@@ -36,6 +36,10 @@ make build        # bin/autodb, version stamped from git describe
 bin/autodb --version
 ```
 
+In a bare-repo + worktree dev checkout, use the make targets (or pass
+`-buildvcs=false`): Go's nested-VCS detection resolves to the bare store and
+plain `go build` fails with "error obtaining VCS status".
+
 ## License
 
 [Apache-2.0](LICENSE). See [NOTICE](NOTICE).
