@@ -18,6 +18,13 @@ type migration struct {
 // migrations is the ordered, append-only schema history (ADR-0053 §3).
 var migrations = []migration{
 	{Version: 1, SQLite: ddlV1SQLite, Postgres: ddlV1Postgres},
+	// v2 (ADR-0054 §6): per-user master-key keyslot. NOT NULL with an empty
+	// default so v1 stores upgrade; auth code enforces non-empty at creation.
+	{
+		Version:  2,
+		SQLite:   []string{`ALTER TABLE users ADD COLUMN mk_wrapped BLOB NOT NULL DEFAULT x''`},
+		Postgres: []string{`ALTER TABLE users ADD COLUMN mk_wrapped BYTEA NOT NULL DEFAULT '\x'::bytea`},
+	},
 }
 
 // runMigrations creates the ledger, checks the downgrade guard, and applies

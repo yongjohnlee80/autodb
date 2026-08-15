@@ -26,12 +26,15 @@ func schema[R any, C ~string](conn dao.DataConn, table string, id C, fields map[
 
 // --- users -------------------------------------------------------------------
 
-// User is an autodb account (Objectives 12-13; auth semantics in M3).
+// User is an autodb account (Objectives 12-13; auth semantics in ADR-0054).
+// PassHash holds the PHC-encoded argon2id record; MKWrapped is this user's
+// master-key keyslot (nonce-prefixed AES-GCM wrap).
 type User struct {
 	ID        int64
 	Name      string
 	Role      string
 	PassHash  []byte
+	MKWrapped []byte
 	Disabled  int64 // 0/1 flag
 	CreatedAt int64 // unix seconds
 	UpdatedAt int64
@@ -44,6 +47,7 @@ const (
 	UserName      UserField = "name"
 	UserRole      UserField = "role"
 	UserPassHash  UserField = "pass_hash"
+	UserMKWrapped UserField = "mk_wrapped"
 	UserDisabled  UserField = "disabled"
 	UserCreatedAt UserField = "created_at"
 	UserUpdatedAt UserField = "updated_at"
@@ -55,6 +59,7 @@ func newUsers(conn dao.DataConn) *dao.Schema[*User, UserField, Sort, int64] {
 		UserName:      {Column: "name", Scan: func(r *User) any { return &r.Name }, Value: func(r *User) any { return r.Name }},
 		UserRole:      {Column: "role", Scan: func(r *User) any { return &r.Role }, Value: func(r *User) any { return r.Role }},
 		UserPassHash:  {Column: "pass_hash", Scan: func(r *User) any { return &r.PassHash }, Value: func(r *User) any { return r.PassHash }},
+		UserMKWrapped: {Column: "mk_wrapped", Scan: func(r *User) any { return &r.MKWrapped }, Value: func(r *User) any { return r.MKWrapped }},
 		UserDisabled:  {Column: "disabled", Scan: func(r *User) any { return &r.Disabled }, Value: func(r *User) any { return r.Disabled }},
 		UserCreatedAt: {Column: "created_at", Scan: func(r *User) any { return &r.CreatedAt }, Value: func(r *User) any { return r.CreatedAt }},
 		UserUpdatedAt: {Column: "updated_at", Scan: func(r *User) any { return &r.UpdatedAt }, Value: func(r *User) any { return r.UpdatedAt }},
