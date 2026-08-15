@@ -1,0 +1,6 @@
+github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
+github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
+github.com/yongjohnlee80/golib v0.2.2 h1:HHf632kOexJVfu6p9/vzWso98tcBOKdXHMuiu/VRiIg=
+github.com/yongjohnlee80/golib v0.2.2/go.mod h1:Z3TnawqcZKJA8qsfpDgUsHYiFLgSxs2cq179nqoZPfE=
+github.com/yongjohnlee80/golib v0.3.0 h1:41bUAYxjKR9FZwtJM4NleJH9YThTi3ENIvcB4BCjU8s=
+github.com/yongjohnlee80/golib v0.3.0/go.mod h1:3aL2vyq2aDA+r/Yl45/JeWqTErRM62VREEfGfLK5qNk=
