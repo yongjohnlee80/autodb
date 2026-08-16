@@ -52,69 +52,91 @@ func requiredRank(a Action) int {
 	return int(^uint(0) >> 1) // unknown action: unreachable rank
 }
 
-// Authorize is the single permission gate (ADR-0054 §3). ActionManage
-// checks the global role alone. Connection-scoped actions require a grant —
-// for admins too (Objective 13) — and the effective role is
-// min(global role, grant role): a globally-reader user never exceeds
-// SELECT regardless of grants (Objective 15).
-func (s *Service) Authorize(ctx context.Context, ident Identity, connID int64, action Action) error {
+// Authorize is the single permission gate (ADR-0054 §3): it resolves the
+// token to a FRESH identity (provenance + current authority, must-fix #1)
+// and checks the action. ActionManage checks the global role alone.
+// Connection-scoped actions require a grant — for admins too (Objective
+// 13) — and the effective role is min(global role, grant role): a
+// globally-reader user never exceeds SELECT regardless of grants
+// (Objective 15). The fresh identity is returned for the caller's records.
+func (s *Service) Authorize(ctx context.Context, token string, connID int64, action Action) (Identity, error) {
+	ident, _, err := s.resolveToken(ctx, token)
+	if err != nil {
+		return Identity{}, err
+	}
 	if action == ActionManage {
-		if ident.Role != meta.RoleAdmin {
-			return ErrDenied
+		if ident.role != meta.RoleAdmin {
+			return Identity{}, ErrDenied
 		}
-		return nil
+		return ident, nil
 	}
 	g, err := s.store.Grants.OnCtx(ctx).
-		With(meta.GrantUserID, ident.UserID).With(meta.GrantConnID, connID).Get()
+		With(meta.GrantUserID, ident.userID).With(meta.GrantConnID, connID).Get()
 	if errors.Is(err, dao.ErrNoRows) {
-		return ErrDenied
+		return Identity{}, ErrDenied
 	}
 	if err != nil {
-		return err
+		return Identity{}, err
 	}
-	eff := min(rankOf(ident.Role), rankOf(g.Role))
+	eff := min(rankOf(ident.role), rankOf(g.Role))
 	if eff < requiredRank(action) {
-		return ErrDenied
+		return Identity{}, ErrDenied
 	}
-	return nil
+	return ident, nil
 }
 
-// AddGrant gives userID a role on connID (admin only; Objective 13 —
+// AddGrant gives userID a role on connID (admin token; Objective 13 —
 // including granting to oneself). An existing grant is updated in place.
-func (s *Service) AddGrant(ctx context.Context, actor Identity, userID, connID int64, role, ip string) error {
-	if actor.Role != meta.RoleAdmin {
-		return ErrDenied
+func (s *Service) AddGrant(ctx context.Context, token string, userID, connID int64, role, ip string) error {
+	actor, err := s.requireAdmin(ctx, token)
+	if err != nil {
+		return err
 	}
 	if rankOf(role) == 0 {
 		return fmt.Errorf("auth: invalid grant role %q", role)
 	}
-	_, err := s.store.Grants.OnCtx(ctx).
-		Set(meta.GrantUserID, userID).Set(meta.GrantConnID, connID).
-		Set(meta.GrantRole, role).Set(meta.GrantGrantedBy, actor.UserID).
-		Set(meta.GrantCreatedAt, s.now().Unix()).
-		Insert()
-	if errors.Is(err, dao.ErrDuplicate) {
-		err = s.store.Grants.OnCtx(ctx).
-			With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).
-			Set(meta.GrantRole, role).Set(meta.GrantGrantedBy, actor.UserID).
-			Update()
-	}
+	return s.inTx(ctx, func(tx *dao.Transaction) error {
+		_, err := s.store.Grants.On(tx).
+			Set(meta.GrantUserID, userID).Set(meta.GrantConnID, connID).
+			Set(meta.GrantRole, role).Set(meta.GrantGrantedBy, actor.userID).
+			Set(meta.GrantCreatedAt, s.now().Unix()).
+			Insert()
+		if errors.Is(err, dao.ErrDuplicate) {
+			err = s.store.Grants.On(tx).
+				With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).
+				Set(meta.GrantRole, role).Set(meta.GrantGrantedBy, actor.userID).
+				Update()
+		}
+		if err != nil {
+			return err
+		}
+		return s.AuditTx(tx, actor.userID, ip, "grant_added",
+			fmt.Sprintf("user %d on connection %d as %s", userID, connID, role))
+	})
+}
+
+// RemoveGrant revokes userID's grant on connID (admin token).
+func (s *Service) RemoveGrant(ctx context.Context, token string, userID, connID int64, ip string) error {
+	actor, err := s.requireAdmin(ctx, token)
 	if err != nil {
 		return err
 	}
-	return s.Audit(ctx, actor.UserID, ip, "grant_added",
-		fmt.Sprintf("user %d on connection %d as %s", userID, connID, role))
+	return s.inTx(ctx, func(tx *dao.Transaction) error {
+		if err := s.store.Grants.On(tx).
+			With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).Delete(); err != nil {
+			return err
+		}
+		return s.AuditTx(tx, actor.userID, ip, "grant_removed",
+			fmt.Sprintf("user %d on connection %d", userID, connID))
+	})
 }
 
-// RemoveGrant revokes userID's grant on connID (admin only).
-func (s *Service) RemoveGrant(ctx context.Context, actor Identity, userID, connID int64, ip string) error {
-	if actor.Role != meta.RoleAdmin {
-		return ErrDenied
-	}
-	if err := s.store.Grants.OnCtx(ctx).
-		With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).Delete(); err != nil {
-		return err
-	}
-	return s.Audit(ctx, actor.UserID, ip, "grant_removed",
-		fmt.Sprintf("user %d on connection %d", userID, connID))
+// GrantCreatorTx writes the auto-grant a connection creator receives
+// (ADR-0055 §3 — flagged decision), inside the creation transaction.
+func (s *Service) GrantCreatorTx(tx *dao.Transaction, creator Identity, connID int64) error {
+	_, err := s.store.Grants.On(tx).
+		Set(meta.GrantUserID, creator.userID).Set(meta.GrantConnID, connID).
+		Set(meta.GrantRole, creator.role).Set(meta.GrantGrantedBy, creator.userID).
+		Set(meta.GrantCreatedAt, s.now().Unix()).Insert()
+	return err
 }

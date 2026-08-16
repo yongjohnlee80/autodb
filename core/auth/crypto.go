@@ -64,7 +64,22 @@ func encodeHash(p kdfParams, authHalf []byte) string {
 		b64.EncodeToString(p.Salt), b64.EncodeToString(digest[:]))
 }
 
-// decodeHash parses an encodeHash record back into params + verifier digest.
+// Stored-parameter bounds: a hostile meta-DB writer must not be able to
+// panic x/crypto (t=0, p=0) or drive CPU/memory exhaustion through absurd
+// stored params (lector M3 must-fix #4). Derivation happens only inside
+// these bounds.
+const (
+	minMemoryKiB = 8 * 1024    // 8 MiB
+	maxMemoryKiB = 1024 * 1024 // 1 GiB
+	maxTime      = 16
+	maxThreads   = 32
+	minSaltLen   = 8
+	maxSaltLen   = 64
+)
+
+// decodeHash parses an encodeHash record back into params + verifier
+// digest, strictly validating every stored value before it can reach the
+// KDF.
 func decodeHash(s string) (kdfParams, []byte, error) {
 	parts := strings.Split(s, "$")
 	if len(parts) != 5 || parts[0] != "argon2id" {
@@ -78,13 +93,22 @@ func decodeHash(s string) (kdfParams, []byte, error) {
 	if _, err := fmt.Sscanf(parts[2], "m=%d,t=%d,p=%d", &p.Memory, &p.Time, &p.Threads); err != nil {
 		return kdfParams{}, nil, errors.New("auth: malformed argon2 params in pass_hash")
 	}
+	if p.Memory < minMemoryKiB || p.Memory > maxMemoryKiB {
+		return kdfParams{}, nil, fmt.Errorf("auth: stored argon2 memory %d KiB outside [%d, %d]", p.Memory, minMemoryKiB, maxMemoryKiB)
+	}
+	if p.Time < 1 || p.Time > maxTime {
+		return kdfParams{}, nil, fmt.Errorf("auth: stored argon2 time %d outside [1, %d]", p.Time, maxTime)
+	}
+	if p.Threads < 1 || p.Threads > maxThreads {
+		return kdfParams{}, nil, fmt.Errorf("auth: stored argon2 parallelism %d outside [1, %d]", p.Threads, maxThreads)
+	}
 	salt, err := b64.DecodeString(parts[3])
-	if err != nil {
+	if err != nil || len(salt) < minSaltLen || len(salt) > maxSaltLen {
 		return kdfParams{}, nil, errors.New("auth: malformed salt in pass_hash")
 	}
 	p.Salt = salt
 	verifier, err := b64.DecodeString(parts[4])
-	if err != nil {
+	if err != nil || len(verifier) != 32 {
 		return kdfParams{}, nil, errors.New("auth: malformed verifier in pass_hash")
 	}
 	return p, verifier, nil

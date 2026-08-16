@@ -39,6 +39,39 @@ func TestKDF_EncodeDecodeVerifyRoundTrip(t *testing.T) {
 	}
 }
 
+// Stored params are attacker-influenced (a hostile meta-DB writer); out-of-
+// bounds values must fail decode BEFORE reaching the KDF — t=0/p=0 panic
+// x/crypto and huge m is memory exhaustion (lector M3 must-fix #4).
+func TestDecodeHash_RejectsHostileParams(t *testing.T) {
+	t.Parallel()
+	params, err := newParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, authHalf := deriveKeys("pw", params)
+	good := encodeHash(params, authHalf)
+
+	hostile := []string{
+		"argon2id$v=19$m=65536,t=0,p=4$" + good[len(good)-88:],                 // t=0 → x/crypto panic
+		"argon2id$v=19$m=65536,t=1,p=0$AAAAAAAAAAAAAAAAAAAAAA$" + good[len(good)-43:], // p=0 → panic
+		"argon2id$v=19$m=4294967295,t=1,p=4$AAAAAAAAAAAAAAAAAAAAAA$" + good[len(good)-43:], // 4 TiB
+		"argon2id$v=19$m=1024,t=1,p=4$AAAAAAAAAAAAAAAAAAAAAA$" + good[len(good)-43:],       // below floor
+		"argon2id$v=19$m=65536,t=999,p=4$AAAAAAAAAAAAAAAAAAAAAA$" + good[len(good)-43:],    // CPU exhaustion
+		"argon2id$v=18$m=65536,t=1,p=4$AAAAAAAAAAAAAAAAAAAAAA$" + good[len(good)-43:],      // wrong version
+		"argon2id$v=19$m=65536,t=1,p=4$AA$" + good[len(good)-43:],                          // salt too short
+		"not-a-record",
+	}
+	for _, h := range hostile {
+		if _, _, err := decodeHash(h); err == nil {
+			t.Errorf("decodeHash accepted hostile record %q", h)
+		}
+	}
+	// The genuine record still decodes.
+	if _, _, err := decodeHash(good); err != nil {
+		t.Errorf("decodeHash rejected the genuine record: %v", err)
+	}
+}
+
 func TestSealOpen(t *testing.T) {
 	t.Parallel()
 	key, err := newKey()

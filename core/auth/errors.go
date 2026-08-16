@@ -32,4 +32,9 @@ var (
 	// ErrKeyslotCorrupt reports a keyslot that unwrapped to a key different
 	// from the process's unlocked master key.
 	ErrKeyslotCorrupt = errors.New("auth: keyslot does not match the install master key")
+
+	// ErrNoKeyslot reports an account with an empty keyslot (a pre-v2 row
+	// that never received one) — an admin passphrase reset cuts a fresh
+	// keyslot from the unlocked master key.
+	ErrNoKeyslot = errors.New("auth: account has no master-key keyslot — an admin must reset the passphrase")
 )

@@ -20,10 +20,75 @@ func tokenHash(token string) []byte {
 	return h[:]
 }
 
-// Login authenticates name+passphrase from ip, unlocks the master key, and
-// issues a session token (returned once; only its hash is stored). Failures
-// are audited and deliberately indistinguishable (ErrBadCredentials), except
-// a disallowed IP (ErrDenied).
+// resolveToken is the single provenance check: token → live session → live
+// user → fresh Identity. Every privileged method calls it, so authority is
+// re-read from the store on every call — a demotion or disable takes effect
+// on the caller's next request (lector M3 must-fix #1).
+func (s *Service) resolveToken(ctx context.Context, token string) (Identity, *meta.Session, error) {
+	sess, err := s.store.Sessions.OnCtx(ctx).With(meta.SessTokenHash, tokenHash(token)).Get()
+	if errors.Is(err, dao.ErrNoRows) {
+		return Identity{}, nil, ErrTokenInvalid
+	}
+	if err != nil {
+		return Identity{}, nil, err
+	}
+	if sess.Revoked != 0 || s.now().Unix() >= sess.ExpiresAt {
+		return Identity{}, nil, ErrTokenInvalid
+	}
+	u, err := s.store.Users.OnCtx(ctx).With(meta.UserID, sess.UserID).Get()
+	if err != nil {
+		return Identity{}, nil, err
+	}
+	if u.Disabled != 0 {
+		return Identity{}, nil, ErrTokenInvalid
+	}
+	return Identity{userID: u.ID, name: u.Name, role: u.Role}, sess, nil
+}
+
+// ValidateToken resolves a session token to a fresh Identity.
+func (s *Service) ValidateToken(ctx context.Context, token string) (Identity, error) {
+	ident, _, err := s.resolveToken(ctx, token)
+	return ident, err
+}
+
+// requireAdmin resolves the token and demands a current admin role.
+func (s *Service) requireAdmin(ctx context.Context, token string) (Identity, error) {
+	ident, _, err := s.resolveToken(ctx, token)
+	if err != nil {
+		return Identity{}, err
+	}
+	if ident.role != meta.RoleAdmin {
+		return Identity{}, ErrDenied
+	}
+	return ident, nil
+}
+
+// newSessionTx inserts a session row inside tx and returns the one-time
+// token string.
+func (s *Service) newSessionTx(tx *dao.Transaction, userID int64, ip string) (string, error) {
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("auth: generating token: %w", err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw)
+	now := s.now()
+	if _, err := s.store.Sessions.On(tx).
+		Set(meta.SessTokenHash, tokenHash(token)).
+		Set(meta.SessUserID, userID).Set(meta.SessIP, ip).
+		Set(meta.SessCreatedAt, now.Unix()).
+		Set(meta.SessExpiresAt, now.Add(s.ttl).Unix()).
+		Set(meta.SessRevoked, int64(0)).
+		Insert(); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// Login authenticates name+passphrase from ip and issues a session token.
+// The session insert and the audit row commit atomically; the master key is
+// installed in memory only after the commit (must-fix #2). Failures are
+// audited and deliberately indistinguishable (ErrBadCredentials), except a
+// disallowed IP (ErrDenied).
 func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (string, Identity, error) {
 	allowed, err := s.IPAllowed(ctx, ip)
 	if err != nil {
@@ -66,89 +131,75 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 		}
 		return "", Identity{}, ErrBadCredentials
 	}
+	if len(u.MKWrapped) == 0 {
+		// A v1-era row that never received a keyslot: fail explicitly — an
+		// admin passphrase reset cuts one (lector M3 should-fix).
+		return "", Identity{}, ErrNoKeyslot
+	}
 	mk, err := open(kek, u.MKWrapped, aadMasterKey)
 	if err != nil {
 		return "", Identity{}, fmt.Errorf("auth: unwrapping keyslot for %s: %w", name, ErrKeyslotCorrupt)
 	}
-	if err := s.adoptMasterKey(mk); err != nil {
+	if err := s.checkKeyConsistency(mk); err != nil {
 		return "", Identity{}, err
 	}
 
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", Identity{}, fmt.Errorf("auth: generating token: %w", err)
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw)
-	now := s.now()
-	if _, err := s.store.Sessions.OnCtx(ctx).
-		Set(meta.SessTokenHash, tokenHash(token)).
-		Set(meta.SessUserID, u.ID).Set(meta.SessIP, ip).
-		Set(meta.SessCreatedAt, now.Unix()).
-		Set(meta.SessExpiresAt, now.Add(s.ttl).Unix()).
-		Set(meta.SessRevoked, int64(0)).
-		Insert(); err != nil {
+	var token string
+	err = s.inTx(ctx, func(tx *dao.Transaction) error {
+		var terr error
+		token, terr = s.newSessionTx(tx, u.ID, ip)
+		if terr != nil {
+			return terr
+		}
+		return s.AuditTx(tx, u.ID, ip, "login", name)
+	})
+	if err != nil {
 		return "", Identity{}, err
 	}
+	s.adoptMasterKey(mk) // memory effect only after commit
 
-	ident := Identity{UserID: u.ID, Name: u.Name, Role: u.Role}
-	if err := s.Audit(ctx, u.ID, ip, "login", name); err != nil {
-		return "", Identity{}, err
-	}
-	return token, ident, nil
+	return token, Identity{userID: u.ID, name: u.Name, role: u.Role}, nil
 }
 
-// ValidateToken resolves a session token to an Identity: known hash, not
-// expired, not revoked, account enabled. The client IP is recorded at login;
-// tokens are not IP-pinned in v1 (ADR-0054 §2).
-func (s *Service) ValidateToken(ctx context.Context, token string) (Identity, error) {
-	sess, err := s.store.Sessions.OnCtx(ctx).With(meta.SessTokenHash, tokenHash(token)).Get()
-	if errors.Is(err, dao.ErrNoRows) {
-		return Identity{}, ErrTokenInvalid
-	}
-	if err != nil {
-		return Identity{}, err
-	}
-	if sess.Revoked != 0 || s.now().Unix() >= sess.ExpiresAt {
-		return Identity{}, ErrTokenInvalid
-	}
-	u, err := s.store.Users.OnCtx(ctx).With(meta.UserID, sess.UserID).Get()
-	if err != nil {
-		return Identity{}, err
-	}
-	if u.Disabled != 0 {
-		return Identity{}, ErrTokenInvalid
-	}
-	return Identity{UserID: u.ID, Name: u.Name, Role: u.Role}, nil
-}
-
-// Logout revokes one session token (kept as a row for audit).
+// Logout revokes the calling session (kept as a row for audit).
 func (s *Service) Logout(ctx context.Context, token, ip string) error {
-	sess, err := s.store.Sessions.OnCtx(ctx).With(meta.SessTokenHash, tokenHash(token)).Get()
-	if errors.Is(err, dao.ErrNoRows) {
-		return ErrTokenInvalid
-	}
+	ident, sess, err := s.resolveToken(ctx, token)
 	if err != nil {
 		return err
 	}
-	if err := s.store.Sessions.OnCtx(ctx).With(meta.SessID, sess.ID).
-		Set(meta.SessRevoked, int64(1)).Update(); err != nil {
-		return err
-	}
-	return s.Audit(ctx, sess.UserID, ip, "logout", "")
+	return s.inTx(ctx, func(tx *dao.Transaction) error {
+		if err := s.store.Sessions.On(tx).With(meta.SessID, sess.ID).
+			Set(meta.SessRevoked, int64(1)).Update(); err != nil {
+			return err
+		}
+		return s.AuditTx(tx, ident.userID, ip, "logout", "")
+	})
 }
 
 // RevokeUserSessions revokes every session of userID (self, or admin).
-func (s *Service) RevokeUserSessions(ctx context.Context, actor Identity, userID int64, ip string) error {
-	if actor.UserID != userID && actor.Role != meta.RoleAdmin {
-		return ErrDenied
-	}
-	if err := s.revokeAllSessions(ctx, userID); err != nil {
+func (s *Service) RevokeUserSessions(ctx context.Context, token string, userID int64, ip string) error {
+	actor, _, err := s.resolveToken(ctx, token)
+	if err != nil {
 		return err
 	}
-	return s.Audit(ctx, actor.UserID, ip, "sessions_revoked", fmt.Sprintf("user %d", userID))
+	if actor.userID != userID && actor.role != meta.RoleAdmin {
+		return ErrDenied
+	}
+	return s.inTx(ctx, func(tx *dao.Transaction) error {
+		if err := s.revokeAllSessionsTx(tx, userID, 0); err != nil {
+			return err
+		}
+		return s.AuditTx(tx, actor.userID, ip, "sessions_revoked", fmt.Sprintf("user %d", userID))
+	})
 }
 
-func (s *Service) revokeAllSessions(ctx context.Context, userID int64) error {
-	return s.store.Sessions.OnCtx(ctx).With(meta.SessUserID, userID).
-		Set(meta.SessRevoked, int64(1)).Update()
+// revokeAllSessionsTx revokes userID's sessions inside tx, sparing
+// exceptSessID when non-zero (the caller's own session on passphrase
+// change).
+func (s *Service) revokeAllSessionsTx(tx *dao.Transaction, userID, exceptSessID int64) error {
+	q := s.store.Sessions.On(tx).With(meta.SessUserID, userID)
+	if exceptSessID != 0 {
+		q = q.Excluding(meta.SessID, exceptSessID)
+	}
+	return q.Set(meta.SessRevoked, int64(1)).Update()
 }
