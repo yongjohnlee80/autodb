@@ -52,11 +52,11 @@ func TestLoad_UnknownKeysRejected(t *testing.T) {
 func TestLoad_Validation(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"bad port":            "[server]\nport = 0\n",
-		"bad bind":            "[server]\nbind = \"not-an-ip\"\n",
-		"bad engine":          "[meta]\nengine = \"oracle\"\n",
-		"postgres needs dsn":  "[meta]\nengine = \"postgres\"\n",
-		"bad allowlist":       "[security]\nip_allowlist = [\"nope\"]\n",
+		"bad port":           "[server]\nport = 0\n",
+		"bad bind":           "[server]\nbind = \"not-an-ip\"\n",
+		"bad engine":         "[meta]\nengine = \"oracle\"\n",
+		"postgres needs dsn": "[meta]\nengine = \"postgres\"\n",
+		"bad allowlist":      "[security]\nip_allowlist = [\"nope\"]\n",
 	}
 	for name, body := range cases {
 		if _, err := Load(write(t, body)); !errors.Is(err, ErrInvalid) {

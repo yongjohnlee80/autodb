@@ -359,3 +359,31 @@ func (s *Service) rewrapTx(tx *dao.Transaction, userID int64, newPass string, mk
 		Set(meta.UserUpdatedAt, s.now().Unix()).
 		Update()
 }
+
+// UserRow is one account as listed for administration (no secrets).
+type UserRow struct {
+	ID       int64
+	Name     string
+	Role     string
+	Disabled bool
+}
+
+// ListUsers lists every account (admin token; ADR-0057 §9 — the TUI's user
+// manager). No secret material leaves the package (R8): names, roles, and
+// the disabled flag only.
+func (s *Service) ListUsers(ctx context.Context, token string) ([]UserRow, error) {
+	if _, err := s.requireAdmin(ctx, token); err != nil {
+		return nil, err
+	}
+	rows, err := s.store.Users.OnCtx(ctx).Select()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]UserRow, 0, len(rows))
+	for _, u := range rows {
+		out = append(out, UserRow{
+			ID: u.ID, Name: u.Name, Role: u.Role, Disabled: u.Disabled != 0,
+		})
+	}
+	return out, nil
+}

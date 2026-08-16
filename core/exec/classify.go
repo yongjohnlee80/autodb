@@ -127,12 +127,12 @@ func verbClass(word string) (Class, bool) {
 func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 	var st Statement
 	var (
-		depth      int
-		searching  = true // still looking for the main verb
-		inExplain  bool
-		inWith     bool
-		ended      bool // a top-level ';' was consumed
-		sawContent bool
+		depth       int
+		searching   = true // still looking for the main verb
+		inExplain   bool
+		inWith      bool
+		ended       bool // a top-level ';' was consumed
+		sawContent  bool
 		execComment bool // inside a MySQL /*! ... */ executable comment
 	)
 	maxClass := Class("")

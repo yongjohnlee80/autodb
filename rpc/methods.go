@@ -659,6 +659,27 @@ func (s *Server) registerM6() {
 		return map[string]any{"supported": supported, "routines": list}, nil
 	})
 
+	s.rpc.Handle("auth.user_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		users, err := s.auth.ListUsers(ctx, token)
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		out := make([]any, 0, len(users))
+		for _, u := range users {
+			out = append(out, map[string]any{
+				"id": u.ID, "name": u.Name, "role": u.Role, "disabled": u.Disabled,
+			})
+		}
+		return out, nil
+	})
+
 	// --- workspaces ---
 	s.rpc.Handle("workspace.create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {

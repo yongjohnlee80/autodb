@@ -11,16 +11,21 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/config"
-	"github.com/yongjohnlee80/autodb/core/exec"
+	coreexec "github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/rpc"
+	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/logger"
+	tuicore "github.com/yongjohnlee80/golib/tui"
+	tuiterm "github.com/yongjohnlee80/golib/tui/term"
 )
 
 // version and commit are stamped at build time via
@@ -49,8 +54,10 @@ func main() {
 			os.Exit(1)
 		}
 	case *ui:
-		fmt.Fprintln(os.Stderr, "autodb: --ui is not implemented yet (roadmap M6)")
-		os.Exit(1)
+		if err := runUI(*configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		flag.Usage()
 		os.Exit(1)
@@ -103,7 +110,7 @@ func runServe(configPath string) error {
 		ln.Close()
 		return fmt.Errorf("auth: %w", err)
 	}
-	eng := exec.New(store, svc)
+	eng := coreexec.New(store, svc)
 	defer eng.Close()
 
 	// The operational logger is NOT optional: the transport deliberately
@@ -119,4 +126,95 @@ func runServe(configPath string) error {
 
 func isAddrInUse(err error) bool {
 	return errors.Is(err, syscall.EADDRINUSE)
+}
+
+// runUI starts the standalone TUI (ADR-0057): it reaches the server ONLY
+// through the RPC client seam, spawning `autodb --serve` when nothing
+// answers. The spawned child is detached into its own session with stdio
+// redirected to an owned log file — never the alternate-screen terminal —
+// and deliberately survives TUI exit (the shared server, Objective 25).
+func runUI(configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	addr := net.JoinHostPort(cfg.Server.Bind, fmt.Sprintf("%d", cfg.Server.Port))
+
+	notesRoot := cfg.TUI.NotesDir
+	if notesRoot == "" {
+		base, derr := os.UserHomeDir()
+		if derr != nil {
+			return derr
+		}
+		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+			notesRoot = filepath.Join(xdg, "autodb", "notes")
+		} else {
+			notesRoot = filepath.Join(base, ".local", "share", "autodb", "notes")
+		}
+	}
+	notes, err := tuiapp.NewNoteStore(notesRoot)
+	if err != nil {
+		return err
+	}
+
+	spawn := func() error { return spawnServe(configPath) }
+	session := tuiapp.NewSession(addr, logger.Nop{}, spawn)
+	defer session.Close()
+
+	backend, err := tuiterm.Open()
+	if err != nil {
+		return fmt.Errorf("terminal: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	model := tuiapp.New(session, notes, cancel)
+	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(backend))
+	return app.Run(ctx)
+}
+
+// spawnServe starts a detached `autodb --serve` with stdio redirected to an
+// owned append-only log (ADR-0057 §7 — a stderr line into the alternate
+// screen would corrupt raw mode).
+func spawnServe(configPath string) error {
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	stateDir := os.Getenv("XDG_STATE_HOME")
+	if stateDir == "" {
+		home, herr := os.UserHomeDir()
+		if herr != nil {
+			return herr
+		}
+		stateDir = filepath.Join(home, ".local", "state")
+	}
+	logDir := filepath.Join(stateDir, "autodb")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(filepath.Join(logDir, "serve.log"),
+		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+
+	args := []string{"--serve"}
+	if configPath != "" {
+		args = append(args, "--config", configPath)
+	}
+	cmd := exec.Command(self, args...)
+	cmd.Stdin = nil
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Reap the child if it exits (it normally outlives us; a startup
+	// failure is detected by the session's probe-retry deadline, with the
+	// log path in the operator's hands).
+	go func() { _ = cmd.Wait() }()
+	return nil
 }

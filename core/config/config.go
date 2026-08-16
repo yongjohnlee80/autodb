@@ -28,6 +28,15 @@ type Config struct {
 	Meta     Meta     `toml:"meta"`
 	History  History  `toml:"history"`
 	Security Security `toml:"security"`
+	TUI      TUI      `toml:"tui"`
+}
+
+// TUI configures the standalone terminal UI (ADR-0057).
+type TUI struct {
+	// NotesDir overrides the local notes root (default:
+	// $XDG_DATA_HOME/autodb/notes). Per-workspace folders inside it are
+	// keyed by immutable workspace id.
+	NotesDir string `toml:"notes_dir"`
 }
 
 // Server configures the RPC listener (consumed by rpc, roadmap M5).

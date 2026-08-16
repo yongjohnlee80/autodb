@@ -66,7 +66,7 @@ func WithNow(now func() time.Time) Option { return func(e *Engine) { e.now = now
 func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 	e := &Engine{
 		store: store, auth: authSvc,
-		conns: map[int64]dao.DataConn{},
+		conns:   map[int64]dao.DataConn{},
 		history: true, maxRows: DefaultMaxRows, now: time.Now,
 	}
 	for _, o := range opts {

@@ -52,8 +52,8 @@ func TestDecodeHash_RejectsHostileParams(t *testing.T) {
 	good := encodeHash(params, authHalf)
 
 	hostile := []string{
-		"argon2id$v=19$m=65536,t=0,p=4$" + good[len(good)-88:],                 // t=0 → x/crypto panic
-		"argon2id$v=19$m=65536,t=1,p=0$AAAAAAAAAAAAAAAAAAAAAA$" + good[len(good)-43:], // p=0 → panic
+		"argon2id$v=19$m=65536,t=0,p=4$" + good[len(good)-88:],                             // t=0 → x/crypto panic
+		"argon2id$v=19$m=65536,t=1,p=0$AAAAAAAAAAAAAAAAAAAAAA$" + good[len(good)-43:],      // p=0 → panic
 		"argon2id$v=19$m=4294967295,t=1,p=4$AAAAAAAAAAAAAAAAAAAAAA$" + good[len(good)-43:], // 4 TiB
 		"argon2id$v=19$m=1024,t=1,p=4$AAAAAAAAAAAAAAAAAAAAAA$" + good[len(good)-43:],       // below floor
 		"argon2id$v=19$m=65536,t=999,p=4$AAAAAAAAAAAAAAAAAAAAAA$" + good[len(good)-43:],    // CPU exhaustion
