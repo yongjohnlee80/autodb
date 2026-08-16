@@ -25,6 +25,16 @@ func (s *Service) NeedsBootstrap(ctx context.Context) (bool, error) {
 // users==0 invariant is re-checked inside the guarded transaction, so
 // concurrent bootstraps cannot both succeed (must-fix #3).
 func (s *Service) Bootstrap(ctx context.Context, name, passphrase, ip string) (string, Identity, error) {
+	// Cheap pre-check for a precise error; the authoritative users==0 test
+	// is the in-transaction one below (a racer that passes here is refused
+	// there, or by the unlock gate's key-consistency check).
+	needs, err := s.NeedsBootstrap(ctx)
+	if err != nil {
+		return "", Identity{}, err
+	}
+	if !needs {
+		return "", Identity{}, ErrBootstrapDone
+	}
 	mk, err := newKey()
 	if err != nil {
 		return "", Identity{}, err
@@ -33,34 +43,35 @@ func (s *Service) Bootstrap(ctx context.Context, name, passphrase, ip string) (s
 		token string
 		id    int64
 	)
-	err = s.inTx(ctx, func(tx *dao.Transaction) error {
-		if err := s.lockGuardRow(tx); err != nil {
-			return err
-		}
-		n, err := s.store.Users.On(tx).Count()
-		if err != nil {
-			return err
-		}
-		if n != 0 {
-			return ErrBootstrapDone
-		}
-		id, err = s.insertUserTx(tx, name, passphrase, meta.RoleAdmin, mk)
-		if err != nil {
-			return err
-		}
-		token, err = s.newSessionTx(tx, id, ip)
-		if err != nil {
-			return err
-		}
-		if err := s.AuditTx(tx, id, ip, "bootstrap", "root admin "+name); err != nil {
-			return err
-		}
-		return s.AuditTx(tx, id, ip, "login", name)
+	err = s.withUnlock(mk, func() error {
+		return s.inTx(ctx, func(tx *dao.Transaction) error {
+			if err := s.lockGuardRow(tx); err != nil {
+				return err
+			}
+			n, err := s.store.Users.On(tx).Count()
+			if err != nil {
+				return err
+			}
+			if n != 0 {
+				return ErrBootstrapDone
+			}
+			id, err = s.insertUserTx(tx, name, passphrase, meta.RoleAdmin, mk)
+			if err != nil {
+				return err
+			}
+			token, err = s.newSessionTx(tx, id, ip)
+			if err != nil {
+				return err
+			}
+			if err := s.AuditTx(tx, id, ip, "bootstrap", "root admin "+name); err != nil {
+				return err
+			}
+			return s.AuditTx(tx, id, ip, "login", name)
+		})
 	})
 	if err != nil {
 		return "", Identity{}, err
 	}
-	s.adoptMasterKey(mk)
 	return token, Identity{userID: id, name: name, role: meta.RoleAdmin}, nil
 }
 
@@ -269,23 +280,17 @@ func (s *Service) ChangePassphrase(ctx context.Context, token, oldPass, newPass,
 	if err != nil {
 		return ErrBadCredentials
 	}
-	if err := s.checkKeyConsistency(mk); err != nil {
-		return err
-	}
-	err = s.inTx(ctx, func(tx *dao.Transaction) error {
-		if err := s.rewrapTx(tx, actor.userID, newPass, mk); err != nil {
-			return err
-		}
-		if err := s.revokeAllSessionsTx(tx, actor.userID, sess.ID); err != nil {
-			return err
-		}
-		return s.AuditTx(tx, actor.userID, ip, "passphrase_changed", u.Name)
+	return s.withUnlock(mk, func() error {
+		return s.inTx(ctx, func(tx *dao.Transaction) error {
+			if err := s.rewrapTx(tx, actor.userID, newPass, mk); err != nil {
+				return err
+			}
+			if err := s.revokeAllSessionsTx(tx, actor.userID, sess.ID); err != nil {
+				return err
+			}
+			return s.AuditTx(tx, actor.userID, ip, "passphrase_changed", u.Name)
+		})
 	})
-	if err != nil {
-		return err
-	}
-	s.adoptMasterKey(mk)
-	return nil
 }
 
 // ResetPassphrase sets a new passphrase for another user (admin token;

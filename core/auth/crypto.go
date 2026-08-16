@@ -64,17 +64,35 @@ func encodeHash(p kdfParams, authHalf []byte) string {
 		b64.EncodeToString(p.Salt), b64.EncodeToString(digest[:]))
 }
 
-// Stored-parameter bounds: a hostile meta-DB writer must not be able to
-// panic x/crypto (t=0, p=0) or drive CPU/memory exhaustion through absurd
-// stored params (lector M3 must-fix #4). Derivation happens only inside
-// these bounds.
+// Stored parameters are attacker-influenced (a hostile meta-DB writer), so
+// they are matched against an explicit ALLOWLIST of approved profiles
+// rather than a bounds range: a range still permits the worst allowed cost
+// (1 GiB × 16 passes × 32 threads) as a resource-exhaustion lever
+// (lector M3 r2 must-fix #2). New records always use profileV1; older
+// profiles stay listed only while rows carrying them exist.
+type kdfProfile struct {
+	Memory  uint32
+	Time    uint32
+	Threads uint8
+}
+
+var profileV1 = kdfProfile{Memory: argonMemory, Time: argonTime, Threads: argonThreads}
+
+// approvedProfiles is the exact set of (m, t, p) triples the KDF will run.
+var approvedProfiles = []kdfProfile{profileV1}
+
+func profileApproved(p kdfProfile) bool {
+	for _, a := range approvedProfiles {
+		if a == p {
+			return true
+		}
+	}
+	return false
+}
+
 const (
-	minMemoryKiB = 8 * 1024    // 8 MiB
-	maxMemoryKiB = 1024 * 1024 // 1 GiB
-	maxTime      = 16
-	maxThreads   = 32
-	minSaltLen   = 8
-	maxSaltLen   = 64
+	minSaltLen = 8
+	maxSaltLen = 64
 )
 
 // decodeHash parses an encodeHash record back into params + verifier
@@ -93,14 +111,8 @@ func decodeHash(s string) (kdfParams, []byte, error) {
 	if _, err := fmt.Sscanf(parts[2], "m=%d,t=%d,p=%d", &p.Memory, &p.Time, &p.Threads); err != nil {
 		return kdfParams{}, nil, errors.New("auth: malformed argon2 params in pass_hash")
 	}
-	if p.Memory < minMemoryKiB || p.Memory > maxMemoryKiB {
-		return kdfParams{}, nil, fmt.Errorf("auth: stored argon2 memory %d KiB outside [%d, %d]", p.Memory, minMemoryKiB, maxMemoryKiB)
-	}
-	if p.Time < 1 || p.Time > maxTime {
-		return kdfParams{}, nil, fmt.Errorf("auth: stored argon2 time %d outside [1, %d]", p.Time, maxTime)
-	}
-	if p.Threads < 1 || p.Threads > maxThreads {
-		return kdfParams{}, nil, fmt.Errorf("auth: stored argon2 parallelism %d outside [1, %d]", p.Threads, maxThreads)
+	if !profileApproved(kdfProfile{Memory: p.Memory, Time: p.Time, Threads: p.Threads}) {
+		return kdfParams{}, nil, fmt.Errorf("auth: stored argon2 profile (m=%d,t=%d,p=%d) is not an approved profile", p.Memory, p.Time, p.Threads)
 	}
 	salt, err := b64.DecodeString(parts[3])
 	if err != nil || len(salt) < minSaltLen || len(salt) > maxSaltLen {

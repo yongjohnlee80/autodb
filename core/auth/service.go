@@ -50,8 +50,11 @@ func (i Identity) Role() string { return i.role }
 type Service struct {
 	store *meta.Store
 
-	mu sync.Mutex
-	mk []byte // unwrapped master key; nil while locked
+	// unlockGate serializes check-commit-adopt across concurrent logins;
+	// mu guards the key field itself.
+	unlockGate sync.Mutex
+	mu         sync.Mutex
+	mk         []byte // unwrapped master key; nil while locked
 
 	now       func() time.Time
 	ttl       time.Duration
@@ -122,26 +125,34 @@ func (s *Service) masterKey() ([]byte, error) {
 	return s.mk, nil
 }
 
-// checkKeyConsistency verifies mk matches an already-unlocked master key
-// WITHOUT installing it — called before any state is committed, so a
-// corrupted keyslot cannot half-succeed (lector M3 must-fix #2 ordering).
-func (s *Service) checkKeyConsistency(mk []byte) error {
+// unlockGate serializes the whole check-commit-adopt sequence of a login:
+// consistency checking and adoption must be ONE critical section, otherwise
+// two concurrent logins presenting different master keys can both pass their
+// checks and both commit sessions before one key silently wins (lector M3 r2
+// must-fix #3). Held across the commit, so it is coarse by design — logins
+// are already argon2-bound, not lock-bound.
+//
+// withUnlock runs commit under the gate: mk is validated against the
+// process key, commit runs, and only a successful commit adopts mk.
+func (s *Service) withUnlock(mk []byte, commit func() error) error {
+	s.unlockGate.Lock()
+	defer s.unlockGate.Unlock()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.mk != nil && subtle.ConstantTimeCompare(s.mk, mk) != 1 {
+	current := s.mk
+	s.mu.Unlock()
+	if current != nil && subtle.ConstantTimeCompare(current, mk) != 1 {
 		return ErrKeyslotCorrupt
 	}
-	return nil
-}
-
-// adoptMasterKey installs an unwrapped master key AFTER the surrounding
-// mutation committed. checkKeyConsistency must have passed first.
-func (s *Service) adoptMasterKey(mk []byte) {
+	if err := commit(); err != nil {
+		return err
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.mk == nil {
 		s.mk = mk
 	}
+	s.mu.Unlock()
+	return nil
 }
 
 // inTx runs fn inside one meta-store transaction — every security mutation

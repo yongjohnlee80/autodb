@@ -24,7 +24,8 @@ func TestClassify(t *testing.T) {
 		{name: "nested block comment", sql: "/* a /* b */ c */ SELECT 1", verb: "SELECT", class: ClassRead},
 		{name: "values", sql: "VALUES (1, 2)", verb: "VALUES", class: ClassRead},
 		{name: "table verb", sql: "TABLE artists", verb: "TABLE", class: ClassRead},
-		{name: "pragma", sql: "PRAGMA table_info(t)", verb: "PRAGMA", class: ClassRead},
+		{name: "pragma rejected", sql: "PRAGMA table_info(t)", err: ErrStatementUnsupported},
+		{name: "pragma write rejected", sql: "PRAGMA foreign_keys = OFF", err: ErrStatementUnsupported},
 		{name: "show", sql: "SHOW TABLES", mysql: true, verb: "SHOW", class: ClassRead},
 		{name: "cte select", sql: "WITH a AS (SELECT 1), b AS (SELECT 2) SELECT * FROM a", verb: "SELECT", class: ClassRead},
 		{name: "recursive cte", sql: "WITH RECURSIVE r(n) AS (VALUES(1)) SELECT * FROM r", verb: "SELECT", class: ClassRead},
@@ -53,6 +54,16 @@ func TestClassify(t *testing.T) {
 		{name: "where inside comment", sql: "UPDATE t SET x = 1 -- WHERE 1=1", verb: "UPDATE", class: ClassWrite, where: false},
 		{name: "where only in subquery", sql: "UPDATE t SET x = (SELECT max(y) FROM u WHERE z = 1)", verb: "UPDATE", class: ClassWrite, where: false},
 		{name: "subquery plus top where", sql: "UPDATE t SET x = (SELECT max(y) FROM u WHERE z = 1) WHERE id = 3", verb: "UPDATE", class: ClassWrite, where: true},
+
+		// Data-modifying CTEs (PostgreSQL executes the WITH body) — rejected,
+		// never classified as reads (lector M4 must-fix #1).
+		{name: "cte delete body", sql: "WITH x AS (DELETE FROM t RETURNING id) SELECT * FROM x", err: ErrStatementUnsupported},
+		{name: "cte update body", sql: "WITH x AS (UPDATE t SET a=1 RETURNING id) SELECT * FROM x", err: ErrStatementUnsupported},
+		{name: "cte insert body", sql: "WITH x AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM x", err: ErrStatementUnsupported},
+		{name: "subquery insert", sql: "SELECT (INSERT INTO t VALUES (1))", err: ErrStatementUnsupported},
+		// MySQL executable comments run on the server — their tokens are live.
+		{name: "mysql exec comment delete", sql: "/*!40001 DELETE FROM t WHERE id=1 */", mysql: true, verb: "DELETE", class: ClassWrite, where: true},
+		{name: "mysql exec comment hides nothing", sql: "SELECT 1 /*!40001 ; DROP TABLE t */", mysql: true, err: ErrMultiStatement},
 
 		// Rejections.
 		{name: "begin", sql: "BEGIN", err: ErrStatementUnsupported},

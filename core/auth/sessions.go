@@ -45,6 +45,31 @@ func (s *Service) resolveToken(ctx context.Context, token string) (Identity, *me
 	return Identity{userID: u.ID, name: u.Name, role: u.Role}, sess, nil
 }
 
+// resolveTokenTx is resolveToken bound to an open transaction. Callers
+// already inside a transaction MUST use this: resolving on the pool while a
+// transaction holds a connection deadlocks single-connection stores
+// (sqlite), and it would read outside the transaction's snapshot.
+func (s *Service) resolveTokenTx(tx *dao.Transaction, token string) (Identity, error) {
+	sess, err := s.store.Sessions.On(tx).With(meta.SessTokenHash, tokenHash(token)).Get()
+	if errors.Is(err, dao.ErrNoRows) {
+		return Identity{}, ErrTokenInvalid
+	}
+	if err != nil {
+		return Identity{}, err
+	}
+	if sess.Revoked != 0 || s.now().Unix() >= sess.ExpiresAt {
+		return Identity{}, ErrTokenInvalid
+	}
+	u, err := s.store.Users.On(tx).With(meta.UserID, sess.UserID).Get()
+	if err != nil {
+		return Identity{}, err
+	}
+	if u.Disabled != 0 {
+		return Identity{}, ErrTokenInvalid
+	}
+	return Identity{userID: u.ID, name: u.Name, role: u.Role}, nil
+}
+
 // ValidateToken resolves a session token to a fresh Identity.
 func (s *Service) ValidateToken(ctx context.Context, token string) (Identity, error) {
 	ident, _, err := s.resolveToken(ctx, token)
@@ -140,23 +165,21 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 	if err != nil {
 		return "", Identity{}, fmt.Errorf("auth: unwrapping keyslot for %s: %w", name, ErrKeyslotCorrupt)
 	}
-	if err := s.checkKeyConsistency(mk); err != nil {
-		return "", Identity{}, err
-	}
-
+	// Consistency check, commit, and adoption are ONE critical section
+	// (lector M3 r2 must-fix #3).
 	var token string
-	err = s.inTx(ctx, func(tx *dao.Transaction) error {
-		var terr error
-		token, terr = s.newSessionTx(tx, u.ID, ip)
-		if terr != nil {
-			return terr
-		}
-		return s.AuditTx(tx, u.ID, ip, "login", name)
-	})
-	if err != nil {
+	if err := s.withUnlock(mk, func() error {
+		return s.inTx(ctx, func(tx *dao.Transaction) error {
+			var terr error
+			token, terr = s.newSessionTx(tx, u.ID, ip)
+			if terr != nil {
+				return terr
+			}
+			return s.AuditTx(tx, u.ID, ip, "login", name)
+		})
+	}); err != nil {
 		return "", Identity{}, err
 	}
-	s.adoptMasterKey(mk) // memory effect only after commit
 
 	return token, Identity{userID: u.ID, name: u.Name, role: u.Role}, nil
 }

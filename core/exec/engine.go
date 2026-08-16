@@ -16,6 +16,15 @@ import (
 // DefaultMaxRows is the read-result page size unless overridden.
 const DefaultMaxRows = 500
 
+// Bounds for stored strings and the outcome-record deadline (lector M4
+// should-fixes: bound SQL/audit/error sizes; keep recording alive after
+// caller cancellation).
+const (
+	maxScriptBytes = 8 * 1024
+	maxErrorBytes  = 2 * 1024
+	recordTimeout  = 10 * time.Second
+)
+
 // Engine is the execution core: one instance per process over one meta
 // store + auth service. Callers authenticate with session tokens; identity
 // and authority are re-resolved by core/auth on every call (ADR-0054 rev 1).
@@ -38,8 +47,16 @@ type Option func(*Engine)
 // the audit log is always on regardless, ADR-0054 §4).
 func WithHistory(enabled bool) Option { return func(e *Engine) { e.history = enabled } }
 
-// WithMaxRows overrides the read page size.
-func WithMaxRows(n int) Option { return func(e *Engine) { e.maxRows = n } }
+// WithMaxRows overrides the read page size. Nonpositive values are ignored
+// (a zero page would return nothing and mark every result truncated —
+// lector M4 should-fix).
+func WithMaxRows(n int) Option {
+	return func(e *Engine) {
+		if n > 0 {
+			e.maxRows = n
+		}
+	}
+}
 
 // WithNow injects a clock (tests).
 func WithNow(now func() time.Time) Option { return func(e *Engine) { e.now = now } }
@@ -127,8 +144,14 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 		return nil, err
 	}
 
-	// The connection row drives the classifier's escaping mode; an unknown
-	// connection reports ErrDenied (no existence leak).
+	// Minimum-grant check BEFORE the connection row is fetched or the
+	// statement classified: an ungranted authenticated user must not learn
+	// whether a connection exists or which engine it runs (lector M4
+	// must-fix #6). Read is the floor for any execution.
+	if _, err := e.auth.Authorize(ctx, token, connID, auth.ActionRead); err != nil {
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
+	}
+
 	connRow, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
 	if errors.Is(err, dao.ErrNoRows) {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, auth.ErrDenied)
@@ -141,16 +164,31 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	if err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
-	// Authorize re-resolves authority at the store (fresh role + grant).
-	ident, err = e.auth.Authorize(ctx, token, connID, classToAction(stmt.Class))
+	// Full authorization for the statement's actual class. A denial must
+	// NOT discard the caller's identity — the rejection audits under the
+	// real user (lector M4 must-fix #5).
+	authorized, err := e.auth.Authorize(ctx, token, connID, classToAction(stmt.Class))
 	if err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
+	ident = authorized
 	if (stmt.Verb == "UPDATE" || stmt.Verb == "DELETE") && !stmt.HasTopLevelWhere {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, ErrNoWhere)
 	}
 
 	target, err := e.target(ctx, connID, connRow)
+	if err != nil {
+		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "exec_conn_failed",
+			fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
+			return nil, aerr
+		}
+		return nil, err
+	}
+
+	// Durable attempt record BEFORE the target runs: a crash, timeout, or
+	// cancellation mid-statement must still leave evidence that this user
+	// ran this script (lector M4 must-fix #4).
+	attemptID, err := e.recordAttempt(ctx, ident, connRow.ID, ip, sqlText)
 	if err != nil {
 		return nil, err
 	}
@@ -167,9 +205,12 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	}
 	res.Duration = e.now().Sub(start)
 
-	// Audit + history commit atomically; a failing record fails the call
-	// (ADR-0054 §4 / rev 1 must-fix #2).
-	if err := e.record(ctx, ident, connRow.ID, ip, sqlText, start, res.Duration, rowCount, runErr); err != nil {
+	// Outcome append runs on an internal bounded context so a cancelled
+	// caller context cannot suppress the record; a history failure is
+	// surfaced but never erases the durable attempt audit.
+	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	if err := e.recordOutcome(recCtx, ident, connRow.ID, ip, attemptID, res.Duration, rowCount, runErr); err != nil {
 		return nil, err
 	}
 	if runErr != nil {
@@ -180,41 +221,83 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 
 // reject audits a refused execution attempt and returns the refusal.
 func (e *Engine) reject(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string, cause error) error {
-	detail := fmt.Sprintf("conn %d: %v: %s", connID, cause, sqlText)
+	detail := fmt.Sprintf("conn %d: %v: %s", connID, cause, truncate(sqlText, maxScriptBytes))
 	if err := e.auth.Audit(ctx, ident.UserID(), ip, "exec_rejected", detail); err != nil {
 		return err
 	}
 	return cause
 }
 
-// record writes the always-on audit row and, when enabled, script history —
-// in one transaction.
-func (e *Engine) record(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string, start time.Time, dur time.Duration, rows int64, runErr error) error {
-	status, errText := "ok", ""
-	if runErr != nil {
-		status, errText = "error", runErr.Error()
-	}
-	return dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+// recordAttempt writes the pre-execution audit row and, when history is on,
+// the pending history row; it returns that row's id (0 when history is off).
+func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string) (int64, error) {
+	script := truncate(sqlText, maxScriptBytes)
+	var histID int64
+	err := dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
 		if err := e.auth.AuditTx(tx, ident.UserID(), ip, "exec",
-			fmt.Sprintf("conn %d (%s): %s", connID, status, sqlText)); err != nil {
+			fmt.Sprintf("conn %d: %s", connID, script)); err != nil {
 			return err
 		}
 		if !e.history {
 			return nil
 		}
-		_, err := e.store.History.On(tx).
+		var terr error
+		histID, terr = e.store.History.On(tx).
 			Set(meta.HistUserID, ident.UserID()).Set(meta.HistConnID, connID).
-			Set(meta.HistIP, ip).Set(meta.HistScript, sqlText).
-			Set(meta.HistStartedAt, start.Unix()).
-			Set(meta.HistDurationMS, dur.Milliseconds()).
-			Set(meta.HistRowCount, rows).
-			Set(meta.HistStatus, status).Set(meta.HistError, errText).
+			Set(meta.HistIP, ip).Set(meta.HistScript, script).
+			Set(meta.HistStartedAt, e.now().Unix()).
+			Set(meta.HistDurationMS, int64(0)).Set(meta.HistRowCount, int64(0)).
+			Set(meta.HistStatus, "running").Set(meta.HistError, "").
 			Insert()
-		if err != nil {
-			return fmt.Errorf("exec: recording history: %w", err)
+		if terr != nil {
+			return fmt.Errorf("exec: recording attempt: %w", terr)
 		}
 		return nil
 	})
+	return histID, err
+}
+
+// recordOutcome appends the result audit row and completes the pending
+// history row.
+func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, runErr error) error {
+	status, errText := "ok", ""
+	if runErr != nil {
+		status, errText = "error", truncate(runErr.Error(), maxErrorBytes)
+	}
+	return dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+		if err := e.auth.AuditTx(tx, ident.UserID(), ip, "exec_result",
+			fmt.Sprintf("conn %d (%s, %d row(s), %dms)%s", connID, status, rows, dur.Milliseconds(),
+				errSuffix(errText))); err != nil {
+			return err
+		}
+		if !e.history || histID == 0 {
+			return nil
+		}
+		if err := e.store.History.On(tx).With(meta.HistID, histID).
+			Set(meta.HistDurationMS, dur.Milliseconds()).
+			Set(meta.HistRowCount, rows).
+			Set(meta.HistStatus, status).Set(meta.HistError, errText).
+			Update(); err != nil {
+			return fmt.Errorf("exec: completing history: %w", err)
+		}
+		return nil
+	})
+}
+
+func errSuffix(errText string) string {
+	if errText == "" {
+		return ""
+	}
+	return ": " + errText
+}
+
+// truncate bounds a stored string, marking any elision (lector M4
+// should-fix: bound SQL/audit/error sizes before M5).
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + fmt.Sprintf("… [truncated, %d bytes total]", len(s))
 }
 
 // runQuery executes a read and fills Columns plus either a bounded page
@@ -242,17 +325,20 @@ func (e *Engine) runQuery(ctx context.Context, target dao.DataConn, sqlText stri
 		if err := rows.Scan(ptrs...); err != nil {
 			return count, err
 		}
-		count++
 		if onRow != nil {
+			count++
 			if err := onRow(vals); err != nil {
 				return count, err
 			}
 			continue
 		}
 		if len(res.Rows) == e.maxRows {
+			// The sentinel row proves truncation but was not delivered, so
+			// it is not counted (lector M4 should-fix: correct row count).
 			res.More = true
 			break
 		}
+		count++
 		res.Rows = append(res.Rows, vals)
 	}
 	return count, rows.Err()

@@ -131,12 +131,39 @@ func (s *Service) RemoveGrant(ctx context.Context, token string, userID, connID 
 	})
 }
 
-// GrantCreatorTx writes the auto-grant a connection creator receives
-// (ADR-0055 §3 — flagged decision), inside the creation transaction.
-func (s *Service) GrantCreatorTx(tx *dao.Transaction, creator Identity, connID int64) error {
-	_, err := s.store.Grants.On(tx).
-		Set(meta.GrantUserID, creator.userID).Set(meta.GrantConnID, connID).
-		Set(meta.GrantRole, creator.role).Set(meta.GrantGrantedBy, creator.userID).
-		Set(meta.GrantCreatedAt, s.now().Unix()).Insert()
-	return err
+// GrantCreatorTx writes the ownership grant a connection creator receives,
+// inside the creation transaction. It is NOT general grant management:
+//
+//   - the actor is proven by token, re-resolved inside this call (no
+//     caller-supplied identity — lector M3 r2 must-fix #1);
+//   - the creator relationship is verified against the row just inserted
+//     (connections.created_by must be the token's user);
+//   - the granted role is capped at editor — min(global role, editor) — so
+//     creation can never mint connection-admin rights; arbitrary grant
+//     management stays admin-only via AddGrant (lector policy ruling).
+func (s *Service) GrantCreatorTx(tx *dao.Transaction, token string, connID int64) (Identity, error) {
+	// Resolve on the transaction: the caller already holds it, and pool
+	// access here would deadlock single-connection stores.
+	actor, err := s.resolveTokenTx(tx, token)
+	if err != nil {
+		return Identity{}, err
+	}
+	row, err := s.store.Connections.On(tx).With(meta.ConnID, connID).Get()
+	if err != nil {
+		return Identity{}, err
+	}
+	if row.CreatedBy != actor.userID {
+		return Identity{}, fmt.Errorf("%w: creator grant is only available to the connection's creator", ErrDenied)
+	}
+	role := meta.RoleEditor
+	if rankOf(actor.role) < rankOf(meta.RoleEditor) {
+		role = actor.role
+	}
+	if _, err := s.store.Grants.On(tx).
+		Set(meta.GrantUserID, actor.userID).Set(meta.GrantConnID, connID).
+		Set(meta.GrantRole, role).Set(meta.GrantGrantedBy, actor.userID).
+		Set(meta.GrantCreatedAt, s.now().Unix()).Insert(); err != nil {
+		return Identity{}, err
+	}
+	return actor, nil
 }

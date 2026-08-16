@@ -43,6 +43,14 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 	if err != nil {
 		return nil, fmt.Errorf("exec: opening connection %q: %w", row.Name, err)
 	}
+	// Pin the session to the grammar the classifier assumes (sql_mode /
+	// standard_conforming_strings) — lector M4 must-fix #3.
+	for _, stmt := range sessionGuardSQL(row.Engine) {
+		if _, gerr := conn.ExecContext(ctx, stmt); gerr != nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("exec: pinning session mode on %q: %w", row.Name, gerr)
+		}
+	}
 	// postgres.Open builds the pool without pinging; probe uniformly.
 	rows, perr := conn.QueryContext(ctx, "SELECT 1")
 	if perr != nil {
@@ -77,13 +85,13 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name, engineName, 
 	if ident.Role() != meta.RoleAdmin && ident.Role() != meta.RoleEditor {
 		return 0, auth.ErrDenied
 	}
-	switch engineName {
-	case "postgres", "mysql", "sqlite":
-	default:
-		return 0, fmt.Errorf("exec: unsupported connection engine %q (postgres, mysql, sqlite)", engineName)
-	}
 	if name == "" || dsn == "" {
 		return 0, errors.New("exec: connection name and dsn must not be empty")
+	}
+	// Reject DSNs whose options would desynchronize the classifier from the
+	// target's grammar (multi-statement, sql_mode, interpolation).
+	if err := ValidateDSN(engineName, dsn); err != nil {
+		return 0, err
 	}
 	if !e.auth.Unlocked() {
 		return 0, auth.ErrLocked
@@ -108,11 +116,15 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name, engineName, 
 			Set(meta.ConnDSNEnc, enc).Update(); terr != nil {
 			return terr
 		}
-		if terr := e.auth.GrantCreatorTx(tx, ident, id); terr != nil {
-			return fmt.Errorf("exec: auto-granting creator: %w", terr)
+		// Ownership grant: token-proven actor, creator relationship verified
+		// against the inserted row, role capped at editor (lector M3 r2
+		// must-fix #1 + the auto-grant policy ruling).
+		creator, terr := e.auth.GrantCreatorTx(tx, token, id)
+		if terr != nil {
+			return fmt.Errorf("exec: granting creator ownership: %w", terr)
 		}
-		return e.auth.AuditTx(tx, ident.UserID(), ip, "connection_created",
-			fmt.Sprintf("%s (%s), creator auto-granted %s", name, engineName, ident.Role()))
+		return e.auth.AuditTx(tx, creator.UserID(), ip, "connection_created",
+			fmt.Sprintf("%s (%s), creator granted ownership", name, engineName))
 	})
 	if err != nil {
 		return 0, err
@@ -182,7 +194,13 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 }
 
 // TestConnection authorizes read access and probes the target with SELECT 1.
+// Authorization precedes the row fetch so an ungranted caller learns nothing
+// about the connection's existence (lector M4 must-fix #6).
 func (e *Engine) TestConnection(ctx context.Context, token string, connID int64) error {
+	ident, err := e.auth.Authorize(ctx, token, connID, auth.ActionRead)
+	if err != nil {
+		return err
+	}
 	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
 	if errors.Is(err, dao.ErrNoRows) {
 		return auth.ErrDenied
@@ -190,15 +208,22 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64)
 	if err != nil {
 		return err
 	}
-	if _, err := e.auth.Authorize(ctx, token, connID, auth.ActionRead); err != nil {
-		return err
-	}
 	conn, err := e.target(ctx, connID, row)
 	if err != nil {
+		// Connection failures are security-relevant signal (credential
+		// rotation, tampering) — audit them (lector M4 should-fix).
+		if aerr := e.auth.Audit(ctx, ident.UserID(), "", "conn_test_failed",
+			fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
+			return aerr
+		}
 		return err
 	}
 	rows, err := conn.QueryContext(ctx, "SELECT 1")
 	if err != nil {
+		if aerr := e.auth.Audit(ctx, ident.UserID(), "", "conn_test_failed",
+			fmt.Sprintf("conn %d probe: %v", connID, err)); aerr != nil {
+			return aerr
+		}
 		return fmt.Errorf("exec: probe failed: %w", err)
 	}
 	return rows.Close()

@@ -18,6 +18,18 @@ const (
 	ClassDDL Class = "ddl"
 )
 
+func classRank(c Class) int {
+	switch c {
+	case ClassRead:
+		return 1
+	case ClassWrite:
+		return 2
+	case ClassDDL:
+		return 3
+	}
+	return 0
+}
+
 var (
 	// ErrEmptyStatement reports a blank (or comment-only) script.
 	ErrEmptyStatement = errors.New("exec: empty statement")
@@ -25,7 +37,8 @@ var (
 	// statement per execution (ADR-0055 §1).
 	ErrMultiStatement = errors.New("exec: multiple statements are not allowed — execute one statement per call")
 	// ErrStatementUnsupported reports a statement class the engine refuses:
-	// transaction control, session state, or an unclassifiable leading token.
+	// transaction control, session state, PRAGMA, a data-modifying subquery/
+	// CTE, or an unclassifiable leading token.
 	ErrStatementUnsupported = errors.New("exec: statement is not supported through the execution engine")
 	// ErrMalformedStatement reports an unterminated string/comment/quote.
 	ErrMalformedStatement = errors.New("exec: malformed statement")
@@ -38,16 +51,24 @@ var (
 type Statement struct {
 	// Verb is the classified main verb (uppercase), e.g. "SELECT", "DELETE".
 	Verb string
-	// Class buckets the verb for authorization.
+	// Class is the authorization class: the MAXIMUM class of any verb in the
+	// statement, so a read whose CTE body writes is authorized as a write
+	// (data-modifying CTEs are rejected outright — see Classify — but the
+	// escalation is defense in depth).
 	Class Class
 	// HasTopLevelWhere reports a WHERE at paren depth 0 after the main verb
 	// (only meaningful for UPDATE/DELETE — the Objective 18 guard input).
 	HasTopLevelWhere bool
 }
 
+// readVerbs are lexically read-only statements. PRAGMA is deliberately
+// absent: SQLite has writable PRAGMA forms (e.g. `PRAGMA foreign_keys=OFF`),
+// so PRAGMA is rejected as unsupported and introspection goes through the
+// dedicated dao catalog API (ADR-0055 rev 1; lector M4 must-fix #2). SHOW /
+// DESCRIBE are genuinely read-only.
 var readVerbs = map[string]bool{
 	"SELECT": true, "VALUES": true, "TABLE": true,
-	"SHOW": true, "PRAGMA": true, "DESCRIBE": true, "DESC": true,
+	"SHOW": true, "DESCRIBE": true, "DESC": true,
 }
 
 var writeVerbs = map[string]bool{
@@ -60,19 +81,18 @@ var ddlVerbs = map[string]bool{
 	"COMMENT": true,
 }
 
-// unsupportedVerbs are rejected loudly: transaction control and session
-// state have no safe meaning on pooled autocommit connections (ADR-0055 §1).
+// unsupportedVerbs are rejected loudly: transaction control, session state,
+// and PRAGMA have no safe meaning on pooled autocommit connections
+// (ADR-0055 §1).
 var unsupportedVerbs = map[string]bool{
 	"BEGIN": true, "START": true, "COMMIT": true, "END": true, "ROLLBACK": true,
 	"SAVEPOINT": true, "RELEASE": true, "SET": true, "USE": true,
 	"ATTACH": true, "DETACH": true, "LOCK": true, "UNLOCK": true,
 	"CALL": true, "DO": true, "PREPARE": true, "EXECUTE": true,
 	"DEALLOCATE": true, "DECLARE": true, "FETCH": true, "COPY": true,
+	"PRAGMA": true,
 }
 
-// explainSkip are EXPLAIN option words scanned past to reach the inner verb
-// — EXPLAIN classifies as the statement it wraps, because EXPLAIN ANALYZE
-// executes it (the reader-runs-a-write hole a prefix check would open).
 var explainSkip = map[string]bool{
 	"ANALYZE": true, "VERBOSE": true, "FORMAT": true, "JSON": true,
 	"TREE": true, "TRADITIONAL": true, "QUERY": true, "PLAN": true,
@@ -92,17 +112,31 @@ func verbClass(word string) (Class, bool) {
 
 // Classify tokenizes one SQL script and returns its statement verdict.
 // backslashEscapes selects MySQL string semantics (backslash escapes inside
-// quotes, '#' line comments); leave false for postgres/sqlite.
+// quotes, '#' line comments, /*! executable comments); leave false for
+// postgres/sqlite.
+//
+// The authorization class is the maximum verb class anywhere in the
+// statement. A write/DDL verb at paren depth > 0 (a data-modifying CTE such
+// as `WITH x AS (DELETE ...) SELECT ...`, which PostgreSQL executes) is
+// rejected outright — its embedded mutation cannot be WHERE-guarded, so v1
+// does not run it (lector M4 must-fix #1).
 func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 	var st Statement
 	var (
 		depth      int
-		searching  = true  // still looking for the main verb
+		searching  = true // still looking for the main verb
 		inExplain  bool
 		inWith     bool
 		ended      bool // a top-level ';' was consumed
 		sawContent bool
+		execComment bool // inside a MySQL /*! ... */ executable comment
 	)
+	maxClass := Class("")
+	escalate := func(c Class) {
+		if classRank(c) > classRank(maxClass) {
+			maxClass = c
+		}
+	}
 	n := len(sqlText)
 	i := 0
 
@@ -131,6 +165,19 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 			}
 
 		case c == '/' && i+1 < n && sqlText[i+1] == '*':
+			// MySQL executable comment /*![digits] ... */: the server RUNS
+			// the body, so its tokens are live, not commented out. Skip only
+			// the opener + optional version digits; the matching */ is
+			// handled as whitespace below (lector M4 must-fix #3).
+			if backslashEscapes && i+2 < n && sqlText[i+2] == '!' {
+				j := i + 3
+				for j < n && sqlText[j] >= '0' && sqlText[j] <= '9' {
+					j++
+				}
+				execComment = true
+				i = j
+				continue
+			}
 			level, j := 1, i+2
 			for j < n && level > 0 {
 				switch {
@@ -148,6 +195,10 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 				return st, fmt.Errorf("%w: unterminated block comment", ErrMalformedStatement)
 			}
 			i = j
+
+		case c == '*' && i+1 < n && sqlText[i+1] == '/' && execComment:
+			execComment = false
+			i += 2
 
 		case c == '\'' || c == '"' || c == '`':
 			if err := content(); err != nil {
@@ -203,6 +254,24 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 			}
 			word := strings.ToUpper(sqlText[i:j])
 			i = j
+
+			// EXPLAIN option words (ANALYZE, VERBOSE, FORMAT …) are not
+			// verbs here — ANALYZE is also DDL, and options may sit inside
+			// parens: `EXPLAIN (ANALYZE, BUFFERS) SELECT`. Skip them before
+			// any class escalation or depth check.
+			if inExplain && searching && explainSkip[word] {
+				continue
+			}
+
+			if cls, ok := verbClass(word); ok {
+				// A data-modifying verb below top level is a data-modifying
+				// CTE/subquery — reject (its mutation can't be guarded).
+				if depth > 0 && (cls == ClassWrite || cls == ClassDDL) {
+					return st, fmt.Errorf("%w: data-modifying subquery/CTE (%s at nesting depth %d)", ErrStatementUnsupported, word, depth)
+				}
+				escalate(cls)
+			}
+
 			if depth != 0 {
 				continue
 			}
@@ -215,8 +284,8 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 				case word == "WITH":
 					inWith = true
 				default:
-					if cls, ok := verbClass(word); ok {
-						st.Verb, st.Class = word, cls
+					if _, ok := verbClass(word); ok {
+						st.Verb = word
 						searching = false
 						continue
 					}
@@ -224,7 +293,7 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 						continue // CTE names, AS, RECURSIVE, column lists
 					}
 					if unsupportedVerbs[word] {
-						return st, fmt.Errorf("%w: %s (transaction control and session state have no safe meaning on pooled connections)", ErrStatementUnsupported, word)
+						return st, fmt.Errorf("%w: %s (transaction control, session state, and PRAGMA have no safe meaning on pooled connections)", ErrStatementUnsupported, word)
 					}
 					return st, fmt.Errorf("%w: %s", ErrStatementUnsupported, word)
 				}
@@ -242,14 +311,16 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 		}
 	}
 
+	if execComment {
+		return st, fmt.Errorf("%w: unterminated executable comment", ErrMalformedStatement)
+	}
 	if !sawContent {
 		return st, ErrEmptyStatement
 	}
 	if searching {
-		// Content that never produced a classifiable depth-0 verb — e.g. a
-		// fully parenthesized statement. Conservative refusal.
 		return st, fmt.Errorf("%w: unable to classify the statement", ErrStatementUnsupported)
 	}
+	st.Class = maxClass
 	return st, nil
 }
 

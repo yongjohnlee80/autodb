@@ -111,12 +111,20 @@ func TestEngine_FullPath(t *testing.T) {
 		t.Error("select from missing table succeeded")
 	}
 
-	// Records: audit always, history on (default).
+	// Records: audit always (attempt + result), history on (default).
 	if n, _ := f.store.Audit.OnCtx(ctx).With(meta.AuditAction, "exec").Count(); n == 0 {
 		t.Error("no exec audit rows")
 	}
 	if n, _ := f.store.History.OnCtx(ctx).With(meta.HistStatus, "error").Count(); n != 1 {
 		t.Errorf("error history rows = %d, want 1", n)
+	}
+	// Attempt-before-execute: every execution left an "exec" audit row AND
+	// a result row (lector M4 must-fix #4).
+	if n, _ := f.store.Audit.OnCtx(ctx).With(meta.AuditAction, "exec_result").Count(); n == 0 {
+		t.Error("no exec_result audit rows")
+	}
+	if n, _ := f.store.History.OnCtx(ctx).With(meta.HistStatus, "running").Count(); n != 0 {
+		t.Errorf("left %d history rows stuck in running", n)
 	}
 	hist, err := f.store.History.OnCtx(ctx).With(meta.HistStatus, "ok").Count()
 	if err != nil || hist == 0 {
@@ -246,5 +254,95 @@ func TestEngine_LockedBeforeLogin(t *testing.T) {
 	}
 	if _, err := eng2.Execute(ctx, f.rootTok, f.connID, "SELECT 1", testIP); err != nil {
 		t.Errorf("post-login execute: %v", err)
+	}
+}
+
+// Ungranted callers must not learn a connection's existence or engine: the
+// minimum-grant check precedes the row fetch and classification (lector M4
+// must-fix #6), and denials audit under the REAL user, not user 0 (#5).
+func TestEngine_NoExistenceLeakAndDenialIdentity(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t)
+
+	uid, err := f.svc.CreateUser(ctx, f.rootTok, "nobody", "nobody-pass-1", meta.RoleEditor, testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _, err := f.svc.Login(ctx, "nobody", "nobody-pass-1", testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Existing-but-ungranted and nonexistent connections are indistinguishable.
+	_, errExisting := f.eng.Execute(ctx, tok, f.connID, "SELECT 1", testIP)
+	_, errAbsent := f.eng.Execute(ctx, tok, 4242, "SELECT 1", testIP)
+	if !errors.Is(errExisting, auth.ErrDenied) || !errors.Is(errAbsent, auth.ErrDenied) {
+		t.Fatalf("existing=%v absent=%v — both want ErrDenied", errExisting, errAbsent)
+	}
+	if errExisting.Error() != errAbsent.Error() {
+		t.Errorf("distinguishable errors: %q vs %q", errExisting, errAbsent)
+	}
+	// Even a syntactically invalid statement must not be parsed/reported
+	// before the grant check.
+	if _, err := f.eng.Execute(ctx, tok, f.connID, "BEGIN", testIP); !errors.Is(err, auth.ErrDenied) {
+		t.Errorf("ungranted unsupported-stmt err = %v, want ErrDenied (no classification leak)", err)
+	}
+
+	// Rejections audit under the authenticated user, never 0.
+	rows, err := f.store.Audit.OnCtx(ctx).With(meta.AuditAction, "exec_rejected").Select()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mine, zero int
+	for _, r := range rows {
+		switch r.UserID {
+		case uid:
+			mine++
+		case 0:
+			zero++
+		}
+	}
+	if mine == 0 {
+		t.Error("no rejection audited under the authenticated user")
+	}
+	if zero != 0 {
+		t.Errorf("%d authenticated rejections audited as user 0", zero)
+	}
+}
+
+// The creator ownership grant is capped at editor: an admin creating a
+// connection does NOT mint connection-admin rights (lector policy ruling).
+func TestEngine_CreatorGrantCappedAtEditor(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t)
+
+	grants, err := f.store.Grants.OnCtx(ctx).With(meta.GrantConnID, f.connID).Select()
+	if err != nil || len(grants) != 1 {
+		t.Fatalf("grants = %d, %v", len(grants), err)
+	}
+	if grants[0].Role != meta.RoleEditor {
+		t.Errorf("creator grant role = %s, want editor (capped)", grants[0].Role)
+	}
+}
+
+// DSNs whose options would desynchronize the classifier from the target
+// grammar are refused at creation (lector M4 must-fix #3).
+func TestEngine_RejectsGrammarChangingDSN(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t)
+
+	bad := []struct{ engine, dsn string }{
+		{"mysql", "u:p@tcp(h:3306)/db?multiStatements=true"},
+		{"mysql", "u:p@tcp(h:3306)/db?sql_mode=NO_BACKSLASH_ESCAPES"},
+		{"mysql", "u:p@tcp(h:3306)/db?interpolateParams=true"},
+		{"postgres", "postgres://h/db?standard_conforming_strings=off"},
+	}
+	for _, tc := range bad {
+		if _, err := f.eng.CreateConnection(ctx, f.rootTok, "x", tc.engine, tc.dsn, testIP); err == nil {
+			t.Errorf("accepted grammar-changing %s DSN %q", tc.engine, tc.dsn)
+		}
 	}
 }
