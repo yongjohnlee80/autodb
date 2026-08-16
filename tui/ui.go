@@ -18,6 +18,10 @@ import (
 // at the tail of the bubble chain: everything the focused widget leaves
 // unconsumed (the editor deliberately bubbles Space and unbound Normal-mode
 // keys) lands here.
+//
+// Every cross-goroutine result is generation-conditioned: session-derived
+// results carry the epoch they were issued under and are dropped when a
+// reconnect superseded them; note loads carry their own local generation.
 type Model struct {
 	session *Session
 	notes   *NoteStore
@@ -43,10 +47,14 @@ type Model struct {
 	activeConnNm string
 	curNote      *Note
 	noteDirty    bool
+	noteGen      uint64 // note-load generation; latest open wins
 	zoomed       bool
 	floats       []*widget.Float
 	statusMsg    string
 	running      bool
+	connecting   bool // a connectTask is in flight; suppress duplicates
+	hadAuth      bool // watches the token-empty edge for the login re-prompt
+	pendingCtrlW bool // Ctrl-w chord prefix (Ctrl-w z = zoom alias)
 }
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
@@ -107,7 +115,7 @@ func (m *Model) Init(ctx *tui.Context) {
 	tui.SubscribeScoped(ctx, func(widget.SplitZoomEvent) { m.MarkDirtyAll() })
 
 	m.setStatus("connecting to " + m.session.addr + "…")
-	m.connectTask(true)
+	m.connectTask()
 }
 
 // MarkDirtyAll requests a repaint via the context.
@@ -126,7 +134,11 @@ type disconnectedEvent struct {
 	cause string
 }
 
-func (m *Model) connectTask(initial bool) {
+func (m *Model) connectTask() {
+	if m.connecting {
+		return // one transition at a time (SPC x spam, watcher + manual)
+	}
+	m.connecting = true
 	sess := m.session
 	m.ctx.Go(func(c context.Context) (any, error) {
 		changed, err := sess.Connect(c)
@@ -141,7 +153,7 @@ func (m *Model) connectTask(initial bool) {
 	})
 }
 
-func (m *Model) reconnect() { m.connectTask(false) }
+func (m *Model) reconnect() { m.connectTask() }
 
 // watchDisconnect publishes on the bus when the CURRENT client dies — the
 // bus is the one legal cross-goroutine path into the tree.
@@ -161,12 +173,22 @@ func (m *Model) watchDisconnect() {
 }
 
 func (m *Model) handleStartup(d startupDone) {
+	m.connecting = false
+	m.running = false
 	if d.err != nil {
-		m.setStatus("connect failed: " + d.err.Error() + " — SPC R retries")
+		m.setStatus("connect failed: " + d.err.Error() + " — SPC x retries")
 		return
 	}
 	m.watchDisconnect()
-	m.setStatus(fmt.Sprintf("connected — autodb %s", m.session.ServerVersion()))
+	if d.instanceChanged {
+		// A different server process answered: everything cached from the
+		// old one is void (ADR-0057 §7) — the session already dropped the
+		// token, the UI drops its rendered state.
+		m.resetServerUI()
+		m.setStatus("server instance changed — login required")
+	} else {
+		m.setStatus(fmt.Sprintf("connected — autodb %s", m.session.ServerVersion()))
+	}
 	switch {
 	case d.needsBootstrap:
 		m.openBootstrap()
@@ -177,12 +199,41 @@ func (m *Model) handleStartup(d startupDone) {
 	}
 }
 
+// resetServerUI drops every server-derived rendering (instance change).
+func (m *Model) resetServerUI() {
+	m.explorer.Clear()
+	m.results.Clear()
+	m.activeWs, m.activeConn, m.activeConnNm = 0, 0, ""
+	m.hadAuth = false
+	m.refreshStatus()
+}
+
 func (m *Model) afterLogin() {
 	u := m.session.User()
+	m.hadAuth = true
 	m.setStatus(fmt.Sprintf("logged in as %s (%s)", u.Name, u.Role))
 	m.explorer.Reload()
 	m.ctx.FocusComponent(m.editor)
 	m.refreshStatus()
+}
+
+// checkAuth watches the token-empty edge after every task: the session
+// clears token+user on any public CodeAuth (stale token, relocked store),
+// so whichever surface tripped it, the ONE recovery is the login flow.
+func (m *Model) checkAuth() {
+	if m.session.Token() != "" {
+		m.hadAuth = true
+		return
+	}
+	if !m.hadAuth {
+		return
+	}
+	m.hadAuth = false
+	m.setStatus("session expired — login required")
+	m.refreshStatus()
+	if !m.modalOpen() {
+		m.openLogin()
+	}
 }
 
 // --- auth floats -----------------------------------------------------------------
@@ -225,25 +276,46 @@ func (m *Model) openLogin() {
 }
 
 type authDone struct {
+	gen  uint64
 	what string
 	err  error
 }
 
 func (m *Model) authTask(what string, fn func(context.Context) error) {
+	gen := m.session.Gen()
 	m.ctx.Go(func(c context.Context) (any, error) {
-		return authDone{what: what, err: fn(c)}, nil
+		return authDone{gen: gen, what: what, err: fn(c)}, nil
 	})
 }
 
 // --- execution ---------------------------------------------------------------------
 
 type execDone struct {
-	gen int
+	gen uint64
 	res *ExecResult
 	err error
 }
 
+// runQuery (leader r) runs the visual selection when one exists, the
+// whole buffer otherwise; runSelection (leader R) runs the selection only.
 func (m *Model) runQuery() {
+	sql := m.editor.SelectedText()
+	if strings.TrimSpace(sql) == "" {
+		sql = m.editor.Value()
+	}
+	m.runSQL(sql)
+}
+
+func (m *Model) runSelection() {
+	sql := m.editor.SelectedText()
+	if strings.TrimSpace(sql) == "" {
+		m.setStatus("no visual selection — SPC r runs the buffer")
+		return
+	}
+	m.runSQL(sql)
+}
+
+func (m *Model) runSQL(sql string) {
 	if m.running {
 		m.setStatus("a query is already running")
 		return
@@ -256,10 +328,6 @@ func (m *Model) runQuery() {
 		m.setStatus("no active connection — select one in the explorer")
 		return
 	}
-	sql := m.editor.SelectedText()
-	if strings.TrimSpace(sql) == "" {
-		sql = m.editor.Value()
-	}
 	if strings.TrimSpace(sql) == "" {
 		m.setStatus("query buffer is empty")
 		return
@@ -268,26 +336,51 @@ func (m *Model) runQuery() {
 	m.running = true
 	m.setStatus(fmt.Sprintf("running on %s…", m.activeConnNm))
 	sess := m.session
+	gen := sess.Gen()
 	m.ctx.Go(func(c context.Context) (any, error) {
 		res, err := sess.Run(c, connID, sql)
-		return execDone{res: res, err: err}, nil
+		return execDone{gen: gen, res: res, err: err}, nil
 	})
 }
 
 // --- notes ------------------------------------------------------------------------
 
 type noteLoaded struct {
+	gen  uint64
 	note *Note
 	body string
 	err  error
 }
 
+// openNote guards dirty edits (save/discard/cancel) before loading; the
+// load itself is generation-tokened so the LATEST open wins even if two
+// loads settle out of order.
 func (m *Model) openNote(wsID int64, name string) {
+	if m.noteDirty && m.curNote != nil {
+		cur := m.curNote.Name
+		m.openLeader([]leaderEntry{
+			{'s', "save " + cur + ", then open", func() {
+				m.saveNote()
+				if !m.noteDirty { // a conflict float keeps it dirty; open aborts
+					m.doOpenNote(wsID, name)
+				}
+			}},
+			{'d', "discard changes and open", func() { m.doOpenNote(wsID, name) }},
+			{'c', "cancel (keep editing)", func() {}},
+		})
+		return
+	}
+	m.doOpenNote(wsID, name)
+}
+
+func (m *Model) doOpenNote(wsID int64, name string) {
 	m.activeWs = wsID
+	m.noteGen++
+	gen := m.noteGen
 	notes := m.notes
 	m.ctx.Go(func(c context.Context) (any, error) {
 		n, body, err := notes.Load(wsID, name)
-		return noteLoaded{note: n, body: body, err: err}, nil
+		return noteLoaded{gen: gen, note: n, body: body, err: err}, nil
 	})
 }
 
@@ -326,6 +419,32 @@ func (m *Model) saveNote() {
 	}
 }
 
+// saveNoteAs writes the CAPTURED body under a new name (the conflict
+// float's save-as path — the body must never be re-loaded from disk).
+func (m *Model) saveNoteAs(wsID int64, body string) {
+	m.openForm("save note as", []formField{field("name (.sql is appended)")}, func(v []string) (bool, string) {
+		clean, err := CleanName(strings.TrimSpace(v[0]))
+		if err != nil {
+			return false, err.Error()
+		}
+		n, _, lerr := m.notes.Load(wsID, clean)
+		if lerr != nil {
+			return false, lerr.Error()
+		}
+		if n.existed {
+			return false, clean + " already exists — pick another name"
+		}
+		if serr := m.notes.Save(n, body); serr != nil {
+			return false, serr.Error()
+		}
+		m.curNote = n
+		m.noteDirty = false
+		m.setStatus("saved " + n.Name)
+		m.refreshStatus()
+		return true, ""
+	})
+}
+
 func (m *Model) openConflict(body string) {
 	note := m.curNote
 	m.openLeader([]leaderEntry{
@@ -343,7 +462,7 @@ func (m *Model) openConflict(body string) {
 			m.noteDirty = false
 			m.setStatus("overwrote " + fresh.Name)
 		}},
-		{'s', "save as a new name", func() { m.curNote = nil; m.newNote() }},
+		{'s', "save as a new name", func() { m.saveNoteAs(note.WorkspaceID, body) }},
 		{'c', "cancel (keep editing)", func() {}},
 	})
 }
@@ -433,7 +552,7 @@ func (m *Model) noteConnFromNode(id string) {
 				m.refreshStatus()
 			}
 		}
-	case "schema", "sec", "tbl", "view", "fn":
+	case "schema", "sec", "tbl", "col", "fn":
 		if len(parts) > 1 {
 			if id, err := strconv.ParseInt(parts[1], 10, 64); err == nil && id != m.activeConn {
 				m.activeConn = id
@@ -478,11 +597,22 @@ func (m *Model) HandleEvent(ev tui.Event) bool {
 }
 
 func (m *Model) handleTask(tr tui.TaskResult) bool {
+	handled := m.applyTask(tr)
+	if handled {
+		m.checkAuth()
+	}
+	return handled
+}
+
+func (m *Model) applyTask(tr tui.TaskResult) bool {
 	switch v := tr.Value.(type) {
 	case startupDone:
 		m.handleStartup(v)
 		return true
 	case authDone:
+		if v.gen != m.session.Gen() {
+			return true // logged into a connection that no longer exists
+		}
 		if v.err != nil {
 			m.setStatus(v.what + " failed: " + WireErrorMessage(v.err))
 			if v.what == "login" || v.what == "bootstrap" {
@@ -494,6 +624,9 @@ func (m *Model) handleTask(tr tui.TaskResult) bool {
 		return true
 	case execDone:
 		m.running = false
+		if v.gen != m.session.Gen() {
+			return true // result of a superseded connection
+		}
 		if v.err != nil {
 			m.setStatus("error: " + WireErrorMessage(v.err))
 			return true
@@ -503,6 +636,9 @@ func (m *Model) handleTask(tr tui.TaskResult) bool {
 		m.refreshStatus()
 		return true
 	case noteLoaded:
+		if v.gen != m.noteGen {
+			return true // a newer open superseded this load
+		}
 		if v.err != nil {
 			m.setStatus("note: " + v.err.Error())
 			return true
@@ -514,6 +650,9 @@ func (m *Model) handleTask(tr tui.TaskResult) bool {
 		m.refreshStatus()
 		return true
 	case managerReload:
+		if v.gen != m.session.Gen() {
+			return true // rows fetched over a superseded connection
+		}
 		v.apply()
 		return true
 	}
@@ -529,12 +668,24 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 		return false
 	}
 	ctrl := k.Mods&tui.ModCtrl != 0
+	if m.pendingCtrlW {
+		m.pendingCtrlW = false
+		if !ctrl && k.Text == "z" {
+			m.zoomToggle()
+			return true
+		}
+		// Any other key falls through to normal handling below.
+	}
 	if ctrl {
 		switch k.Code {
 		case 'q':
 			if m.quit != nil {
 				m.quit()
 			}
+			return true
+		case 'w':
+			// Ctrl-w z is the vim-familiar zoom alias (ADR-0057 §2).
+			m.pendingCtrlW = true
 			return true
 		case 'h':
 			m.focusPane(m.explorer)
@@ -556,14 +707,35 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 		m.openLeaderMenu()
 		return true
 	}
+	// q quits when nothing focused consumed it (ADR-0057 §2).
+	if k.Text == "q" && !m.modalOpen() {
+		if m.quit != nil {
+			m.quit()
+		}
+		return true
+	}
+	if k.Text == "?" && !m.modalOpen() {
+		m.openHelp()
+		return true
+	}
 	return false
 }
 
-func (m *Model) openLeaderMenu() {
-	m.openLeader([]leaderEntry{
+// leaderEntries is the single binding table (ADR-0057 §8): the leader
+// menu executes it and the help float renders it.
+func (m *Model) leaderEntries() []leaderEntry {
+	connLabel, connRun := "disconnect", func() {
+		m.session.Disconnect()
+		m.setStatus("disconnected — SPC x reconnects")
+	}
+	if !m.session.Connected() {
+		connLabel, connRun = "connect", m.reconnect
+	}
+	return []leaderEntry{
 		{'r', "run query (selection when active)", m.runQuery},
+		{'R', "run selection only", m.runSelection},
 		{'j', "toggle results table/JSON", m.results.ToggleJSON},
-		{'z', "zoom focused pane", m.zoomToggle},
+		{'z', "zoom focused pane (also Ctrl-w z)", m.zoomToggle},
 		{'e', "focus explorer", func() { m.focusPane(m.explorer) }},
 		{'q', "focus query editor", func() { m.focusPane(m.editor) }},
 		{'t', "focus results", func() { m.focusPane(m.results) }},
@@ -574,13 +746,34 @@ func (m *Model) openLeaderMenu() {
 		{'u', "users…", m.openUserManager},
 		{'g', "refresh explorer", m.explorer.Reload},
 		{'L', "login / switch user", m.openLogin},
-		{'R', "reconnect", m.reconnect},
+		{'x', connLabel, connRun},
+		{'?', "help", m.openHelp},
 		{'Q', "quit", func() {
 			if m.quit != nil {
 				m.quit()
 			}
 		}},
-	})
+	}
+}
+
+func (m *Model) openLeaderMenu() { m.openLeader(m.leaderEntries()) }
+
+// openHelp renders the binding table — the SAME data the leader executes —
+// plus the root-level keys (ADR-0057 §2/§8).
+func (m *Model) openHelp() {
+	var sb strings.Builder
+	sb.WriteString("SPC <key> — leader commands\n\n")
+	for _, e := range m.leaderEntries() {
+		fmt.Fprintf(&sb, "  %c   %s\n", e.key, e.label)
+	}
+	sb.WriteString("\nglobal keys\n\n")
+	sb.WriteString("  Ctrl-h/j/k/l   focus explorer / results / editor\n")
+	sb.WriteString("  Ctrl-w z       zoom focused pane\n")
+	sb.WriteString("  Ctrl-q         quit (q quits too when nothing consumes it)\n")
+	sb.WriteString("\neditor: vim Normal/Insert/Visual, jk = Esc\n")
+	sb.WriteString("explorer: hjkl navigate, l expands, Enter scaffolds a table\n")
+	sb.WriteString("results: v or Enter inspects the selected row\n")
+	m.openTextFloat("help", sb.String(), 64)
 }
 
 var _ = style.New // reserved for status styling

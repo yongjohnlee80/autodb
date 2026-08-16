@@ -67,16 +67,25 @@ func (e *Engine) ListTables(ctx context.Context, token string, connID int64, sch
 	if err != nil {
 		return nil, err
 	}
-	quoter, hasQuoter := tgt.Dialect().(dao.TableQuoter)
+	dialect := tgt.Dialect()
+	quoter, hasQuoter := dialect.(dao.TableQuoter)
 	out := make([]TableEntry, 0, len(infos))
 	for _, t := range infos {
-		qualified := t.Name
-		if t.Schema != "" {
-			qualified = t.Schema + "." + t.Name
-		}
-		quoted := qualified
-		if hasQuoter {
-			quoted = quoter.QuoteTable(qualified)
+		// Quoted is a TRUSTED identifier the frontends splice into SQL —
+		// it must never carry raw text. Dialects with a TableQuoter own
+		// qualified-name quoting; otherwise each component goes through
+		// the dialect's mandatory QuoteIdent separately (fail-safe, never
+		// the unquoted fallthrough).
+		var quoted string
+		switch {
+		case hasQuoter && t.Schema != "":
+			quoted = quoter.QuoteTable(t.Schema + "." + t.Name)
+		case hasQuoter:
+			quoted = quoter.QuoteTable(t.Name)
+		case t.Schema != "":
+			quoted = dialect.QuoteIdent(t.Schema) + "." + dialect.QuoteIdent(t.Name)
+		default:
+			quoted = dialect.QuoteIdent(t.Name)
 		}
 		out = append(out, TableEntry{Schema: t.Schema, Name: t.Name, Kind: t.Kind, Quoted: quoted})
 	}

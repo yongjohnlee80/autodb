@@ -1,8 +1,8 @@
 package tui
 
 import (
+	"fmt"
 	"iter"
-	"strings"
 
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/style"
@@ -222,63 +222,162 @@ func (m *Model) openLeader(entries []leaderEntry) {
 	lm.float = m.openFloat("SPC — commands", lm, 48)
 }
 
-// inspectFloat shows one result row with every cell fully expanded; `y`
-// imports the rendered text into the editor's register.
+// inspectFloat shows one result row as a navigable CELL list (ADR-0057
+// §4 — value inspection is per cell): j/k select a cell, `y` imports the
+// selected cell's FAITHFUL value into the editor's register, Enter opens
+// the full value in a scrollable float.
 type inspectFloat struct {
 	widget.Base
-	view  *widget.BufferView
-	text  string
-	model *Model
-	float *widget.Float
-	ctx   *tui.Context
+	model   *Model
+	float   *widget.Float
+	columns []string
+	row     []any
+	cursor  int
+	top     int
+	height  int
 }
 
 func (m *Model) openInspect(columns []string, row []any) {
-	var sb strings.Builder
-	for i, col := range columns {
-		val := "NULL"
-		if i < len(row) && row[i] != nil {
-			val = renderCell(row[i])
-		}
-		sb.WriteString(col)
-		sb.WriteString(" = ")
-		sb.WriteString(val)
-		sb.WriteString("\n")
+	iv := &inspectFloat{model: m, columns: columns, row: row}
+	iv.float = m.openFloat("row — j/k: cell, y: copy value, Enter: full value", iv, 76)
+}
+
+// faithfulCell renders a cell's value VERBATIM for the register: real
+// newlines, no display substitutions (renderCell is the display form).
+func faithfulCell(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "NULL"
+	case []byte:
+		return fmt.Sprintf("0x%x", x)
+	case string:
+		return x
+	default:
+		return fmt.Sprintf("%v", x)
 	}
-	iv := &inspectFloat{view: widget.NewBufferView(), text: sb.String(), model: m}
-	iv.float = m.openFloat("value — y: copy to editor register, Esc: close", iv, 76)
+}
+
+func (iv *inspectFloat) cell(i int) any {
+	if i < len(iv.row) {
+		return iv.row[i]
+	}
+	return nil
 }
 
 func (iv *inspectFloat) AcceptsFocus() bool { return true }
 
-func (iv *inspectFloat) Init(ctx *tui.Context) {
-	iv.Base.Init(ctx)
-	iv.ctx = ctx
-	ctx.Mount(iv.view)
-	_, _ = iv.view.Writer().Write([]byte(iv.text))
-}
-
 func (iv *inspectFloat) Layout(c tui.Constraints) tui.Size {
-	w := min(c.MaxW, 74)
-	h := min(c.MaxH, 18)
-	sz := iv.ctx.LayoutChild(iv.view, tui.Tight(tui.Size{W: w, H: h}))
-	iv.ctx.PlaceChild(iv.view, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
-	return c.Constrain(tui.Size{W: w, H: h})
+	iv.height = min(c.MaxH, min(len(iv.columns), 18))
+	return c.Constrain(tui.Size{W: min(c.MaxW, 74), H: max(iv.height, 1)})
 }
 
-func (iv *inspectFloat) Render(tui.Surface) {}
+func (iv *inspectFloat) Render(s tui.Surface) {
+	if iv.cursor < iv.top {
+		iv.top = iv.cursor
+	}
+	if iv.cursor >= iv.top+iv.height {
+		iv.top = iv.cursor - iv.height + 1
+	}
+	selSt := style.New().Bold(true).Foreground(style.TokenPrimary)
+	for line := 0; line < iv.height; line++ {
+		i := iv.top + line
+		if i >= len(iv.columns) {
+			break
+		}
+		st := style.New()
+		marker := "  "
+		if i == iv.cursor {
+			st = selSt
+			marker = "❯ "
+		}
+		drawTo(s, 0, line, marker+iv.columns[i]+" = "+renderCell(iv.cell(i)), st)
+	}
+}
 
 func (iv *inspectFloat) HandleEvent(ev tui.Event) bool {
 	k, ok := ev.(tui.KeyEvent)
 	if !ok || k.Kind == tui.KeyRelease {
 		return false
 	}
-	if k.Text == "y" {
-		iv.model.editor.SetRegister(iv.text, false)
-		iv.model.setStatus("value copied to editor register (p to paste)")
+	switch {
+	case k.Text == "j", k.Code == tui.KeyDown:
+		if iv.cursor < len(iv.columns)-1 {
+			iv.cursor++
+			iv.MarkDirty()
+		}
+		return true
+	case k.Text == "k", k.Code == tui.KeyUp:
+		if iv.cursor > 0 {
+			iv.cursor--
+			iv.MarkDirty()
+		}
+		return true
+	case k.Text == "y":
+		iv.model.editor.SetRegister(faithfulCell(iv.cell(iv.cursor)), false)
+		iv.model.setStatus(iv.columns[iv.cursor] + " copied to editor register (p to paste)")
 		iv.float.Hide()
+		return true
+	case k.Code == tui.KeyEnter:
+		col := iv.columns[iv.cursor]
+		iv.model.openValueFloat(col, iv.cell(iv.cursor))
+		return true
+	}
+	return false
+}
+
+// openValueFloat shows ONE cell's full value in a scrollable view; `y`
+// imports the faithful value into the editor's register.
+func (m *Model) openValueFloat(column string, val any) {
+	vf := &valueFloat{model: m, view: widget.NewBufferView(), value: val}
+	vf.float = m.openFloat(column+" — y: copy to editor register, Esc: close", vf, 76)
+}
+
+type valueFloat struct {
+	widget.Base
+	model *Model
+	view  *widget.BufferView
+	value any
+	float *widget.Float
+	ctx   *tui.Context
+}
+
+func (vf *valueFloat) AcceptsFocus() bool { return true }
+
+func (vf *valueFloat) Init(ctx *tui.Context) {
+	vf.Base.Init(ctx)
+	vf.ctx = ctx
+	ctx.Mount(vf.view)
+	_, _ = vf.view.Writer().Write([]byte(faithfulCell(vf.value) + "\n"))
+	vf.view.ScrollTo(0) // static content reads top-down, not log-tailed
+}
+
+func (vf *valueFloat) Layout(c tui.Constraints) tui.Size {
+	w := min(c.MaxW, 74)
+	h := min(c.MaxH, 18)
+	sz := vf.ctx.LayoutChild(vf.view, tui.Tight(tui.Size{W: w, H: h}))
+	vf.ctx.PlaceChild(vf.view, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
+	return c.Constrain(tui.Size{W: w, H: h})
+}
+
+func (vf *valueFloat) Render(tui.Surface) {}
+
+func (vf *valueFloat) HandleEvent(ev tui.Event) bool {
+	k, ok := ev.(tui.KeyEvent)
+	if !ok || k.Kind == tui.KeyRelease {
+		return false
+	}
+	if k.Text == "y" {
+		vf.model.editor.SetRegister(faithfulCell(vf.value), false)
+		vf.model.setStatus("value copied to editor register (p to paste)")
+		vf.float.Hide()
 		return true
 	}
 	// Scrolling keys forward to the buffer view.
-	return iv.view.HandleEvent(ev)
+	return vf.view.HandleEvent(ev)
+}
+
+// openTextFloat shows static text (help) in a scrollable float.
+func (m *Model) openTextFloat(title, text string, width int) {
+	tf := &valueFloat{model: m, view: widget.NewBufferView(), value: text}
+	tf.float = m.openFloat(title, tf, width)
 }

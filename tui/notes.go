@@ -124,44 +124,17 @@ func (s *NoteStore) Load(wsID int64, name string) (*Note, string, error) {
 }
 
 // Save writes the note atomically: exclusive temp in the same directory,
-// write, file fsync, rename, parent-dir fsync — conflict-checked against
-// the load-time identity immediately before the rename. On success the
-// note's identity refreshes to the saved content.
+// write, file fsync — THEN the conflict check against the load-time
+// identity, immediately before the rename, so a concurrent edit during
+// the temp write is still caught and only ADR-0057's accepted
+// check-to-rename instant remains. On success the note's identity
+// refreshes to the saved content.
 func (s *NoteStore) Save(n *Note, body string) error {
 	dir := s.dir(n.WorkspaceID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, n.Name)
-
-	// Conflict check from a fresh no-follow descriptor (r3: content
-	// identity, not timestamps; the instant between this check and the
-	// rename is the documented accepted race for a 0700 local dir).
-	cur, err := openNoFollow(path)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		if n.existed {
-			return ErrNoteConflict // deleted underneath us
-		}
-	case err != nil:
-		return err
-	default:
-		curBody, rerr := io.ReadAll(cur)
-		dev, ino, ierr := fileIdentity(cur)
-		cur.Close()
-		if rerr != nil {
-			return rerr
-		}
-		if ierr != nil {
-			return ierr
-		}
-		if !n.existed {
-			return ErrNoteConflict // appeared since the NEW-note load (r3)
-		}
-		if dev != n.loadedDev || ino != n.loadedIno || sha256.Sum256(curBody) != n.loadedHash {
-			return ErrNoteConflict
-		}
-	}
 
 	tmp, err := os.OpenFile(filepath.Join(dir, "."+n.Name+".tmp"),
 		os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -182,6 +155,41 @@ func (s *NoteStore) Save(n *Note, body string) error {
 		os.Remove(tmpPath)
 		return err
 	}
+
+	// Conflict check from a fresh no-follow descriptor (r3: content
+	// identity, not timestamps), AFTER the temp is fully durable.
+	cur, err := openNoFollow(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		if n.existed {
+			os.Remove(tmpPath)
+			return ErrNoteConflict // deleted underneath us
+		}
+	case err != nil:
+		os.Remove(tmpPath)
+		return err
+	default:
+		curBody, rerr := io.ReadAll(cur)
+		dev, ino, ierr := fileIdentity(cur)
+		cur.Close()
+		if rerr != nil {
+			os.Remove(tmpPath)
+			return rerr
+		}
+		if ierr != nil {
+			os.Remove(tmpPath)
+			return ierr
+		}
+		if !n.existed {
+			os.Remove(tmpPath)
+			return ErrNoteConflict // appeared since the NEW-note load (r3)
+		}
+		if dev != n.loadedDev || ino != n.loadedIno || sha256.Sum256(curBody) != n.loadedHash {
+			os.Remove(tmpPath)
+			return ErrNoteConflict
+		}
+	}
+
 	if err := os.Rename(tmpPath, path); err != nil {
 		os.Remove(tmpPath)
 		return err

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -11,18 +12,22 @@ import (
 )
 
 // explorer wires widget.Tree to the session (ADR-0057 §3): workspaces →
-// {connections → schemas → tables|views|functions, notes}. Every expansion
-// is generation-tokened lazy loading through the client seam; every
-// outcome — including errors — settles the node (SetChildren/SetLoadError),
-// and stale results are inert by construction. Activating a table hands
-// the Model a scaffold built from the SERVER-quoted identifier; activating
-// a note loads the file into the editor.
+// {connections → schemas → tables|views|functions → columns, notes}. Every
+// expansion is generation-tokened lazy loading through the client seam;
+// every outcome — including errors — settles the node (SetChildren/
+// SetLoadError), and stale results are inert by construction. Enter on a
+// table hands the Model a scaffold built from the SERVER-quoted
+// identifier (`l` expands it into its columns); activating a note loads
+// the file into the editor.
 //
-// Node ID grammar (sibling-unique by construction):
+// Node ID grammar (sibling-unique by construction; free-text segments —
+// schema, table, routine, note, column names — are PATH-ESCAPED so a
+// legal ':' or '%' in an identifier can never shift the parse):
 //
 //	ws:<id>  conns:<ws>  notes:<ws>  conn:<ws>:<id>  schema:<conn>:<name>
 //	sec:<conn>:<schema>:tables|views|functions
-//	tbl:<conn>:<schema>:<name>  view:...  fn:<conn>:<schema>:<name>
+//	tbl:<conn>:<schema>:<name>  fn:<conn>:<schema>:<name+sig>
+//	col:<conn>:<schema>:<table>:<name>
 //	note:<ws>:<file>  detached:<ws>
 type explorer struct {
 	widget.Base
@@ -32,6 +37,19 @@ type explorer struct {
 
 	quoted    map[string]string // "tbl:…" node id → server-quoted identifier
 	connNames map[int64]string  // conn id → display name (status bar)
+	seq       uint64            // Reload sequencing: fetches can complete out
+	applied   uint64            // of issue order; stale sets must not win
+}
+
+// encSeg escapes one free-text ID segment; decSeg reverses it.
+func encSeg(s string) string { return url.PathEscape(s) }
+
+func decSeg(s string) string {
+	out, err := url.PathUnescape(s)
+	if err != nil {
+		return s // never produced by encSeg; degrade to the raw text
+	}
+	return out
 }
 
 func newExplorer(m *Model) *explorer {
@@ -79,8 +97,17 @@ func (e *explorer) HandleEvent(ev tui.Event) bool {
 	if tr, ok := ev.(tui.TaskResult); ok {
 		return e.handleTask(tr)
 	}
-	// Track the active connection from the cursor as the user navigates.
 	if k, ok := ev.(tui.KeyEvent); ok && k.Kind != tui.KeyRelease {
+		// Enter on a table/view scaffolds even though the node is a
+		// BRANCH (its children are the columns, reached with `l`) — the
+		// Tree's own Enter would toggle expansion instead.
+		if k.Code == tui.KeyEnter {
+			if n, sel := e.tree.Selected(); sel && strings.HasPrefix(n.ID(), "tbl:") {
+				e.activate(n)
+				return true
+			}
+		}
+		// Track the active connection from the cursor as the user navigates.
 		consumed := e.tree.HandleEvent(ev)
 		if consumed {
 			if n, sel := e.tree.Selected(); sel {
@@ -95,18 +122,30 @@ func (e *explorer) HandleEvent(ev tui.Event) bool {
 // Reload rebuilds the roots from the session's workspace view.
 func (e *explorer) Reload() {
 	gen := e.model.session.Gen()
+	e.seq++
+	seq := e.seq
 	e.ctx.Go(func(c context.Context) (any, error) {
 		wss, err := e.model.session.Workspaces(c)
 		if err != nil {
 			return nil, err
 		}
 		orphans, _ := e.model.notes.ListWorkspaceDirs()
-		return wsLoaded{gen: gen, wss: wss, noteDirs: orphans}, nil
+		return wsLoaded{gen: gen, seq: seq, wss: wss, noteDirs: orphans}, nil
 	})
+}
+
+// Clear drops every server-derived node and cache (instance change —
+// ADR-0057 §7: nothing from the old server may keep rendering).
+func (e *explorer) Clear() {
+	e.quoted = map[string]string{}
+	e.connNames = map[int64]string{}
+	e.tree.SetRoots(widget.NewTreeNode("empty", "not connected", widget.WithLeaf()))
+	e.MarkDirty()
 }
 
 type wsLoaded struct {
 	gen      uint64
+	seq      uint64
 	wss      []WorkspaceInfo
 	noteDirs []int64
 }
@@ -115,6 +154,10 @@ func (e *explorer) applyWorkspaces(l wsLoaded) {
 	if l.gen != e.model.session.Gen() {
 		return // stale connection generation
 	}
+	if l.seq < e.applied {
+		return // an older fetch settling late; a newer set is shown
+	}
+	e.applied = l.seq
 	known := map[int64]bool{}
 	roots := make([]*widget.TreeNode, 0, len(l.wss)+1)
 	for _, ws := range l.wss {
@@ -168,7 +211,7 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 			kids := make([]*widget.TreeNode, 0, len(names))
 			for _, n := range names {
 				kids = append(kids, widget.NewTreeNode(
-					fmt.Sprintf("note:%d:%s", wsID, n), n, widget.WithLeaf()))
+					fmt.Sprintf("note:%d:%s", wsID, encSeg(n)), n, widget.WithLeaf()))
 			}
 			return treeLoaded{node: node, gen: gen, sgen: sgen, kids: kids}, nil
 
@@ -181,34 +224,34 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 			kids := make([]*widget.TreeNode, 0, len(schemas))
 			for _, s := range schemas {
 				kids = append(kids, widget.NewTreeNode(
-					fmt.Sprintf("schema:%d:%s", connID, s), s))
+					fmt.Sprintf("schema:%d:%s", connID, encSeg(s)), s))
 			}
 			return treeLoaded{node: node, gen: gen, sgen: sgen, kids: kids}, nil
 
 		case strings.HasPrefix(id, "schema:"):
 			parts := strings.SplitN(id, ":", 3)
 			connID, _ := strconv.ParseInt(parts[1], 10, 64)
-			schema := parts[2]
+			schema := decSeg(parts[2])
 			supported, _, err := sess.Routines(c, connID, schema)
 			if err != nil {
 				return fail(err), nil
 			}
 			kids := []*widget.TreeNode{
-				widget.NewTreeNode(fmt.Sprintf("sec:%d:%s:tables", connID, schema), "tables"),
-				widget.NewTreeNode(fmt.Sprintf("sec:%d:%s:views", connID, schema), "views"),
+				widget.NewTreeNode(fmt.Sprintf("sec:%d:%s:tables", connID, encSeg(schema)), "tables"),
+				widget.NewTreeNode(fmt.Sprintf("sec:%d:%s:views", connID, encSeg(schema)), "views"),
 			}
 			if supported {
 				// Capability absence renders as an ABSENT section, never an
 				// error (ADR-0057 §3).
 				kids = append(kids, widget.NewTreeNode(
-					fmt.Sprintf("sec:%d:%s:functions", connID, schema), "functions"))
+					fmt.Sprintf("sec:%d:%s:functions", connID, encSeg(schema)), "functions"))
 			}
 			return treeLoaded{node: node, gen: gen, sgen: sgen, kids: kids}, nil
 
 		case strings.HasPrefix(id, "sec:"):
 			parts := strings.SplitN(id, ":", 4)
 			connID, _ := strconv.ParseInt(parts[1], 10, 64)
-			schema, section := parts[2], parts[3]
+			schema, section := decSeg(parts[2]), parts[3]
 			if section == "functions" {
 				_, routines, err := sess.Routines(c, connID, schema)
 				if err != nil {
@@ -217,7 +260,7 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 				kids := make([]*widget.TreeNode, 0, len(routines))
 				for _, r := range routines {
 					kids = append(kids, widget.NewTreeNode(
-						fmt.Sprintf("fn:%d:%s:%s%s", connID, schema, r.Name, r.Signature),
+						fmt.Sprintf("fn:%d:%s:%s", connID, encSeg(schema), encSeg(r.Name+r.Signature)),
 						r.Name, widget.WithLeaf(), widget.WithBadge(r.Signature)))
 				}
 				return treeLoaded{node: node, gen: gen, sgen: sgen, kids: kids}, nil
@@ -236,11 +279,34 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 				if t.Kind != wantKind {
 					continue
 				}
-				nid := fmt.Sprintf("tbl:%d:%s:%s", connID, schema, t.Name)
+				nid := fmt.Sprintf("tbl:%d:%s:%s", connID, encSeg(schema), encSeg(t.Name))
 				quoted[nid] = t.Quoted
-				kids = append(kids, widget.NewTreeNode(nid, t.Name, widget.WithLeaf()))
+				kids = append(kids, widget.NewTreeNode(nid, t.Name))
 			}
 			return treeLoaded{node: node, gen: gen, sgen: sgen, kids: kids, quoted: quoted}, nil
+
+		case strings.HasPrefix(id, "tbl:"):
+			parts := strings.SplitN(id, ":", 4)
+			connID, _ := strconv.ParseInt(parts[1], 10, 64)
+			schema, table := decSeg(parts[2]), decSeg(parts[3])
+			cols, err := sess.Columns(c, connID, schema, table)
+			if err != nil {
+				return fail(err), nil
+			}
+			kids := make([]*widget.TreeNode, 0, len(cols))
+			for _, col := range cols {
+				badge := col.Type
+				if col.PK {
+					badge += " pk"
+				}
+				if !col.Nullable {
+					badge += " not null"
+				}
+				kids = append(kids, widget.NewTreeNode(
+					fmt.Sprintf("col:%d:%s:%s:%s", connID, encSeg(schema), encSeg(table), encSeg(col.Name)),
+					col.Name, widget.WithLeaf(), widget.WithBadge(badge)))
+			}
+			return treeLoaded{node: node, gen: gen, sgen: sgen, kids: kids}, nil
 		}
 		return treeLoaded{node: node, gen: gen, sgen: sgen}, nil
 	})
@@ -284,7 +350,8 @@ func (e *explorer) handleTask(tr tui.TaskResult) bool {
 	return true
 }
 
-// activate handles a leaf activation.
+// activate handles an activation (Enter; leaves via the Tree's own event,
+// tables via the explorer's Enter intercept).
 func (e *explorer) activate(n *widget.TreeNode) {
 	id := n.ID()
 	switch {
@@ -296,7 +363,7 @@ func (e *explorer) activate(n *widget.TreeNode) {
 	case strings.HasPrefix(id, "note:"):
 		parts := strings.SplitN(id, ":", 3)
 		wsID, _ := strconv.ParseInt(parts[1], 10, 64)
-		e.model.openNote(wsID, parts[2])
+		e.model.openNote(wsID, decSeg(parts[2]))
 	}
 }
 

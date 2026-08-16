@@ -16,8 +16,12 @@ import (
 // every action a client call, errors rendered from the wire's structured
 // message (already deny-before-disclose-filtered server-side).
 
-// managerReload carries a loaded row set back onto the loop goroutine.
-type managerReload struct{ apply func() }
+// managerReload carries a loaded row set back onto the loop goroutine;
+// gen is the session epoch it was fetched under (stale results drop).
+type managerReload struct {
+	gen   uint64
+	apply func()
+}
 
 // managerAction is one key-bound operation on the selected row.
 type managerAction[T any] struct {
@@ -37,6 +41,8 @@ type manager[T any] struct {
 	actions []managerAction[T]
 	load    func(c context.Context) ([]T, error)
 	float   *widget.Float
+	seq     uint64 // reload sequencing: fetches can COMPLETE out of issue
+	applied uint64 // order; a stale row set must never overwrite a fresh one
 }
 
 func newManager[T any](m *Model, cols []widget.TableColumn[T],
@@ -70,13 +76,20 @@ func (g *manager[T]) Init(ctx *tui.Context) {
 // Reload fetches rows off-loop and applies them via the Model's task path.
 func (g *manager[T]) Reload() {
 	load := g.load
+	gen := g.model.session.Gen()
+	g.seq++
+	seq := g.seq
 	g.model.ctx.Go(func(c context.Context) (any, error) {
 		rows, err := load(c)
 		if err != nil {
 			msg := WireErrorMessage(err)
-			return managerReload{apply: func() { g.model.setStatus(msg) }}, nil
+			return managerReload{gen: gen, apply: func() { g.model.setStatus(msg) }}, nil
 		}
-		return managerReload{apply: func() {
+		return managerReload{gen: gen, apply: func() {
+			if seq < g.applied {
+				return // an older fetch settling late; a newer set is shown
+			}
+			g.applied = seq
 			g.items = rows
 			g.table.SetItems(rows)
 			g.MarkDirty()
@@ -116,9 +129,10 @@ func (g *manager[T]) HandleEvent(ev tui.Event) bool {
 
 // act wraps a session call: run it off-loop, surface the outcome, reload.
 func managerCall[T any](g *manager[T], what string, fn func(context.Context) error) {
+	gen := g.model.session.Gen()
 	g.model.ctx.Go(func(c context.Context) (any, error) {
 		err := fn(c)
-		return managerReload{apply: func() {
+		return managerReload{gen: gen, apply: func() {
 			if err != nil {
 				g.model.setStatus(what + ": " + WireErrorMessage(err))
 			} else {
@@ -226,6 +240,21 @@ func (m *Model) openWorkspaceManager() {
 					return true, ""
 				})
 			}},
+			{'r', "rename", func(sel WorkspaceInfo, ok bool) {
+				if !ok {
+					return
+				}
+				m.openForm("rename "+sel.Name, []formField{field("new name")}, func(v []string) (bool, string) {
+					name := strings.TrimSpace(v[0])
+					if name == "" {
+						return false, "name required"
+					}
+					managerCall(g, "rename "+sel.Name, func(c context.Context) error {
+						return sess.RenameWorkspace(c, sel.ID, name)
+					})
+					return true, ""
+				})
+			}},
 			{'d', "delete", func(sel WorkspaceInfo, ok bool) {
 				if ok {
 					managerCall(g, "delete "+sel.Name, func(c context.Context) error {
@@ -303,6 +332,22 @@ func (m *Model) openUserManager() {
 					}
 					managerCall(g, "role "+sel.Name, func(c context.Context) error {
 						return sess.SetUserRole(c, sel.ID, role)
+					})
+					return true, ""
+				})
+			}},
+			{'p', "reset passphrase", func(sel UserRow, ok bool) {
+				if !ok {
+					return
+				}
+				m.openForm("reset passphrase for "+sel.Name, []formField{
+					field("new passphrase (min 8 chars)", widget.WithMask('*')),
+				}, func(v []string) (bool, string) {
+					if len(v[0]) < 8 {
+						return false, "passphrase must be at least 8 characters"
+					}
+					managerCall(g, "reset "+sel.Name, func(c context.Context) error {
+						return sess.ResetUserPassphrase(c, sel.ID, v[0])
 					})
 					return true, ""
 				})

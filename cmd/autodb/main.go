@@ -38,7 +38,7 @@ var (
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	serve := flag.Bool("serve", false, "run the RPC server")
-	ui := flag.Bool("ui", false, "run the standalone TUI (not yet implemented - roadmap M6)")
+	ui := flag.Bool("ui", false, "run the standalone TUI")
 	configPath := flag.String("config", "", "config file path (default: the user config dir)")
 	flag.Parse()
 
@@ -157,7 +157,7 @@ func runUI(configPath string) error {
 		return err
 	}
 
-	spawn := func() error { return spawnServe(configPath) }
+	spawn := func() (string, error) { return spawnServe(configPath) }
 	session := tuiapp.NewSession(addr, logger.Nop{}, spawn)
 	defer session.Close()
 
@@ -175,28 +175,29 @@ func runUI(configPath string) error {
 
 // spawnServe starts a detached `autodb --serve` with stdio redirected to an
 // owned append-only log (ADR-0057 §7 — a stderr line into the alternate
-// screen would corrupt raw mode).
-func spawnServe(configPath string) error {
+// screen would corrupt raw mode). It returns the log path so the session's
+// bounded probe window can point the operator at the failure diagnostics.
+func spawnServe(configPath string) (string, error) {
 	self, err := os.Executable()
 	if err != nil {
-		return err
+		return "", err
 	}
 	stateDir := os.Getenv("XDG_STATE_HOME")
 	if stateDir == "" {
 		home, herr := os.UserHomeDir()
 		if herr != nil {
-			return herr
+			return "", herr
 		}
 		stateDir = filepath.Join(home, ".local", "state")
 	}
 	logDir := filepath.Join(stateDir, "autodb")
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
-		return err
+		return "", err
 	}
-	logFile, err := os.OpenFile(filepath.Join(logDir, "serve.log"),
-		os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	logPath := filepath.Join(logDir, "serve.log")
+	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer logFile.Close()
 
@@ -210,11 +211,11 @@ func spawnServe(configPath string) error {
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return err
+		return "", err
 	}
 	// Reap the child if it exits (it normally outlives us; a startup
-	// failure is detected by the session's probe-retry deadline, with the
-	// log path in the operator's hands).
+	// failure keeps refusing dials until the session's bounded probe
+	// window expires with this log path in the error).
 	go func() { _ = cmd.Wait() }()
-	return nil
+	return logPath, nil
 }

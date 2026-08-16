@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -60,15 +61,17 @@ func startRealServer(t *testing.T) (addr string) {
 }
 
 type uiHarness struct {
-	t    *testing.T
-	tb   *tuicore.TestBackend
-	app  *tuicore.App
-	done chan error
+	t         *testing.T
+	tb        *tuicore.TestBackend
+	app       *tuicore.App
+	done      chan error
+	notesRoot string
 }
 
 func startUI(t *testing.T, addr string) *uiHarness {
 	t.Helper()
-	notes, err := tuiapp.NewNoteStore(filepath.Join(t.TempDir(), "notes"))
+	notesRoot := filepath.Join(t.TempDir(), "notes")
+	notes, err := tuiapp.NewNoteStore(notesRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +83,7 @@ func startUI(t *testing.T, addr string) *uiHarness {
 	tb := tuicore.NewTestBackend(110, 32)
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(tb), tuicore.WithMinFrameInterval(0))
 
-	h := &uiHarness{t: t, tb: tb, app: app, done: make(chan error, 1)}
+	h := &uiHarness{t: t, tb: tb, app: app, done: make(chan error, 1), notesRoot: notesRoot}
 	go func() { h.done <- app.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
@@ -109,6 +112,19 @@ func (h *uiHarness) waitFor(what, sub string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	h.t.Fatalf("waiting for %s: %q never appeared.\nscreen:\n%s", what, sub, h.screen())
+}
+
+// waitGone polls until a substring DISAPPEARS from the virtual screen.
+func (h *uiHarness) waitGone(what, sub string) {
+	h.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if !strings.Contains(h.screen(), sub) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	h.t.Fatalf("waiting for %s to disappear: %q still shown.\nscreen:\n%s", what, sub, h.screen())
 }
 
 func (h *uiHarness) keys(s string) {
@@ -157,8 +173,10 @@ func TestUIFullFlow(t *testing.T) {
 	h.key(tuicore.KeyTab)
 	h.keys(fmt.Sprintf("file:uie2e%d?mode=memory&cache=shared", time.Now().UnixNano()))
 	h.key(tuicore.KeyEnter)
-	// The modal scrim covers the status bar; assert the reloaded row
-	// inside the float instead.
+	// The submit closes the form — wait for that FIRST so the row
+	// assertions below can only match the reloaded manager table (the
+	// scrim hides the status bar; the form held the same strings).
+	h.waitGone("connection form", "new connection")
 	h.waitFor("created connection row", "demo")
 	h.waitFor("created connection engine", "sqlite")
 	h.key(tuicore.KeyEscape) // close the manager
@@ -172,6 +190,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("workspace form", "new workspace")
 	h.keys("main")
 	h.key(tuicore.KeyEnter)
+	h.waitGone("workspace form", "new workspace")
 	h.waitFor("workspace row", "main")
 	h.key(tuicore.KeyEscape)
 
@@ -183,6 +202,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("attach form", "attach demo to workspace")
 	h.keys("1")
 	h.key(tuicore.KeyEnter)
+	h.waitGone("attach form", "attach demo to workspace")
 	time.Sleep(300 * time.Millisecond) // let the attach round-trip settle
 	h.key(tuicore.KeyEscape)
 
@@ -240,4 +260,74 @@ func TestUIFullFlow(t *testing.T) {
 	h.key(' ')
 	h.keys("r")
 	h.waitFor("guard refusal", "WHERE clause is blocked")
+
+	// 7. Notes: create, save, external clobber → conflict float → save-as
+	//    preserves the EDITED body under the new name (no data loss).
+	h.key(' ')
+	h.keys("n")
+	h.waitFor("note form", "new note")
+	h.keys("scratch")
+	h.key(tuicore.KeyEnter)
+	h.waitFor("note open", "scratch.sql")
+	h.keys("i")
+	h.keys("-- v1")
+	h.keys("jk")
+	h.key(' ')
+	h.keys("s")
+	h.waitFor("note saved", "saved scratch.sql")
+
+	notePath := filepath.Join(h.notesRoot, "ws-1", "scratch.sql")
+	if err := os.WriteFile(notePath, []byte("-- external edit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.keys("A")
+	h.keys(" more")
+	h.keys("jk")
+	h.key(' ')
+	h.keys("s")
+	h.waitFor("conflict float", "save as a new name")
+	h.keys("s")
+	h.waitFor("save-as form", "save note as")
+	h.keys("scratch2")
+	h.key(tuicore.KeyEnter)
+	h.waitFor("save-as done", "saved scratch2.sql")
+	saved, err := os.ReadFile(filepath.Join(h.notesRoot, "ws-1", "scratch2.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(saved); got != "-- v1 more" {
+		t.Fatalf("save-as body = %q, want the edited buffer", got)
+	}
+	if ext, _ := os.ReadFile(notePath); string(ext) != "-- external edit\n" {
+		t.Fatalf("original note clobbered: %q", string(ext))
+	}
+
+	// 8. Help float from the root `?` binding.
+	h.key('?')
+	h.waitFor("help float", "leader commands")
+	h.key(tuicore.KeyEscape)
+
+	// 9. Explorer drill-down to columns, then Enter on the table scaffolds
+	//    from the server-quoted identifier.
+	h.key(' ')
+	h.keys("e")
+	h.keys("l") // expand the demo connection → schemas
+	h.waitFor("schema listed", "▸ main")
+	h.keys("jl") // onto schema "main", expand → sections
+	h.waitFor("sections", "views")
+	h.keys("jl") // onto "tables", expand → songs
+	h.waitFor("table listed", "songs")
+	h.keys("jl")                              // onto songs, expand → columns
+	h.waitFor("columns listed", "title TEXT") // badge ellipsized by pane width
+	h.key(tuicore.KeyEnter)                   // Enter on the TABLE still scaffolds
+	h.waitFor("scaffold", "LIMIT 100")
+
+	// 10. Disconnect / reconnect toggle (leader x); the token survives a
+	//     same-instance reconnect.
+	h.key(' ')
+	h.keys("x")
+	h.waitFor("disconnected", "disconnected — SPC x reconnects")
+	h.key(' ')
+	h.keys("x")
+	h.waitFor("reconnected", "logged in as root")
 }

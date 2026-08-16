@@ -66,6 +66,15 @@ func (p *resultsPanel) Show(res *ExecResult) {
 	p.rebuild()
 }
 
+// Clear drops the rendered result (instance change — nothing from the old
+// server may keep rendering).
+func (p *resultsPanel) Clear() {
+	p.res = nil
+	p.jsonMode = false
+	p.text.SetText("no results — SPC r runs the query buffer")
+	p.rebuild()
+}
+
 // ToggleJSON flips table/JSON rendering (leader j).
 func (p *resultsPanel) ToggleJSON() {
 	if p.res == nil || len(p.res.Columns) == 0 {
