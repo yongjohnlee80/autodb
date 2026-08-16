@@ -115,9 +115,9 @@ func (v *historyView) HandleEvent(ev tui.Event) bool {
 }
 
 func (v *historyView) Layout(c tui.Constraints) tui.Size {
-	w := min(c.MaxW, historyWidth-2)
+	// The float owns the size (WithSizeFraction); the view fills it.
+	w, h := c.MaxW, c.MaxH
 	hintH := max(v.ctx.LayoutChild(v.hint, tui.Constraints{MaxW: w, MaxH: 3}).H, 1)
-	h := min(c.MaxH, 18+hintH)
 	tableH := max(h-hintH, 1)
 	v.ctx.LayoutChild(v.table, tui.Tight(tui.Size{W: w, H: tableH}))
 	v.ctx.PlaceChild(v.table, tui.Rect{X: 0, Y: 0, W: w, H: tableH})
@@ -167,7 +167,7 @@ func (m *Model) openHistory() {
 			}
 			m.statusMsg = ""
 			v := newHistoryView(m, rows)
-			v.float = m.openFloat("script history", v, historyWidth)
+			v.float = m.openFloatPct("script history", v, historyPct)
 		}}, nil
 	})
 }
@@ -177,7 +177,9 @@ func (m *Model) openHistory() {
 // results view).
 func (m *Model) openScript(title, script string) {
 	sv := &scriptView{model: m, text: script}
-	sv.float = m.openFloat(title, sv, 88)
+	// Smaller than the history behind it, so the stack reads as a
+	// detail ON a list rather than a replacement for it.
+	sv.float = m.openFloatPct(title, sv, scriptPct)
 }
 
 type scriptView struct {
@@ -204,8 +206,8 @@ func (s *scriptView) Init(ctx *tui.Context) {
 }
 
 func (s *scriptView) Layout(c tui.Constraints) tui.Size {
-	w := min(c.MaxW, 86)
-	h := min(c.MaxH, 20)
+	// The float owns the size; the viewer fills it.
+	w, h := c.MaxW, c.MaxH
 	sz := s.ctx.LayoutChild(s.editor, tui.Tight(tui.Size{W: w, H: h}))
 	s.ctx.PlaceChild(s.editor, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
 	return c.Constrain(tui.Size{W: w, H: h})

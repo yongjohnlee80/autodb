@@ -23,14 +23,37 @@ func (m *Model) openFloat(title string, content tui.Component, width int) *widge
 
 // openFloatAt is openFloat with an explicit anchor (the `?` key card
 // lives in the bottom-right corner).
+// openFloatPct sizes the float as a share of the screen (golib
+// WithSizeFraction) — for working surfaces that should follow a resize
+// rather than sit at a fixed column count.
+func (m *Model) openFloatPct(title string, content tui.Component, pct int) *widget.Float {
+	return m.openFloatOpts(title, content, 0, widget.Center,
+		widget.WithSizeFraction(pct, pct))
+}
+
 func (m *Model) openFloatAt(title string, content tui.Component, width int,
 	anchor widget.Anchor) *widget.Float {
+	return m.openFloatOpts(title, content, width, anchor)
+}
+
+func (m *Model) openFloatOpts(title string, content tui.Component, width int,
+	anchor widget.Anchor, extra ...widget.FloatOption) *widget.Float {
+	boxStyle := style.New().Border(style.BorderRounded)
+	if width > 0 {
+		boxStyle = boxStyle.Width(width)
+	}
+	// width <= 0 hands sizing to the CONTENT, which is how a body sizes
+	// itself as a fraction of the screen (the history and script views):
+	// a fixed column count cannot follow a resized terminal.
 	box := widget.NewBox(content,
 		widget.WithTitle(title),
-		widget.WithStyle(style.New().Width(width).Border(style.BorderRounded)),
+		widget.WithStyle(boxStyle),
 		widget.WithFocusable(false),
 	)
-	f := widget.NewFloat(box, widget.WithModal(true), widget.WithAnchor(anchor))
+	opts := append([]widget.FloatOption{
+		widget.WithModal(true), widget.WithAnchor(anchor),
+	}, extra...)
+	f := widget.NewFloat(box, opts...)
 	m.host.Attach(f)
 	f.Show()
 	m.floats = append(m.floats, openFloatRef{f: f, body: content, title: title})

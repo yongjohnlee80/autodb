@@ -108,7 +108,11 @@ func startUI(t *testing.T, addr string) *uiHarness {
 	t.Cleanup(session.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	model := tuiapp.New(session, notes, cancel)
+	model := tuiapp.New(session, notes, cancel, tuiapp.WithAbout(tuiapp.AboutInfo{
+		Version: "test", Commit: "abc1234", BuildDate: "2026-08-17T00:00:00Z",
+		Repo: "https://github.com/yongjohnlee80/autodb", Author: "Yong Sung John Lee",
+		NotesDir: notesRoot, MetaEngine: "sqlite", MetaPath: "/tmp/meta.db",
+	}))
 	tb := tuicore.NewTestBackend(110, 32)
 	// Runtime tracing: interactive failures are timing failures, and the
 	// trace is the evidence (who has focus, what consumed the key).
@@ -240,9 +244,35 @@ func (h *uiHarness) waitCursorBG(what string, want uint8) {
 		what, last, want, h.screen())
 }
 
+// boxWidth measures the rendered width of the float whose top border
+// carries title (-1 when not found).
+func (h *uiHarness) boxWidth(title string) int {
+	for _, line := range strings.Split(h.screen(), "\n") {
+		if !strings.Contains(line, title) {
+			continue
+		}
+		start := strings.IndexAny(line, "╭┌")
+		end := strings.LastIndexAny(line, "╮┐")
+		if start >= 0 && end > start {
+			return len([]rune(line[start:end])) + 1
+		}
+	}
+	return -1
+}
+
 func TestUIFullFlow(t *testing.T) {
 	addr := startRealServer(t)
 	h := startUI(t, addr)
+
+	// 0. The About splash comes FIRST — before any login — and says what
+	//    this build is and where its state lives. Enter closes it, and
+	//    only then does the auth prompt appear.
+	h.waitFor("about splash", "Yong Sung John Lee")
+	h.waitFor("about build date", "2026-08-17T00:00:00Z")
+	h.waitFor("about meta store", "/tmp/meta.db")
+	h.waitFor("about repository", "github.com/yongjohnlee80/autodb")
+	h.key(tuicore.KeyEnter)
+	h.waitGone("about splash", "Yong Sung John Lee")
 
 	// 1. First run: the bootstrap form appears (master passphrase setup).
 	h.waitFor("bootstrap float", "first run")
@@ -274,8 +304,15 @@ func TestUIFullFlow(t *testing.T) {
 	h.key(tuicore.KeyEscape) // close the manager
 
 	// 1b. The status line names the backend: which process, where.
-	h.waitFor("server pid on the status line", "server ")
-	h.waitFor("server address on the status line", "127.0.0.1:")
+	h.waitFor("backend pid on the status line", "Backend [PID:")
+	h.waitFor("backend address on the status line", "127.0.0.1:")
+
+	// 1c. SPC A brings the About modal back, and Esc closes it.
+	h.leader("A")
+	h.waitFor("about reopened", "Yong Sung John Lee")
+	h.waitFor("about names the backend", "Backend")
+	h.key(tuicore.KeyEscape)
+	h.waitGone("about closed", "Yong Sung John Lee")
 
 	// 2b. The users manager shows its full key list (it was truncated at
 	//     "g:gr…" before the float widened and the footer wrapped).
@@ -519,12 +556,25 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("history float", "script history")
 	h.waitFor("history records the user", "root")
 	h.waitFor("history records the connection", "demo")
+	// Wait for content only the history table renders before MEASURING —
+	// its title also appears as the leader entry that opened it.
+	h.waitFor("history columns", "TOOK")
+	// It is a working surface: most of the 110-column grid, not a fixed
+	// width that ignores the terminal.
+	if w := h.boxWidth("script history"); w < 90 || w > 110 {
+		t.Fatalf("history float is %d columns of 110, want ~90%%:\n%s", w, h.screen())
+	}
+
 	h.key(tuicore.KeyEnter)
 	// Which row is newest depends on millisecond-resolution timestamps,
 	// so assert what IS guaranteed: the detail float opened, titled with
 	// the run's identity, showing one of this session's scripts.
 	h.waitFor("detail float titled", "· root ·")
 	h.waitFor("full script shown", "songs")
+	// The detail sits ON the history, so it is smaller than it.
+	if w := h.boxWidth("· root ·"); w < 80 || w > 100 {
+		t.Fatalf("script float is %d columns of 110, want ~80%%:\n%s", w, h.screen())
+	}
 	h.key(tuicore.KeyEscape)
 	h.key(tuicore.KeyEscape)
 
@@ -599,7 +649,7 @@ func TestUIFullFlow(t *testing.T) {
 	//     same-instance reconnect.
 	h.leader("x")
 	h.waitFor("disconnected", "disconnected — SPC x reconnects")
-	h.waitFor("status line reports the backend is gone", "server: disconnected")
+	h.waitFor("status line reports the backend is gone", "Backend [disconnected]")
 	h.leader("x")
 	h.waitFor("reconnected", "logged in as root")
 }
@@ -699,7 +749,10 @@ func TestRestartServerFromTUI(t *testing.T) {
 		}
 	})
 
-	// Bootstrap, then restart from the leader menu.
+	// Bootstrap, then restart from the leader menu (the About splash
+	// comes first and holds the prompt behind it).
+	h.waitFor("about splash", "autodb")
+	h.key(tuicore.KeyEnter)
 	h.waitFor("bootstrap float", "first run")
 	h.keys("root")
 	h.key(tuicore.KeyTab)

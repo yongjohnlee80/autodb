@@ -31,8 +31,15 @@ import (
 // version and commit are stamped at build time via
 // -ldflags "-X main.version=<tag> -X main.commit=<sha>".
 var (
-	version = "dev"
-	commit  = "none"
+	version   = "dev"
+	commit    = "none"
+	buildDate = "unknown"
+)
+
+// repoURL and author are shown in the TUI's About modal.
+const (
+	repoURL = "https://github.com/yongjohnlee80/autodb"
+	author  = "Yong Sung John Lee"
 )
 
 func main() {
@@ -43,7 +50,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("autodb %s (%s)\n", version, commit)
+		fmt.Printf("autodb %s (%s, built %s)\n", version, commit, buildDate)
 		return
 	}
 
@@ -166,11 +173,47 @@ func runUI(configPath string) error {
 		return fmt.Errorf("terminal: %w", err)
 	}
 
+	// The About modal reports what THIS frontend resolved — the paths it
+	// would actually use — rather than asking the server, so the splash
+	// works before anyone logs in.
+	metaPath := cfg.Meta.Path
+	if cfg.Meta.Engine == "sqlite" && metaPath == "" {
+		if p, perr := config.DefaultMetaPath(); perr == nil {
+			metaPath = p
+		}
+	}
+	if cfg.Meta.Engine == "postgres" {
+		metaPath = "(postgres DSN from config)"
+	}
+	activeConfig := configPathFor(configPath)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	model := tuiapp.New(session, notes, cancel)
+	model := tuiapp.New(session, notes, cancel, tuiapp.WithAbout(tuiapp.AboutInfo{
+		Version: version, Commit: commit, BuildDate: buildDate,
+		Repo: repoURL, Author: author,
+		NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine, MetaPath: metaPath,
+		ConfigPath: activeConfig,
+	}))
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(backend))
 	return app.Run(ctx)
+}
+
+// configPathFor reports the config file actually in play: the explicit
+// --config, else the default location when a file exists there, else ""
+// (meaning the built-in defaults, which is worth saying out loud).
+func configPathFor(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	p, err := config.DefaultPath()
+	if err != nil {
+		return ""
+	}
+	if _, statErr := os.Stat(p); statErr != nil {
+		return ""
+	}
+	return p
 }
 
 // spawnServe starts a detached `autodb --serve` with stdio redirected to an

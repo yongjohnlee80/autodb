@@ -60,13 +60,22 @@ type Model struct {
 	authPromptPending bool   // login prompt retained while a modal was open
 	pendingCtrlW      bool   // Ctrl-w chord prefix (Ctrl-w z = zoom alias)
 	searchQuery       string // last / pattern; n and N walk its matches
+	about             AboutInfo
+	pendingPrompt     func() // an auth prompt waiting for the splash to close
+	splashShown       bool   // the About splash opens once, on the first frame
+	connectedOnce     bool   // a later connect is a RE-connect: stale floats go
 	explorerFocused   bool   // last applied cursor styling (focused = cyan)
 	resultsFocused    bool
 }
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
-func New(session *Session, notes *NoteStore, quit func()) *Model {
+func New(session *Session, notes *NoteStore, quit func(), opts ...Option) *Model {
 	m := &Model{session: session, notes: notes, quit: quit}
+	for _, o := range opts {
+		if o != nil {
+			o(m)
+		}
+	}
 	m.editor = widget.NewEditor(widget.WithEditorStyles(widget.TextInputStyles{
 		// The default TokenSecondary selection washed out against the
 		// editor text (Johno, M6 manual testing) — same cyan-on-black
@@ -127,6 +136,12 @@ func (m *Model) Init(ctx *tui.Context) {
 	tui.SubscribeScoped(ctx, func(widget.SplitZoomEvent) { m.MarkDirtyAll() })
 
 	m.refreshQueryTitle()
+	// The splash comes FIRST — before any login prompt — so the first
+	// thing a new user sees is what this build is and where its state
+	// lives. It cannot open from Init (the overlay host is not mounted
+	// yet) nor from Layout (mounting there is illegal), so it opens on
+	// the first loop callback after mount.
+	m.ctx.Go(func(context.Context) (any, error) { return showSplash{}, nil })
 	m.setStatus("connecting to " + m.session.addr + "…")
 	m.connectTask()
 }
@@ -142,6 +157,9 @@ type startupDone struct {
 	needsBootstrap  bool
 	err             error
 }
+
+// showSplash opens the About modal on the loop, once the tree is live.
+type showSplash struct{}
 
 type disconnectedEvent struct {
 	gen   uint64
@@ -210,10 +228,15 @@ func (m *Model) handleStartup(d startupDone) {
 		m.setStatus("connection changed — SPC x reconnects")
 		return
 	}
-	// Every open float was built against the previous epoch (manager
-	// rows, form intent) — dismiss them; the pinned Bounds would refuse
-	// their actions anyway, this just makes the refusal visible.
-	m.dismissFloats()
+	// Floats built against a PREVIOUS connection are stale (manager rows,
+	// form intent), so a re-connect dismisses them — the pinned Bounds
+	// would refuse their actions anyway, this just makes it visible.
+	// The FIRST connection has no previous one, and clearing there would
+	// close the startup splash the user is still reading.
+	if m.connectedOnce {
+		m.dismissFloats()
+	}
+	m.connectedOnce = true
 	m.watchDisconnect()
 	if d.instanceChanged {
 		// A different server process answered: everything cached from the
@@ -226,9 +249,9 @@ func (m *Model) handleStartup(d startupDone) {
 	}
 	switch {
 	case d.needsBootstrap:
-		m.openBootstrap()
+		m.promptOrQueue(m.openBootstrap)
 	case m.session.Token() == "":
-		m.openLogin()
+		m.promptOrQueue(m.openLogin)
 	default:
 		m.afterLogin()
 	}
@@ -256,6 +279,16 @@ func (m *Model) restartServer() {
 			m.setStatus("server stopping — reconnecting…")
 		}}, nil
 	})
+}
+
+// promptOrQueue opens an auth prompt, or waits for the splash to close
+// first — stacking a login form on top of the About modal would bury it.
+func (m *Model) promptOrQueue(open func()) {
+	if m.modalOpen() {
+		m.pendingPrompt = open
+		return
+	}
+	open()
 }
 
 // dismissFloats hides every open float (a (re)connect invalidated the
@@ -313,7 +346,15 @@ func (m *Model) checkAuth() {
 // maybePromptLogin fires a retained login prompt once the float stack
 // empties (called from the float dismiss path).
 func (m *Model) maybePromptLogin() {
-	if m.authPromptPending && !m.modalOpen() {
+	if m.modalOpen() {
+		return
+	}
+	if p := m.pendingPrompt; p != nil {
+		m.pendingPrompt = nil
+		p()
+		return
+	}
+	if m.authPromptPending {
 		m.authPromptPending = false
 		m.openLogin()
 	}
@@ -786,11 +827,11 @@ func (m *Model) serverStatusText() string {
 	pid, addr := m.session.ServerStatus()
 	switch {
 	case addr == "":
-		return "server: disconnected"
+		return "Backend [disconnected]"
 	case pid == 0:
-		return "server: " + addr // an older server does not report its pid
+		return "Backend " + addr // an older server does not report its pid
 	default:
-		return fmt.Sprintf("server %d: %s", pid, addr)
+		return fmt.Sprintf("Backend [PID:%d] %s", pid, addr)
 	}
 }
 
@@ -936,6 +977,12 @@ func (m *Model) handleTask(tr tui.TaskResult) bool {
 
 func (m *Model) applyTask(tr tui.TaskResult) bool {
 	switch v := tr.Value.(type) {
+	case showSplash:
+		if !m.splashShown {
+			m.splashShown = true
+			m.openAbout()
+		}
+		return true
 	case startupDone:
 		m.handleStartup(v)
 		return true
@@ -1095,6 +1142,7 @@ func (m *Model) leaderEntries() []leaderEntry {
 		{'L', "login / switch user", m.openLogin},
 		{'x', connLabel, connRun},
 		{'X', "restart the server", m.restartServer},
+		{'A', "about autodb", m.openAbout},
 		{'?', "help", m.openHelp},
 		{'Q', "quit", func() {
 			if m.quit != nil {
@@ -1124,6 +1172,7 @@ func (m *Model) openHelp() {
 	sb.WriteString("  SPC X          restart the server (picks up a rebuilt binary)\n")
 	sb.WriteString("  SPC C          choose which connection the query runs against\n")
 	sb.WriteString("  SPC H          script history (who ran what, when)\n")
+	sb.WriteString("  SPC A          about: build, backend, and where state lives\n")
 	sb.WriteString("\neditor: vim Normal/Insert/Visual, jk = Esc\n")
 	sb.WriteString("explorer: hjkl navigate, l expands, Enter scaffolds a table\n")
 	sb.WriteString("results: v or Enter inspects the selected row\n")
@@ -1144,7 +1193,10 @@ var (
 const (
 	managerWidth = 96
 	hintWidth    = 56
-	historyWidth = 110
+	// Percentages, not columns: these bodies size against the screen and
+	// follow a resize.
+	historyPct = 90
+	scriptPct  = 80
 )
 
 // Status severities (Johno, M6 manual testing): an outcome the user
