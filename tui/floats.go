@@ -131,10 +131,18 @@ func (f *form) submit() {
 	f.status.SetText(status)
 }
 
+// formWidth caps the form body: text inputs are width-greedy, and an
+// uncapped form stretches its float across the whole screen (Johno, M6
+// manual testing — login/new-workspace should be compact modals). The
+// managers cap themselves the same way.
+const formWidth = 52
+
 func (f *form) Layout(c tui.Constraints) tui.Size {
-	sz := f.tui.LayoutChild(f.flex, c)
+	cc := c
+	cc.MaxW = min(c.MaxW, formWidth)
+	sz := f.tui.LayoutChild(f.flex, cc)
 	f.tui.PlaceChild(f.flex, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
-	return c.Constrain(sz)
+	return cc.Constrain(sz)
 }
 
 func (f *form) Render(tui.Surface) {}
