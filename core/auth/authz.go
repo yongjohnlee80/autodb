@@ -155,10 +155,16 @@ func (s *Service) GrantCreatorTx(tx *dao.Transaction, token string, connID int64
 	if row.CreatedBy != actor.userID {
 		return Identity{}, fmt.Errorf("%w: creator grant is only available to the connection's creator", ErrDenied)
 	}
-	role := meta.RoleEditor
+	// Require current editor+ INSIDE the transaction: a demotion to reader
+	// that commits between the outer CreateConnection check and here must
+	// roll the whole creation back, not silently grant reader on a
+	// connection a reader may not create (lector M4 r2 must-fix #4).
 	if rankOf(actor.role) < rankOf(meta.RoleEditor) {
-		role = actor.role
+		return Identity{}, fmt.Errorf("%w: creating a connection requires editor or admin", ErrDenied)
 	}
+	// The ownership grant is capped at editor — creation never mints
+	// connection-admin rights (lector policy ruling).
+	role := meta.RoleEditor
 	if _, err := s.store.Grants.On(tx).
 		Set(meta.GrantUserID, actor.userID).Set(meta.GrantConnID, connID).
 		Set(meta.GrantRole, role).Set(meta.GrantGrantedBy, actor.userID).

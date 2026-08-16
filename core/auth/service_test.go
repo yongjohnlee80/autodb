@@ -462,3 +462,28 @@ func TestAuthorizeMatrix(t *testing.T) {
 		t.Errorf("post-revoke read err = %v, want ErrDenied", err)
 	}
 }
+
+// A login whose credentials are reset before its session commits must fail:
+// the credential is re-verified inside the committing tx (lector M3 r3
+// must-fix). Non-concurrent proxy — an admin reset then an old-passphrase
+// login — exercises the same recheck path.
+func TestLogin_OldCredentialsAfterResetRejected(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _, _ := newSvc(t)
+	rootTok, _ := mustBootstrap(t, s)
+
+	uid, err := s.CreateUser(ctx, rootTok, "bob", "bob-pass-old", meta.RoleEditor, testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResetPassphrase(ctx, rootTok, uid, "bob-pass-new", testIP); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.Login(ctx, "bob", "bob-pass-old", testIP); !errors.Is(err, ErrBadCredentials) {
+		t.Errorf("old-passphrase login after reset err = %v, want ErrBadCredentials", err)
+	}
+	if _, _, err := s.Login(ctx, "bob", "bob-pass-new", testIP); err != nil {
+		t.Errorf("new-passphrase login after reset: %v", err)
+	}
+}

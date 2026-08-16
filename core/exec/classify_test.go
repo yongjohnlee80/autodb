@@ -65,6 +65,14 @@ func TestClassify(t *testing.T) {
 		{name: "mysql exec comment delete", sql: "/*!40001 DELETE FROM t WHERE id=1 */", mysql: true, verb: "DELETE", class: ClassWrite, where: true},
 		{name: "mysql exec comment hides nothing", sql: "SELECT 1 /*!40001 ; DROP TABLE t */", mysql: true, err: ErrMultiStatement},
 
+		// MySQL dialect: `--` needs trailing whitespace to be a comment, and
+		// block comments do NOT nest (lector M4 r2 must-fix #1).
+		{name: "mysql dashdash no space is operator", sql: "SELECT 1--2", mysql: true, verb: "SELECT", class: ClassRead},
+		{name: "mysql dashdash space is comment", sql: "SELECT 1 -- x\n", mysql: true, verb: "SELECT", class: ClassRead},
+		{name: "mysql block comment no nest leaves tail", sql: "SELECT 1 /* a /* b */ ; DROP TABLE t", mysql: true, err: ErrMultiStatement},
+		{name: "pg dashdash no space still comment", sql: "SELECT 1--2", verb: "SELECT", class: ClassRead},
+		{name: "pg block comment nests", sql: "SELECT 1 /* a /* b */ c */", verb: "SELECT", class: ClassRead},
+
 		// Rejections.
 		{name: "begin", sql: "BEGIN", err: ErrStatementUnsupported},
 		{name: "commit", sql: "COMMIT", err: ErrStatementUnsupported},

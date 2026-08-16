@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -166,11 +167,23 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 		return "", Identity{}, fmt.Errorf("auth: unwrapping keyslot for %s: %w", name, ErrKeyslotCorrupt)
 	}
 	// Consistency check, commit, and adoption are ONE critical section
-	// (lector M3 r2 must-fix #3).
+	// (lector M3 r2 must-fix #3). Credentials are RE-VERIFIED inside the
+	// committing transaction against the current row (lector M3 r3
+	// must-fix): a passphrase reset or disable that commits between the
+	// out-of-tx verify above and this insert must invalidate this login,
+	// otherwise a reset intended to lock someone out races an in-flight
+	// old-passphrase session insert.
+	verified := u.PassHash
 	var token string
 	if err := s.withUnlock(mk, func() error {
 		return s.inTx(ctx, func(tx *dao.Transaction) error {
-			var terr error
+			cur, terr := s.store.Users.On(tx).With(meta.UserID, u.ID).Get()
+			if terr != nil {
+				return terr
+			}
+			if cur.Disabled != 0 || !bytes.Equal(cur.PassHash, verified) {
+				return ErrBadCredentials // credentials changed under us
+			}
 			token, terr = s.newSessionTx(tx, u.ID, ip)
 			if terr != nil {
 				return terr

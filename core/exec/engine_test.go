@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,7 +213,7 @@ func TestEngine_ConnectionManagement(t *testing.T) {
 	}
 
 	// TestConnection over a live grant.
-	if err := f.eng.TestConnection(ctx, f.rootTok, f.connID); err != nil {
+	if err := f.eng.TestConnection(ctx, f.rootTok, f.connID, testIP); err != nil {
 		t.Errorf("TestConnection: %v", err)
 	}
 
@@ -329,6 +330,31 @@ func TestEngine_CreatorGrantCappedAtEditor(t *testing.T) {
 
 // DSNs whose options would desynchronize the classifier from the target
 // grammar are refused at creation (lector M4 must-fix #3).
+func TestEngine_RejectsOversizedScript(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t)
+	f.exec(t, f.rootTok, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+	big := "SELECT '" + strings.Repeat("x", 9000) + "'"
+	if _, err := f.eng.Execute(ctx, f.rootTok, f.connID, big, testIP); !errors.Is(err, ErrScriptTooLarge) {
+		t.Errorf("oversized script err = %v, want ErrScriptTooLarge", err)
+	}
+	// Nothing oversized reached history/target.
+	if n, _ := f.store.History.OnCtx(ctx).With(meta.HistScript, big).Count(); n != 0 {
+		t.Error("oversized script was recorded/executed")
+	}
+}
+
+func TestEngine_WithMaxRowsPanicsOnNonpositive(t *testing.T) {
+	t.Parallel()
+	defer func() {
+		if recover() == nil {
+			t.Error("WithMaxRows(0) did not panic")
+		}
+	}()
+	_ = New(nil, nil, WithMaxRows(0))
+}
+
 func TestEngine_RejectsGrammarChangingDSN(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

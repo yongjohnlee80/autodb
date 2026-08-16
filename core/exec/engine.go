@@ -47,14 +47,15 @@ type Option func(*Engine)
 // the audit log is always on regardless, ADR-0054 §4).
 func WithHistory(enabled bool) Option { return func(e *Engine) { e.history = enabled } }
 
-// WithMaxRows overrides the read page size. Nonpositive values are ignored
-// (a zero page would return nothing and mark every result truncated —
-// lector M4 should-fix).
+// WithMaxRows overrides the read page size. A nonpositive value is a
+// construction-time programming error and panics (the golib fail-fast idiom;
+// lector M4 r2 amendment — fail loudly, not silently).
 func WithMaxRows(n int) Option {
 	return func(e *Engine) {
-		if n > 0 {
-			e.maxRows = n
+		if n <= 0 {
+			panic(fmt.Sprintf("exec.WithMaxRows: page size must be positive, got %d", n))
 		}
+		e.maxRows = n
 	}
 }
 
@@ -158,6 +159,13 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	// Reject oversized scripts BEFORE classification or execution: the
+	// audit/history record must equal exactly what ran — never execute an
+	// unaudited tail (lector M4 r2 must-fix #2).
+	if len(sqlText) > maxScriptBytes {
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, ErrScriptTooLarge)
 	}
 
 	stmt, err := Classify(sqlText, connRow.Engine == "mysql")

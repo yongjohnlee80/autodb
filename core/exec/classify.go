@@ -45,6 +45,10 @@ var (
 	// ErrNoWhere blocks UPDATE/DELETE without a top-level WHERE clause
 	// (Objective 18).
 	ErrNoWhere = errors.New("exec: UPDATE/DELETE without a WHERE clause is blocked")
+	// ErrScriptTooLarge rejects a script exceeding the executable size cap
+	// before it runs, so the audit record always equals what executed
+	// (lector M4 r2 must-fix #2).
+	ErrScriptTooLarge = errors.New("exec: statement exceeds the maximum size")
 )
 
 // Statement is the classifier's verdict.
@@ -155,6 +159,18 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 			i++
 
 		case c == '-' && i+1 < n && sqlText[i+1] == '-':
+			// MySQL requires the double-dash comment to be followed by
+			// whitespace (or EOL); `--x` is the subtraction operator, not a
+			// comment. Postgres/sqlite treat any `--` as a comment. Modeling
+			// the target's rule prevents a `--`-hidden tail on MySQL from
+			// being wrongly commented out (lector M4 r2 must-fix #1).
+			if backslashEscapes && i+2 < n && !isSpace(sqlText[i+2]) {
+				if err := content(); err != nil {
+					return st, err
+				}
+				i++ // consume one '-' as an operator; keep scanning
+				continue
+			}
 			for i < n && sqlText[i] != '\n' {
 				i++
 			}
@@ -178,10 +194,14 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 				i = j
 				continue
 			}
+			// PostgreSQL nests block comments; MySQL does not. Model the
+			// target so a MySQL `/* a /* b */` doesn't leave a live tail
+			// (lector M4 r2 must-fix #1).
+			nests := !backslashEscapes
 			level, j := 1, i+2
 			for j < n && level > 0 {
 				switch {
-				case sqlText[j] == '/' && j+1 < n && sqlText[j+1] == '*':
+				case nests && sqlText[j] == '/' && j+1 < n && sqlText[j+1] == '*':
 					level++
 					j += 2
 				case sqlText[j] == '*' && j+1 < n && sqlText[j+1] == '/':
@@ -366,6 +386,10 @@ func scanDollarQuote(s string, i int) (int, bool, error) {
 		return 0, false, fmt.Errorf("%w: unterminated dollar-quoted region %s", ErrMalformedStatement, delim)
 	}
 	return j + 1 + end + len(delim), true, nil
+}
+
+func isSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
 func isASCIILetter(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }

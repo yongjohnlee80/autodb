@@ -43,21 +43,20 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 	if err != nil {
 		return nil, fmt.Errorf("exec: opening connection %q: %w", row.Name, err)
 	}
-	// Pin the session to the grammar the classifier assumes (sql_mode /
-	// standard_conforming_strings) — lector M4 must-fix #3.
-	for _, stmt := range sessionGuardSQL(row.Engine) {
-		if _, gerr := conn.ExecContext(ctx, stmt); gerr != nil {
-			_ = conn.Close()
-			return nil, fmt.Errorf("exec: pinning session mode on %q: %w", row.Name, gerr)
-		}
-	}
-	// postgres.Open builds the pool without pinging; probe uniformly.
-	rows, perr := conn.QueryContext(ctx, "SELECT 1")
-	if perr != nil {
+	// Re-validate the stored DSN and verify the server's actual parsing mode
+	// matches what the classifier assumes — refuse the connection otherwise
+	// rather than clobbering the server's operational modes (lector M4 r2
+	// must-fix #1). Verified here; the v1 reader-safety contract is
+	// verb-level (see package doc) — engine-native read-only enforcement is
+	// an M9 gate-guard requirement.
+	if verr := ValidateDSN(row.Engine, string(dsn)); verr != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("exec: probing connection %q: %w", row.Name, perr)
+		return nil, verr
 	}
-	_ = rows.Close()
+	if verr := verifyConnGrammar(ctx, conn, row.Engine); verr != nil {
+		_ = conn.Close()
+		return nil, verr
+	}
 	e.conns[connID] = conn
 	return conn, nil
 }
@@ -196,7 +195,7 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 // TestConnection authorizes read access and probes the target with SELECT 1.
 // Authorization precedes the row fetch so an ungranted caller learns nothing
 // about the connection's existence (lector M4 must-fix #6).
-func (e *Engine) TestConnection(ctx context.Context, token string, connID int64) error {
+func (e *Engine) TestConnection(ctx context.Context, token string, connID int64, ip string) error {
 	ident, err := e.auth.Authorize(ctx, token, connID, auth.ActionRead)
 	if err != nil {
 		return err
@@ -212,7 +211,7 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64)
 	if err != nil {
 		// Connection failures are security-relevant signal (credential
 		// rotation, tampering) — audit them (lector M4 should-fix).
-		if aerr := e.auth.Audit(ctx, ident.UserID(), "", "conn_test_failed",
+		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_failed",
 			fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
 			return aerr
 		}
@@ -220,11 +219,16 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64)
 	}
 	rows, err := conn.QueryContext(ctx, "SELECT 1")
 	if err != nil {
-		if aerr := e.auth.Audit(ctx, ident.UserID(), "", "conn_test_failed",
+		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_failed",
 			fmt.Sprintf("conn %d probe: %v", connID, err)); aerr != nil {
 			return aerr
 		}
 		return fmt.Errorf("exec: probe failed: %w", err)
 	}
-	return rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	// A successful test is security-relevant too (who verified reachability,
+	// from where) — audit it (lector M4 r2 amendment).
+	return e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_ok", fmt.Sprintf("conn %d", connID))
 }

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -280,8 +281,25 @@ func (s *Service) ChangePassphrase(ctx context.Context, token, oldPass, newPass,
 	if err != nil {
 		return ErrBadCredentials
 	}
+	verified := u.PassHash
 	return s.withUnlock(mk, func() error {
 		return s.inTx(ctx, func(tx *dao.Transaction) error {
+			// Re-resolve the token and re-verify the old hash inside the
+			// committing tx: a reset that lands between resolveToken above
+			// and this commit must not be silently overwritten (lector M3
+			// r3 must-fix). resolveTokenTx also proves the session is still
+			// live and the account still enabled.
+			cur, terr := s.resolveTokenTx(tx, token)
+			if terr != nil {
+				return terr
+			}
+			urow, terr := s.store.Users.On(tx).With(meta.UserID, cur.userID).Get()
+			if terr != nil {
+				return terr
+			}
+			if !bytes.Equal(urow.PassHash, verified) {
+				return ErrBadCredentials // credentials changed under us
+			}
 			if err := s.rewrapTx(tx, actor.userID, newPass, mk); err != nil {
 				return err
 			}
