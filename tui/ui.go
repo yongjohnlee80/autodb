@@ -53,6 +53,7 @@ type Model struct {
 	statusMsg         string
 	running           bool
 	connecting        bool // a connectTask is in flight; suppress duplicates
+	authInFlight      bool // one login/bootstrap at a time; no last-wins races
 	hadAuth           bool // watches the token-empty edge for the login re-prompt
 	authPromptPending bool // login prompt retained while a modal was open
 	pendingCtrlW      bool // Ctrl-w chord prefix (Ctrl-w z = zoom alias)
@@ -183,6 +184,7 @@ func (m *Model) watchDisconnect() {
 func (m *Model) handleStartup(d startupDone) {
 	m.connecting = false
 	m.running = false
+	m.authInFlight = false // a (re)connect voids any in-flight attempt
 	if d.err != nil {
 		m.setStatus("connect failed: " + d.err.Error() + " — SPC x retries")
 		return
@@ -194,6 +196,10 @@ func (m *Model) handleStartup(d startupDone) {
 		m.setStatus("connection changed — SPC x reconnects")
 		return
 	}
+	// Every open float was built against the previous epoch (manager
+	// rows, form intent) — dismiss them; the pinned Bounds would refuse
+	// their actions anyway, this just makes the refusal visible.
+	m.dismissFloats()
 	m.watchDisconnect()
 	if d.instanceChanged {
 		// A different server process answered: everything cached from the
@@ -211,6 +217,16 @@ func (m *Model) handleStartup(d startupDone) {
 		m.openLogin()
 	default:
 		m.afterLogin()
+	}
+}
+
+// dismissFloats hides every open float (a (re)connect invalidated the
+// state they were built against).
+func (m *Model) dismissFloats() {
+	for _, f := range append([]*widget.Float(nil), m.floats...) {
+		if f.Shown() {
+			f.Hide()
+		}
 	}
 }
 
@@ -282,9 +298,11 @@ func (m *Model) openBootstrap() {
 		if len(v[1]) < 8 {
 			return false, "passphrase must be at least 8 characters"
 		}
-		m.authTask("bootstrap", func(c context.Context, b *Bound) error {
+		if !m.authTask("bootstrap", func(c context.Context, b *Bound) error {
 			return b.Bootstrap(c, name, v[1])
-		})
+		}) {
+			return false, "another sign-in attempt is still running — retry in a moment"
+		}
 		return true, ""
 	})
 }
@@ -297,9 +315,11 @@ func (m *Model) openLogin() {
 		if strings.TrimSpace(v[0]) == "" {
 			return false, "user required"
 		}
-		m.authTask("login", func(c context.Context, b *Bound) error {
+		if !m.authTask("login", func(c context.Context, b *Bound) error {
 			return b.Login(c, strings.TrimSpace(v[0]), v[1])
-		})
+		}) {
+			return false, "another sign-in attempt is still running — retry in a moment"
+		}
 		return true, ""
 	})
 }
@@ -310,11 +330,20 @@ type authDone struct {
 	err  error
 }
 
-func (m *Model) authTask(what string, fn func(context.Context, *Bound) error) {
+// authTask runs one authentication attempt; it reports false when an
+// earlier attempt is still in flight (the form stays open and says so),
+// so two concurrent logins can never race last-response-wins over the
+// adopted identity.
+func (m *Model) authTask(what string, fn func(context.Context, *Bound) error) bool {
+	if m.authInFlight {
+		return false
+	}
+	m.authInFlight = true
 	bound := m.session.Bind() // pin the epoch at issuance (form submit)
 	m.ctx.Go(func(c context.Context) (any, error) {
 		return authDone{gen: bound.Gen(), what: what, err: fn(c, bound)}, nil
 	})
+	return true
 }
 
 // --- execution ---------------------------------------------------------------------
@@ -638,6 +667,7 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 		m.handleStartup(v)
 		return true
 	case authDone:
+		m.authInFlight = false // settled, whatever its epoch or outcome
 		if v.gen != m.session.Gen() {
 			return true // logged into a connection that no longer exists
 		}

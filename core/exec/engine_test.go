@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ type fixture struct {
 	connID  int64
 }
 
-var fixtureSeq int64
+var fixtureSeq atomic.Int64
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
@@ -48,8 +49,7 @@ func newFixture(t *testing.T) *fixture {
 	eng := New(store, svc, WithMaxRows(3))
 	t.Cleanup(func() { _ = eng.Close() })
 
-	fixtureSeq++
-	dsn := fmt.Sprintf("file:exectest%d_%d?mode=memory&cache=shared", time.Now().UnixNano(), fixtureSeq)
+	dsn := fmt.Sprintf("file:exectest%d_%d?mode=memory&cache=shared", time.Now().UnixNano(), fixtureSeq.Add(1))
 	connID, err := eng.CreateConnection(ctx, rootTok, "target", "sqlite", dsn, testIP)
 	if err != nil {
 		t.Fatalf("CreateConnection: %v", err)
@@ -222,9 +222,8 @@ func TestEngine_ConnectionManagement(t *testing.T) {
 	if err := f.eng.DeleteConnection(ctx, f.rootTok, f.connID, testIP); err == nil {
 		t.Error("deleted a connection with recorded history")
 	}
-	fixtureSeq++
 	spare, err := f.eng.CreateConnection(ctx, f.rootTok, "spare", "sqlite",
-		fmt.Sprintf("file:spare%d?mode=memory&cache=shared", fixtureSeq), testIP)
+		fmt.Sprintf("file:spare%d?mode=memory&cache=shared", fixtureSeq.Add(1)), testIP)
 	if err != nil {
 		t.Fatal(err)
 	}

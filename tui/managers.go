@@ -41,6 +41,10 @@ type manager[T any] struct {
 	actions []managerAction[T]
 	load    func(c context.Context, b *Bound) ([]T, error)
 	float   *widget.Float
+	bound   *Bound // pinned at OPEN: every load, action, and nested form
+	//              submit runs in this epoch or is refused — a form held
+	//              open across a reconnect can't mutate a stale ID on the
+	//              replacement server
 	seq     uint64 // reload sequencing: fetches can COMPLETE out of issue
 	applied uint64 // order; a stale row set must never overwrite a fresh one
 }
@@ -52,6 +56,7 @@ func newManager[T any](m *Model, cols []widget.TableColumn[T],
 		table:   widget.NewTable(cols, widget.WithEmptyText[T]("empty")),
 		actions: actions,
 		load:    load,
+		bound:   m.session.Bind(), // the epoch this manager view belongs to
 	}
 	var keys []string
 	for _, a := range actions {
@@ -76,7 +81,7 @@ func (g *manager[T]) Init(ctx *tui.Context) {
 // Reload fetches rows off-loop and applies them via the Model's task path.
 func (g *manager[T]) Reload() {
 	load := g.load
-	bound := g.model.session.Bind() // pin the epoch at issuance
+	bound := g.bound // the manager's pinned epoch, not the current one
 	g.seq++
 	seq := g.seq
 	g.model.ctx.Go(func(c context.Context) (any, error) {
@@ -129,7 +134,10 @@ func (g *manager[T]) HandleEvent(ev tui.Event) bool {
 
 // act wraps a session call: run it off-loop, surface the outcome, reload.
 func managerCall[T any](g *manager[T], what string, fn func(context.Context, *Bound) error) {
-	bound := g.model.session.Bind() // pin the epoch at issuance (keypress)
+	// The manager's pinned Bound, NOT a fresh one: row IDs and form
+	// intent were captured against g.bound's epoch, and nested forms can
+	// outlive a reconnect — the mutation must run in that epoch or fail.
+	bound := g.bound
 	g.model.ctx.Go(func(c context.Context) (any, error) {
 		err := fn(c, bound)
 		return managerReload{gen: bound.Gen(), apply: func() {
