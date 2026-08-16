@@ -13,14 +13,17 @@ import (
 // Model's OverlayHost, removed from the stack on dismiss (the ddex-server
 // recipe — floats must not accumulate as dead layers).
 
-// openFloat shows content in a modal, dimmed, titled float and returns it.
+// openFloat shows content in a modal, titled float and returns it. The
+// backdrop stays LIVE — no scrim: the float overlays the widgets rather
+// than replacing them with gray space (Johno, M6 manual testing). The
+// Box interior is filled, so the float itself remains opaque.
 func (m *Model) openFloat(title string, content tui.Component, width int) *widget.Float {
 	box := widget.NewBox(content,
 		widget.WithTitle(title),
 		widget.WithStyle(style.New().Width(width).Border(style.BorderRounded)),
 		widget.WithFocusable(false),
 	)
-	f := widget.NewFloat(box, widget.WithModal(true), widget.WithDimBackground(true))
+	f := widget.NewFloat(box, widget.WithModal(true))
 	m.host.Attach(f)
 	f.Show()
 	m.floats = append(m.floats, f)

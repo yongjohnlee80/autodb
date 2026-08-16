@@ -175,7 +175,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.key(tuicore.KeyEnter)
 	// The submit closes the form — wait for that FIRST so the row
 	// assertions below can only match the reloaded manager table (the
-	// scrim hides the status bar; the form held the same strings).
+	// form held the same strings).
 	h.waitGone("connection form", "new connection")
 	h.waitFor("created connection row", "demo")
 	h.waitFor("created connection engine", "sqlite")
