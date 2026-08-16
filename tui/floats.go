@@ -292,7 +292,7 @@ func (iv *inspectFloat) Render(s tui.Surface) {
 	if iv.cursor >= iv.top+iv.height {
 		iv.top = iv.cursor - iv.height + 1
 	}
-	selSt := style.New().Bold(true).Foreground(style.TokenPrimary)
+	selSt := cursorRowStyle
 	for line := 0; line < iv.height; line++ {
 		i := iv.top + line
 		if i >= len(iv.columns) {

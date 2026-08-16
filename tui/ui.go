@@ -848,4 +848,8 @@ func (m *Model) openHelp() {
 	m.openTextFloat("help", sb.String(), 64)
 }
 
-var _ = style.New // reserved for status styling
+// cursorRowStyle is the ONE selection fill for every list-shaped
+// surface (explorer tree, manager tables, results, row inspect): ANSI
+// cyan behind black text — readable in light and dark terminals
+// (Johno, M6 manual testing: the TokenPrimary fill was blinding).
+var cursorRowStyle = style.New().Background(style.ANSI(6)).Foreground(style.ANSI(0))

@@ -52,8 +52,9 @@ type manager[T any] struct {
 func newManager[T any](m *Model, cols []widget.TableColumn[T],
 	load func(context.Context, *Bound) ([]T, error), actions []managerAction[T]) *manager[T] {
 	mg := &manager[T]{
-		model:   m,
-		table:   widget.NewTable(cols, widget.WithEmptyText[T]("empty")),
+		model: m,
+		table: widget.NewTable(cols, widget.WithEmptyText[T]("empty"),
+			widget.WithListStyles[T](widget.ListStyles{CursorRow: cursorRowStyle})),
 		actions: actions,
 		load:    load,
 		bound:   m.session.Bind(), // the epoch this manager view belongs to

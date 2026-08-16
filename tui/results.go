@@ -128,7 +128,8 @@ func (p *resultsPanel) rebuild() {
 				},
 			}
 		}
-		tbl := widget.NewTable(cols, widget.WithEmptyText[[]any]("0 rows"))
+		tbl := widget.NewTable(cols, widget.WithEmptyText[[]any]("0 rows"),
+			widget.WithListStyles[[]any](widget.ListStyles{CursorRow: cursorRowStyle}))
 		tbl.SetItems(res.Rows)
 		p.table = tbl
 		p.rawList = tbl.List()

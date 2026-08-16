@@ -59,7 +59,8 @@ func decSeg(s string) string {
 
 func newExplorer(m *Model) *explorer {
 	return &explorer{
-		tree: widget.NewTree(), model: m,
+		tree:   widget.NewTree(widget.WithTreeStyles(widget.ListStyles{CursorRow: cursorRowStyle})),
+		model:  m,
 		quoted: map[string]string{}, connNames: map[int64]string{},
 	}
 }
