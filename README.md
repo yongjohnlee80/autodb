@@ -15,12 +15,52 @@ Postgres, MySQL, and SQLite first.
 
 ## Status
 
-**M5 — the RPC server is live.** `autodb --serve` runs the msgpack-RPC
-server over the full core: config + meta-store (M2), identity/authz/audit
-(M3), the SQL execution engine (M4), and the handshake-gated method surface
-with the shared-server lifecycle (M5). The TUI (M6) and the autovim Lua
-integration (M7) are next. The milestone plan (M0–M9) and per-milestone
-ADRs live in the project knowledge base (kickoff record: ADR-0052).
+**M6 — the standalone TUI is live.** `autodb --ui` is a working DB IDE:
+a three-pane layout (explorer / query editor / results), a vim-modal
+editor, lazy schema browsing, table and JSON results, connection,
+workspace and user management, per-workspace SQL notes, script history,
+and in-panel search. `autodb --serve` runs the msgpack-RPC server over
+the same core: config + meta-store (M2), identity/authz/audit (M3), the
+SQL execution engine (M4), and the handshake-gated method surface with
+the shared-server lifecycle (M5).
+
+Next is **M7**, the autovim Lua integration. The milestone plan (M0–M9)
+and per-milestone ADRs live in the project knowledge base (kickoff
+record: ADR-0052; TUI architecture: ADR-0057).
+
+## The TUI
+
+```sh
+bin/autodb --ui
+```
+
+First run walks you through creating the root user and the master
+passphrase. Everything else hangs off the leader key:
+
+| Key | Does |
+|---|---|
+| `Space` | leader menu — every command, with its binding |
+| `?` | the keys available RIGHT HERE (focused panel, or the open modal) |
+| `Ctrl-h/j/k/l` | move between panes (vim window motions) |
+| `SPC r` / `SPC R` | run the buffer / run the selection |
+| `SPC C` | choose which connection the query runs against |
+| `SPC c` `SPC w` `SPC u` | connections, workspaces, users |
+| `SPC H` | script history — who ran what, when, against which connection |
+| `SPC n` `SPC s` | new note / save note (per-workspace `.sql` files) |
+| `/` `n` `N` | search the focused panel, next/previous match |
+| `SPC z` / `Ctrl-w z` | zoom the focused pane |
+| `SPC x` / `SPC X` | disconnect-reconnect / restart the backend (admin) |
+| `SPC A` | about: build, backend, and where state lives |
+| `Ctrl-q` | quit (the shared server keeps running) |
+
+The editor is vim-modal (`jk` escapes); the explorer and results honour
+`j/k/g/G`; the JSON results view and the script viewer are read-only vim
+buffers — navigate, select and yank, never edit.
+
+**The server outlives the TUI by design** (one shared server, many
+frontends), so a rebuilt binary keeps talking to the process already
+running. `SPC X` restarts it from inside the UI; a protocol mismatch
+says which side is stale.
 
 ## Layout
 
