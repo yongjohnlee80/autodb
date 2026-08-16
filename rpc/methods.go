@@ -27,39 +27,59 @@ const (
 	CodeStatementRejected int64 = -32032
 )
 
+// publicErrs is the whole disclosure allowlist: core sentinels whose
+// CONSTANT text is deliberately public, each with its wire code. Order
+// matters only in that ErrDenied precedes the CodeAuth family.
+var publicErrs = []struct {
+	sentinel error
+	code     int64
+}{
+	{auth.ErrDenied, CodeDenied},
+	{auth.ErrBadCredentials, CodeAuth},
+	{auth.ErrTokenInvalid, CodeAuth},
+	{auth.ErrLocked, CodeAuth},
+	{auth.ErrWeakPassphrase, CodeAuth},
+	{auth.ErrBootstrapDone, CodeAuth},
+	{auth.ErrLastAdmin, CodeAuth},
+	{auth.ErrNoKeyslot, CodeAuth},
+	{exec.ErrEmptyStatement, CodeStatementRejected},
+	{exec.ErrMultiStatement, CodeStatementRejected},
+	{exec.ErrStatementUnsupported, CodeStatementRejected},
+	{exec.ErrMalformedStatement, CodeStatementRejected},
+	{exec.ErrNoWhere, CodeStatementRejected},
+	{exec.ErrScriptTooLarge, CodeStatementRejected},
+}
+
 // wireErr maps core errors onto the wire. The transport withholds any
 // non-*Error text (deny-before-disclose), so this is the ONE place autodb
-// decides which core messages are deliberately public: the auth/exec
-// sentinel texts are user-facing by design and carry no internals. Anything
-// unmapped stays server-side and reaches the peer as a generic internal
-// error.
+// decides what is deliberately public — and it publishes the MATCHED
+// SENTINEL's constant text, never err.Error(): a future wrapper adding
+// context ("user 42 from 10.0.0.9: %w") would otherwise export its whole
+// contextual string across the disclosure boundary. Anything unmapped
+// stays server-side and reaches the peer as a generic internal error.
 func wireErr(err error) error {
 	if err == nil {
 		return nil
 	}
-	switch {
-	case errors.Is(err, auth.ErrDenied):
-		return &golibrpc.Error{Code: CodeDenied, Message: auth.ErrDenied.Error()}
-	case errors.Is(err, auth.ErrBadCredentials),
-		errors.Is(err, auth.ErrTokenInvalid),
-		errors.Is(err, auth.ErrLocked),
-		errors.Is(err, auth.ErrWeakPassphrase),
-		errors.Is(err, auth.ErrBootstrapDone),
-		errors.Is(err, auth.ErrLastAdmin),
-		errors.Is(err, auth.ErrNoKeyslot):
-		return &golibrpc.Error{Code: CodeAuth, Message: err.Error()}
-	case errors.Is(err, exec.ErrEmptyStatement),
-		errors.Is(err, exec.ErrMultiStatement),
-		errors.Is(err, exec.ErrStatementUnsupported),
-		errors.Is(err, exec.ErrMalformedStatement),
-		errors.Is(err, exec.ErrNoWhere),
-		errors.Is(err, exec.ErrScriptTooLarge):
-		return &golibrpc.Error{Code: CodeStatementRejected, Message: err.Error()}
+	for _, pe := range publicErrs {
+		if errors.Is(err, pe.sentinel) {
+			return &golibrpc.Error{Code: pe.code, Message: pe.sentinel.Error()}
+		}
 	}
 	return err // transport logs it; peer sees a generic internal error
 }
 
 // --- positional argument decoding (msgpack-RPC params are arrays) ---
+
+// exactArgs enforces exact positional arity: trailing extras are an invalid
+// call, not silently ignored input.
+func exactArgs(p []any, n int) error {
+	if len(p) != n {
+		return &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+			Message: fmt.Sprintf("want %d argument(s), got %d", n, len(p))}
+	}
+	return nil
+}
 
 func argStr(p []any, i int, name string) (string, error) {
 	if i >= len(p) {
@@ -112,10 +132,16 @@ func (s *Server) register() {
 
 	// --- auth: sessions & bootstrap ---
 	s.rpc.Handle("auth.needs_bootstrap", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 0); err != nil {
+			return nil, err
+		}
 		need, err := s.auth.NeedsBootstrap(ctx)
 		return need, wireErr(err)
 	})
 	s.rpc.Handle("auth.bootstrap", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
 		name, err := argStr(req.Params, 0, "name")
 		if err != nil {
 			return nil, err
@@ -131,6 +157,9 @@ func (s *Server) register() {
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
 	s.rpc.Handle("auth.login", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
 		name, err := argStr(req.Params, 0, "name")
 		if err != nil {
 			return nil, err
@@ -146,6 +175,9 @@ func (s *Server) register() {
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
 	s.rpc.Handle("auth.logout", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -153,6 +185,9 @@ func (s *Server) register() {
 		return nil, wireErr(s.auth.Logout(ctx, token, peerIP(req)))
 	})
 	s.rpc.Handle("auth.whoami", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -166,6 +201,9 @@ func (s *Server) register() {
 
 	// --- auth: user management (admin, token-first) ---
 	s.rpc.Handle("auth.user_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 4); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -189,6 +227,9 @@ func (s *Server) register() {
 		return id, nil
 	})
 	s.rpc.Handle("auth.user_role", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -204,6 +245,9 @@ func (s *Server) register() {
 		return nil, wireErr(s.auth.SetUserRole(ctx, token, userID, role, peerIP(req)))
 	})
 	s.rpc.Handle("auth.user_disable", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -219,6 +263,9 @@ func (s *Server) register() {
 		return nil, wireErr(s.auth.SetUserDisabled(ctx, token, userID, disabled, peerIP(req)))
 	})
 	s.rpc.Handle("auth.user_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -230,6 +277,9 @@ func (s *Server) register() {
 		return nil, wireErr(s.auth.RemoveUser(ctx, token, userID, peerIP(req)))
 	})
 	s.rpc.Handle("auth.passphrase_change", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -245,6 +295,9 @@ func (s *Server) register() {
 		return nil, wireErr(s.auth.ChangePassphrase(ctx, token, oldPass, newPass, peerIP(req)))
 	})
 	s.rpc.Handle("auth.passphrase_reset", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -262,6 +315,9 @@ func (s *Server) register() {
 
 	// --- auth: grants & allowlist (admin, token-first) ---
 	s.rpc.Handle("auth.grant_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 4); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -281,6 +337,9 @@ func (s *Server) register() {
 		return nil, wireErr(s.auth.AddGrant(ctx, token, userID, connID, role, peerIP(req)))
 	})
 	s.rpc.Handle("auth.grant_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -296,6 +355,9 @@ func (s *Server) register() {
 		return nil, wireErr(s.auth.RemoveGrant(ctx, token, userID, connID, peerIP(req)))
 	})
 	s.rpc.Handle("auth.allowlist_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -311,6 +373,9 @@ func (s *Server) register() {
 		return nil, wireErr(s.auth.AddAllowedIP(ctx, token, cidr, note, peerIP(req)))
 	})
 	s.rpc.Handle("auth.allowlist_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -324,6 +389,9 @@ func (s *Server) register() {
 
 	// --- conn: connection management ---
 	s.rpc.Handle("conn.create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 4); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -347,6 +415,9 @@ func (s *Server) register() {
 		return id, nil
 	})
 	s.rpc.Handle("conn.list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -366,6 +437,9 @@ func (s *Server) register() {
 		return out, nil
 	})
 	s.rpc.Handle("conn.delete", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -377,6 +451,9 @@ func (s *Server) register() {
 		return nil, wireErr(s.eng.DeleteConnection(ctx, token, connID, peerIP(req)))
 	})
 	s.rpc.Handle("conn.test", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err
@@ -390,6 +467,9 @@ func (s *Server) register() {
 
 	// --- exec ---
 	s.rpc.Handle("exec.run", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
 		token, err := argStr(req.Params, 0, "token")
 		if err != nil {
 			return nil, err

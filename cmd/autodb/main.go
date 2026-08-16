@@ -20,6 +20,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/rpc"
+	"github.com/yongjohnlee80/golib/logger"
 )
 
 // version and commit are stamped at build time via
@@ -61,11 +62,16 @@ func main() {
 // compatible autodb means "already running" (exit 0, the FE contract);
 // anything else is a loud error. Serves until SIGINT/SIGTERM, then drains.
 func runServe(configPath string) error {
-	cfg, err := loadConfig(configPath)
+	// config.Load owns path resolution: an empty path resolves to the
+	// default location, a missing file means defaults, and everything else
+	// (unreadable file, bad TOML, unknown keys) fails loudly — no silent
+	// fallback away from the operator's intended bind/allowlist/meta.
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
-	addr := fmt.Sprintf("%s:%d", cfg.Server.Bind, cfg.Server.Port)
+	// JoinHostPort, not Sprintf: an IPv6 bind ("::1") needs brackets.
+	addr := net.JoinHostPort(cfg.Server.Bind, fmt.Sprintf("%d", cfg.Server.Port))
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -100,25 +106,15 @@ func runServe(configPath string) error {
 	eng := exec.New(store, svc)
 	defer eng.Close()
 
-	srv := rpc.New(svc, eng, cfg.Server, version, rpc.WithListener(ln))
+	// The operational logger is NOT optional: the transport deliberately
+	// withholds error detail from the wire (deny-before-disclose), so the
+	// server-side log is the only place withheld core errors, frame
+	// diagnostics, panics, and reply failures exist at all.
+	oplog := logger.New(logger.WithWriter(os.Stderr), logger.WithContext("autodb"))
+	srv := rpc.New(svc, eng, cfg.Server, version,
+		rpc.WithListener(ln), rpc.WithLogger(oplog))
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	return srv.Run(ctx)
-}
-
-// loadConfig resolves the config: an explicit path must load; the default
-// path is optional (zero-config defaults when absent — ADR-0053).
-func loadConfig(path string) (config.Config, error) {
-	if path != "" {
-		return config.Load(path)
-	}
-	def, err := config.DefaultPath()
-	if err != nil {
-		return config.Default(), nil
-	}
-	if _, err := os.Stat(def); err != nil {
-		return config.Default(), nil
-	}
-	return config.Load(def)
 }
 
 func isAddrInUse(err error) bool {

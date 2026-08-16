@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/golib/msgpack"
+	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
+	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
 )
 
 // ErrNotAutodb reports that something answered on the probed address but it
@@ -16,11 +18,31 @@ import (
 // path (ADR-0056 §3).
 var ErrNotAutodb = errors.New("rpc: address is occupied by something other than a compatible autodb server")
 
+// probeLimits bounds the occupant's reply: a hello response is tiny, and
+// the occupant is by definition untrusted until it proves itself.
+func probeLimits() *msgpack.Limits {
+	return &msgpack.Limits{
+		MaxDepth:         4,
+		MaxStrBytes:      256,
+		MaxBinBytes:      256,
+		MaxElements:      16,
+		MaxTotalElements: 64,
+		MaxTotalBytes:    1024,
+	}
+}
+
 // Probe dials addr and performs a bare sys.hello WITHOUT declaring a
 // protocol (the server answers probes without admitting them). It returns
 // the server's reported version when a compatible autodb answers,
 // ErrNotAutodb when the occupant is foreign or incompatible, and the dial
 // error when nothing is listening (the FE contract's spawn signal).
+//
+// The reply is authenticated as a strict msgpack-RPC frame: a response
+// (tag 1) echoing this probe's msgid with a nil error and a result naming
+// a protocol-compatible autodb. Anything else — request-shaped frames,
+// wrong msgid, an error reply, a malformed result — is ErrNotAutodb; a
+// foreign occupant must not be able to make the guard report
+// "already running".
 func Probe(ctx context.Context, addr string) (version string, err error) {
 	d := net.Dialer{}
 	conn, err := d.DialContext(ctx, "tcp", addr)
@@ -34,33 +56,46 @@ func Probe(ctx context.Context, addr string) (version string, err error) {
 		_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
 	}
 
-	frame, err := msgpack.Marshal([]any{int64(0), int64(1), "sys.hello", []any{map[string]any{}}})
-	if err != nil {
+	codec := msgpackrpc.New(probeLimits())
+	const probeID = 1
+
+	bw := bufio.NewWriter(conn)
+	req := &golibrpc.Message{Kind: golibrpc.KindRequest, ID: probeID,
+		Method: "sys.hello", Params: []any{map[string]any{}}}
+	if err := codec.Write(bw, req); err != nil {
 		return "", err
 	}
-	if _, err := conn.Write(frame); err != nil {
+	if err := bw.Flush(); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrNotAutodb, err)
 	}
-	v, err := msgpack.Decode(bufio.NewReader(conn), nil)
+
+	m, err := codec.Read(bufio.NewReader(conn))
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrNotAutodb, err)
 	}
-	// Expect [1, 1, nil, {protocol, server, version}].
-	arr, ok := v.([]any)
-	if !ok || len(arr) != 4 {
-		return "", ErrNotAutodb
+	if m.Kind != golibrpc.KindResponse {
+		return "", fmt.Errorf("%w: occupant sent a non-response frame", ErrNotAutodb)
 	}
-	result, ok := arr[3].(map[string]any)
+	if m.ID != probeID {
+		return "", fmt.Errorf("%w: response msgid %d, want %d", ErrNotAutodb, m.ID, probeID)
+	}
+	if m.Err != nil {
+		return "", fmt.Errorf("%w: occupant answered the probe with an error", ErrNotAutodb)
+	}
+	result, ok := m.Result.(map[string]any)
 	if !ok {
-		return "", ErrNotAutodb
+		return "", fmt.Errorf("%w: malformed hello result", ErrNotAutodb)
 	}
 	if name, _ := result["server"].(string); name != "autodb" {
 		return "", ErrNotAutodb
 	}
-	proto, _ := result["protocol"].(int64)
-	if proto != Protocol {
-		return "", fmt.Errorf("%w: protocol %d, want %d", ErrNotAutodb, proto, Protocol)
+	proto, ok := result["protocol"].(int64)
+	if !ok || proto != Protocol {
+		return "", fmt.Errorf("%w: protocol %v, want %d", ErrNotAutodb, result["protocol"], Protocol)
 	}
-	ver, _ := result["version"].(string)
+	ver, ok := result["version"].(string)
+	if !ok {
+		return "", fmt.Errorf("%w: malformed version", ErrNotAutodb)
+	}
 	return ver, nil
 }

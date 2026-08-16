@@ -392,9 +392,9 @@ func TestProbe(t *testing.T) {
 	}
 }
 
-func TestGracefulDrainFlushesInflightReply(t *testing.T) {
+func TestShutdownWithLiveConnection(t *testing.T) {
 	t.Parallel()
-	// A dedicated fixture whose server we stop mid-request.
+	// A dedicated fixture whose server we shut down under a live connection.
 	ctx := context.Background()
 	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
 	if err != nil {
@@ -432,32 +432,216 @@ func TestGracefulDrainFlushesInflightReply(t *testing.T) {
 	c := &client{t: t, conn: conn, br: bufio.NewReader(conn)}
 	c.hello()
 
-	// Fire a request, then immediately begin shutdown. The polite-drain
-	// property is that a WELL-FORMED reply with msgid fidelity arrives
-	// instead of a dropped connection; whether it carries the result or a
-	// cancellation-driven error is inherently racy (Shutdown cancels
-	// handler contexts by design), so only the frame shape is asserted.
-	b, _ := msgpack.Marshal([]any{int64(0), int64(42), "auth.whoami", []any{rootTok}})
-	if _, err := conn.Write(b); err != nil {
-		t.Fatal(err)
+	// A request completed before shutdown proves the connection is live;
+	// then shutdown with the connection still open must drain cleanly
+	// (Run returns nil) and close the socket. Racing a request AGAINST
+	// shutdown is deliberately not asserted here: under drain-safe
+	// admission a message decoded after drain begins is refused by
+	// design, so the outcome is timing-dependent — the drain-window
+	// flush property is proven deterministically in golib's transport
+	// suite, where a test handler synchronizes on entry.
+	errVal, result := c.call("auth.whoami", rootTok)
+	if errVal != nil {
+		t.Fatalf("whoami: %#v", errVal)
 	}
-	cancel()
+	if u := result.(map[string]any); u["name"] != "root" {
+		t.Fatalf("whoami: %#v", u)
+	}
 
+	cancel()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	v, err := msgpack.Decode(c.br, nil)
-	if err != nil {
-		t.Fatalf("drained reply never arrived: %v", err)
-	}
-	arr := v.([]any)
-	if len(arr) != 4 || arr[0] != int64(1) || arr[1] != int64(42) {
-		t.Fatalf("drained reply: %#v", arr)
-	}
-	if arr[2] == nil {
-		if u, ok := arr[3].(map[string]any); !ok || u["name"] != "root" {
-			t.Fatalf("drained result: %#v", arr[3])
-		}
+	if _, err := c.br.ReadByte(); err == nil {
+		t.Fatal("connection still open after shutdown")
 	}
 	if err := <-errc; err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+}
+
+// --- review-fold regression tests (2026-08-16 lector autodb-M5 r1) ---
+
+// fakeOccupant answers every accepted connection with a fixed raw frame.
+func fakeOccupant(t *testing.T, frame []byte) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = conn.Write(frame)
+			conn.Close()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// Must-fix 1: Probe authenticates the full response frame — a foreign
+// occupant sending a plausible-but-wrong frame must never make the
+// single-instance guard report "already running".
+func TestProbeRejectsForgedFrames(t *testing.T) {
+	t.Parallel()
+	goodResult := map[string]any{"server": "autodb", "protocol": rpc.Protocol, "version": "v"}
+	cases := []struct {
+		name  string
+		frame any
+	}{
+		{"request-shaped frame", []any{int64(0), int64(1), "sys.hello", []any{goodResult}}},
+		{"notification frame", []any{int64(2), "sys.hello", []any{goodResult}}},
+		{"wrong msgid", []any{int64(1), int64(99), nil, goodResult}},
+		{"error response", []any{int64(1), int64(1), "boom", nil}},
+		{"error and plausible result", []any{int64(1), int64(1), "boom", goodResult}},
+		{"missing version", []any{int64(1), int64(1), nil,
+			map[string]any{"server": "autodb", "protocol": rpc.Protocol}}},
+		{"wrong server name", []any{int64(1), int64(1), nil,
+			map[string]any{"server": "otherdb", "protocol": rpc.Protocol, "version": "v"}}},
+		{"wrong protocol", []any{int64(1), int64(1), nil,
+			map[string]any{"server": "autodb", "protocol": int64(99), "version": "v"}}},
+		{"result not a map", []any{int64(1), int64(1), nil, "autodb"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// Per-subtest ctx: a parent ctx's deferred cancel fires before
+			// parallel subtests execute.
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			frame, err := msgpack.Marshal(tc.frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := fakeOccupant(t, frame)
+			if _, err := rpc.Probe(ctx, addr); !errors.Is(err, rpc.ErrNotAutodb) {
+				t.Fatalf("err = %v, want ErrNotAutodb", err)
+			}
+		})
+	}
+}
+
+// Must-fix 2: the incompatible-hello audit row is a durable promise — when
+// it cannot persist, the failure surfaces (generic internal error, R6)
+// instead of being swallowed, and the session stays poisoned.
+func TestIncompatibleHelloAuditFailureSurfaces(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32", "::1/128"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	eng := exec.New(store, svc)
+	defer eng.Close()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "test", rpc.WithListener(ln))
+	runCtx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Run(runCtx) }()
+	defer func() {
+		cancel()
+		<-errc
+	}()
+	for srv.Addr() == "" {
+		time.Sleep(time.Millisecond)
+	}
+	conn, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	c := &client{t: t, conn: conn, br: bufio.NewReader(conn)}
+
+	// Kill the audit store, then send an incompatible hello: the peer must
+	// see a generic internal error (audit could not persist), not the
+	// protocol-mismatch code the promise couldn't record.
+	_ = store.Close()
+	errVal, _ := c.call("sys.hello", map[string]any{"protocol": int64(999)})
+	mustErr(t, errVal, -32603)
+
+	// The session is poisoned regardless.
+	errVal, _ = c.call("sys.hello", map[string]any{"protocol": rpc.Protocol})
+	mustErr(t, errVal, rpc.CodeProtocolMismatch)
+}
+
+// Must-fix 4: an IPv6 bind must produce a bracketed, bindable address.
+func TestIPv6Bind(t *testing.T) {
+	t.Parallel()
+	probe, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skip("IPv6 loopback unavailable:", err)
+	}
+	probe.Close()
+
+	ctx := context.Background()
+	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"::1/128"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng := exec.New(store, svc)
+	t.Cleanup(func() { _ = eng.Close() })
+
+	srv := rpc.New(svc, eng, config.Server{Bind: "::1", Port: 0}, "test")
+	runCtx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Run(runCtx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-errc; err != nil {
+			t.Errorf("Run: %v", err)
+		}
+	})
+	deadline := time.After(2 * time.Second)
+	for srv.Addr() == "" {
+		select {
+		case <-deadline:
+			t.Fatal("IPv6 server never bound")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	pctx, pcancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer pcancel()
+	if ver, err := rpc.Probe(pctx, srv.Addr()); err != nil || ver != "test" {
+		t.Fatalf("Probe over IPv6 = %q, %v", ver, err)
+	}
+}
+
+// Should-fix 1: a present-but-non-integer hello protocol is an invalid
+// call — neither a probe nor a poisoning — and exact arity is enforced.
+func TestStrictParams(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+
+	// Malformed protocol declaration: invalid params, session stays clean.
+	errVal, _ := c.call("sys.hello", map[string]any{"protocol": "one"})
+	mustErr(t, errVal, -32602)
+	c.hello() // still admissible
+
+	// Trailing extra argument: refused, not silently ignored.
+	errVal, _ = c.call("auth.whoami", f.rootTok, "extra")
+	mustErr(t, errVal, -32602)
+
+	// Extra hello argument likewise.
+	errVal, _ = c.call("sys.hello", map[string]any{}, "extra")
+	mustErr(t, errVal, -32602)
 }

@@ -79,7 +79,8 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 	s := &Server{auth: authSvc, eng: eng, version: version}
 
 	ropts := []golibrpc.Option{
-		golibrpc.Addr(fmt.Sprintf("%s:%d", cfg.Bind, cfg.Port)),
+		// JoinHostPort, not Sprintf: an IPv6 bind ("::1") needs brackets.
+		golibrpc.Addr(net.JoinHostPort(cfg.Bind, fmt.Sprintf("%d", cfg.Port))),
 		golibrpc.WithLogger(o.logger),
 		golibrpc.MaxMessageBytes(4 << 20),
 		golibrpc.WithGate(s.gate),
@@ -132,14 +133,25 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		"server":   "autodb",
 		"version":  s.version,
 	}
+	if len(req.Params) > 1 {
+		return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+			Message: fmt.Sprintf("sys.hello: want at most 1 argument, got %d", len(req.Params))}
+	}
 	var clientProto int64 = -1
-	if len(req.Params) > 0 {
+	if len(req.Params) == 1 {
 		info, ok := req.Params[0].(map[string]any)
 		if !ok {
 			return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
 				Message: "sys.hello: clientInfo must be a map"}
 		}
-		if p, ok := info["protocol"].(int64); ok {
+		if raw, present := info["protocol"]; present {
+			p, ok := raw.(int64)
+			if !ok {
+				// A malformed declaration is an invalid call, not a probe
+				// and not an incompatible client — the session stays clean.
+				return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+					Message: fmt.Sprintf("sys.hello: protocol must be an integer, got %T", raw)}
+			}
 			clientProto = p
 		}
 	}
@@ -150,11 +162,16 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		// Probe: no protocol declared. Answer, admit nothing.
 	default:
 		// Incompatible client: structured refusal, session poisoned
-		// (ADR-0056 §2 — the Lua side re-provisions the binary). Audited
-		// as a protocol error under user 0 with the peer IP.
+		// (ADR-0056 §2 — the Lua side re-provisions the binary), audited
+		// as a protocol error under user 0 with the peer IP. The audit row
+		// is a durable promise (R6): if it cannot persist, the failure is
+		// surfaced — the transport logs the detail and the peer gets a
+		// generic internal error — while the session stays poisoned.
 		req.Session.SetValue(sessRefused, true)
-		_ = s.auth.Audit(ctx, 0, peerIP(req), "rpc_protocol_error",
-			fmt.Sprintf("client protocol %d, server %d", clientProto, Protocol))
+		if aerr := s.auth.Audit(ctx, 0, peerIP(req), "rpc_protocol_error",
+			fmt.Sprintf("client protocol %d, server %d", clientProto, Protocol)); aerr != nil {
+			return nil, fmt.Errorf("rpc_protocol_error audit failed: %w", aerr)
+		}
 		return nil, &golibrpc.Error{Code: CodeProtocolMismatch,
 			Message: fmt.Sprintf("protocol mismatch: client %d, server %d", clientProto, Protocol)}
 	}
