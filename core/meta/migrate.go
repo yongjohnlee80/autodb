@@ -43,14 +43,14 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 		{"users", func() (int64, error) {
 			return copyAll(ctx, src.Users, dst.Users, func(r *User) map[UserField]any {
 				return map[UserField]any{UserID: r.ID, UserName: r.Name, UserRole: r.Role,
-					UserPassHash: r.PassHash, UserMKWrapped: r.MKWrapped, UserDisabled: r.Disabled,
+					UserPassHash: nb(r.PassHash), UserMKWrapped: nb(r.MKWrapped), UserDisabled: r.Disabled,
 					UserCreatedAt: r.CreatedAt, UserUpdatedAt: r.UpdatedAt}
 			})
 		}},
 		{"connections", func() (int64, error) {
 			return copyAll(ctx, src.Connections, dst.Connections, func(r *Connection) map[ConnField]any {
 				return map[ConnField]any{ConnID: r.ID, ConnName: r.Name, ConnEngine: r.Engine,
-					ConnDSNEnc: r.DSNEnc, ConnCreatedBy: r.CreatedBy,
+					ConnDSNEnc: nb(r.DSNEnc), ConnCreatedBy: r.CreatedBy,
 					ConnCreatedAt: r.CreatedAt, ConnUpdatedAt: r.UpdatedAt}
 			})
 		}},
@@ -73,7 +73,7 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 		}},
 		{"sessions", func() (int64, error) {
 			return copyAll(ctx, src.Sessions, dst.Sessions, func(r *Session) map[SessionField]any {
-				return map[SessionField]any{SessID: r.ID, SessTokenHash: r.TokenHash,
+				return map[SessionField]any{SessID: r.ID, SessTokenHash: nb(r.TokenHash),
 					SessUserID: r.UserID, SessIP: r.IP, SessCreatedAt: r.CreatedAt,
 					SessExpiresAt: r.ExpiresAt, SessRevoked: r.Revoked}
 			})
@@ -123,6 +123,15 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 		return fmt.Errorf("meta: stamping migrated_from: %w", err)
 	}
 	return nil
+}
+
+// nb coalesces a nil byte slice to empty: sqlite scans empty blobs as nil,
+// which a NOT NULL bytea column on postgres would reject as NULL.
+func nb(b []byte) []byte {
+	if b == nil {
+		return []byte{}
+	}
+	return b
 }
 
 // copyAll streams every src row into a dst batch, ids included (the batch
