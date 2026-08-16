@@ -52,11 +52,12 @@ type Model struct {
 	floats            []*widget.Float
 	statusMsg         string
 	running           bool
-	connecting        bool // a connectTask is in flight; suppress duplicates
-	authInFlight      bool // one login/bootstrap at a time; no last-wins races
-	hadAuth           bool // watches the token-empty edge for the login re-prompt
-	authPromptPending bool // login prompt retained while a modal was open
-	pendingCtrlW      bool // Ctrl-w chord prefix (Ctrl-w z = zoom alias)
+	connecting        bool   // a connectTask is in flight; suppress duplicates
+	authSeq           uint64 // monotonic authentication-attempt identities
+	authAttempt       uint64 // attempt owning the auth guard; 0 = idle
+	hadAuth           bool   // watches the token-empty edge for the login re-prompt
+	authPromptPending bool   // login prompt retained while a modal was open
+	pendingCtrlW      bool   // Ctrl-w chord prefix (Ctrl-w z = zoom alias)
 }
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
@@ -184,7 +185,10 @@ func (m *Model) watchDisconnect() {
 func (m *Model) handleStartup(d startupDone) {
 	m.connecting = false
 	m.running = false
-	m.authInFlight = false // a (re)connect voids any in-flight attempt
+	// A (re)connect INVALIDATES any in-flight attempt's guard ownership:
+	// its late completion no longer matches and cannot unlock a newer
+	// attempt admitted on this epoch.
+	m.authAttempt = 0
 	if d.err != nil {
 		m.setStatus("connect failed: " + d.err.Error() + " — SPC x retries")
 		return
@@ -325,23 +329,29 @@ func (m *Model) openLogin() {
 }
 
 type authDone struct {
-	gen  uint64
-	what string
-	err  error
+	attempt uint64 // which attempt this settles; only the OWNER unlocks
+	gen     uint64
+	what    string
+	err     error
 }
 
 // authTask runs one authentication attempt; it reports false when an
 // earlier attempt is still in flight (the form stays open and says so),
 // so two concurrent logins can never race last-response-wins over the
-// adopted identity.
+// adopted identity. The guard is VERSIONED: each attempt carries an
+// identity and only the current owner's completion unlocks it — a stale
+// prior-epoch completion arriving late cannot unlock a successor's guard
+// and re-admit same-epoch concurrency.
 func (m *Model) authTask(what string, fn func(context.Context, *Bound) error) bool {
-	if m.authInFlight {
+	if m.authAttempt != 0 {
 		return false
 	}
-	m.authInFlight = true
+	m.authSeq++
+	attempt := m.authSeq
+	m.authAttempt = attempt
 	bound := m.session.Bind() // pin the epoch at issuance (form submit)
 	m.ctx.Go(func(c context.Context) (any, error) {
-		return authDone{gen: bound.Gen(), what: what, err: fn(c, bound)}, nil
+		return authDone{attempt: attempt, gen: bound.Gen(), what: what, err: fn(c, bound)}, nil
 	})
 	return true
 }
@@ -667,7 +677,11 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 		m.handleStartup(v)
 		return true
 	case authDone:
-		m.authInFlight = false // settled, whatever its epoch or outcome
+		if v.attempt == m.authAttempt {
+			// Only the guard's current owner unlocks it: an attempt
+			// invalidated by a reconnect settles without effect here.
+			m.authAttempt = 0
+		}
 		if v.gen != m.session.Gen() {
 			return true // logged into a connection that no longer exists
 		}
