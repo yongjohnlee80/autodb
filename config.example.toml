@@ -1,0 +1,91 @@
+# autodb configuration — EXAMPLE
+#
+# Copy to the location autodb reads, then edit:
+#
+#   mkdir -p ~/.config/autodb
+#   cp config.example.toml ~/.config/autodb/config.toml
+#
+# or point a run at any file: `autodb --serve --config /path/to/config.toml`
+# (pass the same --config to `autodb --ui`, which hands it to the server it
+# spawns).
+#
+# The file is OPTIONAL. Every value below is autodb's default, so an
+# absent config and this file (uncommented) behave identically — nothing
+# here is required to run.
+#
+# Two things to know before editing:
+#
+#   * Unknown keys are REJECTED, not ignored. A typo fails at startup
+#     with the offending key named, rather than silently leaving you on a
+#     default you thought you had changed.
+#   * Validation happens at load: a bad port, bind address, CIDR, or a
+#     postgres meta store with no DSN stops the server before it listens.
+
+[server]
+# TCP port for the msgpack-RPC surface. Frontends (the TUI, and autovim's
+# Lua integration) dial this, and the first one to find nothing listening
+# starts a server itself.
+port = 7419
+
+# Listen address. Loopback by default — deliberately. autodb holds
+# encrypted database credentials for every user, so exposing it beyond
+# this machine is a decision you make explicitly, not one you inherit.
+# If you do change it, tighten [security].ip_allowlist to match, and put
+# the port behind whatever your network already trusts.
+bind = "127.0.0.1"
+
+[meta]
+# autodb's OWN database: users, encrypted connection secrets, grants,
+# workspaces, sessions, the audit log, and script history. It is not one
+# of the databases you connect TO.
+#
+# "sqlite" (default) or "postgres". Postgres is for installations with
+# many users and long script retention; migration from sqlite is
+# supported and ONE-WAY.
+engine = "sqlite"
+
+# sqlite only. Empty means $XDG_DATA_HOME/autodb/meta.db
+# (~/.local/share/autodb/meta.db). The -wal and -shm files beside it are
+# part of the database: copy all three together, or checkpoint first.
+#
+# Losing this file means losing your users, grants and stored
+# connections — the encrypted DSNs are unrecoverable without it, because
+# the master key lives in its keyslot envelope. Back it up like a
+# credential store, because that is what it is.
+# path = "/home/you/.local/share/autodb/meta.db"
+
+# postgres only, and REQUIRED when engine = "postgres".
+# dsn = "postgres://autodb:secret@localhost:5432/autodb"
+
+[history]
+# Record every executed script (who, when, from which IP, against which
+# connection, how it ended) for recall in the TUI's SPC H view.
+#
+# Turning this off does NOT turn off auditing: the audit log is always
+# on and records the attempt before it runs. This switch only controls
+# whether the script TEXT is kept for recall.
+enabled = true
+
+[security]
+# Client CIDRs allowed to reach the server. Enforced at login, so a
+# stolen token is useless from an address outside this list.
+#
+# Loopback only by default. Widen it deliberately and narrowly — this is
+# the guard that makes a shared autodb a gate in front of your databases
+# rather than a hole through them.
+ip_allowlist = ["127.0.0.1/32", "::1/128"]
+
+# Example for a trusted internal subnet, ADDED to loopback rather than
+# replacing it (the TUI on this machine still connects over loopback):
+# ip_allowlist = ["127.0.0.1/32", "::1/128", "10.0.5.0/24"]
+
+[tui]
+# Where `autodb --ui` keeps its local .sql notes. Empty means
+# $XDG_DATA_HOME/autodb/notes (~/.local/share/autodb/notes).
+#
+# Notes are CLIENT-side files, grouped per workspace by immutable
+# workspace id — renaming a workspace never moves them, and deleting one
+# server-side never deletes your files (they surface as "detached notes"
+# in the explorer instead). Point this at a directory you already sync or
+# keep in version control if you want your query scratchpads to travel.
+# notes_dir = "/home/you/Documents/autodb-notes"

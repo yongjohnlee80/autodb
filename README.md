@@ -31,6 +31,7 @@ ADRs live in the project knowledge base (kickoff record: ADR-0052).
 | `tui/` | Standalone terminal UI on golib/tui (M6) |
 | `lua/` | autovim/Neovim integration + binary lifecycle (M7) |
 | `cmd/autodb/` | The single binary |
+| `config.example.toml` | Every setting, with its default and why it is that |
 
 ## Build & run
 
@@ -45,6 +46,32 @@ and implements the single-instance guard: if the port is taken by a
 compatible autodb it reports "already running" and exits 0; a foreign
 occupant is a loud error. Protocol handshake, method surface, and error
 codes are documented in [rpc/README.md](rpc/README.md).
+
+## Configuration
+
+autodb runs with no config at all: a first run needs no setup. The
+defaults are loopback-only RPC on `127.0.0.1:7419` and a sqlite meta
+store at `$XDG_DATA_HOME/autodb/meta.db`.
+
+To change any of it, copy the annotated example — it ships every
+setting at its default value, so an uncommented copy behaves exactly
+like no config:
+
+```sh
+mkdir -p ~/.config/autodb
+cp config.example.toml ~/.config/autodb/config.toml
+```
+
+`--config <path>` overrides the location for both `--serve` and `--ui`
+(the TUI passes it to the server it spawns). Unknown keys are rejected
+rather than ignored, and values are validated at load — a bad port,
+bind, CIDR, or a postgres meta store without a DSN fails before the
+server listens, naming the offending key.
+
+The meta store is autodb's own database — users, encrypted connection
+secrets, grants, workspaces, audit log, script history — not one of the
+databases you connect to. Treat it as a credential store: the encrypted
+DSNs cannot be recovered without it.
 
 In a bare-repo + worktree dev checkout, use the make targets (or pass
 `-buildvcs=false`): Go's nested-VCS detection resolves to the bare store and
