@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
@@ -174,6 +175,12 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		// the meta store, but the master key does not survive a restart —
 		// ADR-0057 §7).
 		"instance": s.instance,
+		// The frontends run in a different process (often a different
+		// machine) from this server, which they may have spawned. Report
+		// the identity an operator needs to find it: the pid and the
+		// address it is actually listening on.
+		"pid":  int64(os.Getpid()),
+		"addr": s.rpc.Addr(),
 	}
 	if len(req.Params) > 1 {
 		return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,

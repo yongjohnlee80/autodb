@@ -778,8 +778,24 @@ func (m *Model) setActiveConn(c ConnInfo) {
 	m.setStatus("query connection: " + c.Name)
 }
 
+// serverStatusText names the backend this frontend is driving. The
+// server is a separate process — often spawned by the TUI, sometimes
+// left running from an earlier build — so an operator needs to see WHICH
+// one at a glance (Johno, M6 manual testing).
+func (m *Model) serverStatusText() string {
+	pid, addr := m.session.ServerStatus()
+	switch {
+	case addr == "":
+		return "server: disconnected"
+	case pid == 0:
+		return "server: " + addr // an older server does not report its pid
+	default:
+		return fmt.Sprintf("server %d: %s", pid, addr)
+	}
+}
+
 func (m *Model) refreshStatus() {
-	left := "-- " + m.editor.Mode().String() + " --"
+	left := "-- " + m.editor.Mode().String() + " --  " + m.serverStatusText()
 	mid := ""
 	if u := m.session.User(); u.Name != "" {
 		mid = u.Name

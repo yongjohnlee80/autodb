@@ -33,13 +33,15 @@ type Session struct {
 	log   logger.Logger
 	spawn func() (logHint string, err error) // start `autodb --serve`; nil = never spawn
 
-	mu       sync.Mutex
-	client   *golibrpc.Client
-	instance string
-	version  string
-	token    string
-	user     UserInfo
-	gen      uint64 // state epoch; bumps when a (re)connect/disconnect BEGINS
+	mu         sync.Mutex
+	client     *golibrpc.Client
+	instance   string
+	version    string
+	serverPID  int64
+	serverAddr string
+	token      string
+	user       UserInfo
+	gen        uint64 // state epoch; bumps when a (re)connect/disconnect BEGINS
 }
 
 // spawnProbeWindow bounds how long Connect keeps dialing after the first
@@ -91,6 +93,22 @@ func (s *Session) Connected() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.client != nil
+}
+
+// ServerStatus describes the backend an operator is talking to: its pid
+// and the address it listens on ("" / 0 when not connected, or when the
+// server predates the handshake reporting them).
+func (s *Session) ServerStatus() (pid int64, addr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.client == nil {
+		return 0, ""
+	}
+	addr = s.serverAddr
+	if addr == "" {
+		addr = s.addr // what we dialed, when the server does not report
+	}
+	return s.serverPID, addr
 }
 
 // ServerVersion reports the connected server's version string.
@@ -247,6 +265,8 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 	m, _ := res.(map[string]any)
 	inst, _ := m["instance"].(string)
 	ver, _ := m["version"].(string)
+	pid, _ := m["pid"].(int64)
+	srvAddr, _ := m["addr"].(string)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -266,6 +286,8 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 	s.client = cli
 	s.instance = inst
 	s.version = ver
+	s.serverPID = pid
+	s.serverAddr = srvAddr
 	return instanceChanged, nil
 }
 

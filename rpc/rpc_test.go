@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -670,6 +671,14 @@ func TestHelloCarriesInstanceAndProtocol(t *testing.T) {
 	// the handshake contract.
 	if m["protocol"] != rpc.Protocol {
 		t.Fatalf("protocol = %v, want %d", m["protocol"], rpc.Protocol)
+	}
+	// The pid must be THIS process (frontends use it to identify which
+	// backend they are driving), and the address must be the live one.
+	if got := m["pid"]; got != int64(os.Getpid()) {
+		t.Fatalf("pid = %v, want %d", got, os.Getpid())
+	}
+	if addr, _ := m["addr"].(string); addr == "" {
+		t.Fatal("hello reported no listen address")
 	}
 	inst, _ := m["instance"].(string)
 	if len(inst) != 16 {

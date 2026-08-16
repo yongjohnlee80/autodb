@@ -273,6 +273,10 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("created connection engine", "sqlite")
 	h.key(tuicore.KeyEscape) // close the manager
 
+	// 1b. The status line names the backend: which process, where.
+	h.waitFor("server pid on the status line", "server ")
+	h.waitFor("server address on the status line", "127.0.0.1:")
+
 	// 2b. The users manager shows its full key list (it was truncated at
 	//     "g:gr…" before the float widened and the footer wrapped).
 	h.leader("u")
@@ -595,6 +599,7 @@ func TestUIFullFlow(t *testing.T) {
 	//     same-instance reconnect.
 	h.leader("x")
 	h.waitFor("disconnected", "disconnected — SPC x reconnects")
+	h.waitFor("status line reports the backend is gone", "server: disconnected")
 	h.leader("x")
 	h.waitFor("reconnected", "logged in as root")
 }
