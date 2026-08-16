@@ -225,6 +225,15 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 	})
 	if err != nil {
 		_ = cli.Close()
+		var re *golibrpc.Error
+		if errors.As(err, &re) && re.Code == rpc.CodeProtocolMismatch {
+			// The running server is an OLDER build. It outlives frontends
+			// by design, so this is the normal state after an upgrade —
+			// say so, and say how to fix it.
+			return false, fmt.Errorf(
+				"the running server speaks an older protocol than this build "+
+					"— stop it so a current one starts: pkill -f 'autodb --serve' (%w)", err)
+		}
 		return false, fmt.Errorf("handshake: %w", err)
 	}
 	m, _ := res.(map[string]any)

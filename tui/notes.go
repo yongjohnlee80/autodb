@@ -214,6 +214,42 @@ func (s *NoteStore) Save(n *Note, body string) error {
 	return nil
 }
 
+// Create materializes an EMPTY note and returns it loaded. Creating a
+// note has to put a file on disk immediately: a note that exists only in
+// the editor leaves the explorer empty and the user wondering whether
+// anything was created at all (Johno, M6 manual testing). Refuses a name
+// already in use so `a` never silently adopts someone else's file.
+func (s *NoteStore) Create(wsID int64, name string) (*Note, error) {
+	clean, err := CleanName(name)
+	if err != nil {
+		return nil, err
+	}
+	dir := s.dir(wsID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(filepath.Join(dir, clean),
+		os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("tui: %s already exists", clean)
+		}
+		return nil, err
+	}
+	if serr := f.Sync(); serr != nil {
+		f.Close()
+		return nil, serr
+	}
+	if cerr := f.Close(); cerr != nil {
+		return nil, cerr
+	}
+	if err := syncDir(dir); err != nil {
+		return nil, err
+	}
+	n, _, err := s.Load(wsID, clean)
+	return n, err
+}
+
 // Delete removes a note (no conflict check — an explicit user action).
 func (s *NoteStore) Delete(wsID int64, name string) error {
 	clean, err := CleanName(name)

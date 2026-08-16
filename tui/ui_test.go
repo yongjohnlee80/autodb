@@ -477,7 +477,14 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("jjj") // connections → demo → notes
 	h.keys("a")
 	h.waitFor("note form from explorer", "new note")
-	h.key(tuicore.KeyEscape)
+	h.keys("fromexplorer")
+	h.key(tuicore.KeyEnter)
+	// The FILE exists as soon as it is named, so the explorer shows it
+	// without waiting for a first save.
+	h.waitFor("created note listed", "· fromexplorer.sql")
+	if _, err := os.Stat(filepath.Join(h.notesRoot, "ws-1", "fromexplorer.sql")); err != nil {
+		t.Fatalf("note created from the explorer is not on disk: %v", err)
+	}
 	h.ctrl('l')
 
 	// 6d. SPC C picks the query connection from a list, and the query

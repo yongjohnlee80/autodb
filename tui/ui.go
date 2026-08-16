@@ -496,7 +496,20 @@ func (m *Model) newNote() {
 		if err != nil {
 			return false, err.Error()
 		}
-		m.openNote(wsID, clean)
+		// Create the FILE now, so the explorer shows it immediately —
+		// then open it. (Opening a not-yet-written name left the tree
+		// unchanged until the first save.)
+		note, cerr := m.notes.Create(wsID, clean)
+		if cerr != nil {
+			return false, cerr.Error()
+		}
+		m.curNote = note
+		m.noteDirty = false
+		m.editor.SetValue("")
+		m.explorer.RefreshNotes(wsID)
+		m.ctx.FocusComponent(m.editor)
+		m.setStatus("created " + note.Name)
+		m.refreshStatus()
 		return true, ""
 	})
 }

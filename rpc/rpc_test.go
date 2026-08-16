@@ -656,7 +656,7 @@ func TestStrictParams(t *testing.T) {
 
 // --- M6 surface: schema.*, workspace.*, protocol 2 (ADR-0057 §6/§7) ---
 
-func TestHelloCarriesInstanceAndProtocol2(t *testing.T) {
+func TestHelloCarriesInstanceAndProtocol(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 	c := f.dial(t)
@@ -665,8 +665,11 @@ func TestHelloCarriesInstanceAndProtocol2(t *testing.T) {
 		t.Fatalf("hello: %#v", errVal)
 	}
 	m := result.(map[string]any)
-	if m["protocol"] != int64(2) {
-		t.Fatalf("protocol = %v, want 2", m["protocol"])
+	// Track the constant: the hello reply must advertise whatever the
+	// server actually speaks, so bumping Protocol cannot silently skip
+	// the handshake contract.
+	if m["protocol"] != rpc.Protocol {
+		t.Fatalf("protocol = %v, want %d", m["protocol"], rpc.Protocol)
 	}
 	inst, _ := m["instance"].(string)
 	if len(inst) != 16 {
