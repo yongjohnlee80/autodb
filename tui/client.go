@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -227,12 +229,18 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 		_ = cli.Close()
 		var re *golibrpc.Error
 		if errors.As(err, &re) && re.Code == rpc.CodeProtocolMismatch {
-			// The running server is an OLDER build. It outlives frontends
-			// by design, so this is the normal state after an upgrade —
-			// say so, and say how to fix it.
-			return false, fmt.Errorf(
-				"the running server speaks an older protocol than this build "+
-					"— stop it so a current one starts: pkill -f 'autodb --serve' (%w)", err)
+			// Client and server are different builds. Which one is stale
+			// decides what to do, and BOTH directions happen: the shared
+			// server outlives frontends (so it is usually the old one),
+			// but restarting it from a rebuilt binary makes the running
+			// TUI the old one instead. The server's message carries both
+			// numbers; add the instruction.
+			hint := "stop the running server so a current one starts: " +
+				"pkill -f 'autodb --serve'"
+			if serverProto := protocolOf(re.Message); serverProto > rpc.Protocol {
+				hint = "this frontend is the older build — quit and relaunch it"
+			}
+			return false, fmt.Errorf("%s — %s", re.Message, hint)
 		}
 		return false, fmt.Errorf("handshake: %w", err)
 	}
@@ -273,6 +281,20 @@ func (s *Session) Disconnect() {
 	if old != nil {
 		_ = old.Close()
 	}
+}
+
+// protocolOf reads the server's protocol out of a mismatch message
+// ("protocol mismatch: client N, server M"); 0 when it cannot.
+func protocolOf(msg string) int64 {
+	i := strings.LastIndex(msg, "server ")
+	if i < 0 {
+		return 0
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(msg[i+len("server "):]), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // Close shuts the underlying client down.

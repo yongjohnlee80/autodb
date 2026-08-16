@@ -598,3 +598,129 @@ func TestUIFullFlow(t *testing.T) {
 	h.leader("x")
 	h.waitFor("reconnected", "logged in as root")
 }
+
+// SPC X restarts the shared server from inside the TUI: the running
+// server drains, the disconnect watcher reconnects, and the reconnect
+// spawns a fresh one. The new process has a new instance id and a locked
+// master key, so the session drops its token and the login prompt comes
+// back — that is the contract, and it is what makes a rebuilt binary
+// reachable without leaving the UI.
+func TestRestartServerFromTUI(t *testing.T) {
+	ctx := context.Background()
+	// One META STORE shared across restarts, as a real restart re-opens
+	// the same file: the users survive, the master key does not.
+	// A real restart re-opens the same store, so use a FILE the second
+	// server can open again (the meta store appends its own pragmas, so
+	// a shared-cache memory DSN is not available here).
+	store, err := meta.Open(ctx, config.Meta{
+		Engine: "sqlite",
+		Path:   filepath.Join(t.TempDir(), "meta.db"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+
+	var mu sync.Mutex
+	var spawns int
+	serve := func(l net.Listener) {
+		svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32", "::1/128"}))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		eng := exec.New(store, svc)
+		srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "restart-e2e",
+			rpc.WithListener(l))
+		runCtx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		go func() {
+			_ = srv.Run(runCtx)
+			_ = eng.Close()
+		}()
+	}
+	serve(ln)
+
+	// The spawner rebinds the address the drained server released — the
+	// stand-in for `autodb --serve` starting again.
+	spawn := func() (string, error) {
+		mu.Lock()
+		spawns++
+		mu.Unlock()
+		var l net.Listener
+		var lerr error
+		for i := 0; i < 200; i++ { // the old listener closes asynchronously
+			l, lerr = net.Listen("tcp", addr)
+			if lerr == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if lerr != nil {
+			return "", lerr
+		}
+		serve(l)
+		return "restart-e2e.log", nil
+	}
+
+	notes, err := tuiapp.NewNoteStore(filepath.Join(t.TempDir(), "notes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := tuiapp.NewSession(addr, logger.Nop{}, spawn)
+	t.Cleanup(session.Close)
+
+	appCtx, cancel := context.WithCancel(context.Background())
+	model := tuiapp.New(session, notes, cancel)
+	tb := tuicore.NewTestBackend(110, 32)
+	tr := &traceLog{}
+	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(tb),
+		tuicore.WithMinFrameInterval(0), tuicore.WithTrace(tr.add))
+	h := &uiHarness{t: t, tb: tb, app: app, done: make(chan error, 1),
+		notesRoot: "", trace: tr}
+	go func() { h.done <- app.Run(appCtx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-h.done:
+		case <-time.After(5 * time.Second):
+			t.Error("app never exited")
+		}
+	})
+
+	// Bootstrap, then restart from the leader menu.
+	h.waitFor("bootstrap float", "first run")
+	h.keys("root")
+	h.key(tuicore.KeyTab)
+	h.keys("restart-passphrase")
+	h.key(tuicore.KeyTab)
+	h.keys("restart-passphrase")
+	h.key(tuicore.KeyEnter)
+	h.waitFor("logged in", "logged in as root")
+
+	h.leader("X")
+
+	// The end state is what matters and what is stable: the server
+	// drained, the reconnect spawned a replacement, and the new process
+	// (new instance, locked master key) put the login prompt back. The
+	// "server stopping" status is transient and races the reconnect.
+	h.waitFor("login prompt after restart", "login")
+	h.keys("root")
+	h.key(tuicore.KeyTab)
+	h.keys("restart-passphrase")
+	h.key(tuicore.KeyEnter)
+	h.waitFor("logged in again", "logged in as root")
+
+	mu.Lock()
+	got := spawns
+	mu.Unlock()
+	if got == 0 {
+		t.Fatalf("the restart never spawned a replacement server\ntrace:\n%s", tr.tail(30))
+	}
+}
