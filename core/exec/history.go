@@ -81,7 +81,9 @@ func (e *Engine) ListHistory(ctx context.Context, token string, limit int) ([]Hi
 			ID: r.ID, UserID: r.UserID, User: e.userName(ctx, names, r.UserID),
 			ConnID: r.ConnectionID, Conn: e.connName(ctx, conns, r.ConnectionID),
 			IP: r.IP, Script: r.Script,
-			StartedAt: time.UnixMilli(r.StartedAt),
+			// script_history.started_at is unix SECONDS (see meta), not
+			// millis — reading it as millis dated every run to 1970.
+			StartedAt: time.Unix(r.StartedAt, 0),
 			Duration:  time.Duration(r.DurationMS) * time.Millisecond,
 			RowCount:  r.RowCount, Status: r.Status, Error: r.Error,
 		})

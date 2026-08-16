@@ -245,11 +245,13 @@ type HistoryEntry struct {
 type HistoryField string
 
 const (
-	HistID         HistoryField = "id"
-	HistUserID     HistoryField = "user_id"
-	HistConnID     HistoryField = "connection_id"
-	HistIP         HistoryField = "ip"
-	HistScript     HistoryField = "script"
+	HistID     HistoryField = "id"
+	HistUserID HistoryField = "user_id"
+	HistConnID HistoryField = "connection_id"
+	HistIP     HistoryField = "ip"
+	HistScript HistoryField = "script"
+	// HistStartedAt is unix SECONDS (written with time.Time.Unix()).
+	// Readers that assume milliseconds date every row to January 1970.
 	HistStartedAt  HistoryField = "started_at"
 	HistDurationMS HistoryField = "duration_ms"
 	HistRowCount   HistoryField = "row_count"
