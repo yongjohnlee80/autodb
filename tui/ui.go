@@ -541,6 +541,42 @@ func (m *Model) focusPane(c tui.Component) {
 	m.refreshStatus()
 }
 
+// movePane implements DIRECTIONAL pane navigation over the layout
+// explorer | (query / results), the vim window-motion model (Johno, M6
+// manual testing): h left, l right, k up, j down. A motion with nothing
+// in that direction is a no-op — focus never jumps somewhere unrelated.
+// A zoomed pane un-zooms first: the target would otherwise be hidden.
+func (m *Model) movePane(dir rune) {
+	inExplorer := m.ctx.FocusWithin(m.explorerBox)
+	inResults := m.ctx.FocusWithin(m.resultsBox)
+	var target tui.Component
+	switch dir {
+	case 'h': // left: anything in the right column → explorer
+		if !inExplorer {
+			target = m.explorer
+		}
+	case 'l': // right: explorer → the query editor
+		if inExplorer {
+			target = m.editor
+		}
+	case 'k': // up: results → query editor
+		if inResults {
+			target = m.editor
+		}
+	case 'j': // down: query editor → results
+		if !inExplorer && !inResults {
+			target = m.results
+		}
+	}
+	if target == nil {
+		return
+	}
+	if m.zoomed {
+		m.zoomToggle() // restore both splits so the target is visible
+	}
+	m.focusPane(target)
+}
+
 // zoomToggle maximizes the focused pane along the split chain (req 8).
 func (m *Model) zoomToggle() {
 	if m.zoomed {
@@ -759,14 +795,8 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 			// Ctrl-w z is the vim-familiar zoom alias (ADR-0057 §2).
 			m.pendingCtrlW = true
 			return true
-		case 'h':
-			m.focusPane(m.explorer)
-			return true
-		case 'l', 'k':
-			m.focusPane(m.editor)
-			return true
-		case 'j':
-			m.focusPane(m.results)
+		case 'h', 'j', 'k', 'l':
+			m.movePane(k.Code)
 			return true
 		}
 		return false
@@ -839,7 +869,7 @@ func (m *Model) openHelp() {
 		fmt.Fprintf(&sb, "  %c   %s\n", e.key, e.label)
 	}
 	sb.WriteString("\nglobal keys\n\n")
-	sb.WriteString("  Ctrl-h/j/k/l   focus explorer / results / editor\n")
+	sb.WriteString("  Ctrl-h/j/k/l   move between panes (left/down/up/right)\n")
 	sb.WriteString("  Ctrl-w z       zoom focused pane\n")
 	sb.WriteString("  Ctrl-q         quit (q quits too when nothing consumes it)\n")
 	sb.WriteString("\neditor: vim Normal/Insert/Visual, jk = Esc\n")

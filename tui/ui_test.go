@@ -136,6 +136,15 @@ func (h *uiHarness) keys(s string) {
 	}
 }
 
+// ctrl injects a Ctrl-modified key (pane motion).
+func (h *uiHarness) ctrl(code rune) {
+	if err := h.tb.Inject(tuicore.KeyEvent{
+		Kind: tuicore.KeyPress, Code: code, Mods: tuicore.ModCtrl,
+	}); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
 func (h *uiHarness) key(code rune) {
 	text := ""
 	if code >= 0x20 && code < 0xE000 {
@@ -251,6 +260,37 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("result rows", "alpha")
 	h.waitFor("result rows", "beta")
 	h.waitFor("result summary", "SELECT: 2 row(s)")
+
+	// 5b. JSON toggle renders the same rows as a JSON document (the
+	//     BufferView must be mounted BEFORE its writer is fed).
+	h.key(' ')
+	h.keys("j")
+	h.waitFor("json document", "\"title\": \"alpha\"")
+	h.key(' ')
+	h.keys("j")
+	h.waitFor("back to table", "beta")
+
+	// 5c. Directional pane motion: Ctrl-j moves DOWN into the results
+	//     (proved by `v` opening the row inspector there), Ctrl-k moves
+	//     back UP to the query editor.
+	h.ctrl('j')
+	h.keys("j") // vim motion inside the results table (golib List)
+	h.keys("v")
+	h.waitFor("results focused", "y: copy value")
+	h.waitFor("second row selected", "beta") // j moved the cursor before v
+	h.key(tuicore.KeyEscape)
+	h.ctrl('k')
+
+	// 5d. Ctrl-h reaches the explorer, and Ctrl-l comes back out of it —
+	//     the tree must NOT read those chords as its own h/l collapse and
+	//     expand (golib bubbles Ctrl-modified keys).
+	h.ctrl('h')
+	h.ctrl('l')
+	h.keys("i") // insert mode only lands if the editor took focus
+	h.keys("-- back in the editor")
+	h.keys("jk")
+	h.waitFor("editor focused after Ctrl-l", "-- back in the editor")
+	h.keys("Vd") // clear that probe line
 
 	// 6. The WHERE-less guard surfaces as a structured status message.
 	h.keys("Vd")

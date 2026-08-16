@@ -97,6 +97,11 @@ func (p *resultsPanel) rebuild() {
 		if p.jsonV == nil {
 			p.jsonV = widget.NewBufferView()
 		}
+		// MOUNT FIRST: BufferView binds its writer handle in Init and
+		// drops writes while unmounted (view.alive is false, the app
+		// handle is nil) — writing before the swap silently produced an
+		// empty JSON view.
+		p.swap(p.jsonV)
 		p.jsonV.Clear()
 		out := make([]map[string]any, 0, len(res.Rows))
 		for _, row := range res.Rows {
@@ -113,7 +118,7 @@ func (p *resultsPanel) rebuild() {
 			b = []byte(err.Error())
 		}
 		_, _ = p.jsonV.Writer().Write(append(b, '\n'))
-		p.swap(p.jsonV)
+		p.jsonV.ScrollTo(0) // a document, not a log tail
 	default:
 		cols := make([]widget.TableColumn[[]any], len(res.Columns))
 		for i, name := range res.Columns {

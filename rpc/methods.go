@@ -2,9 +2,13 @@ package rpc
 
 import (
 	"context"
+	"encoding"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/exec"
@@ -522,19 +526,68 @@ func resultMap(res *exec.Result) map[string]any {
 	}
 }
 
+// isPrintableText reports whether b is valid UTF-8 carrying no control
+// characters beyond tab/newline/carriage-return — the test for "these
+// bytes are a string the user wants to read".
+func isPrintableText(b []byte) bool {
+	if !utf8.Valid(b) {
+		return false
+	}
+	for _, r := range string(b) {
+		if r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
 // wireVal normalizes one result cell. Types the codec carries pass through;
 // time.Time becomes RFC3339Nano; anything else stringifies — the FEs are
 // display surfaces, and a lossy-but-visible cell beats a failed page.
 func wireVal(v any) any {
 	switch x := v.(type) {
-	case nil, bool, int64, float64, string, []byte,
+	case nil, bool, int64, float64, string,
 		int, int8, int16, int32, uint, uint8, uint16, uint32, uint64, float32:
+		return x
+	case []byte:
+		// Drivers hand back TEXT as bytes (every mysql string column, and
+		// postgres bytea alike). Bytes that ARE text ship as text so both
+		// frontends show the value, not a hex dump; anything genuinely
+		// binary stays bytes and renders as hex client-side.
+		if isPrintableText(x) {
+			return string(x)
+		}
 		return x
 	case time.Time:
 		return x.Format(time.RFC3339Nano)
-	default:
-		return fmt.Sprintf("%v", x)
 	}
+	// Fixed-size byte ARRAYS never match the []byte case above: a
+	// postgres uuid scans into [16]uint8, and the %v fallback would ship
+	// it as a decimal byte list. Render 16-byte arrays as canonical
+	// UUIDs and any other byte array as hex.
+	if rv := reflect.ValueOf(v); rv.Kind() == reflect.Array &&
+		rv.Type().Elem().Kind() == reflect.Uint8 {
+		b := make([]byte, rv.Len())
+		reflect.Copy(reflect.ValueOf(b), rv)
+		if len(b) == 16 {
+			return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+		}
+		return fmt.Sprintf("%x", b)
+	}
+	// Driver types that know their own text form (pgtype values, decimals,
+	// net.IP, …) render through it rather than through %v's struct dump.
+	switch x := v.(type) {
+	case encoding.TextMarshaler:
+		if t, err := x.MarshalText(); err == nil {
+			return string(t)
+		}
+	case fmt.Stringer:
+		return x.String()
+	}
+	return fmt.Sprintf("%v", v)
 }
 
 // registerM6 wires the schema.* and workspace.* surface (ADR-0057 §6,
