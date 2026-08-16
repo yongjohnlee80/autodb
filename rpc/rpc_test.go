@@ -653,3 +653,174 @@ func TestStrictParams(t *testing.T) {
 	errVal, _ = c.call("sys.hello", map[string]any{}, "extra")
 	mustErr(t, errVal, -32602)
 }
+
+// --- M6 surface: schema.*, workspace.*, protocol 2 (ADR-0057 §6/§7) ---
+
+func TestHelloCarriesInstanceAndProtocol2(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	errVal, result := c.call("sys.hello", map[string]any{"protocol": rpc.Protocol})
+	if errVal != nil {
+		t.Fatalf("hello: %#v", errVal)
+	}
+	m := result.(map[string]any)
+	if m["protocol"] != int64(2) {
+		t.Fatalf("protocol = %v, want 2", m["protocol"])
+	}
+	inst, _ := m["instance"].(string)
+	if len(inst) != 16 {
+		t.Fatalf("instance = %q, want 16 hex chars", inst)
+	}
+}
+
+func TestSchemaIntrospectionOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	// Seed a table through the engine.
+	if errVal, _ := c.call("exec.run", f.rootTok, f.connID,
+		"CREATE TABLE tracks (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"); errVal != nil {
+		t.Fatalf("create: %#v", errVal)
+	}
+
+	errVal, result := c.call("schema.tables", f.rootTok, f.connID, "")
+	if errVal != nil {
+		t.Fatalf("schema.tables: %#v", errVal)
+	}
+	var found map[string]any
+	for _, row := range result.([]any) {
+		m := row.(map[string]any)
+		if m["name"] == "tracks" {
+			found = m
+		}
+	}
+	if found == nil {
+		t.Fatalf("tracks not listed: %#v", result)
+	}
+	if found["kind"] != "table" || found["quoted"] == "" || found["quoted"] == nil {
+		t.Fatalf("table row = %#v (server-quoted name required)", found)
+	}
+
+	// The server-quoted identifier drives the quick-select scaffold.
+	quoted := found["quoted"].(string)
+	if errVal, _ = c.call("exec.run", f.rootTok, f.connID,
+		"SELECT * FROM "+quoted+" LIMIT 100"); errVal != nil {
+		t.Fatalf("scaffold select over quoted name: %#v", errVal)
+	}
+
+	errVal, result = c.call("schema.columns", f.rootTok, f.connID, "", "tracks")
+	if errVal != nil {
+		t.Fatalf("schema.columns: %#v", errVal)
+	}
+	cols := result.([]any)
+	if len(cols) != 2 {
+		t.Fatalf("columns = %#v", cols)
+	}
+	first := cols[0].(map[string]any)
+	if first["name"] != "id" || first["pk"] != true {
+		t.Fatalf("column 0 = %#v", first)
+	}
+
+	// sqlite has no stored routines: capability absence is DATA.
+	errVal, result = c.call("schema.routines", f.rootTok, f.connID, "")
+	if errVal != nil {
+		t.Fatalf("schema.routines: %#v", errVal)
+	}
+	r := result.(map[string]any)
+	if r["supported"] != false {
+		t.Fatalf("routines = %#v, want supported=false for sqlite", r)
+	}
+
+	// R13: a user with no grant on the connection learns nothing.
+	if errVal, _ := c.call("auth.user_create", f.rootTok, "nogrant", "nogrant-pass", "reader"); errVal != nil {
+		t.Fatalf("user_create: %#v", errVal)
+	}
+	errVal, result = c.call("auth.login", "nogrant", "nogrant-pass")
+	if errVal != nil {
+		t.Fatalf("login: %#v", errVal)
+	}
+	tok := result.(map[string]any)["token"].(string)
+	errVal, _ = c.call("schema.tables", tok, f.connID, "")
+	mustErr(t, errVal, rpc.CodeDenied)
+}
+
+func TestWorkspacesOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	errVal, result := c.call("workspace.create", f.rootTok, "analytics")
+	if errVal != nil {
+		t.Fatalf("workspace.create: %#v", errVal)
+	}
+	wsID := result.(int64)
+	if errVal, _ = c.call("workspace.attach", f.rootTok, wsID, f.connID); errVal != nil {
+		t.Fatalf("attach: %#v", errVal)
+	}
+
+	// Admin sees the workspace with its connection.
+	errVal, result = c.call("workspace.list", f.rootTok)
+	if errVal != nil {
+		t.Fatalf("list: %#v", errVal)
+	}
+	views := result.([]any)
+	if len(views) != 1 {
+		t.Fatalf("views = %#v", views)
+	}
+	v := views[0].(map[string]any)
+	if v["name"] != "analytics" || len(v["connections"].([]any)) != 1 {
+		t.Fatalf("view = %#v", v)
+	}
+
+	// A reader with NO grant: the workspace is OMITTED entirely (R13).
+	if errVal, _ = c.call("auth.user_create", f.rootTok, "wsreader", "wsreader-pass", "reader"); errVal != nil {
+		t.Fatalf("user_create: %#v", errVal)
+	}
+	errVal, result = c.call("auth.login", "wsreader", "wsreader-pass")
+	if errVal != nil {
+		t.Fatalf("login: %#v", errVal)
+	}
+	readerTok := result.(map[string]any)["token"].(string)
+	readerID := result.(map[string]any)["user"].(map[string]any)["id"].(int64)
+
+	errVal, result = c.call("workspace.list", readerTok)
+	if errVal != nil {
+		t.Fatalf("reader list: %#v", errVal)
+	}
+	if got := len(result.([]any)); got != 0 {
+		t.Fatalf("ungranted reader sees %d workspaces, want 0", got)
+	}
+
+	// Granted reader sees it, with only the granted connection.
+	if errVal, _ = c.call("auth.grant_add", f.rootTok, readerID, f.connID, "reader"); errVal != nil {
+		t.Fatalf("grant_add: %#v", errVal)
+	}
+	errVal, result = c.call("workspace.list", readerTok)
+	if errVal != nil {
+		t.Fatalf("granted list: %#v", errVal)
+	}
+	if got := len(result.([]any)); got != 1 {
+		t.Fatalf("granted reader sees %d workspaces, want 1", got)
+	}
+
+	// Writes are admin-gated.
+	errVal, _ = c.call("workspace.create", readerTok, "sneaky")
+	mustErr(t, errVal, rpc.CodeDenied)
+
+	// Rename + detach + delete round out the lifecycle.
+	if errVal, _ = c.call("workspace.rename", f.rootTok, wsID, "renamed"); errVal != nil {
+		t.Fatalf("rename: %#v", errVal)
+	}
+	if errVal, _ = c.call("workspace.detach", f.rootTok, wsID, f.connID); errVal != nil {
+		t.Fatalf("detach: %#v", errVal)
+	}
+	if errVal, _ = c.call("workspace.delete", f.rootTok, wsID); errVal != nil {
+		t.Fatalf("delete: %#v", errVal)
+	}
+	errVal, _ = c.call("workspace.rename", f.rootTok, wsID, "ghost")
+	mustErr(t, errVal, -32602) // not-found surfaces as the mapped sentinel
+}

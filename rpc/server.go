@@ -2,6 +2,8 @@ package rpc
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 
@@ -16,8 +18,12 @@ import (
 
 // Protocol is the wire protocol version (ADR-0051 §5). autodb owns this
 // number; a client hello carrying a different value is refused and the Lua
-// side re-provisions the binary.
-const Protocol int64 = 1
+// side re-provisions the binary. M6 bumped it to 2: the schema.* and
+// workspace.* surface is required by the M6+ frontends, and a new client
+// helloing an old server must be REFUSED at the handshake, not surprised
+// by method-not-found (ADR-0057 §7). The server speaks exactly one
+// protocol version; there is no negotiation.
+const Protocol int64 = 2
 
 // Session keys the gate and the hello handler share.
 const (
@@ -42,10 +48,11 @@ func decodeLimits() *msgpack.Limits {
 // core/auth + core/exec onto the golib transport (Objective 19 — no
 // business logic lives here).
 type Server struct {
-	auth    *auth.Service
-	eng     *exec.Engine
-	rpc     *golibrpc.Server
-	version string
+	auth     *auth.Service
+	eng      *exec.Engine
+	rpc      *golibrpc.Server
+	version  string
+	instance string // random per-process id; hello exposes it (ADR-0057 §7)
 }
 
 // Option configures a Server.
@@ -76,7 +83,7 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 			op(&o)
 		}
 	}
-	s := &Server{auth: authSvc, eng: eng, version: version}
+	s := &Server{auth: authSvc, eng: eng, version: version, instance: newInstanceID()}
 
 	ropts := []golibrpc.Option{
 		// JoinHostPort, not Sprintf: an IPv6 bind ("::1") needs brackets.
@@ -132,6 +139,11 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		"protocol": Protocol,
 		"server":   "autodb",
 		"version":  s.version,
+		// A changed instance across a reconnect means a NEW server process:
+		// clients drop cached state and re-prompt login (tokens persist in
+		// the meta store, but the master key does not survive a restart —
+		// ADR-0057 §7).
+		"instance": s.instance,
 	}
 	if len(req.Params) > 1 {
 		return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
@@ -182,6 +194,16 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 			Message: fmt.Sprintf("protocol mismatch: client %d, server %d", clientProto, Protocol)}
 	}
 	return reply, nil
+}
+
+// newInstanceID generates the per-process identity hello exposes.
+func newInstanceID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// A dead entropy source is a broken host; refuse to start quietly.
+		panic(fmt.Sprintf("rpc: instance id: %v", err))
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // peerIP extracts the bare client IP from the connection's peer address —

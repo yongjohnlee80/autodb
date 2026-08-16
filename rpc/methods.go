@@ -48,6 +48,9 @@ var publicErrs = []struct {
 	{exec.ErrMalformedStatement, CodeStatementRejected},
 	{exec.ErrNoWhere, CodeStatementRejected},
 	{exec.ErrScriptTooLarge, CodeStatementRejected},
+	// Workspace not-found is admin-only reachable (Manage authz runs
+	// BEFORE the lookup, so R13 ordering holds) and carries no internals.
+	{exec.ErrWorkspaceNotFound, golibrpc.CodeInvalidParams},
 }
 
 // wireErr maps core errors onto the wire. The transport withholds any
@@ -129,6 +132,7 @@ func identMap(id auth.Identity) map[string]any {
 // peer IP threaded through, map the result/error. No business logic.
 func (s *Server) register() {
 	s.rpc.Handle("sys.hello", s.helloHandler)
+	s.registerM6()
 
 	// --- auth: sessions & bootstrap ---
 	s.rpc.Handle("auth.needs_bootstrap", func(ctx context.Context, req *golibrpc.Request) (any, error) {
@@ -531,4 +535,242 @@ func wireVal(v any) any {
 	default:
 		return fmt.Sprintf("%v", x)
 	}
+}
+
+// registerM6 wires the schema.* and workspace.* surface (ADR-0057 §6,
+// protocol 2) under the same per-verb discipline as the v1 methods: exact
+// arity and typed decoding, peer-IP threading into every mutating core
+// call, sentinel-constant-only disclosure, wire-vocabulary normalization.
+func (s *Server) registerM6() {
+	// --- schema introspection (authz ≥ reader happens in the core, R13) ---
+	s.rpc.Handle("schema.schemas", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		names, err := s.eng.ListSchemas(ctx, token, connID)
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		out := make([]any, 0, len(names))
+		for _, n := range names {
+			out = append(out, n)
+		}
+		return out, nil
+	})
+	s.rpc.Handle("schema.tables", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		schema, err := argStr(req.Params, 2, "schema")
+		if err != nil {
+			return nil, err
+		}
+		tables, err := s.eng.ListTables(ctx, token, connID, schema)
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		out := make([]any, 0, len(tables))
+		for _, t := range tables {
+			out = append(out, map[string]any{
+				"schema": t.Schema, "name": t.Name,
+				"kind": string(t.Kind), "quoted": t.Quoted,
+			})
+		}
+		return out, nil
+	})
+	s.rpc.Handle("schema.columns", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 4); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		schema, err := argStr(req.Params, 2, "schema")
+		if err != nil {
+			return nil, err
+		}
+		table, err := argStr(req.Params, 3, "table")
+		if err != nil {
+			return nil, err
+		}
+		cols, err := s.eng.ListColumns(ctx, token, connID, schema, table)
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		out := make([]any, 0, len(cols))
+		for _, c := range cols {
+			out = append(out, map[string]any{
+				"name": c.Name, "type": c.DataType, "nullable": c.Nullable,
+				"default": c.Default, "has_default": c.HasDefault,
+				"position": int64(c.Position), "pk": c.PrimaryKey,
+			})
+		}
+		return out, nil
+	})
+	s.rpc.Handle("schema.routines", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		schema, err := argStr(req.Params, 2, "schema")
+		if err != nil {
+			return nil, err
+		}
+		supported, routines, err := s.eng.ListRoutines(ctx, token, connID, schema)
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		list := make([]any, 0, len(routines))
+		for _, r := range routines {
+			list = append(list, map[string]any{
+				"schema": r.Schema, "name": r.Name,
+				"kind": string(r.Kind), "signature": r.Signature,
+			})
+		}
+		// Capability absence is DATA (supported=false), never an error.
+		return map[string]any{"supported": supported, "routines": list}, nil
+	})
+
+	// --- workspaces ---
+	s.rpc.Handle("workspace.create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		name, err := argStr(req.Params, 1, "name")
+		if err != nil {
+			return nil, err
+		}
+		id, err := s.eng.CreateWorkspace(ctx, token, name, peerIP(req))
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		return id, nil
+	})
+	s.rpc.Handle("workspace.list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		views, err := s.eng.ListWorkspaces(ctx, token)
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		out := make([]any, 0, len(views))
+		for _, w := range views {
+			conns := make([]any, 0, len(w.Connections))
+			for _, c := range w.Connections {
+				conns = append(conns, map[string]any{
+					"id": c.ID, "name": c.Name, "engine": c.Engine,
+				})
+			}
+			out = append(out, map[string]any{
+				"id": w.ID, "name": w.Name, "created_at": w.CreatedAt,
+				"connections": conns,
+			})
+		}
+		return out, nil
+	})
+	s.rpc.Handle("workspace.rename", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		wsID, err := argInt(req.Params, 1, "workspace_id")
+		if err != nil {
+			return nil, err
+		}
+		name, err := argStr(req.Params, 2, "name")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.eng.RenameWorkspace(ctx, token, wsID, name, peerIP(req)))
+	})
+	s.rpc.Handle("workspace.delete", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		wsID, err := argInt(req.Params, 1, "workspace_id")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.eng.DeleteWorkspace(ctx, token, wsID, peerIP(req)))
+	})
+	s.rpc.Handle("workspace.attach", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		wsID, err := argInt(req.Params, 1, "workspace_id")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 2, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.eng.AttachConnection(ctx, token, wsID, connID, peerIP(req)))
+	})
+	s.rpc.Handle("workspace.detach", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		wsID, err := argInt(req.Params, 1, "workspace_id")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 2, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.eng.DetachConnection(ctx, token, wsID, connID, peerIP(req)))
+	})
 }
