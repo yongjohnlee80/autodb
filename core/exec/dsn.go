@@ -6,9 +6,11 @@ import (
 	"strings"
 
 	drvmysql "github.com/go-sql-driver/mysql"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yongjohnlee80/golib/dao"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 )
 
 // The tokenizer models one dialect per engine. Two mechanisms keep the
@@ -82,8 +84,40 @@ func ValidateDSN(engineName, dsn string) error {
 	}
 }
 
-// optionsSetsParam reports whether a libpq-style options string
-// ("-c name=value --name=value …") sets the named runtime parameter.
+// pgAfterConnectVerify returns a golib postgres.Option installing a pgxpool
+// AfterConnect hook: every PHYSICAL connection the pool establishes —
+// including replacements over the pool's lifetime — has its parsing mode
+// verified before it serves a single statement, and is discarded on
+// mismatch. This is the authoritative postgres grammar guarantee; it lets
+// statements run in plain autocommit so transaction-prohibited DDL stays
+// executable (ADR-0055 rev 4).
+func pgAfterConnectVerify() golibpg.Option {
+	return func(cfg *pgxpool.Config) {
+		prev := cfg.AfterConnect
+		cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+			if prev != nil {
+				if err := prev(ctx, conn); err != nil {
+					return err
+				}
+			}
+			var scs string
+			if err := conn.QueryRow(ctx, "SHOW standard_conforming_strings").Scan(&scs); err != nil {
+				return fmt.Errorf("exec: verifying standard_conforming_strings on new connection: %w", err)
+			}
+			if !strings.EqualFold(strings.TrimSpace(scs), "on") {
+				return fmt.Errorf("exec: connection has standard_conforming_strings=off, which changes string parsing the classifier relies on")
+			}
+			return nil
+		}
+	}
+}
+
+// optionsSetsParam is a BEST-EFFORT field matcher over a libpq-style options
+// string ("-c name=value --name=value …") — it does NOT implement libpq's
+// escaping grammar, so it exists only as a fast, clear failure at
+// creation time. The authoritative check is live per-connection
+// verification (pgAfterConnectVerify), which a smuggled setting cannot
+// evade (lector M4 r4 docs note).
 func optionsSetsParam(options, name string) bool {
 	fields := strings.Fields(options)
 	for i, f := range fields {

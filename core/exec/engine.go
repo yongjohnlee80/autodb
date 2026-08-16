@@ -309,12 +309,17 @@ func truncate(s string, max int) string {
 }
 
 // runQuery executes a read and fills Columns plus either a bounded page
-// (maxRows, More on truncation) or the onRow stream. On mysql/postgres the
-// statement runs inside a transaction — ONE pinned physical session — whose
-// grammar is verified first, because a pool-level check cannot speak for
-// the session a later statement lands on (ADR-0055 rev 3; lector M4 r3).
+// (maxRows, More on truncation) or the onRow stream.
+//
+// Per-physical-session grammar guarantees differ by engine (ADR-0055 rev 4):
+// postgres verifies every physical connection at establish time via the
+// pgxpool AfterConnect hook (pgAfterConnectVerify), so statements run in
+// plain autocommit — which keeps transaction-prohibited DDL executable;
+// mysql has no per-connect seam in database/sql, so each statement runs
+// inside a transaction (one pinned session) verified by verifyGrammarQ
+// first; sqlite's grammar is fixed.
 func (e *Engine) runQuery(ctx context.Context, target dao.DataConn, engineName, sqlText string, res *Result, onRow func([]any) error) (int64, error) {
-	if engineName == "sqlite" {
+	if engineName != "mysql" {
 		return e.queryOn(ctx, target, sqlText, res, onRow)
 	}
 	tx, err := target.Begin(ctx)
@@ -377,11 +382,14 @@ func (e *Engine) queryOn(ctx context.Context, q dao.Querier, sqlText string, res
 	return count, rows.Err()
 }
 
-// runExec executes a write/DDL statement, same-session-verified like
-// runQuery. (MySQL DDL implicitly commits inside the transaction; the
-// trailing COMMIT is then a harmless no-op.)
+// runExec executes a write/DDL statement, with the same per-engine session
+// guarantees as runQuery. Postgres runs in autocommit (AfterConnect-verified
+// connections) so VACUUM / CREATE DATABASE / CONCURRENTLY forms work; MySQL
+// pins a verified transaction — none of the accepted verbs are
+// transaction-prohibited there, and DDL's implicit commit makes the trailing
+// COMMIT a harmless no-op.
 func (e *Engine) runExec(ctx context.Context, target dao.DataConn, engineName, sqlText string, res *Result) error {
-	if engineName == "sqlite" {
+	if engineName != "mysql" {
 		return e.execOn(ctx, target, sqlText, res)
 	}
 	tx, err := target.Begin(ctx)

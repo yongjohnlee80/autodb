@@ -57,6 +57,13 @@ func TestEngine_PostgresTarget(t *testing.T) {
 	if res, err := f.eng.Execute(ctx, f.rootTok, connID, "DELETE FROM "+table+" WHERE id = 1", testIP); err != nil || res.Affected != 1 {
 		t.Errorf("delete = %+v, %v", res, err)
 	}
+	// Transaction-prohibited DDL must execute — the r3 tx-pinning regression
+	// pin (lector M4 r4): postgres refuses VACUUM inside a transaction block
+	// (SQLSTATE 25001); the AfterConnect-verified autocommit path runs it.
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, "VACUUM "+table, testIP); err != nil {
+		t.Errorf("VACUUM failed (tx-pinning regression?): %v", err)
+	}
+
 	// Dollar-quoted semicolons stay one statement.
 	if _, err := f.eng.Execute(ctx, f.rootTok, connID, "SELECT $x$; not a second statement $x$", testIP); err != nil {
 		t.Errorf("dollar-quote select: %v", err)
