@@ -859,3 +859,79 @@ func TestShutdownOverWire(t *testing.T) {
 		t.Fatalf("shutdown reply = %#v, want stopping:true", result)
 	}
 }
+
+// A denied statement must come back as a structured error the frontends
+// can render — a reader running DELETE is the case that looked silent in
+// M6 manual testing.
+func TestDeniedStatementReportsOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	if errVal, _ := c.call("exec.run", f.rootTok, f.connID,
+		"CREATE TABLE songs (id INTEGER PRIMARY KEY, title TEXT NOT NULL)"); errVal != nil {
+		t.Fatalf("scaffold: %#v", errVal)
+	}
+	if errVal, _ := c.call("auth.user_create", f.rootTok, "onlyreader", "reader-passphrase", "reader"); errVal != nil {
+		t.Fatalf("user_create: %#v", errVal)
+	}
+	errVal, result := c.call("auth.login", "onlyreader", "reader-passphrase")
+	if errVal != nil {
+		t.Fatalf("login: %#v", errVal)
+	}
+	tok := result.(map[string]any)["token"].(string)
+
+	// No grant at all: denied without disclosing the connection.
+	errVal, _ = c.call("exec.run_script", tok, f.connID, "DELETE FROM songs WHERE id = 1")
+	mustErr(t, errVal, rpc.CodeDenied)
+
+	// With a reader grant: SELECT runs, DELETE is still denied — and the
+	// denial carries a message, not an empty error.
+	if errVal, _ := c.call("auth.grant_add", f.rootTok, result.(map[string]any)["user"].(map[string]any)["id"], f.connID, "reader"); errVal != nil {
+		t.Fatalf("grant_add: %#v", errVal)
+	}
+	if errVal, _ := c.call("exec.run_script", tok, f.connID, "SELECT count(*) FROM songs"); errVal != nil {
+		t.Fatalf("reader select: %#v", errVal)
+	}
+	errVal, _ = c.call("exec.run_script", tok, f.connID, "DELETE FROM songs WHERE id = 1")
+	mustErr(t, errVal, rpc.CodeDenied)
+	if msg, _ := errVal.(map[string]any)["message"].(string); msg == "" {
+		t.Fatalf("denial carried no message: %#v", errVal)
+	}
+}
+
+// A multi-statement script runs every statement and returns the last
+// result; a failure mid-script says how many already ran.
+func TestRunScriptOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	if errVal, _ := c.call("exec.run", f.rootTok, f.connID,
+		"CREATE TABLE songs (id INTEGER PRIMARY KEY, title TEXT NOT NULL)"); errVal != nil {
+		t.Fatalf("scaffold: %#v", errVal)
+	}
+	errVal, result := c.call("exec.run_script", f.rootTok, f.connID,
+		"INSERT INTO songs (title) VALUES ('one'); SELECT title FROM songs ORDER BY id DESC")
+	if errVal != nil {
+		t.Fatalf("run_script: %#v", errVal)
+	}
+	m := result.(map[string]any)
+	if m["statements"] != int64(2) {
+		t.Fatalf("statements = %v, want 2", m["statements"])
+	}
+	res, ok := m["result"].(map[string]any)
+	if !ok {
+		t.Fatalf("no result from the last statement: %#v", m)
+	}
+	if len(res["rows"].([]any)) == 0 {
+		t.Fatalf("last statement returned no rows: %#v", res)
+	}
+
+	// A failure stops the script and reports the partial application.
+	errVal, _ = c.call("exec.run_script", f.rootTok, f.connID,
+		"INSERT INTO songs (title) VALUES ('two'); UPDATE songs SET title = 'x'")
+	mustErr(t, errVal, rpc.CodeStatementRejected)
+}

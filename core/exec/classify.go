@@ -125,7 +125,30 @@ func verbClass(word string) (Class, bool) {
 // rejected outright — its embedded mutation cannot be WHERE-guarded, so v1
 // does not run it (lector M4 must-fix #1).
 func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
+	st, _, err := scanScript(sqlText, backslashEscapes, false)
+	return st, err
+}
+
+// SplitStatements splits a script into its individual statements using the
+// SAME lexer Classify uses — quoting, dollar-quoting, nested and MySQL
+// executable comments, `--` disambiguation — because a splitter with its
+// own idea of where a string ends is a security bug, not a convenience.
+// Each returned statement is classified, authorized, WHERE-guarded and
+// audited on its own when executed; splitting changes how much you can
+// submit at once, never what the core will run.
+func SplitStatements(sqlText string, backslashEscapes bool) ([]string, error) {
+	_, parts, err := scanScript(sqlText, backslashEscapes, true)
+	return parts, err
+}
+
+// scanScript is the one tokenizer. With split=false it enforces the
+// one-statement rule (ErrMultiStatement) and returns the statement's
+// verdict; with split=true it records statement boundaries instead and
+// returns their texts.
+func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, []string, error) {
 	var st Statement
+	var parts []string
+	stmtStart := 0
 	var (
 		depth       int
 		searching   = true // still looking for the main verb
@@ -146,7 +169,18 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 
 	content := func() error {
 		if ended {
-			return ErrMultiStatement
+			if !split {
+				return ErrMultiStatement
+			}
+			// A new statement begins here: bank the previous one and
+			// reset the per-statement classification state.
+			if part := strings.TrimSpace(sqlText[stmtStart:i]); part != "" {
+				parts = append(parts, part)
+			}
+			stmtStart = i
+			ended, searching, inWith, inExplain = false, true, false, false
+			maxClass = ""
+			st = Statement{}
 		}
 		sawContent = true
 		return nil
@@ -166,7 +200,7 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 			// being wrongly commented out (lector M4 r2 must-fix #1).
 			if backslashEscapes && i+2 < n && !isSpace(sqlText[i+2]) {
 				if err := content(); err != nil {
-					return st, err
+					return st, parts, err
 				}
 				i++ // consume one '-' as an operator; keep scanning
 				continue
@@ -212,7 +246,7 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 				}
 			}
 			if level > 0 {
-				return st, fmt.Errorf("%w: unterminated block comment", ErrMalformedStatement)
+				return st, parts, fmt.Errorf("%w: unterminated block comment", ErrMalformedStatement)
 			}
 			i = j
 
@@ -222,20 +256,20 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 
 		case c == '\'' || c == '"' || c == '`':
 			if err := content(); err != nil {
-				return st, err
+				return st, parts, err
 			}
 			j, err := scanQuoted(sqlText, i, c, backslashEscapes)
 			if err != nil {
-				return st, err
+				return st, parts, err
 			}
 			i = j
 
 		case c == '$' && !backslashEscapes:
 			if err := content(); err != nil {
-				return st, err
+				return st, parts, err
 			}
 			if j, ok, err := scanDollarQuote(sqlText, i); err != nil {
-				return st, err
+				return st, parts, err
 			} else if ok {
 				i = j
 			} else {
@@ -244,14 +278,14 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 
 		case c == '(':
 			if err := content(); err != nil {
-				return st, err
+				return st, parts, err
 			}
 			depth++
 			i++
 
 		case c == ')':
 			if err := content(); err != nil {
-				return st, err
+				return st, parts, err
 			}
 			if depth > 0 {
 				depth--
@@ -266,7 +300,7 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 
 		case isWordStart(c):
 			if err := content(); err != nil {
-				return st, err
+				return st, parts, err
 			}
 			j := i + 1
 			for j < n && isWordChar(sqlText[j]) {
@@ -287,7 +321,7 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 				// A data-modifying verb below top level is a data-modifying
 				// CTE/subquery — reject (its mutation can't be guarded).
 				if depth > 0 && (cls == ClassWrite || cls == ClassDDL) {
-					return st, fmt.Errorf("%w: data-modifying subquery/CTE (%s at nesting depth %d)", ErrStatementUnsupported, word, depth)
+					return st, parts, fmt.Errorf("%w: data-modifying subquery/CTE (%s at nesting depth %d)", ErrStatementUnsupported, word, depth)
 				}
 				escalate(cls)
 			}
@@ -313,9 +347,9 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 						continue // CTE names, AS, RECURSIVE, column lists
 					}
 					if unsupportedVerbs[word] {
-						return st, fmt.Errorf("%w: %s (transaction control, session state, and PRAGMA have no safe meaning on pooled connections)", ErrStatementUnsupported, word)
+						return st, parts, fmt.Errorf("%w: %s (transaction control, session state, and PRAGMA have no safe meaning on pooled connections)", ErrStatementUnsupported, word)
 					}
-					return st, fmt.Errorf("%w: %s", ErrStatementUnsupported, word)
+					return st, parts, fmt.Errorf("%w: %s", ErrStatementUnsupported, word)
 				}
 				continue
 			}
@@ -325,23 +359,29 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 
 		default:
 			if err := content(); err != nil {
-				return st, err
+				return st, parts, err
 			}
 			i++
 		}
 	}
 
 	if execComment {
-		return st, fmt.Errorf("%w: unterminated executable comment", ErrMalformedStatement)
+		return st, parts, fmt.Errorf("%w: unterminated executable comment", ErrMalformedStatement)
 	}
 	if !sawContent {
-		return st, ErrEmptyStatement
+		return st, parts, ErrEmptyStatement
+	}
+	if split {
+		if part := strings.TrimSpace(sqlText[stmtStart:]); part != "" {
+			parts = append(parts, part)
+		}
+		return st, parts, nil
 	}
 	if searching {
-		return st, fmt.Errorf("%w: unable to classify the statement", ErrStatementUnsupported)
+		return st, parts, fmt.Errorf("%w: unable to classify the statement", ErrStatementUnsupported)
 	}
 	st.Class = maxClass
-	return st, nil
+	return st, parts, nil
 }
 
 // scanQuoted advances past a quoted region opened at s[i] and returns the

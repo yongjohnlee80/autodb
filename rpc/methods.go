@@ -300,6 +300,37 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.ChangePassphrase(ctx, token, oldPass, newPass, peerIP(req)))
 	})
+	// exec.run_script runs a multi-statement buffer sequentially and
+	// returns the LAST statement's result. The core splits with the
+	// classifier's own lexer and runs each statement through the normal
+	// guarded path — the wire adds nothing.
+	s.rpc.Handle("exec.run_script", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "connection_id")
+		if err != nil {
+			return nil, err
+		}
+		sqlText, err := argStr(req.Params, 2, "sql")
+		if err != nil {
+			return nil, err
+		}
+		out, xerr := s.eng.ExecuteScript(ctx, token, connID, sqlText, peerIP(req))
+		if xerr != nil {
+			return nil, wireErr(xerr)
+		}
+		reply := map[string]any{"statements": int64(out.Statements)}
+		if out.Last != nil {
+			reply["result"] = resultMap(out.Last)
+		}
+		return reply, nil
+	})
+
 	// history.list is the script-history read side (Objective 5/20). The
 	// CORE decides what the caller may see (admins everything, everyone
 	// else their own executions) — the wire just projects it.

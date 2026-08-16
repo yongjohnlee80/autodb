@@ -320,7 +320,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("CREATE TABLE songs (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
 	h.keys("jk") // escape chord
 	h.leader("r")
-	h.waitFor("DDL ack", "CREATE: ")
+	h.waitFor("DDL ack", "CREATE ok")
 
 	h.keys("ggVG") // select-all in the editor… then replace via insert
 	h.key(tuicore.KeyEscape)
@@ -332,7 +332,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("INSERT INTO songs (title) VALUES ('alpha'), ('beta')")
 	h.keys("jk")
 	h.leader("r")
-	h.waitFor("insert ack", "INSERT: 2 affected")
+	h.waitFor("insert ack", "INSERT ok — 2 row(s) affected")
 
 	h.keys("Vd") // clear the single line
 	h.keys("i")
@@ -341,7 +341,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.leader("r")
 	h.waitFor("result rows", "alpha")
 	h.waitFor("result rows", "beta")
-	h.waitFor("result summary", "SELECT: 2 row(s)")
+	h.waitFor("result summary", "SELECT ok — 2 row(s)")
 
 	// 5b. JSON toggle renders the same rows as a JSON document (the
 	//     BufferView must be mounted BEFORE its writer is fed).
@@ -428,6 +428,15 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitCursorBG("explorer refocused", cyan)
 	h.ctrl('l')
 
+	// 5g. TWO statements in one buffer: both run, the LAST result shows.
+	h.keys("Vd")
+	h.keys("i")
+	h.keys("INSERT INTO songs (title) VALUES ('gamma'); SELECT title FROM songs ORDER BY id")
+	h.keys("jk")
+	h.leader("r")
+	h.waitFor("script summary", "2 statements")
+	h.waitFor("last result shown", "gamma")
+
 	// 6. The WHERE-less guard surfaces as a structured status message.
 	h.keys("Vd")
 	h.keys("i")
@@ -507,7 +516,11 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("history records the user", "root")
 	h.waitFor("history records the connection", "demo")
 	h.key(tuicore.KeyEnter)
-	h.waitFor("full script shown", "SELECT id, title FROM songs")
+	// Which row is newest depends on millisecond-resolution timestamps,
+	// so assert what IS guaranteed: the detail float opened, titled with
+	// the run's identity, showing one of this session's scripts.
+	h.waitFor("detail float titled", "· root ·")
+	h.waitFor("full script shown", "songs")
 	h.key(tuicore.KeyEscape)
 	h.key(tuicore.KeyEscape)
 

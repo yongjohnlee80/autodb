@@ -95,7 +95,7 @@ func (g *manager[T]) Reload() {
 		rows, err := load(c, bound)
 		if err != nil {
 			msg := WireErrorMessage(err)
-			return managerReload{gen: bound.Gen(), apply: func() { g.model.setStatus(msg) }}, nil
+			return managerReload{gen: bound.Gen(), apply: func() { g.model.setError(msg) }}, nil
 		}
 		return managerReload{gen: bound.Gen(), apply: func() {
 			if seq < g.applied {
@@ -153,9 +153,9 @@ func managerCall[T any](g *manager[T], what string, fn func(context.Context, *Bo
 		err := fn(c, bound)
 		return managerReload{gen: bound.Gen(), apply: func() {
 			if err != nil {
-				g.model.setStatus(what + ": " + WireErrorMessage(err))
+				g.model.setError(what + ": " + WireErrorMessage(err))
 			} else {
-				g.model.setStatus(what + ": ok")
+				g.model.setOK(what + ": ok")
 				g.Reload()
 				g.model.explorer.Reload()
 			}

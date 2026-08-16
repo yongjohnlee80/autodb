@@ -24,13 +24,13 @@ import (
 // helloing an old server must be REFUSED at the handshake, not surprised
 // by method-not-found (ADR-0057 §7). The server speaks exactly one
 // protocol version; there is no negotiation.
-// Protocol 3 added history.list and sys.shutdown. BUMP THIS whenever the
+// Protocol 4 added exec.run_script (3 added history.list and sys.shutdown). BUMP THIS whenever the
 // verb surface changes: the handshake is what tells a NEWER frontend that
 // it is talking to an OLDER server (the shared server outlives frontends
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 3
+const Protocol int64 = 4
 
 // Session keys the gate and the hello handler share.
 const (

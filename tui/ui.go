@@ -51,6 +51,7 @@ type Model struct {
 	zoomed            bool
 	floats            []openFloatRef
 	statusMsg         string
+	statusKind        statusKind
 	running           bool
 	connecting        bool   // a connectTask is in flight; suppress duplicates
 	authSeq           uint64 // monotonic authentication-attempt identities
@@ -702,7 +703,18 @@ func (m *Model) zoomToggle() {
 // --- status bar -------------------------------------------------------------------
 
 func (m *Model) setStatus(msg string) {
-	m.statusMsg = msg
+	m.statusMsg, m.statusKind = msg, statusInfo
+	m.refreshStatus()
+}
+
+// setOK / setError report an outcome, coloured so it cannot be missed.
+func (m *Model) setOK(msg string) {
+	m.statusMsg, m.statusKind = msg, statusOK
+	m.refreshStatus()
+}
+
+func (m *Model) setError(msg string) {
+	m.statusMsg, m.statusKind = msg, statusError
 	m.refreshStatus()
 }
 
@@ -791,7 +803,35 @@ func (m *Model) refreshStatus() {
 	}
 	m.status.SetLeft(left)
 	m.status.SetCenter(mid)
-	m.status.SetRight(right)
+	switch m.statusKind {
+	case statusOK:
+		m.status.SetRight(right, statusOKStyle)
+	case statusError:
+		m.status.SetRight(right, statusErrorStyle)
+	default:
+		m.status.SetRight(right)
+	}
+}
+
+// execSummary states what an execution actually did.
+func execSummary(res *ExecResult) string {
+	if res == nil {
+		return "ok"
+	}
+	prefix := ""
+	if res.Statements > 1 {
+		prefix = fmt.Sprintf("%d statements ⋅ ", res.Statements)
+	}
+	if len(res.Columns) == 0 {
+		return fmt.Sprintf("%s%s ok — %d row(s) affected in %s",
+			prefix, strings.ToUpper(res.Verb), res.Affected, res.Duration)
+	}
+	line := fmt.Sprintf("%s%s ok — %d row(s) in %s",
+		prefix, strings.ToUpper(res.Verb), len(res.Rows), res.Duration)
+	if res.More {
+		line += " (more truncated)"
+	}
+	return line
 }
 
 // noteConnFromNode tracks the active workspace/connection as the explorer
@@ -907,12 +947,11 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 			return true // result of a superseded connection
 		}
 		if v.err != nil {
-			m.setStatus("error: " + WireErrorMessage(v.err))
+			m.setError(WireErrorMessage(v.err))
 			return true
 		}
-		m.statusMsg = ""
 		m.results.Show(v.res)
-		m.refreshStatus()
+		m.setOK(execSummary(v.res))
 		return true
 	case noteLoaded:
 		if v.gen != m.noteGen {
@@ -1090,6 +1129,23 @@ const (
 	managerWidth = 96
 	hintWidth    = 56
 	historyWidth = 110
+)
+
+// Status severities (Johno, M6 manual testing): an outcome the user
+// asked for must ANNOUNCE itself. A refused DELETE that only greys a
+// line at the far right reads as "nothing happened" — which is exactly
+// how a permission denial presented.
+type statusKind uint8
+
+const (
+	statusInfo statusKind = iota
+	statusOK
+	statusError
+)
+
+var (
+	statusOKStyle    = style.New().Background(style.ANSI(2)).Foreground(style.ANSI(15)).Bold(true)
+	statusErrorStyle = style.New().Background(style.ANSI(1)).Foreground(style.ANSI(15)).Bold(true)
 )
 
 // cursorStyle picks the fill for a panel's focus state.

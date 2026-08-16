@@ -594,23 +594,34 @@ func (b *Bound) Routines(ctx context.Context, connID int64, schema string) (supp
 
 // ExecResult is one exec.run outcome.
 type ExecResult struct {
-	Verb     string
-	Class    string
-	Columns  []string
-	Rows     [][]any
-	More     bool
-	Affected int64
-	Duration time.Duration
+	// Statements is how many ran (a script may hold several).
+	Statements int64
+	Verb       string
+	Class      string
+	Columns    []string
+	Rows       [][]any
+	More       bool
+	Affected   int64
+	Duration   time.Duration
 }
 
+// Run executes the buffer as a SCRIPT: one statement or many, run in
+// order server-side, with the last statement's result coming back.
 func (b *Bound) Run(ctx context.Context, connID int64, sql string) (*ExecResult, error) {
-	res, err := b.authed(ctx, "exec.run", connID, sql)
+	res, err := b.authed(ctx, "exec.run_script", connID, sql)
 	if err != nil {
 		return nil, err
 	}
-	m, _ := res.(map[string]any)
+	outer, _ := res.(map[string]any)
+	statements := mI(outer, "statements")
+	m, ok := outer["result"].(map[string]any)
+	if !ok {
+		// Every statement was a write with no rows to show.
+		return &ExecResult{Verb: "OK", Statements: statements}, nil
+	}
 	out := &ExecResult{
-		Verb: mS(m, "verb"), Class: mS(m, "class"),
+		Statements: statements,
+		Verb:       mS(m, "verb"), Class: mS(m, "class"),
 		More: mB(m, "more"), Affected: mI(m, "affected"),
 		Duration: time.Duration(mI(m, "duration_ms")) * time.Millisecond,
 	}
