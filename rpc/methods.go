@@ -300,6 +300,38 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.ChangePassphrase(ctx, token, oldPass, newPass, peerIP(req)))
 	})
+	// history.list is the script-history read side (Objective 5/20). The
+	// CORE decides what the caller may see (admins everything, everyone
+	// else their own executions) — the wire just projects it.
+	s.rpc.Handle("history.list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		limit, err := argInt(req.Params, 1, "limit")
+		if err != nil {
+			return nil, err
+		}
+		rows, herr := s.eng.ListHistory(ctx, token, int(limit))
+		if herr != nil {
+			return nil, wireErr(herr)
+		}
+		out := make([]any, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, map[string]any{
+				"id": r.ID, "user_id": r.UserID, "user": r.User,
+				"connection_id": r.ConnID, "connection": r.Conn, "ip": r.IP,
+				"script": r.Script, "started_at": r.StartedAt.Format(time.RFC3339),
+				"duration_ms": r.Duration.Milliseconds(), "row_count": r.RowCount,
+				"status": r.Status, "error": r.Error,
+			})
+		}
+		return out, nil
+	})
+
 	// sys.shutdown drains this server (ADR-0056 §3: the shared server
 	// outlives its frontends, so restarting it needs an authorized
 	// remote path — a rebuilt binary otherwise keeps serving from the

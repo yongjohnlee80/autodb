@@ -364,6 +364,38 @@ func (b *Bound) Logout(ctx context.Context) error {
 	return err
 }
 
+// HistoryRow is one recorded execution (script history).
+type HistoryRow struct {
+	User      string
+	Conn      string
+	IP        string
+	Script    string
+	StartedAt string
+	Duration  time.Duration
+	RowCount  int64
+	Status    string
+	Error     string
+}
+
+func (b *Bound) History(ctx context.Context, limit int64) ([]HistoryRow, error) {
+	res, err := b.authed(ctx, "history.list", limit)
+	if err != nil {
+		return nil, err
+	}
+	var out []HistoryRow
+	for _, row := range asList(res) {
+		m, _ := row.(map[string]any)
+		out = append(out, HistoryRow{
+			User: mS(m, "user"), Conn: mS(m, "connection"), IP: mS(m, "ip"),
+			Script: mS(m, "script"), StartedAt: mS(m, "started_at"),
+			Duration: time.Duration(mI(m, "duration_ms")) * time.Millisecond,
+			RowCount: mI(m, "row_count"), Status: mS(m, "status"),
+			Error: mS(m, "error"),
+		})
+	}
+	return out, nil
+}
+
 // ShutdownServer asks the connected server to drain and exit (admin
 // only). The disconnect watcher then drives the reconnect, which spawns
 // a fresh server when one is configured — that is the restart.

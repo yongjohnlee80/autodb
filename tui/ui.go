@@ -66,7 +66,12 @@ type Model struct {
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
 func New(session *Session, notes *NoteStore, quit func()) *Model {
 	m := &Model{session: session, notes: notes, quit: quit}
-	m.editor = widget.NewEditor()
+	m.editor = widget.NewEditor(widget.WithEditorStyles(widget.TextInputStyles{
+		// The default TokenSecondary selection washed out against the
+		// editor text (Johno, M6 manual testing) — same cyan-on-black
+		// contract as every other cursor in the app.
+		Selection: cursorRowStyle,
+	}))
 	m.results = newResultsPanel(m)
 	m.explorer = newExplorer(m)
 
@@ -120,6 +125,7 @@ func (m *Model) Init(ctx *tui.Context) {
 	})
 	tui.SubscribeScoped(ctx, func(widget.SplitZoomEvent) { m.MarkDirtyAll() })
 
+	m.refreshQueryTitle()
 	m.setStatus("connecting to " + m.session.addr + "…")
 	m.connectTask()
 }
@@ -266,6 +272,7 @@ func (m *Model) resetServerUI() {
 	m.explorer.Clear()
 	m.results.Clear()
 	m.activeWs, m.activeConn, m.activeConnNm = 0, 0, ""
+	m.refreshQueryTitle()
 	m.hadAuth = false
 	m.refreshStatus()
 }
@@ -452,7 +459,7 @@ type noteLoaded struct {
 func (m *Model) openNote(wsID int64, name string) {
 	if m.noteDirty && m.curNote != nil {
 		cur := m.curNote.Name
-		m.openLeader([]leaderEntry{
+		m.openLeader("unsaved changes in "+cur, []leaderEntry{
 			{'s', "save " + cur + ", then open", func() {
 				m.saveNote()
 				if !m.noteDirty { // a conflict float keeps it dirty; open aborts
@@ -517,6 +524,7 @@ func (m *Model) saveNote() {
 	case err == nil:
 		m.noteDirty = false
 		m.setStatus("saved " + m.curNote.Name)
+		m.explorer.RefreshNotes(m.curNote.WorkspaceID) // the file list changed
 		m.refreshStatus()
 	case err == ErrNoteConflict:
 		m.openConflict(body)
@@ -546,6 +554,7 @@ func (m *Model) saveNoteAs(wsID int64, body string) {
 		m.curNote = n
 		m.noteDirty = false
 		m.setStatus("saved " + n.Name)
+		m.explorer.RefreshNotes(wsID) // a new file: the explorer shows it now
 		m.refreshStatus()
 		return true, ""
 	})
@@ -553,7 +562,7 @@ func (m *Model) saveNoteAs(wsID int64, body string) {
 
 func (m *Model) openConflict(body string) {
 	note := m.curNote
-	m.openLeader([]leaderEntry{
+	m.openLeader(note.Name+" changed on disk", []leaderEntry{
 		{'o', "overwrite the on-disk note", func() {
 			fresh, _, err := m.notes.Load(note.WorkspaceID, note.Name)
 			if err != nil {
@@ -684,6 +693,66 @@ func (m *Model) setStatus(msg string) {
 	m.refreshStatus()
 }
 
+// refreshQueryTitle names the connection the query will RUN AGAINST —
+// with two connections in a workspace, the target must never be a guess
+// (Johno, M6 manual testing).
+func (m *Model) refreshQueryTitle() {
+	title := "query — no connection (SPC C selects one)"
+	if m.activeConnNm != "" {
+		title = "query → " + m.activeConnNm
+	}
+	m.editorBox.SetTitle(title)
+}
+
+// openConnPicker lists the connections available in the active workspace
+// (all accessible ones when no workspace is selected) and switches the
+// query target to the highlighted row — no typing.
+func (m *Model) openConnPicker() {
+	wsID := m.activeWs
+	bound := m.session.Bind()
+	m.setStatus("loading connections…")
+	m.ctx.Go(func(c context.Context) (any, error) {
+		var conns []ConnInfo
+		var err error
+		if wsID != 0 {
+			var wss []WorkspaceInfo
+			wss, err = bound.Workspaces(c)
+			for _, w := range wss {
+				if w.ID == wsID {
+					conns = w.Connections
+					break
+				}
+			}
+		}
+		if err == nil && len(conns) == 0 {
+			conns, err = bound.Connections(c)
+		}
+		return managerReload{gen: bound.Gen(), apply: func() {
+			if err != nil {
+				m.setStatus("connections: " + WireErrorMessage(err))
+				return
+			}
+			if len(conns) == 0 {
+				m.setStatus("no connections yet — SPC c adds one")
+				return
+			}
+			m.statusMsg = ""
+			m.showConnPicker(conns)
+		}}, nil
+	})
+}
+
+func (m *Model) showConnPicker(conns []ConnInfo) {
+	p := newConnPicker(m, conns)
+	p.float = m.openFloat("connection for this query", p, 60)
+}
+
+func (m *Model) setActiveConn(c ConnInfo) {
+	m.activeConn, m.activeConnNm = c.ID, c.Name
+	m.refreshQueryTitle()
+	m.setStatus("query connection: " + c.Name)
+}
+
 func (m *Model) refreshStatus() {
 	left := "-- " + m.editor.Mode().String() + " --"
 	mid := ""
@@ -731,6 +800,7 @@ func (m *Model) noteConnFromNode(id string) {
 			if id, err := strconv.ParseInt(parts[2], 10, 64); err == nil && id != m.activeConn {
 				m.activeConn = id
 				m.activeConnNm = m.explorer.ConnName(id)
+				m.refreshQueryTitle()
 				m.refreshStatus()
 			}
 		}
@@ -739,6 +809,7 @@ func (m *Model) noteConnFromNode(id string) {
 			if id, err := strconv.ParseInt(parts[1], 10, 64); err == nil && id != m.activeConn {
 				m.activeConn = id
 				m.activeConnNm = m.explorer.ConnName(id)
+				m.refreshQueryTitle()
 				m.refreshStatus()
 			}
 		}
@@ -841,6 +912,7 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 		m.curNote = v.note
 		m.noteDirty = false
 		m.editor.SetValue(v.body)
+		m.explorer.RefreshNotes(v.note.WorkspaceID) // a brand-new note appears
 		m.ctx.FocusComponent(m.editor)
 		m.refreshStatus()
 		return true
@@ -946,9 +1018,11 @@ func (m *Model) leaderEntries() []leaderEntry {
 		{'t', "focus results", func() { m.focusPane(m.results) }},
 		{'n', "new note", m.newNote},
 		{'s', "save note", m.saveNote},
+		{'C', "select the query connection", m.openConnPicker},
 		{'c', "connections…", m.openConnManager},
 		{'w', "workspaces…", m.openWorkspaceManager},
 		{'u', "users…", m.openUserManager},
+		{'H', "script history…", m.openHistory},
 		{'g', "refresh explorer", m.explorer.Reload},
 		{'L', "login / switch user", m.openLogin},
 		{'x', connLabel, connRun},
@@ -962,7 +1036,7 @@ func (m *Model) leaderEntries() []leaderEntry {
 	}
 }
 
-func (m *Model) openLeaderMenu() { m.openLeader(m.leaderEntries()) }
+func (m *Model) openLeaderMenu() { m.openLeader("SPC — commands", m.leaderEntries()) }
 
 // openHelp renders the binding table — the SAME data the leader executes —
 // plus the root-level keys (ADR-0057 §2/§8).
@@ -980,6 +1054,8 @@ func (m *Model) openHelp() {
 	sb.WriteString("  Ctrl-w z       zoom focused pane\n")
 	sb.WriteString("  Ctrl-q         quit (q quits too when nothing consumes it)\n")
 	sb.WriteString("  SPC X          restart the server (picks up a rebuilt binary)\n")
+	sb.WriteString("  SPC C          choose which connection the query runs against\n")
+	sb.WriteString("  SPC H          script history (who ran what, when)\n")
 	sb.WriteString("\neditor: vim Normal/Insert/Visual, jk = Esc\n")
 	sb.WriteString("explorer: hjkl navigate, l expands, Enter scaffolds a table\n")
 	sb.WriteString("results: v or Enter inspects the selected row\n")
@@ -1000,6 +1076,7 @@ var (
 const (
 	managerWidth = 96
 	hintWidth    = 56
+	historyWidth = 110
 )
 
 // cursorStyle picks the fill for a panel's focus state.

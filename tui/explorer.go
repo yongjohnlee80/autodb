@@ -121,6 +121,13 @@ func (e *explorer) HandleEvent(ev tui.Event) bool {
 				return true
 			}
 		}
+		// `d` deletes the note under the cursor (confirmed).
+		if k.Text == "d" {
+			if n, sel := e.tree.Selected(); sel && strings.HasPrefix(n.ID(), "note:") {
+				e.confirmDeleteNote(n.ID())
+				return true
+			}
+		}
 		// Track the active connection from the cursor as the user navigates.
 		consumed := e.tree.HandleEvent(ev)
 		if consumed {
@@ -146,6 +153,19 @@ func (e *explorer) Reload() {
 		orphans, _ := e.model.notes.ListWorkspaceDirs()
 		return wsLoaded{gen: bound.Gen(), seq: seq, wss: wss, noteDirs: orphans}, nil
 	})
+}
+
+// RefreshNotes reloads a workspace's notes folder so a file written (or
+// deleted) shows up immediately — a save used to leave the explorer
+// stale, so you could not tell whether the note existed (Johno, M6
+// manual testing). Expanded folders reload now; collapsed ones simply
+// drop their cache.
+func (e *explorer) RefreshNotes(wsID int64) {
+	if wsID == 0 {
+		return
+	}
+	e.tree.Reload(fmt.Sprintf("notes:%d", wsID))
+	e.tree.Reload(fmt.Sprintf("detached:%d", wsID))
 }
 
 // Clear drops every server-derived node and cache (instance change —
@@ -405,13 +425,41 @@ func (e *explorer) addAt(id string) bool {
 		if ws == 0 {
 			return false
 		}
-		e.model.openLeader([]leaderEntry{
+		e.model.openLeader("add to this workspace", []leaderEntry{
 			{'c', "add a connection", func() { e.model.addConnectionToWorkspace(ws) }},
 			{'n', "add a note", func() { e.model.activeWs = ws; e.model.newNote() }},
 		})
 		return true
 	}
 	return false
+}
+
+// confirmDeleteNote asks before removing a local note file.
+func (e *explorer) confirmDeleteNote(id string) {
+	parts := strings.SplitN(id, ":", 3)
+	if len(parts) != 3 {
+		return
+	}
+	wsID, _ := strconv.ParseInt(parts[1], 10, 64)
+	name := decSeg(parts[2])
+	e.model.openLeader("delete this note?", []leaderEntry{
+		{'y', "delete " + name, func() {
+			if err := e.model.notes.Delete(wsID, name); err != nil {
+				e.model.setStatus("delete failed: " + err.Error())
+				return
+			}
+			if e.model.curNote != nil && e.model.curNote.WorkspaceID == wsID &&
+				e.model.curNote.Name == name {
+				// The open note is gone: the buffer is no longer a note.
+				e.model.curNote = nil
+				e.model.noteDirty = false
+			}
+			e.model.setStatus("deleted " + name)
+			e.RefreshNotes(wsID)
+			e.model.refreshStatus()
+		}},
+		{'n', "keep it", func() {}},
+	})
 }
 
 // activate handles an activation (Enter; leaves via the Tree's own event,

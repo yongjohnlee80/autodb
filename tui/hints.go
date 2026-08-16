@@ -50,7 +50,7 @@ func (m *Model) currentHints() (title string, hs []keyHint) {
 		return "explorer", []keyHint{
 			{"j/k", "down / up"}, {"l", "expand"}, {"h", "collapse / parent"},
 			{"g/G", "first / last"}, {"Enter", "scaffold a query for the table"},
-			{"a", "add a connection / note here"},
+			{"a", "add a connection / note here"}, {"d", "delete the note"},
 			{"/", "search"}, {"n/N", "next / previous match"},
 			{"SPC", "commands"},
 		}

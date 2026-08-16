@@ -245,10 +245,13 @@ func drawTo(s tui.Surface, x, y int, text string, st style.Style) {
 	}
 }
 
-// openLeader shows the leader menu.
-func (m *Model) openLeader(entries []leaderEntry) {
+// openLeader shows a which-key style chooser. The TITLE matters: these
+// floats are also used for confirmations and conflict choices, and
+// titling every one of them "SPC — commands" told the user nothing
+// (and made two very different prompts indistinguishable).
+func (m *Model) openLeader(title string, entries []leaderEntry) {
 	lm := &leaderMenu{entries: entries}
-	lm.float = m.openFloat("SPC — commands", lm, 48)
+	lm.float = m.openFloat(title, lm, 48)
 }
 
 // inspectFloat shows one result row as a navigable CELL list (ADR-0057

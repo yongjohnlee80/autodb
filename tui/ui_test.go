@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -66,6 +67,34 @@ type uiHarness struct {
 	app       *tuicore.App
 	done      chan error
 	notesRoot string
+	trace     *traceLog
+}
+
+// traceLog buffers runtime trace records for failure diagnostics.
+type traceLog struct {
+	mu   sync.Mutex
+	recs []string
+}
+
+func (l *traceLog) add(ev tuicore.TraceEvent) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	line := ev.Kind.String() + " node=" + ev.Comp
+	if ev.PrevComp != "" {
+		line += " prev=" + ev.PrevComp
+	}
+	if ev.Detail != "" {
+		line += " (" + ev.Detail + ")"
+	}
+	l.recs = append(l.recs, line)
+}
+
+// tail returns the last n records, newest last.
+func (l *traceLog) tail(n int) string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	from := max(len(l.recs)-n, 0)
+	return strings.Join(l.recs[from:], "\n")
 }
 
 func startUI(t *testing.T, addr string) *uiHarness {
@@ -81,9 +110,14 @@ func startUI(t *testing.T, addr string) *uiHarness {
 	ctx, cancel := context.WithCancel(context.Background())
 	model := tuiapp.New(session, notes, cancel)
 	tb := tuicore.NewTestBackend(110, 32)
-	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(tb), tuicore.WithMinFrameInterval(0))
+	// Runtime tracing: interactive failures are timing failures, and the
+	// trace is the evidence (who has focus, what consumed the key).
+	tr := &traceLog{}
+	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(tb),
+		tuicore.WithMinFrameInterval(0), tuicore.WithTrace(tr.add))
 
-	h := &uiHarness{t: t, tb: tb, app: app, done: make(chan error, 1), notesRoot: notesRoot}
+	h := &uiHarness{t: t, tb: tb, app: app, done: make(chan error, 1),
+		notesRoot: notesRoot, trace: tr}
 	go func() { h.done <- app.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
@@ -111,7 +145,8 @@ func (h *uiHarness) waitFor(what, sub string) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	h.t.Fatalf("waiting for %s: %q never appeared.\nscreen:\n%s", what, sub, h.screen())
+	h.t.Fatalf("waiting for %s: %q never appeared.\nscreen:\n%s\n\nlast runtime trace:\n%s",
+		what, sub, h.screen(), h.trace.tail(40))
 }
 
 // waitGone polls until a substring DISAPPEARS from the virtual screen.
@@ -125,6 +160,18 @@ func (h *uiHarness) waitGone(what, sub string) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	h.t.Fatalf("waiting for %s to disappear: %q still shown.\nscreen:\n%s", what, sub, h.screen())
+}
+
+// leader invokes a leader binding and returns only once the menu has
+// closed. Leader labels intentionally mirror the titles of the floats
+// they open ("script history…" / "script history"), so asserting right
+// after the keypress can match the MENU and race ahead of the float.
+func (h *uiHarness) leader(binding string) {
+	h.t.Helper()
+	h.key(' ')
+	h.waitFor("leader menu", "SPC — commands")
+	h.keys(binding)
+	h.waitGone("leader menu", "SPC — commands")
 }
 
 func (h *uiHarness) keys(s string) {
@@ -208,9 +255,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("login completion", "logged in as root")
 
 	// 2. Create a connection through the manager float (SPC c → a).
-	h.key(' ')
-	h.waitFor("leader menu", "connections…")
-	h.keys("c")
+	h.leader("c")
 	h.waitFor("connections manager", "a:add")
 	h.keys("a")
 	h.waitFor("connection form", "new connection")
@@ -230,17 +275,14 @@ func TestUIFullFlow(t *testing.T) {
 
 	// 2b. The users manager shows its full key list (it was truncated at
 	//     "g:gr…" before the float widened and the footer wrapped).
-	h.key(' ')
-	h.keys("u")
+	h.leader("u")
 	h.waitFor("users manager", "a:add")
 	h.waitFor("full key list", "g:grant on conn")
 	h.waitFor("reset key", "p:reset passphrase")
 	h.key(tuicore.KeyEscape)
 
 	// 3. Create a workspace and attach the connection (server-side ids 1).
-	h.key(' ')
-	h.waitFor("leader menu", "workspaces…")
-	h.keys("w")
+	h.leader("w")
 	h.waitFor("workspace manager", "a:add")
 	h.keys("a")
 	h.waitFor("workspace form", "new workspace")
@@ -250,8 +292,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("workspace row", "main")
 	h.key(tuicore.KeyEscape)
 
-	h.key(' ')
-	h.keys("c")
+	h.leader("c")
 	h.waitFor("connections manager", "a:add")
 	h.waitFor("connection row loaded", "demo") // rows land async; 'w' needs a selection
 	h.keys("w")                                // attach selected conn to a workspace
@@ -267,22 +308,18 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("explorer", "main")
 	h.key(0x03) // no-op guard; keep event flow moving
 	// Focus the explorer pane and navigate: ws → connections → conn.
-	h.key(' ')
-	h.waitFor("leader menu", "focus explorer")
-	h.keys("e")
+	h.leader("e")
 	h.keys("l")  // expand ws (pre-assembled: shows connections/notes)
 	h.keys("jl") // onto "connections", expand (already loaded)
 	h.keys("j")  // onto the demo connection
 	h.waitFor("active connection", "demo")
 
 	// 5. Write a query with the vim editor and run it via the leader.
-	h.key(' ')
-	h.keys("q") // focus query editor
-	h.keys("i") // insert mode
+	h.leader("q") // focus query editor
+	h.keys("i")   // insert mode
 	h.keys("CREATE TABLE songs (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
 	h.keys("jk") // escape chord
-	h.key(' ')
-	h.keys("r")
+	h.leader("r")
 	h.waitFor("DDL ack", "CREATE: ")
 
 	h.keys("ggVG") // select-all in the editor… then replace via insert
@@ -294,24 +331,21 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("i")
 	h.keys("INSERT INTO songs (title) VALUES ('alpha'), ('beta')")
 	h.keys("jk")
-	h.key(' ')
-	h.keys("r")
+	h.leader("r")
 	h.waitFor("insert ack", "INSERT: 2 affected")
 
 	h.keys("Vd") // clear the single line
 	h.keys("i")
 	h.keys("SELECT id, title FROM songs ORDER BY id")
 	h.keys("jk")
-	h.key(' ')
-	h.keys("r")
+	h.leader("r")
 	h.waitFor("result rows", "alpha")
 	h.waitFor("result rows", "beta")
 	h.waitFor("result summary", "SELECT: 2 row(s)")
 
 	// 5b. JSON toggle renders the same rows as a JSON document (the
 	//     BufferView must be mounted BEFORE its writer is fed).
-	h.key(' ')
-	h.keys("j")
+	h.leader("j")
 	h.waitFor("json document", "\"title\": \"alpha\"")
 	// The JSON view is a read-only vim VIEWER: motions and yank work,
 	// edits are refused.
@@ -320,8 +354,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("Vy") // visual-line yank into the editor register
 	h.keys("ix") // insert would mutate — refused
 	h.waitFor("json intact", "\"title\": \"alpha\"")
-	h.key(' ')
-	h.keys("j")
+	h.leader("j")
 	h.waitFor("back to table", "beta")
 
 	// 5c. Directional pane motion: Ctrl-j moves DOWN into the results
@@ -400,8 +433,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("i")
 	h.keys("UPDATE songs SET title = 'x'")
 	h.keys("jk")
-	h.key(' ')
-	h.keys("r")
+	h.leader("r")
 	h.waitFor("guard refusal", "WHERE clause is blocked")
 
 	// 6b. SPC s with NO note open saves the BUFFER under a new name — it
@@ -411,8 +443,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("i")
 	h.keys("-- unsaved buffer")
 	h.keys("jk")
-	h.key(' ')
-	h.keys("s")
+	h.leader("s")
 	h.waitFor("save-as prompt", "save note as")
 	h.keys("frombuffer")
 	h.key(tuicore.KeyEnter)
@@ -423,6 +454,23 @@ func TestUIFullFlow(t *testing.T) {
 		t.Fatalf("SPC s wrote %q, want the editor buffer", string(body))
 	}
 
+	// 6b-2. The saved note appears in the explorer WITHOUT a manual
+	//       refresh, and `d` deletes it (confirmed).
+	h.ctrl('h')
+	h.keys("g")
+	h.keys("jjj") // workspace → connections → demo → notes
+	h.keys("l")   // expand the notes folder
+	// Anchor on the TREE row (the leaf bullet): the bare filename also
+	// appears in the status bar, which would pass this wait early.
+	h.waitFor("saved note listed", "· frombuffer.sql")
+	h.keys("j") // onto the note
+	h.keys("d")
+	h.waitFor("delete confirm", "delete frombuffer.sql")
+	h.keys("y")
+	h.waitFor("deleted", "deleted frombuffer.sql")
+	h.waitGone("note gone from the explorer", "· frombuffer.sql")
+	h.ctrl('l')
+
 	// 6c. The explorer's `a` adds a note under a workspace's notes folder.
 	h.ctrl('h')
 	h.keys("g")   // first row: the workspace
@@ -432,10 +480,33 @@ func TestUIFullFlow(t *testing.T) {
 	h.key(tuicore.KeyEscape)
 	h.ctrl('l')
 
+	// 6d. SPC C picks the query connection from a list, and the query
+	//     panel names the target.
+	h.leader("C")
+	// Wait for content ONLY the picker renders. Waiting on its title used
+	// to pass against the leader menu's identically-worded entry, so the
+	// test pressed Enter before the float existed — the runtime trace
+	// showed the key consumed by nobody, then the float opening.
+	h.waitFor("connection picker", "(sqlite, id 1)")
+	h.key(tuicore.KeyEnter)
+	h.waitFor("target adopted", "query connection: demo")
+	h.waitFor("query panel names the target", "query → demo")
+
+	// 6e. Script history: every execution above was recorded — who ran
+	//     what, when. The script is ellipsed in the table and Enter opens
+	//     it in full.
+	h.leader("H")
+	h.waitFor("history float", "script history")
+	h.waitFor("history records the user", "root")
+	h.waitFor("history records the connection", "demo")
+	h.key(tuicore.KeyEnter)
+	h.waitFor("full script shown", "SELECT id, title FROM songs")
+	h.key(tuicore.KeyEscape)
+	h.key(tuicore.KeyEscape)
+
 	// 7. Notes: create, save, external clobber → conflict float → save-as
 	//    preserves the EDITED body under the new name (no data loss).
-	h.key(' ')
-	h.keys("n")
+	h.leader("n")
 	h.waitFor("note form", "new note")
 	h.keys("scratch")
 	h.key(tuicore.KeyEnter)
@@ -443,8 +514,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("i")
 	h.keys("-- v1")
 	h.keys("jk")
-	h.key(' ')
-	h.keys("s")
+	h.leader("s")
 	h.waitFor("note saved", "saved scratch.sql")
 
 	notePath := filepath.Join(h.notesRoot, "ws-1", "scratch.sql")
@@ -454,8 +524,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("A")
 	h.keys(" more")
 	h.keys("jk")
-	h.key(' ')
-	h.keys("s")
+	h.leader("s")
 	h.waitFor("conflict float", "save as a new name")
 	h.keys("s")
 	h.waitFor("save-as form", "save note as")
@@ -479,15 +548,13 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("context keys", "query editor — keys")
 	h.waitFor("context binding", "run the query")
 	h.key(tuicore.KeyEscape) // any key dismisses the card
-	h.key(' ')
-	h.keys("?")
+	h.leader("?")
 	h.waitFor("leader help", "leader commands")
 	h.key(tuicore.KeyEscape)
 
 	// 9. Explorer drill-down to columns, then Enter on the table scaffolds
 	//    from the server-quoted identifier.
-	h.key(' ')
-	h.keys("e")
+	h.leader("e")
 	// Start from a known row: g jumps to the first (the workspace), then
 	// down onto the connection — the search above left the cursor
 	// wherever its match was.
@@ -506,10 +573,8 @@ func TestUIFullFlow(t *testing.T) {
 
 	// 10. Disconnect / reconnect toggle (leader x); the token survives a
 	//     same-instance reconnect.
-	h.key(' ')
-	h.keys("x")
+	h.leader("x")
 	h.waitFor("disconnected", "disconnected — SPC x reconnects")
-	h.key(' ')
-	h.keys("x")
+	h.leader("x")
 	h.waitFor("reconnected", "logged in as root")
 }
