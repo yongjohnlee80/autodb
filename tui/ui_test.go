@@ -155,6 +155,44 @@ func (h *uiHarness) key(code rune) {
 	}
 }
 
+// explorerCursorBG returns the background color index of the explorer's
+// highlighted row, or false when no row is filled.
+func (h *uiHarness) explorerCursorBG() (uint8, bool) {
+	cells := h.tb.Snapshot()
+	if len(cells) < 3 {
+		return 0, false
+	}
+	for y := 1; y < len(cells)-1; y++ {
+		a := cells[y][2].Attrs
+		if a.BG.Kind == 0 || a.BG.Index == 0 {
+			continue
+		}
+		if cells[y][3].Attrs == a && cells[y][4].Attrs == a {
+			return a.BG.Index, true
+		}
+	}
+	return 0, false
+}
+
+// waitCursorBG polls until the explorer's highlight uses the wanted
+// background (styling lands on the focus event, one loop turn later).
+func (h *uiHarness) waitCursorBG(what string, want uint8) {
+	h.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var last uint8
+	for time.Now().Before(deadline) {
+		if bg, ok := h.explorerCursorBG(); ok {
+			if bg == want {
+				return
+			}
+			last = bg
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	h.t.Fatalf("%s: explorer highlight background = %d, want %d\nscreen:\n%s",
+		what, last, want, h.screen())
+}
+
 func TestUIFullFlow(t *testing.T) {
 	addr := startRealServer(t)
 	h := startUI(t, addr)
@@ -343,6 +381,19 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("editor match", "songs: match 1/1 in the query")
 	h.keys("n") // single match: n wraps back onto it
 	h.waitFor("editor wrap", "songs: match 1/1 in the query")
+
+	// 5f. The cursor highlight follows FOCUS: the explorer's row is
+	//     styled one way while it holds focus and another once focus
+	//     moves to the query editor — and the change lands on the focus
+	//     event itself, without waiting for some later re-layout.
+	const cyan, gray = 6, 8
+	h.ctrl('h')
+	h.waitCursorBG("explorer focused", cyan)
+	h.ctrl('l')
+	h.waitCursorBG("explorer blurred by moving to the query editor", gray)
+	h.ctrl('h')
+	h.waitCursorBG("explorer refocused", cyan)
+	h.ctrl('l')
 
 	// 6. The WHERE-less guard surfaces as a structured status message.
 	h.keys("Vd")

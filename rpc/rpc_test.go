@@ -824,3 +824,35 @@ func TestWorkspacesOverWire(t *testing.T) {
 	errVal, _ = c.call("workspace.rename", f.rootTok, wsID, "ghost")
 	mustErr(t, errVal, -32602) // not-found surfaces as the mapped sentinel
 }
+
+// sys.shutdown is the supported restart path for the shared server
+// (ADR-0056 §3): admin-only, and the reply is delivered before the
+// listener closes.
+func TestShutdownOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	// A non-admin is refused.
+	if errVal, _ := c.call("auth.user_create", f.rootTok, "peon", "peon-passphrase", "editor"); errVal != nil {
+		t.Fatalf("user_create: %#v", errVal)
+	}
+	errVal, result := c.call("auth.login", "peon", "peon-passphrase")
+	if errVal != nil {
+		t.Fatalf("login: %#v", errVal)
+	}
+	peonTok := result.(map[string]any)["token"].(string)
+	errVal, _ = c.call("sys.shutdown", peonTok)
+	mustErr(t, errVal, rpc.CodeDenied)
+
+	// An admin gets an acknowledged shutdown — the reply arrives, which
+	// is the drain property that matters.
+	errVal, result = c.call("sys.shutdown", f.rootTok)
+	if errVal != nil {
+		t.Fatalf("admin shutdown: %#v", errVal)
+	}
+	if m, ok := result.(map[string]any); !ok || m["stopping"] != true {
+		t.Fatalf("shutdown reply = %#v, want stopping:true", result)
+	}
+}

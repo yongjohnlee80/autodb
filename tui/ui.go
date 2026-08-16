@@ -227,6 +227,30 @@ func (m *Model) handleStartup(d startupDone) {
 	}
 }
 
+// restartServer stops the shared server and lets the reconnect spawn a
+// fresh one — the supported way to pick up a rebuilt binary, since
+// `--serve` deliberately outlives the TUI (ADR-0056 §3).
+func (m *Model) restartServer() {
+	if !m.session.Connected() {
+		m.setStatus("not connected — SPC x connects (and spawns a server)")
+		return
+	}
+	m.setStatus("restarting the server…")
+	bound := m.session.Bind()
+	m.ctx.Go(func(c context.Context) (any, error) {
+		err := bound.ShutdownServer(c)
+		return managerReload{gen: bound.Gen(), apply: func() {
+			if err != nil {
+				m.setStatus("restart refused: " + WireErrorMessage(err))
+				return
+			}
+			// The server drains; its close wakes the disconnect watcher,
+			// which reconnects and spawns the new process.
+			m.setStatus("server stopping — reconnecting…")
+		}}, nil
+	})
+}
+
 // dismissFloats hides every open float (a (re)connect invalidated the
 // state they were built against).
 func (m *Model) dismissFloats() {
@@ -540,6 +564,14 @@ func (m *Model) openConflict(body string) {
 // --- pane focus & zoom ------------------------------------------------------------
 
 func (m *Model) focusPane(c tui.Component) {
+	// Panels that delegate (the results panel hosts either a table or the
+	// read-only JSON editor) hand focus to the child that draws the
+	// cursor and owns the keys.
+	if t, ok := c.(interface{ FocusTarget() tui.Component }); ok {
+		if target := t.FocusTarget(); target != nil {
+			c = target
+		}
+	}
 	m.ctx.FocusComponent(c)
 	m.refreshStatus()
 }
@@ -699,6 +731,13 @@ func (m *Model) HandleEvent(ev tui.Event) bool {
 		return m.handleTask(t)
 	case tui.KeyEvent:
 		return m.handleKey(t)
+	case tui.FocusEvent:
+		// Focus changes bubble to the root but do NOT force a layout, so
+		// the cursor styling has to react here — styling only in Layout
+		// meant a panel kept its focused color until something else
+		// happened to re-layout (Johno, M6 manual testing).
+		m.applyCursorStyles()
+		return false
 	}
 	return false
 }
@@ -869,6 +908,7 @@ func (m *Model) leaderEntries() []leaderEntry {
 		{'g', "refresh explorer", m.explorer.Reload},
 		{'L', "login / switch user", m.openLogin},
 		{'x', connLabel, connRun},
+		{'X', "restart the server", m.restartServer},
 		{'?', "help", m.openHelp},
 		{'Q', "quit", func() {
 			if m.quit != nil {
@@ -895,6 +935,7 @@ func (m *Model) openHelp() {
 	sb.WriteString("  Ctrl-h/j/k/l   move between panes (left/down/up/right)\n")
 	sb.WriteString("  Ctrl-w z       zoom focused pane\n")
 	sb.WriteString("  Ctrl-q         quit (q quits too when nothing consumes it)\n")
+	sb.WriteString("  SPC X          restart the server (picks up a rebuilt binary)\n")
 	sb.WriteString("\neditor: vim Normal/Insert/Visual, jk = Esc\n")
 	sb.WriteString("explorer: hjkl navigate, l expands, Enter scaffolds a table\n")
 	sb.WriteString("results: v or Enter inspects the selected row\n")

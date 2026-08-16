@@ -38,7 +38,24 @@ func newResultsPanel(m *Model) *resultsPanel {
 	}
 }
 
-func (p *resultsPanel) AcceptsFocus() bool { return true }
+// The panel is a CONTAINER, not a focus stop: focus goes to whichever
+// child is showing (the table's list, or the read-only JSON editor), so
+// the runtime draws that child's cursor and the child handles its own
+// vim keys. Unconsumed keys still bubble here (`v` opens the row
+// inspector) and on to the Model.
+func (p *resultsPanel) AcceptsFocus() bool { return false }
+
+// FocusTarget is the component focus should land on for this panel.
+func (p *resultsPanel) FocusTarget() tui.Component {
+	switch {
+	case p.jsonMode && p.jsonV != nil:
+		return p.jsonV
+	case p.rawList != nil && p.current == p.table:
+		return p.rawList
+	default:
+		return p.current
+	}
+}
 
 func (p *resultsPanel) Init(ctx *tui.Context) {
 	p.Base.Init(ctx)
@@ -47,16 +64,27 @@ func (p *resultsPanel) Init(ctx *tui.Context) {
 	ctx.Mount(p.current)
 }
 
-// swap replaces the mounted child.
+// focusedNow reports whether this panel currently owns focus.
+func (p *resultsPanel) focusedNow() bool {
+	return p.model.ctx != nil && p.model.ctx.FocusWithin(p.model.resultsBox)
+}
+
+// swap replaces the mounted child, carrying focus across when the panel
+// had it (the outgoing child is unmounted — without this the focus
+// repair would land somewhere else entirely).
 func (p *resultsPanel) swap(c tui.Component) {
 	if p.current == c {
 		return
 	}
+	hadFocus := p.focusedNow()
 	if p.current != nil {
 		p.ctx.Unmount(p.current)
 	}
 	p.current = c
 	p.ctx.Mount(c)
+	if hadFocus {
+		p.model.ctx.FocusComponent(p.FocusTarget())
+	}
 	p.RequestLayout()
 	p.MarkDirty()
 }
@@ -135,7 +163,11 @@ func (p *resultsPanel) rebuild() {
 			}
 		}
 		tbl := widget.NewTable(cols, widget.WithEmptyText[[]any]("0 rows"),
-			widget.WithListStyles[[]any](widget.ListStyles{CursorRow: cursorRowStyle}))
+			widget.WithListStyles[[]any](widget.ListStyles{
+				// A rebuilt table is a NEW widget: give it the style its
+				// panel's current focus calls for, not the default.
+				CursorRow: cursorStyle(p.focusedNow()),
+			}))
 		tbl.SetItems(res.Rows)
 		p.table = tbl
 		p.rawList = tbl.List()

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/config"
@@ -53,6 +54,9 @@ type Server struct {
 	rpc      *golibrpc.Server
 	version  string
 	instance string // random per-process id; hello exposes it (ADR-0057 §7)
+
+	stop     chan struct{} // closed by RequestShutdown
+	stopOnce sync.Once
 }
 
 // Option configures a Server.
@@ -83,7 +87,10 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 			op(&o)
 		}
 	}
-	s := &Server{auth: authSvc, eng: eng, version: version, instance: newInstanceID()}
+	s := &Server{
+		auth: authSvc, eng: eng, version: version,
+		instance: newInstanceID(), stop: make(chan struct{}),
+	}
 
 	ropts := []golibrpc.Option{
 		// JoinHostPort, not Sprintf: an IPv6 bind ("::1") needs brackets.
@@ -100,8 +107,25 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 	return s
 }
 
-// Run serves until ctx is cancelled, then drains gracefully.
-func (s *Server) Run(ctx context.Context) error { return s.rpc.Run(ctx) }
+// Run serves until ctx is cancelled — or an authorized sys.shutdown
+// asks for it — then drains gracefully. The drain waits for in-flight
+// handlers, so the shutdown call's own reply is delivered before the
+// listener closes.
+func (s *Server) Run(ctx context.Context) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-s.stop:
+			cancel()
+		case <-runCtx.Done():
+		}
+	}()
+	return s.rpc.Run(runCtx)
+}
+
+// RequestShutdown asks a running server to drain and exit (idempotent).
+func (s *Server) RequestShutdown() { s.stopOnce.Do(func() { close(s.stop) }) }
 
 // Shutdown drains politely, bounded by ctx.
 func (s *Server) Shutdown(ctx context.Context) error { return s.rpc.Shutdown(ctx) }

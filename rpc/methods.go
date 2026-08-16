@@ -300,6 +300,30 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.ChangePassphrase(ctx, token, oldPass, newPass, peerIP(req)))
 	})
+	// sys.shutdown drains this server (ADR-0056 §3: the shared server
+	// outlives its frontends, so restarting it needs an authorized
+	// remote path — a rebuilt binary otherwise keeps serving from the
+	// old process). Admin-only, audited BEFORE the effect (R6).
+	s.rpc.Handle("sys.shutdown", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		ident, aerr := s.auth.RequireAdmin(ctx, token)
+		if aerr != nil {
+			return nil, wireErr(aerr)
+		}
+		if err := s.auth.Audit(ctx, ident.UserID(), peerIP(req),
+			"server_shutdown", "requested over rpc"); err != nil {
+			return nil, wireErr(err) // an unaudited privileged effect never happens
+		}
+		s.RequestShutdown()
+		return map[string]any{"stopping": true}, nil
+	})
+
 	s.rpc.Handle("auth.passphrase_reset", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err

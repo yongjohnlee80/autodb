@@ -77,6 +77,14 @@ func (s *Service) ValidateToken(ctx context.Context, token string) (Identity, er
 	return ident, err
 }
 
+// RequireAdmin authorizes a SERVER-scoped admin operation — one with no
+// connection to grant against (currently: shutdown). The caller must hold
+// a live token for an enabled admin; everything else is ErrDenied, which
+// the wire renders without disclosing which check failed.
+func (s *Service) RequireAdmin(ctx context.Context, token string) (Identity, error) {
+	return s.requireAdmin(ctx, token)
+}
+
 // requireAdmin resolves the token and demands a current admin role.
 func (s *Service) requireAdmin(ctx context.Context, token string) (Identity, error) {
 	ident, _, err := s.resolveToken(ctx, token)

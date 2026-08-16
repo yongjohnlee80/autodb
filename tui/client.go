@@ -364,6 +364,14 @@ func (b *Bound) Logout(ctx context.Context) error {
 	return err
 }
 
+// ShutdownServer asks the connected server to drain and exit (admin
+// only). The disconnect watcher then drives the reconnect, which spawns
+// a fresh server when one is configured — that is the restart.
+func (b *Bound) ShutdownServer(ctx context.Context) error {
+	_, err := b.authed(ctx, "sys.shutdown")
+	return err
+}
+
 // ConnInfo is one stored connection.
 type ConnInfo struct {
 	ID     int64
