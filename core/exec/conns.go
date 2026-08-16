@@ -43,17 +43,16 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 	if err != nil {
 		return nil, fmt.Errorf("exec: opening connection %q: %w", row.Name, err)
 	}
-	// Re-validate the stored DSN and verify the server's actual parsing mode
-	// matches what the classifier assumes — refuse the connection otherwise
-	// rather than clobbering the server's operational modes (lector M4 r2
-	// must-fix #1). Verified here; the v1 reader-safety contract is
-	// verb-level (see package doc) — engine-native read-only enforcement is
-	// an M9 gate-guard requirement.
+	// Re-validate the stored DSN (driver parsers, not substrings) and probe
+	// one session's parsing mode for a fast, clear failure at first use.
+	// This is a BELT check only: the authoritative grammar verification runs
+	// per physical session at execution time (verifyGrammarQ on the pinned
+	// TxConn in the engine's run path — lector M4 r3).
 	if verr := ValidateDSN(row.Engine, string(dsn)); verr != nil {
 		_ = conn.Close()
 		return nil, verr
 	}
-	if verr := verifyConnGrammar(ctx, conn, row.Engine); verr != nil {
+	if verr := verifyGrammarQ(ctx, conn, row.Engine); verr != nil {
 		_ = conn.Close()
 		return nil, verr
 	}
@@ -225,8 +224,14 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64,
 		}
 		return fmt.Errorf("exec: probe failed: %w", err)
 	}
-	if err := rows.Close(); err != nil {
-		return err
+	if cerr := rows.Close(); cerr != nil {
+		// A close failure is a probe failure — audit it like one (lector
+		// M4 r3 amendment: no unaudited exit path from TestConnection).
+		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_failed",
+			fmt.Sprintf("conn %d close: %v", connID, cerr)); aerr != nil {
+			return aerr
+		}
+		return cerr
 	}
 	// A successful test is security-relevant too (who verified reachability,
 	// from where) — audit it (lector M4 r2 amendment).

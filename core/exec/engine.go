@@ -206,9 +206,9 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	var runErr error
 	var rowCount int64
 	if stmt.Class == ClassRead {
-		rowCount, runErr = e.runQuery(ctx, target, sqlText, res, onRow)
+		rowCount, runErr = e.runQuery(ctx, target, connRow.Engine, sqlText, res, onRow)
 	} else {
-		runErr = e.runExec(ctx, target, sqlText, res)
+		runErr = e.runExec(ctx, target, connRow.Engine, sqlText, res)
 		rowCount = res.Affected
 	}
 	res.Duration = e.now().Sub(start)
@@ -309,9 +309,34 @@ func truncate(s string, max int) string {
 }
 
 // runQuery executes a read and fills Columns plus either a bounded page
-// (maxRows, More on truncation) or the onRow stream.
-func (e *Engine) runQuery(ctx context.Context, target dao.DataConn, sqlText string, res *Result, onRow func([]any) error) (int64, error) {
-	rows, err := target.QueryContext(ctx, sqlText)
+// (maxRows, More on truncation) or the onRow stream. On mysql/postgres the
+// statement runs inside a transaction — ONE pinned physical session — whose
+// grammar is verified first, because a pool-level check cannot speak for
+// the session a later statement lands on (ADR-0055 rev 3; lector M4 r3).
+func (e *Engine) runQuery(ctx context.Context, target dao.DataConn, engineName, sqlText string, res *Result, onRow func([]any) error) (int64, error) {
+	if engineName == "sqlite" {
+		return e.queryOn(ctx, target, sqlText, res, onRow)
+	}
+	tx, err := target.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if err := verifyGrammarQ(ctx, tx, engineName); err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+	n, qerr := e.queryOn(ctx, tx, sqlText, res, onRow)
+	if qerr != nil {
+		_ = tx.Rollback()
+		return n, qerr
+	}
+	return n, tx.Commit()
+}
+
+// queryOn runs the read on q (a pool for sqlite, a pinned TxConn otherwise)
+// and fully consumes the rows before returning.
+func (e *Engine) queryOn(ctx context.Context, q dao.Querier, sqlText string, res *Result, onRow func([]any) error) (int64, error) {
+	rows, err := q.QueryContext(ctx, sqlText)
 	if err != nil {
 		return 0, err
 	}
@@ -352,9 +377,31 @@ func (e *Engine) runQuery(ctx context.Context, target dao.DataConn, sqlText stri
 	return count, rows.Err()
 }
 
-// runExec executes a write/DDL statement.
-func (e *Engine) runExec(ctx context.Context, target dao.DataConn, sqlText string, res *Result) error {
-	r, err := target.ExecContext(ctx, sqlText)
+// runExec executes a write/DDL statement, same-session-verified like
+// runQuery. (MySQL DDL implicitly commits inside the transaction; the
+// trailing COMMIT is then a harmless no-op.)
+func (e *Engine) runExec(ctx context.Context, target dao.DataConn, engineName, sqlText string, res *Result) error {
+	if engineName == "sqlite" {
+		return e.execOn(ctx, target, sqlText, res)
+	}
+	tx, err := target.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	if err := verifyGrammarQ(ctx, tx, engineName); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := e.execOn(ctx, tx, sqlText, res); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// execOn runs the statement on x (pool or pinned TxConn).
+func (e *Engine) execOn(ctx context.Context, x dao.Execer, sqlText string, res *Result) error {
+	r, err := x.ExecContext(ctx, sqlText)
 	if err != nil {
 		return err
 	}
