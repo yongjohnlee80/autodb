@@ -6,7 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/yongjohnlee80/golib v0.3.2-0.20260816064403-cd3f4abb31c7
+	github.com/yongjohnlee80/golib v0.3.2
 	golang.org/x/crypto v0.55.0
 )
 
