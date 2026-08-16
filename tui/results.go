@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/style"
@@ -190,13 +192,46 @@ func (p *resultsPanel) HandleEvent(ev tui.Event) bool {
 	return false
 }
 
+// bytesText is the ONE display rule for wire bytes (the server ships
+// values, not presentation — Johno, M6 manual testing). Bytes that read
+// as text are text (mysql returns every string column as []byte);
+// 16 bytes are a UUID (postgres uuid scans into a 16-byte array);
+// anything else is hex.
+func bytesText(b []byte) string {
+	if isPrintableText(b) {
+		return string(b)
+	}
+	if len(b) == 16 {
+		return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	}
+	return fmt.Sprintf("0x%x", b)
+}
+
+// isPrintableText reports whether b is valid UTF-8 carrying no control
+// characters beyond tab/newline/carriage-return — the test for "these
+// bytes are a string the user wants to read".
+func isPrintableText(b []byte) bool {
+	if !utf8.Valid(b) {
+		return false
+	}
+	for _, r := range string(b) {
+		if r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
 // renderCell renders one wire value for a table cell (single line).
 func renderCell(v any) string {
 	switch x := v.(type) {
 	case nil:
 		return "NULL"
 	case []byte:
-		return fmt.Sprintf("0x%x", x)
+		return renderCell(bytesText(x))
 	case string:
 		// Cells are single-line; the widget layer ellipsizes width.
 		return strings.ReplaceAll(strings.ReplaceAll(x, "\n", "␤"), "\r", "")
@@ -205,10 +240,10 @@ func renderCell(v any) string {
 	}
 }
 
-// jsonCell keeps JSON output faithful for bytes.
+// jsonCell renders bytes through the same display rule.
 func jsonCell(v any) any {
 	if b, ok := v.([]byte); ok {
-		return fmt.Sprintf("0x%x", b)
+		return bytesText(b)
 	}
 	return v
 }

@@ -263,7 +263,7 @@ func faithfulCell(v any) string {
 	case nil:
 		return "NULL"
 	case []byte:
-		return fmt.Sprintf("0x%x", x)
+		return bytesText(x)
 	case string:
 		return x
 	default:
