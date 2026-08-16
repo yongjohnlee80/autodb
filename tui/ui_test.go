@@ -404,6 +404,34 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("r")
 	h.waitFor("guard refusal", "WHERE clause is blocked")
 
+	// 6b. SPC s with NO note open saves the BUFFER under a new name — it
+	//     used to create the note and load the empty file over the text,
+	//     losing it.
+	h.keys("Vd")
+	h.keys("i")
+	h.keys("-- unsaved buffer")
+	h.keys("jk")
+	h.key(' ')
+	h.keys("s")
+	h.waitFor("save-as prompt", "save note as")
+	h.keys("frombuffer")
+	h.key(tuicore.KeyEnter)
+	h.waitFor("buffer saved", "saved frombuffer.sql")
+	if body, err := os.ReadFile(filepath.Join(h.notesRoot, "ws-1", "frombuffer.sql")); err != nil {
+		t.Fatalf("saved note: %v", err)
+	} else if string(body) != "-- unsaved buffer" {
+		t.Fatalf("SPC s wrote %q, want the editor buffer", string(body))
+	}
+
+	// 6c. The explorer's `a` adds a note under a workspace's notes folder.
+	h.ctrl('h')
+	h.keys("g")   // first row: the workspace
+	h.keys("jjj") // connections → demo → notes
+	h.keys("a")
+	h.waitFor("note form from explorer", "new note")
+	h.key(tuicore.KeyEscape)
+	h.ctrl('l')
+
 	// 7. Notes: create, save, external clobber → conflict float → save-as
 	//    preserves the EDITED body under the new name (no data loss).
 	h.key(' ')

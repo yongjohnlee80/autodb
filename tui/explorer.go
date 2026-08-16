@@ -113,6 +113,14 @@ func (e *explorer) HandleEvent(ev tui.Event) bool {
 				return true
 			}
 		}
+		// `a` ADDS whatever belongs under the cursor (Johno, M6 manual
+		// testing): a connection under a workspace's connections folder,
+		// a note under its notes folder.
+		if k.Text == "a" {
+			if n, sel := e.tree.Selected(); sel && e.addAt(n.ID()) {
+				return true
+			}
+		}
 		// Track the active connection from the cursor as the user navigates.
 		consumed := e.tree.HandleEvent(ev)
 		if consumed {
@@ -365,6 +373,45 @@ func (e *explorer) applyTask(tr tui.TaskResult) bool {
 	}
 	l.node.SetChildren(l.gen, l.kids)
 	return true
+}
+
+// addAt runs the `a` action for the node under the cursor; it reports
+// false when nothing is addable there (the key then falls through).
+func (e *explorer) addAt(id string) bool {
+	wsOf := func(idx int) int64 {
+		parts := strings.Split(id, ":")
+		if len(parts) <= idx {
+			return 0
+		}
+		n, _ := strconv.ParseInt(parts[idx], 10, 64)
+		return n
+	}
+	switch {
+	case strings.HasPrefix(id, "conns:"), strings.HasPrefix(id, "conn:"):
+		if ws := wsOf(1); ws != 0 {
+			e.model.addConnectionToWorkspace(ws)
+			return true
+		}
+	case strings.HasPrefix(id, "notes:"), strings.HasPrefix(id, "note:"),
+		strings.HasPrefix(id, "detached:"):
+		if ws := wsOf(1); ws != 0 {
+			e.model.activeWs = ws
+			e.model.newNote()
+			return true
+		}
+	case strings.HasPrefix(id, "ws:"):
+		// On the workspace itself, ask which one.
+		ws := wsOf(1)
+		if ws == 0 {
+			return false
+		}
+		e.model.openLeader([]leaderEntry{
+			{'c', "add a connection", func() { e.model.addConnectionToWorkspace(ws) }},
+			{'n', "add a note", func() { e.model.activeWs = ws; e.model.newNote() }},
+		})
+		return true
+	}
+	return false
 }
 
 // activate handles an activation (Enter; leaves via the Tree's own event,

@@ -496,7 +496,19 @@ func (m *Model) newNote() {
 
 func (m *Model) saveNote() {
 	if m.curNote == nil {
-		m.newNote()
+		// No note open: SAVE THE BUFFER under a new name. (It used to
+		// call newNote, which created the note and then loaded the empty
+		// file OVER the text being saved — the buffer was destroyed,
+		// which read as "save does nothing". Johno, M6 manual testing.)
+		if m.activeWs == 0 {
+			m.setStatus("select a workspace (or one of its notes) first")
+			return
+		}
+		if strings.TrimSpace(m.editor.Value()) == "" {
+			m.setStatus("nothing to save — the query buffer is empty")
+			return
+		}
+		m.saveNoteAs(m.activeWs, m.editor.Value())
 		return
 	}
 	body := m.editor.Value()
@@ -558,6 +570,38 @@ func (m *Model) openConflict(body string) {
 		}},
 		{'s', "save as a new name", func() { m.saveNoteAs(note.WorkspaceID, body) }},
 		{'c', "cancel (keep editing)", func() {}},
+	})
+}
+
+// addConnectionToWorkspace creates a connection AND attaches it to ws in
+// one step — the explorer's `a` on a workspace's connections folder.
+// (Attaching an EXISTING connection stays SPC c → w.)
+func (m *Model) addConnectionToWorkspace(wsID int64) {
+	m.openForm("add connection to workspace "+strconv.FormatInt(wsID, 10), []formField{
+		field("name"),
+		field("engine (postgres | mysql | sqlite)"),
+		field("dsn (stored encrypted at rest)"),
+	}, func(v []string) (bool, string) {
+		name, engine, dsn := strings.TrimSpace(v[0]), strings.TrimSpace(v[1]), strings.TrimSpace(v[2])
+		if name == "" || engine == "" || dsn == "" {
+			return false, "all fields are required"
+		}
+		bound := m.session.Bind()
+		m.ctx.Go(func(c context.Context) (any, error) {
+			id, err := bound.CreateConnection(c, name, engine, dsn)
+			if err == nil {
+				err = bound.AttachConnection(c, wsID, id)
+			}
+			return managerReload{gen: bound.Gen(), apply: func() {
+				if err != nil {
+					m.setStatus("add " + name + ": " + WireErrorMessage(err))
+					return
+				}
+				m.setStatus("added " + name + " to workspace " + strconv.FormatInt(wsID, 10))
+				m.explorer.Reload()
+			}}, nil
+		})
+		return true, ""
 	})
 }
 
