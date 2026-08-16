@@ -137,7 +137,13 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
 			Message: fmt.Sprintf("sys.hello: want at most 1 argument, got %d", len(req.Params))}
 	}
-	var clientProto int64 = -1
+	// Declaration is tracked separately from the value: a sentinel value
+	// would collide with a client explicitly declaring that number (a
+	// declared -1 must poison like any other mismatch, never probe).
+	var (
+		clientProto int64
+		declared    bool
+	)
 	if len(req.Params) == 1 {
 		info, ok := req.Params[0].(map[string]any)
 		if !ok {
@@ -152,14 +158,14 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 				return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
 					Message: fmt.Sprintf("sys.hello: protocol must be an integer, got %T", raw)}
 			}
-			clientProto = p
+			clientProto, declared = p, true
 		}
 	}
-	switch clientProto {
-	case Protocol:
-		req.Session.SetValue(sessHello, true)
-	case -1:
+	switch {
+	case !declared:
 		// Probe: no protocol declared. Answer, admit nothing.
+	case clientProto == Protocol:
+		req.Session.SetValue(sessHello, true)
 	default:
 		// Incompatible client: structured refusal, session poisoned
 		// (ADR-0056 §2 — the Lua side re-provisions the binary), audited

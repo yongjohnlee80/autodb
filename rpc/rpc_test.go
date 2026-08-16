@@ -190,9 +190,17 @@ func TestHandshakeGate(t *testing.T) {
 func TestHandshakeIncompatiblePoisonsSession(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
-	c := f.dial(t)
 
-	errVal, _ := c.call("sys.hello", map[string]any{"protocol": int64(999)})
+	// A declared protocol of -1 must poison like any other mismatch — it
+	// must never collide with the omitted-protocol probe form (lector r2).
+	cNeg := f.dial(t)
+	errVal, _ := cNeg.call("sys.hello", map[string]any{"protocol": int64(-1)})
+	mustErr(t, errVal, rpc.CodeProtocolMismatch)
+	errVal, _ = cNeg.call("auth.needs_bootstrap")
+	mustErr(t, errVal, rpc.CodeProtocolMismatch)
+
+	c := f.dial(t)
+	errVal, _ = c.call("sys.hello", map[string]any{"protocol": int64(999)})
 	mustErr(t, errVal, rpc.CodeProtocolMismatch)
 
 	// Everything afterward is refused — including a now-compatible hello:
