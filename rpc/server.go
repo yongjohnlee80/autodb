@@ -1,0 +1,175 @@
+package rpc
+
+import (
+	"context"
+	"fmt"
+	"net"
+
+	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/config"
+	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/golib/logger"
+	"github.com/yongjohnlee80/golib/msgpack"
+	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
+	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
+)
+
+// Protocol is the wire protocol version (ADR-0051 §5). autodb owns this
+// number; a client hello carrying a different value is refused and the Lua
+// side re-provisions the binary.
+const Protocol int64 = 1
+
+// Session keys the gate and the hello handler share.
+const (
+	sessHello   = "hello"   // bool: compatible handshake completed
+	sessRefused = "refused" // bool: incompatible handshake; everything denied
+)
+
+// decodeLimits bounds inbound value decoding. Tighter than golib defaults:
+// autodb requests are small (SQL text + scalars); results flow OUT, not in.
+func decodeLimits() *msgpack.Limits {
+	return &msgpack.Limits{
+		MaxDepth:         16,
+		MaxStrBytes:      1 << 20, // core/exec re-checks its own script cap
+		MaxBinBytes:      1 << 20,
+		MaxElements:      1 << 12,
+		MaxTotalElements: 1 << 14,
+		MaxTotalBytes:    2 << 20,
+	}
+}
+
+// Server is autodb's msgpack-RPC server: a mechanical projection of
+// core/auth + core/exec onto the golib transport (Objective 19 — no
+// business logic lives here).
+type Server struct {
+	auth    *auth.Service
+	eng     *exec.Engine
+	rpc     *golibrpc.Server
+	version string
+}
+
+// Option configures a Server.
+type Option func(*options)
+
+type options struct {
+	logger   logger.Logger
+	listener net.Listener
+}
+
+// WithLogger sets the transport logger.
+func WithLogger(l logger.Logger) Option {
+	return func(o *options) { o.logger = l }
+}
+
+// WithListener injects a pre-bound listener (tests; the single-instance
+// guard in cmd/autodb, which must own the bind error).
+func WithListener(ln net.Listener) Option {
+	return func(o *options) { o.listener = ln }
+}
+
+// New assembles the server over an authenticated core. version is the
+// build-stamped autodb version reported by sys.hello.
+func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version string, opts ...Option) *Server {
+	o := options{logger: logger.Nop{}}
+	for _, op := range opts {
+		if op != nil {
+			op(&o)
+		}
+	}
+	s := &Server{auth: authSvc, eng: eng, version: version}
+
+	ropts := []golibrpc.Option{
+		golibrpc.Addr(fmt.Sprintf("%s:%d", cfg.Bind, cfg.Port)),
+		golibrpc.WithLogger(o.logger),
+		golibrpc.MaxMessageBytes(4 << 20),
+		golibrpc.WithGate(s.gate),
+	}
+	if o.listener != nil {
+		ropts = append(ropts, golibrpc.WithListener(o.listener))
+	}
+	s.rpc = golibrpc.New(msgpackrpc.New(decodeLimits()), ropts...)
+	s.register()
+	return s
+}
+
+// Run serves until ctx is cancelled, then drains gracefully.
+func (s *Server) Run(ctx context.Context) error { return s.rpc.Run(ctx) }
+
+// Shutdown drains politely, bounded by ctx.
+func (s *Server) Shutdown(ctx context.Context) error { return s.rpc.Shutdown(ctx) }
+
+// Addr reports the resolved listen address (real port after binding :0).
+func (s *Server) Addr() string { return s.rpc.Addr() }
+
+// gate enforces handshake-before-methods (ADR-0056 §2): sys.hello is the
+// only reachable method until a compatible hello lands; an incompatible
+// hello poisons the session — every later call, hello included, is refused
+// so the client's only useful move is reconnecting with a compatible
+// binary.
+func (s *Server) gate(sess *golibrpc.Session, method string) error {
+	if refused, _ := sess.Value(sessRefused).(bool); refused {
+		return &golibrpc.Error{Code: CodeProtocolMismatch,
+			Message: "protocol mismatch: reconnect with a compatible client"}
+	}
+	if method == "sys.hello" {
+		return nil
+	}
+	if ok, _ := sess.Value(sessHello).(bool); !ok {
+		return &golibrpc.Error{Code: CodeHandshakeRequired,
+			Message: "handshake required: call sys.hello first"}
+	}
+	return nil
+}
+
+// helloHandler implements sys.hello(clientInfo) → {protocol, server,
+// version}. clientInfo is a map; its "protocol" field (int) is compared to
+// Protocol. Missing clientInfo or protocol is tolerated for probes — the
+// reply carries the server's number either way — but only a matching
+// protocol admits the session to the method surface.
+func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, error) {
+	reply := map[string]any{
+		"protocol": Protocol,
+		"server":   "autodb",
+		"version":  s.version,
+	}
+	var clientProto int64 = -1
+	if len(req.Params) > 0 {
+		info, ok := req.Params[0].(map[string]any)
+		if !ok {
+			return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+				Message: "sys.hello: clientInfo must be a map"}
+		}
+		if p, ok := info["protocol"].(int64); ok {
+			clientProto = p
+		}
+	}
+	switch clientProto {
+	case Protocol:
+		req.Session.SetValue(sessHello, true)
+	case -1:
+		// Probe: no protocol declared. Answer, admit nothing.
+	default:
+		// Incompatible client: structured refusal, session poisoned
+		// (ADR-0056 §2 — the Lua side re-provisions the binary). Audited
+		// as a protocol error under user 0 with the peer IP.
+		req.Session.SetValue(sessRefused, true)
+		_ = s.auth.Audit(ctx, 0, peerIP(req), "rpc_protocol_error",
+			fmt.Sprintf("client protocol %d, server %d", clientProto, Protocol))
+		return nil, &golibrpc.Error{Code: CodeProtocolMismatch,
+			Message: fmt.Sprintf("protocol mismatch: client %d, server %d", clientProto, Protocol)}
+	}
+	return reply, nil
+}
+
+// peerIP extracts the bare client IP from the connection's peer address —
+// the `ip` argument every core call requires (Objective 20/21).
+func peerIP(req *golibrpc.Request) string {
+	if req.Peer == nil {
+		return "unknown"
+	}
+	host, _, err := net.SplitHostPort(req.Peer.String())
+	if err != nil {
+		return req.Peer.String()
+	}
+	return host
+}
