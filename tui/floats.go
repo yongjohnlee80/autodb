@@ -18,15 +18,22 @@ import (
 // than replacing them with gray space (Johno, M6 manual testing). The
 // Box interior is filled, so the float itself remains opaque.
 func (m *Model) openFloat(title string, content tui.Component, width int) *widget.Float {
+	return m.openFloatAt(title, content, width, widget.Center)
+}
+
+// openFloatAt is openFloat with an explicit anchor (the `?` key card
+// lives in the bottom-right corner).
+func (m *Model) openFloatAt(title string, content tui.Component, width int,
+	anchor widget.Anchor) *widget.Float {
 	box := widget.NewBox(content,
 		widget.WithTitle(title),
 		widget.WithStyle(style.New().Width(width).Border(style.BorderRounded)),
 		widget.WithFocusable(false),
 	)
-	f := widget.NewFloat(box, widget.WithModal(true))
+	f := widget.NewFloat(box, widget.WithModal(true), widget.WithAnchor(anchor))
 	m.host.Attach(f)
 	f.Show()
-	m.floats = append(m.floats, f)
+	m.floats = append(m.floats, openFloatRef{f: f, body: content, title: title})
 	// Remove the layer once dismissed (Float hides itself on Esc; the
 	// ddex-server recipe — layers must not accumulate).
 	var unsub func()
@@ -36,7 +43,7 @@ func (m *Model) openFloat(title string, content tui.Component, width int) *widge
 		}
 		m.host.Stack.Remove(f)
 		for i, o := range m.floats {
-			if o == f {
+			if o.f == f {
 				m.floats = append(m.floats[:i], m.floats[i+1:]...)
 				break
 			}
@@ -57,11 +64,19 @@ func (m *Model) openFloat(title string, content tui.Component, width int) *widge
 // typed right behind an Esc from being swallowed.
 func (m *Model) modalOpen() bool {
 	for _, f := range m.floats {
-		if f.Shown() {
+		if f.f.Shown() {
 			return true
 		}
 	}
 	return false
+}
+
+// openFloatRef remembers what a float is showing, so `?` can report the
+// keys of whatever currently owns the screen.
+type openFloatRef struct {
+	f     *widget.Float
+	body  tui.Component
+	title string
 }
 
 // formField is one labelled text input.

@@ -59,14 +59,20 @@ func newManager[T any](m *Model, cols []widget.TableColumn[T],
 		load:    load,
 		bound:   m.session.Bind(), // the epoch this manager view belongs to
 	}
-	var keys []string
-	for _, a := range actions {
-		keys = append(keys, string(a.key)+":"+a.label)
-	}
-	keys = append(keys, "Esc:close")
-	mg.hint = widget.NewText(strings.Join(keys, "  "),
-		widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted)))
+	mg.hint = widget.NewText(strings.Join(hintCells(mg.hints()), "  "),
+		widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted)),
+		widget.WithWrapMode(widget.Wrap)) // never truncate the key list
 	return mg
+}
+
+// hints reports this manager's action keys (the `?` context help and the
+// footer render the SAME data).
+func (g *manager[T]) hints() []keyHint {
+	out := make([]keyHint, 0, len(g.actions)+1)
+	for _, a := range g.actions {
+		out = append(out, keyHint{key: string(a.key), label: a.label})
+	}
+	return append(out, keyHint{key: "Esc", label: "close"})
 }
 
 func (g *manager[T]) AcceptsFocus() bool { return true }
@@ -104,12 +110,16 @@ func (g *manager[T]) Reload() {
 }
 
 func (g *manager[T]) Layout(c tui.Constraints) tui.Size {
-	w := min(c.MaxW, 72)
-	h := min(c.MaxH, 16)
-	g.ctx.LayoutChild(g.table, tui.Tight(tui.Size{W: w, H: h - 1}))
-	g.ctx.PlaceChild(g.table, tui.Rect{X: 0, Y: 0, W: w, H: h - 1})
-	g.ctx.LayoutChild(g.hint, tui.Tight(tui.Size{W: w, H: 1}))
-	g.ctx.PlaceChild(g.hint, tui.Rect{X: 0, Y: h - 1, W: w, H: 1})
+	w := min(c.MaxW, managerWidth-2)
+	// The key list wraps rather than truncating (Johno, M6 manual
+	// testing: the users panel cut off "g:grant…"), so ask it how tall
+	// it needs to be and give the table the rest.
+	hintH := max(g.ctx.LayoutChild(g.hint, tui.Constraints{MaxW: w, MaxH: 4}).H, 1)
+	h := min(c.MaxH, 15+hintH)
+	tableH := max(h-hintH, 1)
+	g.ctx.LayoutChild(g.table, tui.Tight(tui.Size{W: w, H: tableH}))
+	g.ctx.PlaceChild(g.table, tui.Rect{X: 0, Y: 0, W: w, H: tableH})
+	g.ctx.PlaceChild(g.hint, tui.Rect{X: 0, Y: tableH, W: w, H: hintH})
 	return c.Constrain(tui.Size{W: w, H: h})
 }
 
@@ -186,7 +196,7 @@ func (m *Model) openConnManager() {
 				}
 			}},
 		})
-	g.float = m.openFloat("connections", g, 74)
+	g.float = m.openFloat("connections", g, managerWidth)
 }
 
 func (m *Model) openConnForm(g *manager[ConnInfo]) {
@@ -287,7 +297,7 @@ func (m *Model) openWorkspaceManager() {
 				})
 			}},
 		})
-	g.float = m.openFloat("workspaces", g, 74)
+	g.float = m.openFloat("workspaces", g, managerWidth)
 }
 
 // --- users -------------------------------------------------------------------------
@@ -395,5 +405,5 @@ func (m *Model) openUserManager() {
 				})
 			}},
 		})
-	g.float = m.openFloat("users", g, 74)
+	g.float = m.openFloat("users", g, managerWidth)
 }

@@ -190,6 +190,15 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("created connection engine", "sqlite")
 	h.key(tuicore.KeyEscape) // close the manager
 
+	// 2b. The users manager shows its full key list (it was truncated at
+	//     "g:gr…" before the float widened and the footer wrapped).
+	h.key(' ')
+	h.keys("u")
+	h.waitFor("users manager", "a:add")
+	h.waitFor("full key list", "g:grant on conn")
+	h.waitFor("reset key", "p:reset passphrase")
+	h.key(tuicore.KeyEscape)
+
 	// 3. Create a workspace and attach the connection (server-side ids 1).
 	h.key(' ')
 	h.waitFor("leader menu", "workspaces…")
@@ -266,6 +275,13 @@ func TestUIFullFlow(t *testing.T) {
 	h.key(' ')
 	h.keys("j")
 	h.waitFor("json document", "\"title\": \"alpha\"")
+	// The JSON view is a read-only vim VIEWER: motions and yank work,
+	// edits are refused.
+	h.ctrl('j') // focus results
+	h.keys("jj")
+	h.keys("Vy") // visual-line yank into the editor register
+	h.keys("ix") // insert would mutate — refused
+	h.waitFor("json intact", "\"title\": \"alpha\"")
 	h.key(' ')
 	h.keys("j")
 	h.waitFor("back to table", "beta")
@@ -291,6 +307,42 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("jk")
 	h.waitFor("editor focused after Ctrl-l", "-- back in the editor")
 	h.keys("Vd") // clear that probe line
+
+	// 5e. In-panel search: / prompts, n / N walk matches — in each panel.
+	//     Results first (two rows, one match each).
+	h.ctrl('j')
+	h.keys("/")
+	h.waitFor("search prompt", "search in results")
+	h.keys("beta")
+	h.key(tuicore.KeyEnter)
+	h.waitFor("results match", "beta: match 1/1 in the results")
+
+	// The explorer searches the VISIBLE node labels (a collapsed subtree
+	// is not on screen, so it is not searchable — same as the eye sees).
+	h.ctrl('h')
+	h.keys("/")
+	h.waitFor("search prompt", "search in explorer")
+	h.keys("notes")
+	h.key(tuicore.KeyEnter)
+	h.waitFor("explorer match", "notes: match 1/1 in the explorer")
+	h.keys("/")
+	h.keys("songs") // collapsed away → honestly reported as no match
+	h.key(tuicore.KeyEnter)
+	h.waitFor("explorer miss", "no match for songs in the explorer")
+
+	// The query editor searches its own lines (the buffer was emptied by
+	// the pane-motion probe above, so give it content first).
+	h.ctrl('l')
+	h.keys("i")
+	h.keys("SELECT id FROM songs")
+	h.keys("jk")
+	h.keys("/")
+	h.waitFor("search prompt", "search in query")
+	h.keys("songs")
+	h.key(tuicore.KeyEnter)
+	h.waitFor("editor match", "songs: match 1/1 in the query")
+	h.keys("n") // single match: n wraps back onto it
+	h.waitFor("editor wrap", "songs: match 1/1 in the query")
 
 	// 6. The WHERE-less guard surfaces as a structured status message.
 	h.keys("Vd")
@@ -342,16 +394,27 @@ func TestUIFullFlow(t *testing.T) {
 		t.Fatalf("original note clobbered: %q", string(ext))
 	}
 
-	// 8. Help float from the root `?` binding.
+	// 8. `?` shows the CONTEXT keys in the bottom-right corner (the full
+	//    leader table lives behind SPC ?).
 	h.key('?')
-	h.waitFor("help float", "leader commands")
+	h.waitFor("context keys", "query editor — keys")
+	h.waitFor("context binding", "run the query")
+	h.key(tuicore.KeyEscape) // any key dismisses the card
+	h.key(' ')
+	h.keys("?")
+	h.waitFor("leader help", "leader commands")
 	h.key(tuicore.KeyEscape)
 
 	// 9. Explorer drill-down to columns, then Enter on the table scaffolds
 	//    from the server-quoted identifier.
 	h.key(' ')
 	h.keys("e")
-	h.keys("l") // expand the demo connection → schemas
+	// Start from a known row: g jumps to the first (the workspace), then
+	// down onto the connection — the search above left the cursor
+	// wherever its match was.
+	h.keys("g")
+	h.keys("jj") // → connections → the demo connection
+	h.keys("l")  // expand it → schemas
 	h.waitFor("schema listed", "▸ main")
 	h.keys("jl") // onto schema "main", expand → sections
 	h.waitFor("sections", "views")

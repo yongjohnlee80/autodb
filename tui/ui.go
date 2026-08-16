@@ -49,7 +49,7 @@ type Model struct {
 	noteDirty         bool
 	noteGen           uint64 // note-load generation; latest open wins
 	zoomed            bool
-	floats            []*widget.Float
+	floats            []openFloatRef
 	statusMsg         string
 	running           bool
 	connecting        bool   // a connectTask is in flight; suppress duplicates
@@ -58,6 +58,9 @@ type Model struct {
 	hadAuth           bool   // watches the token-empty edge for the login re-prompt
 	authPromptPending bool   // login prompt retained while a modal was open
 	pendingCtrlW      bool   // Ctrl-w chord prefix (Ctrl-w z = zoom alias)
+	searchQuery       string // last / pattern; n and N walk its matches
+	explorerFocused   bool   // last applied cursor styling (focused = cyan)
+	resultsFocused    bool
 }
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
@@ -227,9 +230,9 @@ func (m *Model) handleStartup(d startupDone) {
 // dismissFloats hides every open float (a (re)connect invalidated the
 // state they were built against).
 func (m *Model) dismissFloats() {
-	for _, f := range append([]*widget.Float(nil), m.floats...) {
-		if f.Shown() {
-			f.Hide()
+	for _, f := range append([]openFloatRef(nil), m.floats...) {
+		if f.f.Shown() {
+			f.f.Hide()
 		}
 	}
 }
@@ -682,6 +685,7 @@ func (m *Model) loadScaffold(sql string) {
 // --- layout / render / events ------------------------------------------------------
 
 func (m *Model) Layout(c tui.Constraints) tui.Size {
+	m.applyCursorStyles() // cheap: only re-styles on a focus transition
 	sz := m.ctx.LayoutChild(m.host, c)
 	m.ctx.PlaceChild(m.host, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
 	return c.Constrain(sz)
@@ -816,9 +820,25 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 		}
 		return true
 	}
-	if k.Text == "?" && !m.modalOpen() {
-		m.openHelp()
+	// `?` is context help everywhere — including inside a modal, whose
+	// own actions it reports.
+	if k.Text == "?" {
+		m.openHints()
 		return true
+	}
+	// In-panel search, vim vocabulary: / prompts, n / N walk the matches.
+	if !m.modalOpen() {
+		switch k.Text {
+		case "/":
+			m.openSearch()
+			return true
+		case "n":
+			m.searchNext(+1)
+			return true
+		case "N":
+			m.searchNext(-1)
+			return true
+		}
 	}
 	return false
 }
@@ -868,6 +888,9 @@ func (m *Model) openHelp() {
 	for _, e := range m.leaderEntries() {
 		fmt.Fprintf(&sb, "  %c   %s\n", e.key, e.label)
 	}
+	sb.WriteString("\nsearch\n\n")
+	sb.WriteString("  /              search the focused panel (explorer, query, results)\n")
+	sb.WriteString("  n / N          next / previous match\n")
 	sb.WriteString("\nglobal keys\n\n")
 	sb.WriteString("  Ctrl-h/j/k/l   move between panes (left/down/up/right)\n")
 	sb.WriteString("  Ctrl-w z       zoom focused pane\n")
@@ -878,8 +901,26 @@ func (m *Model) openHelp() {
 	m.openTextFloat("help", sb.String(), 64)
 }
 
-// cursorRowStyle is the ONE selection fill for every list-shaped
-// surface (explorer tree, manager tables, results, row inspect): ANSI
-// cyan behind black text — readable in light and dark terminals
-// (Johno, M6 manual testing: the TokenPrimary fill was blinding).
-var cursorRowStyle = style.New().Background(style.ANSI(6)).Foreground(style.ANSI(0))
+// Selection fills (Johno, M6 manual testing): ANSI cyan behind black in
+// the FOCUSED panel, gray behind white everywhere else, so the cursor is
+// always visible but only one panel reads as active. The TokenPrimary
+// default was blinding.
+var (
+	cursorRowStyle   = style.New().Background(style.ANSI(6)).Foreground(style.ANSI(0))
+	cursorRowBlurred = style.New().Background(style.ANSI(8)).Foreground(style.ANSI(15))
+)
+
+// Float widths: managers hold a table plus a wrapped key footer; the `?`
+// key card is a narrow corner reference.
+const (
+	managerWidth = 96
+	hintWidth    = 56
+)
+
+// cursorStyle picks the fill for a panel's focus state.
+func cursorStyle(focused bool) style.Style {
+	if focused {
+		return cursorRowStyle
+	}
+	return cursorRowBlurred
+}

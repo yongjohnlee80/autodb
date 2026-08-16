@@ -26,8 +26,8 @@ type resultsPanel struct {
 
 	table   tui.Component // *widget.Table[[]any] when a read result is shown
 	rawList *widget.List[[]any]
-	jsonV   *widget.BufferView
-	text    *widget.Text // placeholder / write summaries
+	jsonV   *widget.Editor // read-only vim viewer over the JSON document
+	text    *widget.Text   // placeholder / write summaries
 	current tui.Component
 }
 
@@ -97,14 +97,12 @@ func (p *resultsPanel) rebuild() {
 		p.swap(p.text)
 	case p.jsonMode:
 		if p.jsonV == nil {
-			p.jsonV = widget.NewBufferView()
+			// A read-only Editor, not a log view: the JSON is a document
+			// you navigate, select, and yank with the vim keys — but
+			// cannot edit (Johno, M6 manual testing).
+			p.jsonV = widget.NewEditor()
+			p.jsonV.SetReadOnly(true)
 		}
-		// MOUNT FIRST: BufferView binds its writer handle in Init and
-		// drops writes while unmounted (view.alive is false, the app
-		// handle is nil) — writing before the swap silently produced an
-		// empty JSON view.
-		p.swap(p.jsonV)
-		p.jsonV.Clear()
 		out := make([]map[string]any, 0, len(res.Rows))
 		for _, row := range res.Rows {
 			m := make(map[string]any, len(res.Columns))
@@ -119,8 +117,9 @@ func (p *resultsPanel) rebuild() {
 		if err != nil {
 			b = []byte(err.Error())
 		}
-		_, _ = p.jsonV.Writer().Write(append(b, '\n'))
-		p.jsonV.ScrollTo(0) // a document, not a log tail
+		p.jsonV.SetValue(string(b))
+		p.jsonV.SetReadOnly(true) // SetValue is a document-boundary op
+		p.swap(p.jsonV)
 	default:
 		cols := make([]widget.TableColumn[[]any], len(res.Columns))
 		for i, name := range res.Columns {
