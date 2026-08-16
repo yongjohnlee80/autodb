@@ -1143,9 +1143,19 @@ const (
 	statusError
 )
 
+// Explicit colours, not palette indices: terminals render ANSI 1/2 with
+// their own idea of "red" and "green", and Bold promotes many of them to
+// the BRIGHT variant — which came out as pink-on-pale, unreadable
+// (Johno, M6 manual testing). Dark red / dark green under plain white
+// reads the same everywhere, and downsamples sanely on 256-colour
+// terminals.
 var (
-	statusOKStyle    = style.New().Background(style.ANSI(2)).Foreground(style.ANSI(15)).Bold(true)
-	statusErrorStyle = style.New().Background(style.ANSI(1)).Foreground(style.ANSI(15)).Bold(true)
+	statusOKStyle = style.New().
+			Background(style.RGB(21, 87, 36)).
+			Foreground(style.RGB(255, 255, 255))
+	statusErrorStyle = style.New().
+				Background(style.RGB(139, 0, 0)).
+				Foreground(style.RGB(255, 255, 255))
 )
 
 // cursorStyle picks the fill for a panel's focus state.
