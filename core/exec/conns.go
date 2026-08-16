@@ -32,13 +32,13 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 	var conn dao.DataConn
 	switch row.Engine {
 	case "postgres":
-		// Per-PHYSICAL-connection grammar verification via pgxpool's
-		// AfterConnect hook: every pooled connection — including future
-		// replacements — is checked at establish time and discarded on
-		// mismatch. Statements then run in plain autocommit, which keeps
-		// transaction-prohibited DDL (VACUUM, CREATE DATABASE, CREATE INDEX
-		// CONCURRENTLY) executable (ADR-0055 rev 4; lector M4 r4).
-		conn, err = postgres.OpenNamed(ctx, name, string(dsn), pgAfterConnectVerify())
+		// Checkout-time grammar verification via pgxpool's PrepareConn
+		// hook: the session's parsing mode is verified before EVERY
+		// acquisition, so neither a fresh incompatible connection nor a
+		// session mutated after pooling (set_config through a verb-level
+		// read) can serve a statement. Autocommit is preserved, keeping
+		// transaction-prohibited DDL executable (ADR-0055 rev 5).
+		conn, err = postgres.OpenNamed(ctx, name, string(dsn), pgPrepareConnVerify())
 	case "mysql":
 		conn, err = mysql.OpenNamed(ctx, name, string(dsn))
 	case "sqlite":

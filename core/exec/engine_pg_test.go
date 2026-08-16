@@ -64,6 +64,24 @@ func TestEngine_PostgresTarget(t *testing.T) {
 		t.Errorf("VACUUM failed (tx-pinning regression?): %v", err)
 	}
 
+	// Session-drift pin (lector M4 r5, reproduced red pre-fix): a verb-level
+	// read may mutate the session (set_config, is_local=false), but the
+	// PrepareConn checkout verification must destroy that session before it
+	// serves another statement — SHOW must never observe scs=off.
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID,
+		"SELECT set_config('standard_conforming_strings','off',false)", testIP); err != nil {
+		t.Fatalf("set_config: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		res, err := f.eng.Execute(ctx, f.rootTok, connID, "SHOW standard_conforming_strings", testIP)
+		if err != nil {
+			t.Fatalf("show after drift: %v", err)
+		}
+		if v, _ := res.Rows[0][0].(string); v != "on" {
+			t.Fatalf("attempt %d executed on drifted session (scs=%q)", i+1, v)
+		}
+	}
+
 	// Dollar-quoted semicolons stay one statement.
 	if _, err := f.eng.Execute(ctx, f.rootTok, connID, "SELECT $x$; not a second statement $x$", testIP); err != nil {
 		t.Errorf("dollar-quote select: %v", err)

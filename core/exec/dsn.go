@@ -84,30 +84,42 @@ func ValidateDSN(engineName, dsn string) error {
 	}
 }
 
-// pgAfterConnectVerify returns a golib postgres.Option installing a pgxpool
-// AfterConnect hook: every PHYSICAL connection the pool establishes —
-// including replacements over the pool's lifetime — has its parsing mode
-// verified before it serves a single statement, and is discarded on
-// mismatch. This is the authoritative postgres grammar guarantee; it lets
-// statements run in plain autocommit so transaction-prohibited DDL stays
-// executable (ADR-0055 rev 4).
-func pgAfterConnectVerify() golibpg.Option {
+// pgPrepareConnVerify returns a golib postgres.Option installing a pgxpool
+// PrepareConn hook: the session's parsing mode is verified before EVERY
+// acquisition — not only at establishment — so a session mutated after it
+// was pooled (e.g. a verb-level read running
+// `SELECT set_config('standard_conforming_strings','off',false)`, which the
+// v1 reader contract permits) can never serve a later statement (ADR-0055
+// rev 5; lector M4 r5). A drifted session returns (false, nil): pgxpool
+// destroys it and retries on a fresh connection — self-healing — while a
+// server whose DEFAULT is incompatible fails every fresh connection and
+// surfaces pgxpool's bounded-attempts acquire error, fail-closed.
+// Statements stay in plain autocommit, so transaction-prohibited DDL
+// (VACUUM, CREATE DATABASE, CONCURRENTLY forms) remains executable.
+// Existing PrepareConn/BeforeAcquire hooks are chained first.
+func pgPrepareConnVerify() golibpg.Option {
 	return func(cfg *pgxpool.Config) {
-		prev := cfg.AfterConnect
-		cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
-			if prev != nil {
-				if err := prev(ctx, conn); err != nil {
-					return err
+		prevPrepare := cfg.PrepareConn
+		prevBefore := cfg.BeforeAcquire //nolint:staticcheck // chained for completeness
+		cfg.PrepareConn = func(ctx context.Context, conn *pgx.Conn) (bool, error) {
+			if prevPrepare != nil {
+				ok, err := prevPrepare(ctx, conn)
+				if !ok || err != nil {
+					return ok, err
 				}
+			} else if prevBefore != nil && !prevBefore(ctx, conn) {
+				return false, nil
 			}
 			var scs string
 			if err := conn.QueryRow(ctx, "SHOW standard_conforming_strings").Scan(&scs); err != nil {
-				return fmt.Errorf("exec: verifying standard_conforming_strings on new connection: %w", err)
+				return false, fmt.Errorf("exec: verifying standard_conforming_strings at checkout: %w", err)
 			}
 			if !strings.EqualFold(strings.TrimSpace(scs), "on") {
-				return fmt.Errorf("exec: connection has standard_conforming_strings=off, which changes string parsing the classifier relies on")
+				// Drifted or hostile session: destroy it and let the pool
+				// retry on a fresh connection.
+				return false, nil
 			}
-			return nil
+			return true, nil
 		}
 	}
 }
