@@ -41,8 +41,13 @@ type explorer struct {
 	applied   uint64            // of issue order; stale sets must not win
 }
 
-// encSeg escapes one free-text ID segment; decSeg reverses it.
-func encSeg(s string) string { return url.PathEscape(s) }
+// encSeg escapes one free-text ID segment; decSeg reverses it. NOTE:
+// url.PathEscape deliberately leaves ':' intact (legal in an RFC 3986
+// path segment), so the delimiter is percent-encoded explicitly — the
+// grammar's only structural byte can never appear in a segment.
+var segEscaper = strings.NewReplacer("%", "%25", ":", "%3A")
+
+func encSeg(s string) string { return segEscaper.Replace(s) }
 
 func decSeg(s string) string {
 	out, err := url.PathUnescape(s)
@@ -121,16 +126,16 @@ func (e *explorer) HandleEvent(ev tui.Event) bool {
 
 // Reload rebuilds the roots from the session's workspace view.
 func (e *explorer) Reload() {
-	gen := e.model.session.Gen()
+	bound := e.model.session.Bind() // pin the epoch at issuance
 	e.seq++
 	seq := e.seq
 	e.ctx.Go(func(c context.Context) (any, error) {
-		wss, err := e.model.session.Workspaces(c)
+		wss, err := bound.Workspaces(c)
 		if err != nil {
 			return nil, err
 		}
 		orphans, _ := e.model.notes.ListWorkspaceDirs()
-		return wsLoaded{gen: gen, seq: seq, wss: wss, noteDirs: orphans}, nil
+		return wsLoaded{gen: bound.Gen(), seq: seq, wss: wss, noteDirs: orphans}, nil
 	})
 }
 
@@ -195,7 +200,7 @@ func (e *explorer) applyWorkspaces(l wsLoaded) {
 // loadChildren answers one ExpandRequestEvent asynchronously.
 func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 	id := node.ID()
-	sess := e.model.session
+	sess := e.model.session.Bind() // pin the epoch at issuance
 	sgen := sess.Gen()
 	fail := func(err error) treeLoaded {
 		return treeLoaded{node: node, gen: gen, sgen: sgen, err: WireErrorMessage(err)}
@@ -324,6 +329,17 @@ type treeLoaded struct {
 // HandleTaskResult installs one settled load (called from the explorer's
 // addressed TaskResult).
 func (e *explorer) handleTask(tr tui.TaskResult) bool {
+	handled := e.applyTask(tr)
+	if handled {
+		// Explorer results are ADDRESSED here and never reach the Model's
+		// task path — a CodeAuth that cleared the session during a tree
+		// load must still surface the login prompt.
+		e.model.checkAuth()
+	}
+	return handled
+}
+
+func (e *explorer) applyTask(tr tui.TaskResult) bool {
 	l, ok := tr.Value.(treeLoaded)
 	if !ok {
 		if w, ok := tr.Value.(wsLoaded); ok {

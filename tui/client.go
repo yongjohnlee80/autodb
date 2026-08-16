@@ -119,11 +119,45 @@ func (s *Session) Err() error {
 	return s.client.Err()
 }
 
-// snapshot captures the state a worker-goroutine operation runs against.
-func (s *Session) snapshot() (cli *golibrpc.Client, gen uint64, token string) {
+// Bound is a connection-epoch-pinned view of the Session: every call goes
+// to the client and token captured at Bind time. UI actions bind at
+// ISSUANCE (on the loop goroutine), so queued work that a reconnect
+// supersedes is refused before the RPC — and even past the refusal's
+// race window it can only reach the pinned OLD client (already closed by
+// the transition), never the new server. Mutations cannot cross epochs.
+type Bound struct {
+	s     *Session
+	cli   *golibrpc.Client
+	gen   uint64
+	token string
+}
+
+// Bind pins the current epoch. Call it where the user's intent forms —
+// the action issuance point — not inside the worker.
+func (s *Session) Bind() *Bound {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.client, s.gen, s.token
+	return &Bound{s: s, cli: s.client, gen: s.gen, token: s.token}
+}
+
+// Gen reports the pinned epoch (result tagging at issuance sites).
+func (b *Bound) Gen() uint64 { return b.gen }
+
+// errSuperseded refuses work whose issuing epoch has been replaced.
+var errSuperseded = errors.New("tui: connection changed since this action was issued")
+
+// ensure rejects the call before the RPC when the view is unusable.
+func (b *Bound) ensure() error {
+	if b.cli == nil {
+		return errors.New("tui: not connected")
+	}
+	b.s.mu.Lock()
+	current := b.s.gen == b.gen
+	b.s.mu.Unlock()
+	if !current {
+		return errSuperseded
+	}
+	return nil
 }
 
 // Connect implements the FE contract (ADR-0056 §3): dial; on refusal spawn
@@ -236,36 +270,34 @@ func (s *Session) Disconnect() {
 func (s *Session) Close() { s.Disconnect() }
 
 // call issues a tokenless method (hello aside, only auth.needs_bootstrap).
-func (s *Session) call(ctx context.Context, method string, params ...any) (any, error) {
-	cli, _, _ := s.snapshot()
-	if cli == nil {
-		return nil, errors.New("tui: not connected")
+func (b *Bound) call(ctx context.Context, method string, params ...any) (any, error) {
+	if err := b.ensure(); err != nil {
+		return nil, err
 	}
-	return cli.Call(ctx, method, params...)
+	return b.cli.Call(ctx, method, params...)
 }
 
-// authed is the token-first chokepoint: it snapshots the epoch and token,
-// prepends the token, and on a public CodeAuth failure invalidates the
-// login state — but ONLY if this exact token is still current in this
-// exact epoch, so a stale failure can never clear a newer login.
-func (s *Session) authed(ctx context.Context, method string, extra ...any) (any, error) {
-	cli, gen, tok := s.snapshot()
-	if cli == nil {
-		return nil, errors.New("tui: not connected")
+// authed is the token-first chokepoint over the PINNED client and token;
+// on a public CodeAuth failure it invalidates the login state — but ONLY
+// if this exact token is still current in this exact epoch, so a stale
+// failure can never clear a newer login.
+func (b *Bound) authed(ctx context.Context, method string, extra ...any) (any, error) {
+	if err := b.ensure(); err != nil {
+		return nil, err
 	}
-	params := append([]any{tok}, extra...)
-	res, err := cli.Call(ctx, method, params...)
+	params := append([]any{b.token}, extra...)
+	res, err := b.cli.Call(ctx, method, params...)
 	if err != nil {
 		var re *golibrpc.Error
 		if errors.As(err, &re) && re.Code == rpc.CodeAuth {
 			// Stale token or locked store: the UI's one recovery for both
 			// is the login flow (the Model watches the token-empty edge).
-			s.mu.Lock()
-			if s.gen == gen && s.token == tok {
-				s.token = ""
-				s.user = UserInfo{}
+			b.s.mu.Lock()
+			if b.s.gen == b.gen && b.s.token == b.token {
+				b.s.token = ""
+				b.s.user = UserInfo{}
 			}
-			s.mu.Unlock()
+			b.s.mu.Unlock()
 		}
 		return nil, err
 	}
@@ -274,13 +306,13 @@ func (s *Session) authed(ctx context.Context, method string, extra ...any) (any,
 
 // --- typed projections -----------------------------------------------------
 
-func (s *Session) NeedsBootstrap(ctx context.Context) (bool, error) {
-	res, err := s.call(ctx, "auth.needs_bootstrap")
+func (b *Bound) NeedsBootstrap(ctx context.Context) (bool, error) {
+	res, err := b.call(ctx, "auth.needs_bootstrap")
 	if err != nil {
 		return false, err
 	}
-	b, _ := res.(bool)
-	return b, nil
+	needs, _ := res.(bool)
+	return needs, nil
 }
 
 // adoptLogin installs a login result unless the epoch moved on.
@@ -300,44 +332,35 @@ func (s *Session) adoptLogin(res any, gen uint64) {
 	s.user = u
 }
 
-func (s *Session) Bootstrap(ctx context.Context, name, pass string) error {
-	cli, gen, _ := s.snapshot()
-	if cli == nil {
-		return errors.New("tui: not connected")
-	}
-	res, err := cli.Call(ctx, "auth.bootstrap", name, pass)
+func (b *Bound) Bootstrap(ctx context.Context, name, pass string) error {
+	res, err := b.call(ctx, "auth.bootstrap", name, pass)
 	if err != nil {
 		return err
 	}
-	s.adoptLogin(res, gen)
+	b.s.adoptLogin(res, b.gen)
 	return nil
 }
 
-func (s *Session) Login(ctx context.Context, name, pass string) error {
-	cli, gen, _ := s.snapshot()
-	if cli == nil {
-		return errors.New("tui: not connected")
-	}
-	res, err := cli.Call(ctx, "auth.login", name, pass)
+func (b *Bound) Login(ctx context.Context, name, pass string) error {
+	res, err := b.call(ctx, "auth.login", name, pass)
 	if err != nil {
 		return err
 	}
-	s.adoptLogin(res, gen)
+	b.s.adoptLogin(res, b.gen)
 	return nil
 }
 
-func (s *Session) Logout(ctx context.Context) error {
-	cli, gen, tok := s.snapshot()
-	if tok == "" || cli == nil {
+func (b *Bound) Logout(ctx context.Context) error {
+	if b.token == "" {
 		return nil
 	}
-	_, err := cli.Call(ctx, "auth.logout", tok)
-	s.mu.Lock()
-	if s.gen == gen && s.token == tok {
-		s.token = ""
-		s.user = UserInfo{}
+	_, err := b.authed(ctx, "auth.logout")
+	b.s.mu.Lock()
+	if b.s.gen == b.gen && b.s.token == b.token {
+		b.s.token = ""
+		b.s.user = UserInfo{}
 	}
-	s.mu.Unlock()
+	b.s.mu.Unlock()
 	return err
 }
 
@@ -348,8 +371,8 @@ type ConnInfo struct {
 	Engine string
 }
 
-func (s *Session) Connections(ctx context.Context) ([]ConnInfo, error) {
-	res, err := s.authed(ctx, "conn.list")
+func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
+	res, err := b.authed(ctx, "conn.list")
 	if err != nil {
 		return nil, err
 	}
@@ -361,8 +384,8 @@ func (s *Session) Connections(ctx context.Context) ([]ConnInfo, error) {
 	return out, nil
 }
 
-func (s *Session) CreateConnection(ctx context.Context, name, engine, dsn string) (int64, error) {
-	res, err := s.authed(ctx, "conn.create", name, engine, dsn)
+func (b *Bound) CreateConnection(ctx context.Context, name, engine, dsn string) (int64, error) {
+	res, err := b.authed(ctx, "conn.create", name, engine, dsn)
 	if err != nil {
 		return 0, err
 	}
@@ -370,13 +393,13 @@ func (s *Session) CreateConnection(ctx context.Context, name, engine, dsn string
 	return id, nil
 }
 
-func (s *Session) TestConnection(ctx context.Context, connID int64) error {
-	_, err := s.authed(ctx, "conn.test", connID)
+func (b *Bound) TestConnection(ctx context.Context, connID int64) error {
+	_, err := b.authed(ctx, "conn.test", connID)
 	return err
 }
 
-func (s *Session) DeleteConnection(ctx context.Context, connID int64) error {
-	_, err := s.authed(ctx, "conn.delete", connID)
+func (b *Bound) DeleteConnection(ctx context.Context, connID int64) error {
+	_, err := b.authed(ctx, "conn.delete", connID)
 	return err
 }
 
@@ -387,8 +410,8 @@ type WorkspaceInfo struct {
 	Connections []ConnInfo
 }
 
-func (s *Session) Workspaces(ctx context.Context) ([]WorkspaceInfo, error) {
-	res, err := s.authed(ctx, "workspace.list")
+func (b *Bound) Workspaces(ctx context.Context) ([]WorkspaceInfo, error) {
+	res, err := b.authed(ctx, "workspace.list")
 	if err != nil {
 		return nil, err
 	}
@@ -406,8 +429,8 @@ func (s *Session) Workspaces(ctx context.Context) ([]WorkspaceInfo, error) {
 	return out, nil
 }
 
-func (s *Session) CreateWorkspace(ctx context.Context, name string) (int64, error) {
-	res, err := s.authed(ctx, "workspace.create", name)
+func (b *Bound) CreateWorkspace(ctx context.Context, name string) (int64, error) {
+	res, err := b.authed(ctx, "workspace.create", name)
 	if err != nil {
 		return 0, err
 	}
@@ -415,23 +438,23 @@ func (s *Session) CreateWorkspace(ctx context.Context, name string) (int64, erro
 	return id, nil
 }
 
-func (s *Session) RenameWorkspace(ctx context.Context, wsID int64, name string) error {
-	_, err := s.authed(ctx, "workspace.rename", wsID, name)
+func (b *Bound) RenameWorkspace(ctx context.Context, wsID int64, name string) error {
+	_, err := b.authed(ctx, "workspace.rename", wsID, name)
 	return err
 }
 
-func (s *Session) AttachConnection(ctx context.Context, wsID, connID int64) error {
-	_, err := s.authed(ctx, "workspace.attach", wsID, connID)
+func (b *Bound) AttachConnection(ctx context.Context, wsID, connID int64) error {
+	_, err := b.authed(ctx, "workspace.attach", wsID, connID)
 	return err
 }
 
-func (s *Session) DetachConnection(ctx context.Context, wsID, connID int64) error {
-	_, err := s.authed(ctx, "workspace.detach", wsID, connID)
+func (b *Bound) DetachConnection(ctx context.Context, wsID, connID int64) error {
+	_, err := b.authed(ctx, "workspace.detach", wsID, connID)
 	return err
 }
 
-func (s *Session) DeleteWorkspace(ctx context.Context, wsID int64) error {
-	_, err := s.authed(ctx, "workspace.delete", wsID)
+func (b *Bound) DeleteWorkspace(ctx context.Context, wsID int64) error {
+	_, err := b.authed(ctx, "workspace.delete", wsID)
 	return err
 }
 
@@ -443,8 +466,8 @@ type TableInfo struct {
 	Quoted string
 }
 
-func (s *Session) Schemas(ctx context.Context, connID int64) ([]string, error) {
-	res, err := s.authed(ctx, "schema.schemas", connID)
+func (b *Bound) Schemas(ctx context.Context, connID int64) ([]string, error) {
+	res, err := b.authed(ctx, "schema.schemas", connID)
 	if err != nil {
 		return nil, err
 	}
@@ -457,8 +480,8 @@ func (s *Session) Schemas(ctx context.Context, connID int64) ([]string, error) {
 	return out, nil
 }
 
-func (s *Session) Tables(ctx context.Context, connID int64, schema string) ([]TableInfo, error) {
-	res, err := s.authed(ctx, "schema.tables", connID, schema)
+func (b *Bound) Tables(ctx context.Context, connID int64, schema string) ([]TableInfo, error) {
+	res, err := b.authed(ctx, "schema.tables", connID, schema)
 	if err != nil {
 		return nil, err
 	}
@@ -481,8 +504,8 @@ type ColumnInfo struct {
 	PK       bool
 }
 
-func (s *Session) Columns(ctx context.Context, connID int64, schema, table string) ([]ColumnInfo, error) {
-	res, err := s.authed(ctx, "schema.columns", connID, schema, table)
+func (b *Bound) Columns(ctx context.Context, connID int64, schema, table string) ([]ColumnInfo, error) {
+	res, err := b.authed(ctx, "schema.columns", connID, schema, table)
 	if err != nil {
 		return nil, err
 	}
@@ -504,8 +527,8 @@ type RoutineInfo struct {
 	Signature string
 }
 
-func (s *Session) Routines(ctx context.Context, connID int64, schema string) (supported bool, routines []RoutineInfo, err error) {
-	res, err := s.authed(ctx, "schema.routines", connID, schema)
+func (b *Bound) Routines(ctx context.Context, connID int64, schema string) (supported bool, routines []RoutineInfo, err error) {
+	res, err := b.authed(ctx, "schema.routines", connID, schema)
 	if err != nil {
 		return false, nil, err
 	}
@@ -531,8 +554,8 @@ type ExecResult struct {
 	Duration time.Duration
 }
 
-func (s *Session) Run(ctx context.Context, connID int64, sql string) (*ExecResult, error) {
-	res, err := s.authed(ctx, "exec.run", connID, sql)
+func (b *Bound) Run(ctx context.Context, connID int64, sql string) (*ExecResult, error) {
+	res, err := b.authed(ctx, "exec.run", connID, sql)
 	if err != nil {
 		return nil, err
 	}
@@ -595,8 +618,8 @@ type UserRow struct {
 	Disabled bool
 }
 
-func (s *Session) Users(ctx context.Context) ([]UserRow, error) {
-	res, err := s.authed(ctx, "auth.user_list")
+func (b *Bound) Users(ctx context.Context) ([]UserRow, error) {
+	res, err := b.authed(ctx, "auth.user_list")
 	if err != nil {
 		return nil, err
 	}
@@ -611,8 +634,8 @@ func (s *Session) Users(ctx context.Context) ([]UserRow, error) {
 	return out, nil
 }
 
-func (s *Session) CreateUser(ctx context.Context, name, pass, role string) (int64, error) {
-	res, err := s.authed(ctx, "auth.user_create", name, pass, role)
+func (b *Bound) CreateUser(ctx context.Context, name, pass, role string) (int64, error) {
+	res, err := b.authed(ctx, "auth.user_create", name, pass, role)
 	if err != nil {
 		return 0, err
 	}
@@ -620,27 +643,27 @@ func (s *Session) CreateUser(ctx context.Context, name, pass, role string) (int6
 	return id, nil
 }
 
-func (s *Session) SetUserRole(ctx context.Context, userID int64, role string) error {
-	_, err := s.authed(ctx, "auth.user_role", userID, role)
+func (b *Bound) SetUserRole(ctx context.Context, userID int64, role string) error {
+	_, err := b.authed(ctx, "auth.user_role", userID, role)
 	return err
 }
 
-func (s *Session) SetUserDisabled(ctx context.Context, userID int64, disabled bool) error {
-	_, err := s.authed(ctx, "auth.user_disable", userID, disabled)
+func (b *Bound) SetUserDisabled(ctx context.Context, userID int64, disabled bool) error {
+	_, err := b.authed(ctx, "auth.user_disable", userID, disabled)
 	return err
 }
 
-func (s *Session) RemoveUser(ctx context.Context, userID int64) error {
-	_, err := s.authed(ctx, "auth.user_remove", userID)
+func (b *Bound) RemoveUser(ctx context.Context, userID int64) error {
+	_, err := b.authed(ctx, "auth.user_remove", userID)
 	return err
 }
 
-func (s *Session) ResetUserPassphrase(ctx context.Context, userID int64, newPass string) error {
-	_, err := s.authed(ctx, "auth.passphrase_reset", userID, newPass)
+func (b *Bound) ResetUserPassphrase(ctx context.Context, userID int64, newPass string) error {
+	_, err := b.authed(ctx, "auth.passphrase_reset", userID, newPass)
 	return err
 }
 
-func (s *Session) AddGrant(ctx context.Context, userID, connID int64, role string) error {
-	_, err := s.authed(ctx, "auth.grant_add", userID, connID, role)
+func (b *Bound) AddGrant(ctx context.Context, userID, connID int64, role string) error {
+	_, err := b.authed(ctx, "auth.grant_add", userID, connID, role)
 	return err
 }

@@ -42,19 +42,20 @@ type Model struct {
 	status      *widget.StatusBar
 
 	// UI state.
-	activeWs     int64
-	activeConn   int64
-	activeConnNm string
-	curNote      *Note
-	noteDirty    bool
-	noteGen      uint64 // note-load generation; latest open wins
-	zoomed       bool
-	floats       []*widget.Float
-	statusMsg    string
-	running      bool
-	connecting   bool // a connectTask is in flight; suppress duplicates
-	hadAuth      bool // watches the token-empty edge for the login re-prompt
-	pendingCtrlW bool // Ctrl-w chord prefix (Ctrl-w z = zoom alias)
+	activeWs          int64
+	activeConn        int64
+	activeConnNm      string
+	curNote           *Note
+	noteDirty         bool
+	noteGen           uint64 // note-load generation; latest open wins
+	zoomed            bool
+	floats            []*widget.Float
+	statusMsg         string
+	running           bool
+	connecting        bool // a connectTask is in flight; suppress duplicates
+	hadAuth           bool // watches the token-empty edge for the login re-prompt
+	authPromptPending bool // login prompt retained while a modal was open
+	pendingCtrlW      bool // Ctrl-w chord prefix (Ctrl-w z = zoom alias)
 }
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
@@ -124,6 +125,7 @@ func (m *Model) MarkDirtyAll() { m.ctx.MarkDirty() }
 // --- connection lifecycle -----------------------------------------------------
 
 type startupDone struct {
+	gen             uint64 // epoch Connect installed; stale if it moved on
 	instanceChanged bool
 	needsBootstrap  bool
 	err             error
@@ -145,11 +147,14 @@ func (m *Model) connectTask() {
 		if err != nil {
 			return startupDone{err: err}, nil
 		}
-		needs, err := sess.NeedsBootstrap(c)
+		// Bind AFTER Connect: this is the one action whose issuance point
+		// is the just-installed epoch, not the loop-side dispatch.
+		bound := sess.Bind()
+		needs, err := bound.NeedsBootstrap(c)
 		if err != nil {
 			return startupDone{err: err}, nil
 		}
-		return startupDone{instanceChanged: changed, needsBootstrap: needs}, nil
+		return startupDone{gen: bound.Gen(), instanceChanged: changed, needsBootstrap: needs}, nil
 	})
 }
 
@@ -160,6 +165,9 @@ func (m *Model) reconnect() { m.connectTask() }
 func (m *Model) watchDisconnect() {
 	gen := m.session.Gen()
 	done := m.session.Done()
+	if done == nil {
+		return // disconnected in the interim; nothing to watch
+	}
 	bus := m.ctx.Bus()
 	sess := m.session
 	go func() {
@@ -177,6 +185,13 @@ func (m *Model) handleStartup(d startupDone) {
 	m.running = false
 	if d.err != nil {
 		m.setStatus("connect failed: " + d.err.Error() + " — SPC x retries")
+		return
+	}
+	if d.gen != m.session.Gen() || !m.session.Connected() {
+		// A disconnect (or a newer connect) superseded this startup while
+		// its result was in flight — it must not watch, prompt, or claim
+		// a connection that no longer exists.
+		m.setStatus("connection changed — SPC x reconnects")
 		return
 	}
 	m.watchDisconnect()
@@ -231,7 +246,20 @@ func (m *Model) checkAuth() {
 	m.hadAuth = false
 	m.setStatus("session expired — login required")
 	m.refreshStatus()
-	if !m.modalOpen() {
+	if m.modalOpen() {
+		// A float (manager, form) is up: the prompt is RETAINED, not
+		// dropped — the dismiss path re-checks and opens login.
+		m.authPromptPending = true
+		return
+	}
+	m.openLogin()
+}
+
+// maybePromptLogin fires a retained login prompt once the float stack
+// empties (called from the float dismiss path).
+func (m *Model) maybePromptLogin() {
+	if m.authPromptPending && !m.modalOpen() {
+		m.authPromptPending = false
 		m.openLogin()
 	}
 }
@@ -254,22 +282,23 @@ func (m *Model) openBootstrap() {
 		if len(v[1]) < 8 {
 			return false, "passphrase must be at least 8 characters"
 		}
-		m.authTask("bootstrap", func(c context.Context) error {
-			return m.session.Bootstrap(c, name, v[1])
+		m.authTask("bootstrap", func(c context.Context, b *Bound) error {
+			return b.Bootstrap(c, name, v[1])
 		})
 		return true, ""
 	})
 }
 
 func (m *Model) openLogin() {
+	m.authPromptPending = false
 	m.openForm("login", []formField{
 		field("user"), field("passphrase", widget.WithMask('*')),
 	}, func(v []string) (bool, string) {
 		if strings.TrimSpace(v[0]) == "" {
 			return false, "user required"
 		}
-		m.authTask("login", func(c context.Context) error {
-			return m.session.Login(c, strings.TrimSpace(v[0]), v[1])
+		m.authTask("login", func(c context.Context, b *Bound) error {
+			return b.Login(c, strings.TrimSpace(v[0]), v[1])
 		})
 		return true, ""
 	})
@@ -281,10 +310,10 @@ type authDone struct {
 	err  error
 }
 
-func (m *Model) authTask(what string, fn func(context.Context) error) {
-	gen := m.session.Gen()
+func (m *Model) authTask(what string, fn func(context.Context, *Bound) error) {
+	bound := m.session.Bind() // pin the epoch at issuance (form submit)
 	m.ctx.Go(func(c context.Context) (any, error) {
-		return authDone{gen: gen, what: what, err: fn(c)}, nil
+		return authDone{gen: bound.Gen(), what: what, err: fn(c, bound)}, nil
 	})
 }
 
@@ -335,11 +364,10 @@ func (m *Model) runSQL(sql string) {
 	connID := m.activeConn
 	m.running = true
 	m.setStatus(fmt.Sprintf("running on %s…", m.activeConnNm))
-	sess := m.session
-	gen := sess.Gen()
+	bound := m.session.Bind() // pin the epoch at issuance
 	m.ctx.Go(func(c context.Context) (any, error) {
-		res, err := sess.Run(c, connID, sql)
-		return execDone{gen: gen, res: res, err: err}, nil
+		res, err := bound.Run(c, connID, sql)
+		return execDone{gen: bound.Gen(), res: res, err: err}, nil
 	})
 }
 

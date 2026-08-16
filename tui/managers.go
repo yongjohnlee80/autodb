@@ -39,14 +39,14 @@ type manager[T any] struct {
 	items   []T
 	hint    *widget.Text
 	actions []managerAction[T]
-	load    func(c context.Context) ([]T, error)
+	load    func(c context.Context, b *Bound) ([]T, error)
 	float   *widget.Float
 	seq     uint64 // reload sequencing: fetches can COMPLETE out of issue
 	applied uint64 // order; a stale row set must never overwrite a fresh one
 }
 
 func newManager[T any](m *Model, cols []widget.TableColumn[T],
-	load func(context.Context) ([]T, error), actions []managerAction[T]) *manager[T] {
+	load func(context.Context, *Bound) ([]T, error), actions []managerAction[T]) *manager[T] {
 	mg := &manager[T]{
 		model:   m,
 		table:   widget.NewTable(cols, widget.WithEmptyText[T]("empty")),
@@ -76,16 +76,16 @@ func (g *manager[T]) Init(ctx *tui.Context) {
 // Reload fetches rows off-loop and applies them via the Model's task path.
 func (g *manager[T]) Reload() {
 	load := g.load
-	gen := g.model.session.Gen()
+	bound := g.model.session.Bind() // pin the epoch at issuance
 	g.seq++
 	seq := g.seq
 	g.model.ctx.Go(func(c context.Context) (any, error) {
-		rows, err := load(c)
+		rows, err := load(c, bound)
 		if err != nil {
 			msg := WireErrorMessage(err)
-			return managerReload{gen: gen, apply: func() { g.model.setStatus(msg) }}, nil
+			return managerReload{gen: bound.Gen(), apply: func() { g.model.setStatus(msg) }}, nil
 		}
-		return managerReload{gen: gen, apply: func() {
+		return managerReload{gen: bound.Gen(), apply: func() {
 			if seq < g.applied {
 				return // an older fetch settling late; a newer set is shown
 			}
@@ -128,11 +128,11 @@ func (g *manager[T]) HandleEvent(ev tui.Event) bool {
 }
 
 // act wraps a session call: run it off-loop, surface the outcome, reload.
-func managerCall[T any](g *manager[T], what string, fn func(context.Context) error) {
-	gen := g.model.session.Gen()
+func managerCall[T any](g *manager[T], what string, fn func(context.Context, *Bound) error) {
+	bound := g.model.session.Bind() // pin the epoch at issuance (keypress)
 	g.model.ctx.Go(func(c context.Context) (any, error) {
-		err := fn(c)
-		return managerReload{gen: gen, apply: func() {
+		err := fn(c, bound)
+		return managerReload{gen: bound.Gen(), apply: func() {
 			if err != nil {
 				g.model.setStatus(what + ": " + WireErrorMessage(err))
 			} else {
@@ -147,7 +147,6 @@ func managerCall[T any](g *manager[T], what string, fn func(context.Context) err
 // --- connections ---------------------------------------------------------------
 
 func (m *Model) openConnManager() {
-	sess := m.session
 	cols := []widget.TableColumn[ConnInfo]{
 		{Title: "ID", Width: 5, Cell: func(c ConnInfo) string { return strconv.FormatInt(c.ID, 10) }},
 		{Title: "NAME", Cell: func(c ConnInfo) string { return c.Name }},
@@ -155,20 +154,20 @@ func (m *Model) openConnManager() {
 	}
 	var g *manager[ConnInfo]
 	g = newManager(m, cols,
-		func(c context.Context) ([]ConnInfo, error) { return sess.Connections(c) },
+		func(c context.Context, b *Bound) ([]ConnInfo, error) { return b.Connections(c) },
 		[]managerAction[ConnInfo]{
 			{'a', "add", func(ConnInfo, bool) { m.openConnForm(g) }},
 			{'t', "test", func(sel ConnInfo, ok bool) {
 				if ok {
-					managerCall(g, "test "+sel.Name, func(c context.Context) error {
-						return sess.TestConnection(c, sel.ID)
+					managerCall(g, "test "+sel.Name, func(c context.Context, b *Bound) error {
+						return b.TestConnection(c, sel.ID)
 					})
 				}
 			}},
 			{'d', "delete", func(sel ConnInfo, ok bool) {
 				if ok {
-					managerCall(g, "delete "+sel.Name, func(c context.Context) error {
-						return sess.DeleteConnection(c, sel.ID)
+					managerCall(g, "delete "+sel.Name, func(c context.Context, b *Bound) error {
+						return b.DeleteConnection(c, sel.ID)
 					})
 				}
 			}},
@@ -191,8 +190,8 @@ func (m *Model) openConnForm(g *manager[ConnInfo]) {
 		if name == "" || engine == "" || dsn == "" {
 			return false, "all fields are required"
 		}
-		managerCall(g, "create "+name, func(c context.Context) error {
-			_, err := m.session.CreateConnection(c, name, engine, dsn)
+		managerCall(g, "create "+name, func(c context.Context, b *Bound) error {
+			_, err := b.CreateConnection(c, name, engine, dsn)
 			return err
 		})
 		return true, ""
@@ -207,8 +206,8 @@ func (m *Model) openAttachForm(g *manager[ConnInfo], connID int64, connName stri
 		if err != nil {
 			return false, "numeric workspace id required"
 		}
-		managerCall(g, fmt.Sprintf("attach %s→ws %d", connName, wsID), func(c context.Context) error {
-			return m.session.AttachConnection(c, wsID, connID)
+		managerCall(g, fmt.Sprintf("attach %s→ws %d", connName, wsID), func(c context.Context, b *Bound) error {
+			return b.AttachConnection(c, wsID, connID)
 		})
 		return true, ""
 	})
@@ -217,7 +216,6 @@ func (m *Model) openAttachForm(g *manager[ConnInfo], connID int64, connName stri
 // --- workspaces -------------------------------------------------------------------
 
 func (m *Model) openWorkspaceManager() {
-	sess := m.session
 	cols := []widget.TableColumn[WorkspaceInfo]{
 		{Title: "ID", Width: 5, Cell: func(w WorkspaceInfo) string { return strconv.FormatInt(w.ID, 10) }},
 		{Title: "NAME", Cell: func(w WorkspaceInfo) string { return w.Name }},
@@ -225,7 +223,7 @@ func (m *Model) openWorkspaceManager() {
 	}
 	var g *manager[WorkspaceInfo]
 	g = newManager(m, cols,
-		func(c context.Context) ([]WorkspaceInfo, error) { return sess.Workspaces(c) },
+		func(c context.Context, b *Bound) ([]WorkspaceInfo, error) { return b.Workspaces(c) },
 		[]managerAction[WorkspaceInfo]{
 			{'a', "add", func(WorkspaceInfo, bool) {
 				m.openForm("new workspace", []formField{field("name")}, func(v []string) (bool, string) {
@@ -233,8 +231,8 @@ func (m *Model) openWorkspaceManager() {
 					if name == "" {
 						return false, "name required"
 					}
-					managerCall(g, "create "+name, func(c context.Context) error {
-						_, err := sess.CreateWorkspace(c, name)
+					managerCall(g, "create "+name, func(c context.Context, b *Bound) error {
+						_, err := b.CreateWorkspace(c, name)
 						return err
 					})
 					return true, ""
@@ -249,16 +247,16 @@ func (m *Model) openWorkspaceManager() {
 					if name == "" {
 						return false, "name required"
 					}
-					managerCall(g, "rename "+sel.Name, func(c context.Context) error {
-						return sess.RenameWorkspace(c, sel.ID, name)
+					managerCall(g, "rename "+sel.Name, func(c context.Context, b *Bound) error {
+						return b.RenameWorkspace(c, sel.ID, name)
 					})
 					return true, ""
 				})
 			}},
 			{'d', "delete", func(sel WorkspaceInfo, ok bool) {
 				if ok {
-					managerCall(g, "delete "+sel.Name, func(c context.Context) error {
-						return sess.DeleteWorkspace(c, sel.ID)
+					managerCall(g, "delete "+sel.Name, func(c context.Context, b *Bound) error {
+						return b.DeleteWorkspace(c, sel.ID)
 					})
 				}
 			}},
@@ -273,8 +271,8 @@ func (m *Model) openWorkspaceManager() {
 					if err != nil {
 						return false, "numeric connection id required"
 					}
-					managerCall(g, "detach", func(c context.Context) error {
-						return sess.DetachConnection(c, sel.ID, id)
+					managerCall(g, "detach", func(c context.Context, b *Bound) error {
+						return b.DetachConnection(c, sel.ID, id)
 					})
 					return true, ""
 				})
@@ -286,7 +284,6 @@ func (m *Model) openWorkspaceManager() {
 // --- users -------------------------------------------------------------------------
 
 func (m *Model) openUserManager() {
-	sess := m.session
 	cols := []widget.TableColumn[UserRow]{
 		{Title: "ID", Width: 5, Cell: func(u UserRow) string { return strconv.FormatInt(u.ID, 10) }},
 		{Title: "NAME", Cell: func(u UserRow) string { return u.Name }},
@@ -300,7 +297,7 @@ func (m *Model) openUserManager() {
 	}
 	var g *manager[UserRow]
 	g = newManager(m, cols,
-		func(c context.Context) ([]UserRow, error) { return sess.Users(c) },
+		func(c context.Context, b *Bound) ([]UserRow, error) { return b.Users(c) },
 		[]managerAction[UserRow]{
 			{'a', "add", func(UserRow, bool) {
 				m.openForm("new user", []formField{
@@ -312,8 +309,8 @@ func (m *Model) openUserManager() {
 					if name == "" || pass == "" || role == "" {
 						return false, "all fields are required"
 					}
-					managerCall(g, "create "+name, func(c context.Context) error {
-						_, err := sess.CreateUser(c, name, pass, role)
+					managerCall(g, "create "+name, func(c context.Context, b *Bound) error {
+						_, err := b.CreateUser(c, name, pass, role)
 						return err
 					})
 					return true, ""
@@ -330,8 +327,8 @@ func (m *Model) openUserManager() {
 					if role == "" {
 						return false, "role required"
 					}
-					managerCall(g, "role "+sel.Name, func(c context.Context) error {
-						return sess.SetUserRole(c, sel.ID, role)
+					managerCall(g, "role "+sel.Name, func(c context.Context, b *Bound) error {
+						return b.SetUserRole(c, sel.ID, role)
 					})
 					return true, ""
 				})
@@ -346,23 +343,23 @@ func (m *Model) openUserManager() {
 					if len(v[0]) < 8 {
 						return false, "passphrase must be at least 8 characters"
 					}
-					managerCall(g, "reset "+sel.Name, func(c context.Context) error {
-						return sess.ResetUserPassphrase(c, sel.ID, v[0])
+					managerCall(g, "reset "+sel.Name, func(c context.Context, b *Bound) error {
+						return b.ResetUserPassphrase(c, sel.ID, v[0])
 					})
 					return true, ""
 				})
 			}},
 			{'x', "enable/disable", func(sel UserRow, ok bool) {
 				if ok {
-					managerCall(g, "toggle "+sel.Name, func(c context.Context) error {
-						return sess.SetUserDisabled(c, sel.ID, !sel.Disabled)
+					managerCall(g, "toggle "+sel.Name, func(c context.Context, b *Bound) error {
+						return b.SetUserDisabled(c, sel.ID, !sel.Disabled)
 					})
 				}
 			}},
 			{'D', "remove", func(sel UserRow, ok bool) {
 				if ok {
-					managerCall(g, "remove "+sel.Name, func(c context.Context) error {
-						return sess.RemoveUser(c, sel.ID)
+					managerCall(g, "remove "+sel.Name, func(c context.Context, b *Bound) error {
+						return b.RemoveUser(c, sel.ID)
 					})
 				}
 			}},
@@ -382,8 +379,8 @@ func (m *Model) openUserManager() {
 					if role == "" {
 						return false, "role required"
 					}
-					managerCall(g, "grant "+sel.Name, func(c context.Context) error {
-						return sess.AddGrant(c, sel.ID, id, role)
+					managerCall(g, "grant "+sel.Name, func(c context.Context, b *Bound) error {
+						return b.AddGrant(c, sel.ID, id, role)
 					})
 					return true, ""
 				})

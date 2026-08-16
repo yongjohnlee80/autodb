@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,7 +26,7 @@ type fixture struct {
 	addr    string
 }
 
-var fixtureSeq int64
+var fixtureSeq atomic.Int64
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
@@ -47,8 +48,7 @@ func newFixture(t *testing.T) *fixture {
 	eng := exec.New(store, svc)
 	t.Cleanup(func() { _ = eng.Close() })
 
-	fixtureSeq++
-	dsn := fmt.Sprintf("file:rpctest%d_%d?mode=memory&cache=shared", time.Now().UnixNano(), fixtureSeq)
+	dsn := fmt.Sprintf("file:rpctest%d_%d?mode=memory&cache=shared", time.Now().UnixNano(), fixtureSeq.Add(1))
 	connID, err := eng.CreateConnection(ctx, rootTok, "target", "sqlite", dsn, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("CreateConnection: %v", err)

@@ -41,6 +41,9 @@ func (m *Model) openFloat(title string, content tui.Component, width int) *widge
 		if unsub != nil {
 			unsub()
 		}
+		// A login prompt suppressed while this float was up fires now —
+		// the CodeAuth transition is retained, never dropped.
+		m.maybePromptLogin()
 	})
 	return f
 }
