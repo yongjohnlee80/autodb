@@ -199,6 +199,89 @@ print("\n[3] client.connect — handshake and launch-proof, against a REAL daemo
   vim.fn.delete(tmp, "rf")
 end)()
 
+-- ─────────────────── [4] lifecycle — record and recovery ───────────
+print("\n[4] lifecycle — nonce, spawn record, and stale resolution")
+;(function()
+  local lc = require("autodb.lifecycle")
+
+  -- The nonce must be unguessable: math.random would be seeded
+  -- predictably, and a guessable launch proof proves nothing.
+  local n1 = lc.new_nonce()
+  local n2 = lc.new_nonce()
+  ok("p4: a nonce is 64 hex chars (32 bytes)",
+    type(n1) == "string" and #n1 == 64 and n1:match("^%x+$") ~= nil, vim.inspect(n1))
+  ok("p4: two nonces differ", n1 ~= n2)
+
+  -- resolve_stale is the deciding half, split from the acting half so
+  -- the decision — the part that must never guess — is testable.
+  local now = 1000000
+  local function res(rec, at) return lc.resolve_stale(rec, at or now) end
+
+  local a, d = res({ state = "running", generation = "g" })
+  ok("p4: a finalized record is adopted, not signalled", a == "adopt", a .. ": " .. d)
+
+  a, d = res({ state = "tombstone", generation = "g" })
+  ok("p4: a tombstoned generation is already resolved", a == "clean", a .. ": " .. d)
+
+  -- Inside the deadline NOTHING is touched, even with no child pid yet:
+  -- a launcher that has published its intent but not yet spawned is
+  -- healthy, and cleaning it would wipe another instance's launch
+  -- mid-flight.
+  a, d = res({ state = "starting", generation = "g", deadline = now + 5000 })
+  ok("p4: inside the deadline we wait, even with no child recorded",
+    a == "wait", a .. ": " .. d)
+  a, d = res({ state = "starting", generation = "g", deadline = now + 5000,
+    child_pid = 999999999 })
+  ok("p4: inside the deadline we wait even for a dead-looking child",
+    a == "wait", a .. ": " .. d)
+
+  a, d = res({ state = "starting", generation = "g", deadline = now - 1 })
+  ok("p4: a starting record with NO child pid is cleaned, never signalled",
+    a == "clean", a .. ": " .. d)
+
+  a, d = res({ state = "starting", generation = "g", deadline = now - 1, child_pid = 999999999 })
+  ok("p4: a dead child pid is cleaned", a == "clean", a .. ": " .. d)
+
+  -- A pid that exists but is NOT ours: the pid-reuse hazard. This is
+  -- the case that must never produce a kill.
+  a, d = res({ state = "starting", generation = "g", deadline = now - 1,
+    child_pid = vim.fn.getpid(), child_start = "999999999", exe = "/nonexistent/autodb" })
+  ok("p4: a live pid that fails the identity check is NOT signalled",
+    a == "clean", a .. ": " .. d)
+  ok("p4: and the reason says why", d:find("not our child", 1, true) ~= nil, d)
+
+  -- Only a positively identified child of ours is killable.
+  local self_ident = lc.pid_identity(vim.fn.getpid())
+  ok("p4: pid_identity reports start time and exe",
+    self_ident ~= nil and self_ident.start ~= nil and self_ident.exe ~= nil,
+    vim.inspect(self_ident))
+  a, d = res({ state = "starting", generation = "g", deadline = now - 1,
+    child_pid = vim.fn.getpid(), child_start = self_ident.start, exe = self_ident.exe })
+  ok("p4: a fully identified child past its deadline may be killed",
+    a == "kill", a .. ": " .. d)
+
+  a, d = res({ state = "who-knows", generation = "g" })
+  ok("p4: an unknown state REFUSES rather than guessing", a == "refuse", a .. ": " .. d)
+  a, d = res("not a table")
+  ok("p4: a non-table record refuses", a == "refuse", a .. ": " .. d)
+
+  -- Refusing must be actionable: the developer's fallback is one command.
+  local msg = lc.describe_manual("cannot identify the daemon", {
+    generation = "g1", state = "starting", child_pid = 4242, address = "127.0.0.1:7419" })
+  ok("p4: a refusal names the manual command",
+    msg:find("autodb --serve", 1, true) ~= nil, msg)
+  ok("p4: and the pid and address it found",
+    msg:find("4242", 1, true) ~= nil and msg:find("127.0.0.1:7419", 1, true) ~= nil, msg)
+
+  -- is_our_child needs ALL THREE of pid, start time and exe.
+  ok("p4: is_our_child is false without a pid", lc.is_our_child({}) == false)
+  ok("p4: is_our_child is false on a start-time mismatch",
+    lc.is_our_child({ child_pid = vim.fn.getpid(), child_start = "0" }) == false)
+  ok("p4: is_our_child is true for a full match",
+    lc.is_our_child({ child_pid = vim.fn.getpid(), child_start = self_ident.start,
+      exe = self_ident.exe }) == true)
+end)()
+
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   vim.cmd("cq!")
