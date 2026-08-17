@@ -405,6 +405,168 @@ print("\n[6] lifecycle.check_build — tell the user, once, and name the key")
     st_ok .. " notifications=" .. #seen)
 end)()
 
+-- ─────────────────── [7] commands + results ────────────────────────
+print("\n[7] commands — the <leader>D surface, and results on the grid")
+;(function()
+  local commands = require("autodb.commands")
+  local results = require("autodb.results")
+  local keys = require("autodb.keys")
+
+  require("autodb").setup()
+  for _, lhs in ipairs({ keys.RUN_BUFFER, keys.CONNECTION, keys.MAINTENANCE, keys.HISTORY }) do
+    ok("p7: " .. lhs .. " is bound", vim.fn.maparg(lhs, "n") ~= "", lhs)
+  end
+  ok("p7: the visual runner is bound in VISUAL mode",
+    vim.fn.maparg(keys.RUN_VISUAL, "v") ~= "", keys.RUN_VISUAL)
+  for _, cmd in ipairs({ "AutodbRun", "AutodbConnection", "AutodbHistory", "AutodbMaintenance" }) do
+    ok("p7: :" .. cmd .. " exists", vim.fn.exists(":" .. cmd) == 2, cmd)
+  end
+
+  -- Requirement 9: <leader>Dr runs SQL files. Filetype OR extension, so
+  -- a fresh scratch buffer is not refused over an autocmd race.
+  local b1 = vim.api.nvim_create_buf(false, true)
+  vim.bo[b1].filetype = "sql"
+  ok("p7: a sql filetype counts", commands.is_sql(b1) == true)
+  local b2 = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(b2, vim.fn.tempname() .. "/noname.sql")
+  ok("p7: a .sql name counts even before the filetype is set",
+    commands.is_sql(b2) == true)
+  local b3 = vim.api.nvim_create_buf(false, true)
+  ok("p7: a plain scratch buffer does not", commands.is_sql(b3) == false)
+
+  -- The wire shape maps onto the grid model without translation.
+  local model = results.from_wire({
+    verb = "select", columns = { "id", "name" },
+    rows = { { 1, "alpha" }, { 2, vim.NIL } },
+    affected = 0, duration_ms = 12, more = false,
+  })
+  ok("p7: an exec reply becomes a grid model",
+    model:nrows() == 2 and model:ncols() == 2, model:nrows() .. "x" .. model:ncols())
+  ok("p7: values arrive RAW, display is derived",
+    model:cell(1, 1).value == 1 and model:cell(2, 2).null == true,
+    vim.inspect(model:cell(2, 2)))
+  ok("p7: the summary carries verb and duration",
+    model:summary():find("SELECT", 1, true) ~= nil
+      and model:summary():find("12ms", 1, true) ~= nil, model:summary())
+
+  -- An error is a RESULT STATE, not an absence of one.
+  local emodel = results.from_error({ code = -32032, message = "syntax error near \"slect\"" })
+  ok("p7: a failure renders as an error result",
+    emodel:kind() == "error" and emodel:summary():find("slect", 1, true) ~= nil,
+    emodel:summary())
+
+  -- The panel is a bottom split that does not steal focus.
+  local before_win = vim.api.nvim_get_current_win()
+  local view = results.show(model)
+  ok("p7: the result panel opened", view ~= nil and results.window() ~= nil)
+  ok("p7: focus stayed in the query buffer",
+    vim.api.nvim_get_current_win() == before_win)
+  if results.window() then
+    ok("p7: the result window is height-fixed",
+      vim.api.nvim_get_option_value("winfixheight",
+        { win = results.window(), scope = "local" }) == true)
+    local lines = vim.api.nvim_buf_get_lines(view:buf(), 0, -1, false)
+    ok("p7: the rows are rendered", #lines == 2 and lines[1]:match("^1%s+alpha") ~= nil,
+      vim.inspect(lines))
+  end
+
+  -- Showing again replaces the view rather than stacking one per query.
+  local first_buf = view:buf()
+  local view2 = results.show(results.from_wire({ verb = "update", affected = 3 }))
+  ok("p7: a second result reuses the window",
+    view2 ~= nil and results.window() ~= nil)
+  ok("p7: and disposes the previous view", not vim.api.nvim_buf_is_valid(first_buf))
+  results.close()
+  ok("p7: close tears the panel down", results.window() == nil)
+
+  vim.api.nvim_buf_delete(b1, { force = true })
+  vim.api.nvim_buf_delete(b2, { force = true })
+  vim.api.nvim_buf_delete(b3, { force = true })
+end)()
+
+-- ─────────────────── [8] a query, end to end ───────────────────────
+print("\n[8] a real query through the whole stack")
+;(function()
+  local bin = plugin_root .. "/bin/autodb"
+  if vim.fn.executable(bin) ~= 1 then
+    print("  SKIP  no bin/autodb")
+    return
+  end
+  local client = require("autodb.client")
+  local session = require("autodb.session")
+  local results = require("autodb.results")
+
+  local tmp = vim.fn.tempname()
+  vim.fn.mkdir(tmp, "p")
+  local sock = tmp .. "/db.sock"
+  local cfg = tmp .. "/config.toml"
+  vim.fn.writefile({
+    "[server]", 'socket = "' .. sock .. '"',
+    "[meta]", 'engine = "sqlite"', 'path = "' .. tmp .. '/meta.db"',
+    "[tui]", 'notes_dir = "' .. tmp .. '/notes"',
+  }, cfg)
+  local job = vim.fn.jobstart({ bin, "--serve", "--config", cfg })
+
+  local c
+  vim.wait(8000, function()
+    local done = false
+    client.connect({ addr = sock, mode = "pipe" }, function(cl) c = cl; done = true end)
+    vim.wait(700, function() return done end, 20)
+    return c ~= nil
+  end, 250)
+  ok("p8: connected to a private daemon", c ~= nil)
+
+  if c then
+    -- Bootstrap an admin, then drive a real statement through the same
+    -- path a command would: authed call, wire reply, grid model.
+    local booted, berr = nil, nil
+    c:call("auth.bootstrap", { "smoke-admin", "smoke-passphrase-1234" }, function(res, e)
+      booted, berr = res, e
+    end)
+    vim.wait(5000, function() return booted ~= nil or berr ~= nil end, 20)
+    ok("p8: bootstrapped the first admin", booted ~= nil, vim.inspect(berr))
+
+    local token = type(booted) == "table" and (booted.token or booted[1]) or booted
+    ok("p8: bootstrap returned a session token", type(token) == "string", type(token))
+    if type(token) == "string" then
+      c._token = token
+      session.attach(c, { bin = bin })
+      ok("p8: the session adopted the client", session.is_ready() == true)
+
+      -- A statement that needs no connection: ask who we are.
+      local who, werr = nil, nil
+      c:authed("auth.whoami", {}, function(r, e) who, werr = r, e end)
+      vim.wait(4000, function() return who ~= nil or werr ~= nil end, 20)
+      ok("p8: an authenticated call round-trips", who ~= nil, vim.inspect(werr))
+      ok("p8: and identifies the bootstrapped admin",
+        who and vim.inspect(who):find("smoke-admin", 1, true) ~= nil, vim.inspect(who))
+
+      -- workspace.list is what <leader>Dc drives.
+      local spaces, serr = nil, nil
+      c:authed("workspace.list", {}, function(r, e) spaces, serr = r or {}, e end)
+      vim.wait(4000, function() return spaces ~= nil or serr ~= nil end, 20)
+      ok("p8: workspace.list answers (the <leader>Dc source)",
+        spaces ~= nil and serr == nil, vim.inspect(serr))
+
+      -- And a failing statement must arrive as a projected error, not a
+      -- raw wire value, so the panel has one shape to render.
+      local ran, rerr = nil, nil
+      c:authed("exec.run_script", { 999999, "SELECT 1" }, function(r, e) ran, rerr = r, e end)
+      vim.wait(4000, function() return ran ~= nil or rerr ~= nil end, 20)
+      ok("p8: a bad connection id fails with a projected error",
+        rerr ~= nil and type(rerr.message) == "string", vim.inspect(rerr))
+      local em = results.from_error(rerr)
+      ok("p8: which the result panel renders as an error state",
+        em:kind() == "error", em:summary())
+
+      session.detach("smoke")
+    end
+    c:close()
+  end
+  pcall(vim.fn.jobstop, job)
+  vim.fn.delete(tmp, "rf")
+end)()
+
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   vim.cmd("cq!")
