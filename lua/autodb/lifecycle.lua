@@ -25,6 +25,144 @@ local M = {}
 local SPAWN_TIMEOUT_MS = 10000
 local PROBE_INTERVAL_MS = 100
 
+---BINARY_NAME is what we look for on PATH.
+M.BINARY_NAME = "autodb"
+
+---plugin_root is this plugin's own directory, whatever installed it.
+---
+---Derived from this file's path rather than from the runtimepath, so it
+---is correct under lazy, packer, a git clone, or a worktree — none of
+---which agree on where a plugin lives.
+---@return string
+function M.plugin_root()
+  local src = debug.getinfo(1, "S").source:sub(2)
+  -- <root>/lua/autodb/lifecycle.lua -> <root>
+  return vim.fn.fnamemodify(vim.fn.fnamemodify(src, ":p"), ":h:h:h")
+end
+
+---binary_candidates lists every place the executable might be, in
+---priority order, with a label for each so a failure can say what was
+---searched rather than just "not found".
+---@param configured string?
+---@return { label: string, path: string }[]
+function M.binary_candidates(configured)
+  local out = {}
+  if configured and configured ~= "" then
+    out[#out + 1] = { label = "configured (opts.bin)", path = vim.fn.expand(configured) }
+  end
+  -- PATH, which is how gopls and delve are found: Mason installs to its
+  -- own bin directory and prepends that to PATH inside Neovim, so a
+  -- Mason-managed autodb resolves here with no configuration at all.
+  -- `go install` (~/go/bin), Homebrew and system packages land here too.
+  --
+  -- The bare NAME is the candidate, because vim.fn.executable() performs
+  -- the PATH lookup itself. Listing it unconditionally means a failure
+  -- can report that PATH was searched and came up empty, rather than
+  -- leaving the reader to wonder whether it was consulted at all.
+  out[#out + 1] = {
+    label = "PATH (Mason, go install, package manager)",
+    path = M.BINARY_NAME,
+  }
+  -- A plugin-local build, which is what a lazy.nvim `build` hook
+  -- produces — the same shape nvim-dbee uses. Version-matched to this
+  -- checkout by construction.
+  out[#out + 1] = {
+    label = "plugin build (lazy `build` hook)",
+    path = M.plugin_root() .. "/bin/" .. M.BINARY_NAME,
+  }
+  -- A managed cache, for a binary this plugin downloaded itself.
+  out[#out + 1] = {
+    label = "managed cache",
+    path = vim.fn.stdpath("data") .. "/autodb/bin/" .. M.BINARY_NAME,
+  }
+  return out
+end
+
+---resolve_binary finds the executable, or explains what it looked at.
+---
+---No guessing and no silent fallback: if nothing is found, the caller
+---gets every path that was tried, because "autodb not found" without the
+---search list is the least useful error a plugin can produce.
+---@param configured string?
+---@return string|nil path, string? err, string? label
+function M.resolve_binary(configured)
+  -- An explicit opts.bin is honoured or refused — never quietly
+  -- replaced. Falling through to some other autodb would run a
+  -- different build than the one the user named, which is precisely the
+  -- surprise that produces "why is it still doing the old thing".
+  if configured and configured ~= "" then
+    local explicit = vim.fn.expand(configured)
+    if vim.fn.executable(explicit) == 1 then
+      return explicit, nil, "configured (opts.bin)"
+    end
+    return nil, M.describe_manual(
+      string.format("opts.bin is set to %q, which is not executable. "
+        .. "Fix the path or unset it to search PATH and the plugin build.", explicit))
+  end
+
+  local tried = {}
+  for _, c in ipairs(M.binary_candidates(nil)) do
+    if vim.fn.executable(c.path) == 1 then
+      -- Report the RESOLVED location, so health output names a file
+      -- rather than echoing back the word "autodb".
+      local resolved = c.path
+      if resolved == M.BINARY_NAME then resolved = vim.fn.exepath(M.BINARY_NAME) end
+      return resolved, nil, c.label
+    end
+    tried[#tried + 1] = string.format("%-42s %s", c.label, c.path)
+  end
+  return nil, M.describe_manual(
+    "no autodb executable found. Install it with Mason, `go install "
+    .. "github.com/yongjohnlee80/autodb/cmd/autodb@latest`, or a lazy.nvim "
+    .. "`build` hook — or set opts.bin to a path.", tried)
+end
+
+---binary_version reports what `autodb --version` prints.
+---
+---Used to answer "is the running daemon this build?" — a shared daemon
+---outlives the frontend that started it BY DESIGN, so after a rebuild
+---the old process keeps serving happily. That cost me two debugging
+---sessions in M6, and the fix is to make it visible rather than to
+---remember.
+---@param bin string
+---@return string|nil version, string? err
+function M.binary_version(bin)
+  if vim.fn.executable(bin) ~= 1 then
+    return nil, string.format("autodb: %s is not executable", tostring(bin))
+  end
+  local out = vim.fn.systemlist({ bin, "--version" })
+  if vim.v.shell_error ~= 0 then
+    return nil, "autodb: --version failed: " .. table.concat(out or {}, " ")
+  end
+  -- "autodb <version> (<commit>, built <date>)"
+  local line = (out or {})[1] or ""
+  return line:match("^autodb%s+(%S+)") or line
+end
+
+---build_status compares the RUNNING daemon against the binary on disk.
+---
+---Returns one of "match", "stale", "unknown" plus a line for display.
+---The frontend cannot fix a mismatch — restarting is the admin's call —
+---so it does the one useful thing and names it.
+---@param backend_version string?  from sys.hello
+---@param bin string?
+---@return string status, string message
+function M.build_status(backend_version, bin)
+  if not backend_version or backend_version == "" then
+    return "unknown", "backend build unknown (not connected)"
+  end
+  local disk = bin and M.binary_version(bin) or nil
+  if not disk then
+    return "unknown", "backend " .. backend_version .. " (no local binary to compare)"
+  end
+  if disk == backend_version then
+    return "match", backend_version .. " (matches the installed binary)"
+  end
+  return "stale", string.format(
+    "%s \226\137\160 %s \226\128\148 the running server is a DIFFERENT build. "
+    .. "Restart it to pick up the installed one.", backend_version, disk)
+end
+
 ---resolve_endpoint asks the BINARY where to dial.
 ---
 ---The socket path depends on the platform (`XDG_RUNTIME_DIR` on Linux,

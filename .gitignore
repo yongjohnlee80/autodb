@@ -8,3 +8,6 @@ coverage.out
 # it must never be committed (it would break every other clone and CI).
 go.work
 go.work.sum
+
+# auto-agents workspace mailbox (v0.2.30+)
+.auto-agents/

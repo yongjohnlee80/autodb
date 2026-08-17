@@ -234,6 +234,87 @@ print("\n[4] client.connect — handshake over a REAL daemon on a socket")
   vim.fn.delete(tmp, "rf")
 end)()
 
+-- ─────────────────── [5] binary discovery ──────────────────────────
+print("\n[5] lifecycle.resolve_binary — found like gopls and delve are")
+;(function()
+  local lc = require("autodb.lifecycle")
+
+  local cands = lc.binary_candidates(nil)
+  ok("p5: candidates are ordered and labelled", #cands >= 2 and cands[1].label ~= nil,
+    vim.inspect(vim.tbl_map(function(c) return c.label end, cands)))
+
+  -- PATH before plugin-local: Mason prepends its bin dir to PATH inside
+  -- Neovim, which is exactly how gopls and delve resolve by name alone.
+  local labels = {}
+  for i, c in ipairs(cands) do labels[i] = c.label end
+  local joined = table.concat(labels, " | ")
+  ok("p5: PATH is searched (covers Mason, go install, packages)",
+    joined:find("PATH", 1, true) ~= nil, joined)
+  ok("p5: a plugin-local build is searched (lazy `build` hook)",
+    joined:find("plugin build", 1, true) ~= nil, joined)
+
+  -- An explicit path always wins, and is never second-guessed.
+  local first = lc.binary_candidates("/custom/autodb")[1]
+  ok("p5: opts.bin takes priority over everything",
+    first.path == "/custom/autodb" and first.label:find("configured", 1, true) ~= nil,
+    vim.inspect(first))
+
+  ok("p5: plugin_root resolves to this checkout",
+    vim.fn.isdirectory(lc.plugin_root() .. "/lua/autodb") == 1, lc.plugin_root())
+
+  -- A failure must list what it searched. "not found" alone is the least
+  -- useful error a plugin can produce.
+  -- An explicit opts.bin that is missing must FAIL, not fall through to
+  -- some other autodb — running a different build than the one named is
+  -- exactly the surprise this avoids.
+  local cfg_bin, cfg_err = lc.resolve_binary("/definitely/not/here/autodb")
+  ok("p5: a missing opts.bin fails instead of falling back",
+    cfg_bin == nil and cfg_err ~= nil, tostring(cfg_bin))
+  ok("p5: and the error names the path it was given",
+    cfg_err and cfg_err:find("/definitely/not/here/autodb", 1, true) ~= nil, cfg_err)
+
+  -- A search miss must list what it tried. "not found" alone is the
+  -- least useful error a plugin can produce.
+  local saved_path = vim.env.PATH
+  vim.env.PATH = "/nonexistent-for-this-test"
+  local orig_root = lc.plugin_root
+  lc.plugin_root = function() return "/nonexistent-plugin-root" end
+  local _, miss = lc.resolve_binary(nil)
+  lc.plugin_root = orig_root
+  vim.env.PATH = saved_path
+  ok("p5: a search miss reports every path tried",
+    miss and miss:find("PATH", 1, true) ~= nil
+      and miss:find("plugin build", 1, true) ~= nil, miss)
+  ok("p5: and names the ways to install it",
+    miss and miss:find("Mason", 1, true) ~= nil
+      and miss:find("go install", 1, true) ~= nil, miss)
+
+  local bin = plugin_root .. "/bin/autodb"
+  if vim.fn.executable(bin) ~= 1 then
+    print("  SKIP  no bin/autodb for the version comparison")
+    return
+  end
+
+  local resolved, rerr, label = lc.resolve_binary(nil)
+  ok("p5: resolves a real binary and says how", resolved ~= nil and label ~= nil,
+    tostring(rerr) .. " " .. tostring(label))
+
+  local v = lc.binary_version(bin)
+  ok("p5: reads the binary's own version", type(v) == "string" and v ~= "", vim.inspect(v))
+
+  -- The M6 footgun, made visible: a shared daemon outlives the frontend
+  -- that started it BY DESIGN, so after a rebuild the old process keeps
+  -- serving. This is what turns that into a message instead of an hour.
+  local st_match = select(1, lc.build_status(v, bin))
+  ok("p5: an identical build reports match", st_match == "match", st_match)
+  local st_stale, msg_stale = lc.build_status("some-other-build", bin)
+  ok("p5: a differing build reports stale", st_stale == "stale", st_stale)
+  ok("p5: and the message says to restart",
+    msg_stale:find("Restart", 1, true) ~= nil, msg_stale)
+  ok("p5: no backend version is 'unknown', not a false match",
+    (lc.build_status(nil, bin)) == "unknown")
+end)()
+
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   vim.cmd("cq!")

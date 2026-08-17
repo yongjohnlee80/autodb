@@ -63,7 +63,7 @@ func (m *Model) aboutRows() [][2]string {
 	if cfg == "" {
 		cfg = "(none — built-in defaults)"
 	}
-	return [][2]string{
+	rows := [][2]string{
 		{"version", firstNonEmpty(info.Version, "dev")},
 		{"commit", firstNonEmpty(info.Commit, "none")},
 		{"built", firstNonEmpty(info.BuildDate, "unknown")},
@@ -71,10 +71,39 @@ func (m *Model) aboutRows() [][2]string {
 		{"repository", info.Repo},
 		{"", ""},
 		{"backend", backend},
-		{"meta store", meta},
-		{"notes", info.NotesDir},
-		{"config", cfg},
 	}
+	if bv := m.session.ServerVersion(); bv != "" {
+		rows = append(rows, [2]string{"backend build", backendBuildLine(info.Version, bv)})
+	}
+	return append(rows,
+		[2]string{"meta store", meta},
+		[2]string{"notes", info.NotesDir},
+		[2]string{"config", cfg},
+	)
+}
+
+// backendBuildLine compares the RUNNING daemon's build against this
+// binary's, and says plainly when they differ.
+//
+// This is the M6 footgun made visible. Twice during manual testing a
+// feature "did nothing" because a daemon from an earlier build was still
+// serving — the running process kept answering happily while its
+// executable had been replaced underneath it. Diagnosing that took
+// /proc/<pid>/exe showing "(deleted)". A shared daemon outlives the
+// frontend that started it BY DESIGN, so this is not an edge case; it is
+// what happens every time you rebuild and forget.
+//
+// The frontend cannot fix it (restart is the admin's call), so it does
+// the one useful thing: name the mismatch and the remedy.
+func backendBuildLine(frontend, backend string) string {
+	if frontend == "" {
+		frontend = "dev"
+	}
+	if frontend == backend {
+		return backend + " (matches this binary)"
+	}
+	return backend + " ≠ " + frontend + " — the running server is a DIFFERENT build. " +
+		"Restart it (SPC X) to pick up this one."
 }
 
 func (m *Model) openAbout() {
