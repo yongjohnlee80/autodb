@@ -7,57 +7,72 @@
 ---dialled their own daemon would disagree about which workspace is
 ---active the moment either changed it.
 ---
+---**Everything shared runs on auto-core's infrastructure.** Events go
+---through `auto-core.events`, not a private listener table; selection
+---lives in an `auto-core.state` namespace, not a module local. That is
+---the family contract, and it also buys the things a bespoke version
+---would have had to grow later: a documented topic registry, one
+---subscription lifecycle, `:AutoCoreEvents` visibility, and a
+---persistence backend chosen by declaration.
+---
 ---Every read is cheap and synchronous; everything that touches the
 ---network is a callback. Nothing here blocks the editor.
 ---@module 'autodb.session'
 
-local client = require("autodb.client")
+local events = require("auto-core").events
+local state = require("auto-core").state
 local log = require("autodb.log")
 
 local M = {}
 
----@class AutodbSessionState
----@field client AutodbClient|nil
----@field workspace table|nil
----@field connection table|nil
----@field epoch integer          -- bumped on every (re)connect
-local state = {
-  client = nil,
-  workspace = nil,
-  connection = nil,
-  epoch = 0,
-}
+---Topics this plugin publishes. Registered dynamically (the additive
+---path) so auto-core needs no edit to carry them.
+---
+---`dbase.connection:changed` is NOT here: it already exists in
+---auto-core's static registry, reserved for exactly this, so the
+---selection change publishes there rather than inventing a parallel
+---name a subscriber would have to know about separately.
+M.TOPIC_CONNECTED    = "autodb.session:connected"
+M.TOPIC_DISCONNECTED = "autodb.session:disconnected"
+M.TOPIC_SELECTION    = "dbase.connection:changed"
 
----@type table<string, fun(...)[]>
-local listeners = {}
-
----on registers a listener. Events:
----   "connected"     — a client is ready (payload: client)
----   "disconnected"  — the epoch ended (payload: reason)
----   "selection"     — workspace/connection changed
----@param event string
----@param fn fun(...)
----@return fun() unsubscribe
-function M.on(event, fn)
-  listeners[event] = listeners[event] or {}
-  table.insert(listeners[event], fn)
-  return function()
-    for i, f in ipairs(listeners[event] or {}) do
-      if f == fn then table.remove(listeners[event], i) return end
-    end
-  end
+local _registered = false
+local function ensure_topics()
+  if _registered then return end
+  _registered = true
+  pcall(events.register_topics, "autodb", {
+    [M.TOPIC_CONNECTED] = {
+      doc = "A connection to the autodb daemon is ready to serve requests.",
+      payload = "{ instance = string, addr = string, version = string? }",
+      publishers = { "autodb" },
+    },
+    [M.TOPIC_DISCONNECTED] = {
+      doc = "The autodb connection ended; every in-flight request has settled.",
+      payload = "{ reason = string }",
+      publishers = { "autodb" },
+    },
+  })
 end
 
-local function emit(event, ...)
-  for _, fn in ipairs(listeners[event] or {}) do
-    local ok, err = pcall(fn, ...)
-    if not ok then
-      vim.schedule(function()
-        log.error("session", "listener error: " .. tostring(err))
-      end)
-    end
-  end
+---Selection state.
+---
+---**Ephemeral by declaration.** Workspace and connection ids are
+---meaningful only to the server instance that issued them, so
+---persisting them would let a query run against whatever happens to
+---share an id after a restart (ADR-0058 MF6). `persist = "ephemeral"`
+---makes that a property of the namespace rather than a rule someone has
+---to remember not to break.
+local _ns
+local function ns()
+  _ns = _ns or state.namespace("autodb", {
+    persist = "ephemeral",
+    defaults = { workspace = nil, connection = nil },
+  })
+  return _ns
 end
+
+local _client = nil
+local _epoch = 0
 
 ---epoch identifies the current connection.
 ---
@@ -66,20 +81,20 @@ end
 ---the one being shown. Callers stamp their request with `epoch()` and
 ---compare on arrival (ADR-0058 §3.2, MF3).
 ---@return integer
-function M.epoch() return state.epoch end
+function M.epoch() return _epoch end
 
-function M.client() return state.client end
-function M.workspace() return state.workspace end
-function M.connection() return state.connection end
+function M.client() return _client end
+function M.workspace() return ns():get("workspace") end
+function M.connection() return ns():get("connection") end
 
 ---is_ready reports whether a call would reach a live daemon.
 function M.is_ready()
-  return state.client ~= nil and state.client:is_ready()
+  return _client ~= nil and _client:is_ready()
 end
 
 ---attach adopts a connected client as the session's own.
 ---
----Connecting is also when a version mismatch becomes knowable, so it is
+---Connecting is also when a build mismatch becomes knowable, so it is
 ---checked here rather than left to whichever frontend remembers. A
 ---stale backend is the one failure that presents as "my change did
 ---nothing", and the user should hear about it at the moment we learn
@@ -87,8 +102,10 @@ end
 ---@param c AutodbClient
 ---@param opts { bin: string? }?
 function M.attach(c, opts)
-  state.client = c
-  state.epoch = state.epoch + 1
+  ensure_topics()
+  _client = c
+  _epoch = _epoch + 1
+
   local hello = c.hello and c:hello() or nil
   if hello and hello.version then
     local ok, lifecycle = pcall(require, "autodb.lifecycle")
@@ -96,7 +113,13 @@ function M.attach(c, opts)
       pcall(lifecycle.check_build, hello.version, opts and opts.bin or nil)
     end
   end
-  emit("connected", c)
+
+  log.debug("session", "connected to " .. tostring(c.addr and c:addr() or "?"))
+  events.publish(M.TOPIC_CONNECTED, {
+    instance = hello and hello.instance or "",
+    addr = c.addr and c:addr() or "",
+    version = hello and hello.version or nil,
+  })
 end
 
 ---detach drops the client and clears the selection.
@@ -107,28 +130,37 @@ end
 ---epoch lesson).
 ---@param reason string?
 function M.detach(reason)
-  -- A restart may be exactly what fixes a mismatch, so the next
+  ensure_topics()
+  -- A restart may be exactly what fixes a build mismatch, so the next
   -- connection is allowed to report one again.
   local ok, lifecycle = pcall(require, "autodb.lifecycle")
   if ok then pcall(lifecycle.forget_build_warnings) end
-  state.client = nil
-  state.workspace = nil
-  state.connection = nil
-  state.epoch = state.epoch + 1
-  emit("disconnected", reason or "closed")
+
+  _client = nil
+  _epoch = _epoch + 1
+  ns():set("workspace", nil)
+  ns():set("connection", nil)
+  events.publish(M.TOPIC_DISCONNECTED, { reason = reason or "closed" })
 end
 
 ---select_workspace / select_connection record what the user is working
----on. Both emit "selection" so every view repaints from one signal.
+---on. Both publish so every view repaints from one signal.
 function M.select_workspace(ws)
-  state.workspace = ws
-  state.connection = nil   -- a connection belongs to a workspace
-  emit("selection")
+  ensure_topics()
+  ns():set("workspace", ws)
+  ns():set("connection", nil)   -- a connection belongs to a workspace
+  events.publish(M.TOPIC_SELECTION, { id = "", name = ws and ws.name or nil })
 end
 
 function M.select_connection(conn)
-  state.connection = conn
-  emit("selection")
+  ensure_topics()
+  ns():set("connection", conn)
+  -- The static topic's payload contract: { id, name?, type? }.
+  events.publish(M.TOPIC_SELECTION, {
+    id = tostring(conn and conn.id or ""),
+    name = conn and conn.name or nil,
+    type = conn and (conn.driver or conn.type) or nil,
+  })
 end
 
 ---call / authed forward to the live client, or fail politely.
@@ -140,14 +172,14 @@ function M.call(method, params, cb, opts)
   if not M.is_ready() then
     return cb(nil, { code = nil, message = "autodb: not connected" })
   end
-  return state.client:call(method, params, cb, opts)
+  return _client:call(method, params, cb, opts)
 end
 
 function M.authed(method, params, cb, opts)
   if not M.is_ready() then
     return cb(nil, { code = nil, message = "autodb: not connected" })
   end
-  return state.client:authed(method, params, cb, opts)
+  return _client:authed(method, params, cb, opts)
 end
 
 ---guarded wraps a callback so it only runs if the epoch is unchanged.
@@ -167,12 +199,11 @@ end
 
 ---reset_for_tests clears all state. Production code never calls this.
 function M.reset_for_tests()
-  if state.client then pcall(function() state.client:close() end) end
-  state.client, state.workspace, state.connection = nil, nil, nil
-  state.epoch = 0
-  listeners = {}
+  if _client then pcall(function() _client:close() end) end
+  _client, _epoch = nil, 0
+  if _ns then
+    pcall(function() _ns:set("workspace", nil); _ns:set("connection", nil) end)
+  end
 end
-
-M._client_module = client
 
 return M
