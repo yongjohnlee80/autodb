@@ -20,6 +20,9 @@
 ---listening, start something.
 ---@module 'autodb.lifecycle'
 
+local keys = require("autodb.keys")
+local log = require("autodb.log")
+
 local M = {}
 
 local SPAWN_TIMEOUT_MS = 10000
@@ -162,6 +165,48 @@ function M.build_status(backend_version, bin)
     "%s \226\137\160 %s \226\128\148 the running server is a DIFFERENT build. "
     .. "Restart it to pick up the installed one.", backend_version, disk)
 end
+
+---_warned remembers which mismatches have already been reported, so a
+---reconnect does not re-nag about a version pair the user has seen.
+---Keyed by the PAIR, so a genuinely new mismatch still speaks up.
+local _warned = {}
+
+---check_build compares the running daemon against the installed binary
+---and TELLS the user when they differ.
+---
+---A shared daemon outlives the frontend that started it by design, so
+---after a rebuild the old process keeps serving happily — the failure
+---presents as "my change did nothing", which is the most expensive
+---shape a bug can take. It cost two debugging sessions in M6 before
+---`/proc/<pid>/exe` showing "(deleted)" gave it away.
+---
+---The frontend cannot fix it: restarting is the admin's call (§3.7.2).
+---So it does the one useful thing — names the mismatch and the key that
+---opens the maintenance prompt.
+---@param backend_version string?  from sys.hello
+---@param bin string?               resolved binary, or nil to resolve now
+---@param opts { force: boolean? }? force re-notifies an already-seen pair
+---@return string status, string message
+function M.check_build(backend_version, bin, opts)
+  opts = opts or {}
+  bin = bin or (M.resolve_binary())
+  local status, message = M.build_status(backend_version, bin)
+  if status ~= "stale" then return status, message end
+
+  local key = tostring(backend_version) .. "|" .. tostring(bin)
+  if _warned[key] and not opts.force then return status, message end
+  _warned[key] = true
+
+  log.notify(string.format(
+    "autodb: the running backend is a different build (%s).\n" ..
+    "Press %s and choose \"restart the backend\" to pick up the installed one.",
+    message, keys.MAINTENANCE), { level = "warn", component = "lifecycle" })
+  return status, message
+end
+
+---forget_build_warnings clears the "already told them" set — used when
+---the daemon restarts, so a NEW mismatch is reported again.
+function M.forget_build_warnings() _warned = {} end
 
 ---resolve_endpoint asks the BINARY where to dial.
 ---

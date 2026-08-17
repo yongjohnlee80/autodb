@@ -315,6 +315,96 @@ print("\n[5] lifecycle.resolve_binary — found like gopls and delve are")
     (lc.build_status(nil, bin)) == "unknown")
 end)()
 
+-- ─────────────────── [6] stale-build notification ──────────────────
+print("\n[6] lifecycle.check_build — tell the user, once, and name the key")
+;(function()
+  local lc = require("autodb.lifecycle")
+  local keys = require("autodb.keys")
+  local bin = plugin_root .. "/bin/autodb"
+
+  ok("p6: the maintenance key is defined in one place",
+    keys.MAINTENANCE == "<leader>DX", keys.MAINTENANCE)
+  ok("p6: and every dbase key shares the prefix",
+    keys.HISTORY:sub(1, #keys.PREFIX) == keys.PREFIX
+    and keys.RUN_BUFFER:sub(1, #keys.PREFIX) == keys.PREFIX, keys.PREFIX)
+
+  if vim.fn.executable(bin) ~= 1 then
+    print("  SKIP  no bin/autodb")
+    return
+  end
+
+  -- Capture toasts on whichever path is live: autodb.log delegates to
+  -- auto-core.log when it is present and falls back to vim.notify when
+  -- it is not, so the test hooks the same branch the module takes
+  -- rather than assuming one.
+  local seen = {}
+  local core_ok, core = pcall(require, "auto-core")
+  local use_core = core_ok and core and core.log and type(core.log.notify) == "function"
+  local real_notify, real_core = vim.notify, use_core and core.log.notify or nil
+  local function capture(on)
+    if on then
+      if use_core then
+        core.log.notify = function(msg, opts)
+          seen[#seen + 1] = { msg = msg, lvl = (opts or {}).level }
+        end
+      else
+        vim.notify = function(msg, lvl) seen[#seen + 1] = { msg = msg, lvl = lvl } end
+      end
+    else
+      if use_core then core.log.notify = real_core else vim.notify = real_notify end
+    end
+  end
+  local WARN = use_core and "warn" or vim.log.levels.WARN
+
+  lc.forget_build_warnings()
+  capture(true)
+  local st = lc.check_build("some-other-build", bin)
+  capture(false)
+
+  ok("p6: a mismatch is reported as stale", st == "stale", st)
+  ok("p6: the user is notified", #seen == 1, #seen)
+  ok("p6: the message names the maintenance key",
+    seen[1] and seen[1].msg:find(keys.MAINTENANCE, 1, true) ~= nil,
+    seen[1] and seen[1].msg)
+  ok("p6: and says to restart the backend",
+    seen[1] and seen[1].msg:lower():find("restart", 1, true) ~= nil, seen[1] and seen[1].msg)
+  ok("p6: at warning level", seen[1] and seen[1].lvl == WARN,
+    seen[1] and tostring(seen[1].lvl))
+
+  -- Once per mismatch, not once per reconnect: a warning that repeats
+  -- on every connection is a warning people learn to ignore.
+  seen = {}
+  capture(true)
+  lc.check_build("some-other-build", bin)
+  lc.check_build("some-other-build", bin)
+  capture(false)
+  ok("p6: the same mismatch is not repeated", #seen == 0, #seen)
+
+  -- A NEW mismatch still speaks up, and a restart clears the memory.
+  seen = {}
+  capture(true)
+  lc.check_build("a-third-build", bin)
+  capture(false)
+  ok("p6: a different mismatch is reported", #seen == 1, #seen)
+
+  seen = {}
+  lc.forget_build_warnings()
+  capture(true)
+  lc.check_build("some-other-build", bin)
+  capture(false)
+  ok("p6: forgetting (a restart) lets it warn again", #seen == 1, #seen)
+
+  -- A MATCHING build must stay silent.
+  seen = {}
+  local disk = lc.binary_version(bin)
+  lc.forget_build_warnings()
+  capture(true)
+  local st_ok = lc.check_build(disk, bin)
+  capture(false)
+  ok("p6: a matching build notifies nothing", st_ok == "match" and #seen == 0,
+    st_ok .. " notifications=" .. #seen)
+end)()
+
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   vim.cmd("cq!")

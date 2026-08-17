@@ -12,6 +12,7 @@
 ---@module 'autodb.session'
 
 local client = require("autodb.client")
+local log = require("autodb.log")
 
 local M = {}
 
@@ -52,7 +53,7 @@ local function emit(event, ...)
     local ok, err = pcall(fn, ...)
     if not ok then
       vim.schedule(function()
-        vim.notify("autodb.session: listener error: " .. tostring(err), vim.log.levels.ERROR)
+        log.error("session", "listener error: " .. tostring(err))
       end)
     end
   end
@@ -77,10 +78,24 @@ function M.is_ready()
 end
 
 ---attach adopts a connected client as the session's own.
+---
+---Connecting is also when a version mismatch becomes knowable, so it is
+---checked here rather than left to whichever frontend remembers. A
+---stale backend is the one failure that presents as "my change did
+---nothing", and the user should hear about it at the moment we learn
+---it, not the next time they open a modal.
 ---@param c AutodbClient
-function M.attach(c)
+---@param opts { bin: string? }?
+function M.attach(c, opts)
   state.client = c
   state.epoch = state.epoch + 1
+  local hello = c.hello and c:hello() or nil
+  if hello and hello.version then
+    local ok, lifecycle = pcall(require, "autodb.lifecycle")
+    if ok then
+      pcall(lifecycle.check_build, hello.version, opts and opts.bin or nil)
+    end
+  end
   emit("connected", c)
 end
 
@@ -92,6 +107,10 @@ end
 ---epoch lesson).
 ---@param reason string?
 function M.detach(reason)
+  -- A restart may be exactly what fixes a mismatch, so the next
+  -- connection is allowed to report one again.
+  local ok, lifecycle = pcall(require, "autodb.lifecycle")
+  if ok then pcall(lifecycle.forget_build_warnings) end
   state.client = nil
   state.workspace = nil
   state.connection = nil
