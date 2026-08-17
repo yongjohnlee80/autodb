@@ -22,17 +22,29 @@
 #     postgres meta store with no DSN stops the server before it listens.
 
 [server]
-# TCP port for the msgpack-RPC surface. Frontends (the TUI, and autovim's
-# Lua integration) dial this, and the first one to find nothing listening
-# starts a server itself.
-port = 7419
+# By DEFAULT autodb listens on a local unix socket — no port, no network
+# stack, unreachable from another machine, and openable only by your own
+# user because the socket file is mode 0600. Frontends (the TUI and
+# autovim's Lua integration) find each other there, and the first one to
+# see nothing listening starts a server.
+#
+# Setting a port is how you OPT IN to TCP for remote access. Do it
+# deliberately: autodb holds encrypted database credentials for every
+# user, so reaching it across a network is a decision you make, never one
+# you inherit from a default. Tighten [security].ip_allowlist to match,
+# and put the port behind whatever your network already trusts.
+# (Remote access is M9-gated pending TLS and rate limits.)
+# port = 7419
 
-# Listen address. Loopback by default — deliberately. autodb holds
-# encrypted database credentials for every user, so exposing it beyond
-# this machine is a decision you make explicitly, not one you inherit.
-# If you do change it, tighten [security].ip_allowlist to match, and put
-# the port behind whatever your network already trusts.
+# TCP listen address. Only consulted when `port` is set above.
 bind = "127.0.0.1"
+
+# Override the unix socket path. Empty means a per-user runtime
+# directory: $XDG_RUNTIME_DIR/autodb.sock on Linux, and $TMPDIR (which
+# is per-user and 0700) on macOS. Set this if you need a specific
+# location — keep it under ~100 bytes, which is the kernel's limit for a
+# socket path.
+# socket = "/run/user/1000/autodb.sock"
 
 [meta]
 # autodb's OWN database: users, encrypted connection secrets, grants,

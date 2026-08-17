@@ -41,10 +41,17 @@ type TUI struct {
 
 // Server configures the RPC listener (consumed by rpc, roadmap M5).
 type Server struct {
-	// Port is the msgpack-RPC TCP port.
+	// Port opts INTO TCP. Zero (the default) means the local unix
+	// socket instead, which no other machine can reach and no other
+	// user can open. Setting a port is how an operator asks for a
+	// network-reachable server, which is M9-gated (TLS, rate limits).
 	Port int `toml:"port"`
-	// Bind is the listen address; loopback by default (ADR-0052 §5).
+	// Bind is the TCP listen address; loopback by default (ADR-0052 §5).
+	// Ignored when Port is zero.
 	Bind string `toml:"bind"`
+	// Socket overrides the unix socket path. Empty means
+	// $XDG_RUNTIME_DIR/autodb.sock. Ignored when Port is set.
+	Socket string `toml:"socket"`
 }
 
 // Meta configures autodb's own management database (ADR-0053 §2).
@@ -74,7 +81,10 @@ type Security struct {
 // Default returns the zero-config defaults.
 func Default() Config {
 	return Config{
-		Server:   Server{Port: DefaultPort, Bind: "127.0.0.1"},
+		// Port 0: the local unix socket is the default rendezvous.
+		// DefaultPort is what `port` means when an operator sets it,
+		// not what they get by not deciding.
+		Server:   Server{Port: 0, Bind: "127.0.0.1"},
 		Meta:     Meta{Engine: "sqlite"},
 		History:  History{Enabled: true},
 		Security: Security{IPAllowlist: []string{"127.0.0.1/32", "::1/128"}},
@@ -131,11 +141,18 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) validate() error {
-	if c.Server.Port < 1 || c.Server.Port > 65535 {
+	// Zero means "no TCP — use the local socket", so only a SET port is
+	// range-checked. A negative port is still a typo worth rejecting.
+	if c.Server.Port < 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("%w: server.port %d out of range", ErrInvalid, c.Server.Port)
 	}
-	if _, err := netip.ParseAddr(c.Server.Bind); err != nil {
-		return fmt.Errorf("%w: server.bind %q: %v", ErrInvalid, c.Server.Bind, err)
+	// Bind only governs a TCP listener. Validating it unconditionally
+	// would reject a perfectly good socket-only config whose `bind` was
+	// left at some stale value.
+	if c.Server.Port > 0 {
+		if _, err := netip.ParseAddr(c.Server.Bind); err != nil {
+			return fmt.Errorf("%w: server.bind %q: %v", ErrInvalid, c.Server.Bind, err)
+		}
 	}
 	switch c.Meta.Engine {
 	case "sqlite":

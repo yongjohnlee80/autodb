@@ -3,3 +3,8 @@
 *.test
 coverage.out
 .env
+
+# Local Go workspace — points at sibling checkouts on THIS machine, so
+# it must never be committed (it would break every other clone and CI).
+go.work
+go.work.sum

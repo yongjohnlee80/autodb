@@ -52,8 +52,13 @@ func TestLoad_UnknownKeysRejected(t *testing.T) {
 func TestLoad_Validation(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"bad port":           "[server]\nport = 0\n",
-		"bad bind":           "[server]\nbind = \"not-an-ip\"\n",
+		// port 0 is VALID now — it selects the local socket. A negative
+		// or out-of-range port is still a typo.
+		"negative port":      "[server]\nport = -1\n",
+		"port too high":      "[server]\nport = 99999\n",
+		// bind only governs a TCP listener, so it is only validated when
+		// a port asks for one.
+		"bad bind with port": "[server]\nport = 7419\nbind = \"not-an-ip\"\n",
 		"bad engine":         "[meta]\nengine = \"oracle\"\n",
 		"postgres needs dsn": "[meta]\nengine = \"postgres\"\n",
 		"bad allowlist":      "[security]\nip_allowlist = [\"nope\"]\n",

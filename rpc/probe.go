@@ -44,8 +44,15 @@ func probeLimits() *msgpack.Limits {
 // foreign occupant must not be able to make the guard report
 // "already running".
 func Probe(ctx context.Context, addr string) (version string, err error) {
+	return ProbeOn(ctx, "tcp", addr)
+}
+
+// ProbeOn is Probe on an explicit network ("unix" or "tcp"), so the
+// caller's endpoint choice reaches the dial rather than being assumed
+// here (ADR-0058 §3.2.1: one resolver decides where we meet).
+func ProbeOn(ctx context.Context, network, addr string) (version string, err error) {
 	d := net.Dialer{}
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	conn, err := d.DialContext(ctx, network, addr)
 	if err != nil {
 		return "", err
 	}

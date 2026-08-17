@@ -36,6 +36,7 @@ type Session struct {
 	mu         sync.Mutex
 	client     *golibrpc.Client
 	instance   string
+	network    string // "unix" (default) or "tcp"
 	version    string
 	serverPID  int64
 	serverAddr string
@@ -58,10 +59,21 @@ type UserInfo struct {
 
 // NewSession prepares an unconnected session.
 func NewSession(addr string, log logger.Logger, spawn func() (string, error)) *Session {
+	return NewSessionOn("tcp", addr, log, spawn)
+}
+
+// NewSessionOn is NewSession on an explicit network — "unix" (the
+// default endpoint) or "tcp" (a configured port). The frontend does not
+// choose this: config.Server.Endpoint() resolves it once, and both the
+// listener and every dial follow that one answer.
+func NewSessionOn(network, addr string, log logger.Logger, spawn func() (string, error)) *Session {
 	if log == nil {
 		log = logger.Nop{}
 	}
-	return &Session{addr: addr, log: log, spawn: spawn}
+	if network == "" {
+		network = "tcp"
+	}
+	return &Session{network: network, addr: addr, log: log, spawn: spawn}
 }
 
 // Gen reports the state epoch (stale-task filtering in the UI).
@@ -206,7 +218,8 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 	logHint := ""
 	var deadline time.Time
 	for {
-		cli, err = golibrpc.Dial(ctx, s.addr, msgpackrpc.New(nil))
+		cli, err = golibrpc.Dial(ctx, s.addr, msgpackrpc.New(nil),
+			golibrpc.ClientNetwork(s.network))
 		if err == nil {
 			break
 		}

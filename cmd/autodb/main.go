@@ -89,22 +89,37 @@ func runServe(configPath, nonceFile string) error {
 	if err != nil {
 		return err
 	}
-	// JoinHostPort, not Sprintf: an IPv6 bind ("::1") needs brackets.
-	addr := net.JoinHostPort(cfg.Server.Bind, fmt.Sprintf("%d", cfg.Server.Port))
+	ep, err := cfg.Server.Endpoint()
+	if err != nil {
+		return err
+	}
+	addr := ep.Address
 
-	ln, err := net.Listen("tcp", addr)
+	ln, err := listen(ep)
 	if err != nil {
 		if !isAddrInUse(err) {
 			return fmt.Errorf("bind %s: %w", addr, err)
 		}
 		probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-		occupant, perr := rpc.Probe(probeCtx, addr)
+		occupant, perr := rpc.ProbeOn(probeCtx, ep.Network, addr)
 		if perr == nil {
 			fmt.Printf("autodb: already running on %s (version %s)\n", addr, occupant)
 			return nil
 		}
 		return fmt.Errorf("bind %s: address in use, occupant is not a compatible autodb: %v", addr, perr)
+	}
+	if ep.IsLocal() {
+		// The socket file IS the access control, so it is owner-only.
+		// Without this the umask decides who may talk to a service that
+		// holds every database credential.
+		if cerr := os.Chmod(addr, 0o600); cerr != nil {
+			ln.Close()
+			return fmt.Errorf("chmod %s: %w", addr, cerr)
+		}
+		// Leaving the file behind would make the next launch look
+		// occupied when nothing is listening.
+		defer func() { _ = os.Remove(addr) }()
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -160,7 +175,11 @@ func runUI(configPath string) error {
 	if err != nil {
 		return err
 	}
-	addr := net.JoinHostPort(cfg.Server.Bind, fmt.Sprintf("%d", cfg.Server.Port))
+	ep, err := cfg.Server.Endpoint()
+	if err != nil {
+		return err
+	}
+	addr := ep.Address
 
 	notesRoot := cfg.TUI.NotesDir
 	if notesRoot == "" {
@@ -180,7 +199,7 @@ func runUI(configPath string) error {
 	}
 
 	spawn := func() (string, error) { return spawnServe(configPath) }
-	session := tuiapp.NewSession(addr, logger.Nop{}, spawn)
+	session := tuiapp.NewSessionOn(ep.Network, addr, logger.Nop{}, spawn)
 	defer session.Close()
 
 	backend, err := tuiterm.Open()
@@ -276,4 +295,34 @@ func spawnServe(configPath string) (string, error) {
 	// window expires with this log path in the error).
 	go func() { _ = cmd.Wait() }()
 	return logPath, nil
+}
+
+// listen binds the endpoint, clearing a stale unix socket first.
+//
+// A daemon killed with SIGKILL leaves its socket file behind, and bind
+// then fails EADDRINUSE even though nothing is listening. Distinguishing
+// the two cases is a dial: if something answers, the address really is
+// in use and the caller's existing single-instance path handles it; if
+// nothing does, the file is debris and removing it is safe.
+//
+// This is the one failure mode a unix socket has that a TCP port does
+// not, so it is handled here rather than left to the operator.
+func listen(ep config.Endpoint) (net.Listener, error) {
+	if !ep.IsLocal() {
+		return net.Listen(ep.Network, ep.Address)
+	}
+	ln, err := net.Listen(ep.Network, ep.Address)
+	if err == nil || !isAddrInUse(err) {
+		return ln, err
+	}
+	// Something owns the path. Is it alive?
+	c, derr := net.DialTimeout(ep.Network, ep.Address, 500*time.Millisecond)
+	if derr == nil {
+		c.Close()
+		return nil, err // genuinely in use; let the caller probe it
+	}
+	if rerr := os.Remove(ep.Address); rerr != nil {
+		return nil, fmt.Errorf("stale socket %s: %w", ep.Address, rerr)
+	}
+	return net.Listen(ep.Network, ep.Address)
 }
