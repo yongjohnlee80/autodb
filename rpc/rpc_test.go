@@ -29,7 +29,7 @@ type fixture struct {
 
 var fixtureSeq atomic.Int64
 
-func newFixture(t *testing.T, extra ...rpc.Option) *fixture {
+func newFixture(t *testing.T) *fixture {
 	t.Helper()
 	ctx := context.Background()
 	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
@@ -59,8 +59,8 @@ func newFixture(t *testing.T, extra ...rpc.Option) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sopts := append([]rpc.Option{rpc.WithListener(ln)}, extra...)
-	srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "test-version", sopts...)
+	srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "test-version",
+		rpc.WithListener(ln))
 	runCtx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Run(runCtx) }()

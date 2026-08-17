@@ -47,11 +47,12 @@ func main() {
 	serve := flag.Bool("serve", false, "run the RPC server")
 	ui := flag.Bool("ui", false, "run the standalone TUI")
 	configPath := flag.String("config", "", "config file path (default: the user config dir)")
-	// The PATH is public and may appear in the process table; the file's
-	// CONTENTS are the secret, and the server reads-and-unlinks them at
-	// startup (ADR-0058 §3.2.1).
-	nonceFile := flag.String("launch-nonce-file", "",
-		"path to a one-time launch nonce; the server reads it once, deletes it, and echoes it in sys.hello")
+	// Frontends need to know WHERE to dial, and that answer must have one
+	// owner. Reimplementing the socket-path rules in Lua would be a
+	// second resolver that silently drifts from this one — so the binary
+	// reports it instead ([[shared-resolver-single-source-of-truth]]).
+	printEndpoint := flag.Bool("print-endpoint", false,
+		"print the resolved endpoint as <network>\\t<address> and exit")
 	flag.Parse()
 
 	if *showVersion {
@@ -60,8 +61,13 @@ func main() {
 	}
 
 	switch {
+	case *printEndpoint:
+		if err := runPrintEndpoint(*configPath); err != nil {
+			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+			os.Exit(1)
+		}
 	case *serve:
-		if err := runServe(*configPath, *nonceFile); err != nil {
+		if err := runServe(*configPath); err != nil {
 			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 			os.Exit(1)
 		}
@@ -80,7 +86,7 @@ func main() {
 // configured address; when it is already taken, probe the occupant — a
 // compatible autodb means "already running" (exit 0, the FE contract);
 // anything else is a loud error. Serves until SIGINT/SIGTERM, then drains.
-func runServe(configPath, nonceFile string) error {
+func runServe(configPath string) error {
 	// config.Load owns path resolution: an empty path resolves to the
 	// default location, a missing file means defaults, and everything else
 	// (unreadable file, bad TOML, unknown keys) fails loudly — no silent
@@ -145,18 +151,8 @@ func runServe(configPath, nonceFile string) error {
 	// server-side log is the only place withheld core errors, frame
 	// diagnostics, panics, and reply failures exist at all.
 	oplog := logger.New(logger.WithWriter(os.Stderr), logger.WithContext("autodb"))
-	sopts := []rpc.Option{rpc.WithListener(ln), rpc.WithLogger(oplog)}
-	if nonceFile != "" {
-		// Fail to start rather than serve unprovable: a launcher that
-		// asked for a nonce must not silently get a daemon that cannot
-		// present one (ADR-0058 §3.2.1).
-		nonce, nerr := rpc.ReadLaunchNonce(nonceFile)
-		if nerr != nil {
-			return nerr
-		}
-		sopts = append(sopts, rpc.WithLaunchNonce(nonce))
-	}
-	srv := rpc.New(svc, eng, cfg.Server, version, sopts...)
+	srv := rpc.New(svc, eng, cfg.Server, version,
+		rpc.WithListener(ln), rpc.WithLogger(oplog))
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	return srv.Run(ctx)
 }
@@ -325,4 +321,25 @@ func listen(ep config.Endpoint) (net.Listener, error) {
 		return nil, fmt.Errorf("stale socket %s: %w", ep.Address, rerr)
 	}
 	return net.Listen(ep.Network, ep.Address)
+}
+
+// runPrintEndpoint reports where this configuration says to meet, so a
+// frontend in another language can dial the same place without
+// reimplementing the resolution rules (which differ per platform and
+// would drift the moment either side changed).
+//
+// Output is one tab-separated line — `<network>\t<address>` — because it
+// is parsed by machines, and a stable two-field line is harder to get
+// wrong than JSON that grows fields.
+func runPrintEndpoint(configPath string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	ep, err := cfg.Server.Endpoint()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%s\t%s\n", ep.Network, ep.Address)
+	return nil
 }

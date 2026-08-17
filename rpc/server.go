@@ -64,19 +64,14 @@ type Server struct {
 
 	stop     chan struct{} // closed by RequestShutdown
 	stopOnce sync.Once
-
-	// launchNonce, when present, is echoed by sys.hello so the launcher
-	// can prove this process is the child it started (ADR-0058 §3.2.1).
-	launchNonce *LaunchNonce
 }
 
 // Option configures a Server.
 type Option func(*options)
 
 type options struct {
-	logger      logger.Logger
-	listener    net.Listener
-	launchNonce *LaunchNonce
+	logger   logger.Logger
+	listener net.Listener
 }
 
 // WithLogger sets the transport logger.
@@ -102,7 +97,6 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 	s := &Server{
 		auth: authSvc, eng: eng, version: version,
 		instance: newInstanceID(), stop: make(chan struct{}),
-		launchNonce: o.launchNonce,
 	}
 
 	ropts := []golibrpc.Option{
@@ -187,13 +181,6 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		// address it is actually listening on.
 		"pid":  int64(os.Getpid()),
 		"addr": s.rpc.Addr(),
-	}
-	// The launch proof, when this process was started with one. Absent
-	// for a daemon an operator ran by hand, which is why a frontend
-	// treats "no nonce" as "not the child I launched" rather than as an
-	// error (ADR-0058 §3.2.1).
-	if s.launchNonce != nil {
-		reply["launch_nonce"] = s.launchNonce.value
 	}
 	if len(req.Params) > 1 {
 		return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,

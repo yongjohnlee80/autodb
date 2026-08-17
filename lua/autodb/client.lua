@@ -4,13 +4,15 @@
 ---any address and reports the wire's own errors verbatim. Everything
 ---that makes a connection *autodb's* lives here (ADR-0058 §3.2.1):
 ---
----  * **where we may connect** — loopback only, until the M9 transport
----    exists. This is an application rule, not a family one: a future
----    consumer of `auto-core.rpc` with an authenticated transport must
----    not inherit our M9 gate.
----  * **who may receive a credential** — the launch nonce, so a stale
----    daemon from another build or a foreign port occupant cannot
----    collect a passphrase by accident.
+---  * **where we may connect** — a TCP endpoint must be loopback until
+---    the M9 transport exists. This is an application rule, not a family
+---    one: a future consumer of `auto-core.rpc` with an authenticated
+---    transport must not inherit our M9 gate.
+---  * **which transport** — the endpoint the binary resolved, dialled as
+---    a unix socket by default. A socket cannot be reached from another
+---    machine and cannot be opened by another user, so identity comes
+---    from the filesystem rather than from a handshake — the same
+---    guarantee Neovim's own RPC socket relies on.
 ---  * **what an error means** — the transport hands up the raw msgpack
 ---    error slot; autodb projects `{code, message}` out of it.
 ---  * **session and epoch** — the token, and the `instance` that makes a
@@ -31,9 +33,8 @@ local M = {}
 M.PROTOCOL = 4
 
 ---@class AutodbClientOpts
----@field addr string                 -- host:port, loopback only
----@field expect_nonce string?        -- SHA-256 digest from the spawn record
----@field trust_external boolean?     -- user has explicitly trusted an unproved daemon
+---@field addr string                 -- socket path, or host:port for TCP
+---@field mode string?                -- "pipe" (default endpoint) or "tcp"
 ---@field limits table?               -- auto-core.rpc frame limits
 ---@field on_lost fun(reason: string)? -- epoch ended
 
@@ -96,28 +97,35 @@ end
 ---
 ---Asynchronous by construction: `cb(client, err)` fires once. The
 ---handshake is enforced here rather than left to callers — no request
----is admitted before hello has been checked, so a protocol mismatch or
----an unproved daemon cannot be discovered halfway through a login.
+---is admitted before hello has been checked, so a protocol mismatch
+---cannot be discovered halfway through a login.
 ---@param opts AutodbClientOpts
 ---@param cb fun(client: AutodbClient|nil, err: string|nil)
 function M.connect(opts, cb)
   opts = opts or {}
 
-  local loopback_ok, loopback_err = M.is_loopback(opts.addr or "")
-  if not loopback_ok then
-    return cb(nil, loopback_err)
+  local mode = opts.mode or "pipe"
+  -- A TCP endpoint still has to be loopback: remote access is M9-gated
+  -- pending TLS and rate limits, and a credential must never cross an
+  -- unauthenticated network. A unix socket needs no such check — it
+  -- cannot leave the machine.
+  if mode == "tcp" then
+    local loopback_ok, loopback_err = M.is_loopback(opts.addr or "")
+    if not loopback_ok then
+      return cb(nil, loopback_err)
+    end
   end
 
   local self = setmetatable({}, Client)
   self._addr = opts.addr
-  self._expect_nonce = opts.expect_nonce
-  self._trust_external = opts.trust_external and true or false
+  self._mode = mode
   self._on_lost = opts.on_lost
   self._token = nil
   self._ready = false
 
   local conn, cerr = rpc.connect({
     addr = opts.addr,
+    mode = mode,
     limits = opts.limits,
     on_epoch_lost = function(reason)
       self._ready = false
@@ -153,12 +161,6 @@ function M.connect(opts, cb)
         return cb(nil, err)
       end
 
-      ok, err = self:_check_identity(hello)
-      if not ok then
-        conn:close()
-        return cb(nil, err)
-      end
-
       self._hello = hello
       self._instance = hello.instance
       self._ready = true
@@ -182,46 +184,6 @@ function Client:_check_protocol(hello)
   return false, string.format(
     "autodb: the server speaks protocol %s, this plugin speaks %d — " ..
     "the PLUGIN is older. Update autodb.nvim.", tostring(got), M.PROTOCOL)
-end
-
----_check_identity decides whether this endpoint may receive credentials.
----
----Managed mode: the daemon must return the nonce we generated for the
----generation we launched. Anything else — a missing nonce, a different
----one — is not our child, whatever pid it claims, and is refused
----outright rather than downgraded to a trust prompt.
----
----External mode: no nonce exists, so the decision is the user's. It has
----to have been made ALREADY (`trust_external`), because the point is to
----ask before credentials flow, not after.
-function Client:_check_identity(hello)
-  local presented = hello.launch_nonce
-
-  if self._expect_nonce then
-    if type(presented) ~= "string" or presented == "" then
-      return false, string.format(
-        "autodb: the daemon on %s presented no launch proof, but this " ..
-        "plugin started one for this generation. Refusing to send " ..
-        "credentials to a process it did not launch.", self._addr)
-    end
-    if vim.fn.sha256(presented) ~= self._expect_nonce then
-      return false, string.format(
-        "autodb: the daemon on %s presented the WRONG launch proof — it " ..
-        "is not the process this plugin started. Refusing to send " ..
-        "credentials.", self._addr)
-    end
-    self._managed = true
-    return true
-  end
-
-  if not self._trust_external then
-    return false, string.format(
-      "autodb: %s is served by a daemon this plugin did not start. " ..
-      "Confirm you trust it (pid %s, %s) before logging in.",
-      self._addr, tostring(hello.pid), tostring(hello.addr))
-  end
-  self._managed = false
-  return true
 end
 
 ---call issues a request and projects the outcome into autodb's shape.
@@ -279,7 +241,7 @@ function Client:token() return self._token end
 function Client:instance() return self._instance end
 function Client:hello() return self._hello end
 function Client:addr() return self._addr end
-function Client:is_managed() return self._managed == true end
+function Client:mode() return self._mode end
 function Client:is_ready() return self._ready and self._conn and not self._conn:is_closed() end
 function Client:in_flight() return self._conn and self._conn:in_flight() or 0 end
 
