@@ -35,6 +35,13 @@ if not core_found then
   vim.cmd("cq!")
 end
 
+-- float.multi drops its preview pane when the terminal is too narrow to
+-- hold left + middle + preview (documented graceful degradation). A
+-- headless nvim defaults to 80 columns, so the three-pane layout would
+-- silently become two and the assertions would be testing the fallback.
+vim.o.columns = 200
+vim.o.lines = 50
+
 local pass_count, fail_count = 0, 0
 local function ok(name, cond, detail)
   if cond then
@@ -565,6 +572,160 @@ print("\n[8] a real query through the whole stack")
   end
   pcall(vim.fn.jobstop, job)
   vim.fn.delete(tmp, "rf")
+end)()
+
+-- ─────────────────── [9] history modal ─────────────────────────────
+print("\n[9] history — three panes over history.list (requirement 8)")
+;(function()
+  local hist = require("autodb.history")
+
+  -- Formatting: the year is almost always this one and the UTC offset is
+  -- never what you are scanning a list for.
+  ok("p9: a timestamp becomes scannable",
+    hist._fmt_when_for_tests("2026-08-18T09:14:03+09:00") == "08-18 09:14",
+    hist._fmt_when_for_tests("2026-08-18T09:14:03+09:00"))
+  ok("p9: an unparseable timestamp passes through rather than vanishing",
+    hist._fmt_when_for_tests("not a date") == "not a date")
+
+  -- A script is many lines; a list row is one.
+  ok("p9: a multi-line script collapses for the list",
+    hist._one_line_for_tests("select *\n  from t\n where x = 1")
+      == "select * from t where x = 1",
+    hist._one_line_for_tests("select *\n  from t\n where x = 1"))
+  ok("p9: a nil script is empty, not an error",
+    hist._one_line_for_tests(nil) == "")
+
+  local entries = {
+    { id = 1, connection = "analytics", user = "johno", script = "select 1",
+      started_at = "2026-08-18T09:00:00+09:00", status = "ok", row_count = 1 },
+    { id = 2, connection = "analytics", user = "johno", script = "select 2",
+      started_at = "2026-08-18T09:05:00+09:00", status = "ok", row_count = 1 },
+    { id = 3, connection = "billing", user = "ops", script = "update x set y=1",
+      started_at = "2026-08-18T09:10:00+09:00", status = "error", error = "boom" },
+    { id = 4, connection_id = 77, user = "ops", script = "select 4",
+      started_at = "2026-08-18T09:20:00+09:00", status = "ok" },
+  }
+
+  -- The filter offers what the history CONTAINS, not every connection
+  -- that exists, and busiest first so the useful one is nearest.
+  local conns = hist._connections_for_tests(entries)
+  ok("p9: the first filter entry is (all)",
+    conns[1].label:find("all", 1, true) ~= nil and conns[1].key == nil,
+    vim.inspect(conns[1]))
+  ok("p9: (all) counts every entry", conns[1].count == 4, conns[1].count)
+  ok("p9: connections are listed busiest first",
+    conns[2].label == "analytics" and conns[2].count == 2, vim.inspect(conns[2]))
+  ok("p9: a connection with no name falls back to its id",
+    (function()
+      for _, c in ipairs(conns) do
+        if c.label == "#77" then return true end
+      end
+      return false
+    end)(), vim.inspect(vim.tbl_map(function(c) return c.label end, conns)))
+
+  -- Filtering by the selected connection.
+  local state = { entries = entries, conns = conns, conn_idx = 1 }
+  ok("p9: (all) filters nothing", #hist._filtered_for_tests(state) == 4)
+  state.conn_idx = 2
+  local only = hist._filtered_for_tests(state)
+  ok("p9: selecting a connection narrows the list",
+    #only == 2 and only[1].connection == "analytics", #only)
+
+  ok("p9: is_open is false before opening", hist.is_open() == false)
+  ok("p9: close on a closed modal is a no-op", pcall(hist.close))
+
+  -- Opening needs a session; without one it must report rather than
+  -- throw, because <leader>Dh is reachable at any time.
+  local session = require("autodb.session")
+  session.reset_for_tests()
+  ok("p9: opening with no session does not error", pcall(hist.open))
+  ok("p9: and stays closed", hist.is_open() == false)
+
+  -- The float wiring itself, with the server stubbed. Helper functions
+  -- passing is not evidence that three panes render and that the cursor
+  -- drives the preview.
+  local real_authed = session.authed
+  session.authed = function(method, _params, cb)
+    if method == "history.list" then return cb(entries, nil) end
+    return cb(nil, { message = "unexpected " .. method })
+  end
+  local opened = pcall(hist.open)
+  session.authed = real_authed
+
+  ok("p9: it opens with entries", opened and hist.is_open() == true, tostring(opened))
+  if hist.is_open() then
+    local st = hist._state_for_tests()
+    local panes = st.float.panes or {}
+    ok("p9: three panes exist", panes.left and panes.middle and panes.preview,
+      vim.inspect(vim.tbl_keys(panes)))
+
+    local left = vim.api.nvim_buf_get_lines(panes.left.bufnr, 0, -1, false)
+    ok("p9: the left pane lists the filters",
+      #left == #conns and left[1]:find("all", 1, true) ~= nil, vim.inspect(left))
+    ok("p9: the selected filter is marked", left[1]:find("▸", 1, true) ~= nil, left[1])
+
+    local mid = vim.api.nvim_buf_get_lines(panes.middle.bufnr, 0, -1, false)
+    ok("p9: the middle pane lists every entry", #mid == #entries, #mid)
+    ok("p9: a row carries date, user and a one-line script",
+      mid[1]:find("09:00", 1, true) ~= nil and mid[1]:find("johno", 1, true) ~= nil
+      and mid[1]:find("select 1", 1, true) ~= nil, mid[1])
+    ok("p9: a failed statement is marked",
+      (function()
+        for _, l in ipairs(mid) do if l:find("✗", 1, true) then return true end end
+        return false
+      end)(), vim.inspect(mid))
+
+    local prev = vim.api.nvim_buf_get_lines(panes.preview.bufnr, 0, -1, false)
+    ok("p9: the preview shows the first entry in full",
+      table.concat(prev, "\n"):find("select 1", 1, true) ~= nil, vim.inspect(prev))
+    ok("p9: and its metadata", table.concat(prev, "\n"):find("connection:", 1, true) ~= nil)
+    ok("p9: the script pane is treated as SQL",
+      vim.bo[panes.preview.bufnr].filetype == "sql", vim.bo[panes.preview.bufnr].filetype)
+
+    -- The cursor drives the preview: that is what makes it a browser.
+    if panes.middle.winid and vim.api.nvim_win_is_valid(panes.middle.winid) then
+      vim.api.nvim_win_set_cursor(panes.middle.winid, { 3, 0 })
+      hist._preview(st)
+      local p3 = table.concat(vim.api.nvim_buf_get_lines(panes.preview.bufnr, 0, -1, false), "\n")
+      ok("p9: moving the cursor repaints the preview",
+        p3:find("update x set y=1", 1, true) ~= nil, p3:sub(1, 120))
+      ok("p9: and a failed entry shows its error", p3:find("boom", 1, true) ~= nil, p3:sub(1, 200))
+    end
+
+    -- Buffer-local keymaps, so nothing leaks into the editor.
+    local maps = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(panes.middle.bufnr, "n")) do
+      maps[m.lhs] = true
+    end
+    ok("p9: <CR>, y and R are bound on the entry pane",
+      maps["<CR>"] and maps["y"] and maps["R"], vim.inspect(vim.tbl_keys(maps)))
+
+    hist.close()
+    ok("p9: closing releases the modal", hist.is_open() == false)
+  end
+
+  -- A narrow terminal DROPS the preview rather than failing — the
+  -- documented behaviour of float.multi, and the reason _preview guards
+  -- for a missing pane instead of assuming three.
+  local wide = vim.o.columns
+  vim.o.columns = 80
+  session.authed = function(method, _params, cb)
+    if method == "history.list" then return cb(entries, nil) end
+    return cb(nil, { message = "unexpected " .. method })
+  end
+  local narrow_ok = pcall(hist.open)
+  session.authed = real_authed
+  ok("p9: a narrow terminal still opens", narrow_ok and hist.is_open() == true)
+  if hist.is_open() then
+    local np = hist._state_for_tests().float.panes or {}
+    ok("p9: and degrades to two panes rather than erroring",
+      np.left ~= nil and np.middle ~= nil and np.preview == nil,
+      vim.inspect(vim.tbl_keys(np)))
+    ok("p9: the entry list still renders",
+      #vim.api.nvim_buf_get_lines(np.middle.bufnr, 0, -1, false) == #entries)
+    hist.close()
+  end
+  vim.o.columns = wide
 end)()
 
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
