@@ -728,6 +728,68 @@ print("\n[9] history — three panes over history.list (requirement 8)")
   vim.o.columns = wide
 end)()
 
+-- ─────────────────── [10] refresh ──────────────────────────────────
+print("\n[10] refresh — pull, rebuild, relaunch (and refuse when it cannot)")
+;(function()
+  local refresh = require("autodb.refresh")
+  local lifecycle = require("autodb.lifecycle")
+  local commands = require("autodb.commands")
+
+  ok("p10: refresh is reachable from the maintenance prompt",
+    type(commands.refresh) == "function")
+
+  -- In this checkout the plugin-local build IS the resolved binary, so a
+  -- refresh is meaningful.
+  local pass_ok, pass_err, plan = refresh.preflight({})
+  if vim.fn.executable(plan and plan.bin or "") == 1 then
+    ok("p10: preflight passes for a plugin-local build", pass_ok == true, tostring(pass_err))
+    ok("p10: and reports the checkout it would pull",
+      plan and plan.root == lifecycle.plugin_root(), plan and plan.root)
+  else
+    print("  SKIP  no plugin-local bin/autodb to refresh")
+  end
+
+  -- The guard that matters: if the binary came from PATH (Mason, go
+  -- install), refreshing THIS checkout changes nothing about the
+  -- executable that runs. Refusing and naming the right tool beats
+  -- appearing to work.
+  local tmp = vim.fn.tempname()
+  vim.fn.mkdir(tmp, "p")
+  local fake = tmp .. "/autodb"
+  vim.fn.writefile({ "#!/bin/sh", "echo autodb dev" }, fake)
+  vim.fn.setfperm(fake, "rwxr-xr-x")
+
+  local ok_other, err_other = refresh.preflight({ bin = fake })
+  ok("p10: refuses when the binary is not the plugin build", ok_other == false)
+  ok("p10: and names Mason and go install as the right tools",
+    err_other and err_other:find("Mason", 1, true) ~= nil
+    and err_other:find("go install", 1, true) ~= nil, err_other)
+  ok("p10: and points at restart for picking it up",
+    err_other and err_other:find(require("autodb.keys").MAINTENANCE, 1, true) ~= nil,
+    err_other)
+
+  -- A non-git checkout has no branch to fetch, and should say that
+  -- rather than shelling out and relaying git's exit code.
+  local orig_root = lifecycle.plugin_root
+  lifecycle.plugin_root = function() return tmp end
+  local nogit_ok, nogit_err = refresh.preflight({ bin = fake })
+  lifecycle.plugin_root = orig_root
+  ok("p10: a non-git checkout is refused with the manual command",
+    nogit_ok == false and nogit_err ~= nil, nogit_err)
+
+  -- Build goes through the Makefile, which owns -buildvcs=false AND the
+  -- ldflags version stamp that the stale-backend check reads. A second
+  -- recipe here would drift and quietly report `dev` forever.
+  local mk = vim.fn.readfile(lifecycle.plugin_root() .. "/Makefile")
+  local mk_text = table.concat(mk, "\n")
+  ok("p10: the Makefile still owns the version stamp",
+    mk_text:find("main.version", 1, true) ~= nil, "ldflags present")
+  ok("p10: and the buildvcs workaround",
+    mk_text:find("buildvcs=false", 1, true) ~= nil)
+
+  vim.fn.delete(tmp, "rf")
+end)()
+
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   vim.cmd("cq!")

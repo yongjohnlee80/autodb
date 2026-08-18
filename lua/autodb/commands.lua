@@ -209,10 +209,13 @@ end
 ---names what each choice does to the SERVER, because two of the three
 ---affect every other frontend sharing this daemon.
 function M.maintenance()
+  -- Two choices, not three. A factory reset is destructive, rare, and
+  -- easy to hit by accident in a list — it stays a manual operation
+  -- [DECISION — Johno, 2026-08-18: "factory_reset isn't required, and
+  -- should only be performed manually in my opinion"].
   local choices = {
     { key = "restart", label = "Restart the backend (cancels running statements)" },
-    { key = "refresh", label = "Refresh autodb (refetch and rebuild the binary)" },
-    { key = "reset", label = "Reset the database (DESTRUCTIVE — moves the meta store aside)" },
+    { key = "refresh", label = "Refresh autodb (pull the latest branch, rebuild, restart)" },
   }
   vim.ui.select(choices, {
     prompt = "autodb maintenance",
@@ -220,9 +223,7 @@ function M.maintenance()
   }, function(choice)
     if not choice then return end
     if choice.key == "restart" then return M.restart() end
-    log.notify(choice.key .. " is not implemented yet — run `autodb --serve` "
-      .. "yourself, or rebuild the binary, until it lands",
-      { level = "warn", component = "commands" })
+    if choice.key == "refresh" then return M.refresh() end
   end)
 end
 
@@ -245,6 +246,15 @@ function M.restart()
       session.detach("restart")
     end)
   end)
+end
+
+---refresh pulls, rebuilds and relaunches (see `autodb.refresh`).
+function M.refresh()
+  local autodb = require("autodb")
+  require("autodb.refresh").run({
+    bin = autodb.config and autodb.config.bin or nil,
+    config = autodb.config and autodb.config.config or nil,
+  })
 end
 
 ---history opens the script-history modal (requirement 8).
