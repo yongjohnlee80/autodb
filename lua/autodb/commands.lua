@@ -144,6 +144,72 @@ end
 ---come from one request — and a workspace with exactly one connection
 ---skips the second prompt entirely, because asking a question with one
 ---answer is just a keystroke tax.
+---choose_workspace lists workspaces and can create one — the surface
+---the TUI used to own alone. Selecting one makes it the active
+---workspace; "Create…" prompts for a name, creates it over
+---`workspace.create`, then selects it and asks the explorer to refresh
+---so the new (empty) workspace is visible at once.
+---@param cb fun(ws: table|nil)?
+function M.choose_workspace(cb)
+  _connected(function()
+    session.authed("workspace.list", {}, session.guarded(function(spaces, err)
+      if err then
+        log.notify("cannot list workspaces: " .. tostring(err.message),
+          { level = "error", component = "commands" })
+        return cb and cb(nil)
+      end
+      spaces = spaces or {}
+
+      local function create_new()
+        vim.ui.input({ prompt = "autodb — new workspace name: " }, function(name)
+          name = name and vim.trim(name) or ""
+          if name == "" then return cb and cb(nil) end
+          session.authed("workspace.create", { name }, session.guarded(function(id, cerr)
+            if cerr then
+              log.notify("cannot create workspace: " .. tostring(cerr.message),
+                { level = "error", component = "commands" })
+              return cb and cb(nil)
+            end
+            -- workspace.create returns the new id; a fresh workspace has
+            -- no connections yet. Select it and refresh the explorer.
+            local ws = { id = id, name = name, connections = {} }
+            session.select_workspace(ws)
+            session.workspaces_changed()
+            log.notify("created and selected workspace " .. name, { component = "commands" })
+            if cb then cb(ws) end
+          end))
+        end)
+      end
+
+      -- An empty store has nothing to pick, so go straight to creating.
+      if #spaces == 0 then return create_new() end
+
+      -- Existing workspaces, with Create always offered as the last row.
+      -- CREATE is a private sentinel matched by identity below.
+      local CREATE = {}
+      local items = {}
+      for _, w in ipairs(spaces) do items[#items + 1] = w end
+      items[#items + 1] = CREATE
+
+      vim.ui.select(items, {
+        prompt = "autodb — workspace",
+        format_item = function(w)
+          if w == CREATE then return "＋ Create a new workspace…" end
+          local n = #(w.connections or {})
+          return string.format("%s  (%d connection%s)", w.name or w.id, n, n == 1 and "" or "s")
+        end,
+      }, function(choice)
+        if not choice then return cb and cb(nil) end
+        if choice == CREATE then return create_new() end
+        session.select_workspace(choice)
+        log.notify("workspace " .. tostring(choice.name or choice.id),
+          { component = "commands" })
+        if cb then cb(choice) end
+      end)
+    end))
+  end)
+end
+
 ---@param cb fun(conn: table|nil)?
 function M.choose_connection(cb)
   _connected(function()
@@ -155,7 +221,7 @@ function M.choose_connection(cb)
       end
       spaces = spaces or {}
       if #spaces == 0 then
-        log.notify("no workspaces yet — create one in the TUI (autodb --ui)",
+        log.notify("no workspaces yet — press " .. keys.WORKSPACE .. " to create one",
           { level = "warn", component = "commands" })
         return cb and cb(nil)
       end
@@ -163,7 +229,8 @@ function M.choose_connection(cb)
       local function pick_conn(ws)
         local conns = ws.connections or {}
         if #conns == 0 then
-          log.notify("workspace " .. tostring(ws.name) .. " has no connections",
+          log.notify("workspace " .. tostring(ws.name)
+            .. " has no connections — add one in the TUI (autodb --ui)",
             { level = "warn", component = "commands" })
           return cb and cb(nil)
         end
@@ -305,6 +372,8 @@ function M.setup(opts)
   end
 
   set("n", map.login or keys.LOGIN, M.login, "autodb: sign in (retry, or switch user)")
+  set("n", map.workspace or keys.WORKSPACE, function() M.choose_workspace() end,
+    "autodb: choose or create a workspace")
   set("n", map.history or keys.HISTORY, M.history, "autodb: script history")
   set("n", map.run_buffer or keys.RUN_BUFFER, M.run_buffer, "autodb: run this SQL buffer")
   set("v", map.run_visual or keys.RUN_VISUAL, function()
@@ -325,6 +394,8 @@ function M.setup(opts)
     { desc = "autodb: choose a connection" })
   vim.api.nvim_create_user_command("AutodbLogin", M.login,
     { desc = "autodb: sign in (retry, or switch user)" })
+  vim.api.nvim_create_user_command("AutodbWorkspace", function() M.choose_workspace() end,
+    { desc = "autodb: choose or create a workspace" })
   vim.api.nvim_create_user_command("AutodbHistory", M.history, { desc = "autodb: script history" })
   vim.api.nvim_create_user_command("AutodbMaintenance", M.maintenance,
     { desc = "autodb: maintenance prompt" })

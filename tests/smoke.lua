@@ -1002,6 +1002,139 @@ print("\n[11] login — the passphrase is masked, and a failure can be retried")
   session.reset_for_tests()
 end)()
 
+-- ─────────── [12] workspaces — <leader>Dw selects or creates ───────────
+print("\n[12] workspaces — <leader>Dw lists, and can create (requirement 5)")
+;(function()
+  local session = require("autodb.session")
+  local commands = require("autodb.commands")
+  local keys = require("autodb.keys")
+
+  -- A client whose `authed` answers the two workspace verbs. choose_
+  -- workspace is pure client + session wiring; a real daemon would only
+  -- retest what section [8] already covers over the wire.
+  local function ws_client(opts)
+    opts = opts or {}
+    return {
+      _token = "tok-1",
+      calls = {},
+      created = nil,
+      is_ready = function() return true end,
+      token = function(self) return self._token end,
+      hello = function() return nil end,
+      authed = function(self, method, params, cb)
+        self.calls[#self.calls + 1] = method
+        if method == "workspace.list" then
+          return cb(opts.spaces or {}, nil)
+        end
+        if method == "workspace.create" then
+          self.created = params[1]
+          return cb(opts.new_id or 7, nil)
+        end
+        return cb(nil, { message = "unexpected " .. method })
+      end,
+      close = function() end,
+    }
+  end
+
+  local orig_uis, orig_input, orig_select =
+    vim.api.nvim_list_uis, vim.ui.input, vim.ui.select
+  local function restore()
+    vim.api.nvim_list_uis = orig_uis
+    vim.ui.input = orig_input
+    vim.ui.select = orig_select
+  end
+  vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+
+  -- ── empty store → straight to create, no select prompt ──
+  session.reset_for_tests()
+  local c1 = ws_client({ spaces = {} })
+  session.attach(c1, {})
+  local selected_shown = false
+  vim.ui.select = function() selected_shown = true end
+  vim.ui.input = function(o, cb) cb("Analytics") end
+  local got1
+  commands.choose_workspace(function(ws) got1 = ws end)
+  restore()
+  ok("p12: an empty store skips the picker and prompts to create",
+    selected_shown == false)
+  ok("p12: workspace.create was called with the typed name",
+    c1.created == "Analytics", tostring(c1.created))
+  ok("p12: the new workspace becomes the active one",
+    session.workspace() ~= nil and session.workspace().name == "Analytics",
+    vim.inspect(session.workspace()))
+  ok("p12: and the command handed it back", got1 ~= nil and got1.id == 7,
+    vim.inspect(got1))
+
+  -- ── existing workspaces → picker offers them + a Create row ──
+  session.reset_for_tests()
+  local spaces = {
+    { id = 1, name = "LabelManager", connections = { { id = 9, name = "pg" } } },
+    { id = 2, name = "AutoDB", connections = {} },
+  }
+  local c2 = ws_client({ spaces = spaces })
+  session.attach(c2, {})
+  local labels, captured_items
+  vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+  vim.ui.select = function(items, o, cb)
+    captured_items = items
+    labels = {}
+    for _, it in ipairs(items) do labels[#labels + 1] = o.format_item(it) end
+    cb(items[1])   -- pick the first existing workspace
+  end
+  local got2
+  commands.choose_workspace(function(ws) got2 = ws end)
+  restore()
+  ok("p12: the picker lists every workspace plus one Create row",
+    captured_items ~= nil and #captured_items == #spaces + 1, tostring(captured_items and #captured_items))
+  ok("p12: the extra row reads as Create",
+    labels and labels[#labels]:find("Create", 1, true) ~= nil, labels and labels[#labels])
+  ok("p12: picking an existing workspace selects it without creating",
+    got2 ~= nil and got2.name == "LabelManager" and c2.created == nil,
+    vim.inspect(got2))
+  ok("p12: a workspace's connection count is shown",
+    labels and labels[1]:find("1 connection", 1, true) ~= nil, labels and labels[1])
+
+  -- ── choosing the Create row from a non-empty list ──
+  session.reset_for_tests()
+  local c3 = ws_client({ spaces = spaces, new_id = 3 })
+  session.attach(c3, {})
+  vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+  vim.ui.select = function(items, o, cb) cb(items[#items]) end  -- the Create row
+  vim.ui.input = function(o, cb) cb("Scratch") end
+  local got3
+  commands.choose_workspace(function(ws) got3 = ws end)
+  restore()
+  ok("p12: the Create row leads to workspace.create",
+    c3.created == "Scratch" and got3 ~= nil and got3.id == 3, tostring(c3.created))
+
+  -- ── an empty / cancelled name creates nothing ──
+  session.reset_for_tests()
+  local c4 = ws_client({ spaces = {} })
+  session.attach(c4, {})
+  vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+  vim.ui.input = function(o, cb) cb("") end
+  local got4 = "sentinel"
+  commands.choose_workspace(function(ws) got4 = ws end)
+  restore()
+  ok("p12: an empty name creates nothing and cancels",
+    c4.created == nil and got4 == nil, tostring(c4.created))
+
+  -- ── the key surface ──
+  ok("p12: " .. tostring(keys.WORKSPACE) .. " is the workspace key",
+    keys.WORKSPACE == keys.PREFIX .. "w", tostring(keys.WORKSPACE))
+  ok("p12: commands.choose_workspace exists", type(commands.choose_workspace) == "function")
+  commands.setup({})
+  local mapped = false
+  for _, m in ipairs(vim.api.nvim_get_keymap("n")) do
+    if m.desc and m.desc:find("choose or create a workspace", 1, true) then mapped = true end
+  end
+  ok("p12: and setup binds it", mapped == true)
+  ok("p12: the workspaces topic is registered",
+    type(session.TOPIC_WORKSPACES) == "string" and type(session.workspaces_changed) == "function")
+
+  session.reset_for_tests()
+end)()
+
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   vim.cmd("cq!")

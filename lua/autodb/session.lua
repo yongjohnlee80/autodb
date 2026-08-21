@@ -35,6 +35,11 @@ local M = {}
 M.TOPIC_CONNECTED    = "autodb.session:connected"
 M.TOPIC_DISCONNECTED = "autodb.session:disconnected"
 M.TOPIC_SELECTION    = "dbase.connection:changed"
+-- The set of workspaces changed (one was created/renamed/deleted). Its
+-- own topic, not TOPIC_SELECTION: the explorer must re-fetch the tree
+-- root here, but must NOT throw that fetch away on every connection
+-- pick, which is what folding this into the selection topic would do.
+M.TOPIC_WORKSPACES   = "autodb.session:workspaces"
 
 local _registered = false
 local function ensure_topics()
@@ -51,7 +56,20 @@ local function ensure_topics()
       payload = "{ reason = string }",
       publishers = { "autodb" },
     },
+    [M.TOPIC_WORKSPACES] = {
+      doc = "The set of workspaces changed (created / renamed / deleted).",
+      payload = "{}",
+      publishers = { "autodb" },
+    },
   })
+end
+
+---workspaces_changed announces that the workspace set was mutated, so
+---the explorer re-reads its root. Registration is lazy, so publish
+---through the same gate the other topics use.
+function M.workspaces_changed()
+  ensure_topics()
+  events.publish(M.TOPIC_WORKSPACES, {})
 end
 
 ---Selection state.

@@ -14,6 +14,7 @@ local M = {}
 M.PREFIX = "<leader>D"
 
 M.LOGIN       = M.PREFIX .. "l"  -- sign in: retry, or switch user
+M.WORKSPACE   = M.PREFIX .. "w"  -- choose or create a workspace
 M.HISTORY     = M.PREFIX .. "h"  -- history modal
 M.RUN_BUFFER  = M.PREFIX .. "r"  -- execute the current .sql buffer
 M.RUN_VISUAL  = M.PREFIX .. "R"  -- execute the selection
