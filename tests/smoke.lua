@@ -1385,6 +1385,58 @@ print("\n[15] notes — create / list / delete / scaffold, and <leader>Dn")
   session.reset_for_tests()
 end)()
 
+-- ─────── [16] run_sql unwraps the exec.run_script envelope ───────
+print("\n[16] run_sql — a SELECT shows its rows, not '0 row(s) affected'")
+;(function()
+  local session = require("autodb.session")
+  local commands = require("autodb.commands")
+  local results = require("autodb.results")
+
+  -- exec.run_script wraps the last result: { statements, result = {...} }.
+  local ENVELOPE = {
+    statements = 1,
+    result = {
+      verb = "select", class = "read",
+      columns = { "id", "title" },
+      rows = { { 1, "a" }, { 2, "b" } },
+      affected = 0, more = false, duration_ms = 3,
+    },
+  }
+
+  session.reset_for_tests()
+  local c = {
+    _token = "t", is_ready = function() return true end,
+    token = function(self) return self._token end, hello = function() return nil end,
+    authed = function(_, method, _p, cb)
+      if method == "exec.run_script" then return cb(ENVELOPE, nil) end
+      return cb(nil, { message = "unexpected " .. method })
+    end,
+  }
+  session.attach(c, {})
+  session.select_workspace({ id = 1, name = "WS" })
+  session.select_connection({ id = 1, name = "pg" })
+
+  -- Capture what results.show_result receives.
+  local orig = results.show_result
+  local seen_res, seen_err
+  results.show_result = function(res, err) seen_res, seen_err = res, err end
+  commands.run_sql("SELECT * FROM t")
+  results.show_result = orig
+
+  ok("p16: show_result got a result (not nil)", seen_res ~= nil and seen_err == nil,
+    vim.inspect(seen_res))
+  ok("p16: it is the INNER result — columns present",
+    type(seen_res) == "table" and type(seen_res.columns) == "table"
+    and #seen_res.columns == 2, vim.inspect(seen_res and seen_res.columns))
+  ok("p16: the rows came through", type(seen_res) == "table"
+    and type(seen_res.rows) == "table" and #seen_res.rows == 2,
+    vim.inspect(seen_res and seen_res.rows))
+  ok("p16: the envelope was unwrapped (no leftover .statements/.result)",
+    type(seen_res) == "table" and seen_res.statements == nil and seen_res.result == nil)
+
+  session.reset_for_tests()
+end)()
+
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   vim.cmd("cq!")

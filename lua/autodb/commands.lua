@@ -106,10 +106,25 @@ function M.run_sql(sql)
   _with_connection(function(conn)
     log.debug("commands", "running against connection " .. tostring(conn.id))
     session.authed("exec.run_script", { conn.id, sql }, session.guarded(function(res, err)
-      results.show_result(res, err)
       if err then
+        results.show_result(nil, err)
         log.notify("query failed: " .. tostring(err.message),
           { level = "error", component = "commands" })
+        return
+      end
+      -- exec.run_script wraps the LAST statement's result in an envelope
+      -- { statements = N, result = {...} }. The grid wants the inner
+      -- result; handing it the envelope made a SELECT render as the
+      -- write summary ("0 row(s) affected") because columns/rows sat one
+      -- level down. A script with no result set (pure DDL) still reports
+      -- that it ran.
+      local inner = type(res) == "table" and res.result or nil
+      if inner then
+        results.show_result(inner, nil)
+      else
+        local n = type(res) == "table" and tonumber(res.statements) or nil
+        log.notify((n and (n .. " statement(s)") or "executed") .. " — no result set",
+          { component = "commands" })
       end
     end))
   end)
