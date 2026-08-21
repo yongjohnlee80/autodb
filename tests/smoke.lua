@@ -1135,6 +1135,157 @@ print("\n[12] workspaces — <leader>Dw lists, and can create (requirement 5)")
   session.reset_for_tests()
 end)()
 
+-- ─────────── [13] connections — <leader>Dc selects or creates ───────────
+print("\n[13] connections — <leader>Dc lists, or creates and attaches")
+;(function()
+  local session = require("autodb.session")
+  local commands = require("autodb.commands")
+
+  local function cx(opts)
+    opts = opts or {}
+    return {
+      _token = "tok-1",
+      calls = {},          -- ordered method names
+      created = nil,       -- {name, engine, dsn}
+      attached = nil,      -- {ws_id, conn_id}
+      is_ready = function() return true end,
+      token = function(self) return self._token end,
+      hello = function() return nil end,
+      authed = function(self, method, params, cb)
+        self.calls[#self.calls + 1] = method
+        if method == "workspace.list" then return cb(opts.spaces or {}, nil) end
+        if method == "conn.create" then
+          self.created = { name = params[1], engine = params[2], dsn = params[3] }
+          return cb(opts.new_id or 42, nil)
+        end
+        if method == "workspace.attach" then
+          self.attached = { ws_id = params[1], conn_id = params[2] }
+          return cb(nil, nil)
+        end
+        return cb(nil, { message = "unexpected " .. method })
+      end,
+      close = function() end,
+    }
+  end
+
+  local orig_uis, orig_input, orig_select =
+    vim.api.nvim_list_uis, vim.ui.input, vim.ui.select
+  local function restore()
+    vim.api.nvim_list_uis = orig_uis
+    vim.ui.input = orig_input
+    vim.ui.select = orig_select
+  end
+  vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+
+  -- A programmable UI: inputs answered by prompt substring; selects
+  -- answered by a chooser that sees the items and options.
+  local function drive(inputs, on_select)
+    vim.ui.input = function(o, cb)
+      for pat, val in pairs(inputs) do
+        if o.prompt:find(pat, 1, true) then return cb(val) end
+      end
+      return cb(nil)
+    end
+    vim.ui.select = function(items, o, cb) return cb(on_select(items, o)) end
+  end
+
+  -- ── empty workspace → straight to create+attach ──
+  session.reset_for_tests()
+  local c1 = cx({ spaces = { { id = 5, name = "AutoDB", connections = {} } }, new_id = 42 })
+  session.attach(c1, {})
+  local engine_options
+  drive(
+    { ["connection name"] = "local-pg", ["dsn"] = "postgres://u:p@localhost/db" },
+    function(items, o)
+      -- The only select in this flow is the engine picker.
+      engine_options = items
+      return "postgres"
+    end)
+  local got1
+  commands.choose_connection(function(conn) got1 = conn end)
+  restore()
+
+  ok("p13: an empty workspace goes straight to create",
+    c1.created ~= nil, vim.inspect(c1.created))
+  ok("p13: conn.create carried name/engine/dsn",
+    c1.created and c1.created.name == "local-pg" and c1.created.engine == "postgres"
+    and c1.created.dsn == "postgres://u:p@localhost/db", vim.inspect(c1.created))
+  ok("p13: the engine choice is a select over the three engines",
+    engine_options ~= nil and #engine_options == 3
+    and vim.tbl_contains(engine_options, "postgres")
+    and vim.tbl_contains(engine_options, "mysql")
+    and vim.tbl_contains(engine_options, "sqlite"), vim.inspect(engine_options))
+  ok("p13: the new connection was attached to the workspace",
+    c1.attached ~= nil and c1.attached.ws_id == 5 and c1.attached.conn_id == 42,
+    vim.inspect(c1.attached))
+  ok("p13: create is ordered before attach",
+    c1.calls[#c1.calls - 1] == "conn.create" and c1.calls[#c1.calls] == "workspace.attach",
+    table.concat(c1.calls, ","))
+  ok("p13: the new connection becomes active",
+    session.connection() ~= nil and session.connection().name == "local-pg",
+    vim.inspect(session.connection()))
+  ok("p13: and the command handed it back", got1 ~= nil and got1.id == 42, vim.inspect(got1))
+
+  -- ── existing connections → picker offers them + a Create row ──
+  session.reset_for_tests()
+  local spaces = { { id = 1, name = "LM", connections = {
+    { id = 9, name = "pg", engine = "postgres" },
+  } } }
+  local c2 = cx({ spaces = spaces })
+  session.attach(c2, {})
+  local conn_labels
+  vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+  vim.ui.select = function(items, o, cb)
+    conn_labels = {}
+    for _, it in ipairs(items) do conn_labels[#conn_labels + 1] = o.format_item(it) end
+    return cb(items[1])  -- pick the existing connection
+  end
+  local got2
+  commands.choose_connection(function(conn) got2 = conn end)
+  restore()
+  ok("p13: the picker lists connections plus a Create row",
+    conn_labels ~= nil and #conn_labels == 2
+    and conn_labels[2]:find("Create", 1, true) ~= nil, vim.inspect(conn_labels))
+  ok("p13: picking an existing connection adopts it without creating",
+    got2 ~= nil and got2.id == 9 and c2.created == nil, vim.inspect(got2))
+
+  -- ── choosing Create from a non-empty list ──
+  session.reset_for_tests()
+  local c3 = cx({ spaces = spaces, new_id = 77 })
+  session.attach(c3, {})
+  vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+  drive(
+    { ["connection name"] = "warehouse", ["dsn"] = "mysql://a:b@h/w" },
+    function(items, o)
+      if #items == 3 then return "mysql" end       -- engine select
+      return items[#items]                          -- the Create row
+    end)
+  local got3
+  commands.choose_connection(function(conn) got3 = conn end)
+  restore()
+  ok("p13: the Create row leads to conn.create + attach",
+    c3.created ~= nil and c3.created.engine == "mysql"
+    and c3.attached ~= nil and c3.attached.conn_id == 77
+    and got3 ~= nil and got3.id == 77, vim.inspect({ c3.created, c3.attached }))
+
+  -- ── cancelling the DSN creates nothing ──
+  session.reset_for_tests()
+  local c4 = cx({ spaces = { { id = 5, name = "AutoDB", connections = {} } } })
+  session.attach(c4, {})
+  vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+  drive(
+    { ["connection name"] = "x", ["dsn"] = "" },   -- empty dsn cancels
+    function(items) return "sqlite" end)
+  local got4 = "sentinel"
+  commands.choose_connection(function(conn) got4 = conn end)
+  restore()
+  ok("p13: an empty dsn cancels and creates nothing",
+    c4.created == nil and c4.attached == nil and got4 == nil,
+    vim.inspect({ c4.created, got4 }))
+
+  session.reset_for_tests()
+end)()
+
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   vim.cmd("cq!")

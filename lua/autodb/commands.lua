@@ -227,13 +227,6 @@ function M.choose_connection(cb)
       end
 
       local function pick_conn(ws)
-        local conns = ws.connections or {}
-        if #conns == 0 then
-          log.notify("workspace " .. tostring(ws.name)
-            .. " has no connections — add one in the TUI (autodb --ui)",
-            { level = "warn", component = "commands" })
-          return cb and cb(nil)
-        end
         local function adopt(conn)
           session.select_workspace(ws)
           session.select_connection(conn)
@@ -241,14 +234,66 @@ function M.choose_connection(cb)
             { component = "commands" })
           if cb then cb(conn) end
         end
-        if #conns == 1 then return adopt(conns[1]) end
-        vim.ui.select(conns, {
+
+        -- Create a connection AND attach it to this workspace in one go,
+        -- mirroring the TUI's "add connection to workspace": conn.create
+        -- then workspace.attach. The engine is a fixed three-way choice,
+        -- so it is a select, not free text.
+        local function create_conn()
+          vim.ui.input({ prompt = "autodb — connection name: " }, function(name)
+            name = name and vim.trim(name) or ""
+            if name == "" then return cb and cb(nil) end
+            vim.ui.select({ "postgres", "mysql", "sqlite" }, {
+              prompt = "autodb — engine",
+            }, function(engine)
+              if not engine then return cb and cb(nil) end
+              vim.ui.input({ prompt = "autodb — dsn (stored encrypted): " }, function(dsn)
+                dsn = dsn and vim.trim(dsn) or ""
+                if dsn == "" then return cb and cb(nil) end
+                session.authed("conn.create", { name, engine, dsn },
+                  session.guarded(function(conn_id, cerr)
+                    if cerr then
+                      log.notify("cannot create connection: " .. tostring(cerr.message),
+                        { level = "error", component = "commands" })
+                      return cb and cb(nil)
+                    end
+                    session.authed("workspace.attach", { ws.id, conn_id },
+                      session.guarded(function(_, aerr)
+                        if aerr then
+                          log.notify("created " .. name
+                            .. " but could not attach it: " .. tostring(aerr.message),
+                            { level = "error", component = "commands" })
+                          return cb and cb(nil)
+                        end
+                        -- The explorer re-reads its root off this topic,
+                        -- so the new connection shows under the workspace.
+                        session.workspaces_changed()
+                        adopt({ id = conn_id, name = name, engine = engine })
+                      end))
+                  end))
+              end)
+            end)
+          end)
+        end
+
+        local conns = ws.connections or {}
+        -- An empty workspace has only one thing to do: create.
+        if #conns == 0 then return create_conn() end
+
+        -- Otherwise list the connections with Create always last.
+        local CREATE = {}
+        local items = {}
+        for _, c in ipairs(conns) do items[#items + 1] = c end
+        items[#items + 1] = CREATE
+        vim.ui.select(items, {
           prompt = "autodb — connection in " .. tostring(ws.name),
           format_item = function(c)
+            if c == CREATE then return "＋ Create a new connection…" end
             return string.format("%s  (%s)", c.name or c.id, c.engine or "?")
           end,
         }, function(chosen)
           if not chosen then return cb and cb(nil) end
+          if chosen == CREATE then return create_conn() end
           adopt(chosen)
         end)
       end
