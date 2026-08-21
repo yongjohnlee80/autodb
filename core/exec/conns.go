@@ -101,7 +101,7 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name, engineName, 
 		return 0, auth.ErrLocked
 	}
 	var id int64
-	err = dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		now := e.now().Unix()
 		var terr error
 		id, terr = e.store.Connections.On(tx).
@@ -186,7 +186,7 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 		return err
 	}
 	e.closeTarget(connID)
-	return dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.store.Connections.On(tx).With(meta.ConnID, connID).Delete(); err != nil {
 			if errors.Is(err, dao.ErrForeignKey) {
 				return fmt.Errorf("exec: connection %q has recorded history and cannot be deleted: %w", row.Name, err)

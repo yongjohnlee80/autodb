@@ -46,7 +46,7 @@ func (e *Engine) CreateWorkspace(ctx context.Context, token, name, ip string) (i
 		return 0, errors.New("exec: workspace name must not be empty")
 	}
 	var id int64
-	err = dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		var terr error
 		id, terr = e.store.Workspaces.On(tx).
 			Set(meta.WsName, name).
@@ -73,7 +73,7 @@ func (e *Engine) RenameWorkspace(ctx context.Context, token string, wsID int64, 
 	if name == "" {
 		return errors.New("exec: workspace name must not be empty")
 	}
-	return dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if _, terr := e.store.Workspaces.On(tx).With(meta.WsID, wsID).Get(); terr != nil {
 			if errors.Is(terr, dao.ErrNoRows) {
 				return ErrWorkspaceNotFound
@@ -97,7 +97,7 @@ func (e *Engine) DeleteWorkspace(ctx context.Context, token string, wsID int64, 
 	if err != nil {
 		return err
 	}
-	return dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if _, terr := e.store.Workspaces.On(tx).With(meta.WsID, wsID).Get(); terr != nil {
 			if errors.Is(terr, dao.ErrNoRows) {
 				return ErrWorkspaceNotFound
@@ -122,7 +122,7 @@ func (e *Engine) AttachConnection(ctx context.Context, token string, wsID, connI
 	if err != nil {
 		return err
 	}
-	return dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if _, terr := e.store.Workspaces.On(tx).With(meta.WsID, wsID).Get(); terr != nil {
 			if errors.Is(terr, dao.ErrNoRows) {
 				return ErrWorkspaceNotFound
@@ -154,7 +154,7 @@ func (e *Engine) DetachConnection(ctx context.Context, token string, wsID, connI
 	if err != nil {
 		return err
 	}
-	return dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if terr := e.store.WorkspaceConns.On(tx).
 			With(meta.WcWsID, wsID).With(meta.WcConnID, connID).Delete(); terr != nil {
 			return terr

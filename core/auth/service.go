@@ -158,7 +158,7 @@ func (s *Service) withUnlock(mk []byte, commit func() error) error {
 // inTx runs fn inside one meta-store transaction — every security mutation
 // and its audit row commit atomically (lector M3 must-fix #2).
 func (s *Service) inTx(ctx context.Context, fn func(tx *dao.Transaction) error) error {
-	return dao.RunTx(ctx, []dao.DataConn{s.store.Conn()}, fn)
+	return dao.RunTx(ctx, fn)
 }
 
 // lockGuardRow serializes invariant-critical transactions across processes

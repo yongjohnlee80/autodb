@@ -241,7 +241,7 @@ func (e *Engine) reject(ctx context.Context, ident auth.Identity, connID int64, 
 func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string) (int64, error) {
 	script := truncate(sqlText, maxScriptBytes)
 	var histID int64
-	err := dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+	err := dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.auth.AuditTx(tx, ident.UserID(), ip, "exec",
 			fmt.Sprintf("conn %d: %s", connID, script)); err != nil {
 			return err
@@ -272,7 +272,7 @@ func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID 
 	if runErr != nil {
 		status, errText = "error", truncate(runErr.Error(), maxErrorBytes)
 	}
-	return dao.RunTx(ctx, []dao.DataConn{e.store.Conn()}, func(tx *dao.Transaction) error {
+	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.auth.AuditTx(tx, ident.UserID(), ip, "exec_result",
 			fmt.Sprintf("conn %d (%s, %d row(s), %dms)%s", connID, status, rows, dur.Milliseconds(),
 				errSuffix(errText))); err != nil {
