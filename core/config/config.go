@@ -39,6 +39,24 @@ type TUI struct {
 	NotesDir string `toml:"notes_dir"`
 }
 
+// NotesRoot resolves the notes root: an explicit [tui] notes_dir, else
+// $XDG_DATA_HOME/autodb/notes, else ~/.local/share/autodb/notes. One
+// resolver so the server (which reports it over sys.hello), the TUI, and
+// the Lua frontend never disagree about where notes live.
+func (c Config) NotesRoot() (string, error) {
+	if c.TUI.NotesDir != "" {
+		return c.TUI.NotesDir, nil
+	}
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "autodb", "notes"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "share", "autodb", "notes"), nil
+}
+
 // Server configures the RPC listener (consumed by rpc, roadmap M5).
 type Server struct {
 	// Port opts INTO TCP. Zero (the default) means the local unix

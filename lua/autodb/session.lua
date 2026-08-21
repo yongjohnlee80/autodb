@@ -105,6 +105,20 @@ function M.client() return _client end
 function M.workspace() return ns():get("workspace") end
 function M.connection() return ns():get("connection") end
 
+---notes_dir resolves where this server keeps per-workspace notes
+---(`<dir>/ws-<id>/`). The daemon reports it over hello — it owns the
+---config that may override the default — and an older daemon that does
+---not is matched by the SAME default the server itself would compute
+---([[shared-resolver-single-source-of-truth]]).
+function M.notes_dir()
+  local hello = _client and _client.hello and _client:hello() or nil
+  local dir = hello and hello.notes_dir
+  if type(dir) == "string" and dir ~= "" then return dir end
+  local xdg = vim.env.XDG_DATA_HOME
+  if xdg and xdg ~= "" then return xdg .. "/autodb/notes" end
+  return (vim.env.HOME or vim.fn.expand("~")) .. "/.local/share/autodb/notes"
+end
+
 ---is_ready reports whether a call would reach a live daemon AS SOMEONE.
 ---
 ---A token is part of readiness, not an extra someone remembers to check.

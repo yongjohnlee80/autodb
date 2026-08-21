@@ -1013,3 +1013,57 @@ func TestLoginOverUnixSocket(t *testing.T) {
 		t.Fatalf("auth.login over unix socket returned no token: %#v", result)
 	}
 }
+
+// TestHelloReportsNotesDir: the handshake carries the notes root so a
+// frontend lists the right per-workspace folders without re-deriving
+// config (WithNotesDir → sys.hello "notes_dir").
+func TestHelloReportsNotesDir(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("meta.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	eng := exec.New(store, svc)
+	t.Cleanup(func() { _ = eng.Close() })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "test-version",
+		rpc.WithListener(ln), rpc.WithNotesDir("/tmp/autodb-notes-xyz"))
+	runCtx, cancel := context.WithCancel(ctx)
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Run(runCtx) }()
+	t.Cleanup(func() { cancel(); <-errc })
+	deadline := time.After(2 * time.Second)
+	for srv.Addr() == "" {
+		select {
+		case <-deadline:
+			t.Fatal("server never bound")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	conn, err := net.Dial("tcp", srv.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	c := &client{t: t, conn: conn, br: bufio.NewReader(conn)}
+	_, result := c.call("sys.hello", map[string]any{"protocol": rpc.Protocol, "name": "test"})
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("hello reply not a map: %#v", result)
+	}
+	if m["notes_dir"] != "/tmp/autodb-notes-xyz" {
+		t.Fatalf("hello notes_dir = %#v, want /tmp/autodb-notes-xyz", m["notes_dir"])
+	}
+}

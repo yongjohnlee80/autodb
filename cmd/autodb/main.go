@@ -150,9 +150,14 @@ func runServe(configPath string) error {
 	// withholds error detail from the wire (deny-before-disclose), so the
 	// server-side log is the only place withheld core errors, frame
 	// diagnostics, panics, and reply failures exist at all.
+	notesRoot, nerr := cfg.NotesRoot()
+	if nerr != nil {
+		ln.Close()
+		return fmt.Errorf("notes root: %w", nerr)
+	}
 	oplog := logger.New(logger.WithWriter(os.Stderr), logger.WithContext("autodb"))
 	srv := rpc.New(svc, eng, cfg.Server, version,
-		rpc.WithListener(ln), rpc.WithLogger(oplog))
+		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot))
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	return srv.Run(ctx)
 }
@@ -177,17 +182,9 @@ func runUI(configPath string) error {
 	}
 	addr := ep.Address
 
-	notesRoot := cfg.TUI.NotesDir
-	if notesRoot == "" {
-		base, derr := os.UserHomeDir()
-		if derr != nil {
-			return derr
-		}
-		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-			notesRoot = filepath.Join(xdg, "autodb", "notes")
-		} else {
-			notesRoot = filepath.Join(base, ".local", "share", "autodb", "notes")
-		}
+	notesRoot, err := cfg.NotesRoot()
+	if err != nil {
+		return err
 	}
 	notes, err := tuiapp.NewNoteStore(notesRoot)
 	if err != nil {

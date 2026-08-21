@@ -61,6 +61,8 @@ type Server struct {
 	rpc      *golibrpc.Server
 	version  string
 	instance string // random per-process id; hello exposes it (ADR-0057 §7)
+	notesDir string // where per-workspace notes live; hello reports it so
+	//               the frontends resolve notes without re-deriving config
 
 	stop     chan struct{} // closed by RequestShutdown
 	stopOnce sync.Once
@@ -72,6 +74,7 @@ type Option func(*options)
 type options struct {
 	logger   logger.Logger
 	listener net.Listener
+	notesDir string
 }
 
 // WithLogger sets the transport logger.
@@ -83,6 +86,13 @@ func WithLogger(l logger.Logger) Option {
 // guard in cmd/autodb, which must own the bind error).
 func WithListener(ln net.Listener) Option {
 	return func(o *options) { o.listener = ln }
+}
+
+// WithNotesDir sets the notes root reported by sys.hello, so a frontend
+// lists the right per-workspace folders even when config overrides the
+// default. Empty is fine — the client falls back to the same default.
+func WithNotesDir(dir string) Option {
+	return func(o *options) { o.notesDir = dir }
 }
 
 // New assembles the server over an authenticated core. version is the
@@ -97,6 +107,7 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 	s := &Server{
 		auth: authSvc, eng: eng, version: version,
 		instance: newInstanceID(), stop: make(chan struct{}),
+		notesDir: o.notesDir,
 	}
 
 	ropts := []golibrpc.Option{
@@ -181,6 +192,10 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		// address it is actually listening on.
 		"pid":  int64(os.Getpid()),
 		"addr": s.rpc.Addr(),
+		// Notes are client-side files under <notes_dir>/ws-<id>/; the
+		// server is the authority on the path (config may override the
+		// default), so it reports it here for the frontends to list.
+		"notes_dir": s.notesDir,
 	}
 	if len(req.Params) > 1 {
 		return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,

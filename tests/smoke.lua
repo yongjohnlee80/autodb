@@ -1286,6 +1286,33 @@ print("\n[13] connections — <leader>Dc lists, or creates and attaches")
   session.reset_for_tests()
 end)()
 
+-- ─────────── [14] session.notes_dir — the server is the authority ───────────
+print("\n[14] notes_dir — reported by the daemon, with a matching fallback")
+;(function()
+  local session = require("autodb.session")
+
+  -- A client that reports notes_dir over hello wins.
+  session.reset_for_tests()
+  local c = {
+    _token = "t", is_ready = function() return true end,
+    token = function(self) return self._token end,
+    hello = function() return { server = "autodb", notes_dir = "/srv/autodb/notes" } end,
+  }
+  session.attach(c, {})
+  ok("p14: notes_dir comes from the daemon's hello",
+    session.notes_dir() == "/srv/autodb/notes", session.notes_dir())
+
+  -- No client / no field → the same default the server would compute.
+  session.reset_for_tests()
+  local xdg = vim.env.XDG_DATA_HOME
+  vim.env.XDG_DATA_HOME = "/tmp/xdgdata"
+  ok("p14: falls back to $XDG_DATA_HOME/autodb/notes",
+    session.notes_dir() == "/tmp/xdgdata/autodb/notes", session.notes_dir())
+  vim.env.XDG_DATA_HOME = xdg  -- restore
+
+  session.reset_for_tests()
+end)()
+
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   vim.cmd("cq!")
