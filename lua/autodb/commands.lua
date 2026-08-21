@@ -144,6 +144,94 @@ end
 ---come from one request — and a workspace with exactly one connection
 ---skips the second prompt entirely, because asking a question with one
 ---answer is just a keystroke tax.
+---_open_note_file opens a note path in a normal editor window (never the
+---dbase panel). Notes are real files, so :w saves them in place.
+---@param path string
+function M._open_note_file(path)
+  local esc = vim.fn.fnameescape(path)
+  -- Prefer a listed, normal-buftype window that is not a side panel.
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    local buf = vim.api.nvim_win_get_buf(win)
+    if vim.bo[buf].buftype == "" and vim.bo[buf].buflisted then
+      vim.api.nvim_set_current_win(win)
+      pcall(vim.cmd, "edit " .. esc)
+      return
+    end
+  end
+  -- No ordinary window (e.g. focus is in the panel): make one.
+  pcall(vim.cmd, "botright vsplit " .. esc)
+end
+
+---choose_note lists the workspace's notes and can create one
+---(`<leader>Dn`). Notes are the workspace's SQL scratch files; selecting
+---one opens it in the editor, Create makes a new one. It resolves the
+---active workspace, or asks which one when none is selected yet.
+---@param cb fun(path: string|nil)?
+function M.choose_note(cb)
+  local notes = require("autodb.notes")
+  local function in_ws(ws)
+    local items = notes.list(ws.id)
+    local function create_new()
+      vim.ui.input({ prompt = "autodb — new note name: " }, function(name)
+        name = name and vim.trim(name) or ""
+        if name == "" then return cb and cb(nil) end
+        local path, err = notes.create(ws.id, name, "")
+        if not path then
+          log.notify(tostring(err), { level = "error", component = "commands" })
+          return cb and cb(nil)
+        end
+        M._open_note_file(path)
+        if cb then cb(path) end
+      end)
+    end
+    if #items == 0 then return create_new() end
+    local CREATE = {}
+    local list = {}
+    for _, n in ipairs(items) do list[#list + 1] = n end
+    list[#list + 1] = CREATE
+    vim.ui.select(list, {
+      prompt = "autodb — note in " .. tostring(ws.name),
+      format_item = function(x)
+        if x == CREATE then return "＋ Create a new note…" end
+        return x.name
+      end,
+    }, function(choice)
+      if not choice then return cb and cb(nil) end
+      if choice == CREATE then return create_new() end
+      M._open_note_file(choice.path)
+      if cb then cb(choice.path) end
+    end)
+  end
+
+  _connected(function()
+    local ws = session.workspace()
+    if ws then return in_ws(ws) end
+    -- No active workspace: pick one first (notes live under a workspace).
+    session.authed("workspace.list", {}, session.guarded(function(spaces, err)
+      if err then
+        log.notify("cannot list workspaces: " .. tostring(err.message),
+          { level = "error", component = "commands" })
+        return cb and cb(nil)
+      end
+      spaces = spaces or {}
+      if #spaces == 0 then
+        log.notify("no workspaces yet — press " .. keys.WORKSPACE .. " to create one",
+          { level = "warn", component = "commands" })
+        return cb and cb(nil)
+      end
+      if #spaces == 1 then return in_ws(spaces[1]) end
+      vim.ui.select(spaces, {
+        prompt = "autodb — workspace",
+        format_item = function(w) return w.name or w.id end,
+      }, function(ws2)
+        if not ws2 then return cb and cb(nil) end
+        session.select_workspace(ws2)
+        in_ws(ws2)
+      end)
+    end))
+  end)
+end
+
 ---choose_workspace lists workspaces and can create one — the surface
 ---the TUI used to own alone. Selecting one makes it the active
 ---workspace; "Create…" prompts for a name, creates it over
@@ -419,6 +507,8 @@ function M.setup(opts)
   set("n", map.login or keys.LOGIN, M.login, "autodb: sign in (retry, or switch user)")
   set("n", map.workspace or keys.WORKSPACE, function() M.choose_workspace() end,
     "autodb: choose or create a workspace")
+  set("n", map.note or keys.NOTE, function() M.choose_note() end,
+    "autodb: choose or create a note")
   set("n", map.history or keys.HISTORY, M.history, "autodb: script history")
   set("n", map.run_buffer or keys.RUN_BUFFER, M.run_buffer, "autodb: run this SQL buffer")
   set("v", map.run_visual or keys.RUN_VISUAL, function()
@@ -441,6 +531,8 @@ function M.setup(opts)
     { desc = "autodb: sign in (retry, or switch user)" })
   vim.api.nvim_create_user_command("AutodbWorkspace", function() M.choose_workspace() end,
     { desc = "autodb: choose or create a workspace" })
+  vim.api.nvim_create_user_command("AutodbNote", function() M.choose_note() end,
+    { desc = "autodb: choose or create a note" })
   vim.api.nvim_create_user_command("AutodbHistory", M.history, { desc = "autodb: script history" })
   vim.api.nvim_create_user_command("AutodbMaintenance", M.maintenance,
     { desc = "autodb: maintenance prompt" })

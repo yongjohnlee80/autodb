@@ -1313,6 +1313,78 @@ print("\n[14] notes_dir — reported by the daemon, with a matching fallback")
   session.reset_for_tests()
 end)()
 
+-- ─────────── [15] notes — the client-side store + <leader>Dn ───────────
+print("\n[15] notes — create / list / delete / scaffold, and <leader>Dn")
+;(function()
+  local session = require("autodb.session")
+  local commands = require("autodb.commands")
+  local keys = require("autodb.keys")
+
+  -- Point the notes root at a temp dir via the XDG fallback (no client).
+  session.reset_for_tests()
+  local xdg = vim.env.XDG_DATA_HOME
+  local tmp = vim.fn.tempname()
+  vim.env.XDG_DATA_HOME = tmp
+  local notes = require("autodb.notes")
+
+  -- name rules mirror the server's CleanName.
+  ok("p15: a plain name gains .sql", ({ notes.clean_name("scratch") })[1] == "scratch.sql")
+  ok("p15: a separator is rejected", ({ notes.clean_name("a/b") })[1] == nil)
+  ok("p15: a leading dot is rejected", ({ notes.clean_name(".hidden") })[1] == nil)
+  ok("p15: an existing .sql suffix is not doubled",
+    ({ notes.clean_name("q.sql") })[1] == "q.sql")
+
+  -- create → list → duplicate-refuse → delete.
+  local p1, e1 = notes.create(7, "hello", "SELECT 1;\n")
+  ok("p15: create writes a note", type(p1) == "string" and vim.fn.filereadable(p1) == 1, tostring(e1))
+  ok("p15: the body landed",
+    table.concat(vim.fn.readfile(p1), "\n"):find("SELECT 1", 1, true) ~= nil)
+  local lst = notes.list(7)
+  ok("p15: list shows it", #lst == 1 and lst[1].name == "hello.sql", vim.inspect(lst))
+  local dup, derr = notes.create(7, "hello")
+  ok("p15: a duplicate is refused", dup == nil and tostring(derr):find("already exists", 1, true))
+  ok("p15: delete removes it", notes.delete(7, "hello") == true and vim.fn.filereadable(p1) == 0)
+
+  -- scaffold: SELECT over the quoted identifier, collision-suffixed name.
+  ok("p15: scaffold_sql quotes the FROM target",
+    notes.scaffold_sql('"public"."songs"'):find('FROM "public"."songs"', 1, true) ~= nil)
+  local sp1 = notes.scaffold(7, "songs", '"public"."songs"')
+  local sp2 = notes.scaffold(7, "songs", '"public"."songs"')
+  ok("p15: first scaffold is <table>.sql", sp1 and sp1:match("songs%.sql$") ~= nil, tostring(sp1))
+  ok("p15: a second scaffold does not clobber", sp2 and sp2:match("songs%-2%.sql$") ~= nil, tostring(sp2))
+  ok("p15: scaffold refuses without a quoted identifier",
+    ({ notes.scaffold(7, "songs", nil) })[1] == nil)
+
+  -- <leader>Dn create path over a live (stub) session + selected workspace.
+  session.reset_for_tests()
+  local c = {
+    _token = "t", is_ready = function() return true end,
+    token = function(self) return self._token end, hello = function() return nil end,
+    authed = function(_, m, _p, cb) return cb(nil, { message = "unused " .. m }) end,
+  }
+  session.attach(c, {})
+  session.select_workspace({ id = 9, name = "WS" })
+  local opened
+  local orig_open, orig_input, orig_uis =
+    commands._open_note_file, vim.ui.input, vim.api.nvim_list_uis
+  commands._open_note_file = function(path) opened = path end
+  vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+  vim.ui.input = function(_, cb) cb("plan") end
+  local got
+  commands.choose_note(function(p) got = p end)
+  vim.wait(500, function() return got ~= nil end, 5)
+  commands._open_note_file, vim.ui.input, vim.api.nvim_list_uis =
+    orig_open, orig_input, orig_uis
+  ok("p15: <leader>Dn creates a note in the active workspace",
+    type(got) == "string" and got:match("ws%-9/plan%.sql$") ~= nil, tostring(got))
+  ok("p15: and opens it in the editor", opened == got, tostring(opened))
+  ok("p15: " .. tostring(keys.NOTE) .. " is the note key", keys.NOTE == keys.PREFIX .. "n")
+
+  vim.fn.delete(tmp, "rf")
+  vim.env.XDG_DATA_HOME = xdg
+  session.reset_for_tests()
+end)()
+
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
   vim.cmd("cq!")

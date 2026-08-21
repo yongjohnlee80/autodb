@@ -40,6 +40,9 @@ M.TOPIC_SELECTION    = "dbase.connection:changed"
 -- root here, but must NOT throw that fetch away on every connection
 -- pick, which is what folding this into the selection topic would do.
 M.TOPIC_WORKSPACES   = "autodb.session:workspaces"
+-- A workspace's notes changed (a note created or deleted). Its own topic
+-- so the explorer refreshes just the notes folder, not the whole tree.
+M.TOPIC_NOTES        = "autodb.session:notes"
 
 local _registered = false
 local function ensure_topics()
@@ -61,6 +64,11 @@ local function ensure_topics()
       payload = "{}",
       publishers = { "autodb" },
     },
+    [M.TOPIC_NOTES] = {
+      doc = "A workspace's notes changed (a note created or deleted).",
+      payload = "{ workspace = integer }",
+      publishers = { "autodb" },
+    },
   })
 end
 
@@ -70,6 +78,13 @@ end
 function M.workspaces_changed()
   ensure_topics()
   events.publish(M.TOPIC_WORKSPACES, {})
+end
+
+---notes_changed announces that a workspace's notes were mutated.
+---@param ws_id integer
+function M.notes_changed(ws_id)
+  ensure_topics()
+  events.publish(M.TOPIC_NOTES, { workspace = ws_id })
 end
 
 ---Selection state.
