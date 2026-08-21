@@ -118,21 +118,38 @@ func (s *Service) newSessionTx(tx *dao.Transaction, userID int64, ip string) (st
 	return token, nil
 }
 
+// LocalPeer is the pseudo-address a unix-domain (local) connection presents
+// in place of an IP. A unix socket is created 0600 in a per-user runtime
+// directory, so reaching it already proves same-user access — that is the
+// boundary ADR-0058 chose, and it is stronger than any IP allowlist, which
+// exists for the TCP/remote case. A local connection therefore carries this
+// marker rather than an IP, is recorded verbatim in the audit trail and
+// session rows (honest: "local", not a fake 127.0.0.1), and is exempt from
+// the allowlist gate in Login. It is a fixed sentinel, never a parseable
+// address, so it can only be produced deliberately by the transport layer.
+const LocalPeer = "local"
+
 // Login authenticates name+passphrase from ip and issues a session token.
 // The session insert and the audit row commit atomically; the master key is
 // installed in memory only after the commit (must-fix #2). Failures are
 // audited and deliberately indistinguishable (ErrBadCredentials), except a
 // disallowed IP (ErrDenied).
 func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (string, Identity, error) {
-	allowed, err := s.IPAllowed(ctx, ip)
-	if err != nil {
-		return "", Identity{}, err
-	}
-	if !allowed {
-		if err := s.Audit(ctx, 0, ip, "login_failed", name+" (ip not allowed)"); err != nil {
+	// A local (unix-socket) connection is exempt from the IP allowlist:
+	// the 0600 socket is the boundary (ADR-0058), and a socket peer has no
+	// IP to match, so the allowlist can only ever refuse it. The allowlist
+	// governs TCP peers, which carry a real address.
+	if ip != LocalPeer {
+		allowed, err := s.IPAllowed(ctx, ip)
+		if err != nil {
 			return "", Identity{}, err
 		}
-		return "", Identity{}, ErrDenied
+		if !allowed {
+			if err := s.Audit(ctx, 0, ip, "login_failed", name+" (ip not allowed)"); err != nil {
+				return "", Identity{}, err
+			}
+			return "", Identity{}, ErrDenied
+		}
 	}
 
 	u, err := s.store.Users.OnCtx(ctx).With(meta.UserName, name).Get()

@@ -249,6 +249,13 @@ func peerIP(req *golibrpc.Request) string {
 	if req.Peer == nil {
 		return "unknown"
 	}
+	// A unix-domain peer has no IP — its address is a path, "@", or empty.
+	// It is a local, same-user connection gated by the socket's 0600 perms
+	// (ADR-0058), so it carries the LocalPeer sentinel rather than a
+	// meaningless address that no allowlist could ever match.
+	if req.Peer.Network() == "unix" {
+		return auth.LocalPeer
+	}
 	host, _, err := net.SplitHostPort(req.Peer.String())
 	if err != nil {
 		return req.Peer.String()

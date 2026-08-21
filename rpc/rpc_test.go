@@ -944,3 +944,72 @@ func TestRunScriptOverWire(t *testing.T) {
 		"INSERT INTO songs (title) VALUES ('two'); UPDATE songs SET title = 'x'")
 	mustErr(t, errVal, rpc.CodeStatementRejected)
 }
+
+// TestLoginOverUnixSocket reproduces the field bug end to end: the daemon's
+// default transport is a unix socket, whose peer has no IP, so every login
+// after bootstrap was refused "ip not allowed". Bootstrap worked because it
+// does not consult the allowlist; the second connection's auth.login did.
+func TestLoginOverUnixSocket(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("meta.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Loopback-only allowlist — the shipped default. No IP a socket could
+	// present is in it.
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32", "::1/128"}))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	if _, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", auth.LocalPeer); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	eng := exec.New(store, svc)
+	t.Cleanup(func() { _ = eng.Close() })
+
+	sock := t.TempDir() + "/adb.sock"
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	srv := rpc.New(svc, eng, config.Server{}, "test-version", rpc.WithListener(ln))
+	runCtx, cancel := context.WithCancel(ctx)
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Run(runCtx) }()
+	t.Cleanup(func() {
+		cancel()
+		if err := <-errc; err != nil {
+			t.Errorf("server Run: %v", err)
+		}
+	})
+	deadline := time.After(2 * time.Second)
+	for srv.Addr() == "" {
+		select {
+		case <-deadline:
+			t.Fatal("server never bound")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial unix: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	c := &client{t: t, conn: conn, br: bufio.NewReader(conn)}
+	c.hello()
+
+	// This is the call that failed in the field.
+	errVal, result := c.call("auth.login", "root", "root-passphrase")
+	if errVal != nil {
+		t.Fatalf("auth.login over unix socket errored: %#v", errVal)
+	}
+	m, ok := result.(map[string]any)
+	if !ok || m["token"] == nil || m["token"] == "" {
+		t.Fatalf("auth.login over unix socket returned no token: %#v", result)
+	}
+}

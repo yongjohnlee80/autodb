@@ -487,3 +487,31 @@ func TestLogin_OldCredentialsAfterResetRejected(t *testing.T) {
 		t.Errorf("new-passphrase login after reset: %v", err)
 	}
 }
+
+// TestLoginLocalSocketBypassesAllowlist reproduces the field bug where a
+// login over the default unix socket was refused "ip not allowed": a
+// socket peer has no IP, so it can satisfy no IP allowlist. The socket's
+// 0600 perms are the boundary (ADR-0058), so a local connection must not
+// be gated on the allowlist — while TCP still is.
+func TestLoginLocalSocketBypassesAllowlist(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, _, _ := newSvc(t) // config allowlist is 127.0.0.1/32 only
+	mustBootstrap(t, s)
+
+	if _, _, err := s.Login(ctx, "root", rootPass, LocalPeer); err != nil {
+		t.Fatalf("local-socket login = %v, want success", err)
+	}
+
+	// The allowlist still governs TCP: a real, off-list IP is denied.
+	if _, _, err := s.Login(ctx, "root", rootPass, "10.1.1.1"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("off-allowlist TCP login = %v, want ErrDenied", err)
+	}
+
+	// Only the exact sentinel bypasses. A stray unparseable string — e.g.
+	// the raw "@" an unnamed socket used to leak through peerIP — is NOT
+	// silently treated as local.
+	if _, _, err := s.Login(ctx, "root", rootPass, "@"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("bogus peer %q = %v, want ErrDenied", "@", err)
+	}
+}
