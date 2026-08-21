@@ -87,9 +87,18 @@ function M.client() return _client end
 function M.workspace() return ns():get("workspace") end
 function M.connection() return ns():get("connection") end
 
----is_ready reports whether a call would reach a live daemon.
+---is_ready reports whether a call would reach a live daemon AS SOMEONE.
+---
+---A token is part of readiness, not an extra someone remembers to check.
+---The transport and the session are different questions: `Client` answers
+---"is the socket up and handshaken", and this answers "would an
+---authenticated verb succeed". Conflating them wedged the plugin — a
+---mistyped passphrase left a client that was transport-ready but
+---token-less, so `_connected` sailed straight past the login prompt and
+---every command answered "not logged in" until Neovim restarted. One
+---slip, no way back.
 function M.is_ready()
-  return _client ~= nil and _client:is_ready()
+  return _client ~= nil and _client:is_ready() and _client:token() ~= nil
 end
 
 ---attach adopts a connected client as the session's own.

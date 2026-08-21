@@ -638,7 +638,23 @@ print("\n[9] history — three panes over history.list (requirement 8)")
   -- throw, because <leader>Dh is reachable at any time.
   local session = require("autodb.session")
   session.reset_for_tests()
-  ok("p9: opening with no session does not error", pcall(hist.open))
+  -- The report is an ERROR-level notify, and auto-core mirrors those to
+  -- `vim.notify` from inside a `vim.schedule` (log.lua — dispatch can
+  -- come from a libuv callback where notifying is unsafe). Capture it
+  -- HERE rather than leaving a queued toast to surface during a later
+  -- section's event-loop pump, where it prints "Error in <script>" while
+  -- the suite reports green — a clean count over a dirty stderr is not a
+  -- clean signal.
+  local orig_notify = vim.notify
+  local toasts = {}
+  vim.notify = function(msg) toasts[#toasts + 1] = tostring(msg) end
+  local opened_without_session = pcall(hist.open)
+  vim.wait(500, function() return #toasts > 0 end, 5)
+  vim.notify = orig_notify
+  ok("p9: opening with no session does not error", opened_without_session)
+  ok("p9: and says why rather than failing silently",
+    toasts[1] ~= nil and toasts[1]:find("cannot list history", 1, true) ~= nil,
+    tostring(toasts[1]))
   ok("p9: and stays closed", hist.is_open() == false)
 
   -- The float wiring itself, with the server stubbed. Helper functions
@@ -788,6 +804,202 @@ print("\n[10] refresh — pull, rebuild, relaunch (and refuse when it cannot)")
     mk_text:find("buildvcs=false", 1, true) ~= nil)
 
   vim.fn.delete(tmp, "rf")
+end)()
+
+-- ──────────── [11] login — masked, and retryable after a slip ────────────
+print("\n[11] login — the passphrase is masked, and a failure can be retried")
+;(function()
+  local autodb = require("autodb")
+  local session = require("autodb.session")
+  local commands = require("autodb.commands")
+  local keys = require("autodb.keys")
+
+  -- A stub client is enough here, and a real daemon would be worse:
+  -- `_login` only ever touches `c:call` and `c._token`, and what needs
+  -- proving is which PROMPT the passphrase travelled through — something
+  -- no server can observe. Section [8] already covers real auth.
+  local function fake_client(opts)
+    opts = opts or {}
+    return {
+      _token = nil,
+      calls = {},
+      is_ready = function() return true end,
+      token = function(self) return self._token end,
+      call = function(self, method, params, cb)
+        self.calls[#self.calls + 1] = method
+        if method == "auth.needs_bootstrap" then
+          return cb(opts.needs_bootstrap == true, nil)
+        end
+        if method == "auth.login" or method == "auth.bootstrap" then
+          self.sent = params
+          if opts.reject then return cb(nil, { message = "invalid passphrase" }) end
+          return cb({ token = "tok-1" }, nil)
+        end
+        return cb(nil, { message = "unexpected " .. method })
+      end,
+    }
+  end
+
+  -- `_login` refuses to prompt without a UI, so a headless run has to
+  -- claim one. `echoed` collects prompts that render keystrokes;
+  -- `masked` collects prompts that do not. The passphrase must only ever
+  -- appear in the second list.
+  local orig_uis, orig_input, orig_secret =
+    vim.api.nvim_list_uis, vim.ui.input, vim.fn.inputsecret
+  local echoed, masked = {}, {}
+  local function capture(answers)
+    vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+    vim.ui.input = function(o, cb) echoed[#echoed + 1] = o.prompt; cb(answers.name) end
+    vim.fn.inputsecret = function(p) masked[#masked + 1] = p; return answers.pass end
+  end
+  local function restore()
+    vim.api.nvim_list_uis = orig_uis
+    vim.ui.input = orig_input
+    vim.fn.inputsecret = orig_secret
+  end
+  -- The masked prompt is deferred onto a settled main loop, so the stubs
+  -- must stay installed until it has run.
+  local function settle(probe)
+    vim.wait(2000, probe, 5)
+  end
+
+  -- ── first run: bootstrap ──
+  echoed, masked = {}, {}
+  capture({ name = "root", pass = "s3cret" })
+  local c1 = fake_client({ needs_bootstrap = true })
+  local ok1, err1
+  autodb._login(c1, function(o, e) ok1, err1 = o, e end)
+  settle(function() return ok1 ~= nil end)
+  restore()
+
+  ok("p11: a first run prompts to CREATE the admin",
+    echoed[1] ~= nil and echoed[1]:find("create admin user", 1, true) ~= nil, echoed[1])
+  ok("p11: and bootstraps rather than logging in",
+    vim.tbl_contains(c1.calls, "auth.bootstrap"), table.concat(c1.calls, ","))
+  ok("p11: the passphrase goes through a MASKED prompt", #masked == 1, tostring(#masked))
+  ok("p11: named so the user knows what is being asked",
+    masked[1] ~= nil and masked[1]:find("passphrase", 1, true) ~= nil, masked[1])
+  ok("p11: and the echoing prompt is used ONCE — for the name only",
+    #echoed == 1, tostring(#echoed))
+  ok("p11: bootstrap kept the token", ok1 == true and c1._token ~= nil, tostring(err1))
+
+  -- ── returning user: login ──
+  echoed, masked = {}, {}
+  capture({ name = "tester", pass = "s3cret" })
+  local c2 = fake_client({ needs_bootstrap = false })
+  local ok2 = nil
+  autodb._login(c2, function(o) ok2 = o end)
+  settle(function() return ok2 ~= nil end)
+  restore()
+  ok("p11: an existing store asks for a user, not a new admin",
+    echoed[1] ~= nil and echoed[1]:find("create", 1, true) == nil, echoed[1])
+  ok("p11: and logs in", ok2 == true and vim.tbl_contains(c2.calls, "auth.login"),
+    table.concat(c2.calls, ","))
+  ok("p11: the passphrase is still masked on the login path", #masked == 1, tostring(#masked))
+
+  -- ── cancelling ──
+  echoed, masked = {}, {}
+  capture({ name = "root", pass = "" })
+  local c3 = fake_client({ needs_bootstrap = false })
+  local ok3, err3
+  autodb._login(c3, function(o, e) ok3, err3 = o, e end)
+  settle(function() return ok3 ~= nil end)
+  restore()
+  ok("p11: an empty passphrase cancels",
+    ok3 == false and tostring(err3):find("cancelled", 1, true) ~= nil, tostring(err3))
+  ok("p11: and no credentials leave the editor",
+    not vim.tbl_contains(c3.calls, "auth.login"), table.concat(c3.calls, ","))
+
+  -- ── a wrong passphrase ──
+  echoed, masked = {}, {}
+  capture({ name = "root", pass = "wrong" })
+  local c4 = fake_client({ needs_bootstrap = false, reject = true })
+  local ok4, err4
+  autodb._login(c4, function(o, e) ok4, err4 = o, e end)
+  settle(function() return ok4 ~= nil end)
+  restore()
+  ok("p11: a rejected passphrase surfaces the server's reason",
+    ok4 == false and tostring(err4):find("invalid passphrase", 1, true) ~= nil, tostring(err4))
+  ok("p11: and leaves no token behind", c4._token == nil)
+
+  -- ── the wedge: connected is not signed in ──
+  -- Before this section existed, a mistyped passphrase left a client
+  -- that was `is_ready()` but token-less, so every later command sailed
+  -- past the login prompt and answered "not logged in" instead. One slip
+  -- wedged the session for the rest of the Neovim run.
+  session.reset_for_tests()
+  local c5 = fake_client({ needs_bootstrap = false })
+  session.attach(c5, {})
+  ok("p11: a connected client with NO token is not session-ready",
+    session.is_ready() == false)
+  c5._token = "tok-1"
+  ok("p11: and becomes ready once the token lands", session.is_ready() == true)
+
+  -- ── the retry is a login, not a second daemon ──
+  session.reset_for_tests()
+  local c6 = fake_client({ needs_bootstrap = false })
+  session.attach(c6, {})
+  local lifecycle = require("autodb.lifecycle")
+  local orig_resolve, orig_spawn = lifecycle.resolve_binary, lifecycle.spawn
+  local reached_lifecycle = false
+  lifecycle.resolve_binary = function()
+    reached_lifecycle = true
+    return nil, "resolve_binary must not run when a client is already live"
+  end
+  lifecycle.spawn = function() reached_lifecycle = true end
+  echoed, masked = {}, {}
+  capture({ name = "root", pass = "s3cret" })
+  local ok6, err6
+  autodb.ensure_connected(function(o, e) ok6, err6 = o, e end)
+  settle(function() return ok6 ~= nil end)
+  restore()
+  lifecycle.resolve_binary, lifecycle.spawn = orig_resolve, orig_spawn
+  ok("p11: a retry logs in on the live client", ok6 == true, tostring(err6))
+  ok("p11: without resolving a binary or spawning a daemon", reached_lifecycle == false)
+  ok("p11: and it reached auth.login", vim.tbl_contains(c6.calls, "auth.login"),
+    table.concat(c6.calls, ","))
+
+  -- ── one prompt at a time, but never a stranded guard ──
+  -- Two commands in quick succession must not open two passphrase
+  -- prompts. The guard cannot be absolute though: a `vim.ui.input`
+  -- handler that drops its callback on cancel would hold it forever and
+  -- refuse every later attempt, which is the same one-slip wedge this
+  -- section exists to prevent. So the automatic path defers, and a
+  -- deliberate <leader>Dl press replaces the prompt.
+  echoed, masked = {}, {}
+  vim.api.nvim_list_uis = function() return { { chan = 1 } } end
+  vim.ui.input = function(o) echoed[#echoed + 1] = o.prompt end   -- never answers
+  vim.fn.inputsecret = function(p) masked[#masked + 1] = p; return "s3cret" end
+  local c7 = fake_client({ needs_bootstrap = false })
+  autodb._login(c7, function() end)                 -- leaves a prompt open
+  local ok7, err7
+  autodb._login(c7, function(o, e) ok7, err7 = o, e end)
+  ok("p11: a second automatic login defers to the open prompt",
+    ok7 == false and tostring(err7):find("already open", 1, true) ~= nil, tostring(err7))
+  ok("p11: and no second prompt was opened", #echoed == 1, tostring(#echoed))
+
+  local ok8
+  autodb._login(c7, function(o) ok8 = o end, { force = true })
+  ok("p11: a deliberate press is never refused by a stale guard",
+    ok8 == nil or ok8 ~= false, tostring(ok8))
+  ok("p11: and it does open a prompt", #echoed == 2, tostring(#echoed))
+  -- Clear the guard the abandoned prompts left set.
+  vim.ui.input = function(o, cb) echoed[#echoed + 1] = o.prompt; cb(nil) end
+  autodb._login(c7, function() end, { force = true })
+  restore()
+
+  -- ── the key surface ──
+  ok("p11: " .. tostring(keys.LOGIN) .. " is the login key",
+    keys.LOGIN == keys.PREFIX .. "l", tostring(keys.LOGIN))
+  ok("p11: commands.login exists", type(commands.login) == "function")
+  commands.setup({})
+  local mapped = false
+  for _, m in ipairs(vim.api.nvim_get_keymap("n")) do
+    if m.desc and m.desc:find("autodb: sign in", 1, true) then mapped = true end
+  end
+  ok("p11: and setup binds it", mapped == true)
+
+  session.reset_for_tests()
 end)()
 
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))

@@ -257,6 +257,29 @@ function M.refresh()
   })
 end
 
+---login signs in, and is the way back from a mistyped passphrase.
+---
+---Bound because getting a passphrase wrong is an ordinary accident and
+---the recovery should not be "restart Neovim". Pressed while already
+---signed in it re-authenticates, which is also how a user moves between
+---a reader and an admin account on the same shared daemon.
+function M.login()
+  local c = session.client()
+  if c and c:is_ready() then
+    -- The socket is live: prompt straight away. Going through
+    -- `_connected` here would be a no-op for a signed-in user, so a
+    -- deliberate press would appear to do nothing.
+    return require("autodb")._login(c, function(ok, err)
+      if not ok then
+        log.notify(tostring(err), { level = "error", component = "commands" })
+      end
+    end, { force = true })
+  end
+  -- Nothing live to sign in to. The ordinary connect path already ends
+  -- in a login prompt, so reuse it rather than growing a second one.
+  _connected(function() end)
+end
+
 ---history opens the script-history modal (requirement 8).
 function M.history()
   _connected(function()
@@ -281,6 +304,7 @@ function M.setup(opts)
     pcall(vim.keymap.set, mode, lhs, fn, { silent = true, desc = desc })
   end
 
+  set("n", map.login or keys.LOGIN, M.login, "autodb: sign in (retry, or switch user)")
   set("n", map.history or keys.HISTORY, M.history, "autodb: script history")
   set("n", map.run_buffer or keys.RUN_BUFFER, M.run_buffer, "autodb: run this SQL buffer")
   set("v", map.run_visual or keys.RUN_VISUAL, function()
@@ -299,6 +323,8 @@ function M.setup(opts)
   end, { range = true, desc = "autodb: run the buffer or selection" })
   vim.api.nvim_create_user_command("AutodbConnection", function() M.choose_connection() end,
     { desc = "autodb: choose a connection" })
+  vim.api.nvim_create_user_command("AutodbLogin", M.login,
+    { desc = "autodb: sign in (retry, or switch user)" })
   vim.api.nvim_create_user_command("AutodbHistory", M.history, { desc = "autodb: script history" })
   vim.api.nvim_create_user_command("AutodbMaintenance", M.maintenance,
     { desc = "autodb: maintenance prompt" })

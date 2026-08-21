@@ -28,6 +28,7 @@ M.config = {
 
 local _connecting = false
 local _waiters = {}
+local _prompting = false
 
 local function _settle(ok, err)
   _connecting = false
@@ -47,6 +48,15 @@ function M.ensure_connected(cb)
   _waiters[#_waiters + 1] = cb
   if _connecting then return end
   _connecting = true
+
+  -- A client whose socket is still good but which never got a token
+  -- needs a LOGIN, not a second daemon. This is the path back from a
+  -- mistyped passphrase, and it must not resolve a binary, probe the
+  -- endpoint, or open a second connection to get there.
+  local live = session.client()
+  if live and live:is_ready() then
+    return M._login(live, function(lok, lerr) _settle(lok, lerr) end)
+  end
 
   local bin, berr = lifecycle.resolve_binary(M.config.bin)
   if not bin then return _settle(false, berr) end
@@ -81,38 +91,84 @@ function M.ensure_connected(cb)
     end)
 end
 
+---_secret reads a passphrase without rendering it.
+---
+---`vim.ui.input` is the wrong tool for a secret: it echoes every
+---keystroke, and its `highlight` field cannot conceal them — a custom
+---handler paints the raw text into a float just as faithfully as the
+---builtin paints it onto the cmdline. `inputsecret()` is the only core
+---prompt that masks (it renders `*`), so a passphrase deliberately does
+---NOT go through the configured UI, while a username — not a secret —
+---does.
+---
+---One function because it is the only place this plugin ever reads a
+---secret; a second call site is how the echo would quietly come back
+---([[shared-resolver-single-source-of-truth]]).
+---@param prompt string
+---@return string|nil  nil when the user cancelled
+function M._secret(prompt)
+  -- <C-c> raises rather than returning, and an error escaping here would
+  -- strand `_connecting` with every later command queued behind it.
+  local got, val = pcall(vim.fn.inputsecret, prompt)
+  vim.cmd("redraw")   -- take the prompt line back off the screen
+  if not got or type(val) ~= "string" or val == "" then return nil end
+  return val
+end
+
 ---_login authenticates, bootstrapping the first admin if the store is
 ---empty (requirement 19).
 ---
 ---Prompting is suppressed without a UI, during a headless run, or when
 ---`vim.g.autodb_noninteractive` is set: a plugin that blocks a scripted
 ---Neovim on a passphrase prompt is a plugin that breaks CI.
-function M._login(c, cb)
+---
+---`opts.force` is how a deliberate press differs from an automatic
+---connect. Only ONE prompt may be open at a time, but the guard cannot
+---be allowed to strand the plugin: a third-party `vim.ui.input` handler
+---that drops its callback on cancel would otherwise hold the flag for
+---the rest of the session and refuse every later attempt — the same
+---one-slip wedge this change exists to remove. So the automatic path
+---defers to an open prompt, and an explicit key press replaces it.
+---@param c AutodbClient
+---@param cb fun(ok: boolean, err: string|nil)
+---@param opts { force: boolean? }?
+function M._login(c, cb, opts)
   if #vim.api.nvim_list_uis() == 0 or vim.g.autodb_noninteractive then
     return cb(false, "autodb: not connected (no UI for a login prompt)")
   end
+  if _prompting and not (opts and opts.force) then
+    return cb(false, "autodb: a login prompt is already open")
+  end
+  _prompting = true
+  local function settle(ok, err)
+    _prompting = false
+    return cb(ok, err)
+  end
   c:call("auth.needs_bootstrap", {}, function(needs, err)
-    if err then return cb(false, err.message) end
+    if err then return settle(false, err.message) end
     local first = needs == true
     vim.ui.input({ prompt = first and "autodb — create admin user: " or "autodb — user: " },
       function(name)
-        if not name or name == "" then return cb(false, "autodb: login cancelled") end
-        vim.ui.input({ prompt = "autodb — passphrase: ", highlight = function() return {} end },
-          function(pass)
-            if not pass or pass == "" then return cb(false, "autodb: login cancelled") end
-            local method = first and "auth.bootstrap" or "auth.login"
-            c:call(method, { name, pass }, function(res, lerr)
-              if lerr then return cb(false, lerr.message) end
-              -- bootstrap and login both hand back a session token.
-              local token = type(res) == "table" and (res.token or res[1]) or res
-              if type(token) ~= "string" then
-                return cb(false, "autodb: login returned no token")
-              end
-              c._token = token
-              log.notify("signed in as " .. name, { component = "auth" })
-              cb(true, nil)
-            end)
+        if not name or name == "" then return settle(false, "autodb: login cancelled") end
+        -- The name prompt can settle from inside its UI handler's own
+        -- window teardown, so the masked prompt is deferred rather than
+        -- opened on top of a closing float.
+        vim.schedule(function()
+          local pass = M._secret("autodb — passphrase: ")
+          if not pass then return settle(false, "autodb: login cancelled") end
+          local method = first and "auth.bootstrap" or "auth.login"
+          c:call(method, { name, pass }, function(res, lerr)
+            if lerr then return settle(false, lerr.message) end
+            -- bootstrap and login both hand back a session token.
+            local token = type(res) == "table" and (res.token or res[1]) or res
+            if type(token) ~= "string" then
+              return settle(false, "autodb: login returned no token")
+            end
+            c._token = token
+            log.notify("signed in as " .. name, { component = "auth" })
+            settle(true, nil)
           end)
+        end)
       end)
   end)
 end
@@ -155,9 +211,16 @@ function M.health()
     end
   end
 
-  if session.is_ready() then
-    local c = session.client()
+  local c = session.client()
+  if c and c:is_ready() then
     h.ok("connected · instance " .. tostring(c:instance()))
+    -- Connected and signed in are different states, and this is the
+    -- surface where a user works out which one they are stuck in.
+    if c:token() then
+      h.ok("signed in")
+    else
+      h.warn("connected but NOT signed in — press " .. keys.LOGIN .. " to sign in")
+    end
     local conn = session.connection()
     h.info("connection: " .. (conn and (conn.name or conn.id) or "none selected"))
     local status, message = lifecycle.build_status(c:hello().version, bin)
