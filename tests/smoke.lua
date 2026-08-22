@@ -54,6 +54,24 @@ local function ok(name, cond, detail)
 end
 local function eq(a, b) return vim.deep_equal(a, b) end
 
+-- A missing precondition is a FAILURE, not a silent skip.
+--
+-- Five sections drive a real `autodb --serve` and need bin/autodb, which is
+-- gitignored (`git ls-files bin/` is empty) — so its ABSENCE is the default state
+-- of a fresh clone or a misconfigured CI, not an edge case. When those sections
+-- printed "SKIP" and returned, 45 assertions — including [4], the real-daemon
+-- handshake and identity-refusal path this suite's own header calls "the security
+-- boundary of this plugin" — vanished while the run still reported "0 failed" and
+-- exited 0. A skip that cannot be told apart from a pass is not a skip. So an
+-- absent binary is recorded here and made to fail the run at the summary, with the
+-- one-line fix in the message.
+local missing_prereqs = {}
+local function require_bin(section)
+  missing_prereqs[#missing_prereqs + 1] = section
+  print(string.format("  MISSING  %s needs bin/autodb (gitignored) — build it: "
+    .. "make build   (or: go build -o bin/autodb ./cmd/autodb)", section))
+end
+
 print("autodb.nvim smoke")
 
 -- ─────────────────── [1] client — address policy ───────────────────
@@ -113,7 +131,7 @@ print("\n[3] lifecycle.resolve_endpoint — the binary owns the answer")
   local lc = require("autodb.lifecycle")
   local bin = plugin_root .. "/bin/autodb"
   if vim.fn.executable(bin) ~= 1 then
-    print("  SKIP  no bin/autodb — run `go build -o bin/autodb ./cmd/autodb`")
+    require_bin("[3] resolve_endpoint")
     return
   end
 
@@ -156,7 +174,7 @@ print("\n[4] client.connect — handshake over a REAL daemon on a socket")
   local lc = require("autodb.lifecycle")
   local bin = plugin_root .. "/bin/autodb"
   if vim.fn.executable(bin) ~= 1 then
-    print("  SKIP  no bin/autodb")
+    require_bin("[4] connect — real daemon handshake")
     return
   end
 
@@ -298,7 +316,7 @@ print("\n[5] lifecycle.resolve_binary — found like gopls and delve are")
 
   local bin = plugin_root .. "/bin/autodb"
   if vim.fn.executable(bin) ~= 1 then
-    print("  SKIP  no bin/autodb for the version comparison")
+    require_bin("[5] resolve_binary")
     return
   end
 
@@ -336,7 +354,7 @@ print("\n[6] lifecycle.check_build — tell the user, once, and name the key")
     and keys.RUN_BUFFER:sub(1, #keys.PREFIX) == keys.PREFIX, keys.PREFIX)
 
   if vim.fn.executable(bin) ~= 1 then
-    print("  SKIP  no bin/autodb")
+    require_bin("[6] check_build")
     return
   end
 
@@ -496,7 +514,7 @@ print("\n[8] a real query through the whole stack")
 ;(function()
   local bin = plugin_root .. "/bin/autodb"
   if vim.fn.executable(bin) ~= 1 then
-    print("  SKIP  no bin/autodb")
+    require_bin("[8] a real query through the whole stack")
     return
   end
   local client = require("autodb.client")
@@ -675,10 +693,20 @@ print("\n[9] history — three panes over history.list (requirement 8)")
     ok("p9: three panes exist", panes.left and panes.middle and panes.preview,
       vim.inspect(vim.tbl_keys(panes)))
 
-    local left = vim.api.nvim_buf_get_lines(panes.left.bufnr, 0, -1, false)
-    ok("p9: the left pane lists the filters",
-      #left == #conns and left[1]:find("all", 1, true) ~= nil, vim.inspect(left))
-    ok("p9: the selected filter is marked", left[1]:find("▸", 1, true) ~= nil, left[1])
+    -- Guarded: the assertion above can legitimately be false (a narrow terminal
+    -- drops a pane), and dereferencing panes.left.bufnr then throws OUT of the
+    -- chunk — which nvim exits 0 on, darkening every later section (finding 3). A
+    -- missing pane must fail these assertions, not abort the suite.
+    if panes.left then
+      local left = vim.api.nvim_buf_get_lines(panes.left.bufnr, 0, -1, false)
+      ok("p9: the left pane lists the filters",
+        #left == #conns and left[1] and left[1]:find("all", 1, true) ~= nil, vim.inspect(left))
+      ok("p9: the selected filter is marked",
+        left[1] ~= nil and left[1]:find("▸", 1, true) ~= nil, left[1])
+    else
+      ok("p9: the left pane lists the filters", false, "no left pane to read")
+      ok("p9: the selected filter is marked", false, "no left pane to read")
+    end
 
     local mid = vim.api.nvim_buf_get_lines(panes.middle.bufnr, 0, -1, false)
     ok("p9: the middle pane lists every entry", #mid == #entries, #mid)
@@ -738,7 +766,9 @@ print("\n[9] history — three panes over history.list (requirement 8)")
       np.left ~= nil and np.middle ~= nil and np.preview == nil,
       vim.inspect(vim.tbl_keys(np)))
     ok("p9: the entry list still renders",
-      #vim.api.nvim_buf_get_lines(np.middle.bufnr, 0, -1, false) == #entries)
+      np.middle ~= nil
+        and #vim.api.nvim_buf_get_lines(np.middle.bufnr, 0, -1, false) == #entries,
+      "no middle pane to read")
     hist.close()
   end
   vim.o.columns = wide
@@ -754,15 +784,24 @@ print("\n[10] refresh — pull, rebuild, relaunch (and refuse when it cannot)")
   ok("p10: refresh is reachable from the maintenance prompt",
     type(commands.refresh) == "function")
 
-  -- In this checkout the plugin-local build IS the resolved binary, so a
-  -- refresh is meaningful.
-  local pass_ok, pass_err, plan = refresh.preflight({})
-  if vim.fn.executable(plan and plan.bin or "") == 1 then
-    ok("p10: preflight passes for a plugin-local build", pass_ok == true, tostring(pass_err))
+  -- Drive the success path with the plugin-local binary EXPLICITLY.
+  --
+  -- resolve_binary lists PATH/Mason candidates ahead of the plugin build, so on
+  -- any machine where autodb is installed (Mason, `go install`) a bare
+  -- refresh.preflight({}) resolves the Mason binary, refuses, and this success
+  -- path SKIPped — i.e. it was untested precisely where autodb is actually
+  -- installed (finding 2). opts.bin is honoured when executable (lifecycle.lua),
+  -- so passing the plugin build reaches the success path on every machine.
+  local plugin_bin = lifecycle.plugin_root() .. "/bin/" .. lifecycle.BINARY_NAME
+  if vim.fn.executable(plugin_bin) == 1 then
+    local pass_ok, pass_err, plan = refresh.preflight({ bin = plugin_bin })
+    ok("p10: preflight passes for the plugin-local build", pass_ok == true, tostring(pass_err))
     ok("p10: and reports the checkout it would pull",
-      plan and plan.root == lifecycle.plugin_root(), plan and plan.root)
+      plan and plan.root == lifecycle.plugin_root(), plan and (plan.root or "no plan"))
   else
-    print("  SKIP  no plugin-local bin/autodb to refresh")
+    -- The binary is gitignored, so its absence is a required precondition, not a
+    -- skip (finding 1) — the same treatment as the five end-to-end sections.
+    require_bin("[10] refresh preflight success path")
   end
 
   -- The guard that matters: if the binary came from PATH (Mason, go
@@ -1434,10 +1473,52 @@ print("\n[16] run_sql — a SELECT shows its rows, not '0 row(s) affected'")
   ok("p16: the envelope was unwrapped (no leftover .statements/.result)",
     type(seen_res) == "table" and seen_res.statements == nil and seen_res.result == nil)
 
+  -- The PURE-DDL case: exec.run_script returns an envelope with NO `result` (the
+  -- Go handler sets reply.result only when out.Last ~= nil, rpc/methods.go). The
+  -- mock above always set it, so commands.lua's else-branch — "no result set" —
+  -- was never exercised, directly adjacent to the '0 row(s) affected' bug section
+  -- [16] exists to catch (mock-drift finding, lector r?/test-health).
+  local ddl = { _token = "t", is_ready = function() return true end,
+    token = function(self) return self._token end, hello = function() return nil end,
+    authed = function(_, method, _p, cb)
+      if method == "exec.run_script" then return cb({ statements = 2 }, nil) end
+      return cb(nil, { message = "unexpected " .. method })
+    end,
+  }
+  session.attach(ddl, {})
+  session.select_workspace({ id = 1, name = "WS" })
+  session.select_connection({ id = 1, name = "pg" })
+
+  local log = require("autodb.log")
+  local orig_show, orig_notify = results.show_result, log.notify
+  local ddl_shown, ddl_notice = false, nil
+  results.show_result = function() ddl_shown = true end
+  log.notify = function(msg) ddl_notice = msg end
+  commands.run_sql("CREATE TABLE t (id int)")
+  results.show_result, log.notify = orig_show, orig_notify
+
+  ok("p16: a no-result (pure DDL) envelope does NOT open the result panel",
+    ddl_shown == false)
+  ok("p16: it reports that the script ran with no result set",
+    type(ddl_notice) == "string" and ddl_notice:find("no result set", 1, true) ~= nil,
+    tostring(ddl_notice))
+
   session.reset_for_tests()
 end)()
 
-print(string.format("\n%d passed, %d failed", pass_count, fail_count))
-if fail_count > 0 then
+if #missing_prereqs > 0 then
+  print(string.format("\n%d MISSING PRECONDITION(S): %s",
+    #missing_prereqs, table.concat(missing_prereqs, ", ")))
+end
+print(string.format("\n%d passed, %d failed, %d missing",
+  pass_count, fail_count, #missing_prereqs))
+-- SMOKE-COMPLETE is the sentinel the runner greps for. It prints ONLY here, at
+-- the natural end of the main chunk, so its ABSENCE means the chunk aborted
+-- (nvim exits 0 on an uncaught error — confirmed) and the runner must treat a
+-- missing sentinel as a failure regardless of exit code.
+if fail_count > 0 or #missing_prereqs > 0 then
+  print("SMOKE-COMPLETE FAIL")
   vim.cmd("cq!")
+else
+  print("SMOKE-COMPLETE OK")
 end

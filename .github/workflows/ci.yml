@@ -20,3 +20,29 @@ jobs:
         run: |
           CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/autodb
           CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/autodb
+
+  # The neovim smoke suite. A separate job because it needs neovim and the
+  # auto-core.nvim plugin, and because it was in NEITHER the Makefile nor CI —
+  # so its 45 real-daemon/UI assertions, including the handshake and
+  # identity-refusal security boundary, had no automated signal at all.
+  lua:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: install neovim
+        run: |
+          curl -fsSL -o /tmp/nvim.tar.gz \
+            https://github.com/neovim/neovim/releases/download/stable/nvim-linux-x86_64.tar.gz
+          sudo tar -C /opt -xzf /tmp/nvim.tar.gz
+          echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+      - name: fetch auto-core.nvim (hard dependency of the suite)
+        run: |
+          # The suite probes stdpath('data')/lazy/auto-core.nvim; put it there.
+          dest="$HOME/.local/share/nvim/lazy/auto-core.nvim"
+          mkdir -p "$(dirname "$dest")"
+          git clone --depth 1 https://github.com/yongjohnlee80/auto-core.nvim "$dest"
+      - name: smoke suite
+        run: ./tests/run-smoke.sh
