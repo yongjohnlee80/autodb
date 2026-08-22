@@ -1,7 +1,14 @@
 -- autodb.nvim — smoke test driver
 --
 -- Run headless from the repo root:
---   nvim --headless -u tests/smoke.lua -c 'qa!'
+--   nvim --headless -u NONE -l tests/smoke.lua
+--
+-- Use `-u NONE -l`, NOT `-u tests/smoke.lua -c 'qa!'`: under `-c 'qa!'` an
+-- uncaught throw that aborts the suite mid-run is swallowed and the
+-- trailing `qa!` still quits EXIT 0 — a silent, green, partial run (this
+-- driver's only failure signal is `cq!` on a counted FAIL, which an abort
+-- never reaches). Under `-l` the error propagates and nvim exits non-zero.
+-- (Family runner contract, shared/conventions/lua-nvim-plugin-development.md.)
 --
 -- Per the family convention, this driver is extended every iteration and
 -- must run green before work is reported complete.
