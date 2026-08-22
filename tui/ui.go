@@ -61,6 +61,7 @@ type Model struct {
 	pendingCtrlW      bool   // Ctrl-w chord prefix (Ctrl-w z = zoom alias)
 	searchQuery       string // last / pattern; n and N walk its matches
 	about             AboutInfo
+	frontend          Frontend
 	pendingPrompt     func() // an auth prompt waiting for the splash to close
 	splashShown       bool   // the About splash opens once, on the first frame
 	connectedOnce     bool   // a later connect is a RE-connect: stale floats go
@@ -261,6 +262,16 @@ func (m *Model) handleStartup(d startupDone) {
 // fresh one — the supported way to pick up a rebuilt binary, since
 // `--serve` deliberately outlives the TUI (ADR-0056 §3).
 func (m *Model) restartServer() {
+	if !m.canRestartDaemon() {
+		// Refused rather than hidden only: removing it from the menu keeps it out
+		// of a user's way, and this keeps it out of reach of anything that finds
+		// the action another way. Under --web-ui nothing in the process can start
+		// a daemon, so this keystroke would strand every session including other
+		// users' (ADR-0061 §2.7).
+		m.setStatus("restarting the server is not available in the browser frontend — " +
+			"nothing here can start it again")
+		return
+	}
 	if !m.session.Connected() {
 		m.setStatus("not connected — SPC x connects (and spawns a server)")
 		return
@@ -1123,7 +1134,7 @@ func (m *Model) leaderEntries() []leaderEntry {
 	if !m.session.Connected() {
 		connLabel, connRun = "connect", m.reconnect
 	}
-	return []leaderEntry{
+	entries := []leaderEntry{
 		{'r', "run query (selection when active)", m.runQuery},
 		{'R', "run selection only", m.runSelection},
 		{'j', "toggle results table/JSON", m.results.ToggleJSON},
@@ -1141,7 +1152,14 @@ func (m *Model) leaderEntries() []leaderEntry {
 		{'g', "refresh explorer", m.explorer.Reload},
 		{'L', "login / switch user", m.openLogin},
 		{'x', connLabel, connRun},
-		{'X', "restart the server", m.restartServer},
+	}
+	// Only a frontend that can bring the daemon back may offer to take it down.
+	// Removed from the table rather than shown-and-refused: a menu entry that always
+	// fails is a menu entry that teaches the user to distrust the menu.
+	if m.canRestartDaemon() {
+		entries = append(entries, leaderEntry{'X', "restart the server", m.restartServer})
+	}
+	entries = append(entries, []leaderEntry{
 		{'A', "about autodb", m.openAbout},
 		{'?', "help", m.openHelp},
 		{'Q', "quit", func() {
@@ -1149,7 +1167,8 @@ func (m *Model) leaderEntries() []leaderEntry {
 				m.quit()
 			}
 		}},
-	}
+	}...)
+	return entries
 }
 
 func (m *Model) openLeaderMenu() { m.openLeader("SPC — commands", m.leaderEntries()) }

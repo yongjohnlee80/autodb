@@ -38,6 +38,34 @@ func WithAbout(info AboutInfo) Option { return func(m *Model) { m.about = info }
 // Option configures the Model at construction.
 type Option func(*Model)
 
+// Frontend says what this frontend can do about the daemon's lifetime.
+//
+// It exists because the shared component tree offers an admin action that SHUTS
+// THE DAEMON DOWN, and whether that is safe depends entirely on who is hosting the
+// tree. In a terminal it is: the daemon exits, the next call fails, and the
+// session's spawn function starts a replacement. Under `autodb --web-ui` the spawn
+// is nil by design (ADR-0061 §2.2), so the same keystroke strands every web session
+// with no way to bring the daemon back — including sessions belonging to other
+// people.
+//
+// The zero value is the terminal, so every existing caller keeps its behaviour
+// without naming it.
+type Frontend uint8
+
+const (
+	// FrontendTerminal may shut the daemon down; a spawn restores it.
+	FrontendTerminal Frontend = iota
+	// FrontendWeb must not: nothing in this process will start one.
+	FrontendWeb
+)
+
+// WithFrontend declares the hosting frontend (ADR-0061 §2.7).
+func WithFrontend(f Frontend) Option { return func(m *Model) { m.frontend = f } }
+
+// canRestartDaemon reports whether this frontend may offer daemon-restart
+// actions.
+func (m *Model) canRestartDaemon() bool { return m.frontend == FrontendTerminal }
+
 type aboutView struct {
 	widget.Base
 	model *Model
