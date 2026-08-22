@@ -65,6 +65,12 @@ local function eq(a, b) return vim.deep_equal(a, b) end
 -- exited 0. A skip that cannot be told apart from a pass is not a skip. So an
 -- absent binary is recorded here and made to fail the run at the summary, with the
 -- one-line fix in the message.
+-- A FLOOR on assertions run, because "assertions silently vanished" is exactly
+-- the failure this suite exists to make loud (finding 1). If a future change drops
+-- some — a mis-scoped skip, a section that stops executing — the total falls below
+-- this and the run fails, even when nothing that DID run failed. Raise it when the
+-- suite legitimately grows; never lower it to make a run pass.
+local EXPECTED_MIN_ASSERTIONS = 213
 local missing_prereqs = {}
 local function require_bin(section)
   missing_prereqs[#missing_prereqs + 1] = section
@@ -1510,15 +1516,30 @@ if #missing_prereqs > 0 then
   print(string.format("\n%d MISSING PRECONDITION(S): %s",
     #missing_prereqs, table.concat(missing_prereqs, ", ")))
 end
-print(string.format("\n%d passed, %d failed, %d missing",
-  pass_count, fail_count, #missing_prereqs))
--- SMOKE-COMPLETE is the sentinel the runner greps for. It prints ONLY here, at
--- the natural end of the main chunk, so its ABSENCE means the chunk aborted
--- (nvim exits 0 on an uncaught error — confirmed) and the runner must treat a
--- missing sentinel as a failure regardless of exit code.
-if fail_count > 0 or #missing_prereqs > 0 then
+
+-- The assertion floor: fewer assertions than expected means some vanished, which
+-- is a failure in its own right (see EXPECTED_MIN_ASSERTIONS).
+local total = pass_count + fail_count
+local below_floor = total < EXPECTED_MIN_ASSERTIONS
+if below_floor then
+  print(string.format("\nASSERTION FLOOR: ran %d, expected at least %d — some "
+    .. "assertions did not run", total, EXPECTED_MIN_ASSERTIONS))
+end
+
+print(string.format("\n%d passed, %d failed, %d missing (of >= %d expected)",
+  pass_count, fail_count, #missing_prereqs, EXPECTED_MIN_ASSERTIONS))
+
+-- SMOKE-COMPLETE is the sentinel the runner matches as an EXACT full line. It
+-- prints ONLY here, at the natural end of the main chunk, so its absence means the
+-- chunk aborted — nvim exits 0 on an uncaught Lua error, so the runner cannot trust
+-- the exit code alone. The explicit os.exit below (not a trailing `qa!`) closes the
+-- window where a deferred error could fire after the token and still exit 0.
+if fail_count > 0 or #missing_prereqs > 0 or below_floor then
   print("SMOKE-COMPLETE FAIL")
-  vim.cmd("cq!")
+  io.stdout:flush()
+  os.exit(1)
 else
   print("SMOKE-COMPLETE OK")
+  io.stdout:flush()
+  os.exit(0)
 end

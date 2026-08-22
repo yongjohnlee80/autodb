@@ -27,6 +27,10 @@ jobs:
   # identity-refusal security boundary, had no automated signal at all.
   lua:
     runs-on: ubuntu-latest
+    env:
+      # Bump deliberately alongside a compatibility check; a scheduled canary can
+      # track auto-core's HEAD separately.
+      AUTO_CORE_SHA: "928bfb27fe6c08b84176b6dee3669cc5c8ac1ac9"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -34,8 +38,11 @@ jobs:
           go-version: "1.25.x"
       - name: install neovim
         run: |
+          # Pinned to v0.12.2 — the version the suite's 213 assertions were
+          # verified against locally — not 'stable', which is a moving target that
+          # makes a blocking gate non-reproducible. Bump deliberately.
           curl -fsSL -o /tmp/nvim.tar.gz \
-            https://github.com/neovim/neovim/releases/download/stable/nvim-linux-x86_64.tar.gz
+            https://github.com/neovim/neovim/releases/download/v0.12.2/nvim-linux-x86_64.tar.gz
           sudo tar -C /opt -xzf /tmp/nvim.tar.gz
           echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
       - name: fetch auto-core.nvim (hard dependency of the suite)
@@ -43,6 +50,9 @@ jobs:
           # The suite probes stdpath('data')/lazy/auto-core.nvim; put it there.
           dest="$HOME/.local/share/nvim/lazy/auto-core.nvim"
           mkdir -p "$(dirname "$dest")"
-          git clone --depth 1 https://github.com/yongjohnlee80/auto-core.nvim "$dest"
-      - name: smoke suite
-        run: ./tests/run-smoke.sh
+          # Pinned to a commit for a deterministic blocking gate. Latest-auto-core
+          # compatibility belongs in a separate scheduled canary, not here.
+          git clone https://github.com/yongjohnlee80/auto-core.nvim "$dest"
+          git -C "$dest" checkout "$AUTO_CORE_SHA"
+      - name: test suites
+        run: ./tests/run-all.sh
