@@ -2,6 +2,7 @@ package webserver
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -108,7 +109,7 @@ func TestSessions_OnePerUserAndLogoutOnTheLastRelease(t *testing.T) {
 	// connection — a password must be proven against the daemon and cannot be
 	// inferred from another tab.
 	first := login(t, addr, "alice", "correct horse battery", true)
-	sessA, surplusA, err := pool.join("alice", first)
+	sessA, entryA, surplusA, err := pool.join("alice", first)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +118,7 @@ func TestSessions_OnePerUserAndLogoutOnTheLastRelease(t *testing.T) {
 	}
 
 	second := login(t, addr, "alice", "correct horse battery", false)
-	sessB, surplusB, err := pool.join("alice", second)
+	sessB, entryB, surplusB, err := pool.join("alice", second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +140,7 @@ func TestSessions_OnePerUserAndLogoutOnTheLastRelease(t *testing.T) {
 	}
 
 	// One tab closes. The other is still live, so the user must STILL be logged in.
-	pool.release("alice")
+	pool.release("alice", entryB)
 	if n := pool.count("alice"); n != 1 {
 		t.Fatalf("refs = %d after one release, want 1", n)
 	}
@@ -149,7 +150,7 @@ func TestSessions_OnePerUserAndLogoutOnTheLastRelease(t *testing.T) {
 	}
 
 	// The last tab closes. NOW the logout must happen.
-	pool.release("alice")
+	pool.release("alice", entryA)
 	if n := pool.count("alice"); n != 0 {
 		t.Errorf("refs = %d after the last release, want 0", n)
 	}
@@ -172,14 +173,14 @@ func TestSessions_DirectAttachJoinsTheExistingSession(t *testing.T) {
 	t.Cleanup(pool.close)
 
 	first := login(t, addr, "bob", "another long passphrase", true)
-	pooled, _, err := pool.join("bob", first)
+	pooled, _, _, err := pool.join("bob", first)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	got, err := pool.acquire(ctx, "bob")
+	got, _, err := pool.acquire(ctx, "bob")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,18 +201,23 @@ func TestSessions_DistinctUsersAreNotShared(t *testing.T) {
 	pool := newSessions(dialer(addr), logger.Nop{})
 	t.Cleanup(pool.close)
 
+	// Two GENUINELY authenticated users. The pool now asserts that a pooled
+	// session's identity matches its key (the fix for lector r3 must-fix 1), so a
+	// second session pooled without a real login of its own is correctly rejected —
+	// which is why this test bootstraps an admin and has the admin create the
+	// second user rather than pooling an unauthenticated connection.
 	admin := login(t, addr, "alice", "correct horse battery", true)
-	aSess, _, err := pool.join("alice", admin)
+	aSess, _, _, err := pool.join("alice", admin)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A second identity, pooled without a login of its own — enough to prove the
-	// keying, which is what is under test.
-	other, err := dialer(addr)(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, cerr := admin.Bind().CreateUser(ctx, "carol", "carol's own passphrase", "reader"); cerr != nil {
+		t.Fatalf("creating the second user: %v", cerr)
 	}
-	bSess, _, err := pool.join("carol", other)
+	carol := login(t, addr, "carol", "carol's own passphrase", false)
+	bSess, entryB, _, err := pool.join("carol", carol)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,7 +229,7 @@ func TestSessions_DistinctUsersAreNotShared(t *testing.T) {
 		t.Errorf("%d users pooled, want 2", n)
 	}
 	// Releasing one must not disturb the other.
-	pool.release("carol")
+	pool.release("carol", entryB)
 	if n := pool.count("alice"); n != 1 {
 		t.Errorf("alice's refs = %d after carol released, want 1", n)
 	}
@@ -239,7 +245,7 @@ func TestSessions_ClosedPoolRefuses(t *testing.T) {
 	pool := newSessions(dialer(addr), logger.Nop{})
 
 	first := login(t, addr, "dave", "yet another passphrase", true)
-	if _, _, err := pool.join("dave", first); err != nil {
+	if _, _, _, err := pool.join("dave", first); err != nil {
 		t.Fatal(err)
 	}
 	pool.close()
@@ -255,9 +261,100 @@ func TestSessions_ClosedPoolRefuses(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer spare.Close()
-	if _, surplus, err := pool.join("dave", spare); err == nil {
+	if _, _, surplus, err := pool.join("dave", spare); err == nil {
 		t.Error("a closed pool accepted a session")
 	} else if surplus != spare {
 		t.Error("a refused join must hand the connection back to its owner")
+	}
+}
+
+// A pooled session that has been re-keyed to a DIFFERENT user must not be handed
+// out under its original key.
+//
+// This is the core of lector r3 must-fix 1 at the pool boundary. The frontend fix
+// makes the drift impossible (the web App cannot re-authenticate its session), but
+// the pool asserts the invariant anyway: a defence that only exists in another
+// package is a defence one refactor away from gone. Here the drift is simulated the
+// way a switch-user would have caused it — logging the pooled session in as someone
+// else — and both entry points must refuse.
+func TestSessions_RejectsIdentityDrift(t *testing.T) {
+	t.Parallel()
+	addr := startRealServer(t)
+	pool := newSessions(dialer(addr), logger.Nop{})
+	t.Cleanup(pool.close)
+
+	admin := login(t, addr, "alice", "correct horse battery", true)
+	if _, _, _, err := pool.join("alice", admin); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := admin.Bind().CreateUser(ctx, "mallory", "mallory's passphrase", "reader"); err != nil {
+		t.Fatalf("creating the second user: %v", err)
+	}
+
+	// THE DRIFT: the pooled session, keyed "alice", is logged in as mallory — which
+	// is exactly what an in-App switch-user would have done to the shared session.
+	if err := admin.Bind().Login(ctx, "mallory", "mallory's passphrase"); err != nil {
+		t.Fatalf("re-login: %v", err)
+	}
+	if admin.User().Name != "mallory" {
+		t.Fatalf("the drift did not take: session is %q", admin.User().Name)
+	}
+
+	// Now every route into the pool must refuse the drifted entry rather than serve
+	// mallory's connection to a caller who asked for alice.
+	if _, _, err := pool.acquire(ctx, "alice"); !errors.Is(err, ErrIdentityDrift) {
+		t.Errorf("acquire returned %v, want ErrIdentityDrift — it would run alice's "+
+			"tab as mallory", err)
+	}
+	fresh := login(t, addr, "mallory", "mallory's passphrase", false)
+	defer fresh.Close()
+	if _, _, _, err := pool.join("alice", fresh); !errors.Is(err, ErrIdentityDrift) {
+		t.Errorf("join returned %v, want ErrIdentityDrift", err)
+	}
+}
+
+// A late release from a replaced entry must not touch the entry that replaced it.
+//
+// lector r3 must-fix 1, requirement 4. Two joins for one subject produce two
+// references to ONE entry; the pointer-checked release means a stale entry handle —
+// one whose entry has since been removed and a new one installed under the same
+// key — decrements nothing. Constructed directly because the frontend fix makes
+// the natural path unreachable.
+func TestSessions_ReleaseIsEntrySpecific(t *testing.T) {
+	t.Parallel()
+	addr := startRealServer(t)
+	pool := newSessions(dialer(addr), logger.Nop{})
+	t.Cleanup(pool.close)
+
+	first := login(t, addr, "alice", "correct horse battery", true)
+	_, entry1, _, err := pool.join("alice", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Drop it entirely, so the key is now free.
+	pool.release("alice", entry1)
+	if n := pool.count("alice"); n != 0 {
+		t.Fatalf("refs = %d after the only release, want 0", n)
+	}
+
+	// A NEW entry under the same key.
+	second := login(t, addr, "alice", "correct horse battery", false)
+	_, entry2, _, err := pool.join("alice", second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry1 == entry2 {
+		t.Fatal("the replacement reused the old entry object; this test needs them distinct")
+	}
+
+	// A stale release of the OLD entry must not decrement or log out the new one.
+	pool.release("alice", entry1)
+	if n := pool.count("alice"); n != 1 {
+		t.Errorf("a stale release decremented the replacement: refs = %d, want 1", n)
+	}
+	if tok := second.Token(); tok == "" {
+		t.Error("a stale release logged out the replacement session")
 	}
 }

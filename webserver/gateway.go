@@ -92,6 +92,7 @@ type userSession struct {
 	subject string
 	sess    *tuiapp.Session
 	pool    *sessions
+	entry   *poolEntry
 }
 
 // New builds the gateway. It does NOT dial the daemon — [Preflight] does that, and
@@ -151,11 +152,15 @@ func New(cfg Config) (*Gateway, error) {
 		// rather than a failure: the identity is proven, but this gateway did not
 		// witness a password and cannot forward one it never held.
 		Provision: func(ctx context.Context, id *auth.Identity) (*userSession, error) {
-			sess, perr := g.pool.acquire(ctx, id.Subject)
+			// A direct attach with no already-authenticated session for this user
+			// (ErrNoSession) fails the session rather than dialling an
+			// unauthenticated one: the web App cannot log a connection in, so the
+			// recovery is a fresh gateway login, not a stranded TUI (§2.4).
+			sess, entry, perr := g.pool.acquire(ctx, id.Subject)
 			if perr != nil {
 				return nil, perr
 			}
-			return &userSession{subject: id.Subject, sess: sess, pool: g.pool}, nil
+			return &userSession{subject: id.Subject, sess: sess, pool: g.pool, entry: entry}, nil
 		},
 
 		// Logout-then-close lives in the pool, and only fires on the last
@@ -165,7 +170,7 @@ func New(cfg Config) (*Gateway, error) {
 				"webserver": "gateway", "event": "session released",
 				"subject": u.subject, "reason": r.String(),
 			})
-			u.pool.release(u.subject)
+			u.pool.release(u.subject, u.entry)
 		},
 	})
 	if err != nil {
@@ -381,19 +386,21 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 		subject = user
 	}
 
-	sess, surplus, jerr := f.gw.pool.join(subject, fresh)
+	sess, entry, surplus, jerr := f.gw.pool.join(subject, fresh)
 	if surplus != nil {
 		// This user already had a session; ours is one connection too many. Logged
 		// out before closing, or the daemon keeps the token we just minted.
 		f.gw.pool.logoutAndClose(subject, surplus)
 	}
 	if jerr != nil {
-		return auth.Contribution{}, auth.Reason("webserver: the gateway is shutting down")
+		// ErrIdentityDrift lands here too: a pooled session whose identity no longer
+		// matches its key is a bug we refuse to build on rather than paper over.
+		return auth.Contribution{}, auth.Reason("webserver: could not join a session")
 	}
 
-	if serr := f.gw.sso.Stash(ctx, &userSession{subject: subject, sess: sess, pool: f.gw.pool}); serr != nil {
+	if serr := f.gw.sso.Stash(ctx, &userSession{subject: subject, sess: sess, pool: f.gw.pool, entry: entry}); serr != nil {
 		// The reference is ours and the login is failing, so it must go back.
-		f.gw.pool.release(subject)
+		f.gw.pool.release(subject, entry)
 		return auth.Contribution{}, auth.Reason("webserver: could not record the login")
 	}
 	return auth.Contribution{Method: "autodb-daemon", Subject: subject, IssuedAt: time.Now()}, nil
