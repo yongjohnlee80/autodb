@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -327,5 +328,94 @@ func TestGateway_SurplusConnectionIsClosedNotAbandoned(t *testing.T) {
 		t.Errorf("%d of 2 dialled connections still hold a token, want 1: the surplus "+
 			"connection was abandoned with a live token rather than logged out and "+
 			"closed", loggedIn)
+	}
+}
+
+// Two users must not see each other's notes.
+//
+// tuiapp.NoteStore reads from disk and disk has no identity, so a single shared
+// root would hand every web user everyone else's notes. The terminal frontend
+// never had this problem: the OS gave it one user per process. This gateway is one
+// process for N users, which is where the whole class of problem comes from.
+func TestGateway_NoteRootsAreScopedPerUser(t *testing.T) {
+	t.Parallel()
+	daemon := startRealServer(t)
+	notesBase := t.TempDir()
+
+	port := freePort(t)
+	gw, err := New(Config{
+		Network: "tcp", Addr: daemon, Port: port,
+		NotesRoot: notesBase, Log: logger.Nop{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- gw.Serve(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	base := fmt.Sprintf("http://127.0.0.1:%d", port)
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		req, _ := http.NewRequest(http.MethodGet, base+"/", nil)
+		req.Header.Set("Origin", base)
+		if resp, derr := http.DefaultClient.Do(req); derr == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The first login bootstraps the admin; the admin then creates a second user
+	// so there are genuinely two identities on the daemon.
+	ticket, status := webLogin(t, base, "alice", "a long enough passphrase")
+	if status != http.StatusOK {
+		t.Fatalf("bootstrap login: HTTP %d", status)
+	}
+	if _, painted := attach(t, base, ticket); !painted {
+		t.Fatal("alice's session never painted")
+	}
+
+	adminSess, err := dialer(daemon)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adminSess.Close()
+	actx, acancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer acancel()
+	if err := adminSess.Bind().Login(actx, "alice", "a long enough passphrase"); err != nil {
+		t.Fatal(err)
+	}
+	if _, cerr := adminSess.Bind().CreateUser(actx, "bob", "bob's long passphrase", "reader"); cerr != nil {
+		t.Fatalf("creating a second user: %v", cerr)
+	}
+
+	bTicket, status := webLogin(t, base, "bob", "bob's long passphrase")
+	if status != http.StatusOK {
+		t.Fatalf("bob's login: HTTP %d", status)
+	}
+	if _, painted := attach(t, base, bTicket); !painted {
+		t.Fatal("bob's session never painted")
+	}
+
+	// Each user's App built its own root under the base, and they are different.
+	aRoot, err := noteRootFor(notesBase, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bRoot, err := noteRootFor(notesBase, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{aRoot, bRoot} {
+		if _, serr := os.Stat(root); serr != nil {
+			t.Errorf("note root %q was never created: %v", root, serr)
+		}
+	}
+	if aRoot == bRoot {
+		t.Fatal("both users share one note root")
 	}
 }
