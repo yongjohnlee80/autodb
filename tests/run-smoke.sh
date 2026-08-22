@@ -35,8 +35,14 @@ if [ "$code" -ne 0 ]; then
   echo "run-smoke: FAIL — smoke suite exited $code"
   exit "$code"
 fi
-if ! grep -q "SMOKE-COMPLETE OK" <<<"$out"; then
-  echo "run-smoke: FAIL — no SMOKE-COMPLETE OK sentinel; the driver aborted before"
+# EXACT full-line match, exactly once. A substring match (grep -q) could be
+# satisfied by the token appearing inside some other line, and more than one would
+# mean the driver printed it more than once — neither is the single end-of-chunk
+# sentinel we require. -Fxq is fixed-string, whole-line; the count enforces "once".
+sentinels="$(grep -Fxc 'SMOKE-COMPLETE OK' <<<"$out")"
+if [ "$sentinels" -ne 1 ]; then
+  echo "run-smoke: FAIL — expected exactly one 'SMOKE-COMPLETE OK' full-line"
+  echo "          sentinel, found $sentinels. Zero means the driver aborted before"
   echo "          finishing (nvim exits 0 on an uncaught error), so a green exit"
   echo "          code cannot be trusted. Treating as failure."
   exit 1

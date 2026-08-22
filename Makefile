@@ -27,9 +27,9 @@ test-go:
 
 # test-lua builds bin/autodb and runs the neovim smoke suite through a wrapper
 # that fails on an aborted driver — nvim exits 0 on an uncaught Lua error, so the
-# suite's own exit code cannot be trusted alone (see tests/run-smoke.sh).
+# suite's own exit code cannot be trusted alone (see tests/run-all.sh -> run-smoke.sh).
 test-lua:
-	./tests/run-smoke.sh
+	./tests/run-all.sh
 
 vet:
 	go vet ./...
