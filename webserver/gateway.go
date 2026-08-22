@@ -278,7 +278,12 @@ func (r *appRunner) Run(ctx context.Context) error {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	model := tuiapp.New(r.user.sess, notes, cancel, tuiapp.WithAbout(r.gw.cfg.About))
+	// FrontendWeb, which withdraws the daemon-shutdown action. spawn is nil here by
+	// design, so an admin taking the daemon down would strand every session
+	// including other users' (ADR-0061 §2.7).
+	model := tuiapp.New(r.user.sess, notes, cancel,
+		tuiapp.WithAbout(r.gw.cfg.About),
+		tuiapp.WithFrontend(tuiapp.FrontendWeb))
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(r.backend))
 	return app.Run(ctx)
 }
