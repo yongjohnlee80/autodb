@@ -20,12 +20,24 @@ import (
 // tool behind a loopback bind, and every one of these costs the daemon something.
 const (
 	DefaultMaxSessions = 8
-	// DefaultIdle ends a browser session nobody is looking at. Fifteen minutes,
-	// not two: a TUI session holds a user's workspace, query history and unsaved
-	// note state, and two minutes would make a coffee break destructive. The
-	// figure is the one that governs; ADR-0061 rev 2 said both in different
-	// sections, which is how a contradiction becomes a bug.
-	DefaultIdle = 15 * time.Minute
+	// DefaultIdle ends a browser session nobody is ATTACHED to. golib never
+	// idle-evicts an attached session — being connected is what "not idle" means —
+	// so this governs only sessions whose browser has gone away.
+	//
+	// Five minutes, and the number moved twice for reasons worth recording. ADR-0061
+	// rev 0 said fifteen; rev 1 corrected it to two, arguing that a detached session
+	// protects nothing while holding an RPC connection and a live token. Both of
+	// those were computed under one RPC connection PER BROWSER SESSION. The per-user
+	// pool changed the arithmetic: a detached session now holds a REFERENCE, and the
+	// connection dies only when that user's last reference does.
+	//
+	// So what a detached session actually costs is one Manager slot and a reference
+	// keeping its user logged in. What it buys is real: golib's client reconnects
+	// with its session id, so a network blip or a closed laptop lid resumes the TUI
+	// with its workspace and history intact — as long as the tab was not reloaded,
+	// which drops the id. Five minutes covers a lid close and does not hold a
+	// vanished tab's user logged in for a quarter of an hour.
+	DefaultIdle = 5 * time.Minute
 	// TicketTTL is how long a minted attach ticket is good for. The browser
 	// redeems it within a round trip of receiving it.
 	TicketTTL = 30 * time.Second
@@ -72,7 +84,6 @@ type Gateway struct {
 	sso     *web.SSO[*userSession]
 	handler *web.Handler
 	mgr     *web.Manager
-	notes   *tuiapp.NoteStore
 }
 
 // userSession is what the gateway hands each browser session: the user's RPC
@@ -103,12 +114,12 @@ func New(cfg Config) (*Gateway, error) {
 		cfg.Idle = DefaultIdle
 	}
 
-	notes, err := tuiapp.NewNoteStore(cfg.NotesRoot)
-	if err != nil {
-		return nil, fmt.Errorf("webserver: note store: %w", err)
-	}
-
-	g := &Gateway{cfg: cfg, notes: notes}
+	// No shared note store. One root per authenticated user, built when the
+	// session is: a single root would hand every web user every other web user's
+	// notes, because tuiapp.NoteStore reads from disk and disk has no identity
+	// (§2.8). The terminal frontend never had this problem — the OS gave it one
+	// user per process.
+	g := &Gateway{cfg: cfg}
 
 	// NIL SPAWN. This is the half of requirement 5 that is a guarantee: the
 	// session guards with `if s.spawn != nil` before spawning, so auto-starting a
@@ -253,9 +264,21 @@ type appRunner struct {
 }
 
 func (r *appRunner) Run(ctx context.Context) error {
+	root, err := noteRootFor(r.gw.cfg.NotesRoot, r.user.subject)
+	if err != nil {
+		// Refused rather than falling back to the shared root: a fallback would
+		// quietly give this user everyone else's notes, which is the failure this
+		// scoping exists to prevent.
+		return err
+	}
+	notes, err := tuiapp.NewNoteStore(root)
+	if err != nil {
+		return fmt.Errorf("webserver: note store for %q: %w", r.user.subject, err)
+	}
+
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	model := tuiapp.New(r.user.sess, r.gw.notes, cancel, tuiapp.WithAbout(r.gw.cfg.About))
+	model := tuiapp.New(r.user.sess, notes, cancel, tuiapp.WithAbout(r.gw.cfg.About))
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(r.backend))
 	return app.Run(ctx)
 }
