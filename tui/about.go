@@ -77,6 +77,16 @@ func (m *Model) canRestartDaemon() bool { return m.frontend == FrontendTerminal 
 // is terminal.
 func (m *Model) managesOwnAuth() bool { return m.frontend == FrontendTerminal }
 
+// ownsConnection reports whether this frontend owns its RPC connection's
+// lifecycle — connecting it, reconnecting on loss, restarting the daemon behind
+// it. A terminal owns a connection no one else uses. The web frontend does NOT:
+// the gateway dials the connection and shares it across the user's tabs, so an
+// App that connected or reconnected it on its own would replace the client every
+// other tab is using and advance the shared generation, invalidating their
+// in-flight work (ADR-0061 §2.3; lector r4). In the web frontend the connection
+// arrives ready and a loss is terminal.
+func (m *Model) ownsConnection() bool { return m.frontend == FrontendTerminal }
+
 type aboutView struct {
 	widget.Base
 	model *Model
@@ -112,7 +122,7 @@ func (m *Model) aboutRows() [][2]string {
 		{"backend", backend},
 	}
 	if bv := m.session.ServerVersion(); bv != "" {
-		rows = append(rows, [2]string{"backend build", backendBuildLine(info.Version, bv)})
+		rows = append(rows, [2]string{"backend build", backendBuildLine(info.Version, bv, m.canRestartDaemon())})
 	}
 	return append(rows,
 		[2]string{"meta store", meta},
@@ -134,15 +144,22 @@ func (m *Model) aboutRows() [][2]string {
 //
 // The frontend cannot fix it (restart is the admin's call), so it does
 // the one useful thing: name the mismatch and the remedy.
-func backendBuildLine(frontend, backend string) string {
+func backendBuildLine(frontend, backend string, canRestart bool) string {
 	if frontend == "" {
 		frontend = "dev"
 	}
 	if frontend == backend {
 		return backend + " (matches this binary)"
 	}
+	// The SPC X remedy is only offered to a frontend that has it. Under --web-ui
+	// the restart action is withdrawn (§2.7), so pointing a browser user at a key
+	// that does not exist would be worse than saying nothing.
+	if canRestart {
+		return backend + " ≠ " + frontend + " — the running server is a DIFFERENT build. " +
+			"Restart it (SPC X) to pick up this one."
+	}
 	return backend + " ≠ " + frontend + " — the running server is a DIFFERENT build. " +
-		"Restart it (SPC X) to pick up this one."
+		"An administrator must restart it from a terminal to pick up this one."
 }
 
 func (m *Model) openAbout() {

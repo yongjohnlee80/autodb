@@ -131,6 +131,14 @@ func (m *Model) Init(ctx *tui.Context) {
 		if ev.gen != m.session.Gen() {
 			return // an old connection's watcher
 		}
+		if !m.ownsConnection() {
+			// Web: the connection is the gateway's, shared across this user's tabs.
+			// Per-App reconnect would replace the client the other tabs use, so a
+			// real daemon loss ends this browser App instead (lector r4). The user
+			// re-attaches through the gateway.
+			m.endForLostAuth()
+			return
+		}
 		m.setStatus("disconnected: " + ev.cause + " — reconnecting…")
 		m.reconnect()
 	})
@@ -143,8 +151,20 @@ func (m *Model) Init(ctx *tui.Context) {
 	// yet) nor from Layout (mounting there is illegal), so it opens on
 	// the first loop callback after mount.
 	m.ctx.Go(func(context.Context) (any, error) { return showSplash{}, nil })
-	m.setStatus("connecting to " + m.session.addr + "…")
-	m.connectTask()
+	if m.ownsConnection() {
+		m.setStatus("connecting to " + m.session.addr + "…")
+		m.connectTask()
+		return
+	}
+	// Web: the gateway already dialed and authenticated this session, which is
+	// shared across the user's tabs. Calling Connect here would replace the client
+	// every other tab is using and advance the shared generation, superseding their
+	// in-flight work (lector r4). Enter the post-connect flow directly at the
+	// current epoch instead — same handleStartup path, no reconnect.
+	m.setStatus("attaching…")
+	m.ctx.Go(func(context.Context) (any, error) {
+		return startupDone{gen: m.session.Gen()}, nil
+	})
 }
 
 // MarkDirtyAll requests a repaint via the context.
@@ -168,6 +188,11 @@ type disconnectedEvent struct {
 }
 
 func (m *Model) connectTask() {
+	if !m.ownsConnection() {
+		// Belt: Init and reconnect are gated already, but a shared pooled session
+		// must never be reconnected from an App under any path.
+		return
+	}
 	if m.connecting {
 		return // one transition at a time (SPC x spam, watcher + manual)
 	}
@@ -1230,7 +1255,9 @@ func (m *Model) openHelp() {
 	sb.WriteString("  Ctrl-h/j/k/l   move between panes (left/down/up/right)\n")
 	sb.WriteString("  Ctrl-w z       zoom focused pane\n")
 	sb.WriteString("  Ctrl-q         quit (q quits too when nothing consumes it)\n")
-	sb.WriteString("  SPC X          restart the server (picks up a rebuilt binary)\n")
+	if m.canRestartDaemon() {
+		sb.WriteString("  SPC X          restart the server (picks up a rebuilt binary)\n")
+	}
 	sb.WriteString("  SPC C          choose which connection the query runs against\n")
 	sb.WriteString("  SPC H          script history (who ran what, when)\n")
 	sb.WriteString("  SPC A          about: build, backend, and where state lives\n")

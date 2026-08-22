@@ -146,11 +146,10 @@ func New(cfg Config) (*Gateway, error) {
 
 		// A direct attach — a ticket whose parked login has already expired —
 		// authenticated without going through the login route, so nothing was
-		// parked for it. It gets the user's pooled session if they have one, and
-		// a fresh unauthenticated connection otherwise, in which case the TUI's
-		// own login screen is what the user sees. That is a documented outcome
-		// rather than a failure: the identity is proven, but this gateway did not
-		// witness a password and cannot forward one it never held.
+		// parked for it. It gets the user's pooled session if they already have
+		// one, and FAILS otherwise: the web App cannot log a connection in (§2.4.5),
+		// so an unauthenticated session would strand it. The recovery is a fresh
+		// gateway login, which is where authentication belongs.
 		Provision: func(ctx context.Context, id *auth.Identity) (*userSession, error) {
 			// A direct attach with no already-authenticated session for this user
 			// (ErrNoSession) fails the session rather than dialling an

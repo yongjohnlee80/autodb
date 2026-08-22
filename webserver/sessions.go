@@ -103,6 +103,14 @@ func (p *sessions) join(subject string, fresh *tuiapp.Session) (sess *tuiapp.Ses
 	if fresh == nil {
 		return nil, nil, nil, ErrNoSession
 	}
+	// The new session must ALSO be the user it is filed under. Production derives
+	// subject from this same session, so today this cannot mismatch — but a pool
+	// invariant that holds only because of what its one caller happens to pass is
+	// not an invariant (lector r4). Assert it here so the guarantee is the pool's.
+	if name := fresh.User().Name; name != subject {
+		return nil, nil, fresh, fmt.Errorf("%w: adopting %q under key %q",
+			ErrIdentityDrift, name, subject)
+	}
 	e := &poolEntry{sess: fresh, refs: 1}
 	p.entries[subject] = e
 	return fresh, e, nil, nil
