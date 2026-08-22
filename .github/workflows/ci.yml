@@ -37,12 +37,19 @@ jobs:
         with:
           go-version: "1.25.x"
       - name: install neovim
+        env:
+          # Pinned to v0.12.2 — the version the suite's 213 assertions were verified
+          # against locally — not 'stable', a moving target that makes a blocking
+          # gate non-reproducible. Bump deliberately, after a canary proves the new
+          # one. The SHA-256 is the REAL pin: a GitHub release asset can be replaced
+          # under the same tag/name, so the version tag alone is not reproducible
+          # (lector r2). Recompute it when bumping the version.
+          NVIM_VERSION: "v0.12.2"
+          NVIM_SHA256: "31cf85945cb600d96cdf69f88bc68bec814acbff50863c5546adef3a1bcef260"
         run: |
-          # Pinned to v0.12.2 — the version the suite's 213 assertions were
-          # verified against locally — not 'stable', which is a moving target that
-          # makes a blocking gate non-reproducible. Bump deliberately.
           curl -fsSL -o /tmp/nvim.tar.gz \
-            https://github.com/neovim/neovim/releases/download/v0.12.2/nvim-linux-x86_64.tar.gz
+            "https://github.com/neovim/neovim/releases/download/$NVIM_VERSION/nvim-linux-x86_64.tar.gz"
+          echo "$NVIM_SHA256  /tmp/nvim.tar.gz" | sha256sum -c -
           sudo tar -C /opt -xzf /tmp/nvim.tar.gz
           echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
       - name: fetch auto-core.nvim (hard dependency of the suite)
