@@ -358,3 +358,32 @@ func TestSessions_ReleaseIsEntrySpecific(t *testing.T) {
 		t.Error("a stale release logged out the replacement session")
 	}
 }
+
+// join must not adopt a NEW session whose identity does not match its key.
+//
+// The existing-entry path already refuses drift; this is the new-entry path
+// (lector r4 should-fix). Production derives the key from the session, so a
+// mismatch cannot happen there today — which is exactly why it needs a direct
+// test: the invariant must be the pool's own, not a property of its one caller.
+func TestSessions_JoinRejectsMismatchedNewEntry(t *testing.T) {
+	t.Parallel()
+	addr := startRealServer(t)
+	pool := newSessions(dialer(addr), logger.Nop{})
+	t.Cleanup(pool.close)
+
+	// A session authenticated as "alice", offered under the wrong key "bob".
+	alice := login(t, addr, "alice", "correct horse battery", true)
+	sess, entry, surplus, err := pool.join("bob", alice)
+	if !errors.Is(err, ErrIdentityDrift) {
+		t.Fatalf("join adopted an alice session under key bob: err=%v", err)
+	}
+	if sess != nil || entry != nil {
+		t.Error("a rejected join returned a session or entry")
+	}
+	if surplus != alice {
+		t.Error("a rejected join must hand the caller's session back as surplus")
+	}
+	if n := pool.users(); n != 0 {
+		t.Errorf("%d users pooled after a rejected join, want 0", n)
+	}
+}

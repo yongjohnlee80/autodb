@@ -419,3 +419,64 @@ func TestGateway_NoteRootsAreScopedPerUser(t *testing.T) {
 		t.Fatal("both users share one note root")
 	}
 }
+
+// A second live tab must not disturb the first tab's connection.
+//
+// The App is handed a pooled *tui.Session shared across the user's tabs. If it
+// reconnected that session on startup — which Model.Init did unconditionally —
+// opening tab B would replace tab A's RPC client, advance the shared generation,
+// and invalidate work tab A had in flight (lector r4). The web frontend must not
+// own the connection's lifecycle: the gateway dialed it, and it stays put.
+func TestGateway_SecondTabDoesNotDisturbTheFirst(t *testing.T) {
+	t.Parallel()
+	daemon := startRealServer(t)
+	base, gw := startGateway(t, daemon)
+
+	// Tab A: log in and attach.
+	ta, status := webLogin(t, base, "johno", "a long enough passphrase")
+	if status != http.StatusOK {
+		t.Fatalf("first login: HTTP %d", status)
+	}
+	if _, painted := attach(t, base, ta); !painted {
+		t.Fatal("tab A never painted")
+	}
+
+	// The generation of the pooled session, as tab A sees it, after A is running.
+	gw.pool.mu.Lock()
+	entry := gw.pool.entries["johno"]
+	gw.pool.mu.Unlock()
+	if entry == nil {
+		t.Fatal("no pooled session for johno")
+	}
+	genBefore := entry.sess.Gen()
+	if tok := entry.sess.Token(); tok == "" {
+		t.Fatal("the pooled session is not authenticated")
+	}
+
+	// Tab B: a second browser session for the SAME user, attached and painting.
+	tb, status := webLogin(t, base, "johno", "a long enough passphrase")
+	if status != http.StatusOK {
+		t.Fatalf("second login: HTTP %d", status)
+	}
+	if _, painted := attach(t, base, tb); !painted {
+		t.Fatal("tab B never painted")
+	}
+
+	// THE ASSERTION: opening tab B did not reconnect the shared session.
+	genAfter := entry.sess.Gen()
+	if genAfter != genBefore {
+		t.Errorf("the shared RPC generation advanced %d -> %d when the second tab "+
+			"opened: tab B reconnected the connection tab A is using, superseding "+
+			"tab A's in-flight work", genBefore, genAfter)
+	}
+	// And tab A's connection is still the live one — a Bind against it succeeds,
+	// which it would not if its generation had been superseded.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := entry.sess.Bind().Workspaces(ctx); err != nil {
+		t.Errorf("tab A's session can no longer make calls after tab B opened: %v", err)
+	}
+	if n := gw.pool.users(); n != 1 {
+		t.Errorf("%d pooled users for one person's two tabs, want 1", n)
+	}
+}

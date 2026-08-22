@@ -32,6 +32,7 @@ func TestCheckFlags(t *testing.T) {
 		"web-ui + ui":             {webUI: true, ui: true, port: goodPort},
 		"serve + ui":              {serve: true, ui: true, port: goodPort},
 		"serve + print-endpoint":  {serve: true, printEndpoint: true, port: goodPort},
+		"ui + print-endpoint":     {ui: true, printEndpoint: true, port: goodPort},
 		"three at once":           {serve: true, ui: true, webUI: true, port: goodPort},
 		"port without web-ui":     {ui: true, port: goodPort, portSet: true},
 		"web-ui port 0":           {webUI: true, port: 0, portSet: true},

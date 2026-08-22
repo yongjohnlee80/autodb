@@ -94,7 +94,10 @@ ssh -L 7010:127.0.0.1:7010 your-host      # then open http://127.0.0.1:7010/
 A few behaviours worth knowing, because they differ from the terminal:
 
 - **One backend connection per user.** Open the tool in three tabs and they share
-  one login and one daemon connection; the last tab to close logs you out.
+  one login and one daemon connection. Closing a tab detaches it; your login and
+  that connection stay until the last tab has been gone for the idle timeout (five
+  minutes), at which point the gateway logs you out. Closing the last tab is not an
+  immediate sign-out.
 - **A reconnect resumes; a reload restarts.** A dropped network or a closed laptop
   lid reconnects to the same session with your workspace and history intact. A
   browser *reload* starts a fresh session — the session id is not yet persisted
