@@ -58,7 +58,7 @@ func main() {
 		"print the resolved endpoint as <network>\\t<address> and exit")
 	flag.Parse()
 
-	if err := checkFlags(*serve, *ui, *webUI, *port); err != nil {
+	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *port); err != nil {
 		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 		flag.Usage()
 		os.Exit(2)
@@ -111,7 +111,7 @@ const defaultWebPort = 7010
 // user explicitly passing a flag that will be ignored — would slip through
 // (lector r1 #5 on ADR-0061). flag.CommandLine.Visit reports only what was
 // actually set.
-func checkFlags(serve, ui, webUI bool, port int) error {
+func checkFlags(serve, ui, webUI, printEndpoint bool, port int) error {
 	portSet := false
 	flag.CommandLine.Visit(func(f *flag.Flag) {
 		if f.Name == "port" {
@@ -121,11 +121,21 @@ func checkFlags(serve, ui, webUI bool, port int) error {
 	if portSet && !webUI {
 		return errors.New("--port applies to --web-ui only")
 	}
-	if webUI && (serve || ui) {
-		// Not merely untidy: --serve owns a daemon's lifetime and --web-ui
-		// deliberately owns none, so one process doing both would make the
-		// never-auto-start guarantee unobservable (§2.6).
-		return errors.New("--web-ui cannot be combined with --serve or --ui")
+	// EXACTLY ONE mode. The dispatch switch tries printEndpoint, serve, ui, web-ui
+	// in that order, so any pairing silently runs whichever comes first — and
+	// --web-ui --print-endpoint printed the endpoint and never served the UI
+	// (lector r3 must-fix 2). --print-endpoint is a dispatch mode and must be
+	// counted like the others; --version is a query handled before the switch and
+	// is deliberately left to short-circuit.
+	modes := 0
+	for _, on := range []bool{serve, ui, webUI, printEndpoint} {
+		if on {
+			modes++
+		}
+	}
+	if modes > 1 {
+		return errors.New("--serve, --ui, --web-ui, and --print-endpoint are " +
+			"mutually exclusive; pass exactly one")
 	}
 	if webUI {
 		if port <= 0 || port > 65535 {

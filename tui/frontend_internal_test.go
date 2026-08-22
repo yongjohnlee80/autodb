@@ -62,3 +62,72 @@ func TestLeaderEntries_WebFrontendWithdrawsTheRestartAction(t *testing.T) {
 		t.Errorf("restartServer in web mode said %q, want a refusal", web.statusMsg)
 	}
 }
+
+// The web frontend must not offer, or perform, any action that re-authenticates or
+// disconnects its shared session.
+//
+// The pooled RPC session is shared across a user's tabs (ADR-0061 §2.3). In-App
+// login/switch-user would re-key it to another user, and disconnect would drop the
+// connection the other tabs are using — the exact hazard lector r3 must-fix 1
+// reproduced. So in FrontendWeb these actions are gone from the binding table AND
+// the openers refuse, ending the browser App instead.
+func TestFrontendWeb_WithdrawsAuthAndConnectionActions(t *testing.T) {
+	t.Parallel()
+
+	keys := func(m *Model) map[rune]bool {
+		out := map[rune]bool{}
+		for _, e := range m.leaderEntries() {
+			out[e.key] = true
+		}
+		return out
+	}
+
+	term := keys(unconnected())
+	for _, k := range []rune{'L', 'x', 'X'} {
+		if !term[k] {
+			t.Errorf("the terminal frontend lost SPC %c; the zero value must keep "+
+				"existing behaviour", k)
+		}
+	}
+
+	web := keys(unconnected(WithFrontend(FrontendWeb)))
+	for _, k := range []rune{'L', 'x', 'X'} {
+		if web[k] {
+			t.Errorf("the web frontend still offers SPC %c on a shared per-user "+
+				"session — it could re-key or disconnect connections other tabs use", k)
+		}
+	}
+	// It still has to be a usable data client: the query and pane actions remain.
+	for _, k := range []rune{'r', 'e', 'q', 't', 'c', 'w', 'u'} {
+		if !web[k] {
+			t.Errorf("the web frontend lost SPC %c; withdrawing auth actions must not "+
+				"strip the data client", k)
+		}
+	}
+}
+
+// openLogin in web mode ENDS the App rather than opening a form, because the App
+// cannot re-authenticate a shared session in place.
+func TestFrontendWeb_OpenLoginEndsTheApp(t *testing.T) {
+	t.Parallel()
+
+	ended := false
+	sess := NewSessionOn("tcp", "127.0.0.1:1", logger.Nop{}, nil)
+	m := New(sess, nil, func() { ended = true }, WithFrontend(FrontendWeb))
+
+	m.openLogin()
+	if !ended {
+		t.Error("openLogin in web mode did not end the App — a lost session must " +
+			"terminate the browser session, not re-authenticate the shared one")
+	}
+	if m.modalOpen() {
+		t.Error("openLogin in web mode opened a login form on a shared session")
+	}
+
+	// openBootstrap likewise: the gateway bootstraps, never the App.
+	ended = false
+	m.openBootstrap()
+	if !ended {
+		t.Error("openBootstrap in web mode did not end the App")
+	}
+}

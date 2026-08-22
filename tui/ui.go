@@ -354,6 +354,21 @@ func (m *Model) checkAuth() {
 	m.openLogin()
 }
 
+// endForLostAuth ends the browser App when its authenticated session is gone.
+//
+// The web App cannot recover auth in place (managesOwnAuth is false), so a lost or
+// expired session ends this browser session. The gateway's Release then logs the
+// pooled session out on the last reference, and the user re-attaches to a fresh
+// gateway login. quit is the App's own context-cancel (webserver wires it), so
+// this ends THIS session, not the process or anyone else's.
+func (m *Model) endForLostAuth() {
+	m.setStatus("session ended — reload the page to sign in again")
+	m.refreshStatus()
+	if m.quit != nil {
+		m.quit()
+	}
+}
+
 // maybePromptLogin fires a retained login prompt once the float stack
 // empties (called from the float dismiss path).
 func (m *Model) maybePromptLogin() {
@@ -374,6 +389,13 @@ func (m *Model) maybePromptLogin() {
 // --- auth floats -----------------------------------------------------------------
 
 func (m *Model) openBootstrap() {
+	if !m.managesOwnAuth() {
+		// The gateway bootstraps the first admin on first login (§2.9); the App
+		// never does. If this fired, the daemon has no users and the gateway should
+		// have handled it — ending is the safe refusal.
+		m.endForLostAuth()
+		return
+	}
 	pass := field("root passphrase (also unlocks the master key)", widget.WithMask('*'))
 	confirm := field("confirm passphrase", widget.WithMask('*'))
 	m.openForm("first run — create the root user", []formField{
@@ -399,6 +421,16 @@ func (m *Model) openBootstrap() {
 }
 
 func (m *Model) openLogin() {
+	if !m.managesOwnAuth() {
+		// Web mode: the gateway owns authentication (§2.4). The App runs on a
+		// session shared by all this user's tabs and must not re-authenticate it in
+		// place — that would mutate a connection the other tabs are using and could
+		// re-key it to another user. A lost or switched session is therefore
+		// terminal here: end this browser App and let the user re-attach through the
+		// gateway, which is where a login belongs.
+		m.endForLostAuth()
+		return
+	}
 	m.authPromptPending = false
 	m.openForm("login", []formField{
 		field("user"), field("passphrase", widget.WithMask('*')),
@@ -1150,8 +1182,18 @@ func (m *Model) leaderEntries() []leaderEntry {
 		{'u', "users…", m.openUserManager},
 		{'H', "script history…", m.openHistory},
 		{'g', "refresh explorer", m.explorer.Reload},
-		{'L', "login / switch user", m.openLogin},
-		{'x', connLabel, connRun},
+	}
+	// Session and connection lifecycle actions belong to a frontend that OWNS its
+	// session. The web frontend shares one connection per user across tabs and does
+	// not authenticate in-App (§2.4), so login/switch-user and disconnect/reconnect
+	// are withdrawn — a disconnect from one tab would drop the connection the others
+	// are using, and a switch-user would re-key it. Removed from the table, not
+	// shown-and-refused: a menu entry that always fails teaches distrust of the menu.
+	if m.managesOwnAuth() {
+		entries = append(entries,
+			leaderEntry{'L', "login / switch user", m.openLogin},
+			leaderEntry{'x', connLabel, connRun},
+		)
 	}
 	// Only a frontend that can bring the daemon back may offer to take it down.
 	// Removed from the table rather than shown-and-refused: a menu entry that always

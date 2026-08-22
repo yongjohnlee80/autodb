@@ -66,6 +66,17 @@ func WithFrontend(f Frontend) Option { return func(m *Model) { m.frontend = f } 
 // actions.
 func (m *Model) canRestartDaemon() bool { return m.frontend == FrontendTerminal }
 
+// managesOwnAuth reports whether this frontend authenticates its own session.
+//
+// A terminal does: it logs in, switches user, and re-authenticates on token loss,
+// all on a session it owns exclusively. The web frontend does NOT — the gateway
+// authenticates before the App is built, and the session is SHARED across the
+// user's tabs, so any in-App re-authentication would mutate a connection other
+// tabs are using and could re-key it to a different user (ADR-0061 §2.4; lector
+// r3). In the web frontend authentication is not the App's job, and a lost session
+// is terminal.
+func (m *Model) managesOwnAuth() bool { return m.frontend == FrontendTerminal }
+
 type aboutView struct {
 	widget.Base
 	model *Model

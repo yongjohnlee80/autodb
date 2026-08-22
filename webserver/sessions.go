@@ -3,6 +3,7 @@ package webserver
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -17,6 +18,17 @@ const LogoutTimeout = 5 * time.Second
 
 // ErrPoolClosed reports that the gateway is shutting down.
 var ErrPoolClosed = errors.New("webserver: the session pool is closed")
+
+// ErrNoSession reports that a subject has no pooled session to attach to. A
+// direct attach whose parked login has expired lands here: there is nothing to
+// join, and the gateway must NOT dial an unauthenticated one — see acquire.
+var ErrNoSession = errors.New("webserver: no session for this user")
+
+// ErrIdentityDrift reports that a pooled session's authenticated identity no
+// longer matches the key it is filed under. This must be impossible — the web App
+// cannot re-authenticate its session (ADR-0061 §2.4) — so it is a loud bug guard,
+// not a case to recover from.
+var ErrIdentityDrift = errors.New("webserver: pooled session identity does not match its key")
 
 // sessions holds ONE RPC session per authenticated user, reference-counted
 // across that user's browser sessions.
@@ -68,24 +80,32 @@ func newSessions(dial func(ctx context.Context) (*tuiapp.Session, error), log lo
 // Returning "close the one you brought" rather than closing it here keeps the
 // ownership rule single: whoever dialled a connection closes it, unless this pool
 // took it.
-func (p *sessions) join(subject string, fresh *tuiapp.Session) (sess *tuiapp.Session, surplus *tuiapp.Session, err error) {
+func (p *sessions) join(subject string, fresh *tuiapp.Session) (sess *tuiapp.Session, entry *poolEntry, surplus *tuiapp.Session, err error) {
 	if subject == "" {
-		return nil, fresh, errors.New("webserver: no subject to key a session by")
+		return nil, nil, fresh, errors.New("webserver: no subject to key a session by")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
-		return nil, fresh, ErrPoolClosed
+		return nil, nil, fresh, ErrPoolClosed
 	}
 	if e, ok := p.entries[subject]; ok {
+		// The pooled session must still be this exact user. The App cannot
+		// re-authenticate it (§2.4), so a mismatch is a bug, not a state to serve —
+		// serving it would run one user's tabs as another (lector r3 must-fix 1).
+		if name := e.sess.User().Name; name != subject {
+			return nil, nil, fresh, fmt.Errorf("%w: keyed %q, authenticated %q",
+				ErrIdentityDrift, subject, name)
+		}
 		e.refs++
-		return e.sess, fresh, nil
+		return e.sess, e, fresh, nil
 	}
 	if fresh == nil {
-		return nil, nil, errors.New("webserver: no session to adopt")
+		return nil, nil, nil, ErrNoSession
 	}
-	p.entries[subject] = &poolEntry{sess: fresh, refs: 1}
-	return fresh, nil, nil
+	e := &poolEntry{sess: fresh, refs: 1}
+	p.entries[subject] = e
+	return fresh, e, nil, nil
 }
 
 // acquire takes a reference to an EXISTING pooled session, without dialling.
@@ -94,38 +114,34 @@ func (p *sessions) join(subject string, fresh *tuiapp.Session) (sess *tuiapp.Ses
 // an SSH signature has already been authenticated by the attach policy, but no
 // login route ran, so there is no fresh connection to adopt. Whether that user
 // has a session depends on whether they are already logged in somewhere.
-func (p *sessions) acquire(ctx context.Context, subject string) (*tuiapp.Session, error) {
+// acquire takes a reference to an EXISTING, AUTHENTICATED pooled session.
+//
+// It does NOT dial. A direct attach (a ticket, an mTLS chain, an SSHSIG) has been
+// authenticated by the attach policy, but the web App cannot authenticate a
+// connection itself (§2.4) — so if this user has no already-authenticated session,
+// there is nothing to hand it that it could use, and dialling an unauthenticated
+// one would strand the App on a connection it cannot log in. The caller surfaces
+// ErrNoSession, the browser session ends, and the user re-attaches through the
+// gateway's login route — which is where authentication belongs.
+func (p *sessions) acquire(_ context.Context, subject string) (*tuiapp.Session, *poolEntry, error) {
 	if subject == "" {
-		return nil, errors.New("webserver: no subject to key a session by")
+		return nil, nil, errors.New("webserver: no subject to key a session by")
 	}
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.closed {
-		p.mu.Unlock()
-		return nil, ErrPoolClosed
+		return nil, nil, ErrPoolClosed
 	}
-	if e, ok := p.entries[subject]; ok {
-		e.refs++
-		p.mu.Unlock()
-		return e.sess, nil
+	e, ok := p.entries[subject]
+	if !ok {
+		return nil, nil, ErrNoSession
 	}
-	p.mu.Unlock()
-
-	// No pooled session: dial one. Outside the lock, because a dial is I/O and
-	// holding the pool across it would stall every other user's attach.
-	fresh, err := p.dial(ctx)
-	if err != nil {
-		return nil, err
+	if name := e.sess.User().Name; name != subject {
+		return nil, nil, fmt.Errorf("%w: keyed %q, authenticated %q",
+			ErrIdentityDrift, subject, name)
 	}
-	sess, surplus, err := p.join(subject, fresh)
-	if err != nil {
-		fresh.Close()
-		return nil, err
-	}
-	if surplus != nil {
-		// Somebody else's dial won the race. Theirs is the pooled one.
-		surplus.Close()
-	}
-	return sess, nil
+	e.refs++
+	return e.sess, e, nil
 }
 
 // release drops a reference, and LOGS OUT when it was the last one.
@@ -135,10 +151,21 @@ func (p *sessions) acquire(ctx context.Context, subject string) (*tuiapp.Session
 // keep the token valid, so a session the user believes they ended would still be
 // spendable. `tuiapp.Session.Disconnect` closes the client and nothing more, so
 // the logout has to happen HERE (ADR-0061 §2.4; Johno's requirement, 2026-08-22).
-func (p *sessions) release(subject string) {
+// release drops a reference on a SPECIFIC entry, and logs out when it was the last.
+//
+// It takes the entry, not just the subject, so a late release from an entry that
+// has already been removed and replaced under the same key cannot decrement — or
+// log out — its replacement (lector r3 must-fix 1, requirement 4). With the
+// identity invariant held at the frontend this replacement case should not arise,
+// but the check costs a pointer compare and removes a whole class of aliasing bug.
+func (p *sessions) release(subject string, e *poolEntry) {
+	if e == nil {
+		return
+	}
 	p.mu.Lock()
-	e, ok := p.entries[subject]
-	if !ok {
+	cur, ok := p.entries[subject]
+	if !ok || cur != e {
+		// Already gone, or replaced by a different entry. Not ours to touch.
 		p.mu.Unlock()
 		return
 	}
