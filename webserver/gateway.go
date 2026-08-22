@@ -314,11 +314,22 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 		// is defence in depth and a clearer error, not the thing standing between a
 		// guessed password and an admin account.
 		//
-		// The security note, stated rather than buried: on a fresh daemon the first
-		// successful login through this route CREATES THE ADMIN. The bind is
-		// loopback-only, so reaching it already means local access — the same
-		// property `autodb --ui` relies on. A public bind would need a certificate
-		// and is out of scope (§2.1).
+		// FIRST LOGIN ON A FRESH DAEMON CREATES THE ADMIN. Accepted deliberately
+		// (Johno, 2026-08-23): "there isn't really anything to protect when it's
+		// being set up", and the person doing the setup is the one responsible for
+		// users anyway.
+		//
+		// That is not just a judgement call, it is a property of the daemon and it
+		// checks out. Before bootstrap the tokenless RPC surface is four methods —
+		// sys.hello, auth.needs_bootstrap, auth.bootstrap, auth.login — and every
+		// method that reaches data goes through the authed path. conn.create needs a
+		// token, so NO CONNECTION CAN EXIST UNTIL A USER DOES: at the only moment
+		// this path is reachable there is, literally, nothing behind it. The window
+		// closes the instant it is used, and after that this is a plain login.
+		//
+		// The bind is loopback-only besides, so reaching it means local access — the
+		// same property `autodb --ui` already relies on. A public bind needs a
+		// certificate and is out of scope (§2.1).
 		needs, berr := fresh.Bind().NeedsBootstrap(dialCtx)
 		if berr != nil || !needs {
 			fresh.Close()
