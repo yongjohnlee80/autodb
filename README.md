@@ -49,7 +49,7 @@ passphrase. Everything else hangs off the leader key:
 | `SPC n` `SPC s` | new note / save note (per-workspace `.sql` files) |
 | `/` `n` `N` | search the focused panel, next/previous match |
 | `SPC z` / `Ctrl-w z` | zoom the focused pane |
-| `SPC x` / `SPC X` | disconnect-reconnect / restart the backend (admin) |
+| `SPC x` / `SPC X` | disconnect-reconnect / restart the backend (admin; terminal only) |
 | `SPC A` | about: build, backend, and where state lives |
 | `Ctrl-q` | quit (the shared server keeps running) |
 
@@ -61,6 +61,59 @@ buffers — navigate, select and yank, never edit.
 frontends), so a rebuilt binary keeps talking to the process already
 running. `SPC X` restarts it from inside the UI; a protocol mismatch
 says which side is stale.
+
+## The browser frontend
+
+```sh
+bin/autodb --serve                    # start the backend first (it does not auto-start here)
+bin/autodb --web-ui --port=7010       # then serve the TUI to a browser
+```
+
+`--web-ui` serves the **same** TUI you get from `--ui`, in a browser, over a
+WebSocket. It is off unless you ask for it, and it talks to an already-running
+`--serve` daemon over RPC exactly as `--ui` does.
+
+**It never starts the backend, and it fails fast if none is running.** Unlike
+`--ui` — which spawns a daemon when it cannot find one — `--web-ui` exits with an
+error naming the address and telling you to run `--serve`. That is deliberate: a
+browser frontend that silently started a database daemon would be a surprise in the
+wrong direction.
+
+**First login on a fresh backend creates the admin**, the same way `--ui`'s first
+run does. After that it is a normal login. The window is safe because there is
+nothing to protect during setup: no connection can exist until a user does.
+
+**Access it over SSH, not a public bind.** `--web-ui` binds `127.0.0.1` only.
+`golib/tui/web` refuses a non-loopback bind without TLS, so remote access is an SSH
+local-forward rather than a `0.0.0.0` flag:
+
+```sh
+ssh -L 7010:127.0.0.1:7010 your-host      # then open http://127.0.0.1:7010/
+```
+
+A few behaviours worth knowing, because they differ from the terminal:
+
+- **One backend connection per user.** Open the tool in three tabs and they share
+  one login and one daemon connection; the last tab to close logs you out.
+- **A reconnect resumes; a reload restarts.** A dropped network or a closed laptop
+  lid reconnects to the same session with your workspace and history intact. A
+  browser *reload* starts a fresh session — the session id is not yet persisted
+  across reloads.
+- **Your notes are your own.** Each user's per-workspace notes live under their own
+  root. A `--web-ui` user does **not** see the notes of whoever runs `--ui` on the
+  same machine; the two note trees are separate, and unifying them is future work.
+- **No `SPC X`.** The restart-the-backend action is absent in the browser, because
+  nothing in the web process can start a daemon back up — restarting it would
+  strand every other browser session. Restart the daemon from a terminal.
+- **The daemon's audit shows the gateway's address.** Every browser user's RPC
+  calls reach the daemon from `127.0.0.1` (the web process), so the daemon's audit
+  log and IP allowlist attribute them to the gateway, not the browser. The *user*
+  is still recorded correctly. This is inherent to one process serving several
+  people.
+
+The browser text-machine behaviour — key handling, composition, paste, wide
+characters — is owned and tested by `golib/tui/web` across Chromium, Firefox and
+WebKit; autodb does not re-test it.
 
 ## Layout
 
@@ -79,6 +132,8 @@ says which side is stale.
 make build        # bin/autodb, version stamped from git describe
 bin/autodb --version
 bin/autodb --serve            # msgpack-RPC on 127.0.0.1:7419 (config-overridable)
+bin/autodb --ui               # the terminal TUI (spawns a server if none is running)
+bin/autodb --web-ui --port=7010   # the same TUI in a browser (never spawns; see below)
 ```
 
 `--serve` binds loopback by default, drains gracefully on SIGINT/SIGTERM,
@@ -102,8 +157,9 @@ mkdir -p ~/.config/autodb
 cp config.example.toml ~/.config/autodb/config.toml
 ```
 
-`--config <path>` overrides the location for both `--serve` and `--ui`
-(the TUI passes it to the server it spawns). Unknown keys are rejected
+`--config <path>` overrides the location for `--serve`, `--ui`, and `--web-ui`
+(the terminal TUI passes it to the server it spawns; `--web-ui` uses it only to
+find the already-running one). Unknown keys are rejected
 rather than ignored, and values are validated at load — a bad port,
 bind, CIDR, or a postgres meta store without a DSN fails before the
 server listens, naming the offending key.
