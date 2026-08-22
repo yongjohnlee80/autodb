@@ -13,9 +13,25 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.x"
+      # Formatting first: it is the cheapest gate and the one whose absence is
+      # invisible until a diff is noisy. Committed drift in
+      # core/config/config_test.go survived precisely because nothing checked.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would rewrite these files:"
+            echo "$unformatted"
+            exit 1
+          fi
       - run: go vet ./...
       - run: go build ./...
-      - run: go test ./...
+      # -race because the RPC session pool, the web gateway and the TUI all run
+      # concurrently, and a data race that only shows up under load is a race that
+      # ships. -count=2 because a suite run once is a suite whose flakes are
+      # someone else's problem later; the whole suite takes ~17s this way.
+      - name: test
+        run: go test -race -count=2 ./...
       - name: static cross-build smoke
         run: |
           CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build -o /dev/null ./cmd/autodb

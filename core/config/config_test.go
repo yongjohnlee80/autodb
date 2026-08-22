@@ -54,8 +54,8 @@ func TestLoad_Validation(t *testing.T) {
 	cases := map[string]string{
 		// port 0 is VALID now — it selects the local socket. A negative
 		// or out-of-range port is still a typo.
-		"negative port":      "[server]\nport = -1\n",
-		"port too high":      "[server]\nport = 99999\n",
+		"negative port": "[server]\nport = -1\n",
+		"port too high": "[server]\nport = 99999\n",
 		// bind only governs a TCP listener, so it is only validated when
 		// a port asks for one.
 		"bad bind with port": "[server]\nport = 7419\nbind = \"not-an-ip\"\n",
