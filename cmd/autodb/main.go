@@ -23,6 +23,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/rpc"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
+	"github.com/yongjohnlee80/autodb/webserver"
 	"github.com/yongjohnlee80/golib/logger"
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	tuiterm "github.com/yongjohnlee80/golib/tui/term"
@@ -46,6 +47,8 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	serve := flag.Bool("serve", false, "run the RPC server")
 	ui := flag.Bool("ui", false, "run the standalone TUI")
+	webUI := flag.Bool("web-ui", false, "serve the TUI to a browser (requires a running --serve daemon)")
+	port := flag.Int("port", defaultWebPort, "port for --web-ui, bound on 127.0.0.1 only")
 	configPath := flag.String("config", "", "config file path (default: the user config dir)")
 	// Frontends need to know WHERE to dial, and that answer must have one
 	// owner. Reimplementing the socket-path rules in Lua would be a
@@ -54,6 +57,12 @@ func main() {
 	printEndpoint := flag.Bool("print-endpoint", false,
 		"print the resolved endpoint as <network>\\t<address> and exit")
 	flag.Parse()
+
+	if err := checkFlags(*serve, *ui, *webUI, *port); err != nil {
+		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+		flag.Usage()
+		os.Exit(2)
+	}
 
 	if *showVersion {
 		fmt.Printf("autodb %s (%s, built %s)\n", version, commit, buildDate)
@@ -76,10 +85,56 @@ func main() {
 			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 			os.Exit(1)
 		}
+	case *webUI:
+		if err := runWebUI(*configPath, *port); err != nil {
+			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+			os.Exit(1)
+		}
 	default:
 		flag.Usage()
 		os.Exit(1)
 	}
+}
+
+// defaultWebPort is --web-ui's loopback port. A default at all is a convenience;
+// what matters is that it is a FIXED number rather than an ephemeral one, so a
+// user can bookmark the URL and an SSH forward can name it.
+const defaultWebPort = 7010
+
+// checkFlags rejects flag combinations that cannot mean anything, before any of
+// them is acted on (ADR-0061 §2.1).
+//
+// A flag that silently does nothing is a flag someone will believe did something,
+// so `--port` outside `--web-ui` is a usage error rather than an ignored value.
+// That check must detect PRESENCE, not value: comparing against the default
+// cannot tell "not given" from "given the default", so `--port=7010 --ui` — a
+// user explicitly passing a flag that will be ignored — would slip through
+// (lector r1 #5 on ADR-0061). flag.CommandLine.Visit reports only what was
+// actually set.
+func checkFlags(serve, ui, webUI bool, port int) error {
+	portSet := false
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		if f.Name == "port" {
+			portSet = true
+		}
+	})
+	if portSet && !webUI {
+		return errors.New("--port applies to --web-ui only")
+	}
+	if webUI && (serve || ui) {
+		// Not merely untidy: --serve owns a daemon's lifetime and --web-ui
+		// deliberately owns none, so one process doing both would make the
+		// never-auto-start guarantee unobservable (§2.6).
+		return errors.New("--web-ui cannot be combined with --serve or --ui")
+	}
+	if webUI {
+		if port <= 0 || port > 65535 {
+			// Zero is rejected rather than treated as "pick one": an ephemeral
+			// port is one the user cannot predict, bookmark, or forward.
+			return fmt.Errorf("--port %d is out of range (1..65535)", port)
+		}
+	}
+	return nil
 }
 
 // runServe implements the shared-server lifecycle (ADR-0056 §3): bind the
@@ -224,6 +279,74 @@ func runUI(configPath string) error {
 	}))
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(backend))
 	return app.Run(ctx)
+}
+
+// runWebUI serves the TUI to a browser (ADR-0061). It reaches the daemon ONLY
+// through the same RPC client seam --ui uses, and unlike --ui it never starts one:
+// a missing daemon is a startup failure here, not something to fix by spawning.
+func runWebUI(configPath string, port int) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	ep, err := cfg.Server.Endpoint()
+	if err != nil {
+		return err
+	}
+
+	// FAIL FAST, before binding a port or building anything: an operator who
+	// forgot `autodb --serve` should learn it now and not from a browser tab that
+	// loads and then does nothing.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	daemonVersion, err := webserver.Preflight(ctx, ep.Network, ep.Address)
+	if err != nil {
+		return err
+	}
+
+	notesRoot, err := cfg.NotesRoot()
+	if err != nil {
+		return err
+	}
+
+	gw, err := webserver.New(webserver.Config{
+		Network:   ep.Network,
+		Addr:      ep.Address,
+		Port:      port,
+		NotesRoot: notesRoot,
+		About: tuiapp.AboutInfo{
+			Version: version, Commit: commit, BuildDate: buildDate,
+			Repo: repoURL, Author: author,
+			NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine,
+			MetaPath:   metaPathFor(cfg),
+			ConfigPath: configPathFor(configPath),
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	// The URL on stdout, once, before serving: this is a frontend a user has to
+	// go and open, so the address is the only output that matters.
+	fmt.Printf("autodb --web-ui: http://127.0.0.1:%d/ (daemon %s on %s)\n",
+		port, daemonVersion, ep.Address)
+	return gw.Serve(ctx)
+}
+
+// metaPathFor resolves what the About modal should say the meta store is, the way
+// runUI does: this frontend reports the paths IT would use rather than asking the
+// server, so the splash works before anyone logs in.
+func metaPathFor(cfg config.Config) string {
+	p := cfg.Meta.Path
+	if cfg.Meta.Engine == "sqlite" && p == "" {
+		if d, err := config.DefaultMetaPath(); err == nil {
+			return d
+		}
+	}
+	if cfg.Meta.Engine == "postgres" {
+		return "(postgres DSN from config)"
+	}
+	return p
 }
 
 // configPathFor reports the config file actually in play: the explicit
