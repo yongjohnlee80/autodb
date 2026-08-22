@@ -1,13 +1,25 @@
 -- autodb.nvim — smoke test driver
 --
 -- Run headless from the repo root:
---   nvim --headless -u NONE -l tests/smoke.lua
+--   nvim --headless -u tests/smoke.lua -c 'qa!'
+-- and prefer the runner (`tests/run-smoke.sh`, added by the Lua test-health
+-- work) once it is on this branch — see the sentinel note below.
 --
--- Use `-u NONE -l`, NOT `-u tests/smoke.lua -c 'qa!'`: under `-c 'qa!'` an
--- uncaught throw that aborts the suite mid-run is swallowed and the
--- trailing `qa!` still quits EXIT 0 — a silent, green, partial run (this
--- driver's only failure signal is `cq!` on a counted FAIL, which an abort
--- never reaches). Under `-l` the error propagates and nvim exits non-zero.
+-- This suite is a documented EXCEPTION to the family convention's
+-- `nvim --headless -u NONE -l <file>` rule, and the exception is load-bearing.
+-- It must be SOURCED AS INIT (`-u tests/smoke.lua -c 'qa!'`) because its
+-- sections drive real TUI grid rendering, which needs nvim's normal init/UI
+-- path. Measured 2026-08-23 on the same tree:
+--   * `-u tests/smoke.lua -c 'qa!'` → 209 passed, 0 failed, exit 0
+--   * `-u NONE -l tests/smoke.lua`  → SIGABRT in nvim's own grid_line_flush
+--                                     at §[11], 137 PASS, no summary, exit 134
+-- So `-l` does not merely change the exit semantics here — it breaks the run.
+--
+-- The convention's REASON for mandating `-l` still applies: under `-c 'qa!'` an
+-- uncaught throw is swallowed and nvim still quits EXIT 0, so an abort would
+-- look green. That is why this suite must be driven by `tests/run-smoke.sh`,
+-- which gates on the SMOKE-COMPLETE sentinel — the completion proof the
+-- convention actually asks for. Never invoke this file bare.
 -- (Family runner contract, shared/conventions/lua-nvim-plugin-development.md.)
 --
 -- Per the family convention, this driver is extended every iteration and
