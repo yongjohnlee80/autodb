@@ -36,8 +36,18 @@ vim.opt.rtp:prepend(plugin_root)
 
 -- auto-core is a hard dependency. Probe the sibling worktree first (the
 -- development layout) and fall back to the installed plugin.
+--
+-- The SAME-BRANCH sibling comes before `main`, because a cross-repo change
+-- lives in two worktrees at once: developing ADR-0066 in
+-- `autodb/grid-selection-detail` against `auto-core.nvim/main` would have
+-- silently tested the frontend against an auto-core that has none of the
+-- new primitives — and passed, by resolving `require` to the wrong copy.
+-- That is the same failure mode as letting `runtimepath` shadow a checkout.
+local siblings = vim.fn.fnamemodify(plugin_root, ":h:h")
+local branch = vim.fn.fnamemodify(plugin_root, ":t")
 local core_paths = {
-  vim.fn.fnamemodify(plugin_root, ":h:h") .. "/auto-core.nvim/main",
+  siblings .. "/auto-core.nvim/" .. branch,
+  siblings .. "/auto-core.nvim/main",
   vim.fn.stdpath("data") .. "/lazy/auto-core.nvim",
   vim.fn.expand("~/.local/share/nvim/lazy/auto-core.nvim"),
 }
@@ -89,7 +99,7 @@ local function eq(a, b) return vim.deep_equal(a, b) end
 -- some — a mis-scoped skip, a section that stops executing — the total falls below
 -- this and the run fails, even when nothing that DID run failed. Raise it when the
 -- suite legitimately grows; never lower it to make a run pass.
-local EXPECTED_MIN_ASSERTIONS = 213
+local EXPECTED_MIN_ASSERTIONS = 237
 local missing_prereqs = {}
 local function require_bin(section)
   missing_prereqs[#missing_prereqs + 1] = section
@@ -1529,6 +1539,126 @@ print("\n[16] run_sql — a SELECT shows its rows, not '0 row(s) affected'")
     tostring(ddl_notice))
 
   session.reset_for_tests()
+end)()
+
+
+-- ─────── [17] ADR-0066 detail views + selection mode ───────
+print("\n[17] detail views — a value, not '(no help entries)'")
+;(function()
+  local results = require("autodb.results")
+  local NL = string.char(10)
+
+  -- Invoke a key by looking its callback up in the BUFFER'S REAL KEYMAP.
+  -- An unbound or misnamed key resolves to nil and fails the assertion,
+  -- which is the point: calling the handler function directly would pass
+  -- even if nothing were bound to it.
+  local function press(buf, lhs)
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+      if m.lhs == lhs and m.callback then m.callback(); return true end
+    end
+    return false
+  end
+
+  results.reset_for_tests()
+  local model = require("auto-core.ui.grid").model({
+    columns = { "id", "body", "empty" },
+    rows = { { 1, "line1" .. NL .. "line2" .. NL .. "line3", nil } },
+  })
+  local view = results.show(model)
+  ok("p17: the result panel opened", view ~= nil)
+
+  -- ── cell mode: <CR> goes STRAIGHT to the value ──
+  vim.api.nvim_win_set_cursor(view:win(), { 1, 0 })
+  view:inspect()
+  local cv = results.cell_viewer()
+  ok("p17: cell mode <CR> opens a cell viewer", cv ~= nil and cv.is_open())
+  ok("p17: and NOT a row list", results.row_viewer() == nil)
+  local cl = cv and vim.api.nvim_buf_get_lines(cv.buf, 0, -1, false) or {}
+  ok("p17: it shows a value, not '(no help entries)'",
+    not vim.tbl_contains(cl, "  (no help entries)"), vim.inspect(cl[1]))
+  cv.close()
+
+  -- ── the multi-line value renders its REAL newlines in the cell view ──
+  vim.api.nvim_win_set_cursor(view:win(), { 1, 0 })
+  view:move_cell(0, 1)  -- onto `body`
+  view:inspect()
+  cv = results.cell_viewer()
+  local body = cv and vim.api.nvim_buf_get_lines(cv.buf, 0, -1, false) or {}
+  ok("p17: a 3-line value occupies 3 lines in the CELL view", #body == 3, #body)
+  ok("p17: y inside the cell view is bound", press(cv.buf, "y"))
+  ok("p17: and it yanked the faithful value with newlines intact",
+    select(2, vim.fn.getreg('"'):gsub(NL, "")) == 2, vim.inspect(vim.fn.getreg('"')))
+
+  -- ── row mode: <CR> opens the row, one line per column ──
+  view:set_selection_mode("row")
+  ok("p17: the view is in row mode", view:selection_mode() == "row")
+  view:inspect()
+  local rv = results.row_viewer()
+  ok("p17: row mode <CR> opens a row viewer", rv ~= nil and rv.is_open())
+  local rl = vim.api.nvim_buf_get_lines(rv.buf, 0, -1, false)
+  ok("p17: THREE lines for three columns, despite the 3-line value",
+    #rl == 3, #rl .. " -> " .. vim.inspect(rl))
+
+  -- ── drill: <CR> on line 3 must reach column 3, not the value's tail ──
+  vim.api.nvim_win_set_cursor(rv.win, { 3, 0 })
+  ok("p17: <CR> is bound in the row view", press(rv.buf, "<CR>"))
+  cv = results.cell_viewer()
+  ok("p17: drilling line 3 opened a cell view", cv ~= nil and cv.is_open())
+  ok("p17: and it is column 3 — the NULL one, so mapping did not drift",
+    vim.api.nvim_buf_get_lines(cv.buf, 0, -1, false)[1] == "NULL",
+    vim.inspect(vim.api.nvim_buf_get_lines(cv.buf, 0, -1, false)))
+  ok("p17: y on a NULL yields the EMPTY string, not 'NULL'",
+    press(cv.buf, "y") and vim.fn.getreg('"') == "", vim.inspect(vim.fn.getreg('"')))
+
+  -- ── CHILD RETURN (criterion 15) ──
+  vim.api.nvim_win_set_cursor(rv.win, { 1, 0 })
+  press(rv.buf, "<CR>")
+  cv = results.cell_viewer()
+  local cell_win = cv.win
+  cv.close()
+  ok("p17: CHILD RETURN — the row view is still open", rv.is_open())
+  ok("p17: CHILD RETURN — focus is back on the row view",
+    vim.api.nvim_get_current_win() == rv.win,
+    string.format("cur=%s row=%s cell=%s", vim.api.nvim_get_current_win(), rv.win, cell_win))
+
+  -- ── at most ONE cell child: a second drill replaces the first ──
+  press(rv.buf, "<CR>")
+  local first = results.cell_viewer()
+  vim.api.nvim_win_set_cursor(rv.win, { 2, 0 })
+  press(rv.buf, "<CR>")
+  local second = results.cell_viewer()
+  ok("p17: a second drill REPLACES the first child", first ~= second
+    and not first.is_open() and second.is_open())
+
+  -- ── Y is absolute inside the detail views ──
+  ok("p17: Y is bound in the cell view", press(second.buf, "Y"))
+  ok("p17: and yanks the whole row as CSV",
+    vim.fn.getreg('"'):find("line1", 1, true) ~= nil, vim.inspect(vim.fn.getreg('"')))
+
+  -- ── PARENT CASCADE (criterion 16), including an external close ──
+  vim.api.nvim_win_close(rv.win, true)
+  ok("p17: PARENT CASCADE — an external parent close leaves no orphan",
+    not second.is_open() and results.cell_viewer() == nil,
+    tostring(second.is_open()))
+  ok("p17: and the row handle is cleared", results.row_viewer() == nil)
+
+  -- ── STICKY MODE across a re-query (criterion 10) ──
+  ok("p17: the sticky mode recorded the switch to row",
+    results.selection_mode() == "row", results.selection_mode())
+  local view2 = results.show(require("auto-core.ui.grid").model({
+    columns = { "x" }, rows = { { "1" } },
+  }))
+  ok("p17: STICKY — a NEW query's grid is still in row mode",
+    view2:selection_mode() == "row", view2:selection_mode())
+  view2:set_selection_mode("cell")
+  local view3 = results.show(require("auto-core.ui.grid").model({
+    columns = { "x" }, rows = { { "1" } },
+  }))
+  ok("p17: STICKY — and switching back persists too",
+    view3:selection_mode() == "cell", view3:selection_mode())
+
+  results.close()
+  results.reset_for_tests()
 end)()
 
 if #missing_prereqs > 0 then
