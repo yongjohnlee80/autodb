@@ -33,12 +33,20 @@ local _win = nil
 ---[DECISION — ADR-0066 §2.7 / r2].
 local _sel_mode = "cell"
 
----The detail views form a two-level stack: a row detail may own AT MOST ONE
----cell child. auto-core's viewer knows nothing about rows and cells — it only
----restores a still-valid `opener` — so the parent/child relation is owned
----here, which is the only side that knows what those words mean.
-local _row_viewer = nil
-local _cell_viewer = nil
+---The detail views form a two-level stack: a ROOT (a row detail, or a cell
+---opened straight from the grid) which may own AT MOST ONE cell child.
+---auto-core's viewer knows nothing about rows and cells — it only restores a
+---still-valid `opener` — so the parent/child relation is owned here, which is
+---the only side that knows what those words mean.
+---
+---There is ONE root handle, and opening a root closes the previous one. An
+---earlier version kept `_row_viewer` and overwrote it: opening a second row
+---detail left the first floating on screen with nothing tracking it, and
+---`M.close()` then tore down only the newer one. A child is NOT tracked here
+---at all — each `open_row` closure owns its own, so a direct-cell root and a
+---row's child can never be confused for one another.
+local _root = nil
+local _root_kind = nil
 
 ---from_wire turns an `exec.run` reply into a grid model.
 ---
@@ -163,25 +171,25 @@ end
 ---open_cell shows ONE value in full.
 ---
 ---`opener` is the window focus returns to — the row detail when drilled into
----from there, the grid when `<CR>` opened it directly.
+---from there, the grid when `<CR>` opened it directly. `on_closed` lets the
+---OWNER (a row detail, or this module when the cell is the root) drop its
+---reference; nothing about child bookkeeping lives at module scope.
 ---@param label string
 ---@param value any
 ---@param null boolean
 ---@param model AutoCoreGridModel
 ---@param row integer
 ---@param opener integer|nil
-function M.open_cell(label, value, null, model, row, opener)
-  -- At most one cell child: a second drill REPLACES the first rather than
-  -- stacking a third float nobody asked for.
-  if _cell_viewer and _cell_viewer.is_open() then _cell_viewer.close() end
-  _cell_viewer = viewer(cell_lines(value, null), {
+---@param on_closed fun()|nil
+function M.open_cell(label, value, null, model, row, opener, on_closed)
+  return viewer(cell_lines(value, null), {
     title = label .. " — y: value, Y: row CSV, q: close",
     opener = opener,
     wrap = true,
     keymaps = {
       ["y"] = function(h)
         grid.set_clipboard(register_text(value, null))
-        h.close()
+        h:close()
       end,
       -- `Y` is absolute EVERYWHERE: the grid in both modes, and inside both
       -- detail views. Only `y` is ever mode- or selection-dependent.
@@ -190,9 +198,8 @@ function M.open_cell(label, value, null, model, row, opener)
         if csv then grid.set_clipboard(csv) end
       end,
     },
-    on_close = function() _cell_viewer = nil end,
+    on_close = function() if on_closed then on_closed() end end,
   })
-  return _cell_viewer
 end
 
 ---open_row shows one row as a navigable list of its columns.
@@ -210,18 +217,27 @@ function M.open_row(model, row, opener)
   if not entries then return nil end
   local lines, map = model_mod.row_detail_lines(entries)
 
-  _row_viewer = viewer(lines, {
+  M.close_details()
+  ---This row's OWN child. A local, captured by the keymaps and by on_close
+  ---below, so two row details can never share a child slot.
+  local child = nil
+  local handle
+  handle = viewer(lines, {
     title = "row " .. tostring(row) .. " — CR: cell, y: value, Y: row CSV, q: close",
     opener = opener,
     cursorline = true,
     keymaps = {
       ["<CR>"] = function(h)
-        local e = map[vim.api.nvim_win_get_cursor(h.win)[1]]
+        local e = map[vim.api.nvim_win_get_cursor(h:win())[1]]
         if not e then return end
-        M.open_cell(e.label, e.value, e.null, model, row, h.win)
+        -- At most one child: a second drill REPLACES the first rather than
+        -- stacking a third float nobody asked for.
+        if child and child:is_open() then child:close() end
+        child = M.open_cell(e.label, e.value, e.null, model, row, h:win(),
+          function() child = nil end)
       end,
       ["y"] = function(h)
-        local e = map[vim.api.nvim_win_get_cursor(h.win)[1]]
+        local e = map[vim.api.nvim_win_get_cursor(h:win())[1]]
         if e then grid.set_clipboard(register_text(e.value, e.null)) end
       end,
       ["Y"] = function()
@@ -233,11 +249,21 @@ function M.open_row(model, row, opener)
       -- The cascade: a parent never leaves a child behind, however the parent
       -- died. auto-core fires this on_close for every in-session close —
       -- including `:q` on the window — which is what makes that true.
-      if _cell_viewer and _cell_viewer.is_open() then _cell_viewer.close() end
-      _row_viewer = nil
+      if child and child:is_open() then child:close() end
+      child = nil
+      if _root == handle then _root, _root_kind = nil, nil end
     end,
   })
-  return _row_viewer
+  _root, _root_kind = handle, "row"
+  return handle
+end
+
+---close_details tears down the current root (and, through its own on_close,
+---any child it owns). Idempotent, and safe to call before opening a new root.
+function M.close_details()
+  local r = _root
+  _root, _root_kind = nil, nil
+  if r and r:is_open() then r:close() end
 end
 
 ---inspect opens the detail view for whatever is SELECTED.
@@ -259,17 +285,21 @@ function M.inspect(cur, model, mode)
 
   local cols = model and model:columns() or {}
   local label = (cols[cur.col] and cols[cur.col].label) or ("column " .. tostring(cur.col))
-  return M.open_cell(label, cur.cell.value, cur.cell.null, model, cur.row, opener)
+  -- A cell opened straight from the grid is a ROOT in its own right, so it
+  -- replaces whatever root was showing and is what M.close() tears down.
+  M.close_details()
+  local h
+  h = M.open_cell(label, cur.cell.value, cur.cell.null, model, cur.row, opener,
+    function() if _root == h then _root, _root_kind = nil, nil end end)
+  _root, _root_kind = h, "cell"
+  return h
 end
 
 ---close tears the panel down. Idempotent.
 function M.close()
-  -- Child first, then parent: the row viewer's own on_close would cascade
-  -- anyway, but closing in order keeps this readable rather than relying on
-  -- it. The sticky mode SURVIVES — closing the panel is not a decision to
-  -- forget how the user likes to select.
-  if _cell_viewer and _cell_viewer.is_open() then _cell_viewer.close() end
-  if _row_viewer and _row_viewer.is_open() then _row_viewer.close() end
+  -- The root cascades to its own child. The sticky mode SURVIVES — closing
+  -- the panel is not a decision to forget how the user likes to select.
+  M.close_details()
   if _view and not _view:disposed() then pcall(function() _view:dispose() end) end
   _view = nil
   if _win and vim.api.nvim_win_is_valid(_win) then
@@ -284,13 +314,17 @@ function M.window() return _win end
 ---reset_for_tests drops state without touching windows.
 function M.reset_for_tests()
   _view, _win = nil, nil
-  _row_viewer, _cell_viewer = nil, nil
+  _root, _root_kind = nil, nil
   _sel_mode = "cell"
 end
 
 ---selection_mode exposes the sticky mode, for tests and for a status line.
 function M.selection_mode() return _sel_mode end
-function M.row_viewer() return _row_viewer end
-function M.cell_viewer() return _cell_viewer end
+
+---detail_root is the current top-level detail view, and what kind it is.
+---Children are deliberately NOT exposed: they are owned by the root that
+---opened them, not by this module.
+---@return table|nil handle, string|nil kind
+function M.detail_root() return _root, _root_kind end
 
 return M

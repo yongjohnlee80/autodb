@@ -99,7 +99,7 @@ local function eq(a, b) return vim.deep_equal(a, b) end
 -- some — a mis-scoped skip, a section that stops executing — the total falls below
 -- this and the run fails, even when nothing that DID run failed. Raise it when the
 -- suite legitimately grows; never lower it to make a run pass.
-local EXPECTED_MIN_ASSERTIONS = 237
+local EXPECTED_MIN_ASSERTIONS = 241
 local missing_prereqs = {}
 local function require_bin(section)
   missing_prereqs[#missing_prereqs + 1] = section
@@ -1570,22 +1570,23 @@ print("\n[17] detail views — a value, not '(no help entries)'")
   -- ── cell mode: <CR> goes STRAIGHT to the value ──
   vim.api.nvim_win_set_cursor(view:win(), { 1, 0 })
   view:inspect()
-  local cv = results.cell_viewer()
-  ok("p17: cell mode <CR> opens a cell viewer", cv ~= nil and cv.is_open())
-  ok("p17: and NOT a row list", results.row_viewer() == nil)
-  local cl = cv and vim.api.nvim_buf_get_lines(cv.buf, 0, -1, false) or {}
+  local root, kind = results.detail_root()
+  ok("p17: cell mode <CR> opens a cell view as the ROOT",
+    root ~= nil and root:is_open() and kind == "cell", tostring(kind))
+  local cl = root and vim.api.nvim_buf_get_lines(root:buf(), 0, -1, false) or {}
   ok("p17: it shows a value, not '(no help entries)'",
     not vim.tbl_contains(cl, "  (no help entries)"), vim.inspect(cl[1]))
-  cv.close()
+  root:close()
+  ok("p17: closing the root clears it", results.detail_root() == nil)
 
   -- ── the multi-line value renders its REAL newlines in the cell view ──
   vim.api.nvim_win_set_cursor(view:win(), { 1, 0 })
   view:move_cell(0, 1)  -- onto `body`
   view:inspect()
-  cv = results.cell_viewer()
-  local body = cv and vim.api.nvim_buf_get_lines(cv.buf, 0, -1, false) or {}
+  local cv = results.detail_root()
+  local body = vim.api.nvim_buf_get_lines(cv:buf(), 0, -1, false)
   ok("p17: a 3-line value occupies 3 lines in the CELL view", #body == 3, #body)
-  ok("p17: y inside the cell view is bound", press(cv.buf, "y"))
+  ok("p17: y inside the cell view is bound", press(cv:buf(), "y"))
   ok("p17: and it yanked the faithful value with newlines intact",
     select(2, vim.fn.getreg('"'):gsub(NL, "")) == 2, vim.inspect(vim.fn.getreg('"')))
 
@@ -1593,54 +1594,80 @@ print("\n[17] detail views — a value, not '(no help entries)'")
   view:set_selection_mode("row")
   ok("p17: the view is in row mode", view:selection_mode() == "row")
   view:inspect()
-  local rv = results.row_viewer()
-  ok("p17: row mode <CR> opens a row viewer", rv ~= nil and rv.is_open())
-  local rl = vim.api.nvim_buf_get_lines(rv.buf, 0, -1, false)
+  local rv, rkind = results.detail_root()
+  ok("p17: row mode <CR> opens a row view as the ROOT",
+    rv ~= nil and rv:is_open() and rkind == "row", tostring(rkind))
+  local rl = vim.api.nvim_buf_get_lines(rv:buf(), 0, -1, false)
   ok("p17: THREE lines for three columns, despite the 3-line value",
     #rl == 3, #rl .. " -> " .. vim.inspect(rl))
 
   -- ── drill: <CR> on line 3 must reach column 3, not the value's tail ──
-  vim.api.nvim_win_set_cursor(rv.win, { 3, 0 })
-  ok("p17: <CR> is bound in the row view", press(rv.buf, "<CR>"))
-  cv = results.cell_viewer()
-  ok("p17: drilling line 3 opened a cell view", cv ~= nil and cv.is_open())
+  vim.api.nvim_win_set_cursor(rv:win(), { 3, 0 })
+  ok("p17: <CR> is bound in the row view", press(rv:buf(), "<CR>"))
+  ok("p17: the row view is STILL the root — a child is not a root",
+    select(1, results.detail_root()) == rv)
+  local child_win = vim.api.nvim_get_current_win()
+  local child_buf = vim.api.nvim_win_get_buf(child_win)
+  ok("p17: drilling opened a child view", child_win ~= rv:win())
   ok("p17: and it is column 3 — the NULL one, so mapping did not drift",
-    vim.api.nvim_buf_get_lines(cv.buf, 0, -1, false)[1] == "NULL",
-    vim.inspect(vim.api.nvim_buf_get_lines(cv.buf, 0, -1, false)))
+    vim.api.nvim_buf_get_lines(child_buf, 0, -1, false)[1] == "NULL",
+    vim.inspect(vim.api.nvim_buf_get_lines(child_buf, 0, -1, false)))
   ok("p17: y on a NULL yields the EMPTY string, not 'NULL'",
-    press(cv.buf, "y") and vim.fn.getreg('"') == "", vim.inspect(vim.fn.getreg('"')))
+    press(child_buf, "y") and vim.fn.getreg('"') == "", vim.inspect(vim.fn.getreg('"')))
 
-  -- ── CHILD RETURN (criterion 15) ──
-  vim.api.nvim_win_set_cursor(rv.win, { 1, 0 })
-  press(rv.buf, "<CR>")
-  cv = results.cell_viewer()
-  local cell_win = cv.win
-  cv.close()
-  ok("p17: CHILD RETURN — the row view is still open", rv.is_open())
+  -- ── CHILD RETURN (criterion 15): same window AND same cursor line ──
+  vim.api.nvim_win_set_cursor(rv:win(), { 2, 0 })
+  press(rv:buf(), "<CR>")
+  local c2 = vim.api.nvim_get_current_win()
+  vim.api.nvim_win_close(c2, true)
+  ok("p17: CHILD RETURN — the row view is still open", rv:is_open())
   ok("p17: CHILD RETURN — focus is back on the row view",
-    vim.api.nvim_get_current_win() == rv.win,
-    string.format("cur=%s row=%s cell=%s", vim.api.nvim_get_current_win(), rv.win, cell_win))
+    vim.api.nvim_get_current_win() == rv:win(),
+    string.format("cur=%s row=%s", vim.api.nvim_get_current_win(), rv:win()))
+  ok("p17: CHILD RETURN — on the SAME cursor line it was opened from",
+    vim.api.nvim_win_get_cursor(rv:win())[1] == 2,
+    vim.inspect(vim.api.nvim_win_get_cursor(rv:win())))
 
-  -- ── at most ONE cell child: a second drill replaces the first ──
-  press(rv.buf, "<CR>")
-  local first = results.cell_viewer()
-  vim.api.nvim_win_set_cursor(rv.win, { 2, 0 })
-  press(rv.buf, "<CR>")
-  local second = results.cell_viewer()
-  ok("p17: a second drill REPLACES the first child", first ~= second
-    and not first.is_open() and second.is_open())
+  -- ── at most ONE child: a second drill replaces the first ──
+  press(rv:buf(), "<CR>")
+  local first_child = vim.api.nvim_get_current_win()
+  vim.api.nvim_set_current_win(rv:win())
+  vim.api.nvim_win_set_cursor(rv:win(), { 1, 0 })
+  press(rv:buf(), "<CR>")
+  local second_child = vim.api.nvim_get_current_win()
+  ok("p17: a second drill REPLACES the first child",
+    second_child ~= first_child and not vim.api.nvim_win_is_valid(first_child),
+    string.format("first=%s valid=%s second=%s", first_child,
+      vim.api.nvim_win_is_valid(first_child), second_child))
 
   -- ── Y is absolute inside the detail views ──
-  ok("p17: Y is bound in the cell view", press(second.buf, "Y"))
+  local sc_buf = vim.api.nvim_win_get_buf(second_child)
+  ok("p17: Y is bound in the cell view", press(sc_buf, "Y"))
   ok("p17: and yanks the whole row as CSV",
     vim.fn.getreg('"'):find("line1", 1, true) ~= nil, vim.inspect(vim.fn.getreg('"')))
 
-  -- ── PARENT CASCADE (criterion 16), including an external close ──
-  vim.api.nvim_win_close(rv.win, true)
-  ok("p17: PARENT CASCADE — an external parent close leaves no orphan",
-    not second.is_open() and results.cell_viewer() == nil,
-    tostring(second.is_open()))
-  ok("p17: and the row handle is cleared", results.row_viewer() == nil)
+  -- ── PARENT CASCADE (criterion 16), via an EXTERNAL close ──
+  vim.api.nvim_win_close(rv:win(), true)
+  ok("p17: PARENT CASCADE — an external parent close leaves no orphan child",
+    not vim.api.nvim_win_is_valid(second_child), tostring(second_child))
+  ok("p17: and the root is cleared", results.detail_root() == nil)
+
+  -- ── REGRESSION (impl-review MF2): a second root REPLACES the first ──
+  -- Opening a row detail while one was already showing used to leave the
+  -- first floating with nothing tracking it, and close() tore down only the
+  -- newer one.
+  local m2 = require("auto-core.ui.grid").model({
+    columns = { "a" }, rows = { { "1" }, { "2" } },
+  })
+  local vv = results.show(m2)
+  local root1 = results.open_row(m2, 1, vv:win())
+  local root2 = results.open_row(m2, 2, vv:win())
+  ok("p17: REGRESSION — opening a second root CLOSED the first",
+    not root1:is_open() and root2:is_open(),
+    string.format("first=%s second=%s", root1:is_open(), root2:is_open()))
+  results.close()
+  ok("p17: REGRESSION — close() leaves no root behind",
+    not root2:is_open() and results.detail_root() == nil)
 
   -- ── STICKY MODE across a re-query (criterion 10) ──
   ok("p17: the sticky mode recorded the switch to row",
