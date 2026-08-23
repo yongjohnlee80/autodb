@@ -324,6 +324,13 @@ func runWebUI(configPath string, port int) error {
 		Addr:      ep.Address,
 		Port:      port,
 		NotesRoot: notesRoot,
+		// Operational log to stderr. --web-ui is a server an operator leaves
+		// running, so a refused Origin, a failed login, and session lifecycle
+		// have to be VISIBLE: without this the gateway falls back to
+		// logger.Nop and discards every record it is wired to emit —
+		// including the `ref=` correlation ids the browser shows the user,
+		// which exist only to be looked up here.
+		Log: logger.New(logger.WithWriter(os.Stderr), logger.WithContext("autodb")),
 		About: tuiapp.AboutInfo{
 			Version: version, Commit: commit, BuildDate: buildDate,
 			Repo: repoURL, Author: author,

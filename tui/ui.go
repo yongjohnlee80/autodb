@@ -63,6 +63,7 @@ type Model struct {
 	about             AboutInfo
 	frontend          Frontend
 	pendingPrompt     func() // an auth prompt waiting for the splash to close
+	pendingFocus      bool   // afterLogin's editor focus, deferred past an open modal
 	splashShown       bool   // the About splash opens once, on the first frame
 	connectedOnce     bool   // a later connect is a RE-connect: stale floats go
 	explorerFocused   bool   // last applied cursor styling (focused = cyan)
@@ -352,7 +353,18 @@ func (m *Model) afterLogin() {
 	m.hadAuth = true
 	m.setStatus(fmt.Sprintf("logged in as %s (%s)", u.Name, u.Role))
 	m.explorer.Reload()
-	m.ctx.FocusComponent(m.editor)
+	// Never yank focus out of an open modal. A frontend whose session arrives
+	// ALREADY authenticated (--web-ui, where SSO logs in before the TUI
+	// starts) reaches this while the About splash is still up, and stealing
+	// focus there leaves a modal the user can see but cannot close: every key
+	// — Enter, Esc, and the leader — routes to the editor behind it. The two
+	// sibling branches in handleStartup already defer to the splash via
+	// promptOrQueue; this is the same rule for focus.
+	if m.modalOpen() {
+		m.pendingFocus = true
+	} else {
+		m.ctx.FocusComponent(m.editor)
+	}
 	m.refreshStatus()
 }
 
@@ -399,6 +411,12 @@ func (m *Model) endForLostAuth() {
 func (m *Model) maybePromptLogin() {
 	if m.modalOpen() {
 		return
+	}
+	// A focus deferred by afterLogin lands first; a queued prompt below opens
+	// a float that takes focus from here anyway.
+	if m.pendingFocus {
+		m.pendingFocus = false
+		m.ctx.FocusComponent(m.editor)
 	}
 	if p := m.pendingPrompt; p != nil {
 		m.pendingPrompt = nil
