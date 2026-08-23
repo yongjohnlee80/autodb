@@ -11,3 +11,8 @@ go.work.sum
 
 # auto-agents workspace mailbox (v0.2.30+)
 .auto-agents/
+
+# Neovim's own log, written into the cwd when a headless test run cannot
+# create its server socket. A test artifact, never source. auto-core already
+# ignores this; autodb did not, so a suite run left the tree dirty.
+nvim.log
