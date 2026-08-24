@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
@@ -30,6 +31,54 @@ type Config struct {
 	Security Security `toml:"security"`
 	TUI      TUI      `toml:"tui"`
 	Web      Web      `toml:"web"`
+}
+
+// MaxSubjectLen bounds the directory component built from a username. Generous
+// for a login name, far short of any filesystem limit.
+const MaxSubjectLen = 64
+
+// ValidSubject reports whether an identity may name a note directory.
+//
+// This is the ONE canonical predicate, and it lives here because it is now a
+// config rule as well as a runtime one. It was previously enforced only when a
+// root was resolved — which is after login, after bootstrap, after the session
+// pool and after the ticket — so a configured `notes_subject` of `../alice` was
+// accepted at startup and the identity became the daemon's PERMANENT first admin
+// before anything rejected it (lector r1 on PR #5). An unusable subject must be
+// refused at load, at construction, and at admission, all against this function.
+//
+// Rejected rather than sanitised: a name that has to be rewritten to be safe is a
+// name whose owner should be told, not silently given a different directory than
+// their username implies. Two names that sanitise alike would otherwise share
+// notes.
+func ValidSubject(s string) error {
+	switch {
+	case s == "":
+		return fmt.Errorf("%w: empty subject cannot name a note directory", ErrInvalid)
+	case len(s) > MaxSubjectLen:
+		return fmt.Errorf("%w: subject is %d bytes, over the %d-byte limit for a note "+
+			"directory", ErrInvalid, len(s), MaxSubjectLen)
+	case s == "." || s == "..":
+		return fmt.Errorf("%w: subject %q is a path traversal", ErrInvalid, s)
+	case strings.ContainsAny(s, `/\`):
+		return fmt.Errorf("%w: subject %q contains a path separator", ErrInvalid, s)
+	case strings.HasPrefix(s, "."):
+		// A leading dot hides the directory and `..anything` reads as traversal to
+		// a human scanning a listing.
+		return fmt.Errorf("%w: subject %q starts with a dot", ErrInvalid, s)
+	}
+	// A conservative allowlist, not a denylist: the set of characters that break a
+	// path is longer than the set a username needs, and only one of those lists can
+	// be written down completely.
+	for _, r := range s {
+		ok := r == '-' || r == '_' || r == '.' || r == '@' ||
+			(r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		if !ok {
+			return fmt.Errorf("%w: subject %q contains %q, which is not allowed in a "+
+				"note directory name", ErrInvalid, s, r)
+		}
+	}
+	return nil
 }
 
 // NotesMode selects which note tree a --web-ui session reads (ADR-0064 §2.3).
@@ -236,6 +285,13 @@ func (c Config) validate() error {
 		if c.Web.NotesSubject == "" {
 			return fmt.Errorf("%w: web.notes_mode = %q requires web.notes_subject",
 				ErrInvalid, NotesWorkspace)
+		}
+		// And it must be a subject that can actually name a directory. Checking only
+		// for emptiness let `../alice` through, and an unusable identity that reaches
+		// the bootstrap path becomes the permanent first admin before any note root
+		// is resolved to reject it.
+		if err := ValidSubject(c.Web.NotesSubject); err != nil {
+			return fmt.Errorf("web.notes_subject: %w", err)
 		}
 	default:
 		return fmt.Errorf("%w: web.notes_mode %q (want %q or %q)",

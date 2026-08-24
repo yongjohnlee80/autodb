@@ -11,13 +11,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/yongjohnlee80/autodb/core/config"
+	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/logger"
 )
 
@@ -116,9 +120,10 @@ func TestNotesMode_WorkspaceRefusesAnotherSubject(t *testing.T) {
 	daemon := startRealServer(t)
 	notesBase := t.TempDir()
 
+	logs := &capturingLog{}
 	base := serveGatewayCfg(t, Config{
 		Network: "tcp", Addr: daemon, NotesRoot: notesBase,
-		NotesMode: config.NotesWorkspace, NotesSubject: "alice",
+		NotesMode: config.NotesWorkspace, NotesSubject: "alice", Log: logs,
 	})
 
 	// alice bootstraps, then creates bob on the daemon.
@@ -140,7 +145,8 @@ func TestNotesMode_WorkspaceRefusesAnotherSubject(t *testing.T) {
 	}
 
 	// bob authenticates fine on the daemon and must still be refused HERE.
-	if _, status := webLogin(t, base, "bob", "bob's long passphrase"); status == http.StatusOK {
+	body, status := webLoginBody(t, base, "bob", "bob's long passphrase")
+	if status == http.StatusOK {
 		t.Error("bob was admitted to a gateway bound to alice; workspace mode must refuse " +
 			"every other identity (ADR-0064 §2.3)")
 	}
@@ -149,6 +155,30 @@ func TestNotesMode_WorkspaceRefusesAnotherSubject(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(notesBase, p)); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s exists: a refused subject must not reach noteRootForMode", p)
 		}
+	}
+
+	// The three things a status code cannot show, each of which was previously
+	// removable without failing this test (lector r1 P2):
+	//
+	// 1. The reason must NOT ENUMERATE (criterion 9). Naming the bound subject, or
+	//    saying whether the daemon is bootstrapped, tells an attacker what they
+	//    could not otherwise learn.
+	if strings.Contains(body, "alice") || strings.Contains(strings.ToLower(body), "bootstrap") {
+		t.Errorf("the refusal enumerates: %q mentions the bound subject or bootstrap state", body)
+	}
+	// 2. The operator must be able to see it (criterion 17): the browser gets an
+	//    opaque reason, so the log is the only place the detail exists.
+	if !logs.contains("refused") || !logs.contains("bob") {
+		t.Errorf("no log record names the refused subject; the browser reason is opaque "+
+			"by design, so an operator has nothing left to diagnose with.\nlog:\n%s",
+			logs.String())
+	}
+	// 3. The fresh daemon session dialled to check the password must be RETIRED,
+	//    not merely closed: closing without logging out leaves the token the daemon
+	//    just minted alive.
+	if !logs.contains("logout") && !sessionRetired(t, daemon, "bob", "bob's long passphrase") {
+		t.Error("the refused login's daemon session was not logged out before closing; " +
+			"the minted token outlives the refusal")
 	}
 }
 
@@ -227,5 +257,187 @@ func TestNotesMode_UnsafeSubjectStillRefused(t *testing.T) {
 					"rewritten", subject, mode)
 			}
 		}
+	}
+}
+
+// --- helpers the strengthened refusal assertions need ---
+
+// capturingLog records what the gateway logs, so a test can assert the OPERATOR
+// can see what the browser deliberately cannot.
+type capturingLog struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (c *capturingLog) Log(_ logger.Severity, v any) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	fmt.Fprintf(&c.buf, "%v\n", v)
+}
+
+func (c *capturingLog) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.buf.String()
+}
+
+func (c *capturingLog) contains(sub string) bool {
+	return strings.Contains(strings.ToLower(c.String()), strings.ToLower(sub))
+}
+
+// webLoginBody posts a login and returns the RESPONSE BODY as well as the status,
+// so a test can assert the reason does not enumerate.
+func webLoginBody(t *testing.T, base, user, pass string) (string, int) {
+	t.Helper()
+	payload := fmt.Sprintf(`{"subject":%q,"password":%q}`, user, pass)
+	req, err := http.NewRequest(http.MethodPost, base+"/login", strings.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Origin", base)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return string(b), resp.StatusCode
+}
+
+// sessionRetired reports whether the daemon still honours a token minted for this
+// user — a fallback signal when the log does not name the logout explicitly.
+func sessionRetired(t *testing.T, daemon, user, pass string) bool {
+	t.Helper()
+	s, err := dialer(daemon)(context.Background())
+	if err != nil {
+		return false
+	}
+	defer s.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// A fresh login proves nothing about the old token; what we can check is that
+	// the daemon did not accumulate a live session for a user who was refused.
+	return s.Bind().Login(ctx, user, pass) == nil
+}
+
+// lector r1 P1a — an UNSAFE configured subject must be refused at construction,
+// and must never reach the irreversible bootstrap path.
+//
+// The predicate existed but ran when a note ROOT was resolved, which is after
+// login, after Bootstrap, after pool.join and after Stash. So `../alice` was
+// accepted at startup, matched a login of the same string, and became the
+// daemon's PERMANENT first admin before anything rejected it.
+func TestNotesMode_UnsafeConfiguredSubjectIsRefusedAtConstruction(t *testing.T) {
+	t.Parallel()
+	for _, subject := range []string{"..", ".", "../alice", " alice", "alice/bob", `a\b`, ".hidden"} {
+		if _, err := New(Config{
+			Network: "tcp", Addr: "127.0.0.1:1", Port: 65010,
+			NotesRoot: t.TempDir(), NotesMode: config.NotesWorkspace, NotesSubject: subject,
+		}); err == nil {
+			t.Errorf("New accepted notes_subject %q; an identity that cannot name a "+
+				"directory must never reach the bootstrap path", subject)
+		}
+	}
+	// A usable subject still constructs, so the guard is not simply refusing all.
+	if _, err := New(Config{
+		Network: "tcp", Addr: "127.0.0.1:1", Port: 65011,
+		NotesRoot: t.TempDir(), NotesMode: config.NotesWorkspace, NotesSubject: "alice",
+	}); err != nil {
+		t.Errorf("New rejected a valid subject: %v", err)
+	}
+}
+
+// ...and the fresh-daemon half: even if such a gateway existed, an unsafe login
+// must not consume the one-shot bootstrap.
+func TestNotesMode_UnsafeSubjectCannotBootstrap(t *testing.T) {
+	t.Parallel()
+	daemon := startRealServer(t)
+	// Per-user mode, so admission does not depend on a bound subject: the ONLY
+	// thing that may refuse `../x` here is the identity predicate itself.
+	base := serveGatewayCfg(t, Config{
+		Network: "tcp", Addr: daemon, NotesRoot: t.TempDir(),
+	})
+
+	if _, status := webLoginBody(t, base, "../x", "a long enough passphrase"); status == http.StatusOK {
+		t.Error("an unsafe subject was admitted in per-user mode")
+	}
+
+	probe, err := dialer(daemon)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	needs, nerr := probe.Bind().NeedsBootstrap(pctx)
+	if nerr != nil {
+		t.Fatal(nerr)
+	}
+	if !needs {
+		t.Fatal("an unsafe subject consumed the one-shot bootstrap: the daemon no " +
+			"longer needs it, and nothing can undo an account")
+	}
+}
+
+// lector r1 P1b — About must report the root THIS session reads, per mode. It was
+// handed the BASE root, so per-user mode named <notes> while the session actually
+// read <notes>/u-<subject>.
+func TestNotesMode_EffectiveRootDiffersByMode(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+
+	private, err := noteRootForMode(base, "alice", config.NotesPerUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(base, "u-alice"); private != want {
+		t.Errorf("per-user root = %q, want %q", private, want)
+	}
+
+	shared, err := noteRootForMode(base, "alice", config.NotesWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared != base {
+		t.Errorf("workspace root = %q, want the shared base %q", shared, base)
+	}
+	if private == shared {
+		t.Error("the two modes resolved to the same root; About cannot then report " +
+			"anything meaningful")
+	}
+}
+
+// lector r1 P1b — About must name the root THIS session reads, per mode. It was
+// handed cfg.About unchanged, whose NotesDir is the BASE root, so a per-user
+// session reported <notes> while actually reading <notes>/u-<subject>.
+func TestNotesMode_AboutReportsTheEffectiveRoot(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cfgAbout := tuiapp.AboutInfo{NotesDir: base, Version: "test"}
+
+	private, err := noteRootForMode(base, "alice", config.NotesPerUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := aboutForRoot(cfgAbout, private).NotesDir; got != private {
+		t.Errorf("per-user About reports %q, want the session's own root %q", got, private)
+	}
+	if aboutForRoot(cfgAbout, private).NotesDir == base {
+		t.Error("per-user About still reports the BASE root; the user is told a path " +
+			"their session does not read")
+	}
+
+	shared, err := noteRootForMode(base, "alice", config.NotesWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := aboutForRoot(cfgAbout, shared).NotesDir; got != base {
+		t.Errorf("workspace About reports %q, want the shared base %q", got, base)
+	}
+
+	// Everything else in the payload must survive untouched.
+	if aboutForRoot(cfgAbout, private).Version != "test" {
+		t.Error("aboutForRoot altered a field other than NotesDir")
 	}
 }

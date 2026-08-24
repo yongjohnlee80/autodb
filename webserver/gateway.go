@@ -119,9 +119,18 @@ func New(cfg Config) (*Gateway, error) {
 	// the port is bound rather than serving a mode it cannot enforce (ADR-0064
 	// §2.3, criterion 11). config.validate() catches this at load too; this is the
 	// same rule at the API boundary, for callers that build a Config directly.
-	if cfg.NotesMode == config.NotesWorkspace && cfg.NotesSubject == "" {
-		return nil, fmt.Errorf("webserver: notes mode %q requires a bound subject",
-			config.NotesWorkspace)
+	if cfg.NotesMode == config.NotesWorkspace {
+		if cfg.NotesSubject == "" {
+			return nil, fmt.Errorf("webserver: notes mode %q requires a bound subject",
+				config.NotesWorkspace)
+		}
+		// Emptiness was not enough: `..`, `../alice`, ` alice` and `alice/bob` were
+		// all accepted here, and an unusable subject that matches a login reaches the
+		// IRREVERSIBLE bootstrap path — becoming the permanent first admin before any
+		// note root is resolved to reject it (lector r1 on PR #5).
+		if err := config.ValidSubject(cfg.NotesSubject); err != nil {
+			return nil, fmt.Errorf("webserver: notes subject: %w", err)
+		}
 	}
 	if cfg.NotesMode != "" && cfg.NotesMode != config.NotesPerUser &&
 		cfg.NotesMode != config.NotesWorkspace {
@@ -268,6 +277,12 @@ func New(cfg Config) (*Gateway, error) {
 // nothing to protect them from each other. Workspace mode admits exactly the
 // bound subject, because the tree it reads is shared with the terminal frontend.
 func (g *Gateway) subjectAllowed(subject string) bool {
+	// An identity that cannot name a note directory is refused in BOTH modes, and
+	// refused HERE — before bootstrap. Deferring this to the point a root is
+	// resolved is what let an unusable subject consume the one-shot bootstrap.
+	if config.ValidSubject(subject) != nil {
+		return false
+	}
 	if g.cfg.NotesMode != config.NotesWorkspace {
 		return true
 	}
@@ -332,11 +347,32 @@ func (r *appRunner) Run(ctx context.Context) error {
 	// FrontendWeb, which withdraws the daemon-shutdown action. spawn is nil here by
 	// design, so an admin taking the daemon down would strand every session
 	// including other users' (ADR-0061 §2.7).
+	// About must report the root THIS session reads. cfg.About carries the BASE
+	// root (runWebUI resolved it before any identity existed), so in per-user mode
+	// it named <notes> while the session actually read <notes>/u-<subject> — About
+	// told the user the wrong path, which is precisely the confusion criterion 12
+	// exists to remove (lector r1 on PR #5).
+	shared := r.gw.cfg.NotesMode == config.NotesWorkspace
+	about := aboutForRoot(r.gw.cfg.About, root)
+
 	model := tuiapp.New(r.user.sess, notes, cancel,
-		tuiapp.WithAbout(r.gw.cfg.About),
+		tuiapp.WithAbout(about),
+		tuiapp.WithNoteView(tuiapp.NoteView{Shared: shared, Root: root}),
 		tuiapp.WithFrontend(tuiapp.FrontendWeb))
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(r.backend))
 	return app.Run(ctx)
+}
+
+// aboutForRoot restates the About payload to name the root THIS session reads.
+//
+// cfg.About carries the BASE root, resolved by runWebUI before any identity
+// existed. In per-user mode the session actually reads <base>/u-<subject>, so
+// passing About through unchanged made the About modal report a path the session
+// was not using — the exact confusion criterion 12 exists to remove (lector r1
+// P1b on PR #5). Named rather than inlined so it can be tested.
+func aboutForRoot(base tuiapp.AboutInfo, root string) tuiapp.AboutInfo {
+	base.NotesDir = root
+	return base
 }
 
 // loginFactor authenticates a browser login against the DAEMON's own identity
