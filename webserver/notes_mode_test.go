@@ -212,6 +212,14 @@ func TestNotesMode_WorkspaceRefusesAnotherSubject(t *testing.T) {
 			"closed without logging out, so the token the daemon just minted outlives "+
 			"the refusal", len(tok))
 	}
+	// Token AND connection: logoutAndClose does both, and asserting only the token
+	// let lector delete `sess.Close()` while keeping Logout — an empty token with a
+	// live client still installed, which is the resource leak half of the same rule
+	// (r2 asked for both; r3 caught that I had checked one).
+	if last.Connected() {
+		t.Error("the refused login's session is still connected: the token was retired " +
+			"but the client was never closed, so the connection leaks per refusal")
+	}
 }
 
 // Criterion 8 — NEGATIVE CONTROL, the irreversible case: on an EMPTY daemon a
@@ -362,4 +370,204 @@ func (d *dialRecorder) last() *tuiapp.Session {
 		return nil
 	}
 	return d.all[len(d.all)-1]
+}
+
+// --- restored: five tests destroyed by a slice-to-EOF edit in the r2 commit ---
+//
+// They were written, run, and control-verified, then deleted by a string edit
+// that replaced from an index to end-of-file. The suite stayed green, because a
+// missing test and a passing test look identical in aggregate output — which is
+// why the inventory is now asserted below (TestNotesMode_TestInventory).
+
+// lector r1 P1a — an UNSAFE configured subject must be refused at construction,
+// never reaching the irreversible bootstrap path. The predicate used to run only
+// when a note ROOT was resolved: after login, after Bootstrap, after pool.join.
+func TestNotesMode_UnsafeConfiguredSubjectIsRefusedAtConstruction(t *testing.T) {
+	t.Parallel()
+	for _, subject := range []string{"..", ".", "../alice", " alice", "alice/bob", `a\b`, ".hidden"} {
+		if _, err := New(Config{
+			Network: "tcp", Addr: "127.0.0.1:1", Port: 65010,
+			NotesRoot: t.TempDir(), NotesMode: config.NotesWorkspace, NotesSubject: subject,
+		}); err == nil {
+			t.Errorf("New accepted notes_subject %q; an identity that cannot name a "+
+				"directory must never reach the bootstrap path", subject)
+		}
+	}
+	if _, err := New(Config{
+		Network: "tcp", Addr: "127.0.0.1:1", Port: 65011,
+		NotesRoot: t.TempDir(), NotesMode: config.NotesWorkspace, NotesSubject: "alice",
+	}); err != nil {
+		t.Errorf("New rejected a valid subject: %v", err)
+	}
+}
+
+// ...and the fresh-daemon half: an unsafe login must not consume the one-shot
+// bootstrap. Per-user mode, so only the identity predicate can refuse it.
+func TestNotesMode_UnsafeSubjectCannotBootstrap(t *testing.T) {
+	t.Parallel()
+	daemon := startRealServer(t)
+	base := serveGatewayCfg(t, Config{Network: "tcp", Addr: daemon, NotesRoot: t.TempDir()})
+
+	if _, status := webLoginBody(t, base, "../x", "a long enough passphrase"); status == http.StatusOK {
+		t.Error("an unsafe subject was admitted in per-user mode")
+	}
+	probe, err := dialer(daemon)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer probe.Close()
+	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer pcancel()
+	needs, nerr := probe.Bind().NeedsBootstrap(pctx)
+	if nerr != nil {
+		t.Fatal(nerr)
+	}
+	if !needs {
+		t.Fatal("an unsafe subject consumed the one-shot bootstrap: the daemon no " +
+			"longer needs it, and nothing can undo an account")
+	}
+}
+
+// The two modes must resolve to different roots, or About can report nothing
+// meaningful.
+func TestNotesMode_EffectiveRootDiffersByMode(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	private, err := noteRootForMode(base, "alice", config.NotesPerUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(base, "u-alice"); private != want {
+		t.Errorf("per-user root = %q, want %q", private, want)
+	}
+	shared, err := noteRootForMode(base, "alice", config.NotesWorkspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared != base {
+		t.Errorf("workspace root = %q, want the shared base %q", shared, base)
+	}
+	if private == shared {
+		t.Error("both modes resolved to the same root")
+	}
+}
+
+// lector r1 P1b — About must name the root THIS session reads.
+func TestNotesMode_AboutReportsTheEffectiveRoot(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	cfgAbout := tuiapp.AboutInfo{NotesDir: base, Version: "test"}
+
+	private, err := noteRootForMode(base, "alice", config.NotesPerUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := aboutForRoot(cfgAbout, private).NotesDir; got != private {
+		t.Errorf("per-user About reports %q, want %q", got, private)
+	}
+	if aboutForRoot(cfgAbout, private).NotesDir == base {
+		t.Error("per-user About still reports the BASE root")
+	}
+	if got := aboutForRoot(cfgAbout, base).NotesDir; got != base {
+		t.Errorf("workspace About reports %q, want the shared base %q", got, base)
+	}
+	if aboutForRoot(cfgAbout, private).Version != "test" {
+		t.Error("aboutForRoot altered a field other than NotesDir")
+	}
+}
+
+// lector r3 — the ACTUAL runner path, not the helper.
+//
+// Testing modelOptions() in isolation proved the helper and not its caller:
+// lector restored the old construction, left the helper intact, and every test
+// stayed green while the criterion-12 bug was back. This drives a REAL browser
+// session — login, ticket, attach — and captures the model factory appRunner must
+// go through, so a caller bypass fails here rather than passing quietly.
+func TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		mode       config.NotesMode
+		subject    string
+		wantShared bool
+	}{
+		{"per-user", config.NotesPerUser, "", false},
+		{"workspace", config.NotesWorkspace, "alice", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			daemon := startRealServer(t)
+			notesBase := t.TempDir()
+
+			var mu sync.Mutex
+			var built *tuiapp.Model
+			factory := func(sess *tuiapp.Session, notes *tuiapp.NoteStore, cancel func(),
+				opts ...tuiapp.Option) *tuiapp.Model {
+				m := tuiapp.New(sess, notes, cancel, opts...)
+				mu.Lock()
+				built = m
+				mu.Unlock()
+				return m
+			}
+
+			base := serveGatewayCfg(t, Config{
+				Network: "tcp", Addr: daemon, NotesRoot: notesBase,
+				NotesMode: tc.mode, NotesSubject: tc.subject,
+				About:    tuiapp.AboutInfo{NotesDir: notesBase, Version: "test"},
+				newModel: factory,
+			})
+
+			ticket, status := webLogin(t, base, "alice", "a long enough passphrase")
+			if status != http.StatusOK {
+				t.Fatalf("login: HTTP %d", status)
+			}
+			if _, painted := attach(t, base, ticket); !painted {
+				t.Fatal("the session never painted, so appRunner never built a model")
+			}
+
+			mu.Lock()
+			m := built
+			mu.Unlock()
+			if m == nil {
+				t.Fatal("appRunner did not build its Model through the factory: it bypassed " +
+					"the seam, so nothing here constrains what it passed")
+			}
+
+			wantRoot := notesBase
+			if !tc.wantShared {
+				wantRoot = filepath.Join(notesBase, "u-alice")
+			}
+			if got := m.AboutNotesDir(); got != wantRoot {
+				t.Errorf("About root = %q, want %q — the runner passed the wrong root, which "+
+					"is the criterion-12 bug", got, wantRoot)
+			}
+			if got := m.NoteViewOf().Shared; got != tc.wantShared {
+				t.Errorf("NoteView.Shared = %v, want %v — help will describe the wrong mode",
+					got, tc.wantShared)
+			}
+		})
+	}
+}
+
+// TestNotesMode_TestInventory guards against a repeat of how the r2 commit lost
+// five verified tests: a string edit replaced from an index to end-of-file, and
+// the suite stayed green because a MISSING test is indistinguishable from a
+// passing one in aggregate output. Naming them here makes a deletion fail.
+func TestNotesMode_TestInventory(t *testing.T) {
+	required := []any{
+		TestNotesMode_WorkspaceRequiresBoundSubject,
+		TestNotesMode_BoundSubjectReadsTheSharedTree,
+		TestNotesMode_WorkspaceRefusesAnotherSubject,
+		TestNotesMode_WrongSubjectCannotBootstrap,
+		TestNotesMode_DefaultIsPerUserIsolation,
+		TestNotesMode_UnsafeSubjectStillRefused,
+		TestNotesMode_UnsafeConfiguredSubjectIsRefusedAtConstruction,
+		TestNotesMode_UnsafeSubjectCannotBootstrap,
+		TestNotesMode_EffectiveRootDiffersByMode,
+		TestNotesMode_AboutReportsTheEffectiveRoot,
+		TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot,
+	}
+	for i, fn := range required {
+		if fn == nil {
+			t.Errorf("required test %d is nil", i)
+		}
+	}
 }
