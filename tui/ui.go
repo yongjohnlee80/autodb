@@ -62,11 +62,12 @@ type Model struct {
 	searchQuery       string // last / pattern; n and N walk its matches
 	about             AboutInfo
 	frontend          Frontend
-	pendingPrompt     func() // an auth prompt waiting for the splash to close
-	pendingFocus      bool   // afterLogin's editor focus, deferred past an open modal
-	splashShown       bool   // the About splash opens once, on the first frame
-	connectedOnce     bool   // a later connect is a RE-connect: stale floats go
-	explorerFocused   bool   // last applied cursor styling (focused = cyan)
+	noteView          NoteView // which note tree this session reads (ADR-0064 §2.3)
+	pendingPrompt     func()   // an auth prompt waiting for the splash to close
+	pendingFocus      bool     // afterLogin's editor focus, deferred past an open modal
+	splashShown       bool     // the About splash opens once, on the first frame
+	connectedOnce     bool     // a later connect is a RE-connect: stale floats go
+	explorerFocused   bool     // last applied cursor styling (focused = cyan)
 	resultsFocused    bool
 }
 
@@ -1298,17 +1299,24 @@ func (m *Model) openHelp() {
 	sb.WriteString("  SPC H          script history (who ran what, when)\n")
 	sb.WriteString("  SPC A          about: build, backend, and where state lives\n")
 	if m.frontend == FrontendWeb {
-		// Criterion 12 (ADR-0064 §2.3): an empty explorer must be explicable. The
-		// explorer pane itself is ~25 columns and truncates any sentence, so the
-		// explanation lives here and in About (which prints the exact path). The
-		// confusion this removes is specific and was reported as a bug: a browser
-		// session showed an empty note tree while the same person's terminal notes
-		// sat one level up, because a web session reads its own root by default.
+		// Criterion 12 (ADR-0064 §2.3): an empty explorer must be explicable, and the
+		// explorer pane is ~25 columns and truncates any sentence — so the explanation
+		// lives here, with About printing the exact path.
+		//
+		// It must describe the mode ACTUALLY in force. Predicating only on "is this
+		// the web frontend" told a session already reading the shared tree that it was
+		// reading its own root and should set notes_mode=workspace, which was false.
 		sb.WriteString("\nnotes in a browser session\n\n")
-		sb.WriteString("  This session reads YOUR OWN note root, not the one the\n")
-		sb.WriteString("  terminal TUI writes — so an empty explorer here does not\n")
-		sb.WriteString("  mean your notes are gone. SPC A shows the exact path.\n")
-		sb.WriteString("  Set [web] notes_mode = \"workspace\" to share one tree.\n")
+		if m.noteView.Shared {
+			sb.WriteString("  This session reads the SHARED workspace notes — the same\n")
+			sb.WriteString("  tree the terminal TUI writes. An empty explorer here means\n")
+			sb.WriteString("  there are no workspaces yet, not a separate note root.\n")
+		} else {
+			sb.WriteString("  This session reads YOUR OWN note root, not the one the\n")
+			sb.WriteString("  terminal TUI writes — so an empty explorer here does not\n")
+			sb.WriteString("  mean your notes are gone. SPC A shows the exact path.\n")
+			sb.WriteString("  Set [web] notes_mode = \"workspace\" to share one tree.\n")
+		}
 	}
 	sb.WriteString("\neditor: vim Normal/Insert/Visual, jk = Esc\n")
 	sb.WriteString("explorer: hjkl navigate, l expands, Enter scaffolds a table\n")

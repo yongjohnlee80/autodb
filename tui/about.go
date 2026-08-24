@@ -62,6 +62,27 @@ const (
 // WithFrontend declares the hosting frontend (ADR-0061 §2.7).
 func WithFrontend(f Frontend) Option { return func(m *Model) { m.frontend = f } }
 
+// NoteView describes WHICH note tree this session actually reads (ADR-0064 §2.3).
+//
+// The Model needs to be told, rather than inferring it from the frontend. A
+// browser session reads its own root by DEFAULT and the shared workspace tree when
+// the gateway is bound — and help text predicated on "is this the web frontend"
+// said "you are reading your own root, set notes_mode=workspace to share" even to
+// a session already in workspace mode, which was simply false (lector r1 on
+// PR #5).
+type NoteView struct {
+	// Shared is true when this session reads the same workspace-keyed tree the
+	// terminal TUI writes, false when it reads a private per-identity root.
+	Shared bool
+	// Root is the effective note root for THIS session — the path About should
+	// report. Empty means "not stated by the host".
+	Root string
+}
+
+// WithNoteView tells the Model which tree it is reading, so About reports the
+// path actually in use and help explains the mode actually in force.
+func WithNoteView(v NoteView) Option { return func(m *Model) { m.noteView = v } }
+
 // canRestartDaemon reports whether this frontend may offer daemon-restart
 // actions.
 func (m *Model) canRestartDaemon() bool { return m.frontend == FrontendTerminal }

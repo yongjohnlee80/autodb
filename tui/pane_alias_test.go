@@ -61,27 +61,55 @@ func TestHelpCardDocumentsTheBrowserChords(t *testing.T) {
 }
 
 // Criterion 12 — a web session must be able to find out WHY its explorer is
-// empty. The explorer pane is ~25 columns and truncates any sentence, so the
-// explanation lives on the surfaces wide enough to carry it: the help card names
-// the tree and About prints the exact path.
-func TestWebSessionExplainsItsNoteRoot(t *testing.T) {
-	h := startUIAuthed(t, startRealServer(t), tuiapp.WithFrontend(tuiapp.FrontendWeb))
+// empty, and the explanation must describe the mode ACTUALLY in force.
+//
+// The explorer pane is ~25 columns and truncates any sentence, so this lives in
+// the help card with About printing the exact path. Predicating only on "is this
+// the web frontend" told a session already reading the shared tree that it was
+// reading its own root — false, and the reason the Model is now told its mode
+// (lector r1 P1b on PR #5).
+func TestWebHelpExplainsThePrivateNoteRoot(t *testing.T) {
+	h := startUIAuthed(t, startRealServer(t),
+		tuiapp.WithFrontend(tuiapp.FrontendWeb),
+		tuiapp.WithNoteView(tuiapp.NoteView{Shared: false, Root: "/tmp/notes/u-alice"}))
 	h.waitFor("about splash", "Yong Sung John Lee")
 	h.key(tuicore.KeyEnter)
 	h.waitGone("about splash", "Yong Sung John Lee")
 
-	h.waitFor("an empty explorer", "no workspaces")
 	h.leader("?")
 	h.waitFor("help card open", "leader commands")
-	findInScrollableFloat(t, h, "help explains the note root", "YOUR OWN note root")
+	findInScrollableFloat(t, h, "help names the private root", "YOUR OWN note root")
 	if s := h.screen(); !strings.Contains(s, "notes_mode") {
 		t.Error("the help card explains the split but never names the setting that " +
 			"changes it; a user who wants one shared tree needs to know what to set")
 	}
 }
 
-// ...and the terminal frontend does NOT carry the browser-specific note section:
-// it reads the shared tree already, so the explanation would be noise.
+// The SHARED case must not be told to go and share what it already shares.
+func TestWebHelpExplainsTheSharedNoteTree(t *testing.T) {
+	h := startUIAuthed(t, startRealServer(t),
+		tuiapp.WithFrontend(tuiapp.FrontendWeb),
+		tuiapp.WithNoteView(tuiapp.NoteView{Shared: true, Root: "/tmp/notes"}))
+	h.waitFor("about splash", "Yong Sung John Lee")
+	h.key(tuicore.KeyEnter)
+	h.waitGone("about splash", "Yong Sung John Lee")
+
+	h.leader("?")
+	h.waitFor("help card open", "leader commands")
+	findInScrollableFloat(t, h, "help names the shared tree", "SHARED workspace notes")
+
+	// And it must NOT repeat the private-root advice, which would be false here.
+	for page := 0; page < 15; page++ {
+		if strings.Contains(h.screen(), "YOUR OWN note root") {
+			t.Fatal("a session already reading the shared tree is told it reads its own " +
+				"root and should set notes_mode=workspace — the false text lector caught")
+		}
+		h.key(tuicore.KeyPageDown)
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// ...and the terminal frontend carries neither: it reads the shared tree already.
 func TestTerminalSessionOmitsTheBrowserNoteSection(t *testing.T) {
 	h := startUIAuthed(t, startRealServer(t))
 	h.waitFor("about splash", "Yong Sung John Lee")
@@ -90,10 +118,10 @@ func TestTerminalSessionOmitsTheBrowserNoteSection(t *testing.T) {
 
 	h.leader("?")
 	h.waitFor("help card open", "leader commands")
-	// Page the whole card: the browser-only section must appear on NO page.
 	for page := 0; page < 15; page++ {
-		if strings.Contains(h.screen(), "YOUR OWN note root") {
-			t.Fatal("the terminal frontend shows the browser-only note explanation")
+		s := h.screen()
+		if strings.Contains(s, "YOUR OWN note root") || strings.Contains(s, "SHARED workspace notes") {
+			t.Fatal("the terminal frontend shows a browser-only note explanation")
 		}
 		h.key(tuicore.KeyPageDown)
 		time.Sleep(20 * time.Millisecond)
@@ -101,9 +129,9 @@ func TestTerminalSessionOmitsTheBrowserNoteSection(t *testing.T) {
 }
 
 // findInScrollableFloat pages through an open scrollable float until sub appears.
-// The help card is taller than the viewport, so asserting after a single End (or
-// on the first screen) pins WHERE a line happens to sit rather than that it is
-// present at all — and breaks whenever the card grows.
+// The help card is taller than the viewport, so asserting on the first screen (or
+// after a single End) pins WHERE a line happens to sit rather than that it is
+// present, and breaks whenever the card grows.
 func findInScrollableFloat(t *testing.T, h *uiHarness, what, sub string) {
 	t.Helper()
 	for page := 0; page < 15; page++ {

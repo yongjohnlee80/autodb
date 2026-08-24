@@ -1,6 +1,7 @@
 package webserver
 
 import (
+	"github.com/yongjohnlee80/autodb/core/config"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -50,7 +51,7 @@ func TestNoteRootFor(t *testing.T) {
 			"space":            "a b",
 			"colon":            "a:b",
 			"tilde":            "~root",
-			"too long":         strings.Repeat("x", maxSubjectLen+1),
+			"too long":         strings.Repeat("x", config.MaxSubjectLen+1),
 		}
 		for name, subject := range bad {
 			got, err := noteRootFor(base, subject)

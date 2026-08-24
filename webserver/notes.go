@@ -1,16 +1,10 @@
 package webserver
 
 import (
-	"fmt"
 	"path/filepath"
-	"strings"
 
 	"github.com/yongjohnlee80/autodb/core/config"
 )
-
-// maxSubjectLen bounds the directory component built from a username. Generous
-// for a person's login name, far short of any filesystem limit.
-const maxSubjectLen = 64
 
 // noteRootFor returns the note root for one authenticated user.
 //
@@ -63,35 +57,13 @@ func noteRootFor(base, subject string) (string, error) {
 	return filepath.Join(base, "u-"+subject), nil
 }
 
-func validSubject(s string) error {
-	switch {
-	case s == "":
-		return fmt.Errorf("webserver: empty subject cannot name a note directory")
-	case len(s) > maxSubjectLen:
-		return fmt.Errorf("webserver: subject is %d bytes, over the %d-byte limit for "+
-			"a note directory", len(s), maxSubjectLen)
-	case s == "." || s == "..":
-		return fmt.Errorf("webserver: subject %q is a path traversal", s)
-	case strings.ContainsAny(s, `/\`):
-		return fmt.Errorf("webserver: subject %q contains a path separator", s)
-	case strings.HasPrefix(s, "."):
-		// A leading dot would hide the directory and, worse, `..anything` reads as
-		// traversal to a human scanning a listing.
-		return fmt.Errorf("webserver: subject %q starts with a dot", s)
-	}
-	// A conservative allowlist, not a denylist: the set of characters that break a
-	// path is longer than the set a username needs, and only one of those lists
-	// can be written down completely.
-	for _, r := range s {
-		ok := r == '-' || r == '_' || r == '.' || r == '@' ||
-			(r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
-		if !ok {
-			return fmt.Errorf("webserver: subject %q contains %q, which is not allowed "+
-				"in a note directory name", s, r)
-		}
-	}
-	return nil
-}
+// validSubject delegates to the ONE canonical predicate. It used to live here and
+// run only when a root was resolved — which is after login, after bootstrap, after
+// the pool and after the ticket — so a configured subject of `../alice` reached
+// the bootstrap path and became the permanent first admin before anything rejected
+// it (lector r1 on PR #5). The rule now belongs to config, and is enforced at
+// load, at New, and at admission.
+func validSubject(s string) error { return config.ValidSubject(s) }
 
 // refusalReason is the single browser-facing message for a subject the gateway
 // will not admit.
