@@ -102,9 +102,29 @@ A few behaviours worth knowing, because they differ from the terminal:
   lid reconnects to the same session with your workspace and history intact. A
   browser *reload* starts a fresh session — the session id is not yet persisted
   across reloads.
-- **Your notes are your own.** Each user's per-workspace notes live under their own
-  root. A `--web-ui` user does **not** see the notes of whoever runs `--ui` on the
-  same machine; the two note trees are separate, and unifying them is future work.
+- **Notes: your own root by default, one shared tree if you ask.** By default each
+  browser identity gets its own root, so a `--web-ui` user does **not** see the
+  notes of whoever runs `--ui` on the same machine. That is right for a gateway —
+  one process serves several people, and a note store reads from disk, which has
+  no identity — but it surprises the common case, which is one person opening one
+  install through two frontends and finding an empty explorer while their own
+  notes sit one level up.
+
+  Set `[web] notes_mode = "workspace"` with `notes_subject = "<you>"` to read the
+  same workspace-keyed tree the terminal writes. It is deliberately **bound to one
+  identity**: any other user is refused, before a session, a ticket or a note store
+  exists for them — including on a fresh daemon, where the wrong name cannot
+  bootstrap the first admin. Without `notes_subject` the mode is a startup error
+  rather than a quiet fall back, because a shared tree with no bound reader hands
+  the terminal user's notes to whoever logs in first. `SPC ?` in a browser session
+  names which tree you are reading; `SPC A` prints the exact path.
+- **Some Ctrl chords belong to the browser.** `Ctrl-L`, `Ctrl-W` and `Ctrl-T` never
+  reach autodb: the browser keeps them (address bar, close tab, new tab) and a page
+  cannot take them back. Measured: `Ctrl-H`, `Ctrl-J`, `Ctrl-K` and every `Alt`
+  chord do arrive. So pane motion is also bound to **`Alt-h/j/k/l`**, which works
+  in any browser; use those instead of `Ctrl-h/j/k/l` there. If you view the UI in
+  an Electron-based terminal browser, `--no-shortcuts` (or `--app-mode`) hands the
+  reserved chords to the page instead.
 - **No `SPC X`.** The restart-the-backend action is absent in the browser, because
   nothing in the web process can start a daemon back up — restarting it would
   strand every other browser session. Restart the daemon from a terminal.

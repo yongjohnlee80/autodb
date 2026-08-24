@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/yongjohnlee80/autodb/core/config"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/auth"
 	"github.com/yongjohnlee80/golib/auth/ipallow"
@@ -56,6 +57,14 @@ type Config struct {
 	// NotesRoot is where the TUI's note store lives.
 	NotesRoot string
 
+	// NotesMode selects which tree a session reads: per-user (default) or the
+	// shared workspace tree. Workspace mode REQUIRES NotesSubject and admits only
+	// that identity (ADR-0064 §2.3).
+	NotesMode config.NotesMode
+	// NotesSubject is the single identity workspace mode admits. Ignored in
+	// per-user mode, where every authenticated identity is welcome to its own root.
+	NotesSubject string
+
 	// About is what the TUI's About modal reports. Resolved by the frontend, so
 	// the splash works before anyone has logged in.
 	About tuiapp.AboutInfo
@@ -104,6 +113,19 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	if cfg.Port <= 0 || cfg.Port > 65535 {
 		return nil, fmt.Errorf("webserver: port %d is out of range", cfg.Port)
+	}
+	// Workspace mode without a bound subject would read the shared tree for
+	// whoever logged in first. Refused at construction, so the process dies before
+	// the port is bound rather than serving a mode it cannot enforce (ADR-0064
+	// §2.3, criterion 11). config.validate() catches this at load too; this is the
+	// same rule at the API boundary, for callers that build a Config directly.
+	if cfg.NotesMode == config.NotesWorkspace && cfg.NotesSubject == "" {
+		return nil, fmt.Errorf("webserver: notes mode %q requires a bound subject",
+			config.NotesWorkspace)
+	}
+	if cfg.NotesMode != "" && cfg.NotesMode != config.NotesPerUser &&
+		cfg.NotesMode != config.NotesWorkspace {
+		return nil, fmt.Errorf("webserver: unknown notes mode %q", cfg.NotesMode)
 	}
 	if cfg.Log == nil {
 		cfg.Log = logger.Nop{}
@@ -240,6 +262,31 @@ func New(cfg Config) (*Gateway, error) {
 }
 
 // Serve serves until ctx ends, then drains.
+// subjectAllowed reports whether this gateway will admit an identity at all.
+//
+// per-user mode admits everyone: each identity gets its OWN root, so there is
+// nothing to protect them from each other. Workspace mode admits exactly the
+// bound subject, because the tree it reads is shared with the terminal frontend.
+func (g *Gateway) subjectAllowed(subject string) bool {
+	if g.cfg.NotesMode != config.NotesWorkspace {
+		return true
+	}
+	// Constant-time is not required — the bound subject is operator configuration,
+	// not a secret — but an empty subject must never match, which New() already
+	// refuses to construct.
+	return subject != "" && subject == g.cfg.NotesSubject
+}
+
+// logRefusal records a refused admission where the operator can see it. The
+// browser gets refusalReason and nothing else; this is the only place the two
+// differ, and the reason that difference is safe (ADR-0064 §2.3).
+func (g *Gateway) logRefusal(at, subject string) {
+	logger.Notice(g.cfg.Log, map[string]any{
+		"webserver": "gateway", "event": "refused: subject not bound to this gateway",
+		"at": at, "subject": subject, "bound_to": g.cfg.NotesSubject,
+	})
+}
+
 func (g *Gateway) Serve(ctx context.Context) error {
 	logger.Info(g.cfg.Log, map[string]any{
 		"webserver": "gateway", "event": "serving",
@@ -268,7 +315,7 @@ type appRunner struct {
 }
 
 func (r *appRunner) Run(ctx context.Context) error {
-	root, err := noteRootFor(r.gw.cfg.NotesRoot, r.user.subject)
+	root, err := noteRootForMode(r.gw.cfg.NotesRoot, r.user.subject, r.gw.cfg.NotesMode)
 	if err != nil {
 		// Refused rather than falling back to the shared root: a fallback would
 		// quietly give this user everyone else's notes, which is the failure this
@@ -362,6 +409,21 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 		// The bind is loopback-only besides, so reaching it means local access — the
 		// same property `autodb --ui` already relies on. A public bind needs a
 		// certificate and is out of scope (§2.1).
+		// GATE 1, before an irreversible side effect. Bootstrap CREATES the first
+		// admin, and nothing can undo an account or restore one-shot bootstrap
+		// state, so a bound gateway must refuse a foreign subject BEFORE this rather
+		// than after: otherwise the wrong person becomes the permanent first admin
+		// and only then gets denied, and the rightful subject may never be able to
+		// bootstrap (ADR-0064 §2.3, lector r3).
+		//
+		// This checks the CLAIMED name, which is all that exists yet — there is no
+		// daemon identity to ask about before the account is made. Gate 2 below
+		// re-checks the daemon's canonical answer, which is the authoritative one.
+		if !f.gw.subjectAllowed(user) {
+			fresh.Close()
+			f.gw.logRefusal("bootstrap", user)
+			return auth.Contribution{}, auth.Reason(refusalReason)
+		}
 		needs, berr := fresh.Bind().NeedsBootstrap(dialCtx)
 		if berr != nil || !needs {
 			fresh.Close()
@@ -383,6 +445,17 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 	subject := fresh.User().Name
 	if subject == "" {
 		subject = user
+	}
+
+	// GATE 2, on the daemon's canonical answer, before pool.join, sso.Stash, any
+	// ticket and any App. The claimed name is what the browser typed; this is what
+	// the daemon says, and only this one is authoritative for admission.
+	if !f.gw.subjectAllowed(subject) {
+		// The fresh session we dialled to prove the password must not be leaked:
+		// same logout-then-close discipline the surplus-connection path uses.
+		f.gw.pool.logoutAndClose(subject, fresh)
+		f.gw.logRefusal("login", subject)
+		return auth.Contribution{}, auth.Reason(refusalReason)
 	}
 
 	sess, entry, surplus, jerr := f.gw.pool.join(subject, fresh)

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/yongjohnlee80/autodb/core/config"
 )
 
 // maxSubjectLen bounds the directory component built from a username. Generous
@@ -34,6 +36,26 @@ const maxSubjectLen = 64
 // name whose owner should be told, not silently given a different directory than
 // the one their username implies. Two users whose names sanitise to the same
 // string would otherwise share notes.
+// noteRootForMode resolves the root for one session under the configured mode
+// (ADR-0064 §2.3).
+//
+// workspace mode returns the SHARED base — the tree the terminal TUI writes,
+// containing ws-* directories — and is only reachable for the bound subject,
+// because Gateway.subjectAllowed refused everyone else before any session
+// existed. per-user mode keeps ADR-0061 §2.8's isolation unchanged.
+func noteRootForMode(base, subject string, mode config.NotesMode) (string, error) {
+	if mode == config.NotesWorkspace {
+		// Still validated: the subject is not interpolated into a path here, but a
+		// caller reaching this with an unsafe name means an admission bug upstream,
+		// and failing loudly beats reading the shared tree on its behalf.
+		if err := validSubject(subject); err != nil {
+			return "", err
+		}
+		return base, nil
+	}
+	return noteRootFor(base, subject)
+}
+
 func noteRootFor(base, subject string) (string, error) {
 	if err := validSubject(subject); err != nil {
 		return "", err
@@ -70,3 +92,12 @@ func validSubject(s string) error {
 	}
 	return nil
 }
+
+// refusalReason is the single browser-facing message for a subject the gateway
+// will not admit.
+//
+// Deliberately NON-ENUMERATING and identical for every refusal: it reveals
+// neither whether the daemon has been bootstrapped, nor who the bound subject
+// is, nor whether the name exists. The operator learns which it was from the
+// log; the browser learns only that it was refused (ADR-0064 §2.3).
+const refusalReason = "webserver: the daemon refused the login"

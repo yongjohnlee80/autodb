@@ -1161,6 +1161,23 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 		}
 		return false
 	}
+	// Alt+h/j/k/l alias pane motion, because a BROWSER cannot always give us the
+	// Ctrl chords: Ctrl-L is the address bar in both Firefox and Chrome and is not
+	// preventable from the page (golib/tui ADR-0009 §2.9 Rule 1 hands reserved
+	// shortcuts to the browser deliberately). Measured 2026-08-24: Ctrl+H/J/K and
+	// Alt+H/L all reach the server; Ctrl+L/W/T never do.
+	//
+	// The alias is unconditional rather than FrontendWeb-only. A binding that
+	// exists in one frontend and not another is a worse surprise than a spare
+	// binding in the terminal, and the terminal has no conflicting use for Alt with
+	// these letters (ADR-0064 §2.4).
+	if k.Mods&tui.ModAlt != 0 {
+		switch k.Code {
+		case 'h', 'j', 'k', 'l':
+			m.movePane(k.Code)
+			return true
+		}
+	}
 	// The leader: Space bubbles out of every widget (the editor only in
 	// Normal mode — Insert consumes it as text). Floats trap focus but
 	// bubbling still reaches the root, so the leader is gated while any
@@ -1271,6 +1288,7 @@ func (m *Model) openHelp() {
 	sb.WriteString("  n / N          next / previous match\n")
 	sb.WriteString("\nglobal keys\n\n")
 	sb.WriteString("  Ctrl-h/j/k/l   move between panes (left/down/up/right)\n")
+	sb.WriteString("  Alt-h/j/k/l    the same, for a browser: Ctrl-L is the address bar\n")
 	sb.WriteString("  Ctrl-w z       zoom focused pane\n")
 	sb.WriteString("  Ctrl-q         quit (q quits too when nothing consumes it)\n")
 	if m.canRestartDaemon() {
@@ -1279,6 +1297,19 @@ func (m *Model) openHelp() {
 	sb.WriteString("  SPC C          choose which connection the query runs against\n")
 	sb.WriteString("  SPC H          script history (who ran what, when)\n")
 	sb.WriteString("  SPC A          about: build, backend, and where state lives\n")
+	if m.frontend == FrontendWeb {
+		// Criterion 12 (ADR-0064 §2.3): an empty explorer must be explicable. The
+		// explorer pane itself is ~25 columns and truncates any sentence, so the
+		// explanation lives here and in About (which prints the exact path). The
+		// confusion this removes is specific and was reported as a bug: a browser
+		// session showed an empty note tree while the same person's terminal notes
+		// sat one level up, because a web session reads its own root by default.
+		sb.WriteString("\nnotes in a browser session\n\n")
+		sb.WriteString("  This session reads YOUR OWN note root, not the one the\n")
+		sb.WriteString("  terminal TUI writes — so an empty explorer here does not\n")
+		sb.WriteString("  mean your notes are gone. SPC A shows the exact path.\n")
+		sb.WriteString("  Set [web] notes_mode = \"workspace\" to share one tree.\n")
+	}
 	sb.WriteString("\neditor: vim Normal/Insert/Visual, jk = Esc\n")
 	sb.WriteString("explorer: hjkl navigate, l expands, Enter scaffolds a table\n")
 	sb.WriteString("results: v or Enter inspects the selected row\n")
