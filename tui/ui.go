@@ -565,7 +565,7 @@ func (m *Model) runSQL(sql string) {
 	}
 	connID := m.activeConn
 	m.running = true
-	m.setStatus(fmt.Sprintf("running on %s…", m.activeConnNm))
+	m.setStatus(fmt.Sprintf("running on %s…", m.connLabel()))
 	bound := m.session.Bind() // pin the epoch at issuance
 	m.ctx.Go(func(c context.Context) (any, error) {
 		res, err := bound.Run(c, connID, sql)
@@ -849,10 +849,32 @@ func (m *Model) setError(msg string) {
 // refreshQueryTitle names the connection the query will RUN AGAINST —
 // with two connections in a workspace, the target must never be a guess
 // (Johno, M6 manual testing).
-func (m *Model) refreshQueryTitle() {
-	title := "query — no connection (SPC C selects one)"
+// connLabel names the active connection for display. The NAME can be missing
+// while the connection is perfectly real: explorer.connNames is populated only
+// from a workspace load (explorer.go:~204) and is emptied by Clear() on an
+// instance change, so every table activation between those two points had an id
+// with no cached name.
+//
+// Returning "" there made three call sites report "no connection" for a
+// connection that execution would happily use — the reported defect (Johno,
+// 2026-08-25: Enter on a table appeared not to change the connection). The id is
+// always available and always truthful, so it is the fallback.
+func (m *Model) connLabel() string {
+	if m.activeConn == 0 {
+		return ""
+	}
 	if m.activeConnNm != "" {
-		title = "query → " + m.activeConnNm
+		return m.activeConnNm
+	}
+	return fmt.Sprintf("connection %d", m.activeConn)
+}
+
+func (m *Model) refreshQueryTitle() {
+	// Keyed on activeConn, NOT on the name: activeConn is what Run() uses, so it
+	// is the only thing that may decide whether a connection exists.
+	title := "query — no connection (SPC C selects one)"
+	if m.activeConn != 0 {
+		title = "query → " + m.connLabel()
 	}
 	m.editorBox.SetTitle(title)
 }
@@ -928,8 +950,8 @@ func (m *Model) refreshStatus() {
 	if u := m.session.User(); u.Name != "" {
 		mid = u.Name
 	}
-	if m.activeConnNm != "" {
-		mid += " ⋅ " + m.activeConnNm
+	if lbl := m.connLabel(); lbl != "" {
+		mid += " ⋅ " + lbl
 	}
 	if m.curNote != nil {
 		marker := ""
