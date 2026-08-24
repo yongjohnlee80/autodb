@@ -352,15 +352,25 @@ func (r *appRunner) Run(ctx context.Context) error {
 	// it named <notes> while the session actually read <notes>/u-<subject> — About
 	// told the user the wrong path, which is precisely the confusion criterion 12
 	// exists to remove (lector r1 on PR #5).
-	shared := r.gw.cfg.NotesMode == config.NotesWorkspace
-	about := aboutForRoot(r.gw.cfg.About, root)
-
-	model := tuiapp.New(r.user.sess, notes, cancel,
-		tuiapp.WithAbout(about),
-		tuiapp.WithNoteView(tuiapp.NoteView{Shared: shared, Root: root}),
-		tuiapp.WithFrontend(tuiapp.FrontendWeb))
+	model := tuiapp.New(r.user.sess, notes, cancel, r.gw.modelOptions(root)...)
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(r.backend))
 	return app.Run(ctx)
+}
+
+// modelOptions is the ONE place a per-session Model is configured, so a test can
+// exercise the wiring the runner actually uses.
+//
+// Testing the options individually was not enough: lector restored the old
+// construction — unchanged `WithAbout(cfg.About)` and no `WithNoteView` — and
+// every test still passed, because the tests applied the options themselves
+// instead of asking the runner for them (r2 on PR #5). Deleting either line below
+// must now fail a test.
+func (g *Gateway) modelOptions(root string) []tuiapp.Option {
+	return []tuiapp.Option{
+		tuiapp.WithAbout(aboutForRoot(g.cfg.About, root)),
+		tuiapp.WithNoteView(tuiapp.NoteView{Shared: g.cfg.NotesMode == config.NotesWorkspace}),
+		tuiapp.WithFrontend(tuiapp.FrontendWeb),
+	}
 }
 
 // aboutForRoot restates the About payload to name the root THIS session reads.

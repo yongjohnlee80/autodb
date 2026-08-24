@@ -71,7 +71,7 @@ func TestHelpCardDocumentsTheBrowserChords(t *testing.T) {
 func TestWebHelpExplainsThePrivateNoteRoot(t *testing.T) {
 	h := startUIAuthed(t, startRealServer(t),
 		tuiapp.WithFrontend(tuiapp.FrontendWeb),
-		tuiapp.WithNoteView(tuiapp.NoteView{Shared: false, Root: "/tmp/notes/u-alice"}))
+		tuiapp.WithNoteView(tuiapp.NoteView{Shared: false}))
 	h.waitFor("about splash", "Yong Sung John Lee")
 	h.key(tuicore.KeyEnter)
 	h.waitGone("about splash", "Yong Sung John Lee")
@@ -89,7 +89,7 @@ func TestWebHelpExplainsThePrivateNoteRoot(t *testing.T) {
 func TestWebHelpExplainsTheSharedNoteTree(t *testing.T) {
 	h := startUIAuthed(t, startRealServer(t),
 		tuiapp.WithFrontend(tuiapp.FrontendWeb),
-		tuiapp.WithNoteView(tuiapp.NoteView{Shared: true, Root: "/tmp/notes"}))
+		tuiapp.WithNoteView(tuiapp.NoteView{Shared: true}))
 	h.waitFor("about splash", "Yong Sung John Lee")
 	h.key(tuicore.KeyEnter)
 	h.waitGone("about splash", "Yong Sung John Lee")
