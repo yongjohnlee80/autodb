@@ -46,7 +46,13 @@ jobs:
     env:
       # Bump deliberately alongside a compatibility check; a scheduled canary can
       # track auto-core's HEAD separately.
-      AUTO_CORE_SHA: "928bfb27fe6c08b84176b6dee3669cc5c8ac1ac9"
+      #
+      # 9c44a56 == auto-core v0.2.2, the release that carries ui.float.viewer,
+      # Model:row_entries and grid.row_detail_lines (ADR-0066). This bump is not
+      # optional: autodb.results requires auto-core.ui.float.viewer at MODULE
+      # top level, so against the previous pin the module failed to load at all
+      # and the suite aborted before its SMOKE-COMPLETE sentinel.
+      AUTO_CORE_SHA: "9c44a5621887515e8e2df24d4c6d05da749a72e6"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
