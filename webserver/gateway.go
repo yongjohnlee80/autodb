@@ -82,6 +82,13 @@ type Config struct {
 	// a test can COUNT connections, which is the only way to see a surplus one
 	// being abandoned rather than closed.
 	dial func(ctx context.Context) (*tuiapp.Session, error)
+
+	// newModel overrides how a per-session Model is built. Test seam only, and it
+	// exists for a specific reason: testing modelOptions() proves the HELPER, not
+	// that appRunner calls it. Restoring the old construction while leaving the
+	// helper intact reintroduced the bug with every test green (lector r3). A test
+	// that captures this factory fails if the runner stops going through it.
+	newModel func(*tuiapp.Session, *tuiapp.NoteStore, func(), ...tuiapp.Option) *tuiapp.Model
 }
 
 // Gateway is the `--web-ui` web-server: it terminates authentication, owns the
@@ -352,7 +359,11 @@ func (r *appRunner) Run(ctx context.Context) error {
 	// it named <notes> while the session actually read <notes>/u-<subject> — About
 	// told the user the wrong path, which is precisely the confusion criterion 12
 	// exists to remove (lector r1 on PR #5).
-	model := tuiapp.New(r.user.sess, notes, cancel, r.gw.modelOptions(root)...)
+	newModel := r.gw.cfg.newModel
+	if newModel == nil {
+		newModel = tuiapp.New
+	}
+	model := newModel(r.user.sess, notes, cancel, r.gw.modelOptions(root)...)
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(r.backend))
 	return app.Run(ctx)
 }
