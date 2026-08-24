@@ -35,6 +35,17 @@ func TestWebNotesModeValidation(t *testing.T) {
 			"a bound subject that binds nothing is a config mistake worth naming"},
 		{"unknown mode", NotesMode("shared"), "", true,
 			"a typo must fail loudly, not fall back to a default"},
+		// lector r2: these were untested at LOAD. Removing ValidSubject from
+		// validate() left every later defence in place, so nothing failed — the
+		// promised load-time contract could regress silently.
+		{"workspace subject is a traversal", NotesWorkspace, "..", true,
+			"an unusable identity must never reach the irreversible bootstrap path"},
+		{"workspace subject has a separator", NotesWorkspace, "../alice", true,
+			"a separator escapes the notes root"},
+		{"workspace subject has a space", NotesWorkspace, " alice", true,
+			"the allowlist is conservative on purpose"},
+		{"workspace subject is hidden", NotesWorkspace, ".hidden", true,
+			"a leading dot hides the directory and reads as traversal"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

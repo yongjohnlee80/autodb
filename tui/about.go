@@ -74,14 +74,23 @@ type NoteView struct {
 	// Shared is true when this session reads the same workspace-keyed tree the
 	// terminal TUI writes, false when it reads a private per-identity root.
 	Shared bool
-	// Root is the effective note root for THIS session — the path About should
-	// report. Empty means "not stated by the host".
-	Root string
+	// (No path here on purpose. About carries the effective root, set by
+	// aboutForRoot; duplicating it in the view would be a second source of truth
+	// for the same fact — lector r2 non-blocking note.)
 }
 
-// WithNoteView tells the Model which tree it is reading, so About reports the
-// path actually in use and help explains the mode actually in force.
+// WithNoteView tells the Model which tree it is reading, so help explains the
+// mode actually in force.
 func WithNoteView(v NoteView) Option { return func(m *Model) { m.noteView = v } }
+
+// NoteViewOf reports the note view a host configured. Exported so a host can
+// assert its OWN wiring: the interesting bug is not "does the option work" but
+// "did the runner pass it", and that is only observable on the built Model
+// (lector r2 on PR #5).
+func (m *Model) NoteViewOf() NoteView { return m.noteView }
+
+// AboutNotesDir reports the note root About will display, for the same reason.
+func (m *Model) AboutNotesDir() string { return m.about.NotesDir }
 
 // canRestartDaemon reports whether this frontend may offer daemon-restart
 // actions.
