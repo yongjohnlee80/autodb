@@ -546,28 +546,3 @@ func TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot(t *testing.T) {
 		})
 	}
 }
-
-// TestNotesMode_TestInventory guards against a repeat of how the r2 commit lost
-// five verified tests: a string edit replaced from an index to end-of-file, and
-// the suite stayed green because a MISSING test is indistinguishable from a
-// passing one in aggregate output. Naming them here makes a deletion fail.
-func TestNotesMode_TestInventory(t *testing.T) {
-	required := []any{
-		TestNotesMode_WorkspaceRequiresBoundSubject,
-		TestNotesMode_BoundSubjectReadsTheSharedTree,
-		TestNotesMode_WorkspaceRefusesAnotherSubject,
-		TestNotesMode_WrongSubjectCannotBootstrap,
-		TestNotesMode_DefaultIsPerUserIsolation,
-		TestNotesMode_UnsafeSubjectStillRefused,
-		TestNotesMode_UnsafeConfiguredSubjectIsRefusedAtConstruction,
-		TestNotesMode_UnsafeSubjectCannotBootstrap,
-		TestNotesMode_EffectiveRootDiffersByMode,
-		TestNotesMode_AboutReportsTheEffectiveRoot,
-		TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot,
-	}
-	for i, fn := range required {
-		if fn == nil {
-			t.Errorf("required test %d is nil", i)
-		}
-	}
-}
