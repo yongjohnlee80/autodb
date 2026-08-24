@@ -1003,6 +1003,9 @@ func execSummary(res *ExecResult) string {
 // noteConnFromNode tracks the active workspace/connection as the explorer
 // cursor moves (any node under a connection selects it).
 func (m *Model) noteConnFromNode(id string) {
+	// `id` is shadowed by the parsed connection id inside the switch below, so the
+	// node id is captured here for WorkspaceOfNode, which needs the NODE.
+	nodeID := id
 	parts := strings.Split(id, ":")
 	switch parts[0] {
 	case "ws", "conns", "notes", "detached", "note":
@@ -1034,7 +1037,7 @@ func (m *Model) noteConnFromNode(id string) {
 				// filed notes into workspace 1. Guarding this on `id != activeConn`
 				// would also miss the case where the same connection is reached under
 				// a different workspace.
-				if ws := m.explorer.ConnWorkspace(id); ws != 0 {
+				if ws := m.explorer.WorkspaceOfNode(nodeID); ws != 0 {
 					m.activeWs = ws
 				}
 				if id != m.activeConn {
