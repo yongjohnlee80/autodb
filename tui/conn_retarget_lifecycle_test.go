@@ -26,8 +26,16 @@ import (
 
 // childWithPrefix waits for a node with the given id prefix to become visible,
 // expanding along the way. Levels load asynchronously, so ExpandPath is called
-// repeatedly — its own contract is that an unloaded node stops the walk after
+// repeatedly — its contract is that an unloaded node stops the walk after
 // requesting expansion.
+//
+// The search is SCOPED to the workspace subtree named by path[0]. Node ids are
+// NOT unique across the tree: a connection attached to two workspaces renders
+// `schema:<connID>:…`, `sec:…` and `tbl:…` with identical ids under both. A
+// global prefix search therefore returns the first workspace's copy and the walk
+// silently stops expanding the subtree it was asked about — which is exactly how
+// an earlier version of this helper made lector's shared-connection probe walk
+// into the wrong workspace.
 func childWithPrefix(t *testing.T, sync func(func()), e *explorer, path []string, prefix string) string {
 	t.Helper()
 	deadline := time.Now().Add(20 * time.Second)
@@ -37,9 +45,29 @@ func childWithPrefix(t *testing.T, sync func(func()), e *explorer, path []string
 			if len(path) > 0 {
 				e.tree.ExpandPath(path...)
 			}
-			for _, n := range e.tree.VisibleRows() {
-				if strings.HasPrefix(n.ID(), prefix) {
-					found = n.ID()
+			rows := e.tree.VisibleRows()
+			start, end := 0, len(rows)
+			if len(path) > 0 && strings.HasPrefix(path[0], "ws:") {
+				start = -1
+				for i, n := range rows {
+					if n.ID() == path[0] {
+						start = i
+						break
+					}
+				}
+				if start < 0 {
+					return
+				}
+				for i := start + 1; i < len(rows); i++ {
+					if strings.HasPrefix(rows[i].ID(), "ws:") {
+						end = i
+						break
+					}
+				}
+			}
+			for i := start; i < end; i++ {
+				if strings.HasPrefix(rows[i].ID(), prefix) {
+					found = rows[i].ID()
 					return
 				}
 			}
@@ -55,7 +83,7 @@ func childWithPrefix(t *testing.T, sync func(func()), e *explorer, path []string
 			dump = append(dump, n.ID())
 		}
 	})
-	t.Fatalf("no visible node with prefix %q after expanding %v; visible: %v", prefix, path, dump)
+	t.Fatalf("no visible node with prefix %q inside %v; visible: %v", prefix, path, dump)
 	return ""
 }
 

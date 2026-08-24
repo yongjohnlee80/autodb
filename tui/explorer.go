@@ -31,13 +31,12 @@ import (
 //	note:<ws>:<file>  detached:<ws>
 type explorer struct {
 	widget.Base
-	tree  *widget.Tree
+	tree  *paneTree
 	model *Model
 	ctx   *tui.Context
 
 	quoted    map[string]string // "tbl:…" node id → server-quoted identifier
 	connNames map[int64]string  // conn id → display name (status bar)
-	connWs    map[int64]int64   // conn id → owning workspace (see ConnWorkspace)
 	seq       uint64            // Reload sequencing: fetches can complete out
 	applied   uint64            // of issue order; stale sets must not win
 }
@@ -58,32 +57,96 @@ func decSeg(s string) string {
 	return out
 }
 
+// paneTree is the explorer's tree with focus DECLINED.
+//
+// The explorer pane must have exactly ONE focus target, and it must be the
+// explorer — because the explorer owns the pane's key semantics: Enter on a
+// `tbl:` node scaffolds a query instead of expanding the node's columns, and `a`
+// / `d` act on the node under the cursor. Those live in explorer.HandleEvent,
+// which only runs on keys the explorer is given; it then forwards to the tree.
+//
+// widget.Tree accepts focus in its own right, so the pane had two targets and
+// which one you got depended on HOW you focused it: the pane-motion keys focus
+// the explorer (semantics apply), while a pointer click focuses the tree, since
+// golib's focusFromPointer walks outward from the click target and takes the
+// FIRST focusable it meets. With focus on the tree, Enter reached the tree
+// first, was consumed as expand/collapse, and the explorer's intercept never
+// ran — so clicking the explorer and pressing Enter on a table opened its
+// COLUMNS instead of scaffolding (Johno, 2026-08-25, in both frontends).
+//
+// Declining focus here removes the ambiguity at its source rather than patching
+// Enter: a click now lands on the explorer, exactly as the keys do. The tree
+// still renders its cursor, because the highlight keys off FocusWithin the
+// explorer's box, not off the tree itself.
+type paneTree struct{ *widget.Tree }
+
+func (*paneTree) AcceptsFocus() bool { return false }
+
 func newExplorer(m *Model) *explorer {
 	return &explorer{
-		tree:   widget.NewTree(widget.WithTreeStyles(widget.ListStyles{CursorRow: cursorRowStyle})),
+		tree:   &paneTree{widget.NewTree(widget.WithTreeStyles(widget.ListStyles{CursorRow: cursorRowStyle}))},
 		model:  m,
 		quoted: map[string]string{}, connNames: map[int64]string{},
-		connWs: map[int64]int64{},
 	}
 }
 
 // ConnName resolves a connection's display name.
 func (e *explorer) ConnName(id int64) string { return e.connNames[id] }
 
-// ConnWorkspace reports the workspace a connection was rendered under, or 0.
+// WorkspaceOfNode reports the workspace the given node is rendered UNDER, or 0.
 //
-// Needed because the node-id grammar below `conn:` carries only the CONNECTION:
-// `tbl:<connID>:<schema>:<name>`, `schema:<connID>:…`, `col:`, `sec:`, `fn:`.
-// So a table activation cannot name its workspace from its own id, and before
-// this the workspace simply kept whatever value the last `conn:`/`ws:` node had
-// left behind. activeWs is not cosmetic — it selects the workspace for note
-// creation, for saveNoteAs, and for the connection picker — so a table under
-// workspace 2 activated after a connection under workspace 1 filed notes into
-// workspace 1 and listed workspace 1 in the picker.
+// Needed because the node-id grammar below `conn:` carries only the CONNECTION —
+// `tbl:<connID>:<schema>:<name>`, `schema:`, `sec:`, `col:`, `fn:` — so a table
+// activation cannot name its workspace from its own id, and activeWs would
+// otherwise keep whatever the last `conn:`/`ws:` node left behind. That is not
+// cosmetic: activeWs selects the workspace for note creation, for saveNoteAs,
+// and for the connection picker.
 //
-// The explorer already knows the answer: it BUILT the `conn:<ws>:<connID>` node.
-// Recording it there is cheaper and more reliable than walking ancestry.
-func (e *explorer) ConnWorkspace(id int64) int64 { return e.connWs[id] }
+// A connID -> wsID cache CANNOT answer this. A connection may be attached to
+// several workspaces, so it has several rendered parents and a cache can hold
+// only the last one written — lector's probe attaches one connection to two
+// workspaces and shows one of the two subtrees then resolving to the wrong
+// workspace. Ancestry is the only thing that distinguishes them.
+//
+// Rows are a PRE-ORDER traversal, so the nearest preceding `conn:<ws>:<id>` row
+// is the rendered parent connection, and the nearest preceding `ws:<id>` row is
+// the rendered workspace. Scanning back from the node's own row therefore gives
+// the workspace for the subtree the cursor is actually in, per rendered position
+// rather than per connection identity.
+func (e *explorer) WorkspaceOfNode(id string) int64 {
+	rows := e.tree.VisibleRows()
+	at := -1
+	if c := e.tree.Cursor(); c >= 0 && c < len(rows) && rows[c].ID() == id {
+		at = c // the common case: the node under the cursor
+	} else {
+		for i, n := range rows {
+			if n.ID() == id {
+				at = i
+				break
+			}
+		}
+	}
+	if at < 0 {
+		return 0
+	}
+	for i := at; i >= 0; i-- {
+		rid := rows[i].ID()
+		if strings.HasPrefix(rid, "conn:") {
+			parts := strings.Split(rid, ":")
+			if len(parts) == 3 {
+				if ws, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+					return ws
+				}
+			}
+		}
+		if strings.HasPrefix(rid, "ws:") {
+			if ws, err := strconv.ParseInt(strings.TrimPrefix(rid, "ws:"), 10, 64); err == nil {
+				return ws
+			}
+		}
+	}
+	return 0
+}
 
 func (e *explorer) AcceptsFocus() bool { return true }
 
@@ -190,7 +253,6 @@ func (e *explorer) RefreshNotes(wsID int64) {
 func (e *explorer) Clear() {
 	e.quoted = map[string]string{}
 	e.connNames = map[int64]string{}
-	e.connWs = map[int64]int64{}
 	e.tree.SetRoots(widget.NewTreeNode("empty", "not connected", widget.WithLeaf()))
 	e.MarkDirty()
 }
@@ -220,7 +282,6 @@ func (e *explorer) applyWorkspaces(l wsLoaded) {
 		kids := make([]*widget.TreeNode, 0, len(ws.Connections))
 		for _, c := range ws.Connections {
 			e.connNames[c.ID] = c.Name
-			e.connWs[c.ID] = ws.ID
 			kids = append(kids, widget.NewTreeNode(
 				fmt.Sprintf("conn:%d:%d", ws.ID, c.ID), c.Name, widget.WithBadge(c.Engine)))
 		}
