@@ -4,15 +4,15 @@ go 1.25.3
 
 require (
 	github.com/BurntSushi/toml v1.6.0
+	github.com/coder/websocket v1.8.15
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/yongjohnlee80/golib v0.4.1
+	github.com/yongjohnlee80/golib v0.5.2
 	golang.org/x/crypto v0.55.0
 )
 
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
-	github.com/coder/websocket v1.8.15 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect

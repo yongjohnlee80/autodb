@@ -101,3 +101,34 @@ ip_allowlist = ["127.0.0.1/32", "::1/128"]
 # in the explorer instead). Point this at a directory you already sync or
 # keep in version control if you want your query scratchpads to travel.
 # notes_dir = "/home/you/Documents/autodb-notes"
+
+[web]
+# The --web-ui gateway (ADR-0064). These keys are ignored by --serve and --ui.
+#
+# Which note tree a browser session reads.
+#
+# "per-user" (default) gives each browser identity its own root,
+# <notes_dir>/u-<subject>. That is the safe shape for a gateway, because one
+# process serves N people and a NoteStore reads from disk, which has no
+# identity: a shared root would hand every web user everyone else's notes.
+#
+# "workspace" reads the SHARED workspace-keyed tree the terminal TUI writes,
+# <notes_dir>/ws-<id>. This exists for the common case that is NOT multi-user:
+# one person, one machine, opening the same install through two frontends.
+# Showing them an empty directory while their own notes sit one level up is a
+# lost file, not isolation.
+#
+# It is opt-in and identity-BOUND, never inferred. Counting logged-in users is
+# not a safe test for "only one person" — the first user can open the shared
+# root before a second ever logs in — so workspace mode requires the subject
+# below and REFUSES every other identity, before any session or note store is
+# built for them.
+# notes_mode = "per-user"
+
+# The single identity permitted in workspace mode. REQUIRED there: a missing
+# value is a startup error, not a quiet fall back to per-user, because
+# silently narrowing a mode the operator asked for is how a config mistake
+# turns into a data-exposure surprise. Must match the daemon's own name for
+# the user (what `auth.login` reports), not merely what gets typed in the
+# browser form.
+# notes_subject = "you"

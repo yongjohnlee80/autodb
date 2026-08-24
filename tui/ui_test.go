@@ -206,6 +206,16 @@ func (h *uiHarness) key(code rune) {
 	}
 }
 
+// alt injects an Alt-modified key (the browser-safe pane-motion alias: a
+// browser keeps Ctrl-L for its address bar, so Alt is the chord that arrives).
+func (h *uiHarness) alt(code rune) {
+	if err := h.tb.Inject(tuicore.KeyEvent{
+		Kind: tuicore.KeyPress, Code: code, Mods: tuicore.ModAlt,
+	}); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
 // explorerCursorBG returns the background color index of the explorer's
 // highlighted row, or false when no row is filled.
 func (h *uiHarness) explorerCursorBG() (uint8, bool) {

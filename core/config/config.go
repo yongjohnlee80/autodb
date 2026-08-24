@@ -29,6 +29,40 @@ type Config struct {
 	History  History  `toml:"history"`
 	Security Security `toml:"security"`
 	TUI      TUI      `toml:"tui"`
+	Web      Web      `toml:"web"`
+}
+
+// NotesMode selects which note tree a --web-ui session reads (ADR-0064 §2.3).
+type NotesMode string
+
+const (
+	// NotesPerUser is the DEFAULT and gives each browser identity its own root,
+	// <notes>/u-<subject>. Safe for a gateway serving more than one person, which
+	// is what the gateway structurally is.
+	NotesPerUser NotesMode = "per-user"
+	// NotesWorkspace reads the SHARED workspace-keyed tree the terminal TUI
+	// writes, <notes>/ws-<id>. Only legitimate when the gateway is bound to one
+	// identity, so it REQUIRES NotesSubject and refuses every other subject.
+	NotesWorkspace NotesMode = "workspace"
+)
+
+// Web configures the --web-ui gateway (ADR-0064).
+type Web struct {
+	// NotesMode is "per-user" (default) or "workspace". Empty means per-user.
+	//
+	// Workspace mode exists because one human with one machine, opening the same
+	// install through two frontends, means the same notes — showing them an empty
+	// directory while their files sit one level up is a lost file, not isolation.
+	// It is opt-in and identity-BOUND rather than inferred: counting active
+	// sessions is not a safe predicate for "only one user", since the first user
+	// can open the shared root before a second ever logs in.
+	NotesMode NotesMode `toml:"notes_mode"`
+
+	// NotesSubject is the single identity permitted in workspace mode. REQUIRED
+	// there; a missing value is a startup error, never a fallback to per-user,
+	// because silently narrowing a mode the operator asked for is how a
+	// configuration mistake becomes a data-exposure surprise.
+	NotesSubject string `toml:"notes_subject"`
 }
 
 // TUI configures the standalone terminal UI (ADR-0057).
@@ -186,5 +220,34 @@ func (c Config) validate() error {
 			return fmt.Errorf("%w: security.ip_allowlist %q: %v", ErrInvalid, cidr, err)
 		}
 	}
+	// web.notes_mode, validated at LOAD so a mistake stops the process before a
+	// port is bound rather than surfacing as a surprising note tree later
+	// (ADR-0064 §2.3, acceptance criterion 11).
+	switch c.Web.NotesMode {
+	case "", NotesPerUser:
+		if c.Web.NotesSubject != "" {
+			return fmt.Errorf("%w: web.notes_subject is meaningless without "+
+				"web.notes_mode = %q", ErrInvalid, NotesWorkspace)
+		}
+	case NotesWorkspace:
+		// REQUIRED, and deliberately not defaulted: workspace mode reads the
+		// shared tree, so without a bound subject it would hand the terminal
+		// user's notes to whoever logs in first.
+		if c.Web.NotesSubject == "" {
+			return fmt.Errorf("%w: web.notes_mode = %q requires web.notes_subject",
+				ErrInvalid, NotesWorkspace)
+		}
+	default:
+		return fmt.Errorf("%w: web.notes_mode %q (want %q or %q)",
+			ErrInvalid, c.Web.NotesMode, NotesPerUser, NotesWorkspace)
+	}
 	return nil
+}
+
+// WebNotesMode resolves the effective mode, treating empty as the safe default.
+func (c Config) WebNotesMode() NotesMode {
+	if c.Web.NotesMode == "" {
+		return NotesPerUser
+	}
+	return c.Web.NotesMode
 }

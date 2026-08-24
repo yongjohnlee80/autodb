@@ -324,6 +324,10 @@ func runWebUI(configPath string, port int) error {
 		Addr:      ep.Address,
 		Port:      port,
 		NotesRoot: notesRoot,
+		// Note visibility (ADR-0064 §2.3). Default per-user; workspace mode is
+		// opt-in, bound to one subject, and validated at config load.
+		NotesMode:    cfg.WebNotesMode(),
+		NotesSubject: cfg.Web.NotesSubject,
 		// Operational log to stderr. --web-ui is a server an operator leaves
 		// running, so a refused Origin, a failed login, and session lifecycle
 		// have to be VISIBLE: without this the gateway falls back to
