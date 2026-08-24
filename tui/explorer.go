@@ -37,6 +37,7 @@ type explorer struct {
 
 	quoted    map[string]string // "tbl:…" node id → server-quoted identifier
 	connNames map[int64]string  // conn id → display name (status bar)
+	connWs    map[int64]int64   // conn id → owning workspace (see ConnWorkspace)
 	seq       uint64            // Reload sequencing: fetches can complete out
 	applied   uint64            // of issue order; stale sets must not win
 }
@@ -62,11 +63,27 @@ func newExplorer(m *Model) *explorer {
 		tree:   widget.NewTree(widget.WithTreeStyles(widget.ListStyles{CursorRow: cursorRowStyle})),
 		model:  m,
 		quoted: map[string]string{}, connNames: map[int64]string{},
+		connWs: map[int64]int64{},
 	}
 }
 
 // ConnName resolves a connection's display name.
 func (e *explorer) ConnName(id int64) string { return e.connNames[id] }
+
+// ConnWorkspace reports the workspace a connection was rendered under, or 0.
+//
+// Needed because the node-id grammar below `conn:` carries only the CONNECTION:
+// `tbl:<connID>:<schema>:<name>`, `schema:<connID>:…`, `col:`, `sec:`, `fn:`.
+// So a table activation cannot name its workspace from its own id, and before
+// this the workspace simply kept whatever value the last `conn:`/`ws:` node had
+// left behind. activeWs is not cosmetic — it selects the workspace for note
+// creation, for saveNoteAs, and for the connection picker — so a table under
+// workspace 2 activated after a connection under workspace 1 filed notes into
+// workspace 1 and listed workspace 1 in the picker.
+//
+// The explorer already knows the answer: it BUILT the `conn:<ws>:<connID>` node.
+// Recording it there is cheaper and more reliable than walking ancestry.
+func (e *explorer) ConnWorkspace(id int64) int64 { return e.connWs[id] }
 
 func (e *explorer) AcceptsFocus() bool { return true }
 
@@ -173,6 +190,7 @@ func (e *explorer) RefreshNotes(wsID int64) {
 func (e *explorer) Clear() {
 	e.quoted = map[string]string{}
 	e.connNames = map[int64]string{}
+	e.connWs = map[int64]int64{}
 	e.tree.SetRoots(widget.NewTreeNode("empty", "not connected", widget.WithLeaf()))
 	e.MarkDirty()
 }
@@ -202,6 +220,7 @@ func (e *explorer) applyWorkspaces(l wsLoaded) {
 		kids := make([]*widget.TreeNode, 0, len(ws.Connections))
 		for _, c := range ws.Connections {
 			e.connNames[c.ID] = c.Name
+			e.connWs[c.ID] = ws.ID
 			kids = append(kids, widget.NewTreeNode(
 				fmt.Sprintf("conn:%d:%d", ws.ID, c.ID), c.Name, widget.WithBadge(c.Engine)))
 		}

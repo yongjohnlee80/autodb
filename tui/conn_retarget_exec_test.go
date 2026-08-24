@@ -151,3 +151,39 @@ func TestEnterOnTable_QueryExecutesAgainstThatTablesConnection(t *testing.T) {
 		t.Fatalf("no rows returned; cannot tell which connection ran: %q", cells)
 	}
 }
+
+// Call site 3 of 3: the "running on …" status. Read inside the SAME App.Update
+// as runSQL, because setStatus happens before the query goroutine is launched —
+// so this is deterministic rather than a race against the result arriving.
+func TestRunStatus_UsesTheConnectionLabel(t *testing.T) {
+	addr := bootServer(t)
+	dir := t.TempDir()
+
+	sess := NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(sess.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := sess.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := sess.Bind().Bootstrap(ctx, "root", "runstatus-passphrase-1"); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	cid, err := sess.Bind().CreateConnection(ctx, "bravo", "sqlite", filepath.Join(dir, "b.db"))
+	if err != nil {
+		t.Fatalf("create connection: %v", err)
+	}
+
+	m, _, sync := mountedWith(t, sess)
+	var status string
+	sync(func() {
+		m.activeConn, m.activeConnNm = cid, "" // real connection, name not cached
+		m.runSQL("SELECT 1")
+		status = m.statusMsg
+	})
+	want := "running on connection " + strconv.FormatInt(cid, 10)
+	if !strings.Contains(status, want) {
+		t.Errorf("status = %q, want it to contain %q — an empty label renders "+
+			"\"running on …\", which names nothing", status, want)
+	}
+}

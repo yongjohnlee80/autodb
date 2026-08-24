@@ -1025,11 +1025,24 @@ func (m *Model) noteConnFromNode(id string) {
 		}
 	case "schema", "sec", "tbl", "col", "fn":
 		if len(parts) > 1 {
-			if id, err := strconv.ParseInt(parts[1], 10, 64); err == nil && id != m.activeConn {
-				m.activeConn = id
-				m.activeConnNm = m.explorer.ConnName(id)
-				m.refreshQueryTitle()
-				m.refreshStatus()
+			if id, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+				// The workspace FIRST, and unconditionally: these ids carry only the
+				// connection, so activeWs would otherwise keep whatever the last
+				// conn:/ws: node left behind — and it selects the workspace for note
+				// creation, saveNoteAs and the connection picker. Activating a table
+				// under workspace 2 after a connection under workspace 1 therefore
+				// filed notes into workspace 1. Guarding this on `id != activeConn`
+				// would also miss the case where the same connection is reached under
+				// a different workspace.
+				if ws := m.explorer.ConnWorkspace(id); ws != 0 {
+					m.activeWs = ws
+				}
+				if id != m.activeConn {
+					m.activeConn = id
+					m.activeConnNm = m.explorer.ConnName(id)
+					m.refreshQueryTitle()
+					m.refreshStatus()
+				}
 			}
 		}
 	}

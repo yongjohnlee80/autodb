@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -57,7 +58,13 @@ func mountedWith(t *testing.T, sess *Session) (*Model, *tui.TestBackend, func(fu
 	t.Helper()
 	m := unconnected()
 	if sess != nil {
-		m = New(sess, nil, nil)
+		// A real NoteStore: explorer.Reload calls notes.ListWorkspaceDirs(), so a
+		// nil store makes the load task fail and the tree never populates.
+		ns, err := NewNoteStore(filepath.Join(t.TempDir(), "notes"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		m = New(sess, ns, nil)
 	}
 	tb := tui.NewTestBackend(110, 32)
 	app := tui.NewApp(m.Root(), tui.WithBackend(tb), tui.WithMinFrameInterval(0))
@@ -133,9 +140,13 @@ func TestExplorerEnterOnTable_RetargetsTheConnection(t *testing.T) {
 
 	// What the user actually reads. A retarget the UI reports as "no connection"
 	// is indistinguishable from no retarget at all, which is the reported symptom.
-	if conn == 2 && strings.Contains(titleLine, "no connection") {
-		t.Errorf("connection DID retarget to %d but the UI reports %q — "+
-			"the state is right and the display is wrong, which is "+
-			"indistinguishable from no retarget at all", conn, titleLine)
+	// EXACT, not merely "not no-connection": a connLabel() returning "" renders
+	// "query → " and passed the earlier version of this assertion 20/20 (lector).
+	if titleLine == "" {
+		t.Fatal("no query title line was rendered at all")
+	}
+	if !strings.Contains(titleLine, "query \u2192 connection 2") {
+		t.Errorf("title = %q, want it to contain %q — the id fallback is the "+
+			"assertion here, so an empty label must not pass", titleLine, "query \u2192 connection 2")
 	}
 }
