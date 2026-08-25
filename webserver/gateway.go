@@ -57,14 +57,6 @@ type Config struct {
 	// NotesRoot is where the TUI's note store lives.
 	NotesRoot string
 
-	// NotesMode selects which tree a session reads: per-user (default) or the
-	// shared workspace tree. Workspace mode REQUIRES NotesSubject and admits only
-	// that identity (ADR-0064 §2.3).
-	NotesMode config.NotesMode
-	// NotesSubject is the single identity workspace mode admits. Ignored in
-	// per-user mode, where every authenticated identity is welcome to its own root.
-	NotesSubject string
-
 	// About is what the TUI's About modal reports. Resolved by the frontend, so
 	// the splash works before anyone has logged in.
 	About tuiapp.AboutInfo
@@ -88,7 +80,7 @@ type Config struct {
 	// that appRunner calls it. Restoring the old construction while leaving the
 	// helper intact reintroduced the bug with every test green (lector r3). A test
 	// that captures this factory fails if the runner stops going through it.
-	newModel func(*tuiapp.Session, *tuiapp.NoteStore, func(), ...tuiapp.Option) *tuiapp.Model
+	newModel func(*tuiapp.Session, tuiapp.NotesFactory, func(), ...tuiapp.Option) *tuiapp.Model
 }
 
 // Gateway is the `--web-ui` web-server: it terminates authentication, owns the
@@ -126,23 +118,6 @@ func New(cfg Config) (*Gateway, error) {
 	// the port is bound rather than serving a mode it cannot enforce (ADR-0064
 	// §2.3, criterion 11). config.validate() catches this at load too; this is the
 	// same rule at the API boundary, for callers that build a Config directly.
-	if cfg.NotesMode == config.NotesWorkspace {
-		if cfg.NotesSubject == "" {
-			return nil, fmt.Errorf("webserver: notes mode %q requires a bound subject",
-				config.NotesWorkspace)
-		}
-		// Emptiness was not enough: `..`, `../alice`, ` alice` and `alice/bob` were
-		// all accepted here, and an unusable subject that matches a login reaches the
-		// IRREVERSIBLE bootstrap path — becoming the permanent first admin before any
-		// note root is resolved to reject it (lector r1 on PR #5).
-		if err := config.ValidSubject(cfg.NotesSubject); err != nil {
-			return nil, fmt.Errorf("webserver: notes subject: %w", err)
-		}
-	}
-	if cfg.NotesMode != "" && cfg.NotesMode != config.NotesPerUser &&
-		cfg.NotesMode != config.NotesWorkspace {
-		return nil, fmt.Errorf("webserver: unknown notes mode %q", cfg.NotesMode)
-	}
 	if cfg.Log == nil {
 		cfg.Log = logger.Nop{}
 	}
@@ -280,23 +255,19 @@ func New(cfg Config) (*Gateway, error) {
 // Serve serves until ctx ends, then drains.
 // subjectAllowed reports whether this gateway will admit an identity at all.
 //
-// per-user mode admits everyone: each identity gets its OWN root, so there is
-// nothing to protect them from each other. Workspace mode admits exactly the
-// bound subject, because the tree it reads is shared with the terminal frontend.
+// ONE check remains, and it is not about which notes anyone sees: a subject that
+// cannot become a safe path component is refused. It is refused HERE, before the
+// bootstrap path, because Bootstrap creates the daemon's permanent first admin
+// and nothing can undo an account — deferring this to the point a note root is
+// resolved is what let an unusable subject consume the one-shot bootstrap.
+//
+// The equality-to-a-configured-subject test that used to sit here is GONE
+// (ADR-0068 §2.3). It was an access-control substitute for a missing key: the
+// tree it protected had no user component. Now that notes are keyed by
+// (user, workspace), a foreign identity cannot reach another's notes by
+// construction, so the gate protected nothing and only denied service.
 func (g *Gateway) subjectAllowed(subject string) bool {
-	// An identity that cannot name a note directory is refused in BOTH modes, and
-	// refused HERE — before bootstrap. Deferring this to the point a root is
-	// resolved is what let an unusable subject consume the one-shot bootstrap.
-	if config.ValidSubject(subject) != nil {
-		return false
-	}
-	if g.cfg.NotesMode != config.NotesWorkspace {
-		return true
-	}
-	// Constant-time is not required — the bound subject is operator configuration,
-	// not a secret — but an empty subject must never match, which New() already
-	// refuses to construct.
-	return subject != "" && subject == g.cfg.NotesSubject
+	return config.ValidSubject(subject) == nil
 }
 
 // logRefusal records a refused admission where the operator can see it. The
@@ -305,7 +276,7 @@ func (g *Gateway) subjectAllowed(subject string) bool {
 func (g *Gateway) logRefusal(at, subject string) {
 	logger.Notice(g.cfg.Log, map[string]any{
 		"webserver": "gateway", "event": "refused: subject not bound to this gateway",
-		"at": at, "subject": subject, "bound_to": g.cfg.NotesSubject,
+		"at": at, "subject": subject,
 	})
 }
 
@@ -337,17 +308,19 @@ type appRunner struct {
 }
 
 func (r *appRunner) Run(ctx context.Context) error {
-	root, err := noteRootForMode(r.gw.cfg.NotesRoot, r.user.subject, r.gw.cfg.NotesMode)
-	if err != nil {
-		// Refused rather than falling back to the shared root: a fallback would
-		// quietly give this user everyone else's notes, which is the failure this
-		// scoping exists to prevent.
-		return err
-	}
-	notes, err := tuiapp.NewNoteStore(root)
+	// The store is derived from the base and this session's CANONICAL subject;
+	// the final directory is not the caller's to choose. There is no mode and no
+	// fallback: a fallback would quietly hand this user everyone else's notes,
+	// which is the failure the keying exists to prevent (ADR-0068 §2.1).
+	//
+	// Built here as well as passed as a factory, because the gateway wants to
+	// FAIL THE SESSION on an unusable subject rather than start a UI that will
+	// report notes unavailable — the browser user cannot fix it from there.
+	notes, err := tuiapp.NewPersonalNotes(r.gw.cfg.NotesRoot, r.user.subject)
 	if err != nil {
 		return fmt.Errorf("webserver: note store for %q: %w", r.user.subject, err)
 	}
+	notesFor := tuiapp.PersonalNotesIn(r.gw.cfg.NotesRoot)
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -363,7 +336,7 @@ func (r *appRunner) Run(ctx context.Context) error {
 	if newModel == nil {
 		newModel = tuiapp.New
 	}
-	model := newModel(r.user.sess, notes, cancel, r.gw.modelOptions(root)...)
+	model := newModel(r.user.sess, notesFor, cancel, r.gw.modelOptions(notes.Root())...)
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(r.backend))
 	return app.Run(ctx)
 }
@@ -379,7 +352,7 @@ func (r *appRunner) Run(ctx context.Context) error {
 func (g *Gateway) modelOptions(root string) []tuiapp.Option {
 	return []tuiapp.Option{
 		tuiapp.WithAbout(aboutForRoot(g.cfg.About, root)),
-		tuiapp.WithNoteView(tuiapp.NoteView{Shared: g.cfg.NotesMode == config.NotesWorkspace}),
+		tuiapp.WithNoteView(tuiapp.NoteView{Shared: false}),
 		tuiapp.WithFrontend(tuiapp.FrontendWeb),
 	}
 }

@@ -9,7 +9,7 @@ import (
 
 func testStore(t *testing.T) *NoteStore {
 	t.Helper()
-	s, err := NewNoteStore(filepath.Join(t.TempDir(), "notes"))
+	s, err := NewPersonalNotes(filepath.Join(t.TempDir(), "notes"), "tester")
 	if err != nil {
 		t.Fatal(err)
 	}

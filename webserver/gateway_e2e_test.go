@@ -402,14 +402,16 @@ func TestGateway_NoteRootsAreScopedPerUser(t *testing.T) {
 	}
 
 	// Each user's App built its own root under the base, and they are different.
-	aRoot, err := noteRootFor(notesBase, "alice")
+	aStore, err := tuiapp.NewPersonalNotes(notesBase, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	bRoot, err := noteRootFor(notesBase, "bob")
+	aRoot := aStore.Root()
+	bStore, err := tuiapp.NewPersonalNotes(notesBase, "bob")
 	if err != nil {
 		t.Fatal(err)
 	}
+	bRoot := bStore.Root()
 	for _, root := range []string{aRoot, bRoot} {
 		if _, serr := os.Stat(root); serr != nil {
 			t.Errorf("note root %q was never created: %v", root, serr)

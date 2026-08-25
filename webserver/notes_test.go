@@ -2,6 +2,7 @@ package webserver
 
 import (
 	"github.com/yongjohnlee80/autodb/core/config"
+	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -9,14 +10,31 @@ import (
 
 // A subject becomes a path component, so the interesting cases are the ones that
 // stop being a component.
+// rootFor derives a subject's personal root through the EXPORTED constructor —
+// the same call production makes. The old package-private noteRootFor/
+// noteRootForMode helpers are gone with the mode (ADR-0068), and testing through
+// the exported surface is what keeps these assertions about the real derivation
+// rather than about a test-only copy of it.
+func rootFor(base, subject string) (string, error) {
+	s, err := tuiapp.NewPersonalNotes(base, subject)
+	if err != nil {
+		return "", err
+	}
+	return s.Root(), nil
+}
+
 func TestNoteRootFor(t *testing.T) {
 	t.Parallel()
-	base := "/var/lib/autodb/notes"
+	// A REAL base, not the production default. The old package-private helper was
+	// pure path arithmetic; NewPersonalNotes also creates the directory with
+	// restrictive modes, so a fictional base now fails on mkdir rather than
+	// exercising the derivation this test is about.
+	base := t.TempDir()
 
 	t.Run("ordinary names", func(t *testing.T) {
 		t.Parallel()
 		for _, subject := range []string{"johno", "alice", "a.b", "user_1", "x-y", "a@b.c"} {
-			got, err := noteRootFor(base, subject)
+			got, err := rootFor(base, subject)
 			if err != nil {
 				t.Errorf("%q: %v", subject, err)
 				continue
@@ -54,7 +72,7 @@ func TestNoteRootFor(t *testing.T) {
 			"too long":         strings.Repeat("x", config.MaxSubjectLen+1),
 		}
 		for name, subject := range bad {
-			got, err := noteRootFor(base, subject)
+			got, err := rootFor(base, subject)
 			if err == nil {
 				t.Errorf("%s (%q) was accepted, giving root %q", name, subject, got)
 			}
@@ -66,11 +84,11 @@ func TestNoteRootFor(t *testing.T) {
 
 	t.Run("two users never share a root", func(t *testing.T) {
 		t.Parallel()
-		a, err := noteRootFor(base, "alice")
+		a, err := rootFor(base, "alice")
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, err := noteRootFor(base, "bob")
+		b, err := rootFor(base, "bob")
 		if err != nil {
 			t.Fatal(err)
 		}

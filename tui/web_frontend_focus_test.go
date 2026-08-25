@@ -30,10 +30,7 @@ import (
 func startUIAuthed(t *testing.T, addr string, opts ...tuiapp.Option) *uiHarness {
 	t.Helper()
 	notesRoot := filepath.Join(t.TempDir(), "notes")
-	notes, err := tuiapp.NewNoteStore(notesRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	notesFor := tuiapp.PersonalNotesIn(notesRoot)
 	session := tuiapp.NewSession(addr, logger.Nop{}, nil)
 	t.Cleanup(session.Close)
 
@@ -58,7 +55,7 @@ func startUIAuthed(t *testing.T, addr string, opts ...tuiapp.Option) *uiHarness 
 		Repo: "https://github.com/yongjohnlee80/autodb", Author: "Yong Sung John Lee",
 		NotesDir: notesRoot, MetaEngine: "sqlite", MetaPath: "/tmp/meta.db",
 	})}
-	model := tuiapp.New(session, notes, cancel, append(base, opts...)...)
+	model := tuiapp.New(session, notesFor, cancel, append(base, opts...)...)
 	tb := tuicore.NewTestBackend(110, 32)
 	tr := &traceLog{}
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(tb),

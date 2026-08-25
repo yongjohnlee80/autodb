@@ -58,13 +58,9 @@ func mountedWith(t *testing.T, sess *Session) (*Model, *tui.TestBackend, func(fu
 	t.Helper()
 	m := unconnected()
 	if sess != nil {
-		// A real NoteStore: explorer.Reload calls notes.ListWorkspaceDirs(), so a
-		// nil store makes the load task fail and the tree never populates.
-		ns, err := NewNoteStore(filepath.Join(t.TempDir(), "notes"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		m = New(sess, ns, nil)
+		// A real factory: the store is built by afterLogin from the canonical
+		// subject, and explorer.Reload needs one to list workspace dirs.
+		m = New(sess, PersonalNotesIn(filepath.Join(t.TempDir(), "notes")), nil)
 	}
 	tb := tui.NewTestBackend(110, 32)
 	app := tui.NewApp(m.Root(), tui.WithBackend(tb), tui.WithMinFrameInterval(0))

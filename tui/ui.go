@@ -24,8 +24,12 @@ import (
 // reconnect superseded them; note loads carry their own local generation.
 type Model struct {
 	session *Session
-	notes   *NoteStore
-	quit    func()
+	// notes is nil until afterLogin builds it: with no authenticated subject
+	// there is no personal tree to read, and there must be no ownerless one to
+	// fall back to (ADR-0068 §2.2).
+	notes    *NoteStore
+	notesFor NotesFactory
+	quit     func()
 
 	ctx  *tui.Context
 	host *widget.OverlayHost
@@ -72,8 +76,8 @@ type Model struct {
 }
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
-func New(session *Session, notes *NoteStore, quit func(), opts ...Option) *Model {
-	m := &Model{session: session, notes: notes, quit: quit}
+func New(session *Session, notesFor NotesFactory, quit func(), opts ...Option) *Model {
+	m := &Model{session: session, notesFor: notesFor, quit: quit}
 	for _, o := range opts {
 		if o != nil {
 			o(m)
@@ -349,9 +353,39 @@ func (m *Model) resetServerUI() {
 	m.refreshStatus()
 }
 
+// requireNotes returns the personal store, or reports why there is none.
+//
+// Before sign-in there is no authenticated subject, so there is no personal tree
+// — and deliberately no ownerless one to fall back to. Every write path goes
+// through here, so "the terminal cannot write a note before login" is ONE gate
+// rather than nine nil checks that each have to be remembered (ADR-0068
+// criterion 5).
+func (m *Model) requireNotes() (*NoteStore, bool) {
+	if m.notes == nil {
+		m.setStatus("notes appear once you sign in")
+		return nil, false
+	}
+	return m.notes, true
+}
+
 func (m *Model) afterLogin() {
 	u := m.session.User()
 	m.hadAuth = true
+
+	// The personal store is built HERE, from the daemon's canonical subject, and
+	// not before: this is the whole point of ADR-0068. A failure leaves no store
+	// at all rather than falling back to the ownerless base — failing closed is
+	// the contract, because a fallback would reintroduce the shared tree at
+	// exactly the moment identity is uncertain (§2.2).
+	m.notes = nil
+	if m.notesFor != nil {
+		notes, err := m.notesFor(u.Name)
+		if err != nil {
+			m.setError(fmt.Sprintf("notes unavailable for %s: %v", u.Name, err))
+		} else {
+			m.notes = notes
+		}
+	}
 	m.setStatus(fmt.Sprintf("logged in as %s (%s)", u.Name, u.Role))
 	m.explorer.Reload()
 	// Never yank focus out of an open modal. A frontend whose session arrives
@@ -628,7 +662,11 @@ func (m *Model) newNote() {
 		// Create the FILE now, so the explorer shows it immediately —
 		// then open it. (Opening a not-yet-written name left the tree
 		// unchanged until the first save.)
-		note, cerr := m.notes.Create(wsID, clean)
+		ns, ok := m.requireNotes()
+		if !ok {
+			return false, "not signed in"
+		}
+		note, cerr := ns.Create(wsID, clean)
 		if cerr != nil {
 			return false, cerr.Error()
 		}
@@ -661,7 +699,11 @@ func (m *Model) saveNote() {
 		return
 	}
 	body := m.editor.Value()
-	err := m.notes.Save(m.curNote, body)
+	ns, ok := m.requireNotes()
+	if !ok {
+		return
+	}
+	err := ns.Save(m.curNote, body)
 	switch {
 	case err == nil:
 		m.noteDirty = false
@@ -683,14 +725,18 @@ func (m *Model) saveNoteAs(wsID int64, body string) {
 		if err != nil {
 			return false, err.Error()
 		}
-		n, _, lerr := m.notes.Load(wsID, clean)
+		ns, ok := m.requireNotes()
+		if !ok {
+			return false, "not signed in"
+		}
+		n, _, lerr := ns.Load(wsID, clean)
 		if lerr != nil {
 			return false, lerr.Error()
 		}
 		if n.existed {
 			return false, clean + " already exists — pick another name"
 		}
-		if serr := m.notes.Save(n, body); serr != nil {
+		if serr := ns.Save(n, body); serr != nil {
 			return false, serr.Error()
 		}
 		m.curNote = n
@@ -706,13 +752,17 @@ func (m *Model) openConflict(body string) {
 	note := m.curNote
 	m.openLeader(note.Name+" changed on disk", []leaderEntry{
 		{'o', "overwrite the on-disk note", func() {
-			fresh, _, err := m.notes.Load(note.WorkspaceID, note.Name)
+			ns, ok := m.requireNotes()
+			if !ok {
+				return
+			}
+			fresh, _, err := ns.Load(note.WorkspaceID, note.Name)
 			if err != nil {
 				m.setStatus("overwrite failed: " + err.Error())
 				return
 			}
 			m.curNote = fresh
-			if err := m.notes.Save(fresh, body); err != nil {
+			if err := ns.Save(fresh, body); err != nil {
 				m.setStatus("overwrite failed: " + err.Error())
 				return
 			}

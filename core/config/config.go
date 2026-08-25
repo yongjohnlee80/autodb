@@ -81,38 +81,17 @@ func ValidSubject(s string) error {
 	return nil
 }
 
-// NotesMode selects which note tree a --web-ui session reads (ADR-0064 §2.3).
-type NotesMode string
-
-const (
-	// NotesPerUser is the DEFAULT and gives each browser identity its own root,
-	// <notes>/u-<subject>. Safe for a gateway serving more than one person, which
-	// is what the gateway structurally is.
-	NotesPerUser NotesMode = "per-user"
-	// NotesWorkspace reads the SHARED workspace-keyed tree the terminal TUI
-	// writes, <notes>/ws-<id>. Only legitimate when the gateway is bound to one
-	// identity, so it REQUIRES NotesSubject and refuses every other subject.
-	NotesWorkspace NotesMode = "workspace"
-)
-
 // Web configures the --web-ui gateway (ADR-0064).
-type Web struct {
-	// NotesMode is "per-user" (default) or "workspace". Empty means per-user.
-	//
-	// Workspace mode exists because one human with one machine, opening the same
-	// install through two frontends, means the same notes — showing them an empty
-	// directory while their files sit one level up is a lost file, not isolation.
-	// It is opt-in and identity-BOUND rather than inferred: counting active
-	// sessions is not a safe predicate for "only one user", since the first user
-	// can open the shared root before a second ever logs in.
-	NotesMode NotesMode `toml:"notes_mode"`
-
-	// NotesSubject is the single identity permitted in workspace mode. REQUIRED
-	// there; a missing value is a startup error, never a fallback to per-user,
-	// because silently narrowing a mode the operator asked for is how a
-	// configuration mistake becomes a data-exposure surprise.
-	NotesSubject string `toml:"notes_subject"`
-}
+//
+// notes_mode / notes_subject were REMOVED by ADR-0068. They selected which note
+// tree a browser session read, and the "workspace" mode pointed at a tree with
+// no user component — so isolation had to come from admitting exactly one
+// configured identity rather than from the path. Notes are now keyed by
+// (user, workspace) in both frontends, which makes the mode and its admission
+// gate unnecessary. A config still carrying either key fails to load: silently
+// ignoring it would leave an operator believing an isolation setting is in
+// force when it no longer exists.
+type Web struct{}
 
 // TUI configures the standalone terminal UI (ADR-0057).
 type TUI struct {
@@ -236,6 +215,19 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("config: %s: %w", path, err)
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
+		// Keys ADR-0068 removed get a reason rather than a bare "unknown key".
+		// An operator who set notes_mode did so for isolation, and the one
+		// dangerous outcome is their believing it still applies; the generic
+		// message would not tell them it is gone or what replaced it.
+		for _, k := range undecoded {
+			switch k.String() {
+			case "web.notes_mode", "web.notes_subject":
+				return Config{}, fmt.Errorf("%w: %s: %s was removed by ADR-0068 — notes "+
+					"are now keyed by (user, workspace) in both frontends and are visible "+
+					"only to their owner, so no setting selects a note tree; delete this key",
+					ErrInvalid, path, k.String())
+			}
+		}
 		return Config{}, fmt.Errorf("%w: %s: unknown keys: %v", ErrInvalid, path, undecoded)
 	}
 	return cfg, cfg.validate()
@@ -269,41 +261,5 @@ func (c Config) validate() error {
 			return fmt.Errorf("%w: security.ip_allowlist %q: %v", ErrInvalid, cidr, err)
 		}
 	}
-	// web.notes_mode, validated at LOAD so a mistake stops the process before a
-	// port is bound rather than surfacing as a surprising note tree later
-	// (ADR-0064 §2.3, acceptance criterion 11).
-	switch c.Web.NotesMode {
-	case "", NotesPerUser:
-		if c.Web.NotesSubject != "" {
-			return fmt.Errorf("%w: web.notes_subject is meaningless without "+
-				"web.notes_mode = %q", ErrInvalid, NotesWorkspace)
-		}
-	case NotesWorkspace:
-		// REQUIRED, and deliberately not defaulted: workspace mode reads the
-		// shared tree, so without a bound subject it would hand the terminal
-		// user's notes to whoever logs in first.
-		if c.Web.NotesSubject == "" {
-			return fmt.Errorf("%w: web.notes_mode = %q requires web.notes_subject",
-				ErrInvalid, NotesWorkspace)
-		}
-		// And it must be a subject that can actually name a directory. Checking only
-		// for emptiness let `../alice` through, and an unusable identity that reaches
-		// the bootstrap path becomes the permanent first admin before any note root
-		// is resolved to reject it.
-		if err := ValidSubject(c.Web.NotesSubject); err != nil {
-			return fmt.Errorf("web.notes_subject: %w", err)
-		}
-	default:
-		return fmt.Errorf("%w: web.notes_mode %q (want %q or %q)",
-			ErrInvalid, c.Web.NotesMode, NotesPerUser, NotesWorkspace)
-	}
 	return nil
-}
-
-// WebNotesMode resolves the effective mode, treating empty as the safe default.
-func (c Config) WebNotesMode() NotesMode {
-	if c.Web.NotesMode == "" {
-		return NotesPerUser
-	}
-	return c.Web.NotesMode
 }

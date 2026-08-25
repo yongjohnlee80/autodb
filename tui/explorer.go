@@ -228,7 +228,11 @@ func (e *explorer) Reload() {
 		if err != nil {
 			return nil, err
 		}
-		orphans, _ := e.model.notes.ListWorkspaceDirs()
+		// No store before sign-in: an empty list, never the ownerless base.
+		var orphans []int64
+		if ns := e.model.notes; ns != nil {
+			orphans, _ = ns.ListWorkspaceDirs()
+		}
 		return wsLoaded{gen: bound.Gen(), seq: seq, wss: wss, noteDirs: orphans}, nil
 	})
 }
@@ -316,7 +320,11 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 		switch {
 		case strings.HasPrefix(id, "notes:"), strings.HasPrefix(id, "detached:"):
 			wsID, _ := strconv.ParseInt(id[strings.Index(id, ":")+1:], 10, 64)
-			names, err := e.model.notes.List(wsID)
+			ns, ok := e.model.requireNotes()
+			if !ok {
+				return treeLoaded{node: node, gen: gen, sgen: sgen}, nil
+			}
+			names, err := ns.List(wsID)
 			if err != nil {
 				return fail(err), nil
 			}
@@ -522,7 +530,11 @@ func (e *explorer) confirmDeleteNote(id string) {
 	name := decSeg(parts[2])
 	e.model.openLeader("delete this note?", []leaderEntry{
 		{'y', "delete " + name, func() {
-			if err := e.model.notes.Delete(wsID, name); err != nil {
+			ns, ok := e.model.requireNotes()
+			if !ok {
+				return
+			}
+			if err := ns.Delete(wsID, name); err != nil {
 				e.model.setStatus("delete failed: " + err.Error())
 				return
 			}

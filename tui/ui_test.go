@@ -100,15 +100,12 @@ func (l *traceLog) tail(n int) string {
 func startUI(t *testing.T, addr string) *uiHarness {
 	t.Helper()
 	notesRoot := filepath.Join(t.TempDir(), "notes")
-	notes, err := tuiapp.NewNoteStore(notesRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	notesFor := tuiapp.PersonalNotesIn(notesRoot)
 	session := tuiapp.NewSession(addr, logger.Nop{}, nil)
 	t.Cleanup(session.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	model := tuiapp.New(session, notes, cancel, tuiapp.WithAbout(tuiapp.AboutInfo{
+	model := tuiapp.New(session, notesFor, cancel, tuiapp.WithAbout(tuiapp.AboutInfo{
 		Version: "test", Commit: "abc1234", BuildDate: "2026-08-17T00:00:00Z",
 		Repo: "https://github.com/yongjohnlee80/autodb", Author: "Yong Sung John Lee",
 		NotesDir: notesRoot, MetaEngine: "sqlite", MetaPath: "/tmp/meta.db",
@@ -508,7 +505,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("frombuffer")
 	h.key(tuicore.KeyEnter)
 	h.waitFor("buffer saved", "saved frombuffer.sql")
-	if body, err := os.ReadFile(filepath.Join(h.notesRoot, "ws-1", "frombuffer.sql")); err != nil {
+	if body, err := os.ReadFile(filepath.Join(h.notesRoot, "u-root", "ws-1", "frombuffer.sql")); err != nil {
 		t.Fatalf("saved note: %v", err)
 	} else if string(body) != "-- unsaved buffer" {
 		t.Fatalf("SPC s wrote %q, want the editor buffer", string(body))
@@ -542,7 +539,7 @@ func TestUIFullFlow(t *testing.T) {
 	// The FILE exists as soon as it is named, so the explorer shows it
 	// without waiting for a first save.
 	h.waitFor("created note listed", "· fromexplorer.sql")
-	if _, err := os.Stat(filepath.Join(h.notesRoot, "ws-1", "fromexplorer.sql")); err != nil {
+	if _, err := os.Stat(filepath.Join(h.notesRoot, "u-root", "ws-1", "fromexplorer.sql")); err != nil {
 		t.Fatalf("note created from the explorer is not on disk: %v", err)
 	}
 	h.ctrl('l')
@@ -601,7 +598,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.leader("s")
 	h.waitFor("note saved", "saved scratch.sql")
 
-	notePath := filepath.Join(h.notesRoot, "ws-1", "scratch.sql")
+	notePath := filepath.Join(h.notesRoot, "u-root", "ws-1", "scratch.sql")
 	if err := os.WriteFile(notePath, []byte("-- external edit\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -615,7 +612,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("scratch2")
 	h.key(tuicore.KeyEnter)
 	h.waitFor("save-as done", "saved scratch2.sql")
-	saved, err := os.ReadFile(filepath.Join(h.notesRoot, "ws-1", "scratch2.sql"))
+	saved, err := os.ReadFile(filepath.Join(h.notesRoot, "u-root", "ws-1", "scratch2.sql"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,15 +731,12 @@ func TestRestartServerFromTUI(t *testing.T) {
 		return "restart-e2e.log", nil
 	}
 
-	notes, err := tuiapp.NewNoteStore(filepath.Join(t.TempDir(), "notes"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	notesFor := tuiapp.PersonalNotesIn(filepath.Join(t.TempDir(), "notes"))
 	session := tuiapp.NewSession(addr, logger.Nop{}, spawn)
 	t.Cleanup(session.Close)
 
 	appCtx, cancel := context.WithCancel(context.Background())
-	model := tuiapp.New(session, notes, cancel)
+	model := tuiapp.New(session, notesFor, cancel)
 	tb := tuicore.NewTestBackend(110, 32)
 	tr := &traceLog{}
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(tb),

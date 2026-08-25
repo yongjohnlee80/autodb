@@ -1,8 +1,6 @@
 package webserver
 
 import (
-	"path/filepath"
-
 	"github.com/yongjohnlee80/autodb/core/config"
 )
 
@@ -30,33 +28,6 @@ import (
 // name whose owner should be told, not silently given a different directory than
 // the one their username implies. Two users whose names sanitise to the same
 // string would otherwise share notes.
-// noteRootForMode resolves the root for one session under the configured mode
-// (ADR-0064 §2.3).
-//
-// workspace mode returns the SHARED base — the tree the terminal TUI writes,
-// containing ws-* directories — and is only reachable for the bound subject,
-// because Gateway.subjectAllowed refused everyone else before any session
-// existed. per-user mode keeps ADR-0061 §2.8's isolation unchanged.
-func noteRootForMode(base, subject string, mode config.NotesMode) (string, error) {
-	if mode == config.NotesWorkspace {
-		// Still validated: the subject is not interpolated into a path here, but a
-		// caller reaching this with an unsafe name means an admission bug upstream,
-		// and failing loudly beats reading the shared tree on its behalf.
-		if err := validSubject(subject); err != nil {
-			return "", err
-		}
-		return base, nil
-	}
-	return noteRootFor(base, subject)
-}
-
-func noteRootFor(base, subject string) (string, error) {
-	if err := validSubject(subject); err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "u-"+subject), nil
-}
-
 // validSubject delegates to the ONE canonical predicate. It used to live here and
 // run only when a root was resolved — which is after login, after bootstrap, after
 // the pool and after the ticket — so a configured subject of `../alice` reached
