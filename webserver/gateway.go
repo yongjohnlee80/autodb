@@ -353,6 +353,7 @@ func (g *Gateway) modelOptions(root string) []tuiapp.Option {
 	return []tuiapp.Option{
 		tuiapp.WithAbout(aboutForRoot(g.cfg.About, root)),
 		tuiapp.WithNoteView(tuiapp.NoteView{Shared: false}),
+		tuiapp.WithLegacyNotes(g.cfg.NotesRoot),
 		tuiapp.WithFrontend(tuiapp.FrontendWeb),
 	}
 }
