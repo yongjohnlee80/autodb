@@ -129,7 +129,7 @@ func (l *LegacyNotes) Delete(wsID int64, name string) error {
 	// Unlinked RELATIVE to a descriptor for the workspace directory, which is
 	// opened refusing a symlink — a path-based Remove here deleted a file outside
 	// the base entirely when `<base>/ws-N` was replaced with a symlink.
-	_, err = removeAt(l.dir(wsID), clean)
+	_, err = removeAt(l.base, filepath.Join(fmt.Sprintf("ws-%d", wsID), clean))
 	return err
 }
 
