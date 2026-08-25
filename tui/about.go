@@ -90,7 +90,7 @@ func WithNoteView(v NoteView) Option { return func(m *Model) { m.noteView = v } 
 func (m *Model) NoteViewOf() NoteView { return m.noteView }
 
 // AboutNotesDir reports the note root About will display, for the same reason.
-func (m *Model) AboutNotesDir() string { return m.about.NotesDir }
+func (m *Model) AboutNotesDir() string { return m.notesLine(m.about) }
 
 // canRestartDaemon reports whether this frontend may offer daemon-restart
 // actions.
@@ -156,9 +156,26 @@ func (m *Model) aboutRows() [][2]string {
 	}
 	return append(rows,
 		[2]string{"meta store", meta},
-		[2]string{"notes", info.NotesDir},
+		[2]string{"notes", m.notesLine(info)},
 		[2]string{"config", cfg},
 	)
+}
+
+// notesLine reports the root this session ACTUALLY reads, which is not the
+// configured base.
+//
+// Before sign-in there is no identity and therefore no personal root, so About
+// says so rather than naming the base: showing `<base>` would name a directory
+// this session never reads and would suggest the ownerless tree is still in use
+// (ADR-0068 criteria 20-21).
+func (m *Model) notesLine(info AboutInfo) string {
+	if m.notes != nil {
+		return m.notes.Root()
+	}
+	if info.NotesDir == "" {
+		return "(none configured)"
+	}
+	return "(resolved after sign-in — notes are per user)"
 }
 
 // backendBuildLine compares the RUNNING daemon's build against this

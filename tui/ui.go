@@ -32,7 +32,10 @@ type Model struct {
 	// legacy reads the ownerless pre-ADR-0068 tree. It is NOT identity-scoped —
 	// those files predate ownership — and is read-and-delete only by type.
 	legacy *LegacyNotes
-	quit   func()
+	// identityEpoch increments whenever the signed-in identity changes. Delayed
+	// results captured under an older epoch are discarded rather than applied.
+	identityEpoch uint64
+	quit          func()
 
 	ctx  *tui.Context
 	host *widget.OverlayHost
@@ -359,8 +362,32 @@ func (m *Model) resetServerUI() {
 	m.results.Clear()
 	m.activeWs, m.activeConn, m.activeConnNm = 0, 0, ""
 	m.refreshQueryTitle()
+	m.retireIdentity()
 	m.hadAuth = false
 	m.refreshStatus()
+}
+
+// retireIdentity ends the current identity's access to notes.
+//
+// The ONE place a store stops being current, so every path that loses or changes
+// identity — logout, switch-user, token loss, instance change — releases it the
+// same way. The store itself then refuses further I/O, which is what stops a
+// closure that outlived the UI it belonged to: dismissing a modal does not stop
+// its callback, and the callback holds a plausible body and a valid-looking
+// handle (ADR-0068 §2.2).
+//
+// The epoch is bumped so results still in flight can tell they are stale. It is
+// deliberately separate from the store: the store refuses WRITES, the epoch
+// discards RESULTS, and a delayed read that lands after a switch must not repaint
+// the new identity's UI with the old one's data.
+func (m *Model) retireIdentity() {
+	if m.notes != nil {
+		m.notes.Retire()
+	}
+	m.notes = nil
+	m.identityEpoch++
+	m.curNote = nil
+	m.noteDirty = false
 }
 
 // requireNotes returns the personal store, or reports why there is none.
@@ -387,7 +414,9 @@ func (m *Model) afterLogin() {
 	// at all rather than falling back to the ownerless base — failing closed is
 	// the contract, because a fallback would reintroduce the shared tree at
 	// exactly the moment identity is uncertain (§2.2).
-	m.notes = nil
+	// The PREVIOUS identity is retired before the next one exists, so there is no
+	// window in which two identities' stores are both usable.
+	m.retireIdentity()
 	if m.notesFor != nil {
 		notes, err := m.notesFor(u.Name)
 		if err != nil {
@@ -425,6 +454,9 @@ func (m *Model) checkAuth() {
 		return
 	}
 	m.hadAuth = false
+	// Losing the token loses the identity: retire before anything can be written
+	// under an authority that no longer exists.
+	m.retireIdentity()
 	m.setStatus("session expired — login required")
 	m.refreshStatus()
 	if m.modalOpen() {
@@ -517,6 +549,34 @@ func (m *Model) openLogin() {
 		// terminal here: end this browser App and let the user re-attach through the
 		// gateway, which is where a login belongs.
 		m.endForLostAuth()
+		return
+	}
+	// A SWITCH with unsaved work resolves it under the OLD identity first.
+	//
+	// Carrying a dirty buffer across an identity boundary has no correct
+	// destination: saving it afterwards writes one person's work into another's
+	// tree, and dropping it silently loses it. So the choice is made here, while
+	// the old store is still current — and CANCEL means the switch does not
+	// happen at all, not that it happens without saving (ADR-0068 §2.2).
+	if m.noteDirty && m.notes != nil {
+		name := "this note"
+		if m.curNote != nil {
+			name = m.curNote.Name
+		}
+		m.openLeader("unsaved "+name+" — before switching identity", []leaderEntry{
+			{'s', "save it as " + m.notes.Subject() + ", then switch", func() {
+				m.saveNote()
+				if !m.noteDirty {
+					m.openLogin()
+				}
+			}},
+			{'d', "discard it and switch", func() {
+				m.noteDirty = false
+				m.curNote = nil
+				m.openLogin()
+			}},
+			{'c', "cancel — stay signed in as " + m.notes.Subject(), func() {}},
+		})
 		return
 	}
 	m.authPromptPending = false
