@@ -199,10 +199,25 @@ func (e *explorer) HandleEvent(ev tui.Event) bool {
 				return true
 			}
 		}
+		// `m` MIGRATES a legacy note into this identity's own space. Per-note and
+		// user-driven: the files carry no owner, so the person who recognises the
+		// note is the only one who can say it is theirs (ADR-0068 §2.4 as amended).
+		if k.Text == "m" {
+			if n, sel := e.tree.Selected(); sel && strings.HasPrefix(n.ID(), "lnote:") {
+				e.model.migrateLegacyNote(n.ID())
+				return true
+			}
+		}
 		// `d` deletes the note under the cursor (confirmed).
 		if k.Text == "d" {
 			if n, sel := e.tree.Selected(); sel && strings.HasPrefix(n.ID(), "note:") {
 				e.confirmDeleteNote(n.ID())
+				return true
+			}
+			// Deleting is how the deprecated tree drains, so it is offered on the
+			// same key rather than hidden behind a different one.
+			if n, sel := e.tree.Selected(); sel && strings.HasPrefix(n.ID(), "lnote:") {
+				e.confirmDeleteLegacy(n.ID())
 				return true
 			}
 		}
@@ -233,7 +248,12 @@ func (e *explorer) Reload() {
 		if ns := e.model.notes; ns != nil {
 			orphans, _ = ns.ListWorkspaceDirs()
 		}
-		return wsLoaded{gen: bound.Gen(), seq: seq, wss: wss, noteDirs: orphans}, nil
+		// The legacy tree is read from the BASE, independently of the personal
+		// store: it is not this identity's data, it is data from before identity
+		// existed.
+		legacy, _ := e.model.legacy.Workspaces()
+		return wsLoaded{gen: bound.Gen(), seq: seq, wss: wss,
+			noteDirs: orphans, legacyDirs: legacy}, nil
 	})
 }
 
@@ -260,10 +280,11 @@ func (e *explorer) Clear() {
 }
 
 type wsLoaded struct {
-	gen      uint64
-	seq      uint64
-	wss      []WorkspaceInfo
-	noteDirs []int64
+	gen        uint64
+	seq        uint64
+	wss        []WorkspaceInfo
+	noteDirs   []int64
+	legacyDirs []int64
 }
 
 func (e *explorer) applyWorkspaces(l wsLoaded) {
@@ -292,14 +313,20 @@ func (e *explorer) applyWorkspaces(l wsLoaded) {
 		wsNode.SetChildren(0, []*widget.TreeNode{connsNode, notesNode})
 		roots = append(roots, wsNode)
 	}
-	// Local note folders whose workspace no longer exists server-side
-	// surface as detached (ADR-0057 §5 — never silently invisible).
-	for _, id := range l.noteDirs {
-		if !known[id] {
-			d := widget.NewTreeNode(fmt.Sprintf("detached:%d", id),
-				fmt.Sprintf("detached notes (ws-%d)", id))
-			roots = append(roots, d)
-		}
+	// The LEGACY section, replacing the old detached-notes node.
+	//
+	// Pre-ADR-0068 notes live at `<base>/ws-<id>/` and carry no owner, so the
+	// personal tree cannot show them and nothing can decide whose they are. They
+	// would otherwise simply vanish from the UI while sitting on disk — which is
+	// the one outcome worse than showing them, because a user who cannot see a
+	// file cannot rescue it. So they get a labelled home, and the user resolves
+	// each one: MIGRATE it into their own space, or DELETE it (ADR-0068 §2.4,
+	// amended by Johno 2026-08-25 — per-note and user-driven, rather than a bulk
+	// migration whose ownership nobody can attest).
+	for _, id := range l.legacyDirs {
+		d := widget.NewTreeNode(fmt.Sprintf("legacy:%d", id),
+			fmt.Sprintf("legacy notes (ws-%d) — deprecated", id))
+		roots = append(roots, d)
 	}
 	if len(roots) == 0 {
 		empty := widget.NewTreeNode("empty", "no workspaces — SPC w to create one", widget.WithLeaf())
@@ -318,6 +345,19 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 	}
 	e.ctx.Go(func(c context.Context) (any, error) {
 		switch {
+		case strings.HasPrefix(id, "legacy:"):
+			wsID, _ := strconv.ParseInt(id[strings.Index(id, ":")+1:], 10, 64)
+			names, lerr := e.model.legacy.List(wsID)
+			if lerr != nil {
+				return fail(lerr), nil
+			}
+			kids := make([]*widget.TreeNode, 0, len(names))
+			for _, n := range names {
+				kids = append(kids, widget.NewTreeNode(
+					fmt.Sprintf("lnote:%d:%s", wsID, encSeg(n)), n, widget.WithLeaf()))
+			}
+			return treeLoaded{node: node, gen: gen, sgen: sgen, kids: kids}, nil
+
 		case strings.HasPrefix(id, "notes:"), strings.HasPrefix(id, "detached:"):
 			wsID, _ := strconv.ParseInt(id[strings.Index(id, ":")+1:], 10, 64)
 			ns, ok := e.model.requireNotes()
@@ -562,11 +602,49 @@ func (e *explorer) activate(n *widget.TreeNode) {
 			e.model.noteConnFromNode(id)
 			e.model.loadScaffold("SELECT * FROM " + q + " LIMIT 100")
 		}
+	case strings.HasPrefix(id, "lnote:"):
+		wsID, name, ok := parseLegacyID(id)
+		if ok {
+			e.model.openLegacyNote(wsID, name)
+		}
 	case strings.HasPrefix(id, "note:"):
 		parts := strings.SplitN(id, ":", 3)
 		wsID, _ := strconv.ParseInt(parts[1], 10, 64)
 		e.model.openNote(wsID, decSeg(parts[2]))
 	}
+}
+
+// parseLegacyID splits "lnote:<ws>:<file>".
+func parseLegacyID(id string) (int64, string, bool) {
+	parts := strings.SplitN(id, ":", 3)
+	if len(parts) != 3 {
+		return 0, "", false
+	}
+	ws, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return 0, "", false
+	}
+	return ws, decSeg(parts[2]), true
+}
+
+// confirmDeleteLegacy asks before removing a legacy note. Confirmed because it
+// is destructive and the file has no other copy.
+func (e *explorer) confirmDeleteLegacy(id string) {
+	wsID, name, ok := parseLegacyID(id)
+	if !ok {
+		return
+	}
+	e.model.openLeader("delete this legacy note?", []leaderEntry{
+		{'y', "delete " + name, func() {
+			if err := e.model.legacy.Delete(wsID, name); err != nil {
+				e.model.setStatus("delete failed: " + err.Error())
+				return
+			}
+			e.model.setOK("deleted " + name + " from the legacy tree")
+			e.Reload()
+		}},
+		{'n', "keep it", func() {}},
+	})
 }
 
 // connIDOf parses "conn:<ws>:<id>".

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/yongjohnlee80/autodb/core/config"
 )
@@ -41,6 +42,52 @@ var noteName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]*$`)
 type NoteStore struct {
 	root    string
 	subject string
+
+	// retired is set when this store's identity is no longer current. A retired
+	// store refuses ALL I/O: a retained closure that reaches it after a switch
+	// must fail rather than write, and it must fail rather than quietly write
+	// somewhere else (ADR-0068 §2.2).
+	mu      sync.Mutex
+	retired bool
+}
+
+// ErrRetired reports I/O attempted through a store whose identity has been
+// retired — a logout, a switch, or a lost token.
+var ErrRetired = errors.New("tui: notes: this identity's store has been retired")
+
+// ErrForeignNote reports a Note handle minted by a DIFFERENT store. It is the
+// cross-identity guard: a handle carries the store that created it, so
+// bob.Save(aliceNote, …) is refused instead of writing Alice's body into Bob's
+// tree — which is exactly what it did before this ADR (lector's r1 probe).
+var ErrForeignNote = errors.New("tui: notes: note belongs to another identity's store")
+
+// Retire marks the store unusable. Idempotent.
+func (s *NoteStore) Retire() {
+	s.mu.Lock()
+	s.retired = true
+	s.mu.Unlock()
+}
+
+// alive reports whether the store may still perform I/O.
+func (s *NoteStore) alive() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.retired {
+		return ErrRetired
+	}
+	return nil
+}
+
+// owns reports whether this store minted n, and that it is still alive. Every
+// write path checks it; a handle is not a capability on its own.
+func (s *NoteStore) owns(n *Note) error {
+	if err := s.alive(); err != nil {
+		return err
+	}
+	if n == nil || n.store != s {
+		return ErrForeignNote
+	}
+	return nil
 }
 
 // NewPersonalNotes opens the note store for one canonical subject under base:
@@ -101,6 +148,11 @@ type Note struct {
 	WorkspaceID int64
 	Name        string // validated display name, ".sql" included
 
+	// store is the NoteStore that minted this handle. A Note is scoped to one
+	// identity: without this, a handle loaded as alice could be saved through
+	// bob's store and land in u-bob (ADR-0068 §2.2, criterion 8).
+	store *NoteStore
+
 	existed    bool
 	loadedDev  uint64
 	loadedIno  uint64
@@ -125,6 +177,9 @@ func CleanName(name string) (string, error) {
 // List returns the workspace's note names (sorted by the OS listing).
 // A missing directory is an empty list, never an error.
 func (s *NoteStore) List(wsID int64) ([]string, error) {
+	if err := s.alive(); err != nil {
+		return nil, err
+	}
 	ents, err := os.ReadDir(s.dir(wsID))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -144,11 +199,14 @@ func (s *NoteStore) List(wsID int64) ([]string, error) {
 // Load reads a note through a no-follow descriptor, capturing its identity
 // and content hash for the conflict check at save time.
 func (s *NoteStore) Load(wsID int64, name string) (*Note, string, error) {
+	if err := s.alive(); err != nil {
+		return nil, "", err
+	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return nil, "", err
 	}
-	n := &Note{WorkspaceID: wsID, Name: clean}
+	n := &Note{WorkspaceID: wsID, Name: clean, store: s}
 	path := filepath.Join(s.dir(wsID), clean)
 
 	f, err := openNoFollow(path)
@@ -180,6 +238,14 @@ func (s *NoteStore) Load(wsID int64, name string) (*Note, string, error) {
 // check-to-rename instant remains. On success the note's identity
 // refreshes to the saved content.
 func (s *NoteStore) Save(n *Note, body string) error {
+	// The handle must belong to THIS store, and this store must still be the
+	// current identity. Checked before anything touches the filesystem: a
+	// retained closure that reaches here after a switch has a valid-looking
+	// handle and a plausible body, and the only thing distinguishing it from a
+	// legitimate save is provenance (ADR-0068 §2.2).
+	if err := s.owns(n); err != nil {
+		return err
+	}
 	dir := s.dir(n.WorkspaceID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -270,6 +336,9 @@ func (s *NoteStore) Save(n *Note, body string) error {
 // anything was created at all (Johno, M6 manual testing). Refuses a name
 // already in use so `a` never silently adopts someone else's file.
 func (s *NoteStore) Create(wsID int64, name string) (*Note, error) {
+	if err := s.alive(); err != nil {
+		return nil, err
+	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return nil, err
@@ -302,6 +371,9 @@ func (s *NoteStore) Create(wsID int64, name string) (*Note, error) {
 
 // Delete removes a note (no conflict check — an explicit user action).
 func (s *NoteStore) Delete(wsID int64, name string) error {
+	if err := s.alive(); err != nil {
+		return err
+	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return err
