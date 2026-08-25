@@ -383,14 +383,20 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 			}
 			names, err := noteCap.store.List(wsID)
 			if err != nil {
-				return fail(err), nil
+				// Tagged with the identity too: an ERROR from a retired identity
+				// must not surface on the next one's tree either.
+				f := fail(err)
+				f.epoch = noteCap.epoch
+				return f, nil
 			}
 			kids := make([]*widget.TreeNode, 0, len(names))
 			for _, n := range names {
 				kids = append(kids, widget.NewTreeNode(
 					fmt.Sprintf("note:%d:%s", wsID, encSeg(n)), n, widget.WithLeaf()))
 			}
-			return treeLoaded{node: node, gen: gen, sgen: sgen, kids: kids}, nil
+			// THIS result is one identity's data, so it carries the epoch it was
+			// issued under; the daemon-derived branches deliberately do not.
+			return treeLoaded{node: node, gen: gen, sgen: sgen, epoch: noteCap.epoch, kids: kids}, nil
 
 		case strings.HasPrefix(id, "conn:"):
 			connID := connIDOf(id)
@@ -490,7 +496,14 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 }
 
 type treeLoaded struct {
-	node   *widget.TreeNode
+	node *widget.TreeNode
+	// epoch is the IDENTITY this load was issued under. sgen tracks the session,
+	// which retirement does not advance — so a personal-notes child result issued
+	// as alice could still install under bob (lector r2 P4).
+	//
+	// Zero means "not identity-scoped": a connections or schema listing comes from
+	// the daemon and is not one person's data.
+	epoch  uint64
 	gen    uint64
 	sgen   uint64
 	kids   []*widget.TreeNode
@@ -523,6 +536,9 @@ func (e *explorer) applyTask(tr tui.TaskResult) bool {
 			return true
 		}
 		return false
+	}
+	if l.epoch != 0 && !e.model.current(l.epoch) {
+		return true // issued by an identity that is no longer signed in
 	}
 	if l.sgen != e.model.session.Gen() {
 		return true // a reconnect superseded this load; the gen guard below

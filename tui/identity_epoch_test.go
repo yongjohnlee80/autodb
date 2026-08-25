@@ -9,6 +9,8 @@ package tui
 
 import (
 	"testing"
+
+	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
 func TestDelayedLoadFromAPreviousIdentityIsDiscarded(t *testing.T) {
@@ -73,5 +75,49 @@ func TestLoadFromTheCurrentIdentityIsApplied(t *testing.T) {
 	})
 	if got != "alice's own note" {
 		t.Errorf("a current-identity load was not applied: %q", got)
+	}
+}
+
+// lector r2 P4 — a delayed PERSONAL-NOTES child result must not install under a
+// later identity. sgen tracks the session, which retirement does not advance, so
+// it could not tell alice's listing from bob's.
+func TestDelayedPersonalTreeResultFromAPreviousIdentityIsDiscarded(t *testing.T) {
+	m, _, sync := mounted(t)
+	base := t.TempDir()
+	alice, err := NewPersonalNotes(base, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var applied bool
+	sync(func() {
+		m.notes = alice
+		cap, _ := m.captureNotes()
+
+		// Alice's listing, issued now.
+		node := widget.NewTreeNode("notes:1", "notes")
+		m.explorer.tree.SetRoots(node)
+		delayed := treeLoaded{node: node, gen: 0, sgen: m.session.Gen(), epoch: cap.epoch,
+			kids: []*widget.TreeNode{
+				widget.NewTreeNode("note:1:alice_secret.sql", "alice_secret.sql", widget.WithLeaf()),
+			}}
+
+		// Alice goes; bob arrives.
+		m.retireIdentity()
+		bob, berr := NewPersonalNotes(base, "bob")
+		if berr != nil {
+			t.Fatal(berr)
+		}
+		m.notes = bob
+
+		m.explorer.applyTask(taskResultOf(delayed))
+		for _, n := range m.explorer.tree.VisibleRows() {
+			if n.ID() == "note:1:alice_secret.sql" {
+				applied = true
+			}
+		}
+	})
+	if applied {
+		t.Error("a previous identity's note listing was installed on the current identity's tree")
 	}
 }

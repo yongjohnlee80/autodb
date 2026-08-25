@@ -25,7 +25,7 @@ func TestNotesRoundTripAndModes(t *testing.T) {
 	if err := s.Save(n, "SELECT 1;"); err != nil {
 		t.Fatalf("save: %v", err)
 	}
-	path := filepath.Join(s.dir(7), "queries.sql")
+	path := filepath.Join(filepath.Join(s.root, s.dir(7)), "queries.sql")
 	st, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +33,7 @@ func TestNotesRoundTripAndModes(t *testing.T) {
 	if st.Mode().Perm() != 0o600 {
 		t.Fatalf("file mode = %v, want 0600", st.Mode().Perm())
 	}
-	dst, _ := os.Stat(s.dir(7))
+	dst, _ := os.Stat(filepath.Join(s.root, s.dir(7)))
 	if dst.Mode().Perm() != 0o700 {
 		t.Fatalf("dir mode = %v, want 0700", dst.Mode().Perm())
 	}
@@ -109,14 +109,14 @@ func TestNotesConflictDetection(t *testing.T) {
 
 func TestNotesRefuseSymlink(t *testing.T) {
 	s := testStore(t)
-	if err := os.MkdirAll(s.dir(3), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(s.root, s.dir(3)), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	target := filepath.Join(t.TempDir(), "outside.sql")
 	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(target, filepath.Join(s.dir(3), "link.sql")); err != nil {
+	if err := os.Symlink(target, filepath.Join(filepath.Join(s.root, s.dir(3)), "link.sql")); err != nil {
 		t.Skip("symlinks unavailable:", err)
 	}
 	if _, _, err := s.Load(3, "link"); err == nil {
