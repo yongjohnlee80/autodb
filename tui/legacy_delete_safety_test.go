@@ -8,6 +8,7 @@ package tui
 // directory.
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,5 +68,37 @@ func TestPersonalDeleteRefusesASymlinkedWorkspaceDir(t *testing.T) {
 	_ = ns.Delete(1, "victim.sql")
 	if _, serr := os.Stat(victim); serr != nil {
 		t.Fatal("the personal store deleted a file outside its root")
+	}
+}
+
+// Criterion 36 — the legacy space is open to every AUTHENTICATED user, not to
+// nobody. Deleting is destructive, so it needs an identity even though reading
+// does not distinguish between them.
+func TestLegacyDeleteRequiresSignIn(t *testing.T) {
+	m := unconnected()
+	base := t.TempDir()
+	p := seedLegacy(t, base, 1, "track.sql", "select 1")
+	m.legacy = OpenLegacyNotes(base)
+	m.notes = nil // not signed in
+
+	m.explorer.confirmDeleteLegacy("lnote:1:" + encSeg("track.sql"))
+
+	if _, err := os.Stat(p); err != nil {
+		t.Errorf("a legacy note was deleted with nobody signed in: %v", err)
+	}
+}
+
+// Criterion 37 — a note that was unlinked but not durably synced is reported as
+// UNCERTAIN, not as a failure, because the file is already gone and a retry
+// would act on whatever next holds that name.
+func TestRemovedNotDurableIsDistinctFromFailure(t *testing.T) {
+	if !errors.Is(ErrRemovedNotDurable, ErrRemovedNotDurable) {
+		t.Fatal("sentinel is not comparable")
+	}
+	// A delete failure must NOT be mistaken for the uncertain case.
+	base := t.TempDir()
+	err := OpenLegacyNotes(base).Delete(1, "missing.sql")
+	if errors.Is(err, ErrRemovedNotDurable) {
+		t.Error("an ordinary absent-file delete was reported as a durability partial")
 	}
 }

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -650,13 +651,28 @@ func (e *explorer) confirmDeleteLegacy(id string) {
 	if !ok {
 		return
 	}
+	// Reading and deleting the legacy space is open to every AUTHENTICATED user —
+	// not to nobody (ADR-0068 rev 10, criterion 36). requireNotes is the sign-in
+	// test: no identity, no personal store, no destructive action.
+	if _, ok := e.model.requireNotes(); !ok {
+		return
+	}
 	e.model.openLeader("delete this legacy note?", []leaderEntry{
 		{'y', "delete " + name, func() {
-			if err := e.model.legacy.Delete(wsID, name); err != nil {
+			if _, ok := e.model.requireNotes(); !ok {
+				return // signed out between the prompt and the confirmation
+			}
+			switch err := e.model.legacy.Delete(wsID, name); {
+			case errors.Is(err, ErrRemovedNotDurable):
+				// Gone, but possibly not durably. Reported as uncertain rather than
+				// as a failure, because a retry would act on a different file.
+				e.model.setStatus(name + " was removed, but may not survive a crash: " + err.Error())
+			case err != nil:
 				e.model.setStatus("delete failed: " + err.Error())
 				return
+			default:
+				e.model.setOK("deleted " + name + " from the legacy tree")
 			}
-			e.model.setOK("deleted " + name + " from the legacy tree")
 			e.Reload()
 		}},
 		{'n', "keep it", func() {}},
