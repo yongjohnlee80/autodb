@@ -390,6 +390,33 @@ func (m *Model) retireIdentity() {
 	m.noteDirty = false
 }
 
+// notesCapability is what a background task may do with notes: a specific
+// store, and the identity epoch it belongs to.
+//
+// It exists because "read m.notes when the task runs" is two bugs at once. The
+// field is Model state owned by the loop, so a worker reading it is a data race;
+// and by the time the worker runs, the identity may have changed, so the value
+// it reads may be a store the user has since switched away from. Captured ON THE
+// LOOP, carried into the task, and re-checked against the epoch before the
+// result is applied.
+type notesCapability struct {
+	store *NoteStore
+	epoch uint64
+}
+
+// captureNotes takes a capability for a background task. Loop goroutine only.
+func (m *Model) captureNotes() (notesCapability, bool) {
+	ns, ok := m.requireNotes()
+	if !ok {
+		return notesCapability{}, false
+	}
+	return notesCapability{store: ns, epoch: m.identityEpoch}, true
+}
+
+// current reports whether a captured epoch is still the signed-in identity, so a
+// delayed result from a previous one is discarded rather than applied.
+func (m *Model) current(epoch uint64) bool { return epoch == m.identityEpoch }
+
 // requireNotes returns the personal store, or reports why there is none.
 //
 // Before sign-in there is no authenticated subject, so there is no personal tree
@@ -685,10 +712,14 @@ func (m *Model) runSQL(sql string) {
 // --- notes ------------------------------------------------------------------------
 
 type noteLoaded struct {
-	gen  uint64
-	note *Note
-	body string
-	err  error
+	// epoch is the identity this load was issued under. noteGen alone is not
+	// enough: retirement does not advance it, so a load from a previous identity
+	// could still match and be applied.
+	epoch uint64
+	gen   uint64
+	note  *Note
+	body  string
+	err   error
 }
 
 // openNote guards dirty edits (save/discard/cancel) before loading; the
@@ -713,13 +744,20 @@ func (m *Model) openNote(wsID int64, name string) {
 }
 
 func (m *Model) doOpenNote(wsID int64, name string) {
+	// Through the capability, not the field: this used to read m.notes directly,
+	// so it could launch a task against a nil store after a factory failure or
+	// before sign-in, and it carried no epoch — a load issued as one identity
+	// could repaint the next one's editor (lector, reproduced).
+	cap, ok := m.captureNotes()
+	if !ok {
+		return
+	}
 	m.activeWs = wsID
 	m.noteGen++
 	gen := m.noteGen
-	notes := m.notes
 	m.ctx.Go(func(c context.Context) (any, error) {
-		n, body, err := notes.Load(wsID, name)
-		return noteLoaded{gen: gen, note: n, body: body, err: err}, nil
+		n, body, err := cap.store.Load(wsID, name)
+		return noteLoaded{gen: gen, epoch: cap.epoch, note: n, body: body, err: err}, nil
 	})
 }
 
@@ -1271,6 +1309,9 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 		m.setOK(execSummary(v.res))
 		return true
 	case noteLoaded:
+		if !m.current(v.epoch) {
+			return true // issued by an identity that is no longer signed in
+		}
 		if v.gen != m.noteGen {
 			return true // a newer open superseded this load
 		}
