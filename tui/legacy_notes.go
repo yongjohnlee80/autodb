@@ -116,6 +116,14 @@ func (l *LegacyNotes) Read(wsID int64, name string) (string, error) {
 	return string(body), nil
 }
 
+// ErrRemovedNotDurable reports that a note WAS unlinked but the directory could
+// not be synced, so the removal may not survive a crash.
+//
+// Distinct from a delete failure on purpose (ADR-0068 rev 10, criterion 37): the
+// file is already gone, so retrying would act on whatever next holds that name.
+// The caller reports uncertainty; it does not retry.
+var ErrRemovedNotDurable = errors.New("tui: notes: removed, but the directory could not be synced")
+
 // Delete removes a legacy note. This is how the deprecated tree drains, so it is
 // deliberately permitted — and it is the ONLY mutation this type offers.
 func (l *LegacyNotes) Delete(wsID int64, name string) error {
@@ -129,7 +137,11 @@ func (l *LegacyNotes) Delete(wsID int64, name string) error {
 	// Unlinked RELATIVE to a descriptor for the workspace directory, which is
 	// opened refusing a symlink — a path-based Remove here deleted a file outside
 	// the base entirely when `<base>/ws-N` was replaced with a symlink.
-	_, err = removeAt(l.base, filepath.Join(fmt.Sprintf("ws-%d", wsID), clean))
+	removed, err := removeAt(l.base, filepath.Join(fmt.Sprintf("ws-%d", wsID), clean))
+	if err != nil && removed {
+		// Unlinked, but not durably. Not a failure to retry.
+		return fmt.Errorf("%w: %v", ErrRemovedNotDurable, err)
+	}
 	return err
 }
 
