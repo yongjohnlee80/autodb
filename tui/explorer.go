@@ -240,6 +240,12 @@ func (e *explorer) Reload() {
 	bound := e.model.session.Bind() // pin the epoch at issuance
 	e.seq++
 	seq := e.seq
+	// Captured ON THE LOOP. Reading e.model.notes inside the worker was a data
+	// race on Model state and could observe a store the user had already switched
+	// away from (lector).
+	cap, haveNotes := e.model.captureNotes()
+	legacyReader := e.model.legacy
+	epoch := e.model.identityEpoch
 	e.ctx.Go(func(c context.Context) (any, error) {
 		wss, err := bound.Workspaces(c)
 		if err != nil {
@@ -247,14 +253,14 @@ func (e *explorer) Reload() {
 		}
 		// No store before sign-in: an empty list, never the ownerless base.
 		var orphans []int64
-		if ns := e.model.notes; ns != nil {
-			orphans, _ = ns.ListWorkspaceDirs()
+		if haveNotes {
+			orphans, _ = cap.store.ListWorkspaceDirs()
 		}
 		// The legacy tree is read from the BASE, independently of the personal
 		// store: it is not this identity's data, it is data from before identity
 		// existed.
-		legacy, _ := e.model.legacy.Workspaces()
-		return wsLoaded{gen: bound.Gen(), seq: seq, wss: wss,
+		legacy, _ := legacyReader.Workspaces()
+		return wsLoaded{gen: bound.Gen(), seq: seq, epoch: epoch, wss: wss,
 			noteDirs: orphans, legacyDirs: legacy}, nil
 	})
 }
@@ -282,6 +288,8 @@ func (e *explorer) Clear() {
 }
 
 type wsLoaded struct {
+	// epoch is the identity this listing was issued under.
+	epoch      uint64
 	gen        uint64
 	seq        uint64
 	wss        []WorkspaceInfo
@@ -290,6 +298,9 @@ type wsLoaded struct {
 }
 
 func (e *explorer) applyWorkspaces(l wsLoaded) {
+	if !e.model.current(l.epoch) {
+		return // listed under an identity that is no longer signed in
+	}
 	if l.gen != e.model.session.Gen() {
 		return // stale connection generation
 	}
@@ -342,6 +353,10 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 	id := node.ID()
 	sess := e.model.session.Bind() // pin the epoch at issuance
 	sgen := sess.Gen()
+	// Identity state captured ON THE LOOP, like the session epoch above it: the
+	// worker must not read Model fields (lector).
+	legacyReader := e.model.legacy
+	noteCap, haveNotes := e.model.captureNotes()
 	fail := func(err error) treeLoaded {
 		return treeLoaded{node: node, gen: gen, sgen: sgen, err: WireErrorMessage(err)}
 	}
@@ -349,7 +364,7 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 		switch {
 		case strings.HasPrefix(id, "legacy:"):
 			wsID, _ := strconv.ParseInt(id[strings.Index(id, ":")+1:], 10, 64)
-			names, lerr := e.model.legacy.List(wsID)
+			names, lerr := legacyReader.List(wsID)
 			if lerr != nil {
 				return fail(lerr), nil
 			}
@@ -362,11 +377,10 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 
 		case strings.HasPrefix(id, "notes:"), strings.HasPrefix(id, "detached:"):
 			wsID, _ := strconv.ParseInt(id[strings.Index(id, ":")+1:], 10, 64)
-			ns, ok := e.model.requireNotes()
-			if !ok {
+			if !haveNotes {
 				return treeLoaded{node: node, gen: gen, sgen: sgen}, nil
 			}
-			names, err := ns.List(wsID)
+			names, err := noteCap.store.List(wsID)
 			if err != nil {
 				return fail(err), nil
 			}

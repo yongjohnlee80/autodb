@@ -48,7 +48,12 @@ type NoteStore struct {
 	// must fail rather than write, and it must fail rather than quietly write
 	// somewhere else (ADR-0068 §2.2).
 	mu      sync.Mutex
+	drained sync.Cond
 	retired bool
+	// active counts operations ADMITTED but not yet finished. Retire waits for
+	// it to reach zero, so no filesystem effect is still in flight when the next
+	// identity is installed.
+	active int
 }
 
 // ErrRetired reports I/O attempted through a store whose identity has been
@@ -61,14 +66,47 @@ var ErrRetired = errors.New("tui: notes: this identity's store has been retired"
 // tree — which is exactly what it did before this ADR (lector's r1 probe).
 var ErrForeignNote = errors.New("tui: notes: note belongs to another identity's store")
 
-// Retire marks the store unusable. Idempotent.
+// Retire closes the store to new work and WAITS for admitted work to finish.
+// Idempotent — several paths can lose an identity at once.
+//
+// Waiting is the point. A flag alone only stops operations that have not started:
+// `alive()` released its mutex before the I/O it guarded, so Retire could return
+// while an admitted Save was still writing, and the caller would install the next
+// identity believing the previous one was finished (lector r1 finding 4).
 func (s *NoteStore) Retire() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.retired = true
+	for s.active > 0 {
+		s.drained.Wait()
+	}
+}
+
+// begin admits one operation, or refuses. Every public method that touches the
+// filesystem is bracketed by begin/end, so "retired" means "no effect of mine is
+// still in progress" rather than merely "no new call will start".
+func (s *NoteStore) begin() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.retired {
+		return ErrRetired
+	}
+	s.active++
+	return nil
+}
+
+// end releases an admitted operation and wakes a waiting Retire.
+func (s *NoteStore) end() {
+	s.mu.Lock()
+	s.active--
+	if s.active == 0 {
+		s.drained.Broadcast()
+	}
 	s.mu.Unlock()
 }
 
-// alive reports whether the store may still perform I/O.
+// alive reports whether the store may still perform I/O, WITHOUT admitting an
+// operation. Only for callers that do no I/O of their own.
 func (s *NoteStore) alive() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -81,9 +119,6 @@ func (s *NoteStore) alive() error {
 // owns reports whether this store minted n, and that it is still alive. Every
 // write path checks it; a handle is not a capability on its own.
 func (s *NoteStore) owns(n *Note) error {
-	if err := s.alive(); err != nil {
-		return err
-	}
 	if n == nil || n.store != s {
 		return ErrForeignNote
 	}
@@ -113,7 +148,9 @@ func NewPersonalNotes(base, subject string) (*NoteStore, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("tui: notes root: %w", err)
 	}
-	return &NoteStore{root: root, subject: subject}, nil
+	s := &NoteStore{root: root, subject: subject}
+	s.drained.L = &s.mu
+	return s, nil
 }
 
 // NotesFactory builds the personal store for one canonical subject.
@@ -177,9 +214,10 @@ func CleanName(name string) (string, error) {
 // List returns the workspace's note names (sorted by the OS listing).
 // A missing directory is an empty list, never an error.
 func (s *NoteStore) List(wsID int64) ([]string, error) {
-	if err := s.alive(); err != nil {
+	if err := s.begin(); err != nil {
 		return nil, err
 	}
+	defer s.end()
 	ents, err := os.ReadDir(s.dir(wsID))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -199,9 +237,18 @@ func (s *NoteStore) List(wsID int64) ([]string, error) {
 // Load reads a note through a no-follow descriptor, capturing its identity
 // and content hash for the conflict check at save time.
 func (s *NoteStore) Load(wsID int64, name string) (*Note, string, error) {
-	if err := s.alive(); err != nil {
+	if err := s.begin(); err != nil {
 		return nil, "", err
 	}
+	defer s.end()
+	return s.loadUnadmitted(wsID, name)
+}
+
+// loadUnadmitted is Load's body, for callers that ALREADY hold an admission.
+// Create finishes by loading the note it just wrote; going through Load would
+// admit a second operation inside the first, which inflates the active count and
+// makes Retire's drain harder to reason about (lector r1 finding 4).
+func (s *NoteStore) loadUnadmitted(wsID int64, name string) (*Note, string, error) {
 	clean, err := CleanName(name)
 	if err != nil {
 		return nil, "", err
@@ -238,6 +285,10 @@ func (s *NoteStore) Load(wsID int64, name string) (*Note, string, error) {
 // check-to-rename instant remains. On success the note's identity
 // refreshes to the saved content.
 func (s *NoteStore) Save(n *Note, body string) error {
+	if err := s.begin(); err != nil {
+		return err
+	}
+	defer s.end()
 	// The handle must belong to THIS store, and this store must still be the
 	// current identity. Checked before anything touches the filesystem: a
 	// retained closure that reaches here after a switch has a valid-looking
@@ -336,9 +387,10 @@ func (s *NoteStore) Save(n *Note, body string) error {
 // anything was created at all (Johno, M6 manual testing). Refuses a name
 // already in use so `a` never silently adopts someone else's file.
 func (s *NoteStore) Create(wsID int64, name string) (*Note, error) {
-	if err := s.alive(); err != nil {
+	if err := s.begin(); err != nil {
 		return nil, err
 	}
+	defer s.end()
 	clean, err := CleanName(name)
 	if err != nil {
 		return nil, err
@@ -365,15 +417,16 @@ func (s *NoteStore) Create(wsID int64, name string) (*Note, error) {
 	if err := syncDir(dir); err != nil {
 		return nil, err
 	}
-	n, _, err := s.Load(wsID, clean)
+	n, _, err := s.loadUnadmitted(wsID, clean)
 	return n, err
 }
 
 // Delete removes a note (no conflict check — an explicit user action).
 func (s *NoteStore) Delete(wsID int64, name string) error {
-	if err := s.alive(); err != nil {
+	if err := s.begin(); err != nil {
 		return err
 	}
+	defer s.end()
 	clean, err := CleanName(name)
 	if err != nil {
 		return err
@@ -400,9 +453,10 @@ func syncDir(dir string) error {
 // (the explorer surfaces folders whose server workspace is gone as
 // "detached").
 func (s *NoteStore) ListWorkspaceDirs() ([]int64, error) {
-	if err := s.alive(); err != nil {
+	if err := s.begin(); err != nil {
 		return nil, err
 	}
+	defer s.end()
 	ents, err := os.ReadDir(s.root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
