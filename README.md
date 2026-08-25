@@ -102,22 +102,39 @@ A few behaviours worth knowing, because they differ from the terminal:
   lid reconnects to the same session with your workspace and history intact. A
   browser *reload* starts a fresh session — the session id is not yet persisted
   across reloads.
-- **Notes: your own root by default, one shared tree if you ask.** By default each
-  browser identity gets its own root, so a `--web-ui` user does **not** see the
-  notes of whoever runs `--ui` on the same machine. That is right for a gateway —
-  one process serves several people, and a note store reads from disk, which has
-  no identity — but it surprises the common case, which is one person opening one
-  install through two frontends and finding an empty explorer while their own
-  notes sit one level up.
+- **Notes are personal, and keyed by (user, workspace).** Every note lives at
+  `<notes>/u-<your-daemon-username>/ws-<workspace-id>/`, in **both** frontends. You
+  see your own notes and nobody else's, whether you opened autodb in a terminal or
+  through `--web-ui`, and the same account sees the same notes in both.
 
-  Set `[web] notes_mode = "workspace"` with `notes_subject = "<you>"` to read the
-  same workspace-keyed tree the terminal writes. It is deliberately **bound to one
-  identity**: any other user is refused, before a session, a ticket or a note store
-  exists for them — including on a fresh daemon, where the wrong name cannot
-  bootstrap the first admin. Without `notes_subject` the mode is a startup error
-  rather than a quiet fall back, because a shared tree with no bound reader hands
-  the terminal user's notes to whoever logs in first. `SPC ?` in a browser session
-  names which tree you are reading; `SPC A` prints the exact path.
+  This replaces the old `notes_mode` / `notes_subject` settings, which are **gone**
+  — a config still setting either one fails to start and says why. They selected
+  which tree a browser session read, and the "workspace" option pointed at a tree
+  with no user component in its path, so isolation had to come from admitting
+  exactly one configured identity rather than from the layout. Keying the path by
+  user makes both the setting and its admission gate unnecessary: nobody can reach
+  another person's notes, because the path cannot be built without their username.
+
+  Notes resolve **after you sign in** — before that there is no identity, so there
+  is no note tree and deliberately no shared one to fall back to. `SPC A` shows the
+  exact root the session is using, and says so plainly before login.
+
+- **Notes written before this change live in a "legacy" section.** Files under
+  `<notes>/ws-<id>/` predate per-user keying and carry no owner, so nothing can
+  decide whose they are — and they would otherwise simply disappear from the
+  explorer while sitting on disk, which is worse than showing them.
+
+  They appear as **`legacy notes (ws-N) — deprecated`**. Open one with `Enter` to
+  read it, `m` to **migrate** it into your own notes, `d` to **delete** it. Migrate
+  copies the file, reads it back to verify, and only then removes the original; it
+  refuses if you already have a note by that name, because that is a different note
+  and only you know which one wins.
+
+  The legacy tree is **read-and-delete only** — nothing writes there any more, so it
+  can only shrink. Anyone signed in can see and remove those files: they predate
+  ownership, and the point of the section is to drain it. Migrate what is yours,
+  delete the rest, and it goes away.
+
 - **Some Ctrl chords belong to the browser.** `Ctrl-L`, `Ctrl-W` and `Ctrl-T` never
   reach autodb: the browser keeps them (address bar, close tab, new tab) and a page
   cannot take them back. Measured: `Ctrl-H`, `Ctrl-J`, `Ctrl-K` and every `Alt`
