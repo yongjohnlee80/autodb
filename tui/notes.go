@@ -29,6 +29,30 @@ import (
 // it was loaded — the caller decides: overwrite, save-as, or cancel.
 var ErrNoteConflict = errors.New("tui: note changed on disk since load")
 
+// ErrBadWorkspace reports a workspace id that cannot name a canonical `ws-*`
+// directory.
+var ErrBadWorkspace = errors.New("tui: notes: workspace id is not a canonical positive int64")
+
+// canonicalWorkspace validates a workspace id before it is formatted into a
+// path. It is the ONE predicate, applied by every operation that names a
+// workspace — listing, reading, deleting — not just the one that enumerates.
+//
+// Validating only the enumeration left the rejected names ADDRESSABLE: a
+// negative id formats to `ws--1`, which Workspaces() correctly refuses to list
+// and Delete() would happily remove (wanda, ADR-0068 criterion 39). A name the
+// store could not have produced must not be reachable by any route.
+//
+// Only positivity needs checking here: `ws-01`, `ws-1x` and an overflowed
+// suffix cannot be PRODUCED by formatting an int64, so they are unreachable
+// through this API once negatives and zero are refused. The listing side still
+// re-checks the round-trip, because it reads names it did not write.
+func canonicalWorkspace(wsID int64) error {
+	if wsID <= 0 {
+		return fmt.Errorf("%w: %d", ErrBadWorkspace, wsID)
+	}
+	return nil
+}
+
 // noteName validates a single-component display name.
 var noteName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]*$`)
 
@@ -278,6 +302,9 @@ func (s *NoteStore) List(wsID int64) ([]string, error) {
 		return nil, err
 	}
 	defer s.end()
+	if err := canonicalWorkspace(wsID); err != nil {
+		return nil, err
+	}
 	root, err := s.fs()
 	if err != nil {
 		return nil, err
@@ -322,6 +349,9 @@ func (s *NoteStore) Load(wsID int64, name string) (*Note, string, error) {
 // admit a second operation inside the first, which inflates the active count and
 // makes Retire's drain harder to reason about (lector r1 finding 4).
 func (s *NoteStore) loadUnadmitted(wsID int64, name string) (*Note, string, error) {
+	if err := canonicalWorkspace(wsID); err != nil {
+		return nil, "", err
+	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return nil, "", err
@@ -368,6 +398,9 @@ func (s *NoteStore) Save(n *Note, body string) error {
 	// handle and a plausible body, and the only thing distinguishing it from a
 	// legitimate save is provenance (ADR-0068 §2.2).
 	if err := s.owns(n); err != nil {
+		return err
+	}
+	if err := canonicalWorkspace(n.WorkspaceID); err != nil {
 		return err
 	}
 	root, err := s.fs()
@@ -468,6 +501,9 @@ func (s *NoteStore) Create(wsID int64, name string) (*Note, error) {
 		return nil, err
 	}
 	defer s.end()
+	if err := canonicalWorkspace(wsID); err != nil {
+		return nil, err
+	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return nil, err
@@ -507,6 +543,9 @@ func (s *NoteStore) Delete(wsID int64, name string) error {
 		return err
 	}
 	defer s.end()
+	if err := canonicalWorkspace(wsID); err != nil {
+		return err
+	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return err
