@@ -251,10 +251,11 @@ func runUI(configPath string) error {
 	if err != nil {
 		return err
 	}
-	notes, err := tuiapp.NewNoteStore(notesRoot)
-	if err != nil {
-		return err
-	}
+	// The terminal no longer builds a store at startup. It CANNOT: the personal
+	// root is `<base>/u-<subject>`, and the subject is the daemon's canonical
+	// identity, which does not exist until afterLogin. Constructing here is what
+	// forced the terminal onto the ownerless base (ADR-0068 §1.3).
+	notesFor := tuiapp.PersonalNotesIn(notesRoot)
 
 	spawn := func() (string, error) { return spawnServe(configPath) }
 	session := tuiapp.NewSessionOn(ep.Network, addr, logger.Nop{}, spawn)
@@ -281,7 +282,7 @@ func runUI(configPath string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	model := tuiapp.New(session, notes, cancel, tuiapp.WithAbout(tuiapp.AboutInfo{
+	model := tuiapp.New(session, notesFor, cancel, tuiapp.WithAbout(tuiapp.AboutInfo{
 		Version: version, Commit: commit, BuildDate: buildDate,
 		Repo: repoURL, Author: author,
 		NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine, MetaPath: metaPath,
@@ -326,8 +327,6 @@ func runWebUI(configPath string, port int) error {
 		NotesRoot: notesRoot,
 		// Note visibility (ADR-0064 §2.3). Default per-user; workspace mode is
 		// opt-in, bound to one subject, and validated at config load.
-		NotesMode:    cfg.WebNotesMode(),
-		NotesSubject: cfg.Web.NotesSubject,
 		// Operational log to stderr. --web-ui is a server an operator leaves
 		// running, so a refused Origin, a failed login, and session lifecycle
 		// have to be VISIBLE: without this the gateway falls back to

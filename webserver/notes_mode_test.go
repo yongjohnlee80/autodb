@@ -9,18 +9,15 @@ package webserver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/yongjohnlee80/autodb/core/config"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/logger"
 )
@@ -59,226 +56,22 @@ func serveGatewayCfg(t *testing.T, cfg Config) string {
 	return ""
 }
 
-// Criterion 11 — workspace mode without a bound subject must not construct at
-// all, so the process dies before the port is bound rather than serving a mode
-// it cannot enforce.
-func TestNotesMode_WorkspaceRequiresBoundSubject(t *testing.T) {
-	t.Parallel()
-	_, err := New(Config{
-		Network: "tcp", Addr: "127.0.0.1:1", Port: 65000,
-		NotesRoot: t.TempDir(), NotesMode: config.NotesWorkspace,
-	})
-	if err == nil {
-		t.Fatal("workspace mode with no NotesSubject was accepted; it must be refused " +
-			"before the port is bound")
-	}
-}
-
-// Criterion 6 — in workspace mode the BOUND subject reads the shared tree the
-// terminal TUI writes, not a private u-<subject> directory.
-func TestNotesMode_BoundSubjectReadsTheSharedTree(t *testing.T) {
-	t.Parallel()
-	daemon := startRealServer(t)
-	notesBase := t.TempDir()
-
-	// A note the terminal frontend would have written: workspace-keyed.
-	wsDir := filepath.Join(notesBase, "ws-1")
-	if err := os.MkdirAll(wsDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(wsDir, "terminal.sql"), []byte("select 1;\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	base := serveGatewayCfg(t, Config{
-		Network: "tcp", Addr: daemon, NotesRoot: notesBase,
-		NotesMode: config.NotesWorkspace, NotesSubject: "alice",
-	})
-
-	ticket, status := webLogin(t, base, "alice", "a long enough passphrase")
-	if status != http.StatusOK {
-		t.Fatalf("bound subject login: HTTP %d", status)
-	}
-	if _, painted := attach(t, base, ticket); !painted {
-		t.Fatal("the bound subject's session never painted")
-	}
-
-	// The shared tree is what was read: no private root was created for her.
-	if _, err := os.Stat(filepath.Join(notesBase, "u-alice")); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("workspace mode created a per-user root u-alice (err=%v); it must read "+
-			"the shared tree", err)
-	}
-	if _, err := os.Stat(filepath.Join(wsDir, "terminal.sql")); err != nil {
-		t.Errorf("the terminal's note is no longer readable: %v", err)
-	}
-}
-
-// Criterion 7 — NEGATIVE CONTROL: in workspace mode a different authenticated
-// subject is refused, and refused before it gets a session at all.
-func TestNotesMode_WorkspaceRefusesAnotherSubject(t *testing.T) {
-	t.Parallel()
-	daemon := startRealServer(t)
-	notesBase := t.TempDir()
-
-	logs := &capturingLog{}
-	dialled := &dialRecorder{inner: dialer(daemon)}
-	base := serveGatewayCfg(t, Config{
-		Network: "tcp", Addr: daemon, NotesRoot: notesBase,
-		NotesMode: config.NotesWorkspace, NotesSubject: "alice", Log: logs,
-		dial: dialled.dial,
-	})
-
-	// alice bootstraps, then creates bob on the daemon.
-	if _, status := webLogin(t, base, "alice", "a long enough passphrase"); status != http.StatusOK {
-		t.Fatalf("alice bootstrap: HTTP %d", status)
-	}
-	adminSess, err := dialer(daemon)(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer adminSess.Close()
-	actx, acancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer acancel()
-	if err := adminSess.Bind().Login(actx, "alice", "a long enough passphrase"); err != nil {
-		t.Fatal(err)
-	}
-	if _, cerr := adminSess.Bind().CreateUser(actx, "bob", "bob's long passphrase", "reader"); cerr != nil {
-		t.Fatalf("creating bob: %v", cerr)
-	}
-
-	// bob authenticates fine on the daemon and must still be refused HERE.
-	body, status := webLoginBody(t, base, "bob", "bob's long passphrase")
-	if status == http.StatusOK {
-		t.Error("bob was admitted to a gateway bound to alice; workspace mode must refuse " +
-			"every other identity (ADR-0064 §2.3)")
-	}
-	// He never got a note store of any kind.
-	for _, p := range []string{"u-bob", "ws-bob"} {
-		if _, err := os.Stat(filepath.Join(notesBase, p)); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("%s exists: a refused subject must not reach noteRootForMode", p)
-		}
-	}
-
-	// The three things a status code cannot show, each of which was previously
-	// removable without failing this test (lector r1 P2):
-	//
-	// 1. The reason must NOT ENUMERATE (criterion 9): naming the bound subject, or
-	//    revealing whether the daemon is bootstrapped, tells a caller what they
-	//    could not otherwise learn.
-	//
-	//    Two separate assertions, because my first attempt conflated them and was
-	//    vacuous. golib's login handler answers `{"error":"unauthorized"}` and never
-	//    echoes an auth.Reason, so a body check CANNOT fail however bad the reason
-	//    is — lector changed the constant to "only alice may use this gateway" and
-	//    the test stayed green.
-	//
-	//    (a) the wire response stays generic — an upstream property worth pinning,
-	//        since a future golib that echoed reasons would leak ours;
-	if strings.Contains(body, "alice") || strings.Contains(strings.ToLower(body), "bootstrap") {
-		t.Errorf("the refusal response enumerates: %q", body)
-	}
-	//    (b) and the reason WE choose is itself non-enumerating, which is the part
-	//        this package actually controls.
-	if strings.Contains(refusalReason, "alice") {
-		t.Errorf("refusalReason names the bound subject: %q", refusalReason)
-	}
-	if strings.Contains(strings.ToLower(refusalReason), "bootstrap") ||
-		strings.Contains(strings.ToLower(refusalReason), "not bound") {
-		t.Errorf("refusalReason reveals gateway state: %q", refusalReason)
-	}
-	// 2. The operator must be able to see it (criterion 17): the browser gets an
-	//    opaque reason, so the log is the only place the detail exists.
-	if !logs.contains("refused") || !logs.contains("bob") {
-		t.Errorf("no log record names the refused subject; the browser reason is opaque "+
-			"by design, so an operator has nothing left to diagnose with.\nlog:\n%s",
-			logs.String())
-	}
-	// 3. The EXACT session the refusal path dialled must be RETIRED, not merely
-	//    closed. Asserted on that session's own token: Bound.Logout clears it
-	//    (client.go:424-429) while Close does not, so this distinguishes
-	//    logoutAndClose from a bare Close.
-	//
-	//    My first version dialled a NEW session and checked whether a fresh login
-	//    succeeded. Its own comment admitted a fresh login proves nothing about the
-	//    old token — and lector duly replaced logoutAndClose with Close and the test
-	//    still passed. A second login cannot be the oracle for the first one's
-	//    retirement (lector r2 on PR #5).
-	last := dialled.last()
-	if last == nil {
-		t.Fatal("the refusal path dialled no session; this test is not exercising it")
-	}
-	if tok := last.Token(); tok != "" {
-		t.Errorf("the refused login's session still holds a token (%d bytes): it was "+
-			"closed without logging out, so the token the daemon just minted outlives "+
-			"the refusal", len(tok))
-	}
-	// Token AND connection: logoutAndClose does both, and asserting only the token
-	// let lector delete `sess.Close()` while keeping Logout — an empty token with a
-	// live client still installed, which is the resource leak half of the same rule
-	// (r2 asked for both; r3 caught that I had checked one).
-	if last.Connected() {
-		t.Error("the refused login's session is still connected: the token was retired " +
-			"but the client was never closed, so the connection leaks per refusal")
-	}
-}
-
-// Criterion 8 — NEGATIVE CONTROL, the irreversible case: on an EMPTY daemon a
-// non-bound subject must be denied WITHOUT creating an account, so the daemon
-// still needs bootstrap and the rightful subject can still perform it.
-//
-// No test that only exercises an already-bootstrapped daemon can catch this: the
-// account-creation side effect is what cannot be undone.
-func TestNotesMode_WrongSubjectCannotBootstrap(t *testing.T) {
-	t.Parallel()
-	daemon := startRealServer(t)
-	base := serveGatewayCfg(t, Config{
-		Network: "tcp", Addr: daemon, NotesRoot: t.TempDir(),
-		NotesMode: config.NotesWorkspace, NotesSubject: "alice",
-	})
-
-	// bob tries first, on a daemon with no users at all.
-	if _, status := webLogin(t, base, "bob", "bob's long passphrase"); status == http.StatusOK {
-		t.Fatal("bob bootstrapped a gateway bound to alice")
-	}
-
-	// The daemon must STILL need bootstrap — bob created nothing.
-	probe, err := dialer(daemon)(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer probe.Close()
-	pctx, pcancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer pcancel()
-	needs, nerr := probe.Bind().NeedsBootstrap(pctx)
-	if nerr != nil {
-		t.Fatal(nerr)
-	}
-	if !needs {
-		t.Fatal("bob's refused attempt still created the first admin: bootstrap is no " +
-			"longer needed, and nothing can undo an account (ADR-0064 §2.3 gate 1)")
-	}
-
-	// And alice can still bootstrap under the configured subject.
-	if _, status := webLogin(t, base, "alice", "a long enough passphrase"); status != http.StatusOK {
-		t.Error("alice could no longer bootstrap after bob's refused attempt")
-	}
-}
-
-// Criterion 10 — NEGATIVE CONTROL: the DEFAULT stays per-user isolation. This is
-// ADR-0061 §2.8's guarantee and must survive the new mode entirely.
+// Per-user isolation is now the ONLY behaviour, not a default that a mode could
+// turn off. ADR-0061 §2.8's guarantee survives ADR-0068 as an invariant.
 func TestNotesMode_DefaultIsPerUserIsolation(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
-	a, err := noteRootForMode(base, "alice", "")
+	as, err := tuiapp.NewPersonalNotes(base, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := noteRootForMode(base, "bob", config.NotesPerUser)
+	bs, err := tuiapp.NewPersonalNotes(base, "bob")
 	if err != nil {
 		t.Fatal(err)
 	}
+	a, b := as.Root(), bs.Root()
 	if a == b || a == base || b == base {
-		t.Errorf("default mode did not isolate: alice=%q bob=%q base=%q", a, b, base)
+		t.Errorf("notes are not isolated: alice=%q bob=%q base=%q", a, b, base)
 	}
 	if a != filepath.Join(base, "u-alice") {
 		t.Errorf("alice's root = %q, want %q", a, filepath.Join(base, "u-alice"))
@@ -291,11 +84,12 @@ func TestNotesMode_UnsafeSubjectStillRefused(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
 	for _, subject := range []string{"", "..", "a/b", `a\b`} {
-		for _, mode := range []config.NotesMode{config.NotesPerUser, config.NotesWorkspace} {
-			if _, err := noteRootForMode(base, subject, mode); err == nil {
-				t.Errorf("noteRootForMode(%q, %q) was accepted; it must be refused, never "+
-					"rewritten", subject, mode)
-			}
+		// There is no mode to vary any more; the predicate is unconditional. A
+		// name that cannot be a safe path component is REFUSED, never rewritten:
+		// two names that sanitise alike would share notes.
+		if _, err := tuiapp.NewPersonalNotes(base, subject); err == nil {
+			t.Errorf("NewPersonalNotes(%q) was accepted; it must be refused, never "+
+				"rewritten", subject)
 		}
 	}
 }
@@ -379,28 +173,6 @@ func (d *dialRecorder) last() *tuiapp.Session {
 // missing test and a passing test look identical in aggregate output — which is
 // why the inventory is now asserted below (TestNotesMode_TestInventory).
 
-// lector r1 P1a — an UNSAFE configured subject must be refused at construction,
-// never reaching the irreversible bootstrap path. The predicate used to run only
-// when a note ROOT was resolved: after login, after Bootstrap, after pool.join.
-func TestNotesMode_UnsafeConfiguredSubjectIsRefusedAtConstruction(t *testing.T) {
-	t.Parallel()
-	for _, subject := range []string{"..", ".", "../alice", " alice", "alice/bob", `a\b`, ".hidden"} {
-		if _, err := New(Config{
-			Network: "tcp", Addr: "127.0.0.1:1", Port: 65010,
-			NotesRoot: t.TempDir(), NotesMode: config.NotesWorkspace, NotesSubject: subject,
-		}); err == nil {
-			t.Errorf("New accepted notes_subject %q; an identity that cannot name a "+
-				"directory must never reach the bootstrap path", subject)
-		}
-	}
-	if _, err := New(Config{
-		Network: "tcp", Addr: "127.0.0.1:1", Port: 65011,
-		NotesRoot: t.TempDir(), NotesMode: config.NotesWorkspace, NotesSubject: "alice",
-	}); err != nil {
-		t.Errorf("New rejected a valid subject: %v", err)
-	}
-}
-
 // ...and the fresh-daemon half: an unsafe login must not consume the one-shot
 // bootstrap. Per-user mode, so only the identity predicate can refuse it.
 func TestNotesMode_UnsafeSubjectCannotBootstrap(t *testing.T) {
@@ -428,37 +200,13 @@ func TestNotesMode_UnsafeSubjectCannotBootstrap(t *testing.T) {
 	}
 }
 
-// The two modes must resolve to different roots, or About can report nothing
-// meaningful.
-func TestNotesMode_EffectiveRootDiffersByMode(t *testing.T) {
-	t.Parallel()
-	base := t.TempDir()
-	private, err := noteRootForMode(base, "alice", config.NotesPerUser)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := filepath.Join(base, "u-alice"); private != want {
-		t.Errorf("per-user root = %q, want %q", private, want)
-	}
-	shared, err := noteRootForMode(base, "alice", config.NotesWorkspace)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if shared != base {
-		t.Errorf("workspace root = %q, want the shared base %q", shared, base)
-	}
-	if private == shared {
-		t.Error("both modes resolved to the same root")
-	}
-}
-
 // lector r1 P1b — About must name the root THIS session reads.
 func TestNotesMode_AboutReportsTheEffectiveRoot(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
 	cfgAbout := tuiapp.AboutInfo{NotesDir: base, Version: "test"}
 
-	private, err := noteRootForMode(base, "alice", config.NotesPerUser)
+	private, err := rootFor(base, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,14 +232,14 @@ func TestNotesMode_AboutReportsTheEffectiveRoot(t *testing.T) {
 // session — login, ticket, attach — and captures the model factory appRunner must
 // go through, so a caller bypass fails here rather than passing quietly.
 func TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot(t *testing.T) {
+	// One case now: there are no modes. What the runner must still do is build the
+	// Model through the factory with the EFFECTIVE root — the caller-level control
+	// that a helper test cannot replace (ADR-0068 criterion 4).
 	for _, tc := range []struct {
 		name       string
-		mode       config.NotesMode
-		subject    string
 		wantShared bool
 	}{
-		{"per-user", config.NotesPerUser, "", false},
-		{"workspace", config.NotesWorkspace, "alice", true},
+		{"personal", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			daemon := startRealServer(t)
@@ -499,9 +247,9 @@ func TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot(t *testing.T) {
 
 			var mu sync.Mutex
 			var built *tuiapp.Model
-			factory := func(sess *tuiapp.Session, notes *tuiapp.NoteStore, cancel func(),
+			factory := func(sess *tuiapp.Session, notesFor tuiapp.NotesFactory, cancel func(),
 				opts ...tuiapp.Option) *tuiapp.Model {
-				m := tuiapp.New(sess, notes, cancel, opts...)
+				m := tuiapp.New(sess, notesFor, cancel, opts...)
 				mu.Lock()
 				built = m
 				mu.Unlock()
@@ -510,7 +258,6 @@ func TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot(t *testing.T) {
 
 			base := serveGatewayCfg(t, Config{
 				Network: "tcp", Addr: daemon, NotesRoot: notesBase,
-				NotesMode: tc.mode, NotesSubject: tc.subject,
 				About:    tuiapp.AboutInfo{NotesDir: notesBase, Version: "test"},
 				newModel: factory,
 			})

@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/yongjohnlee80/autodb/core/config"
 )
 
 // Notes are LOCAL .sql files (ADR-0057 §5): client-side artifacts grouped
@@ -28,21 +30,69 @@ var ErrNoteConflict = errors.New("tui: note changed on disk since load")
 // noteName validates a single-component display name.
 var noteName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]*$`)
 
-// NoteStore manages one root directory of per-workspace note folders.
+// NoteStore manages one identity's per-workspace note folders.
+//
+// Notes are PERSONAL: keyed by (user, workspace) and visible only to their
+// owner (ADR-0068). The root is derived internally from a base directory and a
+// canonical subject, and there is deliberately NO exported way to construct a
+// store over an arbitrary final root — an ownerless `<base>` must not be
+// expressible, because that is the shape that made one frontend's notes visible
+// to another identity.
 type NoteStore struct {
-	root string
+	root    string
+	subject string
 }
 
-// NewNoteStore ensures root exists with restrictive modes.
-func NewNoteStore(root string) (*NoteStore, error) {
-	if root == "" {
-		return nil, errors.New("tui: empty notes root")
+// NewPersonalNotes opens the note store for one canonical subject under base:
+// `<base>/u-<subject>/ws-<id>/…`.
+//
+// The subject is the DAEMON's canonical identity (session.User().Name), never a
+// claimed or client-supplied name, and it is validated by the same predicate
+// that guards config load and gateway admission — a name that cannot be a safe
+// path component is refused rather than sanitised, because two names that
+// sanitise alike would share notes.
+//
+// The caller cannot choose the final directory. That is the point: `<base>`
+// itself has no user component, so a store rooted there would hand every
+// identity every other identity's notes (ADR-0068 §2.1, criteria 24-25).
+func NewPersonalNotes(base, subject string) (*NoteStore, error) {
+	if base == "" {
+		return nil, errors.New("tui: empty notes base")
 	}
+	if err := config.ValidSubject(subject); err != nil {
+		return nil, fmt.Errorf("tui: notes subject: %w", err)
+	}
+	root := filepath.Join(base, "u-"+subject)
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("tui: notes root: %w", err)
 	}
-	return &NoteStore{root: root}, nil
+	return &NoteStore{root: root, subject: subject}, nil
 }
+
+// NotesFactory builds the personal store for one canonical subject.
+//
+// The Model takes a FACTORY rather than a store because identity is not known
+// when the frontend is constructed: the terminal builds its UI before anyone has
+// logged in, and its subject only exists after afterLogin reads
+// session.User().Name. Handing it a store at startup is what forced the terminal
+// onto an ownerless root in the first place (ADR-0068 §1.3, §2.2).
+//
+// A factory also keeps NoteStore's root immutable. A Rebind(subject) method was
+// rejected: it makes every existing holder of a *NoteStore a potential stale
+// writer, which is precisely the class of bug this ADR exists to close.
+type NotesFactory func(subject string) (*NoteStore, error)
+
+// PersonalNotesIn returns the factory that roots every identity under base.
+func PersonalNotesIn(base string) NotesFactory {
+	return func(subject string) (*NoteStore, error) { return NewPersonalNotes(base, subject) }
+}
+
+// Subject reports the canonical identity this store belongs to.
+func (s *NoteStore) Subject() string { return s.subject }
+
+// Root reports the directory this store actually reads and writes, so About can
+// name it. It is always `<base>/u-<subject>` and never the base (ADR-0068 §2.2).
+func (s *NoteStore) Root() string { return s.root }
 
 // Note identifies one loaded note plus the identity captured at load time
 // for conflict detection. A zero LoadedHash means the note was NEW (absent
