@@ -98,10 +98,11 @@ func (l *LegacyNotes) List(wsID int64) ([]string, error) {
 	if err != nil {
 		return nil, nil
 	}
-	if err := canonicalWorkspace(wsID); err != nil {
+	dir, err := l.workspaceDir(wsID)
+	if err != nil {
 		return nil, err
 	}
-	d, err := root.Open(l.dir(wsID))
+	d, err := root.Open(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -132,14 +133,15 @@ func (l *LegacyNotes) Read(wsID int64, name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := canonicalWorkspace(wsID); err != nil {
+	dir, err := l.workspaceDir(wsID)
+	if err != nil {
 		return "", err
 	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return "", err
 	}
-	rel := filepath.Join(l.dir(wsID), clean)
+	rel := filepath.Join(dir, clean)
 	st, err := root.Lstat(rel)
 	if err != nil {
 		return "", err
@@ -169,14 +171,15 @@ func (l *LegacyNotes) Delete(wsID int64, name string) error {
 	if err != nil {
 		return err
 	}
-	if err := canonicalWorkspace(wsID); err != nil {
+	dir, err := l.workspaceDir(wsID)
+	if err != nil {
 		return err
 	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return err
 	}
-	rel := filepath.Join(l.dir(wsID), clean)
+	rel := filepath.Join(dir, clean)
 	st, err := root.Lstat(rel)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -193,7 +196,7 @@ func (l *LegacyNotes) Delete(wsID int64, name string) error {
 		}
 		return err
 	}
-	d, derr := root.Open(l.dir(wsID))
+	d, derr := root.Open(dir)
 	if derr != nil {
 		return fmt.Errorf("%w: %v", ErrRemovedNotDurable, derr)
 	}
@@ -204,8 +207,16 @@ func (l *LegacyNotes) Delete(wsID int64, name string) error {
 	return nil
 }
 
-// dir is the workspace folder RELATIVE to the confined root.
-func (l *LegacyNotes) dir(wsID int64) string { return fmt.Sprintf("ws-%d", wsID) }
+// workspaceDir is the ONLY way to name a legacy workspace folder, relative to
+// the confined root, and is fallible for the same reason as the personal store's:
+// an operation cannot obtain a path without handling an invalid id, so forgetting
+// the check is a compile error rather than a silent hole.
+func (l *LegacyNotes) workspaceDir(wsID int64) (string, error) {
+	if err := canonicalWorkspace(wsID); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("ws-%d", wsID), nil
+}
 
 // --- Model operations on the legacy tree ---------------------------------
 

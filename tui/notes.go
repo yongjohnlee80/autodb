@@ -234,12 +234,35 @@ type Note struct {
 	loadedHash [32]byte
 }
 
-// dir is the immutable-ID-keyed workspace folder, RELATIVE to the confined root.
-func (s *NoteStore) dir(wsID int64) string { return fmt.Sprintf("ws-%d", wsID) }
+// workspaceDir is the ONLY way to name a workspace folder, relative to the
+// confined root — and it is FALLIBLE by design.
+//
+// The validation could live in each operation, and it did: every entry point
+// called canonicalWorkspace itself. That worked and was wrong in the way that
+// matters, because it made correctness a thing each NEW operation had to
+// remember. Four times in this ticket a criterion was satisfied at the entry
+// point a finding named and missed at its siblings, and every one of those was
+// caught by a reviewer rather than by me.
+//
+// Returning an error moves the enumeration to the compiler. An operation cannot
+// obtain a usable path without handling the failure, so a future method that
+// forgets the check does not compile — it does not merely go unnoticed until
+// someone greps for it (wanda, reviewing PR #7).
+func (s *NoteStore) workspaceDir(wsID int64) (string, error) {
+	if err := canonicalWorkspace(wsID); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("ws-%d", wsID), nil
+}
 
-// rel is one note's path relative to the confined root.
-func (s *NoteStore) rel(wsID int64, name string) string {
-	return filepath.Join(s.dir(wsID), name)
+// rel is one note's path relative to the confined root. Fallible for the same
+// reason: it names a workspace.
+func (s *NoteStore) rel(wsID int64, name string) (string, error) {
+	dir, err := s.workspaceDir(wsID)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name), nil
 }
 
 // fs returns the confined root, or an error for a zero-value store.
@@ -302,14 +325,15 @@ func (s *NoteStore) List(wsID int64) ([]string, error) {
 		return nil, err
 	}
 	defer s.end()
-	if err := canonicalWorkspace(wsID); err != nil {
-		return nil, err
-	}
 	root, err := s.fs()
 	if err != nil {
 		return nil, err
 	}
-	d, err := root.Open(s.dir(wsID))
+	dir, err := s.workspaceDir(wsID)
+	if err != nil {
+		return nil, err
+	}
+	d, err := root.Open(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -349,15 +373,15 @@ func (s *NoteStore) Load(wsID int64, name string) (*Note, string, error) {
 // admit a second operation inside the first, which inflates the active count and
 // makes Retire's drain harder to reason about (lector r1 finding 4).
 func (s *NoteStore) loadUnadmitted(wsID int64, name string) (*Note, string, error) {
-	if err := canonicalWorkspace(wsID); err != nil {
-		return nil, "", err
-	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return nil, "", err
 	}
+	rel, err := s.rel(wsID, clean)
+	if err != nil {
+		return nil, "", err
+	}
 	n := &Note{WorkspaceID: wsID, Name: clean, store: s}
-	rel := s.rel(wsID, clean)
 
 	f, err := s.openRegular(rel)
 	if errors.Is(err, os.ErrNotExist) {
@@ -400,18 +424,21 @@ func (s *NoteStore) Save(n *Note, body string) error {
 	if err := s.owns(n); err != nil {
 		return err
 	}
-	if err := canonicalWorkspace(n.WorkspaceID); err != nil {
-		return err
-	}
 	root, err := s.fs()
 	if err != nil {
 		return err
 	}
-	dir := s.dir(n.WorkspaceID)
+	dir, err := s.workspaceDir(n.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	rel, err := s.rel(n.WorkspaceID, n.Name)
+	if err != nil {
+		return err
+	}
 	if err := root.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	rel := s.rel(n.WorkspaceID, n.Name)
 	tmpRel := filepath.Join(dir, "."+n.Name+".tmp")
 
 	tmp, err := root.OpenFile(tmpRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -501,9 +528,6 @@ func (s *NoteStore) Create(wsID int64, name string) (*Note, error) {
 		return nil, err
 	}
 	defer s.end()
-	if err := canonicalWorkspace(wsID); err != nil {
-		return nil, err
-	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return nil, err
@@ -512,11 +536,18 @@ func (s *NoteStore) Create(wsID int64, name string) (*Note, error) {
 	if err != nil {
 		return nil, err
 	}
-	dir := s.dir(wsID)
+	dir, err := s.workspaceDir(wsID)
+	if err != nil {
+		return nil, err
+	}
+	rel, err := s.rel(wsID, clean)
+	if err != nil {
+		return nil, err
+	}
 	if err := root.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	f, err := root.OpenFile(s.rel(wsID, clean), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("tui: %s already exists", clean)
@@ -543,9 +574,6 @@ func (s *NoteStore) Delete(wsID int64, name string) error {
 		return err
 	}
 	defer s.end()
-	if err := canonicalWorkspace(wsID); err != nil {
-		return err
-	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return err
@@ -554,7 +582,10 @@ func (s *NoteStore) Delete(wsID int64, name string) error {
 	if err != nil {
 		return err
 	}
-	rel := s.rel(wsID, clean)
+	rel, err := s.rel(wsID, clean)
+	if err != nil {
+		return err
+	}
 	// Reject a final component that is a SYMLINK. os.Root refuses to escape, but
 	// Remove on a link inside the root removes the link, which is not the note
 	// the user asked to delete (lector r2 P3).
@@ -574,7 +605,9 @@ func (s *NoteStore) Delete(wsID int64, name string) error {
 		}
 		return err
 	}
-	if serr := s.syncConfinedDir(s.dir(wsID)); serr != nil {
+	// filepath.Dir(rel) rather than re-deriving from wsID: the directory synced is
+	// the one the unlink used, and there is only one place that could disagree.
+	if serr := s.syncConfinedDir(filepath.Dir(rel)); serr != nil {
 		return fmt.Errorf("%w: %v", ErrRemovedNotDurable, serr)
 	}
 	return nil
