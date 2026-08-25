@@ -98,6 +98,9 @@ func (l *LegacyNotes) List(wsID int64) ([]string, error) {
 	if err != nil {
 		return nil, nil
 	}
+	if err := canonicalWorkspace(wsID); err != nil {
+		return nil, err
+	}
 	d, err := root.Open(l.dir(wsID))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -127,6 +130,9 @@ func (l *LegacyNotes) List(wsID int64) ([]string, error) {
 func (l *LegacyNotes) Read(wsID int64, name string) (string, error) {
 	root, err := l.fs()
 	if err != nil {
+		return "", err
+	}
+	if err := canonicalWorkspace(wsID); err != nil {
 		return "", err
 	}
 	clean, err := CleanName(name)
@@ -161,6 +167,9 @@ var ErrRemovedNotDurable = errors.New("tui: notes: removed, but the directory co
 func (l *LegacyNotes) Delete(wsID int64, name string) error {
 	root, err := l.fs()
 	if err != nil {
+		return err
+	}
+	if err := canonicalWorkspace(wsID); err != nil {
 		return err
 	}
 	clean, err := CleanName(name)

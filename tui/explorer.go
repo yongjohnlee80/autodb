@@ -657,6 +657,11 @@ func parseLegacyID(id string) (int64, string, bool) {
 	if err != nil {
 		return 0, "", false
 	}
+	// A constructed or retained `lnote:-1:…` must not become an addressable
+	// action: the id is text, and text is not a validated workspace.
+	if cerr := canonicalWorkspace(ws); cerr != nil {
+		return 0, "", false
+	}
 	return ws, decSeg(parts[2]), true
 }
 
