@@ -433,11 +433,51 @@ func (s *NoteStore) Delete(wsID int64, name string) error {
 	}
 	// Same directory-relative unlink as the legacy tree: a personal root is ours,
 	// but "ours" is not a security boundary once anything else can write beside it.
-	_, err = removeAt(s.dir(wsID), clean)
+	_, err = removeAt(s.root, filepath.Join(fmt.Sprintf("ws-%d", wsID), clean))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	return err
+}
+
+// removeAt unlinks name inside dir without following a symlinked path, and
+// fsyncs the directory so the removal is durable.
+//
+// os.Root confines every operation to the opened directory: a component that is
+// a symlink pointing outside is refused rather than traversed. Lector reproduced
+// why that matters — replacing `<base>/ws-1` with a symlink made a path-based
+// os.Remove delete a file in an entirely different directory.
+//
+// os.Root rather than unlinkat: the first version used syscall.Unlinkat, which
+// exists on Linux and NOT on darwin, and this file's build tag covers both. CI's
+// darwin cross-build caught it; a linux-only local build never could.
+//
+// The two failures are reported DIFFERENTLY on purpose. A failed unlink leaves
+// the file and a retry is safe. A failed fsync happens AFTER the unlink, so the
+// file may already be gone: that is an uncertain partial result, and reporting it
+// as a delete failure invites a retry that would act on a different file
+// (ADR-0068 criteria 45-47).
+func removeAt(base, rel string) (removed bool, err error) {
+	// The root is the BASE, and the workspace directory is a path COMPONENT of
+	// rel. Opening the workspace directory as the root would resolve it first —
+	// which is exactly the symlink being defended against, and is how the first
+	// version of this still deleted the outside file.
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		return false, err
+	}
+	defer root.Close()
+	if err := root.Remove(rel); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	if serr := syncDir(filepath.Join(base, filepath.Dir(rel))); serr != nil {
+		return true, fmt.Errorf("tui: %s was removed but the directory could not be "+
+			"synced, so the removal may not be durable: %w", rel, serr)
+	}
+	return true, nil
 }
 
 func syncDir(dir string) error {
