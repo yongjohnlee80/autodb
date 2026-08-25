@@ -81,9 +81,11 @@ func (l *LegacyNotes) List(wsID int64) ([]string, error) {
 	}
 	var out []string
 	for _, e := range ents {
-		// Regular files only: a symlink here would read outside the tree, and a
-		// legacy directory has no meaning.
-		if e.Type()&os.ModeSymlink != 0 || e.IsDir() {
+		// REGULAR files only, as claimed. Type() reports the raw dirent mode, so
+		// excluding symlinks and directories still admitted FIFOs, sockets and
+		// devices whose names end in .sql — each of which would block or misbehave
+		// on read (lector).
+		if !e.Type().IsRegular() {
 			continue
 		}
 		if strings.HasSuffix(e.Name(), ".sql") {
@@ -124,10 +126,11 @@ func (l *LegacyNotes) Delete(wsID int64, name string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(filepath.Join(l.dir(wsID), clean)); err != nil {
-		return err
-	}
-	return syncDir(l.dir(wsID))
+	// Unlinked RELATIVE to a descriptor for the workspace directory, which is
+	// opened refusing a symlink — a path-based Remove here deleted a file outside
+	// the base entirely when `<base>/ws-N` was replaced with a symlink.
+	_, err = removeAt(l.dir(wsID), clean)
+	return err
 }
 
 func (l *LegacyNotes) dir(wsID int64) string {
@@ -157,17 +160,25 @@ func (m *Model) openLegacyNote(wsID int64, name string) {
 	m.setStatus(name + " (legacy, read-only) — SPC s saves it as your own note")
 }
 
-// migrateLegacyNote copies a legacy note into THIS identity's space and then
-// removes the original — a verified move, not a rename.
+// copyLegacyNoteToPersonal copies a legacy note into THIS identity's space.
 //
-// The copy is read back and compared before the original is deleted. A rename
-// would be atomic but cannot cross into a per-user root that may live on another
-// filesystem, and a copy that is deleted without verification is how a
-// migration loses the only copy of someone's work.
+// It COPIES, and does not remove the source. That is a correction rather than a
+// limitation: the first version verified the destination and then unlinked the
+// source PATHNAME, which is not necessarily the file it read. Lector reproduced
+// it — read version one, let another process publish version two at that path,
+// and the unlink removed version two. Reading a file does not authorize deleting
+// whatever later occupies its name, and a pre-ADR-0068 binary or a second
+// process can cause exactly that.
 //
-// It refuses rather than overwrites: a name already present in the personal
-// space is a different note, and the user picks what happens next.
-func (m *Model) migrateLegacyNote(nodeID string) {
+// Accepted ADR-0068 rev 9 reaches the same place for its own reason: "save as
+// personal" mints a new personal handle and leaves the legacy source
+// byte-identical, with deletion a SEPARATE audited action. So "migrate or
+// delete" is two deliberate steps — copy it out, then delete it — which is also
+// the order that cannot lose anything.
+//
+// It refuses an existing name rather than overwriting: that is a different note
+// and only the user knows which one wins.
+func (m *Model) copyLegacyNoteToPersonal(nodeID string) {
 	wsID, name, ok := parseLegacyID(nodeID)
 	if !ok || m.legacy == nil {
 		return
@@ -183,25 +194,17 @@ func (m *Model) migrateLegacyNote(nodeID string) {
 	}
 	note, err := ns.Create(wsID, name)
 	if err != nil {
-		// Create refuses an existing name, which is the case worth reporting:
-		// the user already has a note called this and only they know which wins.
-		m.setError("migrate " + name + ": " + err.Error())
+		m.setError("copy " + name + ": " + err.Error())
 		return
 	}
 	if err := ns.Save(note, body); err != nil {
-		m.setError("migrate " + name + ": " + err.Error())
+		m.setError("copy " + name + ": " + err.Error())
 		return
 	}
-	// Verify the copy BEFORE destroying the original.
 	if _, got, rerr := ns.Load(wsID, name); rerr != nil || got != body {
-		m.setError("migrate " + name + ": copy could not be verified — the legacy " +
-			"note was NOT removed")
+		m.setError("copy " + name + ": the copy could not be verified")
 		return
 	}
-	if err := m.legacy.Delete(wsID, name); err != nil {
-		m.setError("migrated " + name + " but could not remove the legacy copy: " + err.Error())
-		return
-	}
-	m.setOK("migrated " + name + " into your notes")
+	m.setOK("copied " + name + " into your notes — the legacy copy remains; d deletes it")
 	m.explorer.Reload()
 }

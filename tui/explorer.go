@@ -199,12 +199,14 @@ func (e *explorer) HandleEvent(ev tui.Event) bool {
 				return true
 			}
 		}
-		// `m` MIGRATES a legacy note into this identity's own space. Per-note and
+		// `m` COPIES a legacy note into this identity's own space. Per-note and
 		// user-driven: the files carry no owner, so the person who recognises the
-		// note is the only one who can say it is theirs (ADR-0068 §2.4 as amended).
+		// note is the only one who can say it is theirs. It does NOT remove the
+		// source — deleting is the separate `d`, because an unlink must be bound
+		// to the file that was read, not to its pathname.
 		if k.Text == "m" {
 			if n, sel := e.tree.Selected(); sel && strings.HasPrefix(n.ID(), "lnote:") {
-				e.model.migrateLegacyNote(n.ID())
+				e.model.copyLegacyNoteToPersonal(n.ID())
 				return true
 			}
 		}
