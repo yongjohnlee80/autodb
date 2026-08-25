@@ -13,6 +13,7 @@ package tui
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,7 +22,6 @@ import (
 
 	"github.com/yongjohnlee80/golib/logger"
 	tui "github.com/yongjohnlee80/golib/tui"
-	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
 // childWithPrefix waits for a node with the given id prefix to become visible,
@@ -187,7 +187,6 @@ func TestProductionLifecycle_TableActivationHasTheConnectionName(t *testing.T) {
 	if !strings.Contains(title, "bravo") {
 		t.Errorf("title %q does not name the connection; want it to contain \"bravo\"", strings.TrimSpace(title))
 	}
-	_ = widget.NewTreeNode // keep the import honest if the walk changes
 }
 
 // The asymmetry the synthetic tests hid: `case "conn"` sets BOTH activeWs and
@@ -200,7 +199,7 @@ func TestProductionLifecycle_TableActivationHasTheConnectionName(t *testing.T) {
 // (ui.go:886). A stale value therefore lists the wrong workspace's connections
 // in SPC C — which looks exactly like "the connection did not change" — and
 // files a saved note into the wrong workspace.
-func TestProductionLifecycle_TableActivationLeavesTheWorkspaceStale(t *testing.T) {
+func TestProductionLifecycle_TableActivationSetsTheWorkspace(t *testing.T) {
 	addr := bootServer(t)
 	dir := t.TempDir()
 
@@ -233,7 +232,7 @@ func TestProductionLifecycle_TableActivationLeavesTheWorkspaceStale(t *testing.T
 		}
 		return wid, cid
 	}
-	ws1, _ := mk("alpha", "a.db", "first")
+	ws1, conn1 := mk("alpha", "a.db", "first")
 	ws2, conn2 := mk("bravo", "b.db", "second")
 
 	m, _, sync := mountedWith(t, sess)
@@ -241,7 +240,9 @@ func TestProductionLifecycle_TableActivationLeavesTheWorkspaceStale(t *testing.T
 	sync(func() { e.Reload() })
 
 	// Land on workspace ONE via its connection node — the path that works.
-	sync(func() { m.noteConnFromNode("conn:" + strconv.FormatInt(ws1, 10) + ":1") })
+	sync(func() {
+		m.noteConnFromNode("conn:" + strconv.FormatInt(ws1, 10) + ":" + strconv.FormatInt(conn1, 10))
+	})
 	var gotWs int64
 	sync(func() { gotWs = m.activeWs })
 	if gotWs != ws1 {
@@ -278,5 +279,104 @@ func TestProductionLifecycle_TableActivationLeavesTheWorkspaceStale(t *testing.T
 			"a note saved now goes to the WRONG workspace (saveNoteAs uses activeWs, "+
 			"ui.go:660) and SPC C lists the wrong workspace's connections (ui.go:886)",
 			gotWs, ws2)
+	}
+}
+
+// The CONSEQUENCE, not the intermediate variable (lector r2). activeWs is only
+// worth asserting because of what it decides: saveNoteAs files the note into
+// <notesRoot>/ws-<activeWs>. Before the fix, activating a table under workspace
+// 2 left activeWs on workspace 1, so the note landed in workspace 1's tree —
+// silent misfiling of the user's work, which is the harm the earlier assertion
+// only implied.
+func TestProductionLifecycle_NoteSavedAfterTableActivationLandsInThatWorkspace(t *testing.T) {
+	addr := bootServer(t)
+	dir := t.TempDir()
+
+	sess := NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(sess.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := sess.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Bind().Bootstrap(ctx, "root", "consequence-passphrase-1"); err != nil {
+		t.Fatal(err)
+	}
+	b := sess.Bind()
+	mk := func(name, file, ws string) (int64, int64) {
+		cid, err := b.CreateConnection(ctx, name, "sqlite", filepath.Join(dir, file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := b.Run(ctx, cid, `CREATE TABLE t (v TEXT)`); err != nil {
+			t.Fatal(err)
+		}
+		wid, err := b.CreateWorkspace(ctx, ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := b.AttachConnection(ctx, wid, cid); err != nil {
+			t.Fatal(err)
+		}
+		return wid, cid
+	}
+	ws1, conn1 := mk("alpha", "a.db", "first")
+	ws2, conn2 := mk("bravo", "b.db", "second")
+
+	m, tb, sync := mountedWith(t, sess)
+	e := m.explorer
+	sync(func() { e.Reload() })
+
+	// Start on workspace ONE.
+	sync(func() {
+		m.noteConnFromNode("conn:" + strconv.FormatInt(ws1, 10) + ":" + strconv.FormatInt(conn1, 10))
+	})
+
+	// Activate a table under workspace TWO.
+	wsN := "ws:" + strconv.FormatInt(ws2, 10)
+	conns := childWithPrefix(t, sync, e, []string{wsN}, "conns:")
+	connNode := childWithPrefix(t, sync, e, []string{wsN, conns}, "conn:"+strconv.FormatInt(ws2, 10)+":")
+	schema := childWithPrefix(t, sync, e, []string{wsN, conns, connNode}, "schema:"+strconv.FormatInt(conn2, 10)+":")
+	sec := childWithPrefix(t, sync, e, []string{wsN, conns, connNode, schema}, "sec:")
+	tbl := childWithPrefix(t, sync, e, []string{wsN, conns, connNode, schema, sec}, "tbl:")
+	sync(func() {
+		for i, n := range e.tree.VisibleRows() {
+			if n.ID() == tbl {
+				e.tree.SetCursor(i)
+			}
+		}
+		e.HandleEvent(tui.KeyEvent{Kind: tui.KeyPress, Code: tui.KeyEnter})
+	})
+
+	// Save the scaffold as a note through the SAME expression production uses.
+	sync(func() { m.saveNoteAs(m.activeWs, m.editor.Value()) })
+	dl := time.Now().Add(5 * time.Second)
+	for time.Now().Before(dl) {
+		if strings.Contains(tb.String(), "save note as") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !strings.Contains(tb.String(), "save note as") {
+		t.Fatalf("the save-as form never opened:\n%s", tb.String())
+	}
+	for _, r := range "scaffold" {
+		_ = tb.Inject(tui.KeyEvent{Kind: tui.KeyPress, Code: r, Text: string(r)})
+		time.Sleep(10 * time.Millisecond)
+	}
+	_ = tb.Inject(tui.KeyEvent{Kind: tui.KeyPress, Code: tui.KeyEnter})
+	time.Sleep(300 * time.Millisecond)
+
+	var root string
+	sync(func() { root = m.notes.root })
+	right := filepath.Join(root, "ws-"+strconv.FormatInt(ws2, 10), "scaffold.sql")
+	wrong := filepath.Join(root, "ws-"+strconv.FormatInt(ws1, 10), "scaffold.sql")
+
+	if _, err := os.Stat(wrong); err == nil {
+		t.Errorf("the note was filed into workspace %d — the WRONG workspace — after "+
+			"activating a table under workspace %d: %s", ws1, ws2, wrong)
+	}
+	if _, err := os.Stat(right); err != nil {
+		t.Errorf("the note is not in workspace %d where the activated table lives: %v", ws2, err)
 	}
 }

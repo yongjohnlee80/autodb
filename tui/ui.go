@@ -849,16 +849,20 @@ func (m *Model) setError(msg string) {
 // refreshQueryTitle names the connection the query will RUN AGAINST —
 // with two connections in a workspace, the target must never be a guess
 // (Johno, M6 manual testing).
-// connLabel names the active connection for display. The NAME can be missing
-// while the connection is perfectly real: explorer.connNames is populated only
-// from a workspace load (explorer.go:~204) and is emptied by Clear() on an
-// instance change, so every table activation between those two points had an id
-// with no cached name.
+// connLabel names the active connection for display.
 //
-// Returning "" there made three call sites report "no connection" for a
-// connection that execution would happily use — the reported defect (Johno,
-// 2026-08-25: Enter on a table appeared not to change the connection). The id is
-// always available and always truthful, so it is the fallback.
+// DEFENSIVE, not the fix for anything reported. An earlier commit claimed the
+// missing-name state explained Johno's report; lector showed it is NOT
+// production-reachable — applyWorkspaces fills connNames before it installs the
+// connection roots that table nodes descend from, and Clear() drops the map and
+// the whole tree together. The real defect was a stale activeWs, fixed in
+// explorer.WorkspaceOfNode.
+//
+// It is kept because returning "" made three sites report "no connection" for a
+// connection execution would happily use, and refreshQueryTitle then told the
+// user to select a connection that was already selected. The id is always
+// available and always truthful, so it is the fallback if the name is ever
+// absent.
 func (m *Model) connLabel() string {
 	if m.activeConn == 0 {
 		return ""

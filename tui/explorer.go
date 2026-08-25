@@ -114,21 +114,19 @@ func (e *explorer) ConnName(id int64) string { return e.connNames[id] }
 // the workspace for the subtree the cursor is actually in, per rendered position
 // rather than per connection identity.
 func (e *explorer) WorkspaceOfNode(id string) int64 {
+	// Resolve ONLY from the cursor row. Searching the rows for the id would pick
+	// the first of several identical ids — a connection attached to two
+	// workspaces renders the same `schema:`/`sec:`/`tbl:` ids under both — and
+	// silently answer for the wrong subtree. Both callers pass the selected node,
+	// so a mismatch means an off-cursor caller was added without deciding what
+	// position it means; 0 (leave activeWs alone) is the safe answer, and is
+	// deliberately not a best guess (lector r2).
 	rows := e.tree.VisibleRows()
-	at := -1
-	if c := e.tree.Cursor(); c >= 0 && c < len(rows) && rows[c].ID() == id {
-		at = c // the common case: the node under the cursor
-	} else {
-		for i, n := range rows {
-			if n.ID() == id {
-				at = i
-				break
-			}
-		}
-	}
-	if at < 0 {
+	c := e.tree.Cursor()
+	if c < 0 || c >= len(rows) || rows[c].ID() != id {
 		return 0
 	}
+	at := c
 	for i := at; i >= 0; i-- {
 		rid := rows[i].ID()
 		if strings.HasPrefix(rid, "conn:") {
