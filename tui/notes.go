@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,8 +41,17 @@ var noteName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]*$`)
 // expressible, because that is the shape that made one frontend's notes visible
 // to another identity.
 type NoteStore struct {
-	root    string
-	subject string
+	// confined is the ONLY way this store reaches the filesystem. Every path is
+	// relative to it, so a component that escapes — a workspace directory
+	// replaced by a symlink to somewhere else — is refused by the runtime rather
+	// than by a check someone has to remember to write.
+	//
+	// It is also what makes the ZERO VALUE fail closed: `var s NoteStore` has no
+	// root, so every operation errors instead of resolving `./ws-1` relative to
+	// the process's working directory (lector r2 P5).
+	confined *os.Root
+	root     string // for display only — About names the root a session reads
+	subject  string
 
 	// retired is set when this store's identity is no longer current. A retired
 	// store refuses ALL I/O: a retained closure that reaches it after a switch
@@ -148,7 +158,11 @@ func NewPersonalNotes(base, subject string) (*NoteStore, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("tui: notes root: %w", err)
 	}
-	s := &NoteStore{root: root, subject: subject}
+	confined, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, fmt.Errorf("tui: notes root: %w", err)
+	}
+	s := &NoteStore{confined: confined, root: root, subject: subject}
 	s.drained.L = &s.mu
 	return s, nil
 }
@@ -196,9 +210,55 @@ type Note struct {
 	loadedHash [32]byte
 }
 
-// dir is the immutable-ID-keyed workspace folder.
-func (s *NoteStore) dir(wsID int64) string {
-	return filepath.Join(s.root, fmt.Sprintf("ws-%d", wsID))
+// dir is the immutable-ID-keyed workspace folder, RELATIVE to the confined root.
+func (s *NoteStore) dir(wsID int64) string { return fmt.Sprintf("ws-%d", wsID) }
+
+// rel is one note's path relative to the confined root.
+func (s *NoteStore) rel(wsID int64, name string) string {
+	return filepath.Join(s.dir(wsID), name)
+}
+
+// fs returns the confined root, or an error for a zero-value store.
+func (s *NoteStore) fs() (*os.Root, error) {
+	if s == nil || s.confined == nil {
+		return nil, errors.New("tui: notes: store was not created by NewPersonalNotes")
+	}
+	return s.confined, nil
+}
+
+// openRegular opens a note through the confined root, refusing anything that is
+// not a regular file. os.Root will not let a symlink escape the root, but it
+// WILL follow one that stays inside it and will happily open a FIFO — neither is
+// a note (lector r2 P3).
+func (s *NoteStore) openRegular(rel string) (*os.File, error) {
+	root, err := s.fs()
+	if err != nil {
+		return nil, err
+	}
+	st, err := root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("tui: %s is not a regular file", rel)
+	}
+	return root.Open(rel)
+}
+
+// syncConfinedDir fsyncs a directory THROUGH the confined root, so the
+// descriptor synced is the one the operation used — re-opening it by path lets a
+// replacement make this sync a different directory (lector r2 P3).
+func (s *NoteStore) syncConfinedDir(rel string) error {
+	root, err := s.fs()
+	if err != nil {
+		return err
+	}
+	d, err := root.Open(rel)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // CleanName validates name and appends the canonical .sql suffix.
@@ -218,19 +278,32 @@ func (s *NoteStore) List(wsID int64) ([]string, error) {
 		return nil, err
 	}
 	defer s.end()
-	ents, err := os.ReadDir(s.dir(wsID))
+	root, err := s.fs()
+	if err != nil {
+		return nil, err
+	}
+	d, err := root.Open(s.dir(wsID))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	defer d.Close()
+	ents, err := d.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
 	var out []string
 	for _, e := range ents {
-		if e.Type().IsRegular() && strings.HasSuffix(e.Name(), ".sql") {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".sql") {
 			out = append(out, e.Name())
 		}
 	}
+	sort.Strings(out)
 	return out, nil
 }
 
@@ -254,9 +327,9 @@ func (s *NoteStore) loadUnadmitted(wsID int64, name string) (*Note, string, erro
 		return nil, "", err
 	}
 	n := &Note{WorkspaceID: wsID, Name: clean, store: s}
-	path := filepath.Join(s.dir(wsID), clean)
+	rel := s.rel(wsID, clean)
 
-	f, err := openNoFollow(path)
+	f, err := s.openRegular(rel)
 	if errors.Is(err, os.ErrNotExist) {
 		return n, "", nil // a NEW note: must still be absent at save
 	}
@@ -297,19 +370,23 @@ func (s *NoteStore) Save(n *Note, body string) error {
 	if err := s.owns(n); err != nil {
 		return err
 	}
-	dir := s.dir(n.WorkspaceID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	path := filepath.Join(dir, n.Name)
-
-	tmp, err := os.OpenFile(filepath.Join(dir, "."+n.Name+".tmp"),
-		os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	root, err := s.fs()
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
-	cleanup := func() { tmp.Close(); os.Remove(tmpPath) }
+	dir := s.dir(n.WorkspaceID)
+	if err := root.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	rel := s.rel(n.WorkspaceID, n.Name)
+	tmpRel := filepath.Join(dir, "."+n.Name+".tmp")
+
+	tmp, err := root.OpenFile(tmpRel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	discard := func() { _ = root.Remove(tmpRel) }
+	cleanup := func() { tmp.Close(); discard() }
 	if _, err := tmp.WriteString(body); err != nil {
 		cleanup()
 		return err
@@ -319,54 +396,54 @@ func (s *NoteStore) Save(n *Note, body string) error {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
+		discard()
 		return err
 	}
 
-	// Conflict check from a fresh no-follow descriptor (r3: content
-	// identity, not timestamps), AFTER the temp is fully durable.
-	cur, err := openNoFollow(path)
+	// Conflict check from a fresh descriptor, refusing anything that is not a
+	// regular file (content identity, not timestamps), AFTER the temp is durable.
+	cur, err := s.openRegular(rel)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		if n.existed {
-			os.Remove(tmpPath)
+			discard()
 			return ErrNoteConflict // deleted underneath us
 		}
 	case err != nil:
-		os.Remove(tmpPath)
+		discard()
 		return err
 	default:
 		curBody, rerr := io.ReadAll(cur)
 		dev, ino, ierr := fileIdentity(cur)
 		cur.Close()
 		if rerr != nil {
-			os.Remove(tmpPath)
+			discard()
 			return rerr
 		}
 		if ierr != nil {
-			os.Remove(tmpPath)
+			discard()
 			return ierr
 		}
 		if !n.existed {
-			os.Remove(tmpPath)
-			return ErrNoteConflict // appeared since the NEW-note load (r3)
+			discard()
+			return ErrNoteConflict // appeared since the NEW-note load
 		}
 		if dev != n.loadedDev || ino != n.loadedIno || sha256.Sum256(curBody) != n.loadedHash {
-			os.Remove(tmpPath)
+			discard()
 			return ErrNoteConflict
 		}
 	}
 
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
+	if err := root.Rename(tmpRel, rel); err != nil {
+		discard()
 		return err
 	}
-	if err := syncDir(dir); err != nil {
+	if err := s.syncConfinedDir(dir); err != nil {
 		return err
 	}
 
 	// Refresh the identity to the just-saved state.
-	f, err := openNoFollow(path)
+	f, err := s.openRegular(rel)
 	if err != nil {
 		return err
 	}
@@ -395,12 +472,15 @@ func (s *NoteStore) Create(wsID int64, name string) (*Note, error) {
 	if err != nil {
 		return nil, err
 	}
-	dir := s.dir(wsID)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	root, err := s.fs()
+	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, clean),
-		os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	dir := s.dir(wsID)
+	if err := root.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := root.OpenFile(s.rel(wsID, clean), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return nil, fmt.Errorf("tui: %s already exists", clean)
@@ -414,7 +494,7 @@ func (s *NoteStore) Create(wsID int64, name string) (*Note, error) {
 	if cerr := f.Close(); cerr != nil {
 		return nil, cerr
 	}
-	if err := syncDir(dir); err != nil {
+	if err := s.syncConfinedDir(dir); err != nil {
 		return nil, err
 	}
 	n, _, err := s.loadUnadmitted(wsID, clean)
@@ -431,13 +511,34 @@ func (s *NoteStore) Delete(wsID int64, name string) error {
 	if err != nil {
 		return err
 	}
-	// Same directory-relative unlink as the legacy tree: a personal root is ours,
-	// but "ours" is not a security boundary once anything else can write beside it.
-	_, err = removeAt(s.root, filepath.Join(fmt.Sprintf("ws-%d", wsID), clean))
+	root, err := s.fs()
+	if err != nil {
+		return err
+	}
+	rel := s.rel(wsID, clean)
+	// Reject a final component that is a SYMLINK. os.Root refuses to escape, but
+	// Remove on a link inside the root removes the link, which is not the note
+	// the user asked to delete (lector r2 P3).
+	st, err := root.Lstat(rel)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("tui: %s is not a regular file", rel)
+	}
+	if err := root.Remove(rel); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if serr := s.syncConfinedDir(s.dir(wsID)); serr != nil {
+		return fmt.Errorf("%w: %v", ErrRemovedNotDurable, serr)
+	}
+	return nil
 }
 
 // removeAt unlinks name inside dir without following a symlinked path, and
@@ -497,10 +598,19 @@ func (s *NoteStore) ListWorkspaceDirs() ([]int64, error) {
 		return nil, err
 	}
 	defer s.end()
-	ents, err := os.ReadDir(s.root)
+	root, err := s.fs()
+	if err != nil {
+		return nil, err
+	}
+	d, err := root.Open(".")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	ents, err := d.ReadDir(-1)
 	if err != nil {
 		return nil, err
 	}
@@ -509,8 +619,9 @@ func (s *NoteStore) ListWorkspaceDirs() ([]int64, error) {
 		if !e.IsDir() || !strings.HasPrefix(e.Name(), "ws-") {
 			continue
 		}
-		id, perr := strconv.ParseInt(strings.TrimPrefix(e.Name(), "ws-"), 10, 64)
-		if perr == nil {
+		suffix := strings.TrimPrefix(e.Name(), "ws-")
+		id, perr := strconv.ParseInt(suffix, 10, 64)
+		if perr == nil && id > 0 && strconv.FormatInt(id, 10) == suffix {
 			out = append(out, id)
 		}
 	}

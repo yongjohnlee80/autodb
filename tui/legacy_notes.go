@@ -16,22 +16,43 @@ package tui
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
 
 // LegacyNotes reads the ownerless pre-ADR-0068 tree.
-type LegacyNotes struct{ base string }
+type LegacyNotes struct {
+	base     string
+	confined *os.Root
+}
 
-// OpenLegacyNotes returns a reader over base, or nil when base is empty.
+// OpenLegacyNotes returns a reader over base, or nil when base is empty or
+// cannot be opened.
+//
+// Everything goes through a confined root: the legacy tree is the one place any
+// authenticated user can read, so a `ws-*` replaced by a symlink pointing
+// elsewhere would expose files outside the notes area to everybody. Lector
+// reproduced exactly that against the path-based version.
 func OpenLegacyNotes(base string) *LegacyNotes {
 	if base == "" {
 		return nil
 	}
-	return &LegacyNotes{base: base}
+	confined, err := os.OpenRoot(base)
+	if err != nil {
+		return nil
+	}
+	return &LegacyNotes{base: base, confined: confined}
+}
+
+// fs returns the confined root, or an error when there is none.
+func (l *LegacyNotes) fs() (*os.Root, error) {
+	if l == nil || l.confined == nil {
+		return nil, errors.New("tui: no legacy notes")
+	}
+	return l.confined, nil
 }
 
 // Workspaces lists the workspace ids that still have a legacy folder.
@@ -40,13 +61,19 @@ func OpenLegacyNotes(base string) *LegacyNotes {
 // guessed at: a name the store could not have produced is not something to
 // present as a workspace (ADR-0068 criterion 35).
 func (l *LegacyNotes) Workspaces() ([]int64, error) {
-	if l == nil {
+	root, err := l.fs()
+	if err != nil {
 		return nil, nil
 	}
-	ents, err := os.ReadDir(l.base)
+	d, err := root.Open(".")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	ents, err := d.ReadDir(-1)
 	if err != nil {
 		return nil, err
 	}
@@ -57,8 +84,6 @@ func (l *LegacyNotes) Workspaces() ([]int64, error) {
 		}
 		suffix := strings.TrimPrefix(e.Name(), "ws-")
 		id, perr := strconv.ParseInt(suffix, 10, 64)
-		// Canonical only: "ws-01" and "ws-+1" parse but are not names this
-		// codebase writes, and re-rendering them would produce a different path.
 		if perr != nil || id <= 0 || strconv.FormatInt(id, 10) != suffix {
 			continue
 		}
@@ -69,22 +94,24 @@ func (l *LegacyNotes) Workspaces() ([]int64, error) {
 
 // List names the legacy notes in one workspace folder.
 func (l *LegacyNotes) List(wsID int64) ([]string, error) {
-	if l == nil {
+	root, err := l.fs()
+	if err != nil {
 		return nil, nil
 	}
-	ents, err := os.ReadDir(l.dir(wsID))
+	d, err := root.Open(l.dir(wsID))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	defer d.Close()
+	ents, err := d.ReadDir(-1)
+	if err != nil {
+		return nil, err
+	}
 	var out []string
 	for _, e := range ents {
-		// REGULAR files only, as claimed. Type() reports the raw dirent mode, so
-		// excluding symlinks and directories still admitted FIFOs, sockets and
-		// devices whose names end in .sql — each of which would block or misbehave
-		// on read (lector).
 		if !e.Type().IsRegular() {
 			continue
 		}
@@ -92,28 +119,33 @@ func (l *LegacyNotes) List(wsID int64) ([]string, error) {
 			out = append(out, e.Name())
 		}
 	}
+	sort.Strings(out)
 	return out, nil
 }
 
 // Read returns a legacy note's contents through a no-follow descriptor.
 func (l *LegacyNotes) Read(wsID int64, name string) (string, error) {
-	if l == nil {
-		return "", errors.New("tui: no legacy notes")
+	root, err := l.fs()
+	if err != nil {
+		return "", err
 	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return "", err
 	}
-	f, err := openNoFollow(filepath.Join(l.dir(wsID), clean))
+	rel := filepath.Join(l.dir(wsID), clean)
+	st, err := root.Lstat(rel)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	body, err := io.ReadAll(f)
+	if !st.Mode().IsRegular() {
+		return "", fmt.Errorf("tui: %s is not a regular file", rel)
+	}
+	b, err := root.ReadFile(rel)
 	if err != nil {
 		return "", err
 	}
-	return string(body), nil
+	return string(b), nil
 }
 
 // ErrRemovedNotDurable reports that a note WAS unlinked but the directory could
@@ -127,27 +159,44 @@ var ErrRemovedNotDurable = errors.New("tui: notes: removed, but the directory co
 // Delete removes a legacy note. This is how the deprecated tree drains, so it is
 // deliberately permitted — and it is the ONLY mutation this type offers.
 func (l *LegacyNotes) Delete(wsID int64, name string) error {
-	if l == nil {
-		return errors.New("tui: no legacy notes")
+	root, err := l.fs()
+	if err != nil {
+		return err
 	}
 	clean, err := CleanName(name)
 	if err != nil {
 		return err
 	}
-	// Unlinked RELATIVE to a descriptor for the workspace directory, which is
-	// opened refusing a symlink — a path-based Remove here deleted a file outside
-	// the base entirely when `<base>/ws-N` was replaced with a symlink.
-	removed, err := removeAt(l.base, filepath.Join(fmt.Sprintf("ws-%d", wsID), clean))
-	if err != nil && removed {
-		// Unlinked, but not durably. Not a failure to retry.
-		return fmt.Errorf("%w: %v", ErrRemovedNotDurable, err)
+	rel := filepath.Join(l.dir(wsID), clean)
+	st, err := root.Lstat(rel)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if !st.Mode().IsRegular() {
+		return fmt.Errorf("tui: %s is not a regular file", rel)
+	}
+	if err := root.Remove(rel); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	d, derr := root.Open(l.dir(wsID))
+	if derr != nil {
+		return fmt.Errorf("%w: %v", ErrRemovedNotDurable, derr)
+	}
+	defer d.Close()
+	if serr := d.Sync(); serr != nil {
+		return fmt.Errorf("%w: %v", ErrRemovedNotDurable, serr)
+	}
+	return nil
 }
 
-func (l *LegacyNotes) dir(wsID int64) string {
-	return filepath.Join(l.base, fmt.Sprintf("ws-%d", wsID))
-}
+// dir is the workspace folder RELATIVE to the confined root.
+func (l *LegacyNotes) dir(wsID int64) string { return fmt.Sprintf("ws-%d", wsID) }
 
 // --- Model operations on the legacy tree ---------------------------------
 
