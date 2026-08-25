@@ -378,7 +378,9 @@ func (s *NoteStore) Delete(wsID int64, name string) error {
 	if err != nil {
 		return err
 	}
-	err = os.Remove(filepath.Join(s.dir(wsID), clean))
+	// Same directory-relative unlink as the legacy tree: a personal root is ours,
+	// but "ours" is not a security boundary once anything else can write beside it.
+	_, err = removeAt(s.dir(wsID), clean)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -398,6 +400,9 @@ func syncDir(dir string) error {
 // (the explorer surfaces folders whose server workspace is gone as
 // "detached").
 func (s *NoteStore) ListWorkspaceDirs() ([]int64, error) {
+	if err := s.alive(); err != nil {
+		return nil, err
+	}
 	ents, err := os.ReadDir(s.root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil

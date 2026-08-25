@@ -420,10 +420,15 @@ func (m *Model) afterLogin() {
 	if m.notesFor != nil {
 		notes, err := m.notesFor(u.Name)
 		if err != nil {
-			m.setError(fmt.Sprintf("notes unavailable for %s: %v", u.Name, err))
-		} else {
-			m.notes = notes
+			// Reported INSTEAD of the login line, not before it. The success
+			// message used to overwrite this immediately, so the one case the user
+			// needed to see — signed in but with no notes — announced itself as an
+			// ordinary login (lector).
+			m.setError(fmt.Sprintf("signed in as %s, but notes are unavailable: %v", u.Name, err))
+			m.explorer.Reload()
+			return
 		}
+		m.notes = notes
 	}
 	m.setStatus(fmt.Sprintf("logged in as %s (%s)", u.Name, u.Role))
 	m.explorer.Reload()
