@@ -23,11 +23,18 @@ import (
 // green would be the wrong trade — so the gate is
 // AUTODB_CORPUS_DIR and the test skips without it.
 //
-// What it asserts is invariants, not a golden transcript. A recorded
-// per-statement golden that no CI run can regenerate rots into a file people
-// update until it passes; the invariants below say what must be TRUE of any
-// real workload, and the aggregate shape catches drift loudly enough to
-// investigate.
+// It asserts on two levels, and it needs both. The committed manifest says
+// what every statement's classification and gate decision is SUPPOSED to be;
+// the independent checks beside it — a second reading of the leading verb, a
+// second depth-aware scan for WHERE — say the classifier and its expectations
+// have not simply agreed with each other. Neither alone is enough: an
+// invariant-only version of this test let the corpus's one nested-mutation
+// refusal turn into an admission and stayed green, and a manifest regenerated
+// without looking would do the same.
+//
+// It cannot testify about shapes the corpus lacks. There is no AS MATERIALIZED
+// CTE in these 470 scripts, so the direct tests for that shape are not
+// redundant with this one and must not be folded into it.
 func TestCorpusReplay(t *testing.T) {
 	dir := os.Getenv("AUTODB_CORPUS_DIR")
 	if dir == "" {
@@ -451,6 +458,13 @@ func loadManifest(t *testing.T) map[string]corpusRecord {
 		r.file, r.hash, r.verb, r.class, r.decision = parts[0], parts[2], parts[3], parts[4], parts[5]
 		if _, err := fmt.Sscanf(parts[1], "%d", &r.ordinal); err != nil {
 			t.Fatalf("%s:%d: bad ordinal %q", manifestPath, ln, parts[1])
+		}
+		if prev, dup := out[r.key()]; dup {
+			// Two expectations for one statement means one of them is dead,
+			// and silently keeping the last would make which one wins depend
+			// on file order.
+			t.Fatalf("%s:%d: duplicate record for %s (already had verb=%s class=%s decision=%s)",
+				manifestPath, ln, r.key(), prev.verb, prev.class, prev.decision)
 		}
 		out[r.key()] = r
 	}
