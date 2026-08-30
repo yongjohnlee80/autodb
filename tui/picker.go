@@ -86,6 +86,12 @@ func (p *connPicker) HandleEvent(ev tui.Event) bool {
 // cursor, and Enter selects nothing.
 func (p *connPicker) Add(...tui.Component) {}
 func (p *connPicker) Remove(tui.Component) {}
+
+// Move is a no-op: the picker is a fixed-shape container with a single
+// child and no document order to permute. golib's tui.Container grew Move
+// in v0.5.4 (golib tui ADR-0011 §2.2); satisfying it honestly here means
+// doing nothing rather than pretending to reorder something.
+func (p *connPicker) Move(tui.Component, int) {}
 func (p *connPicker) Children() iter.Seq[tui.Component] {
 	return func(yield func(tui.Component) bool) {
 		if p.list != nil {
