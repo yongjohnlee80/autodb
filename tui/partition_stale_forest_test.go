@@ -5,15 +5,20 @@ package tui
 // map), rejecting a stale result rejects its whole topology atomically. These
 // tests drive the REAL generation protocol — expanding a node mints gen1,
 // Reload supersedes it with gen2 — and push results through explorer.applyTask
-// out of order.
+// in both problematic orders:
+//
+//   - LATE STALE (the criterion): the newer result installs first, then the
+//     older one settles afterwards and must change nothing.
+//   - SUPERSEDED WHILE PENDING: the older result settles while the newer one is
+//     still in flight and must install nothing.
 //
 // The `sec:` node lives in a tree the TEST owns rather than the explorer's own
-// tree. That is deliberate: the explorer auto-loads any expand of its tree
-// (an async round-trip whose late settle would make the ordering flaky), and it
+// tree. That is deliberate: the explorer auto-loads any expand of its tree (an
+// async round-trip whose late settle would make the ordering flaky), and it
 // ignores expand events from trees it does not own. Nothing else about the path
 // changes — applyTask installs by node pointer, and TreeNode.SetChildren
-// enforces the same generation contract either way. Generations are assigned by
-// the tree's own counter, so gen1/gen2 here are the real thing.
+// enforces the same generation contract either way. Generations come from the
+// tree's own counter, so gen1/gen2 here are the real thing.
 //
 // Note on `quoted`: applyTask merges the result's quoted map before the
 // generation guard, so a stale result can leave a stale identifier behind.
@@ -22,6 +27,7 @@ package tui
 // the TREE STRUCTURE, which is what the guard protects.
 
 import (
+	"slices"
 	"testing"
 
 	tui "github.com/yongjohnlee80/golib/tui"
@@ -56,68 +62,105 @@ func subPartitioned(name, parent string) TableInfo {
 	return t
 }
 
-// An older sec: result completing AFTER a newer one must not install its
-// forest — and the newer forest lands with no residue of the older one: a
-// detached partition returns to the top level and a removed sub-partition
-// disappears entirely.
-func TestExplorer_StaleSectionResultDoesNotInstallItsForest(t *testing.T) {
-	m, _, sync := mounted(t)
-	e := m.explorer
-	const secID = "sec:3:public:tables"
-
-	// Forest A (the stale load): events → events_2026 → events_2026_01.
-	forestA := []TableInfo{
+// forestA is the stale load: events → events_2026 → events_2026_01.
+func forestA() []TableInfo {
+	return []TableInfo{
 		partitioned("events"),
 		subPartitioned("events_2026", "events"),
 		childOf("events_2026_01", "events_2026"),
 	}
-	// Forest B (the fresh load): events_2026 was DETACHED (a plain top-level
-	// table now) and events_2026_01 was DROPPED.
-	forestB := []TableInfo{
+}
+
+// forestB is the fresh load: events_2026 was DETACHED (a plain top-level table
+// now) and events_2026_01 was DROPPED.
+func forestB() []TableInfo {
+	return []TableInfo{
 		partitioned("events"),
 		tbl("events_2026"),
 	}
+}
 
+// stagedSection returns a tree whose `sec:` node has issued gen1 and then been
+// superseded by gen2, exactly as an expand followed by a Reload does.
+func stagedSection(secID string) (*widget.Tree, *widget.TreeNode, uint64, uint64) {
 	tree := widget.NewTree()
 	sec := widget.NewTreeNode(secID, "tables")
 	tree.SetRoots(sec)
-
 	tree.ExpandPath(secID) // mints gen1 (the tree's counter starts at 1)
-	const g1 = uint64(1)
-	tree.Reload(secID) // supersedes it: Reset clears the in-flight load, then mints gen2
-	const g2 = uint64(2)
+	tree.Reload(secID)     // Reset clears the in-flight load, then mints gen2
+	return tree, sec, 1, 2
+}
+
+// assertFreshForest checks the topology forestB should produce.
+func assertFreshForest(t *testing.T, tree *widget.Tree, ids []string, what string) {
+	t.Helper()
+	if !contains(ids, "tbl:3:public:events") {
+		t.Fatalf("%s: fresh forest missing: %v", what, ids)
+	}
+	// The detached partition is top-level — no residue nesting it.
+	if !contains(ids, "tbl:3:public:events_2026") {
+		t.Errorf("%s: the detached partition is not top-level: %v", what, ids)
+	}
+	// The dropped sub-partition is gone from the tree entirely.
+	if contains(ids, "tbl:3:public:events_2026_01") {
+		t.Errorf("%s: a removed sub-partition is present: %v", what, ids)
+	}
+	if l, ok := labelByID(tree, "part:3:public:events"); !ok || l != "partitions (0)" {
+		t.Errorf("%s: events partitions folder = %q (found=%v), want 'partitions (0)'", what, l, ok)
+	}
+}
+
+// THE CRITERION: an older sec: result completing AFTER the newer one has
+// already installed must change nothing — the stale forest is rejected whole.
+func TestExplorer_LateStaleSectionResultLeavesTheForestUntouched(t *testing.T) {
+	m, _, sync := mounted(t)
+	e := m.explorer
+	const secID = "sec:3:public:tables"
+	tree, sec, g1, g2 := stagedSection(secID)
+
+	var beforeStale, afterStale []string
+	sync(func() {
+		// The FRESH result lands first and installs the whole forest.
+		e.applyTask(sectionResult(m, sec, g2, forestB()))
+		tree.ExpandPath(secID, "tbl:3:public:events")
+		beforeStale = visibleIDs(tree)
+
+		// ...and only THEN does the older load settle. It must be inert.
+		e.applyTask(sectionResult(m, sec, g1, forestA()))
+		tree.ExpandPath(secID, "tbl:3:public:events")
+		afterStale = visibleIDs(tree)
+	})
+
+	assertFreshForest(t, tree, beforeStale, "after the fresh result")
+	if !slices.Equal(beforeStale, afterStale) {
+		t.Errorf("a late stale result changed the tree:\n before: %v\n  after: %v", beforeStale, afterStale)
+	}
+	assertFreshForest(t, tree, afterStale, "after the late stale result")
+}
+
+// The other order: the older result settles while the newer one is still
+// pending. It must install nothing, and the newer forest still lands intact.
+func TestExplorer_StaleSectionResultWhilePendingInstallsNothing(t *testing.T) {
+	m, _, sync := mounted(t)
+	e := m.explorer
+	const secID = "sec:3:public:tables"
+	tree, sec, g1, g2 := stagedSection(secID)
 
 	var afterStale, afterFresh []string
 	sync(func() {
-		// The STALE result settles last: it must be inert.
-		e.applyTask(sectionResult(m, sec, g1, forestA))
+		e.applyTask(sectionResult(m, sec, g1, forestA()))
 		afterStale = visibleIDs(tree)
 
-		// The FRESH result installs the whole forest atomically.
-		e.applyTask(sectionResult(m, sec, g2, forestB))
+		e.applyTask(sectionResult(m, sec, g2, forestB()))
 		tree.ExpandPath(secID, "tbl:3:public:events")
 		afterFresh = visibleIDs(tree)
 	})
 
 	if n := len(afterStale) - 1; n != 0 { // minus the sec: row itself
-		t.Errorf("a stale sec: result installed %d children: %v — the forest must be rejected wholesale",
+		t.Errorf("a superseded sec: result installed %d children: %v — the forest must be rejected wholesale",
 			n, afterStale)
 	}
-	if !contains(afterFresh, "tbl:3:public:events") {
-		t.Fatalf("fresh forest did not install: %v", afterFresh)
-	}
-	// The detached partition is top-level again — no residue nesting it.
-	if !contains(afterFresh, "tbl:3:public:events_2026") {
-		t.Errorf("the detached partition is not top-level after the fresh load: %v", afterFresh)
-	}
-	// The dropped sub-partition is gone from the tree entirely.
-	if contains(afterFresh, "tbl:3:public:events_2026_01") {
-		t.Errorf("a removed sub-partition survived the reload: %v", afterFresh)
-	}
-	// events has no visible partitions now — its former child was detached.
-	if l, ok := labelByID(tree, "part:3:public:events"); !ok || l != "partitions (0)" {
-		t.Errorf("events partitions folder = %q (found=%v), want 'partitions (0)'", l, ok)
-	}
+	assertFreshForest(t, tree, afterFresh, "after the fresh result")
 }
 
 // A result that settles after its node was detached by a ROOT REBUILD is inert:
@@ -126,8 +169,6 @@ func TestExplorer_SectionResultAfterRootRebuildIsInert(t *testing.T) {
 	m, _, sync := mounted(t)
 	e := m.explorer
 	const secID = "sec:3:public:tables"
-
-	forest := []TableInfo{partitioned("events"), childOf("events_2026_01", "events")}
 
 	tree := widget.NewTree()
 	stale := widget.NewTreeNode(secID, "tables")
@@ -140,7 +181,7 @@ func TestExplorer_SectionResultAfterRootRebuildIsInert(t *testing.T) {
 
 	var after []string
 	sync(func() {
-		e.applyTask(sectionResult(m, stale, 1, forest))
+		e.applyTask(sectionResult(m, stale, 1, forestA()))
 		after = visibleIDs(tree)
 	})
 

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
 	"github.com/yongjohnlee80/golib/dao/postgres"
@@ -45,10 +46,20 @@ func newBarrierConn(base, part [][]any) *barrierConn {
 	}
 }
 
-func (c *barrierConn) QueryContext(_ context.Context, q string, _ ...any) (dao.Rows, error) {
+// QueryContext honors ctx while parked: a regression that never releases the
+// barrier fails the test's deadline instead of hanging until the global timeout.
+func (c *barrierConn) QueryContext(ctx context.Context, q string, _ ...any) (dao.Rows, error) {
 	if strings.Contains(q, "pg_inherits") {
-		c.atBarrier <- struct{}{} // "the base snapshot is taken"
-		<-c.resume                // ...the test mutates the catalog here...
+		select {
+		case c.atBarrier <- struct{}{}: // "the base snapshot is taken"
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		select {
+		case <-c.resume: // ...the test mutates the catalog here...
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		return &fakeRows{rows: append([][]any(nil), c.partRows...)}, nil
@@ -78,6 +89,40 @@ func (f *fixture) injectConn(c dao.DataConn) {
 	f.eng.mu.Unlock()
 }
 
+// barrierWait bounds how long these tests will block on a handoff, so a
+// regression that never reaches the supplementary query fails here with a clear
+// message rather than hanging until the package-wide test timeout.
+const barrierWait = 15 * time.Second
+
+// recvOrFail receives from ch or fails the test after barrierWait.
+func recvOrFail[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(barrierWait):
+		t.Fatalf("timed out after %s waiting for %s", barrierWait, what)
+		var zero T
+		return zero
+	}
+}
+
+// listTablesAsync runs ListTables under a deadline and reports the outcome.
+func listTablesAsync(f *fixture) (<-chan listOut, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), barrierWait)
+	done := make(chan listOut, 1)
+	go func() {
+		tables, err := f.eng.ListTables(ctx, f.rootTok, f.connID, "public")
+		done <- listOut{tables, err}
+	}()
+	return done, cancel
+}
+
+type listOut struct {
+	tables []TableEntry
+	err    error
+}
+
 // A partition CREATED AND ATTACHED between the two snapshots appears only in
 // the supplementary result. It must be ignored, never synthesized into a row:
 // the base listing is authoritative for which relations exist.
@@ -89,24 +134,18 @@ func TestListTables_BarrierAttachBetweenSnapshots(t *testing.T) {
 	)
 	f.injectConn(c)
 
-	type out struct {
-		tables []TableEntry
-		err    error
-	}
-	done := make(chan out, 1)
-	go func() {
-		tables, err := f.eng.ListTables(context.Background(), f.rootTok, f.connID, "public")
-		done <- out{tables, err}
-	}()
+	done, cancel := listTablesAsync(f)
+	defer cancel()
 
-	<-c.atBarrier // the base snapshot is taken; the supplementary has not run
+	// the base snapshot is taken; the supplementary has not run
+	recvOrFail(t, c.atBarrier, "ListTables to reach the supplementary query")
 	c.setRoles([][]any{
 		{"events", true, false, ""},
 		{"events_2026_02", false, true, "events"}, // created + attached just now
 	})
 	close(c.resume)
 
-	got := <-done
+	got := recvOrFail(t, done, "ListTables to return")
 	if got.err != nil {
 		t.Fatalf("ListTables: %v", got.err)
 	}
@@ -138,22 +177,15 @@ func TestListTables_BarrierDetachBetweenSnapshots(t *testing.T) {
 	)
 	f.injectConn(c)
 
-	type out struct {
-		tables []TableEntry
-		err    error
-	}
-	done := make(chan out, 1)
-	go func() {
-		tables, err := f.eng.ListTables(context.Background(), f.rootTok, f.connID, "public")
-		done <- out{tables, err}
-	}()
+	done, cancel := listTablesAsync(f)
+	defer cancel()
 
-	<-c.atBarrier
+	recvOrFail(t, c.atBarrier, "ListTables to reach the supplementary query")
 	// events_2026_01 is detached and dropped before the supplementary read.
 	c.setRoles([][]any{{"events", true, false, ""}})
 	close(c.resume)
 
-	got := <-done
+	got := recvOrFail(t, done, "ListTables to return")
 	if got.err != nil {
 		t.Fatalf("ListTables: %v", got.err)
 	}
