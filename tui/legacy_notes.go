@@ -55,11 +55,17 @@ func (l *LegacyNotes) fs() (*os.Root, error) {
 	return l.confined, nil
 }
 
-// Workspaces lists the workspace ids that still have a legacy folder.
+// Workspaces lists the workspace ids that still hold at least one legacy note.
 //
 // A `ws-*` entry whose suffix is not a canonical positive int64 is IGNORED, not
 // guessed at: a name the store could not have produced is not something to
 // present as a workspace (ADR-0068 criterion 35).
+//
+// An EMPTY `ws-*` folder is ignored too. The legacy set only shrinks (this type
+// is read-and-delete), so once a user has drained a workspace's notes the folder
+// left behind carries nothing to migrate or delete — presenting it would leave a
+// deprecated section lingering with no contents (Johno, 2026-08-30). "Still has a
+// legacy folder" is therefore not the question; "still has a legacy note" is.
 func (l *LegacyNotes) Workspaces() ([]int64, error) {
 	root, err := l.fs()
 	if err != nil {
@@ -85,6 +91,16 @@ func (l *LegacyNotes) Workspaces() ([]int64, error) {
 		suffix := strings.TrimPrefix(e.Name(), "ws-")
 		id, perr := strconv.ParseInt(suffix, 10, 64)
 		if perr != nil || id <= 0 || strconv.FormatInt(id, 10) != suffix {
+			continue
+		}
+		// A drained folder is not a workspace to present. List reads only the
+		// `.sql` notes, so a folder holding none (every note migrated or deleted)
+		// is skipped and its section disappears.
+		names, lerr := l.List(id)
+		if lerr != nil {
+			return nil, lerr
+		}
+		if len(names) == 0 {
 			continue
 		}
 		out = append(out, id)
