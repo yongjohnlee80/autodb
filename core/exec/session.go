@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/yongjohnlee80/golib/dao"
 )
 
 // ExecSession — an engine-owned client session (ADR-0074 §1).
@@ -113,6 +115,13 @@ type session struct {
 	done chan struct{}
 	// lastUsed drives the idle timeout.
 	lastUsed time.Time
+
+	// The session's one transaction (ADR-0074 Amendment 2). All four fields
+	// are guarded by mu.
+	tx       dao.ContextTxConn
+	txPhase  txPhase
+	txID     string
+	txOpened time.Time
 }
 
 func (s *session) get() sessionState { return sessionState(s.state.Load()) }

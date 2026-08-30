@@ -67,11 +67,25 @@ func (p Profile) admit(st Statement) error {
 
 	case ProfileSession:
 		if st.Class == ClassControl {
-			// Honest about the phase: the verb is recognized, the engine
-			// that would act on it is not built yet. Saying "unsupported"
-			// without saying which of those two it is would be the kind of
-			// refusal ADR-0074 §8a exists to prevent.
-			return fmt.Errorf("%w: %s (the session engine is not wired yet — transaction control arrives with ExecSession)",
+			// Transaction control is now an engine action (ADR-0074 §3):
+			// admitted here and performed as a state transition, never
+			// forwarded as text.
+			if txControlVerbs[st.Verb] {
+				return nil
+			}
+			// The rest of the control verbs are still refused, and the
+			// message says which kind of refusal it is. SET and LOCK have
+			// admissible forms the gate matrix defines (SET LOCAL of an
+			// allowlisted GUC inside a transaction, LOCK inside a
+			// transaction) and arrive with that work; the others have no
+			// admissible form at all. Collapsing the two into one message
+			// would tell a caller to stop trying when they should wait, or
+			// the reverse.
+			if pendingControlVerbs[st.Verb] {
+				return fmt.Errorf("%w: %s (this profile will admit it in a restricted form; that gate is not built yet)",
+					ErrStatementUnsupported, st.Verb)
+			}
+			return fmt.Errorf("%w: %s (no admissible form on a session; it cannot be made safe on a pooled connection)",
 				ErrStatementUnsupported, st.Verb)
 		}
 		// Data-modifying CTEs are admitted here and left to the guard, which
@@ -85,6 +99,18 @@ func (p Profile) admit(st Statement) error {
 		// "nothing".
 		return fmt.Errorf("%w: unknown capability profile %q", ErrStatementUnsupported, string(p))
 	}
+}
+
+// txControlVerbs are the transaction boundaries the session profile performs
+// as state transitions.
+var txControlVerbs = map[string]bool{
+	"BEGIN": true, "START": true, "COMMIT": true, "END": true, "ROLLBACK": true,
+}
+
+// pendingControlVerbs have an admissible form the gate matrix defines but
+// which is not built yet — as opposed to the verbs that have none.
+var pendingControlVerbs = map[string]bool{
+	"SET": true, "LOCK": true, "CALL": true, "DO": true,
 }
 
 // guardWhere applies the WHERE guard to every mutation in a statement, at
