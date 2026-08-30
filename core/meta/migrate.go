@@ -92,6 +92,17 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					AuditAction: r.Action, AuditDetail: r.Detail, AuditCreatedAt: r.CreatedAt}
 			})
 		}},
+		// The outcome log migrates with everything else. It is evidence: a
+		// store move that dropped it would silently lose the only record of
+		// which transactions were left unresolved.
+		{"tx_outcomes", func() (int64, error) {
+			return copyAll(ctx, src.TxOutcomes, dst.TxOutcomes, func(r *TxOutcome) map[TxOutcomeField]any {
+				return map[TxOutcomeField]any{TxOutID: r.ID, TxOutTxID: r.TxID, TxOutSeq: r.Seq,
+					TxOutState: r.State, TxOutReason: r.Reason, TxOutUserID: r.UserID,
+					TxOutConnID: r.ConnectionID, TxOutHistoryID: r.HistoryID,
+					TxOutTargetXID: r.TargetXID, TxOutCreatedAt: r.CreatedAt}
+			})
+		}},
 		{"ip_allowlist", func() (int64, error) {
 			return copyAll(ctx, src.AllowedIPs, dst.AllowedIPs, func(r *AllowedIP) map[AllowedIPField]any {
 				return map[AllowedIPField]any{IPID: r.ID, IPCIDR: r.CIDR, IPNote: r.Note,
@@ -175,6 +186,7 @@ func ensureEmpty(ctx context.Context, dst *Store) error {
 		{"sessions", dst.Sessions.OnCtx(ctx).Count},
 		{"script_history", dst.History.OnCtx(ctx).Count},
 		{"audit_log", dst.Audit.OnCtx(ctx).Count},
+		{"tx_outcomes", dst.TxOutcomes.OnCtx(ctx).Count},
 		{"ip_allowlist", dst.AllowedIPs.OnCtx(ctx).Count},
 		{"store_meta", dst.KV.OnCtx(ctx).Count},
 	}
@@ -201,6 +213,7 @@ func verifyCounts(ctx context.Context, dst *Store, want map[string]int64) error 
 		"sessions":              dst.Sessions.OnCtx(ctx).Count,
 		"script_history":        dst.History.OnCtx(ctx).Count,
 		"audit_log":             dst.Audit.OnCtx(ctx).Count,
+		"tx_outcomes":           dst.TxOutcomes.OnCtx(ctx).Count,
 		"ip_allowlist":          dst.AllowedIPs.OnCtx(ctx).Count,
 		"store_meta":            dst.KV.OnCtx(ctx).Count,
 	}
@@ -220,7 +233,8 @@ func verifyCounts(ctx context.Context, dst *Store, want map[string]int64) error 
 // the explicitly-copied ids (store_meta has a natural key; not listed).
 var serialTables = []string{
 	"users", "connections", "workspaces", "workspace_connections",
-	"grants", "sessions", "script_history", "audit_log", "ip_allowlist",
+	"grants", "sessions", "script_history", "audit_log", "tx_outcomes",
+	"ip_allowlist",
 }
 
 // fixSequences advances each table's id sequence: setval(max, is_called) so
