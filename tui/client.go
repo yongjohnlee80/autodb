@@ -565,11 +565,18 @@ func (b *Bound) DeleteWorkspace(ctx context.Context, wsID int64) error {
 }
 
 // TableInfo is one explorer relation with its server-quoted identifier.
+//
+// Partitioned/IsPartition/Parent carry the Postgres partition role (ADR-0077),
+// zero-valued on other dialects and un-partitioned relations. Parent is a
+// same-schema relation name only.
 type TableInfo struct {
-	Schema string
-	Name   string
-	Kind   string
-	Quoted string
+	Schema      string
+	Name        string
+	Kind        string
+	Quoted      string
+	Partitioned bool
+	IsPartition bool
+	Parent      string
 }
 
 func (b *Bound) Schemas(ctx context.Context, connID int64) ([]string, error) {
@@ -597,6 +604,8 @@ func (b *Bound) Tables(ctx context.Context, connID int64, schema string) ([]Tabl
 		out = append(out, TableInfo{
 			Schema: mS(m, "schema"), Name: mS(m, "name"),
 			Kind: mS(m, "kind"), Quoted: mS(m, "quoted"),
+			Partitioned: mB(m, "partitioned"), IsPartition: mB(m, "is_partition"),
+			Parent: mS(m, "parent"),
 		})
 	}
 	return out, nil
