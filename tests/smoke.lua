@@ -99,7 +99,7 @@ local function eq(a, b) return vim.deep_equal(a, b) end
 -- some — a mis-scoped skip, a section that stops executing — the total falls below
 -- this and the run fails, even when nothing that DID run failed. Raise it when the
 -- suite legitimately grows; never lower it to make a run pass.
-local EXPECTED_MIN_ASSERTIONS = 279
+local EXPECTED_MIN_ASSERTIONS = 302
 local missing_prereqs = {}
 local function require_bin(section)
   missing_prereqs[#missing_prereqs + 1] = section
@@ -1449,9 +1449,14 @@ print("\n[15] notes — create / list / delete / scaffold, and <leader>Dn")
   vim.wait(500, function() return got ~= nil end, 5)
   commands._open_note_file, vim.ui.input, vim.api.nvim_list_uis =
     orig_open, orig_input, orig_uis
+  -- The success value is a TABLE since ADR-0078 §3.6 (lector impl-r0
+  -- MF4): a bare string cannot grow a field and gives a caller nothing
+  -- to branch on. This assertion carried the pre-ADR shape.
   ok("p15: <leader>Dn creates a note in the active workspace",
-    type(got) == "string" and got:match("ws%-9/plan%.sql$") ~= nil, tostring(got))
-  ok("p15: and opens it in the editor", opened == got, tostring(opened))
+    type(got) == "table" and type(got.path) == "string"
+      and got.path:match("ws%-9/plan%.sql$") ~= nil, vim.inspect(got))
+  ok("p15: and opens it in the editor", opened == (type(got) == "table" and got.path),
+    tostring(opened))
   ok("p15: " .. tostring(keys.NOTE) .. " is the note key", keys.NOTE == keys.PREFIX .. "n")
 
   vim.fn.delete(tmp, "rf")
@@ -1807,6 +1812,23 @@ print("\n[18] the drawer — instances, host arbitration, and teardown (ADR-0078
   ok("p18: a malformed provider is refused, not raised",
     bad_ok == false and bad_err and bad_err.code == "invalid")
 
+  -- The self-host's identity is RESERVED, both halves. A foreign
+  -- provider at priority 0 would displace the guaranteed standalone
+  -- fallback and make autodb.panel.setup() fail, leaving a user with
+  -- nowhere to put the drawer (lector impl-r0 MF2).
+  local z_ok, z_err = drawer.register_host(fake("squatter", 0))
+  ok("p18: priority 0 is reserved for autodb's self-host",
+    z_ok == false and z_err and z_err.code == "duplicate_priority", vim.inspect(z_err))
+  local i_ok, i_err = drawer.register_host(fake("autodb", 7))
+  ok("p18: the id 'autodb' is reserved too",
+    i_ok == false and i_err and i_err.code == "invalid", vim.inspect(i_err))
+  ok("p18: autodb's own self-host still registers at 0",
+    drawer.register_host(fake("autodb", 0)) == true)
+  for _, bad in ipairs({ 0 / 0, math.huge, -math.huge, 1.5, "9" }) do
+    local pok = drawer.register_host(fake("weird", bad))
+    ok("p18: a non-integer priority (" .. tostring(bad) .. ") is refused", pok == false)
+  end
+
   local oo, ov
   drawer.open(function(o, val) oo, ov = o, val end)
   ok("p18: open mounts on the available host", oo == true and ov.host == "a", vim.inspect(ov))
@@ -1896,6 +1918,56 @@ print("\n[18] the drawer — instances, host arbitration, and teardown (ADR-0078
   drawer.open(function(o) oo = o end)
   ok("p18: and reopening mounts a fresh view", oo == true and drawer.mounted_view() ~= pv)
   reset()
+end)()
+
+print("\n[19] autodb.api — the public contract (ADR-0078 §3.6)")
+;(function()
+  local api = require("autodb.api")
+
+  -- Table-driven, because the ADR's table IS the contract: every entry
+  -- exists, is callable, and reports through a callback rather than
+  -- raising into whatever bound it (lector impl-r0 MF4).
+  local surface = {
+    { "login", 1 }, { "choose_workspace", 1 }, { "choose_connection", 1 },
+    { "choose_note", 1 }, { "history", 1 }, { "run_buffer", 1 },
+    { "run_selection", 1 }, { "run_sql", 2 }, { "maintenance", 1 },
+    { "drawer_open", 1 }, { "drawer_toggle", 1 }, { "drawer_focus", 1 },
+    { "health", 0 },
+  }
+  for _, e in ipairs(surface) do
+    ok("p19: api." .. e[1] .. " exists and is a function", type(api[e[1]]) == "function")
+  end
+  ok("p19: register_host is NOT on the api (host integration is on views.drawer)",
+    api.register_host == nil and type(require("autodb.views.drawer").register_host) == "function")
+
+  -- health() returns DATA, not nil. It rendered through vim.health and
+  -- returned nothing, so a programmatic caller got no contract at all.
+  local h = api.health()
+  ok("p19: health() returns a table", type(h) == "table", type(h))
+  if type(h) == "table" then
+    ok("p19: health reports connection state as booleans",
+      type(h.connected) == "boolean" and type(h.signed_in) == "boolean",
+      vim.inspect({ h.connected, h.signed_in }))
+  end
+
+  -- Nothing that fails may go silent: with no daemon reachable, the
+  -- callback must still be CALLED, with a structured error. Before the
+  -- fix _connected logged and returned, and cb never fired at all.
+  local called, got_ok, got_val = false, nil, nil
+  api.run_sql("select 1", function(o, v) called, got_ok, got_val = true, o, v end)
+  vim.wait(2000, function() return called end)
+  ok("p19: run_sql COMPLETES its callback with no daemon", called, "callback never fired")
+  ok("p19: ...and reports a structured error, not a bare nil",
+    called and got_ok == false and type(got_val) == "table" and type(got_val.code) == "string",
+    vim.inspect(got_val))
+  ok("p19: ...and does NOT call a daemon failure 'cancelled'",
+    called and got_val and got_val.code ~= "cancelled", vim.inspect(got_val))
+
+  -- An empty statement is the caller's fault, and says so.
+  local icalled, ival = false, nil
+  api.run_sql("", function(o, v) icalled, ival = true, v end)
+  ok("p19: run_sql('') reports invalid", icalled and ival and ival.code == "invalid",
+    vim.inspect(ival))
 end)()
 
 if #missing_prereqs > 0 then

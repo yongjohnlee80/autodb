@@ -165,6 +165,9 @@ function M._login(c, cb, opts)
               return settle(false, "autodb: login returned no token")
             end
             c._token = token
+            -- Remember who: autodb.api.login's documented success value
+            -- is { user = ... }, and the name is only known here.
+            M._signed_in_user = name
             log.notify("signed in as " .. name, { component = "auth" })
             settle(true, nil)
           end)
@@ -189,6 +192,12 @@ function M.setup(opts)
   -- guaranteed, so deciding a host at setup time would be a coin flip.
   pcall(function() require("autodb.panel").setup() end)
   return M
+end
+
+---signed_in_user is the name of the last successful sign-in, or nil.
+---@return string|nil
+function M.signed_in_user()
+  return M._signed_in_user
 end
 
 ---health backs `:checkhealth autodb`.
@@ -219,22 +228,38 @@ function M.health()
   end
 
   local c = session.client()
+  local connected, signed_in, conn_label = false, false, "none selected"
   if c and c:is_ready() then
+    connected = true
     h.ok("connected · instance " .. tostring(c:instance()))
     -- Connected and signed in are different states, and this is the
     -- surface where a user works out which one they are stuck in.
     if c:token() then
+      signed_in = true
       h.ok("signed in")
     else
       h.warn("connected but NOT signed in — press " .. keys.LOGIN .. " to sign in")
     end
     local conn = session.connection()
-    h.info("connection: " .. (conn and (conn.name or conn.id) or "none selected"))
+    conn_label = conn and (conn.name or conn.id) or "none selected"
+    h.info("connection: " .. tostring(conn_label))
     local status, message = lifecycle.build_status(c:hello().version, bin)
     if status == "stale" then h.warn(message) else h.info(message) end
   else
     h.info("not connected (a " .. keys.PREFIX .. " command will connect)")
   end
+
+  -- ...and RETURN the same facts as data. `:checkhealth` renders through
+  -- vim.health, but autodb.api.health() is documented to hand a caller a
+  -- table (ADR-0078 §3.6) — it returned nil, which is no contract at all.
+  return {
+    binary = bin,
+    binary_error = (not bin) and (berr or "no autodb binary found") or nil,
+    connected = connected,
+    signed_in = signed_in,
+    user = M._signed_in_user,
+    connection = conn_label,
+  }
 end
 
 return M

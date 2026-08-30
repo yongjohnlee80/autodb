@@ -55,13 +55,21 @@ local function drawer()
   return require("autodb.views.drawer")
 end
 
----cancelled adapts the pickers, which predate this contract and report a
----dismissal and a failure the same way — as a nil value, having already
----logged anything that went wrong. Reporting that as `cancelled` is the
----honest reading of what the caller can actually distinguish.
----@return autodb.ApiError
-local function cancelled(what)
-  return { code = "cancelled", message = what .. ": nothing chosen" }
+---settle adapts a picker's `(value, err)` into the api's `(ok, value)`.
+---
+---The pickers report a genuine failure with an error and a dismissal
+---with a bare nil, so `cancelled` now means the user actually backed
+---out. It used to be applied to both, which told a caller a daemon
+---failure was a dismissal (lector impl-r0 MF3).
+---@param cb autodb.Cb?
+---@param what string
+local function settle(cb, what)
+  return function(value, err)
+    if not cb then return end
+    if value ~= nil then return cb(true, value) end
+    if err then return cb(false, err) end
+    cb(false, { code = "cancelled", message = what .. ": nothing chosen" })
+  end
 end
 
 -- ─── session ──────────────────────────────────────────────────
@@ -77,29 +85,20 @@ end
 ---choose_workspace prompts for a workspace.
 ---@param cb autodb.Cb?  success value: { id, name }
 function M.choose_workspace(cb)
-  return commands().choose_workspace(function(ws)
-    if not cb then return end
-    if ws then cb(true, ws) else cb(false, cancelled("choose_workspace")) end
-  end)
+  return commands().choose_workspace(settle(cb, "choose_workspace"))
 end
 
 ---choose_connection prompts for a workspace, then a connection, and
 ---publishes `dbase.connection:changed`.
 ---@param cb autodb.Cb?  success value: { id, name, engine? }
 function M.choose_connection(cb)
-  return commands().choose_connection(function(conn)
-    if not cb then return end
-    if conn then cb(true, conn) else cb(false, cancelled("choose_connection")) end
-  end)
+  return commands().choose_connection(settle(cb, "choose_connection"))
 end
 
 ---choose_note picks or creates a note in the active workspace.
 ---@param cb autodb.Cb?  success value: { path }
 function M.choose_note(cb)
-  return commands().choose_note(function(note)
-    if not cb then return end
-    if note then cb(true, note) else cb(false, cancelled("choose_note")) end
-  end)
+  return commands().choose_note(settle(cb, "choose_note"))
 end
 
 -- ─── running SQL ──────────────────────────────────────────────
