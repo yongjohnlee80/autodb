@@ -213,13 +213,29 @@ func (e *Engine) Close() error {
 	defer e.mu.Unlock()
 	var errs []error
 	for id, c := range e.conns {
-		if err := c.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("conn %d: %w", id, err))
+		// Bounded, because a pool Close waits for every acquired connection
+		// and a transaction still pinned would block it forever. Sessions
+		// were closed above, so this should return immediately — and if it
+		// does not, saying so beats a daemon that never exits and gives an
+		// operator nothing to look at.
+		done := make(chan error, 1)
+		go func(c dao.DataConn) { done <- c.Close() }(c)
+		select {
+		case err := <-done:
+			if err != nil {
+				errs = append(errs, fmt.Errorf("conn %d: %w", id, err))
+			}
+		case <-time.After(closeTimeout):
+			errs = append(errs, fmt.Errorf("conn %d: pool close timed out after %s — a transaction "+
+				"is still holding a connection", id, closeTimeout))
 		}
 		delete(e.conns, id)
 	}
 	return errors.Join(errs...)
 }
+
+// closeTimeout bounds one pool's close during engine shutdown.
+const closeTimeout = 15 * time.Second
 
 // Result is one execution's outcome.
 type Result struct {
