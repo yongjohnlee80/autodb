@@ -80,6 +80,11 @@ type Engine struct {
 	// (ADR-0074 §1's mandate to inject each competing transition inside that
 	// window, rather than run it alongside and hope).
 	hookAfterDrainCheck func()
+	// closeQuiesce is how long a close waits for an in-flight statement. It
+	// is a FIELD rather than a package variable so a test can shorten it on
+	// its own engine: a shared variable that parallel tests reassign is a
+	// data race, which is how this one started life.
+	closeQuiesce time.Duration
 
 	history bool
 	maxRows int
@@ -246,7 +251,7 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		sessions:     newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
 		sessionIdle:  DefaultSessionIdleTimeout,
 		txLimits:     defaultTxLimits(),
-		poolMaxConns: DefaultPoolMaxConns(), poolMaxConnIdleTime: DefaultPoolMaxConnIdleTime,
+		poolMaxConns: DefaultPoolMaxConns(), closeQuiesce: closeQuiesceTimeout, poolMaxConnIdleTime: DefaultPoolMaxConnIdleTime,
 		poolMaxConnLifetime: DefaultPoolMaxConnLifetime,
 		debugIdle:           DefaultDebugIdleInTxTimeout,
 		maxTxCeiling:        DefaultMaxTxDurationCeiling,

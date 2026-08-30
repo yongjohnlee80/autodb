@@ -264,7 +264,7 @@ func (e *Engine) finishClosing(ctx context.Context, s *session, ip, reason strin
 	// statement still executing would receive a rollback on its own
 	// connection — the same concurrent-command bug as the timeout path, in
 	// the path that runs on every ordinary close.
-	release, quiesced := e.quiesce(ctx, s, closeQuiesceTimeoutForTest)
+	release, quiesced := e.quiesce(ctx, s, e.closeQuiesce)
 	defer release()
 
 	s.mu.Lock()
@@ -334,11 +334,6 @@ func (e *Engine) finishClosing(ctx context.Context, s *session, ip, reason strin
 // close. Longer than the timeout path's: a close is usually a person asking,
 // and finishing the rollback properly is worth a few more seconds.
 const closeQuiesceTimeout = 15 * time.Second
-
-// closeQuiesceTimeoutForTest is the value actually used, so a test can
-// exercise what happens when the bound ELAPSES without waiting fifteen real
-// seconds for it. Production never changes it.
-var closeQuiesceTimeoutForTest = closeQuiesceTimeout
 
 // closeSessionsFor closes every session on a connection. It is the first step
 // of deleting or closing a connection: the pool must not go away underneath a
