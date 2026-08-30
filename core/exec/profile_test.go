@@ -110,6 +110,78 @@ func TestProfile_UnknownFailsClosed(t *testing.T) {
 	}
 }
 
+// ADR-0074 Amendment 3 — the guard fix and its ADMISSION are separate
+// questions, and the answer differs per profile.
+//
+// The guard genuinely can see inside a CTE now. That does not mean a surface
+// which has always refused these should start executing one: a previously
+// refused WRITE quietly running because a dependency moved is the surprise
+// class profiles exist to prevent. So v1compat keeps refusing them — the
+// GUARDED ones included, with the message it has always used — and the
+// session profile admits them and lets the guard decide.
+func TestProfiles_DisagreeOnDataModifyingCTEs(t *testing.T) {
+	t.Parallel()
+
+	const guarded = "WITH x AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT * FROM x"
+	const bare = "WITH x AS (DELETE FROM t RETURNING id) SELECT * FROM x"
+
+	guardedSt, err := Classify(guarded, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bareSt, err := Classify(bare, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// v1compat: refused, and refused the SAME way for both — its rule was
+	// never about the WHERE.
+	for name, st := range map[string]Statement{"guarded": guardedSt, "bare": bareSt} {
+		err := ProfileV1Compat.admit(st)
+		if !errors.Is(err, ErrStatementUnsupported) {
+			t.Errorf("v1compat admit(%s) = %v, want ErrStatementUnsupported", name, err)
+			continue
+		}
+		// Bit-identity includes the message: this is the exact text the
+		// classifier produced before the refusal moved.
+		if !strings.Contains(err.Error(), "data-modifying subquery/CTE (DELETE at nesting depth 1)") {
+			t.Errorf("v1compat admit(%s) message = %q, want the historical wording", name, err)
+		}
+	}
+
+	// session: admitted, then judged by the guard on its own merits.
+	if err := ProfileSession.admit(guardedSt); err != nil {
+		t.Errorf("session admit(guarded) = %v, want nil", err)
+	}
+	if err := guardWhere(guardedSt); err != nil {
+		t.Errorf("guardWhere(guarded) = %v, want nil — the mutation states its rows", err)
+	}
+	if err := ProfileSession.admit(bareSt); err != nil {
+		t.Errorf("session admit(bare) = %v, want nil — admission is not the guard's job", err)
+	}
+	if err := guardWhere(bareSt); !errors.Is(err, ErrNoWhere) {
+		t.Errorf("guardWhere(bare) = %v, want ErrNoWhere", err)
+	}
+}
+
+// The session profile does not yet admit control verbs, and says so in a way
+// that distinguishes "not built yet" from "never allowed" (ADR-0074 §8a).
+func TestProfileSession_ControlVerbsAwaitTheSessionEngine(t *testing.T) {
+	t.Parallel()
+
+	st, err := Classify("BEGIN", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = ProfileSession.admit(st)
+	if !errors.Is(err, ErrStatementUnsupported) {
+		t.Fatalf("session admit(BEGIN) = %v, want ErrStatementUnsupported", err)
+	}
+	if !strings.Contains(err.Error(), "not wired yet") {
+		t.Errorf("refusal %q should say the engine is not built rather than imply the verb never will be", err)
+	}
+}
+
 // ADR-0074 §6 — the guard applies its one rule at every depth.
 func TestGuardWhere_NestedMutations(t *testing.T) {
 	t.Parallel()
