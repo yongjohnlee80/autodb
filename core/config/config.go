@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -266,7 +267,7 @@ func Default() Config {
 			MaxTxDuration:        Duration(DefaultMaxTxDuration),
 			DebugIdleInTxTimeout: Duration(DefaultDebugIdleInTxTimeout),
 			MaxTxDurationCeiling: Duration(DefaultMaxTxDurationCeiling),
-			PoolMaxConns:         DefaultPoolMaxConns,
+			PoolMaxConns:         DefaultPoolMaxConns(),
 			PoolMaxConnIdleTime:  Duration(DefaultPoolMaxConnIdleTime),
 			PoolMaxConnLifetime:  Duration(DefaultPoolMaxConnLifetime),
 			JanitorInterval:      Duration(DefaultJanitorInterval),
@@ -293,23 +294,29 @@ const (
 	DefaultDebugIdleInTxTimeout = 10 * time.Minute
 	DefaultMaxTxDurationCeiling = 30 * time.Minute
 
-	// DefaultPoolMaxConns is deliberately small. The engine's job is to run
-	// an operator's statements, not to saturate the target: 10 is enough for
-	// the session caps above to be reachable while leaving a production
-	// database's connection budget to the applications that depend on it.
-	DefaultPoolMaxConns = 10
-
-	// A connection idle for 5 minutes is between bursts of work, and half an
-	// hour is long enough to be useful while short enough that a server-side
-	// change lands the same shift.
-	DefaultPoolMaxConnIdleTime = 5 * time.Minute
-	DefaultPoolMaxConnLifetime = 30 * time.Minute
+	// Pool-lifecycle defaults are ADR-0074 §1a's: idle 10m / lifetime 60m,
+	// so unused pools shrink to zero against a live production target. An
+	// earlier 5m/30m here was my own invention and contradicted the ADR
+	// without an amendment, which is not a call this code gets to make.
+	DefaultPoolMaxConnIdleTime = 10 * time.Minute
+	DefaultPoolMaxConnLifetime = 60 * time.Minute
 
 	// A tenth of the 90s idle-in-transaction bound: an expired transaction
 	// is rolled back within a few seconds of its deadline rather than at the
 	// next thing that happens to look.
 	DefaultJanitorInterval = 10 * time.Second
 )
+
+// DefaultPoolMaxConns is 2 × cores, per ADR-0074 §1a (Johno, 2026-08-30).
+//
+// It is a function rather than a constant because the number depends on the
+// machine. The reasoning behind it is that pgxpool's own default is roughly
+// core-count, and PINNED transaction connections exhaust exactly that: a
+// session holding a transaction occupies a physical connection for as long as
+// it stays open, so a pool sized for statement throughput has nothing left
+// for the sessions themselves. The ADR's sizing rule for tuning it upward is
+// MaxConns >= concurrent tx-holders + statement headroom.
+func DefaultPoolMaxConns() int { return 2 * runtime.NumCPU() }
 
 // Duration is a TOML-friendly time.Duration: written as a string ("30m",
 // "90s") because an operator setting a timeout should not have to count
@@ -447,7 +454,7 @@ func (c Config) validate() error {
 	if c.Exec.PoolMaxConns <= 0 {
 		return fmt.Errorf("%w: exec.pool_max_conns is %d; a target pool must be bounded, and 0 is not "+
 			"unlimited — remove the key to take the default of %d",
-			ErrInvalid, c.Exec.PoolMaxConns, DefaultPoolMaxConns)
+			ErrInvalid, c.Exec.PoolMaxConns, DefaultPoolMaxConns())
 	}
 	if c.Exec.PoolMaxConnLifetime > 0 && c.Exec.PoolMaxConnIdleTime > c.Exec.PoolMaxConnLifetime {
 		return fmt.Errorf("%w: exec.pool_max_conn_idle_time (%s) exceeds pool_max_conn_lifetime (%s), "+

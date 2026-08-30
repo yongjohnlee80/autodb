@@ -114,6 +114,16 @@ func connectionIsDebug(row *meta.Connection) bool { return row != nil && row.IsD
 func (e *Engine) reapExpired(ctx context.Context, now time.Time) int {
 	var acted int
 	for _, s := range e.sessions.snapshot() {
+		// A session stuck in the closing state still owns a transaction: its
+		// close skipped the rollback because the statement would not stop,
+		// and retained the session precisely so this retry exists. Without
+		// it the skip would be permanent and the transaction would hold
+		// locks with no owner able to end it.
+		if s.get() == sessClosing {
+			e.retryClose(ctx, s)
+			acted++
+			continue
+		}
 		s.mu.Lock()
 		phase, opened, last, txID := s.txPhase, s.txOpened, s.lastUsed, s.txID
 		limits := s.limits
@@ -168,7 +178,9 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 	// two commands in flight at once. The timeout path never did either: it
 	// took the transaction out from under whatever was running and rolled it
 	// back concurrently.
-	if err := e.quiesce(ctx, s, quiesceTimeout); err != nil {
+	release, err := e.quiesce(ctx, s, quiesceTimeout)
+	defer release()
+	if err != nil {
 		// The statement did not stop. Rolling back now would be the exact
 		// concurrent-command bug, so the transaction is LEFT ATTACHED and
 		// the next sweep tries again — with the server-side belt as the
@@ -192,13 +204,13 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 	}
 
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
-	err := tx.RollbackContext(cctx)
+	rerr := tx.RollbackContext(cctx)
 	cancel()
 
 	outcome := "rolled_back"
-	if err != nil {
+	if rerr != nil {
 		outcome = "rollback_failed"
-		e.logf("session %s: rolling back %s on %s: %v", s.id, txID, reason, err)
+		e.logf("session %s: rolling back %s on %s: %v", s.id, txID, reason, rerr)
 	}
 	e.auditBounded(ctx, s.userID, "", "tx_"+outcome,
 		fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))

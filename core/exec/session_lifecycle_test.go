@@ -136,7 +136,7 @@ func TestRollbackExpired_WillNotRollBackUnderALiveStatement(t *testing.T) {
 		defer close(done)
 		// A short bound: the production value is a real wait, and this test
 		// is about what happens WHEN it elapses.
-		if err := e.quiesce(context.Background(), s, 150*time.Millisecond); err == nil {
+		if _, err := e.quiesce(context.Background(), s, 150*time.Millisecond); err == nil {
 			t.Error("quiesce reported success while the statement was still running")
 			return
 		}
@@ -156,4 +156,99 @@ func TestRollbackExpired_WillNotRollBackUnderALiveStatement(t *testing.T) {
 	if s.txPhase == txNone {
 		t.Error("the transaction was detached without being rolled back, so nothing will ever end it")
 	}
+}
+
+// MF4. When the statement will not stop, closeSession correctly declines to
+// roll back concurrently — and then dropped the session anyway. The
+// transaction stayed attached to an object no longer in the registry, so
+// nothing could retry it, nothing accounted for it, and conn.delete's pool
+// close waited on a connection no reachable owner held.
+//
+// Skipping the rollback is the right call. Losing the owner is not.
+func TestCloseSession_RetainsTheOwnerWhenTheRollbackIsSkipped(t *testing.T) {
+	t.Parallel()
+
+	f := newFixture(t)
+	e := f.eng
+	tx := newControllableTx()
+	s, join := sessionWithInFlight(t, tx, false) // ignores cancellation
+	s.connID = f.connID
+	if err := e.sessions.admit(s); err != nil {
+		t.Fatalf("admitting the session: %v", err)
+	}
+
+	// A short bound so the test is about what happens WHEN it elapses.
+	origin := closeQuiesceTimeoutForTest
+	closeQuiesceTimeoutForTest = 150 * time.Millisecond
+	defer func() { closeQuiesceTimeoutForTest = origin }()
+
+	e.closeSession(context.Background(), s, testIP, "connection-deleted")
+
+	if tx.rolledBack.Load() {
+		t.Fatal("ROLLBACK was issued underneath a statement that would not stop")
+	}
+	// THE EFFECT: the transaction still has an owner, and that owner is
+	// still reachable from the registry.
+	if s.get() != sessClosing {
+		t.Errorf("session state is %v, want closing — a session whose rollback was skipped "+
+			"must stay in a state the janitor will retry", s.get())
+	}
+	found := false
+	for _, got := range e.sessions.snapshot() {
+		if got.id == s.id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the session was removed from the registry with its transaction still attached — " +
+			"nothing can retry the rollback, nothing accounts for the held connection, and " +
+			"conn.delete's pool close waits on a connection no reachable owner holds")
+	}
+	if s.tx == nil {
+		t.Error("the transaction was detached without being rolled back, so nothing will end it")
+	}
+
+	// And the retry actually ends it once the statement finally stops.
+	close(tx.release)
+	join()
+	if n := e.reapExpired(context.Background(), time.Now()); n == 0 {
+		t.Fatal("the janitor did not retry the retained closing session")
+	}
+	if !tx.rolledBack.Load() {
+		t.Error("the retry did not roll the transaction back")
+	}
+	if s.get() != sessClosed {
+		t.Errorf("session state after the retry is %v, want closed", s.get())
+	}
+}
+
+// The other half of MF4: nothing may start on the transaction between the
+// join that proved the session idle and the detach that ends it. Proving a
+// fact and then acting on it a moment later is how a statement ends up
+// running on a transaction being rolled back out from under it.
+func TestQuiesce_HoldsTheSlotUntilTheTeardownIsDone(t *testing.T) {
+	t.Parallel()
+
+	sctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &session{id: "slot", ctx: sctx, cancel: cancel}
+	s.state.Store(int32(sessOpen))
+
+	e := newFixture(t).eng
+	release, err := e.quiesce(context.Background(), s, time.Second)
+	if err != nil {
+		t.Fatalf("quiescing an idle session: %v", err)
+	}
+
+	// While the teardown holds the slot, a statement cannot claim it.
+	if err := s.begin(); !errors.Is(err, ErrSessionBusy) {
+		t.Fatalf("a statement claimed the session mid-teardown (%v); it would run on a "+
+			"transaction that is being rolled back out from under it", err)
+	}
+
+	release()
+	if err := s.begin(); err != nil {
+		t.Errorf("the slot was not released after the teardown: %v", err)
+	}
+	s.finish()
 }

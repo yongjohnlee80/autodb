@@ -195,7 +195,8 @@ func TestSession_TeardownJoinsTheInFlightStatement(t *testing.T) {
 	joined := make(chan error, 1)
 	go func() {
 		e := &Engine{}
-		joined <- e.quiesce(context.Background(), s, 5*time.Second)
+		_, qerr := e.quiesce(context.Background(), s, 5*time.Second)
+		joined <- qerr
 	}()
 
 	select {

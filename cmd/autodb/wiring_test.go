@@ -2,8 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/meta"
 
 	"github.com/yongjohnlee80/autodb/core/config"
 	coreexec "github.com/yongjohnlee80/autodb/core/exec"
@@ -118,5 +123,133 @@ func TestWatchLease_StopsWithTheServeContext(t *testing.T) {
 		t.Fatal("a cancelled serve context triggered the lease-loss path; shutdown would report a " +
 			"lease failure that never happened")
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// MF2. The previous cells exercised the helpers directly, so deleting the
+// production calls to watchLease and StartJanitor left the whole suite green
+// — which is the failure mode the helpers were supposed to prevent. These go
+// through startEngine, the one place the daemon wires them, and observe the
+// EFFECT rather than the call.
+func startedEngine(t *testing.T, cfg config.Config, lost <-chan struct{}) (*coreexec.Engine, context.Context, *meta.Store, *auth.Service, string) {
+	t.Helper()
+
+	store, err := meta.Open(t.Context(), config.Meta{Engine: "sqlite", Path: ":memory:"})
+	if err != nil {
+		t.Fatalf("meta.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	tok, _, err := svc.Bootstrap(t.Context(), "root", "root-passphrase", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	eng, serveCtx, _, stop := startEngine(t.Context(), cfg, store, svc, lost, func(string) {})
+	t.Cleanup(func() { stop(); _ = eng.Close() })
+	return eng, serveCtx, store, svc, tok
+}
+
+func execConfig() config.Config {
+	cfg := config.Config{}
+	cfg.Exec = config.Exec{
+		MaxStatementBytes:    65536,
+		MaxSessionsPerUser:   8,
+		MaxSessionsGlobal:    256,
+		SessionIdleTimeout:   config.Duration(50 * time.Millisecond),
+		IdleInTxTimeout:      config.Duration(90 * time.Second),
+		MaxTxDuration:        config.Duration(5 * time.Minute),
+		DebugIdleInTxTimeout: config.Duration(10 * time.Minute),
+		MaxTxDurationCeiling: config.Duration(30 * time.Minute),
+		PoolMaxConns:         8,
+		PoolMaxConnIdleTime:  config.Duration(10 * time.Minute),
+		PoolMaxConnLifetime:  config.Duration(60 * time.Minute),
+		JanitorInterval:      config.Duration(20 * time.Millisecond),
+	}
+	return cfg
+}
+
+// config → daemon → an actual reap. The session idle timeout and the janitor
+// interval both come from configuration and nothing in the test calls the
+// reaper: if the daemon does not start the janitor, or does not pass the
+// configured timings, the session simply never goes away.
+func TestStartEngine_TheJanitorActuallyReapsOnTheConfiguredSchedule(t *testing.T) {
+	t.Parallel()
+
+	openSession := func(t *testing.T, cfg config.Config) (*coreexec.Engine, coreexec.SessionID, string) {
+		t.Helper()
+		eng, _, store, _, tok := startedEngine(t, cfg, make(chan struct{}))
+		dsn := fmt.Sprintf("file:wiring%d?mode=memory&cache=shared", time.Now().UnixNano())
+		connID, err := eng.CreateConnection(t.Context(), tok, "target", "sqlite", dsn, "127.0.0.1")
+		if err != nil {
+			t.Fatalf("CreateConnection: %v", err)
+		}
+		if err := store.Connections.OnCtx(t.Context()).With(meta.ConnID, connID).
+			Set(meta.ConnProfile, string(coreexec.ProfileSession)).Update(); err != nil {
+			t.Fatalf("enabling the session profile: %v", err)
+		}
+		sid, err := eng.OpenSession(t.Context(), tok, connID, "127.0.0.1")
+		if err != nil {
+			t.Fatalf("OpenSession: %v", err)
+		}
+		return eng, sid, tok
+	}
+
+	// Positive control: with a long idle timeout the session SURVIVES.
+	// Without it, a test asserting the session goes away would be satisfied
+	// by a session that could never be opened or that died for any reason.
+	t.Run("a session within its idle timeout survives", func(t *testing.T) {
+		t.Parallel()
+		cfg := execConfig()
+		cfg.Exec.SessionIdleTimeout = config.Duration(time.Hour)
+		eng, sid, tok := openSession(t, cfg)
+		time.Sleep(200 * time.Millisecond)
+		if _, err := eng.SessionExecute(t.Context(), tok, sid, "SELECT 1", "127.0.0.1"); errors.Is(err, coreexec.ErrSessionNotFound) {
+			t.Fatal("a session well within its idle timeout was reaped")
+		}
+	})
+
+	t.Run("an idle session is reaped without anyone calling the reaper", func(t *testing.T) {
+		t.Parallel()
+		eng, sid, tok := openSession(t, execConfig())
+
+		// Checked ONCE, after waiting. Polling with SessionExecute would
+		// keep the session alive — every statement refreshes lastUsed — so a
+		// poll loop asks a question whose own asking prevents the answer.
+		// The wait is 10x the idle timeout and 25x the janitor interval.
+		time.Sleep(500 * time.Millisecond)
+		_, err := eng.SessionExecute(t.Context(), tok, sid, "SELECT 1", "127.0.0.1")
+		if !errors.Is(err, coreexec.ErrSessionNotFound) {
+			t.Fatalf("the session outlived its configured idle timeout by an order of magnitude "+
+				"(SessionExecute = %v): the daemon either never started the janitor or never "+
+				"passed it the configured timings, so nothing enforces the bounds an "+
+				"operator set", err)
+		}
+	})
+}
+
+// lease loss → the server context actually stops. Not the helper in
+// isolation: the context startEngine hands the server.
+func TestStartEngine_LosingTheLeaseStopsTheServeContext(t *testing.T) {
+	t.Parallel()
+
+	lost := make(chan struct{})
+	_, serveCtx, _, _, _ := startedEngine(t, execConfig(), lost)
+
+	// Positive control: the server runs while the lease holds.
+	select {
+	case <-serveCtx.Done():
+		t.Fatal("the serve context was cancelled while the lease was still held")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(lost)
+	select {
+	case <-serveCtx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lease was lost and the server kept running; a second engine can now take " +
+			"the lock while this one is still writing to the same meta store")
 	}
 }

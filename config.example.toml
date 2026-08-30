@@ -158,14 +158,25 @@ max_tx_duration_ceiling = "30m"
 #
 # A connection row may ask for FEWER; it can never ask for more. This number is
 # a ceiling, and a row able to raise it would make the bound advisory.
-pool_max_conns = 10
+# Left unset on purpose: the default is 2 x cores (ADR-0074 1a), which depends
+# on the machine, so there is no literal that is right everywhere. pgxpool's
+# own default is roughly core-count, and pinned transaction connections
+# exhaust exactly that -- a session holding a transaction occupies a physical
+# connection for as long as it stays open.
+#
+# Raise it by the ADR's sizing rule: pool_max_conns >= concurrent tx-holders
+# (at most your team size, since it is one transaction per session) plus
+# statement headroom -- about 25 for a ten-developer team -- bounded by the
+# production max_connections budget for autodb's role.
+#
+# pool_max_conns = 32
 
 # When pooled connections are retired. Idle time returns budget to the target
 # between bursts; lifetime bounds how long a physical connection persists at
 # all, which is what makes a server-side change — a rotated credential, a
 # restarted primary — take effect without restarting the daemon.
-pool_max_conn_idle_time = "5m"
-pool_max_conn_lifetime = "30m"
+pool_max_conn_idle_time = "10m"
+pool_max_conn_lifetime = "60m"
 
 # How often the engine sweeps for expired transactions and idle sessions. This
 # bounds how far past its deadline an abandoned transaction can keep holding

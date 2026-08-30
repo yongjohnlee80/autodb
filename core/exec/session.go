@@ -117,6 +117,13 @@ type session struct {
 	busy bool
 	// runCancel stops the in-flight statement without ending the session.
 	runCancel context.CancelFunc
+	// tearingDown marks the slot as held by a teardown rather than by a
+	// statement, so a refusal can say which it is.
+	tearingDown bool
+	// closeIP and closeWhy are kept so a retried close audits the reason the
+	// close actually had, rather than inventing one at retry time.
+	closeIP  string
+	closeWhy string
 	// done is closed when the in-flight statement finishes, so a closer can
 	// JOIN it without holding a lock.
 	done chan struct{}
@@ -380,6 +387,41 @@ func (s *session) cancelInFlight() {
 	}
 }
 
+// claimTeardown takes the one-statement slot on behalf of a teardown.
+//
+// It closes the window between joining the in-flight statement and detaching
+// the transaction. Without it, a statement arriving in that window starts on
+// a transaction that is about to be rolled back out from under it — the
+// engine having just proven the session idle, and then acted on a fact that
+// was no longer true.
+//
+// It reports false if a statement got there first; the caller must then not
+// proceed, exactly as for a failed join.
+func (s *session) claimTeardown() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.busy {
+		return false
+	}
+	s.busy = true
+	s.tearingDown = true
+	s.done = make(chan struct{})
+	return true
+}
+
+// releaseTeardown gives the slot back.
+func (s *session) releaseTeardown() {
+	s.mu.Lock()
+	s.busy = false
+	s.tearingDown = false
+	done := s.done
+	s.done = nil
+	s.mu.Unlock()
+	if done != nil {
+		close(done)
+	}
+}
+
 // joinInFlight waits for the in-flight statement to finish and REPORTS
 // whether it actually did.
 //
@@ -400,6 +442,19 @@ func (s *session) joinInFlight(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// setCloseReason records why a close began, for a retry to audit later.
+func (s *session) setCloseReason(ip, reason string) {
+	s.mu.Lock()
+	s.closeIP, s.closeWhy = ip, reason
+	s.mu.Unlock()
+}
+
+func (s *session) closeReason() (string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeIP, s.closeWhy
 }
 
 // finishClose moves closing → closed.
