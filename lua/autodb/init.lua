@@ -181,6 +181,13 @@ function M.setup(opts)
     ensure_connected = M.ensure_connected,
     keys = M.config.keys,
   })
+  -- Register autodb's own panel as the FALLBACK drawer host (ADR-0078
+  -- §3.3), at the reserved priority 0 so any real panel host outranks
+  -- it. This only registers: it opens no window and connects nothing,
+  -- so `setup()` stays cheap. Resolution happens when the user opens
+  -- the drawer, never here — load order between plugins is not
+  -- guaranteed, so deciding a host at setup time would be a coin flip.
+  pcall(function() require("autodb.panel").setup() end)
   return M
 end
 
