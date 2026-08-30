@@ -1,13 +1,20 @@
 package exec
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/yongjohnlee80/golib/dao"
+	"github.com/yongjohnlee80/golib/dao/mysql"
+	"github.com/yongjohnlee80/golib/dao/postgres"
+	"github.com/yongjohnlee80/golib/dao/sqlite"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -114,5 +121,168 @@ func TestPoolLimits_DefaultsAreBounded(t *testing.T) {
 	if DefaultPoolMaxConnIdleTime != 10*time.Minute || DefaultPoolMaxConnLifetime != 60*time.Minute {
 		t.Errorf("pool lifecycle defaults are idle %s / lifetime %s, want ADR-0074 §1a's 10m / 60m",
 			DefaultPoolMaxConnIdleTime, DefaultPoolMaxConnLifetime)
+	}
+}
+
+// MF3, the coverage half. The cells above call the option builders directly,
+// which proves the builders work and nothing else: on an exact-head copy
+// lector removed BOTH e.sqlPoolLimits arguments from the mysql and sqlite
+// branches of openTarget and the entire suite stayed green. The bounds could
+// silently disappear from two of the three drivers.
+//
+// This crosses the real branches. It asserts what each production call site
+// actually hands the driver, so deleting an option argument from any one of
+// them turns this red — and it covers mysql and postgres, which have no
+// server to talk to here, by observing the open rather than its result.
+func TestOpenTarget_EveryDriverBranchAppliesThePoolBounds(t *testing.T) {
+	f := newFixture(t)
+	e := f.eng
+	e.poolMaxConns = 11
+	e.poolMaxConnIdleTime = 7 * time.Minute
+	e.poolMaxConnLifetime = 44 * time.Minute
+
+	// Each seam captures the options the production branch passed and applies
+	// them to a probe, then fails the open — the open's RESULT is not what is
+	// under test, and failing keeps this independent of live servers.
+	stop := errors.New("captured")
+	var pgCfg *pgxpool.Config
+	var sqlStats sql.DBStats
+
+	origPG, origMy, origLite := openPostgres, openMySQL, openSQLite
+	t.Cleanup(func() { openPostgres, openMySQL, openSQLite = origPG, origMy, origLite })
+
+	openPostgres = func(_ context.Context, _, _ string, opts ...postgres.Option) (dao.DataConn, error) {
+		cfg, err := pgxpool.ParseConfig("postgres://u:p@127.0.0.1:1/db")
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range opts {
+			o(cfg)
+		}
+		pgCfg = cfg
+		return nil, stop
+	}
+	captureSQL := func(opts ...func(*sql.DB)) {
+		db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "probe.db"))
+		if err != nil {
+			t.Fatalf("probe handle: %v", err)
+		}
+		defer func() { _ = db.Close() }()
+		for _, o := range opts {
+			o(db)
+		}
+		sqlStats = db.Stats()
+	}
+	openMySQL = func(_ context.Context, _, _ string, opts ...mysql.Option) (dao.DataConn, error) {
+		conv := make([]func(*sql.DB), len(opts))
+		for i, o := range opts {
+			conv[i] = o
+		}
+		captureSQL(conv...)
+		return nil, stop
+	}
+	openSQLite = func(_ context.Context, _, _ string, opts ...sqlite.Option) (dao.DataConn, error) {
+		conv := make([]func(*sql.DB), len(opts))
+		for i, o := range opts {
+			conv[i] = o
+		}
+		captureSQL(conv...)
+		return nil, stop
+	}
+
+	for _, engine := range []string{"postgres", "mysql", "sqlite"} {
+		t.Run(engine, func(t *testing.T) {
+			pgCfg, sqlStats = nil, sql.DBStats{}
+			row, err := f.store.Connections.OnCtx(t.Context()).With(meta.ConnID, f.connID).Get()
+			if err != nil {
+				t.Fatalf("reading the connection row: %v", err)
+			}
+			row.Engine = engine
+			e.closeTarget(f.connID)
+
+			// The open is expected to fail: the seam refuses on purpose. What
+			// matters is that the branch was REACHED and what it passed.
+			if _, err := e.target(t.Context(), f.connID, row); !errors.Is(err, stop) {
+				t.Fatalf("the %s branch was not reached (err = %v); this test cannot observe "+
+					"what it passes to the driver", engine, err)
+			}
+
+			if engine == "postgres" {
+				if pgCfg == nil {
+					t.Fatal("the postgres branch passed nothing")
+				}
+				if pgCfg.MaxConns != 11 {
+					t.Errorf("MaxConns = %d, want 11 — the postgres branch opens without the "+
+						"engine's pool bound", pgCfg.MaxConns)
+				}
+				if pgCfg.MaxConnIdleTime != 7*time.Minute || pgCfg.MaxConnLifetime != 44*time.Minute {
+					t.Errorf("retirement = idle %s / lifetime %s, want 7m / 44m",
+						pgCfg.MaxConnIdleTime, pgCfg.MaxConnLifetime)
+				}
+				return
+			}
+			if sqlStats.MaxOpenConnections != 11 {
+				t.Errorf("%s opens with MaxOpenConnections = %d, want 11 — database/sql caps "+
+					"nothing by default, so this branch is unbounded against a live target",
+					engine, sqlStats.MaxOpenConnections)
+			}
+		})
+	}
+}
+
+// And the bound is not merely PASSED, it BITES. The seam above proves the
+// argument reaches the driver; this proves the argument means something,
+// through the real sqlite branch with a real database.
+//
+// A pool of one, with that one connection held by a transaction, must make
+// the next acquisition wait. Unbounded, it is served immediately.
+func TestOpenTarget_TheSQLiteBoundActuallyLimitsTheDriver(t *testing.T) {
+	f := newFixture(t)
+	ctx := t.Context()
+
+	dsn := "file:" + filepath.Join(t.TempDir(), "bound.db")
+	connID, err := f.eng.CreateConnection(ctx, f.rootTok, "bounded", "sqlite", dsn, testIP)
+	if err != nil {
+		t.Fatalf("CreateConnection: %v", err)
+	}
+	if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
+		Set(meta.ConnPoolMaxConns, int64(1)).Update(); err != nil {
+		t.Fatalf("setting the per-connection pool bound: %v", err)
+	}
+	row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
+	if err != nil {
+		t.Fatalf("reading the row back: %v", err)
+	}
+
+	conn, err := f.eng.target(ctx, connID, row)
+	if err != nil {
+		t.Fatalf("opening the target: %v", err)
+	}
+
+	// Positive control: with nothing holding the single connection, a query
+	// is served at once. Without this, a test asserting the second query
+	// blocks would be satisfied by a connection that never works at all.
+	quick, cancelQuick := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelQuick()
+	if _, err := conn.ExecContext(quick, "SELECT 1"); err != nil {
+		t.Fatalf("an unblocked query failed (%v); this test cannot observe the bound either", err)
+	}
+
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("beginning a transaction to hold the one connection: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	blocked, cancelBlocked := context.WithTimeout(ctx, 400*time.Millisecond)
+	defer cancelBlocked()
+	_, err = conn.ExecContext(blocked, "SELECT 1")
+	if err == nil {
+		t.Fatal("a second connection was opened while the pool's only one was held by a " +
+			"transaction — pool_max_conns = 1 did not reach the driver, so the bound is " +
+			"decorative and a target's connection budget is not actually capped")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the second query failed for the wrong reason: %v", err)
 	}
 }

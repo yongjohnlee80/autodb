@@ -177,10 +177,9 @@ func TestCloseSession_RetainsTheOwnerWhenTheRollbackIsSkipped(t *testing.T) {
 		t.Fatalf("admitting the session: %v", err)
 	}
 
-	// A short bound so the test is about what happens WHEN it elapses.
-	origin := closeQuiesceTimeoutForTest
-	closeQuiesceTimeoutForTest = 150 * time.Millisecond
-	defer func() { closeQuiesceTimeoutForTest = origin }()
+	// A short bound, on THIS engine only, so the test is about what happens
+	// when it elapses rather than about waiting fifteen real seconds.
+	e.closeQuiesce = 150 * time.Millisecond
 
 	e.closeSession(context.Background(), s, testIP, "connection-deleted")
 

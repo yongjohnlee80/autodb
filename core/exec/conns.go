@@ -19,6 +19,21 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
+// Driver open seams. Production uses golib's own functions; a test replaces
+// them to observe what these branches actually pass.
+//
+// They exist because the pool bounds were "tested" by calling the option
+// builders directly, which proved only that the builders work — the mysql and
+// sqlite branches could be stripped of their bounds and every package stayed
+// green. A driver call site that no test crosses is a call site that can lose
+// an argument silently, and unbounded database/sql pools against a live
+// production target is exactly the failure ADR-0074 §1a exists to prevent.
+var (
+	openPostgres = postgres.OpenNamed
+	openMySQL    = mysql.OpenNamed
+	openSQLite   = sqlite.OpenNamed
+)
+
 // target returns the cached dao connection for connID, opening it on first
 // use: decrypt the identity-bound DSN (ErrLocked before any passphrase
 // login), open the engine's driver, and probe with SELECT 1.
@@ -116,12 +131,12 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 		// session mutated after pooling (set_config through a verb-level
 		// read) can serve a statement. Autocommit is preserved, keeping
 		// transaction-prohibited DDL executable (ADR-0055 rev 5).
-		conn, err = postgres.OpenNamed(ctx, name, string(dsn),
+		conn, err = openPostgres(ctx, name, string(dsn),
 			pgPrepareConnVerify(), e.pgPoolLimits(row))
 	case "mysql":
-		conn, err = mysql.OpenNamed(ctx, name, string(dsn), mysql.Option(e.sqlPoolLimits(row)))
+		conn, err = openMySQL(ctx, name, string(dsn), mysql.Option(e.sqlPoolLimits(row)))
 	case "sqlite":
-		conn, err = sqlite.OpenNamed(ctx, name, string(dsn), sqlite.Option(e.sqlPoolLimits(row)))
+		conn, err = openSQLite(ctx, name, string(dsn), sqlite.Option(e.sqlPoolLimits(row)))
 	default:
 		return nil, fmt.Errorf("exec: connection %d has unknown engine %q", connID, row.Engine)
 	}
