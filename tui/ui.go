@@ -63,6 +63,7 @@ type Model struct {
 	statusMsg         string
 	statusKind        statusKind
 	running           bool
+	execSeq           uint64 // monotonic run identities; only the latest admitted run may touch running/results/status
 	connecting        bool   // a connectTask is in flight; suppress duplicates
 	authSeq           uint64 // monotonic authentication-attempt identities
 	authAttempt       uint64 // attempt owning the auth guard; 0 = idle
@@ -657,7 +658,15 @@ func (m *Model) authTask(what string, fn func(context.Context, *Bound) error) bo
 
 // --- execution ---------------------------------------------------------------------
 
+// execDone carries two distinct identities (lector, PR #15 r0): gen is the
+// CONNECTION epoch — it guards data crossing a reconnect; seq is the
+// EXECUTION identity — it guards latest-run UI state. A completion whose
+// seq is stale must be fully inert: a reconnect clears the running guard
+// (handleStartup), so a newer run can be admitted while an older one is
+// still completing, and the old completion must not clear the new run's
+// guard, replace its status, or overwrite its results.
 type execDone struct {
+	seq uint64
 	gen uint64
 	res *ExecResult
 	err error
@@ -701,11 +710,13 @@ func (m *Model) runSQL(sql string) {
 	}
 	connID := m.activeConn
 	m.running = true
+	m.execSeq++
+	seq := m.execSeq
 	m.setStatus(fmt.Sprintf("running on %s…", m.connLabel()))
 	bound := m.session.Bind() // pin the epoch at issuance
 	m.ctx.Go(func(c context.Context) (any, error) {
 		res, err := bound.Run(c, connID, sql)
-		return execDone{gen: bound.Gen(), res: res, err: err}, nil
+		return execDone{seq: seq, gen: bound.Gen(), res: res, err: err}, nil
 	})
 }
 
@@ -1297,12 +1308,23 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 		m.afterLogin()
 		return true
 	case execDone:
+		if v.seq != m.execSeq {
+			// A NEWER run was admitted after this one was issued (the
+			// reconnect path clears the running guard, so that is a legal
+			// order). Everything below belongs to the newest run: clearing
+			// running would drop its in-flight guard, and any status —
+			// including the superseded message — would stomp its state.
+			// A stale completion is fully inert (lector, PR #15 r0).
+			return true
+		}
 		m.running = false
 		if v.gen != m.session.Gen() {
 			// The result must not cross epochs, but the user who ran the
 			// query deserves to know it went nowhere: a run issued in a
 			// reconnect window used to vanish without a trace (the
-			// EnterOnTable flake's silent shape).
+			// EnterOnTable flake's silent shape). Reaching here means no
+			// newer run exists (seq matched), so the message cannot stomp
+			// anything.
 			m.setStatus("query superseded by a reconnect — run it again")
 			return true
 		}
