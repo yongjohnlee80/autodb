@@ -31,6 +31,7 @@ type Config struct {
 	Security Security `toml:"security"`
 	TUI      TUI      `toml:"tui"`
 	Web      Web      `toml:"web"`
+	Exec     Exec     `toml:"exec"`
 }
 
 // MaxSubjectLen bounds the directory component built from a username. Generous
@@ -92,6 +93,22 @@ func ValidSubject(s string) error {
 // ignoring it would leave an operator believing an isolation setting is in
 // force when it no longer exists.
 type Web struct{}
+
+// Exec configures the execution engine.
+type Exec struct {
+	// MaxStatementBytes caps the size of one statement the engine will
+	// execute. The cap exists so the audit record always equals exactly what
+	// ran — an oversized script is refused BEFORE execution rather than run
+	// with an unaudited tail.
+	//
+	// The default is 64 KiB. The original 8 KiB was too small for real
+	// schema work: a production deployment corpus of 470 scripts contained
+	// statements up to 11.6 KiB, all of them ordinary view definitions
+	// (design doc G4). This bound is deliberately separate from the audit
+	// record's own truncation, which stays small on purpose — widening what
+	// may RUN is not a reason to store more of it.
+	MaxStatementBytes int `toml:"max_statement_bytes"`
+}
 
 // TUI configures the standalone terminal UI (ADR-0057).
 type TUI struct {
@@ -168,8 +185,12 @@ func Default() Config {
 		Meta:     Meta{Engine: "sqlite"},
 		History:  History{Enabled: true},
 		Security: Security{IPAllowlist: []string{"127.0.0.1/32", "::1/128"}},
+		Exec:     Exec{MaxStatementBytes: DefaultMaxStatementBytes},
 	}
 }
+
+// DefaultMaxStatementBytes is the default [exec] max_statement_bytes.
+const DefaultMaxStatementBytes = 64 * 1024
 
 // DefaultPath returns the default config file location:
 // $XDG_CONFIG_HOME/autodb/config.toml.
@@ -246,6 +267,9 @@ func (c Config) validate() error {
 		if _, err := netip.ParseAddr(c.Server.Bind); err != nil {
 			return fmt.Errorf("%w: server.bind %q: %v", ErrInvalid, c.Server.Bind, err)
 		}
+	}
+	if c.Exec.MaxStatementBytes <= 0 {
+		return fmt.Errorf("%w: exec.max_statement_bytes %d must be positive", ErrInvalid, c.Exec.MaxStatementBytes)
 	}
 	switch c.Meta.Engine {
 	case "sqlite":

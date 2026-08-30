@@ -334,13 +334,21 @@ func TestEngine_RejectsOversizedScript(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 	f.exec(t, f.rootTok, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
-	big := "SELECT '" + strings.Repeat("x", 9000) + "'"
+	big := "SELECT '" + strings.Repeat("x", DefaultMaxStatementBytes+1) + "'"
 	if _, err := f.eng.Execute(ctx, f.rootTok, f.connID, big, testIP); !errors.Is(err, ErrScriptTooLarge) {
 		t.Errorf("oversized script err = %v, want ErrScriptTooLarge", err)
 	}
 	// Nothing oversized reached history/target.
 	if n, _ := f.store.History.OnCtx(ctx).With(meta.HistScript, big).Count(); n != 0 {
 		t.Error("oversized script was recorded/executed")
+	}
+	// The statement that broke the OLD 8 KiB cap now runs: raising it is the
+	// point (design doc G4 — a real deployment corpus held 11.6 KiB view
+	// definitions), so a test that only proved "some size is refused" would
+	// have passed at either cap.
+	nowFits := "SELECT '" + strings.Repeat("x", 9000) + "'"
+	if _, err := f.eng.Execute(ctx, f.rootTok, f.connID, nowFits, testIP); err != nil {
+		t.Errorf("a 9 KB statement must run under the 64 KiB cap: %v", err)
 	}
 }
 
