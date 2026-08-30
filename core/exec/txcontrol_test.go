@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/yongjohnlee80/golib/dao"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 )
 
 // ADR-0074 §8 — "the control-verb string never reaches the wire" is honest
@@ -186,6 +188,12 @@ func TestParseTxControl_MalformedInput(t *testing.T) {
 		// caller hunting for a feature when what they have is a typo.
 		{"comma as a savepoint target", "ROLLBACK TO ,"},
 		{"comma after the SAVEPOINT keyword", "ROLLBACK TO SAVEPOINT ,"},
+		// Reserved keywords are not bare identifiers. PostgreSQL 17.6 calls
+		// both of these a syntax error, so answering "savepoints are not
+		// implemented" would offer a feature where the caller needs quotes.
+		{"reserved keyword as a bare name", "ROLLBACK TO SELECT"},
+		{"reserved keyword AND as a bare name", "ROLLBACK TO AND"},
+		{"reserved keyword after SAVEPOINT", "ROLLBACK TO SAVEPOINT SELECT"},
 		{"empty delimited identifier", `ROLLBACK TO ""`},
 		// A delimited identifier is lexed now, but it still names nothing
 		// outside a savepoint target.
@@ -239,17 +247,30 @@ func TestParseTxControl_UnsupportedClauses(t *testing.T) {
 		// "savepoint" does not exist`, and succeeds when a savepoint by that
 		// name is open. So it is a capability refusal, not a malformed one.
 		{"savepoint named savepoint", "ROLLBACK TO SAVEPOINT", "SAVEPOINT"},
-		// Every one of these is a savepoint name PostgreSQL 17.6 accepts —
-		// verified by opening a savepoint so spelled and rolling back to it.
+		// Except where noted, every one of these is a savepoint name
+		// PostgreSQL 17.6 accepts — verified by opening a savepoint so
+		// spelled and rolling back to it.
 		// They must reach the capability refusal, not be rejected as
 		// malformed on the way: a delimited identifier is how you spell a
 		// name with a space in it.
 		{"delimited identifier target", `ROLLBACK TO "My Point"`, "SAVEPOINT"},
 		{"delimited identifier after the keyword", `ROLLBACK TO SAVEPOINT "My Point"`, "SAVEPOINT"},
-		{"backtick-delimited target", "ROLLBACK TO SAVEPOINT `My Point`", "SAVEPOINT"},
+		// Backticks are MySQL's spelling, not PostgreSQL's — PG 17.6 answers
+		// `syntax error at or near "`"`. The parser lexes both because it
+		// serves both dialects; this cell records whose spelling it is.
+		{"backtick-delimited target (MySQL spelling)", "ROLLBACK TO SAVEPOINT `My Point`", "SAVEPOINT"},
 		{"doubled quote inside the name", `ROLLBACK TO "My ""Point"""`, "SAVEPOINT"},
 		{"dollar sign in the name", "ROLLBACK TO sp$1", "SAVEPOINT"},
 		{"non-ascii name", "ROLLBACK TO spné", "SAVEPOINT"},
+		// Keywords PostgreSQL DOES accept bare as a ColId. `ROLLBACK TO
+		// COMMIT` names a savepoint called "commit"; verified on 17.6, where
+		// it parses and complains only that no transaction is open.
+		{"unreserved keyword as a name", "ROLLBACK TO COMMIT", "SAVEPOINT"},
+		{"the verb itself as a name", "ROLLBACK TO ROLLBACK", "SAVEPOINT"},
+		{"col-name keyword as a name", "ROLLBACK TO VALUE", "SAVEPOINT"},
+		// Quoting lifts the restriction entirely.
+		{"quoted reserved keyword", `ROLLBACK TO "SELECT"`, "SAVEPOINT"},
+		{"quoted reserved keyword after SAVEPOINT", `ROLLBACK TO SAVEPOINT "AND"`, "SAVEPOINT"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -482,4 +503,61 @@ func TestParseTxControl_CorpusRoundTrip(t *testing.T) {
 			"overwhelmingly BEGIN…COMMIT, so finding none means the replay is not reading it")
 	}
 	t.Logf("round-tripped %d transaction controls from %d files, %d failures", controls, len(files), failures)
+}
+
+// The reserved-keyword table is generated from the server, so it can drift
+// from the server. This re-derives it whenever a live PostgreSQL is
+// configured and fails on any difference — a table nobody re-checks is a
+// table that is quietly wrong after the next major release.
+//
+// It uses TEST_PGURL, the same gate the rest of the repo's live tests use.
+func TestReservedKeywords_MatchTheServer(t *testing.T) {
+	url := os.Getenv("TEST_PGURL")
+	if url == "" {
+		t.Skip("TEST_PGURL not set; skipping the keyword-table cross-check")
+	}
+	ctx := context.Background()
+	conn, err := golibpg.Open(ctx, url)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// catcode R is reserved and T is type/function-name reserved; ColId
+	// admits neither. U (unreserved) and C (col_name) are usable bare.
+	rows, err := conn.QueryContext(ctx,
+		`SELECT upper(word) FROM pg_get_keywords() WHERE catcode IN ('R','T')`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	server := map[string]bool{}
+	for rows.Next() {
+		var w string
+		if err := rows.Scan(&w); err != nil {
+			t.Fatal(err)
+		}
+		server[w] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(server) == 0 {
+		t.Fatal("the server reported no reserved keywords — the cross-check is not reading anything")
+	}
+
+	for w := range server {
+		if !pgReservedKeywords[w] {
+			t.Errorf("%q is reserved on this server but missing from pgReservedKeywords — "+
+				"a bare `ROLLBACK TO %s` would be reported as a missing feature instead of a syntax error", w, w)
+		}
+	}
+	for w := range pgReservedKeywords {
+		if !server[w] {
+			t.Errorf("%q is in pgReservedKeywords but this server does not reserve it — "+
+				"a valid savepoint name would be reported as malformed", w)
+		}
+	}
+	t.Logf("cross-checked %d reserved keywords against the server", len(server))
 }

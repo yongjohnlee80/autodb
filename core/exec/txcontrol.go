@@ -353,7 +353,8 @@ func parseSavepointTarget(toks []txToken) error {
 	// missing capability would send the caller looking for a feature when
 	// what they have is a typo.
 	if !name.isName() {
-		return invalidTx("ROLLBACK TO", name.String(), "a savepoint name must be an identifier")
+		return invalidTx("ROLLBACK TO", name.String(),
+			"a savepoint name must be an identifier — a reserved keyword needs quoting")
 	}
 	return fmt.Errorf("%w: ROLLBACK TO SAVEPOINT (savepoints are not implemented)",
 		ErrTxControlUnsupported)
@@ -425,9 +426,22 @@ const (
 // isKw reports whether t is the keyword s.
 func (t txToken) isKw(s string) bool { return t.kind == tokWord && t.text == s }
 
-// isName reports whether t can name a savepoint: a bare identifier or a
-// quoted one. A comma cannot.
-func (t txToken) isName() bool { return t.kind == tokWord || t.kind == tokQuotedIdent }
+// isName reports whether t can name a savepoint.
+//
+// A delimited identifier always can — quoting is exactly how you say "this is
+// a name, not a keyword". A bare word can only if it is not a PostgreSQL
+// reserved keyword: `ROLLBACK TO COMMIT` names a savepoint called "commit"
+// and parses, while `ROLLBACK TO SELECT` is a syntax error. And a comma is
+// not a name at all.
+func (t txToken) isName() bool {
+	switch t.kind {
+	case tokQuotedIdent:
+		return true
+	case tokWord:
+		return !pgReservedKeywords[t.text]
+	}
+	return false
+}
 
 func (t txToken) String() string {
 	if t.kind == tokQuotedIdent {
