@@ -94,16 +94,21 @@ ip_allowlist = ["127.0.0.1/32", "::1/128"]
 [exec]
 # The largest single statement the engine will execute, in bytes.
 #
-# The cap is a promise about the audit trail, not a performance knob: an
-# oversized script is refused BEFORE it runs, so the recorded script always
-# equals exactly what executed and there is never an unaudited tail.
+# A refusal boundary, not a performance knob: an oversized statement is
+# refused BEFORE it runs, so nothing executes that the engine declined to
+# consider.
+#
+# It does not bound what is STORED. The audit and history record keeps a
+# 8 KiB prefix whatever this is set to, so a statement larger than that is
+# recorded in part — every execution still leaves a durable attempt record,
+# but the record is not a full copy of the text.
 #
 # 64 KiB by default. The previous 8 KiB was too small for real schema work
 # — a production deployment corpus of 470 scripts held statements up to
 # 11.6 KiB, all of them ordinary view definitions. Raise it if your
-# migrations are larger; the audit record's own truncation is separate and
-# deliberately stays small, because letting bigger statements RUN is not a
-# reason to store more of each one.
+# migrations are larger; the audit truncation is separate and deliberately
+# stays small, because letting bigger statements RUN is not a reason to store
+# more of each one.
 max_statement_bytes = 65536
 
 [tui]

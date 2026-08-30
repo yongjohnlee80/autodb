@@ -32,6 +32,13 @@ func TestCorpusShapes(t *testing.T) {
 			// classified as ddl, so a reader holding a read grant was refused
 			// an ordinary SELECT.
 			{"SELECT comment FROM notes", "SELECT", ClassRead},
+			// Position must not matter. Reading the first word of ANY paren
+			// as a verb left the bug alive wherever the offending column came
+			// first (lector r0 MF2).
+			{"SELECT (comment)", "SELECT", ClassRead},
+			{"SELECT (comment) FROM notes", "SELECT", ClassRead},
+			{"INSERT INTO notes (comment, id) VALUES ('x', 1)", "INSERT", ClassWrite},
+			{"CREATE TABLE x (comment text, id int)", "CREATE", ClassDDL},
 			{"SELECT id, comment FROM notes WHERE id = 1", "SELECT", ClassRead},
 			{"SELECT merge FROM t", "SELECT", ClassRead},
 			{"UPDATE notes SET comment = 'x' WHERE id = 1", "UPDATE", ClassWrite},
