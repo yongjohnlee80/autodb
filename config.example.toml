@@ -91,6 +91,21 @@ ip_allowlist = ["127.0.0.1/32", "::1/128"]
 # replacing it (the TUI on this machine still connects over loopback):
 # ip_allowlist = ["127.0.0.1/32", "::1/128", "10.0.5.0/24"]
 
+[exec]
+# The largest single statement the engine will execute, in bytes.
+#
+# The cap is a promise about the audit trail, not a performance knob: an
+# oversized script is refused BEFORE it runs, so the recorded script always
+# equals exactly what executed and there is never an unaudited tail.
+#
+# 64 KiB by default. The previous 8 KiB was too small for real schema work
+# — a production deployment corpus of 470 scripts held statements up to
+# 11.6 KiB, all of them ordinary view definitions. Raise it if your
+# migrations are larger; the audit record's own truncation is separate and
+# deliberately stays small, because letting bigger statements RUN is not a
+# reason to store more of each one.
+max_statement_bytes = 65536
+
 [tui]
 # Where `autodb --ui` keeps its local .sql notes. Empty means
 # $XDG_DATA_HOME/autodb/notes (~/.local/share/autodb/notes).

@@ -16,6 +16,13 @@ const (
 	ClassWrite Class = "write"
 	// ClassDDL is schema/privilege change (editor and above, Objective 14).
 	ClassDDL Class = "ddl"
+	// ClassControl is a transaction/session control statement — BEGIN,
+	// COMMIT, SET, LOCK and their kin. The lexer CLASSIFIES these (ADR-0074
+	// §2); it does not decide whether they may run. Admission belongs to the
+	// engine's capability profile, because the answer depends on the profile,
+	// the session's lifecycle state and the caller's grants — none of which a
+	// tokenizer can see.
+	ClassControl Class = "control"
 )
 
 func classRank(c Class) int {
@@ -27,6 +34,9 @@ func classRank(c Class) int {
 	case ClassDDL:
 		return 3
 	}
+	// ClassControl deliberately ranks 0: it is not a point on the
+	// read < write < ddl scale, and a control statement's class is decided by
+	// its own verb rather than escalated to by anything it contains.
 	return 0
 }
 
@@ -63,6 +73,25 @@ type Statement struct {
 	// HasTopLevelWhere reports a WHERE at paren depth 0 after the main verb
 	// (only meaningful for UPDATE/DELETE — the Objective 18 guard input).
 	HasTopLevelWhere bool
+	// Nested lists the data-modifying verbs found BELOW top level — the
+	// bodies of data-modifying CTEs and subqueries, which PostgreSQL really
+	// does execute. HasTopLevelWhere is depth-0-only and says nothing about
+	// them, which is the guard-coverage gap ADR-0074 §6 names: the v1
+	// blanket refusal of data-modifying CTEs stood in for a guard that could
+	// not see inside them. This is that guard's input.
+	Nested []NestedMutation
+}
+
+// NestedMutation is one data-modifying verb found below top level, with the
+// guard input for that verb at ITS OWN depth — a WHERE belonging to an inner
+// subquery is not a guard on the mutation that encloses it.
+type NestedMutation struct {
+	// Verb is the mutating verb, uppercase (e.g. "DELETE").
+	Verb string
+	// Depth is the paren nesting depth the verb was found at.
+	Depth int
+	// HasWhere reports a WHERE at exactly that depth after the verb.
+	HasWhere bool
 }
 
 // readVerbs are lexically read-only statements. PRAGMA is deliberately
@@ -83,12 +112,19 @@ var ddlVerbs = map[string]bool{
 	"CREATE": true, "ALTER": true, "DROP": true, "TRUNCATE": true, "RENAME": true,
 	"VACUUM": true, "REINDEX": true, "ANALYZE": true, "GRANT": true, "REVOKE": true,
 	"COMMENT": true,
+	// REFRESH MATERIALIZED VIEW. It was unclassifiable — and therefore
+	// refused as an unknown verb — while running on a cron against the gold
+	// database (design doc G5).
+	"REFRESH": true,
 }
 
-// unsupportedVerbs are rejected loudly: transaction control, session state,
-// and PRAGMA have no safe meaning on pooled autocommit connections
-// (ADR-0055 §1).
-var unsupportedVerbs = map[string]bool{
+// controlVerbs are transaction-control, session-state and cursor statements.
+// They are CLASSIFIED, never rejected here (ADR-0074 §2): whether one may run
+// is a question about the engine's capability profile and the session's
+// lifecycle state, and the tokenizer knows neither. Under the v1compat
+// profile the engine refuses every one of them, exactly as this list did when
+// the refusal lived here (ADR-0055 §1).
+var controlVerbs = map[string]bool{
 	"BEGIN": true, "START": true, "COMMIT": true, "END": true, "ROLLBACK": true,
 	"SAVEPOINT": true, "RELEASE": true, "SET": true, "USE": true,
 	"ATTACH": true, "DETACH": true, "LOCK": true, "UNLOCK": true,
@@ -158,6 +194,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 		sawContent  bool
 		execComment bool // inside a MySQL /*! ... */ executable comment
 	)
+	var nested []NestedMutation
 	maxClass := Class("")
 	escalate := func(c Class) {
 		if classRank(c) > classRank(maxClass) {
@@ -180,6 +217,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			stmtStart = i
 			ended, searching, inWith, inExplain = false, true, false, false
 			maxClass = ""
+			nested = nil
 			st = Statement{}
 		}
 		sawContent = true
@@ -318,15 +356,34 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			}
 
 			if cls, ok := verbClass(word); ok {
-				// A data-modifying verb below top level is a data-modifying
-				// CTE/subquery — reject (its mutation can't be guarded).
-				if depth > 0 && (cls == ClassWrite || cls == ClassDDL) {
+				// DDL below top level is not valid SQL in any target dialect;
+				// it stays refused outright rather than being handed to a
+				// guard that has no rule for it.
+				if depth > 0 && cls == ClassDDL {
 					return st, parts, fmt.Errorf("%w: data-modifying subquery/CTE (%s at nesting depth %d)", ErrStatementUnsupported, word, depth)
+				}
+				// A mutation below top level is recorded WITH ITS DEPTH, so
+				// the guard can ask whether that particular mutation is
+				// guarded rather than whether the statement as a whole
+				// happens to contain a WHERE somewhere.
+				if depth > 0 && cls == ClassWrite {
+					nested = append(nested, NestedMutation{Verb: word, Depth: depth})
 				}
 				escalate(cls)
 			}
 
 			if depth != 0 {
+				// A WHERE below top level guards the innermost mutation open
+				// at exactly this depth — never one at a shallower depth,
+				// whose own predicate this is not.
+				if word == "WHERE" {
+					for k := len(nested) - 1; k >= 0; k-- {
+						if nested[k].Depth == depth {
+							nested[k].HasWhere = true
+							break
+						}
+					}
+				}
 				continue
 			}
 			if searching {
@@ -346,8 +403,15 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 					if inWith {
 						continue // CTE names, AS, RECURSIVE, column lists
 					}
-					if unsupportedVerbs[word] {
-						return st, parts, fmt.Errorf("%w: %s (transaction control, session state, and PRAGMA have no safe meaning on pooled connections)", ErrStatementUnsupported, word)
+					if controlVerbs[word] {
+						// Classified, not refused. Whether it may run is the
+						// engine profile's question (ADR-0074 §2), and
+						// answering it here also broke SplitStatements: a
+						// script containing BEGIN could not even be split,
+						// because the splitter shares this scanner.
+						st.Verb = word
+						searching = false
+						continue
 					}
 					return st, parts, fmt.Errorf("%w: %s", ErrStatementUnsupported, word)
 				}
@@ -380,7 +444,15 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 	if searching {
 		return st, parts, fmt.Errorf("%w: unable to classify the statement", ErrStatementUnsupported)
 	}
-	st.Class = maxClass
+	st.Nested = nested
+	// A control statement's class is its own verb's, never something it
+	// contains: `LOCK TABLE t` must not read as ClassRead because TABLE is a
+	// read verb.
+	if controlVerbs[st.Verb] {
+		st.Class = ClassControl
+	} else {
+		st.Class = maxClass
+	}
 	return st, parts, nil
 }
 

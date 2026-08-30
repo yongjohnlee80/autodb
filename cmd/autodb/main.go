@@ -208,7 +208,17 @@ func runServe(configPath string) error {
 		ln.Close()
 		return fmt.Errorf("auth: %w", err)
 	}
-	eng := coreexec.New(store, svc)
+	// Both options are read from config here. [exec] max_statement_bytes is
+	// new; [history] enabled was NOT — WithHistory has documented itself as
+	// "config [history].enabled" since it was written, and nothing ever
+	// passed it, so an operator who turned history off still had every
+	// script's text recorded. The switch says it controls whether the script
+	// TEXT is kept, which makes a silently-ignored `enabled = false` a
+	// privacy promise the binary was not keeping.
+	eng := coreexec.New(store, svc,
+		coreexec.WithHistory(cfg.History.Enabled),
+		coreexec.WithMaxStatementBytes(cfg.Exec.MaxStatementBytes),
+	)
 	defer eng.Close()
 
 	// The operational logger is NOT optional: the transport deliberately

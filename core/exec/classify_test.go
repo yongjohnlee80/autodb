@@ -24,8 +24,11 @@ func TestClassify(t *testing.T) {
 		{name: "nested block comment", sql: "/* a /* b */ c */ SELECT 1", verb: "SELECT", class: ClassRead},
 		{name: "values", sql: "VALUES (1, 2)", verb: "VALUES", class: ClassRead},
 		{name: "table verb", sql: "TABLE artists", verb: "TABLE", class: ClassRead},
-		{name: "pragma rejected", sql: "PRAGMA table_info(t)", err: ErrStatementUnsupported},
-		{name: "pragma write rejected", sql: "PRAGMA foreign_keys = OFF", err: ErrStatementUnsupported},
+		// PRAGMA is CONTROL, not read: SQLite has writable PRAGMA forms, so
+		// it never went through the read path. What changed is only WHERE it
+		// is refused — the profile, not the lexer (ADR-0074 §2).
+		{name: "pragma classified control", sql: "PRAGMA table_info(t)", verb: "PRAGMA", class: ClassControl},
+		{name: "pragma write classified control", sql: "PRAGMA foreign_keys = OFF", verb: "PRAGMA", class: ClassControl},
 		{name: "show", sql: "SHOW TABLES", mysql: true, verb: "SHOW", class: ClassRead},
 		{name: "cte select", sql: "WITH a AS (SELECT 1), b AS (SELECT 2) SELECT * FROM a", verb: "SELECT", class: ClassRead},
 		{name: "recursive cte", sql: "WITH RECURSIVE r(n) AS (VALUES(1)) SELECT * FROM r", verb: "SELECT", class: ClassRead},
@@ -57,10 +60,18 @@ func TestClassify(t *testing.T) {
 
 		// Data-modifying CTEs (PostgreSQL executes the WITH body) — rejected,
 		// never classified as reads (lector M4 must-fix #1).
-		{name: "cte delete body", sql: "WITH x AS (DELETE FROM t RETURNING id) SELECT * FROM x", err: ErrStatementUnsupported},
-		{name: "cte update body", sql: "WITH x AS (UPDATE t SET a=1 RETURNING id) SELECT * FROM x", err: ErrStatementUnsupported},
-		{name: "cte insert body", sql: "WITH x AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM x", err: ErrStatementUnsupported},
-		{name: "subquery insert", sql: "SELECT (INSERT INTO t VALUES (1))", err: ErrStatementUnsupported},
+		// Data-modifying CTEs are CLASSIFIED, and the mutation inside is
+		// reported with the WHERE found at its own depth. Admission is the
+		// guard's call now — see TestGuardWhere_NestedMutations (ADR-0074
+		// §6). The class still escalates to write, so authorization is
+		// unchanged.
+		{name: "cte delete body", sql: "WITH x AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT * FROM x", verb: "SELECT", class: ClassWrite},
+		{name: "cte update body", sql: "WITH x AS (UPDATE t SET a=1 WHERE id = 1 RETURNING id) SELECT * FROM x", verb: "SELECT", class: ClassWrite},
+		{name: "cte insert body", sql: "WITH x AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM x", verb: "SELECT", class: ClassWrite},
+		{name: "subquery insert", sql: "SELECT (INSERT INTO t VALUES (1))", verb: "SELECT", class: ClassWrite},
+		// DDL below top level is not valid SQL anywhere and stays refused by
+		// the lexer: there is no guard rule to hand it to.
+		{name: "cte ddl body", sql: "WITH x AS (DROP TABLE t) SELECT 1", err: ErrStatementUnsupported},
 		// MySQL executable comments run on the server — their tokens are live.
 		{name: "mysql exec comment delete", sql: "/*!40001 DELETE FROM t WHERE id=1 */", mysql: true, verb: "DELETE", class: ClassWrite, where: true},
 		{name: "mysql exec comment hides nothing", sql: "SELECT 1 /*!40001 ; DROP TABLE t */", mysql: true, err: ErrMultiStatement},
@@ -74,11 +85,24 @@ func TestClassify(t *testing.T) {
 		{name: "pg block comment nests", sql: "SELECT 1 /* a /* b */ c */", verb: "SELECT", class: ClassRead},
 
 		// Rejections.
-		{name: "begin", sql: "BEGIN", err: ErrStatementUnsupported},
-		{name: "commit", sql: "COMMIT", err: ErrStatementUnsupported},
-		{name: "set", sql: "SET search_path = evil", err: ErrStatementUnsupported},
-		{name: "attach", sql: "ATTACH DATABASE 'x' AS y", err: ErrStatementUnsupported},
-		{name: "copy", sql: "COPY t FROM '/etc/passwd'", err: ErrStatementUnsupported},
+		// Control statements: the lexer names them, it does not judge them.
+		// TestEngine_V1CompatRefusesControlStatements pins the refusal where
+		// it now lives.
+		{name: "begin", sql: "BEGIN", verb: "BEGIN", class: ClassControl},
+		{name: "begin with options", sql: "BEGIN READ ONLY ISOLATION LEVEL SERIALIZABLE", verb: "BEGIN", class: ClassControl},
+		{name: "start transaction", sql: "START TRANSACTION", verb: "START", class: ClassControl},
+		{name: "commit", sql: "COMMIT", verb: "COMMIT", class: ClassControl},
+		{name: "commit and chain", sql: "COMMIT AND CHAIN", verb: "COMMIT", class: ClassControl},
+		{name: "rollback", sql: "ROLLBACK", verb: "ROLLBACK", class: ClassControl},
+		{name: "set", sql: "SET search_path = evil", verb: "SET", class: ClassControl},
+		{name: "set local", sql: "SET LOCAL lock_timeout = '5s'", verb: "SET", class: ClassControl},
+		{name: "attach", sql: "ATTACH DATABASE 'x' AS y", verb: "ATTACH", class: ClassControl},
+		{name: "copy", sql: "COPY t FROM '/etc/passwd'", verb: "COPY", class: ClassControl},
+		{name: "call", sql: "CALL do_thing(1)", verb: "CALL", class: ClassControl},
+		{name: "do block", sql: "DO $$ BEGIN PERFORM 1; END $$", verb: "DO", class: ClassControl},
+		// A control verb's class comes from the verb, never from a word it
+		// contains: TABLE is a read verb and must not make this a read.
+		{name: "lock table is not a read", sql: "LOCK TABLE t IN EXCLUSIVE MODE", verb: "LOCK", class: ClassControl},
 		{name: "multi statement", sql: "SELECT 1; DROP TABLE t", err: ErrMultiStatement},
 		{name: "multi via paren", sql: "SELECT 1; (2)", err: ErrMultiStatement},
 		{name: "trailing semicolon ok", sql: "SELECT 1;", verb: "SELECT", class: ClassRead},

@@ -20,10 +20,20 @@ const DefaultMaxRows = 500
 // should-fixes: bound SQL/audit/error sizes; keep recording alive after
 // caller cancellation).
 const (
-	maxScriptBytes = 8 * 1024
-	maxErrorBytes  = 2 * 1024
-	recordTimeout  = 10 * time.Second
+	// maxAuditSQLBytes bounds the SQL text STORED in an audit or history
+	// record. It is deliberately NOT the execution cap: letting a bigger
+	// statement run is not a reason to store more of every statement
+	// (design doc G4 — "audit-side bounding stays separate").
+	maxAuditSQLBytes = 8 * 1024
+	maxErrorBytes    = 2 * 1024
+	recordTimeout    = 10 * time.Second
 )
+
+// DefaultMaxStatementBytes is the default execution size cap, matching
+// config.DefaultMaxStatementBytes. It is a promise about the audit trail
+// rather than a performance knob: an oversized statement is refused BEFORE
+// it runs, so the record always equals exactly what executed.
+const DefaultMaxStatementBytes = 64 * 1024
 
 // Engine is the execution core: one instance per process over one meta
 // store + auth service. Callers authenticate with session tokens; identity
@@ -38,6 +48,14 @@ type Engine struct {
 	history bool
 	maxRows int
 	now     func() time.Time
+
+	// profile is the capability profile admission runs against (ADR-0074
+	// §2). Per-connection and per-grant profile sources arrive with the
+	// session engine; today every surface runs the one profile.
+	profile Profile
+	// maxStatementBytes is the execution size cap ([exec]
+	// max_statement_bytes).
+	maxStatementBytes int
 }
 
 // Option configures an Engine at New time.
@@ -62,12 +80,30 @@ func WithMaxRows(n int) Option {
 // WithNow injects a clock (tests).
 func WithNow(now func() time.Time) Option { return func(e *Engine) { e.now = now } }
 
+// WithProfile sets the engine's capability profile (ADR-0074 §2). The
+// default is ProfileV1Compat. An unknown profile is not silently corrected to
+// the default — it is kept, and every statement is refused by it, because a
+// misconfigured surface must fail closed rather than quietly become the
+// permissive one.
+func WithProfile(p Profile) Option { return func(e *Engine) { e.profile = p } }
+
+// WithMaxStatementBytes caps the size of one executable statement
+// (`[exec] max_statement_bytes`). A non-positive value keeps the default.
+func WithMaxStatementBytes(n int) Option {
+	return func(e *Engine) {
+		if n > 0 {
+			e.maxStatementBytes = n
+		}
+	}
+}
+
 // New builds the Engine.
 func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 	e := &Engine{
 		store: store, auth: authSvc,
 		conns:   map[int64]dao.DataConn{},
 		history: true, maxRows: DefaultMaxRows, now: time.Now,
+		profile: ProfileV1Compat, maxStatementBytes: DefaultMaxStatementBytes,
 	}
 	for _, o := range opts {
 		o(e)
@@ -164,12 +200,21 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	// Reject oversized scripts BEFORE classification or execution: the
 	// audit/history record must equal exactly what ran — never execute an
 	// unaudited tail (lector M4 r2 must-fix #2).
-	if len(sqlText) > maxScriptBytes {
+	if len(sqlText) > e.maxStatementBytes {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, ErrScriptTooLarge)
 	}
 
 	stmt, err := Classify(sqlText, connRow.Engine == "mysql")
 	if err != nil {
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
+	}
+	// Admission. The classifier said what this IS; the profile says whether
+	// this engine runs it (ADR-0074 §2). It sits after classification and
+	// before authorization deliberately: an ungranted caller is already gone
+	// by here, refused at the read floor above, so a refusal message that
+	// names the verb cannot leak anything to someone who was not allowed to
+	// ask.
+	if err := e.profile.admit(stmt); err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
 	// Full authorization for the statement's actual class. A denial must
@@ -180,8 +225,8 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
 	ident = authorized
-	if (stmt.Verb == "UPDATE" || stmt.Verb == "DELETE") && !stmt.HasTopLevelWhere {
-		return nil, e.reject(ctx, ident, connID, ip, sqlText, ErrNoWhere)
+	if err := guardWhere(stmt); err != nil {
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
 
 	target, err := e.target(ctx, connID, connRow)
@@ -229,7 +274,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 
 // reject audits a refused execution attempt and returns the refusal.
 func (e *Engine) reject(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string, cause error) error {
-	detail := fmt.Sprintf("conn %d: %v: %s", connID, cause, truncate(sqlText, maxScriptBytes))
+	detail := fmt.Sprintf("conn %d: %v: %s", connID, cause, truncate(sqlText, maxAuditSQLBytes))
 	if err := e.auth.Audit(ctx, ident.UserID(), ip, "exec_rejected", detail); err != nil {
 		return err
 	}
@@ -239,7 +284,7 @@ func (e *Engine) reject(ctx context.Context, ident auth.Identity, connID int64, 
 // recordAttempt writes the pre-execution audit row and, when history is on,
 // the pending history row; it returns that row's id (0 when history is off).
 func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string) (int64, error) {
-	script := truncate(sqlText, maxScriptBytes)
+	script := truncate(sqlText, maxAuditSQLBytes)
 	var histID int64
 	err := dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.auth.AuditTx(tx, ident.UserID(), ip, "exec",
