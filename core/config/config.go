@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -112,6 +113,23 @@ type Exec struct {
 	// record's own truncation, which stays small on purpose — widening what
 	// may RUN is not a reason to store more of it.
 	MaxStatementBytes int `toml:"max_statement_bytes"`
+
+	// MaxSessionsPerUser and MaxSessionsGlobal bound the number of open
+	// ExecSessions (ADR-0074 §1b). One transaction per session bounds pinned
+	// database connections, but not the session objects and timers
+	// themselves — without these an authenticated caller could exhaust
+	// memory inside the idle window just by opening sessions.
+	//
+	// Unset means the defaults apply. An explicit 0 is a CONFIGURATION
+	// ERROR, not "unlimited": a default deployment is always bounded, and
+	// unbounded must never be something an operator gets by accident.
+	MaxSessionsPerUser int `toml:"max_sessions_per_user"`
+	MaxSessionsGlobal  int `toml:"max_sessions_global"`
+
+	// SessionIdleTimeout closes a session with no open transaction and no
+	// statement for this long (audited). It is what reaps sessions orphaned
+	// by a client that crashed without closing them.
+	SessionIdleTimeout Duration `toml:"session_idle_timeout"`
 }
 
 // TUI configures the standalone terminal UI (ADR-0057).
@@ -189,12 +207,47 @@ func Default() Config {
 		Meta:     Meta{Engine: "sqlite"},
 		History:  History{Enabled: true},
 		Security: Security{IPAllowlist: []string{"127.0.0.1/32", "::1/128"}},
-		Exec:     Exec{MaxStatementBytes: DefaultMaxStatementBytes},
+		Exec: Exec{
+			MaxStatementBytes:  DefaultMaxStatementBytes,
+			MaxSessionsPerUser: DefaultMaxSessionsPerUser,
+			MaxSessionsGlobal:  DefaultMaxSessionsGlobal,
+			SessionIdleTimeout: Duration(DefaultSessionIdleTimeout),
+		},
 	}
 }
 
 // DefaultMaxStatementBytes is the default [exec] max_statement_bytes.
 const DefaultMaxStatementBytes = 64 * 1024
+
+// Session bounds (ADR-0074 §1b). Positive, safe, and always applied.
+const (
+	DefaultMaxSessionsPerUser = 8
+	DefaultMaxSessionsGlobal  = 256
+	// DefaultSessionIdleTimeout closes an idle session, which also reaps the
+	// ones a crashed client left behind.
+	DefaultSessionIdleTimeout = 30 * time.Minute
+)
+
+// Duration is a TOML-friendly time.Duration: written as a string ("30m",
+// "90s") because an operator setting a timeout should not have to count
+// nanoseconds.
+type Duration time.Duration
+
+// UnmarshalText implements encoding.TextUnmarshaler.
+func (d *Duration) UnmarshalText(b []byte) error {
+	v, err := time.ParseDuration(string(b))
+	if err != nil {
+		return fmt.Errorf("%w: %q is not a duration (try \"30m\" or \"90s\"): %v", ErrInvalid, string(b), err)
+	}
+	*d = Duration(v)
+	return nil
+}
+
+// MarshalText implements encoding.TextMarshaler.
+func (d Duration) MarshalText() ([]byte, error) { return []byte(time.Duration(d).String()), nil }
+
+// Duration returns the value as a time.Duration.
+func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
 // DefaultPath returns the default config file location:
 // $XDG_CONFIG_HOME/autodb/config.toml.
@@ -274,6 +327,25 @@ func (c Config) validate() error {
 	}
 	if c.Exec.MaxStatementBytes <= 0 {
 		return fmt.Errorf("%w: exec.max_statement_bytes %d must be positive", ErrInvalid, c.Exec.MaxStatementBytes)
+	}
+	// An explicit 0 is refused rather than read as "unlimited" (ADR-0074
+	// §1b): a caller must not be able to remove a production-safety bound by
+	// writing what looks like a disable switch.
+	if c.Exec.MaxSessionsPerUser <= 0 {
+		return fmt.Errorf("%w: exec.max_sessions_per_user %d must be positive — 0 does not mean unlimited; "+
+			"remove the key to take the default of %d", ErrInvalid, c.Exec.MaxSessionsPerUser, DefaultMaxSessionsPerUser)
+	}
+	if c.Exec.MaxSessionsGlobal <= 0 {
+		return fmt.Errorf("%w: exec.max_sessions_global %d must be positive — 0 does not mean unlimited; "+
+			"remove the key to take the default of %d", ErrInvalid, c.Exec.MaxSessionsGlobal, DefaultMaxSessionsGlobal)
+	}
+	if c.Exec.MaxSessionsPerUser > c.Exec.MaxSessionsGlobal {
+		return fmt.Errorf("%w: exec.max_sessions_per_user %d exceeds exec.max_sessions_global %d — "+
+			"the per-user cap could never be reached", ErrInvalid, c.Exec.MaxSessionsPerUser, c.Exec.MaxSessionsGlobal)
+	}
+	if c.Exec.SessionIdleTimeout <= 0 {
+		return fmt.Errorf("%w: exec.session_idle_timeout %s must be positive — an unbounded idle window "+
+			"never reaps a session an abandoned client left open", ErrInvalid, c.Exec.SessionIdleTimeout.Duration())
 	}
 	switch c.Meta.Engine {
 	case "sqlite":

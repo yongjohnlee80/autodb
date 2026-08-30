@@ -1,0 +1,194 @@
+package exec
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/golib/dao"
+)
+
+// The session-scoped engine API (ADR-0074 §1, §1b).
+//
+// Authority is NEVER cached from OpenSession. Every call below re-resolves the
+// token and re-authorizes at the statement's own class, exactly as the
+// stateless path does — a session is a place to keep a transaction, never a
+// place to keep a permission. Ownership is re-checked on every call too, so a
+// grant removed between two statements takes effect on the second one.
+
+// OpenSession creates a session bound to one connection for one user.
+func (e *Engine) OpenSession(ctx context.Context, token string, connID int64, ip string) (SessionID, error) {
+	ident, err := e.auth.ValidateToken(ctx, token)
+	if err != nil {
+		return "", err
+	}
+	// Read is the floor for holding a session at all, and it is checked
+	// BEFORE the connection row is read — an ungranted caller must not learn
+	// whether a connection exists (the same rule the stateless path follows).
+	if _, err := e.auth.Authorize(ctx, token, connID, auth.ActionRead); err != nil {
+		return "", e.reject(ctx, ident, connID, ip, "", err)
+	}
+	if _, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get(); err != nil {
+		return "", e.reject(ctx, ident, connID, ip, "", auth.ErrDenied)
+	}
+
+	id, err := newSessionID()
+	if err != nil {
+		return "", err
+	}
+	// The session's context deliberately does NOT inherit the caller's
+	// cancellation: this RPC call is about to return, and the session has to
+	// outlive it. It keeps the values (tracing, deadline-free) and gets its
+	// own cancel, which is what a close uses to stop in-flight work.
+	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	s := &session{
+		id:       id,
+		userID:   ident.UserID(),
+		connID:   connID,
+		ctx:      sctx,
+		cancel:   cancel,
+		lastUsed: e.now(),
+	}
+	if err := e.sessions.admit(s); err != nil {
+		cancel()
+		// Cap refusals are audited: a caller hitting a limit repeatedly is
+		// either misbehaving or under-provisioned, and neither is visible
+		// without a record.
+		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "session_refused",
+			fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
+			return "", aerr
+		}
+		return "", err
+	}
+	if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "session_opened",
+		fmt.Sprintf("conn %d: session %s", connID, id)); aerr != nil {
+		e.closeSession(context.WithoutCancel(ctx), s, ip, "audit-failed")
+		return "", aerr
+	}
+	return id, nil
+}
+
+// CloseSession closes a session the caller owns.
+func (e *Engine) CloseSession(ctx context.Context, token string, id SessionID, ip string) error {
+	ident, err := e.auth.ValidateToken(ctx, token)
+	if err != nil {
+		return err
+	}
+	s, err := e.sessions.lookup(id, ident.UserID())
+	if err != nil {
+		return err
+	}
+	e.closeSession(ctx, s, ip, "client-closed")
+	return nil
+}
+
+// SessionExecute runs one statement on a session.
+//
+// Everything the stateless path does still happens — token, grant floor,
+// classification, profile admission, guard, audit — because a session changes
+// WHERE a statement runs, never WHETHER it is allowed to.
+func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID, sqlText, ip string) (*Result, error) {
+	ident, err := e.auth.ValidateToken(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	s, err := e.sessions.lookup(id, ident.UserID())
+	if err != nil {
+		return nil, err
+	}
+	// One in-flight statement per session. Claimed before any work so a
+	// second caller is refused rather than queued behind work it cannot see.
+	if err := s.begin(); err != nil {
+		return nil, err
+	}
+	defer s.finish()
+
+	// Re-check the state after claiming the slot. A close that began between
+	// the lookup and the claim has already cancelled the session context, and
+	// running a statement into it would be work nobody can observe the end of.
+	if h := e.sessions.hookAfterStateCheck; h != nil {
+		h()
+	}
+	if s.get() != sessOpen {
+		return nil, ErrSessionNotFound
+	}
+
+	// The statement runs on the SESSION's context, not the caller's: a client
+	// that hangs up mid-statement must not silently abandon work on a live
+	// production database. The caller's cancellation is honoured by the
+	// caller's own layer, not by tearing the session's work in half.
+	return e.run(s.ctx, token, s.connID, sqlText, ip, nil)
+}
+
+// closeSession performs the terminal transition exactly once.
+//
+// The CAS decides the owner. Everything after it — cancelling, joining the
+// in-flight statement, removing the registry entry, auditing — happens on the
+// winner's goroutine and on no other, so a session closed by the idle reaper
+// and by its client at the same moment is torn down once.
+func (e *Engine) closeSession(ctx context.Context, s *session, ip, reason string) {
+	if !s.beginClose() {
+		return // someone else owns the teardown
+	}
+	// No registry lock is held here: waitIdle can block on a statement, and
+	// the published lock order forbids waiting on session I/O under the
+	// registry's mutex.
+	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	s.waitIdle(waitCtx)
+	cancel()
+
+	e.sessions.remove(s)
+	s.finishClose()
+
+	if err := e.auth.Audit(context.WithoutCancel(ctx), s.userID, ip, "session_closed",
+		fmt.Sprintf("conn %d: session %s: %s", s.connID, s.id, reason)); err != nil {
+		// A failed audit must not leave the session half-closed; it is
+		// already out of the registry. Record it where an operator will see
+		// it rather than swallowing it.
+		e.logf("session %s closed but the audit record failed: %v", s.id, err)
+	}
+}
+
+// closeSessionsFor closes every session on a connection. It is the first step
+// of deleting or closing a connection: the pool must not go away underneath a
+// session that still believes it can run.
+func (e *Engine) closeSessionsFor(ctx context.Context, connID int64, ip, reason string) {
+	for _, s := range e.sessions.setDraining(connID) {
+		e.closeSession(ctx, s, ip, reason)
+	}
+}
+
+// CloseAllSessions closes every open session (engine shutdown).
+func (e *Engine) CloseAllSessions(ctx context.Context, reason string) {
+	for _, s := range e.sessions.snapshot() {
+		e.closeSession(ctx, s, "", reason)
+	}
+}
+
+// reapIdleSessions closes sessions idle beyond the timeout. It is called by
+// the engine's janitor and is exported to the package's tests through a clock
+// rather than a sleep.
+func (e *Engine) reapIdleSessions(ctx context.Context, now time.Time) int {
+	var n int
+	for _, s := range e.sessions.snapshot() {
+		if s.idleFor(now) >= e.sessionIdle {
+			e.closeSession(ctx, s, "", "idle-timeout")
+			n++
+		}
+	}
+	return n
+}
+
+// logf reports an operational problem that has no caller to return to.
+func (e *Engine) logf(format string, args ...any) {
+	if e.onLog != nil {
+		e.onLog(fmt.Sprintf(format, args...))
+	}
+}
+
+// compile-time proof the session path uses the same dao surface as the rest.
+var _ = dao.ErrNoRows
+var _ = errors.Is

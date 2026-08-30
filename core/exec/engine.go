@@ -37,6 +37,13 @@ const (
 	recordTimeout    = 10 * time.Second
 )
 
+// Session defaults, matching the config package's.
+const (
+	DefaultMaxSessionsPerUser = 8
+	DefaultMaxSessionsGlobal  = 256
+	DefaultSessionIdleTimeout = 30 * time.Minute
+)
+
 // DefaultMaxStatementBytes is the default execution size cap, matching
 // config.DefaultMaxStatementBytes. It is a refusal boundary rather than a
 // performance knob: an oversized statement is refused BEFORE it runs, so the
@@ -65,6 +72,15 @@ type Engine struct {
 	// maxStatementBytes is the execution size cap ([exec]
 	// max_statement_bytes).
 	maxStatementBytes int
+
+	// sessions is the ExecSession registry (ADR-0074 §1). It has its own
+	// mutex; see session.go for the published lock order.
+	sessions *sessionRegistry
+	// sessionIdle is how long a session may sit unused before it is reaped.
+	sessionIdle time.Duration
+	// onLog reports problems with no caller to return them to — a failed
+	// audit on a teardown path, say. nil discards.
+	onLog func(string)
 }
 
 // Option configures an Engine at New time.
@@ -98,6 +114,31 @@ func WithProfile(p Profile) Option { return func(e *Engine) { e.profile = p } }
 
 // WithMaxStatementBytes caps the size of one executable statement
 // (`[exec] max_statement_bytes`). A non-positive value keeps the default.
+// WithSessionLimits bounds open sessions per user and in total ([exec]
+// max_sessions_per_user / max_sessions_global). Non-positive values keep the
+// defaults; config validation is what refuses an explicit 0, so a caller
+// cannot disable the bound by passing one here either.
+func WithSessionLimits(perUser, global int) Option {
+	return func(e *Engine) {
+		if perUser > 0 && global > 0 {
+			e.sessions = newSessionRegistry(perUser, global)
+		}
+	}
+}
+
+// WithSessionIdleTimeout sets how long a session may sit unused before it is
+// reaped. A non-positive value keeps the default.
+func WithSessionIdleTimeout(d time.Duration) Option {
+	return func(e *Engine) {
+		if d > 0 {
+			e.sessionIdle = d
+		}
+	}
+}
+
+// WithLogger receives operational problems that have no caller to return to.
+func WithLogger(fn func(string)) Option { return func(e *Engine) { e.onLog = fn } }
+
 func WithMaxStatementBytes(n int) Option {
 	return func(e *Engine) {
 		if n > 0 {
@@ -113,6 +154,8 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		conns:   map[int64]dao.DataConn{},
 		history: true, maxRows: DefaultMaxRows, now: time.Now,
 		profile: ProfileV1Compat, maxStatementBytes: DefaultMaxStatementBytes,
+		sessions:    newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
+		sessionIdle: DefaultSessionIdleTimeout,
 	}
 	for _, o := range opts {
 		o(e)
@@ -122,6 +165,10 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 
 // Close releases every cached target connection.
 func (e *Engine) Close() error {
+	// Sessions first, for the same reason conn.delete closes them first: a
+	// pool closed under a live session is the undefined behaviour ADR-0074
+	// §1 closes.
+	e.CloseAllSessions(context.Background(), "engine-shutdown")
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	var errs []error
