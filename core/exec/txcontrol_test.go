@@ -180,6 +180,19 @@ func TestParseTxControl_MalformedInput(t *testing.T) {
 		{"rollback to nothing", "ROLLBACK TO"},
 		{"rollback to a name with a tail", "ROLLBACK TO sp1 extra"},
 		{"rollback to savepoint with a tail", "ROLLBACK TO SAVEPOINT sp1 extra"},
+		// A savepoint name is an IDENTIFIER, and punctuation is not one.
+		// PostgreSQL 17.6 answers both of these with `syntax error at or
+		// near ","`, so reporting them as a missing capability would send the
+		// caller hunting for a feature when what they have is a typo.
+		{"comma as a savepoint target", "ROLLBACK TO ,"},
+		{"comma after the SAVEPOINT keyword", "ROLLBACK TO SAVEPOINT ,"},
+		{"empty delimited identifier", `ROLLBACK TO ""`},
+		// A delimited identifier is lexed now, but it still names nothing
+		// outside a savepoint target.
+		{"quoted identifier as a transaction mode", `BEGIN "read only"`},
+		{"quoted identifier on an ending statement", `COMMIT "x"`},
+		// String literals are still not tokens here at all.
+		{"string literal", "ROLLBACK TO 'sp1'"},
 
 		// The DEFERRABLE combination rule, owned by golib-dao-0017 and
 		// enforced here by asking the DAO rather than restating it.
@@ -226,6 +239,17 @@ func TestParseTxControl_UnsupportedClauses(t *testing.T) {
 		// "savepoint" does not exist`, and succeeds when a savepoint by that
 		// name is open. So it is a capability refusal, not a malformed one.
 		{"savepoint named savepoint", "ROLLBACK TO SAVEPOINT", "SAVEPOINT"},
+		// Every one of these is a savepoint name PostgreSQL 17.6 accepts —
+		// verified by opening a savepoint so spelled and rolling back to it.
+		// They must reach the capability refusal, not be rejected as
+		// malformed on the way: a delimited identifier is how you spell a
+		// name with a space in it.
+		{"delimited identifier target", `ROLLBACK TO "My Point"`, "SAVEPOINT"},
+		{"delimited identifier after the keyword", `ROLLBACK TO SAVEPOINT "My Point"`, "SAVEPOINT"},
+		{"backtick-delimited target", "ROLLBACK TO SAVEPOINT `My Point`", "SAVEPOINT"},
+		{"doubled quote inside the name", `ROLLBACK TO "My ""Point"""`, "SAVEPOINT"},
+		{"dollar sign in the name", "ROLLBACK TO sp$1", "SAVEPOINT"},
+		{"non-ascii name", "ROLLBACK TO spné", "SAVEPOINT"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

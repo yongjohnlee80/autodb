@@ -105,32 +105,32 @@ func ParseTxControl(sqlText string) (TxControl, error) {
 		return TxControl{}, ErrEmptyStatement
 	}
 
-	tc := TxControl{Verb: toks[0]}
+	tc := TxControl{Verb: toks[0].text}
 	rest := toks[1:]
 
 	// The prefix is verb-specific. PostgreSQL's BEGIN and the end controls
 	// take an optional WORK or TRANSACTION; START REQUIRES TRANSACTION, and
 	// bare `START` and `START WORK` are both syntax errors. Stripping one
 	// optional noise word for every verb alike made those two parse.
-	switch toks[0] {
+	switch toks[0].text {
 	case "START":
-		if len(rest) == 0 || rest[0] != "TRANSACTION" {
+		if len(rest) == 0 || !rest[0].isKw("TRANSACTION") {
 			return TxControl{}, invalidTx("START", joinToks(rest), "START requires TRANSACTION")
 		}
 		rest = rest[1:]
 		tc.Action = TxBegin
 	case "BEGIN":
-		if len(rest) > 0 && (rest[0] == "WORK" || rest[0] == "TRANSACTION") {
+		if len(rest) > 0 && (rest[0].isKw("WORK") || rest[0].isKw("TRANSACTION")) {
 			rest = rest[1:]
 		}
 		tc.Action = TxBegin
 	case "COMMIT", "END":
-		if len(rest) > 0 && (rest[0] == "WORK" || rest[0] == "TRANSACTION") {
+		if len(rest) > 0 && (rest[0].isKw("WORK") || rest[0].isKw("TRANSACTION")) {
 			rest = rest[1:]
 		}
 		tc.Action = TxCommit
 	case "ROLLBACK":
-		if len(rest) > 0 && (rest[0] == "WORK" || rest[0] == "TRANSACTION") {
+		if len(rest) > 0 && (rest[0].isKw("WORK") || rest[0].isKw("TRANSACTION")) {
 			rest = rest[1:]
 		}
 		tc.Action = TxRollback
@@ -173,11 +173,11 @@ func ParseTxControl(sqlText string) (TxControl, error) {
 // never one inside an item. Dropping commas wherever they appeared made
 // `BEGIN , READ ONLY`, `BEGIN READ, ONLY` and `BEGIN READ ONLY,` all parse —
 // three statements the server rejects outright.
-func parseBeginOptions(toks []string, tc *TxControl) (unsupported error, err error) {
+func parseBeginOptions(toks []txToken, tc *TxControl) (unsupported error, err error) {
 	var sawAccess, sawIso, sawDeferrable bool
 	i := 0
 	for i < len(toks) {
-		if toks[i] == "," {
+		if toks[i].kind == tokComma {
 			return nil, invalidTx("option", joinToks(toks), "a comma may only separate two transaction modes")
 		}
 
@@ -191,9 +191,9 @@ func parseBeginOptions(toks []string, tc *TxControl) (unsupported error, err err
 		i += consumed
 
 		// A comma here must be followed by another mode.
-		if i < len(toks) && toks[i] == "," {
+		if i < len(toks) && toks[i].kind == tokComma {
 			i++
-			if i >= len(toks) || toks[i] == "," {
+			if i >= len(toks) || toks[i].kind == tokComma {
 				return nil, invalidTx("option", joinToks(toks), "a comma may only separate two transaction modes")
 			}
 		}
@@ -203,10 +203,10 @@ func parseBeginOptions(toks []string, tc *TxControl) (unsupported error, err err
 
 // parseBeginOption reads exactly one transaction mode and reports how many
 // tokens it consumed.
-func parseBeginOption(toks []string, tc *TxControl, sawAccess, sawIso, sawDeferrable *bool) (int, error, error) {
-	switch toks[0] {
-	case "ISOLATION":
-		if len(toks) < 3 || toks[1] != "LEVEL" {
+func parseBeginOption(toks []txToken, tc *TxControl, sawAccess, sawIso, sawDeferrable *bool) (int, error, error) {
+	switch {
+	case toks[0].isKw("ISOLATION"):
+		if len(toks) < 3 || !toks[1].isKw("LEVEL") {
 			return 0, nil, invalidTx("ISOLATION", joinToks(toks), "expected ISOLATION LEVEL <level>")
 		}
 		lvl, consumed, err := parseIsolation(toks[2:])
@@ -219,27 +219,27 @@ func parseBeginOption(toks []string, tc *TxControl, sawAccess, sawIso, sawDeferr
 		tc.Options.Isolation, *sawIso = lvl, true
 		return 2 + consumed, nil, nil
 
-	case "READ":
+	case toks[0].isKw("READ"):
 		if len(toks) < 2 {
 			return 0, nil, invalidTx("Access", "READ", "expected READ ONLY or READ WRITE")
 		}
 		var access dao.TxAccess
-		switch toks[1] {
-		case "ONLY":
+		switch {
+		case toks[1].isKw("ONLY"):
 			access = dao.TxReadOnly
-		case "WRITE":
+		case toks[1].isKw("WRITE"):
 			access = dao.TxReadWrite
 		default:
-			return 0, nil, invalidTx("Access", "READ "+toks[1], "expected READ ONLY or READ WRITE")
+			return 0, nil, invalidTx("Access", "READ "+toks[1].String(), "expected READ ONLY or READ WRITE")
 		}
 		if *sawAccess && tc.Options.Access != access {
-			return 0, nil, invalidTx("Access", "READ "+toks[1], "the access mode is set twice, to conflicting values")
+			return 0, nil, invalidTx("Access", "READ "+toks[1].String(), "the access mode is set twice, to conflicting values")
 		}
 		tc.Options.Access, *sawAccess = access, true
 		return 2, nil, nil
 
-	case "NOT":
-		if len(toks) < 2 || toks[1] != "DEFERRABLE" {
+	case toks[0].isKw("NOT"):
+		if len(toks) < 2 || !toks[1].isKw("DEFERRABLE") {
 			return 0, nil, invalidTx("Deferrable", joinToks(toks), "expected NOT DEFERRABLE")
 		}
 		if *sawDeferrable && tc.Options.Deferrable != dao.TxNotDeferrable {
@@ -248,76 +248,76 @@ func parseBeginOption(toks []string, tc *TxControl, sawAccess, sawIso, sawDeferr
 		tc.Options.Deferrable, *sawDeferrable = dao.TxNotDeferrable, true
 		return 2, nil, nil
 
-	case "DEFERRABLE":
+	case toks[0].isKw("DEFERRABLE"):
 		if *sawDeferrable && tc.Options.Deferrable != dao.TxDeferrable {
 			return 0, nil, invalidTx("Deferrable", "deferrable", "deferrability is set twice, to conflicting values")
 		}
 		tc.Options.Deferrable, *sawDeferrable = dao.TxDeferrable, true
 		return 1, nil, nil
 
-	case "WITH":
+	case toks[0].isKw("WITH"):
 		// MySQL's START TRANSACTION WITH CONSISTENT SNAPSHOT. Real,
 		// well-formed, and unmappable onto dao.TxOptions — so it is refused
 		// rather than dropped, because a caller who asked for a consistent
 		// snapshot and silently did not get one is worse off than one who
 		// was told no.
-		if len(toks) >= 3 && toks[1] == "CONSISTENT" && toks[2] == "SNAPSHOT" {
+		if len(toks) >= 3 && toks[1].isKw("CONSISTENT") && toks[2].isKw("SNAPSHOT") {
 			return 3, fmt.Errorf("%w: WITH CONSISTENT SNAPSHOT", ErrTxControlUnsupported), nil
 		}
 		return 0, nil, invalidTx("option", joinToks(toks), "unrecognized transaction option")
 	}
-	return 0, nil, invalidTx("option", toks[0], "unrecognized transaction option")
+	return 0, nil, invalidTx("option", toks[0].String(), "unrecognized transaction option")
 }
 
 // parseIsolation reads a level name, returning how many tokens it consumed —
 // two of the four are two words long, which is why it cannot be a map lookup.
-func parseIsolation(toks []string) (dao.TxIsolation, int, error) {
+func parseIsolation(toks []txToken) (dao.TxIsolation, int, error) {
 	if len(toks) == 0 {
 		return 0, 0, invalidTx("Isolation", "", "expected an isolation level")
 	}
-	switch toks[0] {
-	case "SERIALIZABLE":
+	switch {
+	case toks[0].isKw("SERIALIZABLE"):
 		return dao.TxSerializable, 1, nil
-	case "REPEATABLE":
-		if len(toks) > 1 && toks[1] == "READ" {
+	case toks[0].isKw("REPEATABLE"):
+		if len(toks) > 1 && toks[1].isKw("READ") {
 			return dao.TxRepeatableRead, 2, nil
 		}
 		return 0, 0, invalidTx("Isolation", "REPEATABLE", "expected REPEATABLE READ")
-	case "READ":
+	case toks[0].isKw("READ"):
 		if len(toks) > 1 {
-			switch toks[1] {
-			case "COMMITTED":
+			switch {
+			case toks[1].isKw("COMMITTED"):
 				return dao.TxReadCommitted, 2, nil
-			case "UNCOMMITTED":
+			case toks[1].isKw("UNCOMMITTED"):
 				return dao.TxReadUncommitted, 2, nil
 			}
-			return 0, 0, invalidTx("Isolation", "READ "+toks[1], "expected READ COMMITTED or READ UNCOMMITTED")
+			return 0, 0, invalidTx("Isolation", "READ "+toks[1].String(), "expected READ COMMITTED or READ UNCOMMITTED")
 		}
 		return 0, 0, invalidTx("Isolation", "READ", "expected READ COMMITTED or READ UNCOMMITTED")
 	}
-	return 0, 0, invalidTx("Isolation", toks[0], "unrecognized isolation level")
+	return 0, 0, invalidTx("Isolation", toks[0].String(), "unrecognized isolation level")
 }
 
 // parseEndOptions reads the tail of COMMIT / ROLLBACK / END. These take no
 // comma-separated list at all, so any comma here is a syntax error.
-func parseEndOptions(toks []string, tc *TxControl) error {
+func parseEndOptions(toks []txToken, tc *TxControl) error {
 	if len(toks) == 0 {
 		return nil
 	}
-	if toks[0] == "," {
+	if toks[0].kind == tokComma {
 		return invalidTx("option", joinToks(toks), "a transaction-ending statement takes no option list")
 	}
-	if tc.Action == TxRollback && toks[0] == "TO" {
+	if tc.Action == TxRollback && toks[0].isKw("TO") {
 		return parseSavepointTarget(toks)
 	}
-	if toks[0] != "AND" {
+	if !toks[0].isKw("AND") {
 		return invalidTx("option", joinToks(toks), "expected AND [NO] CHAIN")
 	}
 	switch {
-	case len(toks) == 2 && toks[1] == "CHAIN":
+	case len(toks) == 2 && toks[1].isKw("CHAIN"):
 		tc.Chain = true
 		return nil
-	case len(toks) == 3 && toks[1] == "NO" && toks[2] == "CHAIN":
+	case len(toks) == 3 && toks[1].isKw("NO") && toks[2].isKw("CHAIN"):
 		// The explicit spelling of the default. Recognized so it is not
 		// mistaken for garbage, and it changes nothing.
 		tc.Chain = false
@@ -335,20 +335,26 @@ func parseEndOptions(toks []string, tc *TxControl) error {
 // "savepoint" (verified on 17.6 — it answers `savepoint "savepoint" does not
 // exist`, and succeeds when one by that name is open). So a single word after
 // TO is always the name, whatever it spells.
-func parseSavepointTarget(toks []string) error {
+func parseSavepointTarget(toks []txToken) error {
 	rest := toks[1:] // past TO
-	var name string
+	var name txToken
 	switch {
+	case len(rest) == 0:
+		return invalidTx("ROLLBACK TO", "end of statement", "expected a savepoint name")
 	case len(rest) == 1:
 		name = rest[0]
-	case len(rest) == 2 && rest[0] == "SAVEPOINT":
+	case len(rest) == 2 && rest[0].isKw("SAVEPOINT"):
 		name = rest[1]
-	case len(rest) == 0:
-		return invalidTx("ROLLBACK TO", "", "expected a savepoint name")
 	default:
 		return invalidTx("ROLLBACK TO", joinToks(rest), "expected ROLLBACK TO [SAVEPOINT] <name>")
 	}
-	_ = name // the target is well-formed; which one it names does not change the answer
+	// A name is an identifier — bare or delimited — and never punctuation.
+	// `ROLLBACK TO ,` is a syntax error to PostgreSQL, so reporting it as a
+	// missing capability would send the caller looking for a feature when
+	// what they have is a typo.
+	if !name.isName() {
+		return invalidTx("ROLLBACK TO", name.String(), "a savepoint name must be an identifier")
+	}
 	return fmt.Errorf("%w: ROLLBACK TO SAVEPOINT (savepoints are not implemented)",
 		ErrTxControlUnsupported)
 }
@@ -358,8 +364,6 @@ func parseSavepointTarget(toks []string) error {
 func invalidTx(option, value, reason string) error {
 	return &dao.ErrTxOptionInvalid{Option: option, Value: value, Reason: reason}
 }
-
-func joinToks(toks []string) string { return strings.Join(toks, " ") }
 
 // leadingWord returns the statement's first word, uppercased, skipping
 // leading whitespace and comments. It reads only that far: deciding whether
@@ -395,12 +399,53 @@ func leadingWord(sqlText string) (string, error) {
 	return "", nil
 }
 
-// txTokens splits a control statement into upper-cased words and comma
-// tokens, dropping comments and one trailing terminator.
+// txToken is one lexical token of a transaction-control statement.
 //
-// The comma is a TOKEN, not noise. Skipping it wherever it appeared meant the
-// grammar could not tell `BEGIN ISOLATION LEVEL SERIALIZABLE, READ ONLY`
-// (valid) from `BEGIN READ, ONLY` (a syntax error the server rejects).
+// The KIND matters, not just the text. A comma is not a word, and a quoted
+// identifier is not a keyword — collapsing them into one string list made
+// `ROLLBACK TO ,` look like a rollback to a savepoint called "," (PostgreSQL
+// calls it a syntax error), while a perfectly good `ROLLBACK TO "My Point"`
+// could not be lexed at all.
+type txToken struct {
+	kind txTokKind
+	// text is upper-cased for keywords, because the grammar matches on
+	// keywords; a quoted identifier keeps its exact inner text, because it
+	// names something and case is part of the name.
+	text string
+}
+
+type txTokKind int
+
+const (
+	tokWord txTokKind = iota
+	tokComma
+	tokQuotedIdent
+)
+
+// isKw reports whether t is the keyword s.
+func (t txToken) isKw(s string) bool { return t.kind == tokWord && t.text == s }
+
+// isName reports whether t can name a savepoint: a bare identifier or a
+// quoted one. A comma cannot.
+func (t txToken) isName() bool { return t.kind == tokWord || t.kind == tokQuotedIdent }
+
+func (t txToken) String() string {
+	if t.kind == tokQuotedIdent {
+		return `"` + t.text + `"`
+	}
+	return t.text
+}
+
+func joinToks(toks []txToken) string {
+	parts := make([]string, len(toks))
+	for i, t := range toks {
+		parts[i] = t.String()
+	}
+	return strings.Join(parts, " ")
+}
+
+// txTokens splits a control statement into keywords, commas and quoted
+// identifiers, dropping comments and one trailing terminator.
 //
 // After the terminating `;` it accepts whitespace AND COMMENTS, and only
 // another content token is a second statement. That is not a nicety: the
@@ -409,12 +454,22 @@ func leadingWord(sqlText string) (string, error) {
 // consume its own splitter's output — 153 of the 756 transaction controls in
 // the LM deployment corpus, which is precisely the atomic-script workload.
 //
-// It refuses what it cannot mean rather than skipping it: a quote or a paren
-// in a transaction-control statement is not a clause this parser silently
-// ignores, it is a sign the input is not what the caller thinks it is.
-func txTokens(sqlText string) ([]string, error) {
-	var out []string
+// It refuses what it cannot mean rather than skipping it: a string literal or
+// a paren in a transaction-control statement is not a clause this parser
+// silently ignores, it is a sign the input is not what the caller thinks it
+// is. A DELIMITED IDENTIFIER is different — it is how PostgreSQL spells a
+// savepoint name with a space in it — so it is lexed, and the grammar decides
+// whether a name is allowed where it appeared.
+func txTokens(sqlText string) ([]txToken, error) {
+	var out []txToken
 	terminated := false
+	emit := func(t txToken) error {
+		if terminated {
+			return ErrMultiStatement
+		}
+		out = append(out, t)
+		return nil
+	}
 	n := len(sqlText)
 	for i := 0; i < n; {
 		c := sqlText[i]
@@ -438,28 +493,59 @@ func txTokens(sqlText string) ([]string, error) {
 			terminated = true
 			i++
 		case isWordStart(c):
-			if terminated {
-				return nil, ErrMultiStatement
-			}
 			j := i + 1
 			for j < n && isWordChar(sqlText[j]) {
 				j++
 			}
-			out = append(out, strings.ToUpper(sqlText[i:j]))
+			if err := emit(txToken{kind: tokWord, text: strings.ToUpper(sqlText[i:j])}); err != nil {
+				return nil, err
+			}
 			i = j
 		case c == ',':
-			if terminated {
-				return nil, ErrMultiStatement
+			if err := emit(txToken{kind: tokComma, text: ","}); err != nil {
+				return nil, err
 			}
-			out = append(out, ",")
 			i++
+		case c == '"' || c == '`':
+			// A delimited identifier: `"` in PostgreSQL/SQLite, backticks in
+			// MySQL. Doubling the delimiter escapes it.
+			name, j, err := scanDelimitedIdent(sqlText, i, c)
+			if err != nil {
+				return nil, err
+			}
+			if err := emit(txToken{kind: tokQuotedIdent, text: name}); err != nil {
+				return nil, err
+			}
+			i = j
 		default:
 			if terminated {
 				return nil, ErrMultiStatement
 			}
 			return nil, invalidTx("statement", string(c),
-				"a transaction-control statement has no quoted, parenthesized or operator text")
+				"a transaction-control statement has no string-literal, parenthesized or operator text")
 		}
 	}
 	return out, nil
+}
+
+// scanDelimitedIdent reads a quoted identifier opened at s[i] and returns its
+// unescaped inner text and the index after the closing delimiter.
+func scanDelimitedIdent(s string, i int, quote byte) (string, int, error) {
+	var b strings.Builder
+	for j := i + 1; j < len(s); j++ {
+		if s[j] != quote {
+			b.WriteByte(s[j])
+			continue
+		}
+		if j+1 < len(s) && s[j+1] == quote {
+			b.WriteByte(quote)
+			j++
+			continue
+		}
+		if b.Len() == 0 {
+			return "", 0, invalidTx("identifier", string(quote)+string(quote), "an empty delimited identifier names nothing")
+		}
+		return b.String(), j + 1, nil
+	}
+	return "", 0, fmt.Errorf("%w: unterminated quoted identifier", ErrMalformedStatement)
 }
