@@ -830,6 +830,7 @@ end
 
 M.register_host = host.register_host
 M.unregister_host = host.unregister_host
+M.has_host = host.has_host
 M.open = host.open
 M.focus = host.focus
 M.toggle = host.toggle

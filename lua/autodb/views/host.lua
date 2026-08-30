@@ -336,6 +336,18 @@ function M.toggle(cb)
   return M.open(cb)
 end
 
+---has_host reports whether a provider is currently registered.
+---
+---The registry is the single source of truth for "am I advertising
+---myself as a host". A host that keeps its own parallel boolean will
+---desynchronise the moment any entry point registers without updating
+---it (lector impl-r2 MF1) — so ask here instead of remembering.
+---@param id string
+---@return boolean
+function M.has_host(id)
+  return type(id) == "string" and providers[id] ~= nil
+end
+
 ---owner reports the id of the host currently displaying the drawer.
 ---@return string|nil
 function M.owner()

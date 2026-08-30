@@ -200,6 +200,58 @@ do
   require("autodb.panel")._reset_for_tests()
 end
 
+print("\n[C6] late load — the safety net must leave state authoritative")
+do
+  hostreg._reset_for_tests()
+  require("autodb.panel")._reset_for_tests()
+  require("autodb.panel").setup()
+  -- auto-finder came up with dbase configured; registration then happened
+  -- through the section's OWN late-load safety net rather than through
+  -- _sync_dbase_host. A local "am I registered" boolean went stale here,
+  -- and the next slot mutation either tore down a live drawer or left a
+  -- dead provider behind (lector impl-r2 MF1).
+  require("auto-finder").setup({ sections = { "config", "files", "dbase" } })
+  local dbase = require("auto-finder.views.dbase")
+  hostreg._reset_for_tests()                    -- simulate "autodb arrived late"
+  require("autodb.panel").setup()
+  ok("C6: after a registry reset the facade is not registered",
+    dbase.is_registered() == false)
+
+  -- The safety net registers as a side effect of a direct focus.
+  local panel = require("auto-core").ui.panel.get("auto-finder")
+  local w = panel and panel.winid or vim.api.nvim_get_current_win()
+  dbase.get_buffer(w)
+  ok("C6: the safety net registered the provider", dbase.is_registered() == true)
+  ok("C6: ...and auto-finder is the owner", drawer.owner() == "auto-finder",
+    tostring(drawer.owner()))
+  local view = drawer.mounted_view()
+  local buf = view and view:bufnr()
+  local subs = view and view._sub_count()
+
+  -- Survivor: an unrelated slot add must not disturb it, even though the
+  -- registration came from the safety net rather than from setup.
+  require("auto-finder")._rebuild_section_registry({ "config", "files", "dbase", "repos" },
+    { no_force_open = true })
+  ok("C6: an unrelated slot add leaves the SAME view", drawer.mounted_view() == view
+    and drawer.owner() == "auto-finder", tostring(drawer.owner()))
+  ok("C6: ...its buffer and subscriptions intact",
+    view and view:bufnr() == buf and view._sub_count() == subs,
+    tostring(view and view:bufnr()) .. "/" .. tostring(view and view._sub_count()))
+
+  -- Removal must actually withdraw, so the drawer falls back rather than
+  -- failing against a section that no longer exists.
+  require("auto-finder")._rebuild_section_registry({ "config", "files" },
+    { no_force_open = true })
+  ok("C6: removing dbase withdraws the provider", dbase.is_registered() == false)
+  local oo, ov
+  drawer.open(function(o, v) oo, ov = o, v end)
+  ok("C6: and the next open FALLS BACK to autodb, not host_failed",
+    oo == true and ov.host == "autodb", vim.inspect(ov))
+
+  hostreg._reset_for_tests()
+  require("autodb.panel")._reset_for_tests()
+end
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 if fail > 0 then
   print("COMPOSITION-COMPLETE FAIL")
