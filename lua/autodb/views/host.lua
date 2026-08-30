@@ -32,6 +32,15 @@ local log = require("autodb.log")
 
 local M = {}
 
+-- autodb's own self-host is the guaranteed floor: it is the reason a
+-- standalone install always has somewhere to put the drawer. Both halves
+-- of its identity are reserved, because losing either one loses the
+-- guarantee -- a foreign provider that took priority 0 would make
+-- autodb.panel.setup() fail and leave a user with no fallback at all
+-- (lector impl-r0 MF2).
+local SELF_HOST_ID = "autodb"
+local SELF_HOST_PRIORITY = 0
+
 ---@class autodb.DrawerHostProvider
 ---@field id        string
 ---@field priority  integer
@@ -129,8 +138,27 @@ function M.register_host(p)
       return false, err("invalid", "drawer host '" .. p.id .. "' is missing " .. fn .. "()")
     end
   end
-  if type(p.priority) ~= "number" then
-    return false, err("invalid", "drawer host '" .. p.id .. "' needs a numeric priority")
+  -- A finite integer: NaN and the infinities break every comparison the
+  -- winner search makes, and a fractional priority is a tie waiting to
+  -- be argued about.
+  if type(p.priority) ~= "number" or p.priority ~= p.priority
+    or p.priority == math.huge or p.priority == -math.huge
+    or p.priority ~= math.floor(p.priority) then
+    return false, err("invalid",
+      "drawer host '" .. p.id .. "' needs a finite integer priority, got " .. tostring(p.priority))
+  end
+  -- The reserved pair. Either half alone is a defect: a foreign provider
+  -- at priority 0 displaces the guaranteed fallback, and a foreign
+  -- provider calling itself "autodb" would be adopted as it.
+  if p.id == SELF_HOST_ID and p.priority ~= SELF_HOST_PRIORITY then
+    return false, err("invalid",
+      "the id '" .. SELF_HOST_ID .. "' is reserved for autodb's self-host at priority "
+        .. SELF_HOST_PRIORITY)
+  end
+  if p.priority == SELF_HOST_PRIORITY and p.id ~= SELF_HOST_ID then
+    return false, err("duplicate_priority",
+      "priority " .. SELF_HOST_PRIORITY .. " is reserved for autodb's self-host ('"
+        .. SELF_HOST_ID .. "'); '" .. p.id .. "' must pick another")
   end
   if type(p.profile) ~= "table" then
     return false, err("invalid", "drawer host '" .. p.id .. "' needs a profile")

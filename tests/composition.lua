@@ -65,7 +65,18 @@ do
   ok("C2: auto-finder's dbase facade loads with autodb present", dbase ~= nil)
   ok("C2: the facade reports autodb as available", dbase._available_for_tests() == true)
 
-  ok("C2: the facade registers as a drawer host", dbase.register() == true)
+  -- REGISTRATION IS NOT CALLED HERE. auto-finder.setup() must have done
+  -- it, because a user opens the drawer without visiting the section
+  -- first. Calling dbase.register() by hand is what masked this in the
+  -- first submission (lector impl-r0 MF1).
+  ok("C2: setup registered the facade as a drawer host, unprompted",
+    drawer._host_for_tests ~= nil and (function()
+      -- the winner for an open must be auto-finder, not the self-host
+      local seen
+      drawer.open(function(o, v) seen = o and v.host or nil end)
+      local owner = drawer.owner()
+      return owner == "auto-finder" and seen == "auto-finder"
+    end)(), tostring(drawer.owner()))
 
   -- auto-finder outranks autodb's self-host, so an open goes to it.
   local oo, ov
@@ -119,9 +130,12 @@ do
   local self_buf = self_view:bufnr()
   ok("C4: the self-hosted drawer has a buffer", self_buf ~= nil)
 
-  -- Now auto-finder gains dbase (the `slot add dbase` moment).
-  local dbase = require("auto-finder.views.dbase")
-  dbase.register()
+  -- Now auto-finder gains dbase, through the REAL slot path.
+  require("auto-finder").setup({ sections = { "config", "files" } })
+  ok("C4: without a dbase slot, auto-finder is not a host",
+    drawer.owner() == nil or drawer.owner() == "autodb")
+  require("auto-finder")._rebuild_section_registry({ "config", "files", "dbase" },
+    { no_force_open = true })
   drawer.open(function(o, v) oo, ov = o, v end)
   ok("C4: the higher-priority host takes over", oo == true and ov.host == "auto-finder",
     vim.inspect(ov))
@@ -136,8 +150,10 @@ do
   ok("C4: no autodb panel is left open", panel_mod.get("autodb") == nil
     or not panel_mod.get("autodb"):_is_open())
 
-  -- ...and back again: dbase is removed from the workspace.
-  drawer.unregister_host("auto-finder")
+  -- ...and back again: dbase is removed from the workspace, through the
+  -- REAL rebuild rather than a hand-rolled unregister_host.
+  require("auto-finder")._rebuild_section_registry({ "config", "files" },
+    { no_force_open = true })
   ok("C4: unregistering the OWNER tears it down", drawer.owner() == nil)
   ok("C4: and disposes its view", af_view:bufnr() == nil and af_view._sub_count() == 0)
   drawer.open(function(o, v) oo, ov = o, v end)

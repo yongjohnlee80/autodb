@@ -31,15 +31,27 @@ M._ensure_connected = nil
 ---Every command funnels through here so "not connected" is handled in
 ---ONE place. A command that checked for itself would each invent its own
 ---answer to "and what should the user see now?".
-local function _connected(fn)
+---_connected runs fn once a session is live, and otherwise REPORTS.
+---
+---It used to log the failure and return, which left the caller's
+---callback dangling forever: `run_sql(sql, cb)` never called cb when
+---the daemon could not be reached (lector impl-r0 MF3). An operation
+---that cannot complete has to say so, or a caller cannot sequence
+---anything after it.
+---@param fn fun()
+---@param on_fail fun(err: autodb.ApiError)?
+local function _connected(fn, on_fail)
+  local function fail(code, msg, cause)
+    log.notify(msg, { level = "error", component = "commands" })
+    if on_fail then on_fail({ code = code, message = msg, cause = cause }) end
+  end
   if session.is_ready() then return fn() end
   if not M._ensure_connected then
-    return log.notify("autodb is not set up — call require('autodb').setup()",
-      { level = "warn", component = "commands" })
+    return fail("invalid", "autodb is not set up — call require('autodb').setup()")
   end
   M._ensure_connected(function(ok, err)
     if not ok then
-      return log.notify(tostring(err), { level = "error", component = "commands" })
+      return fail("not_connected", tostring(err), err)
     end
     fn()
   end)
@@ -50,15 +62,22 @@ end
 ---Requirement 12: executing with nothing selected prompts rather than
 ---failing. The prompt is the same one `<leader>Dc` opens, so the user
 ---learns one flow instead of two.
-local function _with_connection(fn)
+---@param fn fun(conn: table)
+---@param on_fail fun(err: autodb.ApiError)?
+local function _with_connection(fn, on_fail)
   _connected(function()
     local conn = session.connection()
     if conn then return fn(conn) end
     log.info("commands", "no connection selected; prompting")
-    M.choose_connection(function(chosen)
-      if chosen then fn(chosen) end
+    M.choose_connection(function(chosen, cerr)
+      if chosen then return fn(chosen) end
+      -- Declining the prompt is a cancellation; a picker that FAILED
+      -- reports its own error and must not be relabelled (MF3).
+      if on_fail then
+        on_fail(cerr or { code = "cancelled", message = "no connection chosen" })
+      end
     end)
-  end)
+  end, on_fail)
 end
 
 -- ─── running SQL ──────────────────────────────────────────────
@@ -138,7 +157,7 @@ function M.run_sql(sql, cb)
         })
       end
     end))
-  end)
+  end, function(e) if cb then cb(false, e) end end)
 end
 
 ---run_buffer runs the current buffer (requirement 9).
@@ -206,10 +225,12 @@ function M.choose_note(cb)
         local path, err = notes.create(ws.id, name, "")
         if not path then
           log.notify(tostring(err), { level = "error", component = "commands" })
-          return cb and cb(nil)
+          return cb and cb(nil, { code = "daemon", message = tostring(err), cause = err })
         end
         M._open_note_file(path)
-        if cb then cb(path) end
+        -- A TABLE, per ADR-0078 §3.6 — a bare string cannot grow a field
+        -- and gives a caller nothing to branch on.
+        if cb then cb({ path = path }) end
       end)
     end
     if #items == 0 then return create_new() end
@@ -227,7 +248,7 @@ function M.choose_note(cb)
       if not choice then return cb and cb(nil) end
       if choice == CREATE then return create_new() end
       M._open_note_file(choice.path)
-      if cb then cb(choice.path) end
+      if cb then cb({ path = choice.path }) end
     end)
   end
 
@@ -239,13 +260,13 @@ function M.choose_note(cb)
       if err then
         log.notify("cannot list workspaces: " .. tostring(err.message),
           { level = "error", component = "commands" })
-        return cb and cb(nil)
+        return cb and cb(nil, { code = "daemon", message = tostring(err.message), cause = err })
       end
       spaces = spaces or {}
       if #spaces == 0 then
         log.notify("no workspaces yet — press " .. keys.WORKSPACE .. " to create one",
           { level = "warn", component = "commands" })
-        return cb and cb(nil)
+        return cb and cb(nil, { code = "invalid", message = "no workspaces yet" })
       end
       if #spaces == 1 then return in_ws(spaces[1]) end
       vim.ui.select(spaces, {
@@ -272,7 +293,7 @@ function M.choose_workspace(cb)
       if err then
         log.notify("cannot list workspaces: " .. tostring(err.message),
           { level = "error", component = "commands" })
-        return cb and cb(nil)
+        return cb and cb(nil, { code = "daemon", message = tostring(err.message), cause = err })
       end
       spaces = spaces or {}
 
@@ -284,7 +305,7 @@ function M.choose_workspace(cb)
             if cerr then
               log.notify("cannot create workspace: " .. tostring(cerr.message),
                 { level = "error", component = "commands" })
-              return cb and cb(nil)
+              return cb and cb(nil, { code = "daemon", message = tostring(cerr.message), cause = cerr })
             end
             -- workspace.create returns the new id; a fresh workspace has
             -- no connections yet. Select it and refresh the explorer.
@@ -333,13 +354,13 @@ function M.choose_connection(cb)
       if err then
         log.notify("cannot list workspaces: " .. tostring(err.message),
           { level = "error", component = "commands" })
-        return cb and cb(nil)
+        return cb and cb(nil, { code = "daemon", message = tostring(err.message), cause = err })
       end
       spaces = spaces or {}
       if #spaces == 0 then
         log.notify("no workspaces yet — press " .. keys.WORKSPACE .. " to create one",
           { level = "warn", component = "commands" })
-        return cb and cb(nil)
+        return cb and cb(nil, { code = "invalid", message = "no workspaces yet" })
       end
 
       local function pick_conn(ws)
@@ -371,7 +392,7 @@ function M.choose_connection(cb)
                     if cerr then
                       log.notify("cannot create connection: " .. tostring(cerr.message),
                         { level = "error", component = "commands" })
-                      return cb and cb(nil)
+                      return cb and cb(nil, { code = "daemon", message = tostring(cerr.message), cause = cerr })
                     end
                     session.authed("workspace.attach", { ws.id, conn_id },
                       session.guarded(function(_, aerr)
@@ -513,16 +534,20 @@ function M.login(cb)
         log.notify(tostring(err), { level = "error", component = "commands" })
       end
       if cb then
-        if ok then cb(true, nil)
-        else cb(false, { code = "not_connected", message = tostring(err), cause = err }) end
+        if ok then
+          cb(true, { user = require("autodb").signed_in_user() })
+        else
+          cb(false, { code = "not_connected", message = tostring(err), cause = err })
+        end
       end
     end, { force = true })
   end
   -- Nothing live to sign in to. The ordinary connect path already ends
   -- in a login prompt, so reuse it rather than growing a second one.
   _connected(function()
-    if cb then cb(true, nil) end
-  end)
+    -- MF4: the documented success value is { user }, not nil.
+    if cb then cb(true, { user = require("autodb").signed_in_user() }) end
+  end, function(e) if cb then cb(false, e) end end)
 end
 
 ---history opens the script-history modal (requirement 8).
@@ -537,7 +562,7 @@ function M.history(cb)
     log.notify("the history modal is not available in this build",
       { level = "warn", component = "commands" })
     if cb then cb(false, { code = "invalid", message = "history modal unavailable" }) end
-  end)
+  end, function(e) if cb then cb(false, e) end end)
 end
 
 -- ─── wiring ───────────────────────────────────────────────────
