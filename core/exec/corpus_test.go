@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -80,9 +81,87 @@ func TestCorpusReplay(t *testing.T) {
 				t.Errorf("%s statement %d: classified as verb=%q class=%q", name, i+1, st.Verb, st.Class)
 				continue
 			}
+
+			// Per-statement agreement with an INDEPENDENT reading of the
+			// text. leadingWord does not consult the classifier's verb
+			// tables, its paren tracking or its class ranks, so when the two
+			// disagree one of them is wrong — this is what catches a
+			// classification driven by an identifier rather than by a verb.
+			lead, lerr := leadingWord(p)
+			if lerr != nil {
+				t.Errorf("%s statement %d: %v", name, i+1, lerr)
+				continue
+			}
+			switch lead {
+			case "WITH", "EXPLAIN":
+				// The classifier deliberately reports the verb these
+				// introduce, not the introducer itself.
+			default:
+				if st.Verb != lead {
+					t.Errorf("%s statement %d: classified verb %q but the statement starts with %q",
+						name, i+1, st.Verb, lead)
+				}
+				if want, ok := independentClass(lead); ok && len(st.Nested) == 0 && st.Class != want {
+					t.Errorf("%s statement %d (%s): class %q, want %q from the leading verb alone",
+						name, i+1, lead, st.Class, want)
+				}
+			}
+
+			// And the gate decision, per statement, with its refusal
+			// identity — not merely tallied.
+			decision, derr := gateDecision(st)
+			switch decision {
+			case "refused:control":
+				if st.Class != ClassControl {
+					t.Errorf("%s statement %d: refused as control but classified %q", name, i+1, st.Class)
+				}
+				if !errors.Is(derr, ErrStatementUnsupported) {
+					t.Errorf("%s statement %d: control refusal is %v, want ErrStatementUnsupported", name, i+1, derr)
+				}
+				if !strings.Contains(derr.Error(), st.Verb) {
+					t.Errorf("%s statement %d: refusal %q does not name %q", name, i+1, derr, st.Verb)
+				}
+			case "refused:nested-mutation":
+				if len(st.Nested) == 0 {
+					t.Errorf("%s statement %d: refused as a nested mutation with none recorded", name, i+1)
+				}
+				if !errors.Is(derr, ErrStatementUnsupported) {
+					t.Errorf("%s statement %d: nested refusal is %v, want ErrStatementUnsupported", name, i+1, derr)
+				}
+			case "refused:where-guard":
+				if !errors.Is(derr, ErrNoWhere) {
+					t.Errorf("%s statement %d: guard refusal is %v, want ErrNoWhere", name, i+1, derr)
+				}
+				// Independently: a refused top-level mutation really has no
+				// WHERE OF ITS OWN. Searching the text for the word is not
+				// that question and gets it backwards — this corpus is full
+				// of full-table backfills like
+				//
+				//   UPDATE asset SET label_id =
+				//       (SELECT id FROM label WHERE tagus_id = entity_id)
+				//
+				// which touch every row of `asset` while containing a WHERE
+				// that belongs to the subquery. Refusing those is the guard
+				// working; admitting them is the bug it exists to prevent.
+				// So the second opinion tracks depth too, by its own scan.
+				if len(st.Nested) == 0 && whereAtTopLevel(p) {
+					t.Errorf("%s statement %d: guard refused a mutation that HAS a top-level WHERE:\n%s",
+						name, i+1, p)
+				}
+			case "admitted":
+				if st.Class == ClassControl {
+					t.Errorf("%s statement %d: a control statement was admitted under v1compat", name, i+1)
+				}
+				if derr != nil {
+					t.Errorf("%s statement %d: admitted with error %v", name, i+1, derr)
+				}
+			default:
+				t.Errorf("%s statement %d: unexpected gate decision %q", name, i+1, decision)
+			}
+
 			byClass[st.Class]++
 			byVerb[st.Verb]++
-			decisions[gateDecision(st)]++
+			decisions[decision]++
 		}
 	}
 
@@ -125,17 +204,98 @@ func TestCorpusReplay(t *testing.T) {
 }
 
 // gateDecision reports what the v1compat gate does with a statement, as a
-// short stable label — the "expected gate decision per statement" the ADR
-// asks the replay to assert.
-func gateDecision(st Statement) string {
+// short stable label, together with the refusal itself — the caller asserts
+// the identity as well as the label, because "it was refused" and "it was
+// refused for the stated reason" are different claims.
+func gateDecision(st Statement) (string, error) {
 	if err := ProfileV1Compat.admit(st); err != nil {
 		if st.Class == ClassControl {
-			return "refused:control"
+			return "refused:control", err
 		}
-		return "refused:nested-mutation"
+		return "refused:nested-mutation", err
 	}
 	if err := guardWhere(st); err != nil {
-		return "refused:where-guard"
+		return "refused:where-guard", err
 	}
-	return "admitted"
+	return "admitted", nil
+}
+
+// whereAtTopLevel reports whether the token WHERE appears at paren depth 0.
+//
+// It is a second implementation on purpose: it shares no state, no tables and
+// no code path with the classifier, so when the two agree about a statement
+// that agreement means something. It only needs to be right about depth,
+// quoting and comments — not about verbs.
+func whereAtTopLevel(sql string) bool {
+	depth := 0
+	n := len(sql)
+	for i := 0; i < n; {
+		c := sql[i]
+		switch {
+		case c == '-' && i+1 < n && sql[i+1] == '-':
+			for i < n && sql[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < n && sql[i+1] == '*':
+			end := strings.Index(sql[i+2:], "*/")
+			if end < 0 {
+				return false
+			}
+			i += 2 + end + 2
+		case c == '\'' || c == '"':
+			q := c
+			i++
+			for i < n {
+				if sql[i] == q {
+					if i+1 < n && sql[i+1] == q {
+						i += 2
+						continue
+					}
+					i++
+					break
+				}
+				i++
+			}
+		case c == '(':
+			depth++
+			i++
+		case c == ')':
+			if depth > 0 {
+				depth--
+			}
+			i++
+		case isWordStart(c):
+			j := i + 1
+			for j < n && isWordChar(sql[j]) {
+				j++
+			}
+			if depth == 0 && strings.EqualFold(sql[i:j], "WHERE") {
+				return true
+			}
+			i = j
+		default:
+			i++
+		}
+	}
+	return false
+}
+
+// independentClass maps a leading verb to its authorization class WITHOUT
+// consulting the classifier's own tables, so a corpus statement's class is
+// checked against a second opinion rather than against the code that
+// produced it.
+func independentClass(verb string) (Class, bool) {
+	switch verb {
+	case "SELECT", "VALUES", "TABLE", "SHOW":
+		return ClassRead, true
+	case "INSERT", "UPDATE", "DELETE", "REPLACE", "MERGE":
+		return ClassWrite, true
+	case "CREATE", "ALTER", "DROP", "TRUNCATE", "COMMENT", "GRANT", "REVOKE",
+		"VACUUM", "REINDEX", "ANALYZE", "REFRESH", "RENAME":
+		return ClassDDL, true
+	case "BEGIN", "START", "COMMIT", "END", "ROLLBACK", "SET", "LOCK", "DO",
+		"CALL", "SAVEPOINT", "RELEASE", "COPY", "PRAGMA":
+		return ClassControl, true
+	}
+	return "", false
 }

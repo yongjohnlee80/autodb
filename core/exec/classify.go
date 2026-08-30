@@ -206,7 +206,11 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 		sawWord bool // its first word token has been consumed
 	}
 	var parens []parenState
-	lastWord := ""
+	// The last three words, most recent first. A CTE body is introduced by
+	// AS, and since PostgreSQL 12 also by AS MATERIALIZED and AS NOT
+	// MATERIALIZED — a hint that changes planning, not the fact that the
+	// parens hold a statement.
+	var w1, w2, w3 string
 	var nested []NestedMutation
 	maxClass := Class("")
 	escalate := func(c Class) {
@@ -232,7 +236,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			maxClass = ""
 			nested = nil
 			parens = parens[:0]
-			lastWord = ""
+			w1, w2, w3 = "", "", ""
 			st = Statement{}
 		}
 		sawContent = true
@@ -333,8 +337,8 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			if err := content(); err != nil {
 				return st, parts, err
 			}
-			parens = append(parens, parenState{body: lastWord == "AS"})
-			lastWord = ""
+			parens = append(parens, parenState{body: opensStatementBody(w1, w2, w3)})
+			w1, w2, w3 = "", "", ""
 			depth++
 			i++
 
@@ -348,7 +352,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			if len(parens) > 0 {
 				parens = parens[:len(parens)-1]
 			}
-			lastWord = ""
+			w1, w2, w3 = "", "", ""
 			i++
 
 		case c == ';':
@@ -383,20 +387,20 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			// column, an alias, a table. Classifying those as verbs is how
 			// `SELECT comment FROM notes` became ddl and how a table with a
 			// `comment` column became unclassifiable.
-			// Below top level, only the FIRST word inside a paren can be a
-			// verb — the `SELECT` of a subquery, the `DELETE` of a CTE body.
-			// Everything after it is that statement's own text.
-			firstInParen := depth > 0 && len(parens) > 0 && !parens[len(parens)-1].sawWord
-			verbPosition := (depth == 0 && searching) || firstInParen
-			// A paren opened directly after AS is a STATEMENT BODY. That is
-			// the only place a data-modifying statement can legally nest, and
-			// it is what separates `WITH x AS (DELETE …)` from the column
-			// list of `CREATE TABLE x (comment text, …)`.
-			statementBody := firstInParen && parens[len(parens)-1].body
+			// A paren introduced by AS holds a STATEMENT; every other paren
+			// holds a list or an expression. That is the whole discriminator,
+			// and it has to be the whole discriminator: treating the first
+			// word of ANY paren as a verb is what made `SELECT (comment)` and
+			// `INSERT INTO t (comment, id)` classify as ddl, so the
+			// identifier bug survived wherever the offending column happened
+			// to come first.
+			statementBody := depth > 0 && len(parens) > 0 &&
+				parens[len(parens)-1].body && !parens[len(parens)-1].sawWord
+			verbPosition := (depth == 0 && searching) || statementBody
 			if depth > 0 && len(parens) > 0 {
 				parens[len(parens)-1].sawWord = true
 			}
-			lastWord = word
+			w1, w2, w3 = word, w1, w2
 
 			if cls, ok := verbClass(word); ok && verbPosition {
 				// DDL below top level is not valid SQL in any target dialect;
@@ -500,6 +504,27 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 		st.Class = maxClass
 	}
 	return st, parts, nil
+}
+
+// opensStatementBody reports whether the words immediately before a '('
+// introduce a statement body rather than a list or an expression. w1 is the
+// nearest word.
+//
+// `AS (` is the CTE/subquery form. `AS MATERIALIZED (` and
+// `AS NOT MATERIALIZED (` are PostgreSQL 12+ planning hints on the same
+// construct — missing them meant `WITH x AS MATERIALIZED (DELETE FROM t)`
+// recorded no nested mutation at all, so the WHERE guard had nothing to
+// refuse and a full-table delete ran.
+func opensStatementBody(w1, w2, w3 string) bool {
+	switch {
+	case w1 == "AS":
+		return true
+	case w1 == "MATERIALIZED" && w2 == "AS":
+		return true
+	case w1 == "MATERIALIZED" && w2 == "NOT" && w3 == "AS":
+		return true
+	}
+	return false
 }
 
 // scanQuoted advances past a quoted region opened at s[i] and returns the

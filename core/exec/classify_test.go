@@ -68,7 +68,17 @@ func TestClassify(t *testing.T) {
 		{name: "cte delete body", sql: "WITH x AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT * FROM x", verb: "SELECT", class: ClassWrite},
 		{name: "cte update body", sql: "WITH x AS (UPDATE t SET a=1 WHERE id = 1 RETURNING id) SELECT * FROM x", verb: "SELECT", class: ClassWrite},
 		{name: "cte insert body", sql: "WITH x AS (INSERT INTO t VALUES (1) RETURNING id) SELECT * FROM x", verb: "SELECT", class: ClassWrite},
-		{name: "subquery insert", sql: "SELECT (INSERT INTO t VALUES (1))", verb: "SELECT", class: ClassWrite},
+		// PostgreSQL 12+ planning hints on the same construct. Missing these
+		// meant no nested mutation was recorded at all, so the guard had
+		// nothing to refuse and a full-table delete ran.
+		{name: "materialized cte body", sql: "WITH x AS MATERIALIZED (DELETE FROM t WHERE id = 1 RETURNING id) SELECT * FROM x", verb: "SELECT", class: ClassWrite},
+		{name: "not materialized cte body", sql: "WITH x AS NOT MATERIALIZED (DELETE FROM t WHERE id = 1 RETURNING id) SELECT * FROM x", verb: "SELECT", class: ClassWrite},
+		// A data-modifying statement can only nest in a CTE body, so this is
+		// not valid SQL in any target dialect and no dialect will execute it
+		// — TestEngine_SubqueryInsertIsRefusedByTheTarget proves that rather
+		// than asserting it. Reading the INSERT here as a verb is what made
+		// every parenthesized identifier a verb too (lector r0 MF2).
+		{name: "subquery insert is not a statement body", sql: "SELECT (INSERT INTO t VALUES (1))", verb: "SELECT", class: ClassRead},
 		// DDL below top level is not valid SQL anywhere and stays refused by
 		// the lexer: there is no guard rule to hand it to.
 		{name: "cte ddl body", sql: "WITH x AS (DROP TABLE t) SELECT 1", err: ErrStatementUnsupported},

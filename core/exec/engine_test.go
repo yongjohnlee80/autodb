@@ -352,6 +352,54 @@ func TestEngine_RejectsOversizedScript(t *testing.T) {
 	}
 }
 
+// A data-modifying statement can only nest inside a CTE body, so the
+// classifier reads `SELECT (INSERT …)` as an ordinary read with a
+// parenthesized expression — which is what stopped every parenthesized
+// identifier from being read as a verb (lector r0 MF2).
+//
+// That is only safe if the construct genuinely cannot execute, so this proves
+// it against a real database rather than asserting it: the target refuses the
+// syntax, and the row it would have written is not there. Reasoning about
+// which dialects accept what is exactly the kind of claim that should be
+// executed instead of argued.
+func TestEngine_SubqueryInsertIsRefusedByTheTarget(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t)
+	f.exec(t, f.rootTok, "CREATE TABLE t (id INTEGER PRIMARY KEY)")
+
+	const smuggled = "SELECT (INSERT INTO t VALUES (1))"
+
+	// It classifies as a read, and the gate lets it through.
+	st, err := Classify(smuggled, false)
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if st.Class != ClassRead {
+		t.Fatalf("class = %s, want read", st.Class)
+	}
+	if err := ProfileV1Compat.admit(st); err != nil {
+		t.Fatalf("admit = %v, want nil", err)
+	}
+
+	// And the database refuses it.
+	if _, err := f.eng.Execute(ctx, f.rootTok, f.connID, smuggled, testIP); err == nil {
+		t.Fatal("the target accepted a data-modifying subquery — the classification is no longer safe")
+	}
+
+	// Nothing was written.
+	rows, err := f.eng.Execute(ctx, f.rootTok, f.connID, "SELECT COUNT(*) FROM t", testIP)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if len(rows.Rows) != 1 {
+		t.Fatalf("count returned %d rows", len(rows.Rows))
+	}
+	if got := rows.Rows[0][0]; got != int64(0) {
+		t.Errorf("table holds %v rows, want 0 — the smuggled INSERT ran", got)
+	}
+}
+
 func TestEngine_WithMaxRowsPanicsOnNonpositive(t *testing.T) {
 	t.Parallel()
 	defer func() {

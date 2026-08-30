@@ -24,15 +24,24 @@ const (
 	// record. It is deliberately NOT the execution cap: letting a bigger
 	// statement run is not a reason to store more of every statement
 	// (design doc G4 — "audit-side bounding stays separate").
+	//
+	// The consequence is worth stating plainly rather than leaving to be
+	// discovered: while the two limits were both 8 KiB the stored script was
+	// necessarily the whole statement, and now it is not. A statement between
+	// this bound and the execution cap is recorded as a bounded PREFIX. What
+	// the audit trail still guarantees is that nothing ran unrecorded — every
+	// execution has a durable attempt record — not that the record reproduces
+	// the statement in full.
 	maxAuditSQLBytes = 8 * 1024
 	maxErrorBytes    = 2 * 1024
 	recordTimeout    = 10 * time.Second
 )
 
 // DefaultMaxStatementBytes is the default execution size cap, matching
-// config.DefaultMaxStatementBytes. It is a promise about the audit trail
-// rather than a performance knob: an oversized statement is refused BEFORE
-// it runs, so the record always equals exactly what executed.
+// config.DefaultMaxStatementBytes. It is a refusal boundary rather than a
+// performance knob: an oversized statement is refused BEFORE it runs, so the
+// engine never executes a tail it declined to consider. It is not a promise
+// that the stored record reproduces the statement — see maxAuditSQLBytes.
 const DefaultMaxStatementBytes = 64 * 1024
 
 // Engine is the execution core: one instance per process over one meta

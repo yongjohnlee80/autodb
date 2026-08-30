@@ -142,10 +142,14 @@ func TestProfiles_DisagreeOnDataModifyingCTEs(t *testing.T) {
 			t.Errorf("v1compat admit(%s) = %v, want ErrStatementUnsupported", name, err)
 			continue
 		}
-		// Bit-identity includes the message: this is the exact text the
-		// classifier produced before the refusal moved.
-		if !strings.Contains(err.Error(), "data-modifying subquery/CTE (DELETE at nesting depth 1)") {
-			t.Errorf("v1compat admit(%s) message = %q, want the historical wording", name, err)
+		// Bit-identity includes the message, EXACTLY: this is the text the
+		// classifier produced before the refusal moved, character for
+		// character. Substring-matching it would let the wording drift
+		// around the fragment being checked.
+		const want = "exec: statement is not supported through the execution engine: " +
+			"data-modifying subquery/CTE (DELETE at nesting depth 1)"
+		if err.Error() != want {
+			t.Errorf("v1compat admit(%s) message =\n  %q\nwant\n  %q", name, err.Error(), want)
 		}
 	}
 
@@ -225,6 +229,13 @@ func TestGuardWhere_NestedMutations(t *testing.T) {
 			"WITH a AS (DELETE FROM t WHERE id = 1 RETURNING id), b AS (UPDATE u SET x = 1 WHERE id = 2 RETURNING id) SELECT 1",
 			false,
 		},
+
+		// PostgreSQL 12+ materialization hints introduce the same statement
+		// body. A guard that does not see through them is not a guard: at
+		// r0 this admitted a full-table delete.
+		{"materialized cte delete guarded", "WITH x AS MATERIALIZED (DELETE FROM t WHERE id = 1 RETURNING id) SELECT * FROM x", false},
+		{"materialized cte delete bare", "WITH x AS MATERIALIZED (DELETE FROM t RETURNING id) SELECT * FROM x", true},
+		{"not materialized cte delete bare", "WITH x AS NOT MATERIALIZED (DELETE FROM t RETURNING id) SELECT * FROM x", true},
 
 		// INSERT is unguarded at every depth, exactly as it is at top level:
 		// there is no full-table hazard to state a predicate against, and a

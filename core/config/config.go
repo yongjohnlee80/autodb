@@ -97,9 +97,13 @@ type Web struct{}
 // Exec configures the execution engine.
 type Exec struct {
 	// MaxStatementBytes caps the size of one statement the engine will
-	// execute. The cap exists so the audit record always equals exactly what
-	// ran — an oversized script is refused BEFORE execution rather than run
-	// with an unaudited tail.
+	// execute. An oversized statement is refused BEFORE execution, so nothing
+	// runs that the engine declined to consider.
+	//
+	// It is not a cap on what is STORED. The audit and history record keeps a
+	// bounded 8 KiB prefix whatever this is set to, so a statement larger
+	// than that is recorded in part. Every execution still leaves a durable
+	// attempt record; what is bounded is how much of the text it carries.
 	//
 	// The default is 64 KiB. The original 8 KiB was too small for real
 	// schema work: a production deployment corpus of 470 scripts contained
