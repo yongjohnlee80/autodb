@@ -246,6 +246,9 @@ func (v *aboutView) HandleEvent(ev tui.Event) bool {
 
 func (v *aboutView) Add(...tui.Component) {}
 func (v *aboutView) Remove(tui.Component) {}
+
+// Move is a no-op — fixed shape, nothing to permute (see connPicker.Move).
+func (v *aboutView) Move(tui.Component, int) {}
 func (v *aboutView) Children() iter.Seq[tui.Component] {
 	return func(func(tui.Component) bool) {}
 }

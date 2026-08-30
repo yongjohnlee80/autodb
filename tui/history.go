@@ -129,6 +129,9 @@ func (v *historyView) Render(tui.Surface) {}
 
 func (v *historyView) Add(...tui.Component) {}
 func (v *historyView) Remove(tui.Component) {}
+
+// Move is a no-op — fixed shape, nothing to permute (see connPicker.Move).
+func (v *historyView) Move(tui.Component, int) {}
 func (v *historyView) Children() iter.Seq[tui.Component] {
 	return func(yield func(tui.Component) bool) {
 		if v.table != nil {
@@ -219,6 +222,9 @@ func (s *scriptView) HandleEvent(ev tui.Event) bool { return false }
 
 func (s *scriptView) Add(...tui.Component) {}
 func (s *scriptView) Remove(tui.Component) {}
+
+// Move is a no-op — fixed shape, nothing to permute (see connPicker.Move).
+func (s *scriptView) Move(tui.Component, int) {}
 func (s *scriptView) Children() iter.Seq[tui.Component] {
 	return func(yield func(tui.Component) bool) {
 		if s.editor != nil {

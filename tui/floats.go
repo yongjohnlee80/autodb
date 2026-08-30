@@ -192,6 +192,9 @@ func (f *form) HandleEvent(ev tui.Event) bool { return false }
 // inputs and the first keystrokes land in the wrong field.
 func (f *form) Add(...tui.Component) {}
 func (f *form) Remove(tui.Component) {}
+
+// Move is a no-op — fixed shape, nothing to permute (see connPicker.Move).
+func (f *form) Move(tui.Component, int) {}
 func (f *form) Children() iter.Seq[tui.Component] {
 	return func(yield func(tui.Component) bool) {
 		yield(f.flex)
