@@ -189,8 +189,23 @@ func TestProfileSession_AdmitsTransactionControlOnly(t *testing.T) {
 		}
 	}
 
-	// A verb with an admissible form the gate matrix defines, not built yet.
+	// SET and LOCK pass the COARSE gate: whether they may run depends on the
+	// session's state, which a profile cannot see, so the decision belongs to
+	// the stateful gate (TestAdmitSet / TestAdmitLock) rather than here.
 	for _, sql := range []string{"SET LOCAL lock_timeout = '5s'", "LOCK TABLE t IN EXCLUSIVE MODE"} {
+		st, _ := Classify(sql, false)
+		if err := ProfileSession.admit(st); err != nil {
+			t.Errorf("session admit(%q) = %v, want the stateful gate to decide it", sql, err)
+		}
+		// v1compat still refuses them outright, unchanged.
+		if err := ProfileV1Compat.admit(st); !errors.Is(err, ErrStatementUnsupported) {
+			t.Errorf("v1compat admit(%q) = %v, want ErrStatementUnsupported", sql, err)
+		}
+	}
+
+	// A verb whose admissible form the gate matrix defines but which is not
+	// built: CALL and DO await the procedure capability of §6a.
+	for _, sql := range []string{"CALL do_thing(1)", "DO $$ BEGIN PERFORM 1; END $$"} {
 		st, _ := Classify(sql, false)
 		err := ProfileSession.admit(st)
 		if !errors.Is(err, ErrStatementUnsupported) {
