@@ -1299,7 +1299,12 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 	case execDone:
 		m.running = false
 		if v.gen != m.session.Gen() {
-			return true // result of a superseded connection
+			// The result must not cross epochs, but the user who ran the
+			// query deserves to know it went nowhere: a run issued in a
+			// reconnect window used to vanish without a trace (the
+			// EnterOnTable flake's silent shape).
+			m.setStatus("query superseded by a reconnect — run it again")
+			return true
 		}
 		if v.err != nil {
 			m.setError(WireErrorMessage(v.err))
