@@ -278,7 +278,7 @@ function M.choose_note(cb)
         in_ws(ws2)
       end)
     end))
-  end)
+  end, function(e) if cb then cb(nil, e) end end)
 end
 
 ---choose_workspace lists workspaces and can create one — the surface
@@ -344,7 +344,7 @@ function M.choose_workspace(cb)
         if cb then cb(choice) end
       end)
     end))
-  end)
+  end, function(e) if cb then cb(nil, e) end end)
 end
 
 ---@param cb fun(conn: table|nil)?
@@ -400,7 +400,9 @@ function M.choose_connection(cb)
                           log.notify("created " .. name
                             .. " but could not attach it: " .. tostring(aerr.message),
                             { level = "error", component = "commands" })
-                          return cb and cb(nil)
+                          return cb and cb(nil, { code = "daemon",
+                            message = "created " .. name .. " but could not attach it: "
+                              .. tostring(aerr.message), cause = aerr })
                         end
                         -- The explorer re-reads its root off this topic,
                         -- so the new connection shows under the workspace.
@@ -447,7 +449,7 @@ function M.choose_connection(cb)
         pick_conn(ws)
       end)
     end))
-  end)
+  end, function(e) if cb then cb(nil, e) end end)
 end
 
 -- ─── maintenance ──────────────────────────────────────────────

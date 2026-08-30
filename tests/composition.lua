@@ -166,6 +166,40 @@ do
   require("autodb.panel")._reset_for_tests()
 end
 
+print("\n[C5] an unrelated slot rebuild must not disturb a live drawer")
+do
+  hostreg._reset_for_tests()
+  require("autodb.panel")._reset_for_tests()
+  require("autodb.panel").setup()
+  require("auto-finder").setup({ sections = { "config", "files", "dbase" } })
+
+  local oo, ov
+  drawer.open(function(o, v) oo, ov = o, v end)
+  ok("C5: the drawer is mounted on auto-finder", oo == true and ov.host == "auto-finder")
+  local view = drawer.mounted_view()
+  local buf = view and view:bufnr()
+  local subs = view and view._sub_count()
+  ok("C5: it has a live buffer and subscriptions", buf ~= nil and subs and subs > 0)
+
+  -- A rebuild that leaves dbase ALONE (adds an unrelated slot). Syncing
+  -- unconditionally re-registered the provider, and autodb's same-id
+  -- rule tears the mounted owner down -- so an unrelated slot change
+  -- disposed and remounted a live drawer (lector impl-r1).
+  require("auto-finder")._rebuild_section_registry({ "config", "files", "dbase", "repos" },
+    { no_force_open = true })
+
+  ok("C5: the owner is unchanged", drawer.owner() == "auto-finder", tostring(drawer.owner()))
+  ok("C5: it is the SAME view instance", drawer.mounted_view() == view)
+  ok("C5: its buffer is still valid and unchanged",
+    view and view:bufnr() == buf and buf and vim.api.nvim_buf_is_valid(buf),
+    tostring(view and view:bufnr()) .. " vs " .. tostring(buf))
+  ok("C5: its subscriptions survived", view and view._sub_count() == subs,
+    tostring(view and view._sub_count()) .. " vs " .. tostring(subs))
+
+  hostreg._reset_for_tests()
+  require("autodb.panel")._reset_for_tests()
+end
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 if fail > 0 then
   print("COMPOSITION-COMPLETE FAIL")
