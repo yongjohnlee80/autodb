@@ -10,7 +10,7 @@
 ---  <leader>Dr   run the current buffer (must be SQL)
 ---  <leader>DR   run the visual selection
 ---  <leader>Dc   choose a connection (workspace, then connection)
----  <leader>DX   maintenance: restart / refresh / reset
+---  <leader>DX   maintenance: restart / refresh
 ---
 ---Key strings come from `autodb.keys`, so a message that tells the user
 ---which key to press cannot drift from the key that is bound.
@@ -548,40 +548,56 @@ function M.setup(opts)
   opts = opts or {}
   M._ensure_connected = opts.ensure_connected or M._ensure_connected
 
+  -- Keymaps and user commands bind on top of the PUBLIC api, not on
+  -- these internals (ADR-0078 §3.6): the api is the contract, and the
+  -- keymaps are one consumer of it. A user who binds their own keys
+  -- therefore drives exactly the same surface these do. Required
+  -- lazily -- autodb.api resolves this module at call time, so there
+  -- is no load-order cycle.
+  local api = require("autodb.api")
+
   local map = opts.keys or {}
   local function set(mode, lhs, fn, desc)
     if lhs == false then return end   -- a consumer may disable one
     pcall(vim.keymap.set, mode, lhs, fn, { silent = true, desc = desc })
   end
 
-  set("n", map.login or keys.LOGIN, M.login, "autodb: sign in (retry, or switch user)")
-  set("n", map.workspace or keys.WORKSPACE, function() M.choose_workspace() end,
+  set("n", map.login or keys.LOGIN, function() api.login() end,
+    "autodb: sign in (retry, or switch user)")
+  set("n", map.workspace or keys.WORKSPACE, function() api.choose_workspace() end,
     "autodb: choose or create a workspace")
-  set("n", map.note or keys.NOTE, function() M.choose_note() end,
+  set("n", map.note or keys.NOTE, function() api.choose_note() end,
     "autodb: choose or create a note")
-  set("n", map.history or keys.HISTORY, M.history, "autodb: script history")
-  set("n", map.run_buffer or keys.RUN_BUFFER, M.run_buffer, "autodb: run this SQL buffer")
+  set("n", map.history or keys.HISTORY, function() api.history() end,
+    "autodb: script history")
+  set("n", map.run_buffer or keys.RUN_BUFFER, function() api.run_buffer() end,
+    "autodb: run this SQL buffer")
   set("v", map.run_visual or keys.RUN_VISUAL, function()
     -- Leave visual mode first so '< and '> are set.
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Esc>", true, false, true), "nx", false)
-    M.run_selection()
+    api.run_selection()
   end, "autodb: run the selection")
-  set("n", map.connection or keys.CONNECTION, function() M.choose_connection() end,
+  set("n", map.connection or keys.CONNECTION, function() api.choose_connection() end,
     "autodb: choose a connection")
-  set("n", map.maintenance or keys.MAINTENANCE, M.maintenance,
-    "autodb: maintenance (restart / refresh / reset)")
+  set("n", map.maintenance or keys.MAINTENANCE, function() api.maintenance() end,
+    "autodb: maintenance (restart / refresh)")
 
   vim.api.nvim_create_user_command("AutodbRun", function(a)
-    if a.range > 0 then return M.run_selection() end
-    M.run_buffer()
+    if a.range > 0 then return api.run_selection() end
+    api.run_buffer()
   end, { range = true, desc = "autodb: run the buffer or selection" })
-  vim.api.nvim_create_user_command("AutodbConnection", function() M.choose_connection() end,
+  -- The drawer's discoverable entry point. Deliberately a command and
+  -- not a new <leader>D key: claiming a keystroke is the user's call,
+  -- and the api + this command already make it reachable.
+  vim.api.nvim_create_user_command("AutodbDrawer", function() api.drawer_toggle() end,
+    { desc = "autodb: toggle the database explorer drawer" })
+  vim.api.nvim_create_user_command("AutodbConnection", function() api.choose_connection() end,
     { desc = "autodb: choose a connection" })
-  vim.api.nvim_create_user_command("AutodbLogin", M.login,
+  vim.api.nvim_create_user_command("AutodbLogin", function() api.login() end,
     { desc = "autodb: sign in (retry, or switch user)" })
-  vim.api.nvim_create_user_command("AutodbWorkspace", function() M.choose_workspace() end,
+  vim.api.nvim_create_user_command("AutodbWorkspace", function() api.choose_workspace() end,
     { desc = "autodb: choose or create a workspace" })
-  vim.api.nvim_create_user_command("AutodbNote", function() M.choose_note() end,
+  vim.api.nvim_create_user_command("AutodbNote", function() api.choose_note() end,
     { desc = "autodb: choose or create a note" })
   vim.api.nvim_create_user_command("AutodbHistory", M.history, { desc = "autodb: script history" })
   vim.api.nvim_create_user_command("AutodbMaintenance", M.maintenance,

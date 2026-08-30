@@ -20,6 +20,6 @@ M.HISTORY     = M.PREFIX .. "h"  -- history modal
 M.RUN_BUFFER  = M.PREFIX .. "r"  -- execute the current .sql buffer
 M.RUN_VISUAL  = M.PREFIX .. "R"  -- execute the selection
 M.CONNECTION  = M.PREFIX .. "c"  -- choose workspace, then connection
-M.MAINTENANCE = M.PREFIX .. "X"  -- prompt: restart / refresh / reset
+M.MAINTENANCE = M.PREFIX .. "X"  -- prompt: restart / refresh
 
 return M
