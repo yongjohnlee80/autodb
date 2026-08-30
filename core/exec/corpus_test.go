@@ -87,9 +87,9 @@ func TestCorpusReplay(t *testing.T) {
 			// tables, its paren tracking or its class ranks, so when the two
 			// disagree one of them is wrong — this is what catches a
 			// classification driven by an identifier rather than by a verb.
-			lead, lerr := leadingWord(p)
-			if lerr != nil {
-				t.Errorf("%s statement %d: %v", name, i+1, lerr)
+			lead := corpusLeadingVerb(p)
+			if lead == "" {
+				t.Errorf("%s statement %d: no leading word found in:\n%s", name, i+1, p)
 				continue
 			}
 			switch lead {
@@ -218,6 +218,50 @@ func gateDecision(st Statement) (string, error) {
 		return "refused:where-guard", err
 	}
 	return "admitted", nil
+}
+
+// corpusLeadingVerb returns a statement's first word, uppercased, skipping
+// leading whitespace and comments.
+//
+// It is written out here rather than borrowed from the package because the
+// whole value of this check is that it is a SECOND OPINION: a helper shared
+// with the code under test would agree with it by construction. (It also
+// borrowed one that lives on a different branch, which is how a "verified
+// green" handoff went out on a tree that did not compile — the assertion was
+// only ever exercised where the helper happened to exist.)
+func corpusLeadingVerb(sql string) string {
+	n := len(sql)
+	for i := 0; i < n; {
+		c := sql[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f':
+			i++
+		case c == '-' && i+1 < n && sql[i+1] == '-':
+			for i < n && sql[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < n && sql[i+1] == '*':
+			end := strings.Index(sql[i+2:], "*/")
+			if end < 0 {
+				return ""
+			}
+			i += 2 + end + 2
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_':
+			j := i + 1
+			for j < n {
+				d := sql[j]
+				if (d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z') || (d >= '0' && d <= '9') || d == '_' {
+					j++
+					continue
+				}
+				break
+			}
+			return strings.ToUpper(sql[i:j])
+		default:
+			return ""
+		}
+	}
+	return ""
 }
 
 // whereAtTopLevel reports whether the token WHERE appears at paren depth 0.
