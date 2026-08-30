@@ -2,6 +2,9 @@ package exec
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,6 +30,11 @@ func TestParseTxControl_Accepted(t *testing.T) {
 		{sql: "BEGIN WORK", action: TxBegin},
 		{sql: "BEGIN TRANSACTION", action: TxBegin},
 		{sql: "START TRANSACTION", action: TxBegin},
+		// What SplitStatements actually hands this parser: the statement
+		// keeps its terminator, and any comment trailing it before the next
+		// statement comes along for the ride.
+		{sql: "BEGIN;\n-- lock person so no new updates happen", action: TxBegin},
+		{sql: "COMMIT;\n/* done */\n", action: TxCommit},
 		{sql: "BEGIN;", action: TxBegin},
 		{sql: "COMMIT", action: TxCommit},
 		{sql: "COMMIT WORK", action: TxCommit},
@@ -88,6 +96,19 @@ func TestParseTxControl_Accepted(t *testing.T) {
 		// Repeating an option with the SAME value is redundant, not
 		// contradictory, and refusing it would be pedantry.
 		{sql: "BEGIN READ ONLY READ ONLY", action: TxBegin, opts: dao.TxOptions{Access: dao.TxReadOnly}},
+
+		// Commas SEPARATE modes and are optional. Verified accepted by
+		// PostgreSQL 17.6.
+		{
+			sql:    "BEGIN ISOLATION LEVEL SERIALIZABLE, READ ONLY, DEFERRABLE",
+			action: TxBegin,
+			opts:   dao.TxOptions{Isolation: dao.TxSerializable, Access: dao.TxReadOnly, Deferrable: dao.TxDeferrable},
+		},
+		{
+			sql:    "START TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ WRITE",
+			action: TxBegin,
+			opts:   dao.TxOptions{Isolation: dao.TxRepeatableRead, Access: dao.TxReadWrite},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.sql, func(t *testing.T) {
@@ -137,6 +158,29 @@ func TestParseTxControl_MalformedInput(t *testing.T) {
 		{"quoted text has no place here", "BEGIN 'READ ONLY'"},
 		{"parenthesized", "BEGIN (READ ONLY)"},
 
+		// Comma placement. Every one of these was accepted before commas
+		// became tokens, and every one is rejected by PostgreSQL 17.6 —
+		// checked against a live server rather than read off the grammar.
+		{"leading comma", "BEGIN , READ ONLY"},
+		{"comma inside a mode", "BEGIN READ, ONLY"},
+		{"comma inside ISOLATION LEVEL", "BEGIN ISOLATION, LEVEL SERIALIZABLE"},
+		{"trailing comma", "BEGIN READ ONLY,"},
+		{"doubled comma", "BEGIN READ ONLY,, DEFERRABLE"},
+		{"comma on an ending statement", "COMMIT , AND CHAIN"},
+		{"comma tail on an ending statement", "ROLLBACK AND CHAIN,"},
+
+		// START requires TRANSACTION; PostgreSQL rejects both of these.
+		// Stripping one optional noise word for every verb alike made them
+		// parse as a bare begin.
+		{"bare START", "START"},
+		{"START WORK", "START WORK"},
+
+		// A savepoint target must be COMPLETE before it can be refused as a
+		// capability — otherwise a typo is reported as a missing feature.
+		{"rollback to nothing", "ROLLBACK TO"},
+		{"rollback to a name with a tail", "ROLLBACK TO sp1 extra"},
+		{"rollback to savepoint with a tail", "ROLLBACK TO SAVEPOINT sp1 extra"},
+
 		// The DEFERRABLE combination rule, owned by golib-dao-0017 and
 		// enforced here by asking the DAO rather than restating it.
 		{"deferrable alone", "BEGIN DEFERRABLE"},
@@ -177,6 +221,11 @@ func TestParseTxControl_UnsupportedClauses(t *testing.T) {
 		{"mysql consistent snapshot", "START TRANSACTION WITH CONSISTENT SNAPSHOT", "CONSISTENT SNAPSHOT"},
 		{"savepoint target", "ROLLBACK TO SAVEPOINT sp1", "SAVEPOINT"},
 		{"savepoint target without the keyword", "ROLLBACK TO sp1", "SAVEPOINT"},
+		// `ROLLBACK TO SAVEPOINT` is WELL-FORMED: PostgreSQL reads the
+		// keyword as the name. Verified on 17.6 — it answers `savepoint
+		// "savepoint" does not exist`, and succeeds when a savepoint by that
+		// name is open. So it is a capability refusal, not a malformed one.
+		{"savepoint named savepoint", "ROLLBACK TO SAVEPOINT", "SAVEPOINT"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -228,6 +277,23 @@ func TestParseTxControl_Boundaries(t *testing.T) {
 	if _, err := ParseTxControl("BEGIN; SELECT 1"); !errors.Is(err, ErrMultiStatement) {
 		t.Errorf("multi-statement err = %v, want ErrMultiStatement", err)
 	}
+	// A second statement made entirely of WORDS. The case above is also
+	// caught by the guard on non-word tokens (the `1`), so on its own it did
+	// not prove the word path checks the terminator at all — removing that
+	// check left the suite green. This one only passes if it does.
+	if _, err := ParseTxControl("BEGIN; COMMIT"); !errors.Is(err, ErrMultiStatement) {
+		t.Errorf("word-only multi-statement err = %v, want ErrMultiStatement", err)
+	}
+	if _, err := ParseTxControl("COMMIT; ROLLBACK"); !errors.Is(err, ErrMultiStatement) {
+		t.Errorf("word-only multi-statement err = %v, want ErrMultiStatement", err)
+	}
+	// Comments and whitespace after the terminator are NOT a second
+	// statement — that distinction is the whole of MF1.
+	for _, sql := range []string{"BEGIN;", "BEGIN; -- trailing", "BEGIN;\n/* trailing */\n", "BEGIN ;  \n\n"} {
+		if _, err := ParseTxControl(sql); err != nil {
+			t.Errorf("ParseTxControl(%q) = %v, want a clean parse", sql, err)
+		}
+	}
 	if _, err := ParseTxControl("   \n -- nothing here\n"); !errors.Is(err, ErrEmptyStatement) {
 		t.Errorf("empty err = %v, want ErrEmptyStatement", err)
 	}
@@ -236,6 +302,44 @@ func TestParseTxControl_Boundaries(t *testing.T) {
 	}
 	if _, err := ParseTxControl("BEGIN /* unterminated"); !errors.Is(err, ErrMalformedStatement) {
 		t.Errorf("unterminated comment err = %v, want ErrMalformedStatement", err)
+	}
+}
+
+// The splitter and the parser have to agree about what one statement is.
+// They did not: SplitStatements returns a statement WITH its terminator and
+// any comment trailing it, and this parser accepted only whitespace after the
+// `;`. 153 of the 756 transaction controls in the LM deployment corpus failed
+// the round trip — the atomic-script workload the session engine exists for.
+//
+// The corpus replay covers this at scale where the corpus is available; these
+// are the shapes it found, pinned so they run everywhere.
+func TestParseTxControl_ConsumesWhatSplitStatementsProduces(t *testing.T) {
+	t.Parallel()
+
+	scripts := []string{
+		"BEGIN;\nUPDATE t SET a = 1 WHERE id = 1;\nCOMMIT;",
+		"-- header comment\nBEGIN;\n-- lock person first\nUPDATE t SET a = 1 WHERE id = 1;\nCOMMIT;\n",
+		"BEGIN;\n\n/* a block comment between statements */\n\nSELECT 1;\nCOMMIT;\n-- trailing",
+		"START TRANSACTION;\nSELECT 1;\nROLLBACK;",
+	}
+	for _, script := range scripts {
+		parts, err := SplitStatements(script, false)
+		if err != nil {
+			t.Fatalf("split(%q): %v", script, err)
+		}
+		for i, p := range parts {
+			st, cerr := Classify(p, false)
+			if cerr != nil {
+				t.Errorf("part %d of %q: %v", i+1, script, cerr)
+				continue
+			}
+			if st.Class != ClassControl {
+				continue
+			}
+			if _, perr := ParseTxControl(p); perr != nil {
+				t.Errorf("the splitter produced %q and the parser refused it: %v", p, perr)
+			}
+		}
 	}
 }
 
@@ -269,4 +373,89 @@ func TestParseTxControl_CoversEveryClassifiedTransactionVerb(t *testing.T) {
 			t.Errorf("ParseTxControl(%q) = %v, want ErrStatementUnsupported", sql, err)
 		}
 	}
+}
+
+// The same round trip at production scale (ADR-0074 §8, G6). Env-gated like
+// the classifier's corpus replay, and for the same reason: the corpus is
+// another product's schema and stays in its own repo.
+//
+// This is the assertion that would have caught MF1 the day it was written.
+// 153 of the 756 transaction controls in the LM deployment corpus failed
+// split→parse, and every unit test in this file passed while they did,
+// because they all fed the parser statements written by hand rather than
+// statements produced by the splitter.
+func TestParseTxControl_CorpusRoundTrip(t *testing.T) {
+	dir := os.Getenv("AUTODB_CORPUS_DIR")
+	if dir == "" {
+		t.Skip("AUTODB_CORPUS_DIR not set; skipping the production-corpus round trip")
+	}
+	files, err := filepath.Glob(filepath.Join(dir, "*.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatalf("AUTODB_CORPUS_DIR=%s holds no .sql files — an empty corpus proves nothing", dir)
+	}
+
+	// Statements in the corpus that are genuinely malformed SQL, so the
+	// parser is right to refuse them. Named individually, with the evidence,
+	// because "some failures are expected" is how a round trip stops being an
+	// assertion.
+	//
+	// 000062_revert_trigger_track_error.sql opens with a `BEGIN` that has no
+	// terminator, so the splitter correctly hands over
+	// `BEGIN\n\nDROP FUNCTION …;` as one statement. PostgreSQL 17.6 answers
+	// that with `syntax error at or near "DROP"` — the same complaint this
+	// parser makes. The script cannot ever have run as written.
+	knownMalformed := map[string]string{
+		"000062_revert_trigger_track_error.sql:1": "BEGIN with no terminator; PostgreSQL rejects it too",
+	}
+	hit := map[string]bool{}
+
+	var controls, failures int
+	for _, f := range files {
+		body, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts, err := SplitStatements(string(body), false)
+		if err != nil {
+			continue // empty placeholders; the classifier replay accounts for them
+		}
+		for i, p := range parts {
+			st, cerr := Classify(p, false)
+			if cerr != nil || st.Class != ClassControl {
+				continue
+			}
+			switch st.Verb {
+			case "BEGIN", "START", "COMMIT", "END", "ROLLBACK":
+			default:
+				continue // SET, LOCK, DO — not this parser's statements
+			}
+			controls++
+			if _, perr := ParseTxControl(p); perr != nil {
+				key := fmt.Sprintf("%s:%d", filepath.Base(f), i+1)
+				if why, known := knownMalformed[key]; known {
+					hit[key] = true
+					t.Logf("%s: refused as expected (%s)", key, why)
+					continue
+				}
+				failures++
+				t.Errorf("%s: the splitter produced this and the parser refused it: %v\n%s",
+					key, perr, p)
+			}
+		}
+	}
+	// An exception that stopped being needed is worse than none: it hides the
+	// next regression at that spot.
+	for key, why := range knownMalformed {
+		if !hit[key] {
+			t.Errorf("%s no longer fails (%s) — delete the exception rather than leaving it to cover something else", key, why)
+		}
+	}
+	if controls == 0 {
+		t.Fatal("no transaction controls found in the corpus — this corpus was chosen because it is " +
+			"overwhelmingly BEGIN…COMMIT, so finding none means the replay is not reading it")
+	}
+	t.Logf("round-tripped %d transaction controls from %d files, %d failures", controls, len(files), failures)
 }
