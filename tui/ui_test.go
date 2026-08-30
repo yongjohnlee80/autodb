@@ -413,8 +413,25 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("v")
 	h.waitFor("results focused", "y: copy value")
 	h.waitFor("second row selected", "beta") // j moved the cursor before v
-	h.key(tuicore.KeyEscape)
+	// The row inspector is a read-only float: q closes it, the same as Esc.
+	h.key('q')
+	h.waitGone("row inspector dismissed by q", "y: copy value")
 	h.ctrl('k')
+
+	// 5c-2. Script history is a read-only LIST — q closes it. Enter opens the
+	//       recorded script in a read-only vim VIEWER, where q closes too: q is
+	//       unbound in the Editor's Normal mode, so it bubbles out of the focused
+	//       editor to the float. Two q's from the viewer unwind viewer→list.
+	h.leader("H")
+	h.waitFor("script history list", "CONNECTION") // the table header
+	h.key(tuicore.KeyEnter)                        // open the newest row in the read-only viewer
+	// The viewer's title carries "· <conn> · <status>", a "· "-joined form the
+	// history table (separate columns) never renders — a reliable open marker.
+	h.waitFor("script viewer open", "· demo · ok")
+	h.key('q') // q bubbles out of the read-only editor and closes the viewer
+	h.waitGone("script viewer dismissed by q", "· demo · ok")
+	h.key('q') // and a second q closes the list behind it
+	h.waitGone("script history dismissed by q", "CONNECTION")
 
 	// 5d. Ctrl-h reaches the explorer, and Ctrl-l comes back out of it —
 	//     the tree must NOT read those chords as its own h/l collapse and

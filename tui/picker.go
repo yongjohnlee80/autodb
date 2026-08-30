@@ -67,6 +67,10 @@ func (p *connPicker) Layout(c tui.Constraints) tui.Size {
 func (p *connPicker) Render(tui.Surface) {}
 
 func (p *connPicker) HandleEvent(ev tui.Event) bool {
+	if dismissKey(ev) {
+		p.float.Hide()
+		return true
+	}
 	if k, ok := ev.(tui.KeyEvent); ok && k.Kind != tui.KeyRelease {
 		// Enter selects the highlighted row directly — no dependency on
 		// the list's activation event reaching a subscriber.
@@ -105,6 +109,6 @@ var _ tui.Container = (*connPicker)(nil)
 // hints powers the `?` card while the picker is open.
 func (p *connPicker) hints() []keyHint {
 	return []keyHint{
-		{"j/k", "down / up"}, {"Enter", "use this connection"}, {"Esc", "cancel"},
+		{"j/k", "down / up"}, {"Enter", "use this connection"}, {"q/Esc", "cancel"},
 	}
 }

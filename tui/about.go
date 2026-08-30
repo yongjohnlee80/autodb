@@ -235,8 +235,12 @@ func (v *aboutView) Render(s tui.Surface) {
 	}
 }
 
-// Enter or Esc closes; the float handles Esc itself.
+// Enter, q, or Esc closes; the float handles Esc itself.
 func (v *aboutView) HandleEvent(ev tui.Event) bool {
+	if dismissKey(ev) {
+		v.float.Hide()
+		return true
+	}
 	if k, ok := ev.(tui.KeyEvent); ok && k.Kind != tui.KeyRelease && k.Code == tui.KeyEnter {
 		v.float.Hide()
 		return true
@@ -254,7 +258,7 @@ func (v *aboutView) Children() iter.Seq[tui.Component] {
 }
 
 func (v *aboutView) hints() []keyHint {
-	return []keyHint{{"Enter", "close"}, {"Esc", "close"}}
+	return []keyHint{{"Enter", "close"}, {"q/Esc", "close"}}
 }
 
 var _ tui.Container = (*aboutView)(nil)

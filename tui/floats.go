@@ -94,6 +94,21 @@ func (m *Model) modalOpen() bool {
 	return false
 }
 
+// dismissKey reports whether ev is a bare `q` — the second dismiss key,
+// alongside the framework's Esc, for the READ-ONLY and NAVIGATIONAL modals:
+// the row/value inspectors, the connection picker, the managers, the script
+// history and its viewer, the about card. Those surfaces only look and move, so
+// `q` closing them matches the app's vim identity and the global `q`-quit.
+//
+// It is deliberately NOT wired into the text-entry forms (where `q` is a typed
+// character) or the single-key command menus — leaderMenu and the confirmations
+// (where `q` would collide with bound choices). golib's Editor leaves an unbound
+// `q` to bubble in Normal mode, so even the read-only vim viewer can use it.
+func dismissKey(ev tui.Event) bool {
+	k, ok := ev.(tui.KeyEvent)
+	return ok && k.Kind != tui.KeyRelease && k.Text == "q"
+}
+
 // openFloatRef remembers what a float is showing, so `?` can report the
 // keys of whatever currently owns the screen.
 type openFloatRef struct {
@@ -297,7 +312,7 @@ type inspectFloat struct {
 
 func (m *Model) openInspect(columns []string, row []any) {
 	iv := &inspectFloat{model: m, columns: columns, row: row}
-	iv.float = m.openFloat("row — j/k: cell, y: copy value, Enter: full value", iv, 76)
+	iv.float = m.openFloat("row — j/k: cell, y: copy value, Enter: full value, q/Esc: close", iv, 76)
 }
 
 // faithfulCell renders a cell's value VERBATIM for the register: real
@@ -357,6 +372,10 @@ func (iv *inspectFloat) HandleEvent(ev tui.Event) bool {
 	if !ok || k.Kind == tui.KeyRelease {
 		return false
 	}
+	if dismissKey(ev) {
+		iv.float.Hide()
+		return true
+	}
 	switch {
 	case k.Text == "j", k.Code == tui.KeyDown:
 		if iv.cursor < len(iv.columns)-1 {
@@ -387,7 +406,7 @@ func (iv *inspectFloat) HandleEvent(ev tui.Event) bool {
 // imports the faithful value into the editor's register.
 func (m *Model) openValueFloat(column string, val any) {
 	vf := &valueFloat{model: m, view: widget.NewBufferView(), value: val}
-	vf.float = m.openFloat(column+" — y: copy to editor register, Esc: close", vf, 76)
+	vf.float = m.openFloat(column+" — y: copy to editor register, q/Esc: close", vf, 76)
 }
 
 type valueFloat struct {
@@ -423,6 +442,10 @@ func (vf *valueFloat) HandleEvent(ev tui.Event) bool {
 	k, ok := ev.(tui.KeyEvent)
 	if !ok || k.Kind == tui.KeyRelease {
 		return false
+	}
+	if dismissKey(ev) {
+		vf.float.Hide()
+		return true
 	}
 	if k.Text == "y" {
 		vf.model.editor.SetRegister(faithfulCell(vf.value), false)
