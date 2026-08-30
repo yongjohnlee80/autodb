@@ -130,6 +130,30 @@ type Exec struct {
 	// statement for this long (audited). It is what reaps sessions orphaned
 	// by a client that crashed without closing them.
 	SessionIdleTimeout Duration `toml:"session_idle_timeout"`
+
+	// IdleInTxTimeout and MaxTxDuration bound an OPEN transaction
+	// (ADR-0074 §1). These are not tuning knobs with a sensible "off": the
+	// target may be a live production database, where a transaction
+	// abandoned between BEGIN and COMMIT holds locks until something ends
+	// it. Nothing else will.
+	//
+	// 90s of idle is a human thinking between two statements. 5m is the
+	// outside edge of a deliberate piece of work. Both are auto-rollbacks
+	// and both are audited with which limit fired.
+	IdleInTxTimeout Duration `toml:"idle_in_tx_timeout"`
+	MaxTxDuration   Duration `toml:"max_tx_duration"`
+
+	// DebugIdleInTxTimeout is the idle-in-transaction bound for connections
+	// marked debug (ADR-0074 Amendment 2 C2). A developer paused at a
+	// breakpoint inside a transaction must not be rolled back mid-step, so
+	// it is longer — but it is still bounded, and still under the ceiling.
+	DebugIdleInTxTimeout Duration `toml:"debug_idle_in_tx_timeout"`
+
+	// MaxTxDurationCeiling is the install-wide maximum a per-connection
+	// override may reach. A connection row must not be able to raise its own
+	// limit past what the operator decided, or the production-safety bound
+	// becomes advisory.
+	MaxTxDurationCeiling Duration `toml:"max_tx_duration_ceiling"`
 }
 
 // TUI configures the standalone terminal UI (ADR-0057).
@@ -208,10 +232,14 @@ func Default() Config {
 		History:  History{Enabled: true},
 		Security: Security{IPAllowlist: []string{"127.0.0.1/32", "::1/128"}},
 		Exec: Exec{
-			MaxStatementBytes:  DefaultMaxStatementBytes,
-			MaxSessionsPerUser: DefaultMaxSessionsPerUser,
-			MaxSessionsGlobal:  DefaultMaxSessionsGlobal,
-			SessionIdleTimeout: Duration(DefaultSessionIdleTimeout),
+			MaxStatementBytes:    DefaultMaxStatementBytes,
+			MaxSessionsPerUser:   DefaultMaxSessionsPerUser,
+			MaxSessionsGlobal:    DefaultMaxSessionsGlobal,
+			SessionIdleTimeout:   Duration(DefaultSessionIdleTimeout),
+			IdleInTxTimeout:      Duration(DefaultIdleInTxTimeout),
+			MaxTxDuration:        Duration(DefaultMaxTxDuration),
+			DebugIdleInTxTimeout: Duration(DefaultDebugIdleInTxTimeout),
+			MaxTxDurationCeiling: Duration(DefaultMaxTxDurationCeiling),
 		},
 	}
 }
@@ -226,6 +254,14 @@ const (
 	// DefaultSessionIdleTimeout closes an idle session, which also reaps the
 	// ones a crashed client left behind.
 	DefaultSessionIdleTimeout = 30 * time.Minute
+)
+
+// Transaction bounds (ADR-0074 §1, Amendment 2 C2).
+const (
+	DefaultIdleInTxTimeout      = 90 * time.Second
+	DefaultMaxTxDuration        = 5 * time.Minute
+	DefaultDebugIdleInTxTimeout = 10 * time.Minute
+	DefaultMaxTxDurationCeiling = 30 * time.Minute
 )
 
 // Duration is a TOML-friendly time.Duration: written as a string ("30m",
@@ -342,6 +378,24 @@ func (c Config) validate() error {
 	if c.Exec.MaxSessionsPerUser > c.Exec.MaxSessionsGlobal {
 		return fmt.Errorf("%w: exec.max_sessions_per_user %d exceeds exec.max_sessions_global %d — "+
 			"the per-user cap could never be reached", ErrInvalid, c.Exec.MaxSessionsPerUser, c.Exec.MaxSessionsGlobal)
+	}
+	for _, b := range []struct {
+		name string
+		val  Duration
+	}{
+		{"exec.idle_in_tx_timeout", c.Exec.IdleInTxTimeout},
+		{"exec.max_tx_duration", c.Exec.MaxTxDuration},
+		{"exec.debug_idle_in_tx_timeout", c.Exec.DebugIdleInTxTimeout},
+		{"exec.max_tx_duration_ceiling", c.Exec.MaxTxDurationCeiling},
+	} {
+		if b.val <= 0 {
+			return fmt.Errorf("%w: %s %s must be positive — an unbounded transaction on a live "+
+				"database holds its locks until something else ends it", ErrInvalid, b.name, b.val.Duration())
+		}
+	}
+	if c.Exec.MaxTxDuration > c.Exec.MaxTxDurationCeiling {
+		return fmt.Errorf("%w: exec.max_tx_duration %s exceeds exec.max_tx_duration_ceiling %s",
+			ErrInvalid, c.Exec.MaxTxDuration.Duration(), c.Exec.MaxTxDurationCeiling.Duration())
 	}
 	if c.Exec.SessionIdleTimeout <= 0 {
 		return fmt.Errorf("%w: exec.session_idle_timeout %s must be positive — an unbounded idle window "+

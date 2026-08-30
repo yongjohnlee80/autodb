@@ -122,6 +122,10 @@ type session struct {
 	txPhase  txPhase
 	txID     string
 	txOpened time.Time
+	// limits are resolved once at BEGIN from the engine defaults and the
+	// connection's own profile, so a transaction is bounded by what was
+	// configured when it opened rather than by whatever config says later.
+	limits txLimits
 }
 
 func (s *session) get() sessionState { return sessionState(s.state.Load()) }

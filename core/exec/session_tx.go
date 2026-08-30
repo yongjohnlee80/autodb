@@ -146,12 +146,24 @@ func (e *Engine) beginTx(
 		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, err)
 	}
 
+	// The engine's own deadline is resolved first, then the server-side belt
+	// is armed BEHIND it, so the engine always fires first and the rollback
+	// lands on the path that can audit it (ADR-0074 §1, timeout ordering).
+	limits := e.txLimits.forConnection(connectionIsDebug(connRow), e.debugIdle, e.maxTxCeiling)
+	if berr := armServerBelt(s.ctx, tx, connRow.Engine, limits); berr != nil {
+		// The belt is a belt. Losing it is worth recording, but the engine's
+		// own deadline is the guarantee and the transaction is usable.
+		e.logf("session %s: arming the server-side idle guard for %s failed: %v", s.id, txID, berr)
+	}
+
+	now := e.now()
 	s.mu.Lock()
 	s.tx = tx
 	s.txPhase = txActive
 	s.txID = txID
-	s.txOpened = e.now()
-	s.lastUsed = e.now()
+	s.txOpened = now
+	s.lastUsed = now
+	s.limits = limits
 	s.mu.Unlock()
 
 	if err := e.auth.Audit(ctx, ident.UserID(), ip, "tx_opened",

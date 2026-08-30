@@ -129,6 +129,27 @@ max_sessions_global = 256
 # every close is audited.
 session_idle_timeout = "30m"
 
+# Bounds on an OPEN transaction.
+#
+# These are not tuning knobs with a sensible "off". The target may be a live
+# production database, and a transaction abandoned between BEGIN and COMMIT
+# holds its locks until something ends it — nothing else will. 90 seconds of
+# idle is a person thinking between two statements; five minutes is the
+# outside edge of a deliberate piece of work. Both roll back automatically and
+# both are audited with which limit fired.
+idle_in_tx_timeout = "90s"
+max_tx_duration = "5m"
+
+# The idle bound for connections marked debug: a developer paused at a
+# breakpoint inside a transaction should not be rolled back mid-step. Longer,
+# still bounded, still under the ceiling below.
+debug_idle_in_tx_timeout = "10m"
+
+# The install-wide maximum a per-connection override may reach. Without it a
+# connection row could raise its own limit past whatever you decided here, and
+# the production-safety bound would be advisory.
+max_tx_duration_ceiling = "30m"
+
 [tui]
 # Where `autodb --ui` keeps its local .sql notes. Empty means
 # $XDG_DATA_HOME/autodb/notes (~/.local/share/autodb/notes).
