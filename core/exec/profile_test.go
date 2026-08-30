@@ -168,21 +168,52 @@ func TestProfiles_DisagreeOnDataModifyingCTEs(t *testing.T) {
 	}
 }
 
-// The session profile does not yet admit control verbs, and says so in a way
-// that distinguishes "not built yet" from "never allowed" (ADR-0074 §8a).
-func TestProfileSession_ControlVerbsAwaitTheSessionEngine(t *testing.T) {
+// The session profile admits transaction control and performs it as a state
+// transition (ADR-0074 §3); the rest of the control verbs are still refused,
+// and the refusal distinguishes "not built yet" from "never".
+func TestProfileSession_AdmitsTransactionControlOnly(t *testing.T) {
 	t.Parallel()
 
-	st, err := Classify("BEGIN", false)
-	if err != nil {
-		t.Fatal(err)
+	for _, sql := range []string{"BEGIN", "START TRANSACTION", "COMMIT", "END", "ROLLBACK",
+		"BEGIN READ ONLY ISOLATION LEVEL SERIALIZABLE"} {
+		st, err := Classify(sql, false)
+		if err != nil {
+			t.Fatalf("Classify(%q): %v", sql, err)
+		}
+		if err := ProfileSession.admit(st); err != nil {
+			t.Errorf("session admit(%q) = %v, want nil", sql, err)
+		}
+		// And v1compat still refuses every one of them, unchanged.
+		if err := ProfileV1Compat.admit(st); !errors.Is(err, ErrStatementUnsupported) {
+			t.Errorf("v1compat admit(%q) = %v, want ErrStatementUnsupported", sql, err)
+		}
 	}
-	err = ProfileSession.admit(st)
+
+	// A verb with an admissible form the gate matrix defines, not built yet.
+	for _, sql := range []string{"SET LOCAL lock_timeout = '5s'", "LOCK TABLE t IN EXCLUSIVE MODE"} {
+		st, _ := Classify(sql, false)
+		err := ProfileSession.admit(st)
+		if !errors.Is(err, ErrStatementUnsupported) {
+			t.Errorf("session admit(%q) = %v, want a refusal", sql, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "not built yet") {
+			t.Errorf("refusal %q should say the gate is unbuilt rather than imply the verb never will be", err)
+		}
+	}
+
+	// A verb with no admissible form at all. The two refusals must not read
+	// the same: one says wait, the other says stop.
+	st, _ := Classify("PRAGMA foreign_keys = OFF", false)
+	err := ProfileSession.admit(st)
 	if !errors.Is(err, ErrStatementUnsupported) {
-		t.Fatalf("session admit(BEGIN) = %v, want ErrStatementUnsupported", err)
+		t.Fatalf("session admit(PRAGMA) = %v, want a refusal", err)
 	}
-	if !strings.Contains(err.Error(), "not wired yet") {
-		t.Errorf("refusal %q should say the engine is not built rather than imply the verb never will be", err)
+	if !strings.Contains(err.Error(), "no admissible form") {
+		t.Errorf("refusal %q should say there is no admissible form", err)
+	}
+	if strings.Contains(err.Error(), "not built yet") {
+		t.Error("a permanently refused verb must not read as merely unbuilt")
 	}
 }
 

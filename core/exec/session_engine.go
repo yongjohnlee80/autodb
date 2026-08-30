@@ -116,11 +116,65 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 		return nil, ErrSessionNotFound
 	}
 
+	// A control verb is a state transition, not SQL to forward, so it is
+	// routed before the execution pipeline is entered at all (ADR-0074 §3).
+	// Everything the pipeline would have done to it — classify, admit,
+	// authorize — still happens; it just ends in a transition rather than a
+	// statement on the wire.
+	connRow, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, s.connID).Get()
+	if err != nil {
+		return nil, auth.ErrDenied // never disclose which connections exist
+	}
+	stmt, cerr := Classify(sqlText, connRow.Engine == "mysql")
+	if cerr == nil && stmt.Class == ClassControl {
+		if err := e.profile.admit(stmt); err != nil {
+			return nil, e.rejectSession(ctx, s, ident, ip, sqlText, err)
+		}
+		// Transaction control needs a grant to match what it enables: an
+		// open transaction is a held connection and a pending write, so the
+		// floor is the same one a write needs.
+		authorized, aerr := e.auth.Authorize(ctx, token, s.connID, auth.ActionWrite)
+		if aerr != nil {
+			return nil, e.rejectSession(ctx, s, ident, ip, sqlText, aerr)
+		}
+		tc, perr := ParseTxControl(sqlText)
+		if perr != nil {
+			return nil, e.rejectSession(ctx, s, authorized, ip, sqlText, perr)
+		}
+		return e.handleTxControl(ctx, s, authorized, connRow, tc, sqlText, ip)
+	}
+
+	// An ordinary statement. If a transaction is open it runs ON it; if the
+	// transaction is aborted nothing runs at all, because the server would
+	// answer every one of them identically and the caller deserves to be
+	// told once what to do about it.
+	s.mu.Lock()
+	pinned, phase := s.tx, s.txPhase
+	s.mu.Unlock()
+	if phase == txAborted {
+		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, ErrTxAborted)
+	}
+
 	// The statement runs on the SESSION's context, not the caller's: a client
 	// that hangs up mid-statement must not silently abandon work on a live
 	// production database. The caller's cancellation is honoured by the
 	// caller's own layer, not by tearing the session's work in half.
-	return e.run(s.ctx, token, s.connID, sqlText, ip, nil)
+	var pinnedTx dao.TxConn
+	if pinned != nil {
+		pinnedTx = pinned
+	}
+	res, rerr := e.run(s.ctx, token, s.connID, sqlText, ip, nil, pinnedTx)
+	s.noteStatementOutcome(rerr)
+	return res, rerr
+}
+
+// rejectSession audits a refusal on a session-scoped call and returns it.
+func (e *Engine) rejectSession(ctx context.Context, s *session, ident auth.Identity, ip, sqlText string, cause error) error {
+	detail := fmt.Sprintf("conn %d: session %s: %v: %s", s.connID, s.id, cause, truncate(sqlText, maxAuditSQLBytes))
+	if err := e.auth.Audit(ctx, ident.UserID(), ip, "exec_rejected", detail); err != nil {
+		return err
+	}
+	return cause
 }
 
 // closeSession performs the terminal transition exactly once.
@@ -139,6 +193,30 @@ func (e *Engine) closeSession(ctx context.Context, s *session, ip, reason string
 	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	s.waitIdle(waitCtx)
 	cancel()
+
+	// The terminal transition detaches the transaction and rolls it back on
+	// a FRESH bounded context — the session's own is cancelled by now, and a
+	// rollback that cannot run because its context is gone would leave a
+	// transaction holding locks on a live database with nobody left to
+	// close it.
+	s.mu.Lock()
+	tx, txID := s.tx, s.txID
+	s.tx, s.txPhase, s.txID = nil, txNone, ""
+	s.mu.Unlock()
+	if tx != nil {
+		cctx, ccancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
+		rerr := tx.RollbackContext(cctx)
+		ccancel()
+		outcome := "rolled_back"
+		if rerr != nil {
+			outcome = "rollback_failed"
+			e.logf("session %s: rolling back %s on close: %v", s.id, txID, rerr)
+		}
+		if aerr := e.auth.Audit(context.WithoutCancel(ctx), s.userID, ip, "tx_"+outcome,
+			fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason)); aerr != nil {
+			e.logf("session %s: auditing the rollback of %s failed: %v", s.id, txID, aerr)
+		}
+	}
 
 	e.sessions.remove(s)
 	s.finishClose()

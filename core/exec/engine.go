@@ -213,7 +213,7 @@ func classToAction(c Class) auth.Action {
 // classify → authorize → guard → run → record. Reads return a page of rows
 // (Result.More reports truncation); writes/DDL return Result.Affected.
 func (e *Engine) Execute(ctx context.Context, token string, connID int64, sqlText, ip string) (*Result, error) {
-	return e.run(ctx, token, connID, sqlText, ip, nil)
+	return e.run(ctx, token, connID, sqlText, ip, nil, nil)
 }
 
 // ExecuteStream runs a read statement, invoking onRow for every row instead
@@ -222,10 +222,15 @@ func (e *Engine) ExecuteStream(ctx context.Context, token string, connID int64, 
 	if onRow == nil {
 		return nil, errors.New("exec: ExecuteStream requires an onRow callback")
 	}
-	return e.run(ctx, token, connID, sqlText, ip, onRow)
+	return e.run(ctx, token, connID, sqlText, ip, onRow, nil)
 }
 
-func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, ip string, onRow func([]any) error) (*Result, error) {
+// run is the one execution pipeline. pinned is the session's transaction when
+// one is open and nil otherwise — the ONLY difference a transaction makes is
+// where the statement lands. Classification, admission, authorization, the
+// guard and the audit are identical either way, because a session changes
+// where a statement runs and never whether it is allowed to.
+func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, ip string, onRow func([]any) error, pinned dao.TxConn) (*Result, error) {
 	// Provenance first: an invalid token gets no classification, no
 	// existence information, and a user-0 audit trail.
 	ident, err := e.auth.ValidateToken(ctx, token)
@@ -285,13 +290,16 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
 
-	target, err := e.target(ctx, connID, connRow)
-	if err != nil {
-		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "exec_conn_failed",
-			fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
-			return nil, aerr
+	var target dao.DataConn
+	if pinned == nil {
+		target, err = e.target(ctx, connID, connRow)
+		if err != nil {
+			if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "exec_conn_failed",
+				fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
+				return nil, aerr
+			}
+			return nil, err
 		}
-		return nil, err
 	}
 
 	// Durable attempt record BEFORE the target runs: a crash, timeout, or
@@ -306,9 +314,19 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	start := e.now()
 	var runErr error
 	var rowCount int64
-	if stmt.Class == ClassRead {
+	switch {
+	case pinned != nil && stmt.Class == ClassRead:
+		// On a pinned transaction the grammar was verified once at BEGIN
+		// (ADR-0074 §3), so the per-statement verify-transaction MySQL needs
+		// on the pool would be both redundant and wrong — it would open a
+		// nested transaction inside the session's.
+		rowCount, runErr = e.queryOn(ctx, pinned, sqlText, res, onRow)
+	case pinned != nil:
+		runErr = e.execOn(ctx, pinned, sqlText, res)
+		rowCount = res.Affected
+	case stmt.Class == ClassRead:
 		rowCount, runErr = e.runQuery(ctx, target, connRow.Engine, sqlText, res, onRow)
-	} else {
+	default:
 		runErr = e.runExec(ctx, target, connRow.Engine, sqlText, res)
 		rowCount = res.Affected
 	}
