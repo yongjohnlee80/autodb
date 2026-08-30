@@ -155,6 +155,54 @@ The browser text-machine behaviour — key handling, composition, paste, wide
 characters — is owned and tested by `golib/tui/web` across Chromium, Firefox and
 WebKit; autodb does not re-test it.
 
+## Production front door (in development)
+
+> Status: **design accepted, implementation phased** — ADR-0074
+> (session engine, accepted 2026-08-30), ADR-0075 (front door,
+> proposed), golib-dao-0017 (accepted). Nothing below is live yet.
+
+autodb is growing a **PostgreSQL wire-protocol listener** so an
+unmodified app (`lm-http` under dlv, `psql`, an IDE) connects to
+production *through autodb* with an ordinary DSN — production's own
+allowlist stays closed to everything but the autodb host, and every
+statement runs under the connecting developer's identity, gates, and
+audit trail: *who is debugging, under whose account, doing what*.
+
+```
+postgres://<user>:<personal-access-token>@autodb-host:5432/<connection>?sslmode=require
+```
+
+- **Credentials are named Personal Access Tokens, never passwords.**
+  Create one per machine/app (`auth.token_create "laptop-lm-http"`),
+  list them, revoke them individually — instantly. The login
+  passphrase never goes in a DSN (it unwraps your encryption keyslot).
+  Session-opens audit which token connected.
+- **Read + write, gated by role.** Devs (`editor`) run the app's real
+  read/write traffic through the full gate stack (classifier, grants,
+  WHERE-less guard, audit). `reader`-role users get sessions pinned
+  inside **server-enforced read-only transactions** — any write,
+  however smuggled (function, procedure, dynamic SQL), fails at
+  PostgreSQL with SQLSTATE 25006.
+- **Transactions behave like Postgres**: one open transaction per
+  connection; an app's connection pool holds several concurrently,
+  bounded by per-user session caps. Abandoned transactions cannot hold
+  production locks: idle-in-transaction rolls back at **90s** (or
+  **10m** on debug-profile connections, so a dlv breakpoint pause
+  doesn't kill your tx), max duration 5m — every timeout rollback is
+  audited with which limit fired.
+- **Network posture is non-negotiable:** TLS mandatory, IP allowlist
+  enforced at accept, per-connection front-door opt-in — no target is
+  reachable through this surface unless explicitly enabled.
+- **Refusals explain themselves**: autodb-layer refusals carry an
+  accurate SQLSTATE, the gate rule in DETAIL, and the fix in HINT
+  (rendered natively by psql/IDEs); target errors pass through
+  verbatim. You always know *which layer* said no.
+
+An AI-assisted unsafe-query inspection net (advisory first) is designed
+separately (ADR-0076, upcoming) and is never the security boundary —
+that remains grants + server-enforced read-only + the deterministic
+gates above.
+
 ## Layout
 
 | Path | Role |
