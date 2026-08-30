@@ -84,3 +84,48 @@ func TestLegacyIgnoresNonCanonicalWorkspaceNames(t *testing.T) {
 			"not have produced must not be presented as a workspace", ws)
 	}
 }
+
+// A drained workspace disappears from the section. The legacy tree only shrinks,
+// so once its last note is migrated or deleted the folder left behind has nothing
+// to present — the deprecated section must not linger, empty (Johno, 2026-08-30).
+func TestLegacyEmptyWorkspaceIsNotListed(t *testing.T) {
+	base := t.TempDir()
+	// ws-1 still holds a note; ws-2 was drained to its last note by the user.
+	seedLegacy(t, base, 1, "keep.sql", "select 1")
+	p := seedLegacy(t, base, 2, "gone.sql", "select 2")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	// A canonical folder that never held a `.sql` note is drained too.
+	if err := os.MkdirAll(filepath.Join(base, "ws-3"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	ws, err := OpenLegacyNotes(base).Workspaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ws) != 1 || ws[0] != 1 {
+		t.Errorf("workspaces = %v, want exactly [1] — a folder with no legacy notes "+
+			"must not be presented as a workspace", ws)
+	}
+}
+
+// The section drains as the last note is deleted THROUGH the type: after Delete
+// removes the final note, the workspace is gone from the listing even though its
+// (now-empty) folder remains on disk.
+func TestLegacyWorkspaceDrainsOnLastDelete(t *testing.T) {
+	base := t.TempDir()
+	seedLegacy(t, base, 7, "only.sql", "select 1")
+	l := OpenLegacyNotes(base)
+
+	if ws, _ := l.Workspaces(); len(ws) != 1 || ws[0] != 7 {
+		t.Fatalf("before delete: workspaces = %v, want [7]", ws)
+	}
+	if err := l.Delete(7, "only.sql"); err != nil {
+		t.Fatal(err)
+	}
+	if ws, _ := l.Workspaces(); len(ws) != 0 {
+		t.Errorf("after deleting the last note: workspaces = %v, want none", ws)
+	}
+}
