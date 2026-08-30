@@ -54,6 +54,37 @@ func TestCorpusShapes(t *testing.T) {
 		}
 	})
 
+	t.Run("a quoted alias does not make a column list a statement body", func(t *testing.T) {
+		t.Parallel()
+
+		// PostgreSQL's column-alias list. Live PG accepts
+		// `SELECT * FROM (SELECT 1) AS "x" (comment);` and returns 1.
+		//
+		// The quoted alias used to be consumed without disturbing the run of
+		// words behind it, so AS was still the nearest word when `(comment)`
+		// opened and the alias list was read as a CTE body — a valid query
+		// refused, and the unquoted spelling of the same query accepted.
+		// Only whitespace and comments are transparent to AS adjacency now.
+		for _, sql := range []string{
+			`SELECT * FROM (SELECT 1) AS "x" (comment)`,
+			`SELECT * FROM (SELECT 1) AS x (comment)`,
+			`SELECT * FROM (SELECT 1) AS "my table" (comment, id)`,
+			"SELECT * FROM (SELECT 1) AS `x` (comment)",
+		} {
+			st, err := Classify(sql, false)
+			if err != nil {
+				t.Errorf("Classify(%s) = %v, want a read", sql, err)
+				continue
+			}
+			if st.Class != ClassRead {
+				t.Errorf("Classify(%s) class = %s, want read", sql, st.Class)
+			}
+			if len(st.Nested) != 0 {
+				t.Errorf("Classify(%s) recorded nested mutations %+v", sql, st.Nested)
+			}
+		}
+	})
+
 	t.Run("a real CTE body is still a statement body", func(t *testing.T) {
 		t.Parallel()
 

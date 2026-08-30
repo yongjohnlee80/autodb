@@ -155,11 +155,17 @@ func verbClass(word string) (Class, bool) {
 // quotes, '#' line comments, /*! executable comments); leave false for
 // postgres/sqlite.
 //
-// The authorization class is the maximum verb class anywhere in the
-// statement. A write/DDL verb at paren depth > 0 (a data-modifying CTE such
-// as `WITH x AS (DELETE ...) SELECT ...`, which PostgreSQL executes) is
-// rejected outright — its embedded mutation cannot be WHERE-guarded, so v1
-// does not run it (lector M4 must-fix #1).
+// The authorization class is the maximum verb class of the statement and of
+// any statement body nested in it, so a read whose CTE writes is authorized
+// as a write.
+//
+// A mutation in a CTE body — `WITH x AS (DELETE ...) SELECT ...`, which
+// PostgreSQL really does execute — is CLASSIFIED here and reported in
+// [Statement.Nested] with the WHERE found at its own depth. It is no longer
+// rejected here: whether it may run is the engine profile's question, and
+// whether it is guarded is the guard's (ADR-0074 §2, §6). The blanket
+// refusal it replaces stood in for a guard that could not see inside a CTE,
+// and refused the guarded ones too.
 func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 	st, _, err := scanScript(sqlText, backslashEscapes, false)
 	return st, err
@@ -319,6 +325,12 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			if err != nil {
 				return st, parts, err
 			}
+			// A quoted string or delimited identifier is a token, so it ends
+			// the run of words before it. Without this, `AS "x" (comment)` —
+			// a perfectly ordinary PostgreSQL column-alias list — still saw
+			// AS as the nearest word when the paren opened, and the alias
+			// list was read as a statement body.
+			w1, w2, w3 = "", "", ""
 			i = j
 
 		case c == '$' && !backslashEscapes:
@@ -332,6 +344,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			} else {
 				i++ // '$1' positional parameter etc.
 			}
+			w1, w2, w3 = "", "", ""
 
 		case c == '(':
 			if err := content(); err != nil {
@@ -359,6 +372,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			if depth == 0 {
 				ended = true
 			}
+			w1, w2, w3 = "", "", ""
 			i++
 
 		case isWordStart(c):
@@ -413,9 +427,9 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 				// the guard can ask whether that particular mutation is
 				// guarded rather than whether the statement as a whole
 				// happens to contain a WHERE somewhere.
-				// Only a statement body yields a nested MUTATION. Class still
-				// escalates for any first-in-paren verb, which keeps the
-				// defense-in-depth escalation the classifier has always had.
+				// Only a statement body yields a nested MUTATION — and only a
+				// statement body is read as a verb at all, so this is where
+				// every below-top-level verb is accounted for.
 				if statementBody && cls == ClassWrite {
 					nested = append(nested, NestedMutation{Verb: word, Depth: depth})
 				}
@@ -475,6 +489,10 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			if err := content(); err != nil {
 				return st, parts, err
 			}
+			// Commas, operators, numbers — any token that is not a word ends
+			// the run of words. Only whitespace and comments are transparent
+			// to AS adjacency.
+			w1, w2, w3 = "", "", ""
 			i++
 		}
 	}
