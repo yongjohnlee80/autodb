@@ -176,36 +176,56 @@ func TestSession_OneInFlightStatement(t *testing.T) {
 	s.finish()
 }
 
-// A closer joins the in-flight statement rather than tearing it in half.
-func TestSession_CloseJoinsTheInFlightStatement(t *testing.T) {
+// A teardown joins the in-flight statement rather than tearing it in half —
+// and, unlike the wait this replaced, it REPORTS whether the statement
+// actually stopped. Every caller of the old wait proceeded either way, so a
+// statement still running got a rollback on its own connection.
+func TestSession_TeardownJoinsTheInFlightStatement(t *testing.T) {
 	t.Parallel()
 
-	s := &session{id: "x"}
-	cancelled := make(chan struct{})
-	s.cancel = func() { close(cancelled) }
+	sctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &session{id: "x", ctx: sctx, cancel: cancel}
 
 	if err := s.begin(); err != nil {
 		t.Fatal(err)
 	}
-	joined := make(chan struct{})
+	runCtx, endRun := s.runContext(context.Background())
+
+	joined := make(chan error, 1)
 	go func() {
-		s.waitIdle(context.Background())
-		close(joined)
+		e := &Engine{}
+		joined <- e.quiesce(context.Background(), s, 5*time.Second)
 	}()
 
 	select {
 	case <-joined:
-		t.Fatal("the closer returned while a statement was still running — " +
-			"the teardown would race the statement it is supposed to wait for")
+		t.Fatal("the teardown returned while a statement was still running — " +
+			"it would race the statement it is supposed to wait for")
 	case <-time.After(50 * time.Millisecond):
 	}
-	<-cancelled // the session context is cancelled first, so the statement can notice
 
+	// The statement's own context is cancelled first, so it can notice. The
+	// SESSION's is not: ending a statement is not ending the session.
+	select {
+	case <-runCtx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the teardown never cancelled the in-flight statement, so it has nothing to wait for")
+	}
+	if sctx.Err() != nil {
+		t.Error("quiescing cancelled the whole session; a transaction timeout ends the " +
+			"transaction, not the session that owns it")
+	}
+
+	endRun()
 	s.finish()
 	select {
-	case <-joined:
+	case err := <-joined:
+		if err != nil {
+			t.Errorf("the join reported failure after the statement finished: %v", err)
+		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("the closer never noticed the statement finishing")
+		t.Fatal("the teardown never noticed the statement finishing")
 	}
 }
 
@@ -239,8 +259,15 @@ func TestSessionRegistry_ForeignAndMissingAreIndistinguishable(t *testing.T) {
 	}
 }
 
-// THE WINDOW TEST for draining: a connection marked for deletion must not
-// accept a session admitted concurrently.
+// THE WINDOW TEST for draining.
+//
+// The previous version of this test was BLIND, which lector demonstrated by
+// running the exact mutation it was supposed to catch: unlock after the last
+// check, let setDraining finish, relock and insert anyway. It passed —
+// because it only asserted that the COMPETITOR was refused, and the
+// competitor is refused either way. The thing the guard actually promises is
+// that no session ends up admitted onto a connection whose drain has begun,
+// and that is what is asserted now.
 func TestSessionRegistry_DrainingBlocksAConcurrentAdmit(t *testing.T) {
 	t.Parallel()
 
@@ -249,28 +276,53 @@ func TestSessionRegistry_DrainingBlocksAConcurrentAdmit(t *testing.T) {
 		once      sync.Once
 		competing error
 		wg        sync.WaitGroup
+		drained   = map[SessionID]bool{}
 	)
 	r.hookAfterAdmitCheck = func() {
 		once.Do(func() {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				// setDraining takes the same lock, so it lands strictly
-				// before or after this admit — never halfway through it.
-				r.setDraining(42)
+				for _, s := range r.setDraining(42) {
+					drained[s.id] = true
+				}
 				competing = r.admit(&session{id: "after-drain", userID: 1, connID: 42})
 			}()
 			time.Sleep(20 * time.Millisecond)
 		})
 	}
-	if err := r.admit(&session{id: "before-drain", userID: 1, connID: 42}); err != nil {
-		t.Fatalf("first admit: %v", err)
-	}
+	first := r.admit(&session{id: "during-drain", userID: 1, connID: 42})
 	wg.Wait()
 
+	// The competitor is refused — necessary, but not sufficient, and on its
+	// own it is what made this test blind.
 	if !errors.Is(competing, ErrConnectionDraining) {
-		t.Fatalf("admit onto a draining connection = %v, want ErrConnectionDraining — "+
-			"a session opened here would outlive the pool it runs on", competing)
+		t.Errorf("admit onto a draining connection = %v, want ErrConnectionDraining", competing)
+	}
+
+	// THE EFFECT, stated precisely. Being in the registry while draining is
+	// not itself the defect — a session admitted BEFORE the drain began is
+	// in setDraining's snapshot and gets closed by it. The defect is a
+	// session the snapshot never saw: admitted after the drain was recorded,
+	// so nothing will ever close it and it outlives the pool it runs on.
+	//
+	// With the check and the insert split apart, `first` inserts after
+	// setDraining returned and is exactly that session. The old assertion
+	// could not see it because it only looked at the competitor.
+	r.mu.Lock()
+	var stranded []SessionID
+	for id, s := range r.byID {
+		if r.draining[s.connID] && !drained[id] {
+			stranded = append(stranded, id)
+		}
+	}
+	r.mu.Unlock()
+	if len(stranded) != 0 {
+		t.Fatalf("sessions %v are on a draining connection but were NOT in the drain snapshot — "+
+			"nothing will close them, and they outlive the pool they run on", stranded)
+	}
+	if first != nil && !errors.Is(first, ErrConnectionDraining) {
+		t.Errorf("the first admit failed for an unexpected reason: %v", first)
 	}
 }
 
@@ -344,3 +396,53 @@ func TestSessionRegistry_RemoveFreesCap(t *testing.T) {
 }
 
 var _ = meta.RoleAdmin
+
+// The context merge itself, without a database. Both bounds must hold, and
+// neither subsumes the other: the session's context is the OUTER bound (a
+// closed session stops work even if the caller waits), the caller's is the
+// INNER one (a client that hangs up stops work the session would allow).
+func TestSessionRunContext_HonoursBothBounds(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the caller's cancellation reaches the statement", func(t *testing.T) {
+		s := &session{}
+		s.ctx = context.Background()
+		caller, cancel := context.WithCancel(context.Background())
+		run, end := s.runContext(caller)
+		defer end()
+		if run.Err() != nil {
+			t.Fatal("the statement context was already cancelled before anything ran")
+		}
+		cancel()
+		select {
+		case <-run.Done():
+		case <-time.After(time.Second):
+			t.Fatal("the caller gave up and the statement kept running")
+		}
+	})
+
+	t.Run("the session's own end reaches the statement", func(t *testing.T) {
+		sctx, closeSession := context.WithCancel(context.Background())
+		s := &session{}
+		s.ctx = sctx
+		run, end := s.runContext(context.Background())
+		defer end()
+		closeSession()
+		select {
+		case <-run.Done():
+		case <-time.After(time.Second):
+			t.Fatal("the session ended and its statement kept running; a closed or timed-out " +
+				"session must stop work even while its caller is still waiting")
+		}
+	})
+
+	t.Run("finishing a statement does not cancel the session", func(t *testing.T) {
+		s := &session{}
+		s.ctx = context.Background()
+		_, end := s.runContext(context.Background())
+		end()
+		if s.ctx.Err() != nil {
+			t.Fatal("ending one statement cancelled the session that owns it")
+		}
+	})
+}

@@ -49,6 +49,24 @@ var migrations = []migration{
 			`ALTER TABLE connections ADD COLUMN debug INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
+	// v4 (ADR-0074 §1a): the per-connection pool bound.
+	//
+	// 0 means "take the install-wide value", which is why the column can be
+	// added to a live store without a decision — every existing connection
+	// keeps exactly the behaviour it had. A row may ask for FEWER connections
+	// than the operator's ceiling and never more; the cap is applied when the
+	// pool is opened rather than when the value is stored, so lowering the
+	// install-wide number immediately binds every connection that had asked
+	// for more, with no rows to rewrite.
+	{
+		Version: 4,
+		SQLite: []string{
+			`ALTER TABLE connections ADD COLUMN pool_max_conns INTEGER NOT NULL DEFAULT 0`,
+		},
+		Postgres: []string{
+			`ALTER TABLE connections ADD COLUMN pool_max_conns INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
 }
 
 // runMigrations creates the ledger, checks the downgrade guard, and applies

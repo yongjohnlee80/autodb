@@ -95,6 +95,11 @@ type session struct {
 	id     SessionID
 	userID int64
 	connID int64
+	// authSessID names the AUTH session row this exec session's authority
+	// rests on. A pinned transaction outlives the call that opened it, so the
+	// authority has to be re-checkable later without a token — and revocation
+	// and expiry both live on that row.
+	authSessID int64
 
 	// ctx outlives the RPC call that created the session, which is the whole
 	// point: a COMMIT arriving in a LATER call has to operate on a live
@@ -110,6 +115,8 @@ type session struct {
 	mu sync.Mutex
 	// busy is the one-in-flight-statement gate.
 	busy bool
+	// runCancel stops the in-flight statement without ending the session.
+	runCancel context.CancelFunc
 	// done is closed when the in-flight statement finishes, so a closer can
 	// JOIN it without holding a lock.
 	done chan struct{}
@@ -325,19 +332,73 @@ func (s *session) beginClose() bool {
 	return s.state.CompareAndSwap(int32(sessOpen), int32(sessClosing))
 }
 
-// waitIdle cancels the session context and waits for the in-flight statement
-// to finish, holding NO registry lock (the published order forbids it).
-func (s *session) waitIdle(ctx context.Context) {
-	s.cancel()
+// runContext is the context ONE statement runs on: the session's lifetime and
+// the caller's cancellation, together.
+//
+// It used to be the session's context alone, and the comment there defended
+// that choice — a client hanging up mid-statement should not abandon work on
+// a live production database. That reasoning was wrong in an important way.
+// Stateless Execute already stops when its handler is cancelled; a session
+// statement did not, so `SELECT pg_sleep(3)` kept running on the target long
+// after the client that asked for it had gone. The inconsistency is the bug:
+// two paths through the same engine answered the same question differently,
+// and the one that ignored cancellation was the one holding a pinned
+// transaction on a production database.
+//
+// Both bounds are needed and neither subsumes the other. The session context
+// is the OUTER bound — a closed or timed-out session must stop work even if
+// the caller is happily waiting — and the caller's is the INNER one. A
+// cancelled statement does not end the session or its transaction: the
+// statement returns an error, the state machine records the outcome, and the
+// next statement or the rollback runs on a fresh context of its own.
+func (s *session) runContext(caller context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(s.ctx)
+	stop := context.AfterFunc(caller, cancel)
+	// The handle is kept so the ENGINE can stop this statement without
+	// killing the session: a timeout ends the transaction, not the session,
+	// and the session's own cancel is too blunt an instrument for that.
+	s.mu.Lock()
+	s.runCancel = cancel
+	s.mu.Unlock()
+	return ctx, func() {
+		stop()
+		cancel()
+		s.mu.Lock()
+		s.runCancel = nil
+		s.mu.Unlock()
+	}
+}
+
+// cancelInFlight stops the statement currently running, if any. It does not
+// end the session.
+func (s *session) cancelInFlight() {
+	s.mu.Lock()
+	cancel := s.runCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// joinInFlight waits for the in-flight statement to finish and REPORTS
+// whether it actually did.
+//
+// The reporting is the point. The wait this replaced returned either way, so
+// every caller proceeded to roll back whether or not the statement had
+// stopped — issuing RollbackContext on a connection that was still
+// executing. A join whose result is discarded is not a join; it is a pause.
+func (s *session) joinInFlight(ctx context.Context) error {
 	s.mu.Lock()
 	done := s.done
 	s.mu.Unlock()
 	if done == nil {
-		return
+		return nil
 	}
 	select {
 	case <-done:
+		return nil
 	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

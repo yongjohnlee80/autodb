@@ -289,21 +289,101 @@ func TestInstanceLease_Postgres(t *testing.T) {
 	}
 }
 
-// The key is derived from the store's identity, so two engines pointed at one
-// DSN collide and two pointed at different stores do not. Cheap to assert and
-// it pins the documented limitation: the key is the DSN's, not the server's.
-func TestLeaseKey_IdentityAndRange(t *testing.T) {
+// MF1, both engines. A lease keyed on the SPELLING that reached the database
+// rather than on the database itself is decorative: lector obtained two leases
+// over one SQLite file through a symlink alias, and two over one PostgreSQL
+// database through DSNs differing only by application_name.
+//
+// These are the two red cells, and they are written as behaviour — a second
+// acquisition is REFUSED — rather than as assertions about a key function,
+// because the key is an implementation detail and the exclusion is the
+// promise.
+
+func TestInstanceLease_SymlinkAliasIsTheSameDatabase(t *testing.T) {
 	t.Parallel()
 
-	a := leaseKey("postgres://u:p@h/db1")
-	if a != leaseKey("postgres://u:p@h/db1") {
-		t.Error("the same DSN must produce the same key, or a second engine would not collide")
+	dir := t.TempDir()
+	direct := filepath.Join(dir, "meta.db")
+	if err := os.WriteFile(direct, nil, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if a == leaseKey("postgres://u:p@h/db2") {
-		t.Error("different stores must not share a key, or unrelated engines would exclude each other")
+	viaLink := filepath.Join(dir, "link-to-meta.db")
+	if err := os.Symlink(direct, viaLink); err != nil {
+		t.Skipf("symlinks are unavailable here: %v", err)
 	}
-	if a < 0 {
-		t.Errorf("key %d is negative; the number in a refusal should match what pg_locks shows", a)
+
+	cfg := func(p string) config.Meta { return config.Meta{Engine: "sqlite", Path: p} }
+	store := &Store{engine: "sqlite"}
+
+	first, err := AcquireLease(t.Context(), store, cfg(direct))
+	if err != nil {
+		t.Fatalf("the first lease: %v", err)
+	}
+	defer func() { _ = first.Release() }()
+
+	// Positive control: this test can observe a refusal at all. Without it a
+	// green result would only prove the guard is never reached.
+	if l, err := AcquireLease(t.Context(), store, cfg(direct)); !errors.Is(err, ErrLeaseHeld) {
+		if err == nil {
+			_ = l.Release()
+		}
+		t.Fatalf("the identical path was not refused (%v) — this test cannot observe the alias either", err)
+	}
+
+	// A directory alias is excluded by the kernel, which resolves the lease
+	// file to one inode. The FILE alias is the one that defeats the lease:
+	// one database, two .lease files, two uncontended locks.
+	second, err := AcquireLease(t.Context(), store, cfg(viaLink))
+	if err == nil {
+		_ = second.Release()
+		t.Fatalf("a second lease was granted over the SAME database through a symlink to it "+
+			"(%s -> %s); two engines would each believe they own the meta store", viaLink, direct)
+	}
+	if !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("the alias was refused for the wrong reason: %v", err)
+	}
+}
+
+// The PostgreSQL half. The lease must be keyed on the SERVER's identity, so
+// every connection string that reaches one database excludes the others.
+func TestInstanceLease_DSNVariantsAreTheSameDatabase(t *testing.T) {
+	dsn := os.Getenv("TEST_PGURL")
+	if dsn == "" {
+		t.Skip("TEST_PGURL not set; skipping the postgres identity test")
+	}
+	ctx := t.Context()
+
+	open := func(d string) *Store {
+		st, err := Open(ctx, config.Meta{Engine: "postgres", DSN: d})
+		if err != nil {
+			t.Fatalf("open %s: %v", d, err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		return st
+	}
+
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	variant := dsn + sep + "application_name=a-different-engine"
+
+	s1 := open(dsn)
+	first, err := AcquireLease(ctx, s1, config.Meta{Engine: "postgres", DSN: dsn})
+	if err != nil {
+		t.Fatalf("the first lease: %v", err)
+	}
+	defer func() { _ = first.Release() }()
+
+	s2 := open(variant)
+	second, err := AcquireLease(ctx, s2, config.Meta{Engine: "postgres", DSN: variant})
+	if err == nil {
+		_ = second.Release()
+		t.Fatal("a second lease was granted over the SAME database through a DSN differing only by " +
+			"application_name; the lease is keyed on the connection string, which a caller can vary freely")
+	}
+	if !errors.Is(err, ErrLeaseHeld) {
+		t.Fatalf("the DSN variant was refused for the wrong reason: %v", err)
 	}
 }
 

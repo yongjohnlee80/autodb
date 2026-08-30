@@ -42,6 +42,14 @@ const (
 	DefaultMaxSessionsPerUser = 8
 	DefaultMaxSessionsGlobal  = 256
 	DefaultSessionIdleTimeout = 30 * time.Minute
+
+	// Target-pool defaults (ADR-0074 §1a), mirroring core/config so an
+	// engine built without options is bounded exactly as a defaulted daemon
+	// is. They are duplicated rather than imported because core/config
+	// depends on nothing here and this package must not depend on it.
+	DefaultPoolMaxConns        = 10
+	DefaultPoolMaxConnIdleTime = 5 * time.Minute
+	DefaultPoolMaxConnLifetime = 30 * time.Minute
 	// Transaction bounds, mirroring the config package's.
 	DefaultIdleInTxTimeout      = 90 * time.Second
 	DefaultMaxTxDuration        = 5 * time.Minute
@@ -91,6 +99,12 @@ type Engine struct {
 	// onLog reports problems with no caller to return them to — a failed
 	// audit on a teardown path, say. nil discards.
 	onLog func(string)
+
+	// Target-pool bounds (ADR-0074 §1a). Defaults are set in New; a
+	// connection row may lower poolMaxConns for itself but never raise it.
+	poolMaxConns        int
+	poolMaxConnIdleTime time.Duration
+	poolMaxConnLifetime time.Duration
 }
 
 // Option configures an Engine at New time.
@@ -174,6 +188,30 @@ func WithDebugTxLimits(debugIdle, ceiling time.Duration) Option {
 }
 
 // WithLogger receives operational problems that have no caller to return to.
+// WithPoolLimits bounds each TARGET pool (ADR-0074 §1a).
+//
+// maxConns is the install-wide ceiling: a connection row may ask for fewer,
+// never more. idle and lifetime retire pooled connections — idle returns
+// budget to the target between bursts, lifetime bounds how long a physical
+// connection persists at all, which is what lets a server-side change take
+// effect without restarting the daemon.
+//
+// Non-positive values leave the existing bound in place rather than removing
+// it: "unbounded" must never be something a caller reaches by passing zero.
+func WithPoolLimits(maxConns int, idle, lifetime time.Duration) Option {
+	return func(e *Engine) {
+		if maxConns > 0 {
+			e.poolMaxConns = maxConns
+		}
+		if idle > 0 {
+			e.poolMaxConnIdleTime = idle
+		}
+		if lifetime > 0 {
+			e.poolMaxConnLifetime = lifetime
+		}
+	}
+}
+
 func WithLogger(fn func(string)) Option { return func(e *Engine) { e.onLog = fn } }
 
 func WithMaxStatementBytes(n int) Option {
@@ -194,8 +232,10 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		sessions:     newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
 		sessionIdle:  DefaultSessionIdleTimeout,
 		txLimits:     defaultTxLimits(),
-		debugIdle:    DefaultDebugIdleInTxTimeout,
-		maxTxCeiling: DefaultMaxTxDurationCeiling,
+		poolMaxConns: DefaultPoolMaxConns, poolMaxConnIdleTime: DefaultPoolMaxConnIdleTime,
+		poolMaxConnLifetime: DefaultPoolMaxConnLifetime,
+		debugIdle:           DefaultDebugIdleInTxTimeout,
+		maxTxCeiling:        DefaultMaxTxDurationCeiling,
 	}
 	for _, o := range opts {
 		o(e)

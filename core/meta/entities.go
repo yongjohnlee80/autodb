@@ -84,10 +84,15 @@ type Connection struct {
 	// (Amendment 2 C2): it takes the longer idle-in-transaction bound,
 	// because a developer paused at a breakpoint inside a transaction should
 	// not be rolled back mid-step. 0/1, matching users.disabled.
-	Debug     int64
-	CreatedBy int64
-	CreatedAt int64
-	UpdatedAt int64
+	Debug int64
+	// PoolMaxConns is this connection's own bound on pooled connections
+	// (ADR-0074 §1a). 0 takes the install-wide value; a larger number is
+	// capped to it when the pool is opened, so a row cannot raise its own
+	// share of a production database's connection budget.
+	PoolMaxConns int64
+	CreatedBy    int64
+	CreatedAt    int64
+	UpdatedAt    int64
 }
 
 // IsDebug reports whether the connection carries the debug profile.
@@ -96,28 +101,30 @@ func (c *Connection) IsDebug() bool { return c.Debug != 0 }
 type ConnField string
 
 const (
-	ConnID        ConnField = "id"
-	ConnName      ConnField = "name"
-	ConnEngine    ConnField = "engine"
-	ConnDSNEnc    ConnField = "dsn_enc"
-	ConnProfile   ConnField = "profile"
-	ConnDebug     ConnField = "debug"
-	ConnCreatedBy ConnField = "created_by"
-	ConnCreatedAt ConnField = "created_at"
-	ConnUpdatedAt ConnField = "updated_at"
+	ConnID           ConnField = "id"
+	ConnName         ConnField = "name"
+	ConnEngine       ConnField = "engine"
+	ConnDSNEnc       ConnField = "dsn_enc"
+	ConnProfile      ConnField = "profile"
+	ConnDebug        ConnField = "debug"
+	ConnPoolMaxConns ConnField = "pool_max_conns"
+	ConnCreatedBy    ConnField = "created_by"
+	ConnCreatedAt    ConnField = "created_at"
+	ConnUpdatedAt    ConnField = "updated_at"
 )
 
 func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort, int64] {
 	return schema(conn, "connections", ConnID, map[ConnField]dao.Field[*Connection]{
-		ConnID:        {Column: "id", Scan: func(r *Connection) any { return &r.ID }},
-		ConnName:      {Column: "name", Scan: func(r *Connection) any { return &r.Name }, Value: func(r *Connection) any { return r.Name }},
-		ConnEngine:    {Column: "engine", Scan: func(r *Connection) any { return &r.Engine }, Value: func(r *Connection) any { return r.Engine }},
-		ConnProfile:   {Column: "profile", Scan: func(r *Connection) any { return &r.Profile }, Value: func(r *Connection) any { return r.Profile }},
-		ConnDebug:     {Column: "debug", Scan: func(r *Connection) any { return &r.Debug }, Value: func(r *Connection) any { return r.Debug }},
-		ConnDSNEnc:    {Column: "dsn_enc", Scan: func(r *Connection) any { return &r.DSNEnc }, Value: func(r *Connection) any { return r.DSNEnc }},
-		ConnCreatedBy: {Column: "created_by", Scan: func(r *Connection) any { return &r.CreatedBy }, Value: func(r *Connection) any { return r.CreatedBy }},
-		ConnCreatedAt: {Column: "created_at", Scan: func(r *Connection) any { return &r.CreatedAt }, Value: func(r *Connection) any { return r.CreatedAt }},
-		ConnUpdatedAt: {Column: "updated_at", Scan: func(r *Connection) any { return &r.UpdatedAt }, Value: func(r *Connection) any { return r.UpdatedAt }},
+		ConnID:           {Column: "id", Scan: func(r *Connection) any { return &r.ID }},
+		ConnName:         {Column: "name", Scan: func(r *Connection) any { return &r.Name }, Value: func(r *Connection) any { return r.Name }},
+		ConnEngine:       {Column: "engine", Scan: func(r *Connection) any { return &r.Engine }, Value: func(r *Connection) any { return r.Engine }},
+		ConnProfile:      {Column: "profile", Scan: func(r *Connection) any { return &r.Profile }, Value: func(r *Connection) any { return r.Profile }},
+		ConnDebug:        {Column: "debug", Scan: func(r *Connection) any { return &r.Debug }, Value: func(r *Connection) any { return r.Debug }},
+		ConnPoolMaxConns: {Column: "pool_max_conns", Scan: func(r *Connection) any { return &r.PoolMaxConns }, Value: func(r *Connection) any { return r.PoolMaxConns }},
+		ConnDSNEnc:       {Column: "dsn_enc", Scan: func(r *Connection) any { return &r.DSNEnc }, Value: func(r *Connection) any { return r.DSNEnc }},
+		ConnCreatedBy:    {Column: "created_by", Scan: func(r *Connection) any { return &r.CreatedBy }, Value: func(r *Connection) any { return r.CreatedBy }},
+		ConnCreatedAt:    {Column: "created_at", Scan: func(r *Connection) any { return &r.CreatedAt }, Value: func(r *Connection) any { return r.CreatedAt }},
+		ConnUpdatedAt:    {Column: "updated_at", Scan: func(r *Connection) any { return &r.UpdatedAt }, Value: func(r *Connection) any { return r.UpdatedAt }},
 	})
 }
 

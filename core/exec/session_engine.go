@@ -21,7 +21,7 @@ import (
 
 // OpenSession creates a session bound to one connection for one user.
 func (e *Engine) OpenSession(ctx context.Context, token string, connID int64, ip string) (SessionID, error) {
-	ident, err := e.auth.ValidateToken(ctx, token)
+	ident, authSessID, err := e.auth.SessionRef(ctx, token)
 	if err != nil {
 		return "", err
 	}
@@ -45,12 +45,13 @@ func (e *Engine) OpenSession(ctx context.Context, token string, connID int64, ip
 	// own cancel, which is what a close uses to stop in-flight work.
 	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s := &session{
-		id:       id,
-		userID:   ident.UserID(),
-		connID:   connID,
-		ctx:      sctx,
-		cancel:   cancel,
-		lastUsed: e.now(),
+		id:         id,
+		userID:     ident.UserID(),
+		authSessID: authSessID,
+		connID:     connID,
+		ctx:        sctx,
+		cancel:     cancel,
+		lastUsed:   e.now(),
 	}
 	if err := e.sessions.admit(s); err != nil {
 		cancel()
@@ -153,7 +154,9 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 			if err := e.admitSessionState(ctx, s, authorized, stmt.Verb, sqlText, ip, txOpen); err != nil {
 				return nil, err
 			}
-			return e.run(s.ctx, token, s.connID, sqlText, ip, nil, pinned)
+			runCtx, endRun := s.runContext(ctx)
+			defer endRun()
+			return e.run(runCtx, token, s.connID, sqlText, ip, nil, pinned)
 		}
 
 		tc, perr := ParseTxControl(sqlText)
@@ -174,15 +177,13 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, ErrTxAborted)
 	}
 
-	// The statement runs on the SESSION's context, not the caller's: a client
-	// that hangs up mid-statement must not silently abandon work on a live
-	// production database. The caller's cancellation is honoured by the
-	// caller's own layer, not by tearing the session's work in half.
 	var pinnedTx dao.TxConn
 	if pinned != nil {
 		pinnedTx = pinned
 	}
-	res, rerr := e.run(s.ctx, token, s.connID, sqlText, ip, nil, pinnedTx)
+	runCtx, endRun := s.runContext(ctx)
+	defer endRun()
+	res, rerr := e.run(runCtx, token, s.connID, sqlText, ip, nil, pinnedTx)
 	s.noteStatementOutcome(rerr)
 	return res, rerr
 }
@@ -242,23 +243,42 @@ func (e *Engine) closeSession(ctx context.Context, s *session, ip, reason string
 	if !s.beginClose() {
 		return // someone else owns the teardown
 	}
-	// No registry lock is held here: waitIdle can block on a statement, and
+	// No registry lock is held here: quiescing can block on a statement, and
 	// the published lock order forbids waiting on session I/O under the
 	// registry's mutex.
-	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	s.waitIdle(waitCtx)
-	cancel()
+	//
+	// The result of the join is CHECKED. It was not before: the close waited
+	// ten seconds and then rolled back whichever way the wait had gone, so a
+	// statement still executing would receive a rollback on its own
+	// connection — the same concurrent-command bug as the timeout path, in
+	// the path that runs on every ordinary close.
+	quiesced := e.quiesce(ctx, s, closeQuiesceTimeout)
 
-	// The terminal transition detaches the transaction and rolls it back on
-	// a FRESH bounded context — the session's own is cancelled by now, and a
-	// rollback that cannot run because its context is gone would leave a
-	// transaction holding locks on a live database with nobody left to
-	// close it.
 	s.mu.Lock()
 	tx, txID := s.tx, s.txID
-	s.tx, s.txPhase, s.txID = nil, txNone, ""
+	if quiesced == nil {
+		// Detach only when it is safe to. Leaving the transaction attached
+		// to a session that is going away is the lesser evil: the pool's
+		// teardown and the server-side belt both end it, whereas rolling
+		// back underneath a live statement corrupts the connection state for
+		// whatever the pool hands out next.
+		s.tx, s.txPhase, s.txID = nil, txNone, ""
+	}
 	s.mu.Unlock()
-	if tx != nil {
+
+	switch {
+	case quiesced != nil && tx != nil:
+		e.logf("session %s: closing on %s but the in-flight statement would not stop (%v); "+
+			"the transaction is left to the connection teardown and the server-side belt",
+			s.id, reason, quiesced)
+		e.auditBounded(ctx, s.userID, ip, "tx_rollback_skipped",
+			fmt.Sprintf("conn %d: session %s: %s: %s: in-flight statement did not stop",
+				s.connID, s.id, txID, reason))
+	case tx != nil:
+		// A FRESH bounded context: the session's own is cancelled by now, and
+		// a rollback that cannot run because its context is gone would leave
+		// a transaction holding locks on a live database with nobody left to
+		// close it.
 		cctx, ccancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
 		rerr := tx.RollbackContext(cctx)
 		ccancel()
@@ -267,23 +287,25 @@ func (e *Engine) closeSession(ctx context.Context, s *session, ip, reason string
 			outcome = "rollback_failed"
 			e.logf("session %s: rolling back %s on close: %v", s.id, txID, rerr)
 		}
-		if aerr := e.auth.Audit(context.WithoutCancel(ctx), s.userID, ip, "tx_"+outcome,
-			fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason)); aerr != nil {
-			e.logf("session %s: auditing the rollback of %s failed: %v", s.id, txID, aerr)
-		}
+		e.auditBounded(ctx, s.userID, ip, "tx_"+outcome,
+			fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
 	}
+
+	// The session's own context is cancelled last, once nothing is running on
+	// it and the rollback has had its fresh context.
+	s.cancel()
 
 	e.sessions.remove(s)
 	s.finishClose()
 
-	if err := e.auth.Audit(context.WithoutCancel(ctx), s.userID, ip, "session_closed",
-		fmt.Sprintf("conn %d: session %s: %s", s.connID, s.id, reason)); err != nil {
-		// A failed audit must not leave the session half-closed; it is
-		// already out of the registry. Record it where an operator will see
-		// it rather than swallowing it.
-		e.logf("session %s closed but the audit record failed: %v", s.id, err)
-	}
+	e.auditBounded(ctx, s.userID, ip, "session_closed",
+		fmt.Sprintf("conn %d: session %s: %s", s.connID, s.id, reason))
 }
+
+// closeQuiesceTimeout bounds the wait for an in-flight statement during a
+// close. Longer than the timeout path's: a close is usually a person asking,
+// and finishing the rollback properly is worth a few more seconds.
+const closeQuiesceTimeout = 15 * time.Second
 
 // closeSessionsFor closes every session on a connection. It is the first step
 // of deleting or closing a connection: the pool must not go away underneath a

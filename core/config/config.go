@@ -154,6 +154,32 @@ type Exec struct {
 	// limit past what the operator decided, or the production-safety bound
 	// becomes advisory.
 	MaxTxDurationCeiling Duration `toml:"max_tx_duration_ceiling"`
+
+	// PoolMaxConns bounds the connections one TARGET pool may open
+	// (ADR-0074 §1a). A pinned transaction holds a physical connection for
+	// as long as the session keeps it open, so without a bound a handful of
+	// callers with open transactions can consume a production database's
+	// entire connection budget — and the first thing that fails is somebody
+	// else's application, not autodb.
+	//
+	// A connection row may ask for LESS (its own workload may deserve less
+	// of the budget), never more: the operator's number is a ceiling, and a
+	// row that could raise it would make the bound advisory.
+	PoolMaxConns int `toml:"pool_max_conns"`
+
+	// PoolMaxConnIdleTime and PoolMaxConnLifetime retire pooled connections.
+	// Idle time returns budget to the target between bursts; lifetime bounds
+	// how long a physical connection persists at all, which is what makes a
+	// server-side change — a rotated credential, a restarted primary, a
+	// changed default — take effect without restarting the daemon.
+	PoolMaxConnIdleTime Duration `toml:"pool_max_conn_idle_time"`
+	PoolMaxConnLifetime Duration `toml:"pool_max_conn_lifetime"`
+
+	// JanitorInterval is how often the engine sweeps for expired
+	// transactions and idle sessions. It bounds how far past its deadline an
+	// abandoned transaction can hold locks, so it is a fraction of the
+	// shortest bound rather than a tuning preference.
+	JanitorInterval Duration `toml:"janitor_interval"`
 }
 
 // TUI configures the standalone terminal UI (ADR-0057).
@@ -240,6 +266,10 @@ func Default() Config {
 			MaxTxDuration:        Duration(DefaultMaxTxDuration),
 			DebugIdleInTxTimeout: Duration(DefaultDebugIdleInTxTimeout),
 			MaxTxDurationCeiling: Duration(DefaultMaxTxDurationCeiling),
+			PoolMaxConns:         DefaultPoolMaxConns,
+			PoolMaxConnIdleTime:  Duration(DefaultPoolMaxConnIdleTime),
+			PoolMaxConnLifetime:  Duration(DefaultPoolMaxConnLifetime),
+			JanitorInterval:      Duration(DefaultJanitorInterval),
 		},
 	}
 }
@@ -262,6 +292,23 @@ const (
 	DefaultMaxTxDuration        = 5 * time.Minute
 	DefaultDebugIdleInTxTimeout = 10 * time.Minute
 	DefaultMaxTxDurationCeiling = 30 * time.Minute
+
+	// DefaultPoolMaxConns is deliberately small. The engine's job is to run
+	// an operator's statements, not to saturate the target: 10 is enough for
+	// the session caps above to be reachable while leaving a production
+	// database's connection budget to the applications that depend on it.
+	DefaultPoolMaxConns = 10
+
+	// A connection idle for 5 minutes is between bursts of work, and half an
+	// hour is long enough to be useful while short enough that a server-side
+	// change lands the same shift.
+	DefaultPoolMaxConnIdleTime = 5 * time.Minute
+	DefaultPoolMaxConnLifetime = 30 * time.Minute
+
+	// A tenth of the 90s idle-in-transaction bound: an expired transaction
+	// is rolled back within a few seconds of its deadline rather than at the
+	// next thing that happens to look.
+	DefaultJanitorInterval = 10 * time.Second
 )
 
 // Duration is a TOML-friendly time.Duration: written as a string ("30m",
@@ -396,6 +443,25 @@ func (c Config) validate() error {
 	if c.Exec.MaxTxDuration > c.Exec.MaxTxDurationCeiling {
 		return fmt.Errorf("%w: exec.max_tx_duration %s exceeds exec.max_tx_duration_ceiling %s",
 			ErrInvalid, c.Exec.MaxTxDuration.Duration(), c.Exec.MaxTxDurationCeiling.Duration())
+	}
+	if c.Exec.PoolMaxConns <= 0 {
+		return fmt.Errorf("%w: exec.pool_max_conns is %d; a target pool must be bounded, and 0 is not "+
+			"unlimited — remove the key to take the default of %d",
+			ErrInvalid, c.Exec.PoolMaxConns, DefaultPoolMaxConns)
+	}
+	if c.Exec.PoolMaxConnLifetime > 0 && c.Exec.PoolMaxConnIdleTime > c.Exec.PoolMaxConnLifetime {
+		return fmt.Errorf("%w: exec.pool_max_conn_idle_time (%s) exceeds pool_max_conn_lifetime (%s), "+
+			"so the idle bound could never retire a connection first", ErrInvalid,
+			c.Exec.PoolMaxConnIdleTime.Duration(), c.Exec.PoolMaxConnLifetime.Duration())
+	}
+	if c.Exec.JanitorInterval <= 0 {
+		return fmt.Errorf("%w: exec.janitor_interval is %s; with no sweep an expired transaction holds "+
+			"locks on the target until its client disconnects", ErrInvalid, c.Exec.JanitorInterval.Duration())
+	}
+	if c.Exec.JanitorInterval.Duration() >= c.Exec.IdleInTxTimeout.Duration() {
+		return fmt.Errorf("%w: exec.janitor_interval (%s) is not shorter than exec.idle_in_tx_timeout (%s), "+
+			"so a transaction could sit well past its deadline before anything looked", ErrInvalid,
+			c.Exec.JanitorInterval.Duration(), c.Exec.IdleInTxTimeout.Duration())
 	}
 	if c.Exec.SessionIdleTimeout <= 0 {
 		return fmt.Errorf("%w: exec.session_idle_timeout %s must be positive — an unbounded idle window "+

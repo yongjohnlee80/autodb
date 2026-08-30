@@ -287,3 +287,40 @@ func describeTxOptions(o dao.TxOptions) string {
 
 // txCleanupTimeout bounds a commit or rollback taken on a fresh context.
 const txCleanupTimeout = 30 * time.Second
+
+// quiesce stops the in-flight statement and waits for it to actually stop.
+//
+// This is the ordering every teardown path must follow before it touches the
+// transaction: CANCEL, then JOIN, and only then roll back. Skipping it issues
+// RollbackContext on a connection that is still executing a statement — two
+// commands in flight on one connection, which is undefined at the protocol
+// level and was observable with a controllable DAO.
+//
+// A non-nil error means the statement did NOT stop within the bound, and the
+// caller must not proceed to roll back. That is the whole reason this returns
+// an error at all: the previous code waited and then continued regardless,
+// which is a pause rather than a join.
+func (e *Engine) quiesce(ctx context.Context, s *session, bound time.Duration) error {
+	s.cancelInFlight()
+	wait, cancel := context.WithTimeout(context.WithoutCancel(ctx), bound)
+	defer cancel()
+	return s.joinInFlight(wait)
+}
+
+// auditBounded writes an audit record on a context that cannot hang.
+//
+// Cleanup audits ran on WithoutCancel with no deadline, so a meta store that
+// had become unresponsive would block a rollback path — the one path that
+// most needs to finish — for as long as the store took to answer.
+func (e *Engine) auditBounded(ctx context.Context, userID int64, ip, action, detail string) {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	if err := e.auth.Audit(actx, userID, ip, action, detail); err != nil {
+		e.logf("auditing %s failed: %v", action, err)
+	}
+}
+
+// auditTimeout bounds a cleanup audit. Generous, because losing the record of
+// why a transaction ended is a real loss — but bounded, because a teardown
+// that cannot finish is a worse one.
+const auditTimeout = 10 * time.Second
