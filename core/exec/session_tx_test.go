@@ -54,22 +54,31 @@ func TestSession_AbortedPhaseFollowsTheServer(t *testing.T) {
 
 	s := &session{id: "x", txPhase: txActive}
 
-	// An ordinary failure does not abort the transaction: a unique-violation
-	// inside a transaction leaves it perfectly usable, and treating it as
-	// terminal would throw away work the caller can still commit.
-	s.noteStatementOutcome(errors.New("some ordinary failure"))
+	// A CLIENT-side failure never reached the server, so it cannot have
+	// aborted anything: a guard refusal or a parse error leaves the
+	// transaction exactly as it was.
+	s.noteStatementOutcome(errors.New("some client-side refusal"))
 	if s.txPhase != txActive {
-		t.Fatalf("phase = %v after an ordinary error, want active", s.txPhase)
-	}
-	s.noteStatementOutcome(pgErrorWithCode("23505")) // unique_violation
-	if s.txPhase != txActive {
-		t.Fatalf("phase = %v after a constraint violation, want active", s.txPhase)
+		t.Fatalf("phase = %v after a client-side error, want active", s.txPhase)
 	}
 
-	// 25P02 is the server saying the transaction is finished.
-	s.noteStatementOutcome(pgErrorWithCode("25P02"))
+	// ANY server error aborts a PostgreSQL transaction — including an
+	// ordinary constraint violation. This test previously asserted the
+	// opposite, and the live suite disproved it: after a failing statement
+	// the NEXT one came back with a raw 25P02, which is the server saying
+	// the transaction had been aborted all along. 25P02 is the report, not
+	// the event.
+	s.noteStatementOutcome(pgErrorWithCode("23505")) // unique_violation
 	if s.txPhase != txAborted {
-		t.Fatalf("phase = %v after 25P02, want aborted", s.txPhase)
+		t.Fatalf("phase = %v after a constraint violation, want aborted — PostgreSQL aborts "+
+			"a transaction on ANY error, and waiting for 25P02 marks it one statement late", s.txPhase)
+	}
+
+	// And the report itself, on a fresh session.
+	s2 := &session{id: "y", txPhase: txActive}
+	s2.noteStatementOutcome(pgErrorWithCode("25P02"))
+	if s2.txPhase != txAborted {
+		t.Fatalf("phase = %v after 25P02, want aborted", s2.txPhase)
 	}
 
 	// And it does not un-abort.

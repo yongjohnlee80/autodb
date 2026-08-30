@@ -243,11 +243,23 @@ func (e *Engine) finalize(ctx context.Context, s *session, tx dao.ContextTxConn,
 }
 
 // noteStatementOutcome moves the session into the aborted phase when the
-// target reports the transaction is no longer usable.
+// target has ended the transaction.
 //
-// PostgreSQL answers every subsequent statement with 25P02 once a transaction
-// has failed, so tracking it here turns a confusing wall of identical server
-// errors into one engine-level answer that says what to do about it.
+// ANY server error inside a PostgreSQL transaction block aborts it — not just
+// the 25P02 that reports the abort afterwards. That distinction cost this
+// code a round: keying on 25P02 alone marked the session aborted one
+// statement LATE, because 25P02 is what the server says to the statement
+// AFTER the one that failed. The live test caught it by failing a statement
+// and watching the next one come back with a raw server error instead of the
+// engine's answer.
+//
+// Client-side refusals — the guard, the gate, a parse — never reach the
+// server and so never abort anything, which is why this keys on the error
+// being a *pgconn.PgError rather than on there being an error at all.
+//
+// The rule is PostgreSQL's, and the session path is PostgreSQL-only by
+// construction: no other driver satisfies ContextTxConn, so no other
+// dialect's error semantics can reach here.
 func (s *session) noteStatementOutcome(err error) {
 	if err == nil {
 		return
@@ -256,15 +268,11 @@ func (s *session) noteStatementOutcome(err error) {
 	if !errors.As(err, &pgErr) {
 		return
 	}
-	switch pgErr.Code {
-	case "25P02", // in_failed_sql_transaction
-		"25001": // active_sql_transaction — a statement not allowed in a tx
-		s.mu.Lock()
-		if s.txPhase == txActive && pgErr.Code == "25P02" {
-			s.txPhase = txAborted
-		}
-		s.mu.Unlock()
+	s.mu.Lock()
+	if s.txPhase == txActive {
+		s.txPhase = txAborted
 	}
+	s.mu.Unlock()
 }
 
 // describeTxOptions renders the options for an audit record. The record says
