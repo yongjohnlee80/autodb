@@ -99,7 +99,7 @@ local function eq(a, b) return vim.deep_equal(a, b) end
 -- some — a mis-scoped skip, a section that stops executing — the total falls below
 -- this and the run fails, even when nothing that DID run failed. Raise it when the
 -- suite legitimately grows; never lower it to make a run pass.
-local EXPECTED_MIN_ASSERTIONS = 241
+local EXPECTED_MIN_ASSERTIONS = 279
 local missing_prereqs = {}
 local function require_bin(section)
   missing_prereqs[#missing_prereqs + 1] = section
@@ -1686,6 +1686,216 @@ print("\n[17] detail views — a value, not '(no help entries)'")
 
   results.close()
   results.reset_for_tests()
+end)()
+
+print("\n[18] the drawer — instances, host arbitration, and teardown (ADR-0078)")
+;(function()
+  local drawer = require("autodb.views.drawer")
+  local hostreg = drawer._host_for_tests
+  local panel_mod = require("auto-core").ui.panel
+
+  local function reset()
+    hostreg._reset_for_tests()
+    require("autodb.panel")._reset_for_tests()
+  end
+  reset()
+
+  -- ── the view contract (ADR-0078 §3.2) ───────────────────────
+  local v = drawer.new()
+  ok("p18: bufnr() is nil before the first get_buffer", v:bufnr() == nil)
+  local b = v:get_buffer(vim.api.nvim_get_current_win())
+  ok("p18: get_buffer returns a live scratch buffer",
+    b and vim.api.nvim_buf_is_valid(b) and vim.bo[b].buftype == "nofile" and vim.bo[b].swapfile == false)
+  ok("p18: bufnr() is that buffer once mounted", v:bufnr() == b)
+  ok("p18: the default profile is autodb's own identity",
+    vim.bo[b].filetype == "autodb" and vim.b[b].autodb_view == "drawer"
+      and vim.api.nvim_buf_get_name(b):find("autodb://drawer", 1, true) ~= nil)
+
+  -- Migrated from auto-finder smoke [49], which drove this renderer while it
+  -- still lived there. The vocabulary is the view's, so it travels with it.
+  local maps = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do maps[m.lhs] = true end
+  ok("p18: the panel vocabulary is bound (<CR>, o, i, R, ?)",
+    maps["<CR>"] and maps["o"] and maps["i"] and maps["R"] and maps["?"],
+    vim.inspect(vim.tbl_keys(maps)))
+  ok("p18: h and l stay ordinary cursor motions", maps["h"] == nil and maps["l"] == nil)
+  -- With no session the drawer states that and names the way forward,
+  -- rather than rendering an empty pane. (auto-finder's [49] looked for
+  -- "autodb is not installed" — that was ITS placeholder screen, a
+  -- different surface that stays in auto-finder with the facade.)
+  local rendered = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  ok("p18: with no session it says so instead of rendering empty",
+    rendered:find("Not connected", 1, true) ~= nil, rendered)
+  ok("p18: and points at the way forward", rendered:find("sign in", 1, true) ~= nil, rendered)
+  ok("p18: rows stay parallel to lines",
+    v._st._rows and #v._st._rows == #vim.api.nvim_buf_get_lines(b, 0, -1, false),
+    tostring(v._st._rows and #v._st._rows))
+
+  -- Criterion 7: subscriptions exist WITHOUT auto-finder, and go away.
+  -- Before ADR-0078 this was the silent defect: the renderer reached into
+  -- auto-finder.shared.view_subs behind a pcall, so standalone it rendered
+  -- one frame and never refreshed again.
+  ok("p18: subscriptions are live with no auto-finder present", v._sub_count() > 0,
+    tostring(v._sub_count()))
+  v:dispose()
+  ok("p18: dispose releases the buffer and every handle",
+    v:bufnr() == nil and v._sub_count() == 0)
+  v:dispose()
+  ok("p18: dispose is idempotent", v:bufnr() == nil)
+
+  -- Criterion 5/9: instances share nothing, so one buffer is never mounted
+  -- in two panels (auto-core restamps b:auto_core_panel_owner every mount).
+  local a1, a2 = drawer.new(), drawer.new()
+  local b1 = a1:get_buffer(vim.api.nvim_get_current_win())
+  local b2 = a2:get_buffer(vim.api.nvim_get_current_win())
+  ok("p18: two instances own two different buffers", b1 ~= b2)
+  ok("p18: two instances share no state", a1._st ~= a2._st)
+  a1:dispose(); a2:dispose()
+
+  -- Criterion 6: the auto-finder profile reproduces that plugin's identity
+  -- exactly. Its smoke asserts all three, so this is the regression gate.
+  local af = drawer.new({ filetype = "auto-finder", buf_var = "auto_finder_view",
+    buf_var_value = "dbase", buf_name = "auto-finder://dbase" })
+  local bf = af:get_buffer(vim.api.nvim_get_current_win())
+  ok("p18: the auto-finder profile yields ft/var/name unchanged",
+    vim.bo[bf].filetype == "auto-finder" and vim.b[bf].auto_finder_view == "dbase"
+      and vim.api.nvim_buf_get_name(bf):find("auto-finder://dbase", 1, true) ~= nil)
+  af:dispose()
+
+  -- ── host arbitration (ADR-0078 §3.3) ────────────────────────
+  reset()
+  local calls = { mount = 0, focus = 0, close = 0 }
+  local last_release
+  local function fake(id, priority, opts)
+    opts = opts or {}
+    return {
+      id = id, priority = priority,
+      profile = drawer.DEFAULT_PROFILE,
+      available = function()
+        if opts.available_raises then error("available boom") end
+        return opts.available ~= false
+      end,
+      mount = function(view, release)
+        calls.mount = calls.mount + 1
+        last_release = release
+        if opts.mount_raises then error("mount boom") end
+        if opts.mount_nil then return nil end
+        if opts.mount_invalid then return 999999 end
+        local w = vim.api.nvim_get_current_win()
+        if opts.mount_wrong_buffer then return w end   -- window shows someone else
+        vim.api.nvim_win_set_buf(w, view:get_buffer(w))
+        return w
+      end,
+      focus = function()
+        calls.focus = calls.focus + 1
+        if opts.focus_raises then error("focus boom") end
+        return vim.api.nvim_get_current_win()
+      end,
+      close = function()
+        calls.close = calls.close + 1
+        if opts.close_raises then error("close boom") end
+      end,
+    }
+  end
+
+  ok("p18: register_host accepts a well-formed provider", drawer.register_host(fake("a", 10)) == true)
+  local dup_ok, dup_err = drawer.register_host(fake("b", 10))
+  ok("p18: a duplicate priority is REFUSED with a machine-readable code",
+    dup_ok == false and dup_err and dup_err.code == "duplicate_priority",
+    vim.inspect(dup_err))
+  local bad_ok, bad_err = drawer.register_host({ id = "c", priority = 1 })
+  ok("p18: a malformed provider is refused, not raised",
+    bad_ok == false and bad_err and bad_err.code == "invalid")
+
+  local oo, ov
+  drawer.open(function(o, val) oo, ov = o, val end)
+  ok("p18: open mounts on the available host", oo == true and ov.host == "a", vim.inspect(ov))
+  ok("p18: owner() names it", drawer.owner() == "a")
+  local mounted_view = drawer.mounted_view()
+  ok("p18: the mounted view has a live buffer", mounted_view and mounted_view:bufnr() ~= nil)
+
+  -- Criterion 8a: a HOST-initiated release ends central ownership, and the
+  -- next open is a FRESH mount rather than a focus of the disposed surface.
+  local dead = mounted_view
+  last_release()
+  ok("p18: release() clears the owner", drawer.owner() == nil)
+  ok("p18: release() disposed the view", dead:bufnr() == nil and dead._sub_count() == 0)
+  drawer.open(function(o, val) oo, ov = o, val end)
+  ok("p18: reopening is a FRESH mount, not a focus of the dead surface",
+    oo == true and drawer.mounted_view() ~= dead and drawer.mounted_view():bufnr() ~= nil)
+
+  -- A release from a SUPERSEDED mount must not clear its successor.
+  local stale_release = last_release
+  drawer.register_host(fake("z", 50))            -- higher priority
+  drawer.open(function() end)                    -- handoff: z takes over
+  ok("p18: a higher-priority host wins the handoff", drawer.owner() == "z")
+  local live = drawer.mounted_view()
+  stale_release()
+  ok("p18: a release from a superseded mount is a no-op",
+    drawer.owner() == "z" and drawer.mounted_view() == live and live:bufnr() ~= nil)
+
+  -- Criterion 8b/8c: provider failures leave no half-mounted world.
+  reset()
+  drawer.register_host(fake("raise", 10, { mount_raises = true }))
+  drawer.open(function(o, val) oo, ov = o, val end)
+  ok("p18: a raising mount reports host_failed and leaves NO owner",
+    oo == false and ov.code == "host_failed" and drawer.owner() == nil, vim.inspect(ov))
+
+  reset()
+  drawer.register_host(fake("nilw", 10, { mount_nil = true }))
+  drawer.open(function(o) oo = o end)
+  ok("p18: a mount returning nil takes the same rollback", oo == false and drawer.owner() == nil)
+
+  reset()
+  drawer.register_host(fake("badw", 10, { mount_invalid = true }))
+  drawer.open(function(o) oo = o end)
+  ok("p18: a mount returning an invalid winid takes the rollback",
+    oo == false and drawer.owner() == nil)
+
+  reset()
+  drawer.register_host(fake("wrongbuf", 10, { mount_wrong_buffer = true }))
+  drawer.open(function(o) oo = o end)
+  ok("p18: a window showing SOMEONE ELSE'S buffer is not a successful mount",
+    oo == false and drawer.owner() == nil)
+
+  reset()
+  drawer.register_host(fake("noavail", 10, { available = false }))
+  drawer.open(function(o, val) oo, ov = o, val end)
+  ok("p18: an unavailable host is skipped -> no_host", oo == false and ov.code == "no_host")
+
+  reset()
+  drawer.register_host(fake("boom", 10, { available_raises = true }))
+  drawer.open(function(o, val) oo, ov = o, val end)
+  ok("p18: a RAISING available() is treated as unavailable, not fatal",
+    oo == false and ov.code == "no_host")
+
+  -- A host that cannot tidy up must still not strand the instance.
+  reset()
+  drawer.register_host(fake("dirty", 10, { close_raises = true }))
+  drawer.open(function() end)
+  local stranded = drawer.mounted_view()
+  drawer.unregister_host("dirty")
+  ok("p18: a raising close() still disposes and clears",
+    drawer.owner() == nil and stranded:bufnr() == nil)
+
+  -- ── the self-hosted panel (criteria 1 and 8) ────────────────
+  reset()
+  require("autodb.panel").setup()
+  drawer.open(function(o, val) oo, ov = o, val end)
+  ok("p18: with auto-core only, autodb self-hosts the drawer",
+    oo == true and ov.host == "autodb", vim.inspect(ov))
+  local pv = drawer.mounted_view()
+  ok("p18: the drawer is visible in a real window",
+    #vim.fn.win_findbuf(pv:bufnr()) > 0)
+  local p = panel_mod.get("autodb")
+  ok("p18: the panel is named autodb, never auto-finder", p ~= nil and panel_mod.get("auto-finder") == nil)
+  p:close()
+  vim.wait(50)
+  ok("p18: closing the panel disposes the buffer, the handles and the owner",
+    drawer.owner() == nil and pv:bufnr() == nil and pv._sub_count() == 0)
+  drawer.open(function(o) oo = o end)
+  ok("p18: and reopening mounts a fresh view", oo == true and drawer.mounted_view() ~= pv)
+  reset()
 end)()
 
 if #missing_prereqs > 0 then
