@@ -97,9 +97,29 @@ var migrations = []migration{
 	// points at is gone. A deleted connection must not take the evidence of
 	// what it did with it.
 	//
-	// The UNIQUE(tx_id, seq) is what makes "append-only" enforceable at the
-	// store rather than by convention: a writer that tries to rewrite a
-	// transition collides instead of silently succeeding.
+	// TWO durable guards, because they enforce different invariants and
+	// neither implies the other:
+	//
+	//   UNIQUE(tx_id, seq)              -- append-only. A writer that tries
+	//                                      to rewrite a transition collides
+	//                                      instead of silently succeeding.
+	//   UNIQUE(tx_id) WHERE terminal    -- exactly-one-terminal. Two
+	//                                      resolvers appending DIFFERENT
+	//                                      seqs would both satisfy the first
+	//                                      index while contradicting each
+	//                                      other, so G2 needs its own.
+	//
+	// The second one lives in the store on purpose (lector Amendment-4 r0
+	// MF3): the instance lease gives one PROCESS, not one goroutine, and the
+	// periodic reconciler, the checkout trigger, the boundary handler and
+	// the timeout reaper can all overlap inside it. An application-level
+	// check-then-write cannot make exactly-one-terminal true across four
+	// concurrent resolvers; a unique index can, and a loser sees a
+	// constraint violation it must read as "another resolver got there
+	// first" rather than as an error to retry into a duplicate.
+	//
+	// Partial indexes are supported by both engines (SQLite 3.8+, Postgres),
+	// so this is one predicate rather than two dialect-specific mechanisms.
 	{
 		Version: 5,
 		SQLite: []string{
@@ -115,6 +135,7 @@ var migrations = []migration{
 				target_xid TEXT NOT NULL DEFAULT '',
 				created_at BIGINT NOT NULL)`,
 			`CREATE UNIQUE INDEX idx_tx_outcomes_seq ON tx_outcomes(tx_id, seq)`,
+			`CREATE UNIQUE INDEX idx_tx_outcomes_terminal ON tx_outcomes(tx_id) WHERE state IN ('committed','rolled_back','outcome_unresolvable')`,
 			`CREATE INDEX idx_tx_outcomes_state ON tx_outcomes(state, created_at)`,
 		},
 		Postgres: []string{
@@ -130,6 +151,7 @@ var migrations = []migration{
 				target_xid TEXT NOT NULL DEFAULT '',
 				created_at BIGINT NOT NULL)`,
 			`CREATE UNIQUE INDEX idx_tx_outcomes_seq ON tx_outcomes(tx_id, seq)`,
+			`CREATE UNIQUE INDEX idx_tx_outcomes_terminal ON tx_outcomes(tx_id) WHERE state IN ('committed','rolled_back','outcome_unresolvable')`,
 			`CREATE INDEX idx_tx_outcomes_state ON tx_outcomes(state, created_at)`,
 		},
 	},
