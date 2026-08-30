@@ -65,7 +65,7 @@ func (v *historyView) hints() []keyHint {
 	return []keyHint{
 		{"j/k", "down / up"}, {"Enter", "show the full script"},
 		{"y", "copy the script to the editor register"},
-		{"e", "load the script into the query editor"}, {"Esc", "close"},
+		{"e", "load the script into the query editor"}, {"q/Esc", "close"},
 	}
 }
 
@@ -90,6 +90,10 @@ func (v *historyView) HandleEvent(ev tui.Event) bool {
 	k, ok := ev.(tui.KeyEvent)
 	if !ok || k.Kind == tui.KeyRelease {
 		return false
+	}
+	if dismissKey(ev) {
+		v.float.Hide()
+		return true
 	}
 	switch {
 	case k.Code == tui.KeyEnter:
@@ -218,7 +222,17 @@ func (s *scriptView) Layout(c tui.Constraints) tui.Size {
 
 func (s *scriptView) Render(tui.Surface) {}
 
-func (s *scriptView) HandleEvent(ev tui.Event) bool { return false }
+// The read-only vim viewer forwards keys to the focused Editor, which leaves an
+// unbound `q` to bubble in Normal mode (and, since golib v0.5.3, a no-op Esc too).
+// So `q` and Esc both reach here and close the viewer — the same second dismiss
+// key the other read-only floats carry.
+func (s *scriptView) HandleEvent(ev tui.Event) bool {
+	if dismissKey(ev) {
+		s.float.Hide()
+		return true
+	}
+	return false
+}
 
 func (s *scriptView) Add(...tui.Component) {}
 func (s *scriptView) Remove(tui.Component) {}
@@ -236,7 +250,7 @@ func (s *scriptView) Children() iter.Seq[tui.Component] {
 func (s *scriptView) hints() []keyHint {
 	return []keyHint{
 		{"hjkl / w b", "move"}, {"v/V then y", "select and yank"},
-		{"Esc", "close"},
+		{"q/Esc", "close"},
 	}
 }
 

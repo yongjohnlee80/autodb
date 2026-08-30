@@ -72,7 +72,7 @@ func (g *manager[T]) hints() []keyHint {
 	for _, a := range g.actions {
 		out = append(out, keyHint{key: string(a.key), label: a.label})
 	}
-	return append(out, keyHint{key: "Esc", label: "close"})
+	return append(out, keyHint{key: "q/Esc", label: "close"})
 }
 
 func (g *manager[T]) AcceptsFocus() bool { return true }
@@ -126,6 +126,10 @@ func (g *manager[T]) Layout(c tui.Constraints) tui.Size {
 func (g *manager[T]) Render(tui.Surface) {}
 
 func (g *manager[T]) HandleEvent(ev tui.Event) bool {
+	if dismissKey(ev) {
+		g.float.Hide()
+		return true
+	}
 	if k, ok := ev.(tui.KeyEvent); ok && k.Kind != tui.KeyRelease && k.Text != "" {
 		r := []rune(k.Text)[0]
 		for _, a := range g.actions {
