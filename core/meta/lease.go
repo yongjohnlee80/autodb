@@ -145,6 +145,34 @@ func acquireFileLease(path string) (*InstanceLease, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("meta: creating the lease directory: %w", err)
 	}
+	// The lock has to name the DATABASE, not the spelling of the path that
+	// reached it. Two engines started as `meta.db` and `link-to-meta.db`
+	// were both granted a lease over one file, which makes the lease
+	// decorative: absolute-ise and resolve symlinks so both spellings
+	// collapse to the same lock file.
+	//
+	// The FILE is what has to be resolved, not just the directory. A
+	// directory alias is already handled for us — the lease file is opened
+	// through the kernel, which resolves `alias/meta.db.lease` and
+	// `real/meta.db.lease` to one inode, and flock excludes on the inode. It
+	// is a symlink to the STORE ITSELF that defeats the lease: `meta.db` and
+	// `link-to-meta.db` are one database but two distinct `.lease` files, so
+	// two engines each take an uncontended lock and both believe they own it.
+	//
+	// AcquireLease is called after meta.Open, so the store exists by then and
+	// EvalSymlinks resolves. The directory fallback covers the case where it
+	// does not — EvalSymlinks fails on a missing path — which leaves a narrow
+	// residue: a dangling symlink to a store that has not been created yet
+	// still aliases. That is bounded by the ordering in cmd/autodb rather
+	// than by this function, so it is stated here rather than hidden.
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	} else if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+		path = filepath.Join(dir, filepath.Base(path))
+	}
 	lockPath := path + ".lease"
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -188,7 +216,22 @@ func acquirePGLease(ctx context.Context, s *Store, dsn string) (*InstanceLease, 
 		return nil, fmt.Errorf("meta: pinning a connection for the instance lease: %w", err)
 	}
 
-	key := leaseKey(dsn)
+	// The key must name the DATABASE, not the DSN that reached it. Two
+	// engines pointed at one database by DSNs differing only in
+	// application_name were both granted a lease, which is the same failure
+	// the symlink alias produced for sqlite — and it is worse here, because
+	// a connection string has many more ways to differ while meaning the
+	// same thing.
+	//
+	// So the identity comes from the SERVER: its cluster identifier and the
+	// database's own oid. That costs a round trip before the lock is taken,
+	// which I previously avoided and should not have — a lease keyed on
+	// something a caller can vary is not a lease.
+	key, err := serverLeaseKey(ctx, tx)
+	if err != nil {
+		_ = rollbackQuietly(tx)
+		return nil, err
+	}
 	rows, err := tx.QueryContext(ctx, "SELECT pg_try_advisory_xact_lock($1)", key)
 	if err != nil {
 		_ = rollbackQuietly(tx)
@@ -262,19 +305,39 @@ func rollbackQuietly(tx dao.ContextTxConn) error {
 	return tx.RollbackContext(cctx)
 }
 
-// leaseKey derives the advisory-lock key from the store's canonical identity.
+// serverLeaseKey derives the advisory-lock key from the server's own identity
+// — the cluster's system identifier and the database's oid — so every DSN
+// that reaches one database produces one key.
 //
-// It hashes the DSN, which is what the operator actually configured. Two
-// engines pointed at one database by DSNs that differ only in spelling would
-// hash differently and both start — a real limit, recorded here rather than
-// papered over: the honest fix is to key on the server's own identity
-// (system identifier + database oid), which needs a round trip this call
-// deliberately does not make before the lock is taken.
-func leaseKey(dsn string) int64 {
+// pg_control_system() is readable by any connected role on a default
+// install; if it is not, the error says so rather than falling back to
+// something weaker, because a lease that silently degrades to a
+// caller-controlled key is worse than a refusal to start.
+//
+// The oid is cast to bigint explicitly: pgx will not scan the oid type into
+// an int64 in binary format, and the cast is the honest fix — an oid IS a
+// 32-bit unsigned number, and widening it here is exact.
+func serverLeaseKey(ctx context.Context, tx dao.ContextTxConn) (int64, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT (SELECT system_identifier FROM pg_control_system()),
+		        (SELECT oid::bigint FROM pg_database WHERE datname = current_database())`)
+	if err != nil {
+		return 0, fmt.Errorf("meta: reading the server's identity for the instance lease "+
+			"(the lease cannot be keyed on the connection string, which can vary for one database): %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return 0, fmt.Errorf("meta: the server reported no identity for the instance lease")
+	}
+	var sysID int64
+	var dbOID int64
+	if err := rows.Scan(&sysID, &dbOID); err != nil {
+		return 0, fmt.Errorf("meta: reading the server's identity: %w", err)
+	}
 	h := fnv.New64a()
 	_, _ = h.Write([]byte("autodb-instance-lease\x00"))
-	_, _ = h.Write([]byte(dsn))
+	_, _ = fmt.Fprintf(h, "%d/%d", sysID, dbOID)
 	// Advisory keys are signed; masking the top bit keeps it positive so the
-	// number in a refusal message matches what pg_locks shows.
-	return int64(h.Sum64() & 0x7fffffffffffffff)
+	// number in a refusal matches what pg_locks shows.
+	return int64(h.Sum64() & 0x7fffffffffffffff), nil
 }

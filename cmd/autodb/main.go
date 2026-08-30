@@ -227,6 +227,23 @@ func runServe(configPath string) error {
 	// TestInstanceLease_ReleaseBeforeStoreCloseDoesNotHang pins it.
 	defer func() { _ = lease.Release() }()
 
+	// MF2 — the lease has to be CONSUMED, not merely acquired. Lost() closes
+	// when the heartbeat can no longer confirm the lock: the postgres
+	// backend was terminated, the advisory lock dropped, the file lease
+	// vanished. Until now nothing read it, so an engine that lost its lock
+	// kept serving — and a second engine, seeing the lock free, would take
+	// it. That is precisely the two-engines-one-store state the lease exists
+	// to prevent, reached THROUGH the lease.
+	//
+	// So losing it is a shutdown, not a warning. serveCtx is what the server
+	// runs on; cancelling it unwinds the listener and every defer above in
+	// order, and the operator is told which invariant failed rather than
+	// being left with a silently degraded daemon.
+	serveCtx, stopServing := context.WithCancel(ctx)
+	defer stopServing()
+	leaseLost := watchLease(serveCtx, lease.Lost(), stopServing,
+		func(msg string) { fmt.Fprintln(os.Stderr, msg) })
+
 	svc, err := auth.New(store, auth.WithConfigAllowlist(cfg.Security.IPAllowlist))
 	if err != nil {
 		ln.Close()
@@ -239,11 +256,24 @@ func runServe(configPath string) error {
 	// script's text recorded. The switch says it controls whether the script
 	// TEXT is kept, which makes a silently-ignored `enabled = false` a
 	// privacy promise the binary was not keeping.
-	eng := coreexec.New(store, svc,
-		coreexec.WithHistory(cfg.History.Enabled),
-		coreexec.WithMaxStatementBytes(cfg.Exec.MaxStatementBytes),
-	)
+	//
+	// MF3 — every [exec] setting below reaches the engine here. They did not
+	// before: the caps, the session idle timeout, and all four transaction
+	// bounds were parsed, validated, defaulted, and then dropped, so an
+	// operator who set max_tx_duration got the built-in default and no
+	// indication otherwise. A configuration value that does not reach the
+	// thing it configures is worse than an absent one, because it reads as a
+	// decision that was made.
+	eng := coreexec.New(store, svc, execOptions(cfg,
+		func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) })...)
 	defer eng.Close()
+
+	// MF3 — and the janitor is STARTED. The timeout machinery is otherwise
+	// inert in production: reapExpired is only ever called by tests, so an
+	// abandoned transaction would sit holding locks on a live target for as
+	// long as the client stayed connected, which is the exact failure the
+	// bounds were written for. It stops with serveCtx.
+	eng.StartJanitor(serveCtx, cfg.Exec.JanitorInterval.Duration())
 
 	// The operational logger is NOT optional: the transport deliberately
 	// withholds error detail from the wire (deny-before-disclose), so the
@@ -258,7 +288,70 @@ func runServe(configPath string) error {
 	srv := rpc.New(svc, eng, cfg.Server, version,
 		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot))
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
-	return srv.Run(ctx)
+	err = srv.Run(serveCtx)
+	// A lease loss is reported as the failure it is. Without this the
+	// shutdown is indistinguishable from a clean SIGTERM, and the one
+	// condition an operator most needs to see would exit 0.
+	select {
+	case <-leaseLost:
+		return fmt.Errorf("stopped serving: the instance lease on this meta store was lost")
+	default:
+	}
+	return err
+}
+
+// execOptions maps the loaded configuration onto engine options.
+//
+// It exists as a named function so the mapping can be ASSERTED. Every setting
+// here was previously parsed, validated, defaulted — and then dropped on the
+// floor, because the call site passed only two of them. Nothing failed; an
+// operator who set max_tx_duration simply got the built-in default and no
+// indication that their value had gone nowhere. A configuration value that
+// does not reach what it configures is worse than an absent one, since it
+// reads as a decision that was made.
+//
+// Building the list separately from constructing the engine is what lets a
+// test observe the mapping without a meta store, an auth service, or a
+// listener.
+func execOptions(cfg config.Config, onLog func(string)) []coreexec.Option {
+	return []coreexec.Option{
+		coreexec.WithHistory(cfg.History.Enabled),
+		coreexec.WithMaxStatementBytes(cfg.Exec.MaxStatementBytes),
+		coreexec.WithSessionLimits(cfg.Exec.MaxSessionsPerUser, cfg.Exec.MaxSessionsGlobal),
+		coreexec.WithSessionIdleTimeout(cfg.Exec.SessionIdleTimeout.Duration()),
+		coreexec.WithTxLimits(cfg.Exec.IdleInTxTimeout.Duration(), cfg.Exec.MaxTxDuration.Duration()),
+		coreexec.WithDebugTxLimits(cfg.Exec.DebugIdleInTxTimeout.Duration(), cfg.Exec.MaxTxDurationCeiling.Duration()),
+		coreexec.WithPoolLimits(cfg.Exec.PoolMaxConns,
+			cfg.Exec.PoolMaxConnIdleTime.Duration(), cfg.Exec.PoolMaxConnLifetime.Duration()),
+		coreexec.WithLogger(onLog),
+	}
+}
+
+// watchLease stops the daemon when the instance lease is lost.
+//
+// The lease was acquired and then never consulted again: Lost() closes when
+// the heartbeat can no longer confirm the lock — the backend was terminated,
+// the advisory lock dropped, the lease file vanished — and with nothing
+// reading it the engine kept serving without one. A second engine, finding
+// the lock free, would then take it, which is exactly the two-engines-one-store
+// state the lease exists to prevent, reached THROUGH the lease.
+//
+// So a lost lease is a shutdown, not a warning. The returned channel closes
+// when that happens, so the caller can report the reason rather than exiting
+// as if a clean signal had arrived.
+func watchLease(ctx context.Context, lost <-chan struct{}, stop func(), warn func(string)) <-chan struct{} {
+	fired := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-lost:
+			close(fired)
+			warn("autodb: the instance lease on this meta store was lost; refusing to keep serving " +
+				"(another autodb may now hold it)")
+			stop()
+		}
+	}()
+	return fired
 }
 
 func isAddrInUse(err error) bool {

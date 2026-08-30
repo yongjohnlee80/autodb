@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/yongjohnlee80/golib/dao"
 	"github.com/yongjohnlee80/golib/dao/mysql"
 	"github.com/yongjohnlee80/golib/dao/postgres"
@@ -18,6 +20,15 @@ import (
 // use: decrypt the identity-bound DSN (ErrLocked before any passphrase
 // login), open the engine's driver, and probe with SELECT 1.
 func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection) (dao.DataConn, error) {
+	// A connection being deleted must not have its pool handed out or
+	// RECREATED. Without this check the cache would happily rebuild a pool
+	// for a connection whose sessions were just closed, so stateless work
+	// could keep using a connection the operator is removing — the ordering
+	// ADR-0074 §1 establishes for conn.delete, applied at the one place a
+	// pool is actually obtained.
+	if e.sessions.isDraining(connID) {
+		return nil, fmt.Errorf("%w: connection %d", ErrConnectionDraining, connID)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if c, ok := e.conns[connID]; ok {
@@ -38,7 +49,8 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 		// session mutated after pooling (set_config through a verb-level
 		// read) can serve a statement. Autocommit is preserved, keeping
 		// transaction-prohibited DDL executable (ADR-0055 rev 5).
-		conn, err = postgres.OpenNamed(ctx, name, string(dsn), pgPrepareConnVerify())
+		conn, err = postgres.OpenNamed(ctx, name, string(dsn),
+			pgPrepareConnVerify(), e.pgPoolLimits(row))
 	case "mysql":
 		conn, err = mysql.OpenNamed(ctx, name, string(dsn))
 	case "sqlite":
@@ -64,6 +76,38 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 	}
 	e.conns[connID] = conn
 	return conn, nil
+}
+
+// pgPoolLimits applies the target-pool bounds (ADR-0074 §1a).
+//
+// A pinned transaction holds a physical connection for as long as its session
+// keeps it open, so an unbounded pool lets a few callers with open
+// transactions consume a production database's entire connection budget —
+// and the first thing to fail is somebody else's application. The bound is
+// the point; the retirement settings are what keep a server-side change from
+// requiring a daemon restart.
+//
+// The per-connection value is a REQUEST, capped here rather than at the point
+// it was stored. That ordering matters: lowering the install-wide ceiling
+// immediately binds every connection that had asked for more, with no rows to
+// rewrite and no window where a stale request outranks the current policy.
+func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
+	max := e.poolMaxConns
+	if row != nil && row.PoolMaxConns > 0 && int(row.PoolMaxConns) < max {
+		max = int(row.PoolMaxConns)
+	}
+	idle, lifetime := e.poolMaxConnIdleTime, e.poolMaxConnLifetime
+	return func(cfg *pgxpool.Config) {
+		if max > 0 {
+			cfg.MaxConns = int32(max)
+		}
+		if idle > 0 {
+			cfg.MaxConnIdleTime = idle
+		}
+		if lifetime > 0 {
+			cfg.MaxConnLifetime = lifetime
+		}
+	}
 }
 
 // closeTarget drops a cached connection (used on delete).

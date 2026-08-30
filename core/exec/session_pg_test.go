@@ -333,3 +333,171 @@ func mustSession(t *testing.T, f *fixture, sid SessionID, sql string) {
 		t.Fatalf("SessionExecute(%q): %v", sql, err)
 	}
 }
+
+// MF5. A statement in a session must stop when the caller that asked for it
+// gives up. Stateless Execute already did; SessionExecute did not, so
+// `SELECT pg_sleep(...)` kept running on the target long after the client had
+// gone — and it was doing so while holding a pinned transaction on what may
+// be a production database. Two paths through one engine answering the same
+// question differently is the defect; the one that ignored cancellation was
+// the more dangerous of the two.
+func TestSessionExecute_HandlerCancellationStopsTheStatement(t *testing.T) {
+	f, _, sid, _ := pgSession(t)
+
+	// Positive control: the same statement COMPLETES when nobody cancels it,
+	// on a budget far shorter than pg_sleep(30). Without this, a green result
+	// below would be satisfied by a session that could not run anything at
+	// all.
+	quick, cancelQuick := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelQuick()
+	if _, err := f.eng.SessionExecute(quick, f.rootTok, sid, "SELECT pg_sleep(0.1)", testIP); err != nil {
+		t.Fatalf("an uncancelled sleep failed (%v); this test cannot observe cancellation either", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		_, err := f.eng.SessionExecute(ctx, f.rootTok, sid, "SELECT pg_sleep(30)", testIP)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a cancelled statement returned success")
+		}
+		if elapsed := time.Since(start); elapsed > 10*time.Second {
+			t.Fatalf("the statement returned after %s; it ran to completion rather than being "+
+				"cancelled, so the target kept working for a client that had gone", elapsed)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the caller cancelled and the statement kept running on the target; a client that " +
+			"hangs up leaves work executing inside a pinned transaction on a live database")
+	}
+
+	// And the SESSION survives. Cancelling one statement is not a reason to
+	// tear down the session or its transaction — the next statement runs on
+	// a context of its own.
+	after, cancelAfter := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelAfter()
+	if _, err := f.eng.SessionExecute(after, f.rootTok, sid, "SELECT 1", testIP); err != nil {
+		t.Errorf("the session was unusable after a cancelled statement: %v", err)
+	}
+}
+
+// MF6, all four ways an authority can end. Revoking permission mid-transaction
+// denied the caller's NEXT statement and nothing more — so a client that
+// simply stopped talking after BEGIN kept its locks on the target for the full
+// transaction budget, and re-adding the grant let it carry on as though
+// nothing had been revoked. That is the probe lector ran: remove the grant,
+// re-add it, ROLLBACK succeeds, proving the transaction had stayed open.
+//
+// A rollback that fires for a removed grant but not for a disabled user would
+// be a coincidence rather than a guarantee, which is why all four run here.
+func TestSessionAuthority_RevocationForcesAnAuditedRollback(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		revoke func(t *testing.T, f *fixture, connID int64, userID int64)
+	}{
+		{"the grant on this connection is removed", func(t *testing.T, f *fixture, connID, userID int64) {
+			if err := f.svc.RemoveGrant(context.Background(), f.rootTok, userID, connID, testIP); err != nil {
+				t.Fatalf("RemoveGrant: %v", err)
+			}
+		}},
+		{"the user is disabled", func(t *testing.T, f *fixture, connID, userID int64) {
+			if err := f.store.Users.OnCtx(context.Background()).With(meta.UserID, userID).
+				Set(meta.UserDisabled, int64(1)).Update(); err != nil {
+				t.Fatalf("disabling the user: %v", err)
+			}
+		}},
+		{"the auth session is revoked", func(t *testing.T, f *fixture, connID, userID int64) {
+			if err := f.store.Sessions.OnCtx(context.Background()).With(meta.SessUserID, userID).
+				Set(meta.SessRevoked, int64(1)).Update(); err != nil {
+				t.Fatalf("revoking the auth session: %v", err)
+			}
+		}},
+		{"the auth session expires", func(t *testing.T, f *fixture, connID, userID int64) {
+			if err := f.store.Sessions.OnCtx(context.Background()).With(meta.SessUserID, userID).
+				Set(meta.SessExpiresAt, time.Now().Add(-time.Hour).Unix()).Update(); err != nil {
+				t.Fatalf("expiring the auth session: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, connID, sid, _ := pgSession(t)
+			ctx := context.Background()
+
+			if _, err := f.eng.SessionExecute(ctx, f.rootTok, sid, "BEGIN", testIP); err != nil {
+				t.Fatalf("BEGIN: %v", err)
+			}
+			s, err := f.eng.sessions.lookup(sid, userIDOf(t, f))
+			if err != nil {
+				t.Fatalf("the session vanished before the revocation: %v", err)
+			}
+			if s.get() != sessOpen || s.txPhase == txNone {
+				t.Fatal("no transaction is open, so this test cannot observe one being rolled back")
+			}
+
+			// Positive control: with the authority intact the sweep leaves
+			// the transaction alone. Without it, a sweep that rolled back
+			// unconditionally would satisfy every assertion below.
+			if n := f.eng.reapExpired(ctx, time.Now()); n != 0 {
+				t.Fatalf("the sweep acted on %d sessions while the authority still stood", n)
+			}
+
+			tc.revoke(t, f, connID, s.userID)
+
+			if n := f.eng.reapExpired(ctx, time.Now()); n != 1 {
+				t.Fatalf("the sweep acted on %d sessions after the authority ended, want 1: the "+
+					"transaction is still holding locks on the target for a caller who is no "+
+					"longer entitled to touch it", n)
+			}
+
+			// The transaction is gone and the session with it. Re-granting
+			// must not resurrect either — that was the exact hole: re-adding
+			// the grant let ROLLBACK succeed, which proved the transaction
+			// had never been ended.
+			if err := f.svc.AddGrant(ctx, f.rootTok, s.userID, connID, "admin", testIP); err == nil {
+				if _, err := f.eng.SessionExecute(ctx, f.rootTok, sid, "ROLLBACK", testIP); err == nil {
+					t.Fatal("ROLLBACK succeeded after the grant was restored, so the revoked " +
+						"transaction had stayed open the whole time")
+				}
+			}
+
+			if !auditMentions(t, f, reasonAuthorityRevoked) {
+				t.Errorf("no audit record names %q; an operator reading the trail cannot tell "+
+					"this transaction ended because permission was withdrawn rather than "+
+					"because someone was slow", reasonAuthorityRevoked)
+			}
+		})
+	}
+}
+
+func userIDOf(t *testing.T, f *fixture) int64 {
+	t.Helper()
+	ident, err := f.svc.ValidateToken(context.Background(), f.rootTok)
+	if err != nil {
+		t.Fatalf("ValidateToken: %v", err)
+	}
+	return ident.UserID()
+}
+
+func auditMentions(t *testing.T, f *fixture, want string) bool {
+	t.Helper()
+	rows, err := f.store.Audit.OnCtx(context.Background()).Select()
+	if err != nil {
+		t.Fatalf("reading the audit trail: %v", err)
+	}
+	for _, a := range rows {
+		if strings.Contains(a.Detail, want) || strings.Contains(a.Action, want) {
+			return true
+		}
+	}
+	return false
+}

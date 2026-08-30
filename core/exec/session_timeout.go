@@ -2,11 +2,13 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
 
+	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -118,6 +120,21 @@ func (e *Engine) reapExpired(ctx context.Context, now time.Time) int {
 		s.mu.Unlock()
 
 		if phase != txNone {
+			// Authority is re-checked BEFORE the clock. A revoked authority
+			// is not a slower version of a timeout: the transaction is
+			// holding locks on a target the caller is no longer entitled to
+			// touch, and waiting out the remaining minutes of its budget
+			// keeps it holding them.
+			//
+			// Denying the caller's NEXT statement is not enough, and was
+			// what happened before. A client that simply stops talking after
+			// BEGIN never sends a next statement, so a revoked user's
+			// transaction stayed open for its full duration — and re-adding
+			// the grant let them carry on as if nothing had been revoked.
+			if e.revokeExpiredAuthority(ctx, s, txID) {
+				acted++
+				continue
+			}
 			reason := limits.expiredReason(now, last, opened)
 			if reason == "" {
 				continue
@@ -139,7 +156,32 @@ func (e *Engine) reapExpired(ctx context.Context, now time.Time) int {
 // rollbackExpired ends one transaction that has passed a limit, audited with
 // WHICH limit fired — the ADR is explicit that a timeout rollback is
 // distinguishable from every other kind.
+// reasonAuthorityRevoked is the audited reason for a rollback forced by an
+// authority ending rather than by a clock. It is a distinct reason on purpose:
+// an operator reading the audit needs to see that a transaction was ended
+// because permission was withdrawn, not because someone was slow.
+const reasonAuthorityRevoked = "authority-revoked"
+
 func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason string) {
+	// Cancel, then JOIN, then roll back. Without this the rollback was
+	// issued while a statement was still executing on the same connection —
+	// two commands in flight at once. The timeout path never did either: it
+	// took the transaction out from under whatever was running and rolled it
+	// back concurrently.
+	if err := e.quiesce(ctx, s, quiesceTimeout); err != nil {
+		// The statement did not stop. Rolling back now would be the exact
+		// concurrent-command bug, so the transaction is LEFT ATTACHED and
+		// the next sweep tries again — with the server-side belt as the
+		// backstop underneath it. Left visible rather than silent, because a
+		// statement that ignores cancellation is itself worth knowing about.
+		e.logf("session %s: %s expired but the in-flight statement would not stop (%v); "+
+			"leaving the transaction for the next sweep", s.id, txID, err)
+		e.auditBounded(ctx, s.userID, "", "tx_rollback_deferred",
+			fmt.Sprintf("conn %d: session %s: %s: %s: in-flight statement did not stop",
+				s.connID, s.id, txID, reason))
+		return
+	}
+
 	s.mu.Lock()
 	tx := s.tx
 	s.tx, s.txPhase, s.txID = nil, txNone, ""
@@ -158,11 +200,15 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 		outcome = "rollback_failed"
 		e.logf("session %s: rolling back %s on %s: %v", s.id, txID, reason, err)
 	}
-	if aerr := e.auth.Audit(context.WithoutCancel(ctx), s.userID, "", "tx_"+outcome,
-		fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason)); aerr != nil {
-		e.logf("session %s: auditing the %s rollback of %s failed: %v", s.id, reason, txID, aerr)
-	}
+	e.auditBounded(ctx, s.userID, "", "tx_"+outcome,
+		fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
 }
+
+// quiesceTimeout bounds how long a teardown waits for an in-flight statement
+// to stop after being cancelled. With the statement running on a context the
+// engine controls, cancellation reaches the driver, so this is an outer bound
+// on a fast path rather than an expected wait.
+const quiesceTimeout = 10 * time.Second
 
 // StartJanitor runs the reaper until ctx is done. The daemon calls it once;
 // tests call reapExpired directly with their own clock.
@@ -182,4 +228,36 @@ func (e *Engine) StartJanitor(ctx context.Context, every time.Duration) {
 			}
 		}
 	}()
+}
+
+// revokeExpiredAuthority rolls back and closes a session whose authority has
+// ended, and reports whether it acted.
+//
+// It covers every way an authority can end — logout, an admin revoking the
+// user's sessions, expiry, the user being disabled, the grant on this
+// connection being removed or lowered — because a rollback that fires for a
+// removed grant but not for a disabled user is a coincidence rather than a
+// guarantee. The write floor is used deliberately: an open transaction is a
+// held connection and a pending write, so the authority it needs to CONTINUE
+// is the one it needed to begin.
+//
+// A store failure is not a revocation. If the meta store cannot be read, the
+// authority is left standing and the timeouts still bound the transaction —
+// tearing down live work because a lookup failed would turn a blip in the
+// meta store into rolled-back transactions across every open session.
+func (e *Engine) revokeExpiredAuthority(ctx context.Context, s *session, txID string) bool {
+	err := e.auth.StillAuthorized(ctx, s.authSessID, s.userID, s.connID, auth.ActionWrite)
+	if err == nil {
+		return false
+	}
+	if !errors.Is(err, auth.ErrDenied) {
+		e.logf("session %s: re-checking authority failed, leaving the transaction to its timeouts: %v", s.id, err)
+		return false
+	}
+	e.rollbackExpired(ctx, s, txID, reasonAuthorityRevoked)
+	// And the session goes with it. Leaving it open would leave a caller
+	// holding a handle to a connection they are no longer entitled to, ready
+	// to BEGIN again the moment a grant reappeared.
+	e.closeSession(ctx, s, "", reasonAuthorityRevoked)
+	return true
 }

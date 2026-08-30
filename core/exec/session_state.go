@@ -70,12 +70,30 @@ var grammarGUCs = map[string]bool{
 // rather than enabling it. Widening this list is a decision with a reason,
 // which is why it is a list rather than a rule.
 var benignGUCs = map[string]bool{
-	"lock_timeout":                        true,
-	"statement_timeout":                   true,
+	"lock_timeout":         true,
+	"statement_timeout":    true,
+	"deadlock_timeout":     true,
+	"work_mem":             true,
+	"maintenance_work_mem": true,
+}
+
+// engineGUCs are set by the ENGINE on a pinned transaction and are never
+// admissible from a user statement.
+//
+// idle_in_transaction_session_timeout is the server-side belt, and letting a
+// user set it inverts the very ordering the belt depends on: `SET LOCAL
+// idle_in_transaction_session_timeout = '50ms'` inside a transaction lets the
+// SERVER kill it before the engine's deadline fires, so the rollback happens
+// with no audited engine record of why. It was on the benign allowlist —
+// which made the gate the thing that undermined the guarantee it exists to
+// protect.
+//
+// Engine-originated controls do not pass through the user gate at all. They
+// are emitted directly by armServerBelt, which is the only correct
+// relationship: a control the engine relies on must not be reachable through
+// the surface it is guarding.
+var engineGUCs = map[string]bool{
 	"idle_in_transaction_session_timeout": true,
-	"deadlock_timeout":                    true,
-	"work_mem":                            true,
-	"maintenance_work_mem":                true,
 }
 
 // setStatement is a parsed SET.
@@ -177,6 +195,11 @@ func leadingNames(sqlText string, max int) ([]string, error) {
 // LOCAL to a statement that would still be refused with LOCAL wastes their
 // next attempt and implies the setting is otherwise available.
 func admitSet(st setStatement, txOpen bool) error {
+	if engineGUCs[st.Name] {
+		return fmt.Errorf("%w: %s is set by the engine to bound this transaction, and letting a "+
+			"statement change it would let the server end the transaction before the engine's own "+
+			"deadline — with no audited record of why", ErrSetGUCRefused, st.Name)
+	}
 	if grammarGUCs[st.Name] {
 		return fmt.Errorf("%w: %s desynchronizes the engine's reading of your SQL from the server's, "+
 			"so it is refused in every form including SET LOCAL", ErrSetGUCRefused, st.Name)

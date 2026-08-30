@@ -150,6 +150,29 @@ debug_idle_in_tx_timeout = "10m"
 # the production-safety bound would be advisory.
 max_tx_duration_ceiling = "30m"
 
+# How many connections one TARGET pool may open. A pinned transaction holds a
+# physical connection for as long as its session keeps it open, so without a
+# bound a few callers with open transactions can consume a production
+# database's whole connection budget — and what fails first is somebody else's
+# application, not autodb.
+#
+# A connection row may ask for FEWER; it can never ask for more. This number is
+# a ceiling, and a row able to raise it would make the bound advisory.
+pool_max_conns = 10
+
+# When pooled connections are retired. Idle time returns budget to the target
+# between bursts; lifetime bounds how long a physical connection persists at
+# all, which is what makes a server-side change — a rotated credential, a
+# restarted primary — take effect without restarting the daemon.
+pool_max_conn_idle_time = "5m"
+pool_max_conn_lifetime = "30m"
+
+# How often the engine sweeps for expired transactions and idle sessions. This
+# bounds how far past its deadline an abandoned transaction can keep holding
+# locks, so it must stay well under idle_in_tx_timeout — it is a fraction of
+# the shortest bound, not a tuning preference.
+janitor_interval = "10s"
+
 [tui]
 # Where `autodb --ui` keeps its local .sql notes. Empty means
 # $XDG_DATA_HOME/autodb/notes (~/.local/share/autodb/notes).
