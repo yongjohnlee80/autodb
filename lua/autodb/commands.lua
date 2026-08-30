@@ -98,10 +98,12 @@ end
 ---guarded path, returning the last result (the M6 behaviour Johno asked
 ---for — "we should still execute then display whatever comes the last").
 ---@param sql string
-function M.run_sql(sql)
+function M.run_sql(sql, cb)
   sql = vim.trim(sql or "")
   if sql == "" then
-    return log.notify("nothing to run", { level = "warn", component = "commands" })
+    log.notify("nothing to run", { level = "warn", component = "commands" })
+    if cb then cb(false, { code = "invalid", message = "nothing to run" }) end
+    return
   end
   _with_connection(function(conn)
     log.debug("commands", "running against connection " .. tostring(conn.id))
@@ -110,6 +112,7 @@ function M.run_sql(sql)
         results.show_result(nil, err)
         log.notify("query failed: " .. tostring(err.message),
           { level = "error", component = "commands" })
+        if cb then cb(false, { code = "daemon", message = tostring(err.message), cause = err }) end
         return
       end
       -- exec.run_script wraps the LAST statement's result in an envelope
@@ -126,19 +129,29 @@ function M.run_sql(sql)
         log.notify((n and (n .. " statement(s)") or "executed") .. " — no result set",
           { component = "commands" })
       end
+      -- The envelope is reported verbatim: `statements` plus the LAST
+      -- statement's result, which is nil for pure DDL (ADR-0078 §3.6).
+      if cb then
+        cb(true, {
+          statements = type(res) == "table" and tonumber(res.statements) or nil,
+          result = inner,
+        })
+      end
     end))
   end)
 end
 
 ---run_buffer runs the current buffer (requirement 9).
-function M.run_buffer()
+function M.run_buffer(cb)
   local buf = vim.api.nvim_get_current_buf()
   if not M.is_sql(buf) then
-    return log.notify(
+    log.notify(
       "this is not a .sql buffer — " .. keys.RUN_BUFFER .. " runs SQL files",
       { level = "warn", component = "commands" })
+    if cb then cb(false, { code = "invalid", message = "not a .sql buffer" }) end
+    return
   end
-  M.run_sql(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"))
+  M.run_sql(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"), cb)
 end
 
 ---run_selection runs the visual selection (requirement 10).
@@ -146,8 +159,8 @@ end
 ---No filetype check: selecting SQL inside a Go string or a markdown
 ---fence is a legitimate thing to do, and the user has already been
 ---explicit about what they meant by selecting it.
-function M.run_selection()
-  M.run_sql(_visual_selection())
+function M.run_selection(cb)
+  M.run_sql(_visual_selection(), cb)
 end
 
 -- ─── choosing a connection ────────────────────────────────────
@@ -423,7 +436,7 @@ end
 ---A prompt rather than a single destructive action, and the wording
 ---names what each choice does to the SERVER, because two of the three
 ---affect every other frontend sharing this daemon.
-function M.maintenance()
+function M.maintenance(cb)
   -- Two choices, not three. A factory reset is destructive, rare, and
   -- easy to hit by accident in a list — it stays a manual operation
   -- [DECISION — Johno, 2026-08-18: "factory_reset isn't required, and
@@ -436,9 +449,20 @@ function M.maintenance()
     prompt = "autodb maintenance",
     format_item = function(c) return c.label end,
   }, function(choice)
-    if not choice then return end
-    if choice.key == "restart" then return M.restart() end
-    if choice.key == "refresh" then return M.refresh() end
+    if not choice then
+      if cb then cb(false, { code = "cancelled", message = "maintenance dismissed" }) end
+      return
+    end
+    if choice.key == "restart" then
+      M.restart()
+      if cb then cb(true, { action = "restart" }) end
+      return
+    end
+    if choice.key == "refresh" then
+      M.refresh()
+      if cb then cb(true, { action = "refresh" }) end
+      return
+    end
   end)
 end
 
@@ -478,7 +502,7 @@ end
 ---the recovery should not be "restart Neovim". Pressed while already
 ---signed in it re-authenticates, which is also how a user moves between
 ---a reader and an admin account on the same shared daemon.
-function M.login()
+function M.login(cb)
   local c = session.client()
   if c and c:is_ready() then
     -- The socket is live: prompt straight away. Going through
@@ -488,20 +512,31 @@ function M.login()
       if not ok then
         log.notify(tostring(err), { level = "error", component = "commands" })
       end
+      if cb then
+        if ok then cb(true, nil)
+        else cb(false, { code = "not_connected", message = tostring(err), cause = err }) end
+      end
     end, { force = true })
   end
   -- Nothing live to sign in to. The ordinary connect path already ends
   -- in a login prompt, so reuse it rather than growing a second one.
-  _connected(function() end)
+  _connected(function()
+    if cb then cb(true, nil) end
+  end)
 end
 
 ---history opens the script-history modal (requirement 8).
-function M.history()
+function M.history(cb)
   _connected(function()
     local ok, hist = pcall(require, "autodb.history")
-    if ok and hist and hist.open then return hist.open() end
+    if ok and hist and hist.open then
+      hist.open()
+      if cb then cb(true, nil) end
+      return
+    end
     log.notify("the history modal is not available in this build",
       { level = "warn", component = "commands" })
+    if cb then cb(false, { code = "invalid", message = "history modal unavailable" }) end
   end)
 end
 
