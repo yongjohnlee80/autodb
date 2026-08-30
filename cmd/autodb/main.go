@@ -227,53 +227,22 @@ func runServe(configPath string) error {
 	// TestInstanceLease_ReleaseBeforeStoreCloseDoesNotHang pins it.
 	defer func() { _ = lease.Release() }()
 
-	// MF2 — the lease has to be CONSUMED, not merely acquired. Lost() closes
-	// when the heartbeat can no longer confirm the lock: the postgres
-	// backend was terminated, the advisory lock dropped, the file lease
-	// vanished. Until now nothing read it, so an engine that lost its lock
-	// kept serving — and a second engine, seeing the lock free, would take
-	// it. That is precisely the two-engines-one-store state the lease exists
-	// to prevent, reached THROUGH the lease.
-	//
-	// So losing it is a shutdown, not a warning. serveCtx is what the server
-	// runs on; cancelling it unwinds the listener and every defer above in
-	// order, and the operator is told which invariant failed rather than
-	// being left with a silently degraded daemon.
-	serveCtx, stopServing := context.WithCancel(ctx)
-	defer stopServing()
-	leaseLost := watchLease(serveCtx, lease.Lost(), stopServing,
-		func(msg string) { fmt.Fprintln(os.Stderr, msg) })
-
 	svc, err := auth.New(store, auth.WithConfigAllowlist(cfg.Security.IPAllowlist))
 	if err != nil {
 		ln.Close()
 		return fmt.Errorf("auth: %w", err)
 	}
-	// Both options are read from config here. [exec] max_statement_bytes is
-	// new; [history] enabled was NOT — WithHistory has documented itself as
-	// "config [history].enabled" since it was written, and nothing ever
-	// passed it, so an operator who turned history off still had every
-	// script's text recorded. The switch says it controls whether the script
-	// TEXT is kept, which makes a silently-ignored `enabled = false` a
-	// privacy promise the binary was not keeping.
-	//
-	// MF3 — every [exec] setting below reaches the engine here. They did not
-	// before: the caps, the session idle timeout, and all four transaction
-	// bounds were parsed, validated, defaulted, and then dropped, so an
-	// operator who set max_tx_duration got the built-in default and no
-	// indication otherwise. A configuration value that does not reach the
-	// thing it configures is worse than an absent one, because it reads as a
-	// decision that was made.
-	eng := coreexec.New(store, svc, execOptions(cfg,
-		func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) })...)
-	defer eng.Close()
 
-	// MF3 — and the janitor is STARTED. The timeout machinery is otherwise
-	// inert in production: reapExpired is only ever called by tests, so an
-	// abandoned transaction would sit holding locks on a live target for as
-	// long as the client stayed connected, which is the exact failure the
-	// bounds were written for. It stops with serveCtx.
-	eng.StartJanitor(serveCtx, cfg.Exec.JanitorInterval.Duration())
+	// Everything that makes the engine actually OBEY its configuration lives
+	// in startEngine, as one function, so it can be exercised as one thing.
+	// Splitting it out is not tidiness: the previous version wired all of
+	// this inline, and deleting the janitor or the lease watcher from those
+	// lines broke no test at all. A call site that no test reaches is a call
+	// site that can be removed by accident.
+	eng, serveCtx, leaseLost, stopServing := startEngine(ctx, cfg, store, svc, lease.Lost(),
+		func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) })
+	defer stopServing()
+	defer eng.Close()
 
 	// The operational logger is NOT optional: the transport deliberately
 	// withholds error detail from the wire (deny-before-disclose), so the
@@ -298,6 +267,49 @@ func runServe(configPath string) error {
 	default:
 	}
 	return err
+}
+
+// startEngine builds the engine and starts everything that makes it obey its
+// configuration: the janitor that enforces the timeouts, and the watcher that
+// stops serving when the instance lease is lost.
+//
+// The three belong together because they fail together. An engine built with
+// the right options but no janitor has bounds nothing enforces; a daemon that
+// holds a lease it never reads is one that keeps serving after another engine
+// has taken the store. Both were true here, and neither was visible, because
+// the wiring was a handful of inline statements no test could reach.
+//
+// Returns the engine, the context the SERVER must run on, a channel that
+// closes if the lease is lost, and the stop function.
+func startEngine(
+	ctx context.Context,
+	cfg config.Config,
+	store *meta.Store,
+	svc *auth.Service,
+	leaseLost <-chan struct{},
+	onLog func(string),
+) (*coreexec.Engine, context.Context, <-chan struct{}, func()) {
+	serveCtx, stopServing := context.WithCancel(ctx)
+
+	// The lease has to be CONSUMED, not merely acquired. Lost() closes when
+	// the heartbeat can no longer confirm the lock: the backend was
+	// terminated, the advisory lock dropped, the lease file vanished. With
+	// nothing reading it, an engine that lost its lock kept serving — and a
+	// second engine, finding the lock free, would take it. That is the
+	// two-engines-one-store state the lease exists to prevent, reached
+	// THROUGH the lease. So losing it is a shutdown, not a warning.
+	lost := watchLease(serveCtx, leaseLost, stopServing, onLog)
+
+	eng := coreexec.New(store, svc, execOptions(cfg, onLog)...)
+
+	// And the janitor is STARTED. The timeout machinery is otherwise inert
+	// in production: reapExpired had no caller outside tests, so an
+	// abandoned transaction would hold locks on a live target for as long as
+	// its client stayed connected — the exact failure the bounds exist for.
+	// It stops with serveCtx.
+	eng.StartJanitor(serveCtx, cfg.Exec.JanitorInterval.Duration())
+
+	return eng, serveCtx, lost, stopServing
 }
 
 // execOptions maps the loaded configuration onto engine options.

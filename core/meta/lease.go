@@ -151,45 +151,44 @@ func acquireFileLease(path string) (*InstanceLease, error) {
 	// decorative: absolute-ise and resolve symlinks so both spellings
 	// collapse to the same lock file.
 	//
-	// The FILE is what has to be resolved, not just the directory. A
-	// directory alias is already handled for us — the lease file is opened
-	// through the kernel, which resolves `alias/meta.db.lease` and
-	// `real/meta.db.lease` to one inode, and flock excludes on the inode. It
-	// is a symlink to the STORE ITSELF that defeats the lease: `meta.db` and
-	// `link-to-meta.db` are one database but two distinct `.lease` files, so
-	// two engines each take an uncontended lock and both believe they own it.
+	// The lock is taken on the STORE FILE ITSELF, so the identity is its
+	// INODE rather than any spelling of a path that reaches it.
 	//
-	// AcquireLease is called after meta.Open, so the store exists by then and
-	// EvalSymlinks resolves. The directory fallback covers the case where it
-	// does not — EvalSymlinks fails on a missing path — which leaves a narrow
-	// residue: a dangling symlink to a store that has not been created yet
-	// still aliases. That is bounded by the ordering in cmd/autodb rather
-	// than by this function, so it is stated here rather than hidden.
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
-	} else if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
-		path = filepath.Join(dir, filepath.Base(path))
-	}
-	lockPath := path + ".lease"
-	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	// This is the third attempt at that identity and the first correct one.
+	// A sidecar `<path>.lease` names a PATH, and a path is not a database:
+	// `meta.db` and a symlink to it produce two sidecars, and so do two
+	// HARDLINKS — which no amount of symlink resolution can fix, because
+	// hardlinks have no canonical name and may not even share a directory.
+	// Every path-derived scheme has this hole somewhere. The inode does not:
+	// it is what "the same database" actually means.
+	//
+	// flock on the store does not disturb SQLite. On Linux flock(2) and the
+	// POSIX record locks fcntl(2) uses are independent lock spaces, and
+	// SQLite's unix VFS uses the latter. That is a real dependency rather
+	// than an assumption, so TestInstanceLease_DoesNotDisturbSQLite holds it
+	// down: if a future driver switched to the unix-flock VFS, the lease
+	// would start blocking the store it protects, and that test says so.
+	//
+	// O_CREATE covers a first run: an empty file is a valid empty SQLite
+	// database, which is exactly what a fresh store starts as.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("meta: opening the lease file %s: %w", lockPath, err)
+		return nil, fmt.Errorf("meta: opening the meta store %s to lease it: %w", path, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, fmt.Errorf("%w: %s", ErrLeaseHeld, path)
 		}
-		return nil, fmt.Errorf("meta: locking %s: %w", lockPath, err)
+		return nil, fmt.Errorf("meta: locking %s: %w", path, err)
 	}
-	// Record who holds it. This is diagnostics, never the lock itself: the
-	// flock is authoritative and this content is only ever read by a human.
-	_ = f.Truncate(0)
-	_, _ = f.WriteAt([]byte(fmt.Sprintf("pid %d\nsince %s\n",
-		os.Getpid(), time.Now().UTC().Format(time.RFC3339))), 0)
+	// Who holds it, for a human reading a refusal. Best-effort and strictly
+	// diagnostic: it is written BESIDE the store, never into it, and nothing
+	// reads it back. The flock is the lock.
+	if info, err := os.OpenFile(path+".lease-info", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
+		_, _ = fmt.Fprintf(info, "pid %d\nsince %s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+		_ = info.Close()
+	}
 
 	return &InstanceLease{target: path, file: f}, nil
 }

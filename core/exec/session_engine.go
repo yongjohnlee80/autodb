@@ -243,6 +243,18 @@ func (e *Engine) closeSession(ctx context.Context, s *session, ip, reason string
 	if !s.beginClose() {
 		return // someone else owns the teardown
 	}
+	e.finishClosing(ctx, s, ip, reason)
+}
+
+// retryClose resumes a close that could not finish because the session's
+// statement would not stop. The session is already in the closing state and
+// still owns its transaction; this is the retry that eventually ends it.
+func (e *Engine) retryClose(ctx context.Context, s *session) {
+	ip, reason := s.closeReason()
+	e.finishClosing(ctx, s, ip, reason)
+}
+
+func (e *Engine) finishClosing(ctx context.Context, s *session, ip, reason string) {
 	// No registry lock is held here: quiescing can block on a statement, and
 	// the published lock order forbids waiting on session I/O under the
 	// registry's mutex.
@@ -252,7 +264,8 @@ func (e *Engine) closeSession(ctx context.Context, s *session, ip, reason string
 	// statement still executing would receive a rollback on its own
 	// connection — the same concurrent-command bug as the timeout path, in
 	// the path that runs on every ordinary close.
-	quiesced := e.quiesce(ctx, s, closeQuiesceTimeout)
+	release, quiesced := e.quiesce(ctx, s, closeQuiesceTimeoutForTest)
+	defer release()
 
 	s.mu.Lock()
 	tx, txID := s.tx, s.txID
@@ -266,15 +279,30 @@ func (e *Engine) closeSession(ctx context.Context, s *session, ip, reason string
 	}
 	s.mu.Unlock()
 
-	switch {
-	case quiesced != nil && tx != nil:
+	if quiesced != nil && tx != nil {
+		// The statement would not stop, so the transaction cannot be rolled
+		// back without racing it. The session therefore STAYS — in the
+		// registry, in the closing state, still owning its transaction.
+		//
+		// Removing it here is what the previous version did, and that was
+		// the worse half of the bug: the rollback was correctly skipped, and
+		// then the only object that knew about the live transaction was
+		// dropped. Nothing could retry it, nothing could account for it, and
+		// conn.delete's pool close would wait on a connection no reachable
+		// owner held. Retaining a closing owner is what makes the skip
+		// recoverable instead of terminal — reapExpired retries it, and the
+		// session keeps counting against the caps because it is still
+		// holding a connection.
 		e.logf("session %s: closing on %s but the in-flight statement would not stop (%v); "+
-			"the transaction is left to the connection teardown and the server-side belt",
-			s.id, reason, quiesced)
-		e.auditBounded(ctx, s.userID, ip, "tx_rollback_skipped",
-			fmt.Sprintf("conn %d: session %s: %s: %s: in-flight statement did not stop",
+			"keeping the session in closing state so the transaction stays owned and the "+
+			"janitor can retry", s.id, reason, quiesced)
+		e.auditBounded(ctx, s.userID, ip, "tx_rollback_deferred",
+			fmt.Sprintf("conn %d: session %s: %s: %s: in-flight statement did not stop; retained for retry",
 				s.connID, s.id, txID, reason))
-	case tx != nil:
+		s.setCloseReason(ip, reason)
+		return
+	}
+	if tx != nil {
 		// A FRESH bounded context: the session's own is cancelled by now, and
 		// a rollback that cannot run because its context is gone would leave
 		// a transaction holding locks on a live database with nobody left to
@@ -307,14 +335,43 @@ func (e *Engine) closeSession(ctx context.Context, s *session, ip, reason string
 // and finishing the rollback properly is worth a few more seconds.
 const closeQuiesceTimeout = 15 * time.Second
 
+// closeQuiesceTimeoutForTest is the value actually used, so a test can
+// exercise what happens when the bound ELAPSES without waiting fifteen real
+// seconds for it. Production never changes it.
+var closeQuiesceTimeoutForTest = closeQuiesceTimeout
+
 // closeSessionsFor closes every session on a connection. It is the first step
 // of deleting or closing a connection: the pool must not go away underneath a
 // session that still believes it can run.
 func (e *Engine) closeSessionsFor(ctx context.Context, connID int64, ip, reason string) {
-	for _, s := range e.sessions.setDraining(connID) {
+	drained, pool := e.beginDraining(connID)
+	for _, s := range drained {
 		e.closeSession(ctx, s, ip, reason)
 	}
+	// The pool goes last, and with a bound. Its Close waits for every
+	// acquired connection, so a session whose statement would not stop —
+	// the case closeSession audits rather than rolling back — would
+	// otherwise hang conn.delete indefinitely. The wait is worth having,
+	// because a clean Close returns the connections to the target; the
+	// bound is worth having because an operator's delete must return.
+	if pool != nil {
+		closed := make(chan struct{})
+		go func() {
+			defer close(closed)
+			_ = pool.Close()
+		}()
+		select {
+		case <-closed:
+		case <-time.After(poolCloseTimeout):
+			e.logf("connection %d: the pool did not close within %s (a statement is still "+
+				"holding one of its connections); abandoning it to the driver", connID, poolCloseTimeout)
+		}
+	}
 }
+
+// poolCloseTimeout bounds how long conn.delete waits for a target pool to
+// shut down cleanly.
+const poolCloseTimeout = 20 * time.Second
 
 // CloseAllSessions closes every open session (engine shutdown).
 func (e *Engine) CloseAllSessions(ctx context.Context, reason string) {

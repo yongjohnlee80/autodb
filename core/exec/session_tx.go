@@ -300,11 +300,21 @@ const txCleanupTimeout = 30 * time.Second
 // caller must not proceed to roll back. That is the whole reason this returns
 // an error at all: the previous code waited and then continued regardless,
 // which is a pause rather than a join.
-func (e *Engine) quiesce(ctx context.Context, s *session, bound time.Duration) error {
+func (e *Engine) quiesce(ctx context.Context, s *session, bound time.Duration) (func(), error) {
 	s.cancelInFlight()
 	wait, cancel := context.WithTimeout(context.WithoutCancel(ctx), bound)
 	defer cancel()
-	return s.joinInFlight(wait)
+	if err := s.joinInFlight(wait); err != nil {
+		return func() {}, err
+	}
+	// Joining proves the session WAS idle; holding the slot keeps it idle.
+	// Proving it and then acting on the proof a moment later is how a
+	// statement ends up running on a transaction that is being rolled back.
+	if !s.claimTeardown() {
+		return func() {}, fmt.Errorf("%w: a statement started while the teardown was joining",
+			ErrSessionBusy)
+	}
+	return s.releaseTeardown, nil
 }
 
 // auditBounded writes an audit record on a context that cannot hang.

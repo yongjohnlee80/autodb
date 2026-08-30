@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -47,9 +48,8 @@ const (
 	// engine built without options is bounded exactly as a defaulted daemon
 	// is. They are duplicated rather than imported because core/config
 	// depends on nothing here and this package must not depend on it.
-	DefaultPoolMaxConns        = 10
-	DefaultPoolMaxConnIdleTime = 5 * time.Minute
-	DefaultPoolMaxConnLifetime = 30 * time.Minute
+	DefaultPoolMaxConnIdleTime = 10 * time.Minute
+	DefaultPoolMaxConnLifetime = 60 * time.Minute
 	// Transaction bounds, mirroring the config package's.
 	DefaultIdleInTxTimeout      = 90 * time.Second
 	DefaultMaxTxDuration        = 5 * time.Minute
@@ -73,6 +73,13 @@ type Engine struct {
 
 	mu    sync.Mutex
 	conns map[int64]dao.DataConn
+	// opening reserves a connID while its driver is connecting, so the open
+	// happens outside e.mu without two callers racing to publish two pools.
+	opening map[int64]chan struct{}
+	// hookAfterDrainCheck runs inside target's check→effect window. Test-only
+	// (ADR-0074 §1's mandate to inject each competing transition inside that
+	// window, rather than run it alongside and hope).
+	hookAfterDrainCheck func()
 
 	history bool
 	maxRows int
@@ -198,6 +205,12 @@ func WithDebugTxLimits(debugIdle, ceiling time.Duration) Option {
 //
 // Non-positive values leave the existing bound in place rather than removing
 // it: "unbounded" must never be something a caller reaches by passing zero.
+// DefaultPoolMaxConns is 2 × cores (ADR-0074 §1a). Pinned transaction
+// connections exhaust a pool sized for statement throughput, because a
+// session holding a transaction occupies a physical connection for as long as
+// it stays open.
+func DefaultPoolMaxConns() int { return 2 * runtime.NumCPU() }
+
 func WithPoolLimits(maxConns int, idle, lifetime time.Duration) Option {
 	return func(e *Engine) {
 		if maxConns > 0 {
@@ -227,12 +240,13 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 	e := &Engine{
 		store: store, auth: authSvc,
 		conns:   map[int64]dao.DataConn{},
+		opening: map[int64]chan struct{}{},
 		history: true, maxRows: DefaultMaxRows, now: time.Now,
 		profile: ProfileV1Compat, maxStatementBytes: DefaultMaxStatementBytes,
 		sessions:     newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
 		sessionIdle:  DefaultSessionIdleTimeout,
 		txLimits:     defaultTxLimits(),
-		poolMaxConns: DefaultPoolMaxConns, poolMaxConnIdleTime: DefaultPoolMaxConnIdleTime,
+		poolMaxConns: DefaultPoolMaxConns(), poolMaxConnIdleTime: DefaultPoolMaxConnIdleTime,
 		poolMaxConnLifetime: DefaultPoolMaxConnLifetime,
 		debugIdle:           DefaultDebugIdleInTxTimeout,
 		maxTxCeiling:        DefaultMaxTxDurationCeiling,

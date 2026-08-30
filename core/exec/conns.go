@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 
+	"database/sql"
+	"time"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -21,20 +24,84 @@ import (
 // login), open the engine's driver, and probe with SELECT 1.
 func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection) (dao.DataConn, error) {
 	// A connection being deleted must not have its pool handed out or
-	// RECREATED. Without this check the cache would happily rebuild a pool
-	// for a connection whose sessions were just closed, so stateless work
-	// could keep using a connection the operator is removing — the ordering
-	// ADR-0074 §1 establishes for conn.delete, applied at the one place a
-	// pool is actually obtained.
-	if e.sessions.isDraining(connID) {
-		return nil, fmt.Errorf("%w: connection %d", ErrConnectionDraining, connID)
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if c, ok := e.conns[connID]; ok {
-		return c, nil
-	}
+	// RECREATED (ADR-0074 §1's ordering for conn.delete, applied at the one
+	// place a pool is actually obtained).
+	//
+	// The check and the pool decision have to be ONE step. They were two:
+	// the drain was checked, the lock dropped, e.mu taken, and a cached pool
+	// returned or a new one opened — so a delete landing in between was
+	// simply not seen, and stateless work carried on against a connection
+	// the operator was removing.
+	//
+	// Making them one step means holding e.mu across the check, and the
+	// driver's network open must NOT happen under it: one slow target would
+	// stall every other connection in the engine. So the open is RESERVED
+	// under the lock, performed outside it, and the drain re-checked before
+	// the result is published. A delete arriving during the open loses the
+	// pool rather than inheriting it.
+	//
+	// Lock order is engine.mu → registry.mu → session.mu. isDraining takes
+	// the registry's lock, and no registry method reaches back for e.mu.
+	for {
+		e.mu.Lock()
+		if e.sessions.isDraining(connID) {
+			e.mu.Unlock()
+			return nil, fmt.Errorf("%w: connection %d", ErrConnectionDraining, connID)
+		}
+		if h := e.hookAfterDrainCheck; h != nil {
+			// Inside the window: the drain has been checked and no pool has
+			// been handed out or published yet. The engine lock is still
+			// held, which is precisely the property under test — a competing
+			// delete must not be able to complete here.
+			h()
+		}
+		if c, ok := e.conns[connID]; ok {
+			e.mu.Unlock()
+			return c, nil
+		}
+		if opening, ok := e.opening[connID]; ok {
+			// Another caller is already opening this one. Wait for it rather
+			// than opening a second pool that would immediately be orphaned
+			// by whichever publish lost.
+			e.mu.Unlock()
+			select {
+			case <-opening:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		reserved := make(chan struct{})
+		e.opening[connID] = reserved
+		e.mu.Unlock()
 
+		conn, err := e.openTarget(ctx, connID, row)
+
+		e.mu.Lock()
+		delete(e.opening, connID)
+		close(reserved)
+		if err != nil {
+			e.mu.Unlock()
+			return nil, err
+		}
+		// The re-check is the whole point of the reservation: a delete that
+		// began while the driver was connecting must win, and the pool it
+		// did not know about must be closed rather than published.
+		if e.sessions.isDraining(connID) {
+			e.mu.Unlock()
+			_ = conn.Close()
+			return nil, fmt.Errorf("%w: connection %d", ErrConnectionDraining, connID)
+		}
+		e.conns[connID] = conn
+		e.mu.Unlock()
+		return conn, nil
+	}
+}
+
+// openTarget performs the driver work for one connection, holding no engine
+// lock: decrypt the identity-bound DSN (ErrLocked before any passphrase
+// login), open the engine's driver, and verify it.
+func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connection) (dao.DataConn, error) {
 	dsn, err := e.auth.DecryptSecret(row.DSNEnc, connID)
 	if err != nil {
 		return nil, err
@@ -52,9 +119,9 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 		conn, err = postgres.OpenNamed(ctx, name, string(dsn),
 			pgPrepareConnVerify(), e.pgPoolLimits(row))
 	case "mysql":
-		conn, err = mysql.OpenNamed(ctx, name, string(dsn))
+		conn, err = mysql.OpenNamed(ctx, name, string(dsn), mysql.Option(e.sqlPoolLimits(row)))
 	case "sqlite":
-		conn, err = sqlite.OpenNamed(ctx, name, string(dsn))
+		conn, err = sqlite.OpenNamed(ctx, name, string(dsn), sqlite.Option(e.sqlPoolLimits(row)))
 	default:
 		return nil, fmt.Errorf("exec: connection %d has unknown engine %q", connID, row.Engine)
 	}
@@ -74,7 +141,6 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 		_ = conn.Close()
 		return nil, verr
 	}
-	e.conns[connID] = conn
 	return conn, nil
 }
 
@@ -91,12 +157,38 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 // it was stored. That ordering matters: lowering the install-wide ceiling
 // immediately binds every connection that had asked for more, with no rows to
 // rewrite and no window where a stale request outranks the current policy.
-func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
+func (e *Engine) poolLimitsFor(row *meta.Connection) (int, time.Duration, time.Duration) {
 	max := e.poolMaxConns
 	if row != nil && row.PoolMaxConns > 0 && int(row.PoolMaxConns) < max {
 		max = int(row.PoolMaxConns)
 	}
-	idle, lifetime := e.poolMaxConnIdleTime, e.poolMaxConnLifetime
+	return max, e.poolMaxConnIdleTime, e.poolMaxConnLifetime
+}
+
+// sqlPoolLimits applies the same bounds to the database/sql drivers.
+//
+// These needed them MORE than pgxpool did, not less. pgxpool at least reaps
+// idle connections on its own; database/sql keeps idle physical connections
+// to the target indefinitely and has no default cap on open ones at all, so
+// mysql and sqlite targets were the unbounded case while only postgres was
+// wired. ADR-0074 §1a says all three drivers, and it says so for this reason.
+func (e *Engine) sqlPoolLimits(row *meta.Connection) func(*sql.DB) {
+	max, idle, lifetime := e.poolLimitsFor(row)
+	return func(db *sql.DB) {
+		if max > 0 {
+			db.SetMaxOpenConns(max)
+		}
+		if idle > 0 {
+			db.SetConnMaxIdleTime(idle)
+		}
+		if lifetime > 0 {
+			db.SetConnMaxLifetime(lifetime)
+		}
+	}
+}
+
+func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
+	max, idle, lifetime := e.poolLimitsFor(row)
 	return func(cfg *pgxpool.Config) {
 		if max > 0 {
 			cfg.MaxConns = int32(max)
@@ -113,11 +205,43 @@ func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 // closeTarget drops a cached connection (used on delete).
 func (e *Engine) closeTarget(connID int64) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-	if c, ok := e.conns[connID]; ok {
+	c, ok := e.conns[connID]
+	delete(e.conns, connID)
+	e.mu.Unlock()
+	// Closed OUTSIDE e.mu. A pool's Close waits for every acquired
+	// connection, so closing under the engine's lock lets one target with a
+	// held connection stall every other connection in the engine.
+	if ok {
 		_ = c.Close()
-		delete(e.conns, connID)
 	}
+}
+
+// beginDraining marks a connection draining and detaches its pool as ONE
+// step, returning the sessions to close and the pool to shut down.
+//
+// The atomicity is the fix. Marking and pool lookup were separate operations
+// under separate locks, so target() could check the drain, find it clear, and
+// hand out (or open) a pool for a connection whose delete had already begun.
+// Both now happen under the engine's lock, which target() holds across its
+// own check, so the two orders are the only two possible ones: either the
+// pool is obtained before the drain and closed by the delete, or the drain is
+// seen and the request refused.
+//
+// The pool is DETACHED here but not closed here — its Close waits for every
+// acquired connection, and the sessions holding those connections have not
+// been torn down yet. The caller closes it after they have.
+//
+// Lock order is engine.mu → registry.mu, matching target().
+func (e *Engine) beginDraining(connID int64) ([]*session, dao.DataConn) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	drained := e.sessions.setDraining(connID)
+	pool, ok := e.conns[connID]
+	if !ok {
+		return drained, nil
+	}
+	delete(e.conns, connID)
+	return drained, pool
 }
 
 // CreateConnection stores a managed connection with its DSN encrypted at
@@ -234,8 +358,11 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 	// pool first would pull it out from under a session that still believed
 	// it could run, and marking after closing would let a session be opened
 	// onto a connection already being deleted.
+	//
+	// closeSessionsFor now owns the whole sequence — the mark and the pool
+	// detach are one atomic step, so nothing can obtain a pool in between —
+	// and it closes the detached pool once the sessions are gone.
 	e.closeSessionsFor(ctx, connID, ip, "connection-deleted")
-	e.closeTarget(connID)
 
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.store.Connections.On(tx).With(meta.ConnID, connID).Delete(); err != nil {

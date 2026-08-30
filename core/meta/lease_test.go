@@ -124,9 +124,13 @@ func TestInstanceLease_SurvivesAHolderThatDiesUncleanly(t *testing.T) {
 	}
 	_, _ = holder.Process.Wait()
 
-	// The lock file is still on disk — its existence never meant anything.
-	if _, err := os.Stat(path + ".lease"); err != nil {
-		t.Fatalf("the lease file should still exist: %v", err)
+	// The store is still on disk — the lock's existence never meant
+	// anything, and the lease must not have damaged the database it guards.
+	// (The lock moved onto the store file itself when the sidecar turned out
+	// to name a PATH rather than a database; a sidecar could not survive
+	// hardlink aliases.)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the store should still exist after its holder was killed: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -299,48 +303,92 @@ func TestInstanceLease_Postgres(t *testing.T) {
 // because the key is an implementation detail and the exclusion is the
 // promise.
 
-func TestInstanceLease_SymlinkAliasIsTheSameDatabase(t *testing.T) {
+// MF1, both alias forms. A lease keyed on a PATH is not keyed on a database.
+// Symlink spellings were the first hole; hardlinks are the one no path
+// canonicalisation can close, because hardlinks have no canonical name and
+// need not even share a directory. The lock is taken on the store's inode,
+// which is what "the same database" means.
+func TestInstanceLease_AliasesAreTheSameDatabase(t *testing.T) {
 	t.Parallel()
 
-	dir := t.TempDir()
-	direct := filepath.Join(dir, "meta.db")
-	if err := os.WriteFile(direct, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	viaLink := filepath.Join(dir, "link-to-meta.db")
-	if err := os.Symlink(direct, viaLink); err != nil {
-		t.Skipf("symlinks are unavailable here: %v", err)
-	}
+	for _, tc := range []struct {
+		name string
+		link func(target, alias string) error
+	}{
+		{"a symlink to the store", os.Symlink},
+		{"a hardlink to the store", os.Link},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	cfg := func(p string) config.Meta { return config.Meta{Engine: "sqlite", Path: p} }
-	store := &Store{engine: "sqlite"}
+			dir := t.TempDir()
+			direct := filepath.Join(dir, "meta.db")
+			if err := os.WriteFile(direct, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			alias := filepath.Join(dir, "alias.db")
+			if err := tc.link(direct, alias); err != nil {
+				t.Skipf("links are unavailable here: %v", err)
+			}
 
-	first, err := AcquireLease(t.Context(), store, cfg(direct))
+			cfg := func(p string) config.Meta { return config.Meta{Engine: "sqlite", Path: p} }
+			store := &Store{engine: "sqlite"}
+
+			first, err := AcquireLease(t.Context(), store, cfg(direct))
+			if err != nil {
+				t.Fatalf("the first lease: %v", err)
+			}
+			defer func() { _ = first.Release() }()
+
+			// Positive control: this test can observe a refusal at all.
+			// Without it a green result would only prove the guard is
+			// never reached.
+			if l, err := AcquireLease(t.Context(), store, cfg(direct)); !errors.Is(err, ErrLeaseHeld) {
+				if err == nil {
+					_ = l.Release()
+				}
+				t.Fatalf("the identical path was not refused (%v) — this test cannot observe "+
+					"the alias either", err)
+			}
+
+			second, err := AcquireLease(t.Context(), store, cfg(alias))
+			if err == nil {
+				_ = second.Release()
+				t.Fatalf("a second lease was granted over the SAME database through %s "+
+					"(%s -> %s); two engines would each believe they own the meta store",
+					tc.name, alias, direct)
+			}
+			if !errors.Is(err, ErrLeaseHeld) {
+				t.Fatalf("the alias was refused for the wrong reason: %v", err)
+			}
+		})
+	}
+}
+
+// The lease locks the store file itself, which is only safe because flock(2)
+// and the POSIX record locks SQLite's unix VFS uses are independent lock
+// spaces on Linux. That is a real dependency on driver behaviour, not an
+// assumption, so it is pinned: if a driver ever switched to the unix-flock
+// VFS, the lease would begin blocking the store it exists to protect, and
+// this test is what would say so.
+func TestInstanceLease_DoesNotDisturbSQLite(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "meta.db")
+	lease, err := AcquireLease(t.Context(), &Store{engine: "sqlite"},
+		config.Meta{Engine: "sqlite", Path: path})
 	if err != nil {
-		t.Fatalf("the first lease: %v", err)
+		t.Fatalf("the lease: %v", err)
 	}
-	defer func() { _ = first.Release() }()
+	defer func() { _ = lease.Release() }()
 
-	// Positive control: this test can observe a refusal at all. Without it a
-	// green result would only prove the guard is never reached.
-	if l, err := AcquireLease(t.Context(), store, cfg(direct)); !errors.Is(err, ErrLeaseHeld) {
-		if err == nil {
-			_ = l.Release()
-		}
-		t.Fatalf("the identical path was not refused (%v) — this test cannot observe the alias either", err)
+	st, err := Open(t.Context(), config.Meta{Engine: "sqlite", Path: path})
+	if err != nil {
+		t.Fatalf("SQLite could not open a store the lease holds: %v", err)
 	}
-
-	// A directory alias is excluded by the kernel, which resolves the lease
-	// file to one inode. The FILE alias is the one that defeats the lease:
-	// one database, two .lease files, two uncontended locks.
-	second, err := AcquireLease(t.Context(), store, cfg(viaLink))
-	if err == nil {
-		_ = second.Release()
-		t.Fatalf("a second lease was granted over the SAME database through a symlink to it "+
-			"(%s -> %s); two engines would each believe they own the meta store", viaLink, direct)
-	}
-	if !errors.Is(err, ErrLeaseHeld) {
-		t.Fatalf("the alias was refused for the wrong reason: %v", err)
+	defer func() { _ = st.Close() }()
+	if _, err := st.Users.OnCtx(t.Context()).Select(); err != nil {
+		t.Fatalf("SQLite could not read while the lease is held: %v", err)
 	}
 }
 
