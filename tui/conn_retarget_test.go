@@ -82,12 +82,32 @@ func mountedWith(t *testing.T, sess *Session) (*Model, *tui.TestBackend, func(fu
 	for time.Now().Before(deadline) {
 		var ready bool
 		sync(func() { ready = m.explorer != nil && m.explorer.ctx != nil })
-		if ready {
+		if ready && sess == nil {
 			return m, tb, sync
+		}
+		if ready {
+			// A supplied session is one the Model RECONNECTS at mount: the
+			// terminal frontend owns its connection, so Init's connectTask
+			// bumps the session epoch, closes the client the test connected,
+			// and reloads the explorer — all asynchronously. Anything a test
+			// does before that transition settles is racing it: a query bound
+			// to the pre-mount epoch is discarded as superseded on delivery,
+			// which is exactly the EnterOnTable flake (silent nil result,
+			// 15s timeout). Settled means: connected, no transition in
+			// flight, and the initial workspace reload applied — so a later
+			// wsLoaded can never clobber a test's SetRoots either.
+			var settled bool
+			sync(func() {
+				settled = m.connectedOnce && !m.connecting &&
+					m.explorer.applied == m.explorer.seq
+			})
+			if settled {
+				return m, tb, sync
+			}
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("model never mounted")
+	t.Fatal("model never mounted (or startup never settled)")
 	return nil, nil, nil
 }
 

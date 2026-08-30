@@ -148,7 +148,18 @@ func TestEnterOnTable_QueryExecutesAgainstThatTablesConnection(t *testing.T) {
 			"activating a table under BRAVO. Both have table t, so it succeeded "+
 			"with the wrong rows: %q", cells)
 	default:
-		t.Fatalf("no rows returned; cannot tell which connection ran: %q", cells)
+		// Distinguish the three nil-result shapes instead of conflating them:
+		// a query error lands in statusMsg (execDone error branch), a
+		// superseded result is silently discarded but leaves running=false,
+		// and a genuine timeout leaves running=true.
+		var status string
+		var running bool
+		var gen uint64
+		sync(func() { status, running, gen = m.statusMsg, m.running, m.session.Gen() })
+		t.Fatalf("no rows returned; cannot tell which connection ran: %q\n"+
+			"  status=%q running=%v session.gen=%d\n"+
+			"  (error → status carries it; discarded-superseded → running=false, "+
+			"status quiet; timeout → running=true)", cells, status, running, gen)
 	}
 }
 
