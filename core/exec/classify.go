@@ -194,6 +194,19 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 		sawContent  bool
 		execComment bool // inside a MySQL /*! ... */ executable comment
 	)
+	// parenCtx tracks, per open paren, whether it opened a STATEMENT body —
+	// `... AS ( SELECT/DELETE/... )` — and whether its first word has been
+	// seen yet. Without this the scanner reads any word that happens to spell
+	// a verb as a verb, wherever it appears, so a column named `comment` in a
+	// CREATE TABLE body reads as DDL nested inside a statement, and
+	// `SELECT comment FROM notes` classifies as ddl and is refused to the
+	// readers who are granted it. A verb only means a verb in verb position.
+	type parenState struct {
+		body    bool // opened directly after AS — a CTE or subquery body
+		sawWord bool // its first word token has been consumed
+	}
+	var parens []parenState
+	lastWord := ""
 	var nested []NestedMutation
 	maxClass := Class("")
 	escalate := func(c Class) {
@@ -218,6 +231,8 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			ended, searching, inWith, inExplain = false, true, false, false
 			maxClass = ""
 			nested = nil
+			parens = parens[:0]
+			lastWord = ""
 			st = Statement{}
 		}
 		sawContent = true
@@ -318,6 +333,8 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			if err := content(); err != nil {
 				return st, parts, err
 			}
+			parens = append(parens, parenState{body: lastWord == "AS"})
+			lastWord = ""
 			depth++
 			i++
 
@@ -328,6 +345,10 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			if depth > 0 {
 				depth--
 			}
+			if len(parens) > 0 {
+				parens = parens[:len(parens)-1]
+			}
+			lastWord = ""
 			i++
 
 		case c == ';':
@@ -355,18 +376,43 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 				continue
 			}
 
-			if cls, ok := verbClass(word); ok {
+			// Verb position. At top level that is the main verb the scanner
+			// is still searching for; below top level it is the first word
+			// of a statement body — the `DELETE` in `WITH x AS (DELETE …)`.
+			// Anywhere else a word that spells a verb is an identifier: a
+			// column, an alias, a table. Classifying those as verbs is how
+			// `SELECT comment FROM notes` became ddl and how a table with a
+			// `comment` column became unclassifiable.
+			// Below top level, only the FIRST word inside a paren can be a
+			// verb — the `SELECT` of a subquery, the `DELETE` of a CTE body.
+			// Everything after it is that statement's own text.
+			firstInParen := depth > 0 && len(parens) > 0 && !parens[len(parens)-1].sawWord
+			verbPosition := (depth == 0 && searching) || firstInParen
+			// A paren opened directly after AS is a STATEMENT BODY. That is
+			// the only place a data-modifying statement can legally nest, and
+			// it is what separates `WITH x AS (DELETE …)` from the column
+			// list of `CREATE TABLE x (comment text, …)`.
+			statementBody := firstInParen && parens[len(parens)-1].body
+			if depth > 0 && len(parens) > 0 {
+				parens[len(parens)-1].sawWord = true
+			}
+			lastWord = word
+
+			if cls, ok := verbClass(word); ok && verbPosition {
 				// DDL below top level is not valid SQL in any target dialect;
 				// it stays refused outright rather than being handed to a
 				// guard that has no rule for it.
-				if depth > 0 && cls == ClassDDL {
+				if statementBody && cls == ClassDDL {
 					return st, parts, fmt.Errorf("%w: data-modifying subquery/CTE (%s at nesting depth %d)", ErrStatementUnsupported, word, depth)
 				}
 				// A mutation below top level is recorded WITH ITS DEPTH, so
 				// the guard can ask whether that particular mutation is
 				// guarded rather than whether the statement as a whole
 				// happens to contain a WHERE somewhere.
-				if depth > 0 && cls == ClassWrite {
+				// Only a statement body yields a nested MUTATION. Class still
+				// escalates for any first-in-paren verb, which keeps the
+				// defense-in-depth escalation the classifier has always had.
+				if statementBody && cls == ClassWrite {
 					nested = append(nested, NestedMutation{Verb: word, Depth: depth})
 				}
 				escalate(cls)

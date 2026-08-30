@@ -18,18 +18,25 @@ import "fmt"
 type Profile string
 
 const (
-	// ProfileV1Compat is today's behavior, unchanged: control statements are
-	// refused with the same error they have always been refused with. It is
-	// the default for every existing surface, and the existing test suite is
-	// what pins it.
+	// ProfileV1Compat is today's behavior, unchanged: control statements and
+	// data-modifying CTEs are refused with the same errors they have always
+	// been refused with. It is the default for every existing surface, and
+	// the existing test suite is what pins it.
 	ProfileV1Compat Profile = "v1compat"
+
+	// ProfileSession is the session-capable profile (ADR-0074 §2). Today it
+	// differs from v1compat in exactly one respect: it admits a
+	// data-modifying CTE whose mutations are guarded, because the guard can
+	// now see inside them (§6). Control verbs become engine actions when the
+	// session engine lands (§3); until then it refuses them, and says why.
+	ProfileSession Profile = "session"
 )
 
 // String implements fmt.Stringer.
 func (p Profile) String() string { return string(p) }
 
 // valid reports whether p is a profile this build knows.
-func (p Profile) valid() bool { return p == ProfileV1Compat }
+func (p Profile) valid() bool { return p == ProfileV1Compat || p == ProfileSession }
 
 // admit decides whether a classified statement may proceed under p. It is the
 // ONLY place a control statement's admissibility is decided; the classifier
@@ -45,7 +52,33 @@ func (p Profile) admit(st Statement) error {
 			return fmt.Errorf("%w: %s (transaction control, session state, and PRAGMA have no safe meaning on pooled connections)",
 				ErrStatementUnsupported, st.Verb)
 		}
+		// The blanket refusal of data-modifying CTEs stays on this profile,
+		// message included, even for the ones the guard could now clear
+		// (ADR-0074 Amendment 3). The guard is genuinely fixed — see
+		// guardWhere — but a statement a legacy surface has always refused
+		// must not start executing a WRITE because a dependency was
+		// upgraded. That surprise is the entire reason profiles exist.
+		if len(st.Nested) > 0 {
+			n := st.Nested[0]
+			return fmt.Errorf("%w: data-modifying subquery/CTE (%s at nesting depth %d)",
+				ErrStatementUnsupported, n.Verb, n.Depth)
+		}
 		return nil
+
+	case ProfileSession:
+		if st.Class == ClassControl {
+			// Honest about the phase: the verb is recognized, the engine
+			// that would act on it is not built yet. Saying "unsupported"
+			// without saying which of those two it is would be the kind of
+			// refusal ADR-0074 §8a exists to prevent.
+			return fmt.Errorf("%w: %s (the session engine is not wired yet — transaction control arrives with ExecSession)",
+				ErrStatementUnsupported, st.Verb)
+		}
+		// Data-modifying CTEs are admitted here and left to the guard, which
+		// refuses the unguarded ones on their own merits — for every role
+		// alike, since the guard is mistake-prevention and not authorization.
+		return nil
+
 	default:
 		// Fail closed. An unknown profile is a configuration error, and the
 		// safe reading of "I do not know what this surface may do" is
