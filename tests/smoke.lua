@@ -99,7 +99,7 @@ local function eq(a, b) return vim.deep_equal(a, b) end
 -- some — a mis-scoped skip, a section that stops executing — the total falls below
 -- this and the run fails, even when nothing that DID run failed. Raise it when the
 -- suite legitimately grows; never lower it to make a run pass.
-local EXPECTED_MIN_ASSERTIONS = 315
+local EXPECTED_MIN_ASSERTIONS = 320
 local missing_prereqs = {}
 local function require_bin(section)
   missing_prereqs[#missing_prereqs + 1] = section
@@ -1298,6 +1298,41 @@ print("\n[13] connections — <leader>Dc lists, or creates and attaches")
   ok("p13: the new connection becomes active",
     session.connection() ~= nil and session.connection().name == "local-pg",
     vim.inspect(session.connection()))
+
+  -- ── create succeeds, ATTACH fails ──
+  --
+  -- A connection that exists but is not attached is a real failure and
+  -- must reach the caller as one. It used to collapse to a bare nil,
+  -- which autodb.api then reported as `cancelled` — telling a caller the
+  -- user had backed out when the daemon had actually refused.
+  session.reset_for_tests()
+  local cfail = cx({ spaces = { { id = 5, name = "AutoDB", connections = {} } }, new_id = 42 })
+  local inner_authed = cfail.authed
+  cfail.authed = function(self, method, params, cb)
+    if method == "workspace.attach" then
+      self.calls[#self.calls + 1] = method
+      return cb(nil, { message = "attach refused by the daemon" })
+    end
+    return inner_authed(self, method, params, cb)
+  end
+  session.attach(cfail, {})
+  drive({ ["connection name"] = "orphan", ["dsn"] = "postgres://u:p@localhost/db" },
+    function() return "postgres" end)
+  local api = require("autodb.api")
+  local fired, calls, fok, fval = false, 0, nil, nil
+  api.choose_connection(function(o, v) fired, calls, fok, fval = true, calls + 1, o, v end)
+  restore()
+  ok("p13: a failed attach calls back exactly once", fired and calls == 1, tostring(calls))
+  ok("p13: ...reporting failure, not success", fired and fok == false, tostring(fok))
+  ok("p13: ...coded daemon, NOT cancelled",
+    type(fval) == "table" and fval.code == "daemon", vim.inspect(fval))
+  ok("p13: ...preserving the daemon's message",
+    type(fval) == "table" and type(fval.message) == "string"
+      and fval.message:find("attach refused by the daemon", 1, true) ~= nil,
+    vim.inspect(fval and fval.message))
+  ok("p13: ...and the underlying cause",
+    type(fval) == "table" and type(fval.cause) == "table"
+      and fval.cause.message == "attach refused by the daemon", vim.inspect(fval and fval.cause))
   ok("p13: and the command handed it back", got1 ~= nil and got1.id == 42, vim.inspect(got1))
 
   -- ── existing connections → picker offers them + a Create row ──
