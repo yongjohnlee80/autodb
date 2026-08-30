@@ -203,6 +203,30 @@ func runServe(configPath string) error {
 	}
 	defer store.Close()
 
+	// One engine per meta store, enforced before anything is served
+	// (ADR-0074 §1). The bind above is a per-ENDPOINT singleton — it says
+	// nothing about the store, so two endpoints could share one meta store
+	// and each keep its own in-memory session registry and transaction
+	// reservation, both believing they enforced a limit neither held.
+	lease, err := meta.AcquireLease(ctx, store, cfg.Meta)
+	if err != nil {
+		ln.Close()
+		if errors.Is(err, meta.ErrLeaseHeld) {
+			// A refusal to serve, not a crash: the operator has another
+			// autodb running against this store and needs to be told which
+			// thing to stop, not handed a stack trace.
+			return fmt.Errorf("refusing to serve: %w\n"+
+				"       another autodb is already serving this meta store; stop it, or point this one at a different [meta] store", err)
+		}
+		return fmt.Errorf("instance lease: %w", err)
+	}
+	// Registered AFTER store.Close so defer's LIFO order releases the lease
+	// FIRST. That ordering is load-bearing, not cosmetic: the postgres lease
+	// pins a pool connection and pgxpool's Close waits for every acquired
+	// connection, so closing the store first would hang shutdown.
+	// TestInstanceLease_ReleaseBeforeStoreCloseDoesNotHang pins it.
+	defer func() { _ = lease.Release() }()
+
 	svc, err := auth.New(store, auth.WithConfigAllowlist(cfg.Security.IPAllowlist))
 	if err != nil {
 		ln.Close()
