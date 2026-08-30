@@ -1,7 +1,15 @@
 # Front-door protocol matrix — PostgreSQL wire v3
 
-**Status:** rev 1 — pre-F0 gate document (ADR-0075 §5). F0 implementation
+**Status:** rev 2 — pre-F0 gate document (ADR-0075 §5). F0 implementation
 does not begin until this matrix is lector-reviewed and accepted.
+Rev 2 folds lector r0: MF1 full-check atomic auth/reservation; MF2
+pg-conformant discard-through-Sync (Close NOT exempt) + segment entry on
+any extended message + the complete object-release rules; MF3 composed
+lane arithmetic, two-stage charging, reserve-before-target; MF4
+NegotiateProtocolVersion for 3.x minors + the type-`p` frame reality;
+MF5 direct-TLS/cert/error behavior + UTF8-pinned lease + full
+ParameterStatus forwarding; MF6 limit identities in the refusal
+catalogue. Lector's four r0 rulings are recorded in §11.
 **Owner:** the F0 implementer (authored by jarvis as ADR-0075's author;
 ownership transfers with F0). **Companion to:** KB ADR-0075 (accepted
 2026-08-30); state semantics from KB ADR-0074 (ExecSession). Code-adjacent
@@ -29,7 +37,7 @@ a defect in this document, not an implementation freedom.
 | `S4 ready-I` | Authenticated; ExecSession open; idle, no transaction (`ReadyForQuery('I')`). |
 | `S4 ready-T` | In explicit transaction (`ReadyForQuery('T')`). |
 | `S4 ready-E` | Failed transaction (`ReadyForQuery('E')`) — recovery controls only (gate matrix). |
-| `S5 seg` | Inside an extended-query segment (between first `Parse`/`Bind` and `Sync`). Sub-state of any `S4`. |
+| `S5 seg` | Inside an extended-query segment: entered by **any** extended-protocol message (`Parse`, `Bind`, `Describe`, `Execute`, `Close`, `Flush`) — a segment legally starts with `Bind`/`Describe`/`Execute` against named objects surviving from earlier segments — and left at `Sync`. Sub-state of any `S4`. |
 | `S6 closing` | Terminate received, fatal error emitted, or lease/deadline expired; draining and releasing. |
 
 Startup-phase (`S0`–`S3`) denials are **uniform** (ADR-0075 MF5): the same
@@ -65,28 +73,43 @@ default 1 GiB):
 
 - **General lane** — all segment input, retained statement/portal state,
   pending serialized output. Charged **before** read/decode/store/serialize.
-- **Control/error lane** — a **reserved slice, default 8 MiB** (config
-  `frontdoor.control_lane_bytes`, ceiling 32 MiB), admitting ONLY:
-  `Close`, `Sync`, `Flush`, `Terminate` intake; `ErrorResponse` /
-  `NoticeResponse` / `ReadyForQuery` emission; cancel processing; and
-  teardown bookkeeping. Charges in this lane are bounded per connection
-  (≤ 64 KiB) and never blocked by general-lane saturation — **a saturated
-  budget can always still process the messages that release it.**
-  The lane is sized so that all 320 max connections can simultaneously
-  hold a control charge (320 × 64 KiB = 20 MiB > 8 MiB default — the
-  per-connection control charge is therefore additionally capped by a
-  per-connection reservation made at accept time, released at close;
-  accept fails closed if the reservation cannot be made).
+- **Control/error lane** — a reserved slice admitting ONLY: `Sync`,
+  `Flush`, `Terminate` intake (and header-only reads while discarding);
+  `ErrorResponse` / `NoticeResponse` / `ReadyForQuery` emission; cancel
+  processing; and teardown bookkeeping. Never blocked by general-lane
+  saturation — **a saturated budget can always still process the messages
+  that release it.** (`Close` releases retained state but is NOT
+  control-lane-exempt from discard semantics — see §4; its intake charge
+  is control-lane-sized.)
 
-### 1.5 Weighting rule (criterion 2)
+  **Composition rule (MF3, binding):** per-connection control reservation
+  = **64 KiB**, made **atomically at accept** together with the
+  connection slot; the lane default is **`max_frontend_connections ×
+  64 KiB` = 20 MiB at the 320-connection default** (config
+  `frontdoor.control_lane_bytes` may only raise it; validation fails
+  startup if `lane < max_conns × 64 KiB`). Accept **fails closed** when
+  the reservation cannot be made; existing connections are **never
+  evicted** to admit a new one (lector r0 ruling 1). The lane is
+  additive to the 1 GiB general budget.
 
-A charge is `max(wire_bytes_declared, decoded_estimate)` where
-`decoded_estimate` weights: parameter count × per-param overhead, portal
-result-buffer high-water, driver-facing buffers handed to the pinned
-target connection, and re-framing buffers on the output path. Wire bytes
-alone never under-charge a small message that decodes large (amplification:
-e.g. a `Bind` with 8192 zero-length parameters charges its decoded array
-overhead, not its ~16 KiB wire size).
+### 1.5 Weighting rule (criterion 2) — two-stage charging (MF3)
+
+The decoded size is unknowable before decode, so charging is two-stage:
+
+1. **Stage 1 — declared-wire precharge:** the 4-byte declared length is
+   validated and charged **before the body is read** (§8.3).
+2. **Stage 2 — decoded delta:** before any decoded allocation is made,
+   compute `decoded_estimate` (parameter count × per-param overhead,
+   portal result-buffer high-water, driver-facing buffers handed to the
+   pinned target connection, re-framing buffers on the output path) and
+   charge **`decoded_estimate − wire_precharge` when positive, before
+   allocating**. Failure of the delta charge refuses the message with
+   the stage-1 charge released.
+
+Wire bytes alone never under-charge a message that decodes large
+(amplification: a `Bind` with 8192 zero-length parameters delta-charges
+its decoded array overhead over its ~16 KiB wire size, before the array
+exists).
 
 ---
 
@@ -95,14 +118,17 @@ overhead, not its ~16 KiB wire size).
 | # | Client sends | State | Decision | Charge | Audit | Error path |
 |---|---|---|---|---|---|---|
 | 2.1 | `SSLRequest` | S0 | **Required.** Answer `S`, begin TLS. A second `SSLRequest` after TLS = protocol violation → close. | pre-auth cap 64 KiB | `fd.conn_open` | plaintext `StartupMessage` at S0 → uniform denial, close (no fallback) |
+| 2.1a | Direct TLS (PG 17 `sslnegotiation=direct`: first bytes are a TLS ClientHello, ALPN `postgresql`) | S0 | **Refused in v1**: bytes that are neither a length-prefixed request nor within the pre-auth cap → close immediately (audited `fd.tls_fail(direct-tls-unsupported)`). Candidate for a later rev; clients fall back to `SSLRequest` negotiation per libpq defaults. | pre-auth cap | `fd.tls_fail` | — |
+| 2.1b | TLS layer behavior | S0→S1 | Server cert/key from config; **reload on config-reload applies to NEW connections only** (established sessions keep their session keys — never dropped by a cert rotation). TLS handshake failure: `fd.tls_fail(reason)` audited, close, **counted against the per-source-IP auth rate** (10/min) so handshake grinding is throttled with auth grinding. | — | `fd.tls_ok` / `fd.tls_fail` | — |
 | 2.2 | `GSSENCRequest` | S0 | **Refused**: answer `N`; if the client then proceeds without TLS → uniform denial + close. | pre-auth cap | — | — |
 | 2.3 | `CancelRequest` | S0 | Accepted **without TLS** (protocol-conformant: cancel connections are plaintext); processed per §6; connection closed immediately after. | control lane | `fd.cancel_received` | stale/unknown key = silent no-op (`fd.cancel_stale`), close |
 | 2.4 | `StartupMessage` (protocol 3.0) | S1 | Parse parameters per §3. Any refused parameter → uniform denial. | pre-auth cap | — | uniform denial (28000), close |
-| 2.5 | `StartupMessage` (protocol ≠ 3.0, incl. 3.x minor > 0) | S1 | **Refused** via `ErrorResponse` (no `NegotiateProtocolVersion` in v1 — we implement exactly 3.0). | pre-auth cap | `fd.refused` | uniform denial, close |
+| 2.5 | `StartupMessage` (major 3, minor > 0, and/or unrecognized `_pq_.*` options) | S1 | **Negotiate down (MF4, ruling 3)**: emit `NegotiateProtocolVersion` (newest supported = 3.0, plus the list of unrecognized `_pq_.*` option names) and **continue at 3.0 semantics** — pg-conformant, never a hard refusal. | pre-auth cap | — | — |
+| 2.5a | `StartupMessage` (major ≠ 3) | S1 | **Refused**: uniform denial, close (unsupported major). | pre-auth cap | `fd.refused` | uniform denial, close |
 | 2.6 | (server →) `AuthenticationCleartextPassword` | S2 | The only offered method. PATs are verified server-side against SHA-256 records; cleartext-over-TLS is the Q4-ratified design. SCRAM is **not offered** (hashed PATs cannot back SCRAM verifiers). | — | — | — |
-| 2.7 | `PasswordMessage` (PAT) | S3 | Verify: token exists ∧ not expired ∧ not revoked ∧ user enabled ∧ **user-layer IP allowlist** ∧ per-user session cap ∧ global cap ∧ `frontdoor_max_leases`. All-or-nothing; which check failed is audit-only. | pre-auth cap | `fd.auth_ok` / `fd.auth_denied` | uniform denial (28000 `invalid_authorization_specification`), close. 3 attempts/conn, 10/min/source-IP. |
-| 2.8 | `SASLInitialResponse` / `SASLResponse` / `GSSResponse` | S3 | **Protocol violation** (method not offered) → uniform denial, close. | control lane | `fd.auth_denied` | — |
-| 2.9 | (server →) on success | S3→S4 | `AuthenticationOk`; `ParameterStatus` set per §3.3; `BackendKeyData` (CSPRNG, MF7); `ReadyForQuery('I')`. ExecSession opened; **session-lifetime lease acquired** — lease unavailable = uniform denial pre-`AuthenticationOk`. | session overhead charged | `fd.session_open` | — |
+| 2.7 | `PasswordMessage` (PAT) | S3 | **Full verification chain (MF1), then one atomic reservation.** Verify: token exists ∧ **is a front-door PAT** (scope check — no other credential class authenticates here) ∧ not expired ∧ not revoked ∧ owner matches startup `user` ∧ user enabled ∧ **user-layer IP allowlist** ∧ **PAT `allowed_ips` intersection** (token-layer, ⊆ user rows by construction — both must admit the source) ∧ **target validation**: the `database` connection exists ∧ is enabled ∧ the user holds a grant on it ∧ its profile admits front-door use. Then **atomically reserve, as ONE operation**: per-user session slot (8) + global slot (256) + target lease (`frontdoor_max_leases`) + the session's fixed overhead charge — no check-then-reserve gap (a cap observed free must be the cap acquired); partial reservation is impossible, failure rolls back nothing-held. Which check failed is audit-only. | pre-auth cap | `fd.auth_ok` / `fd.auth_denied` | uniform denial (28000 `invalid_authorization_specification`), close. 3 attempts/conn, 10/min/source-IP. Lease-cap failure: wire = the same uniform 28000; audit identity = `lease-cap-exceeded` (ruling 4). |
+| 2.8 | Any other type-`p` frame in S3 | S3 | **There is no distinguishable SASL path (MF4):** once `AuthenticationCleartextPassword` is offered, every type-`p` frame IS a `PasswordMessage` by protocol — SASL-shaped bytes are simply a wrong password. Verified per row 2.7; fails the token lookup; uniform denial. `GSSResponse` is likewise type-`p` and takes the same path. | pre-auth cap | `fd.auth_denied` | uniform denial, close |
+| 2.9 | (server →) on success | S3→S4 | `AuthenticationOk`; `ParameterStatus` set per §3.3; `BackendKeyData` (CSPRNG, MF7); `ReadyForQuery('I')`. The ExecSession, lease, and all slots were already **atomically reserved in row 2.7** — nothing acquired between `AuthenticationOk` and ready. | (charged in 2.7) | `fd.session_open` | — |
 
 Deadlines: TLS/startup/auth 10s each (ceiling 60s). Pre-auth global
 connection cap 64, auth workers 16.
@@ -118,10 +144,10 @@ connection cap 64, auth workers 16.
 | `user` | **Required.** Must equal the PAT's owner at auth time; mismatch = uniform denial (identity comes from the token; `user` is a cross-check, never an override). |
 | `database` | **Required.** Must name an autodb **connection** the user holds a grant on (name or `conn:<id>`). Unknown/ungranted = uniform denial (no existence disclosure). |
 | `application_name` | **Accepted + audited** (recorded on session + every audit row; also reported back via `ParameterStatus`). Length-capped 256 bytes (over = truncate + notice, audited verbatim). |
-| `client_encoding` | Accepted iff `UTF8` (case-insensitive). Anything else → refused (uniform denial): autodb does not transcode. |
+| `client_encoding` | Accepted iff `UTF8` (case-insensitive). Anything else → refused (uniform denial): autodb does not transcode (ruling 2). **The target lease is pinned UTF8** — at lease acquisition the pinned connection's `client_encoding`/`server_encoding` `ParameterStatus` must report UTF8-compatible values, else lease acquisition fails loudly (audited); the byte-fidelity claim is only honest if both ends of the relay actually speak UTF8. |
 | `options` | **Refused if it sets any GUC** (`-c key=val` or `--key=val` content). ADR-0075 §5 pins this: GUC-setting options refuse with the §8a shape post-auth-impossible — at startup this is the uniform denial. An empty/whitespace `options` is accepted and ignored (audited). |
 | `replication` | **Refused** (any value: `true`/`database`/`on`). |
-| `_pq_.*` (protocol extensions) | **Refused** (uniform denial). We negotiate no extensions in v1; silently dropping them would be silent acceptance. |
+| `_pq_.*` (protocol extensions) | **Negotiated, not refused (MF4)**: unrecognized `_pq_.*` names are listed in `NegotiateProtocolVersion` (row 2.5) and the session continues at 3.0 with none of them active — the pg-conformant declination, and still no silent acceptance (the client is told exactly what was declined). |
 | any other parameter | **Refused** (uniform denial). PostgreSQL treats unknown startup parameters as GUC attempts; we refuse rather than emulate GUC semantics. |
 
 ### 3.2 GUC policy (summary)
@@ -133,16 +159,17 @@ default admin-only; grammar GUCs banned forever; engine-originated
 
 ### 3.3 `ParameterStatus` set reported at session open
 
-Forwarded **verbatim from the pinned target connection** at lease
-acquisition (fidelity — the values are the real server's):
-`server_version`, `server_encoding`, `client_encoding`, `DateStyle`,
-`IntervalStyle`, `TimeZone`, `integer_datetimes`,
-`standard_conforming_strings`. Synthesized by the front door:
+**Every `ParameterStatus` the pinned target connection presented at its
+own connect is forwarded verbatim at session open (MF5)** — not a fixed
+list: the server decides what is `GUC_REPORT`, and a fixed enumeration
+would silently drop statuses added by newer servers (`search_path` on
+PG 14+, `in_hot_standby`, `scram_iterations`, …). Three values are
+**overridden with synthesized ones** after the forwarded set:
 `application_name` (echo of §3.1), `is_superuser` (**always `off`**),
 `session_authorization` (the autodb username). Later `ParameterStatus`
-messages from the target (e.g. a statement changed `DateStyle` — only
-possible via an admitted `SET`) are **forwarded verbatim**. No other
-parameters are reported in v1.
+messages from the target during the session are **forwarded verbatim**,
+whatever their name — future-safe by construction. The UTF8 pin (§3.1)
+is validated against this forwarded set at lease acquisition.
 
 ---
 
@@ -155,22 +182,42 @@ is read (criterion 3); oversized declared length refuses before any read.
 | Message | States | Decision | Gating | Charge | Audit | Refusal / notes |
 |---|---|---|---|---|---|---|
 | `Query` (simple) | S4-I/T/E | **Mapped: PostgreSQL implicit-transaction semantics** (MF2). Statements split and run in order; each individually classified/authorized/guarded; first error (gate or target) aborts the block, rolls back its earlier statements. Explicit `BEGIN`/`COMMIT` inside the buffer per PostgreSQL implicit-block rules (ExecSession state transitions, never passthrough). In S4-E: recovery controls only. | classify+authorize+guard per statement; attempt-before-effect per statement | general, hdr-first; output via pending-output watermark | `fd.stmt_attempt`/`fd.stmt_outcome` per statement | Empty query → `EmptyQueryResponse` + `ReadyForQuery` (control lane). |
-| `Parse` | S4-I/T (opens S5) | **Native pinned-conn** (MF3). Gated at Parse: classifier + profile + grants; **immutable classification/guard metadata attached** to the statement. Named statements per lifetime rules; unnamed statement replaced per protocol. | classify+authorize at Parse | general, hdr-first; on `ParseComplete`, segment charge **transfers to retained** (statement text + param metadata, 16 MiB/session cap) | `fd.stmt_attempt` (parse-time gate) | Refused classes (COPY/LISTEN/cursor/PREPARE verbs) refuse **at Parse** with §8a; segment then discards through `Sync`. |
-| `Bind` | S5 | Native: raw parameter formats/values and per-column result formats preserved bit-for-bit to the pinned conn. ≤ 8192 params. | none (authority is at Parse + Execute) | general, hdr-first + decoded weighting (param array); portal buffers charge retained on `BindComplete` | — | Param-count/size over limits → §8a refuse, discard-through-Sync. |
+| `Parse` | S4-I/T (opens S5) | **Native pinned-conn** (ADR MF3). Gated at Parse: classifier + profile + grants; **immutable classification/guard metadata attached** to the statement. Named statements per §4a lifetime rules; unnamed statement replaced per protocol. **Retained capacity for the statement is RESERVED against the 16 MiB session cap BEFORE the Parse is forwarded to the target** (reserve → forward → finalize on `ParseComplete`; released on error) — the target must never hold a server-side prepared statement the budget didn't admit (r0 MF3). | classify+authorize at Parse | general, hdr-first + stage-2 delta; retained **reserved pre-forward**, finalized at `ParseComplete` | `fd.stmt_attempt` (parse-time gate) | Refused classes (COPY/LISTEN/cursor/PREPARE verbs) refuse **at Parse** with §8a; segment then discards through `Sync`. Reservation failure → `53400` refuse, nothing forwarded. |
+| `Bind` | S5 | Native: raw parameter formats/values and per-column result formats preserved bit-for-bit to the pinned conn. ≤ 8192 params. **Portal retained capacity reserved BEFORE forwarding**, finalized at `BindComplete`, released on error. | none (authority is at Parse + Execute) | general, hdr-first + stage-2 delta (param array pre-allocation); retained reserved pre-forward | — | Param-count/size over limits → §8a refuse, discard-through-Sync. |
 | `Describe` (`S`/`P`) | S5 | Native passthrough: `ParameterDescription` + `RowDescription`/`NoData` from the pinned conn (Describe-before-Execute metadata preserved). | none | control-sized (general lane) | — | Unknown name → target's error verbatim. |
 | `Execute` | S5 | Native, **with Execute-time authority** (MF1): authority re-resolved + re-authorized at **every** Execute (portal re-executions included); fresh `fd.stmt_attempt` precedes every effect. Portal `maxRows` honored; `PortalSuspended` preserved; suspended portal buffers charge retained state. | re-authorize per Execute | general; output watermark; suspended buffers → retained | `fd.stmt_attempt`/`fd.stmt_outcome` per Execute | Grant revoked between Parse and Execute → §8a refuse at Execute (tested per ADR). |
-| `Close` (`S`/`P`) | S4/S5 | Native; **releases** the named statement's/portal's retained charge. | none | **control lane** | — | Always admissible, even at budget saturation (criterion 1). |
-| `Flush` | S5 | Native passthrough to output pump. | none | **control lane** | — | — |
-| `Sync` | S4/S5 | Native: closes the segment, resets segment counters (10 000 msgs / 96 MiB), emits `ReadyForQuery` from the ExecSession state machine, ends post-error discard. | none | **control lane** | — | Always admissible (criterion 1). |
+| `Close` (`S`/`P`) | S4/S5 (healthy) | Native; **releases** the named statement's/portal's retained charge; closing a prepared statement **cascades to its portals** (§4a). Intake is control-lane-sized so saturation cannot block release — but **during post-error discard `Close` is discarded like everything else** (MF2): PostgreSQL processes nothing but `Sync`/`Terminate` until the segment ends, and conformance wins; release then happens via `Sync` (segment discard) or the §4a rules. | none | **control lane** | — | — |
+| `Flush` | S5 | Native passthrough to output pump. Discarded during post-error discard. | none | **control lane** | — | — |
+| `Sync` | S4/S5 | Native: closes the segment, resets segment counters (10 000 msgs / 96 MiB), emits `ReadyForQuery` from the ExecSession state machine, ends post-error discard, releases the discarded segment's charges. | none | **control lane** | — | Always admissible, even at budget saturation (criterion 1). |
 | `Terminate` | any S4/S5 | Clean close: open tx → ROLLBACK via ExecSession (audited); session closed; lease + all charges released. | — | **control lane** | `fd.conn_close(cause=terminate)` | Always admissible. |
 | `CopyData`/`CopyDone`/`CopyFail` | any | **Protocol violation** (08P01): COPY is refused at classification, so no COPY sub-protocol is ever active; receiving these = fatal error + close. | — | control lane | `fd.refused` | COPY the *statement* refuses at Parse/Query gate with 0A000 (§7). |
 | `FunctionCall` (legacy fast-path) | any | **Refused** (0A000, §8a `frontdoor/no-fastpath`): legacy surface bypasses text classification by construction. | — | control lane | `fd.refused` | Connection stays usable (refusal, not violation). |
 | Unknown message type byte | any | Fatal protocol violation (08P01) → `ErrorResponse` + close. | — | control lane | `fd.refused` | Never skipped-and-continued. |
 
-**Post-error segment discard:** after any error inside a segment, all
-frontend messages except `Sync`/`Close`/`Terminate` are discarded (charged
-to the control lane at header-size only, body skipped with bounded reads)
-until `Sync` — pg-conformant discard-through-Sync.
+**Post-error segment discard (MF2 — pg-conformant):** after any error
+inside a segment, **every** frontend message is discarded (charged to the
+control lane at header-size only, body skipped with bounded reads) until
+`Sync` — with exactly the two exemptions PostgreSQL's own
+`ignore_till_sync` grants: **`Sync`** (ends the discard) and
+**`Terminate`** (closes the connection). `Close`, `Flush`, `Parse`,
+`Bind`, `Describe`, `Execute` are all discarded, exactly as the real
+server would.
+
+### 4a. Object-release rules (MF2 — the complete set)
+
+Retained charges release when their object dies; the death rules are
+PostgreSQL's own:
+
+| Event | Releases |
+|---|---|
+| `Close S name` | the named prepared statement **and every portal constructed from it** (protocol-documented cascade). |
+| `Close P name` | that portal. |
+| `Parse` naming the unnamed statement (`""`) | the previous unnamed statement (implicit replacement). |
+| `Bind` naming the unnamed portal (`""`) | the previous unnamed portal (implicit replacement). |
+| Simple `Query` | the unnamed statement and unnamed portal (protocol-documented destruction). |
+| **Transaction end** (COMMIT or ROLLBACK, incl. implicit-block end and failed-tx recovery) | **all portals** (named and unnamed) — portals do not survive the transaction. Prepared statements survive. |
+| Error mid-segment | the erroring segment's in-flight (unfinalized) reservations; surviving named objects keep theirs. |
+| Session end (any cause) | everything retained by the session. |
 
 ---
 
@@ -237,9 +284,18 @@ All with §8a shape; connection remains usable unless marked fatal.
 | GUC-setting startup `options` / unknown startup params / `replication` / `_pq_.*` | uniform startup denial (`28000`) | (audit-only pre-auth) | — |
 | Non-3.0 protocol version | uniform startup denial | (audit-only) | — |
 | `SET`-class statements post-auth | per ADR-0074 gate matrix (profile/role-gated; grammar GUCs always refused) | `gate/set-…` ids from 0074 §8a | — |
-| Retained-state budget refusal | `53200` (`out_of_memory`) | `frontdoor/retained-budget` | Close unused prepared statements/portals, or raise the budget. |
-| Row-cap configured on a front-door connection | `54000` | `frontdoor/no-silent-truncation` | Remove the cap or use the RPC surface; the wire never shortens results. |
-| Out-of-state / unknown message | `08P01` (fatal) | `frontdoor/protocol-violation` | — |
+| Retained-state quota (configured 16 MiB/session or reservation failure) | `53400` (`configuration_limit_exceeded`, ruling 4) | `frontdoor/retained-budget` | Close unused prepared statements/portals, or raise the quota. Action: refuse statement; connection stays. |
+| Global memory budget: input/output charge | backpressure, never an error (reads pause, audited) | `frontdoor/budget-backpressure` | — |
+| Row-cap configured on a front-door connection / cumulative-output cap (8 GiB) | `54000` (`program_limit_exceeded`, ruling 4) | `frontdoor/no-silent-truncation` / `frontdoor/output-cap` | Remove the cap or use the RPC surface; the wire never shortens results. Action: abort statement; connection stays. |
+| Bind parameters > 8192 | `54000` | `frontdoor/param-cap` | Action: refuse, discard-through-Sync. |
+| Named statements > 256 / portals > 64 per session | `53400` | `frontdoor/named-object-cap` | Close unused objects. Action: refuse the `Parse`/`Bind`; connection stays. |
+| Extended segment caps (10 000 msgs / 96 MiB before `Sync`) | `53400` | `frontdoor/segment-cap` | Issue `Sync` more often. Action: refuse, discard-through-Sync. |
+| `SetMaxBodyLen` exceeded (declared length > 64 MiB) | `08P01` (fatal — cannot resynchronize a stream we refuse to read) | `frontdoor/message-too-large` | Action: error + close. |
+| Partial-frame progress deadline (30s) | `08006` (`connection_failure`, fatal) | `frontdoor/frame-stall` | Action: close; audited. |
+| Idle-in-tx timeout (90s / 10m debug) | FATAL `25P03` (`idle_in_transaction_session_timeout` — pg-conformant identity), tx rolled back + audited (which limit) | `gate/idle-in-tx-timeout` | Action: rollback + close per ADR-0074 timeout semantics. |
+| Max-tx / idle-session (30m) deadlines | FATAL `57P05` shape (idle session) / §8a per ADR-0074 for max-tx | `gate/session-deadline` | Action: rollback if in-tx, close; audited. |
+| Startup-phase caps (pre-auth 64 KiB msg, 64 conns, auth attempts, **lease/session caps at auth**) | uniform `28000`, close | internal audit identities only — incl. `lease-cap-exceeded`, `session-cap-exceeded` (ruling 4: wire stays uniform; audit carries the stable identity) | — |
+| Out-of-state / unknown message | `08P01` (fatal) | `frontdoor/protocol-violation` | Action: error + close. |
 
 Reader role: every statement wrapped read-only engine-side; write attempts
 surface the target's `25006` verbatim (F3 proof paths).
@@ -254,7 +310,7 @@ surface the target's `25006` verbatim (F3 proof paths).
 |---|---|---|---|
 | Message intake | header read: declared length validated (≤ 64 MiB) + charged before body read | general (control for §4-marked messages) | decode complete → either freed (transient) or transferred (below) |
 | Extended segment accumulation | per message, counted against 10 000 msgs / 96 MiB | general | `Sync` (reset) or error-discard completion |
-| Retained statements/portals | `ParseComplete`/`BindComplete`/`PortalSuspended`: **segment charge transfers to retained** (no double-charge, no gap) | general | `Close` of the object; session end; error discarding named objects per protocol rules |
+| Retained statements/portals | **reserved BEFORE the `Parse`/`Bind` is forwarded to the target** (r0 MF3); finalized (segment charge transfers to retained — no double-charge, no gap) at `ParseComplete`/`BindComplete`/`PortalSuspended`; reservation released on pre-Complete error | general | per the §4a object-release rules (Close + cascade, unnamed replacement, simple-Query destruction, transaction end for portals, session end) |
 | Pending serialized output | before serialization of each outbound frame; watermark 4 MiB pauses target reads (backpressure, audited) | general | bytes flushed to socket |
 | Per-connection control reservation | at accept | control | connection close |
 | Session overhead (lease, registries) | at session open | general (fixed size) | session close |
@@ -280,9 +336,10 @@ above any legal configuration).
 
 True worst-case resident memory = global budget (1 GiB default) +
 per-connection fixed overhead (TLS + decoder ≈ 64 KiB × 320 connections
-≈ 20 MiB) + control lane (8 MiB). Nothing allocates before charging;
-therefore the budget bounds the aggregate regardless of per-object shape
-limits (whose naive product is ~29 GiB — shape limits are NOT the bound).
+≈ 20 MiB) + control lane (20 MiB default; composes with max connections
+per §1.4). Nothing allocates before charging; therefore the budget bounds
+the aggregate regardless of per-object shape limits (whose naive product
+is ~29 GiB — shape limits are NOT the bound).
 
 ---
 
@@ -323,14 +380,25 @@ limits (whose naive product is ~29 GiB — shape limits are NOT the bound).
   causes — measured, not asserted).
 - CopyInResponse-from-target canary (§5): classifier bypass detector.
 
-## 11. Open items for lector
+## 11. Rulings on record (lector r0, 2026-08-31)
 
-1. §1.4 control-lane sizing: fixed 8 MiB slice + per-connection 64 KiB
-   reservation at accept — is fail-closed-at-accept the right posture, or
-   should accept degrade (shed oldest idle pre-auth conn) first?
-2. §3.1 `client_encoding`: refuse-non-UTF8 vs accept-and-forward (target
-   would transcode; we chose refuse to keep byte-fidelity claims honest).
-3. §2.5: no `NegotiateProtocolVersion` in v1 (hard-refuse non-3.0) —
-   acceptable, or emit it for 3.x minors with empty extension list?
-4. §7 SQLSTATE choices for budget (`53200`) and truncation-refusal
-   (`54000`) — confirm identities against ADR-0074 §8a registry.
+Rev 1's four open items were ruled in the r0 review; the rulings are
+folded above and recorded here as binding:
+
+1. **Fail closed at accept; never evict existing connections.** The
+   lane/reservation arithmetic must compose (§1.4: lane ≥ max_conns ×
+   per-conn reservation, validated at startup).
+2. **Refuse non-UTF8 clients AND pin the target lease UTF8** (§3.1) —
+   both ends verified, not assumed.
+3. **`NegotiateProtocolVersion` for major-3 minors (downgrade to 3.0);
+   refuse unsupported majors** (§2 rows 2.5/2.5a).
+4. **`53400` for configured retained quotas; `54000` for row/output
+   caps; startup lease-cap stays externally uniform `28000` with the
+   internal stable `lease-cap-exceeded` audit identity** (§7).
+
+Remaining open item for r1:
+
+1. §2 row 2.1a: direct-TLS (PG 17 `sslnegotiation=direct`) is refused in
+   v1 with an audited close — confirm this posture (libpq falls back by
+   default; a client pinned to `direct` cannot connect until a later rev
+   adds ALPN support).
