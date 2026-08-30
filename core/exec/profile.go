@@ -74,7 +74,7 @@ func (p Profile) admit(st Statement) error {
 			// Transaction control is now an engine action (ADR-0074 §3):
 			// admitted here and performed as a state transition, never
 			// forwarded as text.
-			if txControlVerbs[st.Verb] {
+			if txControlVerbs[st.Verb] || statefulControlVerbs[st.Verb] {
 				return nil
 			}
 			// The rest of the control verbs are still refused, and the
@@ -111,10 +111,19 @@ var txControlVerbs = map[string]bool{
 	"BEGIN": true, "START": true, "COMMIT": true, "END": true, "ROLLBACK": true,
 }
 
+// statefulControlVerbs have an admissible form that depends on the SESSION's
+// state, not just the profile — SET LOCAL of an allowlisted setting inside a
+// transaction, LOCK inside a transaction. The profile admits the verb; the
+// session gate in session_state.go decides the statement, because locality,
+// the GUC and whether a transaction is open are not things a profile can see.
+var statefulControlVerbs = map[string]bool{
+	"SET": true, "LOCK": true,
+}
+
 // pendingControlVerbs have an admissible form the gate matrix defines but
 // which is not built yet — as opposed to the verbs that have none.
 var pendingControlVerbs = map[string]bool{
-	"SET": true, "LOCK": true, "CALL": true, "DO": true,
+	"CALL": true, "DO": true,
 }
 
 // profileFor resolves the capability profile for one connection (ADR-0074

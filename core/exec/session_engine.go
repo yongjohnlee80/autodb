@@ -137,6 +137,25 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 		if aerr != nil {
 			return nil, e.rejectSession(ctx, s, ident, ip, sqlText, aerr)
 		}
+		s.mu.Lock()
+		txOpen := s.txPhase != txNone
+		aborted := s.txPhase == txAborted
+		pinned := s.tx
+		s.mu.Unlock()
+
+		// SET and LOCK are admitted by the SESSION's state, not by the
+		// profile alone, and once admitted they are real SQL that must reach
+		// the server — unlike the transaction verbs, which never do.
+		if statefulControlVerbs[stmt.Verb] {
+			if aborted {
+				return nil, e.rejectSession(ctx, s, authorized, ip, sqlText, ErrTxAborted)
+			}
+			if err := e.admitSessionState(ctx, s, authorized, stmt.Verb, sqlText, ip, txOpen); err != nil {
+				return nil, err
+			}
+			return e.run(s.ctx, token, s.connID, sqlText, ip, nil, pinned)
+		}
+
 		tc, perr := ParseTxControl(sqlText)
 		if perr != nil {
 			return nil, e.rejectSession(ctx, s, authorized, ip, sqlText, perr)
@@ -166,6 +185,42 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 	res, rerr := e.run(s.ctx, token, s.connID, sqlText, ip, nil, pinnedTx)
 	s.noteStatementOutcome(rerr)
 	return res, rerr
+}
+
+// admitSessionState applies the stateful gate to SET and LOCK.
+//
+// The role floor is here rather than in the gate because it is a policy
+// question, not a grammar one: SET LOCAL is admin-only by default per
+// ADR-0074 §5, and LOCK takes the write floor already checked above. The §4
+// sub-capability grant that would let an operator delegate SET LOCAL more
+// finely is not built yet, so the default stands alone for now — which is
+// the restrictive direction.
+func (e *Engine) admitSessionState(
+	ctx context.Context, s *session, ident auth.Identity,
+	verb, sqlText, ip string, txOpen bool,
+) error {
+	switch verb {
+	case "LOCK":
+		if err := admitLock(txOpen); err != nil {
+			return e.rejectSession(ctx, s, ident, ip, sqlText, err)
+		}
+		return nil
+	case "SET":
+		st, err := parseSet(sqlText)
+		if err != nil {
+			return e.rejectSession(ctx, s, ident, ip, sqlText, err)
+		}
+		if err := admitSet(st, txOpen); err != nil {
+			return e.rejectSession(ctx, s, ident, ip, sqlText, err)
+		}
+		if ident.Role() != meta.RoleAdmin {
+			return e.rejectSession(ctx, s, ident, ip, sqlText,
+				fmt.Errorf("%w: SET LOCAL is admin-only by default", auth.ErrDenied))
+		}
+		return nil
+	}
+	return e.rejectSession(ctx, s, ident, ip, sqlText,
+		fmt.Errorf("%w: %s", ErrStatementUnsupported, verb))
 }
 
 // rejectSession audits a refusal on a session-scoped call and returns it.
