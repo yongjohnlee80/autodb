@@ -126,10 +126,9 @@ local function valid_mount(winid, view)
   return ok and buf == view:bufnr()
 end
 
----register_host adds or replaces a provider.
----@param p autodb.DrawerHostProvider
+---validate_provider checks the shape and the reserved pair.
 ---@return boolean ok, autodb.ApiError? err
-function M.register_host(p)
+local function validate_provider(p)
   if type(p) ~= "table" or type(p.id) ~= "string" or p.id == "" then
     return false, err("invalid", "a drawer host needs a non-empty string id")
   end
@@ -150,11 +149,6 @@ function M.register_host(p)
   -- The reserved pair. Either half alone is a defect: a foreign provider
   -- at priority 0 displaces the guaranteed fallback, and a foreign
   -- provider calling itself "autodb" would be adopted as it.
-  if p.id == SELF_HOST_ID and p.priority ~= SELF_HOST_PRIORITY then
-    return false, err("invalid",
-      "the id '" .. SELF_HOST_ID .. "' is reserved for autodb's self-host at priority "
-        .. SELF_HOST_PRIORITY)
-  end
   if p.priority == SELF_HOST_PRIORITY and p.id ~= SELF_HOST_ID then
     return false, err("duplicate_priority",
       "priority " .. SELF_HOST_PRIORITY .. " is reserved for autodb's self-host ('"
@@ -172,6 +166,11 @@ function M.register_host(p)
           .. ", already held by '" .. id .. "'")
     end
   end
+  return true
+end
+
+---adopt installs a validated provider.
+local function adopt(p)
   -- Replacing the current owner tears it down first: a new provider must
   -- never inherit a live instance built from the previous profile.
   if mounted and mounted.id == p.id then
@@ -180,6 +179,48 @@ function M.register_host(p)
   providers[p.id] = p
   log.debug("views.host", "registered drawer host '" .. p.id .. "' at priority " .. tostring(p.priority))
   return true
+end
+
+---register_host is the PUBLIC path. It refuses the reserved self-host id
+---outright.
+---
+---Validating the id/priority PAIR was not enough: anyone could present
+---{ id = "autodb", priority = 0 } and, by the same-id replacement rule,
+---tear down and replace the genuine fallback -- leaving a standalone
+---user with no drawer host at all (lector impl-r1 MF2). The real
+---self-host registers through _register_self, which checks that the
+---provider IS autodb's own object rather than one that merely claims
+---its name.
+---@param p autodb.DrawerHostProvider
+---@return boolean ok, autodb.ApiError? err
+function M.register_host(p)
+  if type(p) == "table" and p.id == SELF_HOST_ID then
+    return false, err("invalid",
+      "the id '" .. SELF_HOST_ID .. "' is reserved for autodb's own self-host")
+  end
+  local ok, verr = validate_provider(p)
+  if not ok then return false, verr end
+  return adopt(p)
+end
+
+---_register_self is the INTERNAL path autodb.panel uses. It is not
+---re-exported on autodb.views.drawer, and it verifies identity: the
+---provider must be the very table autodb.panel owns, so a fabricated
+---look-alike cannot take the reserved slot.
+---@param p autodb.DrawerHostProvider
+---@return boolean ok, autodb.ApiError? err
+function M._register_self(p)
+  local okp, panel = pcall(require, "autodb.panel")
+  if not okp or type(p) ~= "table" or p ~= panel.provider then
+    return false, err("invalid", "only autodb's own panel may register the self-host")
+  end
+  if p.id ~= SELF_HOST_ID or p.priority ~= SELF_HOST_PRIORITY then
+    return false, err("invalid",
+      "autodb's self-host must be '" .. SELF_HOST_ID .. "' at priority " .. SELF_HOST_PRIORITY)
+  end
+  local ok, verr = validate_provider(p)
+  if not ok then return false, verr end
+  return adopt(p)
 end
 
 ---unregister_host removes a provider, tearing it down first if it is the

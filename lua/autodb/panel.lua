@@ -186,8 +186,10 @@ M.provider = {
 ---setup registers autodb's own panel as the fallback drawer host.
 ---Cheap: it opens nothing and connects nothing.
 function M.setup()
-  local drawer = require("autodb.views.drawer")
-  local ok, err = drawer.register_host(M.provider)
+  -- The internal path: the public register_host refuses the reserved id
+  -- outright, so a look-alike cannot displace this fallback (ADR-0078
+  -- §3.3, lector impl-r1 MF2).
+  local ok, err = require("autodb.views.host")._register_self(M.provider)
   if not ok then
     log.warn("panel", "could not register the autodb drawer host: " .. tostring(err and err.message))
   end

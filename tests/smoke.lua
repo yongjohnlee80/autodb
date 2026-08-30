@@ -99,7 +99,7 @@ local function eq(a, b) return vim.deep_equal(a, b) end
 -- some — a mis-scoped skip, a section that stops executing — the total falls below
 -- this and the run fails, even when nothing that DID run failed. Raise it when the
 -- suite legitimately grows; never lower it to make a run pass.
-local EXPECTED_MIN_ASSERTIONS = 302
+local EXPECTED_MIN_ASSERTIONS = 315
 local missing_prereqs = {}
 local function require_bin(section)
   missing_prereqs[#missing_prereqs + 1] = section
@@ -1822,8 +1822,21 @@ print("\n[18] the drawer — instances, host arbitration, and teardown (ADR-0078
   local i_ok, i_err = drawer.register_host(fake("autodb", 7))
   ok("p18: the id 'autodb' is reserved too",
     i_ok == false and i_err and i_err.code == "invalid", vim.inspect(i_err))
-  ok("p18: autodb's own self-host still registers at 0",
-    drawer.register_host(fake("autodb", 0)) == true)
+  local hj_ok, hj_err = drawer.register_host(fake("autodb", 0))
+  ok("p18: a FABRICATED provider cannot claim the reserved id",
+    hj_ok == false and hj_err and hj_err.code == "invalid", vim.inspect(hj_err))
+  -- ...and the genuine one still gets in, through the internal path.
+  -- Isolated: the fakes above outrank priority 0, so the fallback can
+  -- only be observed as the winner when it is the only host left.
+  reset()
+  ok("p18: autodb's own panel still registers as the self-host",
+    require("autodb.panel").setup() == true)
+  ok("p18: ...and it answers when nothing outranks it",
+    (function()
+      local h; drawer.open(function(o, v) h = o and v.host or nil end); return h
+    end)() == "autodb")
+  reset()
+  drawer.register_host(fake("a", 10))
   for _, bad in ipairs({ 0 / 0, math.huge, -math.huge, 1.5, "9" }) do
     local pok = drawer.register_host(fake("weird", bad))
     ok("p18: a non-integer priority (" .. tostring(bad) .. ") is refused", pok == false)
@@ -1962,6 +1975,20 @@ print("\n[19] autodb.api — the public contract (ADR-0078 §3.6)")
     vim.inspect(got_val))
   ok("p19: ...and does NOT call a daemon failure 'cancelled'",
     called and got_val and got_val.code ~= "cancelled", vim.inspect(got_val))
+
+  -- Every picker must COMPLETE too, not just run_sql: all three called
+  -- _connected without an on_fail, so with an unreachable daemon none of
+  -- them ever invoked its public callback (lector impl-r1 MF3).
+  for _, name in ipairs({ "choose_workspace", "choose_connection", "choose_note" }) do
+    local fired, calls, val = false, 0, nil
+    api[name](function(o, v) fired, calls, val = true, calls + 1, v end)
+    vim.wait(2000, function() return fired end)
+    ok("p19: " .. name .. " COMPLETES its callback with no daemon", fired,
+      "callback never fired")
+    ok("p19: " .. name .. " reports a structured error", fired and type(val) == "table"
+      and type(val.code) == "string", vim.inspect(val))
+    ok("p19: " .. name .. " calls back exactly once", calls <= 1, tostring(calls))
+  end
 
   -- An empty statement is the caller's fault, and says so.
   local icalled, ival = false, nil
