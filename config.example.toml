@@ -111,6 +111,24 @@ ip_allowlist = ["127.0.0.1/32", "::1/128"]
 # more of each one.
 max_statement_bytes = 65536
 
+# How many ExecSessions may be open at once, per user and in total.
+#
+# One transaction per session bounds how many database connections can be
+# pinned, but not the session objects and their timers — without these an
+# authenticated caller could exhaust memory inside the idle window below just
+# by opening sessions and walking away.
+#
+# An explicit 0 is a CONFIGURATION ERROR, not "unlimited". A default
+# deployment is always bounded, and unbounded is not something you should be
+# able to get by accident. Remove the key to take the default.
+max_sessions_per_user = 8
+max_sessions_global = 256
+
+# Close a session that has no open transaction and has run no statement for
+# this long. This is what reaps sessions a crashed client never closed —
+# every close is audited.
+session_idle_timeout = "30m"
+
 [tui]
 # Where `autodb --ui` keeps its local .sql notes. Empty means
 # $XDG_DATA_HOME/autodb/notes (~/.local/share/autodb/notes).

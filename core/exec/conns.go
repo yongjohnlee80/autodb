@@ -185,8 +185,15 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 	if err != nil {
 		return err
 	}
+	// Order matters and is the ADR-0074 §1 sequence: mark the connection
+	// DRAINING and close its sessions FIRST, then drop the pool. Closing the
+	// pool first would pull it out from under a session that still believed
+	// it could run, and marking after closing would let a session be opened
+	// onto a connection already being deleted.
+	e.closeSessionsFor(ctx, connID, ip, "connection-deleted")
 	e.closeTarget(connID)
-	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
+
+	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.store.Connections.On(tx).With(meta.ConnID, connID).Delete(); err != nil {
 			if errors.Is(err, dao.ErrForeignKey) {
 				return fmt.Errorf("exec: connection %q has recorded history and cannot be deleted: %w", row.Name, err)
@@ -195,6 +202,13 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 		}
 		return e.auth.AuditTx(tx, ident.UserID(), ip, "connection_deleted", row.Name)
 	})
+	if err != nil {
+		// The row survives, so the connection must become usable again —
+		// otherwise a delete that failed on a foreign key would leave a live
+		// connection permanently unopenable with nothing saying why.
+		e.sessions.clearDraining(connID)
+	}
+	return err
 }
 
 // TestConnection authorizes read access and probes the target with SELECT 1.
