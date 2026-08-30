@@ -71,14 +71,27 @@ func newUsers(conn dao.DataConn) *dao.Schema[*User, UserField, Sort, int64] {
 // Connection is a managed target-database connection. DSNEnc is the
 // encrypted-at-rest DSN (Objective 11; envelope shape decided in M3).
 type Connection struct {
-	ID        int64
-	Name      string
-	Engine    string
-	DSNEnc    []byte
+	ID     int64
+	Name   string
+	Engine string
+	DSNEnc []byte
+	// Profile is the connection's capability profile (ADR-0074 §2):
+	// "v1compat" or "session". Existing rows read v1compat, so enabling
+	// sessions is a per-connection decision rather than something a schema
+	// upgrade did on your behalf.
+	Profile string
+	// Debug marks a connection used for debugging against a live target
+	// (Amendment 2 C2): it takes the longer idle-in-transaction bound,
+	// because a developer paused at a breakpoint inside a transaction should
+	// not be rolled back mid-step. 0/1, matching users.disabled.
+	Debug     int64
 	CreatedBy int64
 	CreatedAt int64
 	UpdatedAt int64
 }
+
+// IsDebug reports whether the connection carries the debug profile.
+func (c *Connection) IsDebug() bool { return c.Debug != 0 }
 
 type ConnField string
 
@@ -87,6 +100,8 @@ const (
 	ConnName      ConnField = "name"
 	ConnEngine    ConnField = "engine"
 	ConnDSNEnc    ConnField = "dsn_enc"
+	ConnProfile   ConnField = "profile"
+	ConnDebug     ConnField = "debug"
 	ConnCreatedBy ConnField = "created_by"
 	ConnCreatedAt ConnField = "created_at"
 	ConnUpdatedAt ConnField = "updated_at"
@@ -97,6 +112,8 @@ func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort,
 		ConnID:        {Column: "id", Scan: func(r *Connection) any { return &r.ID }},
 		ConnName:      {Column: "name", Scan: func(r *Connection) any { return &r.Name }, Value: func(r *Connection) any { return r.Name }},
 		ConnEngine:    {Column: "engine", Scan: func(r *Connection) any { return &r.Engine }, Value: func(r *Connection) any { return r.Engine }},
+		ConnProfile:   {Column: "profile", Scan: func(r *Connection) any { return &r.Profile }, Value: func(r *Connection) any { return r.Profile }},
+		ConnDebug:     {Column: "debug", Scan: func(r *Connection) any { return &r.Debug }, Value: func(r *Connection) any { return r.Debug }},
 		ConnDSNEnc:    {Column: "dsn_enc", Scan: func(r *Connection) any { return &r.DSNEnc }, Value: func(r *Connection) any { return r.DSNEnc }},
 		ConnCreatedBy: {Column: "created_by", Scan: func(r *Connection) any { return &r.CreatedBy }, Value: func(r *Connection) any { return r.CreatedBy }},
 		ConnCreatedAt: {Column: "created_at", Scan: func(r *Connection) any { return &r.CreatedAt }, Value: func(r *Connection) any { return r.CreatedAt }},

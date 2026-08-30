@@ -102,17 +102,7 @@ func armServerBelt(ctx context.Context, tx dao.TxConn, engineName string, l txLi
 
 // connectionIsDebug reports whether a connection carries the debug profile,
 // which gets the longer idle bound (ADR-0074 Amendment 2 C2).
-//
-// It is false for every connection today, and deliberately a function rather
-// than a literal so the gap is visible: the flag lives on a `connections`
-// column that does not exist yet. ADR-0074 §2 puts the per-connection PROFILE
-// on that same row, so the column, its migration and both readers are one
-// piece of work rather than three — and adding half of it here would mean a
-// migration landing in a change about timeouts.
-//
-// Until then every connection takes the non-debug bound, which is the safe
-// direction: 90 seconds rather than 10 minutes of held locks.
-func connectionIsDebug(*meta.Connection) bool { return false }
+func connectionIsDebug(row *meta.Connection) bool { return row != nil && row.IsDebug() }
 
 // reapExpired rolls back transactions past their limits and closes idle
 // sessions. It takes the clock so tests drive it directly instead of sleeping
