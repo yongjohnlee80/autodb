@@ -67,6 +67,96 @@ var migrations = []migration{
 			`ALTER TABLE connections ADD COLUMN pool_max_conns INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
+	// v5 (ADR-0074 §7 rev 2 + Amendment 4): the transaction outcome log.
+	//
+	// APPEND-ONLY, and that is the whole point. The v1 model recorded an
+	// outcome by UPDATEing script_history in place, overwriting "running"
+	// with "ok" or "error" — which cannot express a progression, cannot
+	// express an outcome that is not yet knowable, and destroys the earlier
+	// state it overwrites. §7's machine needs all three, so outcomes get
+	// their own table and script_history becomes a projection of it.
+	//
+	// One row per state transition, ordered by seq within a tx_id:
+	//
+	//   opened          -- at BEGIN, carrying the target's xid for recovery
+	//   commit_started  -- appended BEFORE the target Commit call
+	//   unknown_pending -- appended by a resolver that could not prove it
+	//   committed | rolled_back | outcome_unresolvable   -- terminal
+	//
+	// §7: "an absent record after commit_started is interpreted as
+	// unknown_pending", so the nonterminal state is inferable from absence
+	// as well as recordable explicitly. Both are the same fact.
+	//
+	// target_xid is nullable because it only exists where the dialect has
+	// one: Postgres txid_current(). Its absence IS the no-oracle condition
+	// Amendment 4 A3 terminates as outcome_unresolvable(reason=no-oracle),
+	// so the column not being set is load-bearing rather than incidental.
+	//
+	// No foreign keys, for the same reason audit_log has none (ADR-0053 §2):
+	// the outcome trail must never fail to record because something else it
+	// points at is gone. A deleted connection must not take the evidence of
+	// what it did with it.
+	//
+	// The UNIQUE(tx_id, seq) is what makes "append-only" enforceable at the
+	// store rather than by convention: a writer that tries to rewrite a
+	// transition collides instead of silently succeeding.
+	{
+		Version: 5,
+		SQLite: []string{
+			`CREATE TABLE tx_outcomes (
+				id INTEGER PRIMARY KEY,
+				tx_id TEXT NOT NULL,
+				seq INTEGER NOT NULL,
+				state TEXT NOT NULL,
+				reason TEXT NOT NULL DEFAULT '',
+				user_id INTEGER NOT NULL DEFAULT 0,
+				connection_id INTEGER NOT NULL DEFAULT 0,
+				history_id INTEGER NOT NULL DEFAULT 0,
+				target_xid TEXT NOT NULL DEFAULT '',
+				created_at BIGINT NOT NULL)`,
+			`CREATE UNIQUE INDEX idx_tx_outcomes_seq ON tx_outcomes(tx_id, seq)`,
+			`CREATE INDEX idx_tx_outcomes_state ON tx_outcomes(state, created_at)`,
+		},
+		Postgres: []string{
+			`CREATE TABLE tx_outcomes (
+				id BIGSERIAL PRIMARY KEY,
+				tx_id TEXT NOT NULL,
+				seq BIGINT NOT NULL,
+				state TEXT NOT NULL,
+				reason TEXT NOT NULL DEFAULT '',
+				user_id BIGINT NOT NULL DEFAULT 0,
+				connection_id BIGINT NOT NULL DEFAULT 0,
+				history_id BIGINT NOT NULL DEFAULT 0,
+				target_xid TEXT NOT NULL DEFAULT '',
+				created_at BIGINT NOT NULL)`,
+			`CREATE UNIQUE INDEX idx_tx_outcomes_seq ON tx_outcomes(tx_id, seq)`,
+			`CREATE INDEX idx_tx_outcomes_state ON tx_outcomes(state, created_at)`,
+		},
+	},
+	// v6 (ADR-0074 §7 rev 2): tx_id on the audit trail and on history.
+	//
+	// R3 already issues a tx_id and writes it into the free-text `detail`
+	// string of its boundary events. A substring is not a correlation key:
+	// it cannot be indexed, joined, or trusted against a format change. The
+	// column is what lets an operator ask "everything that happened inside
+	// this transaction" and get an answer.
+	//
+	// Empty string, not NULL, for statements outside any transaction — the
+	// house pattern for "no value" in this schema, and it keeps every read
+	// path free of null handling.
+	{
+		Version: 6,
+		SQLite: []string{
+			`ALTER TABLE audit_log ADD COLUMN tx_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE script_history ADD COLUMN tx_id TEXT NOT NULL DEFAULT ''`,
+			`CREATE INDEX idx_audit_tx ON audit_log(tx_id)`,
+		},
+		Postgres: []string{
+			`ALTER TABLE audit_log ADD COLUMN tx_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE script_history ADD COLUMN tx_id TEXT NOT NULL DEFAULT ''`,
+			`CREATE INDEX idx_audit_tx ON audit_log(tx_id)`,
+		},
+	},
 }
 
 // runMigrations creates the ledger, checks the downgrade guard, and applies

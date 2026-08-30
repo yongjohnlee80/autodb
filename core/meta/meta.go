@@ -29,6 +29,7 @@ type Store struct {
 	Sessions       *dao.Schema[*Session, SessionField, Sort, int64]
 	History        *dao.Schema[*HistoryEntry, HistoryField, Sort, int64]
 	Audit          *dao.Schema[*AuditEntry, AuditField, Sort, int64]
+	TxOutcomes     *dao.Schema[*TxOutcome, TxOutcomeField, Sort, int64]
 	AllowedIPs     *dao.Schema[*AllowedIP, AllowedIPField, Sort, int64]
 	KV             *dao.Schema[*MetaKV, MetaKVField, Sort, string]
 }
@@ -68,6 +69,7 @@ func Open(ctx context.Context, mcfg config.Meta) (*Store, error) {
 		Sessions:       newSessions(conn),
 		History:        newHistory(conn),
 		Audit:          newAudit(conn),
+		TxOutcomes:     newTxOutcomes(conn),
 		AllowedIPs:     newAllowedIPs(conn),
 		KV:             newKV(conn),
 	}, nil
