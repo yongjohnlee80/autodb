@@ -5,9 +5,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yongjohnlee80/golib/dao"
+
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // ADR-0074 §3 — transaction verbs are state transitions. These cover the
@@ -126,7 +129,7 @@ func TestTxChain_RefusedThroughTheEngine(t *testing.T) {
 	ctx := context.Background()
 
 	f := newFixture(t)
-	f.eng.profile = ProfileSession
+	useSessionProfile(t, f)
 
 	sid, err := f.eng.OpenSession(ctx, f.rootTok, f.connID, testIP)
 	if err != nil {
@@ -156,7 +159,7 @@ func TestBeginTx_RefusesADriverThatCannotPin(t *testing.T) {
 	ctx := context.Background()
 
 	f := newFixture(t)
-	f.eng.profile = ProfileSession
+	useSessionProfile(t, f)
 
 	sid, err := f.eng.OpenSession(ctx, f.rootTok, f.connID, testIP)
 	if err != nil {
@@ -180,7 +183,7 @@ func TestFinishTx_WithNothingOpen(t *testing.T) {
 	ctx := context.Background()
 
 	f := newFixture(t)
-	f.eng.profile = ProfileSession
+	useSessionProfile(t, f)
 	sid, err := f.eng.OpenSession(ctx, f.rootTok, f.connID, testIP)
 	if err != nil {
 		t.Fatalf("OpenSession: %v", err)
@@ -194,8 +197,113 @@ func TestFinishTx_WithNothingOpen(t *testing.T) {
 	}
 }
 
+// useSessionProfile switches the fixture's connection to the session profile
+// by writing the column the engine actually reads, rather than by reaching
+// into the Engine — so these tests exercise the resolution path a deployment
+// uses instead of a shortcut around it.
+func useSessionProfile(t *testing.T, f *fixture) {
+	t.Helper()
+
+	if err := f.store.Connections.OnCtx(context.Background()).
+		With(meta.ConnID, f.connID).
+		Set(meta.ConnProfile, string(ProfileSession)).
+		Update(); err != nil {
+		t.Fatalf("switching the connection to the session profile: %v", err)
+	}
+}
+
 // pgErrorWithCode builds a server error carrying a SQLSTATE, so the phase
 // transition is driven by the same shape the driver produces.
 func pgErrorWithCode(code string) error {
 	return &pgconn.PgError{Code: code, Message: "synthetic " + code}
+}
+
+// The profile is resolved from the CONNECTION, with the engine default as
+// the fallback and an unrecognized value failing closed (ADR-0074 §2).
+func TestProfileFor_ResolvesFromTheConnectionRow(t *testing.T) {
+	t.Parallel()
+
+	e := &Engine{profile: ProfileV1Compat}
+
+	// No row, or a row with no profile: the install-wide default.
+	if got := e.profileFor(nil); got != ProfileV1Compat {
+		t.Errorf("nil row = %q, want the engine default", got)
+	}
+	if got := e.profileFor(&meta.Connection{}); got != ProfileV1Compat {
+		t.Errorf("empty profile = %q, want the engine default", got)
+	}
+	// The row wins over the default.
+	if got := e.profileFor(&meta.Connection{Profile: "session"}); got != ProfileSession {
+		t.Errorf("row profile = %q, want session", got)
+	}
+	// An unrecognized profile is KEPT, not corrected to the default, so
+	// admission refuses everything under it. Quietly substituting the
+	// default would turn a typo in a connection row into a silent grant of
+	// whatever the default permits.
+	bogus := e.profileFor(&meta.Connection{Profile: "sesion"})
+	if bogus == ProfileV1Compat || bogus == ProfileSession {
+		t.Fatalf("a typo resolved to %q — a misconfigured connection must fail closed", bogus)
+	}
+	st, err := Classify("SELECT 1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bogus.admit(st); !errors.Is(err, ErrStatementUnsupported) {
+		t.Errorf("admit under an unrecognized profile = %v, want a refusal", err)
+	}
+}
+
+// A connection carrying the debug flag takes the longer idle bound; every
+// other connection takes the short one, which is the safe direction.
+func TestConnectionIsDebug_ReadsTheColumn(t *testing.T) {
+	t.Parallel()
+
+	if connectionIsDebug(nil) {
+		t.Error("a nil row must not read as debug")
+	}
+	if connectionIsDebug(&meta.Connection{}) {
+		t.Error("a connection with the column at its default must not read as debug")
+	}
+	if !connectionIsDebug(&meta.Connection{Debug: 1}) {
+		t.Error("a connection with debug set must read as debug")
+	}
+
+	base := txLimits{idleInTx: 90 * time.Second, maxTx: 5 * time.Minute}
+	plain := base.forConnection(connectionIsDebug(&meta.Connection{}), 10*time.Minute, time.Hour)
+	dbg := base.forConnection(connectionIsDebug(&meta.Connection{Debug: 1}), 10*time.Minute, time.Hour)
+	if plain.idleInTx != 90*time.Second {
+		t.Errorf("non-debug idle = %s, want 90s", plain.idleInTx)
+	}
+	if dbg.idleInTx != 10*time.Minute {
+		t.Errorf("debug idle = %s, want 10m", dbg.idleInTx)
+	}
+}
+
+// Existing connections keep v1compat across the migration: enabling sessions
+// is a per-connection decision, not something a schema upgrade did for you.
+func TestMigration_ExistingConnectionsDefaultToV1Compat(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	f := newFixture(t)
+	row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
+	if err != nil {
+		t.Fatalf("reading the connection: %v", err)
+	}
+	if row.Profile != string(ProfileV1Compat) {
+		t.Errorf("a freshly created connection has profile %q, want %q — a migration must not "+
+			"turn sessions on for connections nobody opted in", row.Profile, ProfileV1Compat)
+	}
+	if row.IsDebug() {
+		t.Error("a freshly created connection reads as debug — it would take the 10-minute idle bound")
+	}
+	// And it behaves that way: transaction control is refused on it.
+	sid, err := f.eng.OpenSession(ctx, f.rootTok, f.connID, testIP)
+	if err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+	t.Cleanup(func() { _ = f.eng.CloseSession(ctx, f.rootTok, sid, testIP) })
+	if _, err := f.eng.SessionExecute(ctx, f.rootTok, sid, "BEGIN", testIP); !errors.Is(err, ErrStatementUnsupported) {
+		t.Errorf("BEGIN on a v1compat connection = %v, want it refused", err)
+	}
 }

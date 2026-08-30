@@ -1,6 +1,10 @@
 package exec
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/yongjohnlee80/autodb/core/meta"
+)
 
 // Capability profiles (ADR-0074 §2). The classifier is a pure lexer: it says
 // what a statement IS. A profile says what the engine will RUN. Separating
@@ -111,6 +115,24 @@ var txControlVerbs = map[string]bool{
 // which is not built yet — as opposed to the verbs that have none.
 var pendingControlVerbs = map[string]bool{
 	"SET": true, "LOCK": true, "CALL": true, "DO": true,
+}
+
+// profileFor resolves the capability profile for one connection (ADR-0074
+// §2): the connection's own column, falling back to the engine's install-wide
+// default when the row does not name one.
+//
+// An UNRECOGNIZED profile is not silently corrected to the default. It is
+// kept, and Profile.admit refuses everything under it — a misconfigured
+// connection must fail closed rather than quietly become the permissive one.
+//
+// The third source the ADR names, a per-user ceiling via grants, is not here
+// yet: it narrows what an admitted profile may do rather than which profile
+// applies, and it belongs with the grant work.
+func (e *Engine) profileFor(row *meta.Connection) Profile {
+	if row == nil || row.Profile == "" {
+		return e.profile
+	}
+	return Profile(row.Profile)
 }
 
 // guardWhere applies the WHERE guard to every mutation in a statement, at

@@ -25,6 +25,30 @@ var migrations = []migration{
 		SQLite:   []string{`ALTER TABLE users ADD COLUMN mk_wrapped BLOB NOT NULL DEFAULT x''`},
 		Postgres: []string{`ALTER TABLE users ADD COLUMN mk_wrapped BYTEA NOT NULL DEFAULT '\x'::bytea`},
 	},
+	// v3 (ADR-0074 §2, Amendment 2 C2): the per-connection capability
+	// profile and the debug flag.
+	//
+	// Both default to today's behaviour, which is the safe direction and the
+	// reason a migration can be applied to a live store without a decision:
+	// every existing connection keeps v1compat, so sessions are opt-in per
+	// connection rather than something a schema upgrade turns on. debug
+	// defaults off, so every connection keeps the 90-second idle bound
+	// rather than the debug profile's 10 minutes.
+	//
+	// The 0/1 INTEGER flag matches users.disabled on both engines — the
+	// house pattern here — rather than introducing a second convention for
+	// booleans in one table.
+	{
+		Version: 3,
+		SQLite: []string{
+			`ALTER TABLE connections ADD COLUMN profile TEXT NOT NULL DEFAULT 'v1compat'`,
+			`ALTER TABLE connections ADD COLUMN debug INTEGER NOT NULL DEFAULT 0`,
+		},
+		Postgres: []string{
+			`ALTER TABLE connections ADD COLUMN profile TEXT NOT NULL DEFAULT 'v1compat'`,
+			`ALTER TABLE connections ADD COLUMN debug INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
 }
 
 // runMigrations creates the ledger, checks the downgrade guard, and applies
