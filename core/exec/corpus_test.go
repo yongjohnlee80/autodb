@@ -1,7 +1,11 @@
 package exec
 
 import (
+	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,6 +40,14 @@ func TestCorpusReplay(t *testing.T) {
 	if len(files) == 0 {
 		t.Fatalf("AUTODB_CORPUS_DIR=%s holds no .sql files — an empty corpus proves nothing", dir)
 	}
+
+	update := os.Getenv(updateManifestEnv) != ""
+	var expected map[string]corpusRecord
+	if !update {
+		expected = loadManifest(t)
+	}
+	seen := map[string]bool{}
+	var produced []corpusRecord
 
 	var (
 		statements int
@@ -159,9 +171,55 @@ func TestCorpusReplay(t *testing.T) {
 				t.Errorf("%s statement %d: unexpected gate decision %q", name, i+1, decision)
 			}
 
+			// The committed expectation for THIS statement. Everything above
+			// checks that the classification is internally coherent; this is
+			// the only check that says what the answer is supposed to BE.
+			rec := corpusRecord{
+				file:     name,
+				ordinal:  i + 1,
+				hash:     statementHash(p),
+				verb:     st.Verb,
+				class:    string(st.Class),
+				decision: decision,
+			}
+			if update {
+				produced = append(produced, rec)
+			} else {
+				seen[rec.key()] = true
+				want, ok := expected[rec.key()]
+				switch {
+				case !ok:
+					t.Errorf("%s statement %d is not in the manifest (verb=%s class=%s decision=%s) — "+
+						"a new statement needs a reviewed expectation, not a silent pass",
+						name, i+1, rec.verb, rec.class, rec.decision)
+				case want.hash != rec.hash:
+					t.Errorf("%s statement %d: the corpus text changed (manifest %s, got %s) — "+
+						"re-key the expectation deliberately rather than letting it drift",
+						name, i+1, want.hash, rec.hash)
+				default:
+					if want.verb != rec.verb || want.class != rec.class || want.decision != rec.decision {
+						t.Errorf("%s statement %d:\n  got  verb=%s class=%s decision=%s\n  want verb=%s class=%s decision=%s",
+							name, i+1, rec.verb, rec.class, rec.decision, want.verb, want.class, want.decision)
+					}
+				}
+			}
+
 			byClass[st.Class]++
 			byVerb[st.Verb]++
 			decisions[decision]++
+		}
+	}
+
+	if update {
+		writeManifest(t, produced)
+		t.Skip("manifest regenerated; review the diff — every changed line is a behaviour change")
+	}
+	// A statement that vanished is as much a change as one that appeared: a
+	// corpus file deleted, or a split that stopped producing it.
+	for key, want := range expected {
+		if !seen[key] {
+			t.Errorf("%s: the manifest expects %s (verb=%s class=%s decision=%s) but the replay never saw it",
+				manifestPath, key, want.verb, want.class, want.decision)
 		}
 	}
 
@@ -322,6 +380,118 @@ func whereAtTopLevel(sql string) bool {
 		}
 	}
 	return false
+}
+
+// The committed manifest (ADR-0074 §8, G6). One line per corpus statement:
+//
+//	<file> <ordinal> <sha256[:12] of the statement> <verb> <class> <decision>
+//
+// It holds no SQL — a hash and a verdict — so the corpus stays out of this
+// repo while its EXPECTED classification lives in it, reviewable in a diff.
+//
+// I argued against a golden in the first round, on the grounds that a
+// transcript no CI run can regenerate rots into a file people update until it
+// passes. Lector answered that with a demonstration rather than an argument:
+// with v1compat simulated as admitting nested mutations, the corpus's one
+// nested-mutation refusal silently became an admission and the replay still
+// passed, because it only ever asserted that whatever decision came back was
+// internally consistent. A fixture that cannot see that regression is not
+// doing its job, and the maintenance hazard is the smaller problem. Both
+// checks run now: the manifest catches drift, and the independent
+// second-opinion checks catch a manifest regenerated into agreement.
+const manifestPath = "testdata/lm_corpus_manifest.txt"
+
+// updateManifestEnv regenerates the manifest instead of asserting against it.
+// It is deliberately an explicit opt-in: a golden that refreshes itself is
+// just a log.
+const updateManifestEnv = "AUTODB_CORPUS_UPDATE_MANIFEST"
+
+type corpusRecord struct {
+	file     string
+	ordinal  int
+	hash     string
+	verb     string
+	class    string
+	decision string
+}
+
+func (r corpusRecord) key() string { return fmt.Sprintf("%s:%d", r.file, r.ordinal) }
+
+func (r corpusRecord) line() string {
+	return strings.Join([]string{r.file, fmt.Sprint(r.ordinal), r.hash, r.verb, r.class, r.decision}, "\t")
+}
+
+func statementHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+func loadManifest(t *testing.T) map[string]corpusRecord {
+	t.Helper()
+
+	f, err := os.Open(manifestPath)
+	if err != nil {
+		t.Fatalf("the corpus manifest is missing (%v) — regenerate it with %s=1", err, updateManifestEnv)
+	}
+	defer func() { _ = f.Close() }()
+
+	out := map[string]corpusRecord{}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for ln := 1; sc.Scan(); ln++ {
+		line := sc.Text()
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.Split(line, "\t")
+		if len(parts) != 6 {
+			t.Fatalf("%s:%d: malformed record %q", manifestPath, ln, line)
+		}
+		var r corpusRecord
+		r.file, r.hash, r.verb, r.class, r.decision = parts[0], parts[2], parts[3], parts[4], parts[5]
+		if _, err := fmt.Sscanf(parts[1], "%d", &r.ordinal); err != nil {
+			t.Fatalf("%s:%d: bad ordinal %q", manifestPath, ln, parts[1])
+		}
+		out[r.key()] = r
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func writeManifest(t *testing.T, records []corpusRecord) {
+	t.Helper()
+
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].file != records[j].file {
+			return records[i].file < records[j].file
+		}
+		return records[i].ordinal < records[j].ordinal
+	})
+	var b strings.Builder
+	b.WriteString("# autodb — expected classification and v1compat gate decision for every\n")
+	b.WriteString("# statement of the LM production deployment corpus (ADR-0074 §8, design doc G6).\n")
+	b.WriteString("#\n")
+	b.WriteString("# file\tordinal\tsha256[:12] of the statement\tverb\tclass\tgate decision\n")
+	b.WriteString("#\n")
+	b.WriteString("# No SQL is stored here: the corpus is another product's schema and stays in\n")
+	b.WriteString("# its own repo. The hash pins WHICH statement each expectation belongs to, so\n")
+	b.WriteString("# an edited corpus fails loudly instead of silently re-keying.\n")
+	b.WriteString("#\n")
+	b.WriteString("# Regenerate with AUTODB_CORPUS_UPDATE_MANIFEST=1 and AUTODB_CORPUS_DIR set.\n")
+	b.WriteString("# Every line that changes is a behaviour change: justify it in the commit.\n")
+	for _, r := range records {
+		b.WriteString(r.line())
+		b.WriteString("\n")
+	}
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("wrote %s with %d records", manifestPath, len(records))
 }
 
 // independentClass maps a leading verb to its authorization class WITHOUT
