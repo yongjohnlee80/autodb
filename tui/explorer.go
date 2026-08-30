@@ -30,6 +30,12 @@ import (
 //	tbl:<conn>:<schema>:<name>  fn:<conn>:<schema>:<name+sig>
 //	col:<conn>:<schema>:<table>:<name>
 //	note:<ws>:<file>  detached:<ws>
+//
+// A partitioned Postgres parent (ADR-0077) expands to two folders instead of
+// columns directly; both name the parent table:
+//
+//	cols:<conn>:<schema>:<parent>   the parent's columns (lazy, like tbl:)
+//	part:<conn>:<schema>:<parent>   the partitions (preassembled child tbl: nodes)
 type explorer struct {
 	widget.Base
 	tree  *paneTree
@@ -452,23 +458,28 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 			if err != nil {
 				return fail(err), nil
 			}
-			wantKind := "table"
-			if section == "views" {
-				wantKind = "view"
-			}
-			var kids []*widget.TreeNode
 			quoted := map[string]string{}
-			for _, t := range tables {
-				if t.Kind != wantKind {
-					continue
+			// The tables section nests Postgres partitions under their parent
+			// (ADR-0077); the views section stays a flat list.
+			if section == "views" {
+				var kids []*widget.TreeNode
+				for _, t := range tables {
+					if t.Kind != "view" {
+						continue
+					}
+					nid := fmt.Sprintf("tbl:%d:%s:%s", connID, encSeg(schema), encSeg(t.Name))
+					quoted[nid] = t.Quoted
+					kids = append(kids, widget.NewTreeNode(nid, t.Name))
 				}
-				nid := fmt.Sprintf("tbl:%d:%s:%s", connID, encSeg(schema), encSeg(t.Name))
-				quoted[nid] = t.Quoted
-				kids = append(kids, widget.NewTreeNode(nid, t.Name))
+				return treeLoaded{node: node, gen: gen, sgen: sgen, kids: kids, quoted: quoted}, nil
 			}
+			kids := buildTableForest(connID, schema, tables, quoted)
 			return treeLoaded{node: node, gen: gen, sgen: sgen, kids: kids, quoted: quoted}, nil
 
-		case strings.HasPrefix(id, "tbl:"):
+		// A plain table's or a leaf partition's columns (tbl:), and a partitioned
+		// parent's `columns` folder (cols:) load the same way — both name
+		// (conn, schema, table) and list that relation's columns.
+		case strings.HasPrefix(id, "tbl:"), strings.HasPrefix(id, "cols:"):
 			parts := strings.SplitN(id, ":", 4)
 			connID, _ := strconv.ParseInt(parts[1], 10, 64)
 			schema, table := decSeg(parts[2]), decSeg(parts[3])
@@ -493,6 +504,72 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 		}
 		return treeLoaded{node: node, gen: gen, sgen: sgen}, nil
 	})
+}
+
+// buildTableForest turns the annotated table list into the top-level nodes of
+// the `tables` section, nesting Postgres partitions under their parent (ADR-0077).
+//
+// It runs in the `sec:` worker, off the loop. Every node it builds is UNOWNED
+// here, so a partitioned parent's `SetChildren(0, …)` is static pre-assembly —
+// the whole forest installs atomically when the section node adopts it on the
+// loop, and a stale section result is rejected wholesale by the generation guard
+// (there is no separate topology map to fall out of sync). Only the `cols:`
+// folders and plain/leaf `tbl:` nodes stay lazy (a later columns query).
+func buildTableForest(connID int64, schema string, tables []TableInfo, quoted map[string]string) []*widget.TreeNode {
+	// A parent is nestable only when it is present in THIS listing as a
+	// partitioned parent; a child is nestable only under such a parent in the
+	// same schema. Everything else (a cross-schema child, whose Parent is "",
+	// or a plain table) is top-level — never dropped.
+	partitioned := map[string]bool{}
+	for _, t := range tables {
+		if t.Kind == "table" && t.Partitioned {
+			partitioned[t.Name] = true
+		}
+	}
+	nestable := func(t TableInfo) bool {
+		return t.IsPartition && t.Parent != "" && partitioned[t.Parent]
+	}
+	children := map[string][]TableInfo{}
+	for _, t := range tables {
+		if t.Kind == "table" && nestable(t) {
+			children[t.Parent] = append(children[t.Parent], t)
+		}
+	}
+	nid := func(name string) string {
+		return fmt.Sprintf("tbl:%d:%s:%s", connID, encSeg(schema), encSeg(name))
+	}
+	var build func(t TableInfo) *widget.TreeNode
+	build = func(t TableInfo) *widget.TreeNode {
+		id := nid(t.Name)
+		quoted[id] = t.Quoted // A1: every nested node is Enter-scaffoldable
+		if !t.Partitioned {
+			return widget.NewTreeNode(id, t.Name) // plain table / leaf partition: lazy columns
+		}
+		// A partitioned parent: a lazy `columns` folder + a preassembled
+		// `partitions (N)` folder holding the (visible, same-schema) children.
+		kids := children[t.Name]
+		colsFolder := widget.NewTreeNode(
+			fmt.Sprintf("cols:%d:%s:%s", connID, encSeg(schema), encSeg(t.Name)), "columns")
+		partFolder := widget.NewTreeNode(
+			fmt.Sprintf("part:%d:%s:%s", connID, encSeg(schema), encSeg(t.Name)),
+			fmt.Sprintf("partitions (%d)", len(kids)))
+		partKids := make([]*widget.TreeNode, 0, len(kids))
+		for _, ch := range kids {
+			partKids = append(partKids, build(ch)) // recurse: a sub-partition nests too
+		}
+		partFolder.SetChildren(0, partKids)
+		node := widget.NewTreeNode(id, t.Name, widget.WithBadge("partitioned"))
+		node.SetChildren(0, []*widget.TreeNode{colsFolder, partFolder})
+		return node
+	}
+	var top []*widget.TreeNode
+	for _, t := range tables {
+		if t.Kind != "table" || nestable(t) {
+			continue // views live in their own section; nestable children nest
+		}
+		top = append(top, build(t))
+	}
+	return top
 }
 
 type treeLoaded struct {

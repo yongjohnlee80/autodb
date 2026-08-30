@@ -698,6 +698,8 @@ func (s *Server) registerM6() {
 			out = append(out, map[string]any{
 				"schema": t.Schema, "name": t.Name,
 				"kind": string(t.Kind), "quoted": t.Quoted,
+				"partitioned": t.Partitioned, "is_partition": t.IsPartition,
+				"parent": t.Parent,
 			})
 		}
 		return out, nil
