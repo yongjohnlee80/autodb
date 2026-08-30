@@ -42,6 +42,11 @@ const (
 	DefaultMaxSessionsPerUser = 8
 	DefaultMaxSessionsGlobal  = 256
 	DefaultSessionIdleTimeout = 30 * time.Minute
+	// Transaction bounds, mirroring the config package's.
+	DefaultIdleInTxTimeout      = 90 * time.Second
+	DefaultMaxTxDuration        = 5 * time.Minute
+	DefaultDebugIdleInTxTimeout = 10 * time.Minute
+	DefaultMaxTxDurationCeiling = 30 * time.Minute
 )
 
 // DefaultMaxStatementBytes is the default execution size cap, matching
@@ -78,6 +83,11 @@ type Engine struct {
 	sessions *sessionRegistry
 	// sessionIdle is how long a session may sit unused before it is reaped.
 	sessionIdle time.Duration
+	// txLimits bound an open transaction; debugIdle and maxTxCeiling are the
+	// per-connection override and the install-wide cap on it.
+	txLimits     txLimits
+	debugIdle    time.Duration
+	maxTxCeiling time.Duration
 	// onLog reports problems with no caller to return them to — a failed
 	// audit on a teardown path, say. nil discards.
 	onLog func(string)
@@ -136,6 +146,33 @@ func WithSessionIdleTimeout(d time.Duration) Option {
 	}
 }
 
+// WithTxLimits bounds an open transaction: the idle-in-transaction deadline
+// and the maximum duration. Non-positive values keep the defaults, because
+// these are production-safety bounds and "unset" must never mean "none".
+func WithTxLimits(idleInTx, maxTx time.Duration) Option {
+	return func(e *Engine) {
+		if idleInTx > 0 {
+			e.txLimits.idleInTx = idleInTx
+		}
+		if maxTx > 0 {
+			e.txLimits.maxTx = maxTx
+		}
+	}
+}
+
+// WithDebugTxLimits sets the longer idle bound for debug-profile connections
+// and the install-wide ceiling any per-connection override is capped by.
+func WithDebugTxLimits(debugIdle, ceiling time.Duration) Option {
+	return func(e *Engine) {
+		if debugIdle > 0 {
+			e.debugIdle = debugIdle
+		}
+		if ceiling > 0 {
+			e.maxTxCeiling = ceiling
+		}
+	}
+}
+
 // WithLogger receives operational problems that have no caller to return to.
 func WithLogger(fn func(string)) Option { return func(e *Engine) { e.onLog = fn } }
 
@@ -154,8 +191,11 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		conns:   map[int64]dao.DataConn{},
 		history: true, maxRows: DefaultMaxRows, now: time.Now,
 		profile: ProfileV1Compat, maxStatementBytes: DefaultMaxStatementBytes,
-		sessions:    newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
-		sessionIdle: DefaultSessionIdleTimeout,
+		sessions:     newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
+		sessionIdle:  DefaultSessionIdleTimeout,
+		txLimits:     defaultTxLimits(),
+		debugIdle:    DefaultDebugIdleInTxTimeout,
+		maxTxCeiling: DefaultMaxTxDurationCeiling,
 	}
 	for _, o := range opts {
 		o(e)
