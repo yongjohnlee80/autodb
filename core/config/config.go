@@ -181,6 +181,18 @@ type Exec struct {
 	// abandoned transaction can hold locks, so it is a fraction of the
 	// shortest bound rather than a tuning preference.
 	JanitorInterval Duration `toml:"janitor_interval"`
+
+	// ReconcileInterval is how often the engine re-asks targets about
+	// transactions whose outcome it could not determine (ADR-0074 §7).
+	//
+	// Longer than the janitor on purpose. The janitor bounds how long an
+	// abandoned transaction holds LOCKS, which is a live cost paid by other
+	// clients; this one bounds how long an already-finished transaction's
+	// outcome stays unknown, which costs nobody anything but an operator's
+	// patience. Each pass may open connections to every target that has a
+	// pending entry, so sweeping it as often as the janitor would turn a
+	// down database into steady connection pressure.
+	ReconcileInterval Duration `toml:"reconcile_interval"`
 }
 
 // TUI configures the standalone terminal UI (ADR-0057).
@@ -271,6 +283,7 @@ func Default() Config {
 			PoolMaxConnIdleTime:  Duration(DefaultPoolMaxConnIdleTime),
 			PoolMaxConnLifetime:  Duration(DefaultPoolMaxConnLifetime),
 			JanitorInterval:      Duration(DefaultJanitorInterval),
+			ReconcileInterval:    Duration(DefaultReconcileInterval),
 		},
 	}
 }
@@ -305,6 +318,12 @@ const (
 	// is rolled back within a few seconds of its deadline rather than at the
 	// next thing that happens to look.
 	DefaultJanitorInterval = 10 * time.Second
+
+	// A minute. An unresolved outcome is not urgent the way a held lock is —
+	// nothing is blocked on it — and the startup pass is what recovers the
+	// crash window, so this cadence only governs entries whose target was
+	// unreachable when that pass ran.
+	DefaultReconcileInterval = time.Minute
 )
 
 // DefaultPoolMaxConns is 2 × cores, per ADR-0074 §1a (Johno, 2026-08-30).
@@ -460,6 +479,11 @@ func (c Config) validate() error {
 		return fmt.Errorf("%w: exec.pool_max_conn_idle_time (%s) exceeds pool_max_conn_lifetime (%s), "+
 			"so the idle bound could never retire a connection first", ErrInvalid,
 			c.Exec.PoolMaxConnIdleTime.Duration(), c.Exec.PoolMaxConnLifetime.Duration())
+	}
+	if c.Exec.ReconcileInterval <= 0 {
+		return fmt.Errorf("%w: [exec] reconcile_interval must be positive (got %s); a non-positive value "+
+			"would leave transactions whose outcome could not be determined pending forever",
+			ErrInvalid, c.Exec.ReconcileInterval.Duration())
 	}
 	if c.Exec.JanitorInterval <= 0 {
 		return fmt.Errorf("%w: exec.janitor_interval is %s; with no sweep an expired transaction holds "+

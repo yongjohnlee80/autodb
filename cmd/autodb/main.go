@@ -309,6 +309,14 @@ func startEngine(
 	// It stops with serveCtx.
 	eng.StartJanitor(serveCtx, cfg.Exec.JanitorInterval.Duration())
 
+	// And so is the outcome reconciler, for the same reason and with a
+	// sharper edge: its STARTUP pass is what recovers the crash window. A
+	// daemon that never called it would keep a complete, correct record of
+	// every transaction whose fate it could not determine, and never once go
+	// back to find out — which is the entire point of having written the
+	// record down. It stops with serveCtx.
+	eng.StartOutcomeReconciler(serveCtx, cfg.Exec.ReconcileInterval.Duration())
+
 	return eng, serveCtx, lost, stopServing
 }
 

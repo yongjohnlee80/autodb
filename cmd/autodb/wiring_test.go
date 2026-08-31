@@ -167,8 +167,90 @@ func execConfig() config.Config {
 		PoolMaxConnIdleTime:  config.Duration(10 * time.Minute),
 		PoolMaxConnLifetime:  config.Duration(60 * time.Minute),
 		JanitorInterval:      config.Duration(20 * time.Millisecond),
+		ReconcileInterval:    config.Duration(20 * time.Millisecond),
 	}
 	return cfg
+}
+
+// config → daemon → an actual reconciliation pass.
+//
+// Same MF2 reasoning as the janitor cell: the reconciler is exercised
+// directly in core/exec, so deleting the production call in startEngine would
+// leave every one of those tests green while the daemon kept a complete
+// record of undetermined transactions and never went back to find out. This
+// goes through startEngine and observes the EFFECT.
+//
+// The entry is seeded against a sqlite target, which has no oracle, so the
+// pass terminates it outcome_unresolvable(no-oracle) without needing a live
+// PostgreSQL — the property under test is that the daemon RUNS the
+// reconciler, not what the reconciler concludes.
+func TestStartEngine_TheReconcilerActuallyRunsOnTheConfiguredSchedule(t *testing.T) {
+	t.Parallel()
+
+	seedPending := func(t *testing.T, store *meta.Store, connID int64, txID string) {
+		t.Helper()
+		for i, st := range []string{"opened", "commit_started"} {
+			if _, err := store.TxOutcomes.OnCtx(t.Context()).
+				Set(meta.TxOutTxID, txID).Set(meta.TxOutSeq, int64(i+1)).
+				Set(meta.TxOutState, st).Set(meta.TxOutReason, "").
+				Set(meta.TxOutUserID, int64(1)).Set(meta.TxOutConnID, connID).
+				Set(meta.TxOutHistoryID, int64(0)).Set(meta.TxOutTargetXID, "55").
+				Set(meta.TxOutCreatedAt, int64(1000+i)).Insert(); err != nil {
+				t.Fatalf("seeding: %v", err)
+			}
+		}
+	}
+	settled := func(t *testing.T, store *meta.Store, txID string) bool {
+		t.Helper()
+		rows, err := store.TxOutcomes.OnCtx(t.Context()).With(meta.TxOutTxID, txID).Select()
+		if err != nil {
+			t.Fatalf("reading the log: %v", err)
+		}
+		for _, r := range rows {
+			if r.State == "committed" || r.State == "rolled_back" || r.State == "outcome_unresolvable" {
+				return true
+			}
+		}
+		return false
+	}
+
+	cfg := execConfig()
+	eng, _, store, _, tok := startedEngine(t, cfg, make(chan struct{}))
+	dsn := fmt.Sprintf("file:recon%d?mode=memory&cache=shared", time.Now().UnixNano())
+	connID, err := eng.CreateConnection(t.Context(), tok, "target", "sqlite", dsn, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("CreateConnection: %v", err)
+	}
+
+	// Positive control: an `opened` transaction is NOT the reconciler's to
+	// settle, so if this one were also resolved the test below would be
+	// satisfied by a pass that terminates everything it sees.
+	seedControl := func() {
+		if _, err := store.TxOutcomes.OnCtx(t.Context()).
+			Set(meta.TxOutTxID, "tx_control").Set(meta.TxOutSeq, int64(1)).
+			Set(meta.TxOutState, "opened").Set(meta.TxOutReason, "").
+			Set(meta.TxOutUserID, int64(1)).Set(meta.TxOutConnID, connID).
+			Set(meta.TxOutHistoryID, int64(0)).Set(meta.TxOutTargetXID, "").
+			Set(meta.TxOutCreatedAt, int64(1)).Insert(); err != nil {
+			t.Fatalf("seeding the control: %v", err)
+		}
+	}
+	seedControl()
+	seedPending(t, store, connID, "tx_pending")
+
+	// 25x the configured interval. Nothing in this test calls the
+	// reconciler.
+	time.Sleep(500 * time.Millisecond)
+
+	if !settled(t, store, "tx_pending") {
+		t.Fatal("an undetermined transaction outlived 25 reconcile intervals: the daemon either " +
+			"never started the reconciler or never passed it the configured interval, so a " +
+			"crash-window outcome would stay unknown forever")
+	}
+	if settled(t, store, "tx_control") {
+		t.Fatal("an `opened` transaction was terminated too — the pass settles everything it " +
+			"sees, so the assertion above proves nothing about reconciliation")
+	}
 }
 
 // config → daemon → an actual reap. The session idle timeout and the janitor
