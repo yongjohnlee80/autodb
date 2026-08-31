@@ -142,6 +142,7 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 		txOpen := s.txPhase != txNone
 		aborted := s.txPhase == txAborted
 		pinned := s.tx
+		txID := s.txID
 		s.mu.Unlock()
 
 		// SET and LOCK are admitted by the SESSION's state, not by the
@@ -156,7 +157,7 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 			}
 			runCtx, endRun := s.runContext(ctx)
 			defer endRun()
-			return e.run(runCtx, token, s.connID, sqlText, ip, nil, pinned)
+			return e.run(runCtx, token, s.connID, sqlText, ip, nil, pinned, txID)
 		}
 
 		tc, perr := ParseTxControl(sqlText)
@@ -171,7 +172,7 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 	// answer every one of them identically and the caller deserves to be
 	// told once what to do about it.
 	s.mu.Lock()
-	pinned, phase := s.tx, s.txPhase
+	pinned, phase, txID := s.tx, s.txPhase, s.txID
 	s.mu.Unlock()
 	if phase == txAborted {
 		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, ErrTxAborted)
@@ -183,7 +184,7 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 	}
 	runCtx, endRun := s.runContext(ctx)
 	defer endRun()
-	res, rerr := e.run(runCtx, token, s.connID, sqlText, ip, nil, pinnedTx)
+	res, rerr := e.run(runCtx, token, s.connID, sqlText, ip, nil, pinnedTx, txID)
 	s.noteStatementOutcome(rerr)
 	return res, rerr
 }
