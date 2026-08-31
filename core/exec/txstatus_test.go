@@ -14,9 +14,34 @@ import (
 // seedTx writes a progression directly, so the read side can be tested
 // against shapes the writers do not produce on demand (a stuck pending, an
 // out-of-order arrival) without having to crash a real transaction.
+// enqueueSeed adds the queue entry a real opened transaction would have, and
+// removes it again when the seeded progression already ends in a terminal.
+func enqueueSeed(t *testing.T, f *fixture, txID string, connID int64, states ...meta.TxState) {
+	t.Helper()
+	ctx := context.Background()
+	settled := false
+	for _, st := range states {
+		if st.IsTerminal() {
+			settled = true
+		}
+	}
+	if settled {
+		return
+	}
+	if _, err := f.store.TxPending.OnCtx(ctx).
+		Set(meta.TxPendTxID, txID).Set(meta.TxPendConnID, connID).
+		Set(meta.TxPendCreatedAt, int64(1)).Insert(); err != nil {
+		t.Fatalf("seeding the pending queue for %s: %v", txID, err)
+	}
+}
+
 func seedTx(t *testing.T, f *fixture, txID string, userID, connID int64, states ...meta.TxState) {
 	t.Helper()
 	ctx := context.Background()
+	// A real transaction enqueues as it opens, so a seed that models one has
+	// to as well — otherwise it is a shape production never produces, and
+	// the reconciler is right to ignore it.
+	enqueueSeed(t, f, txID, connID, states...)
 	for i, st := range states {
 		if _, err := f.store.TxOutcomes.OnCtx(ctx).
 			Set(meta.TxOutTxID, txID).Set(meta.TxOutSeq, int64(i+1)).

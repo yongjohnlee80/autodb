@@ -119,22 +119,95 @@ func (e *Engine) projectable(txID string, state meta.TxState) bool {
 	return e.history && txID != "" && historyStatusFor(state) != ""
 }
 
-// repairHistory re-runs the projection for a settled transaction.
+// dequeueSettled clears a queue entry whose transaction is already settled.
 //
-// Belt to the atomic write's braces. The atomicity closes the crash window
-// for transitions written from here on; this heals a row left behind by a
-// build that predates it, or by a projection that was skipped because history
-// was disabled at the time and has since been turned back on. Idempotent: it
-// touches only rows still marked pending.
-func (e *Engine) repairHistory(ctx context.Context, txID string, state meta.TxState) {
-	if !e.projectable(txID, state) {
+// Reachable two ways: a terminal written by a build that predates the queue,
+// and a process that died between the terminal and its own dequeue — though
+// the latter is now impossible for new writes, since both share one store
+// transaction. Clearing it keeps the backlog equal to the real backlog.
+func (e *Engine) dequeueSettled(ctx context.Context, txID string, st TxStatus) {
+	err := dao.RunTx(ctx, func(tx *dao.Transaction) error {
+		if derr := e.dequeuePendingTx(tx, txID); derr != nil {
+			return derr
+		}
+		// Its surface may still be pending for the same reason the entry
+		// was, so project while we are here.
+		return e.projectHistoryTx(tx, txID, st.State)
+	})
+	if err != nil {
+		e.logf("clearing the settled queue entry for %s: %v", txID, err)
+	}
+}
+
+// repairPendingHistory heals history rows stranded under a settled outcome.
+//
+// Driven from HISTORY rather than from the outcome log, which is the whole
+// point: the strandable rows are exactly the ones still marked
+// ok_pending_commit, and there are normally none. Walking settled
+// TRANSACTIONS to find them meant one history query per transaction ever
+// recorded, on every pass (PR #20 r1 MF1) — a scan whose cost grew with
+// history while the thing it looked for did not.
+//
+// Bounded, and re-run each pass, so a backlog larger than one batch drains
+// over several passes instead of being materialized at once.
+func (e *Engine) repairPendingHistory(ctx context.Context) {
+	if !e.history {
 		return
 	}
-	n, err := e.store.History.OnCtx(ctx).
-		With(meta.HistTxID, txID).With(meta.HistStatus, StatusPendingCommit).Count()
-	if err != nil || n == 0 {
+	rows, err := e.store.History.OnCtx(ctx).
+		With(meta.HistStatus, StatusPendingCommit).Limit(maxReconcileBatch).Select()
+	if err != nil {
+		e.logf("looking for stranded history rows: %v", err)
 		return
 	}
-	e.logf("repairing %d history row(s) left pending under settled transaction %s", n, txID)
-	e.resolveHistory(ctx, txID, state)
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if r.TxID == "" || seen[r.TxID] {
+			continue
+		}
+		seen[r.TxID] = true
+		// Only the log can say whether this row is stranded or simply still
+		// in flight, and only the settled ones are ours to touch.
+		group, gerr := e.store.TxOutcomes.OnCtx(ctx).With(meta.TxOutTxID, r.TxID).Select()
+		if gerr != nil || len(group) == 0 {
+			continue
+		}
+		st := foldTxLog(group)
+		if !st.Terminal() {
+			continue
+		}
+		e.logf("repairing history left pending under settled transaction %s", r.TxID)
+		e.resolveHistory(ctx, r.TxID, st.State)
+	}
+}
+
+// --- the pending queue ------------------------------------------------------
+
+// enqueuePendingTx records that this transaction has no terminal yet.
+//
+// A duplicate is success: the append path can retry after a seq collision,
+// and the entry from the first attempt is exactly what we would write.
+func (e *Engine) enqueuePendingTx(tx *dao.Transaction, txID string, connID int64) error {
+	_, err := e.store.TxPending.On(tx).
+		Set(meta.TxPendTxID, txID).
+		Set(meta.TxPendConnID, connID).
+		Set(meta.TxPendCreatedAt, e.now().Unix()).
+		Insert()
+	if errors.Is(err, dao.ErrDuplicate) {
+		return nil
+	}
+	return err
+}
+
+// dequeuePendingTx removes a settled transaction from the queue.
+//
+// An absent row is success. A transaction settled by a build that predates
+// the queue has nothing to remove, and failing a terminal write over
+// bookkeeping already in the desired state would be the wrong trade.
+func (e *Engine) dequeuePendingTx(tx *dao.Transaction, txID string) error {
+	err := e.store.TxPending.On(tx).With(meta.TxPendTxID, txID).Delete()
+	if errors.Is(err, dao.ErrNoRows) {
+		return nil
+	}
+	return err
 }

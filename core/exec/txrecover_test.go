@@ -2,6 +2,8 @@ package exec
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -320,5 +322,155 @@ func TestReconcileConnection_ACheckoutResolvesThatConnectionsBacklog(t *testing.
 	}
 	if st := stateOf(t, f, "tx_checkout"); !st.Terminal() {
 		t.Fatalf("state = %s, want a terminal", st.State)
+	}
+}
+
+// --- r1 MF1: the pending query must be SELECTIVE ---------------------------
+
+// A backlog query must return the backlog, not the history.
+//
+// The previous version selected rows whose state was opened, commit_started
+// or unknown_pending — and every transaction keeps its `opened` row forever,
+// and every committed one keeps `commit_started` too. No predicate over
+// states can separate pending from settled, so the "candidate" set was every
+// transaction ever recorded: lector's probe seeded 32 settled groups plus one
+// pending and got all 33 back.
+//
+// That is not a slow query, it is a broken one. It reloads the whole log
+// through a growing IN list, and when that list reaches the driver's
+// parameter limit reconciliation does not degrade — it stops, silently, at
+// exactly the moment the backlog is largest.
+func TestPendingGroups_ReturnsOnlyTheUnresolvedBacklog(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	const settled = 32
+	for i := 0; i < settled; i++ {
+		id := fmt.Sprintf("tx_settled_%02d", i)
+		seedTx(t, f, id, 1, f.connID, meta.TxOpened, meta.TxCommitStarted, meta.TxCommitted)
+	}
+	seedCrashWindow(t, f, "tx_really_pending", f.connID, "77")
+
+	groups, err := f.eng.pendingGroups(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 {
+		var ids []string
+		for id := range groups {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		t.Fatalf("pendingGroups returned %d groups for a backlog of 1: %v\n"+
+			"a settled transaction still has its opened and commit_started rows, so a "+
+			"state predicate selects the entire history", len(groups), ids)
+	}
+	if _, ok := groups["tx_really_pending"]; !ok {
+		t.Fatal("the one genuinely pending transaction was not returned")
+	}
+
+	// The queue is the reason, and it must shrink as transactions settle.
+	n, err := f.store.TxPending.OnCtx(ctx).Count()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("the pending queue holds %d rows for a backlog of 1 — settled transactions "+
+			"are not leaving it", n)
+	}
+}
+
+// Settling a transaction removes it from the queue, in the same store
+// transaction as the terminal. An entry that outlived its terminal would be
+// probed forever; one deleted before the terminal landed would be lost.
+func TestPendingQueue_ATerminalDequeuesAtomically(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if err := f.eng.appendTxOutcome(ctx, txTransition{
+		txID: "tx_q", state: meta.TxOpened, connectionID: f.connID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := f.store.TxPending.OnCtx(ctx).With(meta.TxPendTxID, "tx_q").Count(); n != 1 {
+		t.Fatalf("an opened transaction is not in the queue (%d rows); nothing would ever "+
+			"come back for it", n)
+	}
+	if err := f.eng.appendTxOutcome(ctx, txTransition{
+		txID: "tx_q", state: meta.TxCommitted, connectionID: f.connID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := f.store.TxPending.OnCtx(ctx).With(meta.TxPendTxID, "tx_q").Count(); n != 0 {
+		t.Fatalf("a settled transaction is still queued (%d rows) and would be probed forever", n)
+	}
+}
+
+// The bounded sweep heals rows stranded under a settled outcome, and is
+// driven from HISTORY — the strandable rows are exactly the ones still marked
+// pending, and there are normally none. Walking settled transactions to find
+// them cost one query per transaction ever recorded, per pass.
+func TestRepairPendingHistory_HealsWithoutWalkingEveryTransaction(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	for i := 0; i < 8; i++ {
+		id := fmt.Sprintf("tx_ok_%02d", i)
+		seedTx(t, f, id, 1, f.connID, meta.TxOpened, meta.TxCommitted)
+		seedHistory(t, f, id, StatusOK)
+	}
+	// One legacy strand: settled outcome, surface still pending.
+	seedTx(t, f, "tx_stranded", 1, f.connID, meta.TxOpened, meta.TxCommitted)
+	seedHistory(t, f, "tx_stranded", StatusPendingCommit)
+
+	f.eng.repairPendingHistory(ctx)
+
+	if got := histStatus(t, f, "tx_stranded"); len(got) != 1 || got[0] != StatusOK {
+		t.Fatalf("history = %v, want [ok] — the stranded row was not healed", got)
+	}
+	// A row whose transaction is genuinely still open must NOT be touched.
+	seedCrashWindow(t, f, "tx_inflight", f.connID, "3")
+	seedHistory(t, f, "tx_inflight", StatusPendingCommit)
+	f.eng.repairPendingHistory(ctx)
+	if got := histStatus(t, f, "tx_inflight"); len(got) != 1 || got[0] != StatusPendingCommit {
+		t.Fatalf("history = %v, want [ok_pending_commit] — an in-flight statement was "+
+			"resolved by a repair pass", got)
+	}
+}
+
+// Engine-owned background work must not outlive Close.
+//
+// The checkout trigger uses the very pools Close tears down, so a detached
+// goroutine could reopen one that had just been shut. Close cancels it and
+// WAITS before touching any pool (PR #20 r1 SF).
+func TestEngineClose_StopsAndWaitsForCheckoutReconciliation(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	seedCrashWindow(t, f, "tx_bg", f.connID, "42")
+	// A checkout: this is what fires the trigger on the real path.
+	if _, err := f.eng.Execute(ctx, f.rootTok, f.connID,
+		"CREATE TABLE bg (id INTEGER PRIMARY KEY)", testIP); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.eng.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Close returned, so every engine-owned goroutine has finished. If any
+	// were still running it would be touching a closed pool right now, and
+	// -race would say so.
+	if f.eng.bgCtx.Err() == nil {
+		t.Fatal("the engine's background context is still live after Close")
+	}
+	// And nothing reopened a pool behind Close's back.
+	f.eng.mu.Lock()
+	open := len(f.eng.conns)
+	f.eng.mu.Unlock()
+	if open != 0 {
+		t.Fatalf("%d pool(s) open after Close — background work reopened one", open)
 	}
 }

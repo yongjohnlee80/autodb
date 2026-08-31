@@ -179,6 +179,53 @@ var migrations = []migration{
 			`CREATE INDEX idx_audit_tx ON audit_log(tx_id)`,
 		},
 	},
+	// v7 adds the durable outcome QUEUE (ADR-0074 §7: "Opening a tx enqueues
+	// a durable finalization-pending entry in core/meta keyed by tx_id …
+	// resolved by whichever writer learns the truth first").
+	//
+	// The log alone cannot answer "what is still unresolved?" cheaply, and
+	// the reason is structural rather than an indexing oversight: every
+	// transaction keeps its `opened` row forever, and every committed one
+	// keeps its `commit_started` too, so no predicate over STATES can
+	// separate the pending from the settled. Any such query selects the
+	// whole history (PR #20 r1 MF1).
+	//
+	// So the queue is a separate, SMALL table holding exactly the
+	// unresolved: one row per transaction, inserted when it opens and
+	// deleted — in the same store transaction as the terminal — when it
+	// settles. It is a pure index into the log, carrying no state of its
+	// own, so it cannot drift from the truth or become a second place where
+	// an outcome is recorded.
+	{
+		Version: 7,
+		SQLite: []string{
+			`CREATE TABLE tx_pending (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				tx_id TEXT NOT NULL UNIQUE,
+				connection_id BIGINT NOT NULL,
+				created_at BIGINT NOT NULL)`,
+			`CREATE INDEX idx_tx_pending_conn ON tx_pending(connection_id)`,
+			// Backfill: everything already on disk without a terminal.
+			// Bounded, runs once, and without it a store upgraded from v6
+			// would silently lose track of its existing backlog.
+			`INSERT INTO tx_pending (tx_id, connection_id, created_at)
+				SELECT tx_id, MIN(connection_id), MIN(created_at) FROM tx_outcomes
+				WHERE tx_id NOT IN (SELECT tx_id FROM tx_outcomes WHERE state IN ('committed','rolled_back','outcome_unresolvable'))
+				GROUP BY tx_id`,
+		},
+		Postgres: []string{
+			`CREATE TABLE tx_pending (
+				id BIGSERIAL PRIMARY KEY,
+				tx_id TEXT NOT NULL UNIQUE,
+				connection_id BIGINT NOT NULL,
+				created_at BIGINT NOT NULL)`,
+			`CREATE INDEX idx_tx_pending_conn ON tx_pending(connection_id)`,
+			`INSERT INTO tx_pending (tx_id, connection_id, created_at)
+				SELECT tx_id, MIN(connection_id), MIN(created_at) FROM tx_outcomes
+				WHERE tx_id NOT IN (SELECT tx_id FROM tx_outcomes WHERE state IN ('committed','rolled_back','outcome_unresolvable'))
+				GROUP BY tx_id`,
+		},
+	},
 }
 
 // runMigrations creates the ledger, checks the downgrade guard, and applies
