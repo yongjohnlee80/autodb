@@ -11,6 +11,7 @@ func fdCfg(mut func(*Config)) Config {
 	c.FrontDoor.Enabled = true
 	c.FrontDoor.TLSCertFile = "/etc/autodb/cert.pem"
 	c.FrontDoor.TLSKeyFile = "/etc/autodb/key.pem"
+	c.FrontDoor.TLSHostNames = []string{"autodb.example.com"}
 	c.Exec.PoolMaxConns = 10
 	c.FrontDoor.ReservedHeadroom = 4
 	if mut != nil {
@@ -62,6 +63,17 @@ func TestFrontDoor_Validation(t *testing.T) {
 		{"an empty bind", func(c *Config) { c.FrontDoor.Bind = "" }, "has no address"},
 		{"a bind that is not host:port", func(c *Config) { c.FrontDoor.Bind = "5432" }, "host:port"},
 		{"negative headroom", func(c *Config) { c.FrontDoor.ReservedHeadroom = -1 }, "cannot be negative"},
+
+		// MF1. Without this the SAN check was skippable by OMISSION: an
+		// enabled front door with no names configured ran zero name checks,
+		// and the one check that cannot be deferred to the client silently
+		// did not run. verify-full verifies the NAME, so the gap simply
+		// reappears at every client as an error each reads as their own.
+		{"no host names at all", func(c *Config) { c.FrontDoor.TLSHostNames = nil },
+			"tls_host_names is empty"},
+		{"a blank host name", func(c *Config) {
+			c.FrontDoor.TLSHostNames = []string{"autodb.example.com", "  "}
+		}, "is blank"},
 		{"negative max_leases", func(c *Config) { c.FrontDoor.MaxLeases = -1 }, "cannot be negative"},
 
 		// The two that matter most, because both are configurations that

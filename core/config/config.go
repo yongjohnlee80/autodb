@@ -74,6 +74,18 @@ type FrontDoor struct {
 	// recurring mystery into a message at the moment the mistake was made.
 	TLSHostNames []string `toml:"tls_host_names"`
 
+	// TLSRootCAFile is the trust root the server's OWN chain is verified
+	// against at startup. Empty uses the host's system roots, which is right
+	// for the ADR's preferred case (a public ACME certificate).
+	//
+	// It exists for the ADR's other sanctioned case — a securely distributed
+	// private CA — because verifying our chain against system roots would
+	// reject a perfectly good private certificate, and the only ways out of
+	// that would be to skip chain verification entirely (which is the defect
+	// this field was added to fix) or to install the CA host-wide for the
+	// benefit of one process.
+	TLSRootCAFile string `toml:"tls_root_ca_file"`
+
 	// ReservedHeadroom is how many connections of each target pool are held
 	// back from wire leases, for the interactive surfaces and the engine's
 	// own control queries (ADR-0075 §3).
@@ -620,6 +632,27 @@ func (f FrontDoor) validate(poolMaxConns int) error {
 			"set; TLS is mandatory on this surface (ADR-0075 §4) because a client using "+
 			"sslmode=require authenticates nothing and an active MITM collects access tokens "+
 			"in cleartext", ErrInvalid)
+	}
+	// At least one host name, and no blank ones. Without this the SAN check
+	// is skippable by omission — an enabled front door with no names
+	// configured ran ZERO name checks, which is the one check that cannot be
+	// deferred to the client: verify-full verifies the NAME, so a gap
+	// reappears at every client instead, as an error each of them reads as
+	// their own problem.
+	//
+	// Not inferred from bind on purpose. bind is where the socket listens
+	// (often 0.0.0.0 or a private address); the name in a DSN is a routable
+	// DNS name, and guessing one from the other would produce a check that
+	// passes while proving nothing about what clients actually dial.
+	if len(f.TLSHostNames) == 0 {
+		return fmt.Errorf("%w: frontdoor is enabled but tls_host_names is empty; name every DNS "+
+			"name clients will dial, so the certificate's coverage is checked once here rather "+
+			"than failing at each client that uses sslmode=verify-full", ErrInvalid)
+	}
+	for i, h := range f.TLSHostNames {
+		if strings.TrimSpace(h) == "" {
+			return fmt.Errorf("%w: frontdoor.tls_host_names[%d] is blank", ErrInvalid, i)
+		}
 	}
 	if f.ReservedHeadroom < 0 {
 		return fmt.Errorf("%w: frontdoor.reserved_headroom is %d; it cannot be negative",
