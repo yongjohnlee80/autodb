@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -58,9 +59,38 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 		return fmt.Errorf("migrate-to-postgres: --to does not look like a postgres DSN (got %q)", o.to)
 	}
 
+	// The source must ALREADY EXIST, and that has to be proven here rather
+	// than left to the opener.
+	//
+	// meta.OpenNoMigrate opens sqlite in a creating mode — correct for daemon
+	// startup, where a first run legitimately has no store yet. Through this
+	// command it turns a typo into a success: a misspelled path was created as
+	// a new empty database, migrated, copied, and reported as `migrated 0
+	// row(s)` with exit 0, leaving the operator free to point [meta] at an
+	// empty postgres store believing it holds their data (lector's PR #31 r0
+	// MF1). A migration has no first-run case — its whole premise is that the
+	// source is already there.
+	info, err := os.Stat(o.from)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("migrate-to-postgres: no sqlite store at --from %q. "+
+				"Nothing was created or written. Check the path: a migration has no "+
+				"first-run case, so a source that does not exist is a typo, not an "+
+				"empty store to copy", o.from)
+		}
+		return fmt.Errorf("migrate-to-postgres: reading --from %q: %w", o.from, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("migrate-to-postgres: --from %q is a directory, not a sqlite store", o.from)
+	}
+
 	srcCfg := config.Meta{Engine: "sqlite", Path: o.from}
 	dstCfg := config.Meta{Engine: "postgres", DSN: o.to, AllowInsecureDSN: o.allowInsecure}
-	if err := dstCfg.CheckDSNTransport(); err != nil {
+	// The FULL operational rule, not the transport half. A DSN-level
+	// pool_max_conns=1 otherwise reaches the destination lease, which pins the
+	// only connection, and the migration runner then blocks forever waiting
+	// for a second one (MF2).
+	if err := dstCfg.CheckOperational(); err != nil {
 		return fmt.Errorf("migrate-to-postgres: %w", err)
 	}
 
@@ -107,7 +137,7 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	defer func() { _ = dstLease.Release() }()
 
 	fmt.Fprintf(out, "source:      %s (sqlite)\n", o.from)
-	fmt.Fprintf(out, "destination: %s\n", redactDSN(o.to))
+	fmt.Fprintf(out, "destination: %s\n", config.RedactDSN(o.to))
 	fmt.Fprintf(out, "no daemon is serving either store (both leases held)\n\n")
 
 	// --- 3. What is there ------------------------------------------------
@@ -156,6 +186,19 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	}
 
 	// --- 4. Copy ----------------------------------------------------------
+	//
+	// Whether the SOURCE already carries a migrated_from stamp has to be read
+	// BEFORE the copy, because it decides what the destination's store_meta
+	// count should be afterwards. MigrateToPostgres copies store_meta and then
+	// SetMeta-upserts `migrated_from`: on a fresh source that is a new key and
+	// the destination gains a row, but on a source that has already been
+	// migrated once it overwrites the copied key and the count does not move.
+	// See the expectation below.
+	srcStamp, srcHadStamp, err := src.GetMeta(ctx, "migrated_from")
+	if err != nil {
+		return fmt.Errorf("migrate-to-postgres: reading the source's migrated_from stamp: %w", err)
+	}
+
 	start := time.Now()
 	if err := meta.MigrateToPostgres(ctx, src, dst); err != nil {
 		return fmt.Errorf("migrate-to-postgres: %w", err)
@@ -177,14 +220,26 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	for _, t := range rows {
 		want[t.Table] = t.Rows
 	}
-	// store_meta is expected to gain EXACTLY ONE row: the copy stamps
-	// `migrated_from` on the destination so a store can say where it came
-	// from. Excluding the table from verification would have been the easy
-	// way past the mismatch and the wrong one — it would stop checking a real
-	// table to hide one known row. Accounting for the row instead keeps the
-	// check, and the stamp itself is asserted below, which is strictly more
-	// than equality would have proven.
-	want["store_meta"]++
+	// store_meta's expected count depends on whether the source was ALREADY
+	// stamped.
+	//
+	// The copy stamps `migrated_from` on the destination so a store can say
+	// where it came from. On a fresh source that is a new key and the table
+	// gains exactly one row. On a source that has itself been migrated before,
+	// the key is copied and then upserted — same key, same count — and an
+	// unconditional +1 turns a perfectly good re-migration into a reported
+	// `store_meta SOURCE 2 DEST 1 MISMATCH`, which tells the operator their
+	// destination is not a faithful replica when it is (lector's PR #31 r0
+	// MF4). A store having been migrated once before does not make it invalid
+	// to migrate again.
+	//
+	// Excluding the table from verification would have been the easy way past
+	// both cases and the wrong one — it would stop checking a real table to
+	// hide a known row. Accounting for the row keeps the check, and the stamp
+	// itself is asserted below, which is strictly more than equality proves.
+	if !srcHadStamp {
+		want["store_meta"]++
+	}
 	fmt.Fprintf(out, "verification (destination re-read):\n")
 	fmt.Fprintf(out, "%-24s %10s %10s %s\n", "TABLE", "SOURCE", "DEST", "")
 	mismatch := 0
@@ -200,11 +255,26 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 		return fmt.Errorf("migrate-to-postgres: %d table(s) do not match after the copy; "+
 			"the destination is NOT a faithful replica and must not be served", mismatch)
 	}
-	// The stamp the extra store_meta row is supposed to be.
-	if v, ok, err := dst.GetMeta(ctx, "migrated_from"); err != nil || !ok || v == "" {
+	// The stamp itself — present, and belonging to THIS migration.
+	//
+	// Presence alone is not enough when the source was already stamped: the
+	// copy would carry the source's old stamp across, and a destination that
+	// says it came from a migration two years ago is exactly as misleading as
+	// one that says nothing. So when the source had a stamp, the destination's
+	// must differ from it.
+	v, ok, err := dst.GetMeta(ctx, "migrated_from")
+	if err != nil || !ok || v == "" {
 		return fmt.Errorf("migrate-to-postgres: the copy completed but the destination carries "+
 			"no migrated_from stamp (%v); a store that cannot say where it came from is not "+
 			"one an operator should trust after a migration", err)
+	}
+	if srcHadStamp && v == srcStamp {
+		return fmt.Errorf("migrate-to-postgres: the destination's migrated_from is still the "+
+			"source's own stamp (%q) rather than one for this migration; the destination would "+
+			"misreport where it came from", srcStamp)
+	}
+	if srcHadStamp {
+		fmt.Fprintf(out, "\nmigrated_from: %s (superseding the source's own %s)\n", v, srcStamp)
 	} else {
 		fmt.Fprintf(out, "\nmigrated_from: %s\n", v)
 	}
@@ -221,18 +291,9 @@ func looksLikePostgresDSN(s string) bool {
 		strings.Contains(t, "host=") || strings.Contains(t, "dbname=")
 }
 
-// redactDSN removes the password before a DSN is printed.
-//
-// The report is the sort of thing an operator pastes into a ticket.
-func redactDSN(dsn string) string {
-	at := strings.LastIndex(dsn, "@")
-	scheme := strings.Index(dsn, "://")
-	if at < 0 || scheme < 0 || at < scheme {
-		return dsn
-	}
-	creds := dsn[scheme+3 : at]
-	if i := strings.Index(creds, ":"); i >= 0 {
-		return dsn[:scheme+3] + creds[:i] + ":***" + dsn[at:]
-	}
-	return dsn
-}
+// Redaction moved to config.RedactDSN. The version that lived here understood
+// only the URL form, while looksLikePostgresDSN above deliberately accepts the
+// keyword form too — so a keyword DSN printed its password verbatim into a
+// report the comment itself described as "the sort of thing an operator pastes
+// into a ticket" (lector's PR #31 r0 MF3). It now sits next to dsnParams,
+// which already had to understand both forms of the same string.
