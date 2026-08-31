@@ -341,10 +341,7 @@ const migrationLockWait = 2 * time.Minute
 //
 // sqlite needs none of this: a file store is single-writer, and each test uses
 // its own file or an in-memory database that no other process can see.
-func withMigrationLock(ctx context.Context, conn dao.DataConn, engine string, run func() error) error {
-	if engine != "postgres" {
-		return run()
-	}
+func withMigrationLock(ctx context.Context, conn dao.DataConn, run func(tx dao.ContextTxConn) error) error {
 	sess, ok := conn.(dao.SessionTxBeginner)
 	if !ok {
 		return fmt.Errorf("meta: the postgres meta connection cannot pin a transaction " +
@@ -354,9 +351,14 @@ func withMigrationLock(ctx context.Context, conn dao.DataConn, engine string, ru
 	if err != nil {
 		return fmt.Errorf("meta: pinning a connection for the migration lock: %w", err)
 	}
+	committed := false
 	defer func() {
-		// Rolling back releases the transaction-scoped lock. There is
-		// nothing to commit — the lock transaction does no work of its own.
+		if committed {
+			return
+		}
+		// Rolling back releases the transaction-scoped lock AND discards a
+		// partial upgrade — the two are the same act now that the DDL runs
+		// on this transaction.
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		defer cancel()
 		_ = tx.RollbackContext(cctx)
@@ -378,26 +380,77 @@ func withMigrationLock(ctx context.Context, conn dao.DataConn, engine string, ru
 		return fmt.Errorf("meta: waiting for the migration lock (advisory key %d) — another "+
 			"process has been migrating this database for over %s: %w", key, migrationLockWait, err)
 	}
-	return run()
+	// The migrations run on THIS transaction — the one holding the lock — so
+	// no second pool connection is needed (PR #22 r0 MF2). Committing both
+	// applies the upgrade and releases the lock, in that order, atomically.
+	if err := run(tx); err != nil {
+		return err
+	}
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), migrationLockWait)
+	defer cancel()
+	if err := tx.CommitContext(cctx); err != nil {
+		return fmt.Errorf("meta: committing the migration: %w", err)
+	}
+	committed = true
+	return nil
 }
 
 func runMigrations(ctx context.Context, conn dao.DataConn, engine string) error {
-	return withMigrationLock(ctx, conn, engine, func() error {
-		return applyMigrations(ctx, conn, engine)
-	})
+	if engine == "postgres" {
+		return withMigrationLock(ctx, conn, func(tx dao.ContextTxConn) error {
+			return applyAll(ctx, tx, conn.Dialect(), engine)
+		})
+	}
+	// sqlite: a file store is single-writer and each test uses its own file
+	// or a private in-memory database, so there is nothing to serialize
+	// against. One transaction all the same, for the atomicity below.
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("meta: beginning the migration transaction: %w", err)
+	}
+	if err := applyAll(ctx, tx, conn.Dialect(), engine); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
-// applyMigrations is the runner proper. It assumes the caller holds the
-// migration lock, which is why it is not exported and not called directly.
-func applyMigrations(ctx context.Context, conn dao.DataConn, engine string) error {
+// migExec is the slice of a connection or transaction that migrations need.
+// Both dao.DataConn and a transaction satisfy it, which is what lets the whole
+// upgrade run on the ONE pinned transaction that holds the advisory lock.
+type migExec interface {
+	ExecContext(ctx context.Context, query string, args ...any) (dao.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (dao.Rows, error)
+}
+
+// applyAll runs the ledger check and every pending version on ONE executor.
+//
+// The whole upgrade is a single transaction now, on both engines, where it
+// used to be one transaction PER VERSION. Two reasons, and the first is a bug
+// this fixes:
+//
+//   - The postgres path holds a pinned connection for the advisory lock, and
+//     applying DDL through the POOL then needs a SECOND connection. With
+//     pool_max_conns=1 in the meta DSN that deadlocks: the lock holds the only
+//     connection and the migration waits for one forever, surfacing as
+//     "creating schema_migrations: context deadline exceeded" (PR #22 r0 MF2).
+//     Running the DDL on the pinned transaction removes the hidden
+//     second-connection requirement entirely.
+//   - An upgrade that half-applies is worse than one that does not start. Both
+//     engines have transactional DDL, so a failure now leaves the store at its
+//     original version rather than stranded between two.
+//
+// That second point is a deliberate SEMANTIC CHANGE, not a side effect: before
+// this, a failure at v10 left a store that had already committed v7..v9.
+func applyAll(ctx context.Context, ex migExec, d dao.Dialect, engine string) error {
 	const ledger = `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
 		applied_at BIGINT NOT NULL)`
-	if _, err := conn.ExecContext(ctx, ledger); err != nil {
+	if _, err := ex.ExecContext(ctx, ledger); err != nil {
 		return fmt.Errorf("meta: creating schema_migrations: %w", err)
 	}
 
-	cur64, err := currentVersion(ctx, conn)
+	cur64, err := currentVersionOn(ctx, ex)
 	if err != nil {
 		return err
 	}
@@ -415,15 +468,27 @@ func applyMigrations(ctx context.Context, conn dao.DataConn, engine string) erro
 		if engine == "postgres" {
 			stmts = m.Postgres
 		}
-		if err := applyOne(ctx, conn, m.Version, stmts); err != nil {
-			return fmt.Errorf("meta: migration %d: %w", m.Version, err)
+		for _, stmt := range stmts {
+			if _, err := ex.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("meta: migration %d: applying %q: %w", m.Version, firstLine(stmt), err)
+			}
+		}
+		if _, err := ex.ExecContext(ctx,
+			`INSERT INTO schema_migrations (version, applied_at) VALUES (`+
+				d.Placeholder(1)+`, `+d.Placeholder(2)+`)`,
+			m.Version, time.Now().Unix()); err != nil {
+			return fmt.Errorf("meta: migration %d: recording version: %w", m.Version, err)
 		}
 	}
 	return nil
 }
 
 func currentVersion(ctx context.Context, conn dao.DataConn) (int64, error) {
-	rows, err := conn.QueryContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`)
+	return currentVersionOn(ctx, conn)
+}
+
+func currentVersionOn(ctx context.Context, ex migExec) (int64, error) {
+	rows, err := ex.QueryContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`)
 	if err != nil {
 		return 0, fmt.Errorf("meta: reading schema version: %w", err)
 	}
@@ -436,27 +501,6 @@ func currentVersion(ctx context.Context, conn dao.DataConn) (int64, error) {
 		return 0, err
 	}
 	return v, rows.Err()
-}
-
-func applyOne(ctx context.Context, conn dao.DataConn, version int, stmts []string) error {
-	tx, err := conn.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	for _, stmt := range stmts {
-		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("applying %q: %w", firstLine(stmt), err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO schema_migrations (version, applied_at) VALUES (`+
-			conn.Dialect().Placeholder(1)+`, `+conn.Dialect().Placeholder(2)+`)`,
-		version, time.Now().Unix()); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("recording version: %w", err)
-	}
-	return tx.Commit()
 }
 
 // firstLine trims a DDL statement to its first line for error messages.
