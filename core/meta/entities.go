@@ -399,6 +399,38 @@ func newAllowedIPs(conn dao.DataConn) *dao.Schema[*AllowedIP, AllowedIPField, So
 	})
 }
 
+// UserIP is one user_ip_allowlist row (ADR-0075 §4): the per-user layer of
+// the front door's two-layer IP model. A front-door login must pass BOTH the
+// global allowlist and the connecting user's rows, and a PAT's allowed_ips
+// must be a subset of these. Managed self-service (own rows) or by an admin.
+type UserIP struct {
+	ID        int64
+	UserID    int64
+	CIDR      string
+	Label     string
+	CreatedAt int64
+}
+
+type UserIPField string
+
+const (
+	UIPID        UserIPField = "id"
+	UIPUserID    UserIPField = "user_id"
+	UIPCIDR      UserIPField = "cidr"
+	UIPLabel     UserIPField = "label"
+	UIPCreatedAt UserIPField = "created_at"
+)
+
+func newUserIPs(conn dao.DataConn) *dao.Schema[*UserIP, UserIPField, Sort, int64] {
+	return schema(conn, "user_ip_allowlist", UIPID, map[UserIPField]dao.Field[*UserIP]{
+		UIPID:        {Column: "id", Scan: func(r *UserIP) any { return &r.ID }},
+		UIPUserID:    {Column: "user_id", Scan: func(r *UserIP) any { return &r.UserID }, Value: func(r *UserIP) any { return r.UserID }},
+		UIPCIDR:      {Column: "cidr", Scan: func(r *UserIP) any { return &r.CIDR }, Value: func(r *UserIP) any { return r.CIDR }},
+		UIPLabel:     {Column: "label", Scan: func(r *UserIP) any { return &r.Label }, Value: func(r *UserIP) any { return r.Label }},
+		UIPCreatedAt: {Column: "created_at", Scan: func(r *UserIP) any { return &r.CreatedAt }, Value: func(r *UserIP) any { return r.CreatedAt }},
+	})
+}
+
 // --- store_meta -------------------------------------------------------------------
 
 // MetaKV is one store_meta row: install-scoped key/value state (schema

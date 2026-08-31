@@ -1476,6 +1476,8 @@ func (m *Model) leaderEntries() []leaderEntry {
 		{'c', "connections…", m.openConnManager},
 		{'w', "workspaces…", m.openWorkspaceManager},
 		{'u', "users…", m.openUserManager},
+		{'i', "my allowed IPs…", func() { m.openUserIPManager(m.session.User().ID, "me") }},
+		{'I', "ip allowlist (admin)…", m.openAllowlistManager},
 		{'H', "script history…", m.openHistory},
 		{'g', "refresh explorer", m.explorer.Reload},
 	}

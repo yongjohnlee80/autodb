@@ -479,6 +479,102 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.RemoveAllowedIP(ctx, token, cidr, peerIP(req)))
 	})
+	s.rpc.Handle("auth.allowlist_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		cfg, rows, err := s.auth.ListAllowedIPs(ctx, token)
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		outRows := make([]any, 0, len(rows))
+		for _, r := range rows {
+			outRows = append(outRows, map[string]any{
+				"id": r.ID, "cidr": r.CIDR, "note": r.Note,
+				"created_by": r.CreatedBy, "created_at": r.CreatedAt,
+			})
+		}
+		cfgOut := make([]any, 0, len(cfg))
+		for _, c := range cfg {
+			cfgOut = append(cfgOut, c)
+		}
+		return map[string]any{"config": cfgOut, "rows": outRows}, nil
+	})
+	s.rpc.Handle("auth.user_ip_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		userID, err := argInt(req.Params, 1, "user_id")
+		if err != nil {
+			return nil, err
+		}
+		rows, err := s.auth.UserIPs(ctx, token, userID)
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		out := make([]any, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, map[string]any{
+				"id": r.ID, "user_id": r.UserID, "cidr": r.CIDR,
+				"label": r.Label, "created_at": r.CreatedAt,
+			})
+		}
+		return out, nil
+	})
+	s.rpc.Handle("auth.user_ip_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 4); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		userID, err := argInt(req.Params, 1, "user_id")
+		if err != nil {
+			return nil, err
+		}
+		cidr, err := argStr(req.Params, 2, "cidr")
+		if err != nil {
+			return nil, err
+		}
+		label, err := argStr(req.Params, 3, "label")
+		if err != nil {
+			return nil, err
+		}
+		// An empty cidr means "the address this request came from" — the
+		// self-service enrollment gesture; only the server knows that
+		// address truthfully, so the substitution happens here.
+		if cidr == "" {
+			cidr = peerIP(req)
+		}
+		return nil, wireErr(s.auth.AddUserIP(ctx, token, userID, cidr, label, peerIP(req)))
+	})
+	s.rpc.Handle("auth.user_ip_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		userID, err := argInt(req.Params, 1, "user_id")
+		if err != nil {
+			return nil, err
+		}
+		rowID, err := argInt(req.Params, 2, "row_id")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.auth.RemoveUserIP(ctx, token, userID, rowID, peerIP(req)))
+	})
 
 	// --- conn: connection management ---
 	s.rpc.Handle("conn.create", func(ctx context.Context, req *golibrpc.Request) (any, error) {

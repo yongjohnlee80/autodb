@@ -32,6 +32,7 @@ type Store struct {
 	TxOutcomes     *dao.Schema[*TxOutcome, TxOutcomeField, Sort, int64]
 	TxPending      *dao.Schema[*TxPending, TxPendingField, Sort, int64]
 	AllowedIPs     *dao.Schema[*AllowedIP, AllowedIPField, Sort, int64]
+	UserIPs        *dao.Schema[*UserIP, UserIPField, Sort, int64]
 	KV             *dao.Schema[*MetaKV, MetaKVField, Sort, string]
 }
 
@@ -73,6 +74,7 @@ func Open(ctx context.Context, mcfg config.Meta) (*Store, error) {
 		TxOutcomes:     newTxOutcomes(conn),
 		TxPending:      newTxPending(conn),
 		AllowedIPs:     newAllowedIPs(conn),
+		UserIPs:        newUserIPs(conn),
 		KV:             newKV(conn),
 	}, nil
 }
