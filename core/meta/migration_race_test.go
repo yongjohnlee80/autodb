@@ -42,7 +42,15 @@ func TestMigrations_ConcurrentStartersAgainstAFreshDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("opening the control connection: %v", err)
 	}
-	defer admin.Close()
+	// Closed via t.Cleanup, NOT defer, and registered FIRST so it runs LAST.
+	//
+	// Cleanups run after the test function returns and in LIFO order, while a
+	// defer runs as the function returns — so `defer admin.Close()` closed the
+	// control connection BEFORE the DROP DATABASE cleanup below could use it.
+	// The drop then failed against a closed store and the error was swallowed,
+	// leaking one database per run. Registering the close first means the drop
+	// (registered later) runs before it.
+	t.Cleanup(func() { _ = admin.Close() })
 
 	name := fmt.Sprintf("autodb_race_%d", time.Now().UnixNano())
 	if _, err := admin.Conn().ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
@@ -51,7 +59,11 @@ func TestMigrations_ConcurrentStartersAgainstAFreshDatabase(t *testing.T) {
 	t.Cleanup(func() {
 		dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = admin.Conn().ExecContext(dctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+		if _, err := admin.Conn().ExecContext(dctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)"); err != nil {
+			// Reported, not swallowed. Swallowing it is what let this leak a
+			// database per run unnoticed until the server had two dozen.
+			t.Errorf("dropping the scratch database %s: %v", name, err)
+		}
 	})
 
 	dsn := swapDatabase(t, base, name)
@@ -158,7 +170,9 @@ func TestMigrations_FreshOpenWithASingleConnectionPool(t *testing.T) {
 	if err != nil {
 		t.Fatalf("control connection: %v", err)
 	}
-	defer admin.Close()
+	// See the sibling test: close via Cleanup registered FIRST, so the drop
+	// below (registered later, run earlier) still has a live connection.
+	t.Cleanup(func() { _ = admin.Close() })
 
 	name := fmt.Sprintf("autodb_one_%d", time.Now().UnixNano())
 	if _, err := admin.Conn().ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
@@ -167,7 +181,11 @@ func TestMigrations_FreshOpenWithASingleConnectionPool(t *testing.T) {
 	t.Cleanup(func() {
 		dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = admin.Conn().ExecContext(dctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+		if _, err := admin.Conn().ExecContext(dctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)"); err != nil {
+			// Reported, not swallowed. Swallowing it is what let this leak a
+			// database per run unnoticed until the server had two dozen.
+			t.Errorf("dropping the scratch database %s: %v", name, err)
+		}
 	})
 
 	dsn := swapDatabase(t, base, name)
