@@ -110,15 +110,50 @@ steps, and those two tables are the ones where absence is load-bearing.
 no partitioning of its own, and the volume problem belongs to an installation
 large enough to be on postgres.
 
-Partitions are created for the **current and next** month, at startup and daily
-thereafter. Next-month matters: a daemon that stays up across a boundary would
-otherwise find no partition, and every write would land in the `DEFAULT`
-partition — which *succeeds*, so nothing fails and nobody notices.
+Partitions are created for the **current month and the next three**, at startup
+and daily thereafter. The look-ahead has to exceed the roll interval by a
+margin, because what it buys is survivable *misses*: at three, two consecutive
+failed rolls still leave the current month covered.
 
 `DEFAULT` is a safety net, not the plan. A row there is a row no month claimed,
 which means the roll fell behind. It exists because the alternative is an
 `INSERT` that fails, and an audit write that fails is worse than one in the
 wrong child table.
+
+**The roll adopts rows out of `DEFAULT`.** This is not a detail. Postgres
+refuses to create a partition whose range overlaps rows already sitting in the
+default partition:
+
+```text
+ERROR: updated partition constraint for default partition "audit_log_pdefault"
+       would be violated by some row (SQLSTATE 23514)
+```
+
+Without adoption the default partition is not a net, it is a **trap**: one
+missed roll strands a row for that month, and from then on every attempt to
+create that month fails, writes keep landing in `DEFAULT`, and the month can
+never be detached for retention because its rows are not in it. So when the
+roll finds stranded rows it detaches the default, creates the month, re-routes
+those rows through the parent, clears them and re-attaches — all in one
+transaction, under an advisory lock, so two daemons cannot race over a detached
+default and a crash cannot leave the table with no default partition at all.
+
+**Watch the default partition anyway.** A non-empty `DEFAULT` between rolls is
+still the signal that something fell behind:
+
+```sql
+SELECT count(*) FROM audit_log_pdefault;
+SELECT count(*) FROM script_history_pdefault;
+```
+
+Both should be `0` in steady state. A number that persists across a daily roll
+means the roll is failing — look at the daemon log, which reports the error.
+
+**Migrating from sqlite pre-creates the months your history occupies.**
+`autodb --migrate-to-postgres` reads the source's own `MIN`/`MAX` on each
+partitioned table and creates the destination months before copying a row.
+Otherwise years of audit history would land in a destination whose only
+partitions are the current month and its look-ahead.
 
 ### The cost: `id` is no longer unique by the schema
 
@@ -130,7 +165,11 @@ global key only by the parent sequence and by migration discipline.
 Two things depend on it and would fail *quietly*: a by-id read has no defined
 answer when two partitions hold the id, and R4's history repair sweep pages by
 `id`, so a non-monotonic id lets a row be skipped. `Store.CheckLogicalIDUniqueness`
-exists to refuse that state rather than let either misbehave first.
+refuses that state rather than letting either misbehave first, and **the daemon
+runs it as a startup preflight**: a store holding duplicate logical ids does not
+start, with the offending ids named. That is deliberate — both failure modes are
+silent, so serving on would produce wrong answers rather than errors. If it
+fires, the store needs the duplicates resolved by hand before it can be served.
 
 To list what is actually there:
 
