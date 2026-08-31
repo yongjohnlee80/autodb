@@ -81,12 +81,14 @@ func TestMigrateToPostgres_RoundTrip(t *testing.T) {
 		Set(HistUserID, rootID).Set(HistConnID, connID).Set(HistIP, "127.0.0.1").
 		Set(HistScript, "SELECT 1").Set(HistStartedAt, int64(1)).
 		Set(HistDurationMS, int64(5)).Set(HistRowCount, int64(1)).
-		Set(HistStatus, "ok").Set(HistError, "").Insert(); err != nil {
+		Set(HistStatus, "ok_pending_commit").Set(HistError, "").
+		Set(HistTxID, "tx_seeded").Insert(); err != nil {
 		t.Fatalf("insert history: %v", err)
 	}
 	if _, err := src.Audit.OnCtx(ctx).
 		Set(AuditUserID, rootID).Set(AuditIP, "127.0.0.1").Set(AuditAction, "exec").
-		Set(AuditDetail, "SELECT 1").Set(AuditCreatedAt, int64(1)).Insert(); err != nil {
+		Set(AuditDetail, "SELECT 1").Set(AuditCreatedAt, int64(1)).
+		Set(AuditTxID, "tx_seeded").Insert(); err != nil {
 		t.Fatalf("insert audit: %v", err)
 	}
 	if _, err := src.AllowedIPs.OnCtx(ctx).
@@ -117,6 +119,22 @@ func TestMigrateToPostgres_RoundTrip(t *testing.T) {
 	if n, _ := dst.Users.OnCtx(ctx).Count(); n != 2 {
 		t.Errorf("dst users = %d, want 2", n)
 	}
+	// Correlation must survive a store move. The parity check counts ROWS,
+	// so a mapper that forgot a column passes it while silently emptying
+	// that column -- and a history row whose tx_id was dropped can never be
+	// resolved again, because nothing connects it to its outcome. Asserted
+	// on the value, not the count, for exactly that reason.
+	if h, err := dst.History.OnCtx(ctx).With(HistTxID, "tx_seeded").Get(); err != nil {
+		t.Errorf("history tx_id did not survive the move: %v", err)
+	} else if h.Status != "ok_pending_commit" {
+		t.Errorf("dst history status = %q, want ok_pending_commit", h.Status)
+	}
+	if a, err := dst.Audit.OnCtx(ctx).With(AuditTxID, "tx_seeded").Get(); err != nil {
+		t.Errorf("audit tx_id did not survive the move: %v", err)
+	} else if a.Action != "exec" {
+		t.Errorf("dst audit action = %q, want exec", a.Action)
+	}
+
 	if v, ok, _ := dst.GetMeta(ctx, "install_id"); !ok || v != "src-install" {
 		t.Errorf("dst install_id = %q ok=%v", v, ok)
 	}
