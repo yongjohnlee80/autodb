@@ -130,12 +130,17 @@ type session struct {
 	// lastUsed drives the idle timeout.
 	lastUsed time.Time
 
-	// The session's one transaction (ADR-0074 Amendment 2). All four fields
-	// are guarded by mu.
+	// The session's one transaction (ADR-0074 Amendment 2). All of these
+	// fields are guarded by mu.
 	tx       dao.ContextTxConn
 	txPhase  txPhase
 	txID     string
 	txOpened time.Time
+	// targetXID is the target's own transaction id, captured at BEGIN. It is
+	// the reconciler's only oracle after a crash, so it is held on the
+	// session for the length of the transaction and written onto the
+	// commit_started row — the one place it can ever be needed.
+	targetXID string
 	// limits are resolved once at BEGIN from the engine defaults and the
 	// connection's own profile, so a transaction is bounded by what was
 	// configured when it opened rather than by whatever config says later.

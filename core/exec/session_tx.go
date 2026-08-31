@@ -139,10 +139,38 @@ func (e *Engine) beginTx(
 	if err != nil {
 		return nil, err
 	}
+
+	// WRITE-AHEAD: the opened transition is durable BEFORE the target is told
+	// to begin anything (ultron-prime, R4/R5 seam review).
+	//
+	// The ordering is the whole basis of the read API's ErrNoSuchTx. If the
+	// target BEGIN could land first, a crash in that window would leave a
+	// live transaction holding locks on the target while the meta store held
+	// zero rows for it — and answering "no such transaction" about a
+	// transaction that demonstrably exists is a worse failure than any
+	// latency this ordering costs. Zero rows now PROVES nothing was started.
+	//
+	// The xid is absent here because it cannot exist yet; see the capture
+	// below for why that is sound rather than merely unavoidable.
+	if err := e.appendTxOutcome(ctx, txTransition{
+		txID: txID, state: meta.TxOpened,
+		userID: ident.UserID(), connectionID: s.connID,
+	}); err != nil {
+		return nil, err
+	}
+
 	// The transaction is opened on the SESSION's context, which outlives this
 	// call — that is what lets a COMMIT arriving later find it alive.
 	tx, err := sess.BeginSessionTx(s.ctx, tc.Options)
 	if err != nil {
+		// The write-ahead row is now an opened transition for a transaction
+		// that never started. Terminate it here rather than leaving an orphan
+		// the reconciler would have to puzzle over forever: nothing reached
+		// the target, so rolled_back is not a guess.
+		e.noteTxOutcome(ctx, txTransition{
+			txID: txID, state: meta.TxRolledBack, reason: meta.ReasonSessionClosed,
+			userID: ident.UserID(), connectionID: s.connID,
+		})
 		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, err)
 	}
 
@@ -156,6 +184,20 @@ func (e *Engine) beginTx(
 		e.logf("session %s: arming the server-side idle guard for %s failed: %v", s.id, txID, berr)
 	}
 
+	// The target's own transaction id, captured INSIDE the transaction while
+	// it is certainly alive, and carried on the commit_started row rather
+	// than on opened.
+	//
+	// That placement looks like a concession to the write-ahead ordering
+	// above — opened is already durable by here, and append-only forbids
+	// going back to fill a column in — but it is independently correct. The
+	// oracle is only ever consulted for a commit_started with no terminal,
+	// because a transaction that crashed BEFORE commit_started is definitely
+	// not committed: the server aborts it when the connection dies. So the
+	// xid is present at exactly the one point anything can ask for it, and
+	// the window that has no xid is the window that needs none.
+	targetXID := e.captureTargetXID(s.ctx, tx, connRow.Engine)
+
 	now := e.now()
 	s.mu.Lock()
 	s.tx = tx
@@ -164,6 +206,7 @@ func (e *Engine) beginTx(
 	s.txOpened = now
 	s.lastUsed = now
 	s.limits = limits
+	s.targetXID = targetXID
 	s.mu.Unlock()
 
 	if err := e.auth.Audit(ctx, ident.UserID(), ip, "tx_opened",
@@ -171,6 +214,38 @@ func (e *Engine) beginTx(
 		return nil, err
 	}
 	return &Result{Verb: tc.Verb, Class: ClassControl}, nil
+}
+
+// captureTargetXID reads the target's transaction id for the reconciler.
+//
+// Best-effort BY DESIGN, and the asymmetry is deliberate: without the xid a
+// crash-window commit terminates outcome_unresolvable, which is honest and
+// survivable, whereas failing the BEGIN over a bookkeeping query would refuse
+// work the user is entitled to do. The cost of losing it is recorded (the
+// entry simply has no oracle), never hidden.
+//
+// PostgreSQL only, because that is where the oracle exists. txid_current()
+// also ASSIGNS an xid if the transaction does not yet have one, which is what
+// we want -- an xid assigned lazily at first write would not be knowable here.
+func (e *Engine) captureTargetXID(ctx context.Context, tx dao.ContextTxConn, engineName string) string {
+	if engineName != "postgres" {
+		return ""
+	}
+	rows, err := tx.QueryContext(ctx, "SELECT txid_current()::text")
+	if err != nil {
+		e.logf("capturing the target transaction id failed: %v", err)
+		return ""
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return ""
+	}
+	var xid string
+	if err := rows.Scan(&xid); err != nil {
+		e.logf("reading the target transaction id failed: %v", err)
+		return ""
+	}
+	return xid
 }
 
 // finishTx commits or rolls back, on a FRESH bounded context.
@@ -181,7 +256,7 @@ func (e *Engine) beginTx(
 // golib-dao-0017's CommitContext/RollbackContext exist for.
 func (e *Engine) finishTx(ctx context.Context, s *session, ident auth.Identity, ip, sqlText string, commit bool) (*Result, error) {
 	s.mu.Lock()
-	tx, phase, txID := s.tx, s.txPhase, s.txID
+	tx, phase, txID, targetXID := s.tx, s.txPhase, s.txID, s.targetXID
 	s.mu.Unlock()
 	if phase == txNone || tx == nil {
 		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, ErrNoOpenTx)
@@ -197,10 +272,41 @@ func (e *Engine) finishTx(ctx context.Context, s *session, ident auth.Identity, 
 	if commit {
 		verb = "COMMIT"
 	}
+
+	// commit_started is durable BEFORE the COMMIT is dispatched, carrying the
+	// target xid. This is the crash-window record the whole design turns on:
+	// if the process dies between here and the terminal, the log says a
+	// COMMIT was in flight and names the xid to ask about, and the reconciler
+	// can recover the true outcome. Without it a crash in that window is
+	// indistinguishable from a transaction that was never committed at all —
+	// and those two have opposite answers.
+	//
+	// Only for a commit. A ROLLBACK has nothing to be uncertain about: if it
+	// does not complete, the server aborts the transaction when the
+	// connection dies, which is the same outcome.
+	if commit {
+		if err := e.appendTxOutcome(ctx, txTransition{
+			txID: txID, state: meta.TxCommitStarted,
+			userID: ident.UserID(), connectionID: s.connID, targetXID: targetXID,
+		}); err != nil {
+			return nil, err
+		}
+	}
+
 	outcome, err := e.finalize(ctx, s, tx, commit)
 
+	// The terminal (or the nonterminal unknown_pending) as classified from
+	// what the driver actually proved. noteTxOutcome rather than
+	// appendTxOutcome: the transaction is over either way, and failing the
+	// caller's COMMIT because the LOG could not be written would report a
+	// failure that did not happen.
+	e.noteTxOutcome(ctx, txTransition{
+		txID: txID, state: txStateFor(outcome, err), reason: txOutcomeReason(outcome, err),
+		userID: ident.UserID(), connectionID: s.connID, targetXID: targetXID,
+	})
+
 	s.mu.Lock()
-	s.tx, s.txPhase, s.txID = nil, txNone, ""
+	s.tx, s.txPhase, s.txID, s.targetXID = nil, txNone, "", ""
 	s.lastUsed = e.now()
 	s.mu.Unlock()
 
@@ -239,6 +345,13 @@ func (e *Engine) finalize(ctx context.Context, s *session, tx dao.ContextTxConn,
 		// recorded nonterminal and reconciled out of band.
 		return "unknown_pending", err
 	}
+	// Everything else stays commit_failed, deliberately UNCLASSIFIED here.
+	//
+	// Deciding whether it is definite needs the error itself, and that
+	// decision belongs to the outcome writer that owns the state vocabulary,
+	// not to this function (ultron-prime, R4/R5 seam, A5 plumbing). The error
+	// is already returned alongside the word, so it crosses the seam as data
+	// and txStateFor does the split.
 	return "commit_failed", err
 }
 
