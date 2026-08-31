@@ -105,7 +105,7 @@ func TestStartup_PlaintextIsRefused(t *testing.T) {
 	_, events, addr := liveListener(t)
 
 	c := dial(t, addr)
-	if _, err := c.Write(startupPacket(protocolVersion30, map[string]string{"user": "root"})); err != nil {
+	if _, err := c.Write(startupPacket(protocolVersion30, map[string]string{"user": "root", "database": "d"})); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	e := readDenial(t, c)
@@ -250,7 +250,7 @@ func TestStartup_VersionNegotiation(t *testing.T) {
 		t.Parallel()
 		_, _, addr := liveListener(t)
 		tc := tlsDial(t, addr)
-		if _, err := tc.Write(startupPacket(uint32(3)<<16|2, map[string]string{"user": "root"})); err != nil {
+		if _, err := tc.Write(startupPacket(uint32(3)<<16|2, map[string]string{"user": "root", "database": "d"})); err != nil {
 			t.Fatal(err)
 		}
 		fe := pgproto3.NewFrontend(tc, tc)
@@ -268,7 +268,7 @@ func TestStartup_VersionNegotiation(t *testing.T) {
 		t.Parallel()
 		_, _, addr := liveListener(t)
 		tc := tlsDial(t, addr)
-		if _, err := tc.Write(startupPacket(uint32(4)<<16|0, map[string]string{"user": "root"})); err != nil {
+		if _, err := tc.Write(startupPacket(uint32(4)<<16|0, map[string]string{"user": "root", "database": "d"})); err != nil {
 			t.Fatal(err)
 		}
 		e := readDenial(t, tc)
@@ -427,28 +427,28 @@ func TestStartup_ParameterPolicy(t *testing.T) {
 			"application_name": "psql", "client_encoding": "UTF8",
 		}, false},
 		{"an unknown parameter is a GUC attempt", map[string]string{
-			"user": "root", "search_path": "public",
+			"user": "root", "database": "d", "search_path": "public",
 		}, true},
 		{"replication is refused at any value", map[string]string{
-			"user": "root", "replication": "database",
+			"user": "root", "database": "d", "replication": "database",
 		}, true},
 		{"a non-UTF8 client_encoding", map[string]string{
-			"user": "root", "client_encoding": "LATIN1",
+			"user": "root", "database": "d", "client_encoding": "LATIN1",
 		}, true},
 		{"UTF-8 spelled with a hyphen is still UTF8", map[string]string{
-			"user": "root", "client_encoding": "utf-8",
+			"user": "root", "database": "d", "client_encoding": "utf-8",
 		}, false},
 		{"options that sets a GUC", map[string]string{
-			"user": "root", "options": "-c search_path=public",
+			"user": "root", "database": "d", "options": "-c search_path=public",
 		}, true},
 		{"options in the --key=val spelling", map[string]string{
-			"user": "root", "options": "--search_path=public",
+			"user": "root", "database": "d", "options": "--search_path=public",
 		}, true},
 		{"empty options is accepted and ignored", map[string]string{
-			"user": "root", "options": "   ",
+			"user": "root", "database": "d", "options": "   ",
 		}, false},
 		{"_pq_ extensions are negotiated, not refused", map[string]string{
-			"user": "root", "_pq_.some_extension": "1",
+			"user": "root", "database": "d", "_pq_.some_extension": "1",
 		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -475,7 +475,7 @@ func TestStartup_RefusedParameterIsAuditedButNotDisclosed(t *testing.T) {
 
 	tc := tlsDial(t, addr)
 	if _, err := tc.Write(startupPacket(protocolVersion30, map[string]string{
-		"user": "root", "search_path": "public",
+		"user": "root", "database": "lm-prod", "search_path": "public",
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -488,12 +488,12 @@ func TestStartup_RefusedParameterIsAuditedButNotDisclosed(t *testing.T) {
 			"willing to ask repeatedly")
 	}
 
-	var reason string
+	var reason, detail string
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) && reason == "" {
 		for _, ev := range events() {
 			if ev.Kind == "fd.auth_denied" {
-				reason = ev.Reason
+				reason, detail = ev.Reason, ev.Detail
 			}
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -501,5 +501,91 @@ func TestStartup_RefusedParameterIsAuditedButNotDisclosed(t *testing.T) {
 	if reason != reasonStartupParamRefus.String() {
 		t.Errorf("audited reason = %q, want %q — a refused parameter must be refused FOR that, "+
 			"not left to fall through to whatever denies next", reason, reasonStartupParamRefus)
+	}
+	// And the PARAMETER NAME reaches the audit. The previous version carried
+	// a RefusedParam field, commented that it was for the audit row, and
+	// dropped it — the test asserted only the generic reason, so the claim
+	// and the code disagreed with nothing to catch it.
+	if detail != "search_path" {
+		t.Errorf("audited detail = %q, want the refused parameter named; an operator reading "+
+			"this cannot tell WHICH parameter was refused, which is the one thing the audit "+
+			"is for here", detail)
+	}
+}
+
+// MF1. An oversized length-prefixed frame is NOT a direct-TLS attempt. The
+// first version inferred direct TLS from pgproto3's "invalid length" error,
+// which a TLS ClientHello does produce — and so does an ordinary frame that
+// simply exceeds the pre-auth cap. A client sending something too big was
+// audited as a PostgreSQL 17 client, sending an operator to look for
+// something that may not exist on their network.
+func TestStartup_OversizeIsNotDirectTLS(t *testing.T) {
+	t.Parallel()
+	_, events, addr := liveListener(t)
+
+	c := dial(t, addr)
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(PreAuthMaxBodyLen+5))
+	if _, err := c.Write(lenBuf[:]); err != nil {
+		t.Fatal(err)
+	}
+
+	var reason string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && reason == "" {
+		for _, ev := range events() {
+			if ev.Kind == "fd.tls_fail" {
+				reason = ev.Reason
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if reason == "" {
+		t.Fatal("an oversized S0 frame produced no fd.tls_fail event")
+	}
+	if reason == "direct-tls-unsupported" {
+		t.Fatalf("an oversized length-prefixed frame was audited as direct TLS; it is not a "+
+			"protocol negotiation at all, and the reason sends an operator hunting a "+
+			"PostgreSQL 17 client that may not exist (reason=%q)", reason)
+	}
+	if reason != reasonPreAuthOversize.String() {
+		t.Errorf("reason = %q, want %q", reason, reasonPreAuthOversize)
+	}
+}
+
+// MF2. `user` and `database` are REQUIRED (§3.1). Without the check, an empty
+// parameter map sailed through to be denied for want of a credential store —
+// which reads in the audit as an authentication problem rather than as the
+// malformed startup it is.
+func TestStartup_RequiredParameters(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+		want   string
+	}{
+		{"no parameters at all", map[string]string{}, "user"},
+		{"only user", map[string]string{"user": "root"}, "database"},
+		{"only database", map[string]string{"database": "lm-prod"}, "user"},
+		{"a blank user", map[string]string{"user": "  ", "database": "lm-prod"}, "user"},
+		{"a blank database", map[string]string{"user": "root", "database": ""}, "database"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			refused, ok := checkStartupParams(tc.params)
+			if ok {
+				t.Fatalf("%v was accepted; both user and database are required", tc.params)
+			}
+			if refused != tc.want {
+				t.Errorf("refused %q, want %q named", refused, tc.want)
+			}
+		})
+	}
+
+	// Positive control: both present is accepted, so the requirement is not
+	// simply refusing everything.
+	if _, ok := checkStartupParams(map[string]string{"user": "root", "database": "lm-prod"}); !ok {
+		t.Error("a startup with both required parameters was refused")
 	}
 }

@@ -15,12 +15,6 @@ import (
 // So the accepted set is CLOSED. A parameter not named here is refused, which
 // is the same stance the matrix takes on messages: no silent acceptance.
 
-// ApplicationNameMaxBytes caps the audited application_name. Over-length is
-// truncated rather than refused — the name is a label for the audit trail,
-// and refusing a connection because someone's tool has a verbose default
-// would be a poor trade for a field nobody authenticates against.
-const ApplicationNameMaxBytes = 256
-
 // startupParamDecision is what the policy says about one parameter.
 type startupParamDecision int
 
@@ -40,6 +34,21 @@ const (
 // their parameters this server dislikes. Telling them would map the accepted
 // set for anyone who asked politely enough.
 func checkStartupParams(params map[string]string) (refused string, ok bool) {
+	// REQUIRED first (§3.1 marks both). Presence is checked before the
+	// per-parameter policy because a startup with neither is not a startup
+	// this surface can act on at all — and without the check an empty
+	// parameter map sailed through to be denied for want of a credential
+	// store, which reads in the audit as an authentication problem rather
+	// than a malformed startup.
+	//
+	// `user` is a cross-check against the token's owner, never an override;
+	// `database` names the connection row. Absent or blank, there is nothing
+	// to cross-check and nothing to route to.
+	for _, required := range []string{"user", "database"} {
+		if strings.TrimSpace(params[required]) == "" {
+			return required, false
+		}
+	}
 	for k, v := range params {
 		switch startupParamPolicy(k) {
 		case paramRefuse:
@@ -103,14 +112,4 @@ func optionsSetsGUC(v string) bool {
 		}
 	}
 	return false
-}
-
-// truncateApplicationName bounds the audited label, reporting whether it was
-// cut so the caller can audit the fact rather than silently keeping a
-// shortened value.
-func truncateApplicationName(v string) (string, bool) {
-	if len(v) <= ApplicationNameMaxBytes {
-		return v, false
-	}
-	return v[:ApplicationNameMaxBytes], true
 }
