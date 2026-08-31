@@ -96,6 +96,15 @@ func TestMigrateToPostgres_RoundTrip(t *testing.T) {
 		Set(IPCreatedAt, int64(1)).Insert(); err != nil {
 		t.Fatalf("insert allowlist: %v", err)
 	}
+	// A queued transaction owned by a real user. The queue is what the
+	// reconciler and the pending list read, so a store move that dropped its
+	// OWNER would leave the entry invisible to the person it belongs to.
+	if _, err := src.TxPending.OnCtx(ctx).
+		Set(TxPendTxID, "tx_queued").Set(TxPendConnID, connID).
+		Set(TxPendUserID, rootID).Set(TxPendCreatedAt, int64(1)).Insert(); err != nil {
+		t.Fatalf("insert tx_pending: %v", err)
+	}
+
 	if err := src.SetMeta(ctx, "install_id", "src-install"); err != nil {
 		t.Fatalf("SetMeta: %v", err)
 	}
@@ -133,6 +142,17 @@ func TestMigrateToPostgres_RoundTrip(t *testing.T) {
 		t.Errorf("audit tx_id did not survive the move: %v", err)
 	} else if a.Action != "exec" {
 		t.Errorf("dst audit action = %q, want exec", a.Action)
+	}
+
+	// The queue's OWNER must survive too. Parity counts rows, so a mapper
+	// that forgot this column passes them while silently resetting every
+	// entry to owner 0 — which belongs to nobody, so a non-admin would stop
+	// seeing their own pending transactions with nothing saying why.
+	if q, err := dst.TxPending.OnCtx(ctx).With(TxPendTxID, "tx_queued").Get(); err != nil {
+		t.Errorf("the queue entry did not survive the move: %v", err)
+	} else if q.UserID != rootID {
+		t.Errorf("migrated queue owner = %d, want %d — the entry now belongs to nobody",
+			q.UserID, rootID)
 	}
 
 	if v, ok, _ := dst.GetMeta(ctx, "install_id"); !ok || v != "src-install" {
