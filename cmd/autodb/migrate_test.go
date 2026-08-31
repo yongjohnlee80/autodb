@@ -230,12 +230,29 @@ func TestMigrateCLI_RefusesAMissingSourceWithoutCreatingIt(t *testing.T) {
 func TestMigrateCLI_RefusesADestinationDSNBelowThePoolFloor(t *testing.T) {
 	t.Parallel()
 	from := seedSqlite(t)
+
+	// A REAL destination when one is available, so that removing the floor
+	// check reproduces the actual deadlock rather than merely a different
+	// error. Against a real postgres the unguarded path takes the destination
+	// lease, pins the only connection, and blocks in withMigrationLock
+	// forever — which is what the timeout below catches. Without TEST_PGURL
+	// the cell still runs and still proves the refusal happens at validation,
+	// just against an address nothing answers on.
+	to := "postgres://h/db?sslmode=verify-full&sslrootcert=/ca.crt&pool_max_conns=1"
+	insecure := false
+	if real := os.Getenv("TEST_PGURL"); real != "" {
+		sep := "?"
+		if strings.Contains(real, "?") {
+			sep = "&"
+		}
+		to, insecure = real+sep+"pool_max_conns=1", true
+	}
+
 	done := make(chan error, 1)
 	go func() {
 		var out bytes.Buffer
 		done <- runMigrateToPostgres(context.Background(), &out, migrateOpts{
-			from: from,
-			to:   "postgres://h/db?sslmode=verify-full&sslrootcert=/ca.crt&pool_max_conns=1",
+			from: from, to: to, allowInsecure: insecure,
 		})
 	}()
 	select {
