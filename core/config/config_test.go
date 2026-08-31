@@ -72,11 +72,15 @@ func TestLoad_Validation(t *testing.T) {
 
 func TestLoad_PostgresEngine(t *testing.T) {
 	t.Parallel()
-	cfg, err := Load(write(t, "[meta]\nengine = \"postgres\"\ndsn = \"postgres://x\"\n"))
+	// The DSN now has to survive the transport check (ADR-0079 §4), so this
+	// cell carries a production-shaped one rather than "postgres://x". That
+	// is the point of the check: a bare DSN is not loadable any more.
+	dsn := "postgres://x/db?sslmode=verify-full&sslrootcert=/etc/ssl/ca.crt"
+	cfg, err := Load(write(t, "[meta]\nengine = \"postgres\"\ndsn = \""+dsn+"\"\n"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Meta.Engine != "postgres" || cfg.Meta.DSN != "postgres://x" {
+	if cfg.Meta.Engine != "postgres" || cfg.Meta.DSN != dsn {
 		t.Errorf("cfg.Meta = %+v", cfg.Meta)
 	}
 }

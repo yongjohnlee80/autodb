@@ -3,8 +3,10 @@ package meta
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
 
@@ -315,5 +317,60 @@ func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
 	if row.UserID != 42 {
 		t.Fatalf("queue owner = %d, want 42 — an inherited entry belongs to nobody and "+
 			"would never appear in its own owner's pending list", row.UserID)
+	}
+}
+
+// The [meta] pool bound must actually reach the pool.
+//
+// A config key that is parsed, validated and then dropped on the floor is
+// worse than no key: it reads as a control in review and is not one. This
+// asserts the connection really carries the configured bound by exhausting
+// it — a pool of 2 hands out 2 concurrent connections and makes the third
+// wait, which is observable without reaching into pgx internals.
+func TestMetaPoolBound_IsAppliedToTheConnection(t *testing.T) {
+	dsn := os.Getenv("TEST_PGURL")
+	if dsn == "" {
+		t.Skip("TEST_PGURL not set")
+	}
+	ctx := context.Background()
+
+	s, err := Open(ctx, config.Meta{Engine: "postgres", DSN: dsn, PoolMaxConns: 2})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	sess, ok := s.Conn().(dao.SessionTxBeginner)
+	if !ok {
+		t.Skip("this connection cannot pin transactions")
+	}
+	// Two pins should succeed: that is the configured bound.
+	var pinned []dao.ContextTxConn
+	for i := 0; i < 2; i++ {
+		tx, err := sess.BeginSessionTx(ctx, dao.TxOptions{})
+		if err != nil {
+			t.Fatalf("pin %d of 2 failed, so the pool is SMALLER than configured: %v", i+1, err)
+		}
+		pinned = append(pinned, tx)
+	}
+	t.Cleanup(func() {
+		for _, tx := range pinned {
+			cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = tx.RollbackContext(cctx)
+			cancel()
+		}
+	})
+
+	// The third must NOT be served while the first two are held. If the bound
+	// were ignored the pool would default to something larger and this would
+	// succeed immediately.
+	bctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if tx, err := sess.BeginSessionTx(bctx, dao.TxOptions{}); err == nil {
+		cctx, c2 := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = tx.RollbackContext(cctx)
+		c2()
+		t.Fatal("a third connection was served while two were pinned, so [meta] pool_max_conns " +
+			"never reached the pool — the setting is decoration")
 	}
 }

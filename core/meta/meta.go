@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yongjohnlee80/golib/dao"
 	"github.com/yongjohnlee80/golib/dao/postgres"
 	"github.com/yongjohnlee80/golib/dao/sqlite"
@@ -38,6 +40,28 @@ type Store struct {
 
 // Open opens the configured meta-store engine, runs pending migrations, and
 // builds the entity schemas (ADR-0053 §2).
+// metaPoolBound sizes the meta store's own pool (ADR-0079 §4).
+//
+// The meta store is NOT a target pool and must not borrow ADR-0074's
+// 2 x cores: that number is sized by how much USER traffic a target absorbs,
+// while this one serves the daemon's own bookkeeping, whose concurrency the
+// daemon sets. Sizing it by cores would buy nothing and spend postgres
+// backends the target pools need.
+//
+// An explicit [meta] pool_max_conns wins. Otherwise a pool_max_conns already
+// in the DSN is left alone — someone who wrote it there meant it — and only a
+// DSN that says nothing gets the default.
+func metaPoolBound(mcfg config.Meta) postgres.Option {
+	want := mcfg.PoolMaxConns
+	if want <= 0 {
+		if strings.Contains(mcfg.DSN, "pool_max_conns") {
+			return func(*pgxpool.Config) {} // the DSN already decided
+		}
+		want = config.DefaultMetaPoolMaxConns
+	}
+	return func(c *pgxpool.Config) { c.MaxConns = int32(want) }
+}
+
 func Open(ctx context.Context, mcfg config.Meta) (*Store, error) {
 	var (
 		conn dao.DataConn
@@ -47,7 +71,7 @@ func Open(ctx context.Context, mcfg config.Meta) (*Store, error) {
 	case "sqlite":
 		conn, err = openSqlite(ctx, mcfg.Path)
 	case "postgres":
-		conn, err = postgres.OpenNamed(ctx, "meta", mcfg.DSN)
+		conn, err = postgres.OpenNamed(ctx, "meta", mcfg.DSN, metaPoolBound(mcfg))
 	default:
 		return nil, fmt.Errorf("meta: unknown engine %q", mcfg.Engine)
 	}

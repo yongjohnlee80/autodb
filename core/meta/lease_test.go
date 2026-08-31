@@ -475,3 +475,47 @@ func TestInstanceLease_ReleaseBeforeStoreCloseDoesNotHang(t *testing.T) {
 		t.Fatal("release-then-close hung — a pinned lease connection is blocking the pool's Close")
 	}
 }
+
+// The lease is ONE abstraction across engines (ADR-0079 §4).
+//
+// Not a style point: a caller that had to branch on the engine would be a
+// caller that could forget an engine, and the daemon takes the lease on a
+// path that must work identically for both.
+func TestInstanceLease_OneAbstractionAcrossEngines(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	path := filepath.Join(t.TempDir(), "meta.db")
+	s, err := Open(ctx, config.Meta{Engine: "sqlite", Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	l, err := AcquireLease(ctx, s, config.Meta{Engine: "sqlite", Path: path})
+	if err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	if l.Target() == "" {
+		t.Error("the lease names no target, so a refusal could not say what it collided with")
+	}
+
+	// The documented asymmetry: sqlite cannot report a loss, and Lost() is a
+	// nil channel rather than a closed one. A closed channel would tell every
+	// caller the lease had ALREADY been lost the moment they selected on it —
+	// which is the opposite of the truth and would shut the daemon down at
+	// startup.
+	select {
+	case <-l.Lost():
+		t.Fatal("a freshly-acquired sqlite lease reports itself already lost")
+	default:
+	}
+	if err := l.Release(); err != nil {
+		t.Errorf("Release: %v", err)
+	}
+	// Release is idempotent — the daemon's defer can run after an explicit
+	// release on a shutdown path.
+	if err := l.Release(); err != nil {
+		t.Errorf("second Release: %v", err)
+	}
+}
