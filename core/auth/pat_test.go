@@ -387,6 +387,20 @@ func TestPAT_SubsetCheckIssuesOnTheCallersTransaction(t *testing.T) {
 //
 // SQLite masks it by serializing writers, which is why this cell is
 // PostgreSQL-only: on sqlite the unsafe version passes.
+//
+// WHAT THIS CELL PROVES, precisely. It asserts the INVARIANT — the per-user
+// cap holds under concurrency — and not which lock delivers it. Removing
+// either lock alone leaves the other serializing this path, so only removing
+// BOTH turns it red. That is the right target: the invariant is what callers
+// depend on, and a cell pinned to one particular lock would fail the day
+// someone legitimately restructures them.
+//
+// It does mean the GLOBAL cap has no concurrency cell of its own — reaching
+// 512 active tokens to race it is not a reasonable test. The global cap
+// relies on the guard row, which serializes every PAT creation install-wide.
+// That is acceptable because creating a token is a human action taken rarely,
+// but it is a real serialization point and is named here rather than left for
+// someone to discover under load.
 func TestPAT_CapHoldsUnderConcurrency(t *testing.T) {
 	dsn := os.Getenv("TEST_PGURL")
 	if dsn == "" {
@@ -481,5 +495,75 @@ func TestPAT_CapHoldsUnderConcurrency(t *testing.T) {
 	}
 	if refused != racers-1 {
 		t.Errorf("%d refused, want %d", refused, racers-1)
+	}
+}
+
+// MF1: a disabled account's token stops working immediately.
+//
+// SetUserDisabled revokes SESSIONS, not tokens, so without a per-call owner
+// check a credential sitting in a DSN outlived the account it belonged to —
+// offboarding looked complete and was not.
+func TestPAT_DisabledOwnersTokenStopsWorking(t *testing.T) {
+	t.Parallel()
+	s, store, _ := newSvc(t)
+	rootTok, _ := mustBootstrap(t, s)
+	ctx := context.Background()
+
+	if _, err := s.CreateUser(ctx, rootTok, "bob", "bob-passphrase-long", "editor", testIP); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	bobTok, _, err := s.Login(ctx, "bob", "bob-passphrase-long", testIP)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	pat, err := s.CreatePAT(ctx, bobTok, "bobs-laptop", 0, nil)
+	if err != nil {
+		t.Fatalf("CreatePAT: %v", err)
+	}
+
+	// Positive control: it works while the account is live. Without this the
+	// assertion below would pass against a token that never worked at all.
+	if _, verr := s.VerifyPAT(ctx, pat.Secret); verr != nil {
+		t.Fatalf("a fresh token was refused (%v); this test cannot observe the disable either", verr)
+	}
+
+	bob, err := store.Users.OnCtx(ctx).With(meta.UserName, "bob").Get()
+	if err != nil {
+		t.Fatalf("reading bob: %v", err)
+	}
+	if err := s.SetUserDisabled(ctx, rootTok, bob.ID, true, testIP); err != nil {
+		t.Fatalf("SetUserDisabled: %v", err)
+	}
+
+	// THE EFFECT: the credential is dead on the next call, with the same
+	// uniform failure as any other bad token.
+	if _, verr := s.VerifyPAT(ctx, pat.Secret); !errors.Is(verr, ErrPATInvalid) {
+		t.Fatalf("a disabled account's token still verifies (%v) — a credential in a DSN "+
+			"outlives the account it belongs to, and offboarding is incomplete", verr)
+	}
+}
+
+// The owner check must not reintroduce the timing oracle it sits next to.
+// It runs AFTER the match, so an unknown selector and a wrong secret — the
+// two cases an attacker can actually produce — still do identical work.
+func TestPAT_TheOwnerCheckDoesNotCostAnUnknownSelectorAnything(t *testing.T) {
+	t.Parallel()
+	s, _, _ := newSvc(t)
+	tok, _ := mustBootstrap(t, s)
+	ctx := context.Background()
+	good := mustPAT(t, s, tok, "timing-owner")
+	sel, _, _ := splitPAT(good.Secret)
+
+	before := PATCompareCount()
+	_, _ = s.VerifyPAT(ctx, PATPrefix+"zzzzzzzzzzzz.bbbbbbbbbbbb")
+	unknown := PATCompareCount() - before
+
+	before = PATCompareCount()
+	_, _ = s.VerifyPAT(ctx, PATPrefix+sel+".wrong-secret")
+	wrong := PATCompareCount() - before
+
+	if unknown != wrong {
+		t.Fatalf("unknown selector did %d compares, wrong secret did %d; adding the owner "+
+			"lookup has made the two paths distinguishable again", unknown, wrong)
 	}
 }

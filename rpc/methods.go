@@ -119,6 +119,7 @@ var publicErrs = []struct {
 	{auth.ErrPATCapExceeded, CodeInvalidToken},
 	{auth.ErrPATBadExpiry, CodeInvalidToken},
 	{auth.ErrPATBadAllowedIPs, CodeInvalidToken},
+	{auth.ErrPATNotFound, CodeInvalidToken},
 	{exec.ErrSessionBusy, CodeSessionBusy},
 	{exec.ErrSessionCapExceeded, CodeSessionCapExceeded},
 	{exec.ErrConnectionDraining, CodeConnectionDraining},
