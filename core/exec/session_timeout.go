@@ -178,7 +178,7 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 	// two commands in flight at once. The timeout path never did either: it
 	// took the transaction out from under whatever was running and rolled it
 	// back concurrently.
-	release, err := e.quiesce(ctx, s, quiesceTimeout)
+	release, err := e.quiesce(ctx, s, e.txQuiesce)
 	defer release()
 	if err != nil {
 		// The statement did not stop. Rolling back now would be the exact

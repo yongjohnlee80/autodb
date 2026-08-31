@@ -85,6 +85,10 @@ type Engine struct {
 	// its own engine: a shared variable that parallel tests reassign is a
 	// data race, which is how this one started life.
 	closeQuiesce time.Duration
+	// txQuiesce is the same bound for the TIMEOUT sweep. A field for the
+	// same reason as closeQuiesce: a shared package variable that parallel
+	// tests reassign is a data race, which is how the first one started.
+	txQuiesce time.Duration
 
 	history bool
 	maxRows int
@@ -263,7 +267,7 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		sessions:     newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
 		sessionIdle:  DefaultSessionIdleTimeout,
 		txLimits:     defaultTxLimits(),
-		poolMaxConns: DefaultPoolMaxConns(), closeQuiesce: closeQuiesceTimeout, poolMaxConnIdleTime: DefaultPoolMaxConnIdleTime,
+		poolMaxConns: DefaultPoolMaxConns(), closeQuiesce: closeQuiesceTimeout, txQuiesce: quiesceTimeout, poolMaxConnIdleTime: DefaultPoolMaxConnIdleTime,
 		poolMaxConnLifetime: DefaultPoolMaxConnLifetime,
 		debugIdle:           DefaultDebugIdleInTxTimeout,
 		maxTxCeiling:        DefaultMaxTxDurationCeiling,

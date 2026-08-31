@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
+
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // controllableTx observes what a teardown actually does. It records whether
@@ -250,4 +252,138 @@ func TestQuiesce_HoldsTheSlotUntilTheTeardownIsDone(t *testing.T) {
 		t.Errorf("the slot was not released after the teardown: %v", err)
 	}
 	s.finish()
+}
+
+// THE POSITIVE CONTROL for PendingOutcomes — lector's review gate, and a gap
+// I found in my own submission after sending it.
+//
+// Every other assertion I wrote against PendingOutcomes checks that the list
+// is EMPTY: nothing pending before a script, nothing after a committed one,
+// nothing left after a failed one. All of those pass if enqueueing is broken
+// entirely — a queue that never receives anything is always empty, and the
+// cell is green for the wrong reason. They prove the R4/R5 seam compiles and
+// drains in the happy path; they cannot prove PendingOutcomes is capable of
+// observing an unresolved transaction at all.
+//
+// So this drives one down R3's deferred-rollback path, where the engine
+// DECIDES not to roll back because the statement will not stop, and the
+// outcome is genuinely undetermined. That is a real unknown_pending, and it
+// must both APPEAR and then RESOLVE — a state that surfaces and never
+// resolves is the unbounded queue Amendment 4 A3 exists to prevent.
+func TestPendingOutcomes_ObservesAnUnresolvedTransactionAndItsResolution(t *testing.T) {
+	f := newFixture(t)
+	e := f.eng
+	ctx := context.Background()
+	uid := userIDOf(t, f)
+
+	tx := newControllableTx()
+	s, join := sessionWithInFlight(t, tx, false) // the statement ignores cancellation
+	s.userID = uid
+	s.connID = f.connID
+	if err := e.sessions.admit(s); err != nil {
+		t.Fatalf("admitting the session: %v", err)
+	}
+	txID := "tx-pending-control"
+
+	// The transaction OPENS first, through the engine's own append, because
+	// that is the only point the pending queue is populated — write-ahead, as
+	// the transaction opens, on the same reasoning as the opened row itself:
+	// a transaction that exists but is not queued is one nothing will ever
+	// come back for.
+	//
+	// My first version of this cell skipped it and drove the deferred path
+	// against a transaction that had never opened. It failed, correctly: no
+	// queue entry, so nothing to find. That setup modelled a shape production
+	// cannot produce — every real transaction is enqueued at BEGIN — which is
+	// the fixture trap white-vision warned about, reached from a direction I
+	// did not expect. What follows is production's own order: opened,
+	// undetermined, resolved.
+	e.noteTxOutcome(ctx, txTransition{
+		txID: txID, state: meta.TxOpened,
+		userID: uid, connectionID: f.connID,
+	})
+
+	// Baseline: nothing pending. This is the assertion every other cell
+	// makes, and on its own it is worth almost nothing — which is the point.
+	// An OPEN transaction is not yet an unresolved one: it is queued so it
+	// can be found later, but it is progressing normally and must not be
+	// reported as stuck.
+	if pending, err := e.PendingOutcomes(ctx, f.rootTok, 50); err != nil {
+		t.Fatalf("PendingOutcomes: %v", err)
+	} else if len(pending) != 1 || pending[0].State != meta.TxOpened {
+		t.Fatalf("after BEGIN the queue holds %+v; want exactly the opened transaction", pending)
+	}
+
+	// The deferred path: quiesce fails because the statement will not stop,
+	// so the engine declines to roll back and records that the outcome is
+	// undetermined rather than leaving it at `opened`.
+	// A short bound on THIS engine, so the cell is about what happens when it
+	// elapses rather than about waiting ten real seconds for it.
+	e.txQuiesce = 100 * time.Millisecond
+	e.rollbackExpired(ctx, s, txID, "idle-in-tx")
+
+	// THE POSITIVE CONTROL. The list can be non-empty, so every empty-list
+	// assertion elsewhere now means something.
+	pending, err := e.PendingOutcomes(ctx, f.rootTok, 50)
+	if err != nil {
+		t.Fatalf("PendingOutcomes: %v", err)
+	}
+	if len(pending) == 0 {
+		t.Fatal("a transaction the engine declined to roll back is NOT listed as pending — " +
+			"PendingOutcomes never observes an unresolved transaction, so every empty-list " +
+			"assertion in this suite is green for the wrong reason")
+	}
+	var found *TxStatus
+	for i := range pending {
+		if pending[i].TxID == txID {
+			found = &pending[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("the pending list does not contain %s: %+v", txID, pending)
+	}
+	if found.State != meta.TxUnknownPending {
+		t.Errorf("state = %q, want %q — the engine does not know this transaction's outcome",
+			found.State, meta.TxUnknownPending)
+	}
+	if found.Reason != meta.ReasonTimeout {
+		t.Errorf("reason = %q, want %q", found.Reason, meta.ReasonTimeout)
+	}
+	if found.ConnID != f.connID {
+		t.Errorf("conn_id = %d, want %d — an operator asking what is stuck needs to know "+
+			"on what", found.ConnID, f.connID)
+	}
+	if found.Terminal() {
+		t.Error("an unknown_pending transaction reports itself terminal")
+	}
+
+	// And it RESOLVES. Once the statement finally stops, the next sweep rolls
+	// the transaction back and records the terminal that retires the pending
+	// entry. Resolution here comes from R3's already-merged janitor, not from
+	// R4's reconciler — which is why it is assertable today.
+	close(tx.release)
+	join()
+	e.rollbackExpired(ctx, s, txID, "idle-in-tx")
+
+	after, err := e.PendingOutcomes(ctx, f.rootTok, 50)
+	if err != nil {
+		t.Fatalf("PendingOutcomes: %v", err)
+	}
+	for _, p := range after {
+		if p.TxID == txID {
+			t.Fatalf("%s is still pending after the retry resolved it (state=%s): a pending "+
+				"entry that never retires is the unbounded queue A3 exists to prevent",
+				txID, p.State)
+		}
+	}
+	st, err := e.TxOutcome(ctx, f.rootTok, txID)
+	if err != nil {
+		t.Fatalf("TxOutcome after resolution: %v", err)
+	}
+	if !st.Terminal() {
+		t.Errorf("the resolved transaction reports state %q, which is not terminal", st.State)
+	}
+	if !tx.rolledBack.Load() {
+		t.Error("the retry never rolled the transaction back")
+	}
 }
