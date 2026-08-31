@@ -323,6 +323,14 @@ func startEngine(
 	// record down. It stops with serveCtx.
 	eng.StartOutcomeReconciler(serveCtx, cfg.Exec.ReconcileInterval.Duration())
 
+	// Retention is STARTED even though it is off by default, for the reason
+	// this file already carries a warning about: machinery that is only ever
+	// reachable from tests is machinery that silently never runs. It
+	// returns immediately unless an operator has configured a retention
+	// period (ADR-0079 §3).
+	eng.StartOutcomeRetention(serveCtx, cfg.Exec.OutcomeRetentionInterval.Duration(),
+		cfg.Exec.OutcomeRetention.Duration())
+
 	return eng, serveCtx, lost, stopServing
 }
 

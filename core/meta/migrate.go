@@ -112,7 +112,8 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 				return map[TxOutcomeField]any{TxOutID: r.ID, TxOutTxID: r.TxID, TxOutSeq: r.Seq,
 					TxOutState: r.State, TxOutReason: r.Reason, TxOutUserID: r.UserID,
 					TxOutConnID: r.ConnectionID, TxOutHistoryID: r.HistoryID,
-					TxOutTargetXID: r.TargetXID, TxOutCreatedAt: r.CreatedAt}
+					TxOutTargetXID: r.TargetXID, TxOutCreatedAt: r.CreatedAt,
+					TxOutCollapsedAt: r.CollapsedAt}
 			})
 		}},
 		{"ip_allowlist", func() (int64, error) {

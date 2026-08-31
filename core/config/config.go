@@ -271,6 +271,19 @@ type Exec struct {
 	// pending entry, so sweeping it as often as the janitor would turn a
 	// down database into steady connection pressure.
 	ReconcileInterval Duration `toml:"reconcile_interval"`
+
+	// OutcomeRetention is how long a SETTLED transaction keeps its full
+	// progression before it is collapsed to a tombstone (ADR-0079 §3).
+	//
+	// DISABLED by default, and non-positive keeps it disabled — the same
+	// named semantics as reconcile_interval. Retention here never deletes a
+	// transaction: it prunes the intermediate transitions and keeps the
+	// terminal, because `ErrNoSuchTx` means "no transaction was started" and
+	// deleting a settled one would make that a lie.
+	OutcomeRetention Duration `toml:"outcome_retention"`
+	// OutcomeRetentionInterval is how often the collapse pass runs. Only
+	// meaningful when OutcomeRetention is positive.
+	OutcomeRetentionInterval Duration `toml:"outcome_retention_interval"`
 }
 
 // TUI configures the standalone terminal UI (ADR-0057).
@@ -362,6 +375,9 @@ func Default() Config {
 			PoolMaxConnLifetime:  Duration(DefaultPoolMaxConnLifetime),
 			JanitorInterval:      Duration(DefaultJanitorInterval),
 			ReconcileInterval:    Duration(DefaultReconcileInterval),
+			// Both zero: retention is off until an operator asks for it.
+			OutcomeRetention:         0,
+			OutcomeRetentionInterval: Duration(DefaultOutcomeRetentionInterval),
 		},
 		FrontDoor: FrontDoor{
 			Enabled:          false,
@@ -418,6 +434,11 @@ const (
 	// crash window, so this cadence only governs entries whose target was
 	// unreachable when that pass ran.
 	DefaultReconcileInterval = time.Minute
+
+	// DefaultOutcomeRetentionInterval is the cadence used IF retention is
+	// enabled. It is deliberately slow: collapsing a settled transaction is
+	// never urgent, and the pass reads a slice of the outcome log.
+	DefaultOutcomeRetentionInterval = time.Hour
 )
 
 // DefaultPoolMaxConns is 2 × cores, per ADR-0074 §1a (Johno, 2026-08-30).

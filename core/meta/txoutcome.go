@@ -105,36 +105,48 @@ type TxOutcome struct {
 	// emptiness is load-bearing rather than incidental.
 	TargetXID string
 	CreatedAt int64
+	// CollapsedAt is 0 while a progression is intact. Non-zero means this
+	// terminal is a TOMBSTONE: the transitions leading to it were pruned by
+	// retention at that time (ADR-0079 §3). The row itself is never removed,
+	// because absence is what ErrNoSuchTx uses to prove nothing started.
+	CollapsedAt int64
 }
 
 type TxOutcomeField string
 
 const (
-	TxOutID        TxOutcomeField = "id"
-	TxOutTxID      TxOutcomeField = "tx_id"
-	TxOutSeq       TxOutcomeField = "seq"
-	TxOutState     TxOutcomeField = "state"
-	TxOutReason    TxOutcomeField = "reason"
-	TxOutUserID    TxOutcomeField = "user_id"
-	TxOutConnID    TxOutcomeField = "connection_id"
-	TxOutHistoryID TxOutcomeField = "history_id"
-	TxOutTargetXID TxOutcomeField = "target_xid"
-	TxOutCreatedAt TxOutcomeField = "created_at"
+	TxOutID          TxOutcomeField = "id"
+	TxOutTxID        TxOutcomeField = "tx_id"
+	TxOutSeq         TxOutcomeField = "seq"
+	TxOutState       TxOutcomeField = "state"
+	TxOutReason      TxOutcomeField = "reason"
+	TxOutUserID      TxOutcomeField = "user_id"
+	TxOutConnID      TxOutcomeField = "connection_id"
+	TxOutHistoryID   TxOutcomeField = "history_id"
+	TxOutTargetXID   TxOutcomeField = "target_xid"
+	TxOutCreatedAt   TxOutcomeField = "created_at"
+	TxOutCollapsedAt TxOutcomeField = "collapsed_at"
 )
 
+// TxOutByID orders the outcome log by insertion, so retention can page it.
+const TxOutByID Sort = "id"
+
 func newTxOutcomes(conn dao.DataConn) *dao.Schema[*TxOutcome, TxOutcomeField, Sort, int64] {
-	return schema(conn, "tx_outcomes", TxOutID, map[TxOutcomeField]dao.Field[*TxOutcome]{
-		TxOutID:        {Column: "id", Scan: func(r *TxOutcome) any { return &r.ID }},
-		TxOutTxID:      {Column: "tx_id", Scan: func(r *TxOutcome) any { return &r.TxID }, Value: func(r *TxOutcome) any { return r.TxID }},
-		TxOutSeq:       {Column: "seq", Scan: func(r *TxOutcome) any { return &r.Seq }, Value: func(r *TxOutcome) any { return r.Seq }},
-		TxOutState:     {Column: "state", Scan: func(r *TxOutcome) any { return &r.State }, Value: func(r *TxOutcome) any { return r.State }},
-		TxOutReason:    {Column: "reason", Scan: func(r *TxOutcome) any { return &r.Reason }, Value: func(r *TxOutcome) any { return r.Reason }},
-		TxOutUserID:    {Column: "user_id", Scan: func(r *TxOutcome) any { return &r.UserID }, Value: func(r *TxOutcome) any { return r.UserID }},
-		TxOutConnID:    {Column: "connection_id", Scan: func(r *TxOutcome) any { return &r.ConnectionID }, Value: func(r *TxOutcome) any { return r.ConnectionID }},
-		TxOutHistoryID: {Column: "history_id", Scan: func(r *TxOutcome) any { return &r.HistoryID }, Value: func(r *TxOutcome) any { return r.HistoryID }},
-		TxOutTargetXID: {Column: "target_xid", Scan: func(r *TxOutcome) any { return &r.TargetXID }, Value: func(r *TxOutcome) any { return r.TargetXID }},
-		TxOutCreatedAt: {Column: "created_at", Scan: func(r *TxOutcome) any { return &r.CreatedAt }, Value: func(r *TxOutcome) any { return r.CreatedAt }},
-	})
+	return sortableSchema(conn, "tx_outcomes", TxOutID,
+		map[Sort]string{TxOutByID: "id"},
+		map[TxOutcomeField]dao.Field[*TxOutcome]{
+			TxOutID:          {Column: "id", Scan: func(r *TxOutcome) any { return &r.ID }},
+			TxOutTxID:        {Column: "tx_id", Scan: func(r *TxOutcome) any { return &r.TxID }, Value: func(r *TxOutcome) any { return r.TxID }},
+			TxOutSeq:         {Column: "seq", Scan: func(r *TxOutcome) any { return &r.Seq }, Value: func(r *TxOutcome) any { return r.Seq }},
+			TxOutState:       {Column: "state", Scan: func(r *TxOutcome) any { return &r.State }, Value: func(r *TxOutcome) any { return r.State }},
+			TxOutReason:      {Column: "reason", Scan: func(r *TxOutcome) any { return &r.Reason }, Value: func(r *TxOutcome) any { return r.Reason }},
+			TxOutUserID:      {Column: "user_id", Scan: func(r *TxOutcome) any { return &r.UserID }, Value: func(r *TxOutcome) any { return r.UserID }},
+			TxOutConnID:      {Column: "connection_id", Scan: func(r *TxOutcome) any { return &r.ConnectionID }, Value: func(r *TxOutcome) any { return r.ConnectionID }},
+			TxOutHistoryID:   {Column: "history_id", Scan: func(r *TxOutcome) any { return &r.HistoryID }, Value: func(r *TxOutcome) any { return r.HistoryID }},
+			TxOutTargetXID:   {Column: "target_xid", Scan: func(r *TxOutcome) any { return &r.TargetXID }, Value: func(r *TxOutcome) any { return r.TargetXID }},
+			TxOutCreatedAt:   {Column: "created_at", Scan: func(r *TxOutcome) any { return &r.CreatedAt }, Value: func(r *TxOutcome) any { return r.CreatedAt }},
+			TxOutCollapsedAt: {Column: "collapsed_at", Scan: func(r *TxOutcome) any { return &r.CollapsedAt }, Value: func(r *TxOutcome) any { return r.CollapsedAt }},
+		})
 }
 
 // --- the pending queue ------------------------------------------------------

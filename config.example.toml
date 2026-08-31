@@ -206,6 +206,22 @@ janitor_interval = "10s"
 # target nothing else touches.
 reconcile_interval = "1m"
 
+# How long a SETTLED transaction keeps its full progression before it is
+# collapsed to a tombstone, and how often that pass runs (ADR-0079 §3).
+#
+# DISABLED by default — outcome_retention = "0s" means never collapse. Turn it
+# on only when the outcome log is actually large; at one row per transition it
+# is far smaller than script_history or audit_log.
+#
+# Retention here NEVER deletes a transaction. It prunes the intermediate
+# transitions and keeps the terminal as a tombstone, because `ErrNoSuchTx`
+# means "no transaction was started" — deleting a settled transaction would
+# make a committed one start answering "no such transaction". For the same
+# reason the outcome log is never time-partitioned: detaching a partition is
+# deletion with extra steps.
+outcome_retention = "0s"
+outcome_retention_interval = "1h"
+
 [tui]
 # Where `autodb --ui` keeps its local .sql notes. Empty means
 # $XDG_DATA_HOME/autodb/notes (~/.local/share/autodb/notes).
