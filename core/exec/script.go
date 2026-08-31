@@ -119,36 +119,76 @@ func (e *Engine) ExecuteScriptAtomic(ctx context.Context, token string, connID i
 		return e.ExecuteScript(ctx, token, connID, sqlText, ip)
 	}
 
-	sid, err := e.OpenSession(ctx, token, connID, ip)
+	sess, err := e.openSession(ctx, token, connID, ip)
 	if err != nil {
 		return nil, err
 	}
-	// The close is the atomicity. It runs on every path — success, failure,
-	// and a script that opened a transaction and simply stopped — and a
-	// close with an open transaction rolls it back.
-	defer func() {
-		if cerr := e.CloseSession(context.WithoutCancel(ctx), token, sid, ip); cerr != nil {
-			e.logf("atomic script: closing the ephemeral session %s: %v", sid, cerr)
-		}
-	}()
+	// The close is the atomicity, and it is the ENGINE's own close: the
+	// session belongs to this call, so cleaning it up must not depend on the
+	// caller's token still authenticating. Going back through the public
+	// CloseSession meant a logout or a revocation during a long statement
+	// made cleanup fail authentication — leaving the ephemeral session, and
+	// the transaction pinned to it, registered and holding a connection.
+	// An engine does not ask permission to clean up after itself.
+	//
+	// It runs on every path: success, failure, and a script that opened a
+	// transaction and simply stopped. A close with an open transaction rolls
+	// it back, and closeSession is synchronous, so cleanup is complete before
+	// this function returns.
+	defer e.closeSession(context.WithoutCancel(ctx), sess, ip, "atomic-script")
 
+	// appliedOutside counts statements that completed while NO transaction
+	// was open. They are applied, and a rollback will not remove them.
+	var appliedOutside int
 	out := &ScriptResult{}
 	for i, stmt := range parts {
-		res, rerr := e.SessionExecute(ctx, token, sid, stmt, ip)
+		inTxBefore := sess.inTransaction()
+		res, rerr := e.SessionExecute(ctx, token, sess.id, stmt, ip)
 		if rerr != nil {
 			out.FailedAt = i + 1
-			// Unlike the statement-by-statement path, nothing here is
-			// half-applied: the deferred close rolls the transaction back.
-			// The message says so, because the other path's message says
-			// the opposite and a caller reading them side by side must not
-			// have to guess which one they got.
-			return out, fmt.Errorf("statement %d of %d failed; the transaction was rolled back "+
-				"and nothing in this script was applied: %w", i+1, len(parts), rerr)
+			return out, e.atomicFailure(sess, i, len(parts), appliedOutside, rerr)
+		}
+		// A statement is "outside" when no transaction was open before it
+		// AND it did not open one. BEGIN itself is neither applied nor lost.
+		if !inTxBefore && !sess.inTransaction() {
+			appliedOutside++
 		}
 		out.Statements++
 		out.Last = res
 	}
 	return out, nil
+}
+
+// atomicFailure words the failure by what is ACTUALLY still applied.
+//
+// The first version of this promised "nothing in this script was applied" for
+// every failure on the session path, which was false whenever the script had
+// statements outside its transaction: the session path is taken when a
+// boundary appears ANYWHERE, so `INSERT …; BEGIN; …; COMMIT;` runs that first
+// INSERT with no transaction around it, and a rollback later cannot remove
+// it. A promise of atomicity that is sometimes untrue is worse than none —
+// it is exactly the assurance someone would act on.
+//
+// Whether a transaction is open is asked of the SESSION rather than tracked
+// here. A second model of the transaction state is a second thing that can be
+// wrong, and this one would be wrong precisely when it mattered.
+func (e *Engine) atomicFailure(sess *session, idx, total, appliedOutside int, cause error) error {
+	stmt := idx + 1
+	if !sess.inTransaction() {
+		// No transaction was open when this failed — either the script had
+		// not opened one yet, or it had already committed. Nothing is being
+		// rolled back, so nothing may claim to be.
+		return fmt.Errorf("statement %d of %d failed with no transaction open; the %d statement(s) "+
+			"before it already ran and are applied: %w", stmt, total, idx, cause)
+	}
+	if appliedOutside == 0 {
+		// The whole script is one transaction. Here the strong promise is
+		// true, and it is worth making plainly.
+		return fmt.Errorf("statement %d of %d failed; the transaction was rolled back "+
+			"and nothing in this script was applied: %w", stmt, total, cause)
+	}
+	return fmt.Errorf("statement %d of %d failed; the transaction was rolled back, but %d "+
+		"statement(s) ran OUTSIDE it and are still applied: %w", stmt, total, appliedOutside, cause)
 }
 
 // scriptOpensATransaction reports whether any statement in the script is a

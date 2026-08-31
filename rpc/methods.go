@@ -27,6 +27,38 @@ const (
 	// CodeStatementRejected carries the execution gate's refusals
 	// (classification, WHERE-less guard, size cap).
 	CodeStatementRejected int64 = -32032
+
+	// The ExecSession family (protocol 5, ADR-0074 §8a). Protocol 5 added
+	// the session verbs but no codes for what they can refuse, so every
+	// session error — no such session, already running, cap reached —
+	// fell through wireErr as an unmapped error and reached the client as a
+	// generic internal failure. A client cannot act on that: "the server
+	// broke" and "you already have eight sessions open" call for opposite
+	// responses, and only one of them is worth retrying.
+	//
+	// The split is by what the CLIENT should do, which is the only thing a
+	// code is for:
+
+	// CodeSessionNotFound: the session does not exist, or is not this
+	// caller's. Deliberately one code for both — the id space must not
+	// become a way to discover which sessions exist. Reopen.
+	CodeSessionNotFound int64 = -32040
+	// CodeSessionBusy: one in-flight statement per session, and this
+	// session already has one. Wait for the previous call, or use another
+	// session; the request was not run.
+	CodeSessionBusy int64 = -32041
+	// CodeSessionCapExceeded: the per-user or global session cap is full.
+	// Close a session, or wait for one to be reaped. Retrying immediately
+	// will fail the same way.
+	CodeSessionCapExceeded int64 = -32042
+	// CodeTxState: the request is wrong for the transaction's CURRENT state
+	// — no transaction open, one already open, or an aborted transaction
+	// that accepts only ROLLBACK. The fix is a different statement, not a
+	// retry of this one.
+	CodeTxState int64 = -32043
+	// CodeConnectionDraining: the connection is being deleted or shut down.
+	// Nothing on it will succeed again; this is not a retry.
+	CodeConnectionDraining int64 = -32044
 )
 
 // publicErrs is the whole disclosure allowlist: core sentinels whose
@@ -53,6 +85,32 @@ var publicErrs = []struct {
 	// Workspace not-found is admin-only reachable (Manage authz runs
 	// BEFORE the lookup, so R13 ordering holds) and carries no internals.
 	{exec.ErrWorkspaceNotFound, golibrpc.CodeInvalidParams},
+
+	// The session/transaction surface (protocol 5). Each of these is a
+	// condition the CALLER can do something about, which is why they are
+	// public: their constant text says what happened and the code says what
+	// to do about it. None of them names a connection, a user, or another
+	// session, so publishing them discloses nothing about what exists.
+	{exec.ErrSessionNotFound, CodeSessionNotFound},
+	{exec.ErrSessionBusy, CodeSessionBusy},
+	{exec.ErrSessionCapExceeded, CodeSessionCapExceeded},
+	{exec.ErrConnectionDraining, CodeConnectionDraining},
+
+	// Transaction-state refusals all map to one code: the caller's next
+	// move is the same in every case — send a different statement, not this
+	// one again — and the sentinel's own text says which state it was in.
+	{exec.ErrTxAlreadyOpen, CodeTxState},
+	{exec.ErrNoOpenTx, CodeTxState},
+	{exec.ErrTxAborted, CodeTxState},
+	{exec.ErrTxChainUnsupported, CodeTxState},
+
+	// The session-state gate (SET / LOCK). These are refusals of a specific
+	// statement, like the classification gate above, so they carry its code
+	// rather than a new one — a caller treats them the same way.
+	{exec.ErrSetNotLocal, CodeStatementRejected},
+	{exec.ErrSetGUCRefused, CodeStatementRejected},
+	{exec.ErrSetOutsideTx, CodeStatementRejected},
+	{exec.ErrLockOutsideTx, CodeStatementRejected},
 }
 
 // wireErr maps core errors onto the wire. The transport withholds any

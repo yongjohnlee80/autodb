@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -218,5 +219,160 @@ func TestStatelessPath_RefusesTransactionControlOnASessionProfile(t *testing.T) 
 	if _, err := f.eng.Execute(ctx, f.rootTok, connID,
 		"INSERT INTO "+table+" (note) VALUES ('after')", testIP); err != nil {
 		t.Errorf("the connection was unusable after the refusals: %v", err)
+	}
+}
+
+// MF1. The session path is chosen when a boundary appears ANYWHERE, so a
+// statement before BEGIN — or after COMMIT — runs on the session with no
+// transaction around it and is applied. The failure message said "nothing in
+// this script was applied", which is a promise the code does not keep.
+//
+// The fix is not to refuse these scripts: `SELECT 1; BEGIN; …; COMMIT;` is a
+// reasonable thing to type, and outside-the-boundary statements ARE applied
+// under ordinary SQL semantics. The fix is to say so exactly.
+func TestExecuteScriptAtomic_ReportsWorkOutsideTheTransactionHonestly(t *testing.T) {
+	t.Run("a statement BEFORE the boundary is applied and the message says so", func(t *testing.T) {
+		f, connID, table := pgAtomicTarget(t)
+		_, err := f.eng.ExecuteScriptAtomic(context.Background(), f.rootTok, connID,
+			"INSERT INTO "+table+" (note) VALUES ('outside'); "+
+				"BEGIN; INSERT INTO "+table+" (note) VALUES ('inside'); "+
+				"INSERT INTO "+table+" (note) VALUES (NULL); COMMIT;", testIP)
+		if err == nil {
+			t.Fatal("the NOT NULL violation returned success")
+		}
+		n := atomicRowCount(t, f, connID, table)
+		if n != 1 {
+			t.Fatalf("%d rows, want 1: the statement before BEGIN runs outside the "+
+				"transaction and is applied", n)
+		}
+		if strings.Contains(err.Error(), "nothing in this script was applied") {
+			t.Errorf("the message claims nothing was applied, but a row survived — a false "+
+				"promise of atomicity is worse than no promise: %v", err)
+		}
+		if !strings.Contains(strings.ToLower(err.Error()), "outside") {
+			t.Errorf("the message does not tell the caller that work ran outside the "+
+				"transaction and is still applied: %v", err)
+		}
+	})
+
+	t.Run("a statement AFTER the boundary is applied and the message says so", func(t *testing.T) {
+		f, connID, table := pgAtomicTarget(t)
+		_, err := f.eng.ExecuteScriptAtomic(context.Background(), f.rootTok, connID,
+			"BEGIN; INSERT INTO "+table+" (note) VALUES ('committed'); COMMIT; "+
+				"INSERT INTO "+table+" (note) VALUES (NULL);", testIP)
+		if err == nil {
+			t.Fatal("the NOT NULL violation returned success")
+		}
+		n := atomicRowCount(t, f, connID, table)
+		if n != 1 {
+			t.Fatalf("%d rows, want 1: the committed transaction is applied and the failure "+
+				"came after it", n)
+		}
+		if strings.Contains(err.Error(), "rolled back") {
+			t.Errorf("the message claims a rollback, but the transaction had already "+
+				"COMMITTED before the failing statement: %v", err)
+		}
+	})
+
+	// And the whole-script case still gets the strong promise, because there
+	// the promise is true.
+	t.Run("a well-formed envelope keeps the atomicity promise", func(t *testing.T) {
+		f, connID, table := pgAtomicTarget(t)
+		_, err := f.eng.ExecuteScriptAtomic(context.Background(), f.rootTok, connID,
+			"BEGIN; INSERT INTO "+table+" (note) VALUES ('a'); "+
+				"INSERT INTO "+table+" (note) VALUES (NULL); COMMIT;", testIP)
+		if err == nil {
+			t.Fatal("the NOT NULL violation returned success")
+		}
+		if n := atomicRowCount(t, f, connID, table); n != 0 {
+			t.Fatalf("%d rows survived, want 0", n)
+		}
+		if !strings.Contains(err.Error(), "nothing in this script was applied") {
+			t.Errorf("a script that IS one transaction should still get the strong "+
+				"promise: %v", err)
+		}
+	})
+}
+
+// MF2. The ephemeral session's cleanup must not depend on the caller's token
+// still authenticating.
+//
+// It used to: the deferred close went through the PUBLIC CloseSession, which
+// re-validates the token. A logout or an admin revocation while a statement
+// was running made cleanup fail authentication, and the session — with its
+// pinned transaction and the connection under it — stayed registered with
+// nobody able to close it. An engine does not ask permission to clean up
+// after itself.
+func TestExecuteScriptAtomic_CleansUpWhenTheTokenDiesMidScript(t *testing.T) {
+	f, connID, table := pgAtomicTarget(t)
+	ctx := context.Background()
+
+	// Revoke the caller's auth session while the script is in flight. The
+	// script's own statements are already authorized; what breaks is the
+	// CLEANUP's re-authentication.
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		uid := userIDOf(t, f)
+		_ = f.store.Sessions.OnCtx(context.Background()).With(meta.SessUserID, uid).
+			Set(meta.SessRevoked, int64(1)).Update()
+	}()
+
+	_, _ = f.eng.ExecuteScriptAtomic(ctx, f.rootTok, connID,
+		"BEGIN; SELECT pg_sleep(0.5); INSERT INTO "+table+" (note) VALUES ('x'); COMMIT;", testIP)
+
+	// THE EFFECT: whatever the script's own outcome, no session may be left
+	// behind. One that survives holds a pinned transaction on the target and
+	// there is no longer a valid token that could close it.
+	if n := len(f.eng.sessions.snapshot()); n != 0 {
+		t.Fatalf("%d ephemeral session(s) survived the script after the token was revoked — "+
+			"each holds a pinned transaction on the target that nothing can now close", n)
+	}
+}
+
+// The cap under CONCURRENCY, which lector asked to be pinned: the submitted
+// leak cell was sequential, and sequential is the easy case. Eight concurrent
+// transactional scripts fill the per-user cap; the ninth must be refused
+// cleanly rather than hang or leak, every admitted one must finish, and the
+// registry must drain.
+func TestExecuteScriptAtomic_ConcurrentScriptsRespectTheCapAndDrain(t *testing.T) {
+	f, connID, table := pgAtomicTarget(t)
+
+	const n = 9 // the per-user cap is 8
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = f.eng.ExecuteScriptAtomic(context.Background(), f.rootTok, connID,
+				"BEGIN; SELECT pg_sleep(0.4); INSERT INTO "+table+" (note) VALUES ('c'); COMMIT;", testIP)
+		}(i)
+	}
+	wg.Wait()
+
+	var admitted, refused int
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			admitted++
+		case errors.Is(err, ErrSessionCapExceeded):
+			refused++
+		default:
+			t.Errorf("script %d failed for an unexpected reason: %v", i, err)
+		}
+	}
+	if admitted == 0 {
+		t.Fatal("no concurrent script completed; the cap is refusing work it should admit")
+	}
+	if admitted+refused != n {
+		t.Fatalf("admitted %d + refused %d != %d", admitted, refused, n)
+	}
+	// Every admitted script committed its row.
+	if got := atomicRowCount(t, f, connID, table); got != int64(admitted) {
+		t.Errorf("%d rows for %d admitted scripts — an admitted script did not commit", got, admitted)
+	}
+	// And nothing is left holding a connection.
+	if left := len(f.eng.sessions.snapshot()); left != 0 {
+		t.Errorf("%d sessions survived %d concurrent scripts", left, n)
 	}
 }
