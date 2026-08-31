@@ -16,9 +16,13 @@ import (
 // seedTx writes a progression directly, so the read side can be tested
 // against shapes the writers do not produce on demand (a stuck pending, an
 // out-of-order arrival) without having to crash a real transaction.
-// enqueueSeed adds the queue entry a real opened transaction would have, and
-// removes it again when the seeded progression already ends in a terminal.
-func enqueueSeed(t *testing.T, f *fixture, txID string, connID int64, states ...meta.TxState) {
+// enqueueSeed adds the queue entry a real opened transaction would have.
+//
+// It carries the OWNER, because the queue does and the read API scopes on it.
+// Leaving it 0 made the visibility tests pass for the wrong reason: a
+// non-admin saw nothing because every seeded entry was owned by nobody, not
+// because another user's transaction was correctly hidden.
+func enqueueSeed(t *testing.T, f *fixture, txID string, userID, connID int64, states ...meta.TxState) {
 	t.Helper()
 	ctx := context.Background()
 	settled := false
@@ -32,6 +36,7 @@ func enqueueSeed(t *testing.T, f *fixture, txID string, connID int64, states ...
 	}
 	if _, err := f.store.TxPending.OnCtx(ctx).
 		Set(meta.TxPendTxID, txID).Set(meta.TxPendConnID, connID).
+		Set(meta.TxPendUserID, userID).
 		Set(meta.TxPendCreatedAt, int64(1)).Insert(); err != nil {
 		t.Fatalf("seeding the pending queue for %s: %v", txID, err)
 	}
@@ -43,7 +48,7 @@ func seedTx(t *testing.T, f *fixture, txID string, userID, connID int64, states 
 	// A real transaction enqueues as it opens, so a seed that models one has
 	// to as well — otherwise it is a shape production never produces, and
 	// the reconciler is right to ignore it.
-	enqueueSeed(t, f, txID, connID, states...)
+	enqueueSeed(t, f, txID, userID, connID, states...)
 	for i, st := range states {
 		if _, err := f.store.TxOutcomes.OnCtx(ctx).
 			Set(meta.TxOutTxID, txID).Set(meta.TxOutSeq, int64(i+1)).
@@ -167,7 +172,7 @@ func TestPendingOutcomes_ListsOnlyUnsettledOldestFirst(t *testing.T) {
 	seedTx(t, f, "tx_settled", 1, f.connID, meta.TxOpened, meta.TxCommitted)
 	// Seeded with an explicit created_at older than the others, so "oldest
 	// first" cannot be satisfied by insertion order.
-	enqueueSeed(t, f, "tx_old_pending", f.connID, meta.TxOpened)
+	enqueueSeed(t, f, "tx_old_pending", 1, f.connID, meta.TxOpened)
 	if _, err := f.store.TxOutcomes.OnCtx(ctx).
 		Set(meta.TxOutTxID, "tx_old_pending").Set(meta.TxOutSeq, int64(1)).
 		Set(meta.TxOutState, string(meta.TxOpened)).Set(meta.TxOutReason, "").

@@ -232,3 +232,74 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 		t.Error("a settled transaction was backfilled into the queue and would be probed forever")
 	}
 }
+
+// v8 must recover each queued transaction's OWNER from the log.
+//
+// The queue gained user_id so the read API can scope before it limits. A v7
+// store upgrading has rows with no owner, and the column defaults to 0 —
+// which belongs to no user, so every inherited entry would become invisible
+// to the person whose transaction it is. Fail-closed, so not a disclosure
+// bug, but a silent one: their own pending transactions simply stop being
+// listed, with nothing saying why.
+func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "meta.db")
+
+	s1, err := Open(ctx, config.Meta{Engine: "sqlite", Path: path})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := s1.TxOutcomes.OnCtx(ctx).
+		Set(TxOutTxID, "tx_owned").Set(TxOutSeq, int64(1)).
+		Set(TxOutState, "opened").Set(TxOutReason, "").
+		Set(TxOutUserID, int64(42)).Set(TxOutConnID, int64(3)).
+		Set(TxOutHistoryID, int64(0)).Set(TxOutTargetXID, "").
+		Set(TxOutCreatedAt, int64(1)).Insert(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s1.TxPending.OnCtx(ctx).
+		Set(TxPendTxID, "tx_owned").Set(TxPendConnID, int64(3)).
+		Set(TxPendUserID, int64(42)).Set(TxPendCreatedAt, int64(1)).Insert(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Roll back to v7 PROPERLY: recreate the table without the column, so v8
+	// runs against the shape it will actually meet in the field. Blanking the
+	// column instead would leave v8's ALTER to fail on a duplicate, and the
+	// test would be exercising its own setup rather than the upgrade.
+	for _, stmt := range []string{
+		`DROP INDEX idx_tx_pending_order`,
+		`DROP INDEX idx_tx_pending_user`,
+		`ALTER TABLE tx_pending RENAME TO tx_pending_v8`,
+		`CREATE TABLE tx_pending (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tx_id TEXT NOT NULL UNIQUE,
+			connection_id BIGINT NOT NULL,
+			created_at BIGINT NOT NULL)`,
+		`INSERT INTO tx_pending (id, tx_id, connection_id, created_at)
+			SELECT id, tx_id, connection_id, created_at FROM tx_pending_v8`,
+		`DROP TABLE tx_pending_v8`,
+		`DELETE FROM schema_migrations WHERE version >= 8`,
+	} {
+		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("rolling back to v7 (%s): %v", stmt, err)
+		}
+	}
+	_ = s1.Close()
+
+	s2, err := Open(ctx, config.Meta{Engine: "sqlite", Path: path})
+	if err != nil {
+		t.Fatalf("upgrade Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	row, err := s2.TxPending.OnCtx(ctx).With(TxPendTxID, "tx_owned").Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.UserID != 42 {
+		t.Fatalf("queue owner = %d, want 42 — an inherited entry belongs to nobody and "+
+			"would never appear in its own owner's pending list", row.UserID)
+	}
+}
