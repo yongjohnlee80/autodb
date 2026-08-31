@@ -128,19 +128,55 @@ func TestTerminalSessionOmitsTheBrowserNoteSection(t *testing.T) {
 	}
 }
 
-// findInScrollableFloat pages through an open scrollable float until sub appears.
-// The help card is taller than the viewport, so asserting on the first screen (or
-// after a single End) pins WHERE a line happens to sit rather than that it is
-// present, and breaks whenever the card grows.
+// findInScrollableFloat pages through an open scrollable float until sub
+// appears, or the float stops scrolling (bottom), whichever comes first.
+//
+// The help card is taller than the viewport, so asserting on the first screen
+// pins WHERE a line happens to sit rather than that it is present. But paging
+// must be SYNCHRONIZED with the app loop, not slept past: h.key is an async
+// inject, and the original fire-and-sleep(20ms) version read a STALE frame
+// whenever the loop was starved, then injected a second PageDown — both keys
+// later applied, skipping a page of content entirely. That skipped page held
+// the target in CI run 33375817666 (the card is 3 pages at 110x32; the target
+// sits on page 1; the failure's last screen was the bottom frame), and the
+// same skip reproduced locally during instrumentation. So: after each
+// PageDown, WAIT for the key's visible effect — a changed frame means the
+// scroll advanced; a frame stable through the wait (probed twice, in case two
+// adjacent pages ever render identically) means the bottom. The page cap is a
+// wrap-around guard, not a timing bound — hitting it is its own failure.
 func findInScrollableFloat(t *testing.T, h *uiHarness, what, sub string) {
 	t.Helper()
-	for page := 0; page < 15; page++ {
-		if strings.Contains(h.screen(), sub) {
+	const wrapGuard = 100
+	for page := 0; page < wrapGuard; page++ {
+		scr := h.screen()
+		if strings.Contains(scr, sub) {
 			return
 		}
 		h.key(tuicore.KeyPageDown)
-		time.Sleep(20 * time.Millisecond)
+		if !h.waitFrameChange(scr) {
+			h.key(tuicore.KeyPageDown) // bottom probe: distinguish "bottom" from
+			if !h.waitFrameChange(scr) { // "two identical adjacent pages"
+				t.Fatalf("%s: %q not found and the float stopped scrolling — "+
+					"bottom reached after %d page(s)\nlast screen:\n%s",
+					what, sub, page, h.screen())
+			}
+		}
 	}
-	t.Fatalf("%s: %q never appeared while paging the float\nlast screen:\n%s",
-		what, sub, h.screen())
+	t.Fatalf("%s: %q — %d pages without reaching a stable bottom (scroll wrap-around?)\nlast screen:\n%s",
+		what, sub, wrapGuard, h.screen())
+}
+
+// waitFrameChange polls until the virtual screen differs from prev, reporting
+// whether it changed within the window. This is how a test observes that an
+// injected key's effect has actually rendered, instead of sleeping a fixed
+// interval and hoping the loop was scheduled.
+func (h *uiHarness) waitFrameChange(prev string) bool {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if h.screen() != prev {
+			return true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return false
 }
