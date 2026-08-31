@@ -167,11 +167,116 @@ func checkMetaPoolFloor(m Meta) error {
 	return nil
 }
 
-// CheckDSNTransport applies the transport rule to this Meta as configured.
+// CheckOperational applies EVERY rule the loaded config would apply to this
+// Meta — transport AND the effective pool floor.
 //
-// Exported so the migration CLI can apply the SAME rule to a DSN typed on the
-// command line. A check that only guards the config file is a check that is
-// bypassed by the first tool that takes a DSN as an argument.
-func (m Meta) CheckDSNTransport() error {
-	return checkMetaDSNTransport(m.DSN, m.AllowInsecureDSN)
+// Exported so the migration CLI can validate a DSN typed on the command line.
+// A check that only guards the config file is bypassed by the first tool that
+// takes a DSN as an argument.
+//
+// It is deliberately ONE method rather than two, and it replaced a
+// CheckDSNTransport that exposed only half the rule. The CLI called that half,
+// looked validated, and let `pool_max_conns=1` through — where the destination
+// lease pins the single connection and the migration runner then waits forever
+// for a second one (lector's PR #31 r0 MF2). That is the PR #27 finding
+// reopened one layer out: PR #27 was about one value being DECIDED twice, this
+// is about one rule being APPLIED in halves. An exported half is an invitation
+// to apply half, so there is no longer a half to call.
+func (m Meta) CheckOperational() error {
+	if err := checkMetaDSNTransport(m.DSN, m.AllowInsecureDSN); err != nil {
+		return err
+	}
+	return checkMetaPoolFloor(m)
+}
+
+// RedactDSN removes the password from a DSN so it can be printed.
+//
+// It handles BOTH forms, because the CLI accepts both. The URL-only version
+// printed `password=sekrit` verbatim for keyword-form DSNs (lector's PR #31 r0
+// MF3), and the report it appears in is the sort of thing an operator pastes
+// into a ticket — so that was a credential leak, not a cosmetic gap.
+//
+// It lives beside dsnParams rather than in the CLI because both forms of the
+// same string are already understood here; a redactor that lives elsewhere is
+// a second, worse parser of the same grammar.
+func RedactDSN(dsn string) string {
+	trimmed := strings.TrimSpace(dsn)
+	if strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://") {
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			// Unparseable: say nothing rather than risk printing a password
+			// that a partial parse failed to find.
+			return "(unparseable postgres URL, withheld)"
+		}
+		if u.User != nil {
+			if _, hasPass := u.User.Password(); hasPass {
+				u.User = url.UserPassword(u.User.Username(), "***")
+			}
+		}
+		// Some deployments pass the password as a query parameter instead.
+		if q := u.Query(); q.Has("password") {
+			q.Set("password", "***")
+			u.RawQuery = q.Encode()
+		}
+		return u.String()
+	}
+	return redactKeywordDSN(trimmed)
+}
+
+// redactKeywordDSN masks password= in libpq's keyword/value form.
+//
+// This needs a real scanner rather than strings.Fields: libpq allows
+// single-quoted values, so `password='sek rit'` is ONE field containing a
+// space, and splitting on whitespace would mask only its first half and print
+// the rest. Backslash escapes inside a quoted value are honoured for the same
+// reason.
+func redactKeywordDSN(dsn string) string {
+	var out strings.Builder
+	i := 0
+	for i < len(dsn) {
+		// Whitespace between fields is copied through unchanged.
+		if dsn[i] == ' ' || dsn[i] == '\t' {
+			out.WriteByte(dsn[i])
+			i++
+			continue
+		}
+		start := i
+		for i < len(dsn) && dsn[i] != '=' && dsn[i] != ' ' && dsn[i] != '\t' {
+			i++
+		}
+		key := dsn[start:i]
+		if i >= len(dsn) || dsn[i] != '=' {
+			out.WriteString(key)
+			continue
+		}
+		i++ // consume '='
+		valStart := i
+		if i < len(dsn) && dsn[i] == '\'' {
+			i++
+			for i < len(dsn) {
+				if dsn[i] == '\\' && i+1 < len(dsn) {
+					i += 2
+					continue
+				}
+				if dsn[i] == '\'' {
+					i++
+					break
+				}
+				i++
+			}
+		} else {
+			for i < len(dsn) && dsn[i] != ' ' && dsn[i] != '\t' {
+				i++
+			}
+		}
+		out.WriteString(key)
+		out.WriteByte('=')
+		// libpq keywords are case-insensitive, so the mask must be too.
+		if strings.EqualFold(strings.TrimSpace(key), "password") {
+			out.WriteString("***")
+		} else {
+			out.WriteString(dsn[valStart:i])
+		}
+	}
+	return out.String()
 }

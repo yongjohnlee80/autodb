@@ -223,3 +223,84 @@ func TestMetaPool_EffectiveBoundAndItsSource(t *testing.T) {
 		}
 	}
 }
+
+// RedactDSN — lector's PR #31 r0 MF3.
+//
+// The migration CLI accepts both DSN forms and prints the destination in a
+// report its own comment describes as "the sort of thing an operator pastes
+// into a ticket". A redactor that understands only the URL form therefore
+// leaks the password of every keyword-form DSN.
+func TestRedactDSNMasksPasswordsInBothForms(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		dsn  string
+		keep []string // must survive: a redactor that returns "" leaks nothing and says nothing
+	}{
+		{"URL userinfo password",
+			"postgres://autodb:sekrit@db.internal:5432/autodb?sslmode=verify-full",
+			[]string{"db.internal", "autodb", "sslmode=verify-full"}},
+		{"URL password query parameter",
+			"postgres://db.internal/autodb?password=sekrit&sslmode=verify-full",
+			[]string{"db.internal", "sslmode=verify-full"}},
+		{"keyword form",
+			"host=db.internal user=autodb password=sekrit dbname=autodb",
+			[]string{"host=db.internal", "dbname=autodb"}},
+		// libpq allows single-quoted values, so this is ONE field containing a
+		// space. Splitting on whitespace masks only its first half and prints
+		// the rest — which is why the redactor scans rather than uses Fields.
+		{"keyword form, quoted value containing a space",
+			"host=db.internal password='sekrit hunter2' dbname=autodb",
+			[]string{"host=db.internal", "dbname=autodb"}},
+		// libpq keywords are case-insensitive.
+		{"keyword form, uppercase keyword",
+			"host=db.internal PASSWORD=sekrit dbname=autodb",
+			[]string{"host=db.internal", "dbname=autodb"}},
+		// The password must not be confused with a value that merely contains
+		// the word, nor a different key masked in its place.
+		{"a non-password value is left alone",
+			"host=db.internal user=password_admin dbname=autodb",
+			[]string{"user=password_admin", "dbname=autodb"}},
+	} {
+		got := RedactDSN(tc.dsn)
+		if strings.Contains(got, "sekrit") || strings.Contains(got, "hunter2") {
+			t.Errorf("%s: the password survived redaction: %s", tc.name, got)
+		}
+		for _, keep := range tc.keep {
+			if !strings.Contains(got, keep) {
+				t.Errorf("%s: redaction lost %q, leaving the report unreadable: %s",
+					tc.name, keep, got)
+			}
+		}
+	}
+}
+
+// CheckOperational applies BOTH halves of the rule.
+//
+// It replaced a CheckDSNTransport that exposed only the transport half. The
+// CLI called that half, looked validated, and let pool_max_conns=1 through to
+// a destination whose lease then pinned the only connection while the
+// migration runner waited for a second (MF2). An exported half is an
+// invitation to apply half.
+func TestCheckOperationalCoversTransportAndPoolFloor(t *testing.T) {
+	t.Parallel()
+	const secure = "postgres://h/db?sslmode=verify-full&sslrootcert=/ca.crt"
+
+	if err := (Meta{DSN: secure}).CheckOperational(); err != nil {
+		t.Errorf("a DSN meeting both rules was refused: %v", err)
+	}
+	if err := (Meta{DSN: "postgres://h/db?sslmode=require"}).CheckOperational(); err == nil ||
+		!strings.Contains(err.Error(), "authenticates NOTHING") {
+		t.Errorf("the transport half is not applied: %v", err)
+	}
+	err := (Meta{DSN: secure + "&pool_max_conns=1"}).CheckOperational()
+	if err == nil {
+		t.Fatal("the pool floor half is not applied: pool_max_conns=1 was accepted")
+	}
+	if !strings.Contains(err.Error(), "pool_max_conns in [meta] dsn") {
+		t.Errorf("the refusal does not name the DSN as the source of the bound: %v", err)
+	}
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("the refusal is not an ErrInvalid: %v", err)
+	}
+}

@@ -174,24 +174,113 @@ func TestMigrateCLI_RefusesPostgresToSqliteByName(t *testing.T) {
 func TestMigrateCLI_AppliesTheTransportRuleToTheDestinationDSN(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
+	// A source that EXISTS, so the run actually reaches the DSN check. This
+	// previously named a path that did not exist, which passed for the wrong
+	// reason the moment a missing source became a refusal of its own.
 	err := runMigrateToPostgres(context.Background(), &out, migrateOpts{
-		from: "/tmp/does-not-matter.db", to: "postgres://h/db?sslmode=require",
+		from: seedSqlite(t), to: "postgres://h/db?sslmode=require",
 	})
 	if err == nil || !strings.Contains(err.Error(), "authenticates NOTHING") {
 		t.Fatalf("an insecure destination DSN was accepted on the command line: %v", err)
 	}
 }
 
-// A password in the report is a password in whatever the operator pastes it
-// into.
-func TestRedactDSN(t *testing.T) {
+// MF1: a typo in --from must not be answered with a brand-new empty store.
+//
+// meta.OpenNoMigrate opens sqlite in a creating mode, which is right for a
+// daemon's first run and wrong here: a misspelled path was created, migrated,
+// copied, and reported as a successful `migrated 0 row(s)` with exit 0. The
+// operator could then point [meta] at an empty postgres store believing it
+// held their data.
+func TestMigrateCLI_RefusesAMissingSourceWithoutCreatingIt(t *testing.T) {
 	t.Parallel()
-	got := redactDSN("postgres://autodb:sekrit@db.internal/autodb?sslmode=verify-full")
-	if strings.Contains(got, "sekrit") {
-		t.Fatalf("the password survived redaction: %s", got)
+	missing := filepath.Join(t.TempDir(), "typo", "meta.db")
+	var out bytes.Buffer
+	err := runMigrateToPostgres(context.Background(), &out, migrateOpts{
+		from: missing, to: "postgres://h/db?sslmode=verify-full&sslrootcert=/ca.crt",
+	})
+	if err == nil {
+		t.Fatal("a --from path that does not exist was accepted as a source to migrate")
 	}
-	if !strings.Contains(got, "autodb:***@db.internal") {
-		t.Errorf("redaction mangled the DSN beyond recognition: %s", got)
+	if !strings.Contains(err.Error(), "no sqlite store at --from") {
+		t.Errorf("the refusal does not name the missing source:\n%v", err)
+	}
+	// THE DECISIVE ASSERTION: nothing was created. The bug was never the error
+	// message, it was the side effect that happened before there was one.
+	if _, serr := os.Stat(missing); !os.IsNotExist(serr) {
+		t.Fatalf("the CLI CREATED the misspelled source at %s — a typo became an empty "+
+			"store that then reported a successful migration of 0 rows", missing)
+	}
+	if _, serr := os.Stat(filepath.Dir(missing)); !os.IsNotExist(serr) {
+		t.Errorf("the CLI created the misspelled source's parent directory %s",
+			filepath.Dir(missing))
+	}
+}
+
+// MF2: the pool floor applies to a command-line DSN, and it must REFUSE
+// rather than hang.
+//
+// pool_max_conns=1 is not a slow configuration, it is a deadlocked one: the
+// destination lease pins the single connection and the migration runner then
+// waits forever for a second. The CLI applied only the transport half of the
+// operational rule, so this reached the opener and timed out inside
+// withMigrationLock. The refusal is the whole point — the operator gets a
+// sentence instead of a hung terminal, which is why this cell fails on a
+// timeout rather than merely on a wrong error.
+func TestMigrateCLI_RefusesADestinationDSNBelowThePoolFloor(t *testing.T) {
+	t.Parallel()
+	from := seedSqlite(t)
+	done := make(chan error, 1)
+	go func() {
+		var out bytes.Buffer
+		done <- runMigrateToPostgres(context.Background(), &out, migrateOpts{
+			from: from,
+			to:   "postgres://h/db?sslmode=verify-full&sslrootcert=/ca.crt&pool_max_conns=1",
+		})
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a DSN-level pool_max_conns=1 destination was accepted")
+		}
+		if !strings.Contains(err.Error(), "pool_max_conns in [meta] dsn") {
+			t.Errorf("the refusal does not name the DSN as the source of the bound:\n%v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the CLI did not refuse pool_max_conns=1 — it got as far as opening the " +
+			"destination, where the lease pins the only connection and the migration " +
+			"lock then waits for one that will never come")
+	}
+}
+
+// MF3: a password in the report is a password in whatever the operator pastes
+// it into — and this CLI accepts BOTH DSN forms, so redaction must too.
+func TestMigrateCLI_ReportRedactsBothDSNForms(t *testing.T) {
+	t.Parallel()
+	// config.RedactDSN is the exact function the report line calls.
+	u := config.RedactDSN("postgres://autodb:sekrit@db.internal/autodb?sslmode=verify-full")
+	if strings.Contains(u, "sekrit") {
+		t.Fatalf("the password survived redaction of a URL DSN: %s", u)
+	}
+	if !strings.Contains(u, "db.internal") || !strings.Contains(u, "sslmode=verify-full") {
+		t.Errorf("redaction mangled the URL DSN beyond recognition: %s", u)
+	}
+
+	kw := config.RedactDSN(
+		"host=db.internal port=5432 user=autodb password=sekrit dbname=autodb sslmode=verify-full")
+	if strings.Contains(kw, "sekrit") {
+		t.Fatalf("the password survived redaction of a keyword DSN: %s", kw)
+	}
+	if !strings.Contains(kw, "host=db.internal") || !strings.Contains(kw, "dbname=autodb") {
+		t.Errorf("redaction mangled the keyword DSN beyond recognition: %s", kw)
+	}
+
+	// looksLikePostgresDSN is what lets the keyword form in at all. If it ever
+	// stopped accepting it, the pairing above would be dead weight and this is
+	// what would say so.
+	if !looksLikePostgresDSN("host=db.internal dbname=autodb") {
+		t.Error("the CLI no longer accepts keyword-form DSNs, so the keyword redaction " +
+			"cell above no longer guards a reachable path")
 	}
 }
 
@@ -269,6 +358,63 @@ func TestMigrateCLI_CopiesAndVerifiesAgainstTheDestination(t *testing.T) {
 		from: src, to: dsn, allowInsecure: true,
 	}); err == nil {
 		t.Fatal("a second migration into a populated destination was accepted")
+	}
+}
+
+// MF4: a source that was ITSELF migrated once already is still a valid source.
+//
+// MigrateToPostgres copies store_meta and then upserts `migrated_from`. On a
+// fresh source that key is new and the destination gains a row; on a source
+// that already carries it, the copy brings it across and the upsert overwrites
+// it — same key, same count. The CLI expected +1 unconditionally and so
+// reported `store_meta SOURCE 2 DEST 1 MISMATCH` on a copy that was perfectly
+// faithful, telling the operator their destination must not be served.
+//
+// The second assertion is the one that makes the fix worth more than deleting
+// the check: the destination's stamp must be THIS migration's, not the
+// source's carried across. A store that says it came from a migration two
+// years ago is as misleading as one that says nothing.
+func TestMigrateCLI_AcceptsASourceThatCarriesItsOwnMigratedFromStamp(t *testing.T) {
+	base := pgDSN(t)
+	ctx := context.Background()
+	src := seedSqlite(t)
+
+	const oldStamp = "sqlite@2024-01-01T00:00:00Z"
+	s, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetMeta(ctx, "migrated_from", oldStamp); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	dsn := freshPG(t, base)
+	var out bytes.Buffer
+	if err := runMigrateToPostgres(ctx, &out, migrateOpts{
+		from: src, to: dsn, allowInsecure: true,
+	}); err != nil {
+		t.Fatalf("a source carrying its own migrated_from stamp was rejected: %v\n%s",
+			err, out.String())
+	}
+	if strings.Contains(out.String(), "MISMATCH") {
+		t.Errorf("the verification report claims a mismatch on a faithful copy:\n%s", out.String())
+	}
+
+	dst, err := meta.Open(ctx, config.Meta{Engine: "postgres", DSN: dsn, AllowInsecureDSN: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+	v, ok, err := dst.GetMeta(ctx, "migrated_from")
+	if err != nil || !ok {
+		t.Fatalf("the destination carries no migrated_from stamp: %v", err)
+	}
+	if v == oldStamp {
+		t.Fatalf("the destination kept the SOURCE's stamp %q — it would misreport where "+
+			"it came from", oldStamp)
 	}
 }
 

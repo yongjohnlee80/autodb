@@ -232,28 +232,21 @@ func ensureEmpty(ctx context.Context, dst *Store) error {
 }
 
 // verifyCounts re-counts every copied table on the destination.
+//
+// It walks countableTables rather than keeping its own map. That list's own
+// comment already called itself the ONE list while this function held a second
+// copy of it — lector's PR #31 r0 non-blocking note. The two agreed, which is
+// the dangerous state rather than the safe one: drift between duplicated lists
+// is invisible until the day a table is added to only one of them, and the
+// symptom then is a migration that silently drops a table it never verified.
 func verifyCounts(ctx context.Context, dst *Store, want map[string]int64) error {
-	got := map[string]func() (uint64, error){
-		"users":                 dst.Users.OnCtx(ctx).Count,
-		"connections":           dst.Connections.OnCtx(ctx).Count,
-		"workspaces":            dst.Workspaces.OnCtx(ctx).Count,
-		"workspace_connections": dst.WorkspaceConns.OnCtx(ctx).Count,
-		"grants":                dst.Grants.OnCtx(ctx).Count,
-		"sessions":              dst.Sessions.OnCtx(ctx).Count,
-		"script_history":        dst.History.OnCtx(ctx).Count,
-		"audit_log":             dst.Audit.OnCtx(ctx).Count,
-		"tx_outcomes":           dst.TxOutcomes.OnCtx(ctx).Count,
-		"tx_pending":            dst.TxPending.OnCtx(ctx).Count,
-		"ip_allowlist":          dst.AllowedIPs.OnCtx(ctx).Count,
-		"store_meta":            dst.KV.OnCtx(ctx).Count,
-	}
-	for name, count := range got {
-		n, err := count()
+	for _, c := range countableTables(ctx, dst) {
+		n, err := c.count()
 		if err != nil {
-			return fmt.Errorf("meta: verifying %s: %w", name, err)
+			return fmt.Errorf("meta: verifying %s: %w", c.name, err)
 		}
-		if int64(n) != want[name] {
-			return fmt.Errorf("meta: %s copy mismatch: destination has %d rows, source had %d", name, n, want[name])
+		if int64(n) != want[c.name] {
+			return fmt.Errorf("meta: %s copy mismatch: destination has %d rows, source had %d", c.name, n, want[c.name])
 		}
 	}
 	return nil
