@@ -642,19 +642,8 @@ func (c Config) validate() error {
 		return fmt.Errorf("%w: exec.session_idle_timeout %s must be positive — an unbounded idle window "+
 			"never reaps a session an abandoned client left open", ErrInvalid, c.Exec.SessionIdleTimeout.Duration())
 	}
-	if c.Meta.PoolMaxConns < 0 {
-		return fmt.Errorf("%w: [meta] pool_max_conns must not be negative (got %d)",
-			ErrInvalid, c.Meta.PoolMaxConns)
-	}
-	if c.Meta.PoolMaxConns > 0 && c.Meta.PoolMaxConns < MinMetaPoolMaxConns {
-		// Below two, an operation that pins a connection (the instance lease,
-		// the migration lock) leaves nothing for the work beside it. That was
-		// a real deadlock before the migration lock ran its DDL on the pinned
-		// transaction, and the next thing to pin a connection would
-		// reintroduce it silently.
-		return fmt.Errorf("%w: [meta] pool_max_conns = %d is too small; the instance lease pins "+
-			"one connection for the daemon's lifetime, so at least %d are needed for anything "+
-			"else to run", ErrInvalid, c.Meta.PoolMaxConns, MinMetaPoolMaxConns)
+	if err := checkMetaPoolFloor(c.Meta); err != nil {
+		return err
 	}
 	switch c.Meta.Engine {
 	case "sqlite":

@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -116,4 +117,52 @@ func checkMetaDSNTransport(dsn string, allowInsecure bool) error {
 		"sslmode=verify-full with an explicit sslrootcert. If this deployment genuinely "+
 		"reaches postgres over a trusted local channel, set [meta] allow_insecure_dsn = true "+
 		"to say so deliberately", ErrInvalid, mode, why)
+}
+
+// EffectivePoolMaxConns reports the bound the meta pool will ACTUALLY use, and
+// where it came from.
+//
+// One function decides, and both the validator and the connection opener call
+// it. That is the fix for PR #27 r0: the bound used to be decided twice —
+// validation checked the TOML field while the opener treated a DSN-level
+// `pool_max_conns` as authoritative — so `dsn = "...?pool_max_conns=1"` walked
+// straight past the floor and produced a one-connection pool that the instance
+// lease could pin whole. Two independent decisions about one value is how a
+// guard ends up guarding the wrong thing.
+//
+// Precedence: an explicit [meta] pool_max_conns wins; otherwise a DSN that
+// names one is honoured (someone who wrote it there meant it); otherwise the
+// default. The floor applies to ALL of them.
+func (m Meta) EffectivePoolMaxConns() (n int, source string) {
+	if m.PoolMaxConns > 0 {
+		return m.PoolMaxConns, "[meta] pool_max_conns"
+	}
+	if params, err := dsnParams(m.DSN); err == nil {
+		if raw := strings.TrimSpace(params["pool_max_conns"]); raw != "" {
+			if v, err := strconv.Atoi(raw); err == nil {
+				return v, "pool_max_conns in [meta] dsn"
+			}
+		}
+	}
+	return DefaultMetaPoolMaxConns, "the built-in default"
+}
+
+// checkMetaPoolFloor refuses an effective bound too small to work.
+//
+// Below two, an operation that pins a connection — the instance lease for the
+// daemon's lifetime, or the migration lock — leaves nothing for the work
+// beside it. That is not hypothetical: it deadlocked the migration runner
+// until its DDL moved onto the pinned transaction.
+func checkMetaPoolFloor(m Meta) error {
+	if m.PoolMaxConns < 0 {
+		return fmt.Errorf("%w: [meta] pool_max_conns must not be negative (got %d)",
+			ErrInvalid, m.PoolMaxConns)
+	}
+	n, source := m.EffectivePoolMaxConns()
+	if n < MinMetaPoolMaxConns {
+		return fmt.Errorf("%w: the meta pool would be bounded at %d by %s; the instance lease "+
+			"pins one connection for the daemon's lifetime, so at least %d are needed for "+
+			"anything else to run", ErrInvalid, n, source, MinMetaPoolMaxConns)
+	}
+	return nil
 }

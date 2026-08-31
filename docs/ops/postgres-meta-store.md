@@ -73,6 +73,11 @@ serves the daemon's own bookkeeping — audit writes, history, the outcome log �
 whose concurrency the daemon sets, not the users. Sizing it by cores would buy
 nothing and spend postgres backends the target pools need.
 
+The bound may also be set as `pool_max_conns` inside the DSN. An explicit
+`[meta] pool_max_conns` wins; otherwise the DSN's value is honoured; otherwise
+the default. **The floor applies wherever the value came from** — setting it in
+the DSN does not get past it, and the refusal names which of the two it read.
+
 The floor of 2 is not arbitrary: the instance lease **pins one connection for
 the daemon's lifetime**. A pool of 1 leaves nothing for the work beside it,
 and that is not hypothetical — it deadlocked the migration runner until the

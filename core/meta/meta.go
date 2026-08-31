@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yongjohnlee80/golib/dao"
@@ -52,14 +51,13 @@ type Store struct {
 // in the DSN is left alone — someone who wrote it there meant it — and only a
 // DSN that says nothing gets the default.
 func metaPoolBound(mcfg config.Meta) postgres.Option {
-	want := mcfg.PoolMaxConns
-	if want <= 0 {
-		if strings.Contains(mcfg.DSN, "pool_max_conns") {
-			return func(*pgxpool.Config) {} // the DSN already decided
-		}
-		want = config.DefaultMetaPoolMaxConns
-	}
-	return func(c *pgxpool.Config) { c.MaxConns = int32(want) }
+	// The SAME decision the validator made — one function, two callers
+	// (PR #27 r0). When these were decided separately, a DSN-level
+	// pool_max_conns=1 satisfied validation (which only looked at the TOML
+	// field) and then won at connect time, producing exactly the
+	// one-connection pool the floor exists to prevent.
+	n, _ := mcfg.EffectivePoolMaxConns()
+	return func(c *pgxpool.Config) { c.MaxConns = int32(n) }
 }
 
 func Open(ctx context.Context, mcfg config.Meta) (*Store, error) {
