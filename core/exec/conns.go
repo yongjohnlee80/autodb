@@ -72,6 +72,7 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 		}
 		if c, ok := e.conns[connID]; ok {
 			e.mu.Unlock()
+			e.checkoutTrigger(connID)
 			return c, nil
 		}
 		if opening, ok := e.opening[connID]; ok {
@@ -109,6 +110,11 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 		}
 		e.conns[connID] = conn
 		e.mu.Unlock()
+		// A successful checkout is evidence this target is answering, which
+		// is exactly what a pending outcome for it has been waiting for
+		// (ADR-0074 Amendment 4 A1, the checkout trigger). Throttled and
+		// backgrounded inside.
+		e.checkoutTrigger(connID)
 		return conn, nil
 	}
 }

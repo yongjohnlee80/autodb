@@ -273,37 +273,7 @@ func (e *Engine) finishTx(ctx context.Context, s *session, ident auth.Identity, 
 		verb = "COMMIT"
 	}
 
-	// commit_started is durable BEFORE the COMMIT is dispatched, carrying the
-	// target xid. This is the crash-window record the whole design turns on:
-	// if the process dies between here and the terminal, the log says a
-	// COMMIT was in flight and names the xid to ask about, and the reconciler
-	// can recover the true outcome. Without it a crash in that window is
-	// indistinguishable from a transaction that was never committed at all —
-	// and those two have opposite answers.
-	//
-	// Only for a commit. A ROLLBACK has nothing to be uncertain about: if it
-	// does not complete, the server aborts the transaction when the
-	// connection dies, which is the same outcome.
-	if commit {
-		if err := e.appendTxOutcome(ctx, txTransition{
-			txID: txID, state: meta.TxCommitStarted,
-			userID: ident.UserID(), connectionID: s.connID, targetXID: targetXID,
-		}); err != nil {
-			return nil, err
-		}
-	}
-
-	outcome, err := e.finalize(ctx, s, tx, commit)
-
-	// The terminal (or the nonterminal unknown_pending) as classified from
-	// what the driver actually proved. noteTxOutcome rather than
-	// appendTxOutcome: the transaction is over either way, and failing the
-	// caller's COMMIT because the LOG could not be written would report a
-	// failure that did not happen.
-	e.noteTxOutcome(ctx, txTransition{
-		txID: txID, state: txStateFor(outcome, err), reason: txOutcomeReason(outcome, err),
-		userID: ident.UserID(), connectionID: s.connID, targetXID: targetXID,
-	})
+	outcome, err := e.commitBoundary(ctx, s, tx, ident, txID, targetXID, commit)
 
 	s.mu.Lock()
 	s.tx, s.txPhase, s.txID, s.targetXID = nil, txNone, "", ""
@@ -320,6 +290,89 @@ func (e *Engine) finishTx(ctx context.Context, s *session, ident auth.Identity, 
 	return &Result{Verb: verb, Class: ClassControl}, nil
 }
 
+// txBoundaryPoint names an instant inside the commit boundary.
+type txBoundaryPoint string
+
+const (
+	// boundaryCommitStartedDurable fires from inside appendTxOutcome, the
+	// instant the commit_started row is durable.
+	boundaryCommitStartedDurable txBoundaryPoint = "appended:commit_started"
+	// boundaryCommitReturned fires from inside finalize, the instant the
+	// target COMMIT has returned — the start of the window the reconciler
+	// exists for.
+	boundaryCommitReturned txBoundaryPoint = "commit-returned"
+)
+
+// txBoundaryHook is nil in production and set by the crash suite.
+//
+// It exists because the ORDER of the boundary's two writes is the guarantee,
+// and an order cannot be tested from outside the process: there is no way to
+// stop a function between two of its own statements from another program.
+// Without it the crash suite could only REPLAY the ordering it believes
+// production uses — which proves the replay, not the production seam, and
+// stayed green when lector moved the production append past the COMMIT (PR
+// #20 r0 MF4).
+//
+// The points fire from inside the PRIMITIVES — appendTxOutcome and finalize —
+// rather than from hand-placed lines in commitBoundary. That distinction is
+// what makes the binding hold: a hand-placed marker moves when someone moves
+// the code around it, so a reordering carries its own witness along and the
+// test still sees the order it expected. A marker inside the primitive fires
+// when the primitive actually runs, so reordering the callers reorders the
+// events, and the crash cells observe the true sequence.
+var txBoundaryHook func(txBoundaryPoint)
+
+func boundaryReached(p txBoundaryPoint) {
+	if txBoundaryHook != nil {
+		txBoundaryHook(p)
+	}
+}
+
+// commitBoundary is the ordered boundary sequence, in one place.
+//
+// The ordering IS the design, so it lives in a named function rather than
+// inline in finishTx: this is the sequence the crash suite executes, so a
+// change to it changes what the crash cells observe, and moving the
+// commit_started append past the COMMIT makes P3 and P4 red instead of
+// leaving them green.
+//
+// commit_started is durable BEFORE the COMMIT is dispatched, carrying the
+// target xid. If the process dies between here and the terminal, the log says
+// a COMMIT was in flight and names the xid to ask about, so the reconciler
+// can recover the true outcome. Without it a crash in that window is
+// indistinguishable from a transaction that was never committed at all — and
+// those two have opposite answers.
+//
+// Only for a commit. A ROLLBACK has nothing to be uncertain about: if it does
+// not complete, the server aborts the transaction when the connection dies,
+// which is the same outcome.
+func (e *Engine) commitBoundary(
+	ctx context.Context, s *session, tx dao.ContextTxConn, ident auth.Identity,
+	txID, targetXID string, commit bool,
+) (string, error) {
+	if commit {
+		if err := e.appendTxOutcome(ctx, txTransition{
+			txID: txID, state: meta.TxCommitStarted,
+			userID: ident.UserID(), connectionID: s.connID, targetXID: targetXID,
+		}); err != nil {
+			return "", err
+		}
+	}
+
+	outcome, err := e.finalize(ctx, s, tx, commit)
+
+	// The terminal (or the nonterminal unknown_pending) as classified from
+	// what the driver actually proved. noteTxOutcome rather than
+	// appendTxOutcome: the transaction is over either way, and failing the
+	// caller's COMMIT because the LOG could not be written would report a
+	// failure that did not happen.
+	e.noteTxOutcome(ctx, txTransition{
+		txID: txID, state: txStateFor(outcome, err), reason: txOutcomeReason(outcome, err),
+		userID: ident.UserID(), connectionID: s.connID, targetXID: targetXID,
+	})
+	return outcome, err
+}
+
 // finalize runs the commit or rollback and classifies the outcome for the
 // audit trail, mapping golib's sentinels onto the states ADR-0074 §7 names.
 func (e *Engine) finalize(ctx context.Context, s *session, tx dao.ContextTxConn, commit bool) (string, error) {
@@ -333,6 +386,10 @@ func (e *Engine) finalize(ctx context.Context, s *session, tx dao.ContextTxConn,
 		return "rolled_back", nil
 	}
 	err := tx.CommitContext(cctx)
+	// The target has answered (or failed to). Fired here, from the primitive
+	// itself, so the instant is the real one no matter how the boundary's
+	// callers are arranged.
+	boundaryReached(boundaryCommitReturned)
 	switch {
 	case err == nil:
 		return "committed", nil

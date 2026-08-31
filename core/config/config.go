@@ -185,6 +185,14 @@ type Exec struct {
 	// ReconcileInterval is how often the engine re-asks targets about
 	// transactions whose outcome it could not determine (ADR-0074 §7).
 	//
+	// Non-positive DISABLES the periodic pass — a supported operator choice
+	// with named semantics (Amendment 4 A1), not a misconfiguration. Startup
+	// recovery and connection-checkout reconciliation continue, so a pending
+	// entry is still resolved when its target next answers; what is given up
+	// is the timed retry for a target nothing else touches. Validation
+	// deliberately does NOT reject it: rejecting made the ratified
+	// configuration unreachable.
+	//
 	// Longer than the janitor on purpose. The janitor bounds how long an
 	// abandoned transaction holds LOCKS, which is a live cost paid by other
 	// clients; this one bounds how long an already-finished transaction's
@@ -479,11 +487,6 @@ func (c Config) validate() error {
 		return fmt.Errorf("%w: exec.pool_max_conn_idle_time (%s) exceeds pool_max_conn_lifetime (%s), "+
 			"so the idle bound could never retire a connection first", ErrInvalid,
 			c.Exec.PoolMaxConnIdleTime.Duration(), c.Exec.PoolMaxConnLifetime.Duration())
-	}
-	if c.Exec.ReconcileInterval <= 0 {
-		return fmt.Errorf("%w: [exec] reconcile_interval must be positive (got %s); a non-positive value "+
-			"would leave transactions whose outcome could not be determined pending forever",
-			ErrInvalid, c.Exec.ReconcileInterval.Duration())
 	}
 	if c.Exec.JanitorInterval <= 0 {
 		return fmt.Errorf("%w: exec.janitor_interval is %s; with no sweep an expired transaction holds "+
