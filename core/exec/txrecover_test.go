@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -472,5 +473,154 @@ func TestEngineClose_StopsAndWaitsForCheckoutReconciliation(t *testing.T) {
 	f.eng.mu.Unlock()
 	if open != 0 {
 		t.Fatalf("%d pool(s) open after Close — background work reopened one", open)
+	}
+}
+
+// The queue invariant, under real concurrency.
+//
+// The queue is only trustworthy if membership means exactly one thing: the
+// log for this tx_id has no terminal. Two failures would break it in opposite
+// directions — an entry that OUTLIVES its terminal is probed forever, and one
+// deleted BEFORE the terminal lands is a transaction nothing comes back for.
+//
+// Both writes are inside the appender's store transaction, so the claim is
+// that no interleaving can separate them. That is a claim about concurrency,
+// so it is tested with concurrency rather than argued: many writers race over
+// the same transactions with a mix of terminal and nonterminal transitions,
+// and the invariant is checked as an equivalence afterwards.
+func TestPendingQueue_MembershipMeansExactlyNoTerminal(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	const txCount, writers = 12, 8
+	ids := make([]string, txCount)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("tx_race_%02d", i)
+		if err := f.eng.appendTxOutcome(ctx, txTransition{
+			txID: ids[i], state: meta.TxOpened, connectionID: f.connID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Every writer attempts every transaction, so each tx_id is contended by
+	// all of them at once. Half the writers try to settle, half try to
+	// advance a nonterminal — which is the ordering that can produce a
+	// nonterminal arriving after a terminal.
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			<-start
+			for _, id := range ids {
+				tr := txTransition{txID: id, connectionID: f.connID}
+				if w%2 == 0 {
+					tr.state, tr.reason = meta.TxCommitted, ""
+				} else {
+					tr.state, tr.reason = meta.TxUnknownPending, meta.ReasonUnanswered
+				}
+				// Failure is reported, not fatal: t.Fatal off the test
+				// goroutine does not stop the run.
+				if err := f.eng.appendTxOutcome(ctx, tr); err != nil {
+					t.Errorf("%s from writer %d: %v", tr.state, w, err)
+				}
+			}
+		}(w)
+	}
+	close(start)
+	wg.Wait()
+
+	queued := map[string]bool{}
+	qrows, err := f.store.TxPending.OnCtx(ctx).Select()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range qrows {
+		queued[r.TxID] = true
+	}
+
+	for _, id := range ids {
+		rows := txLog(t, f, id)
+		terminals, settled := 0, false
+		var last *meta.TxOutcome
+		for _, r := range rows {
+			if meta.TxState(r.State).IsTerminal() {
+				terminals++
+				settled = true
+			}
+			if last == nil || r.Seq > last.Seq {
+				last = r
+			}
+		}
+		// The store guard: never two outcomes for one transaction.
+		if terminals > 1 {
+			t.Errorf("%s has %d terminals", id, terminals)
+		}
+		// MF2, under contention: the trail ends where it settled.
+		if settled && !meta.TxState(last.State).IsTerminal() {
+			t.Errorf("%s ends in %q after a terminal", id, last.State)
+		}
+		// The equivalence, both directions.
+		if settled && queued[id] {
+			t.Errorf("%s is settled and still queued — it would be probed forever", id)
+		}
+		if !settled && !queued[id] {
+			t.Errorf("%s is unresolved and NOT queued — nothing will ever come back for it", id)
+		}
+	}
+}
+
+// Atomicity, probed by making one half FAIL.
+//
+// The concurrency cell above cannot see this: it inspects the end state, so a
+// dequeue that runs in its own transaction — leaving a real window where the
+// terminal is durable and the entry is not yet gone — finishes looking
+// identical to an atomic one. Verified: moving the dequeue out of the
+// terminal's transaction leaves that cell GREEN.
+//
+// What distinguishes them is what happens when one half cannot complete. If
+// they share a transaction, a failing dequeue takes the terminal with it and
+// the transaction stays unresolved — recoverable. If they do not, the
+// terminal is durable while the queue still lists it, and it is probed
+// forever.
+//
+// The failure is induced without a production seam: the queue table is
+// dropped, so the DELETE inside the transaction fails for a real reason.
+func TestPendingQueue_AFailingDequeueRollsBackTheTerminal(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if err := f.eng.appendTxOutcome(ctx, txTransition{
+		txID: "tx_atomic2", state: meta.TxOpened, connectionID: f.connID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Conn().ExecContext(ctx, `DROP TABLE tx_pending`); err != nil {
+		t.Fatalf("dropping the queue table: %v", err)
+	}
+
+	err := f.eng.appendTxOutcome(ctx, txTransition{
+		txID: "tx_atomic2", state: meta.TxCommitted, connectionID: f.connID,
+	})
+	if err == nil {
+		t.Fatal("the terminal reported success while its dequeue could not have run")
+	}
+
+	// The decisive assertion: no terminal on disk. A terminal that survived
+	// its own failed transaction is an outcome recorded without the
+	// bookkeeping that makes it findable.
+	rows := txLog(t, f, "tx_atomic2")
+	for _, r := range rows {
+		if meta.TxState(r.State).IsTerminal() {
+			t.Fatalf("a terminal (%s) is durable even though the transaction that wrote it "+
+				"failed — the terminal and the dequeue are not atomic", r.State)
+		}
+	}
+	if len(rows) != 1 {
+		t.Errorf("log has %d rows, want just the opened one", len(rows))
 	}
 }
