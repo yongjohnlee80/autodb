@@ -15,6 +15,22 @@ const (
 	RoleReader = "reader"
 )
 
+// sortableSchema is schema with ORDER BY keys registered.
+//
+// Paging needs a stable order, and the DAO will only order by keys the schema
+// declares — so a table that is paged has to say how. Without it a LIMIT
+// returns some rows rather than the first ones, and a repeated pass can read
+// the same rows forever while others are never reached.
+func sortableSchema[R any, C ~string](conn dao.DataConn, table string, id C,
+	sorts map[Sort]string, fields map[C]dao.Field[R]) *dao.Schema[R, C, Sort, int64] {
+	return dao.New(conn,
+		dao.Table[R, C, Sort, int64](table),
+		dao.ID[R, C, Sort, int64](id),
+		dao.SortMap[R, C, Sort, int64](sorts),
+		dao.Fields[R, C, Sort, int64](fields),
+	)
+}
+
 // schema builds a meta-store entity schema: single table, int64 id, no joins.
 func schema[R any, C ~string](conn dao.DataConn, table string, id C, fields map[C]dao.Field[R]) *dao.Schema[R, C, Sort, int64] {
 	return dao.New(conn,
@@ -288,20 +304,25 @@ const (
 	HistTxID       HistoryField = "tx_id"
 )
 
+// HistByID orders history by insertion, so the repair sweep can page it.
+const HistByID Sort = "id"
+
 func newHistory(conn dao.DataConn) *dao.Schema[*HistoryEntry, HistoryField, Sort, int64] {
-	return schema(conn, "script_history", HistID, map[HistoryField]dao.Field[*HistoryEntry]{
-		HistID:         {Column: "id", Scan: func(r *HistoryEntry) any { return &r.ID }},
-		HistUserID:     {Column: "user_id", Scan: func(r *HistoryEntry) any { return &r.UserID }, Value: func(r *HistoryEntry) any { return r.UserID }},
-		HistConnID:     {Column: "connection_id", Scan: func(r *HistoryEntry) any { return &r.ConnectionID }, Value: func(r *HistoryEntry) any { return r.ConnectionID }},
-		HistIP:         {Column: "ip", Scan: func(r *HistoryEntry) any { return &r.IP }, Value: func(r *HistoryEntry) any { return r.IP }},
-		HistScript:     {Column: "script", Scan: func(r *HistoryEntry) any { return &r.Script }, Value: func(r *HistoryEntry) any { return r.Script }},
-		HistStartedAt:  {Column: "started_at", Scan: func(r *HistoryEntry) any { return &r.StartedAt }, Value: func(r *HistoryEntry) any { return r.StartedAt }},
-		HistDurationMS: {Column: "duration_ms", Scan: func(r *HistoryEntry) any { return &r.DurationMS }, Value: func(r *HistoryEntry) any { return r.DurationMS }},
-		HistRowCount:   {Column: "row_count", Scan: func(r *HistoryEntry) any { return &r.RowCount }, Value: func(r *HistoryEntry) any { return r.RowCount }},
-		HistStatus:     {Column: "status", Scan: func(r *HistoryEntry) any { return &r.Status }, Value: func(r *HistoryEntry) any { return r.Status }},
-		HistError:      {Column: "error", Scan: func(r *HistoryEntry) any { return &r.Error }, Value: func(r *HistoryEntry) any { return r.Error }},
-		HistTxID:       {Column: "tx_id", Scan: func(r *HistoryEntry) any { return &r.TxID }, Value: func(r *HistoryEntry) any { return r.TxID }},
-	})
+	return sortableSchema(conn, "script_history", HistID,
+		map[Sort]string{HistByID: "id"},
+		map[HistoryField]dao.Field[*HistoryEntry]{
+			HistID:         {Column: "id", Scan: func(r *HistoryEntry) any { return &r.ID }},
+			HistUserID:     {Column: "user_id", Scan: func(r *HistoryEntry) any { return &r.UserID }, Value: func(r *HistoryEntry) any { return r.UserID }},
+			HistConnID:     {Column: "connection_id", Scan: func(r *HistoryEntry) any { return &r.ConnectionID }, Value: func(r *HistoryEntry) any { return r.ConnectionID }},
+			HistIP:         {Column: "ip", Scan: func(r *HistoryEntry) any { return &r.IP }, Value: func(r *HistoryEntry) any { return r.IP }},
+			HistScript:     {Column: "script", Scan: func(r *HistoryEntry) any { return &r.Script }, Value: func(r *HistoryEntry) any { return r.Script }},
+			HistStartedAt:  {Column: "started_at", Scan: func(r *HistoryEntry) any { return &r.StartedAt }, Value: func(r *HistoryEntry) any { return r.StartedAt }},
+			HistDurationMS: {Column: "duration_ms", Scan: func(r *HistoryEntry) any { return &r.DurationMS }, Value: func(r *HistoryEntry) any { return r.DurationMS }},
+			HistRowCount:   {Column: "row_count", Scan: func(r *HistoryEntry) any { return &r.RowCount }, Value: func(r *HistoryEntry) any { return r.RowCount }},
+			HistStatus:     {Column: "status", Scan: func(r *HistoryEntry) any { return &r.Status }, Value: func(r *HistoryEntry) any { return r.Status }},
+			HistError:      {Column: "error", Scan: func(r *HistoryEntry) any { return &r.Error }, Value: func(r *HistoryEntry) any { return r.Error }},
+			HistTxID:       {Column: "tx_id", Scan: func(r *HistoryEntry) any { return &r.TxID }, Value: func(r *HistoryEntry) any { return r.TxID }},
+		})
 }
 
 // --- audit log --------------------------------------------------------------------

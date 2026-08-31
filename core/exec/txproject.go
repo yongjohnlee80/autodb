@@ -154,12 +154,36 @@ func (e *Engine) repairPendingHistory(ctx context.Context) {
 	if !e.history {
 		return
 	}
-	rows, err := e.store.History.OnCtx(ctx).
-		With(meta.HistStatus, StatusPendingCommit).Limit(maxReconcileBatch).Select()
+	// Resume where the last sweep stopped, for the same reason the
+	// reconciler does (PR #20 r2 MF2). A fixed first page is fatal here in
+	// exactly the same way: a screenful of legitimately in-flight pending
+	// rows sits at the front, this sweep correctly leaves them alone, and a
+	// genuinely stranded row behind them is never reached on any pass.
+	//
+	// The cursor is on history id, and it wraps on a short page so rows
+	// ahead of it come round again.
+	after := e.reconcile.cursor(repairCursorScope)
+	q := e.store.History.OnCtx(ctx).
+		With(meta.HistStatus, StatusPendingCommit).
+		OrderBy(dao.Asc(meta.HistByID))
+	if after > 0 {
+		q = q.WithPredicate(dao.Gt(string(meta.HistID), after))
+	}
+	rows, err := q.Limit(maxReconcileBatch).Select()
 	if err != nil {
 		e.logf("looking for stranded history rows: %v", err)
 		return
 	}
+	next := int64(0)
+	if len(rows) == maxReconcileBatch {
+		for _, r := range rows {
+			if r.ID > next {
+				next = r.ID
+			}
+		}
+	}
+	e.reconcile.setCursor(repairCursorScope, next)
+
 	seen := map[string]bool{}
 	for _, r := range rows {
 		if r.TxID == "" || seen[r.TxID] {
@@ -181,16 +205,22 @@ func (e *Engine) repairPendingHistory(ctx context.Context) {
 	}
 }
 
+// repairCursorScope keys the repair sweep's paging position in the shared
+// cursor map. Negative so it can never collide with a connection id, which
+// keys the reconciler's own scopes.
+const repairCursorScope int64 = -1
+
 // --- the pending queue ------------------------------------------------------
 
 // enqueuePendingTx records that this transaction has no terminal yet.
 //
 // A duplicate is success: the append path can retry after a seq collision,
 // and the entry from the first attempt is exactly what we would write.
-func (e *Engine) enqueuePendingTx(tx *dao.Transaction, txID string, connID int64) error {
+func (e *Engine) enqueuePendingTx(tx *dao.Transaction, txID string, connID, userID int64) error {
 	_, err := e.store.TxPending.On(tx).
 		Set(meta.TxPendTxID, txID).
 		Set(meta.TxPendConnID, connID).
+		Set(meta.TxPendUserID, userID).
 		Set(meta.TxPendCreatedAt, e.now().Unix()).
 		Insert()
 	if errors.Is(err, dao.ErrDuplicate) {

@@ -226,6 +226,32 @@ var migrations = []migration{
 				GROUP BY tx_id`,
 		},
 	},
+	// v8 gives the queue the columns a FAIR page needs (PR #20 r2).
+	//
+	// A LIMIT with no ordering and no cursor revisits the same page forever,
+	// so a resolvable entry sitting behind a screenful of live ones is never
+	// reached — starvation, not slowness. Ordering needs a stable key, and
+	// scoping the user-facing read before its limit needs the owner, which
+	// the queue did not carry.
+	{
+		Version: 8,
+		SQLite: []string{
+			`ALTER TABLE tx_pending ADD COLUMN user_id BIGINT NOT NULL DEFAULT 0`,
+			`UPDATE tx_pending SET user_id = COALESCE((
+				SELECT o.user_id FROM tx_outcomes o
+				WHERE o.tx_id = tx_pending.tx_id ORDER BY o.seq LIMIT 1), 0)`,
+			`CREATE INDEX idx_tx_pending_order ON tx_pending(created_at, id)`,
+			`CREATE INDEX idx_tx_pending_user ON tx_pending(user_id, created_at)`,
+		},
+		Postgres: []string{
+			`ALTER TABLE tx_pending ADD COLUMN user_id BIGINT NOT NULL DEFAULT 0`,
+			`UPDATE tx_pending SET user_id = COALESCE((
+				SELECT o.user_id FROM tx_outcomes o
+				WHERE o.tx_id = tx_pending.tx_id ORDER BY o.seq LIMIT 1), 0)`,
+			`CREATE INDEX idx_tx_pending_order ON tx_pending(created_at, id)`,
+			`CREATE INDEX idx_tx_pending_user ON tx_pending(user_id, created_at)`,
+		},
+	},
 }
 
 // runMigrations creates the ledger, checks the downgrade guard, and applies

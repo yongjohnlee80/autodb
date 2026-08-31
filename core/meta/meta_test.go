@@ -194,7 +194,9 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 	// next Open genuinely applies v7 against a populated log.
 	for _, stmt := range []string{
 		`DROP TABLE tx_pending`,
-		`DELETE FROM schema_migrations WHERE version = 7`,
+		// Everything from v7 on, not just v7: currentVersion is the MAX, so
+		// leaving a later row behind would skip the re-application entirely.
+		`DELETE FROM schema_migrations WHERE version >= 7`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
 			t.Fatalf("rolling back to v6 (%s): %v", stmt, err)
