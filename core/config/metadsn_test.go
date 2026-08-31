@@ -159,3 +159,67 @@ func TestLoad_RefusesAnInsecureMetaDSNThroughTheRealEntryPoint(t *testing.T) {
 		t.Errorf("a sqlite config was refused by the postgres transport check: %v", err)
 	}
 }
+
+// PR #27 r0: a DSN-level pool_max_conns must not walk past the floor.
+//
+// The bound used to be decided TWICE — validation read the TOML field while
+// the opener treated a DSN-level pool_max_conns as authoritative — so
+// `dsn = "...?pool_max_conns=1"` satisfied validation and then won at connect
+// time, producing exactly the one-connection pool the floor exists to prevent
+// and which the instance lease could pin whole.
+func TestMetaPool_ADSNLevelBoundCannotBypassTheFloor(t *testing.T) {
+	t.Parallel()
+
+	safe := "sslmode=verify-full&sslrootcert=/c"
+	insecureDSN := "postgres://x/db?" + safe + "&pool_max_conns=1"
+
+	if _, err := Load(write(t, "[meta]\nengine = \"postgres\"\ndsn = \""+insecureDSN+"\"\n")); err == nil {
+		t.Fatal("a DSN-level pool_max_conns=1 was accepted; the floor only guards the TOML " +
+			"field, so the DSN walks past it and the instance lease can pin the whole pool")
+	}
+
+	// The refusal must name WHERE the bound came from, or an operator who set
+	// it in the DSN goes looking at the TOML field they never touched.
+	_, err := Load(write(t, "[meta]\nengine = \"postgres\"\ndsn = \""+insecureDSN+"\"\n"))
+	if !strings.Contains(err.Error(), "dsn") {
+		t.Errorf("the refusal does not say the bound came from the DSN:\n%v", err)
+	}
+
+	// A DSN bound at or above the floor is fine.
+	if _, err := Load(write(t, "[meta]\nengine = \"postgres\"\ndsn = \"postgres://x/db?"+
+		safe+"&pool_max_conns=4\"\n")); err != nil {
+		t.Errorf("a DSN pool_max_conns=4 was refused: %v", err)
+	}
+}
+
+// One function decides the effective bound, and precedence is explicit.
+//
+// The bug was two independent decisions about one value; this pins the single
+// decision so a future caller cannot reintroduce a second one silently.
+func TestMetaPool_EffectiveBoundAndItsSource(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		meta   Meta
+		want   int
+		source string
+	}{
+		{"explicit TOML wins over the DSN",
+			Meta{PoolMaxConns: 6, DSN: "postgres://x/db?pool_max_conns=3"}, 6, "[meta] pool_max_conns"},
+		{"the DSN is honoured when TOML is unset",
+			Meta{DSN: "postgres://x/db?pool_max_conns=3"}, 3, "dsn"},
+		{"keyword-form DSN is read too",
+			Meta{DSN: "host=h pool_max_conns=5"}, 5, "dsn"},
+		{"neither set takes the default",
+			Meta{DSN: "postgres://x/db"}, DefaultMetaPoolMaxConns, "default"},
+	} {
+		got, src := tc.meta.EffectivePoolMaxConns()
+		if got != tc.want {
+			t.Errorf("%s: bound = %d, want %d", tc.name, got, tc.want)
+		}
+		if !strings.Contains(src, tc.source) {
+			t.Errorf("%s: source = %q, want it to mention %q", tc.name, src, tc.source)
+		}
+	}
+}
