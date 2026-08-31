@@ -1,6 +1,7 @@
 package frontdoor
 
 import (
+	"bufio"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -77,7 +78,12 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 	// The pre-auth backend reads the SSLRequest from the PLAINTEXT
 	// connection. It is bounded before it reads anything, so a peer's first
 	// act cannot be to name a length we would then allocate for.
-	plain := pgproto3.NewBackend(raw, raw)
+	// A buffered reader so the first bytes can be INSPECTED before being
+	// consumed. Direct TLS has to be identified by what it actually is,
+	// which is the fix for having previously identified it by a symptom it
+	// shares with ordinary oversize frames.
+	br := bufio.NewReader(raw)
+	plain := pgproto3.NewBackend(br, raw)
 	plain.SetMaxBodyLen(PreAuthMaxBodyLen)
 
 	// S0 is a LOOP, not a single read.
@@ -97,6 +103,21 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 		if err := raw.SetDeadline(now().Add(TLSHandshakeDeadline)); err != nil {
 			return nil, startupOutcome{}, err
 		}
+		// Direct TLS is recognised by its ClientHello SIGNATURE, before any
+		// parse is attempted (matrix row 2.1a).
+		//
+		// The first version inferred it from pgproto3's "invalid length"
+		// error, which a TLS ClientHello does produce — and so does an
+		// ordinary length-prefixed frame that exceeds the pre-auth cap. So a
+		// client that simply sent something too big was audited as a
+		// PostgreSQL 17 direct-TLS attempt, sending an operator to look for
+		// a client that may not exist on their network. Meanwhile
+		// reasonPreAuthOversize sat unused in the source, which is the same
+		// tell as the unapplied parameter policy last round: a named reason
+		// nobody emits is a case nobody handles.
+		if head, perr := br.Peek(2); perr == nil && isTLSClientHello(head) {
+			return nil, startupOutcome{}, tlsFailure("direct-tls-unsupported")
+		}
 		first, err := plain.ReceiveStartupMessage()
 		if err != nil {
 			// Row 2.1a: PostgreSQL 17's direct-TLS negotiation opens with a
@@ -111,7 +132,7 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 			// count credential attacks. It also means no denial FRAME is
 			// written — a client speaking TLS cannot read a PostgreSQL
 			// error, so sending one is noise on the wire and a lie in the log.
-			return nil, startupOutcome{}, tlsFailure(directTLSReason(err))
+			return nil, startupOutcome{}, tlsFailure(s0FailureReason(err))
 		}
 
 		switch msg := first.(type) {
@@ -207,16 +228,6 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 	if derr := sm.Decode(raw2); derr != nil {
 		return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
 	}
-	// §3.1: the accepted set is CLOSED, and it is checked HERE — before the
-	// connection can fall through to any later denial. The first version
-	// decoded the parameters and returned them unvalidated, so a startup
-	// carrying `search_path` was denied for want of a credential store
-	// rather than for the parameter, and reasonStartupParamRefus sat unused
-	// in the source — a dead constant is a policy nobody is applying.
-	if refused, ok := checkStartupParams(sm.Parameters); !ok {
-		_ = refused // named in the audit by the caller; never on the wire
-		return secure, startupOutcome{Denied: reasonStartupParamRefus, RefusedParam: refused}, nil
-	}
 	out := startupOutcome{Params: sm.Parameters}
 
 	// A `_pq_.*` parameter is a protocol EXTENSION the client is asking for.
@@ -237,6 +248,24 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 			return secure, startupOutcome{}, ferr
 		}
 		out.Negotiated = true
+	}
+
+	// §3.1: the accepted set is CLOSED, and it is checked AFTER the protocol
+	// answer is sent. NegotiateProtocolVersion answers a question about the
+	// PROTOCOL — a client that asked for 3.2 is owed "3.0, and here is what I
+	// did not understand" whether or not its parameters then fail policy.
+	// Withholding it would leave a client guessing about the protocol
+	// because of an unrelated parameter.
+	//
+	// The check is still BEFORE the
+	// connection can fall through to any later denial. The first version
+	// decoded the parameters and returned them unvalidated, so a startup
+	// carrying `search_path` was denied for want of a credential store
+	// rather than for the parameter, and reasonStartupParamRefus sat unused
+	// in the source — a dead constant is a policy nobody is applying.
+	if refused, ok := checkStartupParams(sm.Parameters); !ok {
+		_ = refused // named in the audit by the caller; never on the wire
+		return secure, startupOutcome{Denied: reasonStartupParamRefus, RefusedParam: refused, Negotiated: out.Negotiated}, nil
 	}
 	return secure, out, nil
 }
@@ -317,26 +346,33 @@ func (e tlsFailErr) Error() string { return "frontdoor: " + e.reason }
 
 func tlsFailure(reason string) error { return tlsFailErr{reason: reason} }
 
-// directTLSReason distinguishes the S0 parse failures, which the first
-// version collapsed into "this must be direct TLS".
+// s0FailureReason names an S0 read failure that is NOT direct TLS — direct
+// TLS is identified by signature before this is reached.
 //
-// That conflation was wrong in both directions: a malformed frame and an
-// oversize one were both audited as direct-TLS-unsupported, which sends an
-// operator looking for a PostgreSQL 17 client that may not exist, and a real
-// direct-TLS attempt was indistinguishable from line noise. pgproto3 reports
-// the length problem separately from the code problem, so the distinction is
-// available and only had to be kept.
-func directTLSReason(err error) string {
+// The distinction that matters here is oversize versus unreadable. An
+// oversized length-prefixed frame is a client sending something too big, and
+// it has its own reason so an operator reading the trail is not sent hunting
+// a protocol negotiation that never happened.
+func s0FailureReason(err error) string {
 	msg := err.Error()
 	switch {
 	case strings.Contains(msg, "invalid length"):
-		// A TLS ClientHello's first bytes read as an implausible length,
-		// which is the ordinary signature of direct TLS reaching a listener
-		// that does not offer it.
-		return "direct-tls-unsupported"
+		return reasonPreAuthOversize.String()
 	case strings.Contains(msg, "unknown startup message code"):
 		return "startup-code-unknown"
 	default:
 		return "startup-unreadable"
 	}
+}
+
+// isTLSClientHello reports whether these bytes open a TLS record.
+//
+// 0x16 is the handshake content type and 0x03 the legacy record-version
+// major that every TLS version still puts on the wire, TLS 1.3 included. Two
+// bytes is enough to tell a TLS record from a PostgreSQL startup packet,
+// whose first four bytes are a length: a startup packet beginning 0x16 0x03
+// would claim a length of roughly 369 million, which the pre-auth cap
+// refuses anyway.
+func isTLSClientHello(head []byte) bool {
+	return len(head) >= 2 && head[0] == 0x16 && head[1] == 0x03
 }

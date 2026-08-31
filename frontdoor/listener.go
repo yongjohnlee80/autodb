@@ -46,6 +46,15 @@ type Event struct {
 	Kind   string // fd.conn_open, fd.tls_fail, fd.auth_denied, fd.conn_close …
 	Reason string // the INTERNAL reason; never sent to the peer
 	Peer   string
+	// Detail carries the specific INTERNAL particular — the refused startup
+	// parameter, for instance. Like Reason it never reaches the wire.
+	//
+	// It exists because the previous version populated a RefusedParam field,
+	// commented that it was for the audit row, and then dropped it on the
+	// floor: the listener emitted Kind, Reason and Peer only. A comment
+	// describing a contract the code does not keep is worse than no comment,
+	// because a reader stops looking.
+	Detail string
 }
 
 // Options configure a listener.
@@ -182,7 +191,7 @@ func (l *Listener) handle(raw net.Conn) {
 	if derr := sendDenial(w, reason); derr != nil {
 		l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 	}
-	l.onEvent(Event{Kind: "fd.auth_denied", Reason: reason.String(), Peer: peer})
+	l.onEvent(Event{Kind: "fd.auth_denied", Reason: reason.String(), Peer: peer, Detail: out.RefusedParam})
 }
 
 // EnabledFrom reports whether the configuration asks for a listener, and is
