@@ -221,6 +221,46 @@ than a runbook.
 
 ## Migrating from sqlite
 
-`meta.MigrateToPostgres` exists and is one-way — **postgres → sqlite is not
-supported**. The CLI wrapper is ADR-0079 P2 and is not built yet; until it is,
-migration is a library call, not an operator action.
+```bash
+# rehearse: reports what would be copied, writes nothing
+autodb --migrate-to-postgres --dry-run \
+  --from ~/.local/share/autodb/meta.db \
+  --to "postgres://autodb@db.internal/autodb?sslmode=verify-full&sslrootcert=/etc/ssl/certs/db-ca.crt"
+
+# the real thing
+autodb --migrate-to-postgres --from ... --to ...
+```
+
+**One-way. `postgres → sqlite` is not supported** and is refused by name if you
+pass a postgres DSN to `--from` — postgres types, sequences and constraints do
+not round-trip into sqlite without silently losing fidelity.
+
+**Stop the daemon first, on both sides.** The command proves no daemon is
+serving either store *before* it touches anything, by taking the same instance
+lease the daemon takes. If either is held it refuses and **nothing is
+modified** — not even the destination's schema. That ordering is deliberate:
+`meta.Open` runs the migration runner before it returns, so a command built on
+it would have changed the destination's schema before it was in a position to
+discover it should not have.
+
+What it does, in order:
+
+1. open the source **without migrating**, and take its lease;
+2. open the destination **without migrating**, and take its lease;
+3. only now bring both schemas up to date — the single mutation point;
+4. refuse a destination that already holds rows;
+5. copy in FK order, preserving ids and advancing sequences;
+6. re-read the **destination** and print a per-table source-vs-destination
+   comparison.
+
+Step 6 is a second opinion on purpose. The copier verifies its own counts, but
+"it said it worked" and "the rows are there" are different claims, and the
+second is the one worth having before you point production at the result.
+
+`store_meta` legitimately gains exactly one row — the `migrated_from` stamp —
+and the command asserts that stamp is present rather than excluding the table
+from verification.
+
+The destination DSN is checked against the same transport rule as `[meta] dsn`;
+`--allow-insecure-dsn` is the command-line equivalent of
+`allow_insecure_dsn`.

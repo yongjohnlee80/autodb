@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
+
+	"github.com/yongjohnlee80/autodb/core/config"
 )
 
 // ErrMigrate wraps every engine-migration precondition failure; test with
@@ -191,25 +193,38 @@ func copyAll[R any, C ~string, ID any](ctx context.Context,
 }
 
 // ensureEmpty refuses a destination holding any entity rows.
-func ensureEmpty(ctx context.Context, dst *Store) error {
-	counts := []struct {
-		name  string
-		count func() (uint64, error)
-	}{
-		{"users", dst.Users.OnCtx(ctx).Count},
-		{"connections", dst.Connections.OnCtx(ctx).Count},
-		{"workspaces", dst.Workspaces.OnCtx(ctx).Count},
-		{"workspace_connections", dst.WorkspaceConns.OnCtx(ctx).Count},
-		{"grants", dst.Grants.OnCtx(ctx).Count},
-		{"sessions", dst.Sessions.OnCtx(ctx).Count},
-		{"script_history", dst.History.OnCtx(ctx).Count},
-		{"audit_log", dst.Audit.OnCtx(ctx).Count},
-		{"tx_outcomes", dst.TxOutcomes.OnCtx(ctx).Count},
-		{"tx_pending", dst.TxPending.OnCtx(ctx).Count},
-		{"ip_allowlist", dst.AllowedIPs.OnCtx(ctx).Count},
-		{"store_meta", dst.KV.OnCtx(ctx).Count},
+// countableTable pairs a table's name with its row count.
+type countableTable struct {
+	name  string
+	count func() (uint64, error)
+}
+
+// countableTables is the ONE list of migrated tables.
+//
+// Shared by the emptiness preflight, the post-copy verification and the CLI's
+// report. Three copies of this list would be three opinions about what
+// "everything" means, and a table added to only two of them is exactly how a
+// migration silently drops one — which has already happened twice on this
+// branch's history (tx_id columns, then the tx_pending queue).
+func countableTables(ctx context.Context, s *Store) []countableTable {
+	return []countableTable{
+		{"users", s.Users.OnCtx(ctx).Count},
+		{"connections", s.Connections.OnCtx(ctx).Count},
+		{"workspaces", s.Workspaces.OnCtx(ctx).Count},
+		{"workspace_connections", s.WorkspaceConns.OnCtx(ctx).Count},
+		{"grants", s.Grants.OnCtx(ctx).Count},
+		{"sessions", s.Sessions.OnCtx(ctx).Count},
+		{"script_history", s.History.OnCtx(ctx).Count},
+		{"audit_log", s.Audit.OnCtx(ctx).Count},
+		{"tx_outcomes", s.TxOutcomes.OnCtx(ctx).Count},
+		{"tx_pending", s.TxPending.OnCtx(ctx).Count},
+		{"ip_allowlist", s.AllowedIPs.OnCtx(ctx).Count},
+		{"store_meta", s.KV.OnCtx(ctx).Count},
 	}
-	for _, c := range counts {
+}
+
+func ensureEmpty(ctx context.Context, dst *Store) error {
+	for _, c := range countableTables(ctx, dst) {
 		n, err := c.count()
 		if err != nil {
 			return fmt.Errorf("meta: checking %s emptiness: %w", c.name, err)
@@ -268,4 +283,35 @@ func fixSequences(ctx context.Context, dst *Store) error {
 		}
 	}
 	return nil
+}
+
+// TableRows is one table's row count, for the migration CLI's report.
+type TableRows struct {
+	Table string
+	Rows  int64
+}
+
+// TableCounts reports every migrated table's row count, in FK order.
+//
+// Shares its table list with verifyCounts on purpose: a report that counted a
+// different set from the one the copy verifies would be a second opinion about
+// what "everything" means, and the two would drift.
+func TableCounts(ctx context.Context, s *Store) ([]TableRows, error) {
+	out := make([]TableRows, 0, len(countableTables(ctx, s)))
+	for _, t := range countableTables(ctx, s) {
+		n, err := t.count()
+		if err != nil {
+			return nil, fmt.Errorf("meta: counting %s: %w", t.name, err)
+		}
+		out = append(out, TableRows{Table: t.name, Rows: int64(n)})
+	}
+	return out, nil
+}
+
+// Migrate brings an already-open store's schema up to date.
+//
+// Exposed for the migration CLI, which must open WITHOUT migrating (to take
+// the lease first) and then migrate once it has proven no daemon is serving.
+func Migrate(ctx context.Context, s *Store, mcfg config.Meta) error {
+	return runMigrations(ctx, s.conn, mcfg.Engine)
 }

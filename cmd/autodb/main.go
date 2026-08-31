@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -56,9 +57,20 @@ func main() {
 	// reports it instead ([[shared-resolver-single-source-of-truth]]).
 	printEndpoint := flag.Bool("print-endpoint", false,
 		"print the resolved endpoint as <network>\\t<address> and exit")
+	// Meta-store migration (ADR-0079 §5). One-way by design: sqlite to
+	// postgres. The reverse is refused by name rather than left to fail
+	// obscurely.
+	migrateToPG := flag.Bool("migrate-to-postgres", false,
+		"copy a sqlite meta store into an empty postgres one (ONE-WAY) and exit")
+	migrateFrom := flag.String("from", "", "--migrate-to-postgres: the sqlite meta-store path")
+	migrateTo := flag.String("to", "", "--migrate-to-postgres: the destination postgres DSN")
+	migrateDry := flag.Bool("dry-run", false,
+		"--migrate-to-postgres: report what would be copied and write nothing")
+	migrateInsecure := flag.Bool("allow-insecure-dsn", false,
+		"--migrate-to-postgres: permit a destination DSN weaker than sslmode=verify-full")
 	flag.Parse()
 
-	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *port); err != nil {
+	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *port); err != nil {
 		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 		flag.Usage()
 		os.Exit(2)
@@ -70,6 +82,14 @@ func main() {
 	}
 
 	switch {
+	case *migrateToPG:
+		if err := runMigrateToPostgres(context.Background(), os.Stdout, migrateOpts{
+			from: *migrateFrom, to: *migrateTo, dryRun: *migrateDry,
+			allowInsecure: *migrateInsecure,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+			os.Exit(1)
+		}
 	case *printEndpoint:
 		if err := runPrintEndpoint(*configPath); err != nil {
 			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
@@ -111,7 +131,7 @@ const defaultWebPort = 7010
 // user explicitly passing a flag that will be ignored — would slip through
 // (lector r1 #5 on ADR-0061). flag.CommandLine.Visit reports only what was
 // actually set.
-func checkFlags(serve, ui, webUI, printEndpoint bool, port int) error {
+func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG bool, port int) error {
 	portSet := false
 	flag.CommandLine.Visit(func(f *flag.Flag) {
 		if f.Name == "port" {
@@ -121,6 +141,21 @@ func checkFlags(serve, ui, webUI, printEndpoint bool, port int) error {
 	if portSet && !webUI {
 		return errors.New("--port applies to --web-ui only")
 	}
+	// The migration flags belong to their mode, for the same reason --port
+	// belongs to --web-ui: a flag that is silently ignored outside its mode
+	// reads as accepted.
+	migFlags := []string{"from", "to", "dry-run", "allow-insecure-dsn"}
+	var stray []string
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		for _, m := range migFlags {
+			if f.Name == m && !migrateToPG {
+				stray = append(stray, "--"+m)
+			}
+		}
+	})
+	if len(stray) > 0 {
+		return fmt.Errorf("%s applies to --migrate-to-postgres only", strings.Join(stray, ", "))
+	}
 	// EXACTLY ONE mode. The dispatch switch tries printEndpoint, serve, ui, web-ui
 	// in that order, so any pairing silently runs whichever comes first — and
 	// --web-ui --print-endpoint printed the endpoint and never served the UI
@@ -128,14 +163,17 @@ func checkFlags(serve, ui, webUI, printEndpoint bool, port int) error {
 	// counted like the others; --version is a query handled before the switch and
 	// is deliberately left to short-circuit.
 	modes := 0
-	for _, on := range []bool{serve, ui, webUI, printEndpoint} {
+	// --migrate-to-postgres is counted too, and it matters more than the
+	// others: it is FIRST in the dispatch switch, so an unnoticed
+	// `--migrate-to-postgres --serve` would migrate and never serve.
+	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return errors.New("--serve, --ui, --web-ui, and --print-endpoint are " +
-			"mutually exclusive; pass exactly one")
+		return errors.New("--serve, --ui, --web-ui, --print-endpoint and " +
+			"--migrate-to-postgres are mutually exclusive; pass exactly one")
 	}
 	if webUI {
 		if port <= 0 || port > 65535 {

@@ -166,3 +166,12 @@ func checkMetaPoolFloor(m Meta) error {
 	}
 	return nil
 }
+
+// CheckDSNTransport applies the transport rule to this Meta as configured.
+//
+// Exported so the migration CLI can apply the SAME rule to a DSN typed on the
+// command line. A check that only guards the config file is a check that is
+// bypassed by the first tool that takes a DSN as an argument.
+func (m Meta) CheckDSNTransport() error {
+	return checkMetaDSNTransport(m.DSN, m.AllowInsecureDSN)
+}
