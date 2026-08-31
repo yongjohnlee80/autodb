@@ -13,6 +13,74 @@ import (
 
 // Monthly partitioning — ADR-0079 §2 / P3, and its four id-integrity gates.
 
+// scratchDSN creates an EMPTY scratch database and returns its DSN, without
+// opening or migrating it.
+//
+// Split out of freshPGStore so a test can control WHICH migrations run — the
+// upgrade cell has to stop at v10, and freshPGStore's Open applies everything.
+func scratchDSN(t *testing.T) string {
+	t.Helper()
+	base := os.Getenv("TEST_PGURL")
+	if base == "" {
+		t.Skip("TEST_PGURL not set")
+	}
+	ctx := context.Background()
+	admin, err := Open(ctx, config.Meta{Engine: "postgres", DSN: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	name := fmt.Sprintf("autodb_p3_%d", time.Now().UnixNano())
+	if _, err := admin.Conn().ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Skipf("cannot create a scratch database: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Conn().ExecContext(context.Background(),
+			"DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+	})
+	i := strings.Index(base, "?")
+	head, tail := base, ""
+	if i >= 0 {
+		head, tail = base[:i], base[i:]
+	}
+	slash := strings.LastIndex(head, "/")
+	return head[:slash+1] + name + tail
+}
+
+// openAtVersion opens a store with the migration ledger truncated after
+// version v, so a test can build a store in a PAST schema and then let the
+// real runner upgrade it.
+//
+// It mutates the package-level migration list for the duration, so cells using
+// it must not run in parallel with anything that migrates. That is the price
+// of testing an upgrade honestly; the alternative is a cell that opens at the
+// current version and calls itself an upgrade test, which is what this
+// replaced.
+func openAtVersion(t *testing.T, dsn string, v int) *Store {
+	t.Helper()
+	full := migrations
+	capped := make([]migration, 0, len(full))
+	for _, m := range full {
+		if m.Version <= v {
+			capped = append(capped, m)
+		}
+	}
+	if len(capped) == len(full) {
+		t.Fatalf("capping at v%d kept every migration — the ledger no longer has a "+
+			"version above %d, so this cell is not testing an upgrade", v, v)
+	}
+	migrations = capped
+	defer func() { migrations = full }()
+
+	s, err := Open(context.Background(), config.Meta{
+		Engine: "postgres", DSN: dsn, AllowInsecureDSN: true})
+	if err != nil {
+		t.Fatalf("opening the store at v%d: %v", v, err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
 func freshPGStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	base := os.Getenv("TEST_PGURL")
@@ -293,20 +361,29 @@ func seedUserConn(t *testing.T, s *Store) {
 	}
 }
 
-// THE UPGRADE PATH: an existing store with rows converts, and keeps them.
+// THE UPGRADE PATH: a store that ALREADY HAS ROWS at v10 converts, and keeps
+// them.
 //
 // A fresh store partitions trivially — there is nothing to carry across. The
-// case that can lose data is a store that already has history, because the
+// case that can lose data is a store with existing history, because the
 // conversion is rename-create-copy-drop and the partitions needed depend on
 // the months the existing rows fall in. Static DDL cannot express that, which
 // is the whole reason v11 has a computed step.
+//
+// The previous version of this test did NOT do that. It opened through
+// freshPGStore, which applies every migration including v11, then inserted
+// "old" rows into an already-partitioned table and reopened — proving only
+// that v11 tolerates being run once (lector's PR #32 r0 note). It was the
+// riskiest path in the phase and the one cell that claimed to cover it, which
+// is the worst combination. This one stops the runner at v10 so the rows exist
+// BEFORE the conversion sees them.
 func TestPartitioning_UpgradeCarriesExistingRowsAcross(t *testing.T) {
-	s, dsn := freshPGStore(t)
+	dsn := scratchDSN(t)
 	ctx := context.Background()
-	seedUserConn(t, s)
 
-	// Rows in months that are NOT the current one, so the conversion has to
-	// discover them rather than rely on the current/next it always makes.
+	// --- v10: the pre-partitioning schema, with history in it ---------------
+	s := openAtVersion(t, dsn, 10)
+	seedUserConn(t, s)
 	old1 := time.Date(2024, 3, 9, 0, 0, 0, 0, time.UTC)
 	old2 := time.Date(2024, 11, 20, 0, 0, 0, 0, time.UTC)
 	for i, when := range []time.Time{old1, old2} {
@@ -317,27 +394,48 @@ func TestPartitioning_UpgradeCarriesExistingRowsAcross(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// It really is unpartitioned at this point, or the test proves nothing.
+	if parts, err := s.PartitionNames(ctx, "audit_log"); err != nil {
+		t.Fatal(err)
+	} else if len(parts) != 0 {
+		t.Fatalf("audit_log was already partitioned at v10 (%v) — the runner was not "+
+			"actually stopped before v11, so this cell does not test the upgrade", parts)
+	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	// Re-open: already at v11, so this proves the rows SURVIVED the migration
-	// that ran when the store was first created and stay readable.
+	// --- v11: the conversion runs over those rows --------------------------
 	s2, err := Open(ctx, config.Meta{Engine: "postgres", DSN: dsn, AllowInsecureDSN: true})
 	if err != nil {
-		t.Fatalf("reopening after conversion: %v", err)
+		t.Fatalf("the v10 -> v11 conversion failed: %v", err)
 	}
 	defer s2.Close()
 
 	for i := range []int{0, 1} {
 		got, err := s2.Audit.OnCtx(ctx).With(AuditID, int64(500+i)).Get()
 		if err != nil {
-			t.Fatalf("audit row %d did not survive: %v", 500+i, err)
+			t.Fatalf("audit row %d did not survive the conversion: %v", 500+i, err)
 		}
 		if got.Detail != fmt.Sprintf("d%d", i) {
 			t.Errorf("row %d came back as %+v", 500+i, got)
 		}
 	}
+
+	// And the months those rows fall in got EXPLICIT partitions — the part
+	// static DDL cannot express. Without it they would sit in DEFAULT, where
+	// they can never be detached for retention.
+	parts, err := s2.PartitionNames(ctx, "audit_log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"audit_log_p2024_03", "audit_log_p2024_11"} {
+		if !contains(parts, want) {
+			t.Errorf("%s is missing from %v — the conversion did not discover the months "+
+				"its existing rows fall in, so they are stranded in DEFAULT", want, parts)
+		}
+	}
+
 	// Rows written into months with no explicit partition land in DEFAULT,
 	// which must still ACCEPT them — an audit write that fails is worse than
 	// one in the wrong child table.
@@ -348,4 +446,101 @@ func TestPartitioning_UpgradeCarriesExistingRowsAcross(t *testing.T) {
 		t.Fatalf("a row outside every explicit month was REFUSED; the DEFAULT partition is "+
 			"the safety net that keeps auditing from failing: %v", err)
 	}
+}
+
+// A DEFAULT partition is only a safety net if the roll can RECOVER from it.
+//
+// Postgres refuses to create a partition whose range overlaps rows already in
+// the default partition. So before adoption, one missed roll was permanent:
+// the month could never be created, writes kept landing in DEFAULT, the daily
+// roll logged the same error forever, and retention could never detach the
+// month because its rows were not in it (lector's PR #32 r0 MF2, reproduced
+// as: `updated partition constraint for default partition "audit_log_pdefault"
+// would be violated by some row`).
+func TestPartitioning_RollAdoptsRowsStrandedInDefault(t *testing.T) {
+	s, _ := freshPGStore(t)
+	ctx := context.Background()
+	seedUserConn(t, s)
+
+	// A month with no partition: far enough out that no roll has made it.
+	stranded := time.Date(2099, 1, 15, 0, 0, 0, 0, time.UTC)
+	if _, err := s.Audit.OnCtx(ctx).
+		Set(AuditID, int64(900)).Set(AuditUserID, int64(1)).Set(AuditIP, "ip").
+		Set(AuditAction, "stranded").Set(AuditDetail, "d").
+		Set(AuditCreatedAt, stranded.Unix()).Set(AuditTxID, "").Insert(); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(mustPartitions(t, s, "audit_log"), "audit_log_pdefault") {
+		t.Fatal("no default partition exists, so this cell cannot strand a row")
+	}
+
+	// THE ROLL FOR THAT MONTH. Before adoption this failed outright.
+	if err := s.RollPartitions(ctx, stranded); err != nil {
+		t.Fatalf("the roll could not create a month whose rows were already in DEFAULT — "+
+			"one missed roll is now permanent: %v", err)
+	}
+	if !contains(mustPartitions(t, s, "audit_log"), "audit_log_p2099_01") {
+		t.Fatalf("audit_log_p2099_01 was not created: %v", mustPartitions(t, s, "audit_log"))
+	}
+
+	// The row is still readable, and it is in the MONTH partition now, not in
+	// DEFAULT — otherwise retention still cannot detach that month.
+	got, err := s.Audit.OnCtx(ctx).With(AuditID, int64(900)).Get()
+	if err != nil || got.Action != "stranded" {
+		t.Fatalf("the stranded row did not survive adoption: %+v %v", got, err)
+	}
+	var left int64
+	rows, err := s.conn.QueryContext(ctx, `SELECT count(*) FROM audit_log_pdefault`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows.Next() {
+		_ = rows.Scan(&left)
+	}
+	_ = rows.Close()
+	if left != 0 {
+		t.Errorf("%d row(s) remain in DEFAULT after adoption — they were copied rather "+
+			"than moved, so the month partition and the default both hold them", left)
+	}
+}
+
+// Month stepping must start from the first of the month.
+//
+// AddDate normalises overflow: 31 January plus one month is 3 MARCH. A
+// look-ahead loop stepping from an unnormalised clock therefore SKIPS February
+// on the 29th, 30th and 31st of January, creating no partition for it at all.
+func TestPartitioning_MonthStepsDoNotSkipShortMonths(t *testing.T) {
+	t.Parallel()
+	jan31 := time.Date(2027, 1, 31, 12, 0, 0, 0, time.UTC)
+	base := monthStart(jan31)
+	var got []string
+	for i := 0; i <= partitionLookAhead; i++ {
+		got = append(got, partitionName("audit_log", base.AddDate(0, i, 0)))
+	}
+	for _, want := range []string{
+		"audit_log_p2027_01", "audit_log_p2027_02", "audit_log_p2027_03", "audit_log_p2027_04",
+	} {
+		if !contains(got, want) {
+			t.Errorf("%s is missing from %v — a roll on the 31st skips a month entirely, "+
+				"and every row for it lands in DEFAULT", want, got)
+		}
+	}
+}
+
+func contains(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func mustPartitions(t *testing.T, s *Store, table string) []string {
+	t.Helper()
+	parts, err := s.PartitionNames(context.Background(), table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return parts
 }

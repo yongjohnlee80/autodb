@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -148,7 +149,10 @@ func startedEngine(t *testing.T, cfg config.Config, lost <-chan struct{}) (*core
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	eng, serveCtx, _, stop := startEngine(t.Context(), cfg, store, svc, lost, func(string) {})
+	eng, serveCtx, _, stop, err := startEngine(t.Context(), cfg, store, svc, lost, func(string) {})
+	if err != nil {
+		t.Fatalf("startEngine: %v", err)
+	}
 	t.Cleanup(func() { stop(); _ = eng.Close() })
 	return eng, serveCtx, store, svc, tok
 }
@@ -352,51 +356,156 @@ func TestStartEngine_LosingTheLeaseStopsTheServeContext(t *testing.T) {
 
 // config -> daemon -> partitions actually rolled.
 //
-// The same MF2 reasoning as the janitor and reconciler cells: RollPartitions
-// is exercised directly in core/meta, so deleting the production call would
-// leave those green while a long-running daemon silently wrote every audit row
-// into the DEFAULT partition. This goes through startEngine's caller path and
-// observes the EFFECT.
+// THIS CELL MUST CALL startEngine. The version it replaces did not: it opened a
+// store and called store.RollPartitions directly, so disabling BOTH production
+// roll calls inside startEngine left it green (lector's PR #32 r0 note). That
+// is precisely the failure the wiring cells exist to catch, in the cell written
+// to catch it — the unit was already covered in core/meta, and what was missing
+// was proof that anything in production calls it.
 //
-// It also happens to be the fourth time in this arc I have had to add a
-// wiring cell after testing only the unit, so it is written first here.
+// So the current month's partition is DROPPED first, and the assertion is that
+// starting the daemon puts it back.
 func TestStartEngine_RollsPartitionsAtStartup(t *testing.T) {
-	t.Parallel()
 	if os.Getenv("TEST_PGURL") == "" {
 		t.Skip("TEST_PGURL not set; partitioning is postgres-only")
 	}
 	ctx := t.Context()
+	store, dsn := pgScratchStore(t)
+	_ = dsn
 
-	store, err := meta.Open(ctx, config.Meta{
-		Engine: "postgres", DSN: os.Getenv("TEST_PGURL"), AllowInsecureDSN: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	current := "audit_log_p" + now.Format("2006_01")
 
-	// Whatever the migration created, the roll must (re)assert the current
-	// and next month without failing.
-	if err := store.RollPartitions(ctx, time.Now()); err != nil {
-		t.Fatalf("the startup roll failed: %v", err)
+	// Remove it, so its presence afterwards can only come from the roll.
+	if _, err := store.Conn().ExecContext(ctx, "DROP TABLE IF EXISTS "+current); err != nil {
+		t.Fatalf("dropping %s to set up the test: %v", current, err)
 	}
 	parts, err := store.PartitionNames(ctx, "audit_log")
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
-	for _, want := range []string{
-		"audit_log_p" + now.Format("2006_01"),
-		"audit_log_p" + now.AddDate(0, 1, 0).Format("2006_01"),
-	} {
-		found := false
-		for _, p := range parts {
-			if p == want {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("%s is missing from %v — a daemon crossing the month boundary would "+
-				"write into DEFAULT, which succeeds silently", want, parts)
+	for _, p := range parts {
+		if p == current {
+			t.Fatalf("%s is still present after the drop; the cell cannot prove anything", current)
 		}
 	}
+
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	if _, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", "127.0.0.1"); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// THE PRODUCTION PATH.
+	eng, _, _, stop, err := startEngine(ctx, execConfig(), store, svc,
+		make(chan struct{}), func(string) {})
+	if err != nil {
+		t.Fatalf("startEngine refused to start: %v", err)
+	}
+	t.Cleanup(func() { stop(); _ = eng.Close() })
+
+	parts, err = store.PartitionNames(ctx, "audit_log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range parts {
+		if p == current {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("starting the daemon did not create %s (have %v) — nothing in production "+
+			"rolls partitions, so a daemon crossing a month boundary writes every audit "+
+			"row into DEFAULT, which succeeds silently", current, parts)
+	}
+}
+
+// A daemon must REFUSE to serve a store whose logical ids are not unique.
+//
+// After partitioning, PRIMARY KEY (id, created_at) permits the same id in two
+// months. CheckLogicalIDUniqueness detected that from the start but nothing
+// production called it, so meta.Open accepted the state it was written to
+// refuse (lector's PR #32 r0 MF1). Both dependents fail QUIETLY — a by-id read
+// is undefined, and repairPendingHistory's id cursor can skip a row forever —
+// so serving on is worse than not starting.
+func TestStartEngine_RefusesAStoreWithDuplicateLogicalIDs(t *testing.T) {
+	if os.Getenv("TEST_PGURL") == "" {
+		t.Skip("TEST_PGURL not set; partitioning is postgres-only")
+	}
+	ctx := t.Context()
+	store, _ := pgScratchStore(t)
+
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	if _, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", "127.0.0.1"); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+
+	// The same id in two different months — which the schema ALLOWS.
+	for _, when := range []time.Time{
+		time.Date(2031, 3, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2031, 4, 1, 0, 0, 0, 0, time.UTC),
+	} {
+		if err := store.RollPartitions(ctx, when); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Audit.OnCtx(ctx).
+			Set(meta.AuditID, int64(4242)).Set(meta.AuditUserID, int64(0)).
+			Set(meta.AuditIP, "ip").Set(meta.AuditAction, "dup").Set(meta.AuditDetail, "d").
+			Set(meta.AuditCreatedAt, when.Unix()).Set(meta.AuditTxID, "").Insert(); err != nil {
+			t.Fatalf("the schema refused a duplicate id, so there is nothing to guard "+
+				"against and this cell is stale: %v", err)
+		}
+	}
+
+	eng, _, _, stop, err := startEngine(ctx, execConfig(), store, svc,
+		make(chan struct{}), func(string) {})
+	if err == nil {
+		stop()
+		_ = eng.Close()
+		t.Fatal("the daemon STARTED on a store holding duplicate logical ids across " +
+			"partitions — by-id reads are undefined and repairPendingHistory can skip " +
+			"rows, both silently")
+	}
+	if !strings.Contains(err.Error(), "duplicate logical ids") {
+		t.Errorf("the refusal does not name the problem:\n%v", err)
+	}
+}
+
+// pgScratchStore opens a migrated store on its own scratch database.
+func pgScratchStore(t *testing.T) (*meta.Store, string) {
+	t.Helper()
+	base := os.Getenv("TEST_PGURL")
+	ctx := context.Background()
+	admin, err := meta.Open(ctx, config.Meta{Engine: "postgres", DSN: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	name := fmt.Sprintf("autodb_wire_%d", time.Now().UnixNano())
+	if _, err := admin.Conn().ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Skipf("cannot create a scratch database: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Conn().ExecContext(context.Background(),
+			"DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+	})
+	i := strings.Index(base, "?")
+	head, tail := base, ""
+	if i >= 0 {
+		head, tail = base[:i], base[i:]
+	}
+	slash := strings.LastIndex(head, "/")
+	dsn := head[:slash+1] + name + tail
+	s, err := meta.Open(ctx, config.Meta{Engine: "postgres", DSN: dsn, AllowInsecureDSN: true})
+	if err != nil {
+		t.Fatalf("opening the scratch store: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s, dsn
 }

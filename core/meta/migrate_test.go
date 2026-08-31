@@ -173,3 +173,83 @@ func TestMigrateToPostgres_RoundTrip(t *testing.T) {
 		t.Error("second migration succeeded, want ErrMigrate (destination not empty)")
 	}
 }
+
+// THE MIGRATION MUST LAND HISTORY IN ITS OWN MONTHS, not in DEFAULT.
+//
+// The destination is created by the migration runner, so its only partitions
+// are the current month and the look-ahead. Copying a store with years of
+// audit history into that put EVERY historical row in DEFAULT (Johno,
+// 2026-09-01): those months could then never be detached for retention,
+// because their rows were not in them — and before ensurePartition learned to
+// adopt, they could never be created either.
+func TestMigrateToPostgres_PrepartitionsForTheSourcesHistory(t *testing.T) {
+	s, dsn := freshPGStore(t)
+	ctx := context.Background()
+	_ = s
+
+	src := openMem(t)
+	rootID := addUser(t, src, "root")
+
+	old1 := time.Date(2024, 3, 9, 0, 0, 0, 0, time.UTC)
+	old2 := time.Date(2024, 11, 20, 0, 0, 0, 0, time.UTC)
+	for i, when := range []time.Time{old1, old2} {
+		if _, err := src.Audit.OnCtx(ctx).
+			Set(AuditID, int64(700+i)).Set(AuditUserID, rootID).Set(AuditIP, "ip").
+			Set(AuditAction, "exec").Set(AuditDetail, fmt.Sprintf("d%d", i)).
+			Set(AuditCreatedAt, when.Unix()).Set(AuditTxID, "").Insert(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A destination that has never seen this history: fresh, so only the
+	// current month and its look-ahead exist.
+	dst, err := Open(ctx, config.Meta{Engine: "postgres", DSN: dsn, AllowInsecureDSN: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+	if _, err := dst.Conn().ExecContext(ctx, "TRUNCATE audit_log, script_history"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dst.Conn().ExecContext(ctx,
+		"TRUNCATE users, connections, workspaces, workspace_connections, grants, sessions, "+
+			"tx_outcomes, tx_pending, ip_allowlist, store_meta CASCADE"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := MigrateToPostgres(ctx, src, dst); err != nil {
+		t.Fatalf("migration failed: %v", err)
+	}
+
+	parts, err := dst.PartitionNames(ctx, "audit_log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"audit_log_p2024_03", "audit_log_p2024_11"} {
+		found := false
+		for _, p := range parts {
+			if p == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s was not pre-created (have %v) — the source's history was copied "+
+				"into a destination that had no month to put it in", want, parts)
+		}
+	}
+
+	// THE DECISIVE ASSERTION: nothing sat down in DEFAULT.
+	var stranded int64
+	rows, err := dst.Conn().QueryContext(ctx, `SELECT count(*) FROM audit_log_pdefault`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rows.Next() {
+		_ = rows.Scan(&stranded)
+	}
+	_ = rows.Close()
+	if stranded != 0 {
+		t.Errorf("%d migrated audit row(s) landed in DEFAULT; those months can never be "+
+			"detached for retention because their rows are not in them", stranded)
+	}
+}
