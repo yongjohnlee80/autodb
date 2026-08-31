@@ -1,0 +1,266 @@
+package frontdoor
+
+import (
+	"crypto/tls"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgproto3"
+)
+
+// The startup exchange (protocol matrix §2 rows 2.1–2.5a).
+//
+// This is everything before authentication: TLS negotiation, the refusals
+// that happen without a credential ever being read, and the StartupMessage
+// itself. Authentication is the next slice; this one ends by denying, which
+// is the honest state of a listener that has no credential store yet.
+
+// Pre-auth bounds (ADR-0075 §4 defaults table). Deliberately tighter than
+// the post-auth caps: nothing here has authenticated, so the budget an
+// anonymous peer can command should be the smallest one in the system.
+const (
+	// PreAuthMaxBodyLen bounds a single pre-auth message. Distinct from the
+	// post-auth SetMaxBodyLen precisely so the pre-auth arithmetic is honest
+	// — 64 connections at 64 MiB would be a very different number.
+	PreAuthMaxBodyLen = 64 * 1024
+
+	// TLSHandshakeDeadline, StartupDeadline bound the phases before auth.
+	// Each is its own deadline rather than one budget for the lot, so a peer
+	// cannot spend the whole allowance on the handshake and still be owed
+	// time for the startup packet.
+	TLSHandshakeDeadline = 10 * time.Second
+	StartupDeadline      = 10 * time.Second
+)
+
+// Protocol version constants. autodb speaks 3.0 and negotiates 3.x down to
+// it, per matrix row 2.5.
+const (
+	protocolMajor3    = 3
+	protocolVersion30 = uint32(protocolMajor3)<<16 | 0
+)
+
+// startupOutcome is what the exchange produced. Exactly one of Params or
+// Denied is meaningful.
+type startupOutcome struct {
+	// Params is the accepted StartupMessage parameter set.
+	Params map[string]string
+	// Denied is the internal reason, empty when the exchange succeeded.
+	Denied denialReason
+	// Negotiated records that a NegotiateProtocolVersion was sent — the
+	// client asked for a 3.x we do not implement and continues at 3.0.
+	Negotiated bool
+}
+
+// errCancelRequest reports a CancelRequest, which is not a session at all:
+// it is a plaintext control connection that is answered and closed.
+var errCancelRequest = errors.New("frontdoor: cancel request")
+
+// runStartup performs the exchange on a freshly accepted connection and
+// returns either the accepted parameters or the reason it was denied.
+//
+// It never reads an authentication response: TLS is established first,
+// without exception (ADR-0075 §4). The ordering is not a preference — a
+// credential read before TLS is a credential an active MITM already has, and
+// this surface's whole credential model assumes the wire is private.
+func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Conn, startupOutcome, error) {
+	// The pre-auth backend reads the SSLRequest from the PLAINTEXT
+	// connection. It is bounded before it reads anything, so a peer's first
+	// act cannot be to name a length we would then allocate for.
+	plain := pgproto3.NewBackend(raw, raw)
+	plain.SetMaxBodyLen(PreAuthMaxBodyLen)
+
+	if err := raw.SetDeadline(now().Add(TLSHandshakeDeadline)); err != nil {
+		return nil, startupOutcome{}, err
+	}
+	first, err := plain.ReceiveStartupMessage()
+	if err != nil {
+		// A frame we cannot even parse is not a client we can talk to. This
+		// includes PostgreSQL 17's direct-TLS negotiation (matrix row 2.1a),
+		// whose first bytes are a TLS ClientHello rather than a
+		// length-prefixed request — refused in v1 so there is ONE
+		// negotiation path to test.
+		return nil, startupOutcome{Denied: reasonDirectTLS}, nil
+	}
+
+	switch msg := first.(type) {
+	case *pgproto3.SSLRequest:
+		// Row 2.1: answer 'S' and begin TLS.
+		if _, werr := raw.Write([]byte{'S'}); werr != nil {
+			return nil, startupOutcome{}, werr
+		}
+	case *pgproto3.GSSEncRequest:
+		// Row 2.2: refuse GSS encryption with 'N'. A client that then
+		// proceeds in plaintext meets the same refusal as any other
+		// plaintext startup below.
+		if _, werr := raw.Write([]byte{'N'}); werr != nil {
+			return nil, startupOutcome{}, werr
+		}
+		return nil, startupOutcome{Denied: reasonPlaintextStartup}, nil
+	case *pgproto3.CancelRequest:
+		// Row 2.3: cancel connections are plaintext by protocol. Answered
+		// and closed; the cancel machinery itself is §6, a later slice.
+		return nil, startupOutcome{}, errCancelRequest
+	case *pgproto3.StartupMessage:
+		// Row 2.1 error path: a plaintext StartupMessage at S0. No
+		// fallback — this surface has no unencrypted mode to fall back to.
+		_ = msg
+		return nil, startupOutcome{Denied: reasonPlaintextStartup}, nil
+	default:
+		return nil, startupOutcome{Denied: reasonStartupMalformed}, nil
+	}
+
+	// TLS, on its own deadline.
+	if err := raw.SetDeadline(now().Add(TLSHandshakeDeadline)); err != nil {
+		return nil, startupOutcome{}, err
+	}
+	secure := tls.Server(raw, tlsCfg)
+	if err := secure.Handshake(); err != nil {
+		return nil, startupOutcome{}, fmt.Errorf("frontdoor: TLS handshake: %w", err)
+	}
+
+	// Everything from here is inside TLS.
+	if err := secure.SetDeadline(now().Add(StartupDeadline)); err != nil {
+		return secure, startupOutcome{}, err
+	}
+	be := pgproto3.NewBackend(secure, secure)
+	be.SetMaxBodyLen(PreAuthMaxBodyLen)
+
+	// The startup packet's VERSION is read here rather than delegated,
+	// because pgproto3's ReceiveStartupMessage accepts only 3.0 and 3.2 and
+	// returns "unknown startup message code" for everything else.
+	//
+	// That is a reasonable library default and the wrong policy for this
+	// surface. Matrix row 2.5 requires ANY 3.x minor to be negotiated DOWN
+	// and continued — "pg-conformant, never a hard refusal" — which is what
+	// PostgreSQL itself does; under the library's allowlist a client asking
+	// for 3.1 or 3.3 would be refused outright even though it can speak 3.0
+	// perfectly well. Row 2.5a's unsupported-major refusal is likewise
+	// unreachable through it: the error arrives before any version check of
+	// mine can run.
+	//
+	// So the length and version are read directly and the PARAMETERS are
+	// still decoded by the library — owning the fiddly part is not the goal,
+	// owning the policy the matrix pins is.
+	raw2, err := readStartupPacket(secure)
+	if err != nil {
+		return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
+	}
+	version := binaryBigEndianUint32(raw2)
+
+	switch version {
+	case sslRequestCode:
+		// A second SSLRequest inside TLS is a protocol violation (row 2.1).
+		return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
+	case cancelRequestCode:
+		return secure, startupOutcome{}, errCancelRequest
+	}
+	if version>>16 != protocolMajor3 {
+		// Row 2.5a: an unsupported major is a refusal, not a negotiation.
+		// There is no 3.0 for a major-4 client to fall back to.
+		return secure, startupOutcome{Denied: reasonUnsupportedMajor}, nil
+	}
+
+	// Parameters decode first: row 2.5's NegotiateProtocolVersion must name
+	// the unrecognized `_pq_.*` options, and they live in the parameter
+	// block, so the block has to be read before the answer can be composed.
+	// The version word is rewritten to 3.0 for the decode — the parameter
+	// block's own format does not vary by minor.
+	negotiated := version != protocolVersion30
+	putUint32(raw2, protocolVersion30)
+	var sm pgproto3.StartupMessage
+	if derr := sm.Decode(raw2); derr != nil {
+		return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
+	}
+	out := startupOutcome{Params: sm.Parameters}
+
+	// A `_pq_.*` parameter is a protocol EXTENSION the client is asking for.
+	// autodb implements none, and saying so by name is the point of the
+	// message: a client told "3.0, and I did not understand these three
+	// options" can decide what to do, while silence leaves it believing an
+	// extension it depends on was accepted.
+	unrecognized := unrecognizedProtocolOptions(sm.Parameters)
+	if negotiated || len(unrecognized) > 0 {
+		// Row 2.5: negotiate DOWN and continue. A newer client asks for more
+		// and accepts less by design; refusing it would break clients that
+		// are perfectly able to speak 3.0.
+		be.Send(&pgproto3.NegotiateProtocolVersion{
+			NewestMinorProtocol: 0,
+			UnrecognizedOptions: unrecognized,
+		})
+		if ferr := be.Flush(); ferr != nil {
+			return secure, startupOutcome{}, ferr
+		}
+		out.Negotiated = true
+	}
+	return secure, out, nil
+}
+
+// unrecognizedProtocolOptions returns the `_pq_.*` parameter names, sorted so
+// the answer is deterministic — a message whose contents vary by map
+// iteration order is one nobody can write a test against.
+func unrecognizedProtocolOptions(params map[string]string) []string {
+	var out []string
+	for k := range params {
+		if strings.HasPrefix(k, "_pq_.") {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Startup packet codes pgproto3 does not export.
+const (
+	sslRequestCode    = 80877103
+	cancelRequestCode = 80877102
+	gssEncRequestCode = 80877104
+)
+
+// readStartupPacket reads one length-prefixed startup packet body, bounded
+// by the pre-auth cap.
+//
+// The bound is applied to the LENGTH FIELD before anything is allocated:
+// a peer's first act on this surface must not be to name a size we then
+// reserve for them. That is the whole reason the pre-auth cap is a separate,
+// much smaller number than the post-auth one.
+func readStartupPacket(r io.Reader) ([]byte, error) {
+	var lenBuf [4]byte
+	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
+		return nil, err
+	}
+	size := int(binary.BigEndian.Uint32(lenBuf[:])) - 4
+	if size < 4 || size > PreAuthMaxBodyLen {
+		return nil, fmt.Errorf("frontdoor: startup packet length %d out of bounds", size)
+	}
+	body := make([]byte, size)
+	if _, err := io.ReadFull(r, body); err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func binaryBigEndianUint32(b []byte) uint32 { return binary.BigEndian.Uint32(b) }
+func putUint32(b []byte, v uint32)          { binary.BigEndian.PutUint32(b, v) }
+
+// sendDenial writes the uniform denial and flushes it.
+//
+// Separated from the decision so every refusal path emits the SAME bytes:
+// one construction site is what makes "indistinguishable across causes" a
+// property of the code rather than a habit of whoever wrote each branch.
+func sendDenial(w interface {
+	Write([]byte) (int, error)
+}, reason denialReason) error {
+	be := pgproto3.NewBackend(emptyReader{}, w)
+	be.Send(denial(reason))
+	return be.Flush()
+}
+
+type emptyReader struct{}
+
+func (emptyReader) Read([]byte) (int, error) { return 0, errors.New("frontdoor: no reader") }
