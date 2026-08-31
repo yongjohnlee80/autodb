@@ -99,7 +99,7 @@ local function eq(a, b) return vim.deep_equal(a, b) end
 -- some — a mis-scoped skip, a section that stops executing — the total falls below
 -- this and the run fails, even when nothing that DID run failed. Raise it when the
 -- suite legitimately grows; never lower it to make a run pass.
-local EXPECTED_MIN_ASSERTIONS = 320
+local EXPECTED_MIN_ASSERTIONS = 335
 local missing_prereqs = {}
 local function require_bin(section)
   missing_prereqs[#missing_prereqs + 1] = section
@@ -625,6 +625,49 @@ print("\n[8] a real query through the whole stack")
   end
   pcall(vim.fn.jobstop, job)
   vim.fn.delete(tmp, "rf")
+end)()
+
+-- ─────────────────── [8b] tx.status surface ────────────────────────
+print("\n[8b] tx.status — the transaction-outcome poll surface (protocol 5)")
+;(function()
+  local tx = require("autodb.txstatus")
+
+  -- Every state the outcome machine can produce has a glyph, and an
+  -- unrecognised one reads as UNKNOWN rather than as success. A state this
+  -- build has never heard of must not render like a clean commit -- that is
+  -- the same defect audit v2 fixed on the history list, and it would be
+  -- reintroduced here by a table with a permissive default.
+  for _, st in ipairs({ "opened", "commit_started", "unknown_pending",
+                        "committed", "rolled_back", "outcome_unresolvable" }) do
+    local m = tx.state_mark(st)
+    ok("p8b: " .. st .. " has a glyph", m ~= nil and m ~= "" and m ~= "?" or st == "outcome_unresolvable",
+      tostring(m))
+  end
+  ok("p8b: an unknown state reads as unknown, not as success",
+    tx.state_mark("some_future_state") == "?", tx.state_mark("some_future_state"))
+  ok("p8b: a nil state reads as unknown", tx.state_mark(nil) == "?")
+  ok("p8b: committed is NOT the unknown glyph",
+    tx.state_mark("committed") ~= tx.state_mark("some_future_state"))
+
+  -- How long it has been stuck is the number that decides whether to act, so
+  -- it is rendered rather than left as two timestamps to subtract.
+  ok("p8b: sub-second stays in ms", tx.stuck_for(340) == "340ms", tx.stuck_for(340))
+  ok("p8b: seconds", tx.stuck_for(5000) == "5s", tx.stuck_for(5000))
+  ok("p8b: minutes carry seconds", tx.stuck_for(125000) == "2m05s", tx.stuck_for(125000))
+  ok("p8b: hours carry minutes", tx.stuck_for(3900000) == "1h05m", tx.stuck_for(3900000))
+  ok("p8b: a nil duration is 0ms, not an error", tx.stuck_for(nil) == "0ms", tx.stuck_for(nil))
+
+  -- A row renders without a reason, which is the ordinary case for a
+  -- transaction that is merely open rather than stuck for a named cause.
+  local line = tx.one_line({ state = "unknown_pending", conn_id = 3, reason = "timeout", stuck_ms = 90000 })
+  ok("p8b: a pending row names the state, the connection and the age",
+    line:find("unknown_pending", 1, true) ~= nil
+      and line:find("conn 3", 1, true) ~= nil
+      and line:find("timeout", 1, true) ~= nil
+      and line:find("1m30s", 1, true) ~= nil, line)
+  local bare = tx.one_line({ state = "opened", conn_id = 1, stuck_ms = 10 })
+  ok("p8b: a row with no reason still renders", type(bare) == "string" and #bare > 0, bare)
+  ok("p8b: an empty entry does not error", type(tx.one_line({})) == "string")
 end)()
 
 -- ─────────────────── [9] history modal ─────────────────────────────
