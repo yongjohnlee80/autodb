@@ -109,7 +109,11 @@ func (e *Engine) PendingOutcomes(ctx context.Context, token string, limit int) (
 	// memory is an O(all history) scan for an answer that is normally empty.
 	// This one is worse than the reconciler's was, because a user can ask
 	// for it (PR #20 r0 SF1 — I fixed the reconciler and left this behind).
-	byTx, err := e.pendingGroups(ctx, 0)
+	// The caller's limit is passed down, so a request for more than the
+	// reconciler's batch size is not silently truncated to it — the two
+	// paths bound the same query for different reasons and should not
+	// borrow each other's number.
+	byTx, err := e.pendingGroups(ctx, 0, limit)
 	if err != nil {
 		return nil, fmt.Errorf("exec: reading the outcome log: %w", err)
 	}
