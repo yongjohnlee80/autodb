@@ -462,6 +462,61 @@ func (b *Bound) History(ctx context.Context, limit int64) ([]HistoryRow, error) 
 	return out, nil
 }
 
+// TxStatus is one transaction's resolved outcome (ADR-0074 §7, protocol 5).
+//
+// The server folds its transition log before it gets here, so this is the
+// answer rather than the evidence: a consumer that had to fold the log itself
+// would be keeping its own copy of the state machine, and copies drift.
+type TxStatus struct {
+	TxID     string
+	State    string // opened|commit_started|unknown_pending|committed|rolled_back|outcome_unresolvable
+	Reason   string
+	ConnID   int64
+	Terminal bool
+	// Stuck is how long the transaction has been in its CURRENT state. It is
+	// the number that decides whether to act, and the server computes it so
+	// three clients cannot get three answers.
+	Stuck time.Duration
+}
+
+// TxOutcome asks about one transaction. A transaction that is not this
+// caller's answers exactly as one that never existed.
+func (b *Bound) TxOutcome(ctx context.Context, txID string) (TxStatus, error) {
+	res, err := b.authed(ctx, "tx.status", txID)
+	if err != nil {
+		return TxStatus{}, err
+	}
+	m, _ := res.(map[string]any)
+	return txStatusOf(m), nil
+}
+
+// PendingTx lists this caller's UNRESOLVED transactions, oldest first —
+// "what is stuck", which is the operator's question. It does not read the
+// script history: history vanishes when [history].enabled is false, and a
+// boundary-only BEGIN/COMMIT never had a row there to begin with.
+func (b *Bound) PendingTx(ctx context.Context, limit int64) ([]TxStatus, error) {
+	res, err := b.authed(ctx, "tx.status", "", limit)
+	if err != nil {
+		return nil, err
+	}
+	m, _ := res.(map[string]any)
+	var out []TxStatus
+	for _, row := range asList(m["pending"]) {
+		rm, _ := row.(map[string]any)
+		out = append(out, txStatusOf(rm))
+	}
+	return out, nil
+}
+
+func txStatusOf(m map[string]any) TxStatus {
+	t, _ := m["terminal"].(bool)
+	return TxStatus{
+		TxID: mS(m, "tx_id"), State: mS(m, "state"), Reason: mS(m, "reason"),
+		ConnID: mI(m, "conn_id"), Terminal: t,
+		Stuck: time.Duration(mI(m, "stuck_ms")) * time.Millisecond,
+	}
+}
+
 // ShutdownServer asks the connected server to drain and exit (admin
 // only). The disconnect watcher then drives the reconnect, which spawns
 // a fresh server when one is configured — that is the restart.

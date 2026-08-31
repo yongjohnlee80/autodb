@@ -376,3 +376,56 @@ func TestExecuteScriptAtomic_ConcurrentScriptsRespectTheCapAndDrain(t *testing.T
 		t.Errorf("%d sessions survived %d concurrent scripts", left, n)
 	}
 }
+
+// tx.status end to end against a live PostgreSQL, through the ENGINE API the
+// verb calls. R5 owns the verb; this pins that the two halves of the seam fit
+// — that a transaction R5 opens is one R4's outcome machine can be asked
+// about, and that it reaches a terminal.
+func TestTxStatus_ResolvesATransactionR5Opened(t *testing.T) {
+	f, connID, table := pgAtomicTarget(t)
+	ctx := context.Background()
+
+	// Nothing is stuck before we start. Without this, a later empty list
+	// would prove nothing.
+	before, err := f.eng.PendingOutcomes(ctx, f.rootTok, 50)
+	if err != nil {
+		t.Fatalf("PendingOutcomes: %v", err)
+	}
+	if len(before) != 0 {
+		t.Fatalf("%d transactions were already pending before the test ran", len(before))
+	}
+
+	// An id that never existed is not pending — the distinction the seam
+	// contract turns on.
+	if _, err := f.eng.TxOutcome(ctx, f.rootTok, "tx-that-never-was"); !errors.Is(err, ErrNoSuchTx) {
+		t.Fatalf("TxOutcome(unknown) = %v, want ErrNoSuchTx: an unknown id answering "+
+			"'pending' leaves a caller polling for a transaction that never was", err)
+	}
+
+	if _, err := f.eng.ExecuteScriptAtomic(ctx, f.rootTok, connID,
+		"BEGIN; INSERT INTO "+table+" (note) VALUES ('tracked'); COMMIT;", testIP); err != nil {
+		t.Fatalf("atomic script: %v", err)
+	}
+
+	// A committed transaction is terminal, so it is NOT in the pending list.
+	after, err := f.eng.PendingOutcomes(ctx, f.rootTok, 50)
+	if err != nil {
+		t.Fatalf("PendingOutcomes: %v", err)
+	}
+	if len(after) != 0 {
+		t.Errorf("a COMMITTED transaction is listed as pending: %+v", after)
+	}
+
+	// And a rolled-back one likewise reaches a terminal rather than sitting
+	// unresolved: a script that fails is not a stuck transaction.
+	_, _ = f.eng.ExecuteScriptAtomic(ctx, f.rootTok, connID,
+		"BEGIN; INSERT INTO "+table+" (note) VALUES (NULL); COMMIT;", testIP)
+	stuck, err := f.eng.PendingOutcomes(ctx, f.rootTok, 50)
+	if err != nil {
+		t.Fatalf("PendingOutcomes: %v", err)
+	}
+	for _, s := range stuck {
+		t.Errorf("a failed script left an unresolved transaction: %s state=%s reason=%s conn=%d",
+			s.TxID, s.State, s.Reason, s.ConnID)
+	}
+}

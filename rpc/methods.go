@@ -59,6 +59,11 @@ const (
 	// CodeConnectionDraining: the connection is being deleted or shut down.
 	// Nothing on it will succeed again; this is not a retry.
 	CodeConnectionDraining int64 = -32044
+	// CodeNoSuchTx: tx.status was asked about a transaction id with no
+	// record — or one belonging to someone else, which is deliberately
+	// indistinguishable. Not a pending status: a mistyped or expired id must
+	// not leave a caller polling forever for a transaction that never was.
+	CodeNoSuchTx int64 = -32045
 )
 
 // publicErrs is the whole disclosure allowlist: core sentinels whose
@@ -92,6 +97,10 @@ var publicErrs = []struct {
 	// to do about it. None of them names a connection, a user, or another
 	// session, so publishing them discloses nothing about what exists.
 	{exec.ErrSessionNotFound, CodeSessionNotFound},
+	// A transaction that is not the caller's answers exactly as one that
+	// never existed — same sentinel, same code, same text — so tx.status
+	// cannot be used to discover which transaction ids exist.
+	{exec.ErrNoSuchTx, CodeNoSuchTx},
 	{exec.ErrSessionBusy, CodeSessionBusy},
 	{exec.ErrSessionCapExceeded, CodeSessionCapExceeded},
 	{exec.ErrConnectionDraining, CodeConnectionDraining},
@@ -794,6 +803,59 @@ func (s *Server) register() {
 		return resultMap(res), nil
 	})
 
+	// tx.status is the poll verb §7 names for asynchronous outcome delivery
+	// (ADR-0074 Amendment 4 A2, R5 scope).
+	//
+	// It reads the ENGINE's outcome API, never the table, and never the
+	// script history — history disappears entirely when [history].enabled is
+	// false, and a boundary-only `BEGIN; COMMIT;` never had a row there at
+	// all, so a projection over it could not answer for the two cases that
+	// most need answering.
+	//
+	// One tx id gives that transaction's resolved state; no id gives the
+	// caller's unresolved ones, oldest first. Both are scoped in core: a
+	// transaction that is not the caller's answers exactly as one that never
+	// existed, so the id space cannot be used to discover what exists.
+	s.rpc.Handle("tx.status", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		n := len(req.Params)
+		if n != 2 && n != 3 {
+			return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+				Message: "tx.status takes (token, tx_id) or (token, \"\", limit)"}
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		txID, err := argStr(req.Params, 1, "tx_id")
+		if err != nil {
+			return nil, err
+		}
+		if txID != "" {
+			st, terr := s.eng.TxOutcome(ctx, token, txID)
+			if terr != nil {
+				return nil, wireErr(terr)
+			}
+			return txStatusMap(st), nil
+		}
+		limit := 0
+		if n == 3 {
+			l, lerr := argInt(req.Params, 2, "limit")
+			if lerr != nil {
+				return nil, lerr
+			}
+			limit = int(l)
+		}
+		list, perr := s.eng.PendingOutcomes(ctx, token, limit)
+		if perr != nil {
+			return nil, wireErr(perr)
+		}
+		out := make([]any, 0, len(list))
+		for _, st := range list {
+			out = append(out, txStatusMap(st))
+		}
+		return map[string]any{"pending": out}, nil
+	})
+
 	s.rpc.Handle("exec.run", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
@@ -816,6 +878,32 @@ func (s *Server) register() {
 		}
 		return resultMap(res), nil
 	})
+}
+
+// txStatusMap projects one transaction outcome onto the wire.
+//
+// `terminal` is computed HERE and not carried on the Go struct: on the engine
+// side it is a method, because a precomputed field can be constructed
+// inconsistently with the state it is derived from. A Lua or Web client
+// cannot call a Go method, so this is the layer where precomputing earns its
+// keep — one place, derived from the state it ships alongside.
+//
+// Times go out as RFC3339Nano strings like every other time on this wire, and
+// `stuck_ms` is the gap between them: how long this transaction has been in
+// its current state is the number that decides whether to act, and making
+// each client subtract two timestamps is how three clients get three answers.
+func txStatusMap(st exec.TxStatus) map[string]any {
+	return map[string]any{
+		"tx_id":    st.TxID,
+		"state":    string(st.State),
+		"reason":   st.Reason,
+		"conn_id":  st.ConnID,
+		"user_id":  st.UserID,
+		"terminal": st.Terminal(),
+		"opened":   st.Opened.Format(time.RFC3339Nano),
+		"since":    st.Since.Format(time.RFC3339Nano),
+		"stuck_ms": time.Since(st.Since).Milliseconds(),
+	}
 }
 
 // resultMap projects exec.Result onto the wire (ADR-0056 §2 exec.run shape).
