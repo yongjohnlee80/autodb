@@ -651,6 +651,19 @@ func (s *Server) register() {
 		if strings.TrimSpace(rawIPs) != "" {
 			ips = strings.Split(rawIPs, ",")
 		}
+		// The integer domain is validated BEFORE the multiply.
+		//
+		// time.Duration(days)*24*time.Hour overflows for large magnitudes,
+		// and overflow wraps: math.MinInt64+1 days came back as a POSITIVE
+		// duration of about a day, sailed past the core's range check, and
+		// created a token. The core check is correct and was simply handed a
+		// number that no longer meant what the caller sent — so the guard
+		// belongs here, on the wire value, before any arithmetic touches it.
+		const maxTokenDays = 365
+		if days < 0 || days > maxTokenDays {
+			return nil, wireErr(fmt.Errorf("%w: %d days requested; the range is 1..%d, or 0 for "+
+				"the default", auth.ErrPATBadExpiry, days, maxTokenDays))
+		}
 		out, cerr := s.auth.CreatePAT(ctx, token, name, time.Duration(days)*24*time.Hour, ips)
 		if cerr != nil {
 			return nil, wireErr(cerr)

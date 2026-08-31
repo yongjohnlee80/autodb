@@ -59,6 +59,9 @@ type Service struct {
 	now       func() time.Time
 	ttl       time.Duration
 	cfgAllows []netip.Prefix
+	// testAfterCapLock runs inside CreatePAT's check→insert window so a test
+	// can make the cap race deterministic. Nil in production.
+	testAfterCapLock func()
 }
 
 // Option configures a Service at New time.

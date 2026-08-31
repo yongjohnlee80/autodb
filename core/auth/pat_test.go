@@ -3,13 +3,17 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
 
+	"github.com/yongjohnlee80/autodb/core/config"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -369,5 +373,113 @@ func TestPAT_SubsetCheckIssuesOnTheCallersTransaction(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("inTx: %v", err)
+	}
+}
+
+// MF1: the per-user cap holds under REAL concurrency, on PostgreSQL.
+//
+// One transaction is not mutual exclusion. Under READ COMMITTED, concurrent
+// creates each read the same committed count, each find a free slot, and each
+// insert — the transaction gives atomicity of the write, not exclusivity of
+// the decision. I claimed one transaction closed this gap in the first
+// version; it did not, and lector reproduced 19 active tokens against a cap
+// of 16.
+//
+// SQLite masks it by serializing writers, which is why this cell is
+// PostgreSQL-only: on sqlite the unsafe version passes.
+func TestPAT_CapHoldsUnderConcurrency(t *testing.T) {
+	dsn := os.Getenv("TEST_PGURL")
+	if dsn == "" {
+		t.Skip("TEST_PGURL not set; the cap race only reproduces on PostgreSQL")
+	}
+	ctx := context.Background()
+	store, err := meta.Open(ctx, config.Meta{Engine: "postgres", DSN: dsn})
+	if err != nil {
+		t.Fatalf("meta.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	s, err := New(store, WithConfigAllowlist([]string{"127.0.0.1/32", "::1/128"}))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	tok, _, err := s.Bootstrap(ctx, fmt.Sprintf("caprace%d", time.Now().UnixNano()),
+		"cap-race-passphrase", testIP)
+	if err != nil {
+		t.Skipf("bootstrap unavailable on this store: %v", err)
+	}
+
+	// Fill to one below the cap, so exactly ONE more may be created.
+	for i := 0; i < PATMaxPerUser-1; i++ {
+		if _, cerr := s.CreatePAT(ctx, tok, fmt.Sprintf("fill-%02d", i), 0, nil); cerr != nil {
+			t.Fatalf("prefill %d: %v", i, cerr)
+		}
+	}
+
+	widened := make(chan struct{})
+
+	// Then race, with the window WIDENED deterministically.
+	//
+	// Eight goroutines starting together is not a reliable instrument: my
+	// first version of this cell had no hook, and the mutation removing
+	// serialization PASSED — the racers happened to serialize on their own.
+	// A probabilistic cell that misses the defect is not evidence.
+	//
+	// The hook runs inside CreatePAT's check→insert window. With the locks
+	// held a competitor blocks there, so exactly one wins; without them
+	// every racer sails through the widened gap and the overrun is certain.
+	s.SetTestAfterCapLock(func() {
+		// Only the FIRST arrival waits; the rest proceed immediately, so a
+		// serialized run cannot deadlock behind its own hook.
+		select {
+		case <-widened:
+		default:
+			close(widened)
+			time.Sleep(300 * time.Millisecond)
+		}
+	})
+	const racers = 8
+	var wg sync.WaitGroup
+	errs := make([]error, racers)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = s.CreatePAT(ctx, tok, fmt.Sprintf("race-%02d", i), 0, nil)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var won, refused int
+	for i, e := range errs {
+		switch {
+		case e == nil:
+			won++
+		case errors.Is(e, ErrPATCapExceeded):
+			refused++
+		default:
+			t.Errorf("racer %d failed unexpectedly: %v", i, e)
+		}
+	}
+
+	ident, _ := s.ValidateToken(ctx, tok)
+	active, cerr := store.PATs.OnCtx(ctx).With(meta.PATUserID, ident.UserID()).
+		With(meta.PATRevoked, int64(0)).Count()
+	if cerr != nil {
+		t.Fatalf("counting: %v", cerr)
+	}
+
+	if active > PATMaxPerUser {
+		t.Fatalf("%d active tokens against a cap of %d (%d racers won, %d were refused): the "+
+			"count-then-insert decision was not serialized, so every racer saw the same free "+
+			"slot and took it", active, PATMaxPerUser, won, refused)
+	}
+	if won != 1 {
+		t.Errorf("%d racers won, want exactly 1 — the cap had one slot left", won)
+	}
+	if refused != racers-1 {
+		t.Errorf("%d refused, want %d", refused, racers-1)
 	}
 }
