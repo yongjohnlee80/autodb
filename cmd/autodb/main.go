@@ -239,8 +239,11 @@ func runServe(configPath string) error {
 	// this inline, and deleting the janitor or the lease watcher from those
 	// lines broke no test at all. A call site that no test reaches is a call
 	// site that can be removed by accident.
-	eng, serveCtx, leaseLost, stopServing := startEngine(ctx, cfg, store, svc, lease.Lost(),
+	eng, serveCtx, leaseLost, stopServing, err := startEngine(ctx, cfg, store, svc, lease.Lost(),
 		func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) })
+	if err != nil {
+		return err
+	}
 	// ORDER MATTERS, and defer is LIFO: eng.Close() is registered second so
 	// it runs FIRST, which is backwards — the engine would tear down its
 	// pools while the serve context was still live and work could still be
@@ -294,7 +297,28 @@ func startEngine(
 	svc *auth.Service,
 	leaseLost <-chan struct{},
 	onLog func(string),
-) (*coreexec.Engine, context.Context, <-chan struct{}, func()) {
+) (*coreexec.Engine, context.Context, <-chan struct{}, func(), error) {
+	// REFUSE TO SERVE a store whose logical ids are not unique, BEFORE
+	// anything is started.
+	//
+	// After partitioning, PRIMARY KEY (id, started_at) no longer makes `id`
+	// unique — the schema permits the same id in two months and accepts it
+	// silently. The guard existed but nothing production ever called it
+	// (lector's PR #32 r0 MF1), which made it documentation rather than a
+	// guard: meta.Open accepted a store holding duplicate script_history ids
+	// across partitions.
+	//
+	// It has to REFUSE rather than warn, because both things that depend on it
+	// fail QUIETLY: a by-id read has no defined answer, and R4's
+	// repairPendingHistory pages with OrderBy(id) + Gt(id, cursor), so a
+	// non-monotonic id lets a row be skipped forever. A daemon that keeps
+	// serving in that state produces wrong answers rather than errors.
+	//
+	// A no-op on sqlite, whose id is a plain primary key.
+	if err := store.CheckLogicalIDUniqueness(ctx); err != nil {
+		return nil, nil, nil, func() {}, fmt.Errorf("refusing to serve: %w", err)
+	}
+
 	serveCtx, stopServing := context.WithCancel(ctx)
 
 	// The lease has to be CONSUMED, not merely acquired. Lost() closes when
@@ -343,7 +367,7 @@ func startEngine(
 	eng.StartOutcomeRetention(serveCtx, cfg.Exec.OutcomeRetentionInterval.Duration(),
 		cfg.Exec.OutcomeRetention.Duration())
 
-	return eng, serveCtx, lost, stopServing
+	return eng, serveCtx, lost, stopServing, nil
 }
 
 // execOptions maps the loaded configuration onto engine options.

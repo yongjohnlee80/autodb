@@ -84,14 +84,27 @@ var volumeTables = []partitionedTable{
 	},
 }
 
+// monthStart truncates t to the first instant of its month, UTC.
+//
+// Every month step MUST start from this rather than from the raw clock.
+// AddDate normalises overflow, so 31 January plus one month is 3 MARCH — a
+// look-ahead loop stepping from an unnormalised `now` skips February entirely
+// on the 29th, 30th and 31st of January, and skips other months from the 31st.
+// The partition for the skipped month is then never created, its rows land in
+// DEFAULT, and before the adoption path in ensurePartition that was
+// unrecoverable. Three days a year, silently.
+func monthStart(t time.Time) time.Time {
+	u := t.UTC()
+	return time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
 // monthBounds returns the [start, end) unix-second bounds of t's month, UTC.
 //
 // UTC deliberately: a partition boundary that moved with the server's timezone
 // would put the same row in different months on two hosts, and the retention
 // question ("is this month droppable?") would have two answers.
 func monthBounds(t time.Time) (start, end int64) {
-	u := t.UTC()
-	s := time.Date(u.Year(), u.Month(), 1, 0, 0, 0, 0, time.UTC)
+	s := monthStart(t)
 	return s.Unix(), s.AddDate(0, 1, 0).Unix()
 }
 
@@ -138,7 +151,12 @@ func convertToPartitioned(ctx context.Context, ex migExec, p partitionedTable, n
 	if err != nil {
 		return err
 	}
-	months = append(months, now, now.AddDate(0, 1, 0)) // current and next
+	// Current plus the look-ahead, stepped from the month START so a
+	// conversion run on the 31st does not skip the next month (see monthStart).
+	base := monthStart(now)
+	for i := 0; i <= partitionLookAhead; i++ {
+		months = append(months, base.AddDate(0, i, 0))
+	}
 	for _, m := range months {
 		if err := ensurePartition(ctx, ex, p, m); err != nil {
 			return err
@@ -189,24 +207,151 @@ func existingMonths(ctx context.Context, ex migExec, table, timeCol string) ([]t
 	return out, rows.Err()
 }
 
-// ensurePartition creates one month's child table if it is absent.
+// ensurePartition creates one month's child table if it is absent, ADOPTING
+// any rows for that month that have already landed in DEFAULT.
 //
-// IF NOT EXISTS on purpose: the roll runs at startup and on a ticker, and both
-// may reach the same month. Creating it twice must be a no-op rather than a
-// startup failure.
+// The adoption is the load-bearing half, and it was missing (lector's PR #32
+// r0 MF2). Postgres refuses to create a partition whose range overlaps rows
+// sitting in the default partition:
+//
+//	ERROR: updated partition constraint for default partition
+//	"audit_log_pdefault" would be violated by some row (SQLSTATE 23514)
+//
+// So without adoption the DEFAULT partition is not a safety net — it is a
+// TRAP. One missed roll puts a row for that month in DEFAULT, and from then on
+// every attempt to create that month FAILS. Writes keep landing in DEFAULT,
+// the daily roll logs the same error forever, and the month can never be
+// detached for retention because its rows are not in it. A transient miss
+// becomes permanent, and each further month compounds it rather than healing.
+//
+// That inverts the tradeoff the default partition was chosen for. The argument
+// for it — an audit write that FAILS is worse than one in the wrong child
+// table — holds only while "the wrong child table" stays recoverable.
+//
+// IF NOT EXISTS stays on the plain path: the roll runs at startup AND on a
+// ticker, and both may reach the same month, so creating it twice must be a
+// no-op rather than a startup failure.
 func ensurePartition(ctx context.Context, ex migExec, p partitionedTable, month time.Time) error {
 	start, end := monthBounds(month)
 	name := partitionName(p.name, month)
-	_, err := ex.ExecContext(ctx, fmt.Sprintf(
-		`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM (%d) TO (%d)`,
-		name, p.name, start, end))
+
+	// Already there — the steady state, and one cheap catalog lookup.
+	exists, err := relationExists(ctx, ex, name)
 	if err != nil {
-		return fmt.Errorf("creating partition %s: %w", name, err)
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	// Are there rows in DEFAULT this partition would have to claim? Asked
+	// BEFORE creating rather than after a failure, because a failed statement
+	// aborts the surrounding transaction and this runs inside one — recovering
+	// from the error would need a savepoint to learn what one query answers.
+	stranded, err := defaultHoldsRange(ctx, ex, p, start, end)
+	if err != nil {
+		return err
+	}
+	if !stranded {
+		if _, err := ex.ExecContext(ctx, fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES FROM (%d) TO (%d)`,
+			name, p.name, start, end)); err != nil {
+			return fmt.Errorf("creating partition %s: %w", name, err)
+		}
+		return nil
+	}
+	return adoptFromDefault(ctx, ex, p, name, start, end)
+}
+
+// relationExists reports whether a relation of that name is visible.
+func relationExists(ctx context.Context, ex migExec, name string) (bool, error) {
+	rows, err := ex.QueryContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, name)
+	if err != nil {
+		return false, fmt.Errorf("looking up the relation %s: %w", name, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ok bool
+	if rows.Next() {
+		if err := rows.Scan(&ok); err != nil {
+			return false, err
+		}
+	}
+	return ok, rows.Err()
+}
+
+// defaultHoldsRange reports whether the default partition holds any row inside
+// [start, end).
+func defaultHoldsRange(ctx context.Context, ex migExec, p partitionedTable, start, end int64) (bool, error) {
+	def := p.name + "_pdefault"
+	exists, err := relationExists(ctx, ex, def)
+	if err != nil || !exists {
+		return false, err
+	}
+	rows, err := ex.QueryContext(ctx, fmt.Sprintf(
+		`SELECT EXISTS(SELECT 1 FROM %s WHERE %s >= %d AND %s < %d)`,
+		def, p.timeCol, start, p.timeCol, end))
+	if err != nil {
+		return false, fmt.Errorf("checking %s for stranded rows: %w", def, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var found bool
+	if rows.Next() {
+		if err := rows.Scan(&found); err != nil {
+			return false, err
+		}
+	}
+	return found, rows.Err()
+}
+
+// adoptFromDefault creates the month's partition and moves the rows stranded
+// in DEFAULT into it.
+//
+// Postgres offers no way to create an overlapping partition in place, so the
+// default has to step aside: detach it, create the month, re-insert the rows
+// through the PARENT (which now routes them to the new child), delete the
+// originals, re-attach. The caller runs this inside a transaction, so a
+// failure at any step leaves the default attached and its rows untouched —
+// the state before the attempt, never a store with no default partition.
+func adoptFromDefault(ctx context.Context, ex migExec, p partitionedTable, name string, start, end int64) error {
+	def := p.name + "_pdefault"
+	steps := []struct {
+		what string
+		sql  string
+	}{
+		{"detaching the default partition", fmt.Sprintf(
+			`ALTER TABLE %s DETACH PARTITION %s`, p.name, def)},
+		{"creating the month partition", fmt.Sprintf(
+			`CREATE TABLE %s PARTITION OF %s FOR VALUES FROM (%d) TO (%d)`,
+			name, p.name, start, end)},
+		{"re-routing the stranded rows", fmt.Sprintf(
+			`INSERT INTO %s SELECT * FROM %s WHERE %s >= %d AND %s < %d`,
+			p.name, def, p.timeCol, start, p.timeCol, end)},
+		{"clearing the adopted rows from the default", fmt.Sprintf(
+			`DELETE FROM %s WHERE %s >= %d AND %s < %d`, def, p.timeCol, start, p.timeCol, end)},
+		{"re-attaching the default partition", fmt.Sprintf(
+			`ALTER TABLE %s ATTACH PARTITION %s DEFAULT`, p.name, def)},
+	}
+	for _, s := range steps {
+		if _, err := ex.ExecContext(ctx, s.sql); err != nil {
+			return fmt.Errorf("adopting stranded %s rows into %s (%s): %w",
+				p.name, name, s.what, err)
+		}
 	}
 	return nil
 }
 
-// RollPartitions creates the current and next month's partitions if absent.
+// partitionLookAhead is how many months past the current one the roll keeps
+// covered.
+//
+// Three, matching the house convention, rather than the one this shipped with.
+// The look-ahead has to exceed the roll interval by a margin, because what it
+// buys is survivable MISSES: at three, two consecutive failed rolls still leave
+// the current month covered. At one, a single missed roll across a boundary
+// strands rows in DEFAULT — which ensurePartition can now recover from, but
+// not having to is better than recovering.
+const partitionLookAhead = 3
+
+// RollPartitions creates the coming months' partitions if absent.
 //
 // Called at startup AND on a ticker. Startup alone is not enough: a daemon
 // that stays up across a month boundary would find no partition for the new
@@ -214,22 +359,55 @@ func ensurePartition(ctx context.Context, ex migExec, p partitionedTable, month 
 // so nothing would fail and nobody would notice until a retention drop tried
 // to detach a month whose rows were somewhere else.
 //
-// "Current and next" rather than just current, so the boundary is crossed with
-// the partition already in place rather than in the same instant the clock
-// rolls over.
+// It runs in ONE transaction holding an advisory lock, which the adoption path
+// in ensurePartition requires: recovering stranded rows detaches the default
+// partition, creates the month, moves the rows and re-attaches. Two daemons
+// doing that concurrently would race over the detached default, and a crash
+// mid-sequence without the transaction would leave the table with NO default
+// partition — turning a recoverable state into failed writes.
 //
 // A no-op on sqlite, so callers do not have to branch on the engine.
 func (s *Store) RollPartitions(ctx context.Context, now time.Time) error {
 	if s.engine != "postgres" {
 		return nil
 	}
+	tx, err := s.conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("meta: beginning the partition roll transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	sysID, dbOID, err := serverIdentity(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("meta: reading the server identity for the partition roll: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SET LOCAL lock_timeout = '30000ms'"); err != nil {
+		return fmt.Errorf("meta: bounding the partition roll lock wait: %w", err)
+	}
+	// Its own key namespace: a roll must not block, or be blocked by, a
+	// migration holding the other lock for a long upgrade.
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)",
+		advisoryKey("autodb-partition-roll", sysID, dbOID)); err != nil {
+		return fmt.Errorf("meta: waiting for the partition roll lock: %w", err)
+	}
+
 	for _, p := range volumeTables {
-		for _, m := range []time.Time{now, now.AddDate(0, 1, 0)} {
-			if err := ensurePartition(ctx, s.conn, p, m); err != nil {
+		base := monthStart(now)
+		for i := 0; i <= partitionLookAhead; i++ {
+			if err := ensurePartition(ctx, tx, p, base.AddDate(0, i, 0)); err != nil {
 				return err
 			}
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("meta: committing the partition roll: %w", err)
+	}
+	committed = true
 	return nil
 }
 
@@ -328,4 +506,82 @@ func joinStrings(in []string, sep string) string {
 		out += s
 	}
 	return out
+}
+
+// maxPrepartitionMonths bounds how many months a migration will pre-create.
+//
+// A store with a corrupt timestamp — a row at unix epoch 0, say — would
+// otherwise ask for six hundred years of partitions. The cap keeps a bad row
+// from turning a migration into a catalog flood; rows older than the covered
+// span still arrive safely, they just land in DEFAULT, which ensurePartition
+// can now adopt them out of.
+const maxPrepartitionMonths = 600
+
+// prepartitionForSource creates destination partitions covering every month
+// the SOURCE's volume tables actually span, before the copy runs.
+//
+// Without this the migration copies years of history into a destination whose
+// only partitions are the current month and its look-ahead, so EVERY
+// historical audit and history row lands in DEFAULT (Johno, 2026-09-01). That
+// is bad on its own — those months can never be detached for retention because
+// their rows are not in them — and it used to be unrecoverable, since a
+// partition cannot be created over rows already sitting in DEFAULT. The
+// adoption path in ensurePartition would now dig it back out one month at a
+// time, but a migration that needs digging out is a migration done wrong.
+//
+// The months come from the source's own MIN/MAX rather than from a fixed
+// window, for the same reason the v11 conversion computes its months: the
+// answer is in the data, and no static window knows how far back a store goes.
+//
+// A no-op unless the destination is postgres.
+func prepartitionForSource(ctx context.Context, src, dst *Store) error {
+	if dst.engine != "postgres" {
+		return nil
+	}
+	for _, p := range volumeTables {
+		lo, hi, ok, err := timeSpan(ctx, src.conn, p)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue // no rows: the roll's own months are enough
+		}
+		first, last := monthStart(time.Unix(lo, 0)), monthStart(time.Unix(hi, 0))
+		// Walk back from the newest month so that a span past the cap keeps
+		// the RECENT history — the part anyone is going to query — and leaves
+		// only the oldest rows for DEFAULT.
+		var months []time.Time
+		for m := last; !m.Before(first) && len(months) < maxPrepartitionMonths; m = m.AddDate(0, -1, 0) {
+			months = append(months, m)
+		}
+		for _, m := range months {
+			if err := ensurePartition(ctx, dst.conn, p, m); err != nil {
+				return fmt.Errorf("%w: preparing the destination for %s history: %v",
+					ErrMigrate, p.name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// timeSpan reports the [min, max] of a table's partition-key column, and
+// whether the table had any rows at all.
+func timeSpan(ctx context.Context, ex migExec, p partitionedTable) (lo, hi int64, ok bool, err error) {
+	rows, qerr := ex.QueryContext(ctx, fmt.Sprintf(
+		`SELECT MIN(%s), MAX(%s) FROM %s`, p.timeCol, p.timeCol, p.name))
+	if qerr != nil {
+		return 0, 0, false, fmt.Errorf("reading the %s time span: %w", p.name, qerr)
+	}
+	defer func() { _ = rows.Close() }()
+	if rows.Next() {
+		// NULL on both when the table is empty.
+		var lov, hiv *int64
+		if serr := rows.Scan(&lov, &hiv); serr != nil {
+			return 0, 0, false, serr
+		}
+		if lov != nil && hiv != nil {
+			return *lov, *hiv, true, rows.Err()
+		}
+	}
+	return 0, 0, false, rows.Err()
 }

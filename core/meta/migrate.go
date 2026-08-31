@@ -33,6 +33,11 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 	if err := ensureEmpty(ctx, dst); err != nil {
 		return err
 	}
+	// The destination's partitions must span the SOURCE's history before a
+	// single row is copied (Johno, 2026-09-01).
+	if err := prepartitionForSource(ctx, src, dst); err != nil {
+		return err
+	}
 
 	// FK-dependency order.
 	counts := map[string]int64{}
