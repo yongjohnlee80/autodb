@@ -673,6 +673,12 @@ type ExecResult struct {
 
 // Run executes the buffer as a SCRIPT: one statement or many, run in
 // order server-side, with the last statement's result coming back.
+//
+// Since protocol 5 the server also decides HOW to run it: a script
+// containing a transaction boundary runs inside one transaction, so a
+// `BEGIN; …; COMMIT;` in the editor applies all or nothing; a script
+// without one keeps the old statement-by-statement behaviour. The
+// distinction is the server's, which is why this call site is unchanged.
 func (b *Bound) Run(ctx context.Context, connID int64, sql string) (*ExecResult, error) {
 	res, err := b.authed(ctx, "exec.run_script", connID, sql)
 	if err != nil {
