@@ -1,8 +1,6 @@
 package frontdoor
 
 import (
-	"fmt"
-
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
@@ -63,5 +61,3 @@ func denial(reason denialReason) *pgproto3.ErrorResponse {
 // String makes a reason usable in an audit detail without a conversion at
 // every call site.
 func (r denialReason) String() string { return string(r) }
-
-var _ = fmt.Sprintf

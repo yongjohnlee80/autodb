@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -326,5 +327,179 @@ func TestStartup_UnrecognizedProtocolOptionsAreNamed(t *testing.T) {
 	// Sorted, so the message is deterministic and testable at all.
 	if n.UnrecognizedOptions[0] != "_pq_.another_thing" || n.UnrecognizedOptions[1] != "_pq_.something" {
 		t.Errorf("UnrecognizedOptions = %v, want them sorted", n.UnrecognizedOptions)
+	}
+}
+
+// MF1. Row 2.2 refuses GSS encryption with 'N' and lets the client CARRY ON:
+// 'N' is the protocol's own way of declining an option, and libpq's next move
+// after it is to ask for TLS. Answering 'N' and hanging up turned a declined
+// option into a dead connection, so a client that tried GSS first could never
+// reach TLS at all — while this file's own prose claimed otherwise.
+func TestStartup_GSSRefusalLetsTheClientProceedToTLS(t *testing.T) {
+	t.Parallel()
+	_, _, addr := liveListener(t)
+
+	c := dial(t, addr)
+	gss := make([]byte, 8)
+	binary.BigEndian.PutUint32(gss[0:4], 8)
+	binary.BigEndian.PutUint32(gss[4:8], 80877104)
+	if _, err := c.Write(gss); err != nil {
+		t.Fatal(err)
+	}
+	answer := make([]byte, 1)
+	if _, err := c.Read(answer); err != nil || answer[0] != 'N' {
+		t.Fatalf("GSS answer = %q err %v, want 'N'", answer, err)
+	}
+
+	// THE POINT: the connection is still usable. Ask for TLS.
+	if _, err := c.Write(sslRequest()); err != nil {
+		t.Fatalf("the connection was closed after the GSS refusal: %v", err)
+	}
+	if _, err := c.Read(answer); err != nil {
+		t.Fatalf("no answer to SSLRequest after a GSS refusal: %v", err)
+	}
+	if answer[0] != 'S' {
+		t.Fatalf("SSLRequest after GSS answered %q, want 'S' — declining one option must not "+
+			"end the connection, or a client that tries GSS first can never reach TLS", answer[0])
+	}
+	tc := tls.Client(c, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // not the subject
+	if err := tc.Handshake(); err != nil {
+		t.Fatalf("handshake after a GSS refusal: %v", err)
+	}
+}
+
+// MF2. Direct TLS is a TLS failure, not an authentication denial — the peer
+// never presented a credential. Calling it fd.auth_denied puts a
+// non-authentication event in the trail an operator reads to count credential
+// attacks, and writing a PostgreSQL error frame to a client speaking raw TLS
+// is noise on the wire.
+func TestStartup_DirectTLSIsATLSFailureNotAnAuthDenial(t *testing.T) {
+	t.Parallel()
+	_, events, addr := liveListener(t)
+
+	c := dial(t, addr)
+	// A TLS ClientHello, which is what sslnegotiation=direct sends first.
+	tc := tls.Client(c, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"postgresql"}}) //nolint:gosec // not the subject
+	_ = tc.Handshake()                                                                             // expected to fail; the server refuses
+
+	var kinds []string
+	var reason string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		kinds = kinds[:0]
+		for _, ev := range events() {
+			kinds = append(kinds, ev.Kind)
+			if ev.Kind == "fd.tls_fail" {
+				reason = ev.Reason
+			}
+		}
+		if reason != "" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if reason == "" {
+		t.Fatalf("direct TLS emitted no fd.tls_fail; events were %v", kinds)
+	}
+	if reason != "direct-tls-unsupported" {
+		t.Errorf("fd.tls_fail reason = %q, want direct-tls-unsupported", reason)
+	}
+	for _, k := range kinds {
+		if k == "fd.auth_denied" {
+			t.Error("direct TLS was audited as an AUTHENTICATION denial; no credential was ever " +
+				"presented, and the auth trail is what an operator counts credential attacks in")
+		}
+	}
+}
+
+// MF3. §3.1's accepted set is CLOSED. A parameter outside it is refused FOR
+// being refused — not allowed to fall through to whatever denies next.
+func TestStartup_ParameterPolicy(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+		refuse bool
+	}{
+		{"the pinned set", map[string]string{
+			"user": "root", "database": "lm-prod",
+			"application_name": "psql", "client_encoding": "UTF8",
+		}, false},
+		{"an unknown parameter is a GUC attempt", map[string]string{
+			"user": "root", "search_path": "public",
+		}, true},
+		{"replication is refused at any value", map[string]string{
+			"user": "root", "replication": "database",
+		}, true},
+		{"a non-UTF8 client_encoding", map[string]string{
+			"user": "root", "client_encoding": "LATIN1",
+		}, true},
+		{"UTF-8 spelled with a hyphen is still UTF8", map[string]string{
+			"user": "root", "client_encoding": "utf-8",
+		}, false},
+		{"options that sets a GUC", map[string]string{
+			"user": "root", "options": "-c search_path=public",
+		}, true},
+		{"options in the --key=val spelling", map[string]string{
+			"user": "root", "options": "--search_path=public",
+		}, true},
+		{"empty options is accepted and ignored", map[string]string{
+			"user": "root", "options": "   ",
+		}, false},
+		{"_pq_ extensions are negotiated, not refused", map[string]string{
+			"user": "root", "_pq_.some_extension": "1",
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			refused, ok := checkStartupParams(tc.params)
+			if tc.refuse && ok {
+				t.Errorf("%v was accepted; PostgreSQL treats an unknown startup parameter as a "+
+					"GUC attempt, and a client-controlled GUC must not reach the pinned target",
+					tc.params)
+			}
+			if !tc.refuse && !ok {
+				t.Errorf("%v was refused as %q", tc.params, refused)
+			}
+		})
+	}
+}
+
+// And the refusal reaches the wire as the uniform denial while the AUDIT
+// names the parameter — the caller learns that startup failed, not which
+// parameter this server dislikes.
+func TestStartup_RefusedParameterIsAuditedButNotDisclosed(t *testing.T) {
+	t.Parallel()
+	_, events, addr := liveListener(t)
+
+	tc := tlsDial(t, addr)
+	if _, err := tc.Write(startupPacket(protocolVersion30, map[string]string{
+		"user": "root", "search_path": "public",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	e := readDenial(t, tc)
+	if e.Code != DenialSQLState || e.Message != DenialMessage {
+		t.Fatalf("got %s/%q, want the uniform denial", e.Code, e.Message)
+	}
+	if strings.Contains(strings.ToLower(e.Message+e.Detail), "search_path") {
+		t.Error("the wire names the refused parameter, which maps the accepted set for anyone " +
+			"willing to ask repeatedly")
+	}
+
+	var reason string
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && reason == "" {
+		for _, ev := range events() {
+			if ev.Kind == "fd.auth_denied" {
+				reason = ev.Reason
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if reason != reasonStartupParamRefus.String() {
+		t.Errorf("audited reason = %q, want %q — a refused parameter must be refused FOR that, "+
+			"not left to fall through to whatever denies next", reason, reasonStartupParamRefus)
 	}
 }
