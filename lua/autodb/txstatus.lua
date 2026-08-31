@@ -9,7 +9,11 @@
 ---outcome API, which is the single place that folds the transition log.
 
 local session = require("autodb.session")
-local log = require("auto-core.log")
+-- The plugin's own wrapper, never auto-core.log directly: ADR-0021 §6 gives
+-- every auto-family plugin exactly one lua/<plugin>/log.lua so changing the
+-- sink is a one-file change rather than a sweep of call sites. Every other
+-- autodb module already does this; this one was the outlier.
+local log = require("autodb.log")
 
 local M = {}
 

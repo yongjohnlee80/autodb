@@ -831,6 +831,18 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if txID != "" {
+			// The single-transaction form takes exactly two arguments. A
+			// third alongside a non-empty id is not a defined shape, and
+			// accepting it silently would let a caller write
+			// tx.status(token, id, limit) — a reading that looks obvious and
+			// means nothing here — and receive an answer about the id while
+			// their limit was quietly discarded. A verb that ignores an
+			// argument teaches the wrong contract to whoever copies the call.
+			if n != 2 {
+				return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+					Message: "tx.status with a tx_id takes exactly (token, tx_id); " +
+						"a limit applies only to the pending form (token, \"\", limit)"}
+			}
 			st, terr := s.eng.TxOutcome(ctx, token, txID)
 			if terr != nil {
 				return nil, wireErr(terr)

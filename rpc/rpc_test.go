@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 	"net"
 	"os"
 	"sync/atomic"
@@ -1246,13 +1247,33 @@ func TestTxStatusOverWire(t *testing.T) {
 		t.Fatalf("pending is not a list: %#v", m)
 	}
 
-	// Arity: two forms only.
-	for _, bad := range [][]any{
-		{f.rootTok},
-		{f.rootTok, "", int64(1), "extra"},
+	// Arity: two DEFINED forms, and nothing else.
+	//
+	// The third case is the one lector found. The handler accepted three
+	// arguments globally and then, seeing a non-empty id, answered about the
+	// transaction — silently discarding the limit. `tx.status(token, id,
+	// limit)` is a reading that looks obvious and means nothing here, and a
+	// verb that ignores an argument teaches the wrong contract to whoever
+	// copies the call.
+	for _, tc := range []struct {
+		name string
+		args []any
+	}{
+		{"too few", []any{f.rootTok}},
+		{"too many", []any{f.rootTok, "", int64(1), "extra"}},
+		{"a limit alongside a tx id is not a defined form",
+			[]any{f.rootTok, "tx-that-never-was", int64(1)}},
 	} {
-		if errVal, _ := c.call("tx.status", bad...); errVal == nil {
-			t.Errorf("tx.status accepted %d argument(s)", len(bad))
+		errVal, _ := c.call("tx.status", tc.args...)
+		if errVal == nil {
+			t.Errorf("tx.status accepted %s: %v", tc.name, tc.args)
+			continue
+		}
+		m, _ := errVal.(map[string]any)
+		if code, _ := m["code"].(int64); code != golibrpc.CodeInvalidParams {
+			t.Errorf("%s: code = %d, want CodeInvalidParams (%d) — an undefined shape must be "+
+				"refused as malformed, not answered as if it were one of the defined ones",
+				tc.name, code, golibrpc.CodeInvalidParams)
 		}
 	}
 
