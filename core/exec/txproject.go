@@ -162,27 +162,40 @@ func (e *Engine) repairPendingHistory(ctx context.Context) {
 	//
 	// The cursor is on history id, and it wraps on a short page so rows
 	// ahead of it come round again.
-	after := e.reconcile.cursor(repairCursorScope)
+	// The same finite rotation as the reconciler, for the same reason: a
+	// cursor that only wraps on a short page chases a continuously-fed tail
+	// forever and never revisits an older strand (PR #20 r3 MF1).
+	cyc := e.reconcile.cycle(repairCursorScope)
+	if cyc.end == 0 {
+		end, herr := e.pendingHistoryHighWater(ctx)
+		if herr != nil {
+			e.logf("looking for stranded history rows: %v", herr)
+			return
+		}
+		if end == 0 {
+			return // nothing pending at all
+		}
+		cyc.end = end
+	}
 	q := e.store.History.OnCtx(ctx).
 		With(meta.HistStatus, StatusPendingCommit).
-		OrderBy(dao.Asc(meta.HistByID))
-	if after > 0 {
-		q = q.WithPredicate(dao.Gt(string(meta.HistID), after))
+		OrderBy(dao.Asc(meta.HistByID)).
+		WithPredicate(dao.Lte(string(meta.HistID), cyc.end))
+	if cyc.cursor > 0 {
+		q = q.WithPredicate(dao.Gt(string(meta.HistID), cyc.cursor))
 	}
 	rows, err := q.Limit(maxReconcileBatch).Select()
 	if err != nil {
 		e.logf("looking for stranded history rows: %v", err)
 		return
 	}
-	next := int64(0)
-	if len(rows) == maxReconcileBatch {
-		for _, r := range rows {
-			if r.ID > next {
-				next = r.ID
-			}
+	last := int64(0)
+	for _, r := range rows {
+		if r.ID > last {
+			last = r.ID
 		}
 	}
-	e.reconcile.setCursor(repairCursorScope, next)
+	e.reconcile.advance(repairCursorScope, last, cyc.end, len(rows) > 0)
 
 	seen := map[string]bool{}
 	for _, r := range rows {
@@ -203,6 +216,17 @@ func (e *Engine) repairPendingHistory(ctx context.Context) {
 		e.logf("repairing history left pending under settled transaction %s", r.TxID)
 		e.resolveHistory(ctx, r.TxID, st.State)
 	}
+}
+
+// pendingHistoryHighWater is the rotation boundary for the repair sweep.
+func (e *Engine) pendingHistoryHighWater(ctx context.Context) (int64, error) {
+	rows, err := e.store.History.OnCtx(ctx).
+		With(meta.HistStatus, StatusPendingCommit).
+		OrderBy(dao.Desc(meta.HistByID)).Limit(1).Select()
+	if err != nil || len(rows) == 0 {
+		return 0, err
+	}
+	return rows[0].ID, nil
 }
 
 // repairCursorScope keys the repair sweep's paging position in the shared

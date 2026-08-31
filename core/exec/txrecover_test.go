@@ -353,7 +353,7 @@ func TestPendingGroups_ReturnsOnlyTheUnresolvedBacklog(t *testing.T) {
 	}
 	seedCrashWindow(t, f, "tx_really_pending", f.connID, "77")
 
-	groups, _, err := f.eng.pendingGroups(ctx, 0, maxReconcileBatch, 0)
+	groups, _, err := f.eng.pendingGroups(ctx, 0, maxReconcileBatch, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -868,4 +868,117 @@ func TestReconcile_TheCursorWrapsSoEarlierEntriesComeRoundAgain(t *testing.T) {
 	t.Fatalf("state = %s — the cursor ran off the end and never came back, so an entry "+
 		"that became resolvable behind it is starved just as badly",
 		stateOf(t, f, "tx_front_000").State)
+}
+
+// --- r3 MF1: a rotation must be FINITE, not just forward-moving -----------
+
+// An old entry must be revisited even while newer ones keep arriving.
+//
+// Wrapping on a short page is not fairness. If new entries arrive as fast as
+// a page is consumed, every page is full, the cursor chases the tail forever,
+// and an entry with a low id is never revisited at all — the same starvation
+// as a fixed first page, reached from the opposite direction. The
+// stop-arriving wrap cell cannot see this, because its queue eventually
+// drains.
+//
+// The fix is a rotation BOUNDARY: the high-water mark taken when a rotation
+// begins. Everything at or below it is visited within that rotation whatever
+// arrives afterwards.
+func TestReconcile_RevisitsAnOldEntryWhileNewerOnesKeepArriving(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// The old one, at the front of the queue, and initially not resolvable.
+	seedTx(t, f, "tx_ancient", 1, f.connID, meta.TxOpened)
+
+	// Each pass is preceded by a fresh full page of NEWER entries which
+	// resolve and dequeue during it, so the queue never grows unboundedly
+	// and never returns a short page either.
+	burst := 0
+	feed := func() {
+		for i := 0; i < maxReconcileBatch; i++ {
+			seedCrashWindow(t, f, fmt.Sprintf("tx_new_%d_%03d", burst, i), f.connID, "1")
+		}
+		burst++
+	}
+
+	feed()
+	f.eng.ReconcileOutcomes(ctx)
+	// Now the old one becomes resolvable, behind everything.
+	if err := f.eng.appendTxOutcome(ctx, txTransition{
+		txID: "tx_ancient", state: meta.TxCommitStarted,
+		connectionID: f.connID, targetXID: "2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 4; i++ {
+		feed()
+		f.eng.ReconcileOutcomes(ctx)
+		if stateOf(t, f, "tx_ancient").Terminal() {
+			return
+		}
+	}
+	t.Fatalf("state = %s after four passes fed with newer work — the cursor chases the "+
+		"tail and never comes back to an entry that has been waiting the longest",
+		stateOf(t, f, "tx_ancient").State)
+}
+
+// The same for the history repair sweep, against a bounded pending set.
+func TestRepairPendingHistory_RevisitsAnOldStrandWhileNewerPendingArrive(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// An old strand: settled outcome, surface still pending.
+	seedTx(t, f, "tx_oldstrand", 1, f.connID, meta.TxOpened, meta.TxCommitted)
+	seedHistory(t, f, "tx_oldstrand", StatusPendingCommit)
+
+	burst := 0
+	feed := func() {
+		for i := 0; i < maxReconcileBatch; i++ {
+			id := fmt.Sprintf("tx_live_%d_%03d", burst, i)
+			seedCrashWindow(t, f, id, f.connID, "1")
+			seedHistory(t, f, id, StatusPendingCommit)
+		}
+		burst++
+	}
+
+	for i := 0; i < 4; i++ {
+		feed()
+		f.eng.repairPendingHistory(ctx)
+		if got := histStatus(t, f, "tx_oldstrand"); len(got) == 1 && got[0] == StatusOK {
+			return
+		}
+	}
+	t.Fatalf("history = %v after four sweeps fed with newer pending rows — the sweep "+
+		"chases the tail and never returns to the oldest strand",
+		histStatus(t, f, "tx_oldstrand"))
+}
+
+// The history repair must not depend on the outcome queue being non-empty.
+//
+// A stranded history row belongs to a SETTLED transaction, which by
+// definition is no longer queued. Gating the sweep on a non-empty queue means
+// the one case it exists for is the case it never runs in — which is what
+// happened when the rotation's empty-queue early return was added above it.
+func TestReconcile_RepairsHistoryEvenWithAnEmptyQueue(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	seedTx(t, f, "tx_settled_strand", 1, f.connID, meta.TxOpened, meta.TxCommitted)
+	seedHistory(t, f, "tx_settled_strand", StatusPendingCommit)
+
+	// Precondition: nothing is queued, because the transaction is settled.
+	if n, _ := f.store.TxPending.OnCtx(ctx).Count(); n != 0 {
+		t.Fatalf("queue holds %d rows; this cell needs an empty queue to mean anything", n)
+	}
+
+	f.eng.ReconcileOutcomes(ctx)
+	if got := histStatus(t, f, "tx_settled_strand"); len(got) != 1 || got[0] != StatusOK {
+		t.Fatalf("history = %v — the repair was skipped because the queue was empty, which "+
+			"is exactly when a stranded row can exist", got)
+	}
 }

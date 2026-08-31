@@ -100,7 +100,8 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 		{"tx_pending", func() (int64, error) {
 			return copyAll(ctx, src.TxPending, dst.TxPending, func(r *TxPending) map[TxPendingField]any {
 				return map[TxPendingField]any{TxPendID: r.ID, TxPendTxID: r.TxID,
-					TxPendConnID: r.ConnectionID, TxPendCreatedAt: r.CreatedAt}
+					TxPendConnID: r.ConnectionID, TxPendUserID: r.UserID,
+					TxPendCreatedAt: r.CreatedAt}
 			})
 		}},
 		// The outcome log migrates with everything else. It is evidence: a
@@ -198,6 +199,7 @@ func ensureEmpty(ctx context.Context, dst *Store) error {
 		{"script_history", dst.History.OnCtx(ctx).Count},
 		{"audit_log", dst.Audit.OnCtx(ctx).Count},
 		{"tx_outcomes", dst.TxOutcomes.OnCtx(ctx).Count},
+		{"tx_pending", dst.TxPending.OnCtx(ctx).Count},
 		{"ip_allowlist", dst.AllowedIPs.OnCtx(ctx).Count},
 		{"store_meta", dst.KV.OnCtx(ctx).Count},
 	}
@@ -225,6 +227,7 @@ func verifyCounts(ctx context.Context, dst *Store, want map[string]int64) error 
 		"script_history":        dst.History.OnCtx(ctx).Count,
 		"audit_log":             dst.Audit.OnCtx(ctx).Count,
 		"tx_outcomes":           dst.TxOutcomes.OnCtx(ctx).Count,
+		"tx_pending":            dst.TxPending.OnCtx(ctx).Count,
 		"ip_allowlist":          dst.AllowedIPs.OnCtx(ctx).Count,
 		"store_meta":            dst.KV.OnCtx(ctx).Count,
 	}

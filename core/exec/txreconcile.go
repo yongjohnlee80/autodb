@@ -52,10 +52,10 @@ type reconciler struct {
 	mu       sync.Mutex
 	inFlight map[string]bool
 	nextTry  map[string]time.Time
-	// cursors carry each scope's paging position between passes, so a pass
-	// resumes rather than restarting. Keyed by connection id, 0 for the
-	// unscoped pass.
-	cursors map[int64]int64
+	// cycles carry each scope's paging position AND the boundary of the
+	// rotation it is part way through. Keyed by connection id, 0 for the
+	// unscoped pass, negative for the history sweep.
+	cycles map[int64]pageCycle
 	// nextCheckout throttles the checkout trigger per connection, so the
 	// engine's hottest path does not become a meta-store query per statement.
 	nextCheckout map[int64]time.Time
@@ -65,7 +65,7 @@ func newReconciler() *reconciler {
 	return &reconciler{
 		inFlight:     map[string]bool{},
 		nextTry:      map[string]time.Time{},
-		cursors:      map[int64]int64{},
+		cycles:       map[int64]pageCycle{},
 		nextCheckout: map[int64]time.Time{},
 	}
 }
@@ -141,20 +141,44 @@ func (r *reconciler) claimCheckout(connID int64, now time.Time) bool {
 	return true
 }
 
-func (r *reconciler) cursor(scope int64) int64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.cursors[scope]
+// pageCycle is one rotation through a scope's backlog.
+//
+// `end` is the HIGH-WATER MARK taken when the rotation began: the largest id
+// present at that moment. Paging runs from `cursor` up to `end` and then
+// starts over.
+//
+// The boundary is what makes the rotation finite (PR #20 r3 MF1). Wrapping
+// only on a short page is not enough: if new entries keep arriving faster
+// than a page is consumed, every page is full, the cursor chases the tail
+// forever, and an entry with a low id is never revisited at all — the same
+// starvation as a fixed first page, reached from the opposite direction and
+// invisible to a test whose queue eventually drains. With a boundary, every
+// entry present when the rotation began is visited within that rotation, no
+// matter what arrives afterwards.
+type pageCycle struct {
+	cursor int64 // last id read; 0 starts a new rotation
+	end    int64 // high-water mark for this rotation; 0 means none is open
 }
 
-func (r *reconciler) setCursor(scope, next int64) {
+func (r *reconciler) cycle(scope int64) pageCycle {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if next == 0 {
-		delete(r.cursors, scope)
+	return r.cycles[scope]
+}
+
+// advance records progress, closing the rotation when it reaches its
+// boundary or runs out of rows.
+func (r *reconciler) advance(scope, lastID int64, end int64, full bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if lastID == 0 || !full || lastID >= end {
+		// Reached the boundary, or the rows ran out before it. Either way
+		// this rotation is done and the next one takes a fresh high-water
+		// mark — so entries added or skipped during it come round again.
+		delete(r.cycles, scope)
 		return
 	}
-	r.cursors[scope] = next
+	r.cycles[scope] = pageCycle{cursor: lastID, end: end}
 }
 
 // claimed reports whether a backoff is currently recorded for a transaction.
@@ -192,31 +216,40 @@ func (e *Engine) ReconcileConnection(ctx context.Context, connID int64) int {
 // reconcileScope resolves the pending backlog, optionally narrowed to one
 // connection.
 func (e *Engine) reconcileScope(ctx context.Context, connID int64) int {
-	// Start where the last pass stopped. A LIMIT with no cursor is a page,
-	// not a position: with a screenful of LIVE `opened` rows at the front —
-	// which this pass correctly skips — every pass re-reads them and a
-	// resolvable entry behind them is never reached at all. That is
-	// starvation, not slowness, and no amount of waiting fixes it
-	// (PR #20 r2 MF1).
-	byTx, next, err := e.pendingGroups(ctx, connID, maxReconcileBatch, e.reconcile.cursor(connID))
+	// The history repair runs FIRST and independently of the queue.
+	//
+	// A stranded history row belongs to a SETTLED transaction, which by
+	// definition is no longer queued — so gating this on a non-empty queue
+	// means the one case it exists for is the case it never runs in. It
+	// stays unscoped-only, since it looks for pending history rows rather
+	// than one connection's.
+	if connID == 0 {
+		e.repairPendingHistory(ctx)
+	}
+
+	// Resume the rotation in progress, or open a new one.
+	//
+	// A pass is bounded, so it cannot settle everything; what matters is
+	// that it always makes progress through a FINITE cycle rather than
+	// re-reading a page or chasing new arrivals (PR #20 r3 MF1).
+	cyc := e.reconcile.cycle(connID)
+	if cyc.end == 0 {
+		end, herr := e.queueHighWater(ctx, connID)
+		if herr != nil {
+			e.logf("reconciling outcomes: reading the queue: %v", herr)
+			return 0
+		}
+		if end == 0 {
+			return 0 // empty backlog: a pass over nothing is a no-op
+		}
+		cyc.end = end
+	}
+	byTx, last, err := e.pendingGroups(ctx, connID, maxReconcileBatch, cyc.cursor, cyc.end)
 	if err != nil {
 		e.logf("reconciling outcomes: reading the log: %v", err)
 		return 0
 	}
-	// A short page means the end; the cursor wraps so the next pass starts
-	// over and entries added or skipped earlier come round again.
-	e.reconcile.setCursor(connID, next)
-
-	// One bounded sweep per pass for rows stranded under a settled outcome,
-	// rather than a query per settled transaction.
-	//
-	// Only on the UNSCOPED pass. The sweep is global by nature — it looks
-	// for pending history rows, not for one connection's — so running it
-	// from the checkout trigger would repeat the same global work once per
-	// active connection while pretending to be scoped.
-	if connID == 0 {
-		e.repairPendingHistory(ctx)
-	}
+	e.reconcile.advance(connID, last, cyc.end, len(byTx) > 0)
 
 	now := e.now()
 	resolved := 0
@@ -268,13 +301,19 @@ const maxReconcileBatch = 200
 // costs one bounded indexed read and nothing else. The full group is then
 // re-read for the ones it names, because the queue carries no state and the
 // log stays the single source of truth.
-func (e *Engine) pendingGroups(ctx context.Context, connID int64, limit int, after int64) (map[string][]*meta.TxOutcome, int64, error) {
+func (e *Engine) pendingGroups(ctx context.Context, connID int64, limit int, after, upto int64) (map[string][]*meta.TxOutcome, int64, error) {
 	q := e.store.TxPending.OnCtx(ctx).OrderBy(dao.Asc(meta.TxPendByID))
 	if connID != 0 {
 		q = q.With(meta.TxPendConnID, connID)
 	}
 	if after > 0 {
 		q = q.WithPredicate(dao.Gt(string(meta.TxPendID), after))
+	}
+	if upto > 0 {
+		// Bounded ABOVE by the rotation's high-water mark, so rows that
+		// arrive mid-rotation belong to the next one and cannot keep the
+		// cursor running ahead of the entries it has not visited yet.
+		q = q.WithPredicate(dao.Lte(string(meta.TxPendID), upto))
 	}
 	// The CALLER's bound, not this file's. Clamping to maxReconcileBatch
 	// here would silently cap the read API at the reconciler's batch size,
@@ -288,14 +327,12 @@ func (e *Engine) pendingGroups(ctx context.Context, connID int64, limit int, aft
 	if err != nil {
 		return nil, 0, err
 	}
-	// The highest id READ, so the caller can continue past this page. Zero
-	// when the page came back short, which means the cursor should wrap.
+	// The highest id READ. The CALLER decides what that means for the
+	// rotation; this function only reports where it got to.
 	var next int64
-	if len(queued) == limit {
-		for _, r := range queued {
-			if r.ID > next {
-				next = r.ID
-			}
+	for _, r := range queued {
+		if r.ID > next {
+			next = r.ID
 		}
 	}
 	byTx := map[string][]*meta.TxOutcome{}
@@ -314,6 +351,22 @@ func (e *Engine) pendingGroups(ctx context.Context, connID int64, limit int, aft
 		byTx[r.TxID] = append(byTx[r.TxID], r)
 	}
 	return byTx, next, nil
+}
+
+// queueHighWater returns the largest queue id currently present in a scope.
+//
+// It is the rotation boundary: every entry at or below it existed when the
+// rotation began and must be visited before the cursor resets.
+func (e *Engine) queueHighWater(ctx context.Context, connID int64) (int64, error) {
+	q := e.store.TxPending.OnCtx(ctx).OrderBy(dao.Desc(meta.TxPendByID))
+	if connID != 0 {
+		q = q.With(meta.TxPendConnID, connID)
+	}
+	rows, err := q.Limit(1).Select()
+	if err != nil || len(rows) == 0 {
+		return 0, err
+	}
+	return rows[0].ID, nil
 }
 
 // needsOracle reports whether a nonterminal state can only be settled by
@@ -469,33 +522,35 @@ func (e *Engine) RecoverStaleOpen(ctx context.Context) int {
 			"`opened` row can no longer be assumed to belong to a dead process", n)
 		return 0
 	}
-	// Startup recovery pages the WHOLE queue rather than one batch: it runs
-	// once, before serving, and an inherited transaction it skipped would
-	// have no other owner to settle it.
-	byTx := map[string][]*meta.TxOutcome{}
+	// Startup recovery walks the WHOLE queue — it runs once, before serving,
+	// and an inherited transaction it skipped would have no other owner to
+	// settle it. Each page is PROCESSED and released rather than accumulated
+	// into one map: bounding the SQL parameters while letting the result set
+	// grow without limit only moves the unbounded thing from the query to
+	// the heap (PR #20 r3 SF).
+	settled := 0
 	for cursor := int64(0); ; {
-		page, next, perr := e.pendingGroups(ctx, 0, maxReconcileBatch, cursor)
+		page, last, perr := e.pendingGroups(ctx, 0, maxReconcileBatch, cursor, 0)
 		if perr != nil {
 			e.logf("stale-transaction recovery: reading the log: %v", perr)
-			return 0
+			return settled
 		}
-		for k, v := range page {
-			byTx[k] = v
-		}
-		if next == 0 {
+		if len(page) == 0 {
 			break
 		}
-		cursor = next
-	}
-	settled := 0
-	for txID, group := range byTx {
-		st := foldTxLog(group)
-		if st.Terminal() || st.State != meta.TxOpened {
-			continue
+		for txID, group := range page {
+			st := foldTxLog(group)
+			if st.Terminal() || st.State != meta.TxOpened {
+				continue
+			}
+			if e.terminate(ctx, txID, st, meta.TxRolledBack, meta.ReasonSessionClosed) {
+				settled++
+			}
 		}
-		if e.terminate(ctx, txID, st, meta.TxRolledBack, meta.ReasonSessionClosed) {
-			settled++
+		if last <= cursor {
+			break // no forward progress; stop rather than spin
 		}
+		cursor = last
 	}
 	if settled > 0 {
 		e.logf("stale-transaction recovery settled %d transaction(s) left open by a previous process", settled)
