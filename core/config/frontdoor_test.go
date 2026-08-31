@@ -41,6 +41,37 @@ func TestFrontDoor_DisabledIsNotValidated(t *testing.T) {
 	}
 }
 
+// The §11 wiring cell (converted from the direct-cell shape below): the
+// front-door refusal must be observable THROUGH Load. Every cell in
+// TestFrontDoor_Validation calls validate() on a hand-built struct, so all
+// of them stay green if Load stops calling validate() at all — the severed
+// seam that shipped PR #22's transport check unwired. This cell dies with
+// that call deleted (verified: `return cfg, cfg.validate()` → `return cfg,
+// nil` in Load fails only this cell; the table stays green). The table
+// below keeps per-message coverage.
+func TestFrontDoor_ValidationIsWiredThroughLoad(t *testing.T) {
+	t.Parallel()
+
+	// Positive control through the same entry: a well-formed front-door
+	// file is accepted, so the refusal below is a real one.
+	mustLoad(t, `
+[frontdoor]
+enabled = true
+tls_cert_file = "/etc/autodb/cert.pem"
+tls_key_file = "/etc/autodb/key.pem"
+tls_host_names = ["autodb.example.com"]
+reserved_headroom = 4
+
+[exec]
+pool_max_conns = 10
+`)
+
+	msg := loadInvalid(t, "[frontdoor]\nenabled = true\n")
+	if !strings.Contains(msg, "tls_cert_file and tls_key_file") {
+		t.Fatalf("refusal does not carry the operator message: %q", msg)
+	}
+}
+
 func TestFrontDoor_Validation(t *testing.T) {
 	t.Parallel()
 
