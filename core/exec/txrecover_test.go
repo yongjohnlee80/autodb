@@ -825,3 +825,47 @@ func seedQueuedFor(t *testing.T, f *fixture, txID string, userID, connID, create
 		}
 	}
 }
+
+// The cursor must WRAP, or it just moves the starvation to the front.
+//
+// Paging forward alone is not enough: once the cursor is past an entry, an
+// entry that becomes resolvable BEHIND it would never be reached again. A
+// short page has to reset the position so the queue is swept round and round
+// rather than once.
+func TestReconcile_TheCursorWrapsSoEarlierEntriesComeRoundAgain(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A full page of live entries at the FRONT, and one resolvable behind.
+	for i := 0; i < maxReconcileBatch; i++ {
+		seedTx(t, f, fmt.Sprintf("tx_front_%03d", i), 1, f.connID, meta.TxOpened)
+	}
+	seedCrashWindow(t, f, "tx_tail", f.connID, "1")
+
+	// Drive the cursor past the front page and off the end.
+	for i := 0; i < 3 && !stateOf(t, f, "tx_tail").Terminal(); i++ {
+		f.eng.ReconcileOutcomes(ctx)
+	}
+	if !stateOf(t, f, "tx_tail").Terminal() {
+		t.Fatal("the entry behind the first page was never reached")
+	}
+
+	// Now one of the FRONT entries — already passed over — becomes
+	// resolvable. Only a cursor that wrapped can reach it.
+	if err := f.eng.appendTxOutcome(ctx, txTransition{
+		txID: "tx_front_000", state: meta.TxCommitStarted,
+		connectionID: f.connID, targetXID: "2",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		f.eng.ReconcileOutcomes(ctx)
+		if stateOf(t, f, "tx_front_000").Terminal() {
+			return
+		}
+	}
+	t.Fatalf("state = %s — the cursor ran off the end and never came back, so an entry "+
+		"that became resolvable behind it is starved just as badly",
+		stateOf(t, f, "tx_front_000").State)
+}
