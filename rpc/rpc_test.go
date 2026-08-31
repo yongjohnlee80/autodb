@@ -1282,3 +1282,37 @@ func TestTokenCreate_DayCountCannotOverflowIntoAValidLifetime(t *testing.T) {
 		t.Errorf("0 days (the default) was refused: %#v", errVal)
 	}
 }
+
+// MF2: revoking a name the user does not have is a normal refusal, not a
+// server fault. RevokePAT wrapped dao.ErrNoRows, which wireErr had no public
+// mapping for, so a mistyped token name came back as -32603 "internal error"
+// — telling someone who made a typo that the SERVER broke.
+func TestTokenRevoke_MissingNameIsARefusalNotAFault(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	errVal, _ := c.call("auth.token_revoke", f.rootTok, int64(0), "no-such-token")
+	if errVal == nil {
+		t.Fatal("revoking a name that does not exist reported success")
+	}
+	m, _ := errVal.(map[string]any)
+	code, _ := m["code"].(int64)
+	if code == -32603 {
+		t.Fatalf("a missing token name came back as an internal fault (%#v); a typo is the "+
+			"caller's business and must not read as a server failure", m)
+	}
+	if code != rpc.CodeInvalidToken {
+		t.Errorf("code = %d, want CodeInvalidToken", code)
+	}
+
+	// Positive control: revoking one that DOES exist still works, so the
+	// mapping is not simply refusing everything.
+	if errVal, _ := c.call("auth.token_create", f.rootTok, "real", int64(0), ""); errVal != nil {
+		t.Fatalf("token_create: %#v", errVal)
+	}
+	if errVal, _ := c.call("auth.token_revoke", f.rootTok, int64(0), "real"); errVal != nil {
+		t.Fatalf("revoking an existing token failed: %#v", errVal)
+	}
+}

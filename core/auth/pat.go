@@ -53,6 +53,15 @@ var (
 	// ErrPATBadAllowedIPs reports allowed_ips that are unparseable or not a
 	// subset of the user's own allowlist rows.
 	ErrPATBadAllowedIPs = errors.New("auth: token allowed_ips rejected")
+
+	// ErrPATNotFound reports a revoke for a name the user does not have.
+	//
+	// Its own sentinel rather than a wrapped dao.ErrNoRows, because the wire
+	// layer maps sentinels: an unmapped store error reaches the caller as a
+	// -32603 internal fault, which tells someone who mistyped a token name
+	// that the SERVER broke. It is safe to name — this reaches an
+	// authenticated caller managing their own tokens.
+	ErrPATNotFound = errors.New("auth: no token with that name")
 )
 
 // PAT policy (ADR-0075 §4 defaults table).
@@ -379,6 +388,37 @@ func (s *Service) VerifyPAT(ctx context.Context, presented string) (*meta.PAT, e
 	case now.Unix() >= row.ExpiresAt:
 		return nil, ErrPATInvalid
 	}
+
+	// The OWNER's current state, re-read on every call.
+	//
+	// Without this a disabled account's PAT kept working: SetUserDisabled
+	// revokes sessions, not tokens, so a credential sitting in a DSN
+	// outlived the account it belonged to and offboarding was incomplete.
+	// Session tokens already guarantee token -> live session -> live enabled
+	// user on every call; a PAT is a longer-lived credential and needs the
+	// same guarantee more, not less.
+	//
+	// Re-read rather than revoked-at-disable-time on purpose. Revoking on
+	// disable would leave two places that decide whether a credential works,
+	// and the day they disagree is the day someone is disabled and still
+	// connected. One authoritative check per call cannot drift.
+	//
+	// AFTER the match, deliberately. Everything above this point is
+	// identical for an unknown selector and a wrong secret — the two cases
+	// an attacker can actually produce — so the extra query cannot become a
+	// timing oracle for which selectors exist. Reaching here at all requires
+	// the real secret.
+	owner, oerr := s.store.Users.OnCtx(ctx).With(meta.UserID, row.UserID).Get()
+	switch {
+	case errors.Is(oerr, dao.ErrNoRows):
+		return nil, ErrPATInvalid
+	case oerr != nil:
+		// A store failure is not an invalid credential — reporting it as one
+		// would send someone to rotate a token that was fine.
+		return nil, oerr
+	case owner.Disabled != 0:
+		return nil, ErrPATInvalid
+	}
 	return row, nil
 }
 
@@ -436,7 +476,7 @@ func (s *Service) RevokePAT(ctx context.Context, token string, userID int64, nam
 	return s.inTx(ctx, func(tx *dao.Transaction) error {
 		row, gerr := s.store.PATs.On(tx).With(meta.PATUserID, userID).With(meta.PATName, name).Get()
 		if errors.Is(gerr, dao.ErrNoRows) {
-			return fmt.Errorf("%w: no token named %q", dao.ErrNoRows, name)
+			return fmt.Errorf("%w: %q", ErrPATNotFound, name)
 		}
 		if gerr != nil {
 			return gerr
