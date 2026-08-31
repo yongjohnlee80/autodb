@@ -321,6 +321,18 @@ func startEngine(
 	// every transaction whose fate it could not determine, and never once go
 	// back to find out — which is the entire point of having written the
 	// record down. It stops with serveCtx.
+	// Partitions must stay AHEAD of the clock. Startup alone is not enough:
+	// a daemon that stays up across a month boundary would find no partition
+	// for the new month, and every audit write would land in DEFAULT — which
+	// SUCCEEDS, so nothing fails and nobody notices until a retention drop
+	// tries to detach a month whose rows are somewhere else (ADR-0079 §2).
+	//
+	// A no-op on sqlite, so this does not branch on the engine.
+	if err := store.RollPartitions(serveCtx, time.Now()); err != nil {
+		onLog(fmt.Sprintf("rolling partitions at startup: %v", err))
+	}
+	startPartitionRoll(serveCtx, store, onLog)
+
 	eng.StartOutcomeReconciler(serveCtx, cfg.Exec.ReconcileInterval.Duration())
 
 	// Retention is STARTED even though it is off by default, for the reason
@@ -645,4 +657,31 @@ func runPrintEndpoint(configPath string) error {
 	}
 	fmt.Printf("%s\t%s\n", ep.Network, ep.Address)
 	return nil
+}
+
+// partitionRollInterval is how often the month-roll re-checks.
+//
+// Daily. The roll only ever creates the current and next month, so it is
+// cheap and idempotent; the interval just has to be short enough that a
+// month boundary cannot be crossed between two checks, and long enough that
+// it is not noise. Anything under a month would do — a day leaves a wide
+// margin for a daemon that is briefly paused or a clock that jumps.
+const partitionRollInterval = 24 * time.Hour
+
+// startPartitionRoll keeps the monthly partitions ahead of the clock.
+func startPartitionRoll(ctx context.Context, store *meta.Store, onLog func(string)) {
+	go func() {
+		t := time.NewTicker(partitionRollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := store.RollPartitions(ctx, time.Now()); err != nil {
+					onLog(fmt.Sprintf("rolling partitions: %v", err))
+				}
+			}
+		}
+	}()
 }

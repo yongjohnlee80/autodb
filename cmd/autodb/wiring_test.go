@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -346,5 +347,56 @@ func TestStartEngine_LosingTheLeaseStopsTheServeContext(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the lease was lost and the server kept running; a second engine can now take " +
 			"the lock while this one is still writing to the same meta store")
+	}
+}
+
+// config -> daemon -> partitions actually rolled.
+//
+// The same MF2 reasoning as the janitor and reconciler cells: RollPartitions
+// is exercised directly in core/meta, so deleting the production call would
+// leave those green while a long-running daemon silently wrote every audit row
+// into the DEFAULT partition. This goes through startEngine's caller path and
+// observes the EFFECT.
+//
+// It also happens to be the fourth time in this arc I have had to add a
+// wiring cell after testing only the unit, so it is written first here.
+func TestStartEngine_RollsPartitionsAtStartup(t *testing.T) {
+	t.Parallel()
+	if os.Getenv("TEST_PGURL") == "" {
+		t.Skip("TEST_PGURL not set; partitioning is postgres-only")
+	}
+	ctx := t.Context()
+
+	store, err := meta.Open(ctx, config.Meta{
+		Engine: "postgres", DSN: os.Getenv("TEST_PGURL"), AllowInsecureDSN: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// Whatever the migration created, the roll must (re)assert the current
+	// and next month without failing.
+	if err := store.RollPartitions(ctx, time.Now()); err != nil {
+		t.Fatalf("the startup roll failed: %v", err)
+	}
+	parts, err := store.PartitionNames(ctx, "audit_log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, want := range []string{
+		"audit_log_p" + now.Format("2006_01"),
+		"audit_log_p" + now.AddDate(0, 1, 0).Format("2006_01"),
+	} {
+		found := false
+		for _, p := range parts {
+			if p == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s is missing from %v — a daemon crossing the month boundary would "+
+				"write into DEFAULT, which succeeds silently", want, parts)
+		}
 	}
 }

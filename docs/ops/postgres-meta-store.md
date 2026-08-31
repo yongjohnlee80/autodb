@@ -96,6 +96,58 @@ Note the order: migrations run *before* the lease. That is safe for concurrent
 or mutates anything (ADR-0079 §5). Concurrent migration being safe is not the
 same as migrating under a live daemon being acceptable.
 
+## Partitioning (postgres only)
+
+`script_history` and `audit_log` are partitioned by **month**, on their time
+column, in UTC. `tx_outcomes` and `tx_pending` are **not**, and that is a
+decision rather than an oversight — ADR-0079 measured that time-partitioning
+the outcome log destroys both of R4's durable guards, because postgres forces
+the partition key into every unique index and the same `(tx_id, seq)` can then
+be rewritten in a different month. Detaching a partition is deletion with extra
+steps, and those two tables are the ones where absence is load-bearing.
+
+**sqlite is unpartitioned and always will be.** It is a single-writer file with
+no partitioning of its own, and the volume problem belongs to an installation
+large enough to be on postgres.
+
+Partitions are created for the **current and next** month, at startup and daily
+thereafter. Next-month matters: a daemon that stays up across a boundary would
+otherwise find no partition, and every write would land in the `DEFAULT`
+partition — which *succeeds*, so nothing fails and nobody notices.
+
+`DEFAULT` is a safety net, not the plan. A row there is a row no month claimed,
+which means the roll fell behind. It exists because the alternative is an
+`INSERT` that fails, and an audit write that fails is worse than one in the
+wrong child table.
+
+### The cost: `id` is no longer unique by the schema
+
+Postgres requires the partition key in every unique constraint, so the primary
+key is `(id, started_at)` / `(id, created_at)`. **That does not make `id`
+unique** — the same `id` in two months is accepted silently. It survives as a
+global key only by the parent sequence and by migration discipline.
+
+Two things depend on it and would fail *quietly*: a by-id read has no defined
+answer when two partitions hold the id, and R4's history repair sweep pages by
+`id`, so a non-monotonic id lets a row be skipped. `Store.CheckLogicalIDUniqueness`
+exists to refuse that state rather than let either misbehave first.
+
+To list what is actually there:
+
+```sql
+SELECT c.relname FROM pg_inherits i
+  JOIN pg_class c ON c.oid = i.inhrelid
+  JOIN pg_class p ON p.oid = i.inhparent
+ WHERE p.relname = 'audit_log' ORDER BY 1;
+```
+
+### Retention by detach
+
+Not automated. Dropping a month is `ALTER TABLE ... DETACH PARTITION` then
+`DROP TABLE`, and it is deliberately left to an operator with the archive step
+in between — an automatic drop of audit history is not a default anything
+should have.
+
 ## Backup and PITR
 
 **Not implemented by autodb, and deliberately so** — this is a database an
