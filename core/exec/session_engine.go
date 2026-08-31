@@ -299,6 +299,14 @@ func (e *Engine) finishClosing(ctx context.Context, s *session, ip, reason strin
 		e.auditBounded(ctx, s.userID, ip, "tx_rollback_deferred",
 			fmt.Sprintf("conn %d: session %s: %s: %s: in-flight statement did not stop; retained for retry",
 				s.connID, s.id, txID, reason))
+		// Same reasoning as the timeout sweep: the rollback was DECIDED
+		// against rather than failed, the transaction is live and owned, and
+		// the janitor will retry. Undetermined is what the log should say
+		// until it is not.
+		e.noteTxOutcome(ctx, txTransition{
+			txID: txID, state: meta.TxUnknownPending, reason: meta.ReasonSessionClosed,
+			userID: s.userID, connectionID: s.connID,
+		})
 		s.setCloseReason(ip, reason)
 		return
 	}
@@ -315,6 +323,10 @@ func (e *Engine) finishClosing(ctx context.Context, s *session, ip, reason strin
 			outcome = "rollback_failed"
 			e.logf("session %s: rolling back %s on close: %v", s.id, txID, rerr)
 		}
+		e.noteTxOutcome(ctx, txTransition{
+			txID: txID, state: txStateFor(outcome, rerr), reason: txOutcomeReason(outcome, rerr),
+			userID: s.userID, connectionID: s.connID,
+		})
 		e.auditBounded(ctx, s.userID, ip, "tx_"+outcome,
 			fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
 	}

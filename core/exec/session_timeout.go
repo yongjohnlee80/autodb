@@ -191,6 +191,16 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 		e.auditBounded(ctx, s.userID, "", "tx_rollback_deferred",
 			fmt.Sprintf("conn %d: session %s: %s: %s: in-flight statement did not stop",
 				s.connID, s.id, txID, reason))
+		// The transaction is still live and still owned, so its outcome is
+		// genuinely undetermined right now — which is a thing the log must
+		// SAY rather than imply by omission. Without this the entry would sit
+		// at `opened` while holding locks, and `opened` reads as a healthy
+		// transaction in progress. The next sweep resolves it; the append is
+		// idempotent, so repeated sweeps do not grow the log.
+		e.noteTxOutcome(ctx, txTransition{
+			txID: txID, state: meta.TxUnknownPending, reason: meta.ReasonTimeout,
+			userID: s.userID, connectionID: s.connID,
+		})
 		return
 	}
 
@@ -212,6 +222,12 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 		outcome = "rollback_failed"
 		e.logf("session %s: rolling back %s on %s: %v", s.id, txID, reason, rerr)
 	}
+	// The terminal that resolves any unknown_pending a previous deferred
+	// sweep left behind.
+	e.noteTxOutcome(ctx, txTransition{
+		txID: txID, state: txStateFor(outcome, rerr), reason: txOutcomeReason(outcome, rerr),
+		userID: s.userID, connectionID: s.connID,
+	})
 	e.auditBounded(ctx, s.userID, "", "tx_"+outcome,
 		fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
 }
