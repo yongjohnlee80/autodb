@@ -4,9 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/yongjohnlee80/autodb/core/config"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -126,6 +130,27 @@ func TestAddUserIP_CanonicalizationAndValidation(t *testing.T) {
 		t.Errorf("canonical rows = %v, want 10.1.2.3/32 and 10.0.0.0/24", got)
 	}
 
+	// 4-in-6 mapped forms canonicalize to IPv4 (SF1): a mapped /128 equals
+	// the bare address's /32; a mapped /104 is the IPv4 /8.
+	if err := s.AddUserIP(ctx, rootTok, root.UserID(), "::ffff:10.1.2.3/128", "", testIP); err == nil {
+		t.Error("mapped /128 accepted as a distinct row — canonicalization gap (should hit UNIQUE)")
+	}
+	if err := s.AddUserIP(ctx, rootTok, root.UserID(), "::ffff:10.0.0.0/104", "", testIP); err != nil {
+		t.Fatalf("mapped /104: %v", err)
+	}
+	rows2, _ := s.UserIPs(ctx, rootTok, root.UserID())
+	found8 := false
+	for _, r := range rows2 {
+		if r.CIDR == "10.0.0.0/8" {
+			found8 = true
+		}
+	}
+	if !found8 {
+		t.Errorf("mapped /104 did not canonicalize to 10.0.0.0/8: %+v", rows2)
+	}
+	if err := s.AddUserIP(ctx, rootTok, root.UserID(), "::ffff:0.0.0.0/90", "", testIP); err == nil {
+		t.Error("mapped prefix wider than the mapped space accepted")
+	}
 	if err := s.AddUserIP(ctx, rootTok, root.UserID(), "not-an-ip", "", testIP); err == nil {
 		t.Error("invalid input accepted")
 	}
@@ -157,7 +182,7 @@ func TestAddUserIP_CapRefusesLoudly(t *testing.T) {
 
 func TestRemoveUserIP_DeleteIsScopedToOwner(t *testing.T) {
 	t.Parallel()
-	s, _, _ := newSvc(t)
+	s, store, _ := newSvc(t)
 	rootTok, _ := mustBootstrap(t, s)
 	ctx := context.Background()
 	aliceID, _ := mkUser(t, s, rootTok, "alice", "editor")
@@ -180,6 +205,17 @@ func TestRemoveUserIP_DeleteIsScopedToOwner(t *testing.T) {
 	if len(after) != 1 {
 		t.Error("a delete scoped to alice removed bob's row — cross-user reach")
 	}
+	// And the no-op must not WRITE AN AUDIT ROW: a false user_ip_removed
+	// asserts a security change that never happened (lector r0 MF2).
+	if n := auditCount(t, store, "user_ip_removed"); n != 0 {
+		t.Errorf("zero-row delete wrote %d user_ip_removed audit rows, want 0", n)
+	}
+	if err := s.RemoveUserIP(ctx, rootTok, bobID, bobRows[0].ID, testIP); err != nil {
+		t.Fatalf("real remove: %v", err)
+	}
+	if n := auditCount(t, store, "user_ip_removed"); n != 1 {
+		t.Errorf("real delete audit rows = %d, want 1", n)
+	}
 }
 
 func TestUserIPs_GoneWithTheUser(t *testing.T) {
@@ -200,5 +236,96 @@ func TestUserIPs_GoneWithTheUser(t *testing.T) {
 	}
 	if len(orphans) != 0 {
 		t.Errorf("%d allowlist rows survived their user (ON DELETE CASCADE broken)", len(orphans))
+	}
+}
+
+func TestAddUserIP_TakesTheOwnerRowLock(t *testing.T) {
+	t.Parallel()
+	s, store, ck := newSvc(t)
+	rootTok, root := mustBootstrap(t, s)
+	ctx := context.Background()
+	before, err := store.Users.OnCtx(ctx).With(meta.UserID, root.UserID()).Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck.t = ck.t.Add(90 * time.Second)
+	if err := s.AddUserIP(ctx, rootTok, root.UserID(), "10.3.3.3", "", testIP); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.Users.OnCtx(ctx).With(meta.UserID, root.UserID()).Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The updated_at bump is the visible form of the per-user write lock
+	// that makes count-then-insert concurrency-safe (lector r0 MF1); if it
+	// disappears, the serialization disappeared with it.
+	if after.UpdatedAt <= before.UpdatedAt {
+		t.Errorf("users.updated_at not bumped (%d -> %d) — the owner-row lock is gone",
+			before.UpdatedAt, after.UpdatedAt)
+	}
+}
+
+// The cap under REAL concurrency needs PostgreSQL (sqlite serializes writers
+// and cannot exhibit the race lector reproduced). Gated on TEST_PGURL; runs
+// on VM43.
+func TestAddUserIP_CapUnderConcurrency_PG(t *testing.T) {
+	base := os.Getenv("TEST_PGURL")
+	if base == "" {
+		t.Skip("TEST_PGURL not set; skipping live-pg concurrency test")
+	}
+	ctx := context.Background()
+	schemaName := fmt.Sprintf("autodb_uip_%d", time.Now().UnixNano())
+	dsn := base
+	if strings.Contains(dsn, "?") {
+		dsn += "&options=-csearch_path%3D" + schemaName
+	} else {
+		dsn += "?options=-csearch_path%3D" + schemaName
+	}
+	admin, err := meta.Open(ctx, config.Meta{Engine: "postgres", DSN: base})
+	if err != nil {
+		t.Fatalf("admin open: %v", err)
+	}
+	if _, err := admin.Conn().ExecContext(ctx, "CREATE SCHEMA "+schemaName); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = admin.Conn().ExecContext(context.Background(), "DROP SCHEMA "+schemaName+" CASCADE")
+		_ = admin.Close()
+	})
+	store, err := meta.Open(ctx, config.Meta{Engine: "postgres", DSN: dsn})
+	if err != nil {
+		t.Fatalf("meta.Open(pg): %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	s, err := New(store, WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootTok, root := mustBootstrap(t, s)
+
+	// Seed to one below the cap, then race well past it.
+	for i := 0; i < maxUserIPs-1; i++ {
+		if err := s.AddUserIP(ctx, rootTok, root.UserID(),
+			fmt.Sprintf("10.%d.%d.0/24", i/256, i%256), "", testIP); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_ = s.AddUserIP(ctx, rootTok, root.UserID(),
+				fmt.Sprintf("192.0.2.%d/32", i), "", testIP)
+		}(i)
+	}
+	wg.Wait()
+	rows, err := s.UserIPs(ctx, rootTok, root.UserID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) > maxUserIPs {
+		t.Fatalf("cap breached under concurrency: %d rows, cap %d — the owner-row "+
+			"lock is not serializing (lector r0 MF1 reproduction)", len(rows), maxUserIPs)
 	}
 }

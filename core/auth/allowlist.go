@@ -13,10 +13,10 @@ package auth
 //     (self-service); admins manage anyone's. Every mutation is audited.
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/netip"
-
-	"context"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/golib/dao"
@@ -75,6 +75,18 @@ func (s *Service) UserIPs(ctx context.Context, token string, userID int64) ([]*m
 // returns the canonical single-address prefix for the latter.
 func canonicalCIDR(cidr string) (string, error) {
 	if p, err := netip.ParsePrefix(cidr); err == nil {
+		// A 4-in-6 mapped prefix canonicalizes to its IPv4 form, exactly as
+		// a bare mapped address does — otherwise ::ffff:10.1.2.3/128 and
+		// 10.1.2.3/32 would be two "different" rows for one network
+		// (lector PR #21 r0 SF1). A mapped prefix wider than the mapped
+		// space (< /96) spans more than IPv4 and is refused as meaningless
+		// for an allowlist entry.
+		if p.Addr().Is4In6() {
+			if p.Bits() < 96 {
+				return "", fmt.Errorf("auth: IPv4-mapped prefix %q wider than the mapped space", cidr)
+			}
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+		}
 		return p.Masked().String(), nil
 	}
 	addr, err := netip.ParseAddr(cidr)
@@ -99,6 +111,17 @@ func (s *Service) AddUserIP(ctx context.Context, token string, userID int64, cid
 		return err
 	}
 	return s.inTx(ctx, func(tx *dao.Transaction) error {
+		// Serialize concurrent adds for this user by taking a WRITE LOCK on
+		// the owner's users row first: count-then-insert alone is not
+		// concurrency-safe on PostgreSQL under READ COMMITTED — lector
+		// reproduced 35 rows against cap 32 from concurrent adds (PR #21 r0
+		// MF1); sqlite only masked it by serializing writers. Touching
+		// updated_at is the lock's visible form, and is also semantically
+		// true: the user's security posture changed.
+		if err := s.store.Users.On(tx).With(meta.UserID, userID).
+			Set(meta.UserUpdatedAt, s.now().Unix()).Update(); err != nil {
+			return err
+		}
 		existing, err := s.store.UserIPs.On(tx).With(meta.UIPUserID, userID).Select()
 		if err != nil {
 			return err
@@ -126,12 +149,25 @@ func (s *Service) RemoveUserIP(ctx context.Context, token string, userID, rowID 
 		return err
 	}
 	return s.inTx(ctx, func(tx *dao.Transaction) error {
+		// Fetch-before-delete: a (id, user_id) miss is a silent no-op and
+		// MUST NOT write an audit row — a false "user_ip_removed" entry
+		// asserts a security change that never happened (lector PR #21 r0
+		// MF2, proven by control on VM43). The fetch also lets the audit
+		// name the CIDR rather than an opaque row id.
+		row, err := s.store.UserIPs.On(tx).
+			With(meta.UIPID, rowID).With(meta.UIPUserID, userID).Get()
+		if errors.Is(err, dao.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 		if err := s.store.UserIPs.On(tx).
 			With(meta.UIPID, rowID).With(meta.UIPUserID, userID).
 			Delete(); err != nil {
 			return err
 		}
 		return s.AuditTx(tx, actor.userID, ip, "user_ip_removed",
-			fmt.Sprintf("user %d: row %d", userID, rowID))
+			fmt.Sprintf("user %d: %s", userID, row.CIDR))
 	})
 }

@@ -1085,12 +1085,12 @@ func TestUserIPAllowlistOverWire(t *testing.T) {
 	// The empty-cidr self-service gesture: the SERVER substitutes the
 	// address this session connects from (loopback in the fixture) — the
 	// one thing the rpc layer itself implements for this surface.
-	if errVal, _ := c.call("auth.user_ip_add", token, rootID, "", "this machine"); errVal != nil {
-		t.Fatalf("user_ip_add(empty cidr) err: %#v", errVal)
+	if errVal, _ := c.call("auth.user_allowlist_add", token, rootID, "", "this machine"); errVal != nil {
+		t.Fatalf("user_allowlist_add(empty cidr) err: %#v", errVal)
 	}
-	errVal, res := c.call("auth.user_ip_list", token, rootID)
+	errVal, res := c.call("auth.user_allowlist_list", token, rootID)
 	if errVal != nil {
-		t.Fatalf("user_ip_list err: %#v", errVal)
+		t.Fatalf("user_allowlist_list err: %#v", errVal)
 	}
 	rows := res.([]any)
 	if len(rows) != 1 {
@@ -1117,10 +1117,10 @@ func TestUserIPAllowlistOverWire(t *testing.T) {
 
 	// Removal round-trips and the list empties.
 	rowID, _ := row["id"].(int64)
-	if errVal, _ := c.call("auth.user_ip_remove", token, rootID, rowID); errVal != nil {
-		t.Fatalf("user_ip_remove err: %#v", errVal)
+	if errVal, _ := c.call("auth.user_allowlist_remove", token, rootID, rowID); errVal != nil {
+		t.Fatalf("user_allowlist_remove err: %#v", errVal)
 	}
-	errVal, res = c.call("auth.user_ip_list", token, rootID)
+	errVal, res = c.call("auth.user_allowlist_list", token, rootID)
 	if errVal != nil {
 		t.Fatalf("relist err: %#v", errVal)
 	}
