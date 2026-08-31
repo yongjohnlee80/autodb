@@ -28,6 +28,7 @@ type Store struct {
 	WorkspaceConns *dao.Schema[*WorkspaceConn, WsConnField, Sort, int64]
 	Grants         *dao.Schema[*Grant, GrantField, Sort, int64]
 	Sessions       *dao.Schema[*Session, SessionField, Sort, int64]
+	PATs           *dao.Schema[*PAT, PATField, Sort, int64]
 	History        *dao.Schema[*HistoryEntry, HistoryField, Sort, int64]
 	Audit          *dao.Schema[*AuditEntry, AuditField, Sort, int64]
 	TxOutcomes     *dao.Schema[*TxOutcome, TxOutcomeField, Sort, int64]
@@ -111,6 +112,7 @@ func OpenNoMigrate(ctx context.Context, mcfg config.Meta) (*Store, error) {
 		WorkspaceConns: newWorkspaceConns(conn),
 		Grants:         newGrants(conn),
 		Sessions:       newSessions(conn),
+		PATs:           newPATs(conn),
 		History:        newHistory(conn),
 		Audit:          newAudit(conn),
 		TxOutcomes:     newTxOutcomes(conn),

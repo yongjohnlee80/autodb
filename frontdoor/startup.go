@@ -129,7 +129,7 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 		// A dependency's error strings are also not a contract: they can be
 		// reworded in a patch release and take this classification with them.
 		if head, perr := br.Peek(2); perr == nil && isTLSClientHello(head) {
-			return nil, startupOutcome{}, tlsFailure("direct-tls-unsupported")
+			return nil, startupOutcome{}, tlsFailure(reasonDirectTLS.String())
 		}
 		if head, perr := br.Peek(4); perr == nil {
 			if reason, bad := classifyStartupLength(binary.BigEndian.Uint32(head)); bad {

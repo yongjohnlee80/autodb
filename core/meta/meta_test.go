@@ -207,6 +207,8 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 		// column goes here — the DROP list is part of adding a migration,
 		// not an afterthought.
 		`ALTER TABLE tx_outcomes DROP COLUMN collapsed_at`,
+		// v11 adds the pats table; same DROP-list rule.
+		`DROP TABLE pats`,
 		`DELETE FROM schema_migrations WHERE version >= 7`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
@@ -296,6 +298,8 @@ func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
 		// Same DROP-list rule as the v7 fixture: undo every later
 		// migration's effect or its re-application fails.
 		`ALTER TABLE tx_outcomes DROP COLUMN collapsed_at`,
+		// v11 adds the pats table; same DROP-list rule.
+		`DROP TABLE pats`,
 		`DELETE FROM schema_migrations WHERE version >= 8`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
