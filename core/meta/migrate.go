@@ -56,9 +56,18 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 		}},
 		{"connections", func() (int64, error) {
 			return copyAll(ctx, src.Connections, dst.Connections, func(r *Connection) map[ConnField]any {
+				// EVERY column. profile, debug and pool_max_conns were added
+				// after this map was written and never added to it, so a
+				// migration silently reset profile=session to v1compat, lost
+				// the debug timeout behaviour, and threw away per-connection
+				// pool budgets (lector's PR #31 r1 MF1). Nothing failed: the
+				// row count matched, because a dropped COLUMN is invisible to
+				// a check that counts ROWS.
 				return map[ConnField]any{ConnID: r.ID, ConnName: r.Name, ConnEngine: r.Engine,
 					ConnDSNEnc: nb(r.DSNEnc), ConnCreatedBy: r.CreatedBy,
-					ConnCreatedAt: r.CreatedAt, ConnUpdatedAt: r.UpdatedAt}
+					ConnCreatedAt: r.CreatedAt, ConnUpdatedAt: r.UpdatedAt,
+					ConnProfile: r.Profile, ConnDebug: r.Debug,
+					ConnPoolMaxConns: r.PoolMaxConns}
 			})
 		}},
 		{"workspaces", func() (int64, error) {
@@ -127,6 +136,17 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 			return copyAll(ctx, src.AllowedIPs, dst.AllowedIPs, func(r *AllowedIP) map[AllowedIPField]any {
 				return map[AllowedIPField]any{IPID: r.ID, IPCIDR: r.CIDR, IPNote: r.Note,
 					IPCreatedBy: r.CreatedBy, IPCreatedAt: r.CreatedAt}
+			})
+		}},
+		// The PER-USER allowlist (ADR-0075's two-layer IP model). It was
+		// missing from the copy steps, from countableTables and from
+		// serialTables all at once, so a migration dropped every per-user
+		// front-door rule AND the verification could not notice — a table
+		// absent from the list is a table nothing compares (MF1).
+		{"user_ip_allowlist", func() (int64, error) {
+			return copyAll(ctx, src.UserIPs, dst.UserIPs, func(r *UserIP) map[UserIPField]any {
+				return map[UserIPField]any{UIPID: r.ID, UIPUserID: r.UserID, UIPCIDR: r.CIDR,
+					UIPLabel: r.Label, UIPCreatedAt: r.CreatedAt}
 			})
 		}},
 		{"store_meta", func() (int64, error) {
@@ -219,6 +239,7 @@ func countableTables(ctx context.Context, s *Store) []countableTable {
 		{"tx_outcomes", s.TxOutcomes.OnCtx(ctx).Count},
 		{"tx_pending", s.TxPending.OnCtx(ctx).Count},
 		{"ip_allowlist", s.AllowedIPs.OnCtx(ctx).Count},
+		{"user_ip_allowlist", s.UserIPs.OnCtx(ctx).Count},
 		{"store_meta", s.KV.OnCtx(ctx).Count},
 	}
 }
@@ -262,7 +283,7 @@ func verifyCounts(ctx context.Context, dst *Store, want map[string]int64) error 
 var serialTables = []string{
 	"users", "connections", "workspaces", "workspace_connections",
 	"grants", "sessions", "script_history", "audit_log", "tx_outcomes",
-	"tx_pending", "ip_allowlist",
+	"tx_pending", "ip_allowlist", "user_ip_allowlist",
 }
 
 // fixSequences advances each table's id sequence: setval(max, is_called) so
