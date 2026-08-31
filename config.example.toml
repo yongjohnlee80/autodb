@@ -184,6 +184,22 @@ pool_max_conn_lifetime = "60m"
 # the shortest bound, not a tuning preference.
 janitor_interval = "10s"
 
+# How often the engine re-asks targets about transactions whose outcome it
+# could not determine — a commit that was in flight when the process died, or
+# one the driver could not prove either way (ADR-0074 §7).
+#
+# Deliberately much longer than janitor_interval. That one bounds how long an
+# abandoned transaction holds LOCKS, which is a live cost paid by every other
+# client; this one bounds how long an already-finished transaction's outcome
+# stays unknown, which blocks nobody. A pass may open a connection to every
+# target that has a pending entry, so sweeping as often as the janitor would
+# turn an unreachable database into steady connection pressure against it.
+#
+# The pass that recovers the crash window runs once at STARTUP regardless of
+# this value; the interval only governs entries whose target was unreachable
+# at that moment.
+reconcile_interval = "1m"
+
 [tui]
 # Where `autodb --ui` keeps its local .sql notes. Empty means
 # $XDG_DATA_HOME/autodb/notes (~/.local/share/autodb/notes).
