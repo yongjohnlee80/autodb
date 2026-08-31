@@ -24,7 +24,7 @@ import (
 func seedCrashWindow(t *testing.T, f *fixture, txID string, connID int64, xid string) {
 	t.Helper()
 	ctx := context.Background()
-	enqueueSeed(t, f, txID, connID, meta.TxOpened, meta.TxCommitStarted)
+	enqueueSeed(t, f, txID, 1, connID, meta.TxOpened, meta.TxCommitStarted)
 	rows := []struct {
 		seq   int64
 		state meta.TxState
