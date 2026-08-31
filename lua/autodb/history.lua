@@ -109,7 +109,7 @@ local function _redraw(state)
     mid[1] = "  (no history)"
   else
     for i, e in ipairs(state.rows) do
-      local mark = (e.status == "error" or (e.error and e.error ~= "")) and "✗" or "·"
+      local mark = M.status_mark(e)
       mid[i] = string.format("%s %s  %-12s %s", mark, _fmt_when(e.started_at),
         tostring(e.user or e.user_id or "?"), _one_line(e.script))
     end
@@ -118,6 +118,38 @@ local function _redraw(state)
 
   -- Right: the entry under the cursor, in full.
   M._preview(state)
+end
+
+---Glyph per outcome (ADR-0074 §7 rev 2).
+---
+---This used to be a binary split -- error or not -- which was correct while
+---"not an error" could only mean "durable success". Audit v2 made that false:
+---a statement inside a transaction is `ok_pending_commit` until the commit
+---says otherwise, and it may end `rolled_back` or `outcome_unresolvable`.
+---All three rendered as the plain success dot, so a reader was told an
+---effect had landed when it had been discarded, or when nothing can ever
+---establish whether it landed at all.
+---@type table<string, string>
+M.STATUS_MARKS = {
+  ok = "·",
+  running = "◌",
+  ok_pending_commit = "⋯",
+  rolled_back = "↩",
+  outcome_unresolvable = "?",
+  error = "✗",
+}
+
+---status_mark returns the glyph for one history entry.
+---
+---An unrecognised status renders "?" rather than the success dot, so a
+---status this build has never heard of reads as "unknown", not as "fine".
+---A new outcome state added on the daemon side must never be able to arrive
+---here and look like a success.
+---@param e table history entry
+---@return string
+function M.status_mark(e)
+  if e.error and e.error ~= "" then return M.STATUS_MARKS.error end
+  return M.STATUS_MARKS[e.status] or "?"
 end
 
 ---_preview paints the full script for the row under the cursor.

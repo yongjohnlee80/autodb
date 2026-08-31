@@ -33,7 +33,7 @@ func newHistoryView(m *Model, rows []HistoryRow) *historyView {
 		{Title: "WHEN", Width: 20, Cell: func(r HistoryRow) string { return whenText(r.StartedAt) }},
 		{Title: "WHO", Width: 12, Cell: func(r HistoryRow) string { return r.User }},
 		{Title: "CONNECTION", Width: 14, Cell: func(r HistoryRow) string { return r.Conn }},
-		{Title: "STATUS", Width: 9, Cell: func(r HistoryRow) string { return r.Status }},
+		{Title: "STATUS", Width: 9, Cell: func(r HistoryRow) string { return statusLabel(r.Status) }},
 		{Title: "ROWS", Width: 6, Cell: func(r HistoryRow) string {
 			return strconv.FormatInt(r.RowCount, 10)
 		}},
@@ -145,6 +145,30 @@ func (v *historyView) Children() iter.Seq[tui.Component] {
 }
 
 var _ tui.Container = (*historyView)(nil)
+
+// statusLabel renders an outcome inside a narrow column (ADR-0074 §7 rev 2).
+//
+// The column is nine cells wide and audit v2's vocabulary is not:
+// "ok_pending_commit" and "outcome_unresolvable" would arrive truncated to
+// "ok_pendin" and "outcome_u", which is not a status anyone can read. Worse,
+// a truncation is silent — the reader has no way to tell they are looking at
+// half a word.
+//
+// So the states get short labels that are whole words and stay distinct from
+// each other at a glance. An unrecognised status is truncated rather than
+// hidden, because a status this build does not know about is still better
+// shown than swallowed.
+func statusLabel(status string) string {
+	switch status {
+	case "ok_pending_commit":
+		return "pending"
+	case "outcome_unresolvable":
+		return "unknown"
+	case "rolled_back":
+		return "rolled"
+	}
+	return status
+}
 
 func scriptTitle(r HistoryRow) string {
 	title := whenText(r.StartedAt) + " · " + r.User

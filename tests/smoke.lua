@@ -648,6 +648,31 @@ print("\n[9] history — three panes over history.list (requirement 8)")
   ok("p9: a nil script is empty, not an error",
     hist._one_line_for_tests(nil) == "")
 
+  -- ADR-0074 §7 rev 2: every outcome gets its OWN glyph. This was a binary
+  -- split -- error or not -- which was correct only while "not an error"
+  -- could mean nothing but durable success. Audit v2 made that false, and a
+  -- reader was then told an effect had landed when it had been discarded, or
+  -- when nothing can ever establish whether it landed.
+  local marks = {}
+  for _, st in ipairs({ "ok", "running", "ok_pending_commit", "rolled_back",
+                        "outcome_unresolvable", "error" }) do
+    local m = hist.status_mark({ status = st })
+    ok("p9: " .. st .. " has a glyph", m ~= nil and m ~= "", tostring(m))
+    ok("p9: " .. st .. " is not confusable with durable success",
+      st == "ok" or m ~= hist.STATUS_MARKS.ok, tostring(m))
+    ok("p9: " .. st .. "'s glyph is unique", marks[m] == nil,
+      string.format("%s collides with %s", st, tostring(marks[m])))
+    marks[m] = st
+  end
+  -- An unknown status must read as unknown, never as fine: a state added on
+  -- the daemon side must not arrive here looking like a success.
+  ok("p9: an unrecognised status is not rendered as success",
+    hist.status_mark({ status = "some_future_state" }) ~= hist.STATUS_MARKS.ok,
+    hist.status_mark({ status = "some_future_state" }))
+  -- A row carrying an error text is an error whatever its status says.
+  ok("p9: an error text wins over the status word",
+    hist.status_mark({ status = "ok", error = "boom" }) == hist.STATUS_MARKS.error)
+
   local entries = {
     { id = 1, connection = "analytics", user = "johno", script = "select 1",
       started_at = "2026-08-18T09:00:00+09:00", status = "ok", row_count = 1 },
