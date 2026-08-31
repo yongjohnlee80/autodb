@@ -9,6 +9,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -27,13 +28,70 @@ const DefaultPort = 7419
 
 // Config is autodb's full configuration.
 type Config struct {
-	Server   Server   `toml:"server"`
-	Meta     Meta     `toml:"meta"`
-	History  History  `toml:"history"`
-	Security Security `toml:"security"`
-	TUI      TUI      `toml:"tui"`
-	Web      Web      `toml:"web"`
-	Exec     Exec     `toml:"exec"`
+	Server    Server    `toml:"server"`
+	Meta      Meta      `toml:"meta"`
+	History   History   `toml:"history"`
+	Security  Security  `toml:"security"`
+	TUI       TUI       `toml:"tui"`
+	Web       Web       `toml:"web"`
+	Exec      Exec      `toml:"exec"`
+	FrontDoor FrontDoor `toml:"frontdoor"`
+}
+
+// FrontDoor configures the PostgreSQL wire-protocol listener (ADR-0075).
+//
+// The whole surface is OFF unless Enabled is set. That is not timidity about
+// a new feature: this listener speaks a protocol every PostgreSQL client in
+// the world already knows how to reach, so switching it on is the decision,
+// and it should be one an operator makes rather than one they inherit.
+type FrontDoor struct {
+	// Enabled turns the listener on. Everything below is validated only when
+	// it is true — an install that does not run the front door is not asked
+	// to hold a valid certificate for it.
+	Enabled bool `toml:"enabled"`
+
+	// Bind is the TCP address to listen on. TCP only, by construction: the
+	// LocalPeer socket exemption does NOT apply to this surface (ADR-0075
+	// §4), so there is no unix-socket form to configure.
+	Bind string `toml:"bind"`
+
+	// TLSCertFile and TLSKeyFile are the server's identity. Both are
+	// REQUIRED when the front door is enabled and are validated before the
+	// listener binds: TLS here is mandatory and verified, and a front door
+	// that cannot prove who it is must not accept a connection to be asked.
+	TLSCertFile string `toml:"tls_cert_file"`
+	TLSKeyFile  string `toml:"tls_key_file"`
+
+	// TLSHostNames are the DNS names clients will use. They are checked
+	// against the certificate's SANs at startup.
+	//
+	// This exists because `sslmode=verify-full` — which ADR-0075 §4 ratified
+	// against `require`, since require authenticates nothing and permits
+	// active-MITM PAT theft — verifies the NAME. A certificate that is
+	// otherwise perfect but does not cover the name in the DSN fails at
+	// every client, one connection at a time, with an error the operator
+	// reads as a client problem. Checking it once at startup turns a
+	// recurring mystery into a message at the moment the mistake was made.
+	TLSHostNames []string `toml:"tls_host_names"`
+
+	// ReservedHeadroom is how many connections of each target pool are held
+	// back from wire leases, for the interactive surfaces and the engine's
+	// own control queries (ADR-0075 §3).
+	//
+	// Without it the front door can take every connection in the pool and
+	// the TUI stops working — with the front door looking healthy, because
+	// from its side nothing failed.
+	ReservedHeadroom int `toml:"reserved_headroom"`
+
+	// MaxLeases caps concurrent wire sessions per target pool.
+	//
+	// Unset DERIVES it as pool_max_conns - reserved_headroom, which is the
+	// value the ADR specifies and the one an operator should almost always
+	// take. An explicit value is validated against that derivation and may
+	// only be lower: a number above it would promise leases the pool cannot
+	// supply, and the failure would land on whichever session asked last
+	// rather than on the operator who set it.
+	MaxLeases int `toml:"max_leases"`
 }
 
 // MaxSubjectLen bounds the directory component built from a username. Generous
@@ -293,6 +351,11 @@ func Default() Config {
 			JanitorInterval:      Duration(DefaultJanitorInterval),
 			ReconcileInterval:    Duration(DefaultReconcileInterval),
 		},
+		FrontDoor: FrontDoor{
+			Enabled:          false,
+			Bind:             DefaultFrontDoorBind,
+			ReservedHeadroom: DefaultReservedHeadroom,
+		},
 	}
 }
 
@@ -321,6 +384,17 @@ const (
 	// without an amendment, which is not a call this code gets to make.
 	DefaultPoolMaxConnIdleTime = 10 * time.Minute
 	DefaultPoolMaxConnLifetime = 60 * time.Minute
+
+	// DefaultFrontDoorBind is the PostgreSQL port on loopback. Loopback and
+	// not 0.0.0.0: the default for a surface that speaks a protocol every
+	// client already knows should be "reachable from this machine", and
+	// exposing it is a decision an operator writes down.
+	DefaultFrontDoorBind = "127.0.0.1:5432"
+
+	// DefaultReservedHeadroom holds four connections of each target pool back
+	// from wire leases, for the interactive surfaces and the engine's own
+	// control queries (ADR-0075 §4 defaults table).
+	DefaultReservedHeadroom = 4
 
 	// A tenth of the 90s idle-in-transaction bound: an expired transaction
 	// is rolled back within a few seconds of its deadline rather than at the
@@ -497,6 +571,9 @@ func (c Config) validate() error {
 			"so a transaction could sit well past its deadline before anything looked", ErrInvalid,
 			c.Exec.JanitorInterval.Duration(), c.Exec.IdleInTxTimeout.Duration())
 	}
+	if err := c.FrontDoor.validate(c.Exec.PoolMaxConns); err != nil {
+		return err
+	}
 	if c.Exec.SessionIdleTimeout <= 0 {
 		return fmt.Errorf("%w: exec.session_idle_timeout %s must be positive — an unbounded idle window "+
 			"never reaps a session an abandoned client left open", ErrInvalid, c.Exec.SessionIdleTimeout.Duration())
@@ -516,4 +593,72 @@ func (c Config) validate() error {
 		}
 	}
 	return nil
+}
+
+// validate checks the front-door section against the pool it draws from.
+//
+// Everything here is skipped when the surface is disabled. An install that
+// does not run the front door should not be asked to hold a certificate for
+// it, and refusing to start over an unused section would be a validator
+// enforcing a feature nobody asked for.
+func (f FrontDoor) validate(poolMaxConns int) error {
+	if !f.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(f.Bind) == "" {
+		return fmt.Errorf("%w: frontdoor.bind is empty; the listener has no address", ErrInvalid)
+	}
+	if _, _, err := net.SplitHostPort(f.Bind); err != nil {
+		return fmt.Errorf("%w: frontdoor.bind %q is not host:port: %v", ErrInvalid, f.Bind, err)
+	}
+	// TLS is not optional on this surface and neither half of it is. A cert
+	// without a key cannot serve, and a key without a cert cannot prove
+	// anything — either alone is a half-written intention, so both are named
+	// rather than one generic "TLS is misconfigured".
+	if strings.TrimSpace(f.TLSCertFile) == "" || strings.TrimSpace(f.TLSKeyFile) == "" {
+		return fmt.Errorf("%w: frontdoor is enabled but tls_cert_file and tls_key_file are not both "+
+			"set; TLS is mandatory on this surface (ADR-0075 §4) because a client using "+
+			"sslmode=require authenticates nothing and an active MITM collects access tokens "+
+			"in cleartext", ErrInvalid)
+	}
+	if f.ReservedHeadroom < 0 {
+		return fmt.Errorf("%w: frontdoor.reserved_headroom is %d; it cannot be negative",
+			ErrInvalid, f.ReservedHeadroom)
+	}
+
+	// The derivation, and the reason an explicit value may only be lower.
+	derived := poolMaxConns - f.ReservedHeadroom
+	if derived < 1 {
+		return fmt.Errorf("%w: frontdoor.reserved_headroom (%d) leaves %d of exec.pool_max_conns "+
+			"(%d) for wire leases; the front door would be enabled with no capacity to serve "+
+			"anyone", ErrInvalid, f.ReservedHeadroom, derived, poolMaxConns)
+	}
+	switch {
+	case f.MaxLeases == 0:
+		// Unset. The derived value applies — see EffectiveMaxLeases.
+	case f.MaxLeases < 0:
+		return fmt.Errorf("%w: frontdoor.max_leases is %d; it cannot be negative",
+			ErrInvalid, f.MaxLeases)
+	case f.MaxLeases > derived:
+		return fmt.Errorf("%w: frontdoor.max_leases is %d but only %d connections remain after "+
+			"reserved_headroom (%d) is held back from exec.pool_max_conns (%d); a cap above what "+
+			"the pool can supply does not create capacity, it just moves the failure onto "+
+			"whichever session asks last", ErrInvalid, f.MaxLeases, derived, f.ReservedHeadroom,
+			poolMaxConns)
+	}
+	return nil
+}
+
+// EffectiveMaxLeases is the wire-lease cap actually in force: the operator's
+// value when set, otherwise the derivation.
+//
+// One function so the number is computed once. Two places deriving it
+// separately is how the validator and the admission gate end up disagreeing,
+// and the disagreement would surface as leases refused by a cap no
+// configuration file mentions.
+func (f FrontDoor) EffectiveMaxLeases(poolMaxConns int) int {
+	if f.MaxLeases > 0 {
+		return f.MaxLeases
+	}
+	return poolMaxConns - f.ReservedHeadroom
 }

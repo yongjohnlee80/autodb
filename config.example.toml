@@ -245,3 +245,51 @@ reconcile_interval = "1m"
 # turns into a data-exposure surprise. Must match the daemon's own name for
 # the user (what `auth.login` reports), not merely what gets typed in the
 # browser form.
+
+[frontdoor]
+# The PostgreSQL wire-protocol front door (ADR-0075): a TCP listener that
+# speaks pgwire v3, so ordinary PostgreSQL clients -- psql, pgx, lib/pq, a
+# JetBrains data source -- reach an autodb connection directly, through the
+# same gate stack as every other surface.
+#
+# OFF unless you turn it on. This surface speaks a protocol every client in
+# the world already knows how to dial, so switching it on is the decision.
+enabled = false
+
+# TCP only. The unix-socket LocalPeer exemption does NOT apply here -- a
+# front-door caller always authenticates. Loopback by default; exposing it is
+# something you write down.
+bind = "127.0.0.1:5432"
+
+# The server's TLS identity. BOTH are required when enabled = true, and both
+# are validated BEFORE the listener binds: an absent, unparsable, expired,
+# not-yet-valid, wrongly-chained or mismatched key/cert fails startup. The
+# front door never listens with an identity it cannot prove.
+#
+# Clients are expected to use sslmode=verify-full. `require` authenticates
+# nothing and permits an active MITM to collect access tokens in cleartext,
+# which is the whole reason this listener refuses to start without a real
+# certificate.
+# tls_cert_file = "/etc/autodb/tls/fullchain.pem"
+# tls_key_file = "/etc/autodb/tls/privkey.pem"
+
+# The DNS names clients will dial, checked against the certificate's SANs at
+# startup. verify-full verifies the NAME, so a certificate that is otherwise
+# perfect but misses the name in your DSN fails at every client, one
+# connection at a time, with an error that reads like a client problem.
+# Checking it once here turns that into a message at the moment you made the
+# mistake.
+# tls_host_names = ["autodb.example.com"]
+
+# How many connections of each target pool are held back from wire leases,
+# for the interactive surfaces and the engine's own control queries. Without
+# it the front door can take the whole pool and the TUI stops working, with
+# the front door looking healthy -- because from its side nothing failed.
+reserved_headroom = 4
+
+# Concurrent wire sessions per target pool. Unset derives
+# pool_max_conns - reserved_headroom, which is what you almost always want.
+# An explicit value may only be LOWER: a higher one promises leases the pool
+# cannot supply, and that failure lands on whichever session asked last
+# rather than on the person who set the number.
+# max_leases = 6
