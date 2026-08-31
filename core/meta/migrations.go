@@ -13,6 +13,19 @@ type migration struct {
 	Version  int
 	SQLite   []string
 	Postgres []string
+	// PostgresFn is a COMPUTED postgres step, run after Postgres.
+	//
+	// Almost every migration is static DDL and should stay that way — a
+	// static list is reviewable, and a function is not. This exists for the
+	// one shape static SQL cannot express: DDL whose content depends on the
+	// data already in the store. Converting an existing table to a
+	// partitioned one needs a partition for every month the existing rows
+	// fall in, and that set is only knowable by looking.
+	//
+	// It runs on the SAME executor as the rest of the upgrade, so it is
+	// inside the one transaction and the migration lock, like everything
+	// else.
+	PostgresFn func(ctx context.Context, ex migExec) error
 }
 
 // migrations is the ordered, append-only schema history (ADR-0053 §3).
@@ -305,6 +318,32 @@ var migrations = []migration{
 			`ALTER TABLE tx_outcomes ADD COLUMN collapsed_at BIGINT NOT NULL DEFAULT 0`,
 		},
 	},
+	// v11 partitions the VOLUME tables by month — postgres only (ADR-0079 §2,
+	// phase P3).
+	//
+	// No SQLite entry, and that is the decision rather than an omission:
+	// sqlite is a single-writer file with no partitioning, and the volume
+	// problem belongs to an installation large enough to be on postgres. This
+	// is the runner's first real per-engine DDL divergence beyond type names.
+	//
+	// The work is computed rather than static because the partitions needed
+	// depend on the months the EXISTING rows fall in, which is only knowable
+	// by looking. See convertToPartitioned.
+	{
+		Version:    11,
+		PostgresFn: partitionVolumeTables,
+	},
+}
+
+// partitionVolumeTables is v11's computed step.
+func partitionVolumeTables(ctx context.Context, ex migExec) error {
+	now := time.Now().UTC()
+	for _, p := range volumeTables {
+		if err := convertToPartitioned(ctx, ex, p, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // migrationLockWait bounds how long a starter waits for another process to
@@ -472,6 +511,11 @@ func applyAll(ctx context.Context, ex migExec, d dao.Dialect, engine string) err
 		for _, stmt := range stmts {
 			if _, err := ex.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("meta: migration %d: applying %q: %w", m.Version, firstLine(stmt), err)
+			}
+		}
+		if engine == "postgres" && m.PostgresFn != nil {
+			if err := m.PostgresFn(ctx, ex); err != nil {
+				return fmt.Errorf("meta: migration %d: computed step: %w", m.Version, err)
 			}
 		}
 		if _, err := ex.ExecContext(ctx,
