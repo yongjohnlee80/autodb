@@ -108,6 +108,10 @@ type Engine struct {
 	txLimits     txLimits
 	debugIdle    time.Duration
 	maxTxCeiling time.Duration
+
+	// reconcile is the outcome reconciler's cross-pass state: per-tx_id
+	// exclusion and retry backoff (ADR-0074 §7).
+	reconcile *reconciler
 	// onLog reports problems with no caller to return them to — a failed
 	// audit on a teardown path, say. nil discards.
 	onLog func(string)
@@ -255,6 +259,7 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		poolMaxConnLifetime: DefaultPoolMaxConnLifetime,
 		debugIdle:           DefaultDebugIdleInTxTimeout,
 		maxTxCeiling:        DefaultMaxTxDurationCeiling,
+		reconcile:           newReconciler(),
 	}
 	for _, o := range opts {
 		o(e)
