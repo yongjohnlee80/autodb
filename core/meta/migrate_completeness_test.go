@@ -51,9 +51,20 @@ func TestMigrateCompleteness_CountableTablesCoversTheSchema(t *testing.T) {
 	ctx := context.Background()
 	dst, _ := isolatedPGStore(t, base, "cover")
 
+	// PARTITION CHILDREN ARE EXCLUDED, and this matters ahead of ADR-0079 P3
+	// rather than after it: once script_history and audit_log are partitioned,
+	// every monthly child (audit_log_p2026_09, ...) and the default partition
+	// appear here as BASE TABLEs. They are storage for a parent that IS in the
+	// list, not tables of their own — the copier writes through the parent and
+	// postgres routes. Without relispartition this guard would go red on the
+	// merge that introduces partitioning, for a reason that is not a defect.
 	rows, err := dst.Conn().QueryContext(ctx,
-		`SELECT table_name FROM information_schema.tables
-		  WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`)
+		`SELECT t.table_name FROM information_schema.tables t
+		   JOIN pg_class c ON c.relname = t.table_name
+		   JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = t.table_schema
+		  WHERE t.table_schema = current_schema()
+		    AND t.table_type = 'BASE TABLE'
+		    AND NOT c.relispartition`)
 	if err != nil {
 		t.Fatal(err)
 	}
