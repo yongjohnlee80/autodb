@@ -15,11 +15,13 @@ func TestCheckFlags(t *testing.T) {
 
 	type args struct {
 		serve, ui, webUI, printEndpoint bool
+		migrateToPG                     bool
 		port                            int
 		portSet                         bool
 	}
 	ok := map[string]args{
 		"serve alone":          {serve: true, port: goodPort},
+		"migrate alone":        {migrateToPG: true, port: goodPort},
 		"ui alone":             {ui: true, port: goodPort},
 		"web-ui alone":         {webUI: true, port: goodPort},
 		"print-endpoint alone": {printEndpoint: true, port: goodPort},
@@ -34,17 +36,22 @@ func TestCheckFlags(t *testing.T) {
 		"serve + print-endpoint":  {serve: true, printEndpoint: true, port: goodPort},
 		"ui + print-endpoint":     {ui: true, printEndpoint: true, port: goodPort},
 		"three at once":           {serve: true, ui: true, webUI: true, port: goodPort},
-		"port without web-ui":     {ui: true, port: goodPort, portSet: true},
-		"web-ui port 0":           {webUI: true, port: 0, portSet: true},
-		"web-ui port too high":    {webUI: true, port: 70000, portSet: true},
-		"web-ui negative port":    {webUI: true, port: -1, portSet: true},
+		// --migrate-to-postgres is FIRST in the dispatch switch, so an
+		// uncounted pairing would migrate and never serve — the same class of
+		// bug as the web-ui/print-endpoint pairing this table was built for.
+		"migrate + serve":      {migrateToPG: true, serve: true, port: goodPort},
+		"migrate + ui":         {migrateToPG: true, ui: true, port: goodPort},
+		"port without web-ui":  {ui: true, port: goodPort, portSet: true},
+		"web-ui port 0":        {webUI: true, port: 0, portSet: true},
+		"web-ui port too high": {webUI: true, port: 70000, portSet: true},
+		"web-ui negative port": {webUI: true, port: -1, portSet: true},
 	}
 
 	run := func(a args) error {
 		// checkFlags reads --port's PRESENCE from flag.CommandLine, so a fresh
 		// FlagSet is set up per case to reflect portSet.
 		reset(t, a.portSet)
-		return checkFlags(a.serve, a.ui, a.webUI, a.printEndpoint, a.port)
+		return checkFlags(a.serve, a.ui, a.webUI, a.printEndpoint, a.migrateToPG, a.port)
 	}
 	for name, a := range ok {
 		t.Run("ok/"+name, func(t *testing.T) {

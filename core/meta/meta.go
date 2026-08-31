@@ -60,7 +60,32 @@ func metaPoolBound(mcfg config.Meta) postgres.Option {
 	return func(c *pgxpool.Config) { c.MaxConns = int32(n) }
 }
 
+// Open connects and brings the schema up to date.
 func Open(ctx context.Context, mcfg config.Meta) (*Store, error) {
+	s, err := OpenNoMigrate(ctx, mcfg)
+	if err != nil {
+		return nil, err
+	}
+	if err := runMigrations(ctx, s.conn, mcfg.Engine); err != nil {
+		_ = s.conn.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+// OpenNoMigrate connects WITHOUT touching the schema.
+//
+// It exists for one caller and one reason (ADR-0079 §5 / P2, lector r0 MF3):
+// the migration CLI must prove no daemon is serving BEFORE it mutates
+// anything — and running migrations IS a mutation. Open cannot serve that,
+// because it migrates before it returns, so a CLI built on Open would already
+// have changed the destination's schema by the time it was in a position to
+// take the lease and find out it should not have.
+//
+// The returned Store is safe for the lease and for reading `schema_migrations`,
+// and nothing else should assume its schema is current. Everything that serves
+// requests uses Open.
+func OpenNoMigrate(ctx context.Context, mcfg config.Meta) (*Store, error) {
 	var (
 		conn dao.DataConn
 		err  error
@@ -75,11 +100,6 @@ func Open(ctx context.Context, mcfg config.Meta) (*Store, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("meta: opening %s store: %w", mcfg.Engine, err)
-	}
-
-	if err := runMigrations(ctx, conn, mcfg.Engine); err != nil {
-		_ = conn.Close()
-		return nil, err
 	}
 
 	return &Store{
