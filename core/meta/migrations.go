@@ -279,6 +279,32 @@ var migrations = []migration{
 		UNIQUE(user_id, cidr))`,
 		},
 	},
+	// v10 records WHEN a settled progression was collapsed to its tombstone
+	// (ADR-0079 §3 / P4).
+	//
+	// Retention for the outcome log COLLAPSES rather than deletes: the
+	// intermediate transitions of a settled transaction go, the terminal
+	// stays. That is not a storage detail, it is the whole mechanism — the
+	// read API's ErrNoSuchTx means "no transaction was started", and its
+	// truthfulness rests on the write-ahead ordering in beginTx (zero rows
+	// PROVES nothing started). Deleting settled rows would break that proof
+	// and a committed transaction would begin answering "no such
+	// transaction", which is the same class of lie the write-ahead ordering
+	// exists to prevent (ADR-0074 Amendment 5 decision 5).
+	//
+	// collapsed_at is 0 for a progression that is still intact. Non-zero
+	// means "the terminal you are reading is a tombstone; the transitions
+	// that led to it were pruned at this time" — so a reader can tell a
+	// short progression from a collapsed one rather than guessing.
+	{
+		Version: 10,
+		SQLite: []string{
+			`ALTER TABLE tx_outcomes ADD COLUMN collapsed_at BIGINT NOT NULL DEFAULT 0`,
+		},
+		Postgres: []string{
+			`ALTER TABLE tx_outcomes ADD COLUMN collapsed_at BIGINT NOT NULL DEFAULT 0`,
+		},
+	},
 }
 
 // runMigrations creates the ledger, checks the downgrade guard, and applies

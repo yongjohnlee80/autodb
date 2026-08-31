@@ -199,6 +199,12 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 		`DROP TABLE user_ip_allowlist`,
 		// Everything from v7 on, not just v7: currentVersion is the MAX, so
 		// leaving a later row behind would skip the re-application entirely.
+		//
+		// And every LATER migration's effect must be undone too, or its
+		// re-application fails. v10 adds tx_outcomes.collapsed_at, so the
+		// column goes here — the DROP list is part of adding a migration,
+		// not an afterthought.
+		`ALTER TABLE tx_outcomes DROP COLUMN collapsed_at`,
 		`DELETE FROM schema_migrations WHERE version >= 7`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
@@ -285,6 +291,9 @@ func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
 		`DROP TABLE tx_pending_v8`,
 		// v9 re-applies as well; drop its artifact for the same reason.
 		`DROP TABLE user_ip_allowlist`,
+		// Same DROP-list rule as the v7 fixture: undo every later
+		// migration's effect or its re-application fails.
+		`ALTER TABLE tx_outcomes DROP COLUMN collapsed_at`,
 		`DELETE FROM schema_migrations WHERE version >= 8`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
