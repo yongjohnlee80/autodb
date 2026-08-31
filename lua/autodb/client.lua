@@ -30,7 +30,15 @@ local M = {}
 -- and reported with direction — an older server needs a refresh, a
 -- newer one needs a newer plugin — because "protocol mismatch" alone
 -- sends people to the wrong fix.
-M.PROTOCOL = 4
+--
+-- 5 (ADR-0074 R5): the ExecSession surface (exec.session_open /
+-- session_close / session_run), and exec.run_script now runs a script
+-- that CONTAINS a transaction boundary inside one transaction. That
+-- second part is why this is a bump and not an addition — the same
+-- `BEGIN; …; COMMIT;` a user could already send means something
+-- different now, so a stale pairing has to fail at the handshake
+-- rather than silently apply half a script.
+M.PROTOCOL = 5
 
 ---@class AutodbClientOpts
 ---@field addr string                 -- socket path, or host:port for TCP

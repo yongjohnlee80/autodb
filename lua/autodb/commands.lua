@@ -116,6 +116,14 @@ end
 ---SCRIPT, and the server splits and runs each statement through the same
 ---guarded path, returning the last result (the M6 behaviour Johno asked
 ---for — "we should still execute then display whatever comes the last").
+---
+---Since protocol 5 the server also decides how to RUN it. A script that
+---contains a transaction boundary runs inside ONE transaction, so
+---`BEGIN; …; COMMIT;` typed into the editor means what it looks like and a
+---failure part-way applies nothing. A script without a boundary is
+---unchanged: independent statements, and the ones before a failure have
+---already run. Nothing here needs to know which — the distinction is the
+---server's, so all three editors get it from one place.
 ---@param sql string
 function M.run_sql(sql, cb)
   sql = vim.trim(sql or "")
