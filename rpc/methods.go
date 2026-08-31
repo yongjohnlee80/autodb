@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
@@ -64,6 +65,14 @@ const (
 	// indistinguishable. Not a pending status: a mistyped or expired id must
 	// not leave a caller polling forever for a transaction that never was.
 	CodeNoSuchTx int64 = -32045
+	// CodeInvalidToken carries PAT MANAGEMENT refusals — a duplicate name, a
+	// cap reached, a lifetime out of range, an allowed_ips that is not a
+	// subset. The caller is authenticated and managing their own tokens, so
+	// the specific reason is theirs to see.
+	//
+	// It is emphatically NOT the front door's credential failure. That one
+	// is uniform and anonymous by design, and it never travels this wire.
+	CodeInvalidToken int64 = -32046
 )
 
 // publicErrs is the whole disclosure allowlist: core sentinels whose
@@ -101,6 +110,15 @@ var publicErrs = []struct {
 	// never existed — same sentinel, same code, same text — so tx.status
 	// cannot be used to discover which transaction ids exist.
 	{exec.ErrNoSuchTx, CodeNoSuchTx},
+
+	// PAT management failures. These reach an AUTHENTICATED caller managing
+	// their own tokens, so naming them is safe and useful — unlike
+	// auth.ErrPATInvalid, which is the anonymous front-door path's single
+	// uniform failure and is deliberately absent from this list.
+	{auth.ErrPATNameTaken, CodeInvalidToken},
+	{auth.ErrPATCapExceeded, CodeInvalidToken},
+	{auth.ErrPATBadExpiry, CodeInvalidToken},
+	{auth.ErrPATBadAllowedIPs, CodeInvalidToken},
 	{exec.ErrSessionBusy, CodeSessionBusy},
 	{exec.ErrSessionCapExceeded, CodeSessionCapExceeded},
 	{exec.ErrConnectionDraining, CodeConnectionDraining},
@@ -602,6 +620,105 @@ func (s *Server) register() {
 		}
 		return out, nil
 	})
+	// Personal Access Tokens (ADR-0075 §4). The credential a person pastes
+	// into a DSN, managed from the surfaces they already use.
+	//
+	// The secret appears exactly once, in this reply. It is not recoverable
+	// afterwards from anywhere — the store keeps a selector and a SHA-256 —
+	// so the reply is the only chance to copy it, and the client is expected
+	// to say so.
+	s.rpc.Handle("auth.token_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 4); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		name, err := argStr(req.Params, 1, "name")
+		if err != nil {
+			return nil, err
+		}
+		days, err := argInt(req.Params, 2, "days")
+		if err != nil {
+			return nil, err
+		}
+		rawIPs, err := argStr(req.Params, 3, "allowed_ips")
+		if err != nil {
+			return nil, err
+		}
+		var ips []string
+		if strings.TrimSpace(rawIPs) != "" {
+			ips = strings.Split(rawIPs, ",")
+		}
+		out, cerr := s.auth.CreatePAT(ctx, token, name, time.Duration(days)*24*time.Hour, ips)
+		if cerr != nil {
+			return nil, wireErr(cerr)
+		}
+		return map[string]any{
+			"name": out.Name,
+			// The one and only time this value exists outside the client's
+			// hands.
+			"secret":     out.Secret,
+			"expires_at": out.ExpiresAt.Format(time.RFC3339),
+		}, nil
+	})
+
+	s.rpc.Handle("auth.token_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		userID, err := argInt(req.Params, 1, "user_id")
+		if err != nil {
+			return nil, err
+		}
+		rows, lerr := s.auth.ListPATs(ctx, token, userID)
+		if lerr != nil {
+			return nil, wireErr(lerr)
+		}
+		out := make([]any, 0, len(rows))
+		for _, r := range rows {
+			// Never the digest and never the selector. The digest is
+			// useless to a client and the selector is half the credential:
+			// publishing it would turn a token list into a head start.
+			out = append(out, map[string]any{
+				"name":        r.Name,
+				"created_at":  time.Unix(r.CreatedAt, 0).Format(time.RFC3339),
+				"expires_at":  time.Unix(r.ExpiresAt, 0).Format(time.RFC3339),
+				"last_used":   lastUsedString(r.LastUsedAt),
+				"revoked":     r.IsRevoked(),
+				"allowed_ips": r.AllowedIPs,
+			})
+		}
+		return out, nil
+	})
+
+	s.rpc.Handle("auth.token_revoke", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		userID, err := argInt(req.Params, 1, "user_id")
+		if err != nil {
+			return nil, err
+		}
+		name, err := argStr(req.Params, 2, "name")
+		if err != nil {
+			return nil, err
+		}
+		if rerr := s.auth.RevokePAT(ctx, token, userID, name); rerr != nil {
+			return nil, wireErr(rerr)
+		}
+		return map[string]any{"revoked": true}, nil
+	})
+
 	s.rpc.Handle("auth.user_allowlist_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 4); err != nil {
 			return nil, err
@@ -1239,4 +1356,16 @@ func (s *Server) registerM6() {
 		}
 		return nil, wireErr(s.eng.DetachConnection(ctx, token, wsID, connID, peerIP(req)))
 	})
+}
+
+// lastUsedString renders a PAT's last-use time, or "never".
+//
+// Zero is not a date. Rendering it as 1970 would put a plausible-looking
+// timestamp on a token nobody has used, which is exactly the row an operator
+// is scanning for when they are deciding what to revoke.
+func lastUsedString(unix int64) string {
+	if unix == 0 {
+		return "never"
+	}
+	return time.Unix(unix, 0).Format(time.RFC3339)
 }

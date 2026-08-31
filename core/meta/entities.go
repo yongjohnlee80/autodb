@@ -458,3 +458,67 @@ func newKV(conn dao.DataConn) *dao.Schema[*MetaKV, MetaKVField, Sort, string] {
 		}),
 	)
 }
+
+// PAT is a Personal Access Token — the front door's credential (ADR-0075 §4).
+//
+// Distinct from Session by design: named, deliberately long-lived, and pasted
+// into a DSN by a person. A session is anonymous, short-lived, and held by a
+// client. Sharing one table would put an "and not a PAT" clause on every
+// session query, which is the sort of condition that gets forgotten once.
+type PAT struct {
+	ID int64
+	// Selector is the stable, indexed lookup key. Authentication finds a row
+	// by equality on this and never by scanning hashes: a scan would make
+	// lookup cost depend on how many tokens exist, and the uniform failure
+	// shape depends on that cost being flat.
+	Selector string
+	// SecretHash is SHA-256 of the secret half. The secret itself is shown
+	// once at creation and never stored.
+	SecretHash []byte
+	UserID     int64
+	Name       string
+	// AllowedIPs is this token's own narrowing, canonicalized on write.
+	// EMPTY means it inherits the admission set (ADR-0075 Amendment 1) —
+	// not "nowhere", which would make an ordinary token useless.
+	AllowedIPs string
+	CreatedAt  int64
+	ExpiresAt  int64
+	// LastUsedAt is written coalesced, never once per statement.
+	LastUsedAt int64
+	Revoked    int64 // 0/1 flag
+}
+
+// IsRevoked reports whether the token has been revoked.
+func (p *PAT) IsRevoked() bool { return p.Revoked != 0 }
+
+// PATField names a column of pats.
+type PATField = string
+
+// PAT columns.
+const (
+	PATID         PATField = "id"
+	PATSelector   PATField = "selector"
+	PATSecretHash PATField = "secret_hash"
+	PATUserID     PATField = "user_id"
+	PATName       PATField = "name"
+	PATAllowedIPs PATField = "allowed_ips"
+	PATCreatedAt  PATField = "created_at"
+	PATExpiresAt  PATField = "expires_at"
+	PATLastUsedAt PATField = "last_used_at"
+	PATRevoked    PATField = "revoked"
+)
+
+func newPATs(conn dao.DataConn) *dao.Schema[*PAT, PATField, Sort, int64] {
+	return schema(conn, "pats", PATID, map[PATField]dao.Field[*PAT]{
+		PATID:         {Column: "id", Scan: func(r *PAT) any { return &r.ID }},
+		PATSelector:   {Column: "selector", Scan: func(r *PAT) any { return &r.Selector }, Value: func(r *PAT) any { return r.Selector }},
+		PATSecretHash: {Column: "secret_hash", Scan: func(r *PAT) any { return &r.SecretHash }, Value: func(r *PAT) any { return r.SecretHash }},
+		PATUserID:     {Column: "user_id", Scan: func(r *PAT) any { return &r.UserID }, Value: func(r *PAT) any { return r.UserID }},
+		PATName:       {Column: "name", Scan: func(r *PAT) any { return &r.Name }, Value: func(r *PAT) any { return r.Name }},
+		PATAllowedIPs: {Column: "allowed_ips", Scan: func(r *PAT) any { return &r.AllowedIPs }, Value: func(r *PAT) any { return r.AllowedIPs }},
+		PATCreatedAt:  {Column: "created_at", Scan: func(r *PAT) any { return &r.CreatedAt }, Value: func(r *PAT) any { return r.CreatedAt }},
+		PATExpiresAt:  {Column: "expires_at", Scan: func(r *PAT) any { return &r.ExpiresAt }, Value: func(r *PAT) any { return r.ExpiresAt }},
+		PATLastUsedAt: {Column: "last_used_at", Scan: func(r *PAT) any { return &r.LastUsedAt }, Value: func(r *PAT) any { return r.LastUsedAt }},
+		PATRevoked:    {Column: "revoked", Scan: func(r *PAT) any { return &r.Revoked }, Value: func(r *PAT) any { return r.Revoked }},
+	})
+}

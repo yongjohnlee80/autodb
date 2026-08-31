@@ -333,6 +333,59 @@ var migrations = []migration{
 		Version:    11,
 		PostgresFn: partitionVolumeTables,
 	},
+	// v12 (ADR-0075 §4): Personal Access Tokens — the front door's
+	// credential.
+	//
+	// A separate table from `sessions` rather than a flag on it, because a
+	// PAT is a different KIND of thing in three ways that each break a
+	// session assumption: it is NAMED (a session is anonymous), it is
+	// deliberately long-lived (a session has a short TTL), and it is a
+	// credential a person pastes into a DSN (a session is issued and held by
+	// a client). Sharing the table would mean every session query growing a
+	// "and not a PAT" clause, which is the kind of condition that gets
+	// forgotten exactly once.
+	//
+	// selector is the STABLE LOOKUP KEY and the reason the shape is
+	// selector+hash rather than hash alone: authentication must find the row
+	// by an indexed equality, never by scanning hashes. A scan would make
+	// the cost of a lookup depend on how many tokens exist, and the uniform
+	// failure shape depends on that cost being flat.
+	//
+	// allowed_ips is the token's own narrowing, stored canonicalized. Empty
+	// means it inherits the admission set (ADR-0075 Amendment 1) rather than
+	// meaning "nowhere" — an empty list that denied everything would make
+	// the ordinary token useless.
+	{
+		Version: 12,
+		SQLite: []string{
+			`CREATE TABLE pats (
+				id INTEGER PRIMARY KEY,
+				selector TEXT NOT NULL UNIQUE,
+				secret_hash BLOB NOT NULL,
+				user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				name TEXT NOT NULL,
+				allowed_ips TEXT NOT NULL DEFAULT '',
+				created_at BIGINT NOT NULL,
+				expires_at BIGINT NOT NULL,
+				last_used_at BIGINT NOT NULL DEFAULT 0,
+				revoked INTEGER NOT NULL DEFAULT 0,
+				UNIQUE (user_id, name))`,
+		},
+		Postgres: []string{
+			`CREATE TABLE pats (
+				id BIGSERIAL PRIMARY KEY,
+				selector TEXT NOT NULL UNIQUE,
+				secret_hash BYTEA NOT NULL,
+				user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+				name TEXT NOT NULL,
+				allowed_ips TEXT NOT NULL DEFAULT '',
+				created_at BIGINT NOT NULL,
+				expires_at BIGINT NOT NULL,
+				last_used_at BIGINT NOT NULL DEFAULT 0,
+				revoked INTEGER NOT NULL DEFAULT 0,
+				UNIQUE (user_id, name))`,
+		},
+	},
 }
 
 // partitionVolumeTables is v11's computed step.

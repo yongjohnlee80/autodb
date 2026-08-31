@@ -5,9 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,6 +17,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/rpc"
 	"github.com/yongjohnlee80/golib/msgpack"
+	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 )
 
 // The fixture (newFixture, session, dial, call, hello, login, mustErr,
@@ -1152,5 +1153,91 @@ func TestTxStatusOverWire(t *testing.T) {
 	fresh := f.dial(t)
 	if errVal, _ := fresh.call("tx.status", f.rootTok, "x"); errVal == nil {
 		t.Error("tx.status answered before sys.hello")
+	}
+}
+
+// PAT management over the wire (ADR-0075 §4). The credential itself is the
+// front door's business; this is the surface a person uses to create and
+// revoke one from the tools they already have.
+func TestTokenVerbsOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	errVal, result := c.call("auth.token_create", f.rootTok, "laptop", int64(0), "")
+	if errVal != nil {
+		t.Fatalf("token_create: %#v", errVal)
+	}
+	m := result.(map[string]any)
+	secret, _ := m["secret"].(string)
+	if secret == "" {
+		t.Fatal("token_create returned no secret; the reply is the only time it exists")
+	}
+	if !strings.HasPrefix(secret, "adb_pat_") {
+		t.Errorf("secret %q lacks the scannable prefix", secret)
+	}
+
+	// The list never carries the credential — not the digest, and not the
+	// selector, which is half of it. Publishing the selector would turn a
+	// token list into a head start.
+	errVal, result = c.call("auth.token_list", f.rootTok, int64(0))
+	if errVal != nil {
+		t.Fatalf("token_list: %#v", errVal)
+	}
+	rows := result.([]any)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0].(map[string]any)
+	if row["name"] != "laptop" {
+		t.Errorf("name = %v", row["name"])
+	}
+	if row["last_used"] != "never" {
+		t.Errorf("last_used = %v, want \"never\" — a zero timestamp rendered as 1970 puts a "+
+			"plausible date on a token nobody has used, which is the row an operator is "+
+			"scanning for", row["last_used"])
+	}
+	for k, v := range row {
+		if sv, ok := v.(string); ok && sv != "" && strings.Contains(secret, sv) && len(sv) > 8 {
+			t.Errorf("the listing field %q carries part of the credential", k)
+		}
+	}
+
+	// A duplicate name is refused, and the reason is NAMED: this caller is
+	// authenticated and managing their own tokens, unlike the anonymous
+	// front-door path whose failure is deliberately uniform.
+	errVal, _ = c.call("auth.token_create", f.rootTok, "laptop", int64(0), "")
+	mustErr(t, errVal, rpc.CodeInvalidToken)
+
+	// An over-long lifetime is refused too.
+	errVal, _ = c.call("auth.token_create", f.rootTok, "forever", int64(400), "")
+	mustErr(t, errVal, rpc.CodeInvalidToken)
+
+	errVal, result = c.call("auth.token_revoke", f.rootTok, int64(0), "laptop")
+	if errVal != nil {
+		t.Fatalf("token_revoke: %#v", errVal)
+	}
+	if result.(map[string]any)["revoked"] != true {
+		t.Fatalf("revoke reply: %#v", result)
+	}
+	// Revocation is a flag, not a delete: the row is what an audit trail
+	// points at, and deleting it would leave every "authenticated with
+	// token X" record naming something that no longer exists.
+	_, result = c.call("auth.token_list", f.rootTok, int64(0))
+	rows = result.([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["revoked"] != true {
+		t.Fatalf("after revoke the listing is %#v; the row must survive as revoked", rows)
+	}
+
+	// Arity.
+	for _, bad := range [][]any{
+		{"auth.token_create", f.rootTok, "x"},
+		{"auth.token_list", f.rootTok},
+		{"auth.token_revoke", f.rootTok, int64(0)},
+	} {
+		if errVal, _ := c.call(bad[0].(string), bad[1:]...); errVal == nil {
+			t.Errorf("%s accepted %d arguments", bad[0], len(bad)-1)
+		}
 	}
 }

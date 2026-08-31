@@ -31,8 +31,10 @@ const (
 type denialReason string
 
 const (
-	reasonPlaintextStartup  denialReason = "frontdoor/tls-required"
-	reasonDirectTLS         denialReason = "frontdoor/direct-tls-unsupported"
+	reasonPlaintextStartup denialReason = "frontdoor/tls-required"
+	// Emitted as a TLS failure rather than a denial (matrix row 2.1a), which
+	// is why it is a reason string and never reaches denial().
+	reasonDirectTLS         denialReason = "direct-tls-unsupported"
 	reasonUnsupportedMajor  denialReason = "frontdoor/protocol-major-unsupported"
 	reasonStartupMalformed  denialReason = "frontdoor/startup-malformed"
 	reasonStartupParamRefus denialReason = "frontdoor/startup-parameter-refused"
