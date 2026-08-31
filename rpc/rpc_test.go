@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"strings"
@@ -1239,5 +1240,45 @@ func TestTokenVerbsOverWire(t *testing.T) {
 		if errVal, _ := c.call(bad[0].(string), bad[1:]...); errVal == nil {
 			t.Errorf("%s accepted %d arguments", bad[0], len(bad)-1)
 		}
+	}
+}
+
+// The integer domain is validated before the multiply. time.Duration(days)*
+// 24*time.Hour overflows, and overflow WRAPS: math.MinInt64+1 days came back
+// as a positive duration of about a day, sailed past the core's range check,
+// and created a token. The core check was correct and was simply handed a
+// number that no longer meant what the caller sent.
+func TestTokenCreate_DayCountCannotOverflowIntoAValidLifetime(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	for _, days := range []int64{
+		math.MinInt64 + 1, // wrapped to ~+24h before the fix
+		math.MinInt64,
+		math.MaxInt64,
+		-1,
+		366,
+	} {
+		errVal, _ := c.call("auth.token_create", f.rootTok, fmt.Sprintf("t%d", days), days, "")
+		if errVal == nil {
+			t.Errorf("days = %d created a token; an out-of-range lifetime must be refused "+
+				"before any arithmetic can turn it into a plausible one", days)
+			continue
+		}
+		m, _ := errVal.(map[string]any)
+		if code, _ := m["code"].(int64); code != rpc.CodeInvalidToken {
+			t.Errorf("days = %d gave code %d, want CodeInvalidToken", days, code)
+		}
+	}
+
+	// Positive control: the range that IS valid still works, so the guard is
+	// not simply refusing everything.
+	if errVal, _ := c.call("auth.token_create", f.rootTok, "ok-365", int64(365), ""); errVal != nil {
+		t.Errorf("365 days was refused: %#v", errVal)
+	}
+	if errVal, _ := c.call("auth.token_create", f.rootTok, "ok-default", int64(0), ""); errVal != nil {
+		t.Errorf("0 days (the default) was refused: %#v", errVal)
 	}
 }

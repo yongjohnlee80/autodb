@@ -80,6 +80,9 @@ const (
 	PATPrefix = "adb_pat_"
 )
 
+// testAfterCapLock runs inside CreatePAT's check→insert window. Test-only.
+func (s *Service) SetTestAfterCapLock(h func()) { s.testAfterCapLock = h }
+
 // NewPAT is a freshly created token. Secret is present exactly once, here.
 type NewPAT struct {
 	Name string
@@ -137,11 +140,6 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, lifetime ti
 			ErrPATBadExpiry, lifetime, PATMaxLifetime)
 	}
 
-	canonical, err := s.canonicalAllowedIPs(ctx, nil, ident.UserID(), allowedIPs)
-	if err != nil {
-		return NewPAT{}, err
-	}
-
 	selector, err := randomToken(patSelectorBytes)
 	if err != nil {
 		return NewPAT{}, err
@@ -153,11 +151,56 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, lifetime ti
 	now := s.now()
 	expires := now.Add(lifetime)
 
-	// Cap check and insert in ONE transaction. Two operations would let two
-	// concurrent creates both observe a free slot and both take it, which is
-	// the same check-then-act gap the session caps close inside their own
-	// atomic reservation.
+	var canonical string
+	// SERIALIZE, then count, then insert.
+	//
+	// One transaction is not mutual exclusion. Under PostgreSQL READ
+	// COMMITTED, concurrent creates each read the same committed count, each
+	// find a free slot, and each insert — the transaction gives atomicity of
+	// the write, not exclusivity of the decision. I claimed in the first
+	// version that one transaction closed this gap; it did not, and lector
+	// reproduced 19 active tokens against a cap of 16.
+	//
+	// The locks come first and ALWAYS in this order — global guard row, then
+	// the owner's users row. A consistent order is what stops two
+	// transactions taking them in opposite sequences and deadlocking.
+	//
+	// This is the pattern PR #21 already established for the per-user
+	// allowlist cap, after lector reproduced the same defect there (35 rows
+	// against a cap of 32). It was sitting in this package while I wrote the
+	// unsafe version.
 	err = s.inTx(ctx, func(tx *dao.Transaction) error {
+		if lerr := s.lockGuardRow(tx); lerr != nil {
+			return lerr
+		}
+		// Touching updated_at is the owner-row lock's visible form, and it
+		// is semantically true: the user's credential set is changing.
+		if lerr := s.store.Users.On(tx).With(meta.UserID, ident.UserID()).
+			Set(meta.UserUpdatedAt, now.Unix()).Update(); lerr != nil {
+			return lerr
+		}
+
+		// The subset read joins the SAME transaction, so the rows it
+		// validates against are the ones this decision is made on.
+		var cerr error
+		canonical, cerr = s.canonicalAllowedIPs(ctx, tx, ident.UserID(), allowedIPs)
+		if cerr != nil {
+			return cerr
+		}
+
+		if h := s.testAfterCapLock; h != nil {
+			// Inside the window: the locks are held and nothing has been
+			// counted yet. A hook here widens the check→insert gap on
+			// demand, which is what makes the cap race DETERMINISTIC rather
+			// than a matter of how the scheduler felt — the
+			// concurrency-testing convention's "inject the competing
+			// transition inside the window" applied to this decision.
+			//
+			// With the locks in place a competitor blocks here, which is
+			// the property under test. Without them it sails through, and
+			// the cell sees the overrun every time instead of occasionally.
+			h()
+		}
 		mine, cerr := s.store.PATs.On(tx).With(meta.PATUserID, ident.UserID()).
 			With(meta.PATRevoked, int64(0)).Count()
 		if cerr != nil {
