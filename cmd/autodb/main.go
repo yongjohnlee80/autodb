@@ -241,8 +241,14 @@ func runServe(configPath string) error {
 	// site that can be removed by accident.
 	eng, serveCtx, leaseLost, stopServing := startEngine(ctx, cfg, store, svc, lease.Lost(),
 		func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) })
-	defer stopServing()
+	// ORDER MATTERS, and defer is LIFO: eng.Close() is registered second so
+	// it runs FIRST, which is backwards — the engine would tear down its
+	// pools while the serve context was still live and work could still be
+	// dispatched. Registering stopServing second means it cancels first, and
+	// Close then stops and waits for engine-owned background work before
+	// closing anything (PR #20 r1 SF).
 	defer eng.Close()
+	defer stopServing()
 
 	// The operational logger is NOT optional: the transport deliberately
 	// withholds error detail from the wire (deny-before-disclose), so the

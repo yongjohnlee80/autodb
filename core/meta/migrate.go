@@ -94,6 +94,15 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					AuditTxID: r.TxID}
 			})
 		}},
+		// The pending queue migrates too. It is derivable from the log, but
+		// a store move that dropped it would leave the destination unable to
+		// find its own backlog until something happened to rebuild it.
+		{"tx_pending", func() (int64, error) {
+			return copyAll(ctx, src.TxPending, dst.TxPending, func(r *TxPending) map[TxPendingField]any {
+				return map[TxPendingField]any{TxPendID: r.ID, TxPendTxID: r.TxID,
+					TxPendConnID: r.ConnectionID, TxPendCreatedAt: r.CreatedAt}
+			})
+		}},
 		// The outcome log migrates with everything else. It is evidence: a
 		// store move that dropped it would silently lose the only record of
 		// which transactions were left unresolved.
@@ -236,7 +245,7 @@ func verifyCounts(ctx context.Context, dst *Store, want map[string]int64) error 
 var serialTables = []string{
 	"users", "connections", "workspaces", "workspace_connections",
 	"grants", "sessions", "script_history", "audit_log", "tx_outcomes",
-	"ip_allowlist",
+	"tx_pending", "ip_allowlist",
 }
 
 // fixSequences advances each table's id sequence: setval(max, is_called) so

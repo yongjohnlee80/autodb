@@ -153,3 +153,80 @@ func TestMigrate_RefusesWrongDirections(t *testing.T) {
 		t.Errorf("sqlite→sqlite err = %v, want ErrMigrate", err)
 	}
 }
+
+// A v6 store upgraded to v7 must arrive with its existing backlog in the
+// queue.
+//
+// The queue is what the reconciler reads, so a transaction unresolved at
+// upgrade time and absent from it is a transaction nothing will ever come
+// back for — silently, and precisely for the installs that had a backlog
+// worth keeping. Fresh stores run this backfill against an empty log and
+// prove nothing about it, which is why the store here is genuinely rolled
+// back to v6 first.
+func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "meta.db")
+
+	s1, err := Open(ctx, config.Meta{Engine: "sqlite", Path: path})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// Two unresolved transactions and one settled, written as a v6 store
+	// would have left them.
+	seed := func(txID, state string, seq int64) {
+		t.Helper()
+		if _, err := s1.TxOutcomes.OnCtx(ctx).
+			Set(TxOutTxID, txID).Set(TxOutSeq, seq).Set(TxOutState, state).
+			Set(TxOutReason, "").Set(TxOutUserID, int64(1)).Set(TxOutConnID, int64(7)).
+			Set(TxOutHistoryID, int64(0)).Set(TxOutTargetXID, "").
+			Set(TxOutCreatedAt, int64(100+seq)).Insert(); err != nil {
+			t.Fatalf("seeding %s/%s: %v", txID, state, err)
+		}
+	}
+	seed("tx_open", "opened", 1)
+	seed("tx_inflight", "opened", 1)
+	seed("tx_inflight", "commit_started", 2)
+	seed("tx_done", "opened", 1)
+	seed("tx_done", "committed", 2)
+
+	// Roll the store back to v6: drop the queue and its ledger row, so the
+	// next Open genuinely applies v7 against a populated log.
+	for _, stmt := range []string{
+		`DROP TABLE tx_pending`,
+		`DELETE FROM schema_migrations WHERE version = 7`,
+	} {
+		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("rolling back to v6 (%s): %v", stmt, err)
+		}
+	}
+	_ = s1.Close()
+
+	s2, err := Open(ctx, config.Meta{Engine: "sqlite", Path: path})
+	if err != nil {
+		t.Fatalf("upgrade Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s2.Close() })
+
+	rows, err := s2.TxPending.OnCtx(ctx).Select()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.TxID] = true
+		if r.ConnectionID != 7 {
+			t.Errorf("%s backfilled with connection %d, want 7 — a scoped checkout would "+
+				"never find it", r.TxID, r.ConnectionID)
+		}
+	}
+	for _, want := range []string{"tx_open", "tx_inflight"} {
+		if !got[want] {
+			t.Errorf("%s was not backfilled; an unresolved transaction is now invisible to "+
+				"the reconciler", want)
+		}
+	}
+	if got["tx_done"] {
+		t.Error("a settled transaction was backfilled into the queue and would be probed forever")
+	}
+}

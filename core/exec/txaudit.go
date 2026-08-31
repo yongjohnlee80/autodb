@@ -138,7 +138,22 @@ func (e *Engine) appendTxOutcome(ctx context.Context, t txTransition) error {
 				return ierr
 			}
 			if terminal {
+				// Leaving the queue is part of settling, not a follow-up to
+				// it: an entry that outlived its terminal would be probed
+				// forever, and one deleted before the terminal landed would
+				// be lost. Same transaction, so neither can happen.
+				if derr := e.dequeuePendingTx(tx, t.txID); derr != nil {
+					return derr
+				}
 				return e.projectHistoryTx(tx, t.txID, t.state)
+			}
+			if t.state == meta.TxOpened {
+				// Enqueued as the transaction opens, which is the earliest
+				// point anything could need to find it — and the same
+				// write-ahead reasoning as the opened row itself: a
+				// transaction that exists but is not in the queue is a
+				// transaction nothing will ever come back for.
+				return e.enqueuePendingTx(tx, t.txID, t.connectionID)
 			}
 			return nil
 		})

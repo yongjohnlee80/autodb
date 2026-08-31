@@ -112,6 +112,14 @@ type Engine struct {
 	// reconcile is the outcome reconciler's cross-pass state: per-tx_id
 	// exclusion and retry backoff (ADR-0074 §7).
 	reconcile *reconciler
+	// Background work the ENGINE owns — today the checkout-triggered
+	// reconciliation. Bound to the engine's own lifetime rather than
+	// detached, so Close can stop it and WAIT before closing the pools it
+	// uses; a detached goroutine could otherwise reopen a pool that Close
+	// had just shut (PR #20 r1 SF).
+	bgCtx    context.Context
+	bgCancel context.CancelFunc
+	bgWG     sync.WaitGroup
 	// onLog reports problems with no caller to return them to — a failed
 	// audit on a teardown path, say. nil discards.
 	onLog func(string)
@@ -261,6 +269,7 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		maxTxCeiling:        DefaultMaxTxDurationCeiling,
 		reconcile:           newReconciler(),
 	}
+	e.bgCtx, e.bgCancel = context.WithCancel(context.Background())
 	for _, o := range opts {
 		o(e)
 	}
@@ -269,7 +278,13 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 
 // Close releases every cached target connection.
 func (e *Engine) Close() error {
-	// Sessions first, for the same reason conn.delete closes them first: a
+	// Engine-owned background work first: stop it and WAIT. It uses the
+	// pools this function is about to close, so leaving it running would
+	// race a checkout against a pool teardown — and a checkout that wins
+	// REOPENS the pool that was just closed.
+	e.bgCancel()
+	e.bgWG.Wait()
+	// Then sessions, for the same reason conn.delete closes them first: a
 	// pool closed under a live session is the undefined behaviour ADR-0074
 	// §1 closes.
 	e.CloseAllSessions(context.Background(), "engine-shutdown")

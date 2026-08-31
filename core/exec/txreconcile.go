@@ -106,15 +106,20 @@ func (r *reconciler) release(txID string, now time.Time, resolved bool) {
 // it runs in the BACKGROUND: a caller waiting for their own statement should
 // never wait on the resolution of somebody else's abandoned transaction.
 //
-// Deliberately fire-and-forget on its own context. The caller's context is
-// cancelled the moment their statement finishes, which would abort the very
-// work this trigger exists to do.
+// It runs on the ENGINE's context, not the caller's and not a detached one.
+// The caller's is cancelled the moment their statement finishes, which would
+// abort the very work this exists to do; a detached one would outlive
+// Engine.Close and could reopen a pool that had just been shut. The engine's
+// is cancelled by Close, which then waits for this to finish before touching
+// any pool.
 func (e *Engine) checkoutTrigger(connID int64) {
 	if !e.reconcile.claimCheckout(connID, e.now()) {
 		return
 	}
+	e.bgWG.Add(1)
 	go func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), txCleanupTimeout)
+		defer e.bgWG.Done()
+		ctx, cancel := context.WithTimeout(e.bgCtx, txCleanupTimeout)
 		defer cancel()
 		e.ReconcileConnection(ctx, connID)
 	}()
@@ -172,17 +177,20 @@ func (e *Engine) reconcileScope(ctx context.Context, connID int64) int {
 		return 0
 	}
 
+	// One bounded sweep per pass for rows stranded under a settled outcome,
+	// rather than a query per settled transaction.
+	e.repairPendingHistory(ctx)
+
 	now := e.now()
 	resolved := 0
 	for txID, group := range byTx {
 		st := foldTxLog(group)
 		if st.Terminal() {
-			// Settled, but its SURFACE may not be. A pass used to skip here
-			// outright, which is why a crash between the terminal write and
-			// its projection was never healed (PR #20 r0 MF3). The write is
-			// atomic now; this heals anything left behind by a build that
-			// predates it, or by history having been off at the time.
-			e.repairHistory(ctx, txID, st.State)
+			// Queued but already settled: a terminal written by a build that
+			// predates the queue, or a dequeue that lost its process. Clear
+			// the entry so the backlog shrinks rather than carrying a
+			// permanent no-op.
+			e.dequeueSettled(ctx, txID, st)
 			continue
 		}
 		if !needsOracle(st.State) {
@@ -200,39 +208,45 @@ func (e *Engine) reconcileScope(ctx context.Context, connID int64) int {
 	return resolved
 }
 
-// pendingGroups fetches the transactions that might still need settling.
+// maxReconcileBatch bounds one pass.
 //
-// It asks the store for rows in the CANDIDATE states and then loads only
-// those transactions' groups, rather than selecting the entire outcome log
-// and discarding the settled majority in memory (PR #20 r0 SF1). The log has
-// no retention by design, so a full scan grows without bound and the default
-// cadence would pay for it every minute forever — on a backlog that is
-// normally empty.
+// Two different limits at once, and both matter. Memory: a pass materializes
+// the groups it folds. And query PARAMETERS: the group fetch is an IN list,
+// and an unbounded one eventually exceeds the driver's parameter limit — at
+// which point reconciliation does not slow down, it STOPS, silently, exactly
+// when the backlog is largest (PR #20 r1 MF1). Whatever a pass does not reach
+// is picked up by the next one, so paging costs latency and never coverage.
+const maxReconcileBatch = 200
+
+// pendingGroups loads the unresolved transactions, from the QUEUE.
 //
-// The candidate query is a filter, not the answer: a tx_id appears here
-// because it has SOME row in a pending state, and only the folded group can
-// say whether it is still pending. That is why the group is re-read whole.
+// The queue is the only thing that can answer this cheaply. Selecting by
+// STATE cannot: every transaction keeps its `opened` row forever and every
+// committed one keeps `commit_started`, so a state predicate matches the
+// entire history — which is what the previous version did while looking
+// selective, returning all 33 groups in lector's 32-settled-plus-one-pending
+// probe.
+//
+// The queue holds only tx_ids with no terminal, so a normally-empty backlog
+// costs one bounded indexed read and nothing else. The full group is then
+// re-read for the ones it names, because the queue carries no state and the
+// log stays the single source of truth.
 func (e *Engine) pendingGroups(ctx context.Context, connID int64) (map[string][]*meta.TxOutcome, error) {
-	q := e.store.TxOutcomes.OnCtx(ctx).With(meta.TxOutState,
-		string(meta.TxOpened), string(meta.TxCommitStarted), string(meta.TxUnknownPending))
+	q := e.store.TxPending.OnCtx(ctx)
 	if connID != 0 {
-		q = q.With(meta.TxOutConnID, connID)
+		q = q.With(meta.TxPendConnID, connID)
 	}
-	candidates, err := q.Select()
+	queued, err := q.Limit(maxReconcileBatch).Select()
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]any, 0, len(candidates))
-	seen := map[string]bool{}
-	for _, r := range candidates {
-		if !seen[r.TxID] {
-			seen[r.TxID] = true
-			ids = append(ids, r.TxID)
-		}
-	}
 	byTx := map[string][]*meta.TxOutcome{}
-	if len(ids) == 0 {
+	if len(queued) == 0 {
 		return byTx, nil
+	}
+	ids := make([]any, 0, len(queued))
+	for _, r := range queued {
+		ids = append(ids, r.TxID)
 	}
 	rows, err := e.store.TxOutcomes.OnCtx(ctx).With(meta.TxOutTxID, ids...).Select()
 	if err != nil {

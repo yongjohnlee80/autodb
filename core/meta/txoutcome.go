@@ -136,3 +136,43 @@ func newTxOutcomes(conn dao.DataConn) *dao.Schema[*TxOutcome, TxOutcomeField, So
 		TxOutCreatedAt: {Column: "created_at", Scan: func(r *TxOutcome) any { return &r.CreatedAt }, Value: func(r *TxOutcome) any { return r.CreatedAt }},
 	})
 }
+
+// --- the pending queue ------------------------------------------------------
+
+// TxPending is one unresolved transaction: ADR-0074 §7's durable outcome
+// queue, keyed by tx_id.
+//
+// It exists because the LOG cannot answer "what is still unresolved?" without
+// reading all of it. Every transaction keeps its `opened` row forever and
+// every committed one keeps `commit_started`, so no predicate over states can
+// separate pending from settled — the query returns the whole history.
+//
+// The queue carries no outcome of its own, deliberately. It is a pure index:
+// a row here means "the log for this tx_id has no terminal yet", and the log
+// remains the only place an outcome is recorded. That keeps a second source
+// of truth from existing at all, which matters more here than the row it
+// would have saved reading.
+type TxPending struct {
+	ID           int64
+	TxID         string
+	ConnectionID int64
+	CreatedAt    int64
+}
+
+type TxPendingField string
+
+const (
+	TxPendID        TxPendingField = "id"
+	TxPendTxID      TxPendingField = "tx_id"
+	TxPendConnID    TxPendingField = "connection_id"
+	TxPendCreatedAt TxPendingField = "created_at"
+)
+
+func newTxPending(conn dao.DataConn) *dao.Schema[*TxPending, TxPendingField, Sort, int64] {
+	return schema(conn, "tx_pending", TxPendID, map[TxPendingField]dao.Field[*TxPending]{
+		TxPendID:        {Column: "id", Scan: func(r *TxPending) any { return &r.ID }},
+		TxPendTxID:      {Column: "tx_id", Scan: func(r *TxPending) any { return &r.TxID }, Value: func(r *TxPending) any { return r.TxID }},
+		TxPendConnID:    {Column: "connection_id", Scan: func(r *TxPending) any { return &r.ConnectionID }, Value: func(r *TxPending) any { return r.ConnectionID }},
+		TxPendCreatedAt: {Column: "created_at", Scan: func(r *TxPending) any { return &r.CreatedAt }, Value: func(r *TxPending) any { return r.CreatedAt }},
+	})
+}

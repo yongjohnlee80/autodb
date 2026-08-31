@@ -189,6 +189,14 @@ func TestStartEngine_TheReconcilerActuallyRunsOnTheConfiguredSchedule(t *testing
 
 	seedPending := func(t *testing.T, store *meta.Store, connID int64, txID string) {
 		t.Helper()
+		// A real transaction enqueues as it opens, so a seed modelling one
+		// must too — the reconciler works from the pending QUEUE, not from a
+		// state predicate over the log (PR #20 r1 MF1).
+		if _, err := store.TxPending.OnCtx(t.Context()).
+			Set(meta.TxPendTxID, txID).Set(meta.TxPendConnID, connID).
+			Set(meta.TxPendCreatedAt, int64(1)).Insert(); err != nil {
+			t.Fatalf("seeding the pending queue: %v", err)
+		}
 		for i, st := range []string{"opened", "commit_started"} {
 			if _, err := store.TxOutcomes.OnCtx(t.Context()).
 				Set(meta.TxOutTxID, txID).Set(meta.TxOutSeq, int64(i+1)).
@@ -226,6 +234,11 @@ func TestStartEngine_TheReconcilerActuallyRunsOnTheConfiguredSchedule(t *testing
 	// settle, so if this one were also resolved the test below would be
 	// satisfied by a pass that terminates everything it sees.
 	seedControl := func() {
+		if _, err := store.TxPending.OnCtx(t.Context()).
+			Set(meta.TxPendTxID, "tx_control").Set(meta.TxPendConnID, connID).
+			Set(meta.TxPendCreatedAt, int64(1)).Insert(); err != nil {
+			t.Fatalf("seeding the control queue entry: %v", err)
+		}
 		if _, err := store.TxOutcomes.OnCtx(t.Context()).
 			Set(meta.TxOutTxID, "tx_control").Set(meta.TxOutSeq, int64(1)).
 			Set(meta.TxOutState, "opened").Set(meta.TxOutReason, "").

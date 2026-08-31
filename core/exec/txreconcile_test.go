@@ -24,6 +24,7 @@ import (
 func seedCrashWindow(t *testing.T, f *fixture, txID string, connID int64, xid string) {
 	t.Helper()
 	ctx := context.Background()
+	enqueueSeed(t, f, txID, connID, meta.TxOpened, meta.TxCommitStarted)
 	rows := []struct {
 		seq   int64
 		state meta.TxState
@@ -198,7 +199,7 @@ func TestReconcile_IsIdempotentAcrossRuns(t *testing.T) {
 // so. This is the §7 gate: "most crash-window unknowns are thereby
 // resolvable".
 func TestReconcile_ResolvesARealCrashWindowFromTheTarget(t *testing.T) {
-	f, _, sid, table := pgSession(t)
+	f, connID, sid, table := pgSession(t)
 	ctx := context.Background()
 
 	for _, sql := range []string{"BEGIN", "INSERT INTO " + table + " (note) VALUES ('survives')", "COMMIT"} {
@@ -222,8 +223,20 @@ func TestReconcile_ResolvesARealCrashWindowFromTheTarget(t *testing.T) {
 		t.Fatal("the committed transaction recorded no terminal")
 	}
 	// Simulate the crash: the COMMIT landed, the outcome write did not.
+	//
+	// BOTH halves have to be undone. The terminal insert, the dequeue and
+	// the history projection share one store transaction, so a process that
+	// died before writing the terminal also left the queue entry in place —
+	// removing only the row would model a state production cannot produce,
+	// and the reconciler would rightly never look at it. (The real SIGKILL
+	// P4 cell needs none of this; it produces the state by dying.)
 	if err := f.store.TxOutcomes.OnCtx(ctx).With(meta.TxOutID, terminalID).Delete(); err != nil {
 		t.Fatalf("removing the terminal: %v", err)
+	}
+	if _, err := f.store.TxPending.OnCtx(ctx).
+		Set(meta.TxPendTxID, txID).Set(meta.TxPendConnID, connID).
+		Set(meta.TxPendCreatedAt, int64(1)).Insert(); err != nil {
+		t.Fatalf("restoring the queue entry: %v", err)
 	}
 	if st := stateOf(t, f, txID); st.State != meta.TxCommitStarted {
 		t.Fatalf("the seeded crash state is %s, want commit_started", st.State)
