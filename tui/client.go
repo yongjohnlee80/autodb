@@ -793,3 +793,78 @@ func (b *Bound) AddGrant(ctx context.Context, userID, connID int64, role string)
 	_, err := b.authed(ctx, "auth.grant_add", userID, connID, role)
 	return err
 }
+
+// AllowlistEntry is one global-allowlist line as the admin screen shows it.
+// Config-seeded entries are read-only at runtime (Config true, ID 0);
+// managed store rows carry their row id.
+type AllowlistEntry struct {
+	ID     int64
+	CIDR   string
+	Note   string
+	Config bool
+}
+
+func (b *Bound) Allowlist(ctx context.Context) ([]AllowlistEntry, error) {
+	res, err := b.authed(ctx, "auth.allowlist_list")
+	if err != nil {
+		return nil, err
+	}
+	m, _ := res.(map[string]any)
+	var out []AllowlistEntry
+	for _, c := range asList(m["config"]) {
+		if cs, ok := c.(string); ok {
+			out = append(out, AllowlistEntry{CIDR: cs, Note: "(config — read-only)", Config: true})
+		}
+	}
+	for _, row := range asList(m["rows"]) {
+		rm, _ := row.(map[string]any)
+		out = append(out, AllowlistEntry{ID: mI(rm, "id"), CIDR: mS(rm, "cidr"), Note: mS(rm, "note")})
+	}
+	return out, nil
+}
+
+func (b *Bound) AddAllowedIP(ctx context.Context, cidr, note string) error {
+	_, err := b.authed(ctx, "auth.allowlist_add", cidr, note)
+	return err
+}
+
+func (b *Bound) RemoveAllowedIP(ctx context.Context, cidr string) error {
+	_, err := b.authed(ctx, "auth.allowlist_remove", cidr)
+	return err
+}
+
+// UserIPRow is one per-user allowlist row (ADR-0075 §4 second layer).
+type UserIPRow struct {
+	ID     int64
+	UserID int64
+	CIDR   string
+	Label  string
+}
+
+func (b *Bound) UserIPs(ctx context.Context, userID int64) ([]UserIPRow, error) {
+	res, err := b.authed(ctx, "auth.user_ip_list", userID)
+	if err != nil {
+		return nil, err
+	}
+	var out []UserIPRow
+	for _, row := range asList(res) {
+		m, _ := row.(map[string]any)
+		out = append(out, UserIPRow{
+			ID: mI(m, "id"), UserID: mI(m, "user_id"),
+			CIDR: mS(m, "cidr"), Label: mS(m, "label"),
+		})
+	}
+	return out, nil
+}
+
+// AddUserIP adds a CIDR (or bare address) to userID's allowlist. An empty
+// cidr asks the server to use the address this session connects from.
+func (b *Bound) AddUserIP(ctx context.Context, userID int64, cidr, label string) error {
+	_, err := b.authed(ctx, "auth.user_ip_add", userID, cidr, label)
+	return err
+}
+
+func (b *Bound) RemoveUserIP(ctx context.Context, userID, rowID int64) error {
+	_, err := b.authed(ctx, "auth.user_ip_remove", userID, rowID)
+	return err
+}

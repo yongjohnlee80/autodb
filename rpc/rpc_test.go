@@ -1067,3 +1067,64 @@ func TestHelloReportsNotesDir(t *testing.T) {
 		t.Fatalf("hello notes_dir = %#v, want /tmp/autodb-notes-xyz", m["notes_dir"])
 	}
 }
+
+func TestUserIPAllowlistOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	errVal, result := c.call("auth.login", "root", "root-passphrase")
+	if errVal != nil {
+		t.Fatalf("login err: %#v", errVal)
+	}
+	login := result.(map[string]any)
+	token, _ := login["token"].(string)
+	rootID, _ := login["user"].(map[string]any)["id"].(int64)
+
+	// The empty-cidr self-service gesture: the SERVER substitutes the
+	// address this session connects from (loopback in the fixture) — the
+	// one thing the rpc layer itself implements for this surface.
+	if errVal, _ := c.call("auth.user_ip_add", token, rootID, "", "this machine"); errVal != nil {
+		t.Fatalf("user_ip_add(empty cidr) err: %#v", errVal)
+	}
+	errVal, res := c.call("auth.user_ip_list", token, rootID)
+	if errVal != nil {
+		t.Fatalf("user_ip_list err: %#v", errVal)
+	}
+	rows := res.([]any)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0].(map[string]any)
+	cidr, _ := row["cidr"].(string)
+	if cidr != "127.0.0.1/32" && cidr != "::1/128" {
+		t.Fatalf("cidr = %q, want the fixture peer address as a single-address prefix", cidr)
+	}
+	if row["label"] != "this machine" {
+		t.Fatalf("label = %#v", row["label"])
+	}
+
+	// The global list verb round-trips config + store split.
+	errVal, res = c.call("auth.allowlist_list", token)
+	if errVal != nil {
+		t.Fatalf("allowlist_list err: %#v", errVal)
+	}
+	gl := res.(map[string]any)
+	if len(gl["config"].([]any)) == 0 {
+		t.Fatal("allowlist_list returned no config CIDRs — fixture seeds loopback")
+	}
+
+	// Removal round-trips and the list empties.
+	rowID, _ := row["id"].(int64)
+	if errVal, _ := c.call("auth.user_ip_remove", token, rootID, rowID); errVal != nil {
+		t.Fatalf("user_ip_remove err: %#v", errVal)
+	}
+	errVal, res = c.call("auth.user_ip_list", token, rootID)
+	if errVal != nil {
+		t.Fatalf("relist err: %#v", errVal)
+	}
+	if n := len(res.([]any)); n != 0 {
+		t.Fatalf("rows after remove = %d, want 0", n)
+	}
+}

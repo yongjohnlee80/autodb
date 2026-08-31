@@ -194,6 +194,9 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 	// next Open genuinely applies v7 against a populated log.
 	for _, stmt := range []string{
 		`DROP TABLE tx_pending`,
+		// Everything from v7 on re-applies, so every artifact a >=7 migration
+		// creates must be dropped here too, or the re-run collides with it.
+		`DROP TABLE user_ip_allowlist`,
 		// Everything from v7 on, not just v7: currentVersion is the MAX, so
 		// leaving a later row behind would skip the re-application entirely.
 		`DELETE FROM schema_migrations WHERE version >= 7`,
@@ -280,6 +283,8 @@ func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
 		`INSERT INTO tx_pending (id, tx_id, connection_id, created_at)
 			SELECT id, tx_id, connection_id, created_at FROM tx_pending_v8`,
 		`DROP TABLE tx_pending_v8`,
+		// v9 re-applies as well; drop its artifact for the same reason.
+		`DROP TABLE user_ip_allowlist`,
 		`DELETE FROM schema_migrations WHERE version >= 8`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {

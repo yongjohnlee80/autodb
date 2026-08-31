@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -408,6 +409,111 @@ func (m *Model) openUserManager() {
 					return true, ""
 				})
 			}},
+			{'i', "allowed IPs…", func(sel UserRow, ok bool) {
+				if ok {
+					m.openUserIPManager(sel.ID, sel.Name)
+				}
+			}},
 		})
 	g.float = m.openFloat("users", g, managerWidth)
+}
+
+// --- ip allowlists ------------------------------------------------------------------
+
+// openAllowlistManager is the admin view of the GLOBAL allowlist (ADR-0075
+// §4 first layer): config-seeded CIDRs shown read-only beside the managed
+// store rows. The server refuses non-admin tokens; the float itself is not
+// role-gated so the refusal (and its audit row) stays observable.
+func (m *Model) openAllowlistManager() {
+	cols := []widget.TableColumn[AllowlistEntry]{
+		{Title: "SOURCE", Width: 7, Cell: func(e AllowlistEntry) string {
+			if e.Config {
+				return "config"
+			}
+			return "store"
+		}},
+		{Title: "CIDR", Width: 22, Cell: func(e AllowlistEntry) string { return e.CIDR }},
+		{Title: "NOTE", Cell: func(e AllowlistEntry) string { return e.Note }},
+	}
+	var g *manager[AllowlistEntry]
+	g = newManager(m, cols,
+		func(c context.Context, b *Bound) ([]AllowlistEntry, error) { return b.Allowlist(c) },
+		[]managerAction[AllowlistEntry]{
+			{'a', "add CIDR", func(AllowlistEntry, bool) {
+				m.openForm("new allowlist CIDR", []formField{
+					field("cidr (e.g. 192.168.68.0/24)"),
+					field("note"),
+				}, func(v []string) (bool, string) {
+					cidr := strings.TrimSpace(v[0])
+					if _, err := netip.ParsePrefix(cidr); err != nil {
+						return false, "not a valid CIDR (a.b.c.d/nn required here)"
+					}
+					managerCall(g, "add "+cidr, func(c context.Context, b *Bound) error {
+						return b.AddAllowedIP(c, cidr, strings.TrimSpace(v[1]))
+					})
+					return true, ""
+				})
+			}},
+			{'D', "remove", func(sel AllowlistEntry, ok bool) {
+				if !ok {
+					return
+				}
+				if sel.Config {
+					m.setStatus("config entries are read-only — edit config.toml and restart")
+					return
+				}
+				managerCall(g, "remove "+sel.CIDR, func(c context.Context, b *Bound) error {
+					return b.RemoveAllowedIP(c, sel.CIDR)
+				})
+			}},
+		})
+	g.float = m.openFloat("ip allowlist (global)", g, managerWidth)
+}
+
+// openUserIPManager is the per-user allowlist view (ADR-0075 §4 second
+// layer) — one implementation for both reaches: the leader's "my allowed
+// IPs" (self-service) and the user manager's per-user entry (admin).
+// Authorization is the server's: self-or-admin, audited.
+func (m *Model) openUserIPManager(userID int64, who string) {
+	cols := []widget.TableColumn[UserIPRow]{
+		{Title: "ID", Width: 5, Cell: func(r UserIPRow) string { return strconv.FormatInt(r.ID, 10) }},
+		{Title: "CIDR", Width: 22, Cell: func(r UserIPRow) string { return r.CIDR }},
+		{Title: "LABEL", Cell: func(r UserIPRow) string { return r.Label }},
+	}
+	var g *manager[UserIPRow]
+	g = newManager(m, cols,
+		func(c context.Context, b *Bound) ([]UserIPRow, error) { return b.UserIPs(c, userID) },
+		[]managerAction[UserIPRow]{
+			{'a', "add IP/CIDR", func(UserIPRow, bool) {
+				m.openForm("allow an IP for "+who, []formField{
+					field("IP or CIDR (blank = the address of THIS session)"),
+					field("label (e.g. home, office)"),
+				}, func(v []string) (bool, string) {
+					cidr := strings.TrimSpace(v[0])
+					if cidr != "" {
+						if _, perr := netip.ParsePrefix(cidr); perr != nil {
+							if _, aerr := netip.ParseAddr(cidr); aerr != nil {
+								return false, "not a valid IP or CIDR"
+							}
+						}
+					}
+					what := cidr
+					if what == "" {
+						what = "current address"
+					}
+					managerCall(g, "allow "+what, func(c context.Context, b *Bound) error {
+						return b.AddUserIP(c, userID, cidr, strings.TrimSpace(v[1]))
+					})
+					return true, ""
+				})
+			}},
+			{'D', "remove", func(sel UserIPRow, ok bool) {
+				if ok {
+					managerCall(g, "remove "+sel.CIDR, func(c context.Context, b *Bound) error {
+						return b.RemoveUserIP(c, userID, sel.ID)
+					})
+				}
+			}},
+		})
+	g.float = m.openFloat("allowed IPs — "+who, g, managerWidth)
 }

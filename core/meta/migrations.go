@@ -252,6 +252,33 @@ var migrations = []migration{
 			`CREATE INDEX idx_tx_pending_user ON tx_pending(user_id, created_at)`,
 		},
 	},
+	// v9 (ADR-0075 §4): the per-user layer of the front door's two-layer IP
+	// model. UNIQUE(user_id, cidr) makes re-adding idempotent-by-refusal;
+	// ON DELETE CASCADE because a removed user's allowlist rows authorize
+	// nobody and must not linger as orphans. (Authored as a provisional v5;
+	// renumbered to v9 when R4's v5-v8 merged first, per the coordination
+	// note both PRs carried.)
+	{
+		Version: 9,
+		SQLite: []string{
+			`CREATE TABLE user_ip_allowlist (
+		id INTEGER PRIMARY KEY,
+		user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		cidr TEXT NOT NULL,
+		label TEXT NOT NULL DEFAULT '',
+		created_at BIGINT NOT NULL,
+		UNIQUE(user_id, cidr))`,
+		},
+		Postgres: []string{
+			`CREATE TABLE user_ip_allowlist (
+		id BIGSERIAL PRIMARY KEY,
+		user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		cidr TEXT NOT NULL,
+		label TEXT NOT NULL DEFAULT '',
+		created_at BIGINT NOT NULL,
+		UNIQUE(user_id, cidr))`,
+		},
+	},
 }
 
 // runMigrations creates the ledger, checks the downgrade guard, and applies
