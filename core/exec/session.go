@@ -449,6 +449,16 @@ func (s *session) joinInFlight(ctx context.Context) error {
 	}
 }
 
+// inTransaction reports whether a transaction is currently open.
+//
+// This is the session's own state, which is the point: a caller that needs to
+// know had better ask rather than keep a second copy that can disagree.
+func (s *session) inTransaction() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.txPhase != txNone
+}
+
 // setCloseReason records why a close began, for a retry to audit later.
 func (s *session) setCloseReason(ip, reason string) {
 	s.mu.Lock()

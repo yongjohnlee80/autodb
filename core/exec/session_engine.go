@@ -21,23 +21,38 @@ import (
 
 // OpenSession creates a session bound to one connection for one user.
 func (e *Engine) OpenSession(ctx context.Context, token string, connID int64, ip string) (SessionID, error) {
-	ident, authSessID, err := e.auth.SessionRef(ctx, token)
+	s, err := e.openSession(ctx, token, connID, ip)
 	if err != nil {
 		return "", err
+	}
+	return s.id, nil
+}
+
+// openSession is OpenSession returning the session OBJECT.
+//
+// An engine-internal caller that opens a session must hold the thing it
+// opened, not just its id. Going back through the public API to close it
+// means re-authenticating a token that may no longer be valid — and the
+// engine already knows this session is its own, so asking permission to
+// clean up after itself is both unnecessary and unsafe.
+func (e *Engine) openSession(ctx context.Context, token string, connID int64, ip string) (*session, error) {
+	ident, authSessID, err := e.auth.SessionRef(ctx, token)
+	if err != nil {
+		return nil, err
 	}
 	// Read is the floor for holding a session at all, and it is checked
 	// BEFORE the connection row is read — an ungranted caller must not learn
 	// whether a connection exists (the same rule the stateless path follows).
 	if _, err := e.auth.Authorize(ctx, token, connID, auth.ActionRead); err != nil {
-		return "", e.reject(ctx, ident, connID, ip, "", err)
+		return nil, e.reject(ctx, ident, connID, ip, "", err)
 	}
 	if _, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get(); err != nil {
-		return "", e.reject(ctx, ident, connID, ip, "", auth.ErrDenied)
+		return nil, e.reject(ctx, ident, connID, ip, "", auth.ErrDenied)
 	}
 
 	id, err := newSessionID()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	// The session's context deliberately does NOT inherit the caller's
 	// cancellation: this RPC call is about to return, and the session has to
@@ -60,16 +75,16 @@ func (e *Engine) OpenSession(ctx context.Context, token string, connID int64, ip
 		// without a record.
 		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "session_refused",
 			fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
-			return "", aerr
+			return nil, aerr
 		}
-		return "", err
+		return nil, err
 	}
 	if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "session_opened",
 		fmt.Sprintf("conn %d: session %s", connID, id)); aerr != nil {
 		e.closeSession(context.WithoutCancel(ctx), s, ip, "audit-failed")
-		return "", aerr
+		return nil, aerr
 	}
-	return id, nil
+	return s, nil
 }
 
 // CloseSession closes a session the caller owns.
