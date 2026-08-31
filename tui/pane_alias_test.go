@@ -99,14 +99,10 @@ func TestWebHelpExplainsTheSharedNoteTree(t *testing.T) {
 	findInScrollableFloat(t, h, "help names the shared tree", "SHARED workspace notes")
 
 	// And it must NOT repeat the private-root advice, which would be false here.
-	for page := 0; page < 15; page++ {
-		if strings.Contains(h.screen(), "YOUR OWN note root") {
-			t.Fatal("a session already reading the shared tree is told it reads its own " +
-				"root and should set notes_mode=workspace — the false text lector caught")
-		}
-		h.key(tuicore.KeyPageDown)
-		time.Sleep(20 * time.Millisecond)
-	}
+	assertAbsentInScrollableFloat(t, h,
+		"a session already reading the shared tree is told it reads its own "+
+			"root and should set notes_mode=workspace — the false text lector caught",
+		"YOUR OWN note root")
 }
 
 // ...and the terminal frontend carries neither: it reads the shared tree already.
@@ -118,14 +114,9 @@ func TestTerminalSessionOmitsTheBrowserNoteSection(t *testing.T) {
 
 	h.leader("?")
 	h.waitFor("help card open", "leader commands")
-	for page := 0; page < 15; page++ {
-		s := h.screen()
-		if strings.Contains(s, "YOUR OWN note root") || strings.Contains(s, "SHARED workspace notes") {
-			t.Fatal("the terminal frontend shows a browser-only note explanation")
-		}
-		h.key(tuicore.KeyPageDown)
-		time.Sleep(20 * time.Millisecond)
-	}
+	assertAbsentInScrollableFloat(t, h,
+		"the terminal frontend shows a browser-only note explanation",
+		"YOUR OWN note root", "SHARED workspace notes")
 }
 
 // findInScrollableFloat pages through an open scrollable float until sub
@@ -146,24 +137,57 @@ func TestTerminalSessionOmitsTheBrowserNoteSection(t *testing.T) {
 // wrap-around guard, not a timing bound — hitting it is its own failure.
 func findInScrollableFloat(t *testing.T, h *uiHarness, what, sub string) {
 	t.Helper()
+	found := pageScrollableFloat(t, h, what, func(scr string) bool {
+		return strings.Contains(scr, sub)
+	})
+	if !found {
+		t.Fatalf("%s: %q not found — the float's bottom was reached without it\nlast screen:\n%s",
+			what, sub, h.screen())
+	}
+}
+
+// assertAbsentInScrollableFloat pages the whole float, top to bottom, and
+// fails if ANY frame contains ANY of the forbidden substrings. Negative
+// scans need the same §10 synchronization as positive ones — MORE so: a
+// skipped page in a positive scan fails loudly, but a skipped page here
+// would hide forbidden text on an unexamined frame and pass falsely.
+func assertAbsentInScrollableFloat(t *testing.T, h *uiHarness, why string, forbidden ...string) {
+	t.Helper()
+	pageScrollableFloat(t, h, why, func(scr string) bool {
+		for _, sub := range forbidden {
+			if strings.Contains(scr, sub) {
+				t.Fatalf("%s (forbidden %q is on screen)\nscreen:\n%s", why, sub, scr)
+			}
+		}
+		return false // never stop early; scan to the bottom
+	})
+}
+
+// pageScrollableFloat drives the shared synchronized scan: visit every
+// distinct frame from the current position to the float's bottom, calling
+// check on each; a true return stops early (reported true). Bottom is a
+// frame that stays stable through a waited PageDown, probed twice so two
+// identical adjacent pages are not mistaken for the end. The page cap is a
+// wrap-around guard, not a timing bound.
+func pageScrollableFloat(t *testing.T, h *uiHarness, what string, check func(scr string) bool) bool {
+	t.Helper()
 	const wrapGuard = 100
 	for page := 0; page < wrapGuard; page++ {
 		scr := h.screen()
-		if strings.Contains(scr, sub) {
-			return
+		if check(scr) {
+			return true
 		}
 		h.key(tuicore.KeyPageDown)
 		if !h.waitFrameChange(scr) {
-			h.key(tuicore.KeyPageDown) // bottom probe: distinguish "bottom" from
+			h.key(tuicore.KeyPageDown)   // bottom probe: distinguish "bottom" from
 			if !h.waitFrameChange(scr) { // "two identical adjacent pages"
-				t.Fatalf("%s: %q not found and the float stopped scrolling — "+
-					"bottom reached after %d page(s)\nlast screen:\n%s",
-					what, sub, page, h.screen())
+				return false // stable through two waited keys: the true bottom
 			}
 		}
 	}
-	t.Fatalf("%s: %q — %d pages without reaching a stable bottom (scroll wrap-around?)\nlast screen:\n%s",
-		what, sub, wrapGuard, h.screen())
+	t.Fatalf("%s: %d pages without reaching a stable bottom (scroll wrap-around?)\nlast screen:\n%s",
+		what, wrapGuard, h.screen())
+	return false
 }
 
 // waitFrameChange polls until the virtual screen differs from prev, reporting
