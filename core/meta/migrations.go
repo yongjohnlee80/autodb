@@ -307,9 +307,6 @@ var migrations = []migration{
 	},
 }
 
-// runMigrations creates the ledger, checks the downgrade guard, and applies
-// pending versions in order — each version inside one driver transaction
-// (both engines support transactional DDL).
 // migrationLockWait bounds how long a starter waits for another process to
 // finish migrating.
 //
@@ -395,6 +392,10 @@ func withMigrationLock(ctx context.Context, conn dao.DataConn, run func(tx dao.C
 	return nil
 }
 
+// runMigrations creates the ledger, checks the downgrade guard, and applies
+// pending versions in order — the WHOLE upgrade inside one driver transaction
+// (both engines support transactional DDL), so a failure leaves the store at
+// its original version rather than stranded between two. See applyAll.
 func runMigrations(ctx context.Context, conn dao.DataConn, engine string) error {
 	if engine == "postgres" {
 		return withMigrationLock(ctx, conn, func(tx dao.ContextTxConn) error {
