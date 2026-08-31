@@ -353,7 +353,7 @@ func TestPendingGroups_ReturnsOnlyTheUnresolvedBacklog(t *testing.T) {
 	}
 	seedCrashWindow(t, f, "tx_really_pending", f.connID, "77")
 
-	groups, err := f.eng.pendingGroups(ctx, 0, maxReconcileBatch)
+	groups, _, err := f.eng.pendingGroups(ctx, 0, maxReconcileBatch, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,5 +701,127 @@ func TestPendingOutcomes_IsNotCappedByTheReconcilerBatch(t *testing.T) {
 	}
 	if len(small) != 2 {
 		t.Fatalf("limit 2 returned %d", len(small))
+	}
+}
+
+// --- r2: a LIMIT without a cursor is starvation, not slowness --------------
+
+// MF1. A resolvable entry sitting behind a full page of LIVE ones must still
+// be reached.
+//
+// The live rows are `opened`, which the pass correctly skips — so they are
+// never removed from the queue and never stop occupying the page. With a
+// fixed first page every pass re-reads exactly them, and the resolvable entry
+// behind them is never looked at on ANY pass. No amount of waiting fixes
+// that; it is starvation.
+func TestReconcile_ReachesAnEntryBehindAFullPageOfLiveOnes(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	for i := 0; i < maxReconcileBatch; i++ {
+		seedTx(t, f, fmt.Sprintf("tx_live_%03d", i), 1, f.connID, meta.TxOpened)
+	}
+	// Enqueued last, so it is behind all of them.
+	seedCrashWindow(t, f, "tx_behind", f.connID, "1")
+
+	// Bounded number of passes: the cursor must reach it, not eventually
+	// stumble on it.
+	for i := 0; i < 3; i++ {
+		f.eng.ReconcileOutcomes(ctx)
+		if stateOf(t, f, "tx_behind").Terminal() {
+			return
+		}
+	}
+	t.Fatalf("state = %s after three passes — the pass re-reads the same page of live "+
+		"entries every time, so this one is never reached at all",
+		stateOf(t, f, "tx_behind").State)
+}
+
+// MF2. The same failure in the history repair sweep: a full page of
+// legitimately in-flight pending rows in front of a genuinely stranded one.
+func TestRepairPendingHistory_ReachesAStrandBehindAFullPage(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	for i := 0; i < maxReconcileBatch; i++ {
+		id := fmt.Sprintf("tx_inflight_%03d", i)
+		seedCrashWindow(t, f, id, f.connID, "1")
+		seedHistory(t, f, id, StatusPendingCommit)
+	}
+	seedTx(t, f, "tx_strandlate", 1, f.connID, meta.TxOpened, meta.TxCommitted)
+	seedHistory(t, f, "tx_strandlate", StatusPendingCommit)
+
+	for i := 0; i < 3; i++ {
+		f.eng.repairPendingHistory(ctx)
+		if got := histStatus(t, f, "tx_strandlate"); len(got) == 1 && got[0] == StatusOK {
+			return
+		}
+	}
+	t.Fatalf("history = %v after three sweeps — the sweep re-reads the same page of "+
+		"in-flight rows, so the stranded one is never reached",
+		histStatus(t, f, "tx_strandlate"))
+}
+
+// MF3. Scope and order must precede the limit.
+//
+// Limiting the GLOBAL queue and filtering afterwards is wrong twice: a caller
+// asking for one entry gets NOTHING when another user's row comes first, and
+// gets a NEWER entry whenever an older one falls outside the fetched page. A
+// limit applied before scoping bounds the wrong set.
+func TestPendingOutcomes_ScopesAndOrdersBeforeLimiting(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	readerTok := f.mustLogin(t, "reader")
+	readerID := int64(0)
+	if u, err := f.svc.ValidateToken(ctx, readerTok); err == nil {
+		readerID = u.UserID()
+	}
+
+	// Another user's entry is inserted FIRST and is the oldest of all, so a
+	// global limit would spend the caller's whole budget on it. The caller's
+	// two are inserted newest-first, so returning the oldest cannot be
+	// satisfied by insertion order either.
+	seedQueuedFor(t, f, "tx_other", 1, f.connID, 1)
+	seedQueuedFor(t, f, "tx_mine_new", readerID, f.connID, 20)
+	seedQueuedFor(t, f, "tx_mine_old", readerID, f.connID, 5)
+
+	got, err := f.eng.PendingOutcomes(ctx, readerTok, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("limit 1 returned %d — another user's row consumed the caller's budget, "+
+			"so the limit bounded the wrong set", len(got))
+	}
+	if got[0].TxID != "tx_mine_old" {
+		t.Fatalf("limit 1 returned %s, want tx_mine_old — the oldest of the CALLER's "+
+			"entries, not whichever happened to be fetched first", got[0].TxID)
+	}
+}
+
+// seedQueuedFor writes an unresolved transaction owned by userID, queued with
+// an explicit created_at so ordering is under the test's control.
+func seedQueuedFor(t *testing.T, f *fixture, txID string, userID, connID, createdAt int64) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := f.store.TxPending.OnCtx(ctx).
+		Set(meta.TxPendTxID, txID).Set(meta.TxPendConnID, connID).
+		Set(meta.TxPendUserID, userID).Set(meta.TxPendCreatedAt, createdAt).
+		Insert(); err != nil {
+		t.Fatalf("queueing %s: %v", txID, err)
+	}
+	for i, st := range []meta.TxState{meta.TxOpened, meta.TxCommitStarted} {
+		if _, err := f.store.TxOutcomes.OnCtx(ctx).
+			Set(meta.TxOutTxID, txID).Set(meta.TxOutSeq, int64(i+1)).
+			Set(meta.TxOutState, string(st)).Set(meta.TxOutReason, "").
+			Set(meta.TxOutUserID, userID).Set(meta.TxOutConnID, connID).
+			Set(meta.TxOutHistoryID, int64(0)).Set(meta.TxOutTargetXID, "").
+			Set(meta.TxOutCreatedAt, createdAt).Insert(); err != nil {
+			t.Fatalf("seeding %s: %v", txID, err)
+		}
 	}
 }

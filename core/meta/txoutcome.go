@@ -156,6 +156,7 @@ type TxPending struct {
 	ID           int64
 	TxID         string
 	ConnectionID int64
+	UserID       int64
 	CreatedAt    int64
 }
 
@@ -165,14 +166,29 @@ const (
 	TxPendID        TxPendingField = "id"
 	TxPendTxID      TxPendingField = "tx_id"
 	TxPendConnID    TxPendingField = "connection_id"
+	TxPendUserID    TxPendingField = "user_id"
 	TxPendCreatedAt TxPendingField = "created_at"
 )
 
+// Sort keys for the queue. Registered so paging can ORDER BY rather than
+// trusting the store's natural order: a LIMIT without one is a page, not a
+// position, and re-reading it forever is how an entry starves.
+const (
+	TxPendByCreated TxPendingSort = "created_at"
+	TxPendByID      TxPendingSort = "id"
+)
+
+// TxPendingSort is the queue's sort-key enum.
+type TxPendingSort = Sort
+
 func newTxPending(conn dao.DataConn) *dao.Schema[*TxPending, TxPendingField, Sort, int64] {
-	return schema(conn, "tx_pending", TxPendID, map[TxPendingField]dao.Field[*TxPending]{
-		TxPendID:        {Column: "id", Scan: func(r *TxPending) any { return &r.ID }},
-		TxPendTxID:      {Column: "tx_id", Scan: func(r *TxPending) any { return &r.TxID }, Value: func(r *TxPending) any { return r.TxID }},
-		TxPendConnID:    {Column: "connection_id", Scan: func(r *TxPending) any { return &r.ConnectionID }, Value: func(r *TxPending) any { return r.ConnectionID }},
-		TxPendCreatedAt: {Column: "created_at", Scan: func(r *TxPending) any { return &r.CreatedAt }, Value: func(r *TxPending) any { return r.CreatedAt }},
-	})
+	return sortableSchema(conn, "tx_pending", TxPendID,
+		map[Sort]string{TxPendByCreated: "created_at", TxPendByID: "id"},
+		map[TxPendingField]dao.Field[*TxPending]{
+			TxPendID:        {Column: "id", Scan: func(r *TxPending) any { return &r.ID }},
+			TxPendTxID:      {Column: "tx_id", Scan: func(r *TxPending) any { return &r.TxID }, Value: func(r *TxPending) any { return r.TxID }},
+			TxPendConnID:    {Column: "connection_id", Scan: func(r *TxPending) any { return &r.ConnectionID }, Value: func(r *TxPending) any { return r.ConnectionID }},
+			TxPendUserID:    {Column: "user_id", Scan: func(r *TxPending) any { return &r.UserID }, Value: func(r *TxPending) any { return r.UserID }},
+			TxPendCreatedAt: {Column: "created_at", Scan: func(r *TxPending) any { return &r.CreatedAt }, Value: func(r *TxPending) any { return r.CreatedAt }},
+		})
 }

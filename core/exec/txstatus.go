@@ -7,6 +7,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/yongjohnlee80/golib/dao"
+
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -103,29 +105,47 @@ func (e *Engine) PendingOutcomes(ctx context.Context, token string, limit int) (
 	}
 	limit = min(limit, MaxPendingLimit)
 
-	// From the QUEUE, like the reconciler, and for the same reason: a
-	// settled transaction keeps its `opened` and `commit_started` rows
-	// forever, so reading the log and discarding the terminal groups in
-	// memory is an O(all history) scan for an answer that is normally empty.
-	// This one is worse than the reconciler's was, because a user can ask
-	// for it (PR #20 r0 SF1 — I fixed the reconciler and left this behind).
-	// The caller's limit is passed down, so a request for more than the
-	// reconciler's batch size is not silently truncated to it — the two
-	// paths bound the same query for different reasons and should not
-	// borrow each other's number.
-	byTx, err := e.pendingGroups(ctx, 0, limit)
+	// SCOPE AND ORDER BEFORE THE LIMIT (PR #20 r2 MF3).
+	//
+	// This used to limit the GLOBAL queue and then filter by owner and sort,
+	// which is wrong twice over: a caller asking for one entry got nothing
+	// when another user's row happened to come first, and got a NEWER entry
+	// whenever an older one sat outside the fetched page. A limit applied
+	// before scoping bounds the wrong set.
+	//
+	// The queue carries user_id and a registered sort key for exactly this,
+	// so the store does the scoping and the ordering and the limit bounds
+	// what the caller actually asked for.
+	q := e.store.TxPending.OnCtx(ctx).OrderBy(dao.Asc(meta.TxPendByCreated), dao.Asc(meta.TxPendByID))
+	if ident.Role() != "admin" {
+		q = q.With(meta.TxPendUserID, ident.UserID())
+	}
+	queued, err := q.Limit(uint64(limit)).Select()
+	if err != nil {
+		return nil, fmt.Errorf("exec: reading the pending queue: %w", err)
+	}
+	if len(queued) == 0 {
+		return nil, nil
+	}
+	ids := make([]any, 0, len(queued))
+	for _, r := range queued {
+		ids = append(ids, r.TxID)
+	}
+	rows, err := e.store.TxOutcomes.OnCtx(ctx).With(meta.TxOutTxID, ids...).Select()
 	if err != nil {
 		return nil, fmt.Errorf("exec: reading the outcome log: %w", err)
 	}
+	byTx := map[string][]*meta.TxOutcome{}
+	for _, r := range rows {
+		byTx[r.TxID] = append(byTx[r.TxID], r)
+	}
 
-	admin := ident.Role() == "admin"
 	out := make([]TxStatus, 0, len(byTx))
 	for _, group := range byTx {
 		st := foldTxLog(group)
 		if st.Terminal() {
-			continue
-		}
-		if !admin && st.UserID != ident.UserID() {
+			// Queued but settled — a stale entry the reconciler will clear.
+			// Not this verb's job to fix, but not its answer either.
 			continue
 		}
 		out = append(out, st)
@@ -140,9 +160,6 @@ func (e *Engine) PendingOutcomes(ctx context.Context, token string, limit int) (
 		}
 		return out[i].TxID < out[j].TxID
 	})
-	if len(out) > limit {
-		out = out[:limit]
-	}
 	return out, nil
 }
 

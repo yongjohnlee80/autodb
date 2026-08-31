@@ -153,7 +153,7 @@ func (e *Engine) appendTxOutcome(ctx context.Context, t txTransition) error {
 				// write-ahead reasoning as the opened row itself: a
 				// transaction that exists but is not in the queue is a
 				// transaction nothing will ever come back for.
-				return e.enqueuePendingTx(tx, t.txID, t.connectionID)
+				return e.enqueuePendingTx(tx, t.txID, t.connectionID, t.userID)
 			}
 			return nil
 		})

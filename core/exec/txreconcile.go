@@ -52,6 +52,10 @@ type reconciler struct {
 	mu       sync.Mutex
 	inFlight map[string]bool
 	nextTry  map[string]time.Time
+	// cursors carry each scope's paging position between passes, so a pass
+	// resumes rather than restarting. Keyed by connection id, 0 for the
+	// unscoped pass.
+	cursors map[int64]int64
 	// nextCheckout throttles the checkout trigger per connection, so the
 	// engine's hottest path does not become a meta-store query per statement.
 	nextCheckout map[int64]time.Time
@@ -61,6 +65,7 @@ func newReconciler() *reconciler {
 	return &reconciler{
 		inFlight:     map[string]bool{},
 		nextTry:      map[string]time.Time{},
+		cursors:      map[int64]int64{},
 		nextCheckout: map[int64]time.Time{},
 	}
 }
@@ -136,6 +141,22 @@ func (r *reconciler) claimCheckout(connID int64, now time.Time) bool {
 	return true
 }
 
+func (r *reconciler) cursor(scope int64) int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cursors[scope]
+}
+
+func (r *reconciler) setCursor(scope, next int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if next == 0 {
+		delete(r.cursors, scope)
+		return
+	}
+	r.cursors[scope] = next
+}
+
 // claimed reports whether a backoff is currently recorded for a transaction.
 // Test seam: the backoff is otherwise only observable by waiting for it.
 func (r *reconciler) claimed(txID string) bool {
@@ -171,11 +192,20 @@ func (e *Engine) ReconcileConnection(ctx context.Context, connID int64) int {
 // reconcileScope resolves the pending backlog, optionally narrowed to one
 // connection.
 func (e *Engine) reconcileScope(ctx context.Context, connID int64) int {
-	byTx, err := e.pendingGroups(ctx, connID, maxReconcileBatch)
+	// Start where the last pass stopped. A LIMIT with no cursor is a page,
+	// not a position: with a screenful of LIVE `opened` rows at the front —
+	// which this pass correctly skips — every pass re-reads them and a
+	// resolvable entry behind them is never reached at all. That is
+	// starvation, not slowness, and no amount of waiting fixes it
+	// (PR #20 r2 MF1).
+	byTx, next, err := e.pendingGroups(ctx, connID, maxReconcileBatch, e.reconcile.cursor(connID))
 	if err != nil {
 		e.logf("reconciling outcomes: reading the log: %v", err)
 		return 0
 	}
+	// A short page means the end; the cursor wraps so the next pass starts
+	// over and entries added or skipped earlier come round again.
+	e.reconcile.setCursor(connID, next)
 
 	// One bounded sweep per pass for rows stranded under a settled outcome,
 	// rather than a query per settled transaction.
@@ -238,10 +268,13 @@ const maxReconcileBatch = 200
 // costs one bounded indexed read and nothing else. The full group is then
 // re-read for the ones it names, because the queue carries no state and the
 // log stays the single source of truth.
-func (e *Engine) pendingGroups(ctx context.Context, connID int64, limit int) (map[string][]*meta.TxOutcome, error) {
-	q := e.store.TxPending.OnCtx(ctx)
+func (e *Engine) pendingGroups(ctx context.Context, connID int64, limit int, after int64) (map[string][]*meta.TxOutcome, int64, error) {
+	q := e.store.TxPending.OnCtx(ctx).OrderBy(dao.Asc(meta.TxPendByID))
 	if connID != 0 {
 		q = q.With(meta.TxPendConnID, connID)
+	}
+	if after > 0 {
+		q = q.WithPredicate(dao.Gt(string(meta.TxPendID), after))
 	}
 	// The CALLER's bound, not this file's. Clamping to maxReconcileBatch
 	// here would silently cap the read API at the reconciler's batch size,
@@ -253,11 +286,21 @@ func (e *Engine) pendingGroups(ctx context.Context, connID int64, limit int) (ma
 	}
 	queued, err := q.Limit(uint64(limit)).Select()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	// The highest id READ, so the caller can continue past this page. Zero
+	// when the page came back short, which means the cursor should wrap.
+	var next int64
+	if len(queued) == limit {
+		for _, r := range queued {
+			if r.ID > next {
+				next = r.ID
+			}
+		}
 	}
 	byTx := map[string][]*meta.TxOutcome{}
 	if len(queued) == 0 {
-		return byTx, nil
+		return byTx, 0, nil
 	}
 	ids := make([]any, 0, len(queued))
 	for _, r := range queued {
@@ -265,12 +308,12 @@ func (e *Engine) pendingGroups(ctx context.Context, connID int64, limit int) (ma
 	}
 	rows, err := e.store.TxOutcomes.OnCtx(ctx).With(meta.TxOutTxID, ids...).Select()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for _, r := range rows {
 		byTx[r.TxID] = append(byTx[r.TxID], r)
 	}
-	return byTx, nil
+	return byTx, next, nil
 }
 
 // needsOracle reports whether a nonterminal state can only be settled by
@@ -426,10 +469,23 @@ func (e *Engine) RecoverStaleOpen(ctx context.Context) int {
 			"`opened` row can no longer be assumed to belong to a dead process", n)
 		return 0
 	}
-	byTx, err := e.pendingGroups(ctx, 0, maxReconcileBatch)
-	if err != nil {
-		e.logf("stale-transaction recovery: reading the log: %v", err)
-		return 0
+	// Startup recovery pages the WHOLE queue rather than one batch: it runs
+	// once, before serving, and an inherited transaction it skipped would
+	// have no other owner to settle it.
+	byTx := map[string][]*meta.TxOutcome{}
+	for cursor := int64(0); ; {
+		page, next, perr := e.pendingGroups(ctx, 0, maxReconcileBatch, cursor)
+		if perr != nil {
+			e.logf("stale-transaction recovery: reading the log: %v", perr)
+			return 0
+		}
+		for k, v := range page {
+			byTx[k] = v
+		}
+		if next == 0 {
+			break
+		}
+		cursor = next
 	}
 	settled := 0
 	for txID, group := range byTx {
