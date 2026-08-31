@@ -77,10 +77,25 @@ func (e *Engine) appendTxOutcome(ctx context.Context, t txTransition) error {
 		if err != nil {
 			return err
 		}
-		// Re-check under the freshly-read head rather than once before the
-		// loop: another resolver may have appended a terminal while this one
-		// was retrying a seq collision.
-		if terminal && head.terminal {
+		// A terminal ENDS the trail, for every appender and not only for
+		// another terminal (PR #20 r0 MF2).
+		//
+		// The store's partial index refuses a second terminal but permits a
+		// nonterminal after one, and that gap is reachable in production:
+		// the reconciler can resolve a durable commit_started while
+		// finishTx is between the target's answer and its own append, and
+		// finishTx's unknown_pending would then land AFTER the committed row.
+		// The result is an append-only trail that does not end in its
+		// terminal — foldTxLog reads it correctly, but a forgiving reader
+		// does not restore the invariant, it just hides that it was broken.
+		//
+		// Re-read on every pass rather than once before the loop: another
+		// resolver may have finished while this one was retrying a seq
+		// collision. Together with the seq retry that closes the race in
+		// both directions — if the nonterminal wins the seq it is simply
+		// followed by the terminal; if the terminal wins, the retrying
+		// nonterminal reads it here and stops.
+		if head.terminal {
 			return nil
 		}
 		// A progression does not repeat itself. The retrying paths — the
@@ -93,27 +108,46 @@ func (e *Engine) appendTxOutcome(ctx context.Context, t txTransition) error {
 			return nil
 		}
 
-		_, err = e.store.TxOutcomes.OnCtx(ctx).
-			Set(meta.TxOutTxID, t.txID).
-			Set(meta.TxOutSeq, head.nextSeq).
-			Set(meta.TxOutState, string(t.state)).
-			Set(meta.TxOutReason, t.reason).
-			Set(meta.TxOutUserID, t.userID).
-			Set(meta.TxOutConnID, t.connectionID).
-			Set(meta.TxOutHistoryID, t.historyID).
-			Set(meta.TxOutTargetXID, t.targetXID).
-			Set(meta.TxOutCreatedAt, e.now().Unix()).
-			Insert()
+		// The transition and its projection go in ONE meta transaction
+		// (PR #20 r0 MF3).
+		//
+		// They were two operations, and a crash between them left the source
+		// of truth terminal while history still said ok_pending_commit —
+		// permanently, because reconciliation folds the terminal and skips
+		// the group before any repair could run. Both writes are in the same
+		// store, so atomicity is available and there is no reason to accept
+		// a window that nothing heals.
+		//
+		// A settled transaction settles its statements HERE rather than at
+		// each call site, so that every resolver projects: the boundary
+		// handler, the timeout sweep, the janitor and the reconciler all
+		// reach this code, and one that forgot would leave rows stuck
+		// pending forever.
+		err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
+			if _, ierr := e.store.TxOutcomes.On(tx).
+				Set(meta.TxOutTxID, t.txID).
+				Set(meta.TxOutSeq, head.nextSeq).
+				Set(meta.TxOutState, string(t.state)).
+				Set(meta.TxOutReason, t.reason).
+				Set(meta.TxOutUserID, t.userID).
+				Set(meta.TxOutConnID, t.connectionID).
+				Set(meta.TxOutHistoryID, t.historyID).
+				Set(meta.TxOutTargetXID, t.targetXID).
+				Set(meta.TxOutCreatedAt, e.now().Unix()).
+				Insert(); ierr != nil {
+				return ierr
+			}
+			if terminal {
+				return e.projectHistoryTx(tx, t.txID, t.state)
+			}
+			return nil
+		})
 		switch {
 		case err == nil:
-			// A settled transaction settles its statements. Done here rather
-			// than at each call site so that EVERY resolver projects — the
-			// boundary handler, the timeout sweep, the janitor and the
-			// reconciler all reach this line, and one that forgot would
-			// leave rows stuck at ok_pending_commit forever.
-			if terminal {
-				e.resolveHistory(ctx, t.txID, t.state)
-			}
+			// Fired from the primitive, the instant this transition is
+			// durable — see txBoundaryHook for why it does not live at the
+			// call site.
+			boundaryReached(txBoundaryPoint("appended:" + string(t.state)))
 			return nil
 		case !errors.Is(err, dao.ErrDuplicate):
 			return fmt.Errorf("exec: appending %s for %s: %w", t.state, t.txID, err)
@@ -251,7 +285,7 @@ func txOutcomeReason(outcome string, err error) string {
 			// would add nothing the error text does not already carry.
 			return ""
 		}
-		return meta.ReasonTimeout
+		return meta.ReasonUnanswered
 	}
 	return ""
 }

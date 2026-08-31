@@ -80,3 +80,40 @@ func TestLoad_PostgresEngine(t *testing.T) {
 		t.Errorf("cfg.Meta = %+v", cfg.Meta)
 	}
 }
+
+// ADR-0074 Amendment 4 A1 names four cases for reconcile_interval: unset
+// takes the positive default, a positive value is honoured, and zero or
+// negative DISABLES the periodic pass — a supported operator choice, not a
+// misconfiguration. Rejecting the non-positive values made the ratified
+// configuration unreachable (PR #20 r0 MF5).
+func TestLoad_ReconcileIntervalSupportsTheRatifiedDisableSemantics(t *testing.T) {
+	t.Parallel()
+
+	if cfg, err := Load(filepath.Join(t.TempDir(), "absent.toml")); err != nil {
+		t.Fatalf("unset: %v", err)
+	} else if cfg.Exec.ReconcileInterval.Duration() != DefaultReconcileInterval {
+		t.Errorf("unset = %s, want the default %s",
+			cfg.Exec.ReconcileInterval.Duration(), DefaultReconcileInterval)
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"positive", "[exec]\nreconcile_interval = \"30s\"\n", "30s"},
+		{"zero disables", "[exec]\nreconcile_interval = \"0s\"\n", "0s"},
+		{"negative disables", "[exec]\nreconcile_interval = \"-1s\"\n", "-1s"},
+	} {
+		cfg, err := Load(write(t, tc.body))
+		if err != nil {
+			t.Errorf("%s: Load: %v — a non-positive interval is a supported choice, not an error",
+				tc.name, err)
+			continue
+		}
+		if got := cfg.Exec.ReconcileInterval.Duration().String(); got != tc.want {
+			t.Errorf("%s = %s, want %s — the explicit value must survive loading rather than "+
+				"being rewritten to a default", tc.name, got, tc.want)
+		}
+	}
+}

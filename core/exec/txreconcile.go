@@ -2,9 +2,12 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/yongjohnlee80/golib/dao"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -49,10 +52,17 @@ type reconciler struct {
 	mu       sync.Mutex
 	inFlight map[string]bool
 	nextTry  map[string]time.Time
+	// nextCheckout throttles the checkout trigger per connection, so the
+	// engine's hottest path does not become a meta-store query per statement.
+	nextCheckout map[int64]time.Time
 }
 
 func newReconciler() *reconciler {
-	return &reconciler{inFlight: map[string]bool{}, nextTry: map[string]time.Time{}}
+	return &reconciler{
+		inFlight:     map[string]bool{},
+		nextTry:      map[string]time.Time{},
+		nextCheckout: map[int64]time.Time{},
+	}
 }
 
 // claim admits one resolver per tx_id per process.
@@ -88,6 +98,39 @@ func (r *reconciler) release(txID string, now time.Time, resolved bool) {
 	r.nextTry[txID] = now.Add(txReconcileBackoff)
 }
 
+// checkoutTrigger fires a scoped reconciliation after a connection is
+// successfully used, at most once per connection per interval.
+//
+// Throttled because target() is the hottest path in the engine and this must
+// not turn every statement into a meta-store query. The throttle is also why
+// it runs in the BACKGROUND: a caller waiting for their own statement should
+// never wait on the resolution of somebody else's abandoned transaction.
+//
+// Deliberately fire-and-forget on its own context. The caller's context is
+// cancelled the moment their statement finishes, which would abort the very
+// work this trigger exists to do.
+func (e *Engine) checkoutTrigger(connID int64) {
+	if !e.reconcile.claimCheckout(connID, e.now()) {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), txCleanupTimeout)
+		defer cancel()
+		e.ReconcileConnection(ctx, connID)
+	}()
+}
+
+// claimCheckout throttles the checkout trigger per connection.
+func (r *reconciler) claimCheckout(connID int64, now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if next, ok := r.nextCheckout[connID]; ok && now.Before(next) {
+		return false
+	}
+	r.nextCheckout[connID] = now.Add(txReconcileBackoff)
+	return true
+}
+
 // claimed reports whether a backoff is currently recorded for a transaction.
 // Test seam: the backoff is otherwise only observable by waiting for it.
 func (r *reconciler) claimed(txID string) bool {
@@ -105,21 +148,44 @@ func (r *reconciler) claimed(txID string) bool {
 // makes restart idempotence hold — a second run over an already-resolved log
 // finds nothing to do.
 func (e *Engine) ReconcileOutcomes(ctx context.Context) int {
-	rows, err := e.store.TxOutcomes.OnCtx(ctx).Select()
+	return e.reconcileScope(ctx, 0)
+}
+
+// ReconcileConnection reconciles only the entries belonging to one connection.
+//
+// The checkout trigger (ADR-0074 Amendment 4 A1): a pending entry is retried
+// on the next successful use of its own connection, which resolves promptly
+// when a target comes back without paying for tighter polling. It is also
+// what makes a disabled periodic pass coherent rather than a way to strand
+// entries — with the ticker off, this is what still notices a recovered
+// target while the daemon stays up.
+func (e *Engine) ReconcileConnection(ctx context.Context, connID int64) int {
+	return e.reconcileScope(ctx, connID)
+}
+
+// reconcileScope resolves the pending backlog, optionally narrowed to one
+// connection.
+func (e *Engine) reconcileScope(ctx context.Context, connID int64) int {
+	byTx, err := e.pendingGroups(ctx, connID)
 	if err != nil {
 		e.logf("reconciling outcomes: reading the log: %v", err)
 		return 0
-	}
-	byTx := map[string][]*meta.TxOutcome{}
-	for _, r := range rows {
-		byTx[r.TxID] = append(byTx[r.TxID], r)
 	}
 
 	now := e.now()
 	resolved := 0
 	for txID, group := range byTx {
 		st := foldTxLog(group)
-		if st.Terminal() || !needsOracle(st.State) {
+		if st.Terminal() {
+			// Settled, but its SURFACE may not be. A pass used to skip here
+			// outright, which is why a crash between the terminal write and
+			// its projection was never healed (PR #20 r0 MF3). The write is
+			// atomic now; this heals anything left behind by a build that
+			// predates it, or by history having been off at the time.
+			e.repairHistory(ctx, txID, st.State)
+			continue
+		}
+		if !needsOracle(st.State) {
 			continue
 		}
 		if !e.reconcile.claim(txID, now) {
@@ -134,14 +200,61 @@ func (e *Engine) ReconcileOutcomes(ctx context.Context) int {
 	return resolved
 }
 
+// pendingGroups fetches the transactions that might still need settling.
+//
+// It asks the store for rows in the CANDIDATE states and then loads only
+// those transactions' groups, rather than selecting the entire outcome log
+// and discarding the settled majority in memory (PR #20 r0 SF1). The log has
+// no retention by design, so a full scan grows without bound and the default
+// cadence would pay for it every minute forever — on a backlog that is
+// normally empty.
+//
+// The candidate query is a filter, not the answer: a tx_id appears here
+// because it has SOME row in a pending state, and only the folded group can
+// say whether it is still pending. That is why the group is re-read whole.
+func (e *Engine) pendingGroups(ctx context.Context, connID int64) (map[string][]*meta.TxOutcome, error) {
+	q := e.store.TxOutcomes.OnCtx(ctx).With(meta.TxOutState,
+		string(meta.TxOpened), string(meta.TxCommitStarted), string(meta.TxUnknownPending))
+	if connID != 0 {
+		q = q.With(meta.TxOutConnID, connID)
+	}
+	candidates, err := q.Select()
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]any, 0, len(candidates))
+	seen := map[string]bool{}
+	for _, r := range candidates {
+		if !seen[r.TxID] {
+			seen[r.TxID] = true
+			ids = append(ids, r.TxID)
+		}
+	}
+	byTx := map[string][]*meta.TxOutcome{}
+	if len(ids) == 0 {
+		return byTx, nil
+	}
+	rows, err := e.store.TxOutcomes.OnCtx(ctx).With(meta.TxOutTxID, ids...).Select()
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		byTx[r.TxID] = append(byTx[r.TxID], r)
+	}
+	return byTx, nil
+}
+
 // needsOracle reports whether a nonterminal state can only be settled by
 // asking the target.
 //
-// `opened` is deliberately excluded: a transaction that never reached
-// commit_started cannot have committed. It is left alone here and settled by
-// the paths that own it — the boundary handler, the timeout sweep, the
-// janitor — rather than being terminated by a reconciler that has no idea
-// whether the session is still live and about to commit it.
+// `opened` is excluded: a transaction that never reached commit_started
+// cannot have committed, so there is nothing to ask. While its session is
+// LIVE it belongs to the paths that own it — the boundary handler, the
+// timeout sweep, the janitor — and terminating it from here would race a
+// transaction that is about to commit perfectly normally.
+//
+// A prior-process `opened` row has no such owner, and is settled by
+// RecoverStaleOpen at startup instead (PR #20 r0 MF1).
 func needsOracle(s meta.TxState) bool {
 	return s == meta.TxCommitStarted || s == meta.TxUnknownPending
 }
@@ -156,12 +269,18 @@ func (e *Engine) resolveOne(ctx context.Context, txID string, st TxStatus, group
 	}
 
 	connRow, err := e.connectionRow(ctx, st.ConnID)
-	if err != nil {
-		// The connection is gone, so no oracle can ever be consulted for this
-		// entry again. That is a permanent condition, not a transient one:
-		// terminating it honestly is better than retrying forever against a
-		// target that no longer exists.
-		return e.terminate(ctx, txID, st, meta.TxUnresolvable, meta.ReasonNoOracle)
+	switch {
+	case errors.Is(err, dao.ErrNoRows):
+		// The connection was DELETED, so no oracle can ever be consulted for
+		// this entry again. Permanent, and named as such.
+		return e.terminate(ctx, txID, st, meta.TxUnresolvable, meta.ReasonConnectionGone)
+	case err != nil:
+		// A meta-store failure proves nothing about the connection (PR #20
+		// r0 SF3). Treating it as deletion would terminate a resolvable
+		// transaction because a lookup blipped — the same fabrication the
+		// unreachable-target branch exists to avoid.
+		e.logf("reconciling %s: reading connection %d: %v", txID, st.ConnID, err)
+		return false
 	}
 
 	// No oracle on this dialect. MySQL and sqlite have nothing equivalent to
@@ -252,24 +371,84 @@ func (e *Engine) connectionRow(ctx context.Context, connID int64) (*meta.Connect
 	return row, nil
 }
 
+// RecoverStaleOpen settles transactions this process inherited from a dead one.
+//
+// A crash after `opened` and before `commit_started` leaves a row no later
+// owner exists for: the dead process's session, timeout reaper and boundary
+// handler all went with it, so nothing would ever settle it and §7's "exactly
+// one terminal" would be false for that transaction forever (PR #20 r0 MF1).
+//
+// The outcome is not a guess. A transaction that never reached commit_started
+// cannot have committed — the target aborts it when the connection dies — so
+// `rolled_back` is proven by the same reasoning Amendment 5 decision 2 uses
+// to justify carrying no xid before that point.
+//
+// SYNCHRONOUS, and called before the daemon serves anything. That ordering is
+// the whole safety argument: at this instant this process has no sessions, so
+// every `opened` row in the store belongs to a process that is gone. There is
+// no epoch to compare and no live row to misidentify, because a live row
+// cannot exist yet. A periodic pass must never do this — by then the rows it
+// would find are this process's own, live, and about to commit.
+func (e *Engine) RecoverStaleOpen(ctx context.Context) int {
+	if n := len(e.sessions.snapshot()); n != 0 {
+		// Refuses rather than proceeds: the guarantee above is an ordering
+		// one, and if it does not hold the sweep would roll back live work.
+		e.logf("stale-transaction recovery skipped: %d session(s) already open, so an "+
+			"`opened` row can no longer be assumed to belong to a dead process", n)
+		return 0
+	}
+	byTx, err := e.pendingGroups(ctx, 0)
+	if err != nil {
+		e.logf("stale-transaction recovery: reading the log: %v", err)
+		return 0
+	}
+	settled := 0
+	for txID, group := range byTx {
+		st := foldTxLog(group)
+		if st.Terminal() || st.State != meta.TxOpened {
+			continue
+		}
+		if e.terminate(ctx, txID, st, meta.TxRolledBack, meta.ReasonSessionClosed) {
+			settled++
+		}
+	}
+	if settled > 0 {
+		e.logf("stale-transaction recovery settled %d transaction(s) left open by a previous process", settled)
+	}
+	return settled
+}
+
 // StartOutcomeReconciler runs the reconciler at startup and then on a ticker.
 //
 // Both are required (ADR-0074 §7): the startup pass is what recovers the
 // crash window — it is the whole reason the log exists — and the periodic
 // pass is what resolves entries whose target was down when the startup pass
 // ran, and the live indeterminate commits that need no crash at all.
+// The startup work is SYNCHRONOUS and the periodic pass is not.
+//
+// Startup recovery has to finish before the daemon accepts requests, because
+// RecoverStaleOpen's correctness rests on this process having no sessions yet
+// (see there). Running it in a goroutine would race the first client.
+//
+// A non-positive interval DISABLES the periodic pass and is a supported
+// operator choice, not an error — ADR-0074 Amendment 4 A1 names the semantics:
+// unset takes the default, zero or negative leaves startup and checkout
+// reconciliation. Silently rewriting it to a minute, as this did, made the
+// ratified configuration unreachable (PR #20 r0 MF5).
 func (e *Engine) StartOutcomeReconciler(ctx context.Context, every time.Duration) {
+	// Inherited transactions first: they are settled by proof, not by asking
+	// anyone, and doing it before the oracle pass means that pass sees a
+	// smaller backlog.
+	e.RecoverStaleOpen(ctx)
+	if n := e.ReconcileOutcomes(ctx); n > 0 {
+		e.logf("startup reconciliation resolved %d transaction outcome(s)", n)
+	}
 	if every <= 0 {
-		every = time.Minute
+		e.logf("periodic outcome reconciliation is disabled (interval %s); startup and "+
+			"connection-checkout reconciliation remain active", every)
+		return
 	}
 	go func() {
-		// The startup pass runs first and unconditionally. Waiting a full
-		// tick would leave every crash-window transaction unresolved for that
-		// long, which is precisely the interval an operator is staring at the
-		// pending list.
-		if n := e.ReconcileOutcomes(ctx); n > 0 {
-			e.logf("startup reconciliation resolved %d transaction outcome(s)", n)
-		}
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for {

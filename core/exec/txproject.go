@@ -2,6 +2,9 @@ package exec
 
 import (
 	"context"
+	"errors"
+
+	"github.com/yongjohnlee80/golib/dao"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -73,21 +76,65 @@ func historyStatusFor(state meta.TxState) string {
 // log, and failing a caller's COMMIT over it would trade a real operation for
 // a cosmetic one.
 func (e *Engine) resolveHistory(ctx context.Context, txID string, state meta.TxState) {
-	status := historyStatusFor(state)
-	if status == "" || txID == "" {
+	if !e.projectable(txID, state) {
 		return
 	}
-	if !e.history {
-		// Nothing to project onto. The outcome log still holds the truth,
-		// which is the whole reason it is not gated on this setting.
-		return
-	}
-	err := e.store.History.OnCtx(ctx).
-		With(meta.HistTxID, txID).
-		With(meta.HistStatus, StatusPendingCommit).
-		Set(meta.HistStatus, status).
-		Update()
+	err := dao.RunTx(ctx, func(tx *dao.Transaction) error {
+		return e.projectHistoryTx(tx, txID, state)
+	})
 	if err != nil {
 		e.logf("projecting the %s outcome of %s onto history failed: %v", state, txID, err)
 	}
+}
+
+// projectHistoryTx is the projection itself, inside a caller's transaction.
+//
+// Written to be callable from the same transaction as the terminal INSERT, so
+// the two land together or not at all (PR #20 r0 MF3): a crash between them
+// used to leave the truth terminal and the surface pending, forever, because
+// reconciliation skips groups that already have a terminal.
+func (e *Engine) projectHistoryTx(tx *dao.Transaction, txID string, state meta.TxState) error {
+	if !e.projectable(txID, state) {
+		return nil
+	}
+	err := e.store.History.On(tx).
+		With(meta.HistTxID, txID).
+		With(meta.HistStatus, StatusPendingCommit).
+		Set(meta.HistStatus, historyStatusFor(state)).
+		Update()
+	if errors.Is(err, dao.ErrNoRows) {
+		// Nothing was pending. The ordinary case for a transaction that ran
+		// no statements, and for a repair pass over an already-projected
+		// group — both are success, not failure.
+		return nil
+	}
+	return err
+}
+
+// projectable reports whether this outcome has a history projection at all.
+func (e *Engine) projectable(txID string, state meta.TxState) bool {
+	// Not gated on e.history for correctness — it is gated because with
+	// history off there is no surface to project ONTO. The outcome log still
+	// holds the truth, which is why it is the thing that is never gated.
+	return e.history && txID != "" && historyStatusFor(state) != ""
+}
+
+// repairHistory re-runs the projection for a settled transaction.
+//
+// Belt to the atomic write's braces. The atomicity closes the crash window
+// for transitions written from here on; this heals a row left behind by a
+// build that predates it, or by a projection that was skipped because history
+// was disabled at the time and has since been turned back on. Idempotent: it
+// touches only rows still marked pending.
+func (e *Engine) repairHistory(ctx context.Context, txID string, state meta.TxState) {
+	if !e.projectable(txID, state) {
+		return
+	}
+	n, err := e.store.History.OnCtx(ctx).
+		With(meta.HistTxID, txID).With(meta.HistStatus, StatusPendingCommit).Count()
+	if err != nil || n == 0 {
+		return
+	}
+	e.logf("repairing %d history row(s) left pending under settled transaction %s", n, txID)
+	e.resolveHistory(ctx, txID, state)
 }

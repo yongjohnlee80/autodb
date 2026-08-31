@@ -198,6 +198,12 @@ janitor_interval = "10s"
 # The pass that recovers the crash window runs once at STARTUP regardless of
 # this value; the interval only governs entries whose target was unreachable
 # at that moment.
+#
+# Set to "0s" (or any non-positive value) to DISABLE the periodic pass. That
+# is a supported choice, not a misconfiguration: startup recovery and
+# connection-checkout reconciliation still run, so a pending entry is resolved
+# the next time its target is used. What you give up is the timed retry for a
+# target nothing else touches.
 reconcile_interval = "1m"
 
 [tui]

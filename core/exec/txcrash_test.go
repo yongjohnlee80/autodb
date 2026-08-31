@@ -71,7 +71,7 @@ func runCrashChild(phase string) {
 	ctx := context.Background()
 	fail := func(format string, a ...any) {
 		fmt.Fprintf(os.Stdout, "CHILD-ERROR: "+format+"\n", a...)
-		os.Stdout.Sync()
+		_ = os.Stdout.Sync()
 		os.Exit(3)
 	}
 
@@ -94,6 +94,10 @@ func runCrashChild(phase string) {
 		fail("ListConnections: %v (%d)", err, len(conns))
 	}
 	connID := conns[0].ID
+	ident, err := svc.ValidateToken(ctx, tok)
+	if err != nil {
+		fail("ValidateToken: %v", err)
+	}
 
 	sid, err := eng.OpenSession(ctx, tok, connID, testIP)
 	if err != nil {
@@ -102,10 +106,13 @@ func runCrashChild(phase string) {
 	if _, err := eng.SessionExecute(ctx, tok, sid, "BEGIN", testIP); err != nil {
 		fail("BEGIN: %v", err)
 	}
-	ident, err := svc.ValidateToken(ctx, tok)
+	s, err := eng.sessions.lookup(sid, ident.UserID())
 	if err != nil {
-		fail("ValidateToken: %v", err)
+		fail("session lookup: %v", err)
 	}
+	s.mu.Lock()
+	txID := s.txID
+	s.mu.Unlock()
 
 	table := os.Getenv(crashTableEnv)
 	if phase == "P1" {
@@ -117,88 +124,72 @@ func runCrashChild(phase string) {
 			_, _ = eng.SessionExecute(ctx, tok, sid,
 				"INSERT INTO "+table+" (note) SELECT 'crash' FROM pg_sleep(600)", testIP)
 		}()
-		s, err := eng.sessions.lookup(sid, ident.UserID())
-		if err != nil {
-			fail("session lookup: %v", err)
-		}
-		s.mu.Lock()
-		id := s.txID
-		s.mu.Unlock()
-
 		// Wait until THIS TRANSACTION's attempt row is durable, then
 		// announce. Counting all history instead would match the setup rows
 		// the parent already wrote, and the child would announce ready
-		// before the write this phase is about — the assertion then fails
-		// for a reason that has nothing to do with the property.
+		// before the write this phase is about.
 		deadline := time.Now().Add(30 * time.Second)
 		for {
-			n, err := store.History.OnCtx(ctx).With(meta.HistTxID, id).Count()
+			n, err := store.History.OnCtx(ctx).With(meta.HistTxID, txID).Count()
 			if err == nil && n > 0 {
 				break
 			}
 			if time.Now().After(deadline) {
-				fail("the attempt row for %s was never written", id)
+				fail("the attempt row for %s was never written", txID)
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		fmt.Fprintf(os.Stdout, "READY %s\n", id)
-		os.Stdout.Sync()
-		select {}
+		announce(txID)
 	}
+
 	if _, err := eng.SessionExecute(ctx, tok, sid,
 		"INSERT INTO "+table+" (note) VALUES ('crash')", testIP); err != nil {
 		fail("INSERT: %v", err)
 	}
 
-	s, err := eng.sessions.lookup(sid, ident.UserID())
-	if err != nil {
-		fail("session lookup: %v", err)
-	}
-	s.mu.Lock()
-	tx, txID, targetXID := s.tx, s.txID, s.targetXID
-	s.mu.Unlock()
-
 	if phase == "P2" {
 		// Killed after the statement ran and before the boundary: the log
 		// holds `opened` and nothing else, and the target must discard the
 		// insert when this connection dies.
-		fmt.Fprintf(os.Stdout, "READY %s\n", txID)
-		os.Stdout.Sync()
-		select {}
+		announce(txID)
 	}
 
-	// The boundary, in finishTx's order: commit_started (durable, carrying
-	// the xid) and only then the target COMMIT.
-	if err := eng.appendTxOutcome(ctx, txTransition{
-		txID: txID, state: meta.TxCommitStarted,
-		connectionID: connID, targetXID: targetXID,
-	}); err != nil {
-		fail("commit_started: %v", err)
-	}
-	if phase == "P3" {
-		// Killed with the COMMIT never dispatched. Indistinguishable from
-		// P4 in the LOG — which is exactly why the reconciler must ask the
-		// target rather than infer.
-		fmt.Fprintf(os.Stdout, "READY %s\n", txID)
-		os.Stdout.Sync()
-		select {}
-	}
-
-	if err := tx.CommitContext(ctx); err != nil {
-		fail("commit: %v", err)
-	}
-	if phase == "P5" {
-		// The terminal IS written, and then the process dies. Recovery must
-		// leave a settled outcome exactly as it found it.
-		if err := eng.appendTxOutcome(ctx, txTransition{
-			txID: txID, state: meta.TxCommitted, connectionID: connID, targetXID: targetXID,
-		}); err != nil {
-			fail("terminal: %v", err)
+	// The boundary runs through the REAL entry point. The child does not
+	// replay the ordering — it dies INSIDE production's commitBoundary, at a
+	// named instant, with whatever durable state production has actually
+	// produced by then (PR #20 r0 MF4).
+	//
+	// So if production stops writing commit_started ahead of the COMMIT, the
+	// state visible at these instants changes and the parent's assertions
+	// fail. That is the whole point: the previous child hard-coded the
+	// desired order and stayed green when production violated it.
+	want := map[string]txBoundaryPoint{
+		"P3": boundaryCommitStartedDurable,
+		"P4": boundaryCommitReturned,
+	}[phase]
+	if want != "" {
+		txBoundaryHook = func(p txBoundaryPoint) {
+			if p == want {
+				announce(txID)
+			}
 		}
 	}
-	// P4: the COMMIT returned success. The terminal outcome is NOT written.
+	if _, err := eng.SessionExecute(ctx, tok, sid, "COMMIT", testIP); err != nil {
+		fail("COMMIT: %v", err)
+	}
+	if want != "" {
+		fail("the %s boundary point was never reached", phase)
+	}
+	// P5: the boundary completed and the terminal IS on disk. The process
+	// then dies, and recovery must leave the settled outcome alone.
+	announce(txID)
+}
+
+// announce tells the parent this phase has been reached, then parks forever
+// so the parent can SIGKILL the process exactly there.
+func announce(txID string) {
 	fmt.Fprintf(os.Stdout, "READY %s\n", txID)
-	os.Stdout.Sync()
+	_ = os.Stdout.Sync()
 	select {}
 }
 
@@ -450,23 +441,34 @@ func TestCrash_P2_KilledBeforeTheBoundary(t *testing.T) {
 		t.Fatal("the statement the crashed process ran left no history row at all")
 	}
 	if rows[0].Status != StatusPendingCommit {
-		t.Errorf("history status = %q, want ok_pending_commit — its fate was never settled",
-			rows[0].Status)
+		t.Errorf("history status = %q before recovery, want ok_pending_commit", rows[0].Status)
 	}
-}
 
-// mustOutcome reads a transaction's status or fails.
-func (e *Engine) mustOutcome(t *testing.T, txID string) TxStatus {
-	t.Helper()
-	rows, err := e.store.TxOutcomes.OnCtx(context.Background()).
-		With(meta.TxOutTxID, txID).Select()
+	// RESTART. This is the half the first version of this cell was missing:
+	// it asserted the opened row stays opened and stopped there, which is a
+	// transaction with no owner and no terminal, forever (PR #20 r0 MF1).
+	//
+	// A fresh process settles it by proof rather than by asking anyone: it
+	// never reached commit_started, so it cannot have committed, and the
+	// target confirms the row is absent.
+	if n := f.eng.RecoverStaleOpen(context.Background()); n != 1 {
+		t.Fatalf("startup recovery settled %d inherited transaction(s), want 1", n)
+	}
+	st = f.eng.mustOutcome(t, txID)
+	if st.State != meta.TxRolledBack {
+		t.Fatalf("state = %s(%s) after restart, want rolled_back", st.State, st.Reason)
+	}
+	if targetHasNote(t, f, table) {
+		t.Fatal("the target holds the row, so rolled_back is not what happened")
+	}
+	rows, err = f.store.History.OnCtx(context.Background()).With(meta.HistTxID, txID).Select()
 	if err != nil {
-		t.Fatalf("reading the outcome log: %v", err)
+		t.Fatal(err)
 	}
-	if len(rows) == 0 {
-		t.Fatalf("no record at all for %s", txID)
+	if rows[0].Status != StatusRolledBack {
+		t.Errorf("history status = %q after restart, want rolled_back — the outcome is "+
+			"settled and the surface still says pending", rows[0].Status)
 	}
-	return foldTxLog(rows)
 }
 
 // P1 — killed WHILE the statement was executing.
@@ -497,7 +499,6 @@ func TestCrash_P1_KilledWhileTheStatementWasRunning(t *testing.T) {
 	if targetHasNote(t, f, table) {
 		t.Fatal("the target kept a row from a statement that never finished")
 	}
-	// But the attempt did.
 	rows, err := f.store.History.OnCtx(context.Background()).With(meta.HistTxID, txID).Select()
 	if err != nil {
 		t.Fatal(err)
@@ -576,4 +577,18 @@ func TestCrash_P5_ASettledOutcomeSurvivesRecoveryUnchanged(t *testing.T) {
 		t.Fatalf("the log grew from %d to %d rows across a recovery pass over a settled transaction",
 			len(rowsBefore), len(rowsAfter))
 	}
+}
+
+// mustOutcome reads a transaction's folded status or fails.
+func (e *Engine) mustOutcome(t *testing.T, txID string) TxStatus {
+	t.Helper()
+	rows, err := e.store.TxOutcomes.OnCtx(context.Background()).
+		With(meta.TxOutTxID, txID).Select()
+	if err != nil {
+		t.Fatalf("reading the outcome log: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatalf("no record at all for %s", txID)
+	}
+	return foldTxLog(rows)
 }
