@@ -102,16 +102,54 @@ func runCrashChild(phase string) {
 	if _, err := eng.SessionExecute(ctx, tok, sid, "BEGIN", testIP); err != nil {
 		fail("BEGIN: %v", err)
 	}
+	ident, err := svc.ValidateToken(ctx, tok)
+	if err != nil {
+		fail("ValidateToken: %v", err)
+	}
+
 	table := os.Getenv(crashTableEnv)
+	if phase == "P1" {
+		// Killed WHILE a statement is executing. The attempt record is
+		// written before the target runs anything, so it must be on disk
+		// even though the statement never finished — that ordering is the
+		// only reason a crash mid-statement leaves evidence at all.
+		go func() {
+			_, _ = eng.SessionExecute(ctx, tok, sid,
+				"INSERT INTO "+table+" (note) SELECT 'crash' FROM pg_sleep(600)", testIP)
+		}()
+		s, err := eng.sessions.lookup(sid, ident.UserID())
+		if err != nil {
+			fail("session lookup: %v", err)
+		}
+		s.mu.Lock()
+		id := s.txID
+		s.mu.Unlock()
+
+		// Wait until THIS TRANSACTION's attempt row is durable, then
+		// announce. Counting all history instead would match the setup rows
+		// the parent already wrote, and the child would announce ready
+		// before the write this phase is about — the assertion then fails
+		// for a reason that has nothing to do with the property.
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			n, err := store.History.OnCtx(ctx).With(meta.HistTxID, id).Count()
+			if err == nil && n > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				fail("the attempt row for %s was never written", id)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		fmt.Fprintf(os.Stdout, "READY %s\n", id)
+		os.Stdout.Sync()
+		select {}
+	}
 	if _, err := eng.SessionExecute(ctx, tok, sid,
 		"INSERT INTO "+table+" (note) VALUES ('crash')", testIP); err != nil {
 		fail("INSERT: %v", err)
 	}
 
-	ident, err := svc.ValidateToken(ctx, tok)
-	if err != nil {
-		fail("ValidateToken: %v", err)
-	}
 	s, err := eng.sessions.lookup(sid, ident.UserID())
 	if err != nil {
 		fail("session lookup: %v", err)
@@ -148,6 +186,15 @@ func runCrashChild(phase string) {
 
 	if err := tx.CommitContext(ctx); err != nil {
 		fail("commit: %v", err)
+	}
+	if phase == "P5" {
+		// The terminal IS written, and then the process dies. Recovery must
+		// leave a settled outcome exactly as it found it.
+		if err := eng.appendTxOutcome(ctx, txTransition{
+			txID: txID, state: meta.TxCommitted, connectionID: connID, targetXID: targetXID,
+		}); err != nil {
+			fail("terminal: %v", err)
+		}
 	}
 	// P4: the COMMIT returned success. The terminal outcome is NOT written.
 	fmt.Fprintf(os.Stdout, "READY %s\n", txID)
@@ -420,4 +467,113 @@ func (e *Engine) mustOutcome(t *testing.T, txID string) TxStatus {
 		t.Fatalf("no record at all for %s", txID)
 	}
 	return foldTxLog(rows)
+}
+
+// P1 — killed WHILE the statement was executing.
+//
+// The attempt record is written before the target is asked to run anything
+// (ADR-0074's attempt-before-effect ordering), so a crash mid-statement must
+// still leave evidence that this user ran this script. That ordering is the
+// only reason such evidence exists at all, and this is the cell that proves
+// it survives a real kill rather than a deferred flush.
+func TestCrash_P1_KilledWhileTheStatementWasRunning(t *testing.T) {
+	f, metaPath, dsn, table := crashFixture(t)
+
+	child, txID := startCrashChild(t, "P1", metaPath, dsn, table)
+	if err := child.Process.Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	_, _ = child.Process.Wait()
+
+	// Reap the orphaned backend. SIGKILL closes the socket, but a backend
+	// inside pg_sleep does not look at its client until the statement ends,
+	// so it keeps running — and keeps its locks — for the remaining ten
+	// minutes. Worth knowing about (a killed daemon does NOT stop work
+	// already dispatched to the target), and worth not making every run of
+	// this test wait on it.
+	reapBackends(t, f, table)
+
+	// The effect never landed: the statement was still sleeping.
+	if targetHasNote(t, f, table) {
+		t.Fatal("the target kept a row from a statement that never finished")
+	}
+	// But the attempt did.
+	rows, err := f.store.History.OnCtx(context.Background()).With(meta.HistTxID, txID).Select()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("a statement that was killed mid-execution left NO record that it was ever run — " +
+			"attempt-before-effect is what makes a crash auditable, and it did not hold")
+	}
+	if !strings.Contains(rows[0].Script, "pg_sleep") {
+		t.Errorf("the attempt row does not carry the statement text: %q", rows[0].Script)
+	}
+	if rows[0].Status != StatusRunning {
+		t.Errorf("status = %q, want running — the statement never returned, so nothing "+
+			"should have advanced it", rows[0].Status)
+	}
+	if st := f.eng.mustOutcome(t, txID); st.State != meta.TxOpened {
+		t.Errorf("state = %s, want opened — the transaction never reached the boundary", st.State)
+	}
+}
+
+// reapBackends terminates target backends still running this table's
+// statements, so a killed child cannot leave locks behind for the cleanup to
+// block on.
+func reapBackends(t *testing.T, f *fixture, table string) {
+	t.Helper()
+	_, err := f.eng.Execute(context.Background(), f.rootTok, f.connID,
+		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity "+
+			"WHERE pid <> pg_backend_pid() AND query LIKE '%"+table+"%'", testIP)
+	if err != nil {
+		t.Logf("reaping backends for %s: %v", table, err)
+	}
+}
+
+// P5 — killed AFTER the terminal was written.
+//
+// Recovery must leave a settled outcome exactly as it found it. This is the
+// phase where the danger is not losing an outcome but rewriting one: a
+// recovery pass that re-resolved would append a second terminal, and the
+// store's guard would refuse it — so this asserts both that nothing changes
+// and that the refusal is not surfaced as an error.
+func TestCrash_P5_ASettledOutcomeSurvivesRecoveryUnchanged(t *testing.T) {
+	f, metaPath, dsn, table := crashFixture(t)
+	ctx := context.Background()
+
+	child, txID := startCrashChild(t, "P5", metaPath, dsn, table)
+	if err := child.Process.Kill(); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	_, _ = child.Process.Wait()
+
+	if !targetHasNote(t, f, table) {
+		t.Fatal("the target does not hold the row — this is not the P5 window")
+	}
+	before := f.eng.mustOutcome(t, txID)
+	if before.State != meta.TxCommitted {
+		t.Fatalf("state = %s, want committed — the child wrote the terminal before dying", before.State)
+	}
+	rowsBefore, err := f.store.TxOutcomes.OnCtx(ctx).With(meta.TxOutTxID, txID).Select()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if n := f.eng.ReconcileOutcomes(ctx); n != 0 {
+		t.Errorf("recovery re-resolved %d already-settled outcome(s)", n)
+	}
+	after := f.eng.mustOutcome(t, txID)
+	if after.State != before.State || !after.Since.Equal(before.Since) {
+		t.Fatalf("a settled outcome was rewritten: %s(%s) -> %s(%s)",
+			before.State, before.Since, after.State, after.Since)
+	}
+	rowsAfter, err := f.store.TxOutcomes.OnCtx(ctx).With(meta.TxOutTxID, txID).Select()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rowsAfter) != len(rowsBefore) {
+		t.Fatalf("the log grew from %d to %d rows across a recovery pass over a settled transaction",
+			len(rowsBefore), len(rowsAfter))
+	}
 }
