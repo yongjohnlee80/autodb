@@ -115,8 +115,26 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 		// reasonPreAuthOversize sat unused in the source, which is the same
 		// tell as the unapplied parameter policy last round: a named reason
 		// nobody emits is a case nobody handles.
+		// The frame is classified from its OWN BYTES before pgproto3 reads
+		// it — the declared length and, where present, the request code.
+		//
+		// This replaces matching on the library's error text, which was
+		// wrong twice for the same reason. "invalid length" is emitted for
+		// an over-cap frame AND for an underlength one, so a length of 0 or
+		// 3 was audited as pre-auth-message-too-large: the opposite of what
+		// it is. Before that, the same text was read as direct TLS. Both
+		// times I was inferring a cause from a symptom shared by several
+		// causes, when the distinguishing value was sitting in the bytes.
+		//
+		// A dependency's error strings are also not a contract: they can be
+		// reworded in a patch release and take this classification with them.
 		if head, perr := br.Peek(2); perr == nil && isTLSClientHello(head) {
 			return nil, startupOutcome{}, tlsFailure("direct-tls-unsupported")
+		}
+		if head, perr := br.Peek(4); perr == nil {
+			if reason, bad := classifyStartupLength(binary.BigEndian.Uint32(head)); bad {
+				return nil, startupOutcome{}, tlsFailure(reason)
+			}
 		}
 		first, err := plain.ReceiveStartupMessage()
 		if err != nil {
@@ -346,23 +364,38 @@ func (e tlsFailErr) Error() string { return "frontdoor: " + e.reason }
 
 func tlsFailure(reason string) error { return tlsFailErr{reason: reason} }
 
-// s0FailureReason names an S0 read failure that is NOT direct TLS — direct
-// TLS is identified by signature before this is reached.
+// classifyStartupLength decides an S0 frame's fate from its DECLARED length.
 //
-// The distinction that matters here is oversize versus unreadable. An
-// oversized length-prefixed frame is a client sending something too big, and
-// it has its own reason so an operator reading the trail is not sent hunting
-// a protocol negotiation that never happened.
-func s0FailureReason(err error) string {
-	msg := err.Error()
+// Underlength and over-cap are different failures and must not share a
+// reason: an under-length frame is malformed, and calling it "too large" is
+// not merely imprecise, it points an operator in the opposite direction.
+//
+// The declared value is a length INCLUDING its own four bytes, so the body is
+// four less. Below the four bytes needed for a version or request code there
+// is nothing a startup packet could be.
+func classifyStartupLength(declared uint32) (reason string, bad bool) {
+	body := int64(declared) - 4
 	switch {
-	case strings.Contains(msg, "invalid length"):
-		return reasonPreAuthOversize.String()
-	case strings.Contains(msg, "unknown startup message code"):
-		return "startup-code-unknown"
+	case body < startupMinBody:
+		return reasonStartupMalformed.String(), true
+	case body > PreAuthMaxBodyLen:
+		return reasonPreAuthOversize.String(), true
 	default:
-		return "startup-unreadable"
+		return "", false
 	}
+}
+
+// startupMinBody is the smallest possible startup body: one 32-bit version or
+// request code.
+const startupMinBody = 4
+
+// s0FailureReason names an S0 read failure that length classification did not
+// already catch — a well-sized frame whose CONTENT is unusable.
+func s0FailureReason(err error) string {
+	if strings.Contains(err.Error(), "unknown startup message code") {
+		return "startup-code-unknown"
+	}
+	return "startup-unreadable"
 }
 
 // isTLSClientHello reports whether these bytes open a TLS record.

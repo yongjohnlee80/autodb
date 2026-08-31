@@ -519,6 +519,59 @@ func TestStartup_RefusedParameterIsAuditedButNotDisclosed(t *testing.T) {
 // simply exceeds the pre-auth cap. A client sending something too big was
 // audited as a PostgreSQL 17 client, sending an operator to look for
 // something that may not exist on their network.
+// S0 frames are classified by their DECLARED LENGTH, and the three outcomes
+// are distinct. Two rounds of review found the same shape of error here: a
+// symptom shared by several causes ("invalid length") read as one specific
+// cause. Underlength is malformed, over-cap is too large, and calling the
+// first "too large" points an operator in the opposite direction.
+func TestStartup_LengthClassification(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		declared uint32
+		want     string
+	}{
+		{"a length of zero", 0, reasonStartupMalformed.String()},
+		{"a length below the four bytes a version needs", 3, reasonStartupMalformed.String()},
+		{"a length of exactly the header", 4, reasonStartupMalformed.String()},
+		{"an over-cap length", uint32(PreAuthMaxBodyLen + 5), reasonPreAuthOversize.String()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, events, addr := liveListener(t)
+			c := dial(t, addr)
+			var buf [4]byte
+			binary.BigEndian.PutUint32(buf[:], tc.declared)
+			if _, err := c.Write(buf[:]); err != nil {
+				t.Fatal(err)
+			}
+			var reason string
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) && reason == "" {
+				for _, ev := range events() {
+					if ev.Kind == "fd.tls_fail" {
+						reason = ev.Reason
+					}
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+			if reason != tc.want {
+				t.Errorf("a declared length of %d audited as %q, want %q", tc.declared, reason, tc.want)
+			}
+		})
+	}
+
+	// The unit is asserted directly too, so the boundary is pinned without
+	// standing up a listener for each case.
+	if _, bad := classifyStartupLength(uint32(PreAuthMaxBodyLen + 4)); bad {
+		t.Error("a body of exactly the cap was rejected; the bound is inclusive")
+	}
+	if _, bad := classifyStartupLength(8); bad {
+		t.Error("an ordinary 8-byte request (SSLRequest's size) was rejected")
+	}
+}
+
 func TestStartup_OversizeIsNotDirectTLS(t *testing.T) {
 	t.Parallel()
 	_, events, addr := liveListener(t)
