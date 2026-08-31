@@ -264,6 +264,10 @@ type HistoryEntry struct {
 	RowCount     int64
 	Status       string
 	Error        string
+	// TxID correlates this statement with the transaction that decides
+	// whether its effect survives. Empty for autocommit, where the
+	// statement's own return already settles that.
+	TxID string
 }
 
 type HistoryField string
@@ -281,6 +285,7 @@ const (
 	HistRowCount   HistoryField = "row_count"
 	HistStatus     HistoryField = "status"
 	HistError      HistoryField = "error"
+	HistTxID       HistoryField = "tx_id"
 )
 
 func newHistory(conn dao.DataConn) *dao.Schema[*HistoryEntry, HistoryField, Sort, int64] {
@@ -295,6 +300,7 @@ func newHistory(conn dao.DataConn) *dao.Schema[*HistoryEntry, HistoryField, Sort
 		HistRowCount:   {Column: "row_count", Scan: func(r *HistoryEntry) any { return &r.RowCount }, Value: func(r *HistoryEntry) any { return r.RowCount }},
 		HistStatus:     {Column: "status", Scan: func(r *HistoryEntry) any { return &r.Status }, Value: func(r *HistoryEntry) any { return r.Status }},
 		HistError:      {Column: "error", Scan: func(r *HistoryEntry) any { return &r.Error }, Value: func(r *HistoryEntry) any { return r.Error }},
+		HistTxID:       {Column: "tx_id", Scan: func(r *HistoryEntry) any { return &r.TxID }, Value: func(r *HistoryEntry) any { return r.TxID }},
 	})
 }
 
@@ -310,6 +316,10 @@ type AuditEntry struct {
 	Action    string
 	Detail    string
 	CreatedAt int64
+	// TxID ties a boundary or in-transaction record to its transaction, so
+	// the trail can be read per-transaction rather than reconstructed by
+	// parsing Detail.
+	TxID string
 }
 
 type AuditField string
@@ -321,6 +331,7 @@ const (
 	AuditAction    AuditField = "action"
 	AuditDetail    AuditField = "detail"
 	AuditCreatedAt AuditField = "created_at"
+	AuditTxID      AuditField = "tx_id"
 )
 
 func newAudit(conn dao.DataConn) *dao.Schema[*AuditEntry, AuditField, Sort, int64] {
@@ -331,6 +342,7 @@ func newAudit(conn dao.DataConn) *dao.Schema[*AuditEntry, AuditField, Sort, int6
 		AuditAction:    {Column: "action", Scan: func(r *AuditEntry) any { return &r.Action }, Value: func(r *AuditEntry) any { return r.Action }},
 		AuditDetail:    {Column: "detail", Scan: func(r *AuditEntry) any { return &r.Detail }, Value: func(r *AuditEntry) any { return r.Detail }},
 		AuditCreatedAt: {Column: "created_at", Scan: func(r *AuditEntry) any { return &r.CreatedAt }, Value: func(r *AuditEntry) any { return r.CreatedAt }},
+		AuditTxID:      {Column: "tx_id", Scan: func(r *AuditEntry) any { return &r.TxID }, Value: func(r *AuditEntry) any { return r.TxID }},
 	})
 }
 
