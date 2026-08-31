@@ -11,7 +11,6 @@ import (
 	"net"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -376,7 +375,7 @@ func (s *Service) VerifyPAT(ctx context.Context, presented string) (*meta.PAT, e
 	if row != nil {
 		stored = row.SecretHash
 	}
-	patCompares.Add(1)
+	s.patCompares.Add(1)
 	match := subtle.ConstantTimeCompare(patHash(secret), stored) == 1
 
 	now := s.now()
@@ -502,11 +501,13 @@ func (s *Service) RevokePAT(ctx context.Context, token string, userID int64, nam
 // selector passed the timing cell. An instrument that cannot observe the
 // defect it is aimed at is not evidence, whatever colour it reports.
 //
-// So the property is asserted where it is actually decidable — the work
-// happens on both paths — and the timing harness stays as a coarse backstop
-// for gross regressions, with its limits written down rather than implied.
-var patCompares atomic.Int64
+// PER-SERVICE and not package-global. As a package variable it was read as a
+// delta around one call while OTHER parallel tests were incrementing it, so
+// the cell reported 2 compares against 1 and failed in CI while passing
+// everywhere I had run it. A shared counter read as a delta is not an
+// instrument, it is a race — the same class of mistake as the shared mutable
+// test knob that -race caught in R5.
 
-// PATCompareCount reads the counter. Test-support, exported because the
-// front-door package needs it too once the auth chain lands.
-func PATCompareCount() int64 { return patCompares.Load() }
+// PATCompareCount reads this service's counter. Test-support, exported
+// because the front-door package needs it once the auth chain lands.
+func (s *Service) PATCompareCount() int64 { return s.patCompares.Load() }

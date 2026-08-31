@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -62,6 +63,11 @@ type Service struct {
 	// testAfterCapLock runs inside CreatePAT's check→insert window so a test
 	// can make the cap race deterministic. Nil in production.
 	testAfterCapLock func()
+
+	// patCompares counts PAT hash-and-compare operations for the
+	// comparable-work assertion. Per-service so parallel tests cannot
+	// interleave into each other's deltas.
+	patCompares atomic.Int64
 }
 
 // Option configures a Service at New time.

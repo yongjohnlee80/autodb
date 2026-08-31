@@ -163,13 +163,13 @@ func TestPAT_UnknownSelectorCostsTheSameAsAWrongSecret(t *testing.T) {
 	// hash-and-compare. An early return on an unknown selector skips it, and
 	// that is what a timing attacker measures — they submit candidates and
 	// learn which selectors EXIST without ever holding a valid credential.
-	before := PATCompareCount()
+	before := s.PATCompareCount()
 	_, _ = s.VerifyPAT(ctx, PATPrefix+"zzzzzzzzzzzz.bbbbbbbbbbbb")
-	unknownWork := PATCompareCount() - before
+	unknownWork := s.PATCompareCount() - before
 
-	before = PATCompareCount()
+	before = s.PATCompareCount()
 	_, _ = s.VerifyPAT(ctx, PATPrefix+sel+".wrong-secret")
-	wrongWork := PATCompareCount() - before
+	wrongWork := s.PATCompareCount() - before
 
 	if unknownWork != wrongWork {
 		t.Fatalf("an unknown selector performed %d hash-compares and a wrong secret performed %d; "+
@@ -554,13 +554,13 @@ func TestPAT_TheOwnerCheckDoesNotCostAnUnknownSelectorAnything(t *testing.T) {
 	good := mustPAT(t, s, tok, "timing-owner")
 	sel, _, _ := splitPAT(good.Secret)
 
-	before := PATCompareCount()
+	before := s.PATCompareCount()
 	_, _ = s.VerifyPAT(ctx, PATPrefix+"zzzzzzzzzzzz.bbbbbbbbbbbb")
-	unknown := PATCompareCount() - before
+	unknown := s.PATCompareCount() - before
 
-	before = PATCompareCount()
+	before = s.PATCompareCount()
 	_, _ = s.VerifyPAT(ctx, PATPrefix+sel+".wrong-secret")
-	wrong := PATCompareCount() - before
+	wrong := s.PATCompareCount() - before
 
 	if unknown != wrong {
 		t.Fatalf("unknown selector did %d compares, wrong secret did %d; adding the owner "+
