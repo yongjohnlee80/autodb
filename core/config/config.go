@@ -337,6 +337,26 @@ type Meta struct {
 	// DSN is the postgres connection string; required when Engine is
 	// "postgres". Ignored for sqlite.
 	DSN string `toml:"dsn"`
+
+	// AllowInsecureDSN opts out of the transport check on the meta DSN
+	// (ADR-0079 §4). Without it a postgres meta store must use
+	// sslmode=verify-full with an explicit sslrootcert.
+	//
+	// A named key rather than a silent default, so an insecure deployment is
+	// visible when someone reads the config rather than only when someone
+	// reads the code.
+	AllowInsecureDSN bool `toml:"allow_insecure_dsn"`
+
+	// PoolMaxConns bounds the META store's own pool. Zero takes
+	// DefaultMetaPoolMaxConns.
+	//
+	// Deliberately NOT the target-pool default from ADR-0074 (2 x cores).
+	// That number is sized by how much USER traffic a target must absorb;
+	// this pool serves the daemon's own bookkeeping — audit writes, history,
+	// the outcome log — whose concurrency is set by the daemon, not by how
+	// many people are querying. Borrowing the target number would size the
+	// meta store for the wrong thing in both directions.
+	PoolMaxConns int `toml:"pool_max_conns"`
 }
 
 // History configures script-history recall (Objective 5). The audit log is
@@ -439,6 +459,17 @@ const (
 	// enabled. It is deliberately slow: collapsing a settled transaction is
 	// never urgent, and the pass reads a slice of the outcome log.
 	DefaultOutcomeRetentionInterval = time.Hour
+
+	// DefaultMetaPoolMaxConns bounds the meta store's own pool.
+	//
+	// Small on purpose, and NOT derived from cores. The meta store serves the
+	// daemon's bookkeeping, whose concurrency the daemon sets; a bigger pool
+	// buys nothing and costs postgres backends that the TARGET pools need.
+	// One is pinned by the instance lease for the process's lifetime, so this
+	// is "a handful, plus the lease".
+	DefaultMetaPoolMaxConns = 8
+	// MinMetaPoolMaxConns is the floor an explicit setting may not go below.
+	MinMetaPoolMaxConns = 2
 )
 
 // DefaultPoolMaxConns is 2 × cores, per ADR-0074 §1a (Johno, 2026-08-30).
@@ -611,9 +642,26 @@ func (c Config) validate() error {
 		return fmt.Errorf("%w: exec.session_idle_timeout %s must be positive — an unbounded idle window "+
 			"never reaps a session an abandoned client left open", ErrInvalid, c.Exec.SessionIdleTimeout.Duration())
 	}
+	if c.Meta.PoolMaxConns < 0 {
+		return fmt.Errorf("%w: [meta] pool_max_conns must not be negative (got %d)",
+			ErrInvalid, c.Meta.PoolMaxConns)
+	}
+	if c.Meta.PoolMaxConns > 0 && c.Meta.PoolMaxConns < MinMetaPoolMaxConns {
+		// Below two, an operation that pins a connection (the instance lease,
+		// the migration lock) leaves nothing for the work beside it. That was
+		// a real deadlock before the migration lock ran its DDL on the pinned
+		// transaction, and the next thing to pin a connection would
+		// reintroduce it silently.
+		return fmt.Errorf("%w: [meta] pool_max_conns = %d is too small; the instance lease pins "+
+			"one connection for the daemon's lifetime, so at least %d are needed for anything "+
+			"else to run", ErrInvalid, c.Meta.PoolMaxConns, MinMetaPoolMaxConns)
+	}
 	switch c.Meta.Engine {
 	case "sqlite":
 	case "postgres":
+		if err := checkMetaDSNTransport(c.Meta.DSN, c.Meta.AllowInsecureDSN); c.Meta.DSN != "" && err != nil {
+			return err
+		}
 		if c.Meta.DSN == "" {
 			return fmt.Errorf("%w: meta.engine postgres requires meta.dsn", ErrInvalid)
 		}

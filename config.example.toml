@@ -56,6 +56,34 @@ bind = "127.0.0.1"
 # supported and ONE-WAY.
 engine = "sqlite"
 
+# postgres only. The meta store holds the audit trail, the user records and
+# the ENCRYPTED CONNECTION SECRETS, so its transport is checked at startup:
+# sslmode=verify-full with an explicit sslrootcert, or autodb refuses to
+# start (ADR-0079 §4).
+#
+#   dsn = "postgres://autodb@db.internal/autodb?sslmode=verify-full&sslrootcert=/etc/ssl/certs/db-ca.crt"
+#
+# `require` is NOT sufficient and the difference is not pedantry: it encrypts
+# but authenticates NOTHING — any certificate from anything answering on that
+# address is accepted, so an attacker who can redirect the connection reads
+# and rewrites the whole store. `verify-ca` proves the issuer but not that the
+# certificate belongs to the host you asked for. Only `verify-full` checks
+# both. An absent sslmode is not "unspecified": libpq defaults to `prefer`,
+# which silently falls back to plaintext.
+#
+# Set this only if postgres is genuinely reached over a trusted local channel
+# (a unix socket, or loopback on the same host). It is a named key so that an
+# insecure deployment is visible to whoever reads this file.
+allow_insecure_dsn = false
+
+# postgres only. Bounds the META store's own pool; 0 takes the built-in
+# default (8). This is NOT the target-pool number from [exec]: that one is
+# sized by how much USER traffic a target absorbs, while this pool serves the
+# daemon's own bookkeeping, whose concurrency the daemon sets. It may not be
+# set below 2 — the instance lease pins one connection for the daemon's
+# lifetime, so a pool of 1 leaves nothing for the work beside it.
+pool_max_conns = 0
+
 # sqlite only. Empty means $XDG_DATA_HOME/autodb/meta.db
 # (~/.local/share/autodb/meta.db). The -wal and -shm files beside it are
 # part of the database: copy all three together, or checkpoint first.

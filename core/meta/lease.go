@@ -66,6 +66,22 @@ type InstanceLease struct {
 //
 // It is called after the store is open (postgres needs the connection) and
 // before anything is served.
+// AcquireLease takes the single-instance lease for a store.
+//
+// ONE abstraction, two mechanisms (ADR-0079 §4). Callers get one type with one
+// Release, one Target and one Lost, and never branch on the engine — the
+// engine-specific state is a union inside InstanceLease rather than a second
+// type with a second lifecycle.
+//
+// ONE ASYMMETRY, stated because it is invisible otherwise: only the postgres
+// path can report a lease LOST. Lost() returns the heartbeat channel, which is
+// nil on the sqlite path, and a receive on a nil channel blocks forever — so a
+// sqlite daemon simply never observes a loss. That is correct rather than
+// missing: an flock is held by the process for its lifetime and cannot be
+// revoked under it, whereas a postgres advisory lock lives on a connection
+// that can drop. Anyone adding a third engine needs to decide which of those
+// two it resembles, and a nil Lost() is the deliberate answer for "cannot be
+// lost while we are alive", not an unimplemented stub.
 func AcquireLease(ctx context.Context, s *Store, mcfg config.Meta) (*InstanceLease, error) {
 	switch s.engine {
 	case "sqlite":
