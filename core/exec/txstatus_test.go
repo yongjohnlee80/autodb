@@ -3,6 +3,8 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -163,6 +165,9 @@ func TestPendingOutcomes_ListsOnlyUnsettledOldestFirst(t *testing.T) {
 	// Seeded newest-first so a correct result cannot be insertion order.
 	seedTx(t, f, "tx_new_pending", 1, f.connID, meta.TxOpened, meta.TxCommitStarted)
 	seedTx(t, f, "tx_settled", 1, f.connID, meta.TxOpened, meta.TxCommitted)
+	// Seeded with an explicit created_at older than the others, so "oldest
+	// first" cannot be satisfied by insertion order.
+	enqueueSeed(t, f, "tx_old_pending", f.connID, meta.TxOpened)
 	if _, err := f.store.TxOutcomes.OnCtx(ctx).
 		Set(meta.TxOutTxID, "tx_old_pending").Set(meta.TxOutSeq, int64(1)).
 		Set(meta.TxOutState, string(meta.TxOpened)).Set(meta.TxOutReason, "").
@@ -221,5 +226,70 @@ func TestPendingOutcomes_ScopedToTheCaller(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("the admin could not see the pending transaction either — the test proves nothing")
+	}
+}
+
+// The user-facing pending list must be selective too, and this asserts the
+// MECHANISM rather than the result.
+//
+// PR #20 r0 SF1 named BOTH the reconciler and this verb; I fixed the
+// reconciler and left this one scanning the whole log. It is the worse of the
+// two to leave: a user can call it, so an O(all history) scan is reachable on
+// demand rather than once a minute.
+//
+// My first version of this cell asserted the returned LIST, and a full scan
+// passed it — of course it did, both implementations filter down to the same
+// answer and only the cost differs. An end-state assertion cannot distinguish
+// a cheap path from an expensive one, exactly as it could not distinguish
+// atomic writes from separate ones.
+//
+// What discriminates is a transaction the two paths DISAGREE about: an
+// unresolved progression that is absent from the queue. A queue-driven
+// implementation cannot see it; a log-scanning one reports it. The shape is
+// deliberately one production cannot produce — the enqueue is inside the
+// opened transition's own store transaction — which is what makes it a probe
+// for which code path ran rather than a claim about real state.
+func TestPendingOutcomes_ReadsTheQueueRatherThanScanningTheLog(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	for i := 0; i < 24; i++ {
+		seedTx(t, f, fmt.Sprintf("tx_done_%02d", i), 1, f.connID,
+			meta.TxOpened, meta.TxCommitStarted, meta.TxCommitted)
+	}
+	seedTx(t, f, "tx_still_open", 1, f.connID, meta.TxOpened, meta.TxCommitStarted)
+
+	// The probe: unresolved in the log, absent from the queue.
+	if _, err := f.store.TxOutcomes.OnCtx(ctx).
+		Set(meta.TxOutTxID, "tx_unqueued").Set(meta.TxOutSeq, int64(1)).
+		Set(meta.TxOutState, string(meta.TxCommitStarted)).Set(meta.TxOutReason, "").
+		Set(meta.TxOutUserID, int64(1)).Set(meta.TxOutConnID, f.connID).
+		Set(meta.TxOutHistoryID, int64(0)).Set(meta.TxOutTargetXID, "9").
+		Set(meta.TxOutCreatedAt, int64(2)).Insert(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := f.eng.PendingOutcomes(ctx, f.rootTok, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, s := range got {
+		ids = append(ids, s.TxID)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if id == "tx_unqueued" {
+			t.Fatalf("pending = %v — it returned a transaction that is not in the queue, "+
+				"so it read the whole outcome log rather than the backlog", ids)
+		}
+	}
+	if len(ids) != 1 || ids[0] != "tx_still_open" {
+		t.Fatalf("pending = %v, want exactly [tx_still_open]", ids)
+	}
+	// And the queue really is the small thing being read.
+	if n, _ := f.store.TxPending.OnCtx(ctx).Count(); n != 1 {
+		t.Errorf("the queue holds %d rows for a backlog of 1", n)
 	}
 }
