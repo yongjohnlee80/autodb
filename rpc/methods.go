@@ -504,7 +504,7 @@ func (s *Server) register() {
 		}
 		return map[string]any{"config": cfgOut, "rows": outRows}, nil
 	})
-	s.rpc.Handle("auth.user_ip_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.rpc.Handle("auth.user_allowlist_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -529,7 +529,7 @@ func (s *Server) register() {
 		}
 		return out, nil
 	})
-	s.rpc.Handle("auth.user_ip_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.rpc.Handle("auth.user_allowlist_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 4); err != nil {
 			return nil, err
 		}
@@ -557,7 +557,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.AddUserIP(ctx, token, userID, cidr, label, peerIP(req)))
 	})
-	s.rpc.Handle("auth.user_ip_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.rpc.Handle("auth.user_allowlist_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}

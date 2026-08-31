@@ -842,7 +842,7 @@ type UserIPRow struct {
 }
 
 func (b *Bound) UserIPs(ctx context.Context, userID int64) ([]UserIPRow, error) {
-	res, err := b.authed(ctx, "auth.user_ip_list", userID)
+	res, err := b.authed(ctx, "auth.user_allowlist_list", userID)
 	if err != nil {
 		return nil, err
 	}
@@ -860,11 +860,11 @@ func (b *Bound) UserIPs(ctx context.Context, userID int64) ([]UserIPRow, error) 
 // AddUserIP adds a CIDR (or bare address) to userID's allowlist. An empty
 // cidr asks the server to use the address this session connects from.
 func (b *Bound) AddUserIP(ctx context.Context, userID int64, cidr, label string) error {
-	_, err := b.authed(ctx, "auth.user_ip_add", userID, cidr, label)
+	_, err := b.authed(ctx, "auth.user_allowlist_add", userID, cidr, label)
 	return err
 }
 
 func (b *Bound) RemoveUserIP(ctx context.Context, userID, rowID int64) error {
-	_, err := b.authed(ctx, "auth.user_ip_remove", userID, rowID)
+	_, err := b.authed(ctx, "auth.user_allowlist_remove", userID, rowID)
 	return err
 }
