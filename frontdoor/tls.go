@@ -72,16 +72,52 @@ func LoadServerTLS(fd config.FrontDoor, now time.Time) (*tls.Config, error) {
 			ErrTLSMaterial, leaf.NotAfter.UTC().Format(time.RFC3339))
 	}
 
-	// SAN coverage of every configured name. verify-full verifies the NAME,
-	// so a gap here fails at every client rather than at startup — one
-	// connection at a time, with an error each developer reads as their own
-	// client's problem.
+	// The CHAIN, not just the leaf.
+	//
+	// The first version of this checked the leaf's own fields and stopped —
+	// key pair, validity, VerifyHostname — and called that "wrongly-chained
+	// material fails startup", which it was not. A leaf served without its
+	// intermediate parses perfectly, is in date, and carries the right name;
+	// it simply cannot be built into a path to any root, so every verifying
+	// client rejects it and the listener is the last to know. That is the
+	// same failure the SAN check exists to prevent, one level up, and it is
+	// the ordinary shape of a real misconfiguration: a renewal that wrote
+	// cert.pem where fullchain.pem was meant.
+	//
+	// Intermediates come from the certificate file itself (everything after
+	// the leaf, as a PEM bundle conventionally is). Roots come from the
+	// configured CA when there is one and the system's otherwise, which is
+	// what lets the ADR's two sanctioned cases — public ACME, or a securely
+	// distributed private CA — both verify here.
+	intermediates := x509.NewCertPool()
+	for _, der := range pair.Certificate[1:] {
+		c, perr := x509.ParseCertificate(der)
+		if perr != nil {
+			return nil, fmt.Errorf("%w: parsing an intermediate certificate: %w", ErrTLSMaterial, perr)
+		}
+		intermediates.AddCert(c)
+	}
+	roots, err := trustRoots(fd.TLSRootCAFile)
+	if err != nil {
+		return nil, err
+	}
+
+	// One Verify per configured name. Verify subsumes the SAN check, the
+	// chain, and server-auth key usage — but it is run per name so the
+	// message can say WHICH name failed; a combined check would report only
+	// that something did.
 	for _, host := range fd.TLSHostNames {
-		if err := leaf.VerifyHostname(host); err != nil {
-			return nil, fmt.Errorf("%w: the certificate does not cover %q (it carries %v) — "+
-				"clients using sslmode=verify-full would each fail on their own, "+
-				"reading it as a client-side problem: %w",
-				ErrTLSMaterial, host, leaf.DNSNames, err)
+		if _, verr := leaf.Verify(x509.VerifyOptions{
+			DNSName:       host,
+			Intermediates: intermediates,
+			Roots:         roots,
+			CurrentTime:   now,
+			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		}); verr != nil {
+			return nil, fmt.Errorf("%w: the certificate does not verify for %q (it carries names %v) — "+
+				"clients using sslmode=verify-full would each fail on their own, reading it as a "+
+				"client-side problem. A missing intermediate looks exactly like this: %w",
+				ErrTLSMaterial, host, leaf.DNSNames, verr)
 		}
 	}
 
@@ -96,4 +132,33 @@ func LoadServerTLS(fd config.FrontDoor, now time.Time) (*tls.Config, error) {
 		// part of refusing it.
 		NextProtos: nil,
 	}, nil
+}
+
+// trustRoots is the root pool the server's own chain is verified against:
+// the configured CA bundle when there is one, the host's system roots
+// otherwise.
+//
+// An unreadable or unparsable CA file is a start-up refusal rather than a
+// silent fall back to system roots. Falling back would turn "my private CA
+// path has a typo" into "verification passes against roots that were never
+// meant to sign this", which is a weaker check wearing the same green.
+func trustRoots(caFile string) (*x509.CertPool, error) {
+	if caFile == "" {
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			return nil, fmt.Errorf("%w: reading the system trust roots (set frontdoor.tls_root_ca_file "+
+				"to name a CA bundle explicitly): %w", ErrTLSMaterial, err)
+		}
+		return pool, nil
+	}
+	pem, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("%w: reading tls_root_ca_file: %w", ErrTLSMaterial, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("%w: tls_root_ca_file %s contains no usable certificate",
+			ErrTLSMaterial, caFile)
+	}
+	return pool, nil
 }

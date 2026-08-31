@@ -273,13 +273,31 @@ bind = "127.0.0.1:5432"
 # tls_cert_file = "/etc/autodb/tls/fullchain.pem"
 # tls_key_file = "/etc/autodb/tls/privkey.pem"
 
-# The DNS names clients will dial, checked against the certificate's SANs at
-# startup. verify-full verifies the NAME, so a certificate that is otherwise
-# perfect but misses the name in your DSN fails at every client, one
-# connection at a time, with an error that reads like a client problem.
-# Checking it once here turns that into a message at the moment you made the
-# mistake.
+# The DNS names clients will dial, checked against the certificate at startup.
+# REQUIRED when enabled = true, and at least one: verify-full verifies the
+# NAME, so a certificate that is otherwise perfect but misses the name in your
+# DSN fails at every client, one connection at a time, with an error that
+# reads like a client problem. Checking it once here turns that into a message
+# at the moment you made the mistake.
+#
+# Not inferred from `bind` on purpose: bind is where the socket listens (often
+# 0.0.0.0 or a private address), while this is the routable name in a DSN.
+# Guessing one from the other would produce a check that passes while proving
+# nothing about what clients actually dial.
 # tls_host_names = ["autodb.example.com"]
+
+# The trust root your OWN certificate chain is verified against at startup.
+# Empty uses this host's system roots, which is right for a public ACME
+# certificate. Point it at your CA bundle if the certificate comes from a
+# private CA, so the chain can be verified without installing that CA
+# host-wide for the benefit of one process.
+#
+# The whole chain is verified here, not just the leaf: a certificate served
+# without its intermediate parses fine, is in date and carries the right name,
+# but cannot be built into a path to any root -- so every verifying client
+# rejects it and the listener is the last to know. That is what a renewal
+# writing cert.pem where fullchain.pem was meant looks like.
+# tls_root_ca_file = "/etc/autodb/tls/ca.pem"
 
 # How many connections of each target pool are held back from wire leases,
 # for the interactive surfaces and the engine's own control queries. Without
