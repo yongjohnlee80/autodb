@@ -103,13 +103,15 @@ func (e *Engine) PendingOutcomes(ctx context.Context, token string, limit int) (
 	}
 	limit = min(limit, MaxPendingLimit)
 
-	rows, err := e.store.TxOutcomes.OnCtx(ctx).Select()
+	// From the QUEUE, like the reconciler, and for the same reason: a
+	// settled transaction keeps its `opened` and `commit_started` rows
+	// forever, so reading the log and discarding the terminal groups in
+	// memory is an O(all history) scan for an answer that is normally empty.
+	// This one is worse than the reconciler's was, because a user can ask
+	// for it (PR #20 r0 SF1 — I fixed the reconciler and left this behind).
+	byTx, err := e.pendingGroups(ctx, 0)
 	if err != nil {
 		return nil, fmt.Errorf("exec: reading the outcome log: %w", err)
-	}
-	byTx := map[string][]*meta.TxOutcome{}
-	for _, r := range rows {
-		byTx[r.TxID] = append(byTx[r.TxID], r)
 	}
 
 	admin := ident.Role() == "admin"
