@@ -1128,3 +1128,137 @@ func TestUserIPAllowlistOverWire(t *testing.T) {
 		t.Fatalf("rows after remove = %d, want 0", n)
 	}
 }
+
+// The ExecSession verbs over the wire (R5). Session SEMANTICS — pinning,
+// transaction state, atomicity — are core's, tested against a live
+// PostgreSQL; what belongs here is that the verbs exist, validate their
+// arguments, carry the session id, and project results like every other
+// exec verb.
+func TestSessionVerbsOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	if errVal, _ := c.call("exec.run", f.rootTok, f.connID,
+		"CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL)"); errVal != nil {
+		t.Fatalf("scaffold: %#v", errVal)
+	}
+
+	errVal, result := c.call("exec.session_open", f.rootTok, f.connID)
+	if errVal != nil {
+		t.Fatalf("session_open: %#v", errVal)
+	}
+	sid, _ := result.(map[string]any)["session_id"].(string)
+	if sid == "" {
+		t.Fatalf("session_open returned no session id: %#v", result)
+	}
+
+	errVal, result = c.call("exec.session_run", f.rootTok, sid, "SELECT 1")
+	if errVal != nil {
+		t.Fatalf("session_run: %#v", errVal)
+	}
+	if rows, ok := result.(map[string]any)["rows"].([]any); !ok || len(rows) != 1 {
+		t.Fatalf("session_run did not project a result: %#v", result)
+	}
+
+	errVal, result = c.call("exec.session_close", f.rootTok, sid)
+	if errVal != nil {
+		t.Fatalf("session_close: %#v", errVal)
+	}
+	if result.(map[string]any)["closed"] != true {
+		t.Fatalf("session_close reply: %#v", result)
+	}
+
+	// A closed session is gone, and a made-up id is refused identically —
+	// the id space must not be usable to discover which sessions exist.
+	errVal, _ = c.call("exec.session_run", f.rootTok, sid, "SELECT 1")
+	if errVal == nil {
+		t.Fatal("a closed session still ran a statement")
+	}
+	bogus, _ := c.call("exec.session_run", f.rootTok, "nope-not-a-session", "SELECT 1")
+	if bogus == nil {
+		t.Fatal("an invented session id ran a statement")
+	}
+	if fmt.Sprintf("%#v", errVal) != fmt.Sprintf("%#v", bogus) {
+		t.Errorf("a closed session and an invented one are distinguishable over the wire "+
+			"(%#v vs %#v); the difference tells a caller which ids existed", errVal, bogus)
+	}
+
+	// Arity is enforced, like every other verb.
+	for _, bad := range [][]any{
+		{"exec.session_open", f.rootTok},
+		{"exec.session_open", f.rootTok, f.connID, "extra"},
+		{"exec.session_close", f.rootTok},
+		{"exec.session_run", f.rootTok, sid},
+	} {
+		method := bad[0].(string)
+		if errVal, _ := c.call(method, bad[1:]...); errVal == nil {
+			t.Errorf("%s accepted %d arguments", method, len(bad)-1)
+		}
+	}
+}
+
+// The protocol bump is the point of the bump: a protocol-4 client sending
+// `BEGIN; …; COMMIT;` to exec.run_script got independent statements, and the
+// same text now runs in one transaction. Same verb, different meaning — so a
+// stale client must be stopped at the handshake rather than surprised by it.
+func TestProtocolBumpRefusesTheOlderClient(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	if rpc.Protocol != 5 {
+		t.Fatalf("Protocol = %d, want 5 — R5 changed what exec.run_script MEANS for a "+
+			"transactional script, and an unbumped handshake lets a client keep the old "+
+			"assumption against the new behaviour", rpc.Protocol)
+	}
+	c := f.dial(t)
+	errVal, _ := c.call("sys.hello", map[string]any{"protocol": int64(4), "name": "stale"})
+	if errVal == nil {
+		t.Fatal("a protocol-4 client completed the handshake against a protocol-5 server")
+	}
+}
+
+// tx.status over the wire (protocol 5, ADR-0074 Amendment 4 A2). R5 owns this
+// verb; R4 owns the outcome machine underneath it.
+func TestTxStatusOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	// An id with no record is NOT pending. A mistyped or expired id must not
+	// leave a caller polling forever for a transaction that never existed.
+	errVal, _ := c.call("tx.status", f.rootTok, "tx-that-never-was")
+	mustErr(t, errVal, rpc.CodeNoSuchTx)
+
+	// The pending list answers even when nothing is pending, and answers
+	// with a LIST rather than an error — "nothing is stuck" is a real answer.
+	errVal, result := c.call("tx.status", f.rootTok, "", int64(10))
+	if errVal != nil {
+		t.Fatalf("tx.status pending: %#v", errVal)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("pending reply shape: %#v", result)
+	}
+	if _, ok := m["pending"].([]any); !ok {
+		t.Fatalf("pending is not a list: %#v", m)
+	}
+
+	// Arity: two forms only.
+	for _, bad := range [][]any{
+		{f.rootTok},
+		{f.rootTok, "", int64(1), "extra"},
+	} {
+		if errVal, _ := c.call("tx.status", bad...); errVal == nil {
+			t.Errorf("tx.status accepted %d argument(s)", len(bad))
+		}
+	}
+
+	// The verb is unreachable before a handshake, like every other method.
+	fresh := f.dial(t)
+	if errVal, _ := fresh.call("tx.status", f.rootTok, "x"); errVal == nil {
+		t.Error("tx.status answered before sys.hello")
+	}
+}

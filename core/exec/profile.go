@@ -49,7 +49,24 @@ func (p Profile) valid() bool { return p == ProfileV1Compat || p == ProfileSessi
 // A profile that does not admit a statement says so with the same error
 // identity the refusal has always had, because a caller's error handling is
 // part of the compatibility surface — not just the fact of the refusal.
-func (p Profile) admit(st Statement) error {
+// admit decides whether a statement may run under this profile.
+//
+// onSession says whether the caller is the SESSION path. It is a parameter
+// rather than an assumption because the same profile serves both paths and
+// the answer genuinely differs: transaction control is an engine ACTION on a
+// session and is performed as a state transition, but on the stateless path
+// there is no session to transition and the statement would be forwarded as
+// TEXT to a pooled connection.
+//
+// That forwarding was real, not hypothetical. Against a live PostgreSQL,
+// `exec.run` with BEGIN on a session-profile connection returned success:
+// a transaction was opened on a pooled physical connection and handed back
+// to the pool for the next user to inherit — the precise hazard the v1compat
+// refusal message describes, reintroduced by a profile that assumed its only
+// caller was SessionExecute. The fix is to give the profile the information
+// instead of the assumption, so one place decides admissibility with the
+// whole picture rather than two places agreeing by convention.
+func (p Profile) admit(st Statement, onSession bool) error {
 	switch p {
 	case ProfileV1Compat:
 		if st.Class == ClassControl {
@@ -71,11 +88,20 @@ func (p Profile) admit(st Statement) error {
 
 	case ProfileSession:
 		if st.Class == ClassControl {
-			// Transaction control is now an engine action (ADR-0074 §3):
-			// admitted here and performed as a state transition, never
-			// forwarded as text.
+			// Transaction control is an engine action (ADR-0074 §3):
+			// admitted on a SESSION and performed as a state transition,
+			// never forwarded as text. Off a session there is nothing to
+			// transition, so it would be forwarded — which is exactly what
+			// the v1compat message below refuses it for.
 			if txControlVerbs[st.Verb] || statefulControlVerbs[st.Verb] {
-				return nil
+				if onSession {
+					return nil
+				}
+				return fmt.Errorf("%w: %s has no safe meaning outside a session — off one it "+
+					"would run as text on a pooled connection and leave its state there for "+
+					"the next user. HINT: open a session (exec.session_open), or send the "+
+					"whole script at once and let the engine run it in one transaction",
+					ErrStatementUnsupported, st.Verb)
 			}
 			// The rest of the control verbs are still refused, and the
 			// message says which kind of refusal it is. SET and LOCK have
@@ -124,6 +150,18 @@ var statefulControlVerbs = map[string]bool{
 // which is not built yet — as opposed to the verbs that have none.
 var pendingControlVerbs = map[string]bool{
 	"CALL": true, "DO": true,
+	// Savepoints are planned and not built: ParseTxControl already refuses
+	// `ROLLBACK TO SAVEPOINT` with "savepoints are not implemented", and the
+	// bare SAVEPOINT/RELEASE verbs belong in the same bucket rather than in
+	// the permanent refusal below. The distinction is not pedantry — the
+	// permanent message says the verb "cannot be made safe on a pooled
+	// connection", which is untrue of a savepoint on a PINNED one and would
+	// tell a caller to stop trying when they should wait.
+	//
+	// R5's atomic script is what made this reachable: before it, getting a
+	// multi-statement transactional script as far as a SAVEPOINT took a
+	// hand-driven session.
+	"SAVEPOINT": true, "RELEASE": true,
 }
 
 // profileFor resolves the capability profile for one connection (ADR-0074

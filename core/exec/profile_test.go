@@ -55,7 +55,7 @@ func TestProfileV1Compat_RefusesEveryControlVerb(t *testing.T) {
 			if st.Class != ClassControl {
 				t.Fatalf("class = %q, want %q", st.Class, ClassControl)
 			}
-			err = ProfileV1Compat.admit(st)
+			err = ProfileV1Compat.admit(st, true)
 			if !errors.Is(err, ErrStatementUnsupported) {
 				t.Fatalf("admit = %v, want ErrStatementUnsupported", err)
 			}
@@ -85,7 +85,7 @@ func TestProfileV1Compat_AdmitsEveryExecutableClass(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Classify(%q): %v", sql, err)
 		}
-		if err := ProfileV1Compat.admit(st); err != nil {
+		if err := ProfileV1Compat.admit(st, true); err != nil {
 			t.Errorf("admit(%q) = %v, want nil", sql, err)
 		}
 	}
@@ -105,7 +105,7 @@ func TestProfile_UnknownFailsClosed(t *testing.T) {
 	if bogus.valid() {
 		t.Fatal("the typo must not read as a known profile")
 	}
-	if err := bogus.admit(st); !errors.Is(err, ErrStatementUnsupported) {
+	if err := bogus.admit(st, true); !errors.Is(err, ErrStatementUnsupported) {
 		t.Errorf("admit under an unknown profile = %v, want a refusal", err)
 	}
 }
@@ -137,7 +137,7 @@ func TestProfiles_DisagreeOnDataModifyingCTEs(t *testing.T) {
 	// v1compat: refused, and refused the SAME way for both — its rule was
 	// never about the WHERE.
 	for name, st := range map[string]Statement{"guarded": guardedSt, "bare": bareSt} {
-		err := ProfileV1Compat.admit(st)
+		err := ProfileV1Compat.admit(st, true)
 		if !errors.Is(err, ErrStatementUnsupported) {
 			t.Errorf("v1compat admit(%s) = %v, want ErrStatementUnsupported", name, err)
 			continue
@@ -154,13 +154,13 @@ func TestProfiles_DisagreeOnDataModifyingCTEs(t *testing.T) {
 	}
 
 	// session: admitted, then judged by the guard on its own merits.
-	if err := ProfileSession.admit(guardedSt); err != nil {
+	if err := ProfileSession.admit(guardedSt, true); err != nil {
 		t.Errorf("session admit(guarded) = %v, want nil", err)
 	}
 	if err := guardWhere(guardedSt); err != nil {
 		t.Errorf("guardWhere(guarded) = %v, want nil — the mutation states its rows", err)
 	}
-	if err := ProfileSession.admit(bareSt); err != nil {
+	if err := ProfileSession.admit(bareSt, true); err != nil {
 		t.Errorf("session admit(bare) = %v, want nil — admission is not the guard's job", err)
 	}
 	if err := guardWhere(bareSt); !errors.Is(err, ErrNoWhere) {
@@ -180,12 +180,39 @@ func TestProfileSession_AdmitsTransactionControlOnly(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Classify(%q): %v", sql, err)
 		}
-		if err := ProfileSession.admit(st); err != nil {
+		if err := ProfileSession.admit(st, true); err != nil {
 			t.Errorf("session admit(%q) = %v, want nil", sql, err)
 		}
 		// And v1compat still refuses every one of them, unchanged.
-		if err := ProfileV1Compat.admit(st); !errors.Is(err, ErrStatementUnsupported) {
+		if err := ProfileV1Compat.admit(st, true); !errors.Is(err, ErrStatementUnsupported) {
 			t.Errorf("v1compat admit(%q) = %v, want ErrStatementUnsupported", sql, err)
+		}
+	}
+
+	// OFF a session, the same profile refuses them — and this is the half
+	// that was missing. `admit` had no way to know which path was calling,
+	// so it assumed SessionExecute and returned nil for BEGIN on the
+	// STATELESS path too. Against a live PostgreSQL that opened a
+	// transaction on a POOLED connection and returned it to the pool for the
+	// next user to inherit, which is the exact hazard the v1compat message
+	// describes.
+	for _, sql := range []string{"BEGIN", "COMMIT", "ROLLBACK", "SET LOCAL lock_timeout = '5s'",
+		"LOCK TABLE t IN EXCLUSIVE MODE"} {
+		st, err := Classify(sql, false)
+		if err != nil {
+			t.Fatalf("Classify(%q): %v", sql, err)
+		}
+		err = ProfileSession.admit(st, false)
+		if !errors.Is(err, ErrStatementUnsupported) {
+			t.Errorf("session profile admit(%q) OFF a session = %v; it would run as text on a "+
+				"pooled connection and leave its state there for the next user", sql, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "pooled connection") {
+			t.Errorf("the refusal for %q does not say what would happen: %v", sql, err)
+		}
+		if !strings.Contains(err.Error(), "exec.session_open") {
+			t.Errorf("the refusal for %q does not say what to do instead: %v", sql, err)
 		}
 	}
 
@@ -194,11 +221,11 @@ func TestProfileSession_AdmitsTransactionControlOnly(t *testing.T) {
 	// the stateful gate (TestAdmitSet / TestAdmitLock) rather than here.
 	for _, sql := range []string{"SET LOCAL lock_timeout = '5s'", "LOCK TABLE t IN EXCLUSIVE MODE"} {
 		st, _ := Classify(sql, false)
-		if err := ProfileSession.admit(st); err != nil {
+		if err := ProfileSession.admit(st, true); err != nil {
 			t.Errorf("session admit(%q) = %v, want the stateful gate to decide it", sql, err)
 		}
 		// v1compat still refuses them outright, unchanged.
-		if err := ProfileV1Compat.admit(st); !errors.Is(err, ErrStatementUnsupported) {
+		if err := ProfileV1Compat.admit(st, true); !errors.Is(err, ErrStatementUnsupported) {
 			t.Errorf("v1compat admit(%q) = %v, want ErrStatementUnsupported", sql, err)
 		}
 	}
@@ -207,7 +234,7 @@ func TestProfileSession_AdmitsTransactionControlOnly(t *testing.T) {
 	// built: CALL and DO await the procedure capability of §6a.
 	for _, sql := range []string{"CALL do_thing(1)", "DO $$ BEGIN PERFORM 1; END $$"} {
 		st, _ := Classify(sql, false)
-		err := ProfileSession.admit(st)
+		err := ProfileSession.admit(st, true)
 		if !errors.Is(err, ErrStatementUnsupported) {
 			t.Errorf("session admit(%q) = %v, want a refusal", sql, err)
 			continue
@@ -220,7 +247,7 @@ func TestProfileSession_AdmitsTransactionControlOnly(t *testing.T) {
 	// A verb with no admissible form at all. The two refusals must not read
 	// the same: one says wait, the other says stop.
 	st, _ := Classify("PRAGMA foreign_keys = OFF", false)
-	err := ProfileSession.admit(st)
+	err := ProfileSession.admit(st, true)
 	if !errors.Is(err, ErrStatementUnsupported) {
 		t.Fatalf("session admit(PRAGMA) = %v, want a refusal", err)
 	}
