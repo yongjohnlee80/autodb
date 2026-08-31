@@ -353,7 +353,7 @@ func TestPendingGroups_ReturnsOnlyTheUnresolvedBacklog(t *testing.T) {
 	}
 	seedCrashWindow(t, f, "tx_really_pending", f.connID, "77")
 
-	groups, err := f.eng.pendingGroups(ctx, 0)
+	groups, err := f.eng.pendingGroups(ctx, 0, maxReconcileBatch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,5 +622,84 @@ func TestPendingQueue_AFailingDequeueRollsBackTheTerminal(t *testing.T) {
 	}
 	if len(rows) != 1 {
 		t.Errorf("log has %d rows, want just the opened one", len(rows))
+	}
+}
+
+// A scoped checkout must not do global work.
+//
+// repairPendingHistory looks for pending HISTORY rows, not for one
+// connection's, so it is global by nature. Running it from the checkout
+// trigger would repeat the same global sweep once per active connection while
+// pretending to be scoped — the shape of the problem SF1 was about, reached by
+// a different route.
+func TestReconcileConnection_DoesNotRunTheGlobalHistorySweep(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A legacy strand belonging to a DIFFERENT connection.
+	other, err := f.eng.CreateConnection(ctx, f.rootTok, "other-conn", "sqlite",
+		"file:othersweep?mode=memory&cache=shared", testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTx(t, f, "tx_strand", 1, other, meta.TxOpened, meta.TxCommitted)
+	seedHistory(t, f, "tx_strand", StatusPendingCommit)
+
+	// A checkout on f.connID has nothing to do with that strand.
+	f.eng.ReconcileConnection(ctx, f.connID)
+	if got := histStatus(t, f, "tx_strand"); len(got) != 1 || got[0] != StatusPendingCommit {
+		t.Fatalf("history = %v — a scoped checkout ran the global repair sweep", got)
+	}
+
+	// The unscoped pass is what owns it, and does heal it. Without this the
+	// assertion above would be satisfied by a sweep that never works.
+	f.eng.ReconcileOutcomes(ctx)
+	if got := histStatus(t, f, "tx_strand"); len(got) != 1 || got[0] != StatusOK {
+		t.Fatalf("history = %v after the unscoped pass, want [ok]", got)
+	}
+}
+
+// A caller asking for more than the reconciler's batch size must not be
+// silently truncated to it.
+//
+// The two paths bound the same query for different reasons — the reconciler
+// to keep a pass bounded, the verb to bound a user's request — and if the
+// fetch borrows the reconciler's number then a backlog larger than it becomes
+// permanently invisible past that point, with nothing saying so.
+//
+// Asserting a SMALL limit proves nothing here: PendingOutcomes truncates
+// after folding, so a small request is honoured no matter how much was
+// fetched. Only a backlog larger than maxReconcileBatch can tell the two
+// apart, so the cell pays for one.
+func TestPendingOutcomes_IsNotCappedByTheReconcilerBatch(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	const n = maxReconcileBatch + 5
+	for i := 0; i < n; i++ {
+		seedCrashWindow(t, f, fmt.Sprintf("tx_lim_%03d", i), f.connID, "1")
+	}
+
+	got, err := f.eng.PendingOutcomes(ctx, f.rootTok, n)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != n {
+		t.Fatalf("asked for %d pending and got %d — the fetch is capped at the reconciler's "+
+			"batch size, so a larger backlog is invisible past it", n, len(got))
+	}
+
+	// The hard cap still applies: a caller cannot ask for the whole table.
+	if MaxPendingLimit < n {
+		t.Fatalf("this cell assumes MaxPendingLimit (%d) exceeds %d", MaxPendingLimit, n)
+	}
+	small, err := f.eng.PendingOutcomes(ctx, f.rootTok, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(small) != 2 {
+		t.Fatalf("limit 2 returned %d", len(small))
 	}
 }

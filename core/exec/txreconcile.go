@@ -171,7 +171,7 @@ func (e *Engine) ReconcileConnection(ctx context.Context, connID int64) int {
 // reconcileScope resolves the pending backlog, optionally narrowed to one
 // connection.
 func (e *Engine) reconcileScope(ctx context.Context, connID int64) int {
-	byTx, err := e.pendingGroups(ctx, connID)
+	byTx, err := e.pendingGroups(ctx, connID, maxReconcileBatch)
 	if err != nil {
 		e.logf("reconciling outcomes: reading the log: %v", err)
 		return 0
@@ -179,7 +179,14 @@ func (e *Engine) reconcileScope(ctx context.Context, connID int64) int {
 
 	// One bounded sweep per pass for rows stranded under a settled outcome,
 	// rather than a query per settled transaction.
-	e.repairPendingHistory(ctx)
+	//
+	// Only on the UNSCOPED pass. The sweep is global by nature — it looks
+	// for pending history rows, not for one connection's — so running it
+	// from the checkout trigger would repeat the same global work once per
+	// active connection while pretending to be scoped.
+	if connID == 0 {
+		e.repairPendingHistory(ctx)
+	}
 
 	now := e.now()
 	resolved := 0
@@ -231,12 +238,20 @@ const maxReconcileBatch = 200
 // costs one bounded indexed read and nothing else. The full group is then
 // re-read for the ones it names, because the queue carries no state and the
 // log stays the single source of truth.
-func (e *Engine) pendingGroups(ctx context.Context, connID int64) (map[string][]*meta.TxOutcome, error) {
+func (e *Engine) pendingGroups(ctx context.Context, connID int64, limit int) (map[string][]*meta.TxOutcome, error) {
 	q := e.store.TxPending.OnCtx(ctx)
 	if connID != 0 {
 		q = q.With(meta.TxPendConnID, connID)
 	}
-	queued, err := q.Limit(maxReconcileBatch).Select()
+	// The CALLER's bound, not this file's. Clamping to maxReconcileBatch
+	// here would silently cap the read API at the reconciler's batch size,
+	// making a larger backlog invisible past it with nothing saying so —
+	// each caller already bounds itself for its own reason (the reconciler
+	// to keep a pass bounded, the verb by MaxPendingLimit).
+	if limit <= 0 {
+		limit = maxReconcileBatch
+	}
+	queued, err := q.Limit(uint64(limit)).Select()
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +426,7 @@ func (e *Engine) RecoverStaleOpen(ctx context.Context) int {
 			"`opened` row can no longer be assumed to belong to a dead process", n)
 		return 0
 	}
-	byTx, err := e.pendingGroups(ctx, 0)
+	byTx, err := e.pendingGroups(ctx, 0, maxReconcileBatch)
 	if err != nil {
 		e.logf("stale-transaction recovery: reading the log: %v", err)
 		return 0
