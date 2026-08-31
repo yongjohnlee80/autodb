@@ -5,66 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
-	"github.com/yongjohnlee80/autodb/core/config"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-const testIP = "127.0.0.1"
-
-// fixture: in-memory meta store, bootstrapped auth, engine, and one sqlite
-// target connection (shared-cache in-memory DB so pooled conns see one DB).
-type fixture struct {
-	store   *meta.Store
-	svc     *auth.Service
-	eng     *Engine
-	rootTok string
-	connID  int64
-}
-
-var fixtureSeq atomic.Int64
-
-func newFixture(t *testing.T) *fixture {
-	t.Helper()
-	ctx := context.Background()
-	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
-	if err != nil {
-		t.Fatalf("meta.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-
-	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
-	if err != nil {
-		t.Fatalf("auth.New: %v", err)
-	}
-	rootTok, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", testIP)
-	if err != nil {
-		t.Fatalf("Bootstrap: %v", err)
-	}
-
-	eng := New(store, svc, WithMaxRows(3))
-	t.Cleanup(func() { _ = eng.Close() })
-
-	dsn := fmt.Sprintf("file:exectest%d_%d?mode=memory&cache=shared", time.Now().UnixNano(), fixtureSeq.Add(1))
-	connID, err := eng.CreateConnection(ctx, rootTok, "target", "sqlite", dsn, testIP)
-	if err != nil {
-		t.Fatalf("CreateConnection: %v", err)
-	}
-	return &fixture{store: store, svc: svc, eng: eng, rootTok: rootTok, connID: connID}
-}
-
-func (f *fixture) exec(t *testing.T, token, sql string) *Result {
-	t.Helper()
-	res, err := f.eng.Execute(context.Background(), token, f.connID, sql, testIP)
-	if err != nil {
-		t.Fatalf("Execute %q: %v", sql, err)
-	}
-	return res
-}
+// The fixture (newFixture, exec, execErr, auditCount, audits) lives in
+// fixture_test.go — the §11 entry-point fixture for this package.
 
 func TestEngine_FullPath(t *testing.T) {
 	t.Parallel()
@@ -99,8 +47,8 @@ func TestEngine_FullPath(t *testing.T) {
 		t.Errorf("stream = %d rows, res.Rows=%v, err=%v — want 5, nil, nil", streamed, sres.Rows, err)
 	}
 
-	// The WHERE guard (Objective 18).
-	if _, err := f.eng.Execute(ctx, f.rootTok, f.connID, "UPDATE songs SET title = 'x'", testIP); !errors.Is(err, ErrNoWhere) {
+	// The WHERE guard (Objective 18) — proven through the dispatch (§11).
+	if err := f.execErr(t, f.rootTok, "UPDATE songs SET title = 'x'"); !errors.Is(err, ErrNoWhere) {
 		t.Errorf("guard err = %v, want ErrNoWhere", err)
 	}
 	if res := f.exec(t, f.rootTok, "UPDATE songs SET title = 'first' WHERE id = 1"); res.Affected != 1 {
@@ -113,7 +61,9 @@ func TestEngine_FullPath(t *testing.T) {
 	}
 
 	// Records: audit always (attempt + result), history on (default).
-	if n, _ := f.store.Audit.OnCtx(ctx).With(meta.AuditAction, "exec").Count(); n == 0 {
+	// (Example §11 conversion: the hand-rolled store queries became the
+	// fixture's auditCount, so an audit promise costs one line to check.)
+	if f.auditCount(t, "exec") == 0 {
 		t.Error("no exec audit rows")
 	}
 	if n, _ := f.store.History.OnCtx(ctx).With(meta.HistStatus, "error").Count(); n != 1 {
@@ -121,7 +71,7 @@ func TestEngine_FullPath(t *testing.T) {
 	}
 	// Attempt-before-execute: every execution left an "exec" audit row AND
 	// a result row (lector M4 must-fix #4).
-	if n, _ := f.store.Audit.OnCtx(ctx).With(meta.AuditAction, "exec_result").Count(); n == 0 {
+	if f.auditCount(t, "exec_result") == 0 {
 		t.Error("no exec_result audit rows")
 	}
 	if n, _ := f.store.History.OnCtx(ctx).With(meta.HistStatus, "running").Count(); n != 0 {
