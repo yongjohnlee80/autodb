@@ -1,6 +1,6 @@
 # Front-door protocol matrix — PostgreSQL wire v3
 
-**Status:** rev 2 — pre-F0 gate document (ADR-0075 §5). F0 implementation
+**Status:** rev 3 — pre-F0 gate document (ADR-0075 §5). F0 implementation
 does not begin until this matrix is lector-reviewed and accepted.
 Rev 2 folds lector r0: MF1 full-check atomic auth/reservation; MF2
 pg-conformant discard-through-Sync (Close NOT exempt) + segment entry on
@@ -9,7 +9,12 @@ lane arithmetic, two-stage charging, reserve-before-target; MF4
 NegotiateProtocolVersion for 3.x minors + the type-`p` frame reality;
 MF5 direct-TLS/cert/error behavior + UTF8-pinned lease + full
 ParameterStatus forwarding; MF6 limit identities in the refusal
-catalogue. Lector's four r0 rulings are recorded in §11.
+catalogue. Lector's four r0 rulings are recorded in §11. Rev 3 folds the r1
+remnants: version-negotiation consistency across §5/§7 (MF1), the
+frontdoor_max_leases pointer to row 2.7's atomic reservation (MF2), the
+complete never-emitted backend canary set (MF3), and certificate
+fail-start before bind/listen + client-side verify-full phrasing (MF4);
+the r1 direct-TLS ruling (v1 refusal accepted) closes §11's open item.
 **Owner:** the F0 implementer (authored by jarvis as ADR-0075's author;
 ownership transfers with F0). **Companion to:** KB ADR-0075 (accepted
 2026-08-30); state semantics from KB ADR-0074 (ExecSession). Code-adjacent
@@ -31,7 +36,7 @@ a defect in this document, not an implementation freedom.
 | State | Meaning |
 |---|---|
 | `S0 raw` | TCP accepted, nothing read. Global IP allowlist already passed at accept. |
-| `S1 tls` | TLS established (`verify-full` contract server-side; client cert not required v1). |
+| `S1 tls` | TLS established. `verify-full` is the CLIENT's DSN contract (ADR-0075 MF4): the server's obligation is presenting certificate identity that verification succeeds against — hostname SAN, valid chain, in-validity. Client certificates are not required in v1. |
 | `S2 startup` | `StartupMessage` received, not yet authenticated. |
 | `S3 auth` | Password exchange in progress (PAT over TLS). |
 | `S4 ready-I` | Authenticated; ExecSession open; idle, no transaction (`ReadyForQuery('I')`). |
@@ -119,7 +124,7 @@ exists).
 |---|---|---|---|---|---|---|
 | 2.1 | `SSLRequest` | S0 | **Required.** Answer `S`, begin TLS. A second `SSLRequest` after TLS = protocol violation → close. | pre-auth cap 64 KiB | `fd.conn_open` | plaintext `StartupMessage` at S0 → uniform denial, close (no fallback) |
 | 2.1a | Direct TLS (PG 17 `sslnegotiation=direct`: first bytes are a TLS ClientHello, ALPN `postgresql`) | S0 | **Refused in v1**: bytes that are neither a length-prefixed request nor within the pre-auth cap → close immediately (audited `fd.tls_fail(direct-tls-unsupported)`). Candidate for a later rev; clients fall back to `SSLRequest` negotiation per libpq defaults. | pre-auth cap | `fd.tls_fail` | — |
-| 2.1b | TLS layer behavior | S0→S1 | Server cert/key from config; **reload on config-reload applies to NEW connections only** (established sessions keep their session keys — never dropped by a cert rotation). TLS handshake failure: `fd.tls_fail(reason)` audited, close, **counted against the per-source-IP auth rate** (10/min) so handshake grinding is throttled with auth grinding. | — | `fd.tls_ok` / `fd.tls_fail` | — |
+| 2.1b | TLS layer behavior | S0→S1 | Server cert/key from config, **validated at startup BEFORE bind/listen** (ADR-0075: absent, unparsable, expired/not-yet-valid material, a broken chain, or a key/cert mismatch **fails start or enable** — the front door never listens with identity it cannot prove; SAN coverage of the configured host names is checked and a mismatch fails start too). **Reload on config-reload applies to NEW connections only** (established sessions keep their session keys — never dropped by a cert rotation); a reload with invalid material is REFUSED, keeping the last-good identity, loudly audited. TLS handshake failure: `fd.tls_fail(reason)` audited, close, **counted against the per-source-IP auth rate** (10/min) so handshake grinding is throttled with auth grinding. | — | `fd.tls_ok` / `fd.tls_fail` | — |
 | 2.2 | `GSSENCRequest` | S0 | **Refused**: answer `N`; if the client then proceeds without TLS → uniform denial + close. | pre-auth cap | — | — |
 | 2.3 | `CancelRequest` | S0 | Accepted **without TLS** (protocol-conformant: cancel connections are plaintext); processed per §6; connection closed immediately after. | control lane | `fd.cancel_received` | stale/unknown key = silent no-op (`fd.cancel_stale`), close |
 | 2.4 | `StartupMessage` (protocol 3.0) | S1 | Parse parameters per §3. Any refused parameter → uniform denial. | pre-auth cap | — | uniform denial (28000), close |
@@ -229,8 +234,8 @@ PostgreSQL's own:
 | `ErrorResponse` (target) | Forwarded with raw `*pgconn.PgError` fields verbatim. | Never rewritten. |
 | `ErrorResponse` (gate/front door) | Synthesized per §1.2 (§8a identity). | Distinguishable via `DETAIL` rule id. |
 | `ReadyForQuery` | **Synthesized** from the ExecSession state machine (§6). Never emitted on `ErrTxOutcomeUnknown` (§6.3). | |
-| `AuthenticationCleartextPassword`, `AuthenticationOk`, `BackendKeyData`, `ParameterStatus` (session-open set §3.3), `NegotiateProtocolVersion` (never in v1) | Synthesized at startup. | `BackendKeyData` keys CSPRNG (MF7). |
-| `CopyInResponse`/`CopyOutResponse`/`CopyBothResponse` | **Never emitted** — COPY refused pre-target. | Also asserted by conformance tests: seeing one from the target = defect (classifier bypass), fatal + audited. |
+| `AuthenticationCleartextPassword`, `AuthenticationOk`, `BackendKeyData`, `ParameterStatus` (session-open set §3.3), `NegotiateProtocolVersion` (emitted per row 2.5 for major-3 minors and unrecognized `_pq_.*` options, then the session continues at 3.0) | Synthesized at startup. | `BackendKeyData` keys CSPRNG (MF7). |
+| `CopyInResponse`/`CopyOutResponse`/`CopyBothResponse`, backend-direction `CopyData`/`CopyDone`, `NotificationResponse` (LISTEN refused), `FunctionCallResponse` (fast-path refused) | **Never emitted** — their triggers are all refused pre-target. | Asserted by conformance canaries: any of these arriving from the target = defect (classifier bypass), fatal + audited. |
 
 ---
 
@@ -281,8 +286,9 @@ All with §8a shape; connection remains usable unless marked fatal.
 | `DECLARE`/`FETCH`/`MOVE` cursors | `0A000` | `gate/no-sql-cursors` | Use extended-protocol portals (`maxRows`) instead. |
 | SQL-text `PREPARE`/`EXECUTE`/`DEALLOCATE` | `0A000` | `gate/no-sql-prepare` | Use wire-level prepared statements (extended protocol). |
 | `FunctionCall` message | `0A000` | `frontdoor/no-fastpath` | Use a SELECT. |
-| GUC-setting startup `options` / unknown startup params / `replication` / `_pq_.*` | uniform startup denial (`28000`) | (audit-only pre-auth) | — |
-| Non-3.0 protocol version | uniform startup denial | (audit-only) | — |
+| Major-3 minor > 0 and/or unrecognized `_pq_.*` options | **not a refusal**: `NegotiateProtocolVersion` (newest supported 3.0 + declined option names), session continues (row 2.5) | — | — |
+| Unsupported protocol MAJOR (≠ 3) | uniform startup denial (`28000`), close | (audit-only) | — |
+| GUC-setting startup `options` / ordinary unknown startup params / `replication` | uniform startup denial (`28000`) | (audit-only pre-auth) | — |
 | `SET`-class statements post-auth | per ADR-0074 gate matrix (profile/role-gated; grammar GUCs always refused) | `gate/set-…` ids from 0074 §8a | — |
 | Retained-state quota (configured 16 MiB/session or reservation failure) | `53400` (`configuration_limit_exceeded`, ruling 4) | `frontdoor/retained-budget` | Close unused prepared statements/portals, or raise the quota. Action: refuse statement; connection stays. |
 | Global memory budget: input/output charge | backpressure, never an error (reads pause, audited) | `frontdoor/budget-backpressure` | — |
@@ -361,7 +367,7 @@ is ~29 GiB — shape limits are NOT the bound).
 | Global budget 1 GiB / 4 GiB (+ control lane §1.4) | §8 |
 | Pre-auth conns 64 / auth workers 16 | accept + §2 |
 | Auth attempts 3/conn, 10/min/IP | §2 row 2.7 |
-| `reserved_headroom` 4; `frontdoor_max_leases` derived ≥ 1 | lease acquisition (§2 row 2.9) |
+| `reserved_headroom` 4; `frontdoor_max_leases` derived ≥ 1 | the row-2.7 atomic reservation (row 2.9 acquires nothing; any later target checkout is NOT admission control and can neither race nor emit `fd.auth_ok` before capacity is held) |
 
 ---
 
@@ -378,7 +384,9 @@ is ~29 GiB — shape limits are NOT the bound).
   (header-first property: no read past a refused header).
 - Uniform-denial timing test (startup denials indistinguishable across
   causes — measured, not asserted).
-- CopyInResponse-from-target canary (§5): classifier bypass detector.
+- Never-emitted backend canaries (§5): CopyIn/CopyOut/CopyBothResponse,
+  backend CopyData/CopyDone, NotificationResponse, FunctionCallResponse —
+  classifier-bypass detectors, each individually asserted.
 
 ## 11. Rulings on record (lector r0, 2026-08-31)
 
@@ -396,9 +404,8 @@ folded above and recorded here as binding:
    caps; startup lease-cap stays externally uniform `28000` with the
    internal stable `lease-cap-exceeded` audit identity** (§7).
 
-Remaining open item for r1:
-
-1. §2 row 2.1a: direct-TLS (PG 17 `sslnegotiation=direct`) is refused in
-   v1 with an audited close — confirm this posture (libpq falls back by
-   default; a client pinned to `direct` cannot connect until a later rev
-   adds ALPN support).
+Direct-TLS posture — RULED at r1 (lector, accepted): v1 refuses PG 17
+`sslnegotiation=direct`/ALPN with an audited close and supports only
+`SSLRequest` negotiation; default libpq clients are unaffected, clients
+pinned to `direct` cannot connect until a later rev adds ALPN. No open
+items remain.
