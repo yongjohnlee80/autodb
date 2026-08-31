@@ -3,8 +3,11 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/yongjohnlee80/golib/dao"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -179,5 +182,77 @@ func TestStartOutcomeRetention_DisabledByDefault(t *testing.T) {
 				"assertion above proves nothing")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// PR #22 r0 MF1: an eligible progression BEHIND a page of tombstones.
+//
+// A collapsed tombstone still satisfies created_at < cutoff and is skipped as
+// having nothing to prune, so a page full of them is a page on which no
+// progress is made. With a fixed first page the scan never reaches anything
+// behind them and eligible progressions are starved PERMANENTLY, not delayed.
+//
+// This is the third consumer in one arc to have this shape — the reconciler
+// and the history repair sweep both had it (PR #20 r2/r3) — so the cell is
+// written the way those two are: fill the first page, put the work behind it.
+func TestRetention_ReachesAnEligibleTxBehindAPageOfTombstones(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A full page of ALREADY-COLLAPSED tombstones, all older than the cutoff.
+	for i := 0; i < maxReconcileBatch; i++ {
+		id := fmt.Sprintf("tx_tomb_%03d", i)
+		if _, err := f.store.TxOutcomes.OnCtx(ctx).
+			Set(meta.TxOutTxID, id).Set(meta.TxOutSeq, int64(1)).
+			Set(meta.TxOutState, string(meta.TxCommitted)).Set(meta.TxOutReason, "").
+			Set(meta.TxOutUserID, int64(1)).Set(meta.TxOutConnID, f.connID).
+			Set(meta.TxOutHistoryID, int64(0)).Set(meta.TxOutTargetXID, "").
+			Set(meta.TxOutCreatedAt, int64(10)).Set(meta.TxOutCollapsedAt, int64(11)).
+			Insert(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The eligible one, inserted last so it sits behind all of them.
+	seedTx(t, f, "tx_behind", 1, f.connID, meta.TxOpened, meta.TxCommitted)
+
+	n, err := f.eng.CollapseSettledOutcomes(ctx, time.Unix(9999, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("collapsed %d, want 1 — the scan never got past a page of tombstones, "+
+			"so a transaction behind them is starved permanently rather than delayed", n)
+	}
+	if got := len(txLog(t, f, "tx_behind")); got != 1 {
+		t.Fatalf("tx_behind still has %d rows; it was never reached", got)
+	}
+}
+
+// A tombstone is excluded at the QUERY, not skipped in the loop. Otherwise it
+// consumes page budget forever for work that will never be done.
+func TestRetention_TombstonesDoNotConsumePageBudget(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		if _, err := f.store.TxOutcomes.OnCtx(ctx).
+			Set(meta.TxOutTxID, fmt.Sprintf("tx_done_%d", i)).Set(meta.TxOutSeq, int64(1)).
+			Set(meta.TxOutState, string(meta.TxCommitted)).Set(meta.TxOutReason, "").
+			Set(meta.TxOutUserID, int64(1)).Set(meta.TxOutConnID, f.connID).
+			Set(meta.TxOutHistoryID, int64(0)).Set(meta.TxOutTargetXID, "").
+			Set(meta.TxOutCreatedAt, int64(10)).Set(meta.TxOutCollapsedAt, int64(11)).
+			Insert(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := f.store.TxOutcomes.OnCtx(ctx).
+		WithPredicate(dao.Eq(string(meta.TxOutCollapsedAt), int64(0))).Select()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("the un-collapsed predicate matched %d tombstones", len(rows))
 	}
 }

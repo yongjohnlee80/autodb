@@ -134,3 +134,67 @@ func lastIndexByte(s string, b byte) int {
 	}
 	return -1
 }
+
+// PR #22 r0 MF2: a fresh open must work when the meta DSN allows ONE
+// connection.
+//
+// The advisory lock is held on a pinned transaction. If the migrations then
+// ran through the POOL they would need a SECOND connection, and with
+// pool_max_conns=1 that deadlocks: the lock holds the only connection and the
+// DDL waits for one that will never come free. Observed before the fix as
+// "meta: creating schema_migrations: context deadline exceeded".
+//
+// Running the DDL on the pinned transaction removes the hidden
+// second-connection requirement entirely, which is why this passes rather
+// than the pool minimum being documented.
+func TestMigrations_FreshOpenWithASingleConnectionPool(t *testing.T) {
+	base := os.Getenv("TEST_PGURL")
+	if base == "" {
+		t.Skip("TEST_PGURL not set")
+	}
+	ctx := context.Background()
+
+	admin, err := Open(ctx, config.Meta{Engine: "postgres", DSN: base})
+	if err != nil {
+		t.Fatalf("control connection: %v", err)
+	}
+	defer admin.Close()
+
+	name := fmt.Sprintf("autodb_one_%d", time.Now().UnixNano())
+	if _, err := admin.Conn().ExecContext(ctx, "CREATE DATABASE "+name); err != nil {
+		t.Skipf("cannot create a scratch database (%v)", err)
+	}
+	t.Cleanup(func() {
+		dctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_, _ = admin.Conn().ExecContext(dctx, "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)")
+	})
+
+	dsn := swapDatabase(t, base, name)
+	if indexByte(dsn, '?') >= 0 {
+		dsn += "&pool_max_conns=1"
+	} else {
+		dsn += "?pool_max_conns=1"
+	}
+
+	// Bounded, so a regression fails as a timeout here rather than hanging
+	// the suite.
+	octx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
+	s, err := Open(octx, config.Meta{Engine: "postgres", DSN: dsn})
+	if err != nil {
+		t.Fatalf("opening a FRESH store through a single-connection pool: %v\n"+
+			"the migration lock holds the only connection and the DDL is waiting for "+
+			"a second one that will never come free", err)
+	}
+	defer s.Close()
+
+	v, err := currentVersion(ctx, s.Conn())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := int64(migrations[len(migrations)-1].Version); v != want {
+		t.Fatalf("schema version = %d, want %d — it opened without migrating", v, want)
+	}
+}

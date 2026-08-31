@@ -42,18 +42,60 @@ import (
 // rather than a rewrite.
 func (e *Engine) CollapseSettledOutcomes(ctx context.Context, before time.Time) (int, error) {
 	cutoff := before.Unix()
-	rows, err := e.store.TxOutcomes.OnCtx(ctx).
-		OrderBy(dao.Asc(meta.TxOutByID)).Limit(maxReconcileBatch * 4).
-		WithPredicate(dao.Lt(string(meta.TxOutCreatedAt), cutoff)).Select()
-	if err != nil {
-		return 0, fmt.Errorf("exec: reading the outcome log for retention: %w", err)
-	}
+	collapsed := 0
 
-	byTx := map[string][]*meta.TxOutcome{}
-	for _, r := range rows {
-		byTx[r.TxID] = append(byTx[r.TxID], r)
+	// Page with a cursor, and EXCLUDE rows that are already tombstones.
+	//
+	// Both halves are needed and the first alone is not enough (PR #22 r0
+	// MF1). A collapsed tombstone still satisfies created_at < cutoff, and
+	// it is skipped here as having nothing left to prune — so a page full of
+	// old tombstones is a page on which no progress is made, and with a
+	// fixed first page the scan never reaches anything behind them. Eligible
+	// progressions are then starved permanently, not merely delayed.
+	//
+	// This is the third time this shape has bitten me in one arc: the
+	// reconciler and the history repair sweep both had it (PR #20 r2/r3),
+	// and I reintroduced it in a new consumer. A bounded scan needs a
+	// position, and a predicate that matches rows it will never act on needs
+	// to exclude them at the query rather than skip them in the loop.
+	for cursor := int64(0); ; {
+		q := e.store.TxOutcomes.OnCtx(ctx).
+			OrderBy(dao.Asc(meta.TxOutByID)).
+			Limit(maxReconcileBatch).
+			WithPredicate(dao.Lt(string(meta.TxOutCreatedAt), cutoff)).
+			WithPredicate(dao.Eq(string(meta.TxOutCollapsedAt), int64(0)))
+		if cursor > 0 {
+			q = q.WithPredicate(dao.Gt(string(meta.TxOutID), cursor))
+		}
+		rows, err := q.Select()
+		if err != nil {
+			return collapsed, fmt.Errorf("exec: reading the outcome log for retention: %w", err)
+		}
+		if len(rows) == 0 {
+			return collapsed, nil
+		}
+		next := int64(0)
+		byTx := map[string][]*meta.TxOutcome{}
+		for _, r := range rows {
+			byTx[r.TxID] = append(byTx[r.TxID], r)
+			if r.ID > next {
+				next = r.ID
+			}
+		}
+		n, err := e.collapseGroups(ctx, byTx, cutoff)
+		collapsed += n
+		if err != nil {
+			return collapsed, err
+		}
+		if next <= cursor {
+			return collapsed, nil // no forward progress; stop rather than spin
+		}
+		cursor = next
 	}
+}
 
+// collapseGroups collapses whichever of these transactions are eligible.
+func (e *Engine) collapseGroups(ctx context.Context, byTx map[string][]*meta.TxOutcome, cutoff int64) (int, error) {
 	collapsed := 0
 	for txID, group := range byTx {
 		// Only SETTLED transactions. An unresolved one still needs its
