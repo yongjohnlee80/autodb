@@ -25,13 +25,20 @@ import (
 // helloing an old server must be REFUSED at the handshake, not surprised
 // by method-not-found (ADR-0057 §7). The server speaks exactly one
 // protocol version; there is no negotiation.
+// Protocol 5 added the ExecSession surface — exec.session_open,
+// exec.session_close, exec.session_run — and made exec.run_script atomic for
+// a script that contains a transaction boundary. The atomicity is why this is
+// a bump rather than an addition: a protocol-4 client sending
+// `BEGIN; …; COMMIT;` to run_script got independent statements, and the same
+// text now runs in one transaction. Same verb, different meaning, so the
+// handshake has to separate them.
 // Protocol 4 added exec.run_script (3 added history.list and sys.shutdown). BUMP THIS whenever the
 // verb surface changes: the handshake is what tells a NEWER frontend that
 // it is talking to an OLDER server (the shared server outlives frontends
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 4
+const Protocol int64 = 5
 
 // Session keys the gate and the hello handler share.
 const (

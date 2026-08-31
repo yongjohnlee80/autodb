@@ -128,7 +128,7 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 	}
 	stmt, cerr := Classify(sqlText, connRow.Engine == "mysql")
 	if cerr == nil && stmt.Class == ClassControl {
-		if err := e.profileFor(connRow).admit(stmt); err != nil {
+		if err := e.profileFor(connRow).admit(stmt, true); err != nil {
 			return nil, e.rejectSession(ctx, s, ident, ip, sqlText, err)
 		}
 		// Transaction control needs a grant to match what it enables: an

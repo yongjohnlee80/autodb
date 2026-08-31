@@ -273,7 +273,7 @@ func TestCorpusReplay(t *testing.T) {
 // the identity as well as the label, because "it was refused" and "it was
 // refused for the stated reason" are different claims.
 func gateDecision(st Statement) (string, error) {
-	if err := ProfileV1Compat.admit(st); err != nil {
+	if err := ProfileV1Compat.admit(st, true); err != nil {
 		if st.Class == ClassControl {
 			return "refused:control", err
 		}

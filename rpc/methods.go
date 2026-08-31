@@ -320,7 +320,13 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		out, xerr := s.eng.ExecuteScript(ctx, token, connID, sqlText, peerIP(req))
+		// The ATOMIC path (R5 gate). A script containing a transaction
+		// boundary runs inside one transaction on an ephemeral session; a
+		// script without one behaves exactly as it always has, statement by
+		// statement. This is the one call site — the editor surfaces (Lua,
+		// TUI, Web) all reach the engine through here, so making them
+		// atomic is not three changes.
+		out, xerr := s.eng.ExecuteScriptAtomic(ctx, token, connID, sqlText, peerIP(req))
 		if xerr != nil {
 			return nil, wireErr(xerr)
 		}
@@ -655,6 +661,81 @@ func (s *Server) register() {
 	})
 
 	// --- exec ---
+	// The ExecSession surface (ADR-0074 §3, R5). A session is the client's
+	// handle on a PINNED connection: it is what makes a transaction spanning
+	// several round trips possible at all, since the stateless path may put
+	// each statement on a different physical connection.
+	//
+	// The session id is opaque and engine-issued. It is deliberately NOT the
+	// auth token and NOT the TCP connection: a client may hold several, and
+	// one dying must not take the others with it.
+	s.rpc.Handle("exec.session_open", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		sid, oerr := s.eng.OpenSession(ctx, token, connID, peerIP(req))
+		if oerr != nil {
+			return nil, wireErr(oerr)
+		}
+		return map[string]any{"session_id": string(sid)}, nil
+	})
+
+	// Closing is not optional housekeeping: an open session holds a physical
+	// connection, and closing rolls back any transaction still open on it.
+	// A client that crashes without calling this is reaped by the engine's
+	// idle timeout — this verb is the polite path, not the only one.
+	s.rpc.Handle("exec.session_close", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		sid, err := argStr(req.Params, 1, "session_id")
+		if err != nil {
+			return nil, err
+		}
+		if cerr := s.eng.CloseSession(ctx, token, exec.SessionID(sid), peerIP(req)); cerr != nil {
+			return nil, wireErr(cerr)
+		}
+		return map[string]any{"closed": true}, nil
+	})
+
+	// Session-scoped run. The connection is the SESSION's — the caller does
+	// not pass one, and cannot redirect a session at another connection
+	// mid-transaction.
+	s.rpc.Handle("exec.session_run", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		sid, err := argStr(req.Params, 1, "session_id")
+		if err != nil {
+			return nil, err
+		}
+		sqlText, err := argStr(req.Params, 2, "sql")
+		if err != nil {
+			return nil, err
+		}
+		res, rerr := s.eng.SessionExecute(ctx, token, exec.SessionID(sid), sqlText, peerIP(req))
+		if rerr != nil {
+			return nil, wireErr(rerr)
+		}
+		return resultMap(res), nil
+	})
+
 	s.rpc.Handle("exec.run", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err

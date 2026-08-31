@@ -378,7 +378,7 @@ func TestEngine_SubqueryInsertIsRefusedByTheTarget(t *testing.T) {
 	if st.Class != ClassRead {
 		t.Fatalf("class = %s, want read", st.Class)
 	}
-	if err := ProfileV1Compat.admit(st); err != nil {
+	if err := ProfileV1Compat.admit(st, true); err != nil {
 		t.Fatalf("admit = %v, want nil", err)
 	}
 

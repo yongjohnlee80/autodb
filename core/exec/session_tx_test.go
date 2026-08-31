@@ -257,7 +257,7 @@ func TestProfileFor_ResolvesFromTheConnectionRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := bogus.admit(st); !errors.Is(err, ErrStatementUnsupported) {
+	if err := bogus.admit(st, true); !errors.Is(err, ErrStatementUnsupported) {
 		t.Errorf("admit under an unrecognized profile = %v, want a refusal", err)
 	}
 }

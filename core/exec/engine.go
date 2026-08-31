@@ -410,7 +410,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	// by here, refused at the read floor above, so a refusal message that
 	// names the verb cannot leak anything to someone who was not allowed to
 	// ask.
-	if err := e.profileFor(connRow).admit(stmt); err != nil {
+	if err := e.profileFor(connRow).admit(stmt, pinned != nil); err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
 	// Full authorization for the statement's actual class. A denial must
