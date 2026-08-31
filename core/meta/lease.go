@@ -333,10 +333,41 @@ func serverLeaseKey(ctx context.Context, tx dao.ContextTxConn) (int64, error) {
 	if err := rows.Scan(&sysID, &dbOID); err != nil {
 		return 0, fmt.Errorf("meta: reading the server's identity: %w", err)
 	}
+	return advisoryKey("autodb-instance-lease", sysID, dbOID), nil
+}
+
+// advisoryKey derives a positive advisory-lock key for one purpose on one
+// database.
+//
+// The purpose string is a NAMESPACE, and keeping the namespaces apart is
+// load-bearing: the instance lease and the migration lock must not collide, or
+// a running daemon would block every other process from even reading the
+// schema version, and a second daemon would hang on startup instead of failing
+// fast with ErrLeaseHeld.
+func advisoryKey(purpose string, sysID, dbOID int64) int64 {
 	h := fnv.New64a()
-	_, _ = h.Write([]byte("autodb-instance-lease\x00"))
+	_, _ = h.Write([]byte(purpose + "\x00"))
 	_, _ = fmt.Fprintf(h, "%d/%d", sysID, dbOID)
 	// Advisory keys are signed; masking the top bit keeps it positive so the
 	// number in a refusal matches what pg_locks shows.
-	return int64(h.Sum64() & 0x7fffffffffffffff), nil
+	return int64(h.Sum64() & 0x7fffffffffffffff)
+}
+
+// serverIdentity reads the cluster id and database oid — the pair that names a
+// DATABASE rather than the connection string that reached it.
+func serverIdentity(ctx context.Context, q dao.Querier) (sysID, dbOID int64, err error) {
+	rows, qerr := q.QueryContext(ctx,
+		`SELECT (SELECT system_identifier FROM pg_control_system()),
+		        (SELECT oid::bigint FROM pg_database WHERE datname = current_database())`)
+	if qerr != nil {
+		return 0, 0, qerr
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return 0, 0, fmt.Errorf("meta: the server reported no identity")
+	}
+	if serr := rows.Scan(&sysID, &dbOID); serr != nil {
+		return 0, 0, serr
+	}
+	return sysID, dbOID, nil
 }

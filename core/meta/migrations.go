@@ -310,7 +310,86 @@ var migrations = []migration{
 // runMigrations creates the ledger, checks the downgrade guard, and applies
 // pending versions in order — each version inside one driver transaction
 // (both engines support transactional DDL).
+// migrationLockWait bounds how long a starter waits for another process to
+// finish migrating.
+//
+// Bounded rather than indefinite: a migrator that has hung would otherwise
+// hang every other process behind it with no diagnosis. Generous, because a
+// legitimate migration on a large store can be slow and timing out on a
+// healthy one would be worse than waiting.
+const migrationLockWait = 2 * time.Minute
+
+// withMigrationLock serializes the migration runner across PROCESSES.
+//
+// Postgres has transactional DDL but nothing stopping two sessions from
+// creating the same object at once, so two starters against one database both
+// run the runner and the loser fails on a duplicate object — observed as
+// `duplicate key value violates unique constraint "pg_type_typname_nsp_index"`
+// on CREATE TABLE, and `column "profile" ... already exists` on ALTER.
+//
+// This is not only a test-harness problem, which is how it was found: `go test
+// ./...` runs packages in parallel against one TEST_PGURL database. Two autodb
+// daemons starting simultaneously against one postgres meta store race
+// identically, and the instance lease does not prevent it because migrations
+// run BEFORE the lease is taken (ADR-0079 §5).
+//
+// The lock BLOCKS rather than refusing: a second starter should wait for the
+// first to finish and then find nothing to apply, not fail. It is
+// transaction-scoped for the same reason the lease is — a session lock
+// outlives its transaction, so on a pooled connection it would leak with
+// nothing tracking it.
+//
+// sqlite needs none of this: a file store is single-writer, and each test uses
+// its own file or an in-memory database that no other process can see.
+func withMigrationLock(ctx context.Context, conn dao.DataConn, engine string, run func() error) error {
+	if engine != "postgres" {
+		return run()
+	}
+	sess, ok := conn.(dao.SessionTxBeginner)
+	if !ok {
+		return fmt.Errorf("meta: the postgres meta connection cannot pin a transaction " +
+			"(golib dao.SessionTxBeginner missing) — migrations cannot be serialized safely")
+	}
+	tx, err := sess.BeginSessionTx(context.WithoutCancel(ctx), dao.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("meta: pinning a connection for the migration lock: %w", err)
+	}
+	defer func() {
+		// Rolling back releases the transaction-scoped lock. There is
+		// nothing to commit — the lock transaction does no work of its own.
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_ = tx.RollbackContext(cctx)
+	}()
+
+	sysID, dbOID, err := serverIdentity(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("meta: reading the server identity for the migration lock: %w", err)
+	}
+	key := advisoryKey("autodb-migration", sysID, dbOID)
+
+	// A bounded wait, so a hung migrator fails its followers with a
+	// diagnosis instead of blocking them forever.
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("SET LOCAL lock_timeout = '%dms'",
+		migrationLockWait.Milliseconds())); err != nil {
+		return fmt.Errorf("meta: bounding the migration lock wait: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock($1)", key); err != nil {
+		return fmt.Errorf("meta: waiting for the migration lock (advisory key %d) — another "+
+			"process has been migrating this database for over %s: %w", key, migrationLockWait, err)
+	}
+	return run()
+}
+
 func runMigrations(ctx context.Context, conn dao.DataConn, engine string) error {
+	return withMigrationLock(ctx, conn, engine, func() error {
+		return applyMigrations(ctx, conn, engine)
+	})
+}
+
+// applyMigrations is the runner proper. It assumes the caller holds the
+// migration lock, which is why it is not exported and not called directly.
+func applyMigrations(ctx context.Context, conn dao.DataConn, engine string) error {
 	const ledger = `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
 		applied_at BIGINT NOT NULL)`
