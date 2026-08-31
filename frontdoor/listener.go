@@ -140,7 +140,17 @@ func (l *Listener) handle(raw net.Conn) {
 		l.onEvent(Event{Kind: "fd.cancel_received", Peer: peer})
 		return
 	case err != nil:
-		l.onEvent(Event{Kind: "fd.tls_fail", Reason: err.Error(), Peer: peer})
+		// A TLS-phase failure closes WITHOUT a denial frame. A peer speaking
+		// raw TLS cannot read a PostgreSQL error, so writing one is noise on
+		// the wire — and the event is fd.tls_fail, not fd.auth_denied,
+		// because no credential was ever presented and the auth trail is
+		// what an operator counts credential attacks in.
+		var tf tlsFailErr
+		reason := err.Error()
+		if errors.As(err, &tf) {
+			reason = tf.reason
+		}
+		l.onEvent(Event{Kind: "fd.tls_fail", Reason: reason, Peer: peer})
 		return
 	}
 	if secure != nil {

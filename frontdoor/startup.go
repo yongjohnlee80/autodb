@@ -55,6 +55,11 @@ type startupOutcome struct {
 	// Negotiated records that a NegotiateProtocolVersion was sent — the
 	// client asked for a 3.x we do not implement and continues at 3.0.
 	Negotiated bool
+	// RefusedParam names the startup parameter that failed §3.1, for the
+	// audit row only. The wire gets the uniform denial: telling a caller
+	// WHICH parameter this server dislikes would map the accepted set for
+	// anyone willing to ask repeatedly.
+	RefusedParam string
 }
 
 // errCancelRequest reports a CancelRequest, which is not a session at all:
@@ -75,44 +80,69 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 	plain := pgproto3.NewBackend(raw, raw)
 	plain.SetMaxBodyLen(PreAuthMaxBodyLen)
 
-	if err := raw.SetDeadline(now().Add(TLSHandshakeDeadline)); err != nil {
-		return nil, startupOutcome{}, err
-	}
-	first, err := plain.ReceiveStartupMessage()
-	if err != nil {
-		// A frame we cannot even parse is not a client we can talk to. This
-		// includes PostgreSQL 17's direct-TLS negotiation (matrix row 2.1a),
-		// whose first bytes are a TLS ClientHello rather than a
-		// length-prefixed request — refused in v1 so there is ONE
-		// negotiation path to test.
-		return nil, startupOutcome{Denied: reasonDirectTLS}, nil
-	}
+	// S0 is a LOOP, not a single read.
+	//
+	// It has to be: matrix row 2.2 refuses GSS encryption with 'N' and then
+	// lets the client carry on — 'N' is the protocol's own way of declining
+	// an option, and libpq's next move after it is to ask for TLS. Answering
+	// 'N' and closing turned a declined option into a dead connection, so a
+	// client that asked for GSS first could never reach TLS at all. My own
+	// test prose claimed 'N' let the client proceed while the code hung up
+	// on it.
+	//
+	// Bounded by the same deadline and the same pre-auth cap on every pass,
+	// so the loop cannot become a way to hold a socket open for free.
+	var sawGSS bool
+	for {
+		if err := raw.SetDeadline(now().Add(TLSHandshakeDeadline)); err != nil {
+			return nil, startupOutcome{}, err
+		}
+		first, err := plain.ReceiveStartupMessage()
+		if err != nil {
+			// Row 2.1a: PostgreSQL 17's direct-TLS negotiation opens with a
+			// TLS ClientHello rather than a length-prefixed request, so it
+			// arrives here as a parse failure. It is refused in v1 to keep
+			// ONE negotiation path under test.
+			//
+			// It is a TLS failure, not an authentication denial, and the
+			// difference is not cosmetic: the peer never presented a
+			// credential, so calling it fd.auth_denied puts a
+			// non-authentication event in the trail an operator reads to
+			// count credential attacks. It also means no denial FRAME is
+			// written — a client speaking TLS cannot read a PostgreSQL
+			// error, so sending one is noise on the wire and a lie in the log.
+			return nil, startupOutcome{}, tlsFailure(directTLSReason(err))
+		}
 
-	switch msg := first.(type) {
-	case *pgproto3.SSLRequest:
-		// Row 2.1: answer 'S' and begin TLS.
-		if _, werr := raw.Write([]byte{'S'}); werr != nil {
-			return nil, startupOutcome{}, werr
+		switch msg := first.(type) {
+		case *pgproto3.SSLRequest:
+			// Row 2.1: answer 'S' and begin TLS.
+			if _, werr := raw.Write([]byte{'S'}); werr != nil {
+				return nil, startupOutcome{}, werr
+			}
+		case *pgproto3.GSSEncRequest:
+			// Row 2.2: decline with 'N' and KEEP READING. A second
+			// GSSENCRequest is a client going in circles; refuse that.
+			if sawGSS {
+				return nil, startupOutcome{Denied: reasonStartupMalformed}, nil
+			}
+			sawGSS = true
+			if _, werr := raw.Write([]byte{'N'}); werr != nil {
+				return nil, startupOutcome{}, werr
+			}
+			continue
+		case *pgproto3.CancelRequest:
+			// Row 2.3: cancel connections are plaintext by protocol.
+			return nil, startupOutcome{}, errCancelRequest
+		case *pgproto3.StartupMessage:
+			// Row 2.1 error path: a plaintext StartupMessage. No fallback —
+			// this surface has no unencrypted mode to fall back to.
+			_ = msg
+			return nil, startupOutcome{Denied: reasonPlaintextStartup}, nil
+		default:
+			return nil, startupOutcome{Denied: reasonStartupMalformed}, nil
 		}
-	case *pgproto3.GSSEncRequest:
-		// Row 2.2: refuse GSS encryption with 'N'. A client that then
-		// proceeds in plaintext meets the same refusal as any other
-		// plaintext startup below.
-		if _, werr := raw.Write([]byte{'N'}); werr != nil {
-			return nil, startupOutcome{}, werr
-		}
-		return nil, startupOutcome{Denied: reasonPlaintextStartup}, nil
-	case *pgproto3.CancelRequest:
-		// Row 2.3: cancel connections are plaintext by protocol. Answered
-		// and closed; the cancel machinery itself is §6, a later slice.
-		return nil, startupOutcome{}, errCancelRequest
-	case *pgproto3.StartupMessage:
-		// Row 2.1 error path: a plaintext StartupMessage at S0. No
-		// fallback — this surface has no unencrypted mode to fall back to.
-		_ = msg
-		return nil, startupOutcome{Denied: reasonPlaintextStartup}, nil
-	default:
-		return nil, startupOutcome{Denied: reasonStartupMalformed}, nil
+		break
 	}
 
 	// TLS, on its own deadline.
@@ -176,6 +206,16 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 	var sm pgproto3.StartupMessage
 	if derr := sm.Decode(raw2); derr != nil {
 		return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
+	}
+	// §3.1: the accepted set is CLOSED, and it is checked HERE — before the
+	// connection can fall through to any later denial. The first version
+	// decoded the parameters and returned them unvalidated, so a startup
+	// carrying `search_path` was denied for want of a credential store
+	// rather than for the parameter, and reasonStartupParamRefus sat unused
+	// in the source — a dead constant is a policy nobody is applying.
+	if refused, ok := checkStartupParams(sm.Parameters); !ok {
+		_ = refused // named in the audit by the caller; never on the wire
+		return secure, startupOutcome{Denied: reasonStartupParamRefus, RefusedParam: refused}, nil
 	}
 	out := startupOutcome{Params: sm.Parameters}
 
@@ -264,3 +304,39 @@ func sendDenial(w interface {
 type emptyReader struct{}
 
 func (emptyReader) Read([]byte) (int, error) { return 0, errors.New("frontdoor: no reader") }
+
+// tlsFailure marks an S0 failure that is NOT an authentication event.
+//
+// The peer never presented a credential, so recording it as fd.auth_denied
+// would put a non-authentication event in the trail an operator reads to
+// count credential attacks — and no denial frame is written either, because a
+// client speaking raw TLS cannot read a PostgreSQL error message.
+type tlsFailErr struct{ reason string }
+
+func (e tlsFailErr) Error() string { return "frontdoor: " + e.reason }
+
+func tlsFailure(reason string) error { return tlsFailErr{reason: reason} }
+
+// directTLSReason distinguishes the S0 parse failures, which the first
+// version collapsed into "this must be direct TLS".
+//
+// That conflation was wrong in both directions: a malformed frame and an
+// oversize one were both audited as direct-TLS-unsupported, which sends an
+// operator looking for a PostgreSQL 17 client that may not exist, and a real
+// direct-TLS attempt was indistinguishable from line noise. pgproto3 reports
+// the length problem separately from the code problem, so the distinction is
+// available and only had to be kept.
+func directTLSReason(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "invalid length"):
+		// A TLS ClientHello's first bytes read as an implausible length,
+		// which is the ordinary signature of direct TLS reaching a listener
+		// that does not offer it.
+		return "direct-tls-unsupported"
+	case strings.Contains(msg, "unknown startup message code"):
+		return "startup-code-unknown"
+	default:
+		return "startup-unreadable"
+	}
+}
