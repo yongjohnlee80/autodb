@@ -337,6 +337,22 @@ func seedEverything(t *testing.T, s *Store) {
 		Set(UIPCreatedAt, int64(25)).Insert(); err != nil {
 		t.Fatal(err)
 	}
+	// A PAT with every column NON-DEFAULT, so the column-by-column compare
+	// has something to fail on. Seeding a row that is mostly zeroes would
+	// let a copier that drops a column pass by accident — the destination's
+	// default would match the source's unset value.
+	if _, err := s.PATs.OnCtx(ctx).
+		Set(PATSelector, "sel-abc123").
+		Set(PATSecretHash, []byte{0xde, 0xad, 0xbe, 0xef}).
+		Set(PATUserID, rootID).
+		Set(PATName, "seeded-laptop").
+		Set(PATAllowedIPs, "10.0.0.0/8,192.168.0.0/16").
+		Set(PATCreatedAt, int64(31)).
+		Set(PATExpiresAt, int64(9_000_000)).
+		Set(PATLastUsedAt, int64(42)).
+		Set(PATRevoked, int64(1)).Insert(); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.SetMeta(ctx, "install_id", "src-install"); err != nil {
 		t.Fatal(err)
 	}

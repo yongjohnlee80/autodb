@@ -149,6 +149,24 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					UIPLabel: r.Label, UIPCreatedAt: r.CreatedAt}
 			})
 		}},
+		// PATs (ADR-0075 §4). After users, which they reference.
+		//
+		// EVERY column, not the ones that come to mind: the guard that
+		// caught this table's absence was written because a dropped COLUMN
+		// is invisible to a check that compares row counts. secret_hash and
+		// selector are the two that matter most — a migration that carried
+		// the rows and lost the digests would leave every token silently
+		// unusable, with the count still matching.
+		{"pats", func() (int64, error) {
+			return copyAll(ctx, src.PATs, dst.PATs, func(r *PAT) map[PATField]any {
+				return map[PATField]any{
+					PATID: r.ID, PATSelector: r.Selector, PATSecretHash: r.SecretHash,
+					PATUserID: r.UserID, PATName: r.Name, PATAllowedIPs: r.AllowedIPs,
+					PATCreatedAt: r.CreatedAt, PATExpiresAt: r.ExpiresAt,
+					PATLastUsedAt: r.LastUsedAt, PATRevoked: r.Revoked,
+				}
+			})
+		}},
 		{"store_meta", func() (int64, error) {
 			return copyAll(ctx, src.KV, dst.KV, func(r *MetaKV) map[MetaKVField]any {
 				return map[MetaKVField]any{KVKey: r.Key, KVValue: r.Value}
@@ -240,6 +258,7 @@ func countableTables(ctx context.Context, s *Store) []countableTable {
 		{"tx_pending", s.TxPending.OnCtx(ctx).Count},
 		{"ip_allowlist", s.AllowedIPs.OnCtx(ctx).Count},
 		{"user_ip_allowlist", s.UserIPs.OnCtx(ctx).Count},
+		{"pats", s.PATs.OnCtx(ctx).Count},
 		{"store_meta", s.KV.OnCtx(ctx).Count},
 	}
 }
@@ -283,7 +302,7 @@ func verifyCounts(ctx context.Context, dst *Store, want map[string]int64) error 
 var serialTables = []string{
 	"users", "connections", "workspaces", "workspace_connections",
 	"grants", "sessions", "script_history", "audit_log", "tx_outcomes",
-	"tx_pending", "ip_allowlist", "user_ip_allowlist",
+	"tx_pending", "ip_allowlist", "user_ip_allowlist", "pats",
 }
 
 // fixSequences advances each table's id sequence: setval(max, is_called) so
