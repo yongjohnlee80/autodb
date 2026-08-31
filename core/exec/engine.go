@@ -333,7 +333,7 @@ func classToAction(c Class) auth.Action {
 // classify → authorize → guard → run → record. Reads return a page of rows
 // (Result.More reports truncation); writes/DDL return Result.Affected.
 func (e *Engine) Execute(ctx context.Context, token string, connID int64, sqlText, ip string) (*Result, error) {
-	return e.run(ctx, token, connID, sqlText, ip, nil, nil)
+	return e.run(ctx, token, connID, sqlText, ip, nil, nil, "")
 }
 
 // ExecuteStream runs a read statement, invoking onRow for every row instead
@@ -342,7 +342,7 @@ func (e *Engine) ExecuteStream(ctx context.Context, token string, connID int64, 
 	if onRow == nil {
 		return nil, errors.New("exec: ExecuteStream requires an onRow callback")
 	}
-	return e.run(ctx, token, connID, sqlText, ip, onRow, nil)
+	return e.run(ctx, token, connID, sqlText, ip, onRow, nil, "")
 }
 
 // run is the one execution pipeline. pinned is the session's transaction when
@@ -350,7 +350,7 @@ func (e *Engine) ExecuteStream(ctx context.Context, token string, connID int64, 
 // where the statement lands. Classification, admission, authorization, the
 // guard and the audit are identical either way, because a session changes
 // where a statement runs and never whether it is allowed to.
-func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, ip string, onRow func([]any) error, pinned dao.TxConn) (*Result, error) {
+func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, ip string, onRow func([]any) error, pinned dao.TxConn, txID string) (*Result, error) {
 	// Provenance first: an invalid token gets no classification, no
 	// existence information, and a user-0 audit trail.
 	ident, err := e.auth.ValidateToken(ctx, token)
@@ -425,7 +425,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	// Durable attempt record BEFORE the target runs: a crash, timeout, or
 	// cancellation mid-statement must still leave evidence that this user
 	// ran this script (lector M4 must-fix #4).
-	attemptID, err := e.recordAttempt(ctx, ident, connRow.ID, ip, sqlText)
+	attemptID, err := e.recordAttempt(ctx, ident, connRow.ID, ip, sqlText, txID)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +457,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	// surfaced but never erases the durable attempt audit.
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	if err := e.recordOutcome(recCtx, ident, connRow.ID, ip, attemptID, res.Duration, rowCount, runErr); err != nil {
+	if err := e.recordOutcome(recCtx, ident, connRow.ID, ip, attemptID, res.Duration, rowCount, runErr, txID); err != nil {
 		return nil, err
 	}
 	if runErr != nil {
@@ -477,12 +477,12 @@ func (e *Engine) reject(ctx context.Context, ident auth.Identity, connID int64, 
 
 // recordAttempt writes the pre-execution audit row and, when history is on,
 // the pending history row; it returns that row's id (0 when history is off).
-func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string) (int64, error) {
+func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText, txID string) (int64, error) {
 	script := truncate(sqlText, maxAuditSQLBytes)
 	var histID int64
 	err := dao.RunTx(ctx, func(tx *dao.Transaction) error {
-		if err := e.auth.AuditTx(tx, ident.UserID(), ip, "exec",
-			fmt.Sprintf("conn %d: %s", connID, script)); err != nil {
+		if err := e.auth.AuditTxCorrelated(tx, ident.UserID(), ip, "exec",
+			fmt.Sprintf("conn %d: %s", connID, script), txID); err != nil {
 			return err
 		}
 		if !e.history {
@@ -494,7 +494,8 @@ func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID 
 			Set(meta.HistIP, ip).Set(meta.HistScript, script).
 			Set(meta.HistStartedAt, e.now().Unix()).
 			Set(meta.HistDurationMS, int64(0)).Set(meta.HistRowCount, int64(0)).
-			Set(meta.HistStatus, "running").Set(meta.HistError, "").
+			Set(meta.HistStatus, StatusRunning).Set(meta.HistError, "").
+			Set(meta.HistTxID, txID).
 			Insert()
 		if terr != nil {
 			return fmt.Errorf("exec: recording attempt: %w", terr)
@@ -504,17 +505,27 @@ func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID 
 	return histID, err
 }
 
-// recordOutcome appends the result audit row and completes the pending
-// history row.
-func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, runErr error) error {
-	status, errText := "ok", ""
-	if runErr != nil {
-		status, errText = "error", truncate(runErr.Error(), maxErrorBytes)
+// recordOutcome appends the result audit row and advances the pending history
+// row to what is KNOWN now.
+//
+// The old version wrote `status = "ok"` for every statement that did not
+// error. Inside a transaction that is a claim the engine cannot support: the
+// statement ran, but whether its effect survives is decided later, by the
+// COMMIT, and possibly by a different process after a crash. It is
+// ok-pending-commit until the boundary says otherwise (ADR-0074 §7), and the
+// transaction's terminal is what resolves it — see resolveHistory.
+func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, runErr error, txID string) error {
+	status, errText := StatusOK, ""
+	switch {
+	case runErr != nil:
+		status, errText = StatusError, truncate(runErr.Error(), maxErrorBytes)
+	case txID != "":
+		status = StatusPendingCommit
 	}
 	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
-		if err := e.auth.AuditTx(tx, ident.UserID(), ip, "exec_result",
+		if err := e.auth.AuditTxCorrelated(tx, ident.UserID(), ip, "exec_result",
 			fmt.Sprintf("conn %d (%s, %d row(s), %dms)%s", connID, status, rows, dur.Milliseconds(),
-				errSuffix(errText))); err != nil {
+				errSuffix(errText)), txID); err != nil {
 			return err
 		}
 		if !e.history || histID == 0 {

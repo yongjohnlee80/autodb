@@ -172,9 +172,19 @@ func (s *Service) lockGuardRow(tx *dao.Transaction) error {
 
 // AuditTx appends one audit row inside tx (atomic with its mutation).
 func (s *Service) AuditTx(tx *dao.Transaction, userID int64, ip, action, detail string) error {
+	return s.AuditTxCorrelated(tx, userID, ip, action, detail, "")
+}
+
+// AuditTxCorrelated is AuditTx with a transaction id attached.
+//
+// The id is a COLUMN rather than something embedded in detail, so the trail
+// can be read per-transaction with a query instead of by parsing prose. Empty
+// for everything that happens outside a transaction, which is most of it.
+func (s *Service) AuditTxCorrelated(tx *dao.Transaction, userID int64, ip, action, detail, txID string) error {
 	_, err := s.store.Audit.On(tx).
 		Set(meta.AuditUserID, userID).Set(meta.AuditIP, ip).
 		Set(meta.AuditAction, action).Set(meta.AuditDetail, detail).
+		Set(meta.AuditTxID, txID).
 		Set(meta.AuditCreatedAt, s.now().Unix()).
 		Insert()
 	if err != nil {
@@ -187,8 +197,13 @@ func (s *Service) AuditTx(tx *dao.Transaction, userID int64, ip, action, detail 
 // failed logins, rejected executions). Callers with a mutation in flight
 // must use the transactional path instead.
 func (s *Service) Audit(ctx context.Context, userID int64, ip, action, detail string) error {
+	return s.AuditCorrelated(ctx, userID, ip, action, detail, "")
+}
+
+// AuditCorrelated is Audit with a transaction id attached.
+func (s *Service) AuditCorrelated(ctx context.Context, userID int64, ip, action, detail, txID string) error {
 	return s.inTx(ctx, func(tx *dao.Transaction) error {
-		return s.AuditTx(tx, userID, ip, action, detail)
+		return s.AuditTxCorrelated(tx, userID, ip, action, detail, txID)
 	})
 }
 

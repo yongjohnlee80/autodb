@@ -106,6 +106,14 @@ func (e *Engine) appendTxOutcome(ctx context.Context, t txTransition) error {
 			Insert()
 		switch {
 		case err == nil:
+			// A settled transaction settles its statements. Done here rather
+			// than at each call site so that EVERY resolver projects — the
+			// boundary handler, the timeout sweep, the janitor and the
+			// reconciler all reach this line, and one that forgot would
+			// leave rows stuck at ok_pending_commit forever.
+			if terminal {
+				e.resolveHistory(ctx, t.txID, t.state)
+			}
 			return nil
 		case !errors.Is(err, dao.ErrDuplicate):
 			return fmt.Errorf("exec: appending %s for %s: %w", t.state, t.txID, err)
