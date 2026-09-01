@@ -64,9 +64,17 @@ fakebin() { # $1=name  $2=exit code
   mkdir -p "$work/fake"
   printf '#!/bin/sh\nexit %s\n' "$2" > "$work/fake/$1"; chmod +x "$work/fake/$1"
 }
-old_binary() { # $1=prefix
+old_binary() { # $1=prefix -- plainly different version
   mkdir -p "$1"
   printf '#!/bin/sh\necho "autodb v0.0.1-OLD"\n' > "$1/autodb"; chmod +x "$1/autodb"
+}
+stale_superset() { # $1=prefix -- version CONTAINS the requested one
+  # The nastier stale binary: "vX-old" contains "vX", so a substring test
+  # accepts it. Release-shaped equivalent: a leftover v0.3.0-rc1 satisfying a
+  # request for v0.3.0.
+  mkdir -p "$1"
+  printf '#!/bin/sh\necho "autodb %s-old (stale, built old)"\n' "$VERSION" > "$1/autodb"
+  chmod +x "$1/autodb"
 }
 run() { # $1=prefix, rest=extra PATH dirs -> echoes exit code
   local pfx="$1"; shift
@@ -112,13 +120,14 @@ else
 fi
 
 # [4] the stale-binary trap: copy and rename both "succeed" but change nothing
-# Mutation that turns this red: drop the version check on `reported`.
-rm -rf "$work/fake"; p="$work/p4"; old_binary "$p"; fakebin cp 0; fakebin mv 0
+# Mutation that turns this red: drop the version check, OR weaken it back to
+# a substring test (case *"$VERSION"*), which accepts VERSION-old.
+rm -rf "$work/fake"; p="$work/p4"; stale_superset "$p"; fakebin cp 0; fakebin mv 0
 rc=$(run "$p")
 if [ "$rc" -ne 0 ] && grep -q 'not the requested' "$work/out"; then
-  ok "[4] a stale binary is never accepted as proof of this install"
+  ok "[4] a stale VERSION-old binary is refused (exact token, not substring)"
 else
-  bad "[4] stale binary accepted (rc=$rc): $(cat "$work/out")"
+  bad "[4] stale VERSION-old binary accepted (rc=$rc): $(cat "$work/out")"
 fi
 
 # [5] checksum mismatch fails closed ----------------------------------------

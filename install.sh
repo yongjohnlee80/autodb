@@ -228,10 +228,16 @@ reported="$("$PREFIX/autodb" --version 2>/dev/null)" \
   || die "$PREFIX/autodb was installed but does not run"
 
 # Never let a pre-existing older binary stand in as proof of this install.
-case "$reported" in
-  *"$VERSION"*) ;;
-  *) die "$PREFIX/autodb reports \"$reported\", which is not the requested $VERSION -- the install did not take effect" ;;
-esac
+#
+# Compare the version TOKEN exactly. A substring test is not enough: it accepts
+# any version that merely contains the requested one, so a stale v0.3.0-rc1
+# satisfies a request for v0.3.0 and the false-success this guard exists to
+# close survives it. `autodb --version` prints "autodb <version> (<commit>,
+# built <date>)", so strip the program name and take the first field.
+reported_rest="${reported#autodb }"
+reported_version="${reported_rest%% *}"
+[ "$reported_version" = "$VERSION" ] \
+  || die "$PREFIX/autodb reports version \"$reported_version\", not the requested $VERSION -- the install did not take effect"
 
 say ""
 say "$reported"
