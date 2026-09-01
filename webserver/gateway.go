@@ -489,6 +489,39 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 		return auth.Contribution{}, auth.Reason(refusalReason)
 	}
 
+	// GATE 3: the two-layer IP admission (ADR-0075 Amendment 1, extended to
+	// this surface by Johno 2026-08-31). The address must be admitted by the
+	// GLOBAL allowlist or by this user's own rows.
+	//
+	// AFTER the password is proven and after the canonical subject is known,
+	// and that ordering is the security property rather than a tidy
+	// sequence. Checking the address first would answer a question the
+	// browser never had to earn: a caller from a non-admitted address would
+	// learn from the SHAPE or the TIMING of the refusal whether the name
+	// they typed exists, because an unknown user and a known one would fail
+	// at different points. Proving the password first means every refusal
+	// from a non-admitted address costs the same work and says the same
+	// thing.
+	//
+	// The daemon decides. This gateway supplies the address it observed —
+	// which only it can see, since the daemon's peer is this process over
+	// loopback — and asks. Evaluating the prefixes here would be a second
+	// implementation of admission in a second process.
+	if admitted, source, aerr := fresh.Bind().IPAdmitted(ctx, peerAddrOf(r)); aerr != nil || !admitted {
+		f.gw.pool.logoutAndClose(subject, fresh)
+		f.gw.logRefusal("ip-admission", subject)
+		return auth.Contribution{}, auth.Reason(refusalReason)
+	} else {
+		// Which LAYER admitted is audited: an operator reading this can tell
+		// a login from shared infrastructure apart from one from a person's
+		// own registered address, which is the distinction that makes an
+		// unexpected access recognisable as one.
+		logger.Notice(f.gw.cfg.Log, map[string]any{
+			"webserver": "gateway", "event": "admitted",
+			"subject": subject, "admission": source,
+		})
+	}
+
 	sess, entry, surplus, jerr := f.gw.pool.join(subject, fresh)
 	if surplus != nil {
 		// This user already had a session; ours is one connection too many. Logged
@@ -507,4 +540,18 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 		return auth.Contribution{}, auth.Reason("webserver: could not record the login")
 	}
 	return auth.Contribution{Method: "autodb-daemon", Subject: subject, IssuedAt: time.Now()}, nil
+}
+
+// peerAddrOf is the browser's address as the TRANSPORT saw it.
+//
+// r.Peer and never a forwarded header: a header is written by whoever is
+// upstream, so trusting one here would let a caller choose the address their
+// admission is judged against — which is the whole check, handed to the
+// person being checked. golib's auth/ipallow is the component that may
+// override this, and only with a configured trusted-proxy set.
+func peerAddrOf(r *auth.Request) string {
+	if !r.Peer.IsValid() {
+		return ""
+	}
+	return r.Peer.Addr().Unmap().String()
 }
