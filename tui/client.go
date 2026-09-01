@@ -431,6 +431,21 @@ func (b *Bound) Login(ctx context.Context, name, pass string) error {
 	return nil
 }
 
+// LoginAt is Login with the admission address the CALLER observed — the web
+// gateway's browser peer, which the daemon cannot see for itself.
+//
+// One call rather than a login followed by a separate admission question,
+// because the two-call shape made a correct password do more work than an
+// incorrect one and a refused caller could time the difference.
+func (b *Bound) LoginAt(ctx context.Context, name, pass, admissionIP string) error {
+	res, err := b.call(ctx, "auth.login_at", name, pass, admissionIP)
+	if err != nil {
+		return err
+	}
+	b.s.adoptLogin(res, b.gen)
+	return nil
+}
+
 func (b *Bound) Logout(ctx context.Context) error {
 	if b.token == "" {
 		return nil

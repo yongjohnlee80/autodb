@@ -135,6 +135,34 @@ const LocalPeer = "local"
 // audited and deliberately indistinguishable (ErrBadCredentials), except a
 // disallowed IP (ErrDenied).
 func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (string, Identity, error) {
+	return s.LoginAt(ctx, name, passphrase, ip, "")
+}
+
+// LoginAt is Login with an ADMISSION ADDRESS the caller observed on its own
+// behalf — the browser's address, which the daemon cannot see because its own
+// peer is the gateway over loopback (ADR-0075 Amendment 1).
+//
+// ONE OPERATION, and that is the whole point of it existing (lector PR #34 r2
+// ruling). The gateway used to log in, get a session back, ask a second RPC
+// whether the address was admitted, and log the session out again when it was
+// not. That sequence did strictly more work for a CORRECT password than for
+// an incorrect one — minting and revoking a real session — and the difference
+// was measurable: about 7ms on a 118ms request under the race detector,
+// reproducible on every run. A caller at a refused address could confirm a
+// guessed password by timing the refusal, without ever being let in.
+//
+// It looked like a choice between two leaks — judge the address first and
+// leak which usernames exist, or judge it last and leak which password is
+// right. It was not. Amendment 1 requires the credential to be verified
+// before the user-row lookup and the denial to stay uniform; it does not
+// require a session to exist before the address is judged. Combining them
+// here means the admission decision happens BETWEEN verification and
+// minting, so a refused caller costs exactly what a wrong password costs and
+// no session is ever created.
+//
+// An empty admissionIP means no second layer, which is the local TUI and
+// every existing caller: Login is that, unchanged.
+func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP string) (string, Identity, error) {
 	// A local (unix-socket) connection is exempt from the IP allowlist:
 	// the 0600 socket is the boundary (ADR-0058), and a socket peer has no
 	// IP to match, so the allowlist can only ever refuse it. The allowlist
@@ -154,7 +182,8 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 
 	u, err := s.store.Users.OnCtx(ctx).With(meta.UserName, name).Get()
 	if errors.Is(err, dao.ErrNoRows) {
-		dummyDerive(passphrase) // equalize timing for unknown users
+		dummyDerive(passphrase)            // equalize timing for unknown users
+		s.decoyAdmission(ctx, admissionIP) // and for the admission query below
 		if aerr := s.Audit(ctx, 0, ip, "login_failed", name+" (unknown user)"); aerr != nil {
 			return "", Identity{}, aerr
 		}
@@ -165,6 +194,7 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 	}
 	if u.Disabled != 0 {
 		dummyDerive(passphrase)
+		s.decoyAdmission(ctx, admissionIP)
 		if aerr := s.Audit(ctx, u.ID, ip, "login_failed", name+" (disabled)"); aerr != nil {
 			return "", Identity{}, aerr
 		}
@@ -177,10 +207,36 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 	}
 	kek, authHalf := deriveKeys(passphrase, params)
 	if !verifyAuthHalf(authHalf, verifier) {
+		s.decoyAdmission(ctx, admissionIP)
 		if aerr := s.Audit(ctx, u.ID, ip, "login_failed", name); aerr != nil {
 			return "", Identity{}, aerr
 		}
 		return "", Identity{}, ErrBadCredentials
+	}
+
+	// ADMISSION, AFTER THE CREDENTIAL AND BEFORE ANY SESSION EXISTS.
+	//
+	// Here rather than in the caller, and here rather than earlier. Earlier
+	// would answer a question the caller never earned — whether the name
+	// exists — because an unknown name and a known one would fail at
+	// different points. Later, in the caller, is where it used to be, and
+	// that made a correct password cost a minted-and-revoked session more
+	// than an incorrect one. Between the two, nothing has been created yet
+	// and the work done is the same as a wrong password's.
+	if admissionIP != "" {
+		src, aerr := s.IPAllowedForUser(ctx, nil, u.ID, admissionIP)
+		if aerr != nil {
+			return "", Identity{}, aerr
+		}
+		if src == NotAdmitted {
+			// The audit says what happened; the caller gets the same error
+			// a wrong password gets.
+			if auerr := s.Audit(ctx, u.ID, ip, "login_failed", name+" (ip not admitted)"); auerr != nil {
+				return "", Identity{}, auerr
+			}
+			return "", Identity{}, ErrBadCredentials
+		}
+		s.noteAdmission(ctx, u.ID, ip, admissionIP, src)
 	}
 	if len(u.MKWrapped) == 0 {
 		// A v1-era row that never received a keyslot: fail explicitly — an
@@ -220,6 +276,36 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 	}
 
 	return token, Identity{userID: u.ID, name: u.Name, role: u.Role}, nil
+}
+
+// decoyAdmission does the admission query's work on a path that has no user
+// to ask about, so that path costs what the real one costs.
+//
+// The sentinel id matches no rows, which is the same query the real check
+// runs when a user simply has none. It is skipped entirely when there is no
+// admission layer, because then the real path does not run it either — the
+// decoy has to mirror what actually happens, not perform unconditional work.
+//
+// Errors are dropped deliberately: this is equalization, not a decision, and
+// a store failure here must not turn a bad-credential refusal into a
+// different error that a caller could tell apart.
+func (s *Service) decoyAdmission(ctx context.Context, admissionIP string) {
+	if admissionIP == "" {
+		return
+	}
+	_, _ = s.IPAllowedForUser(ctx, nil, sentinelUserID, admissionIP)
+}
+
+// sentinelUserID belongs to no account. User ids are positive, so a lookup on
+// this one does the query and finds nothing.
+const sentinelUserID int64 = 0
+
+// noteAdmission records WHICH layer admitted a browser, so an operator can
+// tell a login from shared infrastructure apart from one from a person's own
+// registered address. Best-effort: the login has already been decided.
+func (s *Service) noteAdmission(ctx context.Context, userID int64, ip, admissionIP string, src AdmissionSource) {
+	_ = s.Audit(ctx, userID, ip, "login_admitted",
+		fmt.Sprintf("%s admitted by %s", admissionIP, src))
 }
 
 // Logout revokes the calling session (kept as a row for audit).

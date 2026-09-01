@@ -75,12 +75,6 @@ type Config struct {
 	// being abandoned rather than closed.
 	dial func(ctx context.Context) (*tuiapp.Session, error)
 
-	// testRefusalDelay slows the IP-admission refusal. Test seam only, and it
-	// exists for the reason the front door's equivalent does: a timing
-	// harness that has never resolved a real difference is not evidence that
-	// there is none. This gives it something to resolve.
-	testRefusalDelay time.Duration
-
 	// newModel overrides how a per-session Model is built. Test seam only, and it
 	// exists for a specific reason: testing modelOptions() proves the HELPER, not
 	// that appRunner calls it. Restoring the old construction while leaving the
@@ -412,7 +406,7 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 	if err != nil {
 		return auth.Contribution{}, auth.Reason("webserver: the daemon is unreachable")
 	}
-	if lerr := fresh.Bind().Login(dialCtx, user, pass); lerr != nil {
+	if lerr := fresh.Bind().LoginAt(dialCtx, user, pass, peerAddrOf(r)); lerr != nil {
 		// LOGIN FIRST, BOOTSTRAP SECOND — deliberately in that order.
 		//
 		// A daemon with no users yet cannot be logged into, so a gateway that could
@@ -525,41 +519,29 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 		return auth.Contribution{}, auth.Reason(refusalReason)
 	}
 
-	// GATE 3: the two-layer IP admission (ADR-0075 Amendment 1, extended to
-	// this surface by Johno 2026-08-31). The address must be admitted by the
-	// GLOBAL allowlist or by this user's own rows.
+	// GATE 3 USED TO BE HERE and is deliberately gone. Its work now happens
+	// INSIDE the login, between verifying the credential and minting the
+	// session (auth.LoginAt / auth.login_at).
 	//
-	// AFTER the password is proven and after the canonical subject is known,
-	// and that ordering is the security property rather than a tidy
-	// sequence. Checking the address first would answer a question the
-	// browser never had to earn: a caller from a non-admitted address would
-	// learn from the SHAPE or the TIMING of the refusal whether the name
-	// they typed exists, because an unknown user and a known one would fail
-	// at different points. Proving the password first means every refusal
-	// from a non-admitted address costs the same work and says the same
-	// thing.
+	// The old shape was: log in, get a session back, ask the daemon a second
+	// time whether the address was admitted, and log the session out again
+	// when it was not. That is strictly more work for a CORRECT password
+	// than for an incorrect one — a real session minted and revoked — and it
+	// was measurable at about 7ms on a 118ms request under the race
+	// detector, on every run. A caller at a refused address could confirm a
+	// guessed password by timing the refusal without ever being let in.
 	//
-	// The daemon decides. This gateway supplies the address it observed —
-	// which only it can see, since the daemon's peer is this process over
-	// loopback — and asks. Evaluating the prefixes here would be a second
-	// implementation of admission in a second process.
-	if admitted, source, aerr := fresh.Bind().IPAdmitted(ctx, peerAddrOf(r)); aerr != nil || !admitted {
-		if d := f.gw.cfg.testRefusalDelay; d > 0 {
-			time.Sleep(d)
-		}
-		f.gw.pool.logoutAndClose(subject, fresh)
-		f.gw.logRefusal("ip-admission", subject)
-		return auth.Contribution{}, auth.Reason(refusalReason)
-	} else {
-		// Which LAYER admitted is audited: an operator reading this can tell
-		// a login from shared infrastructure apart from one from a person's
-		// own registered address, which is the distinction that makes an
-		// unexpected access recognisable as one.
-		logger.Notice(f.gw.cfg.Log, map[string]any{
-			"webserver": "gateway", "event": "admitted",
-			"subject": subject, "admission": source,
-		})
-	}
+	// It looked like a choice between leaking which usernames exist and
+	// leaking which password is right. Lector's ruling on PR #34 r2 is that
+	// the choice was false, and it was: nothing required a session to exist
+	// before the address was judged. Moving the decision inside the one
+	// operation removes the extra work rather than trying to disguise it,
+	// and no session is created for a caller who will be refused.
+	//
+	// What stays here is what only this process knows: the browser's
+	// address, taken from r.Peer and never from a forwarded header, because
+	// a header is written by whoever is upstream and trusting one would hand
+	// the check to the person being checked.
 
 	sess, entry, surplus, jerr := f.gw.pool.join(subject, fresh)
 	if surplus != nil {

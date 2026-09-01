@@ -74,6 +74,18 @@ type Service struct {
 	// own timestamp is not enough.
 	patNotedMu sync.Mutex
 	patNoted   map[int64]time.Time
+	// admissionQueries counts IPAllowedForUser calls, so an in-package cell
+	// can assert that every refusal path issues exactly one. That is the
+	// decoy's real contract and it is structural rather than temporal: at
+	// HTTP scale one SQLite read is invisible next to a round trip, so a
+	// timing cell cannot see the decoy missing — but against a Postgres meta
+	// store the same query is a network hop, and then it can.
+	//
+	// Unexported, and read only from this package's own tests. A counter is
+	// not a data-access surface: it answers "how much work has this service
+	// done", not "what does the audit trail say".
+	admissionQueries atomic.Int64
+
 	// patWrites counts last_used UPDATE statements actually ISSUED, which is
 	// the quantity the coalescing bound is about. Per-service for the same
 	// reason patCompares is.

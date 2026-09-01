@@ -32,21 +32,13 @@ func freePort(t *testing.T) int {
 // startGateway runs a real gateway against a real daemon and returns its base URL.
 func startGateway(t *testing.T, daemonAddr string) (base string, gw *Gateway) {
 	t.Helper()
-	return startGatewayWith(t, daemonAddr, 0)
-}
-
-// startGatewayWith is startGateway with the admission-refusal delay under the
-// caller's control, so the timing harness can prove it resolves one.
-func startGatewayWith(t *testing.T, daemonAddr string, refusalDelay time.Duration) (base string, gw *Gateway) {
-	t.Helper()
 	port := freePort(t)
 	gw, err := New(Config{
-		Network:          "tcp",
-		Addr:             daemonAddr,
-		Port:             port,
-		NotesRoot:        t.TempDir(),
-		Log:              logger.Nop{},
-		testRefusalDelay: refusalDelay,
+		Network:   "tcp",
+		Addr:      daemonAddr,
+		Port:      port,
+		NotesRoot: t.TempDir(),
+		Log:       logger.Nop{},
 	})
 	if err != nil {
 		t.Fatal(err)
