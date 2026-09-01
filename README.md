@@ -5,9 +5,9 @@
 </p>
 
 <p align="center">
-  One static Go binary. A terminal UI, a browser UI, a Neovim plugin, and a
-  PostgreSQL-wire front door — all going through one gate stack, one identity
-  model, and one audit trail.
+  One static Go binary: a terminal UI, a browser UI and a Neovim plugin today,
+  with a PostgreSQL-wire front door landing now — all going through one gate
+  stack, one identity model, and one audit trail.
 </p>
 
 <p align="center">
@@ -26,8 +26,8 @@ laptops — and the audit log says `app_user` did it.
 autodb is the other way. Nobody gets the credential. People get an **account**,
 a **role**, and a **grant on a specific connection**. The real DSN is encrypted
 at rest and only autodb can decrypt it. Every statement anyone runs — from the
-TUI, from Neovim, from a browser, or from `psql` through the front door — is
-classified, authorized, and written to an audit log with a name attached.
+TUI, from Neovim, from a browser, and soon from `psql` through the front door —
+is classified, authorized, and written to an audit log with a name attached.
 
 ## See it
 
@@ -70,7 +70,8 @@ assignments that decide what everyone else is allowed to do.*
 3. **First-class Neovim integration** for developers who take security
    seriously and do not want to leave their editor to get it.
 4. **A production front door** that lets existing tools keep working while
-   production itself stops being directly reachable.
+   production itself stops being directly reachable. *(In progress — see
+   [status](#the-production-front-door).)*
 
 ## Security-first by design
 
@@ -84,10 +85,10 @@ connection. Connection-scoped actions require a grant **for admins too**: a
 globally-`reader` user never exceeds `SELECT`, whatever grants they hold.
 
 **Read-only means read-only.** `reader` users don't merely get their `UPDATE`s
-rejected by autodb. Through the front door they run inside **server-enforced
-read-only transactions**, so a write smuggled through a function, a procedure
-or dynamic SQL fails at PostgreSQL itself with SQLSTATE `25006`. The database
-enforces the boundary, not just the proxy in front of it.
+rejected by autodb. Through the front door — once it lands — they run inside
+**server-enforced read-only transactions**, so a write smuggled through a
+function, a procedure or dynamic SQL fails at PostgreSQL itself with SQLSTATE
+`25006`. The database enforces the boundary, not just the proxy in front of it.
 
 **Dangerous-statement detection — deterministic, out of the box.** A
 hand-written lexer — not a regex, and not a full parser — decides what a
