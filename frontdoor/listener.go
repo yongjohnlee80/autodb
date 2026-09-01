@@ -62,6 +62,27 @@ type Listener struct {
 	liveMu sync.Mutex
 	live   map[net.Conn]struct{}
 
+	// testInsideRegistration runs inside beginHandler's window. See Options.
+	testInsideRegistration func()
+
+	// acceptMu is the ACCEPT-REGISTRATION BARRIER, and it is what makes the
+	// WaitGroup's ordering rule hold.
+	//
+	// sync.WaitGroup requires a positive Add that starts from zero to happen
+	// BEFORE a Wait. Serve used to Accept, read the peer address, consult
+	// the budgets, and only then Add — so a Close landing anywhere in that
+	// window observed a zero counter, returned, and left Serve free to Add
+	// and launch a handler after the join it had just promised. Nothing
+	// about that is a scheduler race to be tolerated; it is the counter
+	// being used outside its contract, and lector reproduced it
+	// deterministically by pausing a connection inside the window.
+	//
+	// Every accepted connection now crosses this barrier before anything
+	// else happens to it, and is either counted or refused because the
+	// listener is already closed. Close crosses the same barrier after
+	// closing, so by the time it waits, no later Add can exist.
+	acceptMu sync.Mutex
+
 	// testDenialDelay slows the denial path. Test-only, and it exists so the
 	// timing harness can prove it detects a leak by measuring one rather
 	// than by asserting arithmetic about one.
@@ -133,6 +154,20 @@ type Options struct {
 	testDeadlines   *deadlines
 	testDenialDelay time.Duration
 
+	// testListener replaces the bind, so a cell can hand Serve a connection
+	// that pauses exactly where it wants to look. Unexported, in-package
+	// only, and it exists because the accept-registration window cannot be
+	// entered from outside: reaching it means controlling what Accept
+	// returns and when RemoteAddr answers.
+	testListener net.Listener
+
+	// testInsideRegistration runs inside beginHandler's window, with the
+	// barrier HELD and the counter not yet raised. Test-only, and the same
+	// shape as the engine's hookAfterAdmitCheck: the way to prove an
+	// ordering is to inject the competing transition inside the window
+	// rather than run it alongside and hope.
+	testInsideRegistration func()
+
 	// AuthFailuresPerIP raises the per-source throttle. Zero takes the
 	// default of AuthFailuresPerIP.
 	//
@@ -158,9 +193,12 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, fmt.Errorf("frontdoor: binding %s: %w", addr, err)
+	ln := opt.testListener
+	if ln == nil {
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			return nil, fmt.Errorf("frontdoor: binding %s: %w", addr, err)
+		}
 	}
 	l := &Listener{ln: ln, tls: tlsCfg, closed: make(chan struct{}), live: map[net.Conn]struct{}{}}
 	l.now = opt.Now
@@ -184,6 +222,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 		l.dl = *opt.testDeadlines
 	}
 	l.testDenialDelay = opt.testDenialDelay
+	l.testInsideRegistration = opt.testInsideRegistration
 	return l, nil
 }
 
@@ -309,6 +348,22 @@ func (l *Listener) Serve(ctx context.Context) error {
 			}
 			return err
 		}
+		// COUNTED FIRST, before the budgets and before the handler.
+		//
+		// This is the WaitGroup's ordering rule, not a resource decision:
+		// the counter must rise before a Close can observe it at zero. It
+		// allocates nothing, so charge-before-allocate is untouched — the
+		// reservation below still precedes the goroutine that builds a
+		// reader, a TLS record buffer and a decoder.
+		//
+		// A connection that arrives after Close is refused here and closed
+		// without ever being counted, which is the other half of the same
+		// guarantee: no Add can follow the join.
+		if !l.beginHandler() {
+			_ = conn.Close()
+			continue
+		}
+
 		// CHARGE BEFORE ALLOCATE. The reservation happens on the accept
 		// goroutine, before the connection reaches a handler that builds a
 		// reader, a TLS record buffer and a decoder for it. Reserving inside
@@ -323,9 +378,9 @@ func (l *Listener) Serve(ctx context.Context) error {
 			// exactly what they would learn from a courteous refusal.
 			_ = conn.Close()
 			l.onEvent(Event{Kind: "fd.budget_refuse", Reason: refused.String(), Peer: peer})
+			l.wg.Done()
 			continue
 		}
-		l.wg.Add(1)
 		go func() {
 			defer l.wg.Done()
 			defer tkt.release()
@@ -350,7 +405,15 @@ func (l *Listener) Serve(ctx context.Context) error {
 // waiting on itself — nothing in this package does, and the daemon calls it
 // from its own defer.
 func (l *Listener) Close() {
-	defer l.wg.Wait()
+	defer func() {
+		// CROSS THE BARRIER, then wait. Any accept already inside
+		// beginHandler finishes its Add before this returns; any that
+		// arrives afterwards sees the closed signal and is refused without
+		// one. Only then is the counter meaningful to wait on.
+		l.acceptMu.Lock()
+		l.acceptMu.Unlock() //nolint:staticcheck // the lock/unlock IS the barrier
+		l.wg.Wait()
+	}()
 	l.once.Do(func() {
 		close(l.closed)
 		_ = l.ln.Close()
@@ -562,6 +625,27 @@ func (l *Listener) defaultSession(ctx context.Context, conn net.Conn, be *pgprot
 		_ = be.Flush()
 		return nil
 	}
+}
+
+// beginHandler counts one accepted connection, or reports that the listener
+// is closing and it must not be served.
+//
+// The check and the Add are ONE critical section. Split, they are the
+// check-then-act gap this whole barrier exists to close: a Close between them
+// would see zero and return while the Add was still coming.
+func (l *Listener) beginHandler() bool {
+	l.acceptMu.Lock()
+	defer l.acceptMu.Unlock()
+	select {
+	case <-l.closed:
+		return false
+	default:
+	}
+	if h := l.testInsideRegistration; h != nil {
+		h()
+	}
+	l.wg.Add(1)
+	return true
 }
 
 // track and untrack maintain the live set Close ends.
