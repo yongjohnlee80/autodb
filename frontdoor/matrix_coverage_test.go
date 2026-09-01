@@ -104,7 +104,10 @@ var matrixTriage = map[string]struct {
 	"2.1a": {covered, "direct-TLS ClientHello refusal"},
 	"2.1b": {covered, "TestLoadServerTLS_RefusesUnusableMaterial + admission_test's handshake-grinding cell"},
 	"2.2":  {covered, "TestStartup_GSSEncIsRefusedWithN"},
-	"2.3":  {covered, "TestCancelRegistry — F3a's registry; the key we hand out becomes one we can honour"},
+	"2.3": {awaiting, "the registry exists (core/exec/cancel_registry.go) but has NO production caller: " +
+		"listener.go still closes on errCancelRequest and only emits fd.cancel_received. The row requires " +
+		"§6.4 processing — issuance at open, revocation at close, statement-only cancellation, stale audit, " +
+		"race boundaries — so an engine-side unit cannot promote it. Awaits the listener half"},
 	"2.4":  {covered, "TestStartup_RefusedParameterIsAuditedButNotDisclosed"},
 	"2.5":  {covered, "TestStartup_VersionNegotiation"},
 	"2.5a": {covered, "TestStartup_VersionNegotiation, unsupported major"},

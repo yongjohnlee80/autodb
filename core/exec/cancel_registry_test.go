@@ -6,7 +6,15 @@ import (
 	"time"
 )
 
-// THE CANCEL REGISTRY (matrix row 2.3, F3a).
+// THE CANCEL REGISTRY (F3a — the ENGINE half of the CancelRequest behaviour).
+//
+// Deliberately NOT written as a matrix-row citation. These cells prove the
+// registry honours a key; they do not prove the matrix's CancelRequest row, which requires the
+// plaintext CancelRequest to be processed per §6.4 — issuance at open,
+// revocation at close, statement-only cancellation, stale audit, race
+// boundaries — none of which is reachable until the listener half exists.
+// Naming that row here would promote it in the coverage gate on the strength of
+// a unit that never touches the wire (lector, PR #41 r0).
 //
 // The pair a client receives in BackendKeyData is a CAPABILITY: whoever holds
 // it stops that session's statement without presenting a credential, because
