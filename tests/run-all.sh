@@ -17,6 +17,7 @@ run() {
 }
 
 run run-smoke.sh
+run run-install.sh
 
 if [ "$rc" -ne 0 ]; then
   echo "run-all: one or more suites failed"
