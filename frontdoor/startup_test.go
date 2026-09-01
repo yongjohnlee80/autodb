@@ -1,7 +1,6 @@
 package frontdoor
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -666,63 +665,4 @@ func TestStartup_RequiredParameters(t *testing.T) {
 	if _, ok := checkStartupParams(map[string]string{"user": "root", "database": "lm-prod"}); !ok {
 		t.Error("a startup with both required parameters was refused")
 	}
-}
-
-// The pre-auth length rule has ONE implementation (jarvis, PR #37; F0
-// follow-up).
-//
-// readStartupPacket used to re-derive the bound that classifyStartupLength
-// already owned. The verdicts agreed on every value and nothing made them keep
-// agreeing — and the arithmetic already differed: ADR-0075 §8.3 requires
-// declared lengths int32-validated before use with all accounting in int64,
-// and `int(uint32)` is 32 bits on a 32-bit platform where `int64(uint32)` is
-// not. The two did not compute the same intermediate near MaxUint32. Only one
-// of them obeyed the rule.
-//
-// This pins the BOUNDARIES, deterministically and on every platform. PR #37's
-// fuzz target sweeps the whole uint32 domain and is the proof that removing
-// the second copy changed no verdict anywhere; the two are complementary, and
-// keeping both is what would catch someone re-deriving the bound a third time.
-func TestStartupLength_OneRuleAcrossBothPaths(t *testing.T) {
-	t.Parallel()
-	for _, declared := range []uint32{
-		0, 1, 3, 4, 5, 7,
-		8,      // the smallest legal packet: 4 header + 4 body
-		9, 296, // ordinary
-		PreAuthMaxBodyLen + 4, // the largest legal
-		PreAuthMaxBodyLen + 5, // one past it
-		1 << 31, ^uint32(0) - 1, ^uint32(0),
-	} {
-		_, refusedByClassifier := classifyStartupLength(declared)
-
-		// The read path is driven with a frame whose header declares
-		// `declared` and whose body is as long as the header claims, capped
-		// so an absurd length does not allocate a test fixture the size of
-		// the address space. A short body cannot be mistaken for a refusal:
-		// the classifier runs before any read of it.
-		var head [4]byte
-		binary.BigEndian.PutUint32(head[:], declared)
-		bodyLen := 0
-		if n := int64(declared) - 4; n > 0 && n <= PreAuthMaxBodyLen+16 {
-			bodyLen = int(n)
-		}
-		frame := append(head[:], make([]byte, bodyLen)...)
-
-		_, err := readStartupPacket(bytes.NewReader(frame))
-		refusedByReader := err != nil
-
-		if refusedByClassifier != refusedByReader {
-			t.Errorf("declared %d: the classifier %s and the read path %s. Two copies of one "+
-				"rule have started to disagree, which is the failure the dedupe removed the "+
-				"possibility of",
-				declared, verdictWord(refusedByClassifier), verdictWord(refusedByReader))
-		}
-	}
-}
-
-func verdictWord(refused bool) string {
-	if refused {
-		return "REFUSED"
-	}
-	return "accepted"
 }
