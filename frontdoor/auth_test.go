@@ -156,6 +156,7 @@ func find(events []Event, kind string) (Event, bool) {
 // item that fails for everyone who picks it, because a SCRAM verifier needs
 // material the server deliberately does not keep — and a client that picks it
 // gets an authentication failure it will read as a bad password.
+// Matrix row 5:AuthenticationCleartextPassword: this cell proves the prompt.
 func TestAuth_OffersCleartextAndNothingElse(t *testing.T) {
 	t.Parallel()
 	f := &fakeAuth{result: goodSession()}
@@ -172,6 +173,8 @@ func TestAuth_OffersCleartextAndNothingElse(t *testing.T) {
 }
 
 // MATRIX ROW 2.9's success sequence, in the protocol's order.
+// Matrix row 5:AuthenticationCleartextPassword: this cell proves the grouped
+// AuthenticationOk, ParameterStatus, BackendKeyData, and ReadyForQuery half.
 func TestAuth_SuccessSequence(t *testing.T) {
 	t.Parallel()
 	f := &fakeAuth{result: goodSession()}

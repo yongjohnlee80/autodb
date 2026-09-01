@@ -95,11 +95,6 @@ const (
 // the correct answer, not a failure of the gate: the matrix describes the
 // finished front door, and the gate's job is to keep the distance between
 // here and there visible, not to paper over it.
-//
-// §2's two `uncited` rows are promoted in #39's post-#36 revision, where the
-// citations PR #36 carries actually exist on main. Pre-marking them covered
-// HERE would fail as covered-but-cited-by-nothing: this branch's base does not
-// contain #36's test files.
 var matrixTriage = map[string]struct {
 	state  rowState
 	reason string // for `uncited`, this MUST be the test function's name
@@ -124,12 +119,10 @@ var matrixTriage = map[string]struct {
 	// with claims is covered only when every claim is covered, otherwise it
 	// is awaiting — and the gate checks the map agrees with that derivation
 	// (a parent whose state contradicts its claims is a failure direction
-	// of its own). The owner cross-check in the `user` row is row 2.7's
-	// chain; binding its evidence would mean anchor edits in core/exec,
-	// which is #36's active surface — the claim stays awaiting until that
-	// lands.
-	"3.1:user":                {awaiting, "partial — claims below; owner cross-check proven by 2.7's chain (core/exec), anchor deferred: #36's active surface"},
-	"3.1:database":            {awaiting, "partial — claims below; the grant-on-target check is 2.7's target validation (F0e)"},
+	// of its own). Claims may be proved in other packages; the witness binding
+	// below keeps those citations and anchors inside the named test cells.
+	"3.1:user":                {covered, "claims below prove requiredness and the PAT-owner cross-check"},
+	"3.1:database":            {covered, "claims below prove requiredness and the grant-on-target check"},
 	"3.1:application_name":    {awaiting, "partial — claims below (acceptance proven; the 256-byte truncate+notice is not)"},
 	"3.1:client_encoding":     {awaiting, "partial — claims below (the UTF8-only gate is proven; the target-lease UTF8 pin, ruling 2, is F1)"},
 	"3.1:options":             {awaiting, "partial — claims below (GUC refusal and empty-accepted proven; the empty-options audit is not)"},
@@ -171,7 +164,7 @@ var matrixTriage = map[string]struct {
 	"5:ErrorResponse-target":            {awaiting, "raw *pgconn.PgError fields verbatim — F1"},
 	"5:ErrorResponse-gate-front-door":   {awaiting, "§8a synthesized identity, DETAIL rule id — F1"},
 	"5:ReadyForQuery":                   {awaiting, "synthesized from the ExecSession state machine — F1"},
-	"5:AuthenticationCleartextPassword": {awaiting, "the startup emission group (with AuthenticationOk, BackendKeyData, the session-open ParameterStatus, NegotiateProtocolVersion) — F0e cells in flight in #36; promoted when the full sequence is asserted"},
+	"5:AuthenticationCleartextPassword": {covered, "TestAuth_OffersCleartextAndNothingElse + TestAuth_SuccessSequence + TestStartup_VersionNegotiation — prompt, success group, and protocol negotiation"},
 	"5:CopyInResponse":                  {awaiting, "never-emitted canaries (CopyIn/Out/BothResponse, backend CopyData/CopyDone, NotificationResponse, FunctionCallResponse) — the F4 harness slice"},
 }
 
@@ -205,14 +198,16 @@ var claimTriage = map[string]struct {
 	"3.1:user#required": {covered, "TestStartup_RequiredParameters",
 		"the required pair, without the check a blank startup reads as an auth problem",
 		[]string{`"database": "lm-prod"}, "user"}`}},
-	"3.1:user#owner-cross-check": {awaiting, "",
-		"proven by row 2.7's chain in core/exec; anchor deferred — core/exec is #36's active surface", nil},
+	"3.1:user#owner-cross-check": {covered, "TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly",
+		"the startup user must match the PAT owner",
+		[]string{"the startup user is not the token's owner", "DenyUserMismatch"}},
 
 	"3.1:database#required": {covered, "TestStartup_RequiredParameters",
 		"the required pair",
 		[]string{`"user": "root"}, "database"}`}},
-	"3.1:database#grant-on-target": {awaiting, "",
-		"the grant-on-connection check is 2.7's target validation — F0e (#36)", nil},
+	"3.1:database#grant-on-target": {covered, "TestOpenWireSession_TheRemainingRefusals",
+		"the authenticated user must have a grant on the presented target",
+		[]string{"a user with no grant on the target", "DenyNoGrant"}},
 
 	"3.1:application_name#accept": {covered, "TestStartup_ParameterPolicy",
 		"the pinned set accepts application_name",
