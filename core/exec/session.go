@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
+
+	"github.com/yongjohnlee80/autodb/core/auth"
 )
 
 // ExecSession — an engine-owned client session (ADR-0074 §1).
@@ -95,11 +97,28 @@ type session struct {
 	id     SessionID
 	userID int64
 	connID int64
-	// authSessID names the AUTH session row this exec session's authority
-	// rests on. A pinned transaction outlives the call that opened it, so the
-	// authority has to be re-checkable later without a token — and revocation
-	// and expiry both live on that row.
-	authSessID int64
+	// authority names the durable row this exec session's authority rests
+	// on. A pinned transaction outlives the call that opened it, so the
+	// authority has to be re-checkable later without a token — and
+	// revocation and expiry live on that row.
+	//
+	// TYPED, because there are two kinds and the previous shape could not
+	// say which. It was a bare session id, and a front-door session — whose
+	// authority is a PAT, not a session — stored a zero as a sentinel for
+	// "no session row". The janitor passed that zero to a session-keyed
+	// lookup, the missing row read as a revocation, and every wire
+	// transaction would have been rolled back and closed on the first sweep,
+	// audited as though permission had been withdrawn. Nothing caught it
+	// because the two halves were tested separately: sweeps used token
+	// sessions, wire sessions never opened a transaction.
+	authority auth.AuthorityRef
+
+	// demoted records that this session lost write privilege while it was
+	// open. It is set by the sweep and read by the execution path, which
+	// must not serve a write for a session the sweep has already demoted —
+	// the full reader read-only wrap is F3a's, and this is the flag it will
+	// hang on rather than a second source of truth.
+	demoted bool
 
 	// ctx outlives the RPC call that created the session, which is the whole
 	// point: a COMMIT arriving in a LATER call has to operate on a live

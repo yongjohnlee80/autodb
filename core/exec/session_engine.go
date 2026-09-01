@@ -60,13 +60,13 @@ func (e *Engine) openSession(ctx context.Context, token string, connID int64, ip
 	// own cancel, which is what a close uses to stop in-flight work.
 	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s := &session{
-		id:         id,
-		userID:     ident.UserID(),
-		authSessID: authSessID,
-		connID:     connID,
-		ctx:        sctx,
-		cancel:     cancel,
-		lastUsed:   e.now(),
+		id:        id,
+		userID:    ident.UserID(),
+		authority: auth.SessionAuthority(authSessID),
+		connID:    connID,
+		ctx:       sctx,
+		cancel:    cancel,
+		lastUsed:  e.now(),
 	}
 	if err := e.sessions.admit(s); err != nil {
 		cancel()

@@ -2,13 +2,11 @@ package exec
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
 
-	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -232,6 +230,78 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 		fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
 }
 
+// reasonAuthorityDemoted is the audited reason for a transaction ended because
+// WRITE privilege was withdrawn while the session's own right to be connected
+// survived.
+//
+// Distinct from authority-revoked on purpose, and lector required the
+// distinction: an operator reading the trail needs to see that a still-valid
+// reader lost write privilege, not that someone's access ended. The two lead
+// to different conversations.
+const reasonAuthorityDemoted = "authority-demoted"
+
+// rollbackDemoted ends a demoted session's write transaction and reports
+// whether the session may be RETAINED.
+//
+// It returns false when the outcome is uncertain — the statement would not
+// stop, or the rollback itself failed. There is no third answer: a session
+// kept over a transaction nobody can account for is worse than a closed one,
+// because it looks healthy and holds a leased target connection whose state
+// no longer matches what the engine believes.
+func (e *Engine) rollbackDemoted(ctx context.Context, s *session, txID, role string) bool {
+	// Cancel, then JOIN, then roll back — the same order rollbackExpired
+	// uses and for the same reason: rolling back while a statement is still
+	// executing puts two commands on one connection.
+	release, err := e.quiesce(ctx, s, e.txQuiesce)
+	defer release()
+	if err != nil {
+		e.logf("session %s: write privilege was withdrawn but the in-flight statement would not "+
+			"stop (%v); discarding the session rather than continuing on unknown state", s.id, err)
+		e.noteTxOutcome(ctx, txTransition{
+			txID: txID, state: meta.TxUnknownPending, reason: meta.ReasonSessionClosed,
+			userID: s.userID, connectionID: s.connID,
+		})
+		return false
+	}
+
+	s.mu.Lock()
+	tx := s.tx
+	s.tx, s.txPhase, s.txID = nil, txNone, ""
+	s.lastUsed = e.now()
+	s.mu.Unlock()
+
+	if tx != nil {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
+		rerr := tx.RollbackContext(cctx)
+		cancel()
+		outcome := "rolled_back"
+		if rerr != nil {
+			outcome = "rollback_failed"
+			e.logf("session %s: rolling back %s after demotion: %v", s.id, txID, rerr)
+		}
+		e.noteTxOutcome(ctx, txTransition{
+			txID: txID, state: txStateFor(outcome, rerr), reason: txOutcomeReason(outcome, rerr),
+			userID: s.userID, connectionID: s.connID,
+		})
+		e.auditBounded(ctx, s.userID, "", "tx_"+outcome,
+			fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reasonAuthorityDemoted))
+		if rerr != nil {
+			// Uncertain target state. Never retain.
+			return false
+		}
+	}
+
+	// RETAINED, and the demotion is recorded as its own event so the trail
+	// shows a session that continued with less rather than one that ended.
+	s.mu.Lock()
+	s.demoted = true
+	s.mu.Unlock()
+	e.auditBounded(ctx, s.userID, "", reasonAuthorityDemoted,
+		fmt.Sprintf("conn %d: session %s: write privilege withdrawn (role now %s); the session "+
+			"continues at the read floor", s.connID, s.id, role))
+	return true
+}
+
 // quiesceTimeout bounds how long a teardown waits for an in-flight statement
 // to stop after being cancelled. With the statement running on a context the
 // engine controls, cancellation reaches the driver, so this is an outer bound
@@ -274,18 +344,47 @@ func (e *Engine) StartJanitor(ctx context.Context, every time.Duration) {
 // tearing down live work because a lookup failed would turn a blip in the
 // meta store into rolled-back transactions across every open session.
 func (e *Engine) revokeExpiredAuthority(ctx context.Context, s *session, txID string) bool {
-	err := e.auth.StillAuthorized(ctx, s.authSessID, s.userID, s.connID, auth.ActionWrite)
-	if err == nil {
-		return false
-	}
-	if !errors.Is(err, auth.ErrDenied) {
+	v, err := e.auth.ResolveStanding(ctx, s.authority, s.userID, s.connID)
+	if err != nil {
+		// A store failure is NOT a revocation. Tearing down live work
+		// because a lookup failed would turn a blip in the meta store into
+		// rolled-back transactions across every open session; the
+		// transaction timeouts remain the backstop.
 		e.logf("session %s: re-checking authority failed, leaving the transaction to its timeouts: %v", s.id, err)
 		return false
 	}
-	e.rollbackExpired(ctx, s, txID, reasonAuthorityRevoked)
-	// And the session goes with it. Leaving it open would leave a caller
-	// holding a handle to a connection they are no longer entitled to, ready
-	// to BEGIN again the moment a grant reappeared.
-	e.closeSession(ctx, s, "", reasonAuthorityRevoked)
+	if !v.Standing {
+		e.rollbackExpired(ctx, s, txID, reasonAuthorityRevoked)
+		// And the session goes with it. Leaving it open would leave a caller
+		// holding a handle to a connection they are no longer entitled to,
+		// ready to BEGIN again the moment a grant reappeared.
+		e.closeSession(ctx, s, "", reasonAuthorityRevoked)
+		return true
+	}
+	if v.MayWrite {
+		return false
+	}
+
+	// DEMOTION, not revocation, and the difference is what happens to the
+	// session (lector's ruling on the standing-authority defect).
+	//
+	// The credential is valid and the read grant stands; only the write
+	// privilege is gone. Killing the connection for a privilege REDUCTION
+	// would be harsher than what happens when a grant is removed from a
+	// session with no open transaction — so the TRANSACTION ends and the
+	// session survives it.
+	//
+	// The open transaction cannot continue either way: it was begun with
+	// write authority and the next operation would be running as a reader on
+	// a read-write transaction, which is the state the seam condition
+	// forbids.
+	if !e.rollbackDemoted(ctx, s, txID, v.Role) {
+		// Rollback failed or the target's state is unknown. Never continue
+		// on uncertain state: the leased connection is discarded and the
+		// session goes with it, because a session retained over a
+		// transaction nobody can account for is the worse of the two
+		// failures.
+		e.closeSession(ctx, s, "", reasonAuthorityRevoked)
+	}
 	return true
 }
