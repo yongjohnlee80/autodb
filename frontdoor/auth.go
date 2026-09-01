@@ -1,0 +1,205 @@
+package frontdoor
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"fmt"
+	"net"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgproto3"
+
+	"github.com/yongjohnlee80/autodb/core/exec"
+)
+
+// Authentication and session open (protocol matrix rows 2.6-2.9).
+//
+// One credential exchange, one verification, one answer. The chain that
+// decides is row 2.7's, and it lives in the engine — this file is the wire
+// around it: offer the method, read the frame, hand the token over, and turn
+// whatever comes back into either a session or the one uniform denial.
+
+// AuthDeadline bounds the credential exchange (§9: startup/auth 10s).
+//
+// Its own deadline rather than a share of the startup budget, for the reason
+// every phase here has its own: a peer that spent the whole allowance getting
+// through TLS must not still be owed time to sit holding an open socket while
+// deciding whether to send a password.
+const AuthDeadline = 10 * time.Second
+
+// IdleDeadline is what replaces the pre-auth deadlines once a session is
+// open (§9: between-messages, 30m idle).
+//
+// Re-arming is not bookkeeping. The pre-auth deadlines are ten seconds, and a
+// deadline set on a net.Conn STAYS SET — leaving one in place would mean an
+// authenticated session died ten seconds after it opened, and the first
+// person to notice would be a developer sitting on a debug breakpoint
+// wondering why their connection dropped. The >90s cell exists for exactly
+// that reader.
+const IdleDeadline = 30 * time.Minute
+
+// CancelKeyLen is the BackendKeyData secret's length in bytes.
+//
+// Four, because we negotiate every client down to protocol 3.0 (row 2.5) and
+// 3.0's cancel key is a fixed int32. pgproto3 models the field as a []byte to
+// carry 3.2's variable-length key, so nothing in the library would stop us
+// sending sixteen bytes to a 3.0 client that will read four and lose the
+// frame boundary.
+const CancelKeyLen = 4
+
+// Authenticator is the front door's view of the engine.
+//
+// An interface rather than a *exec.Engine so this package can be exercised
+// against a fake without a meta store — and, more to the point, so the
+// listener's dependency is exactly the two calls it makes. A concrete engine
+// here would let a later change reach for anything on it.
+type Authenticator interface {
+	OpenWireSession(ctx context.Context, presented, startupUser, database, ip string) (exec.WireSessionResult, error)
+	CloseWireSession(ctx context.Context, id exec.SessionID, userID int64, ip, reason string)
+}
+
+// authOutcome is what the credential exchange produced. Exactly one of
+// Session and Denied is meaningful.
+type authOutcome struct {
+	Session exec.WireSessionResult
+	Denied  denialReason
+	// Counts reports whether this denial is the PEER's fault and should be
+	// charged to their source address. A store failure is not.
+	Counts bool
+}
+
+// runAuth performs rows 2.6-2.8 on an established TLS connection.
+//
+// It reads AT MOST ONE credential frame. The matrix cell said three attempts
+// per connection and rev 6 amends it to one, because re-prompting is not a
+// defence: libpq answers a repeated AuthenticationCleartextPassword with the
+// same password it already sent, so a ceiling of three would spend three PAT
+// verifications on one wrong password. That is amplification pointed at
+// ourselves. PostgreSQL closes on the first failure and so do we; the throttle
+// that actually bounds grinding is the per-source-address one, which survives
+// the reconnect that a per-connection ceiling does not.
+func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Backend, params map[string]string, peer string) (authOutcome, error) {
+	if l.authn == nil {
+		// The honest state of a build with no engine behind the listener.
+		// Recorded as its own reason so it is never mistaken in the trail
+		// for a credential that was checked and found wanting.
+		return authOutcome{Denied: reasonNoCredentialStore}, nil
+	}
+
+	// Row 2.6: cleartext, and it is the ONLY method offered. SCRAM cannot be
+	// offered over hashed PATs — a SCRAM verifier needs material the server
+	// deliberately does not keep — so offering it would be a menu item that
+	// fails for everyone who picks it.
+	be.Send(&pgproto3.AuthenticationCleartextPassword{})
+	if err := be.Flush(); err != nil {
+		return authOutcome{}, err
+	}
+	// Row 2.8: after this, EVERY type-`p` frame decodes as a PasswordMessage,
+	// SASL- and GSS-shaped bytes included. There is no distinguishable SASL
+	// path to leak, because by the protocol there is no SASL path at all
+	// once cleartext is what was offered.
+	//
+	// NO TEST CAN OBSERVE THIS CALL, and that is worth stating rather than
+	// leaving for someone to discover by deleting it. pgproto3 decodes an
+	// unset auth type as a PasswordMessage anyway, in a branch its own source
+	// labels "to maintain backwards compatibility" — so removing this line
+	// changes nothing today. It is here because that is a fallback the
+	// library has told us is a fallback, and a surface whose SASL-shaped
+	// frames must not take a SASL path should say which decode it wants
+	// rather than inherit one that exists to avoid breaking old callers.
+	if err := be.SetAuthType(pgproto3.AuthTypeCleartextPassword); err != nil {
+		return authOutcome{}, err
+	}
+
+	if err := conn.SetDeadline(l.now().Add(l.dl.auth)); err != nil {
+		return authOutcome{}, err
+	}
+	msg, err := be.Receive()
+	if err != nil {
+		// A read failure is not a denial: nothing was presented. It closes
+		// without a frame for the same reason a TLS failure does.
+		return authOutcome{}, err
+	}
+	pm, ok := msg.(*pgproto3.PasswordMessage)
+	if !ok {
+		// A frame that is not type-`p` before authentication — a Query, a
+		// Parse. Unambiguous protocol violation, and the peer's fault, so it
+		// is charged to their address like any other failed attempt.
+		return authOutcome{Denied: reasonPreAuthProtocolViolation, Counts: true}, nil
+	}
+
+	res, aerr := l.authn.OpenWireSession(ctx, pm.Password, params["user"], params["database"], hostOf(peer))
+	if aerr != nil {
+		if reason := exec.DenialReason(aerr); reason != "" {
+			return authOutcome{Denied: denialReason(reason), Counts: true}, nil
+		}
+		// A store failure. The wire still gets the uniform denial — telling
+		// a caller that our database is unreachable is an answer they have
+		// not earned either — but the audit says what it was, and the
+		// address is NOT charged for our outage.
+		l.onLog(fmt.Sprintf("frontdoor: authenticating %s: %v", peer, aerr))
+		return authOutcome{Denied: reasonAuthStoreError}, nil
+	}
+	return authOutcome{Session: res}, nil
+}
+
+// completeHandshake is row 2.9: the success sequence, in the protocol's order.
+//
+// Nothing here acquires anything. Every slot, the lease and the memory charge
+// were taken atomically inside row 2.7, which is what makes it true that a
+// client seeing ReadyForQuery is a client whose capacity is already held —
+// there is no window between "you are in" and "and there was room".
+func (l *Listener) completeHandshake(be *pgproto3.Backend, res exec.WireSessionResult, params map[string]string) error {
+	be.Send(&pgproto3.AuthenticationOk{})
+	for _, ps := range synthesizedStatuses(res, params) {
+		be.Send(ps)
+	}
+	key, err := newBackendKey()
+	if err != nil {
+		return err
+	}
+	be.Send(key)
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	return be.Flush()
+}
+
+// synthesizedStatuses is §3.3's three overridden values.
+//
+// ONLY the three. §3.3 requires the target connection's own reported set to
+// be forwarded VERBATIM ahead of these, and that set does not exist until a
+// lease is held — which is F1's slice. Sending a plausible fixed list in the
+// meantime is precisely what §3.3 forbids and would be worse than sending
+// nothing, because a client would believe it had been told the server's
+// DateStyle. The matrix cell records the split (rev 6).
+func synthesizedStatuses(res exec.WireSessionResult, params map[string]string) []pgproto3.BackendMessage {
+	return []pgproto3.BackendMessage{
+		// The echo of §3.1's accepted application_name. Absent is a legal
+		// startup, and an empty echo is the honest answer to it.
+		&pgproto3.ParameterStatus{Name: "application_name", Value: params["application_name"]},
+		// ALWAYS off. A client asking whether it is superuser is asking a
+		// question about the TARGET's role, and the answer through this
+		// surface is that autodb's gates apply regardless of what the target
+		// would have said.
+		&pgproto3.ParameterStatus{Name: "is_superuser", Value: "off"},
+		// The autodb username, canonical rather than as typed.
+		&pgproto3.ParameterStatus{Name: "session_authorization", Value: res.UserName},
+	}
+}
+
+// newBackendKey mints the cancel key from the CSPRNG (matrix row 2.9, MF7).
+//
+// From crypto/rand and nowhere else. A cancel key IS a capability: whoever
+// holds it can cancel that session's running statement, so a key drawn from a
+// process-id-and-timestamp scheme — the shape this kind of code drifts into —
+// is one a stranger can guess and use.
+func newBackendKey() (*pgproto3.BackendKeyData, error) {
+	var b [4 + CancelKeyLen]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return nil, fmt.Errorf("frontdoor: cancel key: %w", err)
+	}
+	return &pgproto3.BackendKeyData{
+		ProcessID: binary.BigEndian.Uint32(b[0:4]),
+		SecretKey: b[4:],
+	}, nil
+}

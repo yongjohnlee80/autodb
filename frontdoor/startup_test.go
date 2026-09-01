@@ -22,6 +22,23 @@ import (
 // assertion of "no events" would have passed forever.
 func liveListener(t testing.TB) (*Listener, func() []Event, string) {
 	t.Helper()
+	return listenerWith(t, Options{})
+}
+
+// unthrottled is the per-source allowance for harnesses that make many
+// refused connections from 127.0.0.1 in one test.
+//
+// Raised, never removed, and only where the throttle is not the subject: a
+// timing harness that takes thirty samples would otherwise be measuring how
+// fast the rate limiter closes a socket rather than how fast the denial path
+// answers, and would report a beautifully uniform result about the wrong
+// thing. The throttle has its own cells.
+const unthrottled = 1 << 20
+
+// listenerWith starts a real listener on a real port with real TLS material,
+// merging the caller's options over the test defaults.
+func listenerWith(t *testing.T, opt Options) (*Listener, func() []Event, string) {
+	t.Helper()
 	now := time.Now()
 	c := issueChain(t, []string{"autodb.example.com"}, now.Add(-time.Hour), now.Add(24*time.Hour))
 	cfg, err := LoadServerTLS(fdWith(c.bundle, c.key, c.ca, "autodb.example.com"), now)
@@ -30,11 +47,16 @@ func liveListener(t testing.TB) (*Listener, func() []Event, string) {
 	}
 	var mu sync.Mutex
 	var events []Event
-	l, err := Open("127.0.0.1:0", cfg, Options{OnEvent: func(e Event) {
+	inner := opt.OnEvent
+	opt.OnEvent = func(e Event) {
 		mu.Lock()
 		events = append(events, e)
 		mu.Unlock()
-	}})
+		if inner != nil {
+			inner(e)
+		}
+	}
+	l, err := Open("127.0.0.1:0", cfg, opt)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

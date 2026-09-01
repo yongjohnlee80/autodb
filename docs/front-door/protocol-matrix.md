@@ -1,6 +1,6 @@
 # Front-door protocol matrix — PostgreSQL wire v3
 
-**Status:** rev 4 — pre-F0 gate document (ADR-0075 §5). F0 implementation
+**Status:** rev 5 — pre-F0 gate document (ADR-0075 §5). F0 implementation
 does not begin until this matrix is lector-reviewed and accepted.
 Rev 2 folds lector r0: MF1 full-check atomic auth/reservation; MF2
 pg-conformant discard-through-Sync (Close NOT exempt) + segment entry on
@@ -19,6 +19,39 @@ Rev 4 folds ADR-0075 **Amendment 1** into row 2.7: IP admission is
 `(global ∨ user-layer) ∧ PAT-if-set`, not the AND rev 3 described. Edited by
 the F0 implementer alongside the code that implements it, per the
 code-adjacent rule.
+
+**Rev 5 (F0e) moves four cells, all of them narrowings the implementation
+forced.** Each is called out where it lands, and none was a free choice:
+
+1. **Auth attempts per connection: 3 → 1.** Cleartext has ONE round, and
+   re-prompting is not a defence — libpq answers a repeated
+   `AuthenticationCleartextPassword` with the same password it already sent,
+   so a ceiling of three spends three PAT verifications on one wrong
+   password. That is amplification pointed at the server. PostgreSQL closes
+   on the first failure and so do we; three remains the right ceiling the day
+   a multi-round method is offered, and there is none to offer.
+2. **Per-source-IP: 10 attempts/min → 10 FAILED attempts/min.** Counting
+   successes would cap every connection pool in the estate at ten
+   connections a minute from one host — an outage with a security story
+   attached, firing on the most ordinary event in the system, an application
+   restarting and refilling its pool. Failures charged: a denied credential,
+   a pre-auth protocol violation, a refused startup, and (per row 2.1b) a
+   TLS handshake failure. **Not** charged: a successful login, a failure of
+   OUR meta store, and a peer that opened a connection and went away without
+   asking for anything — the last because that is what a TCP health check
+   looks like from here, and throttling an operator's own monitoring is a
+   limiter configured by nobody, defending against nothing.
+3. **Row 2.9's `ParameterStatus` set splits across F0e and F1.** §3.3
+   requires the target's own reported set forwarded VERBATIM, and that set
+   does not exist until a lease is held. F0e sends the three synthesized
+   values only; the forwarded set arrives with the lease in F1. Sending a
+   plausible fixed list in the meantime is what §3.3 exists to forbid.
+4. **Accept-time refusals are audited `fd.budget_refuse`** (§1.3's existing
+   vocabulary) with the internal reasons `frontdoor/source-ip-throttled`,
+   `frontdoor/connection-cap`, `frontdoor/pre-auth-connection-cap` and
+   `frontdoor/control-lane-exhausted`. They close WITHOUT a frame: nothing
+   has negotiated TLS at that point, so a PostgreSQL error would be
+   unreadable bytes to a client waiting for an `S` or an `N`.
 
 **Owner:** the F0 implementer (authored by jarvis as ADR-0075's author;
 ownership transfers with F0). **Companion to:** KB ADR-0075 (accepted
@@ -72,7 +105,12 @@ internal reason recorded, wire reason generic), `fd.session_open` /
 effect — extended: at every `Execute`), `fd.stmt_outcome`, `fd.refused`
 (gate rule id), `fd.cancel_received` / `fd.cancel_applied` /
 `fd.cancel_stale`, `fd.backpressure_enter` / `fd.backpressure_exit`,
-`fd.budget_refuse`, `fd.conn_close` (cause). Attempt-before-effect is
+`fd.budget_refuse` (rev 5: also the accept-time refusals —
+`frontdoor/source-ip-throttled`, `frontdoor/connection-cap`,
+`frontdoor/pre-auth-connection-cap`, `frontdoor/control-lane-exhausted` —
+which close without a frame, before any handler allocates for the
+connection, so `fd.conn_open` is absent for them by construction),
+`fd.conn_close` (cause). Attempt-before-effect is
 inherited from core: **no target-visible effect without a prior durable
 attempt record.**
 
@@ -129,16 +167,16 @@ exists).
 |---|---|---|---|---|---|---|
 | 2.1 | `SSLRequest` | S0 | **Required.** Answer `S`, begin TLS. A second `SSLRequest` after TLS = protocol violation → close. | pre-auth cap 64 KiB | `fd.conn_open` | plaintext `StartupMessage` at S0 → uniform denial, close (no fallback) |
 | 2.1a | Direct TLS (PG 17 `sslnegotiation=direct`: first bytes are a TLS ClientHello, ALPN `postgresql`) | S0 | **Refused in v1**: bytes that are neither a length-prefixed request nor within the pre-auth cap → close immediately (audited `fd.tls_fail(direct-tls-unsupported)`). Candidate for a later rev; clients fall back to `SSLRequest` negotiation per libpq defaults. | pre-auth cap | `fd.tls_fail` | — |
-| 2.1b | TLS layer behavior | S0→S1 | Server cert/key from config, **validated at startup BEFORE bind/listen** (ADR-0075: absent, unparsable, expired/not-yet-valid material, a broken chain, or a key/cert mismatch **fails start or enable** — the front door never listens with identity it cannot prove; SAN coverage of the configured host names is checked and a mismatch fails start too). **Reload on config-reload applies to NEW connections only** (established sessions keep their session keys — never dropped by a cert rotation); a reload with invalid material is REFUSED, keeping the last-good identity, loudly audited. TLS handshake failure: `fd.tls_fail(reason)` audited, close, **counted against the per-source-IP auth rate** (10/min) so handshake grinding is throttled with auth grinding. | — | `fd.tls_ok` / `fd.tls_fail` | — |
+| 2.1b | TLS layer behavior | S0→S1 | Server cert/key from config, **validated at startup BEFORE bind/listen** (ADR-0075: absent, unparsable, expired/not-yet-valid material, a broken chain, or a key/cert mismatch **fails start or enable** — the front door never listens with identity it cannot prove; SAN coverage of the configured host names is checked and a mismatch fails start too). **Reload on config-reload applies to NEW connections only** (established sessions keep their session keys — never dropped by a cert rotation); a reload with invalid material is REFUSED, keeping the last-good identity, loudly audited. TLS handshake failure: `fd.tls_fail(reason)` audited, close, **counted against the per-source-IP auth rate** (10/min) so handshake grinding is throttled with auth grinding. **Rev 5 exception:** a peer that opened the connection and sent NOTHING (`peer-gone-before-startup`) is audited and NOT counted — that shape is a TCP health check, and charging it would throttle an operator's own monitoring out of the estate within a minute. | — | `fd.tls_ok` / `fd.tls_fail` | — |
 | 2.2 | `GSSENCRequest` | S0 | **Refused**: answer `N`; if the client then proceeds without TLS → uniform denial + close. | pre-auth cap | — | — |
 | 2.3 | `CancelRequest` | S0 | Accepted **without TLS** (protocol-conformant: cancel connections are plaintext); processed per §6; connection closed immediately after. | control lane | `fd.cancel_received` | stale/unknown key = silent no-op (`fd.cancel_stale`), close |
 | 2.4 | `StartupMessage` (protocol 3.0) | S1 | Parse parameters per §3. Any refused parameter → uniform denial. | pre-auth cap | — | uniform denial (28000), close |
 | 2.5 | `StartupMessage` (major 3, minor > 0, and/or unrecognized `_pq_.*` options) | S1 | **Negotiate down (MF4, ruling 3)**: emit `NegotiateProtocolVersion` (newest supported = 3.0, plus the list of unrecognized `_pq_.*` option names) and **continue at 3.0 semantics** — pg-conformant, never a hard refusal. | pre-auth cap | — | — |
 | 2.5a | `StartupMessage` (major ≠ 3) | S1 | **Refused**: uniform denial, close (unsupported major). | pre-auth cap | `fd.refused` | uniform denial, close |
 | 2.6 | (server →) `AuthenticationCleartextPassword` | S2 | The only offered method. PATs are verified server-side against SHA-256 records; cleartext-over-TLS is the Q4-ratified design. SCRAM is **not offered** (hashed PATs cannot back SCRAM verifiers). | — | — | — |
-| 2.7 | `PasswordMessage` (PAT) | S3 | **Full verification chain (MF1), then one atomic reservation.** Verify: token exists ∧ **is a front-door PAT** (scope check — no other credential class authenticates here) ∧ not expired ∧ not revoked ∧ owner matches startup `user` ∧ user enabled ∧ **IP admission: (global allowlist ∨ the user's `user_ip_allowlist` rows)** ∧ **PAT `allowed_ips` if set** (ADR-0075 **Amendment 1**, Johno 2026-08-31 — this was an AND of the two layers until the amendment; OR because the global list carries shared infrastructure and under AND a colleague at an already-listed office still needed a personal row, while a home address had to be listed GLOBALLY to be usable, bloating the perimeter and making the per-user layer a second registration rather than a narrowing. Accepted cost, on the record: a stolen PAT works from any globally-listed address for any account; per-token `allowed_ips` is the mitigation. Empty `allowed_ips` INHERITS the admission set — it does not mean "nowhere". The admission SOURCE, global or user-row, is audited) ∧ **target validation**: the `database` connection exists ∧ is enabled ∧ the user holds a grant on it ∧ its profile admits front-door use. Then **atomically reserve, as ONE operation**: per-user session slot (8) + global slot (256) + target lease (`frontdoor_max_leases`) + the session's fixed overhead charge — no check-then-reserve gap (a cap observed free must be the cap acquired); partial reservation is impossible, failure rolls back nothing-held. Which check failed is audit-only. | pre-auth cap | `fd.auth_ok` / `fd.auth_denied` | uniform denial (28000 `invalid_authorization_specification`), close. 3 attempts/conn, 10/min/source-IP. Lease-cap failure: wire = the same uniform 28000; audit identity = `lease-cap-exceeded` (ruling 4). |
+| 2.7 | `PasswordMessage` (PAT) | S3 | **Full verification chain (MF1), then one atomic reservation.** Verify: token exists ∧ **is a front-door PAT** (scope check — no other credential class authenticates here) ∧ not expired ∧ not revoked ∧ owner matches startup `user` ∧ user enabled ∧ **IP admission: (global allowlist ∨ the user's `user_ip_allowlist` rows)** ∧ **PAT `allowed_ips` if set** (ADR-0075 **Amendment 1**, Johno 2026-08-31 — this was an AND of the two layers until the amendment; OR because the global list carries shared infrastructure and under AND a colleague at an already-listed office still needed a personal row, while a home address had to be listed GLOBALLY to be usable, bloating the perimeter and making the per-user layer a second registration rather than a narrowing. Accepted cost, on the record: a stolen PAT works from any globally-listed address for any account; per-token `allowed_ips` is the mitigation. Empty `allowed_ips` INHERITS the admission set — it does not mean "nowhere". The admission SOURCE, global or user-row, is audited) ∧ **target validation**: the `database` connection exists ∧ is enabled ∧ the user holds a grant on it ∧ its profile admits front-door use. Then **atomically reserve, as ONE operation**: per-user session slot (8) + global slot (256) + target lease (`frontdoor_max_leases`) + the session's fixed overhead charge — no check-then-reserve gap (a cap observed free must be the cap acquired); partial reservation is impossible, failure rolls back nothing-held. Which check failed is audit-only. | pre-auth cap | `fd.auth_ok` / `fd.auth_denied` | uniform denial (28000 `invalid_authorization_specification`), close. **1 attempt/conn** (rev 5: was 3 — cleartext has one round and re-prompting spends N verifications on one wrong password; 3 returns if a multi-round method is ever offered), **10 FAILED attempts/min/source-IP** (rev 5: was "attempts"; counting successes caps every pool at ten connections a minute from one host). Lease-cap failure: wire = the same uniform 28000; audit identity = `lease-cap-exceeded` (ruling 4). |
 | 2.8 | Any other type-`p` frame in S3 | S3 | **There is no distinguishable SASL path (MF4):** once `AuthenticationCleartextPassword` is offered, every type-`p` frame IS a `PasswordMessage` by protocol — SASL-shaped bytes are simply a wrong password. Verified per row 2.7; fails the token lookup; uniform denial. `GSSResponse` is likewise type-`p` and takes the same path. | pre-auth cap | `fd.auth_denied` | uniform denial, close |
-| 2.9 | (server →) on success | S3→S4 | `AuthenticationOk`; `ParameterStatus` set per §3.3; `BackendKeyData` (CSPRNG, MF7); `ReadyForQuery('I')`. The ExecSession, lease, and all slots were already **atomically reserved in row 2.7** — nothing acquired between `AuthenticationOk` and ready. | (charged in 2.7) | `fd.session_open` | — |
+| 2.9 | (server →) on success | S3→S4 | `AuthenticationOk`; `ParameterStatus` set per §3.3; `BackendKeyData` (CSPRNG, MF7, **4-byte secret** — every client is negotiated down to 3.0 by row 2.5 and 3.0's cancel key is a fixed int32; pgproto3 models it as a `[]byte` for 3.2 and would happily send a longer one to a client that reads four and then loses every frame boundary after it); `ReadyForQuery('I')`. **Rev 5 split:** F0e emits the three SYNTHESIZED statuses only; §3.3's verbatim forwarded set needs the target's own reported values and therefore a lease, which is F1's. The ExecSession, lease, and all slots were already **atomically reserved in row 2.7** — nothing acquired between `AuthenticationOk` and ready. | (charged in 2.7) | `fd.session_open` | — |
 
 Deadlines: TLS/startup/auth 10s each (ceiling 60s). Pre-auth global
 connection cap 64, auth workers 16.
@@ -176,7 +214,11 @@ would silently drop statuses added by newer servers (`search_path` on
 PG 14+, `in_hot_standby`, `scram_iterations`, …). Three values are
 **overridden with synthesized ones** after the forwarded set:
 `application_name` (echo of §3.1), `is_superuser` (**always `off`**),
-`session_authorization` (the autodb username). Later `ParameterStatus`
+`session_authorization` (the autodb username — the CANONICAL account name,
+not the client's spelling of it, which row 2.7 has already matched
+case-insensitively: the identity a session reports should be the one the
+grants are written against). **Rev 5:** the three synthesized values ship in
+F0e; the forwarded set ships in F1, with the lease that produces it. Later `ParameterStatus`
 messages from the target during the session are **forwarded verbatim**,
 whatever their name — future-safe by construction. The UTF8 pin (§3.1)
 is validated against this forwarded set at lease acquisition.
@@ -306,6 +348,10 @@ All with §8a shape; connection remains usable unless marked fatal.
 | Idle-in-tx timeout (90s / 10m debug) | FATAL `25P03` (`idle_in_transaction_session_timeout` — pg-conformant identity), tx rolled back + audited (which limit) | `gate/idle-in-tx-timeout` | Action: rollback + close per ADR-0074 timeout semantics. |
 | Max-tx / idle-session (30m) deadlines | FATAL `57P05` shape (idle session) / §8a per ADR-0074 for max-tx | `gate/session-deadline` | Action: rollback if in-tx, close; audited. |
 | Startup-phase caps (pre-auth 64 KiB msg, 64 conns, auth attempts, **lease/session caps at auth**) | uniform `28000`, close | internal audit identities only — incl. `lease-cap-exceeded`, `session-cap-exceeded` (ruling 4: wire stays uniform; audit carries the stable identity) | — |
+| Accept-time capacity or throttle (rev 5) | **no frame** — the connection is closed before TLS, where a PostgreSQL error is unreadable bytes to a client waiting for `S`/`N` | `frontdoor/source-ip-throttled`, `frontdoor/connection-cap`, `frontdoor/pre-auth-connection-cap`, `frontdoor/control-lane-exhausted`, audited `fd.budget_refuse` | Action: close at accept, before the handler allocates. |
+| A non-`p` frame in `S3` (rev 5) | uniform `28000`, close | `frontdoor/pre-auth-protocol-violation` — audited as a DENIAL and charged to the source, because sending a `Query` before authenticating is the peer's doing | Action: uniform denial + close; the frame never reaches the chain. |
+| OUR store is unreachable during row 2.7 (rev 5) | uniform `28000`, close — telling a caller our database is down is an answer they have not earned either | `frontdoor/auth-store-error`, and deliberately **not** counted in the credential-attack trail nor charged to the source: the peer may have presented a perfectly good credential and been refused for our outage | Action: uniform denial + close; audited distinctly. |
+| Post-auth message before the F1 slice ships (rev 5, temporary) | `0A000` (`feature_not_supported`) | `frontdoor/post-auth-not-implemented` | Action: accurate refusal + close. A silence here would look like a network fault and send someone debugging the wrong layer. Removed when F1 lands. |
 | Out-of-state / unknown message | `08P01` (fatal) | `frontdoor/protocol-violation` | Action: error + close. |
 
 Reader role: every statement wrapped read-only engine-side; write attempts
@@ -370,8 +416,8 @@ is ~29 GiB — shape limits are NOT the bound).
 | Named statements 256/1024, portals 64/256 per session | `Parse`/`Bind` named objects |
 | Pre-auth message cap 64 KiB / 256 KiB | §2 rows 2.1–2.8 |
 | Global budget 1 GiB / 4 GiB (+ control lane §1.4) | §8 |
-| Pre-auth conns 64 / auth workers 16 | accept + §2 |
-| Auth attempts 3/conn, 10/min/IP | §2 row 2.7 |
+| Pre-auth conns 64 / auth workers 16 | accept + §2 (the pre-auth slot is RETURNED at authentication, not at close: it bounds anonymous connections, and holding it for a session's life would let a few long-lived legitimate sessions consume the allowance that keeps half-open ones from starving them) |
+| Auth attempts **1/conn**, **10 FAILED/min/IP** (rev 5) | §2 row 2.7 |
 | `reserved_headroom` 4; `frontdoor_max_leases` derived ≥ 1 | the row-2.7 atomic reservation (row 2.9 acquires nothing; any later target checkout is NOT admission control and can neither race nor emit `fd.auth_ok` before capacity is held) |
 
 ---

@@ -38,6 +38,12 @@ type WireSessionResult struct {
 	// PATName is the credential that authenticated, for the audit trail:
 	// who, under whose account, with which token.
 	PATName string
+	// UserName is the CANONICAL owner name, not the client's spelling of
+	// it. The startup `user` parameter matched it case-insensitively (step
+	// 2), so echoing the parameter back as session_authorization would let
+	// the client's casing become the session's identity — and the identity
+	// a session reports should be the one the grants are written against.
+	UserName string
 }
 
 // wireDenial carries the INTERNAL reason for an audit row. The caller turns
@@ -58,6 +64,14 @@ func DenialReason(err error) string {
 }
 
 func deny(reason string) error { return wireDenial{reason: reason} }
+
+// WireDenial builds a denial with the given internal reason.
+//
+// Exported as the pair of DenialReason: the package that owns the reason
+// vocabulary owns how one is constructed, so a caller in another package
+// cannot invent a denial shape this package would not recognise. The front
+// door's cells build one to prove the wire treats every reason identically.
+func WireDenial(reason string) error { return deny(reason) }
 
 // The internal denial reasons. Each names a distinct operator-visible cause;
 // none of them ever reaches the wire.
@@ -179,7 +193,7 @@ func (e *Engine) OpenWireSession(ctx context.Context, presented, startupUser, da
 	e.auth.NotePATUse(ctx, pat)
 	return WireSessionResult{
 		SessionID: id, UserID: pat.UserID, ConnID: connRow.ID,
-		AdmissionSource: src, PATName: pat.Name,
+		AdmissionSource: src, PATName: pat.Name, UserName: owner.Name,
 	}, nil
 }
 

@@ -39,6 +39,29 @@ const (
 	StartupDeadline      = 10 * time.Second
 )
 
+// deadlines is the phase budget one connection runs under.
+//
+// A struct rather than the constants read directly, so a cell can shorten
+// them and still exercise the REAL enforcement path. The alternative is a
+// slowloris cell that waits ten seconds per case, which is the kind of cost
+// that gets a suite marked short and then skipped — a deadline nobody tests
+// because testing it is slow is a deadline nobody has.
+type deadlines struct {
+	tls     time.Duration
+	startup time.Duration
+	auth    time.Duration
+	idle    time.Duration
+}
+
+func defaultDeadlines() deadlines {
+	return deadlines{
+		tls:     TLSHandshakeDeadline,
+		startup: StartupDeadline,
+		auth:    AuthDeadline,
+		idle:    IdleDeadline,
+	}
+}
+
 // Protocol version constants. autodb speaks 3.0 and negotiates 3.x down to
 // it, per matrix row 2.5.
 const (
@@ -74,7 +97,7 @@ var errCancelRequest = errors.New("frontdoor: cancel request")
 // without exception (ADR-0075 §4). The ordering is not a preference — a
 // credential read before TLS is a credential an active MITM already has, and
 // this surface's whole credential model assumes the wire is private.
-func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Conn, startupOutcome, error) {
+func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadlines) (*tls.Conn, startupOutcome, error) {
 	// The pre-auth backend reads the SSLRequest from the PLAINTEXT
 	// connection. It is bounded before it reads anything, so a peer's first
 	// act cannot be to name a length we would then allocate for.
@@ -100,7 +123,7 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 	// so the loop cannot become a way to hold a socket open for free.
 	var sawGSS bool
 	for {
-		if err := raw.SetDeadline(now().Add(TLSHandshakeDeadline)); err != nil {
+		if err := raw.SetDeadline(now().Add(dl.tls)); err != nil {
 			return nil, startupOutcome{}, err
 		}
 		// Direct TLS is recognised by its ClientHello SIGNATURE, before any
@@ -150,7 +173,7 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 			// count credential attacks. It also means no denial FRAME is
 			// written — a client speaking TLS cannot read a PostgreSQL
 			// error, so sending one is noise on the wire and a lie in the log.
-			return nil, startupOutcome{}, tlsFailure(s0FailureReason(err))
+			return nil, startupOutcome{}, s0Failure(err)
 		}
 
 		switch msg := first.(type) {
@@ -185,16 +208,20 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time) (*tls.Co
 	}
 
 	// TLS, on its own deadline.
-	if err := raw.SetDeadline(now().Add(TLSHandshakeDeadline)); err != nil {
+	if err := raw.SetDeadline(now().Add(dl.tls)); err != nil {
 		return nil, startupOutcome{}, err
 	}
 	secure := tls.Server(raw, tlsCfg)
 	if err := secure.Handshake(); err != nil {
-		return nil, startupOutcome{}, fmt.Errorf("frontdoor: TLS handshake: %w", err)
+		// Classified rather than wrapped, so the audit trail carries a
+		// STABLE reason an operator can count and the library's wording
+		// rides in the detail. A reason string that changes when a
+		// dependency rewords an error is a reason nobody can alert on.
+		return nil, startupOutcome{}, tlsFailureDetail("tls-handshake", err.Error())
 	}
 
 	// Everything from here is inside TLS.
-	if err := secure.SetDeadline(now().Add(StartupDeadline)); err != nil {
+	if err := secure.SetDeadline(now().Add(dl.startup)); err != nil {
 		return secure, startupOutcome{}, err
 	}
 	be := pgproto3.NewBackend(secure, secure)
@@ -358,11 +385,34 @@ func (emptyReader) Read([]byte) (int, error) { return 0, errors.New("frontdoor: 
 // would put a non-authentication event in the trail an operator reads to
 // count credential attacks — and no denial frame is written either, because a
 // client speaking raw TLS cannot read a PostgreSQL error message.
-type tlsFailErr struct{ reason string }
+type tlsFailErr struct {
+	reason string
+	detail string
+	// attributable reports whether the PEER caused this.
+	//
+	// A connection that opened and went away before sending a byte did not
+	// fail anything — that is what a TCP health check looks like from here,
+	// and charging it to the source address would throttle an operator's own
+	// monitoring out of the estate within a minute. A peer that sent bytes we
+	// refused, or that held the socket open until the deadline, is the one
+	// row 2.1b means.
+	attributable bool
+}
 
 func (e tlsFailErr) Error() string { return "frontdoor: " + e.reason }
 
-func tlsFailure(reason string) error { return tlsFailErr{reason: reason} }
+func tlsFailure(reason string) error {
+	return tlsFailErr{reason: reason, attributable: true}
+}
+
+func tlsFailureDetail(reason, detail string) error {
+	return tlsFailErr{reason: reason, detail: detail, attributable: true}
+}
+
+// peerGone marks a connection that ended before it asked for anything.
+func peerGone(reason string) error {
+	return tlsFailErr{reason: reason, attributable: false}
+}
 
 // classifyStartupLength decides an S0 frame's fate from its DECLARED length.
 //
@@ -389,13 +439,23 @@ func classifyStartupLength(declared uint32) (reason string, bad bool) {
 // request code.
 const startupMinBody = 4
 
-// s0FailureReason names an S0 read failure that length classification did not
-// already catch — a well-sized frame whose CONTENT is unusable.
-func s0FailureReason(err error) string {
-	if strings.Contains(err.Error(), "unknown startup message code") {
-		return "startup-code-unknown"
+// s0Failure names an S0 read failure that length classification did not
+// already catch, and says whether the peer is answerable for it.
+//
+// An EOF before any byte arrived is a connection that opened and closed —
+// a port scan, a load balancer's health probe, a client that changed its
+// mind. It is audited, because an operator may want to see it, and it is NOT
+// charged to the source address, because throttling a health check for being
+// a health check is an outage we would have configured ourselves.
+func s0Failure(err error) error {
+	switch {
+	case strings.Contains(err.Error(), "unknown startup message code"):
+		return tlsFailure("startup-code-unknown")
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return peerGone("peer-gone-before-startup")
+	default:
+		return tlsFailure("startup-unreadable")
 	}
-	return "startup-unreadable"
 }
 
 // isTLSClientHello reports whether these bytes open a TLS record.
