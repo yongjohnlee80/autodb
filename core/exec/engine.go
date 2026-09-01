@@ -393,6 +393,13 @@ func classToAction(c Class) auth.Action {
 		return auth.ActionRead
 	case ClassWrite:
 		return auth.ActionWrite
+	case ClassControl:
+		// Stateful controls re-enter run on token-backed sessions. PostgreSQL
+		// permits LOCK TABLE inside a read-only transaction, so this floor is
+		// the boundary that stops a reader taking production locks. The wire
+		// stateful route bypasses run and owns the equivalent check in
+		// wireControl.
+		return auth.ActionDDL
 	default:
 		return auth.ActionDDL
 	}

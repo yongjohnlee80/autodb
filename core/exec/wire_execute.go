@@ -132,6 +132,14 @@ func (e *Engine) wireControl(
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, auth.ErrDenied)
 	}
 
+	// LOCK is real SQL, not a transaction verb, and PostgreSQL permits it in
+	// read-only transactions. The token path re-enters run and gets this floor
+	// from classToAction; this wire-only stateful route bypasses run, so it must
+	// enforce the equivalent boundary here.
+	if stmt.Verb == "LOCK" && !pol.MayWrite {
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, auth.ErrDenied)
+	}
+
 	// SET and LOCK are real SQL that must reach the server; the transaction
 	// verbs never do.
 	if statefulControlVerbs[stmt.Verb] {
