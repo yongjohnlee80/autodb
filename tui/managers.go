@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/style"
 	"github.com/yongjohnlee80/golib/tui/widget"
@@ -516,4 +517,188 @@ func (m *Model) openUserIPManager(userID int64, who string) {
 			}},
 		})
 	g.float = m.openFloat("allowed IPs — "+who, g, managerWidth)
+}
+
+// openPATManager lists, creates and revokes personal access tokens.
+//
+// This is the front door's only credential: the pgwire listener accepts a PAT
+// and nothing else, so before this screen existed the sole way to obtain one
+// was a raw `auth.token_create` RPC call. The backend shipped in F0c; this is
+// the surface over it.
+func (m *Model) openPATManager(userID int64, who string) {
+	cols := []widget.TableColumn[PATRow]{
+		{Title: "NAME", Width: 20, Cell: func(r PATRow) string { return r.Name }},
+		{Title: "EXPIRES", Width: 12, Cell: func(r PATRow) string { return shortStamp(r.ExpiresAt) }},
+		{Title: "LAST USED", Width: 12, Cell: func(r PATRow) string { return shortStamp(r.LastUsed) }},
+		{Title: "IPS", Width: 6, Cell: func(r PATRow) string {
+			// "any" is the honest word for an empty allowlist: the token is
+			// then bounded only by the user's own rows, not by itself.
+			if len(r.AllowedIPs) == 0 {
+				return "any"
+			}
+			return strconv.Itoa(len(r.AllowedIPs))
+		}},
+		{Title: "STATE", Cell: func(r PATRow) string {
+			if r.Revoked {
+				return "revoked"
+			}
+			return "active"
+		}},
+	}
+	var g *manager[PATRow]
+	g = newManager(m, cols,
+		func(c context.Context, b *Bound) ([]PATRow, error) { return b.PATs(c, userID) },
+		[]managerAction[PATRow]{
+			{'a', "create token", func(PATRow, bool) { m.openPATForm(g, userID) }},
+			{'D', "revoke", func(sel PATRow, ok bool) {
+				if !ok {
+					return
+				}
+				if sel.Revoked {
+					m.setStatus(sel.Name + " is already revoked")
+					return
+				}
+				// Revocation is irreversible and immediately locks out
+				// whatever is using the token, so it asks first.
+				m.openLeader("revoke "+sel.Name+"?", []leaderEntry{
+					{'y', "revoke it", func() {
+						managerCall(g, "revoke "+sel.Name, func(c context.Context, b *Bound) error {
+							return b.RevokePAT(c, userID, sel.Name)
+						})
+					}},
+					{'n', "keep it", func() {}},
+				})
+			}},
+		})
+	g.float = m.openFloat("access tokens — "+who, g, managerWidth)
+}
+
+// shortStamp trims an RFC3339 stamp to its date, and passes through the
+// non-timestamps the wire uses for "never" so they stay readable.
+func shortStamp(s string) string {
+	if len(s) >= 10 && strings.Count(s[:10], "-") == 2 {
+		return s[:10]
+	}
+	return s
+}
+
+// openPATForm collects a token's name, lifetime and optional IP restriction.
+//
+// It loads the caller's own allowlist FIRST, because allowed_ips must be a
+// subset of it (ADR-0075 §4). Validating here means a bad entry is refused
+// while the user still has the form open and can fix it, rather than coming
+// back as a wire error after the fact.
+func (m *Model) openPATForm(g *manager[PATRow], userID int64) {
+	bound := g.bound
+	m.ctx.Go(func(c context.Context) (any, error) {
+		own, err := bound.UserIPs(c, userID)
+		if err != nil {
+			msg := WireErrorMessage(err)
+			return managerReload{gen: bound.Gen(), apply: func() { g.model.setError(msg) }}, nil
+		}
+		return managerReload{gen: bound.Gen(), apply: func() {
+			m.patForm(g, userID, own, len(g.items))
+		}}, nil
+	})
+}
+
+func (m *Model) patForm(g *manager[PATRow], userID int64, own []UserIPRow, active int) {
+	title := fmt.Sprintf("create token (%d of %d used)", active, auth.PATMaxPerUser)
+	m.openForm(title, []formField{
+		field("name (e.g. laptop-psql, jetbrains)"),
+		field("expires in days (blank = server default, max 365)"),
+		field("restrict to IPs, comma separated (blank = any of your allowed IPs)"),
+	}, func(v []string) (bool, string) {
+		name := strings.TrimSpace(v[0])
+		if name == "" {
+			return false, "a name is required"
+		}
+		var days int64
+		if d := strings.TrimSpace(v[1]); d != "" {
+			n, err := strconv.ParseInt(d, 10, 64)
+			if err != nil {
+				return false, "days must be a whole number"
+			}
+			// Mirrors the wire guard so the refusal arrives here, where the
+			// value can still be corrected.
+			if n < 1 || n > 365 {
+				return false, "days must be between 1 and 365, or blank for the default"
+			}
+			days = n
+		}
+		var ips []string
+		if raw := strings.TrimSpace(v[2]); raw != "" {
+			for _, part := range strings.Split(raw, ",") {
+				p := strings.TrimSpace(part)
+				if p == "" {
+					continue
+				}
+				pfx, perr := parseCIDROrAddr(p)
+				if perr != nil {
+					return false, p + " is not a valid IP or CIDR"
+				}
+				if !withinAny(pfx, own) {
+					return false, p + " is not inside your allowed IPs — add it there first"
+				}
+				ips = append(ips, p)
+			}
+		}
+		// Not managerCall: creation is the one action with a RESULT the user
+		// must see, and the secret has to reach the screen on the loop
+		// goroutine in the same apply that reloads the list.
+		bound := g.bound
+		m.ctx.Go(func(c context.Context) (any, error) {
+			out, err := bound.CreatePAT(c, name, days, ips)
+			if err != nil {
+				msg := WireErrorMessage(err)
+				return managerReload{gen: bound.Gen(), apply: func() {
+					g.model.setError("create " + name + ": " + msg)
+				}}, nil
+			}
+			return managerReload{gen: bound.Gen(), apply: func() {
+				g.model.setOK("create " + name + ": ok")
+				g.Reload()
+				m.revealPATSecret(out)
+			}}, nil
+		})
+		return true, ""
+	})
+}
+
+// revealPATSecret shows a freshly minted token. The store keeps only a
+// SHA-256, so this value is unrecoverable the moment the float closes — the
+// title says so, and `y` copies the secret ALONE (not the surrounding text)
+// into the editor register.
+func (m *Model) revealPATSecret(out PATSecret) {
+	m.openValueFloat("token "+out.Name+" — COPY IT NOW, it is never shown again"+
+		"; expires "+shortStamp(out.ExpiresAt), out.Secret)
+}
+
+// parseCIDROrAddr accepts either form and returns it as a prefix, so a bare
+// address compares as a /32 or /128 against the user's rows.
+func parseCIDROrAddr(s string) (netip.Prefix, error) {
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p, nil
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	return netip.PrefixFrom(a, a.BitLen()), nil
+}
+
+// withinAny reports whether want is contained by one of the user's rows.
+// Containment rather than equality: an allowlist of 10.0.0.0/8 should permit
+// a token restricted to 10.1.2.3.
+func withinAny(want netip.Prefix, own []UserIPRow) bool {
+	for _, r := range own {
+		have, err := parseCIDROrAddr(r.CIDR)
+		if err != nil {
+			continue
+		}
+		if have.Bits() <= want.Bits() && have.Contains(want.Addr()) {
+			return true
+		}
+	}
+	return false
 }
