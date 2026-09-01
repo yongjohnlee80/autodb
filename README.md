@@ -1,264 +1,442 @@
-# autodb
+<h1 align="center">autodb</h1>
 
-A security-first DB-IDE backend: one static Go binary that is an
-**msgpack-RPC server** (Neovim-native over TCP), a **standalone TUI**
-(lazysql-class, neovim keybindings), and — via the bundled Lua integration —
-the backend of [autovim](https://github.com/yongjohnlee80/autovim)'s `dbase`
-section. Built on [golib](https://github.com/yongjohnlee80/golib)
-(`dao`, `tui`, `logger`).
+<p align="center">
+  <strong>A security-first database IDE — for teams who cannot hand out production credentials.</strong>
+</p>
 
-Every frontend goes through one core: users (`admin | editor | reader`),
-per-connection grants, token sessions, IP whitelisting, encrypted-at-rest
-connection credentials, full audit of every executed statement, and
-guardrails such as blocking `UPDATE`/`DELETE` without a `WHERE` clause.
-Postgres, MySQL, and SQLite first.
+<p align="center">
+  One static Go binary. A terminal UI, a browser UI, a Neovim plugin, and a
+  PostgreSQL-wire front door — all going through one gate stack, one identity
+  model, and one audit trail.
+</p>
 
-## Status
+<p align="center">
+  <a href="https://github.com/yongjohnlee80/autodb/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yongjohnlee80/autodb/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/yongjohnlee80/autodb/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/yongjohnlee80/autodb"></a>
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+  <img alt="Go" src="https://img.shields.io/badge/go-1.25%2B-00ADD8">
+</p>
 
-**M6 — the standalone TUI is live.** `autodb --ui` is a working DB IDE:
-a three-pane layout (explorer / query editor / results), a vim-modal
-editor, lazy schema browsing, table and JSON results, connection,
-workspace and user management, per-workspace SQL notes, script history,
-and in-panel search. `autodb --serve` runs the msgpack-RPC server over
-the same core: config + meta-store (M2), identity/authz/audit (M3), the
-SQL execution engine (M4), and the handshake-gated method surface with
-the shared-server lifecycle (M5).
+---
 
-Next is **M7**, the autovim Lua integration. The milestone plan (M0–M9)
-and per-milestone ADRs live in the project knowledge base (kickoff
-record: ADR-0052; TUI architecture: ADR-0057).
+The usual way to give a developer database access is to give them the
+password. Then the password is in a `.env`, a DSN, a Slack thread and three
+laptops — and the audit log says `app_user` did it.
 
-## The TUI
+autodb is the other way. Nobody gets the credential. People get an **account**,
+a **role**, and a **grant on a specific connection**. The real DSN is encrypted
+at rest and only autodb can decrypt it. Every statement anyone runs — from the
+TUI, from Neovim, from a browser, or from `psql` through the front door — is
+classified, authorized, and written to an audit log with a name attached.
+
+## See it
+
+### In the terminal
+
+![autodb terminal UI](docs/media/autodb-tui.gif)
+
+*`autodb --ui` — a three-pane DB IDE with vim motions and a leader menu:
+explorer on the left, query editor top-right, results below. It closes on the
+script-history view, which is the audit trail as a queryable table: who ran
+what, against which connection, how long it took, how many rows, and the error
+if it failed.*
+
+### Inside Neovim
+
+![autodb inside Neovim](docs/media/autodb-neovim.gif)
+
+*The same core as a Neovim plugin — the database drawer lives in the sidebar
+(here hosted by [auto-finder](https://github.com/yongjohnlee80/auto-finder.nvim)),
+SQL is an ordinary buffer, and results open in a buffer you can navigate, search
+and yank. No context switch, no second application, no credentials on disk.*
+
+### In a browser
+
+![autodb in a browser](docs/media/autodb-web-ui.gif)
+
+*`autodb --web-ui` serves the **same** TUI over a WebSocket, for admins who want
+a GUI or a machine without a terminal. It binds loopback only and refuses to
+start a daemon. It closes on the `grants` table — the reader/editor/admin
+assignments that decide what everyone else is allowed to do.*
+
+## What autodb solves
+
+1. **Role-based database access, without distributing credentials.** Users,
+   roles and per-connection grants replace shared passwords. The connection
+   secret is encrypted at rest and never leaves the server.
+2. **An admin surface that is actually pleasant.** A full terminal UI, and the
+   same UI in a browser, for managing connections, users, grants, allowlists
+   and history.
+3. **First-class Neovim integration** for developers who take security
+   seriously and do not want to leave their editor to get it.
+4. **A production front door** that lets existing tools keep working while
+   production itself stops being directly reachable.
+
+## Security-first by design
+
+Every frontend is a client of one core. There is no path that skips the gates,
+because the gates are not in the frontends.
+
+**Identity and authorization.** Three roles ordered `reader < editor < admin`.
+Statements are classified — read / write / DDL / control — and a class is
+checked against the caller's role *and* their grant on that specific
+connection. Connection-scoped actions require a grant **for admins too**: a
+globally-`reader` user never exceeds `SELECT`, whatever grants they hold.
+
+**Read-only means read-only.** `reader` users don't merely get their `UPDATE`s
+rejected by autodb. Through the front door they run inside **server-enforced
+read-only transactions**, so a write smuggled through a function, a procedure
+or dynamic SQL fails at PostgreSQL itself with SQLSTATE `25006`. The database
+enforces the boundary, not just the proxy in front of it.
+
+**Dangerous-statement detection — deterministic, out of the box.** A
+hand-written lexer — not a regex, and not a full parser — decides what a
+statement *is* before it runs. This layer needs no configuration, no network
+and no model; it is on from the first launch:
+
+- `UPDATE` / `DELETE` with no top-level `WHERE` clause is **blocked**.
+- One statement per execution; anything after a top-level `;` is refused, so
+  the audit record always equals what actually ran.
+- Data-modifying subqueries and CTEs, `PRAGMA`, session-state and
+  transaction-control statements are refused through the ordinary execution
+  path — admission is the engine's decision, made against a capability
+  profile, not something a tokenizer is allowed to wave through.
+- Unterminated strings, comments and quotes are rejected as malformed rather
+  than guessed at.
+- Scripts over the size cap are rejected *before* execution.
+
+These are the **syntactic** shapes — the ones a machine can be certain about.
+They catch the classic accidents (`DELETE FROM orders` with the `WHERE` still
+in your head) but they cannot tell a legitimate migration from a Friday-evening
+mistake that happens to be well-formed.
+
+**AI inspection of the SQL — your model, your keys, never your data.**
+*(Accepted design, ADR-0076 — not yet implemented.)* On top of the
+deterministic gates, an AI agent reviews the **statement text** and flags or
+rejects dangerous executions that are syntactically perfect but semantically
+alarming — the well-formed `DELETE` against the wrong table, the migration
+nobody meant to run in production.
+
+Two properties define the design:
+
+- **It reads scripts, not rows.** This is an architectural line autodb
+  enforces and *does not let you configure away*: the inspector has no access
+  to database data. It never receives introspection objects; it gets a
+  dedicated schema DTO restricted to an allowlist of identifier metadata —
+  table and column names, type names, nullability, primary-key membership —
+  which **structurally cannot represent** column defaults, function bodies or
+  arguments, comments, or any expression text, because those carry literal
+  values. There is no code path to result rows, to connections, to tools, or
+  even to raw error text (server errors can embed values). Canary
+  serialization tests plant secret-like content in every excluded field and
+  assert it can never appear in a prompt.
+- **Bring your own model.** autodb ships the seam, not the model, and provides
+  no inference of its own. Point it at a **local SLM or LLM** via Ollama for a
+  fully offline, nothing-leaves-the-box deployment, or supply **your own API
+  keys** for Anthropic, OpenAI or another provider, or run a frontier model
+  inside your own cloud boundary via Bedrock or Vertex. Providers are pinned
+  **per connection**, so a sensitive database can stay local-only while others
+  use a hosted model. API keys are stored by reference and sealed with the same
+  argon2id/AES-GCM keyslot as every other secret. The shipping default is
+  **off** — you turn it on deliberately.
+
+Enforcement and provider are separate axes: a deployment runs `advisory`
+(observe and annotate the audit) before it runs `enforcing` (refuse), and
+rolling back means returning to advisory, never going blind. Every external
+call is audited — provider, model digest, prompt revision, payload hash — so
+"a production query went to a vendor" is never an unrecorded event.
+
+**The honest caveat**, because a security tool should state it: statement text
+can contain literal values in a `WHERE` clause, and enabling a hosted provider
+means that text leaves your network. autodb makes that choice deliberate,
+per-connection, defaulted off and fully audited — it does not make it for you.
+A local model avoids it entirely.
+
+And the boundary itself never moves: **a model verdict is probabilistic and is
+never the security boundary.** That remains grants, server-enforced read-only
+transactions, and the deterministic gates above. The AI is a net over them, not
+a replacement for them.
+
+**Audit trails.** Every executed statement is recorded with the user, the
+connection, the SQL, the timing, the row count and the outcome. Session opens
+record which token connected. Timeout rollbacks record which limit fired.
+Refusals are audited too — a blocked query is evidence, not a silence.
+
+**Secrets at rest.** Connection credentials are sealed with AES-256-GCM under a
+key unwrapped from your passphrase via argon2id (RFC 9106 profile). The
+key-encryption key is never stored. Lose the meta store and the DSNs are
+unrecoverable — which is the point: treat it as a credential store.
+
+**Network posture.** Loopback by default everywhere. IP allowlisting at both a
+global and a per-user layer. The browser UI refuses a non-loopback bind without
+TLS. The front door validates its TLS material *before* it binds, and will not
+listen with an identity it cannot prove.
+
+## The production front door
+
+> **Status: partially shipped.** ADR-0075 is accepted and implementation is
+> phased. Config + TLS-validated-before-bind, the pgwire startup/TLS
+> negotiation and the uniform denial shape, and Personal Access Tokens are
+> merged. The verification chain and session reservation (F0d) are in progress,
+> with budgets, deadlines and fuzzing (F0e) after it. **It is not yet usable
+> end to end** — the sections below describe the accepted design.
+
+autodb speaks the **PostgreSQL wire protocol**, so an unmodified application,
+`psql`, or a JetBrains data source connects *through autodb* with an ordinary
+DSN:
+
+```
+postgres://<user>:<personal-access-token>@autodb-host:5432/<connection>?sslmode=verify-full
+```
+
+This is the point of the whole project. **Production's own allowlist closes to
+everything except the autodb host.** Your tools keep working, unchanged — but
+the only route to the production database is one that knows who you are.
+The attack surface stops being "every laptop with a `.env`" and becomes one
+audited, TLS-terminated, allowlisted door.
+
+- **Credentials are named Personal Access Tokens, never passwords.** One per
+  machine or app (`auth.token_create "laptop-lm-http"`), listed and revoked
+  individually and instantly. Tokens are stored as a selector plus a SHA-256
+  hash, capped (16 per user, 512 global), expire on a 90d/365d schedule, and
+  can carry their own IP allowlist that must be a subset of the user's. Your
+  login passphrase never goes in a DSN — it unwraps your encryption keyslot.
+- **Read and write, gated by role.** `editor` users run the application's real
+  traffic through the full gate stack. `reader` users are pinned inside
+  server-enforced read-only transactions.
+- **Transactions behave like PostgreSQL.** One open transaction per connection;
+  a connection pool holds several, bounded by per-user session caps. Abandoned
+  transactions cannot sit on production locks: idle-in-transaction rolls back
+  at **90 s** — or **10 minutes** on a debug-profile connection, so a delve
+  breakpoint doesn't kill your transaction — with a 5-minute maximum duration.
+  Every timeout rollback is audited with the limit that fired.
+- **Refusals explain themselves.** An autodb-layer refusal carries an accurate
+  SQLSTATE, the gate rule in `DETAIL`, and the fix in `HINT` — rendered
+  natively by psql and IDEs. Target errors pass through verbatim, so you always
+  know *which layer* said no.
+
+## Databases, and adding more
+
+Targets today: **PostgreSQL**, **MySQL**, **SQLite**. DSNs are validated on the
+way in, and settings that would change parsing semantics under the classifier's
+feet — `sql_mode`, `standard_conforming_strings`, `init_command`, disabled
+autocommit — are rejected rather than silently honoured.
+
+Target access goes through [`golib/dao`](https://github.com/yongjohnlee80/golib),
+which owns the dialect and driver abstraction. That layer already ships a
+**BigQuery** driver alongside the PostgreSQL and MySQL ones, and its
+read-mostly / no-transaction driver contract exists precisely so warehouse-shaped
+targets — no interactive transactions, different introspection, different
+quoting — fit without special-casing them in autodb. **Wiring BigQuery in as an
+autodb target is planned**; the abstraction it needs is already there.
+
+## Installation
+
+### 1. Get the binary
+
+autodb is a single static binary with no runtime dependencies. Pick whichever
+of these you like — they all end with `autodb` on your `PATH`.
+
+**Install script** — downloads the release build for your platform, verifies
+its published SHA-256 checksum, and falls back to building from source if
+there is no prebuilt binary for your OS/arch:
 
 ```sh
-bin/autodb --ui
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install.sh | sh
 ```
 
-First run walks you through creating the root user and the master
-passphrase. Everything else hangs off the leader key:
-
-| Key | Does |
-|---|---|
-| `Space` | leader menu — every command, with its binding |
-| `?` | the keys available RIGHT HERE (focused panel, or the open modal) |
-| `Ctrl-h/j/k/l` | move between panes (vim window motions) |
-| `SPC r` / `SPC R` | run the buffer / run the selection |
-| `SPC C` | choose which connection the query runs against |
-| `SPC c` `SPC w` `SPC u` | connections, workspaces, users |
-| `SPC H` | script history — who ran what, when, against which connection |
-| `SPC n` `SPC s` | new note / save note (per-workspace `.sql` files) |
-| `/` `n` `N` | search the focused panel, next/previous match |
-| `SPC z` / `Ctrl-w z` | zoom the focused pane |
-| `SPC x` / `SPC X` | disconnect-reconnect / restart the backend (admin; terminal only) |
-| `SPC A` | about: build, backend, and where state lives |
-| `Ctrl-q` | quit (the shared server keeps running) |
-
-The editor is vim-modal (`jk` escapes); the explorer and results honour
-`j/k/g/G`; the JSON results view and the script viewer are read-only vim
-buffers — navigate, select and yank, never edit.
-
-**The server outlives the TUI by design** (one shared server, many
-frontends), so a rebuilt binary keeps talking to the process already
-running. `SPC X` restarts it from inside the UI; a protocol mismatch
-says which side is stale.
-
-## The browser frontend
+Read [`install.sh`](install.sh) before you pipe it into a shell — it is short,
+and you should not take that on faith from anyone. Options:
 
 ```sh
-bin/autodb --serve                    # start the backend first (it does not auto-start here)
-bin/autodb --web-ui --port=7010       # then serve the TUI to a browser
+sh install.sh --prefix ~/bin        # where to install (default: ~/.local/bin)
+sh install.sh --version v0.3.0      # a specific release (default: latest)
+sh install.sh --source              # build with Go even if a binary exists
+sh install.sh --binary              # never build; fail if no binary fits
 ```
 
-`--web-ui` serves the **same** TUI you get from `--ui`, in a browser, over a
-WebSocket. It is off unless you ask for it, and it talks to an already-running
-`--serve` daemon over RPC exactly as `--ui` does.
+It never invokes `sudo`. If the prefix is not writable it says so and stops,
+and it tells you if the prefix is not on your `PATH`.
 
-**It never starts the backend, and it fails fast if none is running.** Unlike
-`--ui` — which spawns a daemon when it cannot find one — `--web-ui` exits with an
-error naming the address and telling you to run `--serve`. That is deliberate: a
-browser frontend that silently started a database daemon would be a surprise in the
-wrong direction.
-
-**First login on a fresh backend creates the admin**, the same way `--ui`'s first
-run does. After that it is a normal login. The window is safe because there is
-nothing to protect during setup: no connection can exist until a user does.
-
-**Access it over SSH, not a public bind.** `--web-ui` binds `127.0.0.1` only.
-`golib/tui/web` refuses a non-loopback bind without TLS, so remote access is an SSH
-local-forward rather than a `0.0.0.0` flag:
+**With Go** (1.25+):
 
 ```sh
-ssh -L 7010:127.0.0.1:7010 your-host      # then open http://127.0.0.1:7010/
+go install github.com/yongjohnlee80/autodb/cmd/autodb@latest
 ```
 
-A few behaviours worth knowing, because they differ from the terminal:
+**Manually** — grab a tarball from the
+[releases page](https://github.com/yongjohnlee80/autodb/releases/latest)
+(`linux`/`darwin` × `amd64`/`arm64`, each with a `.sha256`):
 
-- **One backend connection per user.** Open the tool in three tabs and they share
-  one login and one daemon connection. Closing a tab detaches it; your login and
-  that connection stay until the last tab has been gone for the idle timeout (five
-  minutes), at which point the gateway logs you out. Closing the last tab is not an
-  immediate sign-out.
-- **A reconnect resumes; a reload restarts.** A dropped network or a closed laptop
-  lid reconnects to the same session with your workspace and history intact. A
-  browser *reload* starts a fresh session — the session id is not yet persisted
-  across reloads.
-- **Notes are personal, and keyed by (user, workspace).** Every note lives at
-  `<notes>/u-<your-daemon-username>/ws-<workspace-id>/`, in **both** frontends. You
-  see your own notes and nobody else's, whether you opened autodb in a terminal or
-  through `--web-ui`, and the same account sees the same notes in both.
-
-  This replaces the old `notes_mode` / `notes_subject` settings, which are **gone**
-  — a config still setting either one fails to start and says why. They selected
-  which tree a browser session read, and the "workspace" option pointed at a tree
-  with no user component in its path, so isolation had to come from admitting
-  exactly one configured identity rather than from the layout. Keying the path by
-  user makes both the setting and its admission gate unnecessary: nobody can reach
-  another person's notes, because the path cannot be built without their username.
-
-  Notes resolve **after you sign in** — before that there is no identity, so there
-  is no note tree and deliberately no shared one to fall back to. `SPC A` shows the
-  exact root the session is using, and says so plainly before login.
-
-- **Notes written before this change live in a "legacy" section.** Files under
-  `<notes>/ws-<id>/` predate per-user keying and carry no owner, so nothing can
-  decide whose they are — and they would otherwise simply disappear from the
-  explorer while sitting on disk, which is worse than showing them.
-
-  They appear as **`legacy notes (ws-N) — deprecated`**. Open one with `Enter` to
-  read it, `m` to **migrate** it into your own notes, `d` to **delete** it. Migrate
-  copies the file, reads it back to verify, and only then removes the original; it
-  refuses if you already have a note by that name, because that is a different note
-  and only you know which one wins.
-
-  The legacy tree is **read-and-delete only** — nothing writes there any more, so it
-  can only shrink. Anyone signed in can see and remove those files: they predate
-  ownership, and the point of the section is to drain it. Migrate what is yours,
-  delete the rest, and it goes away.
-
-- **Some Ctrl chords belong to the browser.** `Ctrl-L`, `Ctrl-W` and `Ctrl-T` never
-  reach autodb: the browser keeps them (address bar, close tab, new tab) and a page
-  cannot take them back. Measured: `Ctrl-H`, `Ctrl-J`, `Ctrl-K` and every `Alt`
-  chord do arrive. So pane motion is also bound to **`Alt-h/j/k/l`**, which works
-  in any browser; use those instead of `Ctrl-h/j/k/l` there. If you view the UI in
-  an Electron-based terminal browser, `--no-shortcuts` (or `--app-mode`) hands the
-  reserved chords to the page instead.
-- **No `SPC X`.** The restart-the-backend action is absent in the browser, because
-  nothing in the web process can start a daemon back up — restarting it would
-  strand every other browser session. Restart the daemon from a terminal.
-- **The daemon's audit shows the gateway's address.** Every browser user's RPC
-  calls reach the daemon from `127.0.0.1` (the web process), so the daemon's audit
-  log and IP allowlist attribute them to the gateway, not the browser. The *user*
-  is still recorded correctly. This is inherent to one process serving several
-  people.
-
-The browser text-machine behaviour — key handling, composition, paste, wide
-characters — is owned and tested by `golib/tui/web` across Chromium, Firefox and
-WebKit; autodb does not re-test it.
-
-## Production front door (in development)
-
-> Status: **design accepted, implementation phased** — ADR-0074
-> (session engine, accepted 2026-08-30), ADR-0075 (front door,
-> proposed), golib-dao-0017 (accepted). Nothing below is live yet.
-
-autodb is growing a **PostgreSQL wire-protocol listener** so an
-unmodified app (`lm-http` under dlv, `psql`, an IDE) connects to
-production *through autodb* with an ordinary DSN — production's own
-allowlist stays closed to everything but the autodb host, and every
-statement runs under the connecting developer's identity, gates, and
-audit trail: *who is debugging, under whose account, doing what*.
-
-```
-postgres://<user>:<personal-access-token>@autodb-host:5432/<connection>?sslmode=require
+```sh
+VERSION=v0.3.0 OS=linux ARCH=amd64
+curl -fsSLO "https://github.com/yongjohnlee80/autodb/releases/download/$VERSION/autodb-$VERSION-$OS-$ARCH.tar.gz"
+curl -fsSLO "https://github.com/yongjohnlee80/autodb/releases/download/$VERSION/autodb-$VERSION-$OS-$ARCH.tar.gz.sha256"
+sha256sum -c "autodb-$VERSION-$OS-$ARCH.tar.gz.sha256"
+tar xzf "autodb-$VERSION-$OS-$ARCH.tar.gz"
+install -m755 "autodb-$VERSION-$OS-$ARCH" ~/.local/bin/autodb
 ```
 
-- **Credentials are named Personal Access Tokens, never passwords.**
-  Create one per machine/app (`auth.token_create "laptop-lm-http"`),
-  list them, revoke them individually — instantly. The login
-  passphrase never goes in a DSN (it unwraps your encryption keyslot).
-  Session-opens audit which token connected.
-- **Read + write, gated by role.** Devs (`editor`) run the app's real
-  read/write traffic through the full gate stack (classifier, grants,
-  WHERE-less guard, audit). `reader`-role users get sessions pinned
-  inside **server-enforced read-only transactions** — any write,
-  however smuggled (function, procedure, dynamic SQL), fails at
-  PostgreSQL with SQLSTATE 25006.
-- **Transactions behave like Postgres**: one open transaction per
-  connection; an app's connection pool holds several concurrently,
-  bounded by per-user session caps. Abandoned transactions cannot hold
-  production locks: idle-in-transaction rolls back at **90s** (or
-  **10m** on debug-profile connections, so a dlv breakpoint pause
-  doesn't kill your tx), max duration 5m — every timeout rollback is
-  audited with which limit fired.
-- **Network posture is non-negotiable:** TLS mandatory, IP allowlist
-  enforced at accept, per-connection front-door opt-in — no target is
-  reachable through this surface unless explicitly enabled.
-- **Refusals explain themselves**: autodb-layer refusals carry an
-  accurate SQLSTATE, the gate rule in DETAIL, and the fix in HINT
-  (rendered natively by psql/IDEs); target errors pass through
-  verbatim. You always know *which layer* said no.
+**From a clone** — needs Go 1.25+:
 
-An AI-assisted unsafe-query inspection net (advisory first) is designed
-separately (ADR-0076, upcoming) and is never the security boundary —
-that remains grants + server-enforced read-only + the deterministic
-gates above.
+```sh
+git clone https://github.com/yongjohnlee80/autodb.git
+cd autodb
+make build          # -> bin/autodb, version stamped from git describe
+```
 
-## Install in Neovim
+> In a bare-repo + worktree checkout, use the make targets (or pass
+> `-buildvcs=false`): Go's nested-VCS detection resolves to the bare store and
+> plain `go build` fails with "error obtaining VCS status".
 
-autodb is a standalone plugin as well as a backend. **`auto-core.nvim` is a
-hard dependency** — every module goes through it for events, state, logging
-and the UI primitives, and there is no fallback. Everything else is optional.
+### 2. First run
+
+```sh
+autodb --ui
+```
+
+That is the whole setup. The first run walks you through creating the root
+user and the master passphrase; there is no config file to write. The defaults
+are loopback-only RPC on `127.0.0.1:7419` and a SQLite meta store under
+`$XDG_DATA_HOME/autodb/`.
+
+The other entry points:
+
+```sh
+autodb --serve                # msgpack-RPC server on 127.0.0.1:7419
+autodb --web-ui --port=7010   # the same TUI in a browser (never spawns a daemon)
+autodb --version
+```
+
+`--serve` binds loopback by default, drains gracefully on SIGINT/SIGTERM, and
+implements a single-instance guard: a port held by a compatible autodb reports
+"already running" and exits 0, while a foreign occupant is a loud error. The
+protocol handshake, method surface and error codes are documented in
+[rpc/README.md](rpc/README.md).
+
+### 3. Install the Neovim plugin
+
+The plugin talks to the same binary. Install it with your plugin manager —
+here [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ```lua
 {
   "yongjohnlee80/autodb",
   dependencies = {
-    "yongjohnlee80/auto-core.nvim",   -- HARD: events, state, log, ui.*
+    "yongjohnlee80/auto-core.nvim",       -- HARD: events, state, log, ui.*
     -- "yongjohnlee80/auto-finder.nvim",  -- OPTIONAL: hosts the drawer in
     --                                    -- its shared panel instead
   },
-  opts = {},   -- bin / config / auto_spawn / keys
+  opts = {},
 }
 ```
 
-`setup()` is deliberately cheap: it connects nothing and opens nothing. The
-first command that needs the daemon brings it up and prompts for login.
+**How the plugin finds the binary**, in order — it never guesses silently, and
+a failure reports every path it tried:
+
+1. `opts.bin`, if you set it — honoured or refused, never quietly replaced.
+2. **`PATH`** — which covers Mason, `go install` (`~/go/bin`), Homebrew, a
+   system package, and the install script above. Nothing to configure.
+3. A plugin-local `bin/autodb`, which is what a lazy.nvim `build` hook makes.
+4. A managed cache under `stdpath("data")/autodb/bin/`.
+
+If you would rather have the binary version-matched to the plugin checkout
+than on your `PATH`, use a build hook instead of installing it separately:
+
+```lua
+{
+  "yongjohnlee80/autodb",
+  dependencies = { "yongjohnlee80/auto-core.nvim" },
+  build = "make build",
+  opts = {},
+}
+```
+
+Then verify:
+
+```vim
+:checkhealth autodb
+```
+
+which reports the binary it resolved and from where, the endpoint, and the
+connection and login state. `setup()` itself is deliberately cheap — it
+connects nothing and opens nothing; the first command that needs the daemon
+brings it up and prompts for login.
+
+## The terminal UI
+
+```sh
+bin/autodb --ui
+```
+
+Everything hangs off the leader key:
+
+| Key                     | Does                                                              |
+| ----------------------- | ----------------------------------------------------------------- |
+| `Space`                 | leader menu — every command, with its binding                     |
+| `?`                     | the keys available RIGHT HERE (focused panel, or the open modal)  |
+| `Ctrl-h/j/k/l`          | move between panes (vim window motions)                           |
+| `SPC r` / `SPC R`       | run the buffer / run the selection                                |
+| `SPC C`                 | choose which connection the query runs against                    |
+| `SPC c` `SPC w` `SPC u` | connections, workspaces, users                                    |
+| `SPC H`                 | script history — who ran what, when, against which connection     |
+| `SPC n` `SPC s`         | new note / save note (per-workspace `.sql` files)                 |
+| `/` `n` `N`             | search the focused panel, next/previous match                     |
+| `SPC z` / `Ctrl-w z`    | zoom the focused pane                                             |
+| `SPC x` / `SPC X`       | disconnect-reconnect / restart the backend (admin; terminal only) |
+| `SPC A`                 | about: build, backend, and where state lives                      |
+| `Ctrl-q`                | quit (the shared server keeps running)                            |
+
+The editor is vim-modal (`jk` escapes); the explorer and results honour
+`j/k/g/G`; the JSON results view and the script viewer are read-only vim
+buffers — navigate, select and yank, never edit.
+
+**The server outlives the TUI by design** (one shared server, many frontends),
+so a rebuilt binary keeps talking to the process already running. `SPC X`
+restarts it from inside the UI; a protocol mismatch says which side is stale.
+
+## Neovim
+
+autodb is a standalone plugin as well as a backend (see
+[Installation](#3-install-the-neovim-plugin) for the plugin spec).
+**`auto-core.nvim` is a hard dependency** — every module goes through it for
+events, state, logging and UI primitives, and there is no fallback. Everything
+else is optional. `opts` takes `bin` / `config` / `auto_spawn` / `keys`.
 
 ### What you get standalone
 
 Everything, including the explorer. With auto-core alone autodb **self-hosts
-its own panel** for the drawer (ADR-0078):
+its own panel** for the drawer:
 
-| | |
-|---|---|
-| `<leader>Dl` | sign in — retry, or switch user |
-| `<leader>Dw` | choose or create a workspace |
-| `<leader>Dc` | choose a connection |
-| `<leader>Dn` | choose or create a note |
-| `<leader>Dr` / `<leader>DR` | run this SQL buffer / the visual selection |
-| `<leader>Dh` | script history |
-| `<leader>DX` | maintenance — restart / refresh |
-| `:AutodbDrawer` | toggle the database explorer drawer |
-| `:checkhealth autodb` | binary, endpoint, connection and login state |
+|                             |                                              |
+| --------------------------- | -------------------------------------------- |
+| `<leader>Dl`                | sign in — retry, or switch user              |
+| `<leader>Dw`                | choose or create a workspace                 |
+| `<leader>Dc`                | choose a connection                          |
+| `<leader>Dn`                | choose or create a note                      |
+| `<leader>Dr` / `<leader>DR` | run this SQL buffer / the visual selection   |
+| `<leader>Dh`                | script history                               |
+| `<leader>DX`                | maintenance — restart / refresh              |
+| `:AutodbDrawer`             | toggle the database explorer drawer          |
+| `:checkhealth autodb`       | binary, endpoint, connection and login state |
 
 ### What auto-finder adds
 
-If `auto-finder.nvim` is installed and its `dbase` section is enabled, the
-**same** drawer renders in auto-finder's shared panel instead of a second
-one — section switching with `0..9`, one panel column, no duplication.
-autodb notices at open time and does not self-host. Nothing needs
-configuring on either side: auto-finder registers itself as a drawer host
-and autodb picks the highest-priority one that is available.
+If [`auto-finder.nvim`](https://github.com/yongjohnlee80/auto-finder.nvim) is
+installed and its `dbase` section is enabled, the **same** drawer renders in
+auto-finder's shared panel instead of a second one — section switching with
+`0..9`, one panel column, no duplication. autodb notices at open time and does
+not self-host. Nothing needs configuring on either side.
 
 The recommended setup is **autodb + auto-finder** (preferably under
-[autovim](https://github.com/yongjohnlee80/autovim)). Standalone is a
-fully supported configuration, not a degraded one.
+[autovim](https://github.com/yongjohnlee80/autovim)). Standalone is a fully
+supported configuration, not a degraded one.
 
 ### Driving it from Lua
 
-Every `<leader>D` operation is a function on `require("autodb.api")`, so
-your own keymaps get exactly the same surface — the API is the contract and
-the built-in keymaps are one consumer of it.
+Every `<leader>D` operation is a function on `require("autodb.api")`, so your
+own keymaps get exactly the same surface — the API is the contract and the
+built-in keymaps are one consumer of it.
 
 ```lua
 local api = require("autodb.api")
@@ -280,66 +458,131 @@ end)
 ```
 
 `autodb.commands` and the other modules are internal and may change;
-`autodb.api` is the supported surface. Host integration
-(`register_host`) lives on `autodb.views.drawer` — see ADR-0078.
+`autodb.api` is the supported surface. Host integration (`register_host`) lives
+on `autodb.views.drawer`.
 
-## Layout
-
-| Path | Role |
-|---|---|
-| `core/` | Package-of-record: config, meta-store, identity/authz/audit, execution, guards |
-| `rpc/` | msgpack-RPC server ([README](rpc/README.md)); the Go client lands with the TUI (M6) |
-| `tui/` | Standalone terminal UI on golib/tui (M6) |
-| `lua/` | autovim/Neovim integration + binary lifecycle (M7) |
-| `cmd/autodb/` | The single binary |
-| `config.example.toml` | Every setting, with its default and why it is that |
-
-## Build & run
+## The browser frontend
 
 ```sh
-make build        # bin/autodb, version stamped from git describe
-bin/autodb --version
-bin/autodb --serve            # msgpack-RPC on 127.0.0.1:7419 (config-overridable)
-bin/autodb --ui               # the terminal TUI (spawns a server if none is running)
-bin/autodb --web-ui --port=7010   # the same TUI in a browser (never spawns; see below)
+bin/autodb --serve                    # start the backend first (it does not auto-start here)
+bin/autodb --web-ui --port=7010       # then serve the TUI to a browser
 ```
 
-`--serve` binds loopback by default, drains gracefully on SIGINT/SIGTERM,
-and implements the single-instance guard: if the port is taken by a
-compatible autodb it reports "already running" and exits 0; a foreign
-occupant is a loud error. Protocol handshake, method surface, and error
-codes are documented in [rpc/README.md](rpc/README.md).
+`--web-ui` serves the **same** TUI you get from `--ui`, in a browser, over a
+WebSocket, talking to an already-running `--serve` daemon over RPC exactly as
+`--ui` does. It is off unless you ask for it.
+
+**It never starts the backend, and it fails fast if none is running.** Unlike
+`--ui` — which spawns a daemon when it cannot find one — `--web-ui` exits with
+an error naming the address. A browser frontend that silently started a
+database daemon would be a surprise in the wrong direction.
+
+**Access it over SSH, not a public bind.** `--web-ui` binds `127.0.0.1` only,
+and `golib/tui/web` refuses a non-loopback bind without TLS:
+
+```sh
+ssh -L 7010:127.0.0.1:7010 your-host      # then open http://127.0.0.1:7010/
+```
+
+**First login on a fresh backend creates the admin**, the same way `--ui`'s
+first run does. The window is safe because there is nothing to protect during
+setup: no connection can exist until a user does.
+
+A few behaviours differ from the terminal:
+
+- **One backend connection per user.** Three tabs share one login and one
+  daemon connection. Closing a tab detaches it; your login survives until the
+  last tab has been gone for the idle timeout (five minutes). Closing the last
+  tab is not an immediate sign-out.
+- **A reconnect resumes; a reload restarts.** A dropped network or a closed lid
+  reconnects to the same session with workspace and history intact. A browser
+  *reload* starts a fresh session.
+- **Notes are personal, keyed by (user, workspace)** — `<notes>/u-<username>/ws-<id>/`,
+  in both frontends. You see your own notes and nobody else's, and the same
+  account sees the same notes in a terminal and in a browser. Notes resolve
+  *after* you sign in: before that there is no identity, so there is
+  deliberately no shared tree to fall back on. `SPC A` shows the exact root in
+  use.
+- **Notes written before per-user keying appear as `legacy notes (ws-N) —
+  deprecated`.** They carry no owner, so nothing can decide whose they are.
+  `Enter` reads one, `m` migrates it into your own notes (copy, read back,
+  verify, then remove the original — refusing if the name collides), `d`
+  deletes it. The tree is read-and-delete only, so it can only shrink.
+- **Some Ctrl chords belong to the browser.** `Ctrl-L`, `Ctrl-W` and `Ctrl-T`
+  never reach autodb and a page cannot take them back. Measured: `Ctrl-H`,
+  `Ctrl-J`, `Ctrl-K` and every `Alt` chord do arrive — so pane motion is also
+  bound to **`Alt-h/j/k/l`**. Use those in a browser.
+- **No `SPC X`.** Nothing in the web process can start a daemon back up, and
+  restarting it would strand every other browser session. Restart from a
+  terminal.
+- **The daemon's audit shows the gateway's address.** Every browser user's RPC
+  calls reach the daemon from `127.0.0.1` (the web process), so the daemon's IP
+  allowlist and audit log attribute the *address* to the gateway. The **user**
+  is still recorded correctly. This is inherent to one process serving several
+  people.
+
+Browser text-machine behaviour — key handling, composition, paste, wide
+characters — is owned and tested by `golib/tui/web` across Chromium, Firefox
+and WebKit; autodb does not re-test it.
 
 ## Configuration
 
-autodb runs with no config at all: a first run needs no setup. The
-defaults are loopback-only RPC on `127.0.0.1:7419` and a sqlite meta
-store at `$XDG_DATA_HOME/autodb/meta.db`.
-
-To change any of it, copy the annotated example — it ships every
-setting at its default value, so an uncommented copy behaves exactly
-like no config:
+autodb runs with no config at all. To change anything, copy the annotated
+example — it ships every setting at its default value, so an uncommented copy
+behaves exactly like no config:
 
 ```sh
 mkdir -p ~/.config/autodb
 cp config.example.toml ~/.config/autodb/config.toml
 ```
 
-`--config <path>` overrides the location for `--serve`, `--ui`, and `--web-ui`
-(the terminal TUI passes it to the server it spawns; `--web-ui` uses it only to
-find the already-running one). Unknown keys are rejected
-rather than ignored, and values are validated at load — a bad port,
-bind, CIDR, or a postgres meta store without a DSN fails before the
-server listens, naming the offending key.
+`--config <path>` overrides the location for `--serve`, `--ui` and `--web-ui`.
+Unknown keys are **rejected rather than ignored**, and values are validated at
+load — a bad port, bind, CIDR, or a PostgreSQL meta store without a DSN fails
+before the server listens, naming the offending key.
 
-The meta store is autodb's own database — users, encrypted connection
-secrets, grants, workspaces, audit log, script history — not one of the
-databases you connect to. Treat it as a credential store: the encrypted
-DSNs cannot be recovered without it.
+The meta store is autodb's own database — users, encrypted connection secrets,
+grants, workspaces, audit log, script history — not one of the databases you
+connect to. It runs on SQLite by default and on PostgreSQL for production
+deployments (see [docs/ops/postgres-meta-store.md](docs/ops/postgres-meta-store.md)).
 
-In a bare-repo + worktree dev checkout, use the make targets (or pass
-`-buildvcs=false`): Go's nested-VCS detection resolves to the bare store and
-plain `go build` fails with "error obtaining VCS status".
+## Layout
+
+| Path                  | Role                                                                           |
+| --------------------- | ------------------------------------------------------------------------------ |
+| `core/`               | Package of record: config, meta store, identity/authz/audit, execution, guards |
+| `frontdoor/`          | The PostgreSQL wire-protocol listener (ADR-0075)                               |
+| `rpc/`                | msgpack-RPC server ([README](rpc/README.md))                                   |
+| `tui/`                | Standalone terminal UI on golib/tui                                            |
+| `webserver/`          | The `--web-ui` gateway                                                         |
+| `lua/`                | Neovim integration + binary lifecycle                                          |
+| `cmd/autodb/`         | The single binary                                                              |
+| `docs/`               | Operational docs and the front-door protocol matrix                            |
+| `config.example.toml` | Every setting, with its default and why it is that                             |
+| `install.sh`          | Installer: verified release download, or a Go build fallback                   |
+| `docs/media/`         | README demo recordings                                                         |
+
+## Status & roadmap
+
+The terminal UI, the browser UI, the Neovim integration, the msgpack-RPC
+server, and the session-capable execution engine are **shipped** (latest
+release: [v0.3.0](https://github.com/yongjohnlee80/autodb/releases/latest)).
+
+In flight:
+
+| Work                                             | State                                       |
+| ------------------------------------------------ | ------------------------------------------- |
+| Front door — config + TLS validated before bind  | merged                                      |
+| Front door — pgwire startup/TLS negotiation      | merged                                      |
+| Front door — Personal Access Tokens              | merged                                      |
+| Front door — verification chain + session leases | in progress                                 |
+| Front door — budgets, deadlines, fuzzing         | next                                        |
+| AI script inspection (BYO model, advisory first) | designed (ADR-0076), not started            |
+| BigQuery as a target                             | planned — the `golib/dao` driver exists     |
+
+Architecture decisions live in the project knowledge base as numbered ADRs;
+the front door's protocol behaviour is pinned cell-by-cell in
+[docs/front-door/protocol-matrix.md](docs/front-door/protocol-matrix.md).
 
 ## License
 
