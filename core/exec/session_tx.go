@@ -135,6 +135,26 @@ func (e *Engine) beginTx(
 				"(its driver has no context-bounded finalizers)", dao.ErrUnsupported, connRow.Name))
 	}
 
+	// THE SHARED POLICY, resolved fresh for this unit and forced over
+	// whatever the client asked for.
+	//
+	// Here rather than at session open, because the role a session was
+	// opened under is a historical fact: a user demoted between BEGIN and
+	// BEGIN keeps write authority until something re-reads it, and the next
+	// background sweep is too late by a whole janitor interval.
+	pol, perr := e.resolveUnitPolicy(ctx, s.authority, s.userID, s.connID)
+	if perr != nil {
+		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, perr)
+	}
+	if pol.applyTo(&tc.Options) {
+		// AUDITED, not silently downgraded. A reader who wrote
+		// `BEGIN READ WRITE` asked for something they did not get, and a
+		// refusal that says nothing lets them believe they got it.
+		e.auditBounded(ctx, s.userID, ip, "tx_readonly_forced",
+			fmt.Sprintf("conn %d: session %s: role %s: the requested access mode was "+
+				"overridden to read only", s.connID, s.id, pol.Role))
+	}
+
 	txID, err := newTxID()
 	if err != nil {
 		return nil, err

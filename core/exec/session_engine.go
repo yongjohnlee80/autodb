@@ -146,10 +146,29 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 		if err := e.profileFor(connRow).admit(stmt, true); err != nil {
 			return nil, e.rejectSession(ctx, s, ident, ip, sqlText, err)
 		}
-		// Transaction control needs a grant to match what it enables: an
-		// open transaction is a held connection and a pending write, so the
-		// floor is the same one a write needs.
-		authorized, aerr := e.auth.Authorize(ctx, token, s.connID, auth.ActionWrite)
+		// Transaction control needs a grant to match WHAT IT ENABLES, and
+		// F3a changes what it enables for a reader.
+		//
+		// The floor used to be the write floor unconditionally, on the
+		// reasoning that an open transaction is a held connection and a
+		// pending write. That is true of a read-write transaction and false
+		// of a read-only one — and it made the read-only wrap UNREACHABLE
+		// for explicit transactions, because a reader could not BEGIN at all.
+		// A boundary nobody can reach is not a boundary; the cells for the
+		// wrap found this immediately, by trying to use it.
+		//
+		// So the floor follows the policy: a unit that will run read-only
+		// needs the read floor, and anything that could write still needs
+		// the write one.
+		unitPol, uperr := e.resolveUnitPolicy(ctx, s.authority, s.userID, s.connID)
+		if uperr != nil {
+			return nil, e.rejectSession(ctx, s, ident, ip, sqlText, uperr)
+		}
+		txFloor := auth.ActionWrite
+		if unitPol.ReadOnly {
+			txFloor = auth.ActionRead
+		}
+		authorized, aerr := e.auth.Authorize(ctx, token, s.connID, txFloor)
 		if aerr != nil {
 			return nil, e.rejectSession(ctx, s, ident, ip, sqlText, aerr)
 		}
