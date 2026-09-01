@@ -370,7 +370,7 @@ reserved_headroom = 4
 #
 # Until this was wired it was never set outside a test, which meant zero --
 # and zero means no bound at all.
-# resident_budget_bytes = 1073741824   # 1 GiB
+# resident_budget_bytes = 1073741824   # 1 GiB (ceiling 4 GiB; above it fails start)
 
 # Live front-door connections, authenticated or not. This also sizes the
 # control lane below.

@@ -334,8 +334,23 @@ func (l *Listener) Serve(ctx context.Context) error {
 	}
 }
 
-// Close stops accepting and waits for in-flight connections.
+// Close stops accepting and WAITS for in-flight connections, including the
+// authenticated ones.
+//
+// The wait is the contract and it was missing (lector PR #38 r0). This
+// comment already promised it and even referred to "the WaitGroup below" —
+// but only Serve waited, in a goroutine the daemon starts and discards. So
+// Close returned while authenticated handlers were still inside
+// CloseWireSession, and the engine teardown the daemon runs next could race
+// the wire teardown it was ordered after precisely so it would not.
+//
+// The join is OUTSIDE the Once, deliberately: the contract is "returns when
+// in-flight connections are done", and a second caller is owed that too. It
+// is safe to call from anywhere except a tracked handler, which would be
+// waiting on itself — nothing in this package does, and the daemon calls it
+// from its own defer.
 func (l *Listener) Close() {
+	defer l.wg.Wait()
 	l.once.Do(func() {
 		close(l.closed)
 		_ = l.ln.Close()

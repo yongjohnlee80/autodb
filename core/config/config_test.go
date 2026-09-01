@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -121,3 +122,68 @@ func TestLoad_ReconcileIntervalSupportsTheRatifiedDisableSemantics(t *testing.T)
 		}
 	}
 }
+
+// The front door's budget CEILING is enforced through the real Load seam
+// (lector PR #38 r0 must-fix 1).
+//
+// ADR-0075 §4 ratifies 1 GiB with a 4 GiB ceiling. The ceiling was in the
+// comment and in no check: validation rejected negatives, the effective value
+// passed through every positive, and the engine took whatever arrived. That is
+// the same defect this slice exists to close — a stated guard production does
+// not apply — and it was sitting inside the fix for it.
+//
+// Driven through Load rather than by calling validate, because the seam that
+// matters is the one an operator's file goes through.
+func TestLoad_ResidentBudgetCeiling(t *testing.T) {
+	t.Parallel()
+	// A front door that is otherwise valid, so the budget is the only thing
+	// under judgement.
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "cert.pem")
+	key := filepath.Join(dir, "key.pem")
+	for _, p := range []string{cert, key} {
+		if err := os.WriteFile(p, []byte("placeholder"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := "[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
+		"tls_cert_file = \"" + cert + "\"\ntls_key_file = \"" + key + "\"\n" +
+		"tls_host_names = [\"autodb.example.com\"]\n"
+
+	for _, c := range []struct {
+		name    string
+		bytes   int64
+		wantErr bool
+		why     string
+	}{
+		{"unset takes the default", 0, false, ""},
+		{"one byte under the ceiling", MaxResidentBudgetBytes - 1, false, ""},
+		{"exactly the ceiling", MaxResidentBudgetBytes, false,
+			"the ratified ceiling is a permitted value, not the first refused one"},
+		{"one byte over the ceiling", MaxResidentBudgetBytes + 1, true,
+			"a budget above the ceiling is a bound the machine cannot honour"},
+		{"a negative", -1, true, "zero means the default; a negative is not a budget"},
+	} {
+		body := base
+		if c.bytes != 0 {
+			body += "resident_budget_bytes = " + itoa(c.bytes) + "\n"
+		}
+		cfg, err := Load(write(t, body))
+		switch {
+		case c.wantErr && !errors.Is(err, ErrInvalid):
+			t.Errorf("%s: err = %v, want ErrInvalid — %s", c.name, err, c.why)
+		case !c.wantErr && err != nil:
+			t.Errorf("%s: err = %v, want acceptance — %s", c.name, err, c.why)
+		case !c.wantErr:
+			want := c.bytes
+			if want == 0 {
+				want = DefaultResidentBudgetBytes
+			}
+			if got := cfg.FrontDoor.EffectiveResidentBudget(); got != want {
+				t.Errorf("%s: effective budget = %d, want %d", c.name, got, want)
+			}
+		}
+	}
+}
+
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }

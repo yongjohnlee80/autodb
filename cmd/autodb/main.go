@@ -309,13 +309,16 @@ func runServe(configPath string) error {
 	// REFUSE — and a daemon that is going to refuse to start should do so
 	// before it has told anyone it is serving. After for the stop, so a wire
 	// session's teardown still has an engine to release into.
-	fd, ferr := startFrontDoor(serveCtx, cfg, eng, oplog)
+	fd, fdServe, ferr := startFrontDoor(serveCtx, cfg, eng, oplog)
 	if ferr != nil {
 		ln.Close()
 		return ferr
 	}
+	var fdFailed <-chan error
 	if fd != nil {
 		defer fd.Close()
+		fdFailed = superviseFrontDoor(serveCtx, fdServe, stopServing,
+			func(msg string) { fmt.Fprintln(os.Stderr, msg) })
 	}
 
 	srv := rpc.New(svc, eng, cfg.Server, version,
@@ -328,6 +331,14 @@ func runServe(configPath string) error {
 	select {
 	case <-leaseLost:
 		return fmt.Errorf("stopped serving: the instance lease on this meta store was lost")
+	default:
+	}
+	// Same treatment for the front door: a surface that was configured and is
+	// gone is a failure, not a clean exit, and reporting it as one is the only
+	// way an operator learns without going looking.
+	select {
+	case fderr := <-fdFailed:
+		return fmt.Errorf("stopped serving: the front door failed: %w", fderr)
 	default:
 	}
 	return err
@@ -347,14 +358,14 @@ func runServe(configPath string) error {
 // without a front door, because an operator who configured one and got a
 // running process without it would have no reason to look.
 func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine,
-	oplog logger.Logger) (*frontdoor.Listener, error) {
+	oplog logger.Logger) (*frontdoor.Listener, <-chan error, error) {
 
 	if !frontdoor.EnabledFrom(cfg.FrontDoor) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	tlsCfg, err := frontdoor.LoadServerTLS(cfg.FrontDoor, time.Now())
 	if err != nil {
-		return nil, fmt.Errorf("front door: %w", err)
+		return nil, nil, fmt.Errorf("front door: %w", err)
 	}
 	l, err := frontdoor.Open(cfg.FrontDoor.Bind, tlsCfg, frontdoor.Options{
 		Authn:             eng,
@@ -377,15 +388,45 @@ func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("front door: %w", err)
+		return nil, nil, fmt.Errorf("front door: %w", err)
 	}
+	errc := make(chan error, 1)
+	go func() { errc <- l.Serve(ctx) }()
+	fmt.Printf("autodb %s serving the PostgreSQL wire protocol on %s\n", version, cfg.FrontDoor.Bind)
+	return l, errc, nil
+}
+
+// superviseFrontDoor stops the daemon when the front door stops unexpectedly.
+//
+// A LOG LINE IS NOT SUPERVISION, which is what this was: Serve's error was
+// written to the operational log and the RPC surface kept running, so a
+// configured front door could vanish behind a daemon that looked healthy in
+// every other respect. The one condition an operator most needs to see would
+// have been a line in a file nobody greps until something else goes wrong.
+//
+// Same shape as watchLease, and for the same reason: these are the two ways
+// this process can lose a thing it promised to provide while continuing to
+// serve, and they should fail the same way.
+//
+// A nil error, or the context's own cancellation, is a CLEAN stop and fires
+// nothing — otherwise every ordinary shutdown would report itself as a
+// failure.
+func superviseFrontDoor(ctx context.Context, serveErr <-chan error, stop func(), warn func(string)) <-chan error {
+	fired := make(chan error, 1)
 	go func() {
-		if serr := l.Serve(ctx); serr != nil {
-			logger.Notice(oplog, map[string]any{"frontdoor": "serve stopped", "error": serr.Error()})
+		select {
+		case <-ctx.Done():
+		case err := <-serveErr:
+			if err == nil || errors.Is(err, context.Canceled) {
+				return
+			}
+			fired <- err
+			warn(fmt.Sprintf("autodb: the front door stopped serving (%v); refusing to keep "+
+				"running without it", err))
+			stop()
 		}
 	}()
-	fmt.Printf("autodb %s serving the PostgreSQL wire protocol on %s\n", version, cfg.FrontDoor.Bind)
-	return l, nil
+	return fired
 }
 
 // startEngine builds the engine and starts everything that makes it obey its

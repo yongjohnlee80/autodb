@@ -130,8 +130,19 @@ type FrontDoor struct {
 	ControlLaneBytes int64 `toml:"control_lane_bytes"`
 }
 
-// DefaultResidentBudgetBytes is ADR-0075 §4's global resident budget.
-const DefaultResidentBudgetBytes int64 = 1 << 30
+// DefaultResidentBudgetBytes and MaxResidentBudgetBytes are ADR-0075 §4's
+// global resident budget and its ratified ceiling.
+//
+// The ceiling is ENFORCED, not merely documented. It was described in the
+// comment and checked nowhere: validation rejected negatives, the effective
+// value passed through every positive, and the engine took whatever arrived.
+// That is the same defect this whole slice is about — a stated guard
+// production does not apply — and lector found it sitting inside the fix for
+// it.
+const (
+	DefaultResidentBudgetBytes int64 = 1 << 30
+	MaxResidentBudgetBytes     int64 = 4 << 30
+)
 
 // EffectiveResidentBudget is the budget actually in force.
 func (f FrontDoor) EffectiveResidentBudget() int64 {
@@ -778,6 +789,12 @@ func (f FrontDoor) validate(poolMaxConns int) error {
 		return fmt.Errorf("%w: frontdoor.resident_budget_bytes is %d; zero takes the %d default "+
 			"and a negative is not a budget", ErrInvalid, f.ResidentBudgetBytes,
 			DefaultResidentBudgetBytes)
+	}
+	if f.ResidentBudgetBytes > MaxResidentBudgetBytes {
+		return fmt.Errorf("%w: frontdoor.resident_budget_bytes is %d, above ADR-0075 §4's "+
+			"ratified ceiling of %d; the budget bounds what an authenticated population can "+
+			"hold at once, and a number above the ceiling is a bound the machine cannot honour "+
+			"rather than a larger one", ErrInvalid, f.ResidentBudgetBytes, MaxResidentBudgetBytes)
 	}
 
 	// The derivation, and the reason an explicit value may only be lower.

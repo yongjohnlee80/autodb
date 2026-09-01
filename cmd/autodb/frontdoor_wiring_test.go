@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
@@ -101,7 +102,7 @@ func TestStartFrontDoor_ListensAndHasTheEngineBehindIt(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	l, err := startFrontDoor(ctx, cfg, eng, logger.Nop{})
+	l, _, err := startFrontDoor(ctx, cfg, eng, logger.Nop{})
 	if err != nil {
 		t.Fatalf("startFrontDoor: %v", err)
 	}
@@ -162,7 +163,7 @@ func TestStartFrontDoor_DisabledStartsNothing(t *testing.T) {
 	t.Parallel()
 	var cfg config.Config
 	cfg.FrontDoor = config.FrontDoor{Enabled: false, Bind: "127.0.0.1:0"}
-	l, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{})
+	l, _, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{})
 	if err != nil {
 		t.Fatalf("a disabled front door returned an error: %v", err)
 	}
@@ -182,7 +183,7 @@ func TestStartFrontDoor_UnusableMaterialFailsTheStart(t *testing.T) {
 	t.Parallel()
 	// Expired: valid PEM, valid key pair, and not something that may serve.
 	cfg := frontDoorConfig(t, time.Now().Add(-time.Hour))
-	l, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{})
+	l, _, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{})
 	if err == nil {
 		if l != nil {
 			l.Close()
@@ -193,5 +194,93 @@ func TestStartFrontDoor_UnusableMaterialFailsTheStart(t *testing.T) {
 	if l != nil {
 		l.Close()
 		t.Error("a listener was returned alongside the error")
+	}
+}
+
+// AN UNEXPECTED SERVE FAILURE STOPS THE DAEMON (lector PR #38 r0 must-fix 2).
+//
+// The first version reduced it to a log line while the RPC surface kept
+// running, so a configured front door could vanish behind a daemon that
+// looked healthy in every other respect — and the one condition an operator
+// most needs to see would be a line in a file nobody greps until something
+// else has already gone wrong.
+//
+// Driven through the supervision seam with a synthetic error, the way
+// watchLease's cells drive theirs: the failure this guards against is the
+// listener stopping, and how it stopped is not what is under test.
+func TestSuperviseFrontDoor_AnUnexpectedFailureStopsServing(t *testing.T) {
+	t.Parallel()
+	serveErr := make(chan error, 1)
+	stopped := make(chan struct{})
+	var warned string
+
+	fired := superviseFrontDoor(context.Background(), serveErr,
+		func() { close(stopped) }, func(m string) { warned = m })
+
+	serveErr <- errors.New("accept: bad file descriptor")
+
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the front door failed and the daemon kept serving; a configured surface that " +
+			"is gone must not hide behind a healthy-looking process")
+	}
+	select {
+	case err := <-fired:
+		if err == nil {
+			t.Error("no error was reported for the failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the failure was not reported, so the exit would look like a clean shutdown")
+	}
+	if warned == "" {
+		t.Error("nothing was written for the operator")
+	}
+}
+
+// A CLEAN STOP FIRES NOTHING, or every ordinary shutdown would report itself
+// as a failure and the signal above would be worthless.
+func TestSuperviseFrontDoor_ACleanStopIsNotAFailure(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name string
+		err  error
+	}{
+		{"a nil error", nil},
+		{"the context's own cancellation", context.Canceled},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			serveErr := make(chan error, 1)
+			stopped := make(chan struct{})
+			fired := superviseFrontDoor(context.Background(), serveErr,
+				func() { close(stopped) }, func(string) {})
+			serveErr <- c.err
+
+			select {
+			case <-stopped:
+				t.Fatal("a clean stop stopped the daemon")
+			case err := <-fired:
+				t.Fatalf("a clean stop was reported as a failure: %v", err)
+			case <-time.After(300 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// The supervisor lets go when the serve context does, rather than outliving
+// the thing it watches.
+func TestSuperviseFrontDoor_StopsWithTheServeContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan struct{})
+	fired := superviseFrontDoor(ctx, make(chan error), func() { close(stopped) }, func(string) {})
+	cancel()
+	select {
+	case <-stopped:
+		t.Error("cancelling the serve context was reported as a front-door failure")
+	case err := <-fired:
+		t.Errorf("a cancelled context fired: %v", err)
+	case <-time.After(300 * time.Millisecond):
 	}
 }
