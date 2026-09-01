@@ -100,10 +100,18 @@ func (m *Model) modalOpen() bool {
 // history and its viewer, the about card. Those surfaces only look and move, so
 // `q` closing them matches the app's vim identity and the global `q`-quit.
 //
-// It is deliberately NOT wired into the text-entry forms (where `q` is a typed
-// character) or the single-key command menus — leaderMenu and the confirmations
-// (where `q` would collide with bound choices). golib's Editor leaves an unbound
-// `q` to bubble in Normal mode, so even the read-only vim viewer can use it.
+// It is deliberately NOT wired into the text-entry forms, where `q` is a typed
+// character: dismissing there would make it impossible to type `q` into a CIDR,
+// a note name, a password, or a PAT label. That exclusion is permanent.
+//
+// The single-key surfaces — leaderMenu and the confirmations built on it — DO
+// honour it as of the quit-confirmation change, but only as a fallback after
+// their own bindings: see leaderMenu.HandleEvent. `q` there means "close this"
+// exactly when the menu has nothing else to say about it, which is why the SPC
+// menu's `q` (focus query editor) is unaffected.
+//
+// golib's Editor leaves an unbound `q` to bubble in Normal mode, so even the
+// read-only vim viewer can use it.
 func dismissKey(ev tui.Event) bool {
 	k, ok := ev.(tui.KeyEvent)
 	return ok && k.Kind != tui.KeyRelease && k.Text == "q"
@@ -257,18 +265,41 @@ func (l *leaderMenu) Render(s tui.Surface) {
 	}
 }
 
-func (l *leaderMenu) HandleEvent(ev tui.Event) bool {
+// leaderResolve decides what a key means inside a leader menu.
+//
+// A BOUND entry always wins; `q` dismisses only when nothing binds it. The
+// order is the whole design: the SPC menu binds `q` to "focus query editor",
+// so a dismiss-first rule would silently delete a real command. Resolving
+// bindings first means every menu and confirmation that does NOT bind `q`
+// gains Esc's behaviour, and the one that does keeps working.
+//
+// It returns the index of the entry to run, or -1; dismiss reports the
+// fallback. Separated from HandleEvent because this precedence is the part
+// worth testing, and a Float is not needed to state it.
+func leaderResolve(entries []leaderEntry, ev tui.Event) (idx int, dismiss bool) {
 	k, ok := ev.(tui.KeyEvent)
 	if !ok || k.Kind == tui.KeyRelease || k.Text == "" {
-		return false
+		return -1, false
 	}
 	r := []rune(k.Text)[0]
-	for _, e := range l.entries {
+	for i, e := range entries {
 		if e.key == r {
-			l.float.Hide()
-			e.run()
-			return true
+			return i, false
 		}
+	}
+	return -1, dismissKey(ev)
+}
+
+func (l *leaderMenu) HandleEvent(ev tui.Event) bool {
+	idx, dismiss := leaderResolve(l.entries, ev)
+	switch {
+	case idx >= 0:
+		l.float.Hide()
+		l.entries[idx].run()
+		return true
+	case dismiss:
+		l.float.Hide()
+		return true
 	}
 	return false
 }

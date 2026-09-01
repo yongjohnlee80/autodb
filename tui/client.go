@@ -976,3 +976,92 @@ func (b *Bound) RemoveUserIP(ctx context.Context, userID, rowID int64) error {
 	_, err := b.authed(ctx, "auth.user_allowlist_remove", userID, rowID)
 	return err
 }
+
+// PATRow is one personal access token as the server is willing to describe
+// it. There is deliberately no secret, digest or selector here: the server
+// publishes none of them after creation, and a row that carried the selector
+// would be half a credential.
+type PATRow struct {
+	Name       string
+	CreatedAt  string
+	ExpiresAt  string
+	LastUsed   string
+	Revoked    bool
+	AllowedIPs []string
+}
+
+// PATSecret is what creating a token returns. Secret exists here and nowhere
+// else, ever again — the store keeps a SHA-256, so if this value is not shown
+// to the user now it is not recoverable by anyone.
+type PATSecret struct {
+	Name      string
+	Secret    string
+	ExpiresAt string
+}
+
+// PATs lists userID's tokens. Pass the caller's own id for self-service.
+func (b *Bound) PATs(ctx context.Context, userID int64) ([]PATRow, error) {
+	res, err := b.authed(ctx, "auth.token_list", userID)
+	if err != nil {
+		return nil, err
+	}
+	var out []PATRow
+	for _, row := range asList(res) {
+		m, _ := row.(map[string]any)
+		out = append(out, patRowFromWire(m))
+	}
+	return out, nil
+}
+
+// patRowFromWire decodes one auth.token_list row.
+//
+// `allowed_ips` is a comma-separated STRING on the wire — meta.PAT.AllowedIPs
+// is a string, canonicalized on write — not a list. Decoding it as a list
+// yielded nil for every restricted token, and the manager then labelled it
+// "any": the UI told the operator a restricted token carried no restriction.
+// Split out so a test can cross the real wire shape, which is exactly what
+// the helper-level tests could not reach.
+func patRowFromWire(m map[string]any) PATRow {
+	return PATRow{
+		Name:       mS(m, "name"),
+		CreatedAt:  mS(m, "created_at"),
+		ExpiresAt:  mS(m, "expires_at"),
+		LastUsed:   mS(m, "last_used"),
+		Revoked:    mB(m, "revoked"),
+		AllowedIPs: splitAllowedIPs(mS(m, "allowed_ips")),
+	}
+}
+
+// splitAllowedIPs parses the CSV, dropping blanks so " , " does not become a
+// phantom restriction. Empty yields nil, which means the token INHERITS the
+// user's admission set (ADR-0075 Amendment 1) rather than reaching nowhere.
+func splitAllowedIPs(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// CreatePAT mints a token for the CALLING user. days is 0 for the server
+// default or 1..365; allowedIPs must be a subset of the caller's own
+// allowlist rows and is sent as the CSV the wire expects.
+func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedIPs []string) (PATSecret, error) {
+	res, err := b.authed(ctx, "auth.token_create", name, days, strings.Join(allowedIPs, ","))
+	if err != nil {
+		return PATSecret{}, err
+	}
+	m, _ := res.(map[string]any)
+	return PATSecret{
+		Name:      mS(m, "name"),
+		Secret:    mS(m, "secret"),
+		ExpiresAt: mS(m, "expires_at"),
+	}, nil
+}
+
+func (b *Bound) RevokePAT(ctx context.Context, userID int64, name string) error {
+	_, err := b.authed(ctx, "auth.token_revoke", userID, name)
+	return err
+}

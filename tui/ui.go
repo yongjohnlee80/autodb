@@ -1422,11 +1422,11 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 		m.openLeaderMenu()
 		return true
 	}
-	// q quits when nothing focused consumed it (ADR-0057 §2).
+	// q quits when nothing focused consumed it (ADR-0057 §2) — via a
+	// confirmation, so a stray `q` in a pane that did not consume it cannot
+	// end the session.
 	if k.Text == "q" && !m.modalOpen() {
-		if m.quit != nil {
-			m.quit()
-		}
+		m.confirmQuit()
 		return true
 	}
 	// `?` is context help everywhere — including inside a modal, whose
@@ -1477,6 +1477,7 @@ func (m *Model) leaderEntries() []leaderEntry {
 		{'w', "workspaces…", m.openWorkspaceManager},
 		{'u', "users…", m.openUserManager},
 		{'i', "my allowed IPs…", func() { m.openUserIPManager(m.session.User().ID, "me") }},
+		{'T', "my access tokens…", func() { m.openPATManager(m.session.User().ID, "me") }},
 		{'I', "ip allowlist (admin)…", m.openAllowlistManager},
 		{'H', "script history…", m.openHistory},
 		{'g', "refresh explorer", m.explorer.Reload},
@@ -1502,13 +1503,28 @@ func (m *Model) leaderEntries() []leaderEntry {
 	entries = append(entries, []leaderEntry{
 		{'A', "about autodb", m.openAbout},
 		{'?', "help", m.openHelp},
-		{'Q', "quit", func() {
+		{'Q', "quit", m.confirmQuit},
+	}...)
+	return entries
+}
+
+// confirmQuit asks before ending the session. Both quit paths route through
+// it — the bare `q` that survives an unfocused pane, and SPC Q — so there is
+// one place that decides what quitting costs.
+//
+// `q` is deliberately NOT bound as a choice here. It is the key that opens
+// this modal, so binding it would make `qq` an instant exit and defeat the
+// confirmation; leaving it unbound lets leaderMenu's dismiss fallback cancel
+// instead, making a double-tap a safe no-op.
+func (m *Model) confirmQuit() {
+	m.openLeader("quit autodb?", []leaderEntry{
+		{'y', "quit", func() {
 			if m.quit != nil {
 				m.quit()
 			}
 		}},
-	}...)
-	return entries
+		{'n', "stay", func() {}},
+	})
 }
 
 func (m *Model) openLeaderMenu() { m.openLeader("SPC — commands", m.leaderEntries()) }
