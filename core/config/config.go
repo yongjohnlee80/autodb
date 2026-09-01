@@ -104,6 +104,41 @@ type FrontDoor struct {
 	// supply, and the failure would land on whichever session asked last
 	// rather than on the operator who set it.
 	MaxLeases int `toml:"max_leases"`
+
+	// ResidentBudgetBytes bounds the memory open wire sessions may reserve
+	// in total (ADR-0075 §4; default 1 GiB, ceiling 4 GiB).
+	//
+	// Unset takes the default. This is the budget row 2.7's fixed
+	// per-session charge is taken against, and until the daemon wiring
+	// landed it was never set outside tests — which meant zero, which meant
+	// the bound did not exist in a running daemon.
+	ResidentBudgetBytes int64 `toml:"resident_budget_bytes"`
+
+	// MaxConns bounds live front-door connections and sizes the control
+	// lane; PreAuthConns bounds those that have not authenticated;
+	// AuthWorkers bounds concurrent credential verifications;
+	// AuthFailuresPerIP is the per-source throttle. Unset takes the matrix
+	// defaults (320 / 64 / 16 / 10). The listener validates the
+	// relationships between them before it binds.
+	MaxConns          int `toml:"max_conns"`
+	PreAuthConns      int `toml:"pre_auth_conns"`
+	AuthWorkers       int `toml:"auth_workers"`
+	AuthFailuresPerIP int `toml:"auth_failures_per_ip"`
+
+	// ControlLaneBytes is the reserved control lane (§1.4). Unset derives
+	// max_conns × 64 KiB, and it may only be RAISED above that.
+	ControlLaneBytes int64 `toml:"control_lane_bytes"`
+}
+
+// DefaultResidentBudgetBytes is ADR-0075 §4's global resident budget.
+const DefaultResidentBudgetBytes int64 = 1 << 30
+
+// EffectiveResidentBudget is the budget actually in force.
+func (f FrontDoor) EffectiveResidentBudget() int64 {
+	if f.ResidentBudgetBytes > 0 {
+		return f.ResidentBudgetBytes
+	}
+	return DefaultResidentBudgetBytes
 }
 
 // MaxSubjectLen bounds the directory component built from a username. Generous
@@ -715,6 +750,34 @@ func (f FrontDoor) validate(poolMaxConns int) error {
 	if f.ReservedHeadroom < 0 {
 		return fmt.Errorf("%w: frontdoor.reserved_headroom is %d; it cannot be negative",
 			ErrInvalid, f.ReservedHeadroom)
+	}
+	// The listener validates the RELATIONSHIPS between the caps before it
+	// binds (frontdoor.Open). What is checked here is the thing config can
+	// check on its own: that nobody wrote a negative where zero means the
+	// default, which would otherwise be accepted as "unset" and produce a
+	// limit the operator did not choose.
+	for _, c := range []struct {
+		name string
+		v    int
+	}{
+		{"max_conns", f.MaxConns},
+		{"pre_auth_conns", f.PreAuthConns},
+		{"auth_workers", f.AuthWorkers},
+		{"auth_failures_per_ip", f.AuthFailuresPerIP},
+	} {
+		if c.v < 0 {
+			return fmt.Errorf("%w: frontdoor.%s is %d; zero takes the default and a negative "+
+				"is not a limit", ErrInvalid, c.name, c.v)
+		}
+	}
+	if f.ControlLaneBytes < 0 {
+		return fmt.Errorf("%w: frontdoor.control_lane_bytes is %d; zero derives it from "+
+			"max_conns and a negative is not a size", ErrInvalid, f.ControlLaneBytes)
+	}
+	if f.ResidentBudgetBytes < 0 {
+		return fmt.Errorf("%w: frontdoor.resident_budget_bytes is %d; zero takes the %d default "+
+			"and a negative is not a budget", ErrInvalid, f.ResidentBudgetBytes,
+			DefaultResidentBudgetBytes)
 	}
 
 	// The derivation, and the reason an explicit value may only be lower.

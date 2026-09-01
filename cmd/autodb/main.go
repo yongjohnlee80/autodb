@@ -22,6 +22,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/config"
 	coreexec "github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/frontdoor"
 	"github.com/yongjohnlee80/autodb/rpc"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/autodb/webserver"
@@ -301,6 +302,22 @@ func runServe(configPath string) error {
 		return fmt.Errorf("notes root: %w", nerr)
 	}
 	oplog := logger.New(logger.WithWriter(os.Stderr), logger.WithContext("autodb"))
+
+	// THE FRONT DOOR, started before the RPC surface and stopped after it.
+	//
+	// Before, because it validates its TLS material and its budgets and can
+	// REFUSE — and a daemon that is going to refuse to start should do so
+	// before it has told anyone it is serving. After for the stop, so a wire
+	// session's teardown still has an engine to release into.
+	fd, ferr := startFrontDoor(serveCtx, cfg, eng, oplog)
+	if ferr != nil {
+		ln.Close()
+		return ferr
+	}
+	if fd != nil {
+		defer fd.Close()
+	}
+
 	srv := rpc.New(svc, eng, cfg.Server, version,
 		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot))
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
@@ -314,6 +331,61 @@ func runServe(configPath string) error {
 	default:
 	}
 	return err
+}
+
+// startFrontDoor opens and serves the PostgreSQL wire listener, or returns nil
+// when the surface is disabled.
+//
+// ONE PLACE ASKS WHETHER IT IS ENABLED, and it is frontdoor.EnabledFrom. A
+// second site testing cfg.Enabled is how a surface ends up half-started —
+// listening without its budgets, or budgeted without listening.
+//
+// The TLS material is proven BEFORE the bind, which is row 2.1b's requirement
+// and the reason Open takes a *tls.Config rather than file paths: a front door
+// that cannot prove who it is must not accept a connection in order to be
+// asked. A failure here fails the daemon rather than degrading to a daemon
+// without a front door, because an operator who configured one and got a
+// running process without it would have no reason to look.
+func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine,
+	oplog logger.Logger) (*frontdoor.Listener, error) {
+
+	if !frontdoor.EnabledFrom(cfg.FrontDoor) {
+		return nil, nil
+	}
+	tlsCfg, err := frontdoor.LoadServerTLS(cfg.FrontDoor, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("front door: %w", err)
+	}
+	l, err := frontdoor.Open(cfg.FrontDoor.Bind, tlsCfg, frontdoor.Options{
+		Authn:             eng,
+		MaxConns:          cfg.FrontDoor.MaxConns,
+		PreAuthMaxConns:   cfg.FrontDoor.PreAuthConns,
+		AuthWorkers:       cfg.FrontDoor.AuthWorkers,
+		AuthFailuresPerIP: cfg.FrontDoor.AuthFailuresPerIP,
+		ControlLaneBytes:  cfg.FrontDoor.ControlLaneBytes,
+		OnLog:             func(msg string) { logger.Notice(oplog, map[string]any{"frontdoor": msg}) },
+		OnEvent: func(e frontdoor.Event) {
+			// Emitted to the operational log, which is where every other
+			// withheld detail on this daemon lives. The DURABLE audit row is
+			// the auth slice's business, not the listener's — matrix §1.3
+			// names the vocabulary, and turning these into meta-store writes
+			// is a separate decision about what an anonymous peer can make
+			// this process write.
+			logger.Notice(oplog, map[string]any{
+				"frontdoor": e.Kind, "reason": e.Reason, "peer": e.Peer, "detail": e.Detail,
+			})
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("front door: %w", err)
+	}
+	go func() {
+		if serr := l.Serve(ctx); serr != nil {
+			logger.Notice(oplog, map[string]any{"frontdoor": "serve stopped", "error": serr.Error()})
+		}
+	}()
+	fmt.Printf("autodb %s serving the PostgreSQL wire protocol on %s\n", version, cfg.FrontDoor.Bind)
+	return l, nil
 }
 
 // startEngine builds the engine and starts everything that makes it obey its
@@ -432,6 +504,12 @@ func execOptions(cfg config.Config, onLog func(string)) []coreexec.Option {
 		coreexec.WithPoolLimits(cfg.Exec.PoolMaxConns,
 			cfg.Exec.PoolMaxConnIdleTime.Duration(), cfg.Exec.PoolMaxConnLifetime.Duration()),
 		coreexec.WithLogger(onLog),
+		// The front door's two registry-scoped bounds. Both existed and
+		// neither was ever set outside a test, so in a running daemon the
+		// lease cap and the resident budget were zero — which is to say
+		// absent. A guard nobody wires is documentation.
+		coreexec.WithLeaseCap(cfg.FrontDoor.EffectiveMaxLeases(cfg.Exec.PoolMaxConns)),
+		coreexec.WithResidentBudget(cfg.FrontDoor.EffectiveResidentBudget()),
 	}
 }
 
