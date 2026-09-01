@@ -1,6 +1,7 @@
 package frontdoor
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,6 +40,17 @@ import (
 // derivation is mechanical on purpose: a reworded row changes its key and
 // fails the phantom check loudly, exactly as a renumbered §2 row does, rather
 // than leaving a hand-maintained alias table to drift silently.
+//
+// CLAIMS (PR #40 r0 MF1): a matrix row that contains SEPARATELY testable
+// guarantees is tracked per claim in claimTriage, keyed "<row>#<claim>" and
+// cited as "row 3.1:options#empty-audit". A covered claim's evidence is
+// machine-checked by anchors — literal fragments of the proving cell — so
+// deleting the case reddens the gate even if the citation comment survives.
+// A parent row is DERIVED from its claims (all covered ⇒ covered, else
+// awaiting) and the gate checks the hand-written parent state agrees.
+// The generated key set is GLOBALLY unique (r0 MF2), and prose units are
+// owned by their section — the anchor proves the block stayed where the
+// registry says it lives (r0 MF3).
 
 // rowState is the triage every matrix row must carry. A row in neither state
 // fails the gate: that is a row somebody added to the spec without deciding
@@ -104,17 +116,23 @@ var matrixTriage = map[string]struct {
 	"2.9":  {covered, "AuthenticationOk / ParameterStatus / BackendKeyData / ReadyForQuery — F0e"},
 
 	// ---- §3.1 Accepted StartupMessage parameters ----
-	// The owner cross-check in the `user` row is row 2.7's chain, which is
-	// covered there; 3.1:user's own decision — required, and a cross-check
-	// never an override — is what TestStartup_RequiredParameters pins.
-	"3.1:user":                {covered, "TestStartup_RequiredParameters — required, and a cross-check, never an override (the owner match is 2.7's chain)"},
-	"3.1:database":            {covered, "TestStartup_RequiredParameters — required; unknown/ungranted naming is 2.7's target validation"},
-	"3.1:application_name":    {awaiting, "TestStartup_ParameterPolicy proves acceptance; the 256-byte truncate+notice has no cell"},
-	"3.1:client_encoding":     {awaiting, "TestStartup_ParameterPolicy proves the UTF8-only gate; the target-lease UTF8 pin at acquisition (ruling 2) has no cell — F1"},
-	"3.1:options":             {covered, "TestStartup_ParameterPolicy — GUC-setting content refused in both spellings; empty accepted and ignored"},
-	"3.1:replication":         {covered, "TestStartup_ParameterPolicy — refused at any value"},
+	// Rows whose guarantees are SEPARATELY testable are marked partial by
+	// carrying claims in claimTriage below. The rule is mechanical: a row
+	// with claims is covered only when every claim is covered, otherwise it
+	// is awaiting — and the gate checks the map agrees with that derivation
+	// (a parent whose state contradicts its claims is a failure direction
+	// of its own). The owner cross-check in the `user` row is row 2.7's
+	// chain; binding its evidence would mean anchor edits in core/exec,
+	// which is #36's active surface — the claim stays awaiting until that
+	// lands.
+	"3.1:user":                {awaiting, "partial — claims below; owner cross-check proven by 2.7's chain (core/exec), anchor deferred: #36's active surface"},
+	"3.1:database":            {awaiting, "partial — claims below; the grant-on-target check is 2.7's target validation (F0e)"},
+	"3.1:application_name":    {awaiting, "partial — claims below (acceptance proven; the 256-byte truncate+notice is not)"},
+	"3.1:client_encoding":     {awaiting, "partial — claims below (the UTF8-only gate is proven; the target-lease UTF8 pin, ruling 2, is F1)"},
+	"3.1:options":             {awaiting, "partial — claims below (GUC refusal and empty-accepted proven; the empty-options audit is not)"},
+	"3.1:replication":         {covered, "single claim below — refused, every tested value"},
 	"3.1:_pq_":                {covered, "TestStartup_UnrecognizedProtocolOptionsAreNamed + TestStartup_ParameterPolicy — negotiated, not refused"},
-	"3.1:any-other-parameter": {covered, "TestStartup_ParameterPolicy — an unknown parameter is refused as a GUC attempt"},
+	"3.1:any-other-parameter": {covered, "TestStartup_ParameterPolicy — an unknown parameter is refused as a GUC attempt (over the wire: the 2.4 cell)"},
 
 	// ---- §3.2 / §3.3 prose units ----
 	"3.2": {awaiting, "post-auth SET policy is the ADR-0074 gate matrix (F1); the startup half is 3.1:options' refusal"},
@@ -155,6 +173,52 @@ var matrixTriage = map[string]struct {
 >>>>>>> 5a4f74e (test(frontdoor): the coverage gate learns the sections that are not numbered)
 }
 
+// claimTriage is the claim-level obligation registry (lector PR #40 r0 MF1):
+// a matrix row that contains SEPARATELY testable guarantees is tracked per
+// claim, keyed "<row>#<claim>" and cited in tests as "row 3.1:options#empty-audit".
+//
+// A covered claim carries ANCHORS — literal fragments of the proving cell
+// that must all match somewhere in the scanned test files — so the evidence
+// is machine-checked, not described: deleting the proving case reddens the
+// gate even if the citation comment survives (that gap was r0's finding,
+// reproduced in mutation M12). An awaiting claim is a missing obligation
+// with the phase that owes it.
+//
+// Parent rows are DERIVED from their claims: all-covered ⇒ the parent is
+// covered, anything awaiting ⇒ the parent is awaiting. matrixTriage must
+// agree with the derivation — the gate checks it (mutation direction: a
+// parent whose hand-written state contradicts its claims reddens).
+var claimTriage = map[string]struct {
+	state   rowState
+	reason  string
+	anchors []string // required for covered claims: literal fragments of the proving cell; all must match
+}{
+	"3.1:user#required": {covered, "TestStartup_RequiredParameters",
+		[]string{`"database": "lm-prod"}, "user"}`}},
+	"3.1:user#owner-cross-check": {awaiting, "proven by row 2.7's chain in core/exec; anchor deferred — core/exec is #36's active surface", nil},
+
+	"3.1:database#required": {covered, "TestStartup_RequiredParameters",
+		[]string{`"user": "root"}, "database"}`}},
+	"3.1:database#grant-on-target": {awaiting, "the grant-on-connection check is 2.7's target validation — F0e (#36)", nil},
+
+	"3.1:application_name#accept": {covered, "TestStartup_ParameterPolicy — the pinned set",
+		[]string{`"application_name": "psql"`}},
+	"3.1:application_name#truncate-notice-256": {awaiting, "length-capped 256 bytes, over = truncate + notice, audited — no cell", nil},
+
+	"3.1:client_encoding#utf8-only": {covered, "TestStartup_ParameterPolicy — non-UTF8 refused, hyphen spelling tolerated",
+		[]string{`"client_encoding": "LATIN1"`, `"client_encoding": "utf-8"`}},
+	"3.1:client_encoding#lease-utf8-pin": {awaiting, "the target lease is pinned UTF8 at acquisition (ruling 2) — F1", nil},
+
+	"3.1:options#guc-refusal": {covered, "TestStartup_ParameterPolicy — both spellings refused",
+		[]string{`"options": "-c search_path=public"`, `"options": "--search_path=public"`}},
+	"3.1:options#empty-accepted": {covered, "TestStartup_ParameterPolicy — empty/whitespace accepted and ignored",
+		[]string{`"options": "   "`}},
+	"3.1:options#empty-audit": {awaiting, "the empty-options acceptance is audited (§3.1) — the audit clause has no cell", nil},
+
+	"3.1:replication#refused-any-value": {covered, "TestStartup_ParameterPolicy — refused at every tested value",
+		[]string{`"replication": "database"`}},
+}
+
 var (
 	// A §2 row opens a table line: "| 2.1a | ..." — matched line-by-line
 	// inside §2's section body only (see matrixRowIDs), so a numbered row in
@@ -176,7 +240,7 @@ var (
 	// the FALLBACK, tried only when no ":"-qualified key follows the id.
 	// A bare-first ordering would record "row 3.1:user" as a citation of a
 	// row 3.1 that may exist independently, and nothing anywhere would fail.
-	citationRe = regexp.MustCompile(`(?i)\browz?\s+((?:[0-9]+(?:\.[0-9]+[a-z]?)?):[A-Za-z0-9_-]+|[0-9]+\.[0-9]+[a-z]?)`)
+	citationRe = regexp.MustCompile(`(?i)\browz?\s+((?:[0-9]+(?:\.[0-9]+[a-z]?)?):[A-Za-z0-9_-]+(?:#[A-Za-z0-9_-]+)?|[0-9]+\.[0-9]+[a-z]?)`)
 
 	// A markdown heading: "## 2. Startup...", "### 4a. Object-release...".
 	headingRe = regexp.MustCompile(`^(#{2,4})\s+(.+)$`)
@@ -209,13 +273,22 @@ var coveredSections = []matrixSection{
 // map, same three states — and their existence is asserted by ANCHOR so a
 // renamed or reworded heading fails loudly instead of the unit silently
 // dropping out of the triage forever.
+//
+// OWNERSHIP IS SECTION-BOUND (r0 MF3): each unit's anchor is matched
+// against its OWNING section's span — heading to the next heading of the
+// same-or-higher level — never against the whole document. A phrase that
+// drifted into another section is a DIFFERENT unit; the gate's job is to
+// prove the block stayed where the registry says it lives, not that the
+// words exist somewhere (r0 relocated the discard block past §5 and the
+// gate stayed green; that direction is bound by mutation M17).
 var proseUnits = []struct {
-	key    string
-	anchor *regexp.Regexp
+	key     string
+	section string // the owning section: the anchor matches inside this span
+	anchor  *regexp.Regexp
 }{
-	{"3.2", regexp.MustCompile(`(?m)^###\s+3\.2\b`)},
-	{"3.3", regexp.MustCompile(`(?m)^###\s+3\.3\b`)},
-	{"4:discard", regexp.MustCompile(`Post-error segment discard`)},
+	{"3.2", "3", regexp.MustCompile(`(?m)^###\s+3\.2\b`)},
+	{"3.3", "3", regexp.MustCompile(`(?m)^###\s+3\.3\b`)},
+	{"4:discard", "4", regexp.MustCompile(`Post-error segment discard`)},
 }
 
 func repoRoot(t *testing.T) string {
@@ -245,6 +318,40 @@ func headingBody(t *testing.T, src, id string) string {
 			}
 			if want.MatchString(strings.TrimSpace(m[2])) {
 				inBody = true
+				continue
+			}
+		}
+		if inBody {
+			body = append(body, ln)
+		}
+	}
+	if !inBody {
+		t.Fatalf("the matrix has no §%s heading — the section was renumbered, renamed, or removed, and this gate refuses to run blind against a spec whose shape it cannot find", id)
+	}
+	return strings.Join(body, "\n")
+}
+
+// headingSpan returns the FULL span of the section whose heading id is id:
+// from that heading line up to the next heading of the SAME-OR-HIGHER level.
+// Unlike headingBody (which stops at the next heading of any level, to keep
+// §4's table out of §4a's), the span of §4 includes its ### subsections —
+// which is what a prose unit's ownership check needs: the block stays
+// anywhere inside its owning section, and nowhere else.
+func headingSpan(t *testing.T, src, id string) string {
+	t.Helper()
+	want := regexp.MustCompile(`^` + regexp.QuoteMeta(id) + `([.\s]|$)`)
+	var body []string
+	inBody := false
+	myLevel := 0
+	for _, ln := range strings.Split(src, "\n") {
+		if m := headingRe.FindStringSubmatch(ln); m != nil {
+			level := len(m[1])
+			if inBody && level <= myLevel {
+				break
+			}
+			if !inBody && want.MatchString(strings.TrimSpace(m[2])) {
+				inBody = true
+				myLevel = level
 				continue
 			}
 		}
@@ -365,6 +472,9 @@ func deriveSectionKeys(t *testing.T, section string, cells []string) []string {
 			cell:     c,
 			hasParen: paren != "",
 		}
+		if entries[i].base == "" {
+			t.Fatalf("§%s: the row %q derives an EMPTY key — an identifier with no keyable characters is a row the gate cannot address and refuses to skip", section, c)
+		}
 		if paren != "" {
 			entries[i].disambig = slugKey(ident + " " + paren)
 		} else {
@@ -410,12 +520,18 @@ func deriveSectionKeys(t *testing.T, section string, cells []string) []string {
 }
 
 // matrixRowIDs reads the matrix and returns every row key the gate claims to
-// cover: one parser per covered section, plus the prose units. Every parser
-// carries the contract the §2 one established on day one: a section that
-// yields ZERO rows is a FATAL, never a quiet pass — a regex that silently
-// matches nothing turns the whole gate into a test that measures nothing
-// while reporting success, which is the exact failure this gate exists to
-// prevent elsewhere.
+// cover: one parser per covered section, plus the prose units, plus the
+// claim keys of claimTriage (validated against their parent rows). Every
+// parser carries the contract the §2 one established on day one: a section
+// that yields ZERO rows is a FATAL, never a quiet pass — a regex that
+// silently matches nothing turns the whole gate into a test that measures
+// nothing while reporting success, which is the exact failure this gate
+// exists to prevent elsewhere.
+//
+// The generated key set is GLOBALLY UNIQUE (r0 MF2): per-table collision
+// checks cannot see across sections or against prose keys, so uniqueness is
+// enforced once over the complete set — a §4 table row named `discard` and
+// the prose unit 4:discard are the same finding, not two.
 func matrixRowIDs(t *testing.T) []string {
 	t.Helper()
 	src, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "front-door", "protocol-matrix.md"))
@@ -423,39 +539,75 @@ func matrixRowIDs(t *testing.T) []string {
 		t.Fatalf("read the matrix: %v — the conformance gate cannot run without the spec it gates against", err)
 	}
 	var out []string
+	origin := map[string]string{} // key → where it came from, for the uniqueness fatal
+	add := func(key, from string) {
+		if prev, ok := origin[key]; ok {
+			t.Fatalf("the row key %q is generated twice — by %s and by %s. A key that addresses two units addresses neither, and the gate refuses to track it", key, prev, from)
+		}
+		origin[key] = from
+		out = append(out, key)
+	}
 	for _, s := range coveredSections {
 		body := headingBody(t, string(src), s.id)
 		if s.numeric {
-			out = append(out, numericRows(t, s.id, body)...)
+			for _, k := range numericRows(t, s.id, body) {
+				add(k, "§"+s.id)
+			}
 			continue
 		}
 		cells := tableDataFirstCells(t, body)
 		if len(cells) == 0 {
 			t.Fatalf("§%s yielded ZERO table rows: its table moved, changed shape, or left the section — the gate is now measuring nothing in a section it claims to cover", s.id)
 		}
-		out = append(out, deriveSectionKeys(t, s.id, cells)...)
+		for _, k := range deriveSectionKeys(t, s.id, cells) {
+			add(k, "§"+s.id)
+		}
 	}
 	for _, u := range proseUnits {
-		n := len(u.anchor.FindAllStringIndex(string(src), -1))
+		span := headingSpan(t, string(src), u.section)
+		n := len(u.anchor.FindAllStringIndex(span, -1))
 		switch {
 		case n == 0:
-			t.Fatalf("the prose unit %s is gone: its anchor no longer matches the matrix — a renamed or reworded block must be re-anchored deliberately, not left to silently drop out of the triage", u.key)
+			t.Fatalf("the prose unit %s is gone from §%s: its anchor no longer matches inside its owning section — a renamed, reworded, or RELOCATED block must be re-anchored deliberately, not left to silently drop out of the triage", u.key, u.section)
 		case n > 1:
-			t.Fatalf("the prose unit %s's anchor matches %d places — an anchor that cannot name ONE block cannot gate it", u.key, n)
+			t.Fatalf("the prose unit %s's anchor matches %d places inside §%s — an anchor that cannot name ONE block cannot gate it", u.key, n, u.section)
 		}
-		out = append(out, u.key)
+		add(u.key, "prose unit in §"+u.section)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// numericRows parses §2's numbered rows: "| 2.1a | ...".
+// matrixClaimIDs validates the claim registry against the row set and
+// returns the claim keys. A claim whose parent row does not exist describes
+// coverage of nothing.
+func matrixClaimIDs(t *testing.T, rowSet map[string]bool) []string {
+	t.Helper()
+	var claims []string
+	for c := range claimTriage {
+		parent, _, _ := strings.Cut(c, "#")
+		if !rowSet[parent] {
+			t.Fatalf("claim %s names the parent row %q, which the matrix does not contain — a claim whose parent is gone describes nothing", c, parent)
+		}
+		claims = append(claims, c)
+	}
+	sort.Strings(claims)
+	return claims
+}
+
+// numericRows parses §2's numbered rows: "| 2.1a | ...". A row id that
+// appears TWICE is fatal (r0 MF2): the original deduplication silently
+// accepted an ambiguous identity — two normative rows answering to one id —
+// and a gate that cannot tell them apart must not pick one and continue.
 func numericRows(t *testing.T, section, body string) []string {
 	t.Helper()
 	seen := map[string]bool{}
 	var out []string
 	for _, ln := range strings.Split(body, "\n") {
-		if m := matrixRowRe.FindStringSubmatch(ln); m != nil && !seen[m[1]] {
+		if m := matrixRowRe.FindStringSubmatch(ln); m != nil {
+			if seen[m[1]] {
+				t.Fatalf("§%s lists row %q twice — a duplicated row id is an ambiguous identity, and the gate refuses to deduplicate its way past it", section, m[1])
+			}
 			seen[m[1]] = true
 			out = append(out, m[1])
 		}
@@ -514,17 +666,40 @@ func citedRows(t *testing.T) map[string][]string {
 	return out
 }
 
-// TestMatrixCoverage_EveryRowIsTriaged fails in three directions.
+// TestMatrixCoverage_EveryRowIsTriaged fails in three directions — plus the
+// claim-level obligations (r0 MF1) and the parent-derivation consistency check.
 func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 	rows := matrixRowIDs(t)
+	rowSet := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		rowSet[r] = true
+	}
+	claims := matrixClaimIDs(t, rowSet)
+	claimCount := map[string]int{}
+	for _, c := range claims {
+		parent, _, _ := strings.Cut(c, "#")
+		claimCount[parent]++
+	}
 	cited := citedRows(t)
 
 	var untriaged, regressed, promotable, phantomTest []string
+	var claimRegressed, claimPromotable, evidenceVanished, parentDisagrees []string
 
 	for _, row := range rows {
 		entry, known := matrixTriage[row]
 		if !known {
 			untriaged = append(untriaged, row)
+			continue
+		}
+		// A claim-bearing parent is governed by its claims: its coverage is
+		// derived (checked against the map below), its citations live at
+		// claim level. Only a whole-row citation while the derivation says
+		// awaiting is the parent's own failure — a claim the claims
+		// themselves contradict.
+		if claimCount[row] > 0 {
+			if _, isCited := cited[row]; isCited && entry.state == awaiting {
+				promotable = append(promotable, row+" — cited whole while its claims are still tracked per-claim ("+strings.Join(cited[row], ", ")+")")
+			}
 			continue
 		}
 		_, isCited := cited[row]
@@ -547,6 +722,50 @@ func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 			if !testFuncExists(t, entry.reason) {
 				phantomTest = append(phantomTest, row+" names "+entry.reason+", which is not a test function in this repo")
 			}
+		}
+	}
+
+	// The claim loop. A covered claim needs its citation AND its evidence:
+	// every anchor must still match somewhere in the scanned tests — the
+	// evidence is machine-checked, not described in the reason. An awaiting
+	// claim promoted by citation follows the ordinary promotion path.
+	for _, claim := range claims {
+		entry := claimTriage[claim]
+		_, isCited := cited[claim]
+		switch entry.state {
+		case covered:
+			if !isCited {
+				claimRegressed = append(claimRegressed, claim+" ("+entry.reason+")")
+			}
+			for _, a := range entry.anchors {
+				if !evidenceMatches(t, a) {
+					evidenceVanished = append(evidenceVanished,
+						claim+"'s evidence anchor no longer matches any test: "+a+
+							" — the case that proved this claim was deleted or reworded while the claim still says covered")
+				}
+			}
+		case awaiting:
+			if isCited {
+				claimPromotable = append(claimPromotable, claim+" — now cited by "+strings.Join(cited[claim], ", "))
+			}
+		}
+	}
+
+	// Parent-derivation consistency: a row with claims is covered only when
+	// every claim is covered. The hand-written parent state must AGREE with
+	// the derivation, or the map is asserting something its own claims
+	// contradict — in either direction.
+	for parent, n := range claimCount {
+		derived := covered
+		for _, c := range claims {
+			if p, _, _ := strings.Cut(c, "#"); p == parent && claimTriage[c].state == awaiting {
+				derived = awaiting
+			}
+		}
+		if matrixTriage[parent].state != derived {
+			parentDisagrees = append(parentDisagrees, fmt.Sprintf(
+				"%s is %s in matrixTriage but its %d claims derive %s — the parent state must agree with the claims or the map asserts what its own registry contradicts",
+				parent, stateName(matrixTriage[parent].state), n, stateName(derived)))
 		}
 	}
 
@@ -582,9 +801,44 @@ func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 			phantomTest)
 	}
 
+	if len(claimRegressed) > 0 {
+		t.Errorf("claims marked covered but cited by no test: %v\n"+
+			"A claim is a promise that evidence exists; the citation is how the scan sees it.",
+			claimRegressed)
+	}
+
+	if len(claimPromotable) > 0 {
+		t.Errorf("claims marked awaiting that ARE now tested: %v\n"+
+			"Promote them — the obligation the claim records has been met.",
+			claimPromotable)
+	}
+
+	if len(evidenceVanished) > 0 {
+		t.Errorf("covered claims whose evidence no longer matches: %v\n"+
+			"The anchors are the machine-checked half of a covered claim — the case that proved it was deleted or reworded while the claim still says covered.",
+			evidenceVanished)
+	}
+
+	if len(parentDisagrees) > 0 {
+		t.Errorf("parent rows whose state contradicts their claims: %v\n"+
+			"A row with claims is covered exactly when every claim is covered; the hand-written parent state must agree with the derivation.",
+			parentDisagrees)
+	}
+
 	t.Logf("matrix conformance: %d row keys across %d sections + %d prose units — "+
-		"%d covered, %d tested-but-uncited, %d awaiting a cell",
-		len(rows), len(coveredSections), len(proseUnits), countState(covered), countState(uncited), countState(awaiting))
+		"%d covered, %d tested-but-uncited, %d awaiting a cell; claims: %d covered / %d awaiting",
+		len(rows), len(coveredSections), len(proseUnits), countState(covered), countState(uncited), countState(awaiting),
+		countClaims(covered), countClaims(awaiting))
+}
+
+func countClaims(s rowState) int {
+	n := 0
+	for _, e := range claimTriage {
+		if e.state == s {
+			n++
+		}
+	}
+	return n
 }
 
 func countState(s rowState) int {
@@ -595,6 +849,47 @@ func countState(s rowState) int {
 		}
 	}
 	return n
+}
+
+func stateName(s rowState) string {
+	switch s {
+	case covered:
+		return "covered"
+	case awaiting:
+		return "awaiting"
+	case uncited:
+		return "uncited"
+	}
+	return "?"
+}
+
+// evidenceMatches reports whether the literal fragment — a covered claim's
+// anchor — still appears in any scanned test file. The scan mirrors
+// citedRows: every _test.go in the repo, this file excluded.
+func evidenceMatches(t *testing.T, fragment string) bool {
+	t.Helper()
+	const self = "matrix_coverage_test.go"
+	found := false
+	_ = filepath.Walk(repoRoot(t), func(path string, info os.FileInfo, err error) error {
+		if err != nil || found {
+			return nil
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") || filepath.Base(path) == self {
+			return nil
+		}
+		src, rerr := os.ReadFile(path)
+		if rerr == nil && strings.Contains(string(src), fragment) {
+			found = true
+		}
+		return nil
+	})
+	return found
 }
 
 // TestMatrixCoverage_TriageHasNoPhantomRows guards the other direction: an
