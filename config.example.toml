@@ -355,3 +355,51 @@ reserved_headroom = 4
 # cannot supply, and that failure lands on whichever session asked last
 # rather than on the person who set the number.
 # max_leases = 6
+
+# --- front-door budgets (ADR-0075 §4 and the protocol matrix §9) ---
+#
+# Everything below has a default that is the number the matrix pins. They are
+# here because an operator with an unusual deployment shape needs to move one,
+# not because they are routinely tuned. The listener validates the
+# RELATIONSHIPS between them before it binds, so a set that cannot work fails
+# start rather than at whichever connection arrives last.
+
+# The memory open wire sessions may reserve in total. Row 2.7 charges a fixed
+# figure per session against this when it admits one, so it is the bound on
+# how much an authenticated population can hold at once.
+#
+# Until this was wired it was never set outside a test, which meant zero --
+# and zero means no bound at all.
+# resident_budget_bytes = 1073741824   # 1 GiB
+
+# Live front-door connections, authenticated or not. This also sizes the
+# control lane below.
+# max_conns = 320
+
+# Connections that have NOT yet authenticated. Much smaller than max_conns on
+# purpose: an anonymous peer should command the smallest slice of the system,
+# and a flood of half-open connections must not starve the authenticated ones
+# out of their slots. The slot is returned AT authentication, not at close.
+# pre_auth_conns = 64
+
+# Concurrent credential verifications. Distinct from pre_auth_conns and not
+# implied by it: verifying is the expensive part -- a token digest is
+# deliberately slow and the chain behind it runs several queries -- so without
+# this, every pre-auth connection could command one at once.
+# auth_workers = 16
+
+# FAILED authentications per minute from one source address, after which that
+# address is refused at accept. Failures only: counting successes would cap
+# every connection pool in your estate at ten connections a minute from one
+# host, which is an outage rather than a defence. TLS handshake failures count
+# too, so an attacker cannot switch from one kind of grinding to the other.
+#
+# May only be RAISED. Raise it if many clients share one egress address -- a
+# NAT gateway, a Kubernetes egress IP -- because they share this budget.
+# auth_failures_per_ip = 10
+
+# The reserved control lane: memory held back so the messages that RELEASE the
+# general budget -- Terminate, Sync, an error response -- can still be
+# processed while it is saturated. Derived as max_conns x 64 KiB when unset,
+# and it may only be raised above that.
+# control_lane_bytes = 20971520        # 320 x 64 KiB

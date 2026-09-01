@@ -94,6 +94,11 @@ type Engine struct {
 	maxRows int
 	now     func() time.Time
 
+	// pendingLeaseCap and pendingResidentCap hold the registry-scoped caps
+	// until every option has run. See WithLeaseCap.
+	pendingLeaseCap    int
+	pendingResidentCap int64
+
 	// profile is the capability profile admission runs against (ADR-0074
 	// §2). Per-connection and per-grant profile sources arrive with the
 	// session engine; today every surface runs the one profile.
@@ -174,6 +179,34 @@ func WithSessionLimits(perUser, global int) Option {
 	return func(e *Engine) {
 		if perUser > 0 && global > 0 {
 			e.sessions = newSessionRegistry(perUser, global)
+		}
+	}
+}
+
+// WithLeaseCap bounds concurrent WIRE sessions per target pool
+// (`[frontdoor] max_leases`, derived from pool_max_conns - reserved_headroom).
+//
+// APPLIED AFTER EVERY OPTION HAS RUN, not here, and that is deliberate:
+// WithSessionLimits REPLACES the registry, so a caller who passed the two in
+// the other order would have this silently discarded. An option whose effect
+// depends on its position among the others is a guard that disappears the day
+// somebody tidies the list.
+func WithLeaseCap(n int) Option {
+	return func(e *Engine) {
+		if n > 0 {
+			e.pendingLeaseCap = n
+		}
+	}
+}
+
+// WithResidentBudget bounds the total memory reserved by open wire sessions
+// (ADR-0075 §4, default 1 GiB).
+//
+// Same deferral as WithLeaseCap, for the same reason.
+func WithResidentBudget(bytes int64) Option {
+	return func(e *Engine) {
+		if bytes > 0 {
+			e.pendingResidentCap = bytes
 		}
 	}
 }
@@ -276,6 +309,18 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 	e.bgCtx, e.bgCancel = context.WithCancel(context.Background())
 	for _, o := range opts {
 		o(e)
+	}
+	// The registry-scoped caps are stamped LAST, because WithSessionLimits
+	// builds a fresh registry and would otherwise drop whichever of these
+	// ran before it. Order-independence is the point: these two are the
+	// front door's lease and memory bounds, and until this ran they were set
+	// only by tests — in a running daemon both were zero, which means
+	// disabled.
+	if e.pendingLeaseCap > 0 {
+		e.sessions.leaseCap = e.pendingLeaseCap
+	}
+	if e.pendingResidentCap > 0 {
+		e.sessions.residentCap = e.pendingResidentCap
 	}
 	return e
 }

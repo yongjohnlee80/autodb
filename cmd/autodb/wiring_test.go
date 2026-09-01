@@ -44,6 +44,14 @@ func TestExecOptions_EveryConfiguredValueReachesTheEngine(t *testing.T) {
 		JanitorInterval:      config.Duration(2 * time.Second),
 	}
 
+	// The front door's two registry-scoped bounds come from ITS section, and
+	// until F0f nothing wired either: both were zero in a running daemon,
+	// which means the lease cap and the resident budget did not exist
+	// outside tests.
+	cfg.FrontDoor = config.FrontDoor{
+		Enabled: true, MaxLeases: 5, ResidentBudgetBytes: 12345678,
+	}
+
 	eng := coreexec.New(nil, nil, execOptions(cfg, func(string) {})...)
 	got := eng.Settings()
 
@@ -63,6 +71,8 @@ func TestExecOptions_EveryConfiguredValueReachesTheEngine(t *testing.T) {
 		{"pool_max_conns", got.PoolMaxConns, 6, "a target's connection budget was bounded by the default"},
 		{"pool_max_conn_idle_time", got.PoolMaxConnIdleTime, 21 * time.Second, ""},
 		{"pool_max_conn_lifetime", got.PoolMaxConnLifetime, 23 * time.Minute, ""},
+		{"frontdoor.max_leases", got.LeaseCap, 5, "the per-target wire-lease cap was zero, which is no cap at all"},
+		{"frontdoor.resident_budget_bytes", got.ResidentBudget, int64(12345678), "the wire sessions' memory budget was zero, which is no budget at all"},
 	} {
 		if c.got != c.want {
 			msg := c.wasDropped

@@ -23,6 +23,13 @@ type Settings struct {
 	PoolMaxConns         int
 	PoolMaxConnIdleTime  time.Duration
 	PoolMaxConnLifetime  time.Duration
+
+	// LeaseCap bounds concurrent wire sessions per target pool, and
+	// ResidentBudget the memory they may reserve in total. Both were set
+	// only by tests until the daemon wiring landed: zero here means the
+	// guard is off.
+	LeaseCap       int
+	ResidentBudget int64
 }
 
 // Settings returns the effective configuration.
@@ -39,5 +46,7 @@ func (e *Engine) Settings() Settings {
 		PoolMaxConns:         e.poolMaxConns,
 		PoolMaxConnIdleTime:  e.poolMaxConnIdleTime,
 		PoolMaxConnLifetime:  e.poolMaxConnLifetime,
+		LeaseCap:             e.sessions.leaseCap,
+		ResidentBudget:       e.sessions.residentCap,
 	}
 }
