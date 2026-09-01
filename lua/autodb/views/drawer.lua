@@ -122,6 +122,45 @@ end
 
 local M = {}
 
+---bucket_relations selects the `want` kind out of a flat schema.tables result
+---and nests Postgres partitions (ADR-0077) under their parent.
+---
+---Drawn flat, a parent with 50 partitions puts 51 siblings in the section and
+---buries everything else. This returns only the TOP-LEVEL relations, each
+---carrying its own partitions on `_partitions`.
+---
+---An orphan — a partition whose parent is not in this list, because it was
+---filtered out or lives in another schema — stays top-level on purpose:
+---nesting it under a folder that never gets drawn would make the relation
+---disappear from the tree entirely.
+---@param all table  raw schema.tables rows
+---@param want string  the kind to keep ("table" / "view")
+---@return table
+local function bucket_relations(all, want)
+  all = type(all) == "table" and all or {}
+  local byparent, present, out = {}, {}, {}
+  for _, x in ipairs(all) do
+    if (x.kind or "table") == want then present[x.name or ""] = true end
+  end
+  for _, x in ipairs(all) do
+    local p = x.parent
+    if x.is_partition and p and p ~= "" and present[p] then
+      byparent[p] = byparent[p] or {}
+      byparent[p][#byparent[p] + 1] = x
+    end
+  end
+  for _, x in ipairs(all) do
+    if (x.kind or "table") == want then
+      local parented = x.is_partition and x.parent and x.parent ~= "" and present[x.parent]
+      if not parented then
+        x._partitions = byparent[x.name or ""]
+        out[#out + 1] = x
+      end
+    end
+  end
+  return out
+end
+
 ---new builds a drawer instance bound to one host profile.
 ---
 ---The profile is frozen here: buffer name, filetype, buffer vars,
@@ -316,7 +355,12 @@ function M.new(profile)
         local function draw_relation(depth, ws, conn, item, kind)
           local label = item.name or tostring(item)
           if item.schema and item.schema ~= "" then label = item.schema .. "." .. label end
+          -- The node id is built BEFORE the badge: expansion state is keyed by
+          -- it, so folding a relation must not depend on a cosmetic suffix.
           local id = string.format("%s:%d:%s", kind, conn.id, label)
+          -- Bracketed so the role reads as an annotation rather than as part of
+          -- the relation's name: "audit_log [partitioned]". Matches the TUI.
+          if item.partitioned then label = label .. " [partitioned]" end
           local open = container(depth, {
             kind = kind, id = id, workspace = ws, connection = conn,
             item = item, hl = HL.item, label = label,
@@ -335,6 +379,23 @@ function M.new(profile)
                     .. (badge ~= "" and ("  " .. badge) or "") })
               end
             end)
+          -- A partitioned parent also carries its partitions, bucketed by the
+          -- section's projection. They are already in hand, so this draws them
+          -- directly rather than issuing another schema.tables call — and
+          -- recurses, so a partition's own columns work exactly as a table's.
+          local parts = item._partitions
+          if parts and #parts > 0 then
+            local pid = id .. ":parts"
+            if container(depth + 1, {
+              kind = "group", id = pid, group = "partitions",
+              workspace = ws, connection = conn, hl = HL.group,
+              label = string.format("partitions (%d)", #parts),
+            }) then
+              for _, p in ipairs(parts) do
+                draw_relation(depth + 2, ws, conn, p, kind)
+              end
+            end
+          end
         end
 
         -- the tables / views / functions sections under a connection.
@@ -363,13 +424,7 @@ function M.new(profile)
             else
               local want = sec.kind
               children(sid, "schema.tables", { conn.id, "" },
-                function(r)
-                  local out = {}
-                  for _, x in ipairs(type(r) == "table" and r or {}) do
-                    if (x.kind or "table") == want then out[#out + 1] = x end
-                  end
-                  return out
-                end,
+                function(r) return bucket_relations(r, want) end,
                 depth + 1, "(none)", function(items)
                   for _, item in ipairs(items) do
                     draw_relation(depth + 1, ws, conn, item, sec.kind)
@@ -841,5 +896,6 @@ M.DEFAULT_PROFILE = DEFAULT_PROFILE
 M._HL = HL
 M._NS = NS
 M._host_for_tests = host
+M._bucket_relations_for_tests = bucket_relations
 
 return M

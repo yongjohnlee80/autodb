@@ -2100,6 +2100,58 @@ print("\n[19] autodb.api — the public contract (ADR-0078 §3.6)")
     vim.inspect(ival))
 end)()
 
+print("\n[20] the drawer nests Postgres partitions under their parent (ADR-0077)")
+;(function()
+  local bucket = require("autodb.views.drawer")._bucket_relations_for_tests
+
+  local function rel(name, o)
+    return vim.tbl_extend("force", { name = name, kind = "table" }, o or {})
+  end
+  local function byname(list)
+    local m = {}
+    for _, x in ipairs(list) do m[x.name] = x end
+    return m
+  end
+
+  -- The shape that motivated this: one parent, many partitions. Drawn flat
+  -- they are siblings and bury the rest of the schema.
+  local flat = {
+    rel("audit_log", { partitioned = true }),
+    rel("audit_log_2026_01", { is_partition = true, parent = "audit_log" }),
+    rel("audit_log_2026_02", { is_partition = true, parent = "audit_log" }),
+    rel("users"),
+  }
+  local top = bucket(flat, "table")
+  ok("p20: partitions are lifted out of the top level", #top == 2,
+    "top-level count = " .. #top)
+  local m = byname(top)
+  ok("p20: the parent survives at the top level", m.audit_log ~= nil)
+  ok("p20: an ordinary table is untouched", m.users ~= nil and m.users._partitions == nil)
+  ok("p20: the parent carries both partitions",
+    m.audit_log and m.audit_log._partitions and #m.audit_log._partitions == 2)
+
+  -- Nothing may vanish: a partition whose parent is absent stays visible.
+  local orphaned = bucket({
+    rel("orphan_2026_01", { is_partition = true, parent = "not_in_this_list" }),
+    rel("users"),
+  }, "table")
+  ok("p20: an orphaned partition stays top-level rather than disappearing",
+    #orphaned == 2, "count = " .. #orphaned)
+
+  -- A partition of a VIEW-kind filter must not leak into the tables section.
+  local mixed = bucket({
+    rel("audit_log", { partitioned = true }),
+    rel("audit_log_2026_01", { is_partition = true, parent = "audit_log" }),
+    rel("v_users", { kind = "view" }),
+  }, "view")
+  ok("p20: the kind filter still applies", #mixed == 1 and mixed[1].name == "v_users")
+
+  -- Degenerate inputs must not throw: the drawer renders on every reply.
+  local okc = pcall(function() return bucket(nil, "table") end)
+  ok("p20: a nil result set is tolerated", okc)
+  ok("p20: an empty result set yields nothing", #bucket({}, "table") == 0)
+end)()
+
 if #missing_prereqs > 0 then
   print(string.format("\n%d MISSING PRECONDITION(S): %s",
     #missing_prereqs, table.concat(missing_prereqs, ", ")))
