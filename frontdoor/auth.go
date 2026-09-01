@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -129,7 +130,21 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		return authOutcome{Denied: reasonPreAuthProtocolViolation, Counts: true}, nil
 	}
 
+	// THE WORKER GATE (matrix §9), taken here and not earlier.
+	//
+	// Around the VERIFICATION rather than around the whole credential phase,
+	// and the difference is availability. A slot held from the moment the
+	// prompt is offered would be held while a client decides whether to
+	// answer — so sixteen silent peers, costing nothing to run, would keep
+	// every real client out for the whole auth deadline. Held from the frame
+	// arriving, it bounds exactly the work that is expensive and nothing a
+	// peer can stretch for free.
+	release, werr := l.acquireAuthWorker(ctx)
+	if werr != nil {
+		return authOutcome{}, werr
+	}
 	res, aerr := l.authn.OpenWireSession(ctx, pm.Password, params["user"], params["database"], hostOf(peer))
+	release()
 	if aerr != nil {
 		if reason := exec.DenialReason(aerr); reason != "" {
 			return authOutcome{Denied: denialReason(reason), Counts: true}, nil
@@ -142,6 +157,32 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		return authOutcome{Denied: reasonAuthStoreError}, nil
 	}
 	return authOutcome{Session: res}, nil
+}
+
+// acquireAuthWorker takes one of the credential-phase slots, or gives up when
+// the connection's own deadline says it should.
+//
+// Bounded by the SAME auth deadline the read was, so a queue cannot become a
+// way to hold connections open past their budget: a peer that waits for a
+// worker is spending its own ten seconds, not new ones. A caller that gives
+// up here is closed without a denial frame — it presented a credential we
+// never looked at, and saying "authentication failed" would be a claim about
+// a check that did not happen.
+func (l *Listener) acquireAuthWorker(ctx context.Context) (func(), error) {
+	if l.authSlots == nil {
+		return func() {}, nil
+	}
+	timer := time.NewTimer(l.dl.auth)
+	defer timer.Stop()
+	select {
+	case l.authSlots <- struct{}{}:
+		var once sync.Once
+		return func() { once.Do(func() { <-l.authSlots }) }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, fmt.Errorf("frontdoor: no credential worker within %s", l.dl.auth)
+	}
 }
 
 // completeHandshake is row 2.9: the success sequence, in the protocol's order.

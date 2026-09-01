@@ -88,13 +88,26 @@ const (
 	DenyResidentBudget = "frontdoor/resident-budget-exceeded"
 )
 
-// WireSessionOverhead is the fixed memory charged for one wire session: its
-// decoder, TLS record buffers and session bookkeeping.
+// WireSessionOverhead is the fixed memory charged for one wire session: the
+// ExecSession's own state — the session record, its registry and per-user
+// entries, the reservation itself, and the bookkeeping the engine keeps for
+// the session's whole life.
 //
-// A flat figure rather than a measurement, deliberately. The budget's job is
-// to bound the total, and a charge that varied with actual allocation would
-// let a connection grow past what it reserved — the reservation would stop
-// meaning anything the moment it was most needed.
+// IT DOES NOT COVER ANY WIRE-SIDE BUFFER, and the first version of this
+// comment said it did — "its decoder, TLS record buffers and session
+// bookkeeping". That was wrong and it was load-bearing wrong: the front door
+// separately reserves 64 KiB per connection for its control lane, whose
+// comment also mentions the decoder, so the two read as one charge taken
+// twice. They are different terms of ADR-0075 §8.4's worst case, charged
+// against different budgets by different packages. The protocol matrix §8.5
+// carries the allocation-to-charge map; lector found the drift on PR #36.
+//
+// A flat figure rather than a measurement, deliberately, and lector's PR #33
+// ruling accepts it as such: the budget's job is to bound the total, and a
+// charge that varied with actual allocation would let a session grow past
+// what it reserved — the reservation would stop meaning anything at the
+// moment it was most needed. Variable input, retained and output allocations
+// stay separately charged where they are made.
 const WireSessionOverhead = 64 * 1024
 
 // OpenWireSession authenticates a front-door connection and reserves its

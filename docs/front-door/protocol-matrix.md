@@ -46,7 +46,12 @@ forced.** Each is called out where it lands, and none was a free choice:
    does not exist until a lease is held. F0e sends the three synthesized
    values only; the forwarded set arrives with the lease in F1. Sending a
    plausible fixed list in the meantime is what §3.3 exists to forbid.
-4. **Accept-time refusals are audited `fd.budget_refuse`** (§1.3's existing
+4. **§8.5 is new: the allocation-to-charge map.** Two 64 KiB constants in two
+   packages both had comments mentioning "TLS" and "decoder", so they read as
+   one charge taken twice. They are different terms of §8.4's worst case, and
+   the map names what each covers, which budget it is charged against, and
+   which allocation is bounded by the connection cap rather than by a charge.
+5. **Accept-time refusals are audited `fd.budget_refuse`** (§1.3's existing
    vocabulary) with the internal reasons `frontdoor/source-ip-throttled`,
    `frontdoor/connection-cap`, `frontdoor/pre-auth-connection-cap` and
    `frontdoor/control-lane-exhausted`. They close WITHOUT a frame: nothing
@@ -397,6 +402,33 @@ per-connection fixed overhead (TLS + decoder ≈ 64 KiB × 320 connections
 per §1.4). Nothing allocates before charging; therefore the budget bounds
 the aggregate regardless of per-object shape limits (whose naive product
 is ~29 GiB — shape limits are NOT the bound).
+
+### 8.5 Allocation-to-charge map (rev 5, lector PR #36 r0 must-fix 2)
+
+Two constants in the implementation are both 64 KiB and both had comments
+mentioning "TLS" and "decoder", which made them read as one charge taken
+twice. They are not. **The coincidence in the numbers is what made this
+worth writing down** — three terms above, and each is a different thing.
+
+| §8.4 term | Constant | Charged against | Taken / released | What it covers |
+|---|---|---|---|---|
+| global budget | `exec.WireSessionOverhead` (64 KiB) | the ENGINE's resident budget, in row 2.7's atomic reservation | at session open / at session close | The **ExecSession's** fixed state: the session record, its registry and per-user entries, the reservation itself, and the per-session bookkeeping the engine keeps for the session's whole life. It is an admission reservation for a conservative fixed footprint, not allocator telemetry (lector's PR #33 ruling). **It does not cover any wire-side buffer.** |
+| control lane | `frontdoor.ControlLanePerConn` (64 KiB) | the FRONT DOOR's control lane, at accept | at accept / at connection close | Reserved headroom so the messages that RELEASE the general budget can always be processed while it is saturated — `Sync`/`Flush`/`Terminate` intake, `ErrorResponse`/`NoticeResponse`/`ReadyForQuery` emission, cancel processing, teardown bookkeeping (§1.4). A reservation against a budget, not a description of an allocation. |
+| per-connection fixed overhead | — | **nothing; bounded by the connection CAP** | — | The actual wire-side buffers: the `bufio.Reader`, the TLS record buffers, and the `pgproto3` backend's chunk reader. |
+
+**The third row is a real statement about the current implementation and is
+deliberately not a charge.** These are allocated per connection and bounded by
+`MaxFrontendConns` — 320 × ≈64 KiB ≈ 20 MiB, which is exactly the figure §8.4
+already carries. A charge would add nothing a hard connection cap does not
+already guarantee: unlike segment input or retained state, this allocation
+cannot grow with what a peer sends. If a future change makes any of these
+buffers peer-sized, that stops being true and the row becomes a charge.
+
+**Why the two reservations are the same number and stay independent:** each is
+a conservative round figure for a different thing, arrived at separately. They
+must not be collapsed into one constant on the strength of being equal today —
+the engine's session footprint and the wire's control headroom answer to
+different limits and will move for different reasons.
 
 ---
 

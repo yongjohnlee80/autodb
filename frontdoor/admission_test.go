@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strings"
 	"testing"
@@ -511,4 +512,76 @@ func TestAdmitter_TheFailureMapIsSwept(t *testing.T) {
 		t.Errorf("the map holds %d entries after every one of %d expired; only the new failure "+
 			"should remain", after, before)
 	}
+}
+
+// The Options contract is ENFORCED, not merely documented (lector PR #36 r0
+// must-fix 3).
+//
+// The field docs said zero takes the default and that the per-source throttle
+// may only be raised. `<= 0` enforced neither: a negative silently became the
+// default, and a caller could ask for a limit of 1 and get a throttle
+// stricter than the matrix pins — which would put an ordinary pool refill
+// into a lockout. A contract in a doc comment that the code does not keep is
+// the same defect as a comment claiming one decision point over two copies.
+func TestOpen_EnforcesTheOptionsContract(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	c := issueChain(t, []string{"autodb.example.com"}, now.Add(-time.Hour), now.Add(24*time.Hour))
+	cfg, err := LoadServerTLS(fdWith(c.bundle, c.key, c.ca, "autodb.example.com"), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRefuse := func(t *testing.T, why string, opt Options, wants string) {
+		t.Helper()
+		l, oerr := Open("127.0.0.1:0", cfg, opt)
+		if oerr == nil {
+			l.Close()
+			t.Fatalf("%s was accepted", why)
+		}
+		if !strings.Contains(oerr.Error(), wants) {
+			t.Errorf("%s was refused with %q, which does not mention %q", why, oerr, wants)
+		}
+	}
+
+	t.Run("a negative is a mistake, not a default", func(t *testing.T) {
+		t.Parallel()
+		mustRefuse(t, "a negative connection cap", Options{MaxConns: -1}, "max_conns")
+		mustRefuse(t, "a negative pre-auth cap", Options{PreAuthMaxConns: -8}, "pre_auth_conns")
+		mustRefuse(t, "a negative worker count", Options{AuthWorkers: -2}, "auth_workers")
+		mustRefuse(t, "a negative failure limit", Options{AuthFailuresPerIP: -10}, "auth_failures_per_ip")
+		mustRefuse(t, "a negative lane", Options{ControlLaneBytes: -1}, "control_lane_bytes")
+	})
+
+	t.Run("the throttle may only be raised", func(t *testing.T) {
+		t.Parallel()
+		mustRefuse(t, "a failure limit of 1", Options{AuthFailuresPerIP: 1}, "may only be raised")
+		// And raising it is still allowed, or the check has simply banned
+		// the field.
+		l, oerr := Open("127.0.0.1:0", cfg, Options{AuthFailuresPerIP: AuthFailuresPerIP * 10})
+		if oerr != nil {
+			t.Fatalf("raising the limit was refused: %v", oerr)
+		}
+		l.Close()
+	})
+
+	t.Run("the lane arithmetic cannot overflow", func(t *testing.T) {
+		t.Parallel()
+		// maxConns × 64 KiB exceeds int64 here. The product wraps NEGATIVE,
+		// every lane clears a negative floor, and the check that exists to
+		// fail closed passes everything.
+		mustRefuse(t, "a connection cap that overflows the lane product",
+			Options{MaxConns: math.MaxInt64/ControlLanePerConn + 1}, "overflows")
+	})
+
+	t.Run("zero still takes the documented default", func(t *testing.T) {
+		t.Parallel()
+		l, oerr := Open("127.0.0.1:0", cfg, Options{})
+		if oerr != nil {
+			t.Fatalf("an empty Options was refused: %v", oerr)
+		}
+		defer l.Close()
+		if got := cap(l.authSlots); got != AuthWorkers {
+			t.Errorf("workers = %d, want the default %d", got, AuthWorkers)
+		}
+	})
 }
