@@ -41,6 +41,13 @@ var (
 	// so directly rather than relaying it per statement.
 	ErrTxAborted = errors.New("exec: the transaction is aborted; only ROLLBACK is accepted")
 
+	// ErrTxAuthorityChanged reports that the caller lost write authority
+	// while a transaction opened with write authority was still attached.
+	// The transaction has been rolled back synchronously; the caller must
+	// start a new read-only transaction rather than silently continuing in
+	// autocommit.
+	ErrTxAuthorityChanged = errors.New("exec: transaction authority changed; the writable transaction was rolled back")
+
 	// ErrTxChainUnsupported reports COMMIT/ROLLBACK AND CHAIN. Parsed, and
 	// refused BY NAME — the ADR §8 rule is that a clause is mapped or
 	// refused, never quietly dropped.
@@ -82,9 +89,10 @@ func newTxID() (string, error) {
 // handleTxControl performs a transaction-control statement as a state
 // transition. It runs with the session's execution slot already claimed.
 func (e *Engine) handleTxControl(
-	ctx context.Context, s *session, ident auth.Identity, connRow *meta.Connection,
+	ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection,
 	tc TxControl, sqlText, ip string,
 ) (*Result, error) {
+	ident := pol.Ident
 	// AND CHAIN is recognized and refused rather than dropped. Honouring it
 	// means committing and immediately reopening with the SAME options,
 	// which is a second transition the audit trail has no shape for yet —
@@ -98,7 +106,7 @@ func (e *Engine) handleTxControl(
 
 	switch tc.Action {
 	case TxBegin:
-		return e.beginTx(ctx, s, ident, connRow, tc, sqlText, ip)
+		return e.beginTx(ctx, s, pol, connRow, tc, sqlText, ip)
 	case TxCommit:
 		return e.finishTx(ctx, s, ident, ip, sqlText, true)
 	case TxRollback:
@@ -109,9 +117,10 @@ func (e *Engine) handleTxControl(
 
 // beginTx opens the session's transaction.
 func (e *Engine) beginTx(
-	ctx context.Context, s *session, ident auth.Identity, connRow *meta.Connection,
+	ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection,
 	tc TxControl, sqlText, ip string,
 ) (*Result, error) {
+	ident := pol.Ident
 	s.mu.Lock()
 	phase := s.txPhase
 	s.mu.Unlock()
@@ -135,17 +144,9 @@ func (e *Engine) beginTx(
 				"(its driver has no context-bounded finalizers)", dao.ErrUnsupported, connRow.Name))
 	}
 
-	// THE SHARED POLICY, resolved fresh for this unit and forced over
-	// whatever the client asked for.
-	//
-	// Here rather than at session open, because the role a session was
-	// opened under is a historical fact: a user demoted between BEGIN and
-	// BEGIN keeps write authority until something re-reads it, and the next
-	// background sweep is too late by a whole janitor interval.
-	pol, perr := e.resolveUnitPolicy(ctx, s.authority, s.userID, s.connID)
-	if perr != nil {
-		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, perr)
-	}
+	// THE SHARED POLICY, resolved once by the entry point for this unit and
+	// forced over whatever the client asked for. Resolving again here would
+	// allow the preflight and BEGIN to observe different authority states.
 	if pol.applyTo(&tc.Options) {
 		// AUDITED, not silently downgraded. A reader who wrote
 		// `BEGIN READ WRITE` asked for something they did not get, and a
@@ -224,6 +225,7 @@ func (e *Engine) beginTx(
 	s.txPhase = txActive
 	s.txID = txID
 	s.txOpened = now
+	s.txOpenedMayWrite = pol.MayWrite
 	s.lastUsed = now
 	s.limits = limits
 	s.targetXID = targetXID
@@ -296,7 +298,7 @@ func (e *Engine) finishTx(ctx context.Context, s *session, ident auth.Identity, 
 	outcome, err := e.commitBoundary(ctx, s, tx, ident, txID, targetXID, commit)
 
 	s.mu.Lock()
-	s.tx, s.txPhase, s.txID, s.targetXID = nil, txNone, "", ""
+	s.clearTxLocked()
 	s.lastUsed = e.now()
 	s.mu.Unlock()
 

@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -98,17 +99,12 @@ func pgWireSession(t *testing.T) (f *fixture, connID int64, sid SessionID, pat *
 	// A REAL transaction on the target. Attached through the production begin
 	// path rather than by poking the struct, so what the sweep sees is what a
 	// statement would have left behind.
+	if _, berr := f.eng.WireExecute(ctx, sid, userID, "BEGIN", testIP); berr != nil {
+		t.Fatalf("BEGIN on the wire session: %v", berr)
+	}
 	s, err := f.eng.sessions.lookup(sid, userID)
 	if err != nil {
 		t.Fatalf("the wire session vanished: %v", err)
-	}
-	ident, err := f.svc.Authorize(ctx, f.rootTok, connID, auth.ActionWrite)
-	if err != nil {
-		t.Fatalf("identity for the begin: %v", err)
-	}
-	if _, berr := f.eng.beginTx(ctx, s, ident, connRow,
-		TxControl{Action: TxBegin, Verb: "BEGIN"}, "BEGIN", testIP); berr != nil {
-		t.Fatalf("BEGIN on the wire session: %v", berr)
 	}
 	if s.txPhase == txNone {
 		t.Fatal("no transaction is open, so these cells cannot observe one being rolled back")
@@ -326,7 +322,8 @@ func TestStanding_AnUnreferencedAuthorityDoesNotStand(t *testing.T) {
 	}
 }
 
-// AN UNCERTAIN ROLLBACK DISCARDS THE SESSION rather than retaining it.
+// AN UNCERTAIN FOREGROUND ROLLBACK DISCARDS THE SESSION rather than retaining
+// it, and the close reason remains a demotion cleanup failure.
 //
 // The demotion path keeps a session only after a CONFIRMED clean rollback.
 // If the transaction cannot be ended — the statement will not stop, or the
@@ -338,7 +335,7 @@ func TestStanding_AnUnreferencedAuthorityDoesNotStand(t *testing.T) {
 // The backend is terminated out from under the session, which is the genuine
 // shape of the failure rather than an injected error — the connection holding
 // the transaction goes away and the rollback has nowhere to land.
-func TestStanding_AnUncertainRollbackClosesTheSessionInstead(t *testing.T) {
+func TestStanding_AnUncertainForegroundRollbackClosesForDemotionCleanup(t *testing.T) {
 	t.Parallel()
 	f, connID, sid, _, userID := pgWireSession(t)
 	ctx := context.Background()
@@ -364,6 +361,11 @@ func TestStanding_AnUncertainRollbackClosesTheSessionInstead(t *testing.T) {
 		t.Fatalf("scanning the backend pid: %v", serr)
 	}
 	rows.Close()
+	s.mu.Lock()
+	counter := &countingRollbackTx{ContextTxConn: s.tx}
+	s.tx = counter
+	txID := s.txID
+	s.mu.Unlock()
 
 	// Editor first, so what follows is a DEMOTION rather than a revocation —
 	// the retention decision only exists on that path.
@@ -390,13 +392,64 @@ func TestStanding_AnUncertainRollbackClosesTheSessionInstead(t *testing.T) {
 		t.Fatal(gerr)
 	}
 
-	if n := f.eng.reapExpired(ctx, time.Now()); n != 1 {
-		t.Fatalf("the sweep acted on %d sessions, want 1", n)
+	closeOwned := make(chan struct{})
+	releaseClose := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseClose:
+		default:
+			close(releaseClose)
+		}
+	}()
+	f.eng.hookDemotionCloseOwned = func() {
+		close(closeOwned)
+		<-releaseClose
+	}
+	execDone := make(chan error, 1)
+	go func() {
+		_, xerr := f.eng.WireExecute(ctx, sid, userID, "COMMIT", testIP)
+		execDone <- xerr
+	}()
+	waitDemotionSignal(t, closeOwned, "foreground close-transfer ownership")
+	beforeClose := txLog(t, f, txID)
+	if len(beforeClose) != 1 || beforeClose[0].State != string(meta.TxOpened) {
+		t.Fatalf("outcome trail before the close owner ran = %#v, want only the opened row", beforeClose)
+	}
+	// A sweep that sees sessClosing while the original owner is still active
+	// must not start a second finalizer.
+	if n := f.eng.reapExpired(ctx, time.Now()); n != 0 {
+		t.Fatalf("sweep reported %d actions while the original close finalizer was active", n)
+	}
+	close(releaseClose)
+	xerr := <-execDone
+	if !errors.Is(xerr, ErrTxAuthorityChanged) {
+		t.Fatalf("the triggering COMMIT returned %v, want ErrTxAuthorityChanged", xerr)
 	}
 	if sessionExists(f, sid, userID) {
 		t.Fatal("the session was RETAINED after a rollback that could not be confirmed. Its " +
 			"transaction's fate is unknown and it still holds a leased target connection, so " +
 			"it looks healthy while the engine's picture of the target is wrong")
+	}
+	if got := counter.calls.Load(); got != 2 {
+		t.Fatalf("RollbackContext calls = %d, want 2: failed preflight plus the sole close finalizer retry", got)
+	}
+	if got := len(auditDetail(t, f, "session_closed")); got != 1 {
+		t.Fatalf("session_closed audits = %d, want exactly 1", got)
+	}
+	if got := len(auditDetail(t, f, "tx_rollback_failed")); got != 1 {
+		t.Fatalf("tx_rollback_failed audits = %d, want exactly 1", got)
+	}
+	assertAuditContains(t, f, "session_closed", reasonDemotionCleanupFailed)
+	assertAuditContains(t, f, "tx_rollback_failed", reasonDemotionCleanupFailed)
+	trail := txLog(t, f, txID)
+	if len(trail) != 2 || trail[0].State != string(meta.TxOpened) || trail[1].State != string(meta.TxRolledBack) {
+		t.Fatalf("transaction outcome trail = %#v, want opened then the close-owned rolled_back terminal", trail)
+	}
+	if n := len(auditDetail(t, f, reasonAuthorityRevoked)); n != 0 {
+		t.Fatalf("%d authority-revoked audits for a demotion cleanup failure", n)
+	}
+	if n := len(auditDetail(t, f, reasonAuthorityDemoted)); n != 0 {
+		t.Fatalf("%d authority-demoted audits after rollback failed; retention was never confirmed", n)
 	}
 }
 

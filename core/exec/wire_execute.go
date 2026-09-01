@@ -41,7 +41,13 @@ func (e *Engine) WireExecute(ctx context.Context, id SessionID, userID int64, sq
 	if err := s.begin(); err != nil {
 		return nil, err
 	}
-	defer s.finish()
+	closeAfterRelease := false
+	defer func() {
+		s.finish()
+		if closeAfterRelease {
+			e.finishClosing(context.WithoutCancel(ctx), s)
+		}
+	}()
 	if s.get() != sessOpen {
 		return nil, ErrSessionNotFound
 	}
@@ -53,6 +59,25 @@ func (e *Engine) WireExecute(ctx context.Context, id SessionID, userID int64, sq
 	if perr != nil {
 		return nil, perr
 	}
+	demoted, derr := e.enforceTransactionAuthority(ctx, s, pol, ip)
+	if derr != nil {
+		closeAfterRelease = e.transferDemotionClose(s, ip)
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText,
+			fmt.Errorf("%w: rollback cleanup failed: %v", ErrTxAuthorityChanged, derr))
+	}
+	if demoted {
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAuthorityChanged)
+	}
+	return e.executeSessionUnit(ctx, s, pol, sqlText, ip, true)
+}
+
+// executeSessionUnit is the shared token/PAT session pipeline after one fresh
+// policy has been resolved and transaction authority has been preflighted.
+// Control authorization remains surface-owned because its two independent
+// gates are load-bearing P2 evidence; ordinary execution shares everything.
+func (e *Engine) executeSessionUnit(
+	ctx context.Context, s *session, pol UnitPolicy, sqlText, ip string, wire bool,
+) (*Result, error) {
 
 	connRow, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, s.connID).Get()
 	if err != nil {
@@ -82,7 +107,10 @@ func (e *Engine) WireExecute(ctx context.Context, id SessionID, userID int64, sq
 	// pipeline is entered at all — the same routing the token path does, for
 	// the same reason (ADR-0074 §3).
 	if stmt.Class == ClassControl {
-		return e.wireControl(ctx, s, connRow, stmt, pol, sqlText, ip)
+		if wire {
+			return e.wireControl(ctx, s, connRow, stmt, pol, sqlText, ip)
+		}
+		return e.tokenControl(ctx, s, connRow, stmt, pol, sqlText, ip)
 	}
 
 	// The statement's own class, authorized against the SAME verdict the
@@ -116,7 +144,7 @@ func (e *Engine) WireExecute(ctx context.Context, id SessionID, userID int64, sq
 	return res, rerr
 }
 
-// wireControl routes a transaction verb on a wire session.
+// wireControl routes a transaction verb on a PAT-backed wire session.
 func (e *Engine) wireControl(
 	ctx context.Context, s *session, connRow *meta.Connection,
 	stmt Statement, pol UnitPolicy, sqlText, ip string,
@@ -164,7 +192,7 @@ func (e *Engine) wireControl(
 	if perr != nil {
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
 	}
-	return e.handleTxControl(ctx, s, pol.Ident, connRow, tc, sqlText, ip)
+	return e.handleTxControl(ctx, s, pol, connRow, tc, sqlText, ip)
 }
 
 // authorizeUnit decides a statement's class against an ALREADY-RESOLVED

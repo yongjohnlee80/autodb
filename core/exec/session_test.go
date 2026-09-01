@@ -138,7 +138,7 @@ func TestSession_ManyClosersOneOwner(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start // release them together
-			if s.beginClose() {
+			if s.beginClose("", "test") {
 				mu.Lock()
 				owned++
 				mu.Unlock()

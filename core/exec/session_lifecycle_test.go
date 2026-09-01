@@ -254,6 +254,49 @@ func TestQuiesce_HoldsTheSlotUntilTheTeardownIsDone(t *testing.T) {
 	s.finish()
 }
 
+func TestTransferClose_ClaimsAClosingSessionWhoseOwnerDeferred(t *testing.T) {
+	t.Parallel()
+	s := &session{}
+	s.state.Store(int32(sessOpen))
+	if !s.beginClose(testIP, "ordinary-close") {
+		t.Fatal("initial closer did not own the transition")
+	}
+	s.releaseCloseForRetry()
+
+	if !s.transferClose("", reasonDemotionCleanupFailed) {
+		t.Fatal("demotion transfer did not claim the inactive closing finalizer")
+	}
+	s.mu.Lock()
+	active, reason := s.closeActive, s.closeWhy
+	s.mu.Unlock()
+	if !active || reason != reasonDemotionCleanupFailed {
+		t.Fatalf("transferred close = active:%v reason:%q, want true/%q",
+			active, reason, reasonDemotionCleanupFailed)
+	}
+}
+
+func TestTransferClose_RequestsAnImmediateRetryFromAnActiveDeferringOwner(t *testing.T) {
+	t.Parallel()
+	s := &session{}
+	s.state.Store(int32(sessOpen))
+	if !s.beginClose(testIP, "ordinary-close") {
+		t.Fatal("initial closer did not own the transition")
+	}
+	if s.transferClose("", reasonDemotionCleanupFailed) {
+		t.Fatal("demotion transfer claimed a finalizer that was still active")
+	}
+	if !s.releaseCloseForRetry() {
+		t.Fatal("active closer did not observe the pending demotion retry at its defer boundary")
+	}
+	s.mu.Lock()
+	active, pending, reason := s.closeActive, s.closeRetryRequested, s.closeWhy
+	s.mu.Unlock()
+	if !active || pending || reason != reasonDemotionCleanupFailed {
+		t.Fatalf("handoff = active:%v pending:%v reason:%q, want true/false/%q",
+			active, pending, reason, reasonDemotionCleanupFailed)
+	}
+}
+
 // THE POSITIVE CONTROL for PendingOutcomes — lector's review gate, and a gap
 // I found in my own submission after sending it.
 //

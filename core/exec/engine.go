@@ -89,6 +89,12 @@ type Engine struct {
 	// same reason as closeQuiesce: a shared package variable that parallel
 	// tests reassign is a data race, which is how the first one started.
 	txQuiesce time.Duration
+	// Demotion race hooks are nil in production. They let tests place the
+	// foreground and janitor on opposite sides of the slot boundary without
+	// relying on scheduler timing.
+	hookBeforeDemotionQuiesce func()
+	hookDemotionOwned         func(teardown bool)
+	hookDemotionCloseOwned    func()
 
 	history bool
 	maxRows int
