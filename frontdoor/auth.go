@@ -68,6 +68,12 @@ type authOutcome struct {
 	// Counts reports whether this denial is the PEER's fault and should be
 	// charged to their source address. A store failure is not.
 	Counts bool
+	// Peer reports the same thing for a non-denial ERROR return: a read
+	// failure is the peer's doing, while running out of workers or a stuck
+	// store is ours. Separate from Counts because one accompanies a denial
+	// and the other accompanies an error, and collapsing them would make the
+	// caller guess which it had.
+	Peer bool
 }
 
 // runAuth performs rows 2.6-2.8 on an established TLS connection.
@@ -87,6 +93,23 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// for a credential that was checked and found wanting.
 		return authOutcome{Denied: reasonNoCredentialStore}, nil
 	}
+
+	// ONE DEADLINE FOR THE WHOLE CREDENTIAL EXCHANGE, absolute, taken here.
+	//
+	// It was three budgets that ADDED UP. The socket got l.dl.auth before the
+	// read; the worker wait then started a FRESH timer of the same length;
+	// and the verification itself got the listener's context, which has no
+	// deadline at all. A peer could spend twice the budget by being slow at
+	// the right moment — lector measured 502.96ms against a 300ms setting —
+	// and a stuck auth store could hold a worker forever, because nothing
+	// upstream was ever going to cancel it.
+	//
+	// The phase's budget is a property of the PHASE, not of each step in it.
+	// Every step below shares this instant: the socket, the queue, and the
+	// store call.
+	authDeadline := l.now().Add(l.dl.auth)
+	authCtx, cancelAuth := context.WithDeadline(ctx, authDeadline)
+	defer cancelAuth()
 
 	// Row 2.6: cleartext, and it is the ONLY method offered. SCRAM cannot be
 	// offered over hashed PATs — a SCRAM verifier needs material the server
@@ -113,14 +136,15 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		return authOutcome{}, err
 	}
 
-	if err := conn.SetDeadline(l.now().Add(l.dl.auth)); err != nil {
+	if err := conn.SetDeadline(authDeadline); err != nil {
 		return authOutcome{}, err
 	}
 	msg, err := be.Receive()
 	if err != nil {
 		// A read failure is not a denial: nothing was presented. It closes
-		// without a frame for the same reason a TLS failure does.
-		return authOutcome{}, err
+		// without a frame for the same reason a TLS failure does, and it IS
+		// the peer's doing, so it is charged to them.
+		return authOutcome{Peer: true}, err
 	}
 	pm, ok := msg.(*pgproto3.PasswordMessage)
 	if !ok {
@@ -139,11 +163,16 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	// every real client out for the whole auth deadline. Held from the frame
 	// arriving, it bounds exactly the work that is expensive and nothing a
 	// peer can stretch for free.
-	release, werr := l.acquireAuthWorker(ctx)
+	release, werr := l.acquireAuthWorker(authCtx)
 	if werr != nil {
+		// OUR CAPACITY, NOT THEIR CREDENTIAL. A peer who waited for a worker
+		// we could not spare presented something we never looked at, and
+		// charging that to their address would throttle them for our
+		// shortfall — the same distinction the store-failure path already
+		// draws. Peer stays false, so nothing is counted against them.
 		return authOutcome{}, werr
 	}
-	res, aerr := l.authn.OpenWireSession(ctx, pm.Password, params["user"], params["database"], hostOf(peer))
+	res, aerr := l.authn.OpenWireSession(authCtx, pm.Password, params["user"], params["database"], hostOf(peer))
 	release()
 	if aerr != nil {
 		if reason := exec.DenialReason(aerr); reason != "" {
@@ -172,16 +201,17 @@ func (l *Listener) acquireAuthWorker(ctx context.Context) (func(), error) {
 	if l.authSlots == nil {
 		return func() {}, nil
 	}
-	timer := time.NewTimer(l.dl.auth)
-	defer timer.Stop()
+	// SELECTS ON THE PHASE'S CONTEXT, and starts no timer of its own. A
+	// fresh duration here was a second full budget: a peer who had already
+	// spent the whole allowance getting to this line could then wait the
+	// whole allowance again.
 	select {
 	case l.authSlots <- struct{}{}:
 		var once sync.Once
 		return func() { once.Do(func() { <-l.authSlots }) }, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-timer.C:
-		return nil, fmt.Errorf("frontdoor: no credential worker within %s", l.dl.auth)
+		return nil, fmt.Errorf("frontdoor: no credential worker within the authentication "+
+			"deadline: %w", ctx.Err())
 	}
 }
 
