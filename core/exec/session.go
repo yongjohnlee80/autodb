@@ -120,6 +120,10 @@ type session struct {
 	// tearingDown marks the slot as held by a teardown rather than by a
 	// statement, so a refusal can say which it is.
 	tearingDown bool
+	// reservation is what this session holds from the registry: a wire
+	// lease and a memory charge. Released with it, never separately.
+	reservation reservation
+
 	// closeIP and closeWhy are kept so a retried close audits the reason the
 	// close actually had, rather than inventing one at retry time.
 	closeIP  string
@@ -159,6 +163,25 @@ type sessionRegistry struct {
 	perUserCap int
 	globalCap  int
 
+	// Front-door wire leases, per target connection (ADR-0075 §3). A wire
+	// session holds a PHYSICAL connection for its whole lifetime, so this
+	// cap is what stops the front door consuming a pool the interactive
+	// surfaces and the engine's own control queries also need.
+	//
+	// Counted in the SAME registry and under the SAME mutex as the session
+	// caps, because matrix row 2.7 requires them acquired as one operation:
+	// two locks would reintroduce the check-then-reserve gap between them,
+	// and a cap observed free must be the cap acquired.
+	leases   map[int64]int
+	leaseCap int
+
+	// resident is the global weighted memory budget (ADR-0075 §4 rev 5).
+	// The session's FIXED OVERHEAD is charged here as the fourth member of
+	// the reservation — its absence is what recreates the gap for memory
+	// while the other three are protected.
+	resident    int64
+	residentCap int64
+
 	// Test hooks. They are nil in production and exist because the binding
 	// concurrency-testing convention requires a competing transition to be
 	// driven INSIDE the window between a guard's last check and its effect —
@@ -175,6 +198,7 @@ func newSessionRegistry(perUser, global int) *sessionRegistry {
 		draining:   map[int64]bool{},
 		perUserCap: perUser,
 		globalCap:  global,
+		leases:     map[int64]int{},
 	}
 }
 
@@ -193,31 +217,125 @@ func newSessionID() (SessionID, error) {
 // them and two callers at the cap boundary both see room and both insert —
 // the exact defect the convention's window rule exists to catch, which is why
 // hookAfterAdmitCheck lets a test drive a competing admit through the gap.
-func (r *sessionRegistry) admit(s *session) error {
+// ErrLeaseCapExceeded reports the per-target wire-lease cap (ADR-0075 §3,
+// registered in ADR-0074 §8a's stable identity list by marked extension).
+//
+// A distinct identity from the session caps because the operator's remedy
+// differs: a session cap says this user or this server is at its limit, while
+// this says the TARGET's pool has no lease left — raise pool_max_conns, or
+// lower reserved_headroom, or accept fewer concurrent wire sessions on that
+// database.
+var ErrLeaseCapExceeded = errors.New("exec: lease-cap-exceeded")
+
+// ErrResidentBudgetExceeded reports the global weighted memory budget.
+var ErrResidentBudgetExceeded = errors.New("exec: resident-budget-exceeded")
+
+// reservation is what a front-door session acquires as ONE operation.
+type reservation struct {
+	// LeaseConn is the target connection a wire lease was taken on, 0 for a
+	// session that holds none (the interactive surfaces).
+	LeaseConn int64
+	// Overhead is the fixed memory charge held for this session's lifetime.
+	Overhead int64
+}
+
+// admitWithLease is admit plus the two front-door members: a per-target wire
+// lease and the session's fixed overhead charge.
+//
+// FOUR members acquired under ONE lock, which is matrix row 2.7's
+// requirement and not a convenience. Taking the session slots here and the
+// lease somewhere else would put a window between them where a cap observed
+// free is not the cap acquired — precisely the defect the PAT cap had, and
+// the one the ADR spells out as "partial reservation is impossible".
+//
+// Everything is released together on failure, so a refused connection holds
+// nothing. That is why the rollbacks below are unwound in reverse rather
+// than left to a deferred cleanup: a partial hold is worse than a refusal,
+// because nothing is coming to release it.
+func (r *sessionRegistry) admitWithLease(s *session, leaseConn int64, overhead int64) error {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	if r.draining[s.connID] {
-		r.mu.Unlock()
 		return fmt.Errorf("%w: connection %d", ErrConnectionDraining, s.connID)
 	}
 	if len(r.byID) >= r.globalCap {
-		r.mu.Unlock()
-		return fmt.Errorf("%w: the server is at its limit of %d open sessions", ErrSessionCapExceeded, r.globalCap)
+		return fmt.Errorf("%w: the server is at its limit of %d open sessions",
+			ErrSessionCapExceeded, r.globalCap)
 	}
 	if r.perUser[s.userID] >= r.perUserCap {
-		r.mu.Unlock()
-		return fmt.Errorf("%w: you already have %d open sessions, the per-user limit", ErrSessionCapExceeded, r.perUserCap)
+		return fmt.Errorf("%w: you already have %d open sessions, the per-user limit",
+			ErrSessionCapExceeded, r.perUserCap)
 	}
+	if leaseConn != 0 && r.leaseCap > 0 && r.leases[leaseConn] >= r.leaseCap {
+		return fmt.Errorf("%w: connection %d is at its limit of %d concurrent wire sessions",
+			ErrLeaseCapExceeded, leaseConn, r.leaseCap)
+	}
+	if r.residentCap > 0 && r.resident+overhead > r.residentCap {
+		return fmt.Errorf("%w: %d bytes held of %d", ErrResidentBudgetExceeded,
+			r.resident, r.residentCap)
+	}
+
 	if h := r.hookAfterAdmitCheck; h != nil {
-		// Inside the window: the counts have been checked and nothing has
-		// been inserted yet. The lock is still held, which is precisely the
-		// property under test — a hook that deadlocks here is reporting a
-		// real defect.
+		// Inside the window: every cap has been checked and nothing has been
+		// taken. The lock is still held, which is the property under test.
 		h()
 	}
+
 	r.byID[s.id] = s
 	r.perUser[s.userID]++
-	r.mu.Unlock()
+	if leaseConn != 0 {
+		r.leases[leaseConn]++
+	}
+	r.resident += overhead
+	s.reservation = reservation{LeaseConn: leaseConn, Overhead: overhead}
 	return nil
+}
+
+// releaseReservation gives back everything admitWithLease took. Called from
+// remove, so a session cannot leave the registry while still holding a lease.
+func (r *sessionRegistry) releaseReservation(s *session) {
+	if s.reservation.LeaseConn != 0 {
+		if n := r.leases[s.reservation.LeaseConn]; n > 1 {
+			r.leases[s.reservation.LeaseConn] = n - 1
+		} else {
+			// Delete rather than leave a zero: a map of connections that
+			// once had leases grows without bound on a long-lived daemon.
+			delete(r.leases, s.reservation.LeaseConn)
+		}
+	}
+	r.resident -= s.reservation.Overhead
+	if r.resident < 0 {
+		// Defensive: a negative budget means a double release, which would
+		// silently hand out capacity that does not exist.
+		r.resident = 0
+	}
+	s.reservation = reservation{}
+}
+
+// leaseCount reports the wire leases held on a connection. Test-support.
+func (r *sessionRegistry) leaseCount(connID int64) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.leases[connID]
+}
+
+// residentHeld reports the charged memory. Test-support.
+func (r *sessionRegistry) residentHeld() int64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.resident
+}
+
+// admit reserves the session slots only, for surfaces that hold no wire
+// lease — the TUI, Lua and Web clients, which use pooled connections.
+//
+// It delegates rather than duplicating, so there is exactly ONE reservation
+// path and one place where the ordering of the checks lives. Two
+// implementations of "is there room" is how the interactive surfaces and the
+// front door come to disagree about a cap they share.
+func (r *sessionRegistry) admit(s *session) error {
+	return r.admitWithLease(s, 0, 0)
 }
 
 // lookup returns a session owned by userID, or ErrSessionNotFound.
@@ -245,6 +363,12 @@ func (r *sessionRegistry) remove(s *session) {
 		} else {
 			delete(r.perUser, s.userID)
 		}
+		// The lease and the memory charge go with the session, under the
+		// SAME lock that removed it. Releasing them separately would let a
+		// session leave the registry while still counted against its
+		// target's lease cap — a leak that only shows up as a target
+		// mysteriously refusing connections it has capacity for.
+		r.releaseReservation(s)
 	}
 	r.mu.Unlock()
 }

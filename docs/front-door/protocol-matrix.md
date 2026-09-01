@@ -1,6 +1,6 @@
 # Front-door protocol matrix — PostgreSQL wire v3
 
-**Status:** rev 3 — pre-F0 gate document (ADR-0075 §5). F0 implementation
+**Status:** rev 4 — pre-F0 gate document (ADR-0075 §5). F0 implementation
 does not begin until this matrix is lector-reviewed and accepted.
 Rev 2 folds lector r0: MF1 full-check atomic auth/reservation; MF2
 pg-conformant discard-through-Sync (Close NOT exempt) + segment entry on
@@ -15,6 +15,11 @@ frontdoor_max_leases pointer to row 2.7's atomic reservation (MF2), the
 complete never-emitted backend canary set (MF3), and certificate
 fail-start before bind/listen + client-side verify-full phrasing (MF4);
 the r1 direct-TLS ruling (v1 refusal accepted) closes §11's open item.
+Rev 4 folds ADR-0075 **Amendment 1** into row 2.7: IP admission is
+`(global ∨ user-layer) ∧ PAT-if-set`, not the AND rev 3 described. Edited by
+the F0 implementer alongside the code that implements it, per the
+code-adjacent rule.
+
 **Owner:** the F0 implementer (authored by jarvis as ADR-0075's author;
 ownership transfers with F0). **Companion to:** KB ADR-0075 (accepted
 2026-08-30); state semantics from KB ADR-0074 (ExecSession). Code-adjacent
@@ -131,7 +136,7 @@ exists).
 | 2.5 | `StartupMessage` (major 3, minor > 0, and/or unrecognized `_pq_.*` options) | S1 | **Negotiate down (MF4, ruling 3)**: emit `NegotiateProtocolVersion` (newest supported = 3.0, plus the list of unrecognized `_pq_.*` option names) and **continue at 3.0 semantics** — pg-conformant, never a hard refusal. | pre-auth cap | — | — |
 | 2.5a | `StartupMessage` (major ≠ 3) | S1 | **Refused**: uniform denial, close (unsupported major). | pre-auth cap | `fd.refused` | uniform denial, close |
 | 2.6 | (server →) `AuthenticationCleartextPassword` | S2 | The only offered method. PATs are verified server-side against SHA-256 records; cleartext-over-TLS is the Q4-ratified design. SCRAM is **not offered** (hashed PATs cannot back SCRAM verifiers). | — | — | — |
-| 2.7 | `PasswordMessage` (PAT) | S3 | **Full verification chain (MF1), then one atomic reservation.** Verify: token exists ∧ **is a front-door PAT** (scope check — no other credential class authenticates here) ∧ not expired ∧ not revoked ∧ owner matches startup `user` ∧ user enabled ∧ **user-layer IP allowlist** ∧ **PAT `allowed_ips` intersection** (token-layer, ⊆ user rows by construction — both must admit the source) ∧ **target validation**: the `database` connection exists ∧ is enabled ∧ the user holds a grant on it ∧ its profile admits front-door use. Then **atomically reserve, as ONE operation**: per-user session slot (8) + global slot (256) + target lease (`frontdoor_max_leases`) + the session's fixed overhead charge — no check-then-reserve gap (a cap observed free must be the cap acquired); partial reservation is impossible, failure rolls back nothing-held. Which check failed is audit-only. | pre-auth cap | `fd.auth_ok` / `fd.auth_denied` | uniform denial (28000 `invalid_authorization_specification`), close. 3 attempts/conn, 10/min/source-IP. Lease-cap failure: wire = the same uniform 28000; audit identity = `lease-cap-exceeded` (ruling 4). |
+| 2.7 | `PasswordMessage` (PAT) | S3 | **Full verification chain (MF1), then one atomic reservation.** Verify: token exists ∧ **is a front-door PAT** (scope check — no other credential class authenticates here) ∧ not expired ∧ not revoked ∧ owner matches startup `user` ∧ user enabled ∧ **IP admission: (global allowlist ∨ the user's `user_ip_allowlist` rows)** ∧ **PAT `allowed_ips` if set** (ADR-0075 **Amendment 1**, Johno 2026-08-31 — this was an AND of the two layers until the amendment; OR because the global list carries shared infrastructure and under AND a colleague at an already-listed office still needed a personal row, while a home address had to be listed GLOBALLY to be usable, bloating the perimeter and making the per-user layer a second registration rather than a narrowing. Accepted cost, on the record: a stolen PAT works from any globally-listed address for any account; per-token `allowed_ips` is the mitigation. Empty `allowed_ips` INHERITS the admission set — it does not mean "nowhere". The admission SOURCE, global or user-row, is audited) ∧ **target validation**: the `database` connection exists ∧ is enabled ∧ the user holds a grant on it ∧ its profile admits front-door use. Then **atomically reserve, as ONE operation**: per-user session slot (8) + global slot (256) + target lease (`frontdoor_max_leases`) + the session's fixed overhead charge — no check-then-reserve gap (a cap observed free must be the cap acquired); partial reservation is impossible, failure rolls back nothing-held. Which check failed is audit-only. | pre-auth cap | `fd.auth_ok` / `fd.auth_denied` | uniform denial (28000 `invalid_authorization_specification`), close. 3 attempts/conn, 10/min/source-IP. Lease-cap failure: wire = the same uniform 28000; audit identity = `lease-cap-exceeded` (ruling 4). |
 | 2.8 | Any other type-`p` frame in S3 | S3 | **There is no distinguishable SASL path (MF4):** once `AuthenticationCleartextPassword` is offered, every type-`p` frame IS a `PasswordMessage` by protocol — SASL-shaped bytes are simply a wrong password. Verified per row 2.7; fails the token lookup; uniform denial. `GSSResponse` is likewise type-`p` and takes the same path. | pre-auth cap | `fd.auth_denied` | uniform denial, close |
 | 2.9 | (server →) on success | S3→S4 | `AuthenticationOk`; `ParameterStatus` set per §3.3; `BackendKeyData` (CSPRNG, MF7); `ReadyForQuery('I')`. The ExecSession, lease, and all slots were already **atomically reserved in row 2.7** — nothing acquired between `AuthenticationOk` and ready. | (charged in 2.7) | `fd.session_open` | — |
 
