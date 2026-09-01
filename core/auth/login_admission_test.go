@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -170,4 +171,123 @@ func TestLogin_IsLoginAtWithoutAnAdmissionLayer(t *testing.T) {
 			"never asked for, and the decoy has to MIRROR the real path rather than do "+
 			"unconditional work", got)
 	}
+}
+
+// THE ADMISSION RECORD COMMITS WITH THE SESSION OR NOT AT ALL (lector PR #34
+// r3 must-fix).
+//
+// It used to be written the moment the admission check passed, under a
+// comment claiming the login had already been decided. It had not. Between
+// that point and the commit lie a keyslot check, a master-key unwrap, and a
+// transactional recheck that exists precisely because a disable or a
+// passphrase reset can land underneath an in-flight login. Each of those left
+// a durable row asserting an admitted login that never existed — an audit
+// trail that lies is worse than one that is silent, because it is the thing
+// an operator reconstructs an incident from.
+//
+// Reproduced the way lector did: deterministically, with an empty keyslot,
+// rather than by arguing about a race.
+func TestLoginAt_NoAdmissionRecordWithoutACommittedSession(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, store, _ := newSvc(t)
+	_, ident, err := s.Bootstrap(ctx, "johno", rootPass, testIP)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	// A row that never received a keyslot: correct credentials, admitted
+	// address, and a login that still cannot complete.
+	if uerr := store.Users.OnCtx(ctx).With(meta.UserID, ident.UserID()).
+		Set(meta.UserMKWrapped, []byte{}).Update(); uerr != nil {
+		t.Fatalf("clearing the keyslot: %v", uerr)
+	}
+
+	before := countAuditRows(t, store, "login_admitted")
+	sessBefore := countSessions(t, store)
+
+	tok, _, lerr := s.LoginAt(ctx, "johno", rootPass, testIP, testIP)
+	if !errors.Is(lerr, ErrNoKeyslot) {
+		t.Fatalf("err = %v, want ErrNoKeyslot — this cell needs a login that fails AFTER the "+
+			"admission check and before the commit, or it observes nothing", lerr)
+	}
+	if tok != "" {
+		t.Error("a token was issued despite the failure")
+	}
+	if n := countSessions(t, store) - sessBefore; n != 0 {
+		t.Fatalf("%d sessions were created by a failed login", n)
+	}
+	if n := countAuditRows(t, store, "login_admitted") - before; n != 0 {
+		t.Errorf("%d admission-success rows were written for a login that never completed. The "+
+			"trail now asserts an admitted session that does not exist, which is exactly what "+
+			"someone reconstructing an access would read", n)
+	}
+}
+
+// The positive control: when the transaction DOES commit, the source is
+// recorded. Without this, the cell above is satisfied by never writing the
+// row at all, and an operator loses the distinction between a login from
+// shared infrastructure and one from a person's own registered address.
+func TestLoginAt_AnAdmittedLoginRecordsWhichLayerAdmittedIt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, store, _ := newSvc(t)
+	if _, _, err := s.Bootstrap(ctx, "johno", rootPass, testIP); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	if _, _, err := s.LoginAt(ctx, "johno", rootPass, testIP, testIP); err != nil {
+		t.Fatalf("an admitted login failed: %v", err)
+	}
+	rows, err := store.Audit.OnCtx(ctx).With(meta.AuditAction, "login_admitted").Select()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("%d admission rows for one admitted login, want 1", len(rows))
+	}
+	if !strings.Contains(rows[0].Detail, string(AdmittedByGlobal)) {
+		t.Errorf("detail %q does not name the layer that admitted; an operator cannot tell a "+
+			"login from shared infrastructure apart from one from a person's own address",
+			rows[0].Detail)
+	}
+	if !strings.Contains(rows[0].Detail, testIP) {
+		t.Errorf("detail %q does not name the address", rows[0].Detail)
+	}
+}
+
+// A login with no admission layer writes no admission row — the record must
+// mean something when it is present.
+func TestLoginAt_NoLayerMeansNoAdmissionRecord(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	s, store, _ := newSvc(t)
+	if _, _, err := s.Bootstrap(ctx, "johno", rootPass, testIP); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if _, _, err := s.Login(ctx, "johno", rootPass, testIP); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if n := countAuditRows(t, store, "login_admitted"); n != 0 {
+		t.Errorf("%d admission rows for a login with no admission layer; the row would be "+
+			"claiming a check that never ran", n)
+	}
+}
+
+func countAuditRows(t *testing.T, store *meta.Store, action string) uint64 {
+	t.Helper()
+	n, err := store.Audit.OnCtx(context.Background()).With(meta.AuditAction, action).Count()
+	if err != nil {
+		t.Fatalf("counting %q: %v", action, err)
+	}
+	return n
+}
+
+func countSessions(t *testing.T, store *meta.Store) uint64 {
+	t.Helper()
+	n, err := store.Sessions.OnCtx(context.Background()).Count()
+	if err != nil {
+		t.Fatalf("counting sessions: %v", err)
+	}
+	return n
 }
