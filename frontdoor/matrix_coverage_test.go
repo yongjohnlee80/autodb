@@ -177,12 +177,15 @@ var matrixTriage = map[string]struct {
 // a matrix row that contains SEPARATELY testable guarantees is tracked per
 // claim, keyed "<row>#<claim>" and cited in tests as "row 3.1:options#empty-audit".
 //
-// A covered claim carries ANCHORS — literal fragments of the proving cell
-// that must all match somewhere in the scanned test files — so the evidence
-// is machine-checked, not described: deleting the proving case reddens the
-// gate even if the citation comment survives (that gap was r0's finding,
-// reproduced in mutation M12). An awaiting claim is a missing obligation
-// with the phase that owes it.
+// A covered claim carries ANCHORS — literal fragments of the proving cell —
+// and the evidence is machine-checked with an OWNERSHIP requirement (r1 MF1):
+// every anchor must match inside one of the claim's CITING WITNESS files,
+// the files whose citation names the claim. Deleting the proving case
+// reddens the gate even if the citation comment survives (r0's finding,
+// mutation M12), and planting the literal in an UNRELATED file's comment is
+// not evidence (r1's finding — the citation and the proof must resolve to
+// the same owned cell; mutation M19). An awaiting claim is a missing
+// obligation with the phase that owes it.
 //
 // Parent rows are DERIVED from their claims: all-covered ⇒ the parent is
 // covered, anything awaiting ⇒ the parent is awaiting. matrixTriage must
@@ -580,14 +583,24 @@ func matrixRowIDs(t *testing.T) []string {
 
 // matrixClaimIDs validates the claim registry against the row set and
 // returns the claim keys. A claim whose parent row does not exist describes
-// coverage of nothing.
+// coverage of nothing, and a claim in a state the claim machinery does not
+// fully implement is refused (r1 MF2): `uncited` silently skipped its
+// checks in the first refold while still counting toward coverage — a
+// registry entry that behaves differently from what it says is worse than
+// no entry.
 func matrixClaimIDs(t *testing.T, rowSet map[string]bool) []string {
 	t.Helper()
 	var claims []string
-	for c := range claimTriage {
+	for c, e := range claimTriage {
 		parent, _, _ := strings.Cut(c, "#")
 		if !rowSet[parent] {
 			t.Fatalf("claim %s names the parent row %q, which the matrix does not contain — a claim whose parent is gone describes nothing", c, parent)
+		}
+		if e.state == uncited {
+			t.Fatalf("claim %s is `uncited` — claims have no uncited state: a cell that exists and is named is an ordinary ROW citation, and a claim marked uncited skips every check while still deriving coverage (r1 MF2). Give it covered (with anchors) or awaiting (with the owing phase)", c)
+		}
+		if e.state == covered && len(e.anchors) == 0 {
+			t.Fatalf("claim %s is covered with NO anchors — an unanchored covered claim is an assertion the gate cannot check; the anchors are the machine-checked half of the claim", c)
 		}
 		claims = append(claims, c)
 	}
@@ -725,40 +738,45 @@ func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 		}
 	}
 
-	// The claim loop. A covered claim needs its citation AND its evidence:
-	// every anchor must still match somewhere in the scanned tests — the
-	// evidence is machine-checked, not described in the reason. An awaiting
-	// claim promoted by citation follows the ordinary promotion path.
+	// The claim loop. A covered claim needs its citation AND its evidence,
+	// and the two must resolve to the SAME cell (r1 MF1): every anchor must
+	// match inside one of the citing witness files — the files whose
+	// citation names the claim. Deleting the proving case reddens even with
+	// the comment intact, and planting the literal in an unrelated file's
+	// comment is not evidence. An awaiting claim promoted by citation
+	// follows the ordinary promotion path.
 	for _, claim := range claims {
 		entry := claimTriage[claim]
-		_, isCited := cited[claim]
+		witnesses := cited[claim]
 		switch entry.state {
 		case covered:
-			if !isCited {
+			if len(witnesses) == 0 {
 				claimRegressed = append(claimRegressed, claim+" ("+entry.reason+")")
+				continue
 			}
 			for _, a := range entry.anchors {
-				if !evidenceMatches(t, a) {
+				if !witnessHasEvidence(t, witnesses, a) {
 					evidenceVanished = append(evidenceVanished,
-						claim+"'s evidence anchor no longer matches any test: "+a+
-							" — the case that proved this claim was deleted or reworded while the claim still says covered")
+						claim+"'s evidence anchor no longer matches inside its citing witness ("+strings.Join(witnesses, ", ")+"): "+a+
+							" — the proof and the citation must resolve to the same owned cell")
 				}
 			}
 		case awaiting:
-			if isCited {
-				claimPromotable = append(claimPromotable, claim+" — now cited by "+strings.Join(cited[claim], ", "))
+			if len(witnesses) > 0 {
+				claimPromotable = append(claimPromotable, claim+" — now cited by "+strings.Join(witnesses, ", "))
 			}
 		}
 	}
 
-	// Parent-derivation consistency: a row with claims is covered only when
-	// every claim is covered. The hand-written parent state must AGREE with
-	// the derivation, or the map is asserting something its own claims
+	// Parent-derivation consistency: a row with claims is covered exactly
+	// when EVERY claim is exactly covered (r1 MF2) — anything else derives
+	// awaiting. The hand-written parent state must AGREE with the
+	// derivation, or the map is asserting something its own claims
 	// contradict — in either direction.
 	for parent, n := range claimCount {
 		derived := covered
 		for _, c := range claims {
-			if p, _, _ := strings.Cut(c, "#"); p == parent && claimTriage[c].state == awaiting {
+			if p, _, _ := strings.Cut(c, "#"); p == parent && claimTriage[c].state != covered {
 				derived = awaiting
 			}
 		}
@@ -863,33 +881,26 @@ func stateName(s rowState) string {
 	return "?"
 }
 
-// evidenceMatches reports whether the literal fragment — a covered claim's
-// anchor — still appears in any scanned test file. The scan mirrors
-// citedRows: every _test.go in the repo, this file excluded.
-func evidenceMatches(t *testing.T, fragment string) bool {
+// witnessHasEvidence reports whether the literal fragment — a covered
+// claim's anchor — appears in one of the claim's citing witness files
+// (r1 MF1). The r0 shape searched every _test.go in the repo; r1's mutation
+// killed it by planting the literal in an unrelated tls_test.go comment
+// while the proving case was deleted. The proof and the citation must
+// resolve to the same owned cell: a fragment that only matches elsewhere
+// is a comment, not evidence.
+func witnessHasEvidence(t *testing.T, witnesses []string, fragment string) bool {
 	t.Helper()
-	const self = "matrix_coverage_test.go"
-	found := false
-	_ = filepath.Walk(repoRoot(t), func(path string, info os.FileInfo, err error) error {
-		if err != nil || found {
-			return nil
+	root := repoRoot(t)
+	for _, rel := range witnesses {
+		src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read the citing witness %s: %v", rel, err)
 		}
-		if info.IsDir() {
-			if info.Name() == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
+		if strings.Contains(string(src), fragment) {
+			return true
 		}
-		if !strings.HasSuffix(path, "_test.go") || filepath.Base(path) == self {
-			return nil
-		}
-		src, rerr := os.ReadFile(path)
-		if rerr == nil && strings.Contains(string(src), fragment) {
-			found = true
-		}
-		return nil
-	})
-	return found
+	}
+	return false
 }
 
 // TestMatrixCoverage_TriageHasNoPhantomRows guards the other direction: an
