@@ -37,7 +37,7 @@ const unthrottled = 1 << 20
 
 // listenerWith starts a real listener on a real port with real TLS material,
 // merging the caller's options over the test defaults.
-func listenerWith(t *testing.T, opt Options) (*Listener, func() []Event, string) {
+func listenerWith(t testing.TB, opt Options) (*Listener, func() []Event, string) {
 	t.Helper()
 	now := time.Now()
 	c := issueChain(t, []string{"autodb.example.com"}, now.Add(-time.Hour), now.Add(24*time.Hour))
