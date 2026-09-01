@@ -132,7 +132,7 @@ func find(events []Event, kind string) (Event, bool) {
 	return Event{}, false
 }
 
-// Row 2.6: cleartext is offered, and it is the ONLY thing offered.
+// MATRIX ROW 2.6: cleartext is offered, and it is the ONLY thing offered.
 //
 // The negative half is the point. Offering SCRAM alongside would be a menu
 // item that fails for everyone who picks it, because a SCRAM verifier needs
@@ -153,7 +153,7 @@ func TestAuth_OffersCleartextAndNothingElse(t *testing.T) {
 	}
 }
 
-// Row 2.9's success sequence, in the protocol's order.
+// MATRIX ROW 2.9's success sequence, in the protocol's order.
 func TestAuth_SuccessSequence(t *testing.T) {
 	t.Parallel()
 	f := &fakeAuth{result: goodSession()}
@@ -253,7 +253,7 @@ done:
 	_ = tc
 }
 
-// Row 2.7's refusal: whatever the internal cause, ONE wire shape.
+// MATRIX ROW 2.7's refusal: whatever the internal cause, ONE wire shape.
 func TestAuth_DenialIsUniformAndTheCauseIsAuditOnly(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -351,7 +351,7 @@ func TestAuth_StoreFailureIsNotACredentialFailure(t *testing.T) {
 	}
 }
 
-// Row 2.8: once cleartext is offered, EVERY type-`p` frame is a password.
+// MATRIX ROW 2.8: once cleartext is offered, EVERY type-`p` frame is a password.
 //
 // A client that speaks SASL at us anyway does not get a different path to
 // probe; its SASLInitialResponse is simply a wrong password. That is not this
@@ -400,8 +400,8 @@ func TestAuth_SASLShapedBytesAreJustAWrongPassword(t *testing.T) {
 	}
 }
 
-// A frame that is not type-`p` before authentication is a protocol violation,
-// and it must not reach the engine.
+// MATRIX ROW 2.8, the other half: a frame that is NOT type-`p` before
+// authentication is a protocol violation, and it must not reach the engine.
 func TestAuth_ANonPasswordFrameNeverReachesTheEngine(t *testing.T) {
 	t.Parallel()
 	f := &fakeAuth{result: goodSession()}

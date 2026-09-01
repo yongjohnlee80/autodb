@@ -436,6 +436,8 @@ func TestStartup_DirectTLSIsATLSFailureNotAnAuthDenial(t *testing.T) {
 
 // MF3. §3.1's accepted set is CLOSED. A parameter outside it is refused FOR
 // being refused — not allowed to fall through to whatever denies next.
+// MATRIX ROW 2.4: the StartupMessage's parameters are pinned by §3.1's closed
+// set — a parameter not named there is refused rather than emulated as a GUC.
 func TestStartup_ParameterPolicy(t *testing.T) {
 	t.Parallel()
 

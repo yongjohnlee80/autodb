@@ -119,6 +119,11 @@ func fdWith(certPath, keyPath, caPath string, hosts ...string) config.FrontDoor 
 	}
 }
 
+// MATRIX ROW 2.1b: the TLS layer's material is validated BEFORE bind/listen —
+// absent, unparsable, expired, not-yet-valid, wrongly-chained or mismatched
+// material fails start, and SAN coverage of the configured host names is
+// checked with it. The front door never listens with an identity it cannot
+// prove.
 func TestLoadServerTLS_RefusesUnusableMaterial(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
