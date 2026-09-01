@@ -530,11 +530,14 @@ func (m *Model) openPATManager(userID int64, who string) {
 		{Title: "NAME", Width: 20, Cell: func(r PATRow) string { return r.Name }},
 		{Title: "EXPIRES", Width: 12, Cell: func(r PATRow) string { return shortStamp(r.ExpiresAt) }},
 		{Title: "LAST USED", Width: 12, Cell: func(r PATRow) string { return shortStamp(r.LastUsed) }},
-		{Title: "IPS", Width: 6, Cell: func(r PATRow) string {
-			// "any" is the honest word for an empty allowlist: the token is
-			// then bounded only by the user's own rows, not by itself.
+		{Title: "IPS", Width: 8, Cell: func(r PATRow) string {
+			// NOT "any". An empty allowed_ips means the token inherits the
+			// user's admission set (ADR-0075 Amendment 1) — still bounded,
+			// just not narrowed further by the token itself. "any" claimed
+			// the opposite, and did so for restricted tokens too while the
+			// CSV was being decoded as a list.
 			if len(r.AllowedIPs) == 0 {
-				return "any"
+				return "inherit"
 			}
 			return strconv.Itoa(len(r.AllowedIPs))
 		}},
@@ -573,6 +576,18 @@ func (m *Model) openPATManager(userID int64, who string) {
 	g.float = m.openFloat("access tokens — "+who, g, managerWidth)
 }
 
+// activePATs counts the rows that consume cap. auth bounds ACTIVE tokens
+// (PATRevoked = 0); auth.token_list returns revoked rows as well.
+func activePATs(rows []PATRow) int {
+	n := 0
+	for _, r := range rows {
+		if !r.Revoked {
+			n++
+		}
+	}
+	return n
+}
+
 // shortStamp trims an RFC3339 stamp to its date, and passes through the
 // non-timestamps the wire uses for "never" so they stay readable.
 func shortStamp(s string) string {
@@ -597,7 +612,12 @@ func (m *Model) openPATForm(g *manager[PATRow], userID int64) {
 			return managerReload{gen: bound.Gen(), apply: func() { g.model.setError(msg) }}, nil
 		}
 		return managerReload{gen: bound.Gen(), apply: func() {
-			m.patForm(g, userID, own, len(g.items))
+			// Only ACTIVE tokens count against the cap: auth's check is
+			// `With(meta.PATRevoked, 0).Count()`, while token_list returns
+			// revoked rows too. Passing len(g.items) overstated used capacity
+			// after any revocation and would tell a user with room that they
+			// were full.
+			m.patForm(g, userID, own, activePATs(g.items))
 		}}, nil
 	})
 }

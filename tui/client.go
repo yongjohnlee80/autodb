@@ -1008,21 +1008,41 @@ func (b *Bound) PATs(ctx context.Context, userID int64) ([]PATRow, error) {
 	var out []PATRow
 	for _, row := range asList(res) {
 		m, _ := row.(map[string]any)
-		r := PATRow{
-			Name:      mS(m, "name"),
-			CreatedAt: mS(m, "created_at"),
-			ExpiresAt: mS(m, "expires_at"),
-			LastUsed:  mS(m, "last_used"),
-			Revoked:   mB(m, "revoked"),
-		}
-		for _, ip := range asList(m["allowed_ips"]) {
-			if s, ok := ip.(string); ok {
-				r.AllowedIPs = append(r.AllowedIPs, s)
-			}
-		}
-		out = append(out, r)
+		out = append(out, patRowFromWire(m))
 	}
 	return out, nil
+}
+
+// patRowFromWire decodes one auth.token_list row.
+//
+// `allowed_ips` is a comma-separated STRING on the wire — meta.PAT.AllowedIPs
+// is a string, canonicalized on write — not a list. Decoding it as a list
+// yielded nil for every restricted token, and the manager then labelled it
+// "any": the UI told the operator a restricted token carried no restriction.
+// Split out so a test can cross the real wire shape, which is exactly what
+// the helper-level tests could not reach.
+func patRowFromWire(m map[string]any) PATRow {
+	return PATRow{
+		Name:       mS(m, "name"),
+		CreatedAt:  mS(m, "created_at"),
+		ExpiresAt:  mS(m, "expires_at"),
+		LastUsed:   mS(m, "last_used"),
+		Revoked:    mB(m, "revoked"),
+		AllowedIPs: splitAllowedIPs(mS(m, "allowed_ips")),
+	}
+}
+
+// splitAllowedIPs parses the CSV, dropping blanks so " , " does not become a
+// phantom restriction. Empty yields nil, which means the token INHERITS the
+// user's admission set (ADR-0075 Amendment 1) rather than reaching nowhere.
+func splitAllowedIPs(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // CreatePAT mints a token for the CALLING user. days is 0 for the server

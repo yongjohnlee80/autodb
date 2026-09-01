@@ -210,3 +210,82 @@ func TestShortStamp(t *testing.T) {
 		t.Fatalf("shortStamp turned empty into %q", got)
 	}
 }
+
+// --- the auth.token_list wire contract ---------------------------------------
+//
+// These cells cross the SHAPE the server actually sends. The helper-level
+// subset tests above stayed green through a bug that made every restricted
+// token render as unrestricted, because none of them touched the wire.
+
+// wireRow builds the map rpc/methods.go's auth.token_list handler emits.
+// allowed_ips is meta.PAT.AllowedIPs — a comma-separated STRING, not a list.
+func wireRow(name, allowedIPs string, revoked bool) map[string]any {
+	return map[string]any{
+		"name":        name,
+		"created_at":  "2026-09-01T00:00:00Z",
+		"expires_at":  "2026-12-01T00:00:00Z",
+		"last_used":   "never",
+		"revoked":     revoked,
+		"allowed_ips": allowedIPs,
+	}
+}
+
+// TestPATRowFromWire_RestrictedTokenIsNotRenderedAsUnrestricted is the
+// blocking defect lector caught. Decoding the CSV as a list yielded nil, and
+// the manager labelled the token "any" — telling the operator a restricted
+// credential carried no restriction. A display bug, but a security-display
+// bug: it misreports the blast radius of a live credential.
+func TestPATRowFromWire_RestrictedTokenIsNotRenderedAsUnrestricted(t *testing.T) {
+	r := patRowFromWire(wireRow("laptop", "10.0.0.0/8,192.168.68.5", false))
+	if len(r.AllowedIPs) != 2 {
+		t.Fatalf("a restricted token decoded to %d allowed IPs (%v), want 2 — "+
+			"the panel would call it unrestricted", len(r.AllowedIPs), r.AllowedIPs)
+	}
+	if r.AllowedIPs[0] != "10.0.0.0/8" || r.AllowedIPs[1] != "192.168.68.5" {
+		t.Fatalf("decoded %v, want the two CSV entries verbatim", r.AllowedIPs)
+	}
+}
+
+func TestSplitAllowedIPs_EmptyAndWhitespace(t *testing.T) {
+	// Empty means "inherits the admission set" (Amendment 1), so it must
+	// decode to nothing rather than to one blank entry.
+	for _, s := range []string{"", "   ", ",", " , , "} {
+		if got := splitAllowedIPs(s); len(got) != 0 {
+			t.Fatalf("splitAllowedIPs(%q) = %v, want empty", s, got)
+		}
+	}
+	// Canonical spacing around real entries is trimmed, not preserved.
+	got := splitAllowedIPs(" 10.0.0.0/8 , 172.16.0.0/12 ")
+	if len(got) != 2 || got[0] != "10.0.0.0/8" || got[1] != "172.16.0.0/12" {
+		t.Fatalf("splitAllowedIPs trimmed to %v, want the two entries unpadded", got)
+	}
+}
+
+// TestActivePATs_RevokedRowsDoNotConsumeCap — auth bounds ACTIVE tokens
+// (PATRevoked = 0) while token_list returns revoked rows too, so counting
+// every row overstated used capacity after a revocation.
+func TestActivePATs_RevokedRowsDoNotConsumeCap(t *testing.T) {
+	rows := []PATRow{
+		{Name: "a"},
+		{Name: "b", Revoked: true},
+		{Name: "c"},
+		{Name: "d", Revoked: true},
+	}
+	if got := activePATs(rows); got != 2 {
+		t.Fatalf("activePATs = %d over 4 rows (2 revoked), want 2", got)
+	}
+	if got := activePATs(nil); got != 0 {
+		t.Fatalf("activePATs(nil) = %d, want 0", got)
+	}
+}
+
+// TestPATRowFromWire_RevokedFlagSurvives — the STATE column and the cap count
+// both depend on it.
+func TestPATRowFromWire_RevokedFlagSurvives(t *testing.T) {
+	if r := patRowFromWire(wireRow("gone", "", true)); !r.Revoked {
+		t.Fatal("a revoked token decoded as active")
+	}
+	if r := patRowFromWire(wireRow("live", "", false)); r.Revoked {
+		t.Fatal("an active token decoded as revoked")
+	}
+}
