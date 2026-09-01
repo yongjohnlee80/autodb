@@ -129,6 +129,51 @@ func (e *Engine) RevokeCancelKey(id SessionID) {
 	}
 }
 
+// RegisterCancelKey records an externally minted pair against a session —
+// the front door's spelling of issuance, for the key it sends in its own
+// BackendKeyData.
+//
+// The front door mints from the same CSPRNG (row 2.9, MF7) rather than
+// calling IssueCancelKey, because the pair must be in the CLIENT's frame the
+// moment the handshake composes it and the engine half must not own the wire.
+// Collision handling is the same redraw-never-overwrite rule, for the same
+// reason: overwriting would silently disarm the earlier session's key while
+// its client still holds one that now points at somebody else's statement.
+//
+// An id reregistering REPLACES its earlier pair: the front door calls this
+// once per session at open, and a second registration for one session can
+// only be a retry of the same open. The stale entry is removed first so the
+// replacement cannot be skipped by the collision redraw.
+func (e *Engine) RegisterCancelKey(id SessionID, userID int64, key CancelKey) error {
+	if len(key.Secret) != CancelKeyLen {
+		return fmt.Errorf("exec: cancel key secret must be %d bytes, got %d",
+			CancelKeyLen, len(key.Secret))
+	}
+	e.cancels.mu.Lock()
+	defer e.cancels.mu.Unlock()
+	for pid, t := range e.cancels.by {
+		if t.id == id {
+			delete(e.cancels.by, pid)
+		}
+	}
+	want := key.ProcessID
+	for range 8 {
+		if _, taken := e.cancels.by[want]; !taken {
+			break
+		}
+		var redraw [4]byte
+		if _, err := rand.Read(redraw[:]); err != nil {
+			return fmt.Errorf("exec: cancel key: %w", err)
+		}
+		want = binary.BigEndian.Uint32(redraw[:])
+	}
+	if _, taken := e.cancels.by[want]; taken {
+		return fmt.Errorf("exec: could not place a unique cancel key")
+	}
+	e.cancels.by[want] = cancelTarget{id: id, userID: userID, secret: key.Secret}
+	return nil
+}
+
 // CancelByKey stops the statement the key names, and reports whether it
 // matched.
 //

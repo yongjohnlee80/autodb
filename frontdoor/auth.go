@@ -53,11 +53,41 @@ const CancelKeyLen = 4
 //
 // An interface rather than a *exec.Engine so this package can be exercised
 // against a fake without a meta store — and, more to the point, so the
-// listener's dependency is exactly the two calls it makes. A concrete engine
+// listener's dependency is exactly the calls it makes. A concrete engine
 // here would let a later change reach for anything on it.
 type Authenticator interface {
 	OpenWireSession(ctx context.Context, presented, startupUser, database, ip string) (exec.WireSessionResult, error)
 	CloseWireSession(ctx context.Context, id exec.SessionID, userID int64, ip, reason string)
+}
+
+// CancelExecutor is the engine's cancel-registry half (§6.4), as seen by the
+// listener.
+//
+// The three calls are the whole of row 2.3's engine surface: register the
+// pair at session open so the key a client holds can be honoured, forget it
+// when the session ends so it cannot point at whatever later takes the same
+// process id, and resolve a presented pair — constant-time, statement-only —
+// when a cancel connection arrives.
+//
+// An interface for the same reason Authenticator is one: a cell can drive the
+// listener against a fake, and the seam documents exactly which engine calls
+// this slice makes. Implementations must be safe for concurrent use: cancel
+// connections arrive on their own goroutines, unrelated to the session they
+// name.
+type CancelExecutor interface {
+	// RegisterCancelKey records a freshly minted BackendKeyData pair against
+	// the session that will receive it. Called BEFORE the key is sent, so a
+	// client can never hold a key the engine has forgotten — the inverse
+	// window is harmless: a registered key for a session the client has not
+	// seen yet cancels nothing, because CancelByKey resolves through the
+	// live session.
+	RegisterCancelKey(id exec.SessionID, userID int64, key exec.CancelKey) error
+	// RevokeCancelKey forgets a session's pair.
+	RevokeCancelKey(id exec.SessionID)
+	// CancelByKey stops the statement the pair names, if it matches a live
+	// session. The bool is for the fd.cancel_applied / fd.cancel_stale audit
+	// split and must never reach the wire.
+	CancelByKey(ctx context.Context, key exec.CancelKey) bool
 }
 
 // authOutcome is what the credential exchange produced. Exactly one of
@@ -221,6 +251,15 @@ func (l *Listener) acquireAuthWorker(ctx context.Context) (func(), error) {
 // were taken atomically inside row 2.7, which is what makes it true that a
 // client seeing ReadyForQuery is a client whose capacity is already held —
 // there is no window between "you are in" and "and there was room".
+//
+// Row 2.3 makes the BackendKeyData pair real: the same mint that composes
+// the frame REGISTERS the pair, so the key a client receives is a key the
+// engine can honour. Registered BEFORE the frame is sent — the inverse window
+// (registered, not yet sent) is harmless because a key resolves through a
+// live session, while the forward window (sent, not yet registered) is a
+// client holding a capability the server would refuse. A registration failure
+// fails the handshake rather than sending an unhonourable key: a client that
+// pressed Ctrl-C and got no cancel would debug the wrong layer.
 func (l *Listener) completeHandshake(be *pgproto3.Backend, res exec.WireSessionResult, params map[string]string) error {
 	be.Send(&pgproto3.AuthenticationOk{})
 	for _, ps := range synthesizedStatuses(res, params) {
@@ -229,6 +268,13 @@ func (l *Listener) completeHandshake(be *pgproto3.Backend, res exec.WireSessionR
 	key, err := newBackendKey()
 	if err != nil {
 		return err
+	}
+	if l.cancels != nil {
+		registered := exec.CancelKey{ProcessID: key.ProcessID}
+		copy(registered.Secret[:], key.SecretKey)
+		if rerr := l.cancels.RegisterCancelKey(res.SessionID, res.UserID, registered); rerr != nil {
+			return fmt.Errorf("frontdoor: registering the cancel key: %w", rerr)
+		}
 	}
 	be.Send(key)
 	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})

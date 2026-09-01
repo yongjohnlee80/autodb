@@ -369,6 +369,7 @@ func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine
 	}
 	l, err := frontdoor.Open(cfg.FrontDoor.Bind, tlsCfg, frontdoor.Options{
 		Authn:             eng,
+		Cancels:           eng,
 		MaxConns:          cfg.FrontDoor.MaxConns,
 		PreAuthMaxConns:   cfg.FrontDoor.PreAuthConns,
 		AuthWorkers:       cfg.FrontDoor.AuthWorkers,

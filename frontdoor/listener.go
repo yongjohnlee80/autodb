@@ -36,6 +36,10 @@ type Listener struct {
 	// it did, rather than pretending to check a credential.
 	authn Authenticator
 
+	// cancels resolves CancelRequest pairs (row 2.3). Nil degrades to
+	// fd.cancel_stale on every cancel, for the same honesty as a nil authn.
+	cancels CancelExecutor
+
 	// admit holds every accept-time budget and the per-source throttle.
 	admit *admitter
 
@@ -126,6 +130,13 @@ type Options struct {
 	// Authn is the engine. Nil denies every connection, audited.
 	Authn Authenticator
 
+	// Cancels is the engine's cancel registry (§6.4). Nil is a legal,
+	// degraded state — the same honesty as a nil Authn: a listener whose
+	// cancel key cannot be honoured emits BackendKeyData but every CancelRequest
+	// lands as fd.cancel_stale, which the event trail states plainly rather
+	// than pretending to honour a key nobody resolves.
+	Cancels CancelExecutor
+
 	// OnSession runs after ReadyForQuery('I'). Nil takes the default.
 	OnSession SessionHandler
 
@@ -214,6 +225,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 		l.onEvent = func(Event) {}
 	}
 	l.authn = opt.Authn
+	l.cancels = opt.Cancels
 	l.onSession = opt.OnSession
 	l.admit = newAdmitter(caps.maxConns, caps.preAuthMax, caps.failures, caps.lane, l.now)
 	l.dl = defaultDeadlines()
@@ -448,9 +460,38 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 	secure, out, err := runStartup(raw, l.tls, l.now, l.dl)
 	switch {
 	case errors.Is(err, errCancelRequest):
-		// Answered by closing; the cancel registry is a later slice.
+		// ROW 2.3: the cancel connection is answered by processing the pair
+		// and closing — never by a frame, because this connection presented
+		// no credential and is owed no information, not even whether the
+		// cancel worked.
+		//
+		// fd.cancel_received names the connection; the applied/stale split
+		// is the AUDIT's vocabulary (§1.3) and stays internal. The session
+		// that was cancelled learns what happened the ordinary way: its
+		// statement returns, cancelled, on its own connection.
 		closeReason = "cancel-request"
 		l.onEvent(Event{Kind: "fd.cancel_received", Peer: peer})
+		pid, secret, ok := asCancelRequest(err)
+		if !ok || l.cancels == nil {
+			// The honest degraded state, named so an operator reading the
+			// trail sees a listener that cannot resolve keys rather than one
+			// whose registry is mysteriously empty.
+			l.onEvent(Event{Kind: "fd.cancel_stale", Peer: peer, Detail: "no-cancel-registry"})
+			return
+		}
+		key := exec.CancelKey{ProcessID: pid}
+		// A presented secret of any other length than the 3.0 key is not a
+		// truncation candidate: every client is negotiated to 3.0 (row 2.5),
+		// whose cancel key is a fixed int32, so a longer one cannot match
+		// any registered pair — compare it as-is and let the constant-time
+		// check refuse it, rather than guessing which four bytes the client
+		// meant.
+		copy(key.Secret[:], secret)
+		if l.cancels.CancelByKey(ctx, key) {
+			l.onEvent(Event{Kind: "fd.cancel_applied", Peer: peer})
+		} else {
+			l.onEvent(Event{Kind: "fd.cancel_stale", Peer: peer})
+		}
 		return
 	case err != nil:
 		// A TLS-phase failure closes WITHOUT a denial frame. A peer speaking
@@ -554,6 +595,16 @@ func (l *Listener) serveSession(ctx context.Context, stream net.Conn, be *pgprot
 		// the rollback of whatever it was holding. The engine's own callers
 		// established this shape (script.go's atomic-script close); the wire
 		// is a caller like any other.
+		//
+		// ROW 2.3's revocation rides the SAME defer, deliberately. The key's
+		// validity is bounded by the session's, and a key outliving its
+		// session is a capability pointing at whatever later takes the same
+		// process id. Revoke FIRST, before the engine teardown, so a cancel
+		// racing this close cannot resolve a pair against a session that is
+		// being torn down.
+		if l.cancels != nil {
+			l.cancels.RevokeCancelKey(sess.SessionID)
+		}
 		l.authn.CloseWireSession(context.WithoutCancel(ctx), sess.SessionID, sess.UserID, hostOf(peer), sessionReason)
 		l.onEvent(Event{Kind: "fd.session_close", Reason: sessionReason, Peer: peer, Detail: string(sess.SessionID)})
 	}()

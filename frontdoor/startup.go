@@ -90,6 +90,39 @@ type startupOutcome struct {
 // it is a plaintext control connection that is answered and closed.
 var errCancelRequest = errors.New("frontdoor: cancel request")
 
+// cancelRequestError carries the DECODED pair out of the startup exchange.
+//
+// The two CancelRequest exits — S0 plaintext and inside TLS — used to return
+// the bare sentinel, discarding the process id and secret the client
+// presented. Row 2.3's §6.4 processing needs that pair: the whole point of a
+// cancel connection is that it names the statement to stop, and a listener
+// that throws the name away can only log that one arrived.
+//
+// An error type rather than a startupOutcome field, because a cancel
+// connection IS an error exit from the exchange's perspective — there is no
+// session to build — and the sentinel shape keeps every existing caller's
+// errors.Is(err, errCancelRequest) working unchanged.
+type cancelRequestError struct {
+	// ProcessID and Secret are the presented pair, verbatim. The SECRET is
+	// a capability: it is never logged, never audited, and never compared
+	// anywhere but the engine's constant-time check.
+	ProcessID uint32
+	Secret    []byte
+}
+
+func (cancelRequestError) Error() string { return errCancelRequest.Error() }
+
+func (cancelRequestError) Is(target error) bool { return target == errCancelRequest }
+
+// asCancelRequest extracts the presented pair when err is a CancelRequest.
+func asCancelRequest(err error) (processID uint32, secret []byte, ok bool) {
+	var cr cancelRequestError
+	if errors.As(err, &cr) {
+		return cr.ProcessID, cr.Secret, true
+	}
+	return 0, nil, false
+}
+
 // runStartup performs the exchange on a freshly accepted connection and
 // returns either the accepted parameters or the reason it was denied.
 //
@@ -195,7 +228,7 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 			continue
 		case *pgproto3.CancelRequest:
 			// Row 2.3: cancel connections are plaintext by protocol.
-			return nil, startupOutcome{}, errCancelRequest
+			return nil, startupOutcome{}, cancelRequestError{ProcessID: msg.ProcessID, Secret: msg.SecretKey}
 		case *pgproto3.StartupMessage:
 			// Row 2.1 error path: a plaintext StartupMessage. No fallback —
 			// this surface has no unencrypted mode to fall back to.
@@ -254,7 +287,17 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 		// A second SSLRequest inside TLS is a protocol violation (row 2.1).
 		return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
 	case cancelRequestCode:
-		return secure, startupOutcome{}, errCancelRequest
+		// Row 2.3, the in-TLS spelling: the body is the request code (4
+		// bytes, already checked by the switch) followed by the pair. A
+		// short body is a malformed startup rather than a cancel: a pair
+		// cannot be read from bytes that are not there.
+		if len(raw2) < 12 {
+			return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
+		}
+		return secure, startupOutcome{}, cancelRequestError{
+			ProcessID: binaryBigEndianUint32(raw2[4:8]),
+			Secret:    append([]byte(nil), raw2[8:]...),
+		}
 	}
 	if version>>16 != protocolMajor3 {
 		// Row 2.5a: an unsupported major is a refusal, not a negotiation.
