@@ -66,9 +66,22 @@ type Statement struct {
 	// Verb is the classified main verb (uppercase), e.g. "SELECT", "DELETE".
 	Verb string
 	// Class is the authorization class: the MAXIMUM class of any verb in the
-	// statement, so a read whose CTE body writes is authorized as a write
-	// (data-modifying CTEs are rejected outright — see Classify — but the
-	// escalation is defense in depth).
+	// statement, so a read whose CTE body writes is authorized as a write.
+	// Whether such a statement then EXECUTES is a profile decision, not this
+	// field's — see Profile.admit: v1compat refuses data-modifying CTEs, the
+	// session profile admits them guarded. The escalation is defense in
+	// depth under both.
+	//
+	// The previous wording said they were "rejected outright — see Classify",
+	// and the pointer was the worse half: it lands on the DDL-below-top-level
+	// refusal, whose error text is word-for-word the one v1compat emits for a
+	// data-modifying CTE, so a reader following it finds what looks like
+	// confirmation. Nothing in Classify refuses a data-modifying DML CTE any
+	// more; it records them in Nested and leaves the disposition to the
+	// profile. Found by jarvis and verified by white-vision as the third copy
+	// of one stale claim — the public README and convention R10 carried it
+	// too — each one found by grepping outward from the last rather than by
+	// review of the layer it lived in.
 	Class Class
 	// HasTopLevelWhere reports a WHERE at paren depth 0 after the main verb
 	// (only meaningful for UPDATE/DELETE — the Objective 18 guard input).

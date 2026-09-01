@@ -40,6 +40,26 @@ const (
 	reasonStartupParamRefus denialReason = "frontdoor/startup-parameter-refused"
 	reasonPreAuthOversize   denialReason = "frontdoor/pre-auth-message-too-large"
 	reasonNoCredentialStore denialReason = "frontdoor/auth-not-yet-available"
+
+	// Accept-time refusals (matrix §1.4, §9). None of these reaches the
+	// wire either: a peer refused for capacity learns only that the
+	// connection closed, which is all a peer refused for anything learns.
+	reasonSourceThrottled      denialReason = "frontdoor/source-ip-throttled"
+	reasonConnectionCap        denialReason = "frontdoor/connection-cap"
+	reasonPreAuthConnCap       denialReason = "frontdoor/pre-auth-connection-cap"
+	reasonControlLaneExhausted denialReason = "frontdoor/control-lane-exhausted"
+
+	// Authentication-phase refusals (rows 2.6-2.9).
+	//
+	// reasonAuthStoreError is deliberately NOT an authentication denial in
+	// the audit trail even though the wire shape is identical: the peer may
+	// have presented a perfectly good credential and been refused because
+	// our own store was unreachable. Filing that under fd.auth_denied would
+	// inflate the number an operator watches for credential attacks with
+	// events that are our fault, and it is the same distinction row 2.1a
+	// draws between a TLS failure and a denial.
+	reasonPreAuthProtocolViolation denialReason = "frontdoor/pre-auth-protocol-violation"
+	reasonAuthStoreError           denialReason = "frontdoor/auth-store-error"
 )
 
 // denial builds the wire error. It takes the reason so a caller cannot

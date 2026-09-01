@@ -41,7 +41,10 @@ func denialSample(t *testing.T, addr string, drive func(t *testing.T, addr strin
 }
 
 func TestDenialTiming_IndistinguishableAcrossCauses(t *testing.T) {
-	_, _, addr := liveListener(t)
+	// The throttle is raised out of the way: this harness takes many samples
+	// from one address and the subject is the denial PATH's timing, not the
+	// rate limiter's.
+	_, _, addr := listenerWith(t, Options{AuthFailuresPerIP: unthrottled})
 
 	// The causes this slice can produce. Each drives the connection to the
 	// SAME uniform denial by a different route.
@@ -137,11 +140,10 @@ func slowDenialListener(t *testing.T, delay time.Duration) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l, err := Open("127.0.0.1:0", cfg, Options{})
+	l, err := Open("127.0.0.1:0", cfg, Options{AuthFailuresPerIP: unthrottled, testDenialDelay: delay})
 	if err != nil {
 		t.Fatal(err)
 	}
-	l.testDenialDelay = delay
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = l.Serve(ctx) }()
 	t.Cleanup(func() { cancel(); l.Close() })

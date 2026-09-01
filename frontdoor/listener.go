@@ -9,7 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgproto3"
+
 	"github.com/yongjohnlee80/autodb/core/config"
+	"github.com/yongjohnlee80/autodb/core/exec"
 )
 
 // Listener is the front door's TCP listener.
@@ -26,6 +29,32 @@ type Listener struct {
 	now     func() time.Time
 	onLog   func(string)
 	onEvent func(Event)
+
+	// authn is row 2.7's chain. Nil is a legal, honest state: a build with
+	// no engine behind the listener denies every connection and audits WHY
+	// it did, rather than pretending to check a credential.
+	authn Authenticator
+
+	// admit holds every accept-time budget and the per-source throttle.
+	admit *admitter
+
+	// dl is the phase budget. Defaulted from the matrix's numbers in Open
+	// and shortened only by cells, which is why it is not an Option: an
+	// operator turning the startup deadline down to a millisecond has not
+	// tuned anything, they have closed the front door.
+	dl deadlines
+
+	// onSession is the post-auth handoff (F1's slice). Nil means the
+	// default: honour Terminate, refuse anything else with an accurate
+	// 0A000 rather than a silence a client cannot interpret.
+	onSession SessionHandler
+
+	// live tracks connections so Close can end them. Without it a Close
+	// waits on the WaitGroup for sessions whose idle deadline is thirty
+	// minutes away, which turns "stop the listener" into "stop the listener
+	// eventually".
+	liveMu sync.Mutex
+	live   map[net.Conn]struct{}
 
 	// testDenialDelay slows the denial path. Test-only, and it exists so the
 	// timing harness can prove it detects a leak by measuring one rather
@@ -57,11 +86,53 @@ type Event struct {
 	Detail string
 }
 
+// SessionHandler runs an authenticated connection. F1 supplies the real one;
+// the default handles Terminate and refuses everything else.
+type SessionHandler func(ctx context.Context, conn net.Conn, be *pgproto3.Backend, sess exec.WireSessionResult) error
+
 // Options configure a listener.
 type Options struct {
 	Now     func() time.Time
 	OnLog   func(string)
 	OnEvent func(Event)
+
+	// Authn is the engine. Nil denies every connection, audited.
+	Authn Authenticator
+
+	// OnSession runs after ReadyForQuery('I'). Nil takes the default.
+	OnSession SessionHandler
+
+	// The caps. Zero takes the documented default; Open validates the
+	// relationship between them rather than trusting a caller to have done
+	// the arithmetic, because the one that matters — the control lane
+	// covering every connection the listener will admit — is exactly the
+	// kind that is quietly wrong for months.
+	MaxConns         int
+	PreAuthMaxConns  int
+	ControlLaneBytes int64
+
+	// testDeadlines and testDenialDelay are the package's own knobs, set at
+	// CONSTRUCTION rather than poked into the Listener afterwards.
+	//
+	// Unexported, so no caller outside this package can reach them, and set
+	// here rather than assigned after Open because Serve's accept goroutine
+	// reads both: assigning them afterwards is a write racing a read, which
+	// is exactly what -race found once a cell started shortening deadlines.
+	// The previous version poked testDenialDelay in the same way and the
+	// race was simply never exercised.
+	testDeadlines   *deadlines
+	testDenialDelay time.Duration
+
+	// AuthFailuresPerIP raises the per-source throttle. Zero takes the
+	// default of AuthFailuresPerIP.
+	//
+	// A knob because the default is wrong for a real deployment shape: every
+	// client behind one NAT gateway or one Kubernetes egress address shares a
+	// source address here, so an estate with fifty clients behind one
+	// gateway would throttle its own healthy reconnect storm. It may only be
+	// RAISED — a caller cannot ask for a limit weaker than none, because
+	// there is no way to spell "unlimited" in this field.
+	AuthFailuresPerIP int
 }
 
 // Open binds the listener. TLS material must already be validated — see
@@ -70,11 +141,18 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	if tlsCfg == nil {
 		return nil, errors.New("frontdoor: refusing to listen without validated TLS material")
 	}
+	// The caps are resolved BEFORE the bind. A listener that binds and then
+	// discovers its budget is unusable has already taken the port from
+	// whatever else could have served on it.
+	maxConns, preAuthMax, failures, lane, err := resolveCaps(opt)
+	if err != nil {
+		return nil, err
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("frontdoor: binding %s: %w", addr, err)
 	}
-	l := &Listener{ln: ln, tls: tlsCfg, closed: make(chan struct{})}
+	l := &Listener{ln: ln, tls: tlsCfg, closed: make(chan struct{}), live: map[net.Conn]struct{}{}}
 	l.now = opt.Now
 	if l.now == nil {
 		l.now = time.Now
@@ -87,7 +165,53 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	if l.onEvent == nil {
 		l.onEvent = func(Event) {}
 	}
+	l.authn = opt.Authn
+	l.onSession = opt.OnSession
+	l.admit = newAdmitter(maxConns, preAuthMax, failures, lane, l.now)
+	l.dl = defaultDeadlines()
+	if opt.testDeadlines != nil {
+		l.dl = *opt.testDeadlines
+	}
+	l.testDenialDelay = opt.testDenialDelay
 	return l, nil
+}
+
+// resolveCaps applies the defaults and rejects a configuration whose control
+// lane cannot cover the connections the listener would admit.
+//
+// §1.4 makes this binding: the lane may only be RAISED above
+// max_conns × 64 KiB, and a listener that starts with less has a reservation
+// that fails once the connection count climbs — at which point accept starts
+// failing closed for a reason nobody configured. Refusing at construction is
+// the difference between a misconfiguration and an incident.
+func resolveCaps(opt Options) (maxConns, preAuthMax, failures int, lane int64, err error) {
+	maxConns = opt.MaxConns
+	if maxConns <= 0 {
+		maxConns = MaxFrontendConns
+	}
+	preAuthMax = opt.PreAuthMaxConns
+	if preAuthMax <= 0 {
+		preAuthMax = PreAuthMaxConns
+	}
+	failures = opt.AuthFailuresPerIP
+	if failures <= 0 {
+		failures = AuthFailuresPerIP
+	}
+	lane = opt.ControlLaneBytes
+	floor := int64(maxConns) * ControlLanePerConn
+	if lane == 0 {
+		lane = floor
+	}
+	if lane < floor {
+		return 0, 0, 0, 0, fmt.Errorf("frontdoor: control lane %d bytes is below %d × %d = %d; "+
+			"the lane must cover every connection the listener will admit",
+			lane, maxConns, ControlLanePerConn, floor)
+	}
+	if preAuthMax > maxConns {
+		return 0, 0, 0, 0, fmt.Errorf("frontdoor: pre-auth cap %d exceeds the connection cap %d; "+
+			"the anonymous allowance cannot be larger than the whole", preAuthMax, maxConns)
+	}
+	return maxConns, preAuthMax, failures, lane, nil
 }
 
 // Addr is the bound address, useful when the port was chosen by the OS.
@@ -113,10 +237,27 @@ func (l *Listener) Serve(ctx context.Context) error {
 			}
 			return err
 		}
+		// CHARGE BEFORE ALLOCATE. The reservation happens on the accept
+		// goroutine, before the connection reaches a handler that builds a
+		// reader, a TLS record buffer and a decoder for it. Reserving inside
+		// the handler would bound nothing: by the time the budget said no,
+		// the memory it was protecting would already be allocated.
+		peer := conn.RemoteAddr().String()
+		tkt, refused := l.admit.admit(peer)
+		if tkt == nil {
+			// Closed WITHOUT a frame. Nothing has negotiated TLS yet, so a
+			// PostgreSQL error would be unreadable bytes to a client waiting
+			// for an 'S' or an 'N' — and the peer learns from the close
+			// exactly what they would learn from a courteous refusal.
+			_ = conn.Close()
+			l.onEvent(Event{Kind: "fd.budget_refuse", Reason: refused.String(), Peer: peer})
+			continue
+		}
 		l.wg.Add(1)
 		go func() {
 			defer l.wg.Done()
-			l.handle(conn)
+			defer tkt.release()
+			l.handle(ctx, conn, tkt)
 		}()
 	}
 }
@@ -126,26 +267,39 @@ func (l *Listener) Close() {
 	l.once.Do(func() {
 		close(l.closed)
 		_ = l.ln.Close()
+		// Ending the live connections is what makes Close bounded. The
+		// WaitGroup below waits for handlers whose next deadline is the
+		// thirty-minute idle bound, so without this a shutdown waits half an
+		// hour on an idle session that will never send anything again.
+		l.liveMu.Lock()
+		for c := range l.live {
+			_ = c.Close()
+		}
+		l.liveMu.Unlock()
 	})
 }
 
-// handle runs one connection's startup exchange.
+// handle runs one connection: startup, authentication, and the session.
 //
 // Every exit path closes the connection and emits fd.conn_close, because a
 // front door that leaks sockets under refusal is a front door an anonymous
 // peer can exhaust by being refused.
-func (l *Listener) handle(raw net.Conn) {
+func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 	peer := raw.RemoteAddr().String()
-	l.onEvent(Event{Kind: "fd.conn_open", Peer: peer})
+	l.track(raw)
+	closeReason := "peer-closed"
 	defer func() {
+		l.untrack(raw)
 		_ = raw.Close()
-		l.onEvent(Event{Kind: "fd.conn_close", Peer: peer})
+		l.onEvent(Event{Kind: "fd.conn_close", Reason: closeReason, Peer: peer})
 	}()
+	l.onEvent(Event{Kind: "fd.conn_open", Peer: peer})
 
-	secure, out, err := runStartup(raw, l.tls, l.now)
+	secure, out, err := runStartup(raw, l.tls, l.now, l.dl)
 	switch {
 	case errors.Is(err, errCancelRequest):
 		// Answered by closing; the cancel registry is a later slice.
+		closeReason = "cancel-request"
 		l.onEvent(Event{Kind: "fd.cancel_received", Peer: peer})
 		return
 	case err != nil:
@@ -155,43 +309,178 @@ func (l *Listener) handle(raw net.Conn) {
 		// because no credential was ever presented and the auth trail is
 		// what an operator counts credential attacks in.
 		var tf tlsFailErr
-		reason := err.Error()
+		reason, detail, attributable := err.Error(), "", true
 		if errors.As(err, &tf) {
-			reason = tf.reason
+			reason, detail, attributable = tf.reason, tf.detail, tf.attributable
 		}
-		l.onEvent(Event{Kind: "fd.tls_fail", Reason: reason, Peer: peer})
+		if attributable {
+			// Row 2.1b: handshake grinding is charged to the same per-source
+			// budget as credential grinding, so an attacker cannot simply
+			// switch from one to the other to get a fresh allowance.
+			l.admit.noteFailure(peer)
+		}
+		closeReason = reason
+		l.onEvent(Event{Kind: "fd.tls_fail", Reason: reason, Peer: peer, Detail: detail})
 		return
 	}
 	if secure != nil {
-		defer func() { _ = secure.Close() }()
 		l.onEvent(Event{Kind: "fd.tls_ok", Peer: peer})
 	}
 
 	// The denial WRITER is chosen once, and the two cases differ only in
 	// which stream they own. Both emit the identical error frame.
-	w := func() interface{ Write([]byte) (int, error) } {
+	stream := func() net.Conn {
 		if secure != nil {
 			return secure
 		}
 		return raw
 	}()
 
-	reason := out.Denied
-	if reason == "" {
-		// Nothing here can authenticate anyone yet: there is no credential
-		// store on this surface until the PAT slice lands. Saying so as an
-		// internal reason — while the wire says only "authentication
-		// failed" — keeps the honest state of the implementation visible in
-		// the audit trail without teaching a peer anything.
-		reason = reasonNoCredentialStore
+	// Rows 2.6-2.8, but only once the startup itself was accepted. A startup
+	// that failed policy never reaches the credential exchange: offering
+	// AuthenticationCleartextPassword to a connection we have already decided
+	// to refuse would invite a peer to send a token we then have to be
+	// careful not to have learned anything from.
+	outcome := authOutcome{Denied: out.Denied}
+	if outcome.Denied == "" {
+		be := pgproto3.NewBackend(stream, stream)
+		be.SetMaxBodyLen(PreAuthMaxBodyLen)
+		var aerr error
+		outcome, aerr = l.runAuth(ctx, stream, be, out.Params, peer)
+		if aerr != nil {
+			closeReason = "auth-read-failed"
+			l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s: %v", peer, aerr))
+			l.admit.noteFailure(peer)
+			return
+		}
+		if outcome.Denied == "" {
+			l.serveSession(ctx, stream, be, tkt, outcome.Session, out.Params, peer, &closeReason)
+			return
+		}
+	} else {
+		// A startup refusal is the peer's doing and is charged like one.
+		outcome.Counts = true
+	}
+
+	if outcome.Counts {
+		l.admit.noteFailure(peer)
 	}
 	if l.testDenialDelay > 0 {
 		time.Sleep(l.testDenialDelay)
 	}
-	if derr := sendDenial(w, reason); derr != nil {
+	if derr := sendDenial(stream, outcome.Denied); derr != nil {
 		l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 	}
-	l.onEvent(Event{Kind: "fd.auth_denied", Reason: reason.String(), Peer: peer, Detail: out.RefusedParam})
+	closeReason = outcome.Denied.String()
+	l.onEvent(Event{Kind: "fd.auth_denied", Reason: outcome.Denied.String(), Peer: peer, Detail: out.RefusedParam})
+}
+
+// serveSession completes row 2.9 and runs the authenticated connection.
+func (l *Listener) serveSession(ctx context.Context, stream net.Conn, be *pgproto3.Backend,
+	tkt *ticket, sess exec.WireSessionResult, params map[string]string, peer string, closeReason *string) {
+
+	// The pre-auth slot goes back the moment this connection stops being
+	// anonymous. Holding it for the session's life would let a handful of
+	// long-lived legitimate sessions consume the allowance that exists to
+	// keep half-open connections from starving them.
+	tkt.leavePreAuth()
+
+	// Released on EVERY exit from here, which is what keeps row 2.7's
+	// four-member reservation from outliving the connection that took it.
+	sessionReason := "peer-closed"
+	defer func() {
+		// WithoutCancel, because the commonest reason this runs is that the
+		// listener is shutting down — and the shutdown cancels exactly the
+		// context the release would need. Handing a cancelled context to the
+		// teardown means the release does its work against a context that is
+		// already dead: the audit row for why the session ended, and in F1
+		// the rollback of whatever it was holding. The engine's own callers
+		// established this shape (script.go's atomic-script close); the wire
+		// is a caller like any other.
+		l.authn.CloseWireSession(context.WithoutCancel(ctx), sess.SessionID, sess.UserID, hostOf(peer), sessionReason)
+		l.onEvent(Event{Kind: "fd.session_close", Reason: sessionReason, Peer: peer, Detail: string(sess.SessionID)})
+	}()
+
+	l.onEvent(Event{Kind: "fd.auth_ok", Peer: peer,
+		Detail: fmt.Sprintf("user=%s pat=%s admitted-by=%s", sess.UserName, sess.PATName, sess.AdmissionSource)})
+
+	if err := l.completeHandshake(be, sess, params); err != nil {
+		sessionReason = "handshake-write-failed"
+		*closeReason = sessionReason
+		l.onLog(fmt.Sprintf("frontdoor: completing the handshake with %s: %v", peer, err))
+		return
+	}
+	l.onEvent(Event{Kind: "fd.session_open", Peer: peer, Detail: string(sess.SessionID)})
+
+	// THE DEADLINE MOVES HERE, once, and this is the only place it is armed
+	// for the session's first message.
+	//
+	// The pre-auth deadlines are ten seconds and a deadline set on a net.Conn
+	// stays set. Leaving one in place would kill every authenticated session
+	// ten seconds after it opened — and the person who noticed first would be
+	// a developer paused on a breakpoint, watching a connection drop for no
+	// reason they could see. Arming it here and nowhere else is deliberate:
+	// a second arming inside the session loop would mask the omission of
+	// this one, and then no test could observe it missing.
+	if err := stream.SetDeadline(l.now().Add(l.dl.idle)); err != nil {
+		sessionReason = "deadline"
+		*closeReason = sessionReason
+		return
+	}
+
+	handler := l.onSession
+	if handler == nil {
+		handler = l.defaultSession
+	}
+	if err := handler(ctx, stream, be, sess); err != nil {
+		sessionReason = "session-error"
+		l.onLog(fmt.Sprintf("frontdoor: the session for %s: %v", peer, err))
+	}
+	*closeReason = sessionReason
+}
+
+// defaultSession is the post-auth loop until F1 lands.
+//
+// It honours Terminate and refuses everything else with an ACCURATE 0A000
+// rather than a silence. A client that sends a Query to a build without the
+// execution slice deserves to be told the feature is not there; dropping the
+// connection instead would look like a network fault and send someone
+// debugging the wrong layer.
+func (l *Listener) defaultSession(ctx context.Context, conn net.Conn, be *pgproto3.Backend, sess exec.WireSessionResult) error {
+	_ = ctx
+	_ = sess
+	for {
+		msg, err := be.Receive()
+		if err != nil {
+			return nil
+		}
+		if _, ok := msg.(*pgproto3.Terminate); ok {
+			return nil
+		}
+		be.Send(&pgproto3.ErrorResponse{
+			Severity:            "FATAL",
+			SeverityUnlocalized: "FATAL",
+			Code:                "0A000",
+			Message:             "this autodb front door cannot execute statements yet",
+			Detail:              "frontdoor/post-auth-not-implemented",
+			Hint:                "the simple and extended query paths land with the F1 and F2 slices",
+		})
+		_ = be.Flush()
+		return nil
+	}
+}
+
+// track and untrack maintain the live set Close ends.
+func (l *Listener) track(c net.Conn) {
+	l.liveMu.Lock()
+	l.live[c] = struct{}{}
+	l.liveMu.Unlock()
+}
+
+func (l *Listener) untrack(c net.Conn) {
+	l.liveMu.Lock()
+	delete(l.live, c)
+	l.liveMu.Unlock()
 }
 
 // EnabledFrom reports whether the configuration asks for a listener, and is
