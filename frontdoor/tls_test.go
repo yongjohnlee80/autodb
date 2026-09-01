@@ -32,7 +32,7 @@ import (
 // intermediate to omit.
 type chain struct{ leafOnly, bundle, ca, key string }
 
-func issueChain(t *testing.T, hosts []string, notBefore, notAfter time.Time) chain {
+func issueChain(t testing.TB, hosts []string, notBefore, notAfter time.Time) chain {
 	t.Helper()
 	dir := t.TempDir()
 

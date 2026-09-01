@@ -20,7 +20,7 @@ import (
 // are invisible to the caller — my first version did exactly that and read
 // an empty list while the listener was emitting events correctly. An
 // assertion of "no events" would have passed forever.
-func liveListener(t *testing.T) (*Listener, func() []Event, string) {
+func liveListener(t testing.TB) (*Listener, func() []Event, string) {
 	t.Helper()
 	now := time.Now()
 	c := issueChain(t, []string{"autodb.example.com"}, now.Add(-time.Hour), now.Add(24*time.Hour))
@@ -49,7 +49,7 @@ func liveListener(t *testing.T) (*Listener, func() []Event, string) {
 	return l, snapshot, l.Addr().String()
 }
 
-func dial(t *testing.T, addr string) net.Conn {
+func dial(t testing.TB, addr string) net.Conn {
 	t.Helper()
 	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
@@ -85,7 +85,7 @@ func startupPacket(version uint32, params map[string]string) []byte {
 
 // readErrorResponse reads one backend message and requires it to be the
 // uniform denial.
-func readDenial(t *testing.T, r net.Conn) *pgproto3.ErrorResponse {
+func readDenial(t testing.TB, r net.Conn) *pgproto3.ErrorResponse {
 	t.Helper()
 	fe := pgproto3.NewFrontend(r, r)
 	msg, err := fe.Receive()
