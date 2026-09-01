@@ -111,6 +111,8 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 			_, e := f.eng.OpenWireSession(ctx, auth.PATPrefix+"aaaa.bbbb", "root", dbName, testIP)
 			return e
 		}, DenyBadCredential},
+		// Matrix row 3.1:user#owner-cross-check: the startup user must match
+		// the PAT owner; mismatch is refused without disclosing the cause.
 		{"the startup user is not the token's owner", func() error {
 			_, e := f.eng.OpenWireSession(ctx, secret, "someone-else", dbName, testIP)
 			return e
@@ -213,6 +215,8 @@ func TestOpenWireSession_LeaseCapHasItsOwnAuditIdentity(t *testing.T) {
 func TestOpenWireSession_TheRemainingRefusals(t *testing.T) {
 	t.Parallel()
 
+	// Matrix row 3.1:database#grant-on-target: authentication does not grant
+	// access to a presented target unless the user has an explicit grant.
 	t.Run("a user with no grant on the target", func(t *testing.T) {
 		t.Parallel()
 		f, _, _, dbName := wireFixture(t)

@@ -265,6 +265,8 @@ func TestStartup_TLSEstablishesThenDeniesUniformly(t *testing.T) {
 // A 3.x minor negotiates DOWN and continues (row 2.5); an unsupported major
 // is refused (row 2.5a). PostgreSQL itself does the former, and a hard
 // refusal would break newer clients perfectly able to speak 3.0.
+// Matrix row 5:AuthenticationCleartextPassword: this cell proves the grouped
+// startup emission includes NegotiateProtocolVersion when negotiation applies.
 func TestStartup_VersionNegotiation(t *testing.T) {
 	t.Parallel()
 
@@ -645,9 +647,9 @@ func TestStartup_OversizeIsNotDirectTLS(t *testing.T) {
 // parameter map sailed through to be denied for want of a credential store —
 // which reads in the audit as an authentication problem rather than as the
 // malformed startup it is.
-// Claim citations: row 3.1:user#required and row 3.1:database#required — the
-// requiredness halves. The rows stay partial: the owner cross-check and the
-// grant-on-target check belong to row 2.7's chain.
+// Claim citations: row 3.1:user#required and row 3.1:database#required prove
+// requiredness; their owner-cross-check and grant-on-target sibling claims are
+// bound to the corresponding OpenWireSession cells.
 func TestStartup_RequiredParameters(t *testing.T) {
 	t.Parallel()
 
