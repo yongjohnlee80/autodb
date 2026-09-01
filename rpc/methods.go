@@ -296,6 +296,45 @@ func (s *Server) register() {
 		}
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
+	// auth.login_at is auth.login with the ADMISSION ADDRESS the caller
+	// observed (ADR-0075 Amendment 1, lector PR #34 r2 ruling).
+	//
+	// It exists because the daemon cannot see the browser: its peer is the
+	// web gateway over loopback. The gateway used to log in, ask
+	// auth.ip_admitted separately, and log the session out again when the
+	// answer was no — which made a correct password cost a minted-and-
+	// revoked session more than an incorrect one, a difference a caller
+	// could time. One verb means the admission decision happens between
+	// verification and minting, so a refused caller costs what a wrong
+	// password costs and no session is ever created.
+	//
+	// Tokenless, like auth.login, and it CANNOT weaken anything: the
+	// supplied address adds a second layer that auth.login does not have at
+	// all, so a caller who forged one would be no better off than by calling
+	// auth.login instead. The daemon's own peer allowlist still applies to
+	// the connection itself and is not forgeable from here.
+	s.rpc.Handle("auth.login_at", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		name, err := argStr(req.Params, 0, "name")
+		if err != nil {
+			return nil, err
+		}
+		pass, err := argStr(req.Params, 1, "passphrase")
+		if err != nil {
+			return nil, err
+		}
+		browser, err := argStr(req.Params, 2, "admission_ip")
+		if err != nil {
+			return nil, err
+		}
+		token, id, err := s.auth.LoginAt(ctx, name, pass, peerIP(req), browser)
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		return map[string]any{"token": token, "user": identMap(id)}, nil
+	})
 	s.rpc.Handle("auth.logout", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err

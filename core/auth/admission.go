@@ -51,6 +51,7 @@ const (
 // query — but the ORDER IS NOT A SHORTCUT: both are consulted when the first
 // misses, because either alone is sufficient.
 func (s *Service) IPAllowedForUser(ctx context.Context, tx *dao.Transaction, userID int64, ip string) (AdmissionSource, error) {
+	s.admissionQueries.Add(1)
 	if ip == LocalPeer {
 		// A unix-socket peer has no address to match, and the 0600 socket is
 		// itself the boundary (ADR-0058). This surface never sees one — the

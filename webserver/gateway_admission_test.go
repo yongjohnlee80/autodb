@@ -1,8 +1,10 @@
 package webserver
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sort"
@@ -235,19 +237,26 @@ func TestAdmission_AnAdmittedBrowserStillBootstraps(t *testing.T) {
 // rather than on a string that happens to match.
 var _ = auth.AdmittedByUserRow
 
-// ORDERING, PROVEN DETERMINISTICALLY (lector PR #34 r0 must-fix 3, first half).
+// ORDERING, PROVEN DETERMINISTICALLY (lector PR #34 r0 MF3, rebuilt for the
+// combined operation in r3).
 //
-// The claim the comment on Gate 3 makes is that credentials are verified
-// BEFORE the address is judged, so a refusal from a non-admitted address
-// cannot say whether the name exists. Timing is one way to check that and it
-// is the noisy one; this is the other, and it cannot be flaky.
+// The claim is that the credential is verified BEFORE the address is judged,
+// so a refusal from a non-admitted address cannot say whether the name
+// exists. Timing is one way to check that and it is the noisy one; this is
+// the other, and it cannot be flaky.
 //
-// The daemon writes an audit row for every login it decides. If the gateway
-// reached Gate 3 with a correct password, the daemon must have recorded a
-// SUCCESSFUL login for that account — even though the browser was then
-// refused. That row is the proof the verification happened first. Under the
-// inverse ordering the address would have been refused before the daemon was
-// ever asked, and there would be no row at all.
+// The daemon audits every login it decides, and the REASON it records is
+// reachable only from one point in the sequence. A wrong password from a
+// non-admitted address must be audited as a wrong password — if the address
+// were judged first, that attempt would never reach the verifier and would be
+// filed as not-admitted instead. A correct password from the same address
+// must be audited as not-admitted, which is a branch reachable only AFTER the
+// verifier has succeeded. The pair pins the order from both sides.
+//
+// The earlier version of this cell watched for a SUCCESSFUL login row, which
+// worked while the gateway minted a session and then revoked it. It does not
+// any more, and that is the point of r3: no session is created for a caller
+// who will be refused.
 func TestAdmission_TheCredentialIsVerifiedBeforeTheAddressIsJudged(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -257,108 +266,111 @@ func TestAdmission_TheCredentialIsVerifiedBeforeTheAddressIsJudged(t *testing.T)
 	}
 	base, _ := startGateway(t, daemon)
 
-	before := loginAudits(t, store)
+	// The bootstrap above audits its own successful login, so the count is
+	// taken as a DELTA. An absolute assertion here read the seeding as
+	// evidence of the defect.
+	logins := countAudit(t, store, "login")
 
-	// A CORRECT password from an address neither layer admits.
+	// A WRONG password from a non-admitted address reaches the verifier.
+	before := auditDetails(t, store)
+	if status := webLoginFrom(t, base, browserAddr, "johno", "not the passphrase"); status == http.StatusOK {
+		t.Fatal("a wrong password was accepted")
+	}
+	wrong := newDetails(before, auditDetails(t, store))
+	if len(wrong) != 1 {
+		t.Fatalf("a wrong password produced %d new audit rows, want 1: %v", len(wrong), wrong)
+	}
+	if strings.Contains(wrong[0], "ip not admitted") {
+		t.Errorf("a wrong password was audited as %q — the address was judged BEFORE the "+
+			"credential, so the attempt never reached the verifier. That ordering makes the "+
+			"refusal a username-existence oracle", wrong[0])
+	}
+
+	// A CORRECT password from the same address reaches the admission check,
+	// which is only reachable once the verifier has succeeded.
+	before = auditDetails(t, store)
 	if status := webLoginFrom(t, base, browserAddr, "johno", adminPass); status == http.StatusOK {
-		t.Fatal("the login was accepted from a non-admitted address")
+		t.Fatal("a correct password from a non-admitted address was accepted")
 	}
-	after := loginAudits(t, store)
-
-	if after.ok <= before.ok {
-		t.Errorf("the daemon recorded no successful login (%d -> %d), so the address was judged "+
-			"BEFORE the credential was proven. That ordering makes the refusal a "+
-			"username-existence oracle: an unknown name and a known one would fail at "+
-			"different points and a caller could tell them apart", before.ok, after.ok)
+	right := newDetails(before, auditDetails(t, store))
+	if len(right) != 1 || !strings.Contains(right[0], "ip not admitted") {
+		t.Errorf("a correct password from a non-admitted address was audited as %v; it must "+
+			"reach the admission branch, which lies past the verifier", right)
 	}
 
-	// The mirror: an UNKNOWN user from the same address is refused too, and
-	// the two refusals are the same to the browser.
-	unknown := webLoginFrom(t, base, browserAddr, "nobody", adminPass)
-	known := webLoginFrom(t, base, browserAddr, "johno", adminPass)
-	if unknown != known {
-		t.Errorf("an unknown user got HTTP %d and a known one HTTP %d from the same "+
-			"non-admitted address; the two must be indistinguishable", unknown, known)
+	// And no session was minted for it. A session created and revoked is
+	// what made a correct password cost more than an incorrect one.
+	if n := countAudit(t, store, "login"); n != logins {
+		t.Errorf("%d successful-login rows appeared during two refused attempts; a caller who is "+
+			"going to be refused must not have a session created for them — minting and "+
+			"revoking one is exactly the extra work that let a correct password be timed",
+			n-logins)
 	}
 }
 
-// loginAudits counts the daemon's audit rows FROM THE TEST, against the store
-// the test itself opened.
-//
-// The first version added an exported AuditCountForTest to auth.Service, and
-// lector was right to refuse it: a test witness must not create a new
-// unauthenticated audit-query surface on the production API. Worse, the
-// comment justifying it claimed the same data was reachable through an
-// `audit.list` verb with an admin token — and no such verb exists anywhere in
-// the tree. I asserted an authorized alternative to excuse an unauthorized
-// one, without checking that the alternative was real.
-//
-// The store is already the test's own, so the count belongs here.
-func loginAudits(t *testing.T, store *meta.Store) auditTally {
+// auditDetails snapshots every login_failed detail, in order.
+func auditDetails(t *testing.T, store *meta.Store) []string {
 	t.Helper()
-	count := func(action string) uint64 {
-		n, err := store.Audit.OnCtx(context.Background()).With(meta.AuditAction, action).Count()
-		if err != nil {
-			t.Fatalf("counting %q audit rows: %v", action, err)
-		}
-		return n
+	rows, err := store.Audit.OnCtx(context.Background()).With(meta.AuditAction, "login_failed").Select()
+	if err != nil {
+		t.Fatalf("reading the audit trail: %v", err)
 	}
-	return auditTally{ok: count("login"), failed: count("login_failed")}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Detail)
+	}
+	return out
 }
 
-type auditTally struct{ ok, failed uint64 }
+func newDetails(before, after []string) []string { return after[len(before):] }
 
-// TIMING, MEASURED AND SELF-CALIBRATED (lector PR #34 r0 MF3, redesigned
-// after r1 MF1 — and the redesign found something).
+func countAudit(t *testing.T, store *meta.Store, action string) uint64 {
+	t.Helper()
+	n, err := store.Audit.OnCtx(context.Background()).With(meta.AuditAction, action).Count()
+	if err != nil {
+		t.Fatalf("counting %q: %v", action, err)
+	}
+	return n
+}
+
+// TIMING, MEASURED AND SELF-CALIBRATED (lector PR #34 r0 MF3; redesigned
+// after r1 MF1; the residual it exposed CLOSED in r3).
 //
-// THE PROPERTY THIS DEFENDS is the one the ordering exists for: a caller at a
-// non-admitted address must not learn whether the NAME they typed exists.
-// Those two causes — an unknown name, and a real name with a wrong password —
-// must be indistinguishable, and they are: their medians sit inside this
-// machine's own noise, under -race as well as without it.
+// Two properties, and after the combined daemon operation both are defended
+// rather than one defended and one recorded:
 //
-// WHAT IT DOES NOT DEFEND, and what the calibrated statistic exposed the
-// moment it was tight enough to see anything: a real name with the RIGHT
-// password is measurably SLOWER, by about 9ms on a 125ms request under -race
-// and about 1ms on a 17ms request without it. That difference is structural
-// and cannot be closed by doing decoy work, because the extra cost IS the
-// work of being authenticated — the daemon mints a session, the gateway
-// reads the canonical subject, asks the admission question, and then logs the
-// session out again. A wrong password cannot do those things, so it cannot
-// take as long.
+//   - USERNAME EXISTENCE. An unknown name and a real name with a wrong
+//     password must be indistinguishable, or a caller enumerates accounts
+//     without holding a credential.
+//   - CREDENTIAL VALIDITY. A real name with the RIGHT password, refused for
+//     its address, must be indistinguishable from one with a wrong password,
+//     or a caller at a refused address confirms a guessed password without
+//     ever being let in.
 //
-// SO THE RESIDUAL IS REAL AND IS RECORDED RATHER THAN TUNED AWAY: from a
-// non-admitted address, a caller with enough samples can tell a correct
-// password from an incorrect one, without ever being let in. The mitigations
-// are the per-source throttle (ten failures a minute, so samples are
-// expensive) and the fact that the password remains the primary control with
-// admission as defence in depth. It is bounded below so a regression that
-// made it far worse is caught, and it is flagged for a ruling rather than
-// settled here.
+// The second used to be a recorded residual — about 7ms on a 118ms request
+// under -race, every run — because the gateway minted a session, asked a
+// second RPC about the address, and revoked the session when the answer was
+// no. I read that as a forced choice between leaking which names exist and
+// leaking which password is right. Lector ruled the choice false and was
+// correct: nothing required a session to exist before the address was judged.
+// The decision now happens inside the one login operation, between verifying
+// the credential and minting anything, so the refused path does the same work
+// as a wrong password and no session is created.
 //
-// THE FIRST VERSION OF THIS TEST WAS BOTH TOO WEAK AND FLAKY, and lector
-// reproduced the failure: a fixed 300ms bound on a request whose median is
-// about 17ms, so it would have accepted a difference an order of magnitude
-// larger than the whole request; and t.Parallel() plus three sequential
-// per-cause blocks, so a slow moment landed entirely on whichever block was
-// running and the spread hit 301.9ms under the race matrix. Temporal load
-// drift was part of the security verdict. Three things fix that:
-//
-//  1. NOT PARALLEL. The measurement is of durations, and a test sharing the
-//     machine with whatever else the package is running measures the machine.
-//  2. INTERLEAVED. One sample of each cause per round, rotated, so a slow
-//     moment lands on every cause instead of one.
-//  3. A BOUND CALIBRATED FROM THE DATA rather than asserted. The same
-//     statistic is computed where the answer must be zero — the spread one
-//     cause shows against ITSELF across the run — and the compared spread
-//     must not exceed a multiple of it. On a loaded machine the noise floor
-//     rises and the bound rises with it; the test measures
-//     distinguishability, not the machine.
-func TestAdmission_RefusalTimingDoesNotRevealWhetherTheNameExists(t *testing.T) {
+// THE BOUND IS CALIBRATED FROM THE DATA. The same statistic is computed where
+// the answer must be zero — how far one cause's median moves between the even
+// and odd rounds of the same run — and neither compared spread may exceed
+// four times it. On a loaded machine the noise floor rises and the bound
+// rises with it, so the test measures distinguishability rather than the
+// machine. An earlier version asserted a fixed 300ms against a 17ms request
+// and was both meaningless and flaky under load.
+func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing samples; -short skips them")
 	}
-	// Deliberately NOT t.Parallel(). See above.
+	// Deliberately NOT t.Parallel(): the measurement is of durations, and a
+	// test sharing the machine with the rest of the package measures the
+	// machine.
 	ctx := context.Background()
 	daemon, svc, _ := startRealServerWith(t, globalAdmitsGatewayOnly)
 	if _, _, err := svc.Bootstrap(ctx, "johno", adminPass, gatewayAddr); err != nil {
@@ -366,17 +378,7 @@ func TestAdmission_RefusalTimingDoesNotRevealWhetherTheNameExists(t *testing.T) 
 	}
 	base, _ := startGateway(t, daemon)
 
-	const rounds = 24
-	const unknownName = "a name that does not exist"
-	const wrongPassword = "a real name with the wrong password"
-	const rightPassword = "a real name with the RIGHT password"
-	causes := []timingCause{
-		{unknownName, "nobody-at-all", adminPass},
-		{wrongPassword, "johno", "not the passphrase"},
-		{rightPassword, "johno", adminPass},
-	}
-
-	samples := sampleInterleaved(t, base, causes, rounds)
+	samples := sampleInterleaved(t, base, timingCauses(), timingRounds)
 	noise := selfSpread(samples)
 	bound := 4 * noise
 	if bound < timingFloor {
@@ -385,57 +387,130 @@ func TestAdmission_RefusalTimingDoesNotRevealWhetherTheNameExists(t *testing.T) 
 	meds := mediansOf(samples)
 	t.Logf("medians %v; within-cause noise %v; bound %v", meds, noise, bound)
 
-	// THE DEFENDED PROPERTY: does the name exist?
-	existence := abs(meds[unknownName] - meds[wrongPassword])
-	if existence > bound {
-		t.Errorf("an unknown name answered in %v and a real one with a wrong password in %v — "+
-			"a %v difference past the %v this run's own noise floor of %v supports. A caller "+
-			"could enumerate which accounts exist without ever holding a credential",
-			meds[unknownName], meds[wrongPassword], existence, bound, noise)
-	}
+	checkIndistinguishable(t, "whether the name exists", meds, unknownName, wrongPassword, bound, noise,
+		"a caller could enumerate which accounts exist without ever holding a credential")
+	checkIndistinguishable(t, "whether the password is right", meds, rightPassword, wrongPassword, bound, noise,
+		"a caller at a refused address could confirm a guessed password without ever being let in")
 
-	// THE RECORDED RESIDUAL: a correct password costs more, because being
-	// authenticated is work. Bounded so a regression that made it far worse
-	// fails here, and logged so the number is on the record rather than in
-	// somebody's memory.
-	credential := meds[rightPassword] - meds[wrongPassword]
-	t.Logf("RESIDUAL: a correct password is %v slower than an incorrect one (%.1f%% of the "+
-		"request) — structural, not closeable by decoy work; mitigated by the per-source "+
-		"throttle", credential, 100*float64(credential)/float64(meds[wrongPassword]))
-	if credential > meds[wrongPassword]/2 {
-		t.Errorf("a correct password now costs %v more than an incorrect one, over half the "+
-			"%v request itself. The residual has grown from the ~7%% measured when it was "+
-			"documented, and at this size a caller needs very few samples to confirm a "+
-			"guessed password from an address that is refused",
-			credential, meds[wrongPassword])
-	}
-
-	// THE CONTROL, AND IT CROSSES THE BOUND THIS RUN ACTUALLY USED — not some
-	// large number chosen in advance. A harness whose sensitivity is only
-	// demonstrated far above its acceptance boundary has not shown that the
-	// boundary means anything.
+	// TWO COMMITTED CONTROLS, one per property, each injecting a difference
+	// just past the bound THIS RUN accepted and each caught by the exact
+	// assertion that defends it.
 	//
-	// The injected delay is on the ADMISSION refusal, which only the correct
-	// password reaches, so it separates exactly the pair the existence check
-	// compares would be blind to — and the statistic must see it.
+	// The previous control delayed the gateway's own refusal, which only the
+	// correct-password path reached — so it demonstrated sensitivity to the
+	// credential pair and said nothing about the existence pair. Lector
+	// caught that. These use a proxy in front of the daemon instead, which
+	// is test-owned, needs no production seam, and can single out either
+	// cause by what the request carries.
 	delay := bound + timingControlMargin
-	slowBase, _ := startGatewayWith(t, daemon, delay)
-	slow := sampleInterleaved(t, slowBase, causes, rounds)
-	slowMeds := mediansOf(slow)
-	seen := slowMeds[rightPassword] - slowMeds[wrongPassword] - credential
-	if seen <= bound {
-		t.Fatalf("against a gateway whose admission refusal is delayed by %v — %v past the %v "+
-			"bound this run accepted — the same statistic resolved only %v of it. It cannot "+
-			"see a leak at its own boundary, so its green above says nothing",
-			delay, timingControlMargin, bound, seen)
+	t.Run("the harness can catch a username-existence leak", func(t *testing.T) {
+		control := timingControl(t, daemon, []byte("nobody-at-all"), delay)
+		got := abs(control[unknownName] - control[wrongPassword])
+		if got <= bound {
+			t.Fatalf("with %v injected into the unknown-name path alone — %v past the %v bound "+
+				"this run accepted — the existence statistic resolved only %v. It cannot see a "+
+				"leak at its own boundary, so its green above says nothing",
+				delay, timingControlMargin, bound, got)
+		}
+	})
+	t.Run("the harness can catch a credential-validity leak", func(t *testing.T) {
+		control := timingControl(t, daemon, []byte(adminPass), delay)
+		got := abs(control[rightPassword] - control[wrongPassword])
+		if got <= bound {
+			t.Fatalf("with %v injected into the correct-password path alone — %v past the %v "+
+				"bound this run accepted — the credential statistic resolved only %v. It cannot "+
+				"see a leak at its own boundary, so its green above says nothing",
+				delay, timingControlMargin, bound, got)
+		}
+	})
+}
+
+// timingControl measures the three causes through a proxy that delays only
+// the requests whose payload carries `match`, and returns their medians.
+func timingControl(t *testing.T, daemon string, match []byte, delay time.Duration) map[string]time.Duration {
+	t.Helper()
+	proxy := delayingProxy(t, daemon, match, delay)
+	base, _ := startGateway(t, proxy)
+	return mediansOf(sampleInterleaved(t, base, timingCauses(), timingRounds))
+}
+
+func checkIndistinguishable(t *testing.T, property string, meds map[string]time.Duration,
+	a, b string, bound, noise time.Duration, consequence string) {
+	t.Helper()
+	got := abs(meds[a] - meds[b])
+	if got > bound {
+		t.Errorf("%s: %q answered in %v and %q in %v — a %v difference past the %v this run's "+
+			"own noise floor of %v supports. %s",
+			property, a, meds[a], b, meds[b], got, bound, noise, consequence)
 	}
 }
 
-func abs(d time.Duration) time.Duration {
-	if d < 0 {
-		return -d
+const (
+	unknownName   = "a name that does not exist"
+	wrongPassword = "a real name with the wrong password"
+	rightPassword = "a real name with the RIGHT password"
+	timingRounds  = 24
+)
+
+func timingCauses() []timingCause {
+	return []timingCause{
+		{unknownName, "nobody-at-all", adminPass},
+		{wrongPassword, "johno", "not the passphrase"},
+		{rightPassword, "johno", adminPass},
 	}
-	return d
+}
+
+// delayingProxy sits between the gateway and the daemon and delays only the
+// requests whose bytes contain `match`.
+//
+// A PROXY RATHER THAN A PRODUCTION SEAM, deliberately. The decision under
+// test now lives inside the daemon's login, so a seam able to single out one
+// cause would have to be a knob on auth.Service — and an exported test-only
+// hook on a security-critical API is exactly what lector refused in r1. This
+// is entirely test-owned: it perturbs the wire, which is where the harness
+// measures anyway, and it can select a cause by what the request carries
+// because the name and the passphrase both travel in it.
+func delayingProxy(t *testing.T, upstream string, match []byte, delay time.Duration) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("proxy listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		for {
+			client, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = client.Close() }()
+				server, derr := net.Dial("tcp", upstream)
+				if derr != nil {
+					return
+				}
+				defer func() { _ = server.Close() }()
+				go func() { _, _ = io.Copy(client, server) }()
+				buf := make([]byte, 32*1024)
+				for {
+					n, rerr := client.Read(buf)
+					if n > 0 {
+						if bytes.Contains(buf[:n], match) {
+							time.Sleep(delay)
+						}
+						if _, werr := server.Write(buf[:n]); werr != nil {
+							return
+						}
+					}
+					if rerr != nil {
+						return
+					}
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
 }
 
 // timingFloor is the smallest bound this cell will use, so an unusually quiet
@@ -523,4 +598,11 @@ func selfSpread(samples map[string][]time.Duration) time.Duration {
 		}
 	}
 	return worst
+}
+
+func abs(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
