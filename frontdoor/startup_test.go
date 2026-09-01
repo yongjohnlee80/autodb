@@ -441,16 +441,14 @@ func TestStartup_DirectTLSIsATLSFailureNotAnAuthDenial(t *testing.T) {
 // being refused — not allowed to fall through to whatever denies next.
 // MATRIX ROW 2.4: the StartupMessage's parameters are pinned by §3.1's closed
 // set — a parameter not named there is refused rather than emulated as a GUC.
-// Matrix row 3.1:options (GUC-setting content refused in either spelling,
-// empty accepted and ignored), row 3.1:replication (refused at any value),
-// row 3.1:_pq_ (negotiated, not refused — the naming half is
-// TestStartup_UnrecognizedProtocolOptionsAreNamed), and
-// row 3.1:any-other-parameter (an unknown parameter is a GUC attempt).
-// NOT cited here, deliberately: 3.1:client_encoding and
-// 3.1:application_name are half-proven — this cell pins the accept/refuse
-// decision, while the target-lease UTF8 pin and the 256-byte
-// truncate+notice have no cell yet, so the triage keeps them awaiting
-// rather than letting a citation promote a half into a whole.
+// Claim-level citations (the rows below carry separately testable
+// guarantees, tracked per claim in the gate): row 3.1:options#guc-refusal,
+// row 3.1:options#empty-accepted, row 3.1:replication#refused-any-value,
+// row 3.1:application_name#accept, and row 3.1:client_encoding#utf8-only.
+// The whole-row citation row 3.1:any-other-parameter — one decision, no
+// separate guarantees. The remaining halves of the partial rows
+// (options#empty-audit, application_name#truncate-notice-256,
+// client_encoding#lease-utf8-pin) have no cell and await theirs.
 func TestStartup_ParameterPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -647,7 +645,9 @@ func TestStartup_OversizeIsNotDirectTLS(t *testing.T) {
 // parameter map sailed through to be denied for want of a credential store —
 // which reads in the audit as an authentication problem rather than as the
 // malformed startup it is.
-// Matrix row 3.1:user and row 3.1:database: the required pair.
+// Claim citations: row 3.1:user#required and row 3.1:database#required — the
+// requiredness halves. The rows stay partial: the owner cross-check and the
+// grant-on-target check belong to row 2.7's chain.
 func TestStartup_RequiredParameters(t *testing.T) {
 	t.Parallel()
 
