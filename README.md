@@ -96,12 +96,20 @@ statement *is* before it runs. This layer needs no configuration, no network
 and no model; it is on from the first launch:
 
 - `UPDATE` / `DELETE` with no top-level `WHERE` clause is **blocked**.
-- One statement per execution; anything after a top-level `;` is refused, so
-  the audit record always equals what actually ran.
-- Data-modifying subqueries and CTEs, `PRAGMA`, session-state and
-  transaction-control statements are refused through the ordinary execution
-  path — admission is the engine's decision, made against a capability
-  profile, not something a tokenizer is allowed to wave through.
+- **One statement per call on the single-statement path** — anything after a
+  top-level `;` is refused. The script runner deliberately *does* accept a
+  multi-statement buffer, but it splits the buffer and puts each statement
+  through the same classify → authorize → guard → audit path on its own, so
+  the audit record still equals exactly what ran. A script is not a
+  transaction, and a partial application says which statement failed and how
+  many had already run.
+- **Admission is the engine's decision against the connection's capability
+  profile**, not a tokenizer's: the `v1compat` profile refuses data-modifying
+  subqueries and CTEs outright, while the session profile admits them and
+  leaves them to the `WHERE` guard on their own merits. Transaction-control
+  and session-state statements (`BEGIN`, `SET`, `LOCK`, `PRAGMA`) are refused
+  off a session — on a pooled connection they would leave their state behind
+  for whoever gets that connection next.
 - Unterminated strings, comments and quotes are rejected as malformed rather
   than guessed at.
 - Scripts over the size cap are rejected *before* execution.
@@ -159,9 +167,9 @@ transactions, and the deterministic gates above. The AI is a net over them, not
 a replacement for them.
 
 **Audit trails.** Every executed statement is recorded with the user, the
-connection, the SQL, the timing, the row count and the outcome. Session opens
-record which token connected. Timeout rollbacks record which limit fired.
-Refusals are audited too — a blocked query is evidence, not a silence.
+connection, the SQL, the timing, the row count and the outcome. Refusals are
+audited too — a blocked query is evidence, not a silence. The front door adds
+token-attributed session opens and audited timeout rollbacks when it lands.
 
 **Secrets at rest.** Connection credentials are sealed with AES-256-GCM under a
 key unwrapped from your passphrase via argon2id (RFC 9106 profile). The

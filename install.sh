@@ -101,6 +101,13 @@ resolve_latest() {
 
 verify_sha256() {
   # $1 = file, $2 = file containing "<sum>  <name>"
+  #
+  # Fail CLOSED. An earlier version compared the two sums directly, so a
+  # missing or unreadable file made both strings empty and "" = "" passed --
+  # the one control that makes the download trustworthy silently approving
+  # a file it never read. Both values are checked for emptiness first.
+  [ -s "$1" ] || die "downloaded file $1 is missing or empty"
+  [ -s "$2" ] || die "checksum file $2 is missing or empty"
   want="$(cut -d' ' -f1 < "$2")"
   if command -v sha256sum >/dev/null 2>&1; then
     got="$(sha256sum "$1" | cut -d' ' -f1)"
@@ -109,6 +116,8 @@ verify_sha256() {
   else
     die "neither sha256sum nor shasum found — cannot verify the download"
   fi
+  [ -n "$want" ] || die "could not read an expected checksum from $2"
+  [ -n "$got" ]  || die "could not compute a checksum for $1"
   [ "$want" = "$got" ] || die "checksum mismatch: expected $want, got $got"
   info "checksum verified"
 }
@@ -127,11 +136,27 @@ go_version_ok() {
 
 install_file() {
   # $1 = built/extracted binary
+  #
+  # Every step here is checked explicitly. `set -e` does NOT fire on a failing
+  # command inside an AND-OR list, so `cp x y && mv y z` followed by a success-
+  # ful line silently returns 0 with nothing installed -- and if an older
+  # autodb already sits at the prefix, the final smoke then runs THAT and the
+  # script exits claiming success. A partial install must be loud.
   mkdir -p "$PREFIX" || die "cannot create $PREFIX"
   [ -w "$PREFIX" ] || die "$PREFIX is not writable. Re-run with --prefix <dir>, or create it with the right ownership. This script never calls sudo for you."
-  chmod +x "$1"
-  # mv across filesystems can fail; cp then remove is portable.
-  cp "$1" "$PREFIX/autodb.tmp.$$" && mv "$PREFIX/autodb.tmp.$$" "$PREFIX/autodb"
+  chmod +x "$1" || die "could not make $1 executable"
+
+  dest_tmp="$PREFIX/autodb.tmp.$$"
+  # mv across filesystems can fail; cp to a sibling then rename is portable
+  # and keeps the replacement atomic within the prefix.
+  if ! cp "$1" "$dest_tmp"; then
+    rm -f "$dest_tmp"
+    die "could not copy the binary into $PREFIX (nothing was changed)"
+  fi
+  if ! mv "$dest_tmp" "$PREFIX/autodb"; then
+    rm -f "$dest_tmp"
+    die "could not move the binary into place at $PREFIX/autodb"
+  fi
   info "installed $PREFIX/autodb"
 }
 
@@ -199,11 +224,17 @@ esac
 
 # ------------------------------------------------------------------ report
 
-"$PREFIX/autodb" --version >/dev/null 2>&1 \
+reported="$("$PREFIX/autodb" --version 2>/dev/null)" \
   || die "$PREFIX/autodb was installed but does not run"
 
+# Never let a pre-existing older binary stand in as proof of this install.
+case "$reported" in
+  *"$VERSION"*) ;;
+  *) die "$PREFIX/autodb reports \"$reported\", which is not the requested $VERSION -- the install did not take effect" ;;
+esac
+
 say ""
-say "$("$PREFIX/autodb" --version)"
+say "$reported"
 
 case ":${PATH}:" in
   *":$PREFIX:"*) say "Run: autodb --ui" ;;
