@@ -145,7 +145,20 @@ func TestListenerClose_NoHandlerStartsAfterCloseReturns(t *testing.T) {
 	select {
 	case <-served:
 	case <-time.After(10 * time.Second):
-		t.Error("Serve never returned after Close")
+		t.Fatal("Serve never returned after Close")
+	}
+
+	// RECHECKED AFTER THE DETERMINISTIC JOIN, which is the assertion that
+	// actually holds. The sleep above is a courtesy for a fast failure; on
+	// its own it is a timing assumption inside a cell whose whole subject is
+	// a concurrency guarantee, and lector proved the gap: ignore the closed
+	// check AND put a legal 300ms delay before the handler starts, and the
+	// sleep misses it while Serve's own join does not.
+	if lateHandler.Load() {
+		t.Fatal("a handler started after Close returned; the deterministic Serve join exposed it. " +
+			"Close promises the in-flight connections are done and the daemon tears the engine " +
+			"down on that promise, so this handler is running against pools being closed " +
+			"underneath it")
 	}
 }
 
