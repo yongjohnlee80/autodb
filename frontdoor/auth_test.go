@@ -639,7 +639,6 @@ func TestAuthDeadline_ASaturatedQueueExitsAtTheOriginalDeadline(t *testing.T) {
 	hold := make(chan struct{})
 	entered := make(chan struct{}, 4)
 	blocking := &holdingAuth{entered: entered, release: hold}
-	t.Cleanup(func() { close(hold) })
 
 	_, _, addr := listenerWith(t, Options{
 		Authn: blocking, AuthFailuresPerIP: unthrottled,
@@ -647,6 +646,12 @@ func TestAuthDeadline_ASaturatedQueueExitsAtTheOriginalDeadline(t *testing.T) {
 		testDeadlines: &deadlines{tls: 5 * time.Second, startup: 5 * time.Second,
 			auth: authBudget, idle: time.Minute},
 	})
+	// REGISTERED AFTER THE LISTENER, so LIFO runs it BEFORE the listener's
+	// own cleanup. Close now waits for in-flight handlers, and this holder
+	// deliberately ignores its context — so releasing it second would leave
+	// Close waiting on a goroutine nothing was going to free. The join being
+	// real is what makes the order matter.
+	t.Cleanup(func() { close(hold) })
 
 	// The first connection takes the only worker and holds it.
 	_, feA := startupTo(t, addr, defaultParams())
@@ -733,7 +738,6 @@ func TestAuthDeadline_AWorkerTimeoutIsNotChargedToTheSource(t *testing.T) {
 	hold := make(chan struct{})
 	entered := make(chan struct{}, 4)
 	blocking := &holdingAuth{entered: entered, release: hold}
-	t.Cleanup(func() { close(hold) })
 
 	// A throttle of exactly the matrix minimum, so ONE wrongly-charged
 	// failure is enough to close the door on the next connection.
@@ -742,6 +746,7 @@ func TestAuthDeadline_AWorkerTimeoutIsNotChargedToTheSource(t *testing.T) {
 		testDeadlines: &deadlines{tls: 5 * time.Second, startup: 5 * time.Second,
 			auth: 300 * time.Millisecond, idle: time.Minute},
 	})
+	t.Cleanup(func() { close(hold) }) // see above: before the listener's cleanup
 
 	// Occupy the only worker.
 	_, feA := startupTo(t, addr, defaultParams())
@@ -821,4 +826,90 @@ func queueOneAttempt(t *testing.T, addr string) bool {
 	}
 	_, _ = io.ReadAll(tc)
 	return true
+}
+
+// CLOSE JOINS THE HANDLERS, including a session still tearing down (lector
+// PR #38 r0 must-fix 2).
+//
+// Close's own comment promised this and the code never did it: only Serve
+// waited, in a goroutine the daemon starts and discards. So Close returned
+// while an authenticated handler was still inside CloseWireSession, and the
+// engine teardown the daemon runs next could race the wire teardown it was
+// deliberately ordered after.
+//
+// The cell blocks a session's release and requires Close to be blocked with
+// it. Both halves matter: that it does NOT return while the teardown is in
+// flight, and that it DOES return once the teardown finishes — an
+// implementation that simply never returned would satisfy the first alone.
+func TestListenerClose_WaitsForASessionStillTearingDown(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	f := &blockingCloseAuth{result: goodSession(), entered: entered, release: release}
+
+	l, _, addr := listenerWith(t, Options{Authn: f, AuthFailuresPerIP: unthrottled})
+
+	conn, fe := startupTo(t, addr, defaultParams())
+	if _, err := fe.Receive(); err != nil {
+		t.Fatal(err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "good"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		msg, rerr := fe.Receive()
+		if rerr != nil {
+			t.Fatalf("the success sequence: %v", rerr)
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+
+	// The client goes away, which sends the handler into its teardown — and
+	// the fake holds it there.
+	_ = conn.Close()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the session never reached its teardown; the cell cannot observe the join")
+	}
+
+	closed := make(chan struct{})
+	go func() { l.Close(); close(closed) }()
+
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a session was still tearing down. Its contract says it " +
+			"waits for in-flight connections, and the daemon tears the ENGINE down immediately " +
+			"after — so the release still running here would be racing the pools it releases into")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close never returned once the teardown finished")
+	}
+}
+
+// blockingCloseAuth holds CloseWireSession open until released.
+
+// blockingCloseAuth holds CloseWireSession open until released.
+type blockingCloseAuth struct {
+	result  exec.WireSessionResult
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (b *blockingCloseAuth) OpenWireSession(context.Context, string, string, string, string) (exec.WireSessionResult, error) {
+	return b.result, nil
+}
+
+func (b *blockingCloseAuth) CloseWireSession(context.Context, exec.SessionID, int64, string, string) {
+	b.once.Do(func() { close(b.entered) })
+	<-b.release
 }
