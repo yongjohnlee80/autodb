@@ -2,6 +2,9 @@ package frontdoor
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -177,48 +180,64 @@ var matrixTriage = map[string]struct {
 // a matrix row that contains SEPARATELY testable guarantees is tracked per
 // claim, keyed "<row>#<claim>" and cited in tests as "row 3.1:options#empty-audit".
 //
-// A covered claim carries ANCHORS — literal fragments of the proving cell —
-// and the evidence is machine-checked with an OWNERSHIP requirement (r1 MF1):
-// every anchor must match inside one of the claim's CITING WITNESS files,
-// the files whose citation names the claim. Deleting the proving case
-// reddens the gate even if the citation comment survives (r0's finding,
-// mutation M12), and planting the literal in an UNRELATED file's comment is
-// not evidence (r1's finding — the citation and the proof must resolve to
-// the same owned cell; mutation M19). An awaiting claim is a missing
-// obligation with the phase that owes it.
+// A covered claim carries a WITNESS — the test function that proves it —
+// and ANCHORS — literal fragments of the proving cell. The evidence is
+// machine-checked with CELL ownership (r2 MF1): the citation AND every
+// anchor must appear inside the witness function's span, located by Go AST
+// positions (doc comment through closing brace), not by regex function
+// guessing. Deleting the proving case reddens the gate even if the citation
+// comment survives (r0, mutation M12); planting the anchor in an unrelated
+// comment — same file or not — is not evidence (r1/r2, mutations M19/M21).
+// An awaiting claim is a missing obligation with the phase that owes it;
+// claims carry exactly two states, and the registry refuses anything else
+// (r2 MF2), including blank anchors, which match everything and therefore
+// prove nothing (r2 MF3).
 //
 // Parent rows are DERIVED from their claims: all-covered ⇒ the parent is
 // covered, anything awaiting ⇒ the parent is awaiting. matrixTriage must
 // agree with the derivation — the gate checks it (mutation direction: a
 // parent whose hand-written state contradicts its claims reddens).
 var claimTriage = map[string]struct {
-	state   rowState
+	state   rowState // exactly covered or awaiting; anything else is a registry fatal
+	witness string   // the test FUNCTION that proves a covered claim
 	reason  string
-	anchors []string // required for covered claims: literal fragments of the proving cell; all must match
+	anchors []string // required for covered claims: literal fragments of the proving cell; all must match inside the witness
 }{
 	"3.1:user#required": {covered, "TestStartup_RequiredParameters",
+		"the required pair, without the check a blank startup reads as an auth problem",
 		[]string{`"database": "lm-prod"}, "user"}`}},
-	"3.1:user#owner-cross-check": {awaiting, "proven by row 2.7's chain in core/exec; anchor deferred — core/exec is #36's active surface", nil},
+	"3.1:user#owner-cross-check": {awaiting, "",
+		"proven by row 2.7's chain in core/exec; anchor deferred — core/exec is #36's active surface", nil},
 
 	"3.1:database#required": {covered, "TestStartup_RequiredParameters",
+		"the required pair",
 		[]string{`"user": "root"}, "database"}`}},
-	"3.1:database#grant-on-target": {awaiting, "the grant-on-connection check is 2.7's target validation — F0e (#36)", nil},
+	"3.1:database#grant-on-target": {awaiting, "",
+		"the grant-on-connection check is 2.7's target validation — F0e (#36)", nil},
 
-	"3.1:application_name#accept": {covered, "TestStartup_ParameterPolicy — the pinned set",
+	"3.1:application_name#accept": {covered, "TestStartup_ParameterPolicy",
+		"the pinned set accepts application_name",
 		[]string{`"application_name": "psql"`}},
-	"3.1:application_name#truncate-notice-256": {awaiting, "length-capped 256 bytes, over = truncate + notice, audited — no cell", nil},
+	"3.1:application_name#truncate-notice-256": {awaiting, "",
+		"length-capped 256 bytes, over = truncate + notice, audited — no cell", nil},
 
-	"3.1:client_encoding#utf8-only": {covered, "TestStartup_ParameterPolicy — non-UTF8 refused, hyphen spelling tolerated",
+	"3.1:client_encoding#utf8-only": {covered, "TestStartup_ParameterPolicy",
+		"non-UTF8 refused, hyphen spelling tolerated",
 		[]string{`"client_encoding": "LATIN1"`, `"client_encoding": "utf-8"`}},
-	"3.1:client_encoding#lease-utf8-pin": {awaiting, "the target lease is pinned UTF8 at acquisition (ruling 2) — F1", nil},
+	"3.1:client_encoding#lease-utf8-pin": {awaiting, "",
+		"the target lease is pinned UTF8 at acquisition (ruling 2) — F1", nil},
 
-	"3.1:options#guc-refusal": {covered, "TestStartup_ParameterPolicy — both spellings refused",
+	"3.1:options#guc-refusal": {covered, "TestStartup_ParameterPolicy",
+		"both spellings refused",
 		[]string{`"options": "-c search_path=public"`, `"options": "--search_path=public"`}},
-	"3.1:options#empty-accepted": {covered, "TestStartup_ParameterPolicy — empty/whitespace accepted and ignored",
+	"3.1:options#empty-accepted": {covered, "TestStartup_ParameterPolicy",
+		"empty/whitespace accepted and ignored",
 		[]string{`"options": "   "`}},
-	"3.1:options#empty-audit": {awaiting, "the empty-options acceptance is audited (§3.1) — the audit clause has no cell", nil},
+	"3.1:options#empty-audit": {awaiting, "",
+		"the empty-options acceptance is audited (§3.1) — the audit clause has no cell", nil},
 
-	"3.1:replication#refused-any-value": {covered, "TestStartup_ParameterPolicy — refused at every tested value",
+	"3.1:replication#refused-any-value": {covered, "TestStartup_ParameterPolicy",
+		"refused at every tested value",
 		[]string{`"replication": "database"`}},
 }
 
@@ -583,11 +602,13 @@ func matrixRowIDs(t *testing.T) []string {
 
 // matrixClaimIDs validates the claim registry against the row set and
 // returns the claim keys. A claim whose parent row does not exist describes
-// coverage of nothing, and a claim in a state the claim machinery does not
-// fully implement is refused (r1 MF2): `uncited` silently skipped its
-// checks in the first refold while still counting toward coverage — a
-// registry entry that behaves differently from what it says is worse than
-// no entry.
+// coverage of nothing; a claim in a state the claim machinery does not
+// implement is refused (r1 MF2, r2 MF2): `uncited` and unknown states skip
+// their checks while still deriving coverage — a registry entry that
+// behaves differently from what it says is worse than no entry. A covered
+// claim must name a witness and carry at least one anchor, and every
+// anchor must be non-blank after trimming (r2 MF3): a blank anchor matches
+// everything and therefore proves nothing.
 func matrixClaimIDs(t *testing.T, rowSet map[string]bool) []string {
 	t.Helper()
 	var claims []string
@@ -596,16 +617,83 @@ func matrixClaimIDs(t *testing.T, rowSet map[string]bool) []string {
 		if !rowSet[parent] {
 			t.Fatalf("claim %s names the parent row %q, which the matrix does not contain — a claim whose parent is gone describes nothing", c, parent)
 		}
-		if e.state == uncited {
-			t.Fatalf("claim %s is `uncited` — claims have no uncited state: a cell that exists and is named is an ordinary ROW citation, and a claim marked uncited skips every check while still deriving coverage (r1 MF2). Give it covered (with anchors) or awaiting (with the owing phase)", c)
+		if e.state != covered && e.state != awaiting {
+			t.Fatalf("claim %s carries state %d — claims have exactly two states, covered and awaiting; anything else skips every check while still deriving coverage (r2 MF2)", c, e.state)
 		}
-		if e.state == covered && len(e.anchors) == 0 {
-			t.Fatalf("claim %s is covered with NO anchors — an unanchored covered claim is an assertion the gate cannot check; the anchors are the machine-checked half of the claim", c)
+		if e.state == covered {
+			if e.witness == "" {
+				t.Fatalf("claim %s is covered with NO witness — the witness is the test function whose cell the gate binds the evidence to; without it the anchors have no home", c)
+			}
+			if len(e.anchors) == 0 {
+				t.Fatalf("claim %s is covered with NO anchors — an unanchored covered claim is an assertion the gate cannot check; the anchors are the machine-checked half of the claim", c)
+			}
+			for _, a := range e.anchors {
+				if strings.TrimSpace(a) == "" {
+					t.Fatalf("claim %s carries a BLANK anchor — a blank matches everything and therefore proves nothing (r2 MF3)", c)
+				}
+			}
 		}
 		claims = append(claims, c)
 	}
 	sort.Strings(claims)
 	return claims
+}
+
+// witnessSpan locates the named test function by Go AST (r2 MF1 — function
+// positions, not regex guessing) and returns its source span — doc comment
+// through closing brace — plus its file. The span is the cell a covered
+// claim owns: the citation AND every anchor must appear inside it. A
+// citation that names the claim from an unrelated comment — same file or
+// not — is not evidence, and neither is an anchor that matches outside the
+// witness.
+func witnessSpan(t *testing.T, fn string) (span, rel string) {
+	t.Helper()
+	const self = "matrix_coverage_test.go"
+	root := repoRoot(t)
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || span != "" {
+			return nil
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") || filepath.Base(path) == self {
+			return nil
+		}
+		src, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		fset := token.NewFileSet()
+		f, perr := parser.ParseFile(fset, path, src, parser.ParseComments)
+		if perr != nil {
+			return nil // an unparsable file fails the build on its own; not this gate's finding
+		}
+		for _, d := range f.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			if !ok || fd.Name == nil || fd.Name.Name != fn {
+				continue
+			}
+			start := fd.Pos()
+			if fd.Doc != nil {
+				start = fd.Doc.Pos()
+			}
+			span = string(src)[fset.Position(start).Offset:fset.Position(fd.End()).Offset]
+			rel, _ = filepath.Rel(root, path)
+			return nil
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the repo for the witness %s: %v", fn, err)
+	}
+	if span == "" {
+		t.Fatalf("the witness %s is not a test function in this repo — a covered claim names a cell that must exist, or its evidence is a claim about nothing", fn)
+	}
+	return span, rel
 }
 
 // numericRows parses §2's numbered rows: "| 2.1a | ...". A row id that
@@ -738,32 +826,31 @@ func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 		}
 	}
 
-	// The claim loop. A covered claim needs its citation AND its evidence,
-	// and the two must resolve to the SAME cell (r1 MF1): every anchor must
-	// match inside one of the citing witness files — the files whose
-	// citation names the claim. Deleting the proving case reddens even with
-	// the comment intact, and planting the literal in an unrelated file's
-	// comment is not evidence. An awaiting claim promoted by citation
-	// follows the ordinary promotion path.
+	// The claim loop. A covered claim owns a CELL (r2 MF1): the witness
+	// function's AST span, doc comment through closing brace. The citation
+	// naming the claim AND every anchor must appear inside that span — the
+	// proof and the citation resolve to the same owned cell, and a fragment
+	// that matches anywhere else, same file or not, is a comment, not
+	// evidence. An awaiting claim cited anywhere follows the ordinary
+	// promotion path.
 	for _, claim := range claims {
 		entry := claimTriage[claim]
-		witnesses := cited[claim]
 		switch entry.state {
 		case covered:
-			if len(witnesses) == 0 {
-				claimRegressed = append(claimRegressed, claim+" ("+entry.reason+")")
-				continue
+			span, _ := witnessSpan(t, entry.witness)
+			if !citesRow(span, claim) {
+				claimRegressed = append(claimRegressed, claim+" ("+entry.reason+") — its witness "+entry.witness+" does not cite it; the citation must live inside the same cell as the proof")
 			}
 			for _, a := range entry.anchors {
-				if !witnessHasEvidence(t, witnesses, a) {
+				if !strings.Contains(span, a) {
 					evidenceVanished = append(evidenceVanished,
-						claim+"'s evidence anchor no longer matches inside its citing witness ("+strings.Join(witnesses, ", ")+"): "+a+
-							" — the proof and the citation must resolve to the same owned cell")
+						claim+"'s anchor no longer appears inside its witness "+entry.witness+": "+a+
+							" — the proof and the citation must resolve to the same owned cell; a match elsewhere, same file or not, is a comment, not evidence")
 				}
 			}
 		case awaiting:
-			if len(witnesses) > 0 {
-				claimPromotable = append(claimPromotable, claim+" — now cited by "+strings.Join(witnesses, ", "))
+			if _, isCited := cited[claim]; isCited {
+				claimPromotable = append(claimPromotable, claim+" — now cited by "+strings.Join(cited[claim], ", "))
 			}
 		}
 	}
@@ -881,26 +968,12 @@ func stateName(s rowState) string {
 	return "?"
 }
 
-// witnessHasEvidence reports whether the literal fragment — a covered
-// claim's anchor — appears in one of the claim's citing witness files
-// (r1 MF1). The r0 shape searched every _test.go in the repo; r1's mutation
-// killed it by planting the literal in an unrelated tls_test.go comment
-// while the proving case was deleted. The proof and the citation must
-// resolve to the same owned cell: a fragment that only matches elsewhere
-// is a comment, not evidence.
-func witnessHasEvidence(t *testing.T, witnesses []string, fragment string) bool {
-	t.Helper()
-	root := repoRoot(t)
-	for _, rel := range witnesses {
-		src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
-		if err != nil {
-			t.Fatalf("read the citing witness %s: %v", rel, err)
-		}
-		if strings.Contains(string(src), fragment) {
-			return true
-		}
-	}
-	return false
+// citesRow reports whether the text contains a citation of the row or claim
+// id in any of the shapes the citation convention uses — the same
+// case-insensitivity citationRe carries, checked against a witness span.
+func citesRow(text, id string) bool {
+	re := regexp.MustCompile(`(?i)\browz?\s+` + regexp.QuoteMeta(id) + `\b`)
+	return re.MatchString(text)
 }
 
 // TestMatrixCoverage_TriageHasNoPhantomRows guards the other direction: an
