@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"io"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +35,13 @@ type fakeAuth struct {
 	result exec.WireSessionResult
 	err    error
 
+	// deadlines records the ctx deadline each verification was handed, so a
+	// cell can prove the authenticator is bounded by the SAME budget the
+	// rest of the credential exchange spent — rather than the no-deadline
+	// listener context it used to get.
+	deadlines []time.Time
+	hasDeadln []bool
+
 	// opened and closed record the calls, so a cell can assert the
 	// reservation was released rather than assume it.
 	opened []string // the presented credentials, in order
@@ -43,9 +52,12 @@ type fakeAuth struct {
 	closeCtxErr []error
 }
 
-func (f *fakeAuth) OpenWireSession(_ context.Context, presented, startupUser, database, ip string) (exec.WireSessionResult, error) {
+func (f *fakeAuth) OpenWireSession(ctx context.Context, presented, startupUser, database, ip string) (exec.WireSessionResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	dl, ok := ctx.Deadline()
+	f.deadlines = append(f.deadlines, dl)
+	f.hasDeadln = append(f.hasDeadln, ok)
 	f.opened = append(f.opened, presented+"|"+startupUser+"|"+database+"|"+ip)
 	if f.err != nil {
 		return exec.WireSessionResult{}, f.err
@@ -64,6 +76,12 @@ func (f *fakeAuth) calls() ([]string, []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.opened...), append([]string(nil), f.closed...)
+}
+
+func (f *fakeAuth) authDeadlines() ([]time.Time, []bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]time.Time(nil), f.deadlines...), append([]bool(nil), f.hasDeadln...)
 }
 
 func (f *fakeAuth) closeContexts() []error {
@@ -561,4 +579,246 @@ func TestSession_ShutdownReleasesWithALiveContext(t *testing.T) {
 				"the very context its own teardown needed", i, cerr)
 		}
 	}
+}
+
+// THE AUTHENTICATOR IS BOUND BY THE PHASE'S DEADLINE (lector PR #36 r1).
+//
+// It used to receive the listener's context, which has no deadline at all —
+// so a stuck auth store held a credential worker indefinitely, and nothing
+// upstream was ever going to cancel it. Sixteen such calls and the surface
+// stops authenticating anyone, with no timeout anywhere to end it.
+func TestAuthDeadline_TheAuthenticatorSeesThePhaseDeadline(t *testing.T) {
+	t.Parallel()
+	f := &fakeAuth{result: goodSession()}
+	_, _, addr := listenerWith(t, Options{
+		Authn: f, AuthFailuresPerIP: unthrottled,
+		testDeadlines: &deadlines{tls: 5 * time.Second, startup: 5 * time.Second,
+			auth: 700 * time.Millisecond, idle: time.Minute},
+	})
+
+	before := time.Now()
+	_, fe := startupTo(t, addr, defaultParams())
+	if _, err := fe.Receive(); err != nil {
+		t.Fatal(err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "good"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the verification", func() bool { o, _ := f.calls(); return len(o) == 1 })
+
+	dls, oks := f.authDeadlines()
+	if len(oks) != 1 || !oks[0] {
+		t.Fatal("the authenticator was handed a context with NO deadline. A store that will " +
+			"not answer then holds a credential worker forever, and sixteen of those stop the " +
+			"surface authenticating anyone with no timeout anywhere to end it")
+	}
+	// Within the phase's budget, measured from before the exchange began.
+	if got := dls[0].Sub(before); got > 700*time.Millisecond+250*time.Millisecond || got <= 0 {
+		t.Errorf("the verification's deadline is %v from the start of the exchange, want at "+
+			"most the phase's %v — a deadline larger than the phase is a second budget wearing "+
+			"the first one's name", got, 700*time.Millisecond)
+	}
+}
+
+// A SATURATED QUEUE DOES NOT HAND OUT A SECOND BUDGET.
+//
+// The waiter used to start a fresh full timer, so a peer who had already spent
+// the allowance getting to the queue could wait the whole allowance again.
+// Lector measured 502.96ms against a 300ms setting: 200ms before the password,
+// then 302.96ms waiting for a worker.
+//
+// The discriminating measurement is the time from the PASSWORD, not from the
+// prompt. A cell that only bounded the total would pass on a fresh timer
+// whenever the client happened to be quick.
+func TestAuthDeadline_ASaturatedQueueExitsAtTheOriginalDeadline(t *testing.T) {
+	t.Parallel()
+	const authBudget = 500 * time.Millisecond
+	const clientDelay = 250 * time.Millisecond
+
+	hold := make(chan struct{})
+	entered := make(chan struct{}, 4)
+	blocking := &holdingAuth{entered: entered, release: hold}
+	t.Cleanup(func() { close(hold) })
+
+	_, _, addr := listenerWith(t, Options{
+		Authn: blocking, AuthFailuresPerIP: unthrottled,
+		AuthWorkers: 1, // one worker, so the second caller queues
+		testDeadlines: &deadlines{tls: 5 * time.Second, startup: 5 * time.Second,
+			auth: authBudget, idle: time.Minute},
+	})
+
+	// The first connection takes the only worker and holds it.
+	_, feA := startupTo(t, addr, defaultParams())
+	if _, err := feA.Receive(); err != nil {
+		t.Fatal(err)
+	}
+	feA.Send(&pgproto3.PasswordMessage{Password: "first"})
+	if err := feA.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first connection never reached the verification, so the worker is not held")
+	}
+
+	// The second spends part of its budget before presenting anything.
+	connB, feB := startupTo(t, addr, defaultParams())
+	if _, err := feB.Receive(); err != nil {
+		t.Fatal(err)
+	}
+	promptAt := time.Now()
+	time.Sleep(clientDelay)
+	feB.Send(&pgproto3.PasswordMessage{Password: "second"})
+	if err := feB.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	passwordAt := time.Now()
+
+	_ = connB.SetReadDeadline(time.Now().Add(15 * time.Second))
+	_, _ = io.ReadAll(connB)
+	sincePrompt, sincePassword := time.Since(promptAt), time.Since(passwordAt)
+	t.Logf("closed %v after the prompt, %v after the password (budget %v, client delay %v)",
+		sincePrompt, sincePassword, authBudget, clientDelay)
+
+	// THE DISCRIMINATOR. A fresh timer would give this connection the whole
+	// budget again from the password onwards.
+	if sincePassword >= authBudget {
+		t.Errorf("the connection survived %v after presenting its credential, which is the "+
+			"whole %v budget over again. The phase's allowance is a property of the phase: a "+
+			"peer who spent %v of it before answering does not get it back by having waited",
+			sincePassword, authBudget, clientDelay)
+	}
+	if sincePrompt > authBudget+400*time.Millisecond {
+		t.Errorf("the exchange ran %v against a %v budget", sincePrompt, authBudget)
+	}
+}
+
+// holdingAuth occupies a credential worker until the TEST releases it, and
+// deliberately ignores its context.
+//
+// A store that honours cancellation would give the slot back the moment the
+// first caller's own budget expired — and then the second caller's wait would
+// be bounded by the FIRST caller's deadline rather than by its own, which is
+// not the property under test. The first version did exactly that and the
+// cell measured a coincidence: both numbers landed where they would have
+// anyway.
+//
+// It is also the honest model of the case that motivated the deadline. A
+// store that answers cancellation promptly was never the problem; a stuck one
+// is, and a stuck one does not notice a context.
+type holdingAuth struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *holdingAuth) OpenWireSession(context.Context, string, string, string, string) (exec.WireSessionResult, error) {
+	h.entered <- struct{}{}
+	<-h.release
+	return goodSession(), nil
+}
+
+func (h *holdingAuth) CloseWireSession(context.Context, exec.SessionID, int64, string, string) {}
+
+// OUR CAPACITY IS NOT THEIR CREDENTIAL (lector PR #36 r1, attribution).
+//
+// A peer that waited for a credential worker we could not spare presented
+// something we never looked at. Charging that to their address throttles them
+// for OUR shortfall — the same mistake as throttling one for our own store
+// outage, and worse under load, because the moment the surface is busiest is
+// exactly when it would start locking out the clients waiting for it.
+func TestAuthDeadline_AWorkerTimeoutIsNotChargedToTheSource(t *testing.T) {
+	t.Parallel()
+	hold := make(chan struct{})
+	entered := make(chan struct{}, 4)
+	blocking := &holdingAuth{entered: entered, release: hold}
+	t.Cleanup(func() { close(hold) })
+
+	// A throttle of exactly the matrix minimum, so ONE wrongly-charged
+	// failure is enough to close the door on the next connection.
+	_, events, addr := listenerWith(t, Options{
+		Authn: blocking, AuthWorkers: 1,
+		testDeadlines: &deadlines{tls: 5 * time.Second, startup: 5 * time.Second,
+			auth: 300 * time.Millisecond, idle: time.Minute},
+	})
+
+	// Occupy the only worker.
+	_, feA := startupTo(t, addr, defaultParams())
+	if _, err := feA.Receive(); err != nil {
+		t.Fatal(err)
+	}
+	feA.Send(&pgproto3.PasswordMessage{Password: "first"})
+	if err := feA.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the worker was never taken")
+	}
+
+	// Enough queued-and-timed-out attempts to trip the throttle several
+	// times over, if any of them were being charged.
+	// TOLERANT of a refusal rather than fatal on it: being refused IS the
+	// defect, and a helper that calls Fatal on the way in would report it as
+	// a broken harness. The first version did exactly that — the right
+	// verdict with a message pointing at the wrong thing.
+	attempts := AuthFailuresPerIP + 2
+	refusedAt := 0
+	for i := 1; i <= attempts; i++ {
+		if !queueOneAttempt(t, addr) {
+			refusedAt = i
+			break
+		}
+	}
+
+	if refusedAt > 0 {
+		t.Fatalf("attempt %d was refused at accept, after %d timeouts waiting for OUR credential "+
+			"workers. Under load that turns a capacity shortfall into a lockout of exactly the "+
+			"clients queueing for it", refusedAt, refusedAt-1)
+	}
+	for _, e := range events() {
+		if e.Kind == "fd.budget_refuse" && e.Reason == string(reasonSourceThrottled) {
+			t.Fatalf("the source was throttled after %d timeouts waiting for OUR credential "+
+				"workers", attempts)
+		}
+	}
+}
+
+// queueOneAttempt drives one connection to the credential queue and waits for
+// it to be dropped. It reports false when the listener refused the connection
+// outright, which is the throttle rather than the timeout.
+func queueOneAttempt(t *testing.T, addr string) bool {
+	t.Helper()
+	raw, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = raw.Close() }()
+	_ = raw.SetDeadline(time.Now().Add(15 * time.Second))
+	if _, werr := raw.Write(sslRequest()); werr != nil {
+		return false
+	}
+	answer := make([]byte, 1)
+	if n, rerr := raw.Read(answer); rerr != nil || n != 1 || answer[0] != 'S' {
+		return false // refused at accept: no SSL answer
+	}
+	tc := tls.Client(raw, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // not the subject
+	if herr := tc.Handshake(); herr != nil {
+		return false
+	}
+	if _, werr := tc.Write(startupPacket(protocolVersion30, defaultParams())); werr != nil {
+		return false
+	}
+	fe := pgproto3.NewFrontend(tc, tc)
+	if _, rerr := fe.Receive(); rerr != nil {
+		return false
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "queued"})
+	if ferr := fe.Flush(); ferr != nil {
+		return false
+	}
+	_, _ = io.ReadAll(tc)
+	return true
 }

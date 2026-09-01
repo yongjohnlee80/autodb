@@ -422,7 +422,14 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		if aerr != nil {
 			closeReason = "auth-read-failed"
 			l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s: %v", peer, aerr))
-			l.admit.noteFailure(peer)
+			// CHARGED ONLY IF IT WAS THEIRS. A read that failed is the
+			// peer's doing; running out of credential workers, or a store
+			// that would not answer, is ours — and throttling an address for
+			// our own capacity is the same mistake as throttling one for our
+			// own outage.
+			if outcome.Peer {
+				l.admit.noteFailure(peer)
+			}
 			return
 		}
 		if outcome.Denied == "" {
