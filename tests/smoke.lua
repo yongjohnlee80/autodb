@@ -2150,6 +2150,40 @@ print("\n[20] the drawer nests Postgres partitions under their parent (ADR-0077)
   local okc = pcall(function() return bucket(nil, "table") end)
   ok("p20: a nil result set is tolerated", okc)
   ok("p20: an empty result set yields nothing", #bucket({}, "table") == 0)
+
+  -- CROSS-SCHEMA COLLISION (lector r0 on #43; Juliet reproduced on VM43).
+  -- schema.tables is queried with an EMPTY schema, so every schema arrives at
+  -- once. Keyed by bare name, a partition of schema_a.audit_log attached
+  -- itself to schema_b.audit_log too — both parents reported one partition,
+  -- and the drawer showed a relation under a parent it does not belong to.
+  local two_schemas = bucket({
+    rel("audit_log", { schema = "schema_a", partitioned = true }),
+    rel("audit_log", { schema = "schema_b", partitioned = true }),
+    rel("audit_log_2026_01",
+      { schema = "schema_a", is_partition = true, parent = "audit_log" }),
+  }, "table")
+  ok("p20: both same-named parents survive", #two_schemas == 2,
+    "count = " .. #two_schemas)
+  local a, b
+  for _, x in ipairs(two_schemas) do
+    if x.schema == "schema_a" then a = x elseif x.schema == "schema_b" then b = x end
+  end
+  ok("p20: the partition attaches to its OWN schema's parent",
+    a and a._partitions and #a._partitions == 1,
+    "schema_a parts = " .. tostring(a and a._partitions and #a._partitions or 0))
+  ok("p20: and NOT to the same-named parent in another schema",
+    b and b._partitions == nil,
+    "schema_b parts = " .. tostring(b and b._partitions and #b._partitions or 0))
+
+  -- A parent that exists only in ANOTHER schema is not a parent: the
+  -- partition must stay top-level rather than vanish or cross-attach.
+  local cross = bucket({
+    rel("audit_log", { schema = "schema_b", partitioned = true }),
+    rel("audit_log_2026_01",
+      { schema = "schema_a", is_partition = true, parent = "audit_log" }),
+  }, "table")
+  ok("p20: a cross-schema orphan stays top-level", #cross == 2,
+    "count = " .. #cross)
 end)()
 
 if #missing_prereqs > 0 then

@@ -136,26 +136,50 @@ local M = {}
 ---@param all table  raw schema.tables rows
 ---@param want string  the kind to keep ("table" / "view")
 ---@return table
+---Keyed by SCHEMA then name, never by bare name. `schema.tables` is queried
+---with an empty schema and so returns every schema at once: bare-name keys
+---made same-named parents collide, and a partition of `schema_a.audit_log`
+---attached itself to `schema_b.audit_log` as well — showing a relation under
+---a parent it does not belong to. Nested maps are unambiguous by
+---construction, where a flattened "schema.name" key would only move the
+---ambiguity into the separator.
+---
+---`parent` is a SAME-SCHEMA relation name (ADR-0077), so presence is resolved
+---within the partition's own schema rather than globally.
 local function bucket_relations(all, want)
   all = type(all) == "table" and all or {}
-  local byparent, present, out = {}, {}, {}
-  for _, x in ipairs(all) do
-    if (x.kind or "table") == want then present[x.name or ""] = true end
-  end
-  for _, x in ipairs(all) do
-    local p = x.parent
-    if x.is_partition and p and p ~= "" and present[p] then
-      byparent[p] = byparent[p] or {}
-      byparent[p][#byparent[p] + 1] = x
-    end
-  end
+  local present, byparent, out = {}, {}, {}
+  local function sch(x) return x.schema or "" end
+
   for _, x in ipairs(all) do
     if (x.kind or "table") == want then
-      local parented = x.is_partition and x.parent and x.parent ~= "" and present[x.parent]
-      if not parented then
-        x._partitions = byparent[x.name or ""]
-        out[#out + 1] = x
-      end
+      local s = sch(x)
+      present[s] = present[s] or {}
+      present[s][x.name or ""] = true
+    end
+  end
+
+  local function has_parent(x)
+    local p = x.parent
+    if not (x.is_partition and p and p ~= "") then return false end
+    local s = sch(x)
+    return present[s] ~= nil and present[s][p] == true
+  end
+
+  for _, x in ipairs(all) do
+    if has_parent(x) then
+      local s, p = sch(x), x.parent
+      byparent[s] = byparent[s] or {}
+      byparent[s][p] = byparent[s][p] or {}
+      byparent[s][p][#byparent[s][p] + 1] = x
+    end
+  end
+
+  for _, x in ipairs(all) do
+    if (x.kind or "table") == want and not has_parent(x) then
+      local s = sch(x)
+      x._partitions = byparent[s] and byparent[s][x.name or ""] or nil
+      out[#out + 1] = x
     end
   end
   return out
