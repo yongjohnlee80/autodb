@@ -348,10 +348,24 @@ func readStartupPacket(r io.Reader) ([]byte, error) {
 	if _, err := io.ReadFull(r, lenBuf[:]); err != nil {
 		return nil, err
 	}
-	size := int(binary.BigEndian.Uint32(lenBuf[:])) - 4
-	if size < 4 || size > PreAuthMaxBodyLen {
-		return nil, fmt.Errorf("frontdoor: startup packet length %d out of bounds", size)
+	// ONE implementation of the length rule, and this is not it — the
+	// classifier is (jarvis, PR #37).
+	//
+	// This function used to re-derive the same bound: `int(declared) - 4`
+	// against the same two limits. The verdicts agreed on every value, and
+	// nothing made them keep agreeing — while the ARITHMETIC already
+	// differed. ADR-0075 §8.3 requires declared lengths int32-validated
+	// before use with all accounting in int64, and `int(uint32)` is 32 bits
+	// on a 32-bit platform, where int64(uint32) is not: the two do not even
+	// compute the same intermediate near MaxUint32. Only one of them obeyed
+	// the rule, and it was the other one.
+	declared := binary.BigEndian.Uint32(lenBuf[:])
+	if reason, bad := classifyStartupLength(declared); bad {
+		return nil, fmt.Errorf("frontdoor: startup packet refused: %s", reason)
 	}
+	// Narrowed to int only AFTER the bound has proven it fits, which it now
+	// has on every platform: the classifier leaves at most PreAuthMaxBodyLen.
+	size := int(int64(declared) - 4)
 	body := make([]byte, size)
 	if _, err := io.ReadFull(r, body); err != nil {
 		return nil, err
