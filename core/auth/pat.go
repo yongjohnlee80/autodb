@@ -511,3 +511,73 @@ func (s *Service) RevokePAT(ctx context.Context, token string, userID int64, nam
 // PATCompareCount reads this service's counter. Test-support, exported
 // because the front-door package needs it once the auth chain lands.
 func (s *Service) PATCompareCount() int64 { return s.patCompares.Load() }
+
+// AuthorizeUser is Authorize for a caller already identified WITHOUT a
+// session token — the front door, whose identity comes from a PAT.
+//
+// It exists because Authorize starts from a token and resolves a session
+// row, and a PAT is deliberately not a session: it has no session row to
+// resolve. The grant logic itself is identical and is not duplicated —
+// there is one place that decides whether a role and a grant clear an
+// action, and both entry points reach it.
+func (s *Service) AuthorizeUser(ctx context.Context, userID, connID int64, action Action) error {
+	u, err := s.store.Users.OnCtx(ctx).With(meta.UserID, userID).Get()
+	if errors.Is(err, dao.ErrNoRows) {
+		return ErrDenied
+	}
+	if err != nil {
+		return err
+	}
+	if u.Disabled != 0 {
+		return ErrDenied
+	}
+	if action == ActionManage {
+		if u.Role != meta.RoleAdmin {
+			return ErrDenied
+		}
+		return nil
+	}
+	g, err := s.store.Grants.OnCtx(ctx).
+		With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).Get()
+	if errors.Is(err, dao.ErrNoRows) {
+		return ErrDenied
+	}
+	if err != nil {
+		return err
+	}
+	if min(rankOf(u.Role), rankOf(g.Role)) < requiredRank(action) {
+		return ErrDenied
+	}
+	return nil
+}
+
+// PATLastUsedInterval is how stale a token's last_used may get before a
+// successful authentication refreshes it.
+//
+// Coalescing is the point (ADR-0075 §4). last_used exists so an operator can
+// see which tokens are live when deciding what to revoke; that question is
+// answered just as well by "used within the last few minutes" as by a
+// to-the-second timestamp, and the to-the-second version would mean a WRITE
+// on a path that must stay cheap. An app's connection pool reconnecting in a
+// loop would otherwise turn a diagnostic column into steady write load on the
+// meta store.
+const PATLastUsedInterval = 5 * time.Minute
+
+// NotePATUse records that a token authenticated, at most once per interval.
+//
+// Best-effort by design: this is a diagnostic, and failing an authentication
+// that has already succeeded because a bookkeeping write failed would trade a
+// working connection for a nicer audit column.
+func (s *Service) NotePATUse(ctx context.Context, pat *meta.PAT) {
+	now := s.now()
+	if now.Sub(time.Unix(pat.LastUsedAt, 0)) < PATLastUsedInterval {
+		return
+	}
+	if err := s.store.PATs.OnCtx(ctx).With(meta.PATID, pat.ID).
+		Set(meta.PATLastUsedAt, now.Unix()).Update(); err != nil {
+		// Nothing to escalate to: the caller is mid-authentication and this
+		// is a column nobody authenticates against.
+		return
+	}
+	pat.LastUsedAt = now.Unix()
+}
