@@ -68,6 +68,16 @@ type Service struct {
 	// comparable-work assertion. Per-service so parallel tests cannot
 	// interleave into each other's deltas.
 	patCompares atomic.Int64
+
+	// patNotedMu guards patNoted, the in-process coalescing gate for
+	// NotePATUse. See NotePATUse for why the gate exists and why the row's
+	// own timestamp is not enough.
+	patNotedMu sync.Mutex
+	patNoted   map[int64]time.Time
+	// patWrites counts last_used UPDATE statements actually ISSUED, which is
+	// the quantity the coalescing bound is about. Per-service for the same
+	// reason patCompares is.
+	patWrites atomic.Int64
 }
 
 // Option configures a Service at New time.
@@ -108,7 +118,8 @@ func WithConfigAllowlist(cidrs []string) Option {
 
 // New builds the Service. It starts locked (ADR-0054 §1).
 func New(store *meta.Store, opts ...Option) (*Service, error) {
-	s := &Service{store: store, now: time.Now, ttl: DefaultSessionTTL}
+	s := &Service{store: store, now: time.Now, ttl: DefaultSessionTTL,
+		patNoted: make(map[int64]time.Time)}
 	for _, o := range opts {
 		if err := o(s); err != nil {
 			return nil, err

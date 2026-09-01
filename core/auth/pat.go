@@ -517,9 +517,15 @@ func (s *Service) PATCompareCount() int64 { return s.patCompares.Load() }
 //
 // It exists because Authorize starts from a token and resolves a session
 // row, and a PAT is deliberately not a session: it has no session row to
-// resolve. The grant logic itself is identical and is not duplicated —
-// there is one place that decides whether a role and a grant clear an
-// action, and both entry points reach it.
+// resolve. So the RESOLUTION differs and the DECISION does not — this
+// function does the part that is genuinely its own, the account lookup and
+// the disabled check that resolveToken performs for the session path, and
+// then hands off to decide, which is the only copy of the rule.
+//
+// The first version re-implemented the rule here instead, under a comment
+// claiming both entry points reached one decision point. They did not.
+// TestAuthorizeParity walks every action against both entry points so that
+// the claim is checked rather than asserted.
 func (s *Service) AuthorizeUser(ctx context.Context, userID, connID int64, action Action) error {
 	u, err := s.store.Users.OnCtx(ctx).With(meta.UserID, userID).Get()
 	if errors.Is(err, dao.ErrNoRows) {
@@ -528,27 +534,13 @@ func (s *Service) AuthorizeUser(ctx context.Context, userID, connID int64, actio
 	if err != nil {
 		return err
 	}
+	// The session path gets this from resolveToken; the PAT path has no
+	// session row, so it is checked here. A disabled account is denied
+	// before any grant is consulted, on both paths.
 	if u.Disabled != 0 {
 		return ErrDenied
 	}
-	if action == ActionManage {
-		if u.Role != meta.RoleAdmin {
-			return ErrDenied
-		}
-		return nil
-	}
-	g, err := s.store.Grants.OnCtx(ctx).
-		With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).Get()
-	if errors.Is(err, dao.ErrNoRows) {
-		return ErrDenied
-	}
-	if err != nil {
-		return err
-	}
-	if min(rankOf(u.Role), rankOf(g.Role)) < requiredRank(action) {
-		return ErrDenied
-	}
-	return nil
+	return s.decide(ctx, userID, u.Role, connID, action)
 }
 
 // PATLastUsedInterval is how stale a token's last_used may get before a
@@ -563,17 +555,55 @@ func (s *Service) AuthorizeUser(ctx context.Context, userID, connID int64, actio
 // meta store.
 const PATLastUsedInterval = 5 * time.Minute
 
+// patNotedSweepThreshold bounds the coalescing map. Without it, a install
+// with very many tokens grows a map nothing ever walks — the bookkeeping
+// becoming the cost it was added to avoid.
+const patNotedSweepThreshold = 4096
+
 // NotePATUse records that a token authenticated, at most once per interval.
 //
 // Best-effort by design: this is a diagnostic, and failing an authentication
 // that has already succeeded because a bookkeeping write failed would trade a
 // working connection for a nicer audit column.
+//
+// TWO MECHANISMS, because the obvious one is not enough and the difference
+// only shows under the load the bound exists for.
+//
+// The first version compared s.now() against the LastUsedAt on the row THIS
+// caller had read, and then updated unconditionally. Under a reconnect burst
+// — an application pool refilling, which is exactly when this path is hot —
+// every concurrent authentication reads the same stale timestamp, every one
+// of them passes the interval check, and every one of them issues an UPDATE.
+// The stated bound held in the only case nobody was worried about, one caller
+// at a time, and failed in the case it was written for. Lector caught it.
+//
+//  1. An in-process gate, taken BEFORE the write and under one mutex, is what
+//     actually bounds the statements: of N concurrent callers exactly one
+//     passes and the rest return having issued nothing. The gate is stamped
+//     before the write rather than after, so a slow write cannot let a second
+//     caller through behind it.
+//
+//  2. A compare-and-swap PREDICATE on the write itself, for the case one
+//     process cannot see: another autodb against the same meta store has its
+//     own gate. Matching on the timestamp we read means a concurrent writer's
+//     value is not clobbered by ours — the loser updates nothing rather than
+//     racing the column backwards.
+//
+// The gate is stamped even when the CAS matches nothing, and deliberately: a
+// CAS that missed means somebody else wrote a FRESHER value, which is the
+// outcome the interval wanted anyway.
 func (s *Service) NotePATUse(ctx context.Context, pat *meta.PAT) {
 	now := s.now()
 	if now.Sub(time.Unix(pat.LastUsedAt, 0)) < PATLastUsedInterval {
 		return
 	}
-	if err := s.store.PATs.OnCtx(ctx).With(meta.PATID, pat.ID).
+	if !s.claimPATNote(pat.ID, now) {
+		return
+	}
+	s.patWrites.Add(1)
+	if err := s.store.PATs.OnCtx(ctx).
+		With(meta.PATID, pat.ID).
+		With(meta.PATLastUsedAt, pat.LastUsedAt).
 		Set(meta.PATLastUsedAt, now.Unix()).Update(); err != nil {
 		// Nothing to escalate to: the caller is mid-authentication and this
 		// is a column nobody authenticates against.
@@ -581,3 +611,29 @@ func (s *Service) NotePATUse(ctx context.Context, pat *meta.PAT) {
 	}
 	pat.LastUsedAt = now.Unix()
 }
+
+// claimPATNote reports whether this caller may issue the write, stamping the
+// gate as it grants it. One mutex, check and stamp together — a check
+// released before the stamp is the check-then-act gap this whole function is
+// a fix for.
+func (s *Service) claimPATNote(patID int64, now time.Time) bool {
+	s.patNotedMu.Lock()
+	defer s.patNotedMu.Unlock()
+	if last, ok := s.patNoted[patID]; ok && now.Sub(last) < PATLastUsedInterval {
+		return false
+	}
+	if len(s.patNoted) > patNotedSweepThreshold {
+		for id, t := range s.patNoted {
+			if now.Sub(t) >= PATLastUsedInterval {
+				delete(s.patNoted, id)
+			}
+		}
+	}
+	s.patNoted[patID] = now
+	return true
+}
+
+// PATWriteCount reads this service's last_used write counter. Test-support,
+// and it counts statements ISSUED rather than rows changed, because the
+// quantity the coalescing bound is about is load on the meta store.
+func (s *Service) PATWriteCount() int64 { return s.patWrites.Load() }
