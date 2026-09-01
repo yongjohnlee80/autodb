@@ -21,6 +21,24 @@ import (
 // The mechanism is the citation convention the existing cells already follow —
 // comments naming "row 2.1", "matrix row 2.5" — so nothing new is imposed on
 // how tests are written.
+//
+// COVERAGE IS PER-SECTION, and the sections are declared in coveredSections:
+// §2's numbered rows, §3.1's parameter table, §4's frontend message matrix,
+// §4a's object-release rules, and §5's backend emission matrix, plus the
+// prose units in proseUnits (§3.2, §3.3, §4's post-error discard block) —
+// normative text that carries no table. A section NOT listed is ungated: the
+// coverage boundary is a decision, and it lives here where a reviewer can see
+// it, not inside a regex.
+//
+// Only §2's rows are numbered. Every other covered section keys its rows by
+// name — a parameter, a message, an event — so those rows carry
+// section-qualified keys derived mechanically from the table's first cell:
+// `3.1:client_encoding`, `4:Parse`, `4a:Close-S-name`, `5:ErrorResponse-target`.
+// Tests cite them in the same "row <id>" shape §2 already uses — "row
+// 4:Parse" — so future cells copy ONE convention, not one per section. The
+// derivation is mechanical on purpose: a reworded row changes its key and
+// fails the phantom check loudly, exactly as a renumbered §2 row does, rather
+// than leaving a hand-maintained alias table to drift silently.
 
 // rowState is the triage every matrix row must carry. A row in neither state
 // fails the gate: that is a row somebody added to the spec without deciding
@@ -51,15 +69,27 @@ const (
 	uncited
 )
 
-// The triage. Every §2 row, and why.
+// The triage. Every row of every covered section, and why.
 //
 // Kept in code rather than in the doc on purpose: a claim about what is tested
 // belongs where it can be checked against the tests, not beside the prose it
 // describes.
+//
+// `awaiting` reasons name the phase that owes the cell. Most §4/§4a/§5 rows
+// are awaiting F1/F2 — post-auth behaviour that does not exist yet. That is
+// the correct answer, not a failure of the gate: the matrix describes the
+// finished front door, and the gate's job is to keep the distance between
+// here and there visible, not to paper over it.
+//
+// §2's two `uncited` rows are promoted in #39's post-#36 revision, where the
+// citations PR #36 carries actually exist on main. Pre-marking them covered
+// HERE would fail as covered-but-cited-by-nothing: this branch's base does not
+// contain #36's test files.
 var matrixTriage = map[string]struct {
 	state  rowState
 	reason string // for `uncited`, this MUST be the test function's name
 }{
+	// ---- §2 Startup & authentication sequence ----
 	"2.1":  {covered, "TestStartup_PlaintextIsRefused"},
 	"2.1a": {covered, "direct-TLS ClientHello refusal"},
 	"2.1b": {covered, "TestLoadServerTLS_RefusesUnusableMaterial + admission_test's handshake-grinding cell"},
@@ -72,11 +102,65 @@ var matrixTriage = map[string]struct {
 	"2.7":  {covered, "F0d verification chain + atomic reservation"},
 	"2.8":  {covered, "type-p frames that are not a PasswordMessage — F0e"},
 	"2.9":  {covered, "AuthenticationOk / ParameterStatus / BackendKeyData / ReadyForQuery — F0e"},
+
+	// ---- §3.1 Accepted StartupMessage parameters ----
+	// The owner cross-check in the `user` row is row 2.7's chain, which is
+	// covered there; 3.1:user's own decision — required, and a cross-check
+	// never an override — is what TestStartup_RequiredParameters pins.
+	"3.1:user":                {covered, "TestStartup_RequiredParameters — required, and a cross-check, never an override (the owner match is 2.7's chain)"},
+	"3.1:database":            {covered, "TestStartup_RequiredParameters — required; unknown/ungranted naming is 2.7's target validation"},
+	"3.1:application_name":    {awaiting, "TestStartup_ParameterPolicy proves acceptance; the 256-byte truncate+notice has no cell"},
+	"3.1:client_encoding":     {awaiting, "TestStartup_ParameterPolicy proves the UTF8-only gate; the target-lease UTF8 pin at acquisition (ruling 2) has no cell — F1"},
+	"3.1:options":             {covered, "TestStartup_ParameterPolicy — GUC-setting content refused in both spellings; empty accepted and ignored"},
+	"3.1:replication":         {covered, "TestStartup_ParameterPolicy — refused at any value"},
+	"3.1:_pq_":                {covered, "TestStartup_UnrecognizedProtocolOptionsAreNamed + TestStartup_ParameterPolicy — negotiated, not refused"},
+	"3.1:any-other-parameter": {covered, "TestStartup_ParameterPolicy — an unknown parameter is refused as a GUC attempt"},
+
+	// ---- §3.2 / §3.3 prose units ----
+	"3.2": {awaiting, "post-auth SET policy is the ADR-0074 gate matrix (F1); the startup half is 3.1:options' refusal"},
+	"3.3": {awaiting, "the three synthesized values ship with F0e; the verbatim forwarded set needs the target lease (F1, rev 5 split)"},
+
+	// ---- §4 Frontend message matrix (post-auth) ----
+	"4:Query":                     {awaiting, "implicit-tx semantics per ExecSession — F1"},
+	"4:Parse":                     {awaiting, "reserve-before-forward, gated at Parse — F1"},
+	"4:Bind":                      {awaiting, "native passthrough, ≤8192 params — F1"},
+	"4:Describe":                  {awaiting, "native metadata passthrough — F1"},
+	"4:Execute":                   {awaiting, "Execute-time re-authorization — F1"},
+	"4:Close":                     {awaiting, "release + portal cascade — F1"},
+	"4:Flush":                     {awaiting, "output-pump passthrough — F1"},
+	"4:Sync":                      {awaiting, "segment close, ReadyForQuery, charge release — F1"},
+	"4:Terminate":                 {awaiting, "clean close, rollback, full release — F1"},
+	"4:CopyData":                  {awaiting, "COPY sub-protocol messages (CopyData/CopyDone/CopyFail) are a fatal protocol violation — F1"},
+	"4:FunctionCall":              {awaiting, "0A000 frontdoor/no-fastpath — F1"},
+	"4:Unknown-message-type-byte": {awaiting, "fatal 08P01, never skipped-and-continued — F1"},
+	"4:discard":                   {awaiting, "post-error discard-through-Sync (MF2) — F1"},
+
+	// ---- §4a Object-release rules ----
+	"4a:Close-S-name":      {awaiting, "named statement + portal cascade — F1"},
+	"4a:Close-P-name":      {awaiting, "named portal — F1"},
+	"4a:Parse":             {awaiting, "unnamed statement replacement — F1"},
+	"4a:Bind":              {awaiting, "unnamed portal replacement — F1"},
+	"4a:Query":             {awaiting, "unnamed statement/portal destruction — F1"},
+	"4a:Transaction-end":   {awaiting, "all portals die at transaction end — F1"},
+	"4a:Error-mid-segment": {awaiting, "in-flight reservation release — F1"},
+	"4a:Session-end":       {awaiting, "everything retained by the session — F1"},
+
+	// ---- §5 Backend emission matrix ----
+	"5:RowDescription":                  {awaiting, "verbatim forwarding via RawRows, no silent truncation — F1"},
+	"5:ErrorResponse-target":            {awaiting, "raw *pgconn.PgError fields verbatim — F1"},
+	"5:ErrorResponse-gate-front-door":   {awaiting, "§8a synthesized identity, DETAIL rule id — F1"},
+	"5:ReadyForQuery":                   {awaiting, "synthesized from the ExecSession state machine — F1"},
+	"5:AuthenticationCleartextPassword": {awaiting, "the startup emission group (with AuthenticationOk, BackendKeyData, the session-open ParameterStatus, NegotiateProtocolVersion) — F0e cells in flight in #36; promoted when the full sequence is asserted"},
+	"5:CopyInResponse":                  {awaiting, "never-emitted canaries (CopyIn/Out/BothResponse, backend CopyData/CopyDone, NotificationResponse, FunctionCallResponse) — the F4 harness slice"},
+>>>>>>> 5a4f74e (test(frontdoor): the coverage gate learns the sections that are not numbered)
 }
 
 var (
-	// A §2 row opens a table line: "| 2.1a | ..."
-	matrixRowRe = regexp.MustCompile(`(?m)^\|\s*([0-9]+\.[0-9]+[a-z]?)\s*\|`)
+	// A §2 row opens a table line: "| 2.1a | ..." — matched line-by-line
+	// inside §2's section body only (see matrixRowIDs), so a numbered row in
+	// some OTHER section is outside the declared coverage boundary rather
+	// than a surprise triage demand.
+	matrixRowRe = regexp.MustCompile(`^\|\s*([0-9]+\.[0-9]+[a-z]?)\s*\|`)
 	// A citation in a test, in the shapes the existing cells already use.
 	//
 	// CASE-INSENSITIVE, and that is not cosmetic. The first version was not,
@@ -85,8 +169,54 @@ var (
 	// untested while the comment sat directly above the cell proving them.
 	// Found by zen. A comment is prose, and a gate that silently ignores
 	// prose it does not like is a gate reporting a gap that is not there.
-	citationRe = regexp.MustCompile(`(?i)\browz?\s+([0-9]+\.[0-9]+[a-z]?)`)
+	//
+	// QUALIFIED FIRST, and the order is load-bearing: "row 3.1:user" must
+	// register a citation for 3.1:user, not silently for a bare "3.1". The
+	// bare numeric form — §2's ids, and the §3.2/§3.3 prose-unit ids — is
+	// the FALLBACK, tried only when no ":"-qualified key follows the id.
+	// A bare-first ordering would record "row 3.1:user" as a citation of a
+	// row 3.1 that may exist independently, and nothing anywhere would fail.
+	citationRe = regexp.MustCompile(`(?i)\browz?\s+((?:[0-9]+(?:\.[0-9]+[a-z]?)?):[A-Za-z0-9_-]+|[0-9]+\.[0-9]+[a-z]?)`)
+
+	// A markdown heading: "## 2. Startup...", "### 4a. Object-release...".
+	headingRe = regexp.MustCompile(`^(#{2,4})\s+(.+)$`)
+	// A backticked span in a table's first cell: "`Parse` naming...".
+	backtickSpanRe = regexp.MustCompile("`([^`]+)`")
+	// A parenthetical immediately after a row identifier: "`ErrorResponse` (target)".
+	adjacentParenRe = regexp.MustCompile(`^\s*\(([^)]*)\)`)
+	// A markdown table separator line: "|---|---|...".
+	separatorRe = regexp.MustCompile(`^\|(\s*:?-{3,}:?\s*\|)+$`)
 )
+
+// coveredSections declares the sections this gate claims to cover. A section
+// not listed here is ungated — deliberately; see the file comment.
+type matrixSection struct {
+	id      string // the heading id as written in the doc: "2", "3.1", "4", "4a", "5"
+	numeric bool   // §2's rows are numbers in the first cell; every other section keys by name
+}
+
+var coveredSections = []matrixSection{
+	{"2", true},
+	{"3.1", false},
+	{"4", false},
+	{"4a", false},
+	{"5", false},
+}
+
+// proseUnits are normative blocks that carry no table: §3.2's GUC policy and
+// §3.3's ParameterStatus set are prose subsections, and §4's post-error
+// discard rule is a prose block inside §4. They are triaged like rows — same
+// map, same three states — and their existence is asserted by ANCHOR so a
+// renamed or reworded heading fails loudly instead of the unit silently
+// dropping out of the triage forever.
+var proseUnits = []struct {
+	key    string
+	anchor *regexp.Regexp
+}{
+	{"3.2", regexp.MustCompile(`(?m)^###\s+3\.2\b`)},
+	{"3.3", regexp.MustCompile(`(?m)^###\s+3\.3\b`)},
+	{"4:discard", regexp.MustCompile(`Post-error segment discard`)},
+}
 
 func repoRoot(t *testing.T) string {
 	t.Helper()
@@ -98,46 +228,259 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
-func matrixRows(t *testing.T) []string {
+// headingBody returns the body of the section whose heading id is id — the
+// first token of the heading text after the #s ("2", "3.1", "4a"): everything
+// from that heading line up to the NEXT heading of any level. For "4" that
+// stops at "### 4a.", giving §4's own table and its discard prose but not
+// §4a's table; for "3.1" it stops at "### 3.2".
+func headingBody(t *testing.T, src, id string) string {
 	t.Helper()
-	path := filepath.Join(repoRoot(t), "docs", "front-door", "protocol-matrix.md")
-	src, err := os.ReadFile(path)
+	want := regexp.MustCompile(`^` + regexp.QuoteMeta(id) + `([.\s]|$)`)
+	var body []string
+	inBody := false
+	for _, ln := range strings.Split(src, "\n") {
+		if m := headingRe.FindStringSubmatch(ln); m != nil {
+			if inBody {
+				break // the next heading, whatever its level, ends the section
+			}
+			if want.MatchString(strings.TrimSpace(m[2])) {
+				inBody = true
+				continue
+			}
+		}
+		if inBody {
+			body = append(body, ln)
+		}
+	}
+	if !inBody {
+		t.Fatalf("the matrix has no §%s heading — the section was renumbered, renamed, or removed, and this gate refuses to run blind against a spec whose shape it cannot find", id)
+	}
+	return strings.Join(body, "\n")
+}
+
+// tableDataFirstCells returns the first cell of every DATA row of every
+// markdown table in body. Header and separator lines are not data: a data row
+// is a table line that follows a separator line, until a non-table line ends
+// the table. A data row with an EMPTY first cell is fatal — a row the gate
+// cannot key is a row it would silently not track.
+func tableDataFirstCells(t *testing.T, body string) []string {
+	t.Helper()
+	var cells []string
+	inData := false
+	for _, ln := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(ln)
+		if !strings.HasPrefix(trimmed, "|") {
+			inData = false
+			continue
+		}
+		if separatorRe.MatchString(trimmed) {
+			inData = true
+			continue
+		}
+		if !inData {
+			continue // header line, or prose that happens to start with "|"
+		}
+		c := firstCell(trimmed)
+		if c == "" {
+			t.Fatalf("a data row with an empty first cell in a covered table — the gate cannot key it and refuses to skip it silently: %q", ln)
+		}
+		cells = append(cells, c)
+	}
+	return cells
+}
+
+func firstCell(tableLine string) string {
+	rest := strings.TrimPrefix(tableLine, "|")
+	if i := strings.Index(rest, "|"); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.TrimSpace(rest)
+}
+
+// rowIdent extracts a row's identifier from its first table cell: the first
+// backticked span when the cell carries one ("`Parse` naming…" → "Parse"),
+// otherwise the cell text up to any parenthetical ("Session end (any cause)"
+// → "Session end"). The parenthetical immediately after the identifier is
+// returned alongside: it is the disambiguator when two rows of one section
+// would derive the same key — §5's two `ErrorResponse` rows.
+func rowIdent(cell string) (ident, paren string) {
+	if loc := backtickSpanRe.FindStringSubmatchIndex(cell); loc != nil {
+		ident = cell[loc[2]:loc[3]]
+		if m := adjacentParenRe.FindStringSubmatch(cell[loc[1]:]); m != nil {
+			paren = m[1]
+		}
+		return ident, paren
+	}
+	ident = cell
+	if i := strings.Index(cell, "("); i >= 0 {
+		ident = strings.TrimSpace(cell[:i])
+		if m := adjacentParenRe.FindStringSubmatch(cell[i:]); m != nil {
+			paren = m[1]
+		}
+	}
+	return ident, paren
+}
+
+// slugKey normalizes an identifier into a key segment. Case is PRESERVED —
+// message names are canonical CamelCase (`4:Parse`, not `4:parse`) — runs of
+// whitespace and "/" become a single "-", and characters outside
+// [A-Za-z0-9_-] drop ("_pq_.*" → "_pq_", "**Transaction end**" →
+// "Transaction-end").
+func slugKey(s string) string {
+	var b strings.Builder
+	pendingDash := false
+	for _, r := range s {
+		switch {
+		case r == ' ' || r == '\t' || r == '/':
+			pendingDash = true
+		case r == '_' || r == '-' ||
+			(r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			if pendingDash && b.Len() > 0 {
+				b.WriteByte('-')
+			}
+			pendingDash = false
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// deriveSectionKeys turns first cells into section-prefixed triage keys.
+// Two rows deriving the same base key is FATAL unless their adjacent
+// parentheticals disambiguate them: a key that addresses two rows is an
+// address that addresses neither, and the gate refuses to pretend otherwise.
+func deriveSectionKeys(t *testing.T, section string, cells []string) []string {
+	t.Helper()
+	type entry struct {
+		base     string
+		disambig string
+		cell     string
+		hasParen bool
+	}
+	entries := make([]entry, len(cells))
+	for i, c := range cells {
+		ident, paren := rowIdent(c)
+		entries[i] = entry{
+			base:     slugKey(ident),
+			cell:     c,
+			hasParen: paren != "",
+		}
+		if paren != "" {
+			entries[i].disambig = slugKey(ident + " " + paren)
+		} else {
+			entries[i].disambig = entries[i].base
+		}
+	}
+	byBase := map[string][]int{}
+	for i, e := range entries {
+		byBase[e.base] = append(byBase[e.base], i)
+	}
+	keys := make([]string, len(entries))
+	for base, idxs := range byBase {
+		if len(idxs) == 1 {
+			keys[idxs[0]] = section + ":" + base
+			continue
+		}
+		// A collision: every member of the group takes its parenthetical.
+		// Disambiguating only one side would leave the bare key assigned by
+		// list order — unstable, and wrong in a way no test would catch.
+		members := make([]string, len(idxs))
+		for j, i := range idxs {
+			members[j] = entries[i].cell
+		}
+		for _, i := range idxs {
+			if !entries[i].hasParen {
+				t.Fatalf("§%s: the rows %s all key to %q with no parenthetical to tell them apart — the gate cannot address rows it cannot uniquely name", section, strings.Join(members, " | "), section+":"+base)
+			}
+		}
+		for _, i := range idxs {
+			keys[i] = section + ":" + entries[i].disambig
+		}
+	}
+	// The parentheticals could themselves collide (two "ErrorResponse
+	// (target)" rows); that is still one key for two rows.
+	seen := map[string]string{}
+	for i, k := range keys {
+		if prev, ok := seen[k]; ok {
+			t.Fatalf("§%s: rows %q and %q both key to %q even after parenthetical disambiguation — the gate refuses to track two rows under one key", section, prev, entries[i].cell, k)
+		}
+		seen[k] = entries[i].cell
+	}
+	return keys
+}
+
+// matrixRowIDs reads the matrix and returns every row key the gate claims to
+// cover: one parser per covered section, plus the prose units. Every parser
+// carries the contract the §2 one established on day one: a section that
+// yields ZERO rows is a FATAL, never a quiet pass — a regex that silently
+// matches nothing turns the whole gate into a test that measures nothing
+// while reporting success, which is the exact failure this gate exists to
+// prevent elsewhere.
+func matrixRowIDs(t *testing.T) []string {
+	t.Helper()
+	src, err := os.ReadFile(filepath.Join(repoRoot(t), "docs", "front-door", "protocol-matrix.md"))
 	if err != nil {
 		t.Fatalf("read the matrix: %v — the conformance gate cannot run without the spec it gates against", err)
 	}
-	seen := map[string]bool{}
 	var out []string
-	for _, m := range matrixRowRe.FindAllStringSubmatch(string(src), -1) {
-		if !seen[m[1]] {
-			seen[m[1]] = true
-			out = append(out, m[1])
+	for _, s := range coveredSections {
+		body := headingBody(t, string(src), s.id)
+		if s.numeric {
+			out = append(out, numericRows(t, s.id, body)...)
+			continue
 		}
+		cells := tableDataFirstCells(t, body)
+		if len(cells) == 0 {
+			t.Fatalf("§%s yielded ZERO table rows: its table moved, changed shape, or left the section — the gate is now measuring nothing in a section it claims to cover", s.id)
+		}
+		out = append(out, deriveSectionKeys(t, s.id, cells)...)
 	}
-	if len(out) == 0 {
-		t.Fatal("parsed ZERO rows out of the matrix: the table format changed and this gate is now measuring nothing")
+	for _, u := range proseUnits {
+		n := len(u.anchor.FindAllStringIndex(string(src), -1))
+		switch {
+		case n == 0:
+			t.Fatalf("the prose unit %s is gone: its anchor no longer matches the matrix — a renamed or reworded block must be re-anchored deliberately, not left to silently drop out of the triage", u.key)
+		case n > 1:
+			t.Fatalf("the prose unit %s's anchor matches %d places — an anchor that cannot name ONE block cannot gate it", u.key, n)
+		}
+		out = append(out, u.key)
 	}
 	sort.Strings(out)
 	return out
 }
 
+// numericRows parses §2's numbered rows: "| 2.1a | ...".
+func numericRows(t *testing.T, section, body string) []string {
+	t.Helper()
+	seen := map[string]bool{}
+	var out []string
+	for _, ln := range strings.Split(body, "\n") {
+		if m := matrixRowRe.FindStringSubmatch(ln); m != nil && !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	if len(out) == 0 {
+		t.Fatalf("parsed ZERO rows out of §%s: the table format changed and this gate is now measuring nothing", section)
+	}
+	return out
+}
+
 // citedRows scans every test in the repo for row citations.
 //
-// THIS FILE IS EXCLUDED. Being precise about why, because the obvious claim is
-// wrong and I checked: the exclusion is NOT load-bearing today. matrixTriage
-// holds every row id, but as bare map keys ("2.3":), and citationRe requires
-// the word "row" in front of the number — so removing the exclusion right now
-// changes nothing, which I verified by removing it and watching the gate still
-// pass.
+// THIS FILE IS EXCLUDED. The first version's comment said the exclusion was
+// not load-bearing and said so accurately — verified by removing it and
+// watching the gate still pass — because the only citation-shaped text here
+// named COVERED rows ("row 2.1", "matrix row 2.5", in the file comment
+// above), and a self-citation of a covered row fails nothing.
 //
-// It becomes load-bearing the moment anyone writes "row 2.3" in a comment in
-// THIS file, which is a natural thing to do while explaining a triage entry.
-// Verified: with the exclusion removed and one such comment added, the gate
-// reports "2.3 — now cited by frontdoor/matrix_coverage_test.go" and fails on
-// a citation that is really just this table describing itself.
-//
-// So it is a guard against a future edit, not against the current text. Keeping
-// it, and saying so accurately, beats keeping it under a claim that does not
-// survive being tested.
+// The §3/§4/§5 extension keeps that property only by discipline: this file
+// now discusses qualified row ids in nearly every comment, and one worked
+// example in citation shape — "row 4:Sync", say, somewhere in the triage
+// discussion — would self-cite an AWAITING row and fail the gate on its own
+// prose. The exclusion is one careless sentence from load-bearing, which is
+// the original rationale for keeping it, restated for the wider surface: no
+// comment in this file may assume the scan cannot see it.
 func citedRows(t *testing.T) map[string][]string {
 	t.Helper()
 	const self = "matrix_coverage_test.go"
@@ -174,7 +517,7 @@ func citedRows(t *testing.T) map[string][]string {
 
 // TestMatrixCoverage_EveryRowIsTriaged fails in three directions.
 func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
-	rows := matrixRows(t)
+	rows := matrixRowIDs(t)
 	cited := citedRows(t)
 
 	var untriaged, regressed, promotable, phantomTest []string
@@ -240,8 +583,9 @@ func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 			phantomTest)
 	}
 
-	t.Logf("§2 conformance: %d rows — %d covered, %d tested-but-uncited, %d awaiting a cell",
-		len(rows), countState(covered), countState(uncited), countState(awaiting))
+	t.Logf("matrix conformance: %d row keys across %d sections + %d prose units — "+
+		"%d covered, %d tested-but-uncited, %d awaiting a cell",
+		len(rows), len(coveredSections), len(proseUnits), countState(covered), countState(uncited), countState(awaiting))
 }
 
 func countState(s rowState) int {
@@ -256,10 +600,13 @@ func countState(s rowState) int {
 
 // TestMatrixCoverage_TriageHasNoPhantomRows guards the other direction: an
 // entry in matrixTriage naming a row the matrix does not contain. That happens
-// when a row is renumbered, and it would otherwise sit here forever describing
-// coverage of something that no longer exists.
+// when a row is renumbered — or, for the named-key sections, when a row's
+// first cell is reworded far enough to change its derived key — and it would
+// otherwise sit here forever describing coverage of something that no longer
+// exists. The prose units are guarded the same way by their anchors in
+// matrixRowIDs: a vanished block fails there, loudly.
 func TestMatrixCoverage_TriageHasNoPhantomRows(t *testing.T) {
-	rows := matrixRows(t)
+	rows := matrixRowIDs(t)
 	inMatrix := make(map[string]bool, len(rows))
 	for _, r := range rows {
 		inMatrix[r] = true
@@ -273,7 +620,9 @@ func TestMatrixCoverage_TriageHasNoPhantomRows(t *testing.T) {
 	sort.Strings(phantom)
 	if len(phantom) > 0 {
 		t.Fatalf("matrixTriage names rows the matrix does not contain: %v\n"+
-			"A renumbered or deleted row leaves a claim behind that describes nothing.", phantom)
+			"A renumbered, deleted, or reworded row leaves a claim behind that describes nothing. "+
+			"Re-key the triage entry to the row's current identity.",
+			phantom)
 	}
 }
 

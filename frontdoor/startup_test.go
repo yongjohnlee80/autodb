@@ -321,6 +321,9 @@ func tlsDial(t *testing.T, addr string) *tls.Conn {
 // options it did not understand. Silence would leave a client believing an
 // extension it depends on had been accepted — the negotiation exists to be
 // specific, not merely to say "3.0".
+// Row 3.1:_pq_: the closed set's one negotiated member — unrecognized
+// protocol extensions are declined by NAME, never refused and never silently
+// accepted.
 func TestStartup_UnrecognizedProtocolOptionsAreNamed(t *testing.T) {
 	t.Parallel()
 	_, _, addr := liveListener(t)
@@ -438,6 +441,16 @@ func TestStartup_DirectTLSIsATLSFailureNotAnAuthDenial(t *testing.T) {
 // being refused — not allowed to fall through to whatever denies next.
 // MATRIX ROW 2.4: the StartupMessage's parameters are pinned by §3.1's closed
 // set — a parameter not named there is refused rather than emulated as a GUC.
+// Matrix row 3.1:options (GUC-setting content refused in either spelling,
+// empty accepted and ignored), row 3.1:replication (refused at any value),
+// row 3.1:_pq_ (negotiated, not refused — the naming half is
+// TestStartup_UnrecognizedProtocolOptionsAreNamed), and
+// row 3.1:any-other-parameter (an unknown parameter is a GUC attempt).
+// NOT cited here, deliberately: 3.1:client_encoding and
+// 3.1:application_name are half-proven — this cell pins the accept/refuse
+// decision, while the target-lease UTF8 pin and the 256-byte
+// truncate+notice have no cell yet, so the triage keeps them awaiting
+// rather than letting a citation promote a half into a whole.
 func TestStartup_ParameterPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -634,6 +647,7 @@ func TestStartup_OversizeIsNotDirectTLS(t *testing.T) {
 // parameter map sailed through to be denied for want of a credential store —
 // which reads in the audit as an authentication problem rather than as the
 // malformed startup it is.
+// Matrix row 3.1:user and row 3.1:database: the required pair.
 func TestStartup_RequiredParameters(t *testing.T) {
 	t.Parallel()
 
