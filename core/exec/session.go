@@ -271,9 +271,25 @@ func (r *sessionRegistry) admitWithLease(s *session, leaseConn int64, overhead i
 		return fmt.Errorf("%w: connection %d is at its limit of %d concurrent wire sessions",
 			ErrLeaseCapExceeded, leaseConn, r.leaseCap)
 	}
-	if r.residentCap > 0 && r.resident+overhead > r.residentCap {
-		return fmt.Errorf("%w: %d bytes held of %d", ErrResidentBudgetExceeded,
-			r.resident, r.residentCap)
+	// A NEGATIVE charge is refused rather than accepted as a credit. This is
+	// the resource-accounting choke point, and the way an accounting bug
+	// becomes a security bug is a caller that hands it a number which makes
+	// the budget grow: a negative overhead would raise the remaining
+	// allowance for everyone else and the cap would read as satisfied
+	// forever. No production caller passes one today; that is a reason to
+	// make it impossible now rather than a reason to leave it.
+	if overhead < 0 {
+		return fmt.Errorf("%w: refusing a negative charge of %d bytes",
+			ErrResidentBudgetExceeded, overhead)
+	}
+	// Compared WITHOUT the addition. `resident + overhead` overflows int64
+	// for a large enough overhead and wraps NEGATIVE, which compares below
+	// the cap and admits the one reservation that should certainly have been
+	// refused. Subtracting from the cap cannot overflow, because both terms
+	// are already non-negative and bounded by it.
+	if r.residentCap > 0 && overhead > r.residentCap-r.resident {
+		return fmt.Errorf("%w: %d bytes held of %d, and this session asks for %d",
+			ErrResidentBudgetExceeded, r.resident, r.residentCap, overhead)
 	}
 
 	if h := r.hookAfterAdmitCheck; h != nil {

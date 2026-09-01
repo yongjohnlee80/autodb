@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 )
@@ -91,6 +92,41 @@ func TestReservation_EachMemberRefusesOnItsOwn(t *testing.T) {
 			t.Fatalf("err = %v, want ErrResidentBudgetExceeded — without this member the memory "+
 				"budget is the one unguarded resource in a reservation that protects the "+
 				"other three", err)
+		}
+	})
+
+	// The charge arithmetic FAILS CLOSED (lector PR #33 r0 follow-up).
+	//
+	// This is the resource-accounting choke point, so the two ways a number
+	// can defeat it are worth refusing explicitly rather than relying on
+	// every present and future caller to pass something sensible.
+	t.Run("a charge that would overflow the addition is refused", func(t *testing.T) {
+		t.Parallel()
+		r := regFor(t, 100, 100, 100, 1<<40)
+		// `resident + overhead` wraps NEGATIVE for this value, and a
+		// negative sum compares below the cap — so the naive comparison
+		// admits precisely the reservation that should certainly be refused.
+		err := r.admitWithLease(sess("huge", 1, 1), 1, math.MaxInt64)
+		if !errors.Is(err, ErrResidentBudgetExceeded) {
+			t.Fatalf("err = %v, want ErrResidentBudgetExceeded: a charge of MaxInt64 overflowed "+
+				"the addition and was admitted against a %d-byte budget", err, int64(1<<40))
+		}
+	})
+
+	t.Run("a negative charge is refused rather than credited", func(t *testing.T) {
+		t.Parallel()
+		r := regFor(t, 100, 100, 100, 100)
+		if err := r.admitWithLease(sess("credit", 1, 1), 1, -1<<20); !errors.Is(err, ErrResidentBudgetExceeded) {
+			t.Fatalf("err = %v, want ErrResidentBudgetExceeded: a negative charge is a CREDIT to "+
+				"the budget — it raises the remaining allowance for every other session and "+
+				"the cap reads as satisfied from then on", err)
+		}
+		// And it took nothing on the way out.
+		r.mu.Lock()
+		held := r.resident
+		r.mu.Unlock()
+		if held != 0 {
+			t.Errorf("resident = %d after a refused negative charge, want 0", held)
 		}
 	})
 }

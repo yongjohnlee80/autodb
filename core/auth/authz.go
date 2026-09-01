@@ -64,25 +64,50 @@ func (s *Service) Authorize(ctx context.Context, token string, connID int64, act
 	if err != nil {
 		return Identity{}, err
 	}
-	if action == ActionManage {
-		if ident.role != meta.RoleAdmin {
-			return Identity{}, ErrDenied
-		}
-		return ident, nil
-	}
-	g, err := s.store.Grants.OnCtx(ctx).
-		With(meta.GrantUserID, ident.userID).With(meta.GrantConnID, connID).Get()
-	if errors.Is(err, dao.ErrNoRows) {
-		return Identity{}, ErrDenied
-	}
-	if err != nil {
-		return Identity{}, err
-	}
-	eff := min(rankOf(ident.role), rankOf(g.Role))
-	if eff < requiredRank(action) {
-		return Identity{}, ErrDenied
+	if derr := s.decide(ctx, ident.userID, ident.role, connID, action); derr != nil {
+		return Identity{}, derr
 	}
 	return ident, nil
+}
+
+// decide is THE authorization rule, and the only copy of it.
+//
+// It takes an identity that has ALREADY been resolved and validated, because
+// resolution is the part that legitimately differs: a session token resolves
+// through a session row and its expiry, a PAT resolves through the token
+// record and its owner, and neither can express the other's checks. What must
+// not differ is what follows — whether manage requires admin, whether a grant
+// is required at all, and how a user's role and a grant's role combine.
+//
+// The previous version had that rule written twice, once here and once in
+// AuthorizeUser, under a comment claiming there was one place. A comment
+// asserting a property the code does not have is worse than no comment,
+// because the next person to change one copy reads it and believes the other
+// followed. Lector caught it: two copies of a security rule are not a
+// duplication smell, they are a future divergence with a date on it.
+func (s *Service) decide(ctx context.Context, userID int64, role string, connID int64, action Action) error {
+	if action == ActionManage {
+		// Manage is an account-level power and is not delegated by a grant:
+		// no per-connection grant can make a non-admin an administrator.
+		if role != meta.RoleAdmin {
+			return ErrDenied
+		}
+		return nil
+	}
+	g, err := s.store.Grants.OnCtx(ctx).
+		With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).Get()
+	if errors.Is(err, dao.ErrNoRows) {
+		return ErrDenied
+	}
+	if err != nil {
+		return err
+	}
+	// The LOWER of the two ranks. A grant cannot lift a user above their
+	// account role, and an account role cannot reach past a narrower grant.
+	if min(rankOf(role), rankOf(g.Role)) < requiredRank(action) {
+		return ErrDenied
+	}
+	return nil
 }
 
 // AddGrant gives userID a role on connID (admin token; Objective 13 —
