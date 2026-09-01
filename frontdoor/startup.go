@@ -287,11 +287,17 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 		// A second SSLRequest inside TLS is a protocol violation (row 2.1).
 		return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
 	case cancelRequestCode:
-		// Row 2.3, the in-TLS spelling: the body is the request code (4
-		// bytes, already checked by the switch) followed by the pair. A
-		// short body is a malformed startup rather than a cancel: a pair
-		// cannot be read from bytes that are not there.
-		if len(raw2) < 12 {
+		// Row 2.3, the in-TLS spelling. A protocol-3.0 CancelRequest is
+		// EXACTLY 12 bytes of body after the length field: the request code
+		// (4, already checked by the switch), the process id (4), and the
+		// secret (4) — 3.0's cancel key is a fixed int32, and every client
+		// was negotiated to 3.0 by row 2.5. A longer body is a malformed
+		// request, not a cancel with extras: keeping only the first four
+		// bytes of the secret would let a frame carrying a VALID secret plus
+		// trailing bytes be applied as though it had been the well-formed
+		// request (PR #44 r0, lector's P2), and guessing which four bytes a
+		// 3.2-shaped client meant is not the server's job on this surface.
+		if len(raw2) != 12 {
 			return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
 		}
 		return secure, startupOutcome{}, cancelRequestError{

@@ -480,12 +480,19 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 			return
 		}
 		key := exec.CancelKey{ProcessID: pid}
-		// A presented secret of any other length than the 3.0 key is not a
-		// truncation candidate: every client is negotiated to 3.0 (row 2.5),
-		// whose cancel key is a fixed int32, so a longer one cannot match
-		// any registered pair — compare it as-is and let the constant-time
-		// check refuse it, rather than guessing which four bytes the client
-		// meant.
+		// The 3.0 cancel secret is a FIXED int32 and every client here was
+		// negotiated to 3.0 (row 2.5). A presented secret of any other
+		// length is a malformed request, not a truncation candidate: keeping
+		// only the first four bytes would let a frame carrying a valid
+		// secret plus trailing bytes be applied as though it had been
+		// well-formed (PR #44 r0, lector's P2). Refuse it as stale BEFORE
+		// the conversion, so it never reaches the registry — the same
+		// silent close as every other miss, because a malformed cancel is
+		// still a cancel that presented no credential.
+		if len(secret) != exec.CancelKeyLen {
+			l.onEvent(Event{Kind: "fd.cancel_stale", Peer: peer, Detail: "malformed-cancel-secret"})
+			return
+		}
 		copy(key.Secret[:], secret)
 		if l.cancels.CancelByKey(ctx, key) {
 			l.onEvent(Event{Kind: "fd.cancel_applied", Peer: peer})

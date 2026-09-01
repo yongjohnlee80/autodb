@@ -37,6 +37,14 @@ type fakeCancels struct {
 	// be exercised without a live statement.
 	answer bool
 	err    error
+	// collidePids makes RegisterCancelKey refuse THESE process ids with
+	// exec.ErrCancelKeyCollision, so a cell can drive the remint loop
+	// deterministically — the same refusal the real registry returns when
+	// another session already holds the pid.
+	collidePids map[uint32]bool
+	// collideOnce refuses the FIRST pid it is handed and no later one, so
+	// a cell can force exactly one remint without predicting the CSPRNG.
+	collideOnce bool
 }
 
 func newFakeCancels() *fakeCancels {
@@ -48,6 +56,13 @@ func (f *fakeCancels) RegisterCancelKey(id exec.SessionID, userID int64, key exe
 	defer f.mu.Unlock()
 	if f.err != nil {
 		return f.err
+	}
+	if f.collidePids[key.ProcessID] {
+		return exec.ErrCancelKeyCollision
+	}
+	if f.collideOnce {
+		f.collideOnce = false
+		return exec.ErrCancelKeyCollision
 	}
 	f.registered[id] = key
 	return nil
@@ -290,4 +305,146 @@ func authListenerWithCancels(t *testing.T, f *fakeAuth, c *fakeCancels) (func() 
 		AuthFailuresPerIP: unthrottled,
 	})
 	return events, addr
+}
+
+// MATRIX ROW 2.3 (PR #44 r0 P1): a COLLISION REMINTS, and the pair the client
+// receives is the pair the registry holds — one object, both ends.
+//
+// The defect this guards: a registration seam that silently redrew on
+// collision would send the client one process id and record another, so the
+// key it held could never be honoured — precisely on the collision path,
+// where the registry was doing its most careful work.
+func TestCancel_CollisionRemintsOnePair(t *testing.T) {
+	t.Parallel()
+	f := &fakeAuth{result: goodSession()}
+	c := newFakeCancels()
+	// Refuse the FIRST minted pid, so the remint loop must run exactly once
+	// and land the client and the registry on the same second pair.
+	c.collideOnce = true
+	_, addr := authListenerWithCancels(t, f, c)
+
+	wireKey, _, session := openCancelSession(t, addr)
+	defer session.close()
+
+	registered := c.key("sess-abc123")
+	if registered.ProcessID != wireKey.ProcessID || registered.Secret != wireKey.Secret {
+		t.Fatalf("the registered pair (%d/%x) is not the wire pair (%d/%x) — on the "+
+			"collision path the client and the registry must hold ONE pair, and a silent "+
+			"redraw inside the seam would have sent one pid and recorded another",
+			registered.ProcessID, registered.Secret, wireKey.ProcessID, wireKey.Secret)
+	}
+}
+
+// MATRIX ROW 2.3 (PR #44 r0 P2): a cancel frame whose secret is longer than
+// the 3.0 int32 NEVER reaches the registry — not even its correct first four
+// bytes.
+//
+// The defect this guards: copy into the [4]byte silently truncated, so a
+// malformed frame carrying a VALID secret plus trailing bytes was applied as
+// though it had been well-formed. Every client here was negotiated to 3.0
+// (row 2.5), whose cancel secret is a fixed int32; anything else is
+// malformed and refused as stale before the conversion.
+func TestCancel_AnOversizedSecretNeverReachesTheRegistry(t *testing.T) {
+	t.Parallel()
+	f := &fakeAuth{result: goodSession()}
+	c := newFakeCancels()
+	c.answer = true // would apply anything it is handed
+	events, addr := authListenerWithCancels(t, f, c)
+
+	wireKey, _, session := openCancelSession(t, addr)
+	defer session.close()
+
+	// The valid pair's frame, PLUS one trailing byte — the correct-prefix
+	// probe. The length word is rewritten to cover the extra byte, so the
+	// frame is a well-formed 17-byte CancelRequest carrying a 5-byte secret:
+	// the valid four bytes the registry would honour, and one more.
+	frame := cancelPacket(wireKey)
+	frame = append(frame, 0xAA)
+	binary.BigEndian.PutUint32(frame[0:4], uint32(len(frame)))
+	cc := dial(t, addr)
+	if _, err := cc.Write(frame); err != nil {
+		t.Fatalf("sending the oversized CancelRequest: %v", err)
+	}
+	one := make([]byte, 1)
+	if _, err := cc.Read(one); !errors.Is(err, io.EOF) {
+		t.Fatalf("the malformed cancel was answered with %v rather than a close", err)
+	}
+	if got := len(c.presentedList()); got != 0 {
+		t.Fatalf("CancelByKey was handed %d pair(s) — a malformed secret must be refused "+
+			"BEFORE the registry, because its correct first four bytes are a valid secret "+
+			"and truncation would apply them", got)
+	}
+	waitFor(t, "fd.cancel_stale with the malformed detail", func() bool {
+		e, ok := find(events(), "fd.cancel_stale")
+		return ok && e.Detail == "malformed-cancel-secret"
+	})
+	if _, applied := find(events(), "fd.cancel_applied"); applied {
+		t.Fatal("a malformed secret was audited applied")
+	}
+}
+
+// MATRIX ROW 2.3, the IN-TLS spelling (PR #44 r0 P2): a CancelRequest that
+// arrives inside TLS gets the same exact-length rule — a 12-byte body, no
+// more — and a well-formed one is processed like the plaintext spelling.
+//
+// The oversized frame carries the VALID four-byte secret plus trailing
+// bytes; accepting it would apply the correct-prefix truncation the listener
+// half now refuses, so the parser must refuse it upstream as a malformed
+// startup rather than hand the listener a 5-byte secret to guard.
+func TestCancel_TheInTLSSpellingIsExactAndValid(t *testing.T) {
+	t.Parallel()
+	f := &fakeAuth{result: goodSession()}
+	c := newFakeCancels()
+	c.answer = true
+	events, addr := authListenerWithCancels(t, f, c)
+
+	// A live session first, so its wire key is the valid-prefix payload.
+	wireKey, _, session := openCancelSession(t, addr)
+	defer session.close()
+
+	// OVERSIZED, inside TLS: the cancel code, the valid pid, the valid
+	// secret, one trailing byte. The length word covers all 17.
+	oversized := cancelPacket(wireKey)
+	oversized = append(oversized, 0xAA)
+	binary.BigEndian.PutUint32(oversized[0:4], uint32(len(oversized)))
+	tc := tlsDial(t, addr)
+	if _, err := tc.Write(oversized); err != nil {
+		t.Fatalf("sending the in-TLS CancelRequest: %v", err)
+	}
+	fe := pgproto3.NewFrontend(tc, tc)
+	msg, err := fe.Receive()
+	if err != nil {
+		t.Fatalf("the oversized in-TLS cancel closed the connection (%v) rather than the "+
+			"uniform malformed-startup denial — a cancel frame that cannot be parsed is "+
+			"still a startup frame, and row 2.1 answers those", err)
+	}
+	if _, ok := msg.(*pgproto3.ErrorResponse); !ok {
+		t.Fatalf("the oversized in-TLS cancel was answered with %T, want the uniform denial", msg)
+	}
+	if got := len(c.presentedList()); got != 0 {
+		t.Fatalf("an oversized in-TLS secret reached the registry %d time(s)", got)
+	}
+
+	// WELL-FORMED, inside TLS: processed like the plaintext spelling —
+	// routed, applied, closed without a frame.
+	valid := cancelPacket(wireKey)
+	tc2 := tlsDial(t, addr)
+	if _, err := tc2.Write(valid); err != nil {
+		t.Fatalf("sending the well-formed in-TLS CancelRequest: %v", err)
+	}
+	one := make([]byte, 1)
+	if _, err := tc2.Read(one); !errors.Is(err, io.EOF) {
+		t.Fatalf("the in-TLS cancel was answered with %v rather than a close", err)
+	}
+	waitFor(t, "fd.cancel_applied for the in-TLS cancel", func() bool {
+		_, ok := find(events(), "fd.cancel_applied")
+		return ok
+	})
+	if got := len(c.presentedList()); got != 1 {
+		t.Fatalf("CancelByKey calls = %d, want exactly 1 (the well-formed in-TLS pair)", got)
+	}
+	if presented := c.presentedList()[0]; presented.ProcessID != wireKey.ProcessID || presented.Secret != wireKey.Secret {
+		t.Fatalf("the in-TLS pair reaching the registry (%d/%x) is not the wire pair (%d/%x)",
+			presented.ProcessID, presented.Secret, wireKey.ProcessID, wireKey.Secret)
+	}
 }

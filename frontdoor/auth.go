@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -257,24 +258,42 @@ func (l *Listener) acquireAuthWorker(ctx context.Context) (func(), error) {
 // engine can honour. Registered BEFORE the frame is sent — the inverse window
 // (registered, not yet sent) is harmless because a key resolves through a
 // live session, while the forward window (sent, not yet registered) is a
-// client holding a capability the server would refuse. A registration failure
-// fails the handshake rather than sending an unhonourable key: a client that
-// pressed Ctrl-C and got no cancel would debug the wrong layer.
+// client holding a capability the server would refuse.
+//
+// A COLLISION REMINTS RATHER THAN REDRAWS (PR #44 r0). If the minted process
+// id is already held by another session, the engine refuses with
+// ErrCancelKeyCollision and this loop mints a FRESH pair and registers that —
+// the pid the client receives and the pid the registry holds are one object,
+// because both come from the same `key`. Redrawing inside the registration
+// seam would have sent the client one pid and recorded another. With a
+// 32-bit space and one redraw budget, an eight-round failure is a broken
+// CSPRNG and the handshake fails rather than sends an unhonourable key.
 func (l *Listener) completeHandshake(be *pgproto3.Backend, res exec.WireSessionResult, params map[string]string) error {
 	be.Send(&pgproto3.AuthenticationOk{})
 	for _, ps := range synthesizedStatuses(res, params) {
 		be.Send(ps)
 	}
-	key, err := newBackendKey()
-	if err != nil {
-		return err
-	}
-	if l.cancels != nil {
-		registered := exec.CancelKey{ProcessID: key.ProcessID}
-		copy(registered.Secret[:], key.SecretKey)
-		if rerr := l.cancels.RegisterCancelKey(res.SessionID, res.UserID, registered); rerr != nil {
-			return fmt.Errorf("frontdoor: registering the cancel key: %w", rerr)
+	var key *pgproto3.BackendKeyData
+	for range 8 {
+		minted, err := newBackendKey()
+		if err != nil {
+			return err
 		}
+		registered := exec.CancelKey{ProcessID: minted.ProcessID}
+		copy(registered.Secret[:], minted.SecretKey)
+		if l.cancels == nil {
+			key = minted // the honest degraded state: every cancel lands stale
+			break
+		}
+		if err := l.cancels.RegisterCancelKey(res.SessionID, res.UserID, registered); err == nil {
+			key = minted
+			break
+		} else if !errors.Is(err, exec.ErrCancelKeyCollision) {
+			return fmt.Errorf("frontdoor: registering the cancel key: %w", err)
+		}
+	}
+	if key == nil {
+		return errors.New("frontdoor: could not mint an uncollided cancel key")
 	}
 	be.Send(key)
 	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
