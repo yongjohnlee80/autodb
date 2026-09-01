@@ -95,6 +95,11 @@ type Engine struct {
 	hookBeforeDemotionQuiesce func()
 	hookDemotionOwned         func(teardown bool)
 	hookDemotionCloseOwned    func()
+	// hookQuiesceJoined fires between a successful join and the teardown
+	// claim inside quiesce — the exact window a foreground statement can
+	// claim the slot first and turn the claim into ErrSessionBusy
+	// contention. Nil in production; a test seam only.
+	hookQuiesceJoined func()
 
 	history bool
 	maxRows int

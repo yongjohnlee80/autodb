@@ -313,3 +313,202 @@ func TestDemotionPreflight_ForegroundAndJanitorHaveOneRollbackOwner(t *testing.T
 		})
 	}
 }
+
+// A janitor whose quiesce JOINED the in-flight statement but lost the teardown
+// CLAIM to a foreground caller must defer, not close. The join-to-claim window
+// is the one a foreground statement can legitimately win — it becomes the
+// linearization owner and runs the same synchronous preflight — and treating
+// that loss as a cleanup failure closed a healthy retained reader session
+// (lector r1 on e0a932c, reproduced by juliet on VM43).
+//
+// Deterministic drive: the janitor parks in hookQuiesceJoined (join done, slot
+// free, claim not yet attempted); the foreground then claims the slot and parks
+// in its own preflight hook; only then does the janitor attempt the claim and
+// lose it.
+func TestJanitorDemotion_JoinToClaimLoserDoesNotCloseSession(t *testing.T) {
+	d := newDemotionSurface(t, false)
+	if _, err := d.exec("BEGIN"); err != nil {
+		t.Fatalf("BEGIN: %v", err)
+	}
+	counter, txID := attachRollbackCounter(t, d)
+	demoteToReader(t, d.f, d.connID)
+
+	windowOpen := make(chan struct{})
+	fgParked := make(chan struct{})
+	releaseOwner := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseOwner:
+		default:
+			close(releaseOwner)
+		}
+	}()
+	// Single-shot: the fixture's own cleanup closes sessions through quiesce
+	// too, and a second fire would close an already-closed channel.
+	quiesceFired := false
+	d.f.eng.hookQuiesceJoined = func() {
+		if quiesceFired {
+			return
+		}
+		quiesceFired = true
+		// Join succeeded and the slot is free right now. Hold the janitor
+		// here until the foreground has claimed the slot, so claimTeardown
+		// deterministically loses rather than racing.
+		close(windowOpen)
+		<-fgParked
+	}
+	d.f.eng.hookDemotionOwned = func(teardown bool) {
+		if teardown {
+			t.Error("the janitor reached the owned rollback after the foreground claimed the slot")
+		}
+		close(fgParked)
+		<-releaseOwner
+	}
+
+	janitorDone := make(chan struct{})
+	go func() {
+		defer close(janitorDone)
+		d.f.eng.reapExpired(context.Background(), time.Now())
+	}()
+	waitDemotionSignal(t, windowOpen, "janitor inside the join-to-claim window")
+
+	var foregroundErr error
+	foregroundDone := make(chan struct{})
+	go func() {
+		defer close(foregroundDone)
+		_, foregroundErr = d.exec("COMMIT")
+	}()
+	waitDemotionSignal(t, fgParked, "foreground claiming the slot in the window")
+	close(releaseOwner)
+	waitDemotionSignal(t, foregroundDone, "foreground completion")
+	waitDemotionSignal(t, janitorDone, "janitor completion after deferring")
+
+	if !errors.Is(foregroundErr, ErrTxAuthorityChanged) {
+		t.Fatalf("foreground claim winner returned %v, want ErrTxAuthorityChanged", foregroundErr)
+	}
+
+	// THE REGRESSION ASSERTION. The janitor deferred to the foreground owner;
+	// the session it would have closed under the old code is alive at the
+	// reader floor and the demoted transaction is gone.
+	s, err := d.f.eng.sessions.lookup(d.sid, d.userID)
+	if err != nil {
+		t.Fatalf("the retained reader session was closed by the claim-loser janitor: %v", err)
+	}
+	s.mu.Lock()
+	phase, demoted := s.txPhase, s.demoted
+	s.mu.Unlock()
+	if phase != txNone {
+		t.Fatalf("transaction phase after the claim-loser sweep = %v, want txNone", phase)
+	}
+	if !demoted {
+		t.Fatal("the session was not marked demoted by the foreground winner")
+	}
+	if _, err := d.exec("SELECT 1"); err != nil {
+		t.Fatalf("the retained session did not continue at the reader floor: %v", err)
+	}
+	if got := counter.calls.Load(); got != 1 {
+		t.Fatalf("RollbackContext calls = %d, want exactly 1 (the foreground winner's)", got)
+	}
+	if got := len(auditDetail(t, d.f, reasonAuthorityDemoted)); got != 1 {
+		t.Fatalf("authority-demoted audits = %d, want exactly 1", got)
+	}
+	terminal := 0
+	for _, row := range txLog(t, d.f, txID) {
+		if row.State == string(meta.TxRolledBack) {
+			terminal++
+		}
+	}
+	if terminal != 1 {
+		t.Fatalf("rolled-back terminal rows = %d, want exactly 1", terminal)
+	}
+	// The deferral itself is silent: no cleanup-failed close, no duplicate
+	// trail from the janitor that lost the claim.
+	if got := len(auditDetail(t, d.f, "session_closed")); got != 0 {
+		t.Fatalf("session_closed audits = %d, want 0 — the claim-loser janitor closed a healthy session", got)
+	}
+}
+
+// The OTHER non-nil quiesce exit is a genuine failure: the in-flight statement
+// ignored cancellation and the join timed out. That sweep can never clean up,
+// so closing under demotion-cleanup-failed is correct and must survive the
+// claim-contention fix. Positive control for the preserved path, including the
+// retained-for-retry arc: the first sweep defers, the statement stops, the
+// second sweep retries the close and ends the transaction.
+func TestJanitorDemotion_UnquiesceableStatementClosesForCleanupFailure(t *testing.T) {
+	d := newDemotionSurface(t, false)
+	if _, err := d.exec("BEGIN"); err != nil {
+		t.Fatalf("BEGIN: %v", err)
+	}
+	counter, txID := attachRollbackCounter(t, d)
+	demoteToReader(t, d.f, d.connID)
+
+	// Park a statement that ignores cancellation in the session's slot — the
+	// same shape sessionWithInFlight uses — so the janitor's join times out.
+	s, err := d.f.eng.sessions.lookup(d.sid, d.userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.begin(); err != nil {
+		t.Fatalf("claiming the slot for the unquiesceable statement: %v", err)
+	}
+	runCtx, endRun := s.runContext(context.Background())
+	release := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		defer s.finish()
+		defer endRun()
+		_ = runCtx
+		<-release // ignores cancellation: both joins must time out
+	}()
+
+	// Short bounds on THIS engine so the cell is about the transition, not
+	// about waiting out two real quiesce timeouts.
+	d.f.eng.txQuiesce = 100 * time.Millisecond
+	d.f.eng.closeQuiesce = 100 * time.Millisecond
+
+	if n := d.f.eng.reapExpired(context.Background(), time.Now()); n != 1 {
+		t.Fatalf("the sweep acted on %d sessions, want 1", n)
+	}
+
+	// The rollback was NEVER issued under the live statement, and the close
+	// deferred rather than dropping the only owner of the transaction.
+	if got := counter.calls.Load(); got != 0 {
+		t.Fatalf("RollbackContext calls = %d, want 0 — never under a live statement", got)
+	}
+	var closing *session
+	for _, c := range d.f.eng.sessions.snapshot() {
+		if c.id == d.sid {
+			closing = c
+		}
+	}
+	if closing == nil || closing.get() != sessClosing {
+		t.Fatalf("the session was not retained in the closing state for retry: %v", closing)
+	}
+	pending := 0
+	for _, row := range txLog(t, d.f, txID) {
+		if row.State == string(meta.TxUnknownPending) {
+			pending++
+		}
+	}
+	if pending != 1 {
+		t.Fatalf("unknown_pending rows = %d, want exactly 1 — the close recorded the undetermined outcome", pending)
+	}
+
+	// The statement finally stops; the next sweep retries the close and ends
+	// the transaction under the cleanup-failed reason.
+	close(release)
+	<-stopped
+	if n := d.f.eng.reapExpired(context.Background(), time.Now()); n != 1 {
+		t.Fatalf("the retry sweep acted on %d sessions, want 1", n)
+	}
+	if got := counter.calls.Load(); got != 1 {
+		t.Fatalf("RollbackContext calls after the retry = %d, want exactly 1", got)
+	}
+	assertAuditContains(t, d.f, "session_closed", reasonDemotionCleanupFailed)
+	for _, c := range d.f.eng.sessions.snapshot() {
+		if c.id == d.sid {
+			t.Fatal("the session survived its own retried cleanup close")
+		}
+	}
+}

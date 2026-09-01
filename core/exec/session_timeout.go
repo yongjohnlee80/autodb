@@ -273,6 +273,23 @@ func (e *Engine) rollbackDemoted(
 	}
 	release, err := e.quiesce(ctx, s, e.txQuiesce)
 	if err != nil {
+		// Two materially different failures reach here, and only one may
+		// close the session. A join that did not complete means the
+		// statement would not stop and this sweep cannot ever clean up:
+		// close, so the normal close path owns the terminal outcome.
+		if errors.Is(err, ErrSessionBusy) {
+			// Claim contention, not cleanup failure. Join succeeded, and a
+			// foreground caller claimed the slot before this sweep could.
+			// That caller is the correct linearization owner: it runs the
+			// same preflight and either rolls the transaction back or
+			// observes no-match. Closing here would end a healthy retained
+			// reader session for losing a race the lifecycle already
+			// resolves in the foreground's favor — so defer instead, and a
+			// later sweep re-checks if the foreground itself fails.
+			e.logf("session %s: write privilege was withdrawn but a foreground caller "+
+				"claimed the slot first; deferring demotion rollback to it", s.id)
+			return false
+		}
 		e.logf("session %s: write privilege was withdrawn but the in-flight statement would not "+
 			"stop (%v); closing for demotion cleanup failure", s.id, err)
 		e.closeSession(ctx, s, "", reasonDemotionCleanupFailed)

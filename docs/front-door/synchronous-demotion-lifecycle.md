@@ -149,6 +149,18 @@ transaction back first, janitor observes no-match and emits nothing. If
 janitor acquired teardown first, foreground receives `ErrSessionBusy` and
 cannot reach the transaction.
 
+`quiesce` has two materially different non-nil exits, and the janitor treats
+them differently. A JOIN that did not complete — the statement ignored
+cancellation — means this sweep can never clean up, so the session closes
+under `demotion-cleanup-failed` and the normal close path owns the terminal
+outcome. A claim CONTENTION loss (`ErrSessionBusy` from `claimTeardown`
+because a foreground caller took the slot between the join and the claim) is
+not a failure at all: that foreground caller is the correct linearization
+owner, runs the same synchronous preflight itself, and the janitor defers —
+no close, no audit, no rollback. Closing on claim contention would end a
+healthy retained reader session for losing a race the lifecycle already
+resolves in the foreground's favor.
+
 ## Transition table
 
 | Condition | Transaction | Session | Trigger result | Trail owner |
@@ -160,6 +172,7 @@ cannot reach the transaction.
 | same, rollback fails | attached | closing then closed/retried | wrapped `ErrTxAuthorityChanged` | `finishClosing` |
 | foreground wins race | cleared | open | foreground gets authority-changed; janitor no-match | foreground |
 | janitor wins race | cleared | open | foreground gets `ErrSessionBusy` | janitor |
+| janitor loses the post-join teardown claim to a foreground caller | foreground rolls it back | open | foreground gets authority-changed; janitor defers silently | foreground |
 
 ## Audit and error identities
 
@@ -183,6 +196,8 @@ All executable acceptance evidence runs on VM43 against live PostgreSQL using
 | reader-opened transaction survives foreground and janitor with same XID | `TestDemotionPreflight_ReaderTransactionSurvivesForegroundAndJanitor` |
 | rollback failure has one active close finalizer, retries once, and closes under cleanup-failed rather than revocation | `TestStanding_AnUncertainForegroundRollbackClosesForDemotionCleanup` |
 | foreground/janitor winner orders issue one rollback and one trail | `TestDemotionPreflight_ForegroundAndJanitorHaveOneRollbackOwner` |
+| janitor that loses the post-join teardown claim defers instead of closing the healthy retained session | `TestJanitorDemotion_JoinToClaimLoserDoesNotCloseSession` |
+| janitor whose join times out on an unquiesceable statement closes under cleanup-failed, defers once, and the retry ends the transaction | `TestJanitorDemotion_UnquiesceableStatementClosesForCleanupFailure` |
 
 The foreground-preflight mutation must make both token and PAT cases red.
 Race evidence must additionally assert the wrapped driver's rollback call

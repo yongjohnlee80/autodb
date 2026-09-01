@@ -499,6 +499,13 @@ func (e *Engine) quiesce(ctx context.Context, s *session, bound time.Duration) (
 	if err := s.joinInFlight(wait); err != nil {
 		return func() {}, err
 	}
+	// Join has succeeded and the slot is free RIGHT NOW; claimTeardown takes
+	// it in the next instruction. That is the window a foreground caller can
+	// slip into, and the demotion race tests need to place one there
+	// deterministically rather than hope the scheduler lines it up.
+	if h := e.hookQuiesceJoined; h != nil {
+		h()
+	}
 	// Joining proves the session WAS idle; holding the slot keeps it idle.
 	// Proving it and then acting on the proof a moment later is how a
 	// statement ends up running on a transaction that is being rolled back.
