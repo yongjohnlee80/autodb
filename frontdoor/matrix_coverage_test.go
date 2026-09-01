@@ -78,7 +78,14 @@ var (
 	// A §2 row opens a table line: "| 2.1a | ..."
 	matrixRowRe = regexp.MustCompile(`(?m)^\|\s*([0-9]+\.[0-9]+[a-z]?)\s*\|`)
 	// A citation in a test, in the shapes the existing cells already use.
-	citationRe = regexp.MustCompile(`\browz?\s+([0-9]+\.[0-9]+[a-z]?)`)
+	//
+	// CASE-INSENSITIVE, and that is not cosmetic. The first version was not,
+	// and PR #36 writes its citations as "// MATRIX ROW 2.4" — a good-faith
+	// citation the gate could not see, so both rows would have read as
+	// untested while the comment sat directly above the cell proving them.
+	// Found by zen. A comment is prose, and a gate that silently ignores
+	// prose it does not like is a gate reporting a gap that is not there.
+	citationRe = regexp.MustCompile(`(?i)\browz?\s+([0-9]+\.[0-9]+[a-z]?)`)
 )
 
 func repoRoot(t *testing.T) string {
