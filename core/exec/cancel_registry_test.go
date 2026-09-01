@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -193,5 +194,98 @@ func TestCancelRegistry_RevocationEndsTheCapability(t *testing.T) {
 		t.Fatal("a revoked key still matched a live session. The pair outlives the session it " +
 			"was minted for, so a client holding it can act on whatever later takes that " +
 			"process id")
+	}
+}
+
+// THE REGISTERED PAIR IS THE PAIR GIVEN, OR THE CALLER IS TOLD (PR #44 r0).
+//
+// RegisterCancelKey receives the pair the front door has ALREADY composed
+// into a BackendKeyData frame. A silent redraw on collision would record a
+// process id the client was never sent — an unhonourable key handed out on
+// exactly the collision path. The defect was real: the first version
+// redrew locally and returned nil while the wire frame carried the original
+// pid (lector, PR #44 r0 P1).
+//
+// This is the ENGINE cell; the front door's remint-and-retry half is in
+// frontdoor/cancel_test.go. Neither can stand in for the other: this one
+// proves the typed refusal, that one proves the retry composes one pair.
+func TestCancelRegistry_CollisionIsRefusedNotRedrawn(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	first := issuedKey(t, f, "sess-first", 1)
+	// A second session presenting the SAME process id must be refused with
+	// the typed collision error — never silently registered elsewhere.
+	second := CancelKey{ProcessID: first.ProcessID}
+	copy(second.Secret[:], first.Secret[:])
+	second.Secret[0] ^= 0xFF // a different pair, so only the pid collides
+	if err := f.eng.RegisterCancelKey("sess-second", 2, second); !errors.Is(err, ErrCancelKeyCollision) {
+		t.Fatalf("a colliding registration returned %v, want ErrCancelKeyCollision — the "+
+			"caller must be told, because only it knows the frame the client will receive", err)
+	}
+
+	// The refusal changed NOTHING, read from the registry itself: CancelByKey
+	// resolves through a live session, and these ids are deliberately not
+	// live ones, so the lookup would answer false whatever the map held —
+	// the fixture trap the file comment above warns about.
+	f.eng.cancels.mu.Lock()
+	held, present := f.eng.cancels.by[first.ProcessID]
+	secondPids := []uint32{}
+	for pid, target := range f.eng.cancels.by {
+		if target.id == "sess-second" {
+			secondPids = append(secondPids, pid)
+		}
+	}
+	f.eng.cancels.mu.Unlock()
+	if !present || held.id != "sess-first" || held.secret != first.Secret {
+		t.Fatalf("the collision refusal disturbed the existing entry: %+v — a refused "+
+			"registration must leave the registry exactly as it was", held)
+	}
+	if len(secondPids) != 0 {
+		t.Fatalf("the refused session holds %d registered pid(s) %v — the colliding "+
+			"registration was stored after all, possibly under a redrawn pid", len(secondPids), secondPids)
+	}
+}
+
+// REREGISTRATION FOR THE SAME SESSION REPLACES IN PLACE, and cannot disarm
+// the session: the old entry survives until the new one is placed.
+func TestCancelRegistry_ReregistrationReplacesWithoutDisarming(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+
+	old := issuedKey(t, f, "sess-re", 1)
+	// Reregister the SAME session under a fresh pair, colliding with nobody.
+	next := CancelKey{ProcessID: old.ProcessID ^ 0x1}
+	copy(next.Secret[:], old.Secret[:])
+	next.Secret[1] ^= 0xFF
+	if err := f.eng.RegisterCancelKey("sess-re", 1, next); err != nil {
+		t.Fatalf("reregistration: %v", err)
+	}
+
+	// Both halves read from the registry itself: CancelByKey resolves
+	// through a live session and "sess-re" is deliberately not one.
+	f.eng.cancels.mu.Lock()
+	newEntry, newHeld := f.eng.cancels.by[next.ProcessID]
+	oldEntry, oldHeld := f.eng.cancels.by[old.ProcessID]
+	count := 0
+	for _, target := range f.eng.cancels.by {
+		if target.id == "sess-re" {
+			count++
+		}
+	}
+	f.eng.cancels.mu.Unlock()
+	if !newHeld || newEntry.id != "sess-re" || newEntry.secret != next.Secret {
+		t.Fatal("the replacement pair was not registered")
+	}
+	if count != 1 {
+		t.Fatalf("the session holds %d keys, want exactly 1 — a session whose open was "+
+			"retried would carry two live capabilities", count)
+	}
+	// The pid is only "old" when the replacement genuinely moved; if the
+	// reregistration kept it (it must not — next.ProcessID differs), this
+	// would double-count. It differs by construction, so the old pid must
+	// be free of this session.
+	if oldHeld && oldEntry.id == "sess-re" {
+		t.Fatal("the replaced pair still points at the session")
 	}
 }

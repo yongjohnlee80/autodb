@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -127,6 +128,52 @@ func (e *Engine) RevokeCancelKey(id SessionID) {
 			return
 		}
 	}
+}
+
+// ErrCancelKeyCollision reports that the process id in a RegisterCancelKey
+// call is already held by a DIFFERENT session. Typed and sentinel-shaped so
+// the front door can remint and retry: a silent redraw here would register a
+// process id the client was never sent, handing it a key the server cannot
+// honour on exactly the collision path (PR #44 r0, lector's P1).
+var ErrCancelKeyCollision = errors.New("exec: cancel key process id already registered")
+
+// RegisterCancelKey records an externally minted pair against a session —
+// the front door's spelling of issuance, for the key it sends in its own
+// BackendKeyData.
+//
+// The front door mints from the same CSPRNG (row 2.9, MF7) rather than
+// calling IssueCancelKey, because the pair must be in the CLIENT'S frame the
+// moment the handshake composes it and the engine half must not own the wire.
+//
+// THE PAIR REGISTERED IS THE PAIR GIVEN, exactly. A process id already held
+// by another session is NOT redrawn behind the caller's back — that would
+// send the client one pid and record another, so the key it holds could
+// never be honoured. The caller remints and retries on
+// ErrCancelKeyCollision instead, which keeps the wire pair and the
+// registry entry one object end to end.
+//
+// A process id held by the SAME session is replaced in place: the front
+// door calls this once per session at open, so a second registration for
+// one session can only be an open retry. The replacement is placeable
+// BEFORE the old entry is touched — both live under the one mutex here, so
+// a failed registration cannot leave the session disarmed.
+func (e *Engine) RegisterCancelKey(id SessionID, userID int64, key CancelKey) error {
+	if len(key.Secret) != CancelKeyLen {
+		return fmt.Errorf("exec: cancel key secret must be %d bytes, got %d",
+			CancelKeyLen, len(key.Secret))
+	}
+	e.cancels.mu.Lock()
+	defer e.cancels.mu.Unlock()
+	if t, taken := e.cancels.by[key.ProcessID]; taken && t.id != id {
+		return ErrCancelKeyCollision
+	}
+	for pid, t := range e.cancels.by {
+		if t.id == id {
+			delete(e.cancels.by, pid)
+		}
+	}
+	e.cancels.by[key.ProcessID] = cancelTarget{id: id, userID: userID, secret: key.Secret}
+	return nil
 }
 
 // CancelByKey stops the statement the key names, and reports whether it
