@@ -59,6 +59,20 @@ func (e *Engine) WireExecute(ctx context.Context, id SessionID, userID int64, sq
 		return nil, auth.ErrDenied // never disclose which connections exist
 	}
 
+	// Reject oversized input BEFORE classification or control routing, for the
+	// same reason the token path does (engine.go, lector M4 r2 must-fix #2):
+	// the audit record must equal exactly what ran, and an unaudited tail must
+	// never execute. The wire path omitted this, so a statement of any size
+	// reached the classifier here while the identical statement was refused on
+	// the token path.
+	//
+	// Placed above Classify so it also covers CONTROL statements: wireControl
+	// is reached only through the routing below, so a gate here is the single
+	// point that governs both.
+	if len(sqlText) > e.maxStatementBytes {
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrScriptTooLarge)
+	}
+
 	stmt, cerr := Classify(sqlText, connRow.Engine == "mysql")
 	if cerr != nil {
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, cerr)
