@@ -628,6 +628,48 @@ func (s *Server) register() {
 	// afterwards from anywhere — the store keeps a selector and a SHA-256 —
 	// so the reply is the only chance to copy it, and the client is expected
 	// to say so.
+	// auth.ip_admitted answers the two-layer admission question for an
+	// address the DAEMON cannot see for itself (ADR-0075 Amendment 1).
+	//
+	// The web gateway reaches the daemon over loopback, so the peer the
+	// daemon observes is the gateway, not the browser. Only the gateway
+	// knows the browser's address, and only the daemon knows the user's
+	// allowlist rows — so one of them has to tell the other. This verb is
+	// that, in the direction that keeps the DECISION with the rules: the
+	// gateway supplies the address it observed, and the daemon decides.
+	//
+	// The alternative — the gateway reading auth.user_allowlist_list and
+	// evaluating the prefixes itself — would put a second implementation of
+	// admission in a second process, and the day they disagree is a day
+	// someone is admitted somewhere the rules say they are not.
+	s.rpc.Handle("auth.ip_admitted", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		addr, err := argStr(req.Params, 1, "ip")
+		if err != nil {
+			return nil, err
+		}
+		ident, verr := s.auth.ValidateToken(ctx, token)
+		if verr != nil {
+			return nil, wireErr(verr)
+		}
+		src, aerr := s.auth.IPAllowedForUser(ctx, nil, ident.UserID(), addr)
+		if aerr != nil {
+			return nil, wireErr(aerr)
+		}
+		// The SOURCE is returned as well as the verdict, so the caller can
+		// audit which layer admitted rather than only that something did.
+		return map[string]any{
+			"admitted": src != auth.NotAdmitted,
+			"source":   string(src),
+		}, nil
+	})
+
 	s.rpc.Handle("auth.token_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 4); err != nil {
 			return nil, err

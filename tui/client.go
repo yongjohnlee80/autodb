@@ -517,6 +517,23 @@ func txStatusOf(m map[string]any) TxStatus {
 	}
 }
 
+// IPAdmitted asks the daemon whether an address may be used by the
+// authenticated user, and which allowlist layer admitted it.
+//
+// The address is supplied by the caller because the daemon cannot see it: a
+// gateway reaches the daemon over loopback, so the peer the daemon observes
+// is the gateway. The DECISION stays with the daemon, which is the only
+// process holding the rules.
+func (b *Bound) IPAdmitted(ctx context.Context, ip string) (bool, string, error) {
+	res, err := b.authed(ctx, "auth.ip_admitted", ip)
+	if err != nil {
+		return false, "", err
+	}
+	m, _ := res.(map[string]any)
+	admitted, _ := m["admitted"].(bool)
+	return admitted, mS(m, "source"), nil
+}
+
 // ShutdownServer asks the connected server to drain and exit (admin
 // only). The disconnect watcher then drives the reconnect, which spawns
 // a fresh server when one is configured — that is the restart.

@@ -1316,3 +1316,57 @@ func TestTokenRevoke_MissingNameIsARefusalNotAFault(t *testing.T) {
 		t.Fatalf("revoking an existing token failed: %#v", errVal)
 	}
 }
+
+// auth.ip_admitted answers the two-layer admission question for an address
+// the daemon cannot observe: the web gateway reaches it over loopback, so
+// the peer the daemon sees is the gateway rather than the browser.
+//
+// The DECISION stays with the daemon. A gateway evaluating prefixes itself
+// would be a second implementation of admission in a second process, and the
+// day they disagree is a day someone is admitted somewhere the rules say
+// they are not.
+func TestIPAdmittedOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.dial(t)
+	c.hello()
+
+	// The fixture's config allowlist carries loopback, so the GLOBAL layer
+	// admits it with no user rows at all — the case Amendment 1 exists for.
+	errVal, result := c.call("auth.ip_admitted", f.rootTok, "127.0.0.1")
+	if errVal != nil {
+		t.Fatalf("ip_admitted: %#v", errVal)
+	}
+	m := result.(map[string]any)
+	if m["admitted"] != true {
+		t.Fatalf("a globally-listed address was not admitted: %#v", m)
+	}
+	if m["source"] != "global" {
+		t.Errorf("source = %v, want \"global\" — the audit must say which layer admitted", m["source"])
+	}
+
+	// An address in neither layer is refused. Without this the assertion
+	// above would pass against a verb that admits everything.
+	errVal, result = c.call("auth.ip_admitted", f.rootTok, "203.0.113.7")
+	if errVal != nil {
+		t.Fatalf("ip_admitted: %#v", errVal)
+	}
+	m = result.(map[string]any)
+	if m["admitted"] != false {
+		t.Fatalf("an address in neither layer was admitted: %#v", m)
+	}
+	if m["source"] != "none" {
+		t.Errorf("source = %v, want \"none\"", m["source"])
+	}
+
+	// It needs a token: admission is a question about a USER, and answering
+	// it for an unauthenticated caller would leak whose rules admit what.
+	if errVal, _ := c.call("auth.ip_admitted", "not-a-token", "127.0.0.1"); errVal == nil {
+		t.Error("ip_admitted answered without a valid token")
+	}
+	for _, bad := range [][]any{{f.rootTok}, {f.rootTok, "1.2.3.4", "extra"}} {
+		if errVal, _ := c.call("auth.ip_admitted", bad...); errVal == nil {
+			t.Errorf("ip_admitted accepted %d argument(s)", len(bad))
+		}
+	}
+}
