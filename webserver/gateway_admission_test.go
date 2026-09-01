@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // The web UI's IP admission, observed AT THE WEB SURFACE (lector PR #34 r0
@@ -83,7 +84,7 @@ func webLoginFrom(t *testing.T, base, srcIP, user, pass string) int {
 func TestAdmission_TheHarnessSeparatesTheTwoAddresses(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	daemon, svc := startRealServerWith(t, globalAdmitsBoth)
+	daemon, svc, _ := startRealServerWith(t, globalAdmitsBoth)
 	if _, _, err := svc.Bootstrap(ctx, "johno", adminPass, browserAddr); err != nil {
 		t.Fatalf("seeding the admin: %v", err)
 	}
@@ -102,7 +103,7 @@ func TestAdmission_TheHarnessSeparatesTheTwoAddresses(t *testing.T) {
 // ORDINARY LOGIN, admitted by the GLOBAL layer.
 func TestAdmission_GlobalLayerAdmitsAnOrdinaryLogin(t *testing.T) {
 	t.Parallel()
-	daemon, svc := startRealServerWith(t, globalAdmitsBoth)
+	daemon, svc, _ := startRealServerWith(t, globalAdmitsBoth)
 	if _, _, err := svc.Bootstrap(context.Background(), "johno", adminPass, browserAddr); err != nil {
 		t.Fatalf("seeding the admin: %v", err)
 	}
@@ -125,7 +126,7 @@ func TestAdmission_GlobalLayerAdmitsAnOrdinaryLogin(t *testing.T) {
 func TestAdmission_AUsersOwnRowAdmitsWhereTheGlobalListDoesNot(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	daemon, svc := startRealServerWith(t, globalAdmitsGatewayOnly)
+	daemon, svc, _ := startRealServerWith(t, globalAdmitsGatewayOnly)
 	tok, ident, err := svc.Bootstrap(ctx, "johno", adminPass, gatewayAddr)
 	if err != nil {
 		t.Fatalf("seeding the admin: %v", err)
@@ -153,7 +154,7 @@ func TestAdmission_AUsersOwnRowAdmitsWhereTheGlobalListDoesNot(t *testing.T) {
 func TestAdmission_NeitherLayerRefusesAndLeavesNothingBehind(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	daemon, svc := startRealServerWith(t, globalAdmitsGatewayOnly)
+	daemon, svc, _ := startRealServerWith(t, globalAdmitsGatewayOnly)
 	if _, _, err := svc.Bootstrap(ctx, "johno", adminPass, gatewayAddr); err != nil {
 		t.Fatalf("seeding the admin: %v", err)
 	}
@@ -183,7 +184,7 @@ func TestAdmission_NeitherLayerRefusesAndLeavesNothingBehind(t *testing.T) {
 func TestAdmission_AnInadmissibleBrowserCannotConsumeTheBootstrap(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	daemon, svc := startRealServerWith(t, globalAdmitsGatewayOnly)
+	daemon, svc, _ := startRealServerWith(t, globalAdmitsGatewayOnly)
 	base, _ := startGateway(t, daemon)
 
 	needs, err := svc.NeedsBootstrap(ctx)
@@ -215,7 +216,7 @@ func TestAdmission_AnInadmissibleBrowserCannotConsumeTheBootstrap(t *testing.T) 
 func TestAdmission_AnAdmittedBrowserStillBootstraps(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	daemon, svc := startRealServerWith(t, globalAdmitsBoth)
+	daemon, svc, _ := startRealServerWith(t, globalAdmitsBoth)
 	base, _ := startGateway(t, daemon)
 
 	if status := webLoginFrom(t, base, browserAddr, "johno", adminPass); status != http.StatusOK {
@@ -250,19 +251,19 @@ var _ = auth.AdmittedByUserRow
 func TestAdmission_TheCredentialIsVerifiedBeforeTheAddressIsJudged(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	daemon, svc := startRealServerWith(t, globalAdmitsGatewayOnly)
+	daemon, svc, store := startRealServerWith(t, globalAdmitsGatewayOnly)
 	if _, _, err := svc.Bootstrap(ctx, "johno", adminPass, gatewayAddr); err != nil {
 		t.Fatalf("seeding the admin: %v", err)
 	}
 	base, _ := startGateway(t, daemon)
 
-	before := loginAudits(t, svc)
+	before := loginAudits(t, store)
 
 	// A CORRECT password from an address neither layer admits.
 	if status := webLoginFrom(t, base, browserAddr, "johno", adminPass); status == http.StatusOK {
 		t.Fatal("the login was accepted from a non-admitted address")
 	}
-	after := loginAudits(t, svc)
+	after := loginAudits(t, store)
 
 	if after.ok <= before.ok {
 		t.Errorf("the daemon recorded no successful login (%d -> %d), so the address was judged "+
@@ -281,93 +282,245 @@ func TestAdmission_TheCredentialIsVerifiedBeforeTheAddressIsJudged(t *testing.T)
 	}
 }
 
-type auditTally struct{ ok, failed uint64 }
-
-func loginAudits(t *testing.T, svc *auth.Service) auditTally {
+// loginAudits counts the daemon's audit rows FROM THE TEST, against the store
+// the test itself opened.
+//
+// The first version added an exported AuditCountForTest to auth.Service, and
+// lector was right to refuse it: a test witness must not create a new
+// unauthenticated audit-query surface on the production API. Worse, the
+// comment justifying it claimed the same data was reachable through an
+// `audit.list` verb with an admin token — and no such verb exists anywhere in
+// the tree. I asserted an authorized alternative to excuse an unauthorized
+// one, without checking that the alternative was real.
+//
+// The store is already the test's own, so the count belongs here.
+func loginAudits(t *testing.T, store *meta.Store) auditTally {
 	t.Helper()
-	return auditTally{ok: svc.AuditCountForTest("login"), failed: svc.AuditCountForTest("login_failed")}
+	count := func(action string) uint64 {
+		n, err := store.Audit.OnCtx(context.Background()).With(meta.AuditAction, action).Count()
+		if err != nil {
+			t.Fatalf("counting %q audit rows: %v", action, err)
+		}
+		return n
+	}
+	return auditTally{ok: count("login"), failed: count("login_failed")}
 }
 
-// TIMING, MEASURED (lector PR #34 r0 must-fix 3, second half).
+type auditTally struct{ ok, failed uint64 }
+
+// TIMING, MEASURED AND SELF-CALIBRATED (lector PR #34 r0 MF3, redesigned
+// after r1 MF1 — and the redesign found something).
 //
-// The three causes a caller could try to tell apart, all from a non-admitted
-// address: a name that does not exist, a name that does with the wrong
-// password, and a name that does with the RIGHT password. The last is the
-// interesting one — it is the only path that reaches Gate 3, and if reaching
-// it cost visibly more than failing earlier, the refusal would announce that
-// the credential was good.
+// THE PROPERTY THIS DEFENDS is the one the ordering exists for: a caller at a
+// non-admitted address must not learn whether the NAME they typed exists.
+// Those two causes — an unknown name, and a real name with a wrong password —
+// must be indistinguishable, and they are: their medians sit inside this
+// machine's own noise, under -race as well as without it.
 //
-// The bound is deliberately generous. This runs on shared CI as well as
-// VM43, and a tight bound on a noisy machine is a flaky test that gets
-// deleted rather than a strong property. What makes the number meaningful is
-// the control below: a harness that has never resolved a real difference
-// cannot claim to have found none.
-func TestAdmission_RefusalTimingDoesNotSeparateTheCauses(t *testing.T) {
+// WHAT IT DOES NOT DEFEND, and what the calibrated statistic exposed the
+// moment it was tight enough to see anything: a real name with the RIGHT
+// password is measurably SLOWER, by about 9ms on a 125ms request under -race
+// and about 1ms on a 17ms request without it. That difference is structural
+// and cannot be closed by doing decoy work, because the extra cost IS the
+// work of being authenticated — the daemon mints a session, the gateway
+// reads the canonical subject, asks the admission question, and then logs the
+// session out again. A wrong password cannot do those things, so it cannot
+// take as long.
+//
+// SO THE RESIDUAL IS REAL AND IS RECORDED RATHER THAN TUNED AWAY: from a
+// non-admitted address, a caller with enough samples can tell a correct
+// password from an incorrect one, without ever being let in. The mitigations
+// are the per-source throttle (ten failures a minute, so samples are
+// expensive) and the fact that the password remains the primary control with
+// admission as defence in depth. It is bounded below so a regression that
+// made it far worse is caught, and it is flagged for a ruling rather than
+// settled here.
+//
+// THE FIRST VERSION OF THIS TEST WAS BOTH TOO WEAK AND FLAKY, and lector
+// reproduced the failure: a fixed 300ms bound on a request whose median is
+// about 17ms, so it would have accepted a difference an order of magnitude
+// larger than the whole request; and t.Parallel() plus three sequential
+// per-cause blocks, so a slow moment landed entirely on whichever block was
+// running and the spread hit 301.9ms under the race matrix. Temporal load
+// drift was part of the security verdict. Three things fix that:
+//
+//  1. NOT PARALLEL. The measurement is of durations, and a test sharing the
+//     machine with whatever else the package is running measures the machine.
+//  2. INTERLEAVED. One sample of each cause per round, rotated, so a slow
+//     moment lands on every cause instead of one.
+//  3. A BOUND CALIBRATED FROM THE DATA rather than asserted. The same
+//     statistic is computed where the answer must be zero — the spread one
+//     cause shows against ITSELF across the run — and the compared spread
+//     must not exceed a multiple of it. On a loaded machine the noise floor
+//     rises and the bound rises with it; the test measures
+//     distinguishability, not the machine.
+func TestAdmission_RefusalTimingDoesNotRevealWhetherTheNameExists(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing samples; -short skips them")
 	}
-	t.Parallel()
+	// Deliberately NOT t.Parallel(). See above.
 	ctx := context.Background()
-	daemon, svc := startRealServerWith(t, globalAdmitsGatewayOnly)
+	daemon, svc, _ := startRealServerWith(t, globalAdmitsGatewayOnly)
 	if _, _, err := svc.Bootstrap(ctx, "johno", adminPass, gatewayAddr); err != nil {
 		t.Fatalf("seeding the admin: %v", err)
 	}
 	base, _ := startGateway(t, daemon)
 
-	const samples = 15
-	const tolerance = 300 * time.Millisecond
-
-	medians := map[string]time.Duration{}
-	for _, c := range []struct{ name, user, pass string }{
-		{"a name that does not exist", "nobody-at-all", adminPass},
-		{"a real name with the wrong password", "johno", "not the passphrase"},
-		{"a real name with the RIGHT password", "johno", adminPass},
-	} {
-		medians[c.name] = medianRefusal(t, base, c.user, c.pass, samples)
+	const rounds = 24
+	const unknownName = "a name that does not exist"
+	const wrongPassword = "a real name with the wrong password"
+	const rightPassword = "a real name with the RIGHT password"
+	causes := []timingCause{
+		{unknownName, "nobody-at-all", adminPass},
+		{wrongPassword, "johno", "not the passphrase"},
+		{rightPassword, "johno", adminPass},
 	}
 
-	var lo, hi time.Duration
-	var loName, hiName string
-	for name, d := range medians {
-		if lo == 0 || d < lo {
-			lo, loName = d, name
-		}
-		if d > hi {
-			hi, hiName = d, name
-		}
+	samples := sampleInterleaved(t, base, causes, rounds)
+	noise := selfSpread(samples)
+	bound := 4 * noise
+	if bound < timingFloor {
+		bound = timingFloor
 	}
-	if hi-lo > tolerance {
-		t.Errorf("%q answered in %s and %q in %s — a %s spread above the %s bound. A caller "+
-			"who can time the difference can tell a real account from an invented one "+
-			"without ever being let in\nmedians: %v",
-			hiName, hi, loName, lo, hi-lo, tolerance, medians)
+	meds := mediansOf(samples)
+	t.Logf("medians %v; within-cause noise %v; bound %v", meds, noise, bound)
+
+	// THE DEFENDED PROPERTY: does the name exist?
+	existence := abs(meds[unknownName] - meds[wrongPassword])
+	if existence > bound {
+		t.Errorf("an unknown name answered in %v and a real one with a wrong password in %v — "+
+			"a %v difference past the %v this run's own noise floor of %v supports. A caller "+
+			"could enumerate which accounts exist without ever holding a credential",
+			meds[unknownName], meds[wrongPassword], existence, bound, noise)
 	}
 
-	// THE CONTROL. Same three causes against a gateway whose admission
-	// refusal is deliberately slowed, so the spread is real and known.
-	// Without this the assertion above is satisfied by a harness that cannot
-	// resolve anything at all.
-	slowBase, _ := startGatewayWith(t, daemon, 700*time.Millisecond)
-	fast := medianRefusal(t, slowBase, "nobody-at-all", adminPass, samples)
-	slow := medianRefusal(t, slowBase, "johno", adminPass, samples)
-	if slow-fast <= tolerance {
-		t.Fatalf("against a gateway with a deliberate 700ms delay on the admission refusal, the "+
-			"harness measured %s and %s — a %s difference it could not resolve above its own "+
-			"%s bound. It cannot see a real timing leak, so its green above means nothing",
-			slow, fast, slow-fast, tolerance)
+	// THE RECORDED RESIDUAL: a correct password costs more, because being
+	// authenticated is work. Bounded so a regression that made it far worse
+	// fails here, and logged so the number is on the record rather than in
+	// somebody's memory.
+	credential := meds[rightPassword] - meds[wrongPassword]
+	t.Logf("RESIDUAL: a correct password is %v slower than an incorrect one (%.1f%% of the "+
+		"request) — structural, not closeable by decoy work; mitigated by the per-source "+
+		"throttle", credential, 100*float64(credential)/float64(meds[wrongPassword]))
+	if credential > meds[wrongPassword]/2 {
+		t.Errorf("a correct password now costs %v more than an incorrect one, over half the "+
+			"%v request itself. The residual has grown from the ~7%% measured when it was "+
+			"documented, and at this size a caller needs very few samples to confirm a "+
+			"guessed password from an address that is refused",
+			credential, meds[wrongPassword])
+	}
+
+	// THE CONTROL, AND IT CROSSES THE BOUND THIS RUN ACTUALLY USED — not some
+	// large number chosen in advance. A harness whose sensitivity is only
+	// demonstrated far above its acceptance boundary has not shown that the
+	// boundary means anything.
+	//
+	// The injected delay is on the ADMISSION refusal, which only the correct
+	// password reaches, so it separates exactly the pair the existence check
+	// compares would be blind to — and the statistic must see it.
+	delay := bound + timingControlMargin
+	slowBase, _ := startGatewayWith(t, daemon, delay)
+	slow := sampleInterleaved(t, slowBase, causes, rounds)
+	slowMeds := mediansOf(slow)
+	seen := slowMeds[rightPassword] - slowMeds[wrongPassword] - credential
+	if seen <= bound {
+		t.Fatalf("against a gateway whose admission refusal is delayed by %v — %v past the %v "+
+			"bound this run accepted — the same statistic resolved only %v of it. It cannot "+
+			"see a leak at its own boundary, so its green above says nothing",
+			delay, timingControlMargin, bound, seen)
 	}
 }
 
-func medianRefusal(t *testing.T, base, user, pass string, n int) time.Duration {
-	t.Helper()
-	samples := make([]time.Duration, 0, n)
-	for range n {
-		start := time.Now()
-		if status := webLoginFrom(t, base, browserAddr, user, pass); status == http.StatusOK {
-			t.Fatalf("%q was ACCEPTED; every cause here must be refused", user)
-		}
-		samples = append(samples, time.Since(start))
+func abs(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
 	}
-	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
-	return samples[len(samples)/2]
+	return d
+}
+
+// timingFloor is the smallest bound this cell will use, so an unusually quiet
+// run does not set one tighter than the causes' real sub-millisecond
+// difference in work done.
+const timingFloor = 5 * time.Millisecond
+
+// timingControlMargin is how far past the accepted bound the control's
+// injected delay sits. Small on purpose: the control has to demonstrate
+// sensitivity AT the boundary.
+const timingControlMargin = 20 * time.Millisecond
+
+type timingCause struct{ name, user, pass string }
+
+// sampleInterleaved takes one sample of each cause per round, ROTATING the
+// order, so a slow moment lands across the causes rather than on one block.
+func sampleInterleaved(t *testing.T, base string, causes []timingCause, rounds int) map[string][]time.Duration {
+	t.Helper()
+	out := map[string][]time.Duration{}
+	for round := range rounds {
+		for i := range causes {
+			c := causes[(i+round)%len(causes)]
+			start := time.Now()
+			if status := webLoginFrom(t, base, browserAddr, c.user, c.pass); status == http.StatusOK {
+				t.Fatalf("%q was ACCEPTED; every cause here must be refused", c.user)
+			}
+			out[c.name] = append(out[c.name], time.Since(start))
+		}
+	}
+	return out
+}
+
+func median(v []time.Duration) time.Duration {
+	c := append([]time.Duration(nil), v...)
+	sort.Slice(c, func(i, j int) bool { return c[i] < c[j] })
+	return c[len(c)/2]
+}
+
+func mediansOf(samples map[string][]time.Duration) map[string]time.Duration {
+	out := map[string]time.Duration{}
+	for name, v := range samples {
+		out[name] = median(v)
+	}
+	return out
+}
+
+func spreadOfMedians(samples map[string][]time.Duration) (spread time.Duration, hi, lo string) {
+	var his, los time.Duration
+	for name, v := range samples {
+		m := median(v)
+		if los == 0 || m < los {
+			los, lo = m, name
+		}
+		if m > his {
+			his, hi = m, name
+		}
+	}
+	return his - los, hi, lo
+}
+
+// selfSpread is the same statistic computed where the answer must be zero:
+// how far one cause's median moves between the even and odd rounds of the
+// SAME run. That is this machine's noise at this moment, measured rather than
+// guessed, and it is what the acceptance bound is scaled to.
+func selfSpread(samples map[string][]time.Duration) time.Duration {
+	var worst time.Duration
+	for _, v := range samples {
+		var even, odd []time.Duration
+		for i, d := range v {
+			if i%2 == 0 {
+				even = append(even, d)
+			} else {
+				odd = append(odd, d)
+			}
+		}
+		if len(even) == 0 || len(odd) == 0 {
+			continue
+		}
+		d := median(even) - median(odd)
+		if d < 0 {
+			d = -d
+		}
+		if d > worst {
+			worst = d
+		}
+	}
+	return worst
 }

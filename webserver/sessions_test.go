@@ -23,7 +23,7 @@ import (
 // only that the call was made. Mirrors the harness in tui/ui_test.go.
 func startRealServer(t *testing.T) string {
 	t.Helper()
-	addr, _ := startRealServerWith(t, []string{"127.0.0.1/32", "::1/128"})
+	addr, _, _ := startRealServerWith(t, []string{"127.0.0.1/32", "::1/128"})
 	return addr
 }
 
@@ -35,7 +35,7 @@ func startRealServer(t *testing.T) string {
 // the admission gate could be absent and every one of them stay green. A cell
 // that means to observe a refusal has to be able to build a daemon that
 // refuses.
-func startRealServerWith(t *testing.T, allowlist []string) (string, *auth.Service) {
+func startRealServerWith(t *testing.T, allowlist []string) (string, *auth.Service, *meta.Store) {
 	t.Helper()
 	ctx := context.Background()
 	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
@@ -71,7 +71,7 @@ func startRealServerWith(t *testing.T, allowlist []string) (string, *auth.Servic
 		}
 		time.Sleep(time.Millisecond)
 	}
-	return srv.Addr(), svc
+	return srv.Addr(), svc, store
 }
 
 // dialer returns the pool's dial function: a session with NO SPAWN, which is what

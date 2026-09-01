@@ -216,21 +216,6 @@ func (s *Service) AuditTxCorrelated(tx *dao.Transaction, userID int64, ip, actio
 // Audit appends one standalone audit row (no accompanying mutation — e.g.
 // failed logins, rejected executions). Callers with a mutation in flight
 // must use the transactional path instead.
-// AuditCountForTest counts rows for one audit action.
-//
-// Exported for the web gateway's ORDERING cell, which proves that a login
-// refused for its address had its credential verified first — the daemon's
-// audit row is the deterministic evidence for a property that timing can only
-// suggest. It reads nothing a caller could not already read through
-// audit.list with an admin token; the value here is that it needs no token.
-func (s *Service) AuditCountForTest(action string) uint64 {
-	n, err := s.store.Audit.OnCtx(context.Background()).With(meta.AuditAction, action).Count()
-	if err != nil {
-		return 0
-	}
-	return n
-}
-
 func (s *Service) Audit(ctx context.Context, userID int64, ip, action, detail string) error {
 	return s.AuditCorrelated(ctx, userID, ip, action, detail, "")
 }
