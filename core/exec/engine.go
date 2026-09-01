@@ -118,6 +118,10 @@ type Engine struct {
 	debugIdle    time.Duration
 	maxTxCeiling time.Duration
 
+	// cancels maps a client's BackendKeyData pair to the session it may
+	// cancel. See cancel_registry.go.
+	cancels *cancelRegistry
+
 	// reconcile is the outcome reconciler's cross-pass state: per-tx_id
 	// exclusion and retry backoff (ADR-0074 §7).
 	reconcile *reconciler
@@ -305,6 +309,7 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		debugIdle:           DefaultDebugIdleInTxTimeout,
 		maxTxCeiling:        DefaultMaxTxDurationCeiling,
 		reconcile:           newReconciler(),
+		cancels:             newCancelRegistry(),
 	}
 	e.bgCtx, e.bgCancel = context.WithCancel(context.Background())
 	for _, o := range opts {
