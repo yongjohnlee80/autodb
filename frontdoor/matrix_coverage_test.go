@@ -173,7 +173,6 @@ var matrixTriage = map[string]struct {
 	"5:ReadyForQuery":                   {awaiting, "synthesized from the ExecSession state machine — F1"},
 	"5:AuthenticationCleartextPassword": {awaiting, "the startup emission group (with AuthenticationOk, BackendKeyData, the session-open ParameterStatus, NegotiateProtocolVersion) — F0e cells in flight in #36; promoted when the full sequence is asserted"},
 	"5:CopyInResponse":                  {awaiting, "never-emitted canaries (CopyIn/Out/BothResponse, backend CopyData/CopyDone, NotificationResponse, FunctionCallResponse) — the F4 harness slice"},
->>>>>>> 5a4f74e (test(frontdoor): the coverage gate learns the sections that are not numbered)
 }
 
 // claimTriage is the claim-level obligation registry (lector PR #40 r0 MF1):
