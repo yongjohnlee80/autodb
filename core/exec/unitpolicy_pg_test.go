@@ -109,19 +109,37 @@ func TestUnitPolicy_ASmuggledWriteFailsAtTheServer(t *testing.T) {
 // policy forces it down again.
 func TestUnitPolicy_AReaderCannotUpgradeToReadWrite(t *testing.T) {
 	t.Parallel()
-	f, _, sid, table := readerSession(t)
+	f, connID, sid, table := pgSession(t)
 	ctx := context.Background()
+	// The function first: the fixture's root is the account about to be
+	// demoted, so anything it needs must exist while it still can create it.
+	fnPre := fmt.Sprintf("upgrade_pre_%d", time.Now().UnixNano())
+	if _, cerr := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
+		`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS $$ INSERT INTO %s(note) VALUES ('up'); SELECT 1 $$`,
+		fnPre, table), testIP); cerr != nil {
+		t.Skipf("cannot create the smuggling function: %v", cerr)
+	}
+	demoteToReader(t, f, connID)
 
 	if _, err := f.eng.SessionExecute(ctx, f.rootTok, sid, "BEGIN READ WRITE", testIP); err != nil {
 		t.Fatalf("BEGIN READ WRITE was refused outright (%v); the wrap is meant to override the "+
 			"access mode, not to reject the statement — a client that asks for a read-write "+
 			"transaction and is simply denied cannot tell that from a broken connection", err)
 	}
-	_, err := f.eng.SessionExecute(ctx, f.rootTok, sid,
-		fmt.Sprintf("INSERT INTO %s(note) VALUES ('upgrade')", table), testIP)
+	// THE SMUGGLED write, not a plain INSERT — the wire cell found this
+	// weakness in its own copy of the assertion first. A plain INSERT is
+	// refused by the GATE, because a reader is not authorized for
+	// ActionWrite, so it never reaches the server and proves nothing about
+	// the transaction's access mode. Only a statement the classifier passes
+	// can show where the refusal came from.
+	_, err := f.eng.SessionExecute(ctx, f.rootTok, sid, fmt.Sprintf("SELECT %s()", fnPre), testIP)
 	if err == nil {
 		t.Fatal("a reader who asked for READ WRITE got one. The access mode must be forced " +
 			"over an explicit request, not merely defaulted — otherwise the wrap is advice")
+	}
+	t.Logf("inside BEGIN READ WRITE, the target refused it with: %v", err)
+	if !strings.Contains(err.Error(), "25006") {
+		t.Errorf("the refusal was %v, want the target's own 25006", err)
 	}
 
 	// And the override is on the record, so a reader is not silently given

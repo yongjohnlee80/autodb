@@ -87,6 +87,14 @@ type StandingVerdict struct {
 	MayWrite bool
 	// Role is the effective account role at this moment, for the audit.
 	Role string
+	// Identity is the caller, resolved from the same read that decided the
+	// verdict.
+	//
+	// Carried here because the alternative is for every caller to re-read the
+	// user row to build one, and a second read is a second answer: the row
+	// can change between them, and then the unit runs as one identity and is
+	// authorized as another. One read, one answer.
+	Identity Identity
 	// Reason names why Standing is false, for the audit trail only.
 	Reason string
 }
@@ -179,6 +187,7 @@ func (s *Service) ResolveStanding(ctx context.Context, ref AuthorityRef, userID,
 		Standing: true,
 		MayWrite: eff >= requiredRank(ActionWrite),
 		Role:     u.Role,
+		Identity: Identity{userID: u.ID, name: u.Name, role: u.Role},
 	}, nil
 }
 

@@ -38,6 +38,15 @@ import (
 type UnitPolicy struct {
 	// Role is the effective account role at this instant, for the audit.
 	Role string
+	// Ident is the caller, from the same read that decided the policy. A
+	// second read would be a second answer.
+	Ident auth.Identity
+	// MayWrite reports whether the effective role clears the write floor.
+	// The inverse of ReadOnly, kept as its own field because a caller
+	// authorizing a statement asks the positive question and one that is
+	// wrapping asks the negative — and `!ReadOnly` at an authorization site
+	// reads like a double negative nobody checks.
+	MayWrite bool
 	// ReadOnly requires the unit to run inside a server-enforced read-only
 	// transaction. It is derived from the SAME verdict the janitor's
 	// authority re-check uses, so the foreground and the background cannot
@@ -66,7 +75,7 @@ func (e *Engine) resolveUnitPolicy(ctx context.Context, ref auth.AuthorityRef, u
 	if !v.Standing {
 		return UnitPolicy{}, auth.ErrDenied
 	}
-	return UnitPolicy{Role: v.Role, ReadOnly: !v.MayWrite}, nil
+	return UnitPolicy{Role: v.Role, MayWrite: v.MayWrite, ReadOnly: !v.MayWrite, Ident: v.Identity}, nil
 }
 
 // tokenUnitPolicy resolves the policy for a caller holding a session token.

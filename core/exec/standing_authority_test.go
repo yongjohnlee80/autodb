@@ -399,3 +399,112 @@ func TestStanding_AnUncertainRollbackClosesTheSessionInstead(t *testing.T) {
 			"it looks healthy while the engine's picture of the target is wrong")
 	}
 }
+
+// THE WIRE CELL (lector's final F1/F3a merge-gate item).
+//
+// Everything the session-path cells prove is about the policy's SEMANTICS.
+// This one is about the CREDENTIAL-KIND SEAM: that a PAT-backed wire session
+// reaches the same policy, resolved from the token's own row, and gets the
+// same server-enforced boundary. The two are different claims — the whole
+// defect this branch opens with was a re-check that worked for one kind of
+// credential and silently mis-read the other.
+//
+// It needs no listener. OpenWireSession already creates the PAT-backed
+// session; a socket would add a transport, not a claim.
+func TestStanding_TheWirePathReachesTheSamePolicy(t *testing.T) {
+	t.Parallel()
+	f, connID, sid, _, userID := pgWireSession(t)
+	ctx := context.Background()
+
+	// The transaction pgWireSession opened is the editor's; end it so each
+	// case below starts from a known state.
+	if _, err := f.eng.WireExecute(ctx, sid, userID, "ROLLBACK", testIP); err != nil {
+		t.Fatalf("ROLLBACK on the wire session: %v", err)
+	}
+
+	table := fmt.Sprintf("wire_%d", time.Now().UnixNano())
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID,
+		"CREATE TABLE "+table+" (id BIGSERIAL PRIMARY KEY, note TEXT NOT NULL)", testIP); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	fn := fmt.Sprintf("wire_smuggle_%d", time.Now().UnixNano())
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
+		`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS $$ INSERT INTO %s(note) VALUES ('wire'); SELECT 1 $$`,
+		fn, table), testIP); err != nil {
+		t.Skipf("cannot create the smuggling function: %v", err)
+	}
+
+	// An editor writes, so the refusals below are the policy and not a
+	// wire path that refuses everything.
+	if err := f.store.Users.OnCtx(ctx).With(meta.UserID, userID).
+		Set(meta.UserRole, meta.RoleEditor).Update(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Grants.OnCtx(ctx).With(meta.GrantUserID, userID).
+		With(meta.GrantConnID, connID).Set(meta.GrantRole, meta.RoleEditor).Update(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.eng.WireExecute(ctx, sid, userID,
+		fmt.Sprintf("INSERT INTO %s(note) VALUES ('editor')", table), testIP); err != nil {
+		t.Fatalf("an editor's wire write was refused (%v); every refusal below would then be "+
+			"a path that refuses everything rather than a policy", err)
+	}
+
+	// DEMOTED, same session, no reconnect.
+	if err := f.store.Users.OnCtx(ctx).With(meta.UserID, userID).
+		Set(meta.UserRole, meta.RoleReader).Update(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Grants.OnCtx(ctx).With(meta.GrantUserID, userID).
+		With(meta.GrantConnID, connID).Set(meta.GrantRole, meta.RoleReader).Update(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("autocommit: a smuggled write hits the server", func(t *testing.T) {
+		_, err := f.eng.WireExecute(ctx, sid, userID, fmt.Sprintf("SELECT %s()", fn), testIP)
+		if err == nil {
+			t.Fatal("a PAT-backed reader wrote through a function on the wire path")
+		}
+		t.Logf("the target refused it with: %v", err)
+		if !strings.Contains(err.Error(), "25006") {
+			t.Errorf("the refusal was %v; the wire path must carry the target's own 25006 "+
+				"exactly as the session path does", err)
+		}
+	})
+
+	t.Run("an explicit READ WRITE does not lift the wrap", func(t *testing.T) {
+		if _, err := f.eng.WireExecute(ctx, sid, userID, "BEGIN READ WRITE", testIP); err != nil {
+			t.Fatalf("BEGIN READ WRITE was refused outright on the wire path: %v", err)
+		}
+		// THE SMUGGLED write, not a plain INSERT.
+		//
+		// A plain INSERT is refused by the GATE — a reader is not authorized
+		// for ActionWrite — so it never reaches the server and proves
+		// nothing about the transaction's access mode. That is defence in
+		// depth working, and it is cheaper than a round trip, but it is not
+		// this assertion's subject. The function body is invisible to the
+		// classifier, so it is the only statement whose refusal can ONLY
+		// have come from the transaction being read-only.
+		_, err := f.eng.WireExecute(ctx, sid, userID, fmt.Sprintf("SELECT %s()", fn), testIP)
+		if err == nil {
+			t.Fatal("a PAT-backed reader who asked for READ WRITE got one: the smuggled write " +
+				"landed inside the transaction they requested")
+		}
+		t.Logf("inside BEGIN READ WRITE, the target refused it with: %v", err)
+		if !strings.Contains(err.Error(), "25006") {
+			t.Errorf("the refusal was %v, want the target's 25006 — anything else means the "+
+				"statement did not reach a server that would have stopped it", err)
+		}
+		if _, rerr := f.eng.WireExecute(ctx, sid, userID, "ROLLBACK", testIP); rerr != nil {
+			t.Fatalf("ROLLBACK: %v", rerr)
+		}
+	})
+
+	t.Run("a reader's SELECT still works", func(t *testing.T) {
+		if _, err := f.eng.WireExecute(ctx, sid, userID,
+			"SELECT count(*) FROM "+table, testIP); err != nil {
+			t.Fatalf("a PAT-backed reader's SELECT was refused (%v); the wrap has to be "+
+				"invisible to the thing readers actually do", err)
+		}
+	})
+}
