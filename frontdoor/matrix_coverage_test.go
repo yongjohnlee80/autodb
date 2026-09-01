@@ -62,16 +62,16 @@ var matrixTriage = map[string]struct {
 }{
 	"2.1":  {covered, "TestStartup_PlaintextIsRefused"},
 	"2.1a": {covered, "direct-TLS ClientHello refusal"},
-	"2.1b": {uncited, "TestLoadServerTLS_RefusesUnusableMaterial"},
+	"2.1b": {covered, "TestLoadServerTLS_RefusesUnusableMaterial + admission_test's handshake-grinding cell"},
 	"2.2":  {covered, "TestStartup_GSSEncIsRefusedWithN"},
 	"2.3":  {awaiting, "CancelRequest handling is F3 (cancel registry/mapping)"},
-	"2.4":  {uncited, "TestStartup_RefusedParameterIsAuditedButNotDisclosed"},
+	"2.4":  {covered, "TestStartup_RefusedParameterIsAuditedButNotDisclosed"},
 	"2.5":  {covered, "TestStartup_VersionNegotiation"},
 	"2.5a": {covered, "TestStartup_VersionNegotiation, unsupported major"},
-	"2.6":  {awaiting, "AuthenticationCleartextPassword offer — server-emission cell lands with the credential exchange (F0e)"},
+	"2.6":  {covered, "AuthenticationCleartextPassword offer — F0e's credential exchange"},
 	"2.7":  {covered, "F0d verification chain + atomic reservation"},
-	"2.8":  {awaiting, "type-p frames that are not a PasswordMessage — same path as 2.7, needs its own cell"},
-	"2.9":  {awaiting, "AuthenticationOk / ParameterStatus / BackendKeyData / ReadyForQuery sequence — F0e"},
+	"2.8":  {covered, "type-p frames that are not a PasswordMessage — F0e"},
+	"2.9":  {covered, "AuthenticationOk / ParameterStatus / BackendKeyData / ReadyForQuery — F0e"},
 }
 
 var (
