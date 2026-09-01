@@ -558,7 +558,9 @@ func buildTableForest(connID int64, schema string, tables []TableInfo, quoted ma
 			partKids = append(partKids, build(ch)) // recurse: a sub-partition nests too
 		}
 		partFolder.SetChildren(0, partKids)
-		node := widget.NewTreeNode(id, t.Name, widget.WithBadge("partitioned"))
+		// Bracketed so the role reads as an annotation rather than as part of
+		// the relation's name: "audit_log [partitioned]".
+		node := widget.NewTreeNode(id, t.Name, widget.WithBadge("[partitioned]"))
 		node.SetChildren(0, []*widget.TreeNode{colsFolder, partFolder})
 		return node
 	}
