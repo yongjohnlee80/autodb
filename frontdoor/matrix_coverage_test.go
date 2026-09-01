@@ -468,19 +468,18 @@ func numericRows(t *testing.T, section, body string) []string {
 
 // citedRows scans every test in the repo for row citations.
 //
-// THIS FILE IS EXCLUDED. The first version's comment said the exclusion was
-// not load-bearing and said so accurately — verified by removing it and
-// watching the gate still pass — because the only citation-shaped text here
-// named COVERED rows ("row 2.1", "matrix row 2.5", in the file comment
-// above), and a self-citation of a covered row fails nothing.
-//
-// The §3/§4/§5 extension keeps that property only by discipline: this file
-// now discusses qualified row ids in nearly every comment, and one worked
-// example in citation shape — "row 4:Sync", say, somewhere in the triage
-// discussion — would self-cite an AWAITING row and fail the gate on its own
-// prose. The exclusion is one careless sentence from load-bearing, which is
-// the original rationale for keeping it, restated for the wider surface: no
-// comment in this file may assume the scan cannot see it.
+// THIS FILE IS EXCLUDED, and the exclusion IS load-bearing — verified by
+// drill: remove it and the gate reddens on its own prose. This file quotes
+// PR #36's caps citation verbatim while explaining the case-insensitivity
+// fix ("// MATRIX ROW 2.4"), and this very paragraph names an awaiting row
+// in citation shape ("row 4:Sync"). Scan this file and both light up as
+// self-citations, the gate counting its own
+// description of the matrix as coverage of the matrix. The first version
+// claimed the exclusion was not load-bearing and was right at the time —
+// verified then by removing it and watching the gate still pass; the §2
+// quote arrived with the case-insensitivity fix and the §3/§4/§5
+// discussion widened the surface. No comment in this file may assume the
+// scan cannot see it.
 func citedRows(t *testing.T) map[string][]string {
 	t.Helper()
 	const self = "matrix_coverage_test.go"
