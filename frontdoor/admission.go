@@ -39,12 +39,37 @@ const (
 	// still process the messages that release it" true: the memory that
 	// carries a Terminate or an ErrorResponse was reserved before the
 	// connection could consume anything else.
+	//
+	// DISTINCT from exec.WireSessionOverhead, which is also 64 KiB and is
+	// charged against the ENGINE's resident budget for the ExecSession's own
+	// state. Two terms of §8.4's worst case, two budgets, two packages — see
+	// the matrix's §8.5 map. The numbers coincide because each is a
+	// conservative round figure for a different thing, and they must not be
+	// collapsed into one constant on the strength of being equal today.
+	//
+	// This is a RESERVATION against a budget, not a description of an
+	// allocation. The wire-side buffers themselves — the bufio.Reader, the
+	// TLS record buffers, the pgproto3 chunk reader — are §8.4's third term
+	// and are bounded by MaxFrontendConns rather than charged, because
+	// unlike segment input they cannot grow with what a peer sends.
 	ControlLanePerConn = 64 * 1024
 
 	// AuthFailuresPerIP and AuthFailureWindow throttle credential and
 	// handshake grinding from one source (matrix rows 2.1b and 2.7).
 	AuthFailuresPerIP = 10
 	AuthFailureWindow = time.Minute
+
+	// AuthWorkers bounds CONCURRENT credential verifications (matrix §9:
+	// "pre-auth conns 64 / auth workers 16").
+	//
+	// The connection cap and this are different quantities and the first
+	// does not imply the second. Sixty-four peers may be in the pre-auth
+	// phase at once, and verification is the expensive part of it — a PAT
+	// digest is deliberately slow, and the chain behind it runs several
+	// store queries. Without this, sixty-four anonymous peers can command
+	// sixty-four concurrent hash-and-query sequences, which is a way to
+	// spend the machine's CPU without holding a credential.
+	AuthWorkers = 16
 )
 
 // failureSweepThreshold bounds the throttle's map. Without it, a peer that

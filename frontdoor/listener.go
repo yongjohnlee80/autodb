@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"sync"
 	"time"
@@ -37,6 +38,11 @@ type Listener struct {
 
 	// admit holds every accept-time budget and the per-source throttle.
 	admit *admitter
+
+	// authSlots bounds CONCURRENT credential verifications (matrix §9's
+	// sixteen auth workers). A channel rather than a counter because the
+	// waiting has to be selectable against the connection's own deadline.
+	authSlots chan struct{}
 
 	// dl is the phase budget. Defaulted from the matrix's numbers in Open
 	// and shortened only by cells, which is why it is not an Option: an
@@ -111,6 +117,10 @@ type Options struct {
 	PreAuthMaxConns  int
 	ControlLaneBytes int64
 
+	// AuthWorkers bounds concurrent credential verifications. Zero takes
+	// the default of AuthWorkers.
+	AuthWorkers int
+
 	// testDeadlines and testDenialDelay are the package's own knobs, set at
 	// CONSTRUCTION rather than poked into the Listener afterwards.
 	//
@@ -144,7 +154,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	// The caps are resolved BEFORE the bind. A listener that binds and then
 	// discovers its budget is unusable has already taken the port from
 	// whatever else could have served on it.
-	maxConns, preAuthMax, failures, lane, err := resolveCaps(opt)
+	caps, err := resolveCaps(opt)
 	if err != nil {
 		return nil, err
 	}
@@ -167,8 +177,9 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	}
 	l.authn = opt.Authn
 	l.onSession = opt.OnSession
-	l.admit = newAdmitter(maxConns, preAuthMax, failures, lane, l.now)
+	l.admit = newAdmitter(caps.maxConns, caps.preAuthMax, caps.failures, caps.lane, l.now)
 	l.dl = defaultDeadlines()
+	l.authSlots = make(chan struct{}, caps.workers)
 	if opt.testDeadlines != nil {
 		l.dl = *opt.testDeadlines
 	}
@@ -184,34 +195,95 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 // that fails once the connection count climbs — at which point accept starts
 // failing closed for a reason nobody configured. Refusing at construction is
 // the difference between a misconfiguration and an incident.
-func resolveCaps(opt Options) (maxConns, preAuthMax, failures int, lane int64, err error) {
-	maxConns = opt.MaxConns
-	if maxConns <= 0 {
-		maxConns = MaxFrontendConns
+func resolveCaps(opt Options) (caps resolvedCaps, err error) {
+	// A NEGATIVE is a mistake, not a default (lector PR #36 r0 must-fix 3).
+	//
+	// The doc says zero takes the default, and `<= 0` silently made -5 mean
+	// the same thing. A caller who wrote a negative meant something, got
+	// something else, and was told nothing — which is how a limit ends up
+	// being whatever the code felt like rather than whatever was configured.
+	for _, f := range []struct {
+		name string
+		v    int
+	}{
+		{"max_conns", opt.MaxConns},
+		{"pre_auth_conns", opt.PreAuthMaxConns},
+		{"auth_workers", opt.AuthWorkers},
+		{"auth_failures_per_ip", opt.AuthFailuresPerIP},
+	} {
+		if f.v < 0 {
+			return caps, fmt.Errorf("frontdoor: %s is %d; zero takes the default and a "+
+				"negative is not a limit", f.name, f.v)
+		}
 	}
-	preAuthMax = opt.PreAuthMaxConns
-	if preAuthMax <= 0 {
-		preAuthMax = PreAuthMaxConns
+	if opt.ControlLaneBytes < 0 {
+		return caps, fmt.Errorf("frontdoor: control_lane_bytes is %d; zero takes the default "+
+			"and a negative is not a size", opt.ControlLaneBytes)
 	}
-	failures = opt.AuthFailuresPerIP
-	if failures <= 0 {
-		failures = AuthFailuresPerIP
+
+	caps.maxConns = orDefault(opt.MaxConns, MaxFrontendConns)
+	caps.preAuthMax = orDefault(opt.PreAuthMaxConns, PreAuthMaxConns)
+	caps.workers = orDefault(opt.AuthWorkers, AuthWorkers)
+
+	// The per-source throttle may only be RAISED, which is what the field
+	// documents and what `<= 0` did not enforce: a caller could ask for 1
+	// and get a limit stricter than the matrix pins, throttling an ordinary
+	// pool refill out of the estate. There is no spelling for "weaker".
+	caps.failures = orDefault(opt.AuthFailuresPerIP, AuthFailuresPerIP)
+	if caps.failures < AuthFailuresPerIP {
+		return caps, fmt.Errorf("frontdoor: auth_failures_per_ip %d is below the %d the matrix "+
+			"pins; this limit may only be raised", caps.failures, AuthFailuresPerIP)
 	}
-	lane = opt.ControlLaneBytes
-	floor := int64(maxConns) * ControlLanePerConn
-	if lane == 0 {
-		lane = floor
+
+	// The lane floor is computed WITHOUT overflowing. maxConns is a count
+	// and ControlLanePerConn a size, and their product exceeds int64 for a
+	// large enough count — at which point the floor wraps negative, every
+	// lane clears it, and the check that exists to fail closed passes
+	// everything.
+	if int64(caps.maxConns) > math.MaxInt64/ControlLanePerConn {
+		return caps, fmt.Errorf("frontdoor: max_conns %d × %d bytes overflows the lane "+
+			"arithmetic; no machine has that memory and the check would wrap",
+			caps.maxConns, ControlLanePerConn)
 	}
-	if lane < floor {
-		return 0, 0, 0, 0, fmt.Errorf("frontdoor: control lane %d bytes is below %d × %d = %d; "+
+	floor := int64(caps.maxConns) * ControlLanePerConn
+	caps.lane = opt.ControlLaneBytes
+	if caps.lane == 0 {
+		caps.lane = floor
+	}
+	if caps.lane < floor {
+		return caps, fmt.Errorf("frontdoor: control lane %d bytes is below %d × %d = %d; "+
 			"the lane must cover every connection the listener will admit",
-			lane, maxConns, ControlLanePerConn, floor)
+			caps.lane, caps.maxConns, ControlLanePerConn, floor)
 	}
-	if preAuthMax > maxConns {
-		return 0, 0, 0, 0, fmt.Errorf("frontdoor: pre-auth cap %d exceeds the connection cap %d; "+
-			"the anonymous allowance cannot be larger than the whole", preAuthMax, maxConns)
+	if caps.preAuthMax > caps.maxConns {
+		return caps, fmt.Errorf("frontdoor: pre-auth cap %d exceeds the connection cap %d; "+
+			"the anonymous allowance cannot be larger than the whole",
+			caps.preAuthMax, caps.maxConns)
 	}
-	return maxConns, preAuthMax, failures, lane, nil
+	// More workers than pre-auth connections is not a misconfiguration, it
+	// is a ceiling above a ceiling: only a connection in the pre-auth phase
+	// can ask for a worker, so the surplus is unreachable by construction.
+	// Clamped rather than refused, because refusing it would make a small
+	// pre-auth cap require a second setting to go with it for no benefit.
+	caps.workers = min(caps.workers, caps.preAuthMax)
+	return caps, nil
+}
+
+// resolvedCaps is one listener's settled budget. A struct because the tuple
+// had grown to five and a caller mixing two of them up would compile.
+type resolvedCaps struct {
+	maxConns   int
+	preAuthMax int
+	workers    int
+	failures   int
+	lane       int64
+}
+
+func orDefault(v, def int) int {
+	if v == 0 {
+		return def
+	}
+	return v
 }
 
 // Addr is the bound address, useful when the port was chosen by the OS.
