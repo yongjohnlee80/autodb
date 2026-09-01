@@ -223,6 +223,7 @@ func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP
 	// that made a correct password cost a minted-and-revoked session more
 	// than an incorrect one. Between the two, nothing has been created yet
 	// and the work done is the same as a wrong password's.
+	var admittedBy AdmissionSource
 	if admissionIP != "" {
 		src, aerr := s.IPAllowedForUser(ctx, nil, u.ID, admissionIP)
 		if aerr != nil {
@@ -236,7 +237,9 @@ func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP
 			}
 			return "", Identity{}, ErrBadCredentials
 		}
-		s.noteAdmission(ctx, u.ID, ip, admissionIP, src)
+		// CARRIED, NOT WRITTEN. The row goes in the committing transaction
+		// below — see there for why.
+		admittedBy = src
 	}
 	if len(u.MKWrapped) == 0 {
 		// A v1-era row that never received a keyslot: fail explicitly — an
@@ -269,7 +272,31 @@ func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP
 			if terr != nil {
 				return terr
 			}
-			return s.AuditTx(tx, u.ID, ip, "login", name)
+			if aerr := s.AuditTx(tx, u.ID, ip, "login", name); aerr != nil {
+				return aerr
+			}
+			// THE ADMISSION RECORD COMMITS WITH THE SESSION OR NOT AT ALL.
+			//
+			// It used to be written the moment the admission check passed,
+			// with a comment saying the login had already been decided. It
+			// had not: everything between there and here can still fail —
+			// a missing keyslot, a master key that will not unwrap, and the
+			// recheck just above, which exists precisely because a disable
+			// or a passphrase reset can commit underneath an in-flight
+			// login. Every one of those left behind a durable row claiming
+			// an admitted login that never existed. Lector reproduced it
+			// deterministically with an empty-keyslot row: no session, and
+			// login_admitted went from 0 to 1.
+			//
+			// An audit failure ROLLS THE LOGIN BACK rather than being
+			// dropped. The record of which layer admitted a session is part
+			// of what makes an unexpected access recognisable, and a session
+			// nobody can account for is worth less than a refused login.
+			if admittedBy != "" {
+				return s.AuditTx(tx, u.ID, ip, "login_admitted",
+					fmt.Sprintf("%s admitted by %s", admissionIP, admittedBy))
+			}
+			return nil
 		})
 	}); err != nil {
 		return "", Identity{}, err
@@ -299,14 +326,6 @@ func (s *Service) decoyAdmission(ctx context.Context, admissionIP string) {
 // sentinelUserID belongs to no account. User ids are positive, so a lookup on
 // this one does the query and finds nothing.
 const sentinelUserID int64 = 0
-
-// noteAdmission records WHICH layer admitted a browser, so an operator can
-// tell a login from shared infrastructure apart from one from a person's own
-// registered address. Best-effort: the login has already been decided.
-func (s *Service) noteAdmission(ctx context.Context, userID int64, ip, admissionIP string, src AdmissionSource) {
-	_ = s.Audit(ctx, userID, ip, "login_admitted",
-		fmt.Sprintf("%s admitted by %s", admissionIP, src))
-}
 
 // Logout revokes the calling session (kept as a row for audit).
 func (s *Service) Logout(ctx context.Context, token, ip string) error {
