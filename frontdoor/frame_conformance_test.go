@@ -178,12 +178,25 @@ func FuzzStartupFrame(f *testing.F) {
 
 	_, _, addr := liveListener(f)
 
+	// NO goroutine assertion here, deliberately. The first version of this
+	// target counted goroutines per iteration against a baseline it re-sampled
+	// per iteration -- so a leak of one goroutine per connection ratcheted
+	// under the slack forever and the target reported PASS while leaking on
+	// every connection (juliet, PR #37 r0; reproduced by injecting
+	// `go func(){ select{} }()` into handle()). Counting a cumulative quantity
+	// against a moving baseline cannot observe accumulation. Leak detection
+	// needs a controlled loop and a FIXED origin, so it lives in
+	// TestStartupFrame_NoGoroutineLeakAcrossConnections below.
+	//
+	// What belongs here is what fuzzing is actually for: novel input. Two
+	// invariants, neither dependent on what the bytes mean.
 	f.Fuzz(func(t *testing.T, opening []byte) {
-		before := runtime.NumGoroutine()
-
 		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
 		if err != nil {
-			t.Skipf("dial: %v", err) // the listener is shared; a refused dial is not the subject
+			// NOT a skip. A skip here would turn listener death into a silent
+			// pass: if the listener stops accepting, every remaining iteration
+			// skips and the target reports PASS having exercised nothing.
+			t.Fatalf("dial %s: %v (the listener under test is not accepting)", addr, err)
 		}
 		done := make(chan struct{})
 		go func() {
@@ -203,19 +216,98 @@ func FuzzStartupFrame(f *testing.F) {
 				"a peer can hold a pre-auth socket open with arbitrary bytes", opening)
 		}
 		_ = conn.Close()
-
-		// Goroutines unwind asynchronously; give the server a bounded moment
-		// rather than asserting on an instant that has no reason to be settled.
-		deadline := time.Now().Add(2 * time.Second)
-		for runtime.NumGoroutine() > before+4 && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if after := runtime.NumGoroutine(); after > before+4 {
-			t.Fatalf("goroutines %d -> %d for opening %x: a malformed frame leaked its server goroutine",
-				before, after, opening)
-		}
 	})
+}
 
+// TestStartupFrame_NoGoroutineLeakAcrossConnections observes what the fuzz
+// target could not: accumulation.
+//
+// A leak is a CUMULATIVE quantity, so it is measured against a FIXED origin
+// sampled once, across many connections. connCount is chosen so that a leak of
+// a single goroutine per connection is unmistakable against scheduler noise --
+// at 40 connections a 1-per-connection leak shows +40, which no slack that
+// still deserves the name could absorb.
+//
+// This is the cell that fails under `go func(){ select{} }()` in handle().
+func TestStartupFrame_NoGoroutineLeakAcrossConnections(t *testing.T) {
+	const connCount = 40
+
+	_, _, addr := liveListener(t)
+
+	// Openings that reach different IMMEDIATE refusal paths, so the loop
+	// exercises several ways a connection can end rather than one of them
+	// forty times.
+	//
+	// Deliberately excluded: sslRequest and GSSENCRequest. Both are answered
+	// and then WAIT for a TLS ClientHello that this test never sends, so each
+	// costs the full TLSHandshakeDeadline -- measured at 10.005s and 10.009s
+	// against 0s for the three below. Including them made this cell take 48s
+	// for no additional leak coverage.
+	//
+	// STATED LIMITATION: that means the deadline-expiry path's cleanup is not
+	// covered here. A leak reachable ONLY by timing out the handshake would
+	// pass this cell. That is a real gap, accepted because a per-connection
+	// leak lives in the shared handle() path these three already traverse --
+	// which is exactly what the mutation control demonstrates.
+	openings := [][]byte{
+		{0x16, 0x03, 0x01, 0x00, 0x01}, // direct TLS refusal
+		{0x00, 0x00, 0x00, 0x00},       // malformed length
+		{0xff, 0xff, 0xff, 0xff},       // over-cap length
+	}
+
+	// One connection first, so the server's per-connection machinery is warm
+	// and the baseline does not absorb first-use allocations as if they were
+	// the leak we are looking for.
+	drive(t, addr, openings[0])
+	settle()
+
+	origin := runtime.NumGoroutine()
+
+	for i := 0; i < connCount; i++ {
+		drive(t, addr, openings[i%len(openings)])
+	}
+	settle()
+
+	// Slack covers scheduler noise and the listener's own accept loop, NOT a
+	// per-connection leak: 8 is a fifth of connCount, so one leaked goroutine
+	// per connection overshoots it five times over.
+	const slack = 8
+	if after := runtime.NumGoroutine(); after > origin+slack {
+		t.Fatalf("goroutines %d -> %d across %d connections (slack %d): "+
+			"roughly %.1f leaked per connection",
+			origin, after, connCount, slack, float64(after-origin)/float64(connCount))
+	}
+}
+
+// drive opens one connection, sends opening, and waits for the server to end
+// the conversation. It fails the test rather than skipping on a dial error.
+func drive(t *testing.T, addr string, opening []byte) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", addr, err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	_, _ = conn.Write(opening)
+	_, _ = io.Copy(io.Discard, conn)
+}
+
+// settle waits for server goroutines to unwind. Goroutine teardown is
+// asynchronous, so an instantaneous reading after the last close has no reason
+// to be correct; this waits for the count to stop moving rather than sleeping
+// a guessed interval.
+func settle() {
+	prev := -1
+	for i := 0; i < 200; i++ { // bounded: 200 * 10ms = 2s ceiling
+		runtime.Gosched()
+		n := runtime.NumGoroutine()
+		if n == prev {
+			return
+		}
+		prev = n
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // TestStartupFrame_HeaderWithoutBodyIsBoundedByTheDeadline records what a
