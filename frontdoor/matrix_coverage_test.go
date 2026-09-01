@@ -31,10 +31,24 @@ const (
 	// covered: at least one test cites this row today. The gate fails if the
 	// citation disappears, which is how a deleted cell gets noticed.
 	covered rowState = iota
-	// awaiting: deliberately not tested yet, with the reason recorded. The
-	// gate fails if a citation APPEARS — that is the promotion signal, and it
-	// keeps this list from silently rotting into a list of lies.
+	// awaiting: no cell exists yet, with the reason recorded. The gate fails
+	// if a citation APPEARS — that is the promotion signal, and it keeps this
+	// list from silently rotting into a list of lies.
 	awaiting
+	// uncited: a cell DOES exist and is named, but it does not cite the row,
+	// so the citation scan cannot see it.
+	//
+	// This state exists because the first version of this gate did not have
+	// it, and was wrong because of that: I marked 2.1b and 2.4 "awaiting" and
+	// reported 6 of 12 rows untested, when both are in fact tested — 2.4 end
+	// to end, over the wire, asserting the uniform denial AND the audit
+	// reason. Tested-but-uncited is indistinguishable from untested to a
+	// citation scan, so without a third state the gate silently overstates the
+	// gap and its headline number is wrong.
+	//
+	// The named test must EXIST, and the gate checks that it does — otherwise
+	// this state would be a free-text excuse for anything.
+	uncited
 )
 
 // The triage. Every §2 row, and why.
@@ -44,14 +58,14 @@ const (
 // describes.
 var matrixTriage = map[string]struct {
 	state  rowState
-	reason string
+	reason string // for `uncited`, this MUST be the test function's name
 }{
 	"2.1":  {covered, "TestStartup_PlaintextIsRefused"},
 	"2.1a": {covered, "direct-TLS ClientHello refusal"},
-	"2.1b": {awaiting, "TLS material validation IS implemented and tested (tls_test.go, F0a) but those cells do not cite this row; promote when a citation is added"},
+	"2.1b": {uncited, "TestLoadServerTLS_RefusesUnusableMaterial"},
 	"2.2":  {covered, "TestStartup_GSSEncIsRefusedWithN"},
 	"2.3":  {awaiting, "CancelRequest handling is F3 (cancel registry/mapping)"},
-	"2.4":  {awaiting, "StartupMessage parameter policy — §3.1 pinning, not yet exercised end to end"},
+	"2.4":  {uncited, "TestStartup_RefusedParameterIsAuditedButNotDisclosed"},
 	"2.5":  {covered, "TestStartup_VersionNegotiation"},
 	"2.5a": {covered, "TestStartup_VersionNegotiation, unsupported major"},
 	"2.6":  {awaiting, "AuthenticationCleartextPassword offer — server-emission cell lands with the credential exchange (F0e)"},
@@ -156,7 +170,7 @@ func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 	rows := matrixRows(t)
 	cited := citedRows(t)
 
-	var untriaged, regressed, promotable []string
+	var untriaged, regressed, promotable, phantomTest []string
 
 	for _, row := range rows {
 		entry, known := matrixTriage[row]
@@ -173,6 +187,16 @@ func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 		case awaiting:
 			if isCited {
 				promotable = append(promotable, row+" — now cited by "+strings.Join(cited[row], ", "))
+			}
+		case uncited:
+			if isCited {
+				promotable = append(promotable, row+" — now cited by "+strings.Join(cited[row], ", ")+
+					" (promote to covered)")
+			}
+			// The named cell must exist. An `uncited` claim is otherwise just
+			// an assertion that something, somewhere, covers this.
+			if !testFuncExists(t, entry.reason) {
+				phantomTest = append(phantomTest, row+" names "+entry.reason+", which is not a test function in this repo")
 			}
 		}
 	}
@@ -203,8 +227,14 @@ func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 			promotable)
 	}
 
-	t.Logf("§2 conformance: %d rows, %d covered, %d awaiting",
-		len(rows), countState(covered), countState(awaiting))
+	if len(phantomTest) > 0 {
+		t.Errorf("rows marked uncited whose named cell does not exist: %v\n"+
+			"An uncited claim must name a real test, or it is an excuse rather than a record.",
+			phantomTest)
+	}
+
+	t.Logf("§2 conformance: %d rows — %d covered, %d tested-but-uncited, %d awaiting a cell",
+		len(rows), countState(covered), countState(uncited), countState(awaiting))
 }
 
 func countState(s rowState) int {
@@ -238,4 +268,35 @@ func TestMatrixCoverage_TriageHasNoPhantomRows(t *testing.T) {
 		t.Fatalf("matrixTriage names rows the matrix does not contain: %v\n"+
 			"A renumbered or deleted row leaves a claim behind that describes nothing.", phantom)
 	}
+}
+
+// testFuncExists reports whether a Go test function of this name is declared
+// anywhere in the repo, so an `uncited` entry names something real.
+func testFuncExists(t *testing.T, name string) bool {
+	t.Helper()
+	if name == "" {
+		return false
+	}
+	want := regexp.MustCompile(`func\s+` + regexp.QuoteMeta(name) + `\s*\(`)
+	found := false
+	_ = filepath.Walk(repoRoot(t), func(path string, info os.FileInfo, err error) error {
+		if err != nil || found {
+			return nil
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, rerr := os.ReadFile(path)
+		if rerr == nil && want.Match(src) {
+			found = true
+		}
+		return nil
+	})
+	return found
 }
