@@ -357,13 +357,23 @@ func countAudit(t *testing.T, store *meta.Store, action string) uint64 {
 // the credential and minting anything, so the refused path does the same work
 // as a wrong password and no session is created.
 //
+// THE COMPARISON IS PAIRED, and that is what lets it run beside two other
+// package binaries under -race. Dropping t.Parallel() stops competition from
+// sibling tests and is not enough: `go test ./rpc ./tui ./webserver` runs the
+// three packages CONCURRENTLY, so the machine is busy whatever this package
+// does — an earlier version failed on the third run of that matrix while
+// passing five times in isolation. The causes are sampled together, one of
+// each per rotated round, and the statistic is the median of the per-ROUND
+// differences rather than the difference of two independent medians. A load
+// spike inflates every cause in the round it lands on, so it cancels.
+//
 // THE BOUND IS CALIBRATED FROM THE DATA. The same statistic is computed where
-// the answer must be zero — how far one cause's median moves between the even
-// and odd rounds of the same run — and neither compared spread may exceed
-// four times it. On a loaded machine the noise floor rises and the bound
-// rises with it, so the test measures distinguishability rather than the
-// machine. An earlier version asserted a fixed 300ms against a 17ms request
-// and was both meaningless and flaky under load.
+// the answer must be zero — how far the paired difference moves between the
+// even and odd rounds of the same run — and neither compared difference may
+// exceed four times it. On a loaded machine the noise floor rises and the
+// bound rises with it, so the test measures distinguishability rather than
+// the machine. An earlier version asserted a fixed 300ms against a 17ms
+// request and was both meaningless and flaky under load.
 func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing samples; -short skips them")
@@ -379,18 +389,29 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	base, _ := startGateway(t, daemon)
 
 	samples := sampleInterleaved(t, base, timingCauses(), timingRounds)
-	noise := selfSpread(samples)
+	existence := pairedDifference(samples, unknownName, wrongPassword)
+	credential := pairedDifference(samples, rightPassword, wrongPassword)
+	noise := max(pairedNoise(samples, unknownName, wrongPassword),
+		pairedNoise(samples, rightPassword, wrongPassword))
 	bound := 4 * noise
 	if bound < timingFloor {
 		bound = timingFloor
 	}
-	meds := mediansOf(samples)
-	t.Logf("medians %v; within-cause noise %v; bound %v", meds, noise, bound)
+	t.Logf("medians %v; paired existence %v; paired credential %v; paired noise %v; bound %v",
+		mediansOf(samples), existence, credential, noise, bound)
 
-	checkIndistinguishable(t, "whether the name exists", meds, unknownName, wrongPassword, bound, noise,
-		"a caller could enumerate which accounts exist without ever holding a credential")
-	checkIndistinguishable(t, "whether the password is right", meds, rightPassword, wrongPassword, bound, noise,
-		"a caller at a refused address could confirm a guessed password without ever being let in")
+	if abs(existence) > bound {
+		t.Errorf("whether the name exists: an unknown name and a real one with a wrong password "+
+			"differ by %v per attempt, past the %v this run's own noise floor of %v supports. "+
+			"A caller could enumerate which accounts exist without ever holding a credential",
+			existence, bound, noise)
+	}
+	if abs(credential) > bound {
+		t.Errorf("whether the password is right: a correct password and an incorrect one differ "+
+			"by %v per attempt, past the %v this run's own noise floor of %v supports. A caller "+
+			"at a refused address could confirm a guessed password without ever being let in",
+			credential, bound, noise)
+	}
 
 	// TWO COMMITTED CONTROLS, one per property, each injecting a difference
 	// just past the bound THIS RUN accepted and each caught by the exact
@@ -404,8 +425,7 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	// cause by what the request carries.
 	delay := bound + timingControlMargin
 	t.Run("the harness can catch a username-existence leak", func(t *testing.T) {
-		control := timingControl(t, daemon, []byte("nobody-at-all"), delay)
-		got := abs(control[unknownName] - control[wrongPassword])
+		got := abs(timingControl(t, daemon, []byte("nobody-at-all"), delay, unknownName, wrongPassword))
 		if got <= bound {
 			t.Fatalf("with %v injected into the unknown-name path alone — %v past the %v bound "+
 				"this run accepted — the existence statistic resolved only %v. It cannot see a "+
@@ -414,8 +434,7 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 		}
 	})
 	t.Run("the harness can catch a credential-validity leak", func(t *testing.T) {
-		control := timingControl(t, daemon, []byte(adminPass), delay)
-		got := abs(control[rightPassword] - control[wrongPassword])
+		got := abs(timingControl(t, daemon, []byte(adminPass), delay, rightPassword, wrongPassword))
 		if got <= bound {
 			t.Fatalf("with %v injected into the correct-password path alone — %v past the %v "+
 				"bound this run accepted — the credential statistic resolved only %v. It cannot "+
@@ -425,13 +444,55 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	})
 }
 
-// timingControl measures the three causes through a proxy that delays only
-// the requests whose payload carries `match`, and returns their medians.
-func timingControl(t *testing.T, daemon string, match []byte, delay time.Duration) map[string]time.Duration {
+// timingControl measures through a proxy that delays only the requests whose
+// payload carries `match`, and returns the SAME paired statistic the
+// assertions use.
+func timingControl(t *testing.T, daemon string, match []byte, delay time.Duration, a, b string) time.Duration {
 	t.Helper()
 	proxy := delayingProxy(t, daemon, match, delay)
 	base, _ := startGateway(t, proxy)
-	return mediansOf(sampleInterleaved(t, base, timingCauses(), timingRounds))
+	return pairedDifference(sampleInterleaved(t, base, timingCauses(), timingRounds), a, b)
+}
+
+// pairedDifference is the median of the per-ROUND differences between two
+// causes.
+//
+// Paired rather than a difference of independent medians, because the three
+// causes are sampled together in each round: a load spike inflates all of them
+// in the round it lands on and cancels here. That is what lets this run beside
+// two other package binaries under -race and still measure the subject rather
+// than the machine.
+func pairedDifference(samples map[string][]time.Duration, a, b string) time.Duration {
+	va, vb := samples[a], samples[b]
+	n := min(len(va), len(vb))
+	diffs := make([]time.Duration, 0, n)
+	for i := range n {
+		diffs = append(diffs, va[i]-vb[i])
+	}
+	if len(diffs) == 0 {
+		return 0
+	}
+	return median(diffs)
+}
+
+// pairedNoise is the same statistic computed where the answer must be zero:
+// how far the paired difference moves between the even and odd rounds of the
+// SAME run. That is this machine's noise in the units the assertion uses.
+func pairedNoise(samples map[string][]time.Duration, a, b string) time.Duration {
+	va, vb := samples[a], samples[b]
+	n := min(len(va), len(vb))
+	var even, odd []time.Duration
+	for i := range n {
+		if i%2 == 0 {
+			even = append(even, va[i]-vb[i])
+		} else {
+			odd = append(odd, va[i]-vb[i])
+		}
+	}
+	if len(even) == 0 || len(odd) == 0 {
+		return 0
+	}
+	return abs(median(even) - median(odd))
 }
 
 func checkIndistinguishable(t *testing.T, property string, meds map[string]time.Duration,
@@ -569,35 +630,6 @@ func spreadOfMedians(samples map[string][]time.Duration) (spread time.Duration, 
 		}
 	}
 	return his - los, hi, lo
-}
-
-// selfSpread is the same statistic computed where the answer must be zero:
-// how far one cause's median moves between the even and odd rounds of the
-// SAME run. That is this machine's noise at this moment, measured rather than
-// guessed, and it is what the acceptance bound is scaled to.
-func selfSpread(samples map[string][]time.Duration) time.Duration {
-	var worst time.Duration
-	for _, v := range samples {
-		var even, odd []time.Duration
-		for i, d := range v {
-			if i%2 == 0 {
-				even = append(even, d)
-			} else {
-				odd = append(odd, d)
-			}
-		}
-		if len(even) == 0 || len(odd) == 0 {
-			continue
-		}
-		d := median(even) - median(odd)
-		if d < 0 {
-			d = -d
-		}
-		if d > worst {
-			worst = d
-		}
-	}
-	return worst
 }
 
 func abs(d time.Duration) time.Duration {

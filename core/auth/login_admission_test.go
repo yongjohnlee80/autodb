@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -290,4 +291,89 @@ func countSessions(t *testing.T, store *meta.Store) uint64 {
 		t.Fatalf("counting sessions: %v", err)
 	}
 	return n
+}
+
+// AN AUDIT FAILURE ROLLS THE LOGIN BACK (lector PR #34 r4 must-fix).
+//
+// r3 moved the admission record into the committing transaction and returned
+// its error rather than dropping it. I could not observe that with the cells I
+// had — swallowing the error survived every one of them — and I reported it as
+// unobservable, arguing that the `login` audit immediately above had the same
+// uncovered shape.
+//
+// Lector rejected the argument, correctly: an uncovered neighbour is another
+// candidate for the same control, not a licence. And no production seam is
+// needed, which is the part I had not thought of. The test already owns the
+// store, so it can install a trigger that makes one specific insert fail and
+// then watch the whole transaction come back.
+//
+// Both rows get the treatment, because the property is about the transaction
+// boundary rather than about either row in particular.
+func TestLoginAt_AnAuditFailureRollsTheLoginBack(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ name, action string }{
+		{"the admission-source record", "login_admitted"},
+		{"the ordinary login record", "login"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			s, store, _ := newSvc(t)
+			if _, _, err := s.Bootstrap(ctx, "johno", rootPass, testIP); err != nil {
+				t.Fatalf("bootstrap: %v", err)
+			}
+
+			// A login that WORKS, first — otherwise a refusal below could be
+			// the trigger doing nothing and the login failing for its own
+			// reasons.
+			if _, _, err := s.LoginAt(ctx, "johno", rootPass, testIP, testIP); err != nil {
+				t.Fatalf("the control login failed before the trigger was installed: %v", err)
+			}
+
+			failAuditInsert(t, store, c.action)
+
+			sessBefore := countSessions(t, store)
+			loginsBefore := countAuditRows(t, store, "login")
+			admittedBefore := countAuditRows(t, store, "login_admitted")
+
+			tok, _, err := s.LoginAt(ctx, "johno", rootPass, testIP, testIP)
+			if err == nil {
+				t.Fatalf("LoginAt succeeded although the %s insert was forced to fail; the "+
+					"error was swallowed, and a session now exists that the trail cannot "+
+					"account for", c.action)
+			}
+			if tok != "" {
+				t.Errorf("a token was returned despite the failure: %q", tok)
+			}
+			if n := countSessions(t, store) - sessBefore; n != 0 {
+				t.Errorf("%d sessions survived a failed audit insert; the whole transaction "+
+					"must come back, or the session outlives the record of why it exists", n)
+			}
+			if n := countAuditRows(t, store, "login") - loginsBefore; n != 0 {
+				t.Errorf("%d login rows survived", n)
+			}
+			if n := countAuditRows(t, store, "login_admitted") - admittedBefore; n != 0 {
+				t.Errorf("%d admission rows survived", n)
+			}
+		})
+	}
+}
+
+// failAuditInsert makes every audit insert for one action fail, from the
+// TEST, using the store the test already owns.
+//
+// A trigger rather than a hook on the Service. An injected-failure seam on a
+// security-critical API is what lector refused in r1, and it is not needed:
+// the failure this cell is about is a database refusing a write, so making
+// the database refuse it is both closer to the real thing and entirely
+// test-owned.
+func failAuditInsert(t *testing.T, store *meta.Store, action string) {
+	t.Helper()
+	_, err := store.Conn().ExecContext(context.Background(), fmt.Sprintf(`
+		CREATE TRIGGER fail_%s_audit BEFORE INSERT ON audit_log
+		WHEN NEW.action = '%s'
+		BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END`, action, action))
+	if err != nil {
+		t.Fatalf("installing the failure trigger for %q: %v", action, err)
+	}
 }
