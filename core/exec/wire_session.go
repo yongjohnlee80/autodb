@@ -187,7 +187,9 @@ func (e *Engine) OpenWireSession(ctx context.Context, presented, startupUser, da
 	}
 	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s := &session{
-		id: id, userID: pat.UserID, authSessID: 0, connID: connRow.ID,
+		// The authority is the TOKEN, named by its row id. A zero sentinel
+		// here is what made the janitor read every wire session as revoked.
+		id: id, userID: pat.UserID, authority: auth.PATAuthority(pat.ID), connID: connRow.ID,
 		ctx: sctx, cancel: cancel, lastUsed: e.now(),
 	}
 	if rerr := e.sessions.admitWithLease(s, connRow.ID, WireSessionOverhead); rerr != nil {

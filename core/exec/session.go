@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
+
+	"github.com/yongjohnlee80/autodb/core/auth"
 )
 
 // ExecSession — an engine-owned client session (ADR-0074 §1).
@@ -95,11 +97,28 @@ type session struct {
 	id     SessionID
 	userID int64
 	connID int64
-	// authSessID names the AUTH session row this exec session's authority
-	// rests on. A pinned transaction outlives the call that opened it, so the
-	// authority has to be re-checkable later without a token — and revocation
-	// and expiry both live on that row.
-	authSessID int64
+	// authority names the durable row this exec session's authority rests
+	// on. A pinned transaction outlives the call that opened it, so the
+	// authority has to be re-checkable later without a token — and
+	// revocation and expiry live on that row.
+	//
+	// TYPED, because there are two kinds and the previous shape could not
+	// say which. It was a bare session id, and a front-door session — whose
+	// authority is a PAT, not a session — stored a zero as a sentinel for
+	// "no session row". The janitor passed that zero to a session-keyed
+	// lookup, the missing row read as a revocation, and every wire
+	// transaction would have been rolled back and closed on the first sweep,
+	// audited as though permission had been withdrawn. Nothing caught it
+	// because the two halves were tested separately: sweeps used token
+	// sessions, wire sessions never opened a transaction.
+	authority auth.AuthorityRef
+
+	// demoted records that this session lost write privilege while it was
+	// open. It is set by the sweep and read by the execution path, which
+	// must not serve a write for a session the sweep has already demoted —
+	// the full reader read-only wrap is F3a's, and this is the flag it will
+	// hang on rather than a second source of truth.
+	demoted bool
 
 	// ctx outlives the RPC call that created the session, which is the whole
 	// point: a COMMIT arriving in a LATER call has to operate on a live
@@ -126,8 +145,12 @@ type session struct {
 
 	// closeIP and closeWhy are kept so a retried close audits the reason the
 	// close actually had, rather than inventing one at retry time.
-	closeIP  string
-	closeWhy string
+	closeIP     string
+	closeWhy    string
+	closeActive bool
+	// closeRetryRequested closes the handoff race where a demotion asks an
+	// active ordinary closer to own cleanup just before that closer defers.
+	closeRetryRequested bool
 	// done is closed when the in-flight statement finishes, so a closer can
 	// JOIN it without holding a lock.
 	done chan struct{}
@@ -136,10 +159,11 @@ type session struct {
 
 	// The session's one transaction (ADR-0074 Amendment 2). All of these
 	// fields are guarded by mu.
-	tx       dao.ContextTxConn
-	txPhase  txPhase
-	txID     string
-	txOpened time.Time
+	tx               dao.ContextTxConn
+	txPhase          txPhase
+	txID             string
+	txOpened         time.Time
+	txOpenedMayWrite bool
 	// targetXID is the target's own transaction id, captured at BEGIN. It is
 	// the reconciler's only oracle after a crash, so it is held on the
 	// session for the length of the transaction and written onto the
@@ -149,6 +173,18 @@ type session struct {
 	// connection's own profile, so a transaction is bounded by what was
 	// configured when it opened rather than by whatever config says later.
 	limits txLimits
+}
+
+// clearTxLocked clears every field owned by the attached transaction. The
+// caller must hold s.mu.
+func (s *session) clearTxLocked() {
+	s.tx = nil
+	s.txPhase = txNone
+	s.txID = ""
+	s.txOpened = time.Time{}
+	s.txOpenedMayWrite = false
+	s.targetXID = ""
+	s.limits = txLimits{}
 }
 
 func (s *session) get() sessionState { return sessionState(s.state.Load()) }
@@ -480,8 +516,15 @@ func (s *session) idleFor(now time.Time) time.Duration {
 // CAS is the check and the effect in a single instruction, so there is no gap
 // to reach into, and a hook could only sit outside the operation where it
 // proves nothing. See the note on TestSession_ManyClosersOneOwner.
-func (s *session) beginClose() bool {
-	return s.state.CompareAndSwap(int32(sessOpen), int32(sessClosing))
+func (s *session) beginClose(ip, reason string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.state.CompareAndSwap(int32(sessOpen), int32(sessClosing)) {
+		return false
+	}
+	s.closeIP, s.closeWhy = ip, reason
+	s.closeActive = true
+	return true
 }
 
 // runContext is the context ONE statement runs on: the session's lifetime and
@@ -599,17 +642,56 @@ func (s *session) inTransaction() bool {
 	return s.txPhase != txNone
 }
 
-// setCloseReason records why a close began, for a retry to audit later.
-func (s *session) setCloseReason(ip, reason string) {
-	s.mu.Lock()
-	s.closeIP, s.closeWhy = ip, reason
-	s.mu.Unlock()
-}
-
-func (s *session) closeReason() (string, string) {
+// transferClose publishes an overriding close reason and claims finalizer
+// ownership when no owner is active. It covers both an open session and a
+// closing session whose earlier owner explicitly deferred for retry.
+func (s *session) transferClose(ip, reason string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.closeIP, s.closeWhy
+	switch s.get() {
+	case sessOpen:
+		if !s.state.CompareAndSwap(int32(sessOpen), int32(sessClosing)) {
+			return false
+		}
+		s.closeIP, s.closeWhy = ip, reason
+		s.closeActive = true
+		return true
+	case sessClosing:
+		s.closeIP, s.closeWhy = ip, reason
+		if !s.closeActive {
+			s.closeActive = true
+			return true
+		}
+		s.closeRetryRequested = true
+	}
+	return false
+}
+
+// claimCloseRetry takes finalizer ownership only after an earlier owner
+// explicitly deferred. A closing state alone is not enough: the original
+// owner may still be quiescing or rolling back.
+func (s *session) claimCloseRetry() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.get() != sessClosing || s.closeActive {
+		return false
+	}
+	s.closeActive = true
+	return true
+}
+
+// releaseCloseForRetry reports whether a transfer arrived while this owner was
+// active. In that case ownership remains active and this owner must retry
+// immediately; otherwise the next janitor may claim it.
+func (s *session) releaseCloseForRetry() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closeRetryRequested {
+		s.closeRetryRequested = false
+		return true
+	}
+	s.closeActive = false
+	return false
 }
 
 // finishClose moves closing → closed.

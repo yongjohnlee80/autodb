@@ -89,6 +89,17 @@ type Engine struct {
 	// same reason as closeQuiesce: a shared package variable that parallel
 	// tests reassign is a data race, which is how the first one started.
 	txQuiesce time.Duration
+	// Demotion race hooks are nil in production. They let tests place the
+	// foreground and janitor on opposite sides of the slot boundary without
+	// relying on scheduler timing.
+	hookBeforeDemotionQuiesce func()
+	hookDemotionOwned         func(teardown bool)
+	hookDemotionCloseOwned    func()
+	// hookQuiesceJoined fires between a successful join and the teardown
+	// claim inside quiesce — the exact window a foreground statement can
+	// claim the slot first and turn the claim into ErrSessionBusy
+	// contention. Nil in production; a test seam only.
+	hookQuiesceJoined func()
 
 	history bool
 	maxRows int
@@ -117,6 +128,10 @@ type Engine struct {
 	txLimits     txLimits
 	debugIdle    time.Duration
 	maxTxCeiling time.Duration
+
+	// cancels maps a client's BackendKeyData pair to the session it may
+	// cancel. See cancel_registry.go.
+	cancels *cancelRegistry
 
 	// reconcile is the outcome reconciler's cross-pass state: per-tx_id
 	// exclusion and retry backoff (ADR-0074 §7).
@@ -305,6 +320,7 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		debugIdle:           DefaultDebugIdleInTxTimeout,
 		maxTxCeiling:        DefaultMaxTxDurationCeiling,
 		reconcile:           newReconciler(),
+		cancels:             newCancelRegistry(),
 	}
 	e.bgCtx, e.bgCancel = context.WithCancel(context.Background())
 	for _, o := range opts {
@@ -388,6 +404,13 @@ func classToAction(c Class) auth.Action {
 		return auth.ActionRead
 	case ClassWrite:
 		return auth.ActionWrite
+	case ClassControl:
+		// Stateful controls re-enter run on token-backed sessions. PostgreSQL
+		// permits LOCK TABLE inside a read-only transaction, so this floor is
+		// the boundary that stops a reader taking production locks. The wire
+		// stateful route bypasses run and owns the equivalent check in
+		// wireControl.
+		return auth.ActionDDL
 	default:
 		return auth.ActionDDL
 	}
@@ -469,6 +492,11 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	if err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
+	// The unit's policy, resolved fresh here as it is at every other unit.
+	unitPol, uperr := e.tokenUnitPolicy(ctx, token, connID)
+	if uperr != nil {
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, uperr)
+	}
 	ident = authorized
 	if err := guardWhere(stmt); err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
@@ -492,6 +520,20 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	attemptID, err := e.recordAttempt(ctx, ident, connRow.ID, ip, sqlText, txID)
 	if err != nil {
 		return nil, err
+	}
+
+	// THE AUTOCOMMIT READ-ONLY WRAP (F3a). See wrapReadOnly.
+	if pinned == nil && unitPol.ReadOnly {
+		wrapped, release, werr := e.wrapReadOnly(ctx, target, connRow, ident, connID, ip, sqlText, unitPol)
+		if werr != nil {
+			return nil, werr
+		}
+		if release != nil {
+			defer release()
+		}
+		if wrapped != nil {
+			pinned = wrapped
+		}
 	}
 
 	res := &Result{Verb: stmt.Verb, Class: stmt.Class}

@@ -8,7 +8,6 @@ import (
 
 	"github.com/yongjohnlee80/golib/dao"
 
-	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -120,12 +119,14 @@ func (e *Engine) reapExpired(ctx context.Context, now time.Time) int {
 		// it the skip would be permanent and the transaction would hold
 		// locks with no owner able to end it.
 		if s.get() == sessClosing {
-			e.retryClose(ctx, s)
-			acted++
+			if e.retryClose(ctx, s) {
+				acted++
+			}
 			continue
 		}
 		s.mu.Lock()
-		phase, opened, last, txID := s.txPhase, s.txOpened, s.lastUsed, s.txID
+		tx, phase, opened, last, txID := s.tx, s.txPhase, s.txOpened, s.lastUsed, s.txID
+		openedMayWrite := s.txOpenedMayWrite
 		limits := s.limits
 		s.mu.Unlock()
 
@@ -141,7 +142,7 @@ func (e *Engine) reapExpired(ctx context.Context, now time.Time) int {
 			// BEGIN never sends a next statement, so a revoked user's
 			// transaction stayed open for its full duration — and re-adding
 			// the grant let them carry on as if nothing had been revoked.
-			if e.revokeExpiredAuthority(ctx, s, txID) {
+			if e.revokeExpiredAuthority(ctx, s, tx, phase, txID, openedMayWrite) {
 				acted++
 				continue
 			}
@@ -206,7 +207,7 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 
 	s.mu.Lock()
 	tx := s.tx
-	s.tx, s.txPhase, s.txID = nil, txNone, ""
+	s.clearTxLocked()
 	s.lastUsed = e.now()
 	s.mu.Unlock()
 	if tx == nil {
@@ -230,6 +231,140 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 	})
 	e.auditBounded(ctx, s.userID, "", "tx_"+outcome,
 		fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
+}
+
+// reasonAuthorityDemoted is the audited reason for a transaction ended because
+// WRITE privilege was withdrawn while the session's own right to be connected
+// survived.
+//
+// Distinct from authority-revoked on purpose, and lector required the
+// distinction: an operator reading the trail needs to see that a still-valid
+// reader lost write privilege, not that someone's access ended. The two lead
+// to different conversations.
+const reasonAuthorityDemoted = "authority-demoted"
+
+// reasonDemotionCleanupFailed is a close reason, not a fabricated revocation.
+const reasonDemotionCleanupFailed = "demotion-cleanup-failed"
+
+// enforceTransactionAuthority runs in a foreground caller that already owns
+// the session slot. It synchronously ends a transaction opened with write
+// authority when this unit's fresh policy is read-only.
+func (e *Engine) enforceTransactionAuthority(
+	ctx context.Context, s *session, pol UnitPolicy, ip string,
+) (bool, error) {
+	if pol.MayWrite {
+		return false, nil
+	}
+	s.mu.Lock()
+	tx, phase, txID := s.tx, s.txPhase, s.txID
+	s.mu.Unlock()
+	return e.rollbackDemotedOwned(ctx, s, tx, phase, txID, pol.Role, ip)
+}
+
+// rollbackDemoted first acquires teardown ownership for the janitor, then uses
+// the same primitive as foreground preflight. expected* is the janitor's
+// snapshot; a foreground winner makes the primitive a silent no-op.
+func (e *Engine) rollbackDemoted(
+	ctx context.Context, s *session, expectedTx dao.ContextTxConn,
+	expectedPhase txPhase, expectedTxID, role string,
+) bool {
+	if h := e.hookBeforeDemotionQuiesce; h != nil {
+		h()
+	}
+	release, err := e.quiesce(ctx, s, e.txQuiesce)
+	if err != nil {
+		// Two materially different failures reach here, and only one may
+		// close the session. A join that did not complete means the
+		// statement would not stop and this sweep cannot ever clean up:
+		// close, so the normal close path owns the terminal outcome.
+		if errors.Is(err, ErrSessionBusy) {
+			// Claim contention, not cleanup failure. Join succeeded, and a
+			// foreground caller claimed the slot before this sweep could.
+			// That caller is the correct linearization owner: it runs the
+			// same preflight and either rolls the transaction back or
+			// observes no-match. Closing here would end a healthy retained
+			// reader session for losing a race the lifecycle already
+			// resolves in the foreground's favor — so defer instead, and a
+			// later sweep re-checks if the foreground itself fails.
+			e.logf("session %s: write privilege was withdrawn but a foreground caller "+
+				"claimed the slot first; deferring demotion rollback to it", s.id)
+			return false
+		}
+		e.logf("session %s: write privilege was withdrawn but the in-flight statement would not "+
+			"stop (%v); closing for demotion cleanup failure", s.id, err)
+		e.closeSession(ctx, s, "", reasonDemotionCleanupFailed)
+		return true
+	}
+
+	acted, rerr := e.rollbackDemotedOwned(ctx, s, expectedTx, expectedPhase, expectedTxID, role, "")
+	closeOwner := false
+	if rerr != nil {
+		// Own the terminal transition while teardown still owns the slot, so
+		// no foreground unit can enter between failure and close.
+		closeOwner = e.transferDemotionClose(s, "")
+	}
+	release()
+	if closeOwner {
+		e.finishClosing(context.WithoutCancel(ctx), s)
+	}
+	return acted
+}
+
+// rollbackDemotedOwned requires the caller to own the foreground/teardown
+// slot and to have no target statement installed. It never quiesces or claims
+// another slot, so foreground preflight cannot cancel or join itself.
+func (e *Engine) rollbackDemotedOwned(
+	ctx context.Context, s *session, expectedTx dao.ContextTxConn,
+	expectedPhase txPhase, expectedTxID, role, ip string,
+) (bool, error) {
+	s.mu.Lock()
+	if !s.busy || s.runCancel != nil {
+		s.mu.Unlock()
+		return false, errors.New("exec: demotion rollback called without sole idle-slot ownership")
+	}
+	if expectedTx == nil || expectedPhase == txNone || s.tx != expectedTx ||
+		s.txPhase != expectedPhase || s.txID != expectedTxID || !s.txOpenedMayWrite {
+		s.mu.Unlock()
+		return false, nil
+	}
+	teardown := s.tearingDown
+	s.mu.Unlock()
+	if h := e.hookDemotionOwned; h != nil {
+		h(teardown)
+	}
+
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
+	rerr := expectedTx.RollbackContext(cctx)
+	cancel()
+	if rerr != nil {
+		e.logf("session %s: rolling back %s after demotion: %v", s.id, expectedTxID, rerr)
+		// Leave every transaction field attached. The caller transfers the
+		// still-owned transaction to finishClosing, which alone records the
+		// terminal cleanup outcome.
+		return true, rerr
+	}
+
+	s.mu.Lock()
+	if s.tx != expectedTx || s.txPhase != expectedPhase || s.txID != expectedTxID ||
+		!s.txOpenedMayWrite {
+		s.mu.Unlock()
+		return true, errors.New("exec: transaction identity changed while demotion rollback owned the session slot")
+	}
+	s.clearTxLocked()
+	s.lastUsed = e.now()
+	s.demoted = true
+	s.mu.Unlock()
+
+	e.noteTxOutcome(ctx, txTransition{
+		txID: expectedTxID, state: meta.TxRolledBack,
+		userID: s.userID, connectionID: s.connID,
+	})
+	e.auditBounded(ctx, s.userID, ip, "tx_rolled_back",
+		fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, expectedTxID, reasonAuthorityDemoted))
+	e.auditBounded(ctx, s.userID, ip, reasonAuthorityDemoted,
+		fmt.Sprintf("conn %d: session %s: write privilege withdrawn (role now %s); the session "+
+			"continues at the read floor", s.connID, s.id, role))
+	return true, nil
 }
 
 // quiesceTimeout bounds how long a teardown waits for an in-flight statement
@@ -273,19 +408,49 @@ func (e *Engine) StartJanitor(ctx context.Context, every time.Duration) {
 // authority is left standing and the timeouts still bound the transaction —
 // tearing down live work because a lookup failed would turn a blip in the
 // meta store into rolled-back transactions across every open session.
-func (e *Engine) revokeExpiredAuthority(ctx context.Context, s *session, txID string) bool {
-	err := e.auth.StillAuthorized(ctx, s.authSessID, s.userID, s.connID, auth.ActionWrite)
-	if err == nil {
-		return false
-	}
-	if !errors.Is(err, auth.ErrDenied) {
+func (e *Engine) revokeExpiredAuthority(
+	ctx context.Context, s *session, tx dao.ContextTxConn, phase txPhase,
+	txID string, openedMayWrite bool,
+) bool {
+	v, err := e.auth.ResolveStanding(ctx, s.authority, s.userID, s.connID)
+	if err != nil {
+		// A store failure is NOT a revocation. Tearing down live work
+		// because a lookup failed would turn a blip in the meta store into
+		// rolled-back transactions across every open session; the
+		// transaction timeouts remain the backstop.
 		e.logf("session %s: re-checking authority failed, leaving the transaction to its timeouts: %v", s.id, err)
 		return false
 	}
-	e.rollbackExpired(ctx, s, txID, reasonAuthorityRevoked)
-	// And the session goes with it. Leaving it open would leave a caller
-	// holding a handle to a connection they are no longer entitled to, ready
-	// to BEGIN again the moment a grant reappeared.
-	e.closeSession(ctx, s, "", reasonAuthorityRevoked)
-	return true
+	if !v.Standing {
+		e.rollbackExpired(ctx, s, txID, reasonAuthorityRevoked)
+		// And the session goes with it. Leaving it open would leave a caller
+		// holding a handle to a connection they are no longer entitled to,
+		// ready to BEGIN again the moment a grant reappeared.
+		e.closeSession(ctx, s, "", reasonAuthorityRevoked)
+		return true
+	}
+	if v.MayWrite {
+		return false
+	}
+	if !openedMayWrite {
+		// A transaction opened under reader policy is already server-enforced
+		// read-only. A later reader verdict changes nothing and must not replace
+		// the transaction with an autocommit unit.
+		return false
+	}
+
+	// DEMOTION, not revocation, and the difference is what happens to the
+	// session (lector's ruling on the standing-authority defect).
+	//
+	// The credential is valid and the read grant stands; only the write
+	// privilege is gone. Killing the connection for a privilege REDUCTION
+	// would be harsher than what happens when a grant is removed from a
+	// session with no open transaction — so the TRANSACTION ends and the
+	// session survives it.
+	//
+	// The open transaction cannot continue either way: it was begun with
+	// write authority and the next operation would be running as a reader on
+	// a read-write transaction, which is the state the seam condition
+	// forbids.
+	return e.rollbackDemoted(ctx, s, tx, phase, txID, v.Role)
 }

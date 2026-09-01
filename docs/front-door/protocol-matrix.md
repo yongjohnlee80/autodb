@@ -325,6 +325,17 @@ a cancel can never race the 0017 finalizers. Cancel of an idle session is a
 no-op. Race tests pinned by ADR: query/finalizer/disconnect/stale-key
 boundaries.
 
+### 6.5 Write-authority demotion
+
+A session that retains read standing but loses write authority synchronously
+rolls back any transaction opened under write authority before the next
+ordinary or control unit can execute. The triggering unit is rejected rather
+than silently continuing in autocommit; a confirmed rollback retains the
+session at the reader floor, while cleanup failure transfers the attached
+transaction to normal close. The slot ownership, race, audit, and failure
+contract is normative in
+[`synchronous-demotion-lifecycle.md`](synchronous-demotion-lifecycle.md).
+
 ---
 
 ## 7. Refusal catalogue (v1)

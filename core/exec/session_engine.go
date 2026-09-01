@@ -60,13 +60,13 @@ func (e *Engine) openSession(ctx context.Context, token string, connID int64, ip
 	// own cancel, which is what a close uses to stop in-flight work.
 	sctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	s := &session{
-		id:         id,
-		userID:     ident.UserID(),
-		authSessID: authSessID,
-		connID:     connID,
-		ctx:        sctx,
-		cancel:     cancel,
-		lastUsed:   e.now(),
+		id:        id,
+		userID:    ident.UserID(),
+		authority: auth.SessionAuthority(authSessID),
+		connID:    connID,
+		ctx:       sctx,
+		cancel:    cancel,
+		lastUsed:  e.now(),
 	}
 	if err := e.sessions.admit(s); err != nil {
 		cancel()
@@ -120,7 +120,13 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 	if err := s.begin(); err != nil {
 		return nil, err
 	}
-	defer s.finish()
+	closeAfterRelease := false
+	defer func() {
+		s.finish()
+		if closeAfterRelease {
+			e.finishClosing(context.WithoutCancel(ctx), s)
+		}
+	}()
 
 	// Re-check the state after claiming the slot. A close that began between
 	// the lookup and the claim has already cancelled the session context, and
@@ -132,76 +138,65 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 		return nil, ErrSessionNotFound
 	}
 
-	// A control verb is a state transition, not SQL to forward, so it is
-	// routed before the execution pipeline is entered at all (ADR-0074 §3).
-	// Everything the pipeline would have done to it — classify, admit,
-	// authorize — still happens; it just ends in a transition rather than a
-	// statement on the wire.
-	connRow, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, s.connID).Get()
-	if err != nil {
-		return nil, auth.ErrDenied // never disclose which connections exist
+	// Resolve authority ONCE after the slot/state check and carry that exact
+	// answer through preflight, control routing, authorization and execution.
+	pol, perr := e.resolveUnitPolicy(ctx, s.authority, s.userID, s.connID)
+	if perr != nil {
+		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, perr)
 	}
-	stmt, cerr := Classify(sqlText, connRow.Engine == "mysql")
-	if cerr == nil && stmt.Class == ClassControl {
-		if err := e.profileFor(connRow).admit(stmt, true); err != nil {
-			return nil, e.rejectSession(ctx, s, ident, ip, sqlText, err)
-		}
-		// Transaction control needs a grant to match what it enables: an
-		// open transaction is a held connection and a pending write, so the
-		// floor is the same one a write needs.
-		authorized, aerr := e.auth.Authorize(ctx, token, s.connID, auth.ActionWrite)
-		if aerr != nil {
-			return nil, e.rejectSession(ctx, s, ident, ip, sqlText, aerr)
+	demoted, derr := e.enforceTransactionAuthority(ctx, s, pol, ip)
+	if derr != nil {
+		// Own closing before the slot is released. If a concurrent closer
+		// already owns it, that closer is waiting on this same slot and will
+		// resume after the defer above releases it.
+		closeAfterRelease = e.transferDemotionClose(s, ip)
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText,
+			fmt.Errorf("%w: rollback cleanup failed: %v", ErrTxAuthorityChanged, derr))
+	}
+	if demoted {
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAuthorityChanged)
+	}
+	return e.executeSessionUnit(ctx, s, pol, sqlText, ip, false)
+}
+
+// tokenControl preserves the token path's ClassControl authorization floor.
+// The wire route has its own explicit LOCK gate because it does not re-enter
+// the token pipeline; keeping the two boundaries distinct makes each surface's
+// mutation cell independently discriminating.
+func (e *Engine) tokenControl(
+	ctx context.Context, s *session, connRow *meta.Connection,
+	stmt Statement, pol UnitPolicy, sqlText, ip string,
+) (*Result, error) {
+	if err := e.profileFor(connRow).admit(stmt, true); err != nil {
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
+	}
+
+	if statefulControlVerbs[stmt.Verb] {
+		if err := e.authorizeUnit(stmt, pol); err != nil {
+			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
 		}
 		s.mu.Lock()
-		txOpen := s.txPhase != txNone
-		aborted := s.txPhase == txAborted
-		pinned := s.tx
-		txID := s.txID
+		txOpen, aborted, pinned, txID := s.txPhase != txNone, s.txPhase == txAborted, s.tx, s.txID
 		s.mu.Unlock()
-
-		// SET and LOCK are admitted by the SESSION's state, not by the
-		// profile alone, and once admitted they are real SQL that must reach
-		// the server — unlike the transaction verbs, which never do.
-		if statefulControlVerbs[stmt.Verb] {
-			if aborted {
-				return nil, e.rejectSession(ctx, s, authorized, ip, sqlText, ErrTxAborted)
-			}
-			if err := e.admitSessionState(ctx, s, authorized, stmt.Verb, sqlText, ip, txOpen); err != nil {
-				return nil, err
-			}
-			runCtx, endRun := s.runContext(ctx)
-			defer endRun()
-			return e.run(runCtx, token, s.connID, sqlText, ip, nil, pinned, txID)
+		if aborted {
+			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAborted)
 		}
-
-		tc, perr := ParseTxControl(sqlText)
-		if perr != nil {
-			return nil, e.rejectSession(ctx, s, authorized, ip, sqlText, perr)
+		if err := e.admitSessionState(ctx, s, pol.Ident, stmt.Verb, sqlText, ip, txOpen); err != nil {
+			return nil, err
 		}
-		return e.handleTxControl(ctx, s, authorized, connRow, tc, sqlText, ip)
+		runCtx, endRun := s.runContext(ctx)
+		defer endRun()
+		return e.executeUnit(runCtx, execUnit{
+			stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
+			pinned: pinned, txID: txID,
+		})
 	}
 
-	// An ordinary statement. If a transaction is open it runs ON it; if the
-	// transaction is aborted nothing runs at all, because the server would
-	// answer every one of them identically and the caller deserves to be
-	// told once what to do about it.
-	s.mu.Lock()
-	pinned, phase, txID := s.tx, s.txPhase, s.txID
-	s.mu.Unlock()
-	if phase == txAborted {
-		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, ErrTxAborted)
+	tc, perr := ParseTxControl(sqlText)
+	if perr != nil {
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
 	}
-
-	var pinnedTx dao.TxConn
-	if pinned != nil {
-		pinnedTx = pinned
-	}
-	runCtx, endRun := s.runContext(ctx)
-	defer endRun()
-	res, rerr := e.run(runCtx, token, s.connID, sqlText, ip, nil, pinnedTx, txID)
-	s.noteStatementOutcome(rerr)
-	return res, rerr
+	return e.handleTxControl(ctx, s, pol, connRow, tc, sqlText, ip)
 }
 
 // admitSessionState applies the stateful gate to SET and LOCK.
@@ -251,26 +246,29 @@ func (e *Engine) rejectSession(ctx context.Context, s *session, ident auth.Ident
 
 // closeSession performs the terminal transition exactly once.
 //
-// The CAS decides the owner. Everything after it — cancelling, joining the
-// in-flight statement, removing the registry entry, auditing — happens on the
-// winner's goroutine and on no other, so a session closed by the idle reaper
-// and by its client at the same moment is torn down once.
+// The CAS decides the initial owner and closeActive excludes every retry while
+// that owner is running. An owner that cannot quiesce explicitly releases only
+// finalizer ownership, not the closing state, so a later janitor pass can retry
+// without ever running two finalizers concurrently.
 func (e *Engine) closeSession(ctx context.Context, s *session, ip, reason string) {
-	if !s.beginClose() {
+	if !s.beginClose(ip, reason) {
 		return // someone else owns the teardown
 	}
-	e.finishClosing(ctx, s, ip, reason)
+	e.finishClosing(ctx, s)
 }
 
 // retryClose resumes a close that could not finish because the session's
 // statement would not stop. The session is already in the closing state and
 // still owns its transaction; this is the retry that eventually ends it.
-func (e *Engine) retryClose(ctx context.Context, s *session) {
-	ip, reason := s.closeReason()
-	e.finishClosing(ctx, s, ip, reason)
+func (e *Engine) retryClose(ctx context.Context, s *session) bool {
+	if !s.claimCloseRetry() {
+		return false
+	}
+	e.finishClosing(ctx, s)
+	return true
 }
 
-func (e *Engine) finishClosing(ctx context.Context, s *session, ip, reason string) {
+func (e *Engine) finishClosing(ctx context.Context, s *session) {
 	// No registry lock is held here: quiescing can block on a statement, and
 	// the published lock order forbids waiting on session I/O under the
 	// registry's mutex.
@@ -284,6 +282,7 @@ func (e *Engine) finishClosing(ctx context.Context, s *session, ip, reason strin
 	defer release()
 
 	s.mu.Lock()
+	ip, reason := s.closeIP, s.closeWhy
 	tx, txID := s.tx, s.txID
 	if quiesced == nil {
 		// Detach only when it is safe to. Leaving the transaction attached
@@ -291,7 +290,7 @@ func (e *Engine) finishClosing(ctx context.Context, s *session, ip, reason strin
 		// teardown and the server-side belt both end it, whereas rolling
 		// back underneath a live statement corrupts the connection state for
 		// whatever the pool hands out next.
-		s.tx, s.txPhase, s.txID = nil, txNone, ""
+		s.clearTxLocked()
 	}
 	s.mu.Unlock()
 
@@ -323,7 +322,12 @@ func (e *Engine) finishClosing(ctx context.Context, s *session, ip, reason strin
 			txID: txID, state: meta.TxUnknownPending, reason: meta.ReasonSessionClosed,
 			userID: s.userID, connectionID: s.connID,
 		})
-		s.setCloseReason(ip, reason)
+		if s.releaseCloseForRetry() {
+			// A demotion cleanup failure arrived while this owner was
+			// recording its deferral. Keep ownership continuous and retry on
+			// the overriding reason rather than waiting for another sweep.
+			e.finishClosing(context.WithoutCancel(ctx), s)
+		}
 		return
 	}
 	if tx != nil {
@@ -356,6 +360,18 @@ func (e *Engine) finishClosing(ctx context.Context, s *session, ip, reason strin
 
 	e.auditBounded(ctx, s.userID, ip, "session_closed",
 		fmt.Sprintf("conn %d: session %s: %s", s.connID, s.id, reason))
+}
+
+// transferDemotionClose publishes the cleanup-failure reason while the caller
+// still owns the execution slot. If an ordinary closer already owns the state
+// transition, its finalizer reads this overriding reason only after it acquires
+// the slot, so it cannot report a client close for a demotion cleanup failure.
+func (e *Engine) transferDemotionClose(s *session, ip string) bool {
+	owner := s.transferClose(ip, reasonDemotionCleanupFailed)
+	if h := e.hookDemotionCloseOwned; h != nil {
+		h()
+	}
+	return owner
 }
 
 // closeQuiesceTimeout bounds the wait for an in-flight statement during a

@@ -199,68 +199,22 @@ func (s *Service) GrantCreatorTx(tx *dao.Transaction, token string, connID int64
 	return actor, nil
 }
 
-// StillAuthorized re-checks a standing authority WITHOUT a token.
+// StillAuthorized WAS HERE and is deliberately gone.
 //
-// It exists for held resources — an ExecSession with a pinned transaction —
-// where the authority was established once, at open, and the resource then
-// outlives the call that created it. Authorize cannot serve that: it starts
-// from a token the holder is not currently presenting, and the whole question
-// is what happens when nobody is presenting anything.
+// It re-checked a standing authority without a token, which is the right
+// idea, by opening with a lookup keyed on an AUTH SESSION ROW — which is only
+// one of the two kinds of credential a session can stand on. A front-door
+// session stands on a PAT and has no session row, so it passed a zero and the
+// missing row read as a revocation.
 //
-// Every way an authority can end is checked here, because a rollback that
-// fires for a removed grant but not for a disabled user is not a guarantee,
-// it is a coincidence:
+// Deleting it rather than fixing it in place is the point. A function that
+// takes a bare id and silently means "session table" is the shape of the
+// defect; ResolveStanding takes a TYPED AuthorityRef, so the caller cannot
+// fail to say which table the id came from and a future caller cannot
+// reintroduce this by passing the wrong one. Leaving the old signature
+// available would leave the trap available.
 //
-//   - the auth session was revoked (logout, or an admin revoking the user's
-//     sessions),
-//   - it expired,
-//   - the user was disabled,
-//   - the grant on this connection was removed or lowered below what the
-//     action needs.
-//
-// A nil error means the authority still stands. ErrDenied means it does not,
-// whatever ended it; a store failure is returned as itself, because "the
-// database is unreachable" must not be reported as "you are not allowed".
-func (s *Service) StillAuthorized(ctx context.Context, authSessID, userID, connID int64, action Action) error {
-	sess, err := s.store.Sessions.OnCtx(ctx).With(meta.SessID, authSessID).Get()
-	if errors.Is(err, dao.ErrNoRows) {
-		return ErrDenied
-	}
-	if err != nil {
-		return err
-	}
-	if sess.Revoked != 0 || s.now().Unix() >= sess.ExpiresAt || sess.UserID != userID {
-		return ErrDenied
-	}
-	u, err := s.store.Users.OnCtx(ctx).With(meta.UserID, userID).Get()
-	if errors.Is(err, dao.ErrNoRows) {
-		return ErrDenied
-	}
-	if err != nil {
-		return err
-	}
-	if u.Disabled != 0 {
-		return ErrDenied
-	}
-	if action == ActionManage {
-		if u.Role != meta.RoleAdmin {
-			return ErrDenied
-		}
-		return nil
-	}
-	g, err := s.store.Grants.OnCtx(ctx).
-		With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).Get()
-	if errors.Is(err, dao.ErrNoRows) {
-		return ErrDenied
-	}
-	if err != nil {
-		return err
-	}
-	if min(rankOf(u.Role), rankOf(g.Role)) < requiredRank(action) {
-		return ErrDenied
-	}
-	return nil
-}
+// See standing.go.
 
 // SessionRef resolves a token to its identity AND the auth-session row id, so
 // a caller holding a long-lived resource can re-check that authority later
