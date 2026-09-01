@@ -75,6 +75,12 @@ type Config struct {
 	// being abandoned rather than closed.
 	dial func(ctx context.Context) (*tuiapp.Session, error)
 
+	// testRefusalDelay slows the IP-admission refusal. Test seam only, and it
+	// exists for the reason the front door's equivalent does: a timing
+	// harness that has never resolved a real difference is not evidence that
+	// there is none. This gives it something to resolve.
+	testRefusalDelay time.Duration
+
 	// newModel overrides how a per-session Model is built. Test seam only, and it
 	// exists for a specific reason: testing modelOptions() proves the HELPER, not
 	// that appRunner calls it. Restoring the old construction while leaving the
@@ -455,6 +461,36 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 			f.gw.logRefusal("bootstrap", user)
 			return auth.Contribution{}, auth.Reason(refusalReason)
 		}
+
+		// GATE 1b: IP ADMISSION, BEFORE THE IRREVERSIBLE SIDE EFFECT.
+		//
+		// Gate 3 below runs after the password is proven, and for ordinary
+		// login that ordering is the security property. HERE IT IS THE
+		// DEFECT, and it was one: a browser at a non-admitted address could
+		// reach Bootstrap, become the permanent first administrator, and only
+		// then be refused. Nothing undoes an account or restores one-shot
+		// bootstrap state, so the rightful operator would find the system
+		// already claimed by whoever got there first. Gate 1's own comment
+		// names this exact class of failure for the subject and the address
+		// was simply not covered by it. Lector found it (PR #34 r0).
+		//
+		// The INVERSE ordering is correct here, and for a reason that does
+		// not generalise: the reason Gate 3 comes after credentials is that
+		// an early address check would tell a caller whether the name they
+		// typed exists. Before bootstrap there are no accounts, so there is
+		// no such question to answer and nothing to leak — while there IS an
+		// irreversible effect to protect, which ordinary login does not have.
+		//
+		// The GLOBAL layer only, because there is no user whose rows could be
+		// consulted. That is the bootstrap-specific admission rule, and it is
+		// the strictest of the two layers rather than a relaxation: an
+		// address that no global prefix covers cannot claim this daemon.
+		if admitted, aerr := fresh.Bind().GlobalIPAdmitted(dialCtx, peerAddrOf(r)); aerr != nil || !admitted {
+			fresh.Close()
+			f.gw.logRefusal("bootstrap-ip-admission", user)
+			return auth.Contribution{}, auth.Reason(refusalReason)
+		}
+
 		needs, berr := fresh.Bind().NeedsBootstrap(dialCtx)
 		if berr != nil || !needs {
 			fresh.Close()
@@ -508,6 +544,9 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 	// loopback — and asks. Evaluating the prefixes here would be a second
 	// implementation of admission in a second process.
 	if admitted, source, aerr := fresh.Bind().IPAdmitted(ctx, peerAddrOf(r)); aerr != nil || !admitted {
+		if d := f.gw.cfg.testRefusalDelay; d > 0 {
+			time.Sleep(d)
+		}
 		f.gw.pool.logoutAndClose(subject, fresh)
 		f.gw.logRefusal("ip-admission", subject)
 		return auth.Contribution{}, auth.Reason(refusalReason)

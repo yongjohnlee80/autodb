@@ -230,6 +230,36 @@ func (s *Server) register() {
 		need, err := s.auth.NeedsBootstrap(ctx)
 		return need, wireErr(err)
 	})
+	// auth.global_ip_admitted answers the GLOBAL layer alone, for a caller
+	// that has no user to ask about yet (lector PR #34 r0 must-fix 1).
+	//
+	// It exists for exactly one moment: the web gateway deciding whether an
+	// address may perform the irreversible first-admin bootstrap. At that
+	// moment there is no account, so the per-user layer has nothing to
+	// consult and auth.ip_admitted — which resolves a token — cannot be
+	// asked. Tokenless for the same reason auth.bootstrap is: no token can
+	// exist before the first user does.
+	//
+	// It leaks nothing that the bootstrap form does not already reveal.
+	// There are no accounts to enumerate, so there is no username-existence
+	// question to protect, which is precisely why the ordering rule for
+	// ORDINARY login (credentials first, admission second) does not apply
+	// here and its inverse is correct: the address is checked BEFORE the
+	// side effect, because the side effect cannot be undone.
+	s.rpc.Handle("auth.global_ip_admitted", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		addr, err := argStr(req.Params, 0, "ip")
+		if err != nil {
+			return nil, err
+		}
+		admitted, aerr := s.auth.IPAllowed(ctx, addr)
+		if aerr != nil {
+			return nil, wireErr(aerr)
+		}
+		return admitted, nil
+	})
 	s.rpc.Handle("auth.bootstrap", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err

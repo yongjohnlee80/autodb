@@ -381,6 +381,21 @@ func (b *Bound) NeedsBootstrap(ctx context.Context) (bool, error) {
 	return needs, nil
 }
 
+// GlobalIPAdmitted asks whether the GLOBAL allowlist alone admits ip.
+//
+// Tokenless, because the one caller is the web gateway deciding whether an
+// address may perform the first-admin bootstrap — at which point no account
+// and therefore no token exists. Ordinary login uses IPAdmitted, which
+// consults both layers against a proven identity.
+func (b *Bound) GlobalIPAdmitted(ctx context.Context, ip string) (bool, error) {
+	res, err := b.call(ctx, "auth.global_ip_admitted", ip)
+	if err != nil {
+		return false, err
+	}
+	admitted, _ := res.(bool)
+	return admitted, nil
+}
+
 // adoptLogin installs a login result unless the epoch moved on.
 func (s *Session) adoptLogin(res any, gen uint64) {
 	m, _ := res.(map[string]any)

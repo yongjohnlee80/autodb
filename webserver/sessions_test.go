@@ -23,13 +23,27 @@ import (
 // only that the call was made. Mirrors the harness in tui/ui_test.go.
 func startRealServer(t *testing.T) string {
 	t.Helper()
+	addr, _ := startRealServerWith(t, []string{"127.0.0.1/32", "::1/128"})
+	return addr
+}
+
+// startRealServerWith is startRealServer with the daemon's GLOBAL allowlist
+// under the caller's control, returning the auth service so a test can seed
+// accounts and per-user rows directly.
+//
+// Every other test here runs with loopback globally admitted, which is why
+// the admission gate could be absent and every one of them stay green. A cell
+// that means to observe a refusal has to be able to build a daemon that
+// refuses.
+func startRealServerWith(t *testing.T, allowlist []string) (string, *auth.Service) {
+	t.Helper()
 	ctx := context.Background()
 	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32", "::1/128"}))
+	svc, err := auth.New(store, auth.WithConfigAllowlist(allowlist))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +71,7 @@ func startRealServer(t *testing.T) string {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	return srv.Addr()
+	return srv.Addr(), svc
 }
 
 // dialer returns the pool's dial function: a session with NO SPAWN, which is what
