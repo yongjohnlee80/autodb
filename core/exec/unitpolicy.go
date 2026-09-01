@@ -2,10 +2,13 @@ package exec
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/yongjohnlee80/golib/dao"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // THE SHARED EXECUTION-UNIT POLICY (ADR-0075 Amendment 4's F3a seam
@@ -66,6 +69,31 @@ func (e *Engine) resolveUnitPolicy(ctx context.Context, ref auth.AuthorityRef, u
 	return UnitPolicy{Role: v.Role, ReadOnly: !v.MayWrite}, nil
 }
 
+// tokenUnitPolicy resolves the policy for a caller holding a session token.
+//
+// The token path for now. When F1's wire execution lands, its caller will
+// resolve from the session's own PAT-backed AuthorityRef and hand the policy
+// in — same resolver, one more kind of credential, no second decision. It is
+// not parameterised yet because the wire path's shape is not designed, and a
+// signature built for a caller that does not exist is a guess.
+func (e *Engine) tokenUnitPolicy(ctx context.Context, token string, connID int64) (UnitPolicy, error) {
+	ident, sessID, err := e.auth.SessionRef(ctx, token)
+	if err != nil {
+		return UnitPolicy{}, err
+	}
+	return e.resolveUnitPolicy(ctx, auth.SessionAuthority(sessID), ident.UserID(), connID)
+}
+
+// ErrReadOnlyUnenforceable refuses a read-only unit on a target that cannot
+// host a transaction.
+//
+// FAIL CLOSED. The alternative is to run the statement unwrapped and hope the
+// classifier caught everything — which is the whole thing this policy exists
+// because it cannot. A reader whose target has no transactions gets an error
+// they can act on; a reader whose write silently reaches the server gets
+// nothing, and neither does the operator.
+var ErrReadOnlyUnenforceable = errors.New("exec: this connection cannot enforce read-only execution")
+
 // applyTo forces the transaction's access mode when the policy says read-only.
 //
 // FORCED, over both the client's default and an explicit request. A per-
@@ -88,4 +116,68 @@ func (p UnitPolicy) applyTo(opts *dao.TxOptions) (overridden bool) {
 	}
 	opts.Access = dao.TxReadOnly
 	return true
+}
+
+// wrapReadOnly runs one autocommit unit inside a server-enforced read-only
+// transaction, or explains why it cannot.
+//
+// A unit with no pinned transaction runs on a pooled connection, where nothing
+// constrains it but the classifier — and the classifier is RIGHT that
+// `SELECT writes_a_row()` is a read. The write is in the function body, so the
+// boundary has to be one the server holds.
+//
+// Called AFTER the attempt record, because opening a transaction is a
+// target-visible effect and attempt-before-effect has no exception for effects
+// that write nothing.
+//
+// Returns (tx, release, nil) when wrapped, (nil, nil, nil) when the guarantee
+// is unavailable but not promised, and an error when it is unavailable and
+// was.
+func (e *Engine) wrapReadOnly(
+	ctx context.Context, target dao.DataConn, connRow *meta.Connection,
+	ident auth.Identity, connID int64, ip, sqlText string, pol UnitPolicy,
+) (dao.TxConn, func(), error) {
+
+	beginner, ok := target.(dao.TxBeginner)
+	if !ok {
+		// THE TARGET CANNOT HOST A READ-ONLY TRANSACTION, and what to do
+		// about that depends on whether the guarantee was PROMISED.
+		//
+		// On the session profile it was: that is the front door's surface,
+		// where a reader is told the database itself enforces the boundary.
+		// Running unwrapped there would make the promise false while looking
+		// identical, so it fails closed.
+		//
+		// On v1compat it was not. SQLite has no per-transaction read-only
+		// mode, so refusing would take the reader role away from every such
+		// target for a guarantee never offered on it — and the classifier
+		// remains exactly the boundary it has always been. The unit is
+		// AUDITED so the gap is visible rather than inferred from a driver's
+		// capabilities.
+		if e.profileFor(connRow) == ProfileSession {
+			return nil, nil, e.reject(ctx, ident, connID, ip, sqlText, ErrReadOnlyUnenforceable)
+		}
+		e.auditBounded(ctx, ident.UserID(), ip, "readonly_unenforced",
+			fmt.Sprintf("conn %d: role %s: this target cannot host a read-only transaction; "+
+				"the statement ran under classifier enforcement only", connID, pol.Role))
+		return nil, nil, nil
+	}
+
+	rotx, err := beginner.BeginTx(ctx, dao.TxOptions{Access: dao.TxReadOnly})
+	if err != nil {
+		return nil, nil, e.reject(ctx, ident, connID, ip, sqlText, err)
+	}
+	// ROLLED BACK, never committed: a read-only transaction has nothing to
+	// commit, and a rollback cannot return an ambiguous outcome — so the
+	// cleanup path has no case where the engine has to wonder what happened.
+	release := func() {
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
+		defer cancel()
+		if ctxTx, okc := rotx.(dao.ContextTxConn); okc {
+			_ = ctxTx.RollbackContext(cctx)
+			return
+		}
+		_ = rotx.Rollback()
+	}
+	return rotx, release, nil
 }

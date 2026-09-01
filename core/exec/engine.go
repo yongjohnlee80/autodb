@@ -469,6 +469,11 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	if err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
+	// The unit's policy, resolved fresh here as it is at every other unit.
+	unitPol, uperr := e.tokenUnitPolicy(ctx, token, connID)
+	if uperr != nil {
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, uperr)
+	}
 	ident = authorized
 	if err := guardWhere(stmt); err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
@@ -492,6 +497,20 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	attemptID, err := e.recordAttempt(ctx, ident, connRow.ID, ip, sqlText, txID)
 	if err != nil {
 		return nil, err
+	}
+
+	// THE AUTOCOMMIT READ-ONLY WRAP (F3a). See wrapReadOnly.
+	if pinned == nil && unitPol.ReadOnly {
+		wrapped, release, werr := e.wrapReadOnly(ctx, target, connRow, ident, connID, ip, sqlText, unitPol)
+		if werr != nil {
+			return nil, werr
+		}
+		if release != nil {
+			defer release()
+		}
+		if wrapped != nil {
+			pinned = wrapped
+		}
 	}
 
 	res := &Result{Verb: stmt.Verb, Class: stmt.Class}

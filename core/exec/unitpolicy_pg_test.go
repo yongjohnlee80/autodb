@@ -215,3 +215,99 @@ func TestUnitPolicy_TheRoleIsResolvedFreshForEachUnit(t *testing.T) {
 			"demoted, and waiting for the janitor to notice leaves a window an interval wide")
 	}
 }
+
+// AUTOCOMMIT IS WRAPPED TOO — a smuggled write fails with NO transaction open.
+//
+// This is the path that matters most in practice, because it is the one every
+// ordinary client uses: one statement, no BEGIN, straight onto a pooled
+// connection. Wrapping only explicit transactions would leave the common case
+// exactly as exposed as before while every cell about explicit transactions
+// went green.
+func TestUnitPolicy_AutocommitIsWrappedForReaders(t *testing.T) {
+	t.Parallel()
+	f, connID, _, table := pgSession(t)
+	ctx := context.Background()
+
+	fn := fmt.Sprintf("auto_smuggle_%d", time.Now().UnixNano())
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
+		`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS $$ INSERT INTO %s(note) VALUES ('auto'); SELECT 1 $$`,
+		fn, table), testIP); err != nil {
+		t.Skipf("cannot create the smuggling function on this target: %v", err)
+	}
+	demoteToReader(t, f, connID)
+
+	// NO transaction. Straight onto the pool, the way every ordinary client
+	// sends a statement.
+	_, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf("SELECT %s()", fn), testIP)
+	if err == nil {
+		t.Fatal("a reader wrote a row through a function with no transaction open. Wrapping " +
+			"only explicit transactions leaves the common case — one statement, no BEGIN — " +
+			"exactly as exposed as before, while every cell about explicit transactions " +
+			"reports success")
+	}
+	t.Logf("the target refused it with: %v", err)
+	if !strings.Contains(err.Error(), "25006") {
+		t.Errorf("the refusal was %v; it must carry the target's own 25006", err)
+	}
+}
+
+// AN EDITOR'S AUTOCOMMIT WRITE STILL LANDS. Without this the cell above is
+// satisfied by a wrap applied to everyone, which would break every write in
+// the system and look like success in every read-only assertion.
+func TestUnitPolicy_AutocommitStillWritesForAnEditor(t *testing.T) {
+	t.Parallel()
+	f, connID, _, table := pgSession(t)
+	ctx := context.Background()
+	uid := userIDOf(t, f)
+
+	if err := f.store.Users.OnCtx(ctx).With(meta.UserID, uid).
+		Set(meta.UserRole, meta.RoleEditor).Update(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.Grants.OnCtx(ctx).With(meta.GrantUserID, uid).
+		With(meta.GrantConnID, connID).Set(meta.GrantRole, meta.RoleEditor).Update(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID,
+		fmt.Sprintf("INSERT INTO %s(note) VALUES ('editor-auto')", table), testIP); err != nil {
+		t.Fatalf("an editor's autocommit write was refused (%v); the wrap has been applied to "+
+			"everyone, which breaks every write in the system", err)
+	}
+	// And it is really there — a wrap that rolled an editor's work back would
+	// return no error and lose the row.
+	res, err := f.eng.Execute(ctx, f.rootTok, connID,
+		fmt.Sprintf("SELECT count(*) FROM %s WHERE note = 'editor-auto'", table), testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Rows) == 0 || fmt.Sprint(res.Rows[0][0]) != "1" {
+		t.Errorf("the editor's row is not in the table (%v); the unit was rolled back, so the "+
+			"write returned success and lost the data — the worst of both", res.Rows)
+	}
+}
+
+// A READER'S ORDINARY SELECT STILL WORKS through the wrap.
+//
+// The wrap must be invisible to the thing readers actually do. A cell that
+// only checked writes fail would be satisfied by one that refuses everything.
+func TestUnitPolicy_AReadersSelectIsUnaffected(t *testing.T) {
+	t.Parallel()
+	f, connID, _, table := pgSession(t)
+	ctx := context.Background()
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID,
+		fmt.Sprintf("INSERT INTO %s(note) VALUES ('visible')", table), testIP); err != nil {
+		t.Fatal(err)
+	}
+	demoteToReader(t, f, connID)
+
+	res, err := f.eng.Execute(ctx, f.rootTok, connID,
+		fmt.Sprintf("SELECT note FROM %s ORDER BY id", table), testIP)
+	if err != nil {
+		t.Fatalf("a reader's SELECT was refused (%v); the wrap has to be invisible to the "+
+			"thing readers actually do", err)
+	}
+	if len(res.Rows) == 0 {
+		t.Error("the reader's SELECT returned no rows through the wrap")
+	}
+}
