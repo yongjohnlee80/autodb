@@ -508,6 +508,22 @@ different limits and will move for different reasons.
   backend CopyData/CopyDone, NotificationResponse, FunctionCallResponse —
   classifier-bypass detectors, each individually asserted.
 
+- **Specified-vocabulary enumeration** (criterion row; KB convention
+  `shared/conventions/specified-vocabulary-enumeration.md`). Every mapper,
+  guard, or state machine over a vocabulary this document specifies —
+  the frontend and backend message catalogues, the canary set above, the
+  startup parameter set — is enumerated from the SPECIFICATION and witnessed
+  in code, never inferred from the paths a slice happens to reach. A
+  deliberate omission is a row with its own identity and its own cell
+  (forward / refuse-with-code / impossible-by-construction-and-why), never a
+  `default:` arm that reads as impossible. Forged on two defects hours apart:
+  a type-byte guard correct only for non-pipelining clients, and a backend
+  mapper that knew none of the extended protocol's own replies. **A set stated
+  in this document and nowhere else is a hand-maintained list wearing a spec's
+  clothes** — the canary set above is bound to the code by
+  `TestBackendCanaries_TheMatrixAndTheCodeAgree`, which fails if either side
+  gains a member the other lacks.
+
 ## 11. Rulings on record (lector r0, 2026-08-31)
 
 Rev 1's four open items were ruled in the r0 review; the rulings are

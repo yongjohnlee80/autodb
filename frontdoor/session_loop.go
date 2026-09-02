@@ -28,10 +28,16 @@ import (
 
 // runSession is the SessionHandler that replaces defaultSession.
 //
-// br is the SAME buffered reader the Backend decodes from, which is what makes
-// the type-byte guard possible: peeking it here consumes nothing, so pgproto3
-// still sees a complete stream. Handing the loop a different reader would
-// silently split the stream in two and lose whichever bytes the other one held.
+// fr sits BETWEEN the socket and the Backend and validates framing as bytes
+// pass, so the type-byte check happens before decode without the loop and the
+// Backend sharing a reader (frame_reader.go).
+//
+// The earlier design DID share one — a *bufio.Reader the loop peeked beside the
+// Backend — and this comment described it. It was correct for a client that
+// sends one message and waits, and wrong for every client that pipelines: pgx's
+// chunkReader reads ahead, so the peek blocked on bytes pgproto3 had already
+// taken (PR #59). Lector flagged the surviving comment as non-blocking on #59
+// r1; it is corrected here rather than on that PR's approved head.
 func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReader,
 	be *pgproto3.Backend, sess exec.WireSessionResult, peer string, closeReason *string) error {
 
