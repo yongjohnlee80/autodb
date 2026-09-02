@@ -150,6 +150,20 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 		}
 	}()
 
+	// §4a: a simple Query destroys the unnamed prepared statement and the
+	// unnamed portal. It is protocol-documented destruction, and it matters here
+	// because the two protocols share ONE namespace on one session — lib/pq
+	// sends simple for parameterless statements and extended for the rest, so a
+	// client can genuinely bind the unnamed portal and then send a Query. The
+	// backend destroys them; leaving them addressable on this side would let a
+	// later Execute name an object that no longer exists there.
+	//
+	// Placed before dispatch, as PostgreSQL destroys them when the Query message
+	// is processed rather than when it succeeds.
+	if s.ext != nil {
+		s.ext.dropUnnamed()
+	}
+
 	pol, err := e.wireAdmit(ctx, s, sqlText, ip, &closeAfterRelease)
 	if err != nil {
 		return 0, err

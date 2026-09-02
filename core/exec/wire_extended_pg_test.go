@@ -467,3 +467,161 @@ func TestExtPG_ReaderPlainWriteIsRefusedAtParse(t *testing.T) {
 		t.Fatalf("table has %s rows after a refused INSERT", rows)
 	}
 }
+
+// CRITERION 7, THE ENGINE HALF.
+//
+// The criterion names three separate proofs, and two of them are about real
+// DRIVERS: the LM lib/pq + sqlx conformance suite, and a pgx-class suite. Those
+// need a socket, and the front door does not dispatch extended frames yet — that
+// wiring lands after #52 merges. What CAN be proven here, and is not covered by
+// anything above, is the frame SHAPES those drivers emit: binary formats in both
+// directions, the named-statement lifecycle a statement cache drives, and the
+// mixed simple+extended traffic lib/pq produces. The driver-driven arms stay
+// owed, and are named as owed rather than approximated.
+
+// pgx asks for BINARY results. The format code is the client's and must be
+// relayed, not normalized: an int4 comes back as four bytes, not "1".
+//
+// A front door that decoded and re-encoded would return text here and look
+// perfectly correct to a text-mode client, which is why this asserts the BYTES.
+func TestExtPG_BinaryResultFormatIsRelayedVerbatim(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := f.eng.WireParse(ctx, sid, userID, "b", "SELECT 1::int4", nil, testIP); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// resultFormats [1] = binary for the single column.
+	if err := f.eng.WireBind(ctx, sid, userID, "b", "b", nil, nil, []int16{1}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	var row []byte
+	if err := f.eng.WireExecutePortal(ctx, sid, userID, "b", 0, testIP, func(m WireMessage) error {
+		if m.Kind == "DataRow" && len(m.Values) == 1 {
+			row = append([]byte(nil), m.Values[0]...) // borrowed for the call
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+		t.Fatalf("Sync: %v", serr)
+	}
+	want := []byte{0, 0, 0, 1} // int4 1, network byte order
+	if len(row) != 4 || row[0] != want[0] || row[1] != want[1] || row[2] != want[2] || row[3] != want[3] {
+		t.Fatalf("binary int4 came back as %v (%q); want %v — the result format code was not relayed", row, row, want)
+	}
+}
+
+// ...and binary PARAMETERS travel the same way. pgx sends them by default.
+func TestExtPG_BinaryParameterFormatIsRelayedVerbatim(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := f.eng.WireParse(ctx, sid, userID, "p", "SELECT $1::int4 + 1", []uint32{23}, testIP); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	// $1 = 41, sent BINARY; ask for a binary result too.
+	if err := f.eng.WireBind(ctx, sid, userID, "p", "p",
+		[][]byte{{0, 0, 0, 41}}, []int16{1}, []int16{1}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	var row []byte
+	if err := f.eng.WireExecutePortal(ctx, sid, userID, "p", 0, testIP, func(m WireMessage) error {
+		if m.Kind == "DataRow" && len(m.Values) == 1 {
+			row = append([]byte(nil), m.Values[0]...)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+		t.Fatalf("Sync: %v", serr)
+	}
+	if len(row) != 4 || row[3] != 42 {
+		t.Fatalf("binary $1=41 + 1 came back as %v; want the binary 42 — a parameter format or OID was rewritten", row)
+	}
+}
+
+// The named-statement lifecycle a pgx-class STATEMENT CACHE drives: parse once
+// under a name, execute it repeatedly through fresh portals, then evict it with
+// Close S and re-parse the same name.
+//
+// Each Execute re-authorizes (that is criterion 3, proven elsewhere); what this
+// adds is that repetition and eviction work at all, which is the whole of what a
+// cache does to the protocol.
+func TestExtPG_NamedStatementIsReusedAndEvictedLikeACache(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := f.eng.WireParse(ctx, sid, userID, "cached", "SELECT 7::int4", nil, testIP); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for i := range 3 {
+		portal := fmt.Sprintf("pt%d", i)
+		if err := f.eng.WireBind(ctx, sid, userID, portal, "cached", nil, nil, nil); err != nil {
+			t.Fatalf("bind %d: %v", i, err)
+		}
+		var rows int
+		if err := f.eng.WireExecutePortal(ctx, sid, userID, portal, 0, testIP, func(m WireMessage) error {
+			if m.Kind == "DataRow" {
+				rows++
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("execute %d: %v", i, err)
+		}
+		if rows != 1 {
+			t.Fatalf("execution %d returned %d rows, want 1 — a cached statement must stay executable", i, rows)
+		}
+	}
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+		t.Fatalf("Sync: %v", serr)
+	}
+
+	// Eviction: Close S, then the SAME name is parseable again.
+	if err := f.eng.WireCloseStatement(ctx, sid, userID, "cached"); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := f.eng.WireParse(ctx, sid, userID, "cached", "SELECT 8::int4", nil, testIP); err != nil {
+		t.Fatalf("re-parse after eviction: %v — a cache could never replace an entry", err)
+	}
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+		t.Fatalf("Sync: %v", serr)
+	}
+}
+
+// lib/pq's shape: it sends SIMPLE for parameterless statements and extended for
+// the rest, on one connection. §4a says a simple Query destroys the unnamed
+// statement and portal — so the two protocols share a namespace, and the
+// destruction has to be real against a live server, not just in the store.
+func TestExtPG_SimpleQueryDestroysTheUnnamedPairOnALiveSession(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := f.eng.WireParse(ctx, sid, userID, "", "SELECT 1::int4", nil, testIP); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := f.eng.WireBind(ctx, sid, userID, "", "", nil, nil, nil); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+		t.Fatalf("Sync: %v", serr)
+	}
+
+	// The lib/pq half: a parameterless statement over the SIMPLE protocol.
+	if r := runRaw(t, f, sid, userID, "SELECT 2"); r.err != nil {
+		t.Fatalf("simple query on the same session: %v", r.err)
+	}
+	// §4a: the unnamed portal and statement are gone.
+	if err := f.eng.WireExecutePortal(ctx, sid, userID, "", 0, testIP, func(WireMessage) error { return nil }); !errors.Is(err, ErrUnknownPortal) {
+		t.Fatalf("Execute of the unnamed portal after a simple Query = %v, want ErrUnknownPortal", err)
+	}
+	if err := f.eng.WireBind(ctx, sid, userID, "", "", nil, nil, nil); !errors.Is(err, ErrUnknownStatement) {
+		t.Fatalf("Bind from the unnamed statement after a simple Query = %v, want ErrUnknownStatement", err)
+	}
+}
