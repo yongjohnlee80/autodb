@@ -510,6 +510,8 @@ func TestPGLoop_SessionOpenCarriesTheThreeSynthesizedStatuses(t *testing.T) {
 // reentrantProbe wraps the real engine and re-enters it from INSIDE the emit
 // callback, which is the exact thing the seam declares is refused.
 type reentrantProbe struct {
+	noExtended
+
 	eng *exec.Engine
 
 	mu       sync.Mutex
@@ -694,7 +696,7 @@ func TestPGLoop_ASaturatedLaneTellsTheTruthAboutAStatementThatRan(t *testing.T) 
 	// A lane far too small for any real result, so the stall happens while the
 	// statement's output is being forwarded rather than before it runs.
 	_, events, listenAddr := listenerWith(t, Options{
-		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, GeneralLaneBytes: 64,
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, GeneralLaneBytes: 64, testUncheckedLane: true,
 	})
 	fe := pgClient(t, listenAddr, secret, database)
 
@@ -771,6 +773,7 @@ func TestPGLoop_EveryPostDispatchStopTellsTheSameTruth(t *testing.T) {
 			opts: func(o *Options) {
 				o.testWatermark = &lowWatermark
 				o.GeneralLaneBytes = 256
+				o.testUncheckedLane = true // deliberately below the floor: this cell saturates the lane
 			},
 			rule: ruleBudgetBackpressure,
 		},
@@ -897,7 +900,7 @@ func TestPGLoop_ASaturatedLaneRefusesBeforeTheStatementRuns(t *testing.T) {
 	wait := 200 * time.Millisecond
 	l, events, listenAddr := listenerWith(t, Options{
 		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled,
-		GeneralLaneBytes: 256, testWatermark: &watermark, testLaneWait: &wait,
+		GeneralLaneBytes: 256, testUncheckedLane: true, testWatermark: &watermark, testLaneWait: &wait,
 	})
 
 	fe := pgClient(t, listenAddr, secret, database)
@@ -1399,3 +1402,83 @@ func startupParameterSet(t *testing.T, addr, secret, database string) map[string
 // appNameForTest is what pgClientCollecting sends as its startup
 // application_name; the echo must equal it.
 const appNameForTest = "psql"
+
+// r1 MF4 — discard-through-Sync must stop a simple Query too, and the proof is
+// the ABSENT ROW, not the absent frame.
+//
+// PostgreSQL ignores every message but Sync and Terminate after an error in a
+// segment. The guard used to live inside runExtended, so a Query — which is not
+// an extended frame — fell through to runQuery and EXECUTED: a refused Parse
+// followed by a pipelined INSERT committed the row. A client that mixes the two
+// protocols on one connection, which lib/pq does, hits that with ordinary
+// traffic.
+//
+// Asserting on frames would not have caught it: the client sees a refusal either
+// way. Only the target knows whether the write happened, so an independent
+// connection is what asks.
+func TestPGLoop_DiscardingSegmentStopsASimpleQueryFromCommitting(t *testing.T) {
+	addr, secret, database := pgLoop(t)
+	table := fmt.Sprintf("fd_discard_%d", time.Now().UnixNano())
+
+	setup := pgClient(t, addr, secret, database)
+	if msgs := query(t, setup, fmt.Sprintf("CREATE TABLE %s (n int)", table)); hasError(msgs) {
+		t.Fatalf("creating the scratch table: %v", errorText(msgs))
+	}
+	t.Cleanup(func() {
+		cleanup := pgClient(t, addr, secret, database)
+		_ = query(t, cleanup, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+	})
+
+	// POSITIVE CONTROL FIRST: the same Query on a session that is NOT discarding
+	// routes and executes. Without this the cell would pass for a front door that
+	// had simply stopped running simple queries.
+	control := pgClient(t, addr, secret, database)
+	if msgs := query(t, control, fmt.Sprintf("INSERT INTO %s VALUES (99)", table)); hasError(msgs) {
+		t.Fatalf("positive control: an ordinary INSERT was refused: %v", errorText(msgs))
+	}
+
+	// Now the segment: a Parse the FRONT DOOR refuses (LISTEN is refused at
+	// classification, so the target never sees it), then a pipelined INSERT, then
+	// Sync — all in ONE write, which is how a client sends them.
+	fe := pgClient(t, addr, secret, database)
+	fe.Send(&pgproto3.Parse{Name: "refused", Query: "LISTEN chan_" + table})
+	fe.Send(&pgproto3.Query{String: fmt.Sprintf("INSERT INTO %s VALUES (1)", table)})
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	readUntilReadyPG(t, fe)
+
+	// THE OBSERVABLE EFFECT, from a connection that was never part of the segment.
+	checker := pgClient(t, addr, secret, database)
+	msgs := query(t, checker, fmt.Sprintf("SELECT count(*) FROM %s WHERE n = 1", table))
+	if hasError(msgs) {
+		t.Fatalf("counting: %v", errorText(msgs))
+	}
+	var got string
+	for _, m := range msgs {
+		if dr, ok := m.(*pgproto3.DataRow); ok && len(dr.Values) == 1 {
+			got = string(dr.Values[0])
+		}
+	}
+	if got != "0" {
+		t.Fatalf("the INSERT pipelined behind a refused Parse COMMITTED (%s rows): a discarding segment must "+
+			"stop every message but Sync and Terminate, and a simple Query is a message", got)
+	}
+}
+
+// readUntilReadyPG drains to the next ReadyForQuery, bounded so a cell reports
+// rather than hangs.
+func readUntilReadyPG(t *testing.T, fe *pgproto3.Frontend) {
+	t.Helper()
+	for range 64 {
+		m, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("reading to readiness: %v", err)
+		}
+		if _, ok := m.(*pgproto3.ReadyForQuery); ok {
+			return
+		}
+	}
+	t.Fatal("no ReadyForQuery within 64 frames")
+}

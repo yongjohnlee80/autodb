@@ -82,14 +82,6 @@ const (
 	// the wire (matrix §1.2, Event.Reason).
 	causeCopySubprotocolInactive = "frontdoor/copy-subprotocol-inactive"
 	causeUnknownMessageType      = "frontdoor/unknown-message-type"
-
-	// ruleExtendedNotImplemented refuses the extended-query frames until F2
-	// lands. Johno ruled the shape on 2026-09-02: FATAL, tear the connection
-	// down, one error only. "Refuse and stay usable" would be honest only if
-	// the rest of the segment were then discarded through Sync — and that is
-	// F2's row 4:discard and F2's state machine, so staying usable would mean
-	// half-implementing F2 here and deleting it there.
-	ruleExtendedNotImplemented = "frontdoor/extended-query-not-implemented"
 )
 
 // SQLSTATEs used post-auth. 28000 (the uniform pre-auth denial) is deliberately
@@ -216,24 +208,6 @@ func dispatchFrame(msg pgproto3.FrontendMessage) (dispatch, bool) {
 			auditKind:   "fd.refused",
 			auditReason: causeCopySubprotocolInactive,
 			closeReason: "protocol-violation",
-		}, true
-
-	// The extended-query protocol, until F2 lands. Johno's ruling: one FATAL
-	// 0A000, then close. See ruleExtendedNotImplemented for why tearing down
-	// beats staying usable while F2 owns discard-through-Sync.
-	//
-	// F2 REPLACES this arm. It is the only place the extended frames are named
-	// in F1, which is what makes that replacement a local change.
-	case *pgproto3.Parse, *pgproto3.Bind, *pgproto3.Describe,
-		*pgproto3.Execute, *pgproto3.Close, *pgproto3.Flush, *pgproto3.Sync:
-		return dispatch{
-			emit: gateError("FATAL", sqlStateFeatureNotSupported,
-				"the extended query protocol is not supported yet", ruleExtendedNotImplemented,
-				"use the simple query protocol; extended-protocol support lands with the F2 slice"),
-			after:       endSession,
-			auditKind:   "fd.refused",
-			auditReason: ruleExtendedNotImplemented,
-			closeReason: "extended-query-not-implemented",
 		}, true
 
 	// A clean close. No frame: PostgreSQL sends nothing in reply to Terminate,

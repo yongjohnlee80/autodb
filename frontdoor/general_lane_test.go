@@ -148,3 +148,36 @@ func TestLoop_TheLaneIsReleasedOnEveryStatementPath(t *testing.T) {
 		})
 	}
 }
+
+// §1.4's composition rule for the general lane: the default is exactly the
+// floor, config may only raise it, and startup FAILS below it.
+//
+// The equality assertion is the load-bearing one. 256 × 4 MiB = 1 GiB is today's
+// default exactly, with zero margin — it fits by coincidence, not construction,
+// and this cell is what turns the coincidence into a checked invariant. If a
+// later change raises the watermark or the session cap, this fails rather than
+// letting the lane quietly over-commit.
+func TestGeneralLane_DefaultIsExactlyTheDerivedFloor(t *testing.T) {
+	if got, want := DefaultGeneralLaneBytes, GeneralLaneFloor(); got != want {
+		t.Fatalf("default lane %d != derived floor %d (%d sessions × %d watermark).\n"+
+			"The default is not a constant to keep in step by hand: either derive it, or the composition "+
+			"rule is not being applied.", got, want, generalLaneSessionCap, pendingOutputWatermark)
+	}
+}
+
+func TestGeneralLane_StartupRefusesALaneBelowTheFloor(t *testing.T) {
+	if err := validateGeneralLane(GeneralLaneFloor() - 1); err == nil {
+		t.Fatal("a lane one byte below the floor was accepted; at full occupancy a session could not hold " +
+			"one output working set and the lane would refuse statements nothing is wrong with")
+	}
+	if err := validateGeneralLane(GeneralLaneFloor()); err != nil {
+		t.Fatalf("the floor itself was refused: %v", err)
+	}
+	// Config may RAISE it.
+	if err := validateGeneralLane(GeneralLaneFloor() * 2); err != nil {
+		t.Fatalf("raising the lane was refused: %v", err)
+	}
+	if err := validateGeneralLane(generalLaneCeiling + 1); err == nil {
+		t.Fatal("a lane above §9's ceiling was accepted")
+	}
+}

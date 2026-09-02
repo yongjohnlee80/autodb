@@ -50,6 +50,15 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		_ = conn.SetDeadline(l.now().Add(l.dl.frameStall))
 	})
 
+	// THE SEGMENT'S LANE RESERVATION IS OWNED HERE, not by the frame that took
+	// it, because an extended segment spans many frames and many trips round this
+	// loop. §8.2 is release on EVERY path: Sync is the segment's normal exit, but
+	// a client that vanishes between Execute and Sync never sends one, and a
+	// release-at-Sync design would leak those bytes for the life of the process.
+	// This defer is the only thing that runs on every way out of a session.
+	var seg segmentLane
+	defer seg.release(l)
+
 	for {
 		// WHICH BUDGET IS OWED IS A QUESTION ABOUT THE STREAM, and the reader is
 		// the only thing that can answer it — so it is ASKED here rather than
@@ -67,7 +76,12 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// single arming at session open would make the idle budget a cap on
 		// session LIFETIME — a pooled connection doing steady work would die
 		// mid-statement at thirty minutes, having never once been idle.
-		budget := l.dl.idle
+		// A SEGMENT HOLDING OUTPUT GETS ITS OWN CLOCK. Between Execute and Sync the
+		// peer owes us a Sync and we are holding its bytes, so the 30-minute idle
+		// budget is the wrong measure — see segmentStallBudget. A HALF-SENT
+		// MESSAGE still wins over both: a peer stopped mid-frame is neither idle
+		// nor sitting on a segment, and §7 gives that its own identity.
+		budget := l.segmentDeadline(&seg)
 		if fr.midMessage() {
 			budget = l.dl.frameStall
 		}
@@ -78,7 +92,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 
 		msg, err := be.Receive()
 		if err != nil {
-			return l.endOfRead(conn, be, fr, err, peer, closeReason)
+			return l.endOfRead(conn, be, fr, &seg, err, peer, closeReason)
 		}
 
 		// The frame is in. Engine work is NOT between-messages time, and it is
@@ -88,6 +102,28 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		if err := conn.SetDeadline(time.Time{}); err != nil {
 			*closeReason = "deadline"
 			return nil
+		}
+
+		// DISCARD-THROUGH-SYNC APPLIES TO EVERY MESSAGE, and it has to be here —
+		// before the decision table, before the extended routing, before Query —
+		// because PostgreSQL's rule is about the SEGMENT, not about one protocol's
+		// frames. It ignores everything but Sync and Terminate after an error in a
+		// segment, and a simple Query is a message like any other.
+		//
+		// Guarding only the extended path let a Query pipelined behind a refused
+		// Parse fall through to runQuery and EXECUTE: lector r1 MF4 committed a
+		// row that way. A client that mixes the protocols on one connection —
+		// lib/pq does — hits that with ordinary traffic.
+		if seg.discarding {
+			switch msg.(type) {
+			case *pgproto3.Sync:
+				// Ends the discard; routed below so the engine clears the segment
+				// and the client gets its readiness byte.
+			case *pgproto3.Terminate:
+				// Always admissible, and the decision table below closes cleanly.
+			default:
+				continue // discarded, exactly as the target would discard it
+			}
 		}
 
 		if d, decided := dispatchFrame(msg); decided {
@@ -107,6 +143,15 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			// it. A raw Frontend does not wait, which is exactly why the loop's
 			// own cell could not see this and a real client would.
 			if !l.sendReadiness(conn, be, sess, peer, closeReason) {
+				return nil
+			}
+			continue
+		}
+
+		// THE EXTENDED FRAMES ARE ROUTED, not decided — see session_extended.go
+		// for why they cannot be a dispatchFrame entry. One loop, never two.
+		if extendedFrame(msg) {
+			if !l.runExtended(ctx, conn, be, sess, msg, peer, &seg, closeReason) {
 				return nil
 			}
 			continue
@@ -164,7 +209,7 @@ func (l *Listener) endOfFrameRead(conn net.Conn, be *pgproto3.Backend, err error
 // flow. The two framing faults it can report are answered here too, before the
 // timeout arms, because they are not timeouts.
 func (l *Listener) endOfRead(conn net.Conn, be *pgproto3.Backend, fr *frameReader,
-	err error, peer string, closeReason *string) error {
+	seg *segmentLane, err error, peer string, closeReason *string) error {
 
 	switch {
 	case errors.Is(err, errUnknownFrameType):
@@ -193,6 +238,13 @@ func (l *Listener) endOfRead(conn net.Conn, be *pgproto3.Backend, fr *frameReade
 
 	if fr.midMessage() {
 		return l.endOfFrameRead(conn, be, err, peer, closeReason)
+	}
+	// Nothing has started, so whose budget expired depends on what the session
+	// was waiting FOR. A segment holding a reservation was waiting for a Sync;
+	// reporting that as an idle timeout would send an operator looking for a
+	// client that had gone quiet when it had not.
+	if seg != nil && seg.held > 0 {
+		return l.endOfSegmentWait(conn, be, err, peer, closeReason)
 	}
 	return l.endOfIdleWait(conn, be, err, peer, closeReason)
 }
@@ -379,129 +431,41 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 		}
 		return l.sendReadiness(conn, be, sess, peer, closeReason)
 	}
-	// RELEASE ON EVERY PATH (§8.2): whatever this statement holds goes back when
-	// it returns, however it returns.
-	defer func() { l.general.release(held) }()
-
-	var emitErr, writeErr error
-	var withheld outputWithheld
 	// The emitter SEES the target's error before deciding whether to forward it,
 	// so a failure that arrives before the stop is observed rather than inferred
 	// (r5 MF16). A failure arriving AFTER the stop is not observable here at all
 	// — that is the gap jarvis's EmitStopped seam closes.
-	var targetFailed bool
-	var pending, produced int64
+	acct := newOutputAccountant(l, conn, be, peer, held)
+	// RELEASE ON EVERY PATH (§8.2): whatever this statement holds goes back when
+	// it returns, however it returns — and it reads acct.held, not the figure
+	// reserved above, so an oversized frame's top-up cannot leak.
+	defer func() { l.general.release(acct.held) }()
 	status, err := l.queries.WireQuery(ctx, sess.SessionID, sess.UserID, sql, hostOf(peer),
-		func(m exec.WireMessage) error {
-			if m.Err != nil {
-				targetFailed = true
-			}
-			frame, ferr := backendFrame(m)
-			if ferr != nil {
-				emitErr = ferr
-				return ferr
-			}
-			if frame != nil {
-				// ACCOUNTED BEFORE SERIALIZATION (§8.4: "before serialization of
-				// each outbound frame"). Counting after Send means the buffer has
-				// already grown by the frame that crossed the line, so the
-				// watermark is enforced one frame late — and a single frame can
-				// be large.
-				size := estimateFrameBytes(m)
-
-				// §7's cumulative per-statement output cap. Unlike the watermark,
-				// which paces, this ABORTS: past it the statement is refused
-				// rather than allowed to stream forever.
-				produced += int64(size)
-				if produced > l.outputCap() {
-					withheld = withheldAtCap
-					return errStopForwarding
-				}
-
-				// THE WATERMARK IS ENFORCED BEFORE SERIALIZATION (§8.4: "before
-				// serialization of each outbound frame"), which means draining
-				// FIRST when this frame would cross it.
-				//
-				// Checking after Send would let the buffer grow by the frame that
-				// crossed the mark before anything drained it — the allocation
-				// the bound exists to prevent has already happened by the time
-				// the bound notices. One frame can be large.
-				// The session's working set is ALREADY RESERVED above, so an
-				// ordinary frame touches the lane not at all — it draws against
-				// what this statement holds. Only a frame bigger than the whole
-				// reservation needs more, and it asks for it after flushing,
-				// because a flush empties the buffer and may make the extra
-				// unnecessary.
-				if int64(size) > held {
-					l.onEvent(Event{Kind: "fd.backpressure_enter", Reason: ruleBudgetBackpressure, Peer: peer})
-					if ferr := l.flushBounded(conn, be); ferr != nil {
-						writeErr = ferr
-						return ferr
-					}
-					pending = 0
-					ok := l.general.reserve(int64(size)-held, l.laneWait(), l.now)
-					l.onEvent(Event{Kind: "fd.backpressure_exit", Reason: ruleBudgetBackpressure, Peer: peer})
-					if !ok {
-						// The statement HAS RUN. See reportOutputWithheld.
-						withheld = withheldOnSaturatedLane
-						return errStopForwarding
-					}
-					held = int64(size)
-				}
-
-				if pending+int64(size) >= l.outputWatermark() && pending > 0 {
-					l.onEvent(Event{Kind: "fd.backpressure_enter", Reason: ruleOutputWatermark, Peer: peer})
-					if ferr := l.flushBounded(conn, be); ferr != nil {
-						// A failed write is the SOCKET, not our framing. Keeping
-						// one error for both made a client hanging up mid-result
-						// audit as a front-door defect and told the peer the
-						// SERVER had produced something unforwardable.
-						writeErr = ferr
-						return ferr
-					}
-					l.onEvent(Event{Kind: "fd.backpressure_exit", Reason: ruleOutputWatermark, Peer: peer})
-					pending = 0
-				}
-				pending += int64(size)
-
-				// Send ENCODES here, synchronously, appending to the backend's
-				// write buffer — it does not retain the message. That is what
-				// makes it safe to hand it a DataRow whose Values are BORROWED
-				// for the duration of this call: the bytes are copied out before
-				// emit returns.
-				//
-				// A refactor that queued frames to send after the callback
-				// returned would read those values after the producer had reused
-				// the memory, and the corruption would be silent and
-				// data-dependent. Anything deferred must be copied first.
-				be.Send(frame)
-			}
-			return nil
-		})
+		acct.emit)
 
 	switch {
-	case withheld != outputComplete:
+	case acct.withheld != outputComplete:
 		// EVERY post-dispatch stop lands here, and there is nowhere else for one
 		// to land. The cap and the lane trip for different reasons at different
 		// sites; what is owed to the client and the audit is identical, so it is
 		// decided once, below, from what the engine records.
-		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, withheld, targetFailed)
+		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, acct.targetFailed)
 
-	case writeErr != nil:
+	case acct.writeErr != nil:
 		// The peer is gone or will not read. Nothing to send it, and nothing
 		// here is anyone's defect.
 		*closeReason = "write-failed"
 		return false
 
-	case emitErr != nil:
+	case acct.emitErr != nil:
 		// A message the front door cannot frame is a defect on OUR side, not the
 		// peer's — a target emitting something impossible (§5's never-emitted
 		// canaries) lands here. Say so accurately and close; forwarding a guess
 		// would be worse than stopping.
-		l.onEvent(Event{Kind: "fd.refused", Reason: ruleUnframeableMessage, Peer: peer, Detail: emitErr.Error()})
+		l.onEvent(Event{Kind: "fd.refused", Reason: unframeableAudit(acct.emitErr), Peer: peer, Detail: acct.emitErr.Error()})
 		be.Send(gateError("FATAL", sqlStateProtocolViolation,
-			"the server produced a message the front door cannot forward", ruleProtocolViolation,
-			"this is a front-door defect; the statement's outcome is unknown"))
+			unframeableMessageText(acct.emitErr), ruleProtocolViolation,
+			unframeableHint(acct.emitErr)))
 		_ = l.flushBounded(conn, be)
 		*closeReason = "unframeable-message"
 		return false
@@ -685,6 +649,65 @@ func (l *Listener) applyDispatch(conn net.Conn, be *pgproto3.Backend, d dispatch
 	if d.after == endSession && d.closeReason != "" {
 		*closeReason = d.closeReason
 	}
+}
+
+// errUnframeableKind is a backend message whose KIND the front door does not
+// know, as distinct from one whose kind it knows and whose payload is malformed.
+//
+// The distinction is load-bearing for the vocabulary witness: probing "does
+// backendFrame accept this kind" with an empty message cannot otherwise tell a
+// missing case from a missing payload, and ErrorResponse legitimately refuses an
+// empty one. It is also the more useful error for an operator — "I do not know
+// this message" and "this message arrived broken" are different defects.
+var errUnframeableKind = errors.New("unframeable backend message kind")
+
+// errCanaryMessage is a §5 canary: a message whose ARRIVAL is itself the defect,
+// because its trigger is refused before the target could produce one.
+//
+// Distinct from errUnframeableKind on purpose. A canary has a CASE — the front
+// door knows exactly what it is and refuses it deliberately — while an
+// unframeable kind has none. Sharing one error would make "we never thought
+// about this" and "we decided this is impossible" indistinguishable, which is
+// the confusion the vocabulary convention exists to prevent.
+var errCanaryMessage = errors.New("backend message whose arrival is itself a defect")
+
+// ruleClassifierBypass is the audit cause for a §5 canary arriving from the
+// target.
+//
+// SEPARATE FROM ruleUnframeableMessage, and the separation is the point. A canary
+// means something reached the target that CLASSIFICATION was supposed to refuse —
+// a gate bypass. Auditing it as an unframeable message records a security event
+// as our mapper being incomplete, and sends an operator to debug the front door
+// while the thing that actually happened goes unnamed. The wire still gets the
+// catalogue's violation id (§7 names one id for that class); the AUDIT gets the
+// defect, which is the §1.2 split.
+const ruleClassifierBypass = "frontdoor/classifier-bypass"
+
+// unframeableAudit picks the audit identity for a message the front door would
+// not forward: a deliberate canary refusal, or a kind it has no case for.
+func unframeableAudit(err error) string {
+	if errors.Is(err, errCanaryMessage) {
+		return ruleClassifierBypass
+	}
+	return ruleUnframeableMessage
+}
+
+// unframeableMessageText is what the PEER is told, which differs for the same
+// reason: "the front door cannot forward this" is false for a canary — the front
+// door understood it exactly and refused it.
+func unframeableMessageText(err error) string {
+	if errors.Is(err, errCanaryMessage) {
+		return "the server produced a message that cannot occur through this front door"
+	}
+	return "the server produced a message the front door cannot forward"
+}
+
+// unframeableHint is the remediation half of the same split.
+func unframeableHint(err error) string {
+	if errors.Is(err, errCanaryMessage) {
+		return "this indicates a statement reached the target that classification refuses; the statement's outcome is unknown"
+	}
+	return "this is a front-door defect; the statement's outcome is unknown"
 }
 
 // ruleUnframeableMessage is the audit cause for a backend message the front door
@@ -876,10 +899,173 @@ func backendFrame(m exec.WireMessage) (pgproto3.BackendMessage, error) {
 	case "ParameterStatus":
 		return &pgproto3.ParameterStatus{Name: m.ParameterName, Value: m.ParameterValue}, nil
 
+	// THE EXTENDED PROTOCOL'S OWN REPLIES (F2). Absent until F2 because the
+	// simple path cannot produce one: there is no Parse to complete and no
+	// portal to suspend. Each carries no payload of its own beyond what the
+	// frame type already says, except ParameterDescription, whose OIDs are the
+	// SERVER's answer to a Describe and are forwarded like any other target
+	// value.
+	case "ParseComplete":
+		return &pgproto3.ParseComplete{}, nil
+
+	case "BindComplete":
+		return &pgproto3.BindComplete{}, nil
+
+	case "CloseComplete":
+		return &pgproto3.CloseComplete{}, nil
+
+	case "NoData":
+		return &pgproto3.NoData{}, nil
+
+	case "PortalSuspended":
+		return &pgproto3.PortalSuspended{}, nil
+
+	case "ParameterDescription":
+		return &pgproto3.ParameterDescription{ParameterOIDs: m.ParameterOIDs}, nil
+
+	// §5'S CANARIES, each with its own case rather than the default arm.
+	//
+	// Their triggers are all refused before the target could produce one, so an
+	// arrival is itself the defect — and saying that in code is the difference
+	// between "this is impossible, here is why" and "we never thought about
+	// this". Six of these used to fall into the default, which said the latter
+	// while the matrix said the former; the vocabulary witness is what surfaced
+	// the disagreement.
+	case "CopyInResponse", "CopyOutResponse", "CopyBothResponse":
+		return nil, fmt.Errorf("%w: %s, but COPY and replication are refused at classification", errCanaryMessage, m.Kind)
+
+	case "CopyData", "CopyDone":
+		return nil, fmt.Errorf("%w: backend-direction %s, but no COPY sub-protocol is ever active", errCanaryMessage, m.Kind)
+
+	case "FunctionCallResponse":
+		return nil, fmt.Errorf("%w: FunctionCallResponse, but the fast-path is refused (row 4:FunctionCall)", errCanaryMessage)
+
 	case "NotificationResponse":
 		// A canary: LISTEN is refused at classification, so a notification can
 		// only mean the classifier was bypassed.
-		return nil, fmt.Errorf("the target sent a NotificationResponse, which LISTEN's refusal makes impossible")
+		return nil, fmt.Errorf("%w: NotificationResponse, which LISTEN's refusal makes impossible", errCanaryMessage)
 	}
-	return nil, fmt.Errorf("unframeable backend message %q", m.Kind)
+	return nil, fmt.Errorf("%w: %q", errUnframeableKind, m.Kind)
+}
+
+// outputAccountant is the ONE place output is accounted for on its way to the
+// client: §7's cumulative cap, §8.4's watermark, the general lane's top-up, and
+// the borrowed-bytes contract.
+//
+// It is a type rather than a closure because F2's extended segments stream
+// through it too. A second copy of this logic is the failure mode the budgets
+// document exists to prevent — a stream that bypasses the accounting bypasses
+// every bound at once, and nothing observes it until a process runs out of
+// memory.
+type outputAccountant struct {
+	l    *Listener
+	conn net.Conn
+	be   *pgproto3.Backend
+	peer string
+
+	// held is the working set reserved from the general lane. It grows only for
+	// a single frame larger than the whole reservation, and the owner's release
+	// reads it back, so a top-up cannot leak.
+	held int64
+	// pending is what sits in the Backend's write buffer; produced is the
+	// cumulative output of the statement or segment.
+	pending, produced int64
+
+	withheld     outputWithheld
+	targetFailed bool
+	emitErr      error
+	writeErr     error
+}
+
+func newOutputAccountant(l *Listener, conn net.Conn, be *pgproto3.Backend, peer string, held int64) *outputAccountant {
+	return &outputAccountant{l: l, conn: conn, be: be, peer: peer, held: held, withheld: outputComplete}
+}
+
+// emit accounts for one engine message and forwards it.
+func (a *outputAccountant) emit(m exec.WireMessage) error {
+	l, conn, be, peer := a.l, a.conn, a.be, a.peer
+	if m.Err != nil {
+		a.targetFailed = true
+	}
+	frame, ferr := backendFrame(m)
+	if ferr != nil {
+		a.emitErr = ferr
+		return ferr
+	}
+	if frame != nil {
+		// ACCOUNTED BEFORE SERIALIZATION (§8.4: "before serialization of
+		// each outbound frame"). Counting after Send means the buffer has
+		// already grown by the frame that crossed the line, so the
+		// watermark is enforced one frame late — and a single frame can
+		// be large.
+		size := estimateFrameBytes(m)
+
+		// §7's cumulative per-statement output cap. Unlike the watermark,
+		// which paces, this ABORTS: past it the statement is refused
+		// rather than allowed to stream forever.
+		a.produced += int64(size)
+		if a.produced > l.outputCap() {
+			a.withheld = withheldAtCap
+			return errStopForwarding
+		}
+
+		// THE WATERMARK IS ENFORCED BEFORE SERIALIZATION (§8.4: "before
+		// serialization of each outbound frame"), which means draining
+		// FIRST when this frame would cross it.
+		//
+		// Checking after Send would let the buffer grow by the frame that
+		// crossed the mark before anything drained it — the allocation
+		// the bound exists to prevent has already happened by the time
+		// the bound notices. One frame can be large.
+		// The session's working set is ALREADY RESERVED above, so an
+		// ordinary frame touches the lane not at all — it draws against
+		// what this statement holds. Only a frame bigger than the whole
+		// reservation needs more, and it asks for it after flushing,
+		// because a flush empties the buffer and may make the extra
+		// unnecessary.
+		if int64(size) > a.held {
+			l.onEvent(Event{Kind: "fd.backpressure_enter", Reason: ruleBudgetBackpressure, Peer: peer})
+			if ferr := l.flushBounded(conn, be); ferr != nil {
+				a.writeErr = ferr
+				return ferr
+			}
+			a.pending = 0
+			ok := l.general.reserve(int64(size)-a.held, l.laneWait(), l.now)
+			l.onEvent(Event{Kind: "fd.backpressure_exit", Reason: ruleBudgetBackpressure, Peer: peer})
+			if !ok {
+				// The statement HAS RUN. See reportOutputWithheld.
+				a.withheld = withheldOnSaturatedLane
+				return errStopForwarding
+			}
+			a.held = int64(size)
+		}
+
+		if a.pending+int64(size) >= l.outputWatermark() && a.pending > 0 {
+			l.onEvent(Event{Kind: "fd.backpressure_enter", Reason: ruleOutputWatermark, Peer: peer})
+			if ferr := l.flushBounded(conn, be); ferr != nil {
+				// A failed write is the SOCKET, not our framing. Keeping
+				// one error for both made a client hanging up mid-result
+				// audit as a front-door defect and told the peer the
+				// SERVER had produced something unforwardable.
+				a.writeErr = ferr
+				return ferr
+			}
+			l.onEvent(Event{Kind: "fd.backpressure_exit", Reason: ruleOutputWatermark, Peer: peer})
+			a.pending = 0
+		}
+		a.pending += int64(size)
+
+		// Send ENCODES here, synchronously, appending to the backend's
+		// write buffer — it does not retain the message. That is what
+		// makes it safe to hand it a DataRow whose Values are BORROWED
+		// for the duration of this call: the bytes are copied out before
+		// emit returns.
+		//
+		// A refactor that queued frames to send after the callback
+		// returned would read those values after the producer had reused
+		// the memory, and the corruption would be silent and
+		// data-dependent. Anything deferred must be copied first.
+		be.Send(frame)
+	}
+	return nil
 }

@@ -53,6 +53,11 @@ type WireMessage struct {
 	// Tag is the CommandComplete's command tag, verbatim.
 	Tag string
 
+	// ParameterOIDs is the ParameterDescription's parameter types, as the
+	// SERVER reported them. Extended-protocol only: the simple path has no
+	// Describe and never sets it.
+	ParameterOIDs []uint32
+
 	Err          *pgconn.PgError
 	Notice       *pgconn.Notice
 	Notification *pgconn.Notification
@@ -144,6 +149,20 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 			e.finishClosing(context.WithoutCancel(ctx), s)
 		}
 	}()
+
+	// §4a: a simple Query destroys the unnamed prepared statement and the
+	// unnamed portal. It is protocol-documented destruction, and it matters here
+	// because the two protocols share ONE namespace on one session — lib/pq
+	// sends simple for parameterless statements and extended for the rest, so a
+	// client can genuinely bind the unnamed portal and then send a Query. The
+	// backend destroys them; leaving them addressable on this side would let a
+	// later Execute name an object that no longer exists there.
+	//
+	// Placed before dispatch, as PostgreSQL destroys them when the Query message
+	// is processed rather than when it succeeds.
+	if s.ext != nil {
+		s.ext.dropUnnamed()
+	}
 
 	pol, err := e.wireAdmit(ctx, s, sqlText, ip, &closeAfterRelease)
 	if err != nil {

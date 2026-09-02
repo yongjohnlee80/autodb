@@ -86,6 +86,10 @@ type Listener struct {
 	// saturated lane without waiting the policy thirty seconds for it.
 	testLaneWait *time.Duration
 
+	// testSegmentStall shortens the extended-segment stall budget so a cell can
+	// observe the real enforcement path without waiting thirty seconds.
+	testSegmentStall *time.Duration
+
 	// testOutputCap lowers the cumulative output cap so a cell can trip it
 	// without producing 8 GiB. Nil takes the matrix's figure.
 	testOutputCap *int64
@@ -181,6 +185,18 @@ type Options struct {
 	// testLaneWait shortens the general-lane wait budget for a cell.
 	testLaneWait *time.Duration
 
+	// testSegmentStall shortens the extended-segment stall budget for a cell.
+	testSegmentStall *time.Duration
+
+	// testUncheckedLane skips the general-lane floor validation.
+	//
+	// It exists for the cells that deliberately SATURATE the lane, which they do
+	// by configuring a tiny one — and the floor rule refuses exactly that. The
+	// escape is test-only and explicit rather than implicit in another knob:
+	// production configuration is always validated, and a cell that shrinks the
+	// lane has to say it means to.
+	testUncheckedLane bool
+
 	// The caps. Zero takes the documented default; Open validates the
 	// relationship between them rather than trusting a caller to have done
 	// the arithmetic, because the one that matters — the control lane
@@ -272,9 +288,20 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.testOutputCap = opt.testOutputCap
 	l.testWatermark = opt.testWatermark
 	l.testLaneWait = opt.testLaneWait
+	l.testSegmentStall = opt.testSegmentStall
 	laneBytes := opt.GeneralLaneBytes
 	if laneBytes <= 0 {
 		laneBytes = DefaultGeneralLaneBytes
+	}
+	// §1.4's composition rule, applied to the general lane: config may only
+	// RAISE it. Validated at startup rather than discovered under load, because
+	// the symptom of an under-sized lane is statements refused for backpressure
+	// that nothing is actually wrong with — which reads as a busy server, not as
+	// a misconfiguration.
+	if !opt.testUncheckedLane {
+		if err := validateGeneralLane(laneBytes); err != nil {
+			return nil, err
+		}
 	}
 	l.general = newGeneralLane(laneBytes)
 	l.admit = newAdmitter(caps.maxConns, caps.preAuthMax, caps.failures, caps.lane, l.now)

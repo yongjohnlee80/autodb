@@ -89,10 +89,18 @@ func TestDispatch_CopySubprotocolIsAFatalViolation(t *testing.T) {
 	}
 }
 
-// The extended-query frames tear the connection down until F2 lands (Johno's
-// ruling): one FATAL 0A000, then close. Staying usable would be honest only
-// with discard-through-Sync, which is F2's state machine.
-func TestDispatch_ExtendedFramesTearDownWithOneError(t *testing.T) {
+// The extended-query frames are NOT in the decision table — F2 routes them.
+//
+// Johno's "one FATAL 0A000, then close" ruling governed the window before F2
+// existed and is superseded by F2 landing, not by this cell deciding it is.
+//
+// The table keeps its defining property: everything in it is decidable from the
+// frame ALONE. None of these is — Parse needs the classifier and the gate,
+// Execute a fresh authority resolution, Sync the engine's state machine — and
+// two of them produce STREAMS, which `dispatch.emit` (one *pgproto3.ErrorResponse)
+// could never carry. A table entry for them would have dissolved the property
+// rather than extended the table.
+func TestDispatch_ExtendedFramesAreRoutedNotDecided(t *testing.T) {
 	t.Parallel()
 
 	for name, msg := range map[string]pgproto3.FrontendMessage{
@@ -105,25 +113,12 @@ func TestDispatch_ExtendedFramesTearDownWithOneError(t *testing.T) {
 		"Sync":     &pgproto3.Sync{},
 	} {
 		t.Run(name, func(t *testing.T) {
-			d, ok := dispatchFrame(msg)
-			if !ok {
-				t.Fatalf("%s was not decided by the frame table", name)
+			if _, decided := dispatchFrame(msg); decided {
+				t.Fatalf("%s is still decided by the frame table; F2 routes it", name)
 			}
-			if d.after != endSession {
-				t.Fatalf("%s kept the session; the ruling is tear-down, because staying usable requires F2's discard-through-Sync", name)
-			}
-			if d.emit == nil || d.emit.Code != sqlStateFeatureNotSupported {
-				t.Fatalf("%s: code = %v, want %s", name, d.emit, sqlStateFeatureNotSupported)
-			}
-			if d.emit.Severity != "FATAL" {
-				t.Errorf("%s: severity = %q, want FATAL — the connection does not survive this", name, d.emit.Severity)
-			}
-			if d.emit.Detail != ruleExtendedNotImplemented {
-				t.Errorf("%s: DETAIL = %q, want %q so the audit trail is greppable and the wire is unambiguous",
-					name, d.emit.Detail, ruleExtendedNotImplemented)
-			}
-			if d.closeReason != "extended-query-not-implemented" {
-				t.Errorf("%s: closeReason = %q, want its own reason rather than a generic one", name, d.closeReason)
+			if !extendedFrame(msg) {
+				t.Fatalf("%s is neither decided nor routed — it would fall through to the Query path, "+
+					"which is the regression that makes the deletion and the routing ONE change", name)
 			}
 		})
 	}
@@ -221,7 +216,6 @@ func TestDispatch_SynthesizedErrorsCarryTheGateIdentity(t *testing.T) {
 	for name, msg := range map[string]pgproto3.FrontendMessage{
 		"FunctionCall": &pgproto3.FunctionCall{},
 		"CopyData":     &pgproto3.CopyData{},
-		"Parse":        &pgproto3.Parse{},
 	} {
 		d, _ := dispatchFrame(msg)
 		if d.emit == nil {

@@ -49,6 +49,37 @@ type QueryExecutor interface {
 	// ReadyForQuery status byte, for the readiness that follows a refusal the
 	// engine returned without dispatching anything.
 	WireTxStatus(id exec.SessionID, userID int64) (byte, error)
+
+	// THE EXTENDED-QUERY SEAM (F2). One method per frame, and no more: the loop
+	// can ask for a statement to be prepared, bound, described, executed, closed,
+	// flushed or synced, and it cannot reach past that. Notably still absent is
+	// anything handing the front door the pinned connection or a raw protocol
+	// handle — the segment's state machine and every §4a object lifetime stay
+	// engine-side, which is what keeps this a seam rather than a second loop.
+	WireParse(ctx context.Context, id exec.SessionID, userID int64,
+		name, sqlText string, paramOIDs []uint32, ip string) error
+	WireBind(ctx context.Context, id exec.SessionID, userID int64,
+		portalName, stmtName string, paramValues [][]byte, paramFormats, resultFormats []int16) error
+	WireDescribeStatement(ctx context.Context, id exec.SessionID, userID int64, name string) error
+	WireDescribePortal(ctx context.Context, id exec.SessionID, userID int64, name string) error
+	WireCloseStatement(ctx context.Context, id exec.SessionID, userID int64, name string) error
+	WireClosePortal(ctx context.Context, id exec.SessionID, userID int64, name string) error
+
+	// WireExecutePortal runs one portal, emitting the target's messages in wire
+	// order. emit carries the same non-reentrancy contract WireQuery's does.
+	WireExecutePortal(ctx context.Context, id exec.SessionID, userID int64,
+		portalName string, maxRows uint32, ip string, emit func(exec.WireMessage) error) error
+
+	// WireFlushSegment delivers the answers to every frame queued so far without
+	// ending the segment.
+	WireFlushSegment(ctx context.Context, id exec.SessionID, userID int64,
+		emit func(exec.WireMessage) error) error
+
+	// WireSyncSegment ends the segment and returns the ReadyForQuery status byte
+	// from the engine's own state machine. It is also the only thing that ends a
+	// post-error discard (matrix row 4:discard), so the loop never synthesises
+	// this byte.
+	WireSyncSegment(ctx context.Context, id exec.SessionID, userID int64) (byte, error)
 }
 
 // ReadyForQuery status bytes (matrix §6.1). The engine names these too; the

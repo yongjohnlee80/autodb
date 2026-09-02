@@ -126,6 +126,31 @@ default 1 GiB):
 
 - **General lane** — all segment input, retained statement/portal state,
   pending serialized output. Charged **before** read/decode/store/serialize.
+
+  **Composition (RULED, jarvis as lead, 2026-09-03).** The general lane admits
+  three charges. ONE is a reservation — a statement's output working set
+  (`pendingOutputWatermark`), taken before dispatch — and the lane's floor is
+  derived from it: **global session cap × watermark**, so that at full occupancy
+  every session can hold one output working set; config may only RAISE the lane,
+  and startup refuses a lane below the floor. The other two are **caps on one session**, admitted by
+  **backpressure** rather than reserved. Segment input (cap 96 MiB per segment)
+  is charged as it occurs, header first (§1.5). Retained statement/portal state
+  (cap 16 MiB per session) is **reserved BEFORE the `Parse`/`Bind` is forwarded to
+  the target**, **finalized** at `ParseComplete`/`BindComplete`/`PortalSuspended`
+  (the segment charge transfers to retained — no double-charge, no gap), and
+  **released on a pre-Complete error** (:263, :264, :407, r0 MF3: the target must
+  never hold a server-side prepared statement the budget did not admit). It is
+  then released again when the object dies — closed, taken by its statement's
+  cascade, ended with the transaction, or destroyed with the unnamed pair by a
+  simple `Query` (§4a) — **owed: retained-state charging, F2b.** F2 owns those lifetimes and does not yet
+  charge them, so that clause states the contract, not current behaviour, and §4
+  and §4a stay `awaiting` until it lands. Backpressure: at full occupancy a new segment's
+  intake waits for any statement to release its working set, which is the §7
+  contract, bounded by the segment-stall budget (§8.4) and §8.2's release on
+  every exit. They are deliberately NOT reserved: their sum over the session cap
+  (≈29 GiB) exceeds the 4 GiB ceiling seven times, which is the proof they were
+  never a composition. What the output reservation has that the others lack is a
+  KNOWABLE bound per statement; that is why it composes and they do not.
 - **Control/error lane** — a reserved slice admitting ONLY: `Sync`,
   `Flush`, `Terminate` intake (and header-only reads while discarding);
   `ErrorResponse` / `NoticeResponse` / `ReadyForQuery` emission; cancel

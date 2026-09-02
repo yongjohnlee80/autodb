@@ -45,6 +45,7 @@ on session *lifetime* (r0 MF2).
 | **frame in progress** (a type byte is present, body incomplete) | `frameStall` (30s, §7) | `08006` `frontdoor/frame-stall` | by `frameReader` as the type byte is read, **and at cycle entry when the stream is already mid-message** |
 | **statement running** (engine owns the session) | **none** | — (engine's own statement/tx timeouts bound it) | cleared after a successful `Receive` |
 | **output streaming** (each watermark flush) | `outputStall` per write | transport close, `write-failed` | `flushBounded`, cleared after each write |
+| **extended segment held** (output reserved, awaiting the client's `Sync`) | `segmentStallBudget` (30s) | `08006` `frontdoor/segment-stall` | top of the loop, while the segment holds a reservation |
 | **teardown / goodbye frame** | `deadlineGoodbyeBudget` (2s) | close regardless | in the expiry handlers |
 
 Three consequences that were each a finding:
@@ -135,11 +136,35 @@ does not matter to a 4 MiB bound.
 | idle past budget | `57P05` | `gate/session-deadline` | closed |
 | partial frame past budget | `08006` | `frontdoor/frame-stall` | closed |
 | statement output past 8 GiB | `54000` | `frontdoor/output-cap` | **survives** — and the message says the statement EXECUTED |
+| extended segment left open past budget | `08006` | `frontdoor/segment-stall` | closed |
 | gate refusal (classifier, grants, size) | per §7 | `gate/…` | survives, **readiness follows** |
 | target error | the target's own, verbatim | the target's own | survives, readiness follows |
 | fast-path, extended frames, COPY, unknown byte | §7 / Johno's ruling | `frontdoor/…` | per row |
 | client stopped reading | — (no frame reaches it) | — | closed, `write-failed` |
 | a frame the front door cannot build | `08P01` | `frontdoor/protocol-violation` | closed |
+
+**A segment left open is not an idle session.** `frontdoor/segment-stall` is
+frame-stall's sibling one level up — a whole segment half-open rather than one
+frame — hence the same `08006` class. It is deliberately NOT `57P05`
+`gate/session-deadline`: that reason says the session was idle, and this client
+was not idle, it asked for output and then did not collect it. It is not
+`write-failed` either, because the peer may well be reading; it simply never
+ended its segment. The budget is its OWN constant at 30s and does not inherit
+`idle` or `generalLaneWaitBudget` — per §5.1, three budgets that happen to share
+a number are three MEANINGS, and sharing a constant would make a later change to
+one silently change the others.
+
+It arms ONLY while a segment holds a lane reservation. A segment that has Parsed
+and Bound but executed nothing has produced no output, holds nothing, and is a
+client merely between messages: it stays under the idle clock, because adding a
+second timer to an idle session buys nothing and costs a state.
+
+**The lane can span a client gap by design; the budget bounds the gap, it does
+not remove it.** The alternative was to flush at the end of every streaming call,
+which would keep the lane out of every gap — and it is rejected because it sends
+bytes earlier than PostgreSQL would. Fidelity to the application outranks a
+tidier accounting story (Amendment 6): the requirement is that a wire session
+behaves as PostgreSQL does, and PostgreSQL does not send until `Flush` or `Sync`.
 
 **Wire identity follows the published §7 catalogue; audit identity follows the
 defect.** Two decisions may share a wire `DETAIL` when §7 names one id for their
