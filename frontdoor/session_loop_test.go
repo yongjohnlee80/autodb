@@ -151,6 +151,7 @@ func TestLoop_QueryRunsAndEndsWithSynthesizedReadyForQuery(t *testing.T) {
 // The status byte is the ENGINE's, not a constant. A loop that hard-coded 'I'
 // would pass the cell above and still tell a client inside a transaction that
 // it had nothing to commit.
+// Witness for row 5:ReadyForQuery.
 func TestLoop_ReadyForQueryCarriesTheEnginesStatus(t *testing.T) {
 	t.Parallel()
 	for _, want := range []byte{txStatusIdle, txStatusInTx, txStatusAborted} {
@@ -175,6 +176,7 @@ func TestLoop_ReadyForQueryCarriesTheEnginesStatus(t *testing.T) {
 // rule id in DETAIL, and then a readiness byte, because the refusal did not end
 // the session. The readiness comes from the engine — a refusal inside a
 // transaction leaves that transaction open.
+// Witness for row 5:ErrorResponse-gate-front-door.
 func TestLoop_GateRefusalIsFramedWithTheGateIdentityThenReadiness(t *testing.T) {
 	t.Parallel()
 	q := okQueries()
@@ -259,6 +261,7 @@ func TestLoop_TargetErrorIsForwardedVerbatimAndTheSessionContinues(t *testing.T)
 // The fast-path refusal must leave the connection USABLE. This is the row's
 // whole point, and the reason a cell that only checked the error frame would
 // not observe it: the stub refused everything with the same code and closed.
+// Witness for row 4:FunctionCall.
 func TestLoop_FunctionCallIsRefusedAndTheConnectionStillWorks(t *testing.T) {
 	t.Parallel()
 	q := okQueries()
@@ -308,6 +311,7 @@ func TestLoop_FunctionCallIsRefusedAndTheConnectionStillWorks(t *testing.T) {
 }
 
 // A COPY sub-protocol frame is a violation: fatal, and the connection closes.
+// Witness for row 4:CopyData.
 func TestLoop_CopyDataIsFatalAndCloses(t *testing.T) {
 	t.Parallel()
 	events, addr := loopListener(t, okQueries())
@@ -344,6 +348,7 @@ func TestLoop_CopyDataIsFatalAndCloses(t *testing.T) {
 
 // An UNDEFINED type byte is fatal and the stream closes — never skipped and
 // continued. The byte is written raw because pgproto3 has no way to send one.
+// Witness for row 4:Unknown-message-type-byte.
 func TestLoop_UnknownMessageTypeIsFatalAndNotSkipped(t *testing.T) {
 	t.Parallel()
 	events, addr := loopListener(t, okQueries())
@@ -420,6 +425,7 @@ func TestLoop_ExtendedFrameTearsDownWithOneError(t *testing.T) {
 // §5's never-emitted canaries arrive exactly here — a NotificationResponse can
 // only mean LISTEN's refusal was bypassed — and skipping one would hide the
 // event the canary exists to catch.
+// Witness for row 5:CopyInResponse.
 func TestLoop_ImpossibleBackendMessageIsAFrontDoorDefectAndCloses(t *testing.T) {
 	t.Parallel()
 	q := okQueries()
@@ -449,6 +455,7 @@ func TestLoop_ImpossibleBackendMessageIsAFrontDoorDefectAndCloses(t *testing.T) 
 // An engine status byte outside the protocol's three is never forwarded: it is
 // a claim the client acts on, and a NUL would assert a state that does not
 // exist.
+// Witness for row 5:ReadyForQuery.
 func TestLoop_InvalidStatusByteIsNeverForwarded(t *testing.T) {
 	t.Parallel()
 	q := okQueries()
@@ -674,6 +681,7 @@ func TestLoop_OrdinaryRefusalStillGetsReadiness(t *testing.T) {
 // answer and the connection looks fine. A client that DOES wait — libpq's PQfn,
 // and the large-object interface built on it — blocks forever. So this cell
 // waits, which is the whole difference.
+// Witness for row 4:FunctionCall.
 func TestLoop_SurvivingRefusalEndsTheCycleWithReadiness(t *testing.T) {
 	t.Parallel()
 	q := okQueries()

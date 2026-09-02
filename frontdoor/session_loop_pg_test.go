@@ -229,6 +229,7 @@ func firstOfType[T pgproto3.BackendMessage](msgs []pgproto3.BackendMessage) (T, 
 // A producer that decoded rows and re-encoded them would have to invent types,
 // and int4 arriving as text (OID 25) is exactly what that looks like — which is
 // why this asserts the OID rather than only the column name.
+// Witness for row 5:RowDescription.
 func TestPGLoop_RowDescriptionCarriesTheServersTypes(t *testing.T) {
 	addr, secret, database := pgLoop(t)
 	fe := pgClient(t, addr, secret, database)
@@ -273,6 +274,7 @@ func TestPGLoop_RowDescriptionCarriesTheServersTypes(t *testing.T) {
 // which no front door could compute and which psql uses to underline the
 // offending token. Its presence is what distinguishes a forwarded error from a
 // re-described one.
+// Witness for row 5:ErrorResponse-target.
 func TestPGLoop_TargetErrorIsVerbatimIncludingPosition(t *testing.T) {
 	addr, secret, database := pgLoop(t)
 	fe := pgClient(t, addr, secret, database)
@@ -320,6 +322,7 @@ func TestPGLoop_EmptyQueryIsItsOwnResponse(t *testing.T) {
 // The second half is the load-bearing one. A loop that ran each statement
 // independently would also produce an error frame here, and would look correct
 // until you asked whether the statement AFTER the failure had executed.
+// Witness for row 4:Query.
 func TestPGLoop_MultiStatementRunsInOrderAndStopsAtTheFirstError(t *testing.T) {
 	addr, secret, database := pgLoop(t)
 	fe := pgClient(t, addr, secret, database)
@@ -358,6 +361,7 @@ func TestPGLoop_MultiStatementRunsInOrderAndStopsAtTheFirstError(t *testing.T) {
 
 // BEGIN and COMMIT inside one buffer are honoured as transitions, and the
 // transaction they open is real: the ReadyForQuery between them says so.
+// Witness for row 4:Query.
 func TestPGLoop_ControlInsideTheBufferDrivesTheTransactionState(t *testing.T) {
 	addr, secret, database := pgLoop(t)
 	fe := pgClient(t, addr, secret, database)
@@ -413,6 +417,7 @@ func errorText(msgs []pgproto3.BackendMessage) string {
 //
 // So this writes inside a transaction, terminates WITHOUT committing, and then
 // asks a SECOND connection what survived. Nothing may have.
+// Witness for row 4:Terminate#rollback.
 func TestPGLoop_TerminateRollsBackAnOpenTransaction(t *testing.T) {
 	addr, secret, database := pgLoop(t)
 	table := fmt.Sprintf("fd_rollback_%d", time.Now().UnixNano())
