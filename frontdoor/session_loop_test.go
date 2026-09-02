@@ -1341,13 +1341,14 @@ func TestLoop_PipelinedQueryThenParseBothReachTheEngine(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	// The Query's own readiness, then the segment's.
 	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
-		t.Fatalf("no readiness for the pipelined Query (got %q); engine saw sql=%v ext=%v", got, q.sawSQL, q.calls())
+		t.Fatalf("no readiness for the pipelined Query (got %q); engine saw sql=%v ext=%v", got, q.statements(), q.calls())
 	}
 	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
-		t.Fatalf("no readiness for the pipelined Sync (got %q); engine saw sql=%v ext=%v", got, q.sawSQL, q.calls())
+		t.Fatalf("no readiness for the pipelined Sync (got %q); engine saw sql=%v ext=%v", got, q.statements(), q.calls())
 	}
-	if len(q.sawSQL) != 1 || q.sawSQL[0] != "SELECT 1" {
-		t.Errorf("the simple half reached the engine as %v, want [SELECT 1]", q.sawSQL)
+	// Snapshot under the mutex; sawSQL is written on the server goroutine.
+	if ran := q.statements(); len(ran) != 1 || ran[0] != "SELECT 1" {
+		t.Errorf("the simple half reached the engine as %v, want [SELECT 1]", ran)
 	}
 	want := []string{"Parse:p2:SELECT 2", "Sync"}
 	got := q.calls()

@@ -239,9 +239,13 @@ func TestExtDiscard_SimpleQueryDoesNotEscapeTheDiscard(t *testing.T) {
 	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
 		t.Fatalf("no readiness after the discarded segment (got %q)", got)
 	}
-	if len(q.sawSQL) != 0 {
+	// SNAPSHOT UNDER THE MUTEX. sawSQL is written on the SERVER goroutine and read
+	// here; -race staying quiet would not establish a happens-before through
+	// socket readiness, which is the accidental ordering that hid the same defect
+	// in this fake once already.
+	if ran := q.statements(); len(ran) != 0 {
 		t.Fatalf("the engine executed %v inside a discarding segment; every message but Sync and Terminate "+
-			"is dropped, and a simple Query is a message", q.sawSQL)
+			"is dropped, and a simple Query is a message", ran)
 	}
 
 	// POSITIVE CONTROL: after Sync ended the discard, the same session runs a
@@ -253,7 +257,7 @@ func TestExtDiscard_SimpleQueryDoesNotEscapeTheDiscard(t *testing.T) {
 	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
 		t.Fatalf("the session did not recover after Sync (got %q)", got)
 	}
-	if len(q.sawSQL) != 1 || q.sawSQL[0] != "SELECT 1" {
-		t.Fatalf("after Sync the engine saw %v, want [SELECT 1] — the discard must end at Sync", q.sawSQL)
+	if ran := q.statements(); len(ran) != 1 || ran[0] != "SELECT 1" {
+		t.Fatalf("after Sync the engine saw %v, want [SELECT 1] — the discard must end at Sync", ran)
 	}
 }
