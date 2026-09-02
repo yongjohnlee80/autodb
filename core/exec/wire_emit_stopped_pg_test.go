@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // errClientGone stands for the loop's own stop: a failed write, a budget cut.
@@ -148,4 +150,92 @@ func TestWireQuery_EmitStopped(t *testing.T) {
 		}
 	})
 	_ = pgconn.PgError{}
+}
+
+// The remaining emit-stop sites, each discriminated by its own cell (lector
+// #60 r0 MF1 + SF1): the EMPTY query (no statement to index — this panicked),
+// the owned-control target error (wireTargetError), and the decoded producer
+// (a non-PostgreSQL target, here sqlite).
+func TestWireQuery_EmitStopped_OtherSites(t *testing.T) {
+	ctx := context.Background()
+	as := func(t *testing.T, err error) *EmitStopped {
+		t.Helper()
+		var st *EmitStopped
+		if !errors.As(err, &st) {
+			t.Fatalf("WireQuery error is not an EmitStopped: %T %v", err, err)
+		}
+		if !errors.Is(err, errClientGone) {
+			t.Fatalf("the consumer's own cause is not reachable through the wrap: %v", err)
+		}
+		return st
+	}
+
+	t.Run("empty query: nothing executed, no panic", func(t *testing.T) {
+		f, _, res, err := openWire(t, liveDSN(t), "emit-empty")
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		_, qerr := f.eng.WireQuery(ctx, res.SessionID, res.UserID, "", testIP, cuttingEmit("EmptyQueryResponse"))
+		st := as(t, qerr)
+		if st.Executed || st.Outcome != "" || st.TargetErr != nil || st.TxStatus != TxStatusIdle {
+			t.Fatalf("empty-query cut: %+v (want Executed=false, empty Outcome, no target error, tx idle)", st)
+		}
+	})
+
+	t.Run("owned control refused by the target: TargetErr through wireTargetError", func(t *testing.T) {
+		f, _, res, err := openWire(t, liveDSN(t), "emit-control-err")
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		q := func(sql string, emit func(WireMessage) error) (byte, error) {
+			return f.eng.WireQuery(ctx, res.SessionID, res.UserID, sql, testIP, emit)
+		}
+		table := fmt.Sprintf("emit_deferred_%d", time.Now().UnixNano())
+		// A DEFERRED unique constraint fails at COMMIT, so the target refuses the
+		// owned control itself — the only way a control reaches wireTargetError.
+		if _, err := q(fmt.Sprintf("CREATE TABLE %s (v int, CONSTRAINT %s_u UNIQUE (v) DEFERRABLE INITIALLY DEFERRED)", table, table), passEmit); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		t.Cleanup(func() { _, _ = q(fmt.Sprintf("DROP TABLE IF EXISTS %s", table), passEmit) })
+		for _, sql := range []string{"BEGIN", fmt.Sprintf("INSERT INTO %s VALUES (1)", table), fmt.Sprintf("INSERT INTO %s VALUES (1)", table)} {
+			if _, err := q(sql, passEmit); err != nil {
+				t.Fatalf("%s: %v", sql, err)
+			}
+		}
+		_, cerr := q("COMMIT", cuttingEmit("ErrorResponse"))
+		st := as(t, cerr)
+		if st.TargetErr == nil || st.TargetErr.Code != "23505" || st.Outcome != StatusError || !st.Executed {
+			t.Fatalf("control refused by target, frame cut: %+v (want TargetErr 23505, outcome %s, executed)", st, StatusError)
+		}
+		if st.TxStatus != TxStatusIdle {
+			t.Fatalf("after a COMMIT the target refused, the session track is %c, want idle: the failed commit ended the transaction", st.TxStatus)
+		}
+	})
+
+	t.Run("decoded producer (sqlite target): completed before the first emit", func(t *testing.T) {
+		f := newFixture(t)
+		dsn := filepath.Join(t.TempDir(), "decoded.db")
+		connID, err := f.eng.CreateConnection(ctx, f.rootTok, fmt.Sprintf("dec-%d", time.Now().UnixNano()), "sqlite", dsn, testIP)
+		if err != nil {
+			t.Fatalf("CreateConnection sqlite: %v", err)
+		}
+		if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Set(meta.ConnProfile, string(ProfileSession)).Update(); err != nil {
+			t.Fatal(err)
+		}
+		row, _ := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
+		pat, err := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("dec-%d", time.Now().UnixNano()), 0, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := f.eng.OpenWireSessionWith(ctx, WireOpen{PAT: pat.Secret, StartupUser: "root", Database: row.Name, IP: testIP, ApplicationName: "emit-decoded"})
+		if err != nil {
+			t.Fatalf("open on sqlite: %v", err)
+		}
+		t.Cleanup(func() { f.eng.CloseWireSession(context.Background(), res.SessionID, res.UserID, testIP, "test") })
+		_, qerr := f.eng.WireQuery(ctx, res.SessionID, res.UserID, "SELECT 1 AS d", testIP, cuttingEmit("DataRow"))
+		st := as(t, qerr)
+		if st.Outcome != StatusOK || !st.Executed || st.TargetErr != nil {
+			t.Fatalf("decoded cut: %+v (want outcome %s — the unit completed before any emit — executed, no target error)", st, StatusOK)
+		}
+	})
 }

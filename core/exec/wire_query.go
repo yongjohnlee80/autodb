@@ -442,6 +442,13 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		// stopped carries the RECORDED outcome of the cut statement to the loop
 		// (EmitStopped): the audit row and the client's error tell one story.
 		stopped := func() error {
+			if el.last < el.first {
+				// The EMPTY query: no statement, no outcome row, nothing
+				// executed. The client did not receive its EmptyQueryResponse;
+				// there are no effects to speak of (lector #60 r0 MF1 — the
+				// fallback below indexed outcomes[-1]).
+				return e.emitStopped(s, ef.err, "", false, nil)
+			}
 			i := cutStmt
 			if i < el.first || i > el.last {
 				i = el.last

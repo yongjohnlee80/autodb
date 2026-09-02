@@ -26,6 +26,7 @@ import (
 //   - Outcome == StatusOK — the engine observed the statement COMPLETE (its
 //     CommandComplete arrived; the owned-control and decoded paths always have
 //     the whole result before the first emit): the effects were kept.
+//   - !Executed — the empty query: nothing ran, Outcome is "", no effects.
 //   - Outcome == StatusUnresolvable — the tail was drained UNOBSERVED (golib
 //     stops delivery at the first emit error and drains to ReadyForQuery
 //     without it): whether the target kept the statement is not known to the
@@ -44,8 +45,10 @@ type EmitStopped struct {
 	// Outcome is the status RECORDED in the statement's outcome row: StatusOK,
 	// StatusPendingCommit, StatusError, StatusRolledBack or StatusUnresolvable.
 	Outcome string
-	// Executed reports that the statement had been dispatched to the target
-	// before the stop. Always true today: nothing before dispatch emits.
+	// Executed reports that a statement had been dispatched to the target
+	// before the stop. False only for the EMPTY query, whose one frame
+	// (EmptyQueryResponse) is not a statement: then Outcome is empty and there
+	// are no effects to report — the loop says nothing about them.
 	Executed bool
 	// TargetErr is the target's error for that statement if its ErrorResponse
 	// passed through the emitter (the frame that failed to emit, or one before
