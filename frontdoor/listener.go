@@ -284,6 +284,14 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	if laneBytes <= 0 {
 		laneBytes = DefaultGeneralLaneBytes
 	}
+	// §1.4's composition rule, applied to the general lane: config may only
+	// RAISE it. Validated at startup rather than discovered under load, because
+	// the symptom of an under-sized lane is statements refused for backpressure
+	// that nothing is actually wrong with — which reads as a busy server, not as
+	// a misconfiguration.
+	if err := validateGeneralLane(laneBytes); err != nil {
+		return nil, err
+	}
 	l.general = newGeneralLane(laneBytes)
 	l.admit = newAdmitter(caps.maxConns, caps.preAuthMax, caps.failures, caps.lane, l.now)
 	l.dl = defaultDeadlines()

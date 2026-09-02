@@ -1,6 +1,7 @@
 package frontdoor
 
 import (
+	"fmt"
 	"sync"
 	"time"
 )
@@ -134,3 +135,61 @@ const DefaultGeneralLaneBytes int64 = 1 << 30
 // generalLaneWaitBudget bounds how long one connection waits for another to
 // release before it stops holding a statement open. Policy, not a matrix figure.
 const generalLaneWaitBudget = 30 * time.Second
+
+// GENERAL-LANE FLOOR (§1.4's composition rule, jarvis's ruling 2c, 2026-09-03).
+//
+// §1.4 already binds the CONTROL lane this way — its default is
+// `max_frontend_connections × 64 KiB`, and config may only raise it — so that
+// the reservation every connection is entitled to cannot be an accident of three
+// constants happening to multiply out. The general lane needs the same treatment
+// for the same reason, and the arithmetic is why: the pre-dispatch reservation is
+// one watermark per in-flight statement, so at the global session cap the lane is
+// committed to 256 × 4 MiB = 1 GiB — EXACTLY today's default, with zero margin.
+// It fits by coincidence, not by construction.
+//
+// So the floor is DERIVED rather than asserted, and startup fails below it. If a
+// future change raises the watermark or the session cap, the build stops instead
+// of silently over-committing a lane that three separate documents describe as
+// having room.
+//
+// WHAT THIS FLOOR DOES NOT YET COVER, stated here rather than left implicit:
+// §1.4 charges THREE things to this lane — pending output, segment input, and
+// retained statement/portal state. Only pending output is a RESERVATION; the
+// other two are per-session CAPS (retained state 16 MiB, segment 96 MiB, §9),
+// and a cap is not a reservation — nothing takes them up front. Composing the
+// caps the way this composes the reservation gives 256 × 116 MiB ≈ 29 GiB
+// against a published ceiling of 4 GiB, which is itself the evidence that they
+// were never meant to compose that way. Completing the rule needs a per-session
+// reservation figure for those two, or a ruling that they stay caps. Raised with
+// the lead; the floor below is the part that can be derived from what is
+// published today.
+const (
+	// generalLaneSessionCap is the global session cap the floor composes over
+	// (config.DefaultMaxSessionsGlobal; matrix row 2.7).
+	generalLaneSessionCap = 256
+
+	// generalLaneCeiling is §9's ceiling for the global budget.
+	generalLaneCeiling int64 = 4 << 30
+)
+
+// GeneralLaneFloor is the smallest lane that lets every session hold one output
+// working set at full occupancy.
+func GeneralLaneFloor() int64 {
+	return int64(generalLaneSessionCap) * pendingOutputWatermark
+}
+
+// validateGeneralLane enforces the composition rule: config may only RAISE the
+// lane, never lower it below the floor.
+func validateGeneralLane(bytes int64) error {
+	floor := GeneralLaneFloor()
+	if bytes < floor {
+		return fmt.Errorf("general lane %d bytes is below the floor of %d (%d sessions × %d watermark): "+
+			"at full occupancy a session could not hold one output working set, and the lane would refuse "+
+			"statements that nothing is wrong with",
+			bytes, floor, generalLaneSessionCap, pendingOutputWatermark)
+	}
+	if bytes > generalLaneCeiling {
+		return fmt.Errorf("general lane %d bytes exceeds §9's ceiling of %d", bytes, generalLaneCeiling)
+	}
+	return nil
+}
