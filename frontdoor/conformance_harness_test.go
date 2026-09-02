@@ -323,11 +323,47 @@ func harnessDB(t *testing.T) (*sql.DB, func()) {
 	return db, func() { _ = db.Close() }
 }
 
+// THE EXTENDED PROTOCOL through a real driver — F1 refused it, #57 serves it,
+// and this arm's skip ("blocked on PR #57") went stale the moment that merged.
+//
+// It asserts the VALUE, not merely that the call returned. Everything on this
+// path relays, so almost everything "runs": a cell that only checks for a nil
+// error would pass against a front door that forwarded the segment to the wrong
+// target, or returned another statement's rows (white-vision's F4 fixture spec
+// makes this its central point, and it is the reason this arm is not a smoke
+// test).
+//
+// The parameter is what makes it the extended path rather than a simple query
+// wearing a cast: pgconn.ExecParams drives Parse/Bind/Describe/Execute/Sync
+// with a typed argument, which is the segment shape lib/pq and JDBC send.
 func TestHarness_PgxExtendedProtocol(t *testing.T) {
-	t.Skip("pgx's default query mode is the extended protocol, which the front door refuses until " +
-		"F2 lands (PR #57). This arm is the pgx-class suite §10 names — binary formats and the " +
-		"statement cache — and it belongs here rather than in a second harness")
+	conn, done := harnessConn(t)
+	defer done()
+
+	res := conn.ExecParams(context.Background(), "SELECT $1::int + 1",
+		[][]byte{[]byte("41")}, nil, nil, nil).Read()
+	if res.Err != nil {
+		t.Fatalf("a real driver's extended-protocol query failed: %v", res.Err)
+	}
+	if len(res.Rows) != 1 || len(res.Rows[0]) != 1 {
+		t.Fatalf("result shape = %v, want one row of one column", res.Rows)
+	}
+	if got := string(res.Rows[0][0]); got != "42" {
+		t.Fatalf("got %q, want 42 — the parameter was bound and the expression evaluated at the "+
+			"TARGET, so a wrong value here means the segment did not carry what the client sent",
+			got)
+	}
 }
+
+// Vision's remaining eight extended shapes (named-statement reuse, binary
+// params/results, Describe-before-Execute, maxRows/PortalSuspended paging,
+// discard-through-Sync, standalone and empty Flush, pipelined mixed
+// simple+extended, control through the extended protocol) are a follow-up PR,
+// not this one: four matrix rows are AWAITING for want of a client driving them
+// (4:Describe, 4:Execute, 4:Flush, 4:discard), and closing them is a slice of
+// its own rather than scope bolted onto a PR already under review.
+//
+// Spec: $KB_ROOT/agents/ultron-prime/incoming/2026-09-02-f4-extended-client-shapes-from-white-vision.md
 
 // THE TEST-ONLY CONDITION, ASSERTED RATHER THAN REVIEWED.
 //
