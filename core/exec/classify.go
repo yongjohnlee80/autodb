@@ -147,7 +147,7 @@ var ddlVerbs = map[string]bool{
 // the refusal lived here (ADR-0055 §1).
 var controlVerbs = map[string]bool{
 	"BEGIN": true, "START": true, "COMMIT": true, "END": true, "ROLLBACK": true,
-	"SAVEPOINT": true, "RELEASE": true, "SET": true, "USE": true,
+	"SAVEPOINT": true, "RELEASE": true, "SET": true, "RESET": true, "USE": true,
 	"ATTACH": true, "DETACH": true, "LOCK": true, "UNLOCK": true,
 	"CALL": true, "DO": true, "PREPARE": true, "EXECUTE": true,
 	"DEALLOCATE": true, "DECLARE": true, "FETCH": true, "COPY": true,

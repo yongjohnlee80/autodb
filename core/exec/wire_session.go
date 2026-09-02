@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5/pgconn"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -102,6 +104,10 @@ const (
 	// wire it is the uniform 28000 like every lease failure in the reservation
 	// phase (§7 ruling 4); this reason is the audit identity only.
 	DenyLeaseEncoding = "frontdoor/lease-encoding"
+	// DenyStartupGUC: a startup parameter named a setting this session may not
+	// change (the Amendment 8 denylist), or the target refused to apply it.
+	// Uniform 28000 on the wire (§7 ruling 4); the audit row names the key.
+	DenyStartupGUC = "frontdoor/startup-parameter-refused"
 )
 
 // WireSessionOverhead is the fixed memory charged for one wire session: the
@@ -136,6 +142,14 @@ const WireSessionOverhead = 64 * 1024
 // front door; it is recorded on the session and in its audit lines.
 type WireOpen struct {
 	PAT, StartupUser, Database, IP, ApplicationName string
+	// StartupGUCs are the StartupMessage parameters outside row 3.1's named
+	// set — the settings a client asks for at connect (lib/pq's datestyle,
+	// JDBC's TimeZone and extra_float_digits). Each is admitted EXACTLY as
+	// `SET name TO value` from this session would be (ADR-0075 Amendment 8,
+	// one admission implementation) and, when admitted, applied to the pinned
+	// backend before the result returns — PostgreSQL's own semantics, not an
+	// emulation. One refusal withdraws the session (DenyStartupGUC).
+	StartupGUCs map[string]string
 }
 
 // OpenWireSession is the original entry point, kept so the front door's
@@ -273,6 +287,33 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 			cancel()
 			return out, deny(DenyLeaseEncoding)
 		}
+		// Startup GUCs (Amendment 8): judged by the SAME denylist a SET from
+		// this session meets, then applied to the pinned backend so the
+		// reported ParameterStatus set the client receives already reflects
+		// them. Any refusal — ours or the target's — withdraws the session.
+		if len(req.StartupGUCs) > 0 {
+			if gerr := e.applyStartupGUCs(ctx, s, pc, req.StartupGUCs, pat.UserID, ip, connRow.ID); gerr != nil {
+				pc.Discard()
+				s.mu.Lock()
+				s.pc = nil
+				s.mu.Unlock()
+				e.sessions.remove(s)
+				cancel()
+				return out, deny(DenyStartupGUC)
+			}
+			if r, ok := e.reporterFor(pc).(golibpg.ParameterStatusReporter); ok {
+				statuses = r.ReportedParameterStatuses() // live: reflects the SETs
+			}
+		}
+	} else if len(req.StartupGUCs) > 0 {
+		// A non-PostgreSQL target has no session to apply a GUC to. Refuse
+		// rather than pretend: an accepted setting that silently did nothing
+		// is the behaviour a client cannot detect.
+		e.auditBounded(ctx, pat.UserID, ip, "wire_startup_guc_refused",
+			fmt.Sprintf("conn %d: session %s: target engine %q has no session settings", connRow.ID, s.id, connRow.Engine))
+		e.sessions.remove(s)
+		cancel()
+		return out, deny(DenyStartupGUC)
 	}
 	e.auth.NotePATUse(ctx, pat)
 	return WireSessionResult{
@@ -340,3 +381,62 @@ func (e *Engine) CloseWireSession(ctx context.Context, id SessionID, userID int6
 	}
 	e.closeSession(ctx, s, ip, reason)
 }
+
+// applyStartupGUCs admits and applies the client's startup settings on the
+// pinned backend, in sorted order so refusals are deterministic. The admission
+// is admitWireSet with Local=false — the same function a SET statement meets —
+// and the application is a real `SET name TO 'value'` on the session's own
+// backend (PostgreSQL applies startup parameters as session settings; so do
+// we, on the session that is now ours). The target's refusal (an unknown
+// setting, a bad value — the cases PostgreSQL would FATAL at startup) is a
+// refusal here too, audited with the target's own message.
+func (e *Engine) applyStartupGUCs(ctx context.Context, s *session, pc golibpg.PinnedConn, gucs map[string]string, userID int64, ip string, connID int64) error {
+	pol, perr := e.resolveUnitPolicy(ctx, s.authority, s.userID, s.connID)
+	if perr != nil {
+		return perr
+	}
+	sq, ferr := rawFace(pc)
+	if ferr != nil {
+		return ferr
+	}
+	names := make([]string, 0, len(gucs))
+	for k := range gucs {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, raw := range names {
+		name := strings.ToLower(raw)
+		if err := admitWireSet(setStatement{Name: name}, pol.ReadOnly, false); err != nil {
+			e.auditBounded(ctx, userID, ip, "wire_startup_guc_refused",
+				fmt.Sprintf("conn %d: session %s: %s: %v", connID, s.id, name, err))
+			return err
+		}
+		var targetErr *pgconn.PgError
+		_, derr := sq.SimpleQuery(ctx, "SET "+quoteIdent(name)+" TO "+quoteLiteral(gucs[raw]), func(m golibpg.ExtendedMessage) error {
+			if m.Kind == "ErrorResponse" && targetErr == nil {
+				targetErr = m.Err
+			}
+			return nil
+		})
+		switch {
+		case derr != nil:
+			e.auditBounded(ctx, userID, ip, "wire_startup_guc_refused",
+				fmt.Sprintf("conn %d: session %s: %s: wire: %v", connID, s.id, name, derr))
+			return derr
+		case targetErr != nil:
+			e.auditBounded(ctx, userID, ip, "wire_startup_guc_refused",
+				fmt.Sprintf("conn %d: session %s: %s: target: %s", connID, s.id, name, targetErr.Message))
+			return targetErr
+		}
+	}
+	e.auditBounded(ctx, userID, ip, "wire_startup_gucs_applied",
+		fmt.Sprintf("conn %d: session %s: %s", connID, s.id, strings.Join(names, ",")))
+	return nil
+}
+
+// quoteIdent renders a setting name as a double-quoted identifier.
+func quoteIdent(name string) string { return `"` + strings.ReplaceAll(name, `"`, `""`) + `"` }
+
+// quoteLiteral renders a value as a single-quoted string literal. PostgreSQL
+// accepts the quoted form for every GUC type (numeric and boolean included).
+func quoteLiteral(v string) string { return "'" + strings.ReplaceAll(v, "'", "''") + "'" }

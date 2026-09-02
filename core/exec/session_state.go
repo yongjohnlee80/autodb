@@ -234,3 +234,149 @@ func admitLock(txOpen bool) error {
 	}
 	return nil
 }
+
+// ---------------------------------------------------------------------------
+// WIRE SESSIONS: the denylist (ADR-0075 Amendment 8, Johno 2026-09-03).
+//
+// A wire session is a real PostgreSQL session pinned to one backend for its
+// whole life, and that backend is DISCARDED at close, never returned to the
+// pool (closeSession). So the reason the pooled path refuses non-LOCAL SET —
+// state persisting onto a connection the next user inherits — does not exist
+// here: a session-level setting lives exactly as long as PostgreSQL says it
+// does. Amendment 6 rule 1 therefore applies in full: no allowlist of
+// settings. What remains is a SHORT DENYLIST naming only what must not change:
+//
+//   - the parsing-mode GUCs (parsingGUCs): they desynchronize the classifier
+//     from the server's reading of the SQL, for every role, in every form;
+//   - the engine's own belts (engineGUCs): a user must not be able to shorten
+//     the server-side timeout the engine relies on;
+//   - the non-GUC SET forms that are authority or transaction control in
+//     disguise (SET ROLE, SET SESSION AUTHORIZATION, SET TRANSACTION, SET
+//     SESSION CHARACTERISTICS): the first two would change WHO the target
+//     thinks is running, escaping autodb's authorization; the last two are
+//     transaction control, which the owned-control path handles and golib's
+//     raw face poisons on;
+//   - for READERS only, search_path (and its alias SET SCHEMA): the reader
+//     analysis exempts catalog-named calls by name, and search_path is how a
+//     user-defined function comes to answer to a catalog name.
+//
+// Startup parameters that name a GUC are admitted by EXACTLY this rule
+// (OpenWireSessionWith): one implementation, so the startup packet and a SET
+// statement cannot disagree about what a session may change.
+// ---------------------------------------------------------------------------
+
+// parsingGUCs are grammarGUCs minus search_path: the settings that change how
+// the SERVER PARSES SQL. search_path changes name RESOLUTION, not parsing, and
+// is a reader concern only (see readerGUCs).
+var parsingGUCs = map[string]bool{
+	"standard_conforming_strings": true,
+	"backslash_quote":             true,
+	"escape_string_warning":       true,
+	"sql_mode":                    true,
+	"autocommit":                  true,
+	"transform_null_equals":       true,
+}
+
+// readerGUCs are refused for read-only wire sessions on top of the denylist:
+// search_path and its alias SET SCHEMA (catalog-name shadowing), and the two
+// GUC spellings that would lift the READ ONLY wrap by hand —
+// transaction_read_only (this transaction) and default_transaction_read_only
+// (every later one). SET TRANSACTION READ WRITE is the statement form of the
+// same thing and is refused for everyone as transaction control.
+var readerGUCs = map[string]bool{
+	"search_path":                   true,
+	"schema":                        true,
+	"transaction_read_only":         true,
+	"default_transaction_read_only": true,
+}
+
+// nonGUCSetForms are the leading names of SET statements that are not GUC
+// assignments at all. parseSet reports them as the "name" it saw.
+var nonGUCSetForms = map[string]string{
+	"role":            "SET ROLE changes who the target believes is running; autodb's authorization is the identity",
+	"authorization":   "SET SESSION AUTHORIZATION changes who the target believes is running; autodb's authorization is the identity",
+	"transaction":     "SET TRANSACTION is transaction control; use BEGIN with its options",
+	"characteristics": "SET SESSION CHARACTERISTICS is transaction control; use BEGIN with its options",
+}
+
+// ErrWireSetRefused reports a setting a wire session may never change.
+var ErrWireSetRefused = errors.New("exec: SET/RESET refused by the wire session-state gate")
+
+// wireSettingDenied applies the denylist to a setting name for a wire session.
+// It answers for SET and RESET alike, which is the point: one rule.
+func wireSettingDenied(name string, readOnly bool) error {
+	if why, ok := nonGUCSetForms[name]; ok {
+		return fmt.Errorf("%w: %s", ErrWireSetRefused, why)
+	}
+	if engineGUCs[name] {
+		return fmt.Errorf("%w: %s is set by the engine to bound this session's transactions and may not be "+
+			"changed from the wire", ErrWireSetRefused, name)
+	}
+	if parsingGUCs[name] {
+		return fmt.Errorf("%w: %s changes how the server parses SQL and would desynchronize the engine's "+
+			"reading of your statements from the server's; refused in every form", ErrWireSetRefused, name)
+	}
+	if readOnly && readerGUCs[name] {
+		return fmt.Errorf("%w: a read-only session may not SET %s — it would move the read-only boundary "+
+			"(transaction_read_only, default_transaction_read_only) or the catalog-name resolution "+
+			"(search_path, SET SCHEMA) the reader analysis relies on", ErrWireSetRefused, name)
+	}
+	return nil
+}
+
+// admitWireSet decides whether a SET may run on a WIRE (pinned) session:
+// anything not on the denylist, LOCAL or session-level. SET LOCAL still needs
+// the client's transaction to be open, as on the pooled path — outside one
+// there is nothing for LOCAL to be local to.
+func admitWireSet(st setStatement, readOnly, txOpen bool) error {
+	if err := wireSettingDenied(st.Name, readOnly); err != nil {
+		return err
+	}
+	if st.Local && !txOpen {
+		return fmt.Errorf("%w: %s reverts at the transaction boundary, and outside a transaction "+
+			"there is no boundary for it to revert at", ErrSetOutsideTx, st.Name)
+	}
+	return nil
+}
+
+// resetStatement is a parsed RESET.
+type resetStatement struct {
+	// All reports RESET ALL.
+	All bool
+	// Name is the GUC, lower-cased ("" for RESET ALL).
+	Name string
+}
+
+// parseReset reads the setting a RESET names. RESET SESSION AUTHORIZATION and
+// RESET ROLE parse to "authorization" / "role" and meet the same denylist.
+func parseReset(sqlText string) (resetStatement, error) {
+	names, err := leadingNames(sqlText, 3)
+	if err != nil {
+		return resetStatement{}, err
+	}
+	if len(names) == 0 || !strings.EqualFold(names[0], "RESET") {
+		return resetStatement{}, fmt.Errorf("%w: not a RESET statement", ErrStatementUnsupported)
+	}
+	rest := names[1:]
+	if len(rest) == 0 {
+		return resetStatement{}, fmt.Errorf("%w: RESET names no setting", ErrStatementUnsupported)
+	}
+	if strings.EqualFold(rest[0], "ALL") {
+		return resetStatement{All: true}, nil
+	}
+	if strings.EqualFold(rest[0], "SESSION") && len(rest) > 1 {
+		rest = rest[1:]
+	}
+	return resetStatement{Name: strings.ToLower(rest[0])}, nil
+}
+
+// admitWireReset decides whether a RESET may run on a wire session. RESET ALL
+// is refused: it would reset the engine's own belts along with everything
+// else, which no single-setting check can defend.
+func admitWireReset(st resetStatement, readOnly bool) error {
+	if st.All {
+		return fmt.Errorf("%w: RESET ALL would reset the settings the engine relies on to bound this "+
+			"session; reset settings by name", ErrWireSetRefused)
+	}
+	return wireSettingDenied(st.Name, readOnly)
+}

@@ -222,14 +222,15 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 			return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, auth.ErrDenied)
 		}
 		if statefulControlVerbs[stmt.Verb] {
-			// SET LOCAL / LOCK: admitted stateful controls. The SET admission
-			// refuses SET TRANSACTION and SET SESSION CHARACTERISTICS (non-LOCAL),
-			// so what passes here is never transaction control — it goes RAW so
-			// the target's ParameterStatus reaches the client (A1-C4 (i)).
+			// SET / RESET / LOCK: admitted stateful controls. The wire admission
+			// (Amendment 8 denylist) refuses SET TRANSACTION, SET SESSION
+			// CHARACTERISTICS, SET ROLE and SET SESSION AUTHORIZATION by name,
+			// so what passes here is never transaction or authority control — it
+			// goes RAW so the target's ParameterStatus reaches the client (A1-C4 (i)).
 			if aborted {
 				return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, ErrTxAborted)
 			}
-			if err := e.admitSessionState(ctx, s, pol.Ident, stmt.Verb, part, ip, txOpen); err != nil {
+			if err := e.admitSessionState(ctx, s, pol.Ident, stmt.Verb, part, ip, txOpen, pol.ReadOnly); err != nil {
 				return Statement{}, 0, err
 			}
 			return stmt, routeRaw, nil
@@ -313,10 +314,9 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 	if perr != nil {
 		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
 	}
-	sq, ok := pc.(golibpg.SimpleQuerier) // the ONE assertion site in autodb (A1-C1)
-	if !ok {
-		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText,
-			fmt.Errorf("%w: the pinned connection has no simple-query face", dao.ErrUnsupported))
+	sq, ferr := rawFace(pc)
+	if ferr != nil {
+		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ferr)
 	}
 	runCtx, endRun := s.runContext(ctx)
 	defer endRun()
@@ -778,4 +778,17 @@ func controlCommandTag(res *Result) string {
 		return "SELECT 0"
 	}
 	return verb
+}
+
+// rawFace is the ONE assertion site in autodb for the pinned connection's
+// simple-query capability (golib ADR-0018 A1-C1). Every raw dispatch — the
+// raw producer and the startup-GUC application at open — obtains the face
+// here, so TestRawSimpleQueryCapabilityNeverLeavesCoreExec has exactly one
+// site to guard.
+func rawFace(pc golibpg.PinnedConn) (golibpg.SimpleQuerier, error) {
+	sq, ok := pc.(golibpg.SimpleQuerier) // the ONE assertion site in autodb (A1-C1)
+	if !ok {
+		return nil, fmt.Errorf("%w: the pinned connection has no simple-query face", dao.ErrUnsupported)
+	}
+	return sq, nil
 }
