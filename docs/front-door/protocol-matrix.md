@@ -501,7 +501,26 @@ different limits and will move for different reasons.
 - Grant-revoked-between-Parse-and-Execute refusal.
 - Cancel races (query/finalizer/disconnect/stale-key).
 - §8.2 release-on-every-path leak assertions; frame/length fuzzing
-  (header-first property: no read past a refused header).
+  (header-first property: **a refused frame's body is never read to its
+  declared length** — reads are bounded by the transport buffer, §8.3 — **and
+  nothing past a refused header is interpreted as framing**).
+
+  *Amended by jarvis as lead, 2026-09-03. **RATIFICATION BY JOHNO IS PENDING** —
+  this records a lead's amendment awaiting his decision, not a decision he has
+  made. (The earlier wording here said "Johno ratifies", which stated a
+  ratification that had not happened; a document that predicts a decision is
+  indistinguishable from one that reports it, and the next reader cannot tell
+  which they are looking at.) The previous wording,
+  "no read past a refused header", read as a source-read boundary the reader
+  does not provide and does not need to. The measurement decided which side was
+  wrong: a refusal consumed 4101 source bytes — one transport bufferful, NOT the
+  frame's declared length. Had the reader been reading to the declared length, a
+  refused oversized frame would cost megabytes. So the guarantee that has value
+  already holds, and literal zero-read-ahead would buy nothing: the leftover
+  bytes are bounded by the OS buffer, on a connection about to close, and
+  reading exactly five header bytes per frame is a syscall per frame for no
+  resource or correctness gain. This amends a spec to name the real guarantee;
+  it does not relax a contract to match a defect.*
 - Uniform-denial timing test (startup denials indistinguishable across
   causes — measured, not asserted).
 - Never-emitted backend canaries (§5): CopyIn/CopyOut/CopyBothResponse,

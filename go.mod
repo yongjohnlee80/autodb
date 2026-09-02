@@ -7,6 +7,8 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jmoiron/sqlx v1.4.0
+	github.com/lib/pq v1.12.3
 	github.com/yongjohnlee80/golib v0.5.7
 	golang.org/x/crypto v0.55.0
 )
