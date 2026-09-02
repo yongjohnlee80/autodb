@@ -73,7 +73,8 @@ fault" outcome an accurate SQLSTATE exists to prevent.
 |---|---|---|---|
 | pending serialized output | 4 MiB watermark | **before** serialization of each frame; flush, audited `fd.backpressure_enter`/`_exit` | §8.4 :387 |
 | cumulative statement output | 8 GiB | per frame, across the whole statement; stops FORWARDING with `54000` `frontdoor/output-cap`, connection survives. **It does not undo the statement** — see §4 | §7 :358 |
-| control lane | 64 KiB/conn | at accept | `admission.go` |
+| control lane | 64 KiB/conn | at accept | §1.4 |
+| **general lane (process-wide)** | 1 GiB | pending output reserved BEFORE serialization, released when flushed AND on every statement exit; saturation is backpressure, audited `frontdoor/budget-backpressure` | §1.4, §8.1 |
 | wire-side buffers (`bufio.Reader`, TLS records, pgproto3 chunk reader) | — | **not charged**; bounded by `MaxFrontendConns` because they cannot grow with what a peer sends | §8.4 third term |
 
 Two rules that were findings:
@@ -138,10 +139,18 @@ be written to wait on purpose (r0 MF1).
    drained nothing for 30s is a dead reader, not a slow one. It does NOT inherit
    `idle`: idle measures a client that is not asking, this measures one that will
    not take what it asked for.
-2. **No global resident-output budget.** §8.4 speaks of pending output against a
-   process-wide budget; the front door has a per-connection watermark and a
-   per-statement cap, and no seam through which a connection can reserve against
-   a global one. Adding that is an architectural change, not a loop fix.
+2. ~~No global resident-output budget.~~ **BUILT** (PR #52 r3, lector MF8). The
+   general lane (`general_lane.go`, 1 GiB per §1.4) now carries pending
+   serialized output: reserved before serialization, released when the bytes
+   reach the socket, released again on EVERY exit from a statement per §8.2. The
+   per-connection watermark paces one connection; only the lane can stop a
+   thousand of them each holding 4 MiB from adding up past the process budget.
+   Saturation is BACKPRESSURE, never an error (§7): flush first — itself a
+   release — then wait for another connection to release. One policy figure
+   remains un-pinned by the matrix: how long a connection waits before it stops
+   holding a statement open (`generalLaneWaitBudget`, 30s). Unbounded waiting on
+   a lane nothing releases is a hung session holding the engine's claim and a
+   pinned backend, which is r1 MF7 in different clothing.
 3. **The watermark has no time-based flush.** Within contract — the matrix
    specifies a size watermark only — but a slow-producing statement shows the
    client nothing until 4 MiB accrues or it ends, so an interactive client on a

@@ -73,6 +73,12 @@ type Listener struct {
 	liveMu sync.Mutex
 	live   map[net.Conn]struct{}
 
+	// general is the process-wide resident budget's general lane (§1.4). Pending
+	// serialized output is charged against it, so a thousand connections each
+	// holding their per-connection watermark cannot add up past the process's
+	// budget — a per-connection bound cannot express a process-wide limit.
+	general *generalLane
+
 	// testOutputCap lowers the cumulative output cap so a cell can trip it
 	// without producing 8 GiB. Nil takes the matrix's figure.
 	testOutputCap *int64
@@ -154,6 +160,10 @@ type Options struct {
 	// Queries is the engine seam for the post-auth query path. Nil refuses
 	// every statement with an accurate error rather than pretending.
 	Queries QueryExecutor
+
+	// GeneralLaneBytes is the process-wide general resident budget (§1.4).
+	// Zero takes the 1 GiB default.
+	GeneralLaneBytes int64
 
 	// testOutputCap lowers the cumulative output cap for a cell.
 	testOutputCap *int64
@@ -247,6 +257,11 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.onSession = opt.OnSession
 	l.queries = opt.Queries
 	l.testOutputCap = opt.testOutputCap
+	laneBytes := opt.GeneralLaneBytes
+	if laneBytes <= 0 {
+		laneBytes = DefaultGeneralLaneBytes
+	}
+	l.general = newGeneralLane(laneBytes)
 	l.admit = newAdmitter(caps.maxConns, caps.preAuthMax, caps.failures, caps.lane, l.now)
 	l.dl = defaultDeadlines()
 	l.authSlots = make(chan struct{}, caps.workers)

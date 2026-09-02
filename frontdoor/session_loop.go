@@ -226,6 +226,10 @@ func (l *Listener) outputCap() int64 {
 	return cumulativeOutputCap
 }
 
+// errGeneralLaneStalled stops the producer when the process-wide lane stays
+// saturated past the wait budget. It never reaches the peer.
+var errGeneralLaneStalled = errors.New("frontdoor: the general lane stayed saturated")
+
 // errOutputCapExceeded stops the producer when a statement passes §7's
 // cumulative output cap. It never reaches the peer; the loop frames §8a for it.
 var errOutputCapExceeded = errors.New("frontdoor: the statement exceeded the cumulative output cap")
@@ -239,7 +243,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 	// this session: WireQuery holds the session's one-in-flight claim across
 	// every emit, so a re-entrant call gets ErrSessionBusy by design. Anything
 	// this loop needs from the engine happens after WireQuery returns.
-	var emitErr, writeErr, capErr error
+	var emitErr, writeErr, capErr, laneErr error
 	var pending, produced int64
 	status, err := l.queries.WireQuery(ctx, sess.SessionID, sess.UserID, sql, hostOf(peer),
 		func(m exec.WireMessage) error {
@@ -273,6 +277,32 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 				// crossed the mark before anything drained it — the allocation
 				// the bound exists to prevent has already happened by the time
 				// the bound notices. One frame can be large.
+				// THE PROCESS-WIDE GENERAL LANE (§1.4/§8.1). Reserved before
+				// serialization, released when the bytes reach the socket. The
+				// per-connection watermark paces ONE connection; it cannot stop a
+				// thousand of them each holding 4 MiB from adding up past the
+				// process's budget.
+				//
+				// Saturation is BACKPRESSURE, never an error (§7): flush first —
+				// which is itself a release — and only then wait for someone else
+				// to release. A budget whose remedy was refusal would turn a busy
+				// moment into a failed statement.
+				if !l.general.tryReserve(int64(size)) {
+					l.onEvent(Event{Kind: "fd.backpressure_enter", Reason: ruleBudgetBackpressure, Peer: peer})
+					if ferr := l.flushBounded(conn, be); ferr != nil {
+						writeErr = ferr
+						return ferr
+					}
+					l.general.release(pending)
+					pending = 0
+					ok := l.general.reserve(int64(size), generalLaneWaitBudget, l.now)
+					l.onEvent(Event{Kind: "fd.backpressure_exit", Reason: ruleBudgetBackpressure, Peer: peer})
+					if !ok {
+						laneErr = errGeneralLaneStalled
+						return laneErr
+					}
+				}
+
 				if pending+int64(size) >= pendingOutputWatermark && pending > 0 {
 					l.onEvent(Event{Kind: "fd.backpressure_enter", Reason: ruleOutputWatermark, Peer: peer})
 					if ferr := l.flushBounded(conn, be); ferr != nil {
@@ -284,6 +314,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 						return ferr
 					}
 					l.onEvent(Event{Kind: "fd.backpressure_exit", Reason: ruleOutputWatermark, Peer: peer})
+					l.general.release(pending)
 					pending = 0
 				}
 				pending += int64(size)
@@ -303,7 +334,26 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 			return nil
 		})
 
+	// RELEASE ON EVERY PATH (§8.2). Whatever is still reserved when this
+	// function returns — after a normal finish, a gate refusal, a lost wire, a
+	// cap trip or a write failure — goes back to the lane. A budget that leaks
+	// on one exit is a budget that fails at the worst moment, which is why the
+	// matrix makes the obligation explicit rather than leaving it to each path.
+	defer func() {
+		l.general.release(pending)
+		pending = 0
+	}()
+
 	switch {
+	case laneErr != nil:
+		// The process budget stayed saturated for longer than a statement may
+		// hold. Not the peer's doing and not a refusal of its statement: the
+		// session ends and the audit says why.
+		l.onEvent(Event{Kind: "fd.refused", Reason: ruleBudgetBackpressure, Peer: peer,
+			Detail: "the general lane stayed saturated past the wait budget"})
+		*closeReason = ruleBudgetBackpressure
+		return false
+
 	case capErr != nil:
 		// THE STATEMENT ALREADY RAN. The cap trips while its output is being
 		// forwarded, which is after the target executed it and — for DML in an
@@ -429,8 +479,12 @@ const ruleUnframeableMessage = "frontdoor/unframeable-message"
 // loop cannot ask the engine for another message while it is writing this one.
 const pendingOutputWatermark int64 = 4 << 20
 
-// ruleOutputWatermark identifies the backpressure in the audit trail.
-const ruleOutputWatermark = "frontdoor/output-watermark"
+// ruleOutputWatermark identifies the per-connection backpressure in the audit
+// trail; ruleBudgetBackpressure identifies the process-wide lane's (§7).
+const (
+	ruleOutputWatermark    = "frontdoor/output-watermark"
+	ruleBudgetBackpressure = "frontdoor/budget-backpressure"
+)
 
 // ruleSessionDeadline is §7's identity for the front door closing an idle
 // session, and sqlStateIdleSessionTimeout is the SQLSTATE PostgreSQL itself uses
