@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -564,5 +565,74 @@ func TestLoop_ViolationAlsoTearsDownAndUnderItsOwnCause(t *testing.T) {
 	if closed[0] != "sess-abc123/protocol-violation" {
 		t.Fatalf("teardown = %q, want the violation's own cause; a session released only on the "+
 			"clean path would let a peer keep one open by ending every connection badly", closed[0])
+	}
+}
+
+// A lost wire tears the connection down with NO readiness byte. Asserting a
+// transaction state over a connection whose wire has gone would be a claim the
+// front door cannot support, and a client that believed it would send its next
+// statement into a session the engine has already closed.
+//
+// The absence is the assertion here, so the cell reads to EOF rather than
+// stopping at the first frame: a ReadyForQuery arriving after the error would
+// otherwise go unnoticed.
+func TestLoop_LostWireTearsDownWithoutAReadinessByte(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.err = fmt.Errorf("%w: connection reset", exec.ErrWireFaceLost)
+	_, addr := loopListener(t, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Query{String: "SELECT 1"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawError bool
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			break // the connection closed, which is the contract
+		}
+		switch m := msg.(type) {
+		case *pgproto3.ErrorResponse:
+			sawError = true
+			if m.Severity != "FATAL" {
+				t.Errorf("severity = %q, want FATAL — the session is gone", m.Severity)
+			}
+		case *pgproto3.ReadyForQuery:
+			t.Fatalf("a ReadyForQuery (%q) followed a lost wire; the front door asserted a "+
+				"transaction state over a connection that no longer exists", m.TxStatus)
+		}
+	}
+	if !sawError {
+		t.Fatal("the wire was lost and the client was told nothing at all")
+	}
+}
+
+// The control: an ordinary refusal on a HEALTHY wire still gets its readiness
+// byte. Without this, "no ReadyForQuery" would also be satisfied by a loop that
+// had stopped sending them entirely.
+func TestLoop_OrdinaryRefusalStillGetsReadiness(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.err = exec.ErrScriptTooLarge
+	q.txStatus = txStatusIdle
+	_, addr := loopListener(t, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Query{String: "SELECT 1"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if msg, err := fe.Receive(); err != nil {
+		t.Fatalf("reading the refusal: %v", err)
+	} else if _, ok := msg.(*pgproto3.ErrorResponse); !ok {
+		t.Fatalf("first frame = %T, want ErrorResponse", msg)
+	}
+	if got := readUntilReady(t, fe); got != txStatusIdle {
+		t.Fatalf("readiness = %q, want %q — a refusal on a live wire is still followed by readiness", got, txStatusIdle)
 	}
 }

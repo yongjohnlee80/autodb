@@ -221,12 +221,26 @@ const ruleUnframeableMessage = "frontdoor/unframeable-message"
 // recovery.
 func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 	switch {
-	case errors.Is(err, exec.ErrInterimTruncated):
-		// Interim only: the paged producer REFUSES rather than dropping rows,
-		// which is what §5 requires of anything that cannot serve a result
-		// whole. It disappears with the raw path.
-		return "54000", exec.InterimTruncatedRuleID,
-			"the result exceeds the interim page; the raw result path removes this limit", false
+	case errors.Is(err, exec.ErrWireFaceLost):
+		// The session's wire failed and the engine is already closing the
+		// session. There is nothing left to be ready for, so the connection is
+		// torn down with NO readiness byte — asserting a transaction state over
+		// a wire that has gone would be a claim we cannot support.
+		//
+		// Matched EXPLICITLY rather than inferred from a later WireTxStatus
+		// failure. The outcome would be the same today, but correctness that
+		// depends on a downstream call happening to fail is correctness that
+		// breaks silently when that call changes.
+		return sqlStateProtocolViolation, "frontdoor/wire-face-lost",
+			"the session's connection to the target failed; reconnect", true
+
+	case errors.Is(err, exec.ErrDecodedResultTruncated):
+		// Only a NON-PostgreSQL target can reach this now: PostgreSQL streams
+		// unbounded through the raw path. The decoded producer REFUSES rather
+		// than dropping rows, which is what §5 requires of anything that cannot
+		// serve a result whole.
+		return "54000", exec.DecodedResultTruncatedRuleID,
+			"the result exceeds the decoded producer's page; this target does not stream unbounded results", false
 
 	case errors.Is(err, exec.ErrMultiStatement):
 		return sqlStateFeatureNotSupported, "gate/no-multi-statement",
