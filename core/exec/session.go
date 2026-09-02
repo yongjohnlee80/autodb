@@ -177,7 +177,12 @@ type session struct {
 	// inside it. Token sessions never set it. Discarded, never released, on
 	// close: the wire is the client's for the connection's life and a pooled
 	// recycle of it would carry session state to another user.
-	pc               golibpg.PinnedConn
+	pc golibpg.PinnedConn
+	// ext is the session's extended-protocol namespace (F2, matrix §4a): its
+	// wire-level prepared statements and portals. Nil until the first extended
+	// frame, and dropped with the session, so the objects cannot outlive the
+	// connection whose backend holds them.
+	ext              *extObjects
 	txPhase          txPhase
 	txID             string
 	txOpened         time.Time
@@ -196,6 +201,16 @@ type session struct {
 // clearTxLocked clears every field owned by the attached transaction. The
 // caller must hold s.mu.
 func (s *session) clearTxLocked() {
+	// §4a: portals do not survive the transaction — named and unnamed alike —
+	// while prepared statements do. This is the single point every transaction
+	// end passes through (commit, rollback, abort, implicit-block end, failed-tx
+	// recovery, authority demotion), so hooking it here is what makes the rule
+	// hold no matter WHICH protocol ended the transaction. A client that binds a
+	// portal over the extended protocol and then sends a simple COMMIT — lib/pq
+	// does exactly this — must not be left naming a portal the backend destroyed.
+	if s.ext != nil {
+		s.ext.dropAllPortals()
+	}
 	s.tx = nil
 	s.txPhase = txNone
 	s.txID = ""

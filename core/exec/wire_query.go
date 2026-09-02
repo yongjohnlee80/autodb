@@ -53,6 +53,11 @@ type WireMessage struct {
 	// Tag is the CommandComplete's command tag, verbatim.
 	Tag string
 
+	// ParameterOIDs is the ParameterDescription's parameter types, as the
+	// SERVER reported them. Extended-protocol only: the simple path has no
+	// Describe and never sets it.
+	ParameterOIDs []uint32
+
 	Err          *pgconn.PgError
 	Notice       *pgconn.Notice
 	Notification *pgconn.Notification
