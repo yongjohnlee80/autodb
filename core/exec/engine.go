@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -88,6 +89,11 @@ type Engine struct {
 	// EXACT bytes handed to the wire. Cells use it to prove the gate ran on the
 	// same text that was dispatched and that refused buffers dispatch nothing.
 	hookRawDispatch func(sqlText string)
+	// hookWrapPinned, when set, substitutes the value whose ParameterStatusReporter
+	// capability OpenWireSessionWith consults (tests: a wrapper without the
+	// capability, or with an incomplete set) so row 3.1's fail-closed arms can be
+	// observed without a real target that lacks them.
+	hookWrapPinned func(golibpg.PinnedConn) any
 	// closeQuiesce is how long a close waits for an in-flight statement. It
 	// is a FIELD rather than a package variable so a test can shorten it on
 	// its own engine: a shared variable that parallel tests reassign is a

@@ -17,7 +17,9 @@ func TestLeaseEncodingRefusal(t *testing.T) {
 		{"latin1 server", map[string]string{"server_encoding": "LATIN1", "client_encoding": "UTF8"}, true, "server_encoding=LATIN1"},
 		{"sql_ascii", map[string]string{"server_encoding": "SQL_ASCII", "client_encoding": "UTF8"}, true, "server_encoding=SQL_ASCII"},
 		{"client not utf8", map[string]string{"server_encoding": "UTF8", "client_encoding": "WIN1252"}, true, "client_encoding=WIN1252"},
-		{"unknown (non-postgres)", map[string]string{}, false, ""},
+		{"empty set (fail closed)", map[string]string{}, true, "server_encoding missing"},
+		{"nil set (fail closed)", nil, true, "no reported statuses"},
+		{"client key missing (fail closed)", map[string]string{"server_encoding": "UTF8"}, true, "client_encoding missing"},
 	} {
 		got, refused := leaseEncodingRefusal(tc.st)
 		if refused != tc.refuse || got != tc.want {

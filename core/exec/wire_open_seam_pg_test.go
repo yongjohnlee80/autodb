@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -192,4 +193,102 @@ func TestWireOpen_NonUTF8TargetIsRefusedAtOpen(t *testing.T) {
 	}
 	_ = errors.Is
 	_ = auth.ErrDenied
+}
+
+// noReporter hides the ParameterStatusReporter capability: the pinned handle
+// as a pool without capture (or an older golib) would present it.
+type noReporter struct{ golibpg.PinnedConn }
+
+// partialReporter reports a set that lacks server_encoding.
+type partialReporter struct{ golibpg.PinnedConn }
+
+func (partialReporter) ReportedParameterStatuses() map[string]string {
+	return map[string]string{"client_encoding": "UTF8", "server_version": "17"}
+}
+
+// Row 3.1 fails CLOSED (lector MF1): no reporter capability, or a reported set
+// without both encoding keys, refuses the open with the lease-encoding reason,
+// withdraws the session and releases the reservation — nothing is admitted on
+// an encoding that was never established.
+func TestWireOpen_FailsClosedWithoutReporterOrEncodingKeys(t *testing.T) {
+	dsn := liveDSN(t)
+	for name, wrap := range map[string]func(golibpg.PinnedConn) any{
+		"no reporter capability":  func(pc golibpg.PinnedConn) any { return noReporter{pc} },
+		"server_encoding missing": func(pc golibpg.PinnedConn) any { return partialReporter{pc} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newFixture(t)
+			f.eng.hookWrapPinned = wrap
+			connID, err := f.eng.CreateConnection(ctx, f.rootTok, fmt.Sprintf("fc-%d", time.Now().UnixNano()), "postgres", dsn, testIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Set(meta.ConnProfile, string(ProfileSession)).Update(); err != nil {
+				t.Fatal(err)
+			}
+			row, _ := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
+			pat, err := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("fc-%d", time.Now().UnixNano()), 0, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := f.eng.sessions.countForTest()
+			res, oerr := f.eng.OpenWireSessionWith(ctx, WireOpen{PAT: pat.Secret, StartupUser: "root", Database: row.Name, IP: testIP})
+			if oerr == nil {
+				t.Fatalf("open ADMITTED (session %s) although the lease encoding could not be established — row 3.1 must fail closed", res.SessionID)
+			}
+			if DenialReason(oerr) != DenyLeaseEncoding {
+				t.Fatalf("denial reason %q (%v), want %s", DenialReason(oerr), oerr, DenyLeaseEncoding)
+			}
+			if after := f.eng.sessions.countForTest(); after != before {
+				t.Fatalf("sessions %d → %d after a refused open; the admitted session must be withdrawn and its reservation released", before, after)
+			}
+			if n := len(auditDetail(t, f, "wire_lease_encoding_refused")); n != 1 {
+				t.Fatalf("%d wire_lease_encoding_refused audit rows, want 1", n)
+			}
+		})
+	}
+}
+
+// SF1: the session stamp is on the audit lines of EVERY execution site a wire
+// session can reach — the decoded WireExecute path and the owned
+// stateful-control site (SET LOCAL through the decoded path inside BEGIN), not
+// only the raw WireQuery path.
+func TestWireOpen_AuditStampCoversDecodedAndOwnedControlSites(t *testing.T) {
+	f, _, res, err := openWire(t, liveDSN(t), "sites-probe")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	ctx := context.Background()
+	if _, err := f.eng.WireExecute(ctx, res.SessionID, res.UserID, "SELECT 1 AS decoded_marker", testIP); err != nil {
+		t.Fatalf("decoded WireExecute: %v", err)
+	}
+	if _, err := f.eng.WireExecute(ctx, res.SessionID, res.UserID, "BEGIN", testIP); err != nil {
+		t.Fatalf("BEGIN: %v", err)
+	}
+	if _, err := f.eng.WireExecute(ctx, res.SessionID, res.UserID, "SET LOCAL statement_timeout = '7s'", testIP); err != nil {
+		t.Fatalf("owned stateful control: %v", err)
+	}
+	if _, err := f.eng.WireExecute(ctx, res.SessionID, res.UserID, "ROLLBACK", testIP); err != nil {
+		t.Fatalf("ROLLBACK: %v", err)
+	}
+	stamp := fmt.Sprintf("session %s app %q", res.SessionID, "sites-probe")
+	var decoded, control int
+	for _, d := range auditDetail(t, f, "exec") {
+		switch {
+		case strings.Contains(d, "decoded_marker"):
+			if !strings.Contains(d, stamp) {
+				t.Fatalf("decoded-path exec line lacks the stamp: %q", d)
+			}
+			decoded++
+		case strings.Contains(d, "statement_timeout = '7s'"):
+			if !strings.Contains(d, stamp) {
+				t.Fatalf("owned stateful-control exec line lacks the stamp: %q", d)
+			}
+			control++
+		}
+	}
+	if decoded != 1 || control != 1 {
+		t.Fatalf("stamped decoded lines %d (want 1), stamped control lines %d (want 1)", decoded, control)
+	}
 }

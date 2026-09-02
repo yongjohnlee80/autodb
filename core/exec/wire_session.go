@@ -96,9 +96,11 @@ const (
 	DenyLeaseCap       = "frontdoor/lease-cap-exceeded"
 	DenySessionCap     = "frontdoor/session-cap-exceeded"
 	DenyResidentBudget = "frontdoor/resident-budget-exceeded"
-	// DenyLeaseEncoding: the pinned target reports a server_encoding or
-	// client_encoding that is not UTF8 (matrix row 3.1: the lease is pinned UTF8;
-	// autodb does not transcode). The loop frames it as FATAL 08004.
+	// DenyLeaseEncoding: the pinned target's server_encoding or client_encoding
+	// is not UTF8, or could not be established (matrix row 3.1: the lease is
+	// pinned UTF8; autodb does not transcode; the check FAILS CLOSED). On the
+	// wire it is the uniform 28000 like every lease failure in the reservation
+	// phase (§7 ruling 4); this reason is the audit identity only.
 	DenyLeaseEncoding = "frontdoor/lease-encoding"
 )
 
@@ -253,7 +255,10 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 			cancel()
 			return out, perr
 		}
-		if r, ok := pc.(golibpg.ParameterStatusReporter); ok {
+		// Row 3.1 fails CLOSED: no reporter, no statuses, or either encoding
+		// key missing is a refusal, not an acceptance — the lease's encoding
+		// must be ESTABLISHED as UTF8, not merely not-known-to-be-otherwise.
+		if r, ok := e.reporterFor(pc).(golibpg.ParameterStatusReporter); ok {
 			statuses = r.ReportedParameterStatuses()
 		}
 		if enc, ok := leaseEncodingRefusal(statuses); ok {
@@ -277,15 +282,19 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	}, nil
 }
 
-// leaseEncodingRefusal reports the first of server_encoding / client_encoding
-// that is not UTF8, if any. SQL_ASCII is refused too: it means the server
-// validates nothing, which is not "UTF8-compatible" for a relay that does not
-// transcode.
+// leaseEncodingRefusal reports why the lease cannot be established as UTF8:
+// no reported set, a missing server_encoding or client_encoding, or a value
+// that is not UTF8. SQL_ASCII is refused too: it means the server validates
+// nothing, which is not "UTF8-compatible" for a relay that does not transcode.
+// Absence is a refusal — the rule fails closed.
 func leaseEncodingRefusal(statuses map[string]string) (string, bool) {
+	if statuses == nil {
+		return "no reported statuses", true
+	}
 	for _, k := range []string{"server_encoding", "client_encoding"} {
 		v, ok := statuses[k]
 		if !ok {
-			continue
+			return k + " missing", true
 		}
 		switch strings.ToUpper(strings.ReplaceAll(v, "-", "")) {
 		case "UTF8":
@@ -294,6 +303,17 @@ func leaseEncodingRefusal(statuses map[string]string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// reporterFor returns the value whose ParameterStatusReporter capability is
+// consulted at open: the pinned connection itself, or, in tests, whatever
+// hookWrapPinned substitutes (a wrapper WITHOUT the capability, or one that
+// reports an incomplete set) so the fail-closed arms can be observed.
+func (e *Engine) reporterFor(pc golibpg.PinnedConn) any {
+	if e.hookWrapPinned != nil {
+		return e.hookWrapPinned(pc)
+	}
+	return pc
 }
 
 // lookupWireTarget resolves the DSN's database field to a connection row.
