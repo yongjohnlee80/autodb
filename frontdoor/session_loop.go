@@ -629,6 +629,26 @@ func (l *Listener) applyDispatch(conn net.Conn, be *pgproto3.Backend, d dispatch
 	}
 }
 
+// errUnframeableKind is a backend message whose KIND the front door does not
+// know, as distinct from one whose kind it knows and whose payload is malformed.
+//
+// The distinction is load-bearing for the vocabulary witness: probing "does
+// backendFrame accept this kind" with an empty message cannot otherwise tell a
+// missing case from a missing payload, and ErrorResponse legitimately refuses an
+// empty one. It is also the more useful error for an operator — "I do not know
+// this message" and "this message arrived broken" are different defects.
+var errUnframeableKind = errors.New("unframeable backend message kind")
+
+// errCanaryMessage is a §5 canary: a message whose ARRIVAL is itself the defect,
+// because its trigger is refused before the target could produce one.
+//
+// Distinct from errUnframeableKind on purpose. A canary has a CASE — the front
+// door knows exactly what it is and refuses it deliberately — while an
+// unframeable kind has none. Sharing one error would make "we never thought
+// about this" and "we decided this is impossible" indistinguishable, which is
+// the confusion the vocabulary convention exists to prevent.
+var errCanaryMessage = errors.New("backend message whose arrival is itself a defect")
+
 // ruleUnframeableMessage is the audit cause for a backend message the front door
 // cannot turn into a frame. It is a front-door defect, so it is audited under
 // its own cause even though the wire is told the catalogue's violation id.
@@ -842,12 +862,29 @@ func backendFrame(m exec.WireMessage) (pgproto3.BackendMessage, error) {
 	case "ParameterDescription":
 		return &pgproto3.ParameterDescription{ParameterOIDs: m.ParameterOIDs}, nil
 
+	// §5'S CANARIES, each with its own case rather than the default arm.
+	//
+	// Their triggers are all refused before the target could produce one, so an
+	// arrival is itself the defect — and saying that in code is the difference
+	// between "this is impossible, here is why" and "we never thought about
+	// this". Six of these used to fall into the default, which said the latter
+	// while the matrix said the former; the vocabulary witness is what surfaced
+	// the disagreement.
+	case "CopyInResponse", "CopyOutResponse", "CopyBothResponse":
+		return nil, fmt.Errorf("%w: %s, but COPY and replication are refused at classification", errCanaryMessage, m.Kind)
+
+	case "CopyData", "CopyDone":
+		return nil, fmt.Errorf("%w: backend-direction %s, but no COPY sub-protocol is ever active", errCanaryMessage, m.Kind)
+
+	case "FunctionCallResponse":
+		return nil, fmt.Errorf("%w: FunctionCallResponse, but the fast-path is refused (row 4:FunctionCall)", errCanaryMessage)
+
 	case "NotificationResponse":
 		// A canary: LISTEN is refused at classification, so a notification can
 		// only mean the classifier was bypassed.
-		return nil, fmt.Errorf("the target sent a NotificationResponse, which LISTEN's refusal makes impossible")
+		return nil, fmt.Errorf("%w: NotificationResponse, which LISTEN's refusal makes impossible", errCanaryMessage)
 	}
-	return nil, fmt.Errorf("unframeable backend message %q", m.Kind)
+	return nil, fmt.Errorf("%w: %q", errUnframeableKind, m.Kind)
 }
 
 // outputAccountant is the ONE place output is accounted for on its way to the
