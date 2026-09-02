@@ -533,14 +533,16 @@ func (f *emitFailure) Unwrap() error { return f.err }
 // What the pinned backend carries as application_name: NOTHING from autodb. The
 // pool is built from the connection's DSN unchanged (dsn.go validates, never
 // decorates) and this function issues no SET on the freshly pinned connection,
-// so a new backend shows the DSN's application_name, if the administrator put
-// one there, or none. The client's startup application_name (frontdoor §3.1) is
+// so a new backend shows the target's own effective startup default: the DSN's
+// application_name if the administrator supplied one, otherwise the applicable
+// server, database or role default (ALTER DATABASE / ALTER ROLE … SET), commonly
+// empty. The client's startup application_name (frontdoor §3.1) is
 // echoed back to the client and never forwarded here; recording it on the
 // session and audit rows is §3.1's contract, awaiting the F1 wire loop. The
 // client CAN still change the backend's value afterwards: SET application_name
 // is refused by the gate, but set_config('application_name', …) is a read-
 // classified function call that runs here and sticks (lector, PR #51). So today
-// a DBA reading pg_stat_activity sees the DSN's value, nothing, or whatever the
+// a DBA reading pg_stat_activity sees that startup default, or whatever the
 // client chose to write — and cannot map a backend to an autodb session; no
 // backend PID is captured on either side. Stamping a structured per-session
 // value at pin time (PostgreSQL caps application_name at 63 bytes, so a short

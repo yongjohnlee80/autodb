@@ -79,8 +79,9 @@ func checkStartupParams(params map[string]string) (refused string, ok bool) {
 }
 
 // applicationNameMaxBytes is §3.1's cap on application_name. BYTES, not
-// runes: the value lands in audit rows and in a ParameterStatus frame, and
-// both are sized in bytes.
+// runes: the value lands in a ParameterStatus frame, and an over-limit original
+// lands in the fd.param_truncated audit detail — both sized in bytes. (Ordinary
+// values are not recorded anywhere yet; see the contract note below.)
 //
 // WHAT application_name IS through this front door (§3.1), as of main
 // 2026-09-03 — present tense only where the code does it today:
@@ -97,9 +98,11 @@ func checkStartupParams(params map[string]string) (refused string, ok bool) {
 //   - it is NOT forwarded to the target. autodb sets no application_name on the
 //     backend connections it pins (core/exec pins one per wire session; the pool
 //     DSN is validated, never decorated — see core/exec/dsn.go), so a freshly
-//     pinned backend carries whatever the connection's DSN says, or nothing, and
-//     two clients that both call themselves "psql" are indistinguishable on the
-//     target. No target backend PID is captured either, so backend → session
+//     pinned backend carries the target's own effective startup default: the
+//     DSN's value if the administrator supplied one, otherwise whatever
+//     server, database or role default applies (ALTER DATABASE / ALTER ROLE …
+//     SET application_name), commonly empty. Two clients that both call
+//     themselves "psql" are indistinguishable on the target. No target backend PID is captured either, so backend → session
 //     mapping does not exist today on either side;
 //   - the client CAN change the target backend's value after startup. SET
 //     application_name is refused by the session-state gate (not on the benign
