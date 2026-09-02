@@ -135,10 +135,14 @@ default 1 GiB):
   and startup refuses a lane below the floor. The other two are **caps on one session**, admitted by
   **backpressure** rather than reserved. Segment input (cap 96 MiB per segment)
   is charged as it occurs, header first (§1.5). Retained statement/portal state
-  (cap 16 MiB per session) is charged when a statement or portal is **stored**
-  and released when it is closed, when its statement's cascade takes it, when the
-  transaction ends, or when a simple `Query` destroys the unnamed pair (§4a) —
-  **owed: retained-state charging, F2b.** F2 owns those lifetimes and does not yet
+  (cap 16 MiB per session) is **reserved BEFORE the `Parse`/`Bind` is forwarded to
+  the target**, **finalized** at `ParseComplete`/`BindComplete`/`PortalSuspended`
+  (the segment charge transfers to retained — no double-charge, no gap), and
+  **released on a pre-Complete error** (:263, :264, :407, r0 MF3: the target must
+  never hold a server-side prepared statement the budget did not admit). It is
+  then released again when the object dies — closed, taken by its statement's
+  cascade, ended with the transaction, or destroyed with the unnamed pair by a
+  simple `Query` (§4a) — **owed: retained-state charging, F2b.** F2 owns those lifetimes and does not yet
   charge them, so that clause states the contract, not current behaviour, and §4
   and §4a stay `awaiting` until it lands. Backpressure: at full occupancy a new segment's
   intake waits for any statement to release its working set, which is the §7
