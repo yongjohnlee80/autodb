@@ -147,6 +147,9 @@ func (e *Engine) executeSessionUnit(
 	// policy came from rather than by a second lookup. A second read is a
 	// second answer, and a unit that runs as one identity while being
 	// authorized as another is the gap this shares one read to close.
+	if err := e.readerAnalysis(ctx, connRow, pol, stmt); err != nil { // Amendment 6 rule 2 stage
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
+	}
 	if err := e.authorizeUnit(stmt, pol); err != nil {
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
 	}
@@ -330,6 +333,9 @@ func (e *Engine) executeUnit(ctx context.Context, u execUnit) (*Result, error) {
 	}
 	if runErr != nil {
 		return nil, fmt.Errorf("exec: statement failed: %w", runErr)
+	}
+	if u.stmt.Class == ClassDDL {
+		e.invalidateRoutines(u.connRow.ID) // a routine may have been defined or dropped
 	}
 	return res, nil
 }

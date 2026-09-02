@@ -86,6 +86,14 @@ type Statement struct {
 	// HasTopLevelWhere reports a WHERE at paren depth 0 after the main verb
 	// (only meaningful for UPDATE/DELETE — the Objective 18 guard input).
 	HasTopLevelWhere bool
+	// Calls lists every function-call shape in the statement — an identifier
+	// (unquoted, lowercased; or quoted, exact) immediately followed by '(' at any
+	// depth, with its schema qualifier when written. It is the reader analysis
+	// stage's input (ADR-0075 Amendment 6 rule 2): the stage decides, against the
+	// target's catalog, which of these are user-defined. Keywords that happen to
+	// precede a paren (IN, VALUES, EXISTS …) appear here too; they are harmless,
+	// because no user-defined function can be called by an unquoted keyword.
+	Calls []FunctionCall
 	// Nested lists the data-modifying verbs found BELOW top level — the
 	// bodies of data-modifying CTEs and subqueries, which PostgreSQL really
 	// does execute. HasTopLevelWhere is depth-0-only and says nothing about
@@ -163,6 +171,15 @@ func verbClass(word string) (Class, bool) {
 	return "", false
 }
 
+// FunctionCall is one `name(` shape found by the lexer. Name is lowercased for
+// an unquoted identifier (PostgreSQL folds them) and exact for a quoted one;
+// Schema is the qualifier before the dot when written, same normalization.
+type FunctionCall struct {
+	Schema string
+	Name   string
+	Quoted bool
+}
+
 // Classify tokenizes one SQL script and returns its statement verdict.
 // backslashEscapes selects MySQL string semantics (backslash escapes inside
 // quotes, '#' line comments, /*! executable comments); leave false for
@@ -216,6 +233,18 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 	var st Statement
 	var parts []string
 	var spans []stmtSpan
+	var calls []FunctionCall
+	// Call tracking: the most recent token, when it is an identifier, is the
+	// callee candidate for a '(' that follows it. Whitespace and comments do not
+	// disturb it; every other token clears it.
+	var (
+		identLive   bool   // the last token was an identifier
+		identRaw    string // its text (inner text for a quoted identifier)
+		identQuoted bool
+		qualRaw     string // schema qualifier collected across a '.'
+		qualQuoted  bool
+		qualPending bool // a '.' followed the previous identifier
+	)
 	stmtStart := 0
 	var (
 		depth       int
@@ -352,6 +381,16 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			if err != nil {
 				return st, parts, spans, err
 			}
+			if c == '"' && j-i >= 2 {
+				if qualPending {
+					qualRaw, qualQuoted, qualPending = identRaw, identQuoted, false
+				} else {
+					qualRaw, qualQuoted = "", false
+				}
+				identRaw, identQuoted, identLive = sqlText[i+1:j-1], true, true
+			} else {
+				identLive, qualPending = false, false
+			}
 			// A quoted string or delimited identifier is a token, so it ends
 			// the run of words before it. Without this, `AS "x" (comment)` —
 			// a perfectly ordinary PostgreSQL column-alias list — still saw
@@ -372,11 +411,26 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 				i++ // '$1' positional parameter etc.
 			}
 			w1, w2, w3 = "", "", ""
+			identLive, qualPending = false, false
 
 		case c == '(':
 			if err := content(); err != nil {
 				return st, parts, spans, err
 			}
+			if identLive {
+				fc := FunctionCall{Name: identRaw, Quoted: identQuoted}
+				if !identQuoted {
+					fc.Name = strings.ToLower(fc.Name)
+				}
+				if qualRaw != "" {
+					fc.Schema = qualRaw
+					if !qualQuoted {
+						fc.Schema = strings.ToLower(fc.Schema)
+					}
+				}
+				calls = append(calls, fc)
+			}
+			identLive, qualPending, qualRaw = false, false, ""
 			parens = append(parens, parenState{body: opensStatementBody(w1, w2, w3)})
 			w1, w2, w3 = "", "", ""
 			depth++
@@ -393,6 +447,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 				parens = parens[:len(parens)-1]
 			}
 			w1, w2, w3 = "", "", ""
+			identLive, qualPending = false, false
 			i++
 
 		case c == ';':
@@ -400,8 +455,13 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 				ended = true
 			}
 			w1, w2, w3 = "", "", ""
+			identLive, qualPending = false, false
 			i++
 
+		case c == '.':
+			qualPending = identLive
+			identLive = false
+			i++
 		case isWordStart(c):
 			if err := content(); err != nil {
 				return st, parts, spans, err
@@ -411,6 +471,12 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 				j++
 			}
 			word := strings.ToUpper(sqlText[i:j])
+			if qualPending {
+				qualRaw, qualQuoted, qualPending = identRaw, identQuoted, false
+			} else {
+				qualRaw, qualQuoted = "", false
+			}
+			identRaw, identQuoted, identLive = sqlText[i:j], false, true
 			i = j
 
 			// EXPLAIN option words (ANALYZE, VERBOSE, FORMAT …) are not
@@ -520,6 +586,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			// the run of words. Only whitespace and comments are transparent
 			// to AS adjacency.
 			w1, w2, w3 = "", "", ""
+			identLive, qualPending = false, false
 			i++
 		}
 	}
@@ -530,6 +597,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 	if !sawContent {
 		return st, parts, spans, ErrEmptyStatement
 	}
+	st.Calls = calls
 	if split {
 		if part := strings.TrimSpace(sqlText[stmtStart:]); part != "" {
 			parts = append(parts, part)

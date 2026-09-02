@@ -80,6 +80,10 @@ type Engine struct {
 	// (ADR-0074 §1's mandate to inject each competing transition inside that
 	// window, rather than run it alongside and hope).
 	hookAfterDrainCheck func()
+	// udfCache is the reader analysis stage's per-connection user-routine set
+	// (reader_analysis.go), guarded by udfMu.
+	udfMu    sync.Mutex
+	udfCache map[int64]*udfSet
 	// hookRawDispatch, when set, observes every SimpleQuery dispatch with the
 	// EXACT bytes handed to the wire. Cells use it to prove the gate ran on the
 	// same text that was dispatched and that refused buffers dispatch nothing.
@@ -502,6 +506,9 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, uperr)
 	}
 	ident = authorized
+	if err := e.readerAnalysis(ctx, connRow, unitPol, stmt); err != nil { // Amendment 6 rule 2 stage
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
+	}
 	if err := guardWhere(stmt); err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
@@ -572,6 +579,9 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	}
 	if runErr != nil {
 		return nil, fmt.Errorf("exec: statement failed: %w", runErr)
+	}
+	if stmt.Class == ClassDDL {
+		e.invalidateRoutines(connID) // a routine may have been defined or dropped
 	}
 	return res, nil
 }

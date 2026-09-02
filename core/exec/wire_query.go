@@ -186,6 +186,9 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 	if cerr != nil {
 		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, cerr)
 	}
+	if err := e.readerAnalysis(ctx, connRow, pol, stmt); err != nil { // Amendment 6 rule 2 stage
+		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, err)
+	}
 	s.mu.Lock()
 	txOpen, aborted := s.txPhase != txNone, s.txPhase == txAborted
 	s.mu.Unlock()
@@ -451,6 +454,12 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		// transaction: it goes into the session's track BEFORE any return, or the
 		// local gate would keep saying T over a backend that is in E (PR #50 MF5).
 		s.noteWireStatus(status)
+		for i := el.first; i <= el.last; i++ {
+			if stmts[i].Class == ClassDDL {
+				e.invalidateRoutines(connRow.ID)
+				break
+			}
+		}
 		if consumerErr && failed < 0 {
 			// The client's connection failed and golib drained the rest of the
 			// target's answer WITHOUT delivering it: the engine never observed the
