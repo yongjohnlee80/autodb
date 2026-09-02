@@ -8,20 +8,33 @@ import (
 	"testing"
 )
 
-// POST-AUTH FRAME FUZZING (matrix §10: "frame/length fuzzing (header-first
-// property: no read past a refused header)"), F1's half.
+// POST-AUTH FRAME FUZZING, F1's half of matrix §10's "frame/length fuzzing".
 //
 // #37 fuzzed the PRE-auth reader, where the frames carry no type byte and the
 // rule is a length classification. This is the other reader: post-auth framing,
 // where a type byte precedes a length that counts itself, and where the front
 // door must decide on the HEADER before any body is consumed.
 //
-// THE PROPERTY, stated so a failure is legible: when frameReader refuses a
-// header — an undefined type byte, or a length that cannot describe a message —
-// it must not have consumed anything beyond that header. A reader that
-// swallowed the body of a frame it was about to refuse would resynchronize on
-// arbitrary bytes, and the next "type byte" it saw would be payload. That is
-// how a refusal becomes a parser confusion.
+// WHAT THESE CELLS PROVE, AND WHAT §10 ASKS FOR, ARE NOT THE SAME THING — said
+// plainly here because the earlier version of this comment quoted §10's literal
+// "no read past a refused header" while proving something weaker (lector r0
+// MF1; juliet measured 4101 source bytes consumed before both refusals).
+//
+// §10's phrasing is a SOURCE-READ boundary: nothing beyond the header leaves
+// the socket. frameReader does not provide that and cannot cheaply — it passes
+// the caller's buffer to the underlying reader, so one Read legitimately pulls
+// whatever has arrived, and enforcing a byte boundary would mean reading the
+// five header bytes separately on every frame.
+//
+// What it provides, and what these cells prove, is the PARSING property: when a
+// header is refused, nothing beyond it is INTERPRETED AS FRAMING. A reader that
+// took the body of a frame it was about to refuse would resynchronize on
+// arbitrary bytes and the next "type byte" it reported would be payload — that
+// is how a refusal becomes a parser confusion, and it is the property that
+// matters for correctness.
+//
+// The gap between the two is a matrix-versus-implementation question, not a
+// defect: raised to jarvis rather than settled by renaming a cell and moving on.
 
 // countingReader reports how many bytes were actually taken from the wire, so
 // the header-first property can be MEASURED rather than asserted.
@@ -49,7 +62,7 @@ func frame(typ byte, body []byte) []byte {
 // well-formed:
 //
 //  1. It never panics, whatever arrives.
-//  2. A refused header leaves the body unread — the header-first property.
+//  2. A refused header leaves the body UNINTERPRETED (not unread — see above).
 //  3. Every refusal carries one of the two framing identities, never a bare
 //     error: "undefined type byte" and "impossible length" demand different
 //     answers on the wire (08P01 with the type byte in the audit, versus an
@@ -94,13 +107,10 @@ func FuzzPostAuthFrameReader(f *testing.F) {
 	})
 }
 
-// The header-first property on its own, measured rather than fuzzed: a refused
-// header must leave the body on the wire.
-//
-// §10 names this property specifically, and it is the one that cannot be
-// checked by looking at the returned error — a reader that refuses correctly
-// AND swallows the body returns exactly the same error as one that does not.
-func TestPostAuth_ARefusedHeaderLeavesTheBodyUnread(t *testing.T) {
+// The parsing property on its own, measured rather than fuzzed. It cannot be
+// checked from the returned error: a reader that refuses correctly AND
+// misinterprets the body returns exactly the same error as one that does not.
+func TestPostAuth_ARefusedHeaderLeavesTheBodyUninterpreted(t *testing.T) {
 	body := bytes.Repeat([]byte{'x'}, 4096)
 
 	for _, tc := range []struct {

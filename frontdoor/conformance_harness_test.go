@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jmoiron/sqlx"
 	"github.com/lib/pq"
 )
@@ -68,7 +69,7 @@ func harnessConn(t *testing.T) (*pgconn.PgConn, func()) {
 	if err != nil {
 		t.Fatalf("a real driver could not connect to the front door: %v", err)
 	}
-	return conn, func() { _ = conn.Close(context.Background()) }
+	return conn, func() { _ = conn.Close(opCtx(t)) }
 }
 
 // Row 4:Query through a real driver's simple-protocol path.
@@ -76,7 +77,7 @@ func TestHarness_ADriverRunsAParameterlessQuery(t *testing.T) {
 	conn, done := harnessConn(t)
 	defer done()
 
-	res, err := conn.Exec(context.Background(), "SELECT 42").ReadAll()
+	res, err := conn.Exec(opCtx(t), "SELECT 42").ReadAll()
 	if err != nil {
 		t.Fatalf("the driver's simple Query failed: %v", err)
 	}
@@ -91,24 +92,23 @@ func TestHarness_ADriverRunsAParameterlessQuery(t *testing.T) {
 func TestHarness_AMultiStatementBufferIsOneImplicitBlock(t *testing.T) {
 	conn, done := harnessConn(t)
 	defer done()
-	ctx := context.Background()
 
 	table := fmt.Sprintf("fd_harness_%d", time.Now().UnixNano())
-	if _, err := conn.Exec(ctx, fmt.Sprintf("CREATE TABLE %s (n int)", table)).ReadAll(); err != nil {
+	if _, err := conn.Exec(opCtx(t), fmt.Sprintf("CREATE TABLE %s (n int)", table)).ReadAll(); err != nil {
 		t.Fatalf("creating the scratch table: %v", err)
 	}
 	t.Cleanup(func() {
-		_, _ = conn.Exec(context.Background(), fmt.Sprintf("DROP TABLE IF EXISTS %s", table)).ReadAll()
+		_, _ = conn.Exec(opCtx(t), fmt.Sprintf("DROP TABLE IF EXISTS %s", table)).ReadAll()
 	})
 
 	// One buffer, and the last statement fails.
-	_, err := conn.Exec(ctx, fmt.Sprintf(
+	_, err := conn.Exec(opCtx(t), fmt.Sprintf(
 		"INSERT INTO %s VALUES (1); INSERT INTO %s VALUES (2); SELECT 1/0", table, table)).ReadAll()
 	if err == nil {
 		t.Fatal("the buffer's failing statement was not reported")
 	}
 
-	rows, rerr := conn.Exec(ctx, fmt.Sprintf("SELECT count(*) FROM %s", table)).ReadAll()
+	rows, rerr := conn.Exec(opCtx(t), fmt.Sprintf("SELECT count(*) FROM %s", table)).ReadAll()
 	if rerr != nil {
 		t.Fatalf("counting: %v", rerr)
 	}
@@ -119,24 +119,56 @@ func TestHarness_AMultiStatementBufferIsOneImplicitBlock(t *testing.T) {
 	}
 }
 
-// The #59 property through a REAL driver rather than a hand-built pair: two
-// statements sent before either reply is read. Every cell that proved this
-// before spoke pgproto3 directly; this proves a driver's own pipelining reaches
-// the engine.
-func TestHarness_ADriverPipelinesTwoStatements(t *testing.T) {
+// MF2 (lector r0): the previous version sent "SELECT 1; SELECT 2" through
+// pgconn.Exec and called it pipelining. That is ONE Query frame carrying two
+// statements — the implicit-block shape the cell above already covers — so it
+// could not detect a stranded second frame, which is the entire defect PR #59
+// fixed. The name claimed two frames; the wire carried one.
+//
+// This drives TWO Query frames into one flush on the driver's own connection,
+// through the frontend pgconn exposes, and reads nothing until both are sent.
+// That is what lib/pq and JDBC put on the wire.
+//
+// WHAT IT DOES NOT YET CLAIM: that it would CATCH a stranded second frame. I
+// tried to prove that with a negative control — a mutation making frameReader
+// swallow everything after the first frame — and the cell stayed green. A
+// positive control confirmed the mutated path IS executed (a panic there
+// fires), so the mutation ran and did not produce the symptom I expected; I
+// could not explain that before sending, and an unexplained green control means
+// the cell is UNPROVEN as a #59 regression, not proven.
+//
+// So this stands as a genuine two-frame witness — which the previous version,
+// sending one Query frame with two statements, was not — and the #59-detection
+// claim is withheld until a control reddens. Reported to lector rather than
+// quietly dropped (r0 MF2).
+func TestHarness_ADriverSendsTwoQueryFramesBeforeReading(t *testing.T) {
 	conn, done := harnessConn(t)
 	defer done()
 
-	// pgconn's multi-statement Exec writes one buffer and reads the replies
-	// afterwards, which is the pipelined shape from the server's side.
-	res, err := conn.Exec(context.Background(), "SELECT 1; SELECT 2").ReadAll()
-	if err != nil {
-		t.Fatalf("the driver's pipelined pair failed: %v", err)
+	fe := conn.Frontend()
+	fe.Send(&pgproto3.Query{String: "SELECT 1"})
+	fe.Send(&pgproto3.Query{String: "SELECT 2"})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("flushing two Query frames: %v", err)
 	}
-	if len(res) != 2 {
-		t.Fatalf("%d results, want 2 — the second statement of a pipelined buffer was lost, which "+
-			"is the defect PR #59 fixed, reaching here through a driver rather than a hand-built "+
-			"frame pair", len(res))
+
+	// A stranded second frame shows up as a session that answers once and goes
+	// quiet, so this is BOUNDED (MF3) — unbounded it would hang to the go-test
+	// timeout rather than fail.
+	deadline := time.Now().Add(15 * time.Second)
+	ready := 0
+	for ready < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of 2 readiness bytes: the second frame of a pipelined pair was "+
+				"accepted by the driver, never seen by the engine, and nobody was told", ready)
+		}
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("after %d of 2 readiness bytes: %v", ready, err)
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			ready++
+		}
 	}
 }
 
@@ -146,9 +178,8 @@ func TestHarness_ADriverPipelinesTwoStatements(t *testing.T) {
 func TestHarness_ARefusalArrivesAsASQLSTATENotADisconnect(t *testing.T) {
 	conn, done := harnessConn(t)
 	defer done()
-	ctx := context.Background()
 
-	_, err := conn.Exec(ctx, "SELECT 1/0").ReadAll()
+	_, err := conn.Exec(opCtx(t), "SELECT 1/0").ReadAll()
 	if err == nil {
 		t.Fatal("division by zero was not reported")
 	}
@@ -163,7 +194,7 @@ func TestHarness_ARefusalArrivesAsASQLSTATENotADisconnect(t *testing.T) {
 
 	// And the session SURVIVES it, which is what separates a statement error
 	// from a session-ending refusal.
-	if _, err := conn.Exec(ctx, "SELECT 1").ReadAll(); err != nil {
+	if _, err := conn.Exec(opCtx(t), "SELECT 1").ReadAll(); err != nil {
 		t.Fatalf("the session did not survive a statement error: %v", err)
 	}
 }
@@ -227,6 +258,21 @@ func TestHarness_LibPQIsRefusedForDatestyle(t *testing.T) {
 	// The refusal must be the one this cell names. If lib/pq is being refused
 	// for some OTHER reason, the finding recorded here is wrong and the new
 	// reason is a fresh one to chase.
+	// WAIT FOR THE AUDIT, do not sample it. The client's Ping error returns as
+	// soon as the denial frame arrives; the server writes its audit row after.
+	// Reading events() immediately passed when this cell ran alone and failed
+	// under full-suite load, reporting an EMPTY reason — which read exactly like
+	// "the finding changed" and sent me chasing a behaviour change that had not
+	// happened. A cell that samples a value written by another goroutine is
+	// asking a question before the answer exists.
+	waitFor(t, "the startup-parameter refusal to be audited", func() bool {
+		for _, ev := range events() {
+			if ev.Kind == "fd.auth_denied" {
+				return true
+			}
+		}
+		return false
+	})
 	refused := ""
 	for _, ev := range events() {
 		if ev.Kind == "fd.auth_denied" {
@@ -340,7 +386,7 @@ func TestHarness_PgxExtendedProtocol(t *testing.T) {
 	conn, done := harnessConn(t)
 	defer done()
 
-	res := conn.ExecParams(context.Background(), "SELECT $1::int + 1",
+	res := conn.ExecParams(opCtx(t), "SELECT $1::int + 1",
 		[][]byte{[]byte("41")}, nil, nil, nil).Read()
 	if res.Err != nil {
 		t.Fatalf("a real driver's extended-protocol query failed: %v", res.Err)
@@ -417,4 +463,18 @@ func TestHarness_TheApprovedDriversStayTestOnly(t *testing.T) {
 			"files import them: %v — the approval was for a conformance harness, and a driver "+
 			"in the shipped binary is a different decision that has not been made", offenders)
 	}
+}
+
+// opCtx bounds ONE live operation (MF3, lector r0).
+//
+// Every live call previously used context.Background(), so a lost frame or a
+// withheld readiness byte hung until the outer go-test timeout — surfacing as
+// "panic: test timed out" with no indication of which call stalled. A cell that
+// hangs reports nothing; the rule that bounded #66's readiness drain applies to
+// every operation that waits on the front door.
+func opCtx(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	return ctx
 }
