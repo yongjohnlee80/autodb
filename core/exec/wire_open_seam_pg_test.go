@@ -233,6 +233,8 @@ func TestWireOpen_FailsClosedWithoutReporterOrEncodingKeys(t *testing.T) {
 				t.Fatal(err)
 			}
 			before := f.eng.sessions.countForTest()
+			leaseBefore := f.eng.sessions.leaseCount(row.ID)
+			residentBefore := f.eng.sessions.residentHeld()
 			res, oerr := f.eng.OpenWireSessionWith(ctx, WireOpen{PAT: pat.Secret, StartupUser: "root", Database: row.Name, IP: testIP})
 			if oerr == nil {
 				t.Fatalf("open ADMITTED (session %s) although the lease encoding could not be established — row 3.1 must fail closed", res.SessionID)
@@ -241,7 +243,16 @@ func TestWireOpen_FailsClosedWithoutReporterOrEncodingKeys(t *testing.T) {
 				t.Fatalf("denial reason %q (%v), want %s", DenialReason(oerr), oerr, DenyLeaseEncoding)
 			}
 			if after := f.eng.sessions.countForTest(); after != before {
-				t.Fatalf("sessions %d → %d after a refused open; the admitted session must be withdrawn and its reservation released", before, after)
+				t.Fatalf("sessions %d → %d after a refused open; the admitted session must be withdrawn", before, after)
+			}
+			// The claim is the RESERVATION, not the registry entry: the target's
+			// lease count and the resident charge must both be back where they
+			// were, or a refused open leaks capacity the target still has.
+			if got := f.eng.sessions.leaseCount(row.ID); got != leaseBefore {
+				t.Fatalf("target lease count %d → %d after a refused open; the lease must be released with the session", leaseBefore, got)
+			}
+			if got := f.eng.sessions.residentHeld(); got != residentBefore {
+				t.Fatalf("resident charge %d → %d after a refused open; the reservation must be released with the session", residentBefore, got)
 			}
 			if n := len(auditDetail(t, f, "wire_lease_encoding_refused")); n != 1 {
 				t.Fatalf("%d wire_lease_encoding_refused audit rows, want 1", n)
@@ -291,4 +302,40 @@ func TestWireOpen_AuditStampCoversDecodedAndOwnedControlSites(t *testing.T) {
 	if decoded != 1 || control != 1 {
 		t.Fatalf("stamped decoded lines %d (want 1), stamped control lines %d (want 1)", decoded, control)
 	}
+	// The invariant covers the OUTCOME line as well: the exec_result row
+	// correlated (tx_id) to each marker's exec row carries the same stamp.
+	for _, marker := range []string{"decoded_marker", "statement_timeout = '7s'"} {
+		txID := ""
+		for _, e := range auditEntries(t, f, "exec") {
+			if strings.Contains(e.Detail, marker) {
+				txID = e.TxID
+			}
+		}
+		if txID == "" {
+			t.Fatalf("no exec row with tx_id for marker %q", marker)
+		}
+		results := 0
+		for _, e := range auditEntries(t, f, "exec_result") {
+			if e.TxID != txID {
+				continue
+			}
+			results++
+			if !strings.Contains(e.Detail, stamp) {
+				t.Fatalf("exec_result line for %q lacks the stamp: %q", marker, e.Detail)
+			}
+		}
+		if results != 1 {
+			t.Fatalf("%d exec_result rows correlated to %q, want 1", results, marker)
+		}
+	}
+}
+
+// auditEntries returns the audit rows for one action with their correlation id.
+func auditEntries(t *testing.T, f *fixture, action string) []*meta.AuditEntry {
+	t.Helper()
+	rows, err := f.store.Audit.OnCtx(context.Background()).With(meta.AuditAction, action).Select()
+	if err != nil {
+		t.Fatalf("reading %q audit rows: %v", action, err)
+	}
+	return rows
 }
