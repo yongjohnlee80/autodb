@@ -465,7 +465,8 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 		// to land. The cap and the lane trip for different reasons at different
 		// sites; what is owed to the client and the audit is identical, so it is
 		// decided once, below, from what the engine records.
-		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, stopped, acct.targetFailed)
+		// A simple Query owns its own terminal readiness.
+		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, stopped, acct.targetFailed, true)
 
 	case acct.writeErr != nil:
 		// The peer is gone or will not read. Nothing to send it, and nothing
@@ -537,7 +538,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 // Once the rows exist, honesty is the only remedy left.
 func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, peer string, closeReason *string, why outputWithheld,
-	stopped *exec.EmitStopped, targetFailed bool) bool {
+	stopped *exec.EmitStopped, targetFailed bool, ownsTerminal bool) bool {
 
 	reason, known := withheldReasons[why]
 	if !known {
@@ -599,8 +600,22 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 		return false
 	}
 
-	// The session is intact — a budget stopped the OUTPUT, not the connection —
-	// so it is owed the readiness that ends every surviving cycle (§6.3).
+	// THE TERMINAL BYTE BELONGS TO THE CYCLE THAT OWNS IT (lector r2 MF4).
+	//
+	// A simple Query's cycle ends here: the session is intact — a budget stopped
+	// the OUTPUT, not the connection — so §6.3 owes it the readiness that ends
+	// every surviving cycle, and this is the only place it can come from.
+	//
+	// AN EXTENDED SEGMENT DOES NOT END HERE. Only the client's Sync ends one, and
+	// Sync's ReadyForQuery is that segment's terminal. Sending one here puts TWO
+	// on the wire for a single segment, and a client reads the second as the
+	// answer to whatever it sends NEXT — so a following SELECT consumes a stale
+	// readiness and returns someone else's frames. That is stream
+	// desynchronisation, not a spare frame, and it is invisible to any cell that
+	// stops reading at the first readiness it sees.
+	if !ownsTerminal {
+		return true
+	}
 	be.Send(&pgproto3.ReadyForQuery{TxStatus: status})
 	if ferr := l.flushBounded(conn, be); ferr != nil {
 		*closeReason = "write-failed"
@@ -623,18 +638,20 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 // ordering of its own to get wrong.
 //
 // NOT EVERY PATH HAS AN ENGINE REPORT. exec.EmitStopped is produced by
-// WireQuery; the EXTENDED path (core/exec/wire_extended.go) does not wrap its
-// emitter failures yet, so a segment's stop arrives with no arm. Swapping the
-// emitter's own observation out for the engine's would therefore have made the
-// extended path REPORT LESS than it does today — "unresolved" where it can
-// currently say "failed" — which is a regression dressed as a refactor.
+// WireQuery and, since the extended truth fix, by WireExecutePortal — but NOT by
+// WireFlushSegment, which still returns its drain's bare emitFailure. So a stop
+// during an Execute arrives armed and a stop during a standalone Flush does not,
+// and the fallback below is still reached by the Flush drive. Swapping the
+// emitter's own observation out for the engine's would therefore make that path
+// REPORT LESS than it does today — "unresolved" where it can currently say
+// "failed" — which is a regression dressed as a refactor.
 //
 // So both are kept, engine first: the engine's answer when there is one, the
 // emitter's observation when there is not. The observation is not a guess — the
 // emitter holds the target's message before deciding whether to forward it — it
 // is simply narrower, because a failure arriving after the stop is invisible to
-// it. When the extended path grows its own EmitStopped the second branch stops
-// being reached and can go.
+// it. The second branch goes when Flush and Sync arm their stops too; until
+// then, deleting it would silently downgrade a Flush cut to "unresolved".
 //
 // The fallback arm is deliberate rather than defensive: an unrecognised arm is
 // something the engine grew and the front door has not been taught, and saying
@@ -649,6 +666,13 @@ func recordedEffects(stopped *exec.EmitStopped, status byte, targetFailed bool) 
 		// for the client to worry about.
 		return "the query was empty, so nothing ran",
 			"there are no effects; the empty query's own reply was not delivered", string(arm)
+	case exec.ArmNotExecuted:
+		// IT EXISTED AND IT DID NOT RUN. Not the empty query above — the client
+		// sent this statement, and an earlier one in the same buffer or segment
+		// failed, so the target discarded it. Saying "the query was empty" here
+		// tells a client that sent real SQL that it sent nothing.
+		return "an earlier statement in this batch failed, so this one did not run",
+			"it has no effects; the earlier statement's failure discarded it", string(arm)
 	case exec.ArmFailed:
 		return "the statement failed at the target",
 			"its effects were rolled back", string(arm)

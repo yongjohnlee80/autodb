@@ -63,6 +63,9 @@ type extStatement struct {
 	// portals names every live portal constructed from this statement, for
 	// §4a's protocol-documented Close-S cascade.
 	portals map[string]struct{}
+
+	// seq is this object's GENERATION. See extObjects.nextSeq.
+	seq uint64
 }
 
 // extPortal is one portal: a statement bound to parameters, awaiting Execute.
@@ -80,6 +83,9 @@ type extPortal struct {
 	// resumption is still an Execute (§5 rev 2 MF1 says "portal re-executions
 	// included").
 	suspended bool
+
+	// seq is this object's GENERATION. See extObjects.nextSeq.
+	seq uint64
 }
 
 // extObjects is one session's extended-protocol namespace and the segment's
@@ -121,17 +127,79 @@ type extObjects struct {
 	// quiescent the moment the first frame is queued. So it is opened when a
 	// segment starts and rolled back when Sync ends it.
 	roWrap dao.ContextTxConn
+
+	// nextSeq generates each object's GENERATION.
+	//
+	// A NAME IS NOT AN IDENTITY. The unnamed statement can be replaced while the
+	// first Parse's answer is still in flight, so a rule that matches a frame to
+	// an object by name alone attributes the first Parse's answer to the
+	// REPLACEMENT. The generation is what makes "this frame belongs to that
+	// object" answerable at all — and the extended path's outcome attribution
+	// (wire_extended.go) is decided by exactly that question.
+	nextSeq uint64
 }
 
 // segStep is one queued frame's place in the reply order. A step with synth
 // frames is answered by the front door; an empty one is answered by the server.
 type segStep struct {
 	synth []WireMessage
+
+	// obj names the object this frame CREATES, when it creates one. Nil for
+	// frames that create nothing (Describe, Execute, Close).
+	//
+	// The identity rides the step the drain already walks, rather than arriving
+	// through a channel or a second registry: the drain observes the answer, so
+	// the drain is where the owner is known.
+	obj *objectRef
+
+	// exec marks the Execute frame of the call that queued it.
+	//
+	// WITHOUT THIS THE OWNER OF A nil-obj FRAME IS AMBIGUOUS: Describe, Close and
+	// Execute all create nothing, so an error on one of them could only be
+	// attributed by POSITION in the segment — and position is precisely the rule
+	// that gets `SELECT 1/0` wrong, since the constant folds at plan time and the
+	// target raises 22012 at Bind rather than at Execute. Marking the frame is
+	// how the attribution stays a question about identity.
+	exec bool
+}
+
+// objectRef identifies one object in the store's key space: kind, name AND
+// generation. All three, for the reason given at extObjects.nextSeq.
+type objectRef struct {
+	kind objectKind
+	name string
+	seq  uint64
+}
+
+// objectKind separates the two namespaces §4a keeps apart: a statement and a
+// portal may share a name and are still different objects.
+type objectKind int
+
+const (
+	objectStatement objectKind = iota
+	objectPortal
+)
+
+// sameObject reports whether two refs name the same object, generation included.
+func (r objectRef) sameObject(other objectRef) bool {
+	return r.kind == other.kind && r.name == other.name && r.seq == other.seq
 }
 
 // queueWire records a frame that went to the connection and whose answer must be
 // read back from it.
 func (o *extObjects) queueWire() { o.segment = append(o.segment, segStep{}) }
+
+// queueWireFor records a frame that CREATES an object, so the drain can tell
+// whose answer it is reading.
+func (o *extObjects) queueWireFor(kind objectKind, name string, seq uint64) {
+	// The generation is captured HERE, at queue time, so the step names the
+	// object this frame created rather than whatever holds the name later.
+	o.segment = append(o.segment, segStep{obj: &objectRef{kind: kind, name: name, seq: seq}})
+}
+
+// queueExec records the Execute frame of the call that queued it. See
+// segStep.exec for why the Execute is marked rather than inferred.
+func (o *extObjects) queueExec() { o.segment = append(o.segment, segStep{exec: true}) }
 
 // queueSynth records a frame the front door answers itself, with the fixed
 // shapes the protocol defines for it.
@@ -160,6 +228,10 @@ func (o *extObjects) putStatement(st *extStatement) error {
 		o.dropStatement("")
 	}
 	st.portals = make(map[string]struct{})
+	// The generation is stamped on ADMISSION, so a replacement of the same name
+	// is a different object from the moment it exists.
+	o.nextSeq++
+	st.seq = o.nextSeq
 	o.statements[st.name] = st
 	return nil
 }
@@ -187,6 +259,8 @@ func (o *extObjects) putPortal(p *extPortal) error {
 	} else if _, live := o.portals[""]; live {
 		o.dropPortal("")
 	}
+	o.nextSeq++
+	p.seq = o.nextSeq
 	o.portals[p.name] = p
 	st.portals[p.name] = struct{}{}
 	return nil

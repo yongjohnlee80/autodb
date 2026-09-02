@@ -269,12 +269,31 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 
 	err := drive(acct.emit)
 
+	// THE EXTENDED PATH ARMS ITS OWN STOPS NOW. WireExecutePortal wraps a
+	// consumer stop in exec.EmitStopped carrying the outcome it RECORDED, so the
+	// arm the raw path has always had is available here too and #66's fallback
+	// to the emitter's own observation is retired. Same extraction, same
+	// reportOutputWithheld — one stop path for both protocols.
+	var stopped *exec.EmitStopped
+	if err != nil {
+		var st *exec.EmitStopped
+		if errors.As(err, &st) {
+			stopped = st
+		}
+	}
+
 	switch {
 	case acct.withheld != outputComplete:
-		// nil: the extended engine path does not wrap its emitter failures in
-		// exec.EmitStopped yet, so this stop arrives with no arm and the
-		// emitter's own observation is what is available. See recordedEffects.
-		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, nil, acct.targetFailed)
+		// AN EXTENDED SEGMENT'S TERMINAL BYTE IS SYNC'S (lector r2 MF4), so the
+		// report carries the truthful explanation and no readiness. Having put an
+		// ErrorResponse on the wire we are in the protocol's ignore-till-Sync
+		// state, exactly as the target would be, so the segment discards until
+		// the client's Sync ends it and answers with the one readiness it owns.
+		if !l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, stopped, acct.targetFailed, false) {
+			return false
+		}
+		seg.discarding = true
+		return true
 
 	case acct.writeErr != nil:
 		l.onEvent(Event{Kind: "fd.conn_close", Reason: "write-failed", Peer: peer, Detail: acct.writeErr.Error()})

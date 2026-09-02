@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/yongjohnlee80/golib/dao"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 
@@ -211,16 +213,15 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	// The name is claimed BEFORE the frame goes out, so a refused duplicate
 	// never reaches the server and the store and the backend cannot disagree
 	// about which names are live.
-	if serr := s.ext.putStatement(&extStatement{
-		name: name, sql: sqlText, stmt: stmt, paramOIDs: paramOIDs,
-	}); serr != nil {
+	st := &extStatement{name: name, sql: sqlText, stmt: stmt, paramOIDs: paramOIDs}
+	if serr := s.ext.putStatement(st); serr != nil {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, serr)
 	}
 	if serr := pc.Send(ctx, golibpg.ParseOp(name, sqlText, paramOIDs)); serr != nil {
 		s.ext.dropStatement(name)
 		return serr
 	}
-	s.ext.queueWire()
+	s.ext.queueWireFor(objectStatement, name, st.seq)
 	return nil
 }
 
@@ -243,7 +244,8 @@ func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 	if serr != nil {
 		return serr
 	}
-	if perr := s.ext.putPortal(&extPortal{name: portalName, stmtName: stmtName}); perr != nil {
+	pt := &extPortal{name: portalName, stmtName: stmtName}
+	if perr := s.ext.putPortal(pt); perr != nil {
 		return perr
 	}
 	if isOwnedControl(st) {
@@ -254,7 +256,7 @@ func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 		s.ext.dropPortal(portalName)
 		return serr
 	}
-	s.ext.queueWire()
+	s.ext.queueWireFor(objectPortal, portalName, pt.seq)
 	return nil
 }
 
@@ -522,7 +524,12 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	// A fresh attempt precedes every effect, so a repeated Execute of one portal
 	// is a repeated row in the history rather than one row covering several
 	// executions.
-	attemptID, aerr := e.recordAttempt(ctx, pol.Ident, connRow.ID, ip, st.sql, txID)
+	// TAGGED, like the raw path's attempt (wire_query.go): the extended path's
+	// rows were going into the history without the session stamp, so a
+	// `session <id> app "..."` search answered for one protocol and silently
+	// missed the other.
+	tag := s.auditTag()
+	attemptID, aerr := e.recordAttemptTagged(ctx, pol.Ident, connRow.ID, ip, st.sql, txID, tag)
 	if aerr != nil {
 		return aerr
 	}
@@ -533,30 +540,105 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	start := e.now()
 	var rowCount int64
 	var runErr error
+	var obs extObservation
 
 	switch sendErr := pc.Send(runCtx, golibpg.ExecuteOp(portalName, maxRows)); {
 	case sendErr != nil:
 		runErr = sendErr
 	default:
-		s.ext.queueWire()
+		s.ext.queueExec()
 		// ONE Flush covers everything still queued — a client pipelines Parse
 		// and Bind without flushing and this Execute is what releases them — so
 		// the drain reads the answers to all of them, not just this frame's.
 		if fErr := pc.Flush(runCtx); fErr != nil {
 			runErr = fErr
 		} else {
-			rowCount, runErr = drainExtendedCounting(runCtx, pc, s.ext, emit, p)
+			// The objects whose frames are THIS Execute's, generation included:
+			// its statement, its portal, and the Execute frame itself. Anything
+			// else in the segment belongs to an earlier object.
+			own := &execOwner{
+				stmt:   objectRef{kind: objectStatement, name: p.stmtName, seq: st.seq},
+				portal: objectRef{kind: objectPortal, name: portalName, seq: p.seq},
+			}
+			rowCount, obs, runErr = drainExtendedObserving(runCtx, pc, s.ext, own, emit, p)
 		}
 	}
 	duration := e.now().Sub(start)
 
+	var ef *emitFailure
+	consumerErr := errors.As(runErr, &ef)
+	status, errText := extOutcome(obs, runErr, consumerErr, txID)
+
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	if rerr := e.recordOutcome(recCtx, pol.Ident, connRow.ID, ip, attemptID,
-		duration, rowCount, runErr, txID); rerr != nil {
+	if rerr := e.writeOutcomeTagged(recCtx, pol.Ident, connRow.ID, ip, attemptID,
+		duration, rowCount, status, errText, txID, tag); rerr != nil {
 		return rerr
 	}
-	s.noteStatementOutcome(runErr)
+
+	// THE STATEMENT'S ERROR, not the call's. The target's ErrorResponse is
+	// forwarded as data and leaves runErr nil, so unless the transaction track
+	// is told about it here a statement that failed inside BEGIN leaves the
+	// session reporting T while the target is in E — and the client's next
+	// command is answered against a readiness that is not the target's.
+	stmtErr := runErr
+	if obs.targetErr != nil {
+		stmtErr = obs.targetErr
+	}
+	s.noteStatementOutcome(stmtErr)
+
+	if consumerErr {
+		// The consumer stopped reading. The loop is owed the RECORDED outcome so
+		// the audit row and the client's error tell one story — the raw path's
+		// contract, which this path was returning a plain wrap instead of.
+		//
+		// THE ARM COMES FROM WHAT WAS OBSERVED (lector r0 MF1, MF2), never from a
+		// hopeful status read. The drain above keeps reading after the consumer
+		// leaves, so by here the observation is final — and the status is only
+		// consulted where the tail was actually seen.
+		var (
+			executed  = true
+			targetErr *pgconn.PgError
+			txStatus  byte
+		)
+		switch {
+		case obs.targetErr != nil && obs.mine:
+			// This statement failed at the target. The tail was observed, so the
+			// track is current.
+			targetErr = obs.targetErr
+			txStatus, _ = s.wireTxStatus()
+		case obs.targetErr != nil:
+			// An EARLIER object failed and the target discarded this one. Not
+			// executed — and deliberately NOT carrying the earlier object's error,
+			// which is not this statement's and would blame it for a failure that
+			// happened elsewhere. The recorded outcome is non-empty, which is what
+			// separates this from the empty query in Arm().
+			executed = false
+			// THE TRACK IS KNOWN HERE, so it is reported (lector r1 MF3). The
+			// segment's abort was OBSERVED — that is how we know this statement
+			// did not run — and the session was told about it, so this is not the
+			// hopeful post-hoc read that MF1 forbids.
+			//
+			// It matters because the loop treats the engine's report as the ONLY
+			// snapshot, valid or not: an invalid byte there means "the phase is
+			// unknown", and §6.3 then forbids inventing a readiness, so the loop
+			// closes without telling the client anything. Leaving this 0 made the
+			// truthful not-executed explanation unreachable through the front
+			// door — the arm was right and no client could ever be shown it.
+			txStatus, _ = s.wireTxStatus()
+		case obs.completed:
+			// The terminal was seen before the client left, so an in-transaction
+			// byte here is current rather than a snapshot from mid-answer.
+			txStatus, _ = s.wireTxStatus()
+		}
+		// Anything else: the tail told us nothing, so txStatus stays 0 — the arm
+		// is unresolved rather than a guess dressed as a readiness, and the loop
+		// reads that invalid byte as "phase unknown" and closes WITHOUT inventing
+		// a readiness (§6.3). That close is the deliberate answer for a tail
+		// nobody observed, not an oversight: the two cases above report a status
+		// precisely because they did observe one.
+		return e.emitStoppedWithStatus(ef.err, status, executed, targetErr, txStatus)
+	}
 	if runErr != nil {
 		return fmt.Errorf("exec: extended execute failed: %w", runErr)
 	}
@@ -579,37 +661,139 @@ func drainExtended(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, em
 // died. The error itself is forwarded like any other frame: it is protocol DATA,
 // and turning it into a Go error here would make the front door decide what the
 // client should have been told.
+// extObservation is what the drain SAW the target do.
+//
+// The extended path CANNOT read its outcome off the returned error: a target
+// ErrorResponse is forwarded to the client as data and leaves the Go error nil,
+// so "no error" says only that the relay worked. What was true of the statement
+// has to be observed frame by frame, which is what this records.
+type extObservation struct {
+	// completed records that a TERMINAL frame for this Execute arrived, whether
+	// or not the client ever received it.
+	completed bool
+
+	// targetErr is the target's error, when the drain saw one.
+	targetErr *pgconn.PgError
+
+	// mine records whether the frame that failed belonged to THIS Execute's own
+	// statement or portal — its Parse, its Bind, or the Execute itself — rather
+	// than to an earlier object sharing the segment. It is the difference
+	// between "this statement failed" and "this statement never ran".
+	mine bool
+}
+
+// execOwner names the objects whose frames belong to one Execute.
+//
+// ATTRIBUTION IS BY IDENTITY, NEVER BY POSITION. `SELECT 1/0` folds its constant
+// at PLAN time, so the target raises 22012 at BIND — an earlier step than the
+// Execute, and still this statement's own failure. A rule that read "an error
+// before the last step means an earlier statement failed" records that as "not
+// executed", which is false about the one thing the audit row exists to say.
+type execOwner struct {
+	stmt   objectRef
+	portal objectRef
+}
+
+// owns reports whether a step's frame belongs to this Execute.
+func (ow *execOwner) owns(step segStep) bool {
+	switch {
+	case step.exec:
+		return true
+	case step.obj == nil:
+		// Describe and Close create nothing and are not this Execute's frames.
+		return false
+	default:
+		return step.obj.sameObject(ow.stmt) || step.obj.sameObject(ow.portal)
+	}
+}
+
+// terminalForExecute reports the frames that END an Execute's answer.
+func terminalForExecute(kind string) bool {
+	switch kind {
+	case "CommandComplete", "EmptyQueryResponse", "PortalSuspended":
+		return true
+	}
+	return false
+}
+
+// drainExtendedCounting answers the queued segment and counts rows. Kept for the
+// Flush and Sync callers, which have no Execute to attribute anything to.
 func drainExtendedCounting(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
 	emit func(WireMessage) error, p *extPortal) (int64, error) {
+
+	rows, _, err := drainExtendedObserving(ctx, pc, o, nil, emit, p)
+	return rows, err
+}
+
+// drainExtendedObserving answers the queued segment and reports what the target
+// did with it. own is nil when no Execute is being attributed.
+func drainExtendedObserving(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
+	own *execOwner, emit func(WireMessage) error, p *extPortal) (int64, extObservation, error) {
 
 	steps := o.segment
 	o.segment = nil
 
 	var rows int64
+	var obs extObservation
+	var cut *emitFailure
+
+	// THE CONSUMER LEAVING DOES NOT END THE TARGET'S ANSWER (lector r0 MF1).
+	//
+	// Returning at the first emit failure leaves the rest of the target's tail
+	// unread, and the outcome is then written from an observation that stops
+	// mid-answer: a statement the target goes on to abort at row 501 is recorded
+	// from what was true at row 5. EmitStopped.TxStatus promises the track AFTER
+	// the tail was drained, and Arm() lets an in-transaction status outrank an
+	// unresolved outcome — so the client's last word is "your effects are
+	// pending", about a transaction the target has already aborted.
+	//
+	// It costs no extra reading. Those frames are on the wire either way and are
+	// consumed at the client's Sync; the only question is whether anyone LOOKS at
+	// them first. So delivery stops and observation continues — which is also
+	// what the raw path gets for free, since golib drains to ReadyForQuery on a
+	// consumer error and its status is post-tail for that reason.
+	// Reports whether the frame reached the client. Every caller ignores it on
+	// purpose — see answerOneFrame — and it exists so that "stop reading when
+	// delivery stops" is expressible, and therefore testable, rather than
+	// implicit in the absence of a check.
+	deliver := func(m WireMessage) bool {
+		if cut != nil {
+			return false
+		}
+		if eerr := emit(m); eerr != nil {
+			cut = &emitFailure{err: eerr}
+			return false
+		}
+		return true
+	}
+
 	for _, step := range steps {
 		if len(step.synth) > 0 {
 			for _, m := range step.synth {
-				if eerr := emit(m); eerr != nil {
-					return rows, &emitFailure{err: eerr}
-				}
+				_ = deliver(m)
 			}
 			continue
 		}
-		aborted, err := answerOneFrame(ctx, pc, emit, p, &rows)
+		aborted, err := answerOneFrame(ctx, pc, step, own, deliver, p, &rows, &obs)
 		if err != nil {
-			return rows, err
+			// A WIRE failure while draining outranks the consumer's departure:
+			// the handle is poisoned and that is what the caller must act on.
+			return rows, obs, err
 		}
 		if aborted {
-			return rows, nil
+			break
 		}
 	}
-	return rows, nil
+	if cut != nil {
+		return rows, obs, cut
+	}
+	return rows, obs, nil
 }
 
 // answerOneFrame reads messages until the frame that asked for them is answered.
 // It reports whether the segment was abandoned by a server error.
-func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, emit func(WireMessage) error,
-	p *extPortal, rows *int64) (aborted bool, err error) {
+func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, step segStep, own *execOwner,
+	deliver func(WireMessage) bool, p *extPortal, rows *int64, obs *extObservation) (aborted bool, err error) {
 
 	for {
 		m, err := pc.Receive(ctx)
@@ -624,15 +808,60 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, emit func(WireMe
 				p.suspended = true
 			}
 		}
-		if eerr := emit(extToWire(m)); eerr != nil {
-			return false, &emitFailure{err: eerr}
+		// OBSERVED BEFORE IT IS EMITTED. What the target has done is true whether
+		// or not the client hears about it: a consumer cut on the terminal frame
+		// loses the NOTIFICATION, not the completion, and recording it after a
+		// successful emit would turn a completed statement into an unresolved one
+		// for no reason but the client's timing.
+		if own != nil {
+			switch {
+			case m.Kind == "ErrorResponse":
+				obs.targetErr, obs.mine = m.Err, own.owns(step)
+			case step.exec && terminalForExecute(m.Kind):
+				obs.completed = true
+			}
 		}
+		// THE READING CONTINUES EVEN WHEN DELIVERY HAS STOPPED (lector r0 MF1).
+		// The target's tail is what decides this statement's outcome, and if we
+		// stop looking there is nobody left to tell. The result is ignored here
+		// deliberately — that is the whole fix.
+		_ = deliver(extToWire(m))
 		if m.Kind == "ErrorResponse" {
 			return true, nil
 		}
 		if frameAnswered(m.Kind) {
 			return false, nil
 		}
+	}
+}
+
+// extOutcome maps what the drain observed to the recorded outcome.
+//
+// The order of these arms is the contract. The target's own verdict outranks
+// everything: an ErrorResponse for this statement is its failure even if the
+// client was cut a moment later. A consumer stop is NEVER the statement's error
+// — the client's write failing says nothing about what the target did — so it
+// records what was observed, and unresolved when nothing was.
+func extOutcome(obs extObservation, runErr error, consumerErr bool, txID string) (status, errText string) {
+	switch {
+	case obs.targetErr != nil && obs.mine:
+		return StatusError, truncate(obs.targetErr.Error(), maxErrorBytes)
+	case obs.targetErr != nil:
+		// An earlier object in the same segment failed, so the target discarded
+		// everything through to Sync and this Execute never ran.
+		return StatusError, ErrNotExecuted.Error()
+	case obs.completed:
+		if txID != "" {
+			return StatusPendingCommit, ""
+		}
+		return StatusOK, ""
+	case consumerErr:
+		return StatusUnresolvable, unobservedTailNote
+	case runErr != nil:
+		// The WIRE failed under the relay: transport, not statement.
+		return StatusError, truncate(runErr.Error(), maxErrorBytes)
+	default:
+		return StatusUnresolvable, unobservedTailNote
 	}
 }
 
