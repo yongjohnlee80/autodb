@@ -123,9 +123,9 @@ var matrixTriage = map[string]struct {
 	// below keeps those citations and anchors inside the named test cells.
 	"3.1:user":                {covered, "claims below prove requiredness and the PAT-owner cross-check"},
 	"3.1:database":            {covered, "claims below prove requiredness and the grant-on-target check"},
-	"3.1:application_name":    {awaiting, "partial — claims below (acceptance proven; the 256-byte truncate+notice is NOT IMPLEMENTED — auth.go echoes application_name verbatim)"},
+	"3.1:application_name":    {awaiting, "derived from its claims — #accepted and #truncate-notice-256 are covered; #session-audit (recorded on the session and every audit row) awaits the F1 WIRE LOOP, so the parent stays awaiting (lector PR #46 r0 MF1)"},
 	"3.1:client_encoding":     {awaiting, "partial — claims below (the UTF8-only gate is proven; the target-lease UTF8 pin, ruling 2, needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub)"},
-	"3.1:options":             {awaiting, "partial — claims below (GUC refusal and empty-accepted proven; the empty-options audit is NOT IMPLEMENTED — params.go accepts empty without emitting one)"},
+	"3.1:options":             {covered, "derived from its claims — GUC refusal and empty-accepted (TestStartup_ParameterPolicy), empty-options audit (TestStartup_EmptyOptionsIsAuditedAsIgnored)"},
 	"3.1:replication":         {covered, "single claim below — refused, every tested value"},
 	"3.1:_pq_":                {covered, "TestStartup_UnrecognizedProtocolOptionsAreNamed + TestStartup_ParameterPolicy — negotiated, not refused"},
 	"3.1:any-other-parameter": {covered, "TestStartup_ParameterPolicy — an unknown parameter is refused as a GUC attempt (over the wire: the 2.4 cell)"},
@@ -212,8 +212,15 @@ var claimTriage = map[string]struct {
 	"3.1:application_name#accept": {covered, "TestStartup_ParameterPolicy",
 		"the pinned set accepts application_name",
 		[]string{`"application_name": "psql"`}},
-	"3.1:application_name#truncate-notice-256": {awaiting, "",
-		"length-capped 256 bytes, over = truncate + notice, audited — NOT IMPLEMENTED: auth.go:315 echoes application_name verbatim; an F0 gap, not a missing cell", nil},
+	"3.1:application_name#truncate-notice-256": {covered, "TestStartup_ApplicationNameIsCappedAt256Bytes",
+		"over 256 bytes: the echoed ParameterStatus is the rune-safe 256-byte prefix, a NoticeResponse is sent, and fd.param_truncated audits the verbatim original",
+		[]string{"fd.param_truncated", "*pgproto3.NoticeResponse", "applicationNameMaxBytes"}},
+	// The THIRD guarantee in row 199 — "recorded on session + every audit row" — had
+	// no claim, so the derivation could not see it and the parent was falsely
+	// promoted (lector PR #46 r0 MF1). A missing claim is invisible to the gate;
+	// only a present-and-awaiting one keeps the parent honest.
+	"3.1:application_name#session-audit": {awaiting, "",
+		"recorded on the session and on every audit row — fd.auth_ok's detail omits it and WireSessionResult cannot carry it; the session and audit rows are the F1 WIRE LOOP's, so this awaits it", nil},
 
 	"3.1:client_encoding#utf8-only": {covered, "TestStartup_ParameterPolicy",
 		"non-UTF8 refused, hyphen spelling tolerated",
@@ -227,8 +234,9 @@ var claimTriage = map[string]struct {
 	"3.1:options#empty-accepted": {covered, "TestStartup_ParameterPolicy",
 		"empty/whitespace accepted and ignored",
 		[]string{`"options": "   "`}},
-	"3.1:options#empty-audit": {awaiting, "",
-		"the empty-options acceptance is audited (§3.1) — NOT IMPLEMENTED: params.go accepts empty/whitespace and emits no audit event; an F0 gap, not a missing cell", nil},
+	"3.1:options#empty-audit": {covered, "TestStartup_EmptyOptionsIsAuditedAsIgnored",
+		"an empty/whitespace options is accepted, ignored, and audited as fd.param_ignored; a startup without options emits no such event",
+		[]string{"fd.param_ignored", "no options key at all"}},
 
 	// ---- 4:Terminate — three separately testable guarantees (lector PR #45 r0 MF1).
 	// The original single-row promotion cited two cells that observe reservation

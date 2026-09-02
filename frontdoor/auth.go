@@ -268,8 +268,19 @@ func (l *Listener) acquireAuthWorker(ctx context.Context) (func(), error) {
 // seam would have sent the client one pid and recorded another. With a
 // 32-bit space and one redraw budget, an eight-round failure is a broken
 // CSPRNG and the handshake fails rather than sends an unhonourable key.
-func (l *Listener) completeHandshake(be *pgproto3.Backend, res exec.WireSessionResult, params map[string]string) error {
+func (l *Listener) completeHandshake(be *pgproto3.Backend, res exec.WireSessionResult, params map[string]string, notes []paramNote) error {
 	be.Send(&pgproto3.AuthenticationOk{})
+	// §3.1: an over-long application_name earns a NoticeResponse. The notice
+	// names the cap and the fact, never the original value — that went to the
+	// audit, and echoing it here would defeat the cap.
+	for _, n := range notes {
+		if n.Kind == noteApplicationNameTruncated {
+			be.Send(&pgproto3.NoticeResponse{
+				Severity: "NOTICE", SeverityUnlocalized: "NOTICE", Code: "01000",
+				Message: "application_name was longer than 256 bytes and was truncated",
+			})
+		}
+	}
 	for _, ps := range synthesizedStatuses(res, params) {
 		be.Send(ps)
 	}

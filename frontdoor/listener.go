@@ -541,6 +541,12 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 	// careful not to have learned anything from.
 	outcome := authOutcome{Denied: out.Denied}
 	if outcome.Denied == "" {
+		// §3.1's accept-with-a-note outcomes are audited at ACCEPTANCE, before
+		// the credential exchange: the parameter handling happened whether or
+		// not the peer then authenticates, and the audit should say so.
+		for _, n := range out.Notes {
+			l.onEvent(Event{Kind: paramNoteEventKind(n), Reason: n.Kind, Peer: peer, Detail: n.Detail})
+		}
 		be := pgproto3.NewBackend(stream, stream)
 		be.SetMaxBodyLen(PreAuthMaxBodyLen)
 		var aerr error
@@ -559,7 +565,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 			return
 		}
 		if outcome.Denied == "" {
-			l.serveSession(ctx, stream, be, tkt, outcome.Session, out.Params, peer, &closeReason)
+			l.serveSession(ctx, stream, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
 			return
 		}
 	} else {
@@ -582,7 +588,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 
 // serveSession completes row 2.9 and runs the authenticated connection.
 func (l *Listener) serveSession(ctx context.Context, stream net.Conn, be *pgproto3.Backend,
-	tkt *ticket, sess exec.WireSessionResult, params map[string]string, peer string, closeReason *string) {
+	tkt *ticket, sess exec.WireSessionResult, params map[string]string, notes []paramNote, peer string, closeReason *string) {
 
 	// The pre-auth slot goes back the moment this connection stops being
 	// anonymous. Holding it for the session's life would let a handful of
@@ -619,7 +625,7 @@ func (l *Listener) serveSession(ctx context.Context, stream net.Conn, be *pgprot
 	l.onEvent(Event{Kind: "fd.auth_ok", Peer: peer,
 		Detail: fmt.Sprintf("user=%s pat=%s admitted-by=%s", sess.UserName, sess.PATName, sess.AdmissionSource)})
 
-	if err := l.completeHandshake(be, sess, params); err != nil {
+	if err := l.completeHandshake(be, sess, params, notes); err != nil {
 		sessionReason = "handshake-write-failed"
 		*closeReason = sessionReason
 		l.onLog(fmt.Sprintf("frontdoor: completing the handshake with %s: %v", peer, err))
@@ -683,6 +689,18 @@ func (l *Listener) defaultSession(ctx context.Context, conn net.Conn, be *pgprot
 		_ = be.Flush()
 		return nil
 	}
+}
+
+// paramNoteEventKind maps a §3.1 note to its audit event kind: one kind per
+// note so an operator can grep for either without parsing Reason.
+func paramNoteEventKind(n paramNote) string {
+	switch n.Kind {
+	case noteApplicationNameTruncated:
+		return "fd.param_truncated"
+	case noteOptionsEmptyIgnored:
+		return "fd.param_ignored"
+	}
+	return "fd.param_note"
 }
 
 // beginHandler counts one accepted connection, or reports that the listener
