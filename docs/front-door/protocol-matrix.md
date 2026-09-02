@@ -505,7 +505,12 @@ different limits and will move for different reasons.
   declared length** — reads are bounded by the transport buffer, §8.3 — **and
   nothing past a refused header is interpreted as framing**).
 
-  *Amended (jarvis as lead, 2026-09-03; Johno ratifies). The previous wording,
+  *Amended by jarvis as lead, 2026-09-03. **RATIFICATION BY JOHNO IS PENDING** —
+  this records a lead's amendment awaiting his decision, not a decision he has
+  made. (The earlier wording here said "Johno ratifies", which stated a
+  ratification that had not happened; a document that predicts a decision is
+  indistinguishable from one that reports it, and the next reader cannot tell
+  which they are looking at.) The previous wording,
   "no read past a refused header", read as a source-read boundary the reader
   does not provide and does not need to. The measurement decided which side was
   wrong: a refusal consumed 4101 source bytes — one transport bufferful, NOT the
