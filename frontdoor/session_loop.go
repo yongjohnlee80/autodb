@@ -100,6 +100,17 @@ func (l *Listener) runQuery(ctx context.Context, be *pgproto3.Backend,
 				return ferr
 			}
 			if frame != nil {
+				// Send ENCODES here, synchronously, appending to the backend's
+				// write buffer — it does not retain the message. That is what
+				// makes it safe to hand it a DataRow whose Values are BORROWED
+				// for the duration of this call: the bytes are copied out
+				// before emit returns.
+				//
+				// A refactor that queued frames to send after the callback
+				// returned would read those values after the producer had
+				// reused the memory, and the corruption would be silent and
+				// data-dependent. If frames ever need to be deferred, they must
+				// be copied first.
 				be.Send(frame)
 			}
 			return nil
