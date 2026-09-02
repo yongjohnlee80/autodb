@@ -42,20 +42,36 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 	// reporting a frame stall as an idle timeout tells an operator the client
 	// went quiet when it actually went slow.
 	//
-	// Installed ONCE, not per iteration. It fires per message, including for one
-	// pgproto3 buffered ahead — which is right: a frame already in memory cannot
-	// stall, and the deadline is cleared below before the engine is entered.
+	// Installed ONCE, not per iteration. It covers a frame that BEGINS during a
+	// read; a frame already in progress when a cycle starts is covered by the
+	// entry check below, because the callback cannot fire twice for one message
+	// and a message read ahead during auth has already spent its start.
 	fr.setOnStart(func() {
 		_ = conn.SetDeadline(l.now().Add(l.dl.frameStall))
 	})
 
 	for {
+		// WHICH BUDGET IS OWED IS A QUESTION ABOUT THE STREAM, and the reader is
+		// the only thing that can answer it — so it is ASKED here rather than
+		// assumed (r0 MF1).
+		//
+		// Arming idle unconditionally was wrong for a message already in flight.
+		// The reader is shared with auth, and auth's Backend reads ahead exactly
+		// as this one does: a client writing its PasswordMessage and the start of
+		// a Query in ONE write has its type byte consumed while the message-start
+		// callback is still nil, so nothing can re-trigger it here and a half-sent
+		// message waited under the budget for a client that is not asking.
+		//
 		// THE IDLE BUDGET IS RE-ARMED PER MESSAGE (matrix §8.4: "refreshed on
 		// message/state transitions"). net.Conn deadlines are ABSOLUTE, so a
 		// single arming at session open would make the idle budget a cap on
 		// session LIFETIME — a pooled connection doing steady work would die
 		// mid-statement at thirty minutes, having never once been idle.
-		if err := conn.SetDeadline(l.now().Add(l.dl.idle)); err != nil {
+		budget := l.dl.idle
+		if fr.midMessage() {
+			budget = l.dl.frameStall
+		}
+		if err := conn.SetDeadline(l.now().Add(budget)); err != nil {
 			*closeReason = "deadline"
 			return nil
 		}

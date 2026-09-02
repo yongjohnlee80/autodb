@@ -1162,3 +1162,80 @@ func TestLoop_ASecondPipelinedFrameStillReachesItsDecision(t *testing.T) {
 		return ok && ev.Reason == ruleExtendedNotImplemented
 	})
 }
+
+// MF1 (lector, PR #59 r0). The reader is shared with auth, and auth's Backend
+// reads ahead exactly as the session's does.
+//
+// A client that writes its PasswordMessage and the START of a Query in ONE TLS
+// write lets runAuth's Receive consume the Query's type byte and length while
+// the message-start callback is still nil. The loop then arms the idle budget
+// unconditionally and the type byte cannot re-trigger — so a half-sent message
+// waits under the budget for a client that is not asking, instead of the one for
+// a client that went slow mid-message.
+//
+// This is the assumption I flagged as most worth attacking when I sent the PR.
+// It was worth attacking.
+func TestLoop_AFrameReadAheadDuringAuthStillGetsTheFrameStallBudget(t *testing.T) {
+	t.Parallel()
+	dl := defaultDeadlines()
+	dl.idle = 3 * time.Second // long: nothing here may be charged to idleness
+	dl.frameStall = 300 * time.Millisecond
+	events, addr := deadlineLoopListener(t, dl, okQueries())
+
+	conn, fe := startupTo(t, addr, defaultParams())
+	defer func() { _ = conn.Close() }()
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("auth request: %v", err)
+	}
+
+	// ONE write: the password, then a Query header promising a body that never
+	// comes. Auth's Receive will take the password and read ahead into the Query.
+	var one []byte
+	one = append(one, 'p')
+	pw := []byte("good\x00")
+	n := len(pw) + 4
+	one = append(one, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+	one = append(one, pw...)
+	one = append(one, 'Q', 0, 0, 0, 40) // 36 bytes of body promised, none sent
+	if _, err := conn.Write(one); err != nil {
+		t.Fatalf("the combined write: %v", err)
+	}
+
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("the success sequence: %v", err)
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+
+	start := time.Now()
+	msg, err := fe.Receive()
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("the stalled frame was closed without a frame: %v", err)
+	}
+	e, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("frame = %T, want ErrorResponse", msg)
+	}
+	if e.Detail != ruleFrameStall {
+		t.Fatalf("DETAIL = %q, want %q — a message half-read during AUTH is still a message "+
+			"in progress, and charging it to idleness tells an operator the client went quiet "+
+			"when it went slow", e.Detail, ruleFrameStall)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("the stall took %v, which is the %v IDLE budget rather than the %v frame-stall "+
+			"budget: the frame read ahead during auth lost its budget entirely", elapsed, dl.idle, dl.frameStall)
+	}
+	waitFor(t, "the stall to be audited under its own cause", func() bool {
+		for _, ev := range events() {
+			if ev.Kind == "fd.conn_close" && ev.Reason == ruleFrameStall {
+				return true
+			}
+		}
+		return false
+	})
+}
