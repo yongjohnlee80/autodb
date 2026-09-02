@@ -253,13 +253,17 @@ func (l *Listener) segmentByteCap() int64 {
 // lands between the frames it separates rather than erasing a charge a later
 // frame was already given.
 //
-// KNOWN RESIDUAL, stated rather than implied: when the header was not already
-// framed, the check runs immediately AFTER Receive, so the crossing frame's body
-// has been decoded before it is refused. That is bounded — pgproto3 is held to
-// SetMaxBodyLen for the life of the connection — so the exposure is one frame,
-// not a stream. Closing it entirely means having the reader skip a refused
-// frame's body without handing it to the Backend, which is a change to the
-// component that fixed the pipelining defect and is not folded in here.
+// THE RESIDUAL THIS COMMENT USED TO RECORD IS CLOSED. It said a crossing frame's
+// body was decoded before the refusal, because the check ran after Receive.
+// The reader is now a delivery boundary: the loop frames the header first,
+// refuses from the DECLARED length, and a refused frame's body is skipped
+// without ever being handed to the Backend — measured, not asserted, by
+// TestAdmission_FramesDiscardedBehindABreachAreNotDecoded (5 bytes delivered
+// against 15026 when the skip is mutated away).
+//
+// One edge remains and it is not the old one: the post-Receive call site is
+// reached only when the connection ended before a header could be framed, which
+// is a closing session rather than a stream being paid for.
 func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, fr *frameReader, seg *segmentLane,
 	h frameHeader, peer string, closeReason *string) bool {
 

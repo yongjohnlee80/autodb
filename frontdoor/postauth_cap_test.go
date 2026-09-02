@@ -1,6 +1,7 @@
 package frontdoor
 
 import (
+	"encoding/binary"
 	"strings"
 	"sync"
 	"testing"
@@ -60,10 +61,24 @@ func TestPostAuth_AFrameOverTheCapIsRefusedWithoutDecodingItsBody(t *testing.T) 
 	// cell owns is the delta across ONE over-cap frame.
 	before := fr.deliveredBytes()
 
-	stmt := "SELECT '" + strings.Repeat("y", small*4) + "'::text"
-	fe.Send(&pgproto3.Query{String: stmt})
-	if err := fe.Flush(); err != nil {
-		t.Fatalf("sending a %d-byte statement against a %d-byte cap: %v", len(stmt), small, err)
+	// THE HEADER, AND ONLY A PREFIX OF THE BODY.
+	//
+	// This is not a convenience. Sending the whole frame races the server's own
+	// correctness: it refuses from the declared length and closes, so on a loaded
+	// runner the client's remaining bytes hit a closed socket and the cell fails
+	// on a broken pipe while the front door is behaving exactly as designed.
+	// (That is precisely what CI caught and two green local machines did not.)
+	//
+	// Writing the header plus a prefix asserts the stronger property anyway: the
+	// refusal is decided WITHOUT the body existing on the wire at all, so it
+	// cannot have waited for it, and the prefix that was sent is measured as
+	// never reaching pgproto3.
+	const bodyLen = 16400 // comfortably past the 4096-byte cap
+	frame := []byte{'Q'}
+	frame = binary.BigEndian.AppendUint32(frame, uint32(4+bodyLen))
+	frame = append(frame, []byte(strings.Repeat("y", 100))...)
+	if _, err := conn.Write(frame); err != nil {
+		t.Fatalf("writing a %d-byte header declaring %d body bytes: %v", len(frame), bodyLen, err)
 	}
 
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -74,7 +89,7 @@ func TestPostAuth_AFrameOverTheCapIsRefusedWithoutDecodingItsBody(t *testing.T) 
 	}
 	e, ok := msg.(*pgproto3.ErrorResponse)
 	if !ok {
-		t.Fatalf("frame = %T, want ErrorResponse; a %d-byte body passed a %d-byte cap", msg, len(stmt), small)
+		t.Fatalf("frame = %T, want ErrorResponse; a declared %d-byte body passed a %d-byte cap", msg, bodyLen, small)
 	}
 	if e.Code != sqlStateProtocolViolation || e.Detail != ruleMessageTooLarge {
 		t.Fatalf("refusal = %s/%s, want %s/%s — the matrix gives an over-cap frame 08P01 because a "+
@@ -86,9 +101,8 @@ func TestPostAuth_AFrameOverTheCapIsRefusedWithoutDecodingItsBody(t *testing.T) 
 	// len(stmt)+5; if any of it reached pgproto3 the refusal cost what it was
 	// refusing, which is the whole point of refusing from the header.
 	if got := fr.deliveredBytes() - before; got != 0 {
-		t.Errorf("%d bytes of a refused %d-byte frame reached the Backend, want 0 — the refusal is made "+
+		t.Errorf("%d bytes of a refused frame reached the Backend, want 0 — the refusal is made "+
 			"from the DECLARED LENGTH before admission, so neither header nor body may be delivered; a "+
-			"non-zero delta means the body was released and then refused, which is invisible on the wire",
-			got, len(stmt)+10)
+			"non-zero delta means the body was released and then refused, which is invisible on the wire", got)
 	}
 }
