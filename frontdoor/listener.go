@@ -1,6 +1,7 @@
 package frontdoor
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -40,6 +41,12 @@ type Listener struct {
 	// fd.cancel_stale on every cancel, for the same honesty as a nil authn.
 	cancels CancelExecutor
 
+	// queries runs statements on an authenticated session (F1's loop). Nil is
+	// legal and honest in the same way a nil authn is: a build with no engine
+	// behind the query path refuses every statement and says so, rather than
+	// accepting one it cannot run.
+	queries QueryExecutor
+
 	// admit holds every accept-time budget and the per-source throttle.
 	admit *admitter
 
@@ -65,6 +72,24 @@ type Listener struct {
 	// eventually".
 	liveMu sync.Mutex
 	live   map[net.Conn]struct{}
+
+	// general is the process-wide resident budget's general lane (§1.4). Pending
+	// serialized output is charged against it, so a thousand connections each
+	// holding their per-connection watermark cannot add up past the process's
+	// budget — a per-connection bound cannot express a process-wide limit.
+	general *generalLane
+
+	// testWatermark lowers the pending-output watermark so a cell can reach the
+	// post-dispatch top-up path without producing four megabytes.
+	testWatermark *int64
+
+	// testLaneWait shortens the lane wait budget so a cell can observe a
+	// saturated lane without waiting the policy thirty seconds for it.
+	testLaneWait *time.Duration
+
+	// testOutputCap lowers the cumulative output cap so a cell can trip it
+	// without producing 8 GiB. Nil takes the matrix's figure.
+	testOutputCap *int64
 
 	// testInsideRegistration runs inside beginHandler's window. See Options.
 	testInsideRegistration func()
@@ -139,6 +164,23 @@ type Options struct {
 
 	// OnSession runs after ReadyForQuery('I'). Nil takes the default.
 	OnSession SessionHandler
+
+	// Queries is the engine seam for the post-auth query path. Nil refuses
+	// every statement with an accurate error rather than pretending.
+	Queries QueryExecutor
+
+	// GeneralLaneBytes is the process-wide general resident budget (§1.4).
+	// Zero takes the 1 GiB default.
+	GeneralLaneBytes int64
+
+	// testOutputCap lowers the cumulative output cap for a cell.
+	testOutputCap *int64
+
+	// testWatermark lowers the pending-output watermark for a cell.
+	testWatermark *int64
+
+	// testLaneWait shortens the general-lane wait budget for a cell.
+	testLaneWait *time.Duration
 
 	// The caps. Zero takes the documented default; Open validates the
 	// relationship between them rather than trusting a caller to have done
@@ -227,6 +269,15 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.authn = opt.Authn
 	l.cancels = opt.Cancels
 	l.onSession = opt.OnSession
+	l.queries = opt.Queries
+	l.testOutputCap = opt.testOutputCap
+	l.testWatermark = opt.testWatermark
+	l.testLaneWait = opt.testLaneWait
+	laneBytes := opt.GeneralLaneBytes
+	if laneBytes <= 0 {
+		laneBytes = DefaultGeneralLaneBytes
+	}
+	l.general = newGeneralLane(laneBytes)
 	l.admit = newAdmitter(caps.maxConns, caps.preAuthMax, caps.failures, caps.lane, l.now)
 	l.dl = defaultDeadlines()
 	l.authSlots = make(chan struct{}, caps.workers)
@@ -547,7 +598,19 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		for _, n := range out.Notes {
 			l.onEvent(Event{Kind: paramNoteEventKind(n), Reason: n.Kind, Peer: peer, Detail: n.Detail})
 		}
-		be := pgproto3.NewBackend(stream, stream)
+		// The Backend decodes from a BUFFERED reader so the session loop can
+		// peek the next message's type byte without consuming it (matrix row
+		// 4:Unknown-message-type-byte): pgproto3 reports an undefined type as
+		// an unstructured error that cannot be told from a transport failure,
+		// and the two demand different answers.
+		//
+		// The buffer is not charged. §8.4's third term — "the bufio.Reader, the
+		// TLS record buffers, the pgproto3 chunk reader" — is bounded by
+		// MaxFrontendConns rather than charged per connection, because unlike
+		// segment input it cannot grow with what a peer sends (admission.go's
+		// ControlLanePerConn note).
+		br := bufio.NewReader(stream)
+		be := pgproto3.NewBackend(br, stream)
 		be.SetMaxBodyLen(PreAuthMaxBodyLen)
 		var aerr error
 		outcome, aerr = l.runAuth(ctx, stream, be, out.Params, peer)
@@ -565,7 +628,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 			return
 		}
 		if outcome.Denied == "" {
-			l.serveSession(ctx, stream, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
+			l.serveSession(ctx, stream, br, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
 			return
 		}
 	} else {
@@ -587,7 +650,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 }
 
 // serveSession completes row 2.9 and runs the authenticated connection.
-func (l *Listener) serveSession(ctx context.Context, stream net.Conn, be *pgproto3.Backend,
+func (l *Listener) serveSession(ctx context.Context, stream net.Conn, br *bufio.Reader, be *pgproto3.Backend,
 	tkt *ticket, sess exec.WireSessionResult, params map[string]string, notes []paramNote, peer string, closeReason *string) {
 
 	// The pre-auth slot goes back the moment this connection stops being
@@ -633,27 +696,38 @@ func (l *Listener) serveSession(ctx context.Context, stream net.Conn, be *pgprot
 	}
 	l.onEvent(Event{Kind: "fd.session_open", Peer: peer, Detail: string(sess.SessionID)})
 
-	// THE DEADLINE MOVES HERE, once, and this is the only place it is armed
-	// for the session's first message.
+	// The FIRST arming of the between-messages budget. The session loop re-arms
+	// it per message, clears it for engine work, and swaps it for the
+	// partial-frame progress budget once a message has started — see
+	// session_loop.go, which owns those transitions.
 	//
-	// The pre-auth deadlines are ten seconds and a deadline set on a net.Conn
-	// stays set. Leaving one in place would kill every authenticated session
-	// ten seconds after it opened — and the person who noticed first would be
-	// a developer paused on a breakpoint, watching a connection drop for no
-	// reason they could see. Arming it here and nowhere else is deliberate:
-	// a second arming inside the session loop would mask the omission of
-	// this one, and then no test could observe it missing.
+	// The previous comment here argued AGAINST re-arming in the loop, on the
+	// grounds that a second arming would mask the omission of this one. That
+	// reasoning protected a cell's discriminating power at the cost of a refresh
+	// the matrix requires (§8.4: "refreshed on message/state transitions"), and
+	// the cost was real: an absolute deadline armed once made the idle budget a
+	// cap on session LIFETIME.
 	if err := stream.SetDeadline(l.now().Add(l.dl.idle)); err != nil {
 		sessionReason = "deadline"
 		*closeReason = sessionReason
 		return
 	}
 
-	handler := l.onSession
-	if handler == nil {
-		handler = l.defaultSession
+	// An explicit OnSession still wins — it is the override seam. Otherwise the
+	// real loop runs whenever there is an engine behind it, and defaultSession
+	// remains only for a build with no query path at all, where refusing every
+	// statement with an accurate 0A000 is the honest answer rather than
+	// accepting one nothing can run.
+	var err error
+	switch {
+	case l.onSession != nil:
+		err = l.onSession(ctx, stream, be, sess)
+	case l.queries != nil:
+		err = l.runSession(ctx, stream, br, be, sess, peer, &sessionReason)
+	default:
+		err = l.defaultSession(ctx, stream, be, sess)
 	}
-	if err := handler(ctx, stream, be, sess); err != nil {
+	if err != nil {
 		sessionReason = "session-error"
 		l.onLog(fmt.Sprintf("frontdoor: the session for %s: %v", peer, err))
 	}

@@ -40,7 +40,17 @@ func deadlineListener(t *testing.T, dl deadlines) (func() []Event, string) {
 func TestDeadlines_DefaultsMatchTheMatrix(t *testing.T) {
 	t.Parallel()
 	got := defaultDeadlines()
-	want := deadlines{tls: 10 * time.Second, startup: 10 * time.Second, auth: 10 * time.Second, idle: 30 * time.Minute}
+	// The output-stall deadline IS now a matrix budget row (§8.4 table), ruled at
+	// 30s with its rationale recorded there — a peer that has drained nothing for
+	// 30s with the watermark full is a dead reader, not a slow one. Cited so a
+	// change to the constant is a change to a decision on the record.
+	//
+	// frameStall is §7's 30s partial-frame progress deadline. The first four
+	// are §9's: TLS/startup/auth at 10s and the between-messages idle budget at
+	// 30m. Every one of the six is now pinned by a matrix line, so a change to any
+	// of them is a change to the spec rather than a drift in a constant.
+	want := deadlines{tls: 10 * time.Second, startup: 10 * time.Second, auth: 10 * time.Second,
+		idle: 30 * time.Minute, outputStall: 30 * time.Second, frameStall: 30 * time.Second}
 	if got != want {
 		t.Errorf("defaults = %+v, want %+v (§9: TLS/startup/auth 10s; between-messages idle 30m)", got, want)
 	}

@@ -51,6 +51,18 @@ type deadlines struct {
 	startup time.Duration
 	auth    time.Duration
 	idle    time.Duration
+	// outputStall bounds ONE write of pending output to the client. It is not
+	// an idle budget and must not be confused with one: idle measures a client
+	// that is not asking, this measures a client that will not TAKE what it
+	// asked for. The matrix pins the 4 MiB watermark but no time bound on the
+	// write that drains it, so this figure is a conservative default rather
+	// than a quoted requirement — flagged for a ruling.
+	outputStall time.Duration
+	// frameStall is §7's partial-frame progress budget. It is a DIFFERENT budget
+	// from idle with a different identity (08006 frontdoor/frame-stall): idle
+	// measures a peer that has not started a message, this measures one that
+	// started and stopped mid-frame.
+	frameStall time.Duration
 }
 
 func defaultDeadlines() deadlines {
@@ -58,8 +70,7 @@ func defaultDeadlines() deadlines {
 		tls:     TLSHandshakeDeadline,
 		startup: StartupDeadline,
 		auth:    AuthDeadline,
-		idle:    IdleDeadline,
-	}
+		idle:    IdleDeadline, outputStall: 30 * time.Second, frameStall: 30 * time.Second}
 }
 
 // Protocol version constants. autodb speaks 3.0 and negotiates 3.x down to

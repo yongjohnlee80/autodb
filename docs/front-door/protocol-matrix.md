@@ -454,6 +454,7 @@ different limits and will move for different reasons.
 | Segment 10 000 msgs / 96 MiB (reset at Sync) | §4 `Parse`…`Sync` |
 | Retained state 16 MiB / 64 MiB per session | `Parse`/`Bind`/`PortalSuspended` transfers |
 | Pending output watermark 4 MiB / 16 MiB | §5 emissions (backpressure) |
+| **Output-stall deadline 30s** — one write of pending output to the client | every post-auth response write (§5 emissions, refusals, readiness). RULED (jarvis as lead, 2026-09-03, PR #52 Q1): with the 4 MiB watermark reached, a peer that has drained **nothing** for 30s is not a slow reader, it is a dead one; 30s sits above any sane TCP retransmit hiccup and below the point where held memory matters at the session cap. It is NOT an idle budget and does not inherit `idle`: idle measures a client that is not asking, this measures one that will not take what it asked for. Unbounded here let an authenticated client hold a session, the engine's one-in-flight claim, the pinned backend and its open transaction by selecting something large and not reading (PR #52 r1 MF7). |
 | Cumulative output 8 GiB per statement (audited accounting cap) | `Execute`/`Query` result streaming |
 | Bind params 8192 / 65535 | `Bind` |
 | Named statements 256/1024, portals 64/256 per session | `Parse`/`Bind` named objects |

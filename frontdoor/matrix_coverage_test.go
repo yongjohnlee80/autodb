@@ -132,10 +132,10 @@ var matrixTriage = map[string]struct {
 
 	// ---- §3.2 / §3.3 prose units ----
 	"3.2": {awaiting, "post-auth SET policy is the ADR-0074 gate matrix; needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub; the startup half is 3.1:options' refusal"},
-	"3.3": {awaiting, "the three synthesized values ship with F0e; the verbatim forwarded set needs the target lease — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub (rev 5 split)"},
+	"3.3": {awaiting, "ENGINE SEAM (jarvis) — the three synthesized values ship with F0e and are proven by TestPGLoop_SessionOpenCarriesTheThreeSynthesizedStatuses; the VERBATIM FORWARDED set does not exist and cannot be built from the loop. Established by measurement, not assumption: with the message-aliasing bug fixed, the session-open set is exactly application_name, is_superuser and session_authorization, and no seam exposes the target's GUC_REPORT set. The old reason — that the F1 wire loop was missing — is false as of the loop landing"},
 
 	// ---- §4 Frontend message matrix (post-auth) ----
-	"4:Query":                     {awaiting, "implicit-tx semantics per ExecSession — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
+	"4:Query":                     {covered, "TestPGLoop_MultiStatementRunsInOrderAndStopsAtTheFirstError + TestPGLoop_ControlInsideTheBufferDrivesTheTransactionState — implicit-block semantics against a real server: statements run in order, the first error rolls the block back (count(*)=0 afterwards), and BEGIN/COMMIT inside one buffer drive the readiness byte"},
 	"4:Parse":                     {awaiting, "reserve-before-forward, gated at Parse — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 	"4:Bind":                      {awaiting, "native passthrough, ≤8192 params — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 	"4:Describe":                  {awaiting, "native metadata passthrough — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
@@ -143,10 +143,10 @@ var matrixTriage = map[string]struct {
 	"4:Close":                     {awaiting, "release + portal cascade — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 	"4:Flush":                     {awaiting, "output-pump passthrough — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 	"4:Sync":                      {awaiting, "segment close, ReadyForQuery, charge release — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
-	"4:Terminate":                 {awaiting, "split into claims below — clean-close and release are proven; the rollback claim awaits the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub, so the derived parent stays awaiting (lector PR #45 r0 MF1)"},
-	"4:CopyData":                  {awaiting, "COPY sub-protocol messages (CopyData/CopyDone/CopyFail) are a fatal protocol violation — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
-	"4:FunctionCall":              {awaiting, "0A000 frontdoor/no-fastpath — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub (the stub's blanket 0A000 is NOT this row: it refuses everything, so a cell here today would pass for the wrong reason)"},
-	"4:Unknown-message-type-byte": {awaiting, "fatal 08P01, never skipped-and-continued — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub; note 08P01 appears nowhere in production code yet"},
+	"4:Terminate":                 {covered, "derived from its three claims — clean-close, release and rollback are each proven; the rollback claim by TestPGLoop_TerminateRollsBackAnOpenTransaction across two connections"},
+	"4:CopyData":                  {covered, "TestLoop_CopyDataIsFatalAndCloses — CopyData/CopyDone/CopyFail are a fatal 08P01 and the connection closes; audited under its own cause"},
+	"4:FunctionCall":              {covered, "TestLoop_FunctionCallIsRefusedAndTheConnectionStillWorks + TestLoop_SurvivingRefusalEndsTheCycleWithReadiness — a REFUSAL, not a violation: 0A000 frontdoor/no-fastpath, the cycle ends with ReadyForQuery, and the same connection then answers a query"},
+	"4:Unknown-message-type-byte": {covered, "TestLoop_UnknownMessageTypeIsFatalAndNotSkipped — an undefined type byte is a fatal 08P01 and the stream closes; the cell sends a valid Query immediately after and requires it is never answered, which is what proves not-skipped-and-continued"},
 	"4:discard":                   {awaiting, "post-error discard-through-Sync (MF2) — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 
 	// ---- §4a Object-release rules ----
@@ -160,12 +160,12 @@ var matrixTriage = map[string]struct {
 	"4a:Session-end":       {awaiting, "everything retained by the session — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 
 	// ---- §5 Backend emission matrix ----
-	"5:RowDescription":                  {awaiting, "verbatim forwarding via RawRows, no silent truncation — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
-	"5:ErrorResponse-target":            {awaiting, "raw *pgconn.PgError fields verbatim — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
-	"5:ErrorResponse-gate-front-door":   {awaiting, "§8a synthesized identity, DETAIL rule id — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
-	"5:ReadyForQuery":                   {awaiting, "synthesized from the ExecSession state machine — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
+	"5:RowDescription":                  {covered, "TestPGLoop_RowDescriptionCarriesTheServersTypes — the OIDs are the SERVER's (23/25/16), the values are its own rendering and the command tag is verbatim; a decode-and-re-encode producer would report text OID 25"},
+	"5:ErrorResponse-target":            {covered, "TestPGLoop_TargetErrorIsVerbatimIncludingPosition — Position, File and Routine all survive (no front door can compute Position) and the DETAIL is asserted NOT to be a front-door rule id, which is what separates a forwarded error from a synthesized one"},
+	"5:ErrorResponse-gate-front-door":   {covered, "TestLoop_GateRefusalIsFramedWithTheGateIdentityThenReadiness — §8a identity with the rule id in DETAIL, never the uniform pre-auth code, and the readiness that follows carries the ENGINE's state so a refusal inside a transaction does not read as idle"},
+	"5:ReadyForQuery":                   {covered, "TestLoop_ReadyForQueryCarriesTheEnginesStatus + TestLoop_InvalidStatusByteIsNeverForwarded — synthesized from the ExecSession status across all three bytes, and a status outside the protocol's three is refused rather than put on the wire"},
 	"5:AuthenticationCleartextPassword": {covered, "TestAuth_OffersCleartextAndNothingElse + TestAuth_SuccessSequence + TestStartup_VersionNegotiation — prompt, success group, and protocol negotiation"},
-	"5:CopyInResponse":                  {awaiting, "never-emitted canaries (CopyIn/Out/BothResponse, backend CopyData/CopyDone, NotificationResponse, FunctionCallResponse) — the F4 harness slice — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
+	"5:CopyInResponse":                  {covered, "TestLoop_ImpossibleBackendMessageIsAFrontDoorDefectAndCloses — a never-emitted backend message arriving from the target is a front-door defect: fatal, closed, and audited under its own cause rather than skipped"},
 }
 
 // claimTriage is the claim-level obligation registry (lector PR #40 r0 MF1):
@@ -220,7 +220,7 @@ var claimTriage = map[string]struct {
 	// promoted (lector PR #46 r0 MF1). A missing claim is invisible to the gate;
 	// only a present-and-awaiting one keeps the parent honest.
 	"3.1:application_name#session-audit": {awaiting, "",
-		"recorded on the session and on every audit row — fd.auth_ok's detail omits it and WireSessionResult cannot carry it; the session and audit rows are the F1 WIRE LOOP's, so this awaits it", nil},
+		"ENGINE SEAM (jarvis) — recorded on the session and on every audit row. Verified absent by reading rather than assumed: WireSessionResult (core/exec/wire_session.go) has no ApplicationName field, fd.auth_ok's Event omits it, and exec rows carry no wire session id, so the label cannot reach either the session or the audit rows from the loop. The old reason — that this awaited the F1 wire loop — is false as of the loop landing", nil},
 
 	"3.1:client_encoding#utf8-only": {covered, "TestStartup_ParameterPolicy",
 		"non-UTF8 refused, hyphen spelling tolerated",
@@ -250,8 +250,9 @@ var claimTriage = map[string]struct {
 	"4:Terminate#release": {covered, "TestSession_TerminateReleasesTheReservation",
 		"the session's reservation is released when the client leaves — proven as release-on-teardown, which Terminate is one cause of",
 		[]string{`waitFor(t, "the release"`, "len(closed) == 1"}},
-	"4:Terminate#rollback": {awaiting, "",
-		"an open transaction is rolled back on Terminate — there is no transaction to roll back until the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub", nil},
+	"4:Terminate#rollback": {covered, "TestPGLoop_TerminateRollsBackAnOpenTransaction",
+		"an open transaction is rolled back on Terminate — proven across connections: the write is visible inside its own transaction, Terminate arrives with no COMMIT, and a SECOND connection sees nothing",
+		[]string{"BEGIN", "Terminate", "SELECT count(*) FROM"}},
 
 	"3.1:replication#refused-any-value": {covered, "TestStartup_ParameterPolicy",
 		"refused at every tested value",
