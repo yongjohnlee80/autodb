@@ -302,31 +302,26 @@ func TestWireOpen_AuditStampCoversDecodedAndOwnedControlSites(t *testing.T) {
 	if decoded != 1 || control != 1 {
 		t.Fatalf("stamped decoded lines %d (want 1), stamped control lines %d (want 1)", decoded, control)
 	}
-	// The invariant covers the OUTCOME line as well: the exec_result row
-	// correlated (tx_id) to each marker's exec row carries the same stamp.
-	for _, marker := range []string{"decoded_marker", "statement_timeout = '7s'"} {
-		txID := ""
-		for _, e := range auditEntries(t, f, "exec") {
-			if strings.Contains(e.Detail, marker) {
-				txID = e.TxID
-			}
+	// The invariant covers the OUTCOME line as well. exec_result details carry
+	// no SQL text, and a statement outside a transaction has no tx_id to
+	// correlate on, so the two markers are told apart by the one thing the
+	// outcome line does carry: the row count — the decoded SELECT produced one
+	// row, the owned SET LOCAL none. Every outcome this session wrote must be
+	// stamped, and both shapes must be present.
+	var oneRow, zeroRows int
+	for _, e := range auditEntries(t, f, "exec_result") {
+		if !strings.Contains(e.Detail, stamp) {
+			t.Fatalf("exec_result line lacks the stamp: %q", e.Detail)
 		}
-		if txID == "" {
-			t.Fatalf("no exec row with tx_id for marker %q", marker)
+		switch {
+		case strings.Contains(e.Detail, ", 1 row(s),"):
+			oneRow++
+		case strings.Contains(e.Detail, ", 0 row(s),"):
+			zeroRows++
 		}
-		results := 0
-		for _, e := range auditEntries(t, f, "exec_result") {
-			if e.TxID != txID {
-				continue
-			}
-			results++
-			if !strings.Contains(e.Detail, stamp) {
-				t.Fatalf("exec_result line for %q lacks the stamp: %q", marker, e.Detail)
-			}
-		}
-		if results != 1 {
-			t.Fatalf("%d exec_result rows correlated to %q, want 1", results, marker)
-		}
+	}
+	if oneRow != 1 || zeroRows < 1 {
+		t.Fatalf("stamped exec_result rows: one-row (decoded SELECT) %d want 1, zero-row (owned SET LOCAL) %d want ≥1", oneRow, zeroRows)
 	}
 }
 
