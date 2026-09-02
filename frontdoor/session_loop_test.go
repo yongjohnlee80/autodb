@@ -3,6 +3,7 @@ package frontdoor
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -1539,9 +1540,9 @@ func TestLoop_EveryEmitStoppedArmHasItsOwnStory(t *testing.T) {
 		forbid    string // must NOT appear — the story this arm is confused with
 		wantReady byte   // the readiness byte that must follow, or 0 to not check
 	}{
-		{"no statement", &exec.EmitStopped{Executed: false},
+		{"no statement", &exec.EmitStopped{Executed: false, TxStatus: exec.TxStatusIdle},
 			"nothing ran", "no_statement", "effects are committed", txStatusIdle},
-		{"failed at the target", &exec.EmitStopped{Executed: true, TargetErr: &pgconn.PgError{Code: "22012"}},
+		{"failed at the target", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusIdle, TargetErr: &pgconn.PgError{Code: "22012"}},
 			"failed at the target", "failed", "effects are committed", txStatusIdle},
 		{"pending inside a transaction", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusInTx},
 			"PENDING", "pending_commit", "effects are committed", txStatusInTx},
@@ -1592,7 +1593,7 @@ func TestLoop_EveryEmitStoppedArmHasItsOwnStory(t *testing.T) {
 			// same cycle — the fixture supplies stopped.TxStatus=T while the
 			// fake's WireTxStatus answers I, so the contradiction was constructed
 			// here and never looked at.
-			rfq, ok := firstOfType[*pgproto3.ReadyForQuery](drainToReady(t, fe))
+			rfq, ok := firstOfType[*pgproto3.ReadyForQuery](drainToReady(t, conn, fe))
 			if !ok {
 				t.Fatal("no readiness followed the report; a session-surviving stop owes one")
 			}
@@ -1616,17 +1617,60 @@ func listenerForArms(t *testing.T, q QueryExecutor, cap *int64) (func() []Event,
 
 // drainToReady reads frames until the cycle's ReadyForQuery, so a cell can
 // assert the readiness byte rather than stopping at the error that precedes it.
-func drainToReady(t *testing.T, fe *pgproto3.Frontend) []pgproto3.BackendMessage {
+func drainToReady(t *testing.T, conn net.Conn, fe *pgproto3.Frontend) []pgproto3.BackendMessage {
 	t.Helper()
+	// BOUNDED (r1 residual 2). Without a deadline, a mutation that deletes the
+	// readiness byte makes this cell HANG rather than fail — and a cell that
+	// hangs reports nothing, which is the failure mode it was added to catch.
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("bounding the readiness drain: %v", err)
+	}
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
 	var out []pgproto3.BackendMessage
 	for {
 		msg, err := fe.Receive()
 		if err != nil {
-			t.Fatalf("draining to readiness after %d frames: %v", len(out), err)
+			t.Fatalf("draining to readiness after %d frames: %v — a missing readiness byte must "+
+				"fail here promptly, not hang", len(out), err)
 		}
 		out = append(out, msg)
 		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
 			return out
+		}
+	}
+}
+
+// An engine report whose transaction status is not a status leaves the session's
+// phase UNKNOWN, and §6.3 withholds readiness for exactly that. It must not be
+// repaired from a later snapshot: that is the split this PR removed, returning
+// in the one case where the engine's own answer is already suspect.
+func TestLoop_AnInvalidEngineReportWithholdsReadiness(t *testing.T) {
+	t.Parallel()
+	cap := int64(64)
+	q := okQueries()
+	q.stop = &exec.EmitStopped{Executed: true, TxStatus: 'Z'} // not I, T or E
+	q.txStatus = txStatusIdle                                 // a later read WOULD say idle
+	q.msgs = []exec.WireMessage{{Kind: "DataRow", Values: [][]byte{make([]byte, 256)}}}
+	_, addr := listenerForArms(t, q, &cap)
+
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+	fe.Send(&pgproto3.Query{String: "SELECT 1"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			return // the connection ended without readiness, which is the rule
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			t.Fatal("readiness was sent for a session whose phase the engine could not state — " +
+				"the byte was repaired from a later snapshot, which is the split this PR removed")
 		}
 	}
 }

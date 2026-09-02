@@ -557,10 +557,23 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 	// So when the engine reported, its TxStatus is authoritative for BOTH. The
 	// separate read remains only for the paths that have no report — the
 	// extended path today — where there is one snapshot anyway.
+	// A REPORT THAT EXISTS IS THE ONLY SNAPSHOT, VALID OR NOT (r1 residual 1).
+	//
+	// The first repair asked `stopped != nil && validTxStatus(...)`, which reads
+	// an INVALID status on a real report as though there were no report at all
+	// and repairs it from the later snapshot — reintroducing the split it was
+	// fixing, in the one case where the engine's answer is already suspect. If
+	// the engine reported and its status is not a status, the session's phase is
+	// unknown and §6.3's rule applies: no readiness is invented for it.
 	status := byte(0)
-	if stopped != nil && validTxStatus(stopped.TxStatus) {
+	switch {
+	case stopped != nil:
+		if !validTxStatus(stopped.TxStatus) {
+			*closeReason = "session-lost"
+			return false
+		}
 		status = stopped.TxStatus
-	} else {
+	default:
 		var serr error
 		status, serr = l.queries.WireTxStatus(sess.SessionID, sess.UserID)
 		if serr != nil || !validTxStatus(status) {
