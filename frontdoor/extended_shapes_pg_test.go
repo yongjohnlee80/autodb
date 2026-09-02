@@ -1,6 +1,7 @@
 package frontdoor
 
 import (
+	"crypto/tls"
 	"fmt"
 	"testing"
 	"time"
@@ -13,7 +14,13 @@ import (
 //
 // Four matrix rows were AWAITING for one reason — "no live witness drives this
 // frame end to end" — and no amount of engine-level celling substitutes for a
-// client putting the frames on a real socket. These four close them.
+// client putting the frames on a real socket.
+//
+// TWO of them close here (4:Describe, 4:discard). 4:Execute is NARROWED, not
+// closed: the row also contracts resumption re-authorization and a per-Execute
+// attempt row, neither of which these cells witness. 4:Flush is witnessed
+// ABSENT — the behaviour is not there, and the cell pins the defect rather than
+// the contract.
 //
 // The spec's central warning governs every cell here: everything on this path
 // RELAYS, so almost everything "runs". A cell asserting only that a segment
@@ -22,17 +29,26 @@ import (
 
 // sendSegment writes frames and flushes, then reads until the terminator, with a
 // bound so a stranded segment fails instead of hanging.
-func readUntil(t *testing.T, fe *pgproto3.Frontend, stop func(pgproto3.BackendMessage) bool) []pgproto3.BackendMessage {
+func readUntil(t *testing.T, conn *tls.Conn, fe *pgproto3.Frontend,
+	stop func(pgproto3.BackendMessage) bool) []pgproto3.BackendMessage {
 	t.Helper()
+	// BOUNDED ON THE SOCKET (r0 MF1). A wall-clock check at the top of the loop
+	// cannot fire while fe.Receive() is blocked in netFD.Read — the loop never
+	// gets to look. This is the THIRD time tonight I wrote that shape (#66's
+	// readiness drain, #65's two-frame cell, and here); the fix did not transfer
+	// because each was a new helper and I re-derived the bound instead of reusing
+	// the lesson.
+	if err := conn.SetReadDeadline(time.Now().Add(20 * time.Second)); err != nil {
+		t.Fatalf("bounding the segment read: %v", err)
+	}
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+
 	var out []pgproto3.BackendMessage
-	deadline := time.Now().Add(20 * time.Second)
 	for {
-		if time.Now().After(deadline) {
-			t.Fatalf("segment did not terminate; frames so far: %v", kindsOf(out))
-		}
 		msg, err := fe.Receive()
 		if err != nil {
-			t.Fatalf("reading the segment after %v: %v", kindsOf(out), err)
+			t.Fatalf("reading the segment after %v: %v — a stranded segment must fail here "+
+				"promptly, not hang to the go-test timeout", kindsOf(out), err)
 		}
 		out = append(out, snapshot(msg))
 		if stop(msg) {
@@ -55,7 +71,7 @@ func untilReady(m pgproto3.BackendMessage) bool {
 func TestPGExtended_DescribeCarriesTheServersOwnOIDs(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 	_, _, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
-	fe := pgClient(t, addr, secret, database)
+	conn, fe := pgClientWithConn(t, addr, secret, database)
 
 	fe.Send(&pgproto3.Parse{Name: "s", Query: "SELECT $1::int AS n, $2::bool AS b, 'x'::text AS t"})
 	fe.Send(&pgproto3.Describe{ObjectType: 'S', Name: "s"})
@@ -67,7 +83,7 @@ func TestPGExtended_DescribeCarriesTheServersOwnOIDs(t *testing.T) {
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	msgs := readUntil(t, fe, untilReady)
+	msgs := readUntil(t, conn, fe, untilReady)
 
 	pd, ok := firstOfType[*pgproto3.ParameterDescription](msgs)
 	if !ok {
@@ -98,14 +114,14 @@ func TestPGExtended_DescribeCarriesTheServersOwnOIDs(t *testing.T) {
 func TestPGExtended_AStatementWithNoResultColumnsDescribesAsNoData(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 	_, _, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
-	fe := pgClient(t, addr, secret, database)
+	conn, fe := pgClientWithConn(t, addr, secret, database)
 
 	table := fmt.Sprintf("fd_nodata_%d", time.Now().UnixNano())
 	if msgs := query(t, fe, fmt.Sprintf("CREATE TABLE %s (n int)", table)); hasError(msgs) {
 		t.Fatalf("creating the scratch table: %v", errorText(msgs))
 	}
 	t.Cleanup(func() {
-		c := pgClient(t, addr, secret, database)
+		_, c := pgClientWithConn(t, addr, secret, database)
 		_ = query(t, c, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
 	})
 
@@ -117,7 +133,7 @@ func TestPGExtended_AStatementWithNoResultColumnsDescribesAsNoData(t *testing.T)
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	msgs := readUntil(t, fe, untilReady)
+	msgs := readUntil(t, conn, fe, untilReady)
 
 	if _, ok := firstOfType[*pgproto3.NoData](msgs); !ok {
 		t.Fatalf("Describe('P') on a statement with no result columns must answer NoData, a "+
@@ -151,7 +167,7 @@ func TestPGExtended_AStatementWithNoResultColumnsDescribesAsNoData(t *testing.T)
 func TestPGExtended_ARowLimitedFetchSuspendsAndResumes(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 	_, _, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
-	fe := pgClient(t, addr, secret, database)
+	conn, fe := pgClientWithConn(t, addr, secret, database)
 
 	// INSIDE AN EXPLICIT TRANSACTION, deliberately. A suspended portal does not
 	// survive the end of an implicit one, so the natural way to drive this is
@@ -170,7 +186,7 @@ func TestPGExtended_ARowLimitedFetchSuspendsAndResumes(t *testing.T) {
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	first := readUntil(t, fe, untilReady)
+	first := readUntil(t, conn, fe, untilReady)
 
 	rows := 0
 	for _, m := range first {
@@ -196,7 +212,7 @@ func TestPGExtended_ARowLimitedFetchSuspendsAndResumes(t *testing.T) {
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	rest := readUntil(t, fe, untilReady)
+	rest := readUntil(t, conn, fe, untilReady)
 	more := 0
 	for _, m := range rest {
 		if _, ok := m.(*pgproto3.DataRow); ok {
@@ -225,7 +241,7 @@ func TestPGExtended_ARowLimitedFetchSuspendsAndResumes(t *testing.T) {
 func TestPGExtended_AMidSegmentErrorDiscardsThroughSync(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 	_, _, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
-	fe := pgClient(t, addr, secret, database)
+	conn, fe := pgClientWithConn(t, addr, secret, database)
 
 	// Volatile divisor: the error is raised at EXECUTE, not folded at Bind.
 	fe.Send(&pgproto3.Parse{Name: "bad", Query: "SELECT 1/(random()*0)::int"})
@@ -238,7 +254,7 @@ func TestPGExtended_AMidSegmentErrorDiscardsThroughSync(t *testing.T) {
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	msgs := readUntil(t, fe, untilReady)
+	msgs := readUntil(t, conn, fe, untilReady)
 
 	if _, ok := firstOfType[*pgproto3.BindComplete](msgs); !ok {
 		t.Fatalf("no BindComplete: the divisor folded at plan time after all, so this cell drove "+
@@ -346,8 +362,16 @@ func TestPGExtended_AStandaloneFlushDeliversNothing(t *testing.T) {
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fe.Receive(); err != nil {
-		t.Fatalf("a Sync after a Flush was NOT answered (%v) — the session does not recover, which "+
-			"is a worse finding than the one recorded here and needs reporting as such", err)
+	// DRAIN THROUGH THE ACTUAL ReadyForQuery, then USE the session (r0 MF2). The
+	// first frame after Sync is ParseComplete — the queued work arriving — so a
+	// cell that stopped at "something came back" proved only that the buffer
+	// drained. A mutation suppressing Sync's readiness left it green.
+	msgs := readUntil(t, conn, fe, untilReady)
+	if len(msgs) == 0 {
+		t.Fatal("nothing followed the Sync")
+	}
+	if got := query(t, fe, "SELECT 42"); hasError(got) {
+		t.Fatalf("the session was not usable after Flush-then-Sync: %v — recovery means the next "+
+			"statement runs, not that some frames arrived", errorText(got))
 	}
 }
