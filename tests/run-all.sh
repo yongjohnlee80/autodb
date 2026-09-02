@@ -16,6 +16,7 @@ run() {
   fi
 }
 
+run run-smoke-env.sh
 run run-smoke.sh
 run run-install.sh
 
