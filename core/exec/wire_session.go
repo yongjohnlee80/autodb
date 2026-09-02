@@ -3,6 +3,8 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 	"strconv"
 	"strings"
 
@@ -38,6 +40,14 @@ type WireSessionResult struct {
 	// PATName is the credential that authenticated, for the audit trail:
 	// who, under whose account, with which token.
 	PATName string
+	// ParameterStatuses is every ParameterStatus the pinned target connection
+	// reported at its own connect (matrix §3.3): the loop forwards them verbatim
+	// at session open, overriding only is_superuser and application_name. Empty
+	// for non-postgres targets.
+	ParameterStatuses map[string]string
+	// ApplicationName is the client's accepted startup application_name, as
+	// recorded on the session (matrix claim 3.1:application_name#session-audit).
+	ApplicationName string
 	// UserName is the CANONICAL owner name, not the client's spelling of
 	// it. The startup `user` parameter matched it case-insensitively (step
 	// 2), so echoing the parameter back as session_authorization would let
@@ -86,6 +96,10 @@ const (
 	DenyLeaseCap       = "frontdoor/lease-cap-exceeded"
 	DenySessionCap     = "frontdoor/session-cap-exceeded"
 	DenyResidentBudget = "frontdoor/resident-budget-exceeded"
+	// DenyLeaseEncoding: the pinned target reports a server_encoding or
+	// client_encoding that is not UTF8 (matrix row 3.1: the lease is pinned UTF8;
+	// autodb does not transcode). The loop frames it as FATAL 08004.
+	DenyLeaseEncoding = "frontdoor/lease-encoding"
 )
 
 // WireSessionOverhead is the fixed memory charged for one wire session: the
@@ -115,7 +129,27 @@ const WireSessionOverhead = 64 * 1024
 //
 // presented is the PAT from the PasswordMessage; startupUser and database are
 // the StartupMessage parameters; ip is the canonical peer address.
+// WireOpen is everything a front-door session open needs from the startup
+// exchange. ApplicationName is the CLIENT's label, already length-capped by the
+// front door; it is recorded on the session and in its audit lines.
+type WireOpen struct {
+	PAT, StartupUser, Database, IP, ApplicationName string
+}
+
+// OpenWireSession is the original entry point, kept so the front door's
+// interface keeps compiling; it opens with no application_name.
 func (e *Engine) OpenWireSession(ctx context.Context, presented, startupUser, database, ip string) (WireSessionResult, error) {
+	return e.OpenWireSessionWith(ctx, WireOpen{PAT: presented, StartupUser: startupUser, Database: database, IP: ip})
+}
+
+// OpenWireSessionWith authenticates a front-door client, admits the session,
+// and — for postgres targets — PINS the session's backend connection at open,
+// so the target's reported ParameterStatus set can be handed to the loop before
+// its first frame and the row-3.1 lease rule (UTF8) is enforced before any
+// statement runs. Pinning at open rather than at the first statement is what
+// makes §3.3 satisfiable at all: the set is a property of the connection.
+func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSessionResult, error) {
+	presented, startupUser, database, ip := req.PAT, req.StartupUser, req.Database, req.IP
 	var out WireSessionResult
 
 	// 1. The credential. VerifyPAT already collapses unknown/wrong/revoked/
@@ -205,11 +239,61 @@ func (e *Engine) OpenWireSession(ctx context.Context, presented, startupUser, da
 		return out, rerr
 	}
 
+	s.mu.Lock()
+	s.appName, s.wire = req.ApplicationName, true
+	s.mu.Unlock()
+
+	var statuses map[string]string
+	if connRow.Engine == "postgres" {
+		// Pin now. A failure here is the target's, not the client's: the
+		// admitted session is withdrawn and the error is returned unframed.
+		pc, perr := e.pinWireSession(ctx, s, connRow)
+		if perr != nil {
+			e.sessions.remove(s)
+			cancel()
+			return out, perr
+		}
+		if r, ok := pc.(golibpg.ParameterStatusReporter); ok {
+			statuses = r.ReportedParameterStatuses()
+		}
+		if enc, ok := leaseEncodingRefusal(statuses); ok {
+			// Row 3.1: the lease is pinned UTF8; autodb does not transcode.
+			e.auditBounded(ctx, pat.UserID, ip, "wire_lease_encoding_refused",
+				fmt.Sprintf("conn %d: session %s: target reports %s", connRow.ID, s.id, enc))
+			pc.Discard()
+			s.mu.Lock()
+			s.pc = nil
+			s.mu.Unlock()
+			e.sessions.remove(s)
+			cancel()
+			return out, deny(DenyLeaseEncoding)
+		}
+	}
 	e.auth.NotePATUse(ctx, pat)
 	return WireSessionResult{
 		SessionID: id, UserID: pat.UserID, ConnID: connRow.ID,
 		AdmissionSource: src, PATName: pat.Name, UserName: owner.Name,
+		ParameterStatuses: statuses, ApplicationName: req.ApplicationName,
 	}, nil
+}
+
+// leaseEncodingRefusal reports the first of server_encoding / client_encoding
+// that is not UTF8, if any. SQL_ASCII is refused too: it means the server
+// validates nothing, which is not "UTF8-compatible" for a relay that does not
+// transcode.
+func leaseEncodingRefusal(statuses map[string]string) (string, bool) {
+	for _, k := range []string{"server_encoding", "client_encoding"} {
+		v, ok := statuses[k]
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(strings.ReplaceAll(v, "-", "")) {
+		case "UTF8":
+		default:
+			return k + "=" + v, true
+		}
+	}
+	return "", false
 }
 
 // lookupWireTarget resolves the DSN's database field to a connection row.
