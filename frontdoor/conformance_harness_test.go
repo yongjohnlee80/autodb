@@ -2,13 +2,20 @@ package frontdoor
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 )
 
 // THE CONFORMANCE HARNESS (matrix §10, criterion 7's frame): the listener on a
@@ -21,18 +28,18 @@ import (
 // shapes, its own idea of when to pipeline. This harness is where that claim
 // lives.
 //
-// WHICH DRIVER, and the limitation stated rather than implied: pgx's pgconn is
-// used because it is already a direct dependency and pgconn.Exec speaks the
-// SIMPLE protocol. lib/pq — the client §10 actually names, and LM's real one —
-// is NOT a dependency of this module, and adding one is not a decision a test
-// harness makes on its own. Those arms are present and skipped with that
-// reason, so the harness records which client shapes remain unproven instead of
-// implying it covers them.
+// WHICH DRIVERS, and why more than one. §10 names lib/pq + sqlx as LM's real
+// client and a pgx-class suite separately, because they are NOT interchangeable
+// witnesses: lib/pq uses the SIMPLE protocol for parameterless statements and
+// speaks database/sql's idioms, while pgx defaults to the EXTENDED protocol and
+// speaks simple only through pgconn.Exec or an explicit query mode. A harness
+// proving "a real driver works" against one of them does not prove the other,
+// and the front door's behaviour differs by protocol.
 //
-// lib/pq and pgx are not interchangeable witnesses: lib/pq uses the simple
-// protocol for parameterless statements and pipelines readily, while pgx
-// defaults to the extended protocol and speaks simple only through pgconn.Exec
-// or an explicit query mode. Proving one does not prove the other.
+// lib/pq and sqlx are TEST-ONLY dependencies, approved by Johno on that basis
+// (2026-09-03). They are imported from this file and no other, and nothing in
+// the production build reaches them — a guard below asserts that rather than
+// leaving it to review.
 
 // harnessConn opens a real client connection to a listener in front of a real
 // engine, through the driver's own connection path.
@@ -167,20 +174,211 @@ func TestHarness_ARefusalArrivesAsASQLSTATENotADisconnect(t *testing.T) {
 // reader looks to learn which client shapes are covered, and so that unblocking
 // one is a deletion of a skip rather than a hunt for where it should have gone.
 
-func TestHarness_LibPQSimpleProtocol(t *testing.T) {
-	t.Skip("matrix §10 names lib/pq + sqlx as LM's real client. lib/pq is NOT a dependency of this " +
-		"module, and adding one is Johno's decision, not a test harness's. Unblocked by that approval; " +
-		"pgx cannot stand in, because lib/pq uses the simple protocol for parameterless statements " +
-		"while pgx speaks simple only through pgconn.Exec — proving one does not prove the other")
+// LIB/PQ CANNOT CONNECT AT ALL, and that is a FINDING, not a broken cell.
+//
+// This is what the harness was for. Every hand-written pgproto3 cell in this
+// package passes, and pgconn connects happily — because both send only the
+// parameters the front door accepts. lib/pq sends one more, and is refused with
+// the uniform denial before it ever runs a statement.
+//
+// MEASURED, not inferred. The audit line from the refusal reads:
+//
+//	fd.auth_denied  frontdoor/startup-parameter-refused  datestyle
+//
+// And it is UNCONDITIONAL: lib/pq's config normalization hard-codes it —
+// connector.go:612, `cfg.ClientEncoding, cfg.Datestyle = "UTF8", "ISO, MDY"` —
+// so every lib/pq connection sends `datestyle`, whatever the DSN says. There is
+// no client-side option that avoids it.
+//
+// THE CONFLICT IS BETWEEN TWO PARTS OF THE MATRIX, not in the code. Row 3.1
+// says "any other parameter → Refused (uniform denial)", and the front door does
+// exactly that — correctly. §10 names "lib/pq + sqlx conformance (LM's real
+// client)" as a conformance target. Both cannot hold: as specified, LM's real
+// client can never open a session.
+//
+// Worth noting for whoever rules on it: the VALUE lib/pq sends is "ISO, MDY",
+// PostgreSQL's own default, and it pairs with client_encoding=UTF8 which this
+// surface already accepts. So the refusal is not protecting against a client
+// asking for something unusual.
+//
+// NOT FIXED HERE. A matrix rule is not a thing a test harness changes, and the
+// PR that adds cells changes no behaviour. Raised to jarvis for a ruling.
+func TestHarness_LibPQIsRefusedForDatestyle(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, events, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
+	host, port, ok := strings.Cut(addr, ":")
+	if !ok {
+		t.Fatalf("listener address %q is not host:port", addr)
+	}
+	db, err := sql.Open("postgres", fmt.Sprintf(
+		"host=%s port=%s user=root password=%s dbname=%s sslmode=require",
+		host, port, secret, database))
+	if err != nil {
+		t.Fatalf("opening lib/pq: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if err := db.Ping(); err == nil {
+		t.Fatal("lib/pq CONNECTED — the datestyle refusal has been ruled on and lifted. Delete " +
+			"this cell and restore the four driver arms below it; they are written and were " +
+			"passing except for this")
+	}
+
+	// The refusal must be the one this cell names. If lib/pq is being refused
+	// for some OTHER reason, the finding recorded here is wrong and the new
+	// reason is a fresh one to chase.
+	refused := ""
+	for _, ev := range events() {
+		if ev.Kind == "fd.auth_denied" {
+			refused = ev.Reason + "/" + ev.Detail
+		}
+	}
+	if refused != "frontdoor/startup-parameter-refused/datestyle" {
+		t.Fatalf("lib/pq was refused as %q, not for datestyle — the finding this cell pins has "+
+			"changed and the new cause needs chasing", refused)
+	}
 }
 
-func TestHarness_LibPQParameterized(t *testing.T) {
-	t.Skip("same dependency decision as TestHarness_LibPQSimpleProtocol, and additionally the " +
-		"extended protocol: blocked on PR #57")
+// The arms that lib/pq would run, once it can connect. They are written rather
+// than described: unblocking is then a deletion of the guard above, not a
+// morning spent reconstructing what the cells were meant to assert.
+func TestHarness_LibPQRunsAParameterlessQuery(t *testing.T) {
+	t.Skip("blocked by TestHarness_LibPQIsRefusedForDatestyle — lib/pq cannot open a session " +
+		"(matrix row 3.1 refuses `datestyle`, which lib/pq always sends). Awaiting a ruling")
+
+	db, done := harnessDB(t)
+	defer done()
+
+	var n int
+	if err := db.QueryRow("SELECT 42").Scan(&n); err != nil {
+		t.Fatalf("lib/pq's simple query failed: %v", err)
+	}
+	if n != 42 {
+		t.Fatalf("got %d, want 42", n)
+	}
+
+	// A target error must arrive as a *pq.Error with the target's own SQLSTATE,
+	// and the pooled connection must remain usable. A front door that closed the
+	// socket would look to database/sql like a bad connection and be silently
+	// retried on another — turning one statement error into two executions.
+	err := db.QueryRow("SELECT 1/0").Scan(&n)
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		t.Fatalf("lib/pq got %v, which is not a *pq.Error", err)
+	}
+	if string(pqErr.Code) != "22012" {
+		t.Fatalf("SQLSTATE = %s, want 22012", pqErr.Code)
+	}
+	if err := db.QueryRow("SELECT 42").Scan(&n); err != nil || n != 42 {
+		t.Fatalf("the connection did not survive a statement error: %v", err)
+	}
+}
+
+func TestHarness_SqlxScansThroughTheFrontDoor(t *testing.T) {
+	t.Skip("blocked by the same refusal: sqlx wraps a database/sql handle, and the handle is " +
+		"lib/pq's")
+
+	db, done := harnessDB(t)
+	defer done()
+
+	xdb := sqlx.NewDb(db, "postgres")
+	var row struct {
+		N int    `db:"n"`
+		S string `db:"s"`
+	}
+	if err := xdb.Get(&row, "SELECT 7 AS n, 'seven' AS s"); err != nil {
+		t.Fatalf("sqlx.Get through the front door: %v", err)
+	}
+	if row.N != 7 || row.S != "seven" {
+		t.Fatalf("got %+v, want {7 seven}", row)
+	}
+}
+
+// harnessDB opens a database/sql handle over lib/pq against the front door.
+func harnessDB(t *testing.T) (*sql.DB, func()) {
+	t.Helper()
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, _, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
+
+	host, port, ok := strings.Cut(addr, ":")
+	if !ok {
+		t.Fatalf("listener address %q is not host:port", addr)
+	}
+	// sslmode=require, not verify-full: the cell's listener is self-signed. The
+	// front door has no plaintext path (row 2.1), so a driver that would fall
+	// back must not be given the chance to hide it.
+	db, err := sql.Open("postgres", fmt.Sprintf(
+		"host=%s port=%s user=root password=%s dbname=%s sslmode=require",
+		host, port, secret, database))
+	if err != nil {
+		t.Fatalf("opening lib/pq against the front door: %v", err)
+	}
+	// ONE connection: database/sql may otherwise open several and a cell
+	// asserting that "the connection survived" would silently be handed a new
+	// one, proving nothing.
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		t.Fatalf("lib/pq could not connect to the front door: %v", err)
+	}
+	return db, func() { _ = db.Close() }
 }
 
 func TestHarness_PgxExtendedProtocol(t *testing.T) {
 	t.Skip("pgx's default query mode is the extended protocol, which the front door refuses until " +
 		"F2 lands (PR #57). This arm is the pgx-class suite §10 names — binary formats and the " +
 		"statement cache — and it belongs here rather than in a second harness")
+}
+
+// THE TEST-ONLY CONDITION, ASSERTED RATHER THAN REVIEWED.
+//
+// lib/pq and sqlx were approved as TEST-ONLY dependencies. A condition that
+// lives only in a commit message is a condition nobody enforces: the next
+// import from a production file would be caught, if at all, by a reviewer
+// noticing. This fails the build instead, on the day it happens.
+//
+// It walks the repo's non-test Go files rather than trusting `go mod` layout,
+// because go.mod does not distinguish a test-only requirement — the distinction
+// is entirely about who IMPORTS them, which is what this reads.
+func TestHarness_TheApprovedDriversStayTestOnly(t *testing.T) {
+	root := repoRoot(t)
+	var offenders []string
+
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" || info.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil
+		}
+		f, perr := parser.ParseFile(token.NewFileSet(), path, src, parser.ImportsOnly)
+		if perr != nil {
+			return nil
+		}
+		for _, imp := range f.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			if p == "github.com/lib/pq" || p == "github.com/jmoiron/sqlx" {
+				rel, _ := filepath.Rel(root, path)
+				offenders = append(offenders, rel+" imports "+p)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the repo: %v", err)
+	}
+	if len(offenders) > 0 {
+		t.Fatalf("lib/pq and sqlx are approved as TEST-ONLY dependencies, and these production "+
+			"files import them: %v — the approval was for a conformance harness, and a driver "+
+			"in the shipped binary is a different decision that has not been made", offenders)
+	}
 }
