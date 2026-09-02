@@ -351,6 +351,16 @@ func (e *Engine) finishClosing(ctx context.Context, s *session) {
 			fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
 	}
 
+	// The pinned backend connection dies with the session. Discard, never
+	// Release: the wire carried this client's SET LOCALs, prepared names and
+	// possibly a poisoned raw face; the pool must destroy it, not recycle it.
+	s.mu.Lock()
+	pc := s.pc
+	s.pc = nil
+	s.mu.Unlock()
+	if pc != nil {
+		pc.Discard()
+	}
 	// The session's own context is cancelled last, once nothing is running on
 	// it and the rollback has had its fresh context.
 	s.cancel()

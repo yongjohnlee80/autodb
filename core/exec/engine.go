@@ -80,6 +80,10 @@ type Engine struct {
 	// (ADR-0074 §1's mandate to inject each competing transition inside that
 	// window, rather than run it alongside and hope).
 	hookAfterDrainCheck func()
+	// hookRawDispatch, when set, observes every SimpleQuery dispatch with the
+	// EXACT bytes handed to the wire. Cells use it to prove the gate ran on the
+	// same text that was dispatched and that refused buffers dispatch nothing.
+	hookRawDispatch func(sqlText string)
 	// closeQuiesce is how long a close waits for an in-flight statement. It
 	// is a FIELD rather than a package variable so a test can shorten it on
 	// its own engine: a shared variable that parallel tests reassign is a
@@ -628,6 +632,14 @@ func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID 
 	case txID != "":
 		status = StatusPendingCommit
 	}
+	return e.writeOutcome(ctx, ident, connID, ip, histID, dur, rows, status, errText, txID)
+}
+
+// writeOutcome records an attempt's outcome under an explicit status. The raw
+// wire producer uses it to record a statement that RAN and was then discarded
+// by the target's implicit-transaction rollback as StatusRolledBack — neither
+// ok (its effect is gone) nor error (it did not fail).
+func (e *Engine) writeOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status, errText, txID string) error {
 	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.auth.AuditTxCorrelated(tx, ident.UserID(), ip, "exec_result",
 			fmt.Sprintf("conn %d (%s, %d row(s), %dms)%s", connID, status, rows, dur.Milliseconds(),

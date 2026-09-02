@@ -138,6 +138,14 @@ func (e *Engine) beginTx(
 	// that cannot host a session should say so when the session tries to use
 	// one, not once a transaction is already open and uncleanable.
 	sess, ok := target.(dao.SessionTxBeginner)
+	// A wire session that has pinned its backend (WireQuery) opens the
+	// transaction THROUGH the pinned handle, so the raw simple-query face and
+	// this transaction share one backend connection. Opening it on the pool
+	// instead would put the client's statements on a different connection than
+	// its BEGIN — outside the transaction it believes it is in.
+	if pc := s.pinnedConn(); pc != nil {
+		sess, ok = pc, true
+	}
 	if !ok {
 		return nil, e.rejectSession(ctx, s, ident, ip, sqlText,
 			fmt.Errorf("%w: connection %q cannot host a transaction across calls "+
