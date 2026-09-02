@@ -284,6 +284,18 @@ function M.spawn(opts, cb)
   end
 
   local stderr = {}
+  local settled = false
+  local timer
+  local function finish(ok, err)
+    if settled then return end
+    settled = true
+    if timer then
+      timer:stop()
+      timer:close()
+      timer = nil
+    end
+    cb(ok, err)
+  end
   local job = vim.fn.jobstart(cmd, {
     detach = true,          -- it outlives this editor by design
     stderr_buffered = false,
@@ -292,6 +304,16 @@ function M.spawn(opts, cb)
         if l ~= "" then stderr[#stderr + 1] = l end
       end
     end,
+    -- A process that failed before serving used to leave every caller queued
+    -- until the ten-second probe timeout. Recheck first: a racing launcher may
+    -- have lost the bind, observed the winner, and exited successfully.
+    on_exit = vim.schedule_wrap(function(_, code)
+      if settled then return end
+      if M.is_listening(ep) then return finish(true, nil) end
+      finish(false, M.describe_manual(string.format(
+        "%s exited with status %d before anything answered on %s",
+        opts.bin, code, ep.addr), stderr))
+    end),
   })
   if job <= 0 then
     return cb(false, string.format("autodb: cannot start %s", opts.bin))
@@ -301,16 +323,15 @@ function M.spawn(opts, cb)
   -- happens after process start, and a startup failure (bad config,
   -- unreadable meta store) shows up here rather than as a silent hang.
   local waited = 0
-  local timer = vim.uv.new_timer()
+  timer = vim.uv.new_timer()
   timer:start(PROBE_INTERVAL_MS, PROBE_INTERVAL_MS, vim.schedule_wrap(function()
+    if settled then return end
     waited = waited + PROBE_INTERVAL_MS
     if M.is_listening(ep) then
-      timer:stop(); timer:close()
-      return cb(true, nil)
+      return finish(true, nil)
     end
     if waited >= SPAWN_TIMEOUT_MS then
-      timer:stop(); timer:close()
-      return cb(false, M.describe_manual(string.format(
+      return finish(false, M.describe_manual(string.format(
         "started %s but nothing answered on %s within %dms", opts.bin, ep.addr,
         SPAWN_TIMEOUT_MS), stderr))
     end
