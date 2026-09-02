@@ -3,7 +3,9 @@ package frontdoor
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -29,6 +31,13 @@ import (
 // and replays a scripted response, so a cell can produce a target error, a gate
 // refusal or a normal result without a database.
 type fakeQueries struct {
+	// mu guards every field below. The fake is written on the SERVER's session
+	// goroutine and read on the test's, and it was previously ordered only by
+	// accident: readUntilReady consumed the readiness byte that followed a
+	// statement, which happened to sequence the two. The moment a refusal grew
+	// its own readiness byte that ordering vanished and -race caught it.
+	mu sync.Mutex
+
 	// msgs are emitted in order before the status is returned.
 	msgs []exec.WireMessage
 	// status is the ReadyForQuery byte WireQuery reports.
@@ -42,29 +51,40 @@ type fakeQueries struct {
 
 	// sawSQL records every statement the loop passed down.
 	sawSQL []string
-	// reentered records whether emit was able to call back into the engine.
-	reentered bool
 }
 
 func (q *fakeQueries) WireQuery(_ context.Context, _ exec.SessionID, _ int64, sql, _ string,
 	emit func(exec.WireMessage) error) (byte, error) {
+	q.mu.Lock()
 	q.sawSQL = append(q.sawSQL, sql)
-	if q.err != nil {
-		return 0, q.err
+	msgs, err, status := q.msgs, q.err, q.status
+	q.mu.Unlock()
+
+	if err != nil {
+		return 0, err
 	}
-	for _, m := range q.msgs {
-		if err := emit(m); err != nil {
-			return 0, err
+	for _, m := range msgs {
+		if eerr := emit(m); eerr != nil {
+			return 0, eerr
 		}
 	}
-	return q.status, nil
+	return status, nil
 }
 
 func (q *fakeQueries) WireTxStatus(_ exec.SessionID, _ int64) (byte, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	if q.txErr != nil {
 		return 0, q.txErr
 	}
 	return q.txStatus, nil
+}
+
+// statements returns a copy of what the engine was asked to run.
+func (q *fakeQueries) statements() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]string(nil), q.sawSQL...)
 }
 
 // loopListener starts a listener with the real session loop behind it.
@@ -123,8 +143,8 @@ func TestLoop_QueryRunsAndEndsWithSynthesizedReadyForQuery(t *testing.T) {
 	if !sameKinds(got, want) {
 		t.Fatalf("response = %v, want %v", got, want)
 	}
-	if len(q.sawSQL) != 1 || q.sawSQL[0] != "SELECT 1" {
-		t.Fatalf("the engine saw %v, want exactly [SELECT 1] — the loop must pass the buffer through unaltered", q.sawSQL)
+	if saw := q.statements(); len(saw) != 1 || saw[0] != "SELECT 1" {
+		t.Fatalf("the engine saw %v, want exactly [SELECT 1] — the loop must pass the buffer through unaltered", q.statements())
 	}
 }
 
@@ -265,6 +285,15 @@ func TestLoop_FunctionCallIsRefusedAndTheConnectionStillWorks(t *testing.T) {
 		t.Fatal("the fast-path refusal is FATAL; it must be a refusal, not a violation")
 	}
 
+	// The refusal ends its own cycle with readiness (see
+	// TestLoop_SurvivingRefusalEndsTheCycleWithReadiness). Consume it before
+	// sending the next statement: reading past it would return this cycle's
+	// readiness and the assertion below would run before the engine had been
+	// asked anything.
+	if got := readUntilReady(t, fe); got != txStatusIdle {
+		t.Fatalf("readiness closing the refusal's cycle = %q", got)
+	}
+
 	// THE LOAD-BEARING HALF: the same connection still answers a query.
 	fe.Send(&pgproto3.Query{String: "SELECT 1"})
 	if err := fe.Flush(); err != nil {
@@ -273,8 +302,8 @@ func TestLoop_FunctionCallIsRefusedAndTheConnectionStillWorks(t *testing.T) {
 	if got := readUntilReady(t, fe); got != txStatusIdle {
 		t.Fatalf("readiness after the surviving refusal = %q", got)
 	}
-	if len(q.sawSQL) != 1 {
-		t.Fatalf("the engine saw %v; the query after the refusal did not reach it", q.sawSQL)
+	if saw := q.statements(); len(saw) != 1 {
+		t.Fatalf("the engine saw %v; the query after the refusal did not reach it", saw)
 	}
 }
 
@@ -634,5 +663,217 @@ func TestLoop_OrdinaryRefusalStillGetsReadiness(t *testing.T) {
 	}
 	if got := readUntilReady(t, fe); got != txStatusIdle {
 		t.Fatalf("readiness = %q, want %q — a refusal on a live wire is still followed by readiness", got, txStatusIdle)
+	}
+}
+
+// MF1 (Vision, PR #52 first pass). A refusal that KEEPS the session still ends a
+// protocol cycle, and every cycle ends with readiness.
+//
+// The committed FunctionCall cell could not see this: a raw pgproto3.Frontend
+// never waits for readiness, so it sends its next Query into a server happy to
+// answer and the connection looks fine. A client that DOES wait — libpq's PQfn,
+// and the large-object interface built on it — blocks forever. So this cell
+// waits, which is the whole difference.
+func TestLoop_SurvivingRefusalEndsTheCycleWithReadiness(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.txStatus = txStatusInTx // and it is the ENGINE's state, not an assumed idle
+	_, addr := loopListener(t, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.FunctionCall{Function: 42})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if msg, err := fe.Receive(); err != nil {
+		t.Fatalf("reading the refusal: %v", err)
+	} else if _, ok := msg.(*pgproto3.ErrorResponse); !ok {
+		t.Fatalf("first frame = %T, want ErrorResponse", msg)
+	}
+	// Before the fix this blocked until the read deadline: the loop continued
+	// straight to the next Peek without ending the cycle.
+	msg, err := fe.Receive()
+	if err != nil {
+		t.Fatalf("no ReadyForQuery after a surviving refusal: %v — a client that waits for "+
+			"readiness (libpq's PQfn) blocks here forever", err)
+	}
+	rfq, ok := msg.(*pgproto3.ReadyForQuery)
+	if !ok {
+		t.Fatalf("frame after the refusal = %T, want ReadyForQuery", msg)
+	}
+	if rfq.TxStatus != txStatusInTx {
+		t.Fatalf("readiness = %q, want %q — the byte is the engine's state, and a refusal "+
+			"inside a transaction leaves that transaction open", rfq.TxStatus, txStatusInTx)
+	}
+}
+
+// MF3 (Vision). Rows reach the client WHILE the statement is still streaming.
+//
+// pgproto3's Send only appends to the write buffer, so a per-row Send with one
+// Flush at the end holds the whole result in memory — against a producer that
+// streams unbounded, that is an OOM the size of whatever was selected. The cell
+// holds the statement open after emitting past the watermark and requires that
+// the client has already seen frames.
+func TestLoop_OutputIsFlushedWhileTheStatementIsStillStreaming(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	q := &blockingQueries{release: release, status: txStatusIdle, txStatus: txStatusIdle}
+	_, addr := loopListener(t, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Query{String: "SELECT big"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The statement has NOT finished — the producer is parked — so anything that
+	// arrives now arrived because the loop flushed mid-stream.
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := fe.Receive()
+	if err != nil {
+		close(release)
+		t.Fatalf("no frame reached the client while the statement was still streaming: %v — "+
+			"the whole result is being buffered until the statement ends", err)
+	}
+	if _, ok := msg.(*pgproto3.RowDescription); !ok {
+		t.Fatalf("first streamed frame = %T, want RowDescription", msg)
+	}
+	close(release)
+	_ = conn.SetReadDeadline(time.Time{})
+	if got := readUntilReady(t, fe); got != txStatusIdle {
+		t.Fatalf("readiness = %q", got)
+	}
+}
+
+// blockingQueries emits past the output watermark, then parks until released, so
+// a cell can ask what the client has seen MID-statement.
+type blockingQueries struct {
+	release          chan struct{}
+	status, txStatus byte
+}
+
+func (b *blockingQueries) WireQuery(_ context.Context, _ exec.SessionID, _ int64, _, _ string,
+	emit func(exec.WireMessage) error) (byte, error) {
+	if err := emit(exec.WireMessage{Kind: "RowDescription",
+		Fields: []exec.WireField{{Name: "chunk", TypeOID: 25, TypeSize: -1, TypeModifier: -1}}}); err != nil {
+		return 0, err
+	}
+	// Enough payload to cross the watermark, so the flush is the one the
+	// watermark forces rather than an incidental one.
+	blob := make([]byte, 64*1024)
+	for i := range blob {
+		blob[i] = 'x'
+	}
+	for range (pendingOutputWatermark / len(blob)) + 2 {
+		if err := emit(exec.WireMessage{Kind: "DataRow", Values: [][]byte{blob}}); err != nil {
+			return 0, err
+		}
+	}
+	<-b.release
+	if err := emit(exec.WireMessage{Kind: "CommandComplete", Tag: "SELECT 1"}); err != nil {
+		return 0, err
+	}
+	return b.status, nil
+}
+
+func (b *blockingQueries) WireTxStatus(_ exec.SessionID, _ int64) (byte, error) {
+	return b.txStatus, nil
+}
+
+// deadlineLoopListener is deadlineListener with a query path behind it.
+func deadlineLoopListener(t *testing.T, dl deadlines, q QueryExecutor) (func() []Event, string) {
+	t.Helper()
+	_, events, addr := listenerWith(t, Options{
+		Authn: &fakeAuth{result: goodSession()}, Queries: q,
+		AuthFailuresPerIP: unthrottled, testDeadlines: &dl,
+	})
+	return events, addr
+}
+
+// MF2 (Vision). The idle budget must bound IDLENESS, not session lifetime.
+//
+// net.Conn deadlines are ABSOLUTE, so arming one at session open and never
+// refreshing it turns "30 minutes idle" into a 30-minute cap on the session —
+// a pooled connection doing steady work dies mid-statement having never been
+// idle. This drives continuous traffic, never idling more than a fraction of
+// the budget, well past the budget's own length.
+func TestLoop_ABusySessionOutlivesTheIdleBudget(t *testing.T) {
+	t.Parallel()
+	dl := defaultDeadlines()
+	dl.idle = 700 * time.Millisecond
+	_, addr := deadlineLoopListener(t, dl, okQueries())
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	// Three times the budget, in steps well inside it. Before the fix the
+	// session stopped answering the moment the absolute deadline arrived.
+	deadline := time.Now().Add(3 * dl.idle)
+	n := 0
+	for time.Now().Before(deadline) {
+		fe.Send(&pgproto3.Query{String: "SELECT 1"})
+		if err := fe.Flush(); err != nil {
+			t.Fatalf("after %d statements over %v: %v — the session died while under "+
+				"continuous traffic, so the budget is bounding LIFETIME rather than idleness", n, time.Since(deadline.Add(-3*dl.idle)), err)
+		}
+		if got := readUntilReady(t, fe); got != txStatusIdle {
+			t.Fatalf("statement %d: readiness %q", n, got)
+		}
+		n++
+		time.Sleep(dl.idle / 5)
+	}
+	if n < 5 {
+		t.Fatalf("only %d statements ran; the cell did not exercise the budget", n)
+	}
+}
+
+// MF4 (Vision). When the FRONT DOOR's own deadline fires, the client is told so
+// and the audit records the front door's cause — not "the peer closed".
+//
+// A false operational record is worse than a missing one, because someone will
+// act on it: "peer-closed" sends an operator to the client's logs for a
+// disconnection the server caused.
+func TestLoop_IdleExpiryIsAuditedAsTheFrontDoorsOwnDeadline(t *testing.T) {
+	t.Parallel()
+	dl := defaultDeadlines()
+	dl.idle = 400 * time.Millisecond
+	events, addr := deadlineLoopListener(t, dl, okQueries())
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	// Idle past the budget and read what the server says on its way out.
+	msg, err := fe.Receive()
+	if err != nil {
+		t.Fatalf("the front door closed the idle session without a frame: %v — §7 gives this "+
+			"case a FATAL 57P05 under gate/session-deadline", err)
+	}
+	e, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("frame = %T, want ErrorResponse", msg)
+	}
+	if e.Code != sqlStateIdleSessionTimeout || e.Severity != "FATAL" {
+		t.Errorf("expiry = %s/%s, want %s/FATAL", e.Severity, e.Code, sqlStateIdleSessionTimeout)
+	}
+	if e.Detail != ruleSessionDeadline {
+		t.Errorf("DETAIL = %q, want %q", e.Detail, ruleSessionDeadline)
+	}
+	waitFor(t, "the expiry to be audited under the front door's own cause", func() bool {
+		for _, ev := range events() {
+			if ev.Kind == "fd.conn_close" && ev.Reason == ruleSessionDeadline {
+				return true
+			}
+		}
+		return false
+	})
+	// And NOT under the peer's.
+	for _, ev := range events() {
+		if ev.Kind == "fd.conn_close" && ev.Reason == "peer-closed" {
+			t.Fatal("the front door's own deadline was audited as peer-closed; an operator would " +
+				"go looking at the client for a disconnection the server caused")
+		}
 	}
 }

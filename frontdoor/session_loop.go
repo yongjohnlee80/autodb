@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
@@ -35,16 +36,23 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, br *bufio.Read
 	be *pgproto3.Backend, sess exec.WireSessionResult, peer string, closeReason *string) error {
 
 	for {
+		// THE IDLE BUDGET IS RE-ARMED PER MESSAGE (matrix §8.4: "refreshed on
+		// message/state transitions"). net.Conn deadlines are ABSOLUTE, so a
+		// single arming at session open would make the idle budget a cap on
+		// session LIFETIME — a pooled connection doing steady work would die
+		// mid-statement at thirty minutes, having never once been idle.
+		if err := conn.SetDeadline(l.now().Add(l.dl.idle)); err != nil {
+			*closeReason = "deadline"
+			return nil
+		}
+
 		// The type byte, BEFORE pgproto3 decodes it. An undefined byte cannot be
 		// told from a transport failure once Receive has turned it into an
 		// unstructured error, and it must not be: one closes the connection with
 		// an accurate 08P01 and the other closes it with nothing to say.
 		head, err := br.Peek(1)
 		if err != nil {
-			// The peer stopped talking. Nothing to report to a socket that is
-			// already gone.
-			*closeReason = "peer-closed"
-			return nil
+			return l.endOfRead(conn, be, err, peer, closeReason)
 		}
 		if !validFrontendType(head[0]) {
 			d := unknownMessageType()
@@ -54,13 +62,26 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, br *bufio.Read
 
 		msg, err := be.Receive()
 		if err != nil {
-			*closeReason = "receive-failed"
-			return nil
+			return l.endOfRead(conn, be, err, peer, closeReason)
 		}
 
 		if d, decided := dispatchFrame(msg); decided {
 			l.applyDispatch(be, d, peer, closeReason)
 			if d.after == endSession {
+				return nil
+			}
+			// A refusal that KEEPS the session still ends a protocol cycle, and
+			// every cycle ends with readiness. PostgreSQL's own Function Call
+			// sub-protocol says so explicitly — ReadyForQuery is sent "whether
+			// processing terminates successfully or with an error" — and §6.3
+			// names the ONLY case where readiness is withheld, which is an
+			// unknown transaction outcome, not this.
+			//
+			// Without it a client that WAITS for readiness blocks forever:
+			// libpq's PQfn does, and so does the large-object interface built on
+			// it. A raw Frontend does not wait, which is exactly why the loop's
+			// own cell could not see this and a real client would.
+			if !l.sendReadiness(be, sess, peer, closeReason) {
 				return nil
 			}
 			continue
@@ -82,6 +103,54 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, br *bufio.Read
 	}
 }
 
+// endOfRead decides what a failed read means. A read fails for two reasons that
+// deserve different answers: the peer went away, or OUR OWN deadline fired.
+//
+// Recording both as "peer-closed" makes the audit say the client hung up when
+// the front door in fact hung up on it — and a false operational record is worse
+// than a missing one, because someone will act on it. §7 gives the deadline case
+// its own identity: a FATAL 57P05 under gate/session-deadline.
+func (l *Listener) endOfRead(conn net.Conn, be *pgproto3.Backend, err error, peer string, closeReason *string) error {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		// The deadline that expired is the CONNECTION's, and it bounds writes as
+		// well as reads — so the goodbye frame cannot go out under it. Give the
+		// write its own short budget: without this the client is told nothing and
+		// sees a bare EOF, which is the very "looks like a network fault" outcome
+		// the accurate SQLSTATE exists to prevent.
+		_ = conn.SetDeadline(l.now().Add(deadlineGoodbyeBudget))
+		l.onEvent(Event{Kind: "fd.refused", Reason: ruleSessionDeadline, Peer: peer})
+		be.Send(gateError("FATAL", sqlStateIdleSessionTimeout,
+			"terminating connection due to idle timeout", ruleSessionDeadline,
+			"the front door closes a session that has been idle past its budget"))
+		_ = be.Flush()
+		*closeReason = ruleSessionDeadline
+		return nil
+	}
+	// The peer stopped talking. Nothing to report to a socket that is already
+	// gone.
+	*closeReason = "peer-closed"
+	return nil
+}
+
+// sendReadiness ends a protocol cycle with the session's current transaction
+// state. It reports whether the session continues.
+func (l *Listener) sendReadiness(be *pgproto3.Backend, sess exec.WireSessionResult,
+	peer string, closeReason *string) bool {
+
+	status, err := l.queries.WireTxStatus(sess.SessionID, sess.UserID)
+	if err != nil || !validTxStatus(status) {
+		*closeReason = "session-lost"
+		return false
+	}
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: status})
+	if ferr := be.Flush(); ferr != nil {
+		*closeReason = "write-failed"
+		return false
+	}
+	return true
+}
+
 // runQuery executes one simple-query buffer and frames the response. It reports
 // whether the session continues.
 func (l *Listener) runQuery(ctx context.Context, be *pgproto3.Backend,
@@ -92,6 +161,7 @@ func (l *Listener) runQuery(ctx context.Context, be *pgproto3.Backend,
 	// every emit, so a re-entrant call gets ErrSessionBusy by design. Anything
 	// this loop needs from the engine happens after WireQuery returns.
 	var emitErr error
+	pending := 0
 	status, err := l.queries.WireQuery(ctx, sess.SessionID, sess.UserID, sql, hostOf(peer),
 		func(m exec.WireMessage) error {
 			frame, ferr := backendFrame(m)
@@ -112,6 +182,26 @@ func (l *Listener) runQuery(ctx context.Context, be *pgproto3.Backend,
 				// data-dependent. If frames ever need to be deferred, they must
 				// be copied first.
 				be.Send(frame)
+
+				// THE PENDING-OUTPUT WATERMARK (matrix §8.4). Send only appends
+				// to the Backend's write buffer — it does not write — so a
+				// per-row Send with one Flush at the end holds the WHOLE result
+				// in memory. Against the raw path, which streams unbounded, that
+				// is an OOM the size of whatever the client selected.
+				//
+				// Flushing bounds it. The watermark rather than a flush per row
+				// because a syscall per row would cost more than it saves on a
+				// wide result, and 4 MiB is the figure the matrix budgets.
+				pending += estimateFrameBytes(m)
+				if pending >= pendingOutputWatermark {
+					l.onEvent(Event{Kind: "fd.backpressure_enter", Reason: ruleOutputWatermark, Peer: peer})
+					if ferr := be.Flush(); ferr != nil {
+						emitErr = ferr
+						return ferr
+					}
+					l.onEvent(Event{Kind: "fd.backpressure_exit", Reason: ruleOutputWatermark, Peer: peer})
+					pending = 0
+				}
 			}
 			return nil
 		})
@@ -175,17 +265,7 @@ func (l *Listener) frameGateError(be *pgproto3.Backend, sess exec.WireSessionRes
 	// byte. It comes from the engine's state machine rather than being assumed
 	// idle: a gate refusal INSIDE a transaction leaves that transaction open,
 	// and telling the client "idle" would invite it to start another.
-	status, serr := l.queries.WireTxStatus(sess.SessionID, sess.UserID)
-	if serr != nil || !validTxStatus(status) {
-		*closeReason = "session-lost"
-		return false
-	}
-	be.Send(&pgproto3.ReadyForQuery{TxStatus: status})
-	if ferr := be.Flush(); ferr != nil {
-		*closeReason = "write-failed"
-		return false
-	}
-	return true
+	return l.sendReadiness(be, sess, peer, closeReason)
 }
 
 // applyDispatch emits a decision's frame, if it has one, and records its audit
@@ -211,6 +291,28 @@ func (l *Listener) applyDispatch(be *pgproto3.Backend, d dispatch, peer string, 
 // cannot turn into a frame. It is a front-door defect, so it is audited under
 // its own cause even though the wire is told the catalogue's violation id.
 const ruleUnframeableMessage = "frontdoor/unframeable-message"
+
+// pendingOutputWatermark is matrix §8.4's bound on serialized output waiting to
+// go out. Reaching it flushes, which is what pauses reads from the target: the
+// loop cannot ask the engine for another message while it is writing this one.
+const pendingOutputWatermark = 4 << 20
+
+// ruleOutputWatermark identifies the backpressure in the audit trail.
+const ruleOutputWatermark = "frontdoor/output-watermark"
+
+// ruleSessionDeadline is §7's identity for the front door closing an idle
+// session, and sqlStateIdleSessionTimeout is the SQLSTATE PostgreSQL itself uses
+// for it — a client that already recognises 57P05 from a real server recognises
+// it here.
+const (
+	ruleSessionDeadline        = "gate/session-deadline"
+	sqlStateIdleSessionTimeout = "57P05"
+)
+
+// deadlineGoodbyeBudget bounds the write of the frame that explains a deadline
+// expiry. Short: the peer is already past its budget and this is a courtesy, not
+// a reason to hold the slot open.
+const deadlineGoodbyeBudget = 2 * time.Second
 
 // classifyGateError maps a front-door refusal onto the §7 refusal catalogue:
 // SQLSTATE, the DETAIL rule id, the HINT, and whether the connection survives.
@@ -269,6 +371,26 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 // the audit row instead.
 func gateMessage(err error) string {
 	return err.Error()
+}
+
+// estimateFrameBytes approximates a message's serialized size for the watermark.
+//
+// An estimate, deliberately: pgproto3 gives no way to ask the Backend how much
+// it is holding, and the alternative — encoding twice to measure — would double
+// the work on the hot path. The payload dominates the framing overhead for the
+// messages that can actually grow a buffer (DataRow, RowDescription), so an
+// estimate that counts payload and ignores a few bytes of header is wrong by a
+// margin that does not matter to a 4 MiB bound.
+func estimateFrameBytes(m exec.WireMessage) int {
+	n := 8 // type byte + length, plus slack for small fixed fields
+	for _, v := range m.Values {
+		n += len(v) + 4 // each column carries its own length prefix
+	}
+	for _, f := range m.Fields {
+		n += len(f.Name) + 18
+	}
+	n += len(m.Tag) + len(m.ParameterName) + len(m.ParameterValue)
+	return n
 }
 
 // backendFrame turns one neutral engine message into the wire frame that

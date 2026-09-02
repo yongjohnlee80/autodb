@@ -2,8 +2,10 @@ package frontdoor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,6 +35,14 @@ import (
 // and returns the address plus the PAT secret a client authenticates with.
 func pgLoop(t *testing.T) (addr, secret, database string) {
 	t.Helper()
+	a, s, d, _ := pgLoopWithEngine(t)
+	return a, s, d
+}
+
+// pgLoopWithEngine is pgLoop plus the engine, for cells that need to drive it
+// directly (the re-entrancy witness wraps it).
+func pgLoopWithEngine(t *testing.T) (addr, secret, database string, eng *exec.Engine) {
+	t.Helper()
 
 	dsn := os.Getenv("TEST_PGURL")
 	if dsn == "" {
@@ -55,7 +65,7 @@ func pgLoop(t *testing.T) (addr, secret, database string) {
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	eng := exec.New(store, svc)
+	eng = exec.New(store, svc)
 	t.Cleanup(func() { _ = eng.Close() })
 
 	database = "pgtarget"
@@ -78,7 +88,7 @@ func pgLoop(t *testing.T) (addr, secret, database string) {
 	_, _, addr = listenerWith(t, Options{
 		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled,
 	})
-	return addr, pat.Secret, database
+	return addr, pat.Secret, database, eng
 }
 
 // pgClient authenticates against the live loop and returns a frontend sitting
@@ -488,5 +498,97 @@ func TestPGLoop_SessionOpenCarriesTheThreeSynthesizedStatuses(t *testing.T) {
 	// one the grants are written against.
 	if got := statuses["session_authorization"]; got != "root" {
 		t.Errorf("session_authorization = %q, want the canonical %q", got, "root")
+	}
+}
+
+// reentrantProbe wraps the real engine and re-enters it from INSIDE the emit
+// callback, which is the exact thing the seam declares is refused.
+type reentrantProbe struct {
+	eng *exec.Engine
+
+	mu       sync.Mutex
+	inner    error // what the re-entrant call returned
+	attempts int
+}
+
+func (p *reentrantProbe) WireQuery(ctx context.Context, id exec.SessionID, userID int64, sql, ip string,
+	emit func(exec.WireMessage) error) (byte, error) {
+	return p.eng.WireQuery(ctx, id, userID, sql, ip, func(m exec.WireMessage) error {
+		// Re-enter on the SAME session, from inside emit, exactly once.
+		p.mu.Lock()
+		first := p.attempts == 0
+		p.attempts++
+		p.mu.Unlock()
+		if first {
+			// Re-enter the STATEMENT path, which is what takes the session's
+			// one-in-flight claim. WireTxStatus is a read-only accessor and does
+			// NOT claim, so re-entering through it proves nothing about this
+			// contract — a first attempt through it succeeded and sent me looking
+			// at the wrong call.
+			_, err := p.eng.WireQuery(ctx, id, userID, "SELECT 99", ip,
+				func(exec.WireMessage) error { return nil })
+			p.mu.Lock()
+			p.inner = err
+			p.mu.Unlock()
+		}
+		return emit(m)
+	})
+}
+
+func (p *reentrantProbe) WireTxStatus(id exec.SessionID, userID int64) (byte, error) {
+	return p.eng.WireTxStatus(id, userID)
+}
+
+func (p *reentrantProbe) result() (error, int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.inner, p.attempts
+}
+
+// MF6 (Vision). The seam DECLARES that emit is not re-entrant — WireQuery holds
+// the session's one-in-flight claim across every emit — and that claim was
+// asserted in prose and proven nowhere. F1 is the first real emitter, so the
+// loop-level witness is owed here.
+//
+// The property that matters to the loop is not merely that the inner call is
+// refused: it is that the refusal does not wedge or corrupt the stream. So the
+// cell re-enters mid-result and then requires the statement to complete
+// normally, with a readiness byte and a session that answers again afterwards.
+func TestPGLoop_EmitIsNotReentrantAndTheStreamSurvivesIt(t *testing.T) {
+	addr, secret, database, eng := pgLoopWithEngine(t)
+	probe := &reentrantProbe{eng: eng}
+	_, _, listenAddr := listenerWith(t, Options{
+		Authn: eng, Queries: probe, AuthFailuresPerIP: unthrottled,
+	})
+	_ = addr
+	fe := pgClient(t, listenAddr, secret, database)
+
+	msgs := query(t, fe, "SELECT 1 AS n")
+	if hasError(msgs) {
+		t.Fatalf("the statement failed: %v", errorText(msgs))
+	}
+	if _, ok := firstOfType[*pgproto3.DataRow](msgs); !ok {
+		t.Fatalf("no row: %v", kindsOf(msgs))
+	}
+
+	inner, attempts := probe.result()
+	if attempts == 0 {
+		t.Fatal("emit was never called, so the re-entrancy was never attempted")
+	}
+	if inner == nil {
+		t.Fatal("a re-entrant WireQuery from inside emit SUCCEEDED; the seam documents that the " +
+			"session's one-in-flight claim is held across every emit and refuses this")
+	}
+	if !errors.Is(inner, exec.ErrSessionBusy) {
+		t.Fatalf("re-entrant call returned %v, want ErrSessionBusy — the documented refusal", inner)
+	}
+
+	// The stream survived the refusal: the session answers again.
+	after := query(t, fe, "SELECT 2 AS n")
+	if hasError(after) {
+		t.Fatalf("the session did not survive the refused re-entrancy: %v", errorText(after))
+	}
+	if dr, ok := firstOfType[*pgproto3.DataRow](after); !ok || string(dr.Values[0]) != "2" {
+		t.Fatalf("the follow-up statement returned %v — the frame stream was corrupted", kindsOf(after))
 	}
 }
