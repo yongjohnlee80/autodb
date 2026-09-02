@@ -129,11 +129,23 @@ func TestPGExtended_AStatementWithNoResultColumnsDescribesAsNoData(t *testing.T)
 	}
 }
 
-// SHAPE E — closes matrix row 4:Execute's open half.
+// SHAPE E — narrows the Execute row of §4; it does NOT close it, and this
+// comment deliberately avoids the citation form, because a cell that cites a
+// row is claiming to witness it and this one does not.
 //
 // THE ONE THING: PortalSuspended REACHES THE CLIENT. A producer that swallows it
 // strands a paging client forever — it waits for rows that will not come because
 // it never learned it must ask again.
+//
+// WHAT THIS CELL DOES NOT PROVE, so nobody reads the row as closed: the matrix
+// contracts authority re-resolved at EVERY Execute, "portal re-executions
+// included", and an fd.stmt_attempt per Execute. A resumption riding the first
+// Execute”'s authority would pass this cell and everything else written today —
+// the existing live proof revokes a grant between Parse and Execute, which is
+// not a re-execution. white-vision named the discriminating shape: revoke
+// BETWEEN the first Execute and the resumption. Neither half is observable from
+// here (attempt rows are engine-side audit, not listener events), which is why
+// the row stays awaiting rather than being promoted on this cell.
 func TestPGExtended_ARowLimitedFetchSuspendsAndResumes(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 	_, _, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
@@ -143,7 +155,7 @@ func TestPGExtended_ARowLimitedFetchSuspendsAndResumes(t *testing.T) {
 	// survive the end of an implicit one, so the natural way to drive this is
 	// Execute/Flush/Execute — and a standalone Flush delivers nothing today (see
 	// TestPGExtended_AStandaloneFlushDeliversNothing). BEGIN gives the portal a
-	// transaction to live in, so this cell can close row 4:Execute's open half
+	// transaction to live in, so this cell can narrow the Execute row's open half
 	// without waiting on that defect.
 	if msgs := query(t, fe, "BEGIN"); hasError(msgs) {
 		t.Fatalf("opening the transaction: %v", errorText(msgs))
