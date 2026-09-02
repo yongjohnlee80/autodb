@@ -171,7 +171,7 @@ func (e *Engine) executeSessionUnit(
 	defer endRun()
 	res, rerr := e.executeUnit(runCtx, execUnit{
 		stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
-		pinned: pinned, txID: txID,
+		pinned: pinned, txID: txID, tag: s.auditTag(),
 	})
 	s.noteStatementOutcome(rerr)
 	return res, rerr
@@ -217,7 +217,7 @@ func (e *Engine) wireControl(
 		defer endRun()
 		return e.executeUnit(runCtx, execUnit{
 			stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
-			pinned: pinned, txID: txID,
+			pinned: pinned, txID: txID, tag: s.auditTag(),
 		})
 	}
 
@@ -262,6 +262,7 @@ type execUnit struct {
 	ip      string
 	pinned  dao.TxConn
 	txID    string
+	tag     string // session stamp for audit lines; empty on the token path
 }
 
 // executeUnit is the shared tail: attempt record, read-only wrap, target,
@@ -281,7 +282,7 @@ func (e *Engine) executeUnit(ctx context.Context, u execUnit) (*Result, error) {
 		target = t
 	}
 
-	attemptID, err := e.recordAttempt(ctx, u.pol.Ident, u.connRow.ID, u.ip, u.sqlText, u.txID)
+	attemptID, err := e.recordAttemptTagged(ctx, u.pol.Ident, u.connRow.ID, u.ip, u.sqlText, u.txID, u.tag)
 	if err != nil {
 		return nil, err
 	}
@@ -327,8 +328,15 @@ func (e *Engine) executeUnit(ctx context.Context, u execUnit) (*Result, error) {
 	// it grows, it moves.
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	if err := e.recordOutcome(recCtx, u.pol.Ident, u.connRow.ID, u.ip, attemptID,
-		res.Duration, rowCount, runErr, u.txID); err != nil {
+	status, errText := StatusOK, ""
+	switch {
+	case runErr != nil:
+		status, errText = StatusError, truncate(runErr.Error(), maxErrorBytes)
+	case u.txID != "":
+		status = StatusPendingCommit
+	}
+	if err := e.writeOutcomeTagged(recCtx, u.pol.Ident, u.connRow.ID, u.ip, attemptID,
+		res.Duration, rowCount, status, errText, u.txID, u.tag); err != nil {
 		return nil, err
 	}
 	if runErr != nil {

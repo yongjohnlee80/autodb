@@ -301,6 +301,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 	}
 	runCtx, endRun := s.runContext(ctx)
 	defer endRun()
+	tag := s.auditTag() // session id + application_name on every audit line
 
 	// outcome is recorded per statement once the buffer has run or stopped.
 	type outcome struct {
@@ -325,13 +326,13 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			if !o.ran {
 				// Never reached: no attempt row was written (no effect was ever
 				// possible), so write attempt and outcome together now.
-				aid, aerr := e.recordAttempt(recCtx, pol.Ident, connRow.ID, ip, parts[i], "")
+				aid, aerr := e.recordAttemptTagged(recCtx, pol.Ident, connRow.ID, ip, parts[i], "", tag)
 				if aerr != nil {
 					return aerr
 				}
 				o.attempt, o.status, o.errText = aid, StatusError, ErrNotExecuted.Error()
 			}
-			if werr := e.writeOutcome(recCtx, pol.Ident, connRow.ID, ip, o.attempt, dur, o.rows, o.status, o.errText, o.txID); werr != nil {
+			if werr := e.writeOutcomeTagged(recCtx, pol.Ident, connRow.ID, ip, o.attempt, dur, o.rows, o.status, o.errText, o.txID, tag); werr != nil {
 				return werr
 			}
 		}
@@ -344,7 +345,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			s.mu.Lock()
 			txBefore := s.txID
 			s.mu.Unlock()
-			aid, aerr := e.recordAttempt(runCtx, pol.Ident, connRow.ID, ip, parts[i], txBefore)
+			aid, aerr := e.recordAttemptTagged(runCtx, pol.Ident, connRow.ID, ip, parts[i], txBefore, tag)
 			if aerr != nil {
 				return 0, aerr
 			}
@@ -374,7 +375,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		txID, inTx := s.txID, s.tx != nil
 		s.mu.Unlock()
 		for i := el.first; i <= el.last; i++ {
-			aid, aerr := e.recordAttempt(runCtx, pol.Ident, connRow.ID, ip, parts[i], txID)
+			aid, aerr := e.recordAttemptTagged(runCtx, pol.Ident, connRow.ID, ip, parts[i], txID, tag)
 			if aerr != nil {
 				return 0, aerr
 			}

@@ -121,6 +121,14 @@ type session struct {
 	// hang on rather than a second source of truth.
 	demoted bool
 
+	// appName is the client's accepted startup application_name (frontdoor §3.1,
+	// matrix claim #session-audit): recorded on the session and stamped into every
+	// exec/exec_result audit line for this session's units. Empty for token sessions.
+	appName string
+	// wire marks a front-door session (opened by OpenWireSessionWith); token
+	// sessions leave it false. It selects the audit stamp, nothing else.
+	wire bool
+
 	// ctx outlives the RPC call that created the session, which is the whole
 	// point: a COMMIT arriving in a LATER call has to operate on a live
 	// transaction, so the session's context cannot be the opening caller's.
@@ -706,3 +714,15 @@ func (s *session) releaseCloseForRetry() bool {
 
 // finishClose moves closing → closed.
 func (s *session) finishClose() { s.state.Store(int32(sessClosed)) }
+
+// auditTag is the session's stamp for exec/exec_result audit lines: the wire
+// session id and the client's application_name (matrix claim
+// 3.1:application_name#session-audit). Token sessions carry no stamp.
+func (s *session) auditTag() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.wire {
+		return ""
+	}
+	return fmt.Sprintf("session %s app %q", s.id, s.appName)
+}

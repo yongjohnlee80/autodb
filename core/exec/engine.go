@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -88,6 +89,11 @@ type Engine struct {
 	// EXACT bytes handed to the wire. Cells use it to prove the gate ran on the
 	// same text that was dispatched and that refused buffers dispatch nothing.
 	hookRawDispatch func(sqlText string)
+	// hookWrapPinned, when set, substitutes the value whose ParameterStatusReporter
+	// capability OpenWireSessionWith consults (tests: a wrapper without the
+	// capability, or with an incomplete set) so row 3.1's fail-closed arms can be
+	// observed without a real target that lacks them.
+	hookWrapPinned func(golibpg.PinnedConn) any
 	// closeQuiesce is how long a close waits for an in-flight statement. It
 	// is a FIELD rather than a package variable so a test can shorten it on
 	// its own engine: a shared variable that parallel tests reassign is a
@@ -598,11 +604,18 @@ func (e *Engine) reject(ctx context.Context, ident auth.Identity, connID int64, 
 // recordAttempt writes the pre-execution audit row and, when history is on,
 // the pending history row; it returns that row's id (0 when history is off).
 func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText, txID string) (int64, error) {
+	return e.recordAttemptTagged(ctx, ident, connID, ip, sqlText, txID, "")
+}
+
+// recordAttemptTagged is recordAttempt with a session tag appended to the audit
+// detail — "session <id> app <label>" for wire units (matrix claim
+// 3.1:application_name#session-audit), empty for token units.
+func (e *Engine) recordAttemptTagged(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText, txID, tag string) (int64, error) {
 	script := truncate(sqlText, maxAuditSQLBytes)
 	var histID int64
 	err := dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.auth.AuditTxCorrelated(tx, ident.UserID(), ip, "exec",
-			fmt.Sprintf("conn %d: %s", connID, script), txID); err != nil {
+			fmt.Sprintf("conn %d: %s%s", connID, script, auditTagSuffix(tag)), txID); err != nil {
 			return err
 		}
 		if !e.history {
@@ -650,10 +663,15 @@ func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID 
 // by the target's implicit-transaction rollback as StatusRolledBack — neither
 // ok (its effect is gone) nor error (it did not fail).
 func (e *Engine) writeOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status, errText, txID string) error {
+	return e.writeOutcomeTagged(ctx, ident, connID, ip, histID, dur, rows, status, errText, txID, "")
+}
+
+// writeOutcomeTagged is writeOutcome with the session tag on the audit line.
+func (e *Engine) writeOutcomeTagged(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status, errText, txID, tag string) error {
 	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.auth.AuditTxCorrelated(tx, ident.UserID(), ip, "exec_result",
-			fmt.Sprintf("conn %d (%s, %d row(s), %dms)%s", connID, status, rows, dur.Milliseconds(),
-				errSuffix(errText)), txID); err != nil {
+			fmt.Sprintf("conn %d (%s, %d row(s), %dms)%s%s", connID, status, rows, dur.Milliseconds(),
+				errSuffix(errText), auditTagSuffix(tag)), txID); err != nil {
 			return err
 		}
 		if !e.history || histID == 0 {
@@ -795,4 +813,12 @@ func (e *Engine) execOn(ctx context.Context, x dao.Execer, sqlText string, res *
 		res.Affected = n
 	}
 	return nil
+}
+
+// auditTagSuffix renders a session tag for an audit line, or nothing.
+func auditTagSuffix(tag string) string {
+	if tag == "" {
+		return ""
+	}
+	return " [" + tag + "]"
 }
