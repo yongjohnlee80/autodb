@@ -292,13 +292,21 @@ func TestPGExtended_AMidSegmentErrorDiscardsThroughSync(t *testing.T) {
 
 // SHAPE G — the Flush behaviour that row 4 of the matrix contracts, and the
 //
-// This is a FINDING, pinned rather than reported in a commit message. Row
-// the Flush row was awaiting a live witness ("F2 routes it to the segment, but no
+// This is a FINDING, pinned rather than reported in a commit message. The Flush
+// row was awaiting a live witness ("F2 routes it to the segment, but no
 // witness drives a client Flush frame"). Driving one shows a standalone Flush
-// delivers NOTHING: after Parse/Bind/Flush the client receives zero frames and
-// the audit records no statement events at all — only conn_open, tls_ok,
-// auth_ok, session_open. Delivery happens on Sync; the segment is not dispatched
+// delivers NOTHING ON THE WIRE: after Parse/Bind/Flush the client receives zero
+// frames until it Syncs. Delivery happens on Sync; the segment is not dispatched
 // on Flush.
+//
+// SCOPE OF THE CLAIM (r1 SF1): this cell observes the WIRE and nothing else. An
+// earlier version said the audit records no statement events either — true of
+// listener events I probed while diagnosing, but this cell never reads the meta
+// store, so the committed claim is the silence it actually witnesses.
+//
+// (Narrowing that by blind substitution first produced a sentence claiming wire
+// silence while still listing audit events, which greps clean and reads as
+// nonsense. Prose corrections need reading, not replacing.)
 //
 // That matters to real clients rather than to a conformance checkbox: Flush is
 // how a paging client gets its first page without ending the transaction, and
@@ -370,8 +378,18 @@ func TestPGExtended_AStandaloneFlushDeliversNothing(t *testing.T) {
 	if len(msgs) == 0 {
 		t.Fatal("nothing followed the Sync")
 	}
-	if got := query(t, fe, "SELECT 42"); hasError(got) {
-		t.Fatalf("the session was not usable after Flush-then-Sync: %v — recovery means the next "+
-			"statement runs, not that some frames arrived", errorText(got))
+	// THE VALUE, not the absence of an error (r1 MF2 residual). hasError ACCEPTS
+	// an empty result, so a stale ReadyForQuery — readUntil consuming the first,
+	// query consuming a duplicate second — leaves the cell green while no
+	// statement ever ran. Juliet's duplicate-readiness mutation proved exactly
+	// that. Recovery means the next statement EXECUTES and returns its row.
+	got := query(t, fe, "SELECT 42")
+	if hasError(got) {
+		t.Fatalf("the session was not usable after Flush-then-Sync: %v", errorText(got))
+	}
+	dr, ok := firstOfType[*pgproto3.DataRow](got)
+	if !ok || len(dr.Values) != 1 || string(dr.Values[0]) != "42" {
+		t.Fatalf("the follow-up statement returned no row with 42 (frames=%v) — an errorless "+
+			"reply proves the wire drained, not that a statement ran", kindsOf(got))
 	}
 }
