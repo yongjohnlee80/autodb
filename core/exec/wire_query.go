@@ -533,16 +533,20 @@ func (f *emitFailure) Unwrap() error { return f.err }
 // What the pinned backend carries as application_name: NOTHING from autodb. The
 // pool is built from the connection's DSN unchanged (dsn.go validates, never
 // decorates) and this function issues no SET on the freshly pinned connection,
-// so on the target every autodb backend for a connection shows the DSN's
-// application_name, if the administrator put one there, or none. The client's
-// own startup application_name (frontdoor §3.1) is recorded on the wire session
-// and its audit rows and echoed back to the client, never forwarded here. A
-// DBA reading pg_stat_activity therefore cannot tell autodb sessions apart by
-// application_name today; the mapping backend → session exists only in autodb's
-// audit. Stamping a structured per-session value at pin time (PostgreSQL caps
-// application_name at 63 bytes, so a short session hash plus the client's label)
-// would close that gap; it changes what the target shows and is Johno's call,
-// not taken as of 2026-09-03.
+// so a new backend shows the DSN's application_name, if the administrator put
+// one there, or none. The client's startup application_name (frontdoor §3.1) is
+// echoed back to the client and never forwarded here; recording it on the
+// session and audit rows is §3.1's contract, awaiting the F1 wire loop. The
+// client CAN still change the backend's value afterwards: SET application_name
+// is refused by the gate, but set_config('application_name', …) is a read-
+// classified function call that runs here and sticks (lector, PR #51). So today
+// a DBA reading pg_stat_activity sees the DSN's value, nothing, or whatever the
+// client chose to write — and cannot map a backend to an autodb session; no
+// backend PID is captured on either side. Stamping a structured per-session
+// value at pin time (PostgreSQL caps application_name at 63 bytes, so a short
+// session hash plus the client's label) would close the mapping gap only if the
+// set_config escape is refused or the stamp is re-asserted; it changes what the
+// target shows and is Johno's call, not taken as of 2026-09-03.
 func (e *Engine) pinWireSession(ctx context.Context, s *session, connRow *meta.Connection) (golibpg.PinnedConn, error) {
 	if pc := s.pinnedConn(); pc != nil {
 		return pc, nil

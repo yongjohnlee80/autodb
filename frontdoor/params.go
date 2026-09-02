@@ -82,25 +82,33 @@ func checkStartupParams(params map[string]string) (refused string, ok bool) {
 // runes: the value lands in audit rows and in a ParameterStatus frame, and
 // both are sized in bytes.
 //
-// WHAT application_name IS through this front door (§3.1, documented 2026-09-03):
+// WHAT application_name IS through this front door (§3.1), as of main
+// 2026-09-03 — present tense only where the code does it today:
 //
 //   - it is the CLIENT's label for itself, accepted from the StartupMessage,
-//     capped as below, recorded on the wire session and on every audit row the
-//     session produces, and echoed back to the client in a ParameterStatus so
-//     drivers that read their own name see it;
-//   - it is NOT forwarded to the target. autodb sets no application_name on
-//     the backend connections it opens (core/exec pins one per wire session;
-//     the pool DSN is validated, never decorated — see core/exec/dsn.go), so on
-//     the TARGET every autodb backend for a connection carries the same value:
-//     whatever the connection's DSN says, or nothing. Two clients that both
-//     call themselves "psql" are indistinguishable there, and so are two that
-//     call themselves nothing. Per-session attribution of a target backend is
-//     therefore autodb-side only — through the session id on the audit rows —
-//     until the pinning path stamps a structured, per-session value (a design
-//     decision Johno has not taken; see core/exec.pinWireSession);
-//   - a client cannot change it after startup: SET application_name is refused
-//     by the session-state gate (not on the benign allowlist), so the recorded
-//     label is the one the client connected with.
+//     capped as below, and echoed back to the client in a ParameterStatus so
+//     drivers that read their own name see it. An over-long value is truncated,
+//     noticed, and the verbatim original is audited (fd.param_truncated);
+//   - recording it on the wire session and on every audit row is §3.1's
+//     CONTRACT, not yet current behaviour: OpenWireSession does not receive it,
+//     the session has no field for it, and exec/exec_result rows carry neither
+//     it nor the wire session id. The matrix claim 3.1:application_name
+//     #session-audit is `awaiting` the F1 wire loop for exactly this reason;
+//   - it is NOT forwarded to the target. autodb sets no application_name on the
+//     backend connections it pins (core/exec pins one per wire session; the pool
+//     DSN is validated, never decorated — see core/exec/dsn.go), so a freshly
+//     pinned backend carries whatever the connection's DSN says, or nothing, and
+//     two clients that both call themselves "psql" are indistinguishable on the
+//     target. No target backend PID is captured either, so backend → session
+//     mapping does not exist today on either side;
+//   - the client CAN change the target backend's value after startup. SET
+//     application_name is refused by the session-state gate (not on the benign
+//     allowlist), but `SELECT set_config('application_name', 'x', false)` is
+//     classified as a read, passes the gate, runs on the pinned backend and
+//     sticks (lector, PR #51 review, proven live). Refusing SET does not make a
+//     GUC immutable. A future per-session stamp at pin time must therefore also
+//     refuse or survive that overwrite; the design decision is Johno's and not
+//     taken (see core/exec.pinWireSession).
 const applicationNameMaxBytes = 256
 
 // paramNote records something §3.1 requires to be AUDITED about an ACCEPTED
