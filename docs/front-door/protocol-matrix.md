@@ -132,10 +132,15 @@ default 1 GiB):
   (`pendingOutputWatermark`), taken before dispatch — and the lane's floor is
   derived from it: **global session cap × watermark**, so that at full occupancy
   every session can hold one output working set; config may only RAISE the lane,
-  and startup refuses a lane below the floor. The other two — segment input (cap
-  96 MiB per segment) and retained statement/portal state (cap 16 MiB per
-  session) — are **caps on one session**, charged as they occur (header first,
-  §1.5) and admitted by **backpressure**: at full occupancy a new segment's
+  and startup refuses a lane below the floor. The other two are **caps on one session**, admitted by
+  **backpressure** rather than reserved. Segment input (cap 96 MiB per segment)
+  is charged as it occurs, header first (§1.5). Retained statement/portal state
+  (cap 16 MiB per session) is charged when a statement or portal is **stored**
+  and released when it is closed, when its statement's cascade takes it, when the
+  transaction ends, or when a simple `Query` destroys the unnamed pair (§4a) —
+  **owed: retained-state charging, F2b.** F2 owns those lifetimes and does not yet
+  charge them, so that clause states the contract, not current behaviour, and §4
+  and §4a stay `awaiting` until it lands. Backpressure: at full occupancy a new segment's
   intake waits for any statement to release its working set, which is the §7
   contract, bounded by the segment-stall budget (§8.4) and §8.2's release on
   every exit. They are deliberately NOT reserved: their sum over the session cap
