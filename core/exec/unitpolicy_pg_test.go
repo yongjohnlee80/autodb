@@ -69,8 +69,10 @@ func TestUnitPolicy_ASmuggledWriteFailsAtTheServer(t *testing.T) {
 	// Created as ROOT, before the session's own role is exercised — the
 	// function existing is a precondition, not part of the subject.
 	if _, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
-		`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS $$ INSERT INTO %s(note) VALUES ('smuggled'); SELECT 1 $$`,
-		fn, table), testIP); err != nil {
+		// A CATALOG function that writes — nextval — is the wrap\'s witness now that the
+		// reader analysis stage (Amendment 6 rule 2) refuses user-defined function calls
+		// before dispatch; the sequence stands in for the old smuggling function.
+		`CREATE SEQUENCE %s`, fn), testIP); err != nil {
 		t.Skipf("cannot create the smuggling function on this target: %v", err)
 	}
 	// DEMOTED ONLY NOW. The fixture's root is the account being demoted, so
@@ -80,7 +82,7 @@ func TestUnitPolicy_ASmuggledWriteFailsAtTheServer(t *testing.T) {
 	if _, err := f.eng.SessionExecute(ctx, f.rootTok, sid, "BEGIN", testIP); err != nil {
 		t.Fatalf("BEGIN as a reader: %v", err)
 	}
-	_, err := f.eng.SessionExecute(ctx, f.rootTok, sid, fmt.Sprintf("SELECT %s()", fn), testIP)
+	_, err := f.eng.SessionExecute(ctx, f.rootTok, sid, fmt.Sprintf("SELECT nextval('%s')", fn), testIP)
 	if err == nil {
 		t.Fatal("a reader wrote a row through a function. The classifier is right that this " +
 			"statement is a SELECT — the write is in the function body, where no lexer can " +
@@ -97,6 +99,11 @@ func TestUnitPolicy_ASmuggledWriteFailsAtTheServer(t *testing.T) {
 		t.Errorf("the refusal was %v; it must carry the TARGET's own 25006, preserved verbatim. "+
 			"A refusal autodb synthesized would mean the write never reached a server that "+
 			"would have stopped it, and the boundary is back to being proxy-enforced", err)
+	}
+	// Nothing reached the table: the target's refusal left it empty (the token path
+	// runs the count as its own unit, outside the reader's transaction).
+	if out, qerr := f.eng.Execute(ctx, f.rootTok, connID, "SELECT count(*) FROM "+table, testIP); qerr != nil || fmt.Sprint(out.Rows[0][0]) != "0" {
+		t.Fatalf("table after the refused write: %v (err %v), want 0 rows", out, qerr)
 	}
 }
 
@@ -115,8 +122,10 @@ func TestUnitPolicy_AReaderCannotUpgradeToReadWrite(t *testing.T) {
 	// demoted, so anything it needs must exist while it still can create it.
 	fnPre := fmt.Sprintf("upgrade_pre_%d", time.Now().UnixNano())
 	if _, cerr := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
-		`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS $$ INSERT INTO %s(note) VALUES ('up'); SELECT 1 $$`,
-		fnPre, table), testIP); cerr != nil {
+		// A CATALOG function that writes — nextval — is the wrap\'s witness now that the
+		// reader analysis stage (Amendment 6 rule 2) refuses user-defined function calls
+		// before dispatch; the sequence stands in for the old smuggling function.
+		`CREATE SEQUENCE %s`, fnPre), testIP); cerr != nil {
 		t.Skipf("cannot create the smuggling function: %v", cerr)
 	}
 	demoteToReader(t, f, connID)
@@ -132,7 +141,7 @@ func TestUnitPolicy_AReaderCannotUpgradeToReadWrite(t *testing.T) {
 	// ActionWrite, so it never reaches the server and proves nothing about
 	// the transaction's access mode. Only a statement the classifier passes
 	// can show where the refusal came from.
-	_, err := f.eng.SessionExecute(ctx, f.rootTok, sid, fmt.Sprintf("SELECT %s()", fnPre), testIP)
+	_, err := f.eng.SessionExecute(ctx, f.rootTok, sid, fmt.Sprintf("SELECT nextval('%s')", fnPre), testIP)
 	if err == nil {
 		t.Fatal("a reader who asked for READ WRITE got one. The access mode must be forced " +
 			"over an explicit request, not merely defaulted — otherwise the wrap is advice")
@@ -151,6 +160,11 @@ func TestUnitPolicy_AReaderCannotUpgradeToReadWrite(t *testing.T) {
 	if len(rows) == 0 {
 		t.Error("the forced downgrade was not audited; a reader who wrote BEGIN READ WRITE " +
 			"asked for something they did not get, and nothing recorded that")
+	}
+	// Nothing reached the table: the target's refusal left it empty (the token path
+	// runs the count as its own unit, outside the reader's transaction).
+	if out, qerr := f.eng.Execute(ctx, f.rootTok, connID, "SELECT count(*) FROM "+table, testIP); qerr != nil || fmt.Sprint(out.Rows[0][0]) != "0" {
+		t.Fatalf("table after the refused write: %v (err %v), want 0 rows", out, qerr)
 	}
 }
 
@@ -248,15 +262,17 @@ func TestUnitPolicy_AutocommitIsWrappedForReaders(t *testing.T) {
 
 	fn := fmt.Sprintf("auto_smuggle_%d", time.Now().UnixNano())
 	if _, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
-		`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS $$ INSERT INTO %s(note) VALUES ('auto'); SELECT 1 $$`,
-		fn, table), testIP); err != nil {
+		// A CATALOG function that writes — nextval — is the wrap\'s witness now that the
+		// reader analysis stage (Amendment 6 rule 2) refuses user-defined function calls
+		// before dispatch; the sequence stands in for the old smuggling function.
+		`CREATE SEQUENCE %s`, fn), testIP); err != nil {
 		t.Skipf("cannot create the smuggling function on this target: %v", err)
 	}
 	demoteToReader(t, f, connID)
 
 	// NO transaction. Straight onto the pool, the way every ordinary client
 	// sends a statement.
-	_, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf("SELECT %s()", fn), testIP)
+	_, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf("SELECT nextval('%s')", fn), testIP)
 	if err == nil {
 		t.Fatal("a reader wrote a row through a function with no transaction open. Wrapping " +
 			"only explicit transactions leaves the common case — one statement, no BEGIN — " +
@@ -266,6 +282,11 @@ func TestUnitPolicy_AutocommitIsWrappedForReaders(t *testing.T) {
 	t.Logf("the target refused it with: %v", err)
 	if !strings.Contains(err.Error(), "25006") {
 		t.Errorf("the refusal was %v; it must carry the target's own 25006", err)
+	}
+	// Nothing reached the table: the target's refusal left it empty (the token path
+	// runs the count as its own unit, outside the reader's transaction).
+	if out, qerr := f.eng.Execute(ctx, f.rootTok, connID, "SELECT count(*) FROM "+table, testIP); qerr != nil || fmt.Sprint(out.Rows[0][0]) != "0" {
+		t.Fatalf("table after the refused write: %v (err %v), want 0 rows", out, qerr)
 	}
 }
 

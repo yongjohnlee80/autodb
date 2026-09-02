@@ -37,6 +37,25 @@ front-door PR against these rules.
    catalog functions used by ordinary queries stay allowed. The target-side
    READ ONLY transaction wrap (F3a item 1) remains as the belt behind the
    analysis, not as the design.
+   **Why these patterns, in PostgreSQL terms** (Johno: "document the reason
+   for rejecting certain types of advanced query … such as GUC concerns and so
+   on so it makes sense"): a user-defined function body runs with the
+   FUNCTION's semantics, not the caller's text — a `SECURITY DEFINER` function
+   runs with its owner's privileges; a `VOLATILE` body can call `set_config()`
+   or `SET` and change session settings (`search_path`, `work_mem`,
+   `statement_timeout`, `application_name`) for the rest of the pinned
+   session, which a READ ONLY transaction does not prevent; a function can
+   shadow a catalog name on the `search_path`; and the body is text the
+   classifier never sees. `DO` runs arbitrary PL/pgSQL inline behind the single
+   verb the classifier sees. `CALL` runs a procedure, and procedures may
+   `COMMIT`/`ROLLBACK` inside their body, which ends the READ ONLY wrap by
+   design. Defining routines is DDL, already refused to readers by class.
+   Catalog functions stay allowed because they ARE the language; no named
+   function is special-cased — `set_config` included — because the wrap plus
+   this class rule is the design, and a plug for one name is not. "User-
+   defined" is answered by the target's own `pg_proc` catalog, cached per
+   connection and invalidated when DDL runs through autodb.
+
 3. **No complexity for its own sake.** A control that exists to make one thing
    work, or to plug one named function, is the wrong shape. The right shape is
    a rule about a CLASS of constructs, applied by the classifier, with the

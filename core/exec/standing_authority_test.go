@@ -480,10 +480,12 @@ func TestStanding_TheWirePathReachesTheSamePolicy(t *testing.T) {
 		"CREATE TABLE "+table+" (id BIGSERIAL PRIMARY KEY, note TEXT NOT NULL)", testIP); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	fn := fmt.Sprintf("wire_smuggle_%d", time.Now().UnixNano())
-	if _, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
-		`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS $$ INSERT INTO %s(note) VALUES ('wire'); SELECT 1 $$`,
-		fn, table), testIP); err != nil {
+	// A CATALOG function that writes — nextval on a sequence — is the wrap's witness
+	// now that the reader analysis stage (Amendment 6 rule 2) refuses user-defined
+	// function calls before dispatch. The stage's own proof lives in
+	// wire_query_reader_pg_test.go; this cell proves the target-side belt.
+	fn := fmt.Sprintf("wire_seq_%d", time.Now().UnixNano())
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(`CREATE SEQUENCE %s`, fn), testIP); err != nil {
 		t.Skipf("cannot create the smuggling function: %v", err)
 	}
 
@@ -514,7 +516,7 @@ func TestStanding_TheWirePathReachesTheSamePolicy(t *testing.T) {
 	}
 
 	t.Run("autocommit: a smuggled write hits the server", func(t *testing.T) {
-		_, err := f.eng.WireExecute(ctx, sid, userID, fmt.Sprintf("SELECT %s()", fn), testIP)
+		_, err := f.eng.WireExecute(ctx, sid, userID, fmt.Sprintf("SELECT nextval('%s')", fn), testIP)
 		if err == nil {
 			t.Fatal("a PAT-backed reader wrote through a function on the wire path")
 		}
@@ -538,7 +540,7 @@ func TestStanding_TheWirePathReachesTheSamePolicy(t *testing.T) {
 		// this assertion's subject. The function body is invisible to the
 		// classifier, so it is the only statement whose refusal can ONLY
 		// have come from the transaction being read-only.
-		_, err := f.eng.WireExecute(ctx, sid, userID, fmt.Sprintf("SELECT %s()", fn), testIP)
+		_, err := f.eng.WireExecute(ctx, sid, userID, fmt.Sprintf("SELECT nextval('%s')", fn), testIP)
 		if err == nil {
 			t.Fatal("a PAT-backed reader who asked for READ WRITE got one: the smuggled write " +
 				"landed inside the transaction they requested")
