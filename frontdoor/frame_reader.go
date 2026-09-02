@@ -47,6 +47,20 @@ import (
 type frameReader struct {
 	src io.Reader
 
+	// buf holds bytes read to FRAME A HEADER that the Backend has not taken yet.
+	// waitHeader reads ahead so the loop can admit a frame header-first; those
+	// bytes are still owed to pgproto3, so Read serves them before touching src.
+	// Without this, reading a header would consume bytes the Backend needs and
+	// the stream would split in two — the failure the shared-reader peek caused.
+	buf []byte
+	// deferred is a framing fault waitHeader found while reading ahead. The
+	// bytes it scanned are already buffered, and Read serves those WITHOUT
+	// re-scanning (they have been scanned once), so the fault has to be carried
+	// or it is lost — which is what an undefined type byte did on the first
+	// version of this: it reached pgproto3 unvalidated and the accurate 08P01
+	// became a bare connection reset.
+	deferred error
+
 	phase   framePhase
 	lenBuf  [4]byte
 	lenHave int
@@ -151,6 +165,19 @@ func (r *frameReader) consumeHeader() (frameHeader, bool) {
 func (r *frameReader) badByte() byte { return r.bad }
 
 func (r *frameReader) Read(p []byte) (int, error) {
+	// Buffered bytes first: they were read to frame a header and are still owed.
+	if len(r.buf) > 0 {
+		n := copy(p, r.buf)
+		r.buf = r.buf[n:]
+		return n, nil
+	}
+	// The buffer is drained; a fault found while reading ahead surfaces now,
+	// with its own identity rather than as a transport failure.
+	if r.deferred != nil {
+		err := r.deferred
+		r.deferred = nil
+		return 0, err
+	}
 	n, err := r.src.Read(p)
 	if n > 0 {
 		if serr := r.scan(p[:n]); serr != nil {
@@ -240,4 +267,47 @@ func (r *frameReader) scan(b []byte) error {
 // — which is what the old peek-succeeded/peek-failed split was.
 func (r *frameReader) midMessage() bool {
 	return r.phase != phaseType || r.lenHave != 0
+}
+
+// waitHeader reads until the NEXT frame's header is framed, so a caller can
+// decide about a frame before its body is delivered.
+//
+// WHY IT EXISTS. Segment admission is header-first when the header happens to be
+// framed already, and fell back to deciding AFTER Receive when it was not — so
+// the crossing frame's body had been decoded before it was refused. That was
+// bounded while the post-auth cap was (wrongly) the 64 KiB pre-auth one; at the
+// documented 64 MiB the same residual becomes a 64 MiB decode, which is why the
+// cap raise and this must land together.
+//
+// The bytes it reads are BUFFERED, not consumed: they are still owed to
+// pgproto3, and a reader that swallowed them would split the stream in two —
+// the exact failure the old peek-a-shared-reader design caused.
+//
+// It returns false when the connection ends before a header completes; the
+// caller's Receive then reports the same condition with its own identity.
+func (r *frameReader) waitHeader() bool {
+	if len(r.pending) > 0 {
+		return true
+	}
+	tmp := make([]byte, 512)
+	for len(r.pending) == 0 {
+		n, err := r.src.Read(tmp)
+		if n > 0 {
+			chunk := append([]byte(nil), tmp[:n]...)
+			if serr := r.scan(chunk); serr != nil {
+				// DO NOT buffer these. The connection ends either way, and
+				// handing them on lets pgproto3 decode the bad frame itself —
+				// its "unknown message type" then MASKS the sentinel, and the
+				// loop reports a transport failure instead of an accurate
+				// 08P01. That is the same masking the reader exists to prevent.
+				r.deferred = serr
+				return false
+			}
+			r.buf = append(r.buf, chunk...)
+		}
+		if err != nil {
+			return false
+		}
+	}
+	return true
 }

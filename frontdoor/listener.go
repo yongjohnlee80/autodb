@@ -82,6 +82,10 @@ type Listener struct {
 	// post-dispatch top-up path without producing four megabytes.
 	testWatermark *int64
 
+	// maxBodyBytes is the configured post-auth per-message cap; zero means
+	// PostAuthMaxBodyLen. Clamped to PostAuthMaxBodyCeiling at use.
+	maxBodyBytes int
+
 	// testLaneWait shortens the lane wait budget so a cell can observe a
 	// saturated lane without waiting the policy thirty seconds for it.
 	testLaneWait *time.Duration
@@ -181,6 +185,10 @@ type Options struct {
 	// Zero takes the 1 GiB default.
 	GeneralLaneBytes int64
 
+	// MaxBodyBytes overrides the post-auth per-message cap. Clamped to
+	// PostAuthMaxBodyCeiling; zero means PostAuthMaxBodyLen.
+	MaxBodyBytes int
+
 	// testOutputCap lowers the cumulative output cap for a cell.
 	testOutputCap *int64
 
@@ -190,6 +198,9 @@ type Options struct {
 
 	// testWatermark lowers the pending-output watermark for a cell.
 	testWatermark *int64
+
+	// maxBodyBytes is the configured post-auth cap, zero for the default.
+	maxBodyBytes int
 
 	// testLaneWait shortens the general-lane wait budget for a cell.
 	testLaneWait *time.Duration
@@ -298,6 +309,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.testSegmentMsgs = opt.testSegmentMsgs
 	l.testSegmentBytes = opt.testSegmentBytes
 	l.testWatermark = opt.testWatermark
+	l.maxBodyBytes = opt.MaxBodyBytes
 	l.testLaneWait = opt.testLaneWait
 	l.testSegmentStall = opt.testSegmentStall
 	laneBytes := opt.GeneralLaneBytes
@@ -690,6 +702,15 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 func (l *Listener) serveSession(ctx context.Context, stream net.Conn, fr *frameReader, be *pgproto3.Backend,
 	tkt *ticket, sess exec.WireSessionResult, params map[string]string, notes []paramNote, peer string, closeReason *string) {
 
+	// THE POST-AUTH BODY CAP, applied at the handoff — after AuthenticationOk and
+	// before the loop (matrix :261/:387). Until this existed the session kept the
+	// PRE-auth bound for its whole life.
+	//
+	// It is raised HERE and not earlier on purpose: everything before this point
+	// is an anonymous peer, and the pre-auth arithmetic (64 connections × 64 KiB)
+	// depends on their bound staying the small one.
+	be.SetMaxBodyLen(l.postAuthBodyLen())
+
 	// The pre-auth slot goes back the moment this connection stops being
 	// anonymous. Holding it for the session's life would let a handful of
 	// long-lived legitimate sessions consume the allowance that exists to
@@ -852,3 +873,17 @@ func (l *Listener) untrack(c net.Conn) {
 // the one place the daemon should ask. A second site testing cfg.Enabled is
 // how a surface ends up half-started.
 func EnabledFrom(cfg config.FrontDoor) bool { return cfg.Enabled }
+
+// postAuthBodyLen is the post-auth per-message cap: the default unless a
+// deployment configured one, and never above the ceiling the lane arithmetic
+// assumes (matrix :478).
+func (l *Listener) postAuthBodyLen() int {
+	n := l.maxBodyBytes
+	if n <= 0 {
+		n = PostAuthMaxBodyLen
+	}
+	if n > PostAuthMaxBodyCeiling {
+		n = PostAuthMaxBodyCeiling
+	}
+	return n
+}

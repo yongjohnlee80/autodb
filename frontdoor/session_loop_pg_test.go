@@ -1512,3 +1512,62 @@ func readUntilReadyPG(t *testing.T, fe *pgproto3.Frontend) {
 	}
 	t.Fatal("no ReadyForQuery within 64 frames")
 }
+
+// THE POST-AUTH BODY CAP (matrix :261, :387 — 64 MiB, configurable to 256 MiB).
+//
+// Vision's finding, verified again here: every SetMaxBodyLen call passed
+// PreAuthMaxBodyLen (64 KiB) and nothing raised it, so a wire session ran its
+// whole life at the bound written for an anonymous pre-auth peer and any message
+// body over 64 KiB died with 08P01.
+//
+// TWO CAPS, NOT ONE — and the first version of this cell conflated them. A 65 KB
+// INSERT is over the front door's (broken) body cap AND over the engine's own
+// [exec] max_statement_bytes, which is a legitimate configured policy at 64 KiB.
+// Fixing the front door changed the refusal from 08P01 to the engine's 54000,
+// which is correct and which a cell asserting only "not refused" would have read
+// as still broken.
+//
+// So this drives a large BIND PARAMETER: a >64 KiB message body that is not a
+// large statement, which is exactly jarvis's cited case (a 100 KB bytea
+// parameter) and isolates the front door's cap from the engine's.
+func TestPGLoop_APostAuthBodyOver64KiBIsAccepted(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, _, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
+	fe := pgClient(t, addr, secret, database)
+
+	payload := strings.Repeat("x", 100*1024)
+
+	fe.Send(&pgproto3.Parse{Name: "big", Query: "SELECT length($1::text)"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "pb", PreparedStatement: "big",
+		Parameters: [][]byte{[]byte(payload)}})
+	fe.Send(&pgproto3.Execute{Portal: "pb"})
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("sending a %d-byte Bind parameter: %v", len(payload), err)
+	}
+
+	var msgs []pgproto3.BackendMessage
+	for {
+		m, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("reading the response to a %d-byte Bind parameter: %v (after %v) — a body "+
+				"over 64 KiB must not kill the connection; the documented post-auth cap is 64 MiB",
+				len(payload), err, kindsOf(msgs))
+		}
+		msgs = append(msgs, snapshot(m))
+		if _, ok := m.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+	if hasError(msgs) {
+		t.Fatalf("a %d-byte Bind parameter was refused: %v", len(payload), errorText(msgs))
+	}
+	dr, ok := firstOfType[*pgproto3.DataRow](msgs)
+	if !ok {
+		t.Fatalf("no row came back; frames=%v", kindsOf(msgs))
+	}
+	if got := string(dr.Values[0]); got != fmt.Sprint(len(payload)) {
+		t.Fatalf("the target measured %s bytes, want %d — the parameter crossed the wire but not "+
+			"intact", got, len(payload))
+	}
+}

@@ -106,12 +106,26 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// happens immediately after Receive instead: the queue is popped either
 		// way, exactly once per Receive, which is what keeps a Sync's reset
 		// landing between the frames it separates.
+		// ADMISSION IS HEADER-FIRST, ALWAYS (the body-skip). It used to be
+		// header-first only when the header happened to be framed already, and
+		// to decide AFTER Receive when it was not — so the crossing frame's body
+		// was decoded before it was refused. That residual was bounded while the
+		// post-auth cap was (wrongly) the 64 KiB PRE-auth one; at the documented
+		// 64 MiB it becomes a 64 MiB decode, which is why this lands with the
+		// cap raise and not after it.
+		//
+		// waitHeader reads only far enough to frame the header and BUFFERS what
+		// it read, so pgproto3 still receives every byte — a reader that
+		// consumed them would split the stream, which is the failure the old
+		// peek-beside-the-Backend design caused.
+		fr.waitHeader()
 		preHeader, hadPre := fr.peekHeader()
 		if hadPre && !l.admitSegmentFrame(conn, be, &seg, preHeader, peer, closeReason) {
 			return nil
 		}
 		msg, err := be.Receive()
 		if hdr, ok := fr.consumeHeader(); ok && !hadPre {
+			// Reached only when the connection ended before a header framed.
 			if !l.admitSegmentFrame(conn, be, &seg, hdr, peer, closeReason) {
 				return nil
 			}
