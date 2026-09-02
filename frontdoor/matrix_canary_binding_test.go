@@ -27,11 +27,14 @@ import (
 func TestBackendCanaries_TheMatrixAndTheCodeAgree(t *testing.T) {
 	doc := matrixDoc(t)
 
-	// The §5 row: a table cell listing the canaries in backticks, followed by
-	// "Never emitted".
-	rowSet := canariesFromRow(t, doc)
-	// The §10 conformance line: the same set in prose.
-	listSet := canariesFromConformanceList(t, doc)
+	// EACH LOOKUP IS BOUNDED TO THE SECTION IT NAMES (r0 MF1). Searching the
+	// whole document for "the §5 row" finds the FIRST matching row anywhere, so
+	// an earlier duplicate becomes a decoy: lector proved that adding a
+	// correct-set row above §5 and then removing FunctionCallResponse from the
+	// real §5 leaves this cell green. A witness that names a location must read
+	// that location.
+	rowSet := canariesFromRow(t, headingBody(t, doc, "5"))
+	listSet := canariesFromConformanceList(t, headingBody(t, doc, "10"))
 	codeSet := backendCanaries()
 
 	if len(rowSet) == 0 || len(listSet) == 0 {
@@ -73,8 +76,9 @@ func assertSameSet(t *testing.T, aName string, a map[string]bool, bName string, 
 	}
 }
 
-// canariesFromRow reads the §5 table row whose decision is "Never emitted".
-func canariesFromRow(t *testing.T, doc string) map[string]bool {
+// canariesFromRow reads the table row whose decision is "Never emitted" from
+// the section body it is given — never from the whole document.
+func canariesFromRow(t *testing.T, section string) map[string]bool {
 	t.Helper()
 	// The DECISION cell must BEGIN with the bold "Never emitted", not merely
 	// contain the phrase. §5 has another row — ReadyForQuery — whose decision
@@ -82,7 +86,7 @@ func canariesFromRow(t *testing.T, doc string) map[string]bool {
 	// alone found that row first and parsed zero canaries from it. The vacuity
 	// check below is what surfaced that; without it this witness would have
 	// compared an empty set to an empty set and passed.
-	for _, line := range strings.Split(doc, "\n") {
+	for _, line := range strings.Split(section, "\n") {
 		if !strings.HasPrefix(line, "|") {
 			continue
 		}
@@ -92,22 +96,26 @@ func canariesFromRow(t *testing.T, doc string) map[string]bool {
 		}
 		return backtickedNames(cells[0])
 	}
-	t.Fatal("no §5 row saying \"Never emitted\" — the matrix moved and this witness must follow it")
+	t.Fatal("§5 has no row whose decision begins \"**Never emitted**\" — the section moved or was " +
+		"rewritten, and this witness refuses to fall back to searching elsewhere for something that " +
+		"looks like it")
 	return nil
 }
 
-// canariesFromConformanceList reads §10's bullet naming the same set.
-func canariesFromConformanceList(t *testing.T, doc string) map[string]bool {
+// canariesFromConformanceList reads the never-emitted bullet from the section
+// body it is given — never from the whole document.
+func canariesFromConformanceList(t *testing.T, section string) map[string]bool {
 	t.Helper()
-	i := strings.Index(doc, "Never-emitted backend canaries")
+	i := strings.Index(section, "Never-emitted backend canaries")
 	if i < 0 {
-		t.Fatal("§10's never-emitted-canaries bullet is gone — the matrix moved and this witness must follow it")
+		t.Fatal("§10 has no never-emitted-canaries bullet — the section moved or was rewritten, and " +
+			"this witness refuses to fall back to searching elsewhere for something that looks like it")
 	}
-	end := strings.Index(doc[i:], "\n\n")
+	end := strings.Index(section[i:], "\n\n")
 	if end < 0 {
-		end = len(doc) - i
+		end = len(section) - i
 	}
-	return expandShorthand(doc[i : i+end])
+	return expandShorthand(section[i : i+end])
 }
 
 // THE NAMES ARE READ, NOT RECOGNISED.
