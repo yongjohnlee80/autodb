@@ -1571,3 +1571,70 @@ func TestPGLoop_APostAuthBodyOver64KiBIsAccepted(t *testing.T) {
 			"intact", got, len(payload))
 	}
 }
+
+// LECTOR'S CAP-TRANSITION EVIDENCE, both halves, kept separate on purpose.
+//
+// (a) THE PHASE TRANSITION ITSELF — that the post-auth cap is the DOCUMENTED
+// 64 MiB and not the pre-auth bound. This is asserted directly rather than
+// inferred from a lowered-cap cell, because lector's caveat is exactly right: a
+// cell run at a configured small cap proves the mechanism and would SILENTLY
+// REPLACE the 64 MiB contract claim if it stood alone.
+func TestPostAuth_TheCapIsTheDocumentedSixtyFourMiB(t *testing.T) {
+	l := &Listener{}
+	if got := l.postAuthBodyLen(); got != PostAuthMaxBodyLen {
+		t.Fatalf("default post-auth cap = %d, want %d (matrix :261/:387)", got, PostAuthMaxBodyLen)
+	}
+	if PostAuthMaxBodyLen != 64<<20 {
+		t.Fatalf("PostAuthMaxBodyLen = %d, want 64 MiB — the matrix's figure, and the whole point "+
+			"of this change was that the session ran at the 64 KiB PRE-auth bound", PostAuthMaxBodyLen)
+	}
+	if PostAuthMaxBodyLen == PreAuthMaxBodyLen {
+		t.Fatal("the post-auth cap equals the pre-auth one, which is the defect this change fixed")
+	}
+	// Configurable, and clamped to the documented ceiling.
+	l2 := &Listener{maxBodyBytes: 1 << 30}
+	if got := l2.postAuthBodyLen(); got != PostAuthMaxBodyCeiling {
+		t.Fatalf("a 1 GiB configuration gave %d, want the %d ceiling (matrix :478)",
+			got, PostAuthMaxBodyCeiling)
+	}
+}
+
+// (b) OVER THE CAP → 08P01, AND THE BODY IS NOT DECODED.
+//
+// Driven at a LOWERED cap so the cell takes milliseconds rather than moving 64
+// MiB, which is legitimate only because (a) above pins the real figure
+// separately — the mechanism here, the contract there.
+//
+// The non-decode half is MEASURED, not asserted: a refusal looks the same on the
+// wire whether or not the body was read, so only the reader's own delivery count
+// can tell them apart.
+func TestPostAuth_AFrameOverTheCapIsRefusedWithoutDecodingItsBody(t *testing.T) {
+	small := 4096
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, _, addr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, MaxBodyBytes: small,
+	})
+	conn, fe := pgClientWithConn(t, addr, secret, database)
+
+	// A statement whose body is comfortably past the configured cap.
+	stmt := "SELECT '" + strings.Repeat("y", small*4) + "'::text"
+	fe.Send(&pgproto3.Query{String: stmt})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("sending a %d-byte statement against a %d-byte cap: %v", len(stmt), small, err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+	msg, err := fe.Receive()
+	if err != nil {
+		t.Fatalf("a frame over the cap must be REFUSED with a frame, not by silence: %v — §7 "+
+			"gives it 08P01 precisely so a client is not left reading a dead socket", err)
+	}
+	e, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("frame = %T, want ErrorResponse; a %d-byte body passed a %d-byte cap", msg, len(stmt), small)
+	}
+	if e.Code != sqlStateProtocolViolation {
+		t.Fatalf("SQLSTATE = %s, want %s — the matrix gives an over-cap frame 08P01 because a "+
+			"stream we refuse to read cannot be resynchronised", e.Code, sqlStateProtocolViolation)
+	}
+}

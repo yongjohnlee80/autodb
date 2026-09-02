@@ -125,6 +125,26 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// peek-beside-the-Backend design caused.
 		fr.waitHeader()
 		preHeader, hadPre := fr.peekHeader()
+
+		// OVER THE POST-AUTH CAP: refused HEADER-FIRST with the frame §7 gives it.
+		//
+		// Left to pgproto3 the connection simply dies — its own SetMaxBodyLen
+		// error surfaces after the loop has nothing to say, so the client reads a
+		// bare reset. The matrix gives this 08P01 "cannot resynchronize a stream
+		// we refuse to read" precisely so a client is told, and the body is never
+		// read because the decision is made from the header.
+		if hadPre && preHeader.declared-4 > l.postAuthBodyLen() {
+			l.onEvent(Event{Kind: "fd.refused", Reason: ruleMessageTooLarge, Peer: peer,
+				Detail: fmt.Sprintf("declared %d bytes past the %d-byte post-auth cap",
+					preHeader.declared-4, l.postAuthBodyLen())})
+			be.Send(gateError("FATAL", sqlStateProtocolViolation,
+				"message body exceeds the maximum size", ruleMessageTooLarge,
+				"the front door does not read a message it has refused; send a smaller one"))
+			_ = l.flushBounded(conn, be)
+			*closeReason = ruleMessageTooLarge
+			return nil
+		}
+
 		if hadPre {
 			if !l.admitSegmentFrame(conn, be, fr, &seg, preHeader, peer, closeReason) {
 				return nil
@@ -897,7 +917,11 @@ const pendingOutputWatermark int64 = 4 << 20
 // ruleOutputWatermark identifies the per-connection backpressure in the audit
 // trail; ruleBudgetBackpressure identifies the process-wide lane's (§7).
 const (
-	ruleOutputWatermark    = "frontdoor/output-watermark"
+	ruleOutputWatermark = "frontdoor/output-watermark"
+	// ruleMessageTooLarge is §7's identity for a declared body past the post-auth
+	// cap. Refused from the HEADER — the body is never read — and the connection
+	// closes, because a stream we will not read cannot be resynchronised.
+	ruleMessageTooLarge    = "frontdoor/message-too-large"
 	ruleBudgetBackpressure = "frontdoor/budget-backpressure"
 )
 
