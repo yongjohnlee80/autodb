@@ -2,7 +2,10 @@ package frontdoor
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -75,6 +78,12 @@ type fakeQueries struct {
 	status byte
 	// err, when set, is returned as a GATE refusal with nothing emitted.
 	err error
+	// stop, when set, is the report the engine wraps an emitter failure in —
+	// exactly as core/exec does. A fake that returned the consumer's error BARE
+	// would leave errors.As finding nothing, so every post-dispatch cell would
+	// silently exercise the unresolved arm and the other five would be untested
+	// while looking covered. Cause is filled in at the point of failure.
+	stop *exec.EmitStopped
 	// txStatus is what WireTxStatus reports (the readiness after a refusal).
 	txStatus byte
 	// txErr, when set, fails the status read.
@@ -104,7 +113,16 @@ func (q *fakeQueries) WireQuery(_ context.Context, _ exec.SessionID, _ int64, sq
 	}
 	for _, m := range msgs {
 		if eerr := emit(m); eerr != nil {
-			return 0, eerr
+			q.mu.Lock()
+			stop := q.stop
+			q.mu.Unlock()
+			if stop == nil {
+				return 0, eerr
+			}
+			// A copy, so a shared template is not mutated across calls.
+			wrapped := *stop
+			wrapped.Cause = eerr
+			return wrapped.TxStatus, &wrapped
 		}
 	}
 	return status, nil
@@ -1500,5 +1518,170 @@ func TestLoop_TheAcceptedApplicationNameReachesTheEngine(t *testing.T) {
 	if echoed != label {
 		t.Fatalf("echoed %q, want %q — the echo comes from what the engine ACCEPTED, so it "+
 			"cannot disagree with what the session records", echoed, label)
+	}
+}
+
+// EVERY ARM, THROUGH THE LOOP. The engine decides which arm; this asserts the
+// loop's story for each one and that no two arms tell the same story.
+//
+// It is table-driven against the fake rather than live PG because the arms are
+// the ENGINE's vocabulary and only some are reachable by arranging a real
+// database — ArmAborted in particular. The live-PG cells prove which arm each
+// real path produces; these prove what the loop says once it has one. Both are
+// needed, and neither substitutes for the other.
+func TestLoop_EveryEmitStoppedArmHasItsOwnStory(t *testing.T) {
+	t.Parallel()
+	cap := int64(64) // small enough that the first frame trips it
+
+	for _, arm := range []struct {
+		name      string
+		stop      *exec.EmitStopped
+		wantIn    string // must appear in what the client is told
+		wantOut   string // the audit's effects= word
+		forbid    string // must NOT appear — the story this arm is confused with
+		wantReady byte   // the readiness byte that must follow, or 0 to not check
+	}{
+		{"no statement", &exec.EmitStopped{Executed: false, TxStatus: exec.TxStatusIdle},
+			"nothing ran", "no_statement", "effects are committed", txStatusIdle},
+		{"failed at the target", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusIdle, TargetErr: &pgconn.PgError{Code: "22012"}},
+			"failed at the target", "failed", "effects are committed", txStatusIdle},
+		{"pending inside a transaction", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusInTx},
+			"PENDING", "pending_commit", "effects are committed", txStatusInTx},
+		{"aborted transaction", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusAborted},
+			"aborted", "aborted", "effects are committed", txStatusAborted},
+		{"completed", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusIdle, Outcome: exec.StatusOK},
+			"effects are committed", "completed", "not known", txStatusIdle},
+		{"unresolved", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusIdle},
+			"not known", "unresolvable", "effects are committed", txStatusIdle},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			t.Parallel()
+			q := okQueries()
+			q.stop = arm.stop
+			q.msgs = []exec.WireMessage{{Kind: "DataRow", Values: [][]byte{make([]byte, 256)}}}
+			events, addr := listenerForArms(t, q, &cap)
+			conn, fe := authenticated(t, addr)
+			defer func() { _ = conn.Close() }()
+
+			fe.Send(&pgproto3.Query{String: "SELECT 1"})
+			if err := fe.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			var told *pgproto3.ErrorResponse
+			for told == nil {
+				msg, err := fe.Receive()
+				if err != nil {
+					t.Fatalf("reading the arm's report: %v", err)
+				}
+				if e, ok := msg.(*pgproto3.ErrorResponse); ok {
+					told = e
+				}
+			}
+			said := told.Message + " " + told.Hint
+			if !strings.Contains(said, arm.wantIn) {
+				t.Fatalf("the client was told %q, want it to contain %q", said, arm.wantIn)
+			}
+			if arm.forbid != "" && strings.Contains(said, arm.forbid) {
+				t.Fatalf("the %s arm told the client %q, which is another arm's story", arm.name, arm.forbid)
+			}
+			if !hasEventDetail(events(), "fd.stmt_outcome", "effects="+arm.wantOut) {
+				t.Fatalf("audit must record effects=%s; events=%v", arm.wantOut, events())
+			}
+
+			// AND THE READINESS BYTE MUST AGREE WITH THE STORY (r0 MF1). Reading
+			// only the ErrorResponse let this table PASS while telling the client
+			// its effects were PENDING and then handing it readiness `I` in the
+			// same cycle — the fixture supplies stopped.TxStatus=T while the
+			// fake's WireTxStatus answers I, so the contradiction was constructed
+			// here and never looked at.
+			rfq, ok := firstOfType[*pgproto3.ReadyForQuery](drainToReady(t, conn, fe))
+			if !ok {
+				t.Fatal("no readiness followed the report; a session-surviving stop owes one")
+			}
+			if arm.wantReady != 0 && rfq.TxStatus != arm.wantReady {
+				t.Fatalf("the client was told %q and then handed readiness %q — one answer, two "+
+					"halves, and they disagree about the transaction", said, rfq.TxStatus)
+			}
+		})
+	}
+}
+
+// listenerForArms starts a loop listener with a lowered output cap.
+func listenerForArms(t *testing.T, q QueryExecutor, cap *int64) (func() []Event, string) {
+	t.Helper()
+	_, events, addr := listenerWith(t, Options{
+		Authn: &fakeAuth{result: goodSession()}, Queries: q,
+		AuthFailuresPerIP: unthrottled, testOutputCap: cap,
+	})
+	return events, addr
+}
+
+// drainToReady reads frames until the cycle's ReadyForQuery, so a cell can
+// assert the readiness byte rather than stopping at the error that precedes it.
+func drainToReady(t *testing.T, conn net.Conn, fe *pgproto3.Frontend) []pgproto3.BackendMessage {
+	t.Helper()
+	// BOUNDED (r1 residual 2). Without a deadline, a mutation that deletes the
+	// readiness byte makes this cell HANG rather than fail — and a cell that
+	// hangs reports nothing, which is the failure mode it was added to catch.
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("bounding the readiness drain: %v", err)
+	}
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	var out []pgproto3.BackendMessage
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("draining to readiness after %d frames: %v — a missing readiness byte must "+
+				"fail here promptly, not hang", len(out), err)
+		}
+		out = append(out, msg)
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			return out
+		}
+	}
+}
+
+// An engine report whose transaction status is not a status leaves the session's
+// phase UNKNOWN, and §6.3 withholds readiness for exactly that. It must not be
+// repaired from a later snapshot: that is the split this PR removed, returning
+// in the one case where the engine's own answer is already suspect.
+func TestLoop_AnInvalidEngineReportWithholdsReadiness(t *testing.T) {
+	t.Parallel()
+	cap := int64(64)
+	q := okQueries()
+	q.stop = &exec.EmitStopped{Executed: true, TxStatus: 'Z'} // not I, T or E
+	q.txStatus = txStatusIdle                                 // a later read WOULD say idle
+	q.msgs = []exec.WireMessage{{Kind: "DataRow", Values: [][]byte{make([]byte, 256)}}}
+	_, addr := listenerForArms(t, q, &cap)
+
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+	fe.Send(&pgproto3.Query{String: "SELECT 1"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			// A CLOSE AND A TIMEOUT ARE DIFFERENT OUTCOMES, and accepting both
+			// as success is what the previous version did. §6.3 says the session
+			// ENDS without readiness; a session that neither sends readiness nor
+			// closes is a hang, which is worse than the defect this cell guards
+			// — and it would have passed here.
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				t.Fatalf("no readiness and no close within the budget: the session HUNG. §6.3 "+
+					"withholds the byte by ENDING the session, not by going quiet (%v)", err)
+			}
+			return // the connection ended without readiness, which is the rule
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			t.Fatal("readiness was sent for a session whose phase the engine could not state — " +
+				"the byte was repaired from a later snapshot, which is the split this PR removed")
+		}
 	}
 }

@@ -271,7 +271,10 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 
 	switch {
 	case acct.withheld != outputComplete:
-		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, acct.targetFailed)
+		// nil: the extended engine path does not wrap its emitter failures in
+		// exec.EmitStopped yet, so this stop arrives with no arm and the
+		// emitter's own observation is what is available. See recordedEffects.
+		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, nil, acct.targetFailed)
 
 	case acct.writeErr != nil:
 		l.onEvent(Event{Kind: "fd.conn_close", Reason: "write-failed", Peer: peer, Detail: acct.writeErr.Error()})
