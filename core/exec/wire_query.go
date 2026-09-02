@@ -360,8 +360,9 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 				return e.wireTargetError(s, cerr, emit)
 			}
 			if eerr := emit(WireMessage{Kind: "CommandComplete", Tag: controlCommandTag(res)}); eerr != nil {
+				// The control RAN (the owner returned): the client was not told.
 				_ = record()
-				return 0, eerr
+				return 0, e.emitStopped(s, eerr, StatusOK, true, nil)
 			}
 			continue
 		}
@@ -408,8 +409,10 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		group := el.first // statement index the next CommandComplete belongs to
 		failed := -1
 		emitFailedAt := -1 // first statement index whose frames the client did NOT receive
+		cutStmt := -1      // the statement the frame that failed to emit belonged to
 		var targetErr *pgconn.PgError
 		status, derr := sq.SimpleQuery(runCtx, segment, func(m golibpg.ExtendedMessage) error {
+			owner := group // before CommandComplete advances it
 			switch m.Kind {
 			case "CommandComplete":
 				if group <= el.last {
@@ -425,6 +428,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			}
 			if eerr := emit(wireFromExtended(m)); eerr != nil {
 				emitFailedAt = group
+				cutStmt = owner
 				return &emitFailure{err: eerr}
 			}
 			return nil
@@ -435,6 +439,19 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 
 		var ef *emitFailure
 		consumerErr := errors.As(derr, &ef)
+		// stopped carries the RECORDED outcome of the cut statement to the loop
+		// (EmitStopped): the audit row and the client's error tell one story.
+		stopped := func() error {
+			i := cutStmt
+			if i < el.first || i > el.last {
+				i = el.last
+			}
+			var te *pgconn.PgError
+			if failed == i {
+				te = targetErr
+			}
+			return e.emitStopped(s, ef.err, outcomes[i].status, outcomes[i].ran, te)
+		}
 		if derr != nil && !consumerErr {
 			// The WIRE failed (transport, or control reached the raw face, which
 			// the gate makes impossible): the pinned handle is poisoned and this
@@ -484,7 +501,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 				}
 			}
 			_ = record()
-			return 0, ef.err
+			return 0, stopped()
 		}
 		if failed >= 0 {
 			// The target refused statement `failed`: it carries the target's
@@ -506,7 +523,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 				return 0, rerr
 			}
 			if consumerErr {
-				return 0, ef.err // the target's outcome was observed; the client was not told
+				return 0, stopped() // the target's outcome was observed; the client was not told
 			}
 			return s.wireTxStatus()
 		}
@@ -523,7 +540,7 @@ func (e *Engine) wireTargetError(s *session, err error, emit func(WireMessage) e
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		if eerr := emit(WireMessage{Kind: "ErrorResponse", Err: pgErr}); eerr != nil {
-			return 0, eerr
+			return 0, e.emitStopped(s, eerr, StatusError, true, pgErr)
 		}
 		return s.wireTxStatus()
 	}
@@ -649,7 +666,8 @@ func (e *Engine) wireQueryDecoded(ctx context.Context, s *session, pol UnitPolic
 	}
 	for _, m := range decodedWireMessages(res) {
 		if eerr := emit(m); eerr != nil {
-			return 0, eerr
+			// The unit COMPLETED before anything was emitted; only delivery failed.
+			return 0, e.emitStopped(s, eerr, StatusOK, true, nil)
 		}
 	}
 	return s.wireTxStatus()
