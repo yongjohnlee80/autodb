@@ -123,7 +123,7 @@ var matrixTriage = map[string]struct {
 	// below keeps those citations and anchors inside the named test cells.
 	"3.1:user":                {covered, "claims below prove requiredness and the PAT-owner cross-check"},
 	"3.1:database":            {covered, "claims below prove requiredness and the grant-on-target check"},
-	"3.1:application_name":    {covered, "derived from its claims — acceptance (TestStartup_ParameterPolicy) and the 256-byte truncate+notice+audit (TestStartup_ApplicationNameIsCappedAt256Bytes)"},
+	"3.1:application_name":    {awaiting, "derived from its claims — #accepted and #truncate-notice-256 are covered; #session-audit (recorded on the session and every audit row) awaits the F1 WIRE LOOP, so the parent stays awaiting (lector PR #46 r0 MF1)"},
 	"3.1:client_encoding":     {awaiting, "partial — claims below (the UTF8-only gate is proven; the target-lease UTF8 pin, ruling 2, needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub)"},
 	"3.1:options":             {covered, "derived from its claims — GUC refusal and empty-accepted (TestStartup_ParameterPolicy), empty-options audit (TestStartup_EmptyOptionsIsAuditedAsIgnored)"},
 	"3.1:replication":         {covered, "single claim below — refused, every tested value"},
@@ -215,6 +215,12 @@ var claimTriage = map[string]struct {
 	"3.1:application_name#truncate-notice-256": {covered, "TestStartup_ApplicationNameIsCappedAt256Bytes",
 		"over 256 bytes: the echoed ParameterStatus is the rune-safe 256-byte prefix, a NoticeResponse is sent, and fd.param_truncated audits the verbatim original",
 		[]string{"fd.param_truncated", "*pgproto3.NoticeResponse", "applicationNameMaxBytes"}},
+	// The THIRD guarantee in row 199 — "recorded on session + every audit row" — had
+	// no claim, so the derivation could not see it and the parent was falsely
+	// promoted (lector PR #46 r0 MF1). A missing claim is invisible to the gate;
+	// only a present-and-awaiting one keeps the parent honest.
+	"3.1:application_name#session-audit": {awaiting, "",
+		"recorded on the session and on every audit row — fd.auth_ok's detail omits it and WireSessionResult cannot carry it; the session and audit rows are the F1 WIRE LOOP's, so this awaits it", nil},
 
 	"3.1:client_encoding#utf8-only": {covered, "TestStartup_ParameterPolicy",
 		"non-UTF8 refused, hyphen spelling tolerated",
