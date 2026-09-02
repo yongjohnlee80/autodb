@@ -440,10 +440,10 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 		// peer's — a target emitting something impossible (§5's never-emitted
 		// canaries) lands here. Say so accurately and close; forwarding a guess
 		// would be worse than stopping.
-		l.onEvent(Event{Kind: "fd.refused", Reason: ruleUnframeableMessage, Peer: peer, Detail: acct.emitErr.Error()})
+		l.onEvent(Event{Kind: "fd.refused", Reason: unframeableAudit(acct.emitErr), Peer: peer, Detail: acct.emitErr.Error()})
 		be.Send(gateError("FATAL", sqlStateProtocolViolation,
-			"the server produced a message the front door cannot forward", ruleProtocolViolation,
-			"this is a front-door defect; the statement's outcome is unknown"))
+			unframeableMessageText(acct.emitErr), ruleProtocolViolation,
+			unframeableHint(acct.emitErr)))
 		_ = l.flushBounded(conn, be)
 		*closeReason = "unframeable-message"
 		return false
@@ -648,6 +648,45 @@ var errUnframeableKind = errors.New("unframeable backend message kind")
 // about this" and "we decided this is impossible" indistinguishable, which is
 // the confusion the vocabulary convention exists to prevent.
 var errCanaryMessage = errors.New("backend message whose arrival is itself a defect")
+
+// ruleClassifierBypass is the audit cause for a §5 canary arriving from the
+// target.
+//
+// SEPARATE FROM ruleUnframeableMessage, and the separation is the point. A canary
+// means something reached the target that CLASSIFICATION was supposed to refuse —
+// a gate bypass. Auditing it as an unframeable message records a security event
+// as our mapper being incomplete, and sends an operator to debug the front door
+// while the thing that actually happened goes unnamed. The wire still gets the
+// catalogue's violation id (§7 names one id for that class); the AUDIT gets the
+// defect, which is the §1.2 split.
+const ruleClassifierBypass = "frontdoor/classifier-bypass"
+
+// unframeableAudit picks the audit identity for a message the front door would
+// not forward: a deliberate canary refusal, or a kind it has no case for.
+func unframeableAudit(err error) string {
+	if errors.Is(err, errCanaryMessage) {
+		return ruleClassifierBypass
+	}
+	return ruleUnframeableMessage
+}
+
+// unframeableMessageText is what the PEER is told, which differs for the same
+// reason: "the front door cannot forward this" is false for a canary — the front
+// door understood it exactly and refused it.
+func unframeableMessageText(err error) string {
+	if errors.Is(err, errCanaryMessage) {
+		return "the server produced a message that cannot occur through this front door"
+	}
+	return "the server produced a message the front door cannot forward"
+}
+
+// unframeableHint is the remediation half of the same split.
+func unframeableHint(err error) string {
+	if errors.Is(err, errCanaryMessage) {
+		return "this indicates a statement reached the target that classification refuses; the statement's outcome is unknown"
+	}
+	return "this is a front-door defect; the statement's outcome is unknown"
+}
 
 // ruleUnframeableMessage is the audit cause for a backend message the front door
 // cannot turn into a frame. It is a front-door defect, so it is audited under

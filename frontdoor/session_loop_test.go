@@ -569,7 +569,18 @@ func TestLoop_ExtendedSegmentReachesTheEngineAndSyncEndsIt(t *testing.T) {
 }
 
 // Witness for row 5:CopyInResponse.
-func TestLoop_ImpossibleBackendMessageIsAFrontDoorDefectAndCloses(t *testing.T) {
+//
+// A §5 CANARY arriving is a CLASSIFIER BYPASS, and the audit must say so.
+//
+// This cell previously asserted ruleUnframeableMessage — the identity for a
+// message the front door has no case for — and passing was what made the
+// conflation look correct. The two are different events: an unframeable message
+// is our mapper being incomplete, while a canary means something reached the
+// target that classification was supposed to refuse. Recording the second as the
+// first sends an operator to debug the front door while the security-relevant
+// event goes unnamed. Wire identity stays the catalogue's §7 violation id; the
+// AUDIT carries the defect (§1.2).
+func TestLoop_ACanaryIsAuditedAsAClassifierBypassAndCloses(t *testing.T) {
 	t.Parallel()
 	q := okQueries()
 	q.msgs = []exec.WireMessage{{Kind: "NotificationResponse",
@@ -586,13 +597,54 @@ func TestLoop_ImpossibleBackendMessageIsAFrontDoorDefectAndCloses(t *testing.T) 
 	if err != nil {
 		t.Fatalf("reading the failure: %v", err)
 	}
-	if e, ok := msg.(*pgproto3.ErrorResponse); !ok || e.Severity != "FATAL" {
+	e, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok || e.Severity != "FATAL" {
 		t.Fatalf("frame = %T (%v), want a FATAL ErrorResponse", msg, msg)
+	}
+	if e.Code != sqlStateProtocolViolation {
+		t.Errorf("wire code = %q, want the catalogue's %q", e.Code, sqlStateProtocolViolation)
+	}
+	waitFor(t, "the bypass to be audited as a bypass", func() bool {
+		ev, ok := find(events(), "fd.refused")
+		return ok && ev.Reason == ruleClassifierBypass
+	})
+	for _, ev := range events() {
+		if ev.Kind == "fd.refused" && ev.Reason == ruleUnframeableMessage {
+			t.Fatal("a classifier bypass was audited as an unframeable message; that records a gate bypass " +
+				"as our mapper being incomplete and leaves the real event unnamed")
+		}
+	}
+}
+
+// ...and the OTHER identity still has a witness: a kind the front door genuinely
+// has no case for is a front-door defect, and must not be dressed up as a bypass.
+//
+// Without this cell the split above could be satisfied by auditing everything as
+// a bypass, which would be the same conflation pointing the other way.
+func TestLoop_AnUnknownMessageKindIsAFrontDoorDefect(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.msgs = []exec.WireMessage{{Kind: "NoSuchBackendMessage"}}
+	events, addr := loopListener(t, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Query{String: "SELECT 1"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("reading the failure: %v", err)
 	}
 	waitFor(t, "the defect to be audited under its own cause", func() bool {
 		ev, ok := find(events(), "fd.refused")
 		return ok && ev.Reason == ruleUnframeableMessage
 	})
+	for _, ev := range events() {
+		if ev.Kind == "fd.refused" && ev.Reason == ruleClassifierBypass {
+			t.Fatal("a kind we simply do not handle was audited as a classifier bypass")
+		}
+	}
 }
 
 // An engine status byte outside the protocol's three is never forwarded: it is

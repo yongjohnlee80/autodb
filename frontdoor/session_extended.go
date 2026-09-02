@@ -260,10 +260,10 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 		return false
 
 	case acct.emitErr != nil:
-		l.onEvent(Event{Kind: "fd.refused", Reason: ruleUnframeableMessage, Peer: peer, Detail: acct.emitErr.Error()})
+		l.onEvent(Event{Kind: "fd.refused", Reason: unframeableAudit(acct.emitErr), Peer: peer, Detail: acct.emitErr.Error()})
 		be.Send(gateError("FATAL", sqlStateProtocolViolation,
-			"the server produced a message the front door cannot forward", ruleProtocolViolation,
-			"this is a front-door defect; the statement's outcome is unknown"))
+			unframeableMessageText(acct.emitErr), ruleProtocolViolation,
+			unframeableHint(acct.emitErr)))
 		_ = l.flushBounded(conn, be)
 		*closeReason = "unframeable-message"
 		return false
