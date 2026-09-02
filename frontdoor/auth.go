@@ -322,7 +322,10 @@ func (l *Listener) completeHandshake(be *pgproto3.Backend, res exec.WireSessionR
 func synthesizedStatuses(res exec.WireSessionResult, params map[string]string) []pgproto3.BackendMessage {
 	return []pgproto3.BackendMessage{
 		// The echo of §3.1's accepted application_name. Absent is a legal
-		// startup, and an empty echo is the honest answer to it.
+		// startup, and an empty echo is the honest answer to it. This is the
+		// CLIENT's own label coming back to it — not a value read from the
+		// target, which is never sent it at startup (a client can still change
+		// the backend's own GUC later through set_config(); see params.go).
 		&pgproto3.ParameterStatus{Name: "application_name", Value: params["application_name"]},
 		// ALWAYS off. A client asking whether it is superuser is asking a
 		// question about the TARGET's role, and the answer through this

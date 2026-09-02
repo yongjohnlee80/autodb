@@ -79,8 +79,39 @@ func checkStartupParams(params map[string]string) (refused string, ok bool) {
 }
 
 // applicationNameMaxBytes is §3.1's cap on application_name. BYTES, not
-// runes: the value lands in audit rows and in a ParameterStatus frame, and
-// both are sized in bytes.
+// runes: the value lands in a ParameterStatus frame, and an over-limit original
+// lands in the fd.param_truncated audit detail — both sized in bytes. (Ordinary
+// values are not recorded anywhere yet; see the contract note below.)
+//
+// WHAT application_name IS through this front door (§3.1), as of main
+// 2026-09-03 — present tense only where the code does it today:
+//
+//   - it is the CLIENT's label for itself, accepted from the StartupMessage,
+//     capped as below, and echoed back to the client in a ParameterStatus so
+//     drivers that read their own name see it. An over-long value is truncated,
+//     noticed, and the verbatim original is audited (fd.param_truncated);
+//   - recording it on the wire session and on every audit row is §3.1's
+//     CONTRACT, not yet current behaviour: OpenWireSession does not receive it,
+//     the session has no field for it, and exec/exec_result rows carry neither
+//     it nor the wire session id. The matrix claim 3.1:application_name
+//     #session-audit is `awaiting` the F1 wire loop for exactly this reason;
+//   - it is NOT forwarded to the target. autodb sets no application_name on the
+//     backend connections it pins (core/exec pins one per wire session; the pool
+//     DSN is validated, never decorated — see core/exec/dsn.go), so a freshly
+//     pinned backend carries the target's own effective startup default: the
+//     DSN's value if the administrator supplied one, otherwise whatever
+//     server, database or role default applies (ALTER DATABASE / ALTER ROLE …
+//     SET application_name), commonly empty. Two clients that both call
+//     themselves "psql" are indistinguishable on the target. No target backend PID is captured either, so backend → session
+//     mapping does not exist today on either side;
+//   - the client CAN change the target backend's value after startup. SET
+//     application_name is refused by the session-state gate (not on the benign
+//     allowlist), but `SELECT set_config('application_name', 'x', false)` is
+//     classified as a read, passes the gate, runs on the pinned backend and
+//     sticks (lector, PR #51 review, proven live). Refusing SET does not make a
+//     GUC immutable. A future per-session stamp at pin time must therefore also
+//     refuse or survive that overwrite; the design decision is Johno's and not
+//     taken (see core/exec.pinWireSession).
 const applicationNameMaxBytes = 256
 
 // paramNote records something §3.1 requires to be AUDITED about an ACCEPTED
