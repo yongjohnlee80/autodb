@@ -459,3 +459,16 @@ func (r *frameReader) wasSkipped() bool {
 	r.skipped = false
 	return was
 }
+
+// drainSkipped consumes a refused frame that the loop chose not to Receive.
+//
+// A skipped frame must leave the wire somehow. Letting Receive do it means the
+// loop processes whatever comes back — a frame it never admitted — and the
+// boundary is off for exactly the frames it exists to bound. So the loop drains
+// the refusal itself and moves to the next header.
+func (r *frameReader) drainSkipped() error {
+	if r.skip == 0 {
+		return nil
+	}
+	return r.drainSkip()
+}

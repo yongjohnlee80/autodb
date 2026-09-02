@@ -132,9 +132,21 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			// Admitted frames are released to pgproto3 one at a time; a refused
 			// one is not released at all, which is what keeps its body out of
 			// pgproto3's private buffer and reachable by the skip.
-			if !fr.wasSkipped() {
-				fr.allow(preHeader)
+			if fr.wasSkipped() {
+				// The frame was refused. Drain it here and take the next header:
+				// calling Receive would hand the loop a frame it never admitted,
+				// which turns the boundary off for precisely the frames it
+				// exists to bound — and left the discard never reaching Sync.
+				if derr := fr.drainSkipped(); derr != nil {
+					return l.endOfRead(conn, be, fr, &seg, derr, peer, closeReason)
+				}
+				// NO consumeHeader here: skipFrame already popped this frame's
+				// header. A second pop discards the NEXT header — the Sync's —
+				// while its bytes stay on the wire, so nothing ever frames again
+				// and the discard never ends.
+				continue
 			}
+			fr.allow(preHeader)
 		}
 		msg, err := be.Receive()
 		if hdr, ok := fr.consumeHeader(); ok && !hadPre {
