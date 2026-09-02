@@ -52,6 +52,11 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 	// read; a frame already in progress when a cycle starts is covered by the
 	// entry check below, because the callback cannot fire twice for one message
 	// and a message read ahead during auth has already spent its start.
+	// The delivery boundary is runSession's alone (lector's audit): auth and
+	// defaultSession share this reader and admit nothing.
+	fr.setBounded(true)
+	defer fr.setBounded(false)
+
 	fr.setOnStart(func() {
 		_ = conn.SetDeadline(l.now().Add(l.dl.frameStall))
 	})
@@ -120,8 +125,16 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// peek-beside-the-Backend design caused.
 		fr.waitHeader()
 		preHeader, hadPre := fr.peekHeader()
-		if hadPre && !l.admitSegmentFrame(conn, be, fr, &seg, preHeader, peer, closeReason) {
-			return nil
+		if hadPre {
+			if !l.admitSegmentFrame(conn, be, fr, &seg, preHeader, peer, closeReason) {
+				return nil
+			}
+			// Admitted frames are released to pgproto3 one at a time; a refused
+			// one is not released at all, which is what keeps its body out of
+			// pgproto3's private buffer and reachable by the skip.
+			if !fr.wasSkipped() {
+				fr.allow(preHeader)
+			}
 		}
 		msg, err := be.Receive()
 		if hdr, ok := fr.consumeHeader(); ok && !hadPre {

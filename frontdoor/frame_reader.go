@@ -73,6 +73,27 @@ type frameReader struct {
 	// — so it has to be measured rather than asserted (lector r0).
 	delivered int
 
+	// skipped records that the last admission decision was a refusal.
+	skipped bool
+
+	// bounded turns the delivery boundary ON, and it is ON ONLY INSIDE
+	// runSession. auth and defaultSession use this same reader and admit
+	// nothing, so a boundary applying to them would starve the credential
+	// exchange and the no-Queries path (lector's Receive-site audit: exactly
+	// three sites, and runExtended is not one — it is reached only after
+	// runSession's receive).
+	bounded bool
+
+	// deliverable bounds what may reach pgproto3 while bounded: the bytes of the
+	// frame the loop has ADMITTED, and not one more.
+	//
+	// Handing over whole buffers let pgproto3's chunkReader read ahead and
+	// privately buffer future BODIES; at a crossing header there was then
+	// nothing left for the skip to discard, so it consumed the following Sync
+	// and the segment desynchronised. A frame the loop has not admitted must not
+	// be inside pgproto3 at all.
+	deliverable int
+
 	phase   framePhase
 	lenBuf  [4]byte
 	lenHave int
@@ -184,11 +205,26 @@ func (r *frameReader) Read(p []byte) (int, error) {
 			return 0, err
 		}
 	}
+	room := len(p)
+	if r.bounded && r.deliverable < room {
+		room = r.deliverable
+	}
+	if room <= 0 {
+		// Nothing admitted. This is reached when the loop could not frame a
+		// header — a closed connection — so the read goes THROUGH to surface the
+		// transport's own error. Blocking here replaced a clean EOF with a
+		// front-door error and turned ordinary disconnects into failures, which
+		// is what broke the extended cells on the first attempt.
+		room = len(p)
+	}
 	// Buffered bytes first: they were read to frame a header and are still owed.
 	if len(r.buf) > 0 {
-		n := copy(p, r.buf)
+		n := copy(p[:room], r.buf)
 		r.buf = r.buf[n:]
 		r.delivered += n
+		if r.deliverable >= n {
+			r.deliverable -= n
+		}
 		return n, nil
 	}
 	// The buffer is drained; a fault found while reading ahead surfaces now,
@@ -198,9 +234,12 @@ func (r *frameReader) Read(p []byte) (int, error) {
 		r.deferred = nil
 		return 0, err
 	}
-	n, err := r.src.Read(p)
+	n, err := r.src.Read(p[:room])
 	if n > 0 {
 		r.delivered += n
+		if r.deliverable >= n {
+			r.deliverable -= n
+		}
 		if serr := r.scan(p[:n]); serr != nil {
 			// The connection ends either way, so the bytes already read do not
 			// need to be handed on; reporting the framing fault immediately is
@@ -310,7 +349,9 @@ func (r *frameReader) waitHeader() bool {
 	if len(r.pending) > 0 {
 		return true
 	}
-	tmp := make([]byte, 512)
+	// AT MOST THE HEADER: one byte at a time is the only size that cannot
+	// overshoot a five-byte header and put an unadmitted body out of reach.
+	tmp := make([]byte, 1)
 	for len(r.pending) == 0 {
 		n, err := r.src.Read(tmp)
 		if n > 0 {
@@ -343,6 +384,7 @@ func (r *frameReader) waitHeader() bool {
 // WHETHER we decode — and a surviving mutation told me so, which I first read as
 // a missing cell rather than a missing feature.
 func (r *frameReader) skipFrame(h frameHeader) {
+	r.skipped = true
 	// One type byte plus the declared length, which counts its own four bytes.
 	r.skip += 1 + h.declared
 	// POP THE REFUSED HEADER. Every Receive pops exactly one header (lector C r2
@@ -403,3 +445,17 @@ func (r *frameReader) drainSkip() error {
 // deliveredBytes reports how much has reached the Backend, for cells measuring
 // that a refused frame's body did not.
 func (r *frameReader) deliveredBytes() int { return r.delivered }
+
+// allow admits a frame for delivery: pgproto3 may now see exactly its bytes.
+func (r *frameReader) allow(h frameHeader) { r.deliverable += 1 + h.declared }
+
+// setBounded turns the delivery boundary on. runSession only.
+func (r *frameReader) setBounded(on bool) { r.bounded = on }
+
+// wasSkipped reports whether the last admission decision was a refusal, so the
+// loop does not allow a frame it just skipped.
+func (r *frameReader) wasSkipped() bool {
+	was := r.skipped
+	r.skipped = false
+	return was
+}
