@@ -1,6 +1,7 @@
 package frontdoor
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -39,6 +40,12 @@ type Listener struct {
 	// cancels resolves CancelRequest pairs (row 2.3). Nil degrades to
 	// fd.cancel_stale on every cancel, for the same honesty as a nil authn.
 	cancels CancelExecutor
+
+	// queries runs statements on an authenticated session (F1's loop). Nil is
+	// legal and honest in the same way a nil authn is: a build with no engine
+	// behind the query path refuses every statement and says so, rather than
+	// accepting one it cannot run.
+	queries QueryExecutor
 
 	// admit holds every accept-time budget and the per-source throttle.
 	admit *admitter
@@ -140,6 +147,10 @@ type Options struct {
 	// OnSession runs after ReadyForQuery('I'). Nil takes the default.
 	OnSession SessionHandler
 
+	// Queries is the engine seam for the post-auth query path. Nil refuses
+	// every statement with an accurate error rather than pretending.
+	Queries QueryExecutor
+
 	// The caps. Zero takes the documented default; Open validates the
 	// relationship between them rather than trusting a caller to have done
 	// the arithmetic, because the one that matters — the control lane
@@ -227,6 +238,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.authn = opt.Authn
 	l.cancels = opt.Cancels
 	l.onSession = opt.OnSession
+	l.queries = opt.Queries
 	l.admit = newAdmitter(caps.maxConns, caps.preAuthMax, caps.failures, caps.lane, l.now)
 	l.dl = defaultDeadlines()
 	l.authSlots = make(chan struct{}, caps.workers)
@@ -547,7 +559,19 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		for _, n := range out.Notes {
 			l.onEvent(Event{Kind: paramNoteEventKind(n), Reason: n.Kind, Peer: peer, Detail: n.Detail})
 		}
-		be := pgproto3.NewBackend(stream, stream)
+		// The Backend decodes from a BUFFERED reader so the session loop can
+		// peek the next message's type byte without consuming it (matrix row
+		// 4:Unknown-message-type-byte): pgproto3 reports an undefined type as
+		// an unstructured error that cannot be told from a transport failure,
+		// and the two demand different answers.
+		//
+		// The buffer is not charged. §8.4's third term — "the bufio.Reader, the
+		// TLS record buffers, the pgproto3 chunk reader" — is bounded by
+		// MaxFrontendConns rather than charged per connection, because unlike
+		// segment input it cannot grow with what a peer sends (admission.go's
+		// ControlLanePerConn note).
+		br := bufio.NewReader(stream)
+		be := pgproto3.NewBackend(br, stream)
 		be.SetMaxBodyLen(PreAuthMaxBodyLen)
 		var aerr error
 		outcome, aerr = l.runAuth(ctx, stream, be, out.Params, peer)
@@ -565,7 +589,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 			return
 		}
 		if outcome.Denied == "" {
-			l.serveSession(ctx, stream, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
+			l.serveSession(ctx, stream, br, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
 			return
 		}
 	} else {
@@ -587,7 +611,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 }
 
 // serveSession completes row 2.9 and runs the authenticated connection.
-func (l *Listener) serveSession(ctx context.Context, stream net.Conn, be *pgproto3.Backend,
+func (l *Listener) serveSession(ctx context.Context, stream net.Conn, br *bufio.Reader, be *pgproto3.Backend,
 	tkt *ticket, sess exec.WireSessionResult, params map[string]string, notes []paramNote, peer string, closeReason *string) {
 
 	// The pre-auth slot goes back the moment this connection stops being
@@ -649,11 +673,21 @@ func (l *Listener) serveSession(ctx context.Context, stream net.Conn, be *pgprot
 		return
 	}
 
-	handler := l.onSession
-	if handler == nil {
-		handler = l.defaultSession
+	// An explicit OnSession still wins — it is the override seam. Otherwise the
+	// real loop runs whenever there is an engine behind it, and defaultSession
+	// remains only for a build with no query path at all, where refusing every
+	// statement with an accurate 0A000 is the honest answer rather than
+	// accepting one nothing can run.
+	var err error
+	switch {
+	case l.onSession != nil:
+		err = l.onSession(ctx, stream, be, sess)
+	case l.queries != nil:
+		err = l.runSession(ctx, stream, br, be, sess, peer, &sessionReason)
+	default:
+		err = l.defaultSession(ctx, stream, be, sess)
 	}
-	if err := handler(ctx, stream, be, sess); err != nil {
+	if err != nil {
 		sessionReason = "session-error"
 		l.onLog(fmt.Sprintf("frontdoor: the session for %s: %v", peer, err))
 	}
