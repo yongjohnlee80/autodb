@@ -446,24 +446,36 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			}
 			return 0, wireFaceLost(derr)
 		}
+		// golib drained the target's answer through ReadyForQuery even when the
+		// consumer failed, and the status it returns is the TARGET's word on the
+		// transaction: it goes into the session's track BEFORE any return, or the
+		// local gate would keep saying T over a backend that is in E (PR #50 MF5).
+		s.noteWireStatus(status)
 		if consumerErr && failed < 0 {
 			// The client's connection failed and golib drained the rest of the
 			// target's answer WITHOUT delivering it: the engine never observed the
-			// tail. Nothing unobserved may be recorded as ok (PR #50 MF4). Inside
-			// the client's explicit transaction a statement seen to complete keeps
-			// pending_commit — its fate is the transaction's, resolved by the
-			// projection; everything else in this segment is unresolvable, and in
-			// an IMPLICIT block that includes the observed ones, because whether
-			// the target kept them depends on the tail nobody saw.
+			// tail. Nothing unobserved may be recorded as ok (PR #50 MF4). What the
+			// drained status proves, and only that, is used:
+			//   - inside the client's explicit transaction, a drained T means no
+			//     statement failed, so every statement of the segment completed —
+			//     pending_commit for all (their fate is the transaction's); a
+			//     drained E means one failed, unknown which — the observed-complete
+			//     ones keep pending_commit, the rest are unresolvable;
+			//   - in an IMPLICIT block the status is I either way (commit or
+			//     rollback both end idle), so every statement, observed or not, is
+			//     unresolvable: whether the target kept them depends on the tail
+			//     nobody saw.
 			for i := el.first; i <= el.last; i++ {
-				if !inTx || i >= emitFailedAt {
+				switch {
+				case inTx && status == TxStatusInTx:
+					// completed: keep pending_commit
+				case !inTx || i >= emitFailedAt:
 					outcomes[i].status, outcomes[i].errText = StatusUnresolvable, unobservedTailNote
 				}
 			}
 			_ = record()
 			return 0, ef.err
 		}
-		s.noteWireStatus(status)
 		if failed >= 0 {
 			// The target refused statement `failed`: it carries the target's
 			// error; the statements after it in this segment did not run; and

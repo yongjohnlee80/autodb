@@ -618,3 +618,52 @@ func TestWireQueryRaw_EmitterFailureNeverRecordsTheUnobservedTailAsOK(t *testing
 		}
 	}
 }
+
+// PR #50 MF5: when the emitter fails, golib still drains the target's answer
+// through ReadyForQuery and returns the AUTHORITATIVE status. That status must
+// be folded into the session's track before the emitter's error is returned:
+// a drained failure inside the client's transaction leaves the backend in E,
+// and the engine's local gate must say E too — otherwise a non-recovery
+// statement passes the local T gate and only the target refuses it.
+func TestWireQueryRaw_EmitterFailureStillAppliesTheDrainedStatus(t *testing.T) {
+	f, connID, sid, _, userID := pgWireSession(t) // explicit tx open: T
+	f.eng.history = true
+	emitFailRun(t, f, sid, userID, "SELECT 1; SELECT 1/0") // the failure is drained unseen
+	if st, err := f.eng.WireTxStatus(sid, userID); err != nil || st != TxStatusAborted {
+		t.Fatalf("immediately after the drained failure WireTxStatus = %q err %v, want E — the track must follow the wire", st, err)
+	}
+	next := runRaw(t, f, sid, userID, "SELECT 1")
+	if !errors.Is(next.err, ErrTxAborted) || len(next.dispatch) != 0 {
+		t.Fatalf("non-recovery statement after the drained failure: err %v dispatches %d, want ErrTxAborted and 0 (the LOCAL gate must refuse it)", next.err, len(next.dispatch))
+	}
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil || rb.status != TxStatusIdle {
+		t.Fatalf("ROLLBACK: %q %v", rb.status, rb.err)
+	}
+	// The drained status also sharpens the audit inside an explicit transaction:
+	// a drained T proves every statement of the segment completed (an error
+	// would have made it E), so all of them are pending_commit, not unresolvable.
+	if b := runRaw(t, f, sid, userID, "BEGIN"); b.err != nil {
+		t.Fatalf("BEGIN: %v", b.err)
+	}
+	table := fmt.Sprintf("raw_drainT_%d", fixtureSeq.Add(1))
+	if _, err := f.eng.Execute(context.Background(), f.rootTok, connID, "CREATE TABLE "+table+" (n int4)", testIP); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.eng.Execute(context.Background(), f.rootTok, connID, "DROP TABLE IF EXISTS "+table, testIP)
+	})
+	ins1, ins2 := "INSERT INTO "+table+" VALUES (1)", "INSERT INTO "+table+" VALUES (2)"
+	emitFailRun(t, f, sid, userID, ins1+"; "+ins2)
+	if st, _ := f.eng.WireTxStatus(sid, userID); st != TxStatusInTx {
+		t.Fatalf("after a drained success WireTxStatus = %q, want T", st)
+	}
+	h := histRows(t, f, connID, ins1, ins2)
+	for i := range h {
+		if h[i].Status != StatusPendingCommit || h[i].TxID == "" {
+			t.Fatalf("statement %d after a drained T recorded %q — a drained T proves it completed inside the transaction: pending_commit", i, h[i].Status)
+		}
+	}
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("ROLLBACK: %v", rb.err)
+	}
+}
