@@ -489,3 +489,80 @@ func readUntilReady(t *testing.T, fe *pgproto3.Frontend) byte {
 		}
 	}
 }
+
+// Terminate hands the session to the engine's teardown with the cause the peer
+// gave, and that is what makes the row's rollback real: CloseWireSession is
+// where an open transaction is rolled back and audited, so the loop's whole
+// obligation is to reach it, reach it once, and name the reason honestly.
+//
+// The cell asserts the REASON, not merely that a close happened. A loop that
+// tore down under a generic cause would satisfy "the session was closed" while
+// making every teardown indistinguishable in the audit trail — and a rollback
+// attributed to a deadline when the client actually said goodbye is a false
+// operational record.
+func TestLoop_TerminateClosesTheSessionWithItsOwnReason(t *testing.T) {
+	t.Parallel()
+	f := &fakeAuth{result: goodSession()}
+	_, events, addr := listenerWith(t, Options{
+		Authn: f, Queries: okQueries(), AuthFailuresPerIP: unthrottled,
+	})
+	conn, fe := authenticated(t, addr)
+
+	fe.Send(&pgproto3.Terminate{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// The server answers Terminate with silence and closes.
+	if msg, err := fe.Receive(); err == nil {
+		t.Fatalf("Terminate drew a frame %T; the server answers it with silence", msg)
+	}
+	_ = conn.Close()
+
+	waitFor(t, "the session teardown to run", func() bool {
+		_, closed := f.calls()
+		return len(closed) > 0
+	})
+	_, closed := f.calls()
+	if len(closed) != 1 {
+		t.Fatalf("teardown ran %d times (%v); a session is torn down exactly once", len(closed), closed)
+	}
+	if closed[0] != "sess-abc123/terminate" {
+		t.Fatalf("teardown = %q, want %q — the cause the peer gave, so a rollback is not "+
+			"attributed to a deadline the client never hit", closed[0], "sess-abc123/terminate")
+	}
+	waitFor(t, "the close to be audited", func() bool {
+		ev, ok := find(events(), "fd.conn_close")
+		return ok && ev.Reason == "terminate"
+	})
+}
+
+// A protocol violation must ALSO reach the teardown, under its own cause. The
+// pairing matters: if only the clean path released the session, a peer could
+// hold an engine session open by ending every connection with a bad frame.
+func TestLoop_ViolationAlsoTearsDownAndUnderItsOwnCause(t *testing.T) {
+	t.Parallel()
+	f := &fakeAuth{result: goodSession()}
+	_, _, addr := listenerWith(t, Options{
+		Authn: f, Queries: okQueries(), AuthFailuresPerIP: unthrottled,
+	})
+	conn, fe := authenticated(t, addr)
+
+	fe.Send(&pgproto3.CopyData{Data: []byte("x")})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("reading the violation: %v", err)
+	}
+	_ = conn.Close()
+
+	waitFor(t, "the session teardown to run", func() bool {
+		_, closed := f.calls()
+		return len(closed) > 0
+	})
+	_, closed := f.calls()
+	if closed[0] != "sess-abc123/protocol-violation" {
+		t.Fatalf("teardown = %q, want the violation's own cause; a session released only on the "+
+			"clean path would let a peer keep one open by ending every connection badly", closed[0])
+	}
+}
