@@ -48,6 +48,18 @@ func (e *Engine) WireExecute(ctx context.Context, id SessionID, userID int64, sq
 			e.finishClosing(context.WithoutCancel(ctx), s)
 		}
 	}()
+	return e.wireExecuteClaimed(ctx, s, sqlText, ip, &closeAfterRelease)
+}
+
+// wireExecuteClaimed is WireExecute AFTER the session claim: the caller holds
+// s.begin() and owns s.finish(). It exists so WireQuery can keep ONE claim
+// across gate, dispatch, every emit, and the status read (lector PR #48 r0
+// MF1) — a WireQuery built on WireExecute released the claim in
+// WireExecute's own defer, before the first emit, and a callback that
+// re-entered the engine ran a second statement where ErrSessionBusy was
+// owed. closeAfterRelease is the caller's flag because the caller's defer is
+// the one that runs after release.
+func (e *Engine) wireExecuteClaimed(ctx context.Context, s *session, sqlText, ip string, closeAfterRelease *bool) (*Result, error) {
 	if s.get() != sessOpen {
 		return nil, ErrSessionNotFound
 	}
@@ -61,7 +73,7 @@ func (e *Engine) WireExecute(ctx context.Context, id SessionID, userID int64, sq
 	}
 	demoted, derr := e.enforceTransactionAuthority(ctx, s, pol, ip)
 	if derr != nil {
-		closeAfterRelease = e.transferDemotionClose(s, ip)
+		*closeAfterRelease = e.transferDemotionClose(s, ip)
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText,
 			fmt.Errorf("%w: rollback cleanup failed: %v", ErrTxAuthorityChanged, derr))
 	}

@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -89,5 +90,49 @@ func TestInterimWireMessages_NeverEmitsReadyForQuery(t *testing.T) {
 				t.Fatalf("interim producer emitted ReadyForQuery for %+v; readiness is the session's, returned as the status byte", res)
 			}
 		}
+	}
+}
+
+// The claim is HELD across every emit (lector PR #48 r0 MF1). A callback that
+// re-enters the engine on the same session must be refused with
+// ErrSessionBusy — not run a second statement — and the status WireQuery
+// returns must describe the ORIGINAL transaction, not whatever the re-entrant
+// call would have done. The first version released the claim inside
+// WireExecute's own defer, before the first emit, and ROLLBACK from inside
+// the callback returned nil on VM43.
+func TestWireQuery_CallbackReentryIsRefusedAndStatusIsTheOriginal(t *testing.T) {
+	f, _, sid, _, userID := pgWireSession(t) // fixture opens a REAL transaction: status T
+	ctx := context.Background()
+
+	var reentry error
+	var calls int
+	status, err := f.eng.WireQuery(ctx, sid, userID, "SELECT 1", testIP, func(m WireMessage) error {
+		calls++
+		if calls == 1 {
+			// Re-enter on the SAME session while the response is streaming.
+			_, reentry = f.eng.WireExecute(ctx, sid, userID, "ROLLBACK", testIP)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("WireQuery: %v", err)
+	}
+	if calls == 0 {
+		t.Fatal("emit was never called; the cell observed nothing")
+	}
+	if !errors.Is(reentry, ErrSessionBusy) {
+		t.Fatalf("re-entrant WireExecute during emit returned %v, want ErrSessionBusy — "+
+			"the claim was released before emit and a second statement ran", reentry)
+	}
+	if status != TxStatusInTx {
+		t.Fatalf("status = %q, want %q: the re-entrant ROLLBACK must have been refused, "+
+			"so the fixture's transaction is still open", status, TxStatusInTx)
+	}
+	// And the claim IS released afterwards: the same ROLLBACK now succeeds.
+	if _, err := f.eng.WireExecute(ctx, sid, userID, "ROLLBACK", testIP); err != nil {
+		t.Fatalf("ROLLBACK after WireQuery returned: %v — the claim leaked", err)
+	}
+	if st, _ := f.eng.WireTxStatus(sid, userID); st != TxStatusIdle {
+		t.Fatalf("after the real ROLLBACK status = %q, want %q", st, TxStatusIdle)
 	}
 }

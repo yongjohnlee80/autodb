@@ -96,8 +96,10 @@ const InterimTruncatedRuleID = "frontdoor/interim-result-page-exceeded"
 //
 // CONTRACT (stable across the interim and raw producers; ADR-0018 A1-C3/C4):
 //   - a nil emit fails before dispatch with ErrWireEmitNil;
-//   - emit is called synchronously, in order, and is NOT re-entrant — it
-//     must not call back into the Engine on this session;
+//   - emit is called synchronously, in order, while WireQuery HOLDS the
+//     session's one-in-flight claim — so a callback that re-enters the
+//     engine on this session gets ErrSessionBusy, not a second statement.
+//     Non-reentrancy is enforced, not requested (lector PR #48 r0 MF1);
 //   - a non-nil error from emit stops delivery and is returned (the raw
 //     producer first drains the wire to quiescent; the interim one has
 //     nothing on the wire to drain);
@@ -122,7 +124,23 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 	if emit == nil {
 		return 0, ErrWireEmitNil
 	}
-	res, err := e.WireExecute(ctx, id, userID, sqlText, ip)
+	s, err := e.sessions.lookup(id, userID)
+	if err != nil {
+		return 0, err
+	}
+	// ONE claim for the whole operation: gate, dispatch, every emit, and the
+	// status read happen while this session is busy. Released only here.
+	if err := s.begin(); err != nil {
+		return 0, err
+	}
+	closeAfterRelease := false
+	defer func() {
+		s.finish()
+		if closeAfterRelease {
+			e.finishClosing(context.WithoutCancel(ctx), s)
+		}
+	}()
+	res, err := e.wireExecuteClaimed(ctx, s, sqlText, ip, &closeAfterRelease)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
@@ -130,7 +148,7 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 			if eerr := emit(WireMessage{Kind: "ErrorResponse", Err: pgErr}); eerr != nil {
 				return 0, eerr
 			}
-			return e.WireTxStatus(id, userID)
+			return s.wireTxStatus()
 		}
 		return 0, err // the front door's own refusal; the loop frames it (§8a)
 	}
@@ -142,7 +160,7 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 			return 0, eerr
 		}
 	}
-	return e.WireTxStatus(id, userID)
+	return s.wireTxStatus()
 }
 
 // interimWireMessages re-encodes a decoded Result as text-format wire messages.

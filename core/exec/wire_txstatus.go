@@ -49,6 +49,13 @@ func (e *Engine) WireTxStatus(id SessionID, userID int64) (byte, error) {
 	if err != nil {
 		return 0, err
 	}
+	return s.wireTxStatus()
+}
+
+// wireTxStatus is the status byte for a session the caller already holds —
+// WireQuery reads it while its claim is still held, so the byte cannot
+// describe an interleaving statement (lector PR #48 r0 MF1).
+func (s *session) wireTxStatus() (byte, error) {
 	s.mu.Lock()
 	phase := s.txPhase
 	s.mu.Unlock()
@@ -64,6 +71,6 @@ func (e *Engine) WireTxStatus(id SessionID, userID int64) (byte, error) {
 		// Unreachable through the phase transitions, and deliberately loud if
 		// a new phase is ever added without deciding what the wire should say
 		// about it. Inventing a byte here would put a guess on the wire.
-		return 0, fmt.Errorf("exec: session %v: transaction phase %s has no ReadyForQuery status", id, phase)
+		return 0, fmt.Errorf("exec: session %v: transaction phase %s has no ReadyForQuery status", s.id, phase)
 	}
 }
