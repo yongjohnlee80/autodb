@@ -199,6 +199,63 @@ print("\n[3] lifecycle.resolve_endpoint — the binary owns the answer")
     msg:find("autodb --serve", 1, true) ~= nil, msg)
   ok("p3: and includes the detail it saw",
     msg:find("permission denied", 1, true) ~= nil, msg)
+
+  -- A child that exits before listening must settle NOW, not after the
+  -- ten-second probe timeout. This is the real stale-binary shape: an older
+  -- autodb refuses a newer meta schema immediately, while every public API
+  -- callback waits behind lifecycle.spawn.
+  local failbin = tmp .. "/autodb-fails-before-listen"
+  vim.fn.writefile({
+    "#!/bin/sh",
+    "echo 'store schema version 11 is newer than binary version 9' >&2",
+    "exit 1",
+  }, failbin)
+  vim.fn.setfperm(failbin, "rwxr-xr-x")
+  local spawn_done, spawn_ok, spawn_err, spawn_calls = false, nil, nil, 0
+  lc.spawn({
+    bin = failbin,
+    endpoint = { mode = "pipe", addr = tmp .. "/never-listens.sock" },
+  }, function(o, e)
+    spawn_done, spawn_ok, spawn_err = true, o, e
+    spawn_calls = spawn_calls + 1
+  end)
+  vim.wait(1500, function() return spawn_done end, 10)
+  vim.wait(100)
+  ok("p3: a daemon that exits before listening completes promptly",
+    spawn_done and spawn_ok == false, tostring(spawn_err))
+  ok("p3: the startup error includes the child exit and stderr",
+    spawn_err and spawn_err:find("exited with status 1", 1, true) ~= nil
+      and spawn_err:find("schema version 11", 1, true) ~= nil, tostring(spawn_err))
+  ok("p3: exit and probe paths settle the spawn callback exactly once",
+    spawn_calls == 1, tostring(spawn_calls))
+
+  -- A loser in the two-launcher race exits too, but that is success once the
+  -- winner answers. Stub jobstart so the exit path itself (not a later timer
+  -- tick) has to perform the final endpoint check.
+  local real_jobstart, real_is_listening = vim.fn.jobstart, lc.is_listening
+  local probes = 0
+  lc.is_listening = function()
+    probes = probes + 1
+    return probes > 1
+  end
+  vim.fn.jobstart = function(_, opts)
+    vim.schedule(function() opts.on_exit(99, 0, "exit") end)
+    return 99
+  end
+  local race_done, race_ok, race_calls = false, nil, 0
+  lc.spawn({
+    bin = failbin,
+    endpoint = { mode = "pipe", addr = tmp .. "/winner.sock" },
+  }, function(o)
+    race_done, race_ok = true, o
+    race_calls = race_calls + 1
+  end)
+  vim.wait(500, function() return race_done end, 10)
+  vim.fn.jobstart, lc.is_listening = real_jobstart, real_is_listening
+  ok("p3: a launcher that exits after another wins reports success",
+    race_done and race_ok == true and probes == 2, vim.inspect({ race_ok, probes }))
+  ok("p3: the winning-launcher exit path settles exactly once",
+    race_calls == 1, tostring(race_calls))
   vim.fn.delete(tmp, "rf")
 end)()
 
