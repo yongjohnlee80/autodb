@@ -20,9 +20,45 @@ import (
 // standing_authority_test; these cells prove it for WireQuery, which the F1
 // loop drives.
 
-// readerWireSession is pgWireSession with the user and grant demoted to reader,
-// the fixture's editor transaction rolled back, and a scratch table plus a
-// smuggling function created by root. Returns the table and function names.
+// createReaderScratch creates the scratch table and the smuggling function as
+// root. The TABLE's cleanup is registered the moment the table exists — before
+// anything else can fail — so no exit path leaks it (PR #53 MF1); the function's
+// cleanup is registered once the function exists. A failure to create the
+// function is RETURNED, never skipped: an opted-in TEST_PGURL run that cannot
+// build its fixture is a failing run, not a green one.
+func createReaderScratch(t *testing.T, f *fixture, connID int64, fnBodyFor func(table string) string) (table, fn string, err error) {
+	t.Helper()
+	ctx := context.Background()
+	seq := time.Now().UnixNano() // process-unique: a failed cleanup must never collide with the next run
+	table = fmt.Sprintf("reader_raw_%d", seq)
+	fn = fmt.Sprintf("reader_smuggle_%d", seq)
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, "CREATE TABLE "+table+" (id BIGSERIAL PRIMARY KEY, note TEXT NOT NULL)", testIP); err != nil {
+		return "", "", fmt.Errorf("create table: %w", err)
+	}
+	t.Cleanup(func() {
+		if _, derr := f.eng.Execute(context.Background(), f.rootTok, connID, "DROP TABLE IF EXISTS "+table, testIP); derr != nil {
+			t.Logf("cleanup: drop table %s: %v", table, derr)
+		}
+	})
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
+		`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS $$ %s $$`, fn, fnBodyFor(table)), testIP); err != nil {
+		return table, "", fmt.Errorf("create smuggling function: %w", err)
+	}
+	t.Cleanup(func() {
+		if _, derr := f.eng.Execute(context.Background(), f.rootTok, connID, "DROP FUNCTION IF EXISTS "+fn+"()", testIP); derr != nil {
+			t.Logf("cleanup: drop function %s: %v", fn, derr)
+		}
+	})
+	return table, fn, nil
+}
+
+// readerWireSession is pgWireSession with the fixture's editor transaction
+// rolled back, the scratch table and smuggling function created by root, and
+// THEN the user and grant demoted to reader. Order matters twice over: the DDL
+// runs while root is still admin, and the role-restoring cleanup is registered
+// LAST so it runs FIRST (cleanups are LIFO) — the wire PAT belongs to root, so
+// demoting its owner demotes root, and root's DDL cleanups would otherwise be
+// refused as a reader's and leak the objects.
 func readerWireSession(t *testing.T) (f *fixture, connID int64, sid SessionID, userID int64, table, fn string) {
 	t.Helper()
 	f, connID, sid, _, userID = pgWireSession(t)
@@ -30,28 +66,14 @@ func readerWireSession(t *testing.T) (f *fixture, connID int64, sid SessionID, u
 	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
 		t.Fatalf("ROLLBACK the fixture's transaction: %v", rb.err)
 	}
-	// Process-unique names: a failed cleanup must never collide with the next run.
-	seq := time.Now().UnixNano()
-	table = fmt.Sprintf("reader_raw_%d", seq)
-	fn = fmt.Sprintf("reader_smuggle_%d", seq)
-	if _, err := f.eng.Execute(ctx, f.rootTok, connID, "CREATE TABLE "+table+" (id BIGSERIAL PRIMARY KEY, note TEXT NOT NULL)", testIP); err != nil {
-		t.Fatalf("create table: %v", err)
-	}
-	if _, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
-		`CREATE FUNCTION %s() RETURNS int LANGUAGE sql AS $$ INSERT INTO %s(note) VALUES ('smuggled'); SELECT 1 $$`, fn, table), testIP); err != nil {
-		t.Skipf("cannot create the smuggling function: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := f.eng.Execute(context.Background(), f.rootTok, connID, "DROP FUNCTION IF EXISTS "+fn+"()", testIP); err != nil {
-			t.Logf("cleanup: drop function: %v", err)
-		}
-		if _, err := f.eng.Execute(context.Background(), f.rootTok, connID, "DROP TABLE IF EXISTS "+table, testIP); err != nil {
-			t.Logf("cleanup: drop table: %v", err)
-		}
+	var err error
+	table, fn, err = createReaderScratch(t, f, connID, func(tbl string) string {
+		return "INSERT INTO " + tbl + "(note) VALUES ('smuggled'); SELECT 1"
 	})
-	// The wire PAT belongs to ROOT, so demoting its owner demotes root — and the
-	// cleanup above runs with root's token. Restore the role FIRST (cleanups run
-	// LIFO), or the drops are refused as a reader's DDL and the tables leak.
+	if err != nil {
+		t.Fatalf("reader fixture (opted-in TEST_PGURL run; a fixture that cannot be built is a failure, not a skip): %v", err)
+	}
+	// Restore root's role BEFORE the DDL cleanups run (registered after them ⇒ runs first).
 	t.Cleanup(func() {
 		_ = f.store.Users.OnCtx(context.Background()).With(meta.UserID, userID).Set(meta.UserRole, meta.RoleAdmin).Update()
 		_ = f.store.Grants.OnCtx(context.Background()).With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).Set(meta.GrantRole, meta.RoleAdmin).Update()
@@ -63,6 +85,35 @@ func readerWireSession(t *testing.T) (f *fixture, connID int64, sid SessionID, u
 		t.Fatal(err)
 	}
 	return f, connID, sid, userID, table, fn
+}
+
+// PR #53 MF1 isolation check: when the smuggling function CANNOT be created, the
+// setup returns an error (the caller fails, never skips) and the already-created
+// table does not leak — its cleanup was registered the moment it existed.
+func TestWireQueryReader_FixtureFailureLeaksNothing(t *testing.T) {
+	f, connID, sid, _, userID := pgWireSession(t)
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("ROLLBACK: %v", rb.err)
+	}
+	var table string
+	t.Run("broken-fixture", func(t *testing.T) {
+		var err error
+		table, _, err = createReaderScratch(t, f, connID, func(string) string { return "THIS IS NOT SQL" })
+		if err == nil {
+			t.Fatal("a function with an invalid body was created")
+		}
+		if table == "" {
+			t.Fatal("the table was not created before the function failed; the scenario under test did not occur")
+		}
+		out, qerr := f.eng.Execute(context.Background(), f.rootTok, connID, "SELECT count(*) FROM pg_tables WHERE tablename = '"+table+"'", testIP)
+		if qerr != nil || fmt.Sprint(out.Rows[0][0]) != "1" {
+			t.Fatalf("table %s should exist inside the sub-test: %v %v", table, out.Rows, qerr)
+		}
+	}) // the sub-test's cleanups have run here
+	out, err := f.eng.Execute(context.Background(), f.rootTok, connID, "SELECT count(*) FROM pg_tables WHERE tablename = '"+table+"'", testIP)
+	if err != nil || fmt.Sprint(out.Rows[0][0]) != "0" {
+		t.Fatalf("table %s LEAKED after the fixture failed: count=%v err=%v", table, out.Rows, err)
+	}
 }
 
 func rowCount(t *testing.T, f *fixture, connID int64, table string) string {
