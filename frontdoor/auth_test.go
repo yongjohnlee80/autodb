@@ -50,6 +50,9 @@ type fakeAuth struct {
 	// so a cell can prove the teardown was not given a context that had
 	// already been cancelled by the very shutdown that triggered it.
 	closeCtxErr []error
+	// appNames records the application_name each open carried, so a cell can
+	// prove the label reached the engine rather than only the wire.
+	appNames []string
 }
 
 func (f *fakeAuth) OpenWireSession(ctx context.Context, presented, startupUser, database, ip string) (exec.WireSessionResult, error) {
@@ -63,6 +66,36 @@ func (f *fakeAuth) OpenWireSession(ctx context.Context, presented, startupUser, 
 		return exec.WireSessionResult{}, f.err
 	}
 	return f.result, nil
+}
+
+// OpenWireSessionWith is the call the listener makes. It records the label as
+// well, so a cell can assert the accepted application_name reached the ENGINE
+// and not merely the echo — row 3.1's #session-audit claim is about what the
+// session records, and an echo synthesized in the front door would satisfy a
+// weaker cell while the engine knew nothing.
+func (f *fakeAuth) OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (exec.WireSessionResult, error) {
+	f.mu.Lock()
+	f.appNames = append(f.appNames, req.ApplicationName)
+	f.mu.Unlock()
+	res, err := f.OpenWireSession(ctx, req.PAT, req.StartupUser, req.Database, req.IP)
+	if err != nil {
+		return res, err
+	}
+	// THE LABEL COMES BACK, because that is what the engine does:
+	// core/exec/wire_session.go records it on the session and returns it on the
+	// result. A fake that swallowed it would have made the echo look broken
+	// while production was correct — and, worse, would have let a change that
+	// really did drop the label pass, since the echo would have been empty
+	// either way. The copy is per-call so a canned result is not mutated.
+	res.ApplicationName = req.ApplicationName
+	return res, nil
+}
+
+// openedAppNames reports the labels handed to the engine, in order.
+func (f *fakeAuth) openedAppNames() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.appNames...)
 }
 
 func (f *fakeAuth) CloseWireSession(ctx context.Context, id exec.SessionID, _ int64, _, reason string) {
@@ -721,6 +754,11 @@ type holdingAuth struct {
 	release chan struct{}
 }
 
+// OpenWireSessionWith delegates: this fake is about the HOLD, not the label.
+func (h *holdingAuth) OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (exec.WireSessionResult, error) {
+	return h.OpenWireSession(ctx, req.PAT, req.StartupUser, req.Database, req.IP)
+}
+
 func (h *holdingAuth) OpenWireSession(context.Context, string, string, string, string) (exec.WireSessionResult, error) {
 	h.entered <- struct{}{}
 	<-h.release
@@ -906,6 +944,11 @@ type blockingCloseAuth struct {
 	entered chan struct{}
 	release chan struct{}
 	once    sync.Once
+}
+
+// OpenWireSessionWith delegates: this fake is about the CLOSE.
+func (b *blockingCloseAuth) OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (exec.WireSessionResult, error) {
+	return b.OpenWireSession(ctx, req.PAT, req.StartupUser, req.Database, req.IP)
 }
 
 func (b *blockingCloseAuth) OpenWireSession(context.Context, string, string, string, string) (exec.WireSessionResult, error) {

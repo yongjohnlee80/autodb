@@ -1239,3 +1239,57 @@ func TestLoop_AFrameReadAheadDuringAuthStillGetsTheFrameStallBudget(t *testing.T
 		return false
 	})
 }
+
+// Matrix row 3.1:application_name#session-audit — the front door's half: the
+// ACCEPTED label must reach the ENGINE, not merely the echo.
+//
+// The distinction is the whole claim. An echo synthesized in the front door from
+// the startup params would satisfy a cell that only reads the wire, while the
+// session recorded nothing and every audit row said app "". So this asserts what
+// OpenWireSessionWith was CALLED with, and asserts the echo agrees with it —
+// the engine's half (recorded on the session and on every audit line) is proven
+// by core/exec's TestWireOpen_ApplicationNameIsOnTheSessionAndEveryAuditLine and
+// TestWireOpen_AuditStampCoversDecodedAndOwnedControlSites.
+func TestLoop_TheAcceptedApplicationNameReachesTheEngine(t *testing.T) {
+	t.Parallel()
+	f := &fakeAuth{result: goodSession()}
+	_, addr := authListener(t, f)
+
+	const label = "reporting-tool-7"
+	conn, fe := startupTo(t, addr, map[string]string{
+		"user": "root", "database": "target", "application_name": label,
+	})
+	defer func() { _ = conn.Close() }()
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("auth request: %v", err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "autodb_pat_secret"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	echoed := ""
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("the success sequence: %v", err)
+		}
+		if ps, ok := msg.(*pgproto3.ParameterStatus); ok && ps.Name == "application_name" {
+			echoed = ps.Value
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+
+	got := f.openedAppNames()
+	if len(got) != 1 || got[0] != label {
+		t.Fatalf("the engine was opened with %v, want exactly [%q] — the label must reach the "+
+			"SESSION, and a front door that only echoes it leaves every audit row saying app \"\"",
+			got, label)
+	}
+	if echoed != label {
+		t.Fatalf("echoed %q, want %q — the echo comes from what the engine ACCEPTED, so it "+
+			"cannot disagree with what the session records", echoed, label)
+	}
+}

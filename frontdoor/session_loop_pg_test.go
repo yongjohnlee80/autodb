@@ -1272,3 +1272,130 @@ func TestPGLoop_TwoPipelinedQueriesAreBothExecuted(t *testing.T) {
 			"it hangs until the idle deadline rather than closing")
 	}
 }
+
+// ROW 3.3's FORWARDED HALF (claim: the client's received set equals the target's
+// reported set). This was `awaiting` for as long as the front door had no way to
+// know the target's parameters; #58's seam gives it them, and this is the
+// witness that closes it.
+//
+// The comparison is against an INDEPENDENT connection to the same target rather
+// than against a list written here: a hand-written expectation would encode this
+// PostgreSQL build's parameters and pass while the relay forwarded something
+// else entirely.
+func TestPGLoop_TheClientReceivesTheTargetsOwnParameterSet(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, _, listenAddr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
+
+	// WHOLE SET, not a sample (r0 MF1). The first version of this cell checked
+	// four names and CLAIMED set equality; a mutation dropping the target's
+	// TimeZone from the forwarded set left it green. A cell that samples proves
+	// only what it sampled, and the claim it was cited for is that the client
+	// receives the target's set.
+	direct := targetParameterSet(t, eng, secret, database)
+	relayed := startupParameterSet(t, listenAddr, secret, database)
+
+	// The three documented overrides are the only permitted difference, so they
+	// are removed from BOTH sides and compared separately (the cell below).
+	overridden := map[string]bool{"application_name": true, "is_superuser": true, "session_authorization": true}
+	for name, want := range direct {
+		if overridden[name] {
+			continue
+		}
+		got, present := relayed[name]
+		if !present {
+			t.Fatalf("the target reports %s=%q and the client was never told it — row 3.3 requires the "+
+				"target's set to be forwarded, and a set that is forwarded except for the ones nobody "+
+				"wrote a cell for is not a forwarded set", name, want)
+		}
+		if got != want {
+			t.Fatalf("%s: forwarded %q, target reports %q", name, got, want)
+		}
+	}
+
+	// And nothing invented: every relayed name is either the target's or one of
+	// the three. This is the half that catches a forwarded set with an extra
+	// entry, which the direction above cannot see.
+	for name := range relayed {
+		if overridden[name] {
+			continue
+		}
+		if _, fromTarget := direct[name]; !fromTarget {
+			t.Fatalf("the client was told %s, which the target never reported and which is not one of "+
+				"the three overrides — this surface must not invent parameters", name)
+		}
+	}
+	if len(direct) < 5 {
+		t.Fatalf("only %d parameters came back from the direct connection; the comparison would be "+
+			"vacuous — a whole-set claim needs a whole set to compare against", len(direct))
+	}
+	t.Logf("compared %d forwarded parameters", len(direct)-len(overridden))
+}
+
+// targetParameterSet reads the target's reported set from a SECOND engine
+// session — independent of the front door, which is the thing under test.
+//
+// It does NOT open its own driver connection. The first version did, through
+// golib's ParameterStatusReporter, and core/exec's
+// TestRawSimpleQueryCapabilityNeverLeavesCoreExec correctly failed it: the raw
+// pinned capability must not be referenced outside core/exec, and a cell is not
+// exempt from an architectural boundary because it is only a cell. The guard
+// was right and the instrument was wrong.
+//
+// The engine is the seam, and the front door's whole job here is to forward what
+// the engine hands it — so the engine's own answer on a DIFFERENT session, which
+// never passes through synthesizedStatuses, is the correct independent reading.
+// It also happens to be the honest scope: a capture bug inside the engine is
+// core/exec's cell to own, not this one's.
+func targetParameterSet(t *testing.T, eng *exec.Engine, secret, database string) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	res, err := eng.OpenWireSessionWith(ctx, exec.WireOpen{
+		PAT: secret, StartupUser: "root", Database: database, IP: "127.0.0.1",
+	})
+	if err != nil {
+		t.Fatalf("opening an independent engine session: %v", err)
+	}
+	t.Cleanup(func() { eng.CloseWireSession(ctx, res.SessionID, res.UserID, "127.0.0.1", "cell-done") })
+	if len(res.ParameterStatuses) == 0 {
+		t.Fatal("the independent session reported NO parameters — the comparison would pass " +
+			"vacuously, which is the failure this cell exists to prevent")
+	}
+	return res.ParameterStatuses
+}
+
+// The three overrides must WIN over anything the target reported under the same
+// name — which is why they are appended after the forwarded set rather than the
+// set being filtered. A later ParameterStatus is the one a client keeps.
+func TestPGLoop_TheOverridesWinOverTheTargetsOwnValues(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, _, listenAddr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
+
+	got := startupParameterSet(t, listenAddr, secret, database)
+	if got["is_superuser"] != "off" {
+		t.Fatalf("is_superuser = %q, want off — this answers a question about the TARGET's role, "+
+			"and through this surface autodb's gates apply whatever the target would have said",
+			got["is_superuser"])
+	}
+	if got["application_name"] != appNameForTest {
+		t.Fatalf("application_name = %q, want the client's accepted label %q", got["application_name"], appNameForTest)
+	}
+}
+
+// startupParameterSet collects the ParameterStatus set a client is sent before
+// its first ReadyForQuery, keeping the LAST value for each name — which is what
+// a client keeps, and therefore the only reading that can judge the overrides.
+func startupParameterSet(t *testing.T, addr, secret, database string) map[string]string {
+	t.Helper()
+	_, opening := pgClientCollecting(t, addr, secret, database)
+	set := map[string]string{}
+	for _, msg := range opening {
+		if ps, ok := msg.(*pgproto3.ParameterStatus); ok {
+			set[ps.Name] = ps.Value
+		}
+	}
+	return set
+}
+
+// appNameForTest is what pgClientCollecting sends as its startup
+// application_name; the echo must equal it.
+const appNameForTest = "psql"
