@@ -231,6 +231,11 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 	return stmt, routeRaw, nil
 }
 
+// unobservedTailNote is the recorded text for a statement whose fate the engine
+// could not observe: the client connection failed mid-response and the target's
+// remaining frames were drained undelivered (StatusUnresolvable).
+const unobservedTailNote = "outcome not observed: the client connection failed while the target was still answering; the target's transaction block may have committed or rolled back"
+
 // implicitRollbackNote is the recorded error text for a statement that RAN in an
 // implicit transaction block and was then discarded by the target because a
 // later statement in the same block failed (StatusRolledBack).
@@ -305,10 +310,13 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 	}
 	outcomes := make([]outcome, len(parts))
 	start := e.now()
-	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
-	defer cancel()
+	// record writes every statement's outcome. The recording budget starts HERE,
+	// when recording begins — never before the statements run: a legitimate
+	// statement longer than recordTimeout must still get its outcome (PR #50 MF3).
 	record := func() error {
 		dur := e.now().Sub(start)
+		recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+		defer cancel()
 		for i := range outcomes {
 			o := &outcomes[i]
 			if !o.ran {
@@ -395,6 +403,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		}
 		group := el.first // statement index the next CommandComplete belongs to
 		failed := -1
+		emitFailedAt := -1 // first statement index whose frames the client did NOT receive
 		var targetErr *pgconn.PgError
 		status, derr := sq.SimpleQuery(runCtx, segment, func(m golibpg.ExtendedMessage) error {
 			switch m.Kind {
@@ -411,6 +420,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 				}
 			}
 			if eerr := emit(wireFromExtended(m)); eerr != nil {
+				emitFailedAt = group
 				return &emitFailure{err: eerr}
 			}
 			return nil
@@ -436,7 +446,20 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			}
 			return 0, wireFaceLost(derr)
 		}
-		if consumerErr {
+		if consumerErr && failed < 0 {
+			// The client's connection failed and golib drained the rest of the
+			// target's answer WITHOUT delivering it: the engine never observed the
+			// tail. Nothing unobserved may be recorded as ok (PR #50 MF4). Inside
+			// the client's explicit transaction a statement seen to complete keeps
+			// pending_commit — its fate is the transaction's, resolved by the
+			// projection; everything else in this segment is unresolvable, and in
+			// an IMPLICIT block that includes the observed ones, because whether
+			// the target kept them depends on the tail nobody saw.
+			for i := el.first; i <= el.last; i++ {
+				if !inTx || i >= emitFailedAt {
+					outcomes[i].status, outcomes[i].errText = StatusUnresolvable, unobservedTailNote
+				}
+			}
 			_ = record()
 			return 0, ef.err
 		}
@@ -459,6 +482,9 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			// PostgreSQL abandons the rest of the buffer at the first error.
 			if rerr := record(); rerr != nil {
 				return 0, rerr
+			}
+			if consumerErr {
+				return 0, ef.err // the target's outcome was observed; the client was not told
 			}
 			return s.wireTxStatus()
 		}

@@ -526,3 +526,95 @@ func TestWireQueryRaw_NilEmitRefusedBeforeAnyDispatch(t *testing.T) {
 	}
 	_ = auth.ErrDenied
 }
+
+// PR #50 MF3: the audit-recording deadline must start when RECORDING begins,
+// not while the statement is executing. A legitimate statement longer than
+// recordTimeout must still get its outcome recorded. This cell takes
+// recordTimeout+1s by construction.
+func TestWireQueryRaw_OutcomeRecordingDeadlineStartsAfterExecution(t *testing.T) {
+	f, connID, sid, _, userID := pgWireSession(t)
+	f.eng.history = true
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("ROLLBACK: %v", rb.err)
+	}
+	sql := fmt.Sprintf("SELECT pg_sleep(%d)", int(recordTimeout.Seconds())+1)
+	r := runRaw(t, f, sid, userID, sql)
+	if r.err != nil {
+		t.Fatalf("a %s statement returned %v — the recording deadline was consumed by execution", sql, r.err)
+	}
+	if r.status != TxStatusIdle {
+		t.Fatalf("status %q, want I", r.status)
+	}
+	h := histRows(t, f, connID, sql)
+	if h[0].Status != StatusOK {
+		t.Fatalf("history status %q, want ok — the outcome must be completed after a long statement", h[0].Status)
+	}
+	if h[0].DurationMS < recordTimeout.Milliseconds() {
+		t.Fatalf("recorded duration %dms < %v; the row does not describe the statement that ran", h[0].DurationMS, recordTimeout)
+	}
+}
+
+// emitFailRun is runRaw with an emitter that fails on its first callback — the
+// client connection died mid-response. golib drains the tail without calling
+// back, so the engine never observes what the target did with the rest.
+func emitFailRun(t *testing.T, f *fixture, sid SessionID, userID int64, sql string) error {
+	t.Helper()
+	boom := errors.New("client write failed")
+	_, err := f.eng.WireQuery(context.Background(), sid, userID, sql, testIP, func(WireMessage) error { return boom })
+	if !errors.Is(err, boom) {
+		t.Fatalf("WireQuery returned %v, want the emitter's own error", err)
+	}
+	return err
+}
+
+// PR #50 MF4: when the emitter fails before the tail is observed, the engine
+// must not assert success for statements whose fate it never saw. Outside an
+// explicit transaction the whole implicit block's fate is unknown (the target
+// may have rolled it back — here it did): every statement is
+// outcome_unresolvable, never ok. Inside an explicit transaction an observed-
+// complete statement stays pending_commit (its fate is the transaction's) and
+// the unobserved tail is unresolvable.
+func TestWireQueryRaw_EmitterFailureNeverRecordsTheUnobservedTailAsOK(t *testing.T) {
+	f, connID, sid, _, userID := pgWireSession(t)
+	f.eng.history = true
+	ctx := context.Background()
+	table := fmt.Sprintf("raw_emitfail_%d", fixtureSeq.Add(1))
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, "CREATE TABLE "+table+" (n int4)", testIP); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.eng.Execute(context.Background(), f.rootTok, connID, "DROP TABLE IF EXISTS "+table, testIP)
+	})
+
+	// Inside the fixture's explicit transaction first.
+	insTx := "INSERT INTO " + table + " VALUES (10)"
+	emitFailRun(t, f, sid, userID, insTx+"; SELECT 1/0")
+	h := histRows(t, f, connID, insTx, "SELECT 1/0")
+	if h[0].Status != StatusPendingCommit || h[0].TxID == "" {
+		t.Fatalf("observed-complete INSERT inside the explicit tx recorded %q, want ok_pending_commit with the tx id", h[0].Status)
+	}
+	if h[1].Status != StatusUnresolvable {
+		t.Fatalf("unobserved SELECT inside the explicit tx recorded %q, want outcome_unresolvable", h[1].Status)
+	}
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("ROLLBACK: %v", rb.err)
+	}
+
+	// Now an implicit block: the target rolls the INSERT back after the SELECT
+	// fails, but the engine never saw either frame.
+	ins := "INSERT INTO " + table + " VALUES (1)"
+	emitFailRun(t, f, sid, userID, ins+"; SELECT 2/0; INSERT INTO "+table+" VALUES (2)")
+	out, err := f.eng.Execute(ctx, f.rootTok, connID, "SELECT count(*) FROM "+table, testIP)
+	if err != nil || fmt.Sprint(out.Rows[0][0]) != "0" {
+		t.Fatalf("count = %v err %v, want 0 (the target rolled the implicit block back)", out.Rows, err)
+	}
+	h = histRows(t, f, connID, ins, "SELECT 2/0", "INSERT INTO "+table+" VALUES (2)")
+	for i, want := range []string{StatusUnresolvable, StatusUnresolvable, StatusUnresolvable} {
+		if h[i].Status != want {
+			t.Fatalf("implicit block after emitter failure: statement %d recorded %q/%q, want %s — the engine did not observe its fate and must not claim ok", i, h[i].Status, h[i].Error, want)
+		}
+		if h[i].Status == StatusOK {
+			t.Fatalf("statement %d recorded ok for an effect the target discarded", i)
+		}
+	}
+}
