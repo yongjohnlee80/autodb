@@ -182,6 +182,27 @@ func TestWireQuery_EmitStopped_OtherSites(t *testing.T) {
 		}
 	})
 
+	t.Run("empty query inside BEGIN: no statement, tx open, not pending", func(t *testing.T) {
+		f, _, res, err := openWire(t, liveDSN(t), "emit-empty-tx")
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		if _, err := f.eng.WireQuery(ctx, res.SessionID, res.UserID, "BEGIN", testIP, passEmit); err != nil {
+			t.Fatalf("BEGIN: %v", err)
+		}
+		_, qerr := f.eng.WireQuery(ctx, res.SessionID, res.UserID, "", testIP, cuttingEmit("EmptyQueryResponse"))
+		st := as(t, qerr)
+		if st.Executed || st.TxStatus != TxStatusInTx || st.Arm() != ArmNoStatement {
+			t.Fatalf("empty query inside BEGIN: %+v arm %s (want Executed=false, tx open, arm %s — nothing is pending because nothing ran)", st, st.Arm(), ArmNoStatement)
+		}
+		if strings.Contains(st.Error(), "after dispatch") {
+			t.Fatalf("Error() claims a dispatch for the empty query: %q", st.Error())
+		}
+		if _, err := f.eng.WireQuery(ctx, res.SessionID, res.UserID, "ROLLBACK", testIP, passEmit); err != nil {
+			t.Fatalf("ROLLBACK: %v", err)
+		}
+	})
+
 	t.Run("owned control refused by the target: TargetErr through wireTargetError", func(t *testing.T) {
 		f, _, res, err := openWire(t, liveDSN(t), "emit-control-err")
 		if err != nil {
