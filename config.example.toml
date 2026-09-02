@@ -26,12 +26,15 @@
 # stack, unreachable from another machine, and openable only by your own
 # user because the socket file is mode 0600. Frontends (the TUI and
 # autovim's Lua integration) find each other there, and the first one to
-# see nothing listening starts a server. Another OS account on the SAME
-# machine cannot open that socket either — on a shared host where one
-# daemon serves several people, set a loopback port below so every local
-# account can reach the login prompt (each person is still identified by
-# their autodb login, not their OS user), or have them use --web-ui over
-# an SSH port-forward.
+# see nothing listening starts a server. This default is for SINGLE-USER
+# use: another OS account on the same machine cannot open the socket
+# (the daemon re-applies 0600 on every bind, so a manual chmod to a
+# group-owned socket lasts only until the next restart). For a MULTI-USER
+# host — one daemon, several people with their own SSH accounts — the
+# preferred setup is to set a loopback port below: every local account can
+# then log in with their own autodb credentials, mint a PAT and whitelist
+# their IPs. Each person is identified by their autodb login, not their
+# OS user.
 #
 # Setting a port is how you OPT IN to TCP for remote access. Do it
 # deliberately: autodb holds encrypted database credentials for every
