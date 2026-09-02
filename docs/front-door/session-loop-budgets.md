@@ -72,7 +72,7 @@ fault" outcome an accurate SQLSTATE exists to prevent.
 | Budget | Value | Charged | Matrix |
 |---|---|---|---|
 | pending serialized output | 4 MiB watermark | **before** serialization of each frame; flush, audited `fd.backpressure_enter`/`_exit` | §8.4 :387 |
-| cumulative statement output | 8 GiB | per frame, across the whole statement; abort with `54000` `frontdoor/output-cap`, connection survives | §7 :358 |
+| cumulative statement output | 8 GiB | per frame, across the whole statement; stops FORWARDING with `54000` `frontdoor/output-cap`, connection survives. **It does not undo the statement** — see §4 | §7 :358 |
 | control lane | 64 KiB/conn | at accept | `admission.go` |
 | wire-side buffers (`bufio.Reader`, TLS records, pgproto3 chunk reader) | — | **not charged**; bounded by `MaxFrontendConns` because they cannot grow with what a peer sends | §8.4 third term |
 
@@ -100,7 +100,7 @@ does not matter to a 4 MiB bound.
 |---|---|---|---|
 | idle past budget | `57P05` | `gate/session-deadline` | closed |
 | partial frame past budget | `08006` | `frontdoor/frame-stall` | closed |
-| statement output past 8 GiB | `54000` | `frontdoor/output-cap` | **survives** |
+| statement output past 8 GiB | `54000` | `frontdoor/output-cap` | **survives** — and the message says the statement EXECUTED |
 | gate refusal (classifier, grants, size) | per §7 | `gate/…` | survives, **readiness follows** |
 | target error | the target's own, verbatim | the target's own | survives, readiness follows |
 | fast-path, extended frames, COPY, unknown byte | §7 / Johno's ruling | `frontdoor/…` | per row |
@@ -112,6 +112,16 @@ defect.** Two decisions may share a wire `DETAIL` when §7 names one id for thei
 class — an operator still has to tell them apart, so the *audit* reason is what
 must not collide (r0, self-corrected).
 
+**Never report a refusal for an effect that happened.** The output cap trips
+while a statement's output is being forwarded — after the target ran it, and for
+DML in an implicit block after those effects committed. Reporting that as a
+refusal is a lie the client acts on: r2 saw `54000` returned while 100 rows were
+committed. So the cap says the statement EXECUTED and its output was withheld,
+and the audit records `fd.stmt_outcome`, never `fd.refused`, so the operational
+record and the database agree. The place to PREVENT the effect is the
+retained-capacity reservation before dispatch; once the rows exist, honesty is
+the only remedy this path has (r2 MF9, reframed by jarvis).
+
 **Every session-surviving refusal ends its cycle with `ReadyForQuery`.** §6.3
 names the only exception: an unknown transaction outcome. A client that waits for
 readiness — libpq's `PQfn`, and the large-object interface on it — blocks forever
@@ -122,11 +132,12 @@ be written to wait on purpose (r0 MF1).
 
 ## 5. Open questions for a ruling
 
-1. **`outputStall` is not a matrix number.** §9 pins TLS/startup/auth and the
-   idle budget; §7 pins the 30s partial-frame progress deadline. Nothing pins a
-   bound on the write that drains the output watermark. 30s is a conservative
-   front-door default. An output stall is not an idle timeout and should probably
-   not inherit its value — but the figure wants a ruling rather than a default.
+1. ~~`outputStall` is not a matrix number.~~ **RULED** (jarvis as lead,
+   2026-09-03, PR #52 Q1): 30s stands, and it is now a row in the matrix's §8.4
+   budget table with its rationale — with the watermark full, a peer that has
+   drained nothing for 30s is a dead reader, not a slow one. It does NOT inherit
+   `idle`: idle measures a client that is not asking, this measures one that will
+   not take what it asked for.
 2. **No global resident-output budget.** §8.4 speaks of pending output against a
    process-wide budget; the front door has a per-connection watermark and a
    per-statement cap, and no seam through which a connection can reserve against

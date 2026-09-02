@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -595,5 +596,91 @@ func TestPGLoop_EmitIsNotReentrantAndTheStreamSurvivesIt(t *testing.T) {
 	}
 	if dr, ok := firstOfType[*pgproto3.DataRow](after); !ok || string(dr.Values[0]) != "2" {
 		t.Fatalf("the follow-up statement returned %v — the frame stream was corrupted", kindsOf(after))
+	}
+}
+
+// MF9 (lector r2, reframed by jarvis). The cumulative output cap trips while the
+// statement's output is being FORWARDED — which is after the target ran it and,
+// for DML in an implicit block, after those effects committed.
+//
+// Reporting that as a refusal is a lie the client acts on: lector's repro
+// received 54000 while all 100 rows were committed. The rule is never report a
+// refusal for an effect that happened.
+//
+// So the cell asserts the two things that must AGREE: what the database holds,
+// and what the audit says. A fix that only softened the error text would still
+// leave an audit row calling a committed statement refused, and this fails on
+// that.
+//
+// Witness for row 5:ReadyForQuery's honesty half is not claimed here; this cell
+// is about the cap and is deliberately uncited.
+func TestPGLoop_OutputCapTellsTheTruthAboutAStatementThatRan(t *testing.T) {
+	addr, secret, database, eng := pgLoopWithEngine(t)
+	_ = addr
+	// Low enough to trip PART-WAY THROUGH the RETURNING stream: the point of the
+	// cell is a statement whose effects are already committed when the cap
+	// fires, so the cap must not trip before the first row nor after the last.
+	cap := int64(256)
+	_, events, listenAddr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, testOutputCap: &cap,
+	})
+	fe := pgClient(t, listenAddr, secret, database)
+
+	table := fmt.Sprintf("fd_cap_%d", time.Now().UnixNano())
+	if msgs := query(t, fe, fmt.Sprintf("CREATE TABLE %s (n int)", table)); hasError(msgs) {
+		t.Fatalf("creating the scratch table: %v", errorText(msgs))
+	}
+	t.Cleanup(func() {
+		c := pgClient(t, listenAddr, secret, database)
+		_ = query(t, c, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+	})
+
+	// A DML statement whose OUTPUT is large enough to trip the cap. Its effects
+	// commit at statement end regardless of what the front door does with the
+	// rows it produced.
+	msgs := query(t, fe, fmt.Sprintf(
+		"INSERT INTO %s SELECT g FROM generate_series(1, 100) g RETURNING n", table))
+
+	e, ok := firstOfType[*pgproto3.ErrorResponse](msgs)
+	if !ok {
+		t.Fatalf("the cap never tripped, so the cell proves nothing about a capped statement "+
+			"(%d frames arrived); lower the cap until it fires mid-stream", len(msgs))
+	}
+	if e.Code != sqlStateProgramLimit || e.Detail != ruleOutputCap {
+		t.Fatalf("cap trip = %s/%s, want %s/%s", e.Code, e.Detail, sqlStateProgramLimit, ruleOutputCap)
+	}
+
+	// WHAT THE DATABASE HOLDS. The rows are committed — the statement ran.
+	after := pgClient(t, listenAddr, secret, database)
+	dr, found := firstOfType[*pgproto3.DataRow](query(t, after,
+		fmt.Sprintf("SELECT count(*) FROM %s", table)))
+	if !found {
+		t.Fatal("counting after the cap trip")
+	}
+	committed := string(dr.Values[0])
+
+	// WHAT THE CLIENT WAS TOLD, and what the audit says, must agree with that.
+	if committed != "0" {
+		if !strings.Contains(e.Message, "executed") {
+			t.Fatalf("%s rows are committed but the client was told %q — a refusal was reported "+
+				"for an effect that happened", committed, e.Message)
+		}
+		var refused, outcome bool
+		for _, ev := range events() {
+			if ev.Kind == "fd.refused" && ev.Reason == ruleOutputCap {
+				refused = true
+			}
+			if ev.Kind == "fd.stmt_outcome" && ev.Reason == ruleOutputCap {
+				outcome = true
+			}
+		}
+		if refused {
+			t.Fatalf("%s rows are committed but the audit records the statement as REFUSED; the "+
+				"operational record and the database disagree", committed)
+		}
+		if !outcome {
+			t.Fatal("no fd.stmt_outcome for a statement that executed; the audit is silent about " +
+				"an effect that happened")
+		}
 	}
 }

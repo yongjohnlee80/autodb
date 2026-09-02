@@ -777,7 +777,7 @@ func (b *blockingQueries) WireQuery(_ context.Context, _ exec.SessionID, _ int64
 	for i := range blob {
 		blob[i] = 'x'
 	}
-	for range (pendingOutputWatermark / len(blob)) + 2 {
+	for range int(pendingOutputWatermark)/len(blob) + 2 {
 		if err := emit(exec.WireMessage{Kind: "DataRow", Values: [][]byte{blob}}); err != nil {
 			return 0, err
 		}
@@ -1082,7 +1082,7 @@ func TestLoop_NoticePayloadsCountTowardTheOutputWatermark(t *testing.T) {
 		big[i] = 'n'
 	}
 	var msgs []exec.WireMessage
-	for range (pendingOutputWatermark / len(big)) + 2 {
+	for range int(pendingOutputWatermark)/len(big) + 2 {
 		msgs = append(msgs, exec.WireMessage{Kind: "NoticeResponse",
 			Notice: &pgconn.Notice{Severity: "NOTICE", Code: "01000", Message: string(big)}})
 	}

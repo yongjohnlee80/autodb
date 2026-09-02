@@ -73,6 +73,10 @@ type Listener struct {
 	liveMu sync.Mutex
 	live   map[net.Conn]struct{}
 
+	// testOutputCap lowers the cumulative output cap so a cell can trip it
+	// without producing 8 GiB. Nil takes the matrix's figure.
+	testOutputCap *int64
+
 	// testInsideRegistration runs inside beginHandler's window. See Options.
 	testInsideRegistration func()
 
@@ -150,6 +154,9 @@ type Options struct {
 	// Queries is the engine seam for the post-auth query path. Nil refuses
 	// every statement with an accurate error rather than pretending.
 	Queries QueryExecutor
+
+	// testOutputCap lowers the cumulative output cap for a cell.
+	testOutputCap *int64
 
 	// The caps. Zero takes the documented default; Open validates the
 	// relationship between them rather than trusting a caller to have done
@@ -239,6 +246,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.cancels = opt.Cancels
 	l.onSession = opt.OnSession
 	l.queries = opt.Queries
+	l.testOutputCap = opt.testOutputCap
 	l.admit = newAdmitter(caps.maxConns, caps.preAuthMax, caps.failures, caps.lane, l.now)
 	l.dl = defaultDeadlines()
 	l.authSlots = make(chan struct{}, caps.workers)

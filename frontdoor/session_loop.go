@@ -58,7 +58,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, br *bufio.Read
 		}
 		if !validFrontendType(head[0]) {
 			d := unknownMessageType()
-			l.applyDispatch(be, d, peer, closeReason)
+			l.applyDispatch(conn, be, d, peer, closeReason)
 			return nil
 		}
 
@@ -85,7 +85,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, br *bufio.Read
 		}
 
 		if d, decided := dispatchFrame(msg); decided {
-			l.applyDispatch(be, d, peer, closeReason)
+			l.applyDispatch(conn, be, d, peer, closeReason)
 			if d.after == endSession {
 				return nil
 			}
@@ -113,7 +113,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, br *bufio.Read
 			// report it rather than ignoring the frame, which would leave the
 			// peer waiting for a reply that is never coming.
 			d := unknownMessageType()
-			l.applyDispatch(be, d, peer, closeReason)
+			l.applyDispatch(conn, be, d, peer, closeReason)
 			return nil
 		}
 		if !l.runQuery(ctx, conn, be, sess, q.String, peer, closeReason) {
@@ -140,7 +140,7 @@ func (l *Listener) endOfFrameRead(conn net.Conn, be *pgproto3.Backend, err error
 		be.Send(gateError("FATAL", sqlStateConnectionFailure,
 			"terminating connection: a message stalled part-way through", ruleFrameStall,
 			"the peer began a message and stopped; the front door does not wait indefinitely mid-frame"))
-		_ = be.Flush()
+		_ = l.flushBounded(conn, be)
 		*closeReason = ruleFrameStall
 		return nil
 	}
@@ -162,7 +162,7 @@ func (l *Listener) endOfIdleWait(conn net.Conn, be *pgproto3.Backend, err error,
 		be.Send(gateError("FATAL", sqlStateIdleSessionTimeout,
 			"terminating connection due to idle timeout", ruleSessionDeadline,
 			"the front door closes a session that has been idle past its budget"))
-		_ = be.Flush()
+		_ = l.flushBounded(conn, be)
 		*closeReason = ruleSessionDeadline
 		return nil
 	}
@@ -218,6 +218,14 @@ func (l *Listener) flushBounded(conn net.Conn, be *pgproto3.Backend) error {
 	return err
 }
 
+// outputCap is §7's cumulative per-statement bound, or a cell's lowered one.
+func (l *Listener) outputCap() int64 {
+	if l.testOutputCap != nil {
+		return *l.testOutputCap
+	}
+	return cumulativeOutputCap
+}
+
 // errOutputCapExceeded stops the producer when a statement passes §7's
 // cumulative output cap. It never reaches the peer; the loop frames §8a for it.
 var errOutputCapExceeded = errors.New("frontdoor: the statement exceeded the cumulative output cap")
@@ -232,7 +240,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 	// every emit, so a re-entrant call gets ErrSessionBusy by design. Anything
 	// this loop needs from the engine happens after WireQuery returns.
 	var emitErr, writeErr, capErr error
-	pending, produced := 0, 0
+	var pending, produced int64
 	status, err := l.queries.WireQuery(ctx, sess.SessionID, sess.UserID, sql, hostOf(peer),
 		func(m exec.WireMessage) error {
 			frame, ferr := backendFrame(m)
@@ -250,66 +258,73 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 
 				// §7's cumulative per-statement output cap. Unlike the watermark,
 				// which paces, this ABORTS: past it the statement is refused
-				// rather than allowed to stream forever, and the connection
-				// survives.
-				produced += size
-				if produced > cumulativeOutputCap {
+				// rather than allowed to stream forever.
+				produced += int64(size)
+				if produced > l.outputCap() {
 					capErr = errOutputCapExceeded
 					return capErr
 				}
-				pending += size
 
-				// Send ENCODES here, synchronously, appending to the backend's
-				// write buffer — it does not retain the message. That is what
-				// makes it safe to hand it a DataRow whose Values are BORROWED
-				// for the duration of this call: the bytes are copied out
-				// before emit returns.
+				// THE WATERMARK IS ENFORCED BEFORE SERIALIZATION (§8.4: "before
+				// serialization of each outbound frame"), which means draining
+				// FIRST when this frame would cross it.
 				//
-				// A refactor that queued frames to send after the callback
-				// returned would read those values after the producer had
-				// reused the memory, and the corruption would be silent and
-				// data-dependent. If frames ever need to be deferred, they must
-				// be copied first.
-				be.Send(frame)
-
-				// THE PENDING-OUTPUT WATERMARK (matrix §8.4). Send only appends
-				// to the Backend's write buffer — it does not write — so a
-				// per-row Send with one Flush at the end holds the WHOLE result
-				// in memory. Against the raw path, which streams unbounded, that
-				// is an OOM the size of whatever the client selected.
-				//
-				// Flushing bounds it. The watermark rather than a flush per row
-				// because a syscall per row would cost more than it saves on a
-				// wide result, and 4 MiB is the figure the matrix budgets.
-				if pending >= pendingOutputWatermark {
+				// Checking after Send would let the buffer grow by the frame that
+				// crossed the mark before anything drained it — the allocation
+				// the bound exists to prevent has already happened by the time
+				// the bound notices. One frame can be large.
+				if pending+int64(size) >= pendingOutputWatermark && pending > 0 {
 					l.onEvent(Event{Kind: "fd.backpressure_enter", Reason: ruleOutputWatermark, Peer: peer})
 					if ferr := l.flushBounded(conn, be); ferr != nil {
 						// A failed write is the SOCKET, not our framing. Keeping
 						// one error for both made a client hanging up mid-result
 						// audit as a front-door defect and told the peer the
-						// SERVER had produced something unforwardable — sending
-						// an operator to hunt a bug in the front door, or in the
-						// target. Same false-record class as the deadline
-						// audited as peer-closed.
+						// SERVER had produced something unforwardable.
 						writeErr = ferr
 						return ferr
 					}
 					l.onEvent(Event{Kind: "fd.backpressure_exit", Reason: ruleOutputWatermark, Peer: peer})
 					pending = 0
 				}
+				pending += int64(size)
+
+				// Send ENCODES here, synchronously, appending to the backend's
+				// write buffer — it does not retain the message. That is what
+				// makes it safe to hand it a DataRow whose Values are BORROWED
+				// for the duration of this call: the bytes are copied out before
+				// emit returns.
+				//
+				// A refactor that queued frames to send after the callback
+				// returned would read those values after the producer had reused
+				// the memory, and the corruption would be silent and
+				// data-dependent. Anything deferred must be copied first.
+				be.Send(frame)
 			}
 			return nil
 		})
 
 	switch {
 	case capErr != nil:
-		// The statement produced more than a statement may. §7 aborts the
-		// statement and keeps the connection: the client is told plainly rather
-		// than handed a silently shortened result, which is the thing §5 forbids.
-		l.onEvent(Event{Kind: "fd.refused", Reason: ruleOutputCap, Peer: peer})
+		// THE STATEMENT ALREADY RAN. The cap trips while its output is being
+		// forwarded, which is after the target executed it and — for DML in an
+		// implicit block — after those effects committed.
+		//
+		// So this is not a refusal, and saying it was would be a lie the client
+		// acts on: it would report 54000 while a hundred rows were committed.
+		// Never report a refusal for an effect that happened. The client is told
+		// what is true — the statement executed, its output was withheld — and
+		// the audit records the statement as EXECUTED rather than refused, so
+		// the operational record and the database agree.
+		//
+		// The place to PREVENT the effect is the retained-capacity reservation
+		// before dispatch (the Parse/Bind rows); once the rows exist, honesty is
+		// the only remedy left to this path.
+		l.onEvent(Event{Kind: "fd.stmt_outcome", Reason: ruleOutputCap, Peer: peer,
+			Detail: "executed; output withheld at the cumulative output cap"})
 		be.Send(gateError("ERROR", sqlStateProgramLimit,
-			"the statement produced more output than a single statement may", ruleOutputCap,
-			"narrow the result, or use the RPC surface; the wire never shortens a result silently"))
+			"the statement executed; its output exceeded the session's output budget and was not fully delivered",
+			ruleOutputCap,
+			"the statement's effects are committed; narrow the result or use the RPC surface to read it"))
 		if ferr := l.flushBounded(conn, be); ferr != nil {
 			*closeReason = "write-failed"
 			return false
@@ -331,7 +346,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 		be.Send(gateError("FATAL", sqlStateProtocolViolation,
 			"the server produced a message the front door cannot forward", ruleProtocolViolation,
 			"this is a front-door defect; the statement's outcome is unknown"))
-		_ = be.Flush()
+		_ = l.flushBounded(conn, be)
 		*closeReason = "unframeable-message"
 		return false
 
@@ -371,7 +386,7 @@ func (l *Listener) frameGateError(conn net.Conn, be *pgproto3.Backend, sess exec
 	}
 	be.Send(gateError(severity, code, gateMessage(err), rule, hint))
 	if fatal {
-		_ = be.Flush()
+		_ = l.flushBounded(conn, be)
 		*closeReason = rule
 		return false
 	}
@@ -386,16 +401,18 @@ func (l *Listener) frameGateError(conn net.Conn, be *pgproto3.Backend, sess exec
 // applyDispatch emits a decision's frame, if it has one, and records its audit
 // event. It does not close the connection — the caller owns the loop's exit, so
 // that a decision cannot end a session the caller still believes is running.
-func (l *Listener) applyDispatch(be *pgproto3.Backend, d dispatch, peer string, closeReason *string) {
+func (l *Listener) applyDispatch(conn net.Conn, be *pgproto3.Backend, d dispatch, peer string, closeReason *string) {
 	if d.auditKind != "" {
 		l.onEvent(Event{Kind: d.auditKind, Reason: d.auditReason, Peer: peer})
 	}
 	if d.emit != nil {
 		be.Send(d.emit)
-		// A failed flush is not reported: the decision is already made, the
-		// audit row is already written, and the only remaining question is
-		// whether the peer heard it — which changes nothing this end.
-		_ = be.Flush()
+		// Bounded like every other post-auth write: a peer that will not read
+		// must not park the session on a refusal frame either (r2 MF13). A
+		// failed flush is not reported — the decision is made and the audit row
+		// is written; the only remaining question is whether the peer heard it,
+		// which changes nothing this end.
+		_ = l.flushBounded(conn, be)
 	}
 	if d.after == endSession && d.closeReason != "" {
 		*closeReason = d.closeReason
@@ -410,7 +427,7 @@ const ruleUnframeableMessage = "frontdoor/unframeable-message"
 // pendingOutputWatermark is matrix §8.4's bound on serialized output waiting to
 // go out. Reaching it flushes, which is what pauses reads from the target: the
 // loop cannot ask the engine for another message while it is writing this one.
-const pendingOutputWatermark = 4 << 20
+const pendingOutputWatermark int64 = 4 << 20
 
 // ruleOutputWatermark identifies the backpressure in the audit trail.
 const ruleOutputWatermark = "frontdoor/output-watermark"
@@ -431,7 +448,7 @@ const (
 	ruleOutputCap        = "frontdoor/output-cap"
 	sqlStateProgramLimit = "54000"
 	// cumulativeOutputCap is §7's per-statement bound on total output.
-	cumulativeOutputCap = 8 << 30
+	cumulativeOutputCap int64 = 8 << 30
 )
 
 // deadlineGoodbyeBudget bounds the write of the frame that explains a deadline
