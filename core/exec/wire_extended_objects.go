@@ -1,6 +1,10 @@
 package exec
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/yongjohnlee80/golib/dao"
+)
 
 // THE EXTENDED-PROTOCOL OBJECT STORE (F2, matrix §4a).
 //
@@ -102,6 +106,21 @@ type extObjects struct {
 	// protocol's fixed frames), so some steps are answered locally and some from
 	// the connection — and the client must receive them in the order it asked.
 	segment []segStep
+
+	// roWrap is the hidden READ ONLY transaction a reader's segment runs inside.
+	//
+	// F3a's guarantee is that the SERVER enforces what the classifier decided: a
+	// write smuggled through a volatile function classifies as a read, passes
+	// every gate autodb has, reaches the target — and PostgreSQL refuses it with
+	// 25006 because the unit is running READ ONLY. The raw path opens exactly
+	// this wrap (wire_query.go), and the extended path has to open it too or the
+	// guarantee holds on one protocol and not the other.
+	//
+	// It is a property of the SEGMENT, not of one frame, because golib requires
+	// the quiescent state to begin a transaction and the wire stops being
+	// quiescent the moment the first frame is queued. So it is opened when a
+	// segment starts and rolled back when Sync ends it.
+	roWrap dao.ContextTxConn
 }
 
 // segStep is one queued frame's place in the reply order. A step with synth

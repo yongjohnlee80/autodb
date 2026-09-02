@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/yongjohnlee80/golib/dao"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
@@ -84,7 +85,45 @@ func (e *Engine) wireExtEntry(ctx context.Context, id SessionID, userID int64) (
 	if s.ext == nil {
 		s.ext = newExtObjects()
 	}
+	// THE SEGMENT'S READ-ONLY WRAP, opened when the segment starts.
+	//
+	// It cannot wait for Execute: golib requires the quiescent state to begin a
+	// transaction, and the wire stops being quiescent the moment the first frame
+	// is queued. So the decision is taken here, at the one point every extended
+	// frame passes through, while the wire is still idle.
+	if len(s.ext.segment) == 0 && s.ext.roWrap == nil {
+		pol, perr := e.resolveUnitPolicy(ctx, s.authority, s.userID, s.connID)
+		if perr != nil {
+			release()
+			return nil, nil, nil, nil, perr
+		}
+		s.mu.Lock()
+		inTx := s.txPhase != txNone
+		s.mu.Unlock()
+		if pol.ReadOnly && !inTx {
+			rotx, rerr := pc.BeginSessionTx(ctx, dao.TxOptions{Access: dao.TxReadOnly})
+			if rerr != nil {
+				release()
+				return nil, nil, nil, nil, rerr
+			}
+			s.ext.roWrap = rotx
+		}
+	}
 	return s, connRow, pc, release, nil
+}
+
+// releaseReadOnlyWrap rolls back the segment's hidden READ ONLY transaction. It
+// is autodb's own transaction, so rolling it back is not a client-visible
+// transition and the client's status track is untouched.
+func (o *extObjects) releaseReadOnlyWrap(ctx context.Context) {
+	if o.roWrap == nil {
+		return
+	}
+	rotx := o.roWrap
+	o.roWrap = nil
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
+	defer cancel()
+	_ = rotx.RollbackContext(cctx)
 }
 
 // ErrExtendedUnsupportedTarget is an extended frame on a session whose target is
@@ -339,6 +378,8 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	// segment's outstanding count is void either way: on success the server
 	// answered or discarded everything, and on failure the wire is unusable.
 	s.ext.segment = nil
+	// The wrap lives exactly as long as the segment did.
+	s.ext.releaseReadOnlyWrap(ctx)
 	if serr != nil {
 		return 0, serr
 	}
@@ -394,6 +435,14 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	// transition — so this is the extended twin of an emission that already
 	// exists, not a second control path.
 	if isOwnedControl(st) {
+		// THE HIDDEN WRAP YIELDS TO THE CLIENT'S OWN TRANSACTION. The wrap
+		// exists only while the session has no transaction of its own, and a
+		// control statement is precisely the thing that changes that: golib
+		// permits ONE transaction on the pinned connection, so leaving the wrap
+		// open makes the client's BEGIN fail with ErrTxStillOpen. Releasing it
+		// loses no guarantee — a reader's own transaction is forced READ ONLY by
+		// the same policy, and that force is audited as tx_readonly_forced.
+		s.ext.releaseReadOnlyWrap(ctx)
 		res, cerr := e.wireControl(ctx, s, connRow, st.stmt, pol, st.sql, ip)
 		if cerr != nil {
 			return cerr
@@ -418,6 +467,14 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	s.mu.Unlock()
 	if phase == txAborted {
 		return e.rejectSession(ctx, s, pol.Ident, ip, st.sql, ErrTxAborted)
+	}
+	// FAIL CLOSED. Authority is re-read here, so a caller demoted to reader
+	// mid-segment reaches this with a segment that was opened UNWRAPPED. The
+	// wrap cannot be retrofitted — the wire is no longer quiescent — and running
+	// the statement anyway would relay it with the 25006 guarantee silently
+	// absent, which is the exact hole this path is required not to have.
+	if pol.ReadOnly && phase == txNone && s.ext.roWrap == nil {
+		return e.rejectSession(ctx, s, pol.Ident, ip, st.sql, ErrReadOnlyUnenforceable)
 	}
 
 	// A fresh attempt precedes every effect, so a repeated Execute of one portal
