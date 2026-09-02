@@ -152,17 +152,17 @@ const generalLaneWaitBudget = 30 * time.Second
 // of silently over-committing a lane that three separate documents describe as
 // having room.
 //
-// WHAT THIS FLOOR DOES NOT YET COVER, stated here rather than left implicit:
-// §1.4 charges THREE things to this lane — pending output, segment input, and
-// retained statement/portal state. Only pending output is a RESERVATION; the
-// other two are per-session CAPS (retained state 16 MiB, segment 96 MiB, §9),
-// and a cap is not a reservation — nothing takes them up front. Composing the
-// caps the way this composes the reservation gives 256 × 116 MiB ≈ 29 GiB
-// against a published ceiling of 4 GiB, which is itself the evidence that they
-// were never meant to compose that way. Completing the rule needs a per-session
-// reservation figure for those two, or a ruling that they stay caps. Raised with
-// the lead; the floor below is the part that can be derived from what is
-// published today.
+// WHY ONLY ONE OF THE THREE CHARGES COMPOSES (matrix §1.4, RULED 2026-09-03).
+// §1.4 charges three things to this lane, and only pending output is a
+// RESERVATION — it alone has a knowable bound per statement, the watermark.
+// Segment input (96 MiB per segment) and retained state (16 MiB per session) are
+// CAPS on one session, charged as they occur and admitted by backpressure; their
+// sum over the session cap is ≈29 GiB against a 4 GiB ceiling, which is the proof
+// they were never a composition. A cap bounds what ONE session may hold; the lane
+// bounds what ALL sessions hold together, and §7's backpressure is how the second
+// is enforced when the sum of the caps exceeds it — which it always did, by
+// design.
+
 const (
 	// generalLaneSessionCap is the global session cap the floor composes over
 	// (config.DefaultMaxSessionsGlobal; matrix row 2.7).

@@ -126,6 +126,22 @@ default 1 GiB):
 
 - **General lane** — all segment input, retained statement/portal state,
   pending serialized output. Charged **before** read/decode/store/serialize.
+
+  **Composition (RULED, jarvis as lead, 2026-09-03).** The general lane admits
+  three charges. ONE is a reservation — a statement's output working set
+  (`pendingOutputWatermark`), taken before dispatch — and the lane's floor is
+  derived from it: **global session cap × watermark**, so that at full occupancy
+  every session can hold one output working set; config may only RAISE the lane,
+  and startup refuses a lane below the floor. The other two — segment input (cap
+  96 MiB per segment) and retained statement/portal state (cap 16 MiB per
+  session) — are **caps on one session**, charged as they occur (header first,
+  §1.5) and admitted by **backpressure**: at full occupancy a new segment's
+  intake waits for any statement to release its working set, which is the §7
+  contract, bounded by the segment-stall budget (§8.4) and §8.2's release on
+  every exit. They are deliberately NOT reserved: their sum over the session cap
+  (≈29 GiB) exceeds the 4 GiB ceiling seven times, which is the proof they were
+  never a composition. What the output reservation has that the others lack is a
+  KNOWABLE bound per statement; that is why it composes and they do not.
 - **Control/error lane** — a reserved slice admitting ONLY: `Sync`,
   `Flush`, `Terminate` intake (and header-only reads while discarding);
   `ErrorResponse` / `NoticeResponse` / `ReadyForQuery` emission; cancel
