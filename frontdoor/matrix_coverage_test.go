@@ -132,7 +132,7 @@ var matrixTriage = map[string]struct {
 
 	// ---- §3.2 / §3.3 prose units ----
 	"3.2": {awaiting, "post-auth SET policy is the ADR-0074 gate matrix; needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub; the startup half is 3.1:options' refusal"},
-	"3.3": {awaiting, "the three synthesized values ship with F0e; the verbatim forwarded set needs the target lease — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub (rev 5 split)"},
+	"3.3": {awaiting, "ENGINE SEAM (jarvis) — the three synthesized values ship with F0e and are proven by TestPGLoop_SessionOpenCarriesTheThreeSynthesizedStatuses; the VERBATIM FORWARDED set does not exist and cannot be built from the loop. Established by measurement, not assumption: with the message-aliasing bug fixed, the session-open set is exactly application_name, is_superuser and session_authorization, and no seam exposes the target's GUC_REPORT set. The old reason — that the F1 wire loop was missing — is false as of the loop landing"},
 
 	// ---- §4 Frontend message matrix (post-auth) ----
 	"4:Query":                     {covered, "TestPGLoop_MultiStatementRunsInOrderAndStopsAtTheFirstError + TestPGLoop_ControlInsideTheBufferDrivesTheTransactionState — implicit-block semantics against a real server: statements run in order, the first error rolls the block back (count(*)=0 afterwards), and BEGIN/COMMIT inside one buffer drive the readiness byte"},
@@ -220,7 +220,7 @@ var claimTriage = map[string]struct {
 	// promoted (lector PR #46 r0 MF1). A missing claim is invisible to the gate;
 	// only a present-and-awaiting one keeps the parent honest.
 	"3.1:application_name#session-audit": {awaiting, "",
-		"recorded on the session and on every audit row — fd.auth_ok's detail omits it and WireSessionResult cannot carry it; the session and audit rows are the F1 WIRE LOOP's, so this awaits it", nil},
+		"ENGINE SEAM (jarvis) — recorded on the session and on every audit row. Verified absent by reading rather than assumed: WireSessionResult (core/exec/wire_session.go) has no ApplicationName field, fd.auth_ok's Event omits it, and exec rows carry no wire session id, so the label cannot reach either the session or the audit rows from the loop. The old reason — that this awaited the F1 wire loop — is false as of the loop landing", nil},
 
 	"3.1:client_encoding#utf8-only": {covered, "TestStartup_ParameterPolicy",
 		"non-UTF8 refused, hyphen spelling tolerated",
