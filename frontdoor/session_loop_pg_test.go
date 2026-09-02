@@ -1272,3 +1272,76 @@ func TestPGLoop_TwoPipelinedQueriesAreBothExecuted(t *testing.T) {
 			"it hangs until the idle deadline rather than closing")
 	}
 }
+
+// ROW 3.3's FORWARDED HALF (claim: the client's received set equals the target's
+// reported set). This was `awaiting` for as long as the front door had no way to
+// know the target's parameters; #58's seam gives it them, and this is the
+// witness that closes it.
+//
+// The comparison is against an INDEPENDENT connection to the same target rather
+// than against a list written here: a hand-written expectation would encode this
+// PostgreSQL build's parameters and pass while the relay forwarded something
+// else entirely.
+func TestPGLoop_TheClientReceivesTheTargetsOwnParameterSet(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, _, listenAddr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
+
+	got := startupParameterSet(t, listenAddr, secret, database)
+
+	// What the target itself reports, read through the same relay but as data
+	// rather than as startup frames — so this side cannot be wrong in the same
+	// way the forwarding side is.
+	fe := pgClient(t, listenAddr, secret, database)
+	for _, name := range []string{"server_version", "server_encoding", "client_encoding", "DateStyle"} {
+		dr, ok := firstOfType[*pgproto3.DataRow](query(t, fe, fmt.Sprintf("SHOW %s", name)))
+		if !ok {
+			t.Fatalf("reading the target's own %s", name)
+		}
+		want := string(dr.Values[0])
+		if got[name] == "" {
+			t.Fatalf("the client was never told %s, but the target reports %q — row 3.3 requires "+
+				"the target's set to be forwarded, and a client that asks this surface for "+
+				"%s must learn the server its statements actually run on", name, want, name)
+		}
+		if got[name] != want {
+			t.Fatalf("%s: forwarded %q, target reports %q", name, got[name], want)
+		}
+	}
+}
+
+// The three overrides must WIN over anything the target reported under the same
+// name — which is why they are appended after the forwarded set rather than the
+// set being filtered. A later ParameterStatus is the one a client keeps.
+func TestPGLoop_TheOverridesWinOverTheTargetsOwnValues(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, _, listenAddr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
+
+	got := startupParameterSet(t, listenAddr, secret, database)
+	if got["is_superuser"] != "off" {
+		t.Fatalf("is_superuser = %q, want off — this answers a question about the TARGET's role, "+
+			"and through this surface autodb's gates apply whatever the target would have said",
+			got["is_superuser"])
+	}
+	if got["application_name"] != appNameForTest {
+		t.Fatalf("application_name = %q, want the client's accepted label %q", got["application_name"], appNameForTest)
+	}
+}
+
+// startupParameterSet collects the ParameterStatus set a client is sent before
+// its first ReadyForQuery, keeping the LAST value for each name — which is what
+// a client keeps, and therefore the only reading that can judge the overrides.
+func startupParameterSet(t *testing.T, addr, secret, database string) map[string]string {
+	t.Helper()
+	_, opening := pgClientCollecting(t, addr, secret, database)
+	set := map[string]string{}
+	for _, msg := range opening {
+		if ps, ok := msg.(*pgproto3.ParameterStatus); ok {
+			set[ps.Name] = ps.Value
+		}
+	}
+	return set
+}
+
+// appNameForTest is what pgClientCollecting sends as its startup
+// application_name; the echo must equal it.
+const appNameForTest = "psql"

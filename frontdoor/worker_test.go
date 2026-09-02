@@ -36,6 +36,11 @@ func newBlockingAuth() *blockingAuth {
 	return &blockingAuth{entered: make(chan struct{}, 256), release: make(chan struct{})}
 }
 
+// OpenWireSessionWith delegates: this fake is about worker occupancy.
+func (b *blockingAuth) OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (exec.WireSessionResult, error) {
+	return b.OpenWireSession(ctx, req.PAT, req.StartupUser, req.Database, req.IP)
+}
+
 func (b *blockingAuth) OpenWireSession(_ context.Context, _, _, _, _ string) (exec.WireSessionResult, error) {
 	n := b.inFlight.Add(1)
 	for {

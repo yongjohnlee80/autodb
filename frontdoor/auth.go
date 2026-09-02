@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"sync"
 	"time"
 
@@ -57,6 +58,13 @@ const CancelKeyLen = 4
 // listener's dependency is exactly the calls it makes. A concrete engine
 // here would let a later change reach for anything on it.
 type Authenticator interface {
+	// OpenWireSessionWith is the call this listener makes (#58's seam). It
+	// carries the startup parameters the session must remember — today the
+	// accepted application_name, which row 3.1 requires on the session and on
+	// every audit row for a wire unit (claim #session-audit).
+	OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (exec.WireSessionResult, error)
+	// OpenWireSession is kept because it is what the fakes implement and what
+	// the engine still exposes; it opens with no application_name.
 	OpenWireSession(ctx context.Context, presented, startupUser, database, ip string) (exec.WireSessionResult, error)
 	CloseWireSession(ctx context.Context, id exec.SessionID, userID int64, ip, reason string)
 }
@@ -203,7 +211,14 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// draws. Peer stays false, so nothing is counted against them.
 		return authOutcome{}, werr
 	}
-	res, aerr := l.authn.OpenWireSession(authCtx, pm.Password, params["user"], params["database"], hostOf(peer))
+	res, aerr := l.authn.OpenWireSessionWith(authCtx, exec.WireOpen{
+		PAT: pm.Password, StartupUser: params["user"], Database: params["database"],
+		IP: hostOf(peer),
+		// Already length-capped and audited verbatim by params.go — the cap is
+		// row 3.1's, and applying it before the engine sees the label keeps the
+		// one rule in one place.
+		ApplicationName: params["application_name"],
+	})
 	release()
 	if aerr != nil {
 		if reason := exec.DenialReason(aerr); reason != "" {
@@ -320,21 +335,59 @@ func (l *Listener) completeHandshake(be *pgproto3.Backend, res exec.WireSessionR
 // nothing, because a client would believe it had been told the server's
 // DateStyle. The matrix cell records the split (rev 6).
 func synthesizedStatuses(res exec.WireSessionResult, params map[string]string) []pgproto3.BackendMessage {
-	return []pgproto3.BackendMessage{
-		// The echo of §3.1's accepted application_name. Absent is a legal
-		// startup, and an empty echo is the honest answer to it. This is the
-		// CLIENT's own label coming back to it — not a value read from the
-		// target, which is never sent it at startup (a client can still change
-		// the backend's own GUC later through set_config(); see params.go).
-		&pgproto3.ParameterStatus{Name: "application_name", Value: params["application_name"]},
-		// ALWAYS off. A client asking whether it is superuser is asking a
-		// question about the TARGET's role, and the answer through this
-		// surface is that autodb's gates apply regardless of what the target
-		// would have said.
+	// FORWARD THE TARGET'S OWN SET FIRST, VERBATIM (row 3.3). These are what the
+	// pinned backend actually reported at its startup — server_version,
+	// client_encoding, DateStyle, TimeZone and the rest — and forwarding them is
+	// what makes the relay honest: a client that reads server_version through
+	// this surface learns the TARGET's, because that is the server its
+	// statements will run on.
+	//
+	// Before #58's seam the front door had no way to know them, so it sent only
+	// the three it could synthesize and a client asking for DateStyle was told
+	// nothing at all. Row 3.3's forwarded half was `awaiting` for exactly that
+	// reason.
+	//
+	// Order matters and is deliberate: forwarded first, overrides after. A
+	// ParameterStatus later in the stream is the one the client keeps, so the
+	// two below win over anything the target reported under the same name —
+	// which is the point of overriding them rather than filtering the set.
+	out := make([]pgproto3.BackendMessage, 0, len(res.ParameterStatuses)+3)
+	for _, name := range sortedNames(res.ParameterStatuses) {
+		out = append(out, &pgproto3.ParameterStatus{Name: name, Value: res.ParameterStatuses[name]})
+	}
+
+	return append(out,
+		// The echo of §3.1's accepted application_name — the CLIENT's own label
+		// coming back to it, now taken from what the ENGINE accepted rather than
+		// re-read from the startup params, so the echo cannot disagree with what
+		// the session recorded and audits under (claim #session-audit).
+		//
+		// The target is never sent this label at startup, so its own set will
+		// carry the backend's effective default; the override is what makes the
+		// echo true. (A client can still change the backend's GUC later through
+		// set_config(); see params.go.)
+		&pgproto3.ParameterStatus{Name: "application_name", Value: res.ApplicationName},
+		// ALWAYS off, whatever the target reported. A client asking whether it is
+		// superuser is asking a question about the TARGET's role, and the answer
+		// through this surface is that autodb's gates apply regardless.
 		&pgproto3.ParameterStatus{Name: "is_superuser", Value: "off"},
 		// The autodb username, canonical rather than as typed.
 		&pgproto3.ParameterStatus{Name: "session_authorization", Value: res.UserName},
+	)
+}
+
+// sortedNames orders the forwarded set so the stream is deterministic.
+//
+// PostgreSQL does not promise an order and a client must not depend on one, but
+// a cell comparing two connections' sets would otherwise fail on map iteration
+// rather than on a difference that matters.
+func sortedNames(m map[string]string) []string {
+	names := make([]string, 0, len(m))
+	for k := range m {
+		names = append(names, k)
 	}
+	sort.Strings(names)
+	return names
 }
 
 // newBackendKey mints the cancel key from the CSPRNG (matrix row 2.9, MF7).

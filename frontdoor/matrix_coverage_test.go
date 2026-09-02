@@ -123,7 +123,7 @@ var matrixTriage = map[string]struct {
 	// below keeps those citations and anchors inside the named test cells.
 	"3.1:user":                {covered, "claims below prove requiredness and the PAT-owner cross-check"},
 	"3.1:database":            {covered, "claims below prove requiredness and the grant-on-target check"},
-	"3.1:application_name":    {awaiting, "derived from its claims — #accepted and #truncate-notice-256 are covered; #session-audit (recorded on the session and every audit row) awaits the F1 WIRE LOOP, so the parent stays awaiting (lector PR #46 r0 MF1)"},
+	"3.1:application_name":    {covered, "derived from its claims — #accepted, #truncate-notice-256 and #session-audit are all covered as of #58's seam and its consumer wiring. The parent was held awaiting by #session-audit alone (lector PR #46 r0 MF1); that claim is now witnessed on both sides of the seam, so the derivation promotes it rather than any hand edit here"},
 	"3.1:client_encoding":     {awaiting, "partial — claims below (the UTF8-only gate is proven; the target-lease UTF8 pin, ruling 2, needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub)"},
 	"3.1:options":             {covered, "derived from its claims — GUC refusal and empty-accepted (TestStartup_ParameterPolicy), empty-options audit (TestStartup_EmptyOptionsIsAuditedAsIgnored)"},
 	"3.1:replication":         {covered, "single claim below — refused, every tested value"},
@@ -132,7 +132,7 @@ var matrixTriage = map[string]struct {
 
 	// ---- §3.2 / §3.3 prose units ----
 	"3.2": {awaiting, "post-auth SET policy is the ADR-0074 gate matrix; needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub; the startup half is 3.1:options' refusal"},
-	"3.3": {awaiting, "ENGINE SEAM (jarvis) — the three synthesized values ship with F0e and are proven by TestPGLoop_SessionOpenCarriesTheThreeSynthesizedStatuses; the VERBATIM FORWARDED set does not exist and cannot be built from the loop. Established by measurement, not assumption: with the message-aliasing bug fixed, the session-open set is exactly application_name, is_superuser and session_authorization, and no seam exposes the target's GUC_REPORT set. The old reason — that the F1 wire loop was missing — is false as of the loop landing"},
+	"3.3": {covered, "TestPGLoop_TheClientReceivesTheTargetsOwnParameterSet + TestPGLoop_TheOverridesWinOverTheTargetsOwnValues — the forwarded half exists as of #58's seam and is proven against an INDEPENDENT connection to the same target (SHOW server_version/server_encoding/client_encoding/DateStyle), not against a list written in the cell, which would have encoded this build's parameters and passed while the relay forwarded something else. The overrides are proven to WIN over the target's own values for the same names, which is why they are appended after the forwarded set rather than the set being filtered; mutation-proven both ways (drop the forwarding, and reverse the order)"},
 
 	// ---- §4 Frontend message matrix (post-auth) ----
 	"4:Query":                     {covered, "TestPGLoop_MultiStatementRunsInOrderAndStopsAtTheFirstError + TestPGLoop_ControlInsideTheBufferDrivesTheTransactionState — implicit-block semantics against a real server: statements run in order, the first error rolls the block back (count(*)=0 afterwards), and BEGIN/COMMIT inside one buffer drive the readiness byte"},
@@ -219,8 +219,9 @@ var claimTriage = map[string]struct {
 	// no claim, so the derivation could not see it and the parent was falsely
 	// promoted (lector PR #46 r0 MF1). A missing claim is invisible to the gate;
 	// only a present-and-awaiting one keeps the parent honest.
-	"3.1:application_name#session-audit": {awaiting, "",
-		"ENGINE SEAM (jarvis) — recorded on the session and on every audit row. Verified absent by reading rather than assumed: WireSessionResult (core/exec/wire_session.go) has no ApplicationName field, fd.auth_ok's Event omits it, and exec rows carry no wire session id, so the label cannot reach either the session or the audit rows from the loop. The old reason — that this awaited the F1 wire loop — is false as of the loop landing", nil},
+	"3.1:application_name#session-audit": {covered, "TestLoop_TheAcceptedApplicationNameReachesTheEngine",
+		"the front door's half — the ACCEPTED label reaches the ENGINE, not merely the echo. The distinction is the claim: an echo synthesized here from the startup params would satisfy a wire-only cell while the session recorded nothing and every audit row said app \"\". The engine's half (recorded on the session and on every audit line) is core/exec's TestWireOpen_ApplicationNameIsOnTheSessionAndEveryAuditLine and TestWireOpen_AuditStampCoversDecodedAndOwnedControlSites, shipped with #58",
+		[]string{"openedAppNames", "reporting-tool-7"}},
 
 	"3.1:client_encoding#utf8-only": {covered, "TestStartup_ParameterPolicy",
 		"non-UTF8 refused, hyphen spelling tolerated",
