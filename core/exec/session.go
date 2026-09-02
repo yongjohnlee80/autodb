@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 )
@@ -159,7 +160,16 @@ type session struct {
 
 	// The session's one transaction (ADR-0074 Amendment 2). All of these
 	// fields are guarded by mu.
-	tx               dao.ContextTxConn
+	tx dao.ContextTxConn
+	// pc is the session's PINNED backend connection (golib ADR-0018), set on a
+	// postgres WIRE session by the first WireQuery and held for the session's
+	// life. Every raw simple-query dispatch runs on it, and the session's
+	// transaction is opened THROUGH it (BeginSessionTx), so the raw face and the
+	// owned transaction share one backend — a statement inside BEGIN really runs
+	// inside it. Token sessions never set it. Discarded, never released, on
+	// close: the wire is the client's for the connection's life and a pooled
+	// recycle of it would carry session state to another user.
+	pc               golibpg.PinnedConn
 	txPhase          txPhase
 	txID             string
 	txOpened         time.Time

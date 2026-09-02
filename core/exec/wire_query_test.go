@@ -3,6 +3,8 @@ package exec
 import (
 	"context"
 	"errors"
+	"github.com/jackc/pgx/v5/pgconn"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 	"testing"
 )
 
@@ -20,9 +22,9 @@ func TestWireQuery_NilEmitFailsBeforeDispatch(t *testing.T) {
 	}
 }
 
-func TestInterimWireMessages_ReadResultShape(t *testing.T) {
+func TestDecodedWireMessages_ReadResultShape(t *testing.T) {
 	res := &Result{Columns: []string{"id", "name"}, Rows: [][]any{{int64(1), "a"}, {int64(2), nil}}}
-	msgs := interimWireMessages(res)
+	msgs := decodedWireMessages(res)
 	want := []string{"RowDescription", "DataRow", "DataRow", "CommandComplete"}
 	if len(msgs) != len(want) {
 		t.Fatalf("got %d messages, want %d", len(msgs), len(want))
@@ -40,13 +42,13 @@ func TestInterimWireMessages_ReadResultShape(t *testing.T) {
 	}
 }
 
-// The RawRows rule, which the interim encoder must already honour so the loop
+// The RawRows rule, which the decoded encoder must already honour so the loop
 // is written against the right distinction: NULL is a nil slice, empty is a
 // zero-length NON-nil slice. They are different bytes on the wire (-1 length
 // vs 0 length) and a client tells them apart.
-func TestInterimWireMessages_NullAndEmptyAreDifferent(t *testing.T) {
+func TestDecodedWireMessages_NullAndEmptyAreDifferent(t *testing.T) {
 	res := &Result{Columns: []string{"c"}, Rows: [][]any{{nil}, {""}}}
-	msgs := interimWireMessages(res)
+	msgs := decodedWireMessages(res)
 	null, empty := msgs[1].Values[0], msgs[2].Values[0]
 	if null != nil {
 		t.Fatalf("NULL encoded as %v (len %d), want a nil slice", null, len(null))
@@ -56,7 +58,7 @@ func TestInterimWireMessages_NullAndEmptyAreDifferent(t *testing.T) {
 	}
 }
 
-func TestInterimWireMessages_CommandTags(t *testing.T) {
+func TestDecodedWireMessages_CommandTags(t *testing.T) {
 	for _, tc := range []struct {
 		verb string
 		n    int64
@@ -68,7 +70,7 @@ func TestInterimWireMessages_CommandTags(t *testing.T) {
 		{"CREATE", 0, "CREATE"},
 		{"BEGIN", 0, "BEGIN"},
 	} {
-		msgs := interimWireMessages(&Result{Verb: tc.verb, Affected: tc.n})
+		msgs := decodedWireMessages(&Result{Verb: tc.verb, Affected: tc.n})
 		if len(msgs) != 1 || msgs[0].Kind != "CommandComplete" || msgs[0].Tag != tc.want {
 			t.Errorf("%s/%d → %+v, want one CommandComplete %q", tc.verb, tc.n, msgs, tc.want)
 		}
@@ -77,17 +79,17 @@ func TestInterimWireMessages_CommandTags(t *testing.T) {
 
 // ReadyForQuery is NEVER a message: a producer that could emit readiness could
 // contradict the session's transaction state. Scanning every shape the encoder
-// can produce is the cheapest way to pin that for the interim producer; the raw
+// can produce is the cheapest way to pin that for the decoded producer; the raw
 // producer's cell is A1-C3.
-func TestInterimWireMessages_NeverEmitsReadyForQuery(t *testing.T) {
+func TestDecodedWireMessages_NeverEmitsReadyForQuery(t *testing.T) {
 	for _, res := range []*Result{
 		{Columns: []string{"x"}, Rows: [][]any{{1}}},
 		{Verb: "UPDATE", Affected: 1},
 		{},
 	} {
-		for _, m := range interimWireMessages(res) {
+		for _, m := range decodedWireMessages(res) {
 			if m.Kind == "ReadyForQuery" {
-				t.Fatalf("interim producer emitted ReadyForQuery for %+v; readiness is the session's, returned as the status byte", res)
+				t.Fatalf("decoded producer emitted ReadyForQuery for %+v; readiness is the session's, returned as the status byte", res)
 			}
 		}
 	}
@@ -134,5 +136,33 @@ func TestWireQuery_CallbackReentryIsRefusedAndStatusIsTheOriginal(t *testing.T) 
 	}
 	if st, _ := f.eng.WireTxStatus(sid, userID); st != TxStatusIdle {
 		t.Fatalf("after the real ROLLBACK status = %q, want %q", st, TxStatusIdle)
+	}
+}
+
+// wireFromExtended carries every field of golib's neutral message across
+// unchanged — the asynchronous kinds included, which is what the raw route
+// exists to preserve. A dropped or renamed field reddens this.
+func TestWireFromExtended_CarriesEveryFieldVerbatim(t *testing.T) {
+	t.Parallel()
+	pgErr := &pgconn.PgError{Code: "42P01", Message: "m", Position: 7}
+	notice := &pgconn.Notice{Code: "01000", Message: "n"}
+	notif := &pgconn.Notification{PID: 9, Channel: "c", Payload: "p"}
+	in := golibpg.ExtendedMessage{
+		Kind: "RowDescription", Tag: "SELECT 2", Err: pgErr, Notice: notice, Notification: notif,
+		ParameterName: "application_name", ParameterValue: "x",
+		Values: [][]byte{[]byte("1"), nil, {}},
+		Fields: []golibpg.ExtendedFieldDescription{{Name: "n", TableOID: 16385, ColumnAttr: 2, TypeOID: 23, TypeSize: 4, TypeModifier: -1, Format: 0}},
+	}
+	out := wireFromExtended(in)
+	if out.Kind != in.Kind || out.Tag != in.Tag || out.Err != pgErr || out.Notice != notice || out.Notification != notif ||
+		out.ParameterName != in.ParameterName || out.ParameterValue != in.ParameterValue {
+		t.Fatalf("scalar fields differ: %+v", out)
+	}
+	if len(out.Values) != 3 || string(out.Values[0]) != "1" || out.Values[1] != nil || out.Values[2] == nil || len(out.Values[2]) != 0 {
+		t.Fatalf("Values %q (nil? %v %v): NULL must stay nil and empty non-nil", out.Values, out.Values[1] == nil, out.Values[2] == nil)
+	}
+	f := out.Fields[0]
+	if f.Name != "n" || f.TableOID != 16385 || f.ColumnAttr != 2 || f.TypeOID != 23 || f.TypeSize != 4 || f.TypeModifier != -1 || f.Format != 0 {
+		t.Fatalf("field mapping lost something: %+v", f)
 	}
 }

@@ -80,6 +80,10 @@ type Engine struct {
 	// (ADR-0074 §1's mandate to inject each competing transition inside that
 	// window, rather than run it alongside and hope).
 	hookAfterDrainCheck func()
+	// hookRawDispatch, when set, observes every SimpleQuery dispatch with the
+	// EXACT bytes handed to the wire. Cells use it to prove the gate ran on the
+	// same text that was dispatched and that refused buffers dispatch nothing.
+	hookRawDispatch func(sqlText string)
 	// closeQuiesce is how long a close waits for an in-flight statement. It
 	// is a FIELD rather than a package variable so a test can shorten it on
 	// its own engine: a shared variable that parallel tests reassign is a

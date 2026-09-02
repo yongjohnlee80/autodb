@@ -60,27 +60,45 @@ func (e *Engine) WireExecute(ctx context.Context, id SessionID, userID int64, sq
 // owed. closeAfterRelease is the caller's flag because the caller's defer is
 // the one that runs after release.
 func (e *Engine) wireExecuteClaimed(ctx context.Context, s *session, sqlText, ip string, closeAfterRelease *bool) (*Result, error) {
-	if s.get() != sessOpen {
-		return nil, ErrSessionNotFound
+	pol, err := e.wireAdmit(ctx, s, sqlText, ip, closeAfterRelease)
+	if err != nil {
+		return nil, err
 	}
+	// A postgres WIRE session pins its backend before ANY statement can open a
+	// transaction, on this seam as on WireQuery: a BEGIN that opened on the pool
+	// while later raw statements ran on the pinned connection would put the
+	// client's statements outside the transaction it believes it is in.
+	if connRow, cerr := e.store.Connections.OnCtx(ctx).With(meta.ConnID, s.connID).Get(); cerr == nil && connRow.Engine == "postgres" {
+		if _, perr := e.pinWireSession(ctx, s, connRow); perr != nil {
+			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
+		}
+	}
+	return e.executeSessionUnit(ctx, s, pol, sqlText, ip, true)
+}
 
-	// THE POLICY, resolved fresh from the session's own authority. This is
-	// the whole of what differs from the token path: the credential is a PAT
-	// and it is re-read from the PATs table, not the sessions table.
+// wireAdmit is the wire path's preamble, shared by the decoded and the raw
+// producers: the session must be open, and THE POLICY is resolved fresh from
+// the session's own authority — the credential is a PAT and it is re-read from
+// the PATs table, not the sessions table. A transaction whose authority has
+// changed underneath it is rolled back and the statement refused.
+func (e *Engine) wireAdmit(ctx context.Context, s *session, sqlText, ip string, closeAfterRelease *bool) (UnitPolicy, error) {
+	if s.get() != sessOpen {
+		return UnitPolicy{}, ErrSessionNotFound
+	}
 	pol, perr := e.resolveUnitPolicy(ctx, s.authority, s.userID, s.connID)
 	if perr != nil {
-		return nil, perr
+		return UnitPolicy{}, perr
 	}
 	demoted, derr := e.enforceTransactionAuthority(ctx, s, pol, ip)
 	if derr != nil {
 		*closeAfterRelease = e.transferDemotionClose(s, ip)
-		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText,
+		return UnitPolicy{}, e.rejectSession(ctx, s, pol.Ident, ip, sqlText,
 			fmt.Errorf("%w: rollback cleanup failed: %v", ErrTxAuthorityChanged, derr))
 	}
 	if demoted {
-		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAuthorityChanged)
+		return UnitPolicy{}, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAuthorityChanged)
 	}
-	return e.executeSessionUnit(ctx, s, pol, sqlText, ip, true)
+	return pol, nil
 }
 
 // executeSessionUnit is the shared token/PAT session pipeline after one fresh
