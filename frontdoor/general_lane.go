@@ -116,6 +116,11 @@ func (l *generalLane) release(n int64) {
 	l.cond.Broadcast()
 }
 
+// capacity reports the lane's limit, so a caller can clamp a reservation to
+// something the lane could ever admit rather than asking for a wait that can
+// only time out.
+func (l *generalLane) capacity() int64 { return l.limit }
+
 // inUse reports the bytes currently reserved, for cells and diagnostics.
 func (l *generalLane) inUse() int64 {
 	l.mu.Lock()

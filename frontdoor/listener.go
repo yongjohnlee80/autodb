@@ -79,6 +79,14 @@ type Listener struct {
 	// budget — a per-connection bound cannot express a process-wide limit.
 	general *generalLane
 
+	// testWatermark lowers the pending-output watermark so a cell can reach the
+	// post-dispatch top-up path without producing four megabytes.
+	testWatermark *int64
+
+	// testLaneWait shortens the lane wait budget so a cell can observe a
+	// saturated lane without waiting the policy thirty seconds for it.
+	testLaneWait *time.Duration
+
 	// testOutputCap lowers the cumulative output cap so a cell can trip it
 	// without producing 8 GiB. Nil takes the matrix's figure.
 	testOutputCap *int64
@@ -167,6 +175,12 @@ type Options struct {
 
 	// testOutputCap lowers the cumulative output cap for a cell.
 	testOutputCap *int64
+
+	// testWatermark lowers the pending-output watermark for a cell.
+	testWatermark *int64
+
+	// testLaneWait shortens the general-lane wait budget for a cell.
+	testLaneWait *time.Duration
 
 	// The caps. Zero takes the documented default; Open validates the
 	// relationship between them rather than trusting a caller to have done
@@ -257,6 +271,8 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.onSession = opt.OnSession
 	l.queries = opt.Queries
 	l.testOutputCap = opt.testOutputCap
+	l.testWatermark = opt.testWatermark
+	l.testLaneWait = opt.testLaneWait
 	laneBytes := opt.GeneralLaneBytes
 	if laneBytes <= 0 {
 		laneBytes = DefaultGeneralLaneBytes

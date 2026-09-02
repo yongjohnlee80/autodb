@@ -226,13 +226,68 @@ func (l *Listener) outputCap() int64 {
 	return cumulativeOutputCap
 }
 
-// errGeneralLaneStalled stops the producer when the process-wide lane stays
-// saturated past the wait budget. It never reaches the peer.
-var errGeneralLaneStalled = errors.New("frontdoor: the general lane stayed saturated")
+// outputWatermark is §8.4's bound on serialized output waiting to be written,
+// or a cell's lowered one.
+func (l *Listener) outputWatermark() int64 {
+	if l.testWatermark != nil {
+		return *l.testWatermark
+	}
+	return pendingOutputWatermark
+}
 
-// errOutputCapExceeded stops the producer when a statement passes §7's
-// cumulative output cap. It never reaches the peer; the loop frames §8a for it.
-var errOutputCapExceeded = errors.New("frontdoor: the statement exceeded the cumulative output cap")
+// laneWait is how long a statement waits for the general lane, or a cell's
+// shortened budget. The figure itself is policy (session-loop-budgets.md §5.2).
+func (l *Listener) laneWait() time.Duration {
+	if l.testLaneWait != nil {
+		return *l.testLaneWait
+	}
+	return generalLaneWaitBudget
+}
+
+// outputWithheld names WHY the front door stopped forwarding output for a
+// statement that had ALREADY BEEN DISPATCHED. It is a closed set, and adding a
+// budget means adding a row to withheldReasons below — which is the point.
+//
+// This type exists because the same defect was found twice at two sites (r2 MF9
+// at the cumulative cap, r4 MF15 at the general lane), and a third site would
+// have been a third chance to get it wrong. A stop reason can no longer compose
+// its own account of what happened to the statement: it names what stopped, and
+// the stage asks the ENGINE what became of the effects (jarvis, r4).
+type outputWithheld int
+
+const (
+	// outputComplete is the zero value: nothing was withheld. It is first so
+	// that a site which forgets to name a reason reports nothing rather than
+	// silently picking whichever constant happens to be zero.
+	outputComplete outputWithheld = iota
+	withheldAtCap
+	withheldOnSaturatedLane
+)
+
+// withheldReasons maps each stop reason to its §7 wire identity, the clause
+// naming WHAT STOPPED, and the operator's remedy for it.
+//
+// Note what is NOT here: any claim about the statement's effects. A budget knows
+// why forwarding stopped; only the engine knows whether the rows are durable,
+// and every version of this code that let the budget answer both questions got
+// the second one wrong.
+var withheldReasons = map[outputWithheld]struct{ rule, stopped, remedy string }{
+	withheldAtCap: {
+		rule:    ruleOutputCap,
+		stopped: "its output exceeded the session's output budget",
+		remedy:  "narrow the result, or use the RPC surface to read it",
+	},
+	withheldOnSaturatedLane: {
+		rule:    ruleBudgetBackpressure,
+		stopped: "the server's output budget was saturated",
+		remedy:  "retry the read when the server is less busy",
+	},
+}
+
+// errStopForwarding unwinds the emitter once a stop reason has been recorded.
+// One sentinel for every reason, because the reason is carried by the
+// outputWithheld value and the post-dispatch handling is a single branch.
+var errStopForwarding = errors.New("frontdoor: forwarding stopped by a budget")
 
 // runQuery executes one simple-query buffer and frames the response. It reports
 // whether the session continues.
@@ -243,7 +298,45 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 	// this session: WireQuery holds the session's one-in-flight claim across
 	// every emit, so a re-entrant call gets ErrSessionBusy by design. Anything
 	// this loop needs from the engine happens after WireQuery returns.
-	var emitErr, writeErr, capErr, laneErr error
+	// PRE-DISPATCH RESERVATION — refuse before the effect where the budget can be
+	// known (jarvis, r4: "it is the cheaper truth").
+	//
+	// A statement's output working set is bounded by the watermark, so it can be
+	// reserved from the process lane BEFORE the target runs anything. That moves
+	// the ordinary saturation case — a busy process, a connection arriving into
+	// it — to a point where refusing is simply TRUE: nothing has executed, no
+	// rows are durable, and the client can retry with nothing left behind. It is
+	// also far less lane traffic than a reservation per frame.
+	//
+	// What it cannot cover is a single frame larger than the whole reservation;
+	// that still tops up mid-statement, and if the lane cannot admit it the
+	// statement has already run. Hence the post-dispatch stage — which now sees
+	// the rare case rather than the common one.
+	held := l.outputWatermark()
+	if cap := l.general.capacity(); held > cap {
+		held = cap
+	}
+	if !l.general.reserve(held, l.laneWait(), l.now) {
+		// Backpressure, not a defect (§7) — and honest, because it is PRE-effect.
+		// This is the one place in the statement path where fd.refused is the
+		// truthful audit for a budget: nothing ran.
+		l.onEvent(Event{Kind: "fd.refused", Reason: ruleBudgetBackpressure, Peer: peer,
+			Detail: "the general lane could not admit this statement's output working set; nothing was dispatched"})
+		be.Send(gateError("ERROR", sqlStateProgramLimit,
+			"the server is at its output budget and did not run this statement", ruleBudgetBackpressure,
+			"nothing was executed; retry when the server is less busy"))
+		if ferr := l.flushBounded(conn, be); ferr != nil {
+			*closeReason = "write-failed"
+			return false
+		}
+		return l.sendReadiness(conn, be, sess, peer, closeReason)
+	}
+	// RELEASE ON EVERY PATH (§8.2): whatever this statement holds goes back when
+	// it returns, however it returns.
+	defer func() { l.general.release(held) }()
+
+	var emitErr, writeErr error
+	var withheld outputWithheld
 	var pending, produced int64
 	status, err := l.queries.WireQuery(ctx, sess.SessionID, sess.UserID, sql, hostOf(peer),
 		func(m exec.WireMessage) error {
@@ -265,8 +358,8 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 				// rather than allowed to stream forever.
 				produced += int64(size)
 				if produced > l.outputCap() {
-					capErr = errOutputCapExceeded
-					return capErr
+					withheld = withheldAtCap
+					return errStopForwarding
 				}
 
 				// THE WATERMARK IS ENFORCED BEFORE SERIALIZATION (§8.4: "before
@@ -277,33 +370,30 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 				// crossed the mark before anything drained it — the allocation
 				// the bound exists to prevent has already happened by the time
 				// the bound notices. One frame can be large.
-				// THE PROCESS-WIDE GENERAL LANE (§1.4/§8.1). Reserved before
-				// serialization, released when the bytes reach the socket. The
-				// per-connection watermark paces ONE connection; it cannot stop a
-				// thousand of them each holding 4 MiB from adding up past the
-				// process's budget.
-				//
-				// Saturation is BACKPRESSURE, never an error (§7): flush first —
-				// which is itself a release — and only then wait for someone else
-				// to release. A budget whose remedy was refusal would turn a busy
-				// moment into a failed statement.
-				if !l.general.tryReserve(int64(size)) {
+				// The session's working set is ALREADY RESERVED above, so an
+				// ordinary frame touches the lane not at all — it draws against
+				// what this statement holds. Only a frame bigger than the whole
+				// reservation needs more, and it asks for it after flushing,
+				// because a flush empties the buffer and may make the extra
+				// unnecessary.
+				if int64(size) > held {
 					l.onEvent(Event{Kind: "fd.backpressure_enter", Reason: ruleBudgetBackpressure, Peer: peer})
 					if ferr := l.flushBounded(conn, be); ferr != nil {
 						writeErr = ferr
 						return ferr
 					}
-					l.general.release(pending)
 					pending = 0
-					ok := l.general.reserve(int64(size), generalLaneWaitBudget, l.now)
+					ok := l.general.reserve(int64(size)-held, l.laneWait(), l.now)
 					l.onEvent(Event{Kind: "fd.backpressure_exit", Reason: ruleBudgetBackpressure, Peer: peer})
 					if !ok {
-						laneErr = errGeneralLaneStalled
-						return laneErr
+						// The statement HAS RUN. See reportOutputWithheld.
+						withheld = withheldOnSaturatedLane
+						return errStopForwarding
 					}
+					held = int64(size)
 				}
 
-				if pending+int64(size) >= pendingOutputWatermark && pending > 0 {
+				if pending+int64(size) >= l.outputWatermark() && pending > 0 {
 					l.onEvent(Event{Kind: "fd.backpressure_enter", Reason: ruleOutputWatermark, Peer: peer})
 					if ferr := l.flushBounded(conn, be); ferr != nil {
 						// A failed write is the SOCKET, not our framing. Keeping
@@ -314,7 +404,6 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 						return ferr
 					}
 					l.onEvent(Event{Kind: "fd.backpressure_exit", Reason: ruleOutputWatermark, Peer: peer})
-					l.general.release(pending)
 					pending = 0
 				}
 				pending += int64(size)
@@ -334,52 +423,13 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 			return nil
 		})
 
-	// RELEASE ON EVERY PATH (§8.2). Whatever is still reserved when this
-	// function returns — after a normal finish, a gate refusal, a lost wire, a
-	// cap trip or a write failure — goes back to the lane. A budget that leaks
-	// on one exit is a budget that fails at the worst moment, which is why the
-	// matrix makes the obligation explicit rather than leaving it to each path.
-	defer func() {
-		l.general.release(pending)
-		pending = 0
-	}()
-
 	switch {
-	case laneErr != nil:
-		// The process budget stayed saturated for longer than a statement may
-		// hold. Not the peer's doing and not a refusal of its statement: the
-		// session ends and the audit says why.
-		l.onEvent(Event{Kind: "fd.refused", Reason: ruleBudgetBackpressure, Peer: peer,
-			Detail: "the general lane stayed saturated past the wait budget"})
-		*closeReason = ruleBudgetBackpressure
-		return false
-
-	case capErr != nil:
-		// THE STATEMENT ALREADY RAN. The cap trips while its output is being
-		// forwarded, which is after the target executed it and — for DML in an
-		// implicit block — after those effects committed.
-		//
-		// So this is not a refusal, and saying it was would be a lie the client
-		// acts on: it would report 54000 while a hundred rows were committed.
-		// Never report a refusal for an effect that happened. The client is told
-		// what is true — the statement executed, its output was withheld — and
-		// the audit records the statement as EXECUTED rather than refused, so
-		// the operational record and the database agree.
-		//
-		// The place to PREVENT the effect is the retained-capacity reservation
-		// before dispatch (the Parse/Bind rows); once the rows exist, honesty is
-		// the only remedy left to this path.
-		l.onEvent(Event{Kind: "fd.stmt_outcome", Reason: ruleOutputCap, Peer: peer,
-			Detail: "executed; output withheld at the cumulative output cap"})
-		be.Send(gateError("ERROR", sqlStateProgramLimit,
-			"the statement executed; its output exceeded the session's output budget and was not fully delivered",
-			ruleOutputCap,
-			"the statement's effects are committed; narrow the result or use the RPC surface to read it"))
-		if ferr := l.flushBounded(conn, be); ferr != nil {
-			*closeReason = "write-failed"
-			return false
-		}
-		return l.sendReadiness(conn, be, sess, peer, closeReason)
+	case withheld != outputComplete:
+		// EVERY post-dispatch stop lands here, and there is nowhere else for one
+		// to land. The cap and the lane trip for different reasons at different
+		// sites; what is owed to the client and the audit is identical, so it is
+		// decided once, below, from what the engine records.
+		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, withheld)
 
 	case writeErr != nil:
 		// The peer is gone or will not read. Nothing to send it, and nothing
@@ -419,6 +469,93 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 		return false
 	}
 	return true
+}
+
+// reportOutputWithheld is the ONE post-dispatch stop path: the single place
+// that speaks for a statement whose output the front door stopped forwarding
+// after the target had already run it.
+//
+// Every such stop trips while output is being FORWARDED — after the statement
+// executed and, in an implicit block, after its effects committed. Reporting
+// that as a refusal is a lie the client acts on: r2 returned 54000 over a
+// hundred durable rows, and r4 found the identical lie at the lane, in a
+// function I had just fixed for the cap. So this is a STAGE, not a helper the
+// sites call with their own prose (jarvis, r4): a site names a reason, and
+// nothing else about the story is its to tell.
+//
+// THE EFFECTS CLAUSE COMES FROM THE ENGINE, NOT FROM THE BUDGET. Whether the
+// rows are durable depends on the transaction the statement ran in, which the
+// budget cannot know and every earlier version of this text simply asserted:
+// "the statement's effects are committed" is FALSE inside an explicit BEGIN,
+// where they are pending and a ROLLBACK still decides them. The transaction
+// phase is what the engine records, so it is what the client is told.
+//
+// The status read here also serves the readiness byte, deliberately: asking
+// twice could answer differently, and a session whose error text and readiness
+// byte disagree about its transaction is exactly the inconsistency this whole
+// path exists to prevent.
+//
+// PREVENTING the effect beats reporting it, and where a budget CAN be known
+// before dispatch it is charged there instead — see the pre-dispatch lane
+// reservation in runQuery, which refuses honestly because nothing has run yet.
+// Once the rows exist, honesty is the only remedy left.
+func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
+	sess exec.WireSessionResult, peer string, closeReason *string, why outputWithheld) bool {
+
+	reason, known := withheldReasons[why]
+	if !known {
+		// A stop reason with no row in the table is a front-door defect, and
+		// guessing a message for it would put invented prose on the wire. Say
+		// what is true — the outcome is unknown — and stop.
+		l.onEvent(Event{Kind: "fd.refused", Reason: ruleUnframeableMessage, Peer: peer,
+			Detail: fmt.Sprintf("unnamed output-withheld reason %d", int(why))})
+		*closeReason = "unframeable-message"
+		return false
+	}
+
+	status, serr := l.queries.WireTxStatus(sess.SessionID, sess.UserID)
+	if serr != nil || !validTxStatus(status) {
+		*closeReason = "session-lost"
+		return false
+	}
+	effects, outcome := recordedEffects(status)
+
+	l.onEvent(Event{Kind: "fd.stmt_outcome", Reason: reason.rule, Peer: peer,
+		Detail: fmt.Sprintf("executed; effects=%s; output withheld: %s", outcome, reason.stopped)})
+	be.Send(gateError("ERROR", sqlStateProgramLimit,
+		"the statement executed; "+reason.stopped+" and its result was not fully delivered",
+		reason.rule, effects+"; "+reason.remedy))
+	if ferr := l.flushBounded(conn, be); ferr != nil {
+		*closeReason = "write-failed"
+		return false
+	}
+
+	// The session is intact — a budget stopped the OUTPUT, not the connection —
+	// so it is owed the readiness that ends every surviving cycle (§6.3).
+	be.Send(&pgproto3.ReadyForQuery{TxStatus: status})
+	if ferr := l.flushBounded(conn, be); ferr != nil {
+		*closeReason = "write-failed"
+		return false
+	}
+	return true
+}
+
+// recordedEffects turns the engine's transaction phase into what the client is
+// told about its statement's effects, and the word the audit records for them.
+//
+// This is jarvis's ok / pending_commit / error trichotomy; the engine already
+// answers it, and the answer is materially different in each case — a client
+// told "committed" inside an open transaction may skip the COMMIT that would
+// have made it true.
+func recordedEffects(status byte) (clause, outcome string) {
+	switch status {
+	case txStatusInTx:
+		return "the statement's effects are PENDING: the transaction is still open, so COMMIT or ROLLBACK still decides them", "pending_commit"
+	case txStatusAborted:
+		return "the transaction is aborted, so the statement's effects will be rolled back", "aborted"
+	default:
+		return "the statement's effects are committed", "committed"
+	}
 }
 
 // frameGateError turns the front door's OWN refusal into a §8a ErrorResponse and

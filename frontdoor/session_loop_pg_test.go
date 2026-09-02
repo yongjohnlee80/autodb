@@ -684,3 +684,374 @@ func TestPGLoop_OutputCapTellsTheTruthAboutAStatementThatRan(t *testing.T) {
 		}
 	}
 }
+
+// MF15 (lector r4). The general lane stalls for the same reason the cap trips —
+// after the statement ran — so it owes the client and the audit the same truth.
+//
+// I fixed this for the cap and left the identical defect in the lane path in the
+// same function, so this cell is the pair of the cap cell rather than a variant
+// of it: same two assertions, different reason for stopping.
+func TestPGLoop_ASaturatedLaneTellsTheTruthAboutAStatementThatRan(t *testing.T) {
+	addr, secret, database, eng := pgLoopWithEngine(t)
+	_ = addr
+	// A lane far too small for any real result, so the stall happens while the
+	// statement's output is being forwarded rather than before it runs.
+	_, events, listenAddr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, GeneralLaneBytes: 64,
+	})
+	fe := pgClient(t, listenAddr, secret, database)
+
+	table := fmt.Sprintf("fd_lane_%d", time.Now().UnixNano())
+	if msgs := query(t, fe, fmt.Sprintf("CREATE TABLE %s (n int, s text)", table)); hasError(msgs) {
+		t.Fatalf("creating the scratch table: %v", errorText(msgs))
+	}
+	t.Cleanup(func() {
+		c := pgClient(t, listenAddr, secret, database)
+		_ = query(t, c, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+	})
+
+	msgs := query(t, fe, fmt.Sprintf(
+		"INSERT INTO %s SELECT g, repeat('x', 200) FROM generate_series(1, 50) g RETURNING n, s", table))
+
+	// What the database holds.
+	after := pgClient(t, listenAddr, secret, database)
+	dr, found := firstOfType[*pgproto3.DataRow](query(t, after,
+		fmt.Sprintf("SELECT count(*) FROM %s", table)))
+	if !found {
+		t.Fatal("counting after the lane stall")
+	}
+	committed := string(dr.Values[0])
+	if committed == "0" {
+		t.Skipf("the statement did not commit (lane refused before dispatch); this cell is about "+
+			"a stall AFTER execution, frames=%v", kindsOf(msgs))
+	}
+
+	// It ran. So whatever the client was told must say so, and the audit must not
+	// call it refused.
+	if e, ok := firstOfType[*pgproto3.ErrorResponse](msgs); ok {
+		if !strings.Contains(e.Message, "executed") {
+			t.Fatalf("%s rows are committed but the client was told %q — a refusal was reported "+
+				"for an effect that happened", committed, e.Message)
+		}
+	}
+	for _, ev := range events() {
+		if ev.Kind == "fd.refused" && ev.Reason == ruleBudgetBackpressure {
+			t.Fatalf("%s rows are committed but the audit records the statement as REFUSED under "+
+				"%s; the operational record and the database disagree", committed, ruleBudgetBackpressure)
+		}
+	}
+}
+
+// THE DISCRIMINATOR FAMILY (jarvis, r4 point 3). Every post-dispatch stop, over
+// a statement that commits and one that only reads: what the database holds,
+// what the client is told, and what the audit records must agree in all of them.
+//
+// The family exists because the same defect was found twice at two sites. One
+// cell per site would have caught the second one only after it shipped; this
+// asserts the invariant over the whole set, so a third site fails here on the
+// day it is added rather than in a review round.
+func TestPGLoop_EveryPostDispatchStopTellsTheSameTruth(t *testing.T) {
+	lowCap := int64(256)
+	// A watermark under one row, and a lane that cannot admit a single row even
+	// after a flush: the pre-dispatch reservation (the watermark) fits, so the
+	// statement RUNS, and the first row's top-up cannot. That is the only
+	// remaining way the lane stops a statement that already executed.
+	lowWatermark := int64(128)
+
+	for _, stop := range []struct {
+		name string
+		opts func(o *Options)
+		rule string
+	}{
+		{
+			name: "cumulative output cap",
+			opts: func(o *Options) { o.testOutputCap = &lowCap },
+			rule: ruleOutputCap,
+		},
+		{
+			// A lane that admits the working set — so the statement DISPATCHES —
+			// but cannot admit the oversized frame that follows. That is the only
+			// remaining way the lane can stop a statement that already ran, and
+			// it is the shape r4 MF15 found.
+			name: "general lane, saturated mid-statement",
+			opts: func(o *Options) {
+				o.testWatermark = &lowWatermark
+				o.GeneralLaneBytes = 256
+			},
+			rule: ruleBudgetBackpressure,
+		},
+	} {
+		for _, work := range []struct {
+			name         string
+			sql          func(table string) string
+			commits      bool
+			inExplicitTx bool
+		}{
+			{
+				name: "DML that commits",
+				sql: func(tb string) string {
+					return fmt.Sprintf("INSERT INTO %s SELECT g, repeat('x', 400) FROM generate_series(1,20) g RETURNING n, s", tb)
+				},
+				commits: true,
+			},
+			{
+				name:    "SELECT",
+				sql:     func(tb string) string { return "SELECT g, repeat('x', 400) FROM generate_series(1,20) g" },
+				commits: false,
+			},
+		} {
+			t.Run(stop.name+"/"+work.name, func(t *testing.T) {
+				_, secret, database, eng := pgLoopWithEngine(t)
+				opts := Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled}
+				stop.opts(&opts)
+				_, events, listenAddr := listenerWith(t, opts)
+				fe := pgClient(t, listenAddr, secret, database)
+
+				table := fmt.Sprintf("fd_fam_%d", time.Now().UnixNano())
+				if msgs := query(t, fe, fmt.Sprintf("CREATE TABLE %s (n int, s text)", table)); hasError(msgs) {
+					t.Fatalf("creating the scratch table: %v", errorText(msgs))
+				}
+				t.Cleanup(func() {
+					c := pgClient(t, listenAddr, secret, database)
+					_ = query(t, c, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+				})
+
+				msgs := query(t, fe, work.sql(table))
+
+				// DID IT RUN? Positive evidence only. An assumption here would let
+				// the whole family pass while observing nothing, which is the
+				// failure mode these cells exist to catch.
+				//
+				// For DML: the committed row count, read back over a fresh
+				// connection — the database, not our own audit, is the authority.
+				//
+				// For a SELECT there is no effect to count, so the evidence is the
+				// RowDescription: the target emits it as execution begins, and the
+				// front door never invents one. Its presence is proof the statement
+				// was dispatched and the target started producing, which is exactly
+				// the "post-dispatch" property this family is about. (A DataRow
+				// would be stronger evidence but is unreachable here by design —
+				// the stop fires ON the first row.)
+				ran := false
+				if !work.commits {
+					_, ran = firstOfType[*pgproto3.RowDescription](msgs)
+				}
+				if work.commits {
+					after := pgClient(t, listenAddr, secret, database)
+					dr, found := firstOfType[*pgproto3.DataRow](query(t, after,
+						fmt.Sprintf("SELECT count(*) FROM %s", table)))
+					if !found {
+						t.Fatal("counting after the stop")
+					}
+					if committed := string(dr.Values[0]); committed != "0" {
+						ran = true
+						t.Logf("%s rows are committed", committed)
+					}
+				}
+				if !ran {
+					t.Fatalf("the statement never reached the target, so this cell observed "+
+						"nothing about post-dispatch truth; frames=%v", kindsOf(msgs))
+				}
+
+				// It ran. Three records, one truth.
+				e, ok := firstOfType[*pgproto3.ErrorResponse](msgs)
+				if !ok {
+					t.Fatalf("expected the stop to be reported; frames=%v", kindsOf(msgs))
+				}
+				if !strings.Contains(e.Message, "executed") {
+					t.Fatalf("the statement ran but the client was told %q", e.Message)
+				}
+				if e.Detail != stop.rule {
+					t.Fatalf("wire identity = %q, want the §7 id %q", e.Detail, stop.rule)
+				}
+				for _, ev := range events() {
+					if ev.Kind == "fd.refused" && ev.Reason == stop.rule {
+						t.Fatalf("the statement ran but the audit records it REFUSED under %s", stop.rule)
+					}
+				}
+				if !hasEvent(events(), "fd.stmt_outcome", stop.rule) {
+					t.Fatalf("no fd.stmt_outcome recorded for a statement that ran; events=%v", events())
+				}
+				// And the session survives a budget that stopped OUTPUT.
+				if _, ok := firstOfType[*pgproto3.ReadyForQuery](msgs); !ok {
+					t.Fatalf("no readiness after a session-surviving stop; frames=%v", kindsOf(msgs))
+				}
+			})
+		}
+	}
+}
+
+// hasEvent reports whether the audit recorded a kind/reason pair.
+func hasEvent(evs []Event, kind, reason string) bool {
+	for _, ev := range evs {
+		if ev.Kind == kind && ev.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
+// THE CHEAPER TRUTH (jarvis, r4 point 2): where the budget CAN be known before
+// dispatch, refusing is honest — nothing ran, so there is nothing to be honest
+// ABOUT. This is the one place in the statement path where fd.refused is the
+// correct audit for a budget, and the cell proves the distinction by checking
+// the database: zero rows.
+//
+// The lane is occupied directly rather than by racing a second connection, so
+// the saturation is a fact of the cell rather than a timing hope.
+func TestPGLoop_ASaturatedLaneRefusesBeforeTheStatementRuns(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	watermark := int64(128)
+	wait := 200 * time.Millisecond
+	l, events, listenAddr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled,
+		GeneralLaneBytes: 256, testWatermark: &watermark, testLaneWait: &wait,
+	})
+
+	fe := pgClient(t, listenAddr, secret, database)
+	table := fmt.Sprintf("fd_pre_%d", time.Now().UnixNano())
+	if msgs := query(t, fe, fmt.Sprintf("CREATE TABLE %s (n int)", table)); hasError(msgs) {
+		t.Fatalf("creating the scratch table: %v", errorText(msgs))
+	}
+	t.Cleanup(func() {
+		c := pgClient(t, listenAddr, secret, database)
+		_ = query(t, c, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+	})
+
+	// Occupy the lane so no working set can be reserved for the next statement.
+	if !l.general.tryReserve(200) {
+		t.Fatal("could not occupy the lane; the cell would prove nothing")
+	}
+	defer l.general.release(200)
+
+	msgs := query(t, fe, fmt.Sprintf("INSERT INTO %s VALUES (1)", table))
+
+	e, ok := firstOfType[*pgproto3.ErrorResponse](msgs)
+	if !ok {
+		t.Fatalf("expected a pre-dispatch refusal; frames=%v", kindsOf(msgs))
+	}
+	if !strings.Contains(e.Message, "did not run") {
+		t.Fatalf("a statement that never ran was reported as %q", e.Message)
+	}
+	if !hasEvent(events(), "fd.refused", ruleBudgetBackpressure) {
+		t.Fatalf("a pre-effect refusal must audit as refused; events=%v", events())
+	}
+	if hasEvent(events(), "fd.stmt_outcome", ruleBudgetBackpressure) {
+		t.Fatal("nothing executed, so nothing may be recorded as a statement outcome")
+	}
+
+	// The claim is that nothing ran. The database decides that.
+	l.general.release(200)
+	defer func() { _ = l.general.tryReserve(200) }()
+	after := pgClient(t, listenAddr, secret, database)
+	dr, found := firstOfType[*pgproto3.DataRow](query(t, after, fmt.Sprintf("SELECT count(*) FROM %s", table)))
+	if !found {
+		t.Fatal("counting after the pre-dispatch refusal")
+	}
+	if got := string(dr.Values[0]); got != "0" {
+		t.Fatalf("the client was told the statement did not run, but %s rows exist", got)
+	}
+	if _, ok := firstOfType[*pgproto3.ReadyForQuery](msgs); !ok {
+		t.Fatal("a session-surviving refusal owes a readiness byte")
+	}
+}
+
+// "The statement's effects are committed" is FALSE inside an explicit
+// transaction, and every version of this text before jarvis's r4 note said it
+// unconditionally. The effects clause now comes from the engine's recorded
+// transaction phase, and this cell proves the new answer is the true one by
+// rolling back and finding nothing.
+func TestPGLoop_OutputWithheldInsideATransactionSaysPendingNotCommitted(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	cap := int64(256)
+	_, events, listenAddr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, testOutputCap: &cap,
+	})
+	fe := pgClient(t, listenAddr, secret, database)
+
+	table := fmt.Sprintf("fd_tx_%d", time.Now().UnixNano())
+	if msgs := query(t, fe, fmt.Sprintf("CREATE TABLE %s (n int, s text)", table)); hasError(msgs) {
+		t.Fatalf("creating the scratch table: %v", errorText(msgs))
+	}
+	t.Cleanup(func() {
+		c := pgClient(t, listenAddr, secret, database)
+		_ = query(t, c, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+	})
+
+	if msgs := query(t, fe, "BEGIN"); hasError(msgs) {
+		t.Fatalf("opening the transaction: %v", errorText(msgs))
+	}
+	msgs := query(t, fe, fmt.Sprintf(
+		"INSERT INTO %s SELECT g, repeat('x', 400) FROM generate_series(1,20) g RETURNING n, s", table))
+
+	e, ok := firstOfType[*pgproto3.ErrorResponse](msgs)
+	if !ok {
+		t.Fatalf("expected the cap to stop the output; frames=%v", kindsOf(msgs))
+	}
+	if strings.Contains(e.Hint, "are committed") {
+		t.Fatalf("inside an explicit transaction the client was told its effects "+
+			"%q — a client that believes this skips the COMMIT that would make it true", e.Hint)
+	}
+	if !strings.Contains(e.Hint, "PENDING") {
+		t.Fatalf("hint = %q, want the pending-commit truth", e.Hint)
+	}
+	if rfq, ok := firstOfType[*pgproto3.ReadyForQuery](msgs); !ok || rfq.TxStatus != txStatusInTx {
+		t.Fatalf("readiness must agree with the error text about the open transaction, got %v", rfq)
+	}
+	found := false
+	for _, ev := range events() {
+		if ev.Kind == "fd.stmt_outcome" && strings.Contains(ev.Detail, "pending_commit") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the audit must record the effects as pending, not committed; events=%v", events())
+	}
+
+	// And the proof that "pending" was the true word: roll back, find nothing.
+	if msgs := query(t, fe, "ROLLBACK"); hasError(msgs) {
+		t.Fatalf("rolling back: %v", errorText(msgs))
+	}
+	after := pgClient(t, listenAddr, secret, database)
+	dr, ok := firstOfType[*pgproto3.DataRow](query(t, after, fmt.Sprintf("SELECT count(*) FROM %s", table)))
+	if !ok {
+		t.Fatal("counting after the rollback")
+	}
+	if got := string(dr.Values[0]); got != "0" {
+		t.Fatalf("the rollback left %s rows, so the effects were not pending after all", got)
+	}
+}
+
+// The structural guarantee itself: every stop reason in the closed set has a row
+// in the table, and every row uses an identity from the §7 catalogue.
+//
+// This is what makes the fold structural rather than two fixes. A third budget
+// site added later cannot compose its own account of what happened to the
+// statement — it can only name a reason, and if it names one with no row here,
+// this fails on the day it is written.
+func TestOutputWithheldReasonsAreClosedAndCatalogued(t *testing.T) {
+	catalogued := map[string]bool{ruleOutputCap: true, ruleBudgetBackpressure: true}
+	for why := outputComplete + 1; ; why++ {
+		reason, known := withheldReasons[why]
+		if !known {
+			if int(why) <= len(withheldReasons) {
+				t.Fatalf("stop reason %d has no row in withheldReasons: it would reach the "+
+					"wire with no message of its own", int(why))
+			}
+			break
+		}
+		if !catalogued[reason.rule] {
+			t.Fatalf("stop reason %d uses %q, which is not a §7 identity", int(why), reason.rule)
+		}
+		if reason.stopped == "" || reason.remedy == "" {
+			t.Fatalf("stop reason %d is missing its clause or remedy", int(why))
+		}
+		if strings.Contains(reason.stopped, "commit") || strings.Contains(reason.remedy, "commit") {
+			t.Fatalf("stop reason %d claims something about the statement's EFFECTS (%q/%q); "+
+				"only the engine may answer that", int(why), reason.stopped, reason.remedy)
+		}
+	}
+	if outputComplete != 0 {
+		t.Fatal("outputComplete must be the zero value so an unset reason withholds nothing")
+	}
+}

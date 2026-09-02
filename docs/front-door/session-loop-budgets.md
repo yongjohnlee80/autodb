@@ -74,7 +74,7 @@ fault" outcome an accurate SQLSTATE exists to prevent.
 | pending serialized output | 4 MiB watermark | **before** serialization of each frame; flush, audited `fd.backpressure_enter`/`_exit` | §8.4 :387 |
 | cumulative statement output | 8 GiB | per frame, across the whole statement; stops FORWARDING with `54000` `frontdoor/output-cap`, connection survives. **It does not undo the statement** — see §4 | §7 :358 |
 | control lane | 64 KiB/conn | at accept | §1.4 |
-| **general lane (process-wide)** | 1 GiB | pending output reserved BEFORE serialization, released when flushed AND on every statement exit; saturation is backpressure, audited `frontdoor/budget-backpressure` | §1.4, §8.1 |
+| **general lane (process-wide)** | 1 GiB | the statement's output **working set** (= the watermark) reserved **BEFORE DISPATCH**; topped up mid-statement only for a single frame larger than the reservation; released on every statement exit; saturation is backpressure, audited `frontdoor/budget-backpressure` | §1.4, §8.1 |
 | wire-side buffers (`bufio.Reader`, TLS records, pgproto3 chunk reader) | — | **not charged**; bounded by `MaxFrontendConns` because they cannot grow with what a peer sends | §8.4 third term |
 
 Two rules that were findings:
@@ -113,15 +113,42 @@ defect.** Two decisions may share a wire `DETAIL` when §7 names one id for thei
 class — an operator still has to tell them apart, so the *audit* reason is what
 must not collide (r0, self-corrected).
 
-**Never report a refusal for an effect that happened.** The output cap trips
-while a statement's output is being forwarded — after the target ran it, and for
-DML in an implicit block after those effects committed. Reporting that as a
-refusal is a lie the client acts on: r2 saw `54000` returned while 100 rows were
-committed. So the cap says the statement EXECUTED and its output was withheld,
-and the audit records `fd.stmt_outcome`, never `fd.refused`, so the operational
-record and the database agree. The place to PREVENT the effect is the
-retained-capacity reservation before dispatch; once the rows exist, honesty is
-the only remedy this path has (r2 MF9, reframed by jarvis).
+**Never report a refusal for an effect that happened.** A budget that stops
+forwarding does so while output is being FORWARDED — after the target ran the
+statement and, in an implicit block, after those effects committed. Reporting
+that as a refusal is a lie the client acts on: r2 returned `54000` over a hundred
+durable rows, and r4 found the identical lie at the general lane, in the function
+r2 had just fixed.
+
+Twice at two sites is a pattern, and a third would be a design smell (jarvis,
+r4), so the fold is **structural** rather than a fix per budget:
+
+1. **Prevent before the effect where the budget can be known.** A statement's
+   output working set is bounded by the watermark, so it is reserved from the
+   process lane *before dispatch*. The ordinary saturation case — a busy process,
+   another connection arriving — is then refused at a point where refusing is
+   simply TRUE: nothing executed, nothing is durable, `fd.refused` is the correct
+   audit. This is also far less lane traffic than a reservation per frame. For a
+   simple `Query` the *output size* is unknown before execution, so post-effect
+   withholding remains the only honest shape for what the reservation cannot
+   cover — a single frame larger than the whole working set.
+2. **One post-dispatch stop path, and nowhere else to land.** `outputWithheld`
+   is a closed set; a site names a reason and nothing else about the story is its
+   to tell. `reportOutputWithheld` is a **stage, not a helper**: it derives the
+   wire identity and the "what stopped" clause from `withheldReasons`, and it
+   asks the ENGINE what became of the effects. No site composes its own message.
+3. **The effects clause is the engine's answer, not the budget's.** Every earlier
+   version asserted *"the statement's effects are committed"* — which is FALSE
+   inside an explicit `BEGIN`, where they are pending and a `ROLLBACK` still
+   decides them, and a client that believes it may skip the `COMMIT` that would
+   have made it true. `WireTxStatus` already answers the ok / pending_commit /
+   aborted trichotomy, so that is what the client and the audit are told. The
+   same read serves the readiness byte, deliberately: asking twice could answer
+   differently, and an error text that disagrees with the readiness byte about
+   the transaction is the very inconsistency this path exists to prevent.
+
+The audit records `fd.stmt_outcome`, never `fd.refused`, for anything that ran,
+so the operational record and the database agree.
 
 **Every session-surviving refusal ends its cycle with `ReadyForQuery`.** §6.3
 names the only exception: an unknown transaction outcome. A client that waits for
@@ -148,9 +175,13 @@ be written to wait on purpose (r0 MF1).
    Saturation is BACKPRESSURE, never an error (§7): flush first — itself a
    release — then wait for another connection to release. One policy figure
    remains un-pinned by the matrix: how long a connection waits before it stops
-   holding a statement open (`generalLaneWaitBudget`, 30s). Unbounded waiting on
+   holding a statement open (`generalLaneWaitBudget`, 30s, §5.2). Unbounded waiting on
    a lane nothing releases is a hung session holding the engine's claim and a
    pinned backend, which is r1 MF7 in different clothing.
+   **r4 restructured where the lane is charged** (see §4): the working set is
+   reserved before dispatch rather than frame by frame, which moves ordinary
+   saturation to a pre-effect refusal and leaves the post-dispatch path only the
+   oversized-frame top-up it cannot avoid.
 3. **The watermark has no time-based flush.** Within contract — the matrix
    specifies a size watermark only — but a slow-producing statement shows the
    client nothing until 4 MiB accrues or it ends, so an interactive client on a
