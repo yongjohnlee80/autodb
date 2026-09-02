@@ -469,3 +469,218 @@ func TestWireQueryRaw_TheEmptyQueryIsStillTheEmptyQueryArm(t *testing.T) {
 		t.Fatalf("the empty query reached %s, want %s", arm, ArmNoStatement)
 	}
 }
+
+// A PAYING FOR B: a consumer cut mid-answer still leaves a CORRECT account.
+//
+// The reservation for an object is finalized when the target's completion is
+// observed. Under the r0 drain, a consumer cut returned at the first emit
+// failure — so completions arriving after it were never seen, and Sync swept
+// those reservations as unfinalized. The charge went back for objects the target
+// had actually created and the store still holds: an account that under-reports
+// live state, which is the direction that lets a session hold more than its
+// budget admits.
+//
+// Since lector r0 MF1 the drain reads the whole tail, so the completions after
+// the cut are still observed and still finalize. The cut lands on the FIRST
+// frame (the statement's ParseComplete) so the portal's BindComplete is
+// unambiguously after it.
+func TestExtPG_AMidAnswerCutStillFinalizesLaterCompletions(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	extPrepare(t, f, sid, userID, "acct", "SELECT generate_series(1,3)")
+
+	cut := false
+	if _, err := extExecuteCut(t, f, sid, userID, "acct", func(m WireMessage) bool {
+		if cut {
+			return false
+		}
+		cut = true // the very first frame: the statement's ParseComplete
+		return true
+	}); err == nil {
+		t.Fatal("the consumer cut produced no error")
+	}
+
+	s, lerr := f.eng.sessions.lookup(sid, userID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	p, perr := s.ext.portal("acct")
+	if perr != nil {
+		t.Fatalf("the portal is gone after a consumer cut: %v", perr)
+	}
+	st, serr := s.ext.statement("acct")
+	if serr != nil {
+		t.Fatalf("the statement is gone after a consumer cut: %v", serr)
+	}
+	// PREMISE: the cut really did land before the portal's completion, or this
+	// cell is asserting something the r0 code would also have satisfied.
+	if !cut {
+		t.Fatal("the emitter was never cut; this cell proves nothing")
+	}
+	if !st.finalized || !p.finalized {
+		t.Fatalf("statement finalized=%v portal finalized=%v — the target confirmed both and the client's "+
+			"departure is not the target's answer; a drain that stops reading loses these",
+			st.finalized, p.finalized)
+	}
+	want := st.charge + p.charge
+	if s.ext.retained != want || s.ext.retainedPending != 0 {
+		t.Fatalf("retained=%d pending=%d, want %d/0 — confirmed objects must be RETAINED, not left pending "+
+			"for Sync to sweep as though the target had never answered", s.ext.retained, s.ext.retainedPending, want)
+	}
+
+	// And Sync must not now release what was legitimately finalized.
+	if _, err := f.eng.WireSyncSegment(context.Background(), sid, userID); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if s.ext.retained != st.charge {
+		t.Fatalf("after Sync retained=%d, want %d — the statement survives the segment and its charge with it "+
+			"(the portal's is released with the portal at transaction end)", s.ext.retained, st.charge)
+	}
+}
+
+// SYNC ITSELF SWEEPS, against a real target.
+//
+// The unit cell for the sweep calls sweepUnfinalized directly, so it proves the
+// helper and NOT that Sync calls it: deleting the call from WireSyncSegment
+// leaves that cell green. This one drives a real errored segment and a real
+// Sync, which is the only place the wiring is observable.
+//
+// After the target's error the segment discards, so everything queued behind it
+// is never answered — reservations that will never be finalized. A statement is
+// the discriminator rather than a portal, because Sync's own dropAllPortals
+// would release a portal's charge whether the sweep ran or not.
+func TestExtPG_SyncSweepsWhatTheAbortedSegmentWillNeverConfirm(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx := context.Background()
+
+	// The Bind of this one raises 22012 (the constant folds at plan time) and
+	// aborts the segment.
+	extPrepare(t, f, sid, userID, "bad", "SELECT 1/0")
+	// Queued BEHIND the error: their answers never come.
+	if err := f.eng.WireParse(ctx, sid, userID, "later", "SELECT 7", nil, testIP); err != nil {
+		t.Fatalf("parse later: %v", err)
+	}
+
+	s, lerr := f.eng.sessions.lookup(sid, userID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	// POSITIVE CONTROL: something really is held pending, or the sweep has
+	// nothing to prove.
+	if s.ext.retainedPending == 0 {
+		t.Fatal("nothing was reserved before the Execute; this cell cannot observe a sweep")
+	}
+
+	if _, err := extExecuteCut(t, f, sid, userID, "bad", nil); err != nil {
+		t.Fatalf("execute returned %v; the target's error is forwarded as data", err)
+	}
+	later, serr := s.ext.statement("later")
+	if serr != nil {
+		t.Fatalf("the statement queued behind the error is gone: %v", serr)
+	}
+	if later.finalized {
+		t.Fatal("the statement behind the error was finalized, but the target never answered its Parse")
+	}
+
+	if _, err := f.eng.WireSyncSegment(ctx, sid, userID); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if s.ext.retainedPending != 0 {
+		t.Fatalf("pending = %d after Sync, want 0 — every reservation whose completion the aborted segment "+
+			"will never deliver must be released, or an errored segment leaks on every object behind the error",
+			s.ext.retainedPending)
+	}
+
+	// AND THE OBJECT ITSELF IS GONE. The target never created it — the Parse
+	// that would have was discarded — so a record of it here is a phantom the
+	// backend does not share. Keeping it would also consume a named-object slot
+	// for something that exists nowhere.
+	if _, serr := s.ext.statement("later"); !errors.Is(serr, ErrUnknownStatement) {
+		t.Fatalf("the statement behind the error survived the sweep (%v) — the store and the backend "+
+			"now disagree about what exists, and a later Bind would name a statement the target never got",
+			serr)
+	}
+	// A later reference is PostgreSQL's own answer, not ours to invent.
+	berr := f.eng.WireBind(ctx, sid, userID, "p_later", "later", nil, nil, nil)
+	if !errors.Is(berr, ErrUnknownStatement) {
+		t.Fatalf("Bind naming the swept statement = %v, want ErrUnknownStatement (26000)", berr)
+	}
+}
+
+// lector B r0 MF2 — OWNED CONTROL IS CHARGED, and its synthetic completion
+// finalizes it.
+//
+// Control never reaches the target: the front door answers ParseComplete and
+// BindComplete itself. Both halves were missing. The statement carried no charge
+// at all, so a session could accumulate control statements outside the budget
+// entirely; and the synthetic completion named no object, so anything that WAS
+// charged stayed pending forever and Sync's sweep destroyed a control statement
+// the session was still entitled to use.
+func TestExtPG_OwnedControlIsChargedAndItsSyntheticCompletionFinalizesIt(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx := context.Background()
+
+	extPrepare(t, f, sid, userID, "ctl", "BEGIN")
+	s, lerr := f.eng.sessions.lookup(sid, userID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	// CHARGED AT ALL. Zero here means control objects live outside the account.
+	if s.ext.retainedPending == 0 && s.ext.retained == 0 {
+		t.Fatal("the control statement and portal carry no charge — a session can accumulate them without bound")
+	}
+
+	if _, err := extExecuteCut(t, f, sid, userID, "ctl", nil); err != nil {
+		t.Fatalf("execute of the control statement: %v", err)
+	}
+	t.Cleanup(func() { _ = runRawQuiet(f, sid, userID, "ROLLBACK") })
+
+	st, serr := s.ext.statement("ctl")
+	if serr != nil {
+		t.Fatalf("the control statement is gone: %v", serr)
+	}
+	if !st.finalized {
+		t.Fatal("the control statement was never finalized — the front door sent its ParseComplete and did " +
+			"not tell the account, so the reservation is pending forever and Sync will sweep it")
+	}
+	// THE PORTAL TOO, and separately. Asserting only the statement leaves
+	// WireBind's synthetic BindComplete free to name no object: the portal then
+	// stays pending forever and Sync sweeps it, while every statement assertion
+	// above still passes. That is the same one-step-short habit this arc has hit
+	// four times; here it is named and closed with its own assertions.
+	p, perr := s.ext.portal("ctl")
+	if perr != nil {
+		t.Fatalf("the control portal is gone: %v", perr)
+	}
+	if !p.finalized {
+		t.Fatal("the control PORTAL was never finalized — WireBind's synthetic BindComplete named no object, " +
+			"so its reservation is pending forever and Sync will sweep a portal the session may still Execute")
+	}
+	// EXACT, not a lower bound: both charges are retained and nothing else is.
+	want := st.charge + p.charge
+	if s.ext.retained != want || s.ext.retainedPending != 0 {
+		t.Fatalf("retained=%d pending=%d, want %d/0 — the control statement's %d and its portal's %d, both "+
+			"finalized", s.ext.retained, s.ext.retainedPending, want, st.charge, p.charge)
+	}
+
+	// AND SYNC MUST NOT DESTROY EITHER. The Execute opened the session's
+	// transaction, so the segment ends with the client in T — portals survive a
+	// transaction that is still open, and so do their charges.
+	status, err := f.eng.WireSyncSegment(ctx, sid, userID)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if status != TxStatusInTx {
+		t.Fatalf("readiness after the control Execute = %q, want %q; this cell needs the transaction open "+
+			"for the portal to survive Sync", status, TxStatusInTx)
+	}
+	if _, serr := s.ext.statement("ctl"); serr != nil {
+		t.Fatalf("Sync swept the control statement (%v) — the session is entitled to re-Bind and re-Execute it", serr)
+	}
+	if _, perr := s.ext.portal("ctl"); perr != nil {
+		t.Fatalf("Sync swept the control PORTAL (%v) — its completion was observed, so it is not unfinalized", perr)
+	}
+	if s.ext.retained != want || s.ext.retainedPending != 0 {
+		t.Fatalf("retained=%d pending=%d after Sync, want %d/0 — both objects survive and so do their charges",
+			s.ext.retained, s.ext.retainedPending, want)
+	}
+}

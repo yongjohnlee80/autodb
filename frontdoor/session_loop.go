@@ -858,6 +858,12 @@ const (
 	// §7's cumulative-output cap identity.
 	ruleOutputCap        = "frontdoor/output-cap"
 	sqlStateProgramLimit = "54000"
+
+	// sqlStateConfiguredLimit is 53400 configuration_limit_exceeded, which
+	// §7 ruling 4 separates from 54000: a CONFIGURED quota the operator can
+	// raise, not a program limit the client must work under. The retained-state
+	// budget and the named-object cap are both the former.
+	sqlStateConfiguredLimit = "53400"
 	// cumulativeOutputCap is §7's per-statement bound on total output.
 	cumulativeOutputCap int64 = 8 << 30
 )
@@ -908,6 +914,26 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 	case errors.Is(err, auth.ErrDenied):
 		return "42501", "gate/insufficient-privilege",
 			"the credential does not carry the privilege this statement needs", false
+
+	case errors.Is(err, exec.ErrRetainedBudget):
+		// §7 :381 — a CONFIGURED quota the operator can raise, which ruling 4
+		// separates from 54000's program limits. The connection stays: it is this
+		// Parse or Bind that is refused.
+		return sqlStateConfiguredLimit, "frontdoor/retained-budget",
+			"close unused prepared statements or portals, then retry", false
+
+	case errors.Is(err, exec.ErrUnknownStatement):
+		// PostgreSQL'S OWN CODE, not a front-door identity. A client naming a
+		// prepared statement that does not exist gets 26000 from a real server,
+		// and a driver's recovery is written against that. Falling through to the
+		// refusal default told it 42501 — that it lacked PRIVILEGES for a
+		// statement it had simply never successfully parsed.
+		return "26000", "gate/unknown-statement",
+			"the prepared statement does not exist; Parse it again", false
+
+	case errors.Is(err, exec.ErrUnknownPortal):
+		return "34000", "gate/unknown-portal",
+			"the portal does not exist; Bind it again", false
 
 	case errors.Is(err, exec.ErrSessionNotFound):
 		// The session is gone; there is nothing left to be ready for.

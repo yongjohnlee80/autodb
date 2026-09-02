@@ -182,12 +182,19 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	// routes control BEFORE authorizeUnit/admit/guardWhere too, because the
 	// control floor is a different floor.
 	if stmt.Class == ClassControl {
-		if serr := s.ext.putStatement(&extStatement{
-			name: name, sql: sqlText, stmt: stmt, paramOIDs: paramOIDs,
-		}); serr != nil {
+		// CHARGED LIKE ANY OTHER STATEMENT (lector B r0 MF2). Owned control never
+		// reaches the target, but the front door holds its text and metadata just
+		// the same — and an object outside the account is an object a session can
+		// accumulate without limit.
+		cst := &extStatement{name: name, sql: sqlText, stmt: stmt, paramOIDs: paramOIDs,
+			charge: objectCharge(len(sqlText)+len(name), len(paramOIDs)*4)}
+		if serr := s.ext.putStatement(cst); serr != nil {
 			return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, serr)
 		}
-		s.ext.queueSynth(WireMessage{Kind: "ParseComplete"})
+		// The completion is OURS to send, and it still finalizes the object it
+		// completes; without the reference the reservation stays pending and Sync
+		// sweeps a control statement the session may still use.
+		s.ext.queueSynthFor(objectStatement, name, cst.seq, WireMessage{Kind: "ParseComplete"})
 		return nil
 	}
 	// AMENDMENT 6 RULE 2's reader stage, composed at the same point the simple
@@ -213,11 +220,17 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	// The name is claimed BEFORE the frame goes out, so a refused duplicate
 	// never reaches the server and the store and the backend cannot disagree
 	// about which names are live.
-	st := &extStatement{name: name, sql: sqlText, stmt: stmt, paramOIDs: paramOIDs}
+	st := &extStatement{name: name, sql: sqlText, stmt: stmt, paramOIDs: paramOIDs,
+		// The Parse frame's own figure: its statement text, plus the parameter
+		// OID array it makes us hold. See extObjects' retained-account comment
+		// for why this is the transferred segment charge and not a new number.
+		charge: objectCharge(len(sqlText)+len(name), len(paramOIDs)*4)}
 	if serr := s.ext.putStatement(st); serr != nil {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, serr)
 	}
 	if serr := pc.Send(ctx, golibpg.ParseOp(name, sqlText, paramOIDs)); serr != nil {
+		// The frame never left, so the object never existed on the target. The
+		// drop releases its reservation — the drop owns the charge.
 		s.ext.dropStatement(name)
 		return serr
 	}
@@ -244,12 +257,20 @@ func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 	if serr != nil {
 		return serr
 	}
-	pt := &extPortal{name: portalName, stmtName: stmtName}
+	paramBytes := 0
+	for _, v := range paramValues {
+		paramBytes += len(v)
+	}
+	pt := &extPortal{name: portalName, stmtName: stmtName,
+		// The Bind frame's figure: its parameter values, plus the format and
+		// value arrays it pre-allocates (§1.5's stage-2 delta, :268).
+		charge: objectCharge(paramBytes+len(portalName)+len(stmtName),
+			(len(paramFormats)+len(resultFormats))*2+len(paramValues)*8)}
 	if perr := s.ext.putPortal(pt); perr != nil {
 		return perr
 	}
 	if isOwnedControl(st) {
-		s.ext.queueSynth(WireMessage{Kind: "BindComplete"})
+		s.ext.queueSynthFor(objectPortal, portalName, pt.seq, WireMessage{Kind: "BindComplete"})
 		return nil
 	}
 	if serr := pc.Send(ctx, golibpg.BindOp(portalName, stmtName, paramValues, paramFormats, resultFormats)); serr != nil {
@@ -402,6 +423,11 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	// segment's outstanding count is void either way: on success the server
 	// answered or discarded everything, and on failure the wire is unusable.
 	s.ext.segment = nil
+	// EVERY RESERVATION WHOSE COMPLETION WILL NEVER ARRIVE IS RELEASED HERE.
+	// After a target error the segment discards to Sync, so the answers to
+	// everything queued behind it never come — which makes an unfinalized
+	// reservation at Sync the common case on an errored segment, not a corner.
+	s.ext.sweepUnfinalized()
 	// The wrap lives exactly as long as the segment did.
 	s.ext.releaseReadOnlyWrap(ctx)
 	if serr != nil {
@@ -771,10 +797,15 @@ func drainExtendedObserving(ctx context.Context, pc golibpg.PinnedConn, o *extOb
 		if len(step.synth) > 0 {
 			for _, m := range step.synth {
 				_ = deliver(m)
+				// A completion the FRONT DOOR produced finalizes its object
+				// exactly as the target's would (lector B r0 MF2).
+				if step.obj != nil && completesObject(m.Kind) {
+					o.finalizeRetained(*step.obj)
+				}
 			}
 			continue
 		}
-		aborted, err := answerOneFrame(ctx, pc, step, own, deliver, p, &rows, &obs)
+		aborted, err := answerOneFrame(ctx, pc, o, step, own, deliver, p, &rows, &obs)
 		if err != nil {
 			// A WIRE failure while draining outranks the consumer's departure:
 			// the handle is poisoned and that is what the caller must act on.
@@ -792,7 +823,7 @@ func drainExtendedObserving(ctx context.Context, pc golibpg.PinnedConn, o *extOb
 
 // answerOneFrame reads messages until the frame that asked for them is answered.
 // It reports whether the segment was abandoned by a server error.
-func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, step segStep, own *execOwner,
+func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, step segStep, own *execOwner,
 	deliver func(WireMessage) bool, p *extPortal, rows *int64, obs *extObservation) (aborted bool, err error) {
 
 	for {
@@ -827,9 +858,20 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, step segStep, ow
 		// deliberately — that is the whole fix.
 		_ = deliver(extToWire(m))
 		if m.Kind == "ErrorResponse" {
+			// A pre-Complete error: the target created nothing, so the object's
+			// reservation goes back. The drop owns it, as everywhere else.
+			if step.obj != nil {
+				o.dropObject(step.obj)
+			}
 			return true, nil
 		}
 		if frameAnswered(m.Kind) {
+			// FINALIZED AT THE FRAME SITE, where the completion is observed.
+			// PortalSuspended re-finalizes an already-finalized portal, which is
+			// a no-op by design (matrix :270 as amended).
+			if step.obj != nil && completesObject(m.Kind) {
+				o.finalizeRetained(*step.obj)
+			}
 			return false, nil
 		}
 	}
@@ -874,6 +916,16 @@ func extOutcome(obs extObservation, runErr error, consumerErr bool, txID string)
 // the front of the result. RowDescription belongs to Describe alone — in the
 // extended protocol Execute does not re-send it, which is why it can be counted
 // here without stealing Execute's completion.
+// completesObject reports the frames that CONFIRM an object the target created,
+// which is a narrower set than "this frame is answered".
+func completesObject(kind string) bool {
+	switch kind {
+	case "ParseComplete", "BindComplete", "PortalSuspended":
+		return true
+	}
+	return false
+}
+
 func frameAnswered(kind string) bool {
 	switch kind {
 	case "ParseComplete", "BindComplete", "CloseComplete",

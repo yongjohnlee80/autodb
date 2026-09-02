@@ -129,3 +129,49 @@ func TestPGExt_TheNotExecutedExplanationReachesTheClient(t *testing.T) {
 		t.Fatalf("the following SELECT returned %q, want 42", got)
 	}
 }
+
+// A prepared statement that does not exist is PostgreSQL's 26000, not our 42501.
+//
+// The gate classifier had no case for it, so ErrUnknownStatement fell through to
+// the refusal default and told the client it lacked PRIVILEGES for a statement
+// it had simply never parsed. A driver's recovery is written against 26000 —
+// re-Parse and retry — and 42501 sends it down the "ask an administrator" path
+// instead.
+//
+// This matters more once the sweep destroys objects an aborted segment never
+// confirmed: naming one afterwards is exactly this case, and it must answer what
+// a real server answers.
+func TestPGExt_AnUnknownPreparedStatementIsInvalidSqlStatementName(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, _, listenAddr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled,
+	})
+	fe := pgClient(t, listenAddr, secret, database)
+
+	fe.Send(&pgproto3.Bind{DestinationPortal: "p", PreparedStatement: "never_parsed"})
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var got *pgproto3.ErrorResponse
+	for range 16 {
+		m, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("reading the Bind's answer: %v", err)
+		}
+		if e, ok := m.(*pgproto3.ErrorResponse); ok {
+			got = e
+			break
+		}
+		if _, ok := m.(*pgproto3.ReadyForQuery); ok {
+			t.Fatal("the Bind naming a statement that does not exist was answered with readiness and no error")
+		}
+	}
+	if got == nil {
+		t.Fatal("no ErrorResponse for a Bind naming a statement that does not exist")
+	}
+	if got.Code != "26000" {
+		t.Fatalf("code = %s, want 26000 (invalid_sql_statement_name) — %q is what a real server sends, "+
+			"and a driver's recovery is written against it", got.Code, "26000")
+	}
+}
