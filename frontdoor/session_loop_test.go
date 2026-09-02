@@ -922,3 +922,184 @@ func TestLoop_ALongStatementIsNotKilledByTheBetweenMessagesBudget(t *testing.T) 
 		t.Fatalf("readiness after the long statement = %q", got)
 	}
 }
+
+// R1-1 (Vision). A client that stops reading must NOT hold the session forever.
+//
+// This is the regression my own previous fold introduced, and it is worth being
+// precise about why: clearing the between-messages deadline for the statement's
+// duration is right — a long legitimate result must not die under an IDLE budget
+// — but be.Flush is a BLOCKING conn.Write, and clearing the deadline removed the
+// only bound on it. A client that asks for something large and then stops reading
+// fills its window, then our send buffer, and the write parks holding the session
+// goroutine, the engine's one-in-flight claim, the pinned backend and its open
+// transaction. The engine's statement timeouts cannot help: the target already
+// produced the rows and is executing nothing.
+//
+// The cell asks for a large result and never reads it. The session must end.
+func TestLoop_AClientThatStopsReadingDoesNotHoldTheSession(t *testing.T) {
+	t.Parallel()
+	dl := defaultDeadlines()
+	dl.idle = 30 * time.Second // long, so nothing here is the idle budget
+	dl.outputStall = 500 * time.Millisecond
+
+	release := make(chan struct{})
+	close(release) // stream freely; the block is the CLIENT not reading
+	q := &blockingQueries{release: release, status: txStatusIdle, txStatus: txStatusIdle}
+	events, addr := deadlineLoopListener(t, dl, q)
+
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+	fe.Send(&pgproto3.Query{String: "SELECT big"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately never read. Before the bound, this parked forever.
+	waitFor(t, "the stalled session to be closed rather than held", func() bool {
+		for _, ev := range events() {
+			if ev.Kind == "fd.conn_close" && ev.Reason == "write-failed" {
+				return true
+			}
+		}
+		return false
+	})
+
+	// The positive control: the watermark really did engage, so the cell is
+	// observing a blocked flush and not a statement that never produced output.
+	var sawBackpressure bool
+	for _, ev := range events() {
+		if ev.Kind == "fd.backpressure_enter" {
+			sawBackpressure = true
+		}
+	}
+	if !sawBackpressure {
+		t.Fatal("no backpressure was recorded; the cell did not reach the watermark flush it means to bound")
+	}
+}
+
+// R1-2 (Vision). A failed WRITE is a transport fact, not a framing defect.
+//
+// One error for both causes made a client hanging up mid-result audit as
+// frontdoor/unframeable-message and told the peer the SERVER produced something
+// unforwardable — sending an operator to hunt a bug in the front door, or in the
+// target. Same false-record class as the deadline audited as peer-closed, one
+// function above it.
+func TestLoop_AWriteFailureIsNotAuditedAsAFramingDefect(t *testing.T) {
+	t.Parallel()
+	dl := defaultDeadlines()
+	dl.idle = 30 * time.Second
+	dl.outputStall = 400 * time.Millisecond
+
+	release := make(chan struct{})
+	close(release)
+	q := &blockingQueries{release: release, status: txStatusIdle, txStatus: txStatusIdle}
+	events, addr := deadlineLoopListener(t, dl, q)
+
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+	fe.Send(&pgproto3.Query{String: "SELECT big"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the stalled write to end the session", func() bool {
+		for _, ev := range events() {
+			if ev.Kind == "fd.conn_close" && ev.Reason == "write-failed" {
+				return true
+			}
+		}
+		return false
+	})
+	for _, ev := range events() {
+		if ev.Kind == "fd.refused" && ev.Reason == ruleUnframeableMessage {
+			t.Fatal("a failed write was audited as frontdoor/unframeable-message — that blames the " +
+				"front door's framing, or the target, for a client that stopped reading")
+		}
+	}
+}
+
+// MF10 (lector). A peer that begins a message and stops is NOT idle, and §7
+// gives that its own budget and its own identity. Reporting a frame stall as
+// 57P05 tells an operator the client went quiet when it actually went slow —
+// and the two have different causes and different fixes.
+func TestLoop_APartialFrameStallsUnderItsOwnBudgetAndIdentity(t *testing.T) {
+	t.Parallel()
+	dl := defaultDeadlines()
+	dl.idle = 30 * time.Second // long: nothing here may be the idle budget
+	dl.frameStall = 400 * time.Millisecond
+	events, addr := deadlineLoopListener(t, dl, okQueries())
+
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	// A Query header promising a body, and then silence. The message has STARTED,
+	// so the idle budget no longer applies.
+	if _, err := conn.Write([]byte{'Q', 0, 0, 0, 40}); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := fe.Receive()
+	if err != nil {
+		t.Fatalf("the front door closed a stalled frame without a frame: %v", err)
+	}
+	e, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("frame = %T, want ErrorResponse", msg)
+	}
+	if e.Code != sqlStateConnectionFailure || e.Detail != ruleFrameStall {
+		t.Fatalf("stall = %s/%s, want %s/%s — a half-sent message is not an idle session",
+			e.Code, e.Detail, sqlStateConnectionFailure, ruleFrameStall)
+	}
+	waitFor(t, "the stall to be audited under its own cause", func() bool {
+		for _, ev := range events() {
+			if ev.Kind == "fd.conn_close" && ev.Reason == ruleFrameStall {
+				return true
+			}
+		}
+		return false
+	})
+	for _, ev := range events() {
+		if ev.Kind == "fd.conn_close" && ev.Reason == ruleSessionDeadline {
+			t.Fatal("a partial frame was audited as an idle-session deadline; the two budgets have " +
+				"different causes and an operator would chase the wrong one")
+		}
+	}
+}
+
+// MF8 (lector). A burst of large NOTICES must reach the watermark. The estimate
+// ignored Notice and error payloads entirely, so a producer emitting megabytes
+// of them crossed no watermark and streamed nothing — the buffer grew with
+// output the accounting could not see.
+func TestLoop_NoticePayloadsCountTowardTheOutputWatermark(t *testing.T) {
+	t.Parallel()
+	big := make([]byte, 96*1024)
+	for i := range big {
+		big[i] = 'n'
+	}
+	var msgs []exec.WireMessage
+	for range (pendingOutputWatermark / len(big)) + 2 {
+		msgs = append(msgs, exec.WireMessage{Kind: "NoticeResponse",
+			Notice: &pgconn.Notice{Severity: "NOTICE", Code: "01000", Message: string(big)}})
+	}
+	msgs = append(msgs, exec.WireMessage{Kind: "CommandComplete", Tag: "SELECT 0"})
+
+	q := &fakeQueries{msgs: msgs, status: txStatusIdle, txStatus: txStatusIdle}
+	events, addr := loopListener(t, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Query{String: "SELECT noisy"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUntilReady(t, fe); got != txStatusIdle {
+		t.Fatalf("readiness = %q", got)
+	}
+	var sawBackpressure bool
+	for _, ev := range events() {
+		if ev.Kind == "fd.backpressure_enter" {
+			sawBackpressure = true
+		}
+	}
+	if !sawBackpressure {
+		t.Fatalf("megabytes of notices crossed no watermark — the accounting cannot see the " +
+			"payload that is filling the buffer")
+	}
+}

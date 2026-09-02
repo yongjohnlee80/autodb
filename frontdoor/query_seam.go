@@ -30,10 +30,18 @@ type QueryExecutor interface {
 	// each backend message in wire order and returning the session's
 	// ReadyForQuery status byte.
 	//
-	// emit is NOT re-entrant: WireQuery holds the session's one-in-flight claim
-	// across the gate, the dispatch, every emit and the status read, so a
-	// callback that calls back into the engine on this session is refused with
-	// ErrSessionBusy. Frame the message and return.
+	// emit is NOT re-entrant with respect to the STATEMENT path: WireQuery holds
+	// the session's one-in-flight claim across the gate, the dispatch, every emit
+	// and the status read, so a callback that re-enters WireQuery or WireExecute
+	// on this session is refused with ErrSessionBusy. Frame the message and
+	// return.
+	//
+	// The claim-free accessors are NOT protected by that and do not pretend to
+	// be: WireTxStatus reads the session's transaction phase under its own lock
+	// and takes no claim, so it SUCCEEDS from inside emit. Said explicitly
+	// because the unqualified version of this sentence — "must not call back into
+	// the engine" — would let a future implementer believe the emitter is fenced
+	// from any re-entry, and it is fenced only from the path that claims.
 	WireQuery(ctx context.Context, id exec.SessionID, userID int64, sql, ip string,
 		emit func(exec.WireMessage) error) (byte, error)
 

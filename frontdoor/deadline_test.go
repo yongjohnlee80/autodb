@@ -40,7 +40,14 @@ func deadlineListener(t *testing.T, dl deadlines) (func() []Event, string) {
 func TestDeadlines_DefaultsMatchTheMatrix(t *testing.T) {
 	t.Parallel()
 	got := defaultDeadlines()
-	want := deadlines{tls: 10 * time.Second, startup: 10 * time.Second, auth: 10 * time.Second, idle: 30 * time.Minute}
+	// outputStall and frameStall are NOT matrix numbers in the way the first four
+	// are: §9 pins TLS/startup/auth at 10s and the between-messages idle budget at
+	// 30m, and §7 names a 30s partial-frame progress deadline, but nothing pins a
+	// bound on the write that drains the output watermark. 30s there is a
+	// front-door policy default, chosen conservatively and flagged for a ruling —
+	// recorded here so a change to it is a decision rather than a drift.
+	want := deadlines{tls: 10 * time.Second, startup: 10 * time.Second, auth: 10 * time.Second,
+		idle: 30 * time.Minute, outputStall: 30 * time.Second, frameStall: 30 * time.Second}
 	if got != want {
 		t.Errorf("defaults = %+v, want %+v (§9: TLS/startup/auth 10s; between-messages idle 30m)", got, want)
 	}

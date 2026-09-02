@@ -657,16 +657,17 @@ func (l *Listener) serveSession(ctx context.Context, stream net.Conn, br *bufio.
 	}
 	l.onEvent(Event{Kind: "fd.session_open", Peer: peer, Detail: string(sess.SessionID)})
 
-	// THE DEADLINE MOVES HERE, once, and this is the only place it is armed
-	// for the session's first message.
+	// The FIRST arming of the between-messages budget. The session loop re-arms
+	// it per message, clears it for engine work, and swaps it for the
+	// partial-frame progress budget once a message has started — see
+	// session_loop.go, which owns those transitions.
 	//
-	// The pre-auth deadlines are ten seconds and a deadline set on a net.Conn
-	// stays set. Leaving one in place would kill every authenticated session
-	// ten seconds after it opened — and the person who noticed first would be
-	// a developer paused on a breakpoint, watching a connection drop for no
-	// reason they could see. Arming it here and nowhere else is deliberate:
-	// a second arming inside the session loop would mask the omission of
-	// this one, and then no test could observe it missing.
+	// The previous comment here argued AGAINST re-arming in the loop, on the
+	// grounds that a second arming would mask the omission of this one. That
+	// reasoning protected a cell's discriminating power at the cost of a refresh
+	// the matrix requires (§8.4: "refreshed on message/state transitions"), and
+	// the cost was real: an absolute deadline armed once made the idle budget a
+	// cap on session LIFETIME.
 	if err := stream.SetDeadline(l.now().Add(l.dl.idle)); err != nil {
 		sessionReason = "deadline"
 		*closeReason = sessionReason
