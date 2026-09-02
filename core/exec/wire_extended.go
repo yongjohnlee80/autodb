@@ -257,6 +257,14 @@ func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 	if serr != nil {
 		return serr
 	}
+	// REFUSED BEFORE THE FRAME IS FORWARDED (§7 :384), like every other cap on
+	// this path: the target must never be asked to hold what we would not admit.
+	// The count, not the byte total — the arrays this frame makes the front door
+	// pre-allocate are what the limit bounds.
+	if len(paramValues) > maxBindParams || len(paramFormats) > maxBindParams ||
+		len(resultFormats) > maxBindParams {
+		return ErrParamCap
+	}
 	paramBytes := 0
 	for _, v := range paramValues {
 		paramBytes += len(v)

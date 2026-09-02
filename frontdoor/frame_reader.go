@@ -58,6 +58,27 @@ type frameReader struct {
 	// by the loop because this is the only place that fact is observable.
 	onStart func()
 
+	// pending queues the header of every frame this reader has FRAMED but that no
+	// Receive has consumed yet.
+	//
+	// IT IS A QUEUE AND NOT A CALLBACK, because scan runs far ahead of the loop
+	// (lector C r2 MF2). One socket read can carry [Describe, Sync, Describe],
+	// and scan frames all three before Receive returns the first. A callback
+	// charging a live segment as each was framed therefore charged the THIRD
+	// frame's bytes into the FIRST frame's segment — falsely refusing a compliant
+	// frame — and the Sync between them then reset the counters and erased the
+	// charge the third frame had already been given, so it was admitted for
+	// nothing. Both directions of wrong, out of a single read.
+	//
+	// Queuing preserves the framing order and lets the loop apply each header
+	// when it reaches that frame, so a Sync's reset lands between the frames it
+	// actually separates.
+	pending []frameHeader
+
+	// typ is the current message's type byte, held from phaseType so the queued
+	// header can carry it alongside the length.
+	typ byte
+
 	// bad keeps the offending byte for the audit line. The wire is told only
 	// the rule id (§1.2: a synthesized error never impersonates the target).
 	bad byte
@@ -93,6 +114,39 @@ func newFrameReader(src io.Reader) *frameReader {
 // Auth installs none — its own deadline governs that exchange.
 func (r *frameReader) setOnStart(fn func()) { r.onStart = fn }
 
+// frameHeader is what a frame declared itself to be, before any of its body was
+// decoded: its type byte and the length it announced.
+type frameHeader struct {
+	typ      byte
+	declared int
+}
+
+// peekHeader returns the header of the next frame a Receive will return, when
+// this reader has already framed it. Not framed yet means those bytes have not
+// arrived, and the caller must Receive to make them arrive.
+func (r *frameReader) peekHeader() (frameHeader, bool) {
+	if len(r.pending) == 0 {
+		return frameHeader{}, false
+	}
+	return r.pending[0], true
+}
+
+// consumeHeader removes the head of the queue.
+//
+// EVERY Receive must call it, auth's included (lector C r2 MF3). Auth shares
+// this reader and its Backend, so a queue that only the session loop advances
+// attributes every later header to the wrong frame — and read-ahead during auth
+// means a post-auth frame can already be queued before the loop exists, which is
+// exactly the frame that then went uncharged.
+func (r *frameReader) consumeHeader() (frameHeader, bool) {
+	if len(r.pending) == 0 {
+		return frameHeader{}, false
+	}
+	h := r.pending[0]
+	r.pending = r.pending[1:]
+	return h, true
+}
+
 // badByte reports the undefined type byte that stopped the stream.
 func (r *frameReader) badByte() byte { return r.bad }
 
@@ -125,6 +179,7 @@ func (r *frameReader) scan(b []byte) error {
 			if r.onStart != nil {
 				r.onStart()
 			}
+			r.typ = b[i]
 			r.phase = phaseLength
 			r.lenHave = 0
 			i++
@@ -145,6 +200,9 @@ func (r *frameReader) scan(b []byte) error {
 				// The length counts itself. A length of exactly 4 is a complete
 				// message with an empty body — Sync, Flush and Terminate are all
 				// four bytes and would be mis-framed by an off-by-one here.
+				// QUEUED HERE, before a byte of the body is passed on, so the
+				// header reaches the loop no later than the frame it describes.
+				r.pending = append(r.pending, frameHeader{typ: r.typ, declared: total})
 				r.need = total - 4
 				r.lenHave = 0 // the message is framed; nothing of a length is pending
 				r.phase = phaseBody

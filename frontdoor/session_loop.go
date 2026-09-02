@@ -96,7 +96,26 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			return nil
 		}
 
+		// §1.5 STAGE ONE, APPLIED IN FRAMING ORDER (lector C r2 MF2/MF3). The
+		// header of the frame this Receive will return is already known whenever
+		// the reader framed it in an earlier socket read — the pipelined case,
+		// which is the one that can amplify — so the segment is admitted on the
+		// DECLARED length before the decode allocates anything from the body.
+		//
+		// When it is not yet framed the bytes have not arrived, so the check
+		// happens immediately after Receive instead: the queue is popped either
+		// way, exactly once per Receive, which is what keeps a Sync's reset
+		// landing between the frames it separates.
+		preHeader, hadPre := fr.peekHeader()
+		if hadPre && !l.admitSegmentFrame(conn, be, &seg, preHeader, peer, closeReason) {
+			return nil
+		}
 		msg, err := be.Receive()
+		if hdr, ok := fr.consumeHeader(); ok && !hadPre {
+			if !l.admitSegmentFrame(conn, be, &seg, hdr, peer, closeReason) {
+				return nil
+			}
+		}
 		if err != nil {
 			return l.endOfRead(conn, be, fr, &seg, err, peer, closeReason)
 		}
@@ -914,6 +933,18 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 	case errors.Is(err, auth.ErrDenied):
 		return "42501", "gate/insufficient-privilege",
 			"the credential does not carry the privilege this statement needs", false
+
+	case errors.Is(err, exec.ErrParamCap):
+		// §7 :384 — a PROGRAM limit (54000), not a configured quota: no operator
+		// setting raises it, so the remedy is to send fewer parameters.
+		return sqlStateProgramLimit, "frontdoor/param-cap",
+			"send fewer parameters in one Bind", false
+
+	case errors.Is(err, exec.ErrNamedObjectCap):
+		// §7 :385. The connection stays: it is this Parse or Bind that is
+		// refused, and closing unused objects makes room.
+		return sqlStateConfiguredLimit, "frontdoor/named-object-cap",
+			"close unused prepared statements or portals, then retry", false
 
 	case errors.Is(err, exec.ErrRetainedBudget):
 		// §7 :381 — a CONFIGURED quota the operator can raise, which ruling 4

@@ -137,12 +137,12 @@ var matrixTriage = map[string]struct {
 	// ---- §4 Frontend message matrix (post-auth) ----
 	"4:Query":                     {covered, "TestPGLoop_MultiStatementRunsInOrderAndStopsAtTheFirstError + TestPGLoop_ControlInsideTheBufferDrivesTheTransactionState — implicit-block semantics against a real server: statements run in order, the first error rolls the block back (count(*)=0 afterwards), and BEGIN/COMMIT inside one buffer drive the readiness byte"},
 	"4:Parse":                     {covered, "F2 routes and GATES it (classifier + profile + grants + the rule-2 reader stage, live-celled) and F2b reserves the statement's retained capacity BEFORE the Parse is forwarded, finalizing at ParseComplete and releasing on error - TestRetained_BudgetRefusalAdmitsNothing proves a refusal admits nothing, and the mutation making the budget never refuse reddens it"},
-	"4:Bind":                      {awaiting, "awaiting - F2 routes it and relays raw parameter formats and OIDs verbatim (live-celled, binary in both directions), and F2b now reserves the portal's retained capacity before forwarding. The ONE remaining half is the 8192-param limit (matrix :384, 54000 frontdoor/param-cap), which is not built - that alone keeps this row from covered"},
+	"4:Bind":                      {covered, "F2 routes it and relays raw parameter formats and OIDs verbatim (live-celled, binary in both directions); F2b reserves the portal's retained capacity before forwarding, and F2b-C refuses a Bind past the 8192-parameter limit before the frame is forwarded - TestCaps_ABindPastTheParameterCapIsRefusedAndAdmitsNothing admits the whole allowance, refuses one more, and proves the refusal creates no portal and moves no charge"},
 	"4:Describe":                  {covered, "TestPGExtended_DescribeCarriesTheServersOwnOIDs + TestPGExtended_AStatementWithNoResultColumnsDescribesAsNoData - a live client drives Describe('S') and Describe('P') end to end. The discriminator is three DIFFERENT result types (int4/bool/text): a re-deriving producer collapses them to text OID 25, so equal-to-text would pass a weaker cell. NoData is asserted as its own frame rather than an empty RowDescription"},
 	"4:Execute":                   {awaiting, "awaiting - and NARROWER than before, not closed. TestPGExtended_ARowLimitedFetchSuspendsAndResumes closes the maxRows/PortalSuspended half the previous reason named: N rows then PortalSuspended REACHES THE CLIENT, and the resumption returns the remainder and ends in CommandComplete. TWO contracted halves remain unwitnessed and the row must not be promoted on the first: (1) the row says authority is re-resolved at EVERY Execute, PORTAL RE-EXECUTIONS INCLUDED - the existing live proof revokes a grant between Parse and Execute, which is not a re-execution, so a resumption riding the first Execute's authority would pass everything written today (white-vision: the discriminating cell revokes BETWEEN the first Execute and the resumption); (2) fd.stmt_attempt/fd.stmt_outcome PER Execute - three paged Executes are three rows, not one covering the portal, and a producer folding them looks perfect on the wire. Neither is witnessed here, and the reason for (2) is that it is the WRONG HOME rather than out of reach: attempt rows are engine-side audit, not listener events, so a frontdoor cell would have to open its own meta-store handle against the same database - pgLoopWithEngine builds one and does not return it. Awkward, not impossible; white-vision corrected an earlier version of this reason that said 'not observable at all', which was too strong and would have outlived the message that contained it. I promoted this row on the maxRows half alone and corrected it before review rather than after"},
 	"4:Close":                     {covered, "F2 routes both object types, the 4a cascade is unit-celled, and F2b makes the drop the OWNER of the release - TestRetained_EveryReleasePointReturnsItsCharge walks Close-S cascade, Close-P, transaction end and simple-Query destruction, and the mutation letting a drop skip a still-pending charge reddens it"},
 	"4:Flush":                     {awaiting, "awaiting - and now WITNESSED ABSENT rather than merely undriven. TestPGExtended_AStandaloneFlushDeliversNothing drives a client Flush and receives NOTHING: no frames on the wire until the client Syncs. The cell observes the WIRE only - it does not read the meta store, so this reason claims wire silence and not an absence of audit rows. The session RECOVERS through a subsequent Sync, so this is a missing capability rather than a broken session - a severity I first recorded as worse, from a racy version of the cell whose goroutine corrupted the stream. The row stays AWAITING because that cell pins the defect, it does not witness the contract; promoting it would make this list say the behaviour works. Reported to jarvis and white-vision; the real witness is written in that cell's failure message, to be restored when Flush dispatches"},
-	"4:Sync":                      {awaiting, "awaiting - segment close, the engine own ReadyForQuery, and the lane-reservation release are all live-celled, but the row also contracts resetting the segment counters (10000 msgs / 96 MiB), which F2 does not implement"},
+	"4:Sync":                      {covered, "segment close, the engine's own ReadyForQuery and the lane-reservation release are live-celled; F2b adds the segment-counter reset (10000 msgs / 96 MiB) and the sweep of every reservation the aborted segment will never confirm - TestExtCaps_SyncResetsTheSegmentCounters drives two under-cap segments whose sum is over it, and TestExtPG_SyncSweepsWhatTheAbortedSegmentWillNeverConfirm drives a real Sync rather than the sweep helper"},
 	"4:Terminate":                 {covered, "derived from its three claims — clean-close, release and rollback are each proven; the rollback claim by TestPGLoop_TerminateRollsBackAnOpenTransaction across two connections"},
 	"4:CopyData":                  {covered, "TestLoop_CopyDataIsFatalAndCloses — CopyData/CopyDone/CopyFail are a fatal 08P01 and the connection closes; audited under its own cause"},
 	"4:FunctionCall":              {covered, "TestLoop_FunctionCallIsRefusedAndTheConnectionStillWorks + TestLoop_SurvivingRefusalEndsTheCycleWithReadiness — a REFUSAL, not a violation: 0A000 frontdoor/no-fastpath, the cycle ends with ReadyForQuery, and the same connection then answers a query"},
@@ -1057,4 +1057,48 @@ func testFuncExists(t *testing.T, name string) bool {
 		return nil
 	})
 	return found
+}
+
+// TestMatrixCoverage_EverySectionIsCitable is the gate's check on ITSELF.
+//
+// citationRe once required a digit or a dot after the section number, so a row
+// in §4a — written "4a:Parse" — could not be cited by any cell. All eight §4a
+// rows were therefore STRUCTURALLY UNPROMOTABLE: no citation could exist, the
+// "awaiting rows that ARE now tested" arm could never fire for them, and their
+// reasons sat stale for as long as anyone cared to look. A gate everybody
+// trusted had a section-sized hole, and the hole was silent in the direction of
+// reporting no drift.
+//
+// So the pattern is now asserted against every section this gate claims, and a
+// future section-naming scheme that citationRe cannot express fails HERE rather
+// than becoming another quiet exemption. It is prove-the-instrument-observes
+// turned on the instrument that watches the instruments: ask what input would
+// make the guard complain, and confirm that input is expressible.
+func TestMatrixCoverage_EverySectionIsCitable(t *testing.T) {
+	for _, sec := range coveredSections {
+		// The shape a cell writes: "// Witness for row <section>:<row-name>."
+		probe := "// Witness for row " + sec.id + ":Example-Row_1."
+		got := citationRe.FindStringSubmatch(probe)
+		if got == nil {
+			t.Errorf("section %q cannot be cited: citationRe does not match %q.\n"+
+				"Every row in that section is unpromotable and this gate is blind to it — "+
+				"widen the pattern rather than leaving the section silently ungated.", sec.id, probe)
+			continue
+		}
+		if want := sec.id + ":Example-Row_1"; got[1] != want {
+			t.Errorf("section %q cites as %q, want %q — a partial match citing the wrong key is worse "+
+				"than none, because it credits a row nobody wrote a cell for", sec.id, got[1], want)
+		}
+	}
+
+	// And the numeric claim form §2 uses ("row 2.4"), for the same reason.
+	for _, sec := range coveredSections {
+		if !sec.numeric {
+			continue
+		}
+		probe := "// Witness for row " + sec.id + ".4"
+		if citationRe.FindStringSubmatch(probe) == nil {
+			t.Errorf("numeric section %q cannot be cited: citationRe does not match %q", sec.id, probe)
+		}
+	}
 }

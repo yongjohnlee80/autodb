@@ -34,6 +34,16 @@ var (
 	// exists.
 	ErrRetainedBudget = errors.New("exec: the session's retained-state budget cannot admit this object")
 
+	// ErrNamedObjectCap is a Parse or Bind beyond §9's per-session namespace
+	// limits (matrix §7 :385 — 53400 frontdoor/named-object-cap).
+	ErrNamedObjectCap = errors.New("exec: the session holds too many named prepared statements or portals")
+
+	// ErrParamCap is a Bind carrying more parameters than §9 admits (matrix
+	// §7 :384 — 54000 frontdoor/param-cap). A PROGRAM limit, not a configured
+	// quota: it bounds what one frame may make the front door pre-allocate, and
+	// no operator setting raises it.
+	ErrParamCap = errors.New("exec: the Bind carries more parameters than the front door admits")
+
 	// ErrUnknownStatement is a Bind/Describe/Close naming a statement that does
 	// not exist (PostgreSQL 26000).
 	ErrUnknownStatement = errors.New("exec: prepared statement does not exist")
@@ -278,6 +288,12 @@ func (o *extObjects) putStatement(st *extStatement) error {
 	// releasing first would have fitted it. That is the safe direction: a refusal
 	// is recoverable — Close and retry — and forgetting an object the target
 	// holds is not.
+	// THE NAMESPACE CAP, then the memory budget — both before the frame is
+	// forwarded. A refusal here leaves the connection usable (§7 :385); it is the
+	// Parse that is refused, not the session.
+	if st.name != "" && o.namedStatements() >= maxNamedStatements {
+		return ErrNamedObjectCap
+	}
 	// RESERVED BEFORE THE FRAME IS FORWARDED. The budget decides before the
 	// Parse goes out, never after: the target must never hold a server-side
 	// prepared statement the budget did not admit.
@@ -318,6 +334,9 @@ func (o *extObjects) putPortal(p *extPortal) error {
 		if _, live := o.portals[p.name]; live {
 			return ErrDuplicatePortal
 		}
+	}
+	if p.name != "" && o.namedPortals() >= maxNamedPortals {
+		return ErrNamedObjectCap
 	}
 	if err := o.reserveRetained(p.charge); err != nil {
 		return err
@@ -428,6 +447,45 @@ func (o *extObjects) dropUnnamed() {
 // retainedBudgetPerSession is §9's default retained-state quota (16 MiB/session,
 // ceiling 64 MiB). Exceeding it refuses the statement; the connection stays.
 const retainedBudgetPerSession int64 = 16 << 20
+
+// §9's per-session namespace limits (matrix :385, :479).
+//
+// NAMED objects only. The unnamed statement and portal are exempt because they
+// are REPLACED rather than accumulated — a client that re-Parses the unnamed
+// statement a million times holds one object, and counting those would refuse a
+// correct client for doing the one thing the unnamed name is for.
+const (
+	maxNamedStatements = 256
+	maxNamedPortals    = 64
+
+	// maxBindParams is §9's per-Bind parameter limit (matrix :384, :484). Well
+	// under the protocol's own int16 ceiling of 65535: the figure that matters
+	// here is what one frame may make US pre-allocate, and §1.5 charges the
+	// parameter and format arrays as the frame's stage-2 delta.
+	maxBindParams = 8192
+)
+
+// namedStatements and namedPortals count the capped objects.
+//
+// DERIVED, NOT TRACKED. A counter incremented in put and decremented in every
+// drop is a second bookkeeping with its own drift, and §4a has five release
+// points to keep in step; the map is the truth and the unnamed entry is the only
+// exemption, so this is O(1) and cannot disagree with the store.
+func (o *extObjects) namedStatements() int {
+	n := len(o.statements)
+	if _, ok := o.statements[""]; ok {
+		n--
+	}
+	return n
+}
+
+func (o *extObjects) namedPortals() int {
+	n := len(o.portals)
+	if _, ok := o.portals[""]; ok {
+		n--
+	}
+	return n
+}
 
 // objectCharge is the retained figure for a frame that creates an object: the
 // bytes it declares plus what it makes the front door hold for it.
