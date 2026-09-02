@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
@@ -121,6 +122,35 @@ func pgClient(t *testing.T, addr, secret, database string) *pgproto3.Frontend {
 
 // pgClientCollecting authenticates and returns the frontend plus every frame the
 // server sent between the auth request and ReadyForQuery — the session-open set.
+// pgClientWithConn authenticates and returns the connection alongside the
+// frontend, so a cell can bound reads with a deadline instead of racing a
+// goroutine against the frontend — pgproto3.Frontend is not safe for concurrent
+// use, and a "read in a goroutine, keep sending from the test" shape is a data
+// race that -race catches and a plain run does not.
+func pgClientWithConn(t *testing.T, addr, secret, database string) (*tls.Conn, *pgproto3.Frontend) {
+	t.Helper()
+	conn, fe := startupTo(t, addr, map[string]string{
+		"user": "root", "database": database, "application_name": "psql",
+	})
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("auth request: %v", err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: secret})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("the success sequence: %v", err)
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			return conn, fe
+		}
+	}
+}
+
 func pgClientCollecting(t *testing.T, addr, secret, database string) (*pgproto3.Frontend, []pgproto3.BackendMessage) {
 	t.Helper()
 
