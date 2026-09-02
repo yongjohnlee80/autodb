@@ -166,3 +166,16 @@ func TestWireFromExtended_CarriesEveryFieldVerbatim(t *testing.T) {
 		t.Fatalf("field mapping lost something: %+v", f)
 	}
 }
+
+// The loop matches a lost wire by sentinel and still reads the cause.
+func TestWireFaceLost_IsMatchableAndKeepsTheCause(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("read tcp: connection reset by peer")
+	err := wireFaceLost(cause)
+	if !errors.Is(err, ErrWireFaceLost) {
+		t.Fatalf("errors.Is(ErrWireFaceLost) false for %v", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("the cause is not reachable through Unwrap: %v", err)
+	}
+}

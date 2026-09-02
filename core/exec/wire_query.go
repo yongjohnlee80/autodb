@@ -385,7 +385,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		if consumerErr {
 			return 0, ef.err
 		}
-		return 0, derr
+		return 0, wireFaceLost(derr)
 	}
 	s.noteWireStatus(status)
 	return s.wireTxStatus()
@@ -511,8 +511,24 @@ func (e *Engine) wireQueryDecoded(ctx context.Context, s *session, pol UnitPolic
 
 // ErrDecodedResultTruncated: a non-postgres target's result exceeded the
 // engine's page. The decoded producer cannot stream, so it refuses rather than
-// lie about the row count.
+// lie about the row count. The loop frames it as a §8a refusal (54000) under
+// DecodedResultTruncatedRuleID; the session survives.
 var ErrDecodedResultTruncated = errors.New("exec: result exceeds the decoded producer's page; only PostgreSQL targets stream unbounded results")
+
+// DecodedResultTruncatedRuleID names the refusal in audit and in the loop's
+// error frame. Non-postgres targets only — the raw producer has no page.
+const DecodedResultTruncatedRuleID = "frontdoor/decoded-result-page-exceeded"
+
+// ErrWireFaceLost is the loop's signal that the session's WIRE failed under a
+// raw dispatch — a transport failure, or transaction control reaching the raw
+// face (which the gate makes impossible; golib poisons regardless). By the time
+// the caller sees it the session is already closing (reason raw-face-lost): the
+// loop must tear the client connection down and send NO readiness byte. It
+// wraps the underlying cause; errors.Is(err, ErrWireFaceLost) recognises it.
+var ErrWireFaceLost = errors.New("exec: the session's wire failed; the session is closing")
+
+// wireFaceLost wraps a wire failure so the loop can match it and still read the cause.
+func wireFaceLost(cause error) error { return fmt.Errorf("%w: %w", ErrWireFaceLost, cause) }
 
 // decodedWireMessages re-encodes a decoded Result as text-format wire messages
 // (NON-postgres targets only). No type information survives decoding, so every column is reported
