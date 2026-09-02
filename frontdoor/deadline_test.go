@@ -272,7 +272,9 @@ func TestSession_AQueryBeforeF1IsRefusedAccurately(t *testing.T) {
 	}
 }
 
-// Terminate ends the session cleanly and releases what it held.
+// Terminate ends the session cleanly and releases what it held (matrix
+// row 4:Terminate — the clean-close and full-release halves; the rollback half
+// awaits the F1 wire loop, there being no transaction without one).
 func TestSession_TerminateReleasesTheReservation(t *testing.T) {
 	t.Parallel()
 	f := &fakeAuth{result: goodSession()}
