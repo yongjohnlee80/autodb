@@ -79,6 +79,10 @@ type startupOutcome struct {
 	// Negotiated records that a NegotiateProtocolVersion was sent — the
 	// client asked for a 3.x we do not implement and continues at 3.0.
 	Negotiated bool
+	// Notes are §3.1's accept-with-a-note outcomes (application_name
+	// truncated; empty options ignored). Audited by the listener; the
+	// truncation additionally earns the peer a NoticeResponse.
+	Notes []paramNote
 	// RefusedParam names the startup parameter that failed §3.1, for the
 	// audit row only. The wire gets the uniform denial: telling a caller
 	// WHICH parameter this server dislikes would map the accepted set for
@@ -361,6 +365,10 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 		_ = refused // named in the audit by the caller; never on the wire
 		return secure, startupOutcome{Denied: reasonStartupParamRefus, RefusedParam: refused, Negotiated: out.Negotiated}, nil
 	}
+	// Accepted. Apply the two accept-with-a-note rules to the map that flows
+	// onward, so the echo and the session see the truncated value while the
+	// audit sees the original.
+	out.Notes = normalizeStartupParams(out.Params)
 	return secure, out, nil
 }
 

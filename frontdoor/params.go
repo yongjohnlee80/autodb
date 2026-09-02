@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"strings"
+	"unicode/utf8"
 )
 
 // Startup parameter policy (protocol matrix §3.1).
@@ -75,6 +76,56 @@ func checkStartupParams(params map[string]string) (refused string, ok bool) {
 		}
 	}
 	return "", true
+}
+
+// applicationNameMaxBytes is §3.1's cap on application_name. BYTES, not
+// runes: the value lands in audit rows and in a ParameterStatus frame, and
+// both are sized in bytes.
+const applicationNameMaxBytes = 256
+
+// paramNote records something §3.1 requires to be AUDITED about an ACCEPTED
+// startup — the two cases where the policy does more than accept-or-refuse.
+// It is never sent to the peer as-is; the wire gets a NoticeResponse for the
+// truncation and nothing at all for the ignored options.
+type paramNote struct {
+	// Kind is one of the two note kinds below.
+	Kind string
+	// Detail is the internal particular: the VERBATIM pre-truncation
+	// application_name (§3.1: "audited verbatim"), or the ignored key.
+	Detail string
+}
+
+const (
+	noteApplicationNameTruncated = "application_name_truncated"
+	noteOptionsEmptyIgnored      = "options_empty_ignored"
+)
+
+// normalizeStartupParams applies §3.1's two accept-with-a-note rules to an
+// ALREADY-ACCEPTED parameter set, mutating it in place, and returns what must
+// be audited. It runs after checkStartupParams has passed; on a refused startup
+// there is nothing to normalize.
+//
+//   - application_name over 256 bytes is truncated on a rune boundary so the
+//     echoed ParameterStatus stays valid UTF-8, and the verbatim original goes
+//     to the audit. Truncating mid-rune would hand the client a value it cannot
+//     decode, which is worse than the overrun.
+//   - an empty or whitespace options is accepted and ignored — but audited, so
+//     "the client sent options and we did nothing" is on the record rather than
+//     indistinguishable from "the client sent no options".
+func normalizeStartupParams(params map[string]string) []paramNote {
+	var notes []paramNote
+	if v, ok := params["application_name"]; ok && len(v) > applicationNameMaxBytes {
+		cut := applicationNameMaxBytes
+		for cut > 0 && !utf8.RuneStart(v[cut]) {
+			cut--
+		}
+		notes = append(notes, paramNote{Kind: noteApplicationNameTruncated, Detail: v})
+		params["application_name"] = v[:cut]
+	}
+	if v, ok := params["options"]; ok && strings.TrimSpace(v) == "" {
+		notes = append(notes, paramNote{Kind: noteOptionsEmptyIgnored, Detail: "options"})
+	}
+	return notes
 }
 
 // startupParamPolicy classifies one parameter NAME.
