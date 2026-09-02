@@ -267,6 +267,26 @@ func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, seg *s
 	if !extended || isSync {
 		return true
 	}
+	// AN ALREADY-DISCARDING SEGMENT IS NOT RE-ADMITTED.
+	//
+	// PostgreSQL answers an error mid-segment by discarding until Sync and SAYING
+	// NOTHING FURTHER. Admission runs BEFORE the loop's discard branch —
+	// waitHeader, peek, admit, and only then the discard check — so without this
+	// every frame the client pipelined behind the refusal re-entered here,
+	// re-charged a segment that had already been refused, and drew ANOTHER
+	// ErrorResponse. Four frames behind one breach produced four refusals.
+	//
+	// The frame is still dropped by that discard branch; what changes is that it
+	// is not re-judged and not re-announced.
+	//
+	// NOTE FOR WHOEVER MERGES SECOND: on the #72 branch this short-circuit also
+	// calls fr.skipFrame(h), so a discarded frame's body is not decoded — which
+	// matters once the post-auth cap is the documented 64 MiB. That half depends
+	// on #72's loop draining a refused frame instead of handing it to Receive,
+	// and cannot land here: admitSegmentFrame has no reader on this base.
+	if seg.discarding {
+		return true
+	}
 	seg.msgs++
 	seg.addBytes(int64(h.declared))
 	// DEFENCE IN DEPTH, and deliberately redundant: stage two re-reads these same
