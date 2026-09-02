@@ -238,7 +238,7 @@ var claimTriage = map[string]struct {
 	// READS the wire after Terminate and requires the connection to end with no frame.
 	"4:Terminate#clean-close": {covered, "TestSession_TerminateClosesTheWireWithoutAnErrorFrame",
 		"after Terminate the server closes the connection and sends NOTHING — no ErrorResponse, no ReadyForQuery",
-		[]string{"want the connection closed with NO frame", "*pgproto3.ErrorResponse"}},
+		[]string{"want the connection closed with NO frame", "ne.Timeout()", "left the session OPEN"}},
 	"4:Terminate#release": {covered, "TestSession_TerminateReleasesTheReservation",
 		"the session's reservation is released when the client leaves — proven as release-on-teardown, which Terminate is one cause of",
 		[]string{`waitFor(t, "the release"`, "len(closed) == 1"}},

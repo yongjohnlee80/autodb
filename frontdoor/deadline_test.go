@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"errors"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"os"
+	"syscall"
 )
 
 // The deadline set (matrix §9).
@@ -352,13 +355,27 @@ func TestSession_TerminateClosesTheWireWithoutAnErrorFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Do NOT close our side: the point is to observe what the SERVER does next.
+	// The deadline is a HANG GUARD only. Its expiry is a failure, not a pass: a
+	// server that ignores Terminate and leaves the session open also produces a
+	// non-nil Receive error here, and the first version of this cell accepted
+	// that as a clean close (lector PR #45 r1 MF3 — `return nil` → `continue`
+	// in defaultSession stayed green in 5.01s).
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	msg, err := fe.Receive()
 	if err == nil {
 		t.Fatalf("after Terminate the server sent a %T (%+v); want the connection closed with NO frame", msg, msg)
 	}
-	if _, isErrFrame := msg.(*pgproto3.ErrorResponse); isErrFrame {
-		t.Fatalf("after Terminate the server sent an ErrorResponse; want the connection closed with NO frame")
+	var ne net.Error
+	if errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+		t.Fatalf("after Terminate the server left the session OPEN: the read deadline expired "+
+			"with no close (Timeout() = true) — Terminate was ignored, not honoured: %v", err)
+	}
+	if !(errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)) {
+		// An unrecognised shape is reported, never accepted: the cell must only pass
+		// on a shape it can name as the peer closing.
+		t.Fatalf("after Terminate, Receive failed with an unrecognised error shape %T: %v; "+
+			"want a prompt peer close (EOF / closed / reset)", err, err)
 	}
 	_ = conn.Close()
 }
