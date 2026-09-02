@@ -27,6 +27,37 @@ import (
 // both ways on drift, so a citation landing before its triage entry reddens the
 // suite for everyone.
 
+// noExtended satisfies the extended half of QueryExecutor for doubles whose cell
+// is about the SIMPLE path. Embedding it keeps those cells from carrying nine
+// methods they never call, and it is a compile-time reminder that the seam grew.
+type noExtended struct{}
+
+func (noExtended) WireParse(context.Context, exec.SessionID, int64, string, string, []uint32, string) error {
+	return nil
+}
+func (noExtended) WireBind(context.Context, exec.SessionID, int64, string, string, [][]byte, []int16, []int16) error {
+	return nil
+}
+func (noExtended) WireDescribeStatement(context.Context, exec.SessionID, int64, string) error {
+	return nil
+}
+func (noExtended) WireDescribePortal(context.Context, exec.SessionID, int64, string) error {
+	return nil
+}
+func (noExtended) WireCloseStatement(context.Context, exec.SessionID, int64, string) error {
+	return nil
+}
+func (noExtended) WireClosePortal(context.Context, exec.SessionID, int64, string) error { return nil }
+func (noExtended) WireExecutePortal(context.Context, exec.SessionID, int64, string, uint32, string, func(exec.WireMessage) error) error {
+	return nil
+}
+func (noExtended) WireFlushSegment(context.Context, exec.SessionID, int64, func(exec.WireMessage) error) error {
+	return nil
+}
+func (noExtended) WireSyncSegment(context.Context, exec.SessionID, int64) (byte, error) {
+	return txStatusIdle, nil
+}
+
 // fakeQueries is a QueryExecutor a cell can steer. It records what it was asked
 // and replays a scripted response, so a cell can produce a target error, a gate
 // refusal or a normal result without a database.
@@ -51,6 +82,13 @@ type fakeQueries struct {
 
 	// sawSQL records every statement the loop passed down.
 	sawSQL []string
+
+	// The extended surface: what the loop asked for, what the engine emits back,
+	// and the two refusals a cell may want to script.
+	extCalls []string
+	extMsgs  []exec.WireMessage
+	parseErr error
+	syncErr  error
 }
 
 func (q *fakeQueries) WireQuery(_ context.Context, _ exec.SessionID, _ int64, sql, _ string,
@@ -76,6 +114,89 @@ func (q *fakeQueries) WireTxStatus(_ exec.SessionID, _ int64) (byte, error) {
 	defer q.mu.Unlock()
 	if q.txErr != nil {
 		return 0, q.txErr
+	}
+	return q.txStatus, nil
+}
+
+// THE EXTENDED SURFACE. Scripted the same way the simple one is: the cells say
+// what the engine emits and this records what the loop asked for, so a cell can
+// assert the ROUTING without a database.
+func (q *fakeQueries) extRecord(call string) {
+	q.mu.Lock()
+	q.extCalls = append(q.extCalls, call)
+	q.mu.Unlock()
+}
+
+func (q *fakeQueries) calls() []string {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]string(nil), q.extCalls...)
+}
+
+func (q *fakeQueries) WireParse(_ context.Context, _ exec.SessionID, _ int64, name, sqlText string, _ []uint32, _ string) error {
+	q.extRecord("Parse:" + name + ":" + sqlText)
+	return q.parseErr
+}
+
+func (q *fakeQueries) WireBind(_ context.Context, _ exec.SessionID, _ int64, portal, stmt string, _ [][]byte, _, _ []int16) error {
+	q.extRecord("Bind:" + portal + ":" + stmt)
+	return nil
+}
+
+func (q *fakeQueries) WireDescribeStatement(_ context.Context, _ exec.SessionID, _ int64, name string) error {
+	q.extRecord("DescribeS:" + name)
+	return nil
+}
+
+func (q *fakeQueries) WireDescribePortal(_ context.Context, _ exec.SessionID, _ int64, name string) error {
+	q.extRecord("DescribeP:" + name)
+	return nil
+}
+
+func (q *fakeQueries) WireCloseStatement(_ context.Context, _ exec.SessionID, _ int64, name string) error {
+	q.extRecord("CloseS:" + name)
+	return nil
+}
+
+func (q *fakeQueries) WireClosePortal(_ context.Context, _ exec.SessionID, _ int64, name string) error {
+	q.extRecord("CloseP:" + name)
+	return nil
+}
+
+func (q *fakeQueries) WireExecutePortal(_ context.Context, _ exec.SessionID, _ int64,
+	portal string, _ uint32, _ string, emit func(exec.WireMessage) error) error {
+	q.extRecord("Execute:" + portal)
+	q.mu.Lock()
+	msgs := q.extMsgs
+	q.mu.Unlock()
+	for _, m := range msgs {
+		if err := emit(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (q *fakeQueries) WireFlushSegment(_ context.Context, _ exec.SessionID, _ int64,
+	emit func(exec.WireMessage) error) error {
+	q.extRecord("Flush")
+	q.mu.Lock()
+	msgs := q.extMsgs
+	q.mu.Unlock()
+	for _, m := range msgs {
+		if err := emit(m); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (q *fakeQueries) WireSyncSegment(_ context.Context, _ exec.SessionID, _ int64) (byte, error) {
+	q.extRecord("Sync")
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.syncErr != nil {
+		return 0, q.syncErr
 	}
 	return q.txStatus, nil
 }
@@ -392,39 +513,61 @@ func TestLoop_UnknownMessageTypeIsFatalAndNotSkipped(t *testing.T) {
 
 // The extended-protocol frames tear the connection down until F2 lands, with
 // one FATAL 0A000 carrying its own rule id (Johno's ruling). UNCITED — the
-// matrix has no interim row for this by design.
-func TestLoop_ExtendedFrameTearsDownWithOneError(t *testing.T) {
+// A WHOLE SEGMENT IN ONE FLUSH — Parse, Bind, Execute, Sync — which is how every
+// extended client sends one.
+//
+// This is F2's first witness and it is RED until ultron-prime's pipelining fix
+// lands: the loop cannot currently read past the first frame of a pipelined
+// write. It is committed red deliberately rather than written to send one frame
+// at a time, because a cell that avoids pipelining would pass and mean nothing —
+// no real client sends that way.
+//
+// Witness for rows 4:Parse, 4:Bind, 4:Execute and 4:Sync at the wire: the client
+// drives a whole segment and the engine sees each frame in order, with the
+// readiness byte at the end coming from the engine's Sync rather than being
+// synthesised by the loop.
+func TestLoop_ExtendedSegmentReachesTheEngineAndSyncEndsIt(t *testing.T) {
 	t.Parallel()
-	_, addr := loopListener(t, okQueries())
+	q := okQueries()
+	q.extMsgs = []exec.WireMessage{
+		{Kind: "ParseComplete"},
+		{Kind: "BindComplete"},
+		{Kind: "DataRow", Values: [][]byte{[]byte("1")}},
+		{Kind: "CommandComplete", Tag: "SELECT 1"},
+	}
+	_, addr := loopListener(t, q)
 	conn, fe := authenticated(t, addr)
 	defer func() { _ = conn.Close() }()
 
-	fe.Send(&pgproto3.Parse{Name: "s", Query: "SELECT $1::int"})
+	fe.Send(&pgproto3.Parse{Name: "s", Query: "SELECT 1"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "p", PreparedStatement: "s"})
+	fe.Send(&pgproto3.Execute{Portal: "p"})
+	fe.Send(&pgproto3.Sync{})
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	msg, err := fe.Receive()
-	if err != nil {
-		t.Fatalf("reading the refusal: %v", err)
+	// BOUNDED, because the failure this cell currently observes is a HANG, and a
+	// cell that hangs reports nothing.
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
+		t.Fatalf("no readiness for the segment (got %q); the engine saw %v.\n"+
+			"If it saw only the FIRST frame this is the PIPELINING defect, not F2 routing: pgproto3's Backend "+
+			"wraps the loop's bufio.Reader in its own read-ahead chunkReader, so frames after the first sit "+
+			"inside pgproto3 and br.Peek(1) blocks on an empty reader. Owner: ultron-prime, own PR ahead of #57.",
+			got, q.calls())
 	}
-	e, ok := msg.(*pgproto3.ErrorResponse)
-	if !ok {
-		t.Fatalf("frame = %T, want ErrorResponse", msg)
+	want := []string{"Parse:s:SELECT 1", "Bind:p:s", "Execute:p", "Sync"}
+	got := q.calls()
+	if len(got) != len(want) {
+		t.Fatalf("the engine saw %v, want %v", got, want)
 	}
-	if e.Code != sqlStateFeatureNotSupported || e.Detail != ruleExtendedNotImplemented || e.Severity != "FATAL" {
-		t.Fatalf("refusal = %s/%s/%s, want %s/%s/FATAL",
-			e.Severity, e.Code, e.Detail, sqlStateFeatureNotSupported, ruleExtendedNotImplemented)
-	}
-	// ONE error, then closed — not an error per frame.
-	if _, err := fe.Receive(); err == nil {
-		t.Fatal("a second frame arrived; the ruling is one error then close")
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("the engine saw %v, want %v", got, want)
+		}
 	}
 }
 
-// A backend message the front door cannot frame closes the connection loudly.
-// §5's never-emitted canaries arrive exactly here — a NotificationResponse can
-// only mean LISTEN's refusal was bypassed — and skipping one would hide the
-// event the canary exists to catch.
 // Witness for row 5:CopyInResponse.
 func TestLoop_ImpossibleBackendMessageIsAFrontDoorDefectAndCloses(t *testing.T) {
 	t.Parallel()
@@ -761,6 +904,8 @@ func TestLoop_OutputIsFlushedWhileTheStatementIsStillStreaming(t *testing.T) {
 // blockingQueries emits past the output watermark, then parks until released, so
 // a cell can ask what the client has seen MID-statement.
 type blockingQueries struct {
+	noExtended
+
 	release          chan struct{}
 	status, txStatus byte
 }
@@ -1112,55 +1257,62 @@ func TestLoop_NoticePayloadsCountTowardTheOutputWatermark(t *testing.T) {
 	}
 }
 
-// The second frame of a pipelined pair must REACH THE DECISION TABLE, not sit
-// in pgproto3's buffer unseen.
+// The second frame of a pipelined pair must REACH THE ENGINE, not sit in
+// pgproto3's buffer unseen.
 //
-// F1 has no extended-protocol vocabulary to pipeline, so this proves the same
-// property with frames it does have: a Query answered normally, and a Parse
-// behind it in the SAME flush that must still be refused on its own terms. If
-// the second frame were stranded the session would go quiet instead — which is
-// exactly what a real segment (Parse+Bind+Execute+Sync in one flush) did.
-func TestLoop_ASecondPipelinedFrameStillReachesItsDecision(t *testing.T) {
+// Ultron's cell (PR #59) proves this property with F1 vocabulary, where the
+// second frame is a Parse the decision table REFUSES. On this branch F2 routes
+// Parse to the engine instead, so the same property needs the same shape with
+// the new destination: a Query answered normally, and a Parse behind it in the
+// SAME flush that must still be SEEN. Kept as a distinct cell from the segment
+// witness because it is the MIXED case — one simple frame and one extended frame
+// in one write — which is exactly what lib/pq emits and what neither a
+// simple-only nor an extended-only cell covers.
+func TestLoop_PipelinedQueryThenParseBothReachTheEngine(t *testing.T) {
 	t.Parallel()
-	events, addr := loopListener(t, okQueries())
+	q := okQueries()
+	_, addr := loopListener(t, q)
 	conn, fe := authenticated(t, addr)
 	defer func() { _ = conn.Close() }()
 
 	fe.Send(&pgproto3.Query{String: "SELECT 1"})
-	fe.Send(&pgproto3.Parse{Name: "s", Query: "SELECT 1"})
+	fe.Send(&pgproto3.Parse{Name: "p2", Query: "SELECT 2"})
+	fe.Send(&pgproto3.Sync{})
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
-	// The Query's own cycle first, ending in readiness.
-	sawReady := false
-	for !sawReady {
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	// The Query's own readiness, then the segment's.
+	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
+		t.Fatalf("no readiness for the pipelined Query (got %q); engine saw sql=%v ext=%v", got, q.sawSQL, q.calls())
+	}
+	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
+		t.Fatalf("no readiness for the pipelined Sync (got %q); engine saw sql=%v ext=%v", got, q.sawSQL, q.calls())
+	}
+	if len(q.sawSQL) != 1 || q.sawSQL[0] != "SELECT 1" {
+		t.Errorf("the simple half reached the engine as %v, want [SELECT 1]", q.sawSQL)
+	}
+	want := []string{"Parse:p2:SELECT 2", "Sync"}
+	got := q.calls()
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("the extended half reached the engine as %v, want %v — the frame behind the Query was not seen", got, want)
+	}
+}
+
+// readUntilReadySoft is readUntilReady that RETURNS on a read failure instead of
+// failing the cell, so a caller can report what the engine saw alongside it.
+func readUntilReadySoft(t *testing.T, fe *pgproto3.Frontend) byte {
+	t.Helper()
+	for {
 		msg, err := fe.Receive()
 		if err != nil {
-			t.Fatalf("the first statement of a pipelined pair: %v", err)
+			return 0
 		}
-		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
-			sawReady = true
+		if rfq, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			return rfq.TxStatus
 		}
 	}
-
-	// Then the SECOND frame's decision, which only arrives if the loop ever saw it.
-	msg, err := fe.Receive()
-	if err != nil {
-		t.Fatalf("the second frame of the pipelined pair was never decided: %v — it was "+
-			"accepted by the client, never seen by the loop, and nobody was told", err)
-	}
-	e, ok := msg.(*pgproto3.ErrorResponse)
-	if !ok {
-		t.Fatalf("frame = %T, want the extended-protocol refusal", msg)
-	}
-	if e.Detail != ruleExtendedNotImplemented {
-		t.Fatalf("DETAIL = %q, want %q", e.Detail, ruleExtendedNotImplemented)
-	}
-	waitFor(t, "the pipelined second frame to be audited", func() bool {
-		ev, ok := find(events(), "fd.refused")
-		return ok && ev.Reason == ruleExtendedNotImplemented
-	})
 }
 
 // MF1 (lector, PR #59 r0). The reader is shared with auth, and auth's Backend

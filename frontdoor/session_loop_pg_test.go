@@ -510,6 +510,8 @@ func TestPGLoop_SessionOpenCarriesTheThreeSynthesizedStatuses(t *testing.T) {
 // reentrantProbe wraps the real engine and re-enters it from INSIDE the emit
 // callback, which is the exact thing the seam declares is refused.
 type reentrantProbe struct {
+	noExtended
+
 	eng *exec.Engine
 
 	mu       sync.Mutex
