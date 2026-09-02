@@ -200,3 +200,50 @@ func TestPostAuth_APipelinedBatchIsFramedOrRefusedPerFrame(t *testing.T) {
 		}
 	}
 }
+
+// THE RESOURCE PROPERTY (matrix §10 as amended, jarvis 2026-09-03): a refused
+// frame's body is never read to its DECLARED LENGTH.
+//
+// This is the guarantee that has value, and until this cell nothing asserted it.
+// The parsing cells above prove a refused header does not confuse the parser;
+// this proves it does not COST anything either. A reader that trusted the
+// declared length before validating the header would let one 5-byte header
+// declaring 256 MiB pull 256 MiB off the wire — a refusal that costs more than
+// the statement it refused.
+//
+// It measures source bytes consumed, which is exactly the reading that was
+// WRONG for the parsing property (it measures the socket, not the parser) and is
+// exactly right here — because the socket is what this property is about.
+func TestPostAuth_ARefusedFrameCostsABufferNotItsDeclaredLength(t *testing.T) {
+	const declared = 64 << 20 // 64 MiB claimed by a 5-byte header
+
+	// An undefined type byte with a huge declared length, followed by a small
+	// amount of real data. A reader honouring the declared length would block
+	// waiting for 64 MiB that never comes; one that refuses at the header reads
+	// what has arrived and stops.
+	header := make([]byte, 5)
+	header[0] = 'W'
+	binary.BigEndian.PutUint32(header[1:], uint32(declared))
+	wire := append(header, bytes.Repeat([]byte{'x'}, 8192)...)
+
+	cr := &countingReader{src: bytes.NewReader(wire)}
+	fr := newFrameReader(cr)
+	buf := make([]byte, 4096)
+	var err error
+	for err == nil {
+		_, err = fr.Read(buf)
+	}
+	if !errors.Is(err, errUnknownFrameType) {
+		t.Fatalf("err = %v, want errUnknownFrameType", err)
+	}
+	if cr.read > len(wire) {
+		t.Fatalf("read %d bytes from a %d-byte stream", cr.read, len(wire))
+	}
+	// The bound that matters: the cost is the buffer handed to Read, not the
+	// 64 MiB the header claimed.
+	if cr.read > 4096 {
+		t.Fatalf("a refused frame consumed %d source bytes; the read must be bounded by the "+
+			"transport buffer (%d), never by the frame's declared length (%d) — otherwise a "+
+			"5-byte header buys an attacker an arbitrary read", cr.read, 4096, declared)
+	}
+}
