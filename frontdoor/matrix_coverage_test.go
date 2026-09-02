@@ -143,11 +143,11 @@ var matrixTriage = map[string]struct {
 	"4:Close":                     {awaiting, "release + portal cascade — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 	"4:Flush":                     {awaiting, "output-pump passthrough — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 	"4:Sync":                      {awaiting, "segment close, ReadyForQuery, charge release — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
-	"4:Terminate":                 {covered, "TestSession_TerminateReleasesTheReservation + TestAuth_TheReservationIsReleasedWhenTheClientLeaves — clean close and full release proven against the F0e handler, which honours Terminate; the rollback half has no transaction to roll back until the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
+	"4:Terminate":                 {awaiting, "split into claims below — clean-close and release are proven; the rollback claim awaits the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub, so the derived parent stays awaiting (lector PR #45 r0 MF1)"},
 	"4:CopyData":                  {awaiting, "COPY sub-protocol messages (CopyData/CopyDone/CopyFail) are a fatal protocol violation — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
 	"4:FunctionCall":              {awaiting, "0A000 frontdoor/no-fastpath — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub (the stub's blanket 0A000 is NOT this row: it refuses everything, so a cell here today would pass for the wrong reason)"},
 	"4:Unknown-message-type-byte": {awaiting, "fatal 08P01, never skipped-and-continued — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub; note 08P01 appears nowhere in production code yet"},
-	"4:discard":                   {awaiting, "post-error discard-through-Sync (MF2) — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
+	"4:discard":                   {awaiting, "post-error discard-through-Sync (MF2) — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 
 	// ---- §4a Object-release rules ----
 	"4a:Close-S-name":      {awaiting, "named statement + portal cascade — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
@@ -155,9 +155,9 @@ var matrixTriage = map[string]struct {
 	"4a:Parse":             {awaiting, "unnamed statement replacement — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 	"4a:Bind":              {awaiting, "unnamed portal replacement — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 	"4a:Query":             {awaiting, "unnamed statement/portal destruction — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
-	"4a:Transaction-end":   {awaiting, "all portals die at transaction end — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
-	"4a:Error-mid-segment": {awaiting, "in-flight reservation release — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
-	"4a:Session-end":       {awaiting, "everything retained by the session — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
+	"4a:Transaction-end":   {awaiting, "all portals die at transaction end — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
+	"4a:Error-mid-segment": {awaiting, "in-flight reservation release — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
+	"4a:Session-end":       {awaiting, "everything retained by the session — extended protocol — F2 (mislabelled F1 before Amendment 4 reordered F3a ahead of F2)"},
 
 	// ---- §5 Backend emission matrix ----
 	"5:RowDescription":                  {awaiting, "verbatim forwarding via RawRows, no silent truncation — F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub"},
@@ -229,6 +229,21 @@ var claimTriage = map[string]struct {
 		[]string{`"options": "   "`}},
 	"3.1:options#empty-audit": {awaiting, "",
 		"the empty-options acceptance is audited (§3.1) — NOT IMPLEMENTED: params.go accepts empty/whitespace and emits no audit event; an F0 gap, not a missing cell", nil},
+
+	// ---- 4:Terminate — three separately testable guarantees (lector PR #45 r0 MF1).
+	// The original single-row promotion cited two cells that observe reservation
+	// release on ANY teardown: they send Terminate, close the socket themselves, and
+	// never Receive — so a server that emitted 0A000 before closing stayed green
+	// (Juliet's behaviour-removal mutation). Clean close needs its own witness that
+	// READS the wire after Terminate and requires the connection to end with no frame.
+	"4:Terminate#clean-close": {covered, "TestSession_TerminateClosesTheWireWithoutAnErrorFrame",
+		"after Terminate the server closes the connection and sends NOTHING — no ErrorResponse, no ReadyForQuery",
+		[]string{"want the connection closed with NO frame", "*pgproto3.ErrorResponse"}},
+	"4:Terminate#release": {covered, "TestSession_TerminateReleasesTheReservation",
+		"the session's reservation is released when the client leaves — proven as release-on-teardown, which Terminate is one cause of",
+		[]string{`waitFor(t, "the release"`, "len(closed) == 1"}},
+	"4:Terminate#rollback": {awaiting, "",
+		"an open transaction is rolled back on Terminate — there is no transaction to roll back until the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub", nil},
 
 	"3.1:replication#refused-any-value": {covered, "TestStartup_ParameterPolicy",
 		"refused at every tested value",

@@ -272,9 +272,13 @@ func TestSession_AQueryBeforeF1IsRefusedAccurately(t *testing.T) {
 	}
 }
 
-// Terminate ends the session cleanly and releases what it held (matrix
-// row 4:Terminate — the clean-close and full-release halves; the rollback half
-// awaits the F1 wire loop, there being no transaction without one).
+// Terminate releases what the session held (matrix row 4:Terminate#release).
+//
+// This proves release-on-teardown, of which Terminate is one cause. It does NOT
+// observe the wire after Terminate — it never Receives — so it cannot see whether
+// the server closed cleanly; that is 4:Terminate#clean-close's job, in its own
+// cell. (Lector PR #45 r0 MF1: the two were once cited together as one row, and a
+// server emitting 0A000 before closing left this cell green.)
 func TestSession_TerminateReleasesTheReservation(t *testing.T) {
 	t.Parallel()
 	f := &fakeAuth{result: goodSession()}
@@ -311,4 +315,50 @@ func authenticated(t *testing.T, addr string) (*tls.Conn, *pgproto3.Frontend) {
 			return conn, fe
 		}
 	}
+}
+
+// Terminate must end the wire CLEANLY: the server closes the connection and
+// sends nothing first (matrix row 4:Terminate#clean-close).
+//
+// This cell exists because the two release cells were not evidence for it:
+// they send Terminate, close the socket themselves, and never Receive, so a
+// defaultSession mutated to emit 0A000 before closing left both green. This
+// one reads the wire after Terminate. A server that answers with any frame —
+// the stub's 0A000, a ReadyForQuery, anything — fails it.
+func TestSession_TerminateClosesTheWireWithoutAnErrorFrame(t *testing.T) {
+	t.Parallel()
+	f := &fakeAuth{result: goodSession()}
+	_, addr := authListener(t, f)
+	conn, fe := startupTo(t, addr, defaultParams())
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("auth request: %v", err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "autodb_pat_secret"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("success sequence: %v", err)
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+
+	fe.Send(&pgproto3.Terminate{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Do NOT close our side: the point is to observe what the SERVER does next.
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	msg, err := fe.Receive()
+	if err == nil {
+		t.Fatalf("after Terminate the server sent a %T (%+v); want the connection closed with NO frame", msg, msg)
+	}
+	if _, isErrFrame := msg.(*pgproto3.ErrorResponse); isErrFrame {
+		t.Fatalf("after Terminate the server sent an ErrorResponse; want the connection closed with NO frame")
+	}
+	_ = conn.Close()
 }
