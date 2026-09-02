@@ -44,11 +44,14 @@ func (c *scriptedConn) BeginSessionTx(context.Context, dao.TxOptions) (dao.Conte
 	return nil, errors.New("scripted: not used")
 }
 
+// collect drives the drain over `pending` wire-answered frames.
 func collect(t *testing.T, script []golibpg.ExtendedMessage, pending int) ([]string, int64, error) {
 	t.Helper()
 	c := &scriptedConn{msgs: script}
 	o := newExtObjects()
-	o.pending = pending
+	for i := 0; i < pending; i++ {
+		o.queueWire()
+	}
 	var got []string
 	rows, err := drainExtendedCounting(context.Background(), c, o,
 		func(m WireMessage) error { got = append(got, m.Kind); return nil }, nil)
@@ -143,5 +146,70 @@ func TestExtDrain_TheServerErrorReachesTheClientAsAFrame(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "ErrorResponse" {
 		t.Fatalf("forwarded %v, want the ErrorResponse itself", got)
+	}
+}
+
+// hostileConn refuses every wire operation, so a cell using it proves the code
+// under test never touched the connection.
+type hostileConn struct{ scriptedConn }
+
+func (c *hostileConn) Receive(context.Context) (golibpg.ExtendedMessage, error) {
+	return golibpg.ExtendedMessage{}, errors.New("the connection was read; owned control must never reach the wire")
+}
+func (c *hostileConn) Send(context.Context, golibpg.ExtendedOp) error {
+	return errors.New("a frame was sent; owned control must never reach the wire")
+}
+
+// Owned transaction control is answered with the protocol's fixed shapes, in the
+// order the client asked for them, WITHOUT touching the connection.
+//
+// The hostile connection is the load-bearing half: an assertion on the three
+// frames alone would pass just as well for an implementation that relayed BEGIN
+// to the server and got the same tag back — and that implementation is the one
+// ADR-0018 r2 MF5 forbids, because the transaction it opens has no owner.
+func TestExtDrain_OwnedControlIsAnsweredLocallyAndInOrder(t *testing.T) {
+	o := newExtObjects()
+	o.queueSynth(WireMessage{Kind: "ParseComplete"})
+	o.queueSynth(WireMessage{Kind: "BindComplete"})
+	o.queueSynth(WireMessage{Kind: "CommandComplete", Tag: "BEGIN"})
+
+	var got []string
+	var tag string
+	_, err := drainExtendedCounting(context.Background(), &hostileConn{}, o,
+		func(m WireMessage) error {
+			got = append(got, m.Kind)
+			if m.Kind == "CommandComplete" {
+				tag = m.Tag
+			}
+			return nil
+		}, nil)
+	if err != nil {
+		t.Fatalf("owned control touched the connection: %v", err)
+	}
+	want := []string{"ParseComplete", "BindComplete", "CommandComplete"}
+	for i := range want {
+		if i >= len(got) || got[i] != want[i] {
+			t.Fatalf("forwarded %v, want %v", got, want)
+		}
+	}
+	if tag != "BEGIN" {
+		t.Errorf("CommandComplete tag = %q, want the owner's BEGIN", tag)
+	}
+}
+
+// A Describe of a control statement answers ParameterDescription + NoData: no
+// parameters, no rows. Both are one frame's answer, so the drain must not stop
+// at the first.
+func TestExtDrain_DescribeOfOwnedControlAnswersNoParamsAndNoRows(t *testing.T) {
+	o := newExtObjects()
+	o.queueSynth(WireMessage{Kind: "ParameterDescription"}, WireMessage{Kind: "NoData"})
+
+	var got []string
+	if _, err := drainExtendedCounting(context.Background(), &hostileConn{}, o,
+		func(m WireMessage) error { got = append(got, m.Kind); return nil }, nil); err != nil {
+		t.Fatalf("owned control touched the connection: %v", err)
+	}
+	if len(got) != 2 || got[0] != "ParameterDescription" || got[1] != "NoData" {
+		t.Fatalf("forwarded %v, want [ParameterDescription NoData]", got)
 	}
 }

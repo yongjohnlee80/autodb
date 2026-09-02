@@ -92,14 +92,9 @@ func (e *Engine) wireExtEntry(ctx context.Context, id SessionID, userID int64) (
 // refused loudly, never approximated").
 var ErrExtendedUnsupportedTarget = errors.New("exec: the extended query protocol requires a PostgreSQL target")
 
-// ErrExtendedControl is a transaction-control verb arriving through Parse.
-//
-// Control is a STATE TRANSITION owned by the session's own machine (ADR-0074
-// §3), and the simple path routes it to wireControl before the execution
-// pipeline is entered at all. Relaying a BEGIN/COMMIT as an extended statement
-// would move the target's transaction underneath that machine without telling
-// it, so the front door would believe one thing and the server another.
-var ErrExtendedControl = errors.New("exec: transaction control is not available through the extended protocol")
+// isOwnedControl reports whether a prepared statement is transaction control the
+// session machine owns rather than SQL the target runs.
+func isOwnedControl(st *extStatement) bool { return st.stmt.Class == ClassControl }
 
 // WireParse gates one statement and records it under name.
 //
@@ -131,8 +126,25 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	if cerr != nil {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, cerr)
 	}
+	// OWNED TRANSACTION CONTROL takes the session machine's route, not the wire
+	// (ADR-0075 Amendment 6 ruling, 2026-09-03). A relayed BEGIN would be an
+	// ownerless transaction — no txID, no commit_started row, no limits, no
+	// targetXID for the reconciler — which is what ADR-0018 r2 MF5 forbade, and
+	// the matrix Query and Parse rows say control is mapped through ExecSession
+	// transitions and never passed through.
+	//
+	// It is stored like any other statement and gated where the simple path gates
+	// it: wireControl, at Execute. That is deliberate parity — executeSessionUnit
+	// routes control BEFORE authorizeUnit/admit/guardWhere too, because the
+	// control floor is a different floor.
 	if stmt.Class == ClassControl {
-		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrExtendedControl)
+		if serr := s.ext.putStatement(&extStatement{
+			name: name, sql: sqlText, stmt: stmt, paramOIDs: paramOIDs,
+		}); serr != nil {
+			return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, serr)
+		}
+		s.ext.queueSynth(WireMessage{Kind: "ParseComplete"})
+		return nil
 	}
 	if aerr := e.authorizeUnit(stmt, pol); aerr != nil {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, aerr)
@@ -156,7 +168,7 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 		s.ext.dropStatement(name)
 		return serr
 	}
-	s.ext.pending++
+	s.ext.queueWire()
 	return nil
 }
 
@@ -175,17 +187,22 @@ func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 	}
 	defer release()
 
-	if _, serr := s.ext.statement(stmtName); serr != nil {
+	st, serr := s.ext.statement(stmtName)
+	if serr != nil {
 		return serr
 	}
 	if perr := s.ext.putPortal(&extPortal{name: portalName, stmtName: stmtName}); perr != nil {
 		return perr
 	}
+	if isOwnedControl(st) {
+		s.ext.queueSynth(WireMessage{Kind: "BindComplete"})
+		return nil
+	}
 	if serr := pc.Send(ctx, golibpg.BindOp(portalName, stmtName, paramValues, paramFormats, resultFormats)); serr != nil {
 		s.ext.dropPortal(portalName)
 		return serr
 	}
-	s.ext.pending++
+	s.ext.queueWire()
 	return nil
 }
 
@@ -198,13 +215,19 @@ func (e *Engine) WireDescribeStatement(ctx context.Context, id SessionID, userID
 		return err
 	}
 	defer release()
-	if _, serr := s.ext.statement(name); serr != nil {
+	st, serr := s.ext.statement(name)
+	if serr != nil {
 		return serr
+	}
+	if isOwnedControl(st) {
+		// A control statement takes no parameters and returns no rows.
+		s.ext.queueSynth(WireMessage{Kind: "ParameterDescription"}, WireMessage{Kind: "NoData"})
+		return nil
 	}
 	if serr := pc.Send(ctx, golibpg.DescribeStatementOp(name)); serr != nil {
 		return serr
 	}
-	s.ext.pending++
+	s.ext.queueWire()
 	return nil
 }
 
@@ -215,13 +238,18 @@ func (e *Engine) WireDescribePortal(ctx context.Context, id SessionID, userID in
 		return err
 	}
 	defer release()
-	if _, perr := s.ext.portal(name); perr != nil {
+	prt, perr := s.ext.portal(name)
+	if perr != nil {
 		return perr
+	}
+	if st, err := s.ext.statement(prt.stmtName); err == nil && isOwnedControl(st) {
+		s.ext.queueSynth(WireMessage{Kind: "NoData"})
+		return nil
 	}
 	if serr := pc.Send(ctx, golibpg.DescribePortalOp(name)); serr != nil {
 		return serr
 	}
-	s.ext.pending++
+	s.ext.queueWire()
 	return nil
 }
 
@@ -235,11 +263,16 @@ func (e *Engine) WireCloseStatement(ctx context.Context, id SessionID, userID in
 	defer release()
 	// Close is not an error on a name that does not exist — PostgreSQL's own
 	// Close succeeds on a missing object — so the store's answer is not checked.
+	if st, err := s.ext.statement(name); err == nil && isOwnedControl(st) {
+		s.ext.dropStatement(name)
+		s.ext.queueSynth(WireMessage{Kind: "CloseComplete"})
+		return nil
+	}
 	s.ext.dropStatement(name)
 	if serr := pc.Send(ctx, golibpg.CloseStatementOp(name)); serr != nil {
 		return serr
 	}
-	s.ext.pending++
+	s.ext.queueWire()
 	return nil
 }
 
@@ -250,11 +283,18 @@ func (e *Engine) WireClosePortal(ctx context.Context, id SessionID, userID int64
 		return err
 	}
 	defer release()
+	if prt, err := s.ext.portal(name); err == nil {
+		if st, serr := s.ext.statement(prt.stmtName); serr == nil && isOwnedControl(st) {
+			s.ext.dropPortal(name)
+			s.ext.queueSynth(WireMessage{Kind: "CloseComplete"})
+			return nil
+		}
+	}
 	s.ext.dropPortal(name)
 	if serr := pc.Send(ctx, golibpg.ClosePortalOp(name)); serr != nil {
 		return serr
 	}
-	s.ext.pending++
+	s.ext.queueWire()
 	return nil
 }
 
@@ -298,7 +338,7 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	// Sync consumes through the terminal ReadyForQuery whatever happened, so the
 	// segment's outstanding count is void either way: on success the server
 	// answered or discarded everything, and on failure the wire is unusable.
-	s.ext.pending = 0
+	s.ext.segment = nil
 	if serr != nil {
 		return 0, serr
 	}
@@ -347,6 +387,26 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	if polErr != nil {
 		return polErr
 	}
+
+	// OWNED CONTROL resolves to the session's machine and is answered with the
+	// protocol's fixed reply for a control statement. wireControl is the SAME
+	// function the simple path calls — its own floor, its own audit, its own
+	// transition — so this is the extended twin of an emission that already
+	// exists, not a second control path.
+	if isOwnedControl(st) {
+		res, cerr := e.wireControl(ctx, s, connRow, st.stmt, pol, st.sql, ip)
+		if cerr != nil {
+			return cerr
+		}
+		// Queued, not emitted directly: the client pipelined Parse and Bind
+		// before this Execute and the front door owes their answers first. The
+		// drain then walks the whole segment in order — and since a control
+		// segment has no wire steps, it never touches the connection.
+		s.ext.queueSynth(WireMessage{Kind: "CommandComplete", Tag: controlCommandTag(res)})
+		_, derr := drainExtendedCounting(ctx, pc, s.ext, emit, p)
+		return derr
+	}
+
 	// Re-authorized against the IMMUTABLE classification. Same function, same
 	// rule, a new verdict — not a second authorization path.
 	if aerr := e.authorizeUnit(st.stmt, pol); aerr != nil {
@@ -379,7 +439,7 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	case sendErr != nil:
 		runErr = sendErr
 	default:
-		s.ext.pending++
+		s.ext.queueWire()
 		// ONE Flush covers everything still queued — a client pipelines Parse
 		// and Bind without flushing and this Execute is what releases them — so
 		// the drain reads the answers to all of them, not just this frame's.
@@ -404,51 +464,77 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	return nil
 }
 
-// drainExtended streams the responses for every queued frame to emit.
+// drainExtended answers every queued frame, in order, to emit.
 func drainExtended(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, emit func(WireMessage) error) error {
 	_, err := drainExtendedCounting(ctx, pc, o, emit, nil)
 	return err
 }
 
-// drainExtendedCounting streams the outstanding responses, counting rows and
-// recording a portal suspension.
+// drainExtendedCounting walks the segment in order, answering each queued frame
+// either from the front door or from the connection, and counts the rows.
 //
-// It reads until every queued frame has been answered — see extObjects.pending
-// for why that is a COUNT and not a pattern. A server ErrorResponse zeroes the
-// count outright: after one, the server discards every frame but Sync and
-// Terminate, so nothing still queued will ever be answered and a reader waiting
-// for those answers would block until the context died.
-//
-// The ErrorResponse itself is forwarded like any other frame. It is protocol
-// DATA, not a Go error: turning it into one here would make the front door
-// decide what the client should have been told.
+// A server ErrorResponse ABANDONS the rest of the segment. After one, PostgreSQL
+// discards every frame but Sync and Terminate, so neither the answers still
+// outstanding on the wire nor the ones this end owes will reach the client — and
+// a drain that kept waiting for the wire's share would block until the context
+// died. The error itself is forwarded like any other frame: it is protocol DATA,
+// and turning it into a Go error here would make the front door decide what the
+// client should have been told.
 func drainExtendedCounting(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
 	emit func(WireMessage) error, p *extPortal) (int64, error) {
 
+	steps := o.segment
+	o.segment = nil
+
 	var rows int64
-	for o.pending > 0 {
-		m, err := pc.Receive(ctx)
+	for _, step := range steps {
+		if len(step.synth) > 0 {
+			for _, m := range step.synth {
+				if eerr := emit(m); eerr != nil {
+					return rows, &emitFailure{err: eerr}
+				}
+			}
+			continue
+		}
+		aborted, err := answerOneFrame(ctx, pc, emit, p, &rows)
 		if err != nil {
 			return rows, err
 		}
+		if aborted {
+			return rows, nil
+		}
+	}
+	return rows, nil
+}
+
+// answerOneFrame reads messages until the frame that asked for them is answered.
+// It reports whether the segment was abandoned by a server error.
+func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, emit func(WireMessage) error,
+	p *extPortal, rows *int64) (aborted bool, err error) {
+
+	for {
+		m, err := pc.Receive(ctx)
+		if err != nil {
+			return false, err
+		}
 		switch m.Kind {
 		case "DataRow":
-			rows++
+			*rows++
 		case "PortalSuspended":
 			if p != nil {
 				p.suspended = true
 			}
 		}
-		if m.Kind == "ErrorResponse" {
-			o.pending = 0
-		} else if frameAnswered(m.Kind) {
-			o.pending--
-		}
 		if eerr := emit(extToWire(m)); eerr != nil {
-			return rows, &emitFailure{err: eerr}
+			return false, &emitFailure{err: eerr}
+		}
+		if m.Kind == "ErrorResponse" {
+			return true, nil
+		}
+		if frameAnswered(m.Kind) {
+			return false, nil
 		}
 	}
-	return rows, nil
 }
 
 // frameAnswered reports whether a backend message COMPLETES the frame that asked
@@ -456,9 +542,10 @@ func drainExtendedCounting(ctx context.Context, pc golibpg.PinnedConn, o *extObj
 //
 // ParameterDescription is deliberately absent: a Describe-statement answers with
 // ParameterDescription AND THEN a RowDescription or NoData, so counting the
-// first would end the segment a message early. RowDescription belongs to
-// Describe alone — in the extended protocol Execute does not re-send it, which
-// is why it can be counted here without stealing Execute's completion.
+// first would end the frame a message early and strip the row description off
+// the front of the result. RowDescription belongs to Describe alone — in the
+// extended protocol Execute does not re-send it, which is why it can be counted
+// here without stealing Execute's completion.
 func frameAnswered(kind string) bool {
 	switch kind {
 	case "ParseComplete", "BindComplete", "CloseComplete",

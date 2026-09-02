@@ -89,18 +89,35 @@ type extObjects struct {
 	statements map[string]*extStatement
 	portals    map[string]*extPortal
 
-	// pending is the number of queued frames whose response has not been read.
+	// segment is the ORDER in which this segment's queued frames will be
+	// answered, one step per frame.
 	//
-	// It exists because a Flush does NOT delimit one frame's answer: the server
-	// processes queued frames IN ORDER and a single Flush makes it emit the
-	// responses for ALL of them. A client pipelines Parse, Bind and Execute and
-	// flushes once, so the reply stream is ParseComplete, BindComplete, then the
-	// rows — and a reader that stopped at the first "terminal-looking" message
-	// would stop at ParseComplete and abandon the result.
-	//
-	// So termination is COUNTED, never pattern-matched: every Send adds one,
-	// every frame-completing message takes one, and the drain ends at zero.
-	pending int
+	// Two things force an ordered list rather than a counter. First, a Flush does
+	// not delimit one frame's answer: the server processes queued frames IN ORDER
+	// and one Flush makes it emit the responses for ALL of them, so a client that
+	// pipelines Parse, Bind and Execute gets three answers from one Flush and a
+	// reader stopping at the first would abandon the result. Second, owned
+	// transaction control never reaches the wire at all (ADR-0075 Amendment 6
+	// ruling: control routes to the session's machine and is answered with the
+	// protocol's fixed frames), so some steps are answered locally and some from
+	// the connection — and the client must receive them in the order it asked.
+	segment []segStep
+}
+
+// segStep is one queued frame's place in the reply order. A step with synth
+// frames is answered by the front door; an empty one is answered by the server.
+type segStep struct {
+	synth []WireMessage
+}
+
+// queueWire records a frame that went to the connection and whose answer must be
+// read back from it.
+func (o *extObjects) queueWire() { o.segment = append(o.segment, segStep{}) }
+
+// queueSynth records a frame the front door answers itself, with the fixed
+// shapes the protocol defines for it.
+func (o *extObjects) queueSynth(msgs ...WireMessage) {
+	o.segment = append(o.segment, segStep{synth: msgs})
 }
 
 func newExtObjects() *extObjects {
