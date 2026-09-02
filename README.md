@@ -306,20 +306,23 @@ autodb --ui
 
 That is the whole setup. The first run walks you through creating the root
 user and the master passphrase; there is no config file to write. The defaults
-are loopback-only RPC on `127.0.0.1:7419` and a SQLite meta store under
-`$XDG_DATA_HOME/autodb/`.
+are a per-user unix socket for RPC (`$XDG_RUNTIME_DIR/autodb.sock`, mode 0600,
+so only your own OS user can open it) and a SQLite meta store under
+`$XDG_DATA_HOME/autodb/`. Nothing listens on a TCP port until you configure one.
 
 The other entry points:
 
 ```sh
-autodb --serve                # msgpack-RPC server on 127.0.0.1:7419
+autodb --serve                # msgpack-RPC server on the unix socket (or [server] port, if set)
 autodb --web-ui --port=7010   # the same TUI in a browser (never spawns a daemon)
+autodb --print-endpoint       # where this config listens: <network>\t<address>
 autodb --version
 ```
 
-`--serve` binds loopback by default, drains gracefully on SIGINT/SIGTERM, and
-implements a single-instance guard: a port held by a compatible autodb reports
-"already running" and exits 0, while a foreign occupant is a loud error. The
+`--serve` binds the unix socket by default — or `127.0.0.1:<port>` when
+`[server] port` is set — drains gracefully on SIGINT/SIGTERM, and implements a
+single-instance guard: an endpoint held by a compatible autodb reports "already
+running" and exits 0, while a foreign occupant is a loud error. The
 protocol handshake, method surface and error codes are documented in
 [rpc/README.md](rpc/README.md).
 
@@ -549,6 +552,29 @@ cp config.example.toml ~/.config/autodb/config.toml
 Unknown keys are **rejected rather than ignored**, and values are validated at
 load — a bad port, bind, CIDR, or a PostgreSQL meta store without a DSN fails
 before the server listens, naming the offending key.
+
+### Who can reach the daemon
+
+With no `[server] port` configured, the daemon listens on a unix socket whose
+file is mode 0600 and owned by the OS user that started it. **The socket file
+is the access control:** no other machine can reach it, and no other OS account
+on the same machine can open it — not even to reach the login prompt. On a
+laptop that is exactly right. On a shared host, where several people hold
+their own SSH accounts and one daemon serves them all, you have two choices:
+
+- **Give the daemon a loopback port.** Set `[server] port` (with the default
+  `bind = "127.0.0.1"`). Every OS account on that host can then run `autodb --ui`
+  against it, and each person is identified by their autodb login, not by their
+  OS user. The bind stays loopback; exposing the port beyond the host is a
+  separate, deliberate step (see `config.example.toml`).
+- **Use the browser UI over an SSH port-forward.** `--web-ui` binds `127.0.0.1`
+  on the host; a colleague tunnels the port with their own SSH key and logs in
+  from their browser, with no change to the daemon's socket at all.
+
+Either way, onboarding is: an admin creates the account, the person logs in
+with name and passphrase, and from the token manager they mint their own
+Personal Access Token and register the IP addresses it may be used from.
+`autodb --print-endpoint` shows where a given config actually listens.
 
 The meta store is autodb's own database — users, encrypted connection secrets,
 grants, workspaces, audit log, script history — not one of the databases you
