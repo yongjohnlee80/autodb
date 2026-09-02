@@ -544,10 +544,29 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 		return false
 	}
 
-	status, serr := l.queries.WireTxStatus(sess.SessionID, sess.UserID)
-	if serr != nil || !validTxStatus(status) {
-		*closeReason = "session-lost"
-		return false
+	// ONE SNAPSHOT FOR BOTH THE STORY AND THE READINESS BYTE (r0 MF1).
+	//
+	// The engine's report is taken WHILE it holds the session's claim; a
+	// WireTxStatus read afterwards is a second, later snapshot, and the claim
+	// has been released in between. Deriving the effects clause from the first
+	// and the readiness byte from the second is how a client is told its effects
+	// are PENDING and then handed readiness `I` in the same cycle — the two
+	// halves of one answer disagreeing, which is the defect this whole path
+	// exists to prevent (r5 MF16) reappearing between the arm and the byte.
+	//
+	// So when the engine reported, its TxStatus is authoritative for BOTH. The
+	// separate read remains only for the paths that have no report — the
+	// extended path today — where there is one snapshot anyway.
+	status := byte(0)
+	if stopped != nil && validTxStatus(stopped.TxStatus) {
+		status = stopped.TxStatus
+	} else {
+		var serr error
+		status, serr = l.queries.WireTxStatus(sess.SessionID, sess.UserID)
+		if serr != nil || !validTxStatus(status) {
+			*closeReason = "session-lost"
+			return false
+		}
 	}
 	lead, effects, outcome := recordedEffects(stopped, status, targetFailed)
 

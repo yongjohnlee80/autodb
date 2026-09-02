@@ -1532,24 +1532,25 @@ func TestLoop_EveryEmitStoppedArmHasItsOwnStory(t *testing.T) {
 	cap := int64(64) // small enough that the first frame trips it
 
 	for _, arm := range []struct {
-		name    string
-		stop    *exec.EmitStopped
-		wantIn  string // must appear in what the client is told
-		wantOut string // the audit's effects= word
-		forbid  string // must NOT appear — the story this arm is confused with
+		name      string
+		stop      *exec.EmitStopped
+		wantIn    string // must appear in what the client is told
+		wantOut   string // the audit's effects= word
+		forbid    string // must NOT appear — the story this arm is confused with
+		wantReady byte   // the readiness byte that must follow, or 0 to not check
 	}{
 		{"no statement", &exec.EmitStopped{Executed: false},
-			"nothing ran", "no_statement", "effects are committed"},
+			"nothing ran", "no_statement", "effects are committed", txStatusIdle},
 		{"failed at the target", &exec.EmitStopped{Executed: true, TargetErr: &pgconn.PgError{Code: "22012"}},
-			"failed at the target", "failed", "effects are committed"},
+			"failed at the target", "failed", "effects are committed", txStatusIdle},
 		{"pending inside a transaction", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusInTx},
-			"PENDING", "pending_commit", "effects are committed"},
+			"PENDING", "pending_commit", "effects are committed", txStatusInTx},
 		{"aborted transaction", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusAborted},
-			"aborted", "aborted", "effects are committed"},
+			"aborted", "aborted", "effects are committed", txStatusAborted},
 		{"completed", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusIdle, Outcome: exec.StatusOK},
-			"effects are committed", "completed", "not known"},
+			"effects are committed", "completed", "not known", txStatusIdle},
 		{"unresolved", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusIdle},
-			"not known", "unresolvable", "effects are committed"},
+			"not known", "unresolvable", "effects are committed", txStatusIdle},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
 			t.Parallel()
@@ -1584,6 +1585,21 @@ func TestLoop_EveryEmitStoppedArmHasItsOwnStory(t *testing.T) {
 			if !hasEventDetail(events(), "fd.stmt_outcome", "effects="+arm.wantOut) {
 				t.Fatalf("audit must record effects=%s; events=%v", arm.wantOut, events())
 			}
+
+			// AND THE READINESS BYTE MUST AGREE WITH THE STORY (r0 MF1). Reading
+			// only the ErrorResponse let this table PASS while telling the client
+			// its effects were PENDING and then handing it readiness `I` in the
+			// same cycle — the fixture supplies stopped.TxStatus=T while the
+			// fake's WireTxStatus answers I, so the contradiction was constructed
+			// here and never looked at.
+			rfq, ok := firstOfType[*pgproto3.ReadyForQuery](drainToReady(t, fe))
+			if !ok {
+				t.Fatal("no readiness followed the report; a session-surviving stop owes one")
+			}
+			if arm.wantReady != 0 && rfq.TxStatus != arm.wantReady {
+				t.Fatalf("the client was told %q and then handed readiness %q — one answer, two "+
+					"halves, and they disagree about the transaction", said, rfq.TxStatus)
+			}
 		})
 	}
 }
@@ -1596,4 +1612,21 @@ func listenerForArms(t *testing.T, q QueryExecutor, cap *int64) (func() []Event,
 		AuthFailuresPerIP: unthrottled, testOutputCap: cap,
 	})
 	return events, addr
+}
+
+// drainToReady reads frames until the cycle's ReadyForQuery, so a cell can
+// assert the readiness byte rather than stopping at the error that precedes it.
+func drainToReady(t *testing.T, fe *pgproto3.Frontend) []pgproto3.BackendMessage {
+	t.Helper()
+	var out []pgproto3.BackendMessage
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("draining to readiness after %d frames: %v", len(out), err)
+		}
+		out = append(out, msg)
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			return out
+		}
+	}
 }
