@@ -120,13 +120,13 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// peek-beside-the-Backend design caused.
 		fr.waitHeader()
 		preHeader, hadPre := fr.peekHeader()
-		if hadPre && !l.admitSegmentFrame(conn, be, &seg, preHeader, peer, closeReason) {
+		if hadPre && !l.admitSegmentFrame(conn, be, fr, &seg, preHeader, peer, closeReason) {
 			return nil
 		}
 		msg, err := be.Receive()
 		if hdr, ok := fr.consumeHeader(); ok && !hadPre {
 			// Reached only when the connection ended before a header framed.
-			if !l.admitSegmentFrame(conn, be, &seg, hdr, peer, closeReason) {
+			if !l.admitSegmentFrame(conn, be, fr, &seg, hdr, peer, closeReason) {
 				return nil
 			}
 		}

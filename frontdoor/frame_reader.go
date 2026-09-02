@@ -61,6 +61,18 @@ type frameReader struct {
 	// became a bare connection reset.
 	deferred error
 
+	// skip counts bytes of a REFUSED frame still to be discarded rather than
+	// delivered. They are still SCANNED — the framing state machine must stay
+	// aligned or the next header lands at the wrong offset — but they never
+	// reach pgproto3, which is what stops a refused 64 MiB body being decoded.
+	skip int
+
+	// delivered counts bytes handed to the Backend, so a cell can MEASURE that a
+	// refused frame's body was never delivered. The property is a resource one —
+	// from the wire a refusal looks the same whether or not the body was decoded
+	// — so it has to be measured rather than asserted (lector r0).
+	delivered int
+
 	phase   framePhase
 	lenBuf  [4]byte
 	lenHave int
@@ -165,10 +177,18 @@ func (r *frameReader) consumeHeader() (frameHeader, bool) {
 func (r *frameReader) badByte() byte { return r.bad }
 
 func (r *frameReader) Read(p []byte) (int, error) {
+	// A refused frame is discarded before anything else is served, so its body
+	// never reaches the Backend.
+	if r.skip > 0 {
+		if err := r.drainSkip(); err != nil {
+			return 0, err
+		}
+	}
 	// Buffered bytes first: they were read to frame a header and are still owed.
 	if len(r.buf) > 0 {
 		n := copy(p, r.buf)
 		r.buf = r.buf[n:]
+		r.delivered += n
 		return n, nil
 	}
 	// The buffer is drained; a fault found while reading ahead surfaces now,
@@ -180,6 +200,7 @@ func (r *frameReader) Read(p []byte) (int, error) {
 	}
 	n, err := r.src.Read(p)
 	if n > 0 {
+		r.delivered += n
 		if serr := r.scan(p[:n]); serr != nil {
 			// The connection ends either way, so the bytes already read do not
 			// need to be handed on; reporting the framing fault immediately is
@@ -311,3 +332,74 @@ func (r *frameReader) waitHeader() bool {
 	}
 	return true
 }
+
+// skipFrame tells the reader to discard a refused frame ENTIRELY — its header
+// and its declared body — instead of handing it to pgproto3.
+//
+// This is the body-skip. Deciding header-first was necessary and not sufficient:
+// admission refused the frame and set the segment discarding, but the loop still
+// called Receive, so the crossing body was decoded before the discard branch
+// applied (lector r0). Moving the decision earlier changed WHEN we refuse, not
+// WHETHER we decode — and a surviving mutation told me so, which I first read as
+// a missing cell rather than a missing feature.
+func (r *frameReader) skipFrame(h frameHeader) {
+	// One type byte plus the declared length, which counts its own four bytes.
+	r.skip += 1 + h.declared
+	// POP THE REFUSED HEADER. Every Receive pops exactly one header (lector C r2
+	// MF3) — but the refused frame never reaches Receive, so the next Receive
+	// returns the frame AFTER it. Leaving this header queued makes the loop's
+	// consumeHeader attribute the refused frame's header to the Sync that
+	// followed, and the queue is off by one for the rest of the segment: the
+	// Sync's readiness never arrives.
+	if len(r.pending) > 0 {
+		r.pending = r.pending[1:]
+	}
+}
+
+// drainSkip consumes and discards the pending skip, SCANNING as it goes.
+//
+// Scanning matters: the framing state machine tracks where each body ends, so
+// bytes discarded without scanning would leave `need` un-decremented and the
+// next header would be read at the wrong offset — turning a refusal into a
+// desynchronised stream, which is worse than the decode it avoids.
+func (r *frameReader) drainSkip() error {
+	scratch := make([]byte, 4096)
+	for r.skip > 0 {
+		if len(r.buf) > 0 {
+			n := r.skip
+			if n > len(r.buf) {
+				n = len(r.buf)
+			}
+			r.buf = r.buf[n:]
+			r.skip -= n
+			continue
+		}
+		n, err := r.src.Read(scratch)
+		if n > 0 {
+			chunk := append([]byte(nil), scratch[:n]...)
+			if serr := r.scan(chunk); serr != nil {
+				r.skip = 0
+				return serr
+			}
+			take := r.skip
+			if take > len(chunk) {
+				take = len(chunk)
+			}
+			r.skip -= take
+			// Whatever followed the refused frame is the next frame's, and is
+			// owed to the Backend.
+			if rest := chunk[take:]; len(rest) > 0 {
+				r.buf = append(r.buf, rest...)
+			}
+		}
+		if err != nil {
+			r.skip = 0
+			return err
+		}
+	}
+	return nil
+}
+
+// deliveredBytes reports how much has reached the Backend, for cells measuring
+// that a refused frame's body did not.
+func (r *frameReader) deliveredBytes() int { return r.delivered }

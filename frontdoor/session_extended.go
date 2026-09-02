@@ -260,7 +260,7 @@ func (l *Listener) segmentByteCap() int64 {
 // not a stream. Closing it entirely means having the reader skip a refused
 // frame's body without handing it to the Backend, which is a change to the
 // component that fixed the pipelining defect and is not folded in here.
-func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, seg *segmentLane,
+func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, fr *frameReader, seg *segmentLane,
 	h frameHeader, peer string, closeReason *string) bool {
 
 	extended, isSync := extendedTypeByte(h.typ)
@@ -286,6 +286,12 @@ func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, seg *s
 		*closeReason = "write-failed"
 		return false
 	}
+	// SKIP THE REFUSED FRAME'S BODY (lector r0). Setting discarding is not
+	// enough on its own: the loop still calls Receive, so without this the
+	// crossing body is decoded before the discard branch applies — which is a
+	// 64 MiB decode now that the cap is the documented one.
+	fr.skipFrame(h)
+
 	// Refuse, then discard through Sync (§7 :386).
 	seg.discarding = true
 	return true
