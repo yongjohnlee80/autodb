@@ -1111,3 +1111,54 @@ func TestLoop_NoticePayloadsCountTowardTheOutputWatermark(t *testing.T) {
 			"payload that is filling the buffer")
 	}
 }
+
+// The second frame of a pipelined pair must REACH THE DECISION TABLE, not sit
+// in pgproto3's buffer unseen.
+//
+// F1 has no extended-protocol vocabulary to pipeline, so this proves the same
+// property with frames it does have: a Query answered normally, and a Parse
+// behind it in the SAME flush that must still be refused on its own terms. If
+// the second frame were stranded the session would go quiet instead — which is
+// exactly what a real segment (Parse+Bind+Execute+Sync in one flush) did.
+func TestLoop_ASecondPipelinedFrameStillReachesItsDecision(t *testing.T) {
+	t.Parallel()
+	events, addr := loopListener(t, okQueries())
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Query{String: "SELECT 1"})
+	fe.Send(&pgproto3.Parse{Name: "s", Query: "SELECT 1"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The Query's own cycle first, ending in readiness.
+	sawReady := false
+	for !sawReady {
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("the first statement of a pipelined pair: %v", err)
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			sawReady = true
+		}
+	}
+
+	// Then the SECOND frame's decision, which only arrives if the loop ever saw it.
+	msg, err := fe.Receive()
+	if err != nil {
+		t.Fatalf("the second frame of the pipelined pair was never decided: %v — it was "+
+			"accepted by the client, never seen by the loop, and nobody was told", err)
+	}
+	e, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("frame = %T, want the extended-protocol refusal", msg)
+	}
+	if e.Detail != ruleExtendedNotImplemented {
+		t.Fatalf("DETAIL = %q, want %q", e.Detail, ruleExtendedNotImplemented)
+	}
+	waitFor(t, "the pipelined second frame to be audited", func() bool {
+		ev, ok := find(events(), "fd.refused")
+		return ok && ev.Reason == ruleExtendedNotImplemented
+	})
+}

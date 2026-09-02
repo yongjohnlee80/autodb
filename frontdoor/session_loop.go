@@ -1,7 +1,6 @@
 package frontdoor
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -33,8 +32,22 @@ import (
 // the type-byte guard possible: peeking it here consumes nothing, so pgproto3
 // still sees a complete stream. Handing the loop a different reader would
 // silently split the stream in two and lose whichever bytes the other one held.
-func (l *Listener) runSession(ctx context.Context, conn net.Conn, br *bufio.Reader,
+func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReader,
 	be *pgproto3.Backend, sess exec.WireSessionResult, peer string, closeReason *string) error {
+
+	// A MESSAGE HAS STARTED — reported from the byte path, because once pgproto3
+	// may have read ahead that is the only place the fact is observable. From
+	// here the peer is mid-frame, which §7 gives its own budget and its own
+	// identity: a peer that stops halfway through a message is not idle, and
+	// reporting a frame stall as an idle timeout tells an operator the client
+	// went quiet when it actually went slow.
+	//
+	// Installed ONCE, not per iteration. It fires per message, including for one
+	// pgproto3 buffered ahead — which is right: a frame already in memory cannot
+	// stall, and the deadline is cleared below before the engine is entered.
+	fr.setOnStart(func() {
+		_ = conn.SetDeadline(l.now().Add(l.dl.frameStall))
+	})
 
 	for {
 		// THE IDLE BUDGET IS RE-ARMED PER MESSAGE (matrix §8.4: "refreshed on
@@ -47,32 +60,9 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, br *bufio.Read
 			return nil
 		}
 
-		// The type byte, BEFORE pgproto3 decodes it. An undefined byte cannot be
-		// told from a transport failure once Receive has turned it into an
-		// unstructured error, and it must not be: one closes the connection with
-		// an accurate 08P01 and the other closes it with nothing to say.
-		head, err := br.Peek(1)
-		if err != nil {
-			// Nothing has started, so this is the IDLE budget's business.
-			return l.endOfIdleWait(conn, be, err, peer, closeReason)
-		}
-		if !validFrontendType(head[0]) {
-			d := unknownMessageType()
-			l.applyDispatch(conn, be, d, peer, closeReason)
-			return nil
-		}
-
-		// A MESSAGE HAS STARTED. From here the peer is mid-frame, which §7 gives
-		// its own budget and its own identity — a peer that stops halfway through
-		// a message is not idle, and reporting a frame stall as an idle timeout
-		// tells an operator the client went quiet when it actually went slow.
-		if err := conn.SetDeadline(l.now().Add(l.dl.frameStall)); err != nil {
-			*closeReason = "deadline"
-			return nil
-		}
 		msg, err := be.Receive()
 		if err != nil {
-			return l.endOfFrameRead(conn, be, err, peer, closeReason)
+			return l.endOfRead(conn, be, fr, err, peer, closeReason)
 		}
 
 		// The frame is in. Engine work is NOT between-messages time, and it is
@@ -149,6 +139,48 @@ func (l *Listener) endOfFrameRead(conn net.Conn, be *pgproto3.Backend, err error
 }
 
 // endOfIdleWait decides what a failed wait for the NEXT message means.
+// endOfRead answers one failed Receive.
+//
+// It replaces the split between an idle wait and a frame read, which the loop
+// used to make by knowing whether its peek had succeeded. With framing checked
+// on the byte path, the READER is what knows: it is mid-message or it is not,
+// and that is a fact about the stream rather than an inference from control
+// flow. The two framing faults it can report are answered here too, before the
+// timeout arms, because they are not timeouts.
+func (l *Listener) endOfRead(conn net.Conn, be *pgproto3.Backend, fr *frameReader,
+	err error, peer string, closeReason *string) error {
+
+	switch {
+	case errors.Is(err, errUnknownFrameType):
+		// The distinction the peek existed for, preserved: an undefined type
+		// byte is told apart from a transport failure, and gets the accurate
+		// 08P01 rather than a silent close. The byte itself goes to the audit,
+		// never to the wire (§1.2).
+		// The REASON stays the stable rule id — an audit trail is greppable only
+		// if its identities do not vary — and the offending byte rides in the
+		// detail, where a varying value belongs.
+		d := unknownMessageType()
+		d.auditDetail = fmt.Sprintf("undefined frontend message type 0x%02x", fr.badByte())
+		l.applyDispatch(conn, be, d, peer, closeReason)
+		return nil
+
+	case errors.Is(err, errBadFrameLength):
+		l.onEvent(Event{Kind: "fd.refused", Reason: ruleProtocolViolation, Peer: peer,
+			Detail: "a frontend message declared a length shorter than its own length field"})
+		be.Send(gateError("FATAL", sqlStateProtocolViolation,
+			"invalid message length", ruleProtocolViolation,
+			"the length field counts itself; a value under four describes no message"))
+		_ = l.flushBounded(conn, be)
+		*closeReason = "protocol-violation"
+		return nil
+	}
+
+	if fr.midMessage() {
+		return l.endOfFrameRead(conn, be, err, peer, closeReason)
+	}
+	return l.endOfIdleWait(conn, be, err, peer, closeReason)
+}
+
 func (l *Listener) endOfIdleWait(conn net.Conn, be *pgproto3.Backend, err error, peer string, closeReason *string) error {
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
@@ -623,7 +655,7 @@ func (l *Listener) frameGateError(conn net.Conn, be *pgproto3.Backend, sess exec
 // that a decision cannot end a session the caller still believes is running.
 func (l *Listener) applyDispatch(conn net.Conn, be *pgproto3.Backend, d dispatch, peer string, closeReason *string) {
 	if d.auditKind != "" {
-		l.onEvent(Event{Kind: d.auditKind, Reason: d.auditReason, Peer: peer})
+		l.onEvent(Event{Kind: d.auditKind, Reason: d.auditReason, Peer: peer, Detail: d.auditDetail})
 	}
 	if d.emit != nil {
 		be.Send(d.emit)

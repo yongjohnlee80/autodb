@@ -1219,3 +1219,56 @@ func waitLaneIdle(t *testing.T, l *Listener) {
 	t.Fatalf("the general lane never went idle (in use: %d); a statement leaked a "+
 		"reservation, which is a budget bug and not a slow test", l.general.inUse())
 }
+
+// PIPELINING (white-vision, found while wiring F2; defect on main from #52).
+//
+// Two Query messages in ONE flush. Every other cell in this file sends one
+// message and waits for its reply, which is what psql does — and it is why the
+// loop looked correct. lib/pq pipelines, JDBC batches pipeline, and every
+// extended-protocol client pipelines by construction.
+func TestPGLoop_TwoPipelinedQueriesAreBothExecuted(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, _, listenAddr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
+	fe := pgClient(t, listenAddr, secret, database)
+
+	// BOTH before either reply is read. The second message's bytes arrive while
+	// the loop is still deciding about the first.
+	fe.Send(&pgproto3.Query{String: "SELECT 1"})
+	fe.Send(&pgproto3.Query{String: "SELECT 2"})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("flushing the pipelined pair: %v", err)
+	}
+
+	// A stranded second statement shows up as a session that never answers, so
+	// the read must be bounded or this cell hangs instead of failing.
+	type result struct {
+		ready int
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ready := 0
+		for ready < 2 {
+			msg, err := fe.Receive()
+			if err != nil {
+				done <- result{ready, err}
+				return
+			}
+			if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+				ready++
+			}
+		}
+		done <- result{ready, nil}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err != nil {
+			t.Fatalf("after %d of 2 readiness bytes: %v", r.ready, r.err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the session went silent after the FIRST statement: the second was " +
+			"accepted by the client, never seen by the engine, and nobody was told — " +
+			"it hangs until the idle deadline rather than closing")
+	}
+}

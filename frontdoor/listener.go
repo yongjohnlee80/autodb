@@ -1,7 +1,6 @@
 package frontdoor
 
 import (
-	"bufio"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -598,19 +597,19 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		for _, n := range out.Notes {
 			l.onEvent(Event{Kind: paramNoteEventKind(n), Reason: n.Kind, Peer: peer, Detail: n.Detail})
 		}
-		// The Backend decodes from a BUFFERED reader so the session loop can
-		// peek the next message's type byte without consuming it (matrix row
-		// 4:Unknown-message-type-byte): pgproto3 reports an undefined type as
-		// an unstructured error that cannot be told from a transport failure,
-		// and the two demand different answers.
+		// The Backend decodes through a reader that VALIDATES FRAMING AS BYTES
+		// PASS (frame_reader.go). It replaced a *bufio.Reader the loop peeked
+		// beside: pgproto3 reads ahead into its own chunk reader, so a peek
+		// could be outrun by a pipelining client and the message it was meant
+		// to guard had already been consumed.
 		//
-		// The buffer is not charged. §8.4's third term — "the bufio.Reader, the
+		// Neither buffer is charged. §8.4's third term — "the bufio.Reader, the
 		// TLS record buffers, the pgproto3 chunk reader" — is bounded by
 		// MaxFrontendConns rather than charged per connection, because unlike
 		// segment input it cannot grow with what a peer sends (admission.go's
 		// ControlLanePerConn note).
-		br := bufio.NewReader(stream)
-		be := pgproto3.NewBackend(br, stream)
+		fr := newFrameReader(stream)
+		be := pgproto3.NewBackend(fr, stream)
 		be.SetMaxBodyLen(PreAuthMaxBodyLen)
 		var aerr error
 		outcome, aerr = l.runAuth(ctx, stream, be, out.Params, peer)
@@ -628,7 +627,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 			return
 		}
 		if outcome.Denied == "" {
-			l.serveSession(ctx, stream, br, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
+			l.serveSession(ctx, stream, fr, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
 			return
 		}
 	} else {
@@ -650,7 +649,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 }
 
 // serveSession completes row 2.9 and runs the authenticated connection.
-func (l *Listener) serveSession(ctx context.Context, stream net.Conn, br *bufio.Reader, be *pgproto3.Backend,
+func (l *Listener) serveSession(ctx context.Context, stream net.Conn, fr *frameReader, be *pgproto3.Backend,
 	tkt *ticket, sess exec.WireSessionResult, params map[string]string, notes []paramNote, peer string, closeReason *string) {
 
 	// The pre-auth slot goes back the moment this connection stops being
@@ -723,7 +722,7 @@ func (l *Listener) serveSession(ctx context.Context, stream net.Conn, br *bufio.
 	case l.onSession != nil:
 		err = l.onSession(ctx, stream, be, sess)
 	case l.queries != nil:
-		err = l.runSession(ctx, stream, br, be, sess, peer, &sessionReason)
+		err = l.runSession(ctx, stream, fr, be, sess, peer, &sessionReason)
 	default:
 		err = l.defaultSession(ctx, stream, be, sess)
 	}
