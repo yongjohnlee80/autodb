@@ -81,6 +81,26 @@ func checkStartupParams(params map[string]string) (refused string, ok bool) {
 // applicationNameMaxBytes is §3.1's cap on application_name. BYTES, not
 // runes: the value lands in audit rows and in a ParameterStatus frame, and
 // both are sized in bytes.
+//
+// WHAT application_name IS through this front door (§3.1, documented 2026-09-03):
+//
+//   - it is the CLIENT's label for itself, accepted from the StartupMessage,
+//     capped as below, recorded on the wire session and on every audit row the
+//     session produces, and echoed back to the client in a ParameterStatus so
+//     drivers that read their own name see it;
+//   - it is NOT forwarded to the target. autodb sets no application_name on
+//     the backend connections it opens (core/exec pins one per wire session;
+//     the pool DSN is validated, never decorated — see core/exec/dsn.go), so on
+//     the TARGET every autodb backend for a connection carries the same value:
+//     whatever the connection's DSN says, or nothing. Two clients that both
+//     call themselves "psql" are indistinguishable there, and so are two that
+//     call themselves nothing. Per-session attribution of a target backend is
+//     therefore autodb-side only — through the session id on the audit rows —
+//     until the pinning path stamps a structured, per-session value (a design
+//     decision Johno has not taken; see core/exec.pinWireSession);
+//   - a client cannot change it after startup: SET application_name is refused
+//     by the session-state gate (not on the benign allowlist), so the recorded
+//     label is the one the client connected with.
 const applicationNameMaxBytes = 256
 
 // paramNote records something §3.1 requires to be AUDITED about an ACCEPTED

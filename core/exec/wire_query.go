@@ -529,6 +529,20 @@ func (f *emitFailure) Unwrap() error { return f.err }
 
 // pinWireSession returns the session's pinned backend connection, pinning one
 // from the target pool on first use. Held under the session claim.
+//
+// What the pinned backend carries as application_name: NOTHING from autodb. The
+// pool is built from the connection's DSN unchanged (dsn.go validates, never
+// decorates) and this function issues no SET on the freshly pinned connection,
+// so on the target every autodb backend for a connection shows the DSN's
+// application_name, if the administrator put one there, or none. The client's
+// own startup application_name (frontdoor §3.1) is recorded on the wire session
+// and its audit rows and echoed back to the client, never forwarded here. A
+// DBA reading pg_stat_activity therefore cannot tell autodb sessions apart by
+// application_name today; the mapping backend → session exists only in autodb's
+// audit. Stamping a structured per-session value at pin time (PostgreSQL caps
+// application_name at 63 bytes, so a short session hash plus the client's label)
+// would close that gap; it changes what the target shows and is Johno's call,
+// not taken as of 2026-09-03.
 func (e *Engine) pinWireSession(ctx context.Context, s *session, connRow *meta.Connection) (golibpg.PinnedConn, error) {
 	if pc := s.pinnedConn(); pc != nil {
 		return pc, nil
