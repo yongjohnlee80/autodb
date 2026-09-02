@@ -443,13 +443,23 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 	status, err := l.queries.WireQuery(ctx, sess.SessionID, sess.UserID, sql, hostOf(peer),
 		acct.emit)
 
+	// The engine wraps the emitter's own error, so errors.Is on errStopForwarding
+	// keeps working while errors.As lifts the report out of it.
+	var stopped *exec.EmitStopped
+	if err != nil {
+		var st *exec.EmitStopped
+		if errors.As(err, &st) {
+			stopped = st
+		}
+	}
+
 	switch {
 	case acct.withheld != outputComplete:
 		// EVERY post-dispatch stop lands here, and there is nowhere else for one
 		// to land. The cap and the lane trip for different reasons at different
 		// sites; what is owed to the client and the audit is identical, so it is
 		// decided once, below, from what the engine records.
-		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, acct.targetFailed)
+		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, stopped, acct.targetFailed)
 
 	case acct.writeErr != nil:
 		// The peer is gone or will not read. Nothing to send it, and nothing
@@ -521,7 +531,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 // Once the rows exist, honesty is the only remedy left.
 func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, peer string, closeReason *string, why outputWithheld,
-	targetFailed bool) bool {
+	stopped *exec.EmitStopped, targetFailed bool) bool {
 
 	reason, known := withheldReasons[why]
 	if !known {
@@ -539,7 +549,7 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 		*closeReason = "session-lost"
 		return false
 	}
-	lead, effects, outcome := recordedEffects(status, targetFailed)
+	lead, effects, outcome := recordedEffects(stopped, status, targetFailed)
 
 	l.onEvent(Event{Kind: "fd.stmt_outcome", Reason: reason.rule, Peer: peer,
 		Detail: fmt.Sprintf("effects=%s; output withheld: %s", outcome, reason.stopped)})
@@ -563,43 +573,87 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 
 // recordedEffects says what became of a statement whose output was cut short.
 //
-// It answers from what is KNOWN, and refuses to answer from what merely looks
-// like an answer. `I` is the trap lector found in r5 (MF16): an idle session is
-// what a committed autocommit leaves behind AND what a failed, rolled-back one
-// leaves behind, so deriving "committed" from the status alone reported a commit
-// for a statement the target had thrown away — the same lie as MF9 and MF15,
-// reached from the other direction.
+// IT SWITCHES ON THE ENGINE'S ANSWER AND DOES NOT RE-DERIVE ONE. exec.EmitStopped
+// carries the arm; asking it twice — once in the engine, once from the fields
+// here — is how the two stories drift, and this path exists because the client's
+// story and the audit's disagreed once already (r5 MF16).
 //
-// Four arms, in order of what the front door can actually establish:
+// The arm ORDER is the engine's too, and it is load-bearing: lector's r1 on #60
+// found that placing the empty-query arm after the transaction arms would tell a
+// client its NON-EXISTENT statement's effects were "pending" inside a BEGIN.
+// Order is code there, not documentation, which is why this switch has no
+// ordering of its own to get wrong.
 //
-//   - The target's error was SEEN passing through the emitter. Certain: the
-//     statement failed, and in autocommit nothing was kept.
-//   - `T`: the transaction is still open. Certain, and unaffected by any of
-//     this — a COMMIT or ROLLBACK still decides the effects.
-//   - `E`: the transaction is aborted. Certain.
-//   - `I` with nothing observed: NOT KNOWN. The front door stopped reading
-//     before the target reported the outcome, and stopping early is the entire
-//     premise of this path — so "committed" is never a conclusion available
-//     here, however likely it is. Jarvis's interim rule (r5), and it stays true
-//     once EmitStopped carries the engine's own observation of the drained tail.
+// NOT EVERY PATH HAS AN ENGINE REPORT. exec.EmitStopped is produced by
+// WireQuery; the EXTENDED path (core/exec/wire_extended.go) does not wrap its
+// emitter failures yet, so a segment's stop arrives with no arm. Swapping the
+// emitter's own observation out for the engine's would therefore have made the
+// extended path REPORT LESS than it does today — "unresolved" where it can
+// currently say "failed" — which is a regression dressed as a refactor.
 //
-// The honest word is "unresolved", not a guess dressed as a fact.
-func recordedEffects(status byte, targetFailed bool) (lead, clause, outcome string) {
-	switch {
-	case targetFailed:
+// So both are kept, engine first: the engine's answer when there is one, the
+// emitter's observation when there is not. The observation is not a guess — the
+// emitter holds the target's message before deciding whether to forward it — it
+// is simply narrower, because a failure arriving after the stop is invisible to
+// it. When the extended path grows its own EmitStopped the second branch stops
+// being reached and can go.
+//
+// The fallback arm is deliberate rather than defensive: an unrecognised arm is
+// something the engine grew and the front door has not been taught, and saying
+// "not known" is the only honest answer to a vocabulary this function does not
+// speak — never a guess dressed as a fact.
+func recordedEffects(stopped *exec.EmitStopped, status byte, targetFailed bool) (lead, clause, outcome string) {
+	arm := armFromWhatIsKnown(stopped, status, targetFailed)
+	switch arm {
+	case exec.ArmNoStatement:
+		// The empty query. Nothing ran, so there are no effects to speak about
+		// at all — and saying anything about them would be inventing a statement
+		// for the client to worry about.
+		return "the query was empty, so nothing ran",
+			"there are no effects; the empty query's own reply was not delivered", string(arm)
+	case exec.ArmFailed:
 		return "the statement failed at the target",
-			"its effects were rolled back", "failed"
-	case status == txStatusInTx:
+			"its effects were rolled back", string(arm)
+	case exec.ArmPending:
 		return "the statement executed",
 			"the statement's effects are PENDING: the transaction is still open, so COMMIT or ROLLBACK still decides them",
-			"pending_commit"
-	case status == txStatusAborted:
+			string(arm)
+	case exec.ArmAborted:
 		return "the statement executed",
-			"the transaction is aborted, so the statement's effects will be rolled back", "aborted"
+			"the transaction is aborted, so the statement's effects will be rolled back", string(arm)
+	case exec.ArmCompleted:
+		// The engine watched it finish. This is the one arm the loop could never
+		// reach on its own: stopping early is this path's premise, so "committed"
+		// was not a conclusion available to it until the engine could report the
+		// drained tail (r5 MF16, jarvis's seam).
+		return "the statement executed",
+			"the statement's effects are committed", string(arm)
 	default:
 		return "the statement ran and its outcome is not known to the front door",
 			"the front door stopped reading before the target reported the outcome, so whether the effects were kept is unresolved — read the table to find out",
-			"unresolvable"
+			string(exec.ArmUnresolved)
+	}
+}
+
+// armFromWhatIsKnown prefers the ENGINE's answer and falls back to what the
+// emitter saw, so a path without an engine report still says as much as it can
+// establish rather than defaulting to "unknown".
+func armFromWhatIsKnown(stopped *exec.EmitStopped, status byte, targetFailed bool) exec.EmitArm {
+	if stopped != nil {
+		return stopped.Arm()
+	}
+	switch {
+	case targetFailed:
+		// Seen passing through the emitter: certain, just narrower than the
+		// engine's view.
+		return exec.ArmFailed
+	case status == txStatusInTx:
+		return exec.ArmPending
+	case status == txStatusAborted:
+		return exec.ArmAborted
+	default:
+		// Idle with nothing observed is NOT "committed" — that was r5 MF16.
+		return exec.ArmUnresolved
 	}
 }
 
