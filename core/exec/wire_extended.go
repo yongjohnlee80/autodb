@@ -185,6 +185,16 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 		s.ext.queueSynth(WireMessage{Kind: "ParseComplete"})
 		return nil
 	}
+	// AMENDMENT 6 RULE 2's reader stage, composed at the same point the simple
+	// path composes it: after Classify, before authorize/admit/guard. It is a
+	// STAGE, not a branch — the engine owns the analysis and both protocols call
+	// the one implementation, which is the whole reason it lives in the shared
+	// gate rather than here. Composing it means a reader is analysed on extended
+	// exactly as on simple; skipping it would enforce on one protocol and not the
+	// other, which is the shape rejection criterion 1 exists to catch.
+	if rerr := e.readerAnalysis(ctx, connRow, pol, stmt); rerr != nil {
+		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, rerr)
+	}
 	if aerr := e.authorizeUnit(stmt, pol); aerr != nil {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, aerr)
 	}

@@ -258,46 +258,106 @@ func TestExtPG_ASelectIsRelayedAndItsRowsComeBack(t *testing.T) {
 	}
 }
 
-// CRITERION 1 — the 25006 guarantee must hold THROUGH the extended path.
+// CRITERION 1 — the reader guarantees must hold THROUGH the extended path.
 //
-// A write smuggled inside a volatile function is classified as a READ, so it
-// passes every gate autodb has and reaches the target. What stops it is the
-// server: a reader's unit runs inside a hidden READ ONLY transaction, and
-// PostgreSQL answers 25006.
+// The raw-path proofs all run through the SIMPLE path, so they stay green
+// whether or not extended enforces anything. Inheritance by assumption is not
+// evidence: the same statements go through Parse/Bind/Execute here.
 //
-// This is the cell the task's rejection criterion 1 is written for. The five
-// raw-path proofs all run through the SIMPLE path, so they stay green whether or
-// not the extended path enforces anything — inheritance by assumption is not
-// evidence, and the only way to know is to send the same smuggled write through
-// Parse/Bind/Execute and look at what comes back.
-func TestExtPG_ReaderSmuggledWriteIsRefusedByTheTargetWith25006(t *testing.T) {
+// Post-Amendment-6 there are two distinct witnesses, and both are needed. The
+// STAGE refuses user-defined calls before anything reaches the wire; the WRAP is
+// the belt behind it, and only a catalog function that writes can reach far
+// enough to prove the belt is buckled.
+
+// The stage: a reader's user-defined function call is refused at Parse, in all
+// the spellings Classify records, and nothing is queued for the wire.
+func TestExtPG_ReaderUserFunctionCallRefusedAtParse(t *testing.T) {
 	f, connID, sid, userID, table, fn := readerWireSession(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	if err := f.eng.WireParse(ctx, sid, userID, "sm", fmt.Sprintf("SELECT %s()", fn), nil, testIP); err != nil {
-		t.Fatalf("the smuggled write must PASS the gate — it classifies as a read: %v", err)
+	for i, sql := range []string{
+		fmt.Sprintf("SELECT %s()", fn),
+		fmt.Sprintf("SELECT public.%s()", fn),
+		fmt.Sprintf("SELECT count(*) FROM %s WHERE %s() > 0", table, fn),
+		fmt.Sprintf(`SELECT "%s"()`, fn),
+	} {
+		name := fmt.Sprintf("u%d", i)
+		err := f.eng.WireParse(ctx, sid, userID, name, sql, nil, testIP)
+		if !errors.Is(err, ErrReaderAdvancedPattern) {
+			t.Fatalf("%q at Parse = %v, want ErrReaderAdvancedPattern — the rule-2 stage is not composed on this path", sql, err)
+		}
+		if _, serr := f.eng.sessions.lookup(sid, userID); serr != nil {
+			t.Fatal(serr)
+		}
 	}
-	if err := f.eng.WireBind(ctx, sid, userID, "sm", "sm", nil, nil, nil); err != nil {
+	// Nothing was queued, so nothing can be flushed at the target.
+	if rows := rowCount(t, f, connID, table); rows != "0" {
+		t.Fatalf("table has %s rows after refusals that never reached the wire", rows)
+	}
+}
+
+// Catalog functions are the language, not an escape list: a reader's ordinary
+// query full of them must still run through the extended protocol.
+//
+// This is the positive control for the cell above. Without it, a stage that
+// refused EVERY function call would pass that cell and break every reader.
+func TestExtPG_ReaderCatalogFunctionsStillRun(t *testing.T) {
+	f, _, sid, userID, table, _ := readerWireSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	sql := fmt.Sprintf("SELECT count(*), now() > '2000-01-01', pg_catalog.set_config('application_name', 'reader_probe', true) FROM %s", table)
+	if err := f.eng.WireParse(ctx, sid, userID, "cat", sql, nil, testIP); err != nil {
+		t.Fatalf("the stage refused the LANGUAGE: %v", err)
+	}
+	if err := f.eng.WireBind(ctx, sid, userID, "cat", "cat", nil, nil, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	var got []WireMessage
-	err := f.eng.WireExecutePortal(ctx, sid, userID, "sm", 0, testIP, func(m WireMessage) error {
-		got = append(got, m)
+	var rows int
+	if err := f.eng.WireExecutePortal(ctx, sid, userID, "cat", 0, testIP, func(m WireMessage) error {
+		if m.Kind == "DataRow" {
+			rows++
+		}
 		return nil
-	})
-	// SYNC ENDS THE SEGMENT, and it is not optional. Without it the implicit
-	// transaction the Execute opened stays open on the pinned connection, still
-	// holding its locks, and the fixture's own cleanup then blocks forever on
-	// them — the cell hangs instead of reporting. A real client always Syncs, and
-	// the Sync is also what COMMITS an unwrapped smuggled write, which is the
-	// outcome this cell has to be able to see.
+	}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("%d DataRows, want 1", rows)
+	}
 	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
 		t.Fatalf("Sync: %v", serr)
 	}
+}
 
-	// The refusal is the TARGET's and arrives as protocol data, exactly as it
-	// does on the raw path.
+// THE BELT (F3a item 1) through the extended path: a catalog function that
+// WRITES — nextval — passes the analysis because it is the language, reaches the
+// target, and PostgreSQL refuses it with 25006 inside the reader's hidden READ
+// ONLY transaction.
+//
+// This is the cell that caught the real hole: before the segment wrap existed,
+// the extended path relayed straight onto the wire and the write COMMITTED.
+func TestExtPG_ReaderCatalogWriteFailsAtTheTargetWith25006(t *testing.T) {
+	f, connID, sid, userID, _, _ := readerWireSession(t)
+	seq := adminSequence(t, f, connID, userID)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := f.eng.WireParse(ctx, sid, userID, "nv", fmt.Sprintf("SELECT nextval('%s')", seq), nil, testIP); err != nil {
+		t.Fatalf("nextval is a catalog function and must PASS the analysis: %v", err)
+	}
+	if err := f.eng.WireBind(ctx, sid, userID, "nv", "nv", nil, nil, nil); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	var got []WireMessage
+	_ = f.eng.WireExecutePortal(ctx, sid, userID, "nv", 0, testIP, func(m WireMessage) error {
+		got = append(got, m)
+		return nil
+	})
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+		t.Fatalf("Sync: %v", serr)
+	}
 	var code string
 	for _, m := range got {
 		if m.Kind == "ErrorResponse" && m.Err != nil {
@@ -305,19 +365,71 @@ func TestExtPG_ReaderSmuggledWriteIsRefusedByTheTargetWith25006(t *testing.T) {
 		}
 	}
 	if code != "25006" {
-		t.Errorf("frames %v (err %v): no 25006 read_only_sql_transaction — the reader's unit was NOT wrapped "+
-			"READ ONLY on the extended path, so the guarantee holds on simple and not here", kindsOfMsgs(got), err)
+		t.Fatalf("frames %v: want the TARGET's 25006 — the reader's unit was NOT wrapped READ ONLY on the "+
+			"extended path, so the belt holds on simple and not here", kindsOfMsgs(got))
 	}
-	if rows := rowCount(t, f, connID, table); rows != "0" {
-		t.Fatalf("the smuggled INSERT WROTE %s row(s) through the extended protocol; the 25006 guarantee "+
-			"does not hold on this path", rows)
+	if st, serr := f.eng.WireTxStatus(sid, userID); serr != nil || st != TxStatusIdle {
+		t.Errorf("status %q (%v), want I — the wrap is autodb's transaction, not the client's", st, serr)
 	}
 }
 
-// CRITERION 1, the gate arm: a reader's PLAIN write never reaches the wire.
+// CRITERION 1, the BEGIN READ WRITE arm the task names explicitly: a reader
+// asking for a writable transaction through the EXTENDED protocol is accepted
+// and OVERRIDDEN, and a catalog write inside it still fails with 25006.
 //
-// The classifier is the first gate and it must be the same gate on both
-// protocols. Refused at Parse, so no frame is ever queued for it.
+// A different branch from the cell above: inside a client transaction no hidden
+// wrap is opened, because the client's OWN transaction is the one forced read
+// only. If the force were missing, the write would commit.
+func TestExtPG_ReaderBeginReadWriteThroughExtendedIsForcedReadOnly(t *testing.T) {
+	f, connID, sid, userID, _, _ := readerWireSession(t)
+	seq := adminSequence(t, f, connID, userID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if _, berr := extRun(t, f, sid, userID, "b", "BEGIN READ WRITE"); berr != nil {
+		t.Fatalf("BEGIN READ WRITE for a reader through extended: %v — accepted and OVERRIDDEN, not refused", berr)
+	}
+	if len(auditDetail(t, f, "tx_readonly_forced")) == 0 {
+		t.Fatal("no tx_readonly_forced audit: the override must be on the record")
+	}
+	if st, serr := f.eng.WireTxStatus(sid, userID); serr != nil || st != TxStatusInTx {
+		t.Fatalf("status %q (%v), want T", st, serr)
+	}
+
+	if perr := f.eng.WireParse(ctx, sid, userID, "nv", fmt.Sprintf("SELECT nextval('%s')", seq), nil, testIP); perr != nil {
+		t.Fatalf("nextval must pass the analysis: %v", perr)
+	}
+	if berr := f.eng.WireBind(ctx, sid, userID, "nv", "nv", nil, nil, nil); berr != nil {
+		t.Fatalf("bind: %v", berr)
+	}
+	var got []WireMessage
+	_ = f.eng.WireExecutePortal(ctx, sid, userID, "nv", 0, testIP, func(m WireMessage) error {
+		got = append(got, m)
+		return nil
+	})
+	var code string
+	for _, m := range got {
+		if m.Kind == "ErrorResponse" && m.Err != nil {
+			code = m.Err.Code
+		}
+	}
+	if code != "25006" {
+		t.Errorf("frames %v: want 25006 inside the forced READ ONLY transaction", kindsOfMsgs(got))
+	}
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+		t.Fatalf("Sync: %v", serr)
+	}
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("ROLLBACK: %v", rb.err)
+	}
+	_ = connID
+}
+
+// CRITERION 1, the classifier arm: a reader's PLAIN write never reaches the wire.
+//
+// The classifier is the first gate and must be the same gate on both protocols.
+// The positive control matters as much as the refusal — without it, a Parse that
+// refused everything would pass.
 func TestExtPG_ReaderPlainWriteIsRefusedAtParse(t *testing.T) {
 	f, connID, sid, userID, table, _ := readerWireSession(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -327,9 +439,9 @@ func TestExtPG_ReaderPlainWriteIsRefusedAtParse(t *testing.T) {
 	if !errors.Is(err, auth.ErrDenied) {
 		t.Fatalf("reader Parse of a plain INSERT = %v, want auth.ErrDenied", err)
 	}
-	// Positive control: the same reader's SELECT parses, binds, executes and
-	// returns — so the refusal above is about the WRITE, not about the reader
-	// being unable to do anything.
+
+	// POSITIVE CONTROL: the same reader's SELECT parses, binds, executes and
+	// returns a row, so the refusal above is about the WRITE.
 	if perr := f.eng.WireParse(ctx, sid, userID, "r", "SELECT count(*) FROM "+table, nil, testIP); perr != nil {
 		t.Fatalf("positive control: the reader's SELECT was refused at Parse: %v", perr)
 	}
@@ -353,59 +465,5 @@ func TestExtPG_ReaderPlainWriteIsRefusedAtParse(t *testing.T) {
 	}
 	if rows := rowCount(t, f, connID, table); rows != "0" {
 		t.Fatalf("table has %s rows after a refused INSERT", rows)
-	}
-}
-
-// CRITERION 1, the BEGIN READ WRITE arm: a reader asking for a writable
-// transaction through the EXTENDED protocol is accepted and OVERRIDDEN, and a
-// write smuggled inside it still fails with the target's 25006.
-//
-// This is the path the task names explicitly. Note it exercises a different
-// branch from the cell above: inside a client transaction no hidden wrap is
-// opened, because the client's OWN transaction is the one that was forced read
-// only — so if the force were missing, the smuggled write would commit.
-func TestExtPG_ReaderBeginReadWriteThroughExtendedIsForcedReadOnly(t *testing.T) {
-	f, connID, sid, userID, table, fn := readerWireSession(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if _, berr := extRun(t, f, sid, userID, "b", "BEGIN READ WRITE"); berr != nil {
-		t.Fatalf("BEGIN READ WRITE for a reader through extended: %v — it is accepted and OVERRIDDEN, not refused", berr)
-	}
-	if len(auditDetail(t, f, "tx_readonly_forced")) == 0 {
-		t.Fatal("no tx_readonly_forced audit: the override must be on the record")
-	}
-	if st, serr := f.eng.WireTxStatus(sid, userID); serr != nil || st != TxStatusInTx {
-		t.Fatalf("status %q (%v), want T", st, serr)
-	}
-
-	if perr := f.eng.WireParse(ctx, sid, userID, "sm", fmt.Sprintf("SELECT %s()", fn), nil, testIP); perr != nil {
-		t.Fatalf("the smuggled write must pass the gate: %v", perr)
-	}
-	if berr := f.eng.WireBind(ctx, sid, userID, "sm", "sm", nil, nil, nil); berr != nil {
-		t.Fatalf("bind: %v", berr)
-	}
-	var got []WireMessage
-	_ = f.eng.WireExecutePortal(ctx, sid, userID, "sm", 0, testIP, func(m WireMessage) error {
-		got = append(got, m)
-		return nil
-	})
-	var code string
-	for _, m := range got {
-		if m.Kind == "ErrorResponse" && m.Err != nil {
-			code = m.Err.Code
-		}
-	}
-	if code != "25006" {
-		t.Errorf("frames %v: want the target's 25006 inside the forced READ ONLY transaction", kindsOfMsgs(got))
-	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
-		t.Fatalf("Sync: %v", serr)
-	}
-	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
-		t.Fatalf("ROLLBACK: %v", rb.err)
-	}
-	if rows := rowCount(t, f, connID, table); rows != "0" {
-		t.Fatalf("the smuggled INSERT wrote %s row(s) inside a reader's forced-read-only transaction", rows)
 	}
 }
