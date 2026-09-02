@@ -306,20 +306,23 @@ autodb --ui
 
 That is the whole setup. The first run walks you through creating the root
 user and the master passphrase; there is no config file to write. The defaults
-are loopback-only RPC on `127.0.0.1:7419` and a SQLite meta store under
-`$XDG_DATA_HOME/autodb/`.
+are a per-user unix socket for RPC (`$XDG_RUNTIME_DIR/autodb.sock`, mode 0600,
+so only your own OS user can open it) and a SQLite meta store under
+`$XDG_DATA_HOME/autodb/`. Nothing listens on a TCP port until you configure one.
 
 The other entry points:
 
 ```sh
-autodb --serve                # msgpack-RPC server on 127.0.0.1:7419
+autodb --serve                # msgpack-RPC server on the unix socket (or [server] port, if set)
 autodb --web-ui --port=7010   # the same TUI in a browser (never spawns a daemon)
+autodb --print-endpoint       # where this config listens: <network>\t<address>
 autodb --version
 ```
 
-`--serve` binds loopback by default, drains gracefully on SIGINT/SIGTERM, and
-implements a single-instance guard: a port held by a compatible autodb reports
-"already running" and exits 0, while a foreign occupant is a loud error. The
+`--serve` binds the unix socket by default — or `127.0.0.1:<port>` when
+`[server] port` is set — drains gracefully on SIGINT/SIGTERM, and implements a
+single-instance guard: an endpoint held by a compatible autodb reports "already
+running" and exits 0, while a foreign occupant is a loud error. The
 protocol handshake, method surface and error codes are documented in
 [rpc/README.md](rpc/README.md).
 
@@ -549,6 +552,48 @@ cp config.example.toml ~/.config/autodb/config.toml
 Unknown keys are **rejected rather than ignored**, and values are validated at
 load — a bad port, bind, CIDR, or a PostgreSQL meta store without a DSN fails
 before the server listens, naming the offending key.
+
+### Who can reach the daemon
+
+With no `[server] port` configured, the daemon listens on a unix socket whose
+file is mode 0600 and owned by the OS user that started it. **The socket file
+is the access control:** no other machine can reach it, and no other OS account
+on the same machine can open it — not even to reach the login prompt. That
+default is intended for **single-user** use: one person, one daemon, on their
+own machine.
+
+For a **multi-user** host — several people with their own SSH accounts and one
+daemon serving them all — the preferred setup is to **map a port to the RPC
+server**: set `[server] port` (the default `bind = "127.0.0.1"` keeps it on
+loopback). Every OS account on that host can then SSH in, run `autodb --ui`,
+log in with their own autodb credentials, and from the token manager mint their
+Personal Access Token and whitelist the IP addresses it may be used from. Each
+person is identified by their autodb login, not by their OS user; the bind stays
+loopback, and exposing the port beyond the host is a separate, deliberate step
+(see `config.example.toml`).
+
+Two other routes exist and are second choices. The socket can be made
+group-owned by hand (`chmod 660` on the live socket file, with the other users
+in the daemon's group), but the daemon re-applies 0600 every time it binds, so
+that must be redone after every restart — a footgun, not a configuration. And
+`--web-ui` over an SSH port-forward reaches the same token manager from a
+browser with no change to the daemon at all.
+
+`autodb --print-endpoint` shows where a given config actually listens.
+
+### Known limitations of the PostgreSQL front door (v0.3.1)
+
+- **A standalone `Flush` delivers nothing until `Sync`.** The extended-protocol
+  segment is dispatched on `Sync`; a client that sends `Parse`/`Bind`/`Flush` and
+  waits for the responses before sending `Sync` will wait until it does. Drivers
+  built on `database/sql` (lib/pq, pgx's stdlib adapter) always `Sync`, so they
+  are unaffected. Tracked; fixed in the release after v0.3.1.
+
+Verified on a shared host (Linux, two OS uids, one daemon): with the default
+socket, the other uid's connect fails with `permission denied` while the owner
+connects; after `chmod 660`, a member of the daemon's group connects and a
+non-member is still refused; with `[server] port` set, the other uid connects
+over `127.0.0.1` and the daemon serves it.
 
 The meta store is autodb's own database — users, encrypted connection secrets,
 grants, workspaces, audit log, script history — not one of the databases you

@@ -50,7 +50,9 @@ peer as a generic internal error.
 
 ## Lifecycle (Objective 25)
 
-`autodb --serve` binds `config [server] bind:port` (loopback default)
+`autodb --serve` binds the per-user unix socket by default (mode 0600 — only the
+starting OS user can connect), or `config [server] bind:port` (loopback bind) when
+a port is configured
 and drains gracefully on SIGINT/SIGTERM. On "address in use" it probes
 the occupant with `rpc.Probe`: a compatible autodb → "already running",
 exit 0 (the FE contract: auto-detect via hello, spawn on
