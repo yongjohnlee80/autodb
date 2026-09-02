@@ -144,8 +144,10 @@ func TestPGExtended_AStatementWithNoResultColumnsDescribesAsNoData(t *testing.T)
 // the existing live proof revokes a grant between Parse and Execute, which is
 // not a re-execution. white-vision named the discriminating shape: revoke
 // BETWEEN the first Execute and the resumption. Neither half is observable from
-// here (attempt rows are engine-side audit, not listener events), which is why
-// the row stays awaiting rather than being promoted on this cell.
+// here — attempt rows are engine-side audit, not listener events, so a cell
+// would have to open its own meta-store handle; awkward and the wrong home
+// rather than impossible — which is why the row stays awaiting rather than
+// being promoted on this cell.
 func TestPGExtended_ARowLimitedFetchSuspendsAndResumes(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 	_, _, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
