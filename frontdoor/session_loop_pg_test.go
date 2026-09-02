@@ -696,7 +696,7 @@ func TestPGLoop_ASaturatedLaneTellsTheTruthAboutAStatementThatRan(t *testing.T) 
 	// A lane far too small for any real result, so the stall happens while the
 	// statement's output is being forwarded rather than before it runs.
 	_, events, listenAddr := listenerWith(t, Options{
-		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, GeneralLaneBytes: 64,
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, GeneralLaneBytes: 64, testUncheckedLane: true,
 	})
 	fe := pgClient(t, listenAddr, secret, database)
 
@@ -773,6 +773,7 @@ func TestPGLoop_EveryPostDispatchStopTellsTheSameTruth(t *testing.T) {
 			opts: func(o *Options) {
 				o.testWatermark = &lowWatermark
 				o.GeneralLaneBytes = 256
+				o.testUncheckedLane = true // deliberately below the floor: this cell saturates the lane
 			},
 			rule: ruleBudgetBackpressure,
 		},
@@ -899,7 +900,7 @@ func TestPGLoop_ASaturatedLaneRefusesBeforeTheStatementRuns(t *testing.T) {
 	wait := 200 * time.Millisecond
 	l, events, listenAddr := listenerWith(t, Options{
 		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled,
-		GeneralLaneBytes: 256, testWatermark: &watermark, testLaneWait: &wait,
+		GeneralLaneBytes: 256, testUncheckedLane: true, testWatermark: &watermark, testLaneWait: &wait,
 	})
 
 	fe := pgClient(t, listenAddr, secret, database)
