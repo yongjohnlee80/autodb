@@ -97,6 +97,20 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, br *bufio.Read
 			l.applyDispatch(be, d, peer, closeReason)
 			return nil
 		}
+		// THE IDLE BUDGET IS A BETWEEN-MESSAGES BUDGET, so it must not run during
+		// the statement. Re-arming per message fixes a deadline that never
+		// refreshed; it does NOT stop the armed one from expiring while a long
+		// result streams, which is a separate bug with the same symptom — a
+		// statement killed mid-flight by an IDLE budget it was never idle for.
+		//
+		// Cleared here and re-armed at the top of the next iteration, so the
+		// budget covers exactly the interval it names: the wait for the next
+		// message. What bounds the statement itself is the engine's own
+		// statement/transaction timeouts, which is where that decision belongs.
+		if err := conn.SetDeadline(time.Time{}); err != nil {
+			*closeReason = "deadline"
+			return nil
+		}
 		if !l.runQuery(ctx, be, sess, q.String, peer, closeReason) {
 			return nil
 		}

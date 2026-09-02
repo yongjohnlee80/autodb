@@ -877,3 +877,48 @@ func TestLoop_IdleExpiryIsAuditedAsTheFrontDoorsOwnDeadline(t *testing.T) {
 		}
 	}
 }
+
+// Lector's refinement on MF2. Re-arming the idle budget per message is not
+// enough: the budget must not RUN during the statement either.
+//
+// The two are different bugs with the same symptom. A never-refreshed deadline
+// kills a busy session at the budget from session open; a refreshed one that
+// keeps ticking through the statement kills a single long result mid-stream. A
+// cell that only sends short statements cannot tell them apart, so this one
+// holds a statement open for longer than the whole budget.
+func TestLoop_ALongStatementIsNotKilledByTheBetweenMessagesBudget(t *testing.T) {
+	t.Parallel()
+	dl := defaultDeadlines()
+	dl.idle = 400 * time.Millisecond
+
+	release := make(chan struct{})
+	q := &blockingQueries{release: release, status: txStatusIdle, txStatus: txStatusIdle}
+	_, addr := deadlineLoopListener(t, dl, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Query{String: "SELECT slow"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Hold the statement open well past the between-messages budget. The client
+	// is not idle — it is waiting on a result the server is still producing.
+	time.Sleep(3 * dl.idle)
+	close(release)
+
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUntilReady(t, fe); got != txStatusIdle {
+		t.Fatalf("readiness = %q", got)
+	}
+	// And the session is still usable afterwards: the budget resumes covering
+	// the interval it names.
+	fe.Send(&pgproto3.Query{String: "SELECT after"})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("the session did not survive the long statement: %v", err)
+	}
+	if got := readUntilReady(t, fe); got != txStatusIdle {
+		t.Fatalf("readiness after the long statement = %q", got)
+	}
+}
