@@ -127,20 +127,32 @@ func TestHarness_AMultiStatementBufferIsOneImplicitBlock(t *testing.T) {
 //
 // This drives TWO Query frames into one flush on the driver's own connection,
 // through the frontend pgconn exposes, and reads nothing until both are sent.
-// That is what lib/pq and JDBC put on the wire.
 //
-// WHAT IT DOES NOT YET CLAIM: that it would CATCH a stranded second frame. I
-// tried to prove that with a negative control — a mutation making frameReader
-// swallow everything after the first frame — and the cell stayed green. A
-// positive control confirmed the mutated path IS executed (a panic there
-// fires), so the mutation ran and did not produce the symptom I expected; I
-// could not explain that before sending, and an unexplained green control means
-// the cell is UNPROVEN as a #59 regression, not proven.
+// BE PRECISE ABOUT WHAT THAT IS (r1 SF1): the frames are built by hand and
+// pushed through a real driver's connection and TLS stack. It proves the front
+// door handles the shape, on a real socket, under a real client's transport. It
+// does NOT prove a high-level driver DECIDES to pipeline — no pgconn API asks
+// for two Query frames before a read, which is why it is built this way. The
+// driver-decides case belongs to lib/pq, and lib/pq cannot connect (see the
+// datestyle finding below).
 //
-// So this stands as a genuine two-frame witness — which the previous version,
-// sending one Query frame with two statements, was not — and the #59-detection
-// claim is withheld until a control reddens. Reported to lector rather than
-// quietly dropped (r0 MF2).
+// IT CATCHES A STRANDED SECOND FRAME, and the control that proves it took two
+// attempts — the first of which is worth recording.
+//
+// My first negative control mutated frameReader's SCAN, the validation, and the
+// cell stayed green. A positive control (a panic in that arm) showed the path
+// was executed, so the mutation ran and produced no symptom, which I could not
+// explain — and I sent the PR with the claim WITHHELD rather than asserted.
+//
+// Lector named the reason: scan's state does not affect what Read RETURNS, so
+// pgproto3 still received the whole buffer and nothing was ever stranded. I had
+// mutated the part of the reader that decides, not the part that delivers. The
+// control that works truncates what Read hands over after the first frame, and
+// it reddens this cell with "only 0 of 2 readiness bytes".
+//
+// The lesson is narrower than "mutate carefully": a mutation must break the
+// thing the cell OBSERVES, and I had broken something adjacent to it that the
+// observation does not pass through.
 func TestHarness_ADriverSendsTwoQueryFramesBeforeReading(t *testing.T) {
 	conn, done := harnessConn(t)
 	defer done()
@@ -152,19 +164,20 @@ func TestHarness_ADriverSendsTwoQueryFramesBeforeReading(t *testing.T) {
 		t.Fatalf("flushing two Query frames: %v", err)
 	}
 
-	// A stranded second frame shows up as a session that answers once and goes
-	// quiet, so this is BOUNDED (MF3) — unbounded it would hang to the go-test
-	// timeout rather than fail.
-	deadline := time.Now().Add(15 * time.Second)
+	// BOUNDED ON THE SOCKET, not between reads (r1 MF1). A time.Now() check at
+	// the top of the loop never runs while fe.Receive() is blocked in netFD.Read
+	// — juliet reproduced the indefinite block when reply 2 is absent. The
+	// deadline has to be on the connection, which is the same lesson as #66's
+	// readiness drain, in a cell I wrote after learning it.
+	if err := conn.Conn().SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		t.Fatalf("bounding the pipelined read: %v", err)
+	}
 	ready := 0
 	for ready < 2 {
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of 2 readiness bytes: the second frame of a pipelined pair was "+
-				"accepted by the driver, never seen by the engine, and nobody was told", ready)
-		}
 		msg, err := fe.Receive()
 		if err != nil {
-			t.Fatalf("after %d of 2 readiness bytes: %v", ready, err)
+			t.Fatalf("only %d of 2 readiness bytes (%v): the second frame of a pipelined pair was "+
+				"accepted by the driver, never seen by the engine, and nobody was told", ready, err)
 		}
 		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
 			ready++
@@ -249,7 +262,7 @@ func TestHarness_LibPQIsRefusedForDatestyle(t *testing.T) {
 	}
 	defer func() { _ = db.Close() }()
 
-	if err := db.Ping(); err == nil {
+	if err := db.PingContext(opCtx(t)); err == nil {
 		t.Fatal("lib/pq CONNECTED — the datestyle refusal has been ruled on and lifted. Delete " +
 			"this cell and restore the four driver arms below it; they are written and were " +
 			"passing except for this")
@@ -296,7 +309,7 @@ func TestHarness_LibPQRunsAParameterlessQuery(t *testing.T) {
 	defer done()
 
 	var n int
-	if err := db.QueryRow("SELECT 42").Scan(&n); err != nil {
+	if err := db.QueryRowContext(opCtx(t), "SELECT 42").Scan(&n); err != nil {
 		t.Fatalf("lib/pq's simple query failed: %v", err)
 	}
 	if n != 42 {
@@ -307,7 +320,7 @@ func TestHarness_LibPQRunsAParameterlessQuery(t *testing.T) {
 	// and the pooled connection must remain usable. A front door that closed the
 	// socket would look to database/sql like a bad connection and be silently
 	// retried on another — turning one statement error into two executions.
-	err := db.QueryRow("SELECT 1/0").Scan(&n)
+	err := db.QueryRowContext(opCtx(t), "SELECT 1/0").Scan(&n)
 	var pqErr *pq.Error
 	if !errors.As(err, &pqErr) {
 		t.Fatalf("lib/pq got %v, which is not a *pq.Error", err)
@@ -315,7 +328,7 @@ func TestHarness_LibPQRunsAParameterlessQuery(t *testing.T) {
 	if string(pqErr.Code) != "22012" {
 		t.Fatalf("SQLSTATE = %s, want 22012", pqErr.Code)
 	}
-	if err := db.QueryRow("SELECT 42").Scan(&n); err != nil || n != 42 {
+	if err := db.QueryRowContext(opCtx(t), "SELECT 42").Scan(&n); err != nil || n != 42 {
 		t.Fatalf("the connection did not survive a statement error: %v", err)
 	}
 }
@@ -332,7 +345,7 @@ func TestHarness_SqlxScansThroughTheFrontDoor(t *testing.T) {
 		N int    `db:"n"`
 		S string `db:"s"`
 	}
-	if err := xdb.Get(&row, "SELECT 7 AS n, 'seven' AS s"); err != nil {
+	if err := xdb.GetContext(opCtx(t), &row, "SELECT 7 AS n, 'seven' AS s"); err != nil {
 		t.Fatalf("sqlx.Get through the front door: %v", err)
 	}
 	if row.N != 7 || row.S != "seven" {
@@ -363,7 +376,7 @@ func harnessDB(t *testing.T) (*sql.DB, func()) {
 	// asserting that "the connection survived" would silently be handed a new
 	// one, proving nothing.
 	db.SetMaxOpenConns(1)
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(opCtx(t)); err != nil {
 		t.Fatalf("lib/pq could not connect to the front door: %v", err)
 	}
 	return db, func() { _ = db.Close() }
