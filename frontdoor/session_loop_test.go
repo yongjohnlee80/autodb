@@ -99,6 +99,12 @@ type fakeQueries struct {
 	parseErr   error
 	executeErr error
 	syncErr    error
+
+	// extStopped is what WireExecutePortal returns when the CONSUMER stops it,
+	// mirroring the engine's contract: a consumer stop arrives wrapped in
+	// exec.EmitStopped carrying the outcome the engine recorded, never as the
+	// bare emitter error.
+	extStopped *exec.EmitStopped
 }
 
 func (q *fakeQueries) WireQuery(_ context.Context, _ exec.SessionID, _ int64, sql, _ string,
@@ -193,6 +199,9 @@ func (q *fakeQueries) WireExecutePortal(_ context.Context, _ exec.SessionID, _ i
 	q.mu.Unlock()
 	for _, m := range msgs {
 		if err := emit(m); err != nil {
+			if q.extStopped != nil {
+				return q.extStopped
+			}
 			return err
 		}
 	}
@@ -1683,5 +1692,75 @@ func TestLoop_AnInvalidEngineReportWithholdsReadiness(t *testing.T) {
 			t.Fatal("readiness was sent for a session whose phase the engine could not state — " +
 				"the byte was repaired from a later snapshot, which is the split this PR removed")
 		}
+	}
+}
+
+// The EXTENDED path arms its own stops now, so a capped Execute reports the
+// outcome the ENGINE recorded rather than the emitter's narrower guess.
+//
+// #66 passed nil for the arm here, because the extended engine path did not wrap
+// its emitter failures in exec.EmitStopped. It does now (WireExecutePortal), and
+// this cell is the witness: ArmCompleted is the one arm the fallback can NEVER
+// produce — armFromWhatIsKnown reads an idle status with nothing observed as
+// ArmUnresolved, deliberately, because "idle and nothing seen" is not
+// "committed". So a client told "effects are committed" here can only have been
+// told so by the engine's own report.
+func TestLoop_ACappedExtendedExecuteReportsTheEnginesArm(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	blob := make([]byte, 4096)
+	for i := range blob {
+		blob[i] = 'x'
+	}
+	q.extMsgs = []exec.WireMessage{
+		{Kind: "ParseComplete"},
+		{Kind: "BindComplete"},
+		{Kind: "DataRow", Values: [][]byte{blob}},
+		{Kind: "DataRow", Values: [][]byte{blob}},
+		{Kind: "CommandComplete", Tag: "SELECT 2"},
+	}
+	// The engine watched the statement finish before the consumer was cut.
+	q.extStopped = &exec.EmitStopped{
+		Cause: errors.New("output cap"), Outcome: exec.StatusOK,
+		Executed: true, TxStatus: txStatusIdle,
+	}
+
+	cap := int64(256)
+	_, _, addr := listenerWith(t, Options{
+		Authn: &fakeAuth{result: goodSession()}, Queries: q,
+		AuthFailuresPerIP: unthrottled, testOutputCap: &cap,
+	})
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Parse{Name: "s", Query: "SELECT 1"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "p", PreparedStatement: "s"})
+	fe.Send(&pgproto3.Execute{Portal: "p"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+
+	var got *pgproto3.ErrorResponse
+	for range 24 {
+		m, err := fe.Receive()
+		if err != nil {
+			break
+		}
+		if e, ok := m.(*pgproto3.ErrorResponse); ok {
+			got = e
+			break
+		}
+	}
+	if got == nil {
+		t.Fatal("the cap never tripped, so this cell proves nothing about a capped extended Execute")
+	}
+	if got.Code != sqlStateProgramLimit || got.Detail != ruleOutputCap {
+		t.Fatalf("cap trip = %s/%s, want %s/%s", got.Code, got.Detail, sqlStateProgramLimit, ruleOutputCap)
+	}
+	if !strings.Contains(got.Hint, "effects are committed") {
+		t.Fatalf("hint = %q; want the ENGINE's arm (effects are committed). "+
+			"Reaching this with the emitter's fallback instead would say \"unresolved\" — "+
+			"the extended path is not passing its exec.EmitStopped to reportOutputWithheld", got.Hint)
 	}
 }

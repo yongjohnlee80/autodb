@@ -90,6 +90,11 @@ type Listener struct {
 	// observe the real enforcement path without waiting thirty seconds.
 	testSegmentStall *time.Duration
 
+	// testSegmentMsgs and testSegmentBytes lower the extended segment's caps so a
+	// cell can reach them without sending 96 MiB.
+	testSegmentMsgs  *int
+	testSegmentBytes *int64
+
 	// testOutputCap lowers the cumulative output cap so a cell can trip it
 	// without producing 8 GiB. Nil takes the matrix's figure.
 	testOutputCap *int64
@@ -178,6 +183,10 @@ type Options struct {
 
 	// testOutputCap lowers the cumulative output cap for a cell.
 	testOutputCap *int64
+
+	// testSegmentMsgs and testSegmentBytes lower the segment caps for a cell.
+	testSegmentMsgs  *int
+	testSegmentBytes *int64
 
 	// testWatermark lowers the pending-output watermark for a cell.
 	testWatermark *int64
@@ -286,6 +295,8 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.onSession = opt.OnSession
 	l.queries = opt.Queries
 	l.testOutputCap = opt.testOutputCap
+	l.testSegmentMsgs = opt.testSegmentMsgs
+	l.testSegmentBytes = opt.testSegmentBytes
 	l.testWatermark = opt.testWatermark
 	l.testLaneWait = opt.testLaneWait
 	l.testSegmentStall = opt.testSegmentStall
@@ -639,7 +650,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		be := pgproto3.NewBackend(fr, stream)
 		be.SetMaxBodyLen(PreAuthMaxBodyLen)
 		var aerr error
-		outcome, aerr = l.runAuth(ctx, stream, be, out.Params, peer)
+		outcome, aerr = l.runAuth(ctx, stream, be, fr, out.Params, peer)
 		if aerr != nil {
 			closeReason = "auth-read-failed"
 			l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s: %v", peer, aerr))

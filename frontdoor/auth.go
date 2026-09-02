@@ -125,7 +125,7 @@ type authOutcome struct {
 // ourselves. PostgreSQL closes on the first failure and so do we; the throttle
 // that actually bounds grinding is the per-source-address one, which survives
 // the reconnect that a per-connection ceiling does not.
-func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Backend, params map[string]string, peer string) (authOutcome, error) {
+func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Backend, fr *frameReader, params map[string]string, peer string) (authOutcome, error) {
 	if l.authn == nil {
 		// The honest state of a build with no engine behind the listener.
 		// Recorded as its own reason so it is never mistaken in the trail
@@ -179,6 +179,12 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		return authOutcome{}, err
 	}
 	msg, err := be.Receive()
+	// The queue advances for auth's own frames too: it is shared with the session
+	// loop, and a Receive that does not pop leaves every later header attributed
+	// to the wrong frame (lector C r2 MF3).
+	if fr != nil {
+		fr.consumeHeader()
+	}
 	if err != nil {
 		// A read failure is not a denial: nothing was presented. It closes
 		// without a frame for the same reason a TLS failure does, and it IS

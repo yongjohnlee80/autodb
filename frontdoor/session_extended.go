@@ -3,6 +3,8 @@ package frontdoor
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"net"
 	"time"
 
@@ -54,6 +56,33 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 
 	id, uid := sess.SessionID, sess.UserID
 	var err error
+
+	// THE SEGMENT'S CAPS. The declared wire length was already charged by
+	// frameReader before this frame was decoded (§1.5 stage one); what is added
+	// here is stage two, the decoded pre-allocation, which is only knowable once
+	// the message exists. Sync is exempt from both, and its counters were reset
+	// by runExtendedSync rather than skipped here.
+	if _, isSync := msg.(*pgproto3.Sync); !isSync {
+		// §1.5 STAGE TWO. Stage one — the declared wire length — was applied in
+		// framing order before this frame was decoded; this is the additional
+		// pre-allocation the decode performed, which is only knowable now.
+		seg.addBytes(segmentDecodedDelta(msg))
+		if seg.msgs > l.segmentMessageCap() || seg.bytes > l.segmentByteCap() {
+			l.onEvent(Event{Kind: "fd.refused", Reason: ruleSegmentCap, Peer: peer,
+				Detail: fmt.Sprintf("segment reached %d messages / %d bytes before Sync", seg.msgs, seg.bytes)})
+			be.Send(gateError("ERROR", sqlStateConfiguredLimit,
+				"this extended segment exceeded its message or byte cap before Sync",
+				ruleSegmentCap, "issue Sync more often"))
+			if ferr := l.flushBounded(conn, be); ferr != nil {
+				*closeReason = "write-failed"
+				return false
+			}
+			// Refuse, then discard through Sync (§7 :386): the frames already
+			// pipelined behind this one must not be acted on either.
+			seg.discarding = true
+			return true
+		}
+	}
 
 	switch m := msg.(type) {
 	case *pgproto3.Parse:
@@ -120,6 +149,10 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	// what to tell the client, so no exit path can skip it.
 	seg.release(l)
 	seg.discarding = false
+	// Row 4:Sync (:273): Sync closes the segment and RESETS its counters. Without
+	// this a long-lived session accumulates across segments and is eventually
+	// refused for frames it already had answered.
+	seg.msgs, seg.bytes = 0, 0
 	if err != nil {
 		return l.frameExtendedError(conn, be, sess, err, peer, seg, closeReason)
 	}
@@ -183,8 +216,153 @@ func (l *Listener) frameExtendedError(conn net.Conn, be *pgproto3.Backend,
 // loop holds this in a defer for the session's lifetime: teardown, disconnect
 // and every abandonment release it too. A release-at-Sync design would leak
 // those bytes for the life of the process.
+// §7 :386 / §9 :479 — one segment's own caps, reset at Sync (row 4:Sync :273).
+//
+// They bound what a client may accumulate BEFORE it lets the server answer. A
+// client that never Syncs is not malicious by construction — a driver bug will
+// do it — but the segment's queued frames are memory the front door holds with
+// no bound of its own, so the bound is here.
+const (
+	maxSegmentMessages = 10_000
+	maxSegmentBytes    = 96 << 20
+)
+
+// segmentMessageCap and segmentByteCap are the caps in force, lowered only by a
+// cell. The BYTE cap needs an injection point of its own: driving 96 MiB through
+// a test to reach it would trade minutes of gate time for one branch, and the
+// first version of this cell settled for asserting the message counter — so
+// deleting the byte charge entirely left it green (lector C r1 MF3).
+func (l *Listener) segmentMessageCap() int {
+	if l.testSegmentMsgs != nil {
+		return *l.testSegmentMsgs
+	}
+	return maxSegmentMessages
+}
+
+func (l *Listener) segmentByteCap() int64 {
+	if l.testSegmentBytes != nil {
+		return *l.testSegmentBytes
+	}
+	return maxSegmentBytes
+}
+
+// admitSegmentFrame applies §1.5 stage one — the DECLARED wire length — to the
+// segment, and refuses the segment if that puts it past its caps.
+//
+// It is called once per Receive, in framing order, so a Sync's counter reset
+// lands between the frames it separates rather than erasing a charge a later
+// frame was already given.
+//
+// KNOWN RESIDUAL, stated rather than implied: when the header was not already
+// framed, the check runs immediately AFTER Receive, so the crossing frame's body
+// has been decoded before it is refused. That is bounded — pgproto3 is held to
+// SetMaxBodyLen for the life of the connection — so the exposure is one frame,
+// not a stream. Closing it entirely means having the reader skip a refused
+// frame's body without handing it to the Backend, which is a change to the
+// component that fixed the pipelining defect and is not folded in here.
+func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, seg *segmentLane,
+	h frameHeader, peer string, closeReason *string) bool {
+
+	extended, isSync := extendedTypeByte(h.typ)
+	if !extended || isSync {
+		return true
+	}
+	seg.msgs++
+	seg.addBytes(int64(h.declared))
+	// DEFENCE IN DEPTH, and deliberately redundant: stage two re-reads these same
+	// counters after the decode, so disabling either check alone changes nothing
+	// observable. What is load-bearing is the ACCUMULATION above — a mutation
+	// that stops counting reddens the cells, and one that stops checking here
+	// does not, because the other check catches it.
+	if seg.msgs <= l.segmentMessageCap() && seg.bytes <= l.segmentByteCap() {
+		return true
+	}
+	l.onEvent(Event{Kind: "fd.refused", Reason: ruleSegmentCap, Peer: peer,
+		Detail: fmt.Sprintf("segment reached %d messages / %d bytes before Sync", seg.msgs, seg.bytes)})
+	be.Send(gateError("ERROR", sqlStateConfiguredLimit,
+		"this extended segment exceeded its message or byte cap before Sync",
+		ruleSegmentCap, "issue Sync more often"))
+	if ferr := l.flushBounded(conn, be); ferr != nil {
+		*closeReason = "write-failed"
+		return false
+	}
+	// Refuse, then discard through Sync (§7 :386).
+	seg.discarding = true
+	return true
+}
+
+// extendedTypeByte reports whether a frontend type byte belongs to an extended
+// segment, and whether it is Sync — which is exempt from the caps because it is
+// always admissible and is the only thing that can END the state a breach puts
+// the segment into (row 4:Sync, criterion 1).
+func extendedTypeByte(typ byte) (extended, isSync bool) {
+	switch typ {
+	case 'P', 'B', 'D', 'E', 'C', 'H':
+		return true, false
+	case 'S':
+		return true, true
+	}
+	return false, false
+}
+
+// segmentDecodedDelta is §1.5's STAGE TWO: what a decoded frame makes the front
+// door hold beyond the bytes that arrived.
+//
+// Stage one is the declared wire length, charged from frameReader before any of
+// the body is decoded. This is the additional pre-allocation the decode
+// performs, and it must be an OVER-estimate rather than a tidy one — the first
+// version of this cap reconstructed the wire length from the decoded message and
+// under-charged a NULL-parameter Bind by 3x on the wire and 12.5x on the decode
+// (lector C r1 MF2, measured on VM43: 16,389 charged against 49,165 on the wire
+// and ~200 KiB held). A cap on an under-estimate does not bound what it claims
+// to bound, and it fails in the direction that admits.
+//
+// So each decoded element is charged its own Go-side overhead: a [][]byte
+// parameter costs a slice header whether or not it carries a byte, which is
+// exactly the case the estimate used to price at nothing.
+func segmentDecodedDelta(msg pgproto3.FrontendMessage) int64 {
+	const (
+		sliceHeader = 24 // []byte: pointer, length, capacity
+		elemInt16   = 2
+		strOverhead = 16 // string header
+	)
+	switch m := msg.(type) {
+	case *pgproto3.Parse:
+		return int64(len(m.ParameterOIDs))*4 + 2*strOverhead
+	case *pgproto3.Bind:
+		n := int64(len(m.Parameters)) * sliceHeader
+		n += int64(len(m.ParameterFormatCodes)+len(m.ResultFormatCodes)) * elemInt16
+		return n + 2*strOverhead
+	case *pgproto3.Describe, *pgproto3.Close, *pgproto3.Execute:
+		return strOverhead
+	}
+	return 0
+}
+
+// addBytes accumulates a charge, saturating at the maximum rather than wrapping.
+func (s *segmentLane) addBytes(n int64) {
+	if n < 0 {
+		return
+	}
+	if s.bytes > math.MaxInt64-n {
+		s.bytes = math.MaxInt64
+		return
+	}
+	s.bytes += n
+}
+
 type segmentLane struct {
 	held int64
+
+	// msgs and bytes are this segment's accumulation against the caps above.
+	// Both are reset by Sync, which is what ends a segment.
+	//
+	// bytes is charged in TWO stages: the declared wire length from frameReader
+	// before the frame is decoded, and the decoded delta once it exists. It
+	// saturates rather than wrapping — a cap that overflows to a negative admits
+	// everything, which is the one failure mode a cap must not have.
+	msgs  int
+	bytes int64
 
 	// discarding is the front door's OWN ignore_till_sync.
 	//
@@ -269,12 +447,31 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 
 	err := drive(acct.emit)
 
+	// THE EXTENDED PATH ARMS ITS OWN STOPS NOW. WireExecutePortal wraps a
+	// consumer stop in exec.EmitStopped carrying the outcome it RECORDED, so the
+	// arm the raw path has always had is available here too and #66's fallback
+	// to the emitter's own observation is retired. Same extraction, same
+	// reportOutputWithheld — one stop path for both protocols.
+	var stopped *exec.EmitStopped
+	if err != nil {
+		var st *exec.EmitStopped
+		if errors.As(err, &st) {
+			stopped = st
+		}
+	}
+
 	switch {
 	case acct.withheld != outputComplete:
-		// nil: the extended engine path does not wrap its emitter failures in
-		// exec.EmitStopped yet, so this stop arrives with no arm and the
-		// emitter's own observation is what is available. See recordedEffects.
-		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, nil, acct.targetFailed)
+		// AN EXTENDED SEGMENT'S TERMINAL BYTE IS SYNC'S (lector r2 MF4), so the
+		// report carries the truthful explanation and no readiness. Having put an
+		// ErrorResponse on the wire we are in the protocol's ignore-till-Sync
+		// state, exactly as the target would be, so the segment discards until
+		// the client's Sync ends it and answers with the one readiness it owns.
+		if !l.reportOutputWithheld(conn, be, sess, peer, closeReason, acct.withheld, stopped, acct.targetFailed, false) {
+			return false
+		}
+		seg.discarding = true
+		return true
 
 	case acct.writeErr != nil:
 		l.onEvent(Event{Kind: "fd.conn_close", Reason: "write-failed", Peer: peer, Detail: acct.writeErr.Error()})
@@ -309,6 +506,10 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 // was not idle, it asked for output and did not collect it. And it is not
 // write-failed: the peer may well be reading, it simply never ended its segment.
 const ruleSegmentStall = "frontdoor/segment-stall"
+
+// ruleSegmentCap is §7 :386's identity for a segment that accumulated past its
+// caps before Sync.
+const ruleSegmentCap = "frontdoor/segment-cap"
 
 // segmentStallBudget bounds a segment that holds a reservation and is waiting
 // for the client's next frame.

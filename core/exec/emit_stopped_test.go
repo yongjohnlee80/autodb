@@ -26,6 +26,16 @@ func TestEmitStopped_ArmOrder(t *testing.T) {
 		{"E: aborted", EmitStopped{Cause: cause, Executed: true, TxStatus: TxStatusAborted, Outcome: StatusUnresolvable}, ArmAborted},
 		{"observed complete", EmitStopped{Cause: cause, Executed: true, TxStatus: TxStatusIdle, Outcome: StatusOK}, ArmCompleted},
 		{"unobserved tail", EmitStopped{Cause: cause, Executed: true, TxStatus: TxStatusIdle, Outcome: StatusUnresolvable}, ArmUnresolved},
+		// NOT EXECUTED IS NOT THE EMPTY QUERY. Both are "nothing ran", and the
+		// struct already tells them apart: the empty query carries no outcome,
+		// while a statement discarded by an earlier failure carries the one that
+		// was recorded for it. Reading only Executed collapsed the two and told a
+		// client with a real statement that its query was empty. Appended rather
+		// than inserted — the assertions below index this table.
+		{"not executed: an earlier statement failed",
+			EmitStopped{Cause: cause, Executed: false, TxStatus: TxStatusIdle, Outcome: StatusError}, ArmNotExecuted},
+		{"not executed inside BEGIN: T does not make it the empty query",
+			EmitStopped{Cause: cause, Executed: false, TxStatus: TxStatusInTx, Outcome: StatusError}, ArmNotExecuted},
 	}
 	for _, c := range cases {
 		if got := c.st.Arm(); got != c.want {

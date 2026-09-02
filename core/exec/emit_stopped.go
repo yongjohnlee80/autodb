@@ -75,6 +75,13 @@ type EmitArm string
 const (
 	// ArmNoStatement: nothing ran (the empty query); there are no effects.
 	ArmNoStatement EmitArm = "no_statement"
+	// ArmNotExecuted: the statement EXISTED but never ran, because an earlier
+	// statement in the same buffer or segment failed and the target discarded
+	// the rest. Distinct from ArmNoStatement: there, the client sent nothing;
+	// here it sent a real statement that the target threw away. Telling the
+	// second story with the first's words ("the query was empty") makes a client
+	// conclude it never sent anything.
+	ArmNotExecuted EmitArm = "not_executed"
 	// ArmFailed: the target refused the statement; the error was observed.
 	ArmFailed EmitArm = "failed"
 	// ArmPending: executed inside the client's open transaction.
@@ -91,8 +98,16 @@ const (
 // loop's wording and the audit's status both derive from this answer.
 func (s *EmitStopped) Arm() EmitArm {
 	switch {
-	case !s.Executed:
+	case !s.Executed && s.Outcome == "":
+		// THE EMPTY QUERY, and only it. The two not-run cases already differ in
+		// the struct: the empty query carries no outcome at all, while a
+		// statement discarded by an earlier failure carries the outcome that was
+		// RECORDED for it (StatusError / ErrNotExecuted). Reading only Executed
+		// collapsed them, and the front door then told a client with a real
+		// statement that its query was empty.
 		return ArmNoStatement
+	case !s.Executed:
+		return ArmNotExecuted
 	case s.TargetErr != nil:
 		return ArmFailed
 	case s.TxStatus == TxStatusInTx:
@@ -130,4 +145,20 @@ func txStatusWord(b byte) string {
 func (e *Engine) emitStopped(s *session, cause error, outcome string, executed bool, targetErr *pgconn.PgError) error {
 	st, _ := s.wireTxStatus()
 	return &EmitStopped{Cause: cause, TxStatus: st, Outcome: outcome, Executed: executed, TargetErr: targetErr}
+}
+
+// emitStoppedWithStatus is emitStopped for a producer that KNOWS whether the
+// tail was observed.
+//
+// TxStatus is authoritative only when it was. The raw producer gets that for
+// free — golib drains to ReadyForQuery even on a consumer error, so the status
+// it reads afterwards is post-tail — but a producer that stops reading early
+// holds a snapshot from before the target had finished deciding. Pass 0 there:
+// Arm() then falls through to ArmUnresolved instead of letting a stale
+// in-transaction byte outrank an unresolved outcome and promise a client that
+// effects are still pending when the target has already aborted them.
+func (e *Engine) emitStoppedWithStatus(cause error, outcome string, executed bool,
+	targetErr *pgconn.PgError, status byte) error {
+
+	return &EmitStopped{Cause: cause, TxStatus: status, Outcome: outcome, Executed: executed, TargetErr: targetErr}
 }
