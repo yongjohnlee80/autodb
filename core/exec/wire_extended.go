@@ -156,6 +156,7 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 		s.ext.dropStatement(name)
 		return serr
 	}
+	s.ext.pending++
 	return nil
 }
 
@@ -184,6 +185,7 @@ func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 		s.ext.dropPortal(portalName)
 		return serr
 	}
+	s.ext.pending++
 	return nil
 }
 
@@ -199,7 +201,11 @@ func (e *Engine) WireDescribeStatement(ctx context.Context, id SessionID, userID
 	if _, serr := s.ext.statement(name); serr != nil {
 		return serr
 	}
-	return pc.Send(ctx, golibpg.DescribeStatementOp(name))
+	if serr := pc.Send(ctx, golibpg.DescribeStatementOp(name)); serr != nil {
+		return serr
+	}
+	s.ext.pending++
+	return nil
 }
 
 // WireDescribePortal asks the target to describe a portal's result shape.
@@ -212,7 +218,11 @@ func (e *Engine) WireDescribePortal(ctx context.Context, id SessionID, userID in
 	if _, perr := s.ext.portal(name); perr != nil {
 		return perr
 	}
-	return pc.Send(ctx, golibpg.DescribePortalOp(name))
+	if serr := pc.Send(ctx, golibpg.DescribePortalOp(name)); serr != nil {
+		return serr
+	}
+	s.ext.pending++
+	return nil
 }
 
 // WireCloseStatement releases a prepared statement and, per §4a, every portal
@@ -226,7 +236,11 @@ func (e *Engine) WireCloseStatement(ctx context.Context, id SessionID, userID in
 	// Close is not an error on a name that does not exist — PostgreSQL's own
 	// Close succeeds on a missing object — so the store's answer is not checked.
 	s.ext.dropStatement(name)
-	return pc.Send(ctx, golibpg.CloseStatementOp(name))
+	if serr := pc.Send(ctx, golibpg.CloseStatementOp(name)); serr != nil {
+		return serr
+	}
+	s.ext.pending++
+	return nil
 }
 
 // WireClosePortal releases one portal.
@@ -237,7 +251,11 @@ func (e *Engine) WireClosePortal(ctx context.Context, id SessionID, userID int64
 	}
 	defer release()
 	s.ext.dropPortal(name)
-	return pc.Send(ctx, golibpg.ClosePortalOp(name))
+	if serr := pc.Send(ctx, golibpg.ClosePortalOp(name)); serr != nil {
+		return serr
+	}
+	s.ext.pending++
+	return nil
 }
 
 // WireFlushSegment writes the queued frames and streams back everything the
@@ -251,7 +269,7 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 	if emit == nil {
 		return ErrWireEmitNil
 	}
-	_, _, pc, release, err := e.wireExtEntry(ctx, id, userID)
+	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID)
 	if err != nil {
 		return err
 	}
@@ -260,7 +278,7 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 	if ferr := pc.Flush(ctx); ferr != nil {
 		return ferr
 	}
-	return drainExtended(ctx, pc, emit)
+	return drainExtended(ctx, pc, s.ext, emit)
 }
 
 // WireSyncSegment ends the segment and returns the ReadyForQuery status byte.
@@ -277,6 +295,10 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	defer release()
 
 	status, serr := pc.Sync(ctx)
+	// Sync consumes through the terminal ReadyForQuery whatever happened, so the
+	// segment's outstanding count is void either way: on success the server
+	// answered or discarded everything, and on failure the wire is unusable.
+	s.ext.pending = 0
 	if serr != nil {
 		return 0, serr
 	}
@@ -353,12 +375,19 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	var rowCount int64
 	var runErr error
 
-	if sendErr := pc.Send(runCtx, golibpg.ExecuteOp(portalName, maxRows)); sendErr != nil {
+	switch sendErr := pc.Send(runCtx, golibpg.ExecuteOp(portalName, maxRows)); {
+	case sendErr != nil:
 		runErr = sendErr
-	} else if fErr := pc.Flush(runCtx); fErr != nil {
-		runErr = fErr
-	} else {
-		rowCount, runErr = drainExtendedCounting(runCtx, pc, emit, p)
+	default:
+		s.ext.pending++
+		// ONE Flush covers everything still queued — a client pipelines Parse
+		// and Bind without flushing and this Execute is what releases them — so
+		// the drain reads the answers to all of them, not just this frame's.
+		if fErr := pc.Flush(runCtx); fErr != nil {
+			runErr = fErr
+		} else {
+			rowCount, runErr = drainExtendedCounting(runCtx, pc, s.ext, emit, p)
+		}
 	}
 	duration := e.now().Sub(start)
 
@@ -375,24 +404,29 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	return nil
 }
 
-// drainExtended streams one response group to emit.
-func drainExtended(ctx context.Context, pc golibpg.PinnedConn, emit func(WireMessage) error) error {
-	_, err := drainExtendedCounting(ctx, pc, emit, nil)
+// drainExtended streams the responses for every queued frame to emit.
+func drainExtended(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, emit func(WireMessage) error) error {
+	_, err := drainExtendedCounting(ctx, pc, o, emit, nil)
 	return err
 }
 
-// drainExtendedCounting streams one response group, counting rows and recording
-// a portal suspension.
+// drainExtendedCounting streams the outstanding responses, counting rows and
+// recording a portal suspension.
 //
-// A server ErrorResponse arrives as protocol DATA (ExtendedMessage.Err), not a
-// Go error: it is forwarded to the client verbatim like any other frame, and the
-// segment then discards until the client's Sync. Turning it into a Go error here
-// would make the front door decide what the client should have been told.
-func drainExtendedCounting(ctx context.Context, pc golibpg.PinnedConn,
+// It reads until every queued frame has been answered — see extObjects.pending
+// for why that is a COUNT and not a pattern. A server ErrorResponse zeroes the
+// count outright: after one, the server discards every frame but Sync and
+// Terminate, so nothing still queued will ever be answered and a reader waiting
+// for those answers would block until the context died.
+//
+// The ErrorResponse itself is forwarded like any other frame. It is protocol
+// DATA, not a Go error: turning it into one here would make the front door
+// decide what the client should have been told.
+func drainExtendedCounting(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
 	emit func(WireMessage) error, p *extPortal) (int64, error) {
 
 	var rows int64
-	for {
+	for o.pending > 0 {
 		m, err := pc.Receive(ctx)
 		if err != nil {
 			return rows, err
@@ -405,25 +439,31 @@ func drainExtendedCounting(ctx context.Context, pc golibpg.PinnedConn,
 				p.suspended = true
 			}
 		}
+		if m.Kind == "ErrorResponse" {
+			o.pending = 0
+		} else if frameAnswered(m.Kind) {
+			o.pending--
+		}
 		if eerr := emit(extToWire(m)); eerr != nil {
 			return rows, &emitFailure{err: eerr}
 		}
-		// The group ends at the message that answers the last frame in it.
-		// ReadyForQuery is never one of these: it belongs to Sync, and golib
-		// refuses a premature one rather than letting a group swallow it.
-		if groupTerminal(m.Kind) {
-			return rows, nil
-		}
 	}
+	return rows, nil
 }
 
-// groupTerminal reports whether a message ends the response group a Flush asked
-// for. Describe's answers do not: a ParameterDescription is followed by a
-// RowDescription or a NoData, and a RowDescription is followed by the rows.
-func groupTerminal(kind string) bool {
+// frameAnswered reports whether a backend message COMPLETES the frame that asked
+// for it.
+//
+// ParameterDescription is deliberately absent: a Describe-statement answers with
+// ParameterDescription AND THEN a RowDescription or NoData, so counting the
+// first would end the segment a message early. RowDescription belongs to
+// Describe alone — in the extended protocol Execute does not re-send it, which
+// is why it can be counted here without stealing Execute's completion.
+func frameAnswered(kind string) bool {
 	switch kind {
-	case "CommandComplete", "EmptyQueryResponse", "PortalSuspended", "ErrorResponse",
-		"NoData", "CloseComplete", "ParseComplete", "BindComplete":
+	case "ParseComplete", "BindComplete", "CloseComplete",
+		"CommandComplete", "EmptyQueryResponse", "PortalSuspended",
+		"RowDescription", "NoData":
 		return true
 	}
 	return false

@@ -78,7 +78,8 @@ type extPortal struct {
 	suspended bool
 }
 
-// extObjects is one session's extended-protocol namespace.
+// extObjects is one session's extended-protocol namespace and the segment's
+// outstanding-frame count.
 //
 // Not independently locked: it is reached only under the session's one
 // in-flight claim, which is the same serialization every other per-session
@@ -87,6 +88,19 @@ type extPortal struct {
 type extObjects struct {
 	statements map[string]*extStatement
 	portals    map[string]*extPortal
+
+	// pending is the number of queued frames whose response has not been read.
+	//
+	// It exists because a Flush does NOT delimit one frame's answer: the server
+	// processes queued frames IN ORDER and a single Flush makes it emit the
+	// responses for ALL of them. A client pipelines Parse, Bind and Execute and
+	// flushes once, so the reply stream is ParseComplete, BindComplete, then the
+	// rows — and a reader that stopped at the first "terminal-looking" message
+	// would stop at ParseComplete and abandon the result.
+	//
+	// So termination is COUNTED, never pattern-matched: every Send adds one,
+	// every frame-completing message takes one, and the drain ends at zero.
+	pending int
 }
 
 func newExtObjects() *extObjects {
