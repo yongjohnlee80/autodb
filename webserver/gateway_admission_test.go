@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"sort"
@@ -367,13 +368,25 @@ func countAudit(t *testing.T, store *meta.Store, action string) uint64 {
 // differences rather than the difference of two independent medians. A load
 // spike inflates every cause in the round it lands on, so it cancels.
 //
-// THE BOUND IS CALIBRATED FROM THE DATA. The same statistic is computed where
-// the answer must be zero — how far the paired difference moves between the
-// even and odd rounds of the same run — and neither compared difference may
-// exceed four times it. On a loaded machine the noise floor rises and the
-// bound rises with it, so the test measures distinguishability rather than
-// the machine. An earlier version asserted a fixed 300ms against a 17ms
-// request and was both meaningless and flaky under load.
+// THE BOUND IS CALIBRATED FROM THE DATA — from ALL of it. The dispersion of the
+// per-round differences is estimated with the median absolute deviation over
+// every round, scaled to a standard error of the median, and neither compared
+// difference may exceed four standard errors. On a loaded machine the spread
+// rises and the bound rises with it, so the test measures distinguishability
+// rather than the machine. An earlier version asserted a fixed 300ms against a
+// 17ms request and was both meaningless and flaky under load.
+//
+// WHY NOT THE EVEN/ODD SPLIT. The previous estimator was the distance between
+// the medians of the even and the odd rounds — one realization of a random
+// variable whose own spread is as large as the thing it measured. With twelve
+// samples a side it came out at 3ms on two CI runs whose per-round differences
+// were spread over tens of milliseconds (argon2 allocates 64 MiB per attempt
+// and the race detector makes every GC pause count), and a 15ms median offset
+// that the data fully supported as noise failed a 13ms bound. Eight isolated
+// runs and a CI-shaped run on VM43 put every difference within ±2ms; the leak
+// was in the estimator, not the gateway. TestPairedSpread_CoversTheNullAndSeesAnOffset
+// pins the estimator's coverage and power on synthetic heavy-tailed rounds and
+// records what the old one would have done.
 func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing samples; -short skips them")
@@ -391,9 +404,9 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	samples := sampleInterleaved(t, base, timingCauses(), timingRounds)
 	existence := pairedDifference(samples, unknownName, wrongPassword)
 	credential := pairedDifference(samples, rightPassword, wrongPassword)
-	noise := max(pairedNoise(samples, unknownName, wrongPassword),
-		pairedNoise(samples, rightPassword, wrongPassword))
-	bound := 4 * noise
+	noise := max(pairedSpread(samples, unknownName, wrongPassword),
+		pairedSpread(samples, rightPassword, wrongPassword))
+	bound := timingBoundMultiple * noise
 	if bound < timingFloor {
 		bound = timingFloor
 	}
@@ -478,21 +491,46 @@ func pairedDifference(samples map[string][]time.Duration, a, b string) time.Dura
 // pairedNoise is the same statistic computed where the answer must be zero:
 // how far the paired difference moves between the even and odd rounds of the
 // SAME run. That is this machine's noise in the units the assertion uses.
-func pairedNoise(samples map[string][]time.Duration, a, b string) time.Duration {
+func pairedSpread(samples map[string][]time.Duration, a, b string) time.Duration {
 	va, vb := samples[a], samples[b]
 	n := min(len(va), len(vb))
-	var even, odd []time.Duration
+	d := make([]time.Duration, n)
 	for i := range n {
-		if i%2 == 0 {
-			even = append(even, va[i]-vb[i])
-		} else {
-			odd = append(odd, va[i]-vb[i])
-		}
+		d[i] = va[i] - vb[i]
 	}
-	if len(even) == 0 || len(odd) == 0 {
+	return medianStdErr(d)
+}
+
+// timingBoundMultiple is how many standard errors of the median a compared
+// difference may reach before it counts as distinguishable. Five. Under a
+// normal approximation four would already be a one-sided 3e-5 false alarm per
+// property per run, but the median of 24 heavy-tailed rounds is wider than the
+// approximation: on synthetic CI-shaped rounds four covered the null 99.90% of
+// the time, exactly at the cell's threshold, and five buys the margin. The
+// committed controls inject the bound PLUS a margin, so a wider bound costs
+// nothing they measure.
+const timingBoundMultiple = 5
+
+// medianStdErr estimates the standard error of the median of d from d itself:
+// the median absolute deviation, scaled to a standard deviation (1.4826 for a
+// normal core), then to the standard error of a median (√(π/2)/√n). Robust to
+// the tail — a GC pause in a few rounds moves it a little, not a lot — and it
+// uses every round, so it is a stable estimate rather than one draw of a noisy
+// one. Zero when there is nothing to estimate from; the caller's floor covers
+// that.
+func medianStdErr(d []time.Duration) time.Duration {
+	if len(d) < 2 {
 		return 0
 	}
-	return abs(median(even) - median(odd))
+	m := median(d)
+	dev := make([]time.Duration, len(d))
+	for i, v := range d {
+		dev[i] = abs(v - m)
+	}
+	mad := float64(median(dev))
+	sd := 1.4826 * mad
+	se := 1.2533 * sd / math.Sqrt(float64(len(d)))
+	return time.Duration(se)
 }
 
 func checkIndistinguishable(t *testing.T, property string, meds map[string]time.Duration,
