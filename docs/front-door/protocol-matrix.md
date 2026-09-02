@@ -522,12 +522,13 @@ different limits and will move for different reasons.
   declared length** — reads are bounded by the transport buffer, §8.3 — **and
   nothing past a refused header is interpreted as framing**).
 
-  *Amended by jarvis as lead, 2026-09-03. **RATIFICATION BY JOHNO IS PENDING** —
-  this records a lead's amendment awaiting his decision, not a decision he has
-  made. (The earlier wording here said "Johno ratifies", which stated a
-  ratification that had not happened; a document that predicts a decision is
-  indistinguishable from one that reports it, and the next reader cannot tell
-  which they are looking at.) The previous wording,
+  *Amended by jarvis as lead and **RATIFIED BY JOHNO, 2026-09-03** (ADR-0075
+  Amendment 8, item 5). The marker here read PENDING until he ruled — deliberately,
+  because an earlier draft said "Johno ratifies" and stated a ratification that had
+  not happened. A document that predicts a decision is indistinguishable from one
+  that reports it, and the next reader cannot tell which they are looking at; the
+  pending marker existed so that gap was visible rather than papered over, and it
+  is replaced now that the decision is real. The previous wording,
   "no read past a refused header", read as a source-read boundary the reader
   does not provide and does not need to. The measurement decided which side was
   wrong: a refusal consumed 4101 source bytes — one transport bufferful, NOT the
