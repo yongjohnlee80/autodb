@@ -108,6 +108,82 @@ func pgClient(t *testing.T, addr, secret, database string) *pgproto3.Frontend {
 	}
 }
 
+// pgClientCollecting authenticates and returns the frontend plus every frame the
+// server sent between the auth request and ReadyForQuery — the session-open set.
+func pgClientCollecting(t *testing.T, addr, secret, database string) (*pgproto3.Frontend, []pgproto3.BackendMessage) {
+	t.Helper()
+
+	conn, fe := startupTo(t, addr, map[string]string{
+		"user": "root", "database": database, "application_name": "psql",
+	})
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("auth request: %v", err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: secret})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var opening []pgproto3.BackendMessage
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("the success sequence: %v", err)
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			return fe, opening
+		}
+		opening = append(opening, snapshot(msg))
+	}
+}
+
+// snapshot copies a received message so it survives the next Receive.
+//
+// pgproto3's Frontend REUSES its message structs — Receive returns &f.dataRow,
+// &f.parameterStatus and so on — so retaining the pointer gives an alias that
+// changes under you. Collecting frames without copying means every DataRow in a
+// slice is the LAST DataRow, and a three-entry ParameterStatus map holds one
+// value three times. That is how this helper came to exist: the §3.3 cell
+// reported a session-open set of exactly one status and the bug was mine, not
+// the front door's.
+func snapshot(m pgproto3.BackendMessage) pgproto3.BackendMessage {
+	switch v := m.(type) {
+	case *pgproto3.RowDescription:
+		fields := make([]pgproto3.FieldDescription, len(v.Fields))
+		for i, f := range v.Fields {
+			fields[i] = f
+			fields[i].Name = append([]byte(nil), f.Name...)
+		}
+		return &pgproto3.RowDescription{Fields: fields}
+	case *pgproto3.DataRow:
+		vals := make([][]byte, len(v.Values))
+		for i, b := range v.Values {
+			if b != nil {
+				vals[i] = append([]byte(nil), b...)
+			}
+		}
+		return &pgproto3.DataRow{Values: vals}
+	case *pgproto3.CommandComplete:
+		return &pgproto3.CommandComplete{CommandTag: append([]byte(nil), v.CommandTag...)}
+	case *pgproto3.ParameterStatus:
+		c := *v
+		return &c
+	case *pgproto3.ErrorResponse:
+		c := *v
+		return &c
+	case *pgproto3.NoticeResponse:
+		c := *v
+		return &c
+	case *pgproto3.ReadyForQuery:
+		c := *v
+		return &c
+	case *pgproto3.BackendKeyData:
+		c := *v
+		return &c
+	}
+	return m
+}
+
 // query sends one simple Query and collects every frame through ReadyForQuery.
 func query(t *testing.T, fe *pgproto3.Frontend, sql string) []pgproto3.BackendMessage {
 	t.Helper()
@@ -122,7 +198,7 @@ func query(t *testing.T, fe *pgproto3.Frontend, sql string) []pgproto3.BackendMe
 		if err != nil {
 			t.Fatalf("reading the response to %q: %v (so far %d frames)", sql, err, len(out))
 		}
-		out = append(out, msg)
+		out = append(out, snapshot(msg))
 		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
 			return out
 		}
@@ -318,4 +394,99 @@ func errorText(msgs []pgproto3.BackendMessage) string {
 		return e.Code + " " + e.Message
 	}
 	return "(no error)"
+}
+
+// An OPEN transaction is rolled back when the peer says Terminate, and the proof
+// has to outlive the connection that held it: the rollback happens inside
+// CloseWireSession, so a cell that only watched the loop reach that call would
+// be claiming the engine's work for the loop.
+//
+// So this writes inside a transaction, terminates WITHOUT committing, and then
+// asks a SECOND connection what survived. Nothing may have.
+func TestPGLoop_TerminateRollsBackAnOpenTransaction(t *testing.T) {
+	addr, secret, database := pgLoop(t)
+	table := fmt.Sprintf("fd_rollback_%d", time.Now().UnixNano())
+
+	setup := pgClient(t, addr, secret, database)
+	if msgs := query(t, setup, fmt.Sprintf("CREATE TABLE %s (n int)", table)); hasError(msgs) {
+		t.Fatalf("creating the scratch table: %v", errorText(msgs))
+	}
+	t.Cleanup(func() {
+		cleanup := pgClient(t, addr, secret, database)
+		_ = query(t, cleanup, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+	})
+
+	// A second connection opens a transaction, writes, and never commits.
+	doomed := pgClient(t, addr, secret, database)
+	if msgs := query(t, doomed, "BEGIN"); hasError(msgs) {
+		t.Fatalf("BEGIN: %v", errorText(msgs))
+	}
+	if msgs := query(t, doomed, fmt.Sprintf("INSERT INTO %s VALUES (1)", table)); hasError(msgs) {
+		t.Fatalf("insert: %v", errorText(msgs))
+	}
+	// The write is visible to ITSELF, so the cell is not passing because the
+	// insert silently failed — the row exists until the transaction ends.
+	if dr, ok := firstOfType[*pgproto3.DataRow](query(t, doomed,
+		fmt.Sprintf("SELECT count(*) FROM %s", table))); !ok || string(dr.Values[0]) != "1" {
+		t.Fatal("the uncommitted row is not visible inside its own transaction; the setup proves nothing")
+	}
+
+	doomed.Send(&pgproto3.Terminate{})
+	if err := doomed.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A THIRD connection: the uncommitted write must be gone.
+	after := pgClient(t, addr, secret, database)
+	var got string
+	for range 50 {
+		dr, ok := firstOfType[*pgproto3.DataRow](query(t, after, fmt.Sprintf("SELECT count(*) FROM %s", table)))
+		if !ok {
+			t.Fatal("counting after the terminate")
+		}
+		got = string(dr.Values[0])
+		if got == "0" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s still holds %s row(s) after Terminate — the open transaction was not rolled back", table, got)
+}
+
+// The three SYNTHESIZED session-open statuses are present and correct. This is
+// F0e's half of §3.3, and it is all that is implemented today.
+//
+// It deliberately does NOT claim §3.3. That row also requires the TARGET's own
+// ParameterStatus set — every status the pinned connection presented at its own
+// connect, forwarded verbatim — and this cell is how I established that the
+// forwarded half does not exist: with the message-aliasing bug fixed, the
+// session-open set is exactly these three and nothing else. Closing §3.3 needs an
+// engine seam exposing the target's startup statuses; none exists, so the row
+// stays awaiting rather than being cited from the half that does work.
+func TestPGLoop_SessionOpenCarriesTheThreeSynthesizedStatuses(t *testing.T) {
+	addr, secret, database := pgLoop(t)
+	_, opening := pgClientCollecting(t, addr, secret, database)
+
+	statuses := map[string]string{}
+	for _, m := range opening {
+		if ps, ok := m.(*pgproto3.ParameterStatus); ok {
+			statuses[ps.Name] = ps.Value
+		}
+	}
+	// is_superuser is ALWAYS off: a client asking whether it is superuser is
+	// asking about the target's role, and the answer through this surface is that
+	// autodb's gates apply regardless of what the target would have said.
+	if got := statuses["is_superuser"]; got != "off" {
+		t.Errorf("is_superuser = %q, want %q — it is synthesized, never the target's answer", got, "off")
+	}
+	// The echo of the accepted application_name.
+	if got := statuses["application_name"]; got != "psql" {
+		t.Errorf("application_name = %q, want the echo of what the client sent", got)
+	}
+	// The CANONICAL account name, not the client's spelling: row 2.7 matched
+	// "root" case-insensitively, and the identity a session reports should be the
+	// one the grants are written against.
+	if got := statuses["session_authorization"]; got != "root" {
+		t.Errorf("session_authorization = %q, want the canonical %q", got, "root")
+	}
 }
