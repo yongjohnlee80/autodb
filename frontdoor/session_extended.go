@@ -52,14 +52,6 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 	sess exec.WireSessionResult, msg pgproto3.FrontendMessage, peer string,
 	seg *segmentLane, closeReason *string) bool {
 
-	// DISCARD-THROUGH-SYNC. Only Sync ends it; Terminate is handled by the outer
-	// decision table, which never reaches here.
-	if seg.discarding {
-		if _, isSync := msg.(*pgproto3.Sync); !isSync {
-			return true
-		}
-	}
-
 	id, uid := sess.SessionID, sess.UserID
 	var err error
 

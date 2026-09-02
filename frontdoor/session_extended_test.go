@@ -217,3 +217,43 @@ func TestExtDiscard_LocalExecuteRefusalDiscardsUntilSync(t *testing.T) {
 		}
 	}
 }
+
+// r1 MF4, loop level — a simple Query pipelined behind a local refusal must be
+// discarded. The live cell proves the absent ROW; this one proves the engine is
+// never asked, which is the same rule one layer up and costs no database.
+func TestExtDiscard_SimpleQueryDoesNotEscapeTheDiscard(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.parseErr = auth.ErrDenied
+	_, addr := loopListener(t, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Parse{Name: "rejected", Query: "SELECT 1"})
+	fe.Send(&pgproto3.Query{String: "INSERT INTO t VALUES (1)"})
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
+		t.Fatalf("no readiness after the discarded segment (got %q)", got)
+	}
+	if len(q.sawSQL) != 0 {
+		t.Fatalf("the engine executed %v inside a discarding segment; every message but Sync and Terminate "+
+			"is dropped, and a simple Query is a message", q.sawSQL)
+	}
+
+	// POSITIVE CONTROL: after Sync ended the discard, the same session runs a
+	// simple Query normally — so the guard released rather than wedged.
+	fe.Send(&pgproto3.Query{String: "SELECT 1"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
+		t.Fatalf("the session did not recover after Sync (got %q)", got)
+	}
+	if len(q.sawSQL) != 1 || q.sawSQL[0] != "SELECT 1" {
+		t.Fatalf("after Sync the engine saw %v, want [SELECT 1] — the discard must end at Sync", q.sawSQL)
+	}
+}

@@ -104,6 +104,28 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			return nil
 		}
 
+		// DISCARD-THROUGH-SYNC APPLIES TO EVERY MESSAGE, and it has to be here —
+		// before the decision table, before the extended routing, before Query —
+		// because PostgreSQL's rule is about the SEGMENT, not about one protocol's
+		// frames. It ignores everything but Sync and Terminate after an error in a
+		// segment, and a simple Query is a message like any other.
+		//
+		// Guarding only the extended path let a Query pipelined behind a refused
+		// Parse fall through to runQuery and EXECUTE: lector r1 MF4 committed a
+		// row that way. A client that mixes the protocols on one connection —
+		// lib/pq does — hits that with ordinary traffic.
+		if seg.discarding {
+			switch msg.(type) {
+			case *pgproto3.Sync:
+				// Ends the discard; routed below so the engine clears the segment
+				// and the client gets its readiness byte.
+			case *pgproto3.Terminate:
+				// Always admissible, and the decision table below closes cleanly.
+			default:
+				continue // discarded, exactly as the target would discard it
+			}
+		}
+
 		if d, decided := dispatchFrame(msg); decided {
 			l.applyDispatch(conn, be, d, peer, closeReason)
 			if d.after == endSession {
