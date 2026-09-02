@@ -94,6 +94,12 @@ type Listener struct {
 	// observe the real enforcement path without waiting thirty seconds.
 	testSegmentStall *time.Duration
 
+	// testReaderReady hands a cell the per-session frame reader the moment it
+	// exists, so a cell can MEASURE what reached the Backend rather than infer it
+	// from the frames it received (lector r2). There is no other way in: the
+	// reader is per-connection and owned by the session goroutine.
+	testReaderReady func(*frameReader)
+
 	// testSegmentMsgs and testSegmentBytes lower the extended segment's caps so a
 	// cell can reach them without sending 96 MiB.
 	testSegmentMsgs  *int
@@ -191,6 +197,9 @@ type Options struct {
 
 	// testOutputCap lowers the cumulative output cap for a cell.
 	testOutputCap *int64
+
+	// testReaderReady publishes the per-session reader to a cell.
+	testReaderReady func(*frameReader)
 
 	// testSegmentMsgs and testSegmentBytes lower the segment caps for a cell.
 	testSegmentMsgs  *int
@@ -306,6 +315,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.onSession = opt.OnSession
 	l.queries = opt.Queries
 	l.testOutputCap = opt.testOutputCap
+	l.testReaderReady = opt.testReaderReady
 	l.testSegmentMsgs = opt.testSegmentMsgs
 	l.testSegmentBytes = opt.testSegmentBytes
 	l.testWatermark = opt.testWatermark
@@ -659,6 +669,9 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		// segment input it cannot grow with what a peer sends (admission.go's
 		// ControlLanePerConn note).
 		fr := newFrameReader(stream)
+		if l.testReaderReady != nil {
+			l.testReaderReady(fr)
+		}
 		be := pgproto3.NewBackend(fr, stream)
 		be.SetMaxBodyLen(PreAuthMaxBodyLen)
 		var aerr error

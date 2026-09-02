@@ -268,6 +268,22 @@ func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, fr *fr
 		return true
 	}
 
+	// AN ALREADY-DISCARDING SEGMENT IS NOT RE-ADMITTED (jarvis's diagnosis,
+	// proven live by the discriminator below).
+	//
+	// PostgreSQL answers an error mid-segment by discarding until Sync and
+	// SAYING NOTHING FURTHER. Re-admitting each subsequent frame emitted a fresh
+	// ErrorResponse per frame — the client saw four refusals for one segment and
+	// never reached readiness at all, because the discard never ended.
+	//
+	// The frame is still SKIPPED: discarding means its body must not be decoded
+	// any more than the crossing frame's was. What changes is that it is not
+	// re-judged and not re-reported.
+	if seg.discarding {
+		fr.skipFrame(h)
+		return true
+	}
+
 	seg.msgs++
 	seg.addBytes(int64(h.declared))
 	// DEFENCE IN DEPTH, and deliberately redundant: stage two re-reads these same

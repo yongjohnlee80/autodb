@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"sync/atomic"
 )
 
 // THE TYPE BYTE MUST BE CHECKED ON THE PATH THE BYTES TAKE, NOT BESIDE IT.
@@ -70,8 +71,15 @@ type frameReader struct {
 	// delivered counts bytes handed to the Backend, so a cell can MEASURE that a
 	// refused frame's body was never delivered. The property is a resource one —
 	// from the wire a refusal looks the same whether or not the body was decoded
-	// — so it has to be measured rather than asserted (lector r0).
-	delivered int
+	// — so it has to be measured rather than asserted (lector r0, and again at r2:
+	// a regression that decodes the body before the same fatal 08P01 is invisible
+	// to any cell that only reads the frames).
+	//
+	// ATOMIC because the measuring cell is the peer, not the session: it reads
+	// this from the test goroutine while the session goroutine is still running
+	// its close path. A plain int here is a -race failure in the one cell that
+	// exists to prove a resource property.
+	delivered atomic.Int64
 
 	// skipped records that the last admission decision was a refusal.
 	skipped bool
@@ -221,7 +229,7 @@ func (r *frameReader) Read(p []byte) (int, error) {
 	if len(r.buf) > 0 {
 		n := copy(p[:room], r.buf)
 		r.buf = r.buf[n:]
-		r.delivered += n
+		r.delivered.Add(int64(n))
 		if r.deliverable >= n {
 			r.deliverable -= n
 		}
@@ -236,7 +244,7 @@ func (r *frameReader) Read(p []byte) (int, error) {
 	}
 	n, err := r.src.Read(p[:room])
 	if n > 0 {
-		r.delivered += n
+		r.delivered.Add(int64(n))
 		if r.deliverable >= n {
 			r.deliverable -= n
 		}
@@ -444,7 +452,7 @@ func (r *frameReader) drainSkip() error {
 
 // deliveredBytes reports how much has reached the Backend, for cells measuring
 // that a refused frame's body did not.
-func (r *frameReader) deliveredBytes() int { return r.delivered }
+func (r *frameReader) deliveredBytes() int { return int(r.delivered.Load()) }
 
 // allow admits a frame for delivery: pgproto3 may now see exactly its bytes.
 func (r *frameReader) allow(h frameHeader) { r.deliverable += 1 + h.declared }

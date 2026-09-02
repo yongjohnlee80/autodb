@@ -3,7 +3,9 @@ package frontdoor
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -318,6 +320,223 @@ func TestExtCaps_ASegmentPastItsMessageCapIsRefusedAndDiscardsThroughSync(t *tes
 	r := runQueryOnce(t, fe)
 	if r == nil {
 		t.Fatal("the session was unusable after a segment-cap refusal; the cap must refuse the segment, not the session")
+	}
+}
+
+// THE DISCRIMINATOR: is the re-admission defect FIXED, or merely UNREACHABLE?
+//
+// The shape and the reasoning are mine; the driver is white-vision's, and the
+// defect is hers to have found. When the delivery boundary landed the existing
+// discard-through-Sync cell went green — and a green integration cell is NOT
+// evidence that re-admission is impossible: a boundary that keeps frames out of
+// reach hides the defect rather than fixing it, and "fixed" and "unreachable"
+// are different facts about a component.
+//
+// So this looks at what ONLY re-admission produces. PostgreSQL answers an error
+// mid-segment by discarding until Sync and SAYING NOTHING FURTHER, so the count
+// of ErrorResponses before readiness is the discriminator — one is conformant,
+// many is the bug — and no reader-side change can alter that count either way.
+//
+// DRAINED THROUGH READINESS, which is the step the cap cell above skips: it
+// breaks at the first ErrorResponse and therefore cannot count a second. That
+// one-step-short shape is how this defect sat behind a green suite.
+//
+// The byte cap trips it rather than the message cap: same branch, four frames
+// instead of ten thousand, and no dependence on the default staying where it is.
+// One driver is enough BECAUSE it is one branch — a second cell through the
+// message cap would fail with this one, for this one's reason.
+func TestAdmission_ADiscardingSegmentIsNotReAdmittedFrameByFrame(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.extMsgs = []exec.WireMessage{{Kind: "ParameterDescription"}, {Kind: "NoData"}}
+	capBytes := int64(4096)
+	capMsgs := 1 << 20 // out of the way: the BYTE cap is what trips here
+	_, _, addr := listenerWith(t, Options{
+		Authn: &fakeAuth{result: goodSession()}, Queries: q, AuthFailuresPerIP: unthrottled,
+		testSegmentBytes: &capBytes, testSegmentMsgs: &capMsgs,
+	})
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetReadDeadline(time.Now().Add(15 * time.Second))
+
+	// Four frames, each over the cap on its own, then Sync — in ONE write, so
+	// they are pipelined behind the breach exactly as a real client sends them.
+	big := rawDescribe(strings.Repeat("b", 5000))
+	one := []byte{}
+	for range 4 {
+		one = append(one, big...)
+	}
+	if _, err := conn.Write(append(one, rawSync()...)); err != nil {
+		t.Fatal(err)
+	}
+
+	refusals, sawReady := 0, false
+	for !sawReady {
+		m, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("after %d refusals and no readiness: %v — the segment desynchronised", refusals, err)
+		}
+		switch v := m.(type) {
+		case *pgproto3.ErrorResponse:
+			if v.Detail != ruleSegmentCap {
+				t.Fatalf("refusal = %s/%s, want %s", v.Code, v.Detail, ruleSegmentCap)
+			}
+			refusals++
+		case *pgproto3.ReadyForQuery:
+			sawReady = true
+		}
+	}
+	if refusals != 1 {
+		t.Fatalf("%d ErrorResponses before readiness, want exactly 1 — PostgreSQL answers an error "+
+			"mid-segment by discarding until Sync and saying nothing further, so one refusal per "+
+			"over-cap frame means the segment is being RE-ADMITTED while already discarding", refusals)
+	}
+}
+
+// AND THE FRAMES BEHIND THE BREACH ARE SKIPPED, NOT DECODED — MEASURED.
+//
+// This cell exists because a mutation found nothing. Dropping fr.skipFrame(h)
+// from the guard above, leaving everything else intact, kept the whole package
+// GREEN: the refusal count is right, readiness arrives, the session recovers.
+// Every visible behaviour is identical, because the difference is not a
+// behaviour — it is what the refusal COST.
+//
+// white-vision flagged the same line from the other side when she found her fix
+// could not carry the skip on main. Between the two, the half neither of us
+// could see was the half nothing observed.
+//
+// MEASURED, both directions: 5 bytes reach the Backend with the skip — the Sync
+// that ends the discard, and nothing else — against 15026 without it, the three
+// discarded bodies decoded in full. The segment cap is 96 MiB and the message
+// cap is now 64 MiB, so "decoded anyway" is the whole cost of the refusal.
+func TestAdmission_FramesDiscardedBehindABreachAreNotDecoded(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.extMsgs = []exec.WireMessage{{Kind: "ParameterDescription"}, {Kind: "NoData"}}
+	capBytes := int64(4096)
+	capMsgs := 1 << 20
+	var mu sync.Mutex
+	var readers []*frameReader
+	_, _, addr := listenerWith(t, Options{
+		Authn: &fakeAuth{result: goodSession()}, Queries: q, AuthFailuresPerIP: unthrottled,
+		testSegmentBytes: &capBytes, testSegmentMsgs: &capMsgs,
+		testReaderReady: func(fr *frameReader) { mu.Lock(); readers = append(readers, fr); mu.Unlock() },
+	})
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	mu.Lock()
+	if len(readers) == 0 {
+		mu.Unlock()
+		t.Fatal("no session reader was published; this cell cannot measure anything")
+	}
+	fr := readers[len(readers)-1]
+	mu.Unlock()
+	before := fr.deliveredBytes()
+
+	big := rawDescribe(strings.Repeat("b", 5000))
+	one := []byte{}
+	for range 4 {
+		one = append(one, big...)
+	}
+	if _, err := conn.Write(append(one, rawSync()...)); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for {
+		m, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("draining the refused segment: %v", err)
+		}
+		if _, ok := m.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+
+	// The Sync is the only frame in that write the front door is entitled to
+	// decode: it is what ENDS the discard. Everything ahead of it was refused.
+	const syncWire = 5
+	if got := fr.deliveredBytes() - before; got > syncWire {
+		t.Errorf("%d bytes reached the Backend while a segment was discarding, want at most %d (the Sync) "+
+			"— frames behind a breach must be SKIPPED, and a discard that decodes what it discards pays "+
+			"the full cost of the frames it refused", got, syncWire)
+	}
+}
+
+// ...and the same property at the UNIT, which is the half an integration cell
+// cannot be trusted for.
+//
+// Driving admitSegmentFrame directly is independent of what any reader delivers,
+// so it separates "the component is correct" from "the component is currently
+// unreachable" — the distinction the cell above cannot make on its own once a
+// delivery boundary sits upstream of it. Both are white-vision's, written
+// against a different repair of the same defect before this one existed, which
+// is the one thing a cell written alongside a fix cannot be.
+func TestAdmission_AnAlreadyDiscardingSegmentIsNotAdmittedAgain(t *testing.T) {
+	t.Parallel()
+	l, conn, be, fr, refusals := admissionHarness(t)
+	closeReason := ""
+	seg := &segmentLane{}
+	over := frameHeader{typ: 'D', declared: int(maxSegmentBytes) + 1}
+
+	if !l.admitSegmentFrame(conn, be, fr, seg, over, "probe", &closeReason) {
+		t.Fatal("the first breach closed the session; it must refuse the segment and survive")
+	}
+	if !seg.discarding {
+		t.Fatal("the first breach did not set discarding; this cell cannot observe re-admission")
+	}
+	msgs, bytes := seg.msgs, seg.bytes
+
+	if !l.admitSegmentFrame(conn, be, fr, seg, over, "probe", &closeReason) {
+		t.Fatal("the second frame closed the session")
+	}
+	if seg.msgs != msgs || seg.bytes != bytes {
+		t.Errorf("a discarding segment was re-counted: msgs %d→%d, bytes %d→%d", msgs, seg.msgs, bytes, seg.bytes)
+	}
+	if got := refusals(); got != 1 {
+		t.Errorf("the client received %d ErrorResponses for ONE segment breach, want 1", got)
+	}
+}
+
+// admissionHarness gives a Listener, a live Backend over a real pipe, the reader
+// the admission path now takes, and a count of the ErrorResponses actually
+// WRITTEN to the peer — which is the assertion that matters, since a re-refusal
+// is a defect precisely because the client sees it.
+func admissionHarness(t *testing.T) (*Listener, net.Conn, *pgproto3.Backend, *frameReader, func() int) {
+	t.Helper()
+	client, server := net.Pipe()
+	t.Cleanup(func() { _ = client.Close(); _ = server.Close() })
+
+	seen := make(chan int, 1)
+	go func() {
+		fe := pgproto3.NewFrontend(client, client)
+		n := 0
+		for {
+			m, err := fe.Receive()
+			if err != nil {
+				seen <- n
+				return
+			}
+			if _, ok := m.(*pgproto3.ErrorResponse); ok {
+				n++
+			}
+		}
+	}()
+
+	l, _, _ := listenerWith(t, Options{
+		Authn: &fakeAuth{result: goodSession()}, Queries: okQueries(), AuthFailuresPerIP: unthrottled,
+	})
+	fr := newFrameReader(server)
+	return l, server, pgproto3.NewBackend(fr, server), fr, func() int {
+		_ = server.Close()
+		_ = client.Close()
+		select {
+		case n := <-seen:
+			return n
+		case <-time.After(5 * time.Second):
+			t.Fatal("the frontend reader did not finish")
+			return -1
+		}
 	}
 }
 
