@@ -52,6 +52,14 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 	sess exec.WireSessionResult, msg pgproto3.FrontendMessage, peer string,
 	seg *segmentLane, closeReason *string) bool {
 
+	// DISCARD-THROUGH-SYNC. Only Sync ends it; Terminate is handled by the outer
+	// decision table, which never reaches here.
+	if seg.discarding {
+		if _, isSync := msg.(*pgproto3.Sync); !isSync {
+			return true
+		}
+	}
+
 	id, uid := sess.SessionID, sess.UserID
 	var err error
 
@@ -94,7 +102,7 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 	}
 
 	if err != nil {
-		return l.frameExtendedError(conn, be, sess, err, peer, closeReason)
+		return l.frameExtendedError(conn, be, sess, err, peer, seg, closeReason)
 	}
 	// Parse, Bind, Describe and Close produce no frame of their own here: their
 	// answers are queued in the engine's segment and delivered when the client
@@ -119,8 +127,9 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	// everything, and on failure the wire is unusable. Release before deciding
 	// what to tell the client, so no exit path can skip it.
 	seg.release(l)
+	seg.discarding = false
 	if err != nil {
-		return l.frameExtendedError(conn, be, sess, err, peer, closeReason)
+		return l.frameExtendedError(conn, be, sess, err, peer, seg, closeReason)
 	}
 	if !validTxStatus(status) {
 		l.onEvent(Event{Kind: "fd.refused", Reason: ruleUnframeableMessage, Peer: peer,
@@ -144,7 +153,7 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 // has not ended, and the next frames the client already pipelined would arrive
 // against a server that thinks the segment is over.
 func (l *Listener) frameExtendedError(conn net.Conn, be *pgproto3.Backend,
-	sess exec.WireSessionResult, err error, peer string, closeReason *string) bool {
+	sess exec.WireSessionResult, err error, peer string, seg *segmentLane, closeReason *string) bool {
 
 	code, rule, hint, fatal := classifyGateError(err)
 	l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()})
@@ -162,6 +171,9 @@ func (l *Listener) frameExtendedError(conn net.Conn, be *pgproto3.Backend,
 		*closeReason = rule
 		return false
 	}
+	// The segment is now discarding: this refusal is OURS, so the target never
+	// saw it and will not ignore what follows. We must.
+	seg.discarding = true
 	return true
 }
 
@@ -179,7 +191,22 @@ func (l *Listener) frameExtendedError(conn net.Conn, be *pgproto3.Backend,
 // loop holds this in a defer for the session's lifetime: teardown, disconnect
 // and every abandonment release it too. A release-at-Sync design would leak
 // those bytes for the life of the process.
-type segmentLane struct{ held int64 }
+type segmentLane struct {
+	held int64
+
+	// discarding is the front door's OWN ignore_till_sync.
+	//
+	// PostgreSQL discards every frame but Sync and Terminate after an error in a
+	// segment — but the target only starts that when IT produced the error. A
+	// Parse refused at our gate, or an Execute refused on re-authorization, never
+	// reaches the target, so nothing there starts it and the frames the client
+	// already pipelined behind the failure would be executed as though the
+	// refusal had not happened. This is the same rule, for the errors we raise.
+	//
+	// It lives on the segment, beside the reservation, because both are segment
+	// state the loop owns and Sync ends both.
+	discarding bool
+}
 
 // reserveSegment takes the segment's output working set before its FIRST frame
 // reaches the engine — the segment's own "before dispatch", so that ordinary
@@ -269,7 +296,7 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 		return false
 
 	case err != nil:
-		return l.frameExtendedError(conn, be, sess, err, peer, closeReason)
+		return l.frameExtendedError(conn, be, sess, err, peer, seg, closeReason)
 	}
 	// NOT FLUSHED HERE. The client asks for delivery with Flush or Sync, exactly
 	// as it would of PostgreSQL; flushing now would send bytes earlier than the

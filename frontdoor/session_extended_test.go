@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/exec"
 )
 
@@ -143,5 +144,76 @@ func TestExtStall_SegmentHoldingNothingStaysUnderTheIdleClock(t *testing.T) {
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
 		t.Fatalf("readiness = %q; the session did not survive its idle wait", got)
+	}
+}
+
+// r0 MF3 — a front-door-LOCAL refusal must start discard-through-Sync.
+//
+// PostgreSQL ignores every frame but Sync and Terminate after an error in a
+// segment, but the target only starts that when IT produced the error. A Parse
+// refused at our gate never reaches the target, so nothing there starts it — and
+// the frames the client already pipelined behind the failure would be executed as
+// though the refusal had not happened.
+func TestExtDiscard_LocalParseRefusalDiscardsUntilSync(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.parseErr = auth.ErrDenied
+	_, addr := loopListener(t, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Parse{Name: "rejected", Query: "INSERT INTO t VALUES (1)"})
+	fe.Send(&pgproto3.Parse{Name: "discarded", Query: "SELECT 1"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "p", PreparedStatement: "discarded"})
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
+		t.Fatalf("no readiness after the discarded segment (got %q); engine saw %v", got, q.calls())
+	}
+	got := q.calls()
+	if len(got) != 2 || got[0] != "Parse:rejected:INSERT INTO t VALUES (1)" || got[1] != "Sync" {
+		t.Fatalf("the engine saw %v, want the refused Parse and then only Sync — everything pipelined behind a "+
+			"local refusal must be discarded", got)
+	}
+}
+
+// ...and the same for a refusal at EXECUTE, which is the other place the front
+// door refuses without the target ever seeing the statement (re-authorization).
+//
+// Both are needed: the Parse case discards before anything is bound, the Execute
+// case discards after a statement and portal already exist, and a discard that
+// only covered the first would let the second run the frames behind it.
+func TestExtDiscard_LocalExecuteRefusalDiscardsUntilSync(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.executeErr = auth.ErrDenied
+	_, addr := loopListener(t, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	fe.Send(&pgproto3.Parse{Name: "s", Query: "SELECT 1"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "p", PreparedStatement: "s"})
+	fe.Send(&pgproto3.Execute{Portal: "p"})
+	fe.Send(&pgproto3.Close{ObjectType: 'S', Name: "s"})
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
+		t.Fatalf("no readiness after the discarded segment (got %q); engine saw %v", got, q.calls())
+	}
+	got := q.calls()
+	if len(got) == 0 || got[len(got)-1] != "Sync" {
+		t.Fatalf("the engine saw %v, want it to end at Sync", got)
+	}
+	for _, c := range got {
+		if c == "CloseS:s" {
+			t.Fatalf("the Close pipelined behind a refused Execute reached the engine (%v); "+
+				"after a local refusal every frame but Sync is discarded", got)
+		}
 	}
 }

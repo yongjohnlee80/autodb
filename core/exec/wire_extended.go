@@ -48,7 +48,7 @@ import (
 // own frame, exactly as WireQuery does. Extended frames arrive one at a time, so
 // the claim is per frame rather than per segment; what spans the segment is the
 // OBJECT STORE, not a lock.
-func (e *Engine) wireExtEntry(ctx context.Context, id SessionID, userID int64) (
+func (e *Engine) wireExtEntry(ctx context.Context, id SessionID, userID int64, willSend bool) (
 	*session, *meta.Connection, golibpg.PinnedConn, func(), error) {
 
 	s, err := e.sessions.lookup(id, userID)
@@ -91,7 +91,10 @@ func (e *Engine) wireExtEntry(ctx context.Context, id SessionID, userID int64) (
 	// transaction, and the wire stops being quiescent the moment the first frame
 	// is queued. So the decision is taken here, at the one point every extended
 	// frame passes through, while the wire is still idle.
-	if len(s.ext.segment) == 0 && s.ext.roWrap == nil {
+	// ...and only for a frame that will actually put something on the wire. Flush
+	// and Sync queue nothing, so opening a wrap for them would begin a
+	// transaction for a segment that does not exist, and then strand it.
+	if willSend && len(s.ext.segment) == 0 && s.ext.roWrap == nil {
 		pol, perr := e.resolveUnitPolicy(ctx, s.authority, s.userID, s.connID)
 		if perr != nil {
 			release()
@@ -144,7 +147,7 @@ func isOwnedControl(st *extStatement) bool { return st.stmt.Class == ClassContro
 func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	name, sqlText string, paramOIDs []uint32, ip string) error {
 
-	s, connRow, pc, release, err := e.wireExtEntry(ctx, id, userID)
+	s, connRow, pc, release, err := e.wireExtEntry(ctx, id, userID, true)
 	if err != nil {
 		return err
 	}
@@ -230,7 +233,7 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 	portalName, stmtName string, paramValues [][]byte, paramFormats, resultFormats []int16) error {
 
-	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID)
+	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID, true)
 	if err != nil {
 		return err
 	}
@@ -259,7 +262,7 @@ func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 // client receives the SERVER's ParameterDescription and RowDescription rather
 // than a re-derivation.
 func (e *Engine) WireDescribeStatement(ctx context.Context, id SessionID, userID int64, name string) error {
-	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID)
+	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID, true)
 	if err != nil {
 		return err
 	}
@@ -282,7 +285,7 @@ func (e *Engine) WireDescribeStatement(ctx context.Context, id SessionID, userID
 
 // WireDescribePortal asks the target to describe a portal's result shape.
 func (e *Engine) WireDescribePortal(ctx context.Context, id SessionID, userID int64, name string) error {
-	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID)
+	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID, true)
 	if err != nil {
 		return err
 	}
@@ -305,7 +308,7 @@ func (e *Engine) WireDescribePortal(ctx context.Context, id SessionID, userID in
 // WireCloseStatement releases a prepared statement and, per §4a, every portal
 // built from it.
 func (e *Engine) WireCloseStatement(ctx context.Context, id SessionID, userID int64, name string) error {
-	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID)
+	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID, true)
 	if err != nil {
 		return err
 	}
@@ -327,7 +330,7 @@ func (e *Engine) WireCloseStatement(ctx context.Context, id SessionID, userID in
 
 // WireClosePortal releases one portal.
 func (e *Engine) WireClosePortal(ctx context.Context, id SessionID, userID int64, name string) error {
-	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID)
+	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID, true)
 	if err != nil {
 		return err
 	}
@@ -358,12 +361,20 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 	if emit == nil {
 		return ErrWireEmitNil
 	}
-	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID)
+	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID, false)
 	if err != nil {
 		return err
 	}
 	defer release()
 
+	// A STANDALONE FLUSH IS A NO-OP, not an error. PostgreSQL treats Flush as a
+	// request to deliver whatever output is pending, and none pending is the
+	// ordinary case for a client that flushes defensively; golib refuses it
+	// because its own queue is empty. Answering that refusal to the peer would
+	// break a correct client for doing something the protocol allows.
+	if len(s.ext.segment) == 0 {
+		return nil
+	}
 	if ferr := pc.Flush(ctx); ferr != nil {
 		return ferr
 	}
@@ -377,13 +388,14 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 // 4:discard and PostgreSQL's own ignore_till_sync. The front-door loop must not
 // synthesise a readiness byte of its own.
 func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64) (byte, error) {
-	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID)
+	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID, false)
 	if err != nil {
 		return 0, err
 	}
 	defer release()
 
-	status, serr := pc.Sync(ctx)
+	hadWrap := s.ext.roWrap != nil
+	targetStatus, serr := pc.Sync(ctx)
 	// Sync consumes through the terminal ReadyForQuery whatever happened, so the
 	// segment's outstanding count is void either way: on success the server
 	// answered or discarded everything, and on failure the wire is unusable.
@@ -392,6 +404,26 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	s.ext.releaseReadOnlyWrap(ctx)
 	if serr != nil {
 		return 0, serr
+	}
+
+	// THE READINESS BYTE IS THE CLIENT'S TRACK, NOT THE TARGET'S.
+	//
+	// A reader outside a client transaction runs inside a hidden READ ONLY
+	// transaction autodb opened, so the TARGET reports T at Sync — and that T is
+	// OURS. Forwarding it tells a client with no transaction that it is in one,
+	// which a driver acts on: it sends the COMMIT it believes it owes, against a
+	// transaction that was rolled back before the byte reached it.
+	//
+	// So when the wrap was open, the session's own machine is the authority —
+	// the same rule the raw path follows. A CLIENT-owned transaction has no wrap,
+	// so its real T and E travel untouched.
+	status := targetStatus
+	if hadWrap {
+		clientStatus, cerr := s.wireTxStatus()
+		if cerr != nil {
+			return 0, cerr
+		}
+		status = clientStatus
 	}
 	// §4a's transaction-end rule: portals do not survive the transaction,
 	// prepared statements do. 'I' means the target reports no transaction open,
@@ -418,7 +450,7 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	if emit == nil {
 		return ErrWireEmitNil
 	}
-	s, connRow, pc, release, err := e.wireExtEntry(ctx, id, userID)
+	s, connRow, pc, release, err := e.wireExtEntry(ctx, id, userID, true)
 	if err != nil {
 		return err
 	}

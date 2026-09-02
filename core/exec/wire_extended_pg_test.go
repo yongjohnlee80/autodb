@@ -625,3 +625,75 @@ func TestExtPG_SimpleQueryDestroysTheUnnamedPairOnALiveSession(t *testing.T) {
 		t.Fatalf("Bind from the unnamed statement after a simple Query = %v, want ErrUnknownStatement", err)
 	}
 }
+
+// r0 MF1 — the hidden READ ONLY wrap is AUTODB's transaction, so its T must never
+// reach the client's track.
+//
+// A reader outside a client transaction runs inside a wrap we opened, so the
+// TARGET reports T at Sync. Forwarding that tells a client with no transaction
+// that it is in one, and a driver ACTS on it: it sends the COMMIT it believes it
+// owes, against a transaction rolled back before the byte arrived.
+func TestExtPG_HiddenReadOnlyWrapDoesNotLeakTToTheClient(t *testing.T) {
+	f, _, sid, userID, table, _ := readerWireSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := f.eng.WireParse(ctx, sid, userID, "r", "SELECT count(*) FROM "+table, nil, testIP); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if err := f.eng.WireBind(ctx, sid, userID, "r", "r", nil, nil, nil); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	// POSITIVE CONTROL: the wrap really is open, so the T this cell forbids is
+	// genuinely available to leak.
+	if err := f.eng.WireExecutePortal(ctx, sid, userID, "r", 0, testIP, func(WireMessage) error { return nil }); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	s, lerr := f.eng.sessions.lookup(sid, userID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if s.ext == nil || s.ext.roWrap == nil {
+		t.Fatal("positive control: no hidden wrap was open, so this cell cannot observe it leaking")
+	}
+
+	status, err := f.eng.WireSyncSegment(ctx, sid, userID)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if status != TxStatusIdle {
+		t.Fatalf("Sync status = %q, want %q — the reader has no client transaction and the wrap is ours", status, TxStatusIdle)
+	}
+}
+
+// r0 MF2 — a standalone Flush with nothing queued is the wire's harmless no-op.
+//
+// PostgreSQL treats Flush as a request to deliver whatever output is pending;
+// none pending is ordinary for a client that flushes defensively. golib refuses
+// it because its own queue is empty, and answering that refusal to the peer
+// breaks a correct client for doing something the protocol allows.
+func TestExtPG_EmptyFlushIsANoOpAndTheSessionStaysUsable(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := f.eng.WireFlushSegment(ctx, sid, userID, func(WireMessage) error { return nil }); err != nil {
+		t.Fatalf("a standalone Flush with nothing queued failed: %v", err)
+	}
+	// STATE-INTEGRITY POSITIVE CONTROL (lector r0 MF2): a stranded hidden wrapper
+	// would leave the session unusable, and only a following statement shows it.
+	r := runRaw(t, f, sid, userID, "SELECT 1")
+	if r.err != nil {
+		t.Fatalf("the simple Query after an empty Flush failed: %v — the Flush stranded session state", r.err)
+	}
+	if r.status != TxStatusIdle {
+		t.Errorf("status after the empty Flush = %q, want %q", r.status, TxStatusIdle)
+	}
+	s, lerr := f.eng.sessions.lookup(sid, userID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if s.ext != nil && s.ext.roWrap != nil {
+		t.Error("the empty Flush left a hidden read-only wrapper open")
+	}
+}

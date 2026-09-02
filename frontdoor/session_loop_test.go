@@ -85,10 +85,11 @@ type fakeQueries struct {
 
 	// The extended surface: what the loop asked for, what the engine emits back,
 	// and the two refusals a cell may want to script.
-	extCalls []string
-	extMsgs  []exec.WireMessage
-	parseErr error
-	syncErr  error
+	extCalls   []string
+	extMsgs    []exec.WireMessage
+	parseErr   error
+	executeErr error
+	syncErr    error
 }
 
 func (q *fakeQueries) WireQuery(_ context.Context, _ exec.SessionID, _ int64, sql, _ string,
@@ -166,6 +167,9 @@ func (q *fakeQueries) WireClosePortal(_ context.Context, _ exec.SessionID, _ int
 func (q *fakeQueries) WireExecutePortal(_ context.Context, _ exec.SessionID, _ int64,
 	portal string, _ uint32, _ string, emit func(exec.WireMessage) error) error {
 	q.extRecord("Execute:" + portal)
+	if q.executeErr != nil {
+		return q.executeErr
+	}
 	q.mu.Lock()
 	msgs := q.extMsgs
 	q.mu.Unlock()
