@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -1666,6 +1667,16 @@ func TestLoop_AnInvalidEngineReportWithholdsReadiness(t *testing.T) {
 	for {
 		msg, err := fe.Receive()
 		if err != nil {
+			// A CLOSE AND A TIMEOUT ARE DIFFERENT OUTCOMES, and accepting both
+			// as success is what the previous version did. §6.3 says the session
+			// ENDS without readiness; a session that neither sends readiness nor
+			// closes is a hang, which is worse than the defect this cell guards
+			// — and it would have passed here.
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				t.Fatalf("no readiness and no close within the budget: the session HUNG. §6.3 "+
+					"withholds the byte by ENDING the session, not by going quiet (%v)", err)
+			}
 			return // the connection ended without readiness, which is the rule
 		}
 		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
