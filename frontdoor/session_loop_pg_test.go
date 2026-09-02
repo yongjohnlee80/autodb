@@ -1286,27 +1286,81 @@ func TestPGLoop_TheClientReceivesTheTargetsOwnParameterSet(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 	_, _, listenAddr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
 
-	got := startupParameterSet(t, listenAddr, secret, database)
+	// WHOLE SET, not a sample (r0 MF1). The first version of this cell checked
+	// four names and CLAIMED set equality; a mutation dropping the target's
+	// TimeZone from the forwarded set left it green. A cell that samples proves
+	// only what it sampled, and the claim it was cited for is that the client
+	// receives the target's set.
+	direct := targetParameterSet(t, eng, secret, database)
+	relayed := startupParameterSet(t, listenAddr, secret, database)
 
-	// What the target itself reports, read through the same relay but as data
-	// rather than as startup frames — so this side cannot be wrong in the same
-	// way the forwarding side is.
-	fe := pgClient(t, listenAddr, secret, database)
-	for _, name := range []string{"server_version", "server_encoding", "client_encoding", "DateStyle"} {
-		dr, ok := firstOfType[*pgproto3.DataRow](query(t, fe, fmt.Sprintf("SHOW %s", name)))
-		if !ok {
-			t.Fatalf("reading the target's own %s", name)
+	// The three documented overrides are the only permitted difference, so they
+	// are removed from BOTH sides and compared separately (the cell below).
+	overridden := map[string]bool{"application_name": true, "is_superuser": true, "session_authorization": true}
+	for name, want := range direct {
+		if overridden[name] {
+			continue
 		}
-		want := string(dr.Values[0])
-		if got[name] == "" {
-			t.Fatalf("the client was never told %s, but the target reports %q — row 3.3 requires "+
-				"the target's set to be forwarded, and a client that asks this surface for "+
-				"%s must learn the server its statements actually run on", name, want, name)
+		got, present := relayed[name]
+		if !present {
+			t.Fatalf("the target reports %s=%q and the client was never told it — row 3.3 requires the "+
+				"target's set to be forwarded, and a set that is forwarded except for the ones nobody "+
+				"wrote a cell for is not a forwarded set", name, want)
 		}
-		if got[name] != want {
-			t.Fatalf("%s: forwarded %q, target reports %q", name, got[name], want)
+		if got != want {
+			t.Fatalf("%s: forwarded %q, target reports %q", name, got, want)
 		}
 	}
+
+	// And nothing invented: every relayed name is either the target's or one of
+	// the three. This is the half that catches a forwarded set with an extra
+	// entry, which the direction above cannot see.
+	for name := range relayed {
+		if overridden[name] {
+			continue
+		}
+		if _, fromTarget := direct[name]; !fromTarget {
+			t.Fatalf("the client was told %s, which the target never reported and which is not one of "+
+				"the three overrides — this surface must not invent parameters", name)
+		}
+	}
+	if len(direct) < 5 {
+		t.Fatalf("only %d parameters came back from the direct connection; the comparison would be "+
+			"vacuous — a whole-set claim needs a whole set to compare against", len(direct))
+	}
+	t.Logf("compared %d forwarded parameters", len(direct)-len(overridden))
+}
+
+// targetParameterSet reads the target's reported set from a SECOND engine
+// session — independent of the front door, which is the thing under test.
+//
+// It does NOT open its own driver connection. The first version did, through
+// golib's ParameterStatusReporter, and core/exec's
+// TestRawSimpleQueryCapabilityNeverLeavesCoreExec correctly failed it: the raw
+// pinned capability must not be referenced outside core/exec, and a cell is not
+// exempt from an architectural boundary because it is only a cell. The guard
+// was right and the instrument was wrong.
+//
+// The engine is the seam, and the front door's whole job here is to forward what
+// the engine hands it — so the engine's own answer on a DIFFERENT session, which
+// never passes through synthesizedStatuses, is the correct independent reading.
+// It also happens to be the honest scope: a capture bug inside the engine is
+// core/exec's cell to own, not this one's.
+func targetParameterSet(t *testing.T, eng *exec.Engine, secret, database string) map[string]string {
+	t.Helper()
+	ctx := context.Background()
+	res, err := eng.OpenWireSessionWith(ctx, exec.WireOpen{
+		PAT: secret, StartupUser: "root", Database: database, IP: "127.0.0.1",
+	})
+	if err != nil {
+		t.Fatalf("opening an independent engine session: %v", err)
+	}
+	t.Cleanup(func() { eng.CloseWireSession(ctx, res.SessionID, res.UserID, "127.0.0.1", "cell-done") })
+	if len(res.ParameterStatuses) == 0 {
+		t.Fatal("the independent session reported NO parameters — the comparison would pass " +
+			"vacuously, which is the failure this cell exists to prevent")
+	}
+	return res.ParameterStatuses
 }
 
 // The three overrides must WIN over anything the target reported under the same
