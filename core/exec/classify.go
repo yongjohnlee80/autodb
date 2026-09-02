@@ -180,7 +180,7 @@ func verbClass(word string) (Class, bool) {
 // refusal it replaces stood in for a guard that could not see inside a CTE,
 // and refused the guarded ones too.
 func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
-	st, _, err := scanScript(sqlText, backslashEscapes, false)
+	st, _, _, err := scanScript(sqlText, backslashEscapes, false)
 	return st, err
 }
 
@@ -192,7 +192,7 @@ func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
 // audited on its own when executed; splitting changes how much you can
 // submit at once, never what the core will run.
 func SplitStatements(sqlText string, backslashEscapes bool) ([]string, error) {
-	_, parts, err := scanScript(sqlText, backslashEscapes, true)
+	_, parts, _, err := scanScript(sqlText, backslashEscapes, true)
 	return parts, err
 }
 
@@ -200,9 +200,22 @@ func SplitStatements(sqlText string, backslashEscapes bool) ([]string, error) {
 // one-statement rule (ErrMultiStatement) and returns the statement's
 // verdict; with split=true it records statement boundaries instead and
 // returns their texts.
-func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, []string, error) {
+// stmtSpan is one statement's byte range in the original script, separators
+// included, so a run of statements can be dispatched as the EXACT bytes the
+// gate saw rather than a re-joined rendering of them.
+type stmtSpan struct{ start, end int }
+
+// splitStatementSpans is SplitStatements with each statement's byte range in
+// the original text alongside its trimmed form. Same lexer, same boundaries.
+func splitStatementSpans(sqlText string, backslashEscapes bool) ([]string, []stmtSpan, error) {
+	_, parts, spans, err := scanScript(sqlText, backslashEscapes, true)
+	return parts, spans, err
+}
+
+func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, []string, []stmtSpan, error) {
 	var st Statement
 	var parts []string
+	var spans []stmtSpan
 	stmtStart := 0
 	var (
 		depth       int
@@ -249,6 +262,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			// reset the per-statement classification state.
 			if part := strings.TrimSpace(sqlText[stmtStart:i]); part != "" {
 				parts = append(parts, part)
+				spans = append(spans, stmtSpan{start: stmtStart, end: i})
 			}
 			stmtStart = i
 			ended, searching, inWith, inExplain = false, true, false, false
@@ -276,7 +290,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			// being wrongly commented out (lector M4 r2 must-fix #1).
 			if backslashEscapes && i+2 < n && !isSpace(sqlText[i+2]) {
 				if err := content(); err != nil {
-					return st, parts, err
+					return st, parts, spans, err
 				}
 				i++ // consume one '-' as an operator; keep scanning
 				continue
@@ -322,7 +336,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 				}
 			}
 			if level > 0 {
-				return st, parts, fmt.Errorf("%w: unterminated block comment", ErrMalformedStatement)
+				return st, parts, spans, fmt.Errorf("%w: unterminated block comment", ErrMalformedStatement)
 			}
 			i = j
 
@@ -332,11 +346,11 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 
 		case c == '\'' || c == '"' || c == '`':
 			if err := content(); err != nil {
-				return st, parts, err
+				return st, parts, spans, err
 			}
 			j, err := scanQuoted(sqlText, i, c, backslashEscapes)
 			if err != nil {
-				return st, parts, err
+				return st, parts, spans, err
 			}
 			// A quoted string or delimited identifier is a token, so it ends
 			// the run of words before it. Without this, `AS "x" (comment)` —
@@ -348,10 +362,10 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 
 		case c == '$' && !backslashEscapes:
 			if err := content(); err != nil {
-				return st, parts, err
+				return st, parts, spans, err
 			}
 			if j, ok, err := scanDollarQuote(sqlText, i); err != nil {
-				return st, parts, err
+				return st, parts, spans, err
 			} else if ok {
 				i = j
 			} else {
@@ -361,7 +375,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 
 		case c == '(':
 			if err := content(); err != nil {
-				return st, parts, err
+				return st, parts, spans, err
 			}
 			parens = append(parens, parenState{body: opensStatementBody(w1, w2, w3)})
 			w1, w2, w3 = "", "", ""
@@ -370,7 +384,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 
 		case c == ')':
 			if err := content(); err != nil {
-				return st, parts, err
+				return st, parts, spans, err
 			}
 			if depth > 0 {
 				depth--
@@ -390,7 +404,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 
 		case isWordStart(c):
 			if err := content(); err != nil {
-				return st, parts, err
+				return st, parts, spans, err
 			}
 			j := i + 1
 			for j < n && isWordChar(sqlText[j]) {
@@ -434,7 +448,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 				// it stays refused outright rather than being handed to a
 				// guard that has no rule for it.
 				if statementBody && cls == ClassDDL {
-					return st, parts, fmt.Errorf("%w: data-modifying subquery/CTE (%s at nesting depth %d)", ErrStatementUnsupported, word, depth)
+					return st, parts, spans, fmt.Errorf("%w: data-modifying subquery/CTE (%s at nesting depth %d)", ErrStatementUnsupported, word, depth)
 				}
 				// A mutation below top level is recorded WITH ITS DEPTH, so
 				// the guard can ask whether that particular mutation is
@@ -490,7 +504,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 						searching = false
 						continue
 					}
-					return st, parts, fmt.Errorf("%w: %s", ErrStatementUnsupported, word)
+					return st, parts, spans, fmt.Errorf("%w: %s", ErrStatementUnsupported, word)
 				}
 				continue
 			}
@@ -500,7 +514,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 
 		default:
 			if err := content(); err != nil {
-				return st, parts, err
+				return st, parts, spans, err
 			}
 			// Commas, operators, numbers — any token that is not a word ends
 			// the run of words. Only whitespace and comments are transparent
@@ -511,19 +525,20 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 	}
 
 	if execComment {
-		return st, parts, fmt.Errorf("%w: unterminated executable comment", ErrMalformedStatement)
+		return st, parts, spans, fmt.Errorf("%w: unterminated executable comment", ErrMalformedStatement)
 	}
 	if !sawContent {
-		return st, parts, ErrEmptyStatement
+		return st, parts, spans, ErrEmptyStatement
 	}
 	if split {
 		if part := strings.TrimSpace(sqlText[stmtStart:]); part != "" {
 			parts = append(parts, part)
+			spans = append(spans, stmtSpan{start: stmtStart, end: len(sqlText)})
 		}
-		return st, parts, nil
+		return st, parts, spans, nil
 	}
 	if searching {
-		return st, parts, fmt.Errorf("%w: unable to classify the statement", ErrStatementUnsupported)
+		return st, parts, spans, fmt.Errorf("%w: unable to classify the statement", ErrStatementUnsupported)
 	}
 	st.Nested = nested
 	// A control statement's class is its own verb's, never something it
@@ -534,7 +549,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 	} else {
 		st.Class = maxClass
 	}
-	return st, parts, nil
+	return st, parts, spans, nil
 }
 
 // opensStatementBody reports whether the words immediately before a '('

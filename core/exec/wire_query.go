@@ -93,19 +93,28 @@ var (
 //     WHERE guard, aborted-transaction refusal, stateful-control admission —
 //     BEFORE anything is dispatched. One refused statement refuses the buffer;
 //     nothing reaches the wire;
-//   - transaction-ownership controls (BEGIN/START, COMMIT/END, ROLLBACK/ABORT,
-//     and anything ParseTxControl or the SET admission refuses, which covers
-//     SAVEPOINT/RELEASE/PREPARE TRANSACTION and SET TRANSACTION) travel the
-//     OWNED pinnedTx path and must stand alone in the buffer; every other
-//     admitted statement — SET LOCAL and LOCK included — is dispatched through
-//     SimpleQuery so the target's ParameterStatus and notices survive;
-//   - the WHOLE buffer, the exact bytes that were gated, is dispatched as ONE
-//     simple Query frame on the session's pinned connection, so PostgreSQL
-//     applies its implicit-transaction semantics natively and every frame it
-//     answers with is forwarded verbatim: RowDescription with the real type
-//     OIDs, DataRow bytes untouched, the server's CommandComplete tag, target
-//     ErrorResponse as data, asynchronous messages in wire position. Nothing
-//     is paged, decoded or re-encoded;
+//   - transaction-ownership controls (BEGIN/START, COMMIT/END, ROLLBACK/ABORT;
+//     anything ParseTxControl or the SET admission refuses — SAVEPOINT,
+//     RELEASE, PREPARE TRANSACTION, SET TRANSACTION — is refused) travel the
+//     OWNED pinnedTx path, exactly as PostgreSQL's implicit-block rules place
+//     them (protocol matrix, Query row): the statements between two controls
+//     form a SEGMENT that is dispatched as ONE simple Query frame of the exact
+//     original bytes, so the target runs it as one implicit transaction — or
+//     inside the client's explicit one when a BEGIN preceded it. `BEGIN;
+//     INSERT; COMMIT; INSERT; SELECT 1/0` therefore commits the first INSERT
+//     and rolls back only the second, as PostgreSQL documents. Every other
+//     admitted statement — SET LOCAL and LOCK included — is dispatched raw so
+//     the target's ParameterStatus and notices survive;
+//   - execution stops at the FIRST error, gate or target, and nothing after it
+//     runs; every frame the target answers with is forwarded verbatim:
+//     RowDescription with the real type OIDs, DataRow bytes untouched, the
+//     server's CommandComplete tag, target ErrorResponse as data, asynchronous
+//     messages in wire position. Nothing is paged, decoded or re-encoded;
+//   - one attempt row precedes each statement's effect and one outcome row
+//     follows it, with the server's row count: ok, ok_pending_commit inside
+//     the client's transaction, the target's error for the statement that
+//     failed, rolled_back for the statements of an implicit block the target
+//     discarded because a later one failed, and not-executed for the rest;
 //   - the status returned is the SESSION's transaction track, not the wire's:
 //     a read-only policy's hidden wrapping transaction is autodb's business,
 //     not the client's. A statement failing inside the client's transaction
@@ -157,13 +166,6 @@ const (
 	routeRaw          wireRoute = iota + 1 // SimpleQuery on the pinned connection
 	routeOwnedControl                      // the pinnedTx lifecycle (handleTxControl)
 )
-
-// ErrControlMustStandAlone refuses a Query buffer that mixes a transaction-
-// ownership control with other statements. The owned path runs one control at
-// a time and the raw path must never carry control (A1-C4), so `BEGIN; SELECT
-// 1` cannot be honoured as one buffer. psql users hit this only with multi-
-// statement input; each statement sent on its own works.
-var ErrControlMustStandAlone = errors.New("exec: a transaction-control statement must be sent as its own query, not in a multi-statement buffer")
 
 // ErrNotExecuted is the recorded outcome of a statement in a multi-statement
 // buffer that PostgreSQL did not run because an earlier one failed.
@@ -229,51 +231,55 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 	return stmt, routeRaw, nil
 }
 
+// implicitRollbackNote is the recorded error text for a statement that RAN in an
+// implicit transaction block and was then discarded by the target because a
+// later statement in the same block failed (StatusRolledBack).
+const implicitRollbackNote = "rolled back: a later statement in the same implicit transaction block failed"
+
+// wireElement is one step of a gated buffer's plan: an owned control, or a
+// raw segment of consecutive statements dispatched as one frame.
+type wireElement struct {
+	control     bool
+	first, last int // statement indices, inclusive
+}
+
 // wireQueryRaw is the postgres producer. See WireQuery.
 func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, sqlText, ip string, emit func(WireMessage) error, closeAfterRelease *bool) (byte, error) {
 	if len(sqlText) > e.maxStatementBytes {
 		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrScriptTooLarge)
 	}
-	parts, err := SplitStatements(sqlText, false)
+	parts, spans, err := splitStatementSpans(sqlText, false)
 	if err != nil && !errors.Is(err, ErrEmptyStatement) {
 		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
 	}
 	if errors.Is(err, ErrEmptyStatement) || len(parts) == 0 {
 		// Nothing to gate: the server answers an empty buffer with
 		// EmptyQueryResponse, and the client expects exactly that.
-		parts = nil
+		parts, spans = nil, nil
 	}
 
-	// GATE EVERY STATEMENT FIRST. Nothing below runs until all have passed.
-	stmts := make([]Statement, 0, len(parts))
-	owned := 0
-	for _, part := range parts {
+	// GATE EVERY STATEMENT FIRST. Nothing below runs until all have passed:
+	// a refused statement anywhere refuses the buffer with no effect at all —
+	// stricter than PostgreSQL's run-then-abort, and at least as safe.
+	stmts := make([]Statement, len(parts))
+	var plan []wireElement
+	for i, part := range parts {
 		stmt, route, gerr := e.gateWireStatement(ctx, s, pol, connRow, part, ip)
 		if gerr != nil {
 			return 0, gerr
 		}
-		if route == routeOwnedControl {
-			owned++
+		stmts[i] = stmt
+		switch {
+		case route == routeOwnedControl:
+			plan = append(plan, wireElement{control: true, first: i, last: i})
+		case len(plan) > 0 && !plan[len(plan)-1].control:
+			plan[len(plan)-1].last = i
+		default:
+			plan = append(plan, wireElement{first: i, last: i})
 		}
-		stmts = append(stmts, stmt)
 	}
-	if owned > 0 {
-		if len(parts) != 1 {
-			return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrControlMustStandAlone)
-		}
-		// The owned path: BEGIN opens the transaction THROUGH the pinned
-		// handle (session_tx.go), so pin before it runs.
-		if _, perr := e.pinWireSession(ctx, s, connRow); perr != nil {
-			return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
-		}
-		res, cerr := e.wireControl(ctx, s, connRow, stmts[0], pol, parts[0], ip)
-		if cerr != nil {
-			return e.wireTargetError(s, cerr, emit)
-		}
-		if eerr := emit(WireMessage{Kind: "CommandComplete", Tag: controlCommandTag(res)}); eerr != nil {
-			return 0, eerr
-		}
-		return s.wireTxStatus()
+	if len(parts) == 0 {
+		plan = []wireElement{{first: 0, last: -1}} // the empty frame
 	}
 
 	pc, perr := e.pinWireSession(ctx, s, connRow)
@@ -285,109 +291,181 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText,
 			fmt.Errorf("%w: the pinned connection has no simple-query face", dao.ErrUnsupported))
 	}
-
-	s.mu.Lock()
-	txID := s.txID
-	hasTx := s.tx != nil
-	s.mu.Unlock()
 	runCtx, endRun := s.runContext(ctx)
 	defer endRun()
 
-	// One attempt row per statement (P2 evidence), recorded before dispatch.
-	attempts := make([]int64, len(parts))
-	for i, part := range parts {
-		aid, aerr := e.recordAttempt(runCtx, pol.Ident, connRow.ID, ip, part, txID)
-		if aerr != nil {
-			return 0, aerr
-		}
-		attempts[i] = aid
+	// outcome is recorded per statement once the buffer has run or stopped.
+	type outcome struct {
+		attempt int64
+		txID    string
+		rows    int64
+		status  string
+		errText string
+		ran     bool
 	}
-
-	// A read-only policy outside a client transaction runs inside a hidden
-	// READ ONLY transaction on the same pinned connection: the server enforces
-	// what the classifier decided (F3a's flag). It is autodb's, so the status
-	// reported below stays the client's own track.
-	if pol.ReadOnly && !hasTx {
-		rotx, rerr := pc.BeginSessionTx(runCtx, dao.TxOptions{Access: dao.TxReadOnly})
-		if rerr != nil {
-			return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, rerr)
-		}
-		defer func() {
-			cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
-			defer cancel()
-			_ = rotx.RollbackContext(cctx)
-		}()
-	}
-
-	if h := e.hookRawDispatch; h != nil {
-		h(sqlText)
-	}
+	outcomes := make([]outcome, len(parts))
 	start := e.now()
-	var (
-		group    int // statements completed so far
-		rows     = make([]int64, len(parts))
-		failed   = -1 // index of the statement the target refused
-		targetEr *pgconn.PgError
-	)
-	status, derr := sq.SimpleQuery(runCtx, sqlText, func(m golibpg.ExtendedMessage) error {
-		switch m.Kind {
-		case "CommandComplete":
-			if group < len(rows) {
-				rows[group] = tagRowCount(m.Tag)
-			}
-			group++
-		case "EmptyQueryResponse":
-			group++
-		case "ErrorResponse":
-			if failed < 0 {
-				failed, targetEr = group, m.Err
-			}
-		}
-		if eerr := emit(wireFromExtended(m)); eerr != nil {
-			return &emitFailure{err: eerr}
-		}
-		return nil
-	})
-	dur := e.now().Sub(start)
-
-	var ef *emitFailure
-	consumerErr := errors.As(derr, &ef)
-	if derr != nil && !consumerErr {
-		// The WIRE failed (transport, or control reached the raw face, which the
-		// gate makes impossible): the pinned handle is poisoned and this session
-		// cannot continue on it. Record, then close.
-		e.auditBounded(ctx, s.userID, ip, "wire_raw_face_lost",
-			fmt.Sprintf("conn %d: session %s: %v", s.connID, s.id, derr))
-		*closeAfterRelease = s.transferClose(ip, reasonRawFaceLost)
-	}
-
-	// Outcomes: one per statement. Completed groups carry the server's row
-	// count; the refused one carries the target's error; the rest were not run.
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	for i, aid := range attempts {
-		var runErr error
-		switch {
-		case derr != nil && !consumerErr && i >= group:
-			runErr = derr
-		case failed >= 0 && i == failed:
-			runErr = targetEr
-		case failed >= 0 && i > failed:
-			runErr = ErrNotExecuted
-		case i >= group && derr == nil:
-			runErr = ErrNotExecuted
+	record := func() error {
+		dur := e.now().Sub(start)
+		for i := range outcomes {
+			o := &outcomes[i]
+			if !o.ran {
+				// Never reached: no attempt row was written (no effect was ever
+				// possible), so write attempt and outcome together now.
+				aid, aerr := e.recordAttempt(recCtx, pol.Ident, connRow.ID, ip, parts[i], "")
+				if aerr != nil {
+					return aerr
+				}
+				o.attempt, o.status, o.errText = aid, StatusError, ErrNotExecuted.Error()
+			}
+			if werr := e.writeOutcome(recCtx, pol.Ident, connRow.ID, ip, o.attempt, dur, o.rows, o.status, o.errText, o.txID); werr != nil {
+				return werr
+			}
 		}
-		if rerr := e.recordOutcome(recCtx, pol.Ident, connRow.ID, ip, aid, dur, rows[i], runErr, txID); rerr != nil {
-			return 0, rerr
-		}
+		return nil
 	}
-	if derr != nil {
+
+	for _, el := range plan {
+		if el.control {
+			i := el.first
+			s.mu.Lock()
+			txBefore := s.txID
+			s.mu.Unlock()
+			aid, aerr := e.recordAttempt(runCtx, pol.Ident, connRow.ID, ip, parts[i], txBefore)
+			if aerr != nil {
+				return 0, aerr
+			}
+			outcomes[i] = outcome{attempt: aid, txID: txBefore, ran: true, status: StatusOK}
+			res, cerr := e.wireControl(ctx, s, connRow, stmts[i], pol, parts[i], ip)
+			if cerr != nil {
+				// The owner refused (or the target did): the buffer stops here.
+				outcomes[i].status, outcomes[i].errText = StatusError, truncate(cerr.Error(), maxErrorBytes)
+				if rerr := record(); rerr != nil {
+					return 0, rerr
+				}
+				return e.wireTargetError(s, cerr, emit)
+			}
+			if eerr := emit(WireMessage{Kind: "CommandComplete", Tag: controlCommandTag(res)}); eerr != nil {
+				_ = record()
+				return 0, eerr
+			}
+			continue
+		}
+
+		// A raw segment: the exact original bytes of statements first..last.
+		segment := ""
+		if el.last >= el.first {
+			segment = sqlText[spans[el.first].start:spans[el.last].end]
+		}
+		s.mu.Lock()
+		txID, inTx := s.txID, s.tx != nil
+		s.mu.Unlock()
+		for i := el.first; i <= el.last; i++ {
+			aid, aerr := e.recordAttempt(runCtx, pol.Ident, connRow.ID, ip, parts[i], txID)
+			if aerr != nil {
+				return 0, aerr
+			}
+			outcomes[i] = outcome{attempt: aid, txID: txID, ran: true, status: StatusOK}
+			if txID != "" {
+				outcomes[i].status = StatusPendingCommit
+			}
+		}
+
+		// A read-only policy outside a client transaction runs inside a hidden
+		// READ ONLY transaction on the same pinned connection: the server
+		// enforces what the classifier decided (F3a's flag). It is autodb's, so
+		// the status reported below stays the client's own track.
+		var releaseWrap func()
+		if pol.ReadOnly && !inTx {
+			rotx, rerr := pc.BeginSessionTx(runCtx, dao.TxOptions{Access: dao.TxReadOnly})
+			if rerr != nil {
+				return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, rerr)
+			}
+			releaseWrap = func() {
+				cctx, ccancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
+				defer ccancel()
+				_ = rotx.RollbackContext(cctx)
+			}
+		}
+
+		if h := e.hookRawDispatch; h != nil {
+			h(segment)
+		}
+		group := el.first // statement index the next CommandComplete belongs to
+		failed := -1
+		var targetErr *pgconn.PgError
+		status, derr := sq.SimpleQuery(runCtx, segment, func(m golibpg.ExtendedMessage) error {
+			switch m.Kind {
+			case "CommandComplete":
+				if group <= el.last {
+					outcomes[group].rows = tagRowCount(m.Tag)
+				}
+				group++
+			case "EmptyQueryResponse":
+				group++
+			case "ErrorResponse":
+				if failed < 0 {
+					failed, targetErr = group, m.Err
+				}
+			}
+			if eerr := emit(wireFromExtended(m)); eerr != nil {
+				return &emitFailure{err: eerr}
+			}
+			return nil
+		})
+		if releaseWrap != nil {
+			releaseWrap()
+		}
+
+		var ef *emitFailure
+		consumerErr := errors.As(derr, &ef)
+		if derr != nil && !consumerErr {
+			// The WIRE failed (transport, or control reached the raw face, which
+			// the gate makes impossible): the pinned handle is poisoned and this
+			// session cannot continue on it. Record, then close.
+			e.auditBounded(ctx, s.userID, ip, "wire_raw_face_lost",
+				fmt.Sprintf("conn %d: session %s: %v", s.connID, s.id, derr))
+			*closeAfterRelease = s.transferClose(ip, reasonRawFaceLost)
+			for i := el.first; i <= el.last; i++ {
+				outcomes[i].status, outcomes[i].errText = StatusError, truncate(derr.Error(), maxErrorBytes)
+			}
+			if rerr := record(); rerr != nil {
+				return 0, rerr
+			}
+			return 0, wireFaceLost(derr)
+		}
 		if consumerErr {
+			_ = record()
 			return 0, ef.err
 		}
-		return 0, wireFaceLost(derr)
+		s.noteWireStatus(status)
+		if failed >= 0 {
+			// The target refused statement `failed`: it carries the target's
+			// error; the statements after it in this segment did not run; and
+			// if the segment was an IMPLICIT block (no client transaction), the
+			// target rolled back the ones before it — their effects are gone.
+			for i := el.first; i <= el.last; i++ {
+				switch {
+				case i == failed && targetErr != nil:
+					outcomes[i].status, outcomes[i].errText = StatusError, truncate(targetErr.Error(), maxErrorBytes)
+				case i > failed:
+					outcomes[i].status, outcomes[i].errText = StatusError, ErrNotExecuted.Error()
+				case !inTx:
+					outcomes[i].status, outcomes[i].errText = StatusRolledBack, implicitRollbackNote
+				}
+			}
+			// PostgreSQL abandons the rest of the buffer at the first error.
+			if rerr := record(); rerr != nil {
+				return 0, rerr
+			}
+			return s.wireTxStatus()
+		}
 	}
-	s.noteWireStatus(status)
+	if rerr := record(); rerr != nil {
+		return 0, rerr
+	}
 	return s.wireTxStatus()
 }
 

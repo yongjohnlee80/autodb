@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // Live cells for the RAW wire producer (golib ADR-0018 Amendment 1, autodb side).
@@ -190,32 +191,232 @@ func TestWireQueryRaw_SetTransactionNeverReachesTheRawFace(t *testing.T) {
 	}
 }
 
-// A1-C4: transaction control travels the OWNED path (never SimpleQuery) and must
-// stand alone in the buffer. COMMIT alone ends the client's transaction; a
-// mixed buffer is refused with nothing dispatched and the transaction intact.
-func TestWireQueryRaw_ControlIsOwnedAndStandsAlone(t *testing.T) {
+// histRows returns this connection's history rows for the given scripts, in
+// the order the scripts are listed (each script must appear exactly once).
+func histRows(t *testing.T, f *fixture, connID int64, scripts ...string) []*meta.HistoryEntry {
+	t.Helper()
+	rows, err := f.store.History.OnCtx(context.Background()).With(meta.HistConnID, connID).Select()
+	if err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	out := make([]*meta.HistoryEntry, 0, len(scripts))
+	for _, want := range scripts {
+		var hits []*meta.HistoryEntry
+		for _, r := range rows {
+			// The splitter keeps each statement's terminating ';' in the recorded
+			// script (the last statement has none); match on the statement itself.
+			if strings.TrimSuffix(strings.TrimSpace(r.Script), ";") == want {
+				hits = append(hits, r)
+			}
+		}
+		if len(hits) != 1 {
+			var seen []string
+			for _, r := range rows {
+				seen = append(seen, fmt.Sprintf("%q [%s tx=%q]", r.Script, r.Status, r.TxID))
+			}
+			t.Fatalf("history rows for %q: %d, want exactly 1; rows for conn %d (%d): %s", want, len(hits), connID, len(rows), strings.Join(seen, " | "))
+		}
+		out = append(out, hits[0])
+	}
+	return out
+}
+
+// Matrix Query row / MF1: explicit BEGIN and COMMIT INSIDE the buffer are mapped
+// through the session's owned transitions, never passed raw; the statements
+// between them run as one segment of the exact original bytes inside the
+// client's transaction. `BEGIN; SELECT 1; COMMIT` is one frame, as psql sends it.
+func TestWireQueryRaw_MixedBufferMapsControlsThroughTheOwnedPath(t *testing.T) {
 	f, _, sid, _, userID := pgWireSession(t)
-	mixed := runRaw(t, f, sid, userID, "SELECT 1; COMMIT")
-	if !errors.Is(mixed.err, ErrControlMustStandAlone) {
-		t.Fatalf("mixed control buffer returned %v, want ErrControlMustStandAlone", mixed.err)
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("ROLLBACK: %v", rb.err)
 	}
-	if len(mixed.dispatch) != 0 {
-		t.Fatalf("mixed buffer dispatched %q; must dispatch nothing", mixed.dispatch)
+	sql := "BEGIN;  SELECT 1 AS a ; COMMIT"
+	r := runRaw(t, f, sid, userID, sql)
+	if r.err != nil || r.status != TxStatusIdle {
+		t.Fatalf("status %q err %v, want I nil", r.status, r.err)
 	}
-	if st, _ := f.eng.WireTxStatus(sid, userID); st != TxStatusInTx {
-		t.Fatalf("status after the refused buffer %q, want T — the transaction must be untouched", st)
+	var tags []string
+	for _, m := range kinds(r.msgs, "CommandComplete") {
+		tags = append(tags, m.Tag)
 	}
+	if strings.Join(tags, "|") != "BEGIN|SELECT 1|COMMIT" {
+		t.Fatalf("CommandComplete tags %v, want BEGIN|SELECT 1|COMMIT in order", tags)
+	}
+	if len(r.dispatch) != 1 || !strings.Contains(sql, r.dispatch[0]) || strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(r.dispatch[0]), ";")) != "SELECT 1 AS a" {
+		t.Fatalf("raw dispatches %q: want exactly one segment that is a SUBSTRING of the original buffer holding only the SELECT (controls never reach the raw face)", r.dispatch)
+	}
+	if n := len(kinds(r.msgs, "DataRow")); n != 1 {
+		t.Fatalf("%d DataRows, want 1", n)
+	}
+}
+
+// Matrix Query row / MF1: PostgreSQL's documented example, verbatim semantics.
+// `BEGIN; INSERT 1; COMMIT; INSERT 2; SELECT 1/0` — the first INSERT is
+// committed by the explicit COMMIT; the second INSERT and the SELECT form a new
+// implicit block, so the failure rolls back the second INSERT only. The buffer
+// is abandoned at the first error and the session is idle afterwards.
+func TestWireQueryRaw_MixedBufferFollowsPostgresImplicitBlockRules(t *testing.T) {
+	f, connID, sid, _, userID := pgWireSession(t)
+	f.eng.history = true // the audit rows this cell reads are written only with history on
+	ctx := context.Background()
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("ROLLBACK: %v", rb.err)
+	}
+	table := fmt.Sprintf("raw_blocks_%d", fixtureSeq.Add(1))
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, "CREATE TABLE "+table+" (n int4)", testIP); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.eng.Execute(context.Background(), f.rootTok, connID, "DROP TABLE IF EXISTS "+table, testIP)
+	})
+	ins1, ins2 := "INSERT INTO "+table+" VALUES (1)", "INSERT INTO "+table+" VALUES (2)"
+	r := runRaw(t, f, sid, userID, "BEGIN; "+ins1+"; COMMIT; "+ins2+"; SELECT 1/0")
+	if r.err != nil {
+		t.Fatalf("a target error is protocol data, got %v", r.err)
+	}
+	if r.status != TxStatusIdle {
+		t.Fatalf("status %q, want I — the explicit block committed; the failing implicit block leaves no transaction", r.status)
+	}
+	var tags []string
+	for _, m := range kinds(r.msgs, "CommandComplete") {
+		tags = append(tags, m.Tag)
+	}
+	if strings.Join(tags, "|") != "BEGIN|INSERT 0 1|COMMIT|INSERT 0 1" {
+		t.Fatalf("tags %v, want BEGIN|INSERT 0 1|COMMIT|INSERT 0 1 (then the ErrorResponse, nothing after)", tags)
+	}
+	if er := kinds(r.msgs, "ErrorResponse"); len(er) != 1 || er[0].Err.Code != "22012" {
+		t.Fatalf("ErrorResponse %+v, want one division_by_zero", er)
+	}
+	if len(r.dispatch) != 2 {
+		t.Fatalf("%d raw segments, want 2 (before and after the controls): %q", len(r.dispatch), r.dispatch)
+	}
+	out, err := f.eng.Execute(ctx, f.rootTok, connID, "SELECT count(*), coalesce(min(n),0) FROM "+table, testIP)
+	if err != nil || fmt.Sprint(out.Rows[0][0]) != "1" || fmt.Sprint(out.Rows[0][1]) != "1" {
+		t.Fatalf("table = %v err %v; want exactly the first INSERT (1) committed and the second rolled back", out.Rows, err)
+	}
+	// Audit (MF2): the committed INSERT ran inside the explicit transaction
+	// (pending_commit → resolved by the projection); the second INSERT ran in the
+	// failing implicit block and is ROLLED BACK; the SELECT carries the target's
+	// error.
+	h := histRows(t, f, connID, ins1, ins2, "SELECT 1/0")
+	if h[0].TxID == "" || (h[0].Status != StatusPendingCommit && h[0].Status != StatusOK) {
+		t.Fatalf("first INSERT history %+v: want a tx id and pending_commit/ok", h[0])
+	}
+	if h[1].Status != StatusRolledBack || h[1].TxID != "" {
+		t.Fatalf("second INSERT history status %q tx %q, want rolled_back with no tx — the target discarded it", h[1].Status, h[1].TxID)
+	}
+	if h[2].Status != StatusError || !strings.Contains(h[2].Error, "division by zero") {
+		t.Fatalf("SELECT history %+v, want the target's error", h[2])
+	}
+}
+
+// Matrix Query row / MF1: an error inside the explicit block aborts it; the
+// COMMIT that follows in the same buffer is NOT run (PostgreSQL abandons the
+// buffer at the first error), the track is E, and only ROLLBACK recovers.
+func TestWireQueryRaw_MixedBufferStopsAtTheFirstErrorInsideTheExplicitBlock(t *testing.T) {
+	f, _, sid, _, userID := pgWireSession(t)
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("ROLLBACK: %v", rb.err)
+	}
+	r := runRaw(t, f, sid, userID, "BEGIN; SELECT 1/0; COMMIT")
+	if r.err != nil || r.status != TxStatusAborted {
+		t.Fatalf("status %q err %v, want E nil", r.status, r.err)
+	}
+	for _, m := range kinds(r.msgs, "CommandComplete") {
+		if m.Tag == "COMMIT" {
+			t.Fatal("COMMIT ran after the error; the buffer must be abandoned at the first error")
+		}
+	}
+	if next := runRaw(t, f, sid, userID, "SELECT 1"); !errors.Is(next.err, ErrTxAborted) {
+		t.Fatalf("in S4-E a non-recovery statement returned %v, want ErrTxAborted", next.err)
+	}
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil || rb.status != TxStatusIdle {
+		t.Fatalf("ROLLBACK: %q %v", rb.status, rb.err)
+	}
+}
+
+// MF2: OUTSIDE a client transaction a multi-statement buffer is ONE implicit
+// transaction. When a later statement fails, the target rolls back the earlier
+// ones — and the audit must say so: rolled_back, not ok. The failing statement
+// carries the target's error; statements after it were not executed.
+func TestWireQueryRaw_ImplicitBlockRollbackIsRecordedTruthfully(t *testing.T) {
+	f, connID, sid, _, userID := pgWireSession(t)
+	f.eng.history = true // the audit rows this cell reads are written only with history on
+	ctx := context.Background()
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("ROLLBACK: %v", rb.err)
+	}
+	table := fmt.Sprintf("raw_implicit_%d", fixtureSeq.Add(1))
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, "CREATE TABLE "+table+" (n int4)", testIP); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.eng.Execute(context.Background(), f.rootTok, connID, "DROP TABLE IF EXISTS "+table, testIP)
+	})
+	ins1, ins2 := "INSERT INTO "+table+" VALUES (1)", "INSERT INTO "+table+" VALUES (2)"
+	r := runRaw(t, f, sid, userID, ins1+"; SELECT 1/0; "+ins2)
+	if r.err != nil || r.status != TxStatusIdle {
+		t.Fatalf("status %q err %v", r.status, r.err)
+	}
+	out, err := f.eng.Execute(ctx, f.rootTok, connID, "SELECT count(*) FROM "+table, testIP)
+	if err != nil || fmt.Sprint(out.Rows[0][0]) != "0" {
+		t.Fatalf("count = %v err %v, want 0 — the implicit block rolled the INSERT back", out.Rows, err)
+	}
+	h := histRows(t, f, connID, ins1, "SELECT 1/0", ins2)
+	if h[0].Status != StatusRolledBack || !strings.Contains(h[0].Error, "implicit transaction") {
+		t.Fatalf("first INSERT recorded %q/%q; it RAN and was discarded — must be rolled_back, never ok", h[0].Status, h[0].Error)
+	}
+	if h[0].RowCount != 1 {
+		t.Fatalf("first INSERT row count %d, want the server's 1 kept alongside rolled_back", h[0].RowCount)
+	}
+	if h[1].Status != StatusError || !strings.Contains(h[1].Error, "division by zero") {
+		t.Fatalf("SELECT recorded %q/%q, want the target's error", h[1].Status, h[1].Error)
+	}
+	if h[2].Status != StatusError || !errors.Is(ErrNotExecuted, ErrNotExecuted) || !strings.Contains(h[2].Error, "not executed") {
+		t.Fatalf("second INSERT recorded %q/%q, want not-executed", h[2].Status, h[2].Error)
+	}
+}
+
+// MF2 distinction: INSIDE the client's explicit transaction the same failure is
+// NOT an implicit rollback — the earlier statement stays pending_commit (its
+// fate is the transaction's, resolved by the projection at ROLLBACK), the track
+// goes to E.
+func TestWireQueryRaw_FailureInsideExplicitTransactionKeepsEarlierStatementsPending(t *testing.T) {
+	f, connID, sid, _, userID := pgWireSession(t) // fixture: explicit tx open
+	f.eng.history = true                          // the audit rows this cell reads are written only with history on
+	ctx := context.Background()
+	table := fmt.Sprintf("raw_explicit_%d", fixtureSeq.Add(1))
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, "CREATE TABLE "+table+" (n int4)", testIP); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.eng.Execute(context.Background(), f.rootTok, connID, "DROP TABLE IF EXISTS "+table, testIP)
+	})
+	ins := "INSERT INTO " + table + " VALUES (1)"
+	r := runRaw(t, f, sid, userID, ins+"; SELECT 1/0")
+	if r.err != nil || r.status != TxStatusAborted {
+		t.Fatalf("status %q err %v, want E nil", r.status, r.err)
+	}
+	h := histRows(t, f, connID, ins)
+	if h[0].Status != StatusPendingCommit || h[0].TxID == "" {
+		t.Fatalf("INSERT inside the explicit tx recorded %q tx %q, want ok_pending_commit with the tx id", h[0].Status, h[0].TxID)
+	}
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil || rb.status != TxStatusIdle {
+		t.Fatalf("ROLLBACK: %q %v", rb.status, rb.err)
+	}
+}
+
+// A1-C4: a lone control travels the owned path and never the raw face; after
+// COMMIT the session is idle and a raw statement reports I.
+func TestWireQueryRaw_LoneControlIsOwned(t *testing.T) {
+	f, _, sid, _, userID := pgWireSession(t)
 	commit := runRaw(t, f, sid, userID, "COMMIT")
-	if commit.err != nil || commit.status != TxStatusIdle {
-		t.Fatalf("COMMIT: status %q err %v, want I nil", commit.status, commit.err)
-	}
-	if len(commit.dispatch) != 0 {
-		t.Fatalf("COMMIT reached the raw face (%d dispatch); control is the owned path's", len(commit.dispatch))
+	if commit.err != nil || commit.status != TxStatusIdle || len(commit.dispatch) != 0 {
+		t.Fatalf("COMMIT: status %q err %v dispatches %d, want I nil 0", commit.status, commit.err, len(commit.dispatch))
 	}
 	if cc := kinds(commit.msgs, "CommandComplete"); len(cc) != 1 || cc[0].Tag != "COMMIT" {
 		t.Fatalf("CommandComplete %+v, want COMMIT", cc)
 	}
-	// After COMMIT the session is idle; a raw statement outside a transaction works and reports I.
 	after := runRaw(t, f, sid, userID, "SELECT 42")
 	if after.err != nil || after.status != TxStatusIdle {
 		t.Fatalf("after COMMIT: status %q err %v, want I nil", after.status, after.err)
