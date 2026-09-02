@@ -8,7 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"errors"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"os"
+	"syscall"
 )
 
 // The deadline set (matrix §9).
@@ -272,7 +275,13 @@ func TestSession_AQueryBeforeF1IsRefusedAccurately(t *testing.T) {
 	}
 }
 
-// Terminate ends the session cleanly and releases what it held.
+// Terminate releases what the session held (matrix row 4:Terminate#release).
+//
+// This proves release-on-teardown, of which Terminate is one cause. It does NOT
+// observe the wire after Terminate — it never Receives — so it cannot see whether
+// the server closed cleanly; that is 4:Terminate#clean-close's job, in its own
+// cell. (Lector PR #45 r0 MF1: the two were once cited together as one row, and a
+// server emitting 0A000 before closing left this cell green.)
 func TestSession_TerminateReleasesTheReservation(t *testing.T) {
 	t.Parallel()
 	f := &fakeAuth{result: goodSession()}
@@ -309,4 +318,64 @@ func authenticated(t *testing.T, addr string) (*tls.Conn, *pgproto3.Frontend) {
 			return conn, fe
 		}
 	}
+}
+
+// Terminate must end the wire CLEANLY: the server closes the connection and
+// sends nothing first (matrix row 4:Terminate#clean-close).
+//
+// This cell exists because the two release cells were not evidence for it:
+// they send Terminate, close the socket themselves, and never Receive, so a
+// defaultSession mutated to emit 0A000 before closing left both green. This
+// one reads the wire after Terminate. A server that answers with any frame —
+// the stub's 0A000, a ReadyForQuery, anything — fails it.
+func TestSession_TerminateClosesTheWireWithoutAnErrorFrame(t *testing.T) {
+	t.Parallel()
+	f := &fakeAuth{result: goodSession()}
+	_, addr := authListener(t, f)
+	conn, fe := startupTo(t, addr, defaultParams())
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("auth request: %v", err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "autodb_pat_secret"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		msg, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("success sequence: %v", err)
+		}
+		if _, ok := msg.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+
+	fe.Send(&pgproto3.Terminate{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	// Do NOT close our side: the point is to observe what the SERVER does next.
+	// The deadline is a HANG GUARD only. Its expiry is a failure, not a pass: a
+	// server that ignores Terminate and leaves the session open also produces a
+	// non-nil Receive error here, and the first version of this cell accepted
+	// that as a clean close (lector PR #45 r1 MF3 — `return nil` → `continue`
+	// in defaultSession stayed green in 5.01s).
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	msg, err := fe.Receive()
+	if err == nil {
+		t.Fatalf("after Terminate the server sent a %T (%+v); want the connection closed with NO frame", msg, msg)
+	}
+	var ne net.Error
+	if errors.Is(err, os.ErrDeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout()) {
+		t.Fatalf("after Terminate the server left the session OPEN: the read deadline expired "+
+			"with no close (Timeout() = true) — Terminate was ignored, not honoured: %v", err)
+	}
+	if !(errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) ||
+		errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)) {
+		// An unrecognised shape is reported, never accepted: the cell must only pass
+		// on a shape it can name as the peer closing.
+		t.Fatalf("after Terminate, Receive failed with an unrecognised error shape %T: %v; "+
+			"want a prompt peer close (EOF / closed / reset)", err, err)
+	}
+	_ = conn.Close()
 }
