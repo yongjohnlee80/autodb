@@ -47,6 +47,9 @@ type dispatch struct {
 	auditKind string
 	// auditReason is the internal rule id or cause. Never sent to the peer.
 	auditReason string
+	// auditDetail is free text for the audit row: the varying particulars a
+	// stable rule id must not absorb. Never sent to the peer.
+	auditDetail string
 	// closeReason names the connection's cause of death for fd.conn_close,
 	// set only when after is endSession.
 	closeReason string

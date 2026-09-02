@@ -41,8 +41,8 @@ on session *lifetime* (r0 MF2).
 | State | Deadline armed | On expiry | Set where |
 |---|---|---|---|
 | **pre-auth** (TLS, startup, credential) | `tls` / `startup` / `auth` | uniform denial, close | `startup.go`, `auth.go` |
-| **idle — between messages** | `idle` (30m, §9) | `57P05` `gate/session-deadline` | top of the loop, **per message** (§8.4 "refreshed on message/state transitions") |
-| **frame in progress** (a type byte is present, body incomplete) | `frameStall` (30s, §7) | `08006` `frontdoor/frame-stall` | after `Peek` succeeds, before `Receive` |
+| **idle — between messages** | `idle` (30m, §9) | `57P05` `gate/session-deadline` | top of the loop, **per message**, and only when the reader says the stream is between messages (§8.4 "refreshed on message/state transitions") |
+| **frame in progress** (a type byte is present, body incomplete) | `frameStall` (30s, §7) | `08006` `frontdoor/frame-stall` | by `frameReader` as the type byte is read, **and at cycle entry when the stream is already mid-message** |
 | **statement running** (engine owns the session) | **none** | — (engine's own statement/tx timeouts bound it) | cleared after a successful `Receive` |
 | **output streaming** (each watermark flush) | `outputStall` per write | transport close, `write-failed` | `flushBounded`, cleared after each write |
 | **teardown / goodbye frame** | `deadlineGoodbyeBudget` (2s) | close regardless | in the expiry handlers |
@@ -59,6 +59,39 @@ Three consequences that were each a finding:
 - The clear belongs after `Receive`, not on the Query arm: a session-surviving
   refusal also resolves the transaction status, and that is engine work too
   (r1 MF11).
+
+**THE TYPE BYTE AND THE MESSAGE-START ARE OBSERVED ON THE BYTE PATH, NOT BESIDE
+IT.** The first implementation handed the Backend a `*bufio.Reader` and peeked
+one byte from that reader. That is correct for a client that sends a message and
+waits for the reply — psql — and wrong for every client that PIPELINES, which is
+lib/pq, JDBC batches, and every extended-protocol client by construction.
+`pgproto3.NewBackend` wraps its reader in a chunkReader whose `Next` fills with
+`io.ReadAtLeast(r.r, (*r.buf)[r.wp:], minReadCount)` — it takes the whole
+available buffer, so message 2 is inside pgproto3 while the peeked reader is
+empty, and the peek blocks on bytes already consumed. The second statement was
+accepted by the client, never seen by the engine, and nobody was told: the
+session hung until the idle deadline rather than closing. Found by white-vision
+while wiring F2; it was live on `main`.
+
+`frameReader` (`frame_reader.go`) tracks message boundaries on the only path the
+bytes take, so it cannot be outrun by read-ahead.
+
+**WHICH BUDGET IS OWED IS ASKED OF THE READER AT EVERY CYCLE ENTRY, NEVER
+ASSUMED** (r0 MF1). Reporting the message-start as it is read is necessary and
+not sufficient: the reader is shared with AUTH, and auth's Backend reads ahead
+exactly as the session's does. A client writing its `PasswordMessage` and the
+start of a `Query` in ONE write has that type byte consumed while the callback
+is still nil — nothing can re-trigger it in the loop, so the half-sent message
+waited under the budget for a client that is not asking. The entry check
+(`fr.midMessage()`) covers a message already in flight; the callback covers one
+that begins during a read. Both are needed, and the pair fails in both
+directions: assuming idle loses the stall budget, and assuming frameStall
+charges an idle session to a budget it never earned. It also makes the idle-vs-
+mid-frame question a fact about the STREAM rather than an inference from whether
+a peek had succeeded — which is strictly better than what it replaced. One trap
+found while building it: clearing the length counter only when the next type
+byte arrived left every COMPLETED message looking like one in progress, so the
+first idle session after any message was audited as a frame stall.
 
 **The goodbye frame needs its own write budget.** The deadline that fired bounds
 writes as well as reads, so the frame explaining an expiry cannot be written
