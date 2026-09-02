@@ -74,8 +74,13 @@ func TestDispatch_CopySubprotocolIsAFatalViolation(t *testing.T) {
 			if d.emit.Severity != "FATAL" {
 				t.Errorf("%s: severity = %q, want FATAL — the connection is being closed", name, d.emit.Severity)
 			}
-			if d.emit.Detail != ruleCopySubprotocolInactive {
-				t.Errorf("%s: DETAIL = %q, want %q", name, d.emit.Detail, ruleCopySubprotocolInactive)
+			if d.emit.Detail != ruleProtocolViolation {
+				t.Errorf("%s: DETAIL = %q, want the catalogue's %q (§7 names one id for out-of-state/unknown)",
+					name, d.emit.Detail, ruleProtocolViolation)
+			}
+			if d.auditReason != causeCopySubprotocolInactive {
+				t.Errorf("%s: audit reason = %q, want the specific cause %q — the wire id is shared, the audit id is not",
+					name, d.auditReason, causeCopySubprotocolInactive)
 			}
 			if d.closeReason != "protocol-violation" {
 				t.Errorf("%s: closeReason = %q, want protocol-violation", name, d.closeReason)
@@ -194,8 +199,11 @@ func TestDispatch_UnknownMessageTypeIsFatalAndCloses(t *testing.T) {
 	if d.emit.Severity != "FATAL" {
 		t.Errorf("severity = %q, want FATAL", d.emit.Severity)
 	}
-	if d.emit.Detail != ruleUnknownMessageType {
-		t.Errorf("DETAIL = %q, want %q", d.emit.Detail, ruleUnknownMessageType)
+	if d.emit.Detail != ruleProtocolViolation {
+		t.Errorf("DETAIL = %q, want the catalogue's %q", d.emit.Detail, ruleProtocolViolation)
+	}
+	if d.auditReason != causeUnknownMessageType {
+		t.Errorf("audit reason = %q, want the specific cause %q", d.auditReason, causeUnknownMessageType)
 	}
 	if d.auditKind != "fd.refused" {
 		t.Errorf("auditKind = %q, want fd.refused", d.auditKind)
@@ -231,12 +239,19 @@ func TestDispatch_SynthesizedErrorsCarryTheGateIdentity(t *testing.T) {
 		if d.emit.Severity != d.emit.SeverityUnlocalized {
 			t.Errorf("%s: severity %q != unlocalized %q", name, d.emit.Severity, d.emit.SeverityUnlocalized)
 		}
-		if seen[d.emit.Detail] {
-			t.Errorf("%s: rule id %q is shared with another decision; a shared id is not an identity", name, d.emit.Detail)
+		// Uniqueness belongs to the AUDIT identity, not the wire one. Two
+		// decisions may legitimately share a wire DETAIL when §7 names one id
+		// for their class (out-of-state/unknown), but an operator must still be
+		// able to tell them apart, so the audit reason is what must not collide.
+		if d.auditReason == "" {
+			t.Errorf("%s: no audit reason", name)
 		}
-		seen[d.emit.Detail] = true
+		if seen[d.auditReason] {
+			t.Errorf("%s: audit reason %q is shared with another decision; a shared cause is not an identity", name, d.auditReason)
+		}
+		seen[d.auditReason] = true
 	}
-	if d := unknownMessageType(); seen[d.emit.Detail] {
-		t.Errorf("the unknown-type rule id %q collides with another decision's", d.emit.Detail)
+	if d := unknownMessageType(); seen[d.auditReason] {
+		t.Errorf("the unknown-type audit reason %q collides with another decision's", d.auditReason)
 	}
 }

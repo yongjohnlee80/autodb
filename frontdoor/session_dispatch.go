@@ -63,15 +63,22 @@ const (
 	// can never be gated, only refused (matrix row 4:FunctionCall).
 	ruleNoFastpath = "frontdoor/no-fastpath"
 
-	// ruleCopySubprotocolInactive rejects COPY sub-protocol frames. COPY the
-	// STATEMENT is refused at classification, so no COPY is ever active, so
-	// receiving one of these means the peer is out of sync with the protocol
-	// state — a violation, not a refusal (matrix row 4:CopyData).
-	ruleCopySubprotocolInactive = "frontdoor/copy-subprotocol-inactive"
+	// ruleProtocolViolation is the catalogue's id for "out-of-state / unknown
+	// message" (matrix §7): a fatal 08P01 whose stream cannot be resynchronized.
+	// It is the WIRE identity for both the COPY-out-of-state and unknown-type
+	// cases, because §7 names one id for that class and a DETAIL the catalogue
+	// does not document is one an operator cannot look up.
+	//
+	// The finer cause is not lost — it travels in the AUDIT reason below, which
+	// is the operator-facing identity and is free to be as specific as the cause
+	// actually is. Wire identity follows the published catalogue; audit identity
+	// follows the defect.
+	ruleProtocolViolation = "frontdoor/protocol-violation"
 
-	// ruleUnknownMessageType rejects a message type byte the protocol does not
-	// define (matrix row 4:Unknown-message-type-byte).
-	ruleUnknownMessageType = "frontdoor/unknown-message-type"
+	// The internal audit causes behind ruleProtocolViolation. These never reach
+	// the wire (matrix §1.2, Event.Reason).
+	causeCopySubprotocolInactive = "frontdoor/copy-subprotocol-inactive"
+	causeUnknownMessageType      = "frontdoor/unknown-message-type"
 
 	// ruleExtendedNotImplemented refuses the extended-query frames until F2
 	// lands. Johno ruled the shape on 2026-09-02: FATAL, tear the connection
@@ -159,11 +166,11 @@ func validFrontendType(b byte) bool {
 func unknownMessageType() dispatch {
 	return dispatch{
 		emit: gateError("FATAL", sqlStateProtocolViolation,
-			"unknown message type", ruleUnknownMessageType,
+			"unknown message type", ruleProtocolViolation,
 			"the connection speaks the PostgreSQL v3 frontend protocol; the message type byte is not one it defines"),
 		after:       endSession,
 		auditKind:   "fd.refused",
-		auditReason: ruleUnknownMessageType,
+		auditReason: causeUnknownMessageType,
 		closeReason: "protocol-violation",
 	}
 }
@@ -200,11 +207,11 @@ func dispatchFrame(msg pgproto3.FrontendMessage) (dispatch, bool) {
 	case *pgproto3.CopyData, *pgproto3.CopyDone, *pgproto3.CopyFail:
 		return dispatch{
 			emit: gateError("FATAL", sqlStateProtocolViolation,
-				"COPY sub-protocol message outside a COPY", ruleCopySubprotocolInactive,
+				"COPY sub-protocol message outside a COPY", ruleProtocolViolation,
 				"COPY statements are refused at classification, so no COPY sub-protocol is ever active"),
 			after:       endSession,
 			auditKind:   "fd.refused",
-			auditReason: ruleCopySubprotocolInactive,
+			auditReason: causeCopySubprotocolInactive,
 			closeReason: "protocol-violation",
 		}, true
 
