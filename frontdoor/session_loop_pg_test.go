@@ -661,10 +661,7 @@ func TestPGLoop_OutputCapTellsTheTruthAboutAStatementThatRan(t *testing.T) {
 
 	// WHAT THE CLIENT WAS TOLD, and what the audit says, must agree with that.
 	if committed != "0" {
-		if !strings.Contains(e.Message, "executed") {
-			t.Fatalf("%s rows are committed but the client was told %q — a refusal was reported "+
-				"for an effect that happened", committed, e.Message)
-		}
+		assertNotReportedAsRefused(t, e, committed+" rows are committed")
 		var refused, outcome bool
 		for _, ev := range events() {
 			if ev.Kind == "fd.refused" && ev.Reason == ruleOutputCap {
@@ -729,10 +726,7 @@ func TestPGLoop_ASaturatedLaneTellsTheTruthAboutAStatementThatRan(t *testing.T) 
 	// It ran. So whatever the client was told must say so, and the audit must not
 	// call it refused.
 	if e, ok := firstOfType[*pgproto3.ErrorResponse](msgs); ok {
-		if !strings.Contains(e.Message, "executed") {
-			t.Fatalf("%s rows are committed but the client was told %q — a refusal was reported "+
-				"for an effect that happened", committed, e.Message)
-		}
+		assertNotReportedAsRefused(t, e, committed+" rows are committed")
 	}
 	for _, ev := range events() {
 		if ev.Kind == "fd.refused" && ev.Reason == ruleBudgetBackpressure {
@@ -858,9 +852,7 @@ func TestPGLoop_EveryPostDispatchStopTellsTheSameTruth(t *testing.T) {
 				if !ok {
 					t.Fatalf("expected the stop to be reported; frames=%v", kindsOf(msgs))
 				}
-				if !strings.Contains(e.Message, "executed") {
-					t.Fatalf("the statement ran but the client was told %q", e.Message)
-				}
+				assertNotReportedAsRefused(t, e, "the statement ran")
 				if e.Detail != stop.rule {
 					t.Fatalf("wire identity = %q, want the §7 id %q", e.Detail, stop.rule)
 				}
@@ -918,9 +910,16 @@ func TestPGLoop_ASaturatedLaneRefusesBeforeTheStatementRuns(t *testing.T) {
 		_ = query(t, c, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
 	})
 
-	// Occupy the lane so no working set can be reserved for the next statement.
+	// MF17 (lector r5): readiness is NOT the lane being free. runQuery releases
+	// its reservation in a defer that runs after the response is flushed, so the
+	// CREATE TABLE above can still hold its working set when the client has
+	// already been told the statement finished. Racing that made this cell fail
+	// in a full-suite run and pass in isolation.
+	//
+	// Synchronize on the lane itself rather than on a proxy for it.
+	waitLaneIdle(t, l)
 	if !l.general.tryReserve(200) {
-		t.Fatal("could not occupy the lane; the cell would prove nothing")
+		t.Fatalf("could not occupy the lane even after it read idle (in use: %d)", l.general.inUse())
 	}
 	defer l.general.release(200)
 
@@ -1054,4 +1053,169 @@ func TestOutputWithheldReasonsAreClosedAndCatalogued(t *testing.T) {
 	if outputComplete != 0 {
 		t.Fatal("outputComplete must be the zero value so an unset reason withholds nothing")
 	}
+}
+
+// MF16 (lector r5). 'I' is ambiguous: a successful autocommit and a FAILED,
+// rolled-back autocommit both leave the session idle. Deriving "committed" from
+// the status alone therefore reports a commit for a statement the target threw
+// away — the same lie MF9 and MF15 were, arrived at from the other direction.
+func TestPGLoop_AFailedStatementIsNotReportedAsCommitted(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	// Small enough that the target's OWN ErrorResponse trips the cap, so the
+	// post-dispatch stage runs over a statement that failed.
+	cap := int64(32)
+	_, events, listenAddr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, testOutputCap: &cap,
+	})
+	fe := pgClient(t, listenAddr, secret, database)
+
+	// The target fails this. Its ErrorResponse is forwarded through emit, so the
+	// front door SEES the failure — it does not have to infer it.
+	msgs := query(t, fe, "SELECT 1/0")
+
+	for _, m := range msgs {
+		e, ok := m.(*pgproto3.ErrorResponse)
+		if !ok {
+			continue
+		}
+		if strings.Contains(e.Hint, "are committed") {
+			t.Fatalf("the statement FAILED at the target, and the client was told its effects "+
+				"%q (message %q)", e.Hint, e.Message)
+		}
+	}
+	for _, ev := range events() {
+		if ev.Kind == "fd.stmt_outcome" && strings.Contains(ev.Detail, "effects=committed") {
+			t.Fatalf("the statement failed at the target but the audit records "+
+				"effects=committed: %q", ev.Detail)
+		}
+	}
+
+	// And the positive: the failure was OBSERVED passing through the emitter, so
+	// the front door is not guessing here — it says so outright.
+	e, ok := firstOfType[*pgproto3.ErrorResponse](msgs)
+	if !ok {
+		t.Fatalf("expected the stop to be reported; frames=%v", kindsOf(msgs))
+	}
+	if !strings.Contains(e.Message, "failed at the target") {
+		t.Fatalf("the target's failure was seen by the emitter, so it must be reported as "+
+			"such rather than left unknown; got %q", e.Message)
+	}
+	if !hasEventDetail(events(), "fd.stmt_outcome", "effects=failed") {
+		t.Fatalf("audit must record the observed failure; events=%v", events())
+	}
+}
+
+// The other new arm: nothing was observed, so nothing is claimed. An idle
+// session is what a committed autocommit leaves AND what a rolled-back one
+// leaves, and the front door stopped reading before the target said which — so
+// "unresolved" is the only word available, however likely "committed" is.
+//
+// This is jarvis's interim rule, and it stays true after his EmitStopped seam
+// replaces it with the engine's own observation.
+func TestPGLoop_AnUnobservedOutcomeIsReportedUnresolvedNotCommitted(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+	cap := int64(256)
+	_, events, listenAddr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, testOutputCap: &cap,
+	})
+	fe := pgClient(t, listenAddr, secret, database)
+
+	table := fmt.Sprintf("fd_unres_%d", time.Now().UnixNano())
+	if msgs := query(t, fe, fmt.Sprintf("CREATE TABLE %s (n int, s text)", table)); hasError(msgs) {
+		t.Fatalf("creating the scratch table: %v", errorText(msgs))
+	}
+	t.Cleanup(func() {
+		c := pgClient(t, listenAddr, secret, database)
+		_ = query(t, c, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+	})
+
+	msgs := query(t, fe, fmt.Sprintf(
+		"INSERT INTO %s SELECT g, repeat('x', 400) FROM generate_series(1,20) g RETURNING n, s", table))
+
+	e, ok := firstOfType[*pgproto3.ErrorResponse](msgs)
+	if !ok {
+		t.Fatalf("expected the cap to stop the output; frames=%v", kindsOf(msgs))
+	}
+	if strings.Contains(e.Hint, "effects are committed") {
+		t.Fatalf("the front door stopped reading before the outcome was reported, so it "+
+			"cannot claim a commit; hint = %q", e.Hint)
+	}
+	if !strings.Contains(e.Hint, "unresolved") {
+		t.Fatalf("hint = %q, want the unresolved outcome", e.Hint)
+	}
+	if !hasEventDetail(events(), "fd.stmt_outcome", "effects=unresolvable") {
+		t.Fatalf("audit must record the outcome as unresolvable; events=%v", events())
+	}
+
+	// The rows are in fact there — which is exactly why the weaker word matters:
+	// the front door is declining to state something it happens to be right
+	// about, because in this path it has no way to establish it.
+	after := pgClient(t, listenAddr, secret, database)
+	dr, found := firstOfType[*pgproto3.DataRow](query(t, after, fmt.Sprintf("SELECT count(*) FROM %s", table)))
+	if !found {
+		t.Fatal("counting after the stop")
+	}
+	if got := string(dr.Values[0]); got == "0" {
+		t.Skipf("no rows committed, so this cell did not observe the unresolved-but-committed case")
+	}
+}
+
+// hasEventDetail reports whether an audit row of this kind carries the substring.
+func hasEventDetail(evs []Event, kind, detail string) bool {
+	for _, ev := range evs {
+		if ev.Kind == kind && strings.Contains(ev.Detail, detail) {
+			return true
+		}
+	}
+	return false
+}
+
+// assertNotReportedAsRefused is the invariant behind MF9, MF15 and MF16: a
+// statement that reached the target may never be reported as one that did not
+// run, and its effects may never be claimed as committed unless that was
+// actually established.
+//
+// It asserts the INVARIANT rather than a sentence, because the honest wording
+// changed once "idle" stopped being read as "committed" (r5 MF16) and will
+// change again when the EmitStopped seam lets the engine report the drained
+// outcome. A cell pinned to prose would have failed on a fix and passed on a
+// regression.
+func assertNotReportedAsRefused(t *testing.T, e *pgproto3.ErrorResponse, evidence string) {
+	t.Helper()
+	if strings.Contains(e.Message, "did not run") {
+		t.Fatalf("%s, but the client was told the statement did not run: %q", evidence, e.Message)
+	}
+	if strings.Contains(e.Hint, "nothing was executed") {
+		t.Fatalf("%s, but the hint says nothing was executed: %q", evidence, e.Hint)
+	}
+	// "Committed" is a claim, and after MF16 it is only available when the front
+	// door established it. In every post-dispatch stop it stopped reading first,
+	// so the claim is not available at all.
+	if strings.Contains(e.Hint, "effects are committed") {
+		t.Fatalf("%s, but the hint claims the effects are committed — the front door "+
+			"stopped reading before the target reported the outcome, so it cannot know: %q",
+			evidence, e.Hint)
+	}
+	if !strings.Contains(e.Message, "the statement") {
+		t.Fatalf("%s, but the client was told %q, which does not speak about the statement",
+			evidence, e.Message)
+	}
+}
+
+// waitLaneIdle blocks until the general lane has no reservation outstanding.
+//
+// It waits on the condition itself, not on a duration: a sleep long enough to
+// be reliable on a loaded VM43 run is a sleep in every run, and one short enough
+// to be quick is the flake it replaced.
+func waitLaneIdle(t *testing.T, l *Listener) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if l.general.inUse() == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("the general lane never went idle (in use: %d); a statement leaked a "+
+		"reservation, which is a budget bug and not a slow test", l.general.inUse())
 }

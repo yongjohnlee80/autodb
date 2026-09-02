@@ -337,9 +337,17 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 
 	var emitErr, writeErr error
 	var withheld outputWithheld
+	// The emitter SEES the target's error before deciding whether to forward it,
+	// so a failure that arrives before the stop is observed rather than inferred
+	// (r5 MF16). A failure arriving AFTER the stop is not observable here at all
+	// — that is the gap jarvis's EmitStopped seam closes.
+	var targetFailed bool
 	var pending, produced int64
 	status, err := l.queries.WireQuery(ctx, sess.SessionID, sess.UserID, sql, hostOf(peer),
 		func(m exec.WireMessage) error {
+			if m.Err != nil {
+				targetFailed = true
+			}
 			frame, ferr := backendFrame(m)
 			if ferr != nil {
 				emitErr = ferr
@@ -429,7 +437,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 		// to land. The cap and the lane trip for different reasons at different
 		// sites; what is owed to the client and the audit is identical, so it is
 		// decided once, below, from what the engine records.
-		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, withheld)
+		return l.reportOutputWithheld(conn, be, sess, peer, closeReason, withheld, targetFailed)
 
 	case writeErr != nil:
 		// The peer is gone or will not read. Nothing to send it, and nothing
@@ -500,7 +508,8 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 // reservation in runQuery, which refuses honestly because nothing has run yet.
 // Once the rows exist, honesty is the only remedy left.
 func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
-	sess exec.WireSessionResult, peer string, closeReason *string, why outputWithheld) bool {
+	sess exec.WireSessionResult, peer string, closeReason *string, why outputWithheld,
+	targetFailed bool) bool {
 
 	reason, known := withheldReasons[why]
 	if !known {
@@ -518,12 +527,12 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 		*closeReason = "session-lost"
 		return false
 	}
-	effects, outcome := recordedEffects(status)
+	lead, effects, outcome := recordedEffects(status, targetFailed)
 
 	l.onEvent(Event{Kind: "fd.stmt_outcome", Reason: reason.rule, Peer: peer,
-		Detail: fmt.Sprintf("executed; effects=%s; output withheld: %s", outcome, reason.stopped)})
+		Detail: fmt.Sprintf("effects=%s; output withheld: %s", outcome, reason.stopped)})
 	be.Send(gateError("ERROR", sqlStateProgramLimit,
-		"the statement executed; "+reason.stopped+" and its result was not fully delivered",
+		lead+"; "+reason.stopped+" and its result was not fully delivered",
 		reason.rule, effects+"; "+reason.remedy))
 	if ferr := l.flushBounded(conn, be); ferr != nil {
 		*closeReason = "write-failed"
@@ -540,21 +549,45 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 	return true
 }
 
-// recordedEffects turns the engine's transaction phase into what the client is
-// told about its statement's effects, and the word the audit records for them.
+// recordedEffects says what became of a statement whose output was cut short.
 //
-// This is jarvis's ok / pending_commit / error trichotomy; the engine already
-// answers it, and the answer is materially different in each case — a client
-// told "committed" inside an open transaction may skip the COMMIT that would
-// have made it true.
-func recordedEffects(status byte) (clause, outcome string) {
-	switch status {
-	case txStatusInTx:
-		return "the statement's effects are PENDING: the transaction is still open, so COMMIT or ROLLBACK still decides them", "pending_commit"
-	case txStatusAborted:
-		return "the transaction is aborted, so the statement's effects will be rolled back", "aborted"
+// It answers from what is KNOWN, and refuses to answer from what merely looks
+// like an answer. `I` is the trap lector found in r5 (MF16): an idle session is
+// what a committed autocommit leaves behind AND what a failed, rolled-back one
+// leaves behind, so deriving "committed" from the status alone reported a commit
+// for a statement the target had thrown away — the same lie as MF9 and MF15,
+// reached from the other direction.
+//
+// Four arms, in order of what the front door can actually establish:
+//
+//   - The target's error was SEEN passing through the emitter. Certain: the
+//     statement failed, and in autocommit nothing was kept.
+//   - `T`: the transaction is still open. Certain, and unaffected by any of
+//     this — a COMMIT or ROLLBACK still decides the effects.
+//   - `E`: the transaction is aborted. Certain.
+//   - `I` with nothing observed: NOT KNOWN. The front door stopped reading
+//     before the target reported the outcome, and stopping early is the entire
+//     premise of this path — so "committed" is never a conclusion available
+//     here, however likely it is. Jarvis's interim rule (r5), and it stays true
+//     once EmitStopped carries the engine's own observation of the drained tail.
+//
+// The honest word is "unresolved", not a guess dressed as a fact.
+func recordedEffects(status byte, targetFailed bool) (lead, clause, outcome string) {
+	switch {
+	case targetFailed:
+		return "the statement failed at the target",
+			"its effects were rolled back", "failed"
+	case status == txStatusInTx:
+		return "the statement executed",
+			"the statement's effects are PENDING: the transaction is still open, so COMMIT or ROLLBACK still decides them",
+			"pending_commit"
+	case status == txStatusAborted:
+		return "the statement executed",
+			"the transaction is aborted, so the statement's effects will be rolled back", "aborted"
 	default:
-		return "the statement's effects are committed", "committed"
+		return "the statement ran and its outcome is not known to the front door",
+			"the front door stopped reading before the target reported the outcome, so whether the effects were kept is unresolved — read the table to find out",
+			"unresolvable"
 	}
 }
 

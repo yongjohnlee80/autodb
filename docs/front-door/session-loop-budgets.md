@@ -137,7 +137,8 @@ r4), so the fold is **structural** rather than a fix per budget:
    to tell. `reportOutputWithheld` is a **stage, not a helper**: it derives the
    wire identity and the "what stopped" clause from `withheldReasons`, and it
    asks the ENGINE what became of the effects. No site composes its own message.
-3. **The effects clause is the engine's answer, not the budget's.** Every earlier
+3. **The effects clause is the engine's answer, not the budget's — and `I` is
+   not an answer.** (r5 MF16.) Every earlier
    version asserted *"the statement's effects are committed"* — which is FALSE
    inside an explicit `BEGIN`, where they are pending and a `ROLLBACK` still
    decides them, and a client that believes it may skip the `COMMIT` that would
@@ -146,6 +147,26 @@ r4), so the fold is **structural** rather than a fix per budget:
    same read serves the readiness byte, deliberately: asking twice could answer
    differently, and an error text that disagrees with the readiness byte about
    the transaction is the very inconsistency this path exists to prevent.
+
+   But an **idle** session is what a committed autocommit leaves behind *and*
+   what a failed, rolled-back one leaves behind, so `I` alone establishes
+   nothing. `recordedEffects` therefore answers only from what is known, in this
+   order:
+
+   | Observation | Outcome | Certainty |
+   |---|---|---|
+   | the target's error passed through the emitter | `failed`, effects rolled back | seen |
+   | `T` — transaction still open | `pending_commit` | certain |
+   | `E` — transaction aborted | `aborted` | certain |
+   | `I`, nothing observed | `unresolvable` | **not known** |
+
+   The last row is the honest one: stopping early is the whole premise of this
+   path, so the front door stopped reading *before* the target reported the
+   outcome, and "committed" is not a conclusion available to it however likely it
+   is. A cell proves the rows are in fact there and asserts the weaker word
+   anyway. Jarvis's `EmitStopped` seam will carry the engine's own observation of
+   the drained tail and let the first three rows cover the fourth; until then
+   "unresolved" is what the front door can say without inventing.
 
 The audit records `fd.stmt_outcome`, never `fd.refused`, for anything that ran,
 so the operational record and the database agree.
@@ -182,7 +203,14 @@ be written to wait on purpose (r0 MF1).
    reserved before dispatch rather than frame by frame, which moves ordinary
    saturation to a pre-effect refusal and leaves the post-dispatch path only the
    oversized-frame top-up it cannot avoid.
-3. **The watermark has no time-based flush.** Within contract — the matrix
+3. **A cell may not synchronize on a proxy for the lane** (r5 MF17). `runQuery`
+   releases its reservation in a `defer` that runs *after* the response is
+   flushed, so a client holding `ReadyForQuery` does not imply an idle lane. A
+   probe measured the window directly: on **22 of 300** statements the lane still
+   held its 128-byte working set at the moment the client had already been told
+   the statement finished. Anything that occupies the lane must wait on
+   `inUse() == 0`, never on the previous statement's readiness.
+4. **The watermark has no time-based flush.** Within contract — the matrix
    specifies a size watermark only — but a slow-producing statement shows the
    client nothing until 4 MiB accrues or it ends, so an interactive client on a
    slow query looks hung. Size-or-time is the usual answer.
