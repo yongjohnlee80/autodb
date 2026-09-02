@@ -581,6 +581,14 @@ browser with no change to the daemon at all.
 
 `autodb --print-endpoint` shows where a given config actually listens.
 
+### Known limitations of the PostgreSQL front door (v0.3.1)
+
+- **A standalone `Flush` delivers nothing until `Sync`.** The extended-protocol
+  segment is dispatched on `Sync`; a client that sends `Parse`/`Bind`/`Flush` and
+  waits for the responses before sending `Sync` will wait until it does. Drivers
+  built on `database/sql` (lib/pq, pgx's stdlib adapter) always `Sync`, so they
+  are unaffected. Tracked; fixed in the release after v0.3.1.
+
 Verified on a shared host (Linux, two OS uids, one daemon): with the default
 socket, the other uid's connect fails with `permission denied` while the owner
 connects; after `chmod 660`, a member of the daemon's group connects and a
