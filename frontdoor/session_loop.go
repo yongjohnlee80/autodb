@@ -52,6 +52,11 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 	// read; a frame already in progress when a cycle starts is covered by the
 	// entry check below, because the callback cannot fire twice for one message
 	// and a message read ahead during auth has already spent its start.
+	// The delivery boundary is runSession's alone (lector's audit): auth and
+	// defaultSession share this reader and admit nothing.
+	fr.setBounded(true)
+	defer fr.setBounded(false)
+
 	fr.setOnStart(func() {
 		_ = conn.SetDeadline(l.now().Add(l.dl.frameStall))
 	})
@@ -106,13 +111,67 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// happens immediately after Receive instead: the queue is popped either
 		// way, exactly once per Receive, which is what keeps a Sync's reset
 		// landing between the frames it separates.
+		// ADMISSION IS HEADER-FIRST, ALWAYS (the body-skip). It used to be
+		// header-first only when the header happened to be framed already, and
+		// to decide AFTER Receive when it was not — so the crossing frame's body
+		// was decoded before it was refused. That residual was bounded while the
+		// post-auth cap was (wrongly) the 64 KiB PRE-auth one; at the documented
+		// 64 MiB it becomes a 64 MiB decode, which is why this lands with the
+		// cap raise and not after it.
+		//
+		// waitHeader reads only far enough to frame the header and BUFFERS what
+		// it read, so pgproto3 still receives every byte — a reader that
+		// consumed them would split the stream, which is the failure the old
+		// peek-beside-the-Backend design caused.
+		fr.waitHeader()
 		preHeader, hadPre := fr.peekHeader()
-		if hadPre && !l.admitSegmentFrame(conn, be, &seg, preHeader, peer, closeReason) {
+
+		// OVER THE POST-AUTH CAP: refused HEADER-FIRST with the frame §7 gives it.
+		//
+		// Left to pgproto3 the connection simply dies — its own SetMaxBodyLen
+		// error surfaces after the loop has nothing to say, so the client reads a
+		// bare reset. The matrix gives this 08P01 "cannot resynchronize a stream
+		// we refuse to read" precisely so a client is told, and the body is never
+		// read because the decision is made from the header.
+		if hadPre && preHeader.declared-4 > l.postAuthBodyLen() {
+			l.onEvent(Event{Kind: "fd.refused", Reason: ruleMessageTooLarge, Peer: peer,
+				Detail: fmt.Sprintf("declared %d bytes past the %d-byte post-auth cap",
+					preHeader.declared-4, l.postAuthBodyLen())})
+			be.Send(gateError("FATAL", sqlStateProtocolViolation,
+				"message body exceeds the maximum size", ruleMessageTooLarge,
+				"the front door does not read a message it has refused; send a smaller one"))
+			_ = l.flushBounded(conn, be)
+			*closeReason = ruleMessageTooLarge
 			return nil
+		}
+
+		if hadPre {
+			if !l.admitSegmentFrame(conn, be, fr, &seg, preHeader, peer, closeReason) {
+				return nil
+			}
+			// Admitted frames are released to pgproto3 one at a time; a refused
+			// one is not released at all, which is what keeps its body out of
+			// pgproto3's private buffer and reachable by the skip.
+			if fr.wasSkipped() {
+				// The frame was refused. Drain it here and take the next header:
+				// calling Receive would hand the loop a frame it never admitted,
+				// which turns the boundary off for precisely the frames it
+				// exists to bound — and left the discard never reaching Sync.
+				if derr := fr.drainSkipped(); derr != nil {
+					return l.endOfRead(conn, be, fr, &seg, derr, peer, closeReason)
+				}
+				// NO consumeHeader here: skipFrame already popped this frame's
+				// header. A second pop discards the NEXT header — the Sync's —
+				// while its bytes stay on the wire, so nothing ever frames again
+				// and the discard never ends.
+				continue
+			}
+			fr.allow(preHeader)
 		}
 		msg, err := be.Receive()
 		if hdr, ok := fr.consumeHeader(); ok && !hadPre {
-			if !l.admitSegmentFrame(conn, be, &seg, hdr, peer, closeReason) {
+			// Reached only when the connection ended before a header framed.
+			if !l.admitSegmentFrame(conn, be, fr, &seg, hdr, peer, closeReason) {
 				return nil
 			}
 		}
@@ -858,7 +917,11 @@ const pendingOutputWatermark int64 = 4 << 20
 // ruleOutputWatermark identifies the per-connection backpressure in the audit
 // trail; ruleBudgetBackpressure identifies the process-wide lane's (§7).
 const (
-	ruleOutputWatermark    = "frontdoor/output-watermark"
+	ruleOutputWatermark = "frontdoor/output-watermark"
+	// ruleMessageTooLarge is §7's identity for a declared body past the post-auth
+	// cap. Refused from the HEADER — the body is never read — and the connection
+	// closes, because a stream we will not read cannot be resynchronised.
+	ruleMessageTooLarge    = "frontdoor/message-too-large"
 	ruleBudgetBackpressure = "frontdoor/budget-backpressure"
 )
 

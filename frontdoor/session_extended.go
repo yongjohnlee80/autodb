@@ -253,20 +253,41 @@ func (l *Listener) segmentByteCap() int64 {
 // lands between the frames it separates rather than erasing a charge a later
 // frame was already given.
 //
-// KNOWN RESIDUAL, stated rather than implied: when the header was not already
-// framed, the check runs immediately AFTER Receive, so the crossing frame's body
-// has been decoded before it is refused. That is bounded — pgproto3 is held to
-// SetMaxBodyLen for the life of the connection — so the exposure is one frame,
-// not a stream. Closing it entirely means having the reader skip a refused
-// frame's body without handing it to the Backend, which is a change to the
-// component that fixed the pipelining defect and is not folded in here.
-func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, seg *segmentLane,
+// THE RESIDUAL THIS COMMENT USED TO RECORD IS CLOSED. It said a crossing frame's
+// body was decoded before the refusal, because the check ran after Receive.
+// The reader is now a delivery boundary: the loop frames the header first,
+// refuses from the DECLARED length, and a refused frame's body is skipped
+// without ever being handed to the Backend — measured, not asserted, by
+// TestAdmission_FramesDiscardedBehindABreachAreNotDecoded (5 bytes delivered
+// against 15026 when the skip is mutated away).
+//
+// One edge remains and it is not the old one: the post-Receive call site is
+// reached only when the connection ended before a header could be framed, which
+// is a closing session rather than a stream being paid for.
+func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, fr *frameReader, seg *segmentLane,
 	h frameHeader, peer string, closeReason *string) bool {
 
 	extended, isSync := extendedTypeByte(h.typ)
 	if !extended || isSync {
 		return true
 	}
+
+	// AN ALREADY-DISCARDING SEGMENT IS NOT RE-ADMITTED (jarvis's diagnosis,
+	// proven live by the discriminator below).
+	//
+	// PostgreSQL answers an error mid-segment by discarding until Sync and
+	// SAYING NOTHING FURTHER. Re-admitting each subsequent frame emitted a fresh
+	// ErrorResponse per frame — the client saw four refusals for one segment and
+	// never reached readiness at all, because the discard never ended.
+	//
+	// The frame is still SKIPPED: discarding means its body must not be decoded
+	// any more than the crossing frame's was. What changes is that it is not
+	// re-judged and not re-reported.
+	if seg.discarding {
+		fr.skipFrame(h)
+		return true
+	}
+
 	seg.msgs++
 	seg.addBytes(int64(h.declared))
 	// DEFENCE IN DEPTH, and deliberately redundant: stage two re-reads these same
@@ -286,6 +307,12 @@ func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, seg *s
 		*closeReason = "write-failed"
 		return false
 	}
+	// SKIP THE REFUSED FRAME'S BODY (lector r0). Setting discarding is not
+	// enough on its own: the loop still calls Receive, so without this the
+	// crossing body is decoded before the discard branch applies — which is a
+	// 64 MiB decode now that the cap is the documented one.
+	fr.skipFrame(h)
+
 	// Refuse, then discard through Sync (§7 :386).
 	seg.discarding = true
 	return true

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"sync/atomic"
 )
 
 // THE TYPE BYTE MUST BE CHECKED ON THE PATH THE BYTES TAKE, NOT BESIDE IT.
@@ -46,6 +47,60 @@ import (
 // transport error the day pgx rewords it.
 type frameReader struct {
 	src io.Reader
+
+	// buf holds bytes read to FRAME A HEADER that the Backend has not taken yet.
+	// waitHeader reads ahead so the loop can admit a frame header-first; those
+	// bytes are still owed to pgproto3, so Read serves them before touching src.
+	// Without this, reading a header would consume bytes the Backend needs and
+	// the stream would split in two — the failure the shared-reader peek caused.
+	buf []byte
+	// deferred is a framing fault waitHeader found while reading ahead. The
+	// bytes it scanned are already buffered, and Read serves those WITHOUT
+	// re-scanning (they have been scanned once), so the fault has to be carried
+	// or it is lost — which is what an undefined type byte did on the first
+	// version of this: it reached pgproto3 unvalidated and the accurate 08P01
+	// became a bare connection reset.
+	deferred error
+
+	// skip counts bytes of a REFUSED frame still to be discarded rather than
+	// delivered. They are still SCANNED — the framing state machine must stay
+	// aligned or the next header lands at the wrong offset — but they never
+	// reach pgproto3, which is what stops a refused 64 MiB body being decoded.
+	skip int
+
+	// delivered counts bytes handed to the Backend, so a cell can MEASURE that a
+	// refused frame's body was never delivered. The property is a resource one —
+	// from the wire a refusal looks the same whether or not the body was decoded
+	// — so it has to be measured rather than asserted (lector r0, and again at r2:
+	// a regression that decodes the body before the same fatal 08P01 is invisible
+	// to any cell that only reads the frames).
+	//
+	// ATOMIC because the measuring cell is the peer, not the session: it reads
+	// this from the test goroutine while the session goroutine is still running
+	// its close path. A plain int here is a -race failure in the one cell that
+	// exists to prove a resource property.
+	delivered atomic.Int64
+
+	// skipped records that the last admission decision was a refusal.
+	skipped bool
+
+	// bounded turns the delivery boundary ON, and it is ON ONLY INSIDE
+	// runSession. auth and defaultSession use this same reader and admit
+	// nothing, so a boundary applying to them would starve the credential
+	// exchange and the no-Queries path (lector's Receive-site audit: exactly
+	// three sites, and runExtended is not one — it is reached only after
+	// runSession's receive).
+	bounded bool
+
+	// deliverable bounds what may reach pgproto3 while bounded: the bytes of the
+	// frame the loop has ADMITTED, and not one more.
+	//
+	// Handing over whole buffers let pgproto3's chunkReader read ahead and
+	// privately buffer future BODIES; at a crossing header there was then
+	// nothing left for the skip to discard, so it consumed the following Sync
+	// and the segment desynchronised. A frame the loop has not admitted must not
+	// be inside pgproto3 at all.
+	deliverable int
 
 	phase   framePhase
 	lenBuf  [4]byte
@@ -151,8 +206,48 @@ func (r *frameReader) consumeHeader() (frameHeader, bool) {
 func (r *frameReader) badByte() byte { return r.bad }
 
 func (r *frameReader) Read(p []byte) (int, error) {
-	n, err := r.src.Read(p)
+	// A refused frame is discarded before anything else is served, so its body
+	// never reaches the Backend.
+	if r.skip > 0 {
+		if err := r.drainSkip(); err != nil {
+			return 0, err
+		}
+	}
+	room := len(p)
+	if r.bounded && r.deliverable < room {
+		room = r.deliverable
+	}
+	if room <= 0 {
+		// Nothing admitted. This is reached when the loop could not frame a
+		// header — a closed connection — so the read goes THROUGH to surface the
+		// transport's own error. Blocking here replaced a clean EOF with a
+		// front-door error and turned ordinary disconnects into failures, which
+		// is what broke the extended cells on the first attempt.
+		room = len(p)
+	}
+	// Buffered bytes first: they were read to frame a header and are still owed.
+	if len(r.buf) > 0 {
+		n := copy(p[:room], r.buf)
+		r.buf = r.buf[n:]
+		r.delivered.Add(int64(n))
+		if r.deliverable >= n {
+			r.deliverable -= n
+		}
+		return n, nil
+	}
+	// The buffer is drained; a fault found while reading ahead surfaces now,
+	// with its own identity rather than as a transport failure.
+	if r.deferred != nil {
+		err := r.deferred
+		r.deferred = nil
+		return 0, err
+	}
+	n, err := r.src.Read(p[:room])
 	if n > 0 {
+		r.delivered.Add(int64(n))
+		if r.deliverable >= n {
+			r.deliverable -= n
+		}
 		if serr := r.scan(p[:n]); serr != nil {
 			// The connection ends either way, so the bytes already read do not
 			// need to be handed on; reporting the framing fault immediately is
@@ -240,4 +335,148 @@ func (r *frameReader) scan(b []byte) error {
 // — which is what the old peek-succeeded/peek-failed split was.
 func (r *frameReader) midMessage() bool {
 	return r.phase != phaseType || r.lenHave != 0
+}
+
+// waitHeader reads until the NEXT frame's header is framed, so a caller can
+// decide about a frame before its body is delivered.
+//
+// WHY IT EXISTS. Segment admission is header-first when the header happens to be
+// framed already, and fell back to deciding AFTER Receive when it was not — so
+// the crossing frame's body had been decoded before it was refused. That was
+// bounded while the post-auth cap was (wrongly) the 64 KiB pre-auth one; at the
+// documented 64 MiB the same residual becomes a 64 MiB decode, which is why the
+// cap raise and this must land together.
+//
+// The bytes it reads are BUFFERED, not consumed: they are still owed to
+// pgproto3, and a reader that swallowed them would split the stream in two —
+// the exact failure the old peek-a-shared-reader design caused.
+//
+// It returns false when the connection ends before a header completes; the
+// caller's Receive then reports the same condition with its own identity.
+func (r *frameReader) waitHeader() bool {
+	if len(r.pending) > 0 {
+		return true
+	}
+	// AT MOST THE HEADER: one byte at a time is the only size that cannot
+	// overshoot a five-byte header and put an unadmitted body out of reach.
+	tmp := make([]byte, 1)
+	for len(r.pending) == 0 {
+		n, err := r.src.Read(tmp)
+		if n > 0 {
+			chunk := append([]byte(nil), tmp[:n]...)
+			if serr := r.scan(chunk); serr != nil {
+				// DO NOT buffer these. The connection ends either way, and
+				// handing them on lets pgproto3 decode the bad frame itself —
+				// its "unknown message type" then MASKS the sentinel, and the
+				// loop reports a transport failure instead of an accurate
+				// 08P01. That is the same masking the reader exists to prevent.
+				r.deferred = serr
+				return false
+			}
+			r.buf = append(r.buf, chunk...)
+		}
+		if err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// skipFrame tells the reader to discard a refused frame ENTIRELY — its header
+// and its declared body — instead of handing it to pgproto3.
+//
+// This is the body-skip. Deciding header-first was necessary and not sufficient:
+// admission refused the frame and set the segment discarding, but the loop still
+// called Receive, so the crossing body was decoded before the discard branch
+// applied (lector r0). Moving the decision earlier changed WHEN we refuse, not
+// WHETHER we decode — and a surviving mutation told me so, which I first read as
+// a missing cell rather than a missing feature.
+func (r *frameReader) skipFrame(h frameHeader) {
+	r.skipped = true
+	// One type byte plus the declared length, which counts its own four bytes.
+	r.skip += 1 + h.declared
+	// POP THE REFUSED HEADER. Every Receive pops exactly one header (lector C r2
+	// MF3) — but the refused frame never reaches Receive, so the next Receive
+	// returns the frame AFTER it. Leaving this header queued makes the loop's
+	// consumeHeader attribute the refused frame's header to the Sync that
+	// followed, and the queue is off by one for the rest of the segment: the
+	// Sync's readiness never arrives.
+	if len(r.pending) > 0 {
+		r.pending = r.pending[1:]
+	}
+}
+
+// drainSkip consumes and discards the pending skip, SCANNING as it goes.
+//
+// Scanning matters: the framing state machine tracks where each body ends, so
+// bytes discarded without scanning would leave `need` un-decremented and the
+// next header would be read at the wrong offset — turning a refusal into a
+// desynchronised stream, which is worse than the decode it avoids.
+func (r *frameReader) drainSkip() error {
+	scratch := make([]byte, 4096)
+	for r.skip > 0 {
+		if len(r.buf) > 0 {
+			n := r.skip
+			if n > len(r.buf) {
+				n = len(r.buf)
+			}
+			r.buf = r.buf[n:]
+			r.skip -= n
+			continue
+		}
+		n, err := r.src.Read(scratch)
+		if n > 0 {
+			chunk := append([]byte(nil), scratch[:n]...)
+			if serr := r.scan(chunk); serr != nil {
+				r.skip = 0
+				return serr
+			}
+			take := r.skip
+			if take > len(chunk) {
+				take = len(chunk)
+			}
+			r.skip -= take
+			// Whatever followed the refused frame is the next frame's, and is
+			// owed to the Backend.
+			if rest := chunk[take:]; len(rest) > 0 {
+				r.buf = append(r.buf, rest...)
+			}
+		}
+		if err != nil {
+			r.skip = 0
+			return err
+		}
+	}
+	return nil
+}
+
+// deliveredBytes reports how much has reached the Backend, for cells measuring
+// that a refused frame's body did not.
+func (r *frameReader) deliveredBytes() int { return int(r.delivered.Load()) }
+
+// allow admits a frame for delivery: pgproto3 may now see exactly its bytes.
+func (r *frameReader) allow(h frameHeader) { r.deliverable += 1 + h.declared }
+
+// setBounded turns the delivery boundary on. runSession only.
+func (r *frameReader) setBounded(on bool) { r.bounded = on }
+
+// wasSkipped reports whether the last admission decision was a refusal, so the
+// loop does not allow a frame it just skipped.
+func (r *frameReader) wasSkipped() bool {
+	was := r.skipped
+	r.skipped = false
+	return was
+}
+
+// drainSkipped consumes a refused frame that the loop chose not to Receive.
+//
+// A skipped frame must leave the wire somehow. Letting Receive do it means the
+// loop processes whatever comes back — a frame it never admitted — and the
+// boundary is off for exactly the frames it exists to bound. So the loop drains
+// the refusal itself and moves to the next header.
+func (r *frameReader) drainSkipped() error {
+	if r.skip == 0 {
+		return nil
+	}
+	return r.drainSkip()
 }

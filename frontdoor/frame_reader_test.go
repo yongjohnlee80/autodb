@@ -149,3 +149,83 @@ func (r *byteAtATime) Read(p []byte) (int, error) {
 	r.at++
 	return 1, nil
 }
+
+// THE BODY-SKIP, MEASURED (lector, PR #72 r0).
+//
+// A refused frame's body must never reach the Backend. From the wire a refusal
+// looks identical either way — the client gets the same error — so this is a
+// resource property and has to be MEASURED, exactly like §10's O(buffer) cap.
+// The first version of this change decided header-first and still let Receive
+// decode the body; a surviving mutation said so and I misread it as a missing
+// cell rather than a missing feature.
+func TestFrameReader_ARefusedFrameBodyIsNeverDelivered(t *testing.T) {
+	msg := func(typ byte, body []byte) []byte {
+		out := []byte{typ, 0, 0, 0, 0}
+		n := len(body) + 4
+		out[1], out[2], out[3], out[4] = byte(n>>24), byte(n>>16), byte(n>>8), byte(n)
+		return append(out, body...)
+	}
+	big := bytes.Repeat([]byte{'x'}, 40*1024)
+	// A large Bind, then a Sync — the shape a segment refusal must resynchronise
+	// on: the refused frame vanishes, the Sync still arrives.
+	wire := append(msg('B', big), msg('S', nil)...)
+
+	fr := newFrameReader(bytes.NewReader(wire))
+	if !fr.waitHeader() {
+		t.Fatal("no header framed")
+	}
+	h, ok := fr.peekHeader()
+	if !ok || h.typ != 'B' {
+		t.Fatalf("header = %+v, want a Bind", h)
+	}
+
+	// Refuse it, as segment admission does.
+	fr.skipFrame(h)
+
+	rest, err := io.ReadAll(fr)
+	if err != nil {
+		t.Fatalf("draining after a refusal: %v", err)
+	}
+
+	// THE MEASUREMENT: what reached the Backend must be the Sync alone. A reader
+	// that skipped nothing delivers the 40 KiB body too.
+	if len(rest) != 5 {
+		t.Fatalf("delivered %d bytes after refusing a %d-byte frame, want 5 (the Sync alone) — "+
+			"the refused body reached the Backend, which at the documented 64 MiB cap is a "+
+			"64 MiB decode of a frame we already refused", len(rest), len(big))
+	}
+	if rest[0] != 'S' {
+		t.Fatalf("the frame after the refusal is %q, want the Sync — the stream desynchronised, "+
+			"which is worse than the decode the skip avoids", rest[0])
+	}
+}
+
+// THE DELIVERY BOUNDARY MUST NOT APPLY OUTSIDE runSession (lector's audit).
+//
+// Three Receive sites share this reader: the loop, auth, and defaultSession.
+// Only the loop admits frames. A boundary that applied globally would starve the
+// other two — the credential exchange would never get its PasswordMessage, and
+// the no-Queries path would never get anything at all. My first attempt did
+// exactly that.
+//
+// This is the control for it: an UNBOUNDED reader delivers whatever arrives,
+// with nothing admitted.
+func TestFrameReader_AnUnboundedReaderDeliversWithoutAdmission(t *testing.T) {
+	msg := func(typ byte, body string) []byte {
+		out := []byte{typ, 0, 0, 0, 0}
+		n := len(body) + 4
+		out[1], out[2], out[3], out[4] = byte(n>>24), byte(n>>16), byte(n>>8), byte(n)
+		return append(out, body...)
+	}
+	wire := msg('p', "secret")
+	fr := newFrameReader(bytes.NewReader(wire)) // bounded is OFF by default
+
+	got, err := io.ReadAll(fr)
+	if err != nil {
+		t.Fatalf("an unbounded reader must deliver without admission: %v", err)
+	}
+	if len(got) != len(wire) {
+		t.Fatalf("delivered %d of %d bytes with nothing admitted — the boundary is applying "+
+			"outside runSession, which starves auth and defaultSession", len(got), len(wire))
+	}
+}

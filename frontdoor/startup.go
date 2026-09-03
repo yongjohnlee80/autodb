@@ -31,6 +31,24 @@ const (
 	// — 64 connections at 64 MiB would be a very different number.
 	PreAuthMaxBodyLen = 64 * 1024
 
+	// PostAuthMaxBodyLen bounds a single POST-auth message (matrix :261, :387).
+	//
+	// It exists because it was MISSING: every SetMaxBodyLen call passed the
+	// pre-auth bound and nothing ever raised it, so an authenticated session ran
+	// its whole life at the limit written for an anonymous peer and any body over
+	// 64 KiB died with 08P01. A 65 KB INSERT, a 100 KB bytea parameter, a long
+	// script — ordinary traffic for a front door (white-vision's finding, jarvis's
+	// ruling, verified on main).
+	//
+	// The comment above has named this constant since F0 and it did not exist —
+	// a specification pointing at an implementation that was never written, which
+	// reads as done to anyone who greps for it.
+	PostAuthMaxBodyLen = 64 << 20
+
+	// PostAuthMaxBodyCeiling is the highest a deployment may configure it to
+	// (matrix :478). Above this the arithmetic behind the lanes stops holding.
+	PostAuthMaxBodyCeiling = 256 << 20
+
 	// TLSHandshakeDeadline, StartupDeadline bound the phases before auth.
 	// Each is its own deadline rather than one budget for the lot, so a peer
 	// cannot spend the whole allowance on the handshake and still be owed
