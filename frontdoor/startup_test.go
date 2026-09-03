@@ -439,12 +439,23 @@ func TestStartup_DirectTLSIsATLSFailureNotAnAuthDenial(t *testing.T) {
 	}
 }
 
-// MF3. §3.1's accepted set is CLOSED. A parameter outside it is refused FOR
-// being refused — not allowed to fall through to whatever denies next.
-// MATRIX ROW 2.4: the StartupMessage's parameters are pinned by §3.1's closed
-// set — a parameter not named there is refused rather than emulated as a GUC.
+// MF3. §3.1's policy is THREE-WAY under Amendment 8: a named set governed here,
+// `replication` refused outright, and everything else COLLECTED as a setting for
+// the engine to judge.
+//
+// The rule inverted with Amendment 8 — this table used to assert that an unknown
+// parameter was REFUSED, which was correct until there was something to hand a
+// setting to. What has NOT changed is that nothing is silently ignored: a
+// parameter is answered for here, or handed on to be answered for there.
+//
+// The table asserts BOTH halves of each decision — accepted/refused AND what was
+// collected — because "the startup was accepted" is exactly what a front door
+// that dropped every setting on the floor would also report.
+// MATRIX ROW 2.4: the StartupMessage's parameters are pinned by §3.1 — one
+// outside the named set is admitted as the equivalent SET (Amendment 8) rather
+// than emulated or ignored.
 // Claim-level citations (the rows below carry separately testable
-// guarantees, tracked per claim in the gate): row 3.1:options#guc-refusal,
+// guarantees, tracked per claim in the gate): row 3.1:options#unpacked,
 // row 3.1:options#empty-accepted, row 3.1:replication#refused-any-value,
 // row 3.1:application_name#accept, and row 3.1:client_encoding#utf8-only.
 // The whole-row citation row 3.1:any-other-parameter — one decision, no
@@ -458,46 +469,72 @@ func TestStartup_ParameterPolicy(t *testing.T) {
 		name   string
 		params map[string]string
 		refuse bool
+		// want is the settings the engine must be handed. nil means none —
+		// asserted, not skipped, because a front door that collected a
+		// parameter it should have governed itself is the failure mode that
+		// stops psql connecting.
+		want map[string]string
 	}{
-		{"the pinned set", map[string]string{
+		{"the named set is governed here, never collected", map[string]string{
 			"user": "root", "database": "lm-prod",
 			"application_name": "psql", "client_encoding": "UTF8",
-		}, false},
-		{"an unknown parameter is a GUC attempt", map[string]string{
+		}, false, nil},
+		{"a parameter outside the named set is a SETTING now", map[string]string{
 			"user": "root", "database": "d", "search_path": "public",
-		}, true},
-		{"replication is refused at any value", map[string]string{
+		}, false, map[string]string{"search_path": "public"}},
+		{"replication is refused at any value, and not collected", map[string]string{
 			"user": "root", "database": "d", "replication": "database",
-		}, true},
+		}, true, nil},
 		{"a non-UTF8 client_encoding", map[string]string{
 			"user": "root", "database": "d", "client_encoding": "LATIN1",
-		}, true},
+		}, true, nil},
 		{"UTF-8 spelled with a hyphen is still UTF8", map[string]string{
 			"user": "root", "database": "d", "client_encoding": "utf-8",
-		}, false},
-		{"options that sets a GUC", map[string]string{
+		}, false, nil},
+		{"options -c unpacks into a setting", map[string]string{
 			"user": "root", "database": "d", "options": "-c search_path=public",
-		}, true},
+		}, false, map[string]string{"search_path": "public"}},
 		{"options in the --key=val spelling", map[string]string{
 			"user": "root", "database": "d", "options": "--search_path=public",
-		}, true},
+		}, false, map[string]string{"search_path": "public"}},
+		{"options in the -ckey=val spelling", map[string]string{
+			"user": "root", "database": "d", "options": "-csearch_path=public",
+		}, false, map[string]string{"search_path": "public"}},
 		{"empty options is accepted and ignored", map[string]string{
 			"user": "root", "database": "d", "options": "   ",
-		}, false},
-		{"_pq_ extensions are negotiated, not refused", map[string]string{
+		}, false, nil},
+		{"an options string that is not settings at all", map[string]string{
+			"user": "root", "database": "d", "options": "-f something",
+		}, true, nil},
+		{"_pq_ extensions are negotiated, not refused or collected", map[string]string{
 			"user": "root", "database": "d", "_pq_.some_extension": "1",
-		}, false},
+		}, false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			refused, ok := checkStartupParams(tc.params)
+			check, ok := checkStartupParams(tc.params)
 			if tc.refuse && ok {
-				t.Errorf("%v was accepted; PostgreSQL treats an unknown startup parameter as a "+
-					"GUC attempt, and a client-controlled GUC must not reach the pinned target",
-					tc.params)
+				t.Fatalf("%v was accepted; it names something this surface answers for itself", tc.params)
 			}
 			if !tc.refuse && !ok {
-				t.Errorf("%v was refused as %q", tc.params, refused)
+				t.Fatalf("%v was refused as %q (%s)", tc.params, check.Refused, check.Reason)
+			}
+			if tc.refuse {
+				if len(check.GUCs) != 0 {
+					t.Errorf("a REFUSED startup still produced settings %v — nothing may reach the "+
+						"engine from a packet we rejected", check.GUCs)
+				}
+				return
+			}
+			if len(check.GUCs) != len(tc.want) {
+				t.Fatalf("collected %v, want %v", check.GUCs, tc.want)
+			}
+			for k, v := range tc.want {
+				if got, ok := check.GUCs[k]; !ok || got != v {
+					t.Errorf("collected %v, want %q=%q — a setting that is accepted and then "+
+						"dropped is indistinguishable from one that was applied, right up "+
+						"until something depends on the value", check.GUCs, k, v)
+				}
 			}
 		})
 	}
@@ -506,13 +543,18 @@ func TestStartup_ParameterPolicy(t *testing.T) {
 // And the refusal reaches the wire as the uniform denial while the AUDIT
 // names the parameter — the caller learns that startup failed, not which
 // parameter this server dislikes.
+//
+// `replication` rather than `search_path`: under Amendment 8 a parameter naming
+// a SETTING is collected and judged by the engine, so the parameter this cell
+// needs is one §3.1 still answers for itself. replication is not a setting at
+// all — it selects a different protocol mode — so it stays refused here.
 func TestStartup_RefusedParameterIsAuditedButNotDisclosed(t *testing.T) {
 	t.Parallel()
 	_, events, addr := liveListener(t)
 
 	tc := tlsDial(t, addr)
 	if _, err := tc.Write(startupPacket(protocolVersion30, map[string]string{
-		"user": "root", "database": "lm-prod", "search_path": "public",
+		"user": "root", "database": "lm-prod", "replication": "database",
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +562,7 @@ func TestStartup_RefusedParameterIsAuditedButNotDisclosed(t *testing.T) {
 	if e.Code != DenialSQLState || e.Message != DenialMessage {
 		t.Fatalf("got %s/%q, want the uniform denial", e.Code, e.Message)
 	}
-	if strings.Contains(strings.ToLower(e.Message+e.Detail), "search_path") {
+	if strings.Contains(strings.ToLower(e.Message+e.Detail), "replication") {
 		t.Error("the wire names the refused parameter, which maps the accepted set for anyone " +
 			"willing to ask repeatedly")
 	}
@@ -543,7 +585,7 @@ func TestStartup_RefusedParameterIsAuditedButNotDisclosed(t *testing.T) {
 	// a RefusedParam field, commented that it was for the audit row, and
 	// dropped it — the test asserted only the generic reason, so the claim
 	// and the code disagreed with nothing to catch it.
-	if detail != "search_path" {
+	if detail != "replication" {
 		t.Errorf("audited detail = %q, want the refused parameter named; an operator reading "+
 			"this cannot tell WHICH parameter was refused, which is the one thing the audit "+
 			"is for here", detail)
@@ -666,12 +708,12 @@ func TestStartup_RequiredParameters(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			refused, ok := checkStartupParams(tc.params)
+			check, ok := checkStartupParams(tc.params)
 			if ok {
 				t.Fatalf("%v was accepted; both user and database are required", tc.params)
 			}
-			if refused != tc.want {
-				t.Errorf("refused %q, want %q named", refused, tc.want)
+			if check.Refused != tc.want {
+				t.Errorf("refused %q, want %q named", check.Refused, tc.want)
 			}
 		})
 	}

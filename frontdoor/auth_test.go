@@ -501,9 +501,11 @@ func TestAuth_ARefusedStartupIsNeverOfferedThePrompt(t *testing.T) {
 	f := &fakeAuth{result: goodSession()}
 	_, addr := authListener(t, f)
 
-	// `search_path` is refused by §3.1.
+	// `replication` is refused by §3.1. Not `search_path`: under Amendment 8 a
+	// parameter naming a SETTING is collected and judged by the engine, so this
+	// cell needs one the front door still refuses on its own.
 	_, fe := startupTo(t, addr, map[string]string{
-		"user": "root", "database": "lm-prod", "search_path": "public",
+		"user": "root", "database": "lm-prod", "replication": "database",
 	})
 	msg, err := fe.Receive()
 	if err != nil {

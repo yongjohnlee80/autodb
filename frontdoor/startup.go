@@ -112,6 +112,10 @@ type startupOutcome struct {
 	// truncated; empty options ignored). Audited by the listener; the
 	// truncation additionally earns the peer a NoticeResponse.
 	Notes []paramNote
+	// GUCs are the settings Amendment 8 hands the engine, collected from the
+	// parameters outside §3.1's named set and from `options`. Empty when the
+	// client asked for none.
+	GUCs map[string]string
 	// RefusedParam names the startup parameter that failed §3.1, for the
 	// audit row only. The wire gets the uniform denial: telling a caller
 	// WHICH parameter this server dislikes would map the accepted set for
@@ -390,10 +394,22 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 	// carrying `search_path` was denied for want of a credential store
 	// rather than for the parameter, and reasonStartupParamRefus sat unused
 	// in the source — a dead constant is a policy nobody is applying.
-	if refused, ok := checkStartupParams(sm.Parameters); !ok {
-		_ = refused // named in the audit by the caller; never on the wire
-		return secure, startupOutcome{Denied: reasonStartupParamRefus, RefusedParam: refused, Negotiated: out.Negotiated}, nil
+	// THE DUPLICATE PREFLIGHT RUNS ON THE RAW PAIRS, because by the time the
+	// parameters are a map the duplicate is gone — Decode keeps the last value
+	// for a repeated key and nothing downstream can tell that a first one
+	// existed. Everything after this line is map-based and structurally unable
+	// to see it (lector r0 MF2).
+	if dup, found := duplicateStartupKey(raw2); found {
+		return secure, startupOutcome{Denied: reasonStartupDuplicateKey, RefusedParam: dup, Negotiated: out.Negotiated}, nil
 	}
+	check, ok := checkStartupParams(sm.Parameters)
+	if !ok {
+		// The REASON varies (a refused parameter, too many settings, an
+		// options string we could not read); the wire does not. denial() takes
+		// the reason and drops it, so this choice reaches the audit row only.
+		return secure, startupOutcome{Denied: check.Reason, RefusedParam: check.Refused, Negotiated: out.Negotiated}, nil
+	}
+	out.GUCs = check.GUCs
 	// Accepted. Apply the two accept-with-a-note rules to the map that flows
 	// onward, so the echo and the session see the truncated value while the
 	// audit sees the original.

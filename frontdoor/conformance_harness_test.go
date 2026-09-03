@@ -212,99 +212,20 @@ func TestHarness_ARefusalArrivesAsASQLSTATENotADisconnect(t *testing.T) {
 	}
 }
 
-// ---- Arms this harness names but cannot yet prove ----
+// LM'S REAL CLIENT, RUNNING (ADR-0075 Amendment 8).
 //
-// They are cells rather than a comment so that the harness is the one place a
-// reader looks to learn which client shapes are covered, and so that unblocking
-// one is a deletion of a skip rather than a hunt for where it should have gone.
-
-// LIB/PQ CANNOT CONNECT AT ALL, and that is a FINDING, not a broken cell.
+// These arms were written and then skipped for a day: lib/pq's config
+// normalization hard-codes `datestyle` on every connection, §3.1's closed set
+// refused it, and LM's own driver could not open a session through the front
+// door at all. Writing them anyway rather than describing them meant unblocking
+// was the deletion of a guard, not a morning spent reconstructing what they were
+// meant to assert.
 //
-// This is what the harness was for. Every hand-written pgproto3 cell in this
-// package passes, and pgconn connects happily — because both send only the
-// parameters the front door accepts. lib/pq sends one more, and is refused with
-// the uniform denial before it ever runs a statement.
-//
-// MEASURED, not inferred. The audit line from the refusal reads:
-//
-//	fd.auth_denied  frontdoor/startup-parameter-refused  datestyle
-//
-// And it is UNCONDITIONAL: lib/pq's config normalization hard-codes it —
-// connector.go:612, `cfg.ClientEncoding, cfg.Datestyle = "UTF8", "ISO, MDY"` —
-// so every lib/pq connection sends `datestyle`, whatever the DSN says. There is
-// no client-side option that avoids it.
-//
-// THE CONFLICT IS BETWEEN TWO PARTS OF THE MATRIX, not in the code. Row 3.1
-// says "any other parameter → Refused (uniform denial)", and the front door does
-// exactly that — correctly. §10 names "lib/pq + sqlx conformance (LM's real
-// client)" as a conformance target. Both cannot hold: as specified, LM's real
-// client can never open a session.
-//
-// Worth noting for whoever rules on it: the VALUE lib/pq sends is "ISO, MDY",
-// PostgreSQL's own default, and it pairs with client_encoding=UTF8 which this
-// surface already accepts. So the refusal is not protecting against a client
-// asking for something unusual.
-//
-// NOT FIXED HERE. A matrix rule is not a thing a test harness changes, and the
-// PR that adds cells changes no behaviour. Raised to jarvis for a ruling.
-func TestHarness_LibPQIsRefusedForDatestyle(t *testing.T) {
-	_, secret, database, eng := pgLoopWithEngine(t)
-	_, events, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
-	host, port, ok := strings.Cut(addr, ":")
-	if !ok {
-		t.Fatalf("listener address %q is not host:port", addr)
-	}
-	db, err := sql.Open("postgres", fmt.Sprintf(
-		"host=%s port=%s user=root password=%s dbname=%s sslmode=require",
-		host, port, secret, database))
-	if err != nil {
-		t.Fatalf("opening lib/pq: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-
-	if err := db.PingContext(opCtx(t)); err == nil {
-		t.Fatal("lib/pq CONNECTED — the datestyle refusal has been ruled on and lifted. Delete " +
-			"this cell and restore the four driver arms below it; they are written and were " +
-			"passing except for this")
-	}
-
-	// The refusal must be the one this cell names. If lib/pq is being refused
-	// for some OTHER reason, the finding recorded here is wrong and the new
-	// reason is a fresh one to chase.
-	// WAIT FOR THE AUDIT, do not sample it. The client's Ping error returns as
-	// soon as the denial frame arrives; the server writes its audit row after.
-	// Reading events() immediately passed when this cell ran alone and failed
-	// under full-suite load, reporting an EMPTY reason — which read exactly like
-	// "the finding changed" and sent me chasing a behaviour change that had not
-	// happened. A cell that samples a value written by another goroutine is
-	// asking a question before the answer exists.
-	waitFor(t, "the startup-parameter refusal to be audited", func() bool {
-		for _, ev := range events() {
-			if ev.Kind == "fd.auth_denied" {
-				return true
-			}
-		}
-		return false
-	})
-	refused := ""
-	for _, ev := range events() {
-		if ev.Kind == "fd.auth_denied" {
-			refused = ev.Reason + "/" + ev.Detail
-		}
-	}
-	if refused != "frontdoor/startup-parameter-refused/datestyle" {
-		t.Fatalf("lib/pq was refused as %q, not for datestyle — the finding this cell pins has "+
-			"changed and the new cause needs chasing", refused)
-	}
-}
-
-// The arms that lib/pq would run, once it can connect. They are written rather
-// than described: unblocking is then a deletion of the guard above, not a
-// morning spent reconstructing what the cells were meant to assert.
+// They assert VALUES, not that the calls returned. Everything on this path
+// relays, so almost everything "runs" — and a cell that only checked for a nil
+// error would pass against a front door that dropped every startup setting on
+// the floor, which is the failure this whole change is about.
 func TestHarness_LibPQRunsAParameterlessQuery(t *testing.T) {
-	t.Skip("blocked by TestHarness_LibPQIsRefusedForDatestyle — lib/pq cannot open a session " +
-		"(matrix row 3.1 refuses `datestyle`, which lib/pq always sends). Awaiting a ruling")
-
 	db, done := harnessDB(t)
 	defer done()
 
@@ -334,9 +255,6 @@ func TestHarness_LibPQRunsAParameterlessQuery(t *testing.T) {
 }
 
 func TestHarness_SqlxScansThroughTheFrontDoor(t *testing.T) {
-	t.Skip("blocked by the same refusal: sqlx wraps a database/sql handle, and the handle is " +
-		"lib/pq's")
-
 	db, done := harnessDB(t)
 	defer done()
 

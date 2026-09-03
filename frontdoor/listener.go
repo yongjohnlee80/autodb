@@ -675,7 +675,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		be := pgproto3.NewBackend(fr, stream)
 		be.SetMaxBodyLen(PreAuthMaxBodyLen)
 		var aerr error
-		outcome, aerr = l.runAuth(ctx, stream, be, fr, out.Params, peer)
+		outcome, aerr = l.runAuth(ctx, stream, be, fr, out.Params, out.GUCs, peer)
 		if aerr != nil {
 			closeReason = "auth-read-failed"
 			l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s: %v", peer, aerr))
