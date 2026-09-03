@@ -58,9 +58,11 @@ section 9 says when each applies:
 flowchart TD
     A["Frontend message"] --> B{"Which lane?<br/>(section 4, Charge column)"}
     B -->|"Close, Flush, Sync, Terminate,<br/>CancelRequest, and every refusal"| C["CONTROL LANE<br/><i>always admissible ·<br/>reserves nothing</i>"]
-    B -->|"Query, Parse, Bind, Execute<br/>(Describe is control-sized<br/>on the general lane)"| D["GENERAL LANE<br/><i>reserves output capacity<br/>before dispatch</i>"]
+    B -->|"simple Query — S4"| Q["GENERAL LANE<br/><i>reserves output capacity<br/>before dispatch</i>"]
+    B -->|"Parse, Bind, Execute — S5<br/>(Describe is control-sized<br/>on the general lane)"| D["GENERAL LANE<br/><i>reserves output capacity<br/>before dispatch</i>"]
     D --> E["Segment budget — S5 only<br/>10k msgs / 96 MiB"]
     D --> F["Output watermark<br/>4 MiB"]
+    Q --> F
     C --> G["<b>Sync alone</b> emits ReadyForQuery.<br/>Flush, Terminate and CancelRequest<br/>do not."]
 ```
 

@@ -54,9 +54,22 @@ func TestMatrixDiagrams_AgreeWithTheNormativeRows(t *testing.T) {
 
 	// (2) Row 2.3: a CancelRequest is accepted WITHOUT TLS. The S0 refusal must
 	// not read as an unconditional plaintext refusal.
-	if !regexp.MustCompile(`(?i)CancelRequest[^\n]*WITHOUT TLS`).MatchString(lifecycle) {
-		t.Error("lifecycle diagram omits row 2.3's exception: a plaintext CancelRequest is ACCEPTED without TLS, " +
-			"so an unconditional plaintext refusal at S0 is wrong")
+	cancel := regexp.MustCompile(`(?i)CancelRequest[^\n]*`).FindString(lifecycle)
+	if cancel == "" {
+		t.Fatal("vacuity: the lifecycle names no CancelRequest transition at all")
+	}
+	// Polarity, not tokens: "refused WITHOUT TLS" contains the same words and
+	// means the opposite. Row 2.3 says ACCEPTED.
+	if !regexp.MustCompile(`(?i)accepted`).MatchString(cancel) {
+		t.Errorf("lifecycle CancelRequest transition %q does not say ACCEPTED; row 2.3 accepts it "+
+			"without TLS, and any other polarity contradicts the row", strings.TrimSpace(cancel))
+	}
+	if regexp.MustCompile(`(?i)refus|denied|reject`).MatchString(cancel) {
+		t.Errorf("lifecycle CancelRequest transition %q reads as a refusal; row 2.3 ACCEPTS it without TLS",
+			strings.TrimSpace(cancel))
+	}
+	if !regexp.MustCompile(`(?i)WITHOUT TLS`).MatchString(cancel) {
+		t.Errorf("lifecycle CancelRequest transition %q omits that it is accepted WITHOUT TLS", strings.TrimSpace(cancel))
 	}
 
 	// (3) Matrix line for `S5 seg`: entered by ANY extended message, not by Parse
@@ -66,9 +79,13 @@ func TestMatrixDiagrams_AgreeWithTheNormativeRows(t *testing.T) {
 	if entry == nil {
 		t.Fatal("vacuity: no S4 --> S5 transition found; this cell would assert nothing")
 	}
-	if !strings.Contains(strings.ToUpper(entry[1]), "ANY") {
-		t.Errorf("lifecycle says the segment is opened by %q; the matrix says ANY extended-protocol message "+
-			"opens it (Parse, Bind, Describe, Execute, Close, Flush)", strings.TrimSpace(entry[1]))
+	// Scope, not tokens: "ANY frontend message" contains ANY and is wrong — the
+	// matrix scopes segment entry to EXTENDED-protocol messages.
+	up := strings.ToUpper(entry[1])
+	if !strings.Contains(up, "ANY") || !strings.Contains(up, "EXTENDED") {
+		t.Errorf("lifecycle says the segment is opened by %q; the matrix says ANY EXTENDED-protocol message "+
+			"opens it (Parse, Bind, Describe, Execute, Close, Flush) — both the breadth and the scope matter",
+			strings.TrimSpace(entry[1]))
 	}
 
 	// (4) The segment budget is S5-only; simple Query is an S4 message and must
@@ -80,6 +97,29 @@ func TestMatrixDiagrams_AgreeWithTheNormativeRows(t *testing.T) {
 		if strings.Contains(node[1], "Query") {
 			t.Errorf("segment-budget node %q names Query; simple Query is an S4 message and is not "+
 				"charged against the S5 segment budget", node[1])
+		}
+	}
+
+	// (4b) No edge may route a Query-bearing branch into the segment budget.
+	segNode := regexp.MustCompile(`(\w+)\["[^"]*[Ss]egment budget[^"]*"\]`).FindStringSubmatch(lanes)
+	if segNode == nil {
+		t.Fatal("vacuity: no segment-budget node found in the lane diagram")
+	}
+	for _, edge := range regexp.MustCompile(`(?m)^\s*(\w+)\s*-->\s*`+regexp.QuoteMeta(segNode[1])+`\b`).FindAllStringSubmatch(lanes, -1) {
+		src := edge[1]
+		label := regexp.MustCompile(regexp.QuoteMeta(src) + `\["([^"]*)"\]`).FindStringSubmatch(lanes)
+		branch := regexp.MustCompile(`\|"([^"]*)"\|\s*` + regexp.QuoteMeta(src)).FindStringSubmatch(lanes)
+		hay := ""
+		if label != nil {
+			hay += label[1]
+		}
+		if branch != nil {
+			hay += " " + branch[1]
+		}
+		if strings.Contains(hay, "Query") {
+			t.Errorf("node %q routes into the segment budget while naming Query (%q); simple Query is an S4 "+
+				"message and must not flow into the S5 segment budget — a caveat inside the node does not "+
+				"undo the arrow", src, strings.TrimSpace(hay))
 		}
 	}
 
@@ -97,6 +137,15 @@ func TestMatrixDiagrams_AgreeWithTheNormativeRows(t *testing.T) {
 				"a node naming only Sync reads as though the others were merely unmentioned",
 				readiness[1], notEmitter)
 		}
+	}
+	// Polarity: naming the three non-emitters is not enough — "Flush, Terminate
+	// and CancelRequest ALSO DO" names them and inverts the claim.
+	if !regexp.MustCompile(`(?i)do not|does not|never`).MatchString(readiness[1]) {
+		t.Errorf("readiness node %q names the non-emitters but carries no NEGATIVE: it must say they do NOT "+
+			"emit ReadyForQuery, or the same words assert the opposite", readiness[1])
+	}
+	if regexp.MustCompile(`(?i)also do\b|also emit`).MatchString(readiness[1]) {
+		t.Errorf("readiness node %q says the non-emitters ALSO emit readiness; Sync alone emits it", readiness[1])
 	}
 }
 
