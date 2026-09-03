@@ -223,17 +223,34 @@ connection cap 64, auth workers 16.
 | `database` | **Required.** Must name an autodb **connection** the user holds a grant on (name or `conn:<id>`). Unknown/ungranted = uniform denial (no existence disclosure). |
 | `application_name` | **Accepted + audited** (recorded on session + every audit row; also reported back via `ParameterStatus`). Length-capped 256 bytes (over = truncate + notice, audited verbatim). **Current state (2026-09-03):** the echo and the cap/notice/verbatim-audit are implemented; recording on the session and every audit row is this row's CONTRACT and is `awaiting` the F1 wire loop (claim `#session-audit`). **Not forwarded to the target:** autodb sets no `application_name` on the backends it pins (the connection's DSN is used unchanged), so a fresh backend shows the target's own effective startup default — the DSN's value if supplied, otherwise the applicable server/database/role default (`ALTER DATABASE`/`ALTER ROLE … SET`), commonly empty — and two `psql` clients are indistinguishable there, and no backend PID is captured, so backend → session mapping does not exist yet on either side. **The client can change the backend's value at runtime:** `SET application_name` is refused by the session-state gate, but `SELECT set_config('application_name', …, false)` is classified as a read and runs on the pinned backend (lector, PR #51, proven live) — refusing `SET` makes no GUC immutable. *A structured per-session stamp at pin time (target caps at 63 bytes) is a documented gap, not a decision; it must refuse or survive the `set_config` overwrite.* |
 | `client_encoding` | Accepted iff `UTF8` (case-insensitive). Anything else → refused (uniform denial): autodb does not transcode (ruling 2). **The target lease is pinned UTF8** — at lease acquisition the pinned connection's `client_encoding`/`server_encoding` `ParameterStatus` must report UTF8-compatible values, else lease acquisition fails loudly (audited); the byte-fidelity claim is only honest if both ends of the relay actually speak UTF8. |
-| `options` | **Refused if it sets any GUC** (`-c key=val` or `--key=val` content). ADR-0075 §5 pins this: GUC-setting options refuse with the §8a shape post-auth-impossible — at startup this is the uniform denial. An empty/whitespace `options` is accepted and ignored (audited). |
+| `options` | **Unpacked into startup settings (Amendment 8).** `-c name=value`, `-cname=value` and `--name=value` are parsed — libpq's backslash escaping honoured, so `-c datestyle=ISO,\ MDY` is one setting — and each is admitted exactly as the equivalent `SET` would be. An options string that does **not parse** (a flag we do not implement, a `-c` with no value, a trailing backslash) is **refused**: to admit these we must know what they say, and a string we half-read is a client asking for something we did not do and were not told we skipped. A key named **twice** — in either spelling, case-insensitively — is refused as malformed; a map keeps one of the two values silently. An empty/whitespace `options` is accepted and ignored (audited). *Superseded: this row previously refused any GUC-setting `options`.* |
 | `replication` | **Refused** (any value: `true`/`database`/`on`). |
 | `_pq_.*` (protocol extensions) | **Negotiated, not refused (MF4)**: unrecognized `_pq_.*` names are listed in `NegotiateProtocolVersion` (row 2.5) and the session continues at 3.0 with none of them active — the pg-conformant declination, and still no silent acceptance (the client is told exactly what was declined). |
-| any other parameter | **Refused** (uniform denial). PostgreSQL treats unknown startup parameters as GUC attempts; we refuse rather than emulate GUC semantics. |
+| any other parameter | **Collected as a startup setting and admitted exactly as the equivalent `SET` from this session would be** (ADR-0075 Amendment 8, one admission implementation), applied to the pinned backend before `AuthenticationOk`; refused → uniform denial (28000), audit `frontdoor/startup-parameter-refused`, and the refusal **withdraws the session**. Names and values are carried **verbatim** — the engine lowercases for admission and the target decides what a value means. **Capped at 64 settings per startup packet**, counted after `options` is unpacked (audit `frontdoor/startup-guc-count`); each admitted setting is a round trip inside the session open, so an uncapped map would let an unauthenticated peer buy an arbitrary number for the price of one connection. *Superseded: this row previously refused every unknown parameter, which meant lib/pq — whose config normalization hard-codes `datestyle` — could never open a session.* |
+| **carve-out** (Amendment 8 + ruling 1, 2026-09-03) | Amendment 8's sentence "startup parameters that name a GUC are admitted exactly as the equivalent `SET` would be" is **scoped to the parameters outside this named set**. `client_encoding` and `application_name` **are** GUCs and are **NOT** admitted as the equivalent `SET`: `client_encoding` is governed by this table's UTF8-only rule and is denied unconditionally by the engine's wire denylist (the lease pins the session to UTF8), and `application_name` is capped/truncated/echoed here and deliberately **not forwarded to the target**. Collecting either would withdraw the session of every ordinary client, since psql, lib/pq and JDBC all send `client_encoding` at startup. This is a decision, not an oversight. |
 
 ### 3.2 GUC policy (summary)
 
-No client-controlled GUC reaches the pinned target connection at startup.
-Post-auth, `SET` statements follow the ADR-0074 gate matrix (benign-SET
-default admin-only; grammar GUCs banned forever; engine-originated
-`SET LOCAL` belts are not client-reachable).
+**Amended by ADR-0075 Amendment 8 (2026-09-03).** A client-controlled setting
+*may* reach the pinned target connection at startup — but only through the same
+admission a `SET` from that session would meet. Startup settings are judged by
+the wire **denylist** (parsing GUCs, engine GUCs, the encoding pin, and for a
+read-only session the reader GUCs), applied to the pinned backend before
+`AuthenticationOk`, and one refusal withdraws the session. There is **one
+admission implementation**: startup parameters, `SET` and `RESET` all pass
+through it, so a setting refused mid-session cannot be obtained by asking for it
+at connect instead.
+
+The carve-out in §3.1 is part of this rule, not an exception to it:
+`client_encoding` and `application_name` are governed by §3.1 itself and never
+become startup settings.
+
+Post-auth, `SET`/`RESET` follow the denylist above (the five-setting
+`benignGUCs` allowlist is retired); grammar GUCs are banned forever; and
+engine-originated `SET LOCAL` belts are not client-reachable.
+
+*Superseded: "No client-controlled GUC reaches the pinned target connection at
+startup" — true until Amendment 8, and the reason lib/pq could not connect.*
 
 ### 3.3 `ParameterStatus` set reported at session open
 

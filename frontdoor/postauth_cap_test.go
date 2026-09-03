@@ -97,9 +97,9 @@ func TestPostAuth_AFrameOverTheCapIsRefusedWithoutDecodingItsBody(t *testing.T) 
 			e.Code, e.Detail, sqlStateProtocolViolation, ruleMessageTooLarge)
 	}
 
-	// THE HALF THE WIRE CANNOT SHOW. The frame is 5 header bytes plus a body of
-	// len(stmt)+5; if any of it reached pgproto3 the refusal cost what it was
-	// refusing, which is the whole point of refusing from the header.
+	// THE HALF THE WIRE CANNOT SHOW. The frame declares 5 header bytes plus a
+	// bodyLen-byte body; if any of it reached pgproto3 the refusal cost what it
+	// was refusing, which is the whole point of refusing from the header.
 	if got := fr.deliveredBytes() - before; got != 0 {
 		t.Errorf("%d bytes of a refused frame reached the Backend, want 0 — the refusal is made "+
 			"from the DECLARED LENGTH before admission, so neither header nor body may be delivered; a "+

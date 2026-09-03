@@ -125,10 +125,11 @@ var matrixTriage = map[string]struct {
 	"3.1:database":            {covered, "claims below prove requiredness and the grant-on-target check"},
 	"3.1:application_name":    {covered, "derived from its claims — #accepted, #truncate-notice-256 and #session-audit are all covered as of #58's seam and its consumer wiring. The parent was held awaiting by #session-audit alone (lector PR #46 r0 MF1); that claim is now witnessed on both sides of the seam, so the derivation promotes it rather than any hand edit here"},
 	"3.1:client_encoding":     {awaiting, "partial — claims below (the UTF8-only gate is proven; the target-lease UTF8 pin, ruling 2, needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub)"},
-	"3.1:options":             {covered, "derived from its claims — GUC refusal and empty-accepted (TestStartup_ParameterPolicy), empty-options audit (TestStartup_EmptyOptionsIsAuditedAsIgnored)"},
+	"3.1:options":             {covered, "derived from its claims — options unpacking and empty-accepted (TestStartup_ParameterPolicy, TestStartupGUCs_OptionsUnpackIntoTheSameMap, TestStartupGUCs_AnUnreadableOptionsStringIsRefused), empty-options audit (TestStartup_EmptyOptionsIsAuditedAsIgnored)"},
 	"3.1:replication":         {covered, "single claim below — refused, every tested value"},
 	"3.1:_pq_":                {covered, "TestStartup_UnrecognizedProtocolOptionsAreNamed + TestStartup_ParameterPolicy — negotiated, not refused"},
-	"3.1:any-other-parameter": {covered, "TestStartup_ParameterPolicy — an unknown parameter is refused as a GUC attempt (over the wire: the 2.4 cell)"},
+	"3.1:any-other-parameter": {covered, "TestStartup_ParameterPolicy + TestStartupGUCs_ASettingReachesTheEngineVerbatim (collected verbatim), TestStartupGUCs_TheCapCountsSettingsNotParameters (the 64 cap, counted after options unpacking), TestPGStartupGUCs_AnAdmittedSettingReachesTheBackend (it actually takes effect on the pinned backend — the half no wire cell can see), TestPGStartupGUCs_ADenylistedSettingIsRefused (the same denylist a SET meets)"},
+	"3.1:carve-out":           {covered, "TestStartupGUCs_TheNamedSetIsNeverCollected (client_encoding and application_name never become settings) + TestPGStartupGUCs_ThePacketPsqlSendsConnects (the consequence, live: the packet every ordinary client sends still opens a session) + TestPGStartupGUCs_OptionsIsNotAWayAroundTheEncodingPin (nor through options)"},
 
 	// ---- §3.2 / §3.3 prose units ----
 	"3.2": {awaiting, "post-auth SET policy is the ADR-0074 gate matrix; needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub; the startup half is 3.1:options' refusal"},
@@ -229,9 +230,9 @@ var claimTriage = map[string]struct {
 	"3.1:client_encoding#lease-utf8-pin": {awaiting, "",
 		"the target lease is pinned UTF8 at acquisition (ruling 2) — nothing in core/exec pins client_encoding yet; needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub", nil},
 
-	"3.1:options#guc-refusal": {covered, "TestStartup_ParameterPolicy",
-		"both spellings refused",
-		[]string{`"options": "-c search_path=public"`, `"options": "--search_path=public"`}},
+	"3.1:options#unpacked": {covered, "TestStartupGUCs_OptionsUnpackIntoTheSameMap",
+		"all three libpq spellings unpack into settings, escapes honoured; an options string that does not parse is refused (Amendment 8 — this claim was `#guc-refusal` while the rule was to refuse them)",
+		[]string{`"-c datestyle=ISO"`, `"--datestyle=ISO"`, `-c datestyle=ISO,\ MDY`}},
 	"3.1:options#empty-accepted": {covered, "TestStartup_ParameterPolicy",
 		"empty/whitespace accepted and ignored",
 		[]string{`"options": "   "`}},

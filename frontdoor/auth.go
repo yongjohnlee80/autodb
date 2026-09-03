@@ -125,7 +125,8 @@ type authOutcome struct {
 // ourselves. PostgreSQL closes on the first failure and so do we; the throttle
 // that actually bounds grinding is the per-source-address one, which survives
 // the reconnect that a per-connection ceiling does not.
-func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Backend, fr *frameReader, params map[string]string, peer string) (authOutcome, error) {
+func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Backend, fr *frameReader,
+	params map[string]string, gucs map[string]string, peer string) (authOutcome, error) {
 	if l.authn == nil {
 		// The honest state of a build with no engine behind the listener.
 		// Recorded as its own reason so it is never mistaken in the trail
@@ -224,6 +225,11 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// row 3.1's, and applying it before the engine sees the label keeps the
 		// one rule in one place.
 		ApplicationName: params["application_name"],
+		// Amendment 8: the settings §3.1 collected, judged by the engine's own
+		// denylist — the same one a SET from this session would meet. The front
+		// door does not decide which are allowed; deciding here would be a
+		// second opinion about a rule that lives in one place on purpose.
+		StartupGUCs: gucs,
 	})
 	release()
 	if aerr != nil {

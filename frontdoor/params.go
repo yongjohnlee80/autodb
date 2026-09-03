@@ -1,26 +1,55 @@
 package frontdoor
 
 import (
+	"sort"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
-// Startup parameter policy (protocol matrix §3.1).
+// Startup parameter policy (protocol matrix §3.1, ADR-0075 Amendment 8).
 //
-// PostgreSQL treats an unknown startup parameter as a GUC attempt. autodb
-// refuses rather than emulates that: a client-controlled GUC reaching the
-// pinned target connection is precisely what §3.2 forbids, and emulating the
-// semantics would mean owning a second, quieter configuration surface that
-// nothing else in the engine knows about.
+// PostgreSQL treats an unknown startup parameter as a GUC attempt. This surface
+// used to refuse rather than emulate that, and the refusal was correct for as
+// long as there was nothing to hand a GUC to — but it meant lib/pq could never
+// connect at all, because its config normalization hard-codes `datestyle` on
+// every connection. Amendment 8 admits them instead: a startup parameter naming
+// a setting is judged EXACTLY as `SET name TO value` from this session would be,
+// by the same denylist, and applied to the pinned backend before
+// AuthenticationOk. One refusal withdraws the session.
 //
-// So the accepted set is CLOSED. A parameter not named here is refused, which
-// is the same stance the matrix takes on messages: no silent acceptance.
+// So the policy is now three-way rather than two: the NAMED SET below is
+// governed by §3.1's own rules, `replication` is refused outright, and
+// everything else is COLLECTED and handed to the engine to judge.
+//
+// THE NAMED SET IS A CARVE-OUT, AND IT IS LOAD-BEARING. Amendment 8's sentence
+// reads "startup parameters that name a GUC are admitted exactly as the
+// equivalent SET would be", and taken literally that captures two parameters
+// §3.1 governs differently:
+//
+//   - client_encoding IS a GUC, and the engine's denylist refuses it
+//     UNCONDITIONALLY — including to UTF8 — because the lease pins the session
+//     to UTF8 and moving it afterwards would break the byte-fidelity claim for
+//     every row that followed. psql, lib/pq and JDBC all send client_encoding
+//     in the startup packet, so collecting it would withdraw the session of
+//     every ordinary client. §3.1's UTF8-only check below is what admits them.
+//   - application_name IS a GUC, and §3.1 caps it, truncates it on a rune
+//     boundary, audits the original verbatim, echoes it in a ParameterStatus
+//     and explicitly does NOT forward it to the target.
+//
+// Neither may enter StartupGUCs. This is a decision, not an oversight
+// (jarvis, ruling 1, 2026-09-03).
 
 // startupParamDecision is what the policy says about one parameter.
 type startupParamDecision int
 
 const (
+	// paramAccept marks the NAMED SET: parameters §3.1 governs itself. They
+	// are never collected as settings (see the carve-out above).
 	paramAccept startupParamDecision = iota
+	// paramCollect marks a parameter that names a setting: handed to the
+	// engine's admission as the equivalent SET (Amendment 8).
+	paramCollect
 	paramRefuse
 	// paramNegotiate marks `_pq_.*` protocol extensions: declined by being
 	// NAMED in NegotiateProtocolVersion (row 2.5) rather than refused, which
@@ -28,13 +57,41 @@ const (
 	paramNegotiate
 )
 
-// checkStartupParams applies §3.1 and returns the first refusal, if any.
+// startupGUCLimit caps how many settings one startup packet may carry
+// (Amendment 8). It bounds the work an unauthenticated peer can ask for before
+// it has presented anything: each admitted setting is a round trip to the
+// target inside the session open, so an uncapped map would let a startup packet
+// buy an arbitrary number of them for the price of one connection.
+//
+// 64 is far above what any real client sends — lib/pq sends two, JDBC a
+// handful — and far below anything that costs.
+const startupGUCLimit = 64
+
+// startupCheck is what §3.1 makes of one StartupMessage.
+type startupCheck struct {
+	// GUCs are the settings to hand the engine, keyed by the client's OWN
+	// spelling and carrying the value byte-for-byte. Neither is normalized
+	// here: the engine lowercases for admission and the target is the thing
+	// that decides what a value means, so a front door that trimmed or
+	// re-spelled would be holding an opinion it cannot back.
+	GUCs map[string]string
+	// Refused names the parameter or key that failed, for the AUDIT row only.
+	Refused string
+	// Reason distinguishes the three ways a startup can fail §3.1 for the
+	// audit. The WIRE gets the same uniform denial for all of them — a
+	// distinguishable refusal would map the accepted set for anyone willing to
+	// ask repeatedly (jarvis, ruling 2, 2026-09-03).
+	Reason denialReason
+}
+
+// checkStartupParams applies §3.1 and Amendment 8: it refuses, or it returns
+// the settings the engine must judge.
 //
 // The refusal names the parameter for the AUDIT row; the wire still gets the
 // uniform denial, so a caller learns that startup failed and not which of
 // their parameters this server dislikes. Telling them would map the accepted
 // set for anyone who asked politely enough.
-func checkStartupParams(params map[string]string) (refused string, ok bool) {
+func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	// REQUIRED first (§3.1 marks both). Presence is checked before the
 	// per-parameter policy because a startup with neither is not a startup
 	// this surface can act on at all — and without the check an empty
@@ -47,13 +104,46 @@ func checkStartupParams(params map[string]string) (refused string, ok bool) {
 	// to cross-check and nothing to route to.
 	for _, required := range []string{"user", "database"} {
 		if strings.TrimSpace(params[required]) == "" {
-			return required, false
+			return startupCheck{Refused: required, Reason: reasonStartupParamRefus}, false
 		}
 	}
-	for k, v := range params {
+
+	// seen maps a setting's LOWERCASED name to the key it first arrived under,
+	// so a duplicate is caught whatever its spelling. GUC names are
+	// case-insensitive to PostgreSQL, so `DateStyle` and `datestyle` are one
+	// setting asked for twice — and two different values for one setting is a
+	// packet whose meaning depends on which the parser happened to keep.
+	gucs := map[string]string{}
+	seen := map[string]string{}
+	add := func(key, value string) (string, denialReason, bool) {
+		lower := strings.ToLower(key)
+		if _, dup := seen[lower]; dup {
+			return key, reasonStartupOptionsMalformed, false
+		}
+		seen[lower] = key
+		gucs[key] = value
+		return "", "", true
+	}
+
+	// SORTED, because a refusal that varies with map iteration order is one
+	// nobody can write a cell against — and because the audit row should name
+	// the same parameter every time the same packet arrives.
+	names := make([]string, 0, len(params))
+	for k := range params {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+
+	for _, k := range names {
+		v := params[k]
 		switch startupParamPolicy(k) {
 		case paramRefuse:
-			return k, false
+			return startupCheck{Refused: k, Reason: reasonStartupParamRefus}, false
+		case paramCollect:
+			if bad, why, ok := add(k, v); !ok {
+				return startupCheck{Refused: bad, Reason: why}, false
+			}
+			continue
 		case paramNegotiate, paramAccept:
 		}
 		// The two parameters with VALUE conditions, not just name ones.
@@ -62,20 +152,139 @@ func checkStartupParams(params map[string]string) (refused string, ok bool) {
 			// UTF8 only: autodb does not transcode, and the byte-fidelity
 			// claim the relay makes is only honest if both ends agree on the
 			// encoding (matrix §3.1, ruling 2).
+			//
+			// THIS is what lets psql and lib/pq connect. The engine's denylist
+			// refuses client_encoding unconditionally, so were this parameter
+			// collected instead of checked here, every ordinary client would
+			// have its session withdrawn for sending the encoding it is
+			// required to send.
 			if !strings.EqualFold(strings.TrimSpace(v), "UTF8") &&
 				!strings.EqualFold(strings.TrimSpace(v), "UTF-8") {
-				return k, false
+				return startupCheck{Refused: k, Reason: reasonStartupParamRefus}, false
 			}
 		case "options":
-			// Empty or whitespace is accepted and ignored. Anything that
-			// SETS a GUC is refused — that is the whole point of the
-			// parameter and the whole reason it cannot be allowed.
-			if optionsSetsGUC(v) {
-				return k, false
+			// Empty or whitespace is accepted and ignored (audited). Anything
+			// else must PARSE — and what it parses to is settings, admitted
+			// exactly as the same names arriving as parameters would be.
+			//
+			// The old code refused any options that looked like it set
+			// something, deliberately not parsing, on the grounds that a parser
+			// disagreeing with the server's about what a string meant was worse
+			// than a blunt refusal. Amendment 8 removes that choice: to admit
+			// these we must know what they say. So the parser is strict and
+			// anything it cannot read is REFUSED rather than guessed at, which
+			// keeps the original reasoning intact — we still never act on a
+			// string we are not sure we understood.
+			parsed, ok := parseOptionsGUCs(v)
+			if !ok {
+				return startupCheck{Refused: k, Reason: reasonStartupOptionsMalformed}, false
+			}
+			for _, kv := range parsed {
+				if bad, why, ok := add(kv.name, kv.value); !ok {
+					return startupCheck{Refused: bad, Reason: why}, false
+				}
 			}
 		}
 	}
-	return "", true
+
+	// The cap is applied to what was COLLECTED, not to the parameter count: the
+	// named set and the `_pq_.*` extensions are not settings and cost nothing
+	// to carry.
+	if len(gucs) > startupGUCLimit {
+		return startupCheck{Refused: "options", Reason: reasonStartupGUCCount}, false
+	}
+	return startupCheck{GUCs: gucs}, true
+}
+
+// optionsGUC is one setting named by an `options` string.
+type optionsGUC struct{ name, value string }
+
+// parseOptionsGUCs unpacks an `options` value into the settings it names,
+// reporting whether the whole string was understood.
+//
+// libpq's own three spellings, and nothing else: `-c name=value`,
+// `-cname=value`, `--name=value`. Fields are separated by whitespace and a
+// backslash escapes the next character, which is how a value containing a space
+// is written — `-c datestyle=ISO,\ MDY` is ONE field and one setting, and a
+// naive strings.Fields would silently truncate it to "ISO," and hand the
+// leftover to the target as a second, malformed option.
+//
+// Anything else — a bare word, `-c` with no `=`, a flag this surface does not
+// implement, a trailing backslash — is NOT understood and refuses the startup.
+// Guessing is the one option not available: an options string we half-read is
+// a client asking for something we did not do and were not told we skipped.
+func parseOptionsGUCs(v string) ([]optionsGUC, bool) {
+	fields, ok := optionsFields(v)
+	if !ok {
+		return nil, false
+	}
+	var out []optionsGUC
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		var body string
+		switch {
+		case f == "-c":
+			// The value is the NEXT field; a `-c` with nothing after it is a
+			// truncated option, not an empty one.
+			if i+1 >= len(fields) {
+				return nil, false
+			}
+			i++
+			body = fields[i]
+		case strings.HasPrefix(f, "-c"):
+			body = strings.TrimPrefix(f, "-c")
+		case strings.HasPrefix(f, "--"):
+			body = strings.TrimPrefix(f, "--")
+		default:
+			return nil, false
+		}
+		name, value, found := strings.Cut(body, "=")
+		if !found || strings.TrimSpace(name) == "" {
+			return nil, false
+		}
+		out = append(out, optionsGUC{name: name, value: value})
+	}
+	return out, true
+}
+
+// optionsFields splits an options string the way libpq writes it: on unescaped
+// whitespace, with a backslash escaping the character after it.
+func optionsFields(v string) ([]string, bool) {
+	var (
+		out     []string
+		cur     strings.Builder
+		esc     bool
+		started bool
+	)
+	for _, r := range v {
+		switch {
+		case esc:
+			cur.WriteRune(r)
+			esc = false
+			started = true
+		case r == '\\':
+			esc = true
+			started = true
+		case unicode.IsSpace(r):
+			if started {
+				out = append(out, cur.String())
+				cur.Reset()
+				started = false
+			}
+		default:
+			cur.WriteRune(r)
+			started = true
+		}
+	}
+	if esc {
+		// A trailing backslash escapes nothing. The string is truncated, and a
+		// truncated option is one we cannot claim to have read.
+		return nil, false
+	}
+	if started {
+		out = append(out, cur.String())
+	}
+	return out, true
 }
 
 // applicationNameMaxBytes is §3.1's cap on application_name. BYTES, not
@@ -168,30 +377,13 @@ func startupParamPolicy(name string) startupParamDecision {
 	case "user", "database", "application_name", "client_encoding", "options":
 		return paramAccept
 	case "replication":
-		// Refused at any value. Replication is a different protocol mode
-		// entirely, and this surface relays statements.
+		// Refused at any value, and NOT collected. Replication is a different
+		// protocol mode entirely — not a setting the engine could admit — and
+		// this surface relays statements.
 		return paramRefuse
 	default:
-		return paramRefuse
+		// Amendment 8: a setting. The engine judges it; refusing here would be
+		// this file holding a second opinion about the denylist.
+		return paramCollect
 	}
-}
-
-// optionsSetsGUC reports whether an `options` value tries to set a GUC.
-//
-// Both spellings libpq passes through: `-c key=val` and `--key=val`. The test
-// is deliberately for the ATTEMPT rather than for a specific well-formed
-// shape — an options string that looks like it is setting something is
-// refused whether or not this parser would have parsed it correctly, because
-// the alternative is a parser disagreeing with the server's about what a
-// string meant.
-func optionsSetsGUC(v string) bool {
-	for _, f := range strings.Fields(v) {
-		if strings.HasPrefix(f, "-c") || strings.HasPrefix(f, "--") {
-			return true
-		}
-		if strings.Contains(f, "=") {
-			return true
-		}
-	}
-	return false
 }

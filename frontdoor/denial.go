@@ -38,8 +38,16 @@ const (
 	reasonUnsupportedMajor  denialReason = "frontdoor/protocol-major-unsupported"
 	reasonStartupMalformed  denialReason = "frontdoor/startup-malformed"
 	reasonStartupParamRefus denialReason = "frontdoor/startup-parameter-refused"
-	reasonPreAuthOversize   denialReason = "frontdoor/pre-auth-message-too-large"
-	reasonNoCredentialStore denialReason = "frontdoor/auth-not-yet-available"
+	// The two ways a startup packet fails Amendment 8 at PARSE, before the
+	// engine judges anything. Both reach the wire as the SAME uniform denial a
+	// refused setting does — a distinguishable refusal would map the accepted
+	// set for anyone willing to ask repeatedly — and differ only here, in the
+	// audit, so the operator record keeps what the wire deliberately discards
+	// (jarvis, ruling 2, 2026-09-03).
+	reasonStartupGUCCount         denialReason = "frontdoor/startup-guc-count"
+	reasonStartupOptionsMalformed denialReason = "frontdoor/startup-options-malformed"
+	reasonPreAuthOversize         denialReason = "frontdoor/pre-auth-message-too-large"
+	reasonNoCredentialStore       denialReason = "frontdoor/auth-not-yet-available"
 
 	// Accept-time refusals (matrix §1.4, §9). None of these reaches the
 	// wire either: a peer refused for capacity learns only that the
