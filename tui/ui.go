@@ -1596,7 +1596,7 @@ var (
 // resize, they render at their floor on every screen, and they forced
 // the users footer to wrap at EVERY width — see modalSpan.
 const (
-	managerPct, managerMinW, managerMaxW = 62, 94, 160
+	managerPct, managerMinW, managerMaxW  = 62, 94, 160
 	managerHPct, managerMinH, managerMaxH = 70, 15, 40
 
 	formPct, formMinW, formMaxW = 34, 52, 88

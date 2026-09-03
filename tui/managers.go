@@ -35,11 +35,11 @@ type managerAction[T any] struct {
 // manager is a generic list-with-actions float body.
 type manager[T any] struct {
 	widget.Base
-	model   *Model
-	ctx     *tui.Context
-	table   *widget.Table[T]
-	all     []T // everything the last load returned
-	items   []T // what the table SHOWS — selection indexes into THIS, so a
+	model *Model
+	ctx   *tui.Context
+	table *widget.Table[T]
+	all   []T // everything the last load returned
+	items []T // what the table SHOWS — selection indexes into THIS, so a
 	//            filtered manager must narrow items, not just the table,
 	//            or a row action reads the wrong record
 	hint    *widget.Text
@@ -52,9 +52,9 @@ type manager[T any] struct {
 	// the key from the footer and the `?` card without unbinding it.
 	dynLabel map[rune]func() string
 
-	load    func(c context.Context, b *Bound) ([]T, error)
-	float   *widget.Float
-	bound   *Bound // pinned at OPEN: every load, action, and nested form
+	load  func(c context.Context, b *Bound) ([]T, error)
+	float *widget.Float
+	bound *Bound // pinned at OPEN: every load, action, and nested form
 	//              submit runs in this epoch or is refused — a form held
 	//              open across a reconnect can't mutate a stale ID on the
 	//              replacement server
