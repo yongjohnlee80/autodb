@@ -264,7 +264,7 @@ exists).
 |---|---|---|---|---|---|---|
 | 2.1 | `SSLRequest` | S0 | **Required.** Answer `S`, begin TLS. A second `SSLRequest` after TLS = protocol violation → close. | pre-auth cap 64 KiB | `fd.conn_open` | plaintext `StartupMessage` at S0 → uniform denial, close (no fallback) |
 | 2.1a | Direct TLS (PG 17 `sslnegotiation=direct`: first bytes are a TLS ClientHello, ALPN `postgresql`) | S0 | **Refused in v1**: bytes that are neither a length-prefixed request nor within the pre-auth cap → close immediately (audited `fd.tls_fail(direct-tls-unsupported)`). Candidate for a later rev; clients fall back to `SSLRequest` negotiation per libpq defaults. | pre-auth cap | `fd.tls_fail` | — |
-| 2.1b | TLS layer behavior | S0→S1 | Server cert/key from config, **validated at startup BEFORE bind/listen** (ADR-0075: absent, unparsable, expired/not-yet-valid material, a broken chain, or a key/cert mismatch **fails start or enable** — the front door never listens with identity it cannot prove; SAN coverage of the configured host names is checked and a mismatch fails start too). **Reload on config-reload applies to NEW connections only** (established sessions keep their session keys — never dropped by a cert rotation); a reload with invalid material is REFUSED, keeping the last-good identity, loudly audited. TLS handshake failure: `fd.tls_fail(reason)` audited, close, **counted against the per-source-IP auth rate** (10/min) so handshake grinding is throttled with auth grinding. **Rev 5 exception:** a peer that opened the connection and sent NOTHING (`peer-gone-before-startup`) is audited and NOT counted — that shape is a TCP health check, and charging it would throttle an operator's own monitoring out of the estate within a minute. | — | `fd.tls_ok` / `fd.tls_fail` | — |
+| 2.1b | TLS layer behavior | S0→S1 | **Cert/key validated at startup BEFORE bind/listen** — the front door never listens with identity it cannot prove. Reload applies to NEW connections only; invalid material is refused and the last-good identity kept. Handshake failure is audited, closed and rate-counted. What fails start, what a reload does, and the health-check exception: **note 2.1b** below. | — | `fd.tls_ok` / `fd.tls_fail` | — |
 | 2.2 | `GSSENCRequest` | S0 | **Refused**: answer `N`; if the client then proceeds without TLS → uniform denial + close. | pre-auth cap | — | — |
 | 2.3 | `CancelRequest` | S0 | Accepted **without TLS** (protocol-conformant: cancel connections are plaintext); processed per §6; connection closed immediately after. | control lane | `fd.cancel_received` | stale/unknown key = silent no-op (`fd.cancel_stale`), close |
 | 2.4 | `StartupMessage` (protocol 3.0) | S1 | Parse parameters per §3. Any refused parameter → uniform denial. | pre-auth cap | — | uniform denial (28000), close |
@@ -273,13 +273,50 @@ exists).
 | 2.6 | (server →) `AuthenticationCleartextPassword` | S2 | The only offered method. PATs are verified server-side against SHA-256 records; cleartext-over-TLS is the Q4-ratified design. SCRAM is **not offered** (hashed PATs cannot back SCRAM verifiers). | — | — | — |
 | 2.7 | `PasswordMessage` (PAT) | S3 | **Full verification chain (MF1), then one atomic reservation.** Every check must pass, then capacity is taken as a single operation — no check-then-reserve gap. Which check failed is audit-only. Full chain and rationale: **note 2.7** below. | pre-auth cap | `fd.auth_ok` / `fd.auth_denied` | Uniform denial (28000 `invalid_authorization_specification`), close. Attempt limits and the lease-cap identity: **note 2.7** below. |
 | 2.8 | Any other type-`p` frame in S3 | S3 | **There is no distinguishable SASL path (MF4):** once `AuthenticationCleartextPassword` is offered, every type-`p` frame IS a `PasswordMessage` by protocol — SASL-shaped bytes are simply a wrong password. Verified per row 2.7; fails the token lookup; uniform denial. `GSSResponse` is likewise type-`p` and takes the same path. | pre-auth cap | `fd.auth_denied` | uniform denial, close |
-| 2.9 | (server →) on success | S3→S4 | `AuthenticationOk`; `ParameterStatus` set per §3.3; `BackendKeyData` (CSPRNG, MF7, **4-byte secret** — every client is negotiated down to 3.0 by row 2.5 and 3.0's cancel key is a fixed int32; pgproto3 models it as a `[]byte` for 3.2 and would happily send a longer one to a client that reads four and then loses every frame boundary after it); `ReadyForQuery('I')`. **Rev 5 split:** F0e emits the three SYNTHESIZED statuses only; §3.3's verbatim forwarded set needs the target's own reported values and therefore a lease, which is F1's. The ExecSession, lease, and all slots were already **atomically reserved in row 2.7** — nothing acquired between `AuthenticationOk` and ready. | (charged in 2.7) | `fd.session_open` | — |
+| 2.9 | (server →) on success | S3→S4 | `AuthenticationOk`; `ParameterStatus` per §3.3; `BackendKeyData` (CSPRNG, MF7, **4-byte secret**); `ReadyForQuery('I')`. Nothing is acquired here — the session, lease and slots were all reserved atomically in row 2.7. Why the secret is four bytes, and what F0e emits versus F1: **note 2.9** below. | (charged in 2.7) | `fd.session_open` | — |
 
 Deadlines: TLS/startup/auth 10s each (ceiling 60s). Pre-auth global
 connection cap 64, auth workers 16.
 
 ---
 
+
+**Note 2.1b — TLS identity, reload, and the health-check exception.**
+
+**Validated at startup, before bind/listen** (ADR-0075). Any of these **fails
+start or enable**:
+
+- absent or unparsable material
+- expired or not-yet-valid material
+- a broken chain, or a key/cert mismatch
+- SAN coverage that does not cover the configured host names
+
+**Reload on config-reload applies to NEW connections only.** Established
+sessions keep their session keys and are never dropped by a cert rotation. A
+reload with invalid material is REFUSED, keeping the last-good identity, loudly
+audited.
+
+**Handshake failure** is audited as `fd.tls_fail(reason)`, closed, and
+**counted against the per-source-IP auth rate** (10/min), so handshake grinding
+is throttled alongside auth grinding.
+
+***Rev 5 exception.*** A peer that opened the connection and sent NOTHING
+(`peer-gone-before-startup`) is audited and **not** counted — that shape is a
+TCP health check, and charging it would throttle an operator's own monitoring
+out of the estate within a minute.
+
+**Note 2.9 — the four-byte cancel secret, and what ships when.**
+
+Every client is negotiated down to 3.0 by row 2.5, and 3.0's cancel key is a
+fixed int32. pgproto3 models it as a `[]byte` for 3.2 and would happily send a
+longer one — to a client that reads four and then loses every frame boundary
+after it.
+
+***Rev 5 split.*** F0e emits the three SYNTHESIZED statuses only; §3.3's
+verbatim forwarded set needs the target's own reported values and therefore a
+lease, which is F1's. The ExecSession, lease and all slots were already
+**atomically reserved in row 2.7** — nothing is acquired between
+`AuthenticationOk` and ready.
 
 **Note 2.7 — the authentication chain.** Every condition must hold; the first
 failure denies. The client is told only `28000`, never which link broke.
@@ -343,13 +380,118 @@ front-door use.
 |---|---|
 | `user` | **Required.** Must equal the PAT's owner at auth time; mismatch = uniform denial (identity comes from the token; `user` is a cross-check, never an override). |
 | `database` | **Required.** Must name an autodb **connection** the user holds a grant on (name or `conn:<id>`). Unknown/ungranted = uniform denial (no existence disclosure). |
-| `application_name` | **Accepted + audited** (recorded on session + every audit row; also reported back via `ParameterStatus`). Length-capped 256 bytes (over = truncate + notice, audited verbatim). **Current state (2026-09-03):** the echo and the cap/notice/verbatim-audit are implemented; recording on the session and every audit row is this row's CONTRACT and is `awaiting` the F1 wire loop (claim `#session-audit`). **Not forwarded to the target:** autodb sets no `application_name` on the backends it pins (the connection's DSN is used unchanged), so a fresh backend shows the target's own effective startup default — the DSN's value if supplied, otherwise the applicable server/database/role default (`ALTER DATABASE`/`ALTER ROLE … SET`), commonly empty — and two `psql` clients are indistinguishable there, and no backend PID is captured, so backend → session mapping does not exist yet on either side. **The client can change the backend's value at runtime:** `SET application_name` is refused by the session-state gate, but `SELECT set_config('application_name', …, false)` is classified as a read and runs on the pinned backend (lector, PR #51, proven live) — refusing `SET` makes no GUC immutable. *A structured per-session stamp at pin time (target caps at 63 bytes) is a documented gap, not a decision; it must refuse or survive the `set_config` overwrite.* |
-| `client_encoding` | Accepted iff `UTF8` (case-insensitive). Anything else → refused (uniform denial): autodb does not transcode (ruling 2). **The target lease is pinned UTF8** — at lease acquisition the pinned connection's `client_encoding`/`server_encoding` `ParameterStatus` must report UTF8-compatible values, else lease acquisition fails loudly (audited); the byte-fidelity claim is only honest if both ends of the relay actually speak UTF8. |
-| `options` | **Unpacked into startup settings (Amendment 8).** `-c name=value`, `-cname=value` and `--name=value` are parsed — libpq's backslash escaping honoured, so `-c datestyle=ISO,\ MDY` is one setting — and each is admitted exactly as the equivalent `SET` would be. An options string that does **not parse** (a flag we do not implement, a `-c` with no value, a trailing backslash) is **refused**: to admit these we must know what they say, and a string we half-read is a client asking for something we did not do and were not told we skipped. A key named **twice** — in either spelling, whether both are in `options` or one is a top-level parameter — is refused (audit `frontdoor/startup-duplicate-key`). Names are compared through **one case-folded index**, and a carved-out name is rewritten to its canonical spelling so the cap/truncation/echo cannot be spelled around. The fold is **PostgreSQL's**: ASCII `A-Z` only, matching `guc_name_compare` — *not* Go's Unicode `ToLower`, which folds U+212A KELVIN SIGN to `k` where the target does not, and would make two names it keeps apart look like one here; a map keeps one of the two values silently. An empty/whitespace `options` is accepted and ignored (audited). *Superseded: this row previously refused any GUC-setting `options`.* |
+| `application_name` | **Accepted, capped at 256 bytes, echoed back — and never forwarded to the target.** Over the cap = truncate + notice, original audited verbatim. Full rules, current state and the documented gap: **note 3.1a** below. |
+| `client_encoding` | **Accepted iff `UTF8`** (case-insensitive); anything else is refused with the uniform denial — autodb does not transcode (ruling 2). The lease is pinned UTF8 at acquisition: **note 3.1b** below. |
+| `options` | **Unpacked into startup settings (Amendment 8).** libpq's three spellings are parsed and each setting is admitted as the equivalent `SET`; anything that does not parse is refused, and a repeated name is refused. Parsing, folding and the duplicate rule: **note 3.1c** below. |
 | `replication` | **Refused** (any value: `true`/`database`/`on`). |
 | `_pq_.*` (protocol extensions) | **Negotiated, not refused (MF4)**: unrecognized `_pq_.*` names are listed in `NegotiateProtocolVersion` (row 2.5) and the session continues at 3.0 with none of them active — the pg-conformant declination, and still no silent acceptance (the client is told exactly what was declined). |
-| any other parameter | **Collected as a startup setting and admitted exactly as the equivalent `SET` from this session would be** (ADR-0075 Amendment 8, one admission implementation), applied to the pinned backend before `AuthenticationOk`; refused → uniform denial (28000), audit `frontdoor/startup-parameter-refused`, and the refusal **withdraws the session**. Names and values are carried **verbatim, as BYTES** — the engine lowercases for admission and the target decides what a value means, and an `options` value containing invalid UTF-8 reaches the target unaltered rather than being rewritten to U+FFFD (this surface adds no encoding rule the target does not have). A key repeated in the **raw wire pairs** is refused by a preflight that reads them before pgproto3's decode collapses them into a map. **Capped at 64 settings per startup packet**, counted after `options` is unpacked (audit `frontdoor/startup-guc-count`); each admitted setting is a round trip inside the session open, so an uncapped map would let an unauthenticated peer buy an arbitrary number for the price of one connection. *Superseded: this row previously refused every unknown parameter, which meant lib/pq — whose config normalization hard-codes `datestyle` — could never open a session.* |
-| **carve-out** (Amendment 8 + ruling 1, 2026-09-03) | **The carve-out is about the NAME, not the arrival path**: a carved-out name is §3.1's whether it arrives as a top-level parameter or inside `options`, and `-c application_name=X` gets §3.1's cap/truncate/echo (and is *not* forwarded) rather than being collected or refused. A name given **both** ways is refused as a duplicate — this surface does not silently pick between two values a client asked for. Amendment 8's sentence "startup parameters that name a GUC are admitted exactly as the equivalent `SET` would be" is **scoped to the parameters outside this named set**. `client_encoding` and `application_name` **are** GUCs and are **NOT** admitted as the equivalent `SET`: `client_encoding` is governed by this table's UTF8-only rule and is denied unconditionally by the engine's wire denylist (the lease pins the session to UTF8), and `application_name` is capped/truncated/echoed here and deliberately **not forwarded to the target**. Collecting either would withdraw the session of every ordinary client, since psql, lib/pq and JDBC all send `client_encoding` at startup. This is a decision, not an oversight. |
+| any other parameter | **Collected as a startup setting and admitted exactly as the equivalent `SET` from this session would be** (Amendment 8, one admission implementation), applied to the pinned backend before `AuthenticationOk`. Refusal is the uniform denial and **withdraws the session**. Verbatim carriage, the raw-pair preflight and the 64-setting cap: **note 3.1d** below. |
+| **carve-out** (Amendment 8 + ruling 1, 2026-09-03) | **The carve-out is about the NAME, not the arrival path.** `application_name` and `client_encoding` are §3.1's wherever they arrive, and are **not** admitted as the equivalent `SET`. Why the amendment's wording does not reach them, and what collecting them would cost: **note 3.1e** below. |
+
+**Note 3.1a — `application_name` through the front door.** Accepted and audited
+(recorded on session + every audit row; also reported back via
+`ParameterStatus`). Length-capped 256 bytes: over = truncate + notice, audited
+verbatim.
+
+- **Current state (2026-09-03):** the echo and the cap/notice/verbatim-audit are
+  implemented; recording on the session and every audit row is this row's
+  CONTRACT and is `awaiting` the F1 wire loop (claim `#session-audit`).
+- **Not forwarded to the target.** autodb sets no `application_name` on the
+  backends it pins (the connection's DSN is used unchanged), so a fresh backend
+  shows the target's own effective startup default — the DSN's value if
+  supplied, otherwise the applicable server/database/role default
+  (`ALTER DATABASE`/`ALTER ROLE … SET`), commonly empty. Two `psql` clients are
+  indistinguishable there, and no backend PID is captured, so backend → session
+  mapping does not exist yet on either side.
+- **The client can change the backend's value at runtime.** `SET
+  application_name` is refused by the session-state gate, but
+  `SELECT set_config('application_name', …, false)` is classified as a read and
+  runs on the pinned backend (lector, PR #51, proven live) — refusing `SET`
+  makes no GUC immutable.
+
+*A structured per-session stamp at pin time (target caps at 63 bytes) is a
+documented gap, not a decision; it must refuse or survive the `set_config`
+overwrite.*
+
+**Note 3.1b — the UTF8 lease pin.** At lease acquisition the pinned connection's
+`client_encoding`/`server_encoding` `ParameterStatus` must report
+UTF8-compatible values, else lease acquisition fails loudly (audited). The
+byte-fidelity claim is only honest if both ends of the relay actually speak
+UTF8.
+
+**Note 3.1c — parsing `options`, and the one folded index.**
+
+```mermaid
+flowchart TD
+    A["options string"] --> B{"parses?"}
+    B -- "no: unknown flag,<br/>-c with no value,<br/>trailing backslash" --> R["REFUSED<br/><i>a string we half-read is a client asking<br/>for something we did not do</i>"]
+    B -- yes --> C["split on unescaped whitespace<br/><code>-c name=value</code> · <code>-cname=value</code> · <code>--name=value</code>"]
+    C --> D{"name already seen?<br/><i>one case-folded index</i>"}
+    D -- yes --> S["REFUSED<br/><code>frontdoor/startup-duplicate-key</code>"]
+    D -- no --> E{"a carved-out name?"}
+    E -- yes --> F["§3.1's own handling<br/><i>rewritten to its canonical spelling</i>"]
+    E -- no --> G["admitted as the equivalent SET"]
+```
+
+- The three spellings parsed are libpq's own: `-c name=value`, `-cname=value`
+  and `--name=value`. Anything else — a flag we do not implement, a `-c` with no
+  value, a trailing backslash — does not parse and is refused.
+- libpq's backslash escaping is honoured, so `-c datestyle=ISO,\ MDY` is **one**
+  setting.
+- A key named **twice** — in either spelling, whether both are in `options` or
+  one is a top-level parameter — is refused (audit
+  `frontdoor/startup-duplicate-key`); a map keeps one of the two values
+  silently.
+- A carved-out name is rewritten to its canonical spelling so the
+  cap/truncation/echo cannot be spelled around.
+- **The fold is PostgreSQL's:** ASCII `A-Z` only, matching `guc_name_compare` —
+  *not* Go's Unicode `ToLower`, which folds U+212A KELVIN SIGN to `k` where the
+  target does not, and would make two names it keeps apart look like one here.
+- An empty/whitespace `options` is accepted and ignored (audited).
+
+*Superseded: this row previously refused any GUC-setting `options`.*
+
+**Note 3.1d — carriage, the preflight, and the cap.**
+
+- **Verbatim, as BYTES.** The engine lowercases for admission and the target
+  decides what a value means; an `options` value containing invalid UTF-8
+  reaches the target unaltered rather than being rewritten to U+FFFD. This
+  surface adds no encoding rule the target does not have.
+- **The raw-pair preflight.** A key repeated in the raw wire pairs is refused by
+  a preflight that reads them *before* pgproto3's decode collapses them into a
+  map — after that collapse the duplicate is gone and no rule here can see it.
+- **Capped at 64 settings per startup packet**, counted after `options` is
+  unpacked (audit `frontdoor/startup-guc-count`). Each admitted setting is a
+  round trip inside the session open, so an uncapped map would let an
+  unauthenticated peer buy an arbitrary number for the price of one connection.
+- Refusal is the uniform denial (28000), audit
+  `frontdoor/startup-parameter-refused`, and it **withdraws the session**.
+
+*Superseded: this row previously refused every unknown parameter, which meant
+lib/pq — whose config normalization hard-codes `datestyle` — could never open a
+session.*
+
+**Note 3.1e — why the carve-out exists.** Amendment 8's sentence "startup
+parameters that name a GUC are admitted exactly as the equivalent `SET` would
+be" is **scoped to the parameters outside this named set**.
+
+`client_encoding` and `application_name` **are** GUCs, and are **not** admitted
+as the equivalent `SET`:
+
+- `client_encoding` is governed by this table's UTF8-only rule and is denied
+  unconditionally by the engine's wire denylist — the lease pins the session to
+  UTF8.
+- `application_name` is capped/truncated/echoed here and deliberately **not
+  forwarded to the target**.
+
+`-c application_name=X` therefore gets §3.1's cap/truncate/echo rather than
+being collected or refused, and a name given **both** ways is refused as a
+duplicate: this surface does not silently pick between two values a client asked
+for.
+
+**Collecting either would withdraw the session of every ordinary client**, since
+psql, lib/pq and JDBC all send `client_encoding` at startup. This is a decision,
+not an oversight.
 
 ### 3.2 GUC policy (summary)
 
@@ -403,13 +545,13 @@ is read (criterion 3); oversized declared length refuses before any read.
 | Message | States | Decision | Gating | Charge | Audit | Refusal / notes |
 |---|---|---|---|---|---|---|
 | `Query` (simple) | S4-I/T/E | **Mapped: PostgreSQL implicit-transaction semantics** (MF2). Statements split and run in order; each individually classified/authorized/guarded; first error (gate or target) aborts the block, rolls back its earlier statements. Explicit `BEGIN`/`COMMIT` inside the buffer per PostgreSQL implicit-block rules (ExecSession state transitions, never passthrough). In S4-E: recovery controls only. | classify+authorize+guard per statement; attempt-before-effect per statement | general, hdr-first; output via pending-output watermark | `fd.stmt_attempt`/`fd.stmt_outcome` per statement | Empty query → `EmptyQueryResponse` + `ReadyForQuery` (control lane). |
-| `Parse` | S4-I/T (opens S5) | **Native pinned-conn** (ADR MF3). Gated at Parse: classifier + profile + grants; **immutable classification/guard metadata attached** to the statement. Named statements per §4a lifetime rules; unnamed statement replaced per protocol. **Retained capacity for the statement is RESERVED against the 16 MiB session cap BEFORE the Parse is forwarded to the target** (reserve → forward → finalize on `ParseComplete`; released on error) — the target must never hold a server-side prepared statement the budget didn't admit (r0 MF3). | classify+authorize at Parse | general, hdr-first + stage-2 delta; retained **reserved pre-forward**, finalized at `ParseComplete` | `fd.stmt_attempt` (parse-time gate) | Refused classes (COPY/LISTEN/cursor/PREPARE verbs) refuse **at Parse** with §8a; segment then discards through `Sync`. Reservation failure → `53400` refuse, nothing forwarded. |
+| `Parse` | S4-I/T (opens S5) | **Native pinned-conn** (ADR MF3). Gated at Parse: classifier + profile + grants, with **immutable classification/guard metadata attached** to the statement. Retained capacity is **reserved BEFORE the Parse is forwarded**. Reservation order and the refused classes: **note 4-Parse** below. | classify+authorize at Parse | general, hdr-first + stage-2 delta; retained **reserved pre-forward**, finalized at `ParseComplete` | `fd.stmt_attempt` (parse-time gate) | Refused classes refuse **at Parse** with §8a; segment then discards through `Sync`. Reservation failure → `53400`, nothing forwarded. |
 | `Bind` | S5 | Native: raw parameter formats/values and per-column result formats preserved bit-for-bit to the pinned conn. ≤ 8192 params. **Portal retained capacity reserved BEFORE forwarding**, finalized at `BindComplete`, released on error. | none (authority is at Parse + Execute) | general, hdr-first + stage-2 delta (param array pre-allocation); retained reserved pre-forward | — | Param-count/size over limits → §8a refuse, discard-through-Sync. |
 | `Describe` (`S`/`P`) | S5 | Native passthrough: `ParameterDescription` + `RowDescription`/`NoData` from the pinned conn (Describe-before-Execute metadata preserved). | none | control-sized (general lane) | — | Unknown name → target's error verbatim. |
 | `Execute` | S5 | Native, **with Execute-time authority** (MF1): authority re-resolved + re-authorized at **every** Execute (portal re-executions included); fresh `fd.stmt_attempt` precedes every effect. Portal `maxRows` honored; `PortalSuspended` preserved; suspended portal buffers charge retained state. | re-authorize per Execute | general; output watermark; suspended buffers → retained | `fd.stmt_attempt`/`fd.stmt_outcome` per Execute | Grant revoked between Parse and Execute → §8a refuse at Execute (tested per ADR). |
-| `Close` (`S`/`P`) | S4/S5 (healthy) | Native; **releases** the named statement's/portal's retained charge; closing a prepared statement **cascades to its portals** (§4a). Intake is control-lane-sized so saturation cannot block release — but **during post-error discard `Close` is discarded like everything else** (MF2): PostgreSQL processes nothing but `Sync`/`Terminate` until the segment ends, and conformance wins; release then happens via `Sync` (segment discard) or the §4a rules. | none | **control lane** | — | — |
+| `Close` (`S`/`P`) | S4/S5 (healthy) | Native; **releases** the named statement's/portal's retained charge, and closing a prepared statement **cascades to its portals** (§4a). Intake is control-lane-sized so saturation cannot block release — but during post-error discard it is discarded like everything else. Why, and how release still happens: **note 4-Close** below. | none | **control lane** | — | — |
 | `Flush` | S5 | Native passthrough to output pump. Discarded during post-error discard. | none | **control lane** | — | — |
-| `Sync` | S4/S5 | Native: closes the segment, resets segment counters (10 000 msgs / 96 MiB), emits `ReadyForQuery` from the ExecSession state machine, ends post-error discard, releases the discarded segment's charges, and **destroys the objects that segment never confirmed** — a `Parse` discarded after a target error never created a statement on the target, so a record of it here is a phantom that would answer `26000` on its next use and consume a named-object slot for something that exists nowhere (ruling 2026-09-03: §4a object drop on sweep — required by the named-object cap). | none | **control lane** | — | Always admissible, even at budget saturation (criterion 1). |
+| `Sync` | S4/S5 | Native: closes the segment, resets its counters (10 000 msgs / 96 MiB), emits `ReadyForQuery` from the ExecSession state machine, ends post-error discard, releases the discarded segment's charges — and **destroys the objects that segment never confirmed**. Why a phantom object is worse than none: **note 4-Sync** below. | none | **control lane** | — | Always admissible, even at budget saturation (criterion 1). |
 | `Terminate` | any S4/S5 | Clean close: open tx → ROLLBACK via ExecSession (audited); session closed; lease + all charges released. | — | **control lane** | `fd.conn_close(cause=terminate)` | Always admissible. |
 | `CopyData`/`CopyDone`/`CopyFail` | any | **Protocol violation** (08P01): COPY is refused at classification, so no COPY sub-protocol is ever active; receiving these = fatal error + close. | — | control lane | `fd.refused` | COPY the *statement* refuses at Parse/Query gate with 0A000 (§7). |
 | `FunctionCall` (legacy fast-path) | any | **Refused** (0A000, §8a `frontdoor/no-fastpath`): legacy surface bypasses text classification by construction. | — | control lane | `fd.refused` | Connection stays usable (refusal, not violation). |
@@ -423,6 +565,42 @@ control lane at header-size only, body skipped with bounded reads) until
 **`Terminate`** (closes the connection). `Close`, `Flush`, `Parse`,
 `Bind`, `Describe`, `Execute` are all discarded, exactly as the real
 server would.
+
+**Note 4-Parse — reserve, then forward.**
+
+The order is **reserve → forward → finalize on `ParseComplete`**, and the charge
+is released on error. Retained capacity for the statement is reserved against
+the 16 MiB session cap **before** the Parse reaches the target, because the
+target must never hold a server-side prepared statement the budget did not admit
+(r0 MF3).
+
+Named statements follow the §4a lifetime rules; the unnamed statement is
+replaced per protocol.
+
+**Refused classes** — COPY, LISTEN, cursor and PREPARE verbs — refuse **at
+Parse** with the §8a shape, and the segment then discards through `Sync`. A
+reservation failure refuses `53400` with nothing forwarded.
+
+**Note 4-Close — release during a discard.**
+
+`Close` releases the named statement's or portal's retained charge, and closing
+a prepared statement **cascades to its portals** (§4a). Intake is
+control-lane-sized so saturation cannot block a release.
+
+But **during post-error discard, `Close` is discarded like everything else**
+(MF2): PostgreSQL processes nothing but `Sync`/`Terminate` until the segment
+ends, and conformance wins. Release then happens via `Sync` (segment discard) or
+the §4a rules.
+
+**Note 4-Sync — why unconfirmed objects are destroyed.**
+
+`Sync` destroys the objects its segment never confirmed. A `Parse` discarded
+after a target error **never created a statement on the target**, so a record of
+it here is a phantom: it would answer `26000` on its next use, and it would
+consume a named-object slot for something that exists nowhere.
+
+*Ruling 2026-09-03 — §4a object drop on sweep; required by the named-object
+cap.*
 
 ### 4a. Object-release rules (MF2 — the complete set)
 
@@ -619,7 +797,7 @@ different limits and will move for different reasons.
 | Segment 10 000 msgs / 96 MiB (reset at Sync) | §4 `Parse`…`Sync` |
 | Retained state 16 MiB / 64 MiB per session | `Parse`/`Bind`/`PortalSuspended` transfers |
 | Pending output watermark 4 MiB / 16 MiB | §5 emissions (backpressure) |
-| **Output-stall deadline 30s** — one write of pending output to the client | every post-auth response write (§5 emissions, refusals, readiness). RULED (jarvis as lead, 2026-09-03, PR #52 Q1): with the 4 MiB watermark reached, a peer that has drained **nothing** for 30s is not a slow reader, it is a dead one; 30s sits above any sane TCP retransmit hiccup and below the point where held memory matters at the session cap. It is NOT an idle budget and does not inherit `idle`: idle measures a client that is not asking, this measures one that will not take what it asked for. Unbounded here let an authenticated client hold a session, the engine's one-in-flight claim, the pinned backend and its open transaction by selecting something large and not reading (PR #52 r1 MF7). |
+| **Output-stall deadline 30s** — one write of pending output to the client | every post-auth response write (§5 emissions, refusals, readiness). A peer that has drained **nothing** for 30s with the watermark reached is a dead reader, not a slow one. Why it is not an idle budget: **note 8-output-stall** below. |
 | Cumulative output 8 GiB per statement (audited accounting cap) | `Execute`/`Query` result streaming |
 | Bind params 8192 / 65535 | `Bind` |
 | Named statements 256/1024, portals 64/256 per session | `Parse`/`Bind` named objects |
@@ -630,6 +808,20 @@ different limits and will move for different reasons.
 | `reserved_headroom` 4; `frontdoor_max_leases` derived ≥ 1 | the row-2.7 atomic reservation (row 2.9 acquires nothing; any later target checkout is NOT admission control and can neither race nor emit `fd.auth_ok` before capacity is held) |
 
 ---
+
+**Note 8-output-stall — why the write deadline is its own budget.**
+
+*RULED (jarvis as lead, 2026-09-03, PR #52 Q1).* With the 4 MiB watermark
+reached, a peer that has drained **nothing** for 30s is not a slow reader, it is
+a dead one. 30s sits above any sane TCP retransmit hiccup and below the point
+where held memory matters at the session cap.
+
+**It is NOT an idle budget and does not inherit `idle`.** Idle measures a client
+that is not asking; this measures one that will not take what it asked for.
+
+Unbounded, it let an authenticated client hold a session, the engine's
+one-in-flight claim, the pinned backend and its open transaction — by selecting
+something large and not reading (PR #52 r1 MF7).
 
 ## 10. Conformance hooks (F4 ladder anchors)
 
