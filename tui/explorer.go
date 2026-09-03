@@ -44,8 +44,14 @@ type explorer struct {
 
 	quoted    map[string]string // "tbl:…" node id → server-quoted identifier
 	connNames map[int64]string  // conn id → display name (status bar)
-	seq       uint64            // Reload sequencing: fetches can complete out
-	applied   uint64            // of issue order; stale sets must not win
+	// connKeys maps the digit shown in a connection row's "[N]" prefix to
+	// that row's node id. Numbering is GLOBAL across workspaces and fixed
+	// when the tree is built, so the number a row displays is always the
+	// key that selects it — a per-workspace count would make "2" mean two
+	// different connections at once.
+	connKeys map[rune]string
+	seq      uint64 // Reload sequencing: fetches can complete out
+	applied  uint64 // of issue order; stale sets must not win
 }
 
 // encSeg escapes one free-text ID segment; decSeg reverses it. NOTE:
@@ -230,6 +236,15 @@ func (e *explorer) HandleEvent(ev tui.Event) bool {
 				return true
 			}
 		}
+		// A digit jumps straight to the connection wearing that number.
+		// Only VISIBLE rows can take the cursor, so a digit belonging to a
+		// collapsed workspace is a no-op rather than a silent jump into a
+		// hidden subtree.
+		if len(k.Text) == 1 && k.Text[0] >= '1' && k.Text[0] <= '9' {
+			if e.selectConnByKey(rune(k.Text[0])) {
+				return true
+			}
+		}
 		// Track the active connection from the cursor as the user navigates.
 		consumed := e.tree.HandleEvent(ev)
 		if consumed {
@@ -316,6 +331,8 @@ func (e *explorer) applyWorkspaces(l wsLoaded) {
 	}
 	e.applied = l.seq
 	known := map[int64]bool{}
+	e.connKeys = map[rune]string{}
+	pos := 0 // global across workspaces, so a displayed digit is unique
 	roots := make([]*widget.TreeNode, 0, len(l.wss)+1)
 	for _, ws := range l.wss {
 		known[ws.ID] = true
@@ -325,8 +342,12 @@ func (e *explorer) applyWorkspaces(l wsLoaded) {
 		kids := make([]*widget.TreeNode, 0, len(ws.Connections))
 		for _, c := range ws.Connections {
 			e.connNames[c.ID] = c.Name
-			kids = append(kids, widget.NewTreeNode(
-				fmt.Sprintf("conn:%d:%d", ws.ID, c.ID), c.Name, widget.WithBadge(c.Engine)))
+			pos++
+			node := connNode(ws.ID, c, pos)
+			if d, keyed := connSlotKey(pos); keyed {
+				e.connKeys[d] = node.ID()
+			}
+			kids = append(kids, node)
 		}
 		connsNode.SetChildren(0, kids)
 		notesNode := widget.NewTreeNode(fmt.Sprintf("notes:%d", ws.ID), "notes")
@@ -777,6 +798,63 @@ func (e *explorer) confirmDeleteLegacy(id string) {
 		}},
 		{'n', "keep it", func() {}},
 	})
+}
+
+// connSlotKey reports the digit that selects the pos-th connection
+// (1-based). Past the ninth there is none: worktree.nvim's three-pane
+// graph shows "·" for those rows rather than pretending to bind 10+, and
+// this follows it.
+func connSlotKey(pos int) (rune, bool) {
+	if pos >= 1 && pos <= 9 {
+		return rune('0' + pos), true
+	}
+	return 0, false
+}
+
+// connNode builds one connection row.
+//
+// "[N]" is the key that selects it. "(ID:n)" is the REAL connection id —
+// the number the grant and detach forms demand ("numeric connection id
+// required") and that the explorer never showed: it existed only inside
+// this node's opaque id, so granting meant leaving the tree for SPC c to
+// read the number off another panel. Position and id are deliberately
+// different things; a row's slot says nothing about its id.
+func connNode(wsID int64, c ConnInfo, pos int) *widget.TreeNode {
+	label, badge := connRowText(c, pos)
+	return widget.NewTreeNode(fmt.Sprintf("conn:%d:%d", wsID, c.ID), label,
+		widget.WithBadge(badge))
+}
+
+// connRowText splits the row into the two strings the Tree renders as
+// "label badge". golib exposes Label() but no Badge(), so building both
+// here is what lets a test read the same values the tree draws instead of
+// re-deriving them.
+func connRowText(c ConnInfo, pos int) (label, badge string) {
+	slot := "·"
+	if _, keyed := connSlotKey(pos); keyed {
+		slot = strconv.Itoa(pos)
+	}
+	return fmt.Sprintf("[%s] %s", slot, c.Name),
+		fmt.Sprintf("%s  (ID:%d)", c.Engine, c.ID)
+}
+
+// selectConnByKey moves the cursor to the connection whose row shows this
+// digit, and adopts it as the active connection — the same thing that
+// happens when the cursor lands there by j/k, so a digit is a shortcut and
+// not a second code path.
+func (e *explorer) selectConnByKey(d rune) bool {
+	id, ok := e.connKeys[d]
+	if !ok {
+		return false
+	}
+	for i, n := range e.tree.VisibleRows() {
+		if n.ID() == id {
+			e.tree.SetCursor(i)
+			e.model.noteConnFromNode(id)
+			return true
+		}
+	}
+	return false
 }
 
 // connIDOf parses "conn:<ws>:<id>".

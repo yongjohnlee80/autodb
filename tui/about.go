@@ -211,7 +211,7 @@ func backendBuildLine(frontend, backend string, canRestart bool) string {
 
 func (m *Model) openAbout() {
 	v := &aboutView{model: m, rows: m.aboutRows()}
-	v.float = m.openFloat("autodb — Enter or Esc to close", v, 78)
+	v.float = m.openFloat("autodb — Enter or Esc to close", v)
 }
 
 func (v *aboutView) AcceptsFocus() bool { return true }

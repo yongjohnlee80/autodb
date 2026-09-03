@@ -17,8 +17,25 @@ import (
 // backdrop stays LIVE — no scrim: the float overlays the widgets rather
 // than replacing them with gray space (Johno, M6 manual testing). The
 // Box interior is filled, so the float itself remains opaque.
-func (m *Model) openFloat(title string, content tui.Component, width int) *widget.Float {
-	return m.openFloatAt(title, content, width, widget.Center)
+func (m *Model) openFloat(title string, content tui.Component) *widget.Float {
+	return m.openFloatAt(title, content, widget.Center)
+}
+
+// modalSpan turns the space a float was offered into a modal dimension:
+// a share of the terminal, floored so the modal stays usable on a small
+// screen and capped so it stays readable on a wide one.
+//
+// Sizing lives HERE and in the bodies, never in the Box: a fixed width
+// handed to style.Width is inert (golib reads propWidth nowhere in the
+// layout path), which is why every modal used to render at its floor on
+// any screen and the users footer wrapped at every width. The order of
+// the clamps matters — the offered space wins last, so a body never
+// returns more than its constraints allow.
+func modalSpan(avail, pct, lo, hi int) int {
+	if avail <= 0 {
+		return 0
+	}
+	return min(min(max(avail*pct/100, lo), hi), avail)
 }
 
 // openFloatAt is openFloat with an explicit anchor (the `?` key card
@@ -27,24 +44,23 @@ func (m *Model) openFloat(title string, content tui.Component, width int) *widge
 // WithSizeFraction) — for working surfaces that should follow a resize
 // rather than sit at a fixed column count.
 func (m *Model) openFloatPct(title string, content tui.Component, pct int) *widget.Float {
-	return m.openFloatOpts(title, content, 0, widget.Center,
+	return m.openFloatOpts(title, content, widget.Center,
 		widget.WithSizeFraction(pct, pct))
 }
 
-func (m *Model) openFloatAt(title string, content tui.Component, width int,
+func (m *Model) openFloatAt(title string, content tui.Component,
 	anchor widget.Anchor) *widget.Float {
-	return m.openFloatOpts(title, content, width, anchor)
+	return m.openFloatOpts(title, content, anchor)
 }
 
-func (m *Model) openFloatOpts(title string, content tui.Component, width int,
+func (m *Model) openFloatOpts(title string, content tui.Component,
 	anchor widget.Anchor, extra ...widget.FloatOption) *widget.Float {
+	// No fixed width: sizing is the CONTENT's job. style.Width sets
+	// propWidth, which nothing in golib's layout path reads, so a column
+	// count passed here was silently discarded — openForm asked for 56
+	// and rendered 54, the help float asked for 64 and rendered 76.
+	// Bodies size themselves with modalSpan and follow a resize.
 	boxStyle := style.New().Border(style.BorderRounded)
-	if width > 0 {
-		boxStyle = boxStyle.Width(width)
-	}
-	// width <= 0 hands sizing to the CONTENT, which is how a body sizes
-	// itself as a fraction of the screen (the history and script views):
-	// a fixed column count cannot follow a resized terminal.
 	box := widget.NewBox(content,
 		widget.WithTitle(title),
 		widget.WithStyle(boxStyle),
@@ -192,15 +208,13 @@ func (f *form) submit() {
 	f.status.SetText(status)
 }
 
-// formWidth caps the form body: text inputs are width-greedy, and an
-// uncapped form stretches its float across the whole screen (Johno, M6
-// manual testing — login/new-workspace should be compact modals). The
-// managers cap themselves the same way.
-const formWidth = 52
-
 func (f *form) Layout(c tui.Constraints) tui.Size {
 	cc := c
-	cc.MaxW = min(c.MaxW, formWidth)
+	// Text inputs are width-greedy, so a form is capped rather than
+	// stretched (Johno, M6: login/new-workspace should stay compact) —
+	// but it scales between the floor and the cap instead of sitting at
+	// the floor on every screen.
+	cc.MaxW = modalSpan(c.MaxW, formPct, formMinW, formMaxW)
 	sz := f.tui.LayoutChild(f.flex, cc)
 	f.tui.PlaceChild(f.flex, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
 	return cc.Constrain(sz)
@@ -229,7 +243,7 @@ var _ tui.Container = (*form)(nil)
 // openForm builds a form float and wires the float back-reference.
 func (m *Model) openForm(title string, fields []formField, onSubmit func([]string) (bool, string)) *form {
 	fm := newForm(fields, onSubmit)
-	fm.float = m.openFloat(title, fm, 56)
+	fm.float = m.openFloat(title, fm)
 	return fm
 }
 
@@ -251,7 +265,10 @@ type leaderMenu struct {
 func (l *leaderMenu) AcceptsFocus() bool { return true }
 
 func (l *leaderMenu) Layout(c tui.Constraints) tui.Size {
-	return c.Constrain(tui.Size{W: min(c.MaxW, 46), H: min(c.MaxH, len(l.entries)+1)})
+	return c.Constrain(tui.Size{
+		W: modalSpan(c.MaxW, leaderPct, leaderMinW, leaderMaxW),
+		H: min(c.MaxH, len(l.entries)+1),
+	})
 }
 
 func (l *leaderMenu) Render(s tui.Surface) {
@@ -323,7 +340,7 @@ func drawTo(s tui.Surface, x, y int, text string, st style.Style) {
 // (and made two very different prompts indistinguishable).
 func (m *Model) openLeader(title string, entries []leaderEntry) {
 	lm := &leaderMenu{entries: entries}
-	lm.float = m.openFloat(title, lm, 48)
+	lm.float = m.openFloat(title, lm)
 }
 
 // inspectFloat shows one result row as a navigable CELL list (ADR-0057
@@ -343,7 +360,7 @@ type inspectFloat struct {
 
 func (m *Model) openInspect(columns []string, row []any) {
 	iv := &inspectFloat{model: m, columns: columns, row: row}
-	iv.float = m.openFloat("row — j/k: cell, y: copy value, Enter: full value, q/Esc: close", iv, 76)
+	iv.float = m.openFloat("row — j/k: cell, y: copy to clipboard, Enter: full value, q/Esc: close", iv)
 }
 
 // faithfulCell renders a cell's value VERBATIM for the register: real
@@ -371,8 +388,11 @@ func (iv *inspectFloat) cell(i int) any {
 func (iv *inspectFloat) AcceptsFocus() bool { return true }
 
 func (iv *inspectFloat) Layout(c tui.Constraints) tui.Size {
-	iv.height = min(c.MaxH, min(len(iv.columns), 18))
-	return c.Constrain(tui.Size{W: min(c.MaxW, 74), H: max(iv.height, 1)})
+	iv.height = min(c.MaxH, min(len(iv.columns), modalSpan(c.MaxH, valueHPct, valueMinH, valueMaxH)))
+	return c.Constrain(tui.Size{
+		W: modalSpan(c.MaxW, valuePct, valueMinW, valueMaxW),
+		H: max(iv.height, 1),
+	})
 }
 
 func (iv *inspectFloat) Render(s tui.Surface) {
@@ -421,9 +441,19 @@ func (iv *inspectFloat) HandleEvent(ev tui.Event) bool {
 		}
 		return true
 	case k.Text == "y":
-		iv.model.editor.SetRegister(faithfulCell(iv.cell(iv.cursor)), false)
-		iv.model.setStatus(iv.columns[iv.cursor] + " copied to editor register (p to paste)")
-		iv.float.Hide()
+		// Same copy contract as the value float: clipboard first, register
+		// always, and never a claim the clipboard took it when it did not.
+		text := faithfulCell(iv.cell(iv.cursor))
+		iv.model.editor.SetRegister(text, false)
+		msg, ok, dismiss := copyReport(iv.model.ctx.CopyToClipboard(text), false)
+		if ok {
+			iv.model.setOK(iv.columns[iv.cursor] + ": " + msg)
+		} else {
+			iv.model.setError(iv.columns[iv.cursor] + ": " + msg)
+		}
+		if dismiss {
+			iv.float.Hide()
+		}
 		return true
 	case k.Code == tui.KeyEnter:
 		col := iv.columns[iv.cursor]
@@ -437,7 +467,16 @@ func (iv *inspectFloat) HandleEvent(ev tui.Event) bool {
 // imports the faithful value into the editor's register.
 func (m *Model) openValueFloat(column string, val any) {
 	vf := &valueFloat{model: m, view: widget.NewBufferView(), value: val}
-	vf.float = m.openFloat(column+" — y: copy to editor register, q/Esc: close", vf, 76)
+	vf.float = m.openFloat(column+" — y: copy to clipboard, q/Esc: close", vf)
+}
+
+// openSecretFloat shows a credential that exists nowhere else. It is a
+// valueFloat that refuses to dismiss itself on a FAILED copy: for a
+// value the store cannot reproduce, closing on the fallback path would
+// destroy it.
+func (m *Model) openSecretFloat(title string, secret string) {
+	vf := &valueFloat{model: m, view: widget.NewBufferView(), value: secret, secret: true}
+	vf.float = m.openFloat(title, vf)
 }
 
 type valueFloat struct {
@@ -447,6 +486,10 @@ type valueFloat struct {
 	value any
 	float *widget.Float
 	ctx   *tui.Context
+	// secret marks a value the store cannot reproduce (a freshly minted
+	// PAT). It changes ONE thing: a copy that did not reach the system
+	// clipboard leaves the float open instead of dismissing it.
+	secret bool
 }
 
 func (vf *valueFloat) AcceptsFocus() bool { return true }
@@ -460,8 +503,8 @@ func (vf *valueFloat) Init(ctx *tui.Context) {
 }
 
 func (vf *valueFloat) Layout(c tui.Constraints) tui.Size {
-	w := min(c.MaxW, 74)
-	h := min(c.MaxH, 18)
+	w := modalSpan(c.MaxW, valuePct, valueMinW, valueMaxW)
+	h := modalSpan(c.MaxH, valueHPct, valueMinH, valueMaxH)
 	sz := vf.ctx.LayoutChild(vf.view, tui.Tight(tui.Size{W: w, H: h}))
 	vf.ctx.PlaceChild(vf.view, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
 	return c.Constrain(tui.Size{W: w, H: h})
@@ -479,17 +522,49 @@ func (vf *valueFloat) HandleEvent(ev tui.Event) bool {
 		return true
 	}
 	if k.Text == "y" {
-		vf.model.editor.SetRegister(faithfulCell(vf.value), false)
-		vf.model.setStatus("value copied to editor register (p to paste)")
-		vf.float.Hide()
+		// The editor register always gets it (in-app `p` keeps working);
+		// the system clipboard is what the user actually needs when the
+		// value is going into a psql string or a JDBC URL. OSC 52 is the
+		// only mechanism that survives SSH and tmux, because the TERMINAL
+		// performs the copy — but a backend may not support it, and
+		// CopyToClipboard reports that rather than pretending.
+		text := faithfulCell(vf.value)
+		vf.model.editor.SetRegister(text, false)
+		msg, ok, dismiss := copyReport(vf.ctx.CopyToClipboard(text), vf.secret)
+		if ok {
+			vf.model.setOK(msg)
+		} else {
+			vf.model.setError(msg)
+		}
+		if dismiss {
+			vf.float.Hide()
+		}
 		return true
 	}
 	// Scrolling keys forward to the buffer view.
 	return vf.view.HandleEvent(ev)
 }
 
-// openTextFloat shows static text (help) in a scrollable float.
-func (m *Model) openTextFloat(title, text string, width int) {
+// copyReport turns a clipboard attempt into what the user is told and
+// whether the float may dismiss itself.
+//
+// Two rules, both learned the hard way. A copy that did not reach the
+// system clipboard is NEVER reported as one — the user acts on this line,
+// and for a value the store cannot reproduce, acting on a false "copied"
+// is unrecoverable. And on that failed path a secret float stays OPEN,
+// because dismissing it is what destroys the credential.
+func copyReport(reachedClipboard, secret bool) (msg string, ok, dismiss bool) {
+	if reachedClipboard {
+		return "copied to the system clipboard", true, true
+	}
+	return "clipboard unavailable — copied to the editor register only (p to paste)",
+		false, !secret
+}
+
+// openTextFloat shows static text (help) in a scrollable float. It shares
+// valueFloat's body, so it shares its sizing — the width argument it used
+// to take was discarded twice over and is gone.
+func (m *Model) openTextFloat(title, text string) {
 	tf := &valueFloat{model: m, view: widget.NewBufferView(), value: text}
-	tf.float = m.openFloat(title, tf, width)
+	tf.float = m.openFloat(title, tf)
 }

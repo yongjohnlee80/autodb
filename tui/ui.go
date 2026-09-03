@@ -1097,7 +1097,7 @@ func (m *Model) openConnPicker() {
 
 func (m *Model) showConnPicker(conns []ConnInfo) {
 	p := newConnPicker(m, conns)
-	p.float = m.openFloat("connection for this query", p, 60)
+	p.float = m.openFloat("connection for this query", p)
 }
 
 func (m *Model) setActiveConn(c ConnInfo) {
@@ -1574,7 +1574,7 @@ func (m *Model) openHelp() {
 	sb.WriteString("\neditor: vim Normal/Insert/Visual, jk = Esc\n")
 	sb.WriteString("explorer: hjkl navigate, l expands, Enter scaffolds a table\n")
 	sb.WriteString("results: v or Enter inspects the selected row\n")
-	m.openTextFloat("help", sb.String(), 64)
+	m.openTextFloat("help", sb.String())
 }
 
 // Selection fills (Johno, M6 manual testing): ANSI cyan behind black in
@@ -1586,11 +1586,30 @@ var (
 	cursorRowBlurred = style.New().Background(style.ANSI(8)).Foreground(style.ANSI(15))
 )
 
-// Float widths: managers hold a table plus a wrapped key footer; the `?`
-// key card is a narrow corner reference.
+// Float sizing (Johno, v0.3.1 manual testing: "the modals are way too
+// small compared to the screen size"). Each modal is a SHARE of the
+// terminal, floored and capped: the floor is the column count that
+// surface used to pin itself to, so nothing is narrower than it was,
+// and the cap keeps a line of prose readable on an ultrawide.
+//
+// Fixed column counts were the whole defect. They cannot follow a
+// resize, they render at their floor on every screen, and they forced
+// the users footer to wrap at EVERY width — see modalSpan.
 const (
-	managerWidth = 96
-	hintWidth    = 56
+	managerPct, managerMinW, managerMaxW = 62, 94, 160
+	managerHPct, managerMinH, managerMaxH = 70, 15, 40
+
+	formPct, formMinW, formMaxW = 34, 52, 88
+
+	valuePct, valueMinW, valueMaxW  = 55, 74, 132
+	valueHPct, valueMinH, valueMaxH = 60, 18, 40
+
+	leaderPct, leaderMinW, leaderMaxW = 30, 46, 72
+
+	// The `?` key card is a fixed corner reference, not a working
+	// surface: it is deliberately narrow and does not scale.
+	hintWidth = 56
+
 	// Percentages, not columns: these bodies size against the screen and
 	// follow a resize.
 	historyPct = 90
