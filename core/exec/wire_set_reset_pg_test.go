@@ -109,3 +109,48 @@ func TestWireSetReset_ReaderDenylistAddsSearchPath(t *testing.T) {
 	}
 	_ = fmt.Sprint(time.Now())
 }
+
+// The lease pins client_encoding to UTF8 at acquisition because the front door
+// does NOT transcode: OpenWireSessionWith refuses a target that does not report
+// UTF8. A wire session must therefore not be able to move the encoding out from
+// under that invariant afterwards — by any spelling. PostgreSQL defines
+// SET NAMES as an alias of SET client_encoding TO, so the denylist has to be
+// canonical: a name-only entry would leave the alias as a fail-open hole.
+// Refusal is unconditional, including TO 'UTF8' — a value-dependent admission
+// would be escape logic on an invariant.
+func TestWireSetReset_EncodingIsPinnedByTheLease(t *testing.T) {
+	f, sid, userID := editorWireSession(t)
+	ctx := context.Background()
+	run := func(sql string) (frames []WireMessage, err error) {
+		_, err = f.eng.WireQuery(ctx, sid, userID, sql, testIP, func(m WireMessage) error { frames = append(frames, m); return nil })
+		return
+	}
+	for _, sql := range []string{
+		"SET client_encoding TO 'LATIN1'",
+		"SET SESSION client_encoding TO 'LATIN1'",
+		"SET client_encoding TO 'UTF8'",
+		"SET NAMES 'LATIN1'",
+		"SET NAMES 'UTF8'",
+		"RESET client_encoding",
+	} {
+		frames, err := run(sql)
+		if !errors.Is(err, ErrWireSetRefused) {
+			t.Fatalf("%q: the lease pins the encoding; want ErrWireSetRefused, got %v", sql, err)
+		}
+		if len(frames) != 0 {
+			t.Fatalf("%q: refused before dispatch, so it must not reach the wire; got %d frames", sql, len(frames))
+		}
+	}
+	// DECOY / over-denial guard: the neighbouring reporting GUCs that clients
+	// legitimately set must still be admitted. A denylist that swallowed these
+	// would pass the refusals above while breaking lib/pq and JDBC.
+	for _, sql := range []string{
+		"SET datestyle TO 'German, DMY'",
+		"SET timezone TO 'UTC'",
+		"SET extra_float_digits TO 2",
+	} {
+		if _, err := run(sql); err != nil {
+			t.Fatalf("%q: must remain admitted, got %v", sql, err)
+		}
+	}
+}

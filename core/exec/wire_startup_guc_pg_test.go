@@ -154,3 +154,20 @@ func TestWireOpen_StartupGUCsMeetTheSameDenylistAsSET(t *testing.T) {
 	}
 	f2.eng.CloseWireSession(context.Background(), res.SessionID, res.UserID, testIP, "test")
 }
+
+// The startup packet reaches the same canonical denylist as SET: a startup
+// client_encoding must not move the encoding the lease pinned. Defence in
+// depth — the engine does not rely on the front door having filtered it out.
+func TestWireOpen_StartupClientEncodingIsRefused(t *testing.T) {
+	dsn := liveDSN(t)
+	f := newFixture(t)
+	if _, _, err := openWireGUCs(t, f, dsn, map[string]string{"client_encoding": "LATIN1"}); err == nil {
+		t.Fatalf("startup client_encoding=LATIN1 must be refused; the lease pinned UTF8")
+	} else if DenialReason(err) != DenyStartupGUC {
+		t.Fatalf("denial reason %q (%v), want %s", DenialReason(err), err, DenyStartupGUC)
+	}
+	f2 := newFixture(t)
+	if _, _, err := openWireGUCs(t, f2, dsn, map[string]string{"datestyle": "ISO, MDY"}); err != nil {
+		t.Fatalf("datestyle must remain admitted at startup: %v", err)
+	}
+}

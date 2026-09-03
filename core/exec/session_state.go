@@ -300,17 +300,54 @@ var nonGUCSetForms = map[string]string{
 }
 
 // ErrWireSetRefused reports a setting a wire session may never change.
+// encodingGUCs carry the front door's no-transcoding invariant. The lease pins
+// the encoding at acquisition — OpenWireSessionWith refuses a target that does
+// not report server_encoding and client_encoding as UTF8 — BECAUSE autodb does
+// not transcode. A session that could move client_encoding afterwards would
+// break that contract for every row that followed, so it is refused in every
+// spelling and for EVERY value: admitting TO 'UTF8' would be escape logic on an
+// invariant, and a value-dependent gate is the hole it is written to close.
+var encodingGUCs = map[string]bool{
+	"client_encoding": true,
+}
+
+// settingAliases map SQL spellings that name the SAME setting onto the
+// canonical GUC, so ONE denylist entry governs every spelling. PostgreSQL
+// defines SET NAMES as an alias of SET client_encoding TO; parseSet and
+// parseReset both report the leading name they saw ("names"), so without this
+// a client_encoding entry would sit beside an unguarded alias.
+var settingAliases = map[string]string{
+	"names": "client_encoding",
+}
+
+// canonicalSetting resolves an alias spelling to the setting it actually names.
+func canonicalSetting(name string) string {
+	if canonical, ok := settingAliases[name]; ok {
+		return canonical
+	}
+	return name
+}
+
 var ErrWireSetRefused = errors.New("exec: SET/RESET refused by the wire session-state gate")
 
 // wireSettingDenied applies the denylist to a setting name for a wire session.
 // It answers for SET and RESET alike, which is the point: one rule.
 func wireSettingDenied(name string, readOnly bool) error {
+	// Canonicalise BEFORE any lookup, so an alias and its GUC meet the same
+	// entry. This is the one place both SET and RESET pass through.
+	name = canonicalSetting(name)
 	if why, ok := nonGUCSetForms[name]; ok {
 		return fmt.Errorf("%w: %s", ErrWireSetRefused, why)
 	}
 	if engineGUCs[name] {
 		return fmt.Errorf("%w: %s is set by the engine to bound this session's transactions and may not be "+
 			"changed from the wire", ErrWireSetRefused, name)
+	}
+	if encodingGUCs[name] {
+		return fmt.Errorf("%w: %s is pinned to UTF8 for the life of this session — the lease refuses a target "+
+			"that does not report UTF8 because autodb does not transcode, so moving it afterwards would "+
+			"break that contract for every row that followed; refused in every spelling and for every value",
+			ErrWireSetRefused, name)
 	}
 	if parsingGUCs[name] {
 		return fmt.Errorf("%w: %s changes how the server parses SQL and would desynchronize the engine's "+
