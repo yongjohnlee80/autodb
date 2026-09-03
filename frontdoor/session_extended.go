@@ -132,17 +132,19 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 	case *pgproto3.Execute:
 		seg.ran = true
 		// Execute ASKS for output; it does not collect it. §5's fidelity rule
-		// keeps the bytes unflushed until the client's own Flush or Sync.
-		return l.runExtendedStream(ctx, conn, be, sess, peer, seg, closeReason, false,
+		// keeps the bytes unflushed until the client's own Flush or Sync. It MAY
+		// reserve, because a portal bound in an earlier segment can be executed
+		// in one whose own frames took nothing.
+		return l.runExtendedStream(ctx, conn, be, sess, peer, seg, closeReason, true, false,
 			func(emit func(exec.WireMessage) error) error {
 				return l.queries.WireExecutePortal(ctx, id, uid, m.Portal, m.MaxRows, hostOf(peer), emit)
 			})
 
 	case *pgproto3.Flush:
 		// Flush COLLECTS — ruleSegmentStall's own contract is a client that has
-		// "neither Synced nor Flushed", so a completed Flush discharges it just
-		// as Sync does.
-		return l.runExtendedStream(ctx, conn, be, sess, peer, seg, closeReason, true,
+		// "neither Synced nor Flushed", so a delivered Flush discharges it just
+		// as Sync does — and RESERVES NOTHING.
+		return l.runExtendedStream(ctx, conn, be, sess, peer, seg, closeReason, false, true,
 			func(emit func(exec.WireMessage) error) error {
 				return l.queries.WireFlushSegment(ctx, id, uid, emit)
 			})
@@ -536,23 +538,39 @@ func (s *segmentLane) release(l *Listener) {
 // own copy of the watermark, the cumulative cap and the lane top-up bypasses
 // every bound at once, and nothing observes it until the process runs out of
 // memory.
+// reserves says whether this drive may CREATE the segment's working set, and
 // collects says whether a COMPLETED drive discharges the client's obligation to
-// take its output — true for Flush, false for Execute. It is what clears
-// seg.ran, and it is honoured only on the success path: see the return below.
+// take its output. They are different questions and Flush answers them
+// differently: it collects, and it reserves nothing.
+//
+// FLUSH IS NOT A RESERVING VERB. It does not need to be — the frames that queued
+// the answers took the working set when they were admitted, and an Execute-only
+// segment takes it at the Execute. A Flush that reserved would charge 4 MiB for
+// output it does not itself produce, and a standalone EMPTY Flush — a protocol
+// no-op §1.4 makes control-lane admissible — could then be REFUSED under
+// general-lane saturation, or take the watermark while producing nothing. With
+// seg.ran false for a Flush, that bad hold would sit under the thirty-MINUTE
+// idle clock rather than the thirty-second stall clock.
+//
+// It reached that reservation through a helper shared with Execute, which
+// reserved unconditionally because that was correct while only Execute drove it
+// — the same coupling-through-a-shared-helper shape as the stall predicate
+// itself. Moving one of these states means auditing EVERY arm that touches it,
+// not only the arms that motivated the move.
 func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, peer string, seg *segmentLane, closeReason *string,
-	collects bool, drive func(emit func(exec.WireMessage) error) error) bool {
+	reserves, collects bool, drive func(emit func(exec.WireMessage) error) error) bool {
 
-	// A BACKSTOP, not the segment's charge. Since the obligation-start ruling the
-	// working set is taken when the first response-producing frame is admitted,
-	// so for an ordinary segment this is already held and the call returns
-	// immediately.
+	// A BACKSTOP for Execute, not the segment's charge. Since the
+	// obligation-start ruling the working set is taken when the first
+	// response-producing frame is admitted, so for an ordinary segment this is
+	// already held and the call returns immediately.
 	//
 	// It stays because an Execute does not have to follow a Parse in the SAME
 	// segment: a portal bound before an earlier Sync can be executed in a segment
 	// whose own frames never reserved anything. That segment still produces
 	// output, so it still needs the working set, and this is where it is taken.
-	if !l.reserveSegment(conn, be, seg, peer, closeReason) {
+	if reserves && !l.reserveSegment(conn, be, seg, peer, closeReason) {
 		return false
 	}
 

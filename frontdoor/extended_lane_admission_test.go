@@ -132,3 +132,69 @@ func TestExtLane_SegmentEndsWhenCapacityVanishesAfterDispatch(t *testing.T) {
 		})
 	}
 }
+
+// §1.4's OTHER control-lane directive, and the symmetric twin of the standalone
+// Sync cell above. The pair together is what makes "Sync and Flush are
+// control-lane directives" true rather than asserted.
+//
+// A standalone empty Flush is a protocol no-op: nothing is queued, so there is
+// nothing to deliver and nothing to account for. It must reach the engine and do
+// nothing — never be refused for general-lane backpressure, and never take a
+// working set of its own.
+//
+// FLUSH REACHED ITS RESERVATION THROUGH A HELPER SHARED WITH EXECUTE, which
+// reserved unconditionally because that was correct while only Execute drove it.
+// That is the same coupling-through-a-shared-helper shape as the stall predicate:
+// moving one of these states means auditing every arm that touches it, not only
+// the arms that motivated the move. Left alone, the 4 MiB a standalone Flush took
+// would sit under the thirty-MINUTE idle clock, because seg.ran is false for a
+// Flush that follows no Execute.
+func TestExtLane_StandaloneFlushNeitherReservesNorIsRefused(t *testing.T) {
+	q := okQueries()
+	l, events, addr := laneListener(t, q)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	// PREMISE: the lane is provably full BEFORE the Flush is sent, so a pass is a
+	// pass under saturation rather than on an empty lane.
+	starve(t, l)
+	before := l.general.inUse()
+
+	fe.Send(&pgproto3.Flush{})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("sending a standalone Flush: %v", err)
+	}
+
+	// PREMISE: the Flush REACHED the engine. Without this the cell would pass on a
+	// frame the loop refused before dispatch, which is the failure it exists for.
+	waitFor(t, "the standalone Flush to reach the engine", func() bool {
+		for _, c := range q.calls() {
+			if c == "Flush" {
+				return true
+			}
+		}
+		return false
+	})
+
+	if got := l.general.inUse(); got != before {
+		t.Errorf("a standalone Flush moved lane usage from %d to %d — it produces "+
+			"nothing and must take no working set of its own", before, got)
+	}
+	for _, e := range events() {
+		if e.Kind == "fd.refused" && e.Reason == ruleBudgetBackpressure {
+			t.Fatal("a standalone empty Flush was refused for general-lane " +
+				"backpressure; §1.4 makes it control-lane admissible")
+		}
+	}
+
+	// The session survives a no-op.
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("the session was torn down by a standalone Flush: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
+		t.Fatalf("readiness = %q, want %q after a standalone Flush",
+			string(got), string(txStatusIdle))
+	}
+}

@@ -408,3 +408,86 @@ func TestPGExtended_AStandaloneFlushDelivers(t *testing.T) {
 			"errorless reply proves the wire drained, not that a statement ran", kindsOf(got))
 	}
 }
+
+// THE PUBLIC-BOUNDARY WITNESS for the stall discharge: a REAL engine, a REAL
+// socket, and a client that collects its output with a Flush and then pauses
+// well past the segment-stall budget.
+//
+// IT IS LIVE RATHER THAN FAKE-BACKED DELIBERATELY. The fake re-emits its scripted
+// messages on Flush, so a fake-backed cell can be green because the FAKE
+// delivered rather than because the code did — and what the code has to do here
+// is write the socket. Only a real engine behind a real listener can tell those
+// apart at the boundary a client actually observes.
+//
+// Execute asks for output; Sync and Flush collect it. Before the discharge
+// existed, a client that Executed, Flushed and paused was torn down at the stall
+// budget for output it had already taken.
+func TestPGExtended_AFlushDischargesTheStallBudget(t *testing.T) {
+	stall := 400 * time.Millisecond
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, events, addr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled,
+		testSegmentStall: &stall,
+	})
+	conn, fe := pgClientWithConn(t, addr, secret, database)
+
+	fe.Send(&pgproto3.Parse{Name: "d", Query: "SELECT 1"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "pd", PreparedStatement: "d"})
+	fe.Send(&pgproto3.Execute{Portal: "pd"})
+	fe.Send(&pgproto3.Flush{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// PREMISE: THE CLIENT ACTUALLY RECEIVED ITS OUTPUT. Without bytes on the
+	// socket nothing was collected, and a cell asserting "the stall did not arm"
+	// would be asserting that a STALLED client gets the idle clock — the exact
+	// inverse of the rule it is written to protect.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	var collected bool
+	for i := 0; i < 8; i++ {
+		m, err := fe.Receive()
+		if err != nil {
+			break
+		}
+		kinds = append(kinds, strings.TrimPrefix(fmt.Sprintf("%T", m), "*pgproto3."))
+		if _, done := m.(*pgproto3.CommandComplete); done {
+			collected = true
+			break
+		}
+	}
+	if !collected {
+		t.Fatalf("PREMISE FAILED: the Flush delivered %v with no CommandComplete, so "+
+			"nothing was collected and the stall budget SHOULD still be armed", kinds)
+	}
+
+	// Well past the budget. The client took its output; it owes nothing.
+	time.Sleep(4 * stall)
+	for _, e := range events() {
+		if e.Kind == "fd.refused" && e.Reason == ruleSegmentStall {
+			t.Fatal("the stall budget armed after a Flush had already delivered the " +
+				"segment's output to the client")
+		}
+	}
+
+	// And the session is still usable, with the follow-up statement really running.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("the session was torn down after collecting its own output: %v", err)
+	}
+	_ = readUntil(t, conn, fe, untilReady)
+	got := query(t, fe, "SELECT 42")
+	if hasError(got) {
+		t.Fatalf("the session was not usable after Flush-then-pause: %v", errorText(got))
+	}
+	dr, ok := firstOfType[*pgproto3.DataRow](got)
+	if !ok || len(dr.Values) != 1 || string(dr.Values[0]) != "42" {
+		t.Fatalf("the follow-up statement returned no row with 42 (frames=%v)", kindsOf(got))
+	}
+}

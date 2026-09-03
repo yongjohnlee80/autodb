@@ -3,6 +3,7 @@ package frontdoor
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -75,14 +76,23 @@ func TestExtPipeline_BareParsesMatchPostgresInEveryErrorPosition(t *testing.T) {
 				// never a divergence: a probe defect looks exactly like a finding.
 				t.Fatalf("the oracle could not be reached, so nothing was measured: %v", err)
 			}
-			defer func() { _ = pgc.Close(context.Background()) }()
 			h, herr := pgc.Hijack()
 			if herr != nil {
+				// Not hijacked, so PgConn still owns the socket.
+				_ = pgc.Close(context.Background())
 				t.Fatalf("hijacking the oracle: %v", herr)
 			}
+			// HIJACK TRANSFERS OWNERSHIP. It marks the PgConn closed and hands the
+			// raw connection to HijackedConn, so a deferred pgc.Close installed
+			// around it closes NOTHING and the oracle socket leaks per subtest.
+			// The deferred call reads correct at its call site and is inert by the
+			// time it runs, which is the whole trap: closing the object you named
+			// is not closing the resource it used to own.
+			defer func() { _ = h.Conn.Close() }()
 
-			want := pipelineReplies(t, h.Frontend, frames)
-			got := pipelineReplies(t, pgClient(t, addr, secret, database), frames)
+			want := pipelineReplies(t, h.Conn, h.Frontend, frames)
+			adConn, adFe := pgClientWithConn(t, addr, secret, database)
+			got := pipelineReplies(t, adConn, adFe, frames)
 
 			// PREMISE: the oracle produced a terminal readiness, so `want` is a
 			// complete answer rather than a truncated read that `got` might match
@@ -100,11 +110,19 @@ func TestExtPipeline_BareParsesMatchPostgresInEveryErrorPosition(t *testing.T) {
 
 // pipelineReplies drives frames and renders every reply up to the readiness.
 //
+// BOUNDED BY A SOCKET DEADLINE, not by a wall-clock loop condition. Receive
+// BLOCKS, so a loop that only checks the clock between iterations never gets to
+// check it again once a reply stops coming — the cell hangs for the whole
+// package timeout instead of failing with what it had. The deadline makes the
+// blocked read itself return.
+//
 // Each message is rendered AS IT ARRIVES. pgproto3 reuses the message struct —
 // "valid only until the next call" — so holding pointers and rendering later
 // reports the last message's fields for every message, which fabricates
 // divergences that do not exist.
-func pipelineReplies(t *testing.T, fe *pgproto3.Frontend, frames []pgproto3.FrontendMessage) string {
+func pipelineReplies(t *testing.T, conn net.Conn, fe *pgproto3.Frontend,
+	frames []pgproto3.FrontendMessage) string {
+
 	t.Helper()
 	for _, f := range frames {
 		fe.Send(f)
@@ -112,9 +130,11 @@ func pipelineReplies(t *testing.T, fe *pgproto3.Frontend, frames []pgproto3.Fron
 	if err := fe.Flush(); err != nil {
 		t.Fatalf("sending the pipeline: %v", err)
 	}
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("bounding the read: %v", err)
+	}
 	var out []string
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	for {
 		m, err := fe.Receive()
 		if err != nil {
 			return strings.Join(out, " ") + " RECV-ERR:" + err.Error()
@@ -129,5 +149,4 @@ func pipelineReplies(t *testing.T, fe *pgproto3.Frontend, frames []pgproto3.Fron
 			out = append(out, strings.TrimPrefix(fmt.Sprintf("%T", m), "*pgproto3."))
 		}
 	}
-	return strings.Join(out, " ") + " NO-READINESS"
 }
