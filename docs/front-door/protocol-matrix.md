@@ -1,5 +1,70 @@
 # Front-door protocol matrix — PostgreSQL wire v3
 
+**What this is.** The normative specification for autodb's PostgreSQL wire front
+door: every frontend message the server may receive, what it decides, what it
+charges, what it audits, and how it refuses. The code is tested against this
+file — `frontdoor/matrix_coverage_test.go` and `matrix_canary_binding_test.go`
+read it directly, so a row here is a claim the suite enforces.
+
+**How to read it.** Rows are numbered `section.row` (`2.7`, `4a`) and cited
+elsewhere as "row 2.7". Sections 2–5 follow a connection's life in order;
+6–11 are cross-cutting. If you only need one answer, go to the section that
+matches your question:
+
+| Your question | Section |
+| --- | --- |
+| How does a connection start, and how is it authenticated? | 2 |
+| What can a client set at startup? | 3 |
+| What does each frontend message do once connected? | 4 |
+| What may the server emit back? | 5 |
+| How do transactions and cancellation behave? | 6 |
+| Why was I refused, and with which code? | 7 |
+| What does an operation cost, and against which budget? | 8, 9 |
+| How is any of this verified? | 10, 11 |
+
+**A connection's life**, which is the order sections 2–5 describe:
+
+```mermaid
+stateDiagram-v2
+    [*] --> S0: TCP accept
+    S0 --> S1: SSLRequest, TLS established
+    S0 --> [*]: plaintext or direct-TLS, refused
+    S1 --> S2: StartupMessage parsed (section 3)
+    S2 --> S3: AuthenticationCleartextPassword offered
+    S3 --> S4: PAT verified + reserved atomically (row 2.7)
+    S3 --> [*]: uniform denial 28000, close
+    S4 --> S5: any extended message opens a segment
+    S5 --> S4: Sync ends the segment
+    S4 --> [*]: Terminate, or a fatal refusal
+    note right of S4: simple query protocol
+    note right of S5: extended query protocol
+```
+
+**Two rules govern almost every refusal below.** They are worth holding in mind
+before reading any row:
+
+- **Uniform denial.** A refused client is told `28000` and nothing more. Which
+  check failed is recorded in the audit trail, never on the wire — a
+  distinguishable refusal maps the accepted set for anyone who asks politely.
+- **Reserve before dispatch.** Capacity is taken before work reaches the
+  target, never after. A cap observed free must be the cap acquired.
+
+**Three budgets, and they are independent.** Section 8 charges against them and
+section 9 says when each applies:
+
+```mermaid
+flowchart LR
+    A["Frontend message"] --> B{"Which lane?"}
+    B -->|"Sync, Flush, Terminate,<br/>CancelRequest"| C["Control lane<br/><i>always admissible,<br/>never reserves</i>"]
+    B -->|"Parse, Bind, Describe,<br/>Close, Execute, Query"| D["General lane<br/><i>reserves output capacity<br/>before dispatch</i>"]
+    D --> E["Segment budget<br/>10k msgs / 96 MiB"]
+    D --> F["Output watermark<br/>4 MiB"]
+    C --> G["Readiness always<br/>reaches the client"]
+```
+
+<details>
+<summary><b>Revision history</b> — what each revision folded, and why (click to expand)</summary>
+
 **Status:** rev 5 — pre-F0 gate document (ADR-0075 §5). F0 implementation
 does not begin until this matrix is lector-reviewed and accepted.
 Rev 2 folds lector r0: MF1 full-check atomic auth/reservation; MF2
@@ -71,6 +136,8 @@ refusal. **No silent acceptance**: a message or parameter not named here is
 a defect in this document, not an implementation freedom.
 
 ---
+
+</details>
 
 ## 1. Conventions
 
@@ -204,7 +271,7 @@ exists).
 | 2.5 | `StartupMessage` (major 3, minor > 0, and/or unrecognized `_pq_.*` options) | S1 | **Negotiate down (MF4, ruling 3)**: emit `NegotiateProtocolVersion` (newest supported = 3.0, plus the list of unrecognized `_pq_.*` option names) and **continue at 3.0 semantics** — pg-conformant, never a hard refusal. | pre-auth cap | — | — |
 | 2.5a | `StartupMessage` (major ≠ 3) | S1 | **Refused**: uniform denial, close (unsupported major). | pre-auth cap | `fd.refused` | uniform denial, close |
 | 2.6 | (server →) `AuthenticationCleartextPassword` | S2 | The only offered method. PATs are verified server-side against SHA-256 records; cleartext-over-TLS is the Q4-ratified design. SCRAM is **not offered** (hashed PATs cannot back SCRAM verifiers). | — | — | — |
-| 2.7 | `PasswordMessage` (PAT) | S3 | **Full verification chain (MF1), then one atomic reservation.** Verify: token exists ∧ **is a front-door PAT** (scope check — no other credential class authenticates here) ∧ not expired ∧ not revoked ∧ owner matches startup `user` ∧ user enabled ∧ **IP admission: (global allowlist ∨ the user's `user_ip_allowlist` rows)** ∧ **PAT `allowed_ips` if set** (ADR-0075 **Amendment 1**, Johno 2026-08-31 — this was an AND of the two layers until the amendment; OR because the global list carries shared infrastructure and under AND a colleague at an already-listed office still needed a personal row, while a home address had to be listed GLOBALLY to be usable, bloating the perimeter and making the per-user layer a second registration rather than a narrowing. Accepted cost, on the record: a stolen PAT works from any globally-listed address for any account; per-token `allowed_ips` is the mitigation. Empty `allowed_ips` INHERITS the admission set — it does not mean "nowhere". The admission SOURCE, global or user-row, is audited) ∧ **target validation**: the `database` connection exists ∧ is enabled ∧ the user holds a grant on it ∧ its profile admits front-door use. Then **atomically reserve, as ONE operation**: per-user session slot (8) + global slot (256) + target lease (`frontdoor_max_leases`) + the session's fixed overhead charge — no check-then-reserve gap (a cap observed free must be the cap acquired); partial reservation is impossible, failure rolls back nothing-held. Which check failed is audit-only. | pre-auth cap | `fd.auth_ok` / `fd.auth_denied` | uniform denial (28000 `invalid_authorization_specification`), close. **1 attempt/conn** (rev 5: was 3 — cleartext has one round and re-prompting spends N verifications on one wrong password; 3 returns if a multi-round method is ever offered), **10 FAILED attempts/min/source-IP** (rev 5: was "attempts"; counting successes caps every pool at ten connections a minute from one host). Lease-cap failure: wire = the same uniform 28000; audit identity = `lease-cap-exceeded` (ruling 4). |
+| 2.7 | `PasswordMessage` (PAT) | S3 | **Full verification chain (MF1), then one atomic reservation.** Every check must pass, then capacity is taken as a single operation — no check-then-reserve gap. Which check failed is audit-only. Full chain and rationale: **note 2.7** below. | pre-auth cap | `fd.auth_ok` / `fd.auth_denied` | Uniform denial (28000 `invalid_authorization_specification`), close. Attempt limits and the lease-cap identity: **note 2.7** below. |
 | 2.8 | Any other type-`p` frame in S3 | S3 | **There is no distinguishable SASL path (MF4):** once `AuthenticationCleartextPassword` is offered, every type-`p` frame IS a `PasswordMessage` by protocol — SASL-shaped bytes are simply a wrong password. Verified per row 2.7; fails the token lookup; uniform denial. `GSSResponse` is likewise type-`p` and takes the same path. | pre-auth cap | `fd.auth_denied` | uniform denial, close |
 | 2.9 | (server →) on success | S3→S4 | `AuthenticationOk`; `ParameterStatus` set per §3.3; `BackendKeyData` (CSPRNG, MF7, **4-byte secret** — every client is negotiated down to 3.0 by row 2.5 and 3.0's cancel key is a fixed int32; pgproto3 models it as a `[]byte` for 3.2 and would happily send a longer one to a client that reads four and then loses every frame boundary after it); `ReadyForQuery('I')`. **Rev 5 split:** F0e emits the three SYNTHESIZED statuses only; §3.3's verbatim forwarded set needs the target's own reported values and therefore a lease, which is F1's. The ExecSession, lease, and all slots were already **atomically reserved in row 2.7** — nothing acquired between `AuthenticationOk` and ready. | (charged in 2.7) | `fd.session_open` | — |
 
@@ -212,6 +279,61 @@ Deadlines: TLS/startup/auth 10s each (ceiling 60s). Pre-auth global
 connection cap 64, auth workers 16.
 
 ---
+
+
+**Note 2.7 — the authentication chain.** Every condition must hold; the first
+failure denies. The client is told only `28000`, never which link broke.
+
+```mermaid
+flowchart TD
+    A["PasswordMessage (PAT)"] --> B["token exists"]
+    B --> C["is a front-door PAT<br/><i>scope check — no other<br/>credential class authenticates here</i>"]
+    C --> D["not expired"]
+    D --> E["not revoked"]
+    E --> F["owner matches startup <code>user</code>"]
+    F --> G["user enabled"]
+    G --> H["IP admission<br/><b>global allowlist OR user rows</b>"]
+    H --> I["PAT <code>allowed_ips</code>, if set"]
+    I --> J["target valid<br/><i>connection exists, enabled,<br/>grant held, profile admits</i>"]
+    J --> K["ATOMIC RESERVATION<br/>user slot + global slot<br/>+ target lease + overhead"]
+    K --> L["authenticated — S4"]
+    B & C & D & E & F & G & H & I & J & K --> X["uniform denial 28000<br/>close · reason audited only"]
+```
+
+The reservation is **one operation**: per-user session slot (8), global slot
+(256), target lease (`frontdoor_max_leases`) and the session's fixed overhead
+charge. Partial reservation is impossible; failure holds nothing.
+
+**The IP admission rule** (ADR-0075 Amendment 1) is an **OR**, not an AND:
+
+> IP admission = (global allowlist **∨** the user's `user_ip_allowlist` rows)
+> **∧** the PAT's `allowed_ips` **if set**
+
+It was an AND until the amendment. Under AND, a colleague at an
+already-listed office still needed a personal row, and a home address had to be
+listed **globally** to be usable — which bloated the perimeter and made the
+per-user layer a second registration rather than a narrowing.
+
+*Accepted cost, on the record:* a stolen PAT works from any globally-listed
+address, for any account. Per-token `allowed_ips` is the mitigation.
+
+An **empty `allowed_ips` inherits** the admission set — it does not mean
+"nowhere". The admission source, global or user-row, is audited.
+
+**Target validation**, checked in the same chain: the `database` connection
+exists, is enabled, the user holds a grant on it, and its profile admits
+front-door use.
+
+**Attempt limits.**
+
+- **1 attempt per connection.** Cleartext has one round, and re-prompting spends
+  N verifications on one wrong password. (Was 3; three returns the day a
+  multi-round method is offered.)
+- **10 FAILED attempts per minute per source IP.** Failures only — counting
+  successes would cap every connection pool at ten connections a minute from
+  one host.
+- **Lease-cap failure** is the same uniform `28000` on the wire; the audit
+  identity is `lease-cap-exceeded` (ruling 4).
 
 ## 3. Startup pinning
 
@@ -376,7 +498,8 @@ than silently continuing in autocommit; a confirmed rollback retains the
 session at the reader floor, while cleanup failure transfers the attached
 transaction to normal close. The slot ownership, race, audit, and failure
 contract is normative in
-[`synchronous-demotion-lifecycle.md`](synchronous-demotion-lifecycle.md).
+the synchronous-demotion lifecycle reference in the knowledge base
+(`shared/reference/autodb-front-door-synchronous-demotion-lifecycle.md`).
 
 ---
 

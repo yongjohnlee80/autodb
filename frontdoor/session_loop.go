@@ -420,7 +420,8 @@ func (l *Listener) outputWatermark() int64 {
 }
 
 // laneWait is how long a statement waits for the general lane, or a cell's
-// shortened budget. The figure itself is policy (session-loop-budgets.md §5.2).
+// shortened budget. The figure itself is policy (KB: shared/reference/
+// autodb-front-door-session-loop-budgets.md §5.2).
 func (l *Listener) laneWait() time.Duration {
 	if l.testLaneWait != nil {
 		return *l.testLaneWait
