@@ -566,11 +566,41 @@ func TestOpen_EnforcesTheOptionsContract(t *testing.T) {
 
 	t.Run("the lane arithmetic cannot overflow", func(t *testing.T) {
 		t.Parallel()
-		// maxConns × 64 KiB exceeds int64 here. The product wraps NEGATIVE,
-		// every lane clears a negative floor, and the check that exists to
-		// fail closed passes everything.
-		mustRefuse(t, "a connection cap that overflows the lane product",
-			Options{MaxConns: math.MaxInt64/ControlLanePerConn + 1}, "overflows")
+		// maxConns × 64 KiB exceeds int64 past this threshold. The product
+		// wraps NEGATIVE, every lane clears a negative floor, and the check
+		// that exists to fail closed passes everything.
+		//
+		// THE THRESHOLD IS NOT REPRESENTABLE IN AN int ON A 32-BIT PLATFORM,
+		// and writing it as a constant is why this file did not COMPILE for
+		// GOARCH=386: an untyped constant is converted at compile time whether
+		// or not its branch can run, so a guarded `if` around it does not help.
+		// It has to be a runtime value.
+		//
+		// The two cases are different properties, and both are worth asserting:
+		// where an overflowing cap CAN be expressed, the guard must refuse it;
+		// where it cannot, the guard is unreachable BY CONSTRUCTION and the
+		// arithmetic is safe for every value the type can hold.
+		threshold := int64(math.MaxInt64 / ControlLanePerConn)
+		if int64(math.MaxInt) > threshold {
+			mustRefuse(t, "a connection cap that overflows the lane product",
+				Options{MaxConns: int(threshold + 1)}, "overflows")
+			return
+		}
+		// 32-bit: the largest cap the type admits still cannot overflow the
+		// product. If ControlLanePerConn ever grows enough to break that, this
+		// fails here rather than silently re-opening the wrap on small
+		// platforms.
+		// maxInt is a VARIABLE on purpose. As a constant expression this
+		// multiplication overflows int64 at compile time on a 64-bit platform —
+		// the same class of mistake as the line this test was fixing, made once
+		// in the fix itself. Constants are evaluated whether or not the branch
+		// they sit in can ever run.
+		maxInt := int64(math.MaxInt)
+		if product := maxInt * ControlLanePerConn; product < 0 {
+			t.Fatalf("the lane product wraps negative at the largest representable cap "+
+				"(%d × %d) — the guard is unreachable on this platform and the arithmetic "+
+				"is no longer safe without it", maxInt, ControlLanePerConn)
+		}
 	})
 
 	t.Run("zero still takes the documented default", func(t *testing.T) {
