@@ -181,7 +181,7 @@ func (e *Engine) tokenControl(
 		if aborted {
 			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAborted)
 		}
-		if err := e.admitSessionState(ctx, s, pol.Ident, stmt.Verb, sqlText, ip, txOpen); err != nil {
+		if err := e.admitSessionState(ctx, s, pol.Ident, stmt.Verb, sqlText, ip, txOpen, pol.ReadOnly); err != nil {
 			return nil, err
 		}
 		runCtx, endRun := s.runContext(ctx)
@@ -209,8 +209,47 @@ func (e *Engine) tokenControl(
 // the restrictive direction.
 func (e *Engine) admitSessionState(
 	ctx context.Context, s *session, ident auth.Identity,
-	verb, sqlText, ip string, txOpen bool,
+	verb, sqlText, ip string, txOpen, readOnly bool,
 ) error {
+	// A WIRE session is a pinned PostgreSQL session whose backend dies with
+	// it (closeSession discards, never releases), so it runs under the
+	// DENYLIST (ADR-0075 Amendment 8): any setting not on it, session-level
+	// or LOCAL, for every role — readers additionally may not move
+	// search_path. No admin floor: Amendment 6 says editors get PostgreSQL as
+	// it is. The pooled path below is unchanged: its connection outlives the
+	// caller, so its allowlist-and-LOCAL rule still protects the next user.
+	s.mu.Lock()
+	wire := s.wire
+	s.mu.Unlock()
+	if wire {
+		switch verb {
+		case "LOCK":
+			if err := admitLock(txOpen); err != nil {
+				return e.rejectSession(ctx, s, ident, ip, sqlText, err)
+			}
+			return nil
+		case "SET":
+			st, err := parseSet(sqlText)
+			if err != nil {
+				return e.rejectSession(ctx, s, ident, ip, sqlText, err)
+			}
+			if err := admitWireSet(st, readOnly, txOpen); err != nil {
+				return e.rejectSession(ctx, s, ident, ip, sqlText, err)
+			}
+			return nil
+		case "RESET":
+			st, err := parseReset(sqlText)
+			if err != nil {
+				return e.rejectSession(ctx, s, ident, ip, sqlText, err)
+			}
+			if err := admitWireReset(st, readOnly); err != nil {
+				return e.rejectSession(ctx, s, ident, ip, sqlText, err)
+			}
+			return nil
+		}
+		return e.rejectSession(ctx, s, ident, ip, sqlText,
+			fmt.Errorf("%w: %s", ErrStatementUnsupported, verb))
+	}
 	switch verb {
 	case "LOCK":
 		if err := admitLock(txOpen); err != nil {
@@ -230,6 +269,12 @@ func (e *Engine) admitSessionState(
 				fmt.Errorf("%w: SET LOCAL is admin-only by default", auth.ErrDenied))
 		}
 		return nil
+	case "RESET":
+		// Pooled connections carry no session-level state a caller may have
+		// set (only SET LOCAL is admitted, and it reverts with the
+		// transaction), so there is nothing a RESET could honestly undo.
+		return e.rejectSession(ctx, s, ident, ip, sqlText,
+			fmt.Errorf("%w: RESET has no meaning on a pooled connection; only a wire session holds settings", ErrStatementUnsupported))
 	}
 	return e.rejectSession(ctx, s, ident, ip, sqlText,
 		fmt.Errorf("%w: %s", ErrStatementUnsupported, verb))

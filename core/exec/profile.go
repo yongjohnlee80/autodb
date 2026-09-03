@@ -143,7 +143,7 @@ var txControlVerbs = map[string]bool{
 // session gate in session_state.go decides the statement, because locality,
 // the GUC and whether a transaction is open are not things a profile can see.
 var statefulControlVerbs = map[string]bool{
-	"SET": true, "LOCK": true,
+	"SET": true, "RESET": true, "LOCK": true,
 }
 
 // pendingControlVerbs have an admissible form the gate matrix defines but

@@ -210,7 +210,7 @@ func (e *Engine) wireControl(
 		if aborted {
 			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAborted)
 		}
-		if err := e.admitSessionState(ctx, s, pol.Ident, stmt.Verb, sqlText, ip, txOpen); err != nil {
+		if err := e.admitSessionState(ctx, s, pol.Ident, stmt.Verb, sqlText, ip, txOpen, pol.ReadOnly); err != nil {
 			return nil, err
 		}
 		runCtx, endRun := s.runContext(ctx)
