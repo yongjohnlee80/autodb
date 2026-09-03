@@ -2,7 +2,9 @@ package frontdoor
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -375,6 +377,18 @@ func TestPGExtended_AStandaloneFlushDelivers(t *testing.T) {
 	// AN EMPTY FLUSH IS A NO-OP, not the producer's empty-queue refusal forwarded
 	// to a correct client. A client that flushes defensively with nothing pending
 	// is doing something the protocol allows.
+	//
+	// A NO-OP MEANS NO FRAME, NOT "NO ERROR FRAME". An earlier version failed
+	// only on ErrorResponse, so every other frame in the protocol satisfied a cell
+	// whose name promised silence — a NoticeResponse injected on the empty-Flush
+	// path left it GREEN. The gap between "no-op" and "not an error" is every
+	// message type that is not an error, which is most of them.
+	//
+	// AND SILENCE IS NOT THE SAME AS A DEAD CONNECTION. The only acceptable
+	// outcome is the bounded read expiring with no bytes; an EOF or any other
+	// transport failure means the session was destroyed by a frame the protocol
+	// allows, and a cell that read "nothing arrived" from a closed socket would
+	// pass on precisely that. So the three outcomes are separated explicitly.
 	fe.Send(&pgproto3.Flush{})
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
@@ -382,11 +396,17 @@ func TestPGExtended_AStandaloneFlushDelivers(t *testing.T) {
 	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if msg, err := fe.Receive(); err == nil {
-		if e, isErr := msg.(*pgproto3.ErrorResponse); isErr {
-			t.Fatalf("an empty Flush was answered with ErrorResponse(%s) — a "+
-				"defensive flush with nothing pending must be a no-op", e.Code)
-		}
+	msg, rerr := fe.Receive()
+	switch {
+	case rerr == nil:
+		t.Fatalf("an empty Flush was answered with %T — a defensive flush with "+
+			"nothing pending must produce NO frame at all, not merely no error", msg)
+	case isReadTimeout(rerr):
+		// The one acceptable outcome: the read expired with no bytes.
+	default:
+		t.Fatalf("an empty Flush did not go unanswered — the read failed with %v "+
+			"rather than expiring. A no-op must leave the session alive; a closed "+
+			"or broken connection is not silence", rerr)
 	}
 
 	// The session is still usable, and the follow-up statement really RUNS.
@@ -490,4 +510,13 @@ func TestPGExtended_AFlushDischargesTheStallBudget(t *testing.T) {
 	if !ok || len(dr.Values) != 1 || string(dr.Values[0]) != "42" {
 		t.Fatalf("the follow-up statement returned no row with 42 (frames=%v)", kindsOf(got))
 	}
+}
+
+// isReadTimeout reports whether a read failed because its DEADLINE expired,
+// rather than because the connection died. The distinction is the difference
+// between "nothing was sent" and "the session was destroyed", which look the
+// same to a caller that only asks whether Receive returned an error.
+func isReadTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

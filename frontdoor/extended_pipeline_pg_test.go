@@ -32,6 +32,14 @@ import (
 // real PostgreSQL replies to the identical frames. An expectation written by
 // hand is a belief about the protocol, and this defect existed because a
 // reasonable belief about it was wrong.
+//
+// WHAT IS ACTUALLY COMPARED, stated precisely because a looser claim was made
+// for this cell and had to be withdrawn: the ordered sequence of reply KINDS,
+// plus ErrorResponse.Code and ReadyForQuery's transaction status. It does NOT
+// compare bytes — field contents, parameter descriptions and row data are not
+// examined — so "byte-identical" is false and the true claim is this one. The
+// true claim is still strong: it is the shape, the order, the error code and the
+// readiness, which is what a client's own dispatch depends on.
 func TestExtPipeline_BareParsesMatchPostgresInEveryErrorPosition(t *testing.T) {
 	// Fails at the TARGET, not at our own classifier: the classifier accepts a
 	// SELECT and PostgreSQL raises 42P01. A locally-refused statement travels a
