@@ -100,6 +100,10 @@ type fakeQueries struct {
 	parseErr   error
 	executeErr error
 	syncErr    error
+	// flushErr fails the Flush drive, so a cell can distinguish a Flush that
+	// DELIVERED from one that merely happened — the difference that decides
+	// whether the segment's output was collected.
+	flushErr error
 
 	// extStopped is what WireExecutePortal returns when the CONSUMER stops it,
 	// mirroring the engine's contract: a consumer stop arrives wrapped in
@@ -213,8 +217,11 @@ func (q *fakeQueries) WireFlushSegment(_ context.Context, _ exec.SessionID, _ in
 	emit func(exec.WireMessage) error) error {
 	q.extRecord("Flush")
 	q.mu.Lock()
-	msgs := q.extMsgs
+	msgs, ferr := q.extMsgs, q.flushErr
 	q.mu.Unlock()
+	if ferr != nil {
+		return ferr
+	}
 	for _, m := range msgs {
 		if err := emit(m); err != nil {
 			return err

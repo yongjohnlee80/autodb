@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -163,6 +164,110 @@ func TestExtStall_SegmentHoldingNothingStaysUnderTheIdleClock(t *testing.T) {
 	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
 		t.Fatalf("readiness = %q; the session did not survive its idle wait", got)
 	}
+}
+
+// A COMPLETED FLUSH COLLECTS, so the stall budget must not arm after one.
+//
+// ruleSegmentStall's own contract is a client that has "neither Synced nor
+// FLUSHED". Execute asks for output; Sync and Flush are the two ways a client
+// takes it. seg.ran was cleared at Sync and not at Flush, so a client that
+// Executed, Flushed successfully, and then paused was killed at the stall budget
+// for output it had already asked to collect — the exact harm the rule exists
+// not to inflict, on a client that did everything right.
+//
+// IT ASSERTS ARRIVAL AT THE SOCKET, not that the engine drive returned nil.
+// Engine success is not client delivery: emitting appends to the backend's write
+// buffer, and for an ordinary sub-watermark result the Execute has already
+// drained the segment into that buffer, so the Flush drive can return nil with
+// the client holding zero bytes. Clearing on that would disarm the stall for a
+// client that collected nothing — the exact inverse of the rule.
+func TestExtStall_ASuccessfulFlushClearsTheStallClock(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.extMsgs = []exec.WireMessage{{Kind: "ParseComplete"}, {Kind: "BindComplete"},
+		{Kind: "CommandComplete", Tag: "SELECT 1"}}
+	_, events, addr := stallListener(t, q, 250*time.Millisecond)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	execSegment(t, fe)
+	fe.Send(&pgproto3.Flush{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// PREMISE: THE CLIENT ACTUALLY RECEIVED BYTES.
+	//
+	// Reading the fake's call record is NOT enough, and that trap is the reason
+	// this reads the socket: the fake emits extMsgs on Flush, so a cell that only
+	// asked "did the drive run" would pass because the FAKE delivered rather than
+	// because the code did. Emitting only appends to the backend's write buffer;
+	// what puts it on the wire is the arm's own bounded flush. So the witness is
+	// the socket.
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var delivered bool
+	for i := 0; i < 4; i++ {
+		m, err := fe.Receive()
+		if err != nil {
+			break
+		}
+		if _, ok := m.(*pgproto3.CommandComplete); ok {
+			delivered = true
+			break
+		}
+	}
+	if !delivered {
+		t.Fatal("PREMISE FAILED: no CommandComplete reached the client, so nothing " +
+			"was collected and the stall clock SHOULD still be armed")
+	}
+
+	// Well past the stall budget. The client asked to collect; it owes nothing.
+	time.Sleep(4 * 250 * time.Millisecond)
+	for _, e := range events() {
+		if e.Kind == "fd.refused" && e.Reason == ruleSegmentStall {
+			t.Fatal("the stall budget armed after a completed Flush — the client " +
+				"collected its output and was killed for not having done so")
+		}
+	}
+	// The session is still usable.
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("the session was torn down after collecting its own output: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
+		t.Fatalf("readiness = %q; the session did not survive the wait after a "+
+			"completed Flush", string(got))
+	}
+}
+
+// THE OTHER HALF: a Flush that did NOT deliver has not collected, so the stall
+// budget must still arm. Without this the fix could be "any Flush clears it",
+// which hands the idle clock to precisely the client the rule is written for.
+func TestExtStall_AFailedFlushDoesNotClearTheStallClock(t *testing.T) {
+	t.Parallel()
+	q := okQueries()
+	q.extMsgs = []exec.WireMessage{{Kind: "ParseComplete"}, {Kind: "BindComplete"},
+		{Kind: "CommandComplete", Tag: "SELECT 1"}}
+	q.flushErr = errors.New("the flush could not deliver")
+	_, events, addr := stallListener(t, q, 250*time.Millisecond)
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+
+	execSegment(t, fe)
+	fe.Send(&pgproto3.Flush{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, "the stall budget to arm on a segment whose Flush did not deliver", func() bool {
+		for _, e := range events() {
+			if e.Kind == "fd.refused" && e.Reason == ruleSegmentStall {
+				return true
+			}
+		}
+		return false
+	})
 }
 
 // r0 MF3 — a front-door-LOCAL refusal must start discard-through-Sync.
