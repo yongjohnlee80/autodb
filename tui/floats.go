@@ -555,7 +555,13 @@ func (vf *valueFloat) HandleEvent(ev tui.Event) bool {
 // because dismissing it is what destroys the credential.
 func copyReport(reachedClipboard, secret bool) (msg string, ok, dismiss bool) {
 	if reachedClipboard {
-		return "copied to the system clipboard", true, true
+		// A SECRET float stays open on success too (Johno, v0.3.2 manual
+		// testing). The value is shown once and cannot be recovered, so the
+		// moment of dismissal belongs to the person who has to paste it —
+		// not to autodb, which cannot know whether the paste landed. Closing
+		// the instant the clipboard call returned took the credential away
+		// while the user was still switching windows.
+		return "copied to the system clipboard", true, !secret
 	}
 	return "clipboard unavailable — copied to the editor register only (p to paste)",
 		false, !secret

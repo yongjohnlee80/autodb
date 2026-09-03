@@ -808,7 +808,7 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, own []UserIPRow, activ
 // copies the secret ALONE — not the title, not the surrounding text — and
 // openSecretFloat keeps the float open if the clipboard write fails.
 func (m *Model) revealPATSecret(out PATSecret) {
-	m.openSecretFloat("token "+out.Name+" — y: copy NOW, never shown again"+
+	m.openSecretFloat("token "+out.Name+" — y: copy, q/Esc: close (never shown again)"+
 		"; expires "+shortStamp(out.ExpiresAt), out.Secret)
 }
 

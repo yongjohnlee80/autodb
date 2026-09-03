@@ -62,6 +62,20 @@ type extStatement struct {
 	name string
 	sql  string
 
+	// empty marks a statement whose text is blank or comment-only.
+	//
+	// PostgreSQL accepts Parse("") — it is a legal prepared statement that
+	// yields EmptyQueryResponse instead of CommandComplete when executed, and
+	// pgjdbc sends exactly that as its connection-validation probe on EVERY
+	// connection. Refusing it made the front door unusable from every
+	// JetBrains data source: authenticate, probe, refused, "connection was
+	// established but closed as invalid".
+	//
+	// It is an explicit FLAG, not an inference from a zero-valued stmt: a
+	// Statement that failed to classify for some other reason would look
+	// identical, and this decides whether a frame reaches the target at all.
+	empty bool
+
 	// stmt is the classification decided ONCE, at Parse, and never re-derived.
 	// Statement is a value type, so holding it is structurally immutable — a
 	// later Execute cannot reclassify the text, which is the whole point of

@@ -246,10 +246,10 @@ func TestDeadline_AnAuthenticatedSessionSurvivesADebugBreakpoint(t *testing.T) {
 	}
 	e, ok := msg.(*pgproto3.ErrorResponse)
 	if !ok {
-		t.Fatalf("got %T; this build answers a Query with the not-implemented refusal", msg)
+		t.Fatalf("got %T; this build answers a Query with the no-query-executor refusal", msg)
 	}
-	if e.Detail != "frontdoor/post-auth-not-implemented" {
-		t.Errorf("detail = %q, want the honest not-implemented identity", e.Detail)
+	if e.Detail != "frontdoor/no-query-executor" {
+		t.Errorf("detail = %q, want the no-query-executor identity", e.Detail)
 	}
 }
 
@@ -280,7 +280,7 @@ func TestSession_AQueryBeforeF1IsRefusedAccurately(t *testing.T) {
 		t.Errorf("code = %q, want 0A000 feature_not_supported — the accurate SQLSTATE for a "+
 			"feature that is not built rather than a permission that was refused", e.Code)
 	}
-	if e.Detail != "frontdoor/post-auth-not-implemented" {
+	if e.Detail != "frontdoor/no-query-executor" {
 		t.Errorf("detail = %q; §1.2 puts the front door's own rule id here", e.Detail)
 	}
 }
