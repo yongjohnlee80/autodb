@@ -57,6 +57,75 @@ const (
 	paramNegotiate
 )
 
+// THE CANONICAL NAME INDEX (lector r1 MF4; jarvis's class ruling).
+//
+// Three defects in this feature were ONE defect wearing different clothes: a
+// guard keyed on a NAME, and another spelling of that name reaching the same
+// setting.
+//
+//  1. #71 MF1 — `SET NAMES` is an alias of `SET client_encoding`, and a
+//     name-keyed denylist reading the leading token missed it.
+//  2. #74 MF1 — an options-derived key skipped the carve-out a top-level key met.
+//  3. #74 MF4 — exact map lookups beside a case-insensitive policy, so
+//     `Application_Name` at top level plus `-c application_name` in options got
+//     past BOTH the carve-out and the cross-source duplicate refusal.
+//
+// So the fix is not a third pair of special cases. EVERY site that asks "is this
+// name X" folds through foldGUCName, and a carved-out name is rewritten to its
+// canonical spelling so the downstream exact lookups — the 256-byte cap, the
+// truncation, the ParameterStatus echo — cannot be spelled around either.
+//
+// FOLD ASCII-ONLY, BECAUSE THAT IS WHAT THE TARGET DOES. PostgreSQL's
+// guc_name_compare folds A-Z byte-wise and nothing else; Go's strings.ToLower is
+// Unicode-aware and folds more. VERIFIED against PostgreSQL 17 rather than
+// assumed: `current_setting('KRB_SERVER_KEYFILE')` returns the value, while the
+// same name with U+212A KELVIN SIGN in place of the K raises "unrecognized
+// configuration parameter", and Go's strings.ToLower maps that same input to
+// "krb_server_keyfile". A canonicaliser that folds MORE than the target does is
+// the next bypass one layer down — on pre-auth, attacker-chosen input — because
+// it can make two names the target keeps apart look like one to us.
+func foldGUCName(name string) string {
+	b := []byte(name)
+	for i := 0; i < len(b); i++ {
+		if b[i] >= 'A' && b[i] <= 'Z' {
+			b[i] += 'a' - 'A'
+		}
+	}
+	return string(b)
+}
+
+// carvedOutNames are the GUC-named parameters §3.1 governs itself. They are
+// looked up through the fold, never by exact key.
+var carvedOutNames = map[string]bool{"application_name": true, "client_encoding": true}
+
+// canonicalizeCarvedOut rewrites a carved-out parameter to its canonical
+// spelling, so every later exact lookup finds it.
+//
+// Without this, `Application_Name=psql` passes the folded policy and then
+// vanishes: normalizeStartupParams, the ParameterStatus echo and the engine all
+// read params["application_name"] exactly, so the cap, the truncation and the
+// echo silently do not happen. It reports the duplicate that two spellings of
+// one name would otherwise become.
+func canonicalizeCarvedOut(params map[string]string) (string, bool) {
+	for _, canonical := range []string{"application_name", "client_encoding"} {
+		var found string
+		for k := range params {
+			if foldGUCName(k) != canonical {
+				continue
+			}
+			if found != "" {
+				return k, false // two spellings of one name in one packet
+			}
+			found = k
+		}
+		if found != "" && found != canonical {
+			params[canonical] = params[found]
+			delete(params, found)
+		}
+	}
+	return "", true
+}
+
 // startupGUCLimit caps how many settings one startup packet may carry
 // (Amendment 8). It bounds the work an unauthenticated peer can ask for before
 // it has presented anything: each admitted setting is a round trip to the
@@ -111,6 +180,11 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	// `user` is a cross-check against the token's owner, never an override;
 	// `database` names the connection row. Absent or blank, there is nothing
 	// to cross-check and nothing to route to.
+	// The carved-out names take their canonical spelling FIRST, so every check
+	// below — and every exact lookup downstream — sees one spelling of one name.
+	if dup, ok := canonicalizeCarvedOut(params); !ok {
+		return startupCheck{Refused: dup, Reason: reasonStartupDuplicateKey}, false
+	}
 	for _, required := range []string{"user", "database"} {
 		if strings.TrimSpace(params[required]) == "" {
 			return startupCheck{Refused: required, Reason: reasonStartupParamRefus}, false
@@ -125,7 +199,7 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	gucs := map[string]string{}
 	seen := map[string]string{}
 	add := func(key, value string) (string, denialReason, bool) {
-		lower := strings.ToLower(key)
+		lower := foldGUCName(key)
 		if _, dup := seen[lower]; dup {
 			return key, reasonStartupDuplicateKey, false
 		}
@@ -161,7 +235,7 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 		case paramNegotiate, paramAccept:
 		}
 		// The two parameters with VALUE conditions, not just name ones.
-		switch strings.ToLower(k) {
+		switch foldGUCName(k) {
 		case "client_encoding":
 			// UTF8 only: autodb does not transcode, and the byte-fidelity
 			// claim the relay makes is only honest if both ends agree on the
@@ -214,7 +288,7 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 		switch startupParamPolicy(kv.name) {
 		case paramAccept:
 			// §3.1's own handling, exactly as the top-level spelling gets.
-			switch strings.ToLower(kv.name) {
+			switch foldGUCName(kv.name) {
 			case "application_name":
 				// Capped, truncated and echoed by normalizeStartupParams, and
 				// never forwarded — reached by writing it where the top-level
@@ -298,7 +372,7 @@ func duplicateStartupKey(raw []byte) (string, bool) {
 			return "", false
 		}
 		b = b[j+1:]
-		lower := strings.ToLower(key)
+		lower := foldGUCName(key)
 		if _, dup := seen[lower]; dup {
 			return key, true
 		}
@@ -507,7 +581,7 @@ func startupParamPolicy(name string) startupParamDecision {
 	if strings.HasPrefix(name, "_pq_.") {
 		return paramNegotiate
 	}
-	switch strings.ToLower(name) {
+	switch foldGUCName(name) {
 	case "user", "database", "application_name", "client_encoding", "options":
 		return paramAccept
 	case "replication":

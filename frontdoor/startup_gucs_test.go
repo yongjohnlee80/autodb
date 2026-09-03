@@ -647,3 +647,135 @@ func TestStartupGUCs_ANameGivenBothWaysIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// row 3.1:carve-out — A SPELLING IS NOT A BYPASS (lector r1 MF4).
+//
+// The third instance of one defect: a guard keyed on a NAME, and another
+// spelling of that name reaching the same setting. First it was an alias
+// (`SET NAMES`), then an arrival path (`options`), then CASE — the policy folded
+// names while the carve-out's presence check used exact map lookups. So
+// `Application_Name=psql` at top level plus `-c application_name=shadow` got past
+// BOTH the carve-out and the cross-source duplicate refusal, and the options
+// value reached the target.
+//
+// Every name check now folds through one index, and a carved-out name is
+// rewritten to its canonical spelling so the downstream exact lookups — the cap,
+// the truncation, the echo — cannot be spelled around either.
+func TestStartupGUCs_AMixedCaseSpellingIsNotABypass(t *testing.T) {
+	t.Parallel()
+
+	// CROSS-SOURCE, with the top-level spelling in a different case.
+	for _, tc := range []struct{ name, top, key, opt string }{
+		{"application_name", "Application_Name", "application_name", "-c application_name=shadow"},
+		{"client_encoding", "Client_Encoding", "client_encoding", "-c client_encoding=UTF8"},
+		{"the options spelling is the odd one", "application_name", "application_name", "-c APPLICATION_NAME=shadow"},
+	} {
+		t.Run(tc.name+"/"+tc.top, func(t *testing.T) {
+			t.Parallel()
+			params := map[string]string{
+				"user": "root", "database": "d", tc.top: "psql", "options": tc.opt,
+			}
+			if tc.key == "client_encoding" {
+				params[tc.top] = "UTF8"
+			}
+			check, ok := checkStartupParams(params)
+			if ok {
+				t.Fatalf("%q at top level with %q in options was ACCEPTED (settings %v, params %v). "+
+					"They are one name in two spellings, so this is the cross-source duplicate the "+
+					"refusal already covers — reached by spelling it differently",
+					tc.top, tc.opt, check.GUCs, params)
+			}
+			if check.Reason != reasonStartupDuplicateKey {
+				t.Errorf("refused as %q, want %q", check.Reason, reasonStartupDuplicateKey)
+			}
+		})
+	}
+
+	// AND A MIXED-CASE SPELLING ALONE still gets §3.1's handling — the fix is a
+	// fold, not a refusal of anything unusual. It must reach the CANONICAL key,
+	// because the cap, the truncation and the echo all read that one exactly.
+	params := map[string]string{
+		"user": "root", "database": "d", "Application_Name": "psql", "CLIENT_ENCODING": "UTF8",
+	}
+	check, ok := checkStartupParams(params)
+	if !ok {
+		t.Fatalf("a mixed-case application_name/client_encoding was refused as %q (%s); to "+
+			"PostgreSQL these are the same GUCs as the lowercase spellings", check.Refused, check.Reason)
+	}
+	if got := params["application_name"]; got != "psql" {
+		t.Errorf("params[application_name] = %q, want psql — a mixed-case spelling that passes the "+
+			"folded policy and then never reaches the canonical key is ACCEPTED AND IGNORED: the "+
+			"256-byte cap, the rune-boundary truncation and the ParameterStatus echo all read that "+
+			"exact key", got)
+	}
+	if _, still := params["Application_Name"]; still {
+		t.Error("both spellings are in the map; the odd one must be replaced, not shadowed, or a " +
+			"later exact lookup can still find the wrong one")
+	}
+	for _, name := range []string{"application_name", "client_encoding"} {
+		if v, collected := check.GUCs[name]; collected {
+			t.Errorf("%s=%q was collected as a setting despite the carve-out", name, v)
+		}
+	}
+}
+
+// THE FOLD IS THE TARGET'S FOLD, NOT GO'S (jarvis's trap).
+//
+// PostgreSQL's guc_name_compare folds A-Z byte-wise and nothing else. Go's
+// strings.ToLower is Unicode-aware and folds more — including U+212A KELVIN SIGN
+// to 'k'. VERIFIED against PostgreSQL 17 rather than reasoned about:
+//
+//	current_setting('KRB_SERVER_KEYFILE')          -> FILE:/usr/local/etc/...
+//	current_setting(U&'\212Arb_server_keyfile')    -> ERROR: unrecognized
+//	                                                  configuration parameter
+//	                                                  "Krb_server_keyfile"
+//	strings.ToLower("Krb_server_keyfile")     -> "krb_server_keyfile"
+//
+// So Go would make two names the target keeps APART look like one to us. A
+// canonicaliser that folds more than the target does is the next bypass one
+// layer down, and this is pre-auth attacker-chosen input.
+//
+// The direction that matters is subtle and worth stating: pg's fold is a SUBSET
+// of Go's, so anything pg considers equal to a carved-out name is an ASCII-case
+// variant that our fold also catches — the carve-out cannot be escaped through
+// folding. What over-folding breaks is the other way round: we would treat a
+// name pg calls DIFFERENT as if it were the carved-out one, and quietly not
+// apply a setting the client asked for.
+func TestStartupGUCs_TheFoldIsPostgresFoldNotGos(t *testing.T) {
+	t.Parallel()
+
+	// ASCII folds, in both directions.
+	for _, spelled := range []string{"DATESTYLE", "DateStyle", "datestyle", "dATEsTYLE"} {
+		if got := foldGUCName(spelled); got != "datestyle" {
+			t.Errorf("foldGUCName(%q) = %q, want datestyle — PostgreSQL folds A-Z", spelled, got)
+		}
+	}
+	// …and nothing else does.
+	const kelvin = "Krb_server_keyfile" // U+212A in place of the ASCII K
+	if got := foldGUCName(kelvin); got == "krb_server_keyfile" {
+		t.Errorf("foldGUCName folded U+212A KELVIN SIGN to an ASCII k (%q). PostgreSQL 17 does NOT: "+
+			"current_setting on that name raises `unrecognized configuration parameter`, while "+
+			"current_setting('KRB_SERVER_KEYFILE') returns a value. Folding more than the target "+
+			"does makes two names it keeps apart look like one here — which is the next bypass, on "+
+			"pre-auth attacker-chosen input", got)
+	}
+	if got := foldGUCName(kelvin); got != kelvin {
+		t.Errorf("foldGUCName(%q) = %q — a name with no ASCII upper-case must pass through unchanged",
+			kelvin, got)
+	}
+
+	// The consequence, at the door: a Kelvin-K spelling of a carved-out name is
+	// NOT the carved-out name, so it is an ordinary setting and the target gets
+	// to reject it — the same answer a direct client receives.
+	params := map[string]string{
+		"user": "root", "database": "d", "Klient_encoding": "LATIN1",
+	}
+	if check, ok := checkStartupParams(params); !ok {
+		t.Fatalf("a name that merely LOOKS like client_encoding was refused as §3.1's (%q/%s); "+
+			"PostgreSQL does not consider it client_encoding, and neither may we",
+			check.Refused, check.Reason)
+	} else if _, collected := check.GUCs["Klient_encoding"]; !collected {
+		t.Errorf("collected %v — a name the target treats as its own setting must be passed to the "+
+			"target, which is the party that decides it does not exist", check.GUCs)
+	}
+}
