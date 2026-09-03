@@ -479,6 +479,46 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			return e.emitStopped(s, ef.err, outcomes[i].status, outcomes[i].ran, te)
 		}
 		if derr != nil && !consumerErr {
+			// A GUARD REFUSAL IS NOT A LOST WIRE, and it is the THIRD cause this
+			// branch has.
+			//
+			// The comment below enumerated two — a transport failure, and control
+			// reaching the raw face, which the gate makes impossible — and treated
+			// everything else as unreachable. golib's own guards are the third: they
+			// refuse a call made while the wire is not quiescent, and they refuse it
+			// BEFORE touching the wire, so the connection is in exactly the state it
+			// was in a moment earlier.
+			//
+			// Classifying that as a poisoned handle told a conformant client its
+			// connection to the target had died, closed the session, and answered
+			// 08P01 protocol_violation — blaming the client for a sequence real
+			// PostgreSQL answers normally. Our refusal has to carry OUR identity.
+			//
+			// GENERAL IN MECHANISM, ONE MEASURED INSTANCE. Every golib refusal
+			// reaching here is now classified as a refusal, but only
+			// Parse-then-simple-Query was driven end to end; the other known golib
+			// refusal is not reachable through the loop, so no second instance could
+			// be constructed. This does not make the sequence SUPPORTED — whether
+			// autodb adopts PostgreSQL's mid-segment-Query behaviour is an open
+			// contract question — it makes the refusal honest.
+			if errors.Is(derr, golibpg.ErrSegmentInFlight) {
+				// The CAUSE travels in the audit row, never to the peer: golib's
+				// internal text is an implementation detail, and forwarding it is how
+				// "an extended segment is in flight" reached a client as though the
+				// target had spoken.
+				e.auditBounded(ctx, s.userID, ip, "wire_sequence_refused",
+					fmt.Sprintf("conn %d: session %s: %v", s.connID, s.id, derr))
+				for i := el.first; i <= el.last; i++ {
+					outcomes[i].status = StatusError
+					outcomes[i].errText = truncate(ErrWireSequenceRefused.Error(), maxErrorBytes)
+				}
+				if rerr := record(); rerr != nil {
+					return 0, rerr
+				}
+				// NOT wrapped: the wire is fine, the session continues, and the
+				// handle is not poisoned or transferred.
+				return 0, ErrWireSequenceRefused
+			}
 			// The WIRE failed (transport, or control reached the raw face, which
 			// the gate makes impossible): the pinned handle is poisoned and this
 			// session cannot continue on it. Record, then close.
@@ -716,6 +756,15 @@ const DecodedResultTruncatedRuleID = "frontdoor/decoded-result-page-exceeded"
 // loop must tear the client connection down and send NO readiness byte. It
 // wraps the underlying cause; errors.Is(err, ErrWireFaceLost) recognises it.
 var ErrWireFaceLost = errors.New("exec: the session's wire failed; the session is closing")
+
+// ErrWireSequenceRefused is autodb's OWN refusal of a message the target
+// connection cannot accept in its current state.
+//
+// It is deliberately NOT a wire failure: golib's guard refuses before touching
+// the wire, so the connection is intact, the handle is not poisoned, and the
+// session continues. The text is what the PEER is told, so it says what to do
+// next and names no internal identifier — the cause travels in the audit row.
+var ErrWireSequenceRefused = errors.New("exec: this message is not supported while an extended-query segment is open; end it with Sync first")
 
 // wireFaceLost wraps a wire failure so the loop can match it and still read the cause.
 func wireFaceLost(cause error) error { return fmt.Errorf("%w: %w", ErrWireFaceLost, cause) }
