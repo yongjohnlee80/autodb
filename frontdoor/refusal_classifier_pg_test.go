@@ -30,11 +30,15 @@ import (
 // carrying golib's own "an extended segment is in flight" as "the session's wire
 // failed".
 //
-// SCOPE OF THE CLAIM. The repair is general in MECHANISM — any golib refusal
-// reaching this branch is classified as a refusal rather than a dead wire — but
-// the evidence is ONE measured instance. The other known golib refusal is not
-// reachable through the loop, so a second instance could not be constructed.
-// This cell does not claim the sequence becomes SUPPORTED: whether autodb adopts
+// SCOPE OF THE CLAIM — ONE SENTINEL, NOT A CATEGORY. The engine classifies
+// golibpg.ErrSegmentInFlight as a refusal and NOTHING ELSE; every other error,
+// including any other golib error, keeps the fatal wire-lost default, which is
+// correct for a transport failure or a poisoned face. This cell is the evidence
+// for that single sentinel and claims nothing about golib refusals as a class —
+// widening it would require enumerating golib's refusal shapes, which is a
+// golib-side question this repo cannot answer.
+//
+// It also does not claim the sequence becomes SUPPORTED: whether autodb adopts
 // PostgreSQL's mid-segment-Query behaviour is an open contract question. It
 // claims only that our refusal is reported as ours.
 func TestRefusal_AGolibRefusalIsNotReportedAsAWireFailure(t *testing.T) {

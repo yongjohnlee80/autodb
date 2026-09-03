@@ -479,28 +479,32 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			return e.emitStopped(s, ef.err, outcomes[i].status, outcomes[i].ran, te)
 		}
 		if derr != nil && !consumerErr {
-			// A GUARD REFUSAL IS NOT A LOST WIRE, and it is the THIRD cause this
-			// branch has.
+			// ErrSegmentInFlight IS NOT A LOST WIRE, and it is a THIRD cause this
+			// branch has beyond the two the comment below enumerates.
 			//
-			// The comment below enumerated two — a transport failure, and control
-			// reaching the raw face, which the gate makes impossible — and treated
-			// everything else as unreachable. golib's own guards are the third: they
-			// refuse a call made while the wire is not quiescent, and they refuse it
-			// BEFORE touching the wire, so the connection is in exactly the state it
-			// was in a moment earlier.
-			//
+			// golib raises it when a guarded call is made while the wire is not
+			// quiescent, and it raises it BEFORE touching the wire — so the
+			// connection is in exactly the state it was in a moment earlier.
 			// Classifying that as a poisoned handle told a conformant client its
 			// connection to the target had died, closed the session, and answered
-			// 08P01 protocol_violation — blaming the client for a sequence real
-			// PostgreSQL answers normally. Our refusal has to carry OUR identity.
+			// 08P01 protocol_violation, blaming the client for a sequence real
+			// PostgreSQL answers normally.
 			//
-			// GENERAL IN MECHANISM, ONE MEASURED INSTANCE. Every golib refusal
-			// reaching here is now classified as a refusal, but only
-			// Parse-then-simple-Query was driven end to end; the other known golib
-			// refusal is not reachable through the loop, so no second instance could
-			// be constructed. This does not make the sequence SUPPORTED — whether
-			// autodb adopts PostgreSQL's mid-segment-Query behaviour is an open
-			// contract question — it makes the refusal honest.
+			// THIS SENTINEL ONLY, DELIBERATELY. It is not a claim that golib
+			// refusals in general are safe here: this is the one whose behaviour is
+			// measured, by the live Parse-then-simple-Query cell. Every other error
+			// — transport failures, a poisoned raw face, and any golib error not
+			// named here — keeps the fatal default below, which is CORRECT for them.
+			//
+			// Widening it would mean enumerating golib's refusal shapes, and that is
+			// a GOLIB-side question this repo cannot answer. Asserting a vocabulary
+			// with evidence for one member of it is the exact defect this branch was
+			// repaired for; a general safe-refusal vocabulary is a golib-side
+			// follow-up, not an oversight here.
+			//
+			// It also does not make the sequence SUPPORTED. Whether autodb adopts
+			// PostgreSQL's mid-segment-Query behaviour is an open contract question;
+			// this only makes the refusal honest.
 			if errors.Is(derr, golibpg.ErrSegmentInFlight) {
 				// The CAUSE travels in the audit row, never to the peer: golib's
 				// internal text is an implementation detail, and forwarding it is how
@@ -764,6 +768,9 @@ var ErrWireFaceLost = errors.New("exec: the session's wire failed; the session i
 // the wire, so the connection is intact, the handle is not poisoned, and the
 // session continues. The text is what the PEER is told, so it says what to do
 // next and names no internal identifier — the cause travels in the audit row.
+//
+// Raised for golibpg.ErrSegmentInFlight and nothing else. It is not a general
+// "golib refused" category; see the classification site for why the set is one.
 var ErrWireSequenceRefused = errors.New("exec: this message is not supported while an extended-query segment is open; end it with Sync first")
 
 // wireFaceLost wraps a wire failure so the loop can match it and still read the cause.

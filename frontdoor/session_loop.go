@@ -965,19 +965,6 @@ const deadlineGoodbyeBudget = 2 * time.Second
 // recovery.
 func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 	switch {
-	case errors.Is(err, exec.ErrWireSequenceRefused):
-		// OUR refusal, not the target's transport dying. The guard declined the
-		// call before it reached the wire, so the connection is exactly as it was
-		// and the session continues — a refusal, not a violation, which is the
-		// same shape the matrix already gives the legacy fast-path (0A000,
-		// "connection stays usable").
-		//
-		// NOT 08P01: protocol_violation says the CLIENT broke the protocol, and
-		// the sequence that reaches this is one real PostgreSQL answers normally.
-		// 0A000 says what is true — autodb does not support it here.
-		return sqlStateFeatureNotSupported, "frontdoor/sequence-unsupported",
-			"end the open extended segment with Sync, then send this again", false
-
 	case errors.Is(err, exec.ErrWireFaceLost):
 		// The session's wire failed and the engine is already closing the
 		// session. There is nothing left to be ready for, so the connection is
@@ -990,6 +977,29 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 		// breaks silently when that call changes.
 		return sqlStateProtocolViolation, "frontdoor/wire-face-lost",
 			"the session's connection to the target failed; reconnect", true
+
+	case errors.Is(err, exec.ErrWireSequenceRefused):
+		// OUR refusal, not the target's transport dying. golib's guard declined
+		// the call before it reached the wire, so the connection is exactly as it
+		// was and the session continues — a refusal, not a violation, which is the
+		// same shape the matrix already gives the legacy fast-path (0A000,
+		// "connection stays usable").
+		//
+		// The engine raises this for ONE golib sentinel, not for golib refusals as
+		// a class; everything else is fatal, which is correct for a transport
+		// failure or a poisoned face.
+		//
+		// ORDERED AFTER ErrWireFaceLost DELIBERATELY. errors.Is walks the whole
+		// chain, so a lost-wire error that happened to WRAP this sentinel would
+		// match here first and be declassed from fatal — the wire is gone whatever
+		// it wrapped. Nothing constructs that chain today; the ordering is what
+		// keeps it from mattering if something later does.
+		//
+		// NOT 08P01: protocol_violation says the CLIENT broke the protocol, and
+		// the sequence that reaches this is one real PostgreSQL answers normally.
+		// 0A000 says what is true — autodb does not support it here.
+		return sqlStateFeatureNotSupported, "frontdoor/sequence-unsupported",
+			"end the open extended segment with Sync, then send this again", false
 
 	case errors.Is(err, exec.ErrDecodedResultTruncated):
 		// Only a NON-PostgreSQL target can reach this now: PostgreSQL streams
