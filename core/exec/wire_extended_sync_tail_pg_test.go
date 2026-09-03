@@ -128,6 +128,78 @@ func TestExtPG_ASecondStatementSurvivesSyncAfterAnEarlierExecute(t *testing.T) {
 	}
 }
 
+// A SEGMENT CAN OWE ANSWERS WITH NOTHING IN FLIGHT.
+//
+// Transaction-control statements are answered by the front door itself, so their
+// ParseComplete is queued ON THE STEP and nothing is sent to the target. The
+// segment is then non-empty while the wire is idle — and the first cut of the
+// tail delivery read "non-empty" as "flush it", which golib refuses with
+// "nothing queued to flush".
+//
+// That refusal came back as a segment-ending error, and Sync's error path sends
+// no ReadyForQuery, so the client was left waiting on a readiness that was never
+// coming. A HANG, on a segment PostgreSQL answers normally. This cell exists
+// because the sweep case that found it takes ten seconds to fail by timeout,
+// which is not a signal anyone should have to wait for twice.
+func TestExtPG_SyncDeliversASegmentWithNothingInFlight(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := f.eng.WireParse(ctx, sid, userID, "b", "BEGIN", nil, testIP); err != nil {
+		t.Fatalf("parse BEGIN: %v", err)
+	}
+	if err := f.eng.WireBind(ctx, sid, userID, "b", "b", nil, nil, nil); err != nil {
+		t.Fatalf("bind BEGIN: %v", err)
+	}
+	if err := f.eng.WireExecutePortal(ctx, sid, userID, "b", 0, testIP,
+		func(WireMessage) error { return nil }); err != nil {
+		t.Fatalf("execute BEGIN: %v", err)
+	}
+
+	// A statement the front door answers itself: its ParseComplete is queued on
+	// the step, and the target is sent nothing.
+	if err := f.eng.WireParse(ctx, sid, userID, "sp", "SAVEPOINT sp1", nil, testIP); err != nil {
+		t.Fatalf("parse SAVEPOINT: %v", err)
+	}
+
+	s, lerr := f.eng.sessions.lookup(sid, userID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	// PREMISE, both halves. The segment must be non-empty (or Sync has nothing to
+	// deliver and the cell is vacuous) AND every step must be locally answered
+	// (or the wire genuinely does owe something and this is not the shape at all).
+	if len(s.ext.segment) == 0 {
+		t.Fatal("PREMISE FAILED: the segment is empty, so this cell observes nothing")
+	}
+	if segmentAwaitsWire(s.ext.segment) {
+		t.Fatal("PREMISE FAILED: a step awaits a wire answer, so this is not the " +
+			"nothing-in-flight shape the cell is named for")
+	}
+
+	var got []WireMessage
+	status, err := f.eng.WireSyncSegment(ctx, sid, userID, func(m WireMessage) error {
+		got = append(got, m)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Sync failed on a segment with nothing in flight: %v — this error "+
+			"reaches the client as a refusal with NO ReadyForQuery behind it, and the "+
+			"client then waits for a readiness that never comes", err)
+	}
+	if !validExtTxStatus(status) {
+		t.Errorf("Sync returned status %q, want a valid transaction status", string(status))
+	}
+	if kinds := kindsOfMsgs(got); !slices.Contains(kinds, "ParseComplete") {
+		t.Errorf("Sync delivered %v, missing the locally-answered ParseComplete", kinds)
+	}
+}
+
+// validExtTxStatus is the cell's own copy, deliberately: asserting against the
+// engine's constant would pass for any byte the engine happened to return.
+func validExtTxStatus(b byte) bool { return b == 'I' || b == 'T' || b == 'E' }
+
 // discardEmit is for cells that assert Sync's STATUS or its error, not what it
 // delivered. Sync answers the segment's tail now, so those cells need a sink;
 // giving them one that drops frames keeps them testing what they were written

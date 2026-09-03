@@ -423,10 +423,38 @@ func deliverSegment(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
 	if len(o.segment) == 0 {
 		return nil
 	}
-	if ferr := pc.Flush(ctx); ferr != nil {
-		return ferr
+	// FLUSH ONLY WHEN THE TARGET OWES AN ANSWER.
+	//
+	// A non-empty segment does not imply anything is in flight. Frames the front
+	// door answers ITSELF carry their replies on the step (segStep.synth) and
+	// send nothing to the target, so a segment holding only those has a queue
+	// length and no wire traffic. Flushing it asks golib to push an empty
+	// outbound queue, which it refuses with "an extended segment is in flight:
+	// nothing queued to flush" — and that refusal travelled all the way out as a
+	// segment-ending error, leaving the client with no ReadyForQuery at all.
+	//
+	// The condition is the step's own kind, not a guess about whether draining
+	// looks safe: a step whose synth is nil is one whose answer must be read
+	// from the target, and that is exactly when there is something to flush.
+	// The drain itself needs no such guard — it answers synth steps from memory
+	// and only touches the wire for the others.
+	if segmentAwaitsWire(o.segment) {
+		if ferr := pc.Flush(ctx); ferr != nil {
+			return ferr
+		}
 	}
 	return drainExtended(ctx, pc, o, emit)
+}
+
+// segmentAwaitsWire reports whether any queued step's answer must come from the
+// target rather than from the step itself.
+func segmentAwaitsWire(steps []segStep) bool {
+	for _, st := range steps {
+		if st.synth == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // WireSyncSegment ends the segment and returns the ReadyForQuery status byte.

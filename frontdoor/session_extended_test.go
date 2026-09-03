@@ -111,12 +111,20 @@ func TestExtStall_SyncWithinBudgetKeepsTheSession(t *testing.T) {
 	waitFor(t, "the lane to be released by Sync", func() bool { return l.general.inUse() == 0 })
 }
 
-// A segment that has Parsed and Bound but executed NOTHING holds no lane, so the
-// stall budget must not arm — that session is merely between messages and stays
-// under the idle clock.
+// A segment that has Parsed and Bound but executed NOTHING must not arm the
+// stall budget — that session is merely between messages and stays under the
+// idle clock.
 //
 // Without this the ruling's narrowing would be untested and a Parse/Bind pair
 // left open would be torn down in 300ms as though it were hoarding output.
+//
+// IT NO LONGER ASSERTS THAT THE LANE IS UNHELD, and that change is deliberate.
+// The obligation-start ruling moved the reservation to the first
+// response-producing frame, because Parse and Bind now queue answers that Sync
+// really delivers — so a Parse/Bind-only segment DOES hold its working set. What
+// the cell protects is the second timer, not the accounting: the stall budget
+// measures a client that asked for output and did not collect it, and parsing is
+// not asking. Those were the same question while only Execute reserved.
 func TestExtStall_SegmentHoldingNothingStaysUnderTheIdleClock(t *testing.T) {
 	t.Parallel()
 	q := okQueries()
@@ -130,8 +138,13 @@ func TestExtStall_SegmentHoldingNothingStaysUnderTheIdleClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "both frames to reach the engine", func() bool { return len(q.calls()) == 2 })
-	if used := l.general.inUse(); used != 0 {
-		t.Fatalf("a Parse/Bind-only segment holds %d lane bytes; it has produced no output", used)
+	// PREMISE: the segment really is holding its working set, so the cell is
+	// exercising the case where reservation and stall clock DISAGREE. If it held
+	// nothing, the old proxy would satisfy this cell too and the protection would
+	// be untested.
+	if used := l.general.inUse(); used == 0 {
+		t.Fatal("PREMISE FAILED: the segment holds no reservation, so this cell no " +
+			"longer distinguishes the stall clock from the accounting")
 	}
 
 	// Well past the stall budget, and nothing happens: the idle clock governs.

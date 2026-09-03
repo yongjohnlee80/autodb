@@ -84,6 +84,29 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 		}
 	}
 
+	// THE RESERVATION FOLLOWS THE OBLIGATION, NOT THE DELIVERY (jarvis/lector
+	// ruling on #75). Parse, Bind, Describe and Close queue answers that Sync
+	// will deliver, so the output obligation begins HERE — at the frame that
+	// creates it — and it is charged before that frame is dispatched.
+	//
+	// Reserving at Sync instead, as the first cut of this change did, is
+	// accounting AFTER dispatch: the frames are already on the target when the
+	// reservation is attempted, so a capacity failure at Sync refuses work that
+	// has demonstrably run and reports "nothing was dispatched", which is false.
+	// It also breaks §1.4's control-lane liveness, because a standalone Sync
+	// with nothing to deliver would still try to take a general-lane working set
+	// and could be refused — the one thing the control lane exists to prevent.
+	//
+	// Idempotent: a segment that already holds its reservation returns
+	// immediately, so the Execute path's own call becomes a no-op after this and
+	// the working set is taken exactly once per segment.
+	switch msg.(type) {
+	case *pgproto3.Parse, *pgproto3.Bind, *pgproto3.Describe, *pgproto3.Close:
+		if !l.reserveSegment(conn, be, seg, peer, closeReason) {
+			return false
+		}
+	}
+
 	switch m := msg.(type) {
 	case *pgproto3.Parse:
 		err = l.queries.WireParse(ctx, id, uid, m.Name, m.Query, m.ParameterOIDs, hostOf(peer))
@@ -107,6 +130,7 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 		}
 
 	case *pgproto3.Execute:
+		seg.ran = true
 		return l.runExtendedStream(ctx, conn, be, sess, peer, seg, closeReason,
 			func(emit func(exec.WireMessage) error) error {
 				return l.queries.WireExecutePortal(ctx, id, uid, m.Portal, m.MaxRows, hostOf(peer), emit)
@@ -143,17 +167,18 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, peer string, seg *segmentLane, closeReason *string) bool {
 
-	// SYNC PRODUCES OUTPUT NOW, so it is accounted like every other call that
-	// does. A segment whose last frame is not an Execute owes its answers here,
-	// and answers delivered outside the accountant would be bytes §8.4 never saw.
+	// SYNC NEVER RESERVES, and that is a §1.4 requirement rather than an
+	// optimisation: Sync and its ReadyForQuery ride the CONTROL lane and are
+	// ALWAYS ADMISSIBLE under general-lane saturation. A Sync that had to take a
+	// general-lane working set before it could answer could be refused exactly
+	// when the guarantee says it cannot be — and a standalone Sync with an empty
+	// segment, which delivers nothing at all, would be refused for output it was
+	// never going to produce.
 	//
-	// The reservation is taken the same way the streaming path takes it, and for
-	// the same reason: this is the frame that can produce output. It is a no-op
-	// when the segment already holds one, which is the ordinary case — the
-	// Execute that preceded this Sync reserved it.
-	if !l.reserveSegment(conn, be, seg, peer, closeReason) {
-		return false
-	}
+	// It still delivers through the accountant, under the working set the
+	// segment ALREADY holds: the frames that queued these answers reserved it
+	// when they were admitted, so the bytes are accounted without this call
+	// needing capacity of its own.
 	acct := newOutputAccountant(l, conn, be, peer, seg.held)
 	status, err := l.queries.WireSyncSegment(context.Background(), sess.SessionID, sess.UserID, acct.emit)
 	seg.held = acct.held
@@ -166,6 +191,7 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	// this a long-lived session accumulates across segments and is eventually
 	// refused for frames it already had answered.
 	seg.msgs, seg.bytes = 0, 0
+	seg.ran = false
 
 	// THE ACCOUNTANT'S VERDICTS COME FIRST, as they do on the streaming path.
 	// A tail that was withheld or could not be framed is not a segment that
@@ -427,6 +453,13 @@ func (s *segmentLane) addBytes(n int64) {
 }
 
 type segmentLane struct {
+	// ran records that this segment EXECUTED something, so the client has asked
+	// for output and owes us the Sync or Flush that collects it. It is what the
+	// stall budget measures; the reservation is what the lane accounting
+	// measures, and since the obligation-start ruling those are different
+	// questions with different answers.
+	ran bool
+
 	held int64
 
 	// msgs and bytes are this segment's accumulation against the caps above.
@@ -608,13 +641,25 @@ func (l *Listener) segmentStall() time.Duration {
 
 // segmentDeadline reports the budget for the wait BEFORE the next frame.
 //
-// A segment holding a reservation has pending output and a client that owes us a
-// Sync, so it gets the stall budget. A segment that has only Parsed and Bound
-// holds nothing and is a client merely between messages, so it stays under the
-// idle clock — jarvis's narrowing, and the reason this asks the reservation
-// rather than "is a segment open".
+// A segment that has RUN something has output the client asked for and has not
+// collected, so it gets the stall budget. A segment that has only Parsed and
+// Bound is a client merely between messages, so it stays under the idle clock —
+// jarvis's narrowing, and it still holds.
+//
+// IT ASKS WHETHER THE SEGMENT RAN, NOT WHETHER IT HOLDS A RESERVATION. Those
+// were the same question while only Execute reserved, and the reservation was
+// the cheaper proxy. The obligation-start ruling separates them: Parse and Bind
+// now take the working set, because the answers they queue are really owed and
+// really delivered. Keeping the proxy would arm a 30-second teardown on a client
+// that has parsed a statement and paused — measured, not theorised: a
+// Parse/Bind-only session held 4 MiB, armed the stall, and was torn down.
+//
+// The stall rule's own words are the test to apply: it is for a client that
+// "asked for output and did not collect it". Parse and Bind do not ask; Execute
+// does, and Sync and Flush are the collection. So the flag is set where the
+// asking happens.
 func (l *Listener) segmentDeadline(seg *segmentLane) time.Duration {
-	if seg.held > 0 {
+	if seg.ran {
 		return l.segmentStall()
 	}
 	return l.dl.idle
