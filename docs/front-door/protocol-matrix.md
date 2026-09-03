@@ -34,7 +34,7 @@ stateDiagram-v2
     S2 --> S3: AuthenticationCleartextPassword offered
     S3 --> S4: PAT verified + reserved atomically (row 2.7)
     S3 --> [*]: uniform denial 28000, close
-    S4 --> S5: Parse opens a segment
+    S4 --> S5: ANY extended message opens a segment<br/>(Parse, Bind, Describe, Execute, Close, Flush)
     S5 --> S4: Sync closes the segment and emits ReadyForQuery
     S4 --> [*]: Terminate, or a fatal protocol violation
     S5 --> [*]: Terminate, or a fatal protocol violation
