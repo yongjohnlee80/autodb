@@ -185,3 +185,98 @@ func TestPGStartupGUCs_OptionsIsNotAWayAroundTheEncodingPin(t *testing.T) {
 			"options would be a door around both, into the one setting the lease pins")
 	}
 }
+
+// row 3.1:carve-out — …AND application_name IS NOT FORWARDED TO THE TARGET.
+//
+// The carve-out names two parameters, and their failure modes are NOT the same.
+// Collecting client_encoding fails loudly: the denylist refuses it and the
+// session is withdrawn, so lib/pq's own arm reddens. application_name is NOT on
+// the denylist — the engine would ADMIT it and apply it to the pinned backend —
+// so collecting it fails SILENTLY, contradicting §3.1's rule while every client
+// still connects and every frame still looks right.
+//
+// That makes this the cell the carve-out actually needs for its second half:
+// the unit guard proves application_name is not collected, and this proves what
+// would happen if it were. `SHOW application_name` asks the TARGET, which is the
+// only party that can tell "we never forwarded it" from "we forwarded it and
+// nobody looked".
+//
+// §3.1: a freshly pinned backend carries the target's OWN effective default —
+// the DSN's value if the administrator supplied one, otherwise the applicable
+// server/database/role default, commonly empty. What it must never carry is the
+// label this client chose for itself.
+func TestPGStartupGUCs_ApplicationNameIsNotForwardedToTheTarget(t *testing.T) {
+	addr, secret, database, _ := pgLoopWithEngine(t)
+
+	// Distinctive enough that it cannot be any target's default by accident.
+	const label = "autodb-carve-out-witness-8213"
+	fe, opened := openWithParams(t, addr, secret, map[string]string{
+		"user": "root", "database": database, "application_name": label,
+	})
+	if !opened {
+		t.Fatal("a startup carrying application_name was denied; §3.1 accepts it")
+	}
+	if got := showSetting(t, fe, "application_name"); got == label {
+		t.Errorf("the pinned backend reports application_name=%q — the CLIENT's label reached the "+
+			"target. §3.1 accepts application_name, caps it, echoes it back in a ParameterStatus "+
+			"and deliberately does NOT forward it: a backend should show the target's own default. "+
+			"Collecting it as a startup setting is the way this breaks, and it breaks SILENTLY — "+
+			"the denylist does not refuse it, so the session opens and every frame looks right",
+			got)
+	}
+}
+
+// row 3.1:carve-out — THE CARVE-OUT HOLDS THROUGH `options`, AGAINST A REAL TARGET.
+//
+// Two things at once, because they are the two halves of one root cause:
+//
+//   - `-c application_name=X` must NOT reach the target. Nothing refuses it —
+//     it is not on the engine's denylist — so if the carve-out misses it, the
+//     session opens, every frame looks right, and the only evidence is the
+//     value the BACKEND reports. This is the case my first live cell could not
+//     see: that one probes client_encoding, which the engine denies on its own,
+//     so it stayed green whether or not the options carve-out existed.
+//   - `-c client_encoding=UTF8` must CONNECT. It is a legitimate thing to put in
+//     PGOPTIONS, and while it was collected it met the engine's unconditional
+//     denial and withdrew the session — the same value that works at top level
+//     killed the connection here.
+//
+// And an ordinary setting in the same options string must still apply, or the
+// "fix" would be a blanket refusal of options that merely mention a named key.
+func TestPGStartupGUCs_TheCarveOutHoldsThroughOptions(t *testing.T) {
+	addr, secret, database, _ := pgLoopWithEngine(t)
+
+	const label = "autodb-options-carve-out-4471"
+	fe, opened := openWithParams(t, addr, secret, map[string]string{
+		"user": "root", "database": database,
+		"options": "-c application_name=" + label + " -c extra_float_digits=3",
+	})
+	if !opened {
+		t.Fatal("`-c application_name` with an ordinary setting beside it was DENIED. §3.1 accepts " +
+			"application_name; arriving through options must not change that")
+	}
+	if got := showSetting(t, fe, "application_name"); got == label {
+		t.Errorf("the pinned backend reports application_name=%q — it arrived through `options` and "+
+			"was FORWARDED. Nothing refuses application_name, so this fails silently: the session "+
+			"opens and the wire looks correct, and only the target knows", got)
+	}
+	// The ordinary setting beside it still applied, so the carve-out is
+	// name-shaped rather than a blanket refusal.
+	if got := showSetting(t, fe, "extra_float_digits"); got != "3" {
+		t.Errorf("extra_float_digits = %q, want 3 — an ordinary setting sharing the options string "+
+			"with a carved-out name must still reach the backend", got)
+	}
+
+	// JARVIS'S AVAILABILITY MIRROR, live.
+	fe2, opened := openWithParams(t, addr, secret, map[string]string{
+		"user": "root", "database": database, "options": "-c client_encoding=UTF8",
+	})
+	if !opened {
+		t.Fatal("`-c client_encoding=UTF8` in PGOPTIONS was DENIED. Top level accepts it; collected " +
+			"as a setting it meets the engine's unconditional denial and withdraws the session, so " +
+			"a client that puts a legitimate encoding in PGOPTIONS cannot connect at all")
+	}
+	if got := showSetting(t, fe2, "client_encoding"); !strings.EqualFold(got, "UTF8") {
+		t.Errorf("client_encoding = %q, want UTF8 — the lease pins it", got)
+	}
+}

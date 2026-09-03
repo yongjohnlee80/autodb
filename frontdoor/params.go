@@ -1,9 +1,9 @@
 package frontdoor
 
 import (
+	"bytes"
 	"sort"
 	"strings"
-	"unicode"
 	"unicode/utf8"
 )
 
@@ -87,6 +87,15 @@ type startupCheck struct {
 // checkStartupParams applies §3.1 and Amendment 8: it refuses, or it returns
 // the settings the engine must judge.
 //
+// IT MUTATES params. A carved-out name arriving through `options` —
+// `-c application_name=X` — is written into the parameter map under its own
+// name, because §3.1's handling of it (the 256-byte cap, the rune-boundary
+// truncation, the verbatim audit, the ParameterStatus echo) lives downstream in
+// normalizeStartupParams and the handshake. Copying those rules here to serve a
+// second spelling would be two implementations of one row, and they would drift.
+// So the value is routed to where the rule already is, rather than the rule
+// being routed to the value.
+//
 // The refusal names the parameter for the AUDIT row; the wire still gets the
 // uniform denial, so a caller learns that startup failed and not which of
 // their parameters this server dislikes. Telling them would map the accepted
@@ -118,12 +127,17 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	add := func(key, value string) (string, denialReason, bool) {
 		lower := strings.ToLower(key)
 		if _, dup := seen[lower]; dup {
-			return key, reasonStartupOptionsMalformed, false
+			return key, reasonStartupDuplicateKey, false
 		}
 		seen[lower] = key
 		gucs[key] = value
 		return "", "", true
 	}
+
+	// options is unpacked in the first pass and APPLIED in the second, because a
+	// name arriving through options gets §3.1's own handling and that handling
+	// has to see the top-level value too (a client may send both).
+	var optioned []optionsGUC
 
 	// SORTED, because a refusal that varies with map iteration order is one
 	// nobody can write a cell against — and because the audit row should name
@@ -179,11 +193,62 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 			if !ok {
 				return startupCheck{Refused: k, Reason: reasonStartupOptionsMalformed}, false
 			}
-			for _, kv := range parsed {
-				if bad, why, ok := add(kv.name, kv.value); !ok {
-					return startupCheck{Refused: bad, Reason: why}, false
+			optioned = parsed
+		}
+	}
+
+	// THE CARVE-OUT IS ABOUT THE NAME, NOT THE ARRIVAL PATH (lector r0 MF1;
+	// jarvis's ruling). §3.1 governs application_name and client_encoding
+	// wherever they arrive — as a top-level parameter or inside `options` —
+	// because the rule is about what the name MEANS, not how it was spelled.
+	//
+	// Without this, `options='-c application_name=shadow'` walked into
+	// StartupGUCs, the engine admitted it as an ordinary editor SET, and it was
+	// FORWARDED to the pinned backend — contradicting §3.1's contract that
+	// application_name is capped, echoed and never forwarded. And its mirror:
+	// `options='-c client_encoding=UTF8'` — a perfectly legitimate thing to put
+	// in PGOPTIONS — was collected, met the engine's unconditional denial and
+	// WITHDREW THE SESSION, so the same value that works at top level killed the
+	// connection here.
+	for _, kv := range optioned {
+		switch startupParamPolicy(kv.name) {
+		case paramAccept:
+			// §3.1's own handling, exactly as the top-level spelling gets.
+			switch strings.ToLower(kv.name) {
+			case "application_name":
+				// Capped, truncated and echoed by normalizeStartupParams, and
+				// never forwarded — reached by writing it where the top-level
+				// value lives rather than by copying the rule.
+				if _, both := params["application_name"]; both {
+					return startupCheck{Refused: kv.name, Reason: reasonStartupDuplicateKey}, false
 				}
+				params["application_name"] = kv.value
+			case "client_encoding":
+				if _, both := params["client_encoding"]; both {
+					return startupCheck{Refused: kv.name, Reason: reasonStartupDuplicateKey}, false
+				}
+				if !strings.EqualFold(strings.TrimSpace(kv.value), "UTF8") &&
+					!strings.EqualFold(strings.TrimSpace(kv.value), "UTF-8") {
+					return startupCheck{Refused: kv.name, Reason: reasonStartupParamRefus}, false
+				}
+			default:
+				// user, database, options themselves. DECIDED EXPLICITLY rather
+				// than left to fall out of the code: refused. They are not
+				// settings — `user` and `database` are the identity and the
+				// route, established by the top-level parameters and
+				// cross-checked against the token — and accepting a second
+				// spelling inside options would create two sources for one
+				// identity, which is the ambiguity the duplicate rule exists to
+				// prevent.
+				return startupCheck{Refused: kv.name, Reason: reasonStartupOptionsMalformed}, false
 			}
+			continue
+		case paramRefuse:
+			return startupCheck{Refused: kv.name, Reason: reasonStartupParamRefus}, false
+		case paramNegotiate, paramCollect:
+		}
+		if bad, why, ok := add(kv.name, kv.value); !ok {
+			return startupCheck{Refused: bad, Reason: why}, false
 		}
 	}
 
@@ -194,6 +259,52 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 		return startupCheck{Refused: "options", Reason: reasonStartupGUCCount}, false
 	}
 	return startupCheck{GUCs: gucs}, true
+}
+
+// duplicateStartupKey scans the RAW ordered parameter pairs for a key named
+// twice, reporting the first repeat.
+//
+// IT HAS TO BE THE RAW BYTES, and that is the finding rather than the fix.
+// pgproto3's StartupMessage.Decode writes each pair straight into a
+// map[string]string, so a packet carrying `datestyle=ISO` and then
+// `datestyle=German` reaches every later layer as ONLY the second — the first
+// value is gone before any policy in this package can see it. §3.1's rule that a
+// key named twice is refused was therefore unenforceable at the layer that
+// states it, and unTESTABLE at the layer that tested it: a map cannot hold a
+// duplicate key, so a map-driven cell is structurally incapable of failing.
+// A harness that cannot EXPRESS a defect reports clean forever (lector r0 MF2).
+//
+// Case-insensitive, because these become settings and GUC names are.
+func duplicateStartupKey(raw []byte) (string, bool) {
+	if len(raw) < 4 {
+		return "", false
+	}
+	b := raw[4:] // past the version word; the parameter block follows
+	seen := map[string]struct{}{}
+	for len(b) > 0 {
+		i := bytes.IndexByte(b, 0)
+		if i < 0 {
+			// Unterminated. Decode has already refused this packet; there is no
+			// second opinion to offer here.
+			return "", false
+		}
+		key := string(b[:i])
+		b = b[i+1:]
+		if key == "" {
+			return "", false // the block's terminator
+		}
+		j := bytes.IndexByte(b, 0)
+		if j < 0 {
+			return "", false
+		}
+		b = b[j+1:]
+		lower := strings.ToLower(key)
+		if _, dup := seen[lower]; dup {
+			return key, true
+		}
+		seen[lower] = struct{}{}
+	}
+	return "", false
 }
 
 // optionsGUC is one setting named by an `options` string.
@@ -248,31 +359,54 @@ func parseOptionsGUCs(v string) ([]optionsGUC, bool) {
 }
 
 // optionsFields splits an options string the way libpq writes it: on unescaped
-// whitespace, with a backslash escaping the character after it.
+// whitespace, with a backslash escaping the byte after it.
+//
+// BYTES, NOT RUNES, and that is the whole point of this comment. The first
+// version ranged over runes and wrote them back with WriteRune, which replaces
+// malformed UTF-8 with U+FFFD — so an options value containing invalid UTF-8
+// came out as DIFFERENT BYTES than went in. On pre-auth, attacker-controlled
+// input, that is a silent value substitution: a rejected byte sequence can
+// become a valid, different value that the target then accepts.
+//
+// pgproto3 preserves startup values as bytes in a Go string and PostgreSQL's
+// own pg_split_opts scans bytes, so byte-preserving is what makes the
+// "verbatim" claim in checkStartupParams true rather than aspirational. There
+// is deliberately NO UTF-8 validity check here: inventing a rule the target
+// does not have would be this surface deciding what the target may be sent. If
+// the bytes are wrong for the target, the TARGET refuses them — which is the
+// same answer a direct client gets (lector r0 MF3; jarvis's ruling).
+//
+// The whitespace set is libpq's, which is ASCII: space, tab, newline, carriage
+// return, vertical tab, form feed. A multi-byte character can never be one of
+// them, so scanning bytes cannot split inside a rune.
 func optionsFields(v string) ([]string, bool) {
+	isSpace := func(c byte) bool {
+		return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
+	}
 	var (
 		out     []string
 		cur     strings.Builder
 		esc     bool
 		started bool
 	)
-	for _, r := range v {
+	for i := 0; i < len(v); i++ {
+		c := v[i]
 		switch {
 		case esc:
-			cur.WriteRune(r)
+			cur.WriteByte(c)
 			esc = false
 			started = true
-		case r == '\\':
+		case c == '\\':
 			esc = true
 			started = true
-		case unicode.IsSpace(r):
+		case isSpace(c):
 			if started {
 				out = append(out, cur.String())
 				cur.Reset()
 				started = false
 			}
 		default:
-			cur.WriteRune(r)
+			cur.WriteByte(c)
 			started = true
 		}
 	}

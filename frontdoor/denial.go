@@ -46,8 +46,14 @@ const (
 	// (jarvis, ruling 2, 2026-09-03).
 	reasonStartupGUCCount         denialReason = "frontdoor/startup-guc-count"
 	reasonStartupOptionsMalformed denialReason = "frontdoor/startup-options-malformed"
-	reasonPreAuthOversize         denialReason = "frontdoor/pre-auth-message-too-large"
-	reasonNoCredentialStore       denialReason = "frontdoor/auth-not-yet-available"
+	// A key named twice — as two raw wire pairs, twice inside `options`, or once
+	// in each. Its own reason rather than a reuse of the options one: a packet
+	// carrying no options at all can hit it, and an audit row saying
+	// "options-malformed" would send an operator looking for a string that was
+	// never sent.
+	reasonStartupDuplicateKey denialReason = "frontdoor/startup-duplicate-key"
+	reasonPreAuthOversize     denialReason = "frontdoor/pre-auth-message-too-large"
+	reasonNoCredentialStore   denialReason = "frontdoor/auth-not-yet-available"
 
 	// Accept-time refusals (matrix §1.4, §9). None of these reaches the
 	// wire either: a peer refused for capacity learns only that the

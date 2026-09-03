@@ -394,6 +394,14 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 	// carrying `search_path` was denied for want of a credential store
 	// rather than for the parameter, and reasonStartupParamRefus sat unused
 	// in the source — a dead constant is a policy nobody is applying.
+	// THE DUPLICATE PREFLIGHT RUNS ON THE RAW PAIRS, because by the time the
+	// parameters are a map the duplicate is gone — Decode keeps the last value
+	// for a repeated key and nothing downstream can tell that a first one
+	// existed. Everything after this line is map-based and structurally unable
+	// to see it (lector r0 MF2).
+	if dup, found := duplicateStartupKey(raw2); found {
+		return secure, startupOutcome{Denied: reasonStartupDuplicateKey, RefusedParam: dup, Negotiated: out.Negotiated}, nil
+	}
 	check, ok := checkStartupParams(sm.Parameters)
 	if !ok {
 		// The REASON varies (a refused parameter, too many settings, an
