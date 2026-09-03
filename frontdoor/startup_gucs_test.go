@@ -779,3 +779,125 @@ func TestStartupGUCs_TheFoldIsPostgresFoldNotGos(t *testing.T) {
 			"target, which is the party that decides it does not exist", check.GUCs)
 	}
 }
+
+// row 3.1:carve-out — A CARVED-OUT NAME IS CHARGED WHEN SEEN, NOT WHEN FORWARDED.
+//
+// The FOURTH axis of one defect (lector r2 MF5). Duplicate detection needs two
+// separate things, and r1 fixed only the first: the name must be FOLDED — one
+// index, every site — and it must be CHARGED to that index when SEEN. The
+// options-derived client_encoding carve-out validated its value and continued
+// without charging anything, so a second spelling had no first occurrence to
+// collide with.
+//
+// Juliet's measurement is the signature, and this cell pins it in both
+// directions: before the fix the call returned ok=true WITH GUCS EMPTY —
+// accepted, and nothing recorded. The empty map is the evidence that the
+// recording never happened, which is stronger than the refusal alone.
+//
+// AND THE ONE THAT WORKED, WORKED BY ACCIDENT: application_name looked covered
+// only because its handling writes params["application_name"] for the cap and
+// echo, so a second spelling collided with an unrelated write. A guard that
+// functions as a side effect functions only where the side effect occurs — the
+// same shape as the r0 cell that passed because the ENGINE denied
+// client_encoding rather than because my guard worked. So both carved-out names
+// are driven here, not just the broken one.
+func TestStartupGUCs_ACarvedOutNameIsChargedWhenSeen(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, options string }{
+		{"client_encoding twice in options", "-c client_encoding=UTF8 -c CLIENT_ENCODING=UTF8"},
+		{"client_encoding twice, same spelling", "-c client_encoding=UTF8 -c client_encoding=UTF8"},
+		{"application_name twice in options", "-c application_name=a -c APPLICATION_NAME=b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			check, ok := checkStartupParams(map[string]string{
+				"user": "root", "database": "d", "options": tc.options,
+			})
+			if ok {
+				t.Fatalf("%q was ACCEPTED, with settings %v. A carved-out name that is validated and "+
+					"then dropped is still a name that was SEEN — and an empty settings map here is "+
+					"the evidence that nothing recorded it, so the second spelling had no first "+
+					"occurrence to collide with", tc.options, check.GUCs)
+			}
+			if check.Reason != reasonStartupDuplicateKey {
+				t.Errorf("refused as %q, want %q", check.Reason, reasonStartupDuplicateKey)
+			}
+		})
+	}
+
+	// POSITIVE CONTROL, because "refuses a repeat" and "refuses everything" look
+	// identical from the cases above: ONE carved-out name in options, plus an
+	// ordinary setting, still passes and still gets §3.1's handling.
+	params := map[string]string{
+		"user": "root", "database": "d",
+		"options": "-c client_encoding=UTF8 -c datestyle=ISO",
+	}
+	check, ok := checkStartupParams(params)
+	if !ok {
+		t.Fatalf("one client_encoding beside one ordinary setting was refused as %q (%s) — charging a "+
+			"name when it is seen must not turn a single occurrence into a duplicate",
+			check.Refused, check.Reason)
+	}
+	if _, collected := check.GUCs["client_encoding"]; collected {
+		t.Error("charging client_encoding to the presence index must not start FORWARDING it — " +
+			"recording that a name was seen and forwarding its value are different things")
+	}
+	if got := check.GUCs["datestyle"]; got != "ISO" {
+		t.Errorf("datestyle = %q, want ISO", got)
+	}
+}
+
+// THE NAME-HANDLING MATRIX, WITNESSED ROW BY ROW.
+//
+// params.go tabulates every special name against the rules that apply to it, to
+// close this class by enumeration rather than by waiting for a fifth instance.
+// A table in a comment is a claim; this is the cell that makes it one the suite
+// can check. Each row asserts the two columns a unit cell can see — what happens
+// to the name through `options`, and whether it ends up forwarded as a setting.
+//
+// (The `charged` column is witnessed by the duplicate cells above, which drive
+// every name through both sources; `canonical` by the mixed-case cell; and
+// `forwarded` for the carve-outs by the live cells against a real target.)
+func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
+	t.Parallel()
+	for _, row := range []struct {
+		name      string
+		viaOption string // the options spelling
+		refused   bool   // …is refused outright
+		collected bool   // …becomes a setting handed to the engine
+	}{
+		{"user", "-c user=someone", true, false},
+		{"database", "-c database=other", true, false},
+		{"options", "-c options=-c x=1", true, false},
+		{"replication", "-c replication=database", true, false},
+		{"_pq_.ext", "-c _pq_.ext=1", false, true},
+		{"application_name", "-c application_name=psql", false, false},
+		{"client_encoding", "-c client_encoding=UTF8", false, false},
+		{"datestyle", "-c datestyle=ISO", false, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			check, ok := checkStartupParams(map[string]string{
+				"user": "root", "database": "d", "options": row.viaOption,
+			})
+			if row.refused {
+				if ok {
+					t.Fatalf("%q was accepted through options (settings %v). The identity, the route "+
+						"and the protocol keywords are not settings; accepting a second spelling of "+
+						"one inside options would create two sources for one answer",
+						row.viaOption, check.GUCs)
+				}
+				return
+			}
+			if !ok {
+				t.Fatalf("%q was refused as %q (%s)", row.viaOption, check.Refused, check.Reason)
+			}
+			_, collected := check.GUCs[row.name]
+			if collected != row.collected {
+				t.Errorf("%q: collected=%v, want %v (settings %v). The matrix in params.go is the "+
+					"completeness argument for this whole class of defect; a row that does not hold "+
+					"makes it a comment rather than an argument", row.viaOption, collected, row.collected, check.GUCs)
+			}
+		})
+	}
+}

@@ -126,6 +126,50 @@ func canonicalizeCarvedOut(params map[string]string) (string, bool) {
 	return "", true
 }
 
+// THE NAME-HANDLING MATRIX — closing the class by ENUMERATION, not iteration.
+//
+// Four review findings in this feature were all "a name-handling rule applied
+// non-uniformly", each on a different axis: alias spelling (#71 MF1), arrival
+// path (#74 MF1), case (#74 MF4), presence-recording (#74 MF5). Fixing the
+// instance each round is how you get a fifth. So the rules are tabulated against
+// the names instead, and each cell is either uniform or DELIBERATELY different
+// with the reason stated.
+//
+//	name              folded  charged  canonical  forwarded  via options
+//	----------------  ------  -------  ---------  ---------  --------------------
+//	user              yes     yes      n/a        no         REFUSED (not a setting)
+//	database          yes     yes      n/a        no         REFUSED (not a setting)
+//	options           yes     yes      n/a        no         REFUSED (not a setting)
+//	replication       yes     yes      n/a        no         REFUSED (not a setting)
+//	_pq_.*            yes     yes      n/a        no         collected, target refuses
+//	application_name  yes     yes      YES        NO (§3.1)  §3.1 handling
+//	client_encoding   yes     yes      YES        NO (§3.1)  §3.1 handling
+//	any other name    yes     yes      n/a        YES        collected
+//
+// folded     — every "is this name X" goes through foldGUCName (ASCII, pg's own).
+// charged    — note() records the name when SEEN, before anything decides what
+//              happens to it, so duplicate detection does not depend on whether
+//              a value is later forwarded. THERE ARE NO "YES BY SIDE EFFECT"
+//              CELLS LEFT: application_name used to have one, and that accident
+//              is exactly where MF5 lived.
+// canonical  — a carved-out name is rewritten to its canonical spelling, because
+//              the cap, truncation and ParameterStatus echo read that exact key.
+//              The others need none: they are carried verbatim and the engine
+//              folds for admission.
+// forwarded  — user/database/options/replication are protocol keywords, not
+//              settings. The two carve-outs are §3.1's and deliberately never
+//              reach the target. Everything else is the point of Amendment 8.
+// via options — the four keywords are refused there because accepting a second
+//              spelling of the identity or the route would create two sources
+//              for one answer. `_pq_.*` is a startup-packet concept, so inside
+//              options it is just a GUC name and the TARGET refuses it, which is
+//              what a direct client would also get.
+//
+// Repeats are refused for EVERY row, in every combination — twice at top level
+// (the raw wire preflight, before pgproto3 collapses the pairs into a map),
+// twice inside options, and once in each — because all three paths charge the
+// same folded index.
+
 // startupGUCLimit caps how many settings one startup packet may carry
 // (Amendment 8). It bounds the work an unauthenticated peer can ask for before
 // it has presented anything: each admitted setting is a round trip to the
@@ -198,13 +242,34 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	// packet whose meaning depends on which the parser happened to keep.
 	gucs := map[string]string{}
 	seen := map[string]string{}
-	add := func(key, value string) (string, denialReason, bool) {
-		lower := foldGUCName(key)
-		if _, dup := seen[lower]; dup {
+
+	// note CHARGES a name to the presence index, and it is the only thing that
+	// does. Every name the rules depend on passes through it once, at the moment
+	// it is SEEN — whether it is collected as a setting, governed by §3.1, or
+	// refused a moment later.
+	//
+	// DUPLICATE DETECTION NEEDS TWO THINGS, and MF5 was the second one missing
+	// while the first was fixed: the name must be FOLDED (one index, r1 MF4) and
+	// it must be CHARGED when seen. The options-derived client_encoding carve-out
+	// validated its value and continued without charging anything, so
+	// `-c client_encoding=UTF8 -c CLIENT_ENCODING=UTF8` was accepted while the
+	// matrix said a repeat is refused.
+	//
+	// AND THE ONE THAT WORKED, WORKED BY ACCIDENT. application_name appeared to
+	// be covered only because its handling writes params["application_name"] for
+	// the cap and echo, so a second spelling collided with that unrelated write.
+	// A guard that functions as a side effect functions only where the side
+	// effect happens to occur — the same shape as the r0 cell that passed
+	// because the ENGINE denied client_encoding rather than because the guard
+	// worked. Charging is now explicit and independent of whether a value is
+	// ever forwarded: recording that a name was seen and forwarding its value
+	// are different things.
+	note := func(key string) (string, denialReason, bool) {
+		folded := foldGUCName(key)
+		if _, dup := seen[folded]; dup {
 			return key, reasonStartupDuplicateKey, false
 		}
-		seen[lower] = key
-		gucs[key] = value
+		seen[folded] = key
 		return "", "", true
 	}
 
@@ -224,13 +289,17 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 
 	for _, k := range names {
 		v := params[k]
+		// CHARGED FIRST, whatever happens to it next. A name is seen here
+		// whether it is a setting, one §3.1 governs, or one about to be refused.
+		if bad, why, ok := note(k); !ok {
+			return startupCheck{Refused: bad, Reason: why}, false
+		}
 		switch startupParamPolicy(k) {
 		case paramRefuse:
 			return startupCheck{Refused: k, Reason: reasonStartupParamRefus}, false
 		case paramCollect:
-			if bad, why, ok := add(k, v); !ok {
-				return startupCheck{Refused: bad, Reason: why}, false
-			}
+			// Already charged above; only the value is recorded here.
+			gucs[k] = v
 			continue
 		case paramNegotiate, paramAccept:
 		}
@@ -285,6 +354,12 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	// WITHDREW THE SESSION, so the same value that works at top level killed the
 	// connection here.
 	for _, kv := range optioned {
+		// CHARGED FIRST, for the same reason and by the same function as a
+		// top-level name. This is the whole of MF5's fix: the carve-out below
+		// decides what HAPPENS to the name, never whether it was seen.
+		if bad, why, ok := note(kv.name); !ok {
+			return startupCheck{Refused: bad, Reason: why}, false
+		}
 		switch startupParamPolicy(kv.name) {
 		case paramAccept:
 			// §3.1's own handling, exactly as the top-level spelling gets.
@@ -293,14 +368,11 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 				// Capped, truncated and echoed by normalizeStartupParams, and
 				// never forwarded — reached by writing it where the top-level
 				// value lives rather than by copying the rule.
-				if _, both := params["application_name"]; both {
-					return startupCheck{Refused: kv.name, Reason: reasonStartupDuplicateKey}, false
-				}
 				params["application_name"] = kv.value
 			case "client_encoding":
-				if _, both := params["client_encoding"]; both {
-					return startupCheck{Refused: kv.name, Reason: reasonStartupDuplicateKey}, false
-				}
+				// Validated and NOT forwarded. It is still charged above: a name
+				// that is deliberately dropped was still asked for, and a client
+				// asking twice is still a client that named one thing twice.
 				if !strings.EqualFold(strings.TrimSpace(kv.value), "UTF8") &&
 					!strings.EqualFold(strings.TrimSpace(kv.value), "UTF-8") {
 					return startupCheck{Refused: kv.name, Reason: reasonStartupParamRefus}, false
@@ -321,9 +393,10 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 			return startupCheck{Refused: kv.name, Reason: reasonStartupParamRefus}, false
 		case paramNegotiate, paramCollect:
 		}
-		if bad, why, ok := add(kv.name, kv.value); !ok {
-			return startupCheck{Refused: bad, Reason: why}, false
-		}
+		// Already charged at the top of this iteration; only the value is
+		// recorded here. Charging twice would make every options-derived setting
+		// look like its own duplicate.
+		gucs[kv.name] = kv.value
 	}
 
 	// The cap is applied to what was COLLECTED, not to the parameter count: the
