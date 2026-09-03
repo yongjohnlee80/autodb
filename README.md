@@ -393,9 +393,29 @@ Everything hangs off the leader key:
 | `SPC c` `SPC w` `SPC u` | connections, workspaces, users                                    |
 | `SPC H`                 | script history — who ran what, when, against which connection     |
 | `SPC n` `SPC s`         | new note / save note (per-workspace `.sql` files)                 |
+| `1`–`9`                 | in the explorer, jump to the connection wearing that number        |
 | `/` `n` `N`             | search the focused panel, next/previous match                     |
 | `SPC z` / `Ctrl-w z`    | zoom the focused pane                                             |
 | `SPC x` / `SPC X`       | disconnect-reconnect / restart the backend (admin; terminal only) |
+
+Explorer rows carry both numbers you need:
+
+```
+▾ Monstercat (4)
+  ▾ connections
+    ▸ [1] lm-local-test    postgres   (ID:7)
+      [2] gold-local-test  postgres  (ID:12)
+```
+
+`[1]` is the key that selects the row. `(ID:7)` is the connection id — the
+number `SPC u` → `g` ("grant on conn") asks for. Past the ninth connection a
+row shows `[·]`: it still displays its id, there is just no digit left to bind.
+
+`y` copies to the **system clipboard** (OSC 52, so it works over SSH and inside
+tmux) and to the editor register. A personal access token is shown **once** —
+the server stores only a SHA-256 — so the reveal float names its `y`, and if the
+clipboard is unavailable it says so and stays open rather than closing over a
+credential you never captured.
 | `SPC A`                 | about: build, backend, and where state lives                      |
 | `Ctrl-q`                | quit (the shared server keeps running)                            |
 

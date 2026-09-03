@@ -51,6 +51,7 @@ func (m *Model) currentHints() (title string, hs []keyHint) {
 			{"j/k", "down / up"}, {"l", "expand"}, {"h", "collapse / parent"},
 			{"g/G", "first / last"}, {"Enter", "scaffold a query for the table"},
 			{"a", "add a connection / note here"}, {"d", "delete the note"},
+			{"1-9", "jump to the connection wearing that number"},
 			{"/", "search"}, {"n/N", "next / previous match"},
 			{"SPC", "commands"},
 		}
@@ -77,7 +78,7 @@ func (m *Model) currentHints() (title string, hs []keyHint) {
 func (m *Model) openHints() {
 	title, hs := m.currentHints()
 	body := &hintPanel{hints: hs}
-	body.float = m.openFloatAt(title+" — keys", body, hintWidth, widget.BottomRight)
+	body.float = m.openFloatAt(title+" — keys", body, widget.BottomRight)
 }
 
 // hintPanel renders "key  label" rows.

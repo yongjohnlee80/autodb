@@ -411,11 +411,11 @@ func TestUIFullFlow(t *testing.T) {
 	h.ctrl('j')
 	h.keys("j") // vim motion inside the results table (golib List)
 	h.keys("v")
-	h.waitFor("results focused", "y: copy value")
+	h.waitFor("results focused", "y: copy to clipboard")
 	h.waitFor("second row selected", "beta") // j moved the cursor before v
 	// The row inspector is a read-only float: q closes it, the same as Esc.
 	h.key('q')
-	h.waitGone("row inspector dismissed by q", "y: copy value")
+	h.waitGone("row inspector dismissed by q", "y: copy to clipboard")
 	h.ctrl('k')
 
 	// 5c-2. Script history is a read-only LIST — q closes it. Enter opens the

@@ -35,15 +35,26 @@ type managerAction[T any] struct {
 // manager is a generic list-with-actions float body.
 type manager[T any] struct {
 	widget.Base
-	model   *Model
-	ctx     *tui.Context
-	table   *widget.Table[T]
-	items   []T
+	model *Model
+	ctx   *tui.Context
+	table *widget.Table[T]
+	all   []T // everything the last load returned
+	items []T // what the table SHOWS — selection indexes into THIS, so a
+	//            filtered manager must narrow items, not just the table,
+	//            or a row action reads the wrong record
 	hint    *widget.Text
 	actions []managerAction[T]
-	load    func(c context.Context, b *Bound) ([]T, error)
-	float   *widget.Float
-	bound   *Bound // pinned at OPEN: every load, action, and nested form
+	// filter narrows all -> items. nil shows everything.
+	filter func([]T) []T
+	// dynLabel overrides an action's footer label from live state (how
+	// many rows the filter is hiding). Keyed by the action's rune so
+	// managerAction keeps its positional literals. Returning "" withdraws
+	// the key from the footer and the `?` card without unbinding it.
+	dynLabel map[rune]func() string
+
+	load  func(c context.Context, b *Bound) ([]T, error)
+	float *widget.Float
+	bound *Bound // pinned at OPEN: every load, action, and nested form
 	//              submit runs in this epoch or is refused — a form held
 	//              open across a reconnect can't mutate a stale ID on the
 	//              replacement server
@@ -61,9 +72,13 @@ func newManager[T any](m *Model, cols []widget.TableColumn[T],
 		load:    load,
 		bound:   m.session.Bind(), // the epoch this manager view belongs to
 	}
-	mg.hint = widget.NewText(strings.Join(hintCells(mg.hints()), "  "),
+	mg.hint = widget.NewText(mg.hintLine(),
 		widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted)),
-		widget.WithWrapMode(widget.Wrap)) // never truncate the key list
+		// The wrap is the NET, not the normal case: Layout widens the
+		// modal to fit this line whenever the terminal allows it, and a
+		// truncated key list is worse than a wrapped one on a terminal
+		// too narrow for either.
+		widget.WithWrapMode(widget.Wrap))
 	return mg
 }
 
@@ -72,9 +87,34 @@ func newManager[T any](m *Model, cols []widget.TableColumn[T],
 func (g *manager[T]) hints() []keyHint {
 	out := make([]keyHint, 0, len(g.actions)+1)
 	for _, a := range g.actions {
-		out = append(out, keyHint{key: string(a.key), label: a.label})
+		label := a.label
+		if dyn, ok := g.dynLabel[a.key]; ok {
+			label = dyn()
+		}
+		if label == "" {
+			continue // not on offer in this state
+		}
+		out = append(out, keyHint{key: string(a.key), label: label})
 	}
 	return append(out, keyHint{key: "q/Esc", label: "close"})
+}
+
+// hintLine is the footer as one line. Layout measures THIS to decide how
+// wide the modal has to be, and the Text widget renders it — one string,
+// so the width we reserve is the width we draw.
+func (g *manager[T]) hintLine() string {
+	return strings.Join(hintCells(g.hints()), "  ")
+}
+
+// applyFilter recomputes the visible rows from the last load. Selection
+// indexes into items, so this is what keeps a row action honest.
+func (g *manager[T]) applyFilter() {
+	g.items = g.all
+	if g.filter != nil {
+		g.items = g.filter(g.all)
+	}
+	g.table.SetItems(g.items)
+	g.hint.SetText(g.hintLine())
 }
 
 func (g *manager[T]) AcceptsFocus() bool { return true }
@@ -104,20 +144,41 @@ func (g *manager[T]) Reload() {
 				return // an older fetch settling late; a newer set is shown
 			}
 			g.applied = seq
-			g.items = rows
-			g.table.SetItems(rows)
+			g.all = rows
+			g.applyFilter()
 			g.MarkDirty()
 		}}, nil
 	})
 }
 
+// managerWidthFor decides a manager modal's column count: a share of the
+// terminal, widened when the key footer needs more to stay on ONE line.
+//
+// The users footer is ~111 columns against the old fixed 94, so it wrapped
+// on every terminal — including Johno's ultrawide, which is what made the
+// bug visible: if it wraps there it is worse everywhere else. Each wrapped
+// line also costs a table row, because tableH is h minus the footer's
+// height. Measuring the footer rather than hardcoding a wider constant
+// keeps this true as actions are added to any manager.
+//
+// availW still wins: on a terminal too narrow for the footer the modal
+// takes what it has and the Wrap mode absorbs the rest. Wrapping is the
+// NET, not the normal case — and a truncated key list would be worse.
+func managerWidthFor(availW, hintW int) int {
+	w := modalSpan(availW, managerPct, managerMinW, managerMaxW)
+	if hintW > w {
+		w = min(hintW, availW)
+	}
+	return w
+}
+
 func (g *manager[T]) Layout(c tui.Constraints) tui.Size {
-	w := min(c.MaxW, managerWidth-2)
+	w := managerWidthFor(c.MaxW, g.ctx.StringWidth(g.hintLine()))
 	// The key list wraps rather than truncating (Johno, M6 manual
 	// testing: the users panel cut off "g:grant…"), so ask it how tall
 	// it needs to be and give the table the rest.
 	hintH := max(g.ctx.LayoutChild(g.hint, tui.Constraints{MaxW: w, MaxH: 4}).H, 1)
-	h := min(c.MaxH, 15+hintH)
+	h := modalSpan(c.MaxH, managerHPct, managerMinH+hintH, managerMaxH+hintH)
 	tableH := max(h-hintH, 1)
 	g.ctx.LayoutChild(g.table, tui.Tight(tui.Size{W: w, H: tableH}))
 	g.ctx.PlaceChild(g.table, tui.Rect{X: 0, Y: 0, W: w, H: tableH})
@@ -202,7 +263,7 @@ func (m *Model) openConnManager() {
 				}
 			}},
 		})
-	g.float = m.openFloat("connections", g, managerWidth)
+	g.float = m.openFloat("connections", g)
 }
 
 func (m *Model) openConnForm(g *manager[ConnInfo]) {
@@ -303,7 +364,7 @@ func (m *Model) openWorkspaceManager() {
 				})
 			}},
 		})
-	g.float = m.openFloat("workspaces", g, managerWidth)
+	g.float = m.openFloat("workspaces", g)
 }
 
 // --- users -------------------------------------------------------------------------
@@ -416,7 +477,7 @@ func (m *Model) openUserManager() {
 				}
 			}},
 		})
-	g.float = m.openFloat("users", g, managerWidth)
+	g.float = m.openFloat("users", g)
 }
 
 // --- ip allowlists ------------------------------------------------------------------
@@ -468,7 +529,7 @@ func (m *Model) openAllowlistManager() {
 				})
 			}},
 		})
-	g.float = m.openFloat("ip allowlist (global)", g, managerWidth)
+	g.float = m.openFloat("ip allowlist (global)", g)
 }
 
 // openUserIPManager is the per-user allowlist view (ADR-0075 §4 second
@@ -516,7 +577,7 @@ func (m *Model) openUserIPManager(userID int64, who string) {
 				}
 			}},
 		})
-	g.float = m.openFloat("allowed IPs — "+who, g, managerWidth)
+	g.float = m.openFloat("allowed IPs — "+who, g)
 }
 
 // openPATManager lists, creates and revokes personal access tokens.
@@ -549,6 +610,7 @@ func (m *Model) openPATManager(userID int64, who string) {
 		}},
 	}
 	var g *manager[PATRow]
+	showRevoked := false
 	g = newManager(m, cols,
 		func(c context.Context, b *Bound) ([]PATRow, error) { return b.PATs(c, userID) },
 		[]managerAction[PATRow]{
@@ -572,8 +634,57 @@ func (m *Model) openPATManager(userID int64, who string) {
 					{'n', "keep it", func() {}},
 				})
 			}},
+			// Revoked tokens are history, not choices: they accumulate
+			// for the life of the account and pushed the live ones off
+			// the panel. Hidden by default, one key to see them.
+			//
+			// Johno asked to age them out after 30 days; that is not
+			// implementable — meta.PATRevoked is a BOOL (core/meta/
+			// entities.go), there is no revoked_at anywhere in the
+			// schema, the service, the RPC, or PATRow, and deriving one
+			// from expires_at is wrong in both directions (a token
+			// revoked years before expiry would linger; one revoked with
+			// a far-future expiry would never age out).
+			{'.', "show revoked", func(PATRow, bool) {
+				showRevoked = !showRevoked
+				g.applyFilter()
+				g.MarkDirty()
+			}},
 		})
-	g.float = m.openFloat("access tokens — "+who, g, managerWidth)
+	g.filter = func(rows []PATRow) []PATRow { return visiblePATs(rows, showRevoked) }
+	g.dynLabel = map[rune]func() string{
+		'.': func() string { return revokedToggleLabel(g.all, showRevoked) },
+	}
+	g.float = m.openFloat("access tokens — "+who, g)
+}
+
+// visiblePATs applies the revoked filter: revoked tokens are history, not
+// choices, and they accumulate for the life of the account.
+func visiblePATs(rows []PATRow, showRevoked bool) []PATRow {
+	if showRevoked {
+		return rows
+	}
+	out := make([]PATRow, 0, len(rows))
+	for _, r := range rows {
+		if !r.Revoked {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// revokedToggleLabel names the `.` key from live state. It returns "" when
+// there is nothing to reveal, which withdraws the key from the footer
+// rather than offering a toggle that would change nothing.
+func revokedToggleLabel(rows []PATRow, showRevoked bool) string {
+	if showRevoked {
+		return "hide revoked"
+	}
+	hidden := len(rows) - activePATs(rows)
+	if hidden == 0 {
+		return ""
+	}
+	return fmt.Sprintf("show revoked (%d hidden)", hidden)
 }
 
 // activePATs counts the rows that consume cap. auth bounds ACTIVE tokens
@@ -686,11 +797,18 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, own []UserIPRow, activ
 }
 
 // revealPATSecret shows a freshly minted token. The store keeps only a
-// SHA-256, so this value is unrecoverable the moment the float closes — the
-// title says so, and `y` copies the secret ALONE (not the surrounding text)
-// into the editor register.
+// SHA-256 (core/auth/pat.go patHash), so this value is unrecoverable the
+// moment the float closes — Johno ratified that show-once property rather
+// than store PATs reversibly, which would mean a database dump plus the
+// master key impersonates every user.
+//
+// That makes this float the ONLY route a token ever takes off the screen,
+// so it names its key: the title used to advertise none, and a user who
+// dismissed without knowing `y` had lost the credential for good. `y`
+// copies the secret ALONE — not the title, not the surrounding text — and
+// openSecretFloat keeps the float open if the clipboard write fails.
 func (m *Model) revealPATSecret(out PATSecret) {
-	m.openValueFloat("token "+out.Name+" — COPY IT NOW, it is never shown again"+
+	m.openSecretFloat("token "+out.Name+" — y: copy NOW, never shown again"+
 		"; expires "+shortStamp(out.ExpiresAt), out.Secret)
 }
 
