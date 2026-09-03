@@ -128,47 +128,58 @@ func canonicalizeCarvedOut(params map[string]string) (string, bool) {
 
 // THE NAME-HANDLING MATRIX — closing the class by ENUMERATION, not iteration.
 //
-// Four review findings in this feature were all "a name-handling rule applied
+// Five review findings in this feature were all "a name-handling rule applied
 // non-uniformly", each on a different axis: alias spelling (#71 MF1), arrival
-// path (#74 MF1), case (#74 MF4), presence-recording (#74 MF5). Fixing the
-// instance each round is how you get a fifth. So the rules are tabulated against
-// the names instead, and each cell is either uniform or DELIBERATELY different
-// with the reason stated.
+// path (#74 MF1), case (#74 MF4), presence-recording (#74 MF5), and the
+// recognition/indexing conflation this table itself first got wrong. Fixing the
+// instance each round is how you get a sixth. So the rules are tabulated against
+// the names, and each cell is either uniform or DELIBERATELY different with the
+// reason stated.
 //
-//	name              folded  charged  canonical  forwarded  via options
-//	----------------  ------  -------  ---------  ---------  --------------------
-//	user              yes     yes      n/a        no         REFUSED (not a setting)
-//	database          yes     yes      n/a        no         REFUSED (not a setting)
-//	options           yes     yes      n/a        no         REFUSED (not a setting)
-//	replication       yes     yes      n/a        no         REFUSED (not a setting)
-//	_pq_.*            yes     yes      n/a        no         collected, target refuses
-//	application_name  yes     yes      YES        NO (§3.1)  §3.1 handling
-//	client_encoding   yes     yes      YES        NO (§3.1)  §3.1 handling
-//	any other name    yes     yes      n/a        YES        collected
+//	name              recognised  indexed  canonical  forwarded  via options
+//	----------------  ----------  -------  ---------  ---------  ---------------------
+//	user              byte-wise   folded   n/a        no         REFUSED (not a setting)
+//	database          byte-wise   folded   n/a        no         REFUSED (not a setting)
+//	options           byte-wise   folded   n/a        no         REFUSED (not a setting)
+//	replication       byte-wise   folded   n/a        no         REFUSED (not a setting)
+//	_pq_.*            byte-wise   folded   n/a        no         collected (a GUC there)
+//	application_name  FOLDED      folded   YES        NO (§3.1)  §3.1 handling
+//	client_encoding   FOLDED      folded   YES        NO (§3.1)  §3.1 handling
+//	any other name    FOLDED      folded   n/a        YES        collected
 //
-// folded     — every "is this name X" goes through foldGUCName (ASCII, pg's own).
-// charged    — note() records the name when SEEN, before anything decides what
-//              happens to it, so duplicate detection does not depend on whether
-//              a value is later forwarded. THERE ARE NO "YES BY SIDE EFFECT"
-//              CELLS LEFT: application_name used to have one, and that accident
-//              is exactly where MF5 lived.
+// recognised — "is this name that name". BYTE-WISE for protocol-level names,
+//              because the target matches them with strcmp and a case-sensitive
+//              `_pq_.` prefix; FOLDED for GUC names, because the target folds
+//              those. A mixed-case protocol key is therefore NOT that key: it
+//              is an ordinary setting, and the target says so.
+// indexed    — "have I seen this name". FOLDS FOR EVERYTHING, including both
+//              spellings of `_pq_.`, so two spellings of one name always
+//              collide. This is a SEPARATE operation from recognition, and
+//              conflating the two is the defect this row exists to prevent:
+//              folding recognition would make `DataBase` the database where the
+//              target says otherwise; not folding the index would let two
+//              spellings of `user` stop colliding.
 // canonical  — a carved-out name is rewritten to its canonical spelling, because
 //              the cap, truncation and ParameterStatus echo read that exact key.
-//              The others need none: they are carried verbatim and the engine
-//              folds for admission.
-// forwarded  — user/database/options/replication are protocol keywords, not
-//              settings. The two carve-outs are §3.1's and deliberately never
-//              reach the target. Everything else is the point of Amendment 8.
-// via options — the four keywords are refused there because accepting a second
-//              spelling of the identity or the route would create two sources
-//              for one answer. `_pq_.*` is a startup-packet concept, so inside
-//              options it is just a GUC name and the TARGET refuses it, which is
-//              what a direct client would also get.
+//              The others need none: carried verbatim, and the engine folds for
+//              admission.
+// forwarded  — the protocol keywords are not settings. The two carve-outs are
+//              §3.1's and deliberately never reach the target. Everything else
+//              is the point of Amendment 8.
+// via options — the four keywords are refused there: accepting a second spelling
+//              of the identity or the route would create two sources for one
+//              answer. `_pq_.*` inside options is not a protocol request at all,
+//              so it is collected — and MEASURED, PostgreSQL ACCEPTS it, because
+//              a dotted name is a customizable placeholder GUC rather than an
+//              unrecognized one. (This row said "the target refuses it" until the
+//              probe showed otherwise; the table is only worth having if its
+//              cells are measured.)
 //
-// Repeats are refused for EVERY row, in every combination — twice at top level
-// (the raw wire preflight, before pgproto3 collapses the pairs into a map),
-// twice inside options, and once in each — because all three paths charge the
-// same folded index.
+// charged — every name reaches note() before anything decides what happens to
+// it, so there are NO "yes by side effect" cells: that accident is where MF5
+// lived. Repeats are refused for every row in every combination — twice at top
+// level (the raw wire preflight, before pgproto3 collapses the pairs into a
+// map), twice inside options, and once in each.
 
 // startupGUCLimit caps how many settings one startup packet may carry
 // (Amendment 8). It bounds the work an unauthenticated peer can ask for before
@@ -304,7 +315,7 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 		case paramNegotiate, paramAccept:
 		}
 		// The two parameters with VALUE conditions, not just name ones.
-		switch foldGUCName(k) {
+		switch specialName(k) {
 		case "client_encoding":
 			// UTF8 only: autodb does not transcode, and the byte-fidelity
 			// claim the relay makes is only honest if both ends agree on the
@@ -363,7 +374,7 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 		switch startupParamPolicy(kv.name) {
 		case paramAccept:
 			// §3.1's own handling, exactly as the top-level spelling gets.
-			switch foldGUCName(kv.name) {
+			switch specialName(kv.name) {
 			case "application_name":
 				// Capped, truncated and echoed by normalizeStartupParams, and
 				// never forwarded — reached by writing it where the top-level
@@ -649,12 +660,62 @@ func normalizeStartupParams(params map[string]string) []paramNote {
 	return notes
 }
 
+// specialName answers "which of §3.1's names is this?", and it is the ONE place
+// that question is answered.
+//
+// TWO OPERATIONS, DELIBERATELY DIFFERENT, because PostgreSQL makes them
+// different (verified below, not inferred):
+//
+//   - RECOGNITION is BYTE-WISE for protocol-level names. PostgreSQL's
+//     ProcessStartupPacket matches `user`, `database`, `options` and
+//     `replication` with strcmp and `_pq_.` with a case-sensitive prefix; only
+//     what falls through reaches the case-insensitive GUC lookup. So
+//     `DataBase=x` is not the database, it is a GUC named `DataBase`.
+//   - The two CARVE-OUTS are GUC names, so they are recognised through the FOLD:
+//     `Application_Name` IS application_name to the target, and §3.1 governs it.
+//
+// And separately from both, the DUPLICATE-PRESENCE INDEX folds EVERYTHING (see
+// note()). Those coexist: recognition asks "is this that name", indexing asks
+// "have I seen this name". Folding recognition would make `DataBase` the
+// database where the target says otherwise; NOT folding the index would let two
+// spellings of `user` stop colliding.
+//
+// MEASURED against PostgreSQL 17, driven to completion against a trust-auth
+// server because these parameters are consumed AFTER authentication and a
+// pre-auth probe cannot see them:
+//
+//	database=nope_xyz     -> 3D000 database "nope_xyz" does not exist
+//	DataBase=nope_xyz     -> 42704 unrecognized configuration parameter "DataBase"
+//	options=-c ds=BOGUS   -> 22023 invalid value for parameter "DateStyle"
+//	Options=-c ds=BOGUS   -> 42704 unrecognized configuration parameter "Options"
+//	replication=bogus     -> 22023 invalid value for parameter "replication"
+//	Replication=bogus     -> 42704 unrecognized configuration parameter "Replication"
+//	User=postgres         -> 28000 no PostgreSQL user name specified in startup packet
+//	datestyle / DATESTYLE -> both 22023 invalid value for parameter "DateStyle"  (GUCs fold)
+//	_pq_.foo=1            -> NegotiateProtocolVersion names it
+//	_PQ_.foo=1            -> no negotiation; accepted as an ordinary GUC
+func specialName(name string) string {
+	// Byte-wise first, exactly as the target does it.
+	if strings.HasPrefix(name, "_pq_.") {
+		return "_pq_."
+	}
+	switch name {
+	case "user", "database", "options", "replication":
+		return name
+	}
+	// Then the GUC names §3.1 governs, through the fold.
+	switch folded := foldGUCName(name); folded {
+	case "application_name", "client_encoding":
+		return folded
+	}
+	return ""
+}
+
 // startupParamPolicy classifies one parameter NAME.
 func startupParamPolicy(name string) startupParamDecision {
-	if strings.HasPrefix(name, "_pq_.") {
+	switch specialName(name) {
+	case "_pq_.":
 		return paramNegotiate
-	}
-	switch foldGUCName(name) {
 	case "user", "database", "application_name", "client_encoding", "options":
 		return paramAccept
 	case "replication":
@@ -662,9 +723,8 @@ func startupParamPolicy(name string) startupParamDecision {
 		// protocol mode entirely — not a setting the engine could admit — and
 		// this surface relays statements.
 		return paramRefuse
-	default:
-		// Amendment 8: a setting. The engine judges it; refusing here would be
-		// this file holding a second opinion about the denylist.
-		return paramCollect
 	}
+	// Amendment 8: a setting. The engine judges it; refusing here would be this
+	// file holding a second opinion about the denylist.
+	return paramCollect
 }

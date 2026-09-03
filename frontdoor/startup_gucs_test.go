@@ -847,57 +847,199 @@ func TestStartupGUCs_ACarvedOutNameIsChargedWhenSeen(t *testing.T) {
 	}
 }
 
-// THE NAME-HANDLING MATRIX, WITNESSED ROW BY ROW.
+// THE NAME-HANDLING MATRIX, WITNESSED ROW BY ROW — EVERY COLUMN.
 //
-// params.go tabulates every special name against the rules that apply to it, to
-// close this class by enumeration rather than by waiting for a fifth instance.
-// A table in a comment is a claim; this is the cell that makes it one the suite
-// can check. Each row asserts the two columns a unit cell can see — what happens
-// to the name through `options`, and whether it ends up forwarded as a setting.
+// params.go tabulates every special name against every rule, to close this class
+// by enumeration rather than by waiting for a sixth instance. A table in a
+// comment is a claim; this is what makes it one the suite checks.
 //
-// (The `charged` column is witnessed by the duplicate cells above, which drive
-// every name through both sources; `canonical` by the mixed-case cell; and
-// `forwarded` for the carve-outs by the live cells against a real target.)
+// THE FIRST VERSION OF THIS CELL WAS THE FAILURE MODE THE TABLE EXISTS TO
+// PREVENT, one level up: it asserted two columns while the table claimed five,
+// and delegated the rest to cells that drove three names out of eight. A
+// completeness argument whose own verifier is incomplete is worth less than no
+// argument, because it invites trust it has not earned (lector r3). So every
+// column is driven here, for every row.
 func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 	t.Parallel()
 	for _, row := range []struct {
 		name      string
-		viaOption string // the options spelling
-		refused   bool   // …is refused outright
-		collected bool   // …becomes a setting handed to the engine
+		mixed     string // a mixed-case spelling of the same name
+		viaOption string
+		// RECOGNITION, per spelling, which is the whole point of the column:
+		// what §3.1 name is this, written this way? "" means "not one of them —
+		// an ordinary setting". A byte-wise name loses its identity when the case
+		// changes; a folded one keeps it; an ordinary setting never had one.
+		asCanonical   string
+		asMixed       string
+		optionRefused bool // the options spelling is refused outright
+		collected     bool // it becomes a setting handed to the engine
 	}{
-		{"user", "-c user=someone", true, false},
-		{"database", "-c database=other", true, false},
-		{"options", "-c options=-c x=1", true, false},
-		{"replication", "-c replication=database", true, false},
-		{"_pq_.ext", "-c _pq_.ext=1", false, true},
-		{"application_name", "-c application_name=psql", false, false},
-		{"client_encoding", "-c client_encoding=UTF8", false, false},
-		{"datestyle", "-c datestyle=ISO", false, true},
+		{"user", "User", "-c user=someone", "user", "", true, false},
+		{"database", "DataBase", "-c database=other", "database", "", true, false},
+		{"options", "Options", "-c options=-c x=1", "options", "", true, false},
+		{"replication", "Replication", "-c replication=database", "replication", "", true, false},
+		{"_pq_.ext", "_PQ_.ext", "-c _pq_.ext=1", "_pq_.", "", false, true},
+		{"application_name", "Application_Name", "-c application_name=psql", "application_name", "application_name", false, false},
+		{"client_encoding", "Client_Encoding", "-c client_encoding=UTF8", "client_encoding", "client_encoding", false, false},
+		{"datestyle", "DateStyle", "-c datestyle=ISO", "", "", false, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
+
+			// COLUMN: recognised, both spellings. Which §3.1 name this is, and
+			// whether the answer survives a change of case, is the TARGET's
+			// answer, not ours.
+			if got := specialName(row.name); got != row.asCanonical {
+				t.Errorf("specialName(%q) = %q, want %q", row.name, got, row.asCanonical)
+			}
+			if got := specialName(row.mixed); got != row.asMixed {
+				t.Errorf("specialName(%q) = %q, want %q — PostgreSQL matches the protocol-level names "+
+					"BYTE-WISE (strcmp, and a case-sensitive _pq_. prefix) and folds only GUC names. "+
+					"Recognising a mixed-case protocol key as that key would make it mean something "+
+					"here that it does not mean at the target: measured, `DataBase=x` raises "+
+					"`unrecognized configuration parameter \"DataBase\"` while `database=x` raises "+
+					"`database \"x\" does not exist`", row.mixed, got, row.asMixed)
+			}
+
+			// COLUMN: indexed. Two spellings of ONE name always collide, whatever
+			// recognition decides — a separate operation, and conflating the two
+			// is the defect this row exists to prevent.
+			// [4:] because duplicateStartupKey reads the message BODY — the
+			// version word onward — and startupPacketPairs builds the framed
+			// packet with its length prefix. Passing the whole packet made every
+			// row report "did not collide", which is what a cell looks like when
+			// it is reading the wrong bytes rather than measuring the wrong thing.
+			raw := startupPacketPairs(protocolVersion30, [][2]string{
+				{"user", "root"}, {"database", "d"},
+				{row.name, "a"}, {row.mixed, "b"},
+			})[4:]
+			if dup, found := duplicateStartupKey(raw); !found {
+				t.Errorf("%q and %q did not collide in the presence index. The index FOLDS for "+
+					"everything, including names recognised byte-wise: recognition asks whether this "+
+					"is that name, indexing asks whether it has been seen", row.name, row.mixed)
+			} else if foldGUCName(dup) != foldGUCName(row.name) {
+				t.Errorf("the collision named %q, want a spelling of %q", dup, row.name)
+			}
+
+			// COLUMNS: via options, forwarded.
 			check, ok := checkStartupParams(map[string]string{
 				"user": "root", "database": "d", "options": row.viaOption,
 			})
-			if row.refused {
+			if row.optionRefused {
 				if ok {
 					t.Fatalf("%q was accepted through options (settings %v). The identity, the route "+
 						"and the protocol keywords are not settings; accepting a second spelling of "+
 						"one inside options would create two sources for one answer",
 						row.viaOption, check.GUCs)
 				}
-				return
+			} else {
+				if !ok {
+					t.Fatalf("%q was refused as %q (%s)", row.viaOption, check.Refused, check.Reason)
+				}
+				if _, collected := check.GUCs[row.name]; collected != row.collected {
+					t.Errorf("%q: collected=%v, want %v (settings %v)",
+						row.viaOption, !row.collected, row.collected, check.GUCs)
+				}
 			}
+
+			// COLUMN: canonical. A carved-out name is rewritten to its canonical
+			// spelling; every other row's key is left exactly as the client wrote
+			// it, because the engine folds for admission and the target decides.
+			params := map[string]string{"user": "root", "database": "d"}
+			if row.name != "user" && row.name != "database" {
+				params[row.mixed] = valueFor(row.name)
+			} else {
+				params[row.name] = "root"
+			}
+			check, ok = checkStartupParams(params)
 			if !ok {
-				t.Fatalf("%q was refused as %q (%s)", row.viaOption, check.Refused, check.Reason)
+				t.Fatalf("a lone %q was refused as %q (%s)", row.mixed, check.Refused, check.Reason)
 			}
-			_, collected := check.GUCs[row.name]
-			if collected != row.collected {
-				t.Errorf("%q: collected=%v, want %v (settings %v). The matrix in params.go is the "+
-					"completeness argument for this whole class of defect; a row that does not hold "+
-					"makes it a comment rather than an argument", row.viaOption, collected, row.collected, check.GUCs)
+			switch {
+			case carvedOutNames[row.asCanonical]:
+				// A carve-out: rewritten, and the odd spelling is gone.
+				if _, still := params[row.mixed]; still && row.mixed != row.name {
+					t.Errorf("%q survives in the map beside its canonical spelling; a later exact "+
+						"lookup could still find the wrong one", row.mixed)
+				}
+				if _, canon := params[row.name]; !canon {
+					t.Errorf("%q was not rewritten to %q — the cap, the truncation and the "+
+						"ParameterStatus echo all read that exact key, so a spelling that never "+
+						"reaches it is accepted and then silently ignored", row.mixed, row.name)
+				}
+			default:
+				// Not rewritten: the client's spelling is what the target sees.
+				if row.mixed != row.name {
+					if _, verbatim := check.GUCs[row.mixed]; !verbatim && !row.optionRefused {
+						t.Errorf("%q was not carried verbatim (settings %v) — only the carved-out "+
+							"names are canonicalised; everything else is the target's to interpret",
+							row.mixed, check.GUCs)
+					}
+				}
 			}
 		})
+	}
+}
+
+// valueFor gives a row a value its own rules accept, so the canonical column is
+// not accidentally testing a value rule instead.
+func valueFor(name string) string {
+	switch name {
+	case "client_encoding":
+		return "UTF8"
+	case "options":
+		return ""
+	case "replication":
+		return "database"
+	}
+	return "x"
+}
+
+// THE RECOGNITION BOUNDARY, AND WHAT IT COSTS TO GET WRONG.
+//
+// The matrix cell asserts what specialName ANSWERS; this asserts what the answer
+// DOES. `User=root` is not the username — PostgreSQL says so
+// (`28000 no PostgreSQL user name specified in startup packet`), so a startup
+// carrying only that spelling has no user at all and §3.1 refuses it for the
+// same reason the target would.
+func TestStartupGUCs_TheRecognitionBoundaryIsTheTargets(t *testing.T) {
+	t.Parallel()
+
+	// A mixed-case protocol key is NOT that key, so the required parameter is
+	// missing — exactly what PostgreSQL reports.
+	check, ok := checkStartupParams(map[string]string{"User": "root", "database": "d"})
+	if ok {
+		t.Fatalf("`User=root` was accepted as the username (settings %v). PostgreSQL matches `user` "+
+			"with strcmp and answers this packet with `no PostgreSQL user name specified`; treating "+
+			"it as the identity here would give the name a meaning the target does not give it",
+			check.GUCs)
+	}
+	if check.Refused != "user" {
+		t.Errorf("refused %q, want the missing `user` named", check.Refused)
+	}
+
+	// …and a mixed-case GUC name still folds, because the target folds it.
+	if check, ok := checkStartupParams(map[string]string{
+		"user": "root", "database": "d", "DateStyle": "ISO", "options": "-c datestyle=German",
+	}); ok {
+		t.Errorf("`DateStyle` and `-c datestyle` did not collide (settings %v) — GUC names fold at "+
+			"the target, so these are one setting named twice", check.GUCs)
+	} else if check.Reason != reasonStartupDuplicateKey {
+		t.Errorf("refused as %q, want %q", check.Reason, reasonStartupDuplicateKey)
+	}
+
+	// …and `_PQ_.ext` is not a protocol extension. Measured: PostgreSQL sends
+	// NegotiateProtocolVersion for `_pq_.foo` and not for `_PQ_.foo`, which it
+	// accepts as an ordinary (dotted, so customizable) GUC instead.
+	check, ok = checkStartupParams(map[string]string{
+		"user": "root", "database": "d", "_PQ_.ext": "1",
+	})
+	if !ok {
+		t.Fatalf("`_PQ_.ext` was refused as %q (%s)", check.Refused, check.Reason)
+	}
+	if _, collected := check.GUCs["_PQ_.ext"]; !collected {
+		t.Errorf("`_PQ_.ext` was not collected as a setting (settings %v). The `_pq_.` prefix is "+
+			"matched case-sensitively, so this is a GUC name — and the target accepts it as a "+
+			"placeholder rather than refusing it, which is the target's call to make", check.GUCs)
 	}
 }
