@@ -84,6 +84,29 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 		}
 	}
 
+	// THE RESERVATION FOLLOWS THE OBLIGATION, NOT THE DELIVERY (jarvis/lector
+	// ruling on #75). Parse, Bind, Describe and Close queue answers that Sync
+	// will deliver, so the output obligation begins HERE — at the frame that
+	// creates it — and it is charged before that frame is dispatched.
+	//
+	// Reserving at Sync instead, as the first cut of this change did, is
+	// accounting AFTER dispatch: the frames are already on the target when the
+	// reservation is attempted, so a capacity failure at Sync refuses work that
+	// has demonstrably run and reports "nothing was dispatched", which is false.
+	// It also breaks §1.4's control-lane liveness, because a standalone Sync
+	// with nothing to deliver would still try to take a general-lane working set
+	// and could be refused — the one thing the control lane exists to prevent.
+	//
+	// Idempotent: a segment that already holds its reservation returns
+	// immediately, so the Execute path's own call becomes a no-op after this and
+	// the working set is taken exactly once per segment.
+	switch msg.(type) {
+	case *pgproto3.Parse, *pgproto3.Bind, *pgproto3.Describe, *pgproto3.Close:
+		if !l.reserveSegment(conn, be, seg, peer, closeReason) {
+			return false
+		}
+	}
+
 	switch m := msg.(type) {
 	case *pgproto3.Parse:
 		err = l.queries.WireParse(ctx, id, uid, m.Name, m.Query, m.ParameterOIDs, hostOf(peer))
@@ -107,13 +130,21 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 		}
 
 	case *pgproto3.Execute:
-		return l.runExtendedStream(ctx, conn, be, sess, peer, seg, closeReason,
+		seg.ran = true
+		// Execute ASKS for output; it does not collect it. §5's fidelity rule
+		// keeps the bytes unflushed until the client's own Flush or Sync. It MAY
+		// reserve, because a portal bound in an earlier segment can be executed
+		// in one whose own frames took nothing.
+		return l.runExtendedStream(ctx, conn, be, sess, peer, seg, closeReason, true, false,
 			func(emit func(exec.WireMessage) error) error {
 				return l.queries.WireExecutePortal(ctx, id, uid, m.Portal, m.MaxRows, hostOf(peer), emit)
 			})
 
 	case *pgproto3.Flush:
-		return l.runExtendedStream(ctx, conn, be, sess, peer, seg, closeReason,
+		// Flush COLLECTS — ruleSegmentStall's own contract is a client that has
+		// "neither Synced nor Flushed", so a delivered Flush discharges it just
+		// as Sync does — and RESERVES NOTHING.
+		return l.runExtendedStream(ctx, conn, be, sess, peer, seg, closeReason, false, true,
 			func(emit func(exec.WireMessage) error) error {
 				return l.queries.WireFlushSegment(ctx, id, uid, emit)
 			})
@@ -143,7 +174,21 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, peer string, seg *segmentLane, closeReason *string) bool {
 
-	status, err := l.queries.WireSyncSegment(context.Background(), sess.SessionID, sess.UserID)
+	// SYNC NEVER RESERVES, and that is a §1.4 requirement rather than an
+	// optimisation: Sync and its ReadyForQuery ride the CONTROL lane and are
+	// ALWAYS ADMISSIBLE under general-lane saturation. A Sync that had to take a
+	// general-lane working set before it could answer could be refused exactly
+	// when the guarantee says it cannot be — and a standalone Sync with an empty
+	// segment, which delivers nothing at all, would be refused for output it was
+	// never going to produce.
+	//
+	// It still delivers through the accountant, under the working set the
+	// segment ALREADY holds: the frames that queued these answers reserved it
+	// when they were admitted, so the bytes are accounted without this call
+	// needing capacity of its own.
+	acct := newOutputAccountant(l, conn, be, peer, seg.held)
+	status, err := l.queries.WireSyncSegment(context.Background(), sess.SessionID, sess.UserID, acct.emit)
+	seg.held = acct.held
 	// The segment is over either way: on success the target answered or discarded
 	// everything, and on failure the wire is unusable. Release before deciding
 	// what to tell the client, so no exit path can skip it.
@@ -153,6 +198,42 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	// this a long-lived session accumulates across segments and is eventually
 	// refused for frames it already had answered.
 	seg.msgs, seg.bytes = 0, 0
+	seg.ran = false
+
+	// THE ACCOUNTANT'S VERDICTS COME FIRST, as they do on the streaming path.
+	// A tail that was withheld or could not be framed is not a segment that
+	// ended cleanly, and answering readiness for it would tell the client its
+	// answers arrived.
+	//
+	// Unlike the streaming path this does NOT set seg.discarding: Sync is what
+	// ENDS a discard, so a Sync that leaves one armed would swallow the frames
+	// of the segment after it.
+	switch {
+	case acct.withheld != outputComplete:
+		var stopped *exec.EmitStopped
+		if err != nil {
+			_ = errors.As(err, &stopped)
+		}
+		return l.reportOutputWithheld(conn, be, sess, peer, closeReason,
+			acct.withheld, stopped, acct.targetFailed, true)
+
+	case acct.writeErr != nil:
+		l.onEvent(Event{Kind: "fd.conn_close", Reason: "write-failed", Peer: peer,
+			Detail: acct.writeErr.Error()})
+		*closeReason = "write-failed"
+		return false
+
+	case acct.emitErr != nil:
+		l.onEvent(Event{Kind: "fd.refused", Reason: unframeableAudit(acct.emitErr), Peer: peer,
+			Detail: acct.emitErr.Error()})
+		be.Send(gateError("FATAL", sqlStateProtocolViolation,
+			unframeableMessageText(acct.emitErr), ruleProtocolViolation,
+			unframeableHint(acct.emitErr)))
+		_ = l.flushBounded(conn, be)
+		*closeReason = "unframeable-message"
+		return false
+	}
+
 	if err != nil {
 		return l.frameExtendedError(conn, be, sess, err, peer, seg, closeReason)
 	}
@@ -379,6 +460,13 @@ func (s *segmentLane) addBytes(n int64) {
 }
 
 type segmentLane struct {
+	// ran records that this segment EXECUTED something, so the client has asked
+	// for output and owes us the Sync or Flush that collects it. It is what the
+	// stall budget measures; the reservation is what the lane accounting
+	// measures, and since the obligation-start ruling those are different
+	// questions with different answers.
+	ran bool
+
 	held int64
 
 	// msgs and bytes are this segment's accumulation against the caps above.
@@ -450,19 +538,39 @@ func (s *segmentLane) release(l *Listener) {
 // own copy of the watermark, the cumulative cap and the lane top-up bypasses
 // every bound at once, and nothing observes it until the process runs out of
 // memory.
+// reserves says whether this drive may CREATE the segment's working set, and
+// collects says whether a COMPLETED drive discharges the client's obligation to
+// take its output. They are different questions and Flush answers them
+// differently: it collects, and it reserves nothing.
+//
+// FLUSH IS NOT A RESERVING VERB. It does not need to be — the frames that queued
+// the answers took the working set when they were admitted, and an Execute-only
+// segment takes it at the Execute. A Flush that reserved would charge 4 MiB for
+// output it does not itself produce, and a standalone EMPTY Flush — a protocol
+// no-op §1.4 makes control-lane admissible — could then be REFUSED under
+// general-lane saturation, or take the watermark while producing nothing. With
+// seg.ran false for a Flush, that bad hold would sit under the thirty-MINUTE
+// idle clock rather than the thirty-second stall clock.
+//
+// It reached that reservation through a helper shared with Execute, which
+// reserved unconditionally because that was correct while only Execute drove it
+// — the same coupling-through-a-shared-helper shape as the stall predicate
+// itself. Moving one of these states means auditing EVERY arm that touches it,
+// not only the arms that motivated the move.
 func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, peer string, seg *segmentLane, closeReason *string,
-	drive func(emit func(exec.WireMessage) error) error) bool {
+	reserves, collects bool, drive func(emit func(exec.WireMessage) error) error) bool {
 
-	// RESERVED HERE, at the first frame of the segment that can PRODUCE output —
-	// the segment's own "before dispatch", so ordinary saturation is refused
-	// while refusing is still TRUE: nothing has executed and nothing is durable.
+	// A BACKSTOP for Execute, not the segment's charge. Since the
+	// obligation-start ruling the working set is taken when the first
+	// response-producing frame is admitted, so for an ordinary segment this is
+	// already held and the call returns immediately.
 	//
-	// Not at the segment's first frame (jarvis, 2026-09-03): a segment that has
-	// only Parsed and Bound has produced nothing, holds no working set, and is a
-	// client merely between messages. Charging it would put a second timer on an
-	// idle session and hold lane bytes for output that does not exist.
-	if !l.reserveSegment(conn, be, seg, peer, closeReason) {
+	// It stays because an Execute does not have to follow a Parse in the SAME
+	// segment: a portal bound before an earlier Sync can be executed in a segment
+	// whose own frames never reserved anything. That segment still produces
+	// output, so it still needs the working set, and this is where it is taken.
+	if reserves && !l.reserveSegment(conn, be, seg, peer, closeReason) {
 		return false
 	}
 
@@ -517,9 +625,34 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 	case err != nil:
 		return l.frameExtendedError(conn, be, sess, err, peer, seg, closeReason)
 	}
-	// NOT FLUSHED HERE. The client asks for delivery with Flush or Sync, exactly
-	// as it would of PostgreSQL; flushing now would send bytes earlier than the
-	// server this stands in for, and the fidelity requirement is explicit.
+	// A FLUSH WRITES THE SOCKET. THAT IS WHAT FLUSH IS.
+	//
+	// The engine drive returning nil is NOT delivery. outputAccountant.emit calls
+	// be.Send, which only appends to pgproto3.Backend's write buffer — and for an
+	// ordinary sub-watermark result the Execute has ALREADY drained the engine's
+	// segment into that buffer, so the Flush drive is an empty no-op that returns
+	// nil with the client holding zero bytes. Treating that as collection would
+	// disarm the stall for a client that has received nothing, which is the exact
+	// inverse of the rule.
+	//
+	// So the arm performs the bounded write itself, and the client's obligation
+	// is discharged only AFTER that write succeeds. Engine success is not client
+	// delivery; the socket is the boundary that decides.
+	if collects {
+		if ferr := l.flushBounded(conn, be); ferr != nil {
+			l.onEvent(Event{Kind: "fd.conn_close", Reason: "write-failed", Peer: peer,
+				Detail: ferr.Error()})
+			*closeReason = "write-failed"
+			return false
+		}
+		// Every branch above returned, so reaching here means the drive completed,
+		// nothing was withheld or unframeable, AND the bytes are on the wire.
+		seg.ran = false
+	}
+	// AN EXECUTE DOES NOT FLUSH. The client asks for delivery with Flush or Sync,
+	// exactly as it would of PostgreSQL; sending an Execute's output before the
+	// client asked would send bytes earlier than the server this stands in for,
+	// and the fidelity requirement is explicit.
 	return true
 }
 
@@ -538,8 +671,13 @@ const ruleSegmentStall = "frontdoor/segment-stall"
 // caps before Sync.
 const ruleSegmentCap = "frontdoor/segment-cap"
 
-// segmentStallBudget bounds a segment that holds a reservation and is waiting
-// for the client's next frame.
+// segmentStallBudget bounds a segment that has RUN something and is waiting for
+// the client to collect it.
+//
+// It asks what the segment DID, not what it holds. Holding a reservation was the
+// same question only while Execute alone reserved; since the obligation-start
+// ruling a segment that has merely Parsed also holds one, and that client is
+// between messages rather than stalling.
 //
 // ITS OWN CONSTANT, deliberately. It is 30s, and so are idle-in-lane waiting and
 // the output stall, but three budgets that happen to share a number are three
@@ -560,13 +698,25 @@ func (l *Listener) segmentStall() time.Duration {
 
 // segmentDeadline reports the budget for the wait BEFORE the next frame.
 //
-// A segment holding a reservation has pending output and a client that owes us a
-// Sync, so it gets the stall budget. A segment that has only Parsed and Bound
-// holds nothing and is a client merely between messages, so it stays under the
-// idle clock — jarvis's narrowing, and the reason this asks the reservation
-// rather than "is a segment open".
+// A segment that has RUN something has output the client asked for and has not
+// collected, so it gets the stall budget. A segment that has only Parsed and
+// Bound is a client merely between messages, so it stays under the idle clock —
+// jarvis's narrowing, and it still holds.
+//
+// IT ASKS WHETHER THE SEGMENT RAN, NOT WHETHER IT HOLDS A RESERVATION. Those
+// were the same question while only Execute reserved, and the reservation was
+// the cheaper proxy. The obligation-start ruling separates them: Parse and Bind
+// now take the working set, because the answers they queue are really owed and
+// really delivered. Keeping the proxy would arm a 30-second teardown on a client
+// that has parsed a statement and paused — measured, not theorised: a
+// Parse/Bind-only session held 4 MiB, armed the stall, and was torn down.
+//
+// The stall rule's own words are the test to apply: it is for a client that
+// "asked for output and did not collect it". Parse and Bind do not ask; Execute
+// does, and Sync and Flush are the collection. So the flag is set where the
+// asking happens.
 func (l *Listener) segmentDeadline(seg *segmentLane) time.Duration {
-	if seg.held > 0 {
+	if seg.ran {
 		return l.segmentStall()
 	}
 	return l.dl.idle

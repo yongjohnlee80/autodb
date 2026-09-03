@@ -45,7 +45,7 @@ on session *lifetime* (r0 MF2).
 | **frame in progress** (a type byte is present, body incomplete) | `frameStall` (30s, §7) | `08006` `frontdoor/frame-stall` | by `frameReader` as the type byte is read, **and at cycle entry when the stream is already mid-message** |
 | **statement running** (engine owns the session) | **none** | — (engine's own statement/tx timeouts bound it) | cleared after a successful `Receive` |
 | **output streaming** (each watermark flush) | `outputStall` per write | transport close, `write-failed` | `flushBounded`, cleared after each write |
-| **extended segment held** (output reserved, awaiting the client's `Sync`) | `segmentStallBudget` (30s) | `08006` `frontdoor/segment-stall` | top of the loop, while the segment holds a reservation |
+| **extended segment ran** (an `Execute` has run, awaiting the client's `Sync` **or** `Flush`) | `segmentStallBudget` (30s) | `08006` `frontdoor/segment-stall` | top of the loop, while `seg.ran` is set |
 | **teardown / goodbye frame** | `deadlineGoodbyeBudget` (2s) | close regardless | in the expiry handlers |
 
 Three consequences that were each a finding:
@@ -154,10 +154,35 @@ ended its segment. The budget is its OWN constant at 30s and does not inherit
 a number are three MEANINGS, and sharing a constant would make a later change to
 one silently change the others.
 
-It arms ONLY while a segment holds a lane reservation. A segment that has Parsed
-and Bound but executed nothing has produced no output, holds nothing, and is a
-client merely between messages: it stays under the idle clock, because adding a
-second timer to an idle session buys nothing and costs a state.
+It arms ONLY after the segment has RUN something — `seg.ran`, set by `Execute`.
+A segment that has Parsed and Bound but executed nothing is a client merely
+between messages: it stays under the idle clock, because adding a second timer to
+an idle session buys nothing and costs a state.
+
+It is discharged by a **successful, complete `Flush` as well as by `Sync`**. The
+rule's own words are the test — a client that has "neither Synced nor Flushed" —
+so a Flush that delivered has collected and the client owes nothing. A Flush that
+did **not** deliver (output withheld, unframeable, or a write error) has not
+collected and does **not** discharge it; the test is the drive's result, never
+that a Flush arrived.
+
+### These are THREE independent states, not one
+
+They were a single state only by coincidence, while `Execute` alone reserved.
+Reusing one as a proxy for another is how a Parse/Bind-only client acquired a
+30-second teardown, and how a client that Flushed and paused acquired one after
+collecting its own output.
+
+| State | What it means | Predicate |
+|---|---|---|
+| **output obligation** | frames are queued whose answers this end owes | the general-lane reservation, taken at the FIRST RESPONSE-PRODUCING FRAME (`Parse`, `Bind`, `Describe`, `Close`) — **before** dispatch, so nothing runs unaccounted and no failure can occur after the work is on the target |
+| **awaiting collection** | the client asked for output and has not taken it | `seg.ran`, set by `Execute`, cleared by a completed `Sync` or `Flush` — this and only this arms `segmentStallBudget` |
+| **control-lane admissibility** | the frame must be answerable under saturation | `Sync` and its `ReadyForQuery` ride the control lane and are ALWAYS admissible (§1.4); `Sync` therefore takes **no** reservation of its own and delivers under the one the segment already holds |
+
+A `Parse`/`Bind`-only segment is in the first state and not the second: it holds
+its working set, because the answers it queued are really owed and really
+delivered at `Sync`, and it stays under the idle clock because it has not asked
+for anything yet.
 
 **The lane can span a client gap by design; the budget bounds the gap, it does
 not remove it.** The alternative was to flush at the end of every streaming call,

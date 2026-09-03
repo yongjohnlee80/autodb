@@ -2,7 +2,10 @@ package frontdoor
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -290,79 +293,123 @@ func TestPGExtended_AMidSegmentErrorDiscardsThroughSync(t *testing.T) {
 	}
 }
 
-// SHAPE G — the Flush behaviour that row 4 of the matrix contracts, and the
+// SHAPE G — a standalone Flush DELIVERS, which is what Flush is for.
 //
-// This is a FINDING, pinned rather than reported in a commit message. The Flush
-// row was awaiting a live witness ("F2 routes it to the segment, but no
-// witness drives a client Flush frame"). Driving one shows a standalone Flush
-// delivers NOTHING ON THE WIRE: after Parse/Bind/Flush the client receives zero
-// frames until it Syncs. Delivery happens on Sync; the segment is not dispatched
-// on Flush.
+// THIS REPLACES A CELL THAT PINNED THE DEFECT. Its predecessor asserted the
+// opposite — that Parse/Bind/Flush delivered nothing until a Sync — and said in
+// its own words that it "fails the day Flush starts working" and should be
+// replaced by the real witness. That day is this change; this is that witness.
 //
-// SCOPE OF THE CLAIM (r1 SF1): this cell observes the WIRE and nothing else. An
-// earlier version said the audit records no statement events either — true of
-// listener events I probed while diagnosing, but this cell never reads the meta
-// store, so the committed claim is the silence it actually witnesses.
-//
-// (Narrowing that by blind substitution first produced a sentence claiming wire
-// silence while still listing audit events, which greps clean and reads as
-// nonsense. Prose corrections need reading, not replacing.)
-//
-// That matters to real clients rather than to a conformance checkbox: Flush is
-// how a paging client gets its first page without ending the transaction, and
-// how any client interleaves work in one segment. A client that sends
+// It matters to real clients rather than to a conformance checkbox: Flush is how
+// a paging client gets its first page without ending the transaction, and how
+// any client interleaves work in one segment. A client that sends
 // Parse/Bind/Execute/Flush and waits — which the protocol entitles it to do —
-// waits until it gives up. The session RECOVERS through a subsequent Sync, so
-// this is a missing capability rather than a broken session; the cell asserts
-// that half too, and it is what corrected my first, worse reading.
+// waited until it gave up.
 //
-// NOT FIXED HERE: it is F2's dispatch and the boundary on this slice is cells
-// only. Reported to jarvis and white-vision.
-//
-// The cell asserts the CURRENT behaviour so the finding cannot rot: it fails
-// the day Flush starts working, and tells whoever sees it to restore the real
-// witness below it.
-func TestPGExtended_AStandaloneFlushDeliversNothing(t *testing.T) {
+// TWO THINGS, because either alone can pass while the other is broken: the
+// answers must ARRIVE without a Sync, and they must arrive BECAUSE OF THE FLUSH.
+// The second is not pedantry — an Execute already drains the engine's segment
+// into the backend's write buffer, so a cell that only checked "bytes arrived
+// after I sent a Flush" cannot tell delivery from a buffer that some other path
+// happened to write. The cell therefore proves silence BEFORE the Flush first.
+func TestPGExtended_AStandaloneFlushDelivers(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 	_, _, addr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
 	conn, fe := pgClientWithConn(t, addr, secret, database)
 
 	fe.Send(&pgproto3.Parse{Name: "f", Query: "SELECT 1"})
 	fe.Send(&pgproto3.Bind{DestinationPortal: "pf", PreparedStatement: "f"})
+	fe.Send(&pgproto3.Execute{Portal: "pf"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// PREMISE — SILENCE BEFORE THE FLUSH. §5's fidelity rule: an Execute's output
+	// is not sent until the client asks. Without this the cell cannot attribute
+	// the delivery below to the Flush at all.
+	//
+	// BOUNDED WITH A DEADLINE, NOT A GOROUTINE. An earlier version of the cell
+	// this replaces read in a goroutine while the body kept sending;
+	// pgproto3.Frontend is not safe for concurrent use, so that was a data race
+	// that PASSED without -race and failed with it.
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if msg, err := fe.Receive(); err == nil {
+		t.Fatalf("PREMISE FAILED: %T arrived before the client asked for it — the "+
+			"cell can no longer tell delivery-at-Flush from output sent early", msg)
+	}
+
+	// NOW THE FLUSH. Everything that follows is attributable to it.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	fe.Send(&pgproto3.Flush{})
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
-	// BOUNDED WITH A DEADLINE, NOT A GOROUTINE. The first version read in a
-	// goroutine and kept sending from the test body — pgproto3.Frontend is not
-	// safe for concurrent use, so that was a data race. It PASSED without -race
-	// and failed with it, which is the clearest possible statement that a cell
-	// can be wrong in a way only one of the two runs shows.
-	if err := conn.SetReadDeadline(time.Now().Add(4 * time.Second)); err != nil {
-		t.Fatal(err)
+	var kinds []string
+	var sawRow bool
+	for i := 0; i < 8; i++ {
+		m, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("a standalone Flush delivered %v and then stopped: %v — Flush "+
+				"must dispatch the segment without a Sync", kinds, err)
+		}
+		kinds = append(kinds, strings.TrimPrefix(fmt.Sprintf("%T", m), "*pgproto3."))
+		if dr, ok := m.(*pgproto3.DataRow); ok &&
+			len(dr.Values) == 1 && string(dr.Values[0]) == "1" {
+			sawRow = true
+		}
+		if _, done := m.(*pgproto3.CommandComplete); done {
+			break
+		}
 	}
-	msg, err := fe.Receive()
-	if err == nil {
-		t.Fatalf("a standalone Flush DELIVERED %T — Flush now works, which is the fix this cell "+
-			"was waiting for. Delete it and restore the real witness: a standalone Flush must "+
-			"deliver the queued answers without a Sync, and an EMPTY Flush must be a no-op rather "+
-			"than the producer's empty-queue refusal forwarded to a correct client", msg)
-	}
-	if ne, ok := err.(interface{ Timeout() bool }); !ok || !ne.Timeout() {
-		t.Fatalf("a standalone Flush produced %v rather than silence — the finding this cell pins "+
-			"has changed shape and the new behaviour needs chasing", err)
+	// THE VALUE, not merely that frames arrived. A cell satisfied by "something
+	// came back" is satisfied by a buffer draining, which is the failure its
+	// predecessor was written to describe.
+	if !sawRow {
+		t.Errorf("the Flush delivered %v with no DataRow carrying 1 — the statement's "+
+			"result did not reach the client", kinds)
 	}
 
-	// THE SESSION RECOVERS THROUGH SYNC, so this is a missing capability rather
-	// than a broken session — and getting that right took the cell correcting me.
+	// AN EMPTY FLUSH IS A NO-OP, not the producer's empty-queue refusal forwarded
+	// to a correct client. A client that flushes defensively with nothing pending
+	// is doing something the protocol allows.
 	//
-	// An earlier version of this cell read in a goroutine while the test body
-	// kept sending. That was a data race (pgproto3.Frontend is not safe for
-	// concurrent use), and under it the Sync appeared unanswered — so I recorded
-	// "the segment is STUCK until the idle deadline", a severity the evidence did
-	// not support. With the race removed the Sync IS answered. The cell asserted
-	// both directions, so it caught my overstatement rather than preserving it.
+	// A NO-OP MEANS NO FRAME, NOT "NO ERROR FRAME". An earlier version failed
+	// only on ErrorResponse, so every other frame in the protocol satisfied a cell
+	// whose name promised silence — a NoticeResponse injected on the empty-Flush
+	// path left it GREEN. The gap between "no-op" and "not an error" is every
+	// message type that is not an error, which is most of them.
+	//
+	// AND SILENCE IS NOT THE SAME AS A DEAD CONNECTION. The only acceptable
+	// outcome is the bounded read expiring with no bytes; an EOF or any other
+	// transport failure means the session was destroyed by a frame the protocol
+	// allows, and a cell that read "nothing arrived" from a closed socket would
+	// pass on precisely that. So the three outcomes are separated explicitly.
+	fe.Send(&pgproto3.Flush{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	msg, rerr := fe.Receive()
+	switch {
+	case rerr == nil:
+		t.Fatalf("an empty Flush was answered with %T — a defensive flush with "+
+			"nothing pending must produce NO frame at all, not merely no error", msg)
+	case isReadTimeout(rerr):
+		// The one acceptable outcome: the read expired with no bytes.
+	default:
+		t.Fatalf("an empty Flush did not go unanswered — the read failed with %v "+
+			"rather than expiring. A no-op must leave the session alive; a closed "+
+			"or broken connection is not silence", rerr)
+	}
+
+	// The session is still usable, and the follow-up statement really RUNS.
 	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -370,26 +417,106 @@ func TestPGExtended_AStandaloneFlushDeliversNothing(t *testing.T) {
 	if err := fe.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	// DRAIN THROUGH THE ACTUAL ReadyForQuery, then USE the session (r0 MF2). The
-	// first frame after Sync is ParseComplete — the queued work arriving — so a
-	// cell that stopped at "something came back" proved only that the buffer
-	// drained. A mutation suppressing Sync's readiness left it green.
-	msgs := readUntil(t, conn, fe, untilReady)
-	if len(msgs) == 0 {
-		t.Fatal("nothing followed the Sync")
-	}
-	// THE VALUE, not the absence of an error (r1 MF2 residual). hasError ACCEPTS
-	// an empty result, so a stale ReadyForQuery — readUntil consuming the first,
-	// query consuming a duplicate second — leaves the cell green while no
-	// statement ever ran. Juliet's duplicate-readiness mutation proved exactly
-	// that. Recovery means the next statement EXECUTES and returns its row.
+	_ = readUntil(t, conn, fe, untilReady)
 	got := query(t, fe, "SELECT 42")
 	if hasError(got) {
-		t.Fatalf("the session was not usable after Flush-then-Sync: %v", errorText(got))
+		t.Fatalf("the session was not usable after a Flush: %v", errorText(got))
 	}
 	dr, ok := firstOfType[*pgproto3.DataRow](got)
 	if !ok || len(dr.Values) != 1 || string(dr.Values[0]) != "42" {
-		t.Fatalf("the follow-up statement returned no row with 42 (frames=%v) — an errorless "+
-			"reply proves the wire drained, not that a statement ran", kindsOf(got))
+		t.Fatalf("the follow-up statement returned no row with 42 (frames=%v) — an "+
+			"errorless reply proves the wire drained, not that a statement ran", kindsOf(got))
 	}
+}
+
+// THE PUBLIC-BOUNDARY WITNESS for the stall discharge: a REAL engine, a REAL
+// socket, and a client that collects its output with a Flush and then pauses
+// well past the segment-stall budget.
+//
+// IT IS LIVE RATHER THAN FAKE-BACKED DELIBERATELY. The fake re-emits its scripted
+// messages on Flush, so a fake-backed cell can be green because the FAKE
+// delivered rather than because the code did — and what the code has to do here
+// is write the socket. Only a real engine behind a real listener can tell those
+// apart at the boundary a client actually observes.
+//
+// Execute asks for output; Sync and Flush collect it. Before the discharge
+// existed, a client that Executed, Flushed and paused was torn down at the stall
+// budget for output it had already taken.
+func TestPGExtended_AFlushDischargesTheStallBudget(t *testing.T) {
+	stall := 400 * time.Millisecond
+	_, secret, database, eng := pgLoopWithEngine(t)
+	_, events, addr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled,
+		testSegmentStall: &stall,
+	})
+	conn, fe := pgClientWithConn(t, addr, secret, database)
+
+	fe.Send(&pgproto3.Parse{Name: "d", Query: "SELECT 1"})
+	fe.Send(&pgproto3.Bind{DestinationPortal: "pd", PreparedStatement: "d"})
+	fe.Send(&pgproto3.Execute{Portal: "pd"})
+	fe.Send(&pgproto3.Flush{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// PREMISE: THE CLIENT ACTUALLY RECEIVED ITS OUTPUT. Without bytes on the
+	// socket nothing was collected, and a cell asserting "the stall did not arm"
+	// would be asserting that a STALLED client gets the idle clock — the exact
+	// inverse of the rule it is written to protect.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	var collected bool
+	for i := 0; i < 8; i++ {
+		m, err := fe.Receive()
+		if err != nil {
+			break
+		}
+		kinds = append(kinds, strings.TrimPrefix(fmt.Sprintf("%T", m), "*pgproto3."))
+		if _, done := m.(*pgproto3.CommandComplete); done {
+			collected = true
+			break
+		}
+	}
+	if !collected {
+		t.Fatalf("PREMISE FAILED: the Flush delivered %v with no CommandComplete, so "+
+			"nothing was collected and the stall budget SHOULD still be armed", kinds)
+	}
+
+	// Well past the budget. The client took its output; it owes nothing.
+	time.Sleep(4 * stall)
+	for _, e := range events() {
+		if e.Kind == "fd.refused" && e.Reason == ruleSegmentStall {
+			t.Fatal("the stall budget armed after a Flush had already delivered the " +
+				"segment's output to the client")
+		}
+	}
+
+	// And the session is still usable, with the follow-up statement really running.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("the session was torn down after collecting its own output: %v", err)
+	}
+	_ = readUntil(t, conn, fe, untilReady)
+	got := query(t, fe, "SELECT 42")
+	if hasError(got) {
+		t.Fatalf("the session was not usable after Flush-then-pause: %v", errorText(got))
+	}
+	dr, ok := firstOfType[*pgproto3.DataRow](got)
+	if !ok || len(dr.Values) != 1 || string(dr.Values[0]) != "42" {
+		t.Fatalf("the follow-up statement returned no row with 42 (frames=%v)", kindsOf(got))
+	}
+}
+
+// isReadTimeout reports whether a read failed because its DEADLINE expired,
+// rather than because the connection died. The distinction is the difference
+// between "nothing was sent" and "the session was destroyed", which look the
+// same to a caller that only asks whether Receive returned an error.
+func isReadTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

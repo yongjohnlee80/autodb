@@ -75,11 +75,16 @@ type QueryExecutor interface {
 	WireFlushSegment(ctx context.Context, id exec.SessionID, userID int64,
 		emit func(exec.WireMessage) error) error
 
-	// WireSyncSegment ends the segment and returns the ReadyForQuery status byte
-	// from the engine's own state machine. It is also the only thing that ends a
-	// post-error discard (matrix row 4:discard), so the loop never synthesises
-	// this byte.
-	WireSyncSegment(ctx context.Context, id exec.SessionID, userID int64) (byte, error)
+	// WireSyncSegment delivers whatever the segment still owes, ends it, and
+	// returns the ReadyForQuery status byte from the engine's own state machine.
+	// It is also the only thing that ends a post-error discard (matrix row
+	// 4:discard), so the loop never synthesises this byte.
+	//
+	// It takes an emit for the same reason Flush does: Sync is one of the two
+	// ways a client asks for its answers, and a segment whose last frame is not
+	// an Execute has no other call that could deliver them.
+	WireSyncSegment(ctx context.Context, id exec.SessionID, userID int64,
+		emit func(exec.WireMessage) error) (byte, error)
 }
 
 // ReadyForQuery status bytes (matrix §6.1). The engine names these too; the

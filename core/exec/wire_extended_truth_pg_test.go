@@ -57,7 +57,7 @@ func extExecuteCut(t *testing.T, f *fixture, sid SessionID, userID int64, name s
 // client's Sync does.
 func resync(t *testing.T, f *fixture, sid SessionID, userID int64) byte {
 	t.Helper()
-	status, err := f.eng.WireSyncSegment(context.Background(), sid, userID)
+	status, err := f.eng.WireSyncSegment(context.Background(), sid, userID, discardEmit)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestExtPG_AMidAnswerCutStillFinalizesLaterCompletions(t *testing.T) {
 	}
 
 	// And Sync must not now release what was legitimately finalized.
-	if _, err := f.eng.WireSyncSegment(context.Background(), sid, userID); err != nil {
+	if _, err := f.eng.WireSyncSegment(context.Background(), sid, userID, discardEmit); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	if s.ext.retained != st.charge {
@@ -581,7 +581,7 @@ func TestExtPG_SyncSweepsWhatTheAbortedSegmentWillNeverConfirm(t *testing.T) {
 		t.Fatal("the statement behind the error was finalized, but the target never answered its Parse")
 	}
 
-	if _, err := f.eng.WireSyncSegment(ctx, sid, userID); err != nil {
+	if _, err := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
 	if s.ext.retainedPending != 0 {
@@ -665,7 +665,7 @@ func TestExtPG_OwnedControlIsChargedAndItsSyntheticCompletionFinalizesIt(t *test
 	// AND SYNC MUST NOT DESTROY EITHER. The Execute opened the session's
 	// transaction, so the segment ends with the client in T — portals survive a
 	// transaction that is still open, and so do their charges.
-	status, err := f.eng.WireSyncSegment(ctx, sid, userID)
+	status, err := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}

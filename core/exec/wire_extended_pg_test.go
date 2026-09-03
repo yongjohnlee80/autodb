@@ -253,7 +253,7 @@ func TestExtPG_ASelectIsRelayedAndItsRowsComeBack(t *testing.T) {
 	if !sawComplete {
 		t.Errorf("no CommandComplete in %v", kinds)
 	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
 		t.Errorf("Sync after the relayed select: %v", serr)
 	}
 }
@@ -326,7 +326,7 @@ func TestExtPG_ReaderCatalogFunctionsStillRun(t *testing.T) {
 	if rows != 1 {
 		t.Errorf("%d DataRows, want 1", rows)
 	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
 		t.Fatalf("Sync: %v", serr)
 	}
 }
@@ -355,7 +355,7 @@ func TestExtPG_ReaderCatalogWriteFailsAtTheTargetWith25006(t *testing.T) {
 		got = append(got, m)
 		return nil
 	})
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
 		t.Fatalf("Sync: %v", serr)
 	}
 	var code string
@@ -416,7 +416,7 @@ func TestExtPG_ReaderBeginReadWriteThroughExtendedIsForcedReadOnly(t *testing.T)
 	if code != "25006" {
 		t.Errorf("frames %v: want 25006 inside the forced READ ONLY transaction", kindsOfMsgs(got))
 	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
 		t.Fatalf("Sync: %v", serr)
 	}
 	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
@@ -460,7 +460,7 @@ func TestExtPG_ReaderPlainWriteIsRefusedAtParse(t *testing.T) {
 	if !sawRow {
 		t.Error("positive control: the reader's SELECT returned no row")
 	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
 		t.Fatalf("Sync: %v", serr)
 	}
 	if rows := rowCount(t, f, connID, table); rows != "0" {
@@ -505,7 +505,7 @@ func TestExtPG_BinaryResultFormatIsRelayedVerbatim(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
 		t.Fatalf("Sync: %v", serr)
 	}
 	want := []byte{0, 0, 0, 1} // int4 1, network byte order
@@ -537,7 +537,7 @@ func TestExtPG_BinaryParameterFormatIsRelayedVerbatim(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
 		t.Fatalf("Sync: %v", serr)
 	}
 	if len(row) != 4 || row[3] != 42 {
@@ -578,7 +578,7 @@ func TestExtPG_NamedStatementIsReusedAndEvictedLikeACache(t *testing.T) {
 			t.Fatalf("execution %d returned %d rows, want 1 — a cached statement must stay executable", i, rows)
 		}
 	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
 		t.Fatalf("Sync: %v", serr)
 	}
 
@@ -589,7 +589,7 @@ func TestExtPG_NamedStatementIsReusedAndEvictedLikeACache(t *testing.T) {
 	if err := f.eng.WireParse(ctx, sid, userID, "cached", "SELECT 8::int4", nil, testIP); err != nil {
 		t.Fatalf("re-parse after eviction: %v — a cache could never replace an entry", err)
 	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
 		t.Fatalf("Sync: %v", serr)
 	}
 }
@@ -609,7 +609,7 @@ func TestExtPG_SimpleQueryDestroysTheUnnamedPairOnALiveSession(t *testing.T) {
 	if err := f.eng.WireBind(ctx, sid, userID, "", "", nil, nil, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID); serr != nil {
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
 		t.Fatalf("Sync: %v", serr)
 	}
 
@@ -657,7 +657,7 @@ func TestExtPG_HiddenReadOnlyWrapDoesNotLeakTToTheClient(t *testing.T) {
 		t.Fatal("positive control: no hidden wrap was open, so this cell cannot observe it leaking")
 	}
 
-	status, err := f.eng.WireSyncSegment(ctx, sid, userID)
+	status, err := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit)
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
