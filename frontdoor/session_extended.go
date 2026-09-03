@@ -143,7 +143,20 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, peer string, seg *segmentLane, closeReason *string) bool {
 
-	status, err := l.queries.WireSyncSegment(context.Background(), sess.SessionID, sess.UserID)
+	// SYNC PRODUCES OUTPUT NOW, so it is accounted like every other call that
+	// does. A segment whose last frame is not an Execute owes its answers here,
+	// and answers delivered outside the accountant would be bytes §8.4 never saw.
+	//
+	// The reservation is taken the same way the streaming path takes it, and for
+	// the same reason: this is the frame that can produce output. It is a no-op
+	// when the segment already holds one, which is the ordinary case — the
+	// Execute that preceded this Sync reserved it.
+	if !l.reserveSegment(conn, be, seg, peer, closeReason) {
+		return false
+	}
+	acct := newOutputAccountant(l, conn, be, peer, seg.held)
+	status, err := l.queries.WireSyncSegment(context.Background(), sess.SessionID, sess.UserID, acct.emit)
+	seg.held = acct.held
 	// The segment is over either way: on success the target answered or discarded
 	// everything, and on failure the wire is unusable. Release before deciding
 	// what to tell the client, so no exit path can skip it.
@@ -153,6 +166,41 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	// this a long-lived session accumulates across segments and is eventually
 	// refused for frames it already had answered.
 	seg.msgs, seg.bytes = 0, 0
+
+	// THE ACCOUNTANT'S VERDICTS COME FIRST, as they do on the streaming path.
+	// A tail that was withheld or could not be framed is not a segment that
+	// ended cleanly, and answering readiness for it would tell the client its
+	// answers arrived.
+	//
+	// Unlike the streaming path this does NOT set seg.discarding: Sync is what
+	// ENDS a discard, so a Sync that leaves one armed would swallow the frames
+	// of the segment after it.
+	switch {
+	case acct.withheld != outputComplete:
+		var stopped *exec.EmitStopped
+		if err != nil {
+			_ = errors.As(err, &stopped)
+		}
+		return l.reportOutputWithheld(conn, be, sess, peer, closeReason,
+			acct.withheld, stopped, acct.targetFailed, true)
+
+	case acct.writeErr != nil:
+		l.onEvent(Event{Kind: "fd.conn_close", Reason: "write-failed", Peer: peer,
+			Detail: acct.writeErr.Error()})
+		*closeReason = "write-failed"
+		return false
+
+	case acct.emitErr != nil:
+		l.onEvent(Event{Kind: "fd.refused", Reason: unframeableAudit(acct.emitErr), Peer: peer,
+			Detail: acct.emitErr.Error()})
+		be.Send(gateError("FATAL", sqlStateProtocolViolation,
+			unframeableMessageText(acct.emitErr), ruleProtocolViolation,
+			unframeableHint(acct.emitErr)))
+		_ = l.flushBounded(conn, be)
+		*closeReason = "unframeable-message"
+		return false
+	}
+
 	if err != nil {
 		return l.frameExtendedError(conn, be, sess, err, peer, seg, closeReason)
 	}

@@ -57,7 +57,8 @@ func (noExtended) WireExecutePortal(context.Context, exec.SessionID, int64, stri
 func (noExtended) WireFlushSegment(context.Context, exec.SessionID, int64, func(exec.WireMessage) error) error {
 	return nil
 }
-func (noExtended) WireSyncSegment(context.Context, exec.SessionID, int64) (byte, error) {
+func (noExtended) WireSyncSegment(context.Context, exec.SessionID, int64,
+	func(exec.WireMessage) error) (byte, error) {
 	return txStatusIdle, nil
 }
 
@@ -222,7 +223,8 @@ func (q *fakeQueries) WireFlushSegment(_ context.Context, _ exec.SessionID, _ in
 	return nil
 }
 
-func (q *fakeQueries) WireSyncSegment(_ context.Context, _ exec.SessionID, _ int64) (byte, error) {
+func (q *fakeQueries) WireSyncSegment(_ context.Context, _ exec.SessionID, _ int64,
+	_ func(exec.WireMessage) error) (byte, error) {
 	q.extRecord("Sync")
 	q.mu.Lock()
 	defer q.mu.Unlock()

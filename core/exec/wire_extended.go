@@ -403,13 +403,30 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 	// ordinary case for a client that flushes defensively; golib refuses it
 	// because its own queue is empty. Answering that refusal to the peer would
 	// break a correct client for doing something the protocol allows.
-	if len(s.ext.segment) == 0 {
+	return deliverSegment(ctx, pc, s.ext, emit)
+}
+
+// deliverSegment answers every frame queued so far, or nothing when the segment
+// is empty.
+//
+// BOTH segment-ending calls share this, and that is the point. Flush and Sync
+// are the two ways a client asks for its answers — PostgreSQL delivers on
+// either — so the delivery itself must not depend on which one asked. Sync
+// having its own path is what let it end a segment without delivering anything.
+//
+// An empty segment is a NO-OP rather than an error: a client that flushes
+// defensively with nothing pending is doing something the protocol allows, and
+// golib refuses the flush because its own queue is empty.
+func deliverSegment(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
+	emit func(WireMessage) error) error {
+
+	if len(o.segment) == 0 {
 		return nil
 	}
 	if ferr := pc.Flush(ctx); ferr != nil {
 		return ferr
 	}
-	return drainExtended(ctx, pc, s.ext, emit)
+	return drainExtended(ctx, pc, o, emit)
 }
 
 // WireSyncSegment ends the segment and returns the ReadyForQuery status byte.
@@ -418,7 +435,12 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 // ErrorResponse golib's inbound track discards until Sync, which is matrix row
 // 4:discard and PostgreSQL's own ignore_till_sync. The front-door loop must not
 // synthesise a readiness byte of its own.
-func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64) (byte, error) {
+func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64,
+	emit func(WireMessage) error) (byte, error) {
+
+	if emit == nil {
+		return 0, ErrWireEmitNil
+	}
 	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID, false)
 	if err != nil {
 		return 0, err
@@ -426,6 +448,32 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	defer release()
 
 	hadWrap := s.ext.roWrap != nil
+
+	// THE TAIL IS DELIVERED BEFORE THE SEGMENT ENDS.
+	//
+	// Answers are queued as frames are admitted and handed over by a drain. The
+	// Execute drive walks the queue and stops at its OWN terminal, so anything
+	// queued after that terminal — and everything in a segment carrying no
+	// Execute at all — has no drive to deliver it. Sync then ended the segment
+	// and golib's Sync consumes through ReadyForQuery, discarding whatever it
+	// swallowed on the way. The answers were lost and, because the objects were
+	// never observed, sweepUnfinalized destroyed them too.
+	//
+	// That is not an edge: Parse/Describe/Sync with no Execute is what pgx does
+	// on its DEFAULT exec mode and what database/sql's Prepare does on every
+	// mode. The client was told its statement was prepared, given no result
+	// shape, and refused at the next Bind for a statement it had just created.
+	//
+	// Delivering here is what the loop already documents as the contract —
+	// answers are "delivered when the client asks for them with Flush or Sync,
+	// exactly as PostgreSQL delivers them". Sync asks. Sync now delivers.
+	//
+	// The delivery error is held rather than returned: the segment must still
+	// END. Sync is what resets both tracks and leaves the wire usable, so
+	// returning early on a consumer stop would strand the connection in a state
+	// no later frame could recover.
+	deliverErr := deliverSegment(ctx, pc, s.ext, emit)
+
 	targetStatus, serr := pc.Sync(ctx)
 	// Sync consumes through the terminal ReadyForQuery whatever happened, so the
 	// segment's outstanding count is void either way: on success the server
@@ -440,6 +488,12 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	s.ext.releaseReadOnlyWrap(ctx)
 	if serr != nil {
 		return 0, serr
+	}
+	// THE WIRE FAILURE OUTRANKS THE DELIVERY FAILURE, deliberately: a broken
+	// wire is what the caller must act on, and a consumer that stopped reading
+	// is only worth reporting on a wire that still works.
+	if deliverErr != nil {
+		return 0, deliverErr
 	}
 
 	// THE READINESS BYTE IS THE CLIENT'S TRACK, NOT THE TARGET'S.
