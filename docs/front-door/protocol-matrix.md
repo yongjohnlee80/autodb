@@ -28,16 +28,18 @@ matches your question:
 stateDiagram-v2
     [*] --> S0: TCP accept
     S0 --> S1: SSLRequest, TLS established
-    S0 --> [*]: plaintext or direct-TLS, refused
+    S0 --> [*]: plaintext StartupMessage — refused, no fallback
+    S0 --> [*]: CancelRequest — accepted WITHOUT TLS (row 2.3),<br/>processed per section 6, then closed
     S1 --> S2: StartupMessage parsed (section 3)
     S2 --> S3: AuthenticationCleartextPassword offered
     S3 --> S4: PAT verified + reserved atomically (row 2.7)
     S3 --> [*]: uniform denial 28000, close
-    S4 --> S5: any extended message opens a segment
-    S5 --> S4: Sync ends the segment
-    S4 --> [*]: Terminate, or a fatal refusal
-    note right of S4: simple query protocol
-    note right of S5: extended query protocol
+    S4 --> S5: Parse opens a segment
+    S5 --> S4: Sync closes the segment and emits ReadyForQuery
+    S4 --> [*]: Terminate, or a fatal protocol violation
+    S5 --> [*]: Terminate, or a fatal protocol violation
+    note right of S4: simple query protocol — Query runs here
+    note right of S5: extended query protocol — Bind, Describe, Execute
 ```
 
 **Two rules govern almost every refusal below.** They are worth holding in mind
@@ -53,13 +55,13 @@ before reading any row:
 section 9 says when each applies:
 
 ```mermaid
-flowchart LR
-    A["Frontend message"] --> B{"Which lane?"}
-    B -->|"Sync, Flush, Terminate,<br/>CancelRequest"| C["Control lane<br/><i>always admissible,<br/>never reserves</i>"]
-    B -->|"Parse, Bind, Describe,<br/>Close, Execute, Query"| D["General lane<br/><i>reserves output capacity<br/>before dispatch</i>"]
-    D --> E["Segment budget<br/>10k msgs / 96 MiB"]
+flowchart TD
+    A["Frontend message"] --> B{"Which lane?<br/>(section 4, Charge column)"}
+    B -->|"Close, Flush, Sync, Terminate,<br/>CancelRequest, and every refusal"| C["CONTROL LANE<br/><i>always admissible ·<br/>reserves nothing</i>"]
+    B -->|"Query, Parse, Bind, Execute<br/>(Describe is control-sized<br/>on the general lane)"| D["GENERAL LANE<br/><i>reserves output capacity<br/>before dispatch</i>"]
+    D --> E["Segment budget — S5 only<br/>10k msgs / 96 MiB"]
     D --> F["Output watermark<br/>4 MiB"]
-    C --> G["Readiness always<br/>reaches the client"]
+    C --> G["<b>Sync alone</b> emits ReadyForQuery.<br/>Flush, Terminate and CancelRequest<br/>do not."]
 ```
 
 <details>
