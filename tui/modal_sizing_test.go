@@ -414,8 +414,20 @@ func TestCopyReport_SecretSurvivesAFailedCopy(t *testing.T) {
 	if _, _, dismiss := copyReport(false, true); dismiss {
 		t.Fatal("a shown-once credential dismissed itself after a FAILED clipboard write")
 	}
-	if _, _, dismiss := copyReport(true, true); !dismiss {
-		t.Fatal("a secret float stayed open after a successful copy")
+	// And it stays open on SUCCESS too. autodb cannot know whether the paste
+	// landed, so the moment of dismissal belongs to the user — closing the
+	// instant the clipboard call returned took a shown-once credential away
+	// mid-window-switch (Johno, v0.3.2 manual testing).
+	if _, ok, dismiss := copyReport(true, true); dismiss {
+		t.Fatal("a shown-once credential dismissed itself on a SUCCESSFUL copy: " +
+			"the user closes that float, not autodb")
+	} else if !ok {
+		t.Fatal("a successful clipboard copy was reported as a failure")
+	}
+	// An ORDINARY value float still closes — the behaviour change is scoped
+	// to credentials, not to every cell inspection.
+	if _, _, dismiss := copyReport(true, false); !dismiss {
+		t.Fatal("an ordinary value float stopped dismissing on a successful copy")
 	}
 }
 

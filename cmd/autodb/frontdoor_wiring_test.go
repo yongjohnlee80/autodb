@@ -284,3 +284,63 @@ func TestSuperviseFrontDoor_StopsWithTheServeContext(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 }
+
+// THE SEAM THE CELL ABOVE CANNOT SEE.
+//
+// TestStartFrontDoor_ListensAndHasTheEngineBehindIt is named for the whole
+// engine and observes ONE seam of three. Its discriminating assertion is the
+// AuthenticationCleartextPassword prompt, which proves Options.Authn was
+// passed — and it stops there, never authenticating, so it can never reach
+// post-auth. Options.Queries was nil in v0.3.1 and v0.3.2 and that cell stayed
+// green through both: the front door authenticated every client and refused
+// every statement it sent, and pgjdbc reported it as "connection was
+// established but closed as invalid" (Johno, 2026-09-03 manual testing).
+//
+// Reaching post-auth from here would need a PAT, a granted connection and an
+// unlocked store — a live-daemon integration cell, which is tracked separately.
+// These assert the wiring directly instead, which is the layer that broke.
+
+// TestFrontDoorOptions_CarryEverySeam: nil Queries means the door opens,
+// authenticates, and then refuses everything.
+func TestFrontDoorOptions_CarryEverySeam(t *testing.T) {
+	t.Parallel()
+	var eng *coreexec.Engine // the wiring is the subject, not the engine
+	opts := frontDoorOptions(config.Default(), eng, logger.Nop{})
+
+	if opts.Queries == nil {
+		t.Error("Options.Queries is nil: the front door would authenticate every " +
+			"client and then refuse every statement it sends")
+	}
+	// Asserted alongside, so a future edit that drops a different seam is caught
+	// by this cell rather than shipping the same class of bug through
+	// another field.
+	if opts.Authn == nil {
+		t.Error("Options.Authn is nil: nothing could authenticate")
+	}
+	if opts.Cancels == nil {
+		t.Error("Options.Cancels is nil: CancelRequest would resolve to nothing")
+	}
+}
+
+// TestFrontDoorOptions_SeamsAreTheEngine checks WHAT was wired, not merely that
+// something was: a non-nil assertion alone passes for any placeholder that
+// satisfies the interface.
+//
+// LIMIT, stated because a mutation run found it rather than leaving a reader to:
+// frontDoorOptions takes a *coreexec.Engine and a unit test has no real engine,
+// so eng is nil here and an "is it the same object" comparison degrades —
+// substituting (*coreexec.Engine)(nil) passes, because it IS what was passed in.
+// The type assertion is what carries weight.
+func TestFrontDoorOptions_SeamsAreTheEngine(t *testing.T) {
+	t.Parallel()
+	var eng *coreexec.Engine
+	opts := frontDoorOptions(config.Default(), eng, logger.Nop{})
+
+	if _, ok := opts.Queries.(*coreexec.Engine); !ok {
+		t.Errorf("Options.Queries is %T, want *coreexec.Engine — the front door must "+
+			"dispatch into the same engine every other surface uses", opts.Queries)
+	}
+	if _, ok := opts.Authn.(*coreexec.Engine); !ok {
+		t.Errorf("Options.Authn is %T, want *coreexec.Engine", opts.Authn)
+	}
+}

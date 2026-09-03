@@ -140,6 +140,12 @@ var ErrExtendedUnsupportedTarget = errors.New("exec: the extended query protocol
 // session machine owns rather than SQL the target runs.
 func isOwnedControl(st *extStatement) bool { return st.stmt.Class == ClassControl }
 
+// isSynthetic reports whether a prepared statement is answered entirely by the
+// front door, without any frame reaching the target: owned transaction control,
+// or an empty statement. Both create real protocol objects the client can bind,
+// describe, execute and close — they just have no target-side existence.
+func isSynthetic(st *extStatement) bool { return isOwnedControl(st) || st.empty }
+
 // WireParse gates one statement and records it under name.
 //
 // THE GATE IS THE SIMPLE PATH'S GATE, called in the same order with the same
@@ -167,6 +173,24 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrScriptTooLarge)
 	}
 	stmt, cerr := Classify(sqlText, false) // postgres-only path; mysql cannot reach here
+	if errors.Is(cerr, ErrEmptyStatement) {
+		// AN EMPTY STATEMENT IS LEGAL, and the matrix row for Query already
+		// says so — "Empty query -> EmptyQueryResponse + ReadyForQuery". The
+		// simple path implemented that; this one refused it, so every pgjdbc
+		// client died on its own validation probe before running anything.
+		//
+		// There is nothing to gate: no verb to authorize, no table to guard,
+		// no mutation to require a WHERE on. PostgreSQL does not authorize it
+		// either. It is charged like any other object, because a client can
+		// still accumulate empty statements without limit.
+		est := &extStatement{name: name, sql: sqlText, empty: true, paramOIDs: paramOIDs,
+			charge: objectCharge(len(sqlText)+len(name), len(paramOIDs)*4)}
+		if serr := s.ext.putStatement(est); serr != nil {
+			return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, serr)
+		}
+		s.ext.queueSynthFor(objectStatement, name, est.seq, WireMessage{Kind: "ParseComplete"})
+		return nil
+	}
 	if cerr != nil {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, cerr)
 	}
@@ -277,7 +301,7 @@ func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 	if perr := s.ext.putPortal(pt); perr != nil {
 		return perr
 	}
-	if isOwnedControl(st) {
+	if isSynthetic(st) {
 		s.ext.queueSynthFor(objectPortal, portalName, pt.seq, WireMessage{Kind: "BindComplete"})
 		return nil
 	}
@@ -302,8 +326,8 @@ func (e *Engine) WireDescribeStatement(ctx context.Context, id SessionID, userID
 	if serr != nil {
 		return serr
 	}
-	if isOwnedControl(st) {
-		// A control statement takes no parameters and returns no rows.
+	if isSynthetic(st) {
+		// A control or empty statement takes no parameters and returns no rows.
 		s.ext.queueSynth(WireMessage{Kind: "ParameterDescription"}, WireMessage{Kind: "NoData"})
 		return nil
 	}
@@ -325,7 +349,7 @@ func (e *Engine) WireDescribePortal(ctx context.Context, id SessionID, userID in
 	if perr != nil {
 		return perr
 	}
-	if st, err := s.ext.statement(prt.stmtName); err == nil && isOwnedControl(st) {
+	if st, err := s.ext.statement(prt.stmtName); err == nil && isSynthetic(st) {
 		s.ext.queueSynth(WireMessage{Kind: "NoData"})
 		return nil
 	}
@@ -346,7 +370,7 @@ func (e *Engine) WireCloseStatement(ctx context.Context, id SessionID, userID in
 	defer release()
 	// Close is not an error on a name that does not exist — PostgreSQL's own
 	// Close succeeds on a missing object — so the store's answer is not checked.
-	if st, err := s.ext.statement(name); err == nil && isOwnedControl(st) {
+	if st, err := s.ext.statement(name); err == nil && isSynthetic(st) {
 		s.ext.dropStatement(name)
 		s.ext.queueSynth(WireMessage{Kind: "CloseComplete"})
 		return nil
@@ -367,7 +391,7 @@ func (e *Engine) WireClosePortal(ctx context.Context, id SessionID, userID int64
 	}
 	defer release()
 	if prt, err := s.ext.portal(name); err == nil {
-		if st, serr := s.ext.statement(prt.stmtName); serr == nil && isOwnedControl(st) {
+		if st, serr := s.ext.statement(prt.stmtName); serr == nil && isSynthetic(st) {
 			s.ext.dropPortal(name)
 			s.ext.queueSynth(WireMessage{Kind: "CloseComplete"})
 			return nil
@@ -594,6 +618,16 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	// function the simple path calls — its own floor, its own audit, its own
 	// transition — so this is the extended twin of an emission that already
 	// exists, not a second control path.
+	// AN EMPTY STATEMENT executes to EmptyQueryResponse and nothing else — no
+	// CommandComplete, which is the whole distinction PostgreSQL draws for it.
+	// It reaches no target, opens no transaction, and touches no policy beyond
+	// the re-resolution above, so it sits before the control branch rather
+	// than inside it.
+	if st.empty {
+		s.ext.queueSynth(WireMessage{Kind: "EmptyQueryResponse"})
+		return nil
+	}
+
 	if isOwnedControl(st) {
 		// THE HIDDEN WRAP YIELDS TO THE CLIENT'S OWN TRANSACTION. The wrap
 		// exists only while the session has no transaction of its own, and a

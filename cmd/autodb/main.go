@@ -367,9 +367,30 @@ func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine
 	if err != nil {
 		return nil, nil, fmt.Errorf("front door: %w", err)
 	}
-	l, err := frontdoor.Open(cfg.FrontDoor.Bind, tlsCfg, frontdoor.Options{
-		Authn:             eng,
-		Cancels:           eng,
+	l, err := frontdoor.Open(cfg.FrontDoor.Bind, tlsCfg, frontDoorOptions(cfg, eng, oplog))
+	if err != nil {
+		return nil, nil, fmt.Errorf("front door: %w", err)
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- l.Serve(ctx) }()
+	fmt.Printf("autodb %s serving the PostgreSQL wire protocol on %s\n", version, cfg.FrontDoor.Bind)
+	return l, errc, nil
+}
+
+// frontDoorOptions builds the listener's options.
+//
+// Extracted so the wiring is TESTABLE. It was not, and that is exactly how
+// the front door shipped able to authenticate and unable to execute: Queries
+// was never passed, every authenticated client got 0A000, and the whole
+// frontdoor suite stayed green because each of its cells supplies the seam
+// itself. The library was verified; the wiring was not.
+func frontDoorOptions(cfg config.Config, eng *coreexec.Engine, oplog logger.Logger) frontdoor.Options {
+	return frontdoor.Options{
+		Authn:   eng,
+		Cancels: eng,
+		// The post-auth query path. Without it the listener authenticates a
+		// client and then refuses every statement it sends.
+		Queries:           eng,
 		MaxConns:          cfg.FrontDoor.MaxConns,
 		PreAuthMaxConns:   cfg.FrontDoor.PreAuthConns,
 		AuthWorkers:       cfg.FrontDoor.AuthWorkers,
@@ -387,14 +408,7 @@ func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine
 				"frontdoor": e.Kind, "reason": e.Reason, "peer": e.Peer, "detail": e.Detail,
 			})
 		},
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("front door: %w", err)
 	}
-	errc := make(chan error, 1)
-	go func() { errc <- l.Serve(ctx) }()
-	fmt.Printf("autodb %s serving the PostgreSQL wire protocol on %s\n", version, cfg.FrontDoor.Bind)
-	return l, errc, nil
 }
 
 // superviseFrontDoor stops the daemon when the front door stops unexpectedly.

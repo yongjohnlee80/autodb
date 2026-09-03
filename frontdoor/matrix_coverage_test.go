@@ -124,7 +124,7 @@ var matrixTriage = map[string]struct {
 	"3.1:user":                {covered, "claims below prove requiredness and the PAT-owner cross-check"},
 	"3.1:database":            {covered, "claims below prove requiredness and the grant-on-target check"},
 	"3.1:application_name":    {covered, "derived from its claims — #accepted, #truncate-notice-256 and #session-audit are all covered as of #58's seam and its consumer wiring. The parent was held awaiting by #session-audit alone (lector PR #46 r0 MF1); that claim is now witnessed on both sides of the seam, so the derivation promotes it rather than any hand edit here"},
-	"3.1:client_encoding":     {awaiting, "partial — claims below (the UTF8-only gate is proven; the target-lease UTF8 pin, ruling 2, needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub)"},
+	"3.1:client_encoding":     {awaiting, "partial — claims below (the UTF8-only gate is proven; the target-lease UTF8 pin, ruling 2, needs the LEASE-SIDE pin, not the wire loop: F1/F2 shipped in v0.3.1 and runSession is the post-auth loop whenever Options.Queries is supplied)"},
 	"3.1:options":             {covered, "derived from its claims — options unpacking and empty-accepted (TestStartup_ParameterPolicy, TestStartupGUCs_OptionsUnpackIntoTheSameMap, TestStartupGUCs_AnUnreadableOptionsStringIsRefused), empty-options audit (TestStartup_EmptyOptionsIsAuditedAsIgnored)"},
 	"3.1:replication":         {covered, "single claim below — refused, every tested value"},
 	"3.1:_pq_":                {covered, "TestStartup_UnrecognizedProtocolOptionsAreNamed + TestStartup_ParameterPolicy — negotiated, not refused"},
@@ -132,7 +132,7 @@ var matrixTriage = map[string]struct {
 	"3.1:carve-out":           {covered, "TestStartupGUCs_TheNamedSetIsNeverCollected (client_encoding and application_name never become settings) + TestPGStartupGUCs_ThePacketPsqlSendsConnects (the consequence, live: the packet every ordinary client sends still opens a session) + TestPGStartupGUCs_OptionsIsNotAWayAroundTheEncodingPin (nor through options)"},
 
 	// ---- §3.2 / §3.3 prose units ----
-	"3.2": {awaiting, "post-auth SET policy is the ADR-0074 gate matrix; needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub; the startup half is 3.1:options' refusal"},
+	"3.2": {awaiting, "post-auth SET policy is the ADR-0074 gate matrix; needs the LEASE-SIDE pin, not the wire loop: F1/F2 shipped in v0.3.1 and runSession is the post-auth loop whenever Options.Queries is supplied; the startup half is 3.1:options' refusal"},
 	"3.3": {covered, "TestPGLoop_TheClientReceivesTheTargetsOwnParameterSet + TestPGLoop_TheOverridesWinOverTheTargetsOwnValues — the forwarded half exists as of #58's seam and is proven against an INDEPENDENT connection to the same target (SHOW server_version/server_encoding/client_encoding/DateStyle), not against a list written in the cell, which would have encoded this build's parameters and passed while the relay forwarded something else. The overrides are proven to WIN over the target's own values for the same names, which is why they are appended after the forwarded set rather than the set being filtered; mutation-proven both ways (drop the forwarding, and reverse the order)"},
 
 	// ---- §4 Frontend message matrix (post-auth) ----
@@ -228,7 +228,7 @@ var claimTriage = map[string]struct {
 		"non-UTF8 refused, hyphen spelling tolerated",
 		[]string{`"client_encoding": "LATIN1"`, `"client_encoding": "utf-8"`}},
 	"3.1:client_encoding#lease-utf8-pin": {awaiting, "",
-		"the target lease is pinned UTF8 at acquisition (ruling 2) — nothing in core/exec pins client_encoding yet; needs the F1 WIRE LOOP — WireExecute (#41) has no wire caller; defaultSession is still the F0e 0A000 stub", nil},
+		"the target lease is pinned UTF8 at acquisition (ruling 2) — nothing in core/exec pins client_encoding yet; needs the LEASE-SIDE pin, not the wire loop: F1/F2 shipped in v0.3.1 and runSession is the post-auth loop whenever Options.Queries is supplied", nil},
 
 	"3.1:options#unpacked": {covered, "TestStartupGUCs_OptionsUnpackIntoTheSameMap",
 		"all three libpq spellings unpack into settings, escapes honoured; an options string that does not parse is refused (Amendment 8 — this claim was `#guc-refusal` while the rule was to refuse them)",

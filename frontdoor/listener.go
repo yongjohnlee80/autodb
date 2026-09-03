@@ -805,13 +805,21 @@ func (l *Listener) serveSession(ctx context.Context, stream net.Conn, fr *frameR
 	*closeReason = sessionReason
 }
 
-// defaultSession is the post-auth loop until F1 lands.
+// defaultSession is the post-auth loop for a listener with no query seam.
 //
-// It honours Terminate and refuses everything else with an ACCURATE 0A000
-// rather than a silence. A client that sends a Query to a build without the
-// execution slice deserves to be told the feature is not there; dropping the
-// connection instead would look like a network fault and send someone
-// debugging the wrong layer.
+// It is NOT a roadmap placeholder any more. F1 and F2 shipped in v0.3.1, and
+// this loop's old message still told the operator they would "land with the
+// F1 and F2 slices" — which sent Johno looking for missing features while the
+// actual fault was that cmd/autodb never passed Options.Queries. An error
+// that describes a world that no longer exists is worse than no error: it
+// aims the reader at the wrong layer with confidence.
+//
+// So it now says what is actually true: this listener has no executor wired.
+// That is a server-side wiring fault, not a missing feature and not anything
+// the client did.
+//
+// It still honours Terminate and refuses with an accurate code rather than a
+// silence — dropping the connection would look like a network fault.
 func (l *Listener) defaultSession(ctx context.Context, conn net.Conn, be *pgproto3.Backend, sess exec.WireSessionResult) error {
 	_ = ctx
 	_ = sess
@@ -827,9 +835,11 @@ func (l *Listener) defaultSession(ctx context.Context, conn net.Conn, be *pgprot
 			Severity:            "FATAL",
 			SeverityUnlocalized: "FATAL",
 			Code:                "0A000",
-			Message:             "this autodb front door cannot execute statements yet",
-			Detail:              "frontdoor/post-auth-not-implemented",
-			Hint:                "the simple and extended query paths land with the F1 and F2 slices",
+			Message:             "this autodb front door has no query executor wired",
+			Detail:              "frontdoor/no-query-executor",
+			Hint: "server misconfiguration, not a client error and not a missing feature: " +
+				"the listener was opened without Options.Queries, so it can authenticate " +
+				"but not execute. Report it to whoever runs this autodb.",
 		})
 		_ = be.Flush()
 		return nil
