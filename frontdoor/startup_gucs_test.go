@@ -847,18 +847,33 @@ func TestStartupGUCs_ACarvedOutNameIsChargedWhenSeen(t *testing.T) {
 	}
 }
 
-// THE NAME-HANDLING MATRIX, WITNESSED ROW BY ROW — EVERY COLUMN.
+// THE NAME-HANDLING MATRIX, WITNESSED ROW BY ROW — EVERY APPLICABLE CELL.
 //
 // params.go tabulates every special name against every rule, to close this class
 // by enumeration rather than by waiting for a sixth instance. A table in a
 // comment is a claim; this is what makes it one the suite checks.
 //
-// THE FIRST VERSION OF THIS CELL WAS THE FAILURE MODE THE TABLE EXISTS TO
-// PREVENT, one level up: it asserted two columns while the table claimed five,
-// and delegated the rest to cells that drove three names out of eight. A
-// completeness argument whose own verifier is incomplete is worth less than no
-// argument, because it invites trust it has not earned (lector r3). So every
-// column is driven here, for every row.
+// "APPLICABLE" IS DELIBERATE AND IT IS THE HONEST CLAIM. One cell genuinely does
+// not apply: canonicalization for `user` and `database`. A mixed-case spelling of
+// either is not that key, so the startup is refused for a missing required
+// parameter before anything could be rewritten — there is no canonical form to
+// enforce, and asserting a negative there would be a check that quietly becomes
+// vacuous. That cell is marked n/a WITH ITS REASON and the recognition
+// consequence is driven instead. Every other cell is driven directly.
+//
+// THIS CELL HAS BEEN THE FAILURE MODE THE TABLE EXISTS TO PREVENT, TWICE, one
+// level up from the code:
+//
+//   - r3: it asserted two columns while the table claimed five, delegating the
+//     rest to cells that drove three names out of eight.
+//   - r4: its fixture PRE-SEEDED user=root and database=d and then appended the
+//     row's pair, so those two rows carried an exact duplicate of their own key
+//     before the mixed spelling was reached — the fixture supplied the very
+//     collision the row exists to demonstrate. Measured: under a case-sensitive
+//     index mutant six rows reddened and those two stayed green. With clean
+//     per-row packets, all EIGHT redden.
+//
+// A cell must not be handed the property it claims to test.
 func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 	t.Parallel()
 	for _, row := range []struct {
@@ -873,15 +888,30 @@ func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 		asMixed       string
 		optionRefused bool // the options spelling is refused outright
 		collected     bool // it becomes a setting handed to the engine
+		// mixedAlone: what the MIXED spelling does as the only top-level
+		// occurrence. Every row drives it — no row substitutes its canonical
+		// spelling, which is how two rows previously claimed a drive they did
+		// not perform (lector r4 MF2).
+		//   refused-missing — it is not that key, so a required one is absent.
+		//                     CANONICALIZATION IS N/A for these rows: the startup
+		//                     is refused before any rewriting could happen, so
+		//                     there is no canonical form to enforce. The
+		//                     recognition consequence is driven instead.
+		//   canonicalised   — a carve-out, rewritten to its canonical spelling.
+		//   verbatim        — an ordinary setting, carried exactly as written;
+		//                     the n/a in the canonical column is ASSERTED here
+		//                     rather than assumed, and a mutation that
+		//                     canonicalises everything reddens exactly these rows.
+		mixedAlone string
 	}{
-		{"user", "User", "-c user=someone", "user", "", true, false},
-		{"database", "DataBase", "-c database=other", "database", "", true, false},
-		{"options", "Options", "-c options=-c x=1", "options", "", true, false},
-		{"replication", "Replication", "-c replication=database", "replication", "", true, false},
-		{"_pq_.ext", "_PQ_.ext", "-c _pq_.ext=1", "_pq_.", "", false, true},
-		{"application_name", "Application_Name", "-c application_name=psql", "application_name", "application_name", false, false},
-		{"client_encoding", "Client_Encoding", "-c client_encoding=UTF8", "client_encoding", "client_encoding", false, false},
-		{"datestyle", "DateStyle", "-c datestyle=ISO", "", "", false, true},
+		{"user", "User", "-c user=someone", "user", "", true, false, "refused-missing"},
+		{"database", "DataBase", "-c database=other", "database", "", true, false, "refused-missing"},
+		{"options", "Options", "-c options=-c x=1", "options", "", true, false, "verbatim"},
+		{"replication", "Replication", "-c replication=database", "replication", "", true, false, "verbatim"},
+		{"_pq_.ext", "_PQ_.ext", "-c _pq_.ext=1", "_pq_.", "", false, true, "verbatim"},
+		{"application_name", "Application_Name", "-c application_name=psql", "application_name", "application_name", false, false, "canonicalised"},
+		{"client_encoding", "Client_Encoding", "-c client_encoding=UTF8", "client_encoding", "client_encoding", false, false, "canonicalised"},
+		{"datestyle", "DateStyle", "-c datestyle=ISO", "", "", false, true, "verbatim"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
@@ -904,21 +934,33 @@ func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 			// COLUMN: indexed. Two spellings of ONE name always collide, whatever
 			// recognition decides — a separate operation, and conflating the two
 			// is the defect this row exists to prevent.
+			// NOTHING BUT THE TWO SPELLINGS UNDER TEST. The first version seeded
+			// user=root and database=d and then appended the row's pair, so the
+			// `user` and `database` rows carried an EXACT duplicate of their own
+			// key before the mixed spelling was ever reached — the fixture
+			// supplied the collision the row exists to demonstrate, and a
+			// case-sensitive index left both rows green (lector r4 MF1).
+			//
 			// [4:] because duplicateStartupKey reads the message BODY — the
 			// version word onward — and startupPacketPairs builds the framed
 			// packet with its length prefix. Passing the whole packet made every
 			// row report "did not collide", which is what a cell looks like when
 			// it is reading the wrong bytes rather than measuring the wrong thing.
 			raw := startupPacketPairs(protocolVersion30, [][2]string{
-				{"user", "root"}, {"database", "d"},
 				{row.name, "a"}, {row.mixed, "b"},
 			})[4:]
-			if dup, found := duplicateStartupKey(raw); !found {
+			dup, found := duplicateStartupKey(raw)
+			if !found {
 				t.Errorf("%q and %q did not collide in the presence index. The index FOLDS for "+
 					"everything, including names recognised byte-wise: recognition asks whether this "+
 					"is that name, indexing asks whether it has been seen", row.name, row.mixed)
-			} else if foldGUCName(dup) != foldGUCName(row.name) {
-				t.Errorf("the collision named %q, want a spelling of %q", dup, row.name)
+			} else if dup != row.mixed {
+				// The REPEAT must be the mixed spelling. Accepting any collision
+				// would pass for a packet that collided with something else — the
+				// exact hole the seeded fixture opened.
+				t.Errorf("the collision named %q, want the mixed spelling %q — a row that accepts "+
+					"any duplicate cannot tell a folded collision from one the fixture supplied",
+					dup, row.mixed)
 			}
 
 			// COLUMNS: via options, forwarded.
@@ -942,23 +984,35 @@ func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 				}
 			}
 
-			// COLUMN: canonical. A carved-out name is rewritten to its canonical
-			// spelling; every other row's key is left exactly as the client wrote
-			// it, because the engine folds for admission and the target decides.
+			// COLUMN: canonical — driven with THE MIXED SPELLING for every row,
+			// including the two that used to substitute their canonical one.
+			// Driving `User=root` really does refuse the startup, and that is the
+			// behaviour: `User` is not the identity, so the identity is missing.
+			// An asserted negative beats a documented N/A wherever the negative
+			// is real, and here it is.
 			params := map[string]string{"user": "root", "database": "d"}
-			if row.name != "user" && row.name != "database" {
-				params[row.mixed] = valueFor(row.name)
-			} else {
-				params[row.name] = "root"
-			}
+			delete(params, row.name) // never pre-seed the key under test
+			params[row.mixed] = valueFor(row.name)
 			check, ok = checkStartupParams(params)
-			if !ok {
-				t.Fatalf("a lone %q was refused as %q (%s)", row.mixed, check.Refused, check.Reason)
-			}
-			switch {
-			case carvedOutNames[row.asCanonical]:
-				// A carve-out: rewritten, and the odd spelling is gone.
-				if _, still := params[row.mixed]; still && row.mixed != row.name {
+
+			switch row.mixedAlone {
+			case "refused-missing":
+				// CANONICAL COLUMN: n/a, and this is the reason rather than an
+				// omission — the packet never gets far enough to rewrite anything.
+				if ok {
+					t.Fatalf("%q alone was ACCEPTED (settings %v). It is not %q — PostgreSQL matches "+
+						"that key byte-wise — so the required parameter is absent and the startup "+
+						"must be refused for the same reason the target refuses it",
+						row.mixed, check.GUCs, row.name)
+				}
+				if check.Refused != row.name {
+					t.Errorf("refused %q, want the missing %q named", check.Refused, row.name)
+				}
+			case "canonicalised":
+				if !ok {
+					t.Fatalf("a lone %q was refused as %q (%s)", row.mixed, check.Refused, check.Reason)
+				}
+				if _, still := params[row.mixed]; still {
 					t.Errorf("%q survives in the map beside its canonical spelling; a later exact "+
 						"lookup could still find the wrong one", row.mixed)
 				}
@@ -967,15 +1021,21 @@ func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 						"ParameterStatus echo all read that exact key, so a spelling that never "+
 						"reaches it is accepted and then silently ignored", row.mixed, row.name)
 				}
-			default:
-				// Not rewritten: the client's spelling is what the target sees.
-				if row.mixed != row.name {
-					if _, verbatim := check.GUCs[row.mixed]; !verbatim && !row.optionRefused {
-						t.Errorf("%q was not carried verbatim (settings %v) — only the carved-out "+
-							"names are canonicalised; everything else is the target's to interpret",
-							row.mixed, check.GUCs)
-					}
+				if _, collected := check.GUCs[row.name]; collected {
+					t.Errorf("%q was collected as a setting despite the carve-out", row.name)
 				}
+			case "verbatim":
+				if !ok {
+					t.Fatalf("a lone %q was refused as %q (%s)", row.mixed, check.Refused, check.Reason)
+				}
+				if _, exact := check.GUCs[row.mixed]; !exact {
+					t.Errorf("%q was not carried verbatim (settings %v) — only the carved-out names "+
+						"are canonicalised; everything else is the target's to interpret, so "+
+						"rewriting it here would hand the target a name the client never sent",
+						row.mixed, check.GUCs)
+				}
+			default:
+				t.Fatalf("row %q has no mixedAlone expectation; every row drives every column", row.name)
 			}
 		})
 	}
@@ -983,14 +1043,14 @@ func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 
 // valueFor gives a row a value its own rules accept, so the canonical column is
 // not accidentally testing a value rule instead.
+//
+// Only client_encoding has one: §3.1 accepts it iff UTF8, and any other value
+// would refuse the startup for the VALUE while the row is asking about the NAME.
+// Every other row's mixed spelling is an ordinary setting whose value the target
+// judges, so anything does.
 func valueFor(name string) string {
-	switch name {
-	case "client_encoding":
+	if name == "client_encoding" {
 		return "UTF8"
-	case "options":
-		return ""
-	case "replication":
-		return "database"
 	}
 	return "x"
 }
