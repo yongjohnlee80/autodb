@@ -64,7 +64,8 @@ func (l *generalLane) tryReserve(n int64) bool {
 // nothing releases is a hung session holding the engine's claim and a pinned
 // backend, which is the failure mode PR #52 r1 MF7 was about in a different
 // clothing; the bound is a policy choice recorded in
-// docs/front-door/session-loop-budgets.md rather than a matrix figure.
+// the session-loop budgets reference in the KB (shared/reference/
+// autodb-front-door-session-loop-budgets.md) rather than a matrix figure.
 func (l *generalLane) reserve(n int64, budget time.Duration, now func() time.Time) bool {
 	if n > l.limit {
 		// Larger than the lane itself: no amount of waiting can admit it, and
