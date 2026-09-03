@@ -479,6 +479,50 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			return e.emitStopped(s, ef.err, outcomes[i].status, outcomes[i].ran, te)
 		}
 		if derr != nil && !consumerErr {
+			// ErrSegmentInFlight IS NOT A LOST WIRE, and it is a THIRD cause this
+			// branch has beyond the two the comment below enumerates.
+			//
+			// golib raises it when a guarded call is made while the wire is not
+			// quiescent, and it raises it BEFORE touching the wire — so the
+			// connection is in exactly the state it was in a moment earlier.
+			// Classifying that as a poisoned handle told a conformant client its
+			// connection to the target had died, closed the session, and answered
+			// 08P01 protocol_violation, blaming the client for a sequence real
+			// PostgreSQL answers normally.
+			//
+			// THIS SENTINEL ONLY, DELIBERATELY. It is not a claim that golib
+			// refusals in general are safe here: this is the one whose behaviour is
+			// measured, by the live Parse-then-simple-Query cell. Every other error
+			// — transport failures, a poisoned raw face, and any golib error not
+			// named here — keeps the fatal default below, which is CORRECT for them.
+			//
+			// Widening it would mean enumerating golib's refusal shapes, and that is
+			// a GOLIB-side question this repo cannot answer. Asserting a vocabulary
+			// with evidence for one member of it is the exact defect this branch was
+			// repaired for; a general safe-refusal vocabulary is a golib-side
+			// follow-up, not an oversight here.
+			//
+			// It also does not make the sequence SUPPORTED. Whether autodb adopts
+			// PostgreSQL's mid-segment-Query behaviour is an open contract question;
+			// this only makes the refusal honest.
+			if errors.Is(derr, golibpg.ErrSegmentInFlight) {
+				// The CAUSE travels in the audit row, never to the peer: golib's
+				// internal text is an implementation detail, and forwarding it is how
+				// "an extended segment is in flight" reached a client as though the
+				// target had spoken.
+				e.auditBounded(ctx, s.userID, ip, "wire_sequence_refused",
+					fmt.Sprintf("conn %d: session %s: %v", s.connID, s.id, derr))
+				for i := el.first; i <= el.last; i++ {
+					outcomes[i].status = StatusError
+					outcomes[i].errText = truncate(ErrWireSequenceRefused.Error(), maxErrorBytes)
+				}
+				if rerr := record(); rerr != nil {
+					return 0, rerr
+				}
+				// NOT wrapped: the wire is fine, the session continues, and the
+				// handle is not poisoned or transferred.
+				return 0, ErrWireSequenceRefused
+			}
 			// The WIRE failed (transport, or control reached the raw face, which
 			// the gate makes impossible): the pinned handle is poisoned and this
 			// session cannot continue on it. Record, then close.
@@ -716,6 +760,18 @@ const DecodedResultTruncatedRuleID = "frontdoor/decoded-result-page-exceeded"
 // loop must tear the client connection down and send NO readiness byte. It
 // wraps the underlying cause; errors.Is(err, ErrWireFaceLost) recognises it.
 var ErrWireFaceLost = errors.New("exec: the session's wire failed; the session is closing")
+
+// ErrWireSequenceRefused is autodb's OWN refusal of a message the target
+// connection cannot accept in its current state.
+//
+// It is deliberately NOT a wire failure: golib's guard refuses before touching
+// the wire, so the connection is intact, the handle is not poisoned, and the
+// session continues. The text is what the PEER is told, so it says what to do
+// next and names no internal identifier — the cause travels in the audit row.
+//
+// Raised for golibpg.ErrSegmentInFlight and nothing else. It is not a general
+// "golib refused" category; see the classification site for why the set is one.
+var ErrWireSequenceRefused = errors.New("exec: this message is not supported while an extended-query segment is open; end it with Sync first")
 
 // wireFaceLost wraps a wire failure so the loop can match it and still read the cause.
 func wireFaceLost(cause error) error { return fmt.Errorf("%w: %w", ErrWireFaceLost, cause) }
