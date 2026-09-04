@@ -10,12 +10,25 @@ package meta
 // cursor advances by keyset (never OFFSET), and exclusion predicates are
 // pushed into the query.
 //
-// GOLIB-TRANSFERABLE BY DESIGN: this file imports only context, errors,
-// fmt, and golib/dao — no autodb packages. If a second golib-dao consumer
-// grows sweeps, it moves upstream nearly verbatim (tracked by the golib/dao
-// check-back task). A native dao version could collapse Key/ByKey/KeyOf,
-// since the Schema already knows its id column; standalone, the caller
-// supplies them.
+// GOLIB-TRANSFERABLE BY DESIGN, AND STAYING HERE: this file imports only
+// context, errors, fmt, and golib/dao — no autodb packages. Keep it that
+// way; the transferability is what makes the upstream move cheap if it is
+// ever taken.
+//
+// The upstream question was asked and ANSWERED — golib ADR-0019 §2.3,
+// ratified by Johno 2026-09-05: it stays in autodb. The second-consumer
+// test failed (no other golib/dao consumer hand-rolls a sweep; ddex's
+// Limit/Offset is a caller-bounded list endpoint), this file has one
+// production call site, and golib forbids exported API nothing uses.
+// autokb was checked rather than assumed: its golib prerequisite is
+// golib/fs, not dao, and its storage design specifies no keyset sweep.
+//
+// Re-open when any of these becomes true (ADR-0019 §2.3): a design that
+// specifies a bounded scan over a table with a unique monotonic id, an
+// autodb sweep this API does not fit, or a third consumer hand-rolling
+// position+LIMIT+predicate. THEN design the native dao version — it could
+// collapse Key/ByKey/KeyOf, since the Schema already knows its id column;
+// standalone, the caller supplies them. Do not lift this file verbatim.
 
 import (
 	"context"
