@@ -3,7 +3,14 @@ package meta
 // MustTx — join-or-begin (Johno-ruled, 2026-09-01), mirroring
 // LabelManager's proven pkg/transaction.MustTx idiom.
 //
-// GOLIB-TRANSFERABLE BY DESIGN: imports only context and golib/dao.
+// GOLIB-TRANSFERABLE BY DESIGN, AND STAYING HERE: imports only context and
+// golib/dao. golib ADR-0019 §2.4 (ratified by Johno 2026-09-05) keeps it in
+// autodb on two grounds: it has no production call sites yet, and golib
+// forbids exported API nothing uses; and `MustTx` is the wrong name for
+// public golib API, where the stdlib's Must* prefix means "panics instead of
+// returning an error". The name is fine here. If it moves upstream it gets a
+// new one (dao.JoinTx is the candidate), chosen by whoever brings the first
+// real caller.
 
 import (
 	"context"
