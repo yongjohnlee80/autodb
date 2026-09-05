@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/exec"
 )
 
@@ -238,6 +239,21 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	if aerr != nil {
 		if reason := exec.DenialReason(aerr); reason != "" {
 			return authOutcome{Denied: denialReason(reason), Counts: chargesThrottle(reason)}, nil
+		}
+		// THE STORE IS LOCKED, which is not a store FAILURE and not the
+		// caller's fault (ADR-0087 A1.3). It answers 57P03 rather than the
+		// uniform 28000 because a developer holding a perfectly good token
+		// must not be told their credentials are wrong on the morning after a
+		// reboot. Uncharged, like every other outage of ours.
+		//
+		// Reached during the CREDENTIAL PHASE, before this connection is
+		// authenticated — so this is a change to the PRE-AUTH vocabulary, and
+		// A1.3 carries it on the R13 argument rather than on the post-auth
+		// "answer accurately" rule, which does not reach here.
+		if errors.Is(aerr, auth.ErrLocked) {
+			l.onLog(fmt.Sprintf("frontdoor: refusing %s: the store is locked — no passphrase "+
+				"login yet, or the service keyslot did not open (see the keyslot status)", peer))
+			return authOutcome{Denied: reasonStoreLocked}, nil
 		}
 		// A store failure. The wire still gets the uniform denial — telling
 		// a caller that our database is unreachable is an answer they have
