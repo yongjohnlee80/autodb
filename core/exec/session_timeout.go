@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -92,8 +93,8 @@ func (l txLimits) serverBeltSeconds() int {
 // A target that does not support it is not an error. The belt is a
 // belt: the engine's own deadline is the guarantee, and a driver without the
 // GUC simply does not get the second layer.
-func armServerBelt(ctx context.Context, tx dao.TxConn, engineName string, l txLimits) error {
-	if engineName != "postgres" {
+func armServerBelt(ctx context.Context, tx dao.TxConn, engineName engine.Name, l txLimits) error {
+	if engineName != engine.Postgres {
 		return nil
 	}
 	_, err := tx.ExecContext(ctx,

@@ -3,6 +3,7 @@ package meta
 import (
 	"context"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -614,10 +615,10 @@ func withMigrationLock(ctx context.Context, conn dao.DataConn, run func(tx dao.C
 // pending versions in order — the WHOLE upgrade inside one driver transaction
 // (both engines support transactional DDL), so a failure leaves the store at
 // its original version rather than stranded between two. See applyAll.
-func runMigrations(ctx context.Context, conn dao.DataConn, engine string) error {
-	if engine == "postgres" {
+func runMigrations(ctx context.Context, conn dao.DataConn, eng engine.Name) error {
+	if eng == engine.Postgres {
 		return withMigrationLock(ctx, conn, func(tx dao.ContextTxConn) error {
-			return applyAll(ctx, tx, conn.Dialect(), engine)
+			return applyAll(ctx, tx, conn.Dialect(), eng)
 		})
 	}
 	// sqlite: a file store is single-writer and each test uses its own file
@@ -627,7 +628,7 @@ func runMigrations(ctx context.Context, conn dao.DataConn, engine string) error 
 	if err != nil {
 		return fmt.Errorf("meta: beginning the migration transaction: %w", err)
 	}
-	if err := applyAll(ctx, tx, conn.Dialect(), engine); err != nil {
+	if err := applyAll(ctx, tx, conn.Dialect(), eng); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -661,7 +662,7 @@ type migExec interface {
 //
 // That second point is a deliberate SEMANTIC CHANGE, not a side effect: before
 // this, a failure at v10 left a store that had already committed v7..v9.
-func applyAll(ctx context.Context, ex migExec, d dao.Dialect, engine string) error {
+func applyAll(ctx context.Context, ex migExec, d dao.Dialect, eng engine.Name) error {
 	const ledger = `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY,
 		applied_at BIGINT NOT NULL)`
@@ -684,7 +685,7 @@ func applyAll(ctx context.Context, ex migExec, d dao.Dialect, engine string) err
 			continue
 		}
 		stmts := m.SQLite
-		if engine == "postgres" {
+		if eng == engine.Postgres {
 			stmts = m.Postgres
 		}
 		for _, stmt := range stmts {
@@ -692,7 +693,7 @@ func applyAll(ctx context.Context, ex migExec, d dao.Dialect, engine string) err
 				return fmt.Errorf("meta: migration %d: applying %q: %w", m.Version, firstLine(stmt), err)
 			}
 		}
-		if engine == "postgres" && m.PostgresFn != nil {
+		if eng == engine.Postgres && m.PostgresFn != nil {
 			if err := m.PostgresFn(ctx, ex); err != nil {
 				return fmt.Errorf("meta: migration %d: computed step: %w", m.Version, err)
 			}

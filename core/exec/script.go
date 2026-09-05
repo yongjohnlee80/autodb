@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -46,7 +47,7 @@ func (e *Engine) ExecuteScript(ctx context.Context, token string, connID int64, 
 		return nil, auth.ErrDenied // never disclose which connections exist
 	}
 
-	parts, err := SplitStatements(sqlText, connRow.Engine == "mysql")
+	parts, err := SplitStatements(sqlText, connRow.Engine == engine.MySQL)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +108,7 @@ func (e *Engine) ExecuteScriptAtomic(ctx context.Context, token string, connID i
 	if err != nil {
 		return nil, auth.ErrDenied // never disclose which connections exist
 	}
-	mysql := connRow.Engine == "mysql"
+	mysql := connRow.Engine == engine.MySQL
 	parts, err := SplitStatements(sqlText, mysql)
 	if err != nil {
 		return nil, err

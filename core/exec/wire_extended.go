@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -71,7 +72,7 @@ func (e *Engine) wireExtEntry(ctx context.Context, id SessionID, userID int64, w
 		release()
 		return nil, nil, nil, nil, auth.ErrDenied // never disclose which connections exist
 	}
-	if connRow.Engine != "postgres" {
+	if connRow.Engine != engine.Postgres {
 		// The extended protocol is relayed natively or not at all. A non-postgres
 		// target has no wire to relay onto, and approximating one — decoding the
 		// frames and re-issuing them as ordinary statements — would silently drop

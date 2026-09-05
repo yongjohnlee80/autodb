@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"strings"
 	"testing"
 
@@ -365,7 +366,10 @@ func TestEngine_RejectsGrammarChangingDSN(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 
-	bad := []struct{ engine, dsn string }{
+	bad := []struct {
+		engine engine.Name
+		dsn    string
+	}{
 		{"mysql", "u:p@tcp(h:3306)/db?multiStatements=true"},
 		{"mysql", "u:p@tcp(h:3306)/db?sql_mode=NO_BACKSLASH_ESCAPES"},
 		{"mysql", "u:p@tcp(h:3306)/db?interpolateParams=true"},

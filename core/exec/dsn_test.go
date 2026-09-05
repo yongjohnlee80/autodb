@@ -1,12 +1,15 @@
 package exec
 
-import "testing"
+import (
+	"github.com/yongjohnlee80/autodb/core/engine"
+	"testing"
+)
 
 func TestValidateDSN(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
-		engine string
+		engine engine.Name
 		dsn    string
 		ok     bool
 	}{

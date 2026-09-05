@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"net"
 	"os"
 	"os/exec"
@@ -803,12 +804,12 @@ func runUI(configPath string) error {
 	// would actually use — rather than asking the server, so the splash
 	// works before anyone logs in.
 	metaPath := cfg.Meta.Path
-	if cfg.Meta.Engine == "sqlite" && metaPath == "" {
+	if cfg.Meta.Engine == engine.SQLite && metaPath == "" {
 		if p, perr := config.DefaultMetaPath(); perr == nil {
 			metaPath = p
 		}
 	}
-	if cfg.Meta.Engine == "postgres" {
+	if cfg.Meta.Engine == engine.Postgres {
 		metaPath = "(postgres DSN from config)"
 	}
 	activeConfig := configPathFor(configPath)
@@ -820,7 +821,7 @@ func runUI(configPath string) error {
 		tuiapp.WithAbout(tuiapp.AboutInfo{
 			Version: version, Commit: commit, BuildDate: buildDate,
 			Repo: repoURL, Author: author,
-			NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine, MetaPath: metaPath,
+			NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine.String(), MetaPath: metaPath,
 			ConfigPath: activeConfig,
 		}))
 	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(backend))
@@ -872,7 +873,7 @@ func runWebUI(configPath string, port int) error {
 		About: tuiapp.AboutInfo{
 			Version: version, Commit: commit, BuildDate: buildDate,
 			Repo: repoURL, Author: author,
-			NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine,
+			NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine.String(),
 			MetaPath:   metaPathFor(cfg),
 			ConfigPath: configPathFor(configPath),
 		},
@@ -893,12 +894,12 @@ func runWebUI(configPath string, port int) error {
 // server, so the splash works before anyone logs in.
 func metaPathFor(cfg config.Config) string {
 	p := cfg.Meta.Path
-	if cfg.Meta.Engine == "sqlite" && p == "" {
+	if cfg.Meta.Engine == engine.SQLite && p == "" {
 		if d, err := config.DefaultMetaPath(); err == nil {
 			return d
 		}
 	}
-	if cfg.Meta.Engine == "postgres" {
+	if cfg.Meta.Engine == engine.Postgres {
 		return "(postgres DSN from config)"
 	}
 	return p

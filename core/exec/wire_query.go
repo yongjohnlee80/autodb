@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/golib/dao"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
@@ -172,7 +173,7 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 	if err != nil {
 		return 0, auth.ErrDenied // never disclose which connections exist
 	}
-	if connRow.Engine != "postgres" {
+	if connRow.Engine != engine.Postgres {
 		return e.wireQueryDecoded(ctx, s, pol, connRow, sqlText, ip, emit)
 	}
 	return e.wireQueryRaw(ctx, s, pol, connRow, sqlText, ip, emit, &closeAfterRelease)

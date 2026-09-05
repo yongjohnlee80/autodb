@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"sync"
 	"time"
 
@@ -109,7 +110,7 @@ func (e *Engine) readerAnalysis(ctx context.Context, connRow *meta.Connection, p
 	case "DO", "CALL":
 		return fmt.Errorf("%w: %s", ErrReaderAdvancedPattern, stmt.Verb)
 	}
-	if len(stmt.Calls) == 0 || connRow.Engine != "postgres" {
+	if len(stmt.Calls) == 0 || connRow.Engine != engine.Postgres {
 		// Non-postgres targets have no catalog of this shape here; their reader
 		// safety rests on the classifier and the driver's read-only transaction.
 		return nil

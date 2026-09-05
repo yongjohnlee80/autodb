@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"io"
 	"os"
 	"strings"
@@ -84,8 +85,8 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 		return fmt.Errorf("migrate-to-postgres: --from %q is a directory, not a sqlite store", o.from)
 	}
 
-	srcCfg := config.Meta{Engine: "sqlite", Path: o.from}
-	dstCfg := config.Meta{Engine: "postgres", DSN: o.to, AllowInsecureDSN: o.allowInsecure}
+	srcCfg := config.Meta{Engine: engine.SQLite, Path: o.from}
+	dstCfg := config.Meta{Engine: engine.Postgres, DSN: o.to, AllowInsecureDSN: o.allowInsecure}
 	// The FULL operational rule, not the transport half. A DSN-level
 	// pool_max_conns=1 otherwise reaches the destination lease, which pins the
 	// only connection, and the migration runner then blocks forever waiting

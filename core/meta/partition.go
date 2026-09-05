@@ -3,6 +3,7 @@ package meta
 import (
 	"context"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"time"
 )
 
@@ -368,7 +369,7 @@ const partitionLookAhead = 3
 //
 // A no-op on sqlite, so callers do not have to branch on the engine.
 func (s *Store) RollPartitions(ctx context.Context, now time.Time) error {
-	if s.engine != "postgres" {
+	if s.engine != engine.Postgres {
 		return nil
 	}
 	tx, err := s.conn.Begin(ctx)
@@ -416,7 +417,7 @@ func (s *Store) RollPartitions(ctx context.Context, now time.Time) error {
 // Exported for the tests and for an operator answering "what is actually
 // there?" — the answer to which is otherwise a catalog query nobody remembers.
 func (s *Store) PartitionNames(ctx context.Context, table string) ([]string, error) {
-	if s.engine != "postgres" {
+	if s.engine != engine.Postgres {
 		return nil, nil
 	}
 	rows, err := s.conn.QueryContext(ctx, `
@@ -461,7 +462,7 @@ func (s *Store) PartitionNames(ctx context.Context, table string) ([]string, err
 //
 // Trivially clean on sqlite, whose id is a plain primary key.
 func (s *Store) CheckLogicalIDUniqueness(ctx context.Context) error {
-	if s.engine != "postgres" {
+	if s.engine != engine.Postgres {
 		return nil
 	}
 	for _, p := range volumeTables {
@@ -535,7 +536,7 @@ const maxPrepartitionMonths = 600
 //
 // A no-op unless the destination is postgres.
 func prepartitionForSource(ctx context.Context, src, dst *Store) error {
-	if dst.engine != "postgres" {
+	if dst.engine != engine.Postgres {
 		return nil
 	}
 	for _, p := range volumeTables {

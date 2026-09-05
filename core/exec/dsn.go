@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"strings"
 
 	drvmysql "github.com/go-sql-driver/mysql"
@@ -32,9 +33,9 @@ import (
 
 // ValidateDSN rejects DSNs whose options would desynchronize the classifier
 // from the target's actual grammar or change statement semantics.
-func ValidateDSN(engineName, dsn string) error {
+func ValidateDSN(engineName engine.Name, dsn string) error {
 	switch engineName {
-	case "mysql":
+	case engine.MySQL:
 		cfg, err := drvmysql.ParseDSN(dsn)
 		if err != nil {
 			return fmt.Errorf("exec: invalid mysql DSN: %w", err)
@@ -59,7 +60,7 @@ func ValidateDSN(engineName, dsn string) error {
 		}
 		return nil
 
-	case "postgres":
+	case engine.Postgres:
 		cfg, err := pgxpool.ParseConfig(dsn)
 		if err != nil {
 			return fmt.Errorf("exec: invalid postgres DSN: %w", err)
@@ -77,7 +78,7 @@ func ValidateDSN(engineName, dsn string) error {
 		}
 		return nil
 
-	case "sqlite":
+	case engine.SQLite:
 		return nil
 	default:
 		return fmt.Errorf("exec: unsupported connection engine %q (postgres, mysql, sqlite)", engineName)
@@ -153,9 +154,9 @@ var lexerIncompatibleModes = []string{"NO_BACKSLASH_ESCAPES", "ANSI_QUOTES", "AN
 // verifyGrammarQ checks the CURRENT session's parsing mode through q — which
 // must be the same session the statement will run on (a TxConn), never the
 // pool. Refuses rather than SETting over the operator's modes.
-func verifyGrammarQ(ctx context.Context, q dao.Querier, engineName string) error {
+func verifyGrammarQ(ctx context.Context, q dao.Querier, engineName engine.Name) error {
 	switch engineName {
-	case "mysql":
+	case engine.MySQL:
 		mode, err := scalarStringQ(ctx, q, "SELECT @@SESSION.sql_mode")
 		if err != nil {
 			return fmt.Errorf("exec: reading sql_mode: %w", err)
@@ -167,7 +168,7 @@ func verifyGrammarQ(ctx context.Context, q dao.Querier, engineName string) error
 			}
 		}
 		return nil
-	case "postgres":
+	case engine.Postgres:
 		scs, err := scalarStringQ(ctx, q, "SHOW standard_conforming_strings")
 		if err != nil {
 			return fmt.Errorf("exec: reading standard_conforming_strings: %w", err)
@@ -225,9 +226,9 @@ func scalarStringQ(ctx context.Context, querier dao.Querier, stmt string) (strin
 // example — its "database" is a file path, not a name a client would type into
 // a Database field. Empty therefore means "reachable by name only", never
 // "misconfigured".
-func TargetDBName(engineName, dsn string) (string, error) {
+func TargetDBName(engineName engine.Name, dsn string) (string, error) {
 	switch engineName {
-	case "postgres":
+	case engine.Postgres:
 		cfg, err := pgxpool.ParseConfig(dsn)
 		if err != nil {
 			return "", fmt.Errorf("exec: invalid postgres DSN: %w", err)

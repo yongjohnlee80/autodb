@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -98,7 +99,7 @@ func TestPoolLimits_DefaultsAreBounded(t *testing.T) {
 	cfg := &pgxpool.Config{}
 	e.pgPoolLimits(&meta.Connection{})(cfg)
 	if cfg.MaxConns <= 0 || cfg.MaxConnLifetime <= 0 {
-		t.Errorf("a default engine opens postgres pools with MaxConns=%d lifetime=%s; unbounded "+
+		t.Errorf("a default eng opens postgres pools with MaxConns=%d lifetime=%s; unbounded "+
 			"by default means every unconfigured install can exhaust its target",
 			cfg.MaxConns, cfg.MaxConnLifetime)
 	}
@@ -109,7 +110,7 @@ func TestPoolLimits_DefaultsAreBounded(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	e.sqlPoolLimits(&meta.Connection{})(db)
 	if st := db.Stats(); st.MaxOpenConnections <= 0 {
-		t.Errorf("a default engine opens database/sql pools with MaxOpenConnections=%d",
+		t.Errorf("a default eng opens database/sql pools with MaxOpenConnections=%d",
 			st.MaxOpenConnections)
 	}
 
@@ -190,24 +191,24 @@ func TestOpenTarget_EveryDriverBranchAppliesThePoolBounds(t *testing.T) {
 		return nil, stop
 	}
 
-	for _, engine := range []string{"postgres", "mysql", "sqlite"} {
-		t.Run(engine, func(t *testing.T) {
+	for _, eng := range engine.All() {
+		t.Run(eng.String(), func(t *testing.T) {
 			pgCfg, sqlStats = nil, sql.DBStats{}
 			row, err := f.store.Connections.OnCtx(t.Context()).With(meta.ConnID, f.connID).Get()
 			if err != nil {
 				t.Fatalf("reading the connection row: %v", err)
 			}
-			row.Engine = engine
+			row.Engine = eng
 			e.closeTarget(f.connID)
 
 			// The open is expected to fail: the seam refuses on purpose. What
 			// matters is that the branch was REACHED and what it passed.
 			if _, err := e.target(t.Context(), f.connID, row); !errors.Is(err, stop) {
 				t.Fatalf("the %s branch was not reached (err = %v); this test cannot observe "+
-					"what it passes to the driver", engine, err)
+					"what it passes to the driver", eng, err)
 			}
 
-			if engine == "postgres" {
+			if eng == engine.Postgres {
 				if pgCfg == nil {
 					t.Fatal("the postgres branch passed nothing")
 				}
@@ -224,7 +225,7 @@ func TestOpenTarget_EveryDriverBranchAppliesThePoolBounds(t *testing.T) {
 			if sqlStats.MaxOpenConnections != 11 {
 				t.Errorf("%s opens with MaxOpenConnections = %d, want 11 — database/sql caps "+
 					"nothing by default, so this branch is unbounded against a live target",
-					engine, sqlStats.MaxOpenConnections)
+					eng, sqlStats.MaxOpenConnections)
 			}
 		})
 	}

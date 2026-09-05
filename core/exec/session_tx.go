@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -257,8 +258,8 @@ func (e *Engine) beginTx(
 // PostgreSQL only, because that is where the oracle exists. txid_current()
 // also ASSIGNS an xid if the transaction does not yet have one, which is what
 // we want -- an xid assigned lazily at first write would not be knowable here.
-func (e *Engine) captureTargetXID(ctx context.Context, tx dao.ContextTxConn, engineName string) string {
-	if engineName != "postgres" {
+func (e *Engine) captureTargetXID(ctx context.Context, tx dao.ContextTxConn, engineName engine.Name) string {
+	if engineName != engine.Postgres {
 		return ""
 	}
 	rows, err := tx.QueryContext(ctx, "SELECT txid_current()::text")
