@@ -603,6 +603,44 @@ func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
 	return out, nil
 }
 
+// FrontDoorEndpoint is what a client needs to dial the front door, read from
+// the LIVE listener rather than from configuration.
+type FrontDoorEndpoint struct {
+	Enabled    bool
+	Listening  bool
+	Addr       string
+	HostNames  []string
+	RootCAFile string
+}
+
+// Configured reports whether a token minted now could actually be used.
+//
+// Enabled-but-not-listening is the case worth naming: the operator asked for
+// the surface and it failed to start, so a credential minted against it works
+// nowhere and nothing on screen would say so.
+func (e FrontDoorEndpoint) Configured() bool { return e.Enabled && e.Listening }
+
+// FrontDoorEndpoint asks the daemon where the front door actually is.
+func (b *Bound) FrontDoorEndpoint(ctx context.Context) (FrontDoorEndpoint, error) {
+	res, err := b.authed(ctx, "frontdoor.endpoint")
+	if err != nil {
+		return FrontDoorEndpoint{}, err
+	}
+	m, _ := res.(map[string]any)
+	out := FrontDoorEndpoint{
+		Enabled:    mB(m, "enabled"),
+		Listening:  mB(m, "listening"),
+		Addr:       mS(m, "addr"),
+		RootCAFile: mS(m, "root_ca_file"),
+	}
+	for _, h := range asList(m["host_names"]) {
+		if s, ok := h.(string); ok {
+			out.HostNames = append(out.HostNames, s)
+		}
+	}
+	return out, nil
+}
+
 // SetConnectionProfile switches a connection's capability profile. Admin only.
 //
 // The caller is expected to have told the user what the switch turns on —

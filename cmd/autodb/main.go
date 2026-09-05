@@ -321,8 +321,24 @@ func runServe(configPath string) error {
 			func(msg string) { fmt.Fprintln(os.Stderr, msg) })
 	}
 
+	// The front-door reader closes over the LIVE listener, so what a
+	// connection card prints is what actually bound — not what was configured
+	// and might have failed to start (ADR-0086 §8).
+	frontDoorState := func() rpc.FrontDoorInfo {
+		info := rpc.FrontDoorInfo{
+			Enabled:    cfg.FrontDoor.Enabled,
+			HostNames:  cfg.FrontDoor.TLSHostNames,
+			RootCAFile: cfg.FrontDoor.TLSRootCAFile,
+		}
+		if fd != nil {
+			info.Listening = true
+			info.Addr = fd.Addr().String()
+		}
+		return info
+	}
 	srv := rpc.New(svc, eng, cfg.Server, version,
-		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot))
+		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot),
+		rpc.WithFrontDoor(frontDoorState))
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)
 	// A lease loss is reported as the failure it is. Without this the

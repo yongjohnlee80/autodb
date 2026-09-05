@@ -979,6 +979,39 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.eng.DeleteConnection(ctx, token, connID, peerIP(req)))
 	})
+	// frontdoor.endpoint reports what a client must dial. It takes the bearer
+	// token and re-resolves authority like every other privileged verb
+	// (security-core-hardening R1) — the values look harmless, but "where does
+	// this install expose a database surface" is not a question an
+	// unauthenticated caller gets to ask.
+	//
+	// It reports the LIVE listener, never config intent: a card printing the
+	// configured bind while the listener failed to start would send a
+	// developer to debug their client.
+	s.rpc.Handle("frontdoor.endpoint", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.auth.ValidateToken(ctx, token); err != nil {
+			return nil, wireErr(err)
+		}
+		var info FrontDoorInfo
+		if s.frontDoor != nil {
+			info = s.frontDoor()
+		}
+		return map[string]any{
+			"enabled":      info.Enabled,
+			"listening":    info.Listening,
+			"addr":         info.Addr,
+			"host_names":   toAnyList(info.HostNames),
+			"root_ca_file": info.RootCAFile,
+		}, nil
+	})
+
 	// conn.set_profile is its OWN verb, not a field on a generic update
 	// (ADR-0086 §9): switching a connection to the session profile is an
 	// exposure decision and gets its own audit action so an operator can count
@@ -1540,4 +1573,13 @@ func lastUsedString(unix int64) string {
 		return "never"
 	}
 	return time.Unix(unix, 0).Format(time.RFC3339)
+}
+
+// toAnyList widens a string slice for the wire codec, which encodes []any.
+func toAnyList(in []string) []any {
+	out := make([]any, 0, len(in))
+	for _, s := range in {
+		out = append(out, s)
+	}
+	return out
 }

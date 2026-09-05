@@ -697,7 +697,7 @@ func (m *Model) openPATManager(userID int64, who string) {
 	g = newManager(m, cols,
 		func(c context.Context, b *Bound) ([]PATRow, error) { return b.PATs(c, userID) },
 		[]managerAction[PATRow]{
-			{'a', "create token", func(PATRow, bool) { m.openPATForm(g, userID) }},
+			{'a', "create token", func(PATRow, bool) { m.openPATForm(g, userID, who) }},
 			{'D', "revoke", func(sel PATRow, ok bool) {
 				if !ok {
 					return
@@ -797,7 +797,7 @@ func shortStamp(s string) string {
 // subset of it (ADR-0075 §4). Validating here means a bad entry is refused
 // while the user still has the form open and can fix it, rather than coming
 // back as a wire error after the fact.
-func (m *Model) openPATForm(g *manager[PATRow], userID int64) {
+func (m *Model) openPATForm(g *manager[PATRow], userID int64, who string) {
 	bound := g.bound
 	m.ctx.Go(func(c context.Context) (any, error) {
 		own, err := bound.UserIPs(c, userID)
@@ -811,12 +811,12 @@ func (m *Model) openPATForm(g *manager[PATRow], userID int64) {
 			// revoked rows too. Passing len(g.items) overstated used capacity
 			// after any revocation and would tell a user with room that they
 			// were full.
-			m.patForm(g, userID, own, activePATs(g.items))
+			m.patForm(g, userID, who, own, activePATs(g.items))
 		}}, nil
 	})
 }
 
-func (m *Model) patForm(g *manager[PATRow], userID int64, own []UserIPRow, active int) {
+func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []UserIPRow, active int) {
 	title := fmt.Sprintf("create token (%d of %d used)", active, auth.PATMaxPerUser)
 	m.openForm(title, []formField{
 		field("name (e.g. laptop-psql, jetbrains)"),
@@ -881,14 +881,65 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, own []UserIPRow, activ
 					g.model.setError("create " + name + ": " + msg)
 				}}, nil
 			}
+			// The endpoint is read on the SAME goroutine as the mint, so the
+			// card shows the front door as it is NOW rather than as it was
+			// when the manager last refreshed. A failure here does not lose
+			// the token: the card renders with what it has and says the
+			// endpoint is unknown, because the secret exists only in this
+			// reply and must reach the screen either way.
+			ep, _ := bound.FrontDoorEndpoint(c)
+			conns, _ := bound.Connections(c)
 			return managerReload{gen: bound.Gen(), apply: func() {
 				g.model.setOK("create " + name + ": ok")
 				g.Reload()
-				m.revealPATSecret(out)
+				m.revealConnectionCard(out, connFor(conns, connID), ep, who)
 			}}, nil
 		})
 		return true, ""
 	})
+}
+
+// connFor finds the row a token was bound to, so the card can name the
+// database a client must type. A miss yields a bare row rather than nothing:
+// the token still has to reach the screen.
+func connFor(conns []ConnInfo, id int64) ConnInfo {
+	for _, c := range conns {
+		if c.ID == id {
+			return c
+		}
+	}
+	return ConnInfo{ID: id, Name: fmt.Sprintf("conn:%d", id)}
+}
+
+// revealConnectionCard replaces revealPATSecret (ADR-0086 §8).
+//
+// The token is still shown once and is still unrecoverable — what changed is
+// that everything ELSE needed to use it is on the same screen, because the
+// absence of the database name alone cost an hour with the first real client.
+//
+// TWO copy keys, and that is the price of the richer card rather than a
+// complaint about the old one: the previous float held nothing but the secret,
+// so its single `y` was exactly right. Move instructions into the body and one
+// key would paste a paragraph into a password field.
+func (m *Model) revealConnectionCard(out PATSecret, conn ConnInfo, ep FrontDoorEndpoint, user string) {
+	if user == "" {
+		// The card prints this into a DSN, so a blank would produce a broken
+		// line that LOOKS pasteable. Say it is unknown instead.
+		user = "your-autodb-user"
+	}
+	text := buildCardText(out.Secret, conn, ep, user, shortStamp(out.ExpiresAt))
+	dsn := buildCardDSN(cardDialHost(ep), cardPort(ep), user, out.Secret,
+		cardDatabase(conn), "verify-full", ep.RootCAFile)
+	card := &connCard{
+		model: m,
+		text:  text,
+		copies: []cardCopy{
+			{'y', "token", out.Secret},
+			{'Y', "DSN", dsn},
+		},
+	}
+	card.float = m.openFloatPct("token "+out.Name+" — y: token, Y: DSN, q/Esc: close (shown once)",
+		card, scriptPct)
 }
 
 // revealPATSecret shows a freshly minted token. The store keeps only a
