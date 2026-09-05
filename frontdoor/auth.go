@@ -221,6 +221,9 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	res, aerr := l.authn.OpenWireSessionWith(authCtx, exec.WireOpen{
 		PAT: pm.Password, StartupUser: params["user"], Database: params["database"],
 		IP: hostOf(peer),
+		// The listener knows its own transport; the engine must not have to
+		// re-derive it from configuration it does not hold.
+		Cleartext: l.cleartextDebug,
 		// Already length-capped and audited verbatim by params.go — the cap is
 		// row 3.1's, and applying it before the engine sees the label keeps the
 		// one rule in one place.
@@ -234,7 +237,7 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	release()
 	if aerr != nil {
 		if reason := exec.DenialReason(aerr); reason != "" {
-			return authOutcome{Denied: denialReason(reason), Counts: true}, nil
+			return authOutcome{Denied: denialReason(reason), Counts: chargesThrottle(reason)}, nil
 		}
 		// A store failure. The wire still gets the uniform denial — telling
 		// a caller that our database is unreachable is an answer they have
@@ -417,4 +420,57 @@ func newBackendKey() (*pgproto3.BackendKeyData, error) {
 		ProcessID: binary.BigEndian.Uint32(b[0:4]),
 		SecretKey: b[4:],
 	}, nil
+}
+
+// chargesThrottle decides whether a post-authentication refusal counts against
+// the per-source-IP throttle.
+//
+// THE PRINCIPLE (ADR-0086 §5) has two axes, and the first is the one Johno's
+// ruling turned on — he did not say "a database mismatch", he said a mismatch
+// AFTER A VERIFIED PAT:
+//
+//	PRE-verification, the peer has proven nothing: charge anything
+//	attributable to them. That is the grinding defence, and an anonymous peer
+//	who can send unlimited malformed startups for free is what it exists to
+//	stop. Those refusals do not reach this function at all — they are charged
+//	by the startup path, deliberately.
+//
+//	POST-verification, a valid token was presented: charge only CREDENTIAL-side
+//	faults. The peer has proven possession and is by definition not grinding,
+//	so their configuration mistakes are not the throttle's business.
+//
+// Everything reaching here is post-verification, so the question is only
+// whether the fault is the credential's.
+func chargesThrottle(reason string) bool {
+	switch reason {
+	case exec.DenyDatabaseMismatch:
+		// RULED by Johno, 2026-09-05. An introspecting client dials each
+		// database it discovered; DBeaver and pgAdmin default the field to
+		// `postgres`. Six discovered databases across two refreshes exceeds
+		// ten, so charging would lock the developer out of their own install
+		// and fill the trail with what an operator reads as a credential
+		// attack. It is a client misconfiguration, not an attack.
+		return false
+	case exec.DenyPATNotCleartextDebug, exec.DenyPATCleartextDebugInTLS:
+		// Mirrors of each other, and both mode-side: the token is perfectly
+		// valid on the listener it was minted for. The common case is a
+		// developer whose daemon restarted into the other mode, and a GUI
+		// client retrying would spend a ten-per-minute budget in seconds.
+		// Charging buys nothing against an attacker either — the wire is the
+		// uniform 28000, so there is no oracle to slow, and a leaked debug
+		// token probing production is a DETECTION concern already served by
+		// this reason's own audit identity.
+		return false
+	default:
+		// Credential-side, or not yet judged. Charging is the safe default for
+		// a reason nobody has reasoned about: it fails towards the throttle
+		// rather than towards an unmetered retry loop.
+		//
+		// NOTE: eight EXISTING reasons are mis-charged under this principle
+		// (capacity, target state, our own configuration). Johno has ruled they
+		// are to be corrected, in their own PR with its own review pass —
+		// deliberately not here, because re-judging live charging behaviour on
+		// seven unrelated reasons is a different change from this one.
+		return true
+	}
 }

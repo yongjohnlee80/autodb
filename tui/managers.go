@@ -927,9 +927,9 @@ func (m *Model) revealConnectionCard(out PATSecret, conn ConnInfo, ep FrontDoorE
 		// line that LOOKS pasteable. Say it is unknown instead.
 		user = "your-autodb-user"
 	}
-	text := buildCardText(out.Secret, conn, ep, user, shortStamp(out.ExpiresAt))
-	dsn := buildCardDSN(cardDialHost(ep), cardPort(ep), user, out.Secret,
-		cardDatabase(conn), "verify-full", ep.RootCAFile)
+	// ONE computation. The copy key gets the SAME string the screen shows —
+	// see buildCardText for why that is not a stylistic preference.
+	text, dsn := buildCardText(out.Secret, conn, ep, user, shortStamp(out.ExpiresAt))
 	card := &connCard{
 		model: m,
 		text:  text,

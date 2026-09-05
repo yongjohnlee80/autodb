@@ -40,6 +40,13 @@ const (
 	// AdmittedByUserRow means one of the user's own rows matched.
 	AdmittedByUserRow AdmissionSource = "user-row"
 	// NotAdmitted means neither layer matched.
+	// AdmittedByTokenList is cleartext debugging mode ONLY (ADR-0086 §10):
+	// the token's own allowed_ips was the entire admission gate and the
+	// inherited set was not consulted. Its own value because the audit trail
+	// must be able to say which sessions were admitted this way — they are the
+	// ones whose perimeter was never checked against their owner's.
+	AdmittedByTokenList AdmissionSource = "token-list"
+
 	NotAdmitted AdmissionSource = "none"
 )
 

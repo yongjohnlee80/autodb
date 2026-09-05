@@ -249,6 +249,20 @@ func runServe(configPath string) error {
 		// the unconditional form and does not grow with how long the daemon
 		// ran, which is what made the original reachable by an ordinary
 		// restart.
+		// Go's *net.UnixListener unlinks the path BY NAME on Close unless told
+		// otherwise, so without this the removal that actually happens in an
+		// ordinary shutdown is the stdlib's name-based one and the identity
+		// check below only ever takes its early return. The reviewer measured
+		// exactly that: with unlink-on-close left at its default the file is
+		// already gone by the time the defer runs.
+		//
+		// Turning it off routes EVERY removal through the identity check,
+		// including the ordering neither of us could construct — a successor
+		// binding before our own Close, reachable when a dial to a live but
+		// saturated listener fails.
+		if ul, ok := ln.(*net.UnixListener); ok {
+			ul.SetUnlinkOnClose(false)
+		}
 		created, cerr := os.Stat(addr)
 		if cerr != nil {
 			ln.Close()
@@ -346,9 +360,18 @@ func runServe(configPath string) error {
 			func(msg string) { fmt.Fprintln(os.Stderr, msg) })
 	}
 
-	// The front-door reader closes over the LIVE listener, so what a
-	// connection card prints is what actually bound — not what was configured
-	// and might have failed to start (ADR-0086 §8).
+	// The front-door reader closes over the listener so the card prints the
+	// address that actually BOUND — cfg.FrontDoor.Bind can be ":0" or a name
+	// resolving to several addresses, and Addr() is the only thing a client
+	// can dial.
+	//
+	// Be precise about what it does NOT buy (reviewer's O1): whether a
+	// listener exists is decided once, before this point, so `Listening` is
+	// effectively a snapshot. The one transition it misses is the supervisor
+	// stopping a door that failed while serving — during that drain a card can
+	// still say listening. The daemon is on its way down in that case, so the
+	// window is the drain rather than indefinite; it is named here rather than
+	// implied away.
 	frontDoorState := func() rpc.FrontDoorInfo {
 		info := rpc.FrontDoorInfo{
 			Enabled:    cfg.FrontDoor.Enabled,

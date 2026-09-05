@@ -104,11 +104,19 @@ const (
 	// NEVER silently substituted: a client that asked for `postgres` and was
 	// quietly given `test` is worse than any refusal.
 	DenyDatabaseMismatch = "frontdoor/database-mismatch"
-	DenyNoGrant          = "frontdoor/no-grant"
-	DenyProfileRefuses   = "frontdoor/profile-not-front-door"
-	DenyLeaseCap         = "frontdoor/lease-cap-exceeded"
-	DenySessionCap       = "frontdoor/session-cap-exceeded"
-	DenyResidentBudget   = "frontdoor/resident-budget-exceeded"
+	// DenyPATNotCleartextDebug: a cleartext listener met an ordinary token
+	// (ADR-0086 §10). Not charged — the credential is valid and the peer may be
+	// fully admitted; what refuses it is our mode.
+	DenyPATNotCleartextDebug = "frontdoor/pat-not-cleartext-debug"
+	// DenyPATCleartextDebugInTLS: a TLS listener met a debug_cleartext token.
+	// The exact mirror of the above, and uncharged for the same reason — the
+	// token is perfectly valid on the listener it was minted for.
+	DenyPATCleartextDebugInTLS = "frontdoor/pat-cleartext-debug-in-tls"
+	DenyNoGrant                = "frontdoor/no-grant"
+	DenyProfileRefuses         = "frontdoor/profile-not-front-door"
+	DenyLeaseCap               = "frontdoor/lease-cap-exceeded"
+	DenySessionCap             = "frontdoor/session-cap-exceeded"
+	DenyResidentBudget         = "frontdoor/resident-budget-exceeded"
 	// DenyLeaseEncoding: the pinned target's server_encoding or client_encoding
 	// is not UTF8, or could not be established (matrix row 3.1: the lease is
 	// pinned UTF8; autodb does not transcode; the check FAILS CLOSED). On the
@@ -161,6 +169,11 @@ type WireOpen struct {
 	// backend before the result returns — PostgreSQL's own semantics, not an
 	// emulation. One refusal withdraws the session (DenyStartupGUC).
 	StartupGUCs map[string]string
+	// Cleartext reports that the LISTENER is serving without TLS (ADR-0086
+	// §10). It comes from the listener rather than from config because it is a
+	// property of the connection being opened, and because the engine must not
+	// have to re-derive a fact the caller already knows.
+	Cleartext bool
 }
 
 // OpenWireSession is the original entry point, kept so the front door's
@@ -202,14 +215,56 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		return out, deny(DenyUserMismatch)
 	}
 
-	// 3. IP admission: (global ∨ the user's rows), then the token's own
-	// narrowing if it sets one (Amendment 1).
-	src, err := e.auth.IPAllowedForUser(ctx, nil, pat.UserID, ip)
-	if err != nil {
-		return out, err
+	// 3a. THE CREDENTIAL CLASS MUST MATCH THE LISTENER (ADR-0086 §10).
+	//
+	// Checked BEFORE any IP work, and that placement is load-bearing:
+	// auth.PATAllowsIP returns TRUE for an empty list by contract, because
+	// empty means "inherit the admission set" and that is correct under TLS.
+	// Teaching it about cleartext would silently change TLS mode too, so this
+	// is a separate check with its own reason rather than a condition bolted
+	// into a function whose contract other callers depend on.
+	//
+	// Both directions are refusals, and the token is VALID in each — what
+	// refuses it is the listener's mode. That is why neither charges the
+	// per-address throttle (§5): a developer whose daemon restarted into the
+	// other mode is the common case, not an attacker.
+	debugToken := pat.DebugCleartext != 0
+	switch {
+	case req.Cleartext && !debugToken:
+		// Turning cleartext ON refuses every ordinary token in the install.
+		// That is the point: a normal credential must never cross a wire that
+		// does not protect it.
+		return out, deny(DenyPATNotCleartextDebug)
+	case !req.Cleartext && debugToken:
+		// A debug token's allowed_ips was never checked against its owner's
+		// perimeter, so honouring it here would import that relaxation into
+		// production. This refusal is what confines the widening to the mode
+		// it was minted for.
+		return out, deny(DenyPATCleartextDebugInTLS)
 	}
-	if src == auth.NotAdmitted {
-		return out, deny(DenyIPNotAdmitted)
+
+	// 3b. IP admission.
+	//
+	// Under TLS: (global ∨ the user's rows), then the token's own narrowing if
+	// it sets one (ADR-0075 Amendment 1).
+	//
+	// In CLEARTEXT: the token's own list is the ENTIRE gate and the inherited
+	// set is NOT consulted (ADR-0086 §10, ruled by Johno). The list is
+	// guaranteed non-empty by the mint gate; it is re-checked here anyway,
+	// because a store edited by hand must not yield a token admitted from
+	// anywhere.
+	src := auth.AdmittedByTokenList
+	if !req.Cleartext {
+		var aerr error
+		src, aerr = e.auth.IPAllowedForUser(ctx, nil, pat.UserID, ip)
+		if aerr != nil {
+			return out, aerr
+		}
+		if src == auth.NotAdmitted {
+			return out, deny(DenyIPNotAdmitted)
+		}
+	} else if strings.TrimSpace(pat.AllowedIPs) == "" {
+		return out, deny(DenyPATIPNarrowed)
 	}
 	if !auth.PATAllowsIP(pat.AllowedIPs, ip) {
 		return out, deny(DenyPATIPNarrowed)

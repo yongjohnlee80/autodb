@@ -148,10 +148,26 @@ func (c *connCard) Children() iter.Seq[tui.Component] {
 	}
 }
 
-// buildCardText renders the card body. Split out so its content is testable
-// without a terminal — the facts on this screen are the deliverable, and a
-// missing one is the defect this ADR exists to fix.
-func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, expires string) string {
+// cardSSLMode is the one place this surface's client sslmode is written.
+//
+// It was a literal in two files, which is how the displayed line and the
+// copied line come to disagree — and the TLS-off work still to land is exactly
+// what will need to change it in one place and not the other.
+const cardSSLMode = "verify-full"
+
+// buildCardText renders the card body AND returns the DSN it printed.
+//
+// The DSN is returned rather than recomputed by the caller because it used to
+// be built TWICE — once here for the screen, once in the copy handler for `Y` —
+// from two separate computations of host, port and sslmode. A reviewer proved
+// the drift with one plausible edit at one site: preferring the last certificate
+// name rather than the first made the shown line and the copied line differ
+// while all six cells stayed green.
+//
+// That is the worst shape a bug can take here. The user copies with `Y` and
+// pastes without re-reading; the screen is what they trust. One computation,
+// one string, handed to both.
+func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, expires string) (string, string) {
 	var b strings.Builder
 	p := func(f string, a ...any) { fmt.Fprintf(&b, f+"\n", a...) }
 
@@ -179,7 +195,6 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, exp
 		// what a client must dial — not the address it happens to resolve to.
 		dialHost = ep.HostNames[0]
 	}
-	sslmode := "verify-full"
 
 	p("connection   %s", conn.Name)
 	if conn.TargetDB != "" {
@@ -191,7 +206,7 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, exp
 	p("host         %s", orNone(dialHost))
 	p("port         %s", orNone(port))
 	p("user         %s", user)
-	p("sslmode      %s", sslmode)
+	p("sslmode      %s", cardSSLMode)
 	if ep.RootCAFile != "" {
 		p("sslrootcert  %s", ep.RootCAFile)
 	}
@@ -206,14 +221,15 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, exp
 	p("")
 	p("token        %s", secret)
 	p("")
+	dsn := buildCardDSN(dialHost, port, user, secret, cardDatabase(conn), cardSSLMode, ep.RootCAFile)
 	p("DSN")
-	p("  %s", buildCardDSN(dialHost, port, user, secret, cardDatabase(conn), sslmode, ep.RootCAFile))
+	p("  %s", dsn)
 	p("")
 	p("JDBC")
-	p("  %s", buildCardJDBC(dialHost, port, user, secret, cardDatabase(conn), sslmode, ep.RootCAFile))
+	p("  %s", buildCardJDBC(dialHost, port, user, secret, cardDatabase(conn), cardSSLMode, ep.RootCAFile))
 	p("")
 	p("The token is shown ONCE and cannot be recovered. Copy it before closing.")
-	return b.String()
+	return b.String(), dsn
 }
 
 // cardDatabase is what the client should put in its Database field: the
@@ -231,19 +247,4 @@ func orNone(s string) string {
 		return "(unknown)"
 	}
 	return s
-}
-
-// cardDialHost and cardPort are what the DSN builders take, kept beside the
-// card's own rendering so the copied DSN and the displayed one cannot drift.
-func cardDialHost(ep FrontDoorEndpoint) string {
-	if len(ep.HostNames) > 0 {
-		return ep.HostNames[0]
-	}
-	h, _ := splitAddr(ep.Addr)
-	return h
-}
-
-func cardPort(ep FrontDoorEndpoint) string {
-	_, p := splitAddr(ep.Addr)
-	return p
 }
