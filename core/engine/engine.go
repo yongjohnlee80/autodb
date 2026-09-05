@@ -1,9 +1,9 @@
 // Package engine names the database engines autodb can target, and the ones it
 // can keep its own metadata in.
 //
-// It owns that concept and nothing else. Every other package may depend on it,
-// and it depends on nothing outside the standard library, so naming an engine
-// can never pull a dependency cycle behind it.
+// It owns the TYPE and nothing else: the values are golib's. Every other
+// package may depend on it, and it depends only on the standard library and
+// golib's dao, so naming an engine can never pull a cycle behind it.
 //
 // WHY A PACKAGE FOR THREE STRINGS. Before this existed the names were written
 // as string literals at 50 sites in 22 files, and every engine DIFFERENCE was
@@ -30,6 +30,8 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"strings"
+
+	"github.com/yongjohnlee80/golib/dao"
 )
 
 // Name is the canonical identity of a database engine.
@@ -39,17 +41,32 @@ import (
 // internal label. Changing a constant's value is a migration, not a rename.
 type Name string
 
+// THE VALUES COME FROM golib, AND THAT IS THE POINT.
+//
+// Each constant below is DEFINED AS the corresponding dao dialect name rather
+// than spelled again here. golib is the single source of truth for the strings
+// (Johno, 2026-09-06: "always define constants in the upstream for a one source
+// of truth"); autodb adds a TYPE and nothing else. If a golib value ever
+// changed, these would follow at compile time — there is no second spelling
+// that could stay behind.
+//
+// The type is what golib deliberately does not have: dao.Dialect declares
+// `Name() string`, so typing the constants upstream would break that signature.
+// Down here the value is PERSISTED — it is written to connection rows and read
+// back — and a named type with a validating Scan is what turns an unknown
+// stored spelling into an error at the read instead of a value nothing matches.
+
 // Postgres is the PostgreSQL engine. It is the only engine the front door can
 // relay natively, and the only meta-store engine besides SQLite.
-const Postgres Name = "postgres"
+const Postgres Name = dao.DialectPostgres
 
 // MySQL is the MySQL engine. It is a target engine only: the front door speaks
 // the PostgreSQL wire protocol and has no MySQL equivalent.
-const MySQL Name = "mysql"
+const MySQL Name = dao.DialectMySQL
 
 // SQLite is the SQLite engine. It is the default meta-store engine and is not
 // offered as a target.
-const SQLite Name = "sqlite"
+const SQLite Name = dao.DialectSQLite
 
 // All returns every engine name, in a fixed order.
 //
