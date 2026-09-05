@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/golib/dao"
 )
 
@@ -89,7 +90,7 @@ func newUsers(conn dao.DataConn) *dao.Schema[*User, UserField, Sort, int64] {
 type Connection struct {
 	ID     int64
 	Name   string
-	Engine string
+	Engine engine.Name
 	DSNEnc []byte
 	// Profile is the connection's capability profile (ADR-0074 §2):
 	// "v1compat" or "session". Existing rows read v1compat, so enabling

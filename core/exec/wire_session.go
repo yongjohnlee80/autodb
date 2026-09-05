@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 	"sort"
 	"strconv"
@@ -355,7 +356,7 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	s.mu.Unlock()
 
 	var statuses map[string]string
-	if connRow.Engine == "postgres" {
+	if connRow.Engine == engine.Postgres {
 		// Pin now. A failure here is the target's, not the client's: the
 		// admitted session is withdrawn and the error is returned unframed.
 		pc, perr := e.pinWireSession(ctx, s, connRow)
