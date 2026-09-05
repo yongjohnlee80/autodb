@@ -127,6 +127,45 @@ ip_allowlist = ["127.0.0.1/32", "::1/128"]
 # replacing it (the TUI on this machine still connects over loopback):
 # ip_allowlist = ["127.0.0.1/32", "::1/128", "10.0.5.0/24"]
 
+# ---------------------------------------------------------------------------
+# UNATTENDED UNLOCK — so a restart does not lock everybody out.
+#
+# Connection secrets are encrypted with a master key that is normally unwrapped
+# by a PASSPHRASE at login. That is right when the only clients are people at a
+# terminal, and wrong the moment autodb is the only path to a production
+# database: the box reboots and nobody can work until a human logs in by hand.
+#
+# Point this at a file and autodb unwraps the master key from it at start, with
+# no passphrase. Cut the slot ONCE from a running, unlocked daemon:
+#
+#   autodb keyslot enroll     # admin, while logged in — writes the keyfile
+#
+# It is the LUKS pattern: a keyfile slot added BESIDE the passphrase slots.
+# Every user's passphrase keeps working exactly as before, and unlocking the
+# key still authenticates NOBODY — authority is a token, re-resolved per call.
+#
+# GIVE IT ITS OWN DIRECTORY, not the one holding the meta store. The store and
+# the key that opens it are the two halves of one envelope, and a keyfile
+# beside the store means one careless `tar` of that directory captures both —
+# taken by somebody who believes they backed up a database.
+#
+# The file is 0600 and autodb REFUSES a group- or world-readable one. That is
+# not ceremony: developers hold shell accounts on the box this runs on, and the
+# enrollment socket next door is deliberately group-readable. A permission that
+# is documented but unchecked is a permission that drifts.
+#
+# WHAT IT COSTS, stated plainly: at-rest protection becomes "filesystem
+# permissions and host security" rather than "a passphrase that exists nowhere
+# on disk". Anyone who can read the keyfile AND the meta store has every
+# secret. That is the trade this setting makes, and it is why it is opt-in.
+#
+# If the keyfile is missing, unreadable, wrongly permissioned or does not match
+# the slot, THE DAEMON STILL STARTS — it prints a loud banner, leaves the store
+# locked, and a passphrase login still works. Front-door clients then get
+# 57P03 "the server is not accepting connections", NOT an authentication
+# failure, so nobody wastes an afternoon regenerating good tokens.
+# service_keyfile = "/var/lib/autodb-keys/service.key"
+
 [exec]
 # The largest single statement the engine will execute, in bytes.
 #
