@@ -308,7 +308,7 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 		now := e.now().Unix()
 		var terr error
 		id, terr = e.store.Connections.On(tx).
-			Set(meta.ConnName, name).Set(meta.ConnEngine, engineName).
+			Set(meta.ConnName, name).Set(meta.ConnEngine, engineName.String()).
 			Set(meta.ConnTargetDB, targetDB).
 			Set(meta.ConnDSNEnc, []byte{}).Set(meta.ConnCreatedBy, ident.UserID()).
 			Set(meta.ConnCreatedAt, now).Set(meta.ConnUpdatedAt, now).

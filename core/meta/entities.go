@@ -165,7 +165,7 @@ func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort,
 	return schema(conn, "connections", ConnID, map[ConnField]dao.Field[*Connection]{
 		ConnID:           {Column: "id", Scan: func(r *Connection) any { return &r.ID }},
 		ConnName:         {Column: "name", Scan: func(r *Connection) any { return &r.Name }, Value: func(r *Connection) any { return r.Name }},
-		ConnEngine:       {Column: "engine", Scan: func(r *Connection) any { return &r.Engine }, Value: func(r *Connection) any { return r.Engine }},
+		ConnEngine:       {Column: "engine", Scan: func(r *Connection) any { return &r.Engine }, Value: func(r *Connection) any { return r.Engine.String() }},
 		ConnProfile:      {Column: "profile", Scan: func(r *Connection) any { return &r.Profile }, Value: func(r *Connection) any { return r.Profile }},
 		ConnDebug:        {Column: "debug", Scan: func(r *Connection) any { return &r.Debug }, Value: func(r *Connection) any { return r.Debug }},
 		ConnPoolMaxConns: {Column: "pool_max_conns", Scan: func(r *Connection) any { return &r.PoolMaxConns }, Value: func(r *Connection) any { return r.PoolMaxConns }},

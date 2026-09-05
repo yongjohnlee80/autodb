@@ -1051,7 +1051,7 @@ func (s *Server) register() {
 		out := make([]any, 0, len(conns))
 		for _, c := range conns {
 			out = append(out, map[string]any{
-				"id": c.ID, "name": c.Name, "engine": c.Engine,
+				"id": c.ID, "name": c.Name, "engine": c.Engine.String(),
 				"created_by": c.CreatedBy, "created_at": c.CreatedAt,
 				"updated_at": c.UpdatedAt,
 				// ADR-0086: the manager shows what a connection's profile IS
@@ -1581,7 +1581,7 @@ func (s *Server) registerM6() {
 			conns := make([]any, 0, len(w.Connections))
 			for _, c := range w.Connections {
 				conns = append(conns, map[string]any{
-					"id": c.ID, "name": c.Name, "engine": c.Engine,
+					"id": c.ID, "name": c.Name, "engine": c.Engine.String(),
 				})
 			}
 			out = append(out, map[string]any{
