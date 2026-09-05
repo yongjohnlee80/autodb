@@ -64,7 +64,7 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 				// pool budgets (lector's PR #31 r1 MF1). Nothing failed: the
 				// row count matched, because a dropped COLUMN is invisible to
 				// a check that counts ROWS.
-				return map[ConnField]any{ConnID: r.ID, ConnName: r.Name, ConnEngine: r.Engine,
+				return map[ConnField]any{ConnID: r.ID, ConnName: r.Name, ConnEngine: r.Engine.String(),
 					ConnDSNEnc: nb(r.DSNEnc), ConnCreatedBy: r.CreatedBy,
 					ConnCreatedAt: r.CreatedAt, ConnUpdatedAt: r.UpdatedAt,
 					ConnProfile: r.Profile, ConnDebug: r.Debug,
