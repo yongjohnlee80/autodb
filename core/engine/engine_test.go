@@ -2,22 +2,29 @@ package engine
 
 import (
 	"go/ast"
+	"go/constant"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"strconv"
 	"strings"
 	"testing"
 )
 
-// declaredNames reads THIS package's own source and returns every constant
-// declared as `… Name = "…"`, keyed by identifier.
+// declaredNames TYPE-CHECKS this package and returns every package-scope
+// constant whose type is Name, keyed by identifier, with its constant value.
 //
-// It parses rather than greps, and it is the reason TestAllIsExhaustive is a
-// test rather than a restatement of the list: a test that hardcodes the three
-// names asserts that the list equals itself. The compiler already knows the
-// constants exist; only the SOURCE knows whether one was added without being
-// added to All().
+// It uses go/types rather than walking the syntax tree, and the difference is
+// the whole point. An earlier version matched `*ast.BasicLit` initializers, so
+// it recognised `const MariaDB Name = "mariadb"` and silently missed
+// `const MariaDB Name = "maria" + "db"` — a legal constant of the same type,
+// declared the same way, invisible to the walk. The cell stayed green while a
+// name was missing from All(), which is the exact failure it exists to catch.
+// A type-checker knows what the CONSTANT IS; a syntax walk only knows what it
+// looks like. TestAConstantSpelledAsAnExpressionIsStillFound pins the
+// difference.
 func declaredNames(t *testing.T) map[string]string {
 	t.Helper()
 	fset := token.NewFileSet()
@@ -27,52 +34,94 @@ func declaredNames(t *testing.T) map[string]string {
 	if err != nil {
 		t.Fatalf("parsing the package source: %v", err)
 	}
-	out := map[string]string{}
-	files := 0
+	var files []*ast.File
 	for _, pkg := range pkgs {
 		for _, f := range pkg.Files {
-			files++
-			for _, d := range f.Decls {
-				gd, ok := d.(*ast.GenDecl)
-				if !ok || gd.Tok != token.CONST {
-					continue
-				}
-				for _, spec := range gd.Specs {
-					vs, ok := spec.(*ast.ValueSpec)
-					if !ok {
-						continue
-					}
-					id, ok := vs.Type.(*ast.Ident)
-					if !ok || id.Name != "Name" || len(vs.Values) != 1 {
-						continue
-					}
-					lit, ok := vs.Values[0].(*ast.BasicLit)
-					if !ok || lit.Kind != token.STRING {
-						continue
-					}
-					v, err := strconv.Unquote(lit.Value)
-					if err != nil {
-						t.Fatalf("unquoting %s: %v", lit.Value, err)
-					}
-					out[vs.Names[0].Name] = v
-				}
-			}
+			files = append(files, f)
 		}
 	}
-	// A parse that found no files agrees with every claim made about them.
-	if files == 0 {
-		t.Fatal("parsed 0 non-test files in this package: the walk below would " +
-			"assert nothing and pass")
+	if len(files) == 0 {
+		t.Fatal("parsed 0 non-test files in this package: every assertion below " +
+			"would hold vacuously")
+	}
+	conf := types.Config{Importer: importer.Default()}
+	info := &types.Info{Defs: map[*ast.Ident]types.Object{}}
+	pkg, err := conf.Check("github.com/yongjohnlee80/autodb/core/engine", fset, files, info)
+	if err != nil {
+		t.Fatalf("type-checking the package: %v", err)
+	}
+
+	out := map[string]string{}
+	scope := pkg.Scope()
+	for _, name := range scope.Names() {
+		c, ok := scope.Lookup(name).(*types.Const)
+		if !ok {
+			continue
+		}
+		named, ok := c.Type().(*types.Named)
+		if !ok || named.Obj().Name() != "Name" || named.Obj().Pkg() != pkg {
+			continue
+		}
+		v := c.Val()
+		if v.Kind() != constant.String {
+			t.Fatalf("const %s has type Name but a %v value; Name is a string type "+
+				"and this cell cannot compare a non-string constant", name, v.Kind())
+		}
+		out[name] = constant.StringVal(v)
 	}
 	if len(out) == 0 {
-		t.Fatalf("found 0 `… Name = \"…\"` constants across %d file(s): the "+
-			"declaration shape changed and this test no longer sees any of them, "+
-			"which would let a missing All() entry pass", files)
+		t.Fatalf("found 0 constants of type Name across %d file(s): the declaration "+
+			"shape changed and this cell no longer sees any of them, which would "+
+			"let a missing All() entry pass", len(files))
 	}
 	return out
 }
 
-// A3 — All() and the declared constants agree in BOTH directions.
+// The control for the instrument above: a constant whose value is an
+// EXPRESSION rather than a literal is still found. Written as a real
+// type-check of a synthetic source rather than as a comment claiming it works.
+func TestAConstantSpelledAsAnExpressionIsStillFound(t *testing.T) {
+	const src = `package engine
+
+type Name string
+
+const Split Name = "split" + "-name"
+const Plain Name = "plain"
+const NotAName = "untyped"
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf := types.Config{Importer: importer.Default()}
+	pkg, err := conf.Check("synthetic", fset, []*ast.File{f}, &types.Info{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, n := range pkg.Scope().Names() {
+		if c, ok := pkg.Scope().Lookup(n).(*types.Const); ok {
+			if named, ok := c.Type().(*types.Named); ok && named.Obj().Name() == "Name" {
+				got[n] = constant.StringVal(c.Val())
+			}
+		}
+	}
+	if got["Split"] != "split-name" {
+		t.Fatalf("a constant declared as an expression was not found with its value: "+
+			"got %q. A syntax walk matching *ast.BasicLit misses this exact shape, "+
+			"and a missing All() entry declared that way would pass unnoticed", got["Split"])
+	}
+	if got["Plain"] != "plain" {
+		t.Fatalf("the ordinary literal form was missed: %q", got["Plain"])
+	}
+	if _, ok := got["NotAName"]; ok {
+		t.Fatal("an untyped string constant was collected as a Name; the filter is " +
+			"matching more than the type it names")
+	}
+}
+
+// All() and the declared constants must agree in BOTH directions.
 //
 // One direction alone is half a guard, and it is the half that feels done: a
 // test asserting "every entry of All() is a declared constant" passes forever
@@ -128,8 +177,8 @@ func TestAllReturnsAFreshSlice(t *testing.T) {
 	}
 }
 
-// A4 — Parse accepts exactly All() and rejects everything else, with an error
-// that says what IS accepted.
+// Parse accepts exactly All() and rejects everything else, with an error that
+// says what IS accepted.
 func TestParse(t *testing.T) {
 	for _, n := range All() {
 		t.Run("accepts/"+string(n), func(t *testing.T) {
