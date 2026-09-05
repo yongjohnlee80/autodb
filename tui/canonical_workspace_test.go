@@ -31,48 +31,6 @@ func seedRawWorkspace(t *testing.T, base, wsDir, name, body string) string {
 	return p
 }
 
-func TestLegacyNonCanonicalWorkspaceIsNotDeletable(t *testing.T) {
-	base := t.TempDir()
-	// `ws--1` is what a negative id formats to. Only a negative id can address it.
-	victim := seedRawWorkspace(t, base, "ws--1", "note.sql", "still here")
-	l := OpenLegacyNotes(base)
-
-	if err := l.Delete(-1, "note.sql"); !errors.Is(err, ErrBadWorkspace) {
-		t.Errorf("Delete(-1) = %v, want ErrBadWorkspace", err)
-	}
-	if _, err := os.Stat(victim); err != nil {
-		t.Errorf("a file under a rejected workspace name was deleted: %v", err)
-	}
-}
-
-func TestLegacyNonCanonicalWorkspaceIsNotReadableOrListable(t *testing.T) {
-	base := t.TempDir()
-	seedRawWorkspace(t, base, "ws--1", "note.sql", "secret")
-	seedRawWorkspace(t, base, "ws-0", "zero.sql", "secret")
-	l := OpenLegacyNotes(base)
-
-	for _, id := range []int64{-1, 0} {
-		if names, err := l.List(id); !errors.Is(err, ErrBadWorkspace) || len(names) != 0 {
-			t.Errorf("List(%d) = %v, %v — want refusal", id, names, err)
-		}
-		if body, err := l.Read(id, "note.sql"); !errors.Is(err, ErrBadWorkspace) || body != "" {
-			t.Errorf("Read(%d) = %q, %v — want refusal", id, body, err)
-		}
-	}
-}
-
-// The node-id parser must not mint an addressable action from text.
-func TestLegacyNodeIDRejectsNonCanonicalWorkspace(t *testing.T) {
-	for _, id := range []string{"lnote:-1:note.sql", "lnote:0:note.sql"} {
-		if _, _, ok := parseLegacyID(id); ok {
-			t.Errorf("parseLegacyID(%q) accepted a non-canonical workspace", id)
-		}
-	}
-	if _, _, ok := parseLegacyID("lnote:3:note.sql"); !ok {
-		t.Error("parseLegacyID rejected a canonical workspace")
-	}
-}
-
 // The personal store shares the predicate. Confinement stops an escape, but a
 // note at `u-alice/ws--1/x.sql` is still a path the store should never name.
 func TestPersonalStoreRefusesNonCanonicalWorkspace(t *testing.T) {
@@ -120,16 +78,4 @@ func TestCanonicalWorkspaceStillWorks(t *testing.T) {
 		t.Fatalf("Delete(1): %v", err)
 	}
 
-	lbase := t.TempDir()
-	seedLegacy(t, lbase, 2, "legacy.sql", "old")
-	l := OpenLegacyNotes(lbase)
-	if names, err := l.List(2); err != nil || len(names) != 1 {
-		t.Fatalf("legacy List(2) = %v, %v", names, err)
-	}
-	if body, err := l.Read(2, "legacy.sql"); err != nil || body != "old" {
-		t.Fatalf("legacy Read(2) = %q, %v", body, err)
-	}
-	if err := l.Delete(2, "legacy.sql"); err != nil {
-		t.Fatalf("legacy Delete(2): %v", err)
-	}
 }

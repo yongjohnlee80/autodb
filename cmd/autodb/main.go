@@ -817,7 +817,6 @@ func runUI(configPath string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	model := tuiapp.New(session, notesFor, cancel,
-		tuiapp.WithLegacyNotes(notesRoot),
 		tuiapp.WithAbout(tuiapp.AboutInfo{
 			Version: version, Commit: commit, BuildDate: buildDate,
 			Repo: repoURL, Author: author,

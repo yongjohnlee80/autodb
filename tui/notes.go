@@ -46,6 +46,14 @@ var ErrBadWorkspace = errors.New("tui: notes: workspace id is not a canonical po
 // suffix cannot be PRODUCED by formatting an int64, so they are unreachable
 // through this API once negatives and zero are refused. The listing side still
 // re-checks the round-trip, because it reads names it did not write.
+// ErrRemovedNotDurable reports that a note WAS unlinked but the directory could
+// not be synced, so the removal may not survive a crash.
+//
+// Distinct from a delete failure on purpose (ADR-0068 rev 10, criterion 37): the
+// file is already gone, so retrying would act on whatever next holds that name.
+// The caller reports uncertainty; it does not retry.
+var ErrRemovedNotDurable = errors.New("tui: notes: removed, but the directory could not be synced")
+
 func canonicalWorkspace(wsID int64) error {
 	if wsID <= 0 {
 		return fmt.Errorf("%w: %d", ErrBadWorkspace, wsID)

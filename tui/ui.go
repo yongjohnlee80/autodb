@@ -29,9 +29,6 @@ type Model struct {
 	// fall back to (ADR-0068 §2.2).
 	notes    *NoteStore
 	notesFor NotesFactory
-	// legacy reads the ownerless pre-ADR-0068 tree. It is NOT identity-scoped —
-	// those files predate ownership — and is read-and-delete only by type.
-	legacy *LegacyNotes
 	// identityEpoch increments whenever the signed-in identity changes. Delayed
 	// results captured under an older epoch are discarded rather than applied.
 	identityEpoch uint64
@@ -82,13 +79,6 @@ type Model struct {
 	cleartextSeen     bool     // the user dismissed the warning for this session
 	explorerFocused   bool     // last applied cursor styling (focused = cyan)
 	resultsFocused    bool
-}
-
-// WithLegacyNotes shows the ownerless pre-ADR-0068 tree at base in its own
-// deprecated section, so those files can be migrated or deleted instead of
-// silently disappearing when notes became personal.
-func WithLegacyNotes(base string) Option {
-	return func(m *Model) { m.legacy = OpenLegacyNotes(base) }
 }
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.

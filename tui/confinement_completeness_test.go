@@ -23,7 +23,7 @@ import (
 // exerciseEveryOperation runs each public entry point that touches the
 // filesystem. A new one that is not called here is still covered by the
 // working-directory assertion IF it is reached; the list exists to reach them.
-func exerciseEveryOperation(t *testing.T, s *NoteStore, l *LegacyNotes) {
+func exerciseEveryOperation(t *testing.T, s *NoteStore) {
 	t.Helper()
 	_, _ = s.ListWorkspaceDirs()
 	_, _ = s.List(1)
@@ -36,10 +36,6 @@ func exerciseEveryOperation(t *testing.T, s *NoteStore, l *LegacyNotes) {
 	}
 	_ = s.Delete(1, "made.sql")
 
-	_, _ = l.Workspaces()
-	_, _ = l.List(1)
-	_, _ = l.Read(1, "legacy.sql")
-	_ = l.Delete(1, "legacy.sql")
 }
 
 func TestNoOperationTouchesTheWorkingDirectory(t *testing.T) {
@@ -52,11 +48,8 @@ func TestNoOperationTouchesTheWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyBase := t.TempDir()
-	seedLegacy(t, legacyBase, 1, "legacy.sql", "old")
-	l := OpenLegacyNotes(legacyBase)
 
-	exerciseEveryOperation(t, s, l)
+	exerciseEveryOperation(t, s)
 
 	ents, err := os.ReadDir(cwd)
 	if err != nil {
@@ -80,8 +73,7 @@ func TestZeroValueTouchesNothing(t *testing.T) {
 	t.Chdir(cwd)
 
 	var s NoteStore
-	var l LegacyNotes
-	exerciseEveryOperation(t, &s, &l)
+	exerciseEveryOperation(t, &s)
 
 	ents, _ := os.ReadDir(cwd)
 	if len(ents) != 0 {
