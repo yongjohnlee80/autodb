@@ -109,6 +109,10 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 
 	switch m := msg.(type) {
 	case *pgproto3.Parse:
+		// The PARSE-TIME GATE's attempt (matrix row 4:Parse). A Parse can have a
+		// target-visible effect — the statement is forwarded and prepared — so
+		// it gets its own attempt rather than being folded into the Execute's.
+		l.stmtAttempt(peer, "parse", portalIdent("stmt", m.Name), m.Query)
 		err = l.queries.WireParse(ctx, id, uid, m.Name, m.Query, m.ParameterOIDs, hostOf(peer))
 
 	case *pgproto3.Bind:
@@ -135,6 +139,14 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 		// keeps the bytes unflushed until the client's own Flush or Sync. It MAY
 		// reserve, because a portal bound in an earlier segment can be executed
 		// in one whose own frames took nothing.
+		// A FRESH ATTEMPT PER EXECUTE, re-executions of a suspended portal
+		// INCLUDED — the half of row 4:Execute that had no witness because the
+		// event had no emission. A paged read is one portal and several
+		// Executes, and the matrix contracts each as its own attempt: folding
+		// them into one would report a client that read five pages as having
+		// tried once.
+		l.stmtAttempt(peer, "execute",
+			fmt.Sprintf("%s max_rows=%d", portalIdent("portal", m.Portal), m.MaxRows), "")
 		return l.runExtendedStream(ctx, conn, be, sess, peer, seg, closeReason, true, false,
 			func(emit func(exec.WireMessage) error) error {
 				return l.queries.WireExecutePortal(ctx, id, uid, m.Portal, m.MaxRows, hostOf(peer), emit)

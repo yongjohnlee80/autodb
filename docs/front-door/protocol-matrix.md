@@ -178,7 +178,7 @@ synthesized by the front door never impersonate the target: `S` (severity),
 `fd.conn_open`, `fd.tls_ok`, `fd.auth_ok`, `fd.auth_denied` (uniform;
 internal reason recorded, wire reason generic), `fd.session_open` /
 `fd.session_close` (with ExecSession id), `fd.stmt_attempt` (before every
-effect — extended: at every `Execute`; ⚠ **NOT IMPLEMENTED** — see note 1.3a),
+effect — extended: at every `Execute`; see note 1.3a),
 `fd.stmt_outcome`, `fd.refused`
 (gate rule id), `fd.cancel_received` / `fd.cancel_applied` /
 `fd.cancel_stale`, `fd.backpressure_enter` / `fd.backpressure_exit`,
@@ -191,30 +191,53 @@ connection, so `fd.conn_open` is absent for them by construction),
 inherited from core: **no target-visible effect without a prior durable
 attempt record.**
 
-**Note 1.3a — `fd.stmt_attempt` is contracted here and emitted nowhere.**
-Measured at `f4-conformance-cells` (jarvis, 2026-09-05; verified independently
-by gold-man): **4 mentions in this document, 0 emissions in production code.**
-Only `fd.stmt_outcome` is emitted, at `frontdoor/session_loop.go:672`.
+**Note 1.3a — `fd.stmt_attempt`, and the two sinks it clarifies.** Emitted as
+of 2026-09-05 (Johno's ruling). The history is worth keeping because it was
+twice mis-stated:
 
-Two costs, and the second is the larger one:
+- The event was contracted here and **emitted nowhere** — 4 mentions, 0
+  emissions — for as long as this document existed.
+- That was first reported as a **missing audit trail**, and it was not. The
+  durable attempt-before-effect record has always existed, per Execute, on
+  every path: `recordAttemptTagged` writes an `exec` audit row plus a pending
+  history row *before* dispatch (`wire_query.go:348/367/398`,
+  `wire_execute.go:285`, and `wire_extended.go:682` inside
+  `WireExecutePortal`). What was missing was the **operational counterpart** on
+  the listener's `OnEvent` feed, which carried `fd.stmt_outcome` alone.
 
-- **The audit gap.** Attempt-before-effect is the record that says an execution
-  was *tried*. It is what an investigation needs precisely when the outcome row
-  is absent — because something crashed between the attempt and the outcome.
-  Without it, a crash mid-effect leaves no trace that the effect was begun.
-- **This document currently makes a claim that is false.** An investigator
-  reading the matrix to find out what an execution left behind will look for a
-  row that has never existed, and may conclude the execution did not happen.
+**The two sinks are not interchangeable, and this is the durable point.**
+`audit_log` + `history` are the record: transactional with the effect,
+authoritative, and what an investigation reads. The `OnEvent` feed is
+operational: best-effort, not transactional, and **nothing may be inferred from
+its absence** — a dropped consumer is not a statement that did not run. Emitting
+`fd.stmt_attempt` makes the stream self-consistent for a live watcher; it adds
+no guarantee, and the guarantee it appears to add is the one the audit rows
+already carry.
 
-Matrix row `4:Execute` is held `awaiting` in the suite's own coverage triage
-(`frontdoor/matrix_coverage_test.go`) for exactly this reason, and **must not be
-promoted by anything except the emission landing**. Its other contracted half —
-authority re-resolved at every `Execute`, portal re-executions included — *is*
-witnessed (`TestPGF4_AuthorityIsReresolvedAtAPortalResumption`).
+Emission sites: `frontdoor/stmt_attempt.go`, called at the three dispatch
+points:
 
-**Open decision (Johno):** implement the event, or narrow the contract. This
-annotation stops the document asserting an emission that does not exist in the
-meantime; it is not a decision about which way that goes.
+| phase | granularity on the FEED | granularity of the DURABLE record |
+|---|---|---|
+| `query` | **one per simple-Query buffer** | **per statement** — `recordAttemptTagged` per part, `wire_query.go:348/367/398` |
+| `parse` | one per Parse | one per Parse |
+| `execute` | one per Execute, **re-executions of a suspended portal included** | same |
+
+**The `query` row is the one to read carefully, and it sharpens the two-sinks
+point rather than weakening it.** The front door emits once with the whole
+buffer as its detail; the split into statements happens inside `WireQuery`,
+downstream of the call, so a client sending `SELECT 1; SELECT 2; SELECT 3` is
+ONE event on the feed and THREE rows in the durable record. Measured: three
+statements in one buffer produce a single `query` attempt whose detail is the
+whole buffer, against a control of one statement producing one (gold-man, PR
+#85 r0; reproduced independently).
+
+That asymmetry is deliberate rather than a gap. Threading a per-statement emit
+seam through `WireQuery` is a large change to buy granularity on a best-effort
+feed, and the sink that has to be per statement — the one an investigation
+reads — already is. Pinned by
+`TestPGF4_TheQueryAttemptIsPerBufferAndTheDurableRecordIsPerStatement`, so this
+paragraph is checked rather than asserted.
 
 ### 1.4 Memory budget lanes (lector matrix-acceptance criterion 1)
 
@@ -574,11 +597,11 @@ is read (criterion 3); oversized declared length refuses before any read.
 
 | Message | States | Decision | Gating | Charge | Audit | Refusal / notes |
 |---|---|---|---|---|---|---|
-| `Query` (simple) | S4-I/T/E | **Mapped: PostgreSQL implicit-transaction semantics** (MF2). Statements split and run in order; each individually classified/authorized/guarded; first error (gate or target) aborts the block, rolls back its earlier statements. Explicit `BEGIN`/`COMMIT` inside the buffer per PostgreSQL implicit-block rules (ExecSession state transitions, never passthrough). In S4-E: recovery controls only. | classify+authorize+guard per statement; attempt-before-effect per statement | general, hdr-first; output via pending-output watermark | `fd.stmt_attempt` (⚠ not implemented, note 1.3a)/`fd.stmt_outcome` per statement | Empty query → `EmptyQueryResponse` + `ReadyForQuery` (control lane). |
-| `Parse` | S4-I/T (opens S5) | **Native pinned-conn** (ADR MF3). Gated at Parse: classifier + profile + grants, with **immutable classification/guard metadata attached** to the statement. Retained capacity is **reserved BEFORE the Parse is forwarded**. Reservation order and the refused classes: **note 4-Parse** below. | classify+authorize at Parse | general, hdr-first + stage-2 delta; retained **reserved pre-forward**, finalized at `ParseComplete` | `fd.stmt_attempt` (parse-time gate) — ⚠ not implemented, note 1.3a | Refused classes refuse **at Parse** with §8a; segment then discards through `Sync`. Reservation failure → `53400`, nothing forwarded. |
+| `Query` (simple) | S4-I/T/E | **Mapped: PostgreSQL implicit-transaction semantics** (MF2). Statements split and run in order; each individually classified/authorized/guarded; first error (gate or target) aborts the block, rolls back its earlier statements. Explicit `BEGIN`/`COMMIT` inside the buffer per PostgreSQL implicit-block rules (ExecSession state transitions, never passthrough). In S4-E: recovery controls only. | classify+authorize+guard per statement; attempt-before-effect per statement | general, hdr-first; output via pending-output watermark | `fd.stmt_attempt` per BUFFER on the feed / per STATEMENT in the durable record (note 1.3a); `fd.stmt_outcome` per statement | Empty query → `EmptyQueryResponse` + `ReadyForQuery` (control lane). |
+| `Parse` | S4-I/T (opens S5) | **Native pinned-conn** (ADR MF3). Gated at Parse: classifier + profile + grants, with **immutable classification/guard metadata attached** to the statement. Retained capacity is **reserved BEFORE the Parse is forwarded**. Reservation order and the refused classes: **note 4-Parse** below. | classify+authorize at Parse | general, hdr-first + stage-2 delta; retained **reserved pre-forward**, finalized at `ParseComplete` | `fd.stmt_attempt` (parse-time gate) | Refused classes refuse **at Parse** with §8a; segment then discards through `Sync`. Reservation failure → `53400`, nothing forwarded. |
 | `Bind` | S5 | Native: raw parameter formats/values and per-column result formats preserved bit-for-bit to the pinned conn. ≤ 8192 params. **Portal retained capacity reserved BEFORE forwarding**, finalized at `BindComplete`, released on error. | none (authority is at Parse + Execute) | general, hdr-first + stage-2 delta (param array pre-allocation); retained reserved pre-forward | — | Param-count/size over limits → §8a refuse, discard-through-Sync. |
 | `Describe` (`S`/`P`) | S5 | Native passthrough: `ParameterDescription` + `RowDescription`/`NoData` from the pinned conn (Describe-before-Execute metadata preserved). | none | control-sized (general lane) | — | Unknown name → target's error verbatim. |
-| `Execute` | S5 | Native, **with Execute-time authority** (MF1): authority re-resolved + re-authorized at **every** Execute (portal re-executions included); fresh `fd.stmt_attempt` precedes every effect (⚠ not implemented — note 1.3a). Portal `maxRows` honored; `PortalSuspended` preserved; suspended portal buffers charge retained state. | re-authorize per Execute | general; output watermark; suspended buffers → retained | `fd.stmt_attempt` (⚠ not implemented, note 1.3a)/`fd.stmt_outcome` per Execute | Grant revoked between Parse and Execute → §8a refuse at Execute (tested per ADR). |
+| `Execute` | S5 | Native, **with Execute-time authority** (MF1): authority re-resolved + re-authorized at **every** Execute (portal re-executions included); fresh `fd.stmt_attempt` precedes every effect. Portal `maxRows` honored; `PortalSuspended` preserved; suspended portal buffers charge retained state. | re-authorize per Execute | general; output watermark; suspended buffers → retained | `fd.stmt_attempt`/`fd.stmt_outcome` per Execute | Grant revoked between Parse and Execute → §8a refuse at Execute (tested per ADR). |
 | `Close` (`S`/`P`) | S4/S5 (healthy) | Native; **releases** the named statement's/portal's retained charge, and closing a prepared statement **cascades to its portals** (§4a). Intake is control-lane-sized so saturation cannot block release — but during post-error discard it is discarded like everything else. Why, and how release still happens: **note 4-Close** below. | none | **control lane** | — | — |
 | `Flush` | S5 | Native passthrough to output pump. Discarded during post-error discard. | none | **control lane** | — | — |
 | `Sync` | S4/S5 | Native: closes the segment, resets its counters (10 000 msgs / 96 MiB), emits `ReadyForQuery` from the ExecSession state machine, ends post-error discard, releases the discarded segment's charges — and **destroys the objects that segment never confirmed**. Why a phantom object is worse than none: **note 4-Sync** below. | none | **control lane** | — | Always admissible, even at budget saturation (criterion 1). |
