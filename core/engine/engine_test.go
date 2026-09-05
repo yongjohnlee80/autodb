@@ -2,30 +2,35 @@ package engine
 
 import (
 	"go/ast"
-	"go/constant"
-	"go/importer"
 	"go/parser"
+	"go/printer"
 	"go/token"
-	"go/types"
 	"io/fs"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/yongjohnlee80/golib/dao"
 )
 
-// declaredNames TYPE-CHECKS this package and returns every package-scope
-// constant whose type is Name, keyed by identifier, with its constant value.
+// declaredNames returns every package-scope constant declared as `… Name = …`,
+// by IDENTIFIER, together with the source text of All()'s return statement.
 //
-// It uses go/types rather than walking the syntax tree, and the difference is
-// the whole point. An earlier version matched `*ast.BasicLit` initializers, so
-// it recognised `const MariaDB Name = "mariadb"` and silently missed
-// `const MariaDB Name = "maria" + "db"` — a legal constant of the same type,
-// declared the same way, invisible to the walk. The cell stayed green while a
-// name was missing from All(), which is the exact failure it exists to catch.
-// A type-checker knows what the CONSTANT IS; a syntax walk only knows what it
-// looks like. TestAConstantSpelledAsAnExpressionIsStillFound pins the
-// difference.
-func declaredNames(t *testing.T) map[string]string {
+// IT DOES NOT TYPE-CHECK, and that is a deliberate retreat from the previous
+// version. That one used go/types with importer.Default(), which is
+// GOPATH-based: the moment this package imported golib's dao — which it now
+// does, because the constant VALUES come from upstream — the importer could not
+// resolve it and the cell failed with "could not import". A module-aware
+// importer means adding golang.org/x/tools, a new dependency for a test.
+//
+// So the property is checked WITHOUT values. The question "is this constant
+// listed in All()" is answered by looking for its IDENTIFIER in All()'s return
+// statement, which needs no types at all — and it is strictly better than the
+// old value-based walk on the case that broke it: a constant declared as
+// `"maria" + "db"`, or as `dao.DialectMariaDB`, is found either way, because
+// its value is never consulted.
+func declaredNames(t *testing.T) (idents []string, allSrc string) {
 	t.Helper()
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
@@ -34,91 +39,48 @@ func declaredNames(t *testing.T) map[string]string {
 	if err != nil {
 		t.Fatalf("parsing the package source: %v", err)
 	}
-	var files []*ast.File
+	files := 0
 	for _, pkg := range pkgs {
 		for _, f := range pkg.Files {
-			files = append(files, f)
-		}
-	}
-	if len(files) == 0 {
-		t.Fatal("parsed 0 non-test files in this package: every assertion below " +
-			"would hold vacuously")
-	}
-	conf := types.Config{Importer: importer.Default()}
-	info := &types.Info{Defs: map[*ast.Ident]types.Object{}}
-	pkg, err := conf.Check("github.com/yongjohnlee80/autodb/core/engine", fset, files, info)
-	if err != nil {
-		t.Fatalf("type-checking the package: %v", err)
-	}
-
-	out := map[string]string{}
-	scope := pkg.Scope()
-	for _, name := range scope.Names() {
-		c, ok := scope.Lookup(name).(*types.Const)
-		if !ok {
-			continue
-		}
-		named, ok := c.Type().(*types.Named)
-		if !ok || named.Obj().Name() != "Name" || named.Obj().Pkg() != pkg {
-			continue
-		}
-		v := c.Val()
-		if v.Kind() != constant.String {
-			t.Fatalf("const %s has type Name but a %v value; Name is a string type "+
-				"and this cell cannot compare a non-string constant", name, v.Kind())
-		}
-		out[name] = constant.StringVal(v)
-	}
-	if len(out) == 0 {
-		t.Fatalf("found 0 constants of type Name across %d file(s): the declaration "+
-			"shape changed and this cell no longer sees any of them, which would "+
-			"let a missing All() entry pass", len(files))
-	}
-	return out
-}
-
-// The control for the instrument above: a constant whose value is an
-// EXPRESSION rather than a literal is still found. Written as a real
-// type-check of a synthetic source rather than as a comment claiming it works.
-func TestAConstantSpelledAsAnExpressionIsStillFound(t *testing.T) {
-	const src = `package engine
-
-type Name string
-
-const Split Name = "split" + "-name"
-const Plain Name = "plain"
-const NotAName = "untyped"
-`
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "synthetic.go", src, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conf := types.Config{Importer: importer.Default()}
-	pkg, err := conf.Check("synthetic", fset, []*ast.File{f}, &types.Info{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := map[string]string{}
-	for _, n := range pkg.Scope().Names() {
-		if c, ok := pkg.Scope().Lookup(n).(*types.Const); ok {
-			if named, ok := c.Type().(*types.Named); ok && named.Obj().Name() == "Name" {
-				got[n] = constant.StringVal(c.Val())
+			files++
+			for _, d := range f.Decls {
+				if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.CONST {
+					for _, spec := range gd.Specs {
+						vs, ok := spec.(*ast.ValueSpec)
+						if !ok {
+							continue
+						}
+						if id, ok := vs.Type.(*ast.Ident); ok && id.Name == "Name" {
+							for _, n := range vs.Names {
+								idents = append(idents, n.Name)
+							}
+						}
+					}
+				}
+				fd, ok := d.(*ast.FuncDecl)
+				if !ok || fd.Name.Name != "All" || fd.Body == nil {
+					continue
+				}
+				var b strings.Builder
+				if err := printer.Fprint(&b, fset, fd.Body); err != nil {
+					t.Fatalf("printing All()'s body: %v", err)
+				}
+				allSrc = b.String()
 			}
 		}
 	}
-	if got["Split"] != "split-name" {
-		t.Fatalf("a constant declared as an expression was not found with its value: "+
-			"got %q. A syntax walk matching *ast.BasicLit misses this exact shape, "+
-			"and a missing All() entry declared that way would pass unnoticed", got["Split"])
+	if files == 0 {
+		t.Fatal("parsed 0 non-test files: every assertion below holds vacuously")
 	}
-	if got["Plain"] != "plain" {
-		t.Fatalf("the ordinary literal form was missed: %q", got["Plain"])
+	if len(idents) == 0 {
+		t.Fatalf("found 0 `… Name = …` constants across %d file(s); the declaration "+
+			"shape changed and a missing All() entry would now pass", files)
 	}
-	if _, ok := got["NotAName"]; ok {
-		t.Fatal("an untyped string constant was collected as a Name; the filter is " +
-			"matching more than the type it names")
+	if allSrc == "" {
+		t.Fatal("did not find All()'s body; the membership check below would compare " +
+			"every identifier against an empty string and fail for the wrong reason")
 	}
+	return idents, allSrc
 }
 
 // All() and the declared constants must agree in BOTH directions.
@@ -128,39 +90,21 @@ const NotAName = "untyped"
 // while a newly declared engine is left out of All(), which is exactly the
 // mistake this exists to catch.
 func TestAllIsExhaustive(t *testing.T) {
-	declared := declaredNames(t)
+	idents, allSrc := declaredNames(t)
 
-	inAll := map[string]bool{}
-	for _, n := range All() {
-		if inAll[string(n)] {
-			t.Errorf("All() lists %q more than once", n)
-		}
-		inAll[string(n)] = true
-	}
-
-	// (a) nothing declared is missing from All()
-	for ident, value := range declared {
-		if !inAll[value] {
-			t.Errorf("const %s = %q is declared but missing from All() — a new engine "+
-				"that never reaches All() is invisible to Parse and to every "+
-				"exhaustiveness cell keyed on it", ident, value)
+	// (a) every declared constant is listed in All()
+	for _, id := range idents {
+		if !regexp.MustCompile(`\b` + regexp.QuoteMeta(id) + `\b`).MatchString(allSrc) {
+			t.Errorf("const %s is declared as a Name but does not appear in All() — an "+
+				"engine that never reaches All() is invisible to Parse and to every "+
+				"exhaustiveness cell keyed on it.\nAll() is: %s", id, allSrc)
 		}
 	}
 
-	// (b) and nothing in All() is undeclared
-	values := map[string]bool{}
-	for _, v := range declared {
-		values[v] = true
-	}
-	for _, n := range All() {
-		if !values[string(n)] {
-			t.Errorf("All() contains %q, which is not declared as a `… Name = …` "+
-				"constant in this package", n)
-		}
-	}
-
-	if len(declared) != len(All()) {
-		t.Errorf("%d declared constant(s) but All() has %d entries", len(declared), len(All()))
+	// (b) and All() lists exactly as many as are declared
+	if got, want := len(All()), len(idents); got != want {
+		t.Errorf("All() returns %d name(s) but %d constant(s) of type Name are "+
+			"declared (%v) — the two must agree in both directions", got, want, idents)
 	}
 }
 
@@ -298,5 +242,81 @@ func TestScanRejectsWhatParseRejects(t *testing.T) {
 	if err := n.Scan("postgres"); err != nil || n != Postgres {
 		t.Fatalf("control: Scan(\"postgres\") = %q, %v — this cell cannot "+
 			"distinguish rejection from a Scan that never works", n, err)
+	}
+}
+
+// JOHNO'S RULING (2026-09-06) MADE THIS PART OF THE DESIGN, NOT AN EXTRA.
+//
+// Approach (b) — a named type whose constants are DEFINED AS golib's — rests on
+// the claim that autodb adds a TYPE and not a second SET. Nothing in the
+// language enforces that: someone can write `const MariaDB Name = "mariadb"`
+// here and re-introduce the divergence quietly, by the back door, which is
+// exactly what naming golib the single source of truth was meant to prevent.
+//
+// So the claim is a test rather than a sentence in an ADR. Both directions:
+//
+//	every autodb Name is an engine golib knows      — no set of our own
+//	every engine autodb SUPPORTS has a constant     — no engine without a name
+//
+// The second direction is deliberately keyed on what autodb SUPPORTS rather
+// than on dao.EngineDialects(): golib names bigquery and autodb does not target
+// it yet, so requiring a constant per golib dialect would fail for a reason
+// that is not a defect. When autodb grows bigquery support, the supported list
+// below grows with it and this cell demands the constant.
+func TestEveryNameIsAGolibDialectAndEverySupportedEngineHasAName(t *testing.T) {
+	upstream := map[string]bool{}
+	for _, d := range dao.EngineDialects() {
+		upstream[d] = true
+	}
+	// An empty upstream set would make direction (a) hold vacuously.
+	if len(upstream) < 2 {
+		t.Fatalf("dao.EngineDialects() returned %d name(s); with fewer than two the "+
+			"first assertion below proves nothing", len(upstream))
+	}
+
+	// (a) autodb declares no engine golib does not name.
+	for _, n := range All() {
+		if !upstream[string(n)] {
+			t.Errorf("engine.%s = %q is not in dao.EngineDialects() (%v). autodb is "+
+				"supposed to add a TYPE, not a second SET of names: a constant with no "+
+				"upstream counterpart is the divergence that naming golib the single "+
+				"source of truth exists to prevent", n, string(n), dao.EngineDialects())
+		}
+	}
+
+	// (b) every engine autodb actually supports has a constant.
+	//
+	// Written out rather than derived from All(), or this direction would be
+	// All() compared with itself. This list is the one place a newly supported
+	// engine is declared to this cell.
+	supported := []string{dao.DialectPostgres, dao.DialectMySQL, dao.DialectSQLite}
+	have := map[string]bool{}
+	for _, n := range All() {
+		have[string(n)] = true
+	}
+	for _, want := range supported {
+		if !have[want] {
+			t.Errorf("autodb supports %q but declares no engine.Name for it; every "+
+				"engine we target must be nameable without writing the string again", want)
+		}
+	}
+
+	// And the values are golib's, not a coincidence: each constant must be the
+	// SAME string as the dao constant it is defined from. A future edit that
+	// replaced `dao.DialectPostgres` with a literal "postgres" would still pass
+	// (a) and (b) above — this is what catches it.
+	for _, pair := range []struct {
+		name     Name
+		upstream string
+		src      string
+	}{
+		{Postgres, dao.DialectPostgres, "dao.DialectPostgres"},
+		{MySQL, dao.DialectMySQL, "dao.DialectMySQL"},
+		{SQLite, dao.DialectSQLite, "dao.DialectSQLite"},
+	} {
+		if string(pair.name) != pair.upstream {
+			t.Errorf("engine constant %q does not equal %s (%q); the values must have "+
+				"one source and it is upstream", string(pair.name), pair.src, pair.upstream)
+		}
 	}
 }
