@@ -1488,6 +1488,7 @@ func (m *Model) leaderEntries() []leaderEntry {
 		{'i', "my allowed IPs…", func() { m.openUserIPManager(m.session.User().ID, "me") }},
 		{'T', "my access tokens…", func() { m.openPATManager(m.session.User().ID, "me") }},
 		{'I', "ip allowlist (admin)…", m.openAllowlistManager},
+		{'K', "service keyslot (admin)…", m.openKeyslotMenu},
 		{'H', "script history…", m.openHistory},
 		{'g', "refresh explorer", m.explorer.Reload},
 	}

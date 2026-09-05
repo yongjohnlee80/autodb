@@ -37,6 +37,9 @@ import (
 // fixture: in-memory meta store, bootstrapped auth, engine, one sqlite
 // target connection, and the RPC server on a real loopback TCP port.
 type fixture struct {
+	// svc is the auth Service behind the server, so a cell can put it into a
+	// state only the daemon normally produces.
+	svc     *auth.Service
 	store   *meta.Store
 	rootTok string
 	connID  int64
@@ -78,6 +81,19 @@ var fixtureSeq atomic.Int64
 // failing for a reason its author cannot see.
 func newFixture(t *testing.T, opts ...rpc.Option) *fixture {
 	t.Helper()
+	return newFixtureWithAuth(t, nil, opts...)
+}
+
+// newFixtureWithAuth is newFixture with options for the AUTH service too.
+//
+// Separate because most cells need neither, and because the one that does —
+// the keyslot status surface — needs a Service that has actually ATTEMPTED an
+// unattended unlock. Nothing reachable from this package can make that happen
+// otherwise: the attempt is something the DAEMON does at start, so an rpc-only
+// fixture reports the zero status forever and a cell built on it cannot tell a
+// real status from a fabricated one.
+func newFixtureWithAuth(t *testing.T, authOpts []auth.Option, opts ...rpc.Option) *fixture {
+	t.Helper()
 	ctx := context.Background()
 	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
 	if err != nil {
@@ -85,7 +101,9 @@ func newFixture(t *testing.T, opts ...rpc.Option) *fixture {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32", "::1/128"}))
+	svc, err := auth.New(store, append([]auth.Option{
+		auth.WithConfigAllowlist([]string{"127.0.0.1/32", "::1/128"}),
+	}, authOpts...)...)
 	if err != nil {
 		t.Fatalf("auth.New: %v", err)
 	}
@@ -126,7 +144,7 @@ func newFixture(t *testing.T, opts ...rpc.Option) *fixture {
 			time.Sleep(time.Millisecond)
 		}
 	}
-	return &fixture{store: store, rootTok: rootTok, connID: connID, eng: eng, addr: srv.Addr()}
+	return &fixture{store: store, svc: svc, rootTok: rootTok, connID: connID, eng: eng, addr: srv.Addr()}
 }
 
 // client is a raw msgpack-RPC test client.
