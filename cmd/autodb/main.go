@@ -249,6 +249,9 @@ func runServe(configPath string) error {
 		// the unconditional form and does not grow with how long the daemon
 		// ran, which is what made the original reachable by an ordinary
 		// restart.
+		//
+		// The identity itself needs a pin to mean anything — inode numbers are
+		// recycled, and on ext4 immediately. See socketIdentity.
 		// Go's *net.UnixListener unlinks the path BY NAME on Close unless told
 		// otherwise, so without this the removal that actually happens in an
 		// ordinary shutdown is the stdlib's name-based one and the identity
@@ -263,12 +266,12 @@ func runServe(configPath string) error {
 		if ul, ok := ln.(*net.UnixListener); ok {
 			ul.SetUnlinkOnClose(false)
 		}
-		created, cerr := os.Stat(addr)
+		id, cerr := pinSocket(addr)
 		if cerr != nil {
 			ln.Close()
 			return fmt.Errorf("stat %s: %w", addr, cerr)
 		}
-		defer removeIfStillOurs(addr, created)
+		defer removeIfStillOurs(addr, id)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -965,18 +968,79 @@ func startPartitionRoll(ctx context.Context, store *meta.Store, onLog func(strin
 	}()
 }
 
+// socketIdentity is what shutdown compares against, and it exists because
+// os.SameFile IS NOT A SOUND IDENTITY FOR A PATH THAT CAN BE RECREATED.
+//
+// os.SameFile is dev+ino on unix, and INODE NUMBERS ARE REUSED. Measured on
+// the two hosts this project builds on: unlink a file and recreate it at the
+// same path and ext4 hands the number straight back — os.SameFile reports
+// TRUE for a file it has never seen — while tmpfs reports false, because tmpfs
+// allocates inode numbers from a monotonic counter. So the identity check
+// shipped looking correct on a developer's /tmp and unsound on the machine it
+// actually runs on. The filesystem, not the code, decides whether the bug
+// appears; that is why the suite was green here and red on the test VM.
+//
+// A HARD LINK closes it. A second name for our socket's inode keeps that inode
+// allocated, so its number cannot be handed to a successor, so a successor's
+// socket is GUARANTEED to compare unequal. The pin is removed on the way out,
+// after the comparison it exists to make sound.
+type socketIdentity struct {
+	// pin is the second name for our inode, or "" when the filesystem would
+	// not give us one.
+	pin string
+	// stat is the identity of record, captured while we hold the bind.
+	stat os.FileInfo
+}
+
+// pinSocket takes the identity of the socket we just bound and pins its inode.
+func pinSocket(sock string) (socketIdentity, error) {
+	st, err := os.Stat(sock)
+	if err != nil {
+		return socketIdentity{}, err
+	}
+	pin := sock + ".inode-pin"
+	// A leftover from a crashed predecessor. We hold the bind on the socket
+	// itself, so no live daemon owns this name and removing it is safe. The
+	// pin is a hard link, so it carries the socket's own 0600 mode and adds
+	// no exposure of its own.
+	_ = os.Remove(pin)
+	if lerr := os.Link(sock, pin); lerr != nil {
+		// UNPINNABLE. Fall back to the bare stat, which is exactly what
+		// shipped before: sound where inode numbers are not recycled, unsound
+		// where they are. Strictly no worse — and the alternative, declining
+		// to remove our own socket at all, makes the next launch look occupied
+		// while nothing is listening, which is the failure this whole block
+		// exists to avoid.
+		return socketIdentity{stat: st}, nil
+	}
+	return socketIdentity{pin: pin, stat: st}, nil
+}
+
+// release drops the second name. Called only after the comparison.
+func (id socketIdentity) release() {
+	if id.pin != "" {
+		_ = os.Remove(id.pin)
+	}
+}
+
 // removeIfStillOurs unlinks a socket path only while it is the same file we
 // created, so a shutdown cannot delete a successor's socket.
 //
 // Split out from the defer so the decision is testable: the bug it fixes is
 // invisible to any test that only checks "the file is gone afterwards".
-func removeIfStillOurs(path string, created os.FileInfo) {
+func removeIfStillOurs(path string, id socketIdentity) {
+	// AFTER the comparison, never before: the pin is what makes the
+	// comparison mean anything.
+	defer id.release()
+	if id.stat == nil {
+		return
+	}
 	now, err := os.Stat(path)
 	if err != nil {
 		// Already gone, or not ours to look at. Either way, not ours to remove.
 		return
 	}
-	if !os.SameFile(created, now) {
+	if !os.SameFile(id.stat, now) {
 		// A successor bound this path while we were shutting down. Its socket
 		// is a different file wearing our name, and unlinking it would leave a
 		// running daemon that no client can reach.
