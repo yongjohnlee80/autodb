@@ -124,7 +124,7 @@ var matrixTriage = map[string]struct {
 	"3.1:user":                {covered, "claims below prove requiredness and the PAT-owner cross-check"},
 	"3.1:database":            {covered, "claims below prove requiredness and the grant-on-target check"},
 	"3.1:application_name":    {covered, "derived from its claims — #accepted, #truncate-notice-256 and #session-audit are all covered as of #58's seam and its consumer wiring. The parent was held awaiting by #session-audit alone (lector PR #46 r0 MF1); that claim is now witnessed on both sides of the seam, so the derivation promotes it rather than any hand edit here"},
-	"3.1:client_encoding":     {awaiting, "partial — claims below (the UTF8-only gate is proven; the target-lease UTF8 pin, ruling 2, needs the LEASE-SIDE pin, not the wire loop: F1/F2 shipped in v0.3.1 and runSession is the post-auth loop whenever Options.Queries is supplied)"},
+	"3.1:client_encoding":     {covered, "derived from its claims — the startup UTF8-only gate (#utf8-only) and the lease pin at acquisition (#lease-utf8-pin), the second promoted once a cell observed client_encoding itself refusing rather than server_encoding standing in for it"},
 	"3.1:options":             {covered, "derived from its claims — options unpacking and empty-accepted (TestStartup_ParameterPolicy, TestStartupGUCs_OptionsUnpackIntoTheSameMap, TestStartupGUCs_AnUnreadableOptionsStringIsRefused), empty-options audit (TestStartup_EmptyOptionsIsAuditedAsIgnored)"},
 	"3.1:replication":         {covered, "single claim below — refused, every tested value"},
 	"3.1:_pq_":                {covered, "TestStartup_UnrecognizedProtocolOptionsAreNamed + TestStartup_ParameterPolicy — negotiated, not refused"},
@@ -132,7 +132,15 @@ var matrixTriage = map[string]struct {
 	"3.1:carve-out":           {covered, "TestStartupGUCs_TheNamedSetIsNeverCollected (client_encoding and application_name never become settings) + TestPGStartupGUCs_ThePacketPsqlSendsConnects (the consequence, live: the packet every ordinary client sends still opens a session) + TestPGStartupGUCs_OptionsIsNotAWayAroundTheEncodingPin (nor through options)"},
 
 	// ---- §3.2 / §3.3 prose units ----
-	"3.2": {awaiting, "post-auth SET policy is the ADR-0074 gate matrix; needs the LEASE-SIDE pin, not the wire loop: F1/F2 shipped in v0.3.1 and runSession is the post-auth loop whenever Options.Queries is supplied; the startup half is 3.1:options' refusal"},
+	// PROMOTED, and on a narrower reading than the old reason took. Cells
+	// already existed on BOTH sides — TestPGStartupGUCs_ADenylistedSettingIsRefused
+	// at startup, TestWireSetReset_EditorDenylist for SET/RESET in core/exec —
+	// and neither witnessed §3.2's load-bearing sentence, because that sentence
+	// is not about either door: it says there is ONE admission implementation,
+	// so a setting refused mid-session cannot be had by asking at connect
+	// instead. Two gates written from the same list satisfy both existing cells
+	// and diverge on the first name added to one of them.
+	"3.2": {covered, "TestPGF4_TheSameAdmissionAnswersStartupAndSET — four denylisted names and one ordinary one are each driven through BOTH doors in one run, and the two answers are required to AGREE (not merely to match a hand-written expectation at each door) and then to be the RIGHT answer, which is the assertion a comparison-only cell cannot make. Mutation-proven: giving the startup door a single exception of its own survives every pre-existing startup-GUC cell and is caught here; dropping a name from the shared denylist makes both doors agree wrongly and is caught too. Also on the SET side: TestWireSetReset_EditorDenylist / _ReaderDenylistAddsSearchPath / _EncodingIsPinnedByTheLease, and TestParsingGUCsIsGrammarGUCsMinusSearchPath now enforces the documented relation between the pooled-path ban and the wire denylist"},
 	"3.3": {covered, "TestPGLoop_TheClientReceivesTheTargetsOwnParameterSet + TestPGLoop_TheOverridesWinOverTheTargetsOwnValues — the forwarded half exists as of #58's seam and is proven against an INDEPENDENT connection to the same target (SHOW server_version/server_encoding/client_encoding/DateStyle), not against a list written in the cell, which would have encoded this build's parameters and passed while the relay forwarded something else. The overrides are proven to WIN over the target's own values for the same names, which is why they are appended after the forwarded set rather than the set being filtered; mutation-proven both ways (drop the forwarding, and reverse the order)"},
 
 	// ---- §4 Frontend message matrix (post-auth) ----
@@ -158,7 +166,7 @@ var matrixTriage = map[string]struct {
 	"4a:Query":             {covered, "a simple Query on a wire session destroys the unnamed pair (proven as a unit AND live) and releases both charges - TestRetained_EveryReleasePointReturnsItsCharge/simple_Query_destroys_the_unnamed_pair"},
 	"4a:Transaction-end":   {covered, "all portals die at transaction end, hooked at clearTxLocked (the single point every transaction end passes), and their charges are released there - TestRetained_EveryReleasePointReturnsItsCharge/transaction_end_then_Close-S"},
 	"4a:Error-mid-segment": {covered, "an in-flight reservation is released when the target refuses the frame that would have created the object - TestRetained_PreCompleteErrorReturnsTheCharge, and live in TestExtPG_SyncSweepsWhatTheAbortedSegmentWillNeverConfirm where everything queued behind the error is both released and destroyed"},
-	"4a:Session-end":       {awaiting, "awaiting - the segment lane reservation is released on every exit including teardown (celled via general.inUse()), and retained charges are now accounted, but NO cell asserts what teardown leaves behind: the per-session account dies with the session object, so there is nothing to release, and that is an argument rather than a witness. A cell would have to observe the lane and the session registry after a mid-segment teardown"},
+	"4a:Session-end":       {covered, "TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease - a live client is torn down with a portal suspended and the segment unsynced, and all three of what it held come back: the general lane returns to zero, the registry stops answering for the session, and the lease it took is available to a second client that was refused for the cap moments earlier. The lease under a cap of one is what turns the old argument (the per-session account dies with the object) into an observation. Mutation-proven three ways; notably, disabling sessions.remove() leaves the registry-forget assertion GREEN and only the lease assertion red, so the two halves are not redundant"},
 
 	// ---- §5 Backend emission matrix ----
 	"5:RowDescription":                  {covered, "TestPGLoop_RowDescriptionCarriesTheServersTypes — the OIDs are the SERVER's (23/25/16), the values are its own rendering and the command tag is verbatim; a decode-and-re-encode producer would report text OID 25"},
@@ -227,8 +235,20 @@ var claimTriage = map[string]struct {
 	"3.1:client_encoding#utf8-only": {covered, "TestStartup_ParameterPolicy",
 		"non-UTF8 refused, hyphen spelling tolerated",
 		[]string{`"client_encoding": "LATIN1"`, `"client_encoding": "utf-8"`}},
-	"3.1:client_encoding#lease-utf8-pin": {awaiting, "",
-		"the target lease is pinned UTF8 at acquisition (ruling 2) — nothing in core/exec pins client_encoding yet; needs the LEASE-SIDE pin, not the wire loop: F1/F2 shipped in v0.3.1 and runSession is the post-auth loop whenever Options.Queries is supplied", nil},
+	// PROMOTED after re-validating the reason, which had gone stale: it said
+	// "nothing in core/exec pins client_encoding yet", and the pin has since
+	// shipped (leaseEncodingRefusal, consulted at acquisition against the
+	// pinned connection's own ParameterStatus). What was genuinely missing was
+	// narrower and had survived every cell: EVERY live arm trips on
+	// server_encoding — a LATIN1 database reports LATIN1 for both and the
+	// predicate checks server_encoding first — so no cell had ever observed
+	// the parameter this claim is NAMED for refusing at acquisition. A
+	// caller-side mutation that hands the predicate only server_encoding
+	// survives TestLeaseEncodingRefusal and both pre-existing live cells, and
+	// is caught by the new one.
+	"3.1:client_encoding#lease-utf8-pin": {covered, "TestWireOpen_TheLeasePinReadsClientEncodingToo",
+		"the lease pin reads BOTH parameters at acquisition: a lease reporting server_encoding=UTF8 with client_encoding=WIN1252 is refused with frontdoor/lease-encoding and the audit NAMES client_encoding, while the same fixture reporting UTF8 for both is admitted — the accept arm, without which every arm of this claim asserts a refusal and a build that admitted nothing would satisfy all of them",
+		[]string{"client_encoding=WIN1252", "wire_lease_encoding_refused", "both are UTF8"}},
 
 	"3.1:options#unpacked": {covered, "TestStartupGUCs_OptionsUnpackIntoTheSameMap",
 		"all three libpq spellings unpack into settings, escapes honoured; an options string that does not parse is refused (Amendment 8 — this claim was `#guc-refusal` while the rule was to refuse them)",
