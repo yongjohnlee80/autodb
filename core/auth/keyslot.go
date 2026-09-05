@@ -92,6 +92,12 @@ var (
 	// the keyfile that opened the old one.
 	ErrServiceKeyslotExists = errors.New("auth: a service keyslot already exists")
 
+	// ErrKeyfileStranded — a keyfile exists with NO slot cut from it, found at
+	// enrollment. Its own error because the REMEDY is the opposite of the one
+	// for a keyfile whose slot exists: this one is inert and deleting it is
+	// the fix.
+	ErrKeyfileStranded = errors.New("auth: a service keyfile exists with no slot")
+
 	// ErrNoServiceKeyslot — a keyfile exists but no slot does. The two halves
 	// live in different places on purpose (Amendment 1 A1.2), so having one
 	// without the other is a reachable state and gets its own name.
@@ -248,6 +254,28 @@ func (s *Service) EnrollServiceKeyslot(ctx context.Context, token, ip string) er
 	// removable, while a slot with no keyfile is a row nothing can open.
 	keyfile, err := newKeyfile(s.keyfilePath)
 	if err != nil {
+		// A KEYFILE WITH NO SLOT, and we can say so DEFINITIVELY rather than
+		// leave the operator to work it out.
+		//
+		// The slot check above already passed, so reaching here with an
+		// existing file means the pair got separated — a crash between the
+		// write and the commit, or a restore that brought back one half. The
+		// two shapes look identical from "file exists" and have OPPOSITE
+		// remedies: this one is INERT and deleting it is the fix, while a
+		// keyfile whose slot DOES exist must never be deleted, because that
+		// strands the slot and the daemon then starts locked with a file on
+		// disk that looks perfectly correct.
+		//
+		// The ordering is what makes the claim safe: if a slot existed we
+		// would have returned ErrServiceKeyslotExists and never got here.
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("%w: a keyfile is already at %s but NO slot was cut from it, so "+
+				"it opens nothing — a crash between writing the keyfile and committing the "+
+				"slot, or a restore that brought back one half. It is inert: delete it and "+
+				"enroll again. (A keyfile whose slot DOES exist is a different situation and "+
+				"must not be deleted; this is not that one, because a slot would have been "+
+				"refused before the file was touched.)", ErrKeyfileStranded, s.keyfilePath)
+		}
 		return err
 	}
 	kek, err := serviceKEK(keyfile)

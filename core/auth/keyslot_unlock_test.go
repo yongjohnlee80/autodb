@@ -380,3 +380,58 @@ func TestServiceKeyslot_RefusesASlotFromAnotherBinding(t *testing.T) {
 		t.Error("a slot from an unknown binding unlocked the store")
 	}
 }
+
+// THE CRASH WINDOW'S MESSAGE has to name the remedy, because the two shapes
+// look identical from "file exists" and their remedies are OPPOSITE.
+//
+// A reviewer asked only that the refusal say which side the operator is on.
+// It can do better than that: the slot check runs BEFORE the keyfile is
+// touched, so reaching an EEXIST here PROVES no slot exists — the file is
+// inert and deleting it is the fix. The ordering is what makes the claim safe
+// rather than a guess.
+func TestServiceKeyslot_StrandedKeyfileNamesItsRemedy(t *testing.T) {
+	t.Parallel()
+	s, _, _, keyfile := newKeyslotFixture(t)
+	rootTok, _ := mustBootstrap(t, s)
+	ctx := context.Background()
+
+	// The crash shape: a keyfile on disk, no slot in the store.
+	if _, err := newKeyfile(keyfile); err != nil {
+		t.Fatal(err)
+	}
+
+	err := s.EnrollServiceKeyslot(ctx, rootTok, testIP)
+	if !errors.Is(err, ErrKeyfileStranded) {
+		t.Fatalf("enroll over a stranded keyfile = %v, want ErrKeyfileStranded", err)
+	}
+	msg := err.Error()
+	for _, want := range []struct{ text, why string }{
+		{keyfile, "the path, so they know which file"},
+		{"NO slot", "which side of the window they are on"},
+		{"inert", "that it grants nothing, so deleting it is safe"},
+		{"delete it and enroll again", "the actual remedy, in words"},
+		{"must not be deleted", "the OTHER case, refused explicitly so nobody generalises"},
+	} {
+		if !strings.Contains(msg, want.text) {
+			t.Errorf("the refusal lacks %q — %s:\n%v", want.text, want.why, err)
+		}
+	}
+
+	// AND IT IS DISTINCT from the already-enrolled refusal, which has the
+	// opposite remedy. A caller that cannot tell them apart deletes the wrong
+	// file.
+	if err := os.Remove(keyfile); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnrollServiceKeyslot(ctx, rootTok, testIP); err != nil {
+		t.Fatalf("control: a clean enroll failed (%v), so the comparison below is meaningless", err)
+	}
+	again := s.EnrollServiceKeyslot(ctx, rootTok, testIP)
+	if !errors.Is(again, ErrServiceKeyslotExists) {
+		t.Fatalf("a second enroll = %v, want ErrServiceKeyslotExists", again)
+	}
+	if errors.Is(again, ErrKeyfileStranded) {
+		t.Error("an already-enrolled install reports the STRANDED error, whose remedy is " +
+			"\"delete the keyfile\" — following it would strand the live slot")
+	}
+}
