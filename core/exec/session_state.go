@@ -268,13 +268,35 @@ func admitLock(txOpen bool) error {
 // parsingGUCs are grammarGUCs minus search_path: the settings that change how
 // the SERVER PARSES SQL. search_path changes name RESOLUTION, not parsing, and
 // is a reader concern only (see readerGUCs).
-var parsingGUCs = map[string]bool{
-	"standard_conforming_strings": true,
-	"backslash_quote":             true,
-	"escape_string_warning":       true,
-	"sql_mode":                    true,
-	"autocommit":                  true,
-	"transform_null_equals":       true,
+//
+// DERIVED, NOT RESTATED. This was a second hand-maintained literal holding six
+// of grammarGUCs' seven names, with the sentence above as the only thing
+// claiming the relation. grammarGUCs governs the POOLED path (classifySet) and
+// parsingGUCs the WIRE denylist, so a name added to one and forgotten in the
+// other was a setting refused as a statement and admitted through the front
+// door, silently, with both comments still asserting the derivation held. A
+// guard was added for it first; deriving the set removes the class instead of
+// detecting it, and there is now no edit that can make the two disagree.
+var parsingGUCs = grammarGUCsExcept("search_path")
+
+// grammarGUCsExcept returns grammarGUCs without the named settings.
+//
+// The exclusions are checked against the source set by
+// TestEveryGrammarGUCExclusionNamesARealSetting: an exclusion that names
+// something grammarGUCs no longer contains subtracts nothing, which reads as a
+// deliberate carve-out and is actually a leftover.
+func grammarGUCsExcept(exclude ...string) map[string]bool {
+	skip := make(map[string]bool, len(exclude))
+	for _, name := range exclude {
+		skip[name] = true
+	}
+	out := make(map[string]bool, len(grammarGUCs))
+	for name := range grammarGUCs {
+		if !skip[name] {
+			out[name] = true
+		}
+	}
+	return out
 }
 
 // readerGUCs are refused for read-only wire sessions on top of the denylist:
