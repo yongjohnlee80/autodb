@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,6 +10,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/yongjohnlee80/golib/dao"
+
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // The SERVICE KEYSLOT (ADR-0087): a copy of the install master key wrapped by a
@@ -75,6 +82,15 @@ var (
 	// ErrKeyfileMalformed — present and readable and the wrong size, which is
 	// a truncated write or a file that was never a keyfile.
 	ErrKeyfileMalformed = errors.New("auth: service keyfile is not the expected length")
+
+	// ErrNoKeyfilePath — the Service was built without WithServiceKeyfile, so
+	// there is nowhere to write one. An install that never asked for
+	// unattended unlock, told apart from one that asked and failed.
+	ErrNoKeyfilePath = errors.New("auth: no service keyfile path is configured")
+
+	// ErrServiceKeyslotExists — refuse to re-cut a slot. Re-cutting strands
+	// the keyfile that opened the old one.
+	ErrServiceKeyslotExists = errors.New("auth: a service keyslot already exists")
 
 	// ErrNoServiceKeyslot — a keyfile exists but no slot does. The two halves
 	// live in different places on purpose (Amendment 1 A1.2), so having one
@@ -163,4 +179,212 @@ func readKeyfile(path string) ([]byte, error) {
 			"file that was never a keyfile", ErrKeyfileMalformed, path, len(b), keyfileLen)
 	}
 	return b, nil
+}
+
+// --- the slot itself: enroll, unlock, remove ---------------------------------------
+
+// ServiceKeyslotState is what an operator is shown about the service slot
+// (ADR-0087 §6). The daemon KEEPS RUNNING on every failure below, so the state
+// has to be reportable — inferring "the store is locked" from every developer
+// being refused is the diagnosis this feature exists to end.
+type ServiceKeyslotState struct {
+	// Attempted is false when no keyfile path was configured at all, which is
+	// an install that has not enrolled rather than one that failed.
+	Attempted bool
+	// Unlocked is true when the slot opened the master key this boot.
+	Unlocked bool
+	// Reason is empty on success and otherwise names the ground, from the
+	// vocabulary in this file, so the log distinguishes "absent" from "wrong
+	// mode" from "corrupt".
+	Reason string
+}
+
+// ServiceKeyslotStatus reports the last unlock attempt.
+func (s *Service) ServiceKeyslotStatus() ServiceKeyslotState {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.keyslotState
+}
+
+// EnrollServiceKeyslot writes a keyfile and stores the master key wrapped by
+// it, so the NEXT start needs no passphrase (ADR-0087 §1, §5).
+//
+// Admin-only and only while UNLOCKED, and both are structural rather than
+// policy: wrapping the master key requires HAVING it, so the slot can only be
+// cut from a process that already holds it — which today means after a human
+// logged in. That is the enrollment step the acceptance story allows, and it
+// happens once.
+//
+// The slot row and its audit row commit in ONE transaction
+// ([[security-core-hardening]] R2). A slot that exists with no record of who
+// cut it is exactly the row an investigation cannot account for — and this one
+// grants unattended access to every secret in the store.
+func (s *Service) EnrollServiceKeyslot(ctx context.Context, token, ip string) error {
+	ident, err := s.requireAdmin(ctx, token)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(s.keyfilePath) == "" {
+		return ErrNoKeyfilePath
+	}
+	// Requires the key, which is the point: you cannot wrap what you do not
+	// hold, so this cannot be done from a locked process.
+	mk, err := s.masterKey()
+	if err != nil {
+		return err
+	}
+	// REFUSE TO REPLACE an existing slot rather than silently re-cutting one.
+	// A re-cut strands the keyfile that opened the old slot, and the operator
+	// is left with a file on disk that looks exactly right.
+	if _, err := s.store.Keyslots.OnCtx(ctx).
+		With(meta.KeyslotKind, meta.KeyslotKindService).Get(); err == nil {
+		return ErrServiceKeyslotExists
+	} else if !errors.Is(err, dao.ErrNoRows) {
+		return err
+	}
+
+	// The keyfile is written BEFORE the row, and newKeyfile refuses to clobber.
+	// This ordering is the recoverable one: a keyfile with no slot is inert and
+	// removable, while a slot with no keyfile is a row nothing can open.
+	keyfile, err := newKeyfile(s.keyfilePath)
+	if err != nil {
+		return err
+	}
+	kek, err := serviceKEK(keyfile)
+	if err != nil {
+		return err
+	}
+	wrapped, err := seal(kek, mk, aadServiceKeyslot)
+	if err != nil {
+		return fmt.Errorf("auth: wrapping the master key for the service slot: %w", err)
+	}
+
+	if err := s.inTx(ctx, func(tx *dao.Transaction) error {
+		if _, ierr := s.store.Keyslots.On(tx).
+			Set(meta.KeyslotKind, meta.KeyslotKindService).
+			Set(meta.KeyslotWrapped, wrapped).
+			Set(meta.KeyslotAADVersion, aadServiceKeyslot).
+			Set(meta.KeyslotCreatedBy, ident.UserID()).
+			Set(meta.KeyslotCreatedAt, s.now().Unix()).
+			Insert(); ierr != nil {
+			return ierr
+		}
+		return s.AuditTx(tx, ident.UserID(), ip, "service_keyslot_enrolled",
+			fmt.Sprintf("keyfile %s — this install now unlocks without a passphrase at start",
+				s.keyfilePath))
+	}); err != nil {
+		// The row did not land, so the keyfile it would have paired with is
+		// inert. Remove it rather than leave a 32-byte secret on disk that
+		// opens nothing and that the next enroll would refuse to overwrite.
+		_ = os.Remove(s.keyfilePath)
+		return err
+	}
+	return nil
+}
+
+// RemoveServiceKeyslot deletes the slot AND the keyfile (ADR-0087 §5).
+//
+// Both halves, because either alone is a half-removal that reads as done: the
+// keyfile without the row is a secret on disk opening nothing, and the row
+// without the keyfile is unattended access that quietly still works if the file
+// comes back.
+func (s *Service) RemoveServiceKeyslot(ctx context.Context, token, ip string) error {
+	ident, err := s.requireAdmin(ctx, token)
+	if err != nil {
+		return err
+	}
+	if err := s.inTx(ctx, func(tx *dao.Transaction) error {
+		row, gerr := s.store.Keyslots.On(tx).
+			With(meta.KeyslotKind, meta.KeyslotKindService).Get()
+		if errors.Is(gerr, dao.ErrNoRows) {
+			return ErrNoServiceKeyslot
+		} else if gerr != nil {
+			return gerr
+		}
+		if derr := s.store.Keyslots.On(tx).
+			With(meta.KeyslotKind, meta.KeyslotKindService).Delete(); derr != nil {
+			return derr
+		}
+		return s.AuditTx(tx, ident.UserID(), ip, "service_keyslot_removed",
+			fmt.Sprintf("slot cut %s — this install now requires a passphrase login after a restart",
+				time.Unix(row.CreatedAt, 0).UTC().Format(time.RFC3339)))
+	}); err != nil {
+		return err
+	}
+	// After the commit: the authoritative record is gone, so a keyfile left
+	// here is inert rather than dangerous, and a failure to unlink is worth
+	// reporting without un-removing the slot.
+	if s.keyfilePath != "" {
+		if rerr := os.Remove(s.keyfilePath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+			return fmt.Errorf("auth: the service keyslot was removed but its keyfile remains at "+
+				"%s and must be deleted by hand: %w", s.keyfilePath, rerr)
+		}
+	}
+	return nil
+}
+
+// UnlockWithServiceKeyslot is the unattended unlock, run once at start.
+//
+// IT NEVER FAILS THE PROCESS (ADR-0087 §6). Fail closed on the SECRET, not on
+// the daemon: a start that refuses because a keyfile is unreadable converts a
+// degraded state into a total outage, and this feature exists to remove an
+// outage. So every ground below leaves the store locked exactly as it is today,
+// a passphrase login still works, and the reason is recorded for the operator
+// rather than inferred from every developer being refused.
+//
+// The returned error is for the CALLER'S LOG. The daemon starts either way.
+func (s *Service) UnlockWithServiceKeyslot(ctx context.Context) error {
+	if strings.TrimSpace(s.keyfilePath) == "" {
+		s.setKeyslotState(ServiceKeyslotState{Attempted: false})
+		return nil
+	}
+	err := s.unlockFromKeyfile(ctx)
+	if err != nil {
+		s.setKeyslotState(ServiceKeyslotState{Attempted: true, Reason: err.Error()})
+		return err
+	}
+	s.setKeyslotState(ServiceKeyslotState{Attempted: true, Unlocked: true})
+	return nil
+}
+
+func (s *Service) unlockFromKeyfile(ctx context.Context) error {
+	keyfile, err := readKeyfile(s.keyfilePath)
+	if err != nil {
+		return err
+	}
+	row, err := s.store.Keyslots.OnCtx(ctx).
+		With(meta.KeyslotKind, meta.KeyslotKindService).Get()
+	if errors.Is(err, dao.ErrNoRows) {
+		return fmt.Errorf("%w: a keyfile exists at %s but no slot was cut from it",
+			ErrNoServiceKeyslot, s.keyfilePath)
+	} else if err != nil {
+		return err
+	}
+	kek, err := serviceKEK(keyfile)
+	if err != nil {
+		return err
+	}
+	// The AAD comes from the ROW, not from the constant, so a slot sealed under
+	// a future binding is opened under the one it was sealed with — and a row
+	// naming an unknown binding is refused rather than silently retried under
+	// today's.
+	if row.AADVersion != aadServiceKeyslot {
+		return fmt.Errorf("%w: the slot was sealed under %q and this build knows %q",
+			ErrKeyslotCorrupt, row.AADVersion, aadServiceKeyslot)
+	}
+	mk, err := open(kek, row.Wrapped, row.AADVersion)
+	if err != nil {
+		return fmt.Errorf("%w: the service slot did not open — the keyfile does not match the "+
+			"slot, or one of them was replaced: %v", ErrKeyslotCorrupt, err)
+	}
+	// Through withUnlock, so the service slot meets the SAME consistency check
+	// a login does: if this process already holds a master key, one that
+	// disagrees is refused rather than adopted.
+	return s.withUnlock(mk, func() error { return nil })
+}
+
+func (s *Service) setKeyslotState(st ServiceKeyslotState) {
+	s.mu.Lock()
+	s.keyslotState = st
+	s.mu.Unlock()
 }

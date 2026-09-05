@@ -78,6 +78,23 @@ type Service struct {
 	// nobody wired the question up.
 	servingCleartext func() bool
 
+	// keyfilePath is where the SERVICE keyslot's keyfile lives (ADR-0087).
+	//
+	// Empty means this install never asked for unattended unlock, which is a
+	// different state from asking and failing — UnlockWithServiceKeyslot
+	// reports the two apart, because "no keyslot configured" must not read as
+	// "your keyslot is broken".
+	//
+	// A1.2 puts it in its OWN directory rather than beside the meta store:
+	// the store and the key that opens it must be separate acts to back up.
+	keyfilePath string
+
+	// keyslotState records the last unattended-unlock attempt so an operator
+	// can be SHOWN it (§6). The daemon keeps running on every failure, which
+	// is exactly why the state must be reportable rather than inferred from
+	// every developer being refused.
+	keyslotState ServiceKeyslotState
+
 	// patCompares counts PAT hash-and-compare operations for the
 	// comparable-work assertion. Per-service so parallel tests cannot
 	// interleave into each other's deltas.
@@ -161,6 +178,16 @@ func New(store *meta.Store, opts ...Option) (*Service, error) {
 // serving cleartext" and refuses the mint.
 func WithServingCleartext(fn func() bool) Option {
 	return func(s *Service) error { s.servingCleartext = fn; return nil }
+}
+
+// WithServiceKeyfile names where the service keyslot's keyfile lives.
+//
+// Absent, the daemon simply never attempts an unattended unlock — the
+// pre-ADR-0087 behaviour, and the right default: a Service assembled without
+// this (every test, every non-serving mode) stays locked until a passphrase
+// login, rather than reaching for a file nobody configured.
+func WithServiceKeyfile(path string) Option {
+	return func(s *Service) error { s.keyfilePath = path; return nil }
 }
 
 // servingCleartextNow answers the mint gate's question, failing closed.
