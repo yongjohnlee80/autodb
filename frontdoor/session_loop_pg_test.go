@@ -45,6 +45,37 @@ func pgLoop(t *testing.T) (addr, secret, database string) {
 // directly (the re-entrancy witness wraps it).
 func pgLoopWithEngine(t *testing.T) (addr, secret, database string, eng *exec.Engine) {
 	t.Helper()
+	l := pgLoopFull(t)
+	return l.addr, l.secret, l.database, l.eng
+}
+
+// pgLoopHandles is everything pgLoopWithEngine builds, for the cells that need to
+// REACH INTO the install mid-session — revoking a grant between two Executes,
+// say. Most cells want the four values above and nothing else.
+type pgLoopHandles struct {
+	addr, secret, database string
+	eng                    *exec.Engine
+	svc                    *auth.Service
+	store                  *meta.Store
+	rootTok                string
+	connID                 int64
+	patUserID              int64
+	// lis and events are the SERVER side of the same install. A cell that asks
+	// what a teardown left behind cannot ask the client — the client is the
+	// thing that went away — so it reads the listener's lane and the audit trail.
+	lis    *Listener
+	events func() []Event
+}
+
+// pgLoopFull is the one construction; pgLoopWithEngine delegates to it rather
+// than keeping a second copy. Two copies of a fixture is how the pair comes to
+// disagree about what an install looks like, and the cells built on them then
+// disagree about what they proved.
+// engOpts reaches exec.New unchanged. It exists for the cells whose subject IS
+// a bound — a lease cap of one turns "the lease came back" from an argument
+// about accounting into something a second client either can or cannot do.
+func pgLoopFull(t *testing.T, engOpts ...exec.Option) pgLoopHandles {
+	t.Helper()
 
 	dsn := os.Getenv("TEST_PGURL")
 	if dsn == "" {
@@ -67,10 +98,10 @@ func pgLoopWithEngine(t *testing.T) (addr, secret, database string, eng *exec.En
 		t.Fatalf("Bootstrap: %v", err)
 	}
 
-	eng = exec.New(store, svc)
+	eng := exec.New(store, svc, engOpts...)
 	t.Cleanup(func() { _ = eng.Close() })
 
-	database = "pgtarget"
+	database := "pgtarget"
 	connID, err := eng.CreateConnection(ctx, rootTok, database, "postgres", dsn, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("CreateConnection: %v", err)
@@ -87,10 +118,18 @@ func pgLoopWithEngine(t *testing.T) (addr, secret, database string, eng *exec.En
 		t.Fatalf("CreatePAT: %v", err)
 	}
 
-	_, _, addr = listenerWith(t, Options{
+	lis, events, addr := listenerWith(t, Options{
 		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled,
 	})
-	return addr, pat.Secret, database, eng
+	who, err := svc.ValidateToken(ctx, rootTok)
+	if err != nil {
+		t.Fatalf("resolving the bootstrap identity: %v", err)
+	}
+	return pgLoopHandles{
+		addr: addr, secret: pat.Secret, database: database, eng: eng,
+		svc: svc, store: store, rootTok: rootTok, connID: connID, patUserID: who.UserID(),
+		lis: lis, events: events,
+	}
 }
 
 // pgClient authenticates against the live loop and returns a frontend sitting

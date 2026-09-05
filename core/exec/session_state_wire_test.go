@@ -79,3 +79,42 @@ func TestParseReset_AndAdmitWireReset(t *testing.T) {
 		t.Errorf("RESET ROLE meets the authority denylist: %v", err)
 	}
 }
+
+// The two lists are one list, and nothing said so until now.
+//
+// parsingGUCs' own comment states the relation — "grammarGUCs minus
+// search_path" — and then the file writes it out as a second hand-maintained
+// literal. grammarGUCs governs the POOLED path (classifySet) and parsingGUCs
+// the WIRE denylist, so a name added to one and forgotten in the other is a
+// setting banned on one path and admitted on the other, silently, with both
+// comments still claiming the derivation holds.
+//
+// FOUND BY A MIS-AIMED MUTATION, which is worth recording because the miss is
+// what showed the gap: dropping backslash_quote from grammarGUCs left the
+// front-door both-doors cell green, since the wire path never reads that list.
+// A reader who assumes grammarGUCs is the ban would draw the wrong conclusion
+// from a green suite.
+func TestParsingGUCsIsGrammarGUCsMinusSearchPath(t *testing.T) {
+	t.Parallel()
+	for name := range grammarGUCs {
+		if name == "search_path" {
+			if parsingGUCs[name] {
+				t.Errorf("search_path is in parsingGUCs; it changes name RESOLUTION, not parsing, "+
+					"and is a reader concern (readerGUCs) — the derivation excludes it: %v", parsingGUCs)
+			}
+			continue
+		}
+		if !parsingGUCs[name] {
+			t.Errorf("%q is banned on the pooled path (grammarGUCs) but not on the wire "+
+				"denylist (parsingGUCs). The two are documented as one list minus search_path; "+
+				"a name in only one of them is a setting refused as a statement and admitted "+
+				"through the front door", name)
+		}
+	}
+	for name := range parsingGUCs {
+		if !grammarGUCs[name] {
+			t.Errorf("%q is on the wire denylist (parsingGUCs) but not banned on the pooled "+
+				"path (grammarGUCs) — the same divergence in the other direction", name)
+		}
+	}
+}
