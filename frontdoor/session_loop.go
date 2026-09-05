@@ -965,6 +965,26 @@ const deadlineGoodbyeBudget = 2 * time.Second
 // recovery.
 func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 	switch {
+	case errors.Is(err, auth.ErrLocked):
+		// THE STORE IS LOCKED (ADR-0087 §8). It surfaces HERE, at the first
+		// statement, and not during the credential exchange — measured, after
+		// an earlier version of this feature asserted the opposite from a
+		// source trace: OpenWireSessionWith never decrypts a DSN, so a locked
+		// store lets a client AUTHENTICATE and refuses its first query.
+		//
+		// Post-auth, which makes this the ordinary case rather than a special
+		// one: this surface already "answers accurately after authentication"
+		// (see the SQLSTATE block above), so no pre-auth vocabulary changes
+		// and no deny-before-disclose argument is needed.
+		//
+		// FATAL, because the session cannot become usable without an unlock:
+		// leaving the connection open would let a client retry into the same
+		// refusal forever while its pooler counted the connection as healthy.
+		return LockedSQLState, "frontdoor/store-locked",
+			"the autodb store is locked and no statement can reach a target until it is " +
+				"unlocked; this is NOT a credential problem — ask the operator, and do not " +
+				"regenerate your token", true
+
 	case errors.Is(err, exec.ErrWireFaceLost):
 		// The session's wire failed and the engine is already closing the
 		// session. There is nothing left to be ready for, so the connection is
