@@ -255,12 +255,7 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 		*closeReason = "invalid-tx-status"
 		return false
 	}
-	be.Send(&pgproto3.ReadyForQuery{TxStatus: status})
-	if ferr := l.flushBounded(conn, be); ferr != nil {
-		*closeReason = "write-failed"
-		return false
-	}
-	return true
+	return l.sendReadinessWith(conn, be, status, closeReason)
 }
 
 // frameExtendedError turns an engine refusal into a §8a ErrorResponse.
