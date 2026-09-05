@@ -93,14 +93,21 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 	f, pat, secret, dbName := wireFixture(t)
 	ctx := context.Background()
 
-	// A second connection with no grant and no front-door profile, for the
-	// target-side refusals.
-	otherID, err := f.eng.CreateConnection(ctx, f.rootTok, "no-frontdoor", "sqlite",
-		"file:wirenofd?mode=memory&cache=shared", testIP)
-	if err != nil {
-		t.Fatalf("CreateConnection: %v", err)
+	// The profile refusal needs a token BOUND to a connection whose profile
+	// then stops admitting the front door — mint at `session`, then DOWNGRADE.
+	//
+	// Dialling some OTHER connection's name no longer reaches the profile
+	// gate at all (ADR-0086 §4): the token decides the target, so a name that
+	// is not the bound connection's is a database MISMATCH and is refused
+	// before any profile is consulted. Reaching this branch therefore means
+	// constructing the state deliberately, which is what the ADR's cell 3
+	// calls for.
+	f2, pat2, secret2, dbName2 := wireFixture(t)
+	if uerr := f2.store.Connections.OnCtx(ctx).With(meta.ConnID, f2.connID).
+		Set(meta.ConnProfile, meta.ProfileV1Compat).Update(); uerr != nil {
+		t.Fatalf("downgrading the profile: %v", uerr)
 	}
-	otherRow, _ := f.store.Connections.OnCtx(ctx).With(meta.ConnID, otherID).Get()
+	_ = pat2
 
 	for _, tc := range []struct {
 		name   string
@@ -121,12 +128,16 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 			_, e := f.eng.OpenWireSession(ctx, secret, "root", dbName, "203.0.113.7")
 			return e
 		}, DenyIPNotAdmitted},
-		{"a database that does not exist", func() error {
+		// A `database` the bound connection does not answer to. Under the
+		// binding this is a MISMATCH, not a missing database: the connection
+		// the token names exists and is fine — the client asked for something
+		// else, and is refused rather than silently given the bound one.
+		{"a database the token's connection does not answer to", func() error {
 			_, e := f.eng.OpenWireSession(ctx, secret, "root", "no-such-db", testIP)
 			return e
-		}, DenyNoSuchDatabase},
+		}, DenyDatabaseMismatch},
 		{"a connection whose profile refuses the front door", func() error {
-			_, e := f.eng.OpenWireSession(ctx, secret, "root", otherRow.Name, testIP)
+			_, e := f2.eng.OpenWireSession(ctx, secret2, "root", dbName2, testIP)
 			return e
 		}, DenyProfileRefuses},
 	} {
