@@ -16,8 +16,12 @@ func TestCheckFlags(t *testing.T) {
 	type args struct {
 		serve, ui, webUI, printEndpoint bool
 		migrateToPG                     bool
+		createCert                      bool
 		port                            int
 		portSet                         bool
+		// certFlags are --create-cert's own flags, given by NAME so the cell
+		// exercises the same presence check checkFlags reads.
+		certFlags []string
 	}
 	ok := map[string]args{
 		"serve alone":          {serve: true, port: goodPort},
@@ -27,6 +31,11 @@ func TestCheckFlags(t *testing.T) {
 		"print-endpoint alone": {printEndpoint: true, port: goodPort},
 		"web-ui with a port":   {webUI: true, port: 9999, portSet: true},
 		"no mode (usage)":      {port: goodPort},
+		"create-cert alone":    {createCert: true, port: goodPort},
+		"create-cert with its own flags": {createCert: true, port: goodPort,
+			certFlags: []string{"--cert-dir=/tmp/x", "--leaf-only", "--force"}},
+		"create-cert export": {createCert: true, port: goodPort,
+			certFlags: []string{"--export-ca"}},
 	}
 	bad := map[string]args{
 		"web-ui + print-endpoint": {webUI: true, printEndpoint: true, port: goodPort},
@@ -45,13 +54,29 @@ func TestCheckFlags(t *testing.T) {
 		"web-ui port 0":        {webUI: true, port: 0, portSet: true},
 		"web-ui port too high": {webUI: true, port: 70000, portSet: true},
 		"web-ui negative port": {webUI: true, port: -1, portSet: true},
+		// --create-cert is FIRST in the dispatch switch now, so an uncounted
+		// pairing would generate a certificate and never serve.
+		"create-cert + serve":   {createCert: true, serve: true, port: goodPort},
+		"create-cert + ui":      {createCert: true, ui: true, port: goodPort},
+		"create-cert + migrate": {createCert: true, migrateToPG: true, port: goodPort},
+		// A cert flag outside its mode. --force is the one that matters:
+		// "do it anyway" is the last impression to leave on a flag that can
+		// invalidate every ca.pem an organisation has distributed.
+		"force without create-cert":    {serve: true, port: goodPort, certFlags: []string{"--force"}},
+		"cert-dir without create-cert": {serve: true, port: goodPort, certFlags: []string{"--cert-dir=/tmp/x"}},
+		"cert-hosts without create-cert": {ui: true, port: goodPort,
+			certFlags: []string{"--cert-hosts=a.example.com"}},
+		// Two different intentions; the dispatch would honour whichever is
+		// checked first and silently drop the other.
+		"leaf-only + export-ca": {createCert: true, port: goodPort,
+			certFlags: []string{"--leaf-only", "--export-ca"}},
 	}
 
 	run := func(a args) error {
 		// checkFlags reads --port's PRESENCE from flag.CommandLine, so a fresh
 		// FlagSet is set up per case to reflect portSet.
-		reset(t, a.portSet)
-		return checkFlags(a.serve, a.ui, a.webUI, a.printEndpoint, a.migrateToPG, a.port)
+		reset(t, a.portSet, a.certFlags...)
+		return checkFlags(a.serve, a.ui, a.webUI, a.printEndpoint, a.migrateToPG, a.createCert, a.port)
 	}
 	for name, a := range ok {
 		t.Run("ok/"+name, func(t *testing.T) {
@@ -71,13 +96,19 @@ func TestCheckFlags(t *testing.T) {
 
 // reset installs a fresh flag.CommandLine, optionally with --port marked as
 // visited, so checkFlags's presence probe reflects the case.
-func reset(t *testing.T, portSet bool) {
+func reset(t *testing.T, portSet bool, extra ...string) {
 	t.Helper()
 	fs := flag.NewFlagSet("autodb", flag.ContinueOnError)
 	fs.Int("port", 7010, "")
-	args := []string{}
+	fs.String("cert-dir", "", "")
+	var hosts hostList
+	fs.Var(&hosts, "cert-hosts", "")
+	fs.Bool("leaf-only", false, "")
+	fs.Bool("export-ca", false, "")
+	fs.Bool("force", false, "")
+	args := append([]string{}, extra...)
 	if portSet {
-		args = []string{"--port=7010"}
+		args = append(args, "--port=7010")
 	}
 	if err := fs.Parse(args); err != nil {
 		t.Fatal(err)

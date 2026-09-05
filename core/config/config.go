@@ -597,6 +597,24 @@ func DefaultPath() (string, error) {
 	return filepath.Join(dir, "autodb", "config.toml"), nil
 }
 
+// ResolvePath is where a config file WOULD be read from: the given path, or
+// the default location when it is empty.
+//
+// Exported because callers need the answer for reasons other than reading the
+// file — --create-cert puts the generated TLS material beside the config that
+// will name it. Load calls this too, so there is ONE rule for where autodb's
+// configuration lives rather than a second copy that agrees until someone
+// changes the first ([[shared-resolver-single-source-of-truth]]).
+//
+// It reports where a file WOULD be, not whether one is there: a missing config
+// is not an error anywhere else in this package and must not become one here.
+func ResolvePath(path string) (string, error) {
+	if path != "" {
+		return path, nil
+	}
+	return DefaultPath()
+}
+
 // DefaultMetaPath returns the default sqlite meta-store location:
 // $XDG_DATA_HOME/autodb/meta.db.
 func DefaultMetaPath() (string, error) {
@@ -616,14 +634,12 @@ func DefaultMetaPath() (string, error) {
 // file must decode without unknown keys and validate.
 func Load(path string) (Config, error) {
 	cfg := Default()
-	if path == "" {
-		p, err := DefaultPath()
-		if err != nil {
-			return Config{}, err
-		}
-		path = p
+	path, err := ResolvePath(path)
+	if err != nil {
+		return Config{}, err
 	}
-	md, err := toml.DecodeFile(path, &cfg)
+	md, derr := toml.DecodeFile(path, &cfg)
+	err = derr
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return cfg, cfg.validate()

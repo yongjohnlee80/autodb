@@ -384,11 +384,46 @@ bind = "127.0.0.1:5432"
 # insecure_disable_tls = "i-accept-that-every-pat-crosses-in-cleartext"
 
 # ---------------------------------------------------------------------------
-# GETTING A CERTIFICATE for a developer machine.
+# GETTING A CERTIFICATE -- the short way.
 #
-# TLS is mandatory here, so "where does the cert come from" is the first
-# question every new developer has, and leaving it unanswered is friction this
-# surface creates for itself.
+#   autodb --create-cert
+#
+# It reads tls_host_names above, writes ca.pem / cert.pem / key.pem into a
+# tls/ directory beside this config, and prints the block to paste back here
+# plus the DSN to hand a developer. Then:
+#
+#   autodb --create-cert --export-ca     # print ca.pem again, for a new hire
+#   autodb --create-cert --leaf-only     # renew, or add an address, keeping
+#                                        # the SAME ca.pem everyone holds
+#
+# GIVE DEVELOPERS ONE FILE: ca.pem. It is public -- commit it internally, paste
+# it in chat. key.pem NEVER leaves this host: anybody holding it can impersonate
+# this front door and collect other developers' tokens, which is the exact
+# attack mandatory TLS prevents, arriving through the filesystem instead of the
+# network.
+#
+# WHY IT IS SAFER THAN mkcert, which is the obvious alternative: mkcert installs
+# an UNCONSTRAINED CA into your machine trust store -- one that can mint a valid
+# certificate for any domain on the internet, for as long as it is installed.
+# autodb's CA is never installed machine-wide and carries X.509 name
+# constraints, so it cannot sign anything outside the names above even if this
+# host is compromised.
+#
+# IT WORKS WITHOUT A DNS NAME. Put the address in tls_host_names and the
+# certificate carries it as an IP SAN. Verified against the three stacks a
+# client here can be using -- libpq/psql, pgjdbc (which is what DataGrip runs)
+# and Go -- each with a control proving the check was actually running. Use a
+# RESERVED static address: an ephemeral one changes on stop/start and the
+# certificate would have to be reissued.
+#
+# NOT the production path for a public deployment: prefer a real ACME
+# certificate. This is for development and internal hosts.
+#
+# ---------------------------------------------------------------------------
+# GETTING A CERTIFICATE the other way, with mkcert.
+#
+# Kept because it is what most people reach for first, and because the three
+# things that bite are worth knowing whichever route you take.
 #
 #   mkcert -install                  # once per machine: creates a local CA
 #   mkcert localhost 127.0.0.1 ::1   # the cert and key, with matching SANs
