@@ -395,3 +395,74 @@ func mintForeignLeaf(t *testing.T, dir, name string) *x509.Certificate {
 	}
 	return c
 }
+
+// A fully-qualified name, written with its root label, must WORK.
+//
+// It used to fail at CA creation with "parsing the issuing CA we just signed:
+// x509: failed to parse dnsName constraint" — Go's x509 refuses a dNSName name
+// constraint carrying a trailing dot. The message reads as an autodb bug rather
+// than as "drop the trailing dot", and an operator who types the form their DNS
+// zone uses is not making a mistake.
+//
+// A reviewer found the same missing normalisation one layer down, in the
+// --leaf-only constraint check, where it only produced a misleading message.
+// This cell pins the harder failure at the source.
+func TestCreateCert_AcceptsAFullyQualifiedName(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_800_000_000, 0)
+	res := genAt(t, t.TempDir(), []string{"autodb.example.com.", "DB.Example.COM"})
+
+	// Both are normalised into the one form a certificate may carry, and the
+	// uppercase one is not a second, distinct SAN.
+	if got := strings.Join(res.DNSNames, ","); got != "autodb.example.com,db.example.com,localhost" {
+		t.Fatalf("DNS SANs = %q; a trailing root label and mixed case must normalise, and must "+
+			"not produce duplicate entries", got)
+	}
+	// And the daemon starts for the names an operator would actually type,
+	// in either form.
+	for _, dial := range []string{"autodb.example.com", "db.example.com", "DB.EXAMPLE.COM"} {
+		if err := loadFor(t, res, []string{dial}, now); err != nil {
+			t.Errorf("the daemon would refuse to start for %q: %v", dial, err)
+		}
+	}
+}
+
+// dnsPermitted's own table, because --leaf-only's refusal message is built on
+// it and a wrong answer there sends an operator to change the wrong thing.
+//
+// The row that matters most is evilexample.com: a bare strings.HasSuffix would
+// admit it for a constraint of example.com, which is the classic form of this
+// bug and the only PERMISSIVE way to get it wrong.
+func TestCreateCert_LeafOnlyNameMatching(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	genAt(t, dir, []string{"example.com"})
+
+	cases := []struct {
+		name    string
+		allowed bool
+		why     string
+	}{
+		{"example.com", true, "the domain itself"},
+		{"db.example.com", true, "a subdomain"},
+		{"a.b.example.com", true, "a deeper subdomain"},
+		{"DB.Example.COM", true, "DNS names are case-insensitive"},
+		{"db.example.com.", true, "fully qualified, with the root label"},
+		{"evilexample.com", false, "NOT a subdomain — the classic suffix bug"},
+		{"example.com.evil.net", false, "the constraint appears, but not as a suffix"},
+		{"elsewhere.example.net", false, "a different domain entirely"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := frontdoor.CreateCert(frontdoor.CertRequest{
+				Dir: dir, HostNames: []string{tc.name},
+				Now: time.Unix(1_800_000_000, 0), LeafOnly: true,
+			})
+			refused := errors.Is(err, frontdoor.ErrCertMaterial)
+			if refused == tc.allowed {
+				t.Fatalf("%s (%s): refused=%v, want refused=%v (err %v)",
+					tc.name, tc.why, refused, !tc.allowed, err)
+			}
+		})
+	}
+}

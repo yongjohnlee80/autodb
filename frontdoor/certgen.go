@@ -231,7 +231,10 @@ func splitHostNames(hosts []string) (dns []string, ips []net.IP, err error) {
 			}
 			return
 		}
-		h = strings.ToLower(h)
+		h = normalizeDNSName(h)
+		if h == "" {
+			return
+		}
 		if !seenDNS[h] {
 			seenDNS[h] = true
 			dns = append(dns, h)
@@ -250,6 +253,25 @@ func splitHostNames(hosts []string) (dns []string, ips []net.IP, err error) {
 	}
 	sort.Strings(dns)
 	return dns, ips, nil
+}
+
+// normalizeDNSName puts a name into the one form a certificate may carry.
+//
+// DNS names are CASE-INSENSITIVE, and a fully-qualified name written with its
+// ROOT LABEL — "autodb.example.com." — is the same name as the one without.
+// Neither belongs in a certificate verbatim, and the trailing form is not
+// merely untidy: Go's x509 REFUSES TO PARSE a dNSName name constraint that
+// carries it, so an operator who typed the fully-qualified form got
+//
+//	refusing to generate this TLS material: parsing the issuing CA we just
+//	signed: x509: failed to parse dnsName constraint "autodb.example.com."
+//
+// which reads as a bug in autodb rather than as "drop the trailing dot". A
+// reviewer found the same normalisation missing one layer down, in the
+// --leaf-only constraint check, where it only produced a misleading message;
+// following it to the source is where the hard failure was.
+func normalizeDNSName(h string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
 }
 
 func ipStrings(ips []net.IP) []string {
@@ -498,9 +520,23 @@ func ipNetStrings(ns []*net.IPNet) []string {
 // dnsPermitted implements RFC 5280 dNSName subtree matching: a constraint
 // matches the name itself and any name below it.
 func dnsPermitted(name string, permitted []string) bool {
+	// Normalised on BOTH sides. splitHostNames already normalises what this
+	// process generates, but `permitted` is read back from a CERTIFICATE — one
+	// a previous version, or another tool, may have written — so a name is
+	// compared against whatever that file happens to hold.
+	//
+	// Both divergences a reviewer found here refused a name the CA could
+	// vouch for, so the direction was safe. The cost was the MESSAGE: the
+	// operator is told the CA is constrained against a name it covers, and
+	// "retype it in lower case" is not discoverable from that text.
+	name = normalizeDNSName(name)
 	for _, p := range permitted {
-		p = strings.ToLower(strings.TrimPrefix(p, "."))
-		if name == p || strings.HasSuffix(name, "."+p) {
+		p = normalizeDNSName(strings.TrimPrefix(p, "."))
+		// The comparison is against "."+p, NOT a bare suffix. A bare
+		// strings.HasSuffix would admit "evilexample.com" for a constraint of
+		// "example.com" — the classic form of this bug, and the one that would
+		// have mattered.
+		if p != "" && (name == p || strings.HasSuffix(name, "."+p)) {
 			return true
 		}
 	}
