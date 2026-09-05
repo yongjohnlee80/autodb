@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/style"
 	"github.com/yongjohnlee80/golib/tui/widget"
@@ -237,6 +238,18 @@ func (m *Model) openConnManager() {
 		{Title: "ID", Width: 5, Cell: func(c ConnInfo) string { return strconv.FormatInt(c.ID, 10) }},
 		{Title: "NAME", Cell: func(c ConnInfo) string { return c.Name }},
 		{Title: "ENGINE", Width: 10, Cell: func(c ConnInfo) string { return c.Engine }},
+		// The front-door columns (ADR-0086 §9). FRONT DOOR reads yes/no rather
+		// than the raw profile string, because "session" does not tell an
+		// operator what it means; TARGET DB is the name a client types into a
+		// Database field, and showing it is what would have made an evening's
+		// confusion visible in seconds.
+		{Title: "FRONT DOOR", Width: 11, Cell: func(c ConnInfo) string {
+			if c.Profile == meta.ProfileSession {
+				return "yes"
+			}
+			return "no"
+		}},
+		{Title: "TARGET DB", Width: 16, Cell: func(c ConnInfo) string { return c.TargetDB }},
 	}
 	var g *manager[ConnInfo]
 	g = newManager(m, cols,
@@ -257,6 +270,11 @@ func (m *Model) openConnManager() {
 					})
 				}
 			}},
+			{'e', "front door…", func(sel ConnInfo, ok bool) {
+				if ok {
+					m.openProfileSwitch(g, sel)
+				}
+			}},
 			{'w', "attach→ws", func(sel ConnInfo, ok bool) {
 				if ok {
 					m.openAttachForm(g, sel.ID, sel.Name)
@@ -264,6 +282,63 @@ func (m *Model) openConnManager() {
 			}},
 		})
 	g.float = m.openFloat("connections", g)
+}
+
+// frontDoorProse is what an operator reads BEFORE exposing a connection.
+//
+// A raw literal on purpose: this is a screen of text, and building it from
+// escaped fragments is how it acquires a stray newline nobody notices until it
+// is in front of the person making an exposure decision.
+const frontDoorProse = `Opening the front door on this connection turns on THREE things,
+not one. Read them before you decide.
+
+  1. REACHABILITY. Anyone holding an access token bound to this
+     connection, and a grant on it, can reach it from the network —
+     from any address their account is admitted from.
+
+  2. GUARDED DATA-MODIFYING CTEs become admissible. Today this
+     connection refuses ANY statement carrying one, outright.
+
+  3. TRANSACTION CONTROL becomes admissible on a session. BEGIN,
+     COMMIT and ROLLBACK are refused here today and will start
+     being accepted, performed as engine state transitions rather
+     than forwarded to the target as text.
+
+This is an exposure decision and it is audited.
+`
+
+// openProfileSwitch asks whether to expose a connection to the front door, and
+// SAYS WHAT THAT TURNS ON.
+//
+// Deliberately prose and not a toggle. A label reading "enable front door
+// access" would be lying by omission: the profile changes execution semantics
+// beyond this surface, and the third consequence is one nobody would guess
+// from the name (ADR-0086 §9).
+func (m *Model) openProfileSwitch(g *manager[ConnInfo], sel ConnInfo) {
+	if sel.Profile == meta.ProfileSession {
+		m.openLeader("close the front door on "+sel.Name+"?", []leaderEntry{
+			{'y', "close it — open sessions are dropped", func() {
+				managerCall(g, "front door off "+sel.Name, func(c context.Context, b *Bound) error {
+					return b.SetConnectionProfile(c, sel.ID, meta.ProfileV1Compat)
+				})
+			}},
+		})
+		return
+	}
+	target := sel.TargetDB
+	if target == "" {
+		target = "(none recorded — clients use the connection name)"
+	}
+	m.openTextFloat("front door: "+sel.Name+" ("+sel.Engine+")",
+		frontDoorProse+"\nClients would connect with Database = "+target+
+			"\nor the connection name "+sel.Name+".\n")
+	m.openLeader("open the front door on "+sel.Name+"?", []leaderEntry{
+		{'y', "yes — expose it, and audit the change", func() {
+			managerCall(g, "front door on "+sel.Name, func(c context.Context, b *Bound) error {
+				return b.SetConnectionProfile(c, sel.ID, meta.ProfileSession)
+			})
+		}},
+	})
 }
 
 func (m *Model) openConnForm(g *manager[ConnInfo]) {

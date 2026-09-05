@@ -373,6 +373,112 @@ func (e *Engine) ListConnections(ctx context.Context, token string) ([]*meta.Con
 	return rows, nil
 }
 
+// SetConnectionProfile changes a connection's capability profile (ADR-0086 §9).
+//
+// It is its OWN method with its OWN audit action rather than a field inside a
+// generic update, because switching a connection to the session profile is a
+// real exposure decision and belongs in the trail as one. An operator reading
+// the audit log should be able to count these without parsing a diff.
+//
+// ADMIN ONLY. CreateConnection admits editors, but creating a connection and
+// EXPOSING one are different acts: after this call, anyone holding a PAT bound
+// to it and a grant on it can reach it from the network. The ADR did not name
+// a role, so this is the implementation's choice and is flagged as such.
+//
+// What the profile actually changes, which is why the TUI modal that calls this
+// carries prose rather than a toggle:
+//
+//  1. front-door reachability — the connection becomes dialable;
+//  2. data-modifying CTEs whose mutations are guarded become admissible, where
+//     v1compat refuses any statement carrying one outright;
+//  3. transaction control becomes admissible ON A SESSION — v1compat refuses
+//     every control-class statement, while session admits BEGIN/COMMIT/ROLLBACK
+//     and performs them as engine state transitions rather than forwarding text.
+func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID int64, profile, ip string) error {
+	ident, err := e.auth.ValidateToken(ctx, token)
+	if err != nil {
+		return err
+	}
+	if ident.Role() != meta.RoleAdmin {
+		return auth.ErrDenied
+	}
+	// Fail closed on an unknown profile. An engine that stored one would
+	// admit nothing at all (Profile.admit's default arm), so the failure
+	// belongs here, where the caller can still read it, rather than at the
+	// next statement.
+	if profile != meta.ProfileV1Compat && profile != meta.ProfileSession {
+		return fmt.Errorf("exec: unknown capability profile %q (want %q or %q)",
+			profile, meta.ProfileV1Compat, meta.ProfileSession)
+	}
+	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
+	if err != nil {
+		return err
+	}
+	was := row.Profile
+	if was == "" {
+		was = meta.ProfileV1Compat
+	}
+	if was == profile {
+		return nil
+	}
+	if !e.auth.Unlocked() {
+		// Required because enabling the front door records the target's
+		// database name below, which means decrypting the DSN. Not a
+		// hardship: the caller has just authenticated interactively, and a
+		// login is what unwraps the store.
+		return auth.ErrLocked
+	}
+
+	// The target database name, recorded when a connection is first exposed.
+	// It is what lets an introspecting client reconnect by the name the TARGET
+	// reported rather than the name autodb gave the connection — the defect
+	// this ADR exists to fix. Derived only when missing: re-deriving would
+	// clobber a value an operator may have corrected by hand.
+	targetDB := row.TargetDB
+	if profile == meta.ProfileSession && targetDB == "" {
+		dsn, derr := e.auth.DecryptSecret(row.DSNEnc, connID)
+		if derr != nil {
+			return derr
+		}
+		if targetDB, derr = TargetDBName(row.Engine, string(dsn)); derr != nil {
+			return derr
+		}
+	}
+
+	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
+		if uerr := e.store.Connections.On(tx).With(meta.ConnID, connID).
+			Set(meta.ConnProfile, profile).Set(meta.ConnTargetDB, targetDB).
+			Set(meta.ConnUpdatedAt, e.now().Unix()).Update(); uerr != nil {
+			return uerr
+		}
+		return e.auth.AuditTx(tx, ident.UserID(), ip, "connection_profile_changed",
+			fmt.Sprintf("%s: %s -> %s", row.Name, was, profile))
+	})
+	if err != nil {
+		return err
+	}
+
+	// A DOWNGRADE must close the connection's open wire sessions.
+	//
+	// The front-door reachability gate runs at OPEN only, but per-statement
+	// admission reads the profile LIVE on every statement path — so a
+	// downgrade would otherwise HALF-APPLY: admission tightens immediately
+	// while the session stays alive and keeps its lease, and its behaviour
+	// changes underneath a client that is still connected. Worse than no
+	// effect, which is why this is not left to the next open.
+	//
+	// AFTER the commit, deliberately. The committed profile is what stops new
+	// sessions opening, so closing first would leave a window in which one
+	// could be opened onto the profile being removed. clearDraining then lets
+	// the connection be used again under its new profile — closeSessionsFor
+	// marks it draining, which is right for a delete and wrong here.
+	if was == meta.ProfileSession && profile != meta.ProfileSession {
+		e.closeSessionsFor(ctx, connID, ip, "profile-downgraded")
+		e.sessions.clearDraining(connID)
+	}
+	return nil
+}
+
 // DeleteConnection removes a managed connection (admin token). Grants and
 // workspace links cascade; history rows refuse the delete (FK) — the
 // record outlives the connection by design.

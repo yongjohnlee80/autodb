@@ -957,6 +957,10 @@ func (s *Server) register() {
 				"id": c.ID, "name": c.Name, "engine": c.Engine,
 				"created_by": c.CreatedBy, "created_at": c.CreatedAt,
 				"updated_at": c.UpdatedAt,
+				// ADR-0086: the manager shows what a connection's profile IS
+				// and what it points at, so an operator is not deciding
+				// whether to expose something from its name alone.
+				"profile": c.Profile, "target_db": c.TargetDB,
 			})
 		}
 		return out, nil
@@ -974,6 +978,28 @@ func (s *Server) register() {
 			return nil, err
 		}
 		return nil, wireErr(s.eng.DeleteConnection(ctx, token, connID, peerIP(req)))
+	})
+	// conn.set_profile is its OWN verb, not a field on a generic update
+	// (ADR-0086 §9): switching a connection to the session profile is an
+	// exposure decision and gets its own audit action so an operator can count
+	// them.
+	s.rpc.Handle("conn.set_profile", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		profile, err := argStr(req.Params, 2, "profile")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.eng.SetConnectionProfile(ctx, token, connID, profile, peerIP(req)))
 	})
 	s.rpc.Handle("conn.test", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {

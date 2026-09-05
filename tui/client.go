@@ -577,6 +577,14 @@ type ConnInfo struct {
 	ID     int64
 	Name   string
 	Engine string
+	// Profile is the capability profile — "v1compat" or "session". Shown in
+	// the manager because exposing a connection to the front door is a
+	// decision an operator should not have to make from a name alone.
+	Profile string
+	// TargetDB is the database name inside the connection's DSN, when the
+	// engine yields one. It is what a client types into a Database field, and
+	// the fact whose absence cost an evening.
+	TargetDB string
 }
 
 func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
@@ -587,9 +595,23 @@ func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
 	var out []ConnInfo
 	for _, row := range asList(res) {
 		m, _ := row.(map[string]any)
-		out = append(out, ConnInfo{ID: mI(m, "id"), Name: mS(m, "name"), Engine: mS(m, "engine")})
+		out = append(out, ConnInfo{
+			ID: mI(m, "id"), Name: mS(m, "name"), Engine: mS(m, "engine"),
+			Profile: mS(m, "profile"), TargetDB: mS(m, "target_db"),
+		})
 	}
 	return out, nil
+}
+
+// SetConnectionProfile switches a connection's capability profile. Admin only.
+//
+// The caller is expected to have told the user what the switch turns on —
+// front-door reachability is only the first of three consequences (ADR-0086
+// §9), and a UI that said just "enable front door access" would be lying by
+// omission.
+func (b *Bound) SetConnectionProfile(ctx context.Context, connID int64, profile string) error {
+	_, err := b.authed(ctx, "conn.set_profile", connID, profile)
+	return err
 }
 
 func (b *Bound) CreateConnection(ctx context.Context, name, engine, dsn string) (int64, error) {
