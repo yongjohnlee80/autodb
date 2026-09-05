@@ -85,7 +85,7 @@ func (e *Engine) ListHistory(ctx context.Context, token string, limit int) ([]Hi
 			// millis — reading it as millis dated every run to 1970.
 			StartedAt: time.Unix(r.StartedAt, 0),
 			Duration:  time.Duration(r.DurationMS) * time.Millisecond,
-			RowCount:  r.RowCount, Status: r.Status, Error: r.Error,
+			RowCount:  r.RowCount, Status: string(r.Status), Error: r.Error,
 		})
 	}
 	return out, nil

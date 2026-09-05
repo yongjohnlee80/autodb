@@ -251,15 +251,15 @@ func (e *Engine) noteTxOutcome(ctx context.Context, t txTransition) {
 // error; the error crosses the seam as data and is classified once, in one
 // place, by code that can be tested against error values without driving a
 // real commit.
-func txStateFor(outcome string, err error) meta.TxState {
+func txStateFor(outcome FinalizeOutcome, err error) meta.TxState {
 	switch outcome {
-	case "committed":
+	case FinalizeCommitted:
 		return meta.TxCommitted
-	case "rolled_back", "rollback_failed":
+	case FinalizeRolledBack, FinalizeRollbackFailed:
 		return meta.TxRolledBack
-	case "unknown_pending":
+	case FinalizeUnknownPending:
 		return meta.TxUnknownPending
-	case "commit_failed":
+	case FinalizeCommitFailed:
 		// The split is by whether the SERVER ANSWERED, not by whether golib
 		// recognised the error.
 		//
@@ -289,11 +289,11 @@ func txStateFor(outcome string, err error) meta.TxState {
 	return meta.TxUnresolvable
 }
 
-func txOutcomeReason(outcome string, err error) string {
+func txOutcomeReason(outcome FinalizeOutcome, err error) string {
 	switch outcome {
-	case "rollback_failed":
+	case FinalizeRollbackFailed:
 		return meta.ReasonSessionClosed
-	case "commit_failed":
+	case FinalizeCommitFailed:
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) {
 			// A definite refusal; the state says rolled_back and the reason

@@ -70,7 +70,7 @@ func TestWireQuery_EmitStopped(t *testing.T) {
 		// The seam says what the audit row says.
 		var found bool
 		for _, d := range auditDetail(t, f, "exec_result") {
-			if strings.Contains(d, StatusUnresolvable) {
+			if strings.Contains(d, string(StatusUnresolvable)) {
 				found = true
 			}
 		}

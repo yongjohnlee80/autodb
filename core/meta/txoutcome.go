@@ -204,3 +204,41 @@ func newTxPending(conn dao.DataConn) *dao.Schema[*TxPending, TxPendingField, Sor
 			TxPendCreatedAt: {Column: "created_at", Scan: func(r *TxPending) any { return &r.CreatedAt }, Value: func(r *TxPending) any { return r.CreatedAt }},
 		})
 }
+
+// HistoryStatus is a history row's status: what the store records about one
+// statement's fate.
+//
+// A NAMED TYPE, and the reason is the same one that put engine.Name in
+// core/engine.  These were bare untyped strings, so historyStatusFor returned a
+// string, every caller took a string, and the two places that wrote a status
+// wrote a LITERAL — "rolled_back" at session_engine.go and session_timeout.go —
+// with nothing connecting them to this list.
+//
+// NOT THE SAME VOCABULARY AS meta.TxState, though they share two spellings.
+// TxState is what happened to a TRANSACTION (opened, commit_started,
+// committed, rolled_back, outcome_unresolvable); HistStatus is what a
+// STATEMENT'S ROW says (running, ok, ok_pending_commit, error, rolled_back,
+// outcome_unresolvable). "rolled_back" and "outcome_unresolvable" appear in
+// both because the same word is true of both subjects, and historyStatusFor is
+// the seam that maps one onto the other. Typing them separately is what stops
+// a value crossing that seam without passing through it.
+type HistoryStatus string
+
+const (
+	StatusRunning HistoryStatus = "running"
+	// StatusOK means the effect is durable. Outside a transaction that is
+	// true as soon as the statement returns; inside one it is true only
+	// after the commit, which is why it is not written there.
+	StatusOK HistoryStatus = "ok"
+	// StatusPendingCommit means the statement ran and its fate is the
+	// transaction's. This is the honest answer for in-transaction work, and
+	// it is the one the old code could not express.
+	StatusPendingCommit HistoryStatus = "ok_pending_commit"
+	StatusError         HistoryStatus = "error"
+	// StatusRolledBack means the statement ran and was then discarded.
+	StatusRolledBack HistoryStatus = "rolled_back"
+	// StatusUnresolvable means nothing can ever say whether the effect
+	// survived. Distinct from error — the statement did not fail — and
+	// distinct from pending, because no future pass will improve on it.
+	StatusUnresolvable HistoryStatus = "outcome_unresolvable"
+)

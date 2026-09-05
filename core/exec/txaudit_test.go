@@ -38,7 +38,7 @@ func TestTxStateFor_SplitsOnWhetherTheServerAnswered(t *testing.T) {
 
 	for _, tc := range []struct {
 		name    string
-		outcome string
+		outcome FinalizeOutcome
 		err     error
 		want    meta.TxState
 	}{
