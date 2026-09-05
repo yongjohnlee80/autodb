@@ -232,11 +232,22 @@ func CreateCert(req CertRequest) (CertResult, error) {
 func splitHostNames(hosts []string) (dns []string, ips []net.IP, requested map[string]bool, err error) {
 	seenDNS := map[string]bool{}
 	seenIP := map[string]bool{}
-	// requested is what the OPERATOR named, before the loopback set is added.
-	// The distinction is what lets --leaf-only refuse for a name they asked
-	// for and quietly drop a convenience one the CA cannot cover.
+	// requested is what the OPERATOR named, as opposed to the loopback set
+	// this function appends. The distinction is what lets --leaf-only REFUSE
+	// for a name they asked for and quietly DROP a convenience one the CA
+	// cannot cover.
+	//
+	// It is recorded INSIDE add, from the same variable that becomes the entry
+	// in dns/ips, and that is the whole safety of the split. The first version
+	// computed the key a second time in the caller — the same bracket strip,
+	// the same ParseIP, the same normalizeDNSName, written twice. A reviewer
+	// named the seam: if those two ever normalised differently, a name the
+	// operator ASKED FOR would miss the lookup and be silently downgraded to a
+	// convenience — dropped instead of refused, which is the direction that
+	// ISSUES a certificate rather than refusing one. One computation cannot
+	// disagree with itself.
 	requested = map[string]bool{}
-	add := func(h string) {
+	add := func(h string, byOperator bool) {
 		h = strings.TrimSpace(h)
 		if h == "" {
 			return
@@ -246,8 +257,12 @@ func splitHostNames(hosts []string) (dns []string, ips []net.IP, requested map[s
 		// that is really an address wearing brackets.
 		h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
 		if ip := net.ParseIP(h); ip != nil {
-			if !seenIP[ip.String()] {
-				seenIP[ip.String()] = true
+			key := ip.String()
+			if byOperator {
+				requested[key] = true
+			}
+			if !seenIP[key] {
+				seenIP[key] = true
 				ips = append(ips, ip)
 			}
 			return
@@ -256,27 +271,29 @@ func splitHostNames(hosts []string) (dns []string, ips []net.IP, requested map[s
 		if h == "" {
 			return
 		}
+		if byOperator {
+			requested[h] = true
+		}
 		if !seenDNS[h] {
 			seenDNS[h] = true
 			dns = append(dns, h)
 		}
 	}
 	for _, h := range hosts {
-		add(h)
-		bare := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(h), "["), "]")
-		if ip := net.ParseIP(bare); ip != nil {
-			requested[ip.String()] = true
-		} else if n := normalizeDNSName(bare); n != "" {
-			requested[n] = true
-		}
+		add(h, true)
 	}
 	if len(dns) == 0 && len(ips) == 0 {
 		return nil, nil, nil, fmt.Errorf("%w: no host names given; name every address clients will "+
 			"dial (frontdoor.tls_host_names), because sslmode=verify-full verifies the NAME and a "+
 			"certificate that omits one fails at that client and nowhere else", ErrCertMaterial)
 	}
+	// The loopback set, added on the operator's behalf and NOT recorded as
+	// requested. An operator who names one of these explicitly gets it as a
+	// requested name through the loop above, so they can still insist — and
+	// are then told why they cannot have it, rather than having it quietly
+	// dropped.
 	for _, l := range []string{"localhost", "127.0.0.1", "::1"} {
-		add(l)
+		add(l, false)
 	}
 	sort.Strings(dns)
 	return dns, ips, requested, nil
