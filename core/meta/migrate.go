@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -26,10 +27,10 @@ var ErrMigrate = errors.New("meta: engine migration refused")
 // "migrated_from" stamp. The source store is left untouched — the operator
 // retires it after verifying. There is no postgres→sqlite path.
 func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
-	if src.Engine() != "sqlite" {
+	if src.Engine() != engine.SQLite {
 		return fmt.Errorf("%w: source engine is %q, want sqlite", ErrMigrate, src.Engine())
 	}
-	if dst.Engine() != "postgres" {
+	if dst.Engine() != engine.Postgres {
 		return fmt.Errorf("%w: destination engine is %q, want postgres (the migration is one-way)", ErrMigrate, dst.Engine())
 	}
 	if err := ensureEmpty(ctx, dst); err != nil {

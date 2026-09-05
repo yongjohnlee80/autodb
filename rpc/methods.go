@@ -5,6 +5,7 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"reflect"
 	"strings"
 	"time"
@@ -1013,15 +1014,23 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		engine, err := argStr(req.Params, 2, "engine")
+		engineArg, err := argStr(req.Params, 2, "engine")
 		if err != nil {
 			return nil, err
+		}
+		// PARSE AT THE BOUNDARY. This is where an untrusted string becomes an
+		// engine.Name, and the only place in the daemon that converts one. A
+		// caller that sends "Postgres" gets a readable refusal here rather than
+		// a row that no later comparison matches.
+		eng, err := engine.Parse(engineArg)
+		if err != nil {
+			return nil, wireErr(err)
 		}
 		dsn, err := argStr(req.Params, 3, "dsn")
 		if err != nil {
 			return nil, err
 		}
-		id, err := s.eng.CreateConnection(ctx, token, name, engine, dsn, peerIP(req))
+		id, err := s.eng.CreateConnection(ctx, token, name, eng, dsn, peerIP(req))
 		if err != nil {
 			return nil, wireErr(err)
 		}

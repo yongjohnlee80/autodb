@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"strings"
 	"testing"
 	"time"
@@ -109,9 +110,9 @@ func TestArmServerBelt_UsesSetLocalOnPostgresOnly(t *testing.T) {
 	// A driver without the GUC gets no belt and no error: the engine's own
 	// deadline is the guarantee, the belt is the second layer.
 	rec2 := &recordingTx{}
-	for _, engine := range []string{"mysql", "sqlite"} {
-		if err := armServerBelt(context.Background(), rec2, engine, defaultTxLimits()); err != nil {
-			t.Errorf("arming on %s = %v, want nil", engine, err)
+	for _, eng := range []engine.Name{engine.MySQL, engine.SQLite} {
+		if err := armServerBelt(context.Background(), rec2, eng, defaultTxLimits()); err != nil {
+			t.Errorf("arming on %s = %v, want nil", eng, err)
 		}
 	}
 	if len(rec2.execs) != 0 {

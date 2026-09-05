@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"os"
 	"path/filepath"
 
@@ -20,7 +21,7 @@ import (
 // layers (identity/authz in M3, execution in M4) build on these schemas.
 type Store struct {
 	conn   dao.DataConn
-	engine string
+	engine engine.Name
 
 	Users          *dao.Schema[*User, UserField, Sort, int64]
 	Connections    *dao.Schema[*Connection, ConnField, Sort, int64]
@@ -93,9 +94,9 @@ func OpenNoMigrate(ctx context.Context, mcfg config.Meta) (*Store, error) {
 		err  error
 	)
 	switch mcfg.Engine {
-	case "sqlite":
+	case engine.SQLite:
 		conn, err = openSqlite(ctx, mcfg.Path)
-	case "postgres":
+	case engine.Postgres:
 		conn, err = postgres.OpenNamed(ctx, "meta", mcfg.DSN, metaPoolBound(mcfg))
 	default:
 		return nil, fmt.Errorf("meta: unknown engine %q", mcfg.Engine)
@@ -155,7 +156,7 @@ func (s *Store) Close() error { return s.conn.Close() }
 func (s *Store) Conn() dao.DataConn { return s.conn }
 
 // Engine reports "sqlite" or "postgres".
-func (s *Store) Engine() string { return s.engine }
+func (s *Store) Engine() engine.Name { return s.engine }
 
 // GetMeta reads one store_meta key. Missing keys report ok == false, not an
 // error.

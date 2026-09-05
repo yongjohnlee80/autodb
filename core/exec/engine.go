@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"runtime"
 	"sync"
 	"time"
@@ -486,7 +487,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, ErrScriptTooLarge)
 	}
 
-	stmt, err := Classify(sqlText, connRow.Engine == "mysql")
+	stmt, err := Classify(sqlText, connRow.Engine == engine.MySQL)
 	if err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
@@ -714,8 +715,8 @@ func truncate(s string, max int) string {
 // mysql has no per-connect seam in database/sql, so each statement runs
 // inside a transaction (one pinned session) verified by verifyGrammarQ
 // first; sqlite's grammar is fixed.
-func (e *Engine) runQuery(ctx context.Context, target dao.DataConn, engineName, sqlText string, res *Result, onRow func([]any) error) (int64, error) {
-	if engineName != "mysql" {
+func (e *Engine) runQuery(ctx context.Context, target dao.DataConn, engineName engine.Name, sqlText string, res *Result, onRow func([]any) error) (int64, error) {
+	if engineName != engine.MySQL {
 		return e.queryOn(ctx, target, sqlText, res, onRow)
 	}
 	tx, err := target.Begin(ctx)
@@ -784,8 +785,8 @@ func (e *Engine) queryOn(ctx context.Context, q dao.Querier, sqlText string, res
 // pins a verified transaction — none of the accepted verbs are
 // transaction-prohibited there, and DDL's implicit commit makes the trailing
 // COMMIT a harmless no-op.
-func (e *Engine) runExec(ctx context.Context, target dao.DataConn, engineName, sqlText string, res *Result) error {
-	if engineName != "mysql" {
+func (e *Engine) runExec(ctx context.Context, target dao.DataConn, engineName engine.Name, sqlText string, res *Result) error {
+	if engineName != engine.MySQL {
 		return e.execOn(ctx, target, sqlText, res)
 	}
 	tx, err := target.Begin(ctx)
