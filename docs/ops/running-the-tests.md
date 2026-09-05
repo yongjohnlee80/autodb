@@ -13,6 +13,20 @@ The binding rules and the full design live in the knowledge base at
 at `shared/scripts/autodb-test.sh` (keep the two in sync). This page is the
 short version for someone who just wants to run the suite.
 
+## First time on a machine
+
+The harness refuses an instance it has not been told is a scratch instance — a
+host:port pair is not an identity, and a port remap answers exactly like the
+right database. Claim it once:
+
+```bash
+autodb-test.sh setup --worktree . --claim-instance
+```
+
+It refuses outright, and never falls back, if the instance holds a database
+named `lm`, `lm_omni` or `labelmanager` — that presence identifies production
+or the owner's own fixture.
+
 ## The normal invocation
 
 ```bash
@@ -53,12 +67,35 @@ It also records whether the worktree was **clean**. A green run is evidence
 only for the tree it ran in, and a ledger naming a `COMMITHASH` from a dirty
 worktree attests something that is not in the repository.
 
+## When a run is red
+
+Read `STAGES` before anything else. Every gate records its verdict, its
+duration and its log path, and a failing run carries a `FAILED_STAGE:` line:
+
+```
+STAGES:
+  gofmt            ok                   0s     …/gofmt.log
+  go vet           FAILED (exit 1)      2s     …/vet.log
+  ...
+FAILED_STAGE: go vet
+```
+
+Re-running the whole chain to discover which gate broke is the cost this
+harness exists to remove.
+
 ## Handing a run to a reviewer
 
 Give them the report path. They read `RESULTS` and `LIVE_PG` against
 `COMMITHASH`; if they want independence they re-run the same verb and get the
 same-shaped ledger, rather than inventing a second protocol whose result cannot
 be compared with yours.
+
+## This chain is narrower than CI, on purpose
+
+CI runs `go test -race -count=2 ./...` over everything plus a static
+cross-build smoke, and there is a separate neovim job. The harness runs a
+cheaper chain plus the live suite CI cannot. The ledger lists what it did not
+attempt under `NOT ATTEMPTED`, so a green here is never read as a green there.
 
 ## Targets, and the one hard rule
 
