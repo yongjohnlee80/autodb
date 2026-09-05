@@ -228,8 +228,33 @@ func runServe(configPath string) error {
 			return fmt.Errorf("chmod %s: %w", addr, cerr)
 		}
 		// Leaving the file behind would make the next launch look
-		// occupied when nothing is listening.
-		defer func() { _ = os.Remove(addr) }()
+		// occupied when nothing is listening — but removing it
+		// UNCONDITIONALLY is worse, and was a live bug.
+		//
+		// A daemon that exits AFTER a successor has bound the same path
+		// deletes the SUCCESSOR'S socket file. The result is a listener that
+		// `ss` reports as healthy on an orphaned inode while `ls` shows
+		// nothing, and every client fails to dial with no error anywhere
+		// explaining why. Reproduced by `pkill -f "autodb --serve"` followed
+		// immediately by a start.
+		//
+		// The meta-store lease protects the STORE from two writers by holding
+		// an flock on its inode; nothing protected the socket PATH. So this
+		// removes the file only while it is still the one we created, compared
+		// by identity (os.SameFile is dev+ino on unix) rather than by name —
+		// the name is precisely what a successor reuses.
+		//
+		// A window remains between the check and the unlink: unix offers no
+		// "remove if inode matches". It is orders of magnitude narrower than
+		// the unconditional form and does not grow with how long the daemon
+		// ran, which is what made the original reachable by an ordinary
+		// restart.
+		created, cerr := os.Stat(addr)
+		if cerr != nil {
+			ln.Close()
+			return fmt.Errorf("stat %s: %w", addr, cerr)
+		}
+		defer removeIfStillOurs(addr, created)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -896,4 +921,24 @@ func startPartitionRoll(ctx context.Context, store *meta.Store, onLog func(strin
 			}
 		}
 	}()
+}
+
+// removeIfStillOurs unlinks a socket path only while it is the same file we
+// created, so a shutdown cannot delete a successor's socket.
+//
+// Split out from the defer so the decision is testable: the bug it fixes is
+// invisible to any test that only checks "the file is gone afterwards".
+func removeIfStillOurs(path string, created os.FileInfo) {
+	now, err := os.Stat(path)
+	if err != nil {
+		// Already gone, or not ours to look at. Either way, not ours to remove.
+		return
+	}
+	if !os.SameFile(created, now) {
+		// A successor bound this path while we were shutting down. Its socket
+		// is a different file wearing our name, and unlinking it would leave a
+		// running daemon that no client can reach.
+		return
+	}
+	_ = os.Remove(path)
 }
