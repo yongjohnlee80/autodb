@@ -105,6 +105,11 @@ type CertResult struct {
 	LeafNotAfter              time.Time
 	CANotAfter                time.Time
 	ReusedCA                  bool
+	// Dropped are convenience entries (the loopback set) the EXISTING issuing
+	// CA cannot vouch for, left off rather than costing the operator the names
+	// they actually asked for. It never contains a REQUESTED name — those are
+	// a refusal, not a silent trim.
+	Dropped []string
 }
 
 const (
@@ -117,7 +122,7 @@ func CreateCert(req CertRequest) (CertResult, error) {
 	if strings.TrimSpace(req.Dir) == "" {
 		return CertResult{}, fmt.Errorf("%w: no output directory", ErrCertMaterial)
 	}
-	dns, ips, err := splitHostNames(req.HostNames)
+	dns, ips, requested, err := splitHostNames(req.HostNames)
 	if err != nil {
 		return CertResult{}, err
 	}
@@ -137,6 +142,7 @@ func CreateCert(req CertRequest) (CertResult, error) {
 		caCert, intCert *x509.Certificate
 		intKey          *ecdsa.PrivateKey
 		reused          bool
+		dropped         []string
 	)
 	if req.LeafOnly {
 		caCert, intCert, intKey, err = loadIssuer(req.Dir)
@@ -150,9 +156,20 @@ func CreateCert(req CertRequest) (CertResult, error) {
 		// failure would surface at each client as an unexplained verification
 		// error, which is the exact shape LoadServerTLS's startup checks exist
 		// to prevent.
-		if err := constraintsPermit(intCert, dns, ips); err != nil {
+		if err := constraintsPermit(intCert, dns, ips, requested); err != nil {
 			return CertResult{}, err
 		}
+		// The loopback set is a CONVENIENCE this generator adds, not something
+		// the operator asked for. An issuing CA that cannot vouch for it — one
+		// made elsewhere, or constrained to a public name only — must not cost
+		// the operator the certificate they DID ask for. The first version
+		// refused the whole operation naming "localhost", a name they never
+		// typed, which is the confusing shape this file keeps having to avoid.
+		//
+		// Dropped and REPORTED, never dropped silently: a certificate that
+		// quietly stopped covering 127.0.0.1 breaks the operator's own psql at
+		// some later moment with nothing connecting the two events.
+		dns, ips, dropped = dropUnvouchable(intCert, dns, ips)
 	} else {
 		// ONLY the CA keys are guarded, and that asymmetry is the design.
 		// Replacing the leaf breaks nothing that has been handed out — every
@@ -200,7 +217,7 @@ func CreateCert(req CertRequest) (CertResult, error) {
 	}
 	return CertResult{
 		Dir: req.Dir, CAFile: p(CAFileName), CertFile: p(CertFileName), KeyFile: p(KeyFileName),
-		DNSNames: dns, IPAddresses: ipStrings(ips),
+		DNSNames: dns, IPAddresses: ipStrings(ips), Dropped: dropped,
 		LeafNotAfter: leaf.NotAfter, CANotAfter: caCert.NotAfter, ReusedCA: reused,
 	}, nil
 }
@@ -212,9 +229,13 @@ func CreateCert(req CertRequest) (CertResult, error) {
 // host is the first thing anyone tries, and a certificate that covers the
 // public name but not 127.0.0.1 makes that first attempt fail in a way that
 // reads as "TLS is broken" rather than "that name is not on the certificate".
-func splitHostNames(hosts []string) (dns []string, ips []net.IP, err error) {
+func splitHostNames(hosts []string) (dns []string, ips []net.IP, requested map[string]bool, err error) {
 	seenDNS := map[string]bool{}
 	seenIP := map[string]bool{}
+	// requested is what the OPERATOR named, before the loopback set is added.
+	// The distinction is what lets --leaf-only refuse for a name they asked
+	// for and quietly drop a convenience one the CA cannot cover.
+	requested = map[string]bool{}
 	add := func(h string) {
 		h = strings.TrimSpace(h)
 		if h == "" {
@@ -242,9 +263,15 @@ func splitHostNames(hosts []string) (dns []string, ips []net.IP, err error) {
 	}
 	for _, h := range hosts {
 		add(h)
+		bare := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(h), "["), "]")
+		if ip := net.ParseIP(bare); ip != nil {
+			requested[ip.String()] = true
+		} else if n := normalizeDNSName(bare); n != "" {
+			requested[n] = true
+		}
 	}
 	if len(dns) == 0 && len(ips) == 0 {
-		return nil, nil, fmt.Errorf("%w: no host names given; name every address clients will "+
+		return nil, nil, nil, fmt.Errorf("%w: no host names given; name every address clients will "+
 			"dial (frontdoor.tls_host_names), because sslmode=verify-full verifies the NAME and a "+
 			"certificate that omits one fails at that client and nowhere else", ErrCertMaterial)
 	}
@@ -252,7 +279,7 @@ func splitHostNames(hosts []string) (dns []string, ips []net.IP, err error) {
 		add(l)
 	}
 	sort.Strings(dns)
-	return dns, ips, nil
+	return dns, ips, requested, nil
 }
 
 // normalizeDNSName puts a name into the one form a certificate may carry.
@@ -482,18 +509,18 @@ func readCert(path string) (*x509.Certificate, error) {
 // certificate that is perfectly well-formed and that every verifying client
 // rejects, one connection at a time, with an error each of them reads as their
 // own problem.
-func constraintsPermit(issuer *x509.Certificate, dns []string, ips []net.IP) error {
+func constraintsPermit(issuer *x509.Certificate, dns []string, ips []net.IP, requested map[string]bool) error {
 	var bad []string
 	if len(issuer.PermittedDNSDomains) > 0 {
 		for _, h := range dns {
-			if !dnsPermitted(h, issuer.PermittedDNSDomains) {
+			if requested[h] && !dnsPermitted(h, issuer.PermittedDNSDomains) {
 				bad = append(bad, h)
 			}
 		}
 	}
 	if len(issuer.PermittedIPRanges) > 0 {
 		for _, ip := range ips {
-			if !ipPermitted(ip, issuer.PermittedIPRanges) {
+			if requested[ip.String()] && !ipPermitted(ip, issuer.PermittedIPRanges) {
 				bad = append(bad, ip.String())
 			}
 		}
@@ -507,6 +534,37 @@ func constraintsPermit(issuer *x509.Certificate, dns []string, ips []net.IP) err
 		"exactly the redistribution --leaf-only exists to avoid, so this is a decision rather than "+
 		"a retry", ErrCertMaterial, strings.Join(bad, ", "),
 		issuer.PermittedDNSDomains, ipNetStrings(issuer.PermittedIPRanges))
+}
+
+// dropUnvouchable removes convenience names the issuer cannot cover.
+//
+// It takes NO `requested` set, and that is a claim about ordering rather than
+// an oversight: it runs only after constraintsPermit has passed, so every
+// requested name is already known to be permitted and would be kept by the
+// same predicate anyway. A `!requested[h]` guard here would be a line that can
+// never decide anything, which is the kind this file has already deleted once.
+func dropUnvouchable(issuer *x509.Certificate, dns []string, ips []net.IP) ([]string, []net.IP, []string) {
+	var (
+		keptDNS []string
+		keptIPs []net.IP
+		dropped []string
+	)
+	for _, h := range dns {
+		if len(issuer.PermittedDNSDomains) > 0 && !dnsPermitted(h, issuer.PermittedDNSDomains) {
+			dropped = append(dropped, h)
+			continue
+		}
+		keptDNS = append(keptDNS, h)
+	}
+	for _, ip := range ips {
+		if len(issuer.PermittedIPRanges) > 0 && !ipPermitted(ip, issuer.PermittedIPRanges) {
+			dropped = append(dropped, ip.String())
+			continue
+		}
+		keptIPs = append(keptIPs, ip)
+	}
+	sort.Strings(dropped)
+	return keptDNS, keptIPs, dropped
 }
 
 func ipNetStrings(ns []*net.IPNet) []string {

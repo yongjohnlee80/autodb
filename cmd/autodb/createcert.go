@@ -120,6 +120,15 @@ func report(out io.Writer, res frontdoor.CertResult, configPath string) {
 	if len(res.IPAddresses) > 0 {
 		fmt.Fprintf(out, "  covers addresses  %s\n", strings.Join(res.IPAddresses, ", "))
 	}
+	if len(res.Dropped) > 0 {
+		// SAID OUT LOUD, because the alternative is a certificate that quietly
+		// stopped covering an address and an operator whose own psql breaks
+		// weeks later with nothing connecting the two events.
+		fmt.Fprintf(out, "  NOT covered       %s\n", strings.Join(res.Dropped, ", "))
+		fmt.Fprintf(out, "                    (this CA is name-constrained and cannot vouch for them;\n")
+		fmt.Fprintf(out, "                     they are conveniences this command adds, not names you\n")
+		fmt.Fprintf(out, "                     asked for, so the certificate was issued without them)\n")
+	}
 	fmt.Fprintf(out, "  certificate expires %s\n", res.LeafNotAfter.UTC().Format("2006-01-02"))
 	if !res.ReusedCA {
 		fmt.Fprintf(out, "  CA expires          %s\n", res.CANotAfter.UTC().Format("2006-01-02"))

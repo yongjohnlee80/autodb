@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -465,4 +466,245 @@ func TestCreateCert_LeafOnlyNameMatching(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --leaf-only against a CA THIS CODE DID NOT CREATE.
+//
+// This is the boundary the in-package contract test cannot stand at, and a
+// reviewer's argument for why it is needed is the part worth keeping: a
+// mutation that survives from OUTSIDE a package is evidence about the inputs
+// the suite drives, not about whether a line can decide anything. Removing
+// dnsPermitted's normalisation of the CONSTRAINT survived every end-to-end cell
+// here purely because every CA in them was made by CreateCert, which normalises
+// on the way in.
+//
+// Certificates from elsewhere do not. Measured, building a CA per shape and
+// reading it back:
+//
+//	lowercase example.com     -> PermittedDNSDomains ["example.com"]
+//	MIXED CASE Example.COM    -> PermittedDNSDomains ["Example.COM"]   <- preserved
+//	empty string              -> PermittedDNSDomains [""]              <- parses
+//	trailing dot example.com. -> PARSE REFUSED
+//
+// So an openssl-produced CA reaches that line with case intact, and --leaf-only
+// reads its issuer FROM DISK. "The only caller normalises" is not the same
+// claim as "the argument is always normalised".
+func TestCreateCert_LeafOnlyAgainstAForeignCA(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_800_000_000, 0)
+
+	t.Run("a mixed-case constraint still permits its subdomains", func(t *testing.T) {
+		dir := t.TempDir()
+		writeForeignIssuer(t, dir, []string{"Example.COM"}, now)
+
+		res, err := frontdoor.CreateCert(frontdoor.CertRequest{
+			Dir: dir, HostNames: []string{"db.example.com"}, Now: now, LeafOnly: true,
+		})
+		if err != nil {
+			t.Fatalf("--leaf-only refused a name the foreign CA covers: %v\n"+
+				"DNS names are case-insensitive; a CA written by openssl keeps the case it "+
+				"was given, and refusing here tells an operator the CA is constrained "+
+				"against a name it permits", err)
+		}
+		if !res.ReusedCA {
+			t.Error("--leaf-only reported creating a new CA")
+		}
+		// The name the operator ASKED for is on the certificate...
+		if !contains(res.DNSNames, "db.example.com") {
+			t.Errorf("the requested name is missing from the certificate: %v", res.DNSNames)
+		}
+		// ...and `localhost`, a convenience name this CA's dNSName constraint
+		// does NOT cover, was dropped AND REPORTED. Silently is the failure
+		// mode: a certificate that quietly stopped covering a name breaks
+		// something weeks later with nothing connecting the two events.
+		if !contains(res.Dropped, "localhost") {
+			t.Errorf("localhost is neither covered nor reported as dropped: covered=%v dropped=%v",
+				res.DNSNames, res.Dropped)
+		}
+		if contains(res.DNSNames, "localhost") {
+			t.Error("localhost was put on the certificate anyway; this CA's dNSName constraint " +
+				"does not cover it and every verifying client would reject the chain")
+		}
+		// THE LOOPBACK ADDRESSES ARE KEPT, and that is not an oversight.
+		// RFC 5280 §4.2.1.10: a name FORM with no permittedSubtrees entry is
+		// UNCONSTRAINED, and this CA constrains dNSName only. Measured with a
+		// control rather than reasoned: a leaf with an IP SAN verifies against
+		// a dNSName-only CA, and fails against the same CA once an IP range is
+		// added. Dropping them would remove coverage the CA can legitimately
+		// give.
+		for _, want := range []string{"127.0.0.1", "::1"} {
+			if !contains(res.IPAddresses, want) {
+				t.Errorf("%q was dropped, but this CA constrains dNSName only, so IP addresses "+
+					"are unconstrained and it can vouch for them", want)
+			}
+		}
+		// A REQUESTED name must never appear here. Dropping one silently is
+		// the difference between a convenience trimmed and a promise broken.
+		if contains(res.Dropped, "db.example.com") {
+			t.Error("a name the operator asked for was silently dropped instead of refused")
+		}
+	})
+
+	// THE DECOY. A guard that normalised its way into permitting everything
+	// would pass the case above; a name genuinely outside must still be
+	// refused, or the constraint has stopped meaning anything.
+	t.Run("a name outside it is still refused", func(t *testing.T) {
+		dir := t.TempDir()
+		writeForeignIssuer(t, dir, []string{"Example.COM"}, now)
+
+		if _, err := frontdoor.CreateCert(frontdoor.CertRequest{
+			Dir: dir, HostNames: []string{"db.elsewhere.net"}, Now: now, LeafOnly: true,
+		}); !errors.Is(err, frontdoor.ErrCertMaterial) {
+			t.Fatalf("--leaf-only signed a name outside a foreign CA's constraint: %v", err)
+		}
+	})
+
+	// When the foreign CA DOES constrain IP ranges, the loopback addresses go
+	// the same way as the name — this is the branch the case above cannot
+	// reach, because there the form was unconstrained.
+	t.Run("loopback addresses outside an IP constraint are dropped too", func(t *testing.T) {
+		dir := t.TempDir()
+		_, ten, err := net.ParseCIDR("10.0.0.0/8")
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeForeignIssuerWithIPs(t, dir, []string{"Example.COM"}, []*net.IPNet{ten}, now)
+
+		res, cerr := frontdoor.CreateCert(frontdoor.CertRequest{
+			Dir: dir, HostNames: []string{"db.example.com"}, Now: now, LeafOnly: true,
+		})
+		if cerr != nil {
+			t.Fatalf("--leaf-only refused a name the foreign CA covers: %v", cerr)
+		}
+		for _, want := range []string{"localhost", "127.0.0.1", "::1"} {
+			if !contains(res.Dropped, want) {
+				t.Errorf("%q is neither covered nor reported as dropped: dropped=%v", want, res.Dropped)
+			}
+		}
+		if len(res.IPAddresses) != 0 {
+			t.Errorf("addresses outside the CA's 10/8 constraint stayed on the certificate: %v",
+				res.IPAddresses)
+		}
+		if !contains(res.DNSNames, "db.example.com") {
+			t.Errorf("the requested name is missing: %v", res.DNSNames)
+		}
+	})
+
+	// A REQUESTED address outside the CA's IP constraint is REFUSED, not
+	// dropped. This is the symmetric case to the refused DNS name, and the
+	// distinction is the whole point of tracking what the operator asked for:
+	// a convenience we added may be trimmed, a name they typed may not. Issuing
+	// a certificate silently missing the address they are about to put in a DSN
+	// would fail at their client, which is the failure this command exists to
+	// move to the moment the mistake was made.
+	t.Run("a requested address outside the IP constraint is refused", func(t *testing.T) {
+		dir := t.TempDir()
+		_, ten, err := net.ParseCIDR("10.0.0.0/8")
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeForeignIssuerWithIPs(t, dir, []string{"Example.COM"}, []*net.IPNet{ten}, now)
+
+		_, cerr := frontdoor.CreateCert(frontdoor.CertRequest{
+			Dir: dir, HostNames: []string{"192.0.2.7"}, Now: now, LeafOnly: true,
+		})
+		if !errors.Is(cerr, frontdoor.ErrCertMaterial) {
+			t.Fatalf("--leaf-only issued a certificate for an address the CA cannot vouch for, "+
+				"or dropped it silently: %v", cerr)
+		}
+		if !strings.Contains(cerr.Error(), "192.0.2.7") {
+			t.Errorf("the refusal does not name the address it refused: %v", cerr)
+		}
+
+		// CONTROL: an address INSIDE the constraint still works, so the guard
+		// is not simply refusing every address.
+		if _, ok := frontdoor.CreateCert(frontdoor.CertRequest{
+			Dir: dir, HostNames: []string{"10.4.1.7"}, Now: now, LeafOnly: true,
+		}); ok != nil {
+			t.Fatalf("--leaf-only refused an address inside the CA's 10/8 constraint: %v", ok)
+		}
+	})
+
+	// An EMPTY constraint parses into a real certificate, so this is reachable
+	// input rather than a hypothetical. It must permit nothing — an empty
+	// constraint that matched would be an unconstrained CA wearing a
+	// constrained one's clothes.
+	t.Run("an empty constraint permits nothing", func(t *testing.T) {
+		dir := t.TempDir()
+		writeForeignIssuer(t, dir, []string{""}, now)
+
+		if _, err := frontdoor.CreateCert(frontdoor.CertRequest{
+			Dir: dir, HostNames: []string{"db.example.com"}, Now: now, LeafOnly: true,
+		}); !errors.Is(err, frontdoor.ErrCertMaterial) {
+			t.Fatalf("a CA carrying an EMPTY dNSName constraint vouched for a name: %v", err)
+		}
+	})
+}
+
+// writeForeignIssuer lays out a root, a constrained intermediate and its key in
+// the layout --leaf-only reads, using constraint strings VERBATIM — which is
+// the whole point, since CreateCert would have normalised them.
+func writeForeignIssuer(t *testing.T, dir string, permittedDNS []string, now time.Time) {
+	t.Helper()
+	writeForeignIssuerWithIPs(t, dir, permittedDNS, nil, now)
+}
+
+func writeForeignIssuerWithIPs(t *testing.T, dir string, permittedDNS []string, permittedIPs []*net.IPNet, now time.Time) {
+	t.Helper()
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "foreign root"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(365 * 24 * time.Hour),
+		IsCA: true, KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true, MaxPathLen: 1,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTmpl, rootTmpl, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := x509.ParseCertificate(rootDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	intKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "foreign issuing CA"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(365 * 24 * time.Hour),
+		IsCA: true, KeyUsage: x509.KeyUsageCertSign, BasicConstraintsValid: true,
+		MaxPathLen: 0, MaxPathLenZero: true,
+		PermittedDNSDomains: permittedDNS,
+		PermittedIPRanges:   permittedIPs,
+	}
+	intDER, err := x509.CreateCertificate(rand.Reader, intTmpl, root, &intKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("building the foreign issuer with constraints %q: %v", permittedDNS, err)
+	}
+	intKeyDER, err := x509.MarshalECPrivateKey(intKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string, blk *pem.Block) {
+		t.Helper()
+		if werr := os.WriteFile(filepath.Join(dir, name), pem.EncodeToMemory(blk), 0o600); werr != nil {
+			t.Fatal(werr)
+		}
+	}
+	write(frontdoor.CAFileName, &pem.Block{Type: "CERTIFICATE", Bytes: rootDER})
+	write(frontdoor.IntFileName, &pem.Block{Type: "CERTIFICATE", Bytes: intDER})
+	write(frontdoor.IntKeyFileName, &pem.Block{Type: "EC PRIVATE KEY", Bytes: intKeyDER})
+}
+
+func contains(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
 }
