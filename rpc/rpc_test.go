@@ -1166,7 +1166,7 @@ func TestTokenVerbsOverWire(t *testing.T) {
 	c := f.dial(t)
 	c.hello()
 
-	errVal, result := c.call("auth.token_create", f.rootTok, "laptop", int64(0), "")
+	errVal, result := c.call("auth.token_create", f.rootTok, "laptop", int64(0), "", f.frontDoorConn(t))
 	if errVal != nil {
 		t.Fatalf("token_create: %#v", errVal)
 	}
@@ -1208,11 +1208,11 @@ func TestTokenVerbsOverWire(t *testing.T) {
 	// A duplicate name is refused, and the reason is NAMED: this caller is
 	// authenticated and managing their own tokens, unlike the anonymous
 	// front-door path whose failure is deliberately uniform.
-	errVal, _ = c.call("auth.token_create", f.rootTok, "laptop", int64(0), "")
+	errVal, _ = c.call("auth.token_create", f.rootTok, "laptop", int64(0), "", f.frontDoorConn(t))
 	mustErr(t, errVal, rpc.CodeInvalidToken)
 
 	// An over-long lifetime is refused too.
-	errVal, _ = c.call("auth.token_create", f.rootTok, "forever", int64(400), "")
+	errVal, _ = c.call("auth.token_create", f.rootTok, "forever", int64(400), "", f.frontDoorConn(t))
 	mustErr(t, errVal, rpc.CodeInvalidToken)
 
 	errVal, result = c.call("auth.token_revoke", f.rootTok, int64(0), "laptop")
@@ -1253,6 +1253,9 @@ func TestTokenCreate_DayCountCannotOverflowIntoAValidLifetime(t *testing.T) {
 	f := newFixture(t)
 	c := f.dial(t)
 	c.hello()
+	// One front-door-eligible connection for the whole table: the lifetime
+	// guard must be what refuses these, not the binding gates.
+	fdConn := f.frontDoorConn(t)
 
 	for _, days := range []int64{
 		math.MinInt64 + 1, // wrapped to ~+24h before the fix
@@ -1261,7 +1264,7 @@ func TestTokenCreate_DayCountCannotOverflowIntoAValidLifetime(t *testing.T) {
 		-1,
 		366,
 	} {
-		errVal, _ := c.call("auth.token_create", f.rootTok, fmt.Sprintf("t%d", days), days, "")
+		errVal, _ := c.call("auth.token_create", f.rootTok, fmt.Sprintf("t%d", days), days, "", fdConn)
 		if errVal == nil {
 			t.Errorf("days = %d created a token; an out-of-range lifetime must be refused "+
 				"before any arithmetic can turn it into a plausible one", days)
@@ -1275,10 +1278,10 @@ func TestTokenCreate_DayCountCannotOverflowIntoAValidLifetime(t *testing.T) {
 
 	// Positive control: the range that IS valid still works, so the guard is
 	// not simply refusing everything.
-	if errVal, _ := c.call("auth.token_create", f.rootTok, "ok-365", int64(365), ""); errVal != nil {
+	if errVal, _ := c.call("auth.token_create", f.rootTok, "ok-365", int64(365), "", f.frontDoorConn(t)); errVal != nil {
 		t.Errorf("365 days was refused: %#v", errVal)
 	}
-	if errVal, _ := c.call("auth.token_create", f.rootTok, "ok-default", int64(0), ""); errVal != nil {
+	if errVal, _ := c.call("auth.token_create", f.rootTok, "ok-default", int64(0), "", f.frontDoorConn(t)); errVal != nil {
 		t.Errorf("0 days (the default) was refused: %#v", errVal)
 	}
 }
@@ -1309,7 +1312,7 @@ func TestTokenRevoke_MissingNameIsARefusalNotAFault(t *testing.T) {
 
 	// Positive control: revoking one that DOES exist still works, so the
 	// mapping is not simply refusing everything.
-	if errVal, _ := c.call("auth.token_create", f.rootTok, "real", int64(0), ""); errVal != nil {
+	if errVal, _ := c.call("auth.token_create", f.rootTok, "real", int64(0), "", f.frontDoorConn(t)); errVal != nil {
 		t.Fatalf("token_create: %#v", errVal)
 	}
 	if errVal, _ := c.call("auth.token_revoke", f.rootTok, int64(0), "real"); errVal != nil {

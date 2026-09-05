@@ -40,7 +40,33 @@ type fixture struct {
 	store   *meta.Store
 	rootTok string
 	connID  int64
+	eng     *exec.Engine
 	addr    string
+}
+
+// frontDoorConn creates a connection a PAT may legally be bound to (ADR-0086
+// §6): postgres, session profile, with a target_db derived from its DSN.
+//
+// Created ON DEMAND rather than in newFixture, and that is the point: adding
+// it to the shared fixture changed what conn.list returns and broke an
+// unrelated test that asserts the full list. A fixture shared by every test in
+// a package is not the place for a row only two of them want.
+//
+// The DSN is parsed, never dialled — pgxpool.ParseConfig wants a well-formed
+// string, not a reachable server — so this costs no live PostgreSQL.
+func (f *fixture) frontDoorConn(t *testing.T) int64 {
+	t.Helper()
+	ctx := context.Background()
+	id, err := f.eng.CreateConnection(ctx, f.rootTok, fmt.Sprintf("frontdoor-%d", fixtureSeq.Add(1)),
+		"postgres", "postgres://u:p@127.0.0.1:5432/fixture_db?sslmode=disable", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("CreateConnection(front door): %v", err)
+	}
+	if uerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, id).
+		Set(meta.ConnProfile, meta.ProfileSession).Update(); uerr != nil {
+		t.Fatalf("enabling the session profile: %v", uerr)
+	}
+	return id
 }
 
 var fixtureSeq atomic.Int64
@@ -95,7 +121,7 @@ func newFixture(t *testing.T) *fixture {
 			time.Sleep(time.Millisecond)
 		}
 	}
-	return &fixture{store: store, rootTok: rootTok, connID: connID, addr: srv.Addr()}
+	return &fixture{store: store, rootTok: rootTok, connID: connID, eng: eng, addr: srv.Addr()}
 }
 
 // client is a raw msgpack-RPC test client.

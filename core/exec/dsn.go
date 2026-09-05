@@ -197,3 +197,43 @@ func scalarStringQ(ctx context.Context, querier dao.Querier, stmt string) (strin
 	}
 	return v, nil
 }
+
+// TargetDBName returns the database name a DSN points at, using THE DRIVER'S
+// OWN PARSER for the engine in question (ADR-0086 §3).
+//
+// Parsed, never pattern-matched: security-core-hardening R11's rule is that a
+// gate reading a DSN must agree with the driver that will use it, and a
+// substring reading of a connection string disagrees with every driver
+// eventually. It is the same reason ValidateDSN above parses rather than
+// greps, and this deliberately reuses those parsers rather than adding a
+// second reading of the same string.
+//
+// The result is stored in connections.target_db, in PLAINTEXT. The database
+// NAME is not a secret — the DSN's credentials are — and holding it as a
+// column is what makes the front door's startup cross-check an indexed read
+// instead of N DSN decryptions on the authentication path.
+//
+// THIS SWITCH IS THE ONE PLACE THAT GROWS PER ENGINE. mysql and bigquery are
+// coming (Johno, 2026-09-05), and adding them is one case each — nothing else
+// in the front door keys on an engine name, deliberately, because a gate that
+// names engines has to be edited every time the set changes and is a proxy for
+// the question actually being asked: is the target's database name knowable?
+//
+// An engine with no answer returns "" WITHOUT an error. That is not a failure:
+// such a connection is reachable by its CONNECTION NAME, which is how every
+// connection was reachable before this column existed. sqlite is the standing
+// example — its "database" is a file path, not a name a client would type into
+// a Database field. Empty therefore means "reachable by name only", never
+// "misconfigured".
+func TargetDBName(engineName, dsn string) (string, error) {
+	switch engineName {
+	case "postgres":
+		cfg, err := pgxpool.ParseConfig(dsn)
+		if err != nil {
+			return "", fmt.Errorf("exec: invalid postgres DSN: %w", err)
+		}
+		return cfg.ConnConfig.Database, nil
+	default:
+		return "", nil
+	}
+}

@@ -64,7 +64,7 @@ func (s *Service) Authorize(ctx context.Context, token string, connID int64, act
 	if err != nil {
 		return Identity{}, err
 	}
-	if derr := s.decide(ctx, ident.userID, ident.role, connID, action); derr != nil {
+	if derr := s.decide(ctx, nil, ident.userID, ident.role, connID, action); derr != nil {
 		return Identity{}, derr
 	}
 	return ident, nil
@@ -85,7 +85,16 @@ func (s *Service) Authorize(ctx context.Context, token string, connID int64, act
 // because the next person to change one copy reads it and believes the other
 // followed. Lector caught it: two copies of a security rule are not a
 // duplication smell, they are a future divergence with a date on it.
-func (s *Service) decide(ctx context.Context, userID int64, role string, connID int64, action Action) error {
+// decide resolves a grant into a yes/no for one action.
+//
+// It takes an OPTIONAL transaction and issues through On(tx) — nil is the pool
+// by contract, the same shape canonicalAllowedIPs uses and for the same reason
+// (security-core-hardening R14). A caller holding a transaction MUST pass it:
+// reaching for the pool from inside one deadlocks a single-connection sqlite
+// store and reads outside the transaction's snapshot on a file store. Minting
+// a PAT gates on a grant while holding the cap locks, which is what made the
+// parameter necessary.
+func (s *Service) decide(ctx context.Context, tx *dao.Transaction, userID int64, role string, connID int64, action Action) error {
 	if action == ActionManage {
 		// Manage is an account-level power and is not delegated by a grant:
 		// no per-connection grant can make a non-admin an administrator.
@@ -94,7 +103,7 @@ func (s *Service) decide(ctx context.Context, userID int64, role string, connID 
 		}
 		return nil
 	}
-	g, err := s.store.Grants.OnCtx(ctx).
+	g, err := s.store.Grants.On(tx, dao.WithQueryContext(ctx)).
 		With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).Get()
 	if errors.Is(err, dao.ErrNoRows) {
 		return ErrDenied

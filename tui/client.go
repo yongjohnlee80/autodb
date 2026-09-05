@@ -1045,11 +1045,17 @@ func splitAllowedIPs(s string) []string {
 	return out
 }
 
-// CreatePAT mints a token for the CALLING user. days is 0 for the server
-// default or 1..365; allowedIPs must be a subset of the caller's own
-// allowlist rows and is sent as the CSV the wire expects.
-func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedIPs []string) (PATSecret, error) {
-	res, err := b.authed(ctx, "auth.token_create", name, days, strings.Join(allowedIPs, ","))
+// CreatePAT mints a token for the CALLING user, BOUND TO ONE CONNECTION.
+//
+// days is 0 for the server default or 1..365; allowedIPs must be a subset of
+// the caller's own allowlist rows and is sent as the CSV the wire expects.
+//
+// connID is not optional (ADR-0086 §1): every PAT names exactly one
+// connection, and the server refuses a mint against one the caller has no
+// grant on, one that is not enabled for front-door use, or one whose target
+// database name has not been recorded.
+func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedIPs []string, connID int64) (PATSecret, error) {
+	res, err := b.authed(ctx, "auth.token_create", name, days, strings.Join(allowedIPs, ","), connID)
 	if err != nil {
 		return PATSecret{}, err
 	}

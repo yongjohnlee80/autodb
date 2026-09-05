@@ -130,6 +130,20 @@ type Connection struct {
 // IsDebug reports whether the connection carries the debug profile.
 func (c *Connection) IsDebug() bool { return c.Debug != 0 }
 
+// Connection capability profiles — the permitted values of connections.profile.
+//
+// They live HERE, in the package that owns the column, because both layers
+// above need them and neither may import the other: core/auth gates PAT
+// minting on a connection's profile (ADR-0086 §6) and core/exec decides
+// statement admission from it, while core/auth sits BELOW core/exec and cannot
+// reach exec.Profile. Defining the literal a second time in auth would make
+// three copies of one fact — the migration DDL's default being the first.
+// exec.Profile is derived from these rather than restating them.
+const (
+	ProfileV1Compat = "v1compat"
+	ProfileSession  = "session"
+)
+
 type ConnField string
 
 const (

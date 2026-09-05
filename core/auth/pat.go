@@ -53,6 +53,26 @@ var (
 	// subset of the user's own allowlist rows.
 	ErrPATBadAllowedIPs = errors.New("auth: token allowed_ips rejected")
 
+	// ErrPATConnDenied reports a mint against a connection the caller may not
+	// use — INCLUDING one that does not exist. The two are deliberately
+	// indistinguishable (ADR-0086 §6, security-core-hardening R13): telling
+	// them apart would let any authenticated user walk connection ids through
+	// token_create and learn which exist. The same conflation is already made
+	// by exec.TestConnection, which returns ErrDenied for dao.ErrNoRows for
+	// exactly this reason (lector M4 must-fix #6).
+	ErrPATConnDenied = errors.New("auth: no such connection, or you have no grant on it")
+
+	// ErrPATConnNotFrontDoor reports a mint against a connection that is not
+	// enabled for front-door use.
+	//
+	// This one IS distinguishable, and safely so: it is reached only AFTER the
+	// grant check has passed, so it discloses nothing the caller was not
+	// already entitled to know. It is also the one refusal that must be
+	// actionable — a token bound to a v1compat connection would be a
+	// credential that cannot be used anywhere, and telling someone that at 2am
+	// is worse than refusing to create it (ADR-0086 R5).
+	ErrPATConnNotFrontDoor = errors.New("auth: connection is not enabled for front-door use")
+
 	// ErrPATNotFound reports a revoke for a name the user does not have.
 	//
 	// Its own sentinel rather than a wrapped dao.ErrNoRows, because the wire
@@ -123,13 +143,21 @@ func splitPAT(token string) (selector, secret string, wellFormed bool) {
 	return sel, sec, true
 }
 
-// CreatePAT issues a token for the calling user.
+// CreatePAT issues a token for the calling user, BOUND TO ONE CONNECTION.
 //
 // The secret is returned once. Everything durable is the selector and a
 // SHA-256 of the secret, so the store cannot reconstruct the credential even
 // if it is read in full — which is the property that makes a database backup
 // something other than a credential dump.
-func (s *Service) CreatePAT(ctx context.Context, token, name string, lifetime time.Duration, allowedIPs []string) (NewPAT, error) {
+//
+// connID is not optional (ADR-0086 §1, ruled by Johno: every PAT is bound,
+// there is no unscoped form). Binding is what dissolves the connection-name vs
+// target-database-name ambiguity, and it narrows a stolen token to one
+// connection instead of every connection its owner is granted.
+//
+// The gates below run INSIDE the cap transaction and in this order, which is
+// itself part of the contract — see the comments on each.
+func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int64, lifetime time.Duration, allowedIPs []string) (NewPAT, error) {
 	ident, err := s.ValidateToken(ctx, token)
 	if err != nil {
 		return NewPAT{}, err
@@ -188,9 +216,60 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, lifetime ti
 			return lerr
 		}
 
+		// GATE 1 — THE GRANT, BEFORE THE CONNECTION ROW IS READ.
+		//
+		// Order is the security property, not a preference: authorization
+		// precedes any lookup that could reveal whether the row exists
+		// (security-core-hardening R13). An ungranted caller and a caller
+		// naming a connection that does not exist get the SAME error from the
+		// SAME point, so token_create cannot be used to enumerate ids.
+		if derr := s.decide(ctx, tx, ident.UserID(), ident.Role(), connID, ActionRead); derr != nil {
+			if errors.Is(derr, ErrDenied) {
+				return fmt.Errorf("%w", ErrPATConnDenied)
+			}
+			return derr
+		}
+		connRow, cerr := s.store.Connections.On(tx, dao.WithQueryContext(ctx)).
+			With(meta.ConnID, connID).Get()
+		if errors.Is(cerr, dao.ErrNoRows) {
+			// The SAME sentinel as the no-grant path above. A caller who
+			// reaches here held a grant on an id with no row, which is a store
+			// inconsistency rather than an ordinary miss — but it is still not
+			// theirs to learn about.
+			return fmt.Errorf("%w", ErrPATConnDenied)
+		}
+		if cerr != nil {
+			return cerr
+		}
+
+		// GATE 2 (LAST) — the connection must admit front-door use at all.
+		//
+		// There is deliberately NO engine gate and no "target_db must be
+		// recorded" gate here. An earlier draft had both, keyed on the front
+		// door being postgres-only — a claim that was WRONG (wire_session.go's
+		// engine check gates PINNING, after the session is already admitted,
+		// so sqlite targets open front-door sessions today) and that is about
+		// to be wrong in the other direction too: Johno, 2026-09-05, mysql and
+		// bigquery are coming.
+		//
+		// Keying a gate on an engine name is a proxy for the thing actually
+		// wanted, which is whether the target's database name is KNOWABLE.
+		// That question is answered in ONE place — exec.TargetDBName — which
+		// grows by one case per engine, and a connection whose engine yields
+		// no name is simply reachable by its connection name, exactly as it is
+		// today. Nothing here needs to change when mysql and bigquery land.
+		//
+		// Refused at MINT rather than only at connect (ADR-0086 R5): a token
+		// that cannot be used anywhere is worth refusing to create, and the
+		// message names the remedy.
+		if connRow.Profile != meta.ProfileSession {
+			return fmt.Errorf("%w: %q has profile %q. Enable front-door use on it first — and read "+
+				"what that turns on before you do, because it also changes how statements are "+
+				"admitted on that connection", ErrPATConnNotFrontDoor, connRow.Name, connRow.Profile)
+		}
+
 		// The subset read joins the SAME transaction, so the rows it
 		// validates against are the ones this decision is made on.
-		var cerr error
 		canonical, cerr = s.canonicalAllowedIPs(ctx, tx, ident.UserID(), allowedIPs)
 		if cerr != nil {
 			return cerr
@@ -232,6 +311,7 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, lifetime ti
 			Set(meta.PATUserID, ident.UserID()).
 			Set(meta.PATName, name).
 			Set(meta.PATAllowedIPs, canonical).
+			Set(meta.PATConnID, connID).
 			Set(meta.PATCreatedAt, now.Unix()).
 			Set(meta.PATExpiresAt, expires.Unix()).
 			Insert(); ierr != nil {
@@ -244,7 +324,8 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, lifetime ti
 		// exists with no record of its creation is exactly the token an
 		// investigation cannot account for.
 		return s.AuditTx(tx, ident.UserID(), "", "pat_created",
-			fmt.Sprintf("name %q expires %s", name, expires.UTC().Format(time.RFC3339)))
+			fmt.Sprintf("name %q conn %d expires %s", name, connID,
+				expires.UTC().Format(time.RFC3339)))
 	})
 	if err != nil {
 		return NewPAT{}, err
@@ -540,7 +621,7 @@ func (s *Service) AuthorizeUser(ctx context.Context, userID, connID int64, actio
 	if u.Disabled != 0 {
 		return ErrDenied
 	}
-	return s.decide(ctx, userID, u.Role, connID, action)
+	return s.decide(ctx, nil, userID, u.Role, connID, action)
 }
 
 // PATLastUsedInterval is how stale a token's last_used may get before a

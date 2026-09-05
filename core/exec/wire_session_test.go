@@ -24,7 +24,7 @@ func wireFixture(t *testing.T) (*fixture, *meta.PAT, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newPAT, err := f.svc.CreatePAT(ctx, f.rootTok, "wire", 0, nil)
+	newPAT, err := f.svc.CreatePAT(ctx, f.rootTok, "wire", f.connID, 0, nil)
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}
@@ -163,7 +163,7 @@ func TestOpenWireSession_PATNarrowingIsEnforced(t *testing.T) {
 		Set(meta.UIPLabel, "vpn").Set(meta.UIPCreatedAt, int64(1)).Insert(); err != nil {
 		t.Fatal(err)
 	}
-	narrowed, err := f.svc.CreatePAT(ctx, f.rootTok, "narrowed", 0, []string{"10.1.0.0/16"})
+	narrowed, err := f.svc.CreatePAT(ctx, f.rootTok, "narrowed", f.connID, 0, []string{"10.1.0.0/16"})
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}
@@ -222,19 +222,35 @@ func TestOpenWireSession_TheRemainingRefusals(t *testing.T) {
 		f, _, _, dbName := wireFixture(t)
 		ctx := context.Background()
 
-		// A second user, deliberately NOT granted on the connection. Root is
-		// an admin with grants everywhere, which is why the first version of
-		// this file could not reach this branch at all.
+		// A second user who HOLDS a grant, mints a token, and then LOSES the
+		// grant. Root is an admin with grants everywhere, which is why the
+		// first version of this file could not reach this branch at all.
+		//
+		// The grant-then-revoke shape is required as of ADR-0086: a PAT is
+		// bound to a connection at mint, and minting is refused for a
+		// connection the caller has no grant on. So "a token whose owner has
+		// no grant" can no longer be built by minting without one — which is
+		// the point of the gate, and makes this the faithful scenario rather
+		// than a workaround: a grant is revoked while a credential for it is
+		// still in someone's DSN.
 		if _, err := f.svc.CreateUser(ctx, f.rootTok, "erin", "erin-passphrase-long", "editor", testIP); err != nil {
 			t.Fatalf("CreateUser: %v", err)
 		}
-		erinTok, _, err := f.svc.Login(ctx, "erin", "erin-passphrase-long", testIP)
+		erinTok, erinIdent, err := f.svc.Login(ctx, "erin", "erin-passphrase-long", testIP)
 		if err != nil {
 			t.Fatalf("Login: %v", err)
 		}
-		erinPAT, err := f.svc.CreatePAT(ctx, erinTok, "erins", 0, nil)
+		if gerr := f.svc.AddGrant(ctx, f.rootTok, erinIdent.UserID(), f.connID, "reader", testIP); gerr != nil {
+			t.Fatalf("AddGrant: %v", gerr)
+		}
+		erinPAT, err := f.svc.CreatePAT(ctx, erinTok, "erins", f.connID, 0, nil)
 		if err != nil {
 			t.Fatalf("CreatePAT: %v", err)
+		}
+		// Revoked AFTER the mint: the session-open path must re-resolve
+		// authority rather than trust the binding recorded on the token.
+		if rerr := f.svc.RemoveGrant(ctx, f.rootTok, erinIdent.UserID(), f.connID, testIP); rerr != nil {
+			t.Fatalf("RemoveGrant: %v", rerr)
 		}
 
 		_, err = f.eng.OpenWireSession(ctx, erinPAT.Secret, "erin", dbName, testIP)

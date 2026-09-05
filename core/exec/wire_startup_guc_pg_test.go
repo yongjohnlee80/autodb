@@ -26,7 +26,7 @@ func openWireGUCs(t *testing.T, f *fixture, dsn string, gucs map[string]string) 
 	if gerr != nil {
 		t.Fatal(gerr)
 	}
-	pat, perr := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("guc-%d", time.Now().UnixNano()), 0, nil)
+	pat, perr := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("guc-%d", time.Now().UnixNano()), connID, 0, nil)
 	if perr != nil {
 		t.Fatalf("CreatePAT: %v", perr)
 	}
@@ -122,7 +122,7 @@ func TestWireOpen_StartupGUCsMeetTheSameDenylistAsSET(t *testing.T) {
 		t.Fatal(err)
 	}
 	row, _ := f2.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
-	pat, perr := f2.svc.CreatePAT(ctx, f2.rootTok, fmt.Sprintf("rguc-%d", time.Now().UnixNano()), 0, nil)
+	pat, perr := f2.svc.CreatePAT(ctx, f2.rootTok, fmt.Sprintf("rguc-%d", time.Now().UnixNano()), connID, 0, nil)
 	if perr != nil {
 		t.Fatalf("CreatePAT: %v", perr)
 	}

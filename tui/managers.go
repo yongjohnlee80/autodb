@@ -739,10 +739,22 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, own []UserIPRow, activ
 		field("name (e.g. laptop-psql, jetbrains)"),
 		field("expires in days (blank = server default, max 365)"),
 		field("restrict to IPs, comma separated (blank = any of your allowed IPs)"),
+		// ADR-0086 §1: a token names exactly ONE connection. The field is
+		// required because there is no unscoped form — a PAT that reached
+		// every connection its owner is granted is the blast radius this
+		// binding exists to shrink.
+		field("connection id (SPC c lists them; the token reaches ONLY this one)"),
 	}, func(v []string) (bool, string) {
 		name := strings.TrimSpace(v[0])
 		if name == "" {
 			return false, "a name is required"
+		}
+		connID, cerr := strconv.ParseInt(strings.TrimSpace(v[3]), 10, 64)
+		if cerr != nil || connID <= 0 {
+			// Refused HERE, while the form is still open and the value can be
+			// corrected, rather than as a server round trip — the same reason
+			// the day range is mirrored below.
+			return false, "a numeric connection id is required — the token reaches only that connection"
 		}
 		var days int64
 		if d := strings.TrimSpace(v[1]); d != "" {
@@ -779,7 +791,7 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, own []UserIPRow, activ
 		// goroutine in the same apply that reloads the list.
 		bound := g.bound
 		m.ctx.Go(func(c context.Context) (any, error) {
-			out, err := bound.CreatePAT(c, name, days, ips)
+			out, err := bound.CreatePAT(c, name, days, ips, connID)
 			if err != nil {
 				msg := WireErrorMessage(err)
 				return managerReload{gen: bound.Gen(), apply: func() {

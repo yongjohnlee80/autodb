@@ -289,12 +289,26 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name, engineName, 
 	if !e.auth.Unlocked() {
 		return 0, auth.ErrLocked
 	}
+	// The target database NAME, derived here because this is where the DSN is
+	// in hand and parseable (ADR-0086 §3). Stored in plaintext beside the
+	// sealed DSN: the name is not a secret, and holding it as a column is what
+	// lets the front door cross-check a client's `database` field with an
+	// indexed read instead of decrypting every candidate DSN on the auth path.
+	//
+	// Derived BEFORE the transaction opens, because a parse failure is the
+	// caller's mistake and should not cost a rollback.
+	targetDB, err := TargetDBName(engineName, dsn)
+	if err != nil {
+		return 0, err
+	}
+
 	var id int64
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		now := e.now().Unix()
 		var terr error
 		id, terr = e.store.Connections.On(tx).
 			Set(meta.ConnName, name).Set(meta.ConnEngine, engineName).
+			Set(meta.ConnTargetDB, targetDB).
 			Set(meta.ConnDSNEnc, []byte{}).Set(meta.ConnCreatedBy, ident.UserID()).
 			Set(meta.ConnCreatedAt, now).Set(meta.ConnUpdatedAt, now).
 			Insert()

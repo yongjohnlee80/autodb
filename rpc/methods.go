@@ -120,6 +120,17 @@ var publicErrs = []struct {
 	{auth.ErrPATBadExpiry, CodeInvalidToken},
 	{auth.ErrPATBadAllowedIPs, CodeInvalidToken},
 	{auth.ErrPATNotFound, CodeInvalidToken},
+	// ADR-0086's mint gates. Both MUST be mapped: an unmapped sentinel
+	// reaches the caller as a -32603 internal fault, which would tell someone
+	// who named the wrong connection that the SERVER broke — the same reason
+	// ErrPATNotFound is on this list.
+	//
+	// ErrPATConnDenied deliberately covers "no such connection" AND "not
+	// yours" with one code and one text, so the pair cannot be told apart
+	// from the wire (R13). ErrPATConnNotFrontDoor is post-grant and names the
+	// connection on purpose: it is the one refusal that has to be actionable.
+	{auth.ErrPATConnDenied, CodeInvalidToken},
+	{auth.ErrPATConnNotFrontDoor, CodeInvalidToken},
 	{exec.ErrSessionBusy, CodeSessionBusy},
 	{exec.ErrSessionCapExceeded, CodeSessionCapExceeded},
 	{exec.ErrConnectionDraining, CodeConnectionDraining},
@@ -739,8 +750,14 @@ func (s *Server) register() {
 		}, nil
 	})
 
+	// auth.token_create takes FIVE arguments as of ADR-0086: conn_id is new and
+	// is not optional, because every PAT is bound to exactly one connection and
+	// there is no unscoped form. exactArgs is exact, so an old client meets a
+	// clean arity error rather than minting something unbound — which is the
+	// shape a breaking change should have when the alternative is a credential
+	// that silently reaches everything its owner is granted.
 	s.rpc.Handle("auth.token_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
-		if err := exactArgs(req.Params, 4); err != nil {
+		if err := exactArgs(req.Params, 5); err != nil {
 			return nil, err
 		}
 		token, err := argStr(req.Params, 0, "token")
@@ -756,6 +773,10 @@ func (s *Server) register() {
 			return nil, err
 		}
 		rawIPs, err := argStr(req.Params, 3, "allowed_ips")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 4, "conn_id")
 		if err != nil {
 			return nil, err
 		}
@@ -776,7 +797,7 @@ func (s *Server) register() {
 			return nil, wireErr(fmt.Errorf("%w: %d days requested; the range is 1..%d, or 0 for "+
 				"the default", auth.ErrPATBadExpiry, days, maxTokenDays))
 		}
-		out, cerr := s.auth.CreatePAT(ctx, token, name, time.Duration(days)*24*time.Hour, ips)
+		out, cerr := s.auth.CreatePAT(ctx, token, name, connID, time.Duration(days)*24*time.Hour, ips)
 		if cerr != nil {
 			return nil, wireErr(cerr)
 		}
