@@ -140,16 +140,11 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 	if err != nil {
 		return 0, err
 	}
-	if err := s.begin(); err != nil {
+	release, closeAfterRelease, err := e.claimSession(ctx, s)
+	if err != nil {
 		return 0, err
 	}
-	closeAfterRelease := false
-	defer func() {
-		s.finish()
-		if closeAfterRelease {
-			e.finishClosing(context.WithoutCancel(ctx), s)
-		}
-	}()
+	defer release()
 
 	// §4a: a simple Query destroys the unnamed prepared statement and the
 	// unnamed portal. It is protocol-documented destruction, and it matters here
@@ -165,7 +160,7 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 		s.ext.dropUnnamed()
 	}
 
-	pol, err := e.wireAdmit(ctx, s, sqlText, ip, &closeAfterRelease)
+	pol, err := e.wireAdmit(ctx, s, sqlText, ip, closeAfterRelease)
 	if err != nil {
 		return 0, err
 	}
@@ -176,7 +171,7 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 	if connRow.Engine != engine.Postgres {
 		return e.wireQueryDecoded(ctx, s, pol, connRow, sqlText, ip, emit)
 	}
-	return e.wireQueryRaw(ctx, s, pol, connRow, sqlText, ip, emit, &closeAfterRelease)
+	return e.wireQueryRaw(ctx, s, pol, connRow, sqlText, ip, emit, closeAfterRelease)
 }
 
 // wireRoute is where a gated statement is allowed to go.

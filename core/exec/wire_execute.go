@@ -37,19 +37,12 @@ func (e *Engine) WireExecute(ctx context.Context, id SessionID, userID int64, sq
 	if err != nil {
 		return nil, err
 	}
-	// One in-flight statement per session, claimed before any work, exactly
-	// as the token path claims it.
-	if err := s.begin(); err != nil {
+	release, closeAfterRelease, err := e.claimSession(ctx, s)
+	if err != nil {
 		return nil, err
 	}
-	closeAfterRelease := false
-	defer func() {
-		s.finish()
-		if closeAfterRelease {
-			e.finishClosing(context.WithoutCancel(ctx), s)
-		}
-	}()
-	return e.wireExecuteClaimed(ctx, s, sqlText, ip, &closeAfterRelease)
+	defer release()
+	return e.wireExecuteClaimed(ctx, s, sqlText, ip, closeAfterRelease)
 }
 
 // wireExecuteClaimed is WireExecute AFTER the session claim: the caller holds

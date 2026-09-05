@@ -115,18 +115,11 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 	if err != nil {
 		return nil, err
 	}
-	// One in-flight statement per session. Claimed before any work so a
-	// second caller is refused rather than queued behind work it cannot see.
-	if err := s.begin(); err != nil {
+	release, closeAfterRelease, err := e.claimSession(ctx, s)
+	if err != nil {
 		return nil, err
 	}
-	closeAfterRelease := false
-	defer func() {
-		s.finish()
-		if closeAfterRelease {
-			e.finishClosing(context.WithoutCancel(ctx), s)
-		}
-	}()
+	defer release()
 
 	// Re-check the state after claiming the slot. A close that began between
 	// the lookup and the claim has already cancelled the session context, and
@@ -149,7 +142,7 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 		// Own closing before the slot is released. If a concurrent closer
 		// already owns it, that closer is waiting on this same slot and will
 		// resume after the defer above releases it.
-		closeAfterRelease = e.transferDemotionClose(s, ip)
+		*closeAfterRelease = e.transferDemotionClose(s, ip)
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText,
 			fmt.Errorf("%w: rollback cleanup failed: %v", ErrTxAuthorityChanged, derr))
 	}
@@ -498,3 +491,45 @@ func (e *Engine) logf(format string, args ...any) {
 // compile-time proof the session path uses the same dao surface as the rest.
 var _ = dao.ErrNoRows
 var _ = errors.Is
+
+// claimSession takes the session's ONE in-flight slot and returns the release
+// that gives it back.
+//
+// THE THREE COPIES THIS REPLACES WERE IDENTICAL AND SAFETY-CRITICAL, which is a
+// bad combination. session_engine.go, wire_execute.go and wire_query.go each
+// wrote out s.begin(), a closeAfterRelease flag, and a defer that calls
+// s.finish() and then conditionally finishClosing. Nothing tied them together,
+// and the thing that would diverge silently is ORDER: finish() must run before
+// finishClosing, because finishClosing tears down a session that must no longer
+// be claimed, and it must run under a context the caller's cancellation cannot
+// reach — a close that begins as the statement ends would otherwise be
+// abandoned halfway.
+//
+// The flag is returned as a POINTER because the decision to close is made later
+// and deeper: wireAdmit and transferDemotionClose set it after the claim, from
+// inside the work the claim protects. The caller holds the defer, so the caller
+// must hold the flag.
+//
+//	release, closeAfterRelease, err := e.claimSession(ctx, s)
+//	if err != nil {
+//	    return <zero>, err
+//	}
+//	defer release()
+//
+// The zero value is why this returns a release instead of taking the defer
+// itself: the three callers return different types, and a helper that returned
+// early for them would have to know which.
+func (e *Engine) claimSession(ctx context.Context, s *session) (release func(), closeAfterRelease *bool, err error) {
+	// One in-flight statement per session. Claimed before any work so a second
+	// caller is refused rather than queued behind work it cannot see.
+	if err := s.begin(); err != nil {
+		return nil, nil, err
+	}
+	flag := false
+	return func() {
+		s.finish()
+		if flag {
+			e.finishClosing(context.WithoutCancel(ctx), s)
+		}
+	}, &flag, nil
+}
