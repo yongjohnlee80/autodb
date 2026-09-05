@@ -10,7 +10,7 @@ import (
 
 // The two probe classes need different remedies, so they must not collapse into
 // one message. A single "cannot reach the daemon" would send an operator to start
-// a server on an address that is already occupied (ADR-0061 §2.2).
+// a server on an address that is already occupied.
 func TestPreflight_DistinguishesNoDaemonFromForeignOccupant(t *testing.T) {
 	t.Parallel()
 

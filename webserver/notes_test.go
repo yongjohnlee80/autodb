@@ -12,7 +12,7 @@ import (
 // stop being a component.
 // rootFor derives a subject's personal root through the EXPORTED constructor —
 // the same call production makes. The old package-private noteRootFor/
-// noteRootForMode helpers are gone with the mode (ADR-0068), and testing through
+// noteRootForMode helpers are gone with the mode, and testing through
 // the exported surface is what keeps these assertions about the real derivation
 // rather than about a test-only copy of it.
 func rootFor(base, subject string) (string, error) {

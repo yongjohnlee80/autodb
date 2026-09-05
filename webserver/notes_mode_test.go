@@ -1,6 +1,6 @@
 package webserver
 
-// Note visibility modes (ADR-0064 §2.3, acceptance criteria 6-11, 13).
+// Note visibility modes.
 //
 // The product goal is that one human opening one install through two frontends
 // sees the same notes. The risk is that the shared tree has no identity of its
@@ -57,7 +57,7 @@ func serveGatewayCfg(t *testing.T, cfg Config) string {
 }
 
 // Per-user isolation is now the ONLY behaviour, not a default that a mode could
-// turn off. ADR-0061 §2.8's guarantee survives ADR-0068 as an invariant.
+// turn off. That guarantee survives the identity-keying change as an invariant.
 func TestNotesMode_DefaultIsPerUserIsolation(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -200,7 +200,7 @@ func TestNotesMode_UnsafeSubjectCannotBootstrap(t *testing.T) {
 	}
 }
 
-// lector r1 P1b — About must name the root THIS session reads.
+// About must name the root THIS session reads.
 func TestNotesMode_AboutReportsTheEffectiveRoot(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -224,17 +224,17 @@ func TestNotesMode_AboutReportsTheEffectiveRoot(t *testing.T) {
 	}
 }
 
-// lector r3 — the ACTUAL runner path, not the helper.
+// The ACTUAL runner path, not the helper.
 //
 // Testing modelOptions() in isolation proved the helper and not its caller:
-// lector restored the old construction, left the helper intact, and every test
+// A review restored the old construction, left the helper intact, and every test
 // stayed green while the criterion-12 bug was back. This drives a REAL browser
 // session — login, ticket, attach — and captures the model factory appRunner must
 // go through, so a caller bypass fails here rather than passing quietly.
 func TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot(t *testing.T) {
 	// One case now: there are no modes. What the runner must still do is build the
 	// Model through the factory with the EFFECTIVE root — the caller-level control
-	// that a helper test cannot replace (ADR-0068 criterion 4).
+	// that a helper test cannot replace.
 	for _, tc := range []struct {
 		name       string
 		wantShared bool

@@ -25,8 +25,8 @@ const (
 	// idle-evicts an attached session — being connected is what "not idle" means —
 	// so this governs only sessions whose browser has gone away.
 	//
-	// Five minutes, and the number moved twice for reasons worth recording. ADR-0061
-	// rev 0 said fifteen; rev 1 corrected it to two, arguing that a detached session
+	// Five minutes, and the number moved twice for reasons worth recording. The
+	// first design said fifteen; the next corrected it to two, arguing that a detached session
 	// protects nothing while holding an RPC connection and a live token. Both of
 	// those were computed under one RPC connection PER BROWSER SESSION. The per-user
 	// pool changed the arithmetic: a detached session now holds a REFERENCE, and the
@@ -78,7 +78,7 @@ type Config struct {
 	// newModel overrides how a per-session Model is built. Test seam only, and it
 	// exists for a specific reason: testing modelOptions() proves the HELPER, not
 	// that appRunner calls it. Restoring the old construction while leaving the
-	// helper intact reintroduced the bug with every test green (lector r3). A test
+	// helper intact reintroduced the bug with every test green. A test
 	// that captures this factory fails if the runner stops going through it.
 	newModel func(*tuiapp.Session, tuiapp.NotesFactory, func(), ...tuiapp.Option) *tuiapp.Model
 }
@@ -115,8 +115,8 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	// Workspace mode without a bound subject would read the shared tree for
 	// whoever logged in first. Refused at construction, so the process dies before
-	// the port is bound rather than serving a mode it cannot enforce (ADR-0064
-	// §2.3, criterion 11). config.validate() catches this at load too; this is the
+	// the port is bound rather than serving a mode it cannot enforce.
+	// config.validate() catches this at load too; this is the
 	// same rule at the API boundary, for callers that build a Config directly.
 	if cfg.Log == nil {
 		cfg.Log = logger.Nop{}
@@ -131,7 +131,7 @@ func New(cfg Config) (*Gateway, error) {
 	// No shared note store. One root per authenticated user, built when the
 	// session is: a single root would hand every web user every other web user's
 	// notes, because tuiapp.NoteStore reads from disk and disk has no identity
-	// (§2.8). The terminal frontend never had this problem — the OS gave it one
+	// The terminal frontend never had this problem — the OS gave it one
 	// user per process.
 	g := &Gateway{cfg: cfg}
 
@@ -160,14 +160,14 @@ func New(cfg Config) (*Gateway, error) {
 		// A direct attach — a ticket whose parked login has already expired —
 		// authenticated without going through the login route, so nothing was
 		// parked for it. It gets the user's pooled session if they already have
-		// one, and FAILS otherwise: the web App cannot log a connection in (§2.4.5),
+		// one, and FAILS otherwise: the web App cannot log a connection in,
 		// so an unauthenticated session would strand it. The recovery is a fresh
 		// gateway login, which is where authentication belongs.
 		Provision: func(ctx context.Context, id *auth.Identity) (*userSession, error) {
 			// A direct attach with no already-authenticated session for this user
 			// (ErrNoSession) fails the session rather than dialling an
 			// unauthenticated one: the web App cannot log a connection in, so the
-			// recovery is a fresh gateway login, not a stranded TUI (§2.4).
+			// recovery is a fresh gateway login, not a stranded TUI.
 			sess, entry, perr := g.pool.acquire(ctx, id.Subject)
 			if perr != nil {
 				return nil, perr
@@ -262,7 +262,7 @@ func New(cfg Config) (*Gateway, error) {
 // resolved is what let an unusable subject consume the one-shot bootstrap.
 //
 // The equality-to-a-configured-subject test that used to sit here is GONE
-// (ADR-0068 §2.3). It was an access-control substitute for a missing key: the
+// It was an access-control substitute for a missing key: the
 // tree it protected had no user component. Now that notes are keyed by
 // (user, workspace), a foreign identity cannot reach another's notes by
 // construction, so the gate protected nothing and only denied service.
@@ -272,7 +272,7 @@ func (g *Gateway) subjectAllowed(subject string) bool {
 
 // logRefusal records a refused admission where the operator can see it. The
 // browser gets refusalReason and nothing else; this is the only place the two
-// differ, and the reason that difference is safe (ADR-0064 §2.3).
+// differ, and the reason that difference is safe.
 func (g *Gateway) logRefusal(at, subject string) {
 	logger.Notice(g.cfg.Log, map[string]any{
 		"webserver": "gateway", "event": "refused: subject not bound to this gateway",
@@ -311,7 +311,7 @@ func (r *appRunner) Run(ctx context.Context) error {
 	// The store is derived from the base and this session's CANONICAL subject;
 	// the final directory is not the caller's to choose. There is no mode and no
 	// fallback: a fallback would quietly hand this user everyone else's notes,
-	// which is the failure the keying exists to prevent (ADR-0068 §2.1).
+	// which is the failure the keying exists to prevent.
 	//
 	// Built here as well as passed as a factory, because the gateway wants to
 	// FAIL THE SESSION on an unusable subject rather than start a UI that will
@@ -326,12 +326,12 @@ func (r *appRunner) Run(ctx context.Context) error {
 	defer cancel()
 	// FrontendWeb, which withdraws the daemon-shutdown action. spawn is nil here by
 	// design, so an admin taking the daemon down would strand every session
-	// including other users' (ADR-0061 §2.7).
+	// including other users'.
 	// About must report the root THIS session reads. cfg.About carries the BASE
 	// root (runWebUI resolved it before any identity existed), so in per-user mode
 	// it named <notes> while the session actually read <notes>/u-<subject> — About
-	// told the user the wrong path, which is precisely the confusion criterion 12
-	// exists to remove (lector r1 on PR #5).
+	// told the user the wrong path, which is precisely the confusion this exists
+	// to remove.
 	newModel := r.gw.cfg.newModel
 	if newModel == nil {
 		newModel = tuiapp.New
@@ -344,7 +344,7 @@ func (r *appRunner) Run(ctx context.Context) error {
 // modelOptions is the ONE place a per-session Model is configured, so a test can
 // exercise the wiring the runner actually uses.
 //
-// Testing the options individually was not enough: lector restored the old
+// Testing the options individually was not enough: a review restored the old
 // construction — unchanged `WithAbout(cfg.About)` and no `WithNoteView` — and
 // every test still passed, because the tests applied the options themselves
 // instead of asking the runner for them (r2 on PR #5). Deleting either line below
@@ -363,8 +363,8 @@ func (g *Gateway) modelOptions(root string) []tuiapp.Option {
 // cfg.About carries the BASE root, resolved by runWebUI before any identity
 // existed. In per-user mode the session actually reads <base>/u-<subject>, so
 // passing About through unchanged made the About modal report a path the session
-// was not using — the exact confusion criterion 12 exists to remove (lector r1
-// P1b on PR #5). Named rather than inlined so it can be tested.
+// was not using — the exact confusion this exists to remove. Named rather than
+// inlined so it can be tested.
 func aboutForRoot(base tuiapp.AboutInfo, root string) tuiapp.AboutInfo {
 	base.NotesDir = root
 	return base
@@ -372,7 +372,7 @@ func aboutForRoot(base tuiapp.AboutInfo, root string) tuiapp.AboutInfo {
 
 // loginFactor authenticates a browser login against the DAEMON's own identity
 // layer, which is what makes this single sign-on rather than a second password
-// store (ADR-0061 §2.4).
+// store.
 //
 // It holds no credentials of its own: it forwards the pair once, on a connection
 // it dials for the purpose, and carries the answer. There is exactly one source
@@ -439,13 +439,13 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 		//
 		// The bind is loopback-only besides, so reaching it means local access — the
 		// same property `autodb --ui` already relies on. A public bind needs a
-		// certificate and is out of scope (§2.1).
+		// certificate and is out of scope.
 		// GATE 1, before an irreversible side effect. Bootstrap CREATES the first
 		// admin, and nothing can undo an account or restore one-shot bootstrap
 		// state, so a bound gateway must refuse a foreign subject BEFORE this rather
 		// than after: otherwise the wrong person becomes the permanent first admin
 		// and only then gets denied, and the rightful subject may never be able to
-		// bootstrap (ADR-0064 §2.3, lector r3).
+		// bootstrap.
 		//
 		// This checks the CLAIMED name, which is all that exists yet — there is no
 		// daemon identity to ask about before the account is made. Gate 2 below
@@ -466,7 +466,7 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 		// bootstrap state, so the rightful operator would find the system
 		// already claimed by whoever got there first. Gate 1's own comment
 		// names this exact class of failure for the subject and the address
-		// was simply not covered by it. Lector found it (PR #34 r0).
+		// was simply not covered by it. A review found it.
 		//
 		// The INVERSE ordering is correct here, and for a reason that does
 		// not generalise: the reason Gate 3 comes after credentials is that
@@ -532,7 +532,7 @@ func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contrib
 	// guessed password by timing the refusal without ever being let in.
 	//
 	// It looked like a choice between leaking which usernames exist and
-	// leaking which password is right. Lector's ruling on PR #34 r2 is that
+	// leaking which password is right. The ruling under review was that
 	// the choice was false, and it was: nothing required a session to exist
 	// before the address was judged. Moving the decision inside the one
 	// operation removes the extra work rather than trying to disguise it,

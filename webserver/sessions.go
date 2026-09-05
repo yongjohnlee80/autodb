@@ -26,7 +26,7 @@ var ErrNoSession = errors.New("webserver: no session for this user")
 
 // ErrIdentityDrift reports that a pooled session's authenticated identity no
 // longer matches the key it is filed under. This must be impossible — the web App
-// cannot re-authenticate its session (ADR-0061 §2.4) — so it is a loud bug guard,
+// cannot re-authenticate its session — so it is a loud bug guard,
 // not a case to recover from.
 var ErrIdentityDrift = errors.New("webserver: pooled session identity does not match its key")
 
@@ -91,8 +91,8 @@ func (p *sessions) join(subject string, fresh *tuiapp.Session) (sess *tuiapp.Ses
 	}
 	if e, ok := p.entries[subject]; ok {
 		// The pooled session must still be this exact user. The App cannot
-		// re-authenticate it (§2.4), so a mismatch is a bug, not a state to serve —
-		// serving it would run one user's tabs as another (lector r3 must-fix 1).
+		// re-authenticate it, so a mismatch is a bug, not a state to serve —
+		// serving it would run one user's tabs as another.
 		if name := e.sess.User().Name; name != subject {
 			return nil, nil, fresh, fmt.Errorf("%w: keyed %q, authenticated %q",
 				ErrIdentityDrift, subject, name)
@@ -106,7 +106,7 @@ func (p *sessions) join(subject string, fresh *tuiapp.Session) (sess *tuiapp.Ses
 	// The new session must ALSO be the user it is filed under. Production derives
 	// subject from this same session, so today this cannot mismatch — but a pool
 	// invariant that holds only because of what its one caller happens to pass is
-	// not an invariant (lector r4). Assert it here so the guarantee is the pool's.
+	// not an invariant, as a review established. Assert it here so the guarantee is the pool's.
 	if name := fresh.User().Name; name != subject {
 		return nil, nil, fresh, fmt.Errorf("%w: adopting %q under key %q",
 			ErrIdentityDrift, name, subject)
@@ -126,7 +126,7 @@ func (p *sessions) join(subject string, fresh *tuiapp.Session) (sess *tuiapp.Ses
 //
 // It does NOT dial. A direct attach (a ticket, an mTLS chain, an SSHSIG) has been
 // authenticated by the attach policy, but the web App cannot authenticate a
-// connection itself (§2.4) — so if this user has no already-authenticated session,
+// connection itself — so if this user has no already-authenticated session,
 // there is nothing to hand it that it could use, and dialling an unauthenticated
 // one would strand the App on a connection it cannot log in. The caller surfaces
 // ErrNoSession, the browser session ends, and the user re-attaches through the
@@ -158,12 +158,12 @@ func (p *sessions) acquire(_ context.Context, subject string) (*tuiapp.Session, 
 // Closing a transport does not revoke the credential it carried: the daemon would
 // keep the token valid, so a session the user believes they ended would still be
 // spendable. `tuiapp.Session.Disconnect` closes the client and nothing more, so
-// the logout has to happen HERE (ADR-0061 §2.4; Johno's requirement, 2026-08-22).
+// the logout has to happen HERE (Johno's requirement, 2026-08-22).
 // release drops a reference on a SPECIFIC entry, and logs out when it was the last.
 //
 // It takes the entry, not just the subject, so a late release from an entry that
 // has already been removed and replaced under the same key cannot decrement — or
-// log out — its replacement (lector r3 must-fix 1, requirement 4). With the
+// log out — its replacement. With the
 // identity invariant held at the frontend this replacement case should not arise,
 // but the check costs a pointer compare and removes a whole class of aliasing bug.
 func (p *sessions) release(subject string, e *poolEntry) {

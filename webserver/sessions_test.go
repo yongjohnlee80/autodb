@@ -76,7 +76,7 @@ func startRealServerWith(t *testing.T, allowlist []string) (string, *auth.Servic
 
 // dialer returns the pool's dial function: a session with NO SPAWN, which is what
 // makes auto-starting a daemon structurally impossible rather than merely
-// unreached (ADR-0061 §2.2).
+// unreached.
 func dialer(addr string) func(context.Context) (*tuiapp.Session, error) {
 	return func(ctx context.Context) (*tuiapp.Session, error) {
 		s := tuiapp.NewSessionOn("tcp", addr, logger.Nop{}, nil)
@@ -216,7 +216,7 @@ func TestSessions_DistinctUsersAreNotShared(t *testing.T) {
 	t.Cleanup(pool.close)
 
 	// Two GENUINELY authenticated users. The pool now asserts that a pooled
-	// session's identity matches its key (the fix for lector r3 must-fix 1), so a
+	// session's identity matches its key (the fix a review required), so a
 	// second session pooled without a real login of its own is correctly rejected —
 	// which is why this test bootstraps an admin and has the admin create the
 	// second user rather than pooling an unauthenticated connection.
@@ -285,7 +285,7 @@ func TestSessions_ClosedPoolRefuses(t *testing.T) {
 // A pooled session that has been re-keyed to a DIFFERENT user must not be handed
 // out under its original key.
 //
-// This is the core of lector r3 must-fix 1 at the pool boundary. The frontend fix
+// This is the core of that must-fix at the pool boundary. The frontend fix
 // makes the drift impossible (the web App cannot re-authenticate its session), but
 // the pool asserts the invariant anyway: a defence that only exists in another
 // package is a defence one refactor away from gone. Here the drift is simulated the
@@ -331,7 +331,7 @@ func TestSessions_RejectsIdentityDrift(t *testing.T) {
 
 // A late release from a replaced entry must not touch the entry that replaced it.
 //
-// lector r3 must-fix 1, requirement 4. Two joins for one subject produce two
+// Requirement 4 of the same must-fix. Two joins for one subject produce two
 // references to ONE entry; the pointer-checked release means a stale entry handle —
 // one whose entry has since been removed and a new one installed under the same
 // key — decrements nothing. Constructed directly because the frontend fix makes
@@ -376,7 +376,7 @@ func TestSessions_ReleaseIsEntrySpecific(t *testing.T) {
 // join must not adopt a NEW session whose identity does not match its key.
 //
 // The existing-entry path already refuses drift; this is the new-entry path
-// (lector r4 should-fix). Production derives the key from the session, so a
+// (raised as a should-fix in review). Production derives the key from the session, so a
 // mismatch cannot happen there today — which is exactly why it needs a direct
 // test: the invariant must be the pool's own, not a property of its one caller.
 func TestSessions_JoinRejectsMismatchedNewEntry(t *testing.T) {

@@ -1,7 +1,7 @@
 // Package webserver is autodb's `--web-ui` middleware: a thin web-server that
 // terminates authentication, owns per-user RPC sessions, caps concurrency, and
 // serves the EXISTING TUI component tree to a browser through golib/tui/web
-// (ADR-0061).
+// the browser.
 //
 // It is a frontend. The `--serve` daemon does not change — not one RPC method —
 // and every obligation here exists because one process now serves N users where
@@ -26,7 +26,7 @@ const PreflightTimeout = 3 * time.Second
 //
 // Distinct from [ErrForeignOccupant] because the remedies are opposite, and a
 // message that flattened them would send an operator to start a daemon on an
-// address that is already taken (ADR-0061 §2.2, lector r1 #6).
+// address that is already taken.
 var ErrNoDaemon = errors.New("webserver: no autodb daemon is listening")
 
 // ErrForeignOccupant reports that something answered but is not a compatible
@@ -46,7 +46,7 @@ var ErrForeignOccupant = errors.New("webserver: the address is occupied by somet
 // This is only half the guarantee. It covers startup; a later reconnect is
 // covered by passing a nil spawn function to the session, which makes
 // auto-starting structurally impossible rather than merely unreached. A reviewer
-// should check for both — only the second is a guarantee (§2.2).
+// should check for both — only the second is a guarantee.
 func Preflight(ctx context.Context, network, addr string) (version string, err error) {
 	probeCtx, cancel := context.WithTimeout(ctx, PreflightTimeout)
 	defer cancel()

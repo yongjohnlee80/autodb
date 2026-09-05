@@ -427,7 +427,8 @@ func TestGateway_NoteRootsAreScopedPerUser(t *testing.T) {
 // The App is handed a pooled *tui.Session shared across the user's tabs. If it
 // reconnected that session on startup — which Model.Init did unconditionally —
 // opening tab B would replace tab A's RPC client, advance the shared generation,
-// and invalidate work tab A had in flight (lector r4). The web frontend must not
+// and invalidate work tab A had in flight, as a review established. The web
+// frontend must not
 // own the connection's lifecycle: the gateway dialed it, and it stays put.
 func TestGateway_SecondTabDoesNotDisturbTheFirst(t *testing.T) {
 	t.Parallel()

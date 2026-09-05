@@ -17,7 +17,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// The web UI's IP admission, observed AT THE WEB SURFACE (lector PR #34 r0
+// The web UI's IP admission, observed AT THE WEB SURFACE (a review r0
 // must-fix 2).
 //
 // The daemon predicate has its own cells and the RPC verb has its own. What
@@ -177,7 +177,7 @@ func TestAdmission_NeitherLayerRefusesAndLeavesNothingBehind(t *testing.T) {
 // THE IRREVERSIBLE ONE. A browser that no global prefix admits must not be
 // able to become the permanent first administrator.
 //
-// This is the defect lector found: Gate 3 sat after Bootstrap, so an
+// This is the defect a review found: Gate 3 sat after Bootstrap, so an
 // inadmissible browser could consume the one-shot bootstrap, create the
 // admin, and only then be refused. Nothing undoes an account or restores
 // bootstrap state, so the rightful operator would find the system already
@@ -238,8 +238,8 @@ func TestAdmission_AnAdmittedBrowserStillBootstraps(t *testing.T) {
 // rather than on a string that happens to match.
 var _ = auth.AdmittedByUserRow
 
-// ORDERING, PROVEN DETERMINISTICALLY (lector PR #34 r0 MF3, rebuilt for the
-// combined operation in r3).
+// ORDERING, PROVEN DETERMINISTICALLY — rebuilt for the combined operation after
+// a review found the first version proved it only by timing.
 //
 // The claim is that the credential is verified BEFORE the address is judged,
 // so a refusal from a non-admitted address cannot say whether the name
@@ -334,8 +334,8 @@ func countAudit(t *testing.T, store *meta.Store, action string) uint64 {
 	return n
 }
 
-// TIMING, MEASURED AND SELF-CALIBRATED (lector PR #34 r0 MF3; redesigned
-// after r1 MF1; the residual it exposed CLOSED in r3).
+// TIMING, MEASURED AND SELF-CALIBRATED — redesigned twice under review, and the
+// residual the second version exposed is closed.
 //
 // Two properties, and after the combined daemon operation both are defended
 // rather than one defended and one recorded:
@@ -352,7 +352,7 @@ func countAudit(t *testing.T, store *meta.Store, action string) uint64 {
 // under -race, every run — because the gateway minted a session, asked a
 // second RPC about the address, and revoked the session when the answer was
 // no. I read that as a forced choice between leaking which names exist and
-// leaking which password is right. Lector ruled the choice false and was
+// leaking which password is right. A review ruled the choice false and was
 // correct: nothing required a session to exist before the address was judged.
 // The decision now happens inside the one login operation, between verifying
 // the credential and minting anything, so the refused path does the same work
@@ -432,7 +432,7 @@ func TestAdmission_RefusalTimingSeparatesNeitherNameNorPassword(t *testing.T) {
 	//
 	// The previous control delayed the gateway's own refusal, which only the
 	// correct-password path reached — so it demonstrated sensitivity to the
-	// credential pair and said nothing about the existence pair. Lector
+	// credential pair and said nothing about the existence pair. A review
 	// caught that. These use a proxy in front of the daemon instead, which
 	// is test-owned, needs no production seam, and can single out either
 	// cause by what the request carries.
@@ -565,7 +565,7 @@ func timingCauses() []timingCause {
 // A PROXY RATHER THAN A PRODUCTION SEAM, deliberately. The decision under
 // test now lives inside the daemon's login, so a seam able to single out one
 // cause would have to be a knob on auth.Service — and an exported test-only
-// hook on a security-critical API is exactly what lector refused in r1. This
+// hook on a security-critical API is exactly what a review refused. This
 // is entirely test-owned: it perturbs the wire, which is where the harness
 // measures anyway, and it can select a cause by what the request carries
 // because the name and the passphrase both travel in it.

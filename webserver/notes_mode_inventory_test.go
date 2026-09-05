@@ -2,7 +2,7 @@ package webserver
 
 // The manifest for notes_mode_test.go, kept in a SEPARATE FILE on purpose.
 //
-// It just earned its keep a second time. ADR-0068 removed the notes_mode binding,
+// It just earned its keep a second time. A later change removed the notes_mode binding,
 // so six of the eleven tests below described behaviour that no longer exists and
 // were deleted deliberately — and the manifest turned that into a COMPILE failure
 // rather than a quietly smaller suite. A deliberate deletion and an accidental one
@@ -12,7 +12,7 @@ package webserver
 // The r2 commit lost five verified tests to an edit that replaced from a marker
 // to end-of-file. The first version of this guard lived at the end of that same
 // file, so repeating the exact edit would have deleted the guard along with the
-// tests it guards and the suite would have gone green again (lector r4).
+// tests it guards and the suite would have gone green again (a review r4).
 //
 // Here, that edit instead leaves this file referencing symbols that no longer
 // exist — a COMPILE failure, which cannot be mistaken for a pass. A guard that
