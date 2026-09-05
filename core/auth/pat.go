@@ -293,10 +293,24 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 		//  phrase says nothing about that. Mint-time is where it has to be
 		//  stopped, because a dormant credential has no other moment.
 		//
-		//  A NON-EMPTY allowed_ips. In cleartext the token's own list is its
+		//  A NARROW allowed_ips. In cleartext the token's own list is its
 		//  ENTIRE admission gate — the inherited set is not consulted — so an
 		//  empty list would mean "from anywhere", which is the opposite of what
 		//  empty means everywhere else in this file.
+		//
+		//  EMPTINESS IS NOT THE CONCERN, THOUGH; BREADTH IS. The first version
+		//  of this checked only that the list was non-empty, and a reviewer
+		//  minted a cleartext debug token with allowed_ips=["0.0.0.0/0"] — not
+		//  empty, and meaning precisely "from anywhere". A predicate standing
+		//  in for the real concern drifts from it. The check below tests the
+		//  thing the ground is actually about.
+		//
+		//  It is reachable BECAUSE of a correct relaxation: for an ordinary PAT
+		//  that same list is refused by canonicalAllowedIPs, through the SUBSET
+		//  check against the owner's own allowlist. The debug branch skips that
+		//  by Johno's decision 5 — a debug token's list is a perimeter of its
+		//  own, not a narrowing — and skipping it removed a guard that had been
+		//  doing double duty. This restores the half that was load-bearing.
 		if debugCleartext {
 			if ident.Role() != meta.RoleAdmin {
 				return fmt.Errorf("%w: only an administrator may mint one. Enabling cleartext and "+
@@ -312,6 +326,9 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 				return fmt.Errorf("%w: it needs an explicit allowed_ips list. In cleartext that list "+
 					"is the token's WHOLE admission gate, so leaving it empty would mean 'from "+
 					"anywhere' rather than 'inherit'", ErrPATDebugCleartextRefused)
+			}
+			if rerr := refuseBroadDebugRanges(allowedIPs); rerr != nil {
+				return rerr
 			}
 		}
 
@@ -799,6 +816,57 @@ func boolToInt(b bool) int64 {
 // rather than a flag on the other one so the exemption is visible at every call
 // site: this is the ONE path on which a token may name an address its owner was
 // never admitted from, and it should not be reachable by passing false.
+// Prefix floors for a cleartext debugging token's allowed_ips.
+//
+// A /24 is 256 addresses — one office subnet, which is the smallest unit an
+// operator can actually be handed and the realistic shape of "the desks that
+// need this". A /64 is one IPv6 LAN, and is the smallest unit a site is
+// delegated in practice; requiring /128 would exclude anyone whose machine
+// uses SLAAC privacy addresses, which rotate.
+//
+// Both numbers are a judgement and are written here to be argued with rather
+// than buried. What is NOT a judgement is that some floor must exist: without
+// one the ground reads "not empty" while claiming to mean "not from anywhere",
+// and ["0.0.0.0/0"] satisfies the first while being the second.
+//
+// Deliberately NOT configurable. A knob on this is a knob that gets set to 0 by
+// the person in a hurry that this gate exists to slow down.
+const (
+	debugMinIPv4Prefix = 24
+	debugMinIPv6Prefix = 64
+)
+
+// refuseBroadDebugRanges rejects an allowed_ips entry that admits more hosts
+// than an operator could enumerate.
+//
+// It applies ONLY to cleartext debugging tokens. An ordinary PAT's breadth is
+// bounded by the subset check against its owner's allowlist, which an admin
+// controls; a debug token has no such backstop by design.
+func refuseBroadDebugRanges(cidrs []string) error {
+	for _, raw := range cidrs {
+		raw = strings.TrimSpace(raw)
+		_, n, err := net.ParseCIDR(raw)
+		if err != nil {
+			// Left to the canonicalizer, which reports bad syntax as itself.
+			continue
+		}
+		ones, bits := n.Mask.Size()
+		floor := debugMinIPv4Prefix
+		family := "IPv4"
+		if bits > 32 {
+			floor, family = debugMinIPv6Prefix, "IPv6"
+		}
+		if ones < floor {
+			return fmt.Errorf("%w: allowed_ips entry %q admits %s addresses far beyond the hosts "+
+				"that need it. In cleartext this list is the token's WHOLE admission gate, with no "+
+				"subset check behind it, so it must name a range an operator can account for: /%d "+
+				"or narrower for %s. Name the office or VPN egress range instead",
+				ErrPATDebugCleartextRefused, raw, family, floor, family)
+		}
+	}
+	return nil
+}
+
 func canonicalizeIPsUnchecked(cidrs []string) (string, error) {
 	if len(cidrs) == 0 {
 		return "", nil

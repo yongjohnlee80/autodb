@@ -69,9 +69,25 @@ func main() {
 		"--migrate-to-postgres: report what would be copied and write nothing")
 	migrateInsecure := flag.Bool("allow-insecure-dsn", false,
 		"--migrate-to-postgres: permit a destination DSN weaker than sslmode=verify-full")
+	// TLS material for the front door. It exists because the alternative to a
+	// one-command certificate is an operator turning TLS off, and ADR-0086 §10
+	// is what that costs.
+	createCert := flag.Bool("create-cert", false,
+		"generate the front door's CA and server certificate, and exit")
+	certDir := flag.String("cert-dir", "",
+		"--create-cert: where to write the material (default: a tls/ directory beside the config)")
+	var certHosts hostList
+	flag.Var(&certHosts, "cert-hosts",
+		"--create-cert: names and addresses clients will dial (default: frontdoor.tls_host_names)")
+	certLeafOnly := flag.Bool("leaf-only", false,
+		"--create-cert: reissue the server certificate from the existing CA (no redistribution)")
+	certExportCA := flag.Bool("export-ca", false,
+		"--create-cert: print ca.pem, the one file developers need, and exit")
+	certForce := flag.Bool("force", false,
+		"--create-cert: replace existing CA key material (invalidates every distributed ca.pem)")
 	flag.Parse()
 
-	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *port); err != nil {
+	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *createCert, *port); err != nil {
 		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 		flag.Usage()
 		os.Exit(2)
@@ -83,6 +99,14 @@ func main() {
 	}
 
 	switch {
+	case *createCert:
+		if err := runCreateCert(os.Stdout, *configPath, createCertOpts{
+			dir: *certDir, hosts: certHosts, leafOnly: *certLeafOnly,
+			force: *certForce, exportCA: *certExportCA,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+			os.Exit(1)
+		}
 	case *migrateToPG:
 		if err := runMigrateToPostgres(context.Background(), os.Stdout, migrateOpts{
 			from: *migrateFrom, to: *migrateTo, dryRun: *migrateDry,
@@ -132,7 +156,7 @@ const defaultWebPort = 7010
 // user explicitly passing a flag that will be ignored — would slip through
 // (lector r1 #5 on ADR-0061). flag.CommandLine.Visit reports only what was
 // actually set.
-func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG bool, port int) error {
+func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert bool, port int) error {
 	portSet := false
 	flag.CommandLine.Visit(func(f *flag.Flag) {
 		if f.Name == "port" {
@@ -157,6 +181,40 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG bool, port int) err
 	if len(stray) > 0 {
 		return fmt.Errorf("%s applies to --migrate-to-postgres only", strings.Join(stray, ", "))
 	}
+	// Same rule for the certificate flags, and it matters more here than for
+	// --port: --force outside --create-cert reads as "do the thing anyway",
+	// which is the last impression to leave on a flag that can invalidate
+	// every ca.pem an organisation has handed out.
+	certOnly := []string{"cert-dir", "cert-hosts", "leaf-only", "export-ca", "force"}
+	stray = nil
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		for _, c := range certOnly {
+			if f.Name == c && !createCert {
+				stray = append(stray, "--"+c)
+			}
+		}
+	})
+	if len(stray) > 0 {
+		return fmt.Errorf("%s applies to --create-cert only", strings.Join(stray, ", "))
+	}
+	// --export-ca reads an existing CA and --leaf-only reissues from one.
+	// Together they are two different intentions, and the dispatch would
+	// silently honour whichever is checked first.
+	if createCert {
+		leafOnly, exportCA := false, false
+		flag.CommandLine.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "leaf-only":
+				leafOnly = true
+			case "export-ca":
+				exportCA = true
+			}
+		})
+		if leafOnly && exportCA {
+			return errors.New("--leaf-only issues a new certificate and --export-ca only prints " +
+				"the existing CA; pass one")
+		}
+	}
 	// EXACTLY ONE mode. The dispatch switch tries printEndpoint, serve, ui, web-ui
 	// in that order, so any pairing silently runs whichever comes first — and
 	// --web-ui --print-endpoint printed the endpoint and never served the UI
@@ -167,14 +225,14 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG bool, port int) err
 	// --migrate-to-postgres is counted too, and it matters more than the
 	// others: it is FIRST in the dispatch switch, so an unnoticed
 	// `--migrate-to-postgres --serve` would migrate and never serve.
-	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG} {
+	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG, createCert} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return errors.New("--serve, --ui, --web-ui, --print-endpoint and " +
-			"--migrate-to-postgres are mutually exclusive; pass exactly one")
+		return errors.New("--serve, --ui, --web-ui, --print-endpoint, --migrate-to-postgres " +
+			"and --create-cert are mutually exclusive; pass exactly one")
 	}
 	if webUI {
 		if port <= 0 || port > 65535 {
@@ -968,6 +1026,12 @@ func startPartitionRoll(ctx context.Context, store *meta.Store, onLog func(strin
 	}()
 }
 
+// inodeHold is an open reference that keeps an inode ALLOCATED, so its number
+// cannot be recycled under a successor. Its implementation is per-platform;
+// socketIdentity deliberately has NO release method, so the only code that can
+// drop a hold is withInodeHeld below.
+type inodeHold interface{ release() }
+
 // socketIdentity is what shutdown compares against, and it exists because
 // os.SameFile IS NOT A SOUND IDENTITY FOR A PATH THAT CAN BE RECREATED.
 //
@@ -980,14 +1044,24 @@ func startPartitionRoll(ctx context.Context, store *meta.Store, onLog func(strin
 // actually runs on. The filesystem, not the code, decides whether the bug
 // appears; that is why the suite was green here and red on the test VM.
 //
-// A HARD LINK closes it. A second name for our socket's inode keeps that inode
+// AN OPEN REFERENCE closes it. While a descriptor holds the inode it stays
 // allocated, so its number cannot be handed to a successor, so a successor's
-// socket is GUARANTEED to compare unequal. The pin is removed on the way out,
-// after the comparison it exists to make sound.
+// socket is GUARANTEED to compare unequal.
+//
+// THE FIRST VERSION OF THIS USED A HARD LINK AND CANCELLED ITSELF. The second
+// name was derived from the socket path — sock + ".inode-pin" — so a successor
+// binding the SAME path computed the SAME name and removed the predecessor's
+// link on its way in, under a comment asserting that no live daemon could own
+// it. That premise is true for a CRASHED predecessor and false for a
+// SHUTTING-DOWN one, which is the case this whole path exists for: the
+// guarantee could be revoked, at an arbitrary moment, by the very process it
+// was protecting against. An open descriptor has no name to collide over and
+// the kernel drops it on process exit, including a hard kill; a leftover file
+// had neither property.
 type socketIdentity struct {
-	// pin is the second name for our inode, or "" when the filesystem would
-	// not give us one.
-	pin string
+	// hold keeps our inode allocated, or nil where the platform has no way to
+	// take one.
+	hold inodeHold
 	// stat is the identity of record, captured while we hold the bind.
 	stat os.FileInfo
 }
@@ -998,29 +1072,37 @@ func pinSocket(sock string) (socketIdentity, error) {
 	if err != nil {
 		return socketIdentity{}, err
 	}
-	pin := sock + ".inode-pin"
-	// A leftover from a crashed predecessor. We hold the bind on the socket
-	// itself, so no live daemon owns this name and removing it is safe. The
-	// pin is a hard link, so it carries the socket's own 0600 mode and adds
-	// no exposure of its own.
-	_ = os.Remove(pin)
-	if lerr := os.Link(sock, pin); lerr != nil {
-		// UNPINNABLE. Fall back to the bare stat, which is exactly what
-		// shipped before: sound where inode numbers are not recycled, unsound
-		// where they are. Strictly no worse — and the alternative, declining
-		// to remove our own socket at all, makes the next launch look occupied
+	h, herr := holdInode(sock)
+	if herr != nil {
+		// UNHELD. Fall back to the bare stat, which is exactly what shipped
+		// before: sound where inode numbers are not recycled, unsound where
+		// they are. Strictly no worse — and the alternative, declining to
+		// remove our own socket at all, makes the next launch look occupied
 		// while nothing is listening, which is the failure this whole block
 		// exists to avoid.
 		return socketIdentity{stat: st}, nil
 	}
-	return socketIdentity{pin: pin, stat: st}, nil
+	return socketIdentity{hold: h, stat: st}, nil
 }
 
-// release drops the second name. Called only after the comparison.
-func (id socketIdentity) release() {
-	if id.pin != "" {
-		_ = os.Remove(id.pin)
+// withInodeHeld runs fn with our inode reference held and releases it after.
+//
+// The release lives HERE and nowhere else on purpose. Dropping the hold before
+// the comparison is the one ordering that matters, and no deterministic cell
+// can observe it — losing that race IS the thing under test, so a cell would be
+// flaky in exactly the way the bug is. It used to be a one-line edit inside
+// removeIfStillOurs. Now it requires editing a different function whose entire
+// body is the ordering, which a reader cannot mistake for an incidental change.
+//
+// Not a compile error; nothing within one package can be. But the wrong
+// ordering is no longer something you can write by accident while looking at
+// the comparison, and where an instrument cannot exist, removing the way to get
+// it wrong is worth more than a cell that cannot see it.
+func (id socketIdentity) withInodeHeld(fn func()) {
+	if id.hold != nil {
+		defer id.hold.release()
 	}
+	fn()
 }
 
 // removeIfStillOurs unlinks a socket path only while it is the same file we
@@ -1029,24 +1111,24 @@ func (id socketIdentity) release() {
 // Split out from the defer so the decision is testable: the bug it fixes is
 // invisible to any test that only checks "the file is gone afterwards".
 func removeIfStillOurs(path string, id socketIdentity) {
-	// AFTER the comparison, never before: the pin is what makes the
-	// comparison mean anything.
-	defer id.release()
-	if id.stat == nil {
-		return
-	}
-	now, err := os.Stat(path)
-	if err != nil {
-		// Already gone, or not ours to look at. Either way, not ours to remove.
-		return
-	}
-	if !os.SameFile(id.stat, now) {
-		// A successor bound this path while we were shutting down. Its socket
-		// is a different file wearing our name, and unlinking it would leave a
-		// running daemon that no client can reach.
-		return
-	}
-	_ = os.Remove(path)
+	id.withInodeHeld(func() {
+		if id.stat == nil {
+			return
+		}
+		now, err := os.Stat(path)
+		if err != nil {
+			// Already gone, or not ours to look at. Either way, not ours to
+			// remove.
+			return
+		}
+		if !os.SameFile(id.stat, now) {
+			// A successor bound this path while we were shutting down. Its
+			// socket is a different file wearing our name, and unlinking it
+			// would leave a running daemon that no client can reach.
+			return
+		}
+		_ = os.Remove(path)
+	})
 }
 
 // cleartextBanner is what an operator sees at every start of a front door

@@ -4,7 +4,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 )
 
@@ -129,10 +128,19 @@ func TestSocketPath_TheRealShutdownSequence(t *testing.T) {
 	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
 		t.Error("our own socket survived shutdown")
 	}
-	// And the pin goes with it. A cleanup that left a second socket file
-	// beside the first would trade one piece of litter for another.
-	if _, serr := os.Stat(path + ".inode-pin"); !os.IsNotExist(serr) {
-		t.Error("the inode pin outlived the socket it pinned")
+	// AND NOTHING ELSE IS LEFT IN THE DIRECTORY. The first version of the
+	// hold was a hard link named "<sock>.inode-pin", which a reviewer showed
+	// cancels itself: a successor binding the same path computes the same name
+	// and removes the predecessor's. An on-disk artifact derived from the
+	// socket path is the whole bug, so the cell asserts there is no artifact
+	// at all rather than that this particular name is cleaned up.
+	ents, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	for _, e := range ents {
+		t.Errorf("shutdown left %q beside the socket; an inode hold must have no name on "+
+			"disk, or a successor sharing the path shares the artifact too", e.Name())
 	}
 }
 
@@ -181,16 +189,15 @@ func TestSocketPath_ASuccessorBindingAfterOurCloseSurvives(t *testing.T) {
 	_ = c.Close()
 }
 
-// The pin's MECHANISM, asserted directly rather than through a defect that
+// The hold's MECHANISM, asserted directly rather than through a defect that
 // only some filesystems expose.
 //
-// The behavioural cells above are red on ext4 without the pin and green on
-// tmpfs with or without it — which is precisely how this shipped. So this cell
-// asserts the property that makes them sound wherever they run: while the pin
-// is held, our inode is still ALLOCATED after the socket path is unlinked, and
-// an allocated inode's number cannot be handed to a successor.
-func TestPinSocket_KeepsTheInodeAllocated(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "autodb.sock")
+// The behavioural cells above are red on ext4 without a hold and green on tmpfs
+// with or without one — which is precisely how the original shipped. So this
+// cell asserts the property that makes them sound wherever they run.
+func TestPinSocket_HoldsTheInodeNumber(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "autodb.sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Skipf("unix sockets unavailable here: %v", err)
@@ -198,92 +205,155 @@ func TestPinSocket_KeepsTheInodeAllocated(t *testing.T) {
 	if ul, ok := ln.(*net.UnixListener); ok {
 		ul.SetUnlinkOnClose(false)
 	}
-	t.Cleanup(func() { _ = ln.Close() })
 
 	id, err := pinSocket(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if id.pin == "" {
-		t.Fatal("no pin was taken, so the identity is the unsound stat form — on a " +
+	if id.hold == nil {
+		t.Fatal("no inode hold was taken, so the identity is the unsound stat form — on a " +
 			"filesystem that recycles inode numbers this daemon can delete a successor's socket")
 	}
-	pinned, err := os.Stat(id.pin)
-	if err != nil {
-		t.Fatalf("stat the pin: %v", err)
+	// NO NAME ON DISK. This is the property the hard-link version did not have
+	// and could not have: two processes on one path derived one pin name.
+	ents, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		t.Fatal(rerr)
 	}
-	if !os.SameFile(id.stat, pinned) {
-		t.Fatal("the pin does not name the inode we recorded, so holding it protects nothing")
-	}
-	if nl := nlinkOf(t, id.pin); nl != 2 {
-		t.Fatalf("the socket has %d links, want 2 (itself and the pin)", nl)
+	if len(ents) != 1 || ents[0].Name() != "autodb.sock" {
+		var names []string
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		t.Errorf("taking the hold created something on disk: %v", names)
 	}
 
-	// THE PROPERTY: unlink the socket and the inode survives, held by the pin.
-	// That is what stops its number being recycled under a successor.
+	// THE PROPERTY, on a filesystem that recycles: unlink the socket, let a
+	// successor bind the same path, and the successor must NOT be handed our
+	// inode number while we hold it.
+	//
+	// The cell states which case it is in rather than reporting a pass it did
+	// not earn: where nothing recycles, the second half observes nothing, and
+	// saying so is the difference between evidence and a green tick.
+	ourStat := id.stat
+	_ = ln.Close()
 	if rerr := os.Remove(path); rerr != nil {
 		t.Fatal(rerr)
 	}
-	if nl := nlinkOf(t, id.pin); nl != 1 {
-		t.Fatalf("after unlinking the socket the inode has %d links, want 1", nl)
-	}
-	still, err := os.Stat(id.pin)
+	succ, err := net.Listen("unix", path)
 	if err != nil {
-		t.Fatalf("the pin vanished with the socket, so the inode was freed: %v", err)
+		t.Fatalf("successor could not bind: %v", err)
 	}
-	if !os.SameFile(id.stat, still) {
-		t.Fatal("the pin no longer names our inode")
+	if sul, ok := succ.(*net.UnixListener); ok {
+		sul.SetUnlinkOnClose(false)
 	}
-
-	id.release()
-	if _, serr := os.Stat(id.pin); !os.IsNotExist(serr) {
-		t.Error("release left the pin behind")
-	}
-}
-
-// A stale pin from a crashed predecessor must not stop the next start from
-// taking its own. We hold the bind, so no live daemon owns that name.
-func TestPinSocket_ReplacesAStalePin(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "autodb.sock")
-	ln, err := net.Listen("unix", path)
-	if err != nil {
-		t.Skipf("unix sockets unavailable here: %v", err)
-	}
-	if ul, ok := ln.(*net.UnixListener); ok {
-		ul.SetUnlinkOnClose(false)
-	}
-	t.Cleanup(func() { _ = ln.Close() })
-
-	stale := path + ".inode-pin"
-	if werr := os.WriteFile(stale, []byte("a crashed predecessor's"), 0o600); werr != nil {
-		t.Fatal(werr)
-	}
-	id, err := pinSocket(path)
-	if err != nil {
-		t.Fatalf("a stale pin blocked the start: %v", err)
-	}
-	if id.pin == "" {
-		t.Fatal("a stale pin silently downgraded us to the unsound stat identity")
-	}
-	pinned, serr := os.Stat(id.pin)
+	t.Cleanup(func() { _ = succ.Close() })
+	succStat, serr := os.Stat(path)
 	if serr != nil {
 		t.Fatal(serr)
 	}
-	if !os.SameFile(id.stat, pinned) {
-		t.Fatal("the pin still names the predecessor's file, not our socket")
+	if os.SameFile(ourStat, succStat) {
+		t.Fatal("a successor was handed our inode number while the hold was open; the hold " +
+			"is not holding anything and shutdown can delete the successor's socket")
 	}
-	id.release()
+	if !recyclesInodeNumbers(t) {
+		t.Log("NOTE: this filesystem does not recycle inode numbers, so the assertion above " +
+			"passes without observing anything. It is a real measurement only on ext4 and " +
+			"similar; see validate-the-verifier rule 9.")
+	}
 }
 
-func nlinkOf(t *testing.T, path string) uint64 {
+// recyclesInodeNumbers reports whether THIS filesystem hands a freed inode
+// number straight back — the positive control for every assertion above.
+//
+// It exists so a cell can say "green here, and here cannot see it" instead of
+// "green", which is the distinction the whole socket defect turned on.
+func recyclesInodeNumbers(t *testing.T) bool {
 	t.Helper()
-	fi, err := os.Stat(path)
+	p := filepath.Join(t.TempDir(), "probe")
+	if err := os.WriteFile(p, nil, 0o600); err != nil {
+		return false
+	}
+	a, err := os.Stat(p)
+	if err != nil {
+		return false
+	}
+	if err := os.Remove(p); err != nil {
+		return false
+	}
+	if err := os.WriteFile(p, []byte("successor"), 0o600); err != nil {
+		return false
+	}
+	b, err := os.Stat(p)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(a, b)
+}
+
+// TWO daemons on ONE path must not share an artifact.
+//
+// This is the reviewer's finding as a cell. With a hard link both derived
+// "<sock>.inode-pin" from the path, so the successor's setup destroyed the
+// predecessor's guarantee and the predecessor's teardown destroyed the
+// successor's. An open descriptor is per-process by construction; the cell
+// pins that by holding both at once and releasing one.
+func TestPinSocket_SuccessionDoesNotShareAnArtifact(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "autodb.sock")
+
+	lnA, err := net.Listen("unix", path)
+	if err != nil {
+		t.Skipf("unix sockets unavailable here: %v", err)
+	}
+	lnA.(*net.UnixListener).SetUnlinkOnClose(false)
+	idA, err := pinSocket(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatalf("stat of %s is %T, not a *syscall.Stat_t", path, fi.Sys())
+	if idA.hold == nil {
+		t.Fatal("A took no hold; nothing below is observable")
 	}
-	return uint64(st.Nlink)
+
+	// A stops serving and a successor takes the path, exactly as an immediate
+	// restart does.
+	_ = lnA.Close()
+	if rerr := os.Remove(path); rerr != nil {
+		t.Fatal(rerr)
+	}
+	lnB, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("successor could not bind: %v", err)
+	}
+	lnB.(*net.UnixListener).SetUnlinkOnClose(false)
+	t.Cleanup(func() { _ = lnB.Close() })
+	idB, err := pinSocket(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idB.hold == nil {
+		t.Fatal("B took no hold — a successor's setup must not be affected by a predecessor")
+	}
+
+	// B's arrival did not disturb A's identity, and A's shutdown does not
+	// disturb B's socket.
+	if os.SameFile(idA.stat, idB.stat) && recyclesInodeNumbers(t) {
+		t.Error("A and B have the same identity while A still holds its inode")
+	}
+	removeIfStillOurs(path, idA)
+	if _, serr := os.Stat(path); serr != nil {
+		t.Fatal("A's shutdown deleted the SUCCESSOR's socket")
+	}
+	c, derr := net.Dial("unix", path)
+	if derr != nil {
+		t.Fatalf("the successor's socket is present but not dialable: %v", derr)
+	}
+	_ = c.Close()
+
+	// And B is still whole: its own shutdown must still be able to identify
+	// its socket, which the shared-name version destroyed.
+	removeIfStillOurs(path, idB)
+	if _, serr := os.Stat(path); !os.IsNotExist(serr) {
+		t.Error("B could no longer identify its own socket at shutdown")
+	}
 }
