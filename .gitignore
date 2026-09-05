@@ -20,3 +20,6 @@ go.work.sum
 # create its server socket. A test artifact, never source. auto-core already
 # ignores this; autodb did not, so a suite run left the tree dirty.
 nvim.log
+
+# autodb-test.sh per-run logs and ledgers (see shared/playbooks/autodb-test-harness.md)
+.autodb-test-logs/
