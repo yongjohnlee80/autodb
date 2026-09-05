@@ -71,7 +71,7 @@ func pgWireSession(t *testing.T) (f *fixture, connID int64, sid SessionID, pat *
 	// every cell below vacuous.
 	var newPAT auth.NewPAT
 	for range 16 {
-		newPAT, err = f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("wire-standing-%d", time.Now().UnixNano()), f.connID, 0, nil)
+		newPAT, err = f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("wire-standing-%d", time.Now().UnixNano()), connID, 0, nil)
 		if err != nil {
 			t.Fatalf("CreatePAT: %v", err)
 		}
