@@ -82,7 +82,7 @@ func FuzzS0(f *testing.F) {
 		go func() {
 			defer close(done)
 			defer func() { _ = server.Close() }()
-			secure, _, _ := runStartup(server, cfg, time.Now, fuzzDeadlines)
+			secure, _, _ := runStartup(server, cfg, false, time.Now, fuzzDeadlines)
 			if secure != nil {
 				_ = secure.Close()
 			}
