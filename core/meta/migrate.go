@@ -67,7 +67,7 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					ConnDSNEnc: nb(r.DSNEnc), ConnCreatedBy: r.CreatedBy,
 					ConnCreatedAt: r.CreatedAt, ConnUpdatedAt: r.UpdatedAt,
 					ConnProfile: r.Profile, ConnDebug: r.Debug,
-					ConnPoolMaxConns: r.PoolMaxConns}
+					ConnPoolMaxConns: r.PoolMaxConns, ConnTargetDB: r.TargetDB}
 			})
 		}},
 		{"workspaces", func() (int64, error) {
@@ -164,6 +164,7 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					PATUserID: r.UserID, PATName: r.Name, PATAllowedIPs: r.AllowedIPs,
 					PATCreatedAt: r.CreatedAt, PATExpiresAt: r.ExpiresAt,
 					PATLastUsedAt: r.LastUsedAt, PATRevoked: r.Revoked,
+					PATConnID: r.ConnID, PATDebugCleartext: r.DebugCleartext,
 				}
 			})
 		}},
