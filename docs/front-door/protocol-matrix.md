@@ -178,7 +178,7 @@ synthesized by the front door never impersonate the target: `S` (severity),
 `fd.conn_open`, `fd.tls_ok`, `fd.auth_ok`, `fd.auth_denied` (uniform;
 internal reason recorded, wire reason generic), `fd.session_open` /
 `fd.session_close` (with ExecSession id), `fd.stmt_attempt` (before every
-effect — extended: at every `Execute`; ⚠ **NOT IMPLEMENTED** — see note 1.3a),
+effect — extended: at every `Execute`; ⚠ **event never emitted** — the durable record exists; see note 1.3a),
 `fd.stmt_outcome`, `fd.refused`
 (gate rule id), `fd.cancel_received` / `fd.cancel_applied` /
 `fd.cancel_stale`, `fd.backpressure_enter` / `fd.backpressure_exit`,
@@ -191,30 +191,40 @@ connection, so `fd.conn_open` is absent for them by construction),
 inherited from core: **no target-visible effect without a prior durable
 attempt record.**
 
-**Note 1.3a — `fd.stmt_attempt` is contracted here and emitted nowhere.**
-Measured at `f4-conformance-cells` (jarvis, 2026-09-05; verified independently
-by gold-man): **4 mentions in this document, 0 emissions in production code.**
-Only `fd.stmt_outcome` is emitted, at `frontdoor/session_loop.go:672`.
+**Note 1.3a — `fd.stmt_attempt` names an EVENT that is never emitted; the
+attempt RECORD it stands for does exist.** Corrected 2026-09-05 — the first
+version of this note overstated the gap as a missing audit trail. It is not.
 
-Two costs, and the second is the larger one:
+What is true:
 
-- **The audit gap.** Attempt-before-effect is the record that says an execution
-  was *tried*. It is what an investigation needs precisely when the outcome row
-  is absent — because something crashed between the attempt and the outcome.
-  Without it, a crash mid-effect leaves no trace that the effect was begun.
-- **This document currently makes a claim that is false.** An investigator
-  reading the matrix to find out what an execution left behind will look for a
-  row that has never existed, and may conclude the execution did not happen.
+- **The durable attempt-before-effect record EXISTS, per Execute, on every
+  path.** `recordAttemptTagged` writes an `exec` audit row plus a pending
+  history row *before* the statement is dispatched — `wire_query.go:348/367/398`
+  (simple), `wire_execute.go:285` (fast path), and `wire_extended.go:682`
+  inside `WireExecutePortal`, whose own comment reads *"A fresh attempt precedes
+  every effect, so a repeated Execute of one portal is a repeated row in the
+  history rather than one row covering several executions."* This is the
+  "inherited from core" clause below, and it is honoured.
+- **The front-door EVENT named `fd.stmt_attempt` is emitted nowhere.** The
+  listener's `OnEvent` feed (`Options.OnEvent`) carries `fd.stmt_outcome`
+  (`session_loop.go:672`) and no attempt counterpart. That feed is a separate
+  sink from the audit table — operational/streaming rather than durable.
 
-Matrix row `4:Execute` is held `awaiting` in the suite's own coverage triage
-(`frontdoor/matrix_coverage_test.go`) for exactly this reason, and **must not be
-promoted by anything except the emission landing**. Its other contracted half —
-authority re-resolved at every `Execute`, portal re-executions included — *is*
-witnessed (`TestPGF4_AuthorityIsReresolvedAtAPortalResumption`).
+So the cost is narrower than first reported: an operator watching the
+front-door event stream sees outcomes without attempts and cannot correlate the
+two live, and this document names an event that stream does not carry. **An
+investigation is not blind** — the durable record is in `audit_log` and
+`history`.
 
-**Open decision (Johno):** implement the event, or narrow the contract. This
-annotation stops the document asserting an emission that does not exist in the
-meantime; it is not a decision about which way that goes.
+Matrix row `4:Execute` is held `awaiting` in the suite's coverage triage
+(`frontdoor/matrix_coverage_test.go`) because the contracted *event* has no
+witness. Its other half — authority re-resolved at every `Execute`, portal
+re-executions included — *is* witnessed
+(`TestPGF4_AuthorityIsReresolvedAtAPortalResumption`).
+
+**Open decision (Johno):** emit `fd.stmt_attempt` on the front-door feed, or
+drop it from this vocabulary and let `fd.stmt_outcome` plus the core record
+stand. Low stakes either way.
 
 ### 1.4 Memory budget lanes (lector matrix-acceptance criterion 1)
 
@@ -574,11 +584,11 @@ is read (criterion 3); oversized declared length refuses before any read.
 
 | Message | States | Decision | Gating | Charge | Audit | Refusal / notes |
 |---|---|---|---|---|---|---|
-| `Query` (simple) | S4-I/T/E | **Mapped: PostgreSQL implicit-transaction semantics** (MF2). Statements split and run in order; each individually classified/authorized/guarded; first error (gate or target) aborts the block, rolls back its earlier statements. Explicit `BEGIN`/`COMMIT` inside the buffer per PostgreSQL implicit-block rules (ExecSession state transitions, never passthrough). In S4-E: recovery controls only. | classify+authorize+guard per statement; attempt-before-effect per statement | general, hdr-first; output via pending-output watermark | `fd.stmt_attempt` (⚠ not implemented, note 1.3a)/`fd.stmt_outcome` per statement | Empty query → `EmptyQueryResponse` + `ReadyForQuery` (control lane). |
-| `Parse` | S4-I/T (opens S5) | **Native pinned-conn** (ADR MF3). Gated at Parse: classifier + profile + grants, with **immutable classification/guard metadata attached** to the statement. Retained capacity is **reserved BEFORE the Parse is forwarded**. Reservation order and the refused classes: **note 4-Parse** below. | classify+authorize at Parse | general, hdr-first + stage-2 delta; retained **reserved pre-forward**, finalized at `ParseComplete` | `fd.stmt_attempt` (parse-time gate) — ⚠ not implemented, note 1.3a | Refused classes refuse **at Parse** with §8a; segment then discards through `Sync`. Reservation failure → `53400`, nothing forwarded. |
+| `Query` (simple) | S4-I/T/E | **Mapped: PostgreSQL implicit-transaction semantics** (MF2). Statements split and run in order; each individually classified/authorized/guarded; first error (gate or target) aborts the block, rolls back its earlier statements. Explicit `BEGIN`/`COMMIT` inside the buffer per PostgreSQL implicit-block rules (ExecSession state transitions, never passthrough). In S4-E: recovery controls only. | classify+authorize+guard per statement; attempt-before-effect per statement | general, hdr-first; output via pending-output watermark | `fd.stmt_attempt` (⚠ event never emitted, note 1.3a)/`fd.stmt_outcome` per statement | Empty query → `EmptyQueryResponse` + `ReadyForQuery` (control lane). |
+| `Parse` | S4-I/T (opens S5) | **Native pinned-conn** (ADR MF3). Gated at Parse: classifier + profile + grants, with **immutable classification/guard metadata attached** to the statement. Retained capacity is **reserved BEFORE the Parse is forwarded**. Reservation order and the refused classes: **note 4-Parse** below. | classify+authorize at Parse | general, hdr-first + stage-2 delta; retained **reserved pre-forward**, finalized at `ParseComplete` | `fd.stmt_attempt` (parse-time gate) — ⚠ event never emitted, note 1.3a | Refused classes refuse **at Parse** with §8a; segment then discards through `Sync`. Reservation failure → `53400`, nothing forwarded. |
 | `Bind` | S5 | Native: raw parameter formats/values and per-column result formats preserved bit-for-bit to the pinned conn. ≤ 8192 params. **Portal retained capacity reserved BEFORE forwarding**, finalized at `BindComplete`, released on error. | none (authority is at Parse + Execute) | general, hdr-first + stage-2 delta (param array pre-allocation); retained reserved pre-forward | — | Param-count/size over limits → §8a refuse, discard-through-Sync. |
 | `Describe` (`S`/`P`) | S5 | Native passthrough: `ParameterDescription` + `RowDescription`/`NoData` from the pinned conn (Describe-before-Execute metadata preserved). | none | control-sized (general lane) | — | Unknown name → target's error verbatim. |
-| `Execute` | S5 | Native, **with Execute-time authority** (MF1): authority re-resolved + re-authorized at **every** Execute (portal re-executions included); fresh `fd.stmt_attempt` precedes every effect (⚠ not implemented — note 1.3a). Portal `maxRows` honored; `PortalSuspended` preserved; suspended portal buffers charge retained state. | re-authorize per Execute | general; output watermark; suspended buffers → retained | `fd.stmt_attempt` (⚠ not implemented, note 1.3a)/`fd.stmt_outcome` per Execute | Grant revoked between Parse and Execute → §8a refuse at Execute (tested per ADR). |
+| `Execute` | S5 | Native, **with Execute-time authority** (MF1): authority re-resolved + re-authorized at **every** Execute (portal re-executions included); fresh `fd.stmt_attempt` precedes every effect (⚠ event never emitted — note 1.3a). Portal `maxRows` honored; `PortalSuspended` preserved; suspended portal buffers charge retained state. | re-authorize per Execute | general; output watermark; suspended buffers → retained | `fd.stmt_attempt` (⚠ event never emitted, note 1.3a)/`fd.stmt_outcome` per Execute | Grant revoked between Parse and Execute → §8a refuse at Execute (tested per ADR). |
 | `Close` (`S`/`P`) | S4/S5 (healthy) | Native; **releases** the named statement's/portal's retained charge, and closing a prepared statement **cascades to its portals** (§4a). Intake is control-lane-sized so saturation cannot block release — but during post-error discard it is discarded like everything else. Why, and how release still happens: **note 4-Close** below. | none | **control lane** | — | — |
 | `Flush` | S5 | Native passthrough to output pump. Discarded during post-error discard. | none | **control lane** | — | — |
 | `Sync` | S4/S5 | Native: closes the segment, resets its counters (10 000 msgs / 96 MiB), emits `ReadyForQuery` from the ExecSession state machine, ends post-error discard, releases the discarded segment's charges — and **destroys the objects that segment never confirmed**. Why a phantom object is worse than none: **note 4-Sync** below. | none | **control lane** | — | Always admissible, even at budget saturation (criterion 1). |
