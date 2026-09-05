@@ -68,11 +68,26 @@ survives past the idle-in-transaction bound against the real 30-minute budget.
 While iterating, skip the real-time budget tests:
 
 ```bash
-autodb-test.sh run --worktree . --short      # 43s instead of 131s
+autodb-test.sh all --worktree . --short      # 43s instead of 131s
 ```
+
+**Use `all`, not a bare `run`.** `run` does not recreate the review database —
+so the second bare `run` is back on a dirty one, and tests that bootstrap the
+meta store start skipping again. The ledger will tell you
+(`DB_STATE: REUSED …`, and a nonzero `HARNESS_EXIT`), but `all` avoids it.
 
 The ledger stamps `MODE: -short` and says it is not for a reviewer — a run that
 skips those tests has not tested them.
+
+## The review database is recreated each run
+
+`setup` drops and recreates `<worktree>-test` every time. That is deliberate
+and it is not what the LabelManager harness does: some autodb tests bootstrap
+the meta store **into** the review database, so on a reused database they skip
+with *"store already bootstrapped"* — while the suite still reports green.
+Reusing the DB silently cost coverage on every run after the first.
+
+`--reuse-db` opts out and warns. You almost certainly do not want it.
 
 ## Why not just `go test ./...`
 
@@ -82,10 +97,21 @@ looks**. With `TEST_PGURL` unset the suite skips **217 tests** and still exits
 (`.github/workflows/ci.yml`), so **a CI green and a local green are different
 signals**.
 
+The ledger also names every skipped test:
+
+```
+SKIPPED: [TestCorpusReplay, TestParseTxControl_CorpusRoundTrip]
+```
+
+Those two are legitimate environment fixtures — both gate on
+`AUTODB_CORPUS_DIR` (the un-vendored production schema corpus) and neither
+touches the database. Anything **else** in that list is worth reading, because
+a skip-count threshold cannot see a single test quietly dropping out.
+
 The ledger says which you have:
 
 ```
-LIVE_PG: 991 passed / 3 skipped (whole suite, from the -v run)
+LIVE_PG: 992 passed / 2 skipped (whole suite, from the -v run)
 ```
 
 and warns, with a nonzero exit, when the skipped count says the live half
@@ -130,10 +156,12 @@ attempt under `NOT ATTEMPTED`, so a green here is never read as a green there.
 | flag | instance |
 |---|---|
 | `--target local` (default) | `autodb-r3-pg` on `127.0.0.1:55437` |
-| `--target vm43` | `autodb-r3-pg` on `192.168.68.43:55438` — **EXPERIMENTAL, never validated end to end** (and until rev 4 it carried the wrong credentials entirely) |
+| `--target vm43` | `autodb-r3-pg` on `192.168.68.43:55438` — validated 2026-09-06; destructive verbs need an opt-in |
 
-**vm43 is experimental.** Verbs that create or drop databases on it require an
-explicit opt-in, because that path has never been validated end to end:
+**vm43 needs an explicit opt-in for destructive verbs.** Not because it is
+unproven — it was validated end to end on 2026-09-06 — but because **that host
+also runs production** (`lm-omni-db` on :5432). A deliberate speed-bump before
+a remote create-or-drop:
 
 ```bash
 autodb-test.sh verify --target vm43                    # read-only, do this first
@@ -142,8 +170,9 @@ AUTODB_ALLOW_VM43_DESTRUCTIVE=1 autodb-test.sh all --worktree . --target vm43
 
 Read-only verbs are deliberately not gated — `verify` and `provision` are how
 you establish whether the endpoint is safe, so gating them would make the safe
-path harder than the destructive one. If you do run it end to end, record the
-outcome in the playbook so the next person doesn't have to.
+path harder than the destructive one. The endpoint pairing and the forbidden-database probe protect the *endpoint*;
+neither protects against aiming at the wrong host, which is what the opt-in is
+for.
 
 **`lm-omni-db` is production and is never a test target.** `lm-test-db` on
 5432 is not one either. The harness refuses both by name and never falls back
