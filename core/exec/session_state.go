@@ -281,10 +281,20 @@ var parsingGUCs = grammarGUCsExcept("search_path")
 
 // grammarGUCsExcept returns grammarGUCs without the named settings.
 //
-// The exclusions are checked against the source set by
-// TestEveryGrammarGUCExclusionNamesARealSetting: an exclusion that names
-// something grammarGUCs no longer contains subtracts nothing, which reads as a
-// deliberate carve-out and is actually a leftover.
+// It does NOT validate the exclusions — an earlier version of this comment said
+// it did, by pointing at a test, which is a claim about a second artefact that
+// the function itself cannot keep. Naming a setting grammarGUCs does not
+// contain subtracts nothing and reads as a deliberate carve-out; naming one
+// twice is redundant. Both are caught by
+// TestEveryGrammarGUCExclusionNamesARealSetting, which asserts EXACT
+// membership rather than cardinality, and neither is prevented here.
+//
+// The copy is taken once, at package initialisation. That is why the
+// bidirectional membership guard below still exists: deriving the set removes
+// ordinary two-literal drift, it does NOT make the relation immutable. Both
+// maps are package-level and mutable, and a later write to either one — or a
+// regression in this helper that preserves cardinality — puts them back out of
+// step. (lector, #89 r0.)
 func grammarGUCsExcept(exclude ...string) map[string]bool {
 	skip := make(map[string]bool, len(exclude))
 	for _, name := range exclude {

@@ -80,77 +80,136 @@ func TestParseReset_AndAdmitWireReset(t *testing.T) {
 	}
 }
 
-// THE TWO LISTS ARE NOW ONE LIST, and the guard that proved it has been
-// replaced by the derivation it was guarding.
+// THE RELATION IS DERIVED AND STILL GUARDED, and the second half of that
+// sentence is the one I got wrong first.
 //
 // parsingGUCs used to be a second hand-maintained literal holding six of
 // grammarGUCs' seven names, with a comment as the only thing claiming the
-// relation. The both-directions cell that lived here caught a divergence; it
-// could not prevent one. parsingGUCs is now grammarGUCsExcept("search_path"),
-// so the divergence is not detectable because it is not constructible, and
-// re-asserting the relation would be a test that the language already
-// enforces.
+// relation. It is now grammarGUCsExcept("search_path"). I deleted this cell on
+// the grounds that the divergence was no longer constructible. IT IS. Both maps
+// are package-level and MUTABLE, the copy is taken once at initialisation, and
+// a later write to either — or a regression in the helper that preserves
+// cardinality — puts them back out of step with nothing to say so. Deriving
+// removes ordinary two-literal drift. It does not make the relation immutable,
+// and ADR-0088 C1 requires this guard to stay. (lector, #89 r0.)
 //
-// WHAT IS STILL ASSUMABLE, and therefore what is guarded now: that the
-// exclusion names a setting grammarGUCs actually contains. An exclusion for a
-// name that has since been removed from grammarGUCs subtracts nothing while
-// reading like a deliberate carve-out, which is the same class of silent
-// staleness one layer up.
+// grammarGUCs governs the POOLED path (classifySet) and parsingGUCs the WIRE
+// denylist, so a name in only one of them is a setting refused as a statement
+// and admitted through the front door.
 //
 // (The original divergence was found by a MIS-AIMED mutation: dropping
 // backslash_quote from grammarGUCs left the front-door both-doors cell green,
-// because the wire path never reads that list. The miss is what showed the
-// gap.)
+// because the wire path never reads that list. The miss is what showed the gap.)
+func TestParsingGUCsIsGrammarGUCsMinusSearchPath(t *testing.T) {
+	t.Parallel()
+	for name := range grammarGUCs {
+		if name == "search_path" {
+			if parsingGUCs[name] {
+				t.Errorf("search_path is in parsingGUCs; it changes name RESOLUTION, not parsing, "+
+					"and is a reader concern (readerGUCs) — the derivation excludes it: %v", parsingGUCs)
+			}
+			continue
+		}
+		if !parsingGUCs[name] {
+			t.Errorf("%q is banned on the pooled path (grammarGUCs) but not on the wire "+
+				"denylist (parsingGUCs). The two are documented as one list minus search_path; "+
+				"a name in only one of them is a setting refused as a statement and admitted "+
+				"through the front door", name)
+		}
+	}
+	for name := range parsingGUCs {
+		if !grammarGUCs[name] {
+			t.Errorf("%q is on the wire denylist (parsingGUCs) but not banned on the pooled "+
+				"path (grammarGUCs) — the same divergence in the other direction", name)
+		}
+	}
+}
+
+// What is still assumable ON TOP of the relation: that the exclusion names a
+// setting grammarGUCs actually contains. An exclusion for a name since removed
+// subtracts nothing while reading like a deliberate carve-out.
+//
+// EXACT MEMBERSHIP, NOT CARDINALITY. The first version of this cell compared
+// sizes, and a helper that dropped a DIFFERENT key while preserving the count
+// passed it. Asking "is the size right" answers a question nobody had.
 func TestEveryGrammarGUCExclusionNamesARealSetting(t *testing.T) {
 	t.Parallel()
-	// The one exclusion parsingGUCs is derived with. Stated here rather than
-	// read back out of the derivation, or the cell would be comparing the
-	// derivation to itself.
+	// The one exclusion parsingGUCs is derived with. Written out rather than
+	// read back from the derivation, or the cell would compare it to itself.
 	const exclusion = "search_path"
 
+	if len(grammarGUCs) < 2 {
+		t.Fatalf("grammarGUCs has %d entries; with fewer than two every assertion "+
+			"below holds vacuously", len(grammarGUCs))
+	}
 	if !grammarGUCs[exclusion] {
 		t.Fatalf("parsingGUCs excludes %q, but grammarGUCs does not contain it — the "+
 			"exclusion subtracts nothing and reads as a carve-out that is actually a "+
 			"leftover. grammarGUCs = %v", exclusion, grammarGUCs)
 	}
-	if parsingGUCs[exclusion] {
-		t.Fatalf("%q survived the exclusion", exclusion)
+	want := map[string]bool{}
+	for name := range grammarGUCs {
+		if name != exclusion {
+			want[name] = true
+		}
 	}
-	if len(parsingGUCs) != len(grammarGUCs)-1 {
-		t.Fatalf("parsingGUCs has %d entries and grammarGUCs %d; exactly one name is "+
-			"excluded, so the sizes must differ by one", len(parsingGUCs), len(grammarGUCs))
-	}
-	// A derivation from an EMPTY source set would satisfy every assertion above
-	// except this one.
-	if len(grammarGUCs) < 2 {
-		t.Fatalf("grammarGUCs has %d entries; with fewer than two the assertions "+
-			"above hold vacuously", len(grammarGUCs))
-	}
+	assertSameSet(t, "parsingGUCs", parsingGUCs, want)
 }
 
-// grammarGUCsExcept must subtract, and must subtract only what it is told to.
+// grammarGUCsExcept must return exactly the source minus its arguments.
 func TestGrammarGUCsExceptSubtractsExactlyItsArguments(t *testing.T) {
 	t.Parallel()
-	all := grammarGUCsExcept()
-	if len(all) != len(grammarGUCs) {
-		t.Fatalf("with no exclusions the result has %d of %d entries", len(all), len(grammarGUCs))
+	minus := func(names ...string) map[string]bool {
+		skip := map[string]bool{}
+		for _, n := range names {
+			skip[n] = true
+		}
+		out := map[string]bool{}
+		for n := range grammarGUCs {
+			if !skip[n] {
+				out[n] = true
+			}
+		}
+		return out
 	}
-	two := grammarGUCsExcept("search_path", "sql_mode")
-	if len(two) != len(grammarGUCs)-2 {
-		t.Fatalf("two exclusions removed %d names", len(grammarGUCs)-len(two))
-	}
-	// Excluding a name that is not in the source set must not remove a
-	// different one.
-	noop := grammarGUCsExcept("not_a_setting")
-	if len(noop) != len(grammarGUCs) {
-		t.Fatalf("excluding an absent name changed the size: %d of %d",
-			len(noop), len(grammarGUCs))
-	}
+
+	assertSameSet(t, "grammarGUCsExcept()", grammarGUCsExcept(), minus())
+	assertSameSet(t, `grammarGUCsExcept("search_path")`,
+		grammarGUCsExcept("search_path"), minus("search_path"))
+	assertSameSet(t, `grammarGUCsExcept("search_path", "sql_mode")`,
+		grammarGUCsExcept("search_path", "sql_mode"), minus("search_path", "sql_mode"))
+	// An exclusion naming something absent must remove nothing — not "must keep
+	// the count", which a helper dropping some other key also satisfies.
+	assertSameSet(t, `grammarGUCsExcept("not_a_setting")`,
+		grammarGUCsExcept("not_a_setting"), minus())
+	// Naming one twice is redundant, not a double subtraction.
+	assertSameSet(t, `grammarGUCsExcept("sql_mode", "sql_mode")`,
+		grammarGUCsExcept("sql_mode", "sql_mode"), minus("sql_mode"))
+
 	// The returned map must not be the source map: a caller mutating it would
 	// change the pooled-path ban for the whole process.
+	all := grammarGUCsExcept()
 	all["injected"] = true
 	if grammarGUCs["injected"] {
 		t.Fatal("grammarGUCsExcept returned the source map itself; a caller's write " +
 			"changed the pooled-path denylist")
+	}
+}
+
+// assertSameSet compares two sets by MEMBERSHIP and reports both directions.
+func assertSameSet(t *testing.T, what string, got, want map[string]bool) {
+	t.Helper()
+	if len(want) == 0 {
+		t.Fatalf("%s: the expected set is empty, so every comparison holds vacuously", what)
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("%s is missing %q", what, name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("%s contains %q, which the source set minus its exclusions does not", what, name)
+		}
 	}
 }
