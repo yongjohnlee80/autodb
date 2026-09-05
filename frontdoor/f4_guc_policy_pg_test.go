@@ -47,7 +47,8 @@ import (
 // the same name from grammarGUCs changed nothing here. grammarGUCs governs the
 // POOLED path and parsingGUCs the wire denylist, and the two are documented as
 // one list minus search_path with nothing enforcing it — now guarded by
-// TestParsingGUCsIsGrammarGUCsMinusSearchPath in core/exec.
+// TestParsingGUCsIsGrammarGUCsMinusSearchPath in core/exec, which now guards a
+// DERIVED set rather than a second literal.
 func TestPGF4_TheSameAdmissionAnswersStartupAndSET(t *testing.T) {
 	l := pgLoopFull(t)
 
