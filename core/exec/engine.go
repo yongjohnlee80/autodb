@@ -662,12 +662,12 @@ func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID 
 // wire producer uses it to record a statement that RAN and was then discarded
 // by the target's implicit-transaction rollback as StatusRolledBack — neither
 // ok (its effect is gone) nor error (it did not fail).
-func (e *Engine) writeOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status, errText, txID string) error {
+func (e *Engine) writeOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status HistStatus, errText, txID string) error {
 	return e.writeOutcomeTagged(ctx, ident, connID, ip, histID, dur, rows, status, errText, txID, "")
 }
 
 // writeOutcomeTagged is writeOutcome with the session tag on the audit line.
-func (e *Engine) writeOutcomeTagged(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status, errText, txID, tag string) error {
+func (e *Engine) writeOutcomeTagged(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status HistStatus, errText, txID, tag string) error {
 	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.auth.AuditTxCorrelated(tx, ident.UserID(), ip, "exec_result",
 			fmt.Sprintf("conn %d (%s, %d row(s), %dms)%s%s", connID, status, rows, dur.Milliseconds(),

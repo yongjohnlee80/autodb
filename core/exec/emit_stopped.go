@@ -48,7 +48,7 @@ type EmitStopped struct {
 	TxStatus byte
 	// Outcome is the status RECORDED in the statement's outcome row: StatusOK,
 	// StatusPendingCommit, StatusError, StatusRolledBack or StatusUnresolvable.
-	Outcome string
+	Outcome HistStatus
 	// Executed reports that a statement had been dispatched to the target
 	// before the stop. False only for the EMPTY query, whose one frame
 	// (EmptyQueryResponse) is not a statement: then Outcome is empty and there
@@ -142,7 +142,7 @@ func txStatusWord(b byte) string {
 
 // emitStopped builds the EmitStopped for a statement whose frames were cut,
 // reading the session's transaction track the way the loop's readiness would.
-func (e *Engine) emitStopped(s *session, cause error, outcome string, executed bool, targetErr *pgconn.PgError) error {
+func (e *Engine) emitStopped(s *session, cause error, outcome HistStatus, executed bool, targetErr *pgconn.PgError) error {
 	st, _ := s.wireTxStatus()
 	return &EmitStopped{Cause: cause, TxStatus: st, Outcome: outcome, Executed: executed, TargetErr: targetErr}
 }
@@ -157,7 +157,7 @@ func (e *Engine) emitStopped(s *session, cause error, outcome string, executed b
 // Arm() then falls through to ArmUnresolved instead of letting a stale
 // in-transaction byte outrank an unresolved outcome and promise a client that
 // effects are still pending when the target has already aborted them.
-func (e *Engine) emitStoppedWithStatus(cause error, outcome string, executed bool,
+func (e *Engine) emitStoppedWithStatus(cause error, outcome HistStatus, executed bool,
 	targetErr *pgconn.PgError, status byte) error {
 
 	return &EmitStopped{Cause: cause, TxStatus: status, Outcome: outcome, Executed: executed, TargetErr: targetErr}

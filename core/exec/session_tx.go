@@ -400,20 +400,59 @@ func (e *Engine) commitBoundary(
 		txID: txID, state: txStateFor(outcome, err), reason: txOutcomeReason(outcome, err),
 		userID: ident.UserID(), connectionID: s.connID, targetXID: targetXID,
 	})
-	return outcome, err
+	return string(outcome), err
 }
 
 // finalize runs the commit or rollback and classifies the outcome for the
 // audit trail, mapping golib's sentinels onto the states ADR-0074 §7 names.
-func (e *Engine) finalize(ctx context.Context, s *session, tx dao.ContextTxConn, commit bool) (string, error) {
+// FinalizeOutcome is what the commit-or-rollback attempt OBSERVED at the
+// transaction boundary.
+//
+// A THIRD VOCABULARY, and it is neither of the other two. meta.TxState says
+// what happened to the TRANSACTION; exec.HistStatus says what one STATEMENT'S
+// ROW records; this says what the attempt itself returned. All three contain
+// "rolled_back" — the word is true of a transaction, of a statement, and of a
+// rollback attempt — and that shared spelling is the whole reason these are
+// separate types. See docs/reference/vocabularies.md.
+//
+// It is NOT persisted. It exists to carry one observation from finalize to
+// txStateFor and txOutcomeReason, which are the seam that turns it into a
+// meta.TxState. Two of its values, rollback_failed and commit_failed, have no
+// TxState of their own at all: txStateFor DECIDES which state they become, and
+// that decision is the reason this cannot simply be a TxState.
+type FinalizeOutcome string
+
+const (
+	// FinalizeCommitted — COMMIT returned success.
+	FinalizeCommitted FinalizeOutcome = "committed"
+	// FinalizeRolledBack — ROLLBACK returned success.
+	FinalizeRolledBack FinalizeOutcome = "rolled_back"
+	// FinalizeRollbackFailed — the ROLLBACK itself failed.
+	FinalizeRollbackFailed FinalizeOutcome = "rollback_failed"
+	// FinalizeUnknownPending — the server did not answer the COMMIT.
+	FinalizeUnknownPending FinalizeOutcome = "unknown_pending"
+	// FinalizeCommitFailed — COMMIT returned an error.
+	FinalizeCommitFailed FinalizeOutcome = "commit_failed"
+)
+
+// FinalizeOutcomes lists every value, in a stable order, for the
+// exhaustiveness cells.
+func FinalizeOutcomes() []FinalizeOutcome {
+	return []FinalizeOutcome{
+		FinalizeCommitted, FinalizeRolledBack, FinalizeRollbackFailed,
+		FinalizeUnknownPending, FinalizeCommitFailed,
+	}
+}
+
+func (e *Engine) finalize(ctx context.Context, s *session, tx dao.ContextTxConn, commit bool) (FinalizeOutcome, error) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
 	defer cancel()
 
 	if !commit {
 		if err := tx.RollbackContext(cctx); err != nil {
-			return "rollback_failed", err
+			return FinalizeRollbackFailed, err
 		}
-		return "rolled_back", nil
+		return FinalizeRolledBack, nil
 	}
 	err := tx.CommitContext(cctx)
 	// The target has answered (or failed to). Fired here, from the primitive
@@ -422,15 +461,15 @@ func (e *Engine) finalize(ctx context.Context, s *session, tx dao.ContextTxConn,
 	boundaryReached(boundaryCommitReturned)
 	switch {
 	case err == nil:
-		return "committed", nil
+		return FinalizeCommitted, nil
 	case errors.Is(err, dao.ErrTxRolledBack):
 		// Definitely not applied. Safe to report as such.
-		return "rolled_back", err
+		return FinalizeRolledBack, err
 	case errors.Is(err, dao.ErrTxOutcomeUnknown):
 		// The COMMIT may have reached the server. This is the one outcome
 		// that must never be reported as either applied or not — it is
 		// recorded nonterminal and reconciled out of band.
-		return "unknown_pending", err
+		return FinalizeUnknownPending, err
 	}
 	// Everything else stays commit_failed, deliberately UNCLASSIFIED here.
 	//
@@ -439,7 +478,7 @@ func (e *Engine) finalize(ctx context.Context, s *session, tx dao.ContextTxConn,
 	// not to this function (ultron-prime, R4/R5 seam, A5 plumbing). The error
 	// is already returned alongside the word, so it crosses the seam as data
 	// and txStateFor does the split.
-	return "commit_failed", err
+	return FinalizeCommitFailed, err
 }
 
 // noteStatementOutcome moves the session into the aborted phase when the

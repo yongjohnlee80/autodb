@@ -609,7 +609,7 @@ func TestWireQueryRaw_EmitterFailureNeverRecordsTheUnobservedTailAsOK(t *testing
 		t.Fatalf("count = %v err %v, want 0 (the target rolled the implicit block back)", out.Rows, err)
 	}
 	h = histRows(t, f, connID, ins, "SELECT 2/0", "INSERT INTO "+table+" VALUES (2)")
-	for i, want := range []string{StatusUnresolvable, StatusUnresolvable, StatusUnresolvable} {
+	for i, want := range []HistStatus{StatusUnresolvable, StatusUnresolvable, StatusUnresolvable} {
 		if h[i].Status != want {
 			t.Fatalf("implicit block after emitter failure: statement %d recorded %q/%q, want %s — the engine did not observe its fate and must not claim ok", i, h[i].Status, h[i].Error, want)
 		}

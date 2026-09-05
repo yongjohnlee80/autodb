@@ -218,7 +218,7 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 	rerr := tx.RollbackContext(cctx)
 	cancel()
 
-	outcome := "rolled_back"
+	outcome := FinalizeRolledBack
 	if rerr != nil {
 		outcome = "rollback_failed"
 		e.logf("session %s: rolling back %s on %s: %v", s.id, txID, reason, rerr)
@@ -229,7 +229,7 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 		txID: txID, state: txStateFor(outcome, rerr), reason: txOutcomeReason(outcome, rerr),
 		userID: s.userID, connectionID: s.connID,
 	})
-	e.auditBounded(ctx, s.userID, "", "tx_"+outcome,
+	e.auditBounded(ctx, s.userID, "", "tx_"+string(outcome),
 		fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
 }
 

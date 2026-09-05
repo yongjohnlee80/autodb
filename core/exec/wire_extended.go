@@ -1008,7 +1008,7 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, s
 // client was cut a moment later. A consumer stop is NEVER the statement's error
 // — the client's write failing says nothing about what the target did — so it
 // records what was observed, and unresolved when nothing was.
-func extOutcome(obs extObservation, runErr error, consumerErr bool, txID string) (status, errText string) {
+func extOutcome(obs extObservation, runErr error, consumerErr bool, txID string) (status HistStatus, errText string) {
 	switch {
 	case obs.targetErr != nil && obs.mine:
 		return StatusError, truncate(obs.targetErr.Error(), maxErrorBytes)

@@ -310,7 +310,7 @@ type HistoryEntry struct {
 	StartedAt    int64
 	DurationMS   int64
 	RowCount     int64
-	Status       string
+	Status       HistoryStatus
 	Error        string
 	// TxID correlates this statement with the transaction that decides
 	// whether its effect survives. Empty for autocommit, where the
@@ -351,7 +351,7 @@ func newHistory(conn dao.DataConn) *dao.Schema[*HistoryEntry, HistoryField, Sort
 			HistStartedAt:  {Column: "started_at", Scan: func(r *HistoryEntry) any { return &r.StartedAt }, Value: func(r *HistoryEntry) any { return r.StartedAt }},
 			HistDurationMS: {Column: "duration_ms", Scan: func(r *HistoryEntry) any { return &r.DurationMS }, Value: func(r *HistoryEntry) any { return r.DurationMS }},
 			HistRowCount:   {Column: "row_count", Scan: func(r *HistoryEntry) any { return &r.RowCount }, Value: func(r *HistoryEntry) any { return r.RowCount }},
-			HistStatus:     {Column: "status", Scan: func(r *HistoryEntry) any { return &r.Status }, Value: func(r *HistoryEntry) any { return r.Status }},
+			HistStatus:     {Column: "status", Scan: func(r *HistoryEntry) any { return &r.Status }, Value: func(r *HistoryEntry) any { return string(r.Status) }},
 			HistError:      {Column: "error", Scan: func(r *HistoryEntry) any { return &r.Error }, Value: func(r *HistoryEntry) any { return r.Error }},
 			HistTxID:       {Column: "tx_id", Scan: func(r *HistoryEntry) any { return &r.TxID }, Value: func(r *HistoryEntry) any { return r.TxID }},
 		})
