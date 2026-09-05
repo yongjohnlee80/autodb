@@ -15,23 +15,29 @@ short version for someone who just wants to run the suite.
 
 ## First time on a machine
 
-The harness refuses any instance that is not in your scratch-instance
-allowlist. Claim it once — a deliberate, separate operation that does nothing
-else:
+The harness **does not provision scratch instances**, and that is deliberate:
+the same tool, credentials and operator that run `sweep` should not be the
+thing that decides what counts as a scratch instance. It is verification-only.
+
+Pairing is an out-of-band ceremony you perform once. To see it:
 
 ```bash
-autodb-test.sh claim --target local
+autodb-test.sh provision --target local     # prints the steps, executes nothing
 ```
 
-That writes a token into the instance and records it in
-`~/.config/autodb/scratch-instances` (mode 600). Every later run requires the
-instance to present the **same** token, so a port remap, a mispointed tunnel,
-or a rebuilt container is caught rather than tested against. There is no flag
-that turns a test run into a claim.
+Step 0 of what it prints is *verify what is actually listening at that
+endpoint* — the step no automated first-touch can stand in for. You then write
+the marker and the allowlist entry yourself, and check the pairing:
 
-It also refuses outright, and never falls back, if the instance holds a
-database named `lm`, `lm_omni` or `labelmanager` — that presence identifies
-production or the owner's own fixture.
+```bash
+autodb-test.sh verify --target local        # read-only
+```
+
+Every later run requires the instance to present the **same** token recorded in
+`~/.config/autodb/scratch-instances` (mode 600), so a port remap, a mispointed
+tunnel, or a rebuilt container is caught rather than tested against. It also
+refuses outright if the instance holds a database named `lm`, `lm_omni` or
+`labelmanager` — that presence identifies production or the owner's fixture.
 
 ## The normal invocation
 
@@ -108,7 +114,7 @@ attempt under `NOT ATTEMPTED`, so a green here is never read as a green there.
 | flag | instance |
 |---|---|
 | `--target local` (default) | `autodb-r3-pg` on `127.0.0.1:55437` |
-| `--target vm43` | `autodb-r3-pg` on `192.168.68.43:55438` — **EXPERIMENTAL, never validated end to end** |
+| `--target vm43` | `autodb-r3-pg` on `192.168.68.43:55438` — **EXPERIMENTAL, never validated end to end** (and until rev 4 it carried the wrong credentials entirely) |
 
 **`lm-omni-db` is production and is never a test target.** `lm-test-db` on
 5432 is not one either. The harness refuses both by name and never falls back
