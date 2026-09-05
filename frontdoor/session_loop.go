@@ -358,6 +358,10 @@ func (l *Listener) endOfIdleWait(conn net.Conn, be *pgproto3.Backend, err error,
 
 // sendReadiness ends a protocol cycle with the session's current transaction
 // state. It reports whether the session continues.
+//
+// It ASKS the engine for the status. Callers that already HOLD one must use
+// sendReadinessWith instead — see its comment for why that distinction is
+// load-bearing rather than a convenience.
 func (l *Listener) sendReadiness(conn net.Conn, be *pgproto3.Backend, sess exec.WireSessionResult,
 	peer string, closeReason *string) bool {
 
@@ -366,6 +370,28 @@ func (l *Listener) sendReadiness(conn net.Conn, be *pgproto3.Backend, sess exec.
 		*closeReason = "session-lost"
 		return false
 	}
+	return l.sendReadinessWith(conn, be, status, closeReason)
+}
+
+// sendReadinessWith writes the readiness a caller has ALREADY DECIDED ON.
+//
+// THE SPLIT IS DELIBERATE AND THE LOWER HALF IS THE SHARED ONE. Three sites end
+// a cycle with a status they are already holding — the extended path's Sync
+// (session_extended.go), the simple path's terminal, and the withheld-output
+// report. Folding them into sendReadiness would make each RE-READ the status
+// from the engine, and that is a defect this code has already had once: two
+// halves of one answer, fetched at different moments, disagreeing (r5 MF16).
+// A caller that has observed a status must send the one it observed.
+//
+// What is shared is the WRITE, not the decision: send, flush under the
+// output-stall budget, and report a write failure as the session's close
+// reason. Each caller keeps its own validation, because they refuse
+// differently — the extended path emits fd.refused with the Sync's reason, the
+// simple path names the offending byte, and this one has no status of its own
+// to reject.
+func (l *Listener) sendReadinessWith(conn net.Conn, be *pgproto3.Backend,
+	status byte, closeReason *string) bool {
+
 	be.Send(&pgproto3.ReadyForQuery{TxStatus: status})
 	if ferr := l.flushBounded(conn, be); ferr != nil {
 		*closeReason = "write-failed"
@@ -584,12 +610,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 		*closeReason = "invalid-tx-status"
 		return false
 	}
-	be.Send(&pgproto3.ReadyForQuery{TxStatus: status})
-	if err := l.flushBounded(conn, be); err != nil {
-		*closeReason = "write-failed"
-		return false
-	}
-	return true
+	return l.sendReadinessWith(conn, be, status, closeReason)
 }
 
 // reportOutputWithheld is the ONE post-dispatch stop path: the single place
@@ -700,12 +721,7 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 	if !ownsTerminal {
 		return true
 	}
-	be.Send(&pgproto3.ReadyForQuery{TxStatus: status})
-	if ferr := l.flushBounded(conn, be); ferr != nil {
-		*closeReason = "write-failed"
-		return false
-	}
-	return true
+	return l.sendReadinessWith(conn, be, status, closeReason)
 }
 
 // recordedEffects says what became of a statement whose output was cut short.
