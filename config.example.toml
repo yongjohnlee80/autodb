@@ -498,6 +498,40 @@ bind = "127.0.0.1:5432"
 # the front door looking healthy -- because from its side nothing failed.
 reserved_headroom = 4
 
+# ---------------------------------------------------------------------------
+# HOW LONG AN IDLE FRONT-DOOR SESSION LIVES — set in [exec], not here.
+#
+#   [exec] session_idle_timeout = "30m"     (the default)
+#
+# It is documented here because this is the surface where you MEET it. A
+# front-door session is a real, pinned PostgreSQL backend on your target and it
+# holds a lease from that target's pool, so an idle session is a production
+# connection held open by a laptop that went to sleep.
+#
+# 30 MINUTES IS DELIBERATE and was reaffirmed on 2026-09-06. Raising it is a
+# trade in three directions at once, all the wrong way for a deployment where
+# autodb is the only path to production:
+#
+#   - every parked session holds a target lease, and reserved_headroom above is
+#     what stops the front door starving the TUI and the engine's own control
+#     queries. A longer idle window means more sessions parked at once,
+#     competing with the path an admin uses to FIX things.
+#   - an access token works from anywhere it is admitted until revoked, so an
+#     idle session is a live authenticated channel sitting open. 30m bounds
+#     that exposure; two hours quadruples it.
+#   - an abandoned session is the one nobody is watching, which is exactly the
+#     one worth reaping soonest.
+#
+# WHAT A DEVELOPER SEES is a clean, accurate goodbye rather than a dropped
+# connection: FATAL 57P05 "terminating connection due to idle timeout", the
+# SQLSTATE PostgreSQL itself uses, with a hint. Their client reconnects on the
+# next query. Every close is audited.
+#
+# Related bounds on an OPEN transaction, also in [exec] and also deliberate:
+# idle_in_tx_timeout = "90s" and max_tx_duration = "5m". Those are not tuning
+# knobs — a transaction abandoned between BEGIN and COMMIT holds locks on the
+# target until something ends it, and nothing else will.
+
 # Concurrent wire sessions per target pool. Unset derives
 # pool_max_conns - reserved_headroom, which is what you almost always want.
 # An explicit value may only be LOWER: a higher one promises leases the pool
