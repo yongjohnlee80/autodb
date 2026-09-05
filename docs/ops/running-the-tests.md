@@ -116,6 +116,19 @@ attempt under `NOT ATTEMPTED`, so a green here is never read as a green there.
 | `--target local` (default) | `autodb-r3-pg` on `127.0.0.1:55437` |
 | `--target vm43` | `autodb-r3-pg` on `192.168.68.43:55438` — **EXPERIMENTAL, never validated end to end** (and until rev 4 it carried the wrong credentials entirely) |
 
+**vm43 is experimental.** Verbs that create or drop databases on it require an
+explicit opt-in, because that path has never been validated end to end:
+
+```bash
+autodb-test.sh verify --target vm43                    # read-only, do this first
+AUTODB_ALLOW_VM43_DESTRUCTIVE=1 autodb-test.sh all --worktree . --target vm43
+```
+
+Read-only verbs are deliberately not gated — `verify` and `provision` are how
+you establish whether the endpoint is safe, so gating them would make the safe
+path harder than the destructive one. If you do run it end to end, record the
+outcome in the playbook so the next person doesn't have to.
+
 **`lm-omni-db` is production and is never a test target.** `lm-test-db` on
 5432 is not one either. The harness refuses both by name and never falls back
 to another instance — if the scratch instance is unreachable it fails with a
