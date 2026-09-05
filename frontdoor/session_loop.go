@@ -525,6 +525,11 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 	// it returns, however it returns — and it reads acct.held, not the figure
 	// reserved above, so an oversized frame's top-up cannot leak.
 	defer func() { l.general.release(acct.held) }()
+	// ATTEMPT BEFORE EFFECT. Emitted here, after the gate and the reservation
+	// but BEFORE the statement reaches the target, so the event means "this was
+	// tried" — a refusal upstream of this point is an fd.refused and never an
+	// attempt, which is what keeps the two vocabularies from overlapping.
+	l.stmtAttempt(peer, "query", "", sql)
 	status, err := l.queries.WireQuery(ctx, sess.SessionID, sess.UserID, sql, hostOf(peer),
 		acct.emit)
 
