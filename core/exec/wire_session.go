@@ -93,11 +93,30 @@ const (
 	DenyIPNotAdmitted  = "frontdoor/ip-not-admitted"
 	DenyPATIPNarrowed  = "frontdoor/pat-allowed-ips"
 	DenyNoSuchDatabase = "frontdoor/no-such-database"
-	DenyNoGrant        = "frontdoor/no-grant"
-	DenyProfileRefuses = "frontdoor/profile-not-front-door"
-	DenyLeaseCap       = "frontdoor/lease-cap-exceeded"
-	DenySessionCap     = "frontdoor/session-cap-exceeded"
-	DenyResidentBudget = "frontdoor/resident-budget-exceeded"
+	// DenyPATUnscoped: the presented token carries conn_id = 0 — a pre-v13
+	// token, or a v13 tombstone somebody un-revoked by hand (ADR-0086 §2).
+	// Refused INDEPENDENTLY of `revoked`, so re-flipping that column cannot
+	// bring an unscoped credential back.
+	DenyPATUnscoped = "frontdoor/pat-unscoped"
+	// DenyDatabaseMismatch: the startup `database` agrees with neither the
+	// bound connection's name, nor its target_db, nor conn:<id> (ADR-0086 §4).
+	//
+	// NEVER silently substituted: a client that asked for `postgres` and was
+	// quietly given `test` is worse than any refusal.
+	DenyDatabaseMismatch = "frontdoor/database-mismatch"
+	// DenyPATNotCleartextDebug: a cleartext listener met an ordinary token
+	// (ADR-0086 §10). Not charged — the credential is valid and the peer may be
+	// fully admitted; what refuses it is our mode.
+	DenyPATNotCleartextDebug = "frontdoor/pat-not-cleartext-debug"
+	// DenyPATCleartextDebugInTLS: a TLS listener met a debug_cleartext token.
+	// The exact mirror of the above, and uncharged for the same reason — the
+	// token is perfectly valid on the listener it was minted for.
+	DenyPATCleartextDebugInTLS = "frontdoor/pat-cleartext-debug-in-tls"
+	DenyNoGrant                = "frontdoor/no-grant"
+	DenyProfileRefuses         = "frontdoor/profile-not-front-door"
+	DenyLeaseCap               = "frontdoor/lease-cap-exceeded"
+	DenySessionCap             = "frontdoor/session-cap-exceeded"
+	DenyResidentBudget         = "frontdoor/resident-budget-exceeded"
 	// DenyLeaseEncoding: the pinned target's server_encoding or client_encoding
 	// is not UTF8, or could not be established (matrix row 3.1: the lease is
 	// pinned UTF8; autodb does not transcode; the check FAILS CLOSED). On the
@@ -150,6 +169,11 @@ type WireOpen struct {
 	// backend before the result returns — PostgreSQL's own semantics, not an
 	// emulation. One refusal withdraws the session (DenyStartupGUC).
 	StartupGUCs map[string]string
+	// Cleartext reports that the LISTENER is serving without TLS (ADR-0086
+	// §10). It comes from the listener rather than from config because it is a
+	// property of the connection being opened, and because the engine must not
+	// have to re-derive a fact the caller already knows.
+	Cleartext bool
 }
 
 // OpenWireSession is the original entry point, kept so the front door's
@@ -191,24 +215,85 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		return out, deny(DenyUserMismatch)
 	}
 
-	// 3. IP admission: (global ∨ the user's rows), then the token's own
-	// narrowing if it sets one (Amendment 1).
-	src, err := e.auth.IPAllowedForUser(ctx, nil, pat.UserID, ip)
-	if err != nil {
-		return out, err
+	// 3a. THE CREDENTIAL CLASS MUST MATCH THE LISTENER (ADR-0086 §10).
+	//
+	// Checked BEFORE any IP work, and that placement is load-bearing:
+	// auth.PATAllowsIP returns TRUE for an empty list by contract, because
+	// empty means "inherit the admission set" and that is correct under TLS.
+	// Teaching it about cleartext would silently change TLS mode too, so this
+	// is a separate check with its own reason rather than a condition bolted
+	// into a function whose contract other callers depend on.
+	//
+	// Both directions are refusals, and the token is VALID in each — what
+	// refuses it is the listener's mode. That is why neither charges the
+	// per-address throttle (§5): a developer whose daemon restarted into the
+	// other mode is the common case, not an attacker.
+	debugToken := pat.DebugCleartext != 0
+	switch {
+	case req.Cleartext && !debugToken:
+		// Turning cleartext ON refuses every ordinary token in the install.
+		// That is the point: a normal credential must never cross a wire that
+		// does not protect it.
+		return out, deny(DenyPATNotCleartextDebug)
+	case !req.Cleartext && debugToken:
+		// A debug token's allowed_ips was never checked against its owner's
+		// perimeter, so honouring it here would import that relaxation into
+		// production. This refusal is what confines the widening to the mode
+		// it was minted for.
+		return out, deny(DenyPATCleartextDebugInTLS)
 	}
-	if src == auth.NotAdmitted {
-		return out, deny(DenyIPNotAdmitted)
+
+	// 3b. IP admission.
+	//
+	// Under TLS: (global ∨ the user's rows), then the token's own narrowing if
+	// it sets one (ADR-0075 Amendment 1).
+	//
+	// In CLEARTEXT: the token's own list is the ENTIRE gate and the inherited
+	// set is NOT consulted (ADR-0086 §10, ruled by Johno). The list is
+	// guaranteed non-empty by the mint gate; it is re-checked here anyway,
+	// because a store edited by hand must not yield a token admitted from
+	// anywhere.
+	src := auth.AdmittedByTokenList
+	if !req.Cleartext {
+		var aerr error
+		src, aerr = e.auth.IPAllowedForUser(ctx, nil, pat.UserID, ip)
+		if aerr != nil {
+			return out, aerr
+		}
+		if src == auth.NotAdmitted {
+			return out, deny(DenyIPNotAdmitted)
+		}
+	} else if strings.TrimSpace(pat.AllowedIPs) == "" {
+		return out, deny(DenyPATIPNarrowed)
 	}
 	if !auth.PATAllowsIP(pat.AllowedIPs, ip) {
 		return out, deny(DenyPATIPNarrowed)
 	}
 
-	// 4. The target. `database` names an autodb CONNECTION, by name or as
-	// conn:<id>.
-	connRow, err := e.lookupWireTarget(ctx, database)
+	// 4. THE TARGET COMES FROM THE CREDENTIAL, NOT FROM THE CLIENT (ADR-0086 §1).
+	//
+	// This is the change that dissolves the ambiguity rather than managing it.
+	// Two connections targeting a database called `test` — a local one and a
+	// PRODUCTION one — are told apart by WHICH TOKEN was presented, not by a
+	// string the client chose, so there is no spelling a client can send that
+	// reaches a connection its token does not name.
+	//
+	// The tombstone is refused here rather than in VerifyPAT: the denial
+	// vocabulary lives in this package, and VerifyPAT deliberately collapses
+	// every credential failure into one error. It is also AFTER the
+	// constant-time compare, so it cannot become a timing oracle for which
+	// selectors exist.
+	if pat.ConnID == 0 {
+		return out, deny(DenyPATUnscoped)
+	}
+	connRow, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, pat.ConnID).Get()
 	if err != nil {
 		if errors.Is(err, dao.ErrNoRows) {
+			// A live token naming a row that is gone. There is no database-level
+			// foreign key (ADR-0086 §1: it cannot be added to a populated
+			// table), so this is the guard that makes a dangling reference
+			// LOUD rather than silent, and it is why this reason survived the
+			// binding change instead of being collapsed into the mismatch.
 			return out, deny(DenyNoSuchDatabase)
 		}
 		return out, err
@@ -227,6 +312,16 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	// database the daemon knows about.
 	if e.profileFor(connRow) != ProfileSession {
 		return out, deny(DenyProfileRefuses)
+	}
+
+	// 4c. The `database` field is now a CONSISTENCY CHECK, not a lookup key
+	// (ADR-0086 §4, ruling R2).
+	//
+	// Checked AFTER the grant so an ungranted caller never produces a
+	// mismatch row: a reader of the audit trail would take that row as
+	// evidence the connection exists.
+	if !wireDatabaseAgrees(database, connRow) {
+		return out, deny(DenyDatabaseMismatch)
 	}
 
 	// 5. ONE atomic reservation: per-user slot, global slot, target lease,
@@ -357,20 +452,49 @@ func (e *Engine) reporterFor(pc golibpg.PinnedConn) any {
 	return pc
 }
 
-// lookupWireTarget resolves the DSN's database field to a connection row.
+// wireDatabaseAgrees reports whether the client's startup `database` names the
+// connection its token is bound to (ADR-0086 §4).
 //
-// Two spellings: the connection's name, or `conn:<id>`. The id form exists
-// because a name can be changed and a DSN in a config file cannot notice.
-func (e *Engine) lookupWireTarget(ctx context.Context, database string) (*meta.Connection, error) {
+// It REPLACED a lookup. The field used to select which connection to open;
+// now the token has already decided that, and this only asks whether the
+// client agrees. The distinction matters because it changes what a
+// disagreement means: not "no such database" but "you asked for something
+// other than what this credential reaches", which is refused rather than
+// silently substituted.
+//
+// Three accepted spellings:
+//
+//   - the connection's NAME — what works today;
+//   - its TARGET DATABASE NAME, when one is known — what every introspecting
+//     client sends after discovering the target's real databases, and the
+//     whole reason this ADR exists. Skipped when empty, which is the ordinary
+//     case for an engine with no derivable name (r7);
+//   - `conn:<id>` — the explicit disambiguator, which survives a rename.
+//
+// TrimSpace and ParseInt are KEPT deliberately. Both are today's behaviour —
+// a trailing space in a client's config field is a typo rather than an
+// intent, and `conn:01` names the same row as `conn:1` — so tightening them
+// here would be a silent change to who can connect, smuggled in under a
+// change about something else.
+//
+// The name comparisons are EXACT BYTES, and that is not the same rule the
+// startup `user` gets a few lines above (EqualFold). The asymmetry is each
+// namespace's own: two connections whose names differ only in case COEXIST
+// (`connections.name` is UNIQUE but case-sensitive on both engines), and
+// PostgreSQL database names are case-sensitive too, so folding either would
+// accept a client that asked for a DIFFERENT REAL THING. `user` can fold
+// because identity comes from the token and no other principal the client
+// could have meant would then be served.
+func wireDatabaseAgrees(database string, connRow *meta.Connection) bool {
 	database = strings.TrimSpace(database)
 	if rest, ok := strings.CutPrefix(database, "conn:"); ok {
 		id, perr := strconv.ParseInt(rest, 10, 64)
-		if perr != nil {
-			return nil, dao.ErrNoRows
-		}
-		return e.store.Connections.OnCtx(ctx).With(meta.ConnID, id).Get()
+		return perr == nil && id == connRow.ID
 	}
-	return e.store.Connections.OnCtx(ctx).With(meta.ConnName, database).Get()
+	if database == connRow.Name {
+		return true
+	}
+	return connRow.TargetDB != "" && database == connRow.TargetDB
 }
 
 // CloseWireSession releases a front-door session and everything it reserved.

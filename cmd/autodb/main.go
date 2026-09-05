@@ -69,9 +69,25 @@ func main() {
 		"--migrate-to-postgres: report what would be copied and write nothing")
 	migrateInsecure := flag.Bool("allow-insecure-dsn", false,
 		"--migrate-to-postgres: permit a destination DSN weaker than sslmode=verify-full")
+	// TLS material for the front door. It exists because the alternative to a
+	// one-command certificate is an operator turning TLS off, and ADR-0086 §10
+	// is what that costs.
+	createCert := flag.Bool("create-cert", false,
+		"generate the front door's CA and server certificate, and exit")
+	certDir := flag.String("cert-dir", "",
+		"--create-cert: where to write the material (default: a tls/ directory beside the config)")
+	var certHosts hostList
+	flag.Var(&certHosts, "cert-hosts",
+		"--create-cert: names and addresses clients will dial (default: frontdoor.tls_host_names)")
+	certLeafOnly := flag.Bool("leaf-only", false,
+		"--create-cert: reissue the server certificate from the existing CA (no redistribution)")
+	certExportCA := flag.Bool("export-ca", false,
+		"--create-cert: print ca.pem, the one file developers need, and exit")
+	certForce := flag.Bool("force", false,
+		"--create-cert: replace existing CA key material (invalidates every distributed ca.pem)")
 	flag.Parse()
 
-	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *port); err != nil {
+	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *createCert, *port); err != nil {
 		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 		flag.Usage()
 		os.Exit(2)
@@ -83,6 +99,14 @@ func main() {
 	}
 
 	switch {
+	case *createCert:
+		if err := runCreateCert(os.Stdout, *configPath, createCertOpts{
+			dir: *certDir, hosts: certHosts, leafOnly: *certLeafOnly,
+			force: *certForce, exportCA: *certExportCA,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+			os.Exit(1)
+		}
 	case *migrateToPG:
 		if err := runMigrateToPostgres(context.Background(), os.Stdout, migrateOpts{
 			from: *migrateFrom, to: *migrateTo, dryRun: *migrateDry,
@@ -132,7 +156,7 @@ const defaultWebPort = 7010
 // user explicitly passing a flag that will be ignored — would slip through
 // (lector r1 #5 on ADR-0061). flag.CommandLine.Visit reports only what was
 // actually set.
-func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG bool, port int) error {
+func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert bool, port int) error {
 	portSet := false
 	flag.CommandLine.Visit(func(f *flag.Flag) {
 		if f.Name == "port" {
@@ -157,6 +181,40 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG bool, port int) err
 	if len(stray) > 0 {
 		return fmt.Errorf("%s applies to --migrate-to-postgres only", strings.Join(stray, ", "))
 	}
+	// Same rule for the certificate flags, and it matters more here than for
+	// --port: --force outside --create-cert reads as "do the thing anyway",
+	// which is the last impression to leave on a flag that can invalidate
+	// every ca.pem an organisation has handed out.
+	certOnly := []string{"cert-dir", "cert-hosts", "leaf-only", "export-ca", "force"}
+	stray = nil
+	flag.CommandLine.Visit(func(f *flag.Flag) {
+		for _, c := range certOnly {
+			if f.Name == c && !createCert {
+				stray = append(stray, "--"+c)
+			}
+		}
+	})
+	if len(stray) > 0 {
+		return fmt.Errorf("%s applies to --create-cert only", strings.Join(stray, ", "))
+	}
+	// --export-ca reads an existing CA and --leaf-only reissues from one.
+	// Together they are two different intentions, and the dispatch would
+	// silently honour whichever is checked first.
+	if createCert {
+		leafOnly, exportCA := false, false
+		flag.CommandLine.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "leaf-only":
+				leafOnly = true
+			case "export-ca":
+				exportCA = true
+			}
+		})
+		if leafOnly && exportCA {
+			return errors.New("--leaf-only issues a new certificate and --export-ca only prints " +
+				"the existing CA; pass one")
+		}
+	}
 	// EXACTLY ONE mode. The dispatch switch tries printEndpoint, serve, ui, web-ui
 	// in that order, so any pairing silently runs whichever comes first — and
 	// --web-ui --print-endpoint printed the endpoint and never served the UI
@@ -167,14 +225,14 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG bool, port int) err
 	// --migrate-to-postgres is counted too, and it matters more than the
 	// others: it is FIRST in the dispatch switch, so an unnoticed
 	// `--migrate-to-postgres --serve` would migrate and never serve.
-	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG} {
+	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG, createCert} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return errors.New("--serve, --ui, --web-ui, --print-endpoint and " +
-			"--migrate-to-postgres are mutually exclusive; pass exactly one")
+		return errors.New("--serve, --ui, --web-ui, --print-endpoint, --migrate-to-postgres " +
+			"and --create-cert are mutually exclusive; pass exactly one")
 	}
 	if webUI {
 		if port <= 0 || port > 65535 {
@@ -228,8 +286,50 @@ func runServe(configPath string) error {
 			return fmt.Errorf("chmod %s: %w", addr, cerr)
 		}
 		// Leaving the file behind would make the next launch look
-		// occupied when nothing is listening.
-		defer func() { _ = os.Remove(addr) }()
+		// occupied when nothing is listening — but removing it
+		// UNCONDITIONALLY is worse, and was a live bug.
+		//
+		// A daemon that exits AFTER a successor has bound the same path
+		// deletes the SUCCESSOR'S socket file. The result is a listener that
+		// `ss` reports as healthy on an orphaned inode while `ls` shows
+		// nothing, and every client fails to dial with no error anywhere
+		// explaining why. Reproduced by `pkill -f "autodb --serve"` followed
+		// immediately by a start.
+		//
+		// The meta-store lease protects the STORE from two writers by holding
+		// an flock on its inode; nothing protected the socket PATH. So this
+		// removes the file only while it is still the one we created, compared
+		// by identity (os.SameFile is dev+ino on unix) rather than by name —
+		// the name is precisely what a successor reuses.
+		//
+		// A window remains between the check and the unlink: unix offers no
+		// "remove if inode matches". It is orders of magnitude narrower than
+		// the unconditional form and does not grow with how long the daemon
+		// ran, which is what made the original reachable by an ordinary
+		// restart.
+		//
+		// The identity itself needs a pin to mean anything — inode numbers are
+		// recycled, and on ext4 immediately. See socketIdentity.
+		// Go's *net.UnixListener unlinks the path BY NAME on Close unless told
+		// otherwise, so without this the removal that actually happens in an
+		// ordinary shutdown is the stdlib's name-based one and the identity
+		// check below only ever takes its early return. The reviewer measured
+		// exactly that: with unlink-on-close left at its default the file is
+		// already gone by the time the defer runs.
+		//
+		// Turning it off routes EVERY removal through the identity check,
+		// including the ordering neither of us could construct — a successor
+		// binding before our own Close, reachable when a dial to a live but
+		// saturated listener fails.
+		if ul, ok := ln.(*net.UnixListener); ok {
+			ul.SetUnlinkOnClose(false)
+		}
+		id, cerr := pinSocket(addr)
+		if cerr != nil {
+			ln.Close()
+			return fmt.Errorf("stat %s: %w", addr, cerr)
+		}
+		defer removeIfStillOurs(addr, id)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -314,6 +414,21 @@ func runServe(configPath string) error {
 		ln.Close()
 		return ferr
 	}
+	if fd != nil && cfg.FrontDoor.CleartextDebug() {
+		// THE OPERATOR'S RECORD (ADR-0086 R7). Unconditional and
+		// undismissable, at EVERY start — not once, not behind a flag, and not
+		// suppressible. The TUI's banner is the dismissible one; this is the
+		// half that survives nobody looking at it.
+		//
+		// It names the BIND CLASS because "cleartext on loopback" and
+		// "cleartext reachable off-host" are different risk states, and the
+		// second must not be reachable by someone who read a banner describing
+		// the first. A second config key gating the off-host case was
+		// considered and dropped — Johno ruled the admin owns the deployment
+		// decision — so this is where that decision is made visible instead.
+		fmt.Fprint(os.Stderr, cleartextBanner(fd.Addr().String(), countDebugTokens(ctx, store, time.Now())))
+	}
+
 	var fdFailed <-chan error
 	if fd != nil {
 		defer fd.Close()
@@ -321,8 +436,37 @@ func runServe(configPath string) error {
 			func(msg string) { fmt.Fprintln(os.Stderr, msg) })
 	}
 
+	// The front-door reader closes over the listener so the card prints the
+	// address that actually BOUND — cfg.FrontDoor.Bind can be ":0" or a name
+	// resolving to several addresses, and Addr() is the only thing a client
+	// can dial.
+	//
+	// Be precise about what it does NOT buy (reviewer's O1): whether a
+	// listener exists is decided once, before this point, so `Listening` is
+	// effectively a snapshot. The one transition it misses is the supervisor
+	// stopping a door that failed while serving — during that drain a card can
+	// still say listening. The daemon is on its way down in that case, so the
+	// window is the drain rather than indefinite; it is named here rather than
+	// implied away.
+	frontDoorState := func() rpc.FrontDoorInfo {
+		info := rpc.FrontDoorInfo{
+			Enabled:    cfg.FrontDoor.Enabled,
+			HostNames:  cfg.FrontDoor.TLSHostNames,
+			RootCAFile: cfg.FrontDoor.TLSRootCAFile,
+		}
+		if fd != nil {
+			info.Listening = true
+			info.Addr = fd.Addr().String()
+			// Read from the config that OPENED the listener, on the same
+			// branch that reports it listening — so "listening" and "how it
+			// is listening" cannot come from two different moments.
+			info.Cleartext = cfg.FrontDoor.CleartextDebug()
+		}
+		return info
+	}
 	srv := rpc.New(svc, eng, cfg.Server, version,
-		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot))
+		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot),
+		rpc.WithFrontDoor(frontDoorState))
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)
 	// A lease loss is reported as the failure it is. Without this the
@@ -880,4 +1024,184 @@ func startPartitionRoll(ctx context.Context, store *meta.Store, onLog func(strin
 			}
 		}
 	}()
+}
+
+// inodeHold is an open reference that keeps an inode ALLOCATED, so its number
+// cannot be recycled under a successor. Its implementation is per-platform;
+// socketIdentity deliberately has NO release method, so the only code that can
+// drop a hold is withInodeHeld below.
+type inodeHold interface{ release() }
+
+// socketIdentity is what shutdown compares against, and it exists because
+// os.SameFile IS NOT A SOUND IDENTITY FOR A PATH THAT CAN BE RECREATED.
+//
+// os.SameFile is dev+ino on unix, and INODE NUMBERS ARE REUSED. Measured on
+// the two hosts this project builds on: unlink a file and recreate it at the
+// same path and ext4 hands the number straight back — os.SameFile reports
+// TRUE for a file it has never seen — while tmpfs reports false, because tmpfs
+// allocates inode numbers from a monotonic counter. So the identity check
+// shipped looking correct on a developer's /tmp and unsound on the machine it
+// actually runs on. The filesystem, not the code, decides whether the bug
+// appears; that is why the suite was green here and red on the test VM.
+//
+// AN OPEN REFERENCE closes it. While a descriptor holds the inode it stays
+// allocated, so its number cannot be handed to a successor, so a successor's
+// socket is GUARANTEED to compare unequal.
+//
+// THE FIRST VERSION OF THIS USED A HARD LINK AND CANCELLED ITSELF. The second
+// name was derived from the socket path — sock + ".inode-pin" — so a successor
+// binding the SAME path computed the SAME name and removed the predecessor's
+// link on its way in, under a comment asserting that no live daemon could own
+// it. That premise is true for a CRASHED predecessor and false for a
+// SHUTTING-DOWN one, which is the case this whole path exists for: the
+// guarantee could be revoked, at an arbitrary moment, by the very process it
+// was protecting against. An open descriptor has no name to collide over and
+// the kernel drops it on process exit, including a hard kill; a leftover file
+// had neither property.
+type socketIdentity struct {
+	// hold keeps our inode allocated, or nil where the platform has no way to
+	// take one.
+	hold inodeHold
+	// stat is the identity of record, captured while we hold the bind.
+	stat os.FileInfo
+}
+
+// pinSocket takes the identity of the socket we just bound and pins its inode.
+func pinSocket(sock string) (socketIdentity, error) {
+	st, err := os.Stat(sock)
+	if err != nil {
+		return socketIdentity{}, err
+	}
+	h, herr := holdInode(sock)
+	if herr != nil {
+		// UNHELD. Fall back to the bare stat, which is exactly what shipped
+		// before: sound where inode numbers are not recycled, unsound where
+		// they are. Strictly no worse — and the alternative, declining to
+		// remove our own socket at all, makes the next launch look occupied
+		// while nothing is listening, which is the failure this whole block
+		// exists to avoid.
+		return socketIdentity{stat: st}, nil
+	}
+	return socketIdentity{hold: h, stat: st}, nil
+}
+
+// withInodeHeld runs fn with our inode reference held and releases it after.
+//
+// The release lives HERE and nowhere else on purpose. Dropping the hold before
+// the comparison is the one ordering that matters, and no deterministic cell
+// can observe it — losing that race IS the thing under test, so a cell would be
+// flaky in exactly the way the bug is. It used to be a one-line edit inside
+// removeIfStillOurs. Now it requires editing a different function whose entire
+// body is the ordering, which a reader cannot mistake for an incidental change.
+//
+// Not a compile error; nothing within one package can be. But the wrong
+// ordering is no longer something you can write by accident while looking at
+// the comparison, and where an instrument cannot exist, removing the way to get
+// it wrong is worth more than a cell that cannot see it.
+func (id socketIdentity) withInodeHeld(fn func()) {
+	if id.hold != nil {
+		defer id.hold.release()
+	}
+	fn()
+}
+
+// removeIfStillOurs unlinks a socket path only while it is the same file we
+// created, so a shutdown cannot delete a successor's socket.
+//
+// Split out from the defer so the decision is testable: the bug it fixes is
+// invisible to any test that only checks "the file is gone afterwards".
+func removeIfStillOurs(path string, id socketIdentity) {
+	id.withInodeHeld(func() {
+		if id.stat == nil {
+			return
+		}
+		now, err := os.Stat(path)
+		if err != nil {
+			// Already gone, or not ours to look at. Either way, not ours to
+			// remove.
+			return
+		}
+		if !os.SameFile(id.stat, now) {
+			// A successor bound this path while we were shutting down. Its
+			// socket is a different file wearing our name, and unlinking it
+			// would leave a running daemon that no client can reach.
+			return
+		}
+		_ = os.Remove(path)
+	})
+}
+
+// cleartextBanner is what an operator sees at every start of a front door
+// serving without TLS.
+//
+// Split out and returning a string so its CONTENT is testable — a banner
+// asserted only by "it printed something" is a banner whose worst version
+// passes.
+func cleartextBanner(addr string, debugTokens int) string {
+	class := "REACHABLE OFF-HOST"
+	detail := "Any host that can route to this address can read every token that crosses it."
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+			class = "loopback only"
+			detail = "Only processes on this machine can reach it — but anyone with a shell here can read the traffic."
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "==============================================================================")
+	fmt.Fprintln(&b, "  FRONT DOOR IS SERVING WITHOUT TLS.")
+	fmt.Fprintln(&b, "")
+	fmt.Fprintf(&b, "  listening on %s  (%s)\n", addr, class)
+	fmt.Fprintf(&b, "  %s\n", detail)
+	fmt.Fprintln(&b, "")
+	fmt.Fprintln(&b, "  EVERY ACCESS TOKEN PRESENTED HERE CROSSES THE WIRE IN CLEARTEXT, and a")
+	fmt.Fprintln(&b, "  token works from anywhere it is admitted until it is revoked. An")
+	fmt.Fprintln(&b, "  intercepted one is a credential an attacker keeps.")
+	fmt.Fprintln(&b, "")
+	// The COUNT, so an operator enabling the mode sees what they are switching
+	// on rather than discovering it. Zero is stated rather than omitted: "no
+	// debug tokens exist" is the reassuring case and it should be visible.
+	switch {
+	case debugTokens < 0:
+		fmt.Fprintln(&b, "  COULD NOT COUNT the cleartext debugging tokens \u2014 assume some exist.")
+	case debugTokens == 0:
+		fmt.Fprintln(&b, "  No cleartext debugging tokens exist. Nothing can connect until one is minted.")
+	case debugTokens == 1:
+		fmt.Fprintln(&b, "  1 cleartext debugging token exists and is usable RIGHT NOW.")
+	default:
+		fmt.Fprintf(&b, "  %d cleartext debugging tokens exist and are usable RIGHT NOW.\n", debugTokens)
+	}
+	fmt.Fprintln(&b, "")
+	fmt.Fprintln(&b, "  This is a DEBUGGING mode. Turn it off by removing")
+	fmt.Fprintln(&b, "  frontdoor.insecure_disable_tls from the config and restarting.")
+	fmt.Fprintln(&b, "==============================================================================")
+	return b.String()
+}
+
+// countDebugTokens reports how many cleartext debugging tokens are USABLE — the
+// banner's claim is "usable RIGHT NOW", so it has to mean what the auth path
+// means. VerifyPAT refuses a token on revocation AND on expiry
+// (core/auth/pat.go), so a count that filtered only on revoked would report
+// tokens nobody can present.
+//
+// Expiry is filtered in Go rather than in the query because the row filter is
+// equality-only; the row count here is a handful by construction (the mint gate
+// requires an admin and a cleartext front door), so there is nothing to
+// optimise.
+//
+// A failure counts as UNKNOWN rather than zero. Telling an operator "nothing can
+// connect" because a query failed would be the most reassuring possible lie at
+// the worst possible moment.
+func countDebugTokens(ctx context.Context, store *meta.Store, now time.Time) int {
+	rows, err := store.PATs.OnCtx(ctx).
+		With(meta.PATDebugCleartext, int64(1)).With(meta.PATRevoked, int64(0)).Select()
+	if err != nil {
+		return -1
+	}
+	n := 0
+	for _, r := range rows {
+		if now.Unix() < r.ExpiresAt {
+			n++
+		}
+	}
+	return n
 }

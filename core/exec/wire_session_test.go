@@ -24,7 +24,7 @@ func wireFixture(t *testing.T) (*fixture, *meta.PAT, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newPAT, err := f.svc.CreatePAT(ctx, f.rootTok, "wire", 0, nil)
+	newPAT, err := f.svc.CreatePAT(ctx, f.rootTok, "wire", f.connID, 0, nil, false)
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}
@@ -93,14 +93,21 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 	f, pat, secret, dbName := wireFixture(t)
 	ctx := context.Background()
 
-	// A second connection with no grant and no front-door profile, for the
-	// target-side refusals.
-	otherID, err := f.eng.CreateConnection(ctx, f.rootTok, "no-frontdoor", "sqlite",
-		"file:wirenofd?mode=memory&cache=shared", testIP)
-	if err != nil {
-		t.Fatalf("CreateConnection: %v", err)
+	// The profile refusal needs a token BOUND to a connection whose profile
+	// then stops admitting the front door — mint at `session`, then DOWNGRADE.
+	//
+	// Dialling some OTHER connection's name no longer reaches the profile
+	// gate at all (ADR-0086 §4): the token decides the target, so a name that
+	// is not the bound connection's is a database MISMATCH and is refused
+	// before any profile is consulted. Reaching this branch therefore means
+	// constructing the state deliberately, which is what the ADR's cell 3
+	// calls for.
+	f2, pat2, secret2, dbName2 := wireFixture(t)
+	if uerr := f2.store.Connections.OnCtx(ctx).With(meta.ConnID, f2.connID).
+		Set(meta.ConnProfile, meta.ProfileV1Compat).Update(); uerr != nil {
+		t.Fatalf("downgrading the profile: %v", uerr)
 	}
-	otherRow, _ := f.store.Connections.OnCtx(ctx).With(meta.ConnID, otherID).Get()
+	_ = pat2
 
 	for _, tc := range []struct {
 		name   string
@@ -121,12 +128,16 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 			_, e := f.eng.OpenWireSession(ctx, secret, "root", dbName, "203.0.113.7")
 			return e
 		}, DenyIPNotAdmitted},
-		{"a database that does not exist", func() error {
+		// A `database` the bound connection does not answer to. Under the
+		// binding this is a MISMATCH, not a missing database: the connection
+		// the token names exists and is fine — the client asked for something
+		// else, and is refused rather than silently given the bound one.
+		{"a database the token's connection does not answer to", func() error {
 			_, e := f.eng.OpenWireSession(ctx, secret, "root", "no-such-db", testIP)
 			return e
-		}, DenyNoSuchDatabase},
+		}, DenyDatabaseMismatch},
 		{"a connection whose profile refuses the front door", func() error {
-			_, e := f.eng.OpenWireSession(ctx, secret, "root", otherRow.Name, testIP)
+			_, e := f2.eng.OpenWireSession(ctx, secret2, "root", dbName2, testIP)
 			return e
 		}, DenyProfileRefuses},
 	} {
@@ -163,7 +174,7 @@ func TestOpenWireSession_PATNarrowingIsEnforced(t *testing.T) {
 		Set(meta.UIPLabel, "vpn").Set(meta.UIPCreatedAt, int64(1)).Insert(); err != nil {
 		t.Fatal(err)
 	}
-	narrowed, err := f.svc.CreatePAT(ctx, f.rootTok, "narrowed", 0, []string{"10.1.0.0/16"})
+	narrowed, err := f.svc.CreatePAT(ctx, f.rootTok, "narrowed", f.connID, 0, []string{"10.1.0.0/16"}, false)
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}
@@ -222,19 +233,35 @@ func TestOpenWireSession_TheRemainingRefusals(t *testing.T) {
 		f, _, _, dbName := wireFixture(t)
 		ctx := context.Background()
 
-		// A second user, deliberately NOT granted on the connection. Root is
-		// an admin with grants everywhere, which is why the first version of
-		// this file could not reach this branch at all.
+		// A second user who HOLDS a grant, mints a token, and then LOSES the
+		// grant. Root is an admin with grants everywhere, which is why the
+		// first version of this file could not reach this branch at all.
+		//
+		// The grant-then-revoke shape is required as of ADR-0086: a PAT is
+		// bound to a connection at mint, and minting is refused for a
+		// connection the caller has no grant on. So "a token whose owner has
+		// no grant" can no longer be built by minting without one — which is
+		// the point of the gate, and makes this the faithful scenario rather
+		// than a workaround: a grant is revoked while a credential for it is
+		// still in someone's DSN.
 		if _, err := f.svc.CreateUser(ctx, f.rootTok, "erin", "erin-passphrase-long", "editor", testIP); err != nil {
 			t.Fatalf("CreateUser: %v", err)
 		}
-		erinTok, _, err := f.svc.Login(ctx, "erin", "erin-passphrase-long", testIP)
+		erinTok, erinIdent, err := f.svc.Login(ctx, "erin", "erin-passphrase-long", testIP)
 		if err != nil {
 			t.Fatalf("Login: %v", err)
 		}
-		erinPAT, err := f.svc.CreatePAT(ctx, erinTok, "erins", 0, nil)
+		if gerr := f.svc.AddGrant(ctx, f.rootTok, erinIdent.UserID(), f.connID, "reader", testIP); gerr != nil {
+			t.Fatalf("AddGrant: %v", gerr)
+		}
+		erinPAT, err := f.svc.CreatePAT(ctx, erinTok, "erins", f.connID, 0, nil, false)
 		if err != nil {
 			t.Fatalf("CreatePAT: %v", err)
+		}
+		// Revoked AFTER the mint: the session-open path must re-resolve
+		// authority rather than trust the binding recorded on the token.
+		if rerr := f.svc.RemoveGrant(ctx, f.rootTok, erinIdent.UserID(), f.connID, testIP); rerr != nil {
+			t.Fatalf("RemoveGrant: %v", rerr)
 		}
 
 		_, err = f.eng.OpenWireSession(ctx, erinPAT.Secret, "erin", dbName, testIP)

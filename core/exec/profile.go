@@ -26,14 +26,14 @@ const (
 	// data-modifying CTEs are refused with the same errors they have always
 	// been refused with. It is the default for every existing surface, and
 	// the existing test suite is what pins it.
-	ProfileV1Compat Profile = "v1compat"
+	ProfileV1Compat = Profile(meta.ProfileV1Compat)
 
 	// ProfileSession is the session-capable profile (ADR-0074 §2). Today it
 	// differs from v1compat in exactly one respect: it admits a
 	// data-modifying CTE whose mutations are guarded, because the guard can
 	// now see inside them (§6). Control verbs become engine actions when the
 	// session engine lands (§3); until then it refuses them, and says why.
-	ProfileSession Profile = "session"
+	ProfileSession = Profile(meta.ProfileSession)
 )
 
 // String implements fmt.Stringer.

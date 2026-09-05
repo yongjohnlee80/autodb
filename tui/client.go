@@ -577,6 +577,14 @@ type ConnInfo struct {
 	ID     int64
 	Name   string
 	Engine string
+	// Profile is the capability profile — "v1compat" or "session". Shown in
+	// the manager because exposing a connection to the front door is a
+	// decision an operator should not have to make from a name alone.
+	Profile string
+	// TargetDB is the database name inside the connection's DSN, when the
+	// engine yields one. It is what a client types into a Database field, and
+	// the fact whose absence cost an evening.
+	TargetDB string
 }
 
 func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
@@ -587,9 +595,64 @@ func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
 	var out []ConnInfo
 	for _, row := range asList(res) {
 		m, _ := row.(map[string]any)
-		out = append(out, ConnInfo{ID: mI(m, "id"), Name: mS(m, "name"), Engine: mS(m, "engine")})
+		out = append(out, ConnInfo{
+			ID: mI(m, "id"), Name: mS(m, "name"), Engine: mS(m, "engine"),
+			Profile: mS(m, "profile"), TargetDB: mS(m, "target_db"),
+		})
 	}
 	return out, nil
+}
+
+// FrontDoorEndpoint is what a client needs to dial the front door, read from
+// the LIVE listener rather than from configuration.
+type FrontDoorEndpoint struct {
+	Enabled    bool
+	Listening  bool
+	Addr       string
+	HostNames  []string
+	RootCAFile string
+	// Cleartext reports that the live listener is serving WITHOUT TLS.
+	Cleartext bool
+}
+
+// Configured reports whether a token minted now could actually be used.
+//
+// Enabled-but-not-listening is the case worth naming: the operator asked for
+// the surface and it failed to start, so a credential minted against it works
+// nowhere and nothing on screen would say so.
+func (e FrontDoorEndpoint) Configured() bool { return e.Enabled && e.Listening }
+
+// FrontDoorEndpoint asks the daemon where the front door actually is.
+func (b *Bound) FrontDoorEndpoint(ctx context.Context) (FrontDoorEndpoint, error) {
+	res, err := b.authed(ctx, "frontdoor.endpoint")
+	if err != nil {
+		return FrontDoorEndpoint{}, err
+	}
+	m, _ := res.(map[string]any)
+	out := FrontDoorEndpoint{
+		Enabled:    mB(m, "enabled"),
+		Listening:  mB(m, "listening"),
+		Addr:       mS(m, "addr"),
+		RootCAFile: mS(m, "root_ca_file"),
+		Cleartext:  mB(m, "cleartext"),
+	}
+	for _, h := range asList(m["host_names"]) {
+		if s, ok := h.(string); ok {
+			out.HostNames = append(out.HostNames, s)
+		}
+	}
+	return out, nil
+}
+
+// SetConnectionProfile switches a connection's capability profile. Admin only.
+//
+// The caller is expected to have told the user what the switch turns on —
+// front-door reachability is only the first of three consequences (ADR-0086
+// §9), and a UI that said just "enable front door access" would be lying by
+// omission.
+func (b *Bound) SetConnectionProfile(ctx context.Context, connID int64, profile string) error {
+	_, err := b.authed(ctx, "conn.set_profile", connID, profile)
+	return err
 }
 
 func (b *Bound) CreateConnection(ctx context.Context, name, engine, dsn string) (int64, error) {
@@ -1045,11 +1108,21 @@ func splitAllowedIPs(s string) []string {
 	return out
 }
 
-// CreatePAT mints a token for the CALLING user. days is 0 for the server
-// default or 1..365; allowedIPs must be a subset of the caller's own
-// allowlist rows and is sent as the CSV the wire expects.
-func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedIPs []string) (PATSecret, error) {
-	res, err := b.authed(ctx, "auth.token_create", name, days, strings.Join(allowedIPs, ","))
+// CreatePAT mints a token for the CALLING user, BOUND TO ONE CONNECTION.
+//
+// days is 0 for the server default or 1..365; allowedIPs must be a subset of
+// the caller's own allowlist rows and is sent as the CSV the wire expects.
+//
+// connID is not optional (ADR-0086 §1): every PAT names exactly one
+// connection, and the server refuses a mint against one the caller has no
+// grant on, one that is not enabled for front-door use, or one whose target
+// database name has not been recorded.
+func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedIPs []string, connID int64, debugCleartext bool) (PATSecret, error) {
+	flag := int64(0)
+	if debugCleartext {
+		flag = 1
+	}
+	res, err := b.authed(ctx, "auth.token_create", name, days, strings.Join(allowedIPs, ","), connID, flag)
 	if err != nil {
 		return PATSecret{}, err
 	}

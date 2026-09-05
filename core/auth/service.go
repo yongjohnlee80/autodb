@@ -64,6 +64,20 @@ type Service struct {
 	// can make the cap race deterministic. Nil in production.
 	testAfterCapLock func()
 
+	// servingCleartext reports whether THIS daemon is currently running its
+	// front door without TLS (ADR-0086 §10).
+	//
+	// A seam rather than config, because core/auth sits below the front door
+	// and must not import it — and a function rather than a value, because the
+	// answer is a property of a listener that binds after this Service is
+	// built.
+	//
+	// NIL MEANS FALSE, and that default is the whole safety of the mint gate:
+	// a Service assembled without this (every test, every non-serving mode)
+	// refuses to mint a cleartext debug token rather than minting one because
+	// nobody wired the question up.
+	servingCleartext func() bool
+
 	// patCompares counts PAT hash-and-compare operations for the
 	// comparable-work assertion. Per-service so parallel tests cannot
 	// interleave into each other's deltas.
@@ -138,6 +152,20 @@ func New(store *meta.Store, opts ...Option) (*Service, error) {
 		}
 	}
 	return s, nil
+}
+
+// WithServingCleartext wires the front door's live TLS state into the mint gate.
+//
+// Only cmd/autodb calls this, and only when the operator has written out the
+// acknowledgement phrase. Everything else leaves it nil, which reads as "not
+// serving cleartext" and refuses the mint.
+func WithServingCleartext(fn func() bool) Option {
+	return func(s *Service) error { s.servingCleartext = fn; return nil }
+}
+
+// servingCleartextNow answers the mint gate's question, failing closed.
+func (s *Service) servingCleartextNow() bool {
+	return s.servingCleartext != nil && s.servingCleartext()
 }
 
 // Unlocked reports whether the master key is available in this process.

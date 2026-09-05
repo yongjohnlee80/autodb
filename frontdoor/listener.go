@@ -138,6 +138,10 @@ type Listener struct {
 	wg     sync.WaitGroup
 	closed chan struct{}
 	once   sync.Once
+	// cleartextDebug serves without TLS (ADR-0086 §10). It decides the
+	// startup exchange, which session event is audited, and which credential
+	// class the listener will accept.
+	cleartextDebug bool
 }
 
 // Event is one front-door audit event (matrix §1.3 vocabulary).
@@ -169,6 +173,14 @@ type Options struct {
 	Now     func() time.Time
 	OnLog   func(string)
 	OnEvent func(Event)
+
+	// CleartextDebug serves this listener WITHOUT TLS (ADR-0086 §10).
+	//
+	// Carried as its own field rather than inferred from a nil tls.Config,
+	// because those are different facts: absent material is a
+	// misconfiguration and must keep failing, while this is an acknowledged
+	// choice an operator wrote out in full.
+	CleartextDebug bool
 
 	// Authn is the engine. Nil denies every connection, audited.
 	Authn Authenticator
@@ -280,7 +292,12 @@ type Options struct {
 // Open binds the listener. TLS material must already be validated — see
 // LoadServerTLS, which the daemon calls BEFORE this (matrix row 2.1b).
 func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
-	if tlsCfg == nil {
+	// A nil tls.Config is STILL a refusal by default. The cleartext debugging
+	// mode is not "TLS material happened to be missing" — it is an explicit,
+	// acknowledged choice, and it has to be spelled out here rather than
+	// inferred from an absence, or the day a certificate fails to load this
+	// surface would quietly start serving in the clear.
+	if tlsCfg == nil && !opt.CleartextDebug {
 		return nil, errors.New("frontdoor: refusing to listen without validated TLS material")
 	}
 	// The caps are resolved BEFORE the bind. A listener that binds and then
@@ -297,7 +314,8 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 			return nil, fmt.Errorf("frontdoor: binding %s: %w", addr, err)
 		}
 	}
-	l := &Listener{ln: ln, tls: tlsCfg, closed: make(chan struct{}), live: map[net.Conn]struct{}{}}
+	l := &Listener{ln: ln, tls: tlsCfg, cleartextDebug: opt.CleartextDebug,
+		closed: make(chan struct{}), live: map[net.Conn]struct{}{}}
 	l.now = opt.Now
 	if l.now == nil {
 		l.now = time.Now
@@ -567,7 +585,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 	}()
 	l.onEvent(Event{Kind: "fd.conn_open", Peer: peer})
 
-	secure, out, err := runStartup(raw, l.tls, l.now, l.dl)
+	secure, out, err := runStartup(raw, l.tls, l.cleartextDebug, l.now, l.dl)
 	switch {
 	case errors.Is(err, errCancelRequest):
 		// ROW 2.3: the cancel connection is answered by processing the pair
@@ -631,7 +649,20 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		l.onEvent(Event{Kind: "fd.tls_fail", Reason: reason, Peer: peer, Detail: detail})
 		return
 	}
-	if secure != nil {
+	// fd.tls_ok is emitted for a TLS handshake and NOTHING ELSE.
+	//
+	// It used to key off `secure != nil`, which was the same question while a
+	// non-nil connection could only be a *tls.Conn. In cleartext mode the
+	// startup exchange returns a perfectly ordinary net.Conn, so that test
+	// would audit a CLEARTEXT session as a successful TLS handshake — an
+	// operator counting healthy handshakes would count sessions that never had
+	// one. The mode decides, not the nilness.
+	switch {
+	case l.cleartextDebug:
+		// A DISTINCT event kind, not a variant: this is what lets a trail
+		// answer "which tokens crossed in the clear, and must be rotated?"
+		l.onEvent(Event{Kind: "fd.cleartext_session", Peer: peer})
+	case secure != nil:
 		l.onEvent(Event{Kind: "fd.tls_ok", Peer: peer})
 	}
 

@@ -82,7 +82,7 @@ func pgLoopWithEngine(t *testing.T) (addr, secret, database string, eng *exec.En
 		t.Fatalf("enabling the session profile: %v", err)
 	}
 
-	pat, err := svc.CreatePAT(ctx, rootTok, fmt.Sprintf("fd-loop-%d", time.Now().UnixNano()), 0, nil)
+	pat, err := svc.CreatePAT(ctx, rootTok, fmt.Sprintf("fd-loop-%d", time.Now().UnixNano()), connID, 0, nil, false)
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}

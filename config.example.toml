@@ -351,6 +351,108 @@ bind = "127.0.0.1:5432"
 # writing cert.pem where fullchain.pem was meant looks like.
 # tls_root_ca_file = "/etc/autodb/tls/ca.pem"
 
+# ---------------------------------------------------------------------------
+# TURNING TLS OFF, FOR DEBUGGING ONLY.
+#
+# This is the one setting on this surface that WEAKENS a ratified security
+# property, so read the whole comment before you set it.
+#
+# WHAT IT COSTS: with TLS off, EVERY ACCESS TOKEN CROSSES THE WIRE IN
+# CLEARTEXT. A token works from anywhere it is admitted until it is revoked, so
+# an intercepted one is a credential an attacker keeps -- not a session they
+# have to re-establish. ADR-0075 chose sslmode=verify-full over `require`
+# precisely because an unauthenticated channel lets an active MITM collect
+# tokens, and this is a deliberate, documented exception for debugging rather
+# than a reversal of that decision.
+#
+# It is a SENTENCE, not a flag, and the only accepted value is the one below.
+# `true` is refused. That is on purpose: a boolean is copy-pasteable from a blog
+# post and reads as ordinary configuration, while a sentence stating the
+# consequence cannot be set absent-mindedly or inherited from an example nobody
+# read. Any other value fails config load rather than being ignored.
+#
+# WHAT BOUNDS IT is not the bind address -- a non-loopback bind is permitted,
+# and the administrator owns that deployment decision. What bounds it is that a
+# cleartext listener accepts ONLY tokens minted for it (`debug_cleartext`),
+# whose own allowed_ips list is then their entire admission gate, and which are
+# REFUSED on a TLS listener. Such a token can only be minted by an admin, and
+# only while this mode is actually running -- so tokens cannot accumulate on a
+# TLS-only install and all wake up the day someone turns this on.
+#
+# When it is set, cert/key/host names below are not required: there is no
+# identity to prove.
+# insecure_disable_tls = "i-accept-that-every-pat-crosses-in-cleartext"
+
+# ---------------------------------------------------------------------------
+# GETTING A CERTIFICATE -- the short way.
+#
+#   autodb --create-cert
+#
+# It reads tls_host_names above, writes ca.pem / cert.pem / key.pem into a
+# tls/ directory beside this config, and prints the block to paste back here
+# plus the DSN to hand a developer. Then:
+#
+#   autodb --create-cert --export-ca     # print ca.pem again, for a new hire
+#   autodb --create-cert --leaf-only     # renew, or add an address, keeping
+#                                        # the SAME ca.pem everyone holds
+#
+# GIVE DEVELOPERS ONE FILE: ca.pem. It is public -- commit it internally, paste
+# it in chat. key.pem NEVER leaves this host: anybody holding it can impersonate
+# this front door and collect other developers' tokens, which is the exact
+# attack mandatory TLS prevents, arriving through the filesystem instead of the
+# network.
+#
+# WHY IT IS SAFER THAN mkcert, which is the obvious alternative: mkcert installs
+# an UNCONSTRAINED CA into your machine trust store -- one that can mint a valid
+# certificate for any domain on the internet, for as long as it is installed.
+# autodb's CA is never installed machine-wide and carries X.509 name
+# constraints, so it cannot sign anything outside the names above even if this
+# host is compromised.
+#
+# IT WORKS WITHOUT A DNS NAME. Put the address in tls_host_names and the
+# certificate carries it as an IP SAN. Verified against the three stacks a
+# client here can be using -- libpq/psql, pgjdbc (which is what DataGrip runs)
+# and Go -- each with a control proving the check was actually running. Use a
+# RESERVED static address: an ephemeral one changes on stop/start and the
+# certificate would have to be reissued.
+#
+# NOT the production path for a public deployment: prefer a real ACME
+# certificate. This is for development and internal hosts.
+#
+# ---------------------------------------------------------------------------
+# GETTING A CERTIFICATE the other way, with mkcert.
+#
+# Kept because it is what most people reach for first, and because the three
+# things that bite are worth knowing whichever route you take.
+#
+#   mkcert -install                  # once per machine: creates a local CA
+#   mkcert localhost 127.0.0.1 ::1   # the cert and key, with matching SANs
+#
+# Three things bite, each of which has cost someone an hour:
+#
+#  1. verify-full verifies the NAME IN THE DSN, so every name a developer might
+#     dial must be a SAN on the certificate. `localhost` and `127.0.0.1` are
+#     DIFFERENT entries -- mkcert includes only what you list, and a DSN using
+#     the one you omitted fails at the client with an error that reads like a
+#     client problem.
+#  2. `mkcert -install` does NOT reach psql or JetBrains. It installs the CA
+#     into the OS and browser trust stores; libpq reads ~/.postgresql/root.crt
+#     and pgjdbc uses a Java truststore or an explicit sslrootcert. So the
+#     client still needs the CA named:
+#       ...?sslmode=verify-full&sslrootcert=$(mkcert -CAROOT)/rootCA.pem
+#  3. rootCA-key.pem is a real credential -- it can mint a certificate for any
+#     name that machine trusts. It stays on the machine that generated it and
+#     is never shared or committed.
+#
+# For a TEAM rather than one machine, the shape that scales is an internal CA
+# (step-ca runs ACME, so developers get short-lived certificates automatically
+# and the root is distributed once). "Everyone runs mkcert" works for a handful
+# of developers and becomes an unmanaged CA per laptop beyond that.
+#
+# Only ca.pem -- the CA CERTIFICATE -- is given to developers. It is not a
+# secret. The KEY never leaves the host: anyone holding it can impersonate this
+# front door and collect other people's tokens.
+
 # How many connections of each target pool are held back from wire leases,
 # for the interactive surfaces and the engine's own control queries. Without
 # it the front door can take the whole pool and the TUI stops working, with

@@ -125,9 +125,46 @@ type FrontDoor struct {
 	AuthWorkers       int `toml:"auth_workers"`
 	AuthFailuresPerIP int `toml:"auth_failures_per_ip"`
 
+	// InsecureDisableTLS turns TLS OFF on this surface, for debugging.
+	//
+	// A STRING, not a bool, and its only accepted value is the acknowledgement
+	// phrase below. That is deliberate: `tls = false` is copy-pasteable from a
+	// blog post and greps as ordinary configuration, while a sentence stating
+	// the consequence cannot be set absent-mindedly or inherited from an
+	// example someone did not read.
+	//
+	// WHAT IT COSTS, written here as well as in config.example.toml because
+	// ADR-0086 R4 requires the reason to be readable at the point that honours
+	// it, not only where it is set: with TLS off, EVERY ACCESS TOKEN CROSSES
+	// THE WIRE IN CLEARTEXT, and a token works from anywhere it is admitted
+	// until it is revoked — so an intercepted one is a credential an attacker
+	// keeps. ADR-0075 §4 chose verify-full over require for exactly this
+	// reason. This is a deliberate, documented exception for debugging, not a
+	// reversal of that decision.
+	//
+	// The bound on it is NOT loopback (Johno ruled a non-loopback bind
+	// permitted, 2026-09-05: the admin owns the deployment decision). It is
+	// that a cleartext listener accepts ONLY tokens minted `debug_cleartext`,
+	// whose own allowed_ips is then their entire admission gate.
+	InsecureDisableTLS string `toml:"insecure_disable_tls"`
+
 	// ControlLaneBytes is the reserved control lane (§1.4). Unset derives
 	// max_conns × 64 KiB, and it may only be RAISED above that.
 	ControlLaneBytes int64 `toml:"control_lane_bytes"`
+}
+
+// CleartextAcknowledgement is the only value insecure_disable_tls accepts.
+//
+// Typing it is the point. An operator who sets this has written down what it
+// does, in a file someone else will read.
+const CleartextAcknowledgement = "i-accept-that-every-pat-crosses-in-cleartext"
+
+// CleartextDebug reports whether this front door serves without TLS.
+//
+// One predicate, so no caller re-derives the comparison and none can drift
+// into accepting a different spelling.
+func (f FrontDoor) CleartextDebug() bool {
+	return f.InsecureDisableTLS == CleartextAcknowledgement
 }
 
 // DefaultResidentBudgetBytes and MaxResidentBudgetBytes are ADR-0075 §4's
@@ -560,6 +597,24 @@ func DefaultPath() (string, error) {
 	return filepath.Join(dir, "autodb", "config.toml"), nil
 }
 
+// ResolvePath is where a config file WOULD be read from: the given path, or
+// the default location when it is empty.
+//
+// Exported because callers need the answer for reasons other than reading the
+// file — --create-cert puts the generated TLS material beside the config that
+// will name it. Load calls this too, so there is ONE rule for where autodb's
+// configuration lives rather than a second copy that agrees until someone
+// changes the first ([[shared-resolver-single-source-of-truth]]).
+//
+// It reports where a file WOULD be, not whether one is there: a missing config
+// is not an error anywhere else in this package and must not become one here.
+func ResolvePath(path string) (string, error) {
+	if path != "" {
+		return path, nil
+	}
+	return DefaultPath()
+}
+
 // DefaultMetaPath returns the default sqlite meta-store location:
 // $XDG_DATA_HOME/autodb/meta.db.
 func DefaultMetaPath() (string, error) {
@@ -579,14 +634,12 @@ func DefaultMetaPath() (string, error) {
 // file must decode without unknown keys and validate.
 func Load(path string) (Config, error) {
 	cfg := Default()
-	if path == "" {
-		p, err := DefaultPath()
-		if err != nil {
-			return Config{}, err
-		}
-		path = p
+	path, err := ResolvePath(path)
+	if err != nil {
+		return Config{}, err
 	}
-	md, err := toml.DecodeFile(path, &cfg)
+	md, derr := toml.DecodeFile(path, &cfg)
+	err = derr
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return cfg, cfg.validate()
@@ -727,6 +780,25 @@ func (f FrontDoor) validate(poolMaxConns int) error {
 	if _, _, err := net.SplitHostPort(f.Bind); err != nil {
 		return fmt.Errorf("%w: frontdoor.bind %q is not host:port: %v", ErrInvalid, f.Bind, err)
 	}
+	// The cleartext debugging exception (ADR-0086 §10) is checked BEFORE the
+	// TLS requirements, because it is what makes them optional.
+	//
+	// Any value other than the exact acknowledgement is a REFUSAL, not a
+	// falsy-looking ignore. Someone who wrote `insecure_disable_tls = true`
+	// meant to turn TLS off; silently serving TLS anyway would be a surprise in
+	// the safe direction today and a trap the day the parsing changes.
+	if v := strings.TrimSpace(f.InsecureDisableTLS); v != "" && v != CleartextAcknowledgement {
+		return fmt.Errorf("%w: frontdoor.insecure_disable_tls must be exactly %q — it is a "+
+			"sentence rather than a flag so that turning TLS off cannot be done without stating "+
+			"what it costs: every access token then crosses the wire in cleartext, and a token "+
+			"works from anywhere it is admitted until it is revoked",
+			ErrInvalid, CleartextAcknowledgement)
+	}
+	if f.CleartextDebug() {
+		// Cert, key and host names are not required in this mode — there is no
+		// identity to prove. Everything else below still applies.
+		return f.validateBudgets(poolMaxConns)
+	}
 	// TLS is not optional on this surface and neither half of it is. A cert
 	// without a key cannot serve, and a key without a cert cannot prove
 	// anything — either alone is a half-written intention, so both are named
@@ -758,6 +830,14 @@ func (f FrontDoor) validate(poolMaxConns int) error {
 			return fmt.Errorf("%w: frontdoor.tls_host_names[%d] is blank", ErrInvalid, i)
 		}
 	}
+	return f.validateBudgets(poolMaxConns)
+}
+
+// validateBudgets checks the numeric limits, which apply in EVERY mode.
+// Extracted so the cleartext path shares them rather than restating them —
+// the exception is about TLS material, not about budgets, and a second copy
+// is how the two drift.
+func (f FrontDoor) validateBudgets(poolMaxConns int) error {
 	if f.ReservedHeadroom < 0 {
 		return fmt.Errorf("%w: frontdoor.reserved_headroom is %d; it cannot be negative",
 			ErrInvalid, f.ReservedHeadroom)

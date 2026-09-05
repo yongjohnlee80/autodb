@@ -1,5 +1,9 @@
 /bin/
 /dist/
+# `go build ./cmd/autodb/` writes the binary into the working directory, so a
+# `git add -A` sweeps 30-odd MB into the tree. It happened once; the name is
+# the package's, so it will happen again.
+/autodb
 *.test
 coverage.out
 .env

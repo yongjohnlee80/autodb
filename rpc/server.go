@@ -71,17 +71,62 @@ type Server struct {
 	notesDir string // where per-workspace notes live; hello reports it so
 	//               the frontends resolve notes without re-deriving config
 
+	// frontDoor reports the LIVE state of the pgwire listener, or nil when
+	// the daemon was assembled without one (every test, and any install with
+	// the surface off). A FUNCTION rather than a snapshot: the listener binds
+	// after config is read and may fail to bind at all, so a value captured at
+	// New would be config INTENT, and intent is exactly what a connection card
+	// must not print (ADR-0086 §8).
+	frontDoor func() FrontDoorInfo
+
 	stop     chan struct{} // closed by RequestShutdown
 	stopOnce sync.Once
+}
+
+// FrontDoorInfo is what a client needs in order to dial the front door, read
+// from the live listener rather than from configuration.
+//
+// It carries NO secret. The connection card pairs it with a freshly minted
+// token, and the token is the client's business — plaintext DSNs and target
+// credentials never leave the security core (security-core-hardening R8).
+type FrontDoorInfo struct {
+	// Enabled is what the operator configured; Listening is whether a
+	// listener actually bound. They differ exactly when something went wrong,
+	// which is the case worth telling a user about: a token minted on an
+	// install whose front door failed to start is a credential that cannot be
+	// used anywhere, with nothing on screen saying so.
+	Enabled   bool
+	Listening bool
+	// Addr is the live bound address (Listener.Addr()), not the configured
+	// bind. They differ on ":0" and on any host resolving to several
+	// addresses, and the live one is what a client must dial.
+	Addr string
+	// HostNames are the names the certificate covers. A client using
+	// sslmode=verify-full must dial one of these, so the card shows them
+	// rather than leaving a user to discover the mismatch per connection.
+	HostNames []string
+	// RootCAFile is the CA a client should verify against when the server's
+	// material comes from a private CA. Empty means the host's system roots.
+	RootCAFile string
+	// Cleartext reports that this listener is serving WITHOUT TLS
+	// (frontdoor.insecure_disable_tls, ADR-0086 §10).
+	//
+	// It travels with the endpoint rather than being re-derived by each
+	// consumer because two of them must agree with it: the card's sslmode is
+	// meaningless against a cleartext listener, and the TUI's banner exists
+	// only for this state. A consumer reading config for itself would be
+	// reading INTENT, and this struct reports the LIVE listener.
+	Cleartext bool
 }
 
 // Option configures a Server.
 type Option func(*options)
 
 type options struct {
-	logger   logger.Logger
-	listener net.Listener
-	notesDir string
+	logger    logger.Logger
+	listener  net.Listener
+	notesDir  string
+	frontDoor func() FrontDoorInfo
 }
 
 // WithLogger sets the transport logger.
@@ -102,6 +147,17 @@ func WithNotesDir(dir string) Option {
 	return func(o *options) { o.notesDir = dir }
 }
 
+// WithFrontDoor supplies a reader for the LIVE pgwire listener's state, so
+// frontdoor.endpoint can report what a client must actually dial.
+//
+// Deliberately a function over the running listener rather than the front-door
+// config: rpc.New is called with cfg.Server and has never been handed
+// cfg.FrontDoor, and passing the config would answer the wrong question. What
+// a card needs is whether the listener BOUND and WHERE, not what was asked for.
+func WithFrontDoor(fn func() FrontDoorInfo) Option {
+	return func(o *options) { o.frontDoor = fn }
+}
+
 // New assembles the server over an authenticated core. version is the
 // build-stamped autodb version reported by sys.hello.
 func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version string, opts ...Option) *Server {
@@ -114,7 +170,8 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 	s := &Server{
 		auth: authSvc, eng: eng, version: version,
 		instance: newInstanceID(), stop: make(chan struct{}),
-		notesDir: o.notesDir,
+		notesDir:  o.notesDir,
+		frontDoor: o.frontDoor,
 	}
 
 	ropts := []golibrpc.Option{

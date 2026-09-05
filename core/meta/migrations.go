@@ -386,6 +386,93 @@ var migrations = []migration{
 				UNIQUE (user_id, name))`,
 		},
 	},
+	// v13 (ADR-0086): a PAT names exactly ONE connection, and a connection
+	// records its target database name in plaintext.
+	//
+	// NO DATABASE-LEVEL FOREIGN KEY on pats.conn_id, and that is a decision
+	// rather than an omission (ADR-0086 §1, ruled by Johno 2026-09-05 after the
+	// r0 review). A `NOT NULL` REFERENCES column CANNOT BE ADDED TO A POPULATED
+	// TABLE on either engine — reproduced on both, with only the row count
+	// varying:
+	//
+	//	sqlite 3.53.4    0 rows -> ALTER OK    1 row -> "Cannot add a REFERENCES
+	//	                                                 column with non-NULL
+	//	                                                 default value"
+	//	PostgreSQL 17.6  0 rows -> ALTER OK    1 row -> FK violation,
+	//	                                                 Key (conn_id)=(0)
+	//
+	// One shape on both engines: succeeds empty, fails at the first row. Which
+	// is also why a migration cell MUST use a populated fixture — the empty one
+	// passes over this defect on both engines.
+	//
+	// CASCADE was rejected for a second, independent reason: it DELETES pat
+	// rows, and RevokePAT's contract is that a pat row is what an audit trail
+	// points AT. Deleting a connection instead REVOKES its bound tokens inside
+	// the delete transaction, keeping the record.
+	//
+	// conn_id = 0 is a TOMBSTONE, not a value. Nothing can derive which
+	// connection an existing token was for — that is the entire defect this
+	// migration exists to fix — so every pre-v13 token is invalidated below,
+	// and the auth path refuses conn_id = 0 independently of `revoked` so a
+	// hand-un-revoked row cannot come back as an unscoped token.
+	//
+	// debug_cleartext (ADR-0086 §10) marks a credential mintable only while the
+	// daemon serves cleartext, whose allowed_ips is its whole admission gate and
+	// which is refused on a TLS listener. It arrives here rather than in a later
+	// version because the ADR ships as one phase.
+	{
+		Version: 13,
+		SQLite: []string{
+			`ALTER TABLE pats ADD COLUMN conn_id BIGINT NOT NULL DEFAULT 0`,
+			`ALTER TABLE pats ADD COLUMN debug_cleartext INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE connections ADD COLUMN target_db TEXT NOT NULL DEFAULT ''`,
+			// The audit rows are written BEFORE the flip, while the set of
+			// active tokens is still identifiable, and they ride the same
+			// transaction as the flip (security-core-hardening R2: a mutation
+			// and its audit commit atomically, or neither does).
+			`INSERT INTO audit_log (user_id, ip, action, detail, created_at)
+				SELECT user_id, '', 'pat_invalidated_unscoped',
+				       'token ' || name || ' invalidated by schema v13: every access token is now ' ||
+				       'bound to a connection, and this one predates that. Re-mint it.',
+				       CAST(strftime('%s','now') AS INTEGER)
+				  FROM pats WHERE revoked = 0`,
+			// The marker is what lets the daemon TELL the operator, at every
+			// start, that tokens were invalidated — a credential that stops
+			// working with no explanation is the failure this whole change
+			// exists to prevent.
+			// HAVING with no GROUP BY, so NO ROW is written when there was
+			// nothing to invalidate. A marker saying "0 tokens invalidated"
+			// would make every fresh install carry a notice about an event
+			// that did not happen — and the daemon reports this at every
+			// start until it clears, so the noise would be permanent.
+			// Verified to behave identically on sqlite 3.53.4 and PG 17.6.
+			`INSERT INTO store_meta (key, value)
+				SELECT 'v13_unscoped_pats_invalidated', CAST(COUNT(*) AS TEXT)
+				  FROM pats WHERE revoked = 0 HAVING COUNT(*) > 0`,
+			`UPDATE pats SET revoked = 1 WHERE revoked = 0`,
+		},
+		Postgres: []string{
+			`ALTER TABLE pats ADD COLUMN conn_id BIGINT NOT NULL DEFAULT 0`,
+			`ALTER TABLE pats ADD COLUMN debug_cleartext INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE connections ADD COLUMN target_db TEXT NOT NULL DEFAULT ''`,
+			`INSERT INTO audit_log (user_id, ip, action, detail, created_at)
+				SELECT user_id, '', 'pat_invalidated_unscoped',
+				       'token ' || name || ' invalidated by schema v13: every access token is now ' ||
+				       'bound to a connection, and this one predates that. Re-mint it.',
+				       EXTRACT(EPOCH FROM now())::bigint
+				  FROM pats WHERE revoked = 0`,
+			// HAVING with no GROUP BY, so NO ROW is written when there was
+			// nothing to invalidate. A marker saying "0 tokens invalidated"
+			// would make every fresh install carry a notice about an event
+			// that did not happen — and the daemon reports this at every
+			// start until it clears, so the noise would be permanent.
+			// Verified to behave identically on sqlite 3.53.4 and PG 17.6.
+			`INSERT INTO store_meta (key, value)
+				SELECT 'v13_unscoped_pats_invalidated', COUNT(*)::text
+				  FROM pats WHERE revoked = 0 HAVING COUNT(*) > 0`,
+			`UPDATE pats SET revoked = 1 WHERE revoked = 0`,
+		},
+	},
 }
 
 // partitionVolumeTables is v11's computed step.

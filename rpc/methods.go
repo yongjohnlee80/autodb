@@ -120,6 +120,18 @@ var publicErrs = []struct {
 	{auth.ErrPATBadExpiry, CodeInvalidToken},
 	{auth.ErrPATBadAllowedIPs, CodeInvalidToken},
 	{auth.ErrPATNotFound, CodeInvalidToken},
+	// ADR-0086's mint gates. Both MUST be mapped: an unmapped sentinel
+	// reaches the caller as a -32603 internal fault, which would tell someone
+	// who named the wrong connection that the SERVER broke — the same reason
+	// ErrPATNotFound is on this list.
+	//
+	// ErrPATConnDenied deliberately covers "no such connection" AND "not
+	// yours" with one code and one text, so the pair cannot be told apart
+	// from the wire (R13). ErrPATConnNotFrontDoor is post-grant and names the
+	// connection on purpose: it is the one refusal that has to be actionable.
+	{auth.ErrPATConnDenied, CodeInvalidToken},
+	{auth.ErrPATConnNotFrontDoor, CodeInvalidToken},
+	{auth.ErrPATDebugCleartextRefused, CodeInvalidToken},
 	{exec.ErrSessionBusy, CodeSessionBusy},
 	{exec.ErrSessionCapExceeded, CodeSessionCapExceeded},
 	{exec.ErrConnectionDraining, CodeConnectionDraining},
@@ -739,8 +751,14 @@ func (s *Server) register() {
 		}, nil
 	})
 
+	// auth.token_create takes SIX arguments as of ADR-0086: conn_id is new and
+	// is not optional, because every PAT is bound to exactly one connection and
+	// there is no unscoped form. exactArgs is exact, so an old client meets a
+	// clean arity error rather than minting something unbound — which is the
+	// shape a breaking change should have when the alternative is a credential
+	// that silently reaches everything its owner is granted.
 	s.rpc.Handle("auth.token_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
-		if err := exactArgs(req.Params, 4); err != nil {
+		if err := exactArgs(req.Params, 6); err != nil {
 			return nil, err
 		}
 		token, err := argStr(req.Params, 0, "token")
@@ -756,6 +774,18 @@ func (s *Server) register() {
 			return nil, err
 		}
 		rawIPs, err := argStr(req.Params, 3, "allowed_ips")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 4, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		// debug_cleartext (ADR-0086 §10). Refused unless the caller is an
+		// admin AND this daemon is serving cleartext right now — the engine
+		// enforces that, not this handler, so a different caller cannot reach
+		// a weaker path.
+		debugCleartext, err := argInt(req.Params, 5, "debug_cleartext")
 		if err != nil {
 			return nil, err
 		}
@@ -776,7 +806,8 @@ func (s *Server) register() {
 			return nil, wireErr(fmt.Errorf("%w: %d days requested; the range is 1..%d, or 0 for "+
 				"the default", auth.ErrPATBadExpiry, days, maxTokenDays))
 		}
-		out, cerr := s.auth.CreatePAT(ctx, token, name, time.Duration(days)*24*time.Hour, ips)
+		out, cerr := s.auth.CreatePAT(ctx, token, name, connID,
+			time.Duration(days)*24*time.Hour, ips, debugCleartext != 0)
 		if cerr != nil {
 			return nil, wireErr(cerr)
 		}
@@ -936,6 +967,10 @@ func (s *Server) register() {
 				"id": c.ID, "name": c.Name, "engine": c.Engine,
 				"created_by": c.CreatedBy, "created_at": c.CreatedAt,
 				"updated_at": c.UpdatedAt,
+				// ADR-0086: the manager shows what a connection's profile IS
+				// and what it points at, so an operator is not deciding
+				// whether to expose something from its name alone.
+				"profile": c.Profile, "target_db": c.TargetDB,
 			})
 		}
 		return out, nil
@@ -953,6 +988,62 @@ func (s *Server) register() {
 			return nil, err
 		}
 		return nil, wireErr(s.eng.DeleteConnection(ctx, token, connID, peerIP(req)))
+	})
+	// frontdoor.endpoint reports what a client must dial. It takes the bearer
+	// token and re-resolves authority like every other privileged verb
+	// (security-core-hardening R1) — the values look harmless, but "where does
+	// this install expose a database surface" is not a question an
+	// unauthenticated caller gets to ask.
+	//
+	// It reports the LIVE listener, never config intent: a card printing the
+	// configured bind while the listener failed to start would send a
+	// developer to debug their client.
+	s.rpc.Handle("frontdoor.endpoint", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.auth.ValidateToken(ctx, token); err != nil {
+			return nil, wireErr(err)
+		}
+		var info FrontDoorInfo
+		if s.frontDoor != nil {
+			info = s.frontDoor()
+		}
+		return map[string]any{
+			"enabled":      info.Enabled,
+			"listening":    info.Listening,
+			"addr":         info.Addr,
+			"host_names":   toAnyList(info.HostNames),
+			"root_ca_file": info.RootCAFile,
+			"cleartext":    info.Cleartext,
+		}, nil
+	})
+
+	// conn.set_profile is its OWN verb, not a field on a generic update
+	// (ADR-0086 §9): switching a connection to the session profile is an
+	// exposure decision and gets its own audit action so an operator can count
+	// them.
+	s.rpc.Handle("conn.set_profile", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		profile, err := argStr(req.Params, 2, "profile")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.eng.SetConnectionProfile(ctx, token, connID, profile, peerIP(req)))
 	})
 	s.rpc.Handle("conn.test", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
@@ -1493,4 +1584,13 @@ func lastUsedString(unix int64) string {
 		return "never"
 	}
 	return time.Unix(unix, 0).Format(time.RFC3339)
+}
+
+// toAnyList widens a string slice for the wire codec, which encodes []any.
+func toAnyList(in []string) []any {
+	out := make([]any, 0, len(in))
+	for _, s := range in {
+		out = append(out, s)
+	}
+	return out
 }

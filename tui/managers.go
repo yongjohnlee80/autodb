@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/style"
 	"github.com/yongjohnlee80/golib/tui/widget"
@@ -237,6 +238,18 @@ func (m *Model) openConnManager() {
 		{Title: "ID", Width: 5, Cell: func(c ConnInfo) string { return strconv.FormatInt(c.ID, 10) }},
 		{Title: "NAME", Cell: func(c ConnInfo) string { return c.Name }},
 		{Title: "ENGINE", Width: 10, Cell: func(c ConnInfo) string { return c.Engine }},
+		// The front-door columns (ADR-0086 §9). FRONT DOOR reads yes/no rather
+		// than the raw profile string, because "session" does not tell an
+		// operator what it means; TARGET DB is the name a client types into a
+		// Database field, and showing it is what would have made an evening's
+		// confusion visible in seconds.
+		{Title: "FRONT DOOR", Width: 11, Cell: func(c ConnInfo) string {
+			if c.Profile == meta.ProfileSession {
+				return "yes"
+			}
+			return "no"
+		}},
+		{Title: "TARGET DB", Width: 16, Cell: func(c ConnInfo) string { return c.TargetDB }},
 	}
 	var g *manager[ConnInfo]
 	g = newManager(m, cols,
@@ -257,6 +270,11 @@ func (m *Model) openConnManager() {
 					})
 				}
 			}},
+			{'e', "front door…", func(sel ConnInfo, ok bool) {
+				if ok {
+					m.openProfileSwitch(g, sel)
+				}
+			}},
 			{'w', "attach→ws", func(sel ConnInfo, ok bool) {
 				if ok {
 					m.openAttachForm(g, sel.ID, sel.Name)
@@ -264,6 +282,71 @@ func (m *Model) openConnManager() {
 			}},
 		})
 	g.float = m.openFloat("connections", g)
+}
+
+// frontDoorProse is what an operator reads BEFORE exposing a connection.
+//
+// A raw literal on purpose: this is a screen of text, and building it from
+// escaped fragments is how it acquires a stray newline nobody notices until it
+// is in front of the person making an exposure decision.
+const frontDoorProse = `Opening the front door on this connection changes FOUR
+things, not one — and the last one can TAKE SOMETHING AWAY.
+Read them before you decide.
+
+  1. REACHABILITY. Anyone holding an access token bound to this
+     connection, and a grant on it, can reach it from the network —
+     from any address their account is admitted from.
+
+  2. GUARDED DATA-MODIFYING CTEs become admissible. Today this
+     connection refuses ANY statement carrying one, outright.
+
+  3. TRANSACTION CONTROL becomes admissible on a session. BEGIN,
+     COMMIT and ROLLBACK are refused here today and will start
+     being accepted, performed as engine state transitions rather
+     than forwarded to the target as text.
+
+  4. READERS MAY STOP WORKING. A reader runs inside a
+     server-enforced read-only transaction. If this connection's
+     driver cannot host one, every reader unit on it will be
+     REFUSED here, where today it runs under classifier
+     enforcement instead. Drivers without that capability at
+     present: sqlite. postgres and mysql are unaffected.
+
+This is an exposure decision and it is audited.
+`
+
+// openProfileSwitch asks whether to expose a connection to the front door, and
+// SAYS WHAT THAT TURNS ON.
+//
+// Deliberately prose and not a toggle. A label reading "enable front door
+// access" would be lying by omission: the profile changes execution semantics
+// beyond this surface, and the third consequence is one nobody would guess
+// from the name (ADR-0086 §9).
+func (m *Model) openProfileSwitch(g *manager[ConnInfo], sel ConnInfo) {
+	if sel.Profile == meta.ProfileSession {
+		m.openLeader("close the front door on "+sel.Name+"?", []leaderEntry{
+			{'y', "close it — open sessions are dropped", func() {
+				managerCall(g, "front door off "+sel.Name, func(c context.Context, b *Bound) error {
+					return b.SetConnectionProfile(c, sel.ID, meta.ProfileV1Compat)
+				})
+			}},
+		})
+		return
+	}
+	target := sel.TargetDB
+	if target == "" {
+		target = "(none recorded — clients use the connection name)"
+	}
+	m.openTextFloat("front door: "+sel.Name+" ("+sel.Engine+")",
+		frontDoorProse+"\nClients would connect with Database = "+target+
+			"\nor the connection name "+sel.Name+".\n")
+	m.openLeader("open the front door on "+sel.Name+"?", []leaderEntry{
+		{'y', "yes — expose it, and audit the change", func() {
+			managerCall(g, "front door on "+sel.Name, func(c context.Context, b *Bound) error {
+				return b.SetConnectionProfile(c, sel.ID, meta.ProfileSession)
+			})
+		}},
+	})
 }
 
 func (m *Model) openConnForm(g *manager[ConnInfo]) {
@@ -614,7 +697,7 @@ func (m *Model) openPATManager(userID int64, who string) {
 	g = newManager(m, cols,
 		func(c context.Context, b *Bound) ([]PATRow, error) { return b.PATs(c, userID) },
 		[]managerAction[PATRow]{
-			{'a', "create token", func(PATRow, bool) { m.openPATForm(g, userID) }},
+			{'a', "create token", func(PATRow, bool) { m.openPATForm(g, userID, who) }},
 			{'D', "revoke", func(sel PATRow, ok bool) {
 				if !ok {
 					return
@@ -714,7 +797,7 @@ func shortStamp(s string) string {
 // subset of it (ADR-0075 §4). Validating here means a bad entry is refused
 // while the user still has the form open and can fix it, rather than coming
 // back as a wire error after the fact.
-func (m *Model) openPATForm(g *manager[PATRow], userID int64) {
+func (m *Model) openPATForm(g *manager[PATRow], userID int64, who string) {
 	bound := g.bound
 	m.ctx.Go(func(c context.Context) (any, error) {
 		own, err := bound.UserIPs(c, userID)
@@ -728,21 +811,40 @@ func (m *Model) openPATForm(g *manager[PATRow], userID int64) {
 			// revoked rows too. Passing len(g.items) overstated used capacity
 			// after any revocation and would tell a user with room that they
 			// were full.
-			m.patForm(g, userID, own, activePATs(g.items))
+			m.patForm(g, userID, who, own, activePATs(g.items))
 		}}, nil
 	})
 }
 
-func (m *Model) patForm(g *manager[PATRow], userID int64, own []UserIPRow, active int) {
+func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []UserIPRow, active int) {
 	title := fmt.Sprintf("create token (%d of %d used)", active, auth.PATMaxPerUser)
 	m.openForm(title, []formField{
 		field("name (e.g. laptop-psql, jetbrains)"),
 		field("expires in days (blank = server default, max 365)"),
 		field("restrict to IPs, comma separated (blank = any of your allowed IPs)"),
+		// ADR-0086 §1: a token names exactly ONE connection. The field is
+		// required because there is no unscoped form — a PAT that reached
+		// every connection its owner is granted is the blast radius this
+		// binding exists to shrink.
+		field("connection id (SPC c lists them; the token reaches ONLY this one)"),
+		// ADR-0086 §10. Offered here rather than hidden behind a separate
+		// command because the ONLY way to get one is to ask at mint time, and
+		// the server refuses it unless the caller is an admin and this daemon
+		// is serving cleartext right now — so an ordinary user typing `y` gets
+		// a refusal that explains itself, not a silently weaker token.
+		field("cleartext debugging token? y/N (needs admin + a cleartext front door)"),
 	}, func(v []string) (bool, string) {
 		name := strings.TrimSpace(v[0])
 		if name == "" {
 			return false, "a name is required"
+		}
+		debugCleartext := strings.EqualFold(strings.TrimSpace(v[4]), "y")
+		connID, cerr := strconv.ParseInt(strings.TrimSpace(v[3]), 10, 64)
+		if cerr != nil || connID <= 0 {
+			// Refused HERE, while the form is still open and the value can be
+			// corrected, rather than as a server round trip — the same reason
+			// the day range is mirrored below.
+			return false, "a numeric connection id is required — the token reaches only that connection"
 		}
 		var days int64
 		if d := strings.TrimSpace(v[1]); d != "" {
@@ -774,26 +876,87 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, own []UserIPRow, activ
 				ips = append(ips, p)
 			}
 		}
+		if debugCleartext && len(ips) == 0 {
+			// Checked after the list is parsed, and refused HERE while the
+			// form is still open. In cleartext the token's own list is its
+			// WHOLE admission gate, so an empty one would mean "from anywhere"
+			// rather than "inherit" — the opposite of what empty means on
+			// every other token.
+			return false, "a cleartext debugging token needs an explicit IP list — that list is " +
+				"the token's whole admission gate, not a narrowing of yours"
+		}
+
 		// Not managerCall: creation is the one action with a RESULT the user
 		// must see, and the secret has to reach the screen on the loop
 		// goroutine in the same apply that reloads the list.
 		bound := g.bound
 		m.ctx.Go(func(c context.Context) (any, error) {
-			out, err := bound.CreatePAT(c, name, days, ips)
+			out, err := bound.CreatePAT(c, name, days, ips, connID, debugCleartext)
 			if err != nil {
 				msg := WireErrorMessage(err)
 				return managerReload{gen: bound.Gen(), apply: func() {
 					g.model.setError("create " + name + ": " + msg)
 				}}, nil
 			}
+			// The endpoint is read on the SAME goroutine as the mint, so the
+			// card shows the front door as it is NOW rather than as it was
+			// when the manager last refreshed. A failure here does not lose
+			// the token: the card renders with what it has and says the
+			// endpoint is unknown, because the secret exists only in this
+			// reply and must reach the screen either way.
+			ep, _ := bound.FrontDoorEndpoint(c)
+			conns, _ := bound.Connections(c)
 			return managerReload{gen: bound.Gen(), apply: func() {
 				g.model.setOK("create " + name + ": ok")
 				g.Reload()
-				m.revealPATSecret(out)
+				m.revealConnectionCard(out, connFor(conns, connID), ep, who)
 			}}, nil
 		})
 		return true, ""
 	})
+}
+
+// connFor finds the row a token was bound to, so the card can name the
+// database a client must type. A miss yields a bare row rather than nothing:
+// the token still has to reach the screen.
+func connFor(conns []ConnInfo, id int64) ConnInfo {
+	for _, c := range conns {
+		if c.ID == id {
+			return c
+		}
+	}
+	return ConnInfo{ID: id, Name: fmt.Sprintf("conn:%d", id)}
+}
+
+// revealConnectionCard replaces revealPATSecret (ADR-0086 §8).
+//
+// The token is still shown once and is still unrecoverable — what changed is
+// that everything ELSE needed to use it is on the same screen, because the
+// absence of the database name alone cost an hour with the first real client.
+//
+// TWO copy keys, and that is the price of the richer card rather than a
+// complaint about the old one: the previous float held nothing but the secret,
+// so its single `y` was exactly right. Move instructions into the body and one
+// key would paste a paragraph into a password field.
+func (m *Model) revealConnectionCard(out PATSecret, conn ConnInfo, ep FrontDoorEndpoint, user string) {
+	if user == "" {
+		// The card prints this into a DSN, so a blank would produce a broken
+		// line that LOOKS pasteable. Say it is unknown instead.
+		user = "your-autodb-user"
+	}
+	// ONE computation. The copy key gets the SAME string the screen shows —
+	// see buildCardText for why that is not a stylistic preference.
+	text, dsn := buildCardText(out.Secret, conn, ep, user, shortStamp(out.ExpiresAt))
+	card := &connCard{
+		model: m,
+		text:  text,
+		copies: []cardCopy{
+			{'y', "token", out.Secret},
+			{'Y', "DSN", dsn},
+		},
+	}
+	card.float = m.openFloatPct("token "+out.Name+" — y: token, Y: DSN, q/Esc: close (shown once)",
+		card, scriptPct)
 }
 
 // revealPATSecret shows a freshly minted token. The store keeps only a

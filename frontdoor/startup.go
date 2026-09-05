@@ -167,7 +167,11 @@ func asCancelRequest(err error) (processID uint32, secret []byte, ok bool) {
 // without exception (ADR-0075 §4). The ordering is not a preference — a
 // credential read before TLS is a credential an active MITM already has, and
 // this surface's whole credential model assumes the wire is private.
-func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadlines) (*tls.Conn, startupOutcome, error) {
+// runStartup returns a net.Conn rather than a *tls.Conn because in cleartext
+// debugging mode there is no TLS connection to return (ADR-0086 §10). Callers
+// must decide from the MODE, never from whether this is nil — those were the
+// same question only while TLS was mandatory.
+func runStartup(raw net.Conn, tlsCfg *tls.Config, cleartext bool, now func() time.Time, dl deadlines) (net.Conn, startupOutcome, error) {
 	// The pre-auth backend reads the SSLRequest from the PLAINTEXT
 	// connection. It is bounded before it reads anything, so a peer's first
 	// act cannot be to name a length we would then allocate for.
@@ -229,6 +233,26 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 				return nil, startupOutcome{}, tlsFailure(reason)
 			}
 		}
+		// CLEARTEXT MODE: hand off BEFORE pgproto3 decodes.
+		//
+		// The frame is classified from its own request code, and anything that
+		// is not one of the three negotiation codes is a StartupMessage. It is
+		// handed to the shared path UNCONSUMED, which matters twice over: the
+		// shared path reads the raw packet itself so a cleartext client gets
+		// the same version policy as a TLS one (row 2.5 negotiates any 3.x
+		// down; pgproto3 alone would refuse 3.1 outright), and the buffered
+		// reader travels with it so a pipelining client's already-read bytes
+		// are not stranded in a buffer nobody looks at again.
+		if cleartext {
+			if head, perr := br.Peek(8); perr == nil {
+				switch binary.BigEndian.Uint32(head[4:8]) {
+				case sslRequestCode, gssEncRequestCode, cancelRequestCode:
+					// Negotiation frames still go through the loop below.
+				default:
+					return cleartextStartup(br, raw, dl, now)
+				}
+			}
+		}
 		first, err := plain.ReceiveStartupMessage()
 		if err != nil {
 			// Row 2.1a: PostgreSQL 17's direct-TLS negotiation opens with a
@@ -248,6 +272,16 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 
 		switch msg := first.(type) {
 		case *pgproto3.SSLRequest:
+			if cleartext {
+				// Decline with 'N' and KEEP READING — the protocol's own way
+				// of refusing an option, exactly as row 2.2 already does for
+				// GSS. A client asking for TLS against a cleartext listener is
+				// not an error; libpq's sslmode=prefer asks every time.
+				if _, werr := raw.Write([]byte{'N'}); werr != nil {
+					return nil, startupOutcome{}, werr
+				}
+				continue
+			}
 			// Row 2.1: answer 'S' and begin TLS.
 			if _, werr := raw.Write([]byte{'S'}); werr != nil {
 				return nil, startupOutcome{}, werr
@@ -267,8 +301,10 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 			// Row 2.3: cancel connections are plaintext by protocol.
 			return nil, startupOutcome{}, cancelRequestError{ProcessID: msg.ProcessID, Secret: msg.SecretKey}
 		case *pgproto3.StartupMessage:
-			// Row 2.1 error path: a plaintext StartupMessage. No fallback —
-			// this surface has no unencrypted mode to fall back to.
+			// Row 2.1 error path: a plaintext StartupMessage while TLS is
+			// mandatory. No fallback — and in cleartext mode this is
+			// UNREACHABLE, because the peek above hands such a frame off
+			// before the library ever decodes it.
 			_ = msg
 			return nil, startupOutcome{Denied: reasonPlaintextStartup}, nil
 		default:
@@ -290,11 +326,29 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 		return nil, startupOutcome{}, tlsFailureDetail("tls-handshake", err.Error())
 	}
 
-	// Everything from here is inside TLS.
-	if err := secure.SetDeadline(now().Add(dl.startup)); err != nil {
-		return secure, startupOutcome{}, err
+	return startupOnStream(secure, secure, dl, now)
+}
+
+// startupOnStream runs everything AFTER the transport is settled: read the
+// startup packet, apply the matrix's version policy, decode and vet the
+// parameters.
+//
+// Shared by both transports on purpose. The TLS path calls it with the
+// tls.Conn; the cleartext path calls it with the raw conn and the BUFFERED
+// READER that pgproto3 has already read ahead into. Row 2.5's "negotiate any
+// 3.x down and continue" and row 2.5a's unsupported-major refusal are policy
+// this surface owns rather than the library's, so duplicating this for a second
+// transport is how the two would come to disagree about which clients connect.
+//
+// r is the reader and stream is the writer, and they are separate parameters
+// because in cleartext mode they ARE different objects — reading from the conn
+// while pgproto3 holds buffered bytes is how a pipelining client loses its
+// startup packet.
+func startupOnStream(stream net.Conn, r io.Reader, dl deadlines, now func() time.Time) (net.Conn, startupOutcome, error) {
+	if err := stream.SetDeadline(now().Add(dl.startup)); err != nil {
+		return stream, startupOutcome{}, err
 	}
-	be := pgproto3.NewBackend(secure, secure)
+	be := pgproto3.NewBackend(r, stream)
 	be.SetMaxBodyLen(PreAuthMaxBodyLen)
 
 	// The startup packet's VERSION is read here rather than delegated,
@@ -313,16 +367,16 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 	// So the length and version are read directly and the PARAMETERS are
 	// still decoded by the library — owning the fiddly part is not the goal,
 	// owning the policy the matrix pins is.
-	raw2, err := readStartupPacket(secure)
+	raw2, err := readStartupPacket(r)
 	if err != nil {
-		return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
+		return stream, startupOutcome{Denied: reasonStartupMalformed}, nil
 	}
 	version := binaryBigEndianUint32(raw2)
 
 	switch version {
 	case sslRequestCode:
 		// A second SSLRequest inside TLS is a protocol violation (row 2.1).
-		return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
+		return stream, startupOutcome{Denied: reasonStartupMalformed}, nil
 	case cancelRequestCode:
 		// Row 2.3, the in-TLS spelling. A protocol-3.0 CancelRequest is
 		// EXACTLY 12 bytes of body after the length field: the request code
@@ -335,9 +389,9 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 		// request (PR #44 r0, lector's P2), and guessing which four bytes a
 		// 3.2-shaped client meant is not the server's job on this surface.
 		if len(raw2) != 12 {
-			return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
+			return stream, startupOutcome{Denied: reasonStartupMalformed}, nil
 		}
-		return secure, startupOutcome{}, cancelRequestError{
+		return stream, startupOutcome{}, cancelRequestError{
 			ProcessID: binaryBigEndianUint32(raw2[4:8]),
 			Secret:    append([]byte(nil), raw2[8:]...),
 		}
@@ -345,7 +399,7 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 	if version>>16 != protocolMajor3 {
 		// Row 2.5a: an unsupported major is a refusal, not a negotiation.
 		// There is no 3.0 for a major-4 client to fall back to.
-		return secure, startupOutcome{Denied: reasonUnsupportedMajor}, nil
+		return stream, startupOutcome{Denied: reasonUnsupportedMajor}, nil
 	}
 
 	// Parameters decode first: row 2.5's NegotiateProtocolVersion must name
@@ -357,7 +411,7 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 	putUint32(raw2, protocolVersion30)
 	var sm pgproto3.StartupMessage
 	if derr := sm.Decode(raw2); derr != nil {
-		return secure, startupOutcome{Denied: reasonStartupMalformed}, nil
+		return stream, startupOutcome{Denied: reasonStartupMalformed}, nil
 	}
 	out := startupOutcome{Params: sm.Parameters}
 
@@ -376,7 +430,7 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 			UnrecognizedOptions: unrecognized,
 		})
 		if ferr := be.Flush(); ferr != nil {
-			return secure, startupOutcome{}, ferr
+			return stream, startupOutcome{}, ferr
 		}
 		out.Negotiated = true
 	}
@@ -400,21 +454,21 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, now func() time.Time, dl deadl
 	// existed. Everything after this line is map-based and structurally unable
 	// to see it (lector r0 MF2).
 	if dup, found := duplicateStartupKey(raw2); found {
-		return secure, startupOutcome{Denied: reasonStartupDuplicateKey, RefusedParam: dup, Negotiated: out.Negotiated}, nil
+		return stream, startupOutcome{Denied: reasonStartupDuplicateKey, RefusedParam: dup, Negotiated: out.Negotiated}, nil
 	}
 	check, ok := checkStartupParams(sm.Parameters)
 	if !ok {
 		// The REASON varies (a refused parameter, too many settings, an
 		// options string we could not read); the wire does not. denial() takes
 		// the reason and drops it, so this choice reaches the audit row only.
-		return secure, startupOutcome{Denied: check.Reason, RefusedParam: check.Refused, Negotiated: out.Negotiated}, nil
+		return stream, startupOutcome{Denied: check.Reason, RefusedParam: check.Refused, Negotiated: out.Negotiated}, nil
 	}
 	out.GUCs = check.GUCs
 	// Accepted. Apply the two accept-with-a-note rules to the map that flows
 	// onward, so the echo and the session see the truncated value while the
 	// audit sees the original.
 	out.Notes = normalizeStartupParams(out.Params)
-	return secure, out, nil
+	return stream, out, nil
 }
 
 // unrecognizedProtocolOptions returns the `_pq_.*` parameter names, sorted so
@@ -584,4 +638,16 @@ func s0Failure(err error) error {
 // refuses anyway.
 func isTLSClientHello(head []byte) bool {
 	return len(head) >= 2 && head[0] == 0x16 && head[1] == 0x03
+}
+
+// cleartextStartup continues a startup exchange that arrived WITHOUT TLS
+// (ADR-0086 §10).
+//
+// It is reached only when the operator has written out the acknowledgement
+// phrase. The StartupMessage has already been seen by the caller's peek, but
+// it has NOT been consumed from br — the caller detects it and hands the
+// buffered reader here so the shared path can read the raw packet and apply
+// the same version policy a TLS client gets.
+func cleartextStartup(br io.Reader, raw net.Conn, dl deadlines, now func() time.Time) (net.Conn, startupOutcome, error) {
+	return startupOnStream(raw, br, dl, now)
 }

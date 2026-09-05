@@ -40,12 +40,43 @@ type fixture struct {
 	store   *meta.Store
 	rootTok string
 	connID  int64
+	eng     *exec.Engine
 	addr    string
+}
+
+// frontDoorConn creates a connection a PAT may legally be bound to (ADR-0086
+// §6): postgres, session profile, with a target_db derived from its DSN.
+//
+// Created ON DEMAND rather than in newFixture, and that is the point: adding
+// it to the shared fixture changed what conn.list returns and broke an
+// unrelated test that asserts the full list. A fixture shared by every test in
+// a package is not the place for a row only two of them want.
+//
+// The DSN is parsed, never dialled — pgxpool.ParseConfig wants a well-formed
+// string, not a reachable server — so this costs no live PostgreSQL.
+func (f *fixture) frontDoorConn(t *testing.T) int64 {
+	t.Helper()
+	ctx := context.Background()
+	id, err := f.eng.CreateConnection(ctx, f.rootTok, fmt.Sprintf("frontdoor-%d", fixtureSeq.Add(1)),
+		"postgres", "postgres://u:p@127.0.0.1:5432/fixture_db?sslmode=disable", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("CreateConnection(front door): %v", err)
+	}
+	if uerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, id).
+		Set(meta.ConnProfile, meta.ProfileSession).Update(); uerr != nil {
+		t.Fatalf("enabling the session profile: %v", uerr)
+	}
+	return id
 }
 
 var fixtureSeq atomic.Int64
 
-func newFixture(t *testing.T) *fixture {
+// newFixture builds the shared server. The variadic options are appended to
+// the ones every fixture needs, so a cell that requires a surface the others do
+// not — a front door, say — asks for it WITHOUT changing what every other cell
+// gets. Adding it to the shared construction is how an unrelated test starts
+// failing for a reason its author cannot see.
+func newFixture(t *testing.T, opts ...rpc.Option) *fixture {
 	t.Helper()
 	ctx := context.Background()
 	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
@@ -76,7 +107,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "test-version",
-		rpc.WithListener(ln))
+		append([]rpc.Option{rpc.WithListener(ln)}, opts...)...)
 	runCtx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Run(runCtx) }()
@@ -95,7 +126,7 @@ func newFixture(t *testing.T) *fixture {
 			time.Sleep(time.Millisecond)
 		}
 	}
-	return &fixture{store: store, rootTok: rootTok, connID: connID, addr: srv.Addr()}
+	return &fixture{store: store, rootTok: rootTok, connID: connID, eng: eng, addr: srv.Addr()}
 }
 
 // client is a raw msgpack-RPC test client.

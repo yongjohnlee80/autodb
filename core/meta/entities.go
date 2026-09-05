@@ -109,10 +109,40 @@ type Connection struct {
 	CreatedBy    int64
 	CreatedAt    int64
 	UpdatedAt    int64
+	// TargetDB is the database name inside this connection's DSN, kept in
+	// PLAINTEXT (ADR-0086 §3).
+	//
+	// The database NAME is not a secret — the DSN's credentials are — and a
+	// column makes the startup `database` cross-check an indexed read instead
+	// of N DSN decryptions on the auth path. It also lets the TUI show what a
+	// connection actually points at, which is the fact whose absence cost an
+	// evening.
+	//
+	// Derived with the driver's own parser, never by substring matching, and
+	// populated wherever the DSN is set while the store is unlocked. A
+	// session-profile connection is required to have one, which is what makes
+	// the cross-check total rather than conditional. It is a CACHE of a fact
+	// sealed inside the DSN, so it is VERIFIED against the decrypted DSN when a
+	// session pins its target rather than trusted.
+	TargetDB string
 }
 
 // IsDebug reports whether the connection carries the debug profile.
 func (c *Connection) IsDebug() bool { return c.Debug != 0 }
+
+// Connection capability profiles — the permitted values of connections.profile.
+//
+// They live HERE, in the package that owns the column, because both layers
+// above need them and neither may import the other: core/auth gates PAT
+// minting on a connection's profile (ADR-0086 §6) and core/exec decides
+// statement admission from it, while core/auth sits BELOW core/exec and cannot
+// reach exec.Profile. Defining the literal a second time in auth would make
+// three copies of one fact — the migration DDL's default being the first.
+// exec.Profile is derived from these rather than restating them.
+const (
+	ProfileV1Compat = "v1compat"
+	ProfileSession  = "session"
+)
 
 type ConnField string
 
@@ -127,6 +157,7 @@ const (
 	ConnCreatedBy    ConnField = "created_by"
 	ConnCreatedAt    ConnField = "created_at"
 	ConnUpdatedAt    ConnField = "updated_at"
+	ConnTargetDB     ConnField = "target_db"
 )
 
 func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort, int64] {
@@ -141,6 +172,7 @@ func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort,
 		ConnCreatedBy:    {Column: "created_by", Scan: func(r *Connection) any { return &r.CreatedBy }, Value: func(r *Connection) any { return r.CreatedBy }},
 		ConnCreatedAt:    {Column: "created_at", Scan: func(r *Connection) any { return &r.CreatedAt }, Value: func(r *Connection) any { return r.CreatedAt }},
 		ConnUpdatedAt:    {Column: "updated_at", Scan: func(r *Connection) any { return &r.UpdatedAt }, Value: func(r *Connection) any { return r.UpdatedAt }},
+		ConnTargetDB:     {Column: "target_db", Scan: func(r *Connection) any { return &r.TargetDB }, Value: func(r *Connection) any { return r.TargetDB }},
 	})
 }
 
@@ -486,6 +518,27 @@ type PAT struct {
 	// LastUsedAt is written coalesced, never once per statement.
 	LastUsedAt int64
 	Revoked    int64 // 0/1 flag
+	// ConnID is the ONE connection this token may reach (ADR-0086 §1).
+	//
+	// Binding the credential is what dissolves the connection-name vs
+	// target-database-name ambiguity: two connections targeting a database
+	// called `test` — a local one and a PRODUCTION one — are told apart by
+	// WHICH TOKEN was presented, not by a string the client chose. It also
+	// shrinks blast radius on its own merits: a stolen token reaches one
+	// connection rather than every connection its owner is granted.
+	//
+	// ZERO IS A TOMBSTONE, NOT A VALUE. Pre-v13 rows carry 0 because nothing
+	// can derive which connection they were for; the migration revokes them
+	// and the auth path refuses 0 independently of Revoked, so a row
+	// un-revoked by hand cannot come back as an unscoped token.
+	ConnID int64
+	// DebugCleartext marks a token mintable ONLY while the daemon serves
+	// cleartext (ADR-0086 §10). Such a token REQUIRES a non-empty AllowedIPs,
+	// which is then its whole admission gate rather than a narrowing of its
+	// owner's — the inherited set is not consulted — and it is REFUSED on a
+	// TLS listener, so the relaxed perimeter cannot leave the debugging mode
+	// it was minted for. 0/1, matching users.disabled.
+	DebugCleartext int64
 }
 
 // IsRevoked reports whether the token has been revoked.
@@ -506,6 +559,9 @@ const (
 	PATExpiresAt  PATField = "expires_at"
 	PATLastUsedAt PATField = "last_used_at"
 	PATRevoked    PATField = "revoked"
+
+	PATConnID         PATField = "conn_id"
+	PATDebugCleartext PATField = "debug_cleartext"
 )
 
 func newPATs(conn dao.DataConn) *dao.Schema[*PAT, PATField, Sort, int64] {
@@ -520,5 +576,8 @@ func newPATs(conn dao.DataConn) *dao.Schema[*PAT, PATField, Sort, int64] {
 		PATExpiresAt:  {Column: "expires_at", Scan: func(r *PAT) any { return &r.ExpiresAt }, Value: func(r *PAT) any { return r.ExpiresAt }},
 		PATLastUsedAt: {Column: "last_used_at", Scan: func(r *PAT) any { return &r.LastUsedAt }, Value: func(r *PAT) any { return r.LastUsedAt }},
 		PATRevoked:    {Column: "revoked", Scan: func(r *PAT) any { return &r.Revoked }, Value: func(r *PAT) any { return r.Revoked }},
+
+		PATConnID:         {Column: "conn_id", Scan: func(r *PAT) any { return &r.ConnID }, Value: func(r *PAT) any { return r.ConnID }},
+		PATDebugCleartext: {Column: "debug_cleartext", Scan: func(r *PAT) any { return &r.DebugCleartext }, Value: func(r *PAT) any { return r.DebugCleartext }},
 	})
 }
