@@ -289,8 +289,9 @@ func (m *Model) openConnManager() {
 // A raw literal on purpose: this is a screen of text, and building it from
 // escaped fragments is how it acquires a stray newline nobody notices until it
 // is in front of the person making an exposure decision.
-const frontDoorProse = `Opening the front door on this connection turns on THREE things,
-not one. Read them before you decide.
+const frontDoorProse = `Opening the front door on this connection changes FOUR
+things, not one — and the last one can TAKE SOMETHING AWAY.
+Read them before you decide.
 
   1. REACHABILITY. Anyone holding an access token bound to this
      connection, and a grant on it, can reach it from the network —
@@ -303,6 +304,13 @@ not one. Read them before you decide.
      COMMIT and ROLLBACK are refused here today and will start
      being accepted, performed as engine state transitions rather
      than forwarded to the target as text.
+
+  4. READERS MAY STOP WORKING. A reader runs inside a
+     server-enforced read-only transaction. If this connection's
+     driver cannot host one, every reader unit on it will be
+     REFUSED here, where today it runs under classifier
+     enforcement instead. Drivers without that capability at
+     present: sqlite. postgres and mysql are unaffected.
 
 This is an exposure decision and it is audited.
 `
