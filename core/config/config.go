@@ -9,6 +9,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"net"
 	"net/netip"
 	"os"
@@ -413,7 +414,7 @@ type Server struct {
 // Meta configures autodb's own management database (ADR-0053 §2).
 type Meta struct {
 	// Engine selects the meta-store backend: "sqlite" (default) or "postgres".
-	Engine string `toml:"engine"`
+	Engine engine.Name `toml:"engine"`
 	// Path is the sqlite database file; empty means
 	// $XDG_DATA_HOME/autodb/meta.db. Ignored for postgres.
 	Path string `toml:"path"`
@@ -481,7 +482,7 @@ func Default() Config {
 		// DefaultPort is what `port` means when an operator sets it,
 		// not what they get by not deciding.
 		Server:   Server{Port: 0, Bind: "127.0.0.1"},
-		Meta:     Meta{Engine: "sqlite"},
+		Meta:     Meta{Engine: engine.SQLite},
 		History:  History{Enabled: true},
 		Security: Security{IPAllowlist: []string{"127.0.0.1/32", "::1/128"}},
 		Exec: Exec{
@@ -765,8 +766,8 @@ func (c Config) validate() error {
 		return err
 	}
 	switch c.Meta.Engine {
-	case "sqlite":
-	case "postgres":
+	case engine.SQLite:
+	case engine.Postgres:
 		if err := checkMetaDSNTransport(c.Meta.DSN, c.Meta.AllowInsecureDSN); c.Meta.DSN != "" && err != nil {
 			return err
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -25,7 +26,7 @@ var ErrWorkspaceNotFound = errors.New("exec: workspace not found")
 type WorkspaceConnRef struct {
 	ID     int64
 	Name   string
-	Engine string
+	Engine engine.Name
 }
 
 // WorkspaceView is one workspace as seen by the calling token.

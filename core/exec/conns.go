@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 
 	"database/sql"
 	"time"
@@ -130,7 +131,7 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	name := fmt.Sprintf("target-%d", connID)
 	var conn dao.DataConn
 	switch row.Engine {
-	case "postgres":
+	case engine.Postgres:
 		// Checkout-time grammar verification via pgxpool's PrepareConn
 		// hook: the session's parsing mode is verified before EVERY
 		// acquisition, so neither a fresh incompatible connection nor a
@@ -139,9 +140,9 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 		// transaction-prohibited DDL executable (ADR-0055 rev 5).
 		conn, err = openPostgres(ctx, name, string(dsn),
 			pgPrepareConnVerify(), e.pgPoolLimits(row))
-	case "mysql":
+	case engine.MySQL:
 		conn, err = openMySQL(ctx, name, string(dsn), mysql.Option(e.sqlPoolLimits(row)))
-	case "sqlite":
+	case engine.SQLite:
 		conn, err = openSQLite(ctx, name, string(dsn), sqlite.Option(e.sqlPoolLimits(row)))
 	default:
 		return nil, fmt.Errorf("exec: connection %d has unknown engine %q", connID, row.Engine)
@@ -270,7 +271,7 @@ func (e *Engine) beginDraining(connID int64) ([]*session, dao.DataConn) {
 // inserted with an empty secret, the id seals the AAD, and the ciphertext
 // lands in the same transaction as the creator's auto-grant and the audit
 // rows. Global editors and admins may create (Objective 14).
-func (e *Engine) CreateConnection(ctx context.Context, token, name, engineName, dsn, ip string) (int64, error) {
+func (e *Engine) CreateConnection(ctx context.Context, token, name string, engineName engine.Name, dsn, ip string) (int64, error) {
 	ident, err := e.auth.ValidateToken(ctx, token)
 	if err != nil {
 		return 0, err
@@ -307,7 +308,7 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name, engineName, 
 		now := e.now().Unix()
 		var terr error
 		id, terr = e.store.Connections.On(tx).
-			Set(meta.ConnName, name).Set(meta.ConnEngine, engineName).
+			Set(meta.ConnName, name).Set(meta.ConnEngine, engineName.String()).
 			Set(meta.ConnTargetDB, targetDB).
 			Set(meta.ConnDSNEnc, []byte{}).Set(meta.ConnCreatedBy, ident.UserID()).
 			Set(meta.ConnCreatedAt, now).Set(meta.ConnUpdatedAt, now).

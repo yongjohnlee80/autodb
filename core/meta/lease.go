@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"hash/fnv"
 	"os"
 	"path/filepath"
@@ -84,9 +85,9 @@ type InstanceLease struct {
 // lost while we are alive", not an unimplemented stub.
 func AcquireLease(ctx context.Context, s *Store, mcfg config.Meta) (*InstanceLease, error) {
 	switch s.engine {
-	case "sqlite":
+	case engine.SQLite:
 		return acquireFileLease(mcfg.Path)
-	case "postgres":
+	case engine.Postgres:
 		return acquirePGLease(ctx, s, mcfg.DSN)
 	}
 	return nil, fmt.Errorf("meta: cannot lease an unknown engine %q", s.engine)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -83,7 +84,11 @@ func (e *Engine) ListTables(ctx context.Context, token string, connID int64, sch
 		return nil, err
 	}
 	dialect := tgt.Dialect()
-	isPG := dialect.Name() == "postgres"
+	// dao.Dialect.Name() is golib's DIALECT namespace, not autodb's engine
+	// namespace. The two spellings coincide for postgres and there is no
+	// guarantee they always will, so the conversion is explicit rather than a
+	// comparison that reads as if the namespaces were the same one.
+	isPG := dialect.Name() == string(engine.Postgres)
 	// Normalize the schema ONCE, before BOTH queries (ADR-0077 fold 2). dao's
 	// Postgres introspector maps "" → public internally; the supplementary query
 	// binds the schema directly, so without this the two would read different

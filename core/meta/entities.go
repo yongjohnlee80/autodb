@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/golib/dao"
 )
 
@@ -89,7 +90,7 @@ func newUsers(conn dao.DataConn) *dao.Schema[*User, UserField, Sort, int64] {
 type Connection struct {
 	ID     int64
 	Name   string
-	Engine string
+	Engine engine.Name
 	DSNEnc []byte
 	// Profile is the connection's capability profile (ADR-0074 §2):
 	// "v1compat" or "session". Existing rows read v1compat, so enabling
@@ -164,7 +165,7 @@ func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort,
 	return schema(conn, "connections", ConnID, map[ConnField]dao.Field[*Connection]{
 		ConnID:           {Column: "id", Scan: func(r *Connection) any { return &r.ID }},
 		ConnName:         {Column: "name", Scan: func(r *Connection) any { return &r.Name }, Value: func(r *Connection) any { return r.Name }},
-		ConnEngine:       {Column: "engine", Scan: func(r *Connection) any { return &r.Engine }, Value: func(r *Connection) any { return r.Engine }},
+		ConnEngine:       {Column: "engine", Scan: func(r *Connection) any { return &r.Engine }, Value: func(r *Connection) any { return r.Engine.String() }},
 		ConnProfile:      {Column: "profile", Scan: func(r *Connection) any { return &r.Profile }, Value: func(r *Connection) any { return r.Profile }},
 		ConnDebug:        {Column: "debug", Scan: func(r *Connection) any { return &r.Debug }, Value: func(r *Connection) any { return r.Debug }},
 		ConnPoolMaxConns: {Column: "pool_max_conns", Scan: func(r *Connection) any { return &r.PoolMaxConns }, Value: func(r *Connection) any { return r.PoolMaxConns }},

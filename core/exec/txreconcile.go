@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"sync"
 	"time"
 
@@ -412,7 +413,7 @@ func (e *Engine) resolveOne(ctx context.Context, txID string, st TxStatus, group
 	// txid_status, so an indeterminate commit there can never be resolved by
 	// anyone — which is a terminal condition, and Amendment 4 MF2 makes it
 	// one by OUTCOME rather than by cause.
-	if connRow.Engine != "postgres" || xid == "" {
+	if connRow.Engine != engine.Postgres || xid == "" {
 		return e.terminate(ctx, txID, st, meta.TxUnresolvable, meta.ReasonNoOracle)
 	}
 
