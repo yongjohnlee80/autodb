@@ -18,7 +18,7 @@ func renderMigrationDDL() string {
 		for _, m := range migrations {
 			for i, s := range m.stmts(eng) {
 				sum := sha256.Sum256([]byte(s))
-				fmt.Fprintf(&b, "%s\t%d\t%d\t%s\n", eng, m.Version, i, hex.EncodeToString(sum[:])[:16])
+				fmt.Fprintf(&b, "%s\t%d\t%d\t%s\n", eng, m.Version, i, hex.EncodeToString(sum[:]))
 			}
 			if eng == engine.Postgres && m.PostgresFn != nil {
 				fmt.Fprintf(&b, "%s\t%d\tFN\tpresent\n", eng, m.Version)
@@ -28,7 +28,15 @@ func renderMigrationDDL() string {
 	return b.String()
 }
 
-// THE ORACLE FOR THIS REFACTOR, and it is exact.
+// THE ORACLE FOR THIS REFACTOR, and here is exactly how far it reaches.
+//
+// It compares a FULL sha256 of every statement, keyed by engine, version and
+// ordinal, in application order. That is exact for the static DDL. It is NOT
+// exact for PostgresFn, which appears only as "present": a computed step's
+// BEHAVIOUR is not covered here, and a change inside one would pass. Saying
+// "byte-for-byte" of the whole rendering would have overstated it — the
+// earlier version of this comment did, and truncated the hashes to 64 bits on
+// top of that. (lector, #91 r0.)
 //
 // Collapsing a per-engine pair into Both is only safe if both engines still
 // receive byte-identical DDL in the same order. The golden was generated from
