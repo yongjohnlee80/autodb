@@ -15,17 +15,23 @@ short version for someone who just wants to run the suite.
 
 ## First time on a machine
 
-The harness refuses an instance it has not been told is a scratch instance — a
-host:port pair is not an identity, and a port remap answers exactly like the
-right database. Claim it once:
+The harness refuses any instance that is not in your scratch-instance
+allowlist. Claim it once — a deliberate, separate operation that does nothing
+else:
 
 ```bash
-autodb-test.sh setup --worktree . --claim-instance
+autodb-test.sh claim --target local
 ```
 
-It refuses outright, and never falls back, if the instance holds a database
-named `lm`, `lm_omni` or `labelmanager` — that presence identifies production
-or the owner's own fixture.
+That writes a token into the instance and records it in
+`~/.config/autodb/scratch-instances` (mode 600). Every later run requires the
+instance to present the **same** token, so a port remap, a mispointed tunnel,
+or a rebuilt container is caught rather than tested against. There is no flag
+that turns a test run into a claim.
+
+It also refuses outright, and never falls back, if the instance holds a
+database named `lm`, `lm_omni` or `labelmanager` — that presence identifies
+production or the owner's own fixture.
 
 ## The normal invocation
 
@@ -102,7 +108,7 @@ attempt under `NOT ATTEMPTED`, so a green here is never read as a green there.
 | flag | instance |
 |---|---|
 | `--target local` (default) | `autodb-r3-pg` on `127.0.0.1:55437` |
-| `--target vm43` | `autodb-r3-pg` on `192.168.68.43:55438` |
+| `--target vm43` | `autodb-r3-pg` on `192.168.68.43:55438` — **EXPERIMENTAL, never validated end to end** |
 
 **`lm-omni-db` is production and is never a test target.** `lm-test-db` on
 5432 is not one either. The harness refuses both by name and never falls back
