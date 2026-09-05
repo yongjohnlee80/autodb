@@ -57,19 +57,35 @@ and prints a commit-stamped ledger to
 autodb-test.sh teardown --worktree .
 ```
 
+## How long it takes
+
+A full `all --race` run is **~4m49s**, and it is not cold start — `go build` is
+1s with a warm cache. Tests already run in parallel (607 of 989 test functions
+call `t.Parallel()`), and the critical path is the `frontdoor` package, of
+which **73% is one test that sleeps a real 95 seconds** to prove a session
+survives past the idle-in-transaction bound against the real 30-minute budget.
+
+While iterating, skip the real-time budget tests:
+
+```bash
+autodb-test.sh run --worktree . --short      # 43s instead of 131s
+```
+
+The ledger stamps `MODE: -short` and says it is not for a reviewer — a run that
+skips those tests has not tested them.
+
 ## Why not just `go test ./...`
 
 Because `go test ./...` on its own is a **green that means less than it
-looks**. With `TEST_PGURL` unset the suite skips **187 tests** and still exits
-0 — measured 2026-09-05 — and those 187 are essentially every front-door
-conformance cell. CI does not set `TEST_PGURL` either
+looks**. With `TEST_PGURL` unset the suite skips **217 tests** and still exits
+0 — and those are essentially every front-door conformance cell. CI does not set `TEST_PGURL` either
 (`.github/workflows/ci.yml`), so **a CI green and a local green are different
 signals**.
 
 The ledger says which you have:
 
 ```
-LIVE_PG: 602 passed / 2 skipped in frontdoor+core/exec
+LIVE_PG: 991 passed / 3 skipped (whole suite, from the -v run)
 ```
 
 and warns, with a nonzero exit, when the skipped count says the live half
