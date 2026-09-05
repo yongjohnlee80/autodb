@@ -35,7 +35,7 @@ func openWire(t *testing.T, dsn, appName string) (f *fixture, connID int64, res 
 	if gerr != nil {
 		t.Fatal(gerr)
 	}
-	pat, perr := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("seam-%d", time.Now().UnixNano()), connID, 0, nil)
+	pat, perr := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("seam-%d", time.Now().UnixNano()), connID, 0, nil, false)
 	if perr != nil {
 		t.Fatalf("CreatePAT: %v", perr)
 	}
@@ -228,7 +228,7 @@ func TestWireOpen_FailsClosedWithoutReporterOrEncodingKeys(t *testing.T) {
 				t.Fatal(err)
 			}
 			row, _ := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
-			pat, err := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("fc-%d", time.Now().UnixNano()), connID, 0, nil)
+			pat, err := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("fc-%d", time.Now().UnixNano()), connID, 0, nil, false)
 			if err != nil {
 				t.Fatal(err)
 			}

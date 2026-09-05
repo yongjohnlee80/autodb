@@ -184,3 +184,72 @@ func TestCard_TheWarningComesBeforeTheToken(t *testing.T) {
 			"has already seen the credential has what they came for and stops.", warn, tok)
 	}
 }
+
+// A cleartext listener changes what the card must say, and the danger is a card
+// that changes it HALFWAY. sslmode, the JDBC `ssl` flag and the root CA are
+// three facts about one condition; any one of them left at its TLS value
+// produces a DSN that cannot connect, or — worse — one that says "verified"
+// while nothing is.
+func TestCard_CleartextListener(t *testing.T) {
+	ep := liveEndpoint()
+	ep.Cleartext = true
+	conn := ConnInfo{ID: 1, Name: "lm-local-test", Engine: "postgres", TargetDB: "test", Profile: "session"}
+	text, dsn := buildCardText("adb_pat_xxx.yyy", conn, ep, "root", "2026-12-01")
+
+	if !strings.Contains(dsn, "sslmode=disable") {
+		t.Errorf("the copied DSN does not disable TLS against a cleartext listener:\n%s", dsn)
+	}
+	if strings.Contains(dsn, "verify-full") {
+		t.Errorf("the copied DSN still asks for verify-full, which cannot connect:\n%s", dsn)
+	}
+	// The root CA is the parameter that CLAIMS verification. Against a
+	// cleartext listener it is not merely useless, it is a lie in a string the
+	// user pastes and trusts.
+	if strings.Contains(dsn, "sslrootcert") {
+		t.Errorf("the copied DSN carries a root CA against a cleartext listener:\n%s", dsn)
+	}
+	if strings.Contains(text, "sslrootcert") {
+		t.Errorf("the card displays a root CA against a cleartext listener:\n%s", text)
+	}
+	if !strings.Contains(text, "ssl=false") {
+		t.Errorf("the JDBC line still sets ssl=true, which contradicts sslmode=disable:\n%s", text)
+	}
+	if strings.Contains(text, "ssl=true") {
+		t.Errorf("the JDBC line still sets ssl=true:\n%s", text)
+	}
+	// The displayed line and the copied line are ONE computation, and this is
+	// the mode where they would most plausibly diverge.
+	if !strings.Contains(text, dsn) {
+		t.Errorf("the displayed DSN is not the copied DSN:\nshown:\n%s\ncopied:\n%s", text, dsn)
+	}
+
+	// And the user has to be TOLD, above the token, not left to infer it from
+	// a query parameter.
+	if !strings.Contains(text, "WITHOUT TLS") {
+		t.Errorf("the card does not warn that the front door has no TLS:\n%s", text)
+	}
+	if strings.Index(text, "WITHOUT TLS") > strings.Index(text, "token        ") {
+		t.Error("the no-TLS warning appears BELOW the token — a reader who takes the " +
+			"token and stops has not been warned")
+	}
+}
+
+// The decoy half. A card that emitted the cleartext form unconditionally would
+// pass every assertion above, so the ordinary case asserts the opposite of each.
+func TestCard_TLSListenerIsUnchanged(t *testing.T) {
+	conn := ConnInfo{ID: 1, Name: "lm-local-test", Engine: "postgres", TargetDB: "test", Profile: "session"}
+	text, dsn := buildCardText("adb_pat_xxx.yyy", conn, liveEndpoint(), "root", "2026-12-01")
+
+	if !strings.Contains(dsn, "sslmode=verify-full") {
+		t.Errorf("the DSN no longer pins verify-full against a TLS listener:\n%s", dsn)
+	}
+	if !strings.Contains(dsn, "sslrootcert=/etc/autodb/tls/ca.pem") {
+		t.Errorf("the DSN dropped the root CA against a TLS listener:\n%s", dsn)
+	}
+	if !strings.Contains(text, "ssl=true") {
+		t.Errorf("the JDBC line no longer sets ssl=true against a TLS listener:\n%s", text)
+	}
+	if strings.Contains(text, "WITHOUT TLS") {
+		t.Errorf("the card warns about cleartext against a TLS listener:\n%s", text)
+	}
+}

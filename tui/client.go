@@ -611,6 +611,8 @@ type FrontDoorEndpoint struct {
 	Addr       string
 	HostNames  []string
 	RootCAFile string
+	// Cleartext reports that the live listener is serving WITHOUT TLS.
+	Cleartext bool
 }
 
 // Configured reports whether a token minted now could actually be used.
@@ -632,6 +634,7 @@ func (b *Bound) FrontDoorEndpoint(ctx context.Context) (FrontDoorEndpoint, error
 		Listening:  mB(m, "listening"),
 		Addr:       mS(m, "addr"),
 		RootCAFile: mS(m, "root_ca_file"),
+		Cleartext:  mB(m, "cleartext"),
 	}
 	for _, h := range asList(m["host_names"]) {
 		if s, ok := h.(string); ok {
@@ -1114,8 +1117,12 @@ func splitAllowedIPs(s string) []string {
 // connection, and the server refuses a mint against one the caller has no
 // grant on, one that is not enabled for front-door use, or one whose target
 // database name has not been recorded.
-func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedIPs []string, connID int64) (PATSecret, error) {
-	res, err := b.authed(ctx, "auth.token_create", name, days, strings.Join(allowedIPs, ","), connID)
+func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedIPs []string, connID int64, debugCleartext bool) (PATSecret, error) {
+	flag := int64(0)
+	if debugCleartext {
+		flag = 1
+	}
+	res, err := b.authed(ctx, "auth.token_create", name, days, strings.Join(allowedIPs, ","), connID, flag)
 	if err != nil {
 		return PATSecret{}, err
 	}

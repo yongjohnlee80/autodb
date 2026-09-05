@@ -24,7 +24,7 @@ func wireFixture(t *testing.T) (*fixture, *meta.PAT, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newPAT, err := f.svc.CreatePAT(ctx, f.rootTok, "wire", f.connID, 0, nil)
+	newPAT, err := f.svc.CreatePAT(ctx, f.rootTok, "wire", f.connID, 0, nil, false)
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}
@@ -174,7 +174,7 @@ func TestOpenWireSession_PATNarrowingIsEnforced(t *testing.T) {
 		Set(meta.UIPLabel, "vpn").Set(meta.UIPCreatedAt, int64(1)).Insert(); err != nil {
 		t.Fatal(err)
 	}
-	narrowed, err := f.svc.CreatePAT(ctx, f.rootTok, "narrowed", f.connID, 0, []string{"10.1.0.0/16"})
+	narrowed, err := f.svc.CreatePAT(ctx, f.rootTok, "narrowed", f.connID, 0, []string{"10.1.0.0/16"}, false)
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}
@@ -254,7 +254,7 @@ func TestOpenWireSession_TheRemainingRefusals(t *testing.T) {
 		if gerr := f.svc.AddGrant(ctx, f.rootTok, erinIdent.UserID(), f.connID, "reader", testIP); gerr != nil {
 			t.Fatalf("AddGrant: %v", gerr)
 		}
-		erinPAT, err := f.svc.CreatePAT(ctx, erinTok, "erins", f.connID, 0, nil)
+		erinPAT, err := f.svc.CreatePAT(ctx, erinTok, "erins", f.connID, 0, nil, false)
 		if err != nil {
 			t.Fatalf("CreatePAT: %v", err)
 		}

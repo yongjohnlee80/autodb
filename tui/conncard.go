@@ -50,7 +50,11 @@ type connCard struct {
 // password disclosure.
 func buildCardDSN(host, port, user, secret, database, sslmode, rootCA string) string {
 	q := "sslmode=" + sslmode
-	if rootCA != "" {
+	// A root CA against a cleartext listener is not merely useless, it is
+	// MISLEADING: it is the one parameter in the string that says "this is
+	// verified". The two facts are decided here rather than by the caller so
+	// they cannot be set half-right.
+	if rootCA != "" && sslmode != cardSSLModeOff {
 		q += "&sslrootcert=" + rootCA
 	}
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?%s", user, secret, host, port, database, q)
@@ -59,8 +63,15 @@ func buildCardDSN(host, port, user, secret, database, sslmode, rootCA string) st
 // buildCardJDBC renders the JetBrains form, because JetBrains is the client
 // that surfaced every defect this ADR fixes.
 func buildCardJDBC(host, port, user, secret, database, sslmode, rootCA string) string {
-	q := fmt.Sprintf("user=%s&password=%s&ssl=true&sslmode=%s", user, secret, sslmode)
-	if rootCA != "" {
+	// pgjdbc keys on `ssl` as well as `sslmode`, and ssl=true with
+	// sslmode=disable is a contradiction the driver resolves in its own
+	// favour. Derived from the one sslmode value rather than written twice.
+	ssl := "true"
+	if sslmode == cardSSLModeOff {
+		ssl = "false"
+	}
+	q := fmt.Sprintf("user=%s&password=%s&ssl=%s&sslmode=%s", user, secret, ssl, sslmode)
+	if rootCA != "" && sslmode != cardSSLModeOff {
 		q += "&sslrootcert=" + rootCA
 	}
 	return fmt.Sprintf("jdbc:postgresql://%s:%s/%s?%s", host, port, database, q)
@@ -148,12 +159,27 @@ func (c *connCard) Children() iter.Seq[tui.Component] {
 	}
 }
 
-// cardSSLMode is the one place this surface's client sslmode is written.
+// The client sslmode is written in ONE place. It was a literal in two files,
+// which is how the displayed line and the copied line come to disagree — and
+// the TLS-off work is exactly what a reviewer predicted would change it in one
+// of them and not the other.
+const (
+	cardSSLModeVerify = "verify-full"
+	cardSSLModeOff    = "disable"
+)
+
+// cardSSLMode is what a client must ask for against THIS listener.
 //
-// It was a literal in two files, which is how the displayed line and the
-// copied line come to disagree — and the TLS-off work still to land is exactly
-// what will need to change it in one place and not the other.
-const cardSSLMode = "verify-full"
+// verify-full unless the listener is serving cleartext, in which case a client
+// asking for TLS simply cannot connect. Keyed on the live endpoint rather than
+// on config, because the card's whole purpose is to describe the listener that
+// is actually running.
+func cardSSLMode(ep FrontDoorEndpoint) string {
+	if ep.Cleartext {
+		return cardSSLModeOff
+	}
+	return cardSSLModeVerify
+}
 
 // buildCardText renders the card body AND returns the DSN it printed.
 //
@@ -188,11 +214,28 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, exp
 		p("")
 	}
 
+	if ep.Cleartext && ep.Configured() {
+		// SECOND warning slot, and it is deliberately above the token. A
+		// developer who reads only the first two lines of this card must
+		// still learn that what they are about to paste travels in the clear.
+		p("!! THIS FRONT DOOR IS SERVING WITHOUT TLS.")
+		p("!! The token below crosses the network in CLEARTEXT and works from")
+		p("!! anywhere it is admitted until it is revoked. Treat it as exposed.")
+		p("!! This is a debugging mode — ask the operator to turn TLS back on.")
+		p("")
+	}
+
+	sslmode := cardSSLMode(ep)
 	host, port := splitAddr(ep.Addr)
 	dialHost := host
 	if len(ep.HostNames) > 0 {
 		// verify-full checks the NAME, so the name from the certificate is
 		// what a client must dial — not the address it happens to resolve to.
+		//
+		// Under cleartext no name is checked, but the operator still published
+		// these names as how the door is reached, and switching the card to a
+		// bare address here would make the two modes disagree about the host
+		// for no reason a user could see.
 		dialHost = ep.HostNames[0]
 	}
 
@@ -206,8 +249,8 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, exp
 	p("host         %s", orNone(dialHost))
 	p("port         %s", orNone(port))
 	p("user         %s", user)
-	p("sslmode      %s", cardSSLMode)
-	if ep.RootCAFile != "" {
+	p("sslmode      %s", sslmode)
+	if ep.RootCAFile != "" && sslmode != cardSSLModeOff {
 		p("sslrootcert  %s", ep.RootCAFile)
 	}
 	if expires != "" {
@@ -221,12 +264,12 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, exp
 	p("")
 	p("token        %s", secret)
 	p("")
-	dsn := buildCardDSN(dialHost, port, user, secret, cardDatabase(conn), cardSSLMode, ep.RootCAFile)
+	dsn := buildCardDSN(dialHost, port, user, secret, cardDatabase(conn), sslmode, ep.RootCAFile)
 	p("DSN")
 	p("  %s", dsn)
 	p("")
 	p("JDBC")
-	p("  %s", buildCardJDBC(dialHost, port, user, secret, cardDatabase(conn), cardSSLMode, ep.RootCAFile))
+	p("  %s", buildCardJDBC(dialHost, port, user, secret, cardDatabase(conn), sslmode, ep.RootCAFile))
 	p("")
 	p("The token is shown ONCE and cannot be recovered. Copy it before closing.")
 	return b.String(), dsn

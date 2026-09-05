@@ -1166,7 +1166,7 @@ func TestTokenVerbsOverWire(t *testing.T) {
 	c := f.dial(t)
 	c.hello()
 
-	errVal, result := c.call("auth.token_create", f.rootTok, "laptop", int64(0), "", f.frontDoorConn(t))
+	errVal, result := c.call("auth.token_create", f.rootTok, "laptop", int64(0), "", f.frontDoorConn(t), int64(0))
 	if errVal != nil {
 		t.Fatalf("token_create: %#v", errVal)
 	}
@@ -1208,11 +1208,11 @@ func TestTokenVerbsOverWire(t *testing.T) {
 	// A duplicate name is refused, and the reason is NAMED: this caller is
 	// authenticated and managing their own tokens, unlike the anonymous
 	// front-door path whose failure is deliberately uniform.
-	errVal, _ = c.call("auth.token_create", f.rootTok, "laptop", int64(0), "", f.frontDoorConn(t))
+	errVal, _ = c.call("auth.token_create", f.rootTok, "laptop", int64(0), "", f.frontDoorConn(t), int64(0))
 	mustErr(t, errVal, rpc.CodeInvalidToken)
 
 	// An over-long lifetime is refused too.
-	errVal, _ = c.call("auth.token_create", f.rootTok, "forever", int64(400), "", f.frontDoorConn(t))
+	errVal, _ = c.call("auth.token_create", f.rootTok, "forever", int64(400), "", f.frontDoorConn(t), int64(0))
 	mustErr(t, errVal, rpc.CodeInvalidToken)
 
 	errVal, result = c.call("auth.token_revoke", f.rootTok, int64(0), "laptop")
@@ -1264,7 +1264,7 @@ func TestTokenCreate_DayCountCannotOverflowIntoAValidLifetime(t *testing.T) {
 		-1,
 		366,
 	} {
-		errVal, _ := c.call("auth.token_create", f.rootTok, fmt.Sprintf("t%d", days), days, "", fdConn)
+		errVal, _ := c.call("auth.token_create", f.rootTok, fmt.Sprintf("t%d", days), days, "", fdConn, int64(0))
 		if errVal == nil {
 			t.Errorf("days = %d created a token; an out-of-range lifetime must be refused "+
 				"before any arithmetic can turn it into a plausible one", days)
@@ -1278,10 +1278,10 @@ func TestTokenCreate_DayCountCannotOverflowIntoAValidLifetime(t *testing.T) {
 
 	// Positive control: the range that IS valid still works, so the guard is
 	// not simply refusing everything.
-	if errVal, _ := c.call("auth.token_create", f.rootTok, "ok-365", int64(365), "", f.frontDoorConn(t)); errVal != nil {
+	if errVal, _ := c.call("auth.token_create", f.rootTok, "ok-365", int64(365), "", f.frontDoorConn(t), int64(0)); errVal != nil {
 		t.Errorf("365 days was refused: %#v", errVal)
 	}
-	if errVal, _ := c.call("auth.token_create", f.rootTok, "ok-default", int64(0), "", f.frontDoorConn(t)); errVal != nil {
+	if errVal, _ := c.call("auth.token_create", f.rootTok, "ok-default", int64(0), "", f.frontDoorConn(t), int64(0)); errVal != nil {
 		t.Errorf("0 days (the default) was refused: %#v", errVal)
 	}
 }
@@ -1312,7 +1312,7 @@ func TestTokenRevoke_MissingNameIsARefusalNotAFault(t *testing.T) {
 
 	// Positive control: revoking one that DOES exist still works, so the
 	// mapping is not simply refusing everything.
-	if errVal, _ := c.call("auth.token_create", f.rootTok, "real", int64(0), "", f.frontDoorConn(t)); errVal != nil {
+	if errVal, _ := c.call("auth.token_create", f.rootTok, "real", int64(0), "", f.frontDoorConn(t), int64(0)); errVal != nil {
 		t.Fatalf("token_create: %#v", errVal)
 	}
 	if errVal, _ := c.call("auth.token_revoke", f.rootTok, int64(0), "real"); errVal != nil {
@@ -1371,5 +1371,72 @@ func TestIPAdmittedOverWire(t *testing.T) {
 		if errVal, _ := c.call("auth.ip_admitted", bad...); errVal == nil {
 			t.Errorf("ip_admitted accepted %d argument(s)", len(bad))
 		}
+	}
+}
+
+// frontdoor.endpoint has to report the LIVE listener, and every field of it.
+//
+// The failure this cell exists for is the quiet one: a field added to
+// FrontDoorInfo and not to the map the handler returns. The struct compiles,
+// the caller decodes a zero, and the consumer that keyed on it — here, the TUI
+// banner and the card's sslmode — reports the SAFE state for a listener that is
+// in the dangerous one. Nothing else in the suite would notice.
+func TestFrontDoorEndpoint_ReportsEveryField(t *testing.T) {
+	info := rpc.FrontDoorInfo{
+		Enabled:    true,
+		Listening:  true,
+		Addr:       "127.0.0.1:6432",
+		HostNames:  []string{"autodb.example.com", "alt.example.com"},
+		RootCAFile: "/etc/autodb/tls/ca.pem",
+		Cleartext:  true,
+	}
+	f := newFixture(t, rpc.WithFrontDoor(func() rpc.FrontDoorInfo { return info }))
+	c := f.session(t)
+
+	errVal, res := c.call("frontdoor.endpoint", f.rootTok)
+	if errVal != nil {
+		t.Fatalf("frontdoor.endpoint: %v", errVal)
+	}
+	m, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("result is not a map: %T", res)
+	}
+	for k, want := range map[string]any{
+		"enabled":      true,
+		"listening":    true,
+		"addr":         "127.0.0.1:6432",
+		"root_ca_file": "/etc/autodb/tls/ca.pem",
+		"cleartext":    true,
+	} {
+		if got, ok := m[k]; !ok {
+			t.Errorf("the reply has no %q key at all", k)
+		} else if got != want {
+			t.Errorf("%q = %v, want %v", k, got, want)
+		}
+	}
+	names, _ := m["host_names"].([]any)
+	if len(names) != 2 || names[0] != "autodb.example.com" {
+		t.Errorf("host_names = %v, want both certificate names in order", m["host_names"])
+	}
+
+	// And the FALSE case travels too. A handler hardcoding true would satisfy
+	// every assertion above.
+	info.Cleartext = false
+	if _, res := c.call("frontdoor.endpoint", f.rootTok); res.(map[string]any)["cleartext"] != false {
+		t.Errorf("cleartext = %v for a TLS listener, want false", res.(map[string]any)["cleartext"])
+	}
+}
+
+// The verb is privileged: "where does this install expose a database surface"
+// is not a question an unauthenticated caller gets to ask.
+func TestFrontDoorEndpoint_RequiresAToken(t *testing.T) {
+	f := newFixture(t, rpc.WithFrontDoor(func() rpc.FrontDoorInfo {
+		return rpc.FrontDoorInfo{Enabled: true, Listening: true, Addr: "127.0.0.1:6432"}
+	}))
+	c := f.dial(t)
+	c.hello()
+	errVal, _ := c.call("frontdoor.endpoint", "not-a-real-token")
+	if errVal == nil {
+		t.Fatal("frontdoor.endpoint answered an unauthenticated caller")
 	}
 }

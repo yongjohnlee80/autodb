@@ -78,6 +78,8 @@ type Model struct {
 	pendingFocus      bool     // afterLogin's editor focus, deferred past an open modal
 	splashShown       bool     // the About splash opens once, on the first frame
 	connectedOnce     bool     // a later connect is a RE-connect: stale floats go
+	cleartextFD       bool     // the ATTACHED front door is serving without TLS
+	cleartextSeen     bool     // the user dismissed the warning for this session
 	explorerFocused   bool     // last applied cursor styling (focused = cyan)
 	resultsFocused    bool
 }
@@ -365,6 +367,10 @@ func (m *Model) resetServerUI() {
 	m.refreshQueryTitle()
 	m.retireIdentity()
 	m.hadAuth = false
+	// The risk state belonged to the instance we just left. Clearing it means
+	// the next login RE-ANNOUNCES rather than inheriting a dismissal made
+	// against a different daemon.
+	m.cleartextFD, m.cleartextSeen = false, false
 	m.refreshStatus()
 }
 
@@ -459,6 +465,7 @@ func (m *Model) afterLogin() {
 		m.notes = notes
 	}
 	m.setStatus(fmt.Sprintf("logged in as %s (%s)", u.Name, u.Role))
+	m.probeFrontDoorTLS()
 	m.explorer.Reload()
 	// Never yank focus out of an open modal. A frontend whose session arrives
 	// ALREADY authenticated (--web-ui, where SSO logs in before the TUI
@@ -1123,7 +1130,9 @@ func (m *Model) serverStatusText() string {
 }
 
 func (m *Model) refreshStatus() {
-	left := "-- " + m.editor.Mode().String() + " --  " + m.serverStatusText()
+	// The marker goes on the LEFT, which transient status messages never
+	// overwrite. On the right it would survive exactly until the next query.
+	left := m.cleartextBannerText() + "-- " + m.editor.Mode().String() + " --  " + m.serverStatusText()
 	mid := ""
 	if u := m.session.User(); u.Name != "" {
 		mid = u.Name
@@ -1482,6 +1491,14 @@ func (m *Model) leaderEntries() []leaderEntry {
 		{'H', "script history…", m.openHistory},
 		{'g', "refresh explorer", m.explorer.Reload},
 	}
+	// Offered only while the warning is up, following this menu's own rule
+	// that an entry which always fails teaches distrust of the menu. The
+	// handler still guards: the state can clear between opening this menu and
+	// choosing from it, since the probe applies on the loop goroutine.
+	if m.cleartextBannerText() != "" {
+		entries = append(entries,
+			leaderEntry{'!', "dismiss the no-TLS warning", m.dismissCleartextWarning})
+	}
 	// Session and connection lifecycle actions belong to a frontend that OWNS its
 	// session. The web frontend shares one connection per user across tabs and does
 	// not authenticate in-App (§2.4), so login/switch-user and disconnect/reconnect
@@ -1649,4 +1666,76 @@ func cursorStyle(focused bool) style.Style {
 		return cursorRowStyle
 	}
 	return cursorRowBlurred
+}
+
+// --- cleartext front door warning (ADR-0086 §10, R7) -------------------------------
+
+// probeFrontDoorTLS asks the daemon whether the attached front door is serving
+// without TLS, and raises the warning if it is.
+//
+// Asked of the DAEMON rather than read from a local config, because the TUI can
+// be attached to a front door on another machine — that is the whole point of
+// the surface — and a warning derived from the operator's own config file would
+// be silent in exactly the case that matters most.
+//
+// A failure raises NOTHING. The alternative, warning on a failed probe, would
+// train users to dismiss a banner that is usually wrong, and R7 is explicit
+// that the banner must not become something people learn to ignore. The daemon
+// banner is the copy that does not depend on this call succeeding.
+func (m *Model) probeFrontDoorTLS() {
+	bound := m.session.Bind()
+	m.ctx.Go(func(c context.Context) (any, error) {
+		ep, err := bound.FrontDoorEndpoint(c)
+		if err != nil {
+			return nil, nil
+		}
+		return managerReload{gen: bound.Gen(), apply: func() {
+			m.setFrontDoorCleartext(ep.Cleartext && ep.Configured())
+		}}, nil
+	})
+}
+
+// setFrontDoorCleartext records the risk state and announces a NEW one.
+//
+// The announcement fires on the TRANSITION rather than on every probe: a login,
+// a reconnect and a manual refresh all reach here, and re-announcing on each
+// would be the sticky behaviour R7 rules out. Leaving the state clears the
+// dismissal, so a door that goes cleartext again is announced again.
+func (m *Model) setFrontDoorCleartext(on bool) {
+	if on == m.cleartextFD {
+		return
+	}
+	m.cleartextFD = on
+	m.cleartextSeen = false
+	if on {
+		m.setError("FRONT DOOR IS SERVING WITHOUT TLS — access tokens cross the " +
+			"network in cleartext. SPC ! dismisses this.")
+	}
+	m.refreshStatus()
+}
+
+// dismissCleartextWarning closes the banner for this session.
+//
+// DISMISSIBLE and never modal: the state it reports is one an operator chose,
+// and a warning that cannot be closed is a warning that stops being read. It is
+// the daemon banner, not this one, that has to survive being ignored.
+func (m *Model) dismissCleartextWarning() {
+	if !m.cleartextFD {
+		m.setStatus("no cleartext warning to dismiss")
+		return
+	}
+	m.cleartextSeen = true
+	m.setStatus("cleartext warning dismissed for this session")
+}
+
+// cleartextBannerText is the persistent marker, or "" when there is nothing to
+// show. Separate from the rendering so its CONTENT is testable.
+func (m *Model) cleartextBannerText() string {
+	switch {
+	case !m.cleartextFD:
+		return ""
+	case m.cleartextSeen:
+		return ""
+	}
+	return "!! NO TLS !!  "
 }

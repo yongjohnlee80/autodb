@@ -71,7 +71,12 @@ func (f *fixture) frontDoorConn(t *testing.T) int64 {
 
 var fixtureSeq atomic.Int64
 
-func newFixture(t *testing.T) *fixture {
+// newFixture builds the shared server. The variadic options are appended to
+// the ones every fixture needs, so a cell that requires a surface the others do
+// not — a front door, say — asks for it WITHOUT changing what every other cell
+// gets. Adding it to the shared construction is how an unrelated test starts
+// failing for a reason its author cannot see.
+func newFixture(t *testing.T, opts ...rpc.Option) *fixture {
 	t.Helper()
 	ctx := context.Background()
 	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
@@ -102,7 +107,7 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "test-version",
-		rpc.WithListener(ln))
+		append([]rpc.Option{rpc.WithListener(ln)}, opts...)...)
 	runCtx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Run(runCtx) }()

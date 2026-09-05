@@ -244,7 +244,7 @@ func TestWireQuery_EmitStopped_OtherSites(t *testing.T) {
 			t.Fatal(err)
 		}
 		row, _ := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
-		pat, err := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("dec-%d", time.Now().UnixNano()), connID, 0, nil)
+		pat, err := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("dec-%d", time.Now().UnixNano()), connID, 0, nil, false)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -108,6 +108,15 @@ type FrontDoorInfo struct {
 	// RootCAFile is the CA a client should verify against when the server's
 	// material comes from a private CA. Empty means the host's system roots.
 	RootCAFile string
+	// Cleartext reports that this listener is serving WITHOUT TLS
+	// (frontdoor.insecure_disable_tls, ADR-0086 §10).
+	//
+	// It travels with the endpoint rather than being re-derived by each
+	// consumer because two of them must agree with it: the card's sslmode is
+	// meaningless against a cleartext listener, and the TUI's banner exists
+	// only for this state. A consumer reading config for itself would be
+	// reading INTENT, and this struct reports the LIVE listener.
+	Cleartext bool
 }
 
 // Option configures a Server.

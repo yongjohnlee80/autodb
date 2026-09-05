@@ -827,11 +827,18 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 		// every connection its owner is granted is the blast radius this
 		// binding exists to shrink.
 		field("connection id (SPC c lists them; the token reaches ONLY this one)"),
+		// ADR-0086 §10. Offered here rather than hidden behind a separate
+		// command because the ONLY way to get one is to ask at mint time, and
+		// the server refuses it unless the caller is an admin and this daemon
+		// is serving cleartext right now — so an ordinary user typing `y` gets
+		// a refusal that explains itself, not a silently weaker token.
+		field("cleartext debugging token? y/N (needs admin + a cleartext front door)"),
 	}, func(v []string) (bool, string) {
 		name := strings.TrimSpace(v[0])
 		if name == "" {
 			return false, "a name is required"
 		}
+		debugCleartext := strings.EqualFold(strings.TrimSpace(v[4]), "y")
 		connID, cerr := strconv.ParseInt(strings.TrimSpace(v[3]), 10, 64)
 		if cerr != nil || connID <= 0 {
 			// Refused HERE, while the form is still open and the value can be
@@ -869,12 +876,22 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 				ips = append(ips, p)
 			}
 		}
+		if debugCleartext && len(ips) == 0 {
+			// Checked after the list is parsed, and refused HERE while the
+			// form is still open. In cleartext the token's own list is its
+			// WHOLE admission gate, so an empty one would mean "from anywhere"
+			// rather than "inherit" — the opposite of what empty means on
+			// every other token.
+			return false, "a cleartext debugging token needs an explicit IP list — that list is " +
+				"the token's whole admission gate, not a narrowing of yours"
+		}
+
 		// Not managerCall: creation is the one action with a RESULT the user
 		// must see, and the secret has to reach the screen on the loop
 		// goroutine in the same apply that reloads the list.
 		bound := g.bound
 		m.ctx.Go(func(c context.Context) (any, error) {
-			out, err := bound.CreatePAT(c, name, days, ips, connID)
+			out, err := bound.CreatePAT(c, name, days, ips, connID, debugCleartext)
 			if err != nil {
 				msg := WireErrorMessage(err)
 				return managerReload{gen: bound.Gen(), apply: func() {

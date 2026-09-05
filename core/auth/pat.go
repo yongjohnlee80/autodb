@@ -73,6 +73,13 @@ var (
 	// is worse than refusing to create it (ADR-0086 R5).
 	ErrPATConnNotFrontDoor = errors.New("auth: connection is not enabled for front-door use")
 
+	// ErrPATDebugCleartextRefused reports a refused debug_cleartext mint
+	// (ADR-0086 §10). Distinguishable and ACTIONABLE, like
+	// ErrPATConnNotFrontDoor: it reaches an authenticated caller managing
+	// their own tokens, and a refusal that only says "no" sends someone
+	// hunting through configuration.
+	ErrPATDebugCleartextRefused = errors.New("auth: cannot mint a cleartext debugging token")
+
 	// ErrPATNotFound reports a revoke for a name the user does not have.
 	//
 	// Its own sentinel rather than a wrapped dao.ErrNoRows, because the wire
@@ -157,7 +164,7 @@ func splitPAT(token string) (selector, secret string, wellFormed bool) {
 //
 // The gates below run INSIDE the cap transaction and in this order, which is
 // itself part of the contract — see the comments on each.
-func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int64, lifetime time.Duration, allowedIPs []string) (NewPAT, error) {
+func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int64, lifetime time.Duration, allowedIPs []string, debugCleartext bool) (NewPAT, error) {
 	ident, err := s.ValidateToken(ctx, token)
 	if err != nil {
 		return NewPAT{}, err
@@ -268,9 +275,60 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 				"admitted on that connection", ErrPATConnNotFrontDoor, connRow.Name, connRow.Profile)
 		}
 
+		// GATE 3 — the cleartext debugging credential class (ADR-0086 §10).
+		//
+		// THREE parts, and each closes a different hole:
+		//
+		//  ADMIN (Johno's ruling, decision 8). Enabling cleartext is already an
+		//  admin act, so the credentials that mode activates need the same
+		//  authority — it keeps turning the mode on and creating tokens for it
+		//  in one pair of hands rather than split between two people, neither
+		//  of whom sees the whole decision.
+		//
+		//  THE MODE MUST BE ON NOW. Without this, minting is gated by nothing:
+		//  any authenticated caller could create debug tokens on a TLS-only
+		//  install, where they sit INERT in the store — and the day an admin
+		//  enables cleartext for an afternoon, every one of them ACTIVATES AT
+		//  ONCE, each usable from addresses nobody vetted. The acknowledgement
+		//  phrase says nothing about that. Mint-time is where it has to be
+		//  stopped, because a dormant credential has no other moment.
+		//
+		//  A NON-EMPTY allowed_ips. In cleartext the token's own list is its
+		//  ENTIRE admission gate — the inherited set is not consulted — so an
+		//  empty list would mean "from anywhere", which is the opposite of what
+		//  empty means everywhere else in this file.
+		if debugCleartext {
+			if ident.Role() != meta.RoleAdmin {
+				return fmt.Errorf("%w: only an administrator may mint one. Enabling cleartext and "+
+					"creating the credentials it activates are the same decision",
+					ErrPATDebugCleartextRefused)
+			}
+			if !s.servingCleartextNow() {
+				return fmt.Errorf("%w: this daemon is not serving cleartext. Such a token would sit "+
+					"inert in the store and become usable the moment somebody enables the mode, "+
+					"which is exactly what this refusal prevents", ErrPATDebugCleartextRefused)
+			}
+			if len(allowedIPs) == 0 {
+				return fmt.Errorf("%w: it needs an explicit allowed_ips list. In cleartext that list "+
+					"is the token's WHOLE admission gate, so leaving it empty would mean 'from "+
+					"anywhere' rather than 'inherit'", ErrPATDebugCleartextRefused)
+			}
+		}
+
 		// The subset read joins the SAME transaction, so the rows it
 		// validates against are the ones this decision is made on.
-		canonical, cerr = s.canonicalAllowedIPs(ctx, tx, ident.UserID(), allowedIPs)
+		//
+		// SKIPPED for a debug token, which is the relaxation Johno ruled
+		// (decision 5): its list is a perimeter of its OWN rather than a
+		// narrowing of its owner's, so there is nothing for a subset to be
+		// taken of. That is what unblocks a user whose admission comes only
+		// from the global allowlist — they have no personal rows, and under
+		// the subset rule could not narrow a token at all.
+		if debugCleartext {
+			canonical, cerr = canonicalizeIPsUnchecked(allowedIPs)
+		} else {
+			canonical, cerr = s.canonicalAllowedIPs(ctx, tx, ident.UserID(), allowedIPs)
+		}
 		if cerr != nil {
 			return cerr
 		}
@@ -312,6 +370,7 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 			Set(meta.PATName, name).
 			Set(meta.PATAllowedIPs, canonical).
 			Set(meta.PATConnID, connID).
+			Set(meta.PATDebugCleartext, boolToInt(debugCleartext)).
 			Set(meta.PATCreatedAt, now.Unix()).
 			Set(meta.PATExpiresAt, expires.Unix()).
 			Insert(); ierr != nil {
@@ -323,7 +382,13 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 		// The audit rides the SAME transaction as the insert: a token that
 		// exists with no record of its creation is exactly the token an
 		// investigation cannot account for.
-		return s.AuditTx(tx, ident.UserID(), "", "pat_created",
+		action := "pat_created"
+		if debugCleartext {
+			// Its own action, so the trail distinguishes a debug credential
+			// from an ordinary one without anybody reading flags.
+			action = "pat_created_debug_cleartext"
+		}
+		return s.AuditTx(tx, ident.UserID(), "", action,
 			fmt.Sprintf("name %q conn %d expires %s", name, connID,
 				expires.UTC().Format(time.RFC3339)))
 	})
@@ -718,3 +783,34 @@ func (s *Service) claimPATNote(patID int64, now time.Time) bool {
 // and it counts statements ISSUED rather than rows changed, because the
 // quantity the coalescing bound is about is load on the meta store.
 func (s *Service) PATWriteCount() int64 { return s.patWrites.Load() }
+
+func boolToInt(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// canonicalizeIPsUnchecked validates and canonicalizes a token's allowed_ips
+// WITHOUT the subset check against its owner's rows (ADR-0086 §10, decision 5).
+//
+// The parsing is identical to canonicalAllowedIPs — a bad CIDR is still a bad
+// CIDR — and only the containment test is dropped. Written as its own function
+// rather than a flag on the other one so the exemption is visible at every call
+// site: this is the ONE path on which a token may name an address its owner was
+// never admitted from, and it should not be reachable by passing false.
+func canonicalizeIPsUnchecked(cidrs []string) (string, error) {
+	if len(cidrs) == 0 {
+		return "", nil
+	}
+	var out []string
+	for _, raw := range cidrs {
+		_, n, perr := net.ParseCIDR(strings.TrimSpace(raw))
+		if perr != nil {
+			return "", fmt.Errorf("%w: %q is not a CIDR", ErrPATBadAllowedIPs, raw)
+		}
+		out = append(out, n.String())
+	}
+	sort.Strings(out)
+	return strings.Join(out, ","), nil
+}

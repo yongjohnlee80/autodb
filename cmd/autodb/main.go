@@ -353,6 +353,21 @@ func runServe(configPath string) error {
 		ln.Close()
 		return ferr
 	}
+	if fd != nil && cfg.FrontDoor.CleartextDebug() {
+		// THE OPERATOR'S RECORD (ADR-0086 R7). Unconditional and
+		// undismissable, at EVERY start — not once, not behind a flag, and not
+		// suppressible. The TUI's banner is the dismissible one; this is the
+		// half that survives nobody looking at it.
+		//
+		// It names the BIND CLASS because "cleartext on loopback" and
+		// "cleartext reachable off-host" are different risk states, and the
+		// second must not be reachable by someone who read a banner describing
+		// the first. A second config key gating the off-host case was
+		// considered and dropped — Johno ruled the admin owns the deployment
+		// decision — so this is where that decision is made visible instead.
+		fmt.Fprint(os.Stderr, cleartextBanner(fd.Addr().String(), countDebugTokens(ctx, store, time.Now())))
+	}
+
 	var fdFailed <-chan error
 	if fd != nil {
 		defer fd.Close()
@@ -381,6 +396,10 @@ func runServe(configPath string) error {
 		if fd != nil {
 			info.Listening = true
 			info.Addr = fd.Addr().String()
+			// Read from the config that OPENED the listener, on the same
+			// branch that reports it listening — so "listening" and "how it
+			// is listening" cannot come from two different moments.
+			info.Cleartext = cfg.FrontDoor.CleartextDebug()
 		}
 		return info
 	}
@@ -964,4 +983,79 @@ func removeIfStillOurs(path string, created os.FileInfo) {
 		return
 	}
 	_ = os.Remove(path)
+}
+
+// cleartextBanner is what an operator sees at every start of a front door
+// serving without TLS.
+//
+// Split out and returning a string so its CONTENT is testable — a banner
+// asserted only by "it printed something" is a banner whose worst version
+// passes.
+func cleartextBanner(addr string, debugTokens int) string {
+	class := "REACHABLE OFF-HOST"
+	detail := "Any host that can route to this address can read every token that crosses it."
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+			class = "loopback only"
+			detail = "Only processes on this machine can reach it — but anyone with a shell here can read the traffic."
+		}
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "==============================================================================")
+	fmt.Fprintln(&b, "  FRONT DOOR IS SERVING WITHOUT TLS.")
+	fmt.Fprintln(&b, "")
+	fmt.Fprintf(&b, "  listening on %s  (%s)\n", addr, class)
+	fmt.Fprintf(&b, "  %s\n", detail)
+	fmt.Fprintln(&b, "")
+	fmt.Fprintln(&b, "  EVERY ACCESS TOKEN PRESENTED HERE CROSSES THE WIRE IN CLEARTEXT, and a")
+	fmt.Fprintln(&b, "  token works from anywhere it is admitted until it is revoked. An")
+	fmt.Fprintln(&b, "  intercepted one is a credential an attacker keeps.")
+	fmt.Fprintln(&b, "")
+	// The COUNT, so an operator enabling the mode sees what they are switching
+	// on rather than discovering it. Zero is stated rather than omitted: "no
+	// debug tokens exist" is the reassuring case and it should be visible.
+	switch {
+	case debugTokens < 0:
+		fmt.Fprintln(&b, "  COULD NOT COUNT the cleartext debugging tokens \u2014 assume some exist.")
+	case debugTokens == 0:
+		fmt.Fprintln(&b, "  No cleartext debugging tokens exist. Nothing can connect until one is minted.")
+	case debugTokens == 1:
+		fmt.Fprintln(&b, "  1 cleartext debugging token exists and is usable RIGHT NOW.")
+	default:
+		fmt.Fprintf(&b, "  %d cleartext debugging tokens exist and are usable RIGHT NOW.\n", debugTokens)
+	}
+	fmt.Fprintln(&b, "")
+	fmt.Fprintln(&b, "  This is a DEBUGGING mode. Turn it off by removing")
+	fmt.Fprintln(&b, "  frontdoor.insecure_disable_tls from the config and restarting.")
+	fmt.Fprintln(&b, "==============================================================================")
+	return b.String()
+}
+
+// countDebugTokens reports how many cleartext debugging tokens are USABLE — the
+// banner's claim is "usable RIGHT NOW", so it has to mean what the auth path
+// means. VerifyPAT refuses a token on revocation AND on expiry
+// (core/auth/pat.go), so a count that filtered only on revoked would report
+// tokens nobody can present.
+//
+// Expiry is filtered in Go rather than in the query because the row filter is
+// equality-only; the row count here is a handful by construction (the mint gate
+// requires an admin and a cleartext front door), so there is nothing to
+// optimise.
+//
+// A failure counts as UNKNOWN rather than zero. Telling an operator "nothing can
+// connect" because a query failed would be the most reassuring possible lie at
+// the worst possible moment.
+func countDebugTokens(ctx context.Context, store *meta.Store, now time.Time) int {
+	rows, err := store.PATs.OnCtx(ctx).
+		With(meta.PATDebugCleartext, int64(1)).With(meta.PATRevoked, int64(0)).Select()
+	if err != nil {
+		return -1
+	}
+	n := 0
+	for _, r := range rows {
+		if now.Unix() < r.ExpiresAt {
+			n++
+		}
+	}
+	return n
 }

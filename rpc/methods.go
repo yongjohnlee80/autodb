@@ -131,6 +131,7 @@ var publicErrs = []struct {
 	// connection on purpose: it is the one refusal that has to be actionable.
 	{auth.ErrPATConnDenied, CodeInvalidToken},
 	{auth.ErrPATConnNotFrontDoor, CodeInvalidToken},
+	{auth.ErrPATDebugCleartextRefused, CodeInvalidToken},
 	{exec.ErrSessionBusy, CodeSessionBusy},
 	{exec.ErrSessionCapExceeded, CodeSessionCapExceeded},
 	{exec.ErrConnectionDraining, CodeConnectionDraining},
@@ -750,14 +751,14 @@ func (s *Server) register() {
 		}, nil
 	})
 
-	// auth.token_create takes FIVE arguments as of ADR-0086: conn_id is new and
+	// auth.token_create takes SIX arguments as of ADR-0086: conn_id is new and
 	// is not optional, because every PAT is bound to exactly one connection and
 	// there is no unscoped form. exactArgs is exact, so an old client meets a
 	// clean arity error rather than minting something unbound — which is the
 	// shape a breaking change should have when the alternative is a credential
 	// that silently reaches everything its owner is granted.
 	s.rpc.Handle("auth.token_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
-		if err := exactArgs(req.Params, 5); err != nil {
+		if err := exactArgs(req.Params, 6); err != nil {
 			return nil, err
 		}
 		token, err := argStr(req.Params, 0, "token")
@@ -780,6 +781,14 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
+		// debug_cleartext (ADR-0086 §10). Refused unless the caller is an
+		// admin AND this daemon is serving cleartext right now — the engine
+		// enforces that, not this handler, so a different caller cannot reach
+		// a weaker path.
+		debugCleartext, err := argInt(req.Params, 5, "debug_cleartext")
+		if err != nil {
+			return nil, err
+		}
 		var ips []string
 		if strings.TrimSpace(rawIPs) != "" {
 			ips = strings.Split(rawIPs, ",")
@@ -797,7 +806,8 @@ func (s *Server) register() {
 			return nil, wireErr(fmt.Errorf("%w: %d days requested; the range is 1..%d, or 0 for "+
 				"the default", auth.ErrPATBadExpiry, days, maxTokenDays))
 		}
-		out, cerr := s.auth.CreatePAT(ctx, token, name, connID, time.Duration(days)*24*time.Hour, ips)
+		out, cerr := s.auth.CreatePAT(ctx, token, name, connID,
+			time.Duration(days)*24*time.Hour, ips, debugCleartext != 0)
 		if cerr != nil {
 			return nil, wireErr(cerr)
 		}
@@ -1009,6 +1019,7 @@ func (s *Server) register() {
 			"addr":         info.Addr,
 			"host_names":   toAnyList(info.HostNames),
 			"root_ca_file": info.RootCAFile,
+			"cleartext":    info.Cleartext,
 		}, nil
 	})
 

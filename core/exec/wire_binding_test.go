@@ -135,7 +135,7 @@ func TestWireBinding_TwoConnectionsNamedTheSameDatabaseCannotBeConfused(t *testi
 	}
 	setTargetDB(t, f, bID, "test")
 
-	patB, err := f.svc.CreatePAT(ctx, f.rootTok, "wire-b", bID, 0, nil)
+	patB, err := f.svc.CreatePAT(ctx, f.rootTok, "wire-b", bID, 0, nil, false)
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestWireBinding_AnUngrantedCallerAuditsNoGrantNotMismatch(t *testing.T) {
 	if gerr := f.svc.AddGrant(ctx, f.rootTok, erin.UserID(), f.connID, "reader", testIP); gerr != nil {
 		t.Fatalf("AddGrant: %v", gerr)
 	}
-	erinPAT, err := f.svc.CreatePAT(ctx, erinTok, "erins", f.connID, 0, nil)
+	erinPAT, err := f.svc.CreatePAT(ctx, erinTok, "erins", f.connID, 0, nil, false)
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}
