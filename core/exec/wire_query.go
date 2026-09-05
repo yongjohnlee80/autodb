@@ -327,7 +327,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		attempt int64
 		txID    string
 		rows    int64
-		status  string
+		status  HistStatus
 		errText string
 		ran     bool
 	}

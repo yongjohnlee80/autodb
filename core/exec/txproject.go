@@ -28,27 +28,26 @@ import (
 // Named constants because these strings are written by the engine, read by
 // the projection, and rendered by three consumers; a typo in any one of them
 // is a status nothing matches and no test would notice.
+// HistStatus is an ALIAS for meta.HistoryStatus, not a second type.
+//
+// The vocabulary is PERSISTED — it is what the history table's status column
+// holds — so the type lives in core/meta beside meta.TxState, which is
+// persisted for the same reason. core/exec keeps this alias and the constants
+// below so the projection logic reads without a package qualifier on every
+// line; `=` makes them the same type, not a parallel one.
+type HistStatus = meta.HistoryStatus
+
 const (
-	StatusRunning = "running"
-	// StatusOK means the effect is durable. Outside a transaction that is
-	// true as soon as the statement returns; inside one it is true only
-	// after the commit, which is why it is not written there.
-	StatusOK = "ok"
-	// StatusPendingCommit means the statement ran and its fate is the
-	// transaction's. This is the honest answer for in-transaction work, and
-	// it is the one the old code could not express.
-	StatusPendingCommit = "ok_pending_commit"
-	StatusError         = "error"
-	// StatusRolledBack means the statement ran and was then discarded.
-	StatusRolledBack = "rolled_back"
-	// StatusUnresolvable means nothing can ever say whether the effect
-	// survived. Distinct from error — the statement did not fail — and
-	// distinct from pending, because no future pass will improve on it.
-	StatusUnresolvable = "outcome_unresolvable"
+	StatusRunning       = meta.StatusRunning
+	StatusOK            = meta.StatusOK
+	StatusPendingCommit = meta.StatusPendingCommit
+	StatusError         = meta.StatusError
+	StatusRolledBack    = meta.StatusRolledBack
+	StatusUnresolvable  = meta.StatusUnresolvable
 )
 
 // historyStatusFor maps a transaction's terminal onto its statements' status.
-func historyStatusFor(state meta.TxState) string {
+func historyStatusFor(state meta.TxState) HistStatus {
 	switch state {
 	case meta.TxCommitted:
 		return StatusOK

@@ -9,20 +9,20 @@ import (
 
 // History as a projection of the outcome log — ADR-0074 §7 rev 2.
 
-func histStatus(t *testing.T, f *fixture, txID string) []string {
+func histStatus(t *testing.T, f *fixture, txID string) []HistStatus {
 	t.Helper()
 	rows, err := f.store.History.OnCtx(context.Background()).With(meta.HistTxID, txID).Select()
 	if err != nil {
 		t.Fatalf("reading history: %v", err)
 	}
-	out := make([]string, 0, len(rows))
+	out := make([]HistStatus, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, r.Status)
 	}
 	return out
 }
 
-func seedHistory(t *testing.T, f *fixture, txID, status string) int64 {
+func seedHistory(t *testing.T, f *fixture, txID string, status HistStatus) int64 {
 	t.Helper()
 	id, err := f.store.History.OnCtx(context.Background()).
 		Set(meta.HistUserID, int64(1)).Set(meta.HistConnID, f.connID).
@@ -154,7 +154,7 @@ func TestRecordOutcome_AutocommitStaysOK(t *testing.T) {
 		t.Fatal("no history recorded")
 	}
 	for _, r := range rows {
-		if r.Status != StatusOK {
+		if r.Status != string(StatusOK) {
 			t.Errorf("autocommit statement status = %q, want ok — its effect is durable on return",
 				r.Status)
 		}
@@ -195,7 +195,7 @@ func TestSessionTx_AnInTransactionStatementIsPendingUntilTheCommit(t *testing.T)
 	if insert == nil {
 		t.Fatal("the in-transaction INSERT was not recorded at all")
 	}
-	if insert.Status != StatusPendingCommit {
+	if insert.Status != string(StatusPendingCommit) {
 		t.Fatalf("status mid-transaction = %q, want ok_pending_commit — a reader would see "+
 			"durable success for work a rollback would discard", insert.Status)
 	}
@@ -208,7 +208,7 @@ func TestSessionTx_AnInTransactionStatementIsPendingUntilTheCommit(t *testing.T)
 		t.Fatal(err)
 	}
 	for _, r := range rows {
-		if r.ID == insert.ID && r.Status != StatusOK {
+		if r.ID == insert.ID && r.Status != string(StatusOK) {
 			t.Fatalf("status after COMMIT = %q, want ok — the projection never resolved", r.Status)
 		}
 	}

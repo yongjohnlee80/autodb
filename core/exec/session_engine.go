@@ -383,7 +383,7 @@ func (e *Engine) finishClosing(ctx context.Context, s *session) {
 		cctx, ccancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
 		rerr := tx.RollbackContext(cctx)
 		ccancel()
-		outcome := "rolled_back"
+		outcome := FinalizeRolledBack
 		if rerr != nil {
 			outcome = "rollback_failed"
 			e.logf("session %s: rolling back %s on close: %v", s.id, txID, rerr)
@@ -392,7 +392,7 @@ func (e *Engine) finishClosing(ctx context.Context, s *session) {
 			txID: txID, state: txStateFor(outcome, rerr), reason: txOutcomeReason(outcome, rerr),
 			userID: s.userID, connectionID: s.connID,
 		})
-		e.auditBounded(ctx, s.userID, ip, "tx_"+outcome,
+		e.auditBounded(ctx, s.userID, ip, "tx_"+string(outcome),
 			fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
 	}
 

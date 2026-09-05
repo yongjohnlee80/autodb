@@ -480,11 +480,11 @@ func (e *Engine) txidStatus(ctx context.Context, connRow *meta.Connection, xid s
 	if !rows.Next() {
 		return "", fmt.Errorf("exec: txid_status returned no row for %s", xid)
 	}
-	var status string
+	var status HistStatus
 	if err := rows.Scan(&status); err != nil {
 		return "", err
 	}
-	return status, nil
+	return string(status), nil
 }
 
 // connectionRow loads a connection, or reports that it is gone.
