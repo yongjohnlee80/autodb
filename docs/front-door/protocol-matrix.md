@@ -215,9 +215,29 @@ no guarantee, and the guarantee it appears to add is the one the audit rows
 already carry.
 
 Emission sites: `frontdoor/stmt_attempt.go`, called at the three dispatch
-points — `query` (one per statement of a simple Query), `parse` (the
-parse-time gate), and `execute` (one per Execute, **re-executions of a
-suspended portal included**).
+points:
+
+| phase | granularity on the FEED | granularity of the DURABLE record |
+|---|---|---|
+| `query` | **one per simple-Query buffer** | **per statement** — `recordAttemptTagged` per part, `wire_query.go:348/367/398` |
+| `parse` | one per Parse | one per Parse |
+| `execute` | one per Execute, **re-executions of a suspended portal included** | same |
+
+**The `query` row is the one to read carefully, and it sharpens the two-sinks
+point rather than weakening it.** The front door emits once with the whole
+buffer as its detail; the split into statements happens inside `WireQuery`,
+downstream of the call, so a client sending `SELECT 1; SELECT 2; SELECT 3` is
+ONE event on the feed and THREE rows in the durable record. Measured: three
+statements in one buffer produce a single `query` attempt whose detail is the
+whole buffer, against a control of one statement producing one (gold-man, PR
+#85 r0; reproduced independently).
+
+That asymmetry is deliberate rather than a gap. Threading a per-statement emit
+seam through `WireQuery` is a large change to buy granularity on a best-effort
+feed, and the sink that has to be per statement — the one an investigation
+reads — already is. Pinned by
+`TestPGF4_TheQueryAttemptIsPerBufferAndTheDurableRecordIsPerStatement`, so this
+paragraph is checked rather than asserted.
 
 ### 1.4 Memory budget lanes (lector matrix-acceptance criterion 1)
 
@@ -577,7 +597,7 @@ is read (criterion 3); oversized declared length refuses before any read.
 
 | Message | States | Decision | Gating | Charge | Audit | Refusal / notes |
 |---|---|---|---|---|---|---|
-| `Query` (simple) | S4-I/T/E | **Mapped: PostgreSQL implicit-transaction semantics** (MF2). Statements split and run in order; each individually classified/authorized/guarded; first error (gate or target) aborts the block, rolls back its earlier statements. Explicit `BEGIN`/`COMMIT` inside the buffer per PostgreSQL implicit-block rules (ExecSession state transitions, never passthrough). In S4-E: recovery controls only. | classify+authorize+guard per statement; attempt-before-effect per statement | general, hdr-first; output via pending-output watermark | `fd.stmt_attempt`/`fd.stmt_outcome` per statement | Empty query → `EmptyQueryResponse` + `ReadyForQuery` (control lane). |
+| `Query` (simple) | S4-I/T/E | **Mapped: PostgreSQL implicit-transaction semantics** (MF2). Statements split and run in order; each individually classified/authorized/guarded; first error (gate or target) aborts the block, rolls back its earlier statements. Explicit `BEGIN`/`COMMIT` inside the buffer per PostgreSQL implicit-block rules (ExecSession state transitions, never passthrough). In S4-E: recovery controls only. | classify+authorize+guard per statement; attempt-before-effect per statement | general, hdr-first; output via pending-output watermark | `fd.stmt_attempt` per BUFFER on the feed / per STATEMENT in the durable record (note 1.3a); `fd.stmt_outcome` per statement | Empty query → `EmptyQueryResponse` + `ReadyForQuery` (control lane). |
 | `Parse` | S4-I/T (opens S5) | **Native pinned-conn** (ADR MF3). Gated at Parse: classifier + profile + grants, with **immutable classification/guard metadata attached** to the statement. Retained capacity is **reserved BEFORE the Parse is forwarded**. Reservation order and the refused classes: **note 4-Parse** below. | classify+authorize at Parse | general, hdr-first + stage-2 delta; retained **reserved pre-forward**, finalized at `ParseComplete` | `fd.stmt_attempt` (parse-time gate) | Refused classes refuse **at Parse** with §8a; segment then discards through `Sync`. Reservation failure → `53400`, nothing forwarded. |
 | `Bind` | S5 | Native: raw parameter formats/values and per-column result formats preserved bit-for-bit to the pinned conn. ≤ 8192 params. **Portal retained capacity reserved BEFORE forwarding**, finalized at `BindComplete`, released on error. | none (authority is at Parse + Execute) | general, hdr-first + stage-2 delta (param array pre-allocation); retained reserved pre-forward | — | Param-count/size over limits → §8a refuse, discard-through-Sync. |
 | `Describe` (`S`/`P`) | S5 | Native passthrough: `ParameterDescription` + `RowDescription`/`NoData` from the pinned conn (Describe-before-Execute metadata preserved). | none | control-sized (general lane) | — | Unknown name → target's error verbatim. |
