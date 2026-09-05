@@ -463,6 +463,60 @@ func newUserIPs(conn dao.DataConn) *dao.Schema[*UserIP, UserIPField, Sort, int64
 	})
 }
 
+// --- keyslots ---------------------------------------------------------------------
+
+// Keyslot is one row of the keyslots table: a copy of the install master key,
+// wrapped by something other than a user passphrase (ADR-0087).
+//
+// It is the SIBLING of users.mk_wrapped, and deliberately the same shape —
+// Wrapped is the identical nonce-prefixed AES-GCM blob, in a BLOB/BYTEA column,
+// so a reader written against one works against the other. Amendment 1 A1.1
+// chose a table over a store_meta row for exactly that reason: store_meta.value
+// is TEXT, and base64 there would have made these two the same secret in two
+// representations.
+type Keyslot struct {
+	// Kind names which non-user key opens this slot. 'service' is the only
+	// one the schema permits today; 'tpm' and 'kms' are the anticipated
+	// growth and are refused until something can actually unwrap them.
+	Kind string
+	// Wrapped is the master key sealed to this slot's KEK: nonce ‖ ciphertext.
+	Wrapped []byte
+	// AADVersion records WHICH binding sealed it (ADR-0087 §3), so a rotation
+	// can tell an old blob from a new one instead of failing to open and
+	// guessing why.
+	AADVersion string
+	CreatedBy  int64
+	CreatedAt  int64
+}
+
+type KeyslotField string
+
+const (
+	KeyslotKind       KeyslotField = "kind"
+	KeyslotWrapped    KeyslotField = "wrapped"
+	KeyslotAADVersion KeyslotField = "aad_version"
+	KeyslotCreatedBy  KeyslotField = "created_by"
+	KeyslotCreatedAt  KeyslotField = "created_at"
+)
+
+// KeyslotKindService is the only kind the v14 CHECK permits.
+const KeyslotKindService = "service"
+
+func newKeyslots(conn dao.DataConn) *dao.Schema[*Keyslot, KeyslotField, Sort, string] {
+	return dao.New(conn,
+		dao.Table[*Keyslot, KeyslotField, Sort, string]("keyslots"),
+		dao.ID[*Keyslot, KeyslotField, Sort, string](KeyslotKind),
+		dao.Conflict[*Keyslot, KeyslotField, Sort, string](KeyslotKind),
+		dao.Fields[*Keyslot, KeyslotField, Sort, string](map[KeyslotField]dao.Field[*Keyslot]{
+			KeyslotKind:       {Column: "kind", Scan: func(r *Keyslot) any { return &r.Kind }, Value: func(r *Keyslot) any { return r.Kind }},
+			KeyslotWrapped:    {Column: "wrapped", Scan: func(r *Keyslot) any { return &r.Wrapped }, Value: func(r *Keyslot) any { return r.Wrapped }},
+			KeyslotAADVersion: {Column: "aad_version", Scan: func(r *Keyslot) any { return &r.AADVersion }, Value: func(r *Keyslot) any { return r.AADVersion }},
+			KeyslotCreatedBy:  {Column: "created_by", Scan: func(r *Keyslot) any { return &r.CreatedBy }, Value: func(r *Keyslot) any { return r.CreatedBy }},
+			KeyslotCreatedAt:  {Column: "created_at", Scan: func(r *Keyslot) any { return &r.CreatedAt }, Value: func(r *Keyslot) any { return r.CreatedAt }},
+		}),
+	)
+}
+
 // --- store_meta -------------------------------------------------------------------
 
 // MetaKV is one store_meta row: install-scoped key/value state (schema
