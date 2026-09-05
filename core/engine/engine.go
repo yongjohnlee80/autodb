@@ -2,8 +2,8 @@
 // can keep its own metadata in.
 //
 // It owns that concept and nothing else. Every other package may depend on it,
-// and it depends on nothing, so naming an engine can never pull a dependency
-// cycle behind it.
+// and it depends on nothing outside the standard library, so naming an engine
+// can never pull a dependency cycle behind it.
 //
 // WHY A PACKAGE FOR THREE STRINGS. Before this existed the names were written
 // as string literals at 50 sites in 22 files, and every engine DIFFERENCE was
@@ -27,6 +27,7 @@
 package engine
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"strings"
 )
@@ -85,3 +86,43 @@ func Parse(s string) (Name, error) {
 
 // String returns the engine's persisted spelling.
 func (n Name) String() string { return string(n) }
+
+// Value implements driver.Valuer so a Name can be written to the meta store.
+//
+// WHY THIS IS NOT OPTIONAL. database/sql does not accept a defined string type
+// as a parameter — it accepts string — so without this the field types cleanly,
+// compiles, and then fails at runtime the first time a row is written. That is
+// exactly what happened when the persisted field was first typed: conn.list
+// came back as a bare "internal error" over the wire, two layers away from the
+// cause.
+func (n Name) Value() (driver.Value, error) { return string(n), nil }
+
+// Scan implements sql.Scanner so a Name can be read back from the meta store.
+//
+// It accepts what a driver actually hands over for a text column — string,
+// []byte, or NULL — and it VALIDATES: a stored value that is not a known engine
+// is an error here rather than a Name that no comparison will ever match. A row
+// written by an older build with a spelling this build does not know is a fault
+// worth surfacing at the read, where the row id is still in hand.
+func (n *Name) Scan(src any) error {
+	switch v := src.(type) {
+	case nil:
+		return fmt.Errorf("engine: NULL is not an engine name")
+	case string:
+		parsed, err := Parse(v)
+		if err != nil {
+			return err
+		}
+		*n = parsed
+		return nil
+	case []byte:
+		parsed, err := Parse(string(v))
+		if err != nil {
+			return err
+		}
+		*n = parsed
+		return nil
+	default:
+		return fmt.Errorf("engine: cannot scan %T into an engine name", src)
+	}
+}

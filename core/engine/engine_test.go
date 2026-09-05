@@ -243,3 +243,60 @@ func TestStringIsThePersistedSpelling(t *testing.T) {
 		}
 	}
 }
+
+// The store round-trip, both directions, including the failure the typed field
+// caused the first time it was tried: database/sql does not accept a defined
+// string type as a parameter, so without Valuer a write fails at runtime with
+// an error that surfaces two layers away as "internal error".
+func TestValueAndScanRoundTripEveryName(t *testing.T) {
+	for _, n := range All() {
+		v, err := n.Value()
+		if err != nil {
+			t.Fatalf("%q.Value() = error %v", n, err)
+		}
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("%q.Value() returned %T, want string — database/sql accepts a "+
+				"string, not a defined string type, which is the whole reason this "+
+				"method exists", n, v)
+		}
+		// A driver may hand back either form for a text column.
+		for _, src := range []any{s, []byte(s)} {
+			var back Name
+			if err := back.Scan(src); err != nil {
+				t.Fatalf("Scan(%T %v) = %v", src, src, err)
+			}
+			if back != n {
+				t.Fatalf("round-trip changed the value: %q -> %q", n, back)
+			}
+		}
+	}
+}
+
+// Scan VALIDATES. A row holding a spelling this build does not know is a fault
+// to surface at the read, not a Name that silently matches nothing.
+func TestScanRejectsWhatParseRejects(t *testing.T) {
+	bad := []any{
+		nil,
+		"postgress",
+		"Postgres",
+		"",
+		[]byte("mysql "),
+		42,
+	}
+	for _, src := range bad {
+		var n Name
+		if err := n.Scan(src); err == nil {
+			t.Errorf("Scan(%#v) succeeded, giving %q — an unknown stored value must "+
+				"be an error at the read, where the row is still in hand, rather "+
+				"than a value no later comparison will match", src, n)
+		}
+	}
+	// Positive control: the same instrument accepts a good value, so the rows
+	// above are rejected for their content and not because Scan always errors.
+	var n Name
+	if err := n.Scan("postgres"); err != nil || n != Postgres {
+		t.Fatalf("control: Scan(\"postgres\") = %q, %v — this cell cannot "+
+			"distinguish rejection from a Scan that never works", n, err)
+	}
+}
