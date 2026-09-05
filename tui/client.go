@@ -644,6 +644,55 @@ func (b *Bound) FrontDoorEndpoint(ctx context.Context) (FrontDoorEndpoint, error
 	return out, nil
 }
 
+// KeyslotStatus is what the daemon reports about its unattended unlock
+// (ADR-0087 §6).
+//
+// The daemon prints its banner ONCE, at start, to a terminal nobody may be
+// watching. This is how an operator asks later — from the TUI, at the moment
+// developers start being refused — why the store is locked.
+type KeyslotStatus struct {
+	// Attempted is false when no keyfile is configured: an install that never
+	// asked for unattended unlock, which must not read as one that failed.
+	Attempted bool
+	// Unlocked reports whether the KEYSLOT opened the store this boot.
+	Unlocked bool
+	// Reason names the ground when it did not.
+	Reason string
+	// StoreUnlocked is the store's state NOW, which is a different question:
+	// a failed keyslot followed by a passphrase login leaves the keyslot
+	// failed and the store open, and an operator needs both answers.
+	StoreUnlocked bool
+}
+
+// KeyslotStatus asks the daemon why it is (or is not) unlocked.
+func (b *Bound) KeyslotStatus(ctx context.Context) (KeyslotStatus, error) {
+	res, err := b.authed(ctx, "keyslot.status")
+	if err != nil {
+		return KeyslotStatus{}, err
+	}
+	m, _ := res.(map[string]any)
+	return KeyslotStatus{
+		Attempted:     mB(m, "attempted"),
+		Unlocked:      mB(m, "unlocked"),
+		Reason:        mS(m, "reason"),
+		StoreUnlocked: mB(m, "store_unlocked"),
+	}, nil
+}
+
+// EnrollKeyslot cuts the service keyslot. Admin only, and only from an
+// unlocked store — you cannot wrap a master key you do not hold.
+func (b *Bound) EnrollKeyslot(ctx context.Context) error {
+	_, err := b.authed(ctx, "keyslot.enroll")
+	return err
+}
+
+// RemoveKeyslot deletes the slot AND its keyfile, so the next restart needs a
+// passphrase again.
+func (b *Bound) RemoveKeyslot(ctx context.Context) error {
+	_, err := b.authed(ctx, "keyslot.remove")
+	return err
+}
+
 // SetConnectionProfile switches a connection's capability profile. Admin only.
 //
 // The caller is expected to have told the user what the switch turns on —

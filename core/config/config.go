@@ -452,6 +452,26 @@ type History struct {
 type Security struct {
 	// IPAllowlist is the set of client CIDRs allowed to talk to the server.
 	IPAllowlist []string `toml:"ip_allowlist"`
+
+	// ServiceKeyfile enables the UNATTENDED UNLOCK (ADR-0087): the daemon
+	// reads this file at start and unwraps the master key with it, so a
+	// restart does not need a human passphrase.
+	//
+	// EMPTY IS THE DEFAULT AND MEANS "no unattended unlock" — the behaviour
+	// before ADR-0087, and the right default: an install that never asked
+	// stays locked until somebody logs in, rather than reaching for a file
+	// nobody configured.
+	//
+	// GIVE IT ITS OWN DIRECTORY (Amendment 1 A1.2), not the meta store's. The
+	// store and the key that opens it are the two halves of one envelope, and
+	// a keyfile beside the store means one careless archive captures both —
+	// taken by somebody who believes they backed up a database.
+	//
+	// The daemon REFUSES a keyfile that is group- or world-readable, because
+	// developers hold shell accounts on the box this runs on and ADR-0075 §4
+	// already puts a group-readable socket there. A permission that is
+	// documented but unchecked is one that drifts.
+	ServiceKeyfile string `toml:"service_keyfile"`
 }
 
 // Default returns the zero-config defaults.

@@ -127,6 +127,45 @@ ip_allowlist = ["127.0.0.1/32", "::1/128"]
 # replacing it (the TUI on this machine still connects over loopback):
 # ip_allowlist = ["127.0.0.1/32", "::1/128", "10.0.5.0/24"]
 
+# ---------------------------------------------------------------------------
+# UNATTENDED UNLOCK — so a restart does not lock everybody out.
+#
+# Connection secrets are encrypted with a master key that is normally unwrapped
+# by a PASSPHRASE at login. That is right when the only clients are people at a
+# terminal, and wrong the moment autodb is the only path to a production
+# database: the box reboots and nobody can work until a human logs in by hand.
+#
+# Point this at a file and autodb unwraps the master key from it at start, with
+# no passphrase. Cut the slot ONCE from a running, unlocked daemon:
+#
+#   autodb keyslot enroll     # admin, while logged in — writes the keyfile
+#
+# It is the LUKS pattern: a keyfile slot added BESIDE the passphrase slots.
+# Every user's passphrase keeps working exactly as before, and unlocking the
+# key still authenticates NOBODY — authority is a token, re-resolved per call.
+#
+# GIVE IT ITS OWN DIRECTORY, not the one holding the meta store. The store and
+# the key that opens it are the two halves of one envelope, and a keyfile
+# beside the store means one careless `tar` of that directory captures both —
+# taken by somebody who believes they backed up a database.
+#
+# The file is 0600 and autodb REFUSES a group- or world-readable one. That is
+# not ceremony: developers hold shell accounts on the box this runs on, and the
+# enrollment socket next door is deliberately group-readable. A permission that
+# is documented but unchecked is a permission that drifts.
+#
+# WHAT IT COSTS, stated plainly: at-rest protection becomes "filesystem
+# permissions and host security" rather than "a passphrase that exists nowhere
+# on disk". Anyone who can read the keyfile AND the meta store has every
+# secret. That is the trade this setting makes, and it is why it is opt-in.
+#
+# If the keyfile is missing, unreadable, wrongly permissioned or does not match
+# the slot, THE DAEMON STILL STARTS — it prints a loud banner, leaves the store
+# locked, and a passphrase login still works. Front-door clients then get
+# 57P03 "the server is not accepting connections", NOT an authentication
+# failure, so nobody wastes an afternoon regenerating good tokens.
+# service_keyfile = "/var/lib/autodb-keys/service.key"
+
 [exec]
 # The largest single statement the engine will execute, in bytes.
 #
@@ -458,6 +497,40 @@ bind = "127.0.0.1:5432"
 # it the front door can take the whole pool and the TUI stops working, with
 # the front door looking healthy -- because from its side nothing failed.
 reserved_headroom = 4
+
+# ---------------------------------------------------------------------------
+# HOW LONG AN IDLE FRONT-DOOR SESSION LIVES — set in [exec], not here.
+#
+#   [exec] session_idle_timeout = "30m"     (the default)
+#
+# It is documented here because this is the surface where you MEET it. A
+# front-door session is a real, pinned PostgreSQL backend on your target and it
+# holds a lease from that target's pool, so an idle session is a production
+# connection held open by a laptop that went to sleep.
+#
+# 30 MINUTES IS DELIBERATE and was reaffirmed on 2026-09-06. Raising it is a
+# trade in three directions at once, all the wrong way for a deployment where
+# autodb is the only path to production:
+#
+#   - every parked session holds a target lease, and reserved_headroom above is
+#     what stops the front door starving the TUI and the engine's own control
+#     queries. A longer idle window means more sessions parked at once,
+#     competing with the path an admin uses to FIX things.
+#   - an access token works from anywhere it is admitted until revoked, so an
+#     idle session is a live authenticated channel sitting open. 30m bounds
+#     that exposure; two hours quadruples it.
+#   - an abandoned session is the one nobody is watching, which is exactly the
+#     one worth reaping soonest.
+#
+# WHAT A DEVELOPER SEES is a clean, accurate goodbye rather than a dropped
+# connection: FATAL 57P05 "terminating connection due to idle timeout", the
+# SQLSTATE PostgreSQL itself uses, with a hint. Their client reconnects on the
+# next query. Every close is audited.
+#
+# Related bounds on an OPEN transaction, also in [exec] and also deliberate:
+# idle_in_tx_timeout = "90s" and max_tx_duration = "5m". Those are not tuning
+# knobs — a transaction abandoned between BEGIN and COMMIT holds locks on the
+# target until something ends it, and nothing else will.
 
 # Concurrent wire sessions per target pool. Unset derives
 # pool_max_conns - reserved_headroom, which is what you almost always want.

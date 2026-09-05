@@ -356,6 +356,23 @@ func seedEverything(t *testing.T, s *Store) {
 	if err := s.SetMeta(ctx, "install_id", "src-install"); err != nil {
 		t.Fatal(err)
 	}
+	// The SERVICE KEYSLOT (ADR-0087). Every field non-default, because this
+	// cell compares column by column and a zero value proves nothing about
+	// whether that column was copied.
+	//
+	// It matters more here than for most tables: the wrapped master key is a
+	// BLOB, and a migration that dropped it would produce a destination whose
+	// daemon starts LOCKED with a keyfile on disk that looks perfectly
+	// correct — the exact failure the migrate copy path was extended to
+	// prevent.
+	if _, err := s.Keyslots.OnCtx(ctx).
+		Set(KeyslotKind, KeyslotKindService).
+		Set(KeyslotWrapped, []byte{0x01, 0x02, 0x03, 0x04, 0xff}).
+		Set(KeyslotAADVersion, "autodb:keyslot:service:v1").
+		Set(KeyslotCreatedBy, rootID).
+		Set(KeyslotCreatedAt, int64(4242)).Insert(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // isolatedPGStore opens a migrated postgres store inside its own schema.

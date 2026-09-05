@@ -239,6 +239,22 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		if reason := exec.DenialReason(aerr); reason != "" {
 			return authOutcome{Denied: denialReason(reason), Counts: chargesThrottle(reason)}, nil
 		}
+		// A LOCKED STORE DOES NOT ARRIVE HERE, and an earlier version of this
+		// feature wrongly assumed it did.
+		//
+		// The assumption came from a source trace — openTarget decrypts the
+		// DSN and returns ErrLocked — which is true of openTarget and false of
+		// this path: OpenWireSessionWith never opens a target. The DSN is
+		// decrypted at the FIRST STATEMENT, so a locked store lets a client
+		// authenticate and refuses its query, which is post-auth and handled
+		// in session_loop.go's classifyGateError.
+		//
+		// A branch for it here would be one that cannot fire, so there is not
+		// one. What guards the assumption instead is a cell that asserts the
+		// ARRIVAL POINT — that opening SUCCEEDS on a locked store and the
+		// first query fails — which reddens if anything ever moves the target
+		// open earlier, rather than a dead branch nobody would notice was
+		// dead.
 		// A store failure. The wire still gets the uniform denial — telling
 		// a caller that our database is unreachable is an answer they have
 		// not earned either — but the audit says what it was, and the

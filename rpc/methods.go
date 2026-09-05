@@ -73,6 +73,18 @@ const (
 	// It is emphatically NOT the front door's credential failure. That one
 	// is uniform and anonymous by design, and it never travels this wire.
 	CodeInvalidToken int64 = -32046
+
+	// CodeKeyslot reports a SERVICE KEYSLOT mutation an admin can fix
+	// (ADR-0087 §5): no keyfile path configured, a slot that already exists,
+	// no slot to remove, a keyfile with unsafe permissions, a malformed one.
+	//
+	// Its own code rather than a shared "invalid argument", because these have
+	// DIFFERENT REMEDIES and a caller that cannot tell them apart sends its
+	// operator to the wrong file. The caller is an authenticated admin acting
+	// on their own install, so the sentinel text is theirs to see — this is
+	// nothing like the front door's uniform credential denial, which is
+	// anonymous by design and never travels this wire.
+	CodeKeyslot int64 = -32047
 )
 
 // publicErrs is the whole disclosure allowlist: core sentinels whose
@@ -132,6 +144,15 @@ var publicErrs = []struct {
 	{auth.ErrPATConnDenied, CodeInvalidToken},
 	{auth.ErrPATConnNotFrontDoor, CodeInvalidToken},
 	{auth.ErrPATDebugCleartextRefused, CodeInvalidToken},
+	// Keyslot mutations. Denied is the admin gate; the rest are operator
+	// mistakes with distinct remedies, so they must not collapse into one
+	// code — "no keyfile path configured" and "a slot already exists" send an
+	// operator to different places.
+	{auth.ErrNoKeyfilePath, CodeKeyslot},
+	{auth.ErrServiceKeyslotExists, CodeKeyslot},
+	{auth.ErrNoServiceKeyslot, CodeKeyslot},
+	{auth.ErrKeyfileMode, CodeKeyslot},
+	{auth.ErrKeyfileMalformed, CodeKeyslot},
 	{exec.ErrSessionBusy, CodeSessionBusy},
 	{exec.ErrSessionCapExceeded, CodeSessionCapExceeded},
 	{exec.ErrConnectionDraining, CodeConnectionDraining},
@@ -346,6 +367,63 @@ func (s *Server) register() {
 			return nil, wireErr(err)
 		}
 		return map[string]any{"token": token, "user": identMap(id)}, nil
+	})
+	// THE SERVICE KEYSLOT (ADR-0087). Three verbs, all admin-gated inside
+	// core/auth rather than here — this layer is transport, and an authority
+	// check written at the transport is one a second transport forgets.
+	//
+	// keyslot.enroll is the ONE-TIME step the acceptance story allows: an
+	// admin, already logged in, cuts a slot so no later restart needs a human.
+	s.rpc.Handle("keyslot.enroll", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.auth.EnrollServiceKeyslot(ctx, token, peerIP(req)))
+	})
+	s.rpc.Handle("keyslot.remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.auth.RemoveServiceKeyslot(ctx, token, peerIP(req)))
+	})
+	// keyslot.status is what makes §6 honest at a DISTANCE. The daemon prints
+	// its banner once, at start, to a terminal nobody may be watching; this is
+	// how an operator asks later, from the TUI, why every developer is being
+	// refused. It reports the LAST ATTEMPT rather than re-reading the keyfile,
+	// because the question is "what happened at boot", not "what would happen
+	// now".
+	s.rpc.Handle("keyslot.status", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		// Authenticated, like every other privileged verb: "is this install
+		// unlocked, and why not" is not a question an unauthenticated caller
+		// gets to ask (security-core-hardening R1).
+		if _, verr := s.auth.ValidateToken(ctx, token); verr != nil {
+			return nil, wireErr(verr)
+		}
+		st := s.auth.ServiceKeyslotStatus()
+		return map[string]any{
+			"attempted": st.Attempted,
+			"unlocked":  st.Unlocked,
+			"reason":    st.Reason,
+			// The store's CURRENT state, which is not the same question: a
+			// failed keyslot followed by a passphrase login leaves attempted
+			// false-ish and the store open, and an operator needs both.
+			"store_unlocked": s.auth.Unlocked(),
+		}, nil
 	})
 	s.rpc.Handle("auth.logout", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {

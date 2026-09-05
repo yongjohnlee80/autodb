@@ -36,6 +36,7 @@ type Store struct {
 	AllowedIPs     *dao.Schema[*AllowedIP, AllowedIPField, Sort, int64]
 	UserIPs        *dao.Schema[*UserIP, UserIPField, Sort, int64]
 	KV             *dao.Schema[*MetaKV, MetaKVField, Sort, string]
+	Keyslots       *dao.Schema[*Keyslot, KeyslotField, Sort, string]
 }
 
 // Open opens the configured meta-store engine, runs pending migrations, and
@@ -120,6 +121,7 @@ func OpenNoMigrate(ctx context.Context, mcfg config.Meta) (*Store, error) {
 		AllowedIPs:     newAllowedIPs(conn),
 		UserIPs:        newUserIPs(conn),
 		KV:             newKV(conn),
+		Keyslots:       newKeyslots(conn),
 	}, nil
 }
 

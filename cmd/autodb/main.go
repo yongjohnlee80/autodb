@@ -366,10 +366,30 @@ func runServe(configPath string) error {
 	// TestInstanceLease_ReleaseBeforeStoreCloseDoesNotHang pins it.
 	defer func() { _ = lease.Release() }()
 
-	svc, err := auth.New(store, auth.WithConfigAllowlist(cfg.Security.IPAllowlist))
+	svc, err := auth.New(store,
+		auth.WithConfigAllowlist(cfg.Security.IPAllowlist),
+		auth.WithServiceKeyfile(cfg.Security.ServiceKeyfile))
 	if err != nil {
 		ln.Close()
 		return fmt.Errorf("auth: %w", err)
+	}
+
+	// THE UNATTENDED UNLOCK (ADR-0087 §1). Before anything serves, so the
+	// front door and the RPC surface come up against a store that is already
+	// open rather than one that opens under them.
+	//
+	// IT NEVER FAILS THE START (§6). Fail closed on the SECRET, not on the
+	// process: a daemon that refuses to boot because a keyfile is unreadable
+	// converts a degraded state into a total outage, and this feature exists
+	// to remove an outage. So a failure here leaves the store locked exactly
+	// as it was before ADR-0087 — a passphrase login still works — and is
+	// reported LOUDLY, because §6's justification for staying up is that the
+	// state is visible.
+	if uerr := svc.UnlockWithServiceKeyslot(ctx); uerr != nil {
+		fmt.Fprint(os.Stderr, lockedBanner(uerr))
+	} else if st := svc.ServiceKeyslotStatus(); st.Unlocked {
+		fmt.Printf("autodb: store unlocked from the service keyslot (%s)\n",
+			cfg.Security.ServiceKeyfile)
 	}
 
 	// Everything that makes the engine actually OBEY its configuration lives
@@ -1204,4 +1224,32 @@ func countDebugTokens(ctx context.Context, store *meta.Store, now time.Time) int
 		}
 	}
 	return n
+}
+
+// lockedBanner is what an operator sees when the unattended unlock failed.
+//
+// LOUD ON PURPOSE, and it is the half ADR-0087 §6 rests on: §6 keeps the daemon
+// running through every keyfile failure, justified by the state being visible.
+// A one-line warning among startup chatter is not visible, and the symptom
+// without it is every developer being refused with nothing saying why.
+//
+// It names the REMEDY as well as the state, because the operator reading it at
+// 3am is being asked to choose between fixing the keyfile and logging in by
+// hand, and both are one command.
+func lockedBanner(reason error) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "==============================================================================")
+	fmt.Fprintln(&b, "  THE STORE IS LOCKED — the service keyslot did not open.")
+	fmt.Fprintln(&b, "")
+	fmt.Fprintf(&b, "  %v\n", reason)
+	fmt.Fprintln(&b, "")
+	fmt.Fprintln(&b, "  The daemon IS RUNNING and is answering, but every connection that needs a")
+	fmt.Fprintln(&b, "  stored secret is refused until the store is unlocked. Front-door clients")
+	fmt.Fprintln(&b, "  see 57P03 \"the server is not accepting connections\" — NOT an authentication")
+	fmt.Fprintln(&b, "  failure, so nobody should be regenerating tokens over this.")
+	fmt.Fprintln(&b, "")
+	fmt.Fprintln(&b, "  Either fix the keyfile and restart, or log in once with a passphrase to")
+	fmt.Fprintln(&b, "  unlock this process now.")
+	fmt.Fprintln(&b, "==============================================================================")
+	return b.String()
 }

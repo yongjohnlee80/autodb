@@ -24,6 +24,35 @@ const (
 
 	// DenialMessage is deliberately the whole of what the wire learns.
 	DenialMessage = "authentication failed"
+
+	// LockedSQLState is 57P03 cannot_connect_now — the code PostgreSQL itself
+	// uses for "running, but not accepting connections yet" (ADR-0087
+	// Amendment 1 A1.3). It is the ONE state that answers differently from
+	// DenialSQLState, and the exception is argued rather than assumed:
+	//
+	// R13 forbids a denial that varies BY CALLER or BY RESOURCE — "an
+	// ungranted caller's error for an existing resource must be
+	// indistinguishable from a nonexistent one". A locked store is NEITHER.
+	// It is a global server state, identical for every caller, independent of
+	// whether the token is valid, the user exists, or the connection exists,
+	// so it cannot be used to learn anything about a resource and is not an
+	// oracle in R13's sense. What it discloses is that this server is up and
+	// not serving — the least sensitive state a service has, and one every
+	// client library already renders as "not ready" rather than "your
+	// credentials are wrong".
+	//
+	// WHAT IT BUYS is ADR-0087 §6's honesty. §6 keeps the daemon RUNNING when
+	// a keyfile fails, justified by the state being loud and visible; a log
+	// line is not loud to the person who hits it, and that person is a
+	// developer holding a perfectly good token on the morning after a reboot.
+	// Telling them their credentials are invalid sends them to regenerate a
+	// token that was never the problem.
+	LockedSQLState = "57P03"
+
+	// LockedMessage is FIXED. No cause, no HINT, no varying DETAIL: the
+	// caller learns the STATE and never the reason, which stays in the
+	// operational log and the admin surface.
+	LockedMessage = "the server is not accepting connections: the autodb store is locked"
 )
 
 // denialReason is the INTERNAL cause. It reaches the audit trail and never
@@ -31,6 +60,11 @@ const (
 type denialReason string
 
 const (
+	// reasonStoreLocked is the ONLY reason that changes what the wire says
+	// (ADR-0087 A1.3). It is not the caller's fault and is never charged to
+	// their address.
+	reasonStoreLocked denialReason = "frontdoor/store-locked"
+
 	reasonPlaintextStartup denialReason = "frontdoor/tls-required"
 	// Emitted as a TLS failure rather than a denial (matrix row 2.1a), which
 	// is why it is a reason string and never reaches denial().
@@ -84,6 +118,24 @@ const (
 // §1.2: a synthesized error must never impersonate the target, and the rule
 // id is stable, which is what makes an audit trail greppable.
 func denial(reason denialReason) *pgproto3.ErrorResponse {
+	// THE ONE EXCEPTION, and it is a single named state rather than a table.
+	//
+	// The shape matters as much as the decision: a map from reason to code is
+	// how a uniform surface becomes an enumerable one, one well-meaning entry
+	// at a time. This is an `if` against one constant so that adding a second
+	// exception is a visible edit to this function that a reviewer meets,
+	// rather than a row somebody appends elsewhere.
+	if reason == reasonStoreLocked {
+		return &pgproto3.ErrorResponse{
+			Severity:            "FATAL",
+			SeverityUnlocalized: "FATAL",
+			Code:                LockedSQLState,
+			Message:             LockedMessage,
+			// The stable rule id, exactly as every other denial carries
+			// "frontdoor/denied": constant, and not the cause.
+			Detail: string(reasonStoreLocked),
+		}
+	}
 	_ = reason
 	return &pgproto3.ErrorResponse{
 		Severity:            "FATAL",

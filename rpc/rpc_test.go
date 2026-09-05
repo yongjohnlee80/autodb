@@ -8,6 +8,7 @@ import (
 	"math"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1438,5 +1439,141 @@ func TestFrontDoorEndpoint_RequiresAToken(t *testing.T) {
 	errVal, _ := c.call("frontdoor.endpoint", "not-a-real-token")
 	if errVal == nil {
 		t.Fatal("frontdoor.endpoint answered an unauthenticated caller")
+	}
+}
+
+// The SERVICE KEYSLOT verbs (ADR-0087 §5).
+//
+// The authority gate lives in core/auth, not here — this layer is transport,
+// and an authority check written at the transport is one a second transport
+// forgets. What THESE cells cover is what core/auth cannot see: that the verbs
+// exist, are authenticated, and that their distinct failures survive the wire
+// as distinct codes.
+func TestKeyslot_VerbsAreAuthenticated(t *testing.T) {
+	f := newFixture(t)
+	c := f.session(t)
+
+	for _, verb := range []string{"keyslot.status", "keyslot.enroll", "keyslot.remove"} {
+		t.Run(verb, func(t *testing.T) {
+			errVal, _ := c.call(verb, "not-a-real-token")
+			if errVal == nil {
+				t.Fatalf("%s answered an unauthenticated caller — \"is this install unlocked, "+
+					"and why not\" is not a question anyone with a socket gets to ask", verb)
+			}
+		})
+	}
+}
+
+// keyslot.status reports the keyslot AND the store as separate answers,
+// because they are separate questions: a failed keyslot followed by a
+// passphrase login leaves the keyslot failed and the store open.
+func TestKeyslot_StatusReportsBothQuestions(t *testing.T) {
+	f := newFixture(t)
+	c := f.session(t)
+
+	errVal, res := c.call("keyslot.status", f.rootTok)
+	if errVal != nil {
+		t.Fatalf("keyslot.status: %v", errVal)
+	}
+	m, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("result is not a map: %T", res)
+	}
+	for _, k := range []string{"attempted", "unlocked", "reason", "store_unlocked"} {
+		if _, present := m[k]; !present {
+			t.Errorf("the reply has no %q key", k)
+		}
+	}
+	// This fixture never configured a keyfile, so the keyslot was never
+	// attempted — and the store IS unlocked, because the fixture bootstrapped.
+	// The two must disagree, which is the whole point of reporting both.
+	if m["attempted"] != false {
+		t.Errorf("attempted = %v on an install with no keyfile configured; an operator would "+
+			"be shown a failure they did not cause", m["attempted"])
+	}
+	if m["store_unlocked"] != true {
+		t.Errorf("store_unlocked = %v, want true — the fixture is bootstrapped", m["store_unlocked"])
+	}
+}
+
+// The keyslot failures must NOT collapse into one wire code's worth of
+// meaning: "no keyfile path configured" and "a slot already exists" send an
+// operator to different places.
+func TestKeyslot_DistinctFailuresSurviveTheWire(t *testing.T) {
+	f := newFixture(t)
+	c := f.session(t)
+
+	// This fixture configures no keyfile, so enrolling reports exactly that,
+	// with the sentinel's own text rather than a generic internal error.
+	errVal, _ := c.call("keyslot.enroll", f.rootTok)
+	msg := mustErr(t, errVal, rpc.CodeKeyslot)
+	if !strings.Contains(msg, "keyfile path") {
+		t.Errorf("enroll on an unconfigured install said %q; it must name the missing "+
+			"configuration rather than fail generically", msg)
+	}
+
+	// And removing a slot that does not exist is its OWN answer, not the same
+	// one — a caller that cannot tell them apart cannot act on either.
+	errVal2, _ := c.call("keyslot.remove", f.rootTok)
+	msg2 := mustErr(t, errVal2, rpc.CodeKeyslot)
+	if msg2 == msg {
+		t.Errorf("enroll-without-config and remove-without-a-slot returned the SAME message "+
+			"(%q); the two have different remedies", msg)
+	}
+	if !strings.Contains(msg2, "keyslot") {
+		t.Errorf("remove said %q, which does not name what was missing", msg2)
+	}
+}
+
+// keyslot.status reports the DAEMON'S REAL STATE, not a zero value.
+//
+// THE BOUNDARY CELL, and it exists because a mutation proved the others could
+// not reach it: replacing the status read with an empty struct left every
+// keyslot cell green, since an rpc-only fixture never attempts an unattended
+// unlock and so the true status IS the zero value. That is a statement about
+// the suite's inputs rather than about the line — the daemon calls
+// UnlockWithServiceKeyslot at start, and rpc reports whatever that produced.
+//
+// So this fixture puts the Service into the state only a daemon normally
+// produces, and then asks the wire what it says.
+func TestKeyslot_StatusReportsARealFailure(t *testing.T) {
+	keyfile := filepath.Join(t.TempDir(), "keys", "service.key")
+	f := newFixtureWithAuth(t, []auth.Option{auth.WithServiceKeyfile(keyfile)})
+
+	// A keyfile that is not there: §6's "absent" ground, and the daemon stays
+	// up exactly as it would in production.
+	if err := f.svc.UnlockWithServiceKeyslot(context.Background()); err == nil {
+		t.Fatal("control: the unlock did not fail, so there is no real status to report")
+	}
+
+	c := f.session(t)
+	errVal, res := c.call("keyslot.status", f.rootTok)
+	if errVal != nil {
+		t.Fatalf("keyslot.status: %v", errVal)
+	}
+	m, ok := res.(map[string]any)
+	if !ok {
+		t.Fatalf("result is not a map: %T", res)
+	}
+	if m["attempted"] != true {
+		t.Errorf("attempted = %v after a real failed unlock; the operator is shown "+
+			"\"never enabled\" for an install that tried and failed", m["attempted"])
+	}
+	if m["unlocked"] != false {
+		t.Errorf("unlocked = %v after a failed unlock", m["unlocked"])
+	}
+	reason, _ := m["reason"].(string)
+	if reason == "" {
+		t.Error("reason is empty after a failed unlock; §6 keeps the daemon running on five " +
+			"distinguishable grounds and this is where an operator reads which one")
+	}
+	if !strings.Contains(reason, "keyfile") {
+		t.Errorf("reason = %q, which does not name the keyfile", reason)
+	}
+	// The store is still open — the fixture bootstrapped — and that is the
+	// SEPARATE question this surface must not collapse.
+	if m["store_unlocked"] != true {
+		t.Errorf("store_unlocked = %v; a failed keyslot over an open store must report both",
+			m["store_unlocked"])
 	}
 }

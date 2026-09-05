@@ -173,6 +173,21 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 				return map[MetaKVField]any{KVKey: r.Key, KVValue: r.Value}
 			})
 		}},
+		// The SERVICE KEYSLOT travels with the store (ADR-0087). Omitting it
+		// here would migrate an install whose daemon then starts LOCKED with
+		// no explanation — the keyfile on disk would be fine and the slot it
+		// opens simply would not exist. A table missing from this list is
+		// invisible to a row-count check for the same reason a missing column
+		// is: nothing counts what was never copied.
+		{"keyslots", func() (int64, error) {
+			return copyAll(ctx, src.Keyslots, dst.Keyslots, func(r *Keyslot) map[KeyslotField]any {
+				return map[KeyslotField]any{
+					KeyslotKind: r.Kind, KeyslotWrapped: r.Wrapped,
+					KeyslotAADVersion: r.AADVersion,
+					KeyslotCreatedBy:  r.CreatedBy, KeyslotCreatedAt: r.CreatedAt,
+				}
+			})
+		}},
 	}
 	for _, s := range steps {
 		n, err := s.run()
@@ -261,6 +276,7 @@ func countableTables(ctx context.Context, s *Store) []countableTable {
 		{"user_ip_allowlist", s.UserIPs.OnCtx(ctx).Count},
 		{"pats", s.PATs.OnCtx(ctx).Count},
 		{"store_meta", s.KV.OnCtx(ctx).Count},
+		{"keyslots", s.Keyslots.OnCtx(ctx).Count},
 	}
 }
 
@@ -299,7 +315,9 @@ func verifyCounts(ctx context.Context, dst *Store, want map[string]int64) error 
 }
 
 // serialTables lists the tables whose BIGSERIAL sequences must advance past
-// the explicitly-copied ids (store_meta has a natural key; not listed).
+// the explicitly-copied ids (store_meta and keyslots have natural keys — a
+// string `key` and a string `kind` — so neither is listed and neither has a
+// sequence to advance).
 var serialTables = []string{
 	"users", "connections", "workspaces", "workspace_connections",
 	"grants", "sessions", "script_history", "audit_log", "tx_outcomes",

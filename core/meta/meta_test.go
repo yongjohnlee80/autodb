@@ -195,6 +195,11 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 	// Roll the store back to v6: drop the queue and its ledger row, so the
 	// next Open genuinely applies v7 against a populated log.
 	for _, stmt := range []string{
+		// v14's table. A NEW table rather than a new column, so the rollback
+		// is a DROP rather than an ALTER — but it is the same lesson v13 taught
+		// here: a schema step this list does not undo makes the re-migration
+		// fail on its own success.
+		`DROP TABLE keyslots`,
 		`DROP TABLE tx_pending`,
 		// Everything from v7 on re-applies, so every artifact a >=7 migration
 		// creates must be dropped here too, or the re-run collides with it.
@@ -296,6 +301,11 @@ func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
 			created_at BIGINT NOT NULL)`,
 		`INSERT INTO tx_pending (id, tx_id, connection_id, created_at)
 			SELECT id, tx_id, connection_id, created_at FROM tx_pending_v8`,
+		// v14's table. A NEW table rather than a new column, so the rollback
+		// is a DROP rather than an ALTER — but it is the same lesson v13 taught
+		// here: a schema step this list does not undo makes the re-migration
+		// fail on its own success.
+		`DROP TABLE keyslots`,
 		`DROP TABLE tx_pending_v8`,
 		// v9 re-applies as well; drop its artifact for the same reason.
 		`DROP TABLE user_ip_allowlist`,

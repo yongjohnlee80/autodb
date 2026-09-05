@@ -473,6 +473,45 @@ var migrations = []migration{
 			`UPDATE pats SET revoked = 1 WHERE revoked = 0`,
 		},
 	},
+	{
+		// v14 — the SERVICE KEYSLOT (ADR-0087, Amendment 1 A1.1).
+		//
+		// A table rather than a store_meta row, and the reason is the column
+		// type. The wrapped master key is a nonce-prefixed AES-GCM blob, and
+		// its SIBLING — users.mk_wrapped, the per-user slot from ADR-0054 —
+		// is already BLOB/BYTEA. Putting this one in store_meta (TEXT, Go
+		// string) would give one install TWO REPRESENTATIONS of the same kind
+		// of secret, and the failure that follows is not a forgotten base64:
+		// it is somebody writing one reader that works on one of the two.
+		//
+		// The table also gives the ADR's own requirements a shape instead of
+		// a string to encode them into: §3's AAD version, and §5's
+		// created_by/created_at for the audit row that must commit in the
+		// same transaction as the slot.
+		//
+		// `kind` is the primary key, so an install holds at most one slot per
+		// kind, and the CHECK names the vocabulary rather than leaving it to
+		// convention — 'tpm' and 'kms' are the anticipated growth and are
+		// deliberately NOT permitted yet, because a slot kind nothing can
+		// unwrap is a row that looks like protection.
+		Version: 14,
+		SQLite: []string{
+			`CREATE TABLE keyslots (
+				kind TEXT PRIMARY KEY CHECK (kind IN ('service')),
+				wrapped BLOB NOT NULL,
+				aad_version TEXT NOT NULL,
+				created_by INTEGER NOT NULL REFERENCES users(id),
+				created_at BIGINT NOT NULL)`,
+		},
+		Postgres: []string{
+			`CREATE TABLE keyslots (
+				kind TEXT PRIMARY KEY CHECK (kind IN ('service')),
+				wrapped BYTEA NOT NULL,
+				aad_version TEXT NOT NULL,
+				created_by BIGINT NOT NULL REFERENCES users(id),
+				created_at BIGINT NOT NULL)`,
+		},
+	},
 }
 
 // partitionVolumeTables is v11's computed step.
