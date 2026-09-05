@@ -11,7 +11,20 @@ import (
 
 // migration is one schema version: per-engine DDL applied atomically.
 type migration struct {
-	Version  int
+	Version int
+	// Both is the DDL when the two engines take the SAME statements, and it is
+	// the form to reach for first.
+	//
+	// WHY IT EXISTS. Ten migrations carried a SQLite list and a Postgres list;
+	// FIVE were byte-identical and three more differed only in a cast spelling.
+	// Nothing tied the copies together, so a fix applied to one list and not the
+	// other produced two stores with DIFFERENT SCHEMAS, and the divergence
+	// surfaced later, in whichever deployment used the other engine. A migration
+	// that is genuinely the same on both engines should say so once.
+	//
+	// Both and the per-engine lists are mutually exclusive: a migration
+	// declaring both is a contradiction, not a merge.
+	Both     []string
 	SQLite   []string
 	Postgres []string
 	// PostgresFn is a COMPUTED postgres step, run after Postgres.
@@ -27,6 +40,21 @@ type migration struct {
 	// inside the one transaction and the migration lock, like everything
 	// else.
 	PostgresFn func(ctx context.Context, ex migExec) error
+}
+
+// stmts returns the DDL this migration applies on eng.
+//
+// Both wins when present, which is the point: the per-engine lists exist for
+// genuine divergence, and a migration that has none should not be able to
+// express one by accident.
+func (m migration) stmts(eng engine.Name) []string {
+	if len(m.Both) > 0 {
+		return m.Both
+	}
+	if eng == engine.Postgres {
+		return m.Postgres
+	}
+	return m.SQLite
 }
 
 // migrations is the ordered, append-only schema history (ADR-0053 §3).
@@ -54,11 +82,7 @@ var migrations = []migration{
 	// booleans in one table.
 	{
 		Version: 3,
-		SQLite: []string{
-			`ALTER TABLE connections ADD COLUMN profile TEXT NOT NULL DEFAULT 'v1compat'`,
-			`ALTER TABLE connections ADD COLUMN debug INTEGER NOT NULL DEFAULT 0`,
-		},
-		Postgres: []string{
+		Both: []string{
 			`ALTER TABLE connections ADD COLUMN profile TEXT NOT NULL DEFAULT 'v1compat'`,
 			`ALTER TABLE connections ADD COLUMN debug INTEGER NOT NULL DEFAULT 0`,
 		},
@@ -74,10 +98,7 @@ var migrations = []migration{
 	// for more, with no rows to rewrite.
 	{
 		Version: 4,
-		SQLite: []string{
-			`ALTER TABLE connections ADD COLUMN pool_max_conns INTEGER NOT NULL DEFAULT 0`,
-		},
-		Postgres: []string{
+		Both: []string{
 			`ALTER TABLE connections ADD COLUMN pool_max_conns INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
@@ -182,12 +203,7 @@ var migrations = []migration{
 	// path free of null handling.
 	{
 		Version: 6,
-		SQLite: []string{
-			`ALTER TABLE audit_log ADD COLUMN tx_id TEXT NOT NULL DEFAULT ''`,
-			`ALTER TABLE script_history ADD COLUMN tx_id TEXT NOT NULL DEFAULT ''`,
-			`CREATE INDEX idx_audit_tx ON audit_log(tx_id)`,
-		},
-		Postgres: []string{
+		Both: []string{
 			`ALTER TABLE audit_log ADD COLUMN tx_id TEXT NOT NULL DEFAULT ''`,
 			`ALTER TABLE script_history ADD COLUMN tx_id TEXT NOT NULL DEFAULT ''`,
 			`CREATE INDEX idx_audit_tx ON audit_log(tx_id)`,
@@ -249,15 +265,7 @@ var migrations = []migration{
 	// the queue did not carry.
 	{
 		Version: 8,
-		SQLite: []string{
-			`ALTER TABLE tx_pending ADD COLUMN user_id BIGINT NOT NULL DEFAULT 0`,
-			`UPDATE tx_pending SET user_id = COALESCE((
-				SELECT o.user_id FROM tx_outcomes o
-				WHERE o.tx_id = tx_pending.tx_id ORDER BY o.seq LIMIT 1), 0)`,
-			`CREATE INDEX idx_tx_pending_order ON tx_pending(created_at, id)`,
-			`CREATE INDEX idx_tx_pending_user ON tx_pending(user_id, created_at)`,
-		},
-		Postgres: []string{
+		Both: []string{
 			`ALTER TABLE tx_pending ADD COLUMN user_id BIGINT NOT NULL DEFAULT 0`,
 			`UPDATE tx_pending SET user_id = COALESCE((
 				SELECT o.user_id FROM tx_outcomes o
@@ -312,10 +320,7 @@ var migrations = []migration{
 	// short progression from a collapsed one rather than guessing.
 	{
 		Version: 10,
-		SQLite: []string{
-			`ALTER TABLE tx_outcomes ADD COLUMN collapsed_at BIGINT NOT NULL DEFAULT 0`,
-		},
-		Postgres: []string{
+		Both: []string{
 			`ALTER TABLE tx_outcomes ADD COLUMN collapsed_at BIGINT NOT NULL DEFAULT 0`,
 		},
 	},
@@ -684,10 +689,7 @@ func applyAll(ctx context.Context, ex migExec, d dao.Dialect, eng engine.Name) e
 		if m.Version <= cur {
 			continue
 		}
-		stmts := m.SQLite
-		if eng == engine.Postgres {
-			stmts = m.Postgres
-		}
+		stmts := m.stmts(eng)
 		for _, stmt := range stmts {
 			if _, err := ex.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("meta: migration %d: applying %q: %w", m.Version, firstLine(stmt), err)
