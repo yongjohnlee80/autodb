@@ -8,11 +8,22 @@
 // WHY A PACKAGE FOR THREE STRINGS. Before this existed the names were written
 // as string literals at 50 sites in 22 files, and every engine DIFFERENCE was
 // asked as an identity comparison against one of them (`connRow.Engine ==
-// "mysql"`). Two consequences, and the second is the one that costs: a typo is
-// a silent no-match rather than a compile error, and a fourth engine takes the
-// default branch at every one of those sites without failing to build. The
-// constants close the first. Capability interfaces (ADR-0088 §2) close the
-// second; this package is what they are keyed on.
+// "mysql"`).
+//
+// BE PRECISE ABOUT WHAT THE TYPE BUYS, because it is less than it looks. A
+// defined string type does NOT turn a typo into a compile error: Go converts an
+// untyped constant on assignment, so `var n Name = "postgress"` compiles
+// happily. What the type buys is that a value cannot be confused with an
+// unrelated string, and that every comparison has one canonical operand to
+// compare against. The typo only becomes a build failure once raw literals are
+// mechanically excluded from the rest of the tree, which is a separate guard
+// and a separate change.
+//
+// The second cost — that a fourth engine takes the default branch at every one
+// of those comparison sites without failing to build — is not addressed here at
+// all. It is addressed by asking each site's real question as a capability the
+// engine either has or does not, instead of asking which engine it is. This
+// package is what those capabilities are keyed on.
 package engine
 
 import (
