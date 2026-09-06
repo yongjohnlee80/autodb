@@ -40,7 +40,7 @@ type backendDisposition int
 const (
 	// dispForwarded: mapped by backendFrame and sent to the client.
 	dispForwarded backendDisposition = iota
-	// dispCanary: §5 — its ARRIVAL is itself the defect, because its trigger is
+	// dispCanary: matrix §5 — its ARRIVAL is itself the defect, because its trigger is
 	// refused before the target could produce it.
 	dispCanary
 	// dispStartupPhase: belongs to a phase that has ended before backendFrame
@@ -69,10 +69,10 @@ var backendVocabulary = map[string]backendRow{
 	"AuthenticationSASL":              {dispStartupPhase, "credential exchange"},
 	"AuthenticationSASLContinue":      {dispStartupPhase, "credential exchange"},
 	"AuthenticationSASLFinal":         {dispStartupPhase, "credential exchange"},
-	"BackendKeyData":                  {dispStartupPhase, "synthesized by the front door at session open (§3.3)"},
+	"BackendKeyData":                  {dispStartupPhase, "synthesized by the front door at session open (matrix §3.3)"},
 	"NegotiateProtocolVersion":        {dispStartupPhase, "row 2.5, before the session exists"},
 
-	"ReadyForQuery": {dispSynthesized, "synthesized from the engine's state machine (§6.1); the target's is never forwarded"},
+	"ReadyForQuery": {dispSynthesized, "synthesized from the engine's state machine (matrix §6.1); the target's is never forwarded"},
 
 	"CopyInResponse":       {dispCanary, "COPY is refused at classification, so no COPY sub-protocol is ever active"},
 	"CopyOutResponse":      {dispCanary, "COPY is refused at classification"},

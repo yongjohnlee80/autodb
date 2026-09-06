@@ -36,14 +36,14 @@ import (
 // Backend — and this comment described it. It was correct for a client that
 // sends one message and waits, and wrong for every client that pipelines: pgx's
 // chunkReader reads ahead, so the peek blocked on bytes pgproto3 had already
-// taken (PR #59). Lector flagged the surviving comment as non-blocking on #59
+// taken. Review flagged the surviving comment as non-blocking
 // r1; it is corrected here rather than on that PR's approved head.
 func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReader,
 	be *pgproto3.Backend, sess exec.WireSessionResult, peer string, closeReason *string) error {
 
 	// A MESSAGE HAS STARTED — reported from the byte path, because once pgproto3
 	// may have read ahead that is the only place the fact is observable. From
-	// here the peer is mid-frame, which §7 gives its own budget and its own
+	// here the peer is mid-frame, which matrix §7 gives its own budget and its own
 	// identity: a peer that stops halfway through a message is not idle, and
 	// reporting a frame stall as an idle timeout tells an operator the client
 	// went quiet when it actually went slow.
@@ -52,7 +52,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 	// read; a frame already in progress when a cycle starts is covered by the
 	// entry check below, because the callback cannot fire twice for one message
 	// and a message read ahead during auth has already spent its start.
-	// The delivery boundary is runSession's alone (lector's audit): auth and
+	// The delivery boundary is runSession's alone: auth and
 	// defaultSession share this reader and admit nothing.
 	fr.setBounded(true)
 	defer fr.setBounded(false)
@@ -63,7 +63,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 
 	// THE SEGMENT'S LANE RESERVATION IS OWNED HERE, not by the frame that took
 	// it, because an extended segment spans many frames and many trips round this
-	// loop. §8.2 is release on EVERY path: Sync is the segment's normal exit, but
+	// loop. matrix §8.2 is release on EVERY path: Sync is the segment's normal exit, but
 	// a client that vanishes between Execute and Sync never sends one, and a
 	// release-at-Sync design would leak those bytes for the life of the process.
 	// This defer is the only thing that runs on every way out of a session.
@@ -73,7 +73,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 	for {
 		// WHICH BUDGET IS OWED IS A QUESTION ABOUT THE STREAM, and the reader is
 		// the only thing that can answer it — so it is ASKED here rather than
-		// assumed (r0 MF1).
+		// assumed.
 		//
 		// Arming idle unconditionally was wrong for a message already in flight.
 		// The reader is shared with auth, and auth's Backend reads ahead exactly
@@ -101,7 +101,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			return nil
 		}
 
-		// §1.5 STAGE ONE, APPLIED IN FRAMING ORDER (lector C r2 MF2/MF3). The
+		// MATRIX §1.5 STAGE ONE, APPLIED IN FRAMING ORDER. The
 		// header of the frame this Receive will return is already known whenever
 		// the reader framed it in an earlier socket read — the pipelined case,
 		// which is the one that can amplify — so the segment is admitted on the
@@ -195,7 +195,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// segment, and a simple Query is a message like any other.
 		//
 		// Guarding only the extended path let a Query pipelined behind a refused
-		// Parse fall through to runQuery and EXECUTE: lector r1 MF4 committed a
+		// Parse fall through to runQuery and EXECUTE: review found a
 		// row that way. A client that mixes the protocols on one connection —
 		// lib/pq does — hits that with ordinary traffic.
 		if seg.discarding {
@@ -218,7 +218,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			// A refusal that KEEPS the session still ends a protocol cycle, and
 			// every cycle ends with readiness. PostgreSQL's own Function Call
 			// sub-protocol says so explicitly — ReadyForQuery is sent "whether
-			// processing terminates successfully or with an error" — and §6.3
+			// processing terminates successfully or with an error" — and matrix §6.3
 			// names the ONLY case where readiness is withheld, which is an
 			// unknown transaction outcome, not this.
 			//
@@ -262,12 +262,12 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 //
 // Recording both as "peer-closed" makes the audit say the client hung up when
 // the front door in fact hung up on it — and a false operational record is worse
-// than a missing one, because someone will act on it. §7 gives the deadline case
+// than a missing one, because someone will act on it. matrix §7 gives the deadline case
 // its own identity: a FATAL 57P05 under gate/session-deadline.
 func (l *Listener) endOfFrameRead(conn net.Conn, be *pgproto3.Backend, err error, peer string, closeReason *string) error {
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
-		// Mid-frame, not idle: §7's progress budget, with its own SQLSTATE. The
+		// Mid-frame, not idle: matrix §7's progress budget, with its own SQLSTATE. The
 		// write needs its own budget for the same reason the idle path does —
 		// the deadline that fired bounds writes too.
 		_ = conn.SetDeadline(l.now().Add(deadlineGoodbyeBudget))
@@ -300,7 +300,7 @@ func (l *Listener) endOfRead(conn net.Conn, be *pgproto3.Backend, fr *frameReade
 		// The distinction the peek existed for, preserved: an undefined type
 		// byte is told apart from a transport failure, and gets the accurate
 		// 08P01 rather than a silent close. The byte itself goes to the audit,
-		// never to the wire (§1.2).
+		// never to the wire (matrix §1.2).
 		// The REASON stays the stable rule id — an audit trail is greppable only
 		// if its identities do not vary — and the offending byte rides in the
 		// detail, where a varying value belongs.
@@ -380,7 +380,7 @@ func (l *Listener) sendReadiness(conn net.Conn, be *pgproto3.Backend, sess exec.
 // (session_extended.go), the simple path's terminal, and the withheld-output
 // report. Folding them into sendReadiness would make each RE-READ the status
 // from the engine, and that is a defect this code has already had once: two
-// halves of one answer, fetched at different moments, disagreeing (r5 MF16).
+// halves of one answer, fetched at different moments, disagreeing.
 // A caller that has observed a status must send the one it observed.
 //
 // What is shared is the WRITE, not the decision: send, flush under the
@@ -428,7 +428,7 @@ func (l *Listener) flushBounded(conn net.Conn, be *pgproto3.Backend) error {
 	return err
 }
 
-// outputCap is §7's cumulative per-statement bound, or a cell's lowered one.
+// outputCap is matrix §7's cumulative per-statement bound, or a cell's lowered one.
 func (l *Listener) outputCap() int64 {
 	if l.testOutputCap != nil {
 		return *l.testOutputCap
@@ -436,7 +436,7 @@ func (l *Listener) outputCap() int64 {
 	return cumulativeOutputCap
 }
 
-// outputWatermark is §8.4's bound on serialized output waiting to be written,
+// outputWatermark is matrix §8.4's bound on serialized output waiting to be written,
 // or a cell's lowered one.
 func (l *Listener) outputWatermark() int64 {
 	if l.testWatermark != nil {
@@ -447,7 +447,7 @@ func (l *Listener) outputWatermark() int64 {
 
 // laneWait is how long a statement waits for the general lane, or a cell's
 // shortened budget. The figure itself is policy (KB: shared/reference/
-// autodb-front-door-session-loop-budgets.md §5.2).
+// autodb-front-door-session-loop-budgets.md matrix §5.2).
 func (l *Listener) laneWait() time.Duration {
 	if l.testLaneWait != nil {
 		return *l.testLaneWait
@@ -459,11 +459,11 @@ func (l *Listener) laneWait() time.Duration {
 // statement that had ALREADY BEEN DISPATCHED. It is a closed set, and adding a
 // budget means adding a row to withheldReasons below — which is the point.
 //
-// This type exists because the same defect was found twice at two sites (r2 MF9
-// at the cumulative cap, r4 MF15 at the general lane), and a third site would
+// This type exists because the same defect was found twice at two sites (once
+// at the cumulative cap, once at the general lane), and a third site would
 // have been a third chance to get it wrong. A stop reason can no longer compose
 // its own account of what happened to the statement: it names what stopped, and
-// the stage asks the ENGINE what became of the effects (jarvis, r4).
+// the stage asks the ENGINE what became of the effects.
 type outputWithheld int
 
 const (
@@ -475,7 +475,7 @@ const (
 	withheldOnSaturatedLane
 )
 
-// withheldReasons maps each stop reason to its §7 wire identity, the clause
+// withheldReasons maps each stop reason to its matrix §7 wire identity, the clause
 // naming WHAT STOPPED, and the operator's remedy for it.
 //
 // Note what is NOT here: any claim about the statement's effects. A budget knows
@@ -510,7 +510,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 	// every emit, so a re-entrant call gets ErrSessionBusy by design. Anything
 	// this loop needs from the engine happens after WireQuery returns.
 	// PRE-DISPATCH RESERVATION — refuse before the effect where the budget can be
-	// known (jarvis, r4: "it is the cheaper truth").
+	// known.
 	//
 	// A statement's output working set is bounded by the watermark, so it can be
 	// reserved from the process lane BEFORE the target runs anything. That moves
@@ -528,7 +528,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 		held = cap
 	}
 	if !l.general.reserve(held, l.laneWait(), l.now) {
-		// Backpressure, not a defect (§7) — and honest, because it is PRE-effect.
+		// Backpressure, not a defect (matrix §7) — and honest, because it is PRE-effect.
 		// This is the one place in the statement path where fd.refused is the
 		// truthful audit for a budget: nothing ran.
 		l.onEvent(Event{Kind: "fd.refused", Reason: ruleBudgetBackpressure, Peer: peer,
@@ -543,11 +543,11 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 		return l.sendReadiness(conn, be, sess, peer, closeReason)
 	}
 	// The emitter SEES the target's error before deciding whether to forward it,
-	// so a failure that arrives before the stop is observed rather than inferred
-	// (r5 MF16). A failure arriving AFTER the stop is not observable here at all
-	// — that is the gap jarvis's EmitStopped seam closes.
+	// so a failure that arrives before the stop is observed rather than inferred.
+	// A failure arriving AFTER the stop is not observable here at all
+	// — that is the gap the EmitStopped seam closes.
 	acct := newOutputAccountant(l, conn, be, peer, held)
-	// RELEASE ON EVERY PATH (§8.2): whatever this statement holds goes back when
+	// RELEASE ON EVERY PATH (matrix §8.2): whatever this statement holds goes back when
 	// it returns, however it returns — and it reads acct.held, not the figure
 	// reserved above, so an oversized frame's top-up cannot leak.
 	defer func() { l.general.release(acct.held) }()
@@ -586,7 +586,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 
 	case acct.emitErr != nil:
 		// A message the front door cannot frame is a defect on OUR side, not the
-		// peer's — a target emitting something impossible (§5's never-emitted
+		// peer's — a target emitting something impossible (matrix §5's never-emitted
 		// canaries) lands here. Say so accurately and close; forwarding a guess
 		// would be worse than stopping.
 		l.onEvent(Event{Kind: "fd.refused", Reason: unframeableAudit(acct.emitErr), Peer: peer, Detail: acct.emitErr.Error()})
@@ -622,7 +622,7 @@ func (l *Listener) runQuery(ctx context.Context, conn net.Conn, be *pgproto3.Bac
 // that as a refusal is a lie the client acts on: r2 returned 54000 over a
 // hundred durable rows, and r4 found the identical lie at the lane, in a
 // function I had just fixed for the cap. So this is a STAGE, not a helper the
-// sites call with their own prose (jarvis, r4): a site names a reason, and
+// sites call with their own prose: a site names a reason, and
 // nothing else about the story is its to tell.
 //
 // THE EFFECTS CLAUSE COMES FROM THE ENGINE, NOT FROM THE BUDGET. Whether the
@@ -656,7 +656,7 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 		return false
 	}
 
-	// ONE SNAPSHOT FOR BOTH THE STORY AND THE READINESS BYTE (r0 MF1).
+	// ONE SNAPSHOT FOR BOTH THE STORY AND THE READINESS BYTE.
 	//
 	// The engine's report is taken WHILE it holds the session's claim; a
 	// WireTxStatus read afterwards is a second, later snapshot, and the claim
@@ -664,7 +664,7 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 	// and the readiness byte from the second is how a client is told its effects
 	// are PENDING and then handed readiness `I` in the same cycle — the two
 	// halves of one answer disagreeing, which is the defect this whole path
-	// exists to prevent (r5 MF16) reappearing between the arm and the byte.
+	// exists to prevent reappearing between the arm and the byte.
 	//
 	// So when the engine reported, its TxStatus is authoritative for BOTH. The
 	// separate read remains only for the paths that have no report — the
@@ -676,7 +676,7 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 	// and repairs it from the later snapshot — reintroducing the split it was
 	// fixing, in the one case where the engine's answer is already suspect. If
 	// the engine reported and its status is not a status, the session's phase is
-	// unknown and §6.3's rule applies: no readiness is invented for it.
+	// unknown and matrix §6.3's rule applies: no readiness is invented for it.
 	status := byte(0)
 	switch {
 	case stopped != nil:
@@ -705,10 +705,10 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 		return false
 	}
 
-	// THE TERMINAL BYTE BELONGS TO THE CYCLE THAT OWNS IT (lector r2 MF4).
+	// THE TERMINAL BYTE BELONGS TO THE CYCLE THAT OWNS IT.
 	//
 	// A simple Query's cycle ends here: the session is intact — a budget stopped
-	// the OUTPUT, not the connection — so §6.3 owes it the readiness that ends
+	// the OUTPUT, not the connection — so matrix §6.3 owes it the readiness that ends
 	// every surviving cycle, and this is the only place it can come from.
 	//
 	// AN EXTENDED SEGMENT DOES NOT END HERE. Only the client's Sync ends one, and
@@ -729,9 +729,9 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 // IT SWITCHES ON THE ENGINE'S ANSWER AND DOES NOT RE-DERIVE ONE. exec.EmitStopped
 // carries the arm; asking it twice — once in the engine, once from the fields
 // here — is how the two stories drift, and this path exists because the client's
-// story and the audit's disagreed once already (r5 MF16).
+// story and the audit's disagreed once already.
 //
-// The arm ORDER is the engine's too, and it is load-bearing: lector's r1 on #60
+// The arm ORDER is the engine's too, and it is load-bearing: review
 // found that placing the empty-query arm after the transaction arms would tell a
 // client its NON-EXISTENT statement's effects were "pending" inside a BEGIN.
 // Order is code there, not documentation, which is why this switch has no
@@ -787,7 +787,7 @@ func recordedEffects(stopped *exec.EmitStopped, status byte, targetFailed bool) 
 		// The engine watched it finish. This is the one arm the loop could never
 		// reach on its own: stopping early is this path's premise, so "committed"
 		// was not a conclusion available to it until the engine could report the
-		// drained tail (r5 MF16, jarvis's seam).
+		// drained tail.
 		return "the statement executed",
 			"the statement's effects are committed", string(arm)
 	default:
@@ -814,12 +814,12 @@ func armFromWhatIsKnown(stopped *exec.EmitStopped, status byte, targetFailed boo
 	case status == txStatusAborted:
 		return exec.ArmAborted
 	default:
-		// Idle with nothing observed is NOT "committed" — that was r5 MF16.
+		// Idle with nothing observed is NOT "committed".
 		return exec.ArmUnresolved
 	}
 }
 
-// frameGateError turns the front door's OWN refusal into a §8a ErrorResponse and
+// frameGateError turns the front door's OWN refusal into a matrix §8a ErrorResponse and
 // the readiness that follows it. A target error never reaches here — it arrives
 // as protocol data through emit and WireQuery returns a status normally.
 func (l *Listener) frameGateError(conn net.Conn, be *pgproto3.Backend, sess exec.WireSessionResult,
@@ -856,7 +856,7 @@ func (l *Listener) applyDispatch(conn net.Conn, be *pgproto3.Backend, d dispatch
 	if d.emit != nil {
 		be.Send(d.emit)
 		// Bounded like every other post-auth write: a peer that will not read
-		// must not park the session on a refusal frame either (r2 MF13). A
+		// must not park the session on a refusal frame either. A
 		// failed flush is not reported — the decision is made and the audit row
 		// is written; the only remaining question is whether the peer heard it,
 		// which changes nothing this end.
@@ -877,7 +877,7 @@ func (l *Listener) applyDispatch(conn net.Conn, be *pgproto3.Backend, d dispatch
 // this message" and "this message arrived broken" are different defects.
 var errUnframeableKind = errors.New("unframeable backend message kind")
 
-// errCanaryMessage is a §5 canary: a message whose ARRIVAL is itself the defect,
+// errCanaryMessage is a matrix §5 canary: a message whose ARRIVAL is itself the defect,
 // because its trigger is refused before the target could produce one.
 //
 // Distinct from errUnframeableKind on purpose. A canary has a CASE — the front
@@ -887,7 +887,7 @@ var errUnframeableKind = errors.New("unframeable backend message kind")
 // the confusion the vocabulary convention exists to prevent.
 var errCanaryMessage = errors.New("backend message whose arrival is itself a defect")
 
-// ruleClassifierBypass is the audit cause for a §5 canary arriving from the
+// ruleClassifierBypass is the audit cause for a matrix §5 canary arriving from the
 // target.
 //
 // SEPARATE FROM ruleUnframeableMessage, and the separation is the point. A canary
@@ -895,8 +895,8 @@ var errCanaryMessage = errors.New("backend message whose arrival is itself a def
 // a gate bypass. Auditing it as an unframeable message records a security event
 // as our mapper being incomplete, and sends an operator to debug the front door
 // while the thing that actually happened goes unnamed. The wire still gets the
-// catalogue's violation id (§7 names one id for that class); the AUDIT gets the
-// defect, which is the §1.2 split.
+// catalogue's violation id (matrix §7 names one id for that class); the AUDIT gets the
+// defect, which is the matrix §1.2 split.
 const ruleClassifierBypass = "frontdoor/classifier-bypass"
 
 // unframeableAudit picks the audit identity for a message the front door would
@@ -937,17 +937,17 @@ const ruleUnframeableMessage = "frontdoor/unframeable-message"
 const pendingOutputWatermark int64 = 4 << 20
 
 // ruleOutputWatermark identifies the per-connection backpressure in the audit
-// trail; ruleBudgetBackpressure identifies the process-wide lane's (§7).
+// trail; ruleBudgetBackpressure identifies the process-wide lane's (matrix §7).
 const (
 	ruleOutputWatermark = "frontdoor/output-watermark"
-	// ruleMessageTooLarge is §7's identity for a declared body past the post-auth
+	// ruleMessageTooLarge is matrix §7's identity for a declared body past the post-auth
 	// cap. Refused from the HEADER — the body is never read — and the connection
 	// closes, because a stream we will not read cannot be resynchronised.
 	ruleMessageTooLarge    = "frontdoor/message-too-large"
 	ruleBudgetBackpressure = "frontdoor/budget-backpressure"
 )
 
-// ruleSessionDeadline is §7's identity for the front door closing an idle
+// ruleSessionDeadline is matrix §7's identity for the front door closing an idle
 // session, and sqlStateIdleSessionTimeout is the SQLSTATE PostgreSQL itself uses
 // for it — a client that already recognises 57P05 from a real server recognises
 // it here.
@@ -955,20 +955,20 @@ const (
 	ruleSessionDeadline        = "gate/session-deadline"
 	sqlStateIdleSessionTimeout = "57P05"
 
-	// §7's partial-frame progress budget identity.
+	// matrix §7's partial-frame progress budget identity.
 	ruleFrameStall            = "frontdoor/frame-stall"
 	sqlStateConnectionFailure = "08006"
 
-	// §7's cumulative-output cap identity.
+	// matrix §7's cumulative-output cap identity.
 	ruleOutputCap        = "frontdoor/output-cap"
 	sqlStateProgramLimit = "54000"
 
 	// sqlStateConfiguredLimit is 53400 configuration_limit_exceeded, which
-	// §7 ruling 4 separates from 54000: a CONFIGURED quota the operator can
+	// matrix §7 ruling 4 separates from 54000: a CONFIGURED quota the operator can
 	// raise, not a program limit the client must work under. The retained-state
 	// budget and the named-object cap are both the former.
 	sqlStateConfiguredLimit = "53400"
-	// cumulativeOutputCap is §7's per-statement bound on total output.
+	// cumulativeOutputCap is matrix §7's per-statement bound on total output.
 	cumulativeOutputCap int64 = 8 << 30
 )
 
@@ -977,7 +977,7 @@ const (
 // a reason to hold the slot open.
 const deadlineGoodbyeBudget = 2 * time.Second
 
-// classifyGateError maps a front-door refusal onto the §7 refusal catalogue:
+// classifyGateError maps a front-door refusal onto the matrix §7 refusal catalogue:
 // SQLSTATE, the DETAIL rule id, the HINT, and whether the connection survives.
 //
 // Refusals the catalogue does not name fall through to a denial-shaped answer
@@ -987,7 +987,7 @@ const deadlineGoodbyeBudget = 2 * time.Second
 func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 	switch {
 	case errors.Is(err, auth.ErrLocked):
-		// THE STORE IS LOCKED (ADR-0087 §8). It surfaces HERE, at the first
+		// THE STORE IS LOCKED. It surfaces HERE, at the first
 		// statement, and not during the credential exchange — measured, after
 		// an earlier version of this feature asserted the opposite from a
 		// source trace: OpenWireSessionWith never decrypts a DSN, so a locked
@@ -1045,7 +1045,7 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 	case errors.Is(err, exec.ErrDecodedResultTruncated):
 		// Only a NON-PostgreSQL target can reach this now: PostgreSQL streams
 		// unbounded through the raw path. The decoded producer REFUSES rather
-		// than dropping rows, which is what §5 requires of anything that cannot
+		// than dropping rows, which is what matrix §5 requires of anything that cannot
 		// serve a result whole.
 		return "54000", exec.DecodedResultTruncatedRuleID,
 			"the result exceeds the decoded producer's page; this target does not stream unbounded results", false
@@ -1063,19 +1063,19 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 			"the credential does not carry the privilege this statement needs", false
 
 	case errors.Is(err, exec.ErrParamCap):
-		// §7 :384 — a PROGRAM limit (54000), not a configured quota: no operator
+		// matrix §7 :384 — a PROGRAM limit (54000), not a configured quota: no operator
 		// setting raises it, so the remedy is to send fewer parameters.
 		return sqlStateProgramLimit, "frontdoor/param-cap",
 			"send fewer parameters in one Bind", false
 
 	case errors.Is(err, exec.ErrNamedObjectCap):
-		// §7 :385. The connection stays: it is this Parse or Bind that is
+		// matrix §7 :385. The connection stays: it is this Parse or Bind that is
 		// refused, and closing unused objects makes room.
 		return sqlStateConfiguredLimit, "frontdoor/named-object-cap",
 			"close unused prepared statements or portals, then retry", false
 
 	case errors.Is(err, exec.ErrRetainedBudget):
-		// §7 :381 — a CONFIGURED quota the operator can raise, which ruling 4
+		// matrix §7 :381 — a CONFIGURED quota the operator can raise, which ruling 4
 		// separates from 54000's program limits. The connection stays: it is this
 		// Parse or Bind that is refused.
 		return sqlStateConfiguredLimit, "frontdoor/retained-budget",
@@ -1152,7 +1152,7 @@ func pgErrorBytes(e *pgconn.PgError) int {
 
 // backendFrame turns one neutral engine message into the wire frame that
 // carries it. A kind this function does not know is an ERROR rather than a
-// skip: §5's canaries (CopyInResponse, NotificationResponse, FunctionCallResponse
+// skip: matrix §5's canaries (CopyInResponse, NotificationResponse, FunctionCallResponse
 // and the rest) are messages whose ARRIVAL is itself the defect, and skipping
 // one would hide exactly the event the canary exists to catch.
 func backendFrame(m exec.WireMessage) (pgproto3.BackendMessage, error) {
@@ -1250,7 +1250,7 @@ func backendFrame(m exec.WireMessage) (pgproto3.BackendMessage, error) {
 }
 
 // outputAccountant is the ONE place output is accounted for on its way to the
-// client: §7's cumulative cap, §8.4's watermark, the general lane's top-up, and
+// client: matrix §7's cumulative cap, §8.4's watermark, the general lane's top-up, and
 // the borrowed-bytes contract.
 //
 // It is a type rather than a closure because F2's extended segments stream
@@ -1294,14 +1294,14 @@ func (a *outputAccountant) emit(m exec.WireMessage) error {
 		return ferr
 	}
 	if frame != nil {
-		// ACCOUNTED BEFORE SERIALIZATION (§8.4: "before serialization of
+		// ACCOUNTED BEFORE SERIALIZATION (matrix §8.4: "before serialization of
 		// each outbound frame"). Counting after Send means the buffer has
 		// already grown by the frame that crossed the line, so the
 		// watermark is enforced one frame late — and a single frame can
 		// be large.
 		size := estimateFrameBytes(m)
 
-		// §7's cumulative per-statement output cap. Unlike the watermark,
+		// matrix §7's cumulative per-statement output cap. Unlike the watermark,
 		// which paces, this ABORTS: past it the statement is refused
 		// rather than allowed to stream forever.
 		a.produced += int64(size)
@@ -1310,7 +1310,7 @@ func (a *outputAccountant) emit(m exec.WireMessage) error {
 			return errStopForwarding
 		}
 
-		// THE WATERMARK IS ENFORCED BEFORE SERIALIZATION (§8.4: "before
+		// THE WATERMARK IS ENFORCED BEFORE SERIALIZATION (matrix §8.4: "before
 		// serialization of each outbound frame"), which means draining
 		// FIRST when this frame would cross it.
 		//

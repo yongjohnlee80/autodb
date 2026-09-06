@@ -425,7 +425,7 @@ func TestThrottle_APeerThatVanishesIsNotCharged(t *testing.T) {
 // A control lane that cannot cover the connections the listener will admit is
 // refused at construction.
 //
-// §1.4 makes the relationship binding. A listener that starts anyway has a
+// matrix §1.4 makes the relationship binding. A listener that starts anyway has a
 // reservation that begins failing once the connection count climbs, and then
 // accept fails closed for a reason nobody configured — a misconfiguration
 // that presents as an incident, months later, under load.
@@ -466,10 +466,10 @@ func TestAdmission_CapsMatchTheMatrix(t *testing.T) {
 		got, want int
 		whereWhy  string
 	}{
-		{"max frontend connections", MaxFrontendConns, 320, "§1.4 sizes the control lane at max_conns × 64 KiB = 20 MiB"},
-		{"pre-auth connections", PreAuthMaxConns, 64, "§9: an anonymous peer commands the smallest slice"},
-		{"control lane per connection", ControlLanePerConn, 64 * 1024, "§1.4's binding composition rule"},
-		{"failed auth attempts per source per minute", AuthFailuresPerIP, 10, "§9 / row 2.7"},
+		{"max frontend connections", MaxFrontendConns, 320, "matrix §1.4 sizes the control lane at max_conns × 64 KiB = 20 MiB"},
+		{"pre-auth connections", PreAuthMaxConns, 64, "matrix §9: an anonymous peer commands the smallest slice"},
+		{"control lane per connection", ControlLanePerConn, 64 * 1024, "matrix §1.4's binding composition rule"},
+		{"failed auth attempts per source per minute", AuthFailuresPerIP, 10, "matrix §9 / row 2.7"},
 	} {
 		if c.got != c.want {
 			t.Errorf("%s = %d, want %d (%s)", c.name, c.got, c.want, c.whereWhy)
@@ -514,8 +514,8 @@ func TestAdmitter_TheFailureMapIsSwept(t *testing.T) {
 	}
 }
 
-// The Options contract is ENFORCED, not merely documented (lector PR #36 r0
-// must-fix 3).
+// The Options contract is ENFORCED, not merely documented (raised in
+// review).
 //
 // The field docs said zero takes the default and that the per-source throttle
 // may only be raised. `<= 0` enforced neither: a negative silently became the

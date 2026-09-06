@@ -12,7 +12,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/exec"
 )
 
-// The credential-worker bound (matrix §9, lector PR #36 r0 must-fix 1).
+// The credential-worker bound (matrix §9).
 //
 // The connection cap and this are different quantities, and the first does
 // not imply the second: sixty-four peers may be in the pre-auth phase at

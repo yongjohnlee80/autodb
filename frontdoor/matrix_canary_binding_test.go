@@ -13,8 +13,8 @@ import (
 //
 // matrix row 5 names the never-emitted canaries; §10's conformance list names
 // them again; and backendFrame enforces them. Nothing bound the three together,
-// so they agreed by luck: white-vision found, applying the enumeration
-// convention to PR #57, that the matrix named SEVEN and the code had a case for
+// so they agreed by luck: review found, applying the enumeration
+// convention, that the matrix named SEVEN and the code had a case for
 // ONE — and the two prose statements, which happened to agree with each other,
 // both disagreed with the code.
 //
@@ -27,18 +27,18 @@ import (
 func TestBackendCanaries_TheMatrixAndTheCodeAgree(t *testing.T) {
 	doc := matrixDoc(t)
 
-	// EACH LOOKUP IS BOUNDED TO THE SECTION IT NAMES (r0 MF1). Searching the
-	// whole document for "the §5 row" finds the FIRST matching row anywhere, so
-	// an earlier duplicate becomes a decoy: lector proved that adding a
-	// correct-set row above §5 and then removing FunctionCallResponse from the
-	// real §5 leaves this cell green. A witness that names a location must read
+	// EACH LOOKUP IS BOUNDED TO THE SECTION IT NAMES. Searching the
+	// whole document for "the matrix §5 row" finds the FIRST matching row anywhere, so
+	// an earlier duplicate becomes a decoy: review proved that adding a
+	// correct-set row above matrix §5 and then removing FunctionCallResponse from the
+	// real matrix §5 leaves this cell green. A witness that names a location must read
 	// that location.
 	rowSet := canariesFromRow(t, headingBody(t, doc, "5"))
 	listSet := canariesFromConformanceList(t, headingBody(t, doc, "10"))
 	codeSet := backendCanaries()
 
 	if len(rowSet) == 0 || len(listSet) == 0 {
-		t.Fatalf("parsed %d canaries from the §5 row and %d from the §10 list — a witness that "+
+		t.Fatalf("parsed %d canaries from the matrix §5 row and %d from the §10 list — a witness that "+
 			"cannot find the prose it checks would pass vacuously, which is the failure this "+
 			"cell exists to prevent", len(rowSet), len(listSet))
 	}
@@ -48,9 +48,9 @@ func TestBackendCanaries_TheMatrixAndTheCodeAgree(t *testing.T) {
 	// is not implied by each agreeing with the code, because a name absent from
 	// BOTH would satisfy the first two comparisons and still be a spec that
 	// contradicts itself elsewhere.
-	assertSameSet(t, "the §5 row", rowSet, "the code (backendCanaries)", codeSet)
-	assertSameSet(t, "the §10 conformance list", listSet, "the code (backendCanaries)", codeSet)
-	assertSameSet(t, "the §5 row", rowSet, "the §10 conformance list", listSet)
+	assertSameSet(t, "the matrix §5 row", rowSet, "the code (backendCanaries)", codeSet)
+	assertSameSet(t, "the matrix §10 conformance list", listSet, "the code (backendCanaries)", codeSet)
+	assertSameSet(t, "the matrix §5 row", rowSet, "the matrix §10 conformance list", listSet)
 }
 
 func assertSameSet(t *testing.T, aName string, a map[string]bool, bName string, b map[string]bool) {
@@ -81,7 +81,7 @@ func assertSameSet(t *testing.T, aName string, a map[string]bool, bName string, 
 func canariesFromRow(t *testing.T, section string) map[string]bool {
 	t.Helper()
 	// The DECISION cell must BEGIN with the bold "Never emitted", not merely
-	// contain the phrase. §5 has another row — ReadyForQuery — whose decision
+	// contain the phrase. matrix §5 has another row — ReadyForQuery — whose decision
 	// says "Never emitted on ErrTxOutcomeUnknown", and matching on the phrase
 	// alone found that row first and parsed zero canaries from it. The vacuity
 	// check below is what surfaced that; without it this witness would have
@@ -96,7 +96,7 @@ func canariesFromRow(t *testing.T, section string) map[string]bool {
 		}
 		return backtickedNames(cells[0])
 	}
-	t.Fatal("§5 has no row whose decision begins \"**Never emitted**\" — the section moved or was " +
+	t.Fatal("matrix §5 has no row whose decision begins \"**Never emitted**\" — the section moved or was " +
 		"rewritten, and this witness refuses to fall back to searching elsewhere for something that " +
 		"looks like it")
 	return nil
@@ -108,7 +108,7 @@ func canariesFromConformanceList(t *testing.T, section string) map[string]bool {
 	t.Helper()
 	i := strings.Index(section, "Never-emitted backend canaries")
 	if i < 0 {
-		t.Fatal("§10 has no never-emitted-canaries bullet — the section moved or was rewritten, and " +
+		t.Fatal("matrix §10 has no never-emitted-canaries bullet — the section moved or was rewritten, and " +
 			"this witness refuses to fall back to searching elsewhere for something that looks like it")
 	}
 	end := strings.Index(section[i:], "\n\n")
@@ -121,7 +121,7 @@ func canariesFromConformanceList(t *testing.T, section string) map[string]bool {
 // THE NAMES ARE READ, NOT RECOGNISED.
 //
 // The first version matched a fixed alternation of the seven names it expected.
-// A mutation adding an eighth canary to the §5 row SURVIVED it — the witness
+// A mutation adding an eighth canary to the matrix §5 row SURVIVED it — the witness
 // could not see a name it had not been told about, so the "enumeration" was a
 // hand-maintained list checking itself. That is precisely the failure the
 // convention this cell exists to enforce is named after, walked into while
@@ -141,13 +141,13 @@ func backtickedNames(s string) map[string]bool {
 	return out
 }
 
-// expandShorthand reads §10's bullet, where the names are bare rather than
+// expandShorthand reads matrix §10's bullet, where the names are bare rather than
 // backticked and "CopyIn/CopyOut/CopyBothResponse" names three types in one
 // token. The suffix is applied to any Copy* form that lacks it, so the
 // shorthand is handled by its SHAPE rather than by listing its instances.
 func expandShorthand(s string) map[string]bool {
 	// Only the part after the colon: the bullet's own label ("Never-emitted
-	// backend canaries (§5)") is prose, and §5 is not a message type.
+	// backend canaries (matrix §5)") is prose, and §5 is not a message type.
 	if i := strings.Index(s, ":"); i >= 0 {
 		s = s[i+1:]
 	}

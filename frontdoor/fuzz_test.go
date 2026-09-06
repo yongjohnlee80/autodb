@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Fuzzing the pre-auth surface (ADR-0075's F0 exit criterion).
+// Fuzzing the pre-auth surface.
 //
 // EVERYTHING here is reachable by anyone with a TCP route and no credential,
 // which makes it the part of the system where a panic is not a crash report

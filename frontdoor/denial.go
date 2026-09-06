@@ -4,7 +4,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// The uniform external denial (ADR-0075 §4, matrix §1.2 and row 2.7).
+// The uniform external denial (matrix §1.2 and row 2.7).
 //
 // EVERY external failure after the perimeter — an unknown user, a bad token,
 // an IP the user is not allowed from, a database that does not exist, a
@@ -26,8 +26,8 @@ const (
 	DenialMessage = "authentication failed"
 
 	// LockedSQLState is 57P03 cannot_connect_now — the code PostgreSQL itself
-	// uses for "running, but not accepting connections yet" (ADR-0087
-	// Amendment 1 A1.3). It is the ONE state that answers differently from
+	// uses for "running, but not accepting connections yet" (the
+	// locked-daemon rule). It is the ONE state that answers differently from
 	// DenialSQLState, and the exception is argued rather than assumed:
 	//
 	// R13 forbids a denial that varies BY CALLER or BY RESOURCE — "an
@@ -41,7 +41,7 @@ const (
 	// client library already renders as "not ready" rather than "your
 	// credentials are wrong".
 	//
-	// WHAT IT BUYS is ADR-0087 §6's honesty. §6 keeps the daemon RUNNING when
+	// WHAT IT BUYS is the locked-daemon contract's honesty: it keeps the daemon RUNNING when
 	// a keyfile fails, justified by the state being loud and visible; a log
 	// line is not loud to the person who hits it, and that person is a
 	// developer holding a perfectly good token on the morning after a reboot.
@@ -60,8 +60,8 @@ const (
 type denialReason string
 
 const (
-	// reasonStoreLocked is the ONLY reason that changes what the wire says
-	// (ADR-0087 A1.3). It is not the caller's fault and is never charged to
+	// reasonStoreLocked is the ONLY reason that changes what the wire says.
+	// It is not the caller's fault and is never charged to
 	// their address.
 	reasonStoreLocked denialReason = "frontdoor/store-locked"
 
@@ -72,12 +72,12 @@ const (
 	reasonUnsupportedMajor  denialReason = "frontdoor/protocol-major-unsupported"
 	reasonStartupMalformed  denialReason = "frontdoor/startup-malformed"
 	reasonStartupParamRefus denialReason = "frontdoor/startup-parameter-refused"
-	// The two ways a startup packet fails Amendment 8 at PARSE, before the
+	// The two ways a startup packet fails the amended parameter rule at PARSE, before the
 	// engine judges anything. Both reach the wire as the SAME uniform denial a
 	// refused setting does — a distinguishable refusal would map the accepted
 	// set for anyone willing to ask repeatedly — and differ only here, in the
 	// audit, so the operator record keeps what the wire deliberately discards
-	// (jarvis, ruling 2, 2026-09-03).
+	// (ruled 2026-09-03).
 	reasonStartupGUCCount         denialReason = "frontdoor/startup-guc-count"
 	reasonStartupOptionsMalformed denialReason = "frontdoor/startup-options-malformed"
 	// A key named twice — as two raw wire pairs, twice inside `options`, or once

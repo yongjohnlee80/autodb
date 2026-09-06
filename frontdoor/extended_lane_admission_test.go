@@ -34,7 +34,7 @@ func starve(t *testing.T, l *Listener) {
 	}
 }
 
-// §1.4 — SYNC AND ITS READINESS RIDE THE CONTROL LANE AND ARE ALWAYS ADMISSIBLE.
+// matrix §1.4 — SYNC AND ITS READINESS RIDE THE CONTROL LANE AND ARE ALWAYS ADMISSIBLE.
 //
 // A standalone Sync delivers nothing: there is no segment behind it and no
 // output to account for. Requiring a general-lane working set before it can
@@ -62,7 +62,7 @@ func TestExtLane_StandaloneSyncIsAdmittedUnderSaturation(t *testing.T) {
 	if got := readUntilReadySoft(t, fe); got != txStatusIdle {
 		t.Fatalf("readiness = %q, want %q — a standalone Sync was refused or "+
 			"dropped while the general lane was saturated, which is the one thing "+
-			"§1.4's control lane guarantees cannot happen", string(got), string(txStatusIdle))
+			"matrix §1.4's control lane guarantees cannot happen", string(got), string(txStatusIdle))
 	}
 	for _, e := range events() {
 		if e.Kind == "fd.refused" && e.Reason == ruleBudgetBackpressure {
@@ -133,7 +133,7 @@ func TestExtLane_SegmentEndsWhenCapacityVanishesAfterDispatch(t *testing.T) {
 	}
 }
 
-// §1.4's OTHER control-lane directive, and the symmetric twin of the standalone
+// matrix §1.4's OTHER control-lane directive, and the symmetric twin of the standalone
 // Sync cell above. The pair together is what makes "Sync and Flush are
 // control-lane directives" true rather than asserted.
 //
@@ -183,7 +183,7 @@ func TestExtLane_StandaloneFlushNeitherReservesNorIsRefused(t *testing.T) {
 	for _, e := range events() {
 		if e.Kind == "fd.refused" && e.Reason == ruleBudgetBackpressure {
 			t.Fatal("a standalone empty Flush was refused for general-lane " +
-				"backpressure; §1.4 makes it control-lane admissible")
+				"backpressure; matrix §1.4 makes it control-lane admissible")
 		}
 	}
 

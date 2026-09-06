@@ -19,11 +19,11 @@ import (
 // raised — a partially-reserved connection would leak capacity on the one
 // path that runs when the system is already at its limit.
 
-// The caps. Defaults from ADR-0075 §4 / matrix §9; the ceilings are the
+// The caps. Defaults from matrix §9; the ceilings are the
 // operator's to raise, and Open validates the relationship between them.
 const (
 	// MaxFrontendConns bounds live front-door connections, authenticated or
-	// not. It sizes the control lane (§1.4).
+	// not. It sizes the control lane (matrix §1.4).
 	MaxFrontendConns = 320
 
 	// PreAuthMaxConns bounds connections that have NOT yet authenticated.

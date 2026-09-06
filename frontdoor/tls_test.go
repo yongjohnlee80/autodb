@@ -166,7 +166,7 @@ func TestLoadServerTLS_RefusesUnusableMaterial(t *testing.T) {
 		{"a certificate that does not cover the configured name",
 			fdWith(good.bundle, good.key, good.ca, "other.example.com"), "does not verify for"},
 
-		// MF2. The one the first version of this file missed entirely: a
+		// The one the first version of this file missed entirely: a
 		// leaf served WITHOUT its intermediate parses perfectly, is in date,
 		// and carries the right name — it simply cannot be built into a path
 		// to any root. Every verifying client rejects it and the listener is

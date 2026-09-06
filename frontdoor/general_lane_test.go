@@ -103,7 +103,7 @@ func TestGeneralLane_ConcurrentSaturationNeverExceedsAndEndsAtZero(t *testing.T)
 	}
 }
 
-// §8.2's release-on-every-path obligation, through the LOOP: whatever a
+// matrix §8.2's release-on-every-path obligation, through the LOOP: whatever a
 // statement reserved is back in the lane once it ends, whichever way it ended.
 //
 // The mutation this exists for: drop the deferred release in runQuery and a
@@ -149,7 +149,7 @@ func TestLoop_TheLaneIsReleasedOnEveryStatementPath(t *testing.T) {
 	}
 }
 
-// §1.4's composition rule for the general lane: the default is exactly the
+// matrix §1.4's composition rule for the general lane: the default is exactly the
 // floor, config may only raise it, and startup FAILS below it.
 //
 // The equality assertion is the load-bearing one. 256 × 4 MiB = 1 GiB is today's
@@ -178,6 +178,6 @@ func TestGeneralLane_StartupRefusesALaneBelowTheFloor(t *testing.T) {
 		t.Fatalf("raising the lane was refused: %v", err)
 	}
 	if err := validateGeneralLane(generalLaneCeiling + 1); err == nil {
-		t.Fatal("a lane above §9's ceiling was accepted")
+		t.Fatal("a lane above matrix §9's ceiling was accepted")
 	}
 }

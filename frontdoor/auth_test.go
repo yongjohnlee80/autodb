@@ -501,7 +501,7 @@ func TestAuth_ARefusedStartupIsNeverOfferedThePrompt(t *testing.T) {
 	f := &fakeAuth{result: goodSession()}
 	_, addr := authListener(t, f)
 
-	// `replication` is refused by §3.1. Not `search_path`: under Amendment 8 a
+	// `replication` is refused by matrix §3.1. Not `search_path`: under the amended rule a
 	// parameter naming a SETTING is collected and judged by the engine, so this
 	// cell needs one the front door still refuses on its own.
 	_, fe := startupTo(t, addr, map[string]string{
@@ -619,7 +619,7 @@ func TestSession_ShutdownReleasesWithALiveContext(t *testing.T) {
 	}
 }
 
-// THE AUTHENTICATOR IS BOUND BY THE PHASE'S DEADLINE (lector PR #36 r1).
+// THE AUTHENTICATOR IS BOUND BY THE PHASE'S DEADLINE.
 //
 // It used to receive the listener's context, which has no deadline at all —
 // so a stuck auth store held a credential worker indefinitely, and nothing
@@ -663,7 +663,7 @@ func TestAuthDeadline_TheAuthenticatorSeesThePhaseDeadline(t *testing.T) {
 //
 // The waiter used to start a fresh full timer, so a peer who had already spent
 // the allowance getting to the queue could wait the whole allowance again.
-// Lector measured 502.96ms against a 300ms setting: 200ms before the password,
+// Review measured 502.96ms against a 300ms setting: 200ms before the password,
 // then 302.96ms waiting for a worker.
 //
 // The discriminating measurement is the time from the PASSWORD, not from the
@@ -769,7 +769,7 @@ func (h *holdingAuth) OpenWireSession(context.Context, string, string, string, s
 
 func (h *holdingAuth) CloseWireSession(context.Context, exec.SessionID, int64, string, string) {}
 
-// OUR CAPACITY IS NOT THEIR CREDENTIAL (lector PR #36 r1, attribution).
+// OUR CAPACITY IS NOT THEIR CREDENTIAL.
 //
 // A peer that waited for a credential worker we could not spare presented
 // something we never looked at. Charging that to their address throttles them
@@ -871,8 +871,8 @@ func queueOneAttempt(t *testing.T, addr string) bool {
 	return true
 }
 
-// CLOSE JOINS THE HANDLERS, including a session still tearing down (lector
-// PR #38 r0 must-fix 2).
+// CLOSE JOINS THE HANDLERS, including a session still tearing down (found
+// in review).
 //
 // Close's own comment promised this and the code never did it: only Serve
 // waited, in a goroutine the daemon starts and discards. So Close returned

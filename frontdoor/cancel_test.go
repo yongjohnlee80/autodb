@@ -307,7 +307,7 @@ func authListenerWithCancels(t *testing.T, f *fakeAuth, c *fakeCancels) (func() 
 	return events, addr
 }
 
-// MATRIX ROW 2.3 (PR #44 r0 P1): a COLLISION REMINTS, and the pair the client
+// MATRIX ROW 2.3: a COLLISION REMINTS, and the pair the client
 // receives is the pair the registry holds — one object, both ends.
 //
 // The defect this guards: a registration seam that silently redrew on
@@ -335,7 +335,7 @@ func TestCancel_CollisionRemintsOnePair(t *testing.T) {
 	}
 }
 
-// MATRIX ROW 2.3 (PR #44 r0 P2): a cancel frame whose secret is longer than
+// MATRIX ROW 2.3: a cancel frame whose secret is longer than
 // the 3.0 int32 NEVER reaches the registry — not even its correct first four
 // bytes.
 //
@@ -383,7 +383,7 @@ func TestCancel_AnOversizedSecretNeverReachesTheRegistry(t *testing.T) {
 	}
 }
 
-// MATRIX ROW 2.3, the IN-TLS spelling (PR #44 r0 P2): a CancelRequest that
+// MATRIX ROW 2.3, the IN-TLS spelling: a CancelRequest that
 // arrives inside TLS gets the same exact-length rule — a 12-byte body, no
 // more — and a well-formed one is processed like the plaintext spelling.
 //

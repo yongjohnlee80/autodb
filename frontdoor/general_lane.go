@@ -62,7 +62,7 @@ func (l *generalLane) tryReserve(n int64) bool {
 //
 // The wait is bounded rather than indefinite. An unbounded wait on a lane that
 // nothing releases is a hung session holding the engine's claim and a pinned
-// backend, which is the failure mode PR #52 r1 MF7 was about in a different
+// backend, which is the failure mode an earlier review was about in a different
 // clothing; the bound is a policy choice recorded in
 // the session-loop budgets reference in the KB (shared/reference/
 // autodb-front-door-session-loop-budgets.md) rather than a matrix figure.
@@ -137,7 +137,7 @@ const DefaultGeneralLaneBytes int64 = 1 << 30
 // release before it stops holding a statement open. Policy, not a matrix figure.
 const generalLaneWaitBudget = 30 * time.Second
 
-// GENERAL-LANE FLOOR (§1.4's composition rule, jarvis's ruling 2c, 2026-09-03).
+// GENERAL-LANE FLOOR (matrix §1.4's composition rule, ruled 2026-09-03).
 //
 // §1.4 already binds the CONTROL lane this way — its default is
 // `max_frontend_connections × 64 KiB`, and config may only raise it — so that
@@ -169,7 +169,7 @@ const (
 	// (config.DefaultMaxSessionsGlobal; matrix row 2.7).
 	generalLaneSessionCap = 256
 
-	// generalLaneCeiling is §9's ceiling for the global budget.
+	// generalLaneCeiling is matrix §9's ceiling for the global budget.
 	generalLaneCeiling int64 = 4 << 30
 )
 
@@ -190,7 +190,7 @@ func validateGeneralLane(bytes int64) error {
 			bytes, floor, generalLaneSessionCap, pendingOutputWatermark)
 	}
 	if bytes > generalLaneCeiling {
-		return fmt.Errorf("general lane %d bytes exceeds §9's ceiling of %d", bytes, generalLaneCeiling)
+		return fmt.Errorf("general lane %d bytes exceeds matrix §9's ceiling of %d", bytes, generalLaneCeiling)
 	}
 	return nil
 }

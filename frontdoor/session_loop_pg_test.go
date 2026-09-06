@@ -223,7 +223,7 @@ func pgClientCollecting(t *testing.T, addr, secret, database string) (*pgproto3.
 // &f.parameterStatus and so on — so retaining the pointer gives an alias that
 // changes under you. Collecting frames without copying means every DataRow in a
 // slice is the LAST DataRow, and a three-entry ParameterStatus map holds one
-// value three times. That is how this helper came to exist: the §3.3 cell
+// value three times. That is how this helper came to exist: the matrix §3.3 cell
 // reported a session-open set of exactly one status and the bug was mine, not
 // the front door's.
 func snapshot(m pgproto3.BackendMessage) pgproto3.BackendMessage {
@@ -539,13 +539,13 @@ func TestPGLoop_TerminateRollsBackAnOpenTransaction(t *testing.T) {
 }
 
 // The three SYNTHESIZED session-open statuses are present and correct. This is
-// F0e's half of §3.3, and it is all that is implemented today.
+// F0e's half of matrix §3.3, and it is all that is implemented today.
 //
-// It deliberately does NOT claim §3.3. That row also requires the TARGET's own
+// It deliberately does NOT claim matrix §3.3. That row also requires the TARGET's own
 // ParameterStatus set — every status the pinned connection presented at its own
 // connect, forwarded verbatim — and this cell is how I established that the
 // forwarded half does not exist: with the message-aliasing bug fixed, the
-// session-open set is exactly these three and nothing else. Closing §3.3 needs an
+// session-open set is exactly these three and nothing else. Closing matrix §3.3 needs an
 // engine seam exposing the target's startup statuses; none exists, so the row
 // stays awaiting rather than being cited from the half that does work.
 func TestPGLoop_SessionOpenCarriesTheThreeSynthesizedStatuses(t *testing.T) {
@@ -622,7 +622,7 @@ func (p *reentrantProbe) result() (error, int) {
 	return p.inner, p.attempts
 }
 
-// MF6 (Vision). The seam DECLARES that emit is not re-entrant — WireQuery holds
+// The seam DECLARES that emit is not re-entrant — WireQuery holds
 // the session's one-in-flight claim across every emit — and that claim was
 // asserted in prose and proven nowhere. F1 is the first real emitter, so the
 // loop-level witness is owed here.
@@ -670,11 +670,11 @@ func TestPGLoop_EmitIsNotReentrantAndTheStreamSurvivesIt(t *testing.T) {
 	}
 }
 
-// MF9 (lector r2, reframed by jarvis). The cumulative output cap trips while the
+// The cumulative output cap trips while the
 // statement's output is being FORWARDED — which is after the target ran it and,
 // for DML in an implicit block, after those effects committed.
 //
-// Reporting that as a refusal is a lie the client acts on: lector's repro
+// Reporting that as a refusal is a lie the client acts on: the repro
 // received 54000 while all 100 rows were committed. The rule is never report a
 // refusal for an effect that happened.
 //
@@ -753,7 +753,7 @@ func TestPGLoop_OutputCapTellsTheTruthAboutAStatementThatRan(t *testing.T) {
 	}
 }
 
-// MF15 (lector r4). The general lane stalls for the same reason the cap trips —
+// The general lane stalls for the same reason the cap trips —
 // after the statement ran — so it owes the client and the audit the same truth.
 //
 // I fixed this for the cap and left the identical defect in the lane path in the
@@ -807,7 +807,7 @@ func TestPGLoop_ASaturatedLaneTellsTheTruthAboutAStatementThatRan(t *testing.T) 
 	}
 }
 
-// THE DISCRIMINATOR FAMILY (jarvis, r4 point 3). Every post-dispatch stop, over
+// THE DISCRIMINATOR FAMILY. Every post-dispatch stop, over
 // a statement that commits and one that only reads: what the database holds,
 // what the client is told, and what the audit records must agree in all of them.
 //
@@ -837,7 +837,7 @@ func TestPGLoop_EveryPostDispatchStopTellsTheSameTruth(t *testing.T) {
 			// A lane that admits the working set — so the statement DISPATCHES —
 			// but cannot admit the oversized frame that follows. That is the only
 			// remaining way the lane can stop a statement that already ran, and
-			// it is the shape r4 MF15 found.
+			// it is the shape that finding named.
 			name: "general lane, saturated mid-statement",
 			opts: func(o *Options) {
 				o.testWatermark = &lowWatermark
@@ -926,7 +926,7 @@ func TestPGLoop_EveryPostDispatchStopTellsTheSameTruth(t *testing.T) {
 				}
 				assertNotReportedAsRefused(t, e, "the statement ran")
 				if e.Detail != stop.rule {
-					t.Fatalf("wire identity = %q, want the §7 id %q", e.Detail, stop.rule)
+					t.Fatalf("wire identity = %q, want the matrix §7 id %q", e.Detail, stop.rule)
 				}
 				for _, ev := range events() {
 					if ev.Kind == "fd.refused" && ev.Reason == stop.rule {
@@ -955,7 +955,7 @@ func hasEvent(evs []Event, kind, reason string) bool {
 	return false
 }
 
-// THE CHEAPER TRUTH (jarvis, r4 point 2): where the budget CAN be known before
+// THE CHEAPER TRUTH: where the budget CAN be known before
 // dispatch, refusing is honest — nothing ran, so there is nothing to be honest
 // ABOUT. This is the one place in the statement path where fd.refused is the
 // correct audit for a budget, and the cell proves the distinction by checking
@@ -982,7 +982,7 @@ func TestPGLoop_ASaturatedLaneRefusesBeforeTheStatementRuns(t *testing.T) {
 		_ = query(t, c, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
 	})
 
-	// MF17 (lector r5): readiness is NOT the lane being free. runQuery releases
+	// Readiness is NOT the lane being free. runQuery releases
 	// its reservation in a defer that runs after the response is flushed, so the
 	// CREATE TABLE above can still hold its working set when the client has
 	// already been told the statement finished. Racing that made this cell fail
@@ -1028,7 +1028,7 @@ func TestPGLoop_ASaturatedLaneRefusesBeforeTheStatementRuns(t *testing.T) {
 }
 
 // "The statement's effects are committed" is FALSE inside an explicit
-// transaction, and every version of this text before jarvis's r4 note said it
+// transaction, and every version of this text before a review note said it
 // unconditionally. The effects clause now comes from the engine's recorded
 // transaction phase, and this cell proves the new answer is the true one by
 // rolling back and finding nothing.
@@ -1094,7 +1094,7 @@ func TestPGLoop_OutputWithheldInsideATransactionSaysPendingNotCommitted(t *testi
 }
 
 // The structural guarantee itself: every stop reason in the closed set has a row
-// in the table, and every row uses an identity from the §7 catalogue.
+// in the table, and every row uses an identity from the matrix §7 catalogue.
 //
 // This is what makes the fold structural rather than two fixes. A third budget
 // site added later cannot compose its own account of what happened to the
@@ -1112,7 +1112,7 @@ func TestOutputWithheldReasonsAreClosedAndCatalogued(t *testing.T) {
 			break
 		}
 		if !catalogued[reason.rule] {
-			t.Fatalf("stop reason %d uses %q, which is not a §7 identity", int(why), reason.rule)
+			t.Fatalf("stop reason %d uses %q, which is not a matrix §7 identity", int(why), reason.rule)
 		}
 		if reason.stopped == "" || reason.remedy == "" {
 			t.Fatalf("stop reason %d is missing its clause or remedy", int(why))
@@ -1127,10 +1127,10 @@ func TestOutputWithheldReasonsAreClosedAndCatalogued(t *testing.T) {
 	}
 }
 
-// MF16 (lector r5). 'I' is ambiguous: a successful autocommit and a FAILED,
+// 'I' is ambiguous: a successful autocommit and a FAILED,
 // rolled-back autocommit both leave the session idle. Deriving "committed" from
 // the status alone therefore reports a commit for a statement the target threw
-// away — the same lie MF9 and MF15 were, arrived at from the other direction.
+// away — the same lie the cap and the lane told, from the other direction.
 func TestPGLoop_AFailedStatementIsNotReportedAsCommitted(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 	// Small enough that the target's OWN ErrorResponse trips the cap, so the
@@ -1182,7 +1182,7 @@ func TestPGLoop_AFailedStatementIsNotReportedAsCommitted(t *testing.T) {
 // leaves, and the front door stopped reading before the target said which — so
 // "unresolved" is the only word available, however likely "committed" is.
 //
-// This is jarvis's interim rule, and it stays true after his EmitStopped seam
+// This is the interim rule, and it stays true after the EmitStopped seam
 // replaces it with the engine's own observation.
 func TestPGLoop_AnUnobservedOutcomeIsReportedUnresolvedNotCommitted(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
@@ -1242,13 +1242,13 @@ func hasEventDetail(evs []Event, kind, detail string) bool {
 	return false
 }
 
-// assertNotReportedAsRefused is the invariant behind MF9, MF15 and MF16: a
+// assertNotReportedAsRefused is the invariant behind all three findings: a
 // statement that reached the target may never be reported as one that did not
 // run, and its effects may never be claimed as committed unless that was
 // actually established.
 //
 // It asserts the INVARIANT rather than a sentence, because the honest wording
-// changed once "idle" stopped being read as "committed" (r5 MF16) and will
+// changed once "idle" stopped being read as "committed" and will
 // change again when the EmitStopped seam lets the engine report the drained
 // outcome. A cell pinned to prose would have failed on a fix and passed on a
 // regression.
@@ -1260,7 +1260,7 @@ func assertNotReportedAsRefused(t *testing.T, e *pgproto3.ErrorResponse, evidenc
 	if strings.Contains(e.Hint, "nothing was executed") {
 		t.Fatalf("%s, but the hint says nothing was executed: %q", evidence, e.Hint)
 	}
-	// "Committed" is a claim, and after MF16 it is only available when the front
+	// "Committed" is a claim, and it is only available when the front
 	// door established it. In every post-dispatch stop it stopped reading first,
 	// so the claim is not available at all.
 	if strings.Contains(e.Hint, "effects are committed") {
@@ -1292,7 +1292,7 @@ func waitLaneIdle(t *testing.T, l *Listener) {
 		"reservation, which is a budget bug and not a slow test", l.general.inUse())
 }
 
-// PIPELINING (white-vision, found while wiring F2; defect on main from #52).
+// PIPELINING (found while wiring F2; the defect was live on main).
 //
 // Two Query messages in ONE flush. Every other cell in this file sends one
 // message and waits for its reply, which is what psql does — and it is why the
@@ -1358,7 +1358,7 @@ func TestPGLoop_TheClientReceivesTheTargetsOwnParameterSet(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 	_, _, listenAddr := listenerWith(t, Options{Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled})
 
-	// WHOLE SET, not a sample (r0 MF1). The first version of this cell checked
+	// WHOLE SET, not a sample. The first version of this cell checked
 	// four names and CLAIMED set equality; a mutation dropping the target's
 	// TimeZone from the forwarded set left it green. A cell that samples proves
 	// only what it sampled, and the claim it was cited for is that the client
@@ -1472,7 +1472,7 @@ func startupParameterSet(t *testing.T, addr, secret, database string) map[string
 // application_name; the echo must equal it.
 const appNameForTest = "psql"
 
-// r1 MF4 — discard-through-Sync must stop a simple Query too, and the proof is
+// Discard-through-Sync must stop a simple Query too, and the proof is
 // the ABSENT ROW, not the absent frame.
 //
 // PostgreSQL ignores every message but Sync and Terminate after an error in a
@@ -1567,7 +1567,7 @@ func readUntilReadyPG(t *testing.T, fe *pgproto3.Frontend) {
 // as still broken.
 //
 // So this drives a large BIND PARAMETER: a >64 KiB message body that is not a
-// large statement, which is exactly jarvis's cited case (a 100 KB bytea
+// large statement, which is exactly the cited case (a 100 KB bytea
 // parameter) and isolates the front door's cap from the engine's.
 func TestPGLoop_APostAuthBodyOver64KiBIsAccepted(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
@@ -1611,11 +1611,11 @@ func TestPGLoop_APostAuthBodyOver64KiBIsAccepted(t *testing.T) {
 	}
 }
 
-// LECTOR'S CAP-TRANSITION EVIDENCE, both halves, kept separate on purpose.
+// THE CAP-TRANSITION EVIDENCE, both halves, kept separate on purpose.
 //
 // (a) THE PHASE TRANSITION ITSELF — that the post-auth cap is the DOCUMENTED
 // 64 MiB and not the pre-auth bound. This is asserted directly rather than
-// inferred from a lowered-cap cell, because lector's caveat is exactly right: a
+// inferred from a lowered-cap cell, because the caveat is exactly right: a
 // cell run at a configured small cap proves the mechanism and would SILENTLY
 // REPLACE the 64 MiB contract claim if it stood alone.
 func TestPostAuth_TheCapIsTheDocumentedSixtyFourMiB(t *testing.T) {

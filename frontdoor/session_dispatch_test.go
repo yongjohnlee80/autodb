@@ -75,7 +75,7 @@ func TestDispatch_CopySubprotocolIsAFatalViolation(t *testing.T) {
 				t.Errorf("%s: severity = %q, want FATAL — the connection is being closed", name, d.emit.Severity)
 			}
 			if d.emit.Detail != ruleProtocolViolation {
-				t.Errorf("%s: DETAIL = %q, want the catalogue's %q (§7 names one id for out-of-state/unknown)",
+				t.Errorf("%s: DETAIL = %q, want the catalogue's %q (matrix §7 names one id for out-of-state/unknown)",
 					name, d.emit.Detail, ruleProtocolViolation)
 			}
 			if d.auditReason != causeCopySubprotocolInactive {
@@ -205,7 +205,7 @@ func TestDispatch_UnknownMessageTypeIsFatalAndCloses(t *testing.T) {
 	}
 }
 
-// Every synthesized front-door error carries the §8a identity: accurate code,
+// Every synthesized front-door error carries the matrix §8a identity: accurate code,
 // the stable rule id in DETAIL, remediation in HINT — and never impersonates
 // the target. The uniform pre-auth denial code must not leak into this surface,
 // because after authentication the front door answers accurately.
@@ -225,7 +225,7 @@ func TestDispatch_SynthesizedErrorsCarryTheGateIdentity(t *testing.T) {
 			t.Errorf("%s: empty DETAIL — the rule id is what distinguishes a gate error from a target error", name)
 		}
 		if d.emit.Hint == "" {
-			t.Errorf("%s: empty HINT — §8a carries remediation", name)
+			t.Errorf("%s: empty HINT — matrix §8a carries remediation", name)
 		}
 		if d.emit.Code == DenialSQLState {
 			t.Errorf("%s: used the uniform pre-auth denial code %s; post-auth the surface answers accurately", name, DenialSQLState)
@@ -234,7 +234,7 @@ func TestDispatch_SynthesizedErrorsCarryTheGateIdentity(t *testing.T) {
 			t.Errorf("%s: severity %q != unlocalized %q", name, d.emit.Severity, d.emit.SeverityUnlocalized)
 		}
 		// Uniqueness belongs to the AUDIT identity, not the wire one. Two
-		// decisions may legitimately share a wire DETAIL when §7 names one id
+		// decisions may legitimately share a wire DETAIL when matrix §7 names one id
 		// for their class (out-of-state/unknown), but an operator must still be
 		// able to tell them apart, so the audit reason is what must not collide.
 		if d.auditReason == "" {

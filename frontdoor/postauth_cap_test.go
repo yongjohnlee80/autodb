@@ -15,7 +15,7 @@ import (
 // The wire cannot tell you the second half. A refusal looks IDENTICAL whether
 // the body was read first or never touched: same 08P01, same close, same bytes
 // in the same order. So a cell that receives the ErrorResponse and stops has
-// asserted the refusal in prose and the resource property not at all — lector's
+// asserted the refusal in prose and the resource property not at all — review's
 // r2 finding, and he is right that a regression which releases the body before
 // sending the same fatal response would stay green under it.
 //
@@ -84,7 +84,7 @@ func TestPostAuth_AFrameOverTheCapIsRefusedWithoutDecodingItsBody(t *testing.T) 
 	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	msg, err := fe.Receive()
 	if err != nil {
-		t.Fatalf("a frame over the cap must be REFUSED with a frame, not by silence: %v — §7 gives it "+
+		t.Fatalf("a frame over the cap must be REFUSED with a frame, not by silence: %v — matrix §7 gives it "+
 			"08P01 precisely so a client is not left reading a dead socket", err)
 	}
 	e, ok := msg.(*pgproto3.ErrorResponse)

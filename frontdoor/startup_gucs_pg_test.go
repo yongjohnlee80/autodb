@@ -65,13 +65,13 @@ func showSetting(t *testing.T, fe *pgproto3.Frontend, name string) string {
 	return got
 }
 
-// row 3.1:carve-out — THE REGRESSION GUARD, LIVE (jarvis, required cell).
+// row 3.1:carve-out — THE REGRESSION GUARD, LIVE (a required cell).
 //
 // psql, lib/pq and JDBC all put client_encoding in the startup packet. The
 // engine's denylist refuses client_encoding UNCONDITIONALLY — including to UTF8,
 // because the lease pins the session and moving it afterwards would break the
 // byte-fidelity claim for every row that followed. So if this parameter is ever
-// collected as a setting instead of governed by §3.1, the result is not a worse
+// collected as a setting instead of governed by matrix §3.1, the result is not a worse
 // error message: every ordinary client stops being able to connect at all.
 //
 // This is the cell that makes the carve-out enforced rather than commented.
@@ -84,7 +84,7 @@ func TestPGStartupGUCs_ThePacketPsqlSendsConnects(t *testing.T) {
 	})
 	if !opened {
 		t.Fatal("a startup carrying client_encoding=UTF8 — exactly what psql, lib/pq and JDBC " +
-			"send on every connection — was DENIED. §3.1 governs client_encoding itself; if it " +
+			"send on every connection — was DENIED. matrix §3.1 governs client_encoding itself; if it " +
 			"reaches the engine as a setting the denylist refuses it unconditionally and withdraws " +
 			"the session, and no ordinary client can connect")
 	}
@@ -137,7 +137,7 @@ func TestPGStartupGUCs_AnAdmittedSettingReachesTheBackend(t *testing.T) {
 		"datestyle": wantStyle, "extra_float_digits": wantDigits,
 	})
 	if !opened {
-		t.Fatal("a startup naming datestyle and extra_float_digits was denied; Amendment 8 admits " +
+		t.Fatal("a startup naming datestyle and extra_float_digits was denied; the amended rule admits " +
 			"them exactly as the equivalent SET would be")
 	}
 	if got := showSetting(t, fe, "datestyle"); got != wantStyle {
@@ -156,7 +156,7 @@ func TestPGStartupGUCs_AnAdmittedSettingReachesTheBackend(t *testing.T) {
 // standard_conforming_strings is on it because it changes how the server parses
 // SQL, which would desynchronize the engine's reading of a statement from the
 // server's. Admitting it at startup would be a way around the gate that refuses
-// it mid-session, which is the whole reason Amendment 8 routes both through one
+// it mid-session, which is the whole reason the amended rule routes both through one
 // admission.
 func TestPGStartupGUCs_ADenylistedSettingIsRefused(t *testing.T) {
 	addr, secret, database, _ := pgLoopWithEngine(t)
@@ -169,10 +169,10 @@ func TestPGStartupGUCs_ADenylistedSettingIsRefused(t *testing.T) {
 	}
 }
 
-// row 3.1:carve-out — …and `options` is not a way around §3.1 either.
+// row 3.1:carve-out — …and `options` is not a way around matrix §3.1 either.
 //
 // client_encoding is carved OUT of collection when it arrives as a parameter,
-// because §3.1 governs it. It must not become admissible by arriving through
+// because matrix §3.1 governs it. It must not become admissible by arriving through
 // `options` instead — that would be a second door into the setting the lease
 // pins, and the carve-out would read like a loophole rather than a rule.
 func TestPGStartupGUCs_OptionsIsNotAWayAroundTheEncodingPin(t *testing.T) {
@@ -180,7 +180,7 @@ func TestPGStartupGUCs_OptionsIsNotAWayAroundTheEncodingPin(t *testing.T) {
 	if _, opened := openWithParams(t, addr, secret, map[string]string{
 		"user": "root", "database": database, "options": "-c client_encoding=LATIN1",
 	}); opened {
-		t.Fatal("client_encoding=LATIN1 was admitted through `options`. §3.1 refuses it as a " +
+		t.Fatal("client_encoding=LATIN1 was admitted through `options`. matrix §3.1 refuses it as a " +
 			"parameter and the engine's denylist refuses it as a setting; reaching it through " +
 			"options would be a door around both, into the one setting the lease pins")
 	}
@@ -192,7 +192,7 @@ func TestPGStartupGUCs_OptionsIsNotAWayAroundTheEncodingPin(t *testing.T) {
 // Collecting client_encoding fails loudly: the denylist refuses it and the
 // session is withdrawn, so lib/pq's own arm reddens. application_name is NOT on
 // the denylist — the engine would ADMIT it and apply it to the pinned backend —
-// so collecting it fails SILENTLY, contradicting §3.1's rule while every client
+// so collecting it fails SILENTLY, contradicting matrix §3.1's rule while every client
 // still connects and every frame still looks right.
 //
 // That makes this the cell the carve-out actually needs for its second half:
@@ -201,7 +201,7 @@ func TestPGStartupGUCs_OptionsIsNotAWayAroundTheEncodingPin(t *testing.T) {
 // only party that can tell "we never forwarded it" from "we forwarded it and
 // nobody looked".
 //
-// §3.1: a freshly pinned backend carries the target's OWN effective default —
+// matrix §3.1: a freshly pinned backend carries the target's OWN effective default —
 // the DSN's value if the administrator supplied one, otherwise the applicable
 // server/database/role default, commonly empty. What it must never carry is the
 // label this client chose for itself.
@@ -214,11 +214,11 @@ func TestPGStartupGUCs_ApplicationNameIsNotForwardedToTheTarget(t *testing.T) {
 		"user": "root", "database": database, "application_name": label,
 	})
 	if !opened {
-		t.Fatal("a startup carrying application_name was denied; §3.1 accepts it")
+		t.Fatal("a startup carrying application_name was denied; matrix §3.1 accepts it")
 	}
 	if got := showSetting(t, fe, "application_name"); got == label {
 		t.Errorf("the pinned backend reports application_name=%q — the CLIENT's label reached the "+
-			"target. §3.1 accepts application_name, caps it, echoes it back in a ParameterStatus "+
+			"target. matrix §3.1 accepts application_name, caps it, echoes it back in a ParameterStatus "+
 			"and deliberately does NOT forward it: a backend should show the target's own default. "+
 			"Collecting it as a startup setting is the way this breaks, and it breaks SILENTLY — "+
 			"the denylist does not refuse it, so the session opens and every frame looks right",
@@ -252,7 +252,7 @@ func TestPGStartupGUCs_TheCarveOutHoldsThroughOptions(t *testing.T) {
 		"options": "-c application_name=" + label + " -c extra_float_digits=3",
 	})
 	if !opened {
-		t.Fatal("`-c application_name` with an ordinary setting beside it was DENIED. §3.1 accepts " +
+		t.Fatal("`-c application_name` with an ordinary setting beside it was DENIED. matrix §3.1 accepts " +
 			"application_name; arriving through options must not change that")
 	}
 	if got := showSetting(t, fe, "application_name"); got == label {
@@ -267,7 +267,7 @@ func TestPGStartupGUCs_TheCarveOutHoldsThroughOptions(t *testing.T) {
 			"with a carved-out name must still reach the backend", got)
 	}
 
-	// JARVIS'S AVAILABILITY MIRROR, live.
+	// THE AVAILABILITY MIRROR, live.
 	fe2, opened := openWithParams(t, addr, secret, map[string]string{
 		"user": "root", "database": database, "options": "-c client_encoding=UTF8",
 	})

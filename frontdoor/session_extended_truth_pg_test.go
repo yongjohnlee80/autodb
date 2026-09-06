@@ -8,11 +8,11 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// lector r1 MF3 — the not-executed explanation must REACH A CLIENT.
+// The not-executed explanation must REACH A CLIENT.
 //
 // The engine can produce a perfectly truthful arm that no client will ever see.
 // `reportOutputWithheld` treats the engine's report as the only snapshot, valid
-// or not: an invalid TxStatus there means "the phase is unknown", §6.3 forbids
+// or not: an invalid TxStatus there means "the phase is unknown", matrix §6.3 forbids
 // inventing a readiness for it, and the loop closes without sending anything. So
 // an extended producer that filled the arm correctly and left the status byte at
 // zero got a silent session-loss where the client was owed an explanation.
@@ -66,7 +66,7 @@ func TestPGExt_TheNotExecutedExplanationReachesTheClient(t *testing.T) {
 	for range 32 {
 		m, err := fe.Receive()
 		if err != nil {
-			// The pre-MF3 behaviour: the connection closes and the client is told
+			// The earlier behaviour: the connection closes and the client is told
 			// nothing at all.
 			t.Fatalf("reading the segment's answer: %v — the front door closed without telling the client "+
 				"anything. A truthful arm the client cannot be shown is not a truthful answer", err)

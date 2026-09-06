@@ -150,11 +150,11 @@ func (r *byteAtATime) Read(p []byte) (int, error) {
 	return 1, nil
 }
 
-// THE BODY-SKIP, MEASURED (lector, PR #72 r0).
+// THE BODY-SKIP, MEASURED.
 //
 // A refused frame's body must never reach the Backend. From the wire a refusal
 // looks identical either way — the client gets the same error — so this is a
-// resource property and has to be MEASURED, exactly like §10's O(buffer) cap.
+// resource property and has to be MEASURED, exactly like matrix §10's O(buffer) cap.
 // The first version of this change decided header-first and still let Receive
 // decode the body; a surviving mutation said so and I misread it as a missing
 // cell rather than a missing feature.
@@ -200,7 +200,7 @@ func TestFrameReader_ARefusedFrameBodyIsNeverDelivered(t *testing.T) {
 	}
 }
 
-// THE DELIVERY BOUNDARY MUST NOT APPLY OUTSIDE runSession (lector's audit).
+// THE DELIVERY BOUNDARY MUST NOT APPLY OUTSIDE runSession.
 //
 // Three Receive sites share this reader: the loop, auth, and defaultSession.
 // Only the loop admits frames. A boundary that applied globally would starve the

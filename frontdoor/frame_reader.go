@@ -32,7 +32,7 @@ import (
 // is left empty. The peek then blocks on bytes that have already been consumed:
 // the second statement is accepted by the client, never seen by the engine, and
 // nobody is told, so the session hangs until the idle deadline rather than
-// closing. Found by white-vision while wiring F2; it was live on main.
+// closing. Found while wiring F2; it was live on main.
 //
 // frameReader fixes the class rather than the symptom. It sits BETWEEN the
 // socket and the Backend and tracks message boundaries itself — one type byte,
@@ -71,7 +71,7 @@ type frameReader struct {
 	// delivered counts bytes handed to the Backend, so a cell can MEASURE that a
 	// refused frame's body was never delivered. The property is a resource one —
 	// from the wire a refusal looks the same whether or not the body was decoded
-	// — so it has to be measured rather than asserted (lector r0, and again at r2:
+	// — so it has to be measured rather than asserted (review asked twice:
 	// a regression that decodes the body before the same fatal 08P01 is invisible
 	// to any cell that only reads the frames).
 	//
@@ -87,7 +87,7 @@ type frameReader struct {
 	// bounded turns the delivery boundary ON, and it is ON ONLY INSIDE
 	// runSession. auth and defaultSession use this same reader and admit
 	// nothing, so a boundary applying to them would starve the credential
-	// exchange and the no-Queries path (lector's Receive-site audit: exactly
+	// exchange and the no-Queries path (a Receive-site audit: exactly
 	// three sites, and runExtended is not one — it is reached only after
 	// runSession's receive).
 	bounded bool
@@ -109,7 +109,7 @@ type frameReader struct {
 
 	// onStart fires as a message's type byte is consumed — the moment the peer
 	// goes from "between messages" to "mid-frame", which is what selects the
-	// budget that governs it (§2). It is reported from HERE rather than inferred
+	// budget that governs it (matrix §2). It is reported from HERE rather than inferred
 	// by the loop because this is the only place that fact is observable.
 	onStart func()
 
@@ -117,7 +117,7 @@ type frameReader struct {
 	// Receive has consumed yet.
 	//
 	// IT IS A QUEUE AND NOT A CALLBACK, because scan runs far ahead of the loop
-	// (lector C r2 MF2). One socket read can carry [Describe, Sync, Describe],
+	// One socket read can carry [Describe, Sync, Describe],
 	// and scan frames all three before Receive returns the first. A callback
 	// charging a live segment as each was framed therefore charged the THIRD
 	// frame's bytes into the FIRST frame's segment — falsely refusing a compliant
@@ -135,7 +135,7 @@ type frameReader struct {
 	typ byte
 
 	// bad keeps the offending byte for the audit line. The wire is told only
-	// the rule id (§1.2: a synthesized error never impersonates the target).
+	// the rule id (matrix §1.2: a synthesized error never impersonates the target).
 	bad byte
 }
 
@@ -188,7 +188,7 @@ func (r *frameReader) peekHeader() (frameHeader, bool) {
 
 // consumeHeader removes the head of the queue.
 //
-// EVERY Receive must call it, auth's included (lector C r2 MF3). Auth shares
+// EVERY Receive must call it, auth's included. Auth shares
 // this reader and its Backend, so a queue that only the session loop advances
 // attributes every later header to the wrong frame — and read-ahead during auth
 // means a post-auth frame can already be queued before the loop exists, which is
@@ -388,15 +388,15 @@ func (r *frameReader) waitHeader() bool {
 // This is the body-skip. Deciding header-first was necessary and not sufficient:
 // admission refused the frame and set the segment discarding, but the loop still
 // called Receive, so the crossing body was decoded before the discard branch
-// applied (lector r0). Moving the decision earlier changed WHEN we refuse, not
+// applied. Moving the decision earlier changed WHEN we refuse, not
 // WHETHER we decode — and a surviving mutation told me so, which I first read as
 // a missing cell rather than a missing feature.
 func (r *frameReader) skipFrame(h frameHeader) {
 	r.skipped = true
 	// One type byte plus the declared length, which counts its own four bytes.
 	r.skip += 1 + h.declared
-	// POP THE REFUSED HEADER. Every Receive pops exactly one header (lector C r2
-	// MF3) — but the refused frame never reaches Receive, so the next Receive
+	// POP THE REFUSED HEADER. Every Receive pops exactly one header
+	// — but the refused frame never reaches Receive, so the next Receive
 	// returns the frame AFTER it. Leaving this header queued makes the loop's
 	// consumeHeader attribute the refused frame's header to the Sync that
 	// followed, and the queue is off by one for the rest of the segment: the

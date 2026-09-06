@@ -182,7 +182,7 @@ func FuzzStartupFrame(f *testing.F) {
 	// target counted goroutines per iteration against a baseline it re-sampled
 	// per iteration -- so a leak of one goroutine per connection ratcheted
 	// under the slack forever and the target reported PASS while leaking on
-	// every connection (juliet, PR #37 r0; reproduced by injecting
+	// every connection (found in review; reproduced by injecting
 	// `go func(){ select{} }()` into handle()). Counting a cumulative quantity
 	// against a moving baseline cannot observe accumulation. Leak detection
 	// needs a controlled loop and a FIXED origin, so it lives in
@@ -320,7 +320,7 @@ func settle() {
 // which is how the behaviour was found rather than guessed.
 //
 // That is not a defect against F0: the deadline IS the bound, and it holds.
-// It is the slowloris shape F0e is chartered to price (ADR-0075 F0e:
+// It is the slowloris shape F0e is chartered to price (
 // "slowloris and malformed-frame fuzzing"), so this cell pins the current
 // contract -- bounded and terminating -- and will need revisiting when F0e
 // lands a tighter budget. What it must never do is pass while the connection

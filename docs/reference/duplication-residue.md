@@ -219,6 +219,24 @@ catch two; it found four.
   relative path, both against the bare-period cell, both from real code rather
   than an invented fixture. The remaining rungs are conversion work AND the
   cells' live review.
+  RUNG EIGHT NARROWED A CELL INSTEAD OF WIDENING ONE, and it is the first time
+  the ratchet gave ground. 268 of frontdoor's coordinate sites are `§` anchors
+  into `docs/front-door/protocol-matrix.md` — a file IN this repository, which
+  the conformance cells READ FROM DISK and assert against. The rule is
+  accessibility; a reader can open the matrix. The bare anchor's defect was
+  never that it points somewhere private but that it does not say WHICH
+  document, so the fix is to QUALIFY, not to delete: `§3.1` becomes
+  `matrix §3.1`, and the cell admits an anchor whose COMMENT GROUP names the
+  document. Group-scoped rather than file-scoped, deliberately — a file-level
+  pointer would license a later comment in that file to cite §4 of a KB
+  document under the same admission. The admission verifies the named path
+  exists, so it cannot outlive the document.
+  ONE MORE DOCUMENT CLASS came with it: a group naming an RFC or a URL. One
+  real case (`RFC 5280 §4.2.1.10` in certgen), and a public standard is more
+  accessible than anything in this repository.
+  THE ADMISSION IS GROUP-WIDE, stated plainly: a bare anchor sharing a comment
+  group with a qualified one is admitted. That is the chosen scope, narrower
+  than the file and wider than the line.
   A FOURTH SURFACE ARRIVED WITH RUNG SEVEN: FILE NAMES. The tui rung ended
   with one comment hit left, inside a file called `lector_item5_r2_probe_test.go`
   — a reviewer's name and a review round, in the one piece of text a reader

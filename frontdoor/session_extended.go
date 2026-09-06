@@ -58,12 +58,12 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 	var err error
 
 	// THE SEGMENT'S CAPS. The declared wire length was already charged by
-	// frameReader before this frame was decoded (§1.5 stage one); what is added
+	// frameReader before this frame was decoded (matrix §1.5 stage one); what is added
 	// here is stage two, the decoded pre-allocation, which is only knowable once
 	// the message exists. Sync is exempt from both, and its counters were reset
 	// by runExtendedSync rather than skipped here.
 	if _, isSync := msg.(*pgproto3.Sync); !isSync {
-		// §1.5 STAGE TWO. Stage one — the declared wire length — was applied in
+		// matrix §1.5 STAGE TWO. Stage one — the declared wire length — was applied in
 		// framing order before this frame was decoded; this is the additional
 		// pre-allocation the decode performed, which is only knowable now.
 		seg.addBytes(segmentDecodedDelta(msg))
@@ -77,14 +77,14 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 				*closeReason = "write-failed"
 				return false
 			}
-			// Refuse, then discard through Sync (§7 :386): the frames already
+			// Refuse, then discard through Sync (matrix §7 :386): the frames already
 			// pipelined behind this one must not be acted on either.
 			seg.discarding = true
 			return true
 		}
 	}
 
-	// THE RESERVATION FOLLOWS THE OBLIGATION, NOT THE DELIVERY (jarvis/lector
+	// THE RESERVATION FOLLOWS THE OBLIGATION, NOT THE DELIVERY (agreed in
 	// ruling on #75). Parse, Bind, Describe and Close queue answers that Sync
 	// will deliver, so the output obligation begins HERE — at the frame that
 	// creates it — and it is charged before that frame is dispatched.
@@ -93,7 +93,7 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 	// accounting AFTER dispatch: the frames are already on the target when the
 	// reservation is attempted, so a capacity failure at Sync refuses work that
 	// has demonstrably run and reports "nothing was dispatched", which is false.
-	// It also breaks §1.4's control-lane liveness, because a standalone Sync
+	// It also breaks matrix §1.4's control-lane liveness, because a standalone Sync
 	// with nothing to deliver would still try to take a general-lane working set
 	// and could be refused — the one thing the control lane exists to prevent.
 	//
@@ -186,7 +186,7 @@ func (l *Listener) runExtended(ctx context.Context, conn net.Conn, be *pgproto3.
 func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, peer string, seg *segmentLane, closeReason *string) bool {
 
-	// SYNC NEVER RESERVES, and that is a §1.4 requirement rather than an
+	// SYNC NEVER RESERVES, and that is a matrix §1.4 requirement rather than an
 	// optimisation: Sync and its ReadyForQuery ride the CONTROL lane and are
 	// ALWAYS ADMISSIBLE under general-lane saturation. A Sync that had to take a
 	// general-lane working set before it could answer could be refused exactly
@@ -258,7 +258,7 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	return l.sendReadinessWith(conn, be, status, closeReason)
 }
 
-// frameExtendedError turns an engine refusal into a §8a ErrorResponse.
+// frameExtendedError turns an engine refusal into a matrix §8a ErrorResponse.
 //
 // It does NOT send readiness. In the extended protocol the client's own Sync is
 // what asks for it, and PostgreSQL answers an error mid-segment by discarding
@@ -299,12 +299,12 @@ func (l *Listener) frameExtendedError(conn net.Conn, be *pgproto3.Backend,
 // returned would be taken while the working set is small and released while it
 // is largest — backwards, not merely smaller.
 //
-// §8.2 is release on EVERY path, and Sync is only the segment's NORMAL exit. A
+// matrix §8.2 is release on EVERY path, and Sync is only the segment's NORMAL exit. A
 // client that vanishes between Execute and Sync never sends one, so the owning
 // loop holds this in a defer for the session's lifetime: teardown, disconnect
 // and every abandonment release it too. A release-at-Sync design would leak
 // those bytes for the life of the process.
-// §7 :386 / §9 :479 — one segment's own caps, reset at Sync (row 4:Sync :273).
+// matrix §7 :386 / §9 :479 — one segment's own caps, reset at Sync (row 4:Sync :273).
 //
 // They bound what a client may accumulate BEFORE it lets the server answer. A
 // client that never Syncs is not malicious by construction — a driver bug will
@@ -319,7 +319,7 @@ const (
 // cell. The BYTE cap needs an injection point of its own: driving 96 MiB through
 // a test to reach it would trade minutes of gate time for one branch, and the
 // first version of this cell settled for asserting the message counter — so
-// deleting the byte charge entirely left it green (lector C r1 MF3).
+// deleting the byte charge entirely left it green.
 func (l *Listener) segmentMessageCap() int {
 	if l.testSegmentMsgs != nil {
 		return *l.testSegmentMsgs
@@ -334,7 +334,7 @@ func (l *Listener) segmentByteCap() int64 {
 	return maxSegmentBytes
 }
 
-// admitSegmentFrame applies §1.5 stage one — the DECLARED wire length — to the
+// admitSegmentFrame applies matrix §1.5 stage one — the DECLARED wire length — to the
 // segment, and refuses the segment if that puts it past its caps.
 //
 // It is called once per Receive, in framing order, so a Sync's counter reset
@@ -360,7 +360,7 @@ func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, fr *fr
 		return true
 	}
 
-	// AN ALREADY-DISCARDING SEGMENT IS NOT RE-ADMITTED (jarvis's diagnosis,
+	// AN ALREADY-DISCARDING SEGMENT IS NOT RE-ADMITTED (diagnosed in review,
 	// proven live by the discriminator below).
 	//
 	// PostgreSQL answers an error mid-segment by discarding until Sync and
@@ -395,13 +395,13 @@ func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, fr *fr
 		*closeReason = "write-failed"
 		return false
 	}
-	// SKIP THE REFUSED FRAME'S BODY (lector r0). Setting discarding is not
+	// SKIP THE REFUSED FRAME'S BODY. Setting discarding is not
 	// enough on its own: the loop still calls Receive, so without this the
 	// crossing body is decoded before the discard branch applies — which is a
 	// 64 MiB decode now that the cap is the documented one.
 	fr.skipFrame(h)
 
-	// Refuse, then discard through Sync (§7 :386).
+	// Refuse, then discard through Sync (matrix §7 :386).
 	seg.discarding = true
 	return true
 }
@@ -409,7 +409,7 @@ func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, fr *fr
 // extendedTypeByte reports whether a frontend type byte belongs to an extended
 // segment, and whether it is Sync — which is exempt from the caps because it is
 // always admissible and is the only thing that can END the state a breach puts
-// the segment into (row 4:Sync, criterion 1).
+// the segment into.
 func extendedTypeByte(typ byte) (extended, isSync bool) {
 	switch typ {
 	case 'P', 'B', 'D', 'E', 'C', 'H':
@@ -420,7 +420,7 @@ func extendedTypeByte(typ byte) (extended, isSync bool) {
 	return false, false
 }
 
-// segmentDecodedDelta is §1.5's STAGE TWO: what a decoded frame makes the front
+// segmentDecodedDelta is matrix §1.5's STAGE TWO: what a decoded frame makes the front
 // door hold beyond the bytes that arrived.
 //
 // Stage one is the declared wire length, charged from frameReader before any of
@@ -428,7 +428,7 @@ func extendedTypeByte(typ byte) (extended, isSync bool) {
 // performs, and it must be an OVER-estimate rather than a tidy one — the first
 // version of this cap reconstructed the wire length from the decoded message and
 // under-charged a NULL-parameter Bind by 3x on the wire and 12.5x on the decode
-// (lector C r1 MF2, measured on VM43: 16,389 charged against 49,165 on the wire
+// (measured on VM43: 16,389 charged against 49,165 on the wire
 // and ~200 KiB held). A cap on an under-estimate does not bound what it claims
 // to bound, and it fails in the direction that admits.
 //
@@ -554,7 +554,7 @@ func (s *segmentLane) release(l *Listener) {
 // the answers took the working set when they were admitted, and an Execute-only
 // segment takes it at the Execute. A Flush that reserved would charge 4 MiB for
 // output it does not itself produce, and a standalone EMPTY Flush — a protocol
-// no-op §1.4 makes control-lane admissible — could then be REFUSED under
+// no-op matrix §1.4 makes control-lane admissible — could then be REFUSED under
 // general-lane saturation, or take the watermark while producing nothing. With
 // seg.ran false for a Flush, that bad hold would sit under the thirty-MINUTE
 // idle clock rather than the thirty-second stall clock.
@@ -604,7 +604,7 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 
 	switch {
 	case acct.withheld != outputComplete:
-		// AN EXTENDED SEGMENT'S TERMINAL BYTE IS SYNC'S (lector r2 MF4), so the
+		// AN EXTENDED SEGMENT'S TERMINAL BYTE IS SYNC'S, so the
 		// report carries the truthful explanation and no readiness. Having put an
 		// ErrorResponse on the wire we are in the protocol's ignore-till-Sync
 		// state, exactly as the target would be, so the segment discards until
@@ -665,7 +665,7 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 
 // ruleSegmentStall is the identity for a client that opened an extended segment,
 // holds pending output, and has neither Synced nor Flushed within
-// segmentStallBudget (jarvis's ruling, 2026-09-03).
+// segmentStallBudget (ruled 2026-09-03).
 //
 // It is frame-stall's SIBLING one level up — a whole segment left half-open
 // rather than one frame — so it shares 08006's class. It is deliberately NOT
@@ -674,7 +674,7 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 // write-failed: the peer may well be reading, it simply never ended its segment.
 const ruleSegmentStall = "frontdoor/segment-stall"
 
-// ruleSegmentCap is §7 :386's identity for a segment that accumulated past its
+// ruleSegmentCap is matrix §7 :386's identity for a segment that accumulated past its
 // caps before Sync.
 const ruleSegmentCap = "frontdoor/segment-cap"
 
@@ -688,7 +688,7 @@ const ruleSegmentCap = "frontdoor/segment-cap"
 //
 // ITS OWN CONSTANT, deliberately. It is 30s, and so are idle-in-lane waiting and
 // the output stall, but three budgets that happen to share a number are three
-// MEANINGS (budgets doc §5.1): idle measures a client that is not asking,
+// MEANINGS (budgets doc matrix §5.1): idle measures a client that is not asking,
 // outputStall measures one that will not take what it is being sent, and this
 // measures one that asked for output and then left the segment open. Sharing a
 // constant would make a later change to one silently change the others.
@@ -708,7 +708,7 @@ func (l *Listener) segmentStall() time.Duration {
 // A segment that has RUN something has output the client asked for and has not
 // collected, so it gets the stall budget. A segment that has only Parsed and
 // Bound is a client merely between messages, so it stays under the idle clock —
-// jarvis's narrowing, and it still holds.
+// the narrowing agreed in review, and it still holds.
 //
 // IT ASKS WHETHER THE SEGMENT RAN, NOT WHETHER IT HOLDS A RESERVATION. Those
 // were the same question while only Execute reserved, and the reservation was

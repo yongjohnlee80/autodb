@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// STARTUP GUC ADMISSION (ADR-0075 Amendment 8) — the front-door half.
+// STARTUP GUC ADMISSION — the front-door half.
 //
 // Every cell here asserts what the ENGINE would be handed, not that the startup
 // was accepted. The distinction is the whole point: a front door that collected
@@ -50,9 +50,9 @@ func TestStartupGUCs_ASettingReachesTheEngineVerbatim(t *testing.T) {
 	}
 }
 
-// row 3.1:carve-out — THE CARVE-OUT, AND IT IS LOAD-BEARING (jarvis, ruling 1 + the #71 fold).
+// row 3.1:carve-out — THE CARVE-OUT, AND IT IS LOAD-BEARING (ruled 2026-09-03).
 //
-// Amendment 8 says a startup parameter naming a GUC is admitted as the
+// The amended rule says a startup parameter naming a GUC is admitted as the
 // equivalent SET. client_encoding and application_name ARE GUCs, so read
 // literally that sentence captures both — and the engine's denylist refuses
 // client_encoding UNCONDITIONALLY, including to UTF8, because the lease pins the
@@ -83,7 +83,7 @@ func TestStartupGUCs_TheNamedSetIsNeverCollected(t *testing.T) {
 			"client — psql, lib/pq and JDBC all send it at startup",
 		"application_name": "application_name is NOT on the denylist, so collecting it does not fail " +
 			"loudly — the engine ADMITS it and applies it to the pinned backend, silently " +
-			"contradicting §3.1's rule that it is capped, echoed to the client and never forwarded " +
+			"contradicting matrix §3.1's rule that it is capped, echoed to the client and never forwarded " +
 			"to the target (see the live cell for the consequence)",
 		"user":     "identity comes from the token; `user` is a cross-check, never a setting",
 		"database": "this names the connection row, not a setting on it",
@@ -91,7 +91,7 @@ func TestStartupGUCs_TheNamedSetIsNeverCollected(t *testing.T) {
 	}
 	for _, name := range []string{"user", "database", "application_name", "client_encoding", "options"} {
 		if v, found := check.GUCs[name]; found {
-			t.Errorf("%s=%q was collected as a setting, and §3.1 governs it here: %s", name, v, why[name])
+			t.Errorf("%s=%q was collected as a setting, and matrix §3.1 governs it here: %s", name, v, why[name])
 		}
 	}
 }
@@ -142,7 +142,7 @@ func TestStartupGUCs_OptionsUnpackIntoTheSameMap(t *testing.T) {
 //
 // The old policy refused anything that merely looked like it set something, on
 // the stated grounds that a parser disagreeing with the server's about what a
-// string meant was worse than a blunt refusal. Amendment 8 removes that choice —
+// string meant was worse than a blunt refusal. The amended rule removes that choice —
 // to admit these we have to know what they say — so the parser is strict and
 // what it cannot read is refused rather than guessed at. The original reasoning
 // survives: we still never act on a string we are not sure we understood.
@@ -532,7 +532,7 @@ func TestStartupGUCs_OptionValueBytesAreNotRewritten(t *testing.T) {
 
 // row 3.1:carve-out — THE CARVE-OUT IS ABOUT THE NAME, NOT THE ARRIVAL PATH.
 //
-// §3.1 governs application_name and client_encoding wherever they arrive. The
+// matrix §3.1 governs application_name and client_encoding wherever they arrive. The
 // first version applied the carve-out only to top-level parameters, so
 // `options='-c application_name=shadow'` walked straight into StartupGUCs and
 // was forwarded to the pinned backend, contradicting the row that says it never
@@ -547,10 +547,10 @@ func TestStartupGUCs_OptionValueBytesAreNotRewritten(t *testing.T) {
 func TestStartupGUCs_TheCarveOutFollowsTheNameThroughOptions(t *testing.T) {
 	t.Parallel()
 
-	// application_name through options is §3.1's, NOT a setting — and NOT
+	// application_name through options is matrix §3.1's, NOT a setting — and NOT
 	// refused either: it must behave exactly as the top-level spelling does.
 	// The map is held, not inlined: checkStartupParams routes a carved-out name
-	// INTO it, which is how `-c application_name` reaches §3.1's cap, truncation
+	// INTO it, which is how `-c application_name` reaches matrix §3.1's cap, truncation
 	// and echo instead of a second copy of those rules living here.
 	params := map[string]string{
 		"user": "root", "database": "d",
@@ -558,16 +558,16 @@ func TestStartupGUCs_TheCarveOutFollowsTheNameThroughOptions(t *testing.T) {
 	}
 	check, ok := checkStartupParams(params)
 	if !ok {
-		t.Fatalf("`-c application_name` was REFUSED (%q/%s). §3.1 accepts application_name; it must "+
+		t.Fatalf("`-c application_name` was REFUSED (%q/%s). matrix §3.1 accepts application_name; it must "+
 			"behave the same whichever way it is spelled", check.Refused, check.Reason)
 	}
 	if v, collected := check.GUCs["application_name"]; collected {
 		t.Errorf("application_name=%q was collected as a setting because it arrived through options. "+
 			"The engine does NOT deny application_name, so this does not fail loudly — it is "+
 			"admitted as an ordinary SET and FORWARDED to the pinned backend, silently "+
-			"contradicting §3.1's rule that it never is", v)
+			"contradicting matrix §3.1's rule that it never is", v)
 	}
-	// …and it reached §3.1's own handling rather than being dropped.
+	// …and it reached matrix §3.1's own handling rather than being dropped.
 	if got := params["application_name"]; got != "shadow" {
 		t.Errorf("application_name through options = %q, want \"shadow\" — routing it out of the "+
 			"settings map is only half the rule; it must land where the top-level spelling lands, "+
@@ -580,7 +580,7 @@ func TestStartupGUCs_TheCarveOutFollowsTheNameThroughOptions(t *testing.T) {
 			"carved-out name must still be admitted", got)
 	}
 
-	// JARVIS'S AVAILABILITY MIRROR: the same root cause, opposite symptom.
+	// THE AVAILABILITY MIRROR: the same root cause, opposite symptom.
 	// `-c client_encoding=UTF8` is a perfectly legitimate thing to put in
 	// PGOPTIONS. Collected, it meets the engine's UNCONDITIONAL denial and
 	// withdraws the session — so the value that works at top level killed the
@@ -597,14 +597,14 @@ func TestStartupGUCs_TheCarveOutFollowsTheNameThroughOptions(t *testing.T) {
 			"denies client_encoding unconditionally, so this WITHDRAWS THE SESSION: a client that "+
 			"puts a legitimate encoding in PGOPTIONS instead of at top level cannot connect at all", v)
 	}
-	// A non-UTF8 encoding through options gets §3.1's answer, not the engine's.
+	// A non-UTF8 encoding through options gets matrix §3.1's answer, not the engine's.
 	if check, ok := checkStartupParams(map[string]string{
 		"user": "root", "database": "d", "options": "-c client_encoding=LATIN1",
 	}); ok {
-		t.Error("`-c client_encoding=LATIN1` was accepted; §3.1 refuses a non-UTF8 encoding in " +
+		t.Error("`-c client_encoding=LATIN1` was accepted; matrix §3.1 refuses a non-UTF8 encoding in " +
 			"either spelling")
 	} else if check.Reason != reasonStartupParamRefus {
-		t.Errorf("refused as %q, want %q — it is §3.1's refusal, reached by §3.1's rule",
+		t.Errorf("refused as %q, want %q — it is matrix §3.1's refusal, reached by §3.1's rule",
 			check.Reason, reasonStartupParamRefus)
 	}
 }
@@ -617,7 +617,7 @@ func TestStartupGUCs_TheCarveOutFollowsTheNameThroughOptions(t *testing.T) {
 // worth saying why it was not taken.
 //
 // This surface already refuses a setting named twice, and that refusal is itself
-// a deliberate deviation from PostgreSQL's last-wins (jarvis's held scope): the
+// a deliberate deviation from PostgreSQL's last-wins (a held scope): the
 // front door does not silently pick between two values a client asked for. A
 // carved-out name is the same shape, so it gets the same answer. Two rules for
 // one shape would be the harder thing to explain, and the failure mode of
@@ -648,7 +648,7 @@ func TestStartupGUCs_ANameGivenBothWaysIsRefused(t *testing.T) {
 	}
 }
 
-// row 3.1:carve-out — A SPELLING IS NOT A BYPASS (lector r1 MF4).
+// row 3.1:carve-out — A SPELLING IS NOT A BYPASS.
 //
 // The third instance of one defect: a guard keyed on a NAME, and another
 // spelling of that name reaching the same setting. First it was an alias
@@ -691,7 +691,7 @@ func TestStartupGUCs_AMixedCaseSpellingIsNotABypass(t *testing.T) {
 		})
 	}
 
-	// AND A MIXED-CASE SPELLING ALONE still gets §3.1's handling — the fix is a
+	// AND A MIXED-CASE SPELLING ALONE still gets matrix §3.1's handling — the fix is a
 	// fold, not a refusal of anything unusual. It must reach the CANONICAL key,
 	// because the cap, the truncation and the echo all read that one exactly.
 	params := map[string]string{
@@ -719,7 +719,7 @@ func TestStartupGUCs_AMixedCaseSpellingIsNotABypass(t *testing.T) {
 	}
 }
 
-// THE FOLD IS THE TARGET'S FOLD, NOT GO'S (jarvis's trap).
+// THE FOLD IS THE TARGET'S FOLD, NOT GO'S (a trap named in review).
 //
 // PostgreSQL's guc_name_compare folds A-Z byte-wise and nothing else. Go's
 // strings.ToLower is Unicode-aware and folds more — including U+212A KELVIN SIGN
@@ -771,7 +771,7 @@ func TestStartupGUCs_TheFoldIsPostgresFoldNotGos(t *testing.T) {
 		"user": "root", "database": "d", "Klient_encoding": "LATIN1",
 	}
 	if check, ok := checkStartupParams(params); !ok {
-		t.Fatalf("a name that merely LOOKS like client_encoding was refused as §3.1's (%q/%s); "+
+		t.Fatalf("a name that merely LOOKS like client_encoding was refused as matrix §3.1's (%q/%s); "+
 			"PostgreSQL does not consider it client_encoding, and neither may we",
 			check.Refused, check.Reason)
 	} else if _, collected := check.GUCs["Klient_encoding"]; !collected {
@@ -782,14 +782,14 @@ func TestStartupGUCs_TheFoldIsPostgresFoldNotGos(t *testing.T) {
 
 // row 3.1:carve-out — A CARVED-OUT NAME IS CHARGED WHEN SEEN, NOT WHEN FORWARDED.
 //
-// The FOURTH axis of one defect (lector r2 MF5). Duplicate detection needs two
+// The FOURTH axis of one defect. Duplicate detection needs two
 // separate things, and r1 fixed only the first: the name must be FOLDED — one
 // index, every site — and it must be CHARGED to that index when SEEN. The
 // options-derived client_encoding carve-out validated its value and continued
 // without charging anything, so a second spelling had no first occurrence to
 // collide with.
 //
-// Juliet's measurement is the signature, and this cell pins it in both
+// The measurement is the signature, and this cell pins it in both
 // directions: before the fix the call returned ok=true WITH GUCS EMPTY —
 // accepted, and nothing recorded. The empty map is the evidence that the
 // recording never happened, which is stronger than the refusal alone.
@@ -798,7 +798,7 @@ func TestStartupGUCs_TheFoldIsPostgresFoldNotGos(t *testing.T) {
 // only because its handling writes params["application_name"] for the cap and
 // echo, so a second spelling collided with an unrelated write. A guard that
 // functions as a side effect functions only where the side effect occurs — the
-// same shape as the r0 cell that passed because the ENGINE denied
+// same shape as the earlier cell that passed because the ENGINE denied
 // client_encoding rather than because my guard worked. So both carved-out names
 // are driven here, not just the broken one.
 func TestStartupGUCs_ACarvedOutNameIsChargedWhenSeen(t *testing.T) {
@@ -827,7 +827,7 @@ func TestStartupGUCs_ACarvedOutNameIsChargedWhenSeen(t *testing.T) {
 
 	// POSITIVE CONTROL, because "refuses a repeat" and "refuses everything" look
 	// identical from the cases above: ONE carved-out name in options, plus an
-	// ordinary setting, still passes and still gets §3.1's handling.
+	// ordinary setting, still passes and still gets matrix §3.1's handling.
 	params := map[string]string{
 		"user": "root", "database": "d",
 		"options": "-c client_encoding=UTF8 -c datestyle=ISO",
@@ -881,7 +881,7 @@ func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 		mixed     string // a mixed-case spelling of the same name
 		viaOption string
 		// RECOGNITION, per spelling, which is the whole point of the column:
-		// what §3.1 name is this, written this way? "" means "not one of them —
+		// what matrix §3.1 name is this, written this way? "" means "not one of them —
 		// an ordinary setting". A byte-wise name loses its identity when the case
 		// changes; a folded one keeps it; an ordinary setting never had one.
 		asCanonical   string
@@ -891,7 +891,7 @@ func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 		// mixedAlone: what the MIXED spelling does as the only top-level
 		// occurrence. Every row drives it — no row substitutes its canonical
 		// spelling, which is how two rows previously claimed a drive they did
-		// not perform (lector r4 MF2).
+		// not perform.
 		//   refused-missing — it is not that key, so a required one is absent.
 		//                     CANONICALIZATION IS N/A for these rows: the startup
 		//                     is refused before any rewriting could happen, so
@@ -916,7 +916,7 @@ func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 		t.Run(row.name, func(t *testing.T) {
 			t.Parallel()
 
-			// COLUMN: recognised, both spellings. Which §3.1 name this is, and
+			// COLUMN: recognised, both spellings. Which matrix §3.1 name this is, and
 			// whether the answer survives a change of case, is the TARGET's
 			// answer, not ours.
 			if got := specialName(row.name); got != row.asCanonical {
@@ -939,7 +939,7 @@ func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 			// `user` and `database` rows carried an EXACT duplicate of their own
 			// key before the mixed spelling was ever reached — the fixture
 			// supplied the collision the row exists to demonstrate, and a
-			// case-sensitive index left both rows green (lector r4 MF1).
+			// case-sensitive index left both rows green.
 			//
 			// [4:] because duplicateStartupKey reads the message BODY — the
 			// version word onward — and startupPacketPairs builds the framed
@@ -1044,7 +1044,7 @@ func TestStartupGUCs_TheNameHandlingMatrixHoldsRowByRow(t *testing.T) {
 // valueFor gives a row a value its own rules accept, so the canonical column is
 // not accidentally testing a value rule instead.
 //
-// Only client_encoding has one: §3.1 accepts it iff UTF8, and any other value
+// Only client_encoding has one: matrix §3.1 accepts it iff UTF8, and any other value
 // would refuse the startup for the VALUE while the row is asking about the NAME.
 // Every other row's mixed spelling is an ordinary setting whose value the target
 // judges, so anything does.

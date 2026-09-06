@@ -80,7 +80,7 @@ func TestPGF4_TheSameAdmissionAnswersStartupAndSET(t *testing.T) {
 
 			if opened != accepted {
 				t.Fatalf("THE TWO DOORS DISAGREE about %s=%s: startup admitted=%v, SET admitted=%v.\n\n"+
-					"§3.2 contracts ONE admission implementation for both. A setting a client "+
+					"matrix §3.2 contracts ONE admission implementation for both. A setting a client "+
 					"cannot SET mid-session but CAN obtain by reconnecting with it in the startup "+
 					"packet is the exact bypass the sentence forbids — and the reverse is a client "+
 					"whose working session cannot be reproduced by connecting the same way twice.\n"+

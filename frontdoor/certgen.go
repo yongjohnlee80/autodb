@@ -18,14 +18,14 @@ import (
 	"time"
 )
 
-// Certificate generation for the front door (ADR-0075 §4, ADR-0086 §10).
+// Certificate generation for the front door.
 //
 // It lives beside LoadServerTLS ON PURPOSE. The rules for what a certificate
 // must carry and the rules for what is accepted at startup are the same rules,
 // and in two packages they drift — the SAN set generated here is exactly the
-// SAN set verified there ([[shared-resolver-single-source-of-truth]]).
+// SAN set verified there — one resolver, one source of truth.
 //
-// This is NOT the production path. ADR-0075 prefers a real ACME certificate;
+// This is NOT the production path. A real ACME certificate is preferred;
 // this exists so a dev or internal deployment is not forced to choose between
 // standing up a CA by hand and turning TLS off. Saying so is a documentation
 // job and deliberately not another gate.

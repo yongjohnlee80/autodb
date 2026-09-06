@@ -357,7 +357,7 @@ func TestStartup_UnrecognizedProtocolOptionsAreNamed(t *testing.T) {
 	}
 }
 
-// MF1. Row 2.2 refuses GSS encryption with 'N' and lets the client CARRY ON:
+// Row 2.2 refuses GSS encryption with 'N' and lets the client CARRY ON:
 // 'N' is the protocol's own way of declining an option, and libpq's next move
 // after it is to ask for TLS. Answering 'N' and hanging up turned a declined
 // option into a dead connection, so a client that tried GSS first could never
@@ -395,7 +395,7 @@ func TestStartup_GSSRefusalLetsTheClientProceedToTLS(t *testing.T) {
 	}
 }
 
-// MF2. Direct TLS is a TLS failure, not an authentication denial — the peer
+// Direct TLS is a TLS failure, not an authentication denial — the peer
 // never presented a credential. Calling it fd.auth_denied puts a
 // non-authentication event in the trail an operator reads to count credential
 // attacks, and writing a PostgreSQL error frame to a client speaking raw TLS
@@ -439,11 +439,11 @@ func TestStartup_DirectTLSIsATLSFailureNotAnAuthDenial(t *testing.T) {
 	}
 }
 
-// MF3. §3.1's policy is THREE-WAY under Amendment 8: a named set governed here,
+// Matrix §3.1's policy is THREE-WAY under the amended rule: a named set governed here,
 // `replication` refused outright, and everything else COLLECTED as a setting for
 // the engine to judge.
 //
-// The rule inverted with Amendment 8 — this table used to assert that an unknown
+// The rule inverted with the amendment — this table used to assert that an unknown
 // parameter was REFUSED, which was correct until there was something to hand a
 // setting to. What has NOT changed is that nothing is silently ignored: a
 // parameter is answered for here, or handed on to be answered for there.
@@ -452,7 +452,7 @@ func TestStartup_DirectTLSIsATLSFailureNotAnAuthDenial(t *testing.T) {
 // collected — because "the startup was accepted" is exactly what a front door
 // that dropped every setting on the floor would also report.
 // MATRIX ROW 2.4: the StartupMessage's parameters are pinned by §3.1 — one
-// outside the named set is admitted as the equivalent SET (Amendment 8) rather
+// outside the named set is admitted as the equivalent SET rather
 // than emulated or ignored.
 // Claim-level citations (the rows below carry separately testable
 // guarantees, tracked per claim in the gate): row 3.1:options#unpacked,
@@ -544,9 +544,9 @@ func TestStartup_ParameterPolicy(t *testing.T) {
 // names the parameter — the caller learns that startup failed, not which
 // parameter this server dislikes.
 //
-// `replication` rather than `search_path`: under Amendment 8 a parameter naming
+// `replication` rather than `search_path`: under the amended rule a parameter naming
 // a SETTING is collected and judged by the engine, so the parameter this cell
-// needs is one §3.1 still answers for itself. replication is not a setting at
+// needs is one matrix §3.1 still answers for itself. replication is not a setting at
 // all — it selects a different protocol mode — so it stays refused here.
 func TestStartup_RefusedParameterIsAuditedButNotDisclosed(t *testing.T) {
 	t.Parallel()
@@ -592,7 +592,7 @@ func TestStartup_RefusedParameterIsAuditedButNotDisclosed(t *testing.T) {
 	}
 }
 
-// MF1. An oversized length-prefixed frame is NOT a direct-TLS attempt. The
+// An oversized length-prefixed frame is NOT a direct-TLS attempt. The
 // first version inferred direct TLS from pgproto3's "invalid length" error,
 // which a TLS ClientHello does produce — and so does an ordinary frame that
 // simply exceeds the pre-auth cap. A client sending something too big was
@@ -685,7 +685,7 @@ func TestStartup_OversizeIsNotDirectTLS(t *testing.T) {
 	}
 }
 
-// MF2. `user` and `database` are REQUIRED (§3.1). Without the check, an empty
+// `user` and `database` are REQUIRED (matrix §3.1). Without the check, an empty
 // parameter map sailed through to be denied for want of a credential store —
 // which reads in the audit as an authentication problem rather than as the
 // malformed startup it is.

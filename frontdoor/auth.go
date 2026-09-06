@@ -23,7 +23,7 @@ import (
 // around it: offer the method, read the frame, hand the token over, and turn
 // whatever comes back into either a session or the one uniform denial.
 
-// AuthDeadline bounds the credential exchange (§9: startup/auth 10s).
+// AuthDeadline bounds the credential exchange (matrix §9: startup/auth 10s).
 //
 // Its own deadline rather than a share of the startup budget, for the reason
 // every phase here has its own: a peer that spent the whole allowance getting
@@ -32,7 +32,7 @@ import (
 const AuthDeadline = 10 * time.Second
 
 // IdleDeadline is what replaces the pre-auth deadlines once a session is
-// open (§9: between-messages, 30m idle).
+// open (matrix §9: between-messages, 30m idle).
 //
 // Re-arming is not bookkeeping. The pre-auth deadlines are ten seconds, and a
 // deadline set on a net.Conn STAYS SET — leaving one in place would mean an
@@ -69,7 +69,7 @@ type Authenticator interface {
 	CloseWireSession(ctx context.Context, id exec.SessionID, userID int64, ip, reason string)
 }
 
-// CancelExecutor is the engine's cancel-registry half (§6.4), as seen by the
+// CancelExecutor is the engine's cancel-registry half (matrix §6.4), as seen by the
 // listener.
 //
 // The three calls are the whole of row 2.3's engine surface: register the
@@ -140,7 +140,7 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	// read; the worker wait then started a FRESH timer of the same length;
 	// and the verification itself got the listener's context, which has no
 	// deadline at all. A peer could spend twice the budget by being slow at
-	// the right moment — lector measured 502.96ms against a 300ms setting —
+	// the right moment — review measured 502.96ms against a 300ms setting —
 	// and a stuck auth store could hold a worker forever, because nothing
 	// upstream was ever going to cancel it.
 	//
@@ -182,7 +182,7 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	msg, err := be.Receive()
 	// The queue advances for auth's own frames too: it is shared with the session
 	// loop, and a Receive that does not pop leaves every later header attributed
-	// to the wrong frame (lector C r2 MF3).
+	// to the wrong frame.
 	if fr != nil {
 		fr.consumeHeader()
 	}
@@ -228,7 +228,7 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// row 3.1's, and applying it before the engine sees the label keeps the
 		// one rule in one place.
 		ApplicationName: params["application_name"],
-		// Amendment 8: the settings §3.1 collected, judged by the engine's own
+		// The amended rule: the settings matrix §3.1 collected, judged by the engine's own
 		// denylist — the same one a SET from this session would meet. The front
 		// door does not decide which are allowed; deciding here would be a
 		// second opinion about a rule that lives in one place on purpose.
@@ -306,7 +306,7 @@ func (l *Listener) acquireAuthWorker(ctx context.Context) (func(), error) {
 // live session, while the forward window (sent, not yet registered) is a
 // client holding a capability the server would refuse.
 //
-// A COLLISION REMINTS RATHER THAN REDRAWS (PR #44 r0). If the minted process
+// A COLLISION REMINTS RATHER THAN REDRAWS. If the minted process
 // id is already held by another session, the engine refuses with
 // ErrCancelKeyCollision and this loop mints a FRESH pair and registers that —
 // the pid the client receives and the pid the registry holds are one object,
@@ -316,7 +316,7 @@ func (l *Listener) acquireAuthWorker(ctx context.Context) (func(), error) {
 // CSPRNG and the handshake fails rather than sends an unhonourable key.
 func (l *Listener) completeHandshake(be *pgproto3.Backend, res exec.WireSessionResult, params map[string]string, notes []paramNote) error {
 	be.Send(&pgproto3.AuthenticationOk{})
-	// §3.1: an over-long application_name earns a NoticeResponse. The notice
+	// matrix §3.1: an over-long application_name earns a NoticeResponse. The notice
 	// names the cap and the fact, never the original value — that went to the
 	// audit, and echoing it here would defeat the cap.
 	for _, n := range notes {
@@ -388,7 +388,7 @@ func synthesizedStatuses(res exec.WireSessionResult, params map[string]string) [
 	}
 
 	return append(out,
-		// The echo of §3.1's accepted application_name — the CLIENT's own label
+		// The echo of matrix §3.1's accepted application_name — the CLIENT's own label
 		// coming back to it, now taken from what the ENGINE accepted rather than
 		// re-read from the startup params, so the echo cannot disagree with what
 		// the session recorded and audits under (claim #session-audit).
@@ -421,7 +421,7 @@ func sortedNames(m map[string]string) []string {
 	return names
 }
 
-// newBackendKey mints the cancel key from the CSPRNG (matrix row 2.9, MF7).
+// newBackendKey mints the cancel key from the CSPRNG.
 //
 // From crypto/rand and nowhere else. A cancel key IS a capability: whoever
 // holds it can cancel that session's running statement, so a key drawn from a
@@ -441,7 +441,7 @@ func newBackendKey() (*pgproto3.BackendKeyData, error) {
 // chargesThrottle decides whether a post-authentication refusal counts against
 // the per-source-IP throttle.
 //
-// THE PRINCIPLE (ADR-0086 §5) has two axes, and the first is the one Johno's
+// THE PRINCIPLE has two axes, and the first is the one Johno's
 // ruling turned on — he did not say "a database mismatch", he said a mismatch
 // AFTER A VERIFIED PAT:
 //

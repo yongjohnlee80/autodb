@@ -155,7 +155,7 @@ func TestOnlyTwoPlacesConstructAReadyForQuery(t *testing.T) {
 //
 // The split exists so a caller holding an observed status does not have it
 // re-read from the engine underneath — two halves of one answer, fetched at
-// different moments, is a defect this code has had before (r5 MF16). This pins
+// different moments, is a defect this code has had before. This pins
 // the lower half: whatever byte goes in is the byte on the wire.
 func TestSendReadinessWithSendsTheStatusItIsGiven(t *testing.T) {
 	for _, status := range []byte{'I', 'T', 'E'} {

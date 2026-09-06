@@ -45,6 +45,8 @@ var certifiedClean = []string{
 	"core/meta",
 	"core/auth",
 	"tui",
+	"internal/vocabguard",
+	"frontdoor",
 }
 
 // Patterns that name a private artefact.
@@ -81,6 +83,65 @@ var coordinate = regexp.MustCompile(
 		`ultron(-prime)?|white-vision|zen)\b`, // an agent — see the Johno exception below
 )
 
+// A SECTION ANCHOR IS NOT A COORDINATE WHEN ITS COMMENT GROUP SAYS WHICH
+// DOCUMENT, and that document is in this repository.
+//
+// THE CASE THAT TAUGHT THIS. frontdoor cites `§3.1`, `§7`, `§1.4` three hundred
+// times, and every one of them points into docs/front-door/protocol-matrix.md —
+// a file in this repository, which matrix_coverage_test.go READS FROM DISK and
+// asserts conformance against. Those anchors are not commentary about a
+// document; they are references into the package's normative spec, from the
+// code that implements it.
+//
+// So the bare anchor's defect was never that it points somewhere private — the
+// reader can open the matrix. It is that it does not say WHICH document. That
+// is a QUALIFICATION problem, and the fix is to qualify, not to delete: the
+// package already wrote `matrix §8.4` inline a hundred times of its own accord,
+// and this admits that habit rather than eating it.
+//
+// It is the same correction the very first cell made for a different reason —
+// the ADR's text grep would have forced a true sentence about the ALPN protocol
+// to be reworded, so the cell reads the syntax tree instead. Here the cell reads
+// the comment GROUP instead of the character.
+//
+// GROUP-SCOPED, NOT FILE-SCOPED, and the difference is the whole guarantee. A
+// file-level pointer would let a new comment anywhere in that file cite §4 of a
+// KB document under the same admission. The qualifier must sit in the same
+// comment group as the anchor it excuses.
+const matrixPath = "docs/front-door/protocol-matrix.md"
+
+// publicDoc matches a group that names a document the whole world can open.
+//
+// ONE REAL CASE, and it is why this exists rather than being anticipated:
+// certgen_test.go cites "RFC 5280 §4.2.1.10" for the name-constraints rule it
+// implements. That anchor is more accessible than anything in this repository
+// — Johno's rule names public documentation as explicitly fine — and deleting
+// it would lose the one detail a reader needs to check the implementation
+// against the standard. Rewording it to "the name-constraints section" would
+// lose the same detail more politely.
+var publicDoc = regexp.MustCompile(`(?i)\bRFC ?\d{3,5}\b|https?://`)
+
+// qualifiesAnchors reports whether a comment group names the document its
+// section anchors point into — either this repository's protocol matrix or a
+// public standard.
+func qualifiesAnchors(group string) bool {
+	return strings.Contains(strings.ToLower(group), "matrix") ||
+		strings.Contains(group, matrixPath) ||
+		publicDoc.MatchString(group)
+}
+
+// onlyAnchors reports whether every coordinate in the text is a section anchor.
+// A group that says "matrix" excuses its anchors — it does not excuse an ADR
+// number that happens to share the group.
+func onlyAnchors(text string) bool {
+	for _, m := range coordinate.FindAllString(text, -1) {
+		if !strings.HasPrefix(m, "§") {
+			return false
+		}
+	}
+	return true
+}
+
 func TestCertifiedPackagesCiteNothingPrivate(t *testing.T) {
 	root := "../.."
 	if len(certifiedClean) == 0 {
@@ -105,6 +166,7 @@ func TestCertifiedPackagesCiteNothingPrivate(t *testing.T) {
 
 			fset := token.NewFileSet()
 			commentsSeen := 0
+			anchorsAdmitted := 0
 			var hits []string
 			for _, path := range files {
 				f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
@@ -112,17 +174,37 @@ func TestCertifiedPackagesCiteNothingPrivate(t *testing.T) {
 					t.Fatalf("parsing %s: %v", path, err)
 				}
 				for _, cg := range f.Comments {
+					qualified := qualifiesAnchors(cg.Text())
 					for _, c := range cg.List {
 						commentsSeen++
-						if m := coordinate.FindString(c.Text); m != "" {
-							hits = append(hits, fmt.Sprintf("%s:%d  %q  in: %s",
-								filepath.Base(path), fset.Position(c.Pos()).Line, m,
-								strings.TrimSpace(c.Text)))
+						m := coordinate.FindString(c.Text)
+						if m == "" {
+							continue
 						}
+						if qualified && onlyAnchors(c.Text) {
+							anchorsAdmitted++
+							continue
+						}
+						hits = append(hits, fmt.Sprintf("%s:%d  %q  in: %s",
+							filepath.Base(path), fset.Position(c.Pos()).Line, m,
+							strings.TrimSpace(c.Text)))
 					}
 				}
 			}
 			// A package whose comments were not read proves nothing by being clean.
+			// THE ADMISSION MUST NOT OUTLIVE THE DOCUMENT. If the matrix moves,
+			// every anchor admitted above points at nothing and the cell says so
+			// — which puts the propagation cost on whoever moves it, where it
+			// belongs. The fourth part of the exemption mechanism, applied to an
+			// admission rather than an exemption.
+			if anchorsAdmitted > 0 {
+				if _, err := os.Stat(filepath.Join(root, matrixPath)); err != nil {
+					t.Fatalf("%d section anchor(s) in %q were admitted because their "+
+						"comment groups name the matrix, but %s does not exist: %v. "+
+						"The document moved and the pointers did not.",
+						anchorsAdmitted, pkg, matrixPath, err)
+				}
+			}
 			if commentsSeen < 20 {
 				t.Fatalf("only %d comment(s) inspected in %q; a clean result here would "+
 					"mean the walk is not reaching them", commentsSeen, pkg)
@@ -235,6 +317,7 @@ func TestCertifiedPackagesCiteNothingPrivateInStrings(t *testing.T) {
 
 			fset := token.NewFileSet()
 			literals := 0
+			anchorsAdmitted := 0
 			var hits []string
 			for _, path := range files {
 				f, err := parser.ParseFile(fset, path, nil, 0)
@@ -251,13 +334,35 @@ func TestCertifiedPackagesCiteNothingPrivateInStrings(t *testing.T) {
 					// can fail on a raw string and the coordinate would then be
 					// skipped silently, which is the failure mode that matters
 					// here — a hit that is not reported.
-					if m := coordinate.FindString(lit.Value); m != "" {
-						hits = append(hits, fmt.Sprintf("%s:%d  %q  in: %s",
-							filepath.Base(path), fset.Position(lit.Pos()).Line, m,
-							strings.TrimSpace(lit.Value)))
+					m := coordinate.FindString(lit.Value)
+					if m == "" {
+						return true
 					}
+					// The same admission the comment cell makes, scoped to the
+					// LITERAL rather than to a comment group — a string has no
+					// group, and the enclosing call is not a boundary a reader
+					// sees. So a failure message may say "matrix §3.1 accepts
+					// application_name" and may not say "§3.1" alone: the
+					// operator reading it is the one least able to guess which
+					// document a bare anchor means.
+					if qualifiesAnchors(lit.Value) && onlyAnchors(lit.Value) {
+						anchorsAdmitted++
+						return true
+					}
+					hits = append(hits, fmt.Sprintf("%s:%d  %q  in: %s",
+						filepath.Base(path), fset.Position(lit.Pos()).Line, m,
+						strings.TrimSpace(lit.Value)))
 					return true
 				})
+			}
+			// The admission must not outlive the document, exactly as in the
+			// comment cell.
+			if anchorsAdmitted > 0 {
+				if _, err := os.Stat(filepath.Join(root, matrixPath)); err != nil {
+					t.Fatalf("%d anchor(s) in %q strings were admitted because they "+
+						"name the matrix, but %s does not exist: %v",
+						anchorsAdmitted, pkg, matrixPath, err)
+				}
 			}
 			if literals < 20 {
 				t.Fatalf("inspected only %d string literal(s) in %q; a clean result "+

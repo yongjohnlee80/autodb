@@ -19,7 +19,7 @@ import (
 	"github.com/lib/pq"
 )
 
-// THE CONFORMANCE HARNESS (matrix §10, criterion 7's frame): the listener on a
+// THE CONFORMANCE HARNESS (matrix §10): the listener on a
 // real socket, driven by a real client library, asserted against matrix rows.
 //
 // Every other live cell in this package speaks the protocol by hand with
@@ -119,10 +119,10 @@ func TestHarness_AMultiStatementBufferIsOneImplicitBlock(t *testing.T) {
 	}
 }
 
-// MF2 (lector r0): the previous version sent "SELECT 1; SELECT 2" through
+// The previous version sent "SELECT 1; SELECT 2" through
 // pgconn.Exec and called it pipelining. That is ONE Query frame carrying two
 // statements — the implicit-block shape the cell above already covers — so it
-// could not detect a stranded second frame, which is the entire defect PR #59
+// could not detect a stranded second frame, which is the entire defect the
 // fixed. The name claimed two frames; the wire carried one.
 //
 // This drives TWO Query frames into one flush on the driver's own connection,
@@ -144,7 +144,7 @@ func TestHarness_AMultiStatementBufferIsOneImplicitBlock(t *testing.T) {
 // was executed, so the mutation ran and produced no symptom, which I could not
 // explain — and I sent the PR with the claim WITHHELD rather than asserted.
 //
-// Lector named the reason: scan's state does not affect what Read RETURNS, so
+// Review named the reason: scan's state does not affect what Read RETURNS, so
 // pgproto3 still received the whole buffer and nothing was ever stranded. I had
 // mutated the part of the reader that decides, not the part that delivers. The
 // control that works truncates what Read hands over after the first frame, and
@@ -164,9 +164,9 @@ func TestHarness_ADriverSendsTwoQueryFramesBeforeReading(t *testing.T) {
 		t.Fatalf("flushing two Query frames: %v", err)
 	}
 
-	// BOUNDED ON THE SOCKET, not between reads (r1 MF1). A time.Now() check at
+	// BOUNDED ON THE SOCKET, not between reads. A time.Now() check at
 	// the top of the loop never runs while fe.Receive() is blocked in netFD.Read
-	// — juliet reproduced the indefinite block when reply 2 is absent. The
+	// — review reproduced the indefinite block when reply 2 is absent. The
 	// deadline has to be on the connection, which is the same lesson as #66's
 	// readiness drain, in a cell I wrote after learning it.
 	if err := conn.Conn().SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
@@ -212,10 +212,10 @@ func TestHarness_ARefusalArrivesAsASQLSTATENotADisconnect(t *testing.T) {
 	}
 }
 
-// LM'S REAL CLIENT, RUNNING (ADR-0075 Amendment 8).
+// LM'S REAL CLIENT, RUNNING.
 //
 // These arms were written and then skipped for a day: lib/pq's config
-// normalization hard-codes `datestyle` on every connection, §3.1's closed set
+// normalization hard-codes `datestyle` on every connection, matrix §3.1's closed set
 // refused it, and LM's own driver could not open a session through the front
 // door at all. Writing them anyway rather than describing them meant unblocking
 // was the deletion of a guard, not a morning spent reconstructing what they were
@@ -301,12 +301,12 @@ func harnessDB(t *testing.T) (*sql.DB, func()) {
 }
 
 // THE EXTENDED PROTOCOL through a real driver — F1 refused it, #57 serves it,
-// and this arm's skip ("blocked on PR #57") went stale the moment that merged.
+// and this arm's skip went stale the moment that merged.
 //
 // It asserts the VALUE, not merely that the call returned. Everything on this
 // path relays, so almost everything "runs": a cell that only checks for a nil
 // error would pass against a front door that forwarded the segment to the wrong
-// target, or returned another statement's rows (white-vision's F4 fixture spec
+// target, or returned another statement's rows (the F4 fixture spec
 // makes this its central point, and it is the reason this arm is not a smoke
 // test).
 //
@@ -340,7 +340,7 @@ func TestHarness_PgxExtendedProtocol(t *testing.T) {
 // (4:Describe, 4:Execute, 4:Flush, 4:discard), and closing them is a slice of
 // its own rather than scope bolted onto a PR already under review.
 //
-// Spec: $KB_ROOT/agents/ultron-prime/incoming/2026-09-02-f4-extended-client-shapes-from-white-vision.md
+// Spec: the F4 extended-client shapes, agreed 2026-09-02.
 
 // THE TEST-ONLY CONDITION, ASSERTED RATHER THAN REVIEWED.
 //
@@ -396,7 +396,7 @@ func TestHarness_TheApprovedDriversStayTestOnly(t *testing.T) {
 	}
 }
 
-// opCtx bounds ONE live operation (MF3, lector r0).
+// opCtx bounds ONE live operation.
 //
 // Every live call previously used context.Background(), so a lost frame or a
 // withheld readiness byte hung until the outer go-test timeout — surfacing as

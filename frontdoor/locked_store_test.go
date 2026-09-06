@@ -14,7 +14,7 @@ import (
 // A LOCKED STORE answers 57P03, and it answers it POST-AUTH.
 //
 // THIS FILE REPLACES A SET OF CELLS THAT ENCODED A FALSE PREMISE, and the
-// history is the useful part. ADR-0087 Amendment 1 A1.3 asserted that a locked
+// history is the useful part. The keyslot design asserted that a locked
 // store surfaces during the CREDENTIAL phase, from a source trace: openTarget
 // decrypts the DSN and returns ErrLocked. That is true of openTarget and false
 // of the credential path — OpenWireSessionWith never opens a target. Measured:

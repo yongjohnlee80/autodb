@@ -22,7 +22,7 @@ import (
 // itself. Authentication is the next slice; this one ends by denying, which
 // is the honest state of a listener that has no credential store yet.
 
-// Pre-auth bounds (ADR-0075 §4 defaults table). Deliberately tighter than
+// Pre-auth bounds. Deliberately tighter than
 // the post-auth caps: nothing here has authenticated, so the budget an
 // anonymous peer can command should be the smallest one in the system.
 const (
@@ -37,7 +37,7 @@ const (
 	// pre-auth bound and nothing ever raised it, so an authenticated session ran
 	// its whole life at the limit written for an anonymous peer and any body over
 	// 64 KiB died with 08P01. A 65 KB INSERT, a 100 KB bytea parameter, a long
-	// script — ordinary traffic for a front door (white-vision's finding, jarvis's
+	// script — ordinary traffic for a front door (found in review, and
 	// ruling, verified on main).
 	//
 	// The comment above has named this constant since F0 and it did not exist —
@@ -76,7 +76,7 @@ type deadlines struct {
 	// write that drains it, so this figure is a conservative default rather
 	// than a quoted requirement — flagged for a ruling.
 	outputStall time.Duration
-	// frameStall is §7's partial-frame progress budget. It is a DIFFERENT budget
+	// frameStall is matrix §7's partial-frame progress budget. It is a DIFFERENT budget
 	// from idle with a different identity (08006 frontdoor/frame-stall): idle
 	// measures a peer that has not started a message, this measures one that
 	// started and stopped mid-frame.
@@ -108,15 +108,15 @@ type startupOutcome struct {
 	// Negotiated records that a NegotiateProtocolVersion was sent — the
 	// client asked for a 3.x we do not implement and continues at 3.0.
 	Negotiated bool
-	// Notes are §3.1's accept-with-a-note outcomes (application_name
+	// Notes are matrix §3.1's accept-with-a-note outcomes (application_name
 	// truncated; empty options ignored). Audited by the listener; the
 	// truncation additionally earns the peer a NoticeResponse.
 	Notes []paramNote
-	// GUCs are the settings Amendment 8 hands the engine, collected from the
-	// parameters outside §3.1's named set and from `options`. Empty when the
+	// GUCs are the settings the amended rule hands the engine, collected from the
+	// parameters outside matrix §3.1's named set and from `options`. Empty when the
 	// client asked for none.
 	GUCs map[string]string
-	// RefusedParam names the startup parameter that failed §3.1, for the
+	// RefusedParam names the startup parameter that failed matrix §3.1, for the
 	// audit row only. The wire gets the uniform denial: telling a caller
 	// WHICH parameter this server dislikes would map the accepted set for
 	// anyone willing to ask repeatedly.
@@ -131,7 +131,7 @@ var errCancelRequest = errors.New("frontdoor: cancel request")
 //
 // The two CancelRequest exits — S0 plaintext and inside TLS — used to return
 // the bare sentinel, discarding the process id and secret the client
-// presented. Row 2.3's §6.4 processing needs that pair: the whole point of a
+// presented. Row 2.3's matrix §6.4 processing needs that pair: the whole point of a
 // cancel connection is that it names the statement to stop, and a listener
 // that throws the name away can only log that one arrived.
 //
@@ -164,11 +164,11 @@ func asCancelRequest(err error) (processID uint32, secret []byte, ok bool) {
 // returns either the accepted parameters or the reason it was denied.
 //
 // It never reads an authentication response: TLS is established first,
-// without exception (ADR-0075 §4). The ordering is not a preference — a
+// without exception. The ordering is not a preference — a
 // credential read before TLS is a credential an active MITM already has, and
 // this surface's whole credential model assumes the wire is private.
 // runStartup returns a net.Conn rather than a *tls.Conn because in cleartext
-// debugging mode there is no TLS connection to return (ADR-0086 §10). Callers
+// debugging mode there is no TLS connection to return. Callers
 // must decide from the MODE, never from whether this is nil — those were the
 // same question only while TLS was mandatory.
 func runStartup(raw net.Conn, tlsCfg *tls.Config, cleartext bool, now func() time.Time, dl deadlines) (net.Conn, startupOutcome, error) {
@@ -386,7 +386,7 @@ func startupOnStream(stream net.Conn, r io.Reader, dl deadlines, now func() time
 		// request, not a cancel with extras: keeping only the first four
 		// bytes of the secret would let a frame carrying a VALID secret plus
 		// trailing bytes be applied as though it had been the well-formed
-		// request (PR #44 r0, lector's P2), and guessing which four bytes a
+		// request, and guessing which four bytes a
 		// 3.2-shaped client meant is not the server's job on this surface.
 		if len(raw2) != 12 {
 			return stream, startupOutcome{Denied: reasonStartupMalformed}, nil
@@ -435,7 +435,7 @@ func startupOnStream(stream net.Conn, r io.Reader, dl deadlines, now func() time
 		out.Negotiated = true
 	}
 
-	// §3.1: the accepted set is CLOSED, and it is checked AFTER the protocol
+	// matrix §3.1: the accepted set is CLOSED, and it is checked AFTER the protocol
 	// answer is sent. NegotiateProtocolVersion answers a question about the
 	// PROTOCOL — a client that asked for 3.2 is owed "3.0, and here is what I
 	// did not understand" whether or not its parameters then fail policy.
@@ -452,7 +452,7 @@ func startupOnStream(stream net.Conn, r io.Reader, dl deadlines, now func() time
 	// parameters are a map the duplicate is gone — Decode keeps the last value
 	// for a repeated key and nothing downstream can tell that a first one
 	// existed. Everything after this line is map-based and structurally unable
-	// to see it (lector r0 MF2).
+	// to see it.
 	if dup, found := duplicateStartupKey(raw2); found {
 		return stream, startupOutcome{Denied: reasonStartupDuplicateKey, RefusedParam: dup, Negotiated: out.Negotiated}, nil
 	}
@@ -505,12 +505,12 @@ func readStartupPacket(r io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	// ONE implementation of the length rule, and this is not it — the
-	// classifier is (jarvis, PR #37).
+	// classifier is.
 	//
 	// This function used to re-derive the same bound: `int(declared) - 4`
 	// against the same two limits. The verdicts agreed on every value, and
 	// nothing made them keep agreeing — while the ARITHMETIC already
-	// differed. ADR-0075 §8.3 requires declared lengths int32-validated
+	// differed. The design requires declared lengths int32-validated
 	// before use with all accounting in int64, and `int(uint32)` is 32 bits
 	// on a 32-bit platform, where int64(uint32) is not: the two do not even
 	// compute the same intermediate near MaxUint32. Only one of them obeyed
@@ -641,7 +641,7 @@ func isTLSClientHello(head []byte) bool {
 }
 
 // cleartextStartup continues a startup exchange that arrived WITHOUT TLS
-// (ADR-0086 §10).
+// (the cleartext debugging mode).
 //
 // It is reached only when the operator has written out the acknowledgement
 // phrase. The StartupMessage has already been seen by the caller's peek, but

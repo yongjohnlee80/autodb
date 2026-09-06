@@ -1,5 +1,5 @@
 // Package frontdoor implements autodb's PostgreSQL wire-protocol listener
-// (ADR-0075), governed cell-by-cell by docs/front-door/protocol-matrix.md.
+// governed cell-by-cell by docs/front-door/protocol-matrix.md.
 package frontdoor
 
 import (
@@ -123,7 +123,7 @@ func LoadServerTLS(fd config.FrontDoor, now time.Time) (*tls.Config, error) {
 
 	return &tls.Config{
 		Certificates: []tls.Certificate{pair},
-		// TLS 1.2 floor, 1.3 preferred (ADR-0075 §4, rev 2 MF3). The floor is
+		// TLS 1.2 floor, 1.3 preferred. The floor is
 		// a minimum and not a target: everything below it is broken in public.
 		MinVersion: tls.VersionTLS12,
 		// PostgreSQL 17's direct-TLS negotiation advertises ALPN

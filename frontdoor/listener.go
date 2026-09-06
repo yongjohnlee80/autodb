@@ -72,7 +72,7 @@ type Listener struct {
 	liveMu sync.Mutex
 	live   map[net.Conn]struct{}
 
-	// general is the process-wide resident budget's general lane (§1.4). Pending
+	// general is the process-wide resident budget's general lane (matrix §1.4). Pending
 	// serialized output is charged against it, so a thousand connections each
 	// holding their per-connection watermark cannot add up past the process's
 	// budget — a per-connection bound cannot express a process-wide limit.
@@ -96,7 +96,7 @@ type Listener struct {
 
 	// testReaderReady hands a cell the per-session frame reader the moment it
 	// exists, so a cell can MEASURE what reached the Backend rather than infer it
-	// from the frames it received (lector r2). There is no other way in: the
+	// from the frames it received. There is no other way in: the
 	// reader is per-connection and owned by the session goroutine.
 	testReaderReady func(*frameReader)
 
@@ -121,7 +121,7 @@ type Listener struct {
 	// window observed a zero counter, returned, and left Serve free to Add
 	// and launch a handler after the join it had just promised. Nothing
 	// about that is a scheduler race to be tolerated; it is the counter
-	// being used outside its contract, and lector reproduced it
+	// being used outside its contract, and review reproduced it
 	// deterministically by pausing a connection inside the window.
 	//
 	// Every accepted connection now crosses this barrier before anything
@@ -138,7 +138,7 @@ type Listener struct {
 	wg     sync.WaitGroup
 	closed chan struct{}
 	once   sync.Once
-	// cleartextDebug serves without TLS (ADR-0086 §10). It decides the
+	// cleartextDebug serves without TLS. It decides the
 	// startup exchange, which session event is audited, and which credential
 	// class the listener will accept.
 	cleartextDebug bool
@@ -174,7 +174,7 @@ type Options struct {
 	OnLog   func(string)
 	OnEvent func(Event)
 
-	// CleartextDebug serves this listener WITHOUT TLS (ADR-0086 §10).
+	// CleartextDebug serves this listener WITHOUT TLS.
 	//
 	// Carried as its own field rather than inferred from a nil tls.Config,
 	// because those are different facts: absent material is a
@@ -185,7 +185,7 @@ type Options struct {
 	// Authn is the engine. Nil denies every connection, audited.
 	Authn Authenticator
 
-	// Cancels is the engine's cancel registry (§6.4). Nil is a legal,
+	// Cancels is the engine's cancel registry (matrix §6.4). Nil is a legal,
 	// degraded state — the same honesty as a nil Authn: a listener whose
 	// cancel key cannot be honoured emits BackendKeyData but every CancelRequest
 	// lands as fd.cancel_stale, which the event trail states plainly rather
@@ -199,7 +199,7 @@ type Options struct {
 	// every statement with an accurate error rather than pretending.
 	Queries QueryExecutor
 
-	// GeneralLaneBytes is the process-wide general resident budget (§1.4).
+	// GeneralLaneBytes is the process-wide general resident budget (matrix §1.4).
 	// Zero takes the 1 GiB default.
 	GeneralLaneBytes int64
 
@@ -344,7 +344,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	if laneBytes <= 0 {
 		laneBytes = DefaultGeneralLaneBytes
 	}
-	// §1.4's composition rule, applied to the general lane: config may only
+	// matrix §1.4's composition rule, applied to the general lane: config may only
 	// RAISE it. Validated at startup rather than discovered under load, because
 	// the symptom of an under-sized lane is statements refused for backpressure
 	// that nothing is actually wrong with — which reads as a busy server, not as
@@ -369,13 +369,13 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 // resolveCaps applies the defaults and rejects a configuration whose control
 // lane cannot cover the connections the listener would admit.
 //
-// §1.4 makes this binding: the lane may only be RAISED above
+// matrix §1.4 makes this binding: the lane may only be RAISED above
 // max_conns × 64 KiB, and a listener that starts with less has a reservation
 // that fails once the connection count climbs — at which point accept starts
 // failing closed for a reason nobody configured. Refusing at construction is
 // the difference between a misconfiguration and an incident.
 func resolveCaps(opt Options) (caps resolvedCaps, err error) {
-	// A NEGATIVE is a mistake, not a default (lector PR #36 r0 must-fix 3).
+	// A NEGATIVE is a mistake, not a default.
 	//
 	// The doc says zero takes the default, and `<= 0` silently made -5 mean
 	// the same thing. A caller who wrote a negative meant something, got
@@ -532,7 +532,7 @@ func (l *Listener) Serve(ctx context.Context) error {
 // Close stops accepting and WAITS for in-flight connections, including the
 // authenticated ones.
 //
-// The wait is the contract and it was missing (lector PR #38 r0). This
+// The wait is the contract and it was missing. This
 // comment already promised it and even referred to "the WaitGroup below" —
 // but only Serve waited, in a goroutine the daemon starts and discards. So
 // Close returned while authenticated handlers were still inside
@@ -594,7 +594,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		// cancel worked.
 		//
 		// fd.cancel_received names the connection; the applied/stale split
-		// is the AUDIT's vocabulary (§1.3) and stays internal. The session
+		// is the AUDIT's vocabulary (matrix §1.3) and stays internal. The session
 		// that was cancelled learns what happened the ordinary way: its
 		// statement returns, cancelled, on its own connection.
 		closeReason = "cancel-request"
@@ -613,7 +613,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		// length is a malformed request, not a truncation candidate: keeping
 		// only the first four bytes would let a frame carrying a valid
 		// secret plus trailing bytes be applied as though it had been
-		// well-formed (PR #44 r0, lector's P2). Refuse it as stale BEFORE
+		// well-formed. Refuse it as stale BEFORE
 		// the conversion, so it never reaches the registry — the same
 		// silent close as every other miss, because a malformed cancel is
 		// still a cancel that presented no credential.
@@ -682,7 +682,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 	// careful not to have learned anything from.
 	outcome := authOutcome{Denied: out.Denied}
 	if outcome.Denied == "" {
-		// §3.1's accept-with-a-note outcomes are audited at ACCEPTANCE, before
+		// matrix §3.1's accept-with-a-note outcomes are audited at ACCEPTANCE, before
 		// the credential exchange: the parameter handling happened whether or
 		// not the peer then authenticates, and the audit should say so.
 		for _, n := range out.Notes {
@@ -694,7 +694,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		// could be outrun by a pipelining client and the message it was meant
 		// to guard had already been consumed.
 		//
-		// Neither buffer is charged. §8.4's third term — "the bufio.Reader, the
+		// Neither buffer is charged. matrix §8.4's third term — "the bufio.Reader, the
 		// TLS record buffers, the pgproto3 chunk reader" — is bounded by
 		// MaxFrontendConns rather than charged per connection, because unlike
 		// segment input it cannot grow with what a peer sends (admission.go's
@@ -877,7 +877,7 @@ func (l *Listener) defaultSession(ctx context.Context, conn net.Conn, be *pgprot
 	}
 }
 
-// paramNoteEventKind maps a §3.1 note to its audit event kind: one kind per
+// paramNoteEventKind maps a matrix §3.1 note to its audit event kind: one kind per
 // note so an operator can grep for either without parsing Reason.
 func paramNoteEventKind(n paramNote) string {
 	switch n.Kind {

@@ -52,7 +52,7 @@ func TestDeadlines_DefaultsMatchTheMatrix(t *testing.T) {
 	want := deadlines{tls: 10 * time.Second, startup: 10 * time.Second, auth: 10 * time.Second,
 		idle: 30 * time.Minute, outputStall: 30 * time.Second, frameStall: 30 * time.Second}
 	if got != want {
-		t.Errorf("defaults = %+v, want %+v (§9: TLS/startup/auth 10s; between-messages idle 30m)", got, want)
+		t.Errorf("defaults = %+v, want %+v (matrix §9: TLS/startup/auth 10s; between-messages idle 30m)", got, want)
 	}
 }
 
@@ -281,7 +281,7 @@ func TestSession_AQueryBeforeF1IsRefusedAccurately(t *testing.T) {
 			"feature that is not built rather than a permission that was refused", e.Code)
 	}
 	if e.Detail != "frontdoor/no-query-executor" {
-		t.Errorf("detail = %q; §1.2 puts the front door's own rule id here", e.Detail)
+		t.Errorf("detail = %q; matrix §1.2 puts the front door's own rule id here", e.Detail)
 	}
 }
 
@@ -290,7 +290,7 @@ func TestSession_AQueryBeforeF1IsRefusedAccurately(t *testing.T) {
 // This proves release-on-teardown, of which Terminate is one cause. It does NOT
 // observe the wire after Terminate — it never Receives — so it cannot see whether
 // the server closed cleanly; that is 4:Terminate#clean-close's job, in its own
-// cell. (Lector PR #45 r0 MF1: the two were once cited together as one row, and a
+// cell. (Review found the two once cited together as one row, and a
 // server emitting 0A000 before closing left this cell green.)
 func TestSession_TerminateReleasesTheReservation(t *testing.T) {
 	t.Parallel()
@@ -368,7 +368,7 @@ func TestSession_TerminateClosesTheWireWithoutAnErrorFrame(t *testing.T) {
 	// The deadline is a HANG GUARD only. Its expiry is a failure, not a pass: a
 	// server that ignores Terminate and leaves the session open also produces a
 	// non-nil Receive error here, and the first version of this cell accepted
-	// that as a clean close (lector PR #45 r1 MF3 — `return nil` → `continue`
+	// that as a clean close (found in review — `return nil` → `continue`
 	// in defaultSession stayed green in 5.01s).
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	msg, err := fe.Receive()

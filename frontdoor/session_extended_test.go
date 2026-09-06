@@ -16,7 +16,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/exec"
 )
 
-// THE EXTENDED SEGMENT'S STALL BUDGET (jarvis's ruling, 2026-09-03).
+// THE EXTENDED SEGMENT'S STALL BUDGET (ruled 2026-09-03).
 //
 // A client that queued an Execute, holds pending output, and has neither Synced
 // nor Flushed is not idle — it is one that will not collect what it asked for.
@@ -47,7 +47,7 @@ func execSegment(t *testing.T, fe *pgproto3.Frontend) {
 // held goes back, and the audit says SEGMENT-STALL rather than session-deadline.
 //
 // The lane assertion waits on inUse() reaching zero, never on a frame the client
-// received: §5 item 3 measured 22 of 300 statements still holding their working
+// received: matrix §5 item 3 measured 22 of 300 statements still holding their working
 // set at the moment the client had already been told the statement finished, so
 // readiness is not a proxy for an idle lane.
 func TestExtStall_SilentSegmentIsTornDownAndReleasesTheLane(t *testing.T) {
@@ -270,7 +270,7 @@ func TestExtStall_AFailedFlushDoesNotClearTheStallClock(t *testing.T) {
 	})
 }
 
-// r0 MF3 — a front-door-LOCAL refusal must start discard-through-Sync.
+// A front-door-LOCAL refusal must start discard-through-Sync.
 //
 // PostgreSQL ignores every frame but Sync and Terminate after an error in a
 // segment, but the target only starts that when IT produced the error. A Parse
@@ -341,7 +341,7 @@ func TestExtDiscard_LocalExecuteRefusalDiscardsUntilSync(t *testing.T) {
 	}
 }
 
-// r1 MF4, loop level — a simple Query pipelined behind a local refusal must be
+// At loop level, a simple Query pipelined behind a local refusal must be
 // discarded. The live cell proves the absent ROW; this one proves the engine is
 // never asked, which is the same rule one layer up and costs no database.
 func TestExtDiscard_SimpleQueryDoesNotEscapeTheDiscard(t *testing.T) {
@@ -385,7 +385,7 @@ func TestExtDiscard_SimpleQueryDoesNotEscapeTheDiscard(t *testing.T) {
 	}
 }
 
-// §7 :386 — a segment that accumulates past its caps before Sync is refused,
+// matrix §7 :386 — a segment that accumulates past its caps before Sync is refused,
 // discards through Sync, and the connection stays.
 //
 // The counter is what this asserts, not the 96 MiB byte cap: driving 96 MiB
@@ -443,7 +443,7 @@ func TestExtCaps_ASegmentPastItsMessageCapIsRefusedAndDiscardsThroughSync(t *tes
 
 // THE DISCRIMINATOR: is the re-admission defect FIXED, or merely UNREACHABLE?
 //
-// The shape and the reasoning are mine; the driver is white-vision's, and the
+// The shape and the reasoning are mine; the driver came from review, and the
 // defect is hers to have found. When the delivery boundary landed the existing
 // discard-through-Sync cell went green — and a green integration cell is NOT
 // evidence that re-admission is impossible: a boundary that keeps frames out of
@@ -519,7 +519,7 @@ func TestAdmission_ADiscardingSegmentIsNotReAdmittedFrameByFrame(t *testing.T) {
 // Every visible behaviour is identical, because the difference is not a
 // behaviour — it is what the refusal COST.
 //
-// white-vision flagged the same line from the other side when she found her fix
+// review flagged the same line from the other side, from its own fix
 // could not carry the skip on main. Between the two, the half neither of us
 // could see was the half nothing observed.
 //
@@ -587,7 +587,7 @@ func TestAdmission_FramesDiscardedBehindABreachAreNotDecoded(t *testing.T) {
 // Driving admitSegmentFrame directly is independent of what any reader delivers,
 // so it separates "the component is correct" from "the component is currently
 // unreachable" — the distinction the cell above cannot make on its own once a
-// delivery boundary sits upstream of it. Both are white-vision's, written
+// delivery boundary sits upstream of it. Both came from review, written
 // against a different repair of the same defect before this one existed, which
 // is the one thing a cell written alongside a fix cannot be.
 func TestAdmission_AnAlreadyDiscardingSegmentIsNotAdmittedAgain(t *testing.T) {
@@ -723,13 +723,13 @@ func TestExtCaps_SyncResetsTheSegmentCounters(t *testing.T) {
 	}
 }
 
-// §7 :386's BYTE half, and the property that makes a byte cap mean anything:
+// matrix §7 :386's BYTE half, and the property that makes a byte cap mean anything:
 // THE CHARGE IS NEVER LESS THAN WHAT ARRIVED.
 //
 // The first version of this cap reconstructed a frame's size from the DECODED
 // message and under-charged a NULL-parameter Bind by 3x on the wire and ~12.5x
 // on what it made the front door hold — 16,389 charged against 49,165 sent
-// (lector C r1 MF2, measured). A cap on an under-estimate does not bound what it
+// (measured). A cap on an under-estimate does not bound what it
 // claims to, and it fails in the direction that admits. The charge is now the
 // DECLARED wire length, taken from frameReader before the body is decoded, plus
 // the decoded delta.
@@ -808,7 +808,7 @@ func TestExtCaps_TheByteChargeIsNeverLessThanTheWireLength(t *testing.T) {
 	if charged <= capBytes {
 		t.Fatalf("charged %d against a %d-byte cap — the refusal fired without the charge exceeding it", charged, capBytes)
 	}
-	// The upper bound allows §1.5's STAGE TWO — the decoded pre-allocation, which
+	// The upper bound allows matrix §1.5's STAGE TWO — the decoded pre-allocation, which
 	// is a real charge and is per frame — but not an unbounded one: an
 	// over-charge that outgrew the wire would refuse correct clients well before
 	// the documented cap.
@@ -878,7 +878,7 @@ func rawSync() []byte {
 	return append([]byte{'S'}, 0, 0, 0, 4)
 }
 
-// lector C r2 MF2 — ONE socket write carrying [Describe, Sync, Describe].
+// ONE socket write carrying [Describe, Sync, Describe].
 //
 // frameReader's scan frames all three before Receive returns the first, so a
 // design that charged a live segment as each was framed put the THIRD frame's
@@ -949,7 +949,7 @@ func TestExtCaps_ReadAheadInOneWriteChargesEachFrameToItsOwnSegment(t *testing.T
 	t.Fatal("no refusal for the oversized Describe in its own segment")
 }
 
-// lector C r2 MF3 — the queue must survive the AUTH boundary.
+// The queue must survive the AUTH boundary.
 //
 // Auth shares this reader and its Backend. A post-auth frame can arrive in the
 // same socket write as the password and be framed while auth is still running,
@@ -1003,7 +1003,7 @@ func TestExtCaps_AFrameReadAheadDuringAuthIsStillCharged(t *testing.T) {
 		"its header was framed while auth held the reader, and nothing charged it (cap %d)", capBytes)
 }
 
-// §1.5 STAGE TWO decides on its own, and this is the only cell where it does.
+// matrix §1.5 STAGE TWO decides on its own, and this is the only cell where it does.
 //
 // A frame can be comfortably under the cap on the WIRE and still make the front
 // door hold far more than it sent: a NULL parameter is four bytes of length word

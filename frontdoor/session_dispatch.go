@@ -24,7 +24,7 @@ import (
 // end of the connection or it is not, and "discard the rest of the segment"
 // deliberately does NOT appear — post-error discard-through-Sync is matrix row
 // 4:discard, which is F2's, and a temporary one built here would be a second
-// state machine F2 has to delete (zen's objection, agreed by jarvis).
+// state machine F2 has to delete (an objection raised and agreed in review).
 type frameAfter int
 
 const (

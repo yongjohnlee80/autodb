@@ -13,7 +13,7 @@ import (
 )
 
 // THE EXTENDED-PROTOCOL CLIENT SHAPES (matrix §10's pgx-class suite), built to
-// white-vision's F4 fixture spec.
+// The F4 fixture spec.
 //
 // Four matrix rows were AWAITING for one reason — "no live witness drives this
 // frame end to end" — and no amount of engine-level celling substitutes for a
@@ -35,7 +35,7 @@ import (
 func readUntil(t *testing.T, conn *tls.Conn, fe *pgproto3.Frontend,
 	stop func(pgproto3.BackendMessage) bool) []pgproto3.BackendMessage {
 	t.Helper()
-	// BOUNDED ON THE SOCKET (r0 MF1). A wall-clock check at the top of the loop
+	// BOUNDED ON THE SOCKET. A wall-clock check at the top of the loop
 	// cannot fire while fe.Receive() is blocked in netFD.Read — the loop never
 	// gets to look. This is the THIRD time tonight I wrote that shape (#66's
 	// readiness drain, #65's two-frame cell, and here); the fix did not transfer
@@ -161,7 +161,7 @@ func TestPGExtended_AStatementWithNoResultColumnsDescribesAsNoData(t *testing.T)
 // included", and an fd.stmt_attempt per Execute. A resumption riding the first
 // Execute”'s authority would pass this cell and everything else written today —
 // the existing live proof revokes a grant between Parse and Execute, which is
-// not a re-execution. white-vision named the discriminating shape: revoke
+// not a re-execution. Review named the discriminating shape: revoke
 // BETWEEN the first Execute and the resumption. Neither half is observable from
 // here — attempt rows are engine-side audit, not listener events, so a cell
 // would have to open its own meta-store handle; awkward and the wrong home
@@ -324,7 +324,7 @@ func TestPGExtended_AStandaloneFlushDelivers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// PREMISE — SILENCE BEFORE THE FLUSH. §5's fidelity rule: an Execute's output
+	// PREMISE — SILENCE BEFORE THE FLUSH. matrix §5's fidelity rule: an Execute's output
 	// is not sent until the client asks. Without this the cell cannot attribute
 	// the delivery below to the Flush at all.
 	//

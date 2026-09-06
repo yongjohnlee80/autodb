@@ -13,7 +13,7 @@ import (
 // Execute, "portal
 // re-executions included".
 //
-// THE DISCRIMINATING SHAPE, named by white-vision and unreachable until now.
+// THE DISCRIMINATING SHAPE, named in review and unreachable until now.
 // The existing live proof revokes a grant between PARSE and EXECUTE, which is
 // not a re-execution: a resumption riding the FIRST Execute's authority would
 // pass it, and would pass every other cell written today. The only shape that

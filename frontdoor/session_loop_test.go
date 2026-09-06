@@ -333,7 +333,7 @@ func TestLoop_ReadyForQueryCarriesTheEnginesStatus(t *testing.T) {
 	}
 }
 
-// A GATE refusal is the front door's own answer: a §8a ErrorResponse with the
+// A GATE refusal is the front door's own answer: a matrix §8a ErrorResponse with the
 // rule id in DETAIL, and then a readiness byte, because the refusal did not end
 // the session. The readiness comes from the engine — a refusal inside a
 // transaction leaves that transaction open.
@@ -556,7 +556,7 @@ func TestLoop_UnknownMessageTypeIsFatalAndNotSkipped(t *testing.T) {
 // A WHOLE SEGMENT IN ONE FLUSH — Parse, Bind, Execute, Sync — which is how every
 // extended client sends one.
 //
-// This is F2's first witness and it is RED until ultron-prime's pipelining fix
+// This is F2's first witness and it is RED until the pipelining fix
 // lands: the loop cannot currently read past the first frame of a pipelined
 // write. It is committed red deliberately rather than written to send one frame
 // at a time, because a cell that avoids pipelining would pass and mean nothing —
@@ -593,7 +593,7 @@ func TestLoop_ExtendedSegmentReachesTheEngineAndSyncEndsIt(t *testing.T) {
 		t.Fatalf("no readiness for the segment (got %q); the engine saw %v.\n"+
 			"If it saw only the FIRST frame this is the PIPELINING defect, not F2 routing: pgproto3's Backend "+
 			"wraps the loop's bufio.Reader in its own read-ahead chunkReader, so frames after the first sit "+
-			"inside pgproto3 and br.Peek(1) blocks on an empty reader. Owner: ultron-prime, own PR ahead of #57.",
+			"inside pgproto3 and br.Peek(1) blocks on an empty reader. Owned by a separate change.",
 			got, q.calls())
 	}
 	want := []string{"Parse:s:SELECT 1", "Bind:p:s", "Execute:p", "Sync"}
@@ -610,7 +610,7 @@ func TestLoop_ExtendedSegmentReachesTheEngineAndSyncEndsIt(t *testing.T) {
 
 // Witness for row 5:CopyInResponse.
 //
-// A §5 CANARY arriving is a CLASSIFIER BYPASS, and the audit must say so.
+// A matrix §5 CANARY arriving is a CLASSIFIER BYPASS, and the audit must say so.
 //
 // This cell previously asserted ruleUnframeableMessage — the identity for a
 // message the front door has no case for — and passing was what made the
@@ -618,8 +618,8 @@ func TestLoop_ExtendedSegmentReachesTheEngineAndSyncEndsIt(t *testing.T) {
 // is our mapper being incomplete, while a canary means something reached the
 // target that classification was supposed to refuse. Recording the second as the
 // first sends an operator to debug the front door while the security-relevant
-// event goes unnamed. Wire identity stays the catalogue's §7 violation id; the
-// AUDIT carries the defect (§1.2).
+// event goes unnamed. Wire identity stays the catalogue's matrix §7 violation id; the
+// AUDIT carries the defect (matrix §1.2).
 func TestLoop_ACanaryIsAuditedAsAClassifierBypassAndCloses(t *testing.T) {
 	t.Parallel()
 	q := okQueries()
@@ -908,7 +908,7 @@ func TestLoop_OrdinaryRefusalStillGetsReadiness(t *testing.T) {
 	}
 }
 
-// MF1 (Vision, PR #52 first pass). A refusal that KEEPS the session still ends a
+// A refusal that KEEPS the session still ends a
 // protocol cycle, and every cycle ends with readiness.
 //
 // The committed FunctionCall cell could not see this: a raw pgproto3.Frontend
@@ -951,7 +951,7 @@ func TestLoop_SurvivingRefusalEndsTheCycleWithReadiness(t *testing.T) {
 	}
 }
 
-// MF3 (Vision). Rows reach the client WHILE the statement is still streaming.
+// Rows reach the client WHILE the statement is still streaming.
 //
 // pgproto3's Send only appends to the write buffer, so a per-row Send with one
 // Flush at the end holds the whole result in memory — against a producer that
@@ -1040,7 +1040,7 @@ func deadlineLoopListener(t *testing.T, dl deadlines, q QueryExecutor) (func() [
 	return events, addr
 }
 
-// MF2 (Vision). The idle budget must bound IDLENESS, not session lifetime.
+// The idle budget must bound IDLENESS, not session lifetime.
 //
 // net.Conn deadlines are ABSOLUTE, so arming one at session open and never
 // refreshing it turns "30 minutes idle" into a 30-minute cap on the session —
@@ -1076,7 +1076,7 @@ func TestLoop_ABusySessionOutlivesTheIdleBudget(t *testing.T) {
 	}
 }
 
-// MF4 (Vision). When the FRONT DOOR's own deadline fires, the client is told so
+// When the FRONT DOOR's own deadline fires, the client is told so
 // and the audit records the front door's cause — not "the peer closed".
 //
 // A false operational record is worse than a missing one, because someone will
@@ -1093,7 +1093,7 @@ func TestLoop_IdleExpiryIsAuditedAsTheFrontDoorsOwnDeadline(t *testing.T) {
 	// Idle past the budget and read what the server says on its way out.
 	msg, err := fe.Receive()
 	if err != nil {
-		t.Fatalf("the front door closed the idle session without a frame: %v — §7 gives this "+
+		t.Fatalf("the front door closed the idle session without a frame: %v — matrix §7 gives this "+
 			"case a FATAL 57P05 under gate/session-deadline", err)
 	}
 	e, ok := msg.(*pgproto3.ErrorResponse)
@@ -1123,7 +1123,7 @@ func TestLoop_IdleExpiryIsAuditedAsTheFrontDoorsOwnDeadline(t *testing.T) {
 	}
 }
 
-// Lector's refinement on MF2. Re-arming the idle budget per message is not
+// A review refinement. Re-arming the idle budget per message is not
 // enough: the budget must not RUN during the statement either.
 //
 // The two are different bugs with the same symptom. A never-refreshed deadline
@@ -1261,7 +1261,7 @@ func TestLoop_AWriteFailureIsNotAuditedAsAFramingDefect(t *testing.T) {
 	}
 }
 
-// MF10 (lector). A peer that begins a message and stops is NOT idle, and §7
+// A peer that begins a message and stops is NOT idle, and matrix §7
 // gives that its own budget and its own identity. Reporting a frame stall as
 // 57P05 tells an operator the client went quiet when it actually went slow —
 // and the two have different causes and different fixes.
@@ -1308,7 +1308,7 @@ func TestLoop_APartialFrameStallsUnderItsOwnBudgetAndIdentity(t *testing.T) {
 	}
 }
 
-// MF8 (lector). A burst of large NOTICES must reach the watermark. The estimate
+// A burst of large NOTICES must reach the watermark. The estimate
 // ignored Notice and error payloads entirely, so a producer emitting megabytes
 // of them crossed no watermark and streamed nothing — the buffer grew with
 // output the accounting could not see.
@@ -1352,7 +1352,7 @@ func TestLoop_NoticePayloadsCountTowardTheOutputWatermark(t *testing.T) {
 // The second frame of a pipelined pair must REACH THE ENGINE, not sit in
 // pgproto3's buffer unseen.
 //
-// Ultron's cell (PR #59) proves this property with F1 vocabulary, where the
+// A sibling cell proves this property with F1 vocabulary, where the
 // second frame is a Parse the decision table REFUSES. On this branch F2 routes
 // Parse to the engine instead, so the same property needs the same shape with
 // the new destination: a Query answered normally, and a Parse behind it in the
@@ -1408,7 +1408,7 @@ func readUntilReadySoft(t *testing.T, fe *pgproto3.Frontend) byte {
 	}
 }
 
-// MF1 (lector, PR #59 r0). The reader is shared with auth, and auth's Backend
+// The reader is shared with auth, and auth's Backend
 // reads ahead exactly as the session's does.
 //
 // A client that writes its PasswordMessage and the START of a Query in ONE TLS
@@ -1606,7 +1606,7 @@ func TestLoop_EveryEmitStoppedArmHasItsOwnStory(t *testing.T) {
 				t.Fatalf("audit must record effects=%s; events=%v", arm.wantOut, events())
 			}
 
-			// AND THE READINESS BYTE MUST AGREE WITH THE STORY (r0 MF1). Reading
+			// AND THE READINESS BYTE MUST AGREE WITH THE STORY. Reading
 			// only the ErrorResponse let this table PASS while telling the client
 			// its effects were PENDING and then handing it readiness `I` in the
 			// same cycle — the fixture supplies stopped.TxStatus=T while the
@@ -1660,7 +1660,7 @@ func drainToReady(t *testing.T, conn net.Conn, fe *pgproto3.Frontend) []pgproto3
 }
 
 // An engine report whose transaction status is not a status leaves the session's
-// phase UNKNOWN, and §6.3 withholds readiness for exactly that. It must not be
+// phase UNKNOWN, and matrix §6.3 withholds readiness for exactly that. It must not be
 // repaired from a later snapshot: that is the split this PR removed, returning
 // in the one case where the engine's own answer is already suspect.
 func TestLoop_AnInvalidEngineReportWithholdsReadiness(t *testing.T) {
@@ -1686,13 +1686,13 @@ func TestLoop_AnInvalidEngineReportWithholdsReadiness(t *testing.T) {
 		msg, err := fe.Receive()
 		if err != nil {
 			// A CLOSE AND A TIMEOUT ARE DIFFERENT OUTCOMES, and accepting both
-			// as success is what the previous version did. §6.3 says the session
+			// as success is what the previous version did. matrix §6.3 says the session
 			// ENDS without readiness; a session that neither sends readiness nor
 			// closes is a hang, which is worse than the defect this cell guards
 			// — and it would have passed here.
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
-				t.Fatalf("no readiness and no close within the budget: the session HUNG. §6.3 "+
+				t.Fatalf("no readiness and no close within the budget: the session HUNG. matrix §6.3 "+
 					"withholds the byte by ENDING the session, not by going quiet (%v)", err)
 			}
 			return // the connection ended without readiness, which is the rule

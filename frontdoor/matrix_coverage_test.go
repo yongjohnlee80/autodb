@@ -17,7 +17,7 @@ import (
 // audit somebody remembers to run.
 //
 // docs/front-door/protocol-matrix.md is the front door's normative spec, and
-// ADR-0075 makes F4 responsible for a "protocol conformance suite". A suite is
+// F4 is responsible for a "protocol conformance suite". A suite is
 // only conformance if its RELATIONSHIP TO THE SPEC is checked: a matrix row
 // nobody tests is indistinguishable, from inside the test output, from one
 // nobody wrote yet. This turns that question into a failing test.
@@ -44,16 +44,16 @@ import (
 // fails the phantom check loudly, exactly as a renumbered §2 row does, rather
 // than leaving a hand-maintained alias table to drift silently.
 //
-// CLAIMS (PR #40 r0 MF1): a matrix row that contains SEPARATELY testable
+// CLAIMS: a matrix row that contains SEPARATELY testable
 // guarantees is tracked per claim in claimTriage, keyed "<row>#<claim>" and
 // cited as "row 3.1:options#empty-audit". A covered claim's evidence is
 // machine-checked by anchors — literal fragments of the proving cell — so
 // deleting the case reddens the gate even if the citation comment survives.
 // A parent row is DERIVED from its claims (all covered ⇒ covered, else
 // awaiting) and the gate checks the hand-written parent state agrees.
-// The generated key set is GLOBALLY unique (r0 MF2), and prose units are
+// The generated key set is GLOBALLY unique, and prose units are
 // owned by their section — the anchor proves the block stayed where the
-// registry says it lives (r0 MF3).
+// registry says it lives.
 
 // rowState is the triage every matrix row must carry. A row in neither state
 // fails the gate: that is a row somebody added to the spec without deciding
@@ -99,12 +99,12 @@ var matrixTriage = map[string]struct {
 	state  rowState
 	reason string // for `uncited`, this MUST be the test function's name
 }{
-	// ---- §2 Startup & authentication sequence ----
+	// ---- matrix §2 Startup & authentication sequence ----
 	"2.1":  {covered, "TestStartup_PlaintextIsRefused"},
 	"2.1a": {covered, "direct-TLS ClientHello refusal"},
 	"2.1b": {covered, "TestLoadServerTLS_RefusesUnusableMaterial + admission_test's handshake-grinding cell"},
 	"2.2":  {covered, "TestStartup_GSSEncIsRefusedWithN"},
-	"2.3":  {covered, "TestCancel_TheWireKeyIsTheRegisteredKey + TestCancel_AppliedPairIsAuditedAndClosed + TestCancel_StalePairIsASilentNoOp + TestCancel_TheKeyDiesWithItsSession — the listener half: issuance at open, §6.4 processing of the presented pair, applied/stale audit, revocation at close"},
+	"2.3":  {covered, "TestCancel_TheWireKeyIsTheRegisteredKey + TestCancel_AppliedPairIsAuditedAndClosed + TestCancel_StalePairIsASilentNoOp + TestCancel_TheKeyDiesWithItsSession — the listener half: issuance at open, matrix §6.4 processing of the presented pair, applied/stale audit, revocation at close"},
 	"2.4":  {covered, "TestStartup_RefusedParameterIsAuditedButNotDisclosed"},
 	"2.5":  {covered, "TestStartup_VersionNegotiation"},
 	"2.5a": {covered, "TestStartup_VersionNegotiation, unsupported major"},
@@ -113,7 +113,7 @@ var matrixTriage = map[string]struct {
 	"2.8":  {covered, "type-p frames that are not a PasswordMessage — F0e"},
 	"2.9":  {covered, "AuthenticationOk / ParameterStatus / BackendKeyData / ReadyForQuery — F0e"},
 
-	// ---- §3.1 Accepted StartupMessage parameters ----
+	// ---- matrix §3.1 Accepted StartupMessage parameters ----
 	// Rows whose guarantees are SEPARATELY testable are marked partial by
 	// carrying claims in claimTriage below. The rule is mechanical: a row
 	// with claims is covered only when every claim is covered, otherwise it
@@ -123,7 +123,7 @@ var matrixTriage = map[string]struct {
 	// below keeps those citations and anchors inside the named test cells.
 	"3.1:user":                {covered, "claims below prove requiredness and the PAT-owner cross-check"},
 	"3.1:database":            {covered, "claims below prove requiredness and the grant-on-target check"},
-	"3.1:application_name":    {covered, "derived from its claims — #accepted, #truncate-notice-256 and #session-audit are all covered as of #58's seam and its consumer wiring. The parent was held awaiting by #session-audit alone (lector PR #46 r0 MF1); that claim is now witnessed on both sides of the seam, so the derivation promotes it rather than any hand edit here"},
+	"3.1:application_name":    {covered, "derived from its claims — #accepted, #truncate-notice-256 and #session-audit are all covered as of #58's seam and its consumer wiring. The parent was held awaiting by #session-audit alone; that claim is now witnessed on both sides of the seam, so the derivation promotes it rather than any hand edit here"},
 	"3.1:client_encoding":     {covered, "derived from its claims — the startup UTF8-only gate (#utf8-only) and the lease pin at acquisition (#lease-utf8-pin), the second promoted once a cell observed client_encoding itself refusing rather than server_encoding standing in for it"},
 	"3.1:options":             {covered, "derived from its claims — options unpacking and empty-accepted (TestStartup_ParameterPolicy, TestStartupGUCs_OptionsUnpackIntoTheSameMap, TestStartupGUCs_AnUnreadableOptionsStringIsRefused), empty-options audit (TestStartup_EmptyOptionsIsAuditedAsIgnored)"},
 	"3.1:replication":         {covered, "single claim below — refused, every tested value"},
@@ -131,11 +131,11 @@ var matrixTriage = map[string]struct {
 	"3.1:any-other-parameter": {covered, "TestStartup_ParameterPolicy + TestStartupGUCs_ASettingReachesTheEngineVerbatim (collected verbatim), TestStartupGUCs_TheCapCountsSettingsNotParameters (the 64 cap, counted after options unpacking), TestPGStartupGUCs_AnAdmittedSettingReachesTheBackend (it actually takes effect on the pinned backend — the half no wire cell can see), TestPGStartupGUCs_ADenylistedSettingIsRefused (the same denylist a SET meets)"},
 	"3.1:carve-out":           {covered, "TestStartupGUCs_TheNamedSetIsNeverCollected (client_encoding and application_name never become settings) + TestPGStartupGUCs_ThePacketPsqlSendsConnects (the consequence, live: the packet every ordinary client sends still opens a session) + TestPGStartupGUCs_OptionsIsNotAWayAroundTheEncodingPin (nor through options)"},
 
-	// ---- §3.2 / §3.3 prose units ----
+	// ---- matrix §3.2 / §3.3 prose units ----
 	// PROMOTED, and on a narrower reading than the old reason took. Cells
 	// already existed on BOTH sides — TestPGStartupGUCs_ADenylistedSettingIsRefused
 	// at startup, TestWireSetReset_EditorDenylist for SET/RESET in core/exec —
-	// and neither witnessed §3.2's load-bearing sentence, because that sentence
+	// and neither witnessed matrix §3.2's load-bearing sentence, because that sentence
 	// is not about either door: it says there is ONE admission implementation,
 	// so a setting refused mid-session cannot be had by asking at connect
 	// instead. Two gates written from the same list satisfy both existing cells
@@ -159,7 +159,7 @@ var matrixTriage = map[string]struct {
 	"4:Unknown-message-type-byte": {covered, "TestLoop_UnknownMessageTypeIsFatalAndNotSkipped — an undefined type byte is a fatal 08P01 and the stream closes; the cell sends a valid Query immediately after and requires it is never answered, which is what proves not-skipped-and-continued"},
 	"4:discard":                   {covered, "TestPGExtended_AMidSegmentErrorDiscardsThroughSync - after a mid-segment ErrorResponse every further frame is discarded (a Parse produces no second ParseComplete, a Query produces no rows), Sync ends the discard, and the session is usable afterwards. Uses a VOLATILE divisor so the error is raised at Execute: SELECT 1/0 folds at plan time and would have driven a Bind-time error instead, which the cell asserts against by requiring BindComplete"},
 
-	// ---- §4a Object-release rules ----
+	// ---- matrix §4a Object-release rules ----
 	"4a:Close-S-name":      {covered, "the Close-S cascade destroys the statement and its portals (unit-celled, mutation-proven) AND releases their retained charges - TestRetained_EveryReleasePointReturnsItsCharge/Close-S_cascade, with the drop as the single owner of the charge; the mutation that lets a drop skip a still-pending charge reddens it"},
 	"4a:Close-P-name":      {covered, "the portal dies and its charge goes back - TestRetained_EveryReleasePointReturnsItsCharge/Close-P, same owner rule and same mutation"},
 	"4a:Parse":             {covered, "unnamed-statement replacement destroys the old object and RELEASES its charge - TestRetained_ReplacingAnUnnamedObjectReleasesTheOldCharge asserts the account holds only the replacement's charge afterwards, and TestRetained_ARefusedUnnamedReplacementLeavesTheOldStatementUsable proves a refused replacement destroys nothing"},
@@ -172,19 +172,19 @@ var matrixTriage = map[string]struct {
 	// ---- §5 Backend emission matrix ----
 	"5:RowDescription":                  {covered, "TestPGLoop_RowDescriptionCarriesTheServersTypes — the OIDs are the SERVER's (23/25/16), the values are its own rendering and the command tag is verbatim; a decode-and-re-encode producer would report text OID 25"},
 	"5:ErrorResponse-target":            {covered, "TestPGLoop_TargetErrorIsVerbatimIncludingPosition — Position, File and Routine all survive (no front door can compute Position) and the DETAIL is asserted NOT to be a front-door rule id, which is what separates a forwarded error from a synthesized one"},
-	"5:ErrorResponse-gate-front-door":   {covered, "TestLoop_GateRefusalIsFramedWithTheGateIdentityThenReadiness — §8a identity with the rule id in DETAIL, never the uniform pre-auth code, and the readiness that follows carries the ENGINE's state so a refusal inside a transaction does not read as idle"},
+	"5:ErrorResponse-gate-front-door":   {covered, "TestLoop_GateRefusalIsFramedWithTheGateIdentityThenReadiness — matrix §8a identity with the rule id in DETAIL, never the uniform pre-auth code, and the readiness that follows carries the ENGINE's state so a refusal inside a transaction does not read as idle"},
 	"5:ReadyForQuery":                   {covered, "TestLoop_ReadyForQueryCarriesTheEnginesStatus + TestLoop_InvalidStatusByteIsNeverForwarded — synthesized from the ExecSession status across all three bytes, and a status outside the protocol's three is refused rather than put on the wire"},
 	"5:AuthenticationCleartextPassword": {covered, "TestAuth_OffersCleartextAndNothingElse + TestAuth_SuccessSequence + TestStartup_VersionNegotiation — prompt, success group, and protocol negotiation"},
 	"5:CopyInResponse":                  {covered, "TestLoop_ImpossibleBackendMessageIsAFrontDoorDefectAndCloses — a never-emitted backend message arriving from the target is a front-door defect: fatal, closed, and audited under its own cause rather than skipped"},
 }
 
-// claimTriage is the claim-level obligation registry (lector PR #40 r0 MF1):
+// claimTriage is the claim-level obligation registry:
 // a matrix row that contains SEPARATELY testable guarantees is tracked per
 // claim, keyed "<row>#<claim>" and cited in tests as "row 3.1:options#empty-audit".
 //
 // A covered claim carries a WITNESS — the test function that proves it —
 // and ANCHORS — literal fragments of the proving cell. The evidence is
-// machine-checked with CELL ownership (r2 MF1): the citation AND every
+// machine-checked with CELL ownership: the citation AND every
 // anchor must appear inside the witness function's span, located by Go AST
 // positions (doc comment through closing brace), not by regex function
 // guessing. Deleting the proving case reddens the gate even if the citation
@@ -192,8 +192,8 @@ var matrixTriage = map[string]struct {
 // comment — same file or not — is not evidence (r1/r2, mutations M19/M21).
 // An awaiting claim is a missing obligation with the phase that owes it;
 // claims carry exactly two states, and the registry refuses anything else
-// (r2 MF2), including blank anchors, which match everything and therefore
-// prove nothing (r2 MF3).
+// including blank anchors, which match everything and therefore
+// prove nothing.
 //
 // Parent rows are DERIVED from their claims: all-covered ⇒ the parent is
 // covered, anything awaiting ⇒ the parent is awaiting. matrixTriage must
@@ -227,7 +227,7 @@ var claimTriage = map[string]struct {
 		[]string{"fd.param_truncated", "*pgproto3.NoticeResponse", "applicationNameMaxBytes"}},
 	// The THIRD guarantee in row 199 — "recorded on session + every audit row" — had
 	// no claim, so the derivation could not see it and the parent was falsely
-	// promoted (lector PR #46 r0 MF1). A missing claim is invisible to the gate;
+	// promoted. A missing claim is invisible to the gate;
 	// only a present-and-awaiting one keeps the parent honest.
 	"3.1:application_name#session-audit": {covered, "TestLoop_TheAcceptedApplicationNameReachesTheEngine",
 		"the front door's half — the ACCEPTED label reaches the ENGINE, not merely the echo. The distinction is the claim: an echo synthesized here from the startup params would satisfy a wire-only cell while the session recorded nothing and every audit row said app \"\". The engine's half (recorded on the session and on every audit line) is core/exec's TestWireOpen_ApplicationNameIsOnTheSessionAndEveryAuditLine and TestWireOpen_AuditStampCoversDecodedAndOwnedControlSites, shipped with #58",
@@ -252,7 +252,7 @@ var claimTriage = map[string]struct {
 		[]string{"client_encoding=WIN1252", "wire_lease_encoding_refused", "both are UTF8"}},
 
 	"3.1:options#unpacked": {covered, "TestStartupGUCs_OptionsUnpackIntoTheSameMap",
-		"all three libpq spellings unpack into settings, escapes honoured; an options string that does not parse is refused (Amendment 8 — this claim was `#guc-refusal` while the rule was to refuse them)",
+		"all three libpq spellings unpack into settings, escapes honoured; an options string that does not parse is refused (this claim was `#guc-refusal` while the rule was to refuse them)",
 		[]string{`"-c datestyle=ISO"`, `"--datestyle=ISO"`, `-c datestyle=ISO,\ MDY`}},
 	"3.1:options#empty-accepted": {covered, "TestStartup_ParameterPolicy",
 		"empty/whitespace accepted and ignored",
@@ -261,11 +261,11 @@ var claimTriage = map[string]struct {
 		"an empty/whitespace options is accepted, ignored, and audited as fd.param_ignored; a startup without options emits no such event",
 		[]string{"fd.param_ignored", "no options key at all"}},
 
-	// ---- 4:Terminate — three separately testable guarantees (lector PR #45 r0 MF1).
+	// ---- 4:Terminate — three separately testable guarantees.
 	// The original single-row promotion cited two cells that observe reservation
 	// release on ANY teardown: they send Terminate, close the socket themselves, and
 	// never Receive — so a server that emitted 0A000 before closing stayed green
-	// (Juliet's behaviour-removal mutation). Clean close needs its own witness that
+	// (a behaviour-removal mutation). Clean close needs its own witness that
 	// READS the wire after Terminate and requires the connection to end with no frame.
 	"4:Terminate#clean-close": {covered, "TestSession_TerminateClosesTheWireWithoutAnErrorFrame",
 		"after Terminate the server closes the connection and sends NOTHING — no ErrorResponse, no ReadyForQuery",
@@ -291,10 +291,10 @@ var (
 	// A citation in a test, in the shapes the existing cells already use.
 	//
 	// CASE-INSENSITIVE, and that is not cosmetic. The first version was not,
-	// and PR #36 writes its citations as "// MATRIX ROW 2.4" — a good-faith
+	// and an earlier change writes its citations as "// MATRIX ROW 2.4" — a good-faith
 	// citation the gate could not see, so both rows would have read as
 	// untested while the comment sat directly above the cell proving them.
-	// Found by zen. A comment is prose, and a gate that silently ignores
+	// Found in review. A comment is prose, and a gate that silently ignores
 	// prose it does not like is a gate reporting a gap that is not there.
 	//
 	// QUALIFIED FIRST, and the order is load-bearing: "row 3.1:user" must
@@ -324,7 +324,7 @@ var (
 // not listed here is ungated — deliberately; see the file comment.
 type matrixSection struct {
 	id      string // the heading id as written in the doc: "2", "3.1", "4", "4a", "5"
-	numeric bool   // §2's rows are numbers in the first cell; every other section keys by name
+	numeric bool   // matrix §2's rows are numbers in the first cell; every other section keys by name
 }
 
 var coveredSections = []matrixSection{
@@ -335,14 +335,14 @@ var coveredSections = []matrixSection{
 	{"5", false},
 }
 
-// proseUnits are normative blocks that carry no table: §3.2's GUC policy and
-// §3.3's ParameterStatus set are prose subsections, and §4's post-error
-// discard rule is a prose block inside §4. They are triaged like rows — same
+// proseUnits are normative blocks that carry no table: matrix §3.2's GUC policy and
+// matrix §3.3's ParameterStatus set are prose subsections, and §4's post-error
+// discard rule is a prose block inside matrix §4. They are triaged like rows — same
 // map, same three states — and their existence is asserted by ANCHOR so a
 // renamed or reworded heading fails loudly instead of the unit silently
 // dropping out of the triage forever.
 //
-// OWNERSHIP IS SECTION-BOUND (r0 MF3): each unit's anchor is matched
+// OWNERSHIP IS SECTION-BOUND: each unit's anchor is matched
 // against its OWNING section's span — heading to the next heading of the
 // same-or-higher level — never against the whole document. A phrase that
 // drifted into another section is a DIFFERENT unit; the gate's job is to
@@ -372,8 +372,8 @@ func repoRoot(t *testing.T) string {
 // headingBody returns the body of the section whose heading id is id — the
 // first token of the heading text after the #s ("2", "3.1", "4a"): everything
 // from that heading line up to the NEXT heading of any level. For "4" that
-// stops at "### 4a.", giving §4's own table and its discard prose but not
-// §4a's table; for "3.1" it stops at "### 3.2".
+// stops at "### 4a.", giving matrix §4's own table and its discard prose but not
+// matrix §4a's table; for "3.1" it stops at "### 3.2".
 func headingBody(t *testing.T, src, id string) string {
 	t.Helper()
 	want := regexp.MustCompile(`^` + regexp.QuoteMeta(id) + `([.\s]|$)`)
@@ -402,7 +402,7 @@ func headingBody(t *testing.T, src, id string) string {
 // headingSpan returns the FULL span of the section whose heading id is id:
 // from that heading line up to the next heading of the SAME-OR-HIGHER level.
 // Unlike headingBody (which stops at the next heading of any level, to keep
-// §4's table out of §4a's), the span of §4 includes its ### subsections —
+// matrix §4's table out of §4a's), the span of §4 includes its ### subsections —
 // which is what a prose unit's ownership check needs: the block stays
 // anywhere inside its owning section, and nowhere else.
 func headingSpan(t *testing.T, src, id string) string {
@@ -477,7 +477,7 @@ func firstCell(tableLine string) string {
 // otherwise the cell text up to any parenthetical ("Session end (any cause)"
 // → "Session end"). The parenthetical immediately after the identifier is
 // returned alongside: it is the disambiguator when two rows of one section
-// would derive the same key — §5's two `ErrorResponse` rows.
+// would derive the same key — matrix §5's two `ErrorResponse` rows.
 func rowIdent(cell string) (ident, paren string) {
 	if loc := backtickSpanRe.FindStringSubmatchIndex(cell); loc != nil {
 		ident = cell[loc[2]:loc[3]]
@@ -596,7 +596,7 @@ func deriveSectionKeys(t *testing.T, section string, cells []string) []string {
 // nothing while reporting success, which is the exact failure this gate
 // exists to prevent elsewhere.
 //
-// The generated key set is GLOBALLY UNIQUE (r0 MF2): per-table collision
+// The generated key set is GLOBALLY UNIQUE: per-table collision
 // checks cannot see across sections or against prose keys, so uniqueness is
 // enforced once over the complete set — a §4 table row named `discard` and
 // the prose unit 4:discard are the same finding, not two.
@@ -649,11 +649,11 @@ func matrixRowIDs(t *testing.T) []string {
 // matrixClaimIDs validates the claim registry against the row set and
 // returns the claim keys. A claim whose parent row does not exist describes
 // coverage of nothing; a claim in a state the claim machinery does not
-// implement is refused (r1 MF2, r2 MF2): `uncited` and unknown states skip
+// implement is refused: `uncited` and unknown states skip
 // their checks while still deriving coverage — a registry entry that
 // behaves differently from what it says is worse than no entry. A covered
 // claim must name a witness and carry at least one anchor, and every
-// anchor must be non-blank after trimming (r2 MF3): a blank anchor matches
+// anchor must be non-blank after trimming: a blank anchor matches
 // everything and therefore proves nothing.
 func matrixClaimIDs(t *testing.T, rowSet map[string]bool) []string {
 	t.Helper()
@@ -664,7 +664,7 @@ func matrixClaimIDs(t *testing.T, rowSet map[string]bool) []string {
 			t.Fatalf("claim %s names the parent row %q, which the matrix does not contain — a claim whose parent is gone describes nothing", c, parent)
 		}
 		if e.state != covered && e.state != awaiting {
-			t.Fatalf("claim %s carries state %d — claims have exactly two states, covered and awaiting; anything else skips every check while still deriving coverage (r2 MF2)", c, e.state)
+			t.Fatalf("claim %s carries state %d — claims have exactly two states, covered and awaiting; anything else skips every check while still deriving coverage", c, e.state)
 		}
 		if e.state == covered {
 			if e.witness == "" {
@@ -675,7 +675,7 @@ func matrixClaimIDs(t *testing.T, rowSet map[string]bool) []string {
 			}
 			for _, a := range e.anchors {
 				if strings.TrimSpace(a) == "" {
-					t.Fatalf("claim %s carries a BLANK anchor — a blank matches everything and therefore proves nothing (r2 MF3)", c)
+					t.Fatalf("claim %s carries a BLANK anchor — a blank matches everything and therefore proves nothing", c)
 				}
 			}
 		}
@@ -685,7 +685,7 @@ func matrixClaimIDs(t *testing.T, rowSet map[string]bool) []string {
 	return claims
 }
 
-// witnessSpan locates the named test function by Go AST (r2 MF1 — function
+// witnessSpan locates the named test function by Go AST (function
 // positions, not regex guessing) and returns its source span — doc comment
 // through closing brace — plus its file. The span is the cell a covered
 // claim owns: the citation AND every anchor must appear inside it. A
@@ -742,8 +742,8 @@ func witnessSpan(t *testing.T, fn string) (span, rel string) {
 	return span, rel
 }
 
-// numericRows parses §2's numbered rows: "| 2.1a | ...". A row id that
-// appears TWICE is fatal (r0 MF2): the original deduplication silently
+// numericRows parses matrix §2's numbered rows: "| 2.1a | ...". A row id that
+// appears TWICE is fatal: the original deduplication silently
 // accepted an ambiguous identity — two normative rows answering to one id —
 // and a gate that cannot tell them apart must not pick one and continue.
 func numericRows(t *testing.T, section, body string) []string {
@@ -769,7 +769,7 @@ func numericRows(t *testing.T, section, body string) []string {
 //
 // THIS FILE IS EXCLUDED, and the exclusion IS load-bearing — verified by
 // drill: remove it and the gate reddens on its own prose. This file quotes
-// PR #36's caps citation verbatim while explaining the case-insensitivity
+// the caps citation verbatim while explaining the case-insensitivity
 // fix ("// MATRIX ROW 2.4"), and this very paragraph names an awaiting row
 // in citation shape ("row 4:Sync"). Scan this file and both light up as
 // self-citations, the gate counting its own
@@ -814,7 +814,7 @@ func citedRows(t *testing.T) map[string][]string {
 }
 
 // TestMatrixCoverage_EveryRowIsTriaged fails in three directions — plus the
-// claim-level obligations (r0 MF1) and the parent-derivation consistency check.
+// claim-level obligations and the parent-derivation consistency check.
 func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 	rows := matrixRowIDs(t)
 	rowSet := make(map[string]bool, len(rows))
@@ -872,7 +872,7 @@ func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 		}
 	}
 
-	// The claim loop. A covered claim owns a CELL (r2 MF1): the witness
+	// The claim loop. A covered claim owns a CELL: the witness
 	// function's AST span, doc comment through closing brace. The citation
 	// naming the claim AND every anchor must appear inside that span — the
 	// proof and the citation resolve to the same owned cell, and a fragment
@@ -902,7 +902,7 @@ func TestMatrixCoverage_EveryRowIsTriaged(t *testing.T) {
 	}
 
 	// Parent-derivation consistency: a row with claims is covered exactly
-	// when EVERY claim is exactly covered (r1 MF2) — anything else derives
+	// when EVERY claim is exactly covered — anything else derives
 	// awaiting. The hand-written parent state must AGREE with the
 	// derivation, or the map is asserting something its own claims
 	// contradict — in either direction.
@@ -1113,7 +1113,7 @@ func TestMatrixCoverage_EverySectionIsCitable(t *testing.T) {
 		}
 	}
 
-	// And the numeric claim form §2 uses ("row 2.4"), for the same reason.
+	// And the numeric claim form matrix §2 uses ("row 2.4"), for the same reason.
 	for _, sec := range coveredSections {
 		if !sec.numeric {
 			continue

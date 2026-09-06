@@ -9,9 +9,9 @@ import (
 	"time"
 )
 
-// THE ACCEPT-REGISTRATION WINDOW (lector PR #38 r1 must-fix).
+// THE ACCEPT-REGISTRATION WINDOW.
 //
-// Close's join was added in r1 and was still not enough. sync.WaitGroup
+// Close's join was added later and was still not enough. sync.WaitGroup
 // requires a positive Add starting from zero to happen BEFORE a Wait, and
 // Serve did its Add only after Accept had returned, the peer address had been
 // read and the budgets consulted. A Close landing anywhere in that window saw
@@ -27,7 +27,7 @@ import (
 // the cell can stand between "the kernel has a live socket for us" and the
 // accept loop registering it.
 //
-// THE PAUSE IS IN ACCEPT, not in RemoteAddr where lector's probe put it, and
+// THE PAUSE IS IN ACCEPT, not in RemoteAddr where the original probe put it, and
 // the difference is the fix. RemoteAddr is now read AFTER registration, so
 // pausing there would park the cell holding a counted connection and Close
 // would correctly wait for it forever. Accept is the last point that is still
@@ -151,7 +151,7 @@ func TestListenerClose_NoHandlerStartsAfterCloseReturns(t *testing.T) {
 	// RECHECKED AFTER THE DETERMINISTIC JOIN, which is the assertion that
 	// actually holds. The sleep above is a courtesy for a fast failure; on
 	// its own it is a timing assumption inside a cell whose whole subject is
-	// a concurrency guarantee, and lector proved the gap: ignore the closed
+	// a concurrency guarantee, and review proved the gap: ignore the closed
 	// check AND put a legal 300ms delay before the handler starts, and the
 	// sleep misses it while Serve's own join does not.
 	if lateHandler.Load() {

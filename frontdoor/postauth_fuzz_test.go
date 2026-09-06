@@ -17,8 +17,8 @@ import (
 //
 // WHAT THESE CELLS PROVE, AND WHAT §10 ASKS FOR, ARE NOT THE SAME THING — said
 // plainly here because the earlier version of this comment quoted §10's literal
-// "no read past a refused header" while proving something weaker (lector r0
-// MF1; juliet measured 4101 source bytes consumed before both refusals).
+// "no read past a refused header" while proving something weaker (review
+// measured 4101 source bytes consumed before both refusals).
 //
 // §10's phrasing is a SOURCE-READ boundary: nothing beyond the header leaves
 // the socket. frameReader does not provide that and cannot cheaply — it passes
@@ -34,7 +34,7 @@ import (
 // matters for correctness.
 //
 // The gap between the two is a matrix-versus-implementation question, not a
-// defect: raised to jarvis rather than settled by renaming a cell and moving on.
+// defect: raised rather than settled by renaming a cell and moving on.
 
 // countingReader reports how many bytes were actually taken from the wire, so
 // the header-first property can be MEASURED rather than asserted.
@@ -201,7 +201,7 @@ func TestPostAuth_APipelinedBatchIsFramedOrRefusedPerFrame(t *testing.T) {
 	}
 }
 
-// THE RESOURCE PROPERTY (matrix §10 as amended, jarvis 2026-09-03): a refused
+// THE RESOURCE PROPERTY (matrix §10 as amended, 2026-09-03): a refused
 // frame's body is never read to its DECLARED LENGTH.
 //
 // This is the guarantee that has value, and until this cell nothing asserted it.

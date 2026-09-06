@@ -113,7 +113,7 @@ func TestPgxDriver_PrepareReportsTheResultShape(t *testing.T) {
 			len(sd.Fields))
 	}
 
-	// The statement must also still EXIST. §4a: prepared statements survive the
+	// The statement must also still EXIST. matrix §4a: prepared statements survive the
 	// transaction; only portals do not.
 	res := conn.ExecPrepared(ctx, "s1", nil, nil, nil).Read()
 	if res.Err != nil {

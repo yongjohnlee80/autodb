@@ -12,7 +12,7 @@ import (
 // `name` argument left every end-to-end certgen cell green: splitHostNames
 // normalises before the only production caller reaches this function, so from
 // outside the package that half of the predicate is unreachable. By
-// [[validate-the-verifier]] a guard whose mutation changes no outcome should be
+// Validate the verifier: a guard whose mutation changes no outcome should be
 // DELETED rather than kept for safety, and that rule is right.
 //
 // It is kept because normalisation is this predicate's CONTRACT rather than a

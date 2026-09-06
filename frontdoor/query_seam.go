@@ -18,7 +18,7 @@ import (
 // front door from acquiring any engine capability beyond the two calls it makes.
 //
 // Notably absent: anything that hands the front door a pinned connection or a
-// raw protocol handle. Lector ruled that classification, the gate, the F3a unit
+// raw protocol handle. Review ruled that classification, the gate, the F3a unit
 // policy and dispatch are ONE core/exec-owned operation, and that the front door
 // must not receive the raw capability. This interface is that ruling in code —
 // the loop can ask for a statement to be run, and it cannot reach past that.
@@ -54,7 +54,7 @@ type QueryExecutor interface {
 	// can ask for a statement to be prepared, bound, described, executed, closed,
 	// flushed or synced, and it cannot reach past that. Notably still absent is
 	// anything handing the front door the pinned connection or a raw protocol
-	// handle — the segment's state machine and every §4a object lifetime stay
+	// handle — the segment's state machine and every matrix §4a object lifetime stay
 	// engine-side, which is what keeps this a seam rather than a second loop.
 	WireParse(ctx context.Context, id exec.SessionID, userID int64,
 		name, sqlText string, paramOIDs []uint32, ip string) error

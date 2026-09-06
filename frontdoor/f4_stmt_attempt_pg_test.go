@@ -145,8 +145,8 @@ func TestPGF4_AnAttemptPrecedesEveryExecuteIncludingAResumption(t *testing.T) {
 // an attempt that does not name the portal it ran, and an attempt emitted
 // twice — the count and the identifier are both load-bearing.
 //
-// AND THE PREMISE IS NOW GUARDED, not merely disclosed (gold-man's suggestion,
-// PR #85 r0): TestPGF4_ATargetErrorIsNotAFrontDoorFailure asserts that a target
+// AND THE PREMISE IS NOW GUARDED, not merely disclosed (raised in
+// review): TestPGF4_ATargetErrorIsNotAFrontDoorFailure asserts that a target
 // error leaves the session usable, which is WHY this site has no success signal.
 // It goes red the day someone gives runExtendedStream a real verdict — the same
 // day the defect becomes constructible and this cell starts doing real work.
@@ -218,7 +218,7 @@ func attempts(evs []Event, phase string) []string {
 // The `query` phase is PER BUFFER on the feed, and the durable record is per
 // statement. Matrix note 1.3a says so; this is what checks it.
 //
-// FOUND BY GOLD-MAN IN REVIEW (PR #85 r0), in the commit whose stated purpose
+// FOUND IN REVIEW, in the commit whose stated purpose
 // was to stop the document asserting something untrue — and it was the same
 // shape: note 1.3a's first version read "one per statement of a simple Query",
 // which is false. The front door emits once with the whole buffer as its
@@ -278,8 +278,8 @@ func TestPGF4_TheQueryAttemptIsPerBufferAndTheDurableRecordIsPerStatement(t *tes
 	}
 }
 
-// THE PREMISE, GUARDED rather than merely disclosed — gold-man's suggestion on
-// PR #85 r0, and it is the better shape.
+// THE PREMISE, GUARDED rather than merely disclosed — raised in
+// review, and it is the better shape.
 //
 // TestPGF4_AnAttemptIsEmittedForAnExecuteTheTargetRejects discloses that its
 // central claim cannot fail: gating the emission on success is not

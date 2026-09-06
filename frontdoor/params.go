@@ -7,13 +7,13 @@ import (
 	"unicode/utf8"
 )
 
-// Startup parameter policy (protocol matrix §3.1, ADR-0075 Amendment 8).
+// Startup parameter policy (protocol matrix §3.1, as amended).
 //
 // PostgreSQL treats an unknown startup parameter as a GUC attempt. This surface
 // used to refuse rather than emulate that, and the refusal was correct for as
 // long as there was nothing to hand a GUC to — but it meant lib/pq could never
 // connect at all, because its config normalization hard-codes `datestyle` on
-// every connection. Amendment 8 admits them instead: a startup parameter naming
+// every connection. The amended rule admits them instead: a startup parameter naming
 // a setting is judged EXACTLY as `SET name TO value` from this session would be,
 // by the same denylist, and applied to the pinned backend before
 // AuthenticationOk. One refusal withdraws the session.
@@ -22,7 +22,7 @@ import (
 // governed by §3.1's own rules, `replication` is refused outright, and
 // everything else is COLLECTED and handed to the engine to judge.
 //
-// THE NAMED SET IS A CARVE-OUT, AND IT IS LOAD-BEARING. Amendment 8's sentence
+// THE NAMED SET IS A CARVE-OUT, AND IT IS LOAD-BEARING. The amended rule's sentence
 // reads "startup parameters that name a GUC are admitted exactly as the
 // equivalent SET would be", and taken literally that captures two parameters
 // §3.1 governs differently:
@@ -38,17 +38,17 @@ import (
 //     and explicitly does NOT forward it to the target.
 //
 // Neither may enter StartupGUCs. This is a decision, not an oversight
-// (jarvis, ruling 1, 2026-09-03).
+// (ruled 2026-09-03).
 
 // startupParamDecision is what the policy says about one parameter.
 type startupParamDecision int
 
 const (
-	// paramAccept marks the NAMED SET: parameters §3.1 governs itself. They
+	// paramAccept marks the NAMED SET: parameters matrix §3.1 governs itself. They
 	// are never collected as settings (see the carve-out above).
 	paramAccept startupParamDecision = iota
 	// paramCollect marks a parameter that names a setting: handed to the
-	// engine's admission as the equivalent SET (Amendment 8).
+	// engine's admission as the equivalent SET.
 	paramCollect
 	paramRefuse
 	// paramNegotiate marks `_pq_.*` protocol extensions: declined by being
@@ -57,16 +57,16 @@ const (
 	paramNegotiate
 )
 
-// THE CANONICAL NAME INDEX (lector r1 MF4; jarvis's class ruling).
+// THE CANONICAL NAME INDEX.
 //
 // Three defects in this feature were ONE defect wearing different clothes: a
 // guard keyed on a NAME, and another spelling of that name reaching the same
 // setting.
 //
-//  1. #71 MF1 — `SET NAMES` is an alias of `SET client_encoding`, and a
+//  1. `SET NAMES` is an alias of `SET client_encoding`, and a
 //     name-keyed denylist reading the leading token missed it.
-//  2. #74 MF1 — an options-derived key skipped the carve-out a top-level key met.
-//  3. #74 MF4 — exact map lookups beside a case-insensitive policy, so
+//  2. An options-derived key skipped the carve-out a top-level key met.
+//  3. Exact map lookups beside a case-insensitive policy, so
 //     `Application_Name` at top level plus `-c application_name` in options got
 //     past BOTH the carve-out and the cross-source duplicate refusal.
 //
@@ -94,7 +94,7 @@ func foldGUCName(name string) string {
 	return string(b)
 }
 
-// carvedOutNames are the GUC-named parameters §3.1 governs itself. They are
+// carvedOutNames are the GUC-named parameters matrix §3.1 governs itself. They are
 // looked up through the fold, never by exact key.
 var carvedOutNames = map[string]bool{"application_name": true, "client_encoding": true}
 
@@ -129,8 +129,8 @@ func canonicalizeCarvedOut(params map[string]string) (string, bool) {
 // THE NAME-HANDLING MATRIX — closing the class by ENUMERATION, not iteration.
 //
 // Five review findings in this feature were all "a name-handling rule applied
-// non-uniformly", each on a different axis: alias spelling (#71 MF1), arrival
-// path (#74 MF1), case (#74 MF4), presence-recording (#74 MF5), and the
+// non-uniformly", each on a different axis: alias spelling, arrival
+// path, case, presence-recording, and the
 // recognition/indexing conflation this table itself first got wrong. Fixing the
 // instance each round is how you get a sixth. So the rules are tabulated against
 // the names, and each cell is either uniform or DELIBERATELY different with the
@@ -165,7 +165,7 @@ func canonicalizeCarvedOut(params map[string]string) (string, bool) {
 //              admission.
 // forwarded  — the protocol keywords are not settings. The two carve-outs are
 //              §3.1's and deliberately never reach the target. Everything else
-//              is the point of Amendment 8.
+//              is the point of the amended rule.
 // via options — the four keywords are refused there: accepting a second spelling
 //              of the identity or the route would create two sources for one
 //              answer. `_pq_.*` inside options is not a protocol request at all,
@@ -176,13 +176,13 @@ func canonicalizeCarvedOut(params map[string]string) (string, bool) {
 //              cells are measured.)
 //
 // charged — every name reaches note() before anything decides what happens to
-// it, so there are NO "yes by side effect" cells: that accident is where MF5
+// it, so there are NO "yes by side effect" cells: that accident is where the
 // lived. Repeats are refused for every row in every combination — twice at top
 // level (the raw wire preflight, before pgproto3 collapses the pairs into a
 // map), twice inside options, and once in each.
 
 // startupGUCLimit caps how many settings one startup packet may carry
-// (Amendment 8). It bounds the work an unauthenticated peer can ask for before
+// (the amended rule). It bounds the work an unauthenticated peer can ask for before
 // it has presented anything: each admitted setting is a round trip to the
 // target inside the session open, so an uncapped map would let a startup packet
 // buy an arbitrary number of them for the price of one connection.
@@ -191,7 +191,7 @@ func canonicalizeCarvedOut(params map[string]string) (string, bool) {
 // handful — and far below anything that costs.
 const startupGUCLimit = 64
 
-// startupCheck is what §3.1 makes of one StartupMessage.
+// startupCheck is what matrix §3.1 makes of one StartupMessage.
 type startupCheck struct {
 	// GUCs are the settings to hand the engine, keyed by the client's OWN
 	// spelling and carrying the value byte-for-byte. Neither is normalized
@@ -201,19 +201,19 @@ type startupCheck struct {
 	GUCs map[string]string
 	// Refused names the parameter or key that failed, for the AUDIT row only.
 	Refused string
-	// Reason distinguishes the three ways a startup can fail §3.1 for the
+	// Reason distinguishes the three ways a startup can fail matrix §3.1 for the
 	// audit. The WIRE gets the same uniform denial for all of them — a
 	// distinguishable refusal would map the accepted set for anyone willing to
-	// ask repeatedly (jarvis, ruling 2, 2026-09-03).
+	// ask repeatedly (ruled 2026-09-03).
 	Reason denialReason
 }
 
-// checkStartupParams applies §3.1 and Amendment 8: it refuses, or it returns
+// checkStartupParams applies matrix §3.1 as amended: it refuses, or it returns
 // the settings the engine must judge.
 //
 // IT MUTATES params. A carved-out name arriving through `options` —
 // `-c application_name=X` — is written into the parameter map under its own
-// name, because §3.1's handling of it (the 256-byte cap, the rune-boundary
+// name, because matrix §3.1's handling of it (the 256-byte cap, the rune-boundary
 // truncation, the verbatim audit, the ParameterStatus echo) lives downstream in
 // normalizeStartupParams and the handshake. Copying those rules here to serve a
 // second spelling would be two implementations of one row, and they would drift.
@@ -225,7 +225,7 @@ type startupCheck struct {
 // their parameters this server dislikes. Telling them would map the accepted
 // set for anyone who asked politely enough.
 func checkStartupParams(params map[string]string) (startupCheck, bool) {
-	// REQUIRED first (§3.1 marks both). Presence is checked before the
+	// REQUIRED first (matrix §3.1 marks both). Presence is checked before the
 	// per-parameter policy because a startup with neither is not a startup
 	// this surface can act on at all — and without the check an empty
 	// parameter map sailed through to be denied for want of a credential
@@ -259,8 +259,8 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	// it is SEEN — whether it is collected as a setting, governed by §3.1, or
 	// refused a moment later.
 	//
-	// DUPLICATE DETECTION NEEDS TWO THINGS, and MF5 was the second one missing
-	// while the first was fixed: the name must be FOLDED (one index, r1 MF4) and
+	// DUPLICATE DETECTION NEEDS TWO THINGS, and the second one was missing
+	// while the first was fixed: the name must be FOLDED and
 	// it must be CHARGED when seen. The options-derived client_encoding carve-out
 	// validated its value and continued without charging anything, so
 	// `-c client_encoding=UTF8 -c CLIENT_ENCODING=UTF8` was accepted while the
@@ -270,7 +270,7 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	// be covered only because its handling writes params["application_name"] for
 	// the cap and echo, so a second spelling collided with that unrelated write.
 	// A guard that functions as a side effect functions only where the side
-	// effect happens to occur — the same shape as the r0 cell that passed
+	// effect happens to occur — the same shape as the earlier cell that passed
 	// because the ENGINE denied client_encoding rather than because the guard
 	// worked. Charging is now explicit and independent of whether a value is
 	// ever forwarded: recording that a name was seen and forwarding its value
@@ -285,7 +285,7 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	}
 
 	// options is unpacked in the first pass and APPLIED in the second, because a
-	// name arriving through options gets §3.1's own handling and that handling
+	// name arriving through options gets matrix §3.1's own handling and that handling
 	// has to see the top-level value too (a client may send both).
 	var optioned []optionsGUC
 
@@ -301,7 +301,7 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	for _, k := range names {
 		v := params[k]
 		// CHARGED FIRST, whatever happens to it next. A name is seen here
-		// whether it is a setting, one §3.1 governs, or one about to be refused.
+		// whether it is a setting, one matrix §3.1 governs, or one about to be refused.
 		if bad, why, ok := note(k); !ok {
 			return startupCheck{Refused: bad, Reason: why}, false
 		}
@@ -338,7 +338,7 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 			// The old code refused any options that looked like it set
 			// something, deliberately not parsing, on the grounds that a parser
 			// disagreeing with the server's about what a string meant was worse
-			// than a blunt refusal. Amendment 8 removes that choice: to admit
+			// than a blunt refusal. The amended rule removes that choice: to admit
 			// these we must know what they say. So the parser is strict and
 			// anything it cannot read is REFUSED rather than guessed at, which
 			// keeps the original reasoning intact — we still never act on a
@@ -351,14 +351,14 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 		}
 	}
 
-	// THE CARVE-OUT IS ABOUT THE NAME, NOT THE ARRIVAL PATH (lector r0 MF1;
-	// jarvis's ruling). §3.1 governs application_name and client_encoding
+	// THE CARVE-OUT IS ABOUT THE NAME, NOT THE ARRIVAL PATH (found in review;
+	// ruled 2026-09-03). Matrix §3.1 governs application_name and client_encoding
 	// wherever they arrive — as a top-level parameter or inside `options` —
 	// because the rule is about what the name MEANS, not how it was spelled.
 	//
 	// Without this, `options='-c application_name=shadow'` walked into
 	// StartupGUCs, the engine admitted it as an ordinary editor SET, and it was
-	// FORWARDED to the pinned backend — contradicting §3.1's contract that
+	// FORWARDED to the pinned backend — contradicting matrix §3.1's contract that
 	// application_name is capped, echoed and never forwarded. And its mirror:
 	// `options='-c client_encoding=UTF8'` — a perfectly legitimate thing to put
 	// in PGOPTIONS — was collected, met the engine's unconditional denial and
@@ -366,14 +366,14 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 	// connection here.
 	for _, kv := range optioned {
 		// CHARGED FIRST, for the same reason and by the same function as a
-		// top-level name. This is the whole of MF5's fix: the carve-out below
+		// top-level name. This is the whole of that fix: the carve-out below
 		// decides what HAPPENS to the name, never whether it was seen.
 		if bad, why, ok := note(kv.name); !ok {
 			return startupCheck{Refused: bad, Reason: why}, false
 		}
 		switch startupParamPolicy(kv.name) {
 		case paramAccept:
-			// §3.1's own handling, exactly as the top-level spelling gets.
+			// matrix §3.1's own handling, exactly as the top-level spelling gets.
 			switch specialName(kv.name) {
 			case "application_name":
 				// Capped, truncated and echoed by normalizeStartupParams, and
@@ -426,11 +426,11 @@ func checkStartupParams(params map[string]string) (startupCheck, bool) {
 // pgproto3's StartupMessage.Decode writes each pair straight into a
 // map[string]string, so a packet carrying `datestyle=ISO` and then
 // `datestyle=German` reaches every later layer as ONLY the second — the first
-// value is gone before any policy in this package can see it. §3.1's rule that a
+// value is gone before any policy in this package can see it. matrix §3.1's rule that a
 // key named twice is refused was therefore unenforceable at the layer that
 // states it, and unTESTABLE at the layer that tested it: a map cannot hold a
 // duplicate key, so a map-driven cell is structurally incapable of failing.
-// A harness that cannot EXPRESS a defect reports clean forever (lector r0 MF2).
+// A harness that cannot EXPRESS a defect reports clean forever.
 //
 // Case-insensitive, because these become settings and GUC names are.
 func duplicateStartupKey(raw []byte) (string, bool) {
@@ -532,7 +532,7 @@ func parseOptionsGUCs(v string) ([]optionsGUC, bool) {
 // is deliberately NO UTF-8 validity check here: inventing a rule the target
 // does not have would be this surface deciding what the target may be sent. If
 // the bytes are wrong for the target, the TARGET refuses them — which is the
-// same answer a direct client gets (lector r0 MF3; jarvis's ruling).
+// same answer a direct client gets.
 //
 // The whitespace set is libpq's, which is ASCII: space, tab, newline, carriage
 // return, vertical tab, form feed. A multi-byte character can never be one of
@@ -609,13 +609,13 @@ func optionsFields(v string) ([]string, bool) {
 //     application_name is refused by the session-state gate (not on the benign
 //     allowlist), but `SELECT set_config('application_name', 'x', false)` is
 //     classified as a read, passes the gate, runs on the pinned backend and
-//     sticks (lector, PR #51 review, proven live). Refusing SET does not make a
+//     sticks. Refusing SET does not make a
 //     GUC immutable. A future per-session stamp at pin time must therefore also
 //     refuse or survive that overwrite; the design decision is Johno's and not
 //     taken (see core/exec.pinWireSession).
 const applicationNameMaxBytes = 256
 
-// paramNote records something §3.1 requires to be AUDITED about an ACCEPTED
+// paramNote records something matrix §3.1 requires to be AUDITED about an ACCEPTED
 // startup — the two cases where the policy does more than accept-or-refuse.
 // It is never sent to the peer as-is; the wire gets a NoticeResponse for the
 // truncation and nothing at all for the ignored options.
@@ -623,7 +623,7 @@ type paramNote struct {
 	// Kind is one of the two note kinds below.
 	Kind string
 	// Detail is the internal particular: the VERBATIM pre-truncation
-	// application_name (§3.1: "audited verbatim"), or the ignored key.
+	// application_name (matrix §3.1: "audited verbatim"), or the ignored key.
 	Detail string
 }
 
@@ -632,7 +632,7 @@ const (
 	noteOptionsEmptyIgnored      = "options_empty_ignored"
 )
 
-// normalizeStartupParams applies §3.1's two accept-with-a-note rules to an
+// normalizeStartupParams applies matrix §3.1's two accept-with-a-note rules to an
 // ALREADY-ACCEPTED parameter set, mutating it in place, and returns what must
 // be audited. It runs after checkStartupParams has passed; on a refused startup
 // there is nothing to normalize.
@@ -660,7 +660,7 @@ func normalizeStartupParams(params map[string]string) []paramNote {
 	return notes
 }
 
-// specialName answers "which of §3.1's names is this?", and it is the ONE place
+// specialName answers "which of matrix §3.1's names is this?", and it is the ONE place
 // that question is answered.
 //
 // TWO OPERATIONS, DELIBERATELY DIFFERENT, because PostgreSQL makes them
@@ -672,7 +672,7 @@ func normalizeStartupParams(params map[string]string) []paramNote {
 //     what falls through reaches the case-insensitive GUC lookup. So
 //     `DataBase=x` is not the database, it is a GUC named `DataBase`.
 //   - The two CARVE-OUTS are GUC names, so they are recognised through the FOLD:
-//     `Application_Name` IS application_name to the target, and §3.1 governs it.
+//     `Application_Name` IS application_name to the target, and matrix §3.1 governs it.
 //
 // And separately from both, the DUPLICATE-PRESENCE INDEX folds EVERYTHING (see
 // note()). Those coexist: recognition asks "is this that name", indexing asks
@@ -703,7 +703,7 @@ func specialName(name string) string {
 	case "user", "database", "options", "replication":
 		return name
 	}
-	// Then the GUC names §3.1 governs, through the fold.
+	// Then the GUC names matrix §3.1 governs, through the fold.
 	switch folded := foldGUCName(name); folded {
 	case "application_name", "client_encoding":
 		return folded
@@ -724,7 +724,7 @@ func startupParamPolicy(name string) startupParamDecision {
 		// this surface relays statements.
 		return paramRefuse
 	}
-	// Amendment 8: a setting. The engine judges it; refusing here would be this
+	// The amended rule: a setting. The engine judges it; refusing here would be this
 	// file holding a second opinion about the denylist.
 	return paramCollect
 }
