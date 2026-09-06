@@ -306,6 +306,23 @@ back, and its inverse — every `StoreConfig` method must be CALLED in core/meta
 because an interface the consumer does not consume is a copy of the struct it
 replaced wearing a different name.
 
+## An approval attaches to a SHA — and what moves it
+
+"An approval attaches to a SHA" is half a rule. The other half is what evidence
+moves it, and the two cases are not the same review:
+
+- **A head move WITH `git patch-id --stable` evidence needs only a NAMING.**
+  Identical patch-ids before and after are the derived form of "the content you
+  approved is unchanged, only its parent moved" — the claim-equals-artifact
+  discipline applied to a rebase. The reviewer re-attaches and reads nothing.
+- **A head move WITHOUT that evidence needs a RE-VERIFY.** Not because the
+  author is suspected, but because "I only rebased it" is a claim about a diff
+  nobody has computed.
+
+Three heads moved this way while the capability stack was landing (a merge at
+the bottom rebasing every branch above it), and each was named with its
+patch-id rather than asserted to be harmless.
+
 ## The exemption mechanism has four parts
 
 Three answers in this register are **leave, exempted by name**, and the
