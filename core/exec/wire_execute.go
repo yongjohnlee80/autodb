@@ -3,7 +3,6 @@ package exec
 import (
 	"context"
 	"fmt"
-	"github.com/yongjohnlee80/autodb/core/engine"
 
 	"github.com/yongjohnlee80/golib/dao"
 
@@ -62,7 +61,7 @@ func (e *Engine) wireExecuteClaimed(ctx context.Context, s *session, sqlText, ip
 	// transaction, on this seam as on WireQuery: a BEGIN that opened on the pool
 	// while later raw statements ran on the pinned connection would put the
 	// client's statements outside the transaction it believes it is in.
-	if connRow, cerr := e.store.Connections.OnCtx(ctx).With(meta.ConnID, s.connID).Get(); cerr == nil && connRow.Engine == engine.Postgres {
+	if connRow, cerr := e.store.Connections.OnCtx(ctx).With(meta.ConnID, s.connID).Get(); cerr == nil && connRow.Engine.SpeaksPostgresWire() {
 		if _, perr := e.pinWireSession(ctx, s, connRow); perr != nil {
 			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
 		}
@@ -122,7 +121,7 @@ func (e *Engine) executeSessionUnit(
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrScriptTooLarge)
 	}
 
-	stmt, cerr := Classify(sqlText, connRow.Engine == engine.MySQL)
+	stmt, cerr := Classify(sqlText, connRow.Engine.BackslashEscapes())
 	if cerr != nil {
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, cerr)
 	}

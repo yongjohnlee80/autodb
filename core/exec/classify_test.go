@@ -3,6 +3,8 @@ package exec
 import (
 	"errors"
 	"testing"
+
+	"github.com/yongjohnlee80/autodb/core/engine"
 )
 
 func TestClassify(t *testing.T) {
@@ -158,5 +160,54 @@ func TestClassify(t *testing.T) {
 				t.Errorf("HasTopLevelWhere = %v, want %v", st.HasTopLevelWhere, tc.where)
 			}
 		})
+	}
+}
+
+// The engine's grammar answer must actually reach the lexer.
+//
+// WHY THIS EXISTS AT ALL. The call sites that used to compute
+// `connRow.Engine == engine.MySQL` now call connRow.Engine.BackslashEscapes(),
+// and a predicate is easy to wire to nothing: return a constant, read the wrong
+// field, and every existing cell still passes because none of them drives a
+// statement whose READING depends on the answer.
+//
+// So this drives one. In `SELECT 'a\'; b\'; c'; SELECT 2` the two escaped
+// quotes keep the literal open under backslash escaping — two statements, both
+// well-formed — while under standard escaping the first backslash is an
+// ordinary character, the literal closes early, and what follows is a different
+// script entirely that the engine refuses. Success versus refusal is the
+// observable difference, and the two engines must land on opposite sides of it.
+//
+// THE FIXTURE WAS DERIVED, NOT GUESSED. My first attempt left the literal
+// unterminated under backslash escaping, so both readings failed and the cell
+// would have compared two errors — an assertion that observes nothing. It was
+// replaced only after both readings were run and printed.
+func TestBackslashEscapesReachesTheLexer(t *testing.T) {
+	const script = `SELECT 'a\'; b\'; c'; SELECT 2`
+
+	escaped, escErr := SplitStatements(script, true)
+	if escErr != nil {
+		t.Fatalf("under backslash escaping the fixture must parse, and did not: %v. "+
+			"Two failing readings would make every assertion below vacuous", escErr)
+	}
+	if len(escaped) != 2 {
+		t.Fatalf("under backslash escaping the fixture is 2 statements, got %d (%q)",
+			len(escaped), escaped)
+	}
+	if _, stdErr := SplitStatements(script, false); stdErr == nil {
+		t.Fatal("under standard escaping the fixture must NOT parse as the same " +
+			"script; it did, so the flag changed nothing and this cell observes " +
+			"nothing about the predicate")
+	}
+
+	// And the engines must select those two readings, not one of them twice.
+	if _, err := SplitStatements(script, engine.MySQL.BackslashEscapes()); err != nil {
+		t.Errorf("mysql failed to read the script (%v) — its BackslashEscapes answer "+
+			"is not reaching the lexer, and a statement whose quoting depends on it "+
+			"is read as a different statement", err)
+	}
+	if _, err := SplitStatements(script, engine.Postgres.BackslashEscapes()); err == nil {
+		t.Error("postgres read the script as mysql does; the two engines are " +
+			"selecting the same grammar, so the predicate distinguishes nothing")
 	}
 }

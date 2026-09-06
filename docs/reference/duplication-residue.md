@@ -136,13 +136,52 @@ written. The cells now exist; the comments name them.
 left"). The earlier answer for this item was *leave the two shared helpers and
 guard the frozen-for-writes invariant*; that became moot when the type went.
 
+## Phase: engine capabilities (ADR-0088 step 6)
+
+**Left: six predicates that all answer `n == Postgres` today.**
+`HasCommitStatusOracle`, `ReportsTransactionID`, `HasServerStatementTimeout`,
+`SupportsDeclarativePartitioning`, `HasRoutineCatalog` and `SpeaksPostgresWire`
+have identical bodies for the three engines currently supported.
+**Answer: separate.** They coincide because of which engines exist, not because
+they are one fact — the same shape as the outcome vocabularies, where three sets
+share the word `rolled_back`. The tell is what a fourth engine does to them: a
+CockroachDB target has a commit-status oracle and declarative partitioning but
+is not reached by the raw-wire relay, and a merged predicate would have no way
+to say so. `TestEachPredicateReadsItsOwnField` pins the mechanical half — each
+predicate reads its own field — so the cheapest way to "de-duplicate" them
+(pointing two at one field) reddens.
+
+**Left: nineteen identity comparisons that are genuinely about identity.**
+Choosing a driver, parsing a DSN with that engine's own parser, taking a file
+lease versus a database lease, selecting an engine's DDL for a migration step,
+and naming the endpoints of a one-way migration.
+**Answer: leave**, exempted **by name** in
+`TestEngineIdentityIsComparedOnlyWhereItIsTheQuestion` with each file's reason,
+the same mechanism the readiness and session-claim guards use. Expressing these
+as capabilities would not remove the branch; it would rename a factory as a
+predicate and hide which library runs.
+The guard also refuses a **dead exemption** — one naming a file with no
+comparison in it. Two of the first list's entries were guesses at paths I had
+not opened, and an exemption nothing uses is not dormant: it stands ready to
+excuse whatever is written at that path next.
+
 ---
 
 ## Still to survey
 
-- **Comment coordinates** (task item 12) — 698 comment lines citing KB ADRs and
-  section anchors in non-test code. Not duplication, but the same class of
-  problem: a claim whose authority the reader cannot open.
+- **Comment coordinates** (task item 12) — a ratchet, three rungs landed:
+  `webserver`, `core/config` and `cmd/autodb` are certified clean and guarded.
+  Re-measured at this phase's head, what remains is `frontdoor` 442,
+  `core/exec` 423, `tui` 110, `core/auth` 110, `core/meta` 96, `rpc` 49,
+  `internal` 4, `core/engine` 1. The earlier figure of 698 counted a narrower
+  set of arms and predated the rungs; it is replaced rather than adjusted.
+  Not duplication, but the same class of problem: a claim whose authority the
+  reader cannot open.
+  A THIRD ARM ARRIVED WITH RUNG THREE: the same rule applied to STRING
+  LITERALS, after two coordinates survived a conversion because the comment
+  cell structurally cannot see them — one of them printed to an operator's
+  terminal. It found five more in the two packages already certified. Later
+  rungs inherit both arms.
 - **The three statement pipelines** (task item 7) — `wire_query.go`,
   `wire_execute.go`, `wire_extended.go` each implement classify → authorize →
   guard → attempt → dispatch → outcome. **Deliberately not proposed:** the

@@ -94,7 +94,7 @@ func (l txLimits) serverBeltSeconds() int {
 // belt: the engine's own deadline is the guarantee, and a driver without the
 // GUC simply does not get the second layer.
 func armServerBelt(ctx context.Context, tx dao.TxConn, engineName engine.Name, l txLimits) error {
-	if engineName != engine.Postgres {
+	if !engineName.HasServerStatementTimeout() {
 		return nil
 	}
 	_, err := tx.ExecContext(ctx,

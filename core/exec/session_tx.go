@@ -259,7 +259,7 @@ func (e *Engine) beginTx(
 // also ASSIGNS an xid if the transaction does not yet have one, which is what
 // we want -- an xid assigned lazily at first write would not be knowable here.
 func (e *Engine) captureTargetXID(ctx context.Context, tx dao.ContextTxConn, engineName engine.Name) string {
-	if engineName != engine.Postgres {
+	if !engineName.ReportsTransactionID() {
 		return ""
 	}
 	rows, err := tx.QueryContext(ctx, "SELECT txid_current()::text")

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/yongjohnlee80/autodb/core/engine"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -72,7 +71,7 @@ func (e *Engine) wireExtEntry(ctx context.Context, id SessionID, userID int64, w
 		release()
 		return nil, nil, nil, nil, auth.ErrDenied // never disclose which connections exist
 	}
-	if connRow.Engine != engine.Postgres {
+	if !connRow.Engine.SpeaksPostgresWire() {
 		// The extended protocol is relayed natively or not at all. A non-postgres
 		// target has no wire to relay onto, and approximating one — decoding the
 		// frames and re-issuing them as ordinary statements — would silently drop
@@ -173,7 +172,7 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	if len(sqlText) > e.maxStatementBytes {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrScriptTooLarge)
 	}
-	stmt, cerr := Classify(sqlText, false) // postgres-only path; mysql cannot reach here
+	stmt, cerr := Classify(sqlText, connRow.Engine.BackslashEscapes())
 	if errors.Is(cerr, ErrEmptyStatement) {
 		// AN EMPTY STATEMENT IS LEGAL, and the matrix row for Query already
 		// says so — "Empty query -> EmptyQueryResponse + ReadyForQuery". The
