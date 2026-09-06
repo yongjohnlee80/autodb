@@ -306,6 +306,50 @@ back, and its inverse — every `StoreConfig` method must be CALLED in core/meta
 because an interface the consumer does not consume is a copy of the struct it
 replaced wearing a different name.
 
+## The four upstream HOLDs, re-examined (sequence step 17)
+
+Four candidates were held back from golib promotion, one of them marked
+`[UNVERIFIED] — read it first`. It has now been read, and all four holds stand
+— but the reasons are worth stating properly, because "hold" recorded without a
+reason is the same shape as a stale register entry.
+
+**`cancel_registry.go` — HOLD, and the earlier verdict was right for a weaker
+reason than the real one.** It was held as "protocol not library"; reading it
+shows something more specific. Its imports are stdlib ONLY — no autodb domain
+types at all — which is what made it look promotable. But every exported
+function is a method on `*Engine`, and `CancelByKey` ends by reaching into the
+session registry (`e.sessions.lookup`, then `s.cancelInFlight()`). The generic
+kernel inside it is perhaps forty lines: mint a random pair, compare in constant
+time AGAINST A DECOY when the id is unknown, treat a miss as a silent no-op.
+That kernel is what a library would want, and it is also the part whose value is
+inseparable from its cells — the decoy comparison exists so the registry cannot
+be walked by timing one guess against another, and the silent miss exists so the
+surface is not an oracle for which session ids are live. Promoting the kernel
+without those cells would move the code and leave the reasoning behind; keeping
+them together is worth more than the reuse.
+
+**`partition.go` — HOLD.** Zero autodb imports, but PostgreSQL-specific by
+subject (declarative RANGE partitioning) with one consumer. golib's `dao`
+already has `Introspector`; a partition surface there would be a capability with
+one implementor and one caller.
+
+**`session_state.go`'s GUC sets — HOLD, and this one is not a close call.** The
+lists are AUTODB POLICY, not facts about an engine: they say which settings a
+client may not change because the CLASSIFIER's model of the language would stop
+matching the server's. A library has no classifier to protect. Promoting them
+would move a policy into a place that cannot state its own reason for holding
+it.
+
+**`txcontrol.go` — HOLD.** `ParseTxControl` reads transaction verbs as state
+transitions for autodb's engine to act on. It is protocol semantics, not a
+library's parsing service.
+
+**The pattern across all four**, worth one sentence because it is the test that
+settled three of them quickly: a thing is promotable when its VALUE survives
+separation from its cells. Where the cells ARE the value — the decoy compare,
+the classifier-protecting denylist — the code and its reasoning have to travel
+together, and a library is the wrong vehicle.
+
 ## An approval attaches to a SHA — and what moves it
 
 "An approval attaches to a SHA" is half a rule. The other half is what evidence
