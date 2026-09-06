@@ -286,8 +286,8 @@ type Exec struct {
 	// by a client that crashed without closing them.
 	SessionIdleTimeout Duration `toml:"session_idle_timeout"`
 
-	// IdleInTxTimeout and MaxTxDuration bound an OPEN transaction
-	//. These are not tuning knobs with a sensible "off": the
+	// IdleInTxTimeout and MaxTxDuration bound an OPEN transaction. These are
+	// not tuning knobs with a sensible "off": the
 	// target may be a live production database, where a transaction
 	// abandoned between BEGIN and COMMIT holds locks until something ends
 	// it. Nothing else will.
@@ -310,8 +310,8 @@ type Exec struct {
 	// becomes advisory.
 	MaxTxDurationCeiling Duration `toml:"max_tx_duration_ceiling"`
 
-	// PoolMaxConns bounds the connections one TARGET pool may open
-	//. A pinned transaction holds a physical connection for
+	// PoolMaxConns bounds the connections one TARGET pool may open. A pinned
+	// transaction holds a physical connection for
 	// as long as the session keeps it open, so without a bound a handful of
 	// callers with open transactions can consume a production database's
 	// entire connection budget — and the first thing that fails is somebody
@@ -422,8 +422,8 @@ type Meta struct {
 	// "postgres". Ignored for sqlite.
 	DSN string `toml:"dsn"`
 
-	// AllowInsecureDSN opts out of the transport check on the meta DSN
-	//. Without it a postgres meta store must use
+	// AllowInsecureDSN opts out of the transport check on the meta DSN.
+	// Without it a postgres meta store must use
 	// sslmode=verify-full with an explicit sslrootcert.
 	//
 	// A named key rather than a silent default, so an insecure deployment is
