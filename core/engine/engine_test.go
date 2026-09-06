@@ -31,6 +31,20 @@ import (
 // `"maria" + "db"`, or as `dao.DialectMariaDB`, is found either way, because
 // its value is never consulted.
 func declaredNames(t *testing.T) (idents []string, allSrc string) {
+	idents, _, allSrc = declaredNamesWithInit(t)
+	return idents, allSrc
+}
+
+// declaredNamesWithInit additionally returns, per identifier, the SOURCE TEXT
+// of the constant's initializer.
+//
+// The values alone cannot answer the question this package exists to settle.
+// `const Postgres Name = dao.DialectPostgres` and `const Postgres Name =
+// "postgres"` produce an identical value, so every value-based assertion —
+// membership in All(), presence in dao.EngineDialects(), equality against
+// dao.DialectPostgres — passes for both. Only the SOURCE distinguishes a
+// constant DEFINED FROM upstream from one that merely agrees with it today.
+func declaredNamesWithInit(t *testing.T) (idents []string, init map[string]string, allSrc string) {
 	t.Helper()
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
@@ -39,6 +53,7 @@ func declaredNames(t *testing.T) (idents []string, allSrc string) {
 	if err != nil {
 		t.Fatalf("parsing the package source: %v", err)
 	}
+	init = map[string]string{}
 	files := 0
 	for _, pkg := range pkgs {
 		for _, f := range pkg.Files {
@@ -51,8 +66,15 @@ func declaredNames(t *testing.T) (idents []string, allSrc string) {
 							continue
 						}
 						if id, ok := vs.Type.(*ast.Ident); ok && id.Name == "Name" {
-							for _, n := range vs.Names {
+							for i, n := range vs.Names {
 								idents = append(idents, n.Name)
+								if i < len(vs.Values) {
+									var b strings.Builder
+									if err := printer.Fprint(&b, fset, vs.Values[i]); err != nil {
+										t.Fatalf("printing %s's initializer: %v", n.Name, err)
+									}
+									init[n.Name] = b.String()
+								}
 							}
 						}
 					}
@@ -80,7 +102,7 @@ func declaredNames(t *testing.T) (idents []string, allSrc string) {
 		t.Fatal("did not find All()'s body; the membership check below would compare " +
 			"every identifier against an empty string and fail for the wrong reason")
 	}
-	return idents, allSrc
+	return idents, init, allSrc
 }
 
 // All() and the declared constants must agree in BOTH directions.
@@ -317,6 +339,46 @@ func TestEveryNameIsAGolibDialectAndEverySupportedEngineHasAName(t *testing.T) {
 		if string(pair.name) != pair.upstream {
 			t.Errorf("engine constant %q does not equal %s (%q); the values must have "+
 				"one source and it is upstream", string(pair.name), pair.src, pair.upstream)
+		}
+	}
+}
+
+// Every constant must be DEFINED FROM golib's, not merely equal to it.
+//
+// THIS IS THE HOLE A REVIEW FOUND, and it is the one assertion approach (b)
+// actually rests on. Replacing
+//
+//	const Postgres Name = dao.DialectPostgres
+//
+// with
+//
+//	const Postgres Name = "postgres"
+//
+// produces an identical VALUE, so it satisfies the identifier walk, All()
+// membership, both directions of the upstream guard, and even the equality loop
+// that compares each constant against dao.DialectPostgres — because the strings
+// really are equal. Every value-based cell in this file passes, and autodb has
+// silently acquired the second set of names the whole design exists to prevent.
+//
+// I claimed that mutation reddened the suite. It did not: the mutation I had
+// actually run used "postgress", a TYPO, which fails for a different reason
+// entirely — it is not in dao.EngineDialects(). A harsher mutation proved a
+// weaker property, which is the failure mode this codebase keeps finding.
+//
+// Only the SOURCE can tell the two apart, so this reads the initializer.
+func TestEveryConstantIsDefinedFromGolib(t *testing.T) {
+	_, init, _ := declaredNamesWithInit(t)
+	if len(init) == 0 {
+		t.Fatal("no initializers captured; the assertion below would hold vacuously")
+	}
+	for name, src := range init {
+		if !strings.HasPrefix(src, "dao.Dialect") {
+			t.Errorf("const %s = %s is not defined from golib. The VALUE may be "+
+				"correct today and every other cell in this file will still pass — "+
+				"that is exactly the hole. Approach (b) is 'autodb adds a TYPE, not a "+
+				"second SET', and a literal here IS a second set that happens to agree. "+
+				"Write it as dao.DialectX so a change upstream reaches us at compile "+
+				"time.", name, src)
 		}
 	}
 }
