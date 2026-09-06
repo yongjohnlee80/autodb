@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/config"
 )
 
-// Monthly partitioning — ADR-0079 §2 / P3, and its four id-integrity gates.
+// Monthly partitioning, and its four id-integrity gates.
 
 // scratchDSN creates an EMPTY scratch database and returns its DSN, without
 // opening or migrating it.
@@ -119,7 +119,7 @@ func freshPGStore(t *testing.T) (*Store, string) {
 // The volume tables really are partitioned, and the correctness tables really
 // are NOT.
 //
-// The negative half matters more: ADR-0079 measured that partitioning
+// The negative half matters more: measurement showed that partitioning
 // tx_outcomes destroys both R4 guards, so a future change that "partitions
 // everything for consistency" must fail here rather than in production.
 func TestPartitioning_OnlyTheVolumeTables(t *testing.T) {
@@ -141,7 +141,7 @@ func TestPartitioning_OnlyTheVolumeTables(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(parts) != 0 {
-			t.Errorf("%s IS partitioned (%v). ADR-0079 measured that time-partitioning it "+
+			t.Errorf("%s IS partitioned (%v). Measurement showed that time-partitioning it "+
 				"destroys both R4 guards: postgres forces the partition key into every "+
 				"unique index, so the same (tx_id, seq) can be rewritten in another month",
 				table, parts)
@@ -255,11 +255,12 @@ func TestPartitioning_DuplicateIdPreflightRefuses(t *testing.T) {
 
 // GATE 4 of 4: a by-id read is UNAMBIGUOUS across a partition boundary.
 //
-// This is the consequence lector's spike exposed and neither of us had listed:
+// This is the consequence a review spike exposed and nobody had listed:
 // a DAO Get(id) has no defined answer if two partitions hold that id, and
 // R4's repairPendingHistory pages with OrderBy(id) + Gt(id, cursor), so a
 // non-monotonic id lets a row be skipped — the same starvation class as
-// PR #20 r2/r3, reintroduced by the storage layout rather than by the loop.
+// the paging-starvation class, reintroduced by the storage layout rather
+// than by the loop.
 func TestPartitioning_ByIdReadIsUnambiguousAcrossMonths(t *testing.T) {
 	s, _ := freshPGStore(t)
 	ctx := context.Background()
@@ -373,7 +374,7 @@ func seedUserConn(t *testing.T, s *Store) {
 // The previous version of this test did NOT do that. It opened through
 // freshPGStore, which applies every migration including v11, then inserted
 // "old" rows into an already-partitioned table and reopened — proving only
-// that v11 tolerates being run once (lector's PR #32 r0 note). It was the
+// that v11 tolerates being run once. It was the
 // riskiest path in the phase and the one cell that claimed to cover it, which
 // is the worst combination. This one stops the runner at v10 so the rows exist
 // BEFORE the conversion sees them.
@@ -454,7 +455,7 @@ func TestPartitioning_UpgradeCarriesExistingRowsAcross(t *testing.T) {
 // the default partition. So before adoption, one missed roll was permanent:
 // the month could never be created, writes kept landing in DEFAULT, the daily
 // roll logged the same error forever, and retention could never detach the
-// month because its rows were not in it (lector's PR #32 r0 MF2, reproduced
+// month because its rows were not in it (found in review, reproduced
 // as: `updated partition constraint for default partition "audit_log_pdefault"
 // would be violated by some row`).
 func TestPartitioning_RollAdoptsRowsStrandedInDefault(t *testing.T) {

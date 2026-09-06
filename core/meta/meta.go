@@ -41,10 +41,10 @@ type Store struct {
 }
 
 // Open opens the configured meta-store engine, runs pending migrations, and
-// builds the entity schemas (ADR-0053 §2).
-// metaPoolBound sizes the meta store's own pool (ADR-0079 §4).
+// builds the entity schemas.
+// metaPoolBound sizes the meta store's own pool.
 //
-// The meta store is NOT a target pool and must not borrow ADR-0074's
+// The meta store is NOT a target pool and must not borrow the target pool's
 // 2 x cores: that number is sized by how much USER traffic a target absorbs,
 // while this one serves the daemon's own bookkeeping, whose concurrency the
 // daemon sets. Sizing it by cores would buy nothing and spend postgres
@@ -55,7 +55,7 @@ type Store struct {
 // DSN that says nothing gets the default.
 func metaPoolBound(mcfg config.Meta) postgres.Option {
 	// The SAME decision the validator made — one function, two callers
-	// (PR #27 r0). When these were decided separately, a DSN-level
+	// When these were decided separately, a DSN-level
 	// pool_max_conns=1 satisfied validation (which only looked at the TOML
 	// field) and then won at connect time, producing exactly the
 	// one-connection pool the floor exists to prevent.
@@ -78,7 +78,7 @@ func Open(ctx context.Context, mcfg config.Meta) (*Store, error) {
 
 // OpenNoMigrate connects WITHOUT touching the schema.
 //
-// It exists for one caller and one reason (ADR-0079 §5 / P2, lector r0 MF3):
+// It exists for one caller and one reason:
 // the migration CLI must prove no daemon is serving BEFORE it mutates
 // anything — and running migrations IS a mutation. Open cannot serve that,
 // because it migrates before it returns, so a CLI built on Open would already

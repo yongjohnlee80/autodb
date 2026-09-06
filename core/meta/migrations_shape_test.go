@@ -36,7 +36,7 @@ func renderMigrationDDL() string {
 // BEHAVIOUR is not covered here, and a change inside one would pass. Saying
 // "byte-for-byte" of the whole rendering would have overstated it — the
 // earlier version of this comment did, and truncated the hashes to 64 bits on
-// top of that. (lector, #91 r0.)
+// top of that.
 //
 // Collapsing a per-engine pair into Both is only safe if both engines still
 // receive byte-identical DDL in the same order. The golden was generated from

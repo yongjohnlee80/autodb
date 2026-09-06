@@ -4,7 +4,7 @@ package meta
 // LabelManager's proven pkg/transaction.MustTx idiom.
 //
 // GOLIB-TRANSFERABLE BY DESIGN, AND STAYING HERE: imports only context and
-// golib/dao. golib ADR-0019 §2.4 (ratified by Johno 2026-09-05) keeps it in
+// golib/dao. The upstream ruling (ratified by Johno 2026-09-05) keeps it in
 // autodb on two grounds: it has no production call sites yet, and golib
 // forbids exported API nothing uses; and `MustTx` is the wrong name for
 // public golib API, where the stdlib's Must* prefix means "panics instead of

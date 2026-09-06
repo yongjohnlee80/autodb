@@ -43,7 +43,7 @@ func schema[R any, C ~string](conn dao.DataConn, table string, id C, fields map[
 
 // --- users -------------------------------------------------------------------
 
-// User is an autodb account (Objectives 12-13; auth semantics in ADR-0054).
+// User is an autodb account.
 // PassHash holds the PHC-encoded argon2id record; MKWrapped is this user's
 // master-key keyslot (nonce-prefixed AES-GCM wrap).
 type User struct {
@@ -92,18 +92,18 @@ type Connection struct {
 	Name   string
 	Engine engine.Name
 	DSNEnc []byte
-	// Profile is the connection's capability profile (ADR-0074 §2):
+	// Profile is the connection's capability profile:
 	// "v1compat" or "session". Existing rows read v1compat, so enabling
 	// sessions is a per-connection decision rather than something a schema
 	// upgrade did on your behalf.
 	Profile string
-	// Debug marks a connection used for debugging against a live target
-	// (Amendment 2 C2): it takes the longer idle-in-transaction bound,
+	// Debug marks a connection used for debugging against a live target, and
+	// it takes the longer idle-in-transaction bound,
 	// because a developer paused at a breakpoint inside a transaction should
 	// not be rolled back mid-step. 0/1, matching users.disabled.
 	Debug int64
-	// PoolMaxConns is this connection's own bound on pooled connections
-	// (ADR-0074 §1a). 0 takes the install-wide value; a larger number is
+	// PoolMaxConns is this connection's own bound on pooled connections.
+	// 0 takes the install-wide value; a larger number is
 	// capped to it when the pool is opened, so a row cannot raise its own
 	// share of a production database's connection budget.
 	PoolMaxConns int64
@@ -111,7 +111,7 @@ type Connection struct {
 	CreatedAt    int64
 	UpdatedAt    int64
 	// TargetDB is the database name inside this connection's DSN, kept in
-	// PLAINTEXT (ADR-0086 §3).
+	// PLAINTEXT.
 	//
 	// The database NAME is not a secret — the DSN's credentials are — and a
 	// column makes the startup `database` cross-check an indexed read instead
@@ -135,7 +135,7 @@ func (c *Connection) IsDebug() bool { return c.Debug != 0 }
 //
 // They live HERE, in the package that owns the column, because both layers
 // above need them and neither may import the other: core/auth gates PAT
-// minting on a connection's profile (ADR-0086 §6) and core/exec decides
+// minting on a connection's profile and core/exec decides
 // statement admission from it, while core/auth sits BELOW core/exec and cannot
 // reach exec.Profile. Defining the literal a second time in auth would make
 // three copies of one fact — the migration DDL's default being the first.
@@ -432,7 +432,7 @@ func newAllowedIPs(conn dao.DataConn) *dao.Schema[*AllowedIP, AllowedIPField, So
 	})
 }
 
-// UserIP is one user_ip_allowlist row (ADR-0075 §4): the per-user layer of
+// UserIP is one user_ip_allowlist row: the per-user layer of
 // the front door's two-layer IP model. A front-door login must pass BOTH the
 // global allowlist and the connecting user's rows, and a PAT's allowed_ips
 // must be a subset of these. Managed self-service (own rows) or by an admin.
@@ -467,11 +467,11 @@ func newUserIPs(conn dao.DataConn) *dao.Schema[*UserIP, UserIPField, Sort, int64
 // --- keyslots ---------------------------------------------------------------------
 
 // Keyslot is one row of the keyslots table: a copy of the install master key,
-// wrapped by something other than a user passphrase (ADR-0087).
+// wrapped by something other than a user passphrase.
 //
 // It is the SIBLING of users.mk_wrapped, and deliberately the same shape —
 // Wrapped is the identical nonce-prefixed AES-GCM blob, in a BLOB/BYTEA column,
-// so a reader written against one works against the other. Amendment 1 A1.1
+// so a reader written against one works against the other. The keyslot design
 // chose a table over a store_meta row for exactly that reason: store_meta.value
 // is TEXT, and base64 there would have made these two the same secret in two
 // representations.
@@ -482,7 +482,7 @@ type Keyslot struct {
 	Kind string
 	// Wrapped is the master key sealed to this slot's KEK: nonce ‖ ciphertext.
 	Wrapped []byte
-	// AADVersion records WHICH binding sealed it (ADR-0087 §3), so a rotation
+	// AADVersion records WHICH binding sealed it, so a rotation
 	// can tell an old blob from a new one instead of failing to open and
 	// guessing why.
 	AADVersion string
@@ -546,7 +546,7 @@ func newKV(conn dao.DataConn) *dao.Schema[*MetaKV, MetaKVField, Sort, string] {
 	)
 }
 
-// PAT is a Personal Access Token — the front door's credential (ADR-0075 §4).
+// PAT is a Personal Access Token — the front door's credential.
 //
 // Distinct from Session by design: named, deliberately long-lived, and pasted
 // into a DSN by a person. A session is anonymous, short-lived, and held by a
@@ -565,7 +565,7 @@ type PAT struct {
 	UserID     int64
 	Name       string
 	// AllowedIPs is this token's own narrowing, canonicalized on write.
-	// EMPTY means it inherits the admission set (ADR-0075 Amendment 1) —
+	// EMPTY means it inherits the admission set —
 	// not "nowhere", which would make an ordinary token useless.
 	AllowedIPs string
 	CreatedAt  int64
@@ -573,7 +573,7 @@ type PAT struct {
 	// LastUsedAt is written coalesced, never once per statement.
 	LastUsedAt int64
 	Revoked    int64 // 0/1 flag
-	// ConnID is the ONE connection this token may reach (ADR-0086 §1).
+	// ConnID is the ONE connection this token may reach.
 	//
 	// Binding the credential is what dissolves the connection-name vs
 	// target-database-name ambiguity: two connections targeting a database
@@ -588,7 +588,7 @@ type PAT struct {
 	// un-revoked by hand cannot come back as an unscoped token.
 	ConnID int64
 	// DebugCleartext marks a token mintable ONLY while the daemon serves
-	// cleartext (ADR-0086 §10). Such a token REQUIRES a non-empty AllowedIPs,
+	// cleartext. Such a token REQUIRES a non-empty AllowedIPs,
 	// which is then its whole admission gate rather than a narrowing of its
 	// owner's — the inherited set is not consulted — and it is REFUSED on a
 	// TLS listener, so the relaxed perimeter cannot leave the debugging mode

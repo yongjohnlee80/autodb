@@ -15,7 +15,7 @@ package meta
 // way; the transferability is what makes the upstream move cheap if it is
 // ever taken.
 //
-// The upstream question was asked and ANSWERED — golib ADR-0019 §2.3,
+// The upstream question was asked and ANSWERED —
 // ratified by Johno 2026-09-05: it stays in autodb. The second-consumer
 // test failed (no other golib/dao consumer hand-rolls a sweep; ddex's
 // Limit/Offset is a caller-bounded list endpoint), this file has one
@@ -23,7 +23,7 @@ package meta
 // autokb was checked rather than assumed: its golib prerequisite is
 // golib/fs, not dao, and its storage design specifies no keyset sweep.
 //
-// Re-open when any of these becomes true (ADR-0019 §2.3): a design that
+// Re-open when any of these becomes true: a design that
 // specifies a bounded scan over a table with a unique monotonic id, an
 // autodb sweep this API does not fit, or a third consumer hand-rolling
 // position+LIMIT+predicate. THEN design the native dao version — it could
@@ -61,7 +61,7 @@ type SweepSpec[R any, C ~string, K ~string] struct {
 	// PageSize bounds one page. MANDATORY.
 	PageSize uint64
 
-	// Where holds the sweep's predicates. THE RULE FROM PR #22: a
+	// Where holds the sweep's predicates. THE RULE: a
 	// predicate matching rows the visitor will never act on excludes them
 	// HERE, at the query — skipped-in-the-loop rows consume page budget
 	// and starve everything behind them.

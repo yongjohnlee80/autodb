@@ -13,7 +13,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/config"
 )
 
-// ADR-0074 §1 mandates a negative test: two endpoints, one meta store, and
+// The design mandates a negative test: two endpoints, one meta store, and
 // the second engine must refuse. These are it.
 //
 // The interesting one is TestInstanceLease_SecondProcessIsRefused. A
@@ -293,8 +293,8 @@ func TestInstanceLease_Postgres(t *testing.T) {
 	}
 }
 
-// MF1, both engines. A lease keyed on the SPELLING that reached the database
-// rather than on the database itself is decorative: lector obtained two leases
+// Both engines. A lease keyed on the SPELLING that reached the database
+// rather than on the database itself is decorative: review obtained two leases
 // over one SQLite file through a symlink alias, and two over one PostgreSQL
 // database through DSNs differing only by application_name.
 //
@@ -303,7 +303,7 @@ func TestInstanceLease_Postgres(t *testing.T) {
 // because the key is an implementation detail and the exclusion is the
 // promise.
 
-// MF1, both alias forms. A lease keyed on a PATH is not keyed on a database.
+// Both alias forms. A lease keyed on a PATH is not keyed on a database.
 // Symlink spellings were the first hole; hardlinks are the one no path
 // canonicalisation can close, because hardlinks have no canonical name and
 // need not even share a directory. The lock is taken on the store's inode,
@@ -476,7 +476,7 @@ func TestInstanceLease_ReleaseBeforeStoreCloseDoesNotHang(t *testing.T) {
 	}
 }
 
-// The lease is ONE abstraction across engines (ADR-0079 §4).
+// The lease is ONE abstraction across engines.
 //
 // Not a style point: a caller that had to branch on the engine would be a
 // caller that could forget an engine, and the daemon takes the lease on a

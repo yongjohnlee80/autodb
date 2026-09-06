@@ -42,6 +42,7 @@ var certifiedClean = []string{
 	"cmd/autodb",
 	"rpc",
 	"core/engine",
+	"core/meta",
 }
 
 // Patterns that name a private artefact.
@@ -285,11 +286,17 @@ func TestCertifiedPackagesCiteNothingPrivateInStrings(t *testing.T) {
 // machinery you were not thinking about at all.
 func TestNoCommentBeginsWithABarePeriod(t *testing.T) {
 	root := "../.."
-	// NOT an ellipsis. "// ...and the fresh-daemon half" is ordinary prose and
-	// the first version of this check flagged it — the same what-does-it-accept
-	// failure the guard exists to catch, committed while adding the guard. RE2
-	// has no lookahead, so the trailing class does the work.
-	bare := regexp.MustCompile(`^\s*//\s*\.([^.]|$)`)
+	// NOT an ellipsis, and NOT a path. "// ...and the fresh-daemon half" is
+	// ordinary prose and the first version of this check flagged it — the same
+	// what-does-it-accept failure the guard exists to catch, committed while
+	// adding the guard. The second version, with a [^.] trailing class, then
+	// flagged "// ./...` runs packages in parallel" — a shell path, found the
+	// moment core/meta was certified.
+	//
+	// So the shape is a period followed by WHITESPACE or end of line, which is
+	// what a beheaded sentence looks like and what neither an ellipsis nor a
+	// relative path can be. RE2 has no lookahead; it does not need one.
+	bare := regexp.MustCompile(`^\s*//\s*\.(\s|$)`)
 	checked := 0
 	var found []string
 	for _, pkg := range certifiedClean {
@@ -329,7 +336,11 @@ func TestNoCommentBeginsWithABarePeriod(t *testing.T) {
 	// separates them. Demanding both would have forced the check to accept the
 	// defect it exists to catch. A negative fixture can itself be wrong, and
 	// insisting on one is how a guard gets weakened until it passes everything.
-	for _, negative := range []string{"// ...and the fresh-daemon half"} {
+	for _, negative := range []string{
+		"// ...and the fresh-daemon half",
+		"\t// ./...` runs packages in parallel against one TEST_PGURL database",
+		"// ./cmd/autodb is the binary",
+	} {
 		if bare.MatchString(negative) {
 			t.Errorf("the bare-period pattern matches %q; an ellipsis is ordinary prose", negative)
 		}

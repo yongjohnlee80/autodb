@@ -17,7 +17,7 @@ import (
 var ErrMigrate = errors.New("meta: engine migration refused")
 
 // MigrateToPostgres copies a sqlite meta-store into an empty postgres
-// meta-store — the one-way engine migration of Objective 6 / ADR-0053 §4.
+// meta-store — the one-way engine migration.
 //
 // Preconditions (refused otherwise): src is sqlite, dst is postgres, both
 // are migrated to the same schema version (guaranteed by Open), and every
@@ -61,7 +61,7 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 				// after this map was written and never added to it, so a
 				// migration silently reset profile=session to v1compat, lost
 				// the debug timeout behaviour, and threw away per-connection
-				// pool budgets (lector's PR #31 r1 MF1). Nothing failed: the
+				// pool budgets. Nothing failed: the
 				// row count matched, because a dropped COLUMN is invisible to
 				// a check that counts ROWS.
 				return map[ConnField]any{ConnID: r.ID, ConnName: r.Name, ConnEngine: r.Engine.String(),
@@ -139,18 +139,18 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					IPCreatedBy: r.CreatedBy, IPCreatedAt: r.CreatedAt}
 			})
 		}},
-		// The PER-USER allowlist (ADR-0075's two-layer IP model). It was
+		// The PER-USER allowlist. It was
 		// missing from the copy steps, from countableTables and from
 		// serialTables all at once, so a migration dropped every per-user
 		// front-door rule AND the verification could not notice — a table
-		// absent from the list is a table nothing compares (MF1).
+		// absent from the list is a table nothing compares.
 		{"user_ip_allowlist", func() (int64, error) {
 			return copyAll(ctx, src.UserIPs, dst.UserIPs, func(r *UserIP) map[UserIPField]any {
 				return map[UserIPField]any{UIPID: r.ID, UIPUserID: r.UserID, UIPCIDR: r.CIDR,
 					UIPLabel: r.Label, UIPCreatedAt: r.CreatedAt}
 			})
 		}},
-		// PATs (ADR-0075 §4). After users, which they reference.
+		// PATs. After users, which they reference.
 		//
 		// EVERY column, not the ones that come to mind: the guard that
 		// caught this table's absence was written because a dropped COLUMN
@@ -174,7 +174,7 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 				return map[MetaKVField]any{KVKey: r.Key, KVValue: r.Value}
 			})
 		}},
-		// The SERVICE KEYSLOT travels with the store (ADR-0087). Omitting it
+		// The SERVICE KEYSLOT travels with the store. Omitting it
 		// here would migrate an install whose daemon then starts LOCKED with
 		// no explanation — the keyfile on disk would be fine and the slot it
 		// opens simply would not exist. A table missing from this list is
@@ -298,7 +298,7 @@ func ensureEmpty(ctx context.Context, dst *Store) error {
 //
 // It walks countableTables rather than keeping its own map. That list's own
 // comment already called itself the ONE list while this function held a second
-// copy of it — lector's PR #31 r0 non-blocking note. The two agreed, which is
+// copy of it — a review noted it. The two agreed, which is
 // the dangerous state rather than the safe one: drift between duplicated lists
 // is invisible until the day a table is added to only one of them, and the
 // symptom then is a migration that silently drops a table it never verified.

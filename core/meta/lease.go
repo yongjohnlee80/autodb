@@ -17,7 +17,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/config"
 )
 
-// The instance lease: one engine per meta store, enforced (ADR-0074 §1).
+// The instance lease: one engine per meta store, enforced.
 //
 // The existing singleton check is per LISTENING ENDPOINT — cmd/autodb binds
 // the address and probes the occupant, then opens the meta store afterward
@@ -69,7 +69,7 @@ type InstanceLease struct {
 // before anything is served.
 // AcquireLease takes the single-instance lease for a store.
 //
-// ONE abstraction, two mechanisms (ADR-0079 §4). Callers get one type with one
+// ONE abstraction, two mechanisms. Callers get one type with one
 // Release, one Target and one Lost, and never branch on the engine — the
 // engine-specific state is a union inside InstanceLease rather than a second
 // type with a second lifecycle.
@@ -110,7 +110,7 @@ func (l *InstanceLease) Release() error {
 	if l.tx != nil {
 		// A fresh bounded context: the caller's may already be cancelled,
 		// and releasing the lease is exactly the cleanup that must still
-		// happen when it is (golib-dao-0017 §2.2).
+		// happen when it is.
 		cctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 5*time.Second)
 		defer cancel()
 		if err := l.tx.RollbackContext(cctx); err != nil {

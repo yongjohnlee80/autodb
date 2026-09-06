@@ -14,7 +14,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/config"
 )
 
-// MIGRATION COMPLETENESS — lector's PR #31 r1 MF1.
+// MIGRATION COMPLETENESS.
 //
 // The copier lost state without failing, twice over and in two different ways:
 //
@@ -51,7 +51,7 @@ func TestMigrateCompleteness_CountableTablesCoversTheSchema(t *testing.T) {
 	ctx := context.Background()
 	dst, _ := isolatedPGStore(t, base, "cover")
 
-	// PARTITION CHILDREN ARE EXCLUDED, and this matters ahead of ADR-0079 P3
+	// PARTITION CHILDREN ARE EXCLUDED, and this matters ahead of the retention work
 	// rather than after it: once script_history and audit_log are partitioned,
 	// every monthly child (audit_log_p2026_09, ...) and the default partition
 	// appear here as BASE TABLEs. They are storage for a parent that IS in the
@@ -356,7 +356,7 @@ func seedEverything(t *testing.T, s *Store) {
 	if err := s.SetMeta(ctx, "install_id", "src-install"); err != nil {
 		t.Fatal(err)
 	}
-	// The SERVICE KEYSLOT (ADR-0087). Every field non-default, because this
+	// The SERVICE KEYSLOT. Every field non-default, because this
 	// cell compares column by column and a zero value proves nothing about
 	// whether that column was copied.
 	//

@@ -57,17 +57,17 @@ func (m migration) stmts(eng engine.Name) []string {
 	return m.SQLite
 }
 
-// migrations is the ordered, append-only schema history (ADR-0053 §3).
+// migrations is the ordered, append-only schema history.
 var migrations = []migration{
 	{Version: 1, SQLite: ddlV1SQLite, Postgres: ddlV1Postgres},
-	// v2 (ADR-0054 §6): per-user master-key keyslot. NOT NULL with an empty
+	// v2: per-user master-key keyslot. NOT NULL with an empty
 	// default so v1 stores upgrade; auth code enforces non-empty at creation.
 	{
 		Version:  2,
 		SQLite:   []string{`ALTER TABLE users ADD COLUMN mk_wrapped BLOB NOT NULL DEFAULT x''`},
 		Postgres: []string{`ALTER TABLE users ADD COLUMN mk_wrapped BYTEA NOT NULL DEFAULT '\x'::bytea`},
 	},
-	// v3 (ADR-0074 §2, Amendment 2 C2): the per-connection capability
+	// v3: the per-connection capability
 	// profile and the debug flag.
 	//
 	// Both default to today's behaviour, which is the safe direction and the
@@ -87,7 +87,7 @@ var migrations = []migration{
 			`ALTER TABLE connections ADD COLUMN debug INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
-	// v4 (ADR-0074 §1a): the per-connection pool bound.
+	// v4: the per-connection pool bound.
 	//
 	// 0 means "take the install-wide value", which is why the column can be
 	// added to a live store without a decision — every existing connection
@@ -102,13 +102,13 @@ var migrations = []migration{
 			`ALTER TABLE connections ADD COLUMN pool_max_conns INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
-	// v5 (ADR-0074 §7 rev 2 + Amendment 4): the transaction outcome log.
+	// v5: the transaction outcome log.
 	//
 	// APPEND-ONLY, and that is the whole point. The v1 model recorded an
 	// outcome by UPDATEing script_history in place, overwriting "running"
 	// with "ok" or "error" — which cannot express a progression, cannot
 	// express an outcome that is not yet knowable, and destroys the earlier
-	// state it overwrites. §7's machine needs all three, so outcomes get
+	// state it overwrites. The outcome machine needs all three, so outcomes get
 	// their own table and script_history becomes a projection of it.
 	//
 	// One row per state transition, ordered by seq within a tx_id:
@@ -118,16 +118,16 @@ var migrations = []migration{
 	//   unknown_pending -- appended by a resolver that could not prove it
 	//   committed | rolled_back | outcome_unresolvable   -- terminal
 	//
-	// §7: "an absent record after commit_started is interpreted as
+	// The rule: "an absent record after commit_started is interpreted as
 	// unknown_pending", so the nonterminal state is inferable from absence
 	// as well as recordable explicitly. Both are the same fact.
 	//
 	// target_xid is nullable because it only exists where the dialect has
 	// one: Postgres txid_current(). Its absence IS the no-oracle condition
-	// Amendment 4 A3 terminates as outcome_unresolvable(reason=no-oracle),
+	// The no-oracle case terminates as outcome_unresolvable(reason=no-oracle),
 	// so the column not being set is load-bearing rather than incidental.
 	//
-	// No foreign keys, for the same reason audit_log has none (ADR-0053 §2):
+	// No foreign keys, for the same reason audit_log has none:
 	// the outcome trail must never fail to record because something else it
 	// points at is gone. A deleted connection must not take the evidence of
 	// what it did with it.
@@ -144,8 +144,8 @@ var migrations = []migration{
 	//                                      index while contradicting each
 	//                                      other, so G2 needs its own.
 	//
-	// The second one lives in the store on purpose (lector Amendment-4 r0
-	// MF3): the instance lease gives one PROCESS, not one goroutine, and the
+	// The second one lives in the store on purpose: the instance lease gives
+	// one PROCESS, not one goroutine, and the
 	// periodic reconciler, the checkout trigger, the boundary handler and
 	// the timeout reaper can all overlap inside it. An application-level
 	// check-then-write cannot make exactly-one-terminal true across four
@@ -190,7 +190,7 @@ var migrations = []migration{
 			`CREATE INDEX idx_tx_outcomes_state ON tx_outcomes(state, created_at)`,
 		},
 	},
-	// v6 (ADR-0074 §7 rev 2): tx_id on the audit trail and on history.
+	// v6: tx_id on the audit trail and on history.
 	//
 	// R3 already issues a tx_id and writes it into the free-text `detail`
 	// string of its boundary events. A substring is not a correlation key:
@@ -209,7 +209,7 @@ var migrations = []migration{
 			`CREATE INDEX idx_audit_tx ON audit_log(tx_id)`,
 		},
 	},
-	// v7 adds the durable outcome QUEUE (ADR-0074 §7: "Opening a tx enqueues
+	// v7 adds the durable outcome QUEUE ("Opening a tx enqueues
 	// a durable finalization-pending entry in core/meta keyed by tx_id …
 	// resolved by whichever writer learns the truth first").
 	//
@@ -218,7 +218,7 @@ var migrations = []migration{
 	// transaction keeps its `opened` row forever, and every committed one
 	// keeps its `commit_started` too, so no predicate over STATES can
 	// separate the pending from the settled. Any such query selects the
-	// whole history (PR #20 r1 MF1).
+	// whole history.
 	//
 	// So the queue is a separate, SMALL table holding exactly the
 	// unresolved: one row per transaction, inserted when it opens and
@@ -256,7 +256,7 @@ var migrations = []migration{
 				GROUP BY tx_id`,
 		},
 	},
-	// v8 gives the queue the columns a FAIR page needs (PR #20 r2).
+	// v8 gives the queue the columns a FAIR page needs.
 	//
 	// A LIMIT with no ordering and no cursor revisits the same page forever,
 	// so a resolvable entry sitting behind a screenful of live ones is never
@@ -274,7 +274,7 @@ var migrations = []migration{
 			`CREATE INDEX idx_tx_pending_user ON tx_pending(user_id, created_at)`,
 		},
 	},
-	// v9 (ADR-0075 §4): the per-user layer of the front door's two-layer IP
+	// v9: the per-user layer of the front door's two-layer IP
 	// model. UNIQUE(user_id, cidr) makes re-adding idempotent-by-refusal;
 	// ON DELETE CASCADE because a removed user's allowlist rows authorize
 	// nobody and must not linger as orphans. (Authored as a provisional v5;
@@ -302,7 +302,7 @@ var migrations = []migration{
 		},
 	},
 	// v10 records WHEN a settled progression was collapsed to its tombstone
-	// (ADR-0079 §3 / P4).
+	// (the retention phase).
 	//
 	// Retention for the outcome log COLLAPSES rather than deletes: the
 	// intermediate transitions of a settled transaction go, the terminal
@@ -312,7 +312,7 @@ var migrations = []migration{
 	// PROVES nothing started). Deleting settled rows would break that proof
 	// and a committed transaction would begin answering "no such
 	// transaction", which is the same class of lie the write-ahead ordering
-	// exists to prevent (ADR-0074 Amendment 5 decision 5).
+	// exists to prevent.
 	//
 	// collapsed_at is 0 for a progression that is still intact. Non-zero
 	// means "the terminal you are reading is a tombstone; the transitions
@@ -324,8 +324,7 @@ var migrations = []migration{
 			`ALTER TABLE tx_outcomes ADD COLUMN collapsed_at BIGINT NOT NULL DEFAULT 0`,
 		},
 	},
-	// v11 partitions the VOLUME tables by month — postgres only (ADR-0079 §2,
-	// phase P3).
+	// v11 partitions the VOLUME tables by month — postgres only.
 	//
 	// No SQLite entry, and that is the decision rather than an omission:
 	// sqlite is a single-writer file with no partitioning, and the volume
@@ -339,7 +338,7 @@ var migrations = []migration{
 		Version:    11,
 		PostgresFn: partitionVolumeTables,
 	},
-	// v12 (ADR-0075 §4): Personal Access Tokens — the front door's
+	// v12: Personal Access Tokens — the front door's
 	// credential.
 	//
 	// A separate table from `sessions` rather than a flag on it, because a
@@ -358,7 +357,7 @@ var migrations = []migration{
 	// failure shape depends on that cost being flat.
 	//
 	// allowed_ips is the token's own narrowing, stored canonicalized. Empty
-	// means it inherits the admission set (ADR-0075 Amendment 1) rather than
+	// means it inherits the admission set rather than
 	// meaning "nowhere" — an empty list that denied everything would make
 	// the ordinary token useless.
 	{
@@ -392,12 +391,12 @@ var migrations = []migration{
 				UNIQUE (user_id, name))`,
 		},
 	},
-	// v13 (ADR-0086): a PAT names exactly ONE connection, and a connection
+	// v13: a PAT names exactly ONE connection, and a connection
 	// records its target database name in plaintext.
 	//
 	// NO DATABASE-LEVEL FOREIGN KEY on pats.conn_id, and that is a decision
-	// rather than an omission (ADR-0086 §1, ruled by Johno 2026-09-05 after the
-	// r0 review). A `NOT NULL` REFERENCES column CANNOT BE ADDED TO A POPULATED
+	// rather than an omission (ruled by Johno 2026-09-05 after the
+	// first review). A `NOT NULL` REFERENCES column CANNOT BE ADDED TO A POPULATED
 	// TABLE on either engine — reproduced on both, with only the row count
 	// varying:
 	//
@@ -422,7 +421,7 @@ var migrations = []migration{
 	// and the auth path refuses conn_id = 0 independently of `revoked` so a
 	// hand-un-revoked row cannot come back as an unscoped token.
 	//
-	// debug_cleartext (ADR-0086 §10) marks a credential mintable only while the
+	// debug_cleartext marks a credential mintable only while the
 	// daemon serves cleartext, whose allowed_ips is its whole admission gate and
 	// which is refused on a TLS listener. It arrives here rather than in a later
 	// version because the ADR ships as one phase.
@@ -480,18 +479,18 @@ var migrations = []migration{
 		},
 	},
 	{
-		// v14 — the SERVICE KEYSLOT (ADR-0087, Amendment 1 A1.1).
+		// v14 — the SERVICE KEYSLOT.
 		//
 		// A table rather than a store_meta row, and the reason is the column
 		// type. The wrapped master key is a nonce-prefixed AES-GCM blob, and
-		// its SIBLING — users.mk_wrapped, the per-user slot from ADR-0054 —
+		// its SIBLING — users.mk_wrapped, the per-user slot —
 		// is already BLOB/BYTEA. Putting this one in store_meta (TEXT, Go
 		// string) would give one install TWO REPRESENTATIONS of the same kind
 		// of secret, and the failure that follows is not a forgotten base64:
 		// it is somebody writing one reader that works on one of the two.
 		//
-		// The table also gives the ADR's own requirements a shape instead of
-		// a string to encode them into: §3's AAD version, and §5's
+		// The table also gives the design's own requirements a shape instead of
+		// a string to encode them into: the AAD version, and the
 		// created_by/created_at for the audit row that must commit in the
 		// same transaction as the slot.
 		//
@@ -552,7 +551,7 @@ const migrationLockWait = 2 * time.Minute
 // ./...` runs packages in parallel against one TEST_PGURL database. Two autodb
 // daemons starting simultaneously against one postgres meta store race
 // identically, and the instance lease does not prevent it because migrations
-// run BEFORE the lease is taken (ADR-0079 §5).
+// run BEFORE the lease is taken.
 //
 // The lock BLOCKS rather than refusing: a second starter should wait for the
 // first to finish and then find nothing to apply, not fail. It is
@@ -602,7 +601,7 @@ func withMigrationLock(ctx context.Context, conn dao.DataConn, run func(tx dao.C
 			"process has been migrating this database for over %s: %w", key, migrationLockWait, err)
 	}
 	// The migrations run on THIS transaction — the one holding the lock — so
-	// no second pool connection is needed (PR #22 r0 MF2). Committing both
+	// no second pool connection is needed. Committing both
 	// applies the upgrade and releases the lock, in that order, atomically.
 	if err := run(tx); err != nil {
 		return err
@@ -658,7 +657,7 @@ type migExec interface {
 //     applying DDL through the POOL then needs a SECOND connection. With
 //     pool_max_conns=1 in the meta DSN that deadlocks: the lock holds the only
 //     connection and the migration waits for one forever, surfacing as
-//     "creating schema_migrations: context deadline exceeded" (PR #22 r0 MF2).
+//     "creating schema_migrations: context deadline exceeded".
 //     Running the DDL on the pinned transaction removes the hidden
 //     second-connection requirement entirely.
 //   - An upgrade that half-applies is worse than one that does not start. Both
@@ -740,7 +739,7 @@ func firstLine(s string) string {
 	return s
 }
 
-// --- v1 DDL (ADR-0053 §2) ------------------------------------------------------
+// --- v1 DDL ------------------------------------------------------
 //
 // Portability rules: int64 autoincrement ids, unix-second BIGINT timestamps,
 // INTEGER 0/1 flags, TEXT enums with CHECK constraints.
@@ -799,7 +798,7 @@ var ddlV1SQLite = []string{
 		status TEXT NOT NULL,
 		error TEXT NOT NULL DEFAULT '')`,
 	// audit_log has NO foreign keys by design: auditing must never fail, and
-	// user_id 0 records pre-auth events (ADR-0053 §2).
+	// user_id 0 records pre-auth events.
 	`CREATE TABLE audit_log (
 		id INTEGER PRIMARY KEY,
 		user_id INTEGER NOT NULL DEFAULT 0,

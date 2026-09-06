@@ -147,7 +147,7 @@ func lastIndexByte(s string, b byte) int {
 	return -1
 }
 
-// PR #22 r0 MF2: a fresh open must work when the meta DSN allows ONE
+// A fresh open must work when the meta DSN allows ONE
 // connection.
 //
 // The advisory lock is held on a pinned transaction. If the migrations then

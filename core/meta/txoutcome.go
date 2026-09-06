@@ -2,13 +2,14 @@ package meta
 
 import "github.com/yongjohnlee80/golib/dao"
 
-// The transaction outcome log (ADR-0074 §7 rev 2, Amendment 4).
+// The transaction outcome log.
 //
 // An APPEND-ONLY progression, one row per state transition, ordered by seq
 // within a tx_id. It exists because the v1 model recorded an outcome by
 // UPDATEing script_history in place — overwriting "running" with "ok" — which
 // cannot express a progression, cannot express an outcome that is not yet
-// knowable, and destroys the state it overwrites. §7 needs all three.
+// knowable, and destroys the state it overwrites. The outcome machine needs
+// all three.
 //
 // The invariant this table carries: every transaction ends in EXACTLY ONE
 // terminal state, and a nonterminal `unknown_pending` may persist durably and
@@ -32,7 +33,7 @@ const (
 	TxCommitStarted TxState = "commit_started"
 
 	// TxUnknownPending is NONTERMINAL: the commit outcome is not yet
-	// provable. §7 also treats the ABSENCE of any row after commit_started
+	// provable. The progression also treats the ABSENCE of any row after commit_started
 	// as this state, so it can be inferred as well as recorded; both are the
 	// same fact, and IsPending below is the one place that knows it.
 	TxUnknownPending TxState = "unknown_pending"
@@ -67,7 +68,7 @@ func TxStates() []TxState {
 // from "the target no longer remembers" from "this dialect can never say" —
 // three different facts that all end an entry the same way.
 const (
-	// ReasonNoOracle is Amendment 4 A3: the dialect has no commit-status
+	// ReasonNoOracle: the dialect has no commit-status
 	// oracle at all (MySQL, SQLite), so the outcome is not merely unproven
 	// now but unprovable ever. Distinct from ReasonXIDHorizon, which means
 	// the oracle existed and has forgotten.
@@ -82,7 +83,7 @@ const (
 	// ReasonUnanswered: the COMMIT was dispatched and the server never
 	// answered — a transport or context failure, not a deadline. Distinct
 	// from ReasonTimeout so an operator is not told a timeout occurred when
-	// none did (PR #20 r0 SF2).
+	// none did.
 	ReasonUnanswered = "server-unanswered"
 	// ReasonConnectionGone: the connection row was deleted, so no oracle can
 	// be consulted for this transaction again. Distinct from ReasonNoOracle,
@@ -101,7 +102,7 @@ func (s TxState) IsTerminal() bool {
 }
 
 // IsPending reports whether s leaves the outcome unresolved and therefore in
-// the reconciler's backlog. commit_started counts: §7 reads an absent record
+// the reconciler's backlog. commit_started counts: an absent record
 // after it as unknown_pending, so a trail that stops there is pending whether
 // or not the explicit row was ever written.
 func (s TxState) IsPending() bool {
@@ -120,13 +121,13 @@ type TxOutcome struct {
 	HistoryID    int64
 	// TargetXID is the target's own transaction id, where the dialect has
 	// one. Empty means there is no oracle to ask — which is the condition
-	// Amendment 4 A3 terminates as outcome_unresolvable(no-oracle), so its
+	// The no-oracle case terminates as outcome_unresolvable(no-oracle), so its
 	// emptiness is load-bearing rather than incidental.
 	TargetXID string
 	CreatedAt int64
 	// CollapsedAt is 0 while a progression is intact. Non-zero means this
 	// terminal is a TOMBSTONE: the transitions leading to it were pruned by
-	// retention at that time (ADR-0079 §3). The row itself is never removed,
+	// retention at that time. The row itself is never removed,
 	// because absence is what ErrNoSuchTx uses to prove nothing started.
 	CollapsedAt int64
 }
@@ -170,7 +171,7 @@ func newTxOutcomes(conn dao.DataConn) *dao.Schema[*TxOutcome, TxOutcomeField, So
 
 // --- the pending queue ------------------------------------------------------
 
-// TxPending is one unresolved transaction: ADR-0074 §7's durable outcome
+// TxPending is one unresolved transaction: the durable outcome
 // queue, keyed by tx_id.
 //
 // It exists because the LOG cannot answer "what is still unresolved?" without
