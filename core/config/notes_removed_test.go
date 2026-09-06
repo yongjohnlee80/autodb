@@ -39,7 +39,7 @@ func TestRemovedNotesKeysFailToLoadWithAReason(t *testing.T) {
 					"ignoring it leaves the operator believing the setting still applies", tc.key)
 			}
 			msg := err.Error()
-			if !strings.Contains(msg, "ADR-0068") {
+			if !strings.Contains(msg, "identity-keyed") {
 				t.Errorf("error does not name the removal: %q", msg)
 			}
 			if !strings.Contains(msg, "user, workspace") {

@@ -14,7 +14,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// sqlite -> postgres migration CLI — ADR-0079 §5 / P2.
+// sqlite -> postgres migration CLI.
 
 func pgDSN(t *testing.T) string {
 	t.Helper()
@@ -46,7 +46,7 @@ func seedSqlite(t *testing.T) string {
 	return path
 }
 
-// THE MF3 PROPERTY: no-serving is proven BEFORE the destination is touched.
+// THE PROPERTY: no-serving is proven BEFORE the destination is touched.
 //
 // A daemon holding the destination lease must stop the migration, and the
 // destination must be left EXACTLY as it was — not migrated, not partially
@@ -185,7 +185,7 @@ func TestMigrateCLI_AppliesTheTransportRuleToTheDestinationDSN(t *testing.T) {
 	}
 }
 
-// MF1: a typo in --from must not be answered with a brand-new empty store.
+// A typo in --from must not be answered with a brand-new empty store.
 //
 // meta.OpenNoMigrate opens sqlite in a creating mode, which is right for a
 // daemon's first run and wrong here: a misspelled path was created, migrated,
@@ -217,7 +217,7 @@ func TestMigrateCLI_RefusesAMissingSourceWithoutCreatingIt(t *testing.T) {
 	}
 }
 
-// MF2: the pool floor applies to a command-line DSN, and it must REFUSE
+// The pool floor applies to a command-line DSN, and it must REFUSE
 // rather than hang.
 //
 // pool_max_conns=1 is not a slow configuration, it is a deadlocked one: the
@@ -270,7 +270,7 @@ func TestMigrateCLI_RefusesADestinationDSNBelowThePoolFloor(t *testing.T) {
 	}
 }
 
-// MF3: a password in the report is a password in whatever the operator pastes
+// A password in the report is a password in whatever the operator pastes
 // it into — and this CLI accepts BOTH DSN forms, so redaction must too.
 func TestMigrateCLI_ReportRedactsBothDSNForms(t *testing.T) {
 	t.Parallel()
@@ -378,7 +378,7 @@ func TestMigrateCLI_CopiesAndVerifiesAgainstTheDestination(t *testing.T) {
 	}
 }
 
-// MF4: a source that was ITSELF migrated once already is still a valid source.
+// A source that was ITSELF migrated once already is still a valid source.
 //
 // MigrateToPostgres copies store_meta and then upserts `migrated_from`. On a
 // fresh source that key is new and the destination gains a row; on a source

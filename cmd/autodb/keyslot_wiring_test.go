@@ -77,7 +77,7 @@ func TestKeyslotWiring_ConfigPathReachesTheService(t *testing.T) {
 // This is the default for every install that has not asked for unattended
 // unlock, so it is the path most deployments take. It must not error, must not
 // print the locked banner, and must leave the store exactly as locked as it
-// was before ADR-0087 existed.
+// was before the unattended unlock existed.
 func TestKeyslotWiring_NoKeyfileConfiguredStartsCleanly(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

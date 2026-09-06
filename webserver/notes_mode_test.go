@@ -283,8 +283,8 @@ func TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot(t *testing.T) {
 				wantRoot = filepath.Join(notesBase, "u-alice")
 			}
 			if got := m.AboutNotesDir(); got != wantRoot {
-				t.Errorf("About root = %q, want %q — the runner passed the wrong root, which "+
-					"is the criterion-12 bug", got, wantRoot)
+				t.Errorf("About root = %q, want %q — the runner passed the wrong root, so "+
+					"About would describe a note tree the viewer is not looking at", got, wantRoot)
 			}
 			if got := m.NoteViewOf().Shared; got != tc.wantShared {
 				t.Errorf("NoteView.Shared = %v, want %v — help will describe the wrong mode",

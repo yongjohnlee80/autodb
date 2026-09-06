@@ -8,10 +8,10 @@ import (
 	"github.com/yongjohnlee80/autodb/core/auth"
 )
 
-// The locked banner is the half ADR-0087 §6 RESTS ON.
+// The locked banner is the half the stay-up rule RESTS ON.
 //
-// §6 keeps the daemon running through every keyfile failure, and justifies that
-// by the state being loud and visible. If the banner is quiet, §6 is not
+// The rule keeps the daemon running through every keyfile failure, and justifies that
+// by the state being loud and visible. If the banner is quiet, the rule is not
 // honest — the daemon stays up in a degraded state that nobody can see, and the
 // only symptom is every developer being refused.
 //
@@ -38,7 +38,7 @@ func TestLockedBanner_SaysTheState_TheEffect_AndTheRemedy(t *testing.T) {
 }
 
 // The REASON reaches the banner rather than being flattened into "the keyslot
-// failed". §6's whole point is that the grounds are distinguishable from the
+// failed". The whole point is that the grounds are distinguishable from the
 // log alone, and a banner that printed a generic line would throw that away at
 // the last step.
 func TestLockedBanner_CarriesEachGroundVerbatim(t *testing.T) {
@@ -53,7 +53,7 @@ func TestLockedBanner_CarriesEachGroundVerbatim(t *testing.T) {
 	} {
 		got := lockedBanner(ground)
 		if !strings.Contains(got, ground.Error()) {
-			t.Errorf("the banner does not carry %q; the five grounds §6 keeps the daemon "+
+			t.Errorf("the banner does not carry %q; the five grounds that keep the daemon "+
 				"running for are indistinguishable at the one place an operator looks",
 				ground.Error())
 		}

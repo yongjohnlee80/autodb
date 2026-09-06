@@ -197,7 +197,7 @@ func TestStartFrontDoor_UnusableMaterialFailsTheStart(t *testing.T) {
 	}
 }
 
-// AN UNEXPECTED SERVE FAILURE STOPS THE DAEMON (lector PR #38 r0 must-fix 2).
+// AN UNEXPECTED SERVE FAILURE STOPS THE DAEMON (raised in review).
 //
 // The first version reduced it to a log line while the RPC surface kept
 // running, so a configured front door could vanish behind a daemon that

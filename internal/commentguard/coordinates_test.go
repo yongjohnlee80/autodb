@@ -2,6 +2,7 @@ package commentguard
 
 import (
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -38,6 +39,7 @@ import (
 var certifiedClean = []string{
 	"webserver",
 	"core/config",
+	"cmd/autodb",
 }
 
 // Patterns that name a private artefact.
@@ -189,5 +191,151 @@ func TestCoordinatePatternMatchesEachForm(t *testing.T) {
 			t.Errorf("FindString(%q) matched %q; ordinary prose and in-repo or public "+
 				"references must pass", ok, got)
 		}
+	}
+}
+
+// A certified package must not cite a private artefact from a STRING either.
+//
+// THE CLASS THE COMMENT CELL IS BLIND TO, and the cmd/autodb rung found two of
+// them by hand before this existed. One was worse than any comment: the
+// createcert banner PRINTED "(ADR-0075 §4)" to the operator's terminal, where
+// the reader is not a developer with the repository open but someone running a
+// command — the least able reader of all to open a KB document. The other was a
+// test failure message citing "§6", which appears only when something has gone
+// wrong and the reader is looking for a reason.
+//
+// So the rule is the same rule, and the comment cell was simply looking at the
+// wrong half of the file. The reasoning generalises: a guard scoped to the
+// place you found the problem certifies the place you did not look.
+//
+// SAME PATTERN, DELIBERATELY. If an arm is narrow enough for prose in a
+// comment it is narrow enough for prose in a string, and keeping one regexp
+// means an arm added for one cell cannot silently miss for the other.
+func TestCertifiedPackagesCiteNothingPrivateInStrings(t *testing.T) {
+	root := "../.."
+	if len(certifiedClean) == 0 {
+		t.Fatal("certifiedClean is empty, so this cell asserts nothing")
+	}
+
+	for _, pkg := range certifiedClean {
+		t.Run(pkg, func(t *testing.T) {
+			files, err := filepath.Glob(filepath.Join(root, pkg, "*.go"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(files) == 0 {
+				t.Fatalf("no .go files under %s; this run proved nothing about %q",
+					filepath.Join(root, pkg), pkg)
+			}
+
+			fset := token.NewFileSet()
+			literals := 0
+			var hits []string
+			for _, path := range files {
+				f, err := parser.ParseFile(fset, path, nil, 0)
+				if err != nil {
+					t.Fatalf("parsing %s: %v", path, err)
+				}
+				ast.Inspect(f, func(n ast.Node) bool {
+					lit, ok := n.(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						return true
+					}
+					literals++
+					// The raw source text, not the unquoted value: an unquote
+					// can fail on a raw string and the coordinate would then be
+					// skipped silently, which is the failure mode that matters
+					// here — a hit that is not reported.
+					if m := coordinate.FindString(lit.Value); m != "" {
+						hits = append(hits, fmt.Sprintf("%s:%d  %q  in: %s",
+							filepath.Base(path), fset.Position(lit.Pos()).Line, m,
+							strings.TrimSpace(lit.Value)))
+					}
+					return true
+				})
+			}
+			if literals < 20 {
+				t.Fatalf("inspected only %d string literal(s) in %q; a clean result "+
+					"here would mean the walk found nothing to look at", literals, pkg)
+			}
+			if len(hits) > 0 {
+				t.Errorf("%q is certified clean but cites private artefacts from "+
+					"string literals — printed output and failure messages reach "+
+					"readers with even less access than a developer reading a "+
+					"comment:\n  %s", pkg, strings.Join(hits, "\n  "))
+			}
+		})
+	}
+}
+
+// A comment must not begin with a bare period.
+//
+// THE RESIDUE CLASS A CONVERSION LEAVES BEHIND. When a citation OPENS a wrapped
+// parenthetical — "(ADR-0074 §1). These are not tuning knobs..." — stripping its
+// contents leaves the line starting "//." and the sentence beheaded. Three of
+// these shipped in the core/config rung and a review found them; the three
+// pre-certify checks I had all passed, because every one of them was orthogonal
+// to it: no doubled "//", no code touched, ruling clause intact — all true, and
+// none of them looks at what a comment line STARTS with.
+//
+// The lesson generalises past this shape: a conversion's checks tend to guard
+// the thing you were afraid of, and the residue turns up in the sentence
+// machinery you were not thinking about at all.
+func TestNoCommentBeginsWithABarePeriod(t *testing.T) {
+	root := "../.."
+	// NOT an ellipsis. "// ...and the fresh-daemon half" is ordinary prose and
+	// the first version of this check flagged it — the same what-does-it-accept
+	// failure the guard exists to catch, committed while adding the guard. RE2
+	// has no lookahead, so the trailing class does the work.
+	bare := regexp.MustCompile(`^\s*//\s*\.([^.]|$)`)
+	checked := 0
+	var found []string
+	for _, pkg := range certifiedClean {
+		files, err := filepath.Glob(filepath.Join(root, pkg, "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range files {
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i, line := range strings.Split(string(b), "\n") {
+				checked++
+				if bare.MatchString(line) {
+					found = append(found, fmt.Sprintf("%s:%d  %s",
+						filepath.Base(path), i+1, strings.TrimSpace(line)))
+				}
+			}
+		}
+	}
+	if checked < 500 {
+		t.Fatalf("inspected only %d line(s) across the certified packages; a clean "+
+			"result here would mean nothing", checked)
+	}
+	// The check must find the shape it names, and must not find an ellipsis.
+	for _, positive := range []string{"//. These are not tuning knobs", "\t//."} {
+		if !bare.MatchString(positive) {
+			t.Errorf("the bare-period pattern does not match %q, which is the exact "+
+				"residue it exists to catch", positive)
+		}
+	}
+	// ONE NEGATIVE FIXTURE WAS WITHDRAWN, and the reason is worth more than the
+	// fixture. I first also required "// . . . spaced" to pass — a spaced
+	// ellipsis. It cannot: after the marker, "." followed by a space is exactly
+	// the residue shape "//. These are not tuning knobs", and no pattern
+	// separates them. Demanding both would have forced the check to accept the
+	// defect it exists to catch. A negative fixture can itself be wrong, and
+	// insisting on one is how a guard gets weakened until it passes everything.
+	for _, negative := range []string{"// ...and the fresh-daemon half"} {
+		if bare.MatchString(negative) {
+			t.Errorf("the bare-period pattern matches %q; an ellipsis is ordinary prose", negative)
+		}
+	}
+	if len(found) > 0 {
+		t.Fatalf("comment(s) beginning with a bare period:\n  %s\n\n"+
+			"A citation that OPENED a parenthetical was stripped and left the "+
+			"sentence beheaded. Merge the period into the sentence above it.",
+			strings.Join(found, "\n  "))
 	}
 }

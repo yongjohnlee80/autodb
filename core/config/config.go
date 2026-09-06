@@ -675,7 +675,7 @@ func Load(path string) (Config, error) {
 		for _, k := range undecoded {
 			switch k.String() {
 			case "web.notes_mode", "web.notes_subject":
-				return Config{}, fmt.Errorf("%w: %s: %s was removed by ADR-0068 — notes "+
+				return Config{}, fmt.Errorf("%w: %s: %s was removed when notes became identity-keyed — notes "+
 					"are now keyed by (user, workspace) in both frontends and are visible "+
 					"only to their owner, so no setting selects a note tree; delete this key",
 					ErrInvalid, path, k.String())
@@ -826,7 +826,7 @@ func (f FrontDoor) validate(poolMaxConns int) error {
 	// rather than one generic "TLS is misconfigured".
 	if strings.TrimSpace(f.TLSCertFile) == "" || strings.TrimSpace(f.TLSKeyFile) == "" {
 		return fmt.Errorf("%w: frontdoor is enabled but tls_cert_file and tls_key_file are not both "+
-			"set; TLS is mandatory on this surface (ADR-0075 §4) because a client using "+
+			"set; TLS is mandatory on this surface because a client using "+
 			"sslmode=require authenticates nothing and an active MITM collects access tokens "+
 			"in cleartext", ErrInvalid)
 	}
@@ -892,8 +892,8 @@ func (f FrontDoor) validateBudgets(poolMaxConns int) error {
 			DefaultResidentBudgetBytes)
 	}
 	if f.ResidentBudgetBytes > MaxResidentBudgetBytes {
-		return fmt.Errorf("%w: frontdoor.resident_budget_bytes is %d, above ADR-0075 §4's "+
-			"ratified ceiling of %d; the budget bounds what an authenticated population can "+
+		return fmt.Errorf("%w: frontdoor.resident_budget_bytes is %d, above the ratified "+
+			"ceiling of %d; the budget bounds what an authenticated population can "+
 			"hold at once, and a number above the ceiling is a bound the machine cannot honour "+
 			"rather than a larger one", ErrInvalid, f.ResidentBudgetBytes, MaxResidentBudgetBytes)
 	}

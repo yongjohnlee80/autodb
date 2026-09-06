@@ -14,14 +14,14 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// sqlite -> postgres meta-store migration (ADR-0079 §5, phase P2).
+// sqlite -> postgres meta-store migration.
 //
 // The ordering here is the whole design, and it is the opposite of what a
 // naive wrapper around meta.MigrateToPostgres would do.
 //
 // PROVE NO DAEMON IS SERVING FIRST — before opening anything in a way that
-// migrates, and before touching the destination at all (lector's ADR-0079 r0
-// MF3). meta.Open runs the migration runner before it returns, so a CLI built
+// migrates, and before touching the destination at all (raised in review
+// ). meta.Open runs the migration runner before it returns, so a CLI built
 // on Open would have already changed the destination's schema by the time it
 // was in a position to discover it should not have. That is why
 // meta.OpenNoMigrate exists.
@@ -68,8 +68,8 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	// command it turns a typo into a success: a misspelled path was created as
 	// a new empty database, migrated, copied, and reported as `migrated 0
 	// row(s)` with exit 0, leaving the operator free to point [meta] at an
-	// empty postgres store believing it holds their data (lector's PR #31 r0
-	// MF1). A migration has no first-run case — its whole premise is that the
+	// empty postgres store believing it holds their data (raised in review
+	// ). A migration has no first-run case — its whole premise is that the
 	// source is already there.
 	info, err := os.Stat(o.from)
 	if err != nil {
@@ -90,7 +90,7 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	// The FULL operational rule, not the transport half. A DSN-level
 	// pool_max_conns=1 otherwise reaches the destination lease, which pins the
 	// only connection, and the migration runner then blocks forever waiting
-	// for a second one (MF2).
+	// for a second one.
 	if err := dstCfg.CheckOperational(); err != nil {
 		return fmt.Errorf("migrate-to-postgres: %w", err)
 	}
@@ -149,7 +149,7 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	if !o.dryRun {
 		// BOTH schemas are brought up to date here, and only here — after
 		// both leases are held. This is the only mutation point in the whole
-		// command, which is what makes the MF3 ordering checkable rather
+		// command, which is what makes the ordering checkable rather
 		// than merely intended.
 		//
 		// The source, because a store behind the binary would fail mid-copy
@@ -230,8 +230,8 @@ func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) err
 	// the key is copied and then upserted — same key, same count — and an
 	// unconditional +1 turns a perfectly good re-migration into a reported
 	// `store_meta SOURCE 2 DEST 1 MISMATCH`, which tells the operator their
-	// destination is not a faithful replica when it is (lector's PR #31 r0
-	// MF4). A store having been migrated once before does not make it invalid
+	// destination is not a faithful replica when it is (raised in review
+	// ). A store having been migrated once before does not make it invalid
 	// to migrate again.
 	//
 	// Excluding the table from verification would have been the easy way past
@@ -296,5 +296,5 @@ func looksLikePostgresDSN(s string) bool {
 // only the URL form, while looksLikePostgresDSN above deliberately accepts the
 // keyword form too — so a keyword DSN printed its password verbatim into a
 // report the comment itself described as "the sort of thing an operator pastes
-// into a ticket" (lector's PR #31 r0 MF3). It now sits next to dsnParams,
+// into a ticket" (raised in review). It now sits next to dsnParams,
 // which already had to understand both forms of the same string.

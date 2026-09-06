@@ -18,12 +18,12 @@ import (
 // The friction requirement is Johno's and it is the whole point: "TLS is
 // important for encrypted communication, but we have to go about with least
 // amount of friction." An operator who has to stand up a CA by hand turns TLS
-// off instead, and ADR-0086 §10 is what that costs.
+// off instead, and this is what that costs.
 //
-// NOT the production path. ADR-0075 prefers a real ACME certificate. This is
+// NOT the production path. The design prefers a real ACME certificate. This is
 // for dev and internal deployments, and it says so in its own output rather
 // than being gated — a second gate around a decision the operator already owns
-// is the shape §10 considered and deliberately dropped.
+// is the shape that was considered and deliberately dropped.
 
 // createCertOpts are the parsed flags.
 type createCertOpts struct {
@@ -90,7 +90,7 @@ func runCreateCert(out io.Writer, configPath string, o createCertOpts) error {
 // A default at all is the friction argument; that it is DERIVED from the
 // config path rather than a second hardcoded location is the resolver one —
 // two places that each decide where autodb keeps its files is how they come to
-// disagree ([[shared-resolver-single-source-of-truth]]).
+// disagree (one resolver, one source of truth).
 func defaultCertDir(configPath string) string {
 	if configPath == "" {
 		return "tls"
@@ -170,7 +170,7 @@ func writeDistributionNotes(out io.Writer, res frontdoor.CertResult) {
 	fmt.Fprintln(out, "and a private CA in the trust store is a standing risk that this one avoids.")
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "For a public, internet-facing deployment prefer a real ACME certificate")
-	fmt.Fprintln(out, "(ADR-0075 §4). This command is for development and internal hosts.")
+	fmt.Fprintln(out, "from a public CA. This command is for development and internal hosts.")
 }
 
 // sampleDSN is the line a developer pastes. It names the first covered

@@ -16,7 +16,7 @@ import (
 	coreexec "github.com/yongjohnlee80/autodb/core/exec"
 )
 
-// MF3. Every [exec] setting has to REACH the engine. All of them were parsed,
+// Every [exec] setting has to REACH the engine. All of them were parsed,
 // validated and defaulted, and then dropped: the construction site passed
 // history and max_statement_bytes and nothing else, so an operator who set
 // max_tx_duration got the built-in default with no indication their value had
@@ -84,7 +84,7 @@ func TestExecOptions_EveryConfiguredValueReachesTheEngine(t *testing.T) {
 	}
 }
 
-// MF2. A lost lease is a shutdown. Nothing read Lost() before, so an engine
+// A lost lease is a shutdown. Nothing read Lost() before, so an engine
 // whose lock had dropped kept serving — and a second engine, finding the lock
 // free, would take it. That is the two-engines-one-store state the lease
 // exists to prevent, reached through the lease itself.
@@ -138,7 +138,7 @@ func TestWatchLease_StopsWithTheServeContext(t *testing.T) {
 	}
 }
 
-// MF2. The previous cells exercised the helpers directly, so deleting the
+// The previous cells exercised the helpers directly, so deleting the
 // production calls to watchLease and StartJanitor left the whole suite green
 // — which is the failure mode the helpers were supposed to prevent. These go
 // through startEngine, the one place the daemon wires them, and observe the
@@ -189,7 +189,7 @@ func execConfig() config.Config {
 
 // config → daemon → an actual reconciliation pass.
 //
-// Same MF2 reasoning as the janitor cell: the reconciler is exercised
+// Same reasoning as the janitor cell: the reconciler is exercised
 // directly in core/exec, so deleting the production call in startEngine would
 // leave every one of those tests green while the daemon kept a complete
 // record of undetermined transactions and never went back to find out. This
@@ -206,7 +206,7 @@ func TestStartEngine_TheReconcilerActuallyRunsOnTheConfiguredSchedule(t *testing
 		t.Helper()
 		// A real transaction enqueues as it opens, so a seed modelling one
 		// must too — the reconciler works from the pending QUEUE, not from a
-		// state predicate over the log (PR #20 r1 MF1).
+		// state predicate over the log (raised in review).
 		if _, err := store.TxPending.OnCtx(t.Context()).
 			Set(meta.TxPendTxID, txID).Set(meta.TxPendConnID, connID).
 			Set(meta.TxPendCreatedAt, int64(1)).Insert(); err != nil {
@@ -368,7 +368,7 @@ func TestStartEngine_LosingTheLeaseStopsTheServeContext(t *testing.T) {
 //
 // THIS CELL MUST CALL startEngine. The version it replaces did not: it opened a
 // store and called store.RollPartitions directly, so disabling BOTH production
-// roll calls inside startEngine left it green (lector's PR #32 r0 note). That
+// roll calls inside startEngine left it green (raised in review). That
 // is precisely the failure the wiring cells exist to catch, in the cell written
 // to catch it — the unit was already covered in core/meta, and what was missing
 // was proof that anything in production calls it.
@@ -438,7 +438,7 @@ func TestStartEngine_RollsPartitionsAtStartup(t *testing.T) {
 // After partitioning, PRIMARY KEY (id, created_at) permits the same id in two
 // months. CheckLogicalIDUniqueness detected that from the start but nothing
 // production called it, so meta.Open accepted the state it was written to
-// refuse (lector's PR #32 r0 MF1). Both dependents fail QUIETLY — a by-id read
+// refuse (raised in review). Both dependents fail QUIETLY — a by-id read
 // is undefined, and repairPendingHistory's id cursor can skip a row forever —
 // so serving on is worse than not starting.
 func TestStartEngine_RefusesAStoreWithDuplicateLogicalIDs(t *testing.T) {

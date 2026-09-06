@@ -7,8 +7,8 @@ import (
 
 // Exactly one dispatch mode. The switch tries print-endpoint, serve, ui, web-ui in
 // order, so any pairing silently runs whichever comes first — which is how
-// `--web-ui --print-endpoint` printed the endpoint and never served the UI (lector
-// r3 must-fix 2). Every pairwise conflict is checked, print-endpoint included.
+// `--web-ui --print-endpoint` printed the endpoint and never served the UI, as
+// a review found. Every pairwise conflict is checked, print-endpoint included.
 func TestCheckFlags(t *testing.T) {
 	t.Parallel()
 	const goodPort = 7010

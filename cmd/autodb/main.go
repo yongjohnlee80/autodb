@@ -56,10 +56,10 @@ func main() {
 	// Frontends need to know WHERE to dial, and that answer must have one
 	// owner. Reimplementing the socket-path rules in Lua would be a
 	// second resolver that silently drifts from this one — so the binary
-	// reports it instead ([[shared-resolver-single-source-of-truth]]).
+	// reports it instead (one resolver, one source of truth).
 	printEndpoint := flag.Bool("print-endpoint", false,
 		"print the resolved endpoint as <network>\\t<address> and exit")
-	// Meta-store migration (ADR-0079 §5). One-way by design: sqlite to
+	// Meta-store migration. One-way by design: sqlite to
 	// postgres. The reverse is refused by name rather than left to fail
 	// obscurely.
 	migrateToPG := flag.Bool("migrate-to-postgres", false,
@@ -71,7 +71,7 @@ func main() {
 	migrateInsecure := flag.Bool("allow-insecure-dsn", false,
 		"--migrate-to-postgres: permit a destination DSN weaker than sslmode=verify-full")
 	// TLS material for the front door. It exists because the alternative to a
-	// one-command certificate is an operator turning TLS off, and ADR-0086 §10
+	// one-command certificate is an operator turning TLS off, and the design
 	// is what that costs.
 	createCert := flag.Bool("create-cert", false,
 		"generate the front door's CA and server certificate, and exit")
@@ -148,14 +148,14 @@ func main() {
 const defaultWebPort = 7010
 
 // checkFlags rejects flag combinations that cannot mean anything, before any of
-// them is acted on (ADR-0061 §2.1).
+// them is acted on.
 //
 // A flag that silently does nothing is a flag someone will believe did something,
 // so `--port` outside `--web-ui` is a usage error rather than an ignored value.
 // That check must detect PRESENCE, not value: comparing against the default
 // cannot tell "not given" from "given the default", so `--port=7010 --ui` — a
 // user explicitly passing a flag that will be ignored — would slip through
-// (lector r1 #5 on ADR-0061). flag.CommandLine.Visit reports only what was
+// (raised in review). flag.CommandLine.Visit reports only what was
 // actually set.
 func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert bool, port int) error {
 	portSet := false
@@ -219,7 +219,7 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert bool, p
 	// EXACTLY ONE mode. The dispatch switch tries printEndpoint, serve, ui, web-ui
 	// in that order, so any pairing silently runs whichever comes first — and
 	// --web-ui --print-endpoint printed the endpoint and never served the UI
-	// (lector r3 must-fix 2). --print-endpoint is a dispatch mode and must be
+	// (raised in review). --print-endpoint is a dispatch mode and must be
 	// counted like the others; --version is a query handled before the switch and
 	// is deliberately left to short-circuit.
 	modes := 0
@@ -245,7 +245,7 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert bool, p
 	return nil
 }
 
-// runServe implements the shared-server lifecycle (ADR-0056 §3): bind the
+// runServe implements the shared-server lifecycle: bind the
 // configured address; when it is already taken, probe the occupant — a
 // compatible autodb means "already running" (exit 0, the FE contract);
 // anything else is a loud error. Serves until SIGINT/SIGTERM, then drains.
@@ -343,8 +343,8 @@ func runServe(configPath string) error {
 	}
 	defer store.Close()
 
-	// One engine per meta store, enforced before anything is served
-	// (ADR-0074 §1). The bind above is a per-ENDPOINT singleton — it says
+	// One engine per meta store, enforced before anything is served. The bind
+	// above is a per-ENDPOINT singleton — it says
 	// nothing about the store, so two endpoints could share one meta store
 	// and each keep its own in-memory session registry and transaction
 	// reservation, both believing they enforced a limit neither held.
@@ -375,16 +375,16 @@ func runServe(configPath string) error {
 		return fmt.Errorf("auth: %w", err)
 	}
 
-	// THE UNATTENDED UNLOCK (ADR-0087 §1). Before anything serves, so the
+	// THE UNATTENDED UNLOCK. Before anything serves, so the
 	// front door and the RPC surface come up against a store that is already
 	// open rather than one that opens under them.
 	//
-	// IT NEVER FAILS THE START (§6). Fail closed on the SECRET, not on the
+	// IT NEVER FAILS THE START. Fail closed on the SECRET, not on the
 	// process: a daemon that refuses to boot because a keyfile is unreadable
 	// converts a degraded state into a total outage, and this feature exists
 	// to remove an outage. So a failure here leaves the store locked exactly
-	// as it was before ADR-0087 — a passphrase login still works — and is
-	// reported LOUDLY, because §6's justification for staying up is that the
+	// as it was before the unattended unlock — a passphrase login still works — and is
+	// reported LOUDLY, because the justification for staying up is that the
 	// state is visible.
 	if uerr := svc.UnlockWithServiceKeyslot(ctx); uerr != nil {
 		fmt.Fprint(os.Stderr, lockedBanner(uerr))
@@ -409,7 +409,7 @@ func runServe(configPath string) error {
 	// pools while the serve context was still live and work could still be
 	// dispatched. Registering stopServing second means it cancels first, and
 	// Close then stops and waits for engine-owned background work before
-	// closing anything (PR #20 r1 SF).
+	// closing anything (raised in review).
 	defer eng.Close()
 	defer stopServing()
 
@@ -436,7 +436,7 @@ func runServe(configPath string) error {
 		return ferr
 	}
 	if fd != nil && cfg.FrontDoor.CleartextDebug() {
-		// THE OPERATOR'S RECORD (ADR-0086 R7). Unconditional and
+		// THE OPERATOR'S RECORD. Unconditional and
 		// undismissable, at EVERY start — not once, not behind a flag, and not
 		// suppressible. The TUI's banner is the dismissible one; this is the
 		// half that survives nobody looking at it.
@@ -565,7 +565,7 @@ func frontDoorOptions(cfg config.Config, eng *coreexec.Engine, oplog logger.Logg
 		OnEvent: func(e frontdoor.Event) {
 			// Emitted to the operational log, which is where every other
 			// withheld detail on this daemon lives. The DURABLE audit row is
-			// the auth slice's business, not the listener's — matrix §1.3
+			// the auth slice's business, not the listener's — see docs/front-door/protocol-matrix.md
 			// names the vocabulary, and turning these into meta-store writes
 			// is a separate decision about what an anonymous peer can make
 			// this process write.
@@ -635,7 +635,7 @@ func startEngine(
 	// After partitioning, PRIMARY KEY (id, started_at) no longer makes `id`
 	// unique — the schema permits the same id in two months and accepts it
 	// silently. The guard existed but nothing production ever called it
-	// (lector's PR #32 r0 MF1), which made it documentation rather than a
+	// (raised in review), which made it documentation rather than a
 	// guard: meta.Open accepted a store holding duplicate script_history ids
 	// across partitions.
 	//
@@ -680,7 +680,7 @@ func startEngine(
 	// a daemon that stays up across a month boundary would find no partition
 	// for the new month, and every audit write would land in DEFAULT — which
 	// SUCCEEDS, so nothing fails and nobody notices until a retention drop
-	// tries to detach a month whose rows are somewhere else (ADR-0079 §2).
+	// tries to detach a month whose rows are somewhere else.
 	//
 	// A no-op on sqlite, so this does not branch on the engine.
 	if err := store.RollPartitions(serveCtx, time.Now()); err != nil {
@@ -694,7 +694,7 @@ func startEngine(
 	// this file already carries a warning about: machinery that is only ever
 	// reachable from tests is machinery that silently never runs. It
 	// returns immediately unless an operator has configured a retention
-	// period (ADR-0079 §3).
+	// period.
 	eng.StartOutcomeRetention(serveCtx, cfg.Exec.OutcomeRetentionInterval.Duration(),
 		cfg.Exec.OutcomeRetention.Duration())
 
@@ -765,7 +765,7 @@ func isAddrInUse(err error) bool {
 	return errors.Is(err, syscall.EADDRINUSE)
 }
 
-// runUI starts the standalone TUI (ADR-0057): it reaches the server ONLY
+// runUI starts the standalone TUI: it reaches the server ONLY
 // through the RPC client seam, spawning `autodb --serve` when nothing
 // answers. The spawned child is detached into its own session with stdio
 // redirected to an owned log file — never the alternate-screen terminal —
@@ -788,7 +788,7 @@ func runUI(configPath string) error {
 	// The terminal no longer builds a store at startup. It CANNOT: the personal
 	// root is `<base>/u-<subject>`, and the subject is the daemon's canonical
 	// identity, which does not exist until afterLogin. Constructing here is what
-	// forced the terminal onto the ownerless base (ADR-0068 §1.3).
+	// forced the terminal onto the ownerless base.
 	notesFor := tuiapp.PersonalNotesIn(notesRoot)
 
 	spawn := func() (string, error) { return spawnServe(configPath) }
@@ -827,7 +827,7 @@ func runUI(configPath string) error {
 	return app.Run(ctx)
 }
 
-// runWebUI serves the TUI to a browser (ADR-0061). It reaches the daemon ONLY
+// runWebUI serves the TUI to a browser. It reaches the daemon ONLY
 // through the same RPC client seam --ui uses, and unlike --ui it never starts one:
 // a missing daemon is a startup failure here, not something to fix by spawning.
 func runWebUI(configPath string, port int) error {
@@ -860,7 +860,7 @@ func runWebUI(configPath string, port int) error {
 		Addr:      ep.Address,
 		Port:      port,
 		NotesRoot: notesRoot,
-		// Note visibility (ADR-0064 §2.3). Default per-user; workspace mode is
+		// Note visibility. Default per-user; workspace mode is
 		// opt-in, bound to one subject, and validated at config load.
 		// Operational log to stderr. --web-ui is a server an operator leaves
 		// running, so a refused Origin, a failed login, and session lifecycle
@@ -922,7 +922,7 @@ func configPathFor(explicit string) string {
 }
 
 // spawnServe starts a detached `autodb --serve` with stdio redirected to an
-// owned append-only log (ADR-0057 §7 — a stderr line into the alternate
+// owned append-only log (a stderr line into the alternate
 // screen would corrupt raw mode). It returns the log path so the session's
 // bounded probe window can point the operator at the failure diagnostics.
 func spawnServe(configPath string) (string, error) {
@@ -1228,7 +1228,7 @@ func countDebugTokens(ctx context.Context, store *meta.Store, now time.Time) int
 
 // lockedBanner is what an operator sees when the unattended unlock failed.
 //
-// LOUD ON PURPOSE, and it is the half ADR-0087 §6 rests on: §6 keeps the daemon
+// LOUD ON PURPOSE, and it is the half the stay-up rule rests on: it keeps the daemon
 // running through every keyfile failure, justified by the state being visible.
 // A one-line warning among startup chatter is not visible, and the symptom
 // without it is every developer being refused with nothing saying why.
