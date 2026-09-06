@@ -219,8 +219,20 @@ MEANS: **answer: guard**, chosen over deriving the set from the server at
 runtime, because that would make the classifier's safety depend on a query and
 a target answering wrongly would be trusted.
 
-**Two remain**: `TxReconciler` and `AdvisoryLocker`, plus
-`RoutineIntrospector`. The first carries a behaviour decision and is deliberately
+**Third: the transaction oracle**, as TWO capabilities rather than one.
+`TransactionIDReporter` can hand out its own id for a transaction while it is
+open; `CommitStatusOracle` can be asked afterwards whether that transaction
+committed. Exactly one engine has either today, and they are still separate —
+an engine could report an id without being able to answer about it later, which
+would produce a recovery record carrying an id nobody can resolve. That is
+worse than carrying none, so the two questions get two interfaces.
+
+The absence of the oracle is a TERMINAL condition rather than a retryable one,
+which is why its probe sits where it does: where no oracle exists an
+indeterminate commit can never be resolved by anyone.
+
+**One remains**: `AdvisoryLocker`, plus `RoutineIntrospector` with its
+behaviour decision. The first carries a behaviour decision and is deliberately
 not folded in here — see the note below.
 
 **A behaviour fork, recorded rather than taken.** golib's `MysqlDialect`

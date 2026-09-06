@@ -259,21 +259,16 @@ func (e *Engine) beginTx(
 // also ASSIGNS an xid if the transaction does not yet have one, which is what
 // we want -- an xid assigned lazily at first write would not be knowable here.
 func (e *Engine) captureTargetXID(ctx context.Context, tx dao.ContextTxConn, engineName engine.Name) string {
-	if !engineName.ReportsTransactionID() {
+	r, ok := dialectFor(engineName).(TransactionIDReporter)
+	if !ok {
+		// This target does not report an id of its own. The recovery record
+		// then carries none, and the reconciler reads that absence as "no
+		// oracle to ask" rather than as a missing value.
 		return ""
 	}
-	rows, err := tx.QueryContext(ctx, "SELECT txid_current()::text")
+	xid, err := r.CaptureTransactionID(ctx, tx)
 	if err != nil {
 		e.logf("capturing the target transaction id failed: %v", err)
-		return ""
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		return ""
-	}
-	var xid string
-	if err := rows.Scan(&xid); err != nil {
-		e.logf("reading the target transaction id failed: %v", err)
 		return ""
 	}
 	return xid

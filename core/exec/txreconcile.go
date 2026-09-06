@@ -412,7 +412,8 @@ func (e *Engine) resolveOne(ctx context.Context, txID string, st TxStatus, group
 	// txid_status, so an indeterminate commit there can never be resolved by
 	// anyone — which is a terminal condition, and the design makes it
 	// one by OUTCOME rather than by cause.
-	if !connRow.Engine.HasCommitStatusOracle() || xid == "" {
+	_, hasOracle := dialectFor(connRow.Engine).(CommitStatusOracle)
+	if !hasOracle || xid == "" {
 		return e.terminate(ctx, txID, st, meta.TxUnresolvable, meta.ReasonNoOracle)
 	}
 
@@ -462,29 +463,21 @@ func (e *Engine) terminate(ctx context.Context, txID string, st TxStatus, state 
 // between "" and an error is load-bearing: "" is a permanent answer and an
 // error is a transient failure, and they resolve to opposite actions.
 func (e *Engine) txidStatus(ctx context.Context, connRow *meta.Connection, xid string) (string, error) {
+	oracle, ok := dialectFor(connRow.Engine).(CommitStatusOracle)
+	if !ok {
+		// Unreachable through the reconciler, which probes before calling —
+		// but stated rather than assumed, because a second caller arriving
+		// without the probe would otherwise get a nil dereference instead of
+		// a sentence.
+		return "", fmt.Errorf("exec: %s has no commit-status oracle", connRow.Engine)
+	}
 	target, err := e.target(ctx, connRow.ID, connRow)
 	if err != nil {
 		return "", err
 	}
 	qctx, cancel := context.WithTimeout(ctx, txCleanupTimeout)
 	defer cancel()
-
-	// COALESCE so a NULL arrives as a value this code can read, rather than
-	// as a scan into a *string that would have to be nil-checked separately.
-	rows, err := target.QueryContext(qctx,
-		"SELECT COALESCE(txid_status($1::text::bigint), '')", xid)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-	if !rows.Next() {
-		return "", fmt.Errorf("exec: txid_status returned no row for %s", xid)
-	}
-	var status HistStatus
-	if err := rows.Scan(&status); err != nil {
-		return "", err
-	}
-	return string(status), nil
+	return oracle.CommitStatus(qctx, target, xid)
 }
 
 // connectionRow loads a connection, or reports that it is gone.

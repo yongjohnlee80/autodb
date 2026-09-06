@@ -297,3 +297,101 @@ func TestTheIncompatibleModeListIsComplete(t *testing.T) {
 			"was removed", len(lexerIncompatibleModes), len(want))
 	}
 }
+
+// The two oracle capabilities and the capability table must agree.
+//
+// Kept as TWO checks rather than one loop over both, because the interfaces
+// are deliberately separate: an engine could report an id without being able
+// to answer about it later, and a cell that checked them together would
+// silently accept that pairing as long as the two happened to move in step.
+func TestTheOracleCapabilitiesMatchTheCapabilityTable(t *testing.T) {
+	for _, n := range engine.All() {
+		d := dialectFor(n)
+		if _, ok := d.(TransactionIDReporter); ok != n.ReportsTransactionID() {
+			t.Errorf("engine %s: TransactionIDReporter present=%v, table says %v",
+				n, ok, n.ReportsTransactionID())
+		}
+		if _, ok := d.(CommitStatusOracle); ok != n.HasCommitStatusOracle() {
+			t.Errorf("engine %s: CommitStatusOracle present=%v, table says %v",
+				n, ok, n.HasCommitStatusOracle())
+		}
+	}
+}
+
+// A target with no id reporter captures no id, and does it without a
+// connection.
+//
+// The nil transaction is the witness: a probe that stopped short-circuiting
+// would panic here rather than pass quietly. And the captured id's ABSENCE is
+// load-bearing downstream — the reconciler reads an empty xid as "nothing to
+// ask about", so an engine silently returning a placeholder would produce a
+// recovery record carrying an id nobody can resolve.
+func TestAnEngineWithoutAnIDReporterCapturesNothing(t *testing.T) {
+	absent := 0
+	e := &Engine{}
+	for _, n := range engine.All() {
+		if _, ok := dialectFor(n).(TransactionIDReporter); ok {
+			continue
+		}
+		absent++
+		if got := e.captureTargetXID(context.Background(), nil, n); got != "" {
+			t.Errorf("engine %s reports no transaction id but captureTargetXID "+
+				"returned %q", n, got)
+		}
+	}
+	if absent == 0 {
+		t.Fatal("every engine implements TransactionIDReporter, so this cell " +
+			"asserts nothing — which is what a dialectFor handing the same " +
+			"dialect to everyone would look like")
+	}
+}
+
+// The oracle runs its query on the querier it is handed, and asks about the
+// transaction it is given.
+//
+// THE ARGUMENT IS THE POINT. A CommitStatus that ignored its xid would answer
+// about whatever transaction the server last saw — the shape that makes a
+// recovery decision about the wrong transaction, which is the one failure this
+// whole path exists to prevent.
+func TestTheOracleAsksAboutTheTransactionItIsGiven(t *testing.T) {
+	asked := 0
+	for _, n := range engine.All() {
+		o, ok := dialectFor(n).(CommitStatusOracle)
+		if !ok {
+			continue
+		}
+		rec := &recordingArgsQuerier{}
+		_, _ = o.CommitStatus(context.Background(), rec, "424242")
+		if len(rec.queries) != 1 {
+			t.Fatalf("engine %s: the oracle ran %d quer(ies), want one", n, len(rec.queries))
+		}
+		found := false
+		for _, a := range rec.args {
+			if s, ok := a.(string); ok && s == "424242" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("engine %s: the oracle ran %q with args %v — the transaction "+
+				"id it was given does not reach the query, so the answer is "+
+				"about some other transaction",
+				n, rec.queries[0], rec.args)
+		}
+		asked++
+	}
+	if asked == 0 {
+		t.Fatal("no engine implements CommitStatusOracle; the cell above holds vacuously")
+	}
+}
+
+// recordingArgsQuerier records the statement AND its arguments.
+type recordingArgsQuerier struct {
+	queries []string
+	args    []any
+}
+
+func (r *recordingArgsQuerier) QueryContext(_ context.Context, sql string, args ...any) (dao.Rows, error) {
+	r.queries = append(r.queries, sql)
+	r.args = append(r.args, args...)
+	return nil, errors.New("recordingArgsQuerier: no rows")
+}

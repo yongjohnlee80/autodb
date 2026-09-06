@@ -163,3 +163,47 @@ func (mysqlDialect) VerifySessionGrammar(ctx context.Context, q dao.Querier) err
 func (d mysqlDialect) VerifyStatementGrammar(ctx context.Context, q dao.Querier) error {
 	return d.VerifySessionGrammar(ctx, q)
 }
+
+// TransactionIDReporter is a target that can hand out its own identifier for a
+// transaction while that transaction is still open.
+//
+// The identifier is the handle a later question is asked about, so it must be
+// captured at BEGIN: an id assigned lazily at first write would not be knowable
+// at the moment the recovery record has to be written.
+type TransactionIDReporter interface {
+	CaptureTransactionID(ctx context.Context, tx dao.ContextTxConn) (string, error)
+}
+
+// CommitStatusOracle is a target that can be asked, AFTER THE FACT, whether a
+// transaction committed.
+//
+// NOT THE SAME CAPABILITY AS THE ONE ABOVE, though exactly one engine has
+// either today. One is "can I get a handle", the other is "can I ask about a
+// handle later", and an engine could plausibly do the first without the second
+// — at which point a recovery record would carry an id nobody can resolve,
+// which is worse than carrying none.
+//
+// Its absence is a TERMINAL condition rather than a retryable one: where no
+// oracle exists, an indeterminate commit can never be resolved by anyone, so
+// the outcome is unresolvable by OUTCOME rather than pending by cause.
+type CommitStatusOracle interface {
+	CommitStatus(ctx context.Context, q dao.Querier, xid string) (string, error)
+}
+
+// CaptureTransactionID returns txid_current().
+//
+// Taken at BEGIN, inside the transaction, which is what makes it the id of
+// THIS transaction rather than of whatever ran next.
+func (postgresDialect) CaptureTransactionID(ctx context.Context, tx dao.ContextTxConn) (string, error) {
+	return scalarStringQ(ctx, tx, "SELECT txid_current()::text")
+}
+
+// CommitStatus asks txid_status about a transaction that has already ended.
+//
+// COALESCE so a NULL arrives as a value this code can read rather than as a
+// scan into a *string that would have to be nil-checked separately. NULL is
+// itself an answer — the status data was discarded as the xid horizon advanced
+// — and it is a different answer from "not committed".
+func (postgresDialect) CommitStatus(ctx context.Context, q dao.Querier, xid string) (string, error) {
+	return scalarStringQ(ctx, q, "SELECT COALESCE(txid_status($1::text::bigint), '')", xid)
+}

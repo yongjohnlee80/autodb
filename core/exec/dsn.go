@@ -149,8 +149,8 @@ func optionsSetsParam(options, name string) bool {
 }
 
 // scalarStringQ runs q (one text column, one row) on the given querier.
-func scalarStringQ(ctx context.Context, querier dao.Querier, stmt string) (string, error) {
-	rows, err := querier.QueryContext(ctx, stmt)
+func scalarStringQ(ctx context.Context, querier dao.Querier, stmt string, args ...any) (string, error) {
+	rows, err := querier.QueryContext(ctx, stmt, args...)
 	if err != nil {
 		return "", err
 	}
