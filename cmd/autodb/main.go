@@ -805,7 +805,7 @@ func runUI(configPath string) error {
 	// works before anyone logs in.
 	metaPath := cfg.Meta.Path
 	if cfg.Meta.Engine == engine.SQLite && metaPath == "" {
-		if p, perr := config.DefaultMetaPath(); perr == nil {
+		if p, perr := meta.DefaultPath(); perr == nil {
 			metaPath = p
 		}
 	}
@@ -894,7 +894,7 @@ func runWebUI(configPath string, port int) error {
 func metaPathFor(cfg config.Config) string {
 	p := cfg.Meta.Path
 	if cfg.Meta.Engine == engine.SQLite && p == "" {
-		if d, err := config.DefaultMetaPath(); err == nil {
+		if d, err := meta.DefaultPath(); err == nil {
 			return d
 		}
 	}

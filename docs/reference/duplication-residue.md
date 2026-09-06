@@ -234,6 +234,43 @@ Converting it honestly turns reader-routine analysis ON for MySQL: a tightening
 its own change with a live-MySQL witness — including the case that is REFUSED,
 not only the case that is reached — because an enablement inferred from a
 compile-time interface is not an enablement anyone has seen work.
+## Phase: the store stops importing the config layer (sequence step 9)
+
+**Removed: an edge from core/meta to core/config.** The storage layer imported
+the configuration layer in order to NAME the struct its own functions took —
+`Open`, `OpenNoMigrate`, `Migrate`, `AcquireLease` and `metaPoolBound` all
+declared a `config.Meta` parameter, and the package read exactly four values
+out of it: engine, path, DSN, and the resolved pool bound.
+**Answer: derive** — the edge was not carrying anything. `core/meta` now
+declares `StoreConfig`, an interface naming those four, and `config.Meta`
+satisfies it STRUCTURALLY, so neither package imports the other and all 48 call
+sites are unchanged.
+
+The two shapes rejected, and why: a conversion function would have to live in
+one of the two packages (putting the edge back, pointing one way or the other),
+and a method on `config.Meta` returning a `meta.Options` would point the edge
+from config at meta — pulling the database drivers into everything that reads a
+config file.
+
+**Removed: `DefaultMetaPath`, which became a duplicate the moment it moved.**
+The default sqlite location is a fact about where the STORE keeps its file, so
+it now lives in `core/meta` as `DefaultPath`; the copy in `core/config` was
+deleted rather than delegated, and its two remaining callers in `cmd/autodb`
+call the store's. Leaving both would have been the sweep creating exactly what
+it exists to remove.
+
+**Left: tests in core/meta still import core/config**, exempted by name in the
+import guard. A test that constructs a real `config.Meta` and hands it to
+`meta.Open` is the best available evidence that the structural satisfaction
+works at a call site — worth more than the purity of the test binary's import
+graph.
+
+**Guarded three ways**, because an interface is a contract nothing enforces on
+its own: a compile-time witness (`var _ meta.StoreConfig = config.Meta{}`) in
+the package that made the promise, an import guard that fails if the edge comes
+back, and its inverse — every `StoreConfig` method must be CALLED in core/meta,
+because an interface the consumer does not consume is a copy of the struct it
+replaced wearing a different name.
 
 ## The exemption mechanism has four parts
 

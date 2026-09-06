@@ -12,8 +12,6 @@ import (
 	"github.com/yongjohnlee80/golib/dao"
 	"github.com/yongjohnlee80/golib/dao/postgres"
 	"github.com/yongjohnlee80/golib/dao/sqlite"
-
-	"github.com/yongjohnlee80/autodb/core/config"
 )
 
 // Store is the opened meta-store: one dao connection, migrated to the
@@ -53,23 +51,23 @@ type Store struct {
 // An explicit [meta] pool_max_conns wins. Otherwise a pool_max_conns already
 // in the DSN is left alone — someone who wrote it there meant it — and only a
 // DSN that says nothing gets the default.
-func metaPoolBound(mcfg config.Meta) postgres.Option {
+func metaPoolBound(mcfg StoreConfig) postgres.Option {
 	// The SAME decision the validator made — one function, two callers
 	// When these were decided separately, a DSN-level
 	// pool_max_conns=1 satisfied validation (which only looked at the TOML
 	// field) and then won at connect time, producing exactly the
 	// one-connection pool the floor exists to prevent.
-	n, _ := mcfg.EffectivePoolMaxConns()
+	n := mcfg.StorePoolMaxConns()
 	return func(c *pgxpool.Config) { c.MaxConns = int32(n) }
 }
 
 // Open connects and brings the schema up to date.
-func Open(ctx context.Context, mcfg config.Meta) (*Store, error) {
+func Open(ctx context.Context, mcfg StoreConfig) (*Store, error) {
 	s, err := OpenNoMigrate(ctx, mcfg)
 	if err != nil {
 		return nil, err
 	}
-	if err := runMigrations(ctx, s.conn, mcfg.Engine); err != nil {
+	if err := runMigrations(ctx, s.conn, mcfg.StoreEngine()); err != nil {
 		_ = s.conn.Close()
 		return nil, err
 	}
@@ -88,26 +86,26 @@ func Open(ctx context.Context, mcfg config.Meta) (*Store, error) {
 // The returned Store is safe for the lease and for reading `schema_migrations`,
 // and nothing else should assume its schema is current. Everything that serves
 // requests uses Open.
-func OpenNoMigrate(ctx context.Context, mcfg config.Meta) (*Store, error) {
+func OpenNoMigrate(ctx context.Context, mcfg StoreConfig) (*Store, error) {
 	var (
 		conn dao.DataConn
 		err  error
 	)
-	switch mcfg.Engine {
+	switch mcfg.StoreEngine() {
 	case engine.SQLite:
-		conn, err = openSqlite(ctx, mcfg.Path)
+		conn, err = openSqlite(ctx, mcfg.StorePath())
 	case engine.Postgres:
-		conn, err = postgres.OpenNamed(ctx, "meta", mcfg.DSN, metaPoolBound(mcfg))
+		conn, err = postgres.OpenNamed(ctx, "meta", mcfg.StoreDSN(), metaPoolBound(mcfg))
 	default:
-		return nil, fmt.Errorf("meta: unknown engine %q", mcfg.Engine)
+		return nil, fmt.Errorf("meta: unknown engine %q", mcfg.StoreEngine())
 	}
 	if err != nil {
-		return nil, fmt.Errorf("meta: opening %s store: %w", mcfg.Engine, err)
+		return nil, fmt.Errorf("meta: opening %s store: %w", mcfg.StoreEngine(), err)
 	}
 
 	return &Store{
 		conn:           conn,
-		engine:         mcfg.Engine,
+		engine:         mcfg.StoreEngine(),
 		Users:          newUsers(conn),
 		Connections:    newConnections(conn),
 		Workspaces:     newWorkspaces(conn),
@@ -135,7 +133,7 @@ func openSqlite(ctx context.Context, path string) (dao.DataConn, error) {
 			sqlite.MaxOpenConns(1))
 	}
 	if path == "" {
-		p, err := config.DefaultMetaPath()
+		p, err := DefaultPath()
 		if err != nil {
 			return nil, err
 		}

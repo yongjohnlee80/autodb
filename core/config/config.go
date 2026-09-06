@@ -636,20 +636,6 @@ func ResolvePath(path string) (string, error) {
 	return DefaultPath()
 }
 
-// DefaultMetaPath returns the default sqlite meta-store location:
-// $XDG_DATA_HOME/autodb/meta.db.
-func DefaultMetaPath() (string, error) {
-	dir := os.Getenv("XDG_DATA_HOME")
-	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("config: resolving home dir: %w", err)
-		}
-		dir = filepath.Join(home, ".local", "share")
-	}
-	return filepath.Join(dir, "autodb", "meta.db"), nil
-}
-
 // Load reads the configuration at path. An empty path resolves to
 // DefaultPath. A missing file is not an error — defaults apply. A present
 // file must decode without unknown keys and validate.

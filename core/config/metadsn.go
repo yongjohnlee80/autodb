@@ -5,6 +5,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/yongjohnlee80/autodb/core/engine"
 )
 
 // Meta-store DSN hardening.
@@ -279,4 +281,35 @@ func redactKeywordDSN(dsn string) string {
 		}
 	}
 	return out.String()
+}
+
+// --- meta.StoreConfig ---------------------------------------------------------
+//
+// core/meta declares the four values it needs to open a store, and this type
+// supplies them. The methods exist so that neither package has to import the
+// other: core/meta names an interface, config.Meta satisfies it structurally,
+// and the edge that used to point from the storage layer at the configuration
+// layer is gone.
+//
+// The compile-time witness lives in core/meta's own test, where a break shows
+// up as a failure in the package that made the promise.
+
+// StoreEngine is the meta backend.
+func (m Meta) StoreEngine() engine.Name { return m.Engine }
+
+// StorePath is the sqlite file; empty means the store's default location.
+func (m Meta) StorePath() string { return m.Path }
+
+// StoreDSN is the postgres connection string.
+func (m Meta) StoreDSN() string { return m.DSN }
+
+// StorePoolMaxConns is the bound the meta pool will ACTUALLY use.
+//
+// The RESOLVED number, not the configured one: EffectivePoolMaxConns also
+// reports WHERE the number came from, and that provenance is this package's
+// business — an operator asking "why 8?" is asking a configuration question.
+// The store only needs the answer.
+func (m Meta) StorePoolMaxConns() int {
+	n, _ := m.EffectivePoolMaxConns()
+	return n
 }

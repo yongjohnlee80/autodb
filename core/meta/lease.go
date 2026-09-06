@@ -13,8 +13,6 @@ import (
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
-
-	"github.com/yongjohnlee80/autodb/core/config"
 )
 
 // The instance lease: one engine per meta store, enforced.
@@ -83,12 +81,12 @@ type InstanceLease struct {
 // that can drop. Anyone adding a third engine needs to decide which of those
 // two it resembles, and a nil Lost() is the deliberate answer for "cannot be
 // lost while we are alive", not an unimplemented stub.
-func AcquireLease(ctx context.Context, s *Store, mcfg config.Meta) (*InstanceLease, error) {
+func AcquireLease(ctx context.Context, s *Store, mcfg StoreConfig) (*InstanceLease, error) {
 	switch s.engine {
 	case engine.SQLite:
-		return acquireFileLease(mcfg.Path)
+		return acquireFileLease(mcfg.StorePath())
 	case engine.Postgres:
-		return acquirePGLease(ctx, s, mcfg.DSN)
+		return acquirePGLease(ctx, s, mcfg.StoreDSN())
 	}
 	return nil, fmt.Errorf("meta: cannot lease an unknown engine %q", s.engine)
 }
@@ -153,7 +151,7 @@ func acquireFileLease(path string) (*InstanceLease, error) {
 		return &InstanceLease{target: ":memory:", released: true}, nil
 	}
 	if path == "" {
-		p, err := config.DefaultMetaPath()
+		p, err := DefaultPath()
 		if err != nil {
 			return nil, err
 		}
