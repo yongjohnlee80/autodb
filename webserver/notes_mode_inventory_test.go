@@ -12,7 +12,7 @@ package webserver
 // The r2 commit lost five verified tests to an edit that replaced from a marker
 // to end-of-file. The first version of this guard lived at the end of that same
 // file, so repeating the exact edit would have deleted the guard along with the
-// tests it guards and the suite would have gone green again (a review r4).
+// tests it guards and the suite would have gone green again (a review found it).
 //
 // Here, that edit instead leaves this file referencing symbols that no longer
 // exist — a COMPILE failure, which cannot be mistaken for a pass. A guard that

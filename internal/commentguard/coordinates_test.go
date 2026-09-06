@@ -40,13 +40,35 @@ var certifiedClean = []string{
 }
 
 // Patterns that name a private artefact.
+//
+// SIX OF THESE ARMS EXIST BECAUSE THE FIRST VERSION CERTIFIED webserver CLEAN
+// WHILE TWELVE COORDINATES SURVIVED IN IT. The classes it was blind to were not
+// exotic: a PR number, a bare "must-fix", a hyphenated "criterion-12", an
+// "Amendment 1", a "Requirement 4", and a plain "r3" with none of the suffixes
+// the review-round arm required. Worse, most of those twelve were introduced BY
+// the conversion pass — rewriting "lector r1 P1b on PR #5" into "a review r2 on
+// PR #5" removes the name and keeps the coordinate. Solving one half of a line
+// is how you stop seeing the other half.
+//
+// Every arm below is narrower than the prose it must not catch, and every one
+// has both a positive fixture and a negative lookalike in
+// TestCoordinatePatternMatchesEachForm. An arm without a negative is an arm
+// nobody has proven is safe to enable.
 var coordinate = regexp.MustCompile(
 	`ADR[- ]?\d{4}` + // an ADR number
 		`|§\d+(\.\d+)*` + // a section anchor into one
 		`|\[\[[^\]]+\]\]` + // a KB wikilink
-		`|\bcriteri(on|a) \d+` + // an acceptance criterion
-		`|\br\d+ MF\d+\b` + // a review round's must-fix
-		`|\bMF\d+\b` + // a must-fix on its own
+		`|\bcriteri(on|a)[- ]\d+` + // an acceptance criterion, spaced or hyphenated
+		`|\bRequirement \d+\b` + // the same thing under another name
+		`|\bAmendment \d+\b` + // a KB amendment
+		`|\bPR #\d+\b` + // a pull-request number
+		`|\b(must|should)-fix(es)?\b` + // review shorthand, with or without a round
+		`|\bMF\d+\b` + // a must-fix by number
+		`|\b(in|at|of|since|after|before|during|the|review|round)\s+r\d+\b` +
+		// a bare review round. A plain \br\d+\b is far too broad — "register r1"
+		// is a variable, "r2" can be anything — so it is admitted only after the
+		// words a REFERENCE to a round actually uses. The review-verb fixture
+		// "register r1 holds the accumulator" is the negative that pins this.
 		`|(?i)\b(lector|gold-?man|jarvis|kimmy(-vision)?|juliet|wanda(-maximoff)?|` +
 		`ultron(-prime)?|white-vision|zen)\b`, // an agent — see the Johno exception below
 )
@@ -120,7 +142,15 @@ func TestCoordinatePatternMatchesEachForm(t *testing.T) {
 		{"// (§2.4.5) and so on", "§2.4.5"},
 		{"// see [[code-comments]]", "[[code-comments]]"},
 		{"// acceptance criterion 11 says", "criterion 11"},
-		{"// a review round r5 MF16 caught it", "r5 MF16"},
+		{"// MF16 caught it", "MF16"},
+		{"// raised on PR #5", "PR #5"},
+		{"// raised in r2 by the reviewer", "in r2"},
+		{"// a bare must-fix survives review shorthand", "must-fix"},
+		{"// raised as a should-fix in review", "should-fix"},
+		{"// the criterion-12 bug", "criterion-12"},
+		{"// Amendment 1's whole point", "Amendment 1"},
+		{"// Requirement 4 of the same rule", "Requirement 4"},
+		{"// the point of r3", "of r3"},
 		{"// folded MF2 already", "MF2"},
 		{"// lector found the leak", "lector"},
 		{"// per gold-man's note", "gold-man"},
@@ -143,6 +173,16 @@ func TestCoordinatePatternMatchesEachForm(t *testing.T) {
 		"// Johno's ruling supersedes the default",
 		"// a reviewer found the first version proved it only by timing",
 		"// the zenith of the stack",
+		// Negative lookalikes for the six arms added after the first
+		// certification let twelve coordinates through. Each of these is
+		// ordinary prose that a careless arm would swallow, and an arm without
+		// one of these is an arm nobody has proven is safe to enable.
+		"// this must fix the ordering before the flush",
+		"// requirement gathering happens elsewhere",
+		"// the amendment process is documented upstream",
+		"// register r1 holds the accumulator",
+		"// see the criterion for admission",
+		"// PR review happens in the usual place",
 	} {
 		if got := coordinate.FindString(ok); got != "" {
 			t.Errorf("FindString(%q) matched %q; ordinary prose and in-repo or public "+

@@ -17,8 +17,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// The web UI's IP admission, observed AT THE WEB SURFACE (a review r0
-// must-fix 2).
+// The web UI's IP admission, observed AT THE WEB SURFACE (a review required it).
 //
 // The daemon predicate has its own cells and the RPC verb has its own. What
 // none of them can show is that the gateway ENFORCES either. Every other
@@ -123,7 +122,7 @@ func TestAdmission_GlobalLayerAdmitsAnOrdinaryLogin(t *testing.T) {
 // ORDINARY LOGIN, admitted by the USER'S OWN ROW, with the global layer
 // refusing.
 //
-// This is Amendment 1's whole point: the two layers are an OR, so a person's
+// This is the whole point of the amended rule: the two layers are an OR, so a person's
 // own registered address works without their home address having to be added
 // to a perimeter shared by everyone.
 func TestAdmission_AUsersOwnRowAdmitsWhereTheGlobalListDoesNot(t *testing.T) {
@@ -256,7 +255,7 @@ var _ = auth.AdmittedByUserRow
 //
 // The earlier version of this cell watched for a SUCCESSFUL login row, which
 // worked while the gateway minted a session and then revoked it. It does not
-// any more, and that is the point of r3: no session is created for a caller
+// any more, and that is the point of the change: no session is created for a caller
 // who will be refused.
 func TestAdmission_TheCredentialIsVerifiedBeforeTheAddressIsJudged(t *testing.T) {
 	t.Parallel()

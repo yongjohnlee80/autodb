@@ -347,7 +347,7 @@ func (r *appRunner) Run(ctx context.Context) error {
 // Testing the options individually was not enough: a review restored the old
 // construction — unchanged `WithAbout(cfg.About)` and no `WithNoteView` — and
 // every test still passed, because the tests applied the options themselves
-// instead of asking the runner for them (r2 on PR #5). Deleting either line below
+// instead of asking the runner for them. Deleting either line below
 // must now fail a test.
 func (g *Gateway) modelOptions(root string) []tuiapp.Option {
 	return []tuiapp.Option{

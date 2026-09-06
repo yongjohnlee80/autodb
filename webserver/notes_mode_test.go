@@ -166,7 +166,7 @@ func (d *dialRecorder) last() *tuiapp.Session {
 	return d.all[len(d.all)-1]
 }
 
-// --- restored: five tests destroyed by a slice-to-EOF edit in the r2 commit ---
+// --- restored: five tests destroyed by a slice-to-EOF edit in a later commit ---
 //
 // They were written, run, and control-verified, then deleted by a string edit
 // that replaced from an index to end-of-file. The suite stayed green, because a
@@ -228,7 +228,7 @@ func TestNotesMode_AboutReportsTheEffectiveRoot(t *testing.T) {
 //
 // Testing modelOptions() in isolation proved the helper and not its caller:
 // A review restored the old construction, left the helper intact, and every test
-// stayed green while the criterion-12 bug was back. This drives a REAL browser
+// stayed green while the About-path bug was back. This drives a REAL browser
 // session — login, ticket, attach — and captures the model factory appRunner must
 // go through, so a caller bypass fails here rather than passing quietly.
 func TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot(t *testing.T) {

@@ -285,7 +285,7 @@ func TestSessions_ClosedPoolRefuses(t *testing.T) {
 // A pooled session that has been re-keyed to a DIFFERENT user must not be handed
 // out under its original key.
 //
-// This is the core of that must-fix at the pool boundary. The frontend fix
+// This is the core of that fix at the pool boundary. The frontend fix
 // makes the drift impossible (the web App cannot re-authenticate its session), but
 // the pool asserts the invariant anyway: a defence that only exists in another
 // package is a defence one refactor away from gone. Here the drift is simulated the
@@ -331,7 +331,7 @@ func TestSessions_RejectsIdentityDrift(t *testing.T) {
 
 // A late release from a replaced entry must not touch the entry that replaced it.
 //
-// Requirement 4 of the same must-fix. Two joins for one subject produce two
+// The fourth requirement of the same fix. Two joins for one subject produce two
 // references to ONE entry; the pointer-checked release means a stale entry handle —
 // one whose entry has since been removed and a new one installed under the same
 // key — decrements nothing. Constructed directly because the frontend fix makes
@@ -376,7 +376,7 @@ func TestSessions_ReleaseIsEntrySpecific(t *testing.T) {
 // join must not adopt a NEW session whose identity does not match its key.
 //
 // The existing-entry path already refuses drift; this is the new-entry path
-// (raised as a should-fix in review). Production derives the key from the session, so a
+// (raised in review). Production derives the key from the session, so a
 // mismatch cannot happen there today — which is exactly why it needs a direct
 // test: the invariant must be the pool's own, not a property of its one caller.
 func TestSessions_JoinRejectsMismatchedNewEntry(t *testing.T) {
