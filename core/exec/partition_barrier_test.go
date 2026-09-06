@@ -1,6 +1,6 @@
 package exec
 
-// ADR-0077 criterion 10, the BARRIER-CONTROLLED half: the base listing and the
+// The BARRIER-CONTROLLED half: the base listing and the
 // supplementary partition-role query are two independent READ COMMITTED
 // snapshots, and the catalog can change between them. Here a second goroutine
 // mutates the catalog while ListTables is parked at a barrier placed exactly

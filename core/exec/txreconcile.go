@@ -12,7 +12,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Recovery reconciliation — ADR-0074 §7 rev 2 + Amendment 4.
+// Recovery reconciliation.
 //
 // The outcome log records that a COMMIT was in flight; it cannot record what
 // happened to a COMMIT the process did not survive. That is what the target's
@@ -72,8 +72,8 @@ func newReconciler() *reconciler {
 
 // claim admits one resolver per tx_id per process.
 //
-// The instance lease gives one PROCESS, not one goroutine (lector Amendment-4
-// MF3), and inside this process the periodic pass, a checkout trigger and the
+// The instance lease gives one PROCESS, not one goroutine (found in
+// review), and inside this process the periodic pass, a checkout trigger and the
 // boundary handler can all reach the same transaction. The store's terminal
 // guard is what makes a lost race SAFE; this is what stops us from running
 // the race — and paying for two txid_status round-trips — in the first place.
@@ -147,7 +147,7 @@ func (r *reconciler) claimCheckout(connID int64, now time.Time) bool {
 // present at that moment. Paging runs from `cursor` up to `end` and then
 // starts over.
 //
-// The boundary is what makes the rotation finite (PR #20 r3 MF1). Wrapping
+// The boundary is what makes the rotation finite. Wrapping
 // only on a short page is not enough: if new entries keep arriving faster
 // than a page is consumed, every page is full, the cursor chases the tail
 // forever, and an entry with a low id is never revisited at all — the same
@@ -203,7 +203,7 @@ func (e *Engine) ReconcileOutcomes(ctx context.Context) int {
 
 // ReconcileConnection reconciles only the entries belonging to one connection.
 //
-// The checkout trigger (ADR-0074 Amendment 4 A1): a pending entry is retried
+// The checkout trigger: a pending entry is retried
 // on the next successful use of its own connection, which resolves promptly
 // when a target comes back without paying for tighter polling. It is also
 // what makes a disabled periodic pass coherent rather than a way to strand
@@ -231,7 +231,7 @@ func (e *Engine) reconcileScope(ctx context.Context, connID int64) int {
 	//
 	// A pass is bounded, so it cannot settle everything; what matters is
 	// that it always makes progress through a FINITE cycle rather than
-	// re-reading a page or chasing new arrivals (PR #20 r3 MF1).
+	// re-reading a page or chasing new arrivals.
 	cyc := e.reconcile.cycle(connID)
 	if cyc.end == 0 {
 		end, herr := e.queueHighWater(ctx, connID)
@@ -284,7 +284,7 @@ func (e *Engine) reconcileScope(ctx context.Context, connID int64) int {
 // the groups it folds. And query PARAMETERS: the group fetch is an IN list,
 // and an unbounded one eventually exceeds the driver's parameter limit — at
 // which point reconciliation does not slow down, it STOPS, silently, exactly
-// when the backlog is largest (PR #20 r1 MF1). Whatever a pass does not reach
+// when the backlog is largest. Whatever a pass does not reach
 // is picked up by the next one, so paging costs latency and never coverage.
 const maxReconcileBatch = 200
 
@@ -294,7 +294,7 @@ const maxReconcileBatch = 200
 // STATE cannot: every transaction keeps its `opened` row forever and every
 // committed one keeps `commit_started`, so a state predicate matches the
 // entire history — which is what the previous version did while looking
-// selective, returning all 33 groups in lector's 32-settled-plus-one-pending
+// selective, returning all 33 groups in the 32-settled-plus-one-pending
 // probe.
 //
 // The queue holds only tx_ids with no terminal, so a normally-empty backlog
@@ -379,7 +379,7 @@ func (e *Engine) queueHighWater(ctx context.Context, connID int64) (int64, error
 // transaction that is about to commit perfectly normally.
 //
 // A prior-process `opened` row has no such owner, and is settled by
-// RecoverStaleOpen at startup instead (PR #20 r0 MF1).
+// RecoverStaleOpen at startup instead.
 func needsOracle(s meta.TxState) bool {
 	return s == meta.TxCommitStarted || s == meta.TxUnknownPending
 }
@@ -400,7 +400,7 @@ func (e *Engine) resolveOne(ctx context.Context, txID string, st TxStatus, group
 		// this entry again. Permanent, and named as such.
 		return e.terminate(ctx, txID, st, meta.TxUnresolvable, meta.ReasonConnectionGone)
 	case err != nil:
-		// A meta-store failure proves nothing about the connection (PR #20
+		// A meta-store failure proves nothing about the connection (found in
 		// r0 SF3). Treating it as deletion would terminate a resolvable
 		// transaction because a lookup blipped — the same fabrication the
 		// unreachable-target branch exists to avoid.
@@ -410,7 +410,7 @@ func (e *Engine) resolveOne(ctx context.Context, txID string, st TxStatus, group
 
 	// No oracle on this dialect. MySQL and sqlite have nothing equivalent to
 	// txid_status, so an indeterminate commit there can never be resolved by
-	// anyone — which is a terminal condition, and Amendment 4 MF2 makes it
+	// anyone — which is a terminal condition, and the design makes it
 	// one by OUTCOME rather than by cause.
 	if !connRow.Engine.HasCommitStatusOracle() || xid == "" {
 		return e.terminate(ctx, txID, st, meta.TxUnresolvable, meta.ReasonNoOracle)
@@ -500,12 +500,12 @@ func (e *Engine) connectionRow(ctx context.Context, connID int64) (*meta.Connect
 //
 // A crash after `opened` and before `commit_started` leaves a row no later
 // owner exists for: the dead process's session, timeout reaper and boundary
-// handler all went with it, so nothing would ever settle it and §7's "exactly
-// one terminal" would be false for that transaction forever (PR #20 r0 MF1).
+// handler all went with it, so nothing would ever settle it and the "exactly
+// one terminal" would be false for that transaction forever.
 //
 // The outcome is not a guess. A transaction that never reached commit_started
 // cannot have committed — the target aborts it when the connection dies — so
-// `rolled_back` is proven by the same reasoning Amendment 5 decision 2 uses
+// `rolled_back` is proven by the same reasoning the outcome read API uses
 // to justify carrying no xid before that point.
 //
 // SYNCHRONOUS, and called before the daemon serves anything. That ordering is
@@ -527,7 +527,7 @@ func (e *Engine) RecoverStaleOpen(ctx context.Context) int {
 	// settle it. Each page is PROCESSED and released rather than accumulated
 	// into one map: bounding the SQL parameters while letting the result set
 	// grow without limit only moves the unbounded thing from the query to
-	// the heap (PR #20 r3 SF).
+	// the heap.
 	settled := 0
 	for cursor := int64(0); ; {
 		page, last, perr := e.pendingGroups(ctx, 0, maxReconcileBatch, cursor, 0)
@@ -560,7 +560,7 @@ func (e *Engine) RecoverStaleOpen(ctx context.Context) int {
 
 // StartOutcomeReconciler runs the reconciler at startup and then on a ticker.
 //
-// Both are required (ADR-0074 §7): the startup pass is what recovers the
+// Both are required: the startup pass is what recovers the
 // crash window — it is the whole reason the log exists — and the periodic
 // pass is what resolves entries whose target was down when the startup pass
 // ran, and the live indeterminate commits that need no crash at all.
@@ -571,10 +571,10 @@ func (e *Engine) RecoverStaleOpen(ctx context.Context) int {
 // (see there). Running it in a goroutine would race the first client.
 //
 // A non-positive interval DISABLES the periodic pass and is a supported
-// operator choice, not an error — ADR-0074 Amendment 4 A1 names the semantics:
+// operator choice, not an error — the semantics are:
 // unset takes the default, zero or negative leaves startup and checkout
 // reconciliation. Silently rewriting it to a minute, as this did, made the
-// ratified configuration unreachable (PR #20 r0 MF5).
+// ratified configuration unreachable.
 func (e *Engine) StartOutcomeReconciler(ctx context.Context, every time.Duration) {
 	// Inherited transactions first: they are settled by proof, not by asking
 	// anyone, and doing it before the oracle pass means that pass sees a

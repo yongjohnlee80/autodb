@@ -35,7 +35,7 @@ type WireSessionResult struct {
 	UserID    int64
 	ConnID    int64
 	// AdmissionSource records WHICH allowlist layer admitted the address
-	// (ADR-0075 Amendment 1). Audited, so an operator can tell a connection
+	// Audited, so an operator can tell a connection
 	// from shared infrastructure apart from one from a person's own
 	// registered address.
 	AdmissionSource auth.AdmissionSource
@@ -94,18 +94,18 @@ const (
 	DenyPATIPNarrowed  = "frontdoor/pat-allowed-ips"
 	DenyNoSuchDatabase = "frontdoor/no-such-database"
 	// DenyPATUnscoped: the presented token carries conn_id = 0 — a pre-v13
-	// token, or a v13 tombstone somebody un-revoked by hand (ADR-0086 §2).
+	// token, or a v13 tombstone somebody un-revoked by hand.
 	// Refused INDEPENDENTLY of `revoked`, so re-flipping that column cannot
 	// bring an unscoped credential back.
 	DenyPATUnscoped = "frontdoor/pat-unscoped"
 	// DenyDatabaseMismatch: the startup `database` agrees with neither the
-	// bound connection's name, nor its target_db, nor conn:<id> (ADR-0086 §4).
+	// bound connection's name, nor its target_db, nor conn:<id>.
 	//
 	// NEVER silently substituted: a client that asked for `postgres` and was
 	// quietly given `test` is worse than any refusal.
 	DenyDatabaseMismatch = "frontdoor/database-mismatch"
 	// DenyPATNotCleartextDebug: a cleartext listener met an ordinary token
-	// (ADR-0086 §10). Not charged — the credential is valid and the peer may be
+	// (the cleartext debugging mode). Not charged — the credential is valid and the peer may be
 	// fully admitted; what refuses it is our mode.
 	DenyPATNotCleartextDebug = "frontdoor/pat-not-cleartext-debug"
 	// DenyPATCleartextDebugInTLS: a TLS listener met a debug_cleartext token.
@@ -124,8 +124,8 @@ const (
 	// phase (§7 ruling 4); this reason is the audit identity only.
 	DenyLeaseEncoding = "frontdoor/lease-encoding"
 	// DenyStartupGUC: a startup parameter named a setting this session may not
-	// change (the Amendment 8 denylist), or the target refused to apply it.
-	// Uniform 28000 on the wire (§7 ruling 4); the audit row names the key.
+	// change, or the target refused to apply it.
+	// Uniform 28000 on the wire (matrix §7 ruling 4); the audit row names the key.
 	DenyStartupGUC = "frontdoor/startup-parameter-refused"
 )
 
@@ -139,11 +139,11 @@ const (
 // bookkeeping". That was wrong and it was load-bearing wrong: the front door
 // separately reserves 64 KiB per connection for its control lane, whose
 // comment also mentions the decoder, so the two read as one charge taken
-// twice. They are different terms of ADR-0075 §8.4's worst case, charged
+// twice. They are different terms of the worst case, charged
 // against different budgets by different packages. The protocol matrix §8.5
-// carries the allocation-to-charge map; lector found the drift on PR #36.
+// carries the allocation-to-charge map; review found the drift.
 //
-// A flat figure rather than a measurement, deliberately, and lector's PR #33
+// A flat figure rather than a measurement, deliberately, and a review
 // ruling accepts it as such: the budget's job is to bound the total, and a
 // charge that varied with actual allocation would let a session grow past
 // what it reserved — the reservation would stop meaning anything at the
@@ -164,13 +164,13 @@ type WireOpen struct {
 	// StartupGUCs are the StartupMessage parameters outside row 3.1's named
 	// set — the settings a client asks for at connect (lib/pq's datestyle,
 	// JDBC's TimeZone and extra_float_digits). Each is admitted EXACTLY as
-	// `SET name TO value` from this session would be (ADR-0075 Amendment 8,
+	// `SET name TO value` from this session would be (under the amended rule,
 	// one admission implementation) and, when admitted, applied to the pinned
 	// backend before the result returns — PostgreSQL's own semantics, not an
 	// emulation. One refusal withdraws the session (DenyStartupGUC).
 	StartupGUCs map[string]string
-	// Cleartext reports that the LISTENER is serving without TLS (ADR-0086
-	// §10). It comes from the listener rather than from config because it is a
+	// Cleartext reports that the LISTENER is serving without TLS
+	// matrix §10). It comes from the listener rather than from config because it is a
 	// property of the connection being opened, and because the engine must not
 	// have to re-derive a fact the caller already knows.
 	Cleartext bool
@@ -187,7 +187,7 @@ func (e *Engine) OpenWireSession(ctx context.Context, presented, startupUser, da
 // so the target's reported ParameterStatus set can be handed to the loop before
 // its first frame and the row-3.1 lease rule (UTF8) is enforced before any
 // statement runs. Pinning at open rather than at the first statement is what
-// makes §3.3 satisfiable at all: the set is a property of the connection.
+// makes matrix §3.3 satisfiable at all: the set is a property of the connection.
 func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSessionResult, error) {
 	presented, startupUser, database, ip := req.PAT, req.StartupUser, req.Database, req.IP
 	var out WireSessionResult
@@ -215,7 +215,7 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		return out, deny(DenyUserMismatch)
 	}
 
-	// 3a. THE CREDENTIAL CLASS MUST MATCH THE LISTENER (ADR-0086 §10).
+	// 3a. THE CREDENTIAL CLASS MUST MATCH THE LISTENER.
 	//
 	// Checked BEFORE any IP work, and that placement is load-bearing:
 	// auth.PATAllowsIP returns TRUE for an empty list by contract, because
@@ -226,7 +226,7 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	//
 	// Both directions are refusals, and the token is VALID in each — what
 	// refuses it is the listener's mode. That is why neither charges the
-	// per-address throttle (§5): a developer whose daemon restarted into the
+	// per-address throttle (matrix §5): a developer whose daemon restarted into the
 	// other mode is the common case, not an attacker.
 	debugToken := pat.DebugCleartext != 0
 	switch {
@@ -246,10 +246,10 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	// 3b. IP admission.
 	//
 	// Under TLS: (global ∨ the user's rows), then the token's own narrowing if
-	// it sets one (ADR-0075 Amendment 1).
+	// it sets one.
 	//
 	// In CLEARTEXT: the token's own list is the ENTIRE gate and the inherited
-	// set is NOT consulted (ADR-0086 §10, ruled by Johno). The list is
+	// set is NOT consulted. The list is
 	// guaranteed non-empty by the mint gate; it is re-checked here anyway,
 	// because a store edited by hand must not yield a token admitted from
 	// anywhere.
@@ -270,7 +270,7 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		return out, deny(DenyPATIPNarrowed)
 	}
 
-	// 4. THE TARGET COMES FROM THE CREDENTIAL, NOT FROM THE CLIENT (ADR-0086 §1).
+	// 4. THE TARGET COMES FROM THE CREDENTIAL, NOT FROM THE CLIENT.
 	//
 	// This is the change that dissolves the ambiguity rather than managing it.
 	// Two connections targeting a database called `test` — a local one and a
@@ -290,7 +290,7 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	if err != nil {
 		if errors.Is(err, dao.ErrNoRows) {
 			// A live token naming a row that is gone. There is no database-level
-			// foreign key (ADR-0086 §1: it cannot be added to a populated
+			// foreign key (it cannot be added to a populated
 			// table), so this is the guard that makes a dangling reference
 			// LOUD rather than silent, and it is why this reason survived the
 			// binding change instead of being collapsed into the mismatch.
@@ -307,7 +307,7 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		return out, aerr
 	}
 	// And the connection must admit front-door use at all. Opt-in per
-	// connection (ADR-0075 §1): no target is reachable through this surface
+	// connection: no target is reachable through this surface
 	// by default, so adding the listener does not silently expose every
 	// database the daemon knows about.
 	if e.profileFor(connRow) != ProfileSession {
@@ -315,7 +315,7 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	}
 
 	// 4c. The `database` field is now a CONSISTENCY CHECK, not a lookup key
-	// (ADR-0086 §4, ruling R2).
+	// (as ruled).
 	//
 	// Checked AFTER the grant so an ungranted caller never produces a
 	// mismatch row: a reader of the audit trail would take that row as
@@ -382,7 +382,7 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 			cancel()
 			return out, deny(DenyLeaseEncoding)
 		}
-		// Startup GUCs (Amendment 8): judged by the SAME denylist a SET from
+		// Startup GUCs: judged by the SAME denylist a SET from
 		// this session meets, then applied to the pinned backend so the
 		// reported ParameterStatus set the client receives already reflects
 		// them. Any refusal — ours or the target's — withdraws the session.
@@ -453,7 +453,7 @@ func (e *Engine) reporterFor(pc golibpg.PinnedConn) any {
 }
 
 // wireDatabaseAgrees reports whether the client's startup `database` names the
-// connection its token is bound to (ADR-0086 §4).
+// connection its token is bound to.
 //
 // It REPLACED a lookup. The field used to select which connection to open;
 // now the token has already decided that, and this only asks whether the

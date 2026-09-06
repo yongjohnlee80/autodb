@@ -47,6 +47,7 @@ var certifiedClean = []string{
 	"tui",
 	"internal/vocabguard",
 	"frontdoor",
+	"core/exec",
 }
 
 // Patterns that name a private artefact.

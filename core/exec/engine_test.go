@@ -13,7 +13,7 @@ import (
 )
 
 // The fixture (newFixture, exec, execErr, auditCount, audits) lives in
-// fixture_test.go — the §11 entry-point fixture for this package.
+// fixture_test.go — the entry-point fixture for this package.
 
 func TestEngine_FullPath(t *testing.T) {
 	t.Parallel()
@@ -48,7 +48,7 @@ func TestEngine_FullPath(t *testing.T) {
 		t.Errorf("stream = %d rows, res.Rows=%v, err=%v — want 5, nil, nil", streamed, sres.Rows, err)
 	}
 
-	// The WHERE guard (Objective 18) — proven through the dispatch (§11).
+	// The WHERE guard (Objective 18) — proven through the dispatch.
 	if err := f.execErr(t, f.rootTok, "UPDATE songs SET title = 'x'"); !errors.Is(err, ErrNoWhere) {
 		t.Errorf("guard err = %v, want ErrNoWhere", err)
 	}
@@ -62,7 +62,7 @@ func TestEngine_FullPath(t *testing.T) {
 	}
 
 	// Records: audit always (attempt + result), history on (default).
-	// (Example §11 conversion: the hand-rolled store queries became the
+	// (Example conversion to the fixture: the hand-rolled store queries became the
 	// fixture's auditCount, so an audit promise costs one line to check.)
 	if f.auditCount(t, "exec") == 0 {
 		t.Error("no exec audit rows")
@@ -71,7 +71,7 @@ func TestEngine_FullPath(t *testing.T) {
 		t.Errorf("error history rows = %d, want 1", n)
 	}
 	// Attempt-before-execute: every execution left an "exec" audit row AND
-	// a result row (lector M4 must-fix #4).
+	// a result row.
 	if f.auditCount(t, "exec_result") == 0 {
 		t.Error("no exec_result audit rows")
 	}
@@ -209,8 +209,8 @@ func TestEngine_LockedBeforeLogin(t *testing.T) {
 }
 
 // Ungranted callers must not learn a connection's existence or engine: the
-// minimum-grant check precedes the row fetch and classification (lector M4
-// must-fix #6), and denials audit under the REAL user, not user 0 (#5).
+// minimum-grant check precedes the row fetch and classification (found in
+// review), and denials audit under the REAL user, not user 0.
 func TestEngine_NoExistenceLeakAndDenialIdentity(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -263,7 +263,7 @@ func TestEngine_NoExistenceLeakAndDenialIdentity(t *testing.T) {
 }
 
 // The creator ownership grant is capped at editor: an admin creating a
-// connection does NOT mint connection-admin rights (lector policy ruling).
+// connection does NOT mint connection-admin rights.
 func TestEngine_CreatorGrantCappedAtEditor(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -279,7 +279,7 @@ func TestEngine_CreatorGrantCappedAtEditor(t *testing.T) {
 }
 
 // DSNs whose options would desynchronize the classifier from the target
-// grammar are refused at creation (lector M4 must-fix #3).
+// grammar are refused at creation.
 func TestEngine_RejectsOversizedScript(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -306,7 +306,7 @@ func TestEngine_RejectsOversizedScript(t *testing.T) {
 // A data-modifying statement can only nest inside a CTE body, so the
 // classifier reads `SELECT (INSERT …)` as an ordinary read with a
 // parenthesized expression — which is what stopped every parenthesized
-// identifier from being read as a verb (lector r0 MF2).
+// identifier from being read as a verb.
 //
 // That is only safe if the construct genuinely cannot execute, so this proves
 // it against a real database rather than asserting it: the target refuses the

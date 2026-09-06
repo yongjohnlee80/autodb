@@ -12,7 +12,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// The transaction outcome READ API — the R4/R5 seam (ADR-0074 Amendment 5).
+// The transaction outcome READ API — the R4/R5 seam.
 //
 // tx.status cannot be a projection over script_history: [history].enabled=false
 // erases the rows, and a boundary-only BEGIN; COMMIT; never had one. Both are
@@ -43,7 +43,7 @@ type TxStatus struct {
 	// ConnID says WHICH target is involved. An operator reading a pending
 	// list needs "what is stuck" and "on what" together; without it they
 	// have to correlate against another surface to learn which database is
-	// holding locks (ultron-prime, R4/R5 seam).
+	// holding locks (the R4/R5 seam).
 	ConnID int64
 	UserID int64
 	// Since is when the CURRENT state was recorded, Opened when the
@@ -105,7 +105,7 @@ func (e *Engine) PendingOutcomes(ctx context.Context, token string, limit int) (
 	}
 	limit = min(limit, MaxPendingLimit)
 
-	// SCOPE AND ORDER BEFORE THE LIMIT (PR #20 r2 MF3).
+	// SCOPE AND ORDER BEFORE THE LIMIT.
 	//
 	// This used to limit the GLOBAL queue and then filter by owner and sort,
 	// which is wrong twice over: a caller asking for one entry got nothing

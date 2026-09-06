@@ -12,11 +12,11 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// The transaction outcome log — ADR-0074 §7 rev 2 + Amendment 4.
+// The transaction outcome log.
 //
 // The properties under test are the ones the design rests on: the progression
 // is append-only and ordered, a second resolver never contradicts the first,
-// the retrying paths do not grow the log, and — the one ultron-prime caught in
+// the retrying paths do not grow the log, and — the one review caught in
 // review — the opened transition is durable BEFORE the target is asked to
 // begin anything.
 
@@ -215,7 +215,7 @@ func TestSessionTx_ARefusalBeforeTheWriteAheadPointLeavesNoTrace(t *testing.T) {
 // The full progression against a LIVE target, and the discriminating
 // consequence of the write-ahead ordering.
 //
-// After ultron-prime's review the opened transition is appended BEFORE
+// After review the opened transition is appended BEFORE
 // sess.BeginSessionTx, which means it CANNOT carry the target's xid — the
 // transaction it would name does not exist yet. The xid is captured after the
 // BEGIN and rides on commit_started instead, which is the one place an oracle

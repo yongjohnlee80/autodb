@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/golib/dao"
 )
 
-// Schema introspection passthrough (ADR-0057 §6): authorized projections of
+// Schema introspection passthrough: authorized projections of
 // dao's Introspector / RoutineIntrospector capabilities over the engine's
 // verified session targets. Authorization runs BEFORE any lookup (R13 —
 // the same minimum-grant-before-disclosure ordering as execution): a
@@ -23,11 +23,11 @@ import (
 // trusted core, so no frontend ever quotes identifiers itself (the
 // quick-select scaffold builds on it).
 //
-// Partitioned/IsPartition/Parent are Postgres partition annotations (ADR-0077),
+// Partitioned/IsPartition/Parent are Postgres partition annotations,
 // zero-valued on every other dialect and on an un-partitioned relation. They let
 // the explorer nest partition children under their parent instead of listing
 // them as top-level tables. Parent is a SAME-SCHEMA relation name only — it is
-// not a general cross-schema identity (ADR-0077 §2).
+// not a general cross-schema identity.
 type TableEntry struct {
 	Schema      string
 	Name        string
@@ -69,7 +69,7 @@ func (e *Engine) ListSchemas(ctx context.Context, token string, connID int64) ([
 
 // ListTables lists schema's tables and views with server-quoted names.
 //
-// On Postgres it also annotates each relation's partition role (ADR-0077) with
+// On Postgres it also annotates each relation's partition role with
 // one supplementary catalog query. The two queries are two READ COMMITTED
 // snapshots, merged annotate-only: a base row is annotated when the
 // supplementary result names it, a base row is NEVER dropped for lacking a
@@ -89,7 +89,7 @@ func (e *Engine) ListTables(ctx context.Context, token string, connID int64, sch
 	// guarantee they always will, so the conversion is explicit rather than a
 	// comparison that reads as if the namespaces were the same one.
 	isPG := dialect.Name() == string(engine.Postgres)
-	// Normalize the schema ONCE, before BOTH queries (ADR-0077 fold 2). dao's
+	// Normalize the schema ONCE, before BOTH queries. dao's
 	// Postgres introspector maps "" → public internally; the supplementary query
 	// binds the schema directly, so without this the two would read different
 	// schemas and every annotation would miss.
@@ -133,7 +133,7 @@ func (e *Engine) ListTables(ctx context.Context, token string, connID int64, sch
 }
 
 // mergePartitionRoles annotates base rows in place with their partition role
-// (ADR-0077 fold 2). The base list is authoritative for which relations exist:
+// The base list is authoritative for which relations exist:
 // a base row is annotated when roles names it, a base row is NEVER dropped or
 // added, and a role with no base row — a relation dropped between the two
 // READ COMMITTED snapshots — is ignored. A partition attached (or created +
@@ -156,7 +156,7 @@ type partRole struct {
 }
 
 // pgPartitionRoles reads the partition role of every ordinary/partitioned
-// relation in schema (ADR-0077 §1). The pg_inherits join is gated on
+// relation in schema. The pg_inherits join is gated on
 // relispartition, so a classic INHERITS child is not treated as a partition;
 // the parent join is restricted to the SAME namespace, so a cross-schema
 // partition reports parent = "" and is left at top level rather than nested
@@ -197,7 +197,7 @@ func (e *Engine) ListColumns(ctx context.Context, token string, connID int64, sc
 // ListRoutines lists schema's stored routines. Capability absence (sqlite
 // has no stored routines) is DATA, not an error: supported=false with an
 // empty list, so the wire never converts it into a generic internal
-// failure (ADR-0057 §6 r2).
+// failure.
 func (e *Engine) ListRoutines(ctx context.Context, token string, connID int64, schema string) (supported bool, routines []dao.RoutineInfo, err error) {
 	tgt, err := e.introTarget(ctx, token, connID)
 	if err != nil {

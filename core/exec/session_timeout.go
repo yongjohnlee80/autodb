@@ -12,7 +12,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Transaction timeouts (ADR-0074 §1, Amendment 2 C2).
+// Transaction timeouts.
 //
 // These exist because the target may be a live production database. A
 // transaction abandoned between BEGIN and COMMIT — a client that crashed, a
@@ -103,7 +103,7 @@ func armServerBelt(ctx context.Context, tx dao.TxConn, engineName engine.Name, l
 }
 
 // connectionIsDebug reports whether a connection carries the debug profile,
-// which gets the longer idle bound (ADR-0074 Amendment 2 C2).
+// which gets the longer idle bound.
 func connectionIsDebug(row *meta.Connection) bool { return row != nil && row.IsDebug() }
 
 // reapExpired rolls back transactions past their limits and closes idle
@@ -238,7 +238,7 @@ func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason s
 // WRITE privilege was withdrawn while the session's own right to be connected
 // survived.
 //
-// Distinct from authority-revoked on purpose, and lector required the
+// Distinct from authority-revoked on purpose, and review required the
 // distinction: an operator reading the trail needs to see that a still-valid
 // reader lost write privilege, not that someone's access ended. The two lead
 // to different conversations.
@@ -441,7 +441,7 @@ func (e *Engine) revokeExpiredAuthority(
 	}
 
 	// DEMOTION, not revocation, and the difference is what happens to the
-	// session (lector's ruling on the standing-authority defect).
+	// session.
 	//
 	// The credential is valid and the read grant stands; only the write
 	// privilege is gone. Killing the connection for a privilege REDUCTION

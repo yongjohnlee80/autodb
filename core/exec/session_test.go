@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// ADR-0074 §1/§1b, tested per the binding concurrency-testing convention:
+// Tested per the binding concurrency-testing convention:
 // a guard that checks and then acts is tested by driving a competing
 // transition INTO the gap between the check and the act. Setting up
 // conflicting state beforehand tests the entry condition and proves nothing
@@ -262,7 +262,7 @@ func TestSessionRegistry_ForeignAndMissingAreIndistinguishable(t *testing.T) {
 
 // THE WINDOW TEST for draining.
 //
-// The previous version of this test was BLIND, which lector demonstrated by
+// The previous version of this test was BLIND, which review demonstrated by
 // running the exact mutation it was supposed to catch: unlock after the last
 // check, let setDraining finish, relock and insert anyway. It passed —
 // because it only asserted that the COMPETITOR was refused, and the

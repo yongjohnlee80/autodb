@@ -9,7 +9,7 @@ import (
 )
 
 // Arm encodes the six arms and their order; this table is the contract the
-// loop consumes. The first row is the one lector caught: an empty query cut
+// loop consumes. The first row is the one review caught: an empty query cut
 // inside BEGIN has TxStatus T and NO statement — it must not read as pending.
 func TestEmitStopped_ArmOrder(t *testing.T) {
 	cause := errors.New("client gone")

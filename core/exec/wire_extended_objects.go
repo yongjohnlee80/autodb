@@ -79,12 +79,12 @@ type extStatement struct {
 	// stmt is the classification decided ONCE, at Parse, and never re-derived.
 	// Statement is a value type, so holding it is structurally immutable — a
 	// later Execute cannot reclassify the text, which is the whole point of
-	// gating at Parse (ADR-0075 §5: "immutable classification/guard metadata
+	// gating at Parse (matrix §5: "immutable classification/guard metadata
 	// attached to the statement").
 	//
 	// AUTHORITY IS DELIBERATELY ABSENT. Nothing about who may run this is
-	// stored: the policy is re-resolved at every Execute (§5 rev 2 MF1, task
-	// rejection criterion 3). Caching a verdict here is precisely the defect
+	// stored: the policy is re-resolved at every Execute (matrix §5, the
+	// third rejection rule). Caching a verdict here is precisely the defect
 	// that criterion exists to catch — a grant revoked between Parse and
 	// Execute must refuse, and it cannot if the answer was frozen at Parse.
 	stmt Statement
@@ -94,7 +94,7 @@ type extStatement struct {
 	paramOIDs []uint32
 
 	// portals names every live portal constructed from this statement, for
-	// §4a's protocol-documented Close-S cascade.
+	// matrix §4a's protocol-documented Close-S cascade.
 	portals map[string]struct{}
 
 	// seq is this object's GENERATION. See extObjects.nextSeq.
@@ -118,7 +118,7 @@ type extPortal struct {
 	// suspended records that a previous Execute returned PortalSuspended, so a
 	// resuming Execute is a continuation rather than a fresh one. The
 	// distinction matters for the audit: every Execute is re-authorized, and a
-	// resumption is still an Execute (§5 rev 2 MF1 says "portal re-executions
+	// resumption is still an Execute (matrix §5 says "portal re-executions
 	// included").
 	suspended bool
 
@@ -149,7 +149,7 @@ type extObjects struct {
 	// and one Flush makes it emit the responses for ALL of them, so a client that
 	// pipelines Parse, Bind and Execute gets three answers from one Flush and a
 	// reader stopping at the first would abandon the result. Second, owned
-	// transaction control never reaches the wire at all (ADR-0075 Amendment 6
+	// transaction control never reaches the wire at all (the editors-first
 	// ruling: control routes to the session's machine and is answered with the
 	// protocol's fixed frames), so some steps are answered locally and some from
 	// the connection — and the client must receive them in the order it asked.
@@ -224,7 +224,7 @@ type objectRef struct {
 	seq  uint64
 }
 
-// objectKind separates the two namespaces §4a keeps apart: a statement and a
+// objectKind separates the two namespaces matrix §4a keeps apart: a statement and a
 // portal may share a name and are still different objects.
 type objectKind int
 
@@ -264,7 +264,7 @@ func (o *extObjects) queueSynth(msgs ...WireMessage) {
 //
 // Owned control never reaches the target, so its ParseComplete and BindComplete
 // are ours to send — and an object whose completion the front door produces
-// still has to be finalized (lector B r0 MF2). Without the reference its
+// still has to be finalized. Without the reference its
 // reservation stays pending forever and Sync sweeps it, destroying a control
 // statement the session is still entitled to use.
 func (o *extObjects) queueSynthFor(kind objectKind, name string, seq uint64, msgs ...WireMessage) {
@@ -281,7 +281,7 @@ func newExtObjects() *extObjects {
 	}
 }
 
-// putStatement records a parsed statement, applying §4a's replacement rule.
+// putStatement records a parsed statement, applying matrix §4a's replacement rule.
 //
 // The unnamed statement is implicitly replaced; a named one must be closed
 // first. Replacement cascades, because the portals of the statement that is
@@ -292,7 +292,7 @@ func (o *extObjects) putStatement(st *extStatement) error {
 			return ErrDuplicateStatement
 		}
 	}
-	// ADMISSION IS ATOMIC (lector B r0 MF3). The unnamed statement is REPLACED,
+	// ADMISSION IS ATOMIC. The unnamed statement is REPLACED,
 	// and the old one used to be destroyed first — so a budget refusal left the
 	// store having forgotten a statement the TARGET still holds, and a later
 	// Describe failed here for an object that exists there.
@@ -303,7 +303,7 @@ func (o *extObjects) putStatement(st *extStatement) error {
 	// is recoverable — Close and retry — and forgetting an object the target
 	// holds is not.
 	// THE NAMESPACE CAP, then the memory budget — both before the frame is
-	// forwarded. A refusal here leaves the connection usable (§7 :385); it is the
+	// forwarded. A refusal here leaves the connection usable (matrix §7 :385); it is the
 	// Parse that is refused, not the session.
 	if st.name != "" && o.namedStatements() >= maxNamedStatements {
 		return ErrNamedObjectCap
@@ -337,7 +337,7 @@ func (o *extObjects) statement(name string) (*extStatement, error) {
 	return st, nil
 }
 
-// putPortal records a bound portal, applying §4a's replacement rule and
+// putPortal records a bound portal, applying matrix §4a's replacement rule and
 // registering it for its statement's cascade.
 func (o *extObjects) putPortal(p *extPortal) error {
 	st, err := o.statement(p.stmtName)
@@ -377,14 +377,14 @@ func (o *extObjects) portal(name string) (*extPortal, error) {
 }
 
 // dropStatement releases a statement AND every portal built from it — the
-// cascade §4a calls protocol-documented. Reported so a caller can tell a real
+// cascade matrix §4a calls protocol-documented. Reported so a caller can tell a real
 // close from a no-op on a name that was never there.
 func (o *extObjects) dropStatement(name string) bool {
 	st, ok := o.statements[name]
 	if !ok {
 		return false
 	}
-	// THE DROP OWNS THE CHARGE, pending or finalized — every §4a release point
+	// THE DROP OWNS THE CHARGE, pending or finalized — every matrix §4a release point
 	// does. A completion arriving afterwards is a no-op; releasing in both places
 	// would hand out capacity that does not exist.
 	for portalName := range st.portals {
@@ -413,7 +413,7 @@ func (o *extObjects) dropPortal(name string) bool {
 	return true
 }
 
-// dropAllPortals releases every portal, named and unnamed, and is §4a's
+// dropAllPortals releases every portal, named and unnamed, and is matrix §4a's
 // transaction-end rule: portals do not survive the transaction, prepared
 // statements do.
 //
@@ -432,7 +432,7 @@ func (o *extObjects) dropAllPortals() {
 }
 
 // dropUnnamed releases the unnamed statement and the unnamed portal, which is
-// §4a's simple-`Query` rule: a Query destroys both, and a client that mixes the
+// matrix §4a's simple-`Query` rule: a Query destroys both, and a client that mixes the
 // two protocols (lib/pq does — it sends simple for parameterless statements)
 // depends on that being true here as well.
 func (o *extObjects) dropUnnamed() {
@@ -442,13 +442,13 @@ func (o *extObjects) dropUnnamed() {
 
 // THE SESSION'S RETAINED-STATE ACCOUNT (F2b, matrix §8 :411 and §7 :381).
 //
-// Three phases, and the order is the whole point (r0 MF3): a charge is RESERVED
+// Three phases, and the order is the whole point: a charge is RESERVED
 // before the Parse/Bind is forwarded, FINALIZED when the target's completion
 // arrives, and RELEASED on a pre-Complete error. The stated reason is that "the
 // target must never hold a server-side prepared statement the budget didn't
 // admit" — so the budget decides before the frame goes out, never after.
 //
-// WHAT AN OBJECT'S CHARGE IS (jarvis's ruling, 2026-09-04): the transferred
+// WHAT AN OBJECT'S CHARGE IS (ruled 2026-09-04): the transferred
 // SEGMENT charge, which §1.5 defines as the frame's own two-stage figure — its
 // declared wire length, plus the decoded delta for what the frame pre-allocates.
 // A statement retains what its Parse frame was charged; a portal what its Bind
@@ -458,7 +458,7 @@ func (o *extObjects) dropUnnamed() {
 // this the RESIDENT-memory budget: the target's memory is the target's, and the
 // 16 MiB cap bounds THIS process. Nobody should later "correct" this upward.
 
-// retainedBudgetPerSession is §9's default retained-state quota (16 MiB/session,
+// retainedBudgetPerSession is matrix §9's default retained-state quota (16 MiB/session,
 // ceiling 64 MiB). Exceeding it refuses the statement; the connection stays.
 const retainedBudgetPerSession int64 = 16 << 20
 
@@ -482,7 +482,7 @@ const (
 // namedStatements and namedPortals count the capped objects.
 //
 // DERIVED, NOT TRACKED. A counter incremented in put and decremented in every
-// drop is a second bookkeeping with its own drift, and §4a has five release
+// drop is a second bookkeeping with its own drift, and matrix §4a has five release
 // points to keep in step; the map is the truth and the unnamed entry is the only
 // exemption, so this is O(1) and cannot disagree with the store.
 func (o *extObjects) namedStatements() int {
@@ -528,7 +528,7 @@ func (o *extObjects) reserveRetained(charge int64) error {
 // completion arrives.
 //
 // ONE CRITICAL SECTION, and that is a requirement rather than a convenience:
-// §8's "no double-charge, no gap" is a statement about what a concurrent reader
+// matrix §8's "no double-charge, no gap" is a statement about what a concurrent reader
 // may observe, so pending down and retained up happen together or a reader sees
 // a total that was never true.
 //
@@ -536,7 +536,7 @@ func (o *extObjects) reserveRetained(charge int64) error {
 // reachable — a second Parse replaces the unnamed statement while the first
 // completion is still in flight — and the temptation is to release the charge
 // here. That would be a DOUBLE RELEASE: the drop already released it, because
-// the §4a release points own every charge an object holds, pending or finalized.
+// the matrix §4a release points own every charge an object holds, pending or finalized.
 // One owner. The counter below exists so the case is visible rather than silent.
 func (o *extObjects) finalizeRetained(ref objectRef) {
 	var obj *retainedRef
@@ -563,7 +563,7 @@ func (o *extObjects) finalizeRetained(ref objectRef) {
 }
 
 // releaseRetained returns an object's charge, whichever phase it was in. Called
-// ONLY from the §4a release points, which own it.
+// ONLY from the matrix §4a release points, which own it.
 func (o *extObjects) releaseRetained(charge int64, finalized bool) {
 	if finalized {
 		o.retained -= charge
@@ -588,7 +588,7 @@ func (o *extObjects) releaseRetained(charge int64, finalized bool) {
 // store holding a record of them means the store and the backend disagree about
 // what exists.
 //
-// IT DROPS THE OBJECT, NOT ONLY ITS CHARGE (jarvis's ruling, 2026-09-03). Two
+// IT DROPS THE OBJECT, NOT ONLY ITS CHARGE (ruled 2026-09-03). Two
 // reasons, and the second is why this belongs with the caps rather than with the
 // accounting:
 //

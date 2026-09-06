@@ -13,7 +13,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// MF5. target() checked the drain, dropped that lock, then took the engine's
+// target() checked the drain, dropped that lock, then took the engine's
 // lock and returned a cached pool or opened a new one — so a delete landing
 // in between was simply not seen. Stateless work carried on against a
 // connection the operator was removing, and a pool could even be RECREATED

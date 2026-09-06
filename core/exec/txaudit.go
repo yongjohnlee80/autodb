@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// The transaction outcome log — the writer half of ADR-0074 §7 rev 2.
+// The transaction outcome log — the writer half.
 //
 // Every transaction's life is recorded as an APPEND-ONLY progression of
 // transitions rather than as a mutable status column, because a status column
@@ -60,7 +60,7 @@ const maxSeqAttempts = 8
 // convenience that an operator may switch off; the outcome log is the record
 // of whether a transaction's effects survived, and switching it off would
 // mean the engine could not answer that question at all — which is the case
-// lector's Amendment-4 MF1 pinned as unacceptable. A boundary-only
+// review pinned as unacceptable. A boundary-only
 // `BEGIN; COMMIT;` writes no history row and still gets a full progression
 // here.
 func (e *Engine) appendTxOutcome(ctx context.Context, t txTransition) error {
@@ -78,7 +78,7 @@ func (e *Engine) appendTxOutcome(ctx context.Context, t txTransition) error {
 			return err
 		}
 		// A terminal ENDS the trail, for every appender and not only for
-		// another terminal (PR #20 r0 MF2).
+		// another terminal.
 		//
 		// The store's partial index refuses a second terminal but permits a
 		// nonterminal after one, and that gap is reachable in production:
@@ -109,7 +109,7 @@ func (e *Engine) appendTxOutcome(ctx context.Context, t txTransition) error {
 		}
 
 		// The transition and its projection go in ONE meta transaction
-		// (PR #20 r0 MF3).
+		// (found in review).
 		//
 		// They were two operations, and a crash between them left the source
 		// of truth terminal while history still said ok_pending_commit —
@@ -247,7 +247,7 @@ func (e *Engine) noteTxOutcome(ctx context.Context, t txTransition) {
 //
 // The classification lives HERE, not in finalize, because the state vocabulary
 // is the outcome log's and a control path should not have to know it
-// (ultron-prime, R4/R5 seam, A5 plumbing). finalize returns the word and the
+// (the R4/R5 seam). finalize returns the word and the
 // error; the error crosses the seam as data and is classified once, in one
 // place, by code that can be tested against error values without driving a
 // real commit.
@@ -269,7 +269,7 @@ func txStateFor(outcome FinalizeOutcome, err error) meta.TxState {
 		// That leans on a DEPENDENCY's classification being exhaustive in
 		// order to assert a terminal — and if it is ever incomplete, the
 		// engine fabricates a rolled_back for a commit that actually landed.
-		// Fabricating a terminal is the one thing §7's invariant forbids
+		// Fabricating a terminal is the one thing the invariant forbids
 		// outright, so the doubt resolves toward the nonterminal.
 		//
 		// A *pgconn.PgError means the server received the COMMIT, evaluated

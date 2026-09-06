@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// ADR-0074 §5 — locality and the per-GUC allowlist are SEPARATE axes, so the
+// Locality and the per-GUC allowlist are SEPARATE axes, so the
 // tests are separate too. Collapsing them is exactly the coarseness the ADR
 // calls out: "SET" as a verb decides nothing.
 
@@ -131,7 +131,7 @@ func TestAdmitLock_OnlyInsideATransaction(t *testing.T) {
 // The engine's belt is written in the admissible FORM — SET LOCAL — but its
 // GUC is deliberately NOT user-admissible.
 //
-// This test asserted the opposite until lector showed why that was backwards:
+// This test asserted the opposite until review showed why that was backwards:
 // with the belt's setting on the user allowlist, `SET LOCAL
 // idle_in_transaction_session_timeout = '50ms'` inside a transaction lets the
 // server kill it before the engine's deadline, and the audited rollback the
@@ -163,7 +163,7 @@ func TestServerBelt_IsEngineOnly(t *testing.T) {
 	}
 }
 
-// And the specific attack, in the shape lector demonstrated.
+// And the specific attack, in the shape review demonstrated.
 func TestAdmitSet_UserCannotShortenTheEngineBelt(t *testing.T) {
 	t.Parallel()
 

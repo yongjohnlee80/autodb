@@ -14,32 +14,32 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// THE EXTENDED QUERY PROTOCOL, ENGINE SIDE (F2, ADR-0075 §5).
+// THE EXTENDED QUERY PROTOCOL, ENGINE SIDE.
 //
 // F1 runs a whole simple-query buffer as ONE unit. The extended protocol spreads
 // that same unit across frames — Parse, Bind, Describe, Execute, Close, Sync —
 // and the pipeline has to be DECOMPOSED across them rather than copied. A
 // wire-shaped second copy of the execution pipeline is exactly what
 // wire_execute.go forbids, and a second authorization path is the task's
-// rejection criterion 1.
+// the first rejection rule.
 //
 // So the split is:
 //
 //   Parse    size check → Classify → authorizeUnit → profile.admit → guardWhere.
 //            The resulting Statement is stored IMMUTABLY against the statement
-//            name. This is §5's "Parse is gated (classifier + profile + grants)".
+//            name. This is matrix §5's "Parse is gated (classifier + profile + grants)".
 //
 //   Execute  resolveUnitPolicy re-read FRESH, authorizeUnit re-run against the
 //            STORED Statement, a fresh audit attempt before any effect — on
-//            EVERY Execute, portal re-executions included. This is §5 rev 2 MF1
-//            and the task's rejection criterion 3.
+//            EVERY Execute, portal re-executions included. This is matrix §5
+//            and the task's third rejection rule.
 //
 // Classification is immutable; AUTHORITY IS NEVER CACHED. Gating Parse alone is
 // the obvious implementation and it is insufficient: a grant revoked between
 // Parse and Execute must refuse, and it cannot if the verdict was frozen.
 //
 // Everything here runs on the session's ONE pinned backend connection (golib
-// ADR-0018), which is the same connection the session's transaction was opened
+// the pinned connection), which is the same one the session's transaction was opened
 // through — so a relayed Execute really runs inside the BEGIN the client sent.
 
 // wireExtEntry claims the session and resolves the fresh per-frame context every
@@ -132,7 +132,7 @@ func (o *extObjects) releaseReadOnlyWrap(ctx context.Context) {
 }
 
 // ErrExtendedUnsupportedTarget is an extended frame on a session whose target is
-// not PostgreSQL. Refused rather than approximated (§5: "unsupported shapes are
+// not PostgreSQL. Refused rather than approximated (matrix §5: "unsupported shapes are
 // refused loudly, never approximated").
 var ErrExtendedUnsupportedTarget = errors.New("exec: the extended query protocol requires a PostgreSQL target")
 
@@ -167,7 +167,7 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	}
 
 	// Oversized input is refused BEFORE classification, exactly as the simple
-	// path refuses it (lector M4 r2 must-fix #2): the audit record must equal
+	// path refuses it: the audit record must equal
 	// what ran, and an unaudited tail must never execute.
 	if len(sqlText) > e.maxStatementBytes {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrScriptTooLarge)
@@ -195,9 +195,9 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, cerr)
 	}
 	// OWNED TRANSACTION CONTROL takes the session machine's route, not the wire
-	// (ADR-0075 Amendment 6 ruling, 2026-09-03). A relayed BEGIN would be an
+	// (ruled 2026-09-03). A relayed BEGIN would be an
 	// ownerless transaction — no txID, no commit_started row, no limits, no
-	// targetXID for the reconciler — which is what ADR-0018 r2 MF5 forbade, and
+	// targetXID for the reconciler — which review forbade, and
 	// the matrix Query and Parse rows say control is mapped through ExecSession
 	// transitions and never passed through.
 	//
@@ -206,7 +206,7 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	// routes control BEFORE authorizeUnit/admit/guardWhere too, because the
 	// control floor is a different floor.
 	if stmt.Class == ClassControl {
-		// CHARGED LIKE ANY OTHER STATEMENT (lector B r0 MF2). Owned control never
+		// CHARGED LIKE ANY OTHER STATEMENT. Owned control never
 		// reaches the target, but the front door holds its text and metadata just
 		// the same — and an object outside the account is an object a session can
 		// accumulate without limit.
@@ -227,7 +227,7 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	// the one implementation, which is the whole reason it lives in the shared
 	// gate rather than here. Composing it means a reader is analysed on extended
 	// exactly as on simple; skipping it would enforce on one protocol and not the
-	// other, which is the shape rejection criterion 1 exists to catch.
+	// other, which is the shape the first rejection rule exists to catch.
 	if rerr := e.readerAnalysis(ctx, connRow, pol, stmt); rerr != nil {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, rerr)
 	}
@@ -281,7 +281,7 @@ func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 	if serr != nil {
 		return serr
 	}
-	// REFUSED BEFORE THE FRAME IS FORWARDED (§7 :384), like every other cap on
+	// REFUSED BEFORE THE FRAME IS FORWARDED (matrix §7 :384), like every other cap on
 	// this path: the target must never be asked to hold what we would not admit.
 	// The count, not the byte total — the arrays this frame makes the front door
 	// pre-allocate are what the limit bounds.
@@ -295,7 +295,7 @@ func (e *Engine) WireBind(ctx context.Context, id SessionID, userID int64,
 	}
 	pt := &extPortal{name: portalName, stmtName: stmtName,
 		// The Bind frame's figure: its parameter values, plus the format and
-		// value arrays it pre-allocates (§1.5's stage-2 delta, :268).
+		// value arrays it pre-allocates (matrix §1.5's stage-2 delta, :268).
 		charge: objectCharge(paramBytes+len(portalName)+len(stmtName),
 			(len(paramFormats)+len(resultFormats))*2+len(paramValues)*8)}
 	if perr := s.ext.putPortal(pt); perr != nil {
@@ -360,7 +360,7 @@ func (e *Engine) WireDescribePortal(ctx context.Context, id SessionID, userID in
 	return nil
 }
 
-// WireCloseStatement releases a prepared statement and, per §4a, every portal
+// WireCloseStatement releases a prepared statement and, per matrix §4a, every portal
 // built from it.
 func (e *Engine) WireCloseStatement(ctx context.Context, id SessionID, userID int64, name string) error {
 	s, _, pc, release, err := e.wireExtEntry(ctx, id, userID, true)
@@ -567,7 +567,7 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 		}
 		status = clientStatus
 	}
-	// §4a's transaction-end rule: portals do not survive the transaction,
+	// matrix §4a's transaction-end rule: portals do not survive the transaction,
 	// prepared statements do. 'I' means the target reports no transaction open,
 	// so anything the segment left behind is gone on the server and must go here
 	// too — otherwise a later Execute names a portal the backend has destroyed.
@@ -742,7 +742,7 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 		// the audit row and the client's error tell one story — the raw path's
 		// contract, which this path was returning a plain wrap instead of.
 		//
-		// THE ARM COMES FROM WHAT WAS OBSERVED (lector r0 MF1, MF2), never from a
+		// THE ARM COMES FROM WHAT WAS OBSERVED, never from a
 		// hopeful status read. The drain above keeps reading after the consumer
 		// leaves, so by here the observation is final — and the status is only
 		// consulted where the tail was actually seen.
@@ -764,14 +764,14 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 			// happened elsewhere. The recorded outcome is non-empty, which is what
 			// separates this from the empty query in Arm().
 			executed = false
-			// THE TRACK IS KNOWN HERE, so it is reported (lector r1 MF3). The
+			// THE TRACK IS KNOWN HERE, so it is reported. The
 			// segment's abort was OBSERVED — that is how we know this statement
 			// did not run — and the session was told about it, so this is not the
-			// hopeful post-hoc read that MF1 forbids.
+			// hopeful post-hoc read that review forbids.
 			//
 			// It matters because the loop treats the engine's report as the ONLY
 			// snapshot, valid or not: an invalid byte there means "the phase is
-			// unknown", and §6.3 then forbids inventing a readiness, so the loop
+			// unknown", and matrix §6.3 then forbids inventing a readiness, so the loop
 			// closes without telling the client anything. Leaving this 0 made the
 			// truthful not-executed explanation unreachable through the front
 			// door — the arm was right and no client could ever be shown it.
@@ -784,7 +784,7 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 		// Anything else: the tail told us nothing, so txStatus stays 0 — the arm
 		// is unresolved rather than a guess dressed as a readiness, and the loop
 		// reads that invalid byte as "phase unknown" and closes WITHOUT inventing
-		// a readiness (§6.3). That close is the deliberate answer for a tail
+		// a readiness (matrix §6.3). That close is the deliberate answer for a tail
 		// nobody observed, not an oversight: the two cases above report a status
 		// precisely because they did observe one.
 		return e.emitStoppedWithStatus(ef.err, status, executed, targetErr, txStatus)
@@ -887,7 +887,7 @@ func drainExtendedObserving(ctx context.Context, pc golibpg.PinnedConn, o *extOb
 	var obs extObservation
 	var cut *emitFailure
 
-	// THE CONSUMER LEAVING DOES NOT END THE TARGET'S ANSWER (lector r0 MF1).
+	// THE CONSUMER LEAVING DOES NOT END THE TARGET'S ANSWER.
 	//
 	// Returning at the first emit failure leaves the rest of the target's tail
 	// unread, and the outcome is then written from an observation that stops
@@ -922,7 +922,7 @@ func drainExtendedObserving(ctx context.Context, pc golibpg.PinnedConn, o *extOb
 			for _, m := range step.synth {
 				_ = deliver(m)
 				// A completion the FRONT DOOR produced finalizes its object
-				// exactly as the target's would (lector B r0 MF2).
+				// exactly as the target's would.
 				if step.obj != nil && completesObject(m.Kind) {
 					o.finalizeRetained(*step.obj)
 				}
@@ -976,7 +976,7 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, s
 				obs.completed = true
 			}
 		}
-		// THE READING CONTINUES EVEN WHEN DELIVERY HAS STOPPED (lector r0 MF1).
+		// THE READING CONTINUES EVEN WHEN DELIVERY HAS STOPPED.
 		// The target's tail is what decides this statement's outcome, and if we
 		// stop looking there is nobody left to tell. The result is ignored here
 		// deliberately — that is the whole fix.

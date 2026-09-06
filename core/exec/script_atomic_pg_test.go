@@ -222,7 +222,7 @@ func TestStatelessPath_RefusesTransactionControlOnASessionProfile(t *testing.T) 
 	}
 }
 
-// MF1. The session path is chosen when a boundary appears ANYWHERE, so a
+// The session path is chosen when a boundary appears ANYWHERE, so a
 // statement before BEGIN — or after COMMIT — runs on the session with no
 // transaction around it and is applied. The failure message said "nothing in
 // this script was applied", which is a promise the code does not keep.
@@ -294,7 +294,7 @@ func TestExecuteScriptAtomic_ReportsWorkOutsideTheTransactionHonestly(t *testing
 	})
 }
 
-// MF2. The ephemeral session's cleanup must not depend on the caller's token
+// The ephemeral session's cleanup must not depend on the caller's token
 // still authenticating.
 //
 // It used to: the deferred close went through the PUBLIC CloseSession, which
@@ -329,7 +329,7 @@ func TestExecuteScriptAtomic_CleansUpWhenTheTokenDiesMidScript(t *testing.T) {
 	}
 }
 
-// The cap under CONCURRENCY, which lector asked to be pinned: the submitted
+// The cap under CONCURRENCY, which review asked to be pinned: the submitted
 // leak cell was sequential, and sequential is the easy case. Eight concurrent
 // transactional scripts fill the per-user cap; the ninth must be refused
 // cleanly rather than hang or leak, every admitted one must finish, and the

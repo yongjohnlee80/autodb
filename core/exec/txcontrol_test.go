@@ -13,7 +13,7 @@ import (
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 )
 
-// ADR-0074 §8 — "the control-verb string never reaches the wire" is honest
+// "The control-verb string never reaches the wire" is honest
 // only if the options on it are actually read. These are the cells of the
 // gate matrix that concern transaction options.
 
@@ -220,7 +220,7 @@ func TestParseTxControl_MalformedInput(t *testing.T) {
 				t.Fatalf("ParseTxControl(%q) = %v, want *dao.ErrTxOptionInvalid", tc.sql, err)
 			}
 			// Malformed input is not a capability miss, and must not be
-			// handled as one (golib-dao-0017 §2.2a).
+			// handled as one.
 			if errors.Is(err, dao.ErrUnsupported) {
 				t.Error("a malformed statement must not read as a capability miss")
 			}
@@ -333,7 +333,7 @@ func TestParseTxControl_Boundaries(t *testing.T) {
 		t.Errorf("word-only multi-statement err = %v, want ErrMultiStatement", err)
 	}
 	// Comments and whitespace after the terminator are NOT a second
-	// statement — that distinction is the whole of MF1.
+	// statement — that distinction is the whole of the finding.
 	for _, sql := range []string{"BEGIN;", "BEGIN; -- trailing", "BEGIN;\n/* trailing */\n", "BEGIN ;  \n\n"} {
 		if _, err := ParseTxControl(sql); err != nil {
 			t.Errorf("ParseTxControl(%q) = %v, want a clean parse", sql, err)
@@ -420,11 +420,11 @@ func TestParseTxControl_CoversEveryClassifiedTransactionVerb(t *testing.T) {
 	}
 }
 
-// The same round trip at production scale (ADR-0074 §8, G6). Env-gated like
+// The same round trip at production scale. Env-gated like
 // the classifier's corpus replay, and for the same reason: the corpus is
 // another product's schema and stays in its own repo.
 //
-// This is the assertion that would have caught MF1 the day it was written.
+// This is the assertion that would have caught it the day it was written.
 // 153 of the 756 transaction controls in the LM deployment corpus failed
 // split→parse, and every unit test in this file passed while they did,
 // because they all fed the parser statements written by hand rather than

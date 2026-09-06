@@ -10,7 +10,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// WHICH FINALIZER THE WRAP USES (lector's correction on the autocommit ruling).
+// WHICH FINALIZER THE WRAP USES.
 //
 // I reported commit-instead-of-rollback as untestable, and the reasoning was
 // half right: PostgreSQL cannot distinguish their EFFECTS inside a read-only

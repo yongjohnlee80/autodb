@@ -10,7 +10,7 @@ import (
 
 // A GENUINELY LOCKED STORE produces ErrLocked AT THE WIRE SEAM, un-wrapped.
 //
-// THE LINK THE WHOLE OF ADR-0087 A1.3 RESTS ON, and until this cell it was the
+// THE LINK THE WHOLE LOCKED-DAEMON RULE RESTS ON, and until this cell it was the
 // one claim in the chain nobody had measured. A reviewer caught it and was
 // direct that the gap was his: he established the link in the DESIGN round by
 // reading openTarget -> DecryptSecret -> ErrLocked, said at the time it was a
@@ -64,7 +64,7 @@ func TestWireOpen_LockedStoreSurfacesAtTheFirstStatement(t *testing.T) {
 		t.Fatal("the fresh Service is already unlocked; this cell cannot observe a locked store")
 	}
 
-	// THE ARRIVAL POINT, and it is NOT where ADR-0087 A1.3 said it was.
+	// THE ARRIVAL POINT, and it is NOT where the design said it was.
 	//
 	// A1.3 asserted the lock surfaces during the credential exchange, from a
 	// source trace of openTarget. OpenWireSessionWith never opens a target, so
@@ -97,7 +97,7 @@ func TestWireOpen_LockedStoreSurfacesAtTheFirstStatement(t *testing.T) {
 	if reason := DenialReason(qerr); reason != "" {
 		t.Fatalf("the locked-store error carries denial reason %q, so the front door would "+
 			"treat it as a credential refusal — a developer with a perfectly good token told "+
-			"their credentials are wrong, which is what ADR-0087 §8 exists to prevent", reason)
+			"their credentials are wrong, which is what the locked-daemon rule exists to prevent", reason)
 	}
 	eng2.CloseWireSession(ctx, res2.SessionID, res2.UserID, testIP, "cell done")
 

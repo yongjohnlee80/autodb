@@ -40,7 +40,7 @@ func seqOf(o *extObjects, kind objectKind, name string) uint64 {
 // Cell 1 — the charge is RESERVED before the frame could go out, and a budget
 // refusal admits NOTHING.
 //
-// r0 MF3's reason is that the target must never hold an object the budget did not
+// The reason is that the target must never hold an object the budget did not
 // admit, so a refusal has to leave the account exactly as it found it.
 // Witness for row 4:Parse — retained capacity is RESERVED before the Parse is
 // forwarded, so a refusal admits nothing and the target never holds a statement
@@ -200,10 +200,10 @@ func TestRetained_DropReleasesAStillPendingReservation(t *testing.T) {
 	}
 }
 
-// Cell 6 — every §4a release point returns its charge, including the cascade.
+// Cell 6 — every matrix §4a release point returns its charge, including the cascade.
 // Witness for row 4:Close, row 4a:Close-S-name, row 4a:Close-P-name,
 // row 4a:Transaction-end and row 4a:Query — each of those rows is about
-// RELEASING the retained charge, and every §4a release point (the Close-S
+// RELEASING the retained charge, and every matrix §4a release point (the Close-S
 // cascade, Close-P, transaction end, and a simple Query destroying the unnamed
 // pair) is the owner of the charge it drops.
 func TestRetained_EveryReleasePointReturnsItsCharge(t *testing.T) {
@@ -244,7 +244,7 @@ func TestRetained_EveryReleasePointReturnsItsCharge(t *testing.T) {
 }
 
 // Cell 11 — PortalSuspended re-finalizes an already-finalized portal and adds
-// NOTHING (matrix :270 as amended, jarvis 2026-09-04).
+// NOTHING (matrix :270 as amended, 2026-09-04).
 //
 // The suspended rows are pending OUTPUT, accounted by §5 and released on write;
 // what survives the suspension is the portal object, whose Bind charge was
@@ -273,7 +273,7 @@ func TestRetained_PortalSuspendedAddsNoSecondCharge(t *testing.T) {
 	}
 }
 
-// lector B r0 MF3 — a REFUSED replacement must not destroy the object it failed
+// A REFUSED replacement must not destroy the object it failed
 // to replace.
 //
 // The unnamed statement is replaced rather than duplicated, and the old one used
@@ -338,7 +338,7 @@ func TestRetained_ARefusedUnnamedPortalReplacementLeavesTheOldPortalUsable(t *te
 // the charge of the object it replaced.
 //
 // The replacement is destruction plus admission, and the destruction half is
-// what §4a is about. A replacement that admitted the new charge without
+// what matrix §4a is about. A replacement that admitted the new charge without
 // releasing the old would climb toward the budget on a client doing the one
 // thing the unnamed name exists for, and nothing about the store's contents
 // would look wrong.

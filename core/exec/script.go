@@ -78,7 +78,7 @@ func (e *Engine) ExecuteScript(ctx context.Context, token string, connID int64, 
 var _ = errors.Is
 
 // ExecuteScriptAtomic runs a script, and runs it INSIDE ONE TRANSACTION when
-// the script asks for one (ADR-0074, R5 gate).
+// the script asks for one.
 //
 // This is the sugar that makes `BEGIN; …; COMMIT;` mean what a person typing
 // it into a query editor believes it means. Without it the statements are

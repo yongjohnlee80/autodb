@@ -91,7 +91,7 @@ func sessionWithInFlight(t *testing.T, tx *controllableTx, honourCancel bool) (*
 	return s, wg.Wait
 }
 
-// MF7. The timeout path took the transaction out from under whatever was
+// The timeout path took the transaction out from under whatever was
 // running and rolled it back concurrently — two commands in flight on one
 // connection. A live pgx driver happened to mask it; a controllable one does
 // not.
@@ -160,7 +160,7 @@ func TestRollbackExpired_WillNotRollBackUnderALiveStatement(t *testing.T) {
 	}
 }
 
-// MF4. When the statement will not stop, closeSession correctly declines to
+// When the statement will not stop, closeSession correctly declines to
 // roll back concurrently — and then dropped the session anyway. The
 // transaction stayed attached to an object no longer in the registry, so
 // nothing could retry it, nothing accounted for it, and conn.delete's pool
@@ -223,7 +223,7 @@ func TestCloseSession_RetainsTheOwnerWhenTheRollbackIsSkipped(t *testing.T) {
 	}
 }
 
-// The other half of MF4: nothing may start on the transaction between the
+// The other half: nothing may start on the transaction between the
 // join that proved the session idle and the detach that ends it. Proving a
 // fact and then acting on it a moment later is how a statement ends up
 // running on a transaction being rolled back out from under it.
@@ -297,7 +297,7 @@ func TestTransferClose_RequestsAnImmediateRetryFromAnActiveDeferringOwner(t *tes
 	}
 }
 
-// THE POSITIVE CONTROL for PendingOutcomes — lector's review gate, and a gap
+// THE POSITIVE CONTROL for PendingOutcomes — a review gate, and a gap
 // I found in my own submission after sending it.
 //
 // Every other assertion I wrote against PendingOutcomes checks that the list
@@ -312,7 +312,7 @@ func TestTransferClose_RequestsAnImmediateRetryFromAnActiveDeferringOwner(t *tes
 // DECIDES not to roll back because the statement will not stop, and the
 // outcome is genuinely undetermined. That is a real unknown_pending, and it
 // must both APPEAR and then RESOLVE — a state that surfaces and never
-// resolves is the unbounded queue Amendment 4 A3 exists to prevent.
+// resolves is the unbounded queue the design exists to prevent.
 func TestPendingOutcomes_ObservesAnUnresolvedTransactionAndItsResolution(t *testing.T) {
 	f := newFixture(t)
 	e := f.eng
@@ -338,7 +338,7 @@ func TestPendingOutcomes_ObservesAnUnresolvedTransactionAndItsResolution(t *test
 	// against a transaction that had never opened. It failed, correctly: no
 	// queue entry, so nothing to find. That setup modelled a shape production
 	// cannot produce — every real transaction is enqueued at BEGIN — which is
-	// the fixture trap white-vision warned about, reached from a direction I
+	// the fixture trap review warned about, reached from a direction I
 	// did not expect. What follows is production's own order: opened,
 	// undetermined, resolved.
 	e.noteTxOutcome(ctx, txTransition{

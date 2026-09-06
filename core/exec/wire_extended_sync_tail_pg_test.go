@@ -21,7 +21,7 @@ import (
 // follows, and Sync sweeps the object as unfinalized — so the client's next Bind
 // is refused for a statement it just successfully created.
 //
-// §4a is explicit that this is backwards: portals do not survive the
+// matrix §4a is explicit that this is backwards: portals do not survive the
 // transaction, prepared statements DO.
 func TestExtPG_APreparedStatementSurvivesSyncWithoutAnExecute(t *testing.T) {
 	f, _, sid, userID := extSession(t)
@@ -71,7 +71,7 @@ func TestExtPG_APreparedStatementSurvivesSyncWithoutAnExecute(t *testing.T) {
 	}
 
 	if _, serr := s.ext.statement("s1"); serr != nil {
-		t.Fatalf("the prepared statement did not survive Sync: %v — §4a keeps "+
+		t.Fatalf("the prepared statement did not survive Sync: %v — matrix §4a keeps "+
 			"prepared statements across the transaction; only portals go", serr)
 	}
 }

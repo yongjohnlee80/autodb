@@ -13,19 +13,19 @@ import (
 	"strings"
 )
 
-// THE F1 WIRE SEAM (ADR-0075 F1; ADR-0018 Amendment 1).
+// THE F1 WIRE SEAM.
 //
 // The front-door loop (frontdoor/) never sees a database connection, a raw
 // pinned handle, or a pgproto3 message for TARGET data. It sees this: a
 // stream of neutral messages produced by the engine AFTER the engine's own
 // gate — classifier, capability profile, grants, and the F3a unit policy —
-// has accepted the SQL text. Lector's ruling (2026-09-02): gate and dispatch
+// has accepted the SQL text. Ruled 2026-09-02: gate and dispatch
 // are ONE core/exec-owned operation over the exact same bytes, and frontdoor
 // must not receive the raw pinned capability. This file is where that
 // boundary lives.
 //
 // The vocabulary mirrors golib's ExtendedMessage kinds so that, when the raw
-// path lands (ADR-0018 Amendment 1, SimpleQuerier), the conversion is a field
+// path lands, the conversion is a field
 // copy and the loop does not change.
 
 // WireMessage is one backend message of a Query's response, as protocol data.
@@ -82,7 +82,7 @@ type WireField struct {
 var (
 	// ErrWireEmitNil is returned BEFORE any dispatch when WireQuery is handed a
 	// nil emit: no frame is sent, no gate is consulted, nothing is audited.
-	// (ADR-0018 Amendment 1, A1-C3.)
+	// (the pinned-connection design.)
 	ErrWireEmitNil = errors.New("exec: WireQuery requires a non-nil emit")
 )
 
@@ -91,7 +91,7 @@ var (
 // status byte for the ReadyForQuery the caller frames. It is the F1 seam the
 // front door's loop calls; the loop never sees a database handle.
 //
-// POSTGRES TARGETS take the RAW path (golib ADR-0018 Amendment 1, A1-C1..C4):
+// POSTGRES TARGETS take the RAW path:
 //
 //   - the buffer is SPLIT with the classifier's own lexer and EVERY statement
 //     is gated — size, classification, authorization, capability profile,
@@ -145,7 +145,7 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 	}
 	defer release()
 
-	// §4a: a simple Query destroys the unnamed prepared statement and the
+	// matrix §4a: a simple Query destroys the unnamed prepared statement and the
 	// unnamed portal. It is protocol-documented destruction, and it matters here
 	// because the two protocols share ONE namespace on one session — lib/pq
 	// sends simple for parameterless statements and extended for the rest, so a
@@ -200,7 +200,7 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 	if cerr != nil {
 		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, cerr)
 	}
-	if err := e.readerAnalysis(ctx, connRow, pol, stmt); err != nil { // Amendment 6 rule 2 stage
+	if err := e.readerAnalysis(ctx, connRow, pol, stmt); err != nil { // the editors-first rule, stage
 		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, err)
 	}
 	s.mu.Lock()
@@ -218,7 +218,7 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 		}
 		if statefulControlVerbs[stmt.Verb] {
 			// SET / RESET / LOCK: admitted stateful controls. The wire admission
-			// (Amendment 8 denylist) refuses SET TRANSACTION, SET SESSION
+			// refuses SET TRANSACTION, SET SESSION
 			// CHARACTERISTICS, SET ROLE and SET SESSION AUTHORIZATION by name,
 			// so what passes here is never transaction or authority control — it
 			// goes RAW so the target's ParameterStatus reaches the client (A1-C4 (i)).
@@ -330,7 +330,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 	start := e.now()
 	// record writes every statement's outcome. The recording budget starts HERE,
 	// when recording begins — never before the statements run: a legitimate
-	// statement longer than recordTimeout must still get its outcome (PR #50 MF3).
+	// statement longer than recordTimeout must still get its outcome.
 	record := func() error {
 		dur := e.now().Sub(start)
 		recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
@@ -459,7 +459,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			if el.last < el.first {
 				// The EMPTY query: no statement, no outcome row, nothing
 				// executed. The client did not receive its EmptyQueryResponse;
-				// there are no effects to speak of (lector #60 r0 MF1 — the
+				// there are no effects to speak of (found in review — the
 				// fallback below indexed outcomes[-1]).
 				return e.emitStopped(s, ef.err, "", false, nil)
 			}
@@ -535,7 +535,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		// golib drained the target's answer through ReadyForQuery even when the
 		// consumer failed, and the status it returns is the TARGET's word on the
 		// transaction: it goes into the session's track BEFORE any return, or the
-		// local gate would keep saying T over a backend that is in E (PR #50 MF5).
+		// local gate would keep saying T over a backend that is in E.
 		s.noteWireStatus(status)
 		for i := el.first; i <= el.last; i++ {
 			if stmts[i].Class == ClassDDL {
@@ -546,7 +546,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		if consumerErr && failed < 0 {
 			// The client's connection failed and golib drained the rest of the
 			// target's answer WITHOUT delivering it: the engine never observed the
-			// tail. Nothing unobserved may be recorded as ok (PR #50 MF4). What the
+			// tail. Nothing unobserved may be recorded as ok. What the
 			// drained status proves, and only that, is used:
 			//   - inside the client's explicit transaction, a drained T means no
 			//     statement failed, so every statement of the segment completed —
@@ -628,12 +628,12 @@ func (f *emitFailure) Unwrap() error { return f.err }
 // so a new backend shows the target's own effective startup default: the DSN's
 // application_name if the administrator supplied one, otherwise the applicable
 // server, database or role default (ALTER DATABASE / ALTER ROLE … SET), commonly
-// empty. The client's startup application_name (frontdoor §3.1) is
+// empty. The client's startup application_name (frontdoor matrix §3.1) is
 // echoed back to the client and never forwarded here; recording it on the
-// session and audit rows is §3.1's contract, awaiting the F1 wire loop. The
+// session and audit rows is matrix §3.1's contract, awaiting the F1 wire loop. The
 // client CAN still change the backend's value afterwards: SET application_name
 // is refused by the gate, but set_config('application_name', …) is a read-
-// classified function call that runs here and sticks (lector, PR #51). So today
+// classified function call that runs here and sticks. So today
 // a DBA reading pg_stat_activity sees that startup default, or whatever the
 // client chose to write — and cannot map a backend to an autodb session; no
 // backend PID is captured on either side. Stamping a structured per-session
@@ -740,7 +740,7 @@ func (e *Engine) wireQueryDecoded(ctx context.Context, s *session, pol UnitPolic
 
 // ErrDecodedResultTruncated: a non-postgres target's result exceeded the
 // engine's page. The decoded producer cannot stream, so it refuses rather than
-// lie about the row count. The loop frames it as a §8a refusal (54000) under
+// lie about the row count. The loop frames it as a matrix §8a refusal (54000) under
 // DecodedResultTruncatedRuleID; the session survives.
 var ErrDecodedResultTruncated = errors.New("exec: result exceeds the decoded producer's page; only PostgreSQL targets stream unbounded results")
 
@@ -832,7 +832,7 @@ func controlCommandTag(res *Result) string {
 }
 
 // rawFace is the ONE assertion site in autodb for the pinned connection's
-// simple-query capability (golib ADR-0018 A1-C1). Every raw dispatch — the
+// simple-query capability. Every raw dispatch — the
 // raw producer and the startup-GUC application at open — obtains the face
 // here, so TestRawSimpleQueryCapabilityNeverLeavesCoreExec has exactly one
 // site to guard.

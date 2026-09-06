@@ -28,7 +28,7 @@ func TestClassify(t *testing.T) {
 		{name: "table verb", sql: "TABLE artists", verb: "TABLE", class: ClassRead},
 		// PRAGMA is CONTROL, not read: SQLite has writable PRAGMA forms, so
 		// it never went through the read path. What changed is only WHERE it
-		// is refused — the profile, not the lexer (ADR-0074 §2).
+		// is refused — the profile, not the lexer.
 		{name: "pragma classified control", sql: "PRAGMA table_info(t)", verb: "PRAGMA", class: ClassControl},
 		{name: "pragma write classified control", sql: "PRAGMA foreign_keys = OFF", verb: "PRAGMA", class: ClassControl},
 		{name: "show", sql: "SHOW TABLES", mysql: true, verb: "SHOW", class: ClassRead},
@@ -61,11 +61,11 @@ func TestClassify(t *testing.T) {
 		{name: "subquery plus top where", sql: "UPDATE t SET x = (SELECT max(y) FROM u WHERE z = 1) WHERE id = 3", verb: "UPDATE", class: ClassWrite, where: true},
 
 		// Data-modifying CTEs (PostgreSQL executes the WITH body) — rejected,
-		// never classified as reads (lector M4 must-fix #1).
+		// never classified as reads.
 		// Data-modifying CTEs are CLASSIFIED, and the mutation inside is
 		// reported with the WHERE found at its own depth. Admission is the
-		// guard's call now — see TestGuardWhere_NestedMutations (ADR-0074
-		// §6). The class still escalates to write, so authorization is
+		// guard's call now — see TestGuardWhere_NestedMutations.
+		// The class still escalates to write, so authorization is
 		// unchanged.
 		{name: "cte delete body", sql: "WITH x AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT * FROM x", verb: "SELECT", class: ClassWrite},
 		{name: "cte update body", sql: "WITH x AS (UPDATE t SET a=1 WHERE id = 1 RETURNING id) SELECT * FROM x", verb: "SELECT", class: ClassWrite},
@@ -79,7 +79,7 @@ func TestClassify(t *testing.T) {
 		// not valid SQL in any target dialect and no dialect will execute it
 		// — TestEngine_SubqueryInsertIsRefusedByTheTarget proves that rather
 		// than asserting it. Reading the INSERT here as a verb is what made
-		// every parenthesized identifier a verb too (lector r0 MF2).
+		// every parenthesized identifier a verb too.
 		{name: "subquery insert is not a statement body", sql: "SELECT (INSERT INTO t VALUES (1))", verb: "SELECT", class: ClassRead},
 		// DDL below top level is not valid SQL anywhere and stays refused by
 		// the lexer: there is no guard rule to hand it to.
@@ -89,7 +89,7 @@ func TestClassify(t *testing.T) {
 		{name: "mysql exec comment hides nothing", sql: "SELECT 1 /*!40001 ; DROP TABLE t */", mysql: true, err: ErrMultiStatement},
 
 		// MySQL dialect: `--` needs trailing whitespace to be a comment, and
-		// block comments do NOT nest (lector M4 r2 must-fix #1).
+		// block comments do NOT nest.
 		{name: "mysql dashdash no space is operator", sql: "SELECT 1--2", mysql: true, verb: "SELECT", class: ClassRead},
 		{name: "mysql dashdash space is comment", sql: "SELECT 1 -- x\n", mysql: true, verb: "SELECT", class: ClassRead},
 		{name: "mysql block comment no nest leaves tail", sql: "SELECT 1 /* a /* b */ ; DROP TABLE t", mysql: true, err: ErrMultiStatement},

@@ -95,7 +95,7 @@ func TestDecodedWireMessages_NeverEmitsReadyForQuery(t *testing.T) {
 	}
 }
 
-// The claim is HELD across every emit (lector PR #48 r0 MF1). A callback that
+// The claim is HELD across every emit. A callback that
 // re-enters the engine on the same session must be refused with
 // ErrSessionBusy — not run a second statement — and the status WireQuery
 // returns must describe the ORIGINAL transaction, not whatever the re-entrant

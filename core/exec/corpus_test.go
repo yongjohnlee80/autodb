@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-// Real-workload replay (ADR-0074 §8, design doc G6). The corpus is the LM
+// Real-workload replay. The corpus is the LM
 // production deployment estate: 470 PostgreSQL scripts that a human wrote to
 // run against a real database, which is a very different input distribution
 // from the adversarial cases the rest of this file is made of.
@@ -389,7 +389,7 @@ func whereAtTopLevel(sql string) bool {
 	return false
 }
 
-// The committed manifest (ADR-0074 §8, G6). One line per corpus statement:
+// The committed manifest. One line per corpus statement:
 //
 //	<file> <ordinal> <sha256[:12] of the statement> <verb> <class> <decision>
 //
@@ -398,7 +398,7 @@ func whereAtTopLevel(sql string) bool {
 //
 // I argued against a golden in the first round, on the grounds that a
 // transcript no CI run can regenerate rots into a file people update until it
-// passes. Lector answered that with a demonstration rather than an argument:
+// passes. Review answered that with a demonstration rather than an argument:
 // with v1compat simulated as admitting nested mutations, the corpus's one
 // nested-mutation refusal silently became an admission and the replay still
 // passed, because it only ever asserted that whatever decision came back was
@@ -485,7 +485,7 @@ func writeManifest(t *testing.T, records []corpusRecord) {
 	})
 	var b strings.Builder
 	b.WriteString("# autodb — expected classification and v1compat gate decision for every\n")
-	b.WriteString("# statement of the LM production deployment corpus (ADR-0074 §8, design doc G6).\n")
+	b.WriteString("# statement of the LM production deployment corpus (matrix §8).\n")
 	b.WriteString("#\n")
 	b.WriteString("# file\tordinal\tsha256[:12] of the statement\tverb\tclass\tgate decision\n")
 	b.WriteString("#\n")

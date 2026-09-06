@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Session state: SET and LOCK (ADR-0074 §5, and G2 from the corpus survey).
+// Session state: SET and LOCK.
 //
 // The gate has TWO axes here, not one. "SET" as a verb is too coarse to
 // decide anything: whether a statement is admissible depends on its LOCALITY
@@ -236,14 +236,14 @@ func admitLock(txOpen bool) error {
 }
 
 // ---------------------------------------------------------------------------
-// WIRE SESSIONS: the denylist (ADR-0075 Amendment 8, Johno 2026-09-03).
+// WIRE SESSIONS: the denylist.
 //
 // A wire session is a real PostgreSQL session pinned to one backend for its
 // whole life, and that backend is DISCARDED at close, never returned to the
 // pool (closeSession). So the reason the pooled path refuses non-LOCAL SET —
 // state persisting onto a connection the next user inherits — does not exist
 // here: a session-level setting lives exactly as long as PostgreSQL says it
-// does. Amendment 6 rule 1 therefore applies in full: no allowlist of
+// does. The editors-first rule therefore applies in full: no allowlist of
 // settings. What remains is a SHORT DENYLIST naming only what must not change:
 //
 //   - the parsing-mode GUCs (parsingGUCs): they desynchronize the classifier
@@ -294,7 +294,7 @@ var parsingGUCs = grammarGUCsExcept("search_path")
 // ordinary two-literal drift, it does NOT make the relation immutable. Both
 // maps are package-level and mutable, and a later write to either one — or a
 // regression in this helper that preserves cardinality — puts them back out of
-// step. (lector, #89 r0.)
+// step.
 func grammarGUCsExcept(exclude ...string) map[string]bool {
 	skip := make(map[string]bool, len(exclude))
 	for _, name := range exclude {

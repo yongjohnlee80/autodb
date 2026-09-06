@@ -7,7 +7,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// History as a projection of the outcome log — ADR-0074 §7 rev 2.
+// History as a projection of the outcome log.
 
 func histStatus(t *testing.T, f *fixture, txID string) []HistStatus {
 	t.Helper()

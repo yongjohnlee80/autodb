@@ -15,7 +15,7 @@ import (
 )
 
 // The tokenizer models one dialect per engine. Two mechanisms keep the
-// model synchronized with the target (ADR-0055 rev 3; lector M4 r3):
+// model synchronized with the target:
 //
 //  1. ValidateDSN parses the DSN with the ACTUAL driver parsers
 //     (go-sql-driver's ParseDSN, pgxpool's ParseConfig — never substring
@@ -90,8 +90,8 @@ func ValidateDSN(engineName engine.Name, dsn string) error {
 // acquisition — not only at establishment — so a session mutated after it
 // was pooled (e.g. a verb-level read running
 // `SELECT set_config('standard_conforming_strings','off',false)`, which the
-// v1 reader contract permits) can never serve a later statement (ADR-0055
-// rev 5; lector M4 r5). A drifted session returns (false, nil): pgxpool
+// v1 reader contract permits) can never serve a later statement
+// (raised in review). A drifted session returns (false, nil): pgxpool
 // destroys it and retries on a fresh connection — self-healing — while a
 // server whose DEFAULT is incompatible fails every fresh connection and
 // surfaces pgxpool's bounded-attempts acquire error, fail-closed.
@@ -130,7 +130,7 @@ func pgPrepareConnVerify() golibpg.Option {
 // escaping grammar, so it exists only as a fast, clear failure at
 // creation time. The authoritative check is live per-connection
 // verification (pgAfterConnectVerify), which a smuggled setting cannot
-// evade (lector M4 r4 docs note).
+// evade.
 func optionsSetsParam(options, name string) bool {
 	fields := strings.Fields(options)
 	for i, f := range fields {
@@ -200,7 +200,7 @@ func scalarStringQ(ctx context.Context, querier dao.Querier, stmt string) (strin
 }
 
 // TargetDBName returns the database name a DSN points at, using THE DRIVER'S
-// OWN PARSER for the engine in question (ADR-0086 §3).
+// OWN PARSER for the engine in question.
 //
 // Parsed, never pattern-matched: security-core-hardening R11's rule is that a
 // gate reading a DSN must agree with the driver that will use it, and a

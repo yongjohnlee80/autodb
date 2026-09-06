@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// ADR-0074 §2 — the policy that left the tokenizer had to land somewhere, and
+// The policy that left the tokenizer had to land somewhere, and
 // this is where. The classifier tests prove control statements are now
 // CLASSIFIED; these prove they are still REFUSED, with the same error
 // identity, under the profile every existing surface runs.
@@ -14,7 +14,7 @@ import (
 func TestProfileV1Compat_RefusesEveryControlVerb(t *testing.T) {
 	t.Parallel()
 
-	// The full ADR-0074 §2 control-verb list, each in a shape a user could
+	// The full control-verb list, each in a shape a user could
 	// plausibly type. Every one of them was refused by the tokenizer before
 	// this change; every one of them is refused by the profile after it.
 	cases := []string{
@@ -60,7 +60,7 @@ func TestProfileV1Compat_RefusesEveryControlVerb(t *testing.T) {
 				t.Fatalf("admit = %v, want ErrStatementUnsupported", err)
 			}
 			// The message names the verb, so a refusal is actionable rather
-			// than a shrug (ADR-0074 §8a).
+			// than a shrug.
 			if !strings.Contains(err.Error(), st.Verb) {
 				t.Errorf("refusal %q does not name the verb %q", err, st.Verb)
 			}
@@ -110,7 +110,7 @@ func TestProfile_UnknownFailsClosed(t *testing.T) {
 	}
 }
 
-// ADR-0074 Amendment 3 — the guard fix and its ADMISSION are separate
+// The guard fix and its ADMISSION are separate
 // questions, and the answer differs per profile.
 //
 // The guard genuinely can see inside a CTE now. That does not mean a surface
@@ -169,7 +169,7 @@ func TestProfiles_DisagreeOnDataModifyingCTEs(t *testing.T) {
 }
 
 // The session profile admits transaction control and performs it as a state
-// transition (ADR-0074 §3); the rest of the control verbs are still refused,
+// transition; the rest of the control verbs are still refused,
 // and the refusal distinguishes "not built yet" from "never".
 func TestProfileSession_AdmitsTransactionControlOnly(t *testing.T) {
 	t.Parallel()
@@ -259,7 +259,7 @@ func TestProfileSession_AdmitsTransactionControlOnly(t *testing.T) {
 	}
 }
 
-// ADR-0074 §6 — the guard applies its one rule at every depth.
+// The guard applies its one rule at every depth.
 func TestGuardWhere_NestedMutations(t *testing.T) {
 	t.Parallel()
 

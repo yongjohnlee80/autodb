@@ -11,13 +11,13 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// PR #20 r0 MF1, MF2, MF3, MF5 — the review's four structural findings.
+// The review's four structural findings.
 
-// --- MF1: a prior-process `opened` row reaches a terminal ------------------
+// --- A prior-process `opened` row reaches a terminal ---------------------
 
 // A crash after `opened` and before `commit_started` leaves a row with no
 // later owner: the dead process's session, timeout reaper and boundary
-// handler all went with it. Nothing would ever settle it, and §7's
+// handler all went with it. Nothing would ever settle it, and the
 // exactly-one-terminal would be false for that transaction forever.
 func TestRecoverStaleOpen_SettlesATransactionInheritedFromADeadProcess(t *testing.T) {
 	t.Parallel()
@@ -81,7 +81,7 @@ func TestRecoverStaleOpen_RefusesToRunOnceSessionsExist(t *testing.T) {
 	}
 }
 
-// --- MF2: the trail ENDS in its terminal -----------------------------------
+// --- The trail ENDS in its terminal --------------------------------------
 
 // The store's partial index refuses a second terminal but permits a
 // nonterminal after one. That gap is reachable: the reconciler can resolve a
@@ -187,7 +187,7 @@ func TestCommitBoundary_AResolverWinningTheRaceLeavesTheTrailEndingInItsTerminal
 	}
 }
 
-// --- MF3: the terminal and its projection cannot separate ------------------
+// --- The terminal and its projection cannot separate --------------------
 
 // A crash between the terminal write and the history projection used to leave
 // the truth terminal and the surface pending forever, because reconciliation
@@ -231,9 +231,9 @@ func TestAppendTxOutcome_TheTerminalAndItsProjectionAreAtomic(t *testing.T) {
 	}
 }
 
-// --- MF5: the ratified interval semantics ----------------------------------
+// --- The ratified interval semantics -------------------------------------
 
-// Amendment 4 A1: unset takes the default, zero or negative DISABLES the
+// Unset takes the default, zero or negative DISABLES the
 // periodic pass, leaving startup and checkout reconciliation. Rejecting a
 // non-positive value made the ratified configuration unreachable.
 func TestStartOutcomeReconciler_NonPositiveIntervalDisablesOnlyTheTicker(t *testing.T) {
@@ -326,7 +326,7 @@ func TestReconcileConnection_ACheckoutResolvesThatConnectionsBacklog(t *testing.
 	}
 }
 
-// --- r1 MF1: the pending query must be SELECTIVE ---------------------------
+// --- The pending query must be SELECTIVE ---------------------------------
 
 // A backlog query must return the backlog, not the history.
 //
@@ -334,7 +334,7 @@ func TestReconcileConnection_ACheckoutResolvesThatConnectionsBacklog(t *testing.
 // or unknown_pending — and every transaction keeps its `opened` row forever,
 // and every committed one keeps `commit_started` too. No predicate over
 // states can separate pending from settled, so the "candidate" set was every
-// transaction ever recorded: lector's probe seeded 32 settled groups plus one
+// transaction ever recorded: a probe seeded 32 settled groups plus one
 // pending and got all 33 back.
 //
 // That is not a slow query, it is a broken one. It reloads the whole log
@@ -446,7 +446,7 @@ func TestRepairPendingHistory_HealsWithoutWalkingEveryTransaction(t *testing.T) 
 //
 // The checkout trigger uses the very pools Close tears down, so a detached
 // goroutine could reopen one that had just been shut. Close cancels it and
-// WAITS before touching any pool (PR #20 r1 SF).
+// WAITS before touching any pool.
 func TestEngineClose_StopsAndWaitsForCheckoutReconciliation(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -559,7 +559,7 @@ func TestPendingQueue_MembershipMeansExactlyNoTerminal(t *testing.T) {
 		if terminals > 1 {
 			t.Errorf("%s has %d terminals", id, terminals)
 		}
-		// MF2, under contention: the trail ends where it settled.
+		// Under contention: the trail ends where it settled.
 		if settled && !meta.TxState(last.State).IsTerminal() {
 			t.Errorf("%s ends in %q after a terminal", id, last.State)
 		}
@@ -706,7 +706,7 @@ func TestPendingOutcomes_IsNotCappedByTheReconcilerBatch(t *testing.T) {
 
 // --- r2: a LIMIT without a cursor is starvation, not slowness --------------
 
-// MF1. A resolvable entry sitting behind a full page of LIVE ones must still
+// A resolvable entry sitting behind a full page of LIVE ones must still
 // be reached.
 //
 // The live rows are `opened`, which the pass correctly skips — so they are
@@ -738,7 +738,7 @@ func TestReconcile_ReachesAnEntryBehindAFullPageOfLiveOnes(t *testing.T) {
 		stateOf(t, f, "tx_behind").State)
 }
 
-// MF2. The same failure in the history repair sweep: a full page of
+// The same failure in the history repair sweep: a full page of
 // legitimately in-flight pending rows in front of a genuinely stranded one.
 func TestRepairPendingHistory_ReachesAStrandBehindAFullPage(t *testing.T) {
 	t.Parallel()
@@ -764,7 +764,7 @@ func TestRepairPendingHistory_ReachesAStrandBehindAFullPage(t *testing.T) {
 		histStatus(t, f, "tx_strandlate"))
 }
 
-// MF3. Scope and order must precede the limit.
+// Scope and order must precede the limit.
 //
 // Limiting the GLOBAL queue and filtering afterwards is wrong twice: a caller
 // asking for one entry gets NOTHING when another user's row comes first, and
@@ -870,7 +870,7 @@ func TestReconcile_TheCursorWrapsSoEarlierEntriesComeRoundAgain(t *testing.T) {
 		stateOf(t, f, "tx_front_000").State)
 }
 
-// --- r3 MF1: a rotation must be FINITE, not just forward-moving -----------
+// --- A rotation must be FINITE, not just forward-moving ------------------
 
 // An old entry must be revisited even while newer ones keep arriving.
 //

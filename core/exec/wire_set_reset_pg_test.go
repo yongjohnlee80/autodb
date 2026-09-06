@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Amendment 8 on a live target: SET / RESET on a wire session are admitted by
+// The amended rule on a live target: SET / RESET on a wire session are admitted by
 // the denylist and travel RAW, so the target's own ParameterStatus reaches the
 // client; refusals are the gate's, before dispatch, with no target effect.
 

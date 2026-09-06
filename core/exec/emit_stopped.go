@@ -11,7 +11,7 @@ import (
 // after a statement had been dispatched. It carries what the engine itself
 // ESTABLISHED about the statement whose frames the client did not receive, so
 // the loop reports the same truth the audit row records instead of inferring
-// one from a transaction status byte (PR #52 MF16: `I` is left behind by a
+// one from a transaction status byte (`I` is left behind by a
 // committed autocommit AND by a failed one; the status alone proves nothing).
 //
 // The loop obtains it with errors.As and asks Arm() what became of the
@@ -21,7 +21,7 @@ import (
 //  1. !Executed — no statement ran (the empty query): there are NO effects to
 //     describe, whatever the transaction status says — an empty query inside
 //     BEGIN leaves T and still has nothing pending. Checked before every
-//     effect arm for exactly that reason (lector #60 r1 MF2).
+//     effect arm for exactly that reason.
 //  2. TargetErr != nil — the target's ErrorResponse for that statement passed
 //     through the emitter: it FAILED; in autocommit nothing was kept.
 //  3. TxStatus == 'T' — the client's transaction is still open: the effects

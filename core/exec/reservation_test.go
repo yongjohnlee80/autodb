@@ -95,7 +95,7 @@ func TestReservation_EachMemberRefusesOnItsOwn(t *testing.T) {
 		}
 	})
 
-	// The charge arithmetic FAILS CLOSED (lector PR #33 r0 follow-up).
+	// The charge arithmetic FAILS CLOSED.
 	//
 	// This is the resource-accounting choke point, so the two ways a number
 	// can defeat it are worth refusing explicitly rather than relying on

@@ -8,7 +8,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// ADR-0075 F3a item 2 — "expose the debug profile through the front door". The
+// "Expose the debug profile through the front door". The
 // mechanism already exists on the connection (meta.Connection.Debug →
 // txLimits.forConnection at BEGIN); this cell proves a WIRE session's
 // transaction takes its idle-in-transaction bound from it exactly as the token

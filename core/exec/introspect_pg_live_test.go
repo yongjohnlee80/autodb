@@ -1,13 +1,13 @@
 package exec
 
-// Live-PostgreSQL closers for the last two ADR-0077 criteria (gated on
+// Live-PostgreSQL closers for the last two partition cases (gated on
 // TEST_PGURL):
 //
-//   - criterion 10, live half: a real CREATE+ATTACH and a real DETACH+DROP
+//   - the live half: a real CREATE+ATTACH and a real DETACH+DROP
 //     executed BETWEEN the base listing and the supplementary partition-role
 //     query, by hooking the connection between the two statements. The
 //     forced-interleaving fake counterpart is in partition_barrier_test.go.
-//   - criterion 12: a foreign-table partition (relkind 'f') is absent from the
+//   - a foreign-table partition (relkind 'f') is absent from the
 //     listing — asserted as a regression test rather than inferred from the
 //     query's relkind filter.
 
@@ -135,7 +135,7 @@ func TestEngine_ListTables_LiveSnapshotDrift(t *testing.T) {
 		t.Errorf("%s = %+v, want kept but UN-annotated after a mid-flight detach+drop", c1, got)
 	}
 	// CREATE+ATTACH between the snapshots: absent from the base read, so it is
-	// not shown this refresh and certainly not synthesized (lector A3).
+	// not shown this refresh and certainly not synthesized.
 	if _, ok := by[c2]; ok {
 		t.Errorf("%s was created+attached mid-flight but appeared in the listing — "+
 			"a supplementary-only relation must be ignored", c2)
@@ -217,7 +217,7 @@ func TestEngine_ListTables_ForeignPartitionAbsent(t *testing.T) {
 		by[e.Name] = e
 	}
 	if _, ok := by[foreign]; ok {
-		t.Errorf("the foreign-table partition %s appears in the listing; ADR-0077 excludes relkind 'f' "+
+		t.Errorf("the foreign-table partition %s appears in the listing; a foreign table is excluded "+
 			"from the nested subset and the count", foreign)
 	}
 	// The local sibling IS listed and nested, so the absence above is the

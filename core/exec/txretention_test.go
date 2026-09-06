@@ -12,9 +12,9 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Outcome-log retention — ADR-0079 §3 / P4.
+// Outcome-log retention.
 
-// THE ACCEPTANCE CELL (ADR-0079 P4 gate).
+// THE ACCEPTANCE CELL.
 //
 // Age out a settled transaction, then assert the reader does NOT answer
 // ErrNoSuchTx for it. That is the whole invariant: aged-out must stay
@@ -185,7 +185,7 @@ func TestStartOutcomeRetention_DisabledByDefault(t *testing.T) {
 	}
 }
 
-// PR #22 r0 MF1: an eligible progression BEHIND a page of tombstones.
+// An eligible progression BEHIND a page of tombstones.
 //
 // A collapsed tombstone still satisfies created_at < cutoff and is skipped as
 // having nothing to prune, so a page full of them is a page on which no
@@ -193,7 +193,7 @@ func TestStartOutcomeRetention_DisabledByDefault(t *testing.T) {
 // behind them and eligible progressions are starved PERMANENTLY, not delayed.
 //
 // This is the third consumer in one arc to have this shape — the reconciler
-// and the history repair sweep both had it (PR #20 r2/r3) — so the cell is
+// and the history repair sweep both had it — so the cell is
 // written the way those two are: fill the first page, put the work behind it.
 func TestRetention_ReachesAnEligibleTxBehindAPageOfTombstones(t *testing.T) {
 	t.Parallel()

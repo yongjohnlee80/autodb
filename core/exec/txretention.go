@@ -10,7 +10,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Outcome-log retention — ADR-0079 §3, phase P4.
+// Outcome-log retention.
 //
 // Retention here COLLAPSES a settled transaction's progression to its terminal
 // and stops. It never deletes the transaction from the log, and that is the
@@ -22,10 +22,10 @@ import (
 // begin anything, so zero rows PROVES nothing started. Delete a settled
 // transaction and that proof becomes a lie — a committed transaction begins
 // answering "no such transaction", which is the same failure the write-ahead
-// ordering was introduced to prevent (ADR-0074 Amendment 5 decision 5).
+// ordering was introduced to prevent.
 //
 // It is also why time-range partitioning cannot be the retention mechanism for
-// this table: ADR-0079 measured that partitioning by `created_at` forces the
+// this table: measurement showed that partitioning by `created_at` forces the
 // partition key into every unique index and thereby destroys both durable
 // guards. Detaching a partition is deletion with extra steps.
 //
@@ -46,7 +46,7 @@ func (e *Engine) CollapseSettledOutcomes(ctx context.Context, before time.Time) 
 
 	// The keyset paging and the tombstone EXCLUSION both live in meta.Sweep
 	// now. Excluding already-collapsed rows AT THE QUERY is load-bearing (PR
-	// #22 r0 MF1): a tombstone still satisfies created_at < cutoff, so
+	// found in review): a tombstone still satisfies created_at < cutoff, so
 	// filtering it in the loop instead fills pages with rows on which no
 	// progress is made and starves every eligible progression behind them.
 	// This function was the third consumer in one arc to hand-assemble that
@@ -151,13 +151,13 @@ func (e *Engine) collapseOne(ctx context.Context, txID string, group []*meta.TxO
 // StartOutcomeRetention runs retention on a ticker, if it is enabled.
 //
 // Disabled by default and by design. Nothing in autodb needs this until the
-// outcome log is large enough to be a problem, and ADR-0079 §3 records that at
+// outcome log is large enough to be a problem, and the design records that at
 // one row per transition it is orders of magnitude below the volume tables. It
 // exists now so that when an operator does turn it on, the invariant holds by
 // construction rather than by whoever implements it later remembering to.
 //
 // A non-positive interval or retention period disables it — the same named
-// semantics as reconcile_interval (ADR-0074 Amendment 4 A1).
+// semantics as reconcile_interval.
 func (e *Engine) StartOutcomeRetention(ctx context.Context, every, keep time.Duration) {
 	if every <= 0 || keep <= 0 {
 		return

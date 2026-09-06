@@ -1,7 +1,7 @@
-// Package exec is autodb's SQL execution engine (ADR-0055): the single path
+// Package exec is autodb's SQL execution engine: the single path
 // every frontend uses to run statements against a managed connection —
 // classify → authorize (core/auth) → guard → run → page/stream → history +
-// audit. No frontend touches a database driver (ADR-0052 §4 / Objective 19).
+// audit. No frontend touches a database driver.
 //
 // The classifier is a real tokenizer, not a prefix check: it understands
 // comments (nested blocks), strings (engine-specific escaping), quoted

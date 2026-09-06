@@ -319,7 +319,7 @@ func TestDemotionPreflight_ForegroundAndJanitorHaveOneRollbackOwner(t *testing.T
 // is the one a foreground statement can legitimately win — it becomes the
 // linearization owner and runs the same synchronous preflight — and treating
 // that loss as a cleanup failure closed a healthy retained reader session
-// (lector r1 on e0a932c, reproduced by juliet on VM43).
+// (found in review on e0a932c, reproduced on VM43).
 //
 // Deterministic drive: the janitor parks in hookQuiesceJoined (join done, slot
 // free, claim not yet attempted); the foreground then claims the slot and parks

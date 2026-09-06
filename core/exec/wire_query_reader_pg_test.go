@@ -12,7 +12,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// ADR-0075 F3a, item 1, on the RAW producer: a reader's every unit runs inside a
+// On the RAW producer: a reader's every unit runs inside a
 // READ ONLY transaction at the target, so a write smuggled past the classifier —
 // a volatile function whose body inserts — fails AT THE TARGET with SQLSTATE
 // 25006. The classifier is the first gate; PostgreSQL is the one the product's
@@ -22,7 +22,7 @@ import (
 
 // createReaderScratch creates the scratch table and the smuggling function as
 // root. The TABLE's cleanup is registered the moment the table exists — before
-// anything else can fail — so no exit path leaks it (PR #53 MF1); the function's
+// anything else can fail — so no exit path leaks it; the function's
 // cleanup is registered once the function exists. A failure to create the
 // function is RETURNED, never skipped: an opted-in TEST_PGURL run that cannot
 // build its fixture is a failing run, not a green one.
@@ -87,7 +87,7 @@ func readerWireSession(t *testing.T) (f *fixture, connID int64, sid SessionID, u
 	return f, connID, sid, userID, table, fn
 }
 
-// PR #53 MF1 isolation check: when the smuggling function CANNOT be created, the
+// Isolation check: when the smuggling function CANNOT be created, the
 // setup returns an error (the caller fails, never skips) and the already-created
 // table does not leak — its cleanup was registered the moment it existed.
 func TestWireQueryReader_FixtureFailureLeaksNothing(t *testing.T) {
@@ -171,7 +171,7 @@ func TestWireQueryReader_PlainWriteRefusedBeforeDispatchAndReadWorks(t *testing.
 	}
 }
 
-// Amendment 6 rule 2 — the analysis stage: a reader's call to a USER-DEFINED
+// The analysis stage: a reader's call to a USER-DEFINED
 // function is refused BEFORE dispatch (zero dispatches), in every spelling —
 // bare, schema-qualified, quoted — with the front door's own refusal naming it.
 // The READ ONLY wrap behind it is proven separately with a catalog function.

@@ -17,8 +17,8 @@ const (
 	// ClassDDL is schema/privilege change (editor and above, Objective 14).
 	ClassDDL Class = "ddl"
 	// ClassControl is a transaction/session control statement — BEGIN,
-	// COMMIT, SET, LOCK and their kin. The lexer CLASSIFIES these (ADR-0074
-	// §2); it does not decide whether they may run. Admission belongs to the
+	// COMMIT, SET, LOCK and their kin. The lexer CLASSIFIES these;
+	// it does not decide whether they may run. Admission belongs to the
 	// engine's capability profile, because the answer depends on the profile,
 	// the session's lifecycle state and the caller's grants — none of which a
 	// tokenizer can see.
@@ -44,7 +44,7 @@ var (
 	// ErrEmptyStatement reports a blank (or comment-only) script.
 	ErrEmptyStatement = errors.New("exec: empty statement")
 	// ErrMultiStatement reports content after a top-level ';' — one
-	// statement per execution (ADR-0055 §1).
+	// statement per execution.
 	ErrMultiStatement = errors.New("exec: multiple statements are not allowed — execute one statement per call")
 	// ErrStatementUnsupported reports a statement class the engine refuses:
 	// transaction control, session state, PRAGMA, a data-modifying subquery/
@@ -57,7 +57,7 @@ var (
 	ErrNoWhere = errors.New("exec: UPDATE/DELETE without a WHERE clause is blocked")
 	// ErrScriptTooLarge rejects a script exceeding the executable size cap
 	// before it runs, so the audit record always equals what executed
-	// (lector M4 r2 must-fix #2).
+	// (found in review).
 	ErrScriptTooLarge = errors.New("exec: statement exceeds the maximum size")
 )
 
@@ -78,7 +78,7 @@ type Statement struct {
 	// data-modifying CTE, so a reader following it finds what looks like
 	// confirmation. Nothing in Classify refuses a data-modifying DML CTE any
 	// more; it records them in Nested and leaves the disposition to the
-	// profile. Found by jarvis and verified by white-vision as the third copy
+	// profile. Found and independently verified as the third copy
 	// of one stale claim — the public README and convention R10 carried it
 	// too — each one found by grepping outward from the last rather than by
 	// review of the layer it lived in.
@@ -89,7 +89,7 @@ type Statement struct {
 	// Calls lists every function-call shape in the statement — an identifier
 	// (unquoted, lowercased; or quoted, exact) immediately followed by '(' at any
 	// depth, with its schema qualifier when written. It is the reader analysis
-	// stage's input (ADR-0075 Amendment 6 rule 2): the stage decides, against the
+	// stage's input: the stage decides, against the
 	// target's catalog, which of these are user-defined. Keywords that happen to
 	// precede a paren (IN, VALUES, EXISTS …) appear here too; they are harmless,
 	// because no user-defined function can be called by an unquoted keyword.
@@ -97,7 +97,7 @@ type Statement struct {
 	// Nested lists the data-modifying verbs found BELOW top level — the
 	// bodies of data-modifying CTEs and subqueries, which PostgreSQL really
 	// does execute. HasTopLevelWhere is depth-0-only and says nothing about
-	// them, which is the guard-coverage gap ADR-0074 §6 names: the v1
+	// them, which is the guard-coverage gap the design names: the v1
 	// blanket refusal of data-modifying CTEs stood in for a guard that could
 	// not see inside them. This is that guard's input.
 	Nested []NestedMutation
@@ -118,7 +118,7 @@ type NestedMutation struct {
 // readVerbs are lexically read-only statements. PRAGMA is deliberately
 // absent: SQLite has writable PRAGMA forms (e.g. `PRAGMA foreign_keys=OFF`),
 // so PRAGMA is rejected as unsupported and introspection goes through the
-// dedicated dao catalog API (ADR-0055 rev 1; lector M4 must-fix #2). SHOW /
+// dedicated dao catalog API. SHOW /
 // DESCRIBE are genuinely read-only.
 var readVerbs = map[string]bool{
 	"SELECT": true, "VALUES": true, "TABLE": true,
@@ -140,11 +140,11 @@ var ddlVerbs = map[string]bool{
 }
 
 // controlVerbs are transaction-control, session-state and cursor statements.
-// They are CLASSIFIED, never rejected here (ADR-0074 §2): whether one may run
+// They are CLASSIFIED, never rejected here: whether one may run
 // is a question about the engine's capability profile and the session's
 // lifecycle state, and the tokenizer knows neither. Under the v1compat
 // profile the engine refuses every one of them, exactly as this list did when
-// the refusal lived here (ADR-0055 §1).
+// the refusal lived here.
 var controlVerbs = map[string]bool{
 	"BEGIN": true, "START": true, "COMMIT": true, "END": true, "ROLLBACK": true,
 	"SAVEPOINT": true, "RELEASE": true, "SET": true, "RESET": true, "USE": true,
@@ -193,7 +193,7 @@ type FunctionCall struct {
 // PostgreSQL really does execute — is CLASSIFIED here and reported in
 // [Statement.Nested] with the WHERE found at its own depth. It is no longer
 // rejected here: whether it may run is the engine profile's question, and
-// whether it is guarded is the guard's (ADR-0074 §2, §6). The blanket
+// whether it is guarded is the guard's. The blanket
 // refusal it replaces stood in for a guard that could not see inside a CTE,
 // and refused the guarded ones too.
 func Classify(sqlText string, backslashEscapes bool) (Statement, error) {
@@ -316,7 +316,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			// whitespace (or EOL); `--x` is the subtraction operator, not a
 			// comment. Postgres/sqlite treat any `--` as a comment. Modeling
 			// the target's rule prevents a `--`-hidden tail on MySQL from
-			// being wrongly commented out (lector M4 r2 must-fix #1).
+			// being wrongly commented out.
 			if backslashEscapes && i+2 < n && !isSpace(sqlText[i+2]) {
 				if err := content(); err != nil {
 					return st, parts, spans, err
@@ -337,7 +337,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			// MySQL executable comment /*![digits] ... */: the server RUNS
 			// the body, so its tokens are live, not commented out. Skip only
 			// the opener + optional version digits; the matching */ is
-			// handled as whitespace below (lector M4 must-fix #3).
+			// handled as whitespace below.
 			if backslashEscapes && i+2 < n && sqlText[i+2] == '!' {
 				j := i + 3
 				for j < n && sqlText[j] >= '0' && sqlText[j] <= '9' {
@@ -349,7 +349,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 			}
 			// PostgreSQL nests block comments; MySQL does not. Model the
 			// target so a MySQL `/* a /* b */` doesn't leave a live tail
-			// (lector M4 r2 must-fix #1).
+			// (found in review).
 			nests := !backslashEscapes
 			level, j := 1, i+2
 			for j < n && level > 0 {
@@ -562,7 +562,7 @@ func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, [
 					}
 					if controlVerbs[word] {
 						// Classified, not refused. Whether it may run is the
-						// engine profile's question (ADR-0074 §2), and
+						// engine profile's question, and
 						// answering it here also broke SplitStatements: a
 						// script containing BEGIN could not even be split,
 						// because the splitter shares this scanner.

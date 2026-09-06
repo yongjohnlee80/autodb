@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Amendment 8: a WIRE session runs under a DENYLIST, not the pooled path's
+// A WIRE session runs under a DENYLIST, not the pooled path's
 // allowlist. The table is the contract; the pooled cells in
 // session_state_test.go are untouched and still pass — the two paths differ
 // because a pooled connection outlives its caller and a pinned one does not.
@@ -91,7 +91,7 @@ func TestParseReset_AndAdmitWireReset(t *testing.T) {
 // a later write to either — or a regression in the helper that preserves
 // cardinality — puts them back out of step with nothing to say so. Deriving
 // removes ordinary two-literal drift. It does not make the relation immutable,
-// and ADR-0088 C1 requires this guard to stay. (lector, #89 r0.)
+// and the design requires this guard to stay.
 //
 // grammarGUCs governs the POOLED path (classifySet) and parsingGUCs the WIRE
 // denylist, so a name in only one of them is a setting refused as a statement

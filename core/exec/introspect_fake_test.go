@@ -1,6 +1,6 @@
 package exec
 
-// ADR-0077 partition introspection, tested WITHOUT a live database by injecting
+// Partition introspection, tested WITHOUT a live database by injecting
 // a fake DataConn into the engine's connection cache. The fake carries a REAL
 // dialect, so dao.ListTables drives the genuine introspector over canned catalog
 // rows and Engine.ListTables runs its real supplementary query + merge on top.
@@ -51,7 +51,7 @@ func (r *fakeRows) Scan(dest ...any) error {
 }
 
 // fakeConn is a dao.DataConn whose Dialect is real but whose QueryContext
-// serves canned rows and records every statement, dispatching the ADR-0077
+// serves canned rows and records every statement, dispatching the partition
 // supplementary query (pg_inherits) apart from the base table listing.
 type fakeConn struct {
 	dialect  dao.Dialect

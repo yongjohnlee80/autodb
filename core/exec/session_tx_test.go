@@ -13,7 +13,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// ADR-0074 §3 — transaction verbs are state transitions. These cover the
+// Transaction verbs are state transitions. These cover the
 // transitions themselves; the live end-to-end path against a real PostgreSQL
 // is exercised in the pg-tagged suite.
 
@@ -104,7 +104,7 @@ func TestDescribeTxOptions(t *testing.T) {
 	}
 }
 
-// AND CHAIN is parsed and refused BY NAME. The ADR §8 rule is that a clause
+// AND CHAIN is parsed and refused BY NAME. The rule is that a clause
 // is mapped or refused and never silently dropped, and a dropped CHAIN is
 // the worst shape of that: the caller believes a new transaction is open.
 func TestTxChain_IsRefusedByNameRatherThanDropped(t *testing.T) {
@@ -228,7 +228,7 @@ func pgErrorWithCode(code string) error {
 }
 
 // The profile is resolved from the CONNECTION, with the engine default as
-// the fallback and an unrecognized value failing closed (ADR-0074 §2).
+// the fallback and an unrecognized value failing closed.
 func TestProfileFor_ResolvesFromTheConnectionRow(t *testing.T) {
 	t.Parallel()
 

@@ -10,7 +10,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// PR #41 r0, lector's P2 finding: WireExecute omitted the statement-size
+// A review finding: WireExecute omitted the statement-size
 // invariant the token path enforces, so the two surfaces had drifted — a
 // statement of any size reached the classifier here while the identical
 // statement was refused on the token path.
@@ -54,7 +54,7 @@ func TestWireExecute_RejectsOversizedBeforeClassification(t *testing.T) {
 	}
 }
 
-// TestWireExecute_OversizedControlIsRefusedToo covers the half lector named
+// TestWireExecute_OversizedControlIsRefusedToo covers the half review named
 // explicitly: the gate sits above Classify, so CONTROL statements are governed
 // by it as well. A gate placed after classification, or inside the non-control
 // branch, would let this through.

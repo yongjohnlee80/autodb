@@ -16,7 +16,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/auth"
 )
 
-// ExecSession — an engine-owned client session (ADR-0074 §1).
+// ExecSession — an engine-owned client session.
 //
 // The engine had no per-client object at all. A token is not one: browser tabs
 // share it, and one RPC connection runs eight concurrent handlers under it. A
@@ -50,7 +50,7 @@ type SessionID string
 // Session-layer errors.
 var (
 	// ErrSessionBusy reports a second statement on a session that is already
-	// running one. Sessions serialize; they do not queue (ADR-0074 §1), so a
+	// running one. Sessions serialize; they do not queue, so a
 	// caller learns immediately rather than waiting behind work it cannot
 	// see.
 	ErrSessionBusy = errors.New("exec: the session is already running a statement")
@@ -68,7 +68,7 @@ var (
 
 	// ErrConnectionDraining reports a connection being deleted or closed. A
 	// session cannot be opened on it, and the pool must not be recreated for
-	// it (ADR-0074 §1 lifecycle linearization).
+	// it.
 	ErrConnectionDraining = errors.New("exec: the connection is shutting down")
 )
 
@@ -166,10 +166,10 @@ type session struct {
 	// lastUsed drives the idle timeout.
 	lastUsed time.Time
 
-	// The session's one transaction (ADR-0074 Amendment 2). All of these
+	// The session's one transaction. All of these
 	// fields are guarded by mu.
 	tx dao.ContextTxConn
-	// pc is the session's PINNED backend connection (golib ADR-0018), set on a
+	// pc is the session's PINNED backend connection, set on a
 	// postgres WIRE session by the first WireQuery and held for the session's
 	// life. Every raw simple-query dispatch runs on it, and the session's
 	// transaction is opened THROUGH it (BeginSessionTx), so the raw face and the
@@ -201,7 +201,7 @@ type session struct {
 // clearTxLocked clears every field owned by the attached transaction. The
 // caller must hold s.mu.
 func (s *session) clearTxLocked() {
-	// §4a: portals do not survive the transaction — named and unnamed alike —
+	// matrix §4a: portals do not survive the transaction — named and unnamed alike —
 	// while prepared statements do. This is the single point every transaction
 	// end passes through (commit, rollback, abort, implicit-block end, failed-tx
 	// recovery, authority demotion), so hooking it here is what makes the rule
@@ -232,7 +232,7 @@ type sessionRegistry struct {
 	perUserCap int
 	globalCap  int
 
-	// Front-door wire leases, per target connection (ADR-0075 §3). A wire
+	// Front-door wire leases, per target connection. A wire
 	// session holds a PHYSICAL connection for its whole lifetime, so this
 	// cap is what stops the front door consuming a pool the interactive
 	// surfaces and the engine's own control queries also need.
@@ -244,7 +244,7 @@ type sessionRegistry struct {
 	leases   map[int64]int
 	leaseCap int
 
-	// resident is the global weighted memory budget (ADR-0075 §4 rev 5).
+	// resident is the global weighted memory budget.
 	// The session's FIXED OVERHEAD is charged here as the fourth member of
 	// the reservation — its absence is what recreates the gap for memory
 	// while the other three are protected.
@@ -286,8 +286,8 @@ func newSessionID() (SessionID, error) {
 // them and two callers at the cap boundary both see room and both insert —
 // the exact defect the convention's window rule exists to catch, which is why
 // hookAfterAdmitCheck lets a test drive a competing admit through the gap.
-// ErrLeaseCapExceeded reports the per-target wire-lease cap (ADR-0075 §3,
-// registered in ADR-0074 §8a's stable identity list by marked extension).
+// ErrLeaseCapExceeded reports the per-target wire-lease cap,
+// registered in the stable identity list by marked extension).
 //
 // A distinct identity from the session caps because the operator's remedy
 // differs: a session cap says this user or this server is at its limit, while
@@ -462,7 +462,7 @@ func (r *sessionRegistry) remove(s *session) {
 //
 // Marking comes FIRST and under the same lock as the snapshot, so no session
 // can be admitted onto a connection that is already being torn down — the
-// ordering ADR-0074 §1 requires of conn.delete.
+// ordering the design requires of conn.delete.
 func (r *sessionRegistry) setDraining(connID int64) []*session {
 	r.mu.Lock()
 	r.draining[connID] = true

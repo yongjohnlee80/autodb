@@ -17,7 +17,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Crash-phase proof — ADR-0074 §7 rev 2, the mandatory gate.
+// Crash-phase proof — the mandatory gate.
 //
 // The whole design rests on a claim about a process that DIES: that the log
 // written before the crash is enough for a different process to recover the
@@ -157,7 +157,7 @@ func runCrashChild(phase string) {
 	// The boundary runs through the REAL entry point. The child does not
 	// replay the ordering — it dies INSIDE production's commitBoundary, at a
 	// named instant, with whatever durable state production has actually
-	// produced by then (PR #20 r0 MF4).
+	// produced by then.
 	//
 	// So if production stops writing commit_started ahead of the COMMIT, the
 	// state visible at these instants changes and the parent's assertions
@@ -446,7 +446,7 @@ func TestCrash_P2_KilledBeforeTheBoundary(t *testing.T) {
 
 	// RESTART. This is the half the first version of this cell was missing:
 	// it asserted the opened row stays opened and stopped there, which is a
-	// transaction with no owner and no terminal, forever (PR #20 r0 MF1).
+	// transaction with no owner and no terminal, forever.
 	//
 	// A fresh process settles it by proof rather than by asking anyone: it
 	// never reached commit_started, so it cannot have committed, and the
@@ -474,7 +474,7 @@ func TestCrash_P2_KilledBeforeTheBoundary(t *testing.T) {
 // P1 — killed WHILE the statement was executing.
 //
 // The attempt record is written before the target is asked to run anything
-// (ADR-0074's attempt-before-effect ordering), so a crash mid-statement must
+// (the attempt-before-effect ordering), so a crash mid-statement must
 // still leave evidence that this user ran this script. That ordering is the
 // only reason such evidence exists at all, and this is the cell that proves
 // it survives a real kill rather than a deferred flush.

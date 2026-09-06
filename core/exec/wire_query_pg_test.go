@@ -12,7 +12,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Live cells for the RAW wire producer (golib ADR-0018 Amendment 1, autodb side).
+// Live cells for the RAW wire producer.
 // pgWireSession opens a REAL client transaction on a postgres target, so the
 // starting status is T and every statement runs inside the client's tx unless
 // a cell ends it first. Gated on TEST_PGURL.
@@ -221,7 +221,7 @@ func histRows(t *testing.T, f *fixture, connID int64, scripts ...string) []*meta
 	return out
 }
 
-// Matrix Query row / MF1: explicit BEGIN and COMMIT INSIDE the buffer are mapped
+// Matrix Query row: explicit BEGIN and COMMIT INSIDE the buffer are mapped
 // through the session's owned transitions, never passed raw; the statements
 // between them run as one segment of the exact original bytes inside the
 // client's transaction. `BEGIN; SELECT 1; COMMIT` is one frame, as psql sends it.
@@ -250,7 +250,7 @@ func TestWireQueryRaw_MixedBufferMapsControlsThroughTheOwnedPath(t *testing.T) {
 	}
 }
 
-// Matrix Query row / MF1: PostgreSQL's documented example, verbatim semantics.
+// Matrix Query row: PostgreSQL's documented example, verbatim semantics.
 // `BEGIN; INSERT 1; COMMIT; INSERT 2; SELECT 1/0` — the first INSERT is
 // committed by the explicit COMMIT; the second INSERT and the SELECT form a new
 // implicit block, so the failure rolls back the second INSERT only. The buffer
@@ -294,7 +294,7 @@ func TestWireQueryRaw_MixedBufferFollowsPostgresImplicitBlockRules(t *testing.T)
 	if err != nil || fmt.Sprint(out.Rows[0][0]) != "1" || fmt.Sprint(out.Rows[0][1]) != "1" {
 		t.Fatalf("table = %v err %v; want exactly the first INSERT (1) committed and the second rolled back", out.Rows, err)
 	}
-	// Audit (MF2): the committed INSERT ran inside the explicit transaction
+	// Audit: the committed INSERT ran inside the explicit transaction
 	// (pending_commit → resolved by the projection); the second INSERT ran in the
 	// failing implicit block and is ROLLED BACK; the SELECT carries the target's
 	// error.
@@ -310,7 +310,7 @@ func TestWireQueryRaw_MixedBufferFollowsPostgresImplicitBlockRules(t *testing.T)
 	}
 }
 
-// Matrix Query row / MF1: an error inside the explicit block aborts it; the
+// Matrix Query row: an error inside the explicit block aborts it; the
 // COMMIT that follows in the same buffer is NOT run (PostgreSQL abandons the
 // buffer at the first error), the track is E, and only ROLLBACK recovers.
 func TestWireQueryRaw_MixedBufferStopsAtTheFirstErrorInsideTheExplicitBlock(t *testing.T) {
@@ -335,7 +335,7 @@ func TestWireQueryRaw_MixedBufferStopsAtTheFirstErrorInsideTheExplicitBlock(t *t
 	}
 }
 
-// MF2: OUTSIDE a client transaction a multi-statement buffer is ONE implicit
+// OUTSIDE a client transaction a multi-statement buffer is ONE implicit
 // transaction. When a later statement fails, the target rolls back the earlier
 // ones — and the audit must say so: rolled_back, not ok. The failing statement
 // carries the target's error; statements after it were not executed.
@@ -377,7 +377,7 @@ func TestWireQueryRaw_ImplicitBlockRollbackIsRecordedTruthfully(t *testing.T) {
 	}
 }
 
-// MF2 distinction: INSIDE the client's explicit transaction the same failure is
+// The distinction: INSIDE the client's explicit transaction the same failure is
 // NOT an implicit rollback — the earlier statement stays pending_commit (its
 // fate is the transaction's, resolved by the projection at ROLLBACK), the track
 // goes to E.
@@ -527,7 +527,7 @@ func TestWireQueryRaw_NilEmitRefusedBeforeAnyDispatch(t *testing.T) {
 	_ = auth.ErrDenied
 }
 
-// PR #50 MF3: the audit-recording deadline must start when RECORDING begins,
+// The audit-recording deadline must start when RECORDING begins,
 // not while the statement is executing. A legitimate statement longer than
 // recordTimeout must still get its outcome recorded. This cell takes
 // recordTimeout+1s by construction.
@@ -567,7 +567,7 @@ func emitFailRun(t *testing.T, f *fixture, sid SessionID, userID int64, sql stri
 	return err
 }
 
-// PR #50 MF4: when the emitter fails before the tail is observed, the engine
+// When the emitter fails before the tail is observed, the engine
 // must not assert success for statements whose fate it never saw. Outside an
 // explicit transaction the whole implicit block's fate is unknown (the target
 // may have rolled it back — here it did): every statement is
@@ -619,7 +619,7 @@ func TestWireQueryRaw_EmitterFailureNeverRecordsTheUnobservedTailAsOK(t *testing
 	}
 }
 
-// PR #50 MF5: when the emitter fails, golib still drains the target's answer
+// When the emitter fails, golib still drains the target's answer
 // through ReadyForQuery and returns the AUTHORITATIVE status. That status must
 // be folded into the session's track before the emitter's error is returned:
 // a drained failure inside the client's transaction leaves the backend in E,

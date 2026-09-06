@@ -21,7 +21,7 @@ import (
 // legitimately: a session token resolves through a session row, a PAT through
 // the token record, and neither can express the other's checks. Everything
 // after is the same code — the same UnitPolicy, the same admission, the same
-// executors, the same read-only wrap. That is the seam ADR-0075 Amendment 4
+// executors, the same read-only wrap. That is the seam the design
 // requires and the reason this file is thin: a wire-shaped copy of the
 // execution pipeline is exactly what it forbids.
 
@@ -46,8 +46,8 @@ func (e *Engine) WireExecute(ctx context.Context, id SessionID, userID int64, sq
 
 // wireExecuteClaimed is WireExecute AFTER the session claim: the caller holds
 // s.begin() and owns s.finish(). It exists so WireQuery can keep ONE claim
-// across gate, dispatch, every emit, and the status read (lector PR #48 r0
-// MF1) — a WireQuery built on WireExecute released the claim in
+// across gate, dispatch, every emit, and the status read (found in
+// review) — a WireQuery built on WireExecute released the claim in
 // WireExecute's own defer, before the first emit, and a callback that
 // re-entered the engine ran a second statement where ErrSessionBusy was
 // owed. closeAfterRelease is the caller's flag because the caller's defer is
@@ -108,7 +108,7 @@ func (e *Engine) executeSessionUnit(
 	}
 
 	// Reject oversized input BEFORE classification or control routing, for the
-	// same reason the token path does (engine.go, lector M4 r2 must-fix #2):
+	// same reason the token path does:
 	// the audit record must equal exactly what ran, and an unaudited tail must
 	// never execute. The wire path omitted this, so a statement of any size
 	// reached the classifier here while the identical statement was refused on
@@ -128,7 +128,7 @@ func (e *Engine) executeSessionUnit(
 
 	// Transaction control is a state transition, routed before the execution
 	// pipeline is entered at all — the same routing the token path does, for
-	// the same reason (ADR-0074 §3).
+	// the same reason.
 	if stmt.Class == ClassControl {
 		if wire {
 			return e.wireControl(ctx, s, connRow, stmt, pol, sqlText, ip)
@@ -140,7 +140,7 @@ func (e *Engine) executeSessionUnit(
 	// policy came from rather than by a second lookup. A second read is a
 	// second answer, and a unit that runs as one identity while being
 	// authorized as another is the gap this shares one read to close.
-	if err := e.readerAnalysis(ctx, connRow, pol, stmt); err != nil { // Amendment 6 rule 2 stage
+	if err := e.readerAnalysis(ctx, connRow, pol, stmt); err != nil { // the editors-first rule, stage
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
 	}
 	if err := e.authorizeUnit(stmt, pol); err != nil {

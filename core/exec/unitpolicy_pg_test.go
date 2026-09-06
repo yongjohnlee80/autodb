@@ -10,8 +10,8 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// THE SHARED POLICY, PROVED AGAINST A REAL SERVER (ADR-0075 Amendment 4's
-// F3a; lector's component-evidence ruling).
+// THE SHARED POLICY, PROVED AGAINST A REAL SERVER (the
+// F3a seam; the component-evidence ruling).
 //
 // This is the COMPONENT proof: the policy's semantics, exercised through the
 // session path that exists today. The final merge gate additionally requires
@@ -70,7 +70,7 @@ func TestUnitPolicy_ASmuggledWriteFailsAtTheServer(t *testing.T) {
 	// function existing is a precondition, not part of the subject.
 	if _, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
 		// A CATALOG function that writes — nextval — is the wrap\'s witness now that the
-		// reader analysis stage (Amendment 6 rule 2) refuses user-defined function calls
+		// reader analysis stage refuses user-defined function calls
 		// before dispatch; the sequence stands in for the old smuggling function.
 		`CREATE SEQUENCE %s`, fn), testIP); err != nil {
 		t.Skipf("cannot create the smuggling function on this target: %v", err)
@@ -123,7 +123,7 @@ func TestUnitPolicy_AReaderCannotUpgradeToReadWrite(t *testing.T) {
 	fnPre := fmt.Sprintf("upgrade_pre_%d", time.Now().UnixNano())
 	if _, cerr := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
 		// A CATALOG function that writes — nextval — is the wrap\'s witness now that the
-		// reader analysis stage (Amendment 6 rule 2) refuses user-defined function calls
+		// reader analysis stage refuses user-defined function calls
 		// before dispatch; the sequence stands in for the old smuggling function.
 		`CREATE SEQUENCE %s`, fnPre), testIP); cerr != nil {
 		t.Skipf("cannot create the smuggling function: %v", cerr)
@@ -263,7 +263,7 @@ func TestUnitPolicy_AutocommitIsWrappedForReaders(t *testing.T) {
 	fn := fmt.Sprintf("auto_smuggle_%d", time.Now().UnixNano())
 	if _, err := f.eng.Execute(ctx, f.rootTok, connID, fmt.Sprintf(
 		// A CATALOG function that writes — nextval — is the wrap\'s witness now that the
-		// reader analysis stage (Amendment 6 rule 2) refuses user-defined function calls
+		// reader analysis stage refuses user-defined function calls
 		// before dispatch; the sequence stands in for the old smuggling function.
 		`CREATE SEQUENCE %s`, fn), testIP); err != nil {
 		t.Skipf("cannot create the smuggling function on this target: %v", err)

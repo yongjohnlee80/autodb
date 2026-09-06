@@ -177,7 +177,7 @@ func TestExtPG_ErrorOnAnEarlierStatementMeansNotExecuted(t *testing.T) {
 // did, and the loop is owed an EmitStopped so the audit row and the client's
 // error tell one story.
 //
-// Since lector r0 MF1 this cell carries a second claim: the cut lands MID-STREAM
+// Since review this cell carries a second claim: the cut lands MID-STREAM
 // (on the first DataRow), and the outcome is still `ok` — because the drain
 // keeps reading after the consumer leaves and observes the CommandComplete.
 // Before that fix it read `outcome_unresolvable` here, which was honest only
@@ -346,7 +346,7 @@ func TestExtPG_ExtendedAttemptAndOutcomeCarryTheSessionStamp(t *testing.T) {
 	}
 }
 
-// lector #67 A r0 MF1 — a consumer stop must not report a PRE-TAIL transaction
+// A consumer stop must not report a PRE-TAIL transaction
 // track.
 //
 // EmitStopped.TxStatus promises "the session's transaction track AFTER the
@@ -401,7 +401,7 @@ func TestExtPG_AConsumerStopStillObservesTheTargetsTail(t *testing.T) {
 	}
 }
 
-// lector #67 A r0 MF2 — "not executed" must not collapse into the EMPTY-QUERY arm.
+// "Not executed" must not collapse into the EMPTY-QUERY arm.
 //
 // Arm() matches !Executed first and returns ArmNoStatement, whose front-door
 // wording is "the query was empty, so nothing ran". Told that about a real
@@ -441,7 +441,7 @@ func TestExtPG_AnEarlierErrorPlusAConsumerCutIsNotTheEmptyQuery(t *testing.T) {
 	resync(t, f, sid, userID)
 }
 
-// REGRESSION CONTROL for the Arm() precedence split (lector r0 MF2).
+// REGRESSION CONTROL for the Arm() precedence split.
 //
 // Distinguishing "not executed" from "the empty query" turns on the empty query
 // carrying NO recorded outcome. If a live empty query ever starts carrying one,
@@ -473,14 +473,14 @@ func TestWireQueryRaw_TheEmptyQueryIsStillTheEmptyQueryArm(t *testing.T) {
 // A PAYING FOR B: a consumer cut mid-answer still leaves a CORRECT account.
 //
 // The reservation for an object is finalized when the target's completion is
-// observed. Under the r0 drain, a consumer cut returned at the first emit
+// observed. Under the earlier drain, a consumer cut returned at the first emit
 // failure — so completions arriving after it were never seen, and Sync swept
 // those reservations as unfinalized. The charge went back for objects the target
 // had actually created and the store still holds: an account that under-reports
 // live state, which is the direction that lets a session hold more than its
 // budget admits.
 //
-// Since lector r0 MF1 the drain reads the whole tail, so the completions after
+// Since review the drain reads the whole tail, so the completions after
 // the cut are still observed and still finalize. The cut lands on the FIRST
 // frame (the statement's ParseComplete) so the portal's BindComplete is
 // unambiguously after it.
@@ -512,7 +512,7 @@ func TestExtPG_AMidAnswerCutStillFinalizesLaterCompletions(t *testing.T) {
 		t.Fatalf("the statement is gone after a consumer cut: %v", serr)
 	}
 	// PREMISE: the cut really did land before the portal's completion, or this
-	// cell is asserting something the r0 code would also have satisfied.
+	// cell is asserting something the earlier code would also have satisfied.
 	if !cut {
 		t.Fatal("the emitter was never cut; this cell proves nothing")
 	}
@@ -606,7 +606,7 @@ func TestExtPG_SyncSweepsWhatTheAbortedSegmentWillNeverConfirm(t *testing.T) {
 	}
 }
 
-// lector B r0 MF2 — OWNED CONTROL IS CHARGED, and its synthetic completion
+// OWNED CONTROL IS CHARGED, and its synthetic completion
 // finalizes it.
 //
 // Control never reaches the target: the front door answers ParseComplete and

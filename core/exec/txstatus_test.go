@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// The outcome read API — ADR-0074 Amendment 5.
+// The outcome read API.
 
 // seedTx writes a progression directly, so the read side can be tested
 // against shapes the writers do not produce on demand (a stuck pending, an
@@ -237,7 +237,7 @@ func TestPendingOutcomes_ScopedToTheCaller(t *testing.T) {
 // The user-facing pending list must be selective too, and this asserts the
 // MECHANISM rather than the result.
 //
-// PR #20 r0 SF1 named BOTH the reconciler and this verb; I fixed the
+// Review named BOTH the reconciler and this verb; I fixed the
 // reconciler and left this one scanning the whole log. It is the worse of the
 // two to leave: a user can call it, so an O(all history) scan is reachable on
 // demand rather than once a minute.

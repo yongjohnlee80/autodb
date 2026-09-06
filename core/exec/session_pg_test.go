@@ -334,7 +334,7 @@ func mustSession(t *testing.T, f *fixture, sid SessionID, sql string) {
 	}
 }
 
-// MF5. A statement in a session must stop when the caller that asked for it
+// A statement in a session must stop when the caller that asked for it
 // gives up. Stateless Execute already did; SessionExecute did not, so
 // `SELECT pg_sleep(...)` kept running on the target long after the client had
 // gone — and it was doing so while holding a pinned transaction on what may
@@ -391,11 +391,11 @@ func TestSessionExecute_HandlerCancellationStopsTheStatement(t *testing.T) {
 	}
 }
 
-// MF6, all four ways an authority can end. Revoking permission mid-transaction
+// All four ways an authority can end. Revoking permission mid-transaction
 // denied the caller's NEXT statement and nothing more — so a client that
 // simply stopped talking after BEGIN kept its locks on the target for the full
 // transaction budget, and re-adding the grant let it carry on as though
-// nothing had been revoked. That is the probe lector ran: remove the grant,
+// nothing had been revoked. That is the probe review ran: remove the grant,
 // re-add it, ROLLBACK succeeds, proving the transaction had stayed open.
 //
 // A rollback that fires for a removed grant but not for a disabled user would

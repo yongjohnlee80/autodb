@@ -15,7 +15,7 @@ import (
 // revocation at close, statement-only cancellation, stale audit, race
 // boundaries — none of which is reachable until the listener half exists.
 // Naming that row here would promote it in the coverage gate on the strength of
-// a unit that never touches the wire (lector, PR #41 r0).
+// a unit that never touches the wire.
 //
 // The pair a client receives in BackendKeyData is a CAPABILITY: whoever holds
 // it stops that session's statement without presenting a credential, because
@@ -197,14 +197,14 @@ func TestCancelRegistry_RevocationEndsTheCapability(t *testing.T) {
 	}
 }
 
-// THE REGISTERED PAIR IS THE PAIR GIVEN, OR THE CALLER IS TOLD (PR #44 r0).
+// THE REGISTERED PAIR IS THE PAIR GIVEN, OR THE CALLER IS TOLD.
 //
 // RegisterCancelKey receives the pair the front door has ALREADY composed
 // into a BackendKeyData frame. A silent redraw on collision would record a
 // process id the client was never sent — an unhonourable key handed out on
 // exactly the collision path. The defect was real: the first version
 // redrew locally and returned nil while the wire frame carried the original
-// pid (lector, PR #44 r0 P1).
+// pid.
 //
 // This is the ENGINE cell; the front door's remint-and-retry half is in
 // frontdoor/cancel_test.go. Neither can stand in for the other: this one

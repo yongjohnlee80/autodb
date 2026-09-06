@@ -10,7 +10,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// openWireGUCs is openWire with startup GUCs (Amendment 8).
+// openWireGUCs is openWire with startup GUCs.
 func openWireGUCs(t *testing.T, f *fixture, dsn string, gucs map[string]string) (connID int64, res WireSessionResult, err error) {
 	t.Helper()
 	ctx := context.Background()

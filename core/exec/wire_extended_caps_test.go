@@ -84,7 +84,7 @@ func TestCaps_TheUnnamedObjectsNeverConsumeTheCap(t *testing.T) {
 	}
 }
 
-// A PHANTOM MUST NOT HOLD A SLOT (jarvis's ruling, 2026-09-03).
+// A PHANTOM MUST NOT HOLD A SLOT (ruled 2026-09-03).
 //
 // This is why the sweep destroys the object rather than only releasing its
 // charge. An object queued behind a target error was never created ON THE
@@ -129,12 +129,12 @@ func TestCaps_ASweptPhantomFreesItsNamedSlot(t *testing.T) {
 	}
 }
 
-// Witness for row 4:Bind — its parameter half (§7 :384, §9 :484).
+// Witness for row 4:Bind — its parameter half (matrix §7 :384, §9 :484).
 //
 // 8192 parameters, refused BEFORE the frame is forwarded like every other cap on
 // this path. It is a PROGRAM limit rather than a configured quota — no operator
 // setting raises it — because what it bounds is the array one frame makes the
-// front door pre-allocate, which §1.5 charges as that frame's stage-2 delta.
+// front door pre-allocate, which matrix §1.5 charges as that frame's stage-2 delta.
 func TestCaps_ABindPastTheParameterCapIsRefusedAndAdmitsNothing(t *testing.T) {
 	f, _, sid, userID := extSession(t)
 	ctx := context.Background()

@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/golib/dao"
 )
 
-// Workspace management (ADR-0057 §5/§6): workspaces group connections.
+// Workspace management: workspaces group connections.
 // Writes are admin-gated with the mutation and its audit row in ONE meta
 // transaction (R2), failures surfaced (R6). Reads are token-FILTERED
 // projections (R13): a non-admin sees, inside any workspace, only the
@@ -92,7 +92,7 @@ func (e *Engine) RenameWorkspace(ctx context.Context, token string, wsID int64, 
 
 // DeleteWorkspace removes a workspace (admin). Connection links cascade in
 // the schema; SERVER-side deletion NEVER touches any frontend's local note
-// files (ADR-0057 §5 — orphaned note directories surface as detached).
+// files.
 func (e *Engine) DeleteWorkspace(ctx context.Context, token string, wsID int64, ip string) error {
 	ident, err := e.auth.Authorize(ctx, token, 0, auth.ActionManage)
 	if err != nil {

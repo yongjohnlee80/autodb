@@ -19,8 +19,8 @@ import (
 // DefaultMaxRows is the read-result page size unless overridden.
 const DefaultMaxRows = 500
 
-// Bounds for stored strings and the outcome-record deadline (lector M4
-// should-fixes: bound SQL/audit/error sizes; keep recording alive after
+// Bounds for stored strings and the outcome-record deadline (raised in
+// review: bound SQL/audit/error sizes; keep recording alive after
 // caller cancellation).
 const (
 	// maxAuditSQLBytes bounds the SQL text STORED in an audit or history
@@ -46,7 +46,7 @@ const (
 	DefaultMaxSessionsGlobal  = 256
 	DefaultSessionIdleTimeout = 30 * time.Minute
 
-	// Target-pool defaults (ADR-0074 §1a), mirroring core/config so an
+	// Target-pool defaults, mirroring core/config so an
 	// engine built without options is bounded exactly as a defaulted daemon
 	// is. They are duplicated rather than imported because core/config
 	// depends on nothing here and this package must not depend on it.
@@ -68,7 +68,7 @@ const DefaultMaxStatementBytes = 64 * 1024
 
 // Engine is the execution core: one instance per process over one meta
 // store + auth service. Callers authenticate with session tokens; identity
-// and authority are re-resolved by core/auth on every call (ADR-0054 rev 1).
+// and authority are re-resolved by core/auth on every call.
 type Engine struct {
 	store *meta.Store
 	auth  *auth.Service
@@ -79,7 +79,7 @@ type Engine struct {
 	// happens outside e.mu without two callers racing to publish two pools.
 	opening map[int64]chan struct{}
 	// hookAfterDrainCheck runs inside target's check→effect window. Test-only
-	// (ADR-0074 §1's mandate to inject each competing transition inside that
+	// (the mandate to inject each competing transition inside that
 	// window, rather than run it alongside and hope).
 	hookAfterDrainCheck func()
 	// udfCache is the reader analysis stage's per-connection user-routine set
@@ -125,15 +125,15 @@ type Engine struct {
 	pendingLeaseCap    int
 	pendingResidentCap int64
 
-	// profile is the capability profile admission runs against (ADR-0074
-	// §2). Per-connection and per-grant profile sources arrive with the
+	// profile is the capability profile admission runs against
+	// (per-connection and per-grant profile sources arrive with the
 	// session engine; today every surface runs the one profile.
 	profile Profile
 	// maxStatementBytes is the execution size cap ([exec]
 	// max_statement_bytes).
 	maxStatementBytes int
 
-	// sessions is the ExecSession registry (ADR-0074 §1). It has its own
+	// sessions is the ExecSession registry. It has its own
 	// mutex; see session.go for the published lock order.
 	sessions *sessionRegistry
 	// sessionIdle is how long a session may sit unused before it is reaped.
@@ -149,13 +149,13 @@ type Engine struct {
 	cancels *cancelRegistry
 
 	// reconcile is the outcome reconciler's cross-pass state: per-tx_id
-	// exclusion and retry backoff (ADR-0074 §7).
+	// exclusion and retry backoff.
 	reconcile *reconciler
 	// Background work the ENGINE owns — today the checkout-triggered
 	// reconciliation. Bound to the engine's own lifetime rather than
 	// detached, so Close can stop it and WAIT before closing the pools it
 	// uses; a detached goroutine could otherwise reopen a pool that Close
-	// had just shut (PR #20 r1 SF).
+	// had just shut.
 	bgCtx    context.Context
 	bgCancel context.CancelFunc
 	bgWG     sync.WaitGroup
@@ -163,7 +163,7 @@ type Engine struct {
 	// audit on a teardown path, say. nil discards.
 	onLog func(string)
 
-	// Target-pool bounds (ADR-0074 §1a). Defaults are set in New; a
+	// Target-pool bounds. Defaults are set in New; a
 	// connection row may lower poolMaxConns for itself but never raise it.
 	poolMaxConns        int
 	poolMaxConnIdleTime time.Duration
@@ -174,12 +174,12 @@ type Engine struct {
 type Option func(*Engine)
 
 // WithHistory toggles script-history recording (config [history].enabled —
-// the audit log is always on regardless, ADR-0054 §4).
+// the audit log is always on regardless).
 func WithHistory(enabled bool) Option { return func(e *Engine) { e.history = enabled } }
 
 // WithMaxRows overrides the read page size. A nonpositive value is a
 // construction-time programming error and panics (the golib fail-fast idiom;
-// lector M4 r2 amendment — fail loudly, not silently).
+// raised in review — fail loudly, not silently).
 func WithMaxRows(n int) Option {
 	return func(e *Engine) {
 		if n <= 0 {
@@ -192,7 +192,7 @@ func WithMaxRows(n int) Option {
 // WithNow injects a clock (tests).
 func WithNow(now func() time.Time) Option { return func(e *Engine) { e.now = now } }
 
-// WithProfile sets the engine's capability profile (ADR-0074 §2). The
+// WithProfile sets the engine's capability profile. The
 // default is ProfileV1Compat. An unknown profile is not silently corrected to
 // the default — it is kept, and every statement is refused by it, because a
 // misconfigured surface must fail closed rather than quietly become the
@@ -230,7 +230,7 @@ func WithLeaseCap(n int) Option {
 }
 
 // WithResidentBudget bounds the total memory reserved by open wire sessions
-// (ADR-0075 §4, default 1 GiB).
+// (default 1 GiB).
 //
 // Same deferral as WithLeaseCap, for the same reason.
 func WithResidentBudget(bytes int64) Option {
@@ -279,7 +279,7 @@ func WithDebugTxLimits(debugIdle, ceiling time.Duration) Option {
 }
 
 // WithLogger receives operational problems that have no caller to return to.
-// WithPoolLimits bounds each TARGET pool (ADR-0074 §1a).
+// WithPoolLimits bounds each TARGET pool.
 //
 // maxConns is the install-wide ceiling: a connection row may ask for fewer,
 // never more. idle and lifetime retire pooled connections — idle returns
@@ -289,7 +289,7 @@ func WithDebugTxLimits(debugIdle, ceiling time.Duration) Option {
 //
 // Non-positive values leave the existing bound in place rather than removing
 // it: "unbounded" must never be something a caller reaches by passing zero.
-// DefaultPoolMaxConns is 2 × cores (ADR-0074 §1a). Pinned transaction
+// DefaultPoolMaxConns is 2 × cores. Pinned transaction
 // connections exhaust a pool sized for statement throughput, because a
 // session holding a transaction occupies a physical connection for as long as
 // it stays open.
@@ -365,8 +365,8 @@ func (e *Engine) Close() error {
 	e.bgCancel()
 	e.bgWG.Wait()
 	// Then sessions, for the same reason conn.delete closes them first: a
-	// pool closed under a live session is the undefined behaviour ADR-0074
-	// §1 closes.
+	// pool closed under a live session is the undefined behaviour the design
+	// closes.
 	e.CloseAllSessions(context.Background(), "engine-shutdown")
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -466,8 +466,8 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 
 	// Minimum-grant check BEFORE the connection row is fetched or the
 	// statement classified: an ungranted authenticated user must not learn
-	// whether a connection exists or which engine it runs (lector M4
-	// must-fix #6). Read is the floor for any execution.
+	// whether a connection exists or which engine it runs (found in
+	// review). Read is the floor for any execution.
 	if _, err := e.auth.Authorize(ctx, token, connID, auth.ActionRead); err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
@@ -482,7 +482,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 
 	// Reject oversized scripts BEFORE classification or execution: the
 	// audit/history record must equal exactly what ran — never execute an
-	// unaudited tail (lector M4 r2 must-fix #2).
+	// unaudited tail.
 	if len(sqlText) > e.maxStatementBytes {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, ErrScriptTooLarge)
 	}
@@ -492,7 +492,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
 	// Admission. The classifier said what this IS; the profile says whether
-	// this engine runs it (ADR-0074 §2). It sits after classification and
+	// this engine runs it. It sits after classification and
 	// before authorization deliberately: an ungranted caller is already gone
 	// by here, refused at the read floor above, so a refusal message that
 	// names the verb cannot leak anything to someone who was not allowed to
@@ -502,7 +502,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	}
 	// Full authorization for the statement's actual class. A denial must
 	// NOT discard the caller's identity — the rejection audits under the
-	// real user (lector M4 must-fix #5).
+	// real user.
 	authorized, err := e.auth.Authorize(ctx, token, connID, classToAction(stmt.Class))
 	if err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
@@ -513,7 +513,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, uperr)
 	}
 	ident = authorized
-	if err := e.readerAnalysis(ctx, connRow, unitPol, stmt); err != nil { // Amendment 6 rule 2 stage
+	if err := e.readerAnalysis(ctx, connRow, unitPol, stmt); err != nil { // the editors-first rule, stage
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
 	if err := guardWhere(stmt); err != nil {
@@ -534,7 +534,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 
 	// Durable attempt record BEFORE the target runs: a crash, timeout, or
 	// cancellation mid-statement must still leave evidence that this user
-	// ran this script (lector M4 must-fix #4).
+	// ran this script.
 	attemptID, err := e.recordAttempt(ctx, ident, connRow.ID, ip, sqlText, txID)
 	if err != nil {
 		return nil, err
@@ -561,7 +561,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	switch {
 	case pinned != nil && stmt.Class == ClassRead:
 		// On a pinned transaction the grammar was verified once at BEGIN
-		// (ADR-0074 §3), so the per-statement verify-transaction MySQL needs
+		// so the per-statement verify-transaction MySQL needs
 		// on the pool would be both redundant and wrong — it would open a
 		// nested transaction inside the session's.
 		rowCount, runErr = e.queryOn(ctx, pinned, sqlText, res, onRow)
@@ -646,7 +646,7 @@ func (e *Engine) recordAttemptTagged(ctx context.Context, ident auth.Identity, c
 // error. Inside a transaction that is a claim the engine cannot support: the
 // statement ran, but whether its effect survives is decided later, by the
 // COMMIT, and possibly by a different process after a crash. It is
-// ok-pending-commit until the boundary says otherwise (ADR-0074 §7), and the
+// ok-pending-commit until the boundary says otherwise, and the
 // transaction's terminal is what resolves it — see resolveHistory.
 func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, runErr error, txID string) error {
 	status, errText := StatusOK, ""
@@ -696,8 +696,8 @@ func errSuffix(errText string) string {
 	return ": " + errText
 }
 
-// truncate bounds a stored string, marking any elision (lector M4
-// should-fix: bound SQL/audit/error sizes before M5).
+// truncate bounds a stored string, marking any elision (raised in
+// review: bound SQL/audit/error sizes).
 func truncate(s string, max int) string {
 	if len(s) <= max {
 		return s
@@ -708,7 +708,7 @@ func truncate(s string, max int) string {
 // runQuery executes a read and fills Columns plus either a bounded page
 // (maxRows, More on truncation) or the onRow stream.
 //
-// Per-physical-session grammar guarantees differ by engine (ADR-0055 rev 4):
+// Per-physical-session grammar guarantees differ by engine:
 // postgres verifies every physical connection at establish time via the
 // pgxpool AfterConnect hook (pgAfterConnectVerify), so statements run in
 // plain autocommit — which keeps transaction-prohibited DDL executable;
@@ -769,7 +769,7 @@ func (e *Engine) queryOn(ctx context.Context, q dao.Querier, sqlText string, res
 		}
 		if len(res.Rows) == e.maxRows {
 			// The sentinel row proves truncation but was not delivered, so
-			// it is not counted (lector M4 should-fix: correct row count).
+			// it is not counted.
 			res.More = true
 			break
 		}

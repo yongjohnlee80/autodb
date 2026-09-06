@@ -10,7 +10,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// The auth-path half of ADR-0086: the TOKEN decides the target, and the
+// The auth-path half: the TOKEN decides the target, and the
 // startup `database` field is only asked whether it agrees.
 //
 // Every cell here is written against what it must OBSERVE rather than what it
@@ -29,7 +29,7 @@ func setTargetDB(t *testing.T, f *fixture, connID int64, name string) {
 	}
 }
 
-// ADR-0086 cell 6. A pre-v13 token, or a v13 tombstone somebody un-revoked by
+// A pre-v13 token, or a v13 tombstone somebody un-revoked by
 // hand, never authenticates.
 //
 // The DECOYS are the point. Without them the cell passes for an implementation
@@ -63,7 +63,7 @@ func TestWireBinding_TheUnscopedTombstoneNeverAuthenticates(t *testing.T) {
 	}
 }
 
-// ADR-0086 cell 15. What clients actually put in the `database` field, driven
+// What clients actually put in the `database` field, driven
 // row by row rather than asserted in prose.
 func TestWireBinding_TheDatabaseFieldIsAConsistencyCheck(t *testing.T) {
 	t.Parallel()
@@ -109,7 +109,7 @@ func TestWireBinding_TheDatabaseFieldIsAConsistencyCheck(t *testing.T) {
 	}
 }
 
-// ADR-0086 cell 1. The ambiguity this ADR removes CANNOT ARISE — and the cell
+// The ambiguity the design removes CANNOT ARISE — and the cell
 // observes WHICH connection each session actually reached.
 //
 // Without the routed-identity assertion this passes for an implementation
@@ -163,7 +163,7 @@ func TestWireBinding_TwoConnectionsNamedTheSameDatabaseCannotBeConfused(t *testi
 	}
 }
 
-// ADR-0086 cell 2 / §7. The grant is consulted BEFORE the `database` field, so
+// The grant is consulted BEFORE the `database` field, so
 // an ungranted caller never produces a mismatch row — a reader of the trail
 // would take that row as evidence the connection exists.
 func TestWireBinding_AnUngrantedCallerAuditsNoGrantNotMismatch(t *testing.T) {

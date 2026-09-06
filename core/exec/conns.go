@@ -28,7 +28,7 @@ import (
 // sqlite branches could be stripped of their bounds and every package stayed
 // green. A driver call site that no test crosses is a call site that can lose
 // an argument silently, and unbounded database/sql pools against a live
-// production target is exactly the failure ADR-0074 §1a exists to prevent.
+// production target is exactly the failure the pool bound exists to prevent.
 var (
 	openPostgres = postgres.OpenNamed
 	openMySQL    = mysql.OpenNamed
@@ -40,7 +40,7 @@ var (
 // login), open the engine's driver, and probe with SELECT 1.
 func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection) (dao.DataConn, error) {
 	// A connection being deleted must not have its pool handed out or
-	// RECREATED (ADR-0074 §1's ordering for conn.delete, applied at the one
+	// RECREATED (the documented ordering for conn.delete, applied at the one
 	// place a pool is actually obtained).
 	//
 	// The check and the pool decision have to be ONE step. They were two:
@@ -113,7 +113,7 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 		e.mu.Unlock()
 		// A successful checkout is evidence this target is answering, which
 		// is exactly what a pending outcome for it has been waiting for
-		// (ADR-0074 Amendment 4 A1, the checkout trigger). Throttled and
+		// (the checkout trigger). Throttled and
 		// backgrounded inside.
 		e.checkoutTrigger(connID)
 		return conn, nil
@@ -137,7 +137,7 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 		// acquisition, so neither a fresh incompatible connection nor a
 		// session mutated after pooling (set_config through a verb-level
 		// read) can serve a statement. Autocommit is preserved, keeping
-		// transaction-prohibited DDL executable (ADR-0055 rev 5).
+		// transaction-prohibited DDL executable.
 		conn, err = openPostgres(ctx, name, string(dsn),
 			pgPrepareConnVerify(), e.pgPoolLimits(row))
 	case engine.MySQL:
@@ -154,7 +154,7 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	// one session's parsing mode for a fast, clear failure at first use.
 	// This is a BELT check only: the authoritative grammar verification runs
 	// per physical session at execution time (verifyGrammarQ on the pinned
-	// TxConn in the engine's run path — lector M4 r3).
+	// TxConn in the engine's run path — raised in review).
 	if verr := ValidateDSN(row.Engine, string(dsn)); verr != nil {
 		_ = conn.Close()
 		return nil, verr
@@ -166,7 +166,7 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	return conn, nil
 }
 
-// pgPoolLimits applies the target-pool bounds (ADR-0074 §1a).
+// pgPoolLimits applies the target-pool bounds.
 //
 // A pinned transaction holds a physical connection for as long as its session
 // keeps it open, so an unbounded pool lets a few callers with open
@@ -193,7 +193,7 @@ func (e *Engine) poolLimitsFor(row *meta.Connection) (int, time.Duration, time.D
 // idle connections on its own; database/sql keeps idle physical connections
 // to the target indefinitely and has no default cap on open ones at all, so
 // mysql and sqlite targets were the unbounded case while only postgres was
-// wired. ADR-0074 §1a says all three drivers, and it says so for this reason.
+// wired. The design says all three drivers, and it says so for this reason.
 func (e *Engine) sqlPoolLimits(row *meta.Connection) func(*sql.DB) {
 	max, idle, lifetime := e.poolLimitsFor(row)
 	return func(db *sql.DB) {
@@ -267,7 +267,7 @@ func (e *Engine) beginDraining(connID int64) ([]*session, dao.DataConn) {
 }
 
 // CreateConnection stores a managed connection with its DSN encrypted at
-// rest, bound to the new row's id (ADR-0054 rev 1 must-fix #5): the row is
+// rest, bound to the new row's id: the row is
 // inserted with an empty secret, the id seals the AAD, and the ciphertext
 // lands in the same transaction as the creator's auto-grant and the audit
 // rows. Global editors and admins may create (Objective 14).
@@ -291,7 +291,7 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 		return 0, auth.ErrLocked
 	}
 	// The target database NAME, derived here because this is where the DSN is
-	// in hand and parseable (ADR-0086 §3). Stored in plaintext beside the
+	// in hand and parseable. Stored in plaintext beside the
 	// sealed DSN: the name is not a secret, and holding it as a column is what
 	// lets the front door cross-check a client's `database` field with an
 	// indexed read instead of decrypting every candidate DSN on the auth path.
@@ -325,8 +325,8 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 			return terr
 		}
 		// Ownership grant: token-proven actor, creator relationship verified
-		// against the inserted row, role capped at editor (lector M3 r2
-		// must-fix #1 + the auto-grant policy ruling).
+		// against the inserted row, role capped at editor (found in
+		// review, plus the auto-grant policy ruling).
 		creator, terr := e.auth.GrantCreatorTx(tx, token, id)
 		if terr != nil {
 			return fmt.Errorf("exec: granting creator ownership: %w", terr)
@@ -374,7 +374,7 @@ func (e *Engine) ListConnections(ctx context.Context, token string) ([]*meta.Con
 	return rows, nil
 }
 
-// SetConnectionProfile changes a connection's capability profile (ADR-0086 §9).
+// SetConnectionProfile changes a connection's capability profile.
 //
 // It is its OWN method with its OWN audit action rather than a field inside a
 // generic update, because switching a connection to the session profile is a
@@ -495,7 +495,7 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 	if err != nil {
 		return err
 	}
-	// Order matters and is the ADR-0074 §1 sequence: mark the connection
+	// Order matters and is the documented sequence: mark the connection
 	// DRAINING and close its sessions FIRST, then drop the pool. Closing the
 	// pool first would pull it out from under a session that still believed
 	// it could run, and marking after closing would let a session be opened
@@ -526,7 +526,7 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 
 // TestConnection authorizes read access and probes the target with SELECT 1.
 // Authorization precedes the row fetch so an ungranted caller learns nothing
-// about the connection's existence (lector M4 must-fix #6).
+// about the connection's existence.
 func (e *Engine) TestConnection(ctx context.Context, token string, connID int64, ip string) error {
 	ident, err := e.auth.Authorize(ctx, token, connID, auth.ActionRead)
 	if err != nil {
@@ -542,7 +542,7 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64,
 	conn, err := e.target(ctx, connID, row)
 	if err != nil {
 		// Connection failures are security-relevant signal (credential
-		// rotation, tampering) — audit them (lector M4 should-fix).
+		// rotation, tampering) — audit them.
 		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_failed",
 			fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
 			return aerr
@@ -558,7 +558,7 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64,
 		return fmt.Errorf("exec: probe failed: %w", err)
 	}
 	if cerr := rows.Close(); cerr != nil {
-		// A close failure is a probe failure — audit it like one (lector
+		// A close failure is a probe failure — audit it like one (found
 		// M4 r3 amendment: no unaudited exit path from TestConnection).
 		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_failed",
 			fmt.Sprintf("conn %d close: %v", connID, cerr)); aerr != nil {
@@ -567,6 +567,6 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64,
 		return cerr
 	}
 	// A successful test is security-relevant too (who verified reachability,
-	// from where) — audit it (lector M4 r2 amendment).
+	// from where) — audit it.
 	return e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_ok", fmt.Sprintf("conn %d", connID))
 }

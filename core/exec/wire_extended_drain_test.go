@@ -166,7 +166,7 @@ func (c *hostileConn) Send(context.Context, golibpg.ExtendedOp) error {
 // The hostile connection is the load-bearing half: an assertion on the three
 // frames alone would pass just as well for an implementation that relayed BEGIN
 // to the server and got the same tag back — and that implementation is the one
-// ADR-0018 r2 MF5 forbids, because the transaction it opens has no owner.
+// review forbids, because the transaction it opens has no owner.
 func TestExtDrain_OwnedControlIsAnsweredLocallyAndInOrder(t *testing.T) {
 	o := newExtObjects()
 	o.queueSynth(WireMessage{Kind: "ParseComplete"})

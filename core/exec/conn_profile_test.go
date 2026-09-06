@@ -10,7 +10,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// SetConnectionProfile — the opt-in surface that did not exist (ADR-0086 §9).
+// SetConnectionProfile — the opt-in surface that did not exist.
 // Before this, exposing a connection to the front door meant hand-editing
 // SQLite; the gate shipped and worked while the switch had no home.
 
@@ -125,7 +125,7 @@ func TestSetConnectionProfile_RecordsTheTargetDatabaseName(t *testing.T) {
 	}
 }
 
-// ADR-0086 cell 17. A DOWNGRADE closes the connection's open wire sessions.
+// A DOWNGRADE closes the connection's open wire sessions.
 //
 // The reachability gate runs at OPEN only, but per-statement admission reads
 // the profile LIVE — so without this the downgrade HALF-APPLIES: admission

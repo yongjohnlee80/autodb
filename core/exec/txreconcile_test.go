@@ -10,7 +10,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Recovery reconciliation — ADR-0074 §7 rev 2.
+// Recovery reconciliation.
 //
 // The reconciler's one rule is that it may only append a terminal it has
 // PROVEN. Most of these tests are therefore about what it must NOT do: not
@@ -59,7 +59,7 @@ func stateOf(t *testing.T, f *fixture, txID string) TxStatus {
 // The most important negative in the file. Terminating here is how a
 // committed transaction gets permanently recorded as rolled back: the engine
 // would be inferring an outcome from its own inability to ask, which is
-// exactly the fabrication §7's invariant forbids.
+// exactly the fabrication the invariant forbids.
 func TestReconcile_AnUnreachableTargetDoesNotResolveAnything(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -88,7 +88,7 @@ func TestReconcile_AnUnreachableTargetDoesNotResolveAnything(t *testing.T) {
 // A dialect with no oracle terminates rather than queueing forever.
 //
 // MySQL and sqlite have no txid_status, so an indeterminate commit there can
-// never be resolved by anyone. Amendment 4 MF2 makes that terminal by
+// never be resolved by anyone. The design makes that terminal by
 // OUTCOME: leaving it pending would be an unbounded queue of entries that no
 // future pass could ever settle.
 func TestReconcile_NoOracleDialectTerminatesUnresolvable(t *testing.T) {
@@ -159,7 +159,7 @@ func TestReconcile_BacksOffAfterAFailedAttempt(t *testing.T) {
 }
 
 // Reconciling twice resolves nothing the second time, and does not disturb
-// the terminal the first pass wrote. Restart idempotence is the §7 gate.
+// the terminal the first pass wrote. Restart idempotence is the gate.
 func TestReconcile_IsIdempotentAcrossRuns(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -196,7 +196,7 @@ func TestReconcile_IsIdempotentAcrossRuns(t *testing.T) {
 // PostgreSQL, and its terminal row is then deleted — which is exactly the
 // state a crash between tx.Commit() and the outcome write leaves behind. The
 // xid is real, the transaction really committed, and txid_status really says
-// so. This is the §7 gate: "most crash-window unknowns are thereby
+// so. This is the gate: "most crash-window unknowns are thereby
 // resolvable".
 func TestReconcile_ResolvesARealCrashWindowFromTheTarget(t *testing.T) {
 	f, connID, sid, table := pgSession(t)

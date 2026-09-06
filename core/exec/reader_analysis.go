@@ -10,7 +10,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Reader analysis — ADR-0075 Amendment 6, rule 2 (Johno, 2026-09-03):
+// Reader analysis — rule 2 (Johno, 2026-09-03):
 // "for read only sessions, we should have a pattern of middleware of not
 // allowing complicated scripts such plPgsql or functions"; and: "it's okay to
 // wrap reader's transaction as read only transaction to cover the most of the

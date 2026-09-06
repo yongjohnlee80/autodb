@@ -20,7 +20,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// MF4, ADR-0074 §1a. Target pools opened with no bounds at all: no MaxConns,
+// Target pools opened with no bounds at all: no MaxConns,
 // no retirement. A pinned transaction holds a physical connection for as long
 // as its session stays open, so a handful of callers with open transactions
 // can consume a production database's entire connection budget — and the
@@ -116,18 +116,18 @@ func TestPoolLimits_DefaultsAreBounded(t *testing.T) {
 
 	// And the default is the ADR's, not a number this package invented.
 	if want := 2 * runtime.NumCPU(); DefaultPoolMaxConns() != want {
-		t.Errorf("DefaultPoolMaxConns() = %d, want 2 × cores = %d (ADR-0074 §1a)",
+		t.Errorf("DefaultPoolMaxConns() = %d, want 2 × cores = %d",
 			DefaultPoolMaxConns(), want)
 	}
 	if DefaultPoolMaxConnIdleTime != 10*time.Minute || DefaultPoolMaxConnLifetime != 60*time.Minute {
-		t.Errorf("pool lifecycle defaults are idle %s / lifetime %s, want ADR-0074 §1a's 10m / 60m",
+		t.Errorf("pool lifecycle defaults are idle %s / lifetime %s, want 10m / 60m",
 			DefaultPoolMaxConnIdleTime, DefaultPoolMaxConnLifetime)
 	}
 }
 
-// MF3, the coverage half. The cells above call the option builders directly,
+// The coverage half. The cells above call the option builders directly,
 // which proves the builders work and nothing else: on an exact-head copy
-// lector removed BOTH e.sqlPoolLimits arguments from the mysql and sqlite
+// review removed BOTH e.sqlPoolLimits arguments from the mysql and sqlite
 // branches of openTarget and the entire suite stayed green. The bounds could
 // silently disappear from two of the three drivers.
 //

@@ -34,7 +34,7 @@ func TestCorpusShapes(t *testing.T) {
 			{"SELECT comment FROM notes", "SELECT", ClassRead},
 			// Position must not matter. Reading the first word of ANY paren
 			// as a verb left the bug alive wherever the offending column came
-			// first (lector r0 MF2).
+			// first.
 			{"SELECT (comment)", "SELECT", ClassRead},
 			{"SELECT (comment) FROM notes", "SELECT", ClassRead},
 			{"INSERT INTO notes (comment, id) VALUES ('x', 1)", "INSERT", ClassWrite},
@@ -141,8 +141,8 @@ func TestCorpusShapes(t *testing.T) {
 	t.Run("verbs the corpus contains that the survey reported absent", func(t *testing.T) {
 		t.Parallel()
 
-		// The design doc's §7 sampling reported zero DO blocks. The full
-		// replay finds 22, so the CALL/DO capability of ADR-0074 §6a is not
+		// The design doc's sampling reported zero DO blocks. The full
+		// replay finds 22, so the CALL/DO capability is not
 		// hypothetical for this workload — it is deferred over real usage.
 		st, err := Classify("DO $$ BEGIN PERFORM 1; END $$", false)
 		if err != nil {

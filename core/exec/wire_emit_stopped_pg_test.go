@@ -28,7 +28,7 @@ func cuttingEmit(kind string) func(WireMessage) error {
 
 func passEmit(WireMessage) error { return nil }
 
-// PR #52 MF16 seam: when the consumer stops the output after dispatch, WireQuery
+// The stopped-emit seam: when the consumer stops the output after dispatch, WireQuery
 // returns an EmitStopped carrying the outcome the engine RECORDED for the cut
 // statement, the transaction track, the observed target error and the executed
 // flag — errors.As-able, and errors.Is-transparent to the consumer's own cause.
@@ -152,8 +152,8 @@ func TestWireQuery_EmitStopped(t *testing.T) {
 	_ = pgconn.PgError{}
 }
 
-// The remaining emit-stop sites, each discriminated by its own cell (lector
-// #60 r0 MF1 + SF1): the EMPTY query (no statement to index — this panicked),
+// The remaining emit-stop sites, each discriminated by its own cell (found in
+// review): the EMPTY query (no statement to index — this panicked),
 // the owned-control target error (wireTargetError), and the decoded producer
 // (a non-PostgreSQL target, here sqlite).
 func TestWireQuery_EmitStopped_OtherSites(t *testing.T) {

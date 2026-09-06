@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// §4a's object-release rules, one cell per row of the table.
+// matrix §4a's object-release rules, one cell per row of the table.
 //
-// These are unit cells on purpose: every rule in §4a is a statement about the
+// These are unit cells on purpose: every rule in matrix §4a is a statement about the
 // STORE's bookkeeping, and a database cannot observe whether autodb's own
 // namespace agrees with the backend's. The relay cells prove the frames; these
 // prove what the frames are allowed to name.
@@ -48,7 +48,7 @@ func TestExtObjects_CloseStatementCascadesToItsPortals(t *testing.T) {
 	}
 	for _, name := range []string{"p1", "p2"} {
 		if _, err := o.portal(name); !errors.Is(err, ErrUnknownPortal) {
-			t.Errorf("portal %q survived Close S s1 (err = %v); §4a cascades", name, err)
+			t.Errorf("portal %q survived Close S s1 (err = %v); matrix §4a cascades", name, err)
 		}
 	}
 	if _, err := o.portal("keep"); err != nil {
@@ -179,7 +179,7 @@ func TestExtObjects_TransactionEndDropsEveryPortalAndKeepsStatements(t *testing.
 	o.dropAllPortals()
 
 	if len(o.portals) != 0 {
-		t.Errorf("%d portals survived the transaction; §4a says none do", len(o.portals))
+		t.Errorf("%d portals survived the transaction; matrix §4a says none do", len(o.portals))
 	}
 	for _, name := range []string{"s1", ""} {
 		if _, err := o.statement(name); err != nil {

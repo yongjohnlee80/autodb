@@ -6,7 +6,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Capability profiles (ADR-0074 §2). The classifier is a pure lexer: it says
+// Capability profiles. The classifier is a pure lexer: it says
 // what a statement IS. A profile says what the engine will RUN. Separating
 // them is the point of engine v2 — the old design answered both questions in
 // the tokenizer, so "is this a BEGIN?" and "may this caller open a
@@ -28,11 +28,11 @@ const (
 	// the existing test suite is what pins it.
 	ProfileV1Compat = Profile(meta.ProfileV1Compat)
 
-	// ProfileSession is the session-capable profile (ADR-0074 §2). Today it
+	// ProfileSession is the session-capable profile. Today it
 	// differs from v1compat in exactly one respect: it admits a
 	// data-modifying CTE whose mutations are guarded, because the guard can
-	// now see inside them (§6). Control verbs become engine actions when the
-	// session engine lands (§3); until then it refuses them, and says why.
+	// now see inside them. Control verbs become engine actions when the
+	// session engine lands; until then it refuses them, and says why.
 	ProfileSession = Profile(meta.ProfileSession)
 )
 
@@ -75,7 +75,7 @@ func (p Profile) admit(st Statement, onSession bool) error {
 		}
 		// The blanket refusal of data-modifying CTEs stays on this profile,
 		// message included, even for the ones the guard could now clear
-		// (ADR-0074 Amendment 3). The guard is genuinely fixed — see
+		// The guard is genuinely fixed — see
 		// guardWhere — but a statement a legacy surface has always refused
 		// must not start executing a WRITE because a dependency was
 		// upgraded. That surprise is the entire reason profiles exist.
@@ -88,7 +88,7 @@ func (p Profile) admit(st Statement, onSession bool) error {
 
 	case ProfileSession:
 		if st.Class == ClassControl {
-			// Transaction control is an engine action (ADR-0074 §3):
+			// Transaction control is an engine action:
 			// admitted on a SESSION and performed as a state transition,
 			// never forwarded as text. Off a session there is nothing to
 			// transition, so it would be forwarded — which is exactly what
@@ -164,8 +164,8 @@ var pendingControlVerbs = map[string]bool{
 	"SAVEPOINT": true, "RELEASE": true,
 }
 
-// profileFor resolves the capability profile for one connection (ADR-0074
-// §2): the connection's own column, falling back to the engine's install-wide
+// profileFor resolves the capability profile for one connection:
+// the connection's own column, falling back to the engine's install-wide
 // default when the row does not name one.
 //
 // An UNRECOGNIZED profile is not silently corrected to the default. It is
@@ -183,7 +183,7 @@ func (e *Engine) profileFor(row *meta.Connection) Profile {
 }
 
 // guardWhere applies the WHERE guard to every mutation in a statement, at
-// every depth (ADR-0074 §6).
+// every depth.
 //
 // The guard's rule is one sentence — a mutation that can reach every row must
 // say which rows it means — and the v1 implementation only ever applied it at

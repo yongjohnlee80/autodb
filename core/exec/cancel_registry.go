@@ -16,7 +16,7 @@ import (
 // routes CancelRequests here.
 func (e *Engine) CancelCompareCount() int64 { return e.cancels.compares.Load() }
 
-// THE CANCEL REGISTRY (protocol matrix row 2.3; ADR-0075 Amendment 4's F3a).
+// THE CANCEL REGISTRY.
 //
 // PostgreSQL's cancel is not a message on the session. It arrives on a SECOND,
 // plaintext connection carrying a process id and a secret the server handed
@@ -134,14 +134,14 @@ func (e *Engine) RevokeCancelKey(id SessionID) {
 // call is already held by a DIFFERENT session. Typed and sentinel-shaped so
 // the front door can remint and retry: a silent redraw here would register a
 // process id the client was never sent, handing it a key the server cannot
-// honour on exactly the collision path (PR #44 r0, lector's P1).
+// honour on exactly the collision path.
 var ErrCancelKeyCollision = errors.New("exec: cancel key process id already registered")
 
 // RegisterCancelKey records an externally minted pair against a session —
 // the front door's spelling of issuance, for the key it sends in its own
 // BackendKeyData.
 //
-// The front door mints from the same CSPRNG (row 2.9, MF7) rather than
+// The front door mints from the same CSPRNG rather than
 // calling IssueCancelKey, because the pair must be in the CLIENT'S frame the
 // moment the handshake composes it and the engine half must not own the wire.
 //

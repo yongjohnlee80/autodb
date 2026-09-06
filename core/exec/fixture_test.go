@@ -1,6 +1,6 @@
 package exec
 
-// Entry-point fixture for engine cells — code-review §11 ("the wiring is
+// Entry-point fixture for engine cells — the wiring is
 // the claim"): a guard, a limit, or an audit write that must hold on the
 // execution path is proven THROUGH Engine.Execute — token + connection +
 // statement in, result/error/audit rows out — not by a cell on the guard

@@ -9,7 +9,7 @@ import (
 )
 
 // Transaction-control statements are STATE TRANSITIONS, not SQL to forward
-// (ADR-0074 §3): the engine decides what a BEGIN means and calls the driver
+// The engine decides what a BEGIN means and calls the driver
 // with an options value, and the user's control-verb string never reaches the
 // wire. That promise is only honest if the options are actually read. A
 // `BEGIN READ ONLY ISOLATION LEVEL SERIALIZABLE` that becomes a bare

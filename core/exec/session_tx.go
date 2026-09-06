@@ -16,7 +16,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Transaction verbs are STATE TRANSITIONS, never passthrough (ADR-0074 §3).
+// Transaction verbs are STATE TRANSITIONS, never passthrough.
 //
 // A BEGIN does not reach the wire as text. It is parsed into options, mapped
 // onto a dao call, and recorded — which is the only way the engine can know a
@@ -27,7 +27,7 @@ import (
 // Transaction-layer errors.
 var (
 	// ErrTxAlreadyOpen reports a BEGIN on a session that already has one.
-	// One transaction per session (ADR-0074 Amendment 2): the session is the
+	// One transaction per session: the session is the
 	// unit that owns a pinned connection, so a second would either need a
 	// second connection or silently join the first, and both are worse than
 	// a refusal that says which is which.
@@ -50,7 +50,7 @@ var (
 	ErrTxAuthorityChanged = errors.New("exec: transaction authority changed; the writable transaction was rolled back")
 
 	// ErrTxChainUnsupported reports COMMIT/ROLLBACK AND CHAIN. Parsed, and
-	// refused BY NAME — the ADR §8 rule is that a clause is mapped or
+	// refused BY NAME — the rule is that a clause is mapped or
 	// refused, never quietly dropped.
 	ErrTxChainUnsupported = errors.New("exec: AND CHAIN is not supported")
 )
@@ -171,7 +171,7 @@ func (e *Engine) beginTx(
 	}
 
 	// WRITE-AHEAD: the opened transition is durable BEFORE the target is told
-	// to begin anything (ultron-prime, R4/R5 seam review).
+	// to begin anything (raised in the R4/R5 seam review).
 	//
 	// The ordering is the whole basis of the read API's ErrNoSuchTx. If the
 	// target BEGIN could land first, a crash in that window would leave a
@@ -206,7 +206,7 @@ func (e *Engine) beginTx(
 
 	// The engine's own deadline is resolved first, then the server-side belt
 	// is armed BEHIND it, so the engine always fires first and the rollback
-	// lands on the path that can audit it (ADR-0074 §1, timeout ordering).
+	// lands on the path that can audit it.
 	limits := e.txLimits.forConnection(connectionIsDebug(connRow), e.debugIdle, e.maxTxCeiling)
 	if berr := armServerBelt(s.ctx, tx, connRow.Engine, limits); berr != nil {
 		// The belt is a belt. Losing it is worth recording, but the engine's
@@ -341,8 +341,7 @@ const (
 // stop a function between two of its own statements from another program.
 // Without it the crash suite could only REPLAY the ordering it believes
 // production uses — which proves the replay, not the production seam, and
-// stayed green when lector moved the production append past the COMMIT (PR
-// #20 r0 MF4).
+// stayed green when review moved the production append past the COMMIT.
 //
 // The points fire from inside the PRIMITIVES — appendTxOutcome and finalize —
 // rather than from hand-placed lines in commitBoundary. That distinction is
@@ -405,7 +404,7 @@ func (e *Engine) commitBoundary(
 }
 
 // finalize runs the commit or rollback and classifies the outcome for the
-// audit trail, mapping golib's sentinels onto the states ADR-0074 §7 names.
+// audit trail, mapping golib's sentinels onto the states the design names.
 // FinalizeOutcome is what the commit-or-rollback attempt OBSERVED at the
 // transaction boundary.
 //
@@ -488,7 +487,7 @@ func (e *Engine) finalize(ctx context.Context, s *session, tx dao.ContextTxConn,
 	//
 	// Deciding whether it is definite needs the error itself, and that
 	// decision belongs to the outcome writer that owns the state vocabulary,
-	// not to this function (ultron-prime, R4/R5 seam, A5 plumbing). The error
+	// not to this function (the R4/R5 seam). The error
 	// is already returned alongside the word, so it crosses the seam as data
 	// and txStateFor does the split.
 	return FinalizeCommitFailed, err

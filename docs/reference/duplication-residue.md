@@ -189,70 +189,85 @@ path guessed at rather than opened. The check that found them was written to
 catch two; it found four.
 
 
+## Two lessons about instruments, paid for twice each
+
+**A mechanical rewrite must not apply and write in one step.** Rung two ran a
+blanket regex over `core/config` and mangled 153 comment lines; it was reverted
+whole and redone as 25-by-rule and 42-by-hand. Rung eight ran a multi-pattern
+pass over `frontdoor` prose that produced `(review's objection, agreed by
+review)`, a garbled `ADR-0087 the amendment A1.3`, a real KB path rewritten to
+`agents/review/incoming/…`, a numbered list's indentation collapsed, and a
+dangling pronoun — six rungs later, and two rungs after the loop-not-end-of-run
+lesson was written into a commit message by the same hand that then repeated it.
+
+The pair is the point. **The prevention is not a habit, it is a tool that
+cannot apply and write in one invocation.** A correction that lives in a commit
+message does not reach the reflex; only the tool's own shape does. Every rule
+pass after rung two that printed its proposals and wrote only on a second,
+separate decision caught its own bad output — including the two beheaded lines
+in rung five and the em-dash class in rung six, neither of which ever reached a
+file.
+
+**Wrongness has a direction, and the direction decides the bar.** The rule
+"never add a guard without a real positive in hand" governs instruments that
+can be wrong in the UNSAFE direction — a detector that misses, a cell that
+passes while observing nothing. Those are trusted before they have been seen to
+fail, which is the difference between an instrument and an incantation.
+
+An instrument wrong in the SAFE direction is a different animal and earns its
+place on cost alone. The rule pass's beheaded-output refusal has been wrong
+twice — it did not know about em dashes, and it refuses a continuation line that
+legitimately begins with one — and both times the cost was a line sent to the
+hand pile that did not need to go there. It has never caused a bad write. That
+is why it stays open-ended rather than being enumerated: an incomplete refusal
+list in the loop costs one hand-pile line; the same incompleteness at the end
+costs a shipped defect.
+
+**One class was deliberately NOT guarded**, and the reason is the first rule
+applied to itself. A removed citation can carry the sentence's terminal period
+("…rather than inferred (r5 MF16). A failure arriving…" leaves the line before
+ending in nothing), and the bare-period cell structurally cannot see it — that
+cell reads what a line STARTS with. Two instances were found by scanning for a
+comment line ending unpunctuated before a capital, and both were repaired. The
+scan is a repair technique, not a cell: it has real false positives on ordinary
+mid-sentence wraps, and a refusal with known false positives trains people to
+ignore it. If a third instance arrives, the shape to build is the anchored
+variant — period-loss only in lines whose diff removed a citation — which has
+no prose false positives at all.
+
 ---
 
 ## Still to survey
 
-- **Comment coordinates** (task item 12) — a ratchet, three rungs landed:
-  `webserver`, `core/config` and `cmd/autodb` are certified clean and guarded.
-  Re-measured at this phase's head, what remains is `frontdoor` 442,
-  `core/exec` 423, `tui` 110, `core/auth` 110, `core/meta` 96, `rpc` 49,
-  `internal` 4, `core/engine` 1. The earlier figure of 698 counted a narrower
-  set of arms and predated the rungs; it is replaced rather than adjusted.
-  Not duplication, but the same class of problem: a claim whose authority the
-  reader cannot open.
-  RUNG FOUR certified `rpc` and `core/engine`. It did NOT certify
-  `internal/commentguard`, and the reason is worth keeping: that package is
-  the guard itself plus a doc file, and every pattern arm appears in its test
-  file as a FIXTURE or as prose describing what the arm catches — a mention,
-  not a citation. A detector that may not name what it detects cannot be
-  written down. Exempting its own file was tried and abandoned: with that file
-  skipped the walk sees 8 comments and 0 string literals, and the cells'
-  vacuity floors refused the run — correctly, because certifying what is left
-  would assert nothing. The exemption machinery was removed rather than left
-  dormant, per the fourth part above.
-  EACH RUNG IS THE GUARD'S OWN REVIEW, and that is the frame to keep. An
-  instrument's test corpus is written from the instrument's current model of
-  the defect, so it can only confirm that model; every package not yet tailored
-  to the guard is an adversarial input to the model itself. Two of the cells'
-  acceptance bugs were found exactly this way — the ellipsis and then the
-  relative path, both against the bare-period cell, both from real code rather
-  than an invented fixture. The remaining rungs are conversion work AND the
-  cells' live review.
-  RUNG EIGHT NARROWED A CELL INSTEAD OF WIDENING ONE, and it is the first time
-  the ratchet gave ground. 268 of frontdoor's coordinate sites are `§` anchors
-  into `docs/front-door/protocol-matrix.md` — a file IN this repository, which
-  the conformance cells READ FROM DISK and assert against. The rule is
-  accessibility; a reader can open the matrix. The bare anchor's defect was
-  never that it points somewhere private but that it does not say WHICH
-  document, so the fix is to QUALIFY, not to delete: `§3.1` becomes
-  `matrix §3.1`, and the cell admits an anchor whose COMMENT GROUP names the
-  document. Group-scoped rather than file-scoped, deliberately — a file-level
-  pointer would license a later comment in that file to cite §4 of a KB
-  document under the same admission. The admission verifies the named path
-  exists, so it cannot outlive the document.
-  ONE MORE DOCUMENT CLASS came with it: a group naming an RFC or a URL. One
-  real case (`RFC 5280 §4.2.1.10` in certgen), and a public standard is more
-  accessible than anything in this repository.
-  THE ADMISSION IS GROUP-WIDE, stated plainly: a bare anchor sharing a comment
-  group with a qualified one is admitted. That is the chosen scope, narrower
-  than the file and wider than the line.
-  A FOURTH SURFACE ARRIVED WITH RUNG SEVEN: FILE NAMES. The tui rung ended
-  with one comment hit left, inside a file called `lector_item5_r2_probe_test.go`
-  — a reviewer's name and a review round, in the one piece of text a reader
-  meets before opening anything, and invisible to both existing cells because a
-  filename is neither a comment nor a string. Three surfaces now, each added
-  after a real package produced a coordinate the existing cells structurally
-  could not see, and each time the rule was already the rule — only the place it
-  was enforced was missing. The pattern predicts a fourth: identifiers. A
-  function named `testLectorR2Probe` passes all three cells today, and that is
-  recorded here rather than guarded, because no such identifier exists yet and a
-  guard written for a hypothetical is a guard nobody has seen fail.
-  A THIRD ARM ARRIVED WITH RUNG THREE: the same rule applied to STRING
-  LITERALS, after two coordinates survived a conversion because the comment
-  cell structurally cannot see them — one of them printed to an operator's
-  terminal. It found five more in the two packages already certified. Later
-  rungs inherit both arms.
+- **Comment coordinates** (task item 12) — **COMPLETE**, nine rungs. Certified
+  and guarded: `webserver`, `core/config`, `cmd/autodb`, `rpc`, `core/engine`,
+  `core/meta`, `core/auth`, `tui`, `internal/vocabguard`, `frontdoor`,
+  `core/exec`. Two packages are un-certifiable and stay outside the ratchet
+  with the reason in prose: `internal/commentguard` (it is the guard; its
+  fixtures are specimens of what it detects) and `core` (one eight-line
+  `doc.go`, no string literals — the cells' vacuity floors refuse it, which is
+  correct: certifying it would assert nothing). Its own coordinate was
+  converted anyway; the rule applies whether or not a guard watches.
+
+  FOUR SURFACES, each added only after a real package produced a coordinate the
+  existing cells structurally could not see: comments (rung one), string
+  literals (rung three, after a banner printed one to an operator's terminal),
+  file names (rung seven, a reviewer's name and round in a filename that had
+  survived six rungs), and — not a surface but an admission — qualified section
+  anchors (rung eight, where deleting them would have destroyed pointers into
+  an in-repo document the conformance cells read from disk).
+
+  THE COMPLETION WAS CLAIMED ONCE BEFORE IT WAS TRUE. After rung eight I wrote
+  that every package was certified except the guard's own. `core/exec` — the
+  largest package in the tree, 479 sites — was not, and neither was `core`. I
+  asserted it from the rung rather than from the list, having run
+  `go list ./...` earlier in the same rung and read past `core/exec` in its own
+  output; the reviewer echoed it back without deriving it either. A totality
+  claim is a coordinate: it points at something the reader has to open, and
+  neither of us opened it. The check is one command — packages, minus
+  certified, minus recorded-un-certifiable, equals empty — and it is now run
+  and printed rather than remembered.
+
 - **The three statement pipelines** (task item 7) — `wire_query.go`,
   `wire_execute.go`, `wire_extended.go` each implement classify → authorize →
   guard → attempt → dispatch → outcome. **Deliberately not proposed:** the

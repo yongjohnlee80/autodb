@@ -17,7 +17,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// The §3.3 / #session-audit seam, live. openWire mints a PAT for root on a fresh
+// The matrix §3.3 / #session-audit seam, live. openWire mints a PAT for root on a fresh
 // postgres connection (profile session) and opens through OpenWireSessionWith.
 func openWire(t *testing.T, dsn, appName string) (f *fixture, connID int64, res WireSessionResult, err error) {
 	t.Helper()
@@ -54,7 +54,7 @@ func liveDSN(t *testing.T) string {
 	return dsn
 }
 
-// §3.3: the result carries the target's own reported ParameterStatus set —
+// matrix §3.3: the result carries the target's own reported ParameterStatus set —
 // every parameter PostgreSQL reports at connect, equal key by key to an
 // independent pgconn connection to the same target.
 func TestWireOpen_ReportedParameterStatusesAreTheTargets(t *testing.T) {
@@ -206,7 +206,7 @@ func (partialReporter) ReportedParameterStatuses() map[string]string {
 	return map[string]string{"client_encoding": "UTF8", "server_version": "17"}
 }
 
-// Row 3.1 fails CLOSED (lector MF1): no reporter capability, or a reported set
+// Row 3.1 fails CLOSED: no reporter capability, or a reported set
 // without both encoding keys, refuses the open with the lease-encoding reason,
 // withdraws the session and releases the reservation — nothing is admitted on
 // an encoding that was never established.

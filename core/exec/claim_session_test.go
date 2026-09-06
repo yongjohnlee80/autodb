@@ -262,7 +262,7 @@ func TestNoHandRolledSessionClaim(t *testing.T) {
 // someone calls it from the extended path, wireExtEntry's release becomes a
 // leak of a session the engine believes is closing, and this cell fails first.
 //
-// (lector, on the finding: "keep the named exemption only if the guard records
+// (review, on the finding: "keep the named exemption only if the guard records
 // the reachability question and adds a dedicated assertion target; otherwise it
 // risks becoming a forgotten permanent bypass.")
 func TestOnlyTheTwoAdmissionPathsEnforceTransactionAuthority(t *testing.T) {

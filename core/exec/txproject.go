@@ -9,7 +9,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// History as a PROJECTION of the outcome log — ADR-0074 §7 rev 2.
+// History as a PROJECTION of the outcome log.
 //
 // script_history.status used to be authored directly: a statement that did
 // not error was written "ok" and that was the end of it. Inside a transaction
@@ -89,7 +89,7 @@ func (e *Engine) resolveHistory(ctx context.Context, txID string, state meta.TxS
 // projectHistoryTx is the projection itself, inside a caller's transaction.
 //
 // Written to be callable from the same transaction as the terminal INSERT, so
-// the two land together or not at all (PR #20 r0 MF3): a crash between them
+// the two land together or not at all: a crash between them
 // used to leave the truth terminal and the surface pending, forever, because
 // reconciliation skips groups that already have a terminal.
 func (e *Engine) projectHistoryTx(tx *dao.Transaction, txID string, state meta.TxState) error {
@@ -144,7 +144,7 @@ func (e *Engine) dequeueSettled(ctx context.Context, txID string, st TxStatus) {
 // point: the strandable rows are exactly the ones still marked
 // ok_pending_commit, and there are normally none. Walking settled
 // TRANSACTIONS to find them meant one history query per transaction ever
-// recorded, on every pass (PR #20 r1 MF1) — a scan whose cost grew with
+// recorded, on every pass — a scan whose cost grew with
 // history while the thing it looked for did not.
 //
 // Bounded, and re-run each pass, so a backlog larger than one batch drains
@@ -154,7 +154,7 @@ func (e *Engine) repairPendingHistory(ctx context.Context) {
 		return
 	}
 	// Resume where the last sweep stopped, for the same reason the
-	// reconciler does (PR #20 r2 MF2). A fixed first page is fatal here in
+	// reconciler does. A fixed first page is fatal here in
 	// exactly the same way: a screenful of legitimately in-flight pending
 	// rows sits at the front, this sweep correctly leaves them alone, and a
 	// genuinely stranded row behind them is never reached on any pass.
@@ -163,7 +163,7 @@ func (e *Engine) repairPendingHistory(ctx context.Context) {
 	// ahead of it come round again.
 	// The same finite rotation as the reconciler, for the same reason: a
 	// cursor that only wraps on a short page chases a continuously-fed tail
-	// forever and never revisits an older strand (PR #20 r3 MF1).
+	// forever and never revisits an older strand.
 	cyc := e.reconcile.cycle(repairCursorScope)
 	if cyc.end == 0 {
 		end, herr := e.pendingHistoryHighWater(ctx)

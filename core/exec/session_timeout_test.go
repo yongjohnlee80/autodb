@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/golib/dao"
 )
 
-// ADR-0074 §1 — the transaction bounds. Driven by an injected clock, not by
+// The transaction bounds. Driven by an injected clock, not by
 // sleeping: a test that waits 90 seconds to prove a 90-second timeout is a
 // test nobody runs.
 

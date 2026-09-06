@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/golib/dao"
 )
 
-// The session-scoped engine API (ADR-0074 §1, §1b).
+// The session-scoped engine API.
 //
 // Authority is NEVER cached from OpenSession. Every call below re-resolves the
 // token and re-authorizes at the statement's own class, exactly as the
@@ -196,7 +196,7 @@ func (e *Engine) tokenControl(
 //
 // The role floor is here rather than in the gate because it is a policy
 // question, not a grammar one: SET LOCAL is admin-only by default per
-// ADR-0074 §5, and LOCK takes the write floor already checked above. The §4
+// The design says so, and LOCK takes the write floor already checked above. The
 // sub-capability grant that would let an operator delegate SET LOCAL more
 // finely is not built yet, so the default stands alone for now — which is
 // the restrictive direction.
@@ -206,9 +206,9 @@ func (e *Engine) admitSessionState(
 ) error {
 	// A WIRE session is a pinned PostgreSQL session whose backend dies with
 	// it (closeSession discards, never releases), so it runs under the
-	// DENYLIST (ADR-0075 Amendment 8): any setting not on it, session-level
+	// DENYLIST: any setting not on it, session-level
 	// or LOCAL, for every role — readers additionally may not move
-	// search_path. No admin floor: Amendment 6 says editors get PostgreSQL as
+	// search_path. No admin floor: the editors-first rule gives editors PostgreSQL as
 	// it is. The pooled path below is unchanged: its connection outlives the
 	// caller, so its allowlist-and-LOCAL rule still protects the next user.
 	s.mu.Lock()

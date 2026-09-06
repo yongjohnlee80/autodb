@@ -2,7 +2,7 @@ package exec
 
 import "testing"
 
-// The two-snapshot merge (ADR-0077 fold 2): the base list is authoritative for
+// The two-snapshot merge: the base list is authoritative for
 // which relations exist; the supplementary roles only annotate it. A base row
 // is annotated when named, never dropped for lacking a match, and a
 // supplementary-only relation (dropped between the two reads) is ignored. This

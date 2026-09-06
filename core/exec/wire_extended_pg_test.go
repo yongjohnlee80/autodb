@@ -100,7 +100,7 @@ func TestExtPG_BeginThroughExtendedOpensTheSessionsTransaction(t *testing.T) {
 		t.Fatal("the session has no transaction: the BEGIN was relayed to the wire instead of routed to the owner")
 	}
 	if txID == "" {
-		t.Error("no txID: the transaction has no audit identity, which is the ownerless shape ADR-0018 r2 MF5 forbids")
+		t.Error("no txID: the transaction has no audit identity, which is the ownerless shape review forbids")
 	}
 
 	status, serr := f.eng.WireTxStatus(sid, userID)
@@ -137,7 +137,7 @@ func TestExtPG_BeginThroughExtendedOpensTheSessionsTransaction(t *testing.T) {
 // CRITERION 3 — authority is re-decided at EXECUTE, not frozen at Parse.
 //
 // The statement is parsed while the caller may write, the grant is then revoked,
-// and the Execute must refuse. This is the condition ADR-0075 names because it
+// and the Execute must refuse. This is the condition the design names because it
 // is the one that gets missed: gating Parse alone passes every other test.
 //
 // A cell that only checked "a reader cannot Parse an INSERT" would not observe
@@ -194,7 +194,7 @@ func TestExtPG_GrantRevokedBetweenParseAndExecuteRefuses(t *testing.T) {
 	err := f.eng.WireExecutePortal(ctx, sid, userID, "w", 0, testIP, func(WireMessage) error { return nil })
 	if !errors.Is(err, auth.ErrDenied) {
 		t.Fatalf("Execute after the grant was revoked = %v, want auth.ErrDenied — authority was decided at Parse "+
-			"and cached, which is exactly what rejection criterion 3 forbids", err)
+			"and cached, which is exactly what the third rejection rule forbids", err)
 	}
 
 	// ...and nothing was written. A refusal that still ran the statement would
@@ -549,7 +549,7 @@ func TestExtPG_BinaryParameterFormatIsRelayedVerbatim(t *testing.T) {
 // under a name, execute it repeatedly through fresh portals, then evict it with
 // Close S and re-parse the same name.
 //
-// Each Execute re-authorizes (that is criterion 3, proven elsewhere); what this
+// Each Execute re-authorizes; what this
 // adds is that repetition and eviction work at all, which is the whole of what a
 // cache does to the protocol.
 func TestExtPG_NamedStatementIsReusedAndEvictedLikeACache(t *testing.T) {
@@ -595,7 +595,7 @@ func TestExtPG_NamedStatementIsReusedAndEvictedLikeACache(t *testing.T) {
 }
 
 // lib/pq's shape: it sends SIMPLE for parameterless statements and extended for
-// the rest, on one connection. §4a says a simple Query destroys the unnamed
+// the rest, on one connection. matrix §4a says a simple Query destroys the unnamed
 // statement and portal — so the two protocols share a namespace, and the
 // destruction has to be real against a live server, not just in the store.
 func TestExtPG_SimpleQueryDestroysTheUnnamedPairOnALiveSession(t *testing.T) {
@@ -617,7 +617,7 @@ func TestExtPG_SimpleQueryDestroysTheUnnamedPairOnALiveSession(t *testing.T) {
 	if r := runRaw(t, f, sid, userID, "SELECT 2"); r.err != nil {
 		t.Fatalf("simple query on the same session: %v", r.err)
 	}
-	// §4a: the unnamed portal and statement are gone.
+	// matrix §4a: the unnamed portal and statement are gone.
 	if err := f.eng.WireExecutePortal(ctx, sid, userID, "", 0, testIP, func(WireMessage) error { return nil }); !errors.Is(err, ErrUnknownPortal) {
 		t.Fatalf("Execute of the unnamed portal after a simple Query = %v, want ErrUnknownPortal", err)
 	}
@@ -626,7 +626,7 @@ func TestExtPG_SimpleQueryDestroysTheUnnamedPairOnALiveSession(t *testing.T) {
 	}
 }
 
-// r0 MF1 — the hidden READ ONLY wrap is AUTODB's transaction, so its T must never
+// The hidden READ ONLY wrap is AUTODB's transaction, so its T must never
 // reach the client's track.
 //
 // A reader outside a client transaction runs inside a wrap we opened, so the
@@ -666,7 +666,7 @@ func TestExtPG_HiddenReadOnlyWrapDoesNotLeakTToTheClient(t *testing.T) {
 	}
 }
 
-// r0 MF2 — a standalone Flush with nothing queued is the wire's harmless no-op.
+// A standalone Flush with nothing queued is the wire's harmless no-op.
 //
 // PostgreSQL treats Flush as a request to deliver whatever output is pending;
 // none pending is ordinary for a client that flushes defensively. golib refuses
@@ -680,7 +680,7 @@ func TestExtPG_EmptyFlushIsANoOpAndTheSessionStaysUsable(t *testing.T) {
 	if err := f.eng.WireFlushSegment(ctx, sid, userID, func(WireMessage) error { return nil }); err != nil {
 		t.Fatalf("a standalone Flush with nothing queued failed: %v", err)
 	}
-	// STATE-INTEGRITY POSITIVE CONTROL (lector r0 MF2): a stranded hidden wrapper
+	// STATE-INTEGRITY POSITIVE CONTROL: a stranded hidden wrapper
 	// would leave the session unusable, and only a following statement shows it.
 	r := runRaw(t, f, sid, userID, "SELECT 1")
 	if r.err != nil {

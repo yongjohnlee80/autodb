@@ -11,8 +11,8 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// THE SHARED EXECUTION-UNIT POLICY (ADR-0075 Amendment 4's F3a seam
-// condition, lector's ruling).
+// THE SHARED EXECUTION-UNIT POLICY (the F3a seam
+// condition, as ruled).
 //
 // One engine-owned decision, resolved FRESH for every execution unit, that
 // every caller reuses — the simple path today, the wire's segments when F1

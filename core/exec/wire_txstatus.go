@@ -1,6 +1,6 @@
 package exec
 
-// Authored by ultron-prime for the F1 wire loop and handed to the core/exec owner
+// Authored for the F1 wire loop and handed to the core/exec owner
 // under the loop/engine file boundary (2026-09-02); taken verbatim.
 
 import "fmt"
@@ -54,7 +54,7 @@ func (e *Engine) WireTxStatus(id SessionID, userID int64) (byte, error) {
 
 // wireTxStatus is the status byte for a session the caller already holds —
 // WireQuery reads it while its claim is still held, so the byte cannot
-// describe an interleaving statement (lector PR #48 r0 MF1).
+// describe an interleaving statement.
 func (s *session) wireTxStatus() (byte, error) {
 	s.mu.Lock()
 	phase := s.txPhase

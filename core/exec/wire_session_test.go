@@ -97,7 +97,7 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 	// then stops admitting the front door — mint at `session`, then DOWNGRADE.
 	//
 	// Dialling some OTHER connection's name no longer reaches the profile
-	// gate at all (ADR-0086 §4): the token decides the target, so a name that
+	// gate at all: the token decides the target, so a name that
 	// is not the bound connection's is a database MISMATCH and is refused
 	// before any profile is consulted. Reaching this branch therefore means
 	// constructing the state deliberately, which is what the ADR's cell 3
@@ -161,7 +161,7 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 
 // A token whose own allowed_ips excludes the address is refused even though
 // the admission set would have allowed it — that narrowing is the mitigation
-// for Amendment 1's accepted cost.
+// for the accepted cost.
 func TestOpenWireSession_PATNarrowingIsEnforced(t *testing.T) {
 	t.Parallel()
 	f, _, _, dbName := wireFixture(t)
@@ -237,7 +237,7 @@ func TestOpenWireSession_TheRemainingRefusals(t *testing.T) {
 		// grant. Root is an admin with grants everywhere, which is why the
 		// first version of this file could not reach this branch at all.
 		//
-		// The grant-then-revoke shape is required as of ADR-0086: a PAT is
+		// The grant-then-revoke shape is required: a PAT is
 		// bound to a connection at mint, and minting is refused for a
 		// connection the caller has no grant on. So "a token whose owner has
 		// no grant" can no longer be built by minting without one — which is

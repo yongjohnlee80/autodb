@@ -8,11 +8,11 @@ import (
 	"time"
 )
 
-// Live-postgres introspection of partition roles (ADR-0077), gated on
+// Live-postgres introspection of partition roles, gated on
 // TEST_PGURL like the other pg-target tests. Exercises the real supplementary
 // catalog query + merge against a declaratively-partitioned table, a
 // sub-partition, and a plain table, and asserts empty-schema normalization
-// (schema "" annotates public, criterion 8).
+// (schema "" annotates public).
 func TestEngine_ListTables_PartitionRoles(t *testing.T) {
 	dsn := os.Getenv("TEST_PGURL")
 	if dsn == "" {
@@ -50,7 +50,7 @@ func TestEngine_ListTables_PartitionRoles(t *testing.T) {
 		}
 	}
 
-	// schema "" must normalize to public and still annotate (criterion 8).
+	// schema "" must normalize to public and still annotate.
 	tables, err := f.eng.ListTables(ctx, f.rootTok, connID, "")
 	if err != nil {
 		t.Fatalf("ListTables: %v", err)

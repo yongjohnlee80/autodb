@@ -8,10 +8,10 @@ import (
 	"time"
 )
 
-// Live-postgres edge cases for ADR-0077 partition roles (gated on TEST_PGURL):
-// a classic INHERITS child is NOT a partition (criterion 3), and a cross-schema
+// Live-postgres edge cases for partition roles (gated on TEST_PGURL):
+// a classic INHERITS child is NOT a partition, and a cross-schema
 // partition reports an empty same-schema Parent so it stays a top-level table
-// (criterion 4). Foreign-table partitions (relkind 'f', criterion 12) are
+// Foreign-table partitions (relkind 'f') are
 // excluded structurally by the base introspector's relkind filter and are not
 // exercised here (they require FDW setup); see the forest test for the
 // visible-subset count.

@@ -13,8 +13,8 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// STANDING AUTHORITY on a wire session (lector's ruling on the PAT
-// standing-authority defect; ADR-0075 Amendment 4's F3a seam).
+// STANDING AUTHORITY on a wire session (the ruling on the PAT
+// standing-authority defect; the F3a seam).
 //
 // A front-door session's authority is a PAT, not a login. The janitor used to
 // re-check it through a lookup keyed on an auth-session row, and a wire
@@ -453,7 +453,7 @@ func TestStanding_AnUncertainForegroundRollbackClosesForDemotionCleanup(t *testi
 	}
 }
 
-// THE WIRE CELL (lector's final F1/F3a merge-gate item).
+// THE WIRE CELL.
 //
 // Everything the session-path cells prove is about the policy's SEMANTICS.
 // This one is about the CREDENTIAL-KIND SEAM: that a PAT-backed wire session
@@ -481,7 +481,7 @@ func TestStanding_TheWirePathReachesTheSamePolicy(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	// A CATALOG function that writes — nextval on a sequence — is the wrap's witness
-	// now that the reader analysis stage (Amendment 6 rule 2) refuses user-defined
+	// now that the reader analysis stage refuses user-defined
 	// function calls before dispatch. The stage's own proof lives in
 	// wire_query_reader_pg_test.go; this cell proves the target-side belt.
 	fn := fmt.Sprintf("wire_seq_%d", time.Now().UnixNano())
