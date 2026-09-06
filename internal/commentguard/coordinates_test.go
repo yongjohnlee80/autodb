@@ -40,6 +40,8 @@ var certifiedClean = []string{
 	"webserver",
 	"core/config",
 	"cmd/autodb",
+	"rpc",
+	"core/engine",
 }
 
 // Patterns that name a private artefact.

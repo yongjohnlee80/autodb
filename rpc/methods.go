@@ -30,7 +30,7 @@ const (
 	// (classification, WHERE-less guard, size cap).
 	CodeStatementRejected int64 = -32032
 
-	// The ExecSession family (protocol 5, ADR-0074 §8a). Protocol 5 added
+	// The ExecSession family. Protocol 5 added
 	// the session verbs but no codes for what they can refuse, so every
 	// session error — no such session, already running, cap reached —
 	// fell through wireErr as an unmapped error and reached the client as a
@@ -75,8 +75,8 @@ const (
 	// is uniform and anonymous by design, and it never travels this wire.
 	CodeInvalidToken int64 = -32046
 
-	// CodeKeyslot reports a SERVICE KEYSLOT mutation an admin can fix
-	// (ADR-0087 §5): no keyfile path configured, a slot that already exists,
+	// CodeKeyslot reports a SERVICE KEYSLOT mutation an admin can fix:
+	// no keyfile path configured, a slot that already exists,
 	// no slot to remove, a keyfile with unsafe permissions, a malformed one.
 	//
 	// Its own code rather than a shared "invalid argument", because these have
@@ -133,7 +133,7 @@ var publicErrs = []struct {
 	{auth.ErrPATBadExpiry, CodeInvalidToken},
 	{auth.ErrPATBadAllowedIPs, CodeInvalidToken},
 	{auth.ErrPATNotFound, CodeInvalidToken},
-	// ADR-0086's mint gates. Both MUST be mapped: an unmapped sentinel
+	// The mint gates. Both MUST be mapped: an unmapped sentinel
 	// reaches the caller as a -32603 internal fault, which would tell someone
 	// who named the wrong connection that the SERVER broke — the same reason
 	// ErrPATNotFound is on this list.
@@ -249,7 +249,7 @@ func identMap(id auth.Identity) map[string]any {
 	return map[string]any{"id": id.UserID(), "name": id.Name(), "role": id.Role()}
 }
 
-// register wires the v1 method surface (ADR-0056 §2). Every handler is a
+// register wires the v1 method surface. Every handler is a
 // mechanical projection: decode positional args, call the core with the
 // peer IP threaded through, map the result/error. No business logic.
 func (s *Server) register() {
@@ -265,7 +265,7 @@ func (s *Server) register() {
 		return need, wireErr(err)
 	})
 	// auth.global_ip_admitted answers the GLOBAL layer alone, for a caller
-	// that has no user to ask about yet (lector PR #34 r0 must-fix 1).
+	// that has no user to ask about yet.
 	//
 	// It exists for exactly one moment: the web gateway deciding whether an
 	// address may perform the irreversible first-admin bootstrap. At that
@@ -331,7 +331,7 @@ func (s *Server) register() {
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
 	// auth.login_at is auth.login with the ADMISSION ADDRESS the caller
-	// observed (ADR-0075 Amendment 1, lector PR #34 r2 ruling).
+	// observed.
 	//
 	// It exists because the daemon cannot see the browser: its peer is the
 	// web gateway over loopback. The gateway used to log in, ask
@@ -369,7 +369,7 @@ func (s *Server) register() {
 		}
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
-	// THE SERVICE KEYSLOT (ADR-0087). Three verbs, all admin-gated inside
+	// THE SERVICE KEYSLOT. Three verbs, all admin-gated inside
 	// core/auth rather than here — this layer is transport, and an authority
 	// check written at the transport is one a second transport forgets.
 	//
@@ -395,7 +395,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.RemoveServiceKeyslot(ctx, token, peerIP(req)))
 	})
-	// keyslot.status is what makes §6 honest at a DISTANCE. The daemon prints
+	// keyslot.status is what makes the locked-daemon banner honest at a DISTANCE. The daemon prints
 	// its banner once, at start, to a terminal nobody may be watching; this is
 	// how an operator asks later, from the TUI, why every developer is being
 	// refused. It reports the LAST ATTEMPT rather than re-reading the keyfile,
@@ -615,7 +615,7 @@ func (s *Server) register() {
 		return out, nil
 	})
 
-	// sys.shutdown drains this server (ADR-0056 §3: the shared server
+	// sys.shutdown drains this server. The shared server
 	// outlives its frontends, so restarting it needs an authorized
 	// remote path — a rebuilt binary otherwise keeps serving from the
 	// old process). Admin-only, audited BEFORE the effect (R6).
@@ -781,7 +781,7 @@ func (s *Server) register() {
 		}
 		return out, nil
 	})
-	// Personal Access Tokens (ADR-0075 §4). The credential a person pastes
+	// Personal Access Tokens. The credential a person pastes
 	// into a DSN, managed from the surfaces they already use.
 	//
 	// The secret appears exactly once, in this reply. It is not recoverable
@@ -789,7 +789,7 @@ func (s *Server) register() {
 	// so the reply is the only chance to copy it, and the client is expected
 	// to say so.
 	// auth.ip_admitted answers the two-layer admission question for an
-	// address the DAEMON cannot see for itself (ADR-0075 Amendment 1).
+	// address the DAEMON cannot see for itself.
 	//
 	// The web gateway reaches the daemon over loopback, so the peer the
 	// daemon observes is the gateway, not the browser. Only the gateway
@@ -830,7 +830,7 @@ func (s *Server) register() {
 		}, nil
 	})
 
-	// auth.token_create takes SIX arguments as of ADR-0086: conn_id is new and
+	// auth.token_create takes SIX arguments: conn_id is new and
 	// is not optional, because every PAT is bound to exactly one connection and
 	// there is no unscoped form. exactArgs is exact, so an old client meets a
 	// clean arity error rather than minting something unbound — which is the
@@ -860,7 +860,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		// debug_cleartext (ADR-0086 §10). Refused unless the caller is an
+		// debug_cleartext. Refused unless the caller is an
 		// admin AND this daemon is serving cleartext right now — the engine
 		// enforces that, not this handler, so a different caller cannot reach
 		// a weaker path.
@@ -1054,7 +1054,7 @@ func (s *Server) register() {
 				"id": c.ID, "name": c.Name, "engine": c.Engine.String(),
 				"created_by": c.CreatedBy, "created_at": c.CreatedAt,
 				"updated_at": c.UpdatedAt,
-				// ADR-0086: the manager shows what a connection's profile IS
+				// The manager shows what a connection's profile IS
 				// and what it points at, so an operator is not deciding
 				// whether to expose something from its name alone.
 				"profile": c.Profile, "target_db": c.TargetDB,
@@ -1110,8 +1110,8 @@ func (s *Server) register() {
 		}, nil
 	})
 
-	// conn.set_profile is its OWN verb, not a field on a generic update
-	// (ADR-0086 §9): switching a connection to the session profile is an
+	// conn.set_profile is its OWN verb, not a field on a generic update:
+	// switching a connection to the session profile is an
 	// exposure decision and gets its own audit action so an operator can count
 	// them.
 	s.rpc.Handle("conn.set_profile", func(ctx context.Context, req *golibrpc.Request) (any, error) {
@@ -1148,7 +1148,7 @@ func (s *Server) register() {
 	})
 
 	// --- exec ---
-	// The ExecSession surface (ADR-0074 §3, R5). A session is the client's
+	// The ExecSession surface. A session is the client's
 	// handle on a PINNED connection: it is what makes a transaction spanning
 	// several round trips possible at all, since the stateless path may put
 	// each statement on a different physical connection.
@@ -1223,8 +1223,7 @@ func (s *Server) register() {
 		return resultMap(res), nil
 	})
 
-	// tx.status is the poll verb §7 names for asynchronous outcome delivery
-	// (ADR-0074 Amendment 4 A2, R5 scope).
+	// tx.status is the poll verb for asynchronous outcome delivery.
 	//
 	// It reads the ENGINE's outcome API, never the table, and never the
 	// script history — history disappears entirely when [history].enabled is
@@ -1338,7 +1337,7 @@ func txStatusMap(st exec.TxStatus) map[string]any {
 	}
 }
 
-// resultMap projects exec.Result onto the wire (ADR-0056 §2 exec.run shape).
+// resultMap projects exec.Result onto the wire in the exec.run shape.
 // Row cells are normalized into the msgpack vocabulary — drivers hand back
 // types the wire doesn't carry (pgx timestamps as time.Time), and one
 // exotic cell must not fail the whole result page.
@@ -1400,8 +1399,8 @@ func wireVal(v any) any {
 	return fmt.Sprintf("%v", v)
 }
 
-// registerM6 wires the schema.* and workspace.* surface (ADR-0057 §6,
-// protocol 2) under the same per-verb discipline as the v1 methods: exact
+// registerM6 wires the schema.* and workspace.* surface (protocol 2)
+// under the same per-verb discipline as the v1 methods: exact
 // arity and typed decoding, peer-IP threading into every mutating core
 // call, sentinel-constant-only disclosure, wire-vocabulary normalization.
 func (s *Server) registerM6() {

@@ -18,12 +18,12 @@ import (
 	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
 )
 
-// Protocol is the wire protocol version (ADR-0051 §5). autodb owns this
+// Protocol is the wire protocol version. autodb owns this
 // number; a client hello carrying a different value is refused and the Lua
 // side re-provisions the binary. M6 bumped it to 2: the schema.* and
 // workspace.* surface is required by the M6+ frontends, and a new client
 // helloing an old server must be REFUSED at the handshake, not surprised
-// by method-not-found (ADR-0057 §7). The server speaks exactly one
+// by method-not-found. The server speaks exactly one
 // protocol version; there is no negotiation.
 // Protocol 5 added the ExecSession surface — exec.session_open,
 // exec.session_close, exec.session_run — and made exec.run_script atomic for
@@ -67,7 +67,7 @@ type Server struct {
 	eng      *exec.Engine
 	rpc      *golibrpc.Server
 	version  string
-	instance string // random per-process id; hello exposes it (ADR-0057 §7)
+	instance string // random per-process id; hello exposes it
 	notesDir string // where per-workspace notes live; hello reports it so
 	//               the frontends resolve notes without re-deriving config
 
@@ -76,7 +76,7 @@ type Server struct {
 	// the surface off). A FUNCTION rather than a snapshot: the listener binds
 	// after config is read and may fail to bind at all, so a value captured at
 	// New would be config INTENT, and intent is exactly what a connection card
-	// must not print (ADR-0086 §8).
+	// must not print.
 	frontDoor func() FrontDoorInfo
 
 	stop     chan struct{} // closed by RequestShutdown
@@ -109,7 +109,7 @@ type FrontDoorInfo struct {
 	// material comes from a private CA. Empty means the host's system roots.
 	RootCAFile string
 	// Cleartext reports that this listener is serving WITHOUT TLS
-	// (frontdoor.insecure_disable_tls, ADR-0086 §10).
+	// (frontdoor.insecure_disable_tls).
 	//
 	// It travels with the endpoint rather than being re-derived by each
 	// consumer because two of them must agree with it: the card's sslmode is
@@ -215,7 +215,7 @@ func (s *Server) Shutdown(ctx context.Context) error { return s.rpc.Shutdown(ctx
 // Addr reports the resolved listen address (real port after binding :0).
 func (s *Server) Addr() string { return s.rpc.Addr() }
 
-// gate enforces handshake-before-methods (ADR-0056 §2): sys.hello is the
+// gate enforces handshake-before-methods: sys.hello is the
 // only reachable method until a compatible hello lands; an incompatible
 // hello poisons the session — every later call, hello included, is refused
 // so the client's only useful move is reconnecting with a compatible
@@ -247,8 +247,7 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		"version":  s.version,
 		// A changed instance across a reconnect means a NEW server process:
 		// clients drop cached state and re-prompt login (tokens persist in
-		// the meta store, but the master key does not survive a restart —
-		// ADR-0057 §7).
+		// the meta store, but the master key does not survive a restart).
 		"instance": s.instance,
 		// The frontends run in a different process (often a different
 		// machine) from this server, which they may have spawned. Report
@@ -296,7 +295,7 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		req.Session.SetValue(sessHello, true)
 	default:
 		// Incompatible client: structured refusal, session poisoned
-		// (ADR-0056 §2 — the Lua side re-provisions the binary), audited
+		// (the Lua side re-provisions the binary), audited
 		// as a protocol error under user 0 with the peer IP. The audit row
 		// is a durable promise (R6): if it cannot persist, the failure is
 		// surfaced — the transport logs the detail and the peer gets a
@@ -329,8 +328,8 @@ func peerIP(req *golibrpc.Request) string {
 		return "unknown"
 	}
 	// A unix-domain peer has no IP — its address is a path, "@", or empty.
-	// It is a local, same-user connection gated by the socket's 0600 perms
-	// (ADR-0058), so it carries the LocalPeer sentinel rather than a
+	// It is a local, same-user connection gated by the socket's 0600 perms,
+	// so it carries the LocalPeer sentinel rather than a
 	// meaningless address that no allowlist could ever match.
 	if req.Peer.Network() == "unix" {
 		return auth.LocalPeer

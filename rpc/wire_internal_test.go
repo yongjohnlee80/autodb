@@ -10,7 +10,7 @@ import (
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 )
 
-// Review r1 should-fix 2: wireErr publishes the matched sentinel's CONSTANT
+// wireErr publishes the matched sentinel's CONSTANT
 // text — a wrapper's contextual string must never cross the disclosure
 // boundary even though errors.Is still matches it.
 func TestWireErrPublishesSentinelTextOnly(t *testing.T) {
@@ -36,7 +36,7 @@ func TestWireErrUnmappedPassesThrough(t *testing.T) {
 	}
 }
 
-// MF3. Protocol 5 added the session verbs and no codes for what they refuse,
+// Protocol 5 added the session verbs and no codes for what they refuse,
 // so every session error fell through wireErr unmapped and reached the client
 // as a generic internal failure. A client cannot act on that: "the server
 // broke" and "you already have eight sessions open" call for opposite

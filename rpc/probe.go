@@ -15,7 +15,7 @@ import (
 
 // ErrNotAutodb reports that something answered on the probed address but it
 // is not a compatible autodb server — the single-instance guard's loud
-// path (ADR-0056 §3).
+// path.
 var ErrNotAutodb = errors.New("rpc: address is occupied by something other than a compatible autodb server")
 
 // probeLimits bounds the occupant's reply: a hello response is tiny, and
@@ -49,7 +49,7 @@ func Probe(ctx context.Context, addr string) (version string, err error) {
 
 // ProbeOn is Probe on an explicit network ("unix" or "tcp"), so the
 // caller's endpoint choice reaches the dial rather than being assumed
-// here (ADR-0058 §3.2.1: one resolver decides where we meet).
+// here: one resolver decides where we meet.
 func ProbeOn(ctx context.Context, network, addr string) (version string, err error) {
 	d := net.Dialer{}
 	conn, err := d.DialContext(ctx, network, addr)

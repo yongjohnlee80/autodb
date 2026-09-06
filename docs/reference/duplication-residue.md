@@ -201,6 +201,16 @@ catch two; it found four.
   set of arms and predated the rungs; it is replaced rather than adjusted.
   Not duplication, but the same class of problem: a claim whose authority the
   reader cannot open.
+  RUNG FOUR certified `rpc` and `core/engine`. It did NOT certify
+  `internal/commentguard`, and the reason is worth keeping: that package is
+  the guard itself plus a doc file, and every pattern arm appears in its test
+  file as a FIXTURE or as prose describing what the arm catches — a mention,
+  not a citation. A detector that may not name what it detects cannot be
+  written down. Exempting its own file was tried and abandoned: with that file
+  skipped the walk sees 8 comments and 0 string literals, and the cells'
+  vacuity floors refused the run — correctly, because certifying what is left
+  would assert nothing. The exemption machinery was removed rather than left
+  dormant, per the fourth part above.
   A THIRD ARM ARRIVED WITH RUNG THREE: the same rule applied to STRING
   LITERALS, after two coordinates survived a conversion because the comment
   cell structurally cannot see them — one of them printed to an operator's

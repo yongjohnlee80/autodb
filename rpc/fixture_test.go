@@ -1,7 +1,7 @@
 package rpc_test
 
-// Entry-point fixture for wire cells — code-review §11 ("the wiring is the
-// claim"): a verb's behavior is proven through the DISPATCH — a real
+// Entry-point fixture for wire cells — the wiring is the claim:
+// a verb's behavior is proven through the DISPATCH — a real
 // loopback server, a real msgpack-RPC frame — not by calling the handler's
 // implementation directly. A direct cell stays green when the verb is
 // never registered or its wiring drops a field; a wire cell does not.
@@ -47,8 +47,8 @@ type fixture struct {
 	addr    string
 }
 
-// frontDoorConn creates a connection a PAT may legally be bound to (ADR-0086
-// §6): postgres, session profile, with a target_db derived from its DSN.
+// frontDoorConn creates a connection a PAT may legally be bound to:
+// postgres, session profile, with a target_db derived from its DSN.
 //
 // Created ON DEMAND rather than in newFixture, and that is the point: adding
 // it to the shared fixture changed what conn.list returns and broke an

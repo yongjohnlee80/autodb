@@ -23,7 +23,7 @@ import (
 )
 
 // The fixture (newFixture, session, dial, call, hello, login, mustErr,
-// auditCount, audits) lives in fixture_test.go — the §11 entry-point
+// auditCount, audits) lives in fixture_test.go — the entry-point
 // fixture for this package.
 
 func TestHandshakeGate(t *testing.T) {
@@ -62,7 +62,7 @@ func TestHandshakeIncompatiblePoisonsSession(t *testing.T) {
 	f := newFixture(t)
 
 	// A declared protocol of -1 must poison like any other mismatch — it
-	// must never collide with the omitted-protocol probe form (lector r2).
+	// must never collide with the omitted-protocol probe form.
 	cNeg := f.dial(t)
 	errVal, _ := cNeg.call("sys.hello", map[string]any{"protocol": int64(-1)})
 	mustErr(t, errVal, rpc.CodeProtocolMismatch)
@@ -130,7 +130,7 @@ func TestAuthFlowOverWire(t *testing.T) {
 	mustErr(t, errVal, rpc.CodeAuth)
 }
 
-// (Example §11 conversion: dial+hello became f.session, the reader login
+// (Example conversion to the fixture: dial+hello became f.session, the reader login
 // dance became c.login, and the audit promise is checked with auditCount.)
 func TestExecOverWire(t *testing.T) {
 	t.Parallel()
@@ -342,7 +342,7 @@ func TestShutdownWithLiveConnection(t *testing.T) {
 	}
 }
 
-// --- review-fold regression tests (2026-08-16 lector autodb-M5 r1) ---
+// --- review-fold regression tests (2026-08-16) ---
 
 // fakeOccupant answers every accepted connection with a fixed raw frame.
 func fakeOccupant(t *testing.T, frame []byte) string {
@@ -530,7 +530,7 @@ func TestStrictParams(t *testing.T) {
 	mustErr(t, errVal, -32602)
 }
 
-// --- M6 surface: schema.*, workspace.*, protocol 2 (ADR-0057 §6/§7) ---
+// --- M6 surface: schema.*, workspace.*, protocol 2 ---
 
 func TestHelloCarriesInstanceAndProtocol(t *testing.T) {
 	t.Parallel()
@@ -712,8 +712,8 @@ func TestWorkspacesOverWire(t *testing.T) {
 	mustErr(t, errVal, -32602) // not-found surfaces as the mapped sentinel
 }
 
-// sys.shutdown is the supported restart path for the shared server
-// (ADR-0056 §3): admin-only, and the reply is delivered before the
+// sys.shutdown is the supported restart path for the shared server:
+// admin-only, and the reply is delivered before the
 // listener closes.
 func TestShutdownOverWire(t *testing.T) {
 	t.Parallel()
@@ -1094,8 +1094,8 @@ func TestProtocolBumpRefusesTheOlderClient(t *testing.T) {
 	}
 }
 
-// tx.status over the wire (protocol 5, ADR-0074 Amendment 4 A2). R5 owns this
-// verb; R4 owns the outcome machine underneath it.
+// tx.status over the wire (protocol 5). This verb is the poll surface; the
+// outcome machine underneath it is the engine's.
 func TestTxStatusOverWire(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
@@ -1123,7 +1123,7 @@ func TestTxStatusOverWire(t *testing.T) {
 
 	// Arity: two DEFINED forms, and nothing else.
 	//
-	// The third case is the one lector found. The handler accepted three
+	// The third case is the one review found. The handler accepted three
 	// arguments globally and then, seeing a non-empty id, answered about the
 	// transaction — silently discarding the limit. `tx.status(token, id,
 	// limit)` is a reading that looks obvious and means nothing here, and a
@@ -1158,7 +1158,7 @@ func TestTxStatusOverWire(t *testing.T) {
 	}
 }
 
-// PAT management over the wire (ADR-0075 §4). The credential itself is the
+// PAT management over the wire. The credential itself is the
 // front door's business; this is the surface a person uses to create and
 // revoke one from the tools they already have.
 func TestTokenVerbsOverWire(t *testing.T) {
@@ -1287,7 +1287,7 @@ func TestTokenCreate_DayCountCannotOverflowIntoAValidLifetime(t *testing.T) {
 	}
 }
 
-// MF2: revoking a name the user does not have is a normal refusal, not a
+// Revoking a name the user does not have is a normal refusal, not a
 // server fault. RevokePAT wrapped dao.ErrNoRows, which wireErr had no public
 // mapping for, so a mistyped token name came back as -32603 "internal error"
 // — telling someone who made a typo that the SERVER broke.
@@ -1336,7 +1336,7 @@ func TestIPAdmittedOverWire(t *testing.T) {
 	c.hello()
 
 	// The fixture's config allowlist carries loopback, so the GLOBAL layer
-	// admits it with no user rows at all — the case Amendment 1 exists for.
+	// admits it with no user rows at all — the case the global layer exists for.
 	errVal, result := c.call("auth.ip_admitted", f.rootTok, "127.0.0.1")
 	if errVal != nil {
 		t.Fatalf("ip_admitted: %#v", errVal)
@@ -1442,7 +1442,7 @@ func TestFrontDoorEndpoint_RequiresAToken(t *testing.T) {
 	}
 }
 
-// The SERVICE KEYSLOT verbs (ADR-0087 §5).
+// The SERVICE KEYSLOT verbs.
 //
 // The authority gate lives in core/auth, not here — this layer is transport,
 // and an authority check written at the transport is one a second transport
@@ -1540,7 +1540,7 @@ func TestKeyslot_StatusReportsARealFailure(t *testing.T) {
 	keyfile := filepath.Join(t.TempDir(), "keys", "service.key")
 	f := newFixtureWithAuth(t, []auth.Option{auth.WithServiceKeyfile(keyfile)})
 
-	// A keyfile that is not there: §6's "absent" ground, and the daemon stays
+	// A keyfile that is not there: the "absent" ground, and the daemon stays
 	// up exactly as it would in production.
 	if err := f.svc.UnlockWithServiceKeyslot(context.Background()); err == nil {
 		t.Fatal("control: the unlock did not fail, so there is no real status to report")
@@ -1564,7 +1564,7 @@ func TestKeyslot_StatusReportsARealFailure(t *testing.T) {
 	}
 	reason, _ := m["reason"].(string)
 	if reason == "" {
-		t.Error("reason is empty after a failed unlock; §6 keeps the daemon running on five " +
+		t.Error("reason is empty after a failed unlock; the daemon stays up on five " +
 			"distinguishable grounds and this is where an operator reads which one")
 	}
 	if !strings.Contains(reason, "keyfile") {

@@ -15,7 +15,7 @@ import (
 // A2 — no package outside core/engine writes an engine name as a string
 // literal.
 //
-// WHY THIS WALKS THE AST INSTEAD OF GREPPING. The criterion in ADR-0088 is
+// WHY THIS WALKS THE AST INSTEAD OF GREPPING. The criterion was originally
 // written as a `grep -rnE '"(mysql|postgres|...)"'`. Run as text, it has a false
 // positive on this tree today: frontdoor/tls.go contains "postgresql" inside a
 // COMMENT, as the name of the ALPN protocol, which is correct English about a
