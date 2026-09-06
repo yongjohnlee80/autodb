@@ -1,4 +1,4 @@
-// Package config loads autodb's TOML configuration (ADR-0053 §1).
+// Package config loads autodb's TOML configuration.
 //
 // The file is optional: a missing config yields the zero-config defaults, so
 // a first run needs no manual setup. A present file is decoded with
@@ -24,7 +24,7 @@ import (
 // ErrInvalid wraps every validation failure; test with errors.Is.
 var ErrInvalid = errors.New("config: invalid configuration")
 
-// DefaultPort is the default msgpack-RPC port (ADR-0052 §5).
+// DefaultPort is the default msgpack-RPC port.
 const DefaultPort = 7419
 
 // Config is autodb's full configuration.
@@ -39,7 +39,7 @@ type Config struct {
 	FrontDoor FrontDoor `toml:"frontdoor"`
 }
 
-// FrontDoor configures the PostgreSQL wire-protocol listener (ADR-0075).
+// FrontDoor configures the PostgreSQL wire-protocol listener.
 //
 // The whole surface is OFF unless Enabled is set. That is not timidity about
 // a new feature: this listener speaks a protocol every PostgreSQL client in
@@ -52,8 +52,8 @@ type FrontDoor struct {
 	Enabled bool `toml:"enabled"`
 
 	// Bind is the TCP address to listen on. TCP only, by construction: the
-	// LocalPeer socket exemption does NOT apply to this surface (ADR-0075
-	// §4), so there is no unix-socket form to configure.
+	// LocalPeer socket exemption does NOT apply to this surface, so there is
+	// no unix-socket form to configure.
 	Bind string `toml:"bind"`
 
 	// TLSCertFile and TLSKeyFile are the server's identity. Both are
@@ -66,7 +66,7 @@ type FrontDoor struct {
 	// TLSHostNames are the DNS names clients will use. They are checked
 	// against the certificate's SANs at startup.
 	//
-	// This exists because `sslmode=verify-full` — which ADR-0075 §4 ratified
+	// This exists because `sslmode=verify-full` — which the design ratified
 	// against `require`, since require authenticates nothing and permits
 	// active-MITM PAT theft — verifies the NAME. A certificate that is
 	// otherwise perfect but does not cover the name in the DSN fails at
@@ -89,7 +89,7 @@ type FrontDoor struct {
 
 	// ReservedHeadroom is how many connections of each target pool are held
 	// back from wire leases, for the interactive surfaces and the engine's
-	// own control queries (ADR-0075 §3).
+	// own control queries.
 	//
 	// Without it the front door can take every connection in the pool and
 	// the TUI stops working — with the front door looking healthy, because
@@ -107,7 +107,7 @@ type FrontDoor struct {
 	MaxLeases int `toml:"max_leases"`
 
 	// ResidentBudgetBytes bounds the memory open wire sessions may reserve
-	// in total (ADR-0075 §4; default 1 GiB, ceiling 4 GiB).
+	// in total (default 1 GiB, ceiling 4 GiB).
 	//
 	// Unset takes the default. This is the budget row 2.7's fixed
 	// per-session charge is taken against, and until the daemon wiring
@@ -135,11 +135,11 @@ type FrontDoor struct {
 	// example someone did not read.
 	//
 	// WHAT IT COSTS, written here as well as in config.example.toml because
-	// ADR-0086 R4 requires the reason to be readable at the point that honours
+	// The rule requires the reason to be readable at the point that honours
 	// it, not only where it is set: with TLS off, EVERY ACCESS TOKEN CROSSES
 	// THE WIRE IN CLEARTEXT, and a token works from anywhere it is admitted
 	// until it is revoked — so an intercepted one is a credential an attacker
-	// keeps. ADR-0075 §4 chose verify-full over require for exactly this
+	// keeps. The design chose verify-full over require for exactly this
 	// reason. This is a deliberate, documented exception for debugging, not a
 	// reversal of that decision.
 	//
@@ -149,7 +149,7 @@ type FrontDoor struct {
 	// whose own allowed_ips is then their entire admission gate.
 	InsecureDisableTLS string `toml:"insecure_disable_tls"`
 
-	// ControlLaneBytes is the reserved control lane (§1.4). Unset derives
+	// ControlLaneBytes is the reserved control lane. Unset derives
 	// max_conns × 64 KiB, and it may only be RAISED above that.
 	ControlLaneBytes int64 `toml:"control_lane_bytes"`
 }
@@ -168,14 +168,14 @@ func (f FrontDoor) CleartextDebug() bool {
 	return f.InsecureDisableTLS == CleartextAcknowledgement
 }
 
-// DefaultResidentBudgetBytes and MaxResidentBudgetBytes are ADR-0075 §4's
+// DefaultResidentBudgetBytes and MaxResidentBudgetBytes are the design's
 // global resident budget and its ratified ceiling.
 //
 // The ceiling is ENFORCED, not merely documented. It was described in the
 // comment and checked nowhere: validation rejected negatives, the effective
 // value passed through every positive, and the engine took whatever arrived.
 // That is the same defect this whole slice is about — a stated guard
-// production does not apply — and lector found it sitting inside the fix for
+// production does not apply — and a review found it sitting inside the fix for
 // it.
 const (
 	DefaultResidentBudgetBytes int64 = 1 << 30
@@ -201,7 +201,7 @@ const MaxSubjectLen = 64
 // root was resolved — which is after login, after bootstrap, after the session
 // pool and after the ticket — so a configured `notes_subject` of `../alice` was
 // accepted at startup and the identity became the daemon's PERMANENT first admin
-// before anything rejected it (lector r1 on PR #5). An unusable subject must be
+// before anything rejected it. An unusable subject must be
 // refused at load, at construction, and at admission, all against this function.
 //
 // Rejected rather than sanitised: a name that has to be rewritten to be safe is a
@@ -238,9 +238,9 @@ func ValidSubject(s string) error {
 	return nil
 }
 
-// Web configures the --web-ui gateway (ADR-0064).
+// Web configures the --web-ui gateway.
 //
-// notes_mode / notes_subject were REMOVED by ADR-0068. They selected which note
+// notes_mode / notes_subject were REMOVED when notes became identity-keyed. They selected which note
 // tree a browser session read, and the "workspace" mode pointed at a tree with
 // no user component — so isolation had to come from admitting exactly one
 // configured identity rather than from the path. Notes are now keyed by
@@ -270,7 +270,7 @@ type Exec struct {
 	MaxStatementBytes int `toml:"max_statement_bytes"`
 
 	// MaxSessionsPerUser and MaxSessionsGlobal bound the number of open
-	// ExecSessions (ADR-0074 §1b). One transaction per session bounds pinned
+	// ExecSessions. One transaction per session bounds pinned
 	// database connections, but not the session objects and timers
 	// themselves — without these an authenticated caller could exhaust
 	// memory inside the idle window just by opening sessions.
@@ -287,7 +287,7 @@ type Exec struct {
 	SessionIdleTimeout Duration `toml:"session_idle_timeout"`
 
 	// IdleInTxTimeout and MaxTxDuration bound an OPEN transaction
-	// (ADR-0074 §1). These are not tuning knobs with a sensible "off": the
+	//. These are not tuning knobs with a sensible "off": the
 	// target may be a live production database, where a transaction
 	// abandoned between BEGIN and COMMIT holds locks until something ends
 	// it. Nothing else will.
@@ -299,7 +299,7 @@ type Exec struct {
 	MaxTxDuration   Duration `toml:"max_tx_duration"`
 
 	// DebugIdleInTxTimeout is the idle-in-transaction bound for connections
-	// marked debug (ADR-0074 Amendment 2 C2). A developer paused at a
+	// marked debug. A developer paused at a
 	// breakpoint inside a transaction must not be rolled back mid-step, so
 	// it is longer — but it is still bounded, and still under the ceiling.
 	DebugIdleInTxTimeout Duration `toml:"debug_idle_in_tx_timeout"`
@@ -311,7 +311,7 @@ type Exec struct {
 	MaxTxDurationCeiling Duration `toml:"max_tx_duration_ceiling"`
 
 	// PoolMaxConns bounds the connections one TARGET pool may open
-	// (ADR-0074 §1a). A pinned transaction holds a physical connection for
+	//. A pinned transaction holds a physical connection for
 	// as long as the session keeps it open, so without a bound a handful of
 	// callers with open transactions can consume a production database's
 	// entire connection budget — and the first thing that fails is somebody
@@ -337,10 +337,10 @@ type Exec struct {
 	JanitorInterval Duration `toml:"janitor_interval"`
 
 	// ReconcileInterval is how often the engine re-asks targets about
-	// transactions whose outcome it could not determine (ADR-0074 §7).
+	// transactions whose outcome it could not determine.
 	//
 	// Non-positive DISABLES the periodic pass — a supported operator choice
-	// with named semantics (Amendment 4 A1), not a misconfiguration. Startup
+	// with named semantics, not a misconfiguration. Startup
 	// recovery and connection-checkout reconciliation continue, so a pending
 	// entry is still resolved when its target next answers; what is given up
 	// is the timed retry for a target nothing else touches. Validation
@@ -357,7 +357,7 @@ type Exec struct {
 	ReconcileInterval Duration `toml:"reconcile_interval"`
 
 	// OutcomeRetention is how long a SETTLED transaction keeps its full
-	// progression before it is collapsed to a tombstone (ADR-0079 §3).
+	// progression before it is collapsed to a tombstone.
 	//
 	// DISABLED by default, and non-positive keeps it disabled — the same
 	// named semantics as reconcile_interval. Retention here never deletes a
@@ -370,7 +370,7 @@ type Exec struct {
 	OutcomeRetentionInterval Duration `toml:"outcome_retention_interval"`
 }
 
-// TUI configures the standalone terminal UI (ADR-0057).
+// TUI configures the standalone terminal UI.
 type TUI struct {
 	// NotesDir overrides the local notes root (default:
 	// $XDG_DATA_HOME/autodb/notes). Per-workspace folders inside it are
@@ -403,7 +403,7 @@ type Server struct {
 	// user can open. Setting a port is how an operator asks for a
 	// network-reachable server, which is M9-gated (TLS, rate limits).
 	Port int `toml:"port"`
-	// Bind is the TCP listen address; loopback by default (ADR-0052 §5).
+	// Bind is the TCP listen address; loopback by default.
 	// Ignored when Port is zero.
 	Bind string `toml:"bind"`
 	// Socket overrides the unix socket path. Empty means
@@ -411,7 +411,7 @@ type Server struct {
 	Socket string `toml:"socket"`
 }
 
-// Meta configures autodb's own management database (ADR-0053 §2).
+// Meta configures autodb's own management database.
 type Meta struct {
 	// Engine selects the meta-store backend: "sqlite" (default) or "postgres".
 	Engine engine.Name `toml:"engine"`
@@ -423,7 +423,7 @@ type Meta struct {
 	DSN string `toml:"dsn"`
 
 	// AllowInsecureDSN opts out of the transport check on the meta DSN
-	// (ADR-0079 §4). Without it a postgres meta store must use
+	//. Without it a postgres meta store must use
 	// sslmode=verify-full with an explicit sslrootcert.
 	//
 	// A named key rather than a silent default, so an insecure deployment is
@@ -434,7 +434,7 @@ type Meta struct {
 	// PoolMaxConns bounds the META store's own pool. Zero takes
 	// DefaultMetaPoolMaxConns.
 	//
-	// Deliberately NOT the target-pool default from ADR-0074 (2 x cores).
+	// Deliberately NOT the target-pool default (2 x cores).
 	// That number is sized by how much USER traffic a target must absorb;
 	// this pool serves the daemon's own bookkeeping — audit writes, history,
 	// the outcome log — whose concurrency is set by the daemon, not by how
@@ -444,7 +444,7 @@ type Meta struct {
 }
 
 // History configures script-history recall (Objective 5). The audit log is
-// always on regardless (ADR-0053 §2).
+// always on regardless.
 type History struct {
 	Enabled bool `toml:"enabled"`
 }
@@ -454,22 +454,22 @@ type Security struct {
 	// IPAllowlist is the set of client CIDRs allowed to talk to the server.
 	IPAllowlist []string `toml:"ip_allowlist"`
 
-	// ServiceKeyfile enables the UNATTENDED UNLOCK (ADR-0087): the daemon
+	// ServiceKeyfile enables the UNATTENDED UNLOCK: the daemon
 	// reads this file at start and unwraps the master key with it, so a
 	// restart does not need a human passphrase.
 	//
 	// EMPTY IS THE DEFAULT AND MEANS "no unattended unlock" — the behaviour
-	// before ADR-0087, and the right default: an install that never asked
+	// before the unattended-unlock design, and the right default: an install that never asked
 	// stays locked until somebody logs in, rather than reaching for a file
 	// nobody configured.
 	//
-	// GIVE IT ITS OWN DIRECTORY (Amendment 1 A1.2), not the meta store's. The
+	// GIVE IT ITS OWN DIRECTORY, not the meta store's. The
 	// store and the key that opens it are the two halves of one envelope, and
 	// a keyfile beside the store means one careless archive captures both —
 	// taken by somebody who believes they backed up a database.
 	//
 	// The daemon REFUSES a keyfile that is group- or world-readable, because
-	// developers hold shell accounts on the box this runs on and ADR-0075 §4
+	// developers hold shell accounts on the box this runs on and the design
 	// already puts a group-readable socket there. A permission that is
 	// documented but unchecked is one that drifts.
 	ServiceKeyfile string `toml:"service_keyfile"`
@@ -514,7 +514,7 @@ func Default() Config {
 // DefaultMaxStatementBytes is the default [exec] max_statement_bytes.
 const DefaultMaxStatementBytes = 64 * 1024
 
-// Session bounds (ADR-0074 §1b). Positive, safe, and always applied.
+// Session bounds. Positive, safe, and always applied.
 const (
 	DefaultMaxSessionsPerUser = 8
 	DefaultMaxSessionsGlobal  = 256
@@ -523,14 +523,14 @@ const (
 	DefaultSessionIdleTimeout = 30 * time.Minute
 )
 
-// Transaction bounds (ADR-0074 §1, Amendment 2 C2).
+// Transaction bounds.
 const (
 	DefaultIdleInTxTimeout      = 90 * time.Second
 	DefaultMaxTxDuration        = 5 * time.Minute
 	DefaultDebugIdleInTxTimeout = 10 * time.Minute
 	DefaultMaxTxDurationCeiling = 30 * time.Minute
 
-	// Pool-lifecycle defaults are ADR-0074 §1a's: idle 10m / lifetime 60m,
+	// Pool-lifecycle defaults are the engine's: idle 10m / lifetime 60m,
 	// so unused pools shrink to zero against a live production target. An
 	// earlier 5m/30m here was my own invention and contradicted the ADR
 	// without an amendment, which is not a call this code gets to make.
@@ -545,7 +545,7 @@ const (
 
 	// DefaultReservedHeadroom holds four connections of each target pool back
 	// from wire leases, for the interactive surfaces and the engine's own
-	// control queries (ADR-0075 §4 defaults table).
+	// control queries.
 	DefaultReservedHeadroom = 4
 
 	// A tenth of the 90s idle-in-transaction bound: an expired transaction
@@ -576,7 +576,7 @@ const (
 	MinMetaPoolMaxConns = 2
 )
 
-// DefaultPoolMaxConns is 2 × cores, per ADR-0074 §1a (Johno, 2026-08-30).
+// DefaultPoolMaxConns is 2 × cores (Johno, 2026-08-30).
 //
 // It is a function rather than a constant because the number depends on the
 // machine. The reasoning behind it is that pgxpool's own default is roughly
@@ -625,7 +625,7 @@ func DefaultPath() (string, error) {
 // file — --create-cert puts the generated TLS material beside the config that
 // will name it. Load calls this too, so there is ONE rule for where autodb's
 // configuration lives rather than a second copy that agrees until someone
-// changes the first ([[shared-resolver-single-source-of-truth]]).
+// changes the first (one resolver, one source of truth).
 //
 // It reports where a file WOULD be, not whether one is there: a missing config
 // is not an error anywhere else in this package and must not become one here.
@@ -668,7 +668,7 @@ func Load(path string) (Config, error) {
 		return Config{}, fmt.Errorf("config: %s: %w", path, err)
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		// Keys ADR-0068 removed get a reason rather than a bare "unknown key".
+		// Keys the identity-keying change removed get a reason rather than a bare "unknown key".
 		// An operator who set notes_mode did so for isolation, and the one
 		// dangerous outcome is their believing it still applies; the generic
 		// message would not tell them it is gone or what replaced it.
@@ -703,8 +703,8 @@ func (c Config) validate() error {
 	if c.Exec.MaxStatementBytes <= 0 {
 		return fmt.Errorf("%w: exec.max_statement_bytes %d must be positive", ErrInvalid, c.Exec.MaxStatementBytes)
 	}
-	// An explicit 0 is refused rather than read as "unlimited" (ADR-0074
-	// §1b): a caller must not be able to remove a production-safety bound by
+	// An explicit 0 is refused rather than read as "unlimited": a caller must
+	// not be able to remove a production-safety bound by
 	// writing what looks like a disable switch.
 	if c.Exec.MaxSessionsPerUser <= 0 {
 		return fmt.Errorf("%w: exec.max_sessions_per_user %d must be positive — 0 does not mean unlimited; "+
@@ -801,7 +801,7 @@ func (f FrontDoor) validate(poolMaxConns int) error {
 	if _, _, err := net.SplitHostPort(f.Bind); err != nil {
 		return fmt.Errorf("%w: frontdoor.bind %q is not host:port: %v", ErrInvalid, f.Bind, err)
 	}
-	// The cleartext debugging exception (ADR-0086 §10) is checked BEFORE the
+	// The cleartext debugging exception is checked BEFORE the
 	// TLS requirements, because it is what makes them optional.
 	//
 	// Any value other than the exact acknowledgement is a REFUSAL, not a

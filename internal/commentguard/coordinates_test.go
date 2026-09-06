@@ -37,6 +37,7 @@ import (
 // The list is the opposite of an exemption list: being ON it is the obligation.
 var certifiedClean = []string{
 	"webserver",
+	"core/config",
 }
 
 // Patterns that name a private artefact.

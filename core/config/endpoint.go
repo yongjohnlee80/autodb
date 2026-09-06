@@ -15,7 +15,7 @@ const SocketName = "autodb.sock"
 // resolved in ONE place because it is a rendezvous: the TUI and each
 // Neovim instance share a daemon only by looking in the same spot, and
 // two components computing "the same" address independently is how they
-// end up in different places (ADR-0058 §3.2.1).
+// end up in different places.
 type Endpoint struct {
 	// Network is "unix" or "tcp", ready for net.Listen and net.Dial.
 	Network string

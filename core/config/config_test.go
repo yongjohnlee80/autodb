@@ -73,7 +73,7 @@ func TestLoad_Validation(t *testing.T) {
 
 func TestLoad_PostgresEngine(t *testing.T) {
 	t.Parallel()
-	// The DSN now has to survive the transport check (ADR-0079 §4), so this
+	// The DSN now has to survive the transport check, so this
 	// cell carries a production-shaped one rather than "postgres://x". That
 	// is the point of the check: a bare DSN is not loadable any more.
 	dsn := "postgres://x/db?sslmode=verify-full&sslrootcert=/etc/ssl/ca.crt"
@@ -86,11 +86,11 @@ func TestLoad_PostgresEngine(t *testing.T) {
 	}
 }
 
-// ADR-0074 Amendment 4 A1 names four cases for reconcile_interval: unset
+// The amended rule names four cases for reconcile_interval: unset
 // takes the positive default, a positive value is honoured, and zero or
 // negative DISABLES the periodic pass — a supported operator choice, not a
 // misconfiguration. Rejecting the non-positive values made the ratified
-// configuration unreachable (PR #20 r0 MF5).
+// configuration unreachable (raised in review).
 func TestLoad_ReconcileIntervalSupportsTheRatifiedDisableSemantics(t *testing.T) {
 	t.Parallel()
 
@@ -124,9 +124,9 @@ func TestLoad_ReconcileIntervalSupportsTheRatifiedDisableSemantics(t *testing.T)
 }
 
 // The front door's budget CEILING is enforced through the real Load seam
-// (lector PR #38 r0 must-fix 1).
+// (raised in review).
 //
-// ADR-0075 §4 ratifies 1 GiB with a 4 GiB ceiling. The ceiling was in the
+// The design ratifies 1 GiB with a 4 GiB ceiling. The ceiling was in the
 // comment and in no check: validation rejected negatives, the effective value
 // passed through every positive, and the engine took whatever arrived. That is
 // the same defect this slice exists to close — a stated guard production does

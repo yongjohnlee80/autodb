@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// Meta-store transport hardening — ADR-0079 §4 / P1.
+// Meta-store transport hardening.
 //
 // The meta store holds the audit trail, the user records and the encrypted
 // connection secrets, so its DSN is checked at load rather than trusted.
@@ -130,7 +130,7 @@ func TestConfig_MetaPoolFloor(t *testing.T) {
 //
 // Every cell above calls checkMetaDSNTransport directly, and all of them stay
 // green if the call is deleted from Validate — which would leave the function
-// correct, tested, and never run. That is code-review §7: a test that reaches
+// correct, tested, and never run. That is the review rule: a test that reaches
 // the state by hand proves the constructor, not the system.
 func TestLoad_RefusesAnInsecureMetaDSNThroughTheRealEntryPoint(t *testing.T) {
 	t.Parallel()
@@ -160,7 +160,7 @@ func TestLoad_RefusesAnInsecureMetaDSNThroughTheRealEntryPoint(t *testing.T) {
 	}
 }
 
-// PR #27 r0: a DSN-level pool_max_conns must not walk past the floor.
+// A DSN-level pool_max_conns must not walk past the floor.
 //
 // The bound used to be decided TWICE — validation read the TOML field while
 // the opener treated a DSN-level pool_max_conns as authoritative — so
@@ -224,7 +224,7 @@ func TestMetaPool_EffectiveBoundAndItsSource(t *testing.T) {
 	}
 }
 
-// RedactDSN — lector's PR #31 r0 MF3.
+// RedactDSN — raised in review.
 //
 // The migration CLI accepts both DSN forms and prints the destination in a
 // report its own comment describes as "the sort of thing an operator pastes
@@ -280,7 +280,7 @@ func TestRedactDSNMasksPasswordsInBothForms(t *testing.T) {
 // It replaced a CheckDSNTransport that exposed only the transport half. The
 // CLI called that half, looked validated, and let pool_max_conns=1 through to
 // a destination whose lease then pinned the only connection while the
-// migration runner waited for a second (MF2). An exported half is an
+// migration runner waited for a second, as a review found. An exported half is an
 // invitation to apply half.
 func TestCheckOperationalCoversTransportAndPoolFloor(t *testing.T) {
 	t.Parallel()

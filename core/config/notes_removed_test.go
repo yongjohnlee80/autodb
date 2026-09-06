@@ -1,8 +1,8 @@
 package config_test
 
-// ADR-0068 removed web.notes_mode / web.notes_subject. What must be tested is
+// The identity-keying change removed web.notes_mode / web.notes_subject. What must be tested is
 // not the absence of a feature but that a config still carrying either key
-// FAILS TO LOAD with a reason — criterion 15.
+// FAILS TO LOAD with a reason.
 //
 // Being ignored is the dangerous outcome. An operator who set notes_mode did so
 // for isolation, and silently dropping it leaves them believing an isolation

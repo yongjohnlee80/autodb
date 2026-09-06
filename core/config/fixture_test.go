@@ -1,10 +1,10 @@
 package config
 
-// Entry-point fixture for config cells — code-review §11 ("the wiring is
+// Entry-point fixture for config cells — the review rule that "the wiring is
 // the claim"): every new validation gets at least one cell that enters
 // through Load, because a direct cell on the check function stays green
 // when the CALL to it is severed from validate(). The motivating case is
-// PR #22's transport check: five direct cells stayed green with the check
+// the transport check: five direct cells stayed green with the check
 // unwired from Validate.
 //
 // These helpers make the entry-point cell as cheap as the direct cell:

@@ -41,11 +41,11 @@ func TestFrontDoor_DisabledIsNotValidated(t *testing.T) {
 	}
 }
 
-// The §11 wiring cell (converted from the direct-cell shape below): the
+// The wiring cell (converted from the direct-cell shape below): the
 // front-door refusal must be observable THROUGH Load. Every cell in
 // TestFrontDoor_Validation calls validate() on a hand-built struct, so all
 // of them stay green if Load stops calling validate() at all — the severed
-// seam that shipped PR #22's transport check unwired. This cell dies with
+// seam that shipped the transport check unwired. This cell dies with
 // that call deleted (verified: `return cfg, cfg.validate()` → `return cfg,
 // nil` in Load fails only this cell; the table stays green). The table
 // below keeps per-message coverage.
@@ -95,7 +95,7 @@ func TestFrontDoor_Validation(t *testing.T) {
 		{"a bind that is not host:port", func(c *Config) { c.FrontDoor.Bind = "5432" }, "host:port"},
 		{"negative headroom", func(c *Config) { c.FrontDoor.ReservedHeadroom = -1 }, "cannot be negative"},
 
-		// MF1. Without this the SAN check was skippable by OMISSION: an
+		// Without this the SAN check was skippable by OMISSION: an
 		// enabled front door with no names configured ran zero name checks,
 		// and the one check that cannot be deferred to the client silently
 		// did not run. verify-full verifies the NAME, so the gap simply

@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Meta-store DSN hardening — ADR-0079 §4, phase P1.
+// Meta-store DSN hardening.
 //
 // The meta store holds the audit trail, the user records and the encrypted
 // connection secrets. It is the one database whose compromise costs everything
@@ -123,7 +123,7 @@ func checkMetaDSNTransport(dsn string, allowInsecure bool) error {
 // where it came from.
 //
 // One function decides, and both the validator and the connection opener call
-// it. That is the fix for PR #27 r0: the bound used to be decided twice —
+// it. That is the fix a review required: the bound used to be decided twice —
 // validation checked the TOML field while the opener treated a DSN-level
 // `pool_max_conns` as authoritative — so `dsn = "...?pool_max_conns=1"` walked
 // straight past the floor and produced a one-connection pool that the instance
@@ -178,8 +178,8 @@ func checkMetaPoolFloor(m Meta) error {
 // CheckDSNTransport that exposed only half the rule. The CLI called that half,
 // looked validated, and let `pool_max_conns=1` through — where the destination
 // lease pins the single connection and the migration runner then waits forever
-// for a second one (lector's PR #31 r0 MF2). That is the PR #27 finding
-// reopened one layer out: PR #27 was about one value being DECIDED twice, this
+// for a second one, as a later review found. That is the same finding
+// reopened one layer out: the first was about one value being DECIDED twice, this
 // is about one rule being APPLIED in halves. An exported half is an invitation
 // to apply half, so there is no longer a half to call.
 func (m Meta) CheckOperational() error {
@@ -192,8 +192,8 @@ func (m Meta) CheckOperational() error {
 // RedactDSN removes the password from a DSN so it can be printed.
 //
 // It handles BOTH forms, because the CLI accepts both. The URL-only version
-// printed `password=sekrit` verbatim for keyword-form DSNs (lector's PR #31 r0
-// MF3), and the report it appears in is the sort of thing an operator pastes
+// printed `password=sekrit` verbatim for keyword-form DSNs (found in review0
+// ), and the report it appears in is the sort of thing an operator pastes
 // into a ticket — so that was a credential leak, not a cosmetic gap.
 //
 // It lives beside dsnParams rather than in the CLI because both forms of the
