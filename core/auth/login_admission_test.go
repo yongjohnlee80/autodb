@@ -10,7 +10,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// LoginAt's combined operation (ADR-0075 Amendment 1, lector PR #34 r2
+// LoginAt's combined operation (
 // ruling).
 //
 // The gateway used to log in, ask a second RPC whether the browser's address
@@ -174,8 +174,7 @@ func TestLogin_IsLoginAtWithoutAnAdmissionLayer(t *testing.T) {
 	}
 }
 
-// THE ADMISSION RECORD COMMITS WITH THE SESSION OR NOT AT ALL (lector PR #34
-// r3 must-fix).
+// THE ADMISSION RECORD COMMITS WITH THE SESSION OR NOT AT ALL.
 //
 // It used to be written the moment the admission check passed, under a
 // comment claiming the login had already been decided. It had not. Between
@@ -186,7 +185,7 @@ func TestLogin_IsLoginAtWithoutAnAdmissionLayer(t *testing.T) {
 // trail that lies is worse than one that is silent, because it is the thing
 // an operator reconstructs an incident from.
 //
-// Reproduced the way lector did: deterministically, with an empty keyslot,
+// Reproduced the way review did: deterministically, with an empty keyslot,
 // rather than by arguing about a race.
 func TestLoginAt_NoAdmissionRecordWithoutACommittedSession(t *testing.T) {
 	t.Parallel()
@@ -293,7 +292,7 @@ func countSessions(t *testing.T, store *meta.Store) uint64 {
 	return n
 }
 
-// AN AUDIT FAILURE ROLLS THE LOGIN BACK (lector PR #34 r4 must-fix).
+// AN AUDIT FAILURE ROLLS THE LOGIN BACK.
 //
 // r3 moved the admission record into the committing transaction and returned
 // its error rather than dropping it. I could not observe that with the cells I
@@ -301,7 +300,7 @@ func countSessions(t *testing.T, store *meta.Store) uint64 {
 // unobservable, arguing that the `login` audit immediately above had the same
 // uncovered shape.
 //
-// Lector rejected the argument, correctly: an uncovered neighbour is another
+// Review rejected the argument, correctly: an uncovered neighbour is another
 // candidate for the same control, not a licence. And no production seam is
 // needed, which is the part I had not thought of. The test already owns the
 // store, so it can install a trigger that makes one specific insert fail and
@@ -363,7 +362,7 @@ func TestLoginAt_AnAuditFailureRollsTheLoginBack(t *testing.T) {
 // TEST, using the store the test already owns.
 //
 // A trigger rather than a hook on the Service. An injected-failure seam on a
-// security-critical API is what lector refused in r1, and it is not needed:
+// security-critical API is what review refused, and it is not needed:
 // the failure this cell is about is a database refusing a write, so making
 // the database refuse it is both closer to the real thing and entirely
 // test-owned.

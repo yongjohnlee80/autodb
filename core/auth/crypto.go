@@ -68,7 +68,7 @@ func encodeHash(p kdfParams, authHalf []byte) string {
 // they are matched against an explicit ALLOWLIST of approved profiles
 // rather than a bounds range: a range still permits the worst allowed cost
 // (1 GiB × 16 passes × 32 threads) as a resource-exhaustion lever
-// (lector M3 r2 must-fix #2). New records always use profileV1; older
+// New records always use profileV1; older
 // profiles stay listed only while rows carrying them exist.
 type kdfProfile struct {
 	Memory  uint32

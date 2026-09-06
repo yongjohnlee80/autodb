@@ -206,7 +206,7 @@ func TestRemoveUserIP_DeleteIsScopedToOwner(t *testing.T) {
 		t.Error("a delete scoped to alice removed bob's row — cross-user reach")
 	}
 	// And the no-op must not WRITE AN AUDIT ROW: a false user_ip_removed
-	// asserts a security change that never happened (lector r0 MF2).
+	// asserts a security change that never happened.
 	if n := auditCount(t, store, "user_ip_removed"); n != 0 {
 		t.Errorf("zero-row delete wrote %d user_ip_removed audit rows, want 0", n)
 	}
@@ -257,7 +257,7 @@ func TestAddUserIP_TakesTheOwnerRowLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The updated_at bump is the visible form of the per-user write lock
-	// that makes count-then-insert concurrency-safe (lector r0 MF1); if it
+	// that makes count-then-insert concurrency-safe; if it
 	// disappears, the serialization disappeared with it.
 	if after.UpdatedAt <= before.UpdatedAt {
 		t.Errorf("users.updated_at not bumped (%d -> %d) — the owner-row lock is gone",
@@ -266,7 +266,7 @@ func TestAddUserIP_TakesTheOwnerRowLock(t *testing.T) {
 }
 
 // The cap under REAL concurrency needs PostgreSQL (sqlite serializes writers
-// and cannot exhibit the race lector reproduced). Gated on TEST_PGURL; runs
+// and cannot exhibit the race review reproduced). Gated on TEST_PGURL; runs
 // on VM43.
 func TestAddUserIP_CapUnderConcurrency_PG(t *testing.T) {
 	base := os.Getenv("TEST_PGURL")
@@ -326,6 +326,6 @@ func TestAddUserIP_CapUnderConcurrency_PG(t *testing.T) {
 	}
 	if len(rows) > maxUserIPs {
 		t.Fatalf("cap breached under concurrency: %d rows, cap %d — the owner-row "+
-			"lock is not serializing (lector r0 MF1 reproduction)", len(rows), maxUserIPs)
+			"lock is not serializing (the reproduction from review)", len(rows), maxUserIPs)
 	}
 }

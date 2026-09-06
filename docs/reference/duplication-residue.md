@@ -211,6 +211,14 @@ catch two; it found four.
   vacuity floors refused the run — correctly, because certifying what is left
   would assert nothing. The exemption machinery was removed rather than left
   dormant, per the fourth part above.
+  EACH RUNG IS THE GUARD'S OWN REVIEW, and that is the frame to keep. An
+  instrument's test corpus is written from the instrument's current model of
+  the defect, so it can only confirm that model; every package not yet tailored
+  to the guard is an adversarial input to the model itself. Two of the cells'
+  acceptance bugs were found exactly this way — the ellipsis and then the
+  relative path, both against the bare-period cell, both from real code rather
+  than an invented fixture. The remaining rungs are conversion work AND the
+  cells' live review.
   A THIRD ARM ARRIVED WITH RUNG THREE: the same rule applied to STRING
   LITERALS, after two coordinates survived a conversion because the comment
   cell structurally cannot see them — one of them printed to an operator's

@@ -1,11 +1,11 @@
 package auth
 
-// The allowlist management surface (ADR-0075 §4). Two layers, two owners:
+// The allowlist management surface. Two layers, two owners:
 //
 //   - The GLOBAL allowlist (config CIDRs ∪ ip_allowlist rows) gates every
 //     login (Objective 21). Admin-managed; config entries are read-only at
 //     runtime because silently narrowing an allowlist is not acceptable
-//     (lector M3) — they are listed so an admin can SEE the whole truth,
+//     — they are listed so an admin can SEE the whole truth,
 //     but only store rows can be added or removed here.
 //   - The PER-USER allowlist (user_ip_allowlist) is the front door's second
 //     layer: a front-door login must pass both, and a PAT's allowed_ips
@@ -23,7 +23,7 @@ import (
 )
 
 // maxUserIPs bounds one user's allowlist rows — a positive safe default in
-// the house style (ADR-0074 §1b): large enough for real setups (home, VPN,
+// the house style: large enough for real setups (home, VPN,
 // office, laptop…), small enough that an unbounded insert loop is refused.
 const maxUserIPs = 32
 
@@ -78,7 +78,7 @@ func canonicalCIDR(cidr string) (string, error) {
 		// A 4-in-6 mapped prefix canonicalizes to its IPv4 form, exactly as
 		// a bare mapped address does — otherwise ::ffff:10.1.2.3/128 and
 		// 10.1.2.3/32 would be two "different" rows for one network
-		// (lector PR #21 r0 SF1). A mapped prefix wider than the mapped
+		// A mapped prefix wider than the mapped
 		// space (< /96) spans more than IPv4 and is refused as meaningless
 		// for an allowlist entry.
 		if p.Addr().Is4In6() {
@@ -113,9 +113,9 @@ func (s *Service) AddUserIP(ctx context.Context, token string, userID int64, cid
 	return s.inTx(ctx, func(tx *dao.Transaction) error {
 		// Serialize concurrent adds for this user by taking a WRITE LOCK on
 		// the owner's users row first: count-then-insert alone is not
-		// concurrency-safe on PostgreSQL under READ COMMITTED — lector
-		// reproduced 35 rows against cap 32 from concurrent adds (PR #21 r0
-		// MF1); sqlite only masked it by serializing writers. Touching
+		// concurrency-safe on PostgreSQL under READ COMMITTED — review
+		// reproduced 35 rows against cap 32 from concurrent adds;
+		// sqlite only masked it by serializing writers. Touching
 		// updated_at is the lock's visible form, and is also semantically
 		// true: the user's security posture changed.
 		if err := s.store.Users.On(tx).With(meta.UserID, userID).
@@ -151,8 +151,8 @@ func (s *Service) RemoveUserIP(ctx context.Context, token string, userID, rowID 
 	return s.inTx(ctx, func(tx *dao.Transaction) error {
 		// Fetch-before-delete: a (id, user_id) miss is a silent no-op and
 		// MUST NOT write an audit row — a false "user_ip_removed" entry
-		// asserts a security change that never happened (lector PR #21 r0
-		// MF2, proven by control on VM43). The fetch also lets the audit
+		// asserts a security change that never happened (proven by a control
+		// run against a live server). The fetch also lets the audit
 		// name the CIDR rather than an opaque row id.
 		row, err := s.store.UserIPs.On(tx).
 			With(meta.UIPID, rowID).With(meta.UIPUserID, userID).Get()

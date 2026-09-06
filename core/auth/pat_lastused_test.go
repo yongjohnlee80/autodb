@@ -9,7 +9,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// NotePATUse's coalescing bound (lector PR #33 r0 must-fix 2).
+// NotePATUse's coalescing bound.
 //
 // The claim is "at most one write per interval". The first version checked
 // s.now() against the LastUsedAt on the row THIS caller had read and then

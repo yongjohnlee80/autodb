@@ -16,7 +16,7 @@ func seedUserIP(t *testing.T, s *Service, userID int64, cidr string) {
 	}
 }
 
-// Amendment 1: admission is (global OR the user's own rows). Under the AND
+// Admission is (global OR the user's own rows). Under the AND
 // this replaced, a colleague at an already-listed office still needed a
 // personal row, and a home address had to be listed GLOBALLY to be usable —
 // which bloats the perimeter for everyone and makes the per-user layer a

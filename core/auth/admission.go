@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// IP admission for the front door and the web UI (ADR-0075 §4, Amendment 1).
+// IP admission for the front door and the web UI.
 //
 // Admission is (global allowlist OR the user's own rows), and a PAT's
 // allowed_ips then NARROWS that, if it sets any.
@@ -40,7 +40,7 @@ const (
 	// AdmittedByUserRow means one of the user's own rows matched.
 	AdmittedByUserRow AdmissionSource = "user-row"
 	// NotAdmitted means neither layer matched.
-	// AdmittedByTokenList is cleartext debugging mode ONLY (ADR-0086 §10):
+	// AdmittedByTokenList is cleartext debugging mode ONLY:
 	// the token's own allowed_ips was the entire admission gate and the
 	// inherited set was not consulted. Its own value because the audit trail
 	// must be able to say which sessions were admitted this way — they are the
@@ -61,7 +61,7 @@ func (s *Service) IPAllowedForUser(ctx context.Context, tx *dao.Transaction, use
 	s.admissionQueries.Add(1)
 	if ip == LocalPeer {
 		// A unix-socket peer has no address to match, and the 0600 socket is
-		// itself the boundary (ADR-0058). This surface never sees one — the
+		// itself the boundary. This surface never sees one — the
 		// front door is TCP-only — but the web gateway shares this predicate
 		// and might.
 		return AdmittedByGlobal, nil

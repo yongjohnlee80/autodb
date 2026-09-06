@@ -11,7 +11,7 @@ import (
 )
 
 // STANDING AUTHORITY: what a session's right to continue rests on, re-read
-// fresh (ADR-0075 Amendment 4's F3a seam; lector's ruling on the PAT
+// fresh (the standing-authority seam; the ruling on the PAT
 // standing-authority defect).
 //
 // A pinned transaction outlives the call that opened it, so the authority

@@ -91,14 +91,14 @@ func TestServiceKeyslot_SecondProcessUnlocksWithoutAPassphrase(t *testing.T) {
 
 // THE MONOTONICITY ITSELF, not its consequences.
 //
-// The reviewer asked for this by name and gave the reason: ADR-0087 Amendment 1
+// The reviewer asked for this by name and gave the reason: the keyslot design
 // A1.3 scopes the locked-store wire answer to the PRE-AUTH vocabulary, and that
 // scoping holds ONLY while the store cannot re-lock in process. Everything else
 // asserts a consequence of the invariant; this asserts the invariant.
 //
 // It is the cell that reddens the day someone adds "re-seal after N minutes
 // idle" — at which point ErrLocked becomes reachable mid-session through the
-// pool-reopen path and §8's matrix needs a second row for the post-auth case.
+// pool-reopen path, and the matrix needs a second row for the post-auth case.
 // Whoever writes that feature should meet this failure, not discover it.
 func TestServiceKeyslot_UnlockIsMonotonicPerProcess(t *testing.T) {
 	t.Parallel()
@@ -123,10 +123,10 @@ func TestServiceKeyslot_UnlockIsMonotonicPerProcess(t *testing.T) {
 		t.Fatalf("Logout: %v", err)
 	}
 	if !s.Unlocked() {
-		t.Fatal("LOGOUT RE-LOCKED THE STORE. Unlocking is not authentication (ADR-0087 §4) and " +
-			"the two must not be coupled — and if this is a deliberate change, ADR-0087 " +
-			"Amendment 1 A1.3's pre-auth scoping is no longer true and §8 needs a second " +
-			"matrix row for the post-auth case")
+		t.Fatal("LOGOUT RE-LOCKED THE STORE. Unlocking is not authentication and " +
+			"the two must not be coupled — and if this is a deliberate change, the " +
+			"pre-auth scoping is no longer true and the matrix needs a second " +
+			"row for the post-auth case")
 	}
 	if _, err := s.masterKey(); err != nil {
 		t.Fatalf("masterKey returned %v after a logout; ErrLocked has become reachable "+
@@ -134,7 +134,7 @@ func TestServiceKeyslot_UnlockIsMonotonicPerProcess(t *testing.T) {
 	}
 
 	// A failed unattended unlock must not clear a key this process already
-	// holds either — a degraded keyfile is §6's business and must not take
+	// holds either — a degraded keyfile is the locked-daemon contract's business and must not take
 	// down a store that is already open.
 	if err := os.Remove(s.keyfilePath); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
@@ -145,7 +145,7 @@ func TestServiceKeyslot_UnlockIsMonotonicPerProcess(t *testing.T) {
 	}
 }
 
-// §6: every keyfile failure leaves the store LOCKED and the process ALIVE, with
+// The contract: every keyfile failure leaves the store LOCKED and the process ALIVE, with
 // the ground named. Fail closed on the secret, never on the daemon — a start
 // that refuses because a keyfile is unreadable converts a degraded state into a
 // total outage, which is the outage this feature removes.
@@ -196,7 +196,7 @@ func TestServiceKeyslot_FailuresLeaveTheStoreLockedAndTheDaemonRunning(t *testin
 				t.Fatalf("unlock error = %v, want %v — an operator reading the log must be "+
 					"able to tell this ground from the others", err, tc.want)
 			}
-			// THE TWO PROPERTIES §6 PROMISES.
+			// THE TWO PROPERTIES THE CONTRACT PROMISES.
 			if next.Unlocked() {
 				t.Error("a failed keyslot unlock left the store UNLOCKED")
 			}
@@ -330,7 +330,7 @@ func TestServiceKeyslot_RemoveTakesTheKeyfileToo(t *testing.T) {
 //
 // Without the explicit check the open fails anyway — GCM sees a wrong AAD — so
 // this is a DIAGNOSIS guard rather than a security one, and it earns its place
-// on §6's terms: the operator must tell the grounds apart from the log, and
+// on the contract's terms: the operator must tell the grounds apart from the log, and
 // these two have different remedies. "The slot was sealed under a binding this
 // build does not know" means upgrade or roll back; "the slot did not open"
 // means the keyfile and the slot were separated. Sending someone to re-enroll

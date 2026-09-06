@@ -18,7 +18,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// The SERVICE KEYSLOT (ADR-0087): a copy of the install master key wrapped by a
+// The SERVICE KEYSLOT: a copy of the install master key wrapped by a
 // value held in a file, so the daemon can unlock without a human passphrase.
 //
 // WHY THIS EXISTS. Johno's milestone leaves autodb as the only path from a
@@ -27,9 +27,9 @@ import (
 // acceptance story says a developer should not need to touch the server after
 // setup, and it cannot hold while a restart requires one.
 //
-// WHAT IT IS NOT. It unlocks the KEY and authenticates NOBODY (ADR-0087 §4).
+// WHAT IT IS NOT. It unlocks the KEY and authenticates NOBODY.
 // Authority stays a token, re-resolved per call. The per-user passphrase slots
-// of ADR-0054 are untouched — this is the LUKS pattern, a keyfile slot added
+// of the per-user keyslots are untouched — this is the LUKS pattern, a keyfile slot added
 // beside the passphrase slots rather than replacing them.
 
 const (
@@ -37,7 +37,7 @@ const (
 	// wraps, and high-entropy by construction.
 	keyfileLen = 32
 
-	// aadServiceKeyslot binds the wrap to THIS slot (ADR-0087 §3,
+	// aadServiceKeyslot binds the wrap to THIS slot (
 	// security-core-hardening R5). It is deliberately different from
 	// aadMasterKey, which binds the per-user slots: without the distinction a
 	// store writer could move a user's wrapped blob into the service slot, or
@@ -45,7 +45,7 @@ const (
 	// permit?" — here the answer must be none.
 	aadServiceKeyslot = "autodb:keyslot:service:v1"
 
-	// hkdfInfoServiceKEK is the domain separation (ADR-0087 §2). The keyfile is
+	// hkdfInfoServiceKEK is the domain separation. The keyfile is
 	// already high-entropy, so argon2 would buy nothing and cost startup
 	// latency on EVERY boot — which is the delay this whole feature removes.
 	// What HKDF buys instead is `info`: it binds this derivation to this
@@ -53,7 +53,7 @@ const (
 	// one. `:v1` is the rotation seam.
 	//
 	// NO CELL CAN OBSERVE THIS TODAY and that is correct rather than a gap
-	// (ADR-0087 §2): autodb derives exactly one key from the keyfile, so an
+	// autodb derives exactly one key from the keyfile, so an
 	// implementation passing empty info behaves identically everywhere — the
 	// KEK differs, but consistently. It is a namespace reserved against a
 	// derivation that does not exist yet, NOT a redundant guard over a
@@ -62,7 +62,7 @@ const (
 	hkdfInfoServiceKEK = "autodb:keyslot:service:kek:v1"
 )
 
-// Keyfile failure grounds. Each is its own error because §6 keeps the daemon
+// Keyfile failure grounds. Each is its own error because the contract keeps the daemon
 // RUNNING on every one of them, which makes these the states an operator has
 // to tell apart from the log alone — and "TLS error" sends people to inspect
 // the wrong thing.
@@ -99,14 +99,14 @@ var (
 	ErrKeyfileStranded = errors.New("auth: a service keyfile exists with no slot")
 
 	// ErrNoServiceKeyslot — a keyfile exists but no slot does. The two halves
-	// live in different places on purpose (Amendment 1 A1.2), so having one
+	// live in different places on purpose, so having one
 	// without the other is a reachable state and gets its own name.
 	ErrNoServiceKeyslot = errors.New("auth: no service keyslot in this store")
 )
 
 // serviceKEK derives the key-encryption key from a keyfile.
 //
-// salt = none is a DECISION, not an omission (ADR-0087 §2). RFC 5869 permits
+// salt = none is a DECISION, not an omission. RFC 5869 permits
 // it, the IKM is per-install CSPRNG output used for one purpose, and a salt
 // that must itself be stored is one more file to lose. `info` does the work.
 func serviceKEK(keyfile []byte) ([]byte, error) {
@@ -124,7 +124,7 @@ func serviceKEK(keyfile []byte) ([]byte, error) {
 // newKeyfile generates 32 CSPRNG bytes and writes them 0600.
 //
 // The directory is created 0700 and is its OWN directory, not the meta store's
-// (Amendment 1 A1.2): the store resolves under $XDG_DATA_HOME/autodb, so a
+// The store resolves under $XDG_DATA_HOME/autodb, so a
 // keyfile beside it means one careless archive of that directory captures BOTH
 // halves of the envelope — the encrypted secrets and the key that opens them —
 // taken by somebody who believes they backed up a database.
@@ -156,9 +156,9 @@ func newKeyfile(path string) ([]byte, error) {
 }
 
 // readKeyfile reads a keyfile and REFUSES one that anybody but its owner can
-// read (ADR-0087 §7).
+// read.
 //
-// The mode is checked rather than documented, because ADR-0075 §4 already puts
+// The mode is checked rather than documented, because the front door already puts
 // a GROUP-READABLE enrollment socket (0660) on this box and the group is
 // exactly the developers. A permission that is documented but unchecked is a
 // permission that drifts, and here the drift is "every developer can unwrap
@@ -190,7 +190,7 @@ func readKeyfile(path string) ([]byte, error) {
 // --- the slot itself: enroll, unlock, remove ---------------------------------------
 
 // ServiceKeyslotState is what an operator is shown about the service slot
-// (ADR-0087 §6). The daemon KEEPS RUNNING on every failure below, so the state
+// The daemon KEEPS RUNNING on every failure below, so the state
 // has to be reportable — inferring "the store is locked" from every developer
 // being refused is the diagnosis this feature exists to end.
 type ServiceKeyslotState struct {
@@ -213,7 +213,7 @@ func (s *Service) ServiceKeyslotStatus() ServiceKeyslotState {
 }
 
 // EnrollServiceKeyslot writes a keyfile and stores the master key wrapped by
-// it, so the NEXT start needs no passphrase (ADR-0087 §1, §5).
+// it, so the NEXT start needs no passphrase.
 //
 // Admin-only and only while UNLOCKED, and both are structural rather than
 // policy: wrapping the master key requires HAVING it, so the slot can only be
@@ -222,7 +222,7 @@ func (s *Service) ServiceKeyslotStatus() ServiceKeyslotState {
 // happens once.
 //
 // The slot row and its audit row commit in ONE transaction
-// ([[security-core-hardening]] R2). A slot that exists with no record of who
+// A slot that exists with no record of who
 // cut it is exactly the row an investigation cannot account for — and this one
 // grants unattended access to every secret in the store.
 func (s *Service) EnrollServiceKeyslot(ctx context.Context, token, ip string) error {
@@ -310,7 +310,7 @@ func (s *Service) EnrollServiceKeyslot(ctx context.Context, token, ip string) er
 	return nil
 }
 
-// RemoveServiceKeyslot deletes the slot AND the keyfile (ADR-0087 §5).
+// RemoveServiceKeyslot deletes the slot AND the keyfile.
 //
 // Both halves, because either alone is a half-removal that reads as done: the
 // keyfile without the row is a secret on disk opening nothing, and the row
@@ -353,7 +353,7 @@ func (s *Service) RemoveServiceKeyslot(ctx context.Context, token, ip string) er
 
 // UnlockWithServiceKeyslot is the unattended unlock, run once at start.
 //
-// IT NEVER FAILS THE PROCESS (ADR-0087 §6). Fail closed on the SECRET, not on
+// IT NEVER FAILS THE PROCESS. Fail closed on the SECRET, not on
 // the daemon: a start that refuses because a keyfile is unreadable converts a
 // degraded state into a total outage, and this feature exists to remove an
 // outage. So every ground below leaves the store locked exactly as it is today,

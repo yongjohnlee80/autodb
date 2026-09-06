@@ -9,7 +9,7 @@ import (
 
 // The keyfile's REFUSAL GROUNDS, each exercised separately.
 //
-// A reviewer asked for exactly this and gave the reason: ADR-0087 §6 keeps the
+// A reviewer asked for exactly this and gave the reason: the contract keeps the
 // daemon RUNNING on every one of these, so they are the states an operator has
 // to tell apart from the log alone. A single "the keyfile is bad" error would
 // send someone to check permissions when the file is absent, or to look for a
@@ -194,7 +194,7 @@ func TestServiceKEK(t *testing.T) {
 	}
 }
 
-// THE SUBSTITUTION THE AAD EXISTS TO PREVENT (ADR-0087 §3, R5).
+// THE SUBSTITUTION THE AAD EXISTS TO PREVENT.
 //
 // The question an AAD answers is always "what substitution does this permit?",
 // and here it must be none: a store writer must not be able to move a user's

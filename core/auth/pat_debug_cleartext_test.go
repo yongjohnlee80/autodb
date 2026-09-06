@@ -11,13 +11,13 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// The debug_cleartext mint gate (ADR-0086 §10, R7).
+// The debug_cleartext mint gate.
 //
 // It had NO cells at all in its first round, while the banners and the
 // connection card that report the same mode carried thirteen mutation-proven
 // assertions between them. A reviewer named the inversion: the presentation
 // layer was proven to a high standard and the security core was not covered,
-// which is the opposite of the priority [[security-core-hardening]] sets. Every
+// which is the opposite of the priority the hardening work sets. Every
 // ground below therefore gets a cell AND a decoy — the question is never only
 // "does it refuse", it is "what else would it accept".
 

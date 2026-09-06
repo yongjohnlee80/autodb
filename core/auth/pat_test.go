@@ -20,7 +20,7 @@ import (
 // mustFrontDoorConn returns the id of a connection a PAT may legally be bound
 // to, creating it (and the caller's grant on it) on first use.
 //
-// ADR-0086 §6 gates a mint on FOUR things: a grant, profile = session, engine =
+// A mint is gated on FOUR things: a grant, profile = session, engine =
 // postgres, and a recorded target_db. A fixture missing any of them makes every
 // mint observe THE GATE rather than whatever the test is about — so the
 // fixture supplies all four, and the tests that exist to exercise the gates
@@ -434,13 +434,13 @@ func TestPAT_SubsetCheckIssuesOnTheCallersTransaction(t *testing.T) {
 	}
 }
 
-// MF1: the per-user cap holds under REAL concurrency, on PostgreSQL.
+// The per-user cap holds under REAL concurrency, on PostgreSQL.
 //
 // One transaction is not mutual exclusion. Under READ COMMITTED, concurrent
 // creates each read the same committed count, each find a free slot, and each
 // insert — the transaction gives atomicity of the write, not exclusivity of
 // the decision. I claimed one transaction closed this gap in the first
-// version; it did not, and lector reproduced 19 active tokens against a cap
+// version; it did not, and review reproduced 19 active tokens against a cap
 // of 16.
 //
 // SQLite masks it by serializing writers, which is why this cell is
@@ -556,7 +556,7 @@ func TestPAT_CapHoldsUnderConcurrency(t *testing.T) {
 	}
 }
 
-// MF1: a disabled account's token stops working immediately.
+// A disabled account's token stops working immediately.
 //
 // SetUserDisabled revokes SESSIONS, not tokens, so without a per-call owner
 // check a credential sitting in a DSN outlived the account it belonged to —

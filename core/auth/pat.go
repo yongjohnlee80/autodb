@@ -18,7 +18,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// Personal Access Tokens — the front door's credential (ADR-0075 §4).
+// Personal Access Tokens — the front door's credential.
 //
 // A PAT is what a person pastes into a DSN. That single fact drives most of
 // what follows: it is long-lived because a DSN is not re-typed daily, it is
@@ -27,7 +27,7 @@ import (
 // eventually be somewhere it should not be.
 //
 // It is deliberately NOT the login passphrase. The passphrase unwraps the
-// user's encryption keyslot (ADR-0054), so a leaked passphrase is total
+// user's encryption keyslot, so a leaked passphrase is total
 // compromise; a leaked PAT is bounded — gated queries, allowlisted IPs, TLS,
 // audited, and revocable in one command.
 
@@ -55,11 +55,11 @@ var (
 
 	// ErrPATConnDenied reports a mint against a connection the caller may not
 	// use — INCLUDING one that does not exist. The two are deliberately
-	// indistinguishable (ADR-0086 §6, security-core-hardening R13): telling
+	// indistinguishable: telling
 	// them apart would let any authenticated user walk connection ids through
 	// token_create and learn which exist. The same conflation is already made
 	// by exec.TestConnection, which returns ErrDenied for dao.ErrNoRows for
-	// exactly this reason (lector M4 must-fix #6).
+	// exactly this reason.
 	ErrPATConnDenied = errors.New("auth: no such connection, or you have no grant on it")
 
 	// ErrPATConnNotFrontDoor reports a mint against a connection that is not
@@ -70,11 +70,11 @@ var (
 	// already entitled to know. It is also the one refusal that must be
 	// actionable — a token bound to a v1compat connection would be a
 	// credential that cannot be used anywhere, and telling someone that at 2am
-	// is worse than refusing to create it (ADR-0086 R5).
+	// is worse than refusing to create it.
 	ErrPATConnNotFrontDoor = errors.New("auth: connection is not enabled for front-door use")
 
 	// ErrPATDebugCleartextRefused reports a refused debug_cleartext mint
-	// (ADR-0086 §10). Distinguishable and ACTIONABLE, like
+	// Distinguishable and ACTIONABLE, like
 	// ErrPATConnNotFrontDoor: it reaches an authenticated caller managing
 	// their own tokens, and a refusal that only says "no" sends someone
 	// hunting through configuration.
@@ -90,7 +90,7 @@ var (
 	ErrPATNotFound = errors.New("auth: no token with that name")
 )
 
-// PAT policy (ADR-0075 §4 defaults table).
+// PAT policy.
 const (
 	// PATMaxPerUser and PATMaxGlobal bound ACTIVE tokens. Explicit 0 is a
 	// configuration error elsewhere; these are the defaults.
@@ -157,7 +157,7 @@ func splitPAT(token string) (selector, secret string, wellFormed bool) {
 // if it is read in full — which is the property that makes a database backup
 // something other than a credential dump.
 //
-// connID is not optional (ADR-0086 §1, ruled by Johno: every PAT is bound,
+// connID is not optional (ruled by Johno: every PAT is bound,
 // there is no unscoped form). Binding is what dissolves the connection-name vs
 // target-database-name ambiguity, and it narrows a stolen token to one
 // connection instead of every connection its owner is granted.
@@ -201,15 +201,15 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 	// COMMITTED, concurrent creates each read the same committed count, each
 	// find a free slot, and each insert — the transaction gives atomicity of
 	// the write, not exclusivity of the decision. I claimed in the first
-	// version that one transaction closed this gap; it did not, and lector
+	// version that one transaction closed this gap; it did not, and review
 	// reproduced 19 active tokens against a cap of 16.
 	//
 	// The locks come first and ALWAYS in this order — global guard row, then
 	// the owner's users row. A consistent order is what stops two
 	// transactions taking them in opposite sequences and deadlocking.
 	//
-	// This is the pattern PR #21 already established for the per-user
-	// allowlist cap, after lector reproduced the same defect there (35 rows
+	// This is the pattern already established for the per-user
+	// allowlist cap, after review reproduced the same defect there (35 rows
 	// against a cap of 32). It was sitting in this package while I wrote the
 	// unsafe version.
 	err = s.inTx(ctx, func(tx *dao.Transaction) error {
@@ -266,7 +266,7 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 		// no name is simply reachable by its connection name, exactly as it is
 		// today. Nothing here needs to change when mysql and bigquery land.
 		//
-		// Refused at MINT rather than only at connect (ADR-0086 R5): a token
+		// Refused at MINT rather than only at connect: a token
 		// that cannot be used anywhere is worth refusing to create, and the
 		// message names the remedy.
 		if connRow.Profile != meta.ProfileSession {
@@ -275,7 +275,7 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 				"admitted on that connection", ErrPATConnNotFrontDoor, connRow.Name, connRow.Profile)
 		}
 
-		// GATE 3 — the cleartext debugging credential class (ADR-0086 §10).
+		// GATE 3 — the cleartext debugging credential class.
 		//
 		// THREE parts, and each closes a different hole:
 		//
@@ -418,8 +418,8 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 // canonicalAllowedIPs validates a token's own narrowing and returns it
 // canonicalized for storage.
 //
-// Empty is legal and means "inherit the admission set" (ADR-0075
-// Amendment 1). A non-empty list must be a SUBSET of the user's own rows:
+// Empty is legal and means "inherit the admission set".
+// A non-empty list must be a SUBSET of the user's own rows:
 // a token cannot widen where its owner may connect from, or the per-user
 // layer would be advisory.
 //
@@ -501,7 +501,7 @@ var _ = subtle.ConstantTimeCompare
 // can anyone watching — which is the harder half, and the reason this
 // function is shaped the way it is.
 //
-// Comparable work on every path (ADR-0075 §4). An unknown selector still
+// Comparable work on every path. An unknown selector still
 // performs a SHA-256 and a constant-time compare against a decoy digest. The
 // obvious implementation returns early when the lookup misses, and that early
 // return is a measurable difference: an attacker submits a candidate username
@@ -709,7 +709,7 @@ func (s *Service) AuthorizeUser(ctx context.Context, userID, connID int64, actio
 // PATLastUsedInterval is how stale a token's last_used may get before a
 // successful authentication refreshes it.
 //
-// Coalescing is the point (ADR-0075 §4). last_used exists so an operator can
+// Coalescing is the point. last_used exists so an operator can
 // see which tokens are live when deciding what to revoke; that question is
 // answered just as well by "used within the last few minutes" as by a
 // to-the-second timestamp, and the to-the-second version would mean a WRITE
@@ -738,7 +738,7 @@ const patNotedSweepThreshold = 4096
 // every concurrent authentication reads the same stale timestamp, every one
 // of them passes the interval check, and every one of them issues an UPDATE.
 // The stated bound held in the only case nobody was worried about, one caller
-// at a time, and failed in the case it was written for. Lector caught it.
+// at a time, and failed in the case it was written for. Review caught it.
 //
 //  1. An in-process gate, taken BEFORE the write and under one mutex, is what
 //     actually bounds the statements: of N concurrent callers exactly one
@@ -809,7 +809,7 @@ func boolToInt(b bool) int64 {
 }
 
 // canonicalizeIPsUnchecked validates and canonicalizes a token's allowed_ips
-// WITHOUT the subset check against its owner's rows (ADR-0086 §10, decision 5).
+// WITHOUT the subset check against its owner's rows.
 //
 // The parsing is identical to canonicalAllowedIPs — a bad CIDR is still a bad
 // CIDR — and only the containment test is dropped. Written as its own function

@@ -43,6 +43,7 @@ var certifiedClean = []string{
 	"rpc",
 	"core/engine",
 	"core/meta",
+	"core/auth",
 }
 
 // Patterns that name a private artefact.

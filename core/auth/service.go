@@ -21,13 +21,12 @@ const DefaultSessionTTL = 24 * time.Hour
 // adminGuardKey is the store_meta row used as a transaction-scoped lock that
 // serializes security-invariant mutations (bootstrap, admin demote/disable/
 // remove) across processes — the DB-level fix for check-then-act races on
-// READ COMMITTED engines (ADR-0054 rev 1, lector M3 must-fix #3).
+// READ COMMITTED engines.
 const adminGuardKey = "admin_guard"
 
 // Identity is an authenticated caller as resolved from a session token at
 // call time. Fields are unexported so no caller can forge one — only this
-// package constructs identities, from token resolution (lector M3
-// must-fix #1).
+// package constructs identities, from token resolution.
 type Identity struct {
 	userID int64
 	name   string
@@ -65,7 +64,7 @@ type Service struct {
 	testAfterCapLock func()
 
 	// servingCleartext reports whether THIS daemon is currently running its
-	// front door without TLS (ADR-0086 §10).
+	// front door without TLS.
 	//
 	// A seam rather than config, because core/auth sits below the front door
 	// and must not import it — and a function rather than a value, because the
@@ -78,7 +77,7 @@ type Service struct {
 	// nobody wired the question up.
 	servingCleartext func() bool
 
-	// keyfilePath is where the SERVICE keyslot's keyfile lives (ADR-0087).
+	// keyfilePath is where the SERVICE keyslot's keyfile lives.
 	//
 	// Empty means this install never asked for unattended unlock, which is a
 	// different state from asking and failing — UnlockWithServiceKeyslot
@@ -90,7 +89,7 @@ type Service struct {
 	keyfilePath string
 
 	// keyslotState records the last unattended-unlock attempt so an operator
-	// can be SHOWN it (§6). The daemon keeps running on every failure, which
+	// can be SHOWN it. The daemon keeps running on every failure, which
 	// is exactly why the state must be reportable rather than inferred from
 	// every developer being refused.
 	keyslotState ServiceKeyslotState
@@ -144,8 +143,7 @@ func WithSessionTTL(d time.Duration) Option {
 
 // WithConfigAllowlist seeds the IP allowlist from configuration CIDRs. An
 // invalid CIDR fails New loudly — config validation should have caught it,
-// and silently narrowing an allowlist is not acceptable (lector M3
-// should-fix).
+// and silently narrowing an allowlist is not acceptable.
 func WithConfigAllowlist(cidrs []string) Option {
 	return func(s *Service) error {
 		for _, c := range cidrs {
@@ -159,7 +157,7 @@ func WithConfigAllowlist(cidrs []string) Option {
 	}
 }
 
-// New builds the Service. It starts locked (ADR-0054 §1).
+// New builds the Service. It starts locked.
 func New(store *meta.Store, opts ...Option) (*Service, error) {
 	s := &Service{store: store, now: time.Now, ttl: DefaultSessionTTL,
 		patNoted: make(map[int64]time.Time)}
@@ -183,7 +181,7 @@ func WithServingCleartext(fn func() bool) Option {
 // WithServiceKeyfile names where the service keyslot's keyfile lives.
 //
 // Absent, the daemon simply never attempts an unattended unlock — the
-// pre-ADR-0087 behaviour, and the right default: a Service assembled without
+// the behaviour before the service keyslot existed, and the right default: a Service assembled without
 // this (every test, every non-serving mode) stays locked until a passphrase
 // login, rather than reaching for a file nobody configured.
 func WithServiceKeyfile(path string) Option {
@@ -215,8 +213,8 @@ func (s *Service) masterKey() ([]byte, error) {
 // unlockGate serializes the whole check-commit-adopt sequence of a login:
 // consistency checking and adoption must be ONE critical section, otherwise
 // two concurrent logins presenting different master keys can both pass their
-// checks and both commit sessions before one key silently wins (lector M3 r2
-// must-fix #3). Held across the commit, so it is coarse by design — logins
+// checks and both commit sessions before one key silently wins.
+// Held across the commit, so it is coarse by design — logins
 // are already argon2-bound, not lock-bound.
 //
 // withUnlock runs commit under the gate: mk is validated against the
@@ -243,7 +241,7 @@ func (s *Service) withUnlock(mk []byte, commit func() error) error {
 }
 
 // inTx runs fn inside one meta-store transaction — every security mutation
-// and its audit row commit atomically (lector M3 must-fix #2).
+// and its audit row commit atomically.
 func (s *Service) inTx(ctx context.Context, fn func(tx *dao.Transaction) error) error {
 	return dao.RunTx(ctx, fn)
 }
@@ -251,7 +249,7 @@ func (s *Service) inTx(ctx context.Context, fn func(tx *dao.Transaction) error) 
 // lockGuardRow serializes invariant-critical transactions across processes
 // by upserting the store_meta guard row inside tx — the second transaction
 // blocks on the row lock until the first commits, so its in-tx rechecks see
-// committed truth (must-fix #3).
+// committed truth.
 func (s *Service) lockGuardRow(tx *dao.Transaction) error {
 	return s.store.KV.On(tx).
 		Set(meta.KVKey, adminGuardKey).Set(meta.KVValue, "1").Upsert()
@@ -295,7 +293,7 @@ func (s *Service) AuditCorrelated(ctx context.Context, userID int64, ip, action,
 }
 
 // connAAD binds a connection secret's ciphertext to its row identity so a
-// meta-DB writer cannot swap ciphertexts between rows (must-fix #5).
+// meta-DB writer cannot swap ciphertexts between rows.
 func connAAD(connID int64) string { return fmt.Sprintf("autodb:conn:%d:v1", connID) }
 
 // EncryptSecret seals a connection secret under the install master key,

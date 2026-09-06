@@ -52,8 +52,8 @@ func requiredRank(a Action) int {
 	return int(^uint(0) >> 1) // unknown action: unreachable rank
 }
 
-// Authorize is the single permission gate (ADR-0054 §3): it resolves the
-// token to a FRESH identity (provenance + current authority, must-fix #1)
+// Authorize is the single permission gate: it resolves the
+// token to a FRESH identity (provenance + current authority)
 // and checks the action. ActionManage checks the global role alone.
 // Connection-scoped actions require a grant — for admins too (Objective
 // 13) — and the effective role is min(global role, grant role): a
@@ -83,7 +83,7 @@ func (s *Service) Authorize(ctx context.Context, token string, connID int64, act
 // AuthorizeUser, under a comment claiming there was one place. A comment
 // asserting a property the code does not have is worse than no comment,
 // because the next person to change one copy reads it and believes the other
-// followed. Lector caught it: two copies of a security rule are not a
+// followed. Review caught it: two copies of a security rule are not a
 // duplication smell, they are a future divergence with a date on it.
 // decide resolves a grant into a yes/no for one action.
 //
@@ -169,12 +169,12 @@ func (s *Service) RemoveGrant(ctx context.Context, token string, userID, connID 
 // inside the creation transaction. It is NOT general grant management:
 //
 //   - the actor is proven by token, re-resolved inside this call (no
-//     caller-supplied identity — lector M3 r2 must-fix #1);
+//     caller-supplied identity);
 //   - the creator relationship is verified against the row just inserted
 //     (connections.created_by must be the token's user);
 //   - the granted role is capped at editor — min(global role, editor) — so
 //     creation can never mint connection-admin rights; arbitrary grant
-//     management stays admin-only via AddGrant (lector policy ruling).
+//     management stays admin-only via AddGrant.
 func (s *Service) GrantCreatorTx(tx *dao.Transaction, token string, connID int64) (Identity, error) {
 	// Resolve on the transaction: the caller already holds it, and pool
 	// access here would deadlock single-connection stores.
@@ -192,12 +192,12 @@ func (s *Service) GrantCreatorTx(tx *dao.Transaction, token string, connID int64
 	// Require current editor+ INSIDE the transaction: a demotion to reader
 	// that commits between the outer CreateConnection check and here must
 	// roll the whole creation back, not silently grant reader on a
-	// connection a reader may not create (lector M4 r2 must-fix #4).
+	// connection a reader may not create.
 	if rankOf(actor.role) < rankOf(meta.RoleEditor) {
 		return Identity{}, fmt.Errorf("%w: creating a connection requires editor or admin", ErrDenied)
 	}
 	// The ownership grant is capped at editor — creation never mints
-	// connection-admin rights (lector policy ruling).
+	// connection-admin rights.
 	role := meta.RoleEditor
 	if _, err := s.store.Grants.On(tx).
 		Set(meta.GrantUserID, actor.userID).Set(meta.GrantConnID, connID).

@@ -8,8 +8,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// One authorization rule, reached from both entry points (lector PR #33 r0
-// must-fix 1).
+// One authorization rule, reached from both entry points.
 //
 // Authorize starts from a session token; AuthorizeUser starts from a user id
 // the front door resolved through a PAT. What legitimately differs is the

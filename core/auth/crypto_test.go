@@ -41,7 +41,7 @@ func TestKDF_EncodeDecodeVerifyRoundTrip(t *testing.T) {
 
 // Stored params are attacker-influenced (a hostile meta-DB writer); out-of-
 // bounds values must fail decode BEFORE reaching the KDF — t=0/p=0 panic
-// x/crypto and huge m is memory exhaustion (lector M3 must-fix #4).
+// x/crypto and huge m is memory exhaustion.
 func TestDecodeHash_RejectsHostileParams(t *testing.T) {
 	t.Parallel()
 	params, err := newParams()

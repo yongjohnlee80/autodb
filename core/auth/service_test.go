@@ -139,7 +139,7 @@ func TestAuthorityIsFreshPerCall(t *testing.T) {
 		t.Fatalf("pre-demotion CreateUser: %v", err)
 	}
 	// Demote second; their EXISTING token must lose admin power immediately
-	// (lector M3 must-fix #1 — no stale cached authority).
+	// (no stale cached authority).
 	if err := s.SetUserRole(ctx, rootTok, second.UserID(), meta.RoleReader, testIP); err != nil {
 		t.Fatalf("SetUserRole: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestSecretAADBoundToConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The same ciphertext moved to another connection's row must not open
-	// (lector M3 must-fix #5 — substitution).
+	// (substitution).
 	if _, err := s.DecryptSecret(blob, 2); err == nil {
 		t.Error("ciphertext for conn 1 decrypted under conn 2 identity")
 	}
@@ -262,7 +262,7 @@ func TestPassphraseChangeAndReset(t *testing.T) {
 	}
 
 	// Self-service rotation: keeps the calling session, revokes the others
-	// (lector M3 should-fix).
+	// (raised in review).
 	if err := s.ChangePassphrase(ctx, bobTok, "bob-pass-old", "bob-pass-new", testIP); err != nil {
 		t.Fatalf("ChangePassphrase: %v", err)
 	}
@@ -464,8 +464,8 @@ func TestAuthorizeMatrix(t *testing.T) {
 }
 
 // A login whose credentials are reset before its session commits must fail:
-// the credential is re-verified inside the committing tx (lector M3 r3
-// must-fix). Non-concurrent proxy — an admin reset then an old-passphrase
+// the credential is re-verified inside the committing tx.
+// Non-concurrent proxy — an admin reset then an old-passphrase
 // login — exercises the same recheck path.
 func TestLogin_OldCredentialsAfterResetRejected(t *testing.T) {
 	t.Parallel()
@@ -491,7 +491,7 @@ func TestLogin_OldCredentialsAfterResetRejected(t *testing.T) {
 // TestLoginLocalSocketBypassesAllowlist reproduces the field bug where a
 // login over the default unix socket was refused "ip not allowed": a
 // socket peer has no IP, so it can satisfy no IP allowlist. The socket's
-// 0600 perms are the boundary (ADR-0058), so a local connection must not
+// 0600 perms are the boundary, so a local connection must not
 // be gated on the allowlist — while TCP still is.
 func TestLoginLocalSocketBypassesAllowlist(t *testing.T) {
 	t.Parallel()

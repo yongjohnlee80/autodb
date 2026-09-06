@@ -24,7 +24,7 @@ func tokenHash(token string) []byte {
 // resolveToken is the single provenance check: token → live session → live
 // user → fresh Identity. Every privileged method calls it, so authority is
 // re-read from the store on every call — a demotion or disable takes effect
-// on the caller's next request (lector M3 must-fix #1).
+// on the caller's next request.
 func (s *Service) resolveToken(ctx context.Context, token string) (Identity, *meta.Session, error) {
 	sess, err := s.store.Sessions.OnCtx(ctx).With(meta.SessTokenHash, tokenHash(token)).Get()
 	if errors.Is(err, dao.ErrNoRows) {
@@ -121,7 +121,7 @@ func (s *Service) newSessionTx(tx *dao.Transaction, userID int64, ip string) (st
 // LocalPeer is the pseudo-address a unix-domain (local) connection presents
 // in place of an IP. A unix socket is created 0600 in a per-user runtime
 // directory, so reaching it already proves same-user access — that is the
-// boundary ADR-0058 chose, and it is stronger than any IP allowlist, which
+// boundary the socket design chose, and it is stronger than any IP allowlist, which
 // exists for the TCP/remote case. A local connection therefore carries this
 // marker rather than an IP, is recorded verbatim in the audit trail and
 // session rows (honest: "local", not a fake 127.0.0.1), and is exempt from
@@ -131,7 +131,7 @@ const LocalPeer = "local"
 
 // Login authenticates name+passphrase from ip and issues a session token.
 // The session insert and the audit row commit atomically; the master key is
-// installed in memory only after the commit (must-fix #2). Failures are
+// installed in memory only after the commit. Failures are
 // audited and deliberately indistinguishable (ErrBadCredentials), except a
 // disallowed IP (ErrDenied).
 func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (string, Identity, error) {
@@ -140,9 +140,9 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 
 // LoginAt is Login with an ADMISSION ADDRESS the caller observed on its own
 // behalf — the browser's address, which the daemon cannot see because its own
-// peer is the gateway over loopback (ADR-0075 Amendment 1).
+// peer is the gateway over loopback.
 //
-// ONE OPERATION, and that is the whole point of it existing (lector PR #34 r2
+// ONE OPERATION, and that is the whole point of it existing (
 // ruling). The gateway used to log in, get a session back, ask a second RPC
 // whether the address was admitted, and log the session out again when it was
 // not. That sequence did strictly more work for a CORRECT password than for
@@ -153,7 +153,7 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 //
 // It looked like a choice between two leaks — judge the address first and
 // leak which usernames exist, or judge it last and leak which password is
-// right. It was not. Amendment 1 requires the credential to be verified
+// right. It was not. The design requires the credential to be verified
 // before the user-row lookup and the denial to stay uniform; it does not
 // require a session to exist before the address is judged. Combining them
 // here means the admission decision happens BETWEEN verification and
@@ -164,7 +164,7 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 // every existing caller: Login is that, unchanged.
 func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP string) (string, Identity, error) {
 	// A local (unix-socket) connection is exempt from the IP allowlist:
-	// the 0600 socket is the boundary (ADR-0058), and a socket peer has no
+	// the 0600 socket is the boundary, and a socket peer has no
 	// IP to match, so the allowlist can only ever refuse it. The allowlist
 	// governs TCP peers, which carry a real address.
 	if ip != LocalPeer {
@@ -243,7 +243,7 @@ func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP
 	}
 	if len(u.MKWrapped) == 0 {
 		// A v1-era row that never received a keyslot: fail explicitly — an
-		// admin passphrase reset cuts one (lector M3 should-fix).
+		// admin passphrase reset cuts one.
 		return "", Identity{}, ErrNoKeyslot
 	}
 	mk, err := open(kek, u.MKWrapped, aadMasterKey)
@@ -251,9 +251,9 @@ func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP
 		return "", Identity{}, fmt.Errorf("auth: unwrapping keyslot for %s: %w", name, ErrKeyslotCorrupt)
 	}
 	// Consistency check, commit, and adoption are ONE critical section
-	// (lector M3 r2 must-fix #3). Credentials are RE-VERIFIED inside the
-	// committing transaction against the current row (lector M3 r3
-	// must-fix): a passphrase reset or disable that commits between the
+	// Credentials are RE-VERIFIED inside the
+	// committing transaction against the current row:
+	// a passphrase reset or disable that commits between the
 	// out-of-tx verify above and this insert must invalidate this login,
 	// otherwise a reset intended to lock someone out races an in-flight
 	// old-passphrase session insert.
@@ -284,7 +284,7 @@ func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP
 			// recheck just above, which exists precisely because a disable
 			// or a passphrase reset can commit underneath an in-flight
 			// login. Every one of those left behind a durable row claiming
-			// an admitted login that never existed. Lector reproduced it
+			// an admitted login that never existed. Review reproduced it
 			// deterministically with an empty-keyslot row: no session, and
 			// login_admitted went from 0 to 1.
 			//

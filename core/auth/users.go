@@ -24,7 +24,7 @@ func (s *Service) NeedsBootstrap(ctx context.Context) (bool, error) {
 // Bootstrap creates the install master key and the root admin, logs the
 // root in (returning the session token), and unlocks the service. The
 // users==0 invariant is re-checked inside the guarded transaction, so
-// concurrent bootstraps cannot both succeed (must-fix #3).
+// concurrent bootstraps cannot both succeed.
 func (s *Service) Bootstrap(ctx context.Context, name, passphrase, ip string) (string, Identity, error) {
 	// Cheap pre-check for a precise error; the authoritative users==0 test
 	// is the in-transaction one below (a racer that passes here is refused
@@ -133,7 +133,7 @@ func (s *Service) insertUserTx(tx *dao.Transaction, name, passphrase, role strin
 }
 
 // adminsRemainTx reports whether at least one enabled admin exists in the
-// transaction's view — the post-mutation invariant recheck (must-fix #3).
+// transaction's view — the post-mutation invariant recheck.
 func (s *Service) adminsRemainTx(tx *dao.Transaction) (bool, error) {
 	n, err := s.store.Users.On(tx).
 		With(meta.UserRole, meta.RoleAdmin).With(meta.UserDisabled, int64(0)).
@@ -252,8 +252,8 @@ func (s *Service) RemoveUser(ctx context.Context, token string, userID int64, ip
 
 // ChangePassphrase rotates the calling token's own passphrase: the old one
 // is verified and used to unwrap the master key, which is rewrapped under
-// the new KEK. Every OTHER session of the user is revoked (lector M3
-// should-fix); the calling session stays live.
+// the new KEK. Every OTHER session of the user is revoked;
+// the calling session stays live.
 func (s *Service) ChangePassphrase(ctx context.Context, token, oldPass, newPass, ip string) error {
 	actor, sess, err := s.resolveToken(ctx, token)
 	if err != nil {
@@ -286,8 +286,8 @@ func (s *Service) ChangePassphrase(ctx context.Context, token, oldPass, newPass,
 		return s.inTx(ctx, func(tx *dao.Transaction) error {
 			// Re-resolve the token and re-verify the old hash inside the
 			// committing tx: a reset that lands between resolveToken above
-			// and this commit must not be silently overwritten (lector M3
-			// r3 must-fix). resolveTokenTx also proves the session is still
+			// and this commit must not be silently overwritten.
+			// resolveTokenTx also proves the session is still
 			// live and the account still enabled.
 			cur, terr := s.resolveTokenTx(tx, token)
 			if terr != nil {
@@ -313,7 +313,7 @@ func (s *Service) ChangePassphrase(ctx context.Context, token, oldPass, newPass,
 
 // ResetPassphrase sets a new passphrase for another user (admin token;
 // requires the unlocked master key to cut a fresh keyslot). The recovery
-// path for forgotten passphrases (ADR-0054 §1); all target sessions revoke.
+// path for forgotten passphrases; all target sessions revoke.
 func (s *Service) ResetPassphrase(ctx context.Context, token string, userID int64, newPass, ip string) error {
 	actor, err := s.requireAdmin(ctx, token)
 	if err != nil {
@@ -368,7 +368,7 @@ type UserRow struct {
 	Disabled bool
 }
 
-// ListUsers lists every account (admin token; ADR-0057 §9 — the TUI's user
+// ListUsers lists every account (admin token — the TUI's user
 // manager). No secret material leaves the package (R8): names, roles, and
 // the disabled flag only.
 func (s *Service) ListUsers(ctx context.Context, token string) ([]UserRow, error) {

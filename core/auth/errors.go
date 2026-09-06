@@ -4,7 +4,7 @@ import "errors"
 
 var (
 	// ErrLocked reports a secret operation before any passphrase login has
-	// unwrapped the master key in this process (ADR-0054 §1).
+	// unwrapped the master key in this process.
 	ErrLocked = errors.New("auth: store is locked — a passphrase login is required first")
 
 	// ErrBadCredentials reports a failed login (unknown user, wrong
