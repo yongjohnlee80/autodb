@@ -151,6 +151,7 @@ func TestNoHandRolledSessionClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	checked, implHasBegin := 0, false
+	wireExtExemptionUsed := false
 	var offenders []string
 
 	for _, path := range files {
@@ -206,6 +207,7 @@ func TestNoHandRolledSessionClaim(t *testing.T) {
 				// does not have. Exempted by NAME rather than by shape so a future
 				// hand-rolled claim cannot inherit the exemption by looking similar.
 				if fd.Name.Name == "wireExtEntry" {
+					wireExtExemptionUsed = true
 					return true
 				}
 				offenders = append(offenders,
@@ -223,6 +225,23 @@ func TestNoHandRolledSessionClaim(t *testing.T) {
 	if !implHasBegin {
 		t.Fatal("claimSession does not call s.begin(); the assertion below then holds " +
 			"because the session claim has ceased to exist, which is the vacuous pass")
+	}
+	// AND THE EXEMPTION MUST STILL BE LIVE.
+	//
+	// A named exemption for a site that no longer exists is not dormant: it
+	// stands ready to excuse whatever is written under that name next. If
+	// wireExtEntry stops claiming a session itself, this guard silently
+	// pre-authorises whatever a future wireExtEntry does with s.begin().
+	//
+	// The fourth part of the exemption mechanism, after: exempt by name, state
+	// the reason, guard the premise. Adopted across every named-exemption guard
+	// in the tree after a sibling guard's first exemption list was found to
+	// carry four entries naming sites that had none — every one of them a path
+	// guessed at rather than opened.
+	if !wireExtExemptionUsed {
+		t.Fatal("wireExtEntry does not call s.begin(), so its exemption is dead. " +
+			"An exemption nothing uses does not lapse — it waits, and excuses the " +
+			"next thing written there.")
 	}
 	if len(offenders) > 0 {
 		t.Fatalf("s.begin() is called outside claimSession:\n  %s\n\n"+

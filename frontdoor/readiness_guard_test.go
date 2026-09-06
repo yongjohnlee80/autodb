@@ -45,6 +45,7 @@ func TestOnlyTwoPlacesConstructAReadyForQuery(t *testing.T) {
 	}
 	checked := 0
 	implConstructs := false
+	startupExemptionUsed := false
 	var offenders []string
 
 	for _, path := range files {
@@ -96,6 +97,7 @@ func TestOnlyTwoPlacesConstructAReadyForQuery(t *testing.T) {
 				return true
 			}
 			if filepath.Base(path) == startupOK {
+				startupExemptionUsed = true
 				return true
 			}
 			pos := fset.Position(cl.Pos())
@@ -122,6 +124,23 @@ func TestOnlyTwoPlacesConstructAReadyForQuery(t *testing.T) {
 		t.Fatalf("%s does not construct a ReadyForQuery. The assertion above then "+
 			"holds because nothing in the package sends one at all, which is the "+
 			"vacuous pass this check exists to refuse", implFunc)
+	}
+	// AND THE EXEMPTION MUST STILL BE LIVE.
+	//
+	// A named exemption for a site that no longer exists is not dormant: it
+	// stands ready to excuse whatever is written at that name next. The
+	// exemption says auth.go sends the startup 'I' — if auth.go stops sending
+	// one, this guard silently pre-authorises every ReadyForQuery a future
+	// auth.go constructs, for any reason, with nobody having decided that.
+	//
+	// The fourth part of the exemption mechanism, after: exempt by name, state
+	// the reason, guard the premise. Adopted across every named-exemption guard
+	// in the tree after a sibling guard's first exemption list was found to
+	// carry four entries naming sites that had none.
+	if !startupExemptionUsed {
+		t.Fatalf("%s constructs no ReadyForQuery, so its exemption is dead. An "+
+			"exemption nothing uses does not lapse — it waits, and excuses the "+
+			"next thing written there.", startupOK)
 	}
 	if len(offenders) > 0 {
 		t.Fatalf("ReadyForQuery is constructed outside %s and %s:\n  %s\n\n"+

@@ -164,6 +164,30 @@ The guard also refuses a **dead exemption** — one naming a file with no
 comparison in it. Two of the first list's entries were guesses at paths I had
 not opened, and an exemption nothing uses is not dormant: it stands ready to
 excuse whatever is written at that path next.
+## The exemption mechanism has four parts
+
+Three answers in this register are **leave, exempted by name**, and the
+mechanism is the same each time. It is written down here once so the next guard
+is built with all four rather than three:
+
+1. **Exempt by name, never by shape.** An exemption describing a shape is one a
+   future site can accidentally satisfy; one naming a function or a file can
+   only be satisfied by being that thing.
+2. **State the reason where the guard is, not where the code is.** The reason
+   is what a reader needs at the moment they wonder why the guard let something
+   through.
+3. **Guard the premise.** An exemption resting on a claim — "the extended path
+   cannot reach the demotion close" — needs a cell that fails the day the claim
+   stops being true, or it is a bypass wearing a justification.
+4. **Verify the exemption is LIVE.** A named exemption for a site that no longer
+   exists is not dormant: it stands ready to excuse whatever is written under
+   that name next. Silence becomes assent.
+
+The fourth part was added last, and it was added because a guard's first
+exemption list carried four entries naming sites that had none — every one a
+path guessed at rather than opened. The check that found them was written to
+catch two; it found four.
+
 
 ---
 
