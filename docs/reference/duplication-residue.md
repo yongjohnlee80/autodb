@@ -231,8 +231,30 @@ The absence of the oracle is a TERMINAL condition rather than a retryable one,
 which is why its probe sits where it does: where no oracle exists an
 indeterminate commit can never be resolved by anyone.
 
-**One remains**: `AdvisoryLocker`, plus `RoutineIntrospector` with its
-behaviour decision. The first carries a behaviour decision and is deliberately
+**Fourth: `AdvisoryLocker` — the item that is not a capability.**
+`core/meta`'s `AcquireLease` switches on the engine to take a file lock
+(sqlite) or a transaction-scoped `pg_try_advisory_xact_lock` (postgres).
+**Answer: leave, exempted by name**, and the reason is a distinction worth
+keeping: the three capabilities above are OPTIONAL — absence is a legitimate
+answer with a defined consequence, and the generic path carries on. A lease is
+MANDATORY: every meta engine must provide one or the daemon refuses to start,
+what differs is the mechanism, and the absent branch is an ERROR rather than a
+no-op. Modelling it as a probeable capability would make a fatal absence read
+exactly like the timeout belt's benign one — the same word for two opposite
+subjects, which is the polysemy the vocabularies phase spent three PRs
+separating. Mandatory polymorphism in Go is a factory with a stated exemption,
+which is what this already is.
+
+**And the second half, which is true at the same time:** the lease remains a
+golib UPSTREAM promotion candidate. A thing can be mandatory polymorphism in
+its CONSUMING package — autodb's meta store must have a lease — and an optional
+capability at its PROVIDING layer, because a dao-level advisory-lock capability
+must have a no-case (not every backend has one, and golib must not demand it).
+The promotion's precondition was `core/meta` dropping its `core/config` import;
+that landed as step 9. The path is unblocked and belongs to the golib stream
+and a promotion decision, not to this sweep.
+
+**One remains**: `RoutineIntrospector`, with its behaviour decision. The first carries a behaviour decision and is deliberately
 not folded in here — see the note below.
 
 **A behaviour fork, recorded rather than taken.** golib's `MysqlDialect`
