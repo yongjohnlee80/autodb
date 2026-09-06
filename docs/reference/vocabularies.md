@@ -31,9 +31,19 @@ just true of a different subject.
 | `rolled_back` | the effects are gone |
 | `outcome_unresolvable` | nothing will ever say which of the two happened |
 
-### 2. `exec.HistStatus` — what one STATEMENT'S ROW says
+### 2. `meta.HistoryStatus` — what one STATEMENT'S ROW says
 
-`core/exec/txproject.go`. Persisted in the history table, one row per statement.
+`core/meta/txoutcome.go`. Persisted in the history table, one row per statement,
+which is why the type lives beside `TxState` rather than in the package that
+does the projecting.
+
+`core/exec` reads and writes it under the name `exec.HistStatus`, which is an
+**alias** — `type HistStatus = meta.HistoryStatus` — so the projection logic
+does not carry a package qualifier on every line. The `=` is load-bearing: it
+makes the two names one type, not two that agree. The constants below are
+re-exported in `core/exec/txproject.go` for the same reason, and
+`TestEveryHistoryStatusIsReExportedByName` keeps that list complete and
+correctly aimed.
 
 | value | meaning |
 | --- | --- |
@@ -104,7 +114,13 @@ rather than a wrong answer.
 3. **Adding a value is adding it to one set.** If it looks like it belongs in
    two, it is either two values with one name, or the seam between those sets
    needs to learn about it — the exhaustiveness cells for each set will say
-   which.
+   which. They are `TestTxStatesIsExhaustive` and
+   `TestHistoryStatusesIsExhaustive` in `core/meta/vocabularies_test.go`, and
+   `TestFinalizeOutcomesIsExhaustive` in `core/exec/vocabularies_test.go`; each
+   reads the package source, because nothing at run time can enumerate a
+   vocabulary of Go constants. A value added to a set and left out of its
+   listing function reddens them, and `TestTxStateForNamesEveryFinalizeOutcome`
+   reddens when the finalize seam is the thing that was not told.
 
 ## Other constant sets in the repository
 

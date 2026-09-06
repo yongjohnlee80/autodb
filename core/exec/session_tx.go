@@ -436,8 +436,20 @@ const (
 	FinalizeCommitFailed FinalizeOutcome = "commit_failed"
 )
 
-// FinalizeOutcomes lists every value, in a stable order, for the
-// exhaustiveness cells.
+// FinalizeOutcomes lists every value, in the order the boundary can produce
+// them: the two successes first, then the three ways an attempt can fail to
+// settle.
+//
+// Its consumers are TestFinalizeOutcomesIsExhaustive and
+// TestTxStateForNamesEveryFinalizeOutcome. That is the whole reason it exists:
+// nothing at run time can enumerate a vocabulary of Go constants, so a listing
+// function is the only thing an exhaustiveness cell can be written against.
+// This vocabulary needs one more than the other two do, because txStateFor's
+// switch over it is the seam where a forgotten value takes the default branch
+// and is terminated as outcome_unresolvable without anyone deciding that.
+//
+// Callers must not modify the returned slice; it is freshly allocated on each
+// call so that they cannot affect each other if they do.
 func FinalizeOutcomes() []FinalizeOutcome {
 	return []FinalizeOutcome{
 		FinalizeCommitted, FinalizeRolledBack, FinalizeRollbackFailed,

@@ -43,6 +43,25 @@ const (
 	TxUnresolvable TxState = "outcome_unresolvable"
 )
 
+// TxStates lists every state in the progression, in the order a transaction
+// passes through them.
+//
+// The order is the progression's own, not alphabetical, because the list is
+// read by a person as much as by a loop: opened, commit_started, then the
+// nonterminal, then the three terminals.
+//
+// Its consumer is TestTxStatesIsExhaustive, which is the whole reason it
+// exists — nothing at run time can enumerate a vocabulary of Go constants, so
+// a listing function is the only thing an exhaustiveness cell can be written
+// against. Callers must not modify the returned slice; it is freshly allocated
+// on each call so that they cannot affect each other if they do.
+func TxStates() []TxState {
+	return []TxState{
+		TxOpened, TxCommitStarted, TxUnknownPending,
+		TxCommitted, TxRolledBack, TxUnresolvable,
+	}
+}
+
 // Reasons carried alongside a state. These are not free text: an operator
 // reading the trail has to be able to tell "we could not reach the target"
 // from "the target no longer remembers" from "this dialect can never say" —
@@ -242,3 +261,14 @@ const (
 	// distinct from pending, because no future pass will improve on it.
 	StatusUnresolvable HistoryStatus = "outcome_unresolvable"
 )
+
+// HistoryStatuses lists every status a history row can carry, in the order a
+// statement passes through them: running first, then the five ways it can end.
+//
+// Same reason as TxStates, and the same rule about the returned slice.
+func HistoryStatuses() []HistoryStatus {
+	return []HistoryStatus{
+		StatusRunning, StatusOK, StatusPendingCommit,
+		StatusError, StatusRolledBack, StatusUnresolvable,
+	}
+}

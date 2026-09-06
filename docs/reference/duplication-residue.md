@@ -106,6 +106,30 @@ statement's row, and of a rollback attempt. No set is a subset of another.
 `HistoryStatus` with `rollback_failed` and `commit_failed` — values meaningless
 for a statement's row. See `docs/reference/vocabularies.md`.
 
+**Left: the six history-status constants are written twice** — declared in
+`core/meta/txoutcome.go`, re-exported in `core/exec/txproject.go` so the
+projection reads without a package qualifier on every line.
+**Answer: guard.** The type itself is not duplicated (`HistStatus` is an alias,
+not a second type), but the constant list is hand-written and nothing about an
+alias keeps it complete: a status added in `core/meta` and not re-exported is
+not a compile error anywhere, and a re-export aimed at the wrong member of the
+same vocabulary compiles and is wrong.
+`TestEveryHistoryStatusIsReExportedByName` reads both packages' source and
+checks the list in both directions, including the initializer's target.
+Removing the duplication instead would mean qualifying every projection line —
+a cost paid on every read to remove a list that a cell now keeps honest.
+
+**Left: three listing functions whose only consumers are tests** —
+`meta.TxStates`, `meta.HistoryStatuses`, `exec.FinalizeOutcomes`.
+**Answer: leave, with the consumer named in each doc comment.** Nothing at run
+time can enumerate a vocabulary of Go constants — a value of a defined string
+type cannot be asked which constants share its type — so a listing function is
+the only thing an exhaustiveness cell can be written against. Review found
+`FinalizeOutcomes` in the state this note exists to prevent: its comment said
+"for the exhaustiveness cells" and no such cell existed anywhere in the tree,
+which made it dead code whose comment named a consumer that had never been
+written. The cells now exist; the comments name them.
+
 ## Phase: legacy notes (task item 1)
 
 **Nothing left — the feature was removed** (Johno, 2026-09-06: "there are none
