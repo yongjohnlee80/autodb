@@ -24,7 +24,7 @@ import (
 //  2. Because dao.DataConn is a POOL, grammar is verified per PHYSICAL
 //     session at execution time: every mysql/postgres statement runs inside
 //     a transaction (one pinned session) whose mode is checked first — see
-//     verifyGrammarQ and the engine's transactional run path. A one-time
+//     the session-grammar verifier and the engine's transactional run path. A one-time
 //     pool probe cannot speak for later pool members or replacements.
 //
 // The long-term optimization is a golib per-connect hook (pgxpool
@@ -146,40 +146,6 @@ func optionsSetsParam(options, name string) bool {
 		}
 	}
 	return false
-}
-
-// lexerIncompatibleModes are MySQL sql_mode flags that change tokenization.
-var lexerIncompatibleModes = []string{"NO_BACKSLASH_ESCAPES", "ANSI_QUOTES", "ANSI"}
-
-// verifyGrammarQ checks the CURRENT session's parsing mode through q — which
-// must be the same session the statement will run on (a TxConn), never the
-// pool. Refuses rather than SETting over the operator's modes.
-func verifyGrammarQ(ctx context.Context, q dao.Querier, engineName engine.Name) error {
-	switch engineName {
-	case engine.MySQL:
-		mode, err := scalarStringQ(ctx, q, "SELECT @@SESSION.sql_mode")
-		if err != nil {
-			return fmt.Errorf("exec: reading sql_mode: %w", err)
-		}
-		up := strings.ToUpper(mode)
-		for _, bad := range lexerIncompatibleModes {
-			if strings.Contains(up, bad) {
-				return fmt.Errorf("exec: session sql_mode contains %s, which changes SQL parsing the classifier relies on", bad)
-			}
-		}
-		return nil
-	case engine.Postgres:
-		scs, err := scalarStringQ(ctx, q, "SHOW standard_conforming_strings")
-		if err != nil {
-			return fmt.Errorf("exec: reading standard_conforming_strings: %w", err)
-		}
-		if !strings.EqualFold(strings.TrimSpace(scs), "on") {
-			return fmt.Errorf("exec: session has standard_conforming_strings=off, which changes string parsing the classifier relies on")
-		}
-		return nil
-	default:
-		return nil
-	}
 }
 
 // scalarStringQ runs q (one text column, one row) on the given querier.

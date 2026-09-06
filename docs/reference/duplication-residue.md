@@ -195,8 +195,32 @@ one, because a `dialectFor` returning nil for everything would satisfy the
 negative cell for all three. A third cell pins interface and predicate
 together, so the table a reader consults cannot drift from the code that runs.
 
-**Four remain**: `RoutineIntrospector`, `GrammarPinner`, `TxReconciler`,
-`AdvisoryLocker`. The first carries a behaviour decision and is deliberately
+**Second: the grammar verifiers.** `verifyGrammarQ` was a switch on identity
+holding both engines' verification SQL, called from three places — once at
+connection open for every engine, and once per statement for the engines that
+cannot pin. Now two capabilities, because they are two obligations that happen
+to ask the same question: `SessionGrammarVerifier` (can this session drift, and
+is it safe now) and `PerStatementGrammarVerifier` (where can I stand to check
+it). A third engine can answer them independently.
+SQLite implements NEITHER, and that is the point of the shape: a verifier
+returning nil would report "a check passed" while doing "no check was needed".
+
+**Guarded, and the guards found two holes the code did not have.**
+The mode list moved with a retyping error — `"ANSI"` lost, which implies
+`ANSI_QUOTES`, so the omission silently re-admits the quoting change the list
+refuses. Restoring it was trivial; the alarming part was that dropping it again
+as a deliberate mutation left the whole offline suite GREEN. A security-relevant
+vocabulary with nothing enumerating it.
+The first cell written for that was SELF-REFERENTIAL — it iterated the list it
+was checking, so it caught "a listed mode is not refused" and never "a mode
+left the list". The mutation matrix is what surfaced it. The list is now
+enumerated a second time, independently, in the test, from what each mode
+MEANS: **answer: guard**, chosen over deriving the set from the server at
+runtime, because that would make the classifier's safety depend on a query and
+a target answering wrongly would be trusted.
+
+**Two remain**: `TxReconciler` and `AdvisoryLocker`, plus
+`RoutineIntrospector`. The first carries a behaviour decision and is deliberately
 not folded in here — see the note below.
 
 **A behaviour fork, recorded rather than taken.** golib's `MysqlDialect`

@@ -153,15 +153,17 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	// Re-validate the stored DSN (driver parsers, not substrings) and probe
 	// one session's parsing mode for a fast, clear failure at first use.
 	// This is a BELT check only: the authoritative grammar verification runs
-	// per physical session at execution time (verifyGrammarQ on the pinned
+	// per physical session at execution time (the per-statement verifier on the pinned
 	// TxConn in the engine's run path — raised in review).
 	if verr := ValidateDSN(row.Engine, string(dsn)); verr != nil {
 		_ = conn.Close()
 		return nil, verr
 	}
-	if verr := verifyGrammarQ(ctx, conn, row.Engine); verr != nil {
-		_ = conn.Close()
-		return nil, verr
+	if v, ok := dialectFor(row.Engine).(SessionGrammarVerifier); ok {
+		if verr := v.VerifySessionGrammar(ctx, conn); verr != nil {
+			_ = conn.Close()
+			return nil, verr
+		}
 	}
 	return conn, nil
 }

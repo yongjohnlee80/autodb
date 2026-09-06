@@ -2,7 +2,10 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"testing"
+
+	"github.com/yongjohnlee80/golib/dao"
 
 	"github.com/yongjohnlee80/autodb/core/engine"
 )
@@ -69,5 +72,228 @@ func TestTheBeltIsArmedOnTheTransactionItIsGiven(t *testing.T) {
 		t.Fatal("no engine implements StatementTimeoutBelt, so the cell above " +
 			"holds for every engine vacuously — which is what a dialectFor " +
 			"returning nil for everything would look like")
+	}
+}
+
+// The grammar capabilities and the capability table must agree.
+//
+// TWO ENCODINGS OF ONE FACT, kept deliberately and guarded rather than
+// collapsed. The predicate table is what a READER consults — "does postgres
+// verify per connection?" should not require reading type assertions — and the
+// interfaces are what RUNS. The register's answer for that shape is guard:
+// leave both, and add a cell that fails when they disagree.
+//
+// Note the INVERSION, which is the reason this cell is not a copy of the belt
+// one: a dialect implements PerStatementGrammarVerifier exactly when the
+// engine does NOT verify per connection. A cell that asserted equality would
+// pass only by accident.
+func TestGrammarCapabilitiesMatchTheCapabilityTable(t *testing.T) {
+	checked := 0
+	for _, n := range engine.All() {
+		d := dialectFor(n)
+		_, perStatement := d.(PerStatementGrammarVerifier)
+		if perStatement == n.VerifiesGrammarPerConnection() {
+			t.Errorf("engine %s: PerStatementGrammarVerifier present=%v and "+
+				"VerifiesGrammarPerConnection=%v — these are INVERSES. A target "+
+				"that verifies per connection must not also be re-verified per "+
+				"statement, and one that cannot must be.",
+				n, perStatement, n.VerifiesGrammarPerConnection())
+		}
+		checked++
+	}
+	if checked < 3 {
+		t.Fatalf("checked %d engine(s); the walk is not reaching them", checked)
+	}
+}
+
+// A target that cannot drift must not claim a verification it did not make.
+//
+// SQLite's grammar is fixed: there is no session setting to read. It therefore
+// implements NEITHER verifier — and the distinction that matters is between
+// "no check was needed" and "a check passed". A dialect implementing
+// VerifySessionGrammar as `return nil` would report the second while doing the
+// first, which is the no-op-implementation shape the capability pattern exists
+// to refuse.
+func TestAFixedGrammarImplementsNoVerifier(t *testing.T) {
+	fixed := 0
+	for _, n := range engine.All() {
+		d := dialectFor(n)
+		_, session := d.(SessionGrammarVerifier)
+		_, perStatement := d.(PerStatementGrammarVerifier)
+		if session || perStatement {
+			continue
+		}
+		fixed++
+	}
+	if fixed == 0 {
+		t.Fatal("no engine has a fixed grammar, so this cell asserts nothing — " +
+			"sqlite is expected to be one, and its absence here means either " +
+			"the dialect table changed or an empty verifier was added")
+	}
+}
+
+// Both verifiers must run their check on the querier they are handed.
+func TestTheGrammarVerifiersQueryTheSessionTheyAreGiven(t *testing.T) {
+	ran := 0
+	for _, n := range engine.All() {
+		v, ok := dialectFor(n).(SessionGrammarVerifier)
+		if !ok {
+			continue
+		}
+		rec := &recordingQuerier{}
+		// The error is expected: the fake returns no rows. What is asserted is
+		// that a QUERY WAS ATTEMPTED — a verifier that checked nothing would
+		// return nil here and record nothing.
+		_ = v.VerifySessionGrammar(context.Background(), rec)
+		if len(rec.queries) != 1 {
+			t.Errorf("engine %s: the verifier ran %d quer(ies), want exactly one — "+
+				"a verifier that reads no session setting is asserting the "+
+				"session is safe without looking", n, len(rec.queries))
+		}
+		ran++
+	}
+	if ran == 0 {
+		t.Fatal("no engine implements SessionGrammarVerifier; the cell above " +
+			"then holds for every engine vacuously")
+	}
+}
+
+// recordingQuerier records the statements a verifier runs and returns no rows.
+type recordingQuerier struct{ queries []string }
+
+func (r *recordingQuerier) QueryContext(_ context.Context, sql string, _ ...any) (dao.Rows, error) {
+	r.queries = append(r.queries, sql)
+	return nil, errors.New("recordingQuerier: no rows")
+}
+
+// Every mode in the incompatible list must actually be REFUSED.
+//
+// FOUND BY A MUTATION THAT SHOULD HAVE FAILED AND DID NOT. Moving this list
+// out of dsn.go, I retyped it from memory of the switch it came from and lost
+// "ANSI" — a mode that implies ANSI_QUOTES, so losing it silently re-admits
+// the quoting change the list exists to refuse. Restoring the entry was easy;
+// the alarming part was that dropping it again as a deliberate mutation left
+// the whole offline suite green. The vocabulary was security-relevant and
+// nothing enumerated it.
+//
+// So this drives every listed mode through the verifier and requires a
+// refusal, and drives a benign mode through and requires acceptance — without
+// the second half, a verifier that refused everything would pass the first.
+func TestEveryIncompatibleModeIsRefused(t *testing.T) {
+	if len(lexerIncompatibleModes) == 0 {
+		t.Fatal("the incompatible-mode list is empty; every assertion here is vacuous")
+	}
+	d := mysqlDialect{}
+	for _, mode := range lexerIncompatibleModes {
+		// As the server reports it: a comma-joined set, with the flag in it.
+		err := d.VerifySessionGrammar(context.Background(),
+			&fixedQuerier{value: "STRICT_TRANS_TABLES," + mode + ",NO_ENGINE_SUBSTITUTION"})
+		if err == nil {
+			t.Errorf("sql_mode containing %s was ACCEPTED. It changes how the "+
+				"classifier must read a statement, so a statement classified "+
+				"under one reading executes under another.", mode)
+		}
+	}
+	// The negative half: an ordinary mode must pass, or the cell above is
+	// satisfied by a verifier that refuses every session it is shown.
+	if err := d.VerifySessionGrammar(context.Background(),
+		&fixedQuerier{value: "STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"}); err != nil {
+		t.Errorf("an ordinary sql_mode was refused (%v); the cell above would "+
+			"then pass for a verifier that refuses everything", err)
+	}
+}
+
+// The postgres verifier refuses the one setting that changes where a statement
+// ends, and accepts the setting that does not.
+func TestStandardConformingStringsOffIsRefused(t *testing.T) {
+	d := postgresDialect{}
+	if err := d.VerifySessionGrammar(context.Background(), &fixedQuerier{value: "off"}); err == nil {
+		t.Error("standard_conforming_strings=off was ACCEPTED; a backslash then " +
+			"escapes inside a literal and the classifier's idea of where the " +
+			"statement ends stops matching the server's")
+	}
+	if err := d.VerifySessionGrammar(context.Background(), &fixedQuerier{value: "on"}); err != nil {
+		t.Errorf("standard_conforming_strings=on was refused (%v)", err)
+	}
+}
+
+// fixedQuerier answers any query with one row carrying value.
+//
+// A FAKE THAT ANSWERS, unlike recordingQuerier which answers nothing. The two
+// exist for different questions: recordingQuerier proves a verifier LOOKED,
+// this one proves it JUDGED what it saw. A single fake doing both would make
+// the first assertion depend on the second's fixture.
+type fixedQuerier struct{ value string }
+
+func (f *fixedQuerier) QueryContext(context.Context, string, ...any) (dao.Rows, error) {
+	return &oneRow{value: f.value}, nil
+}
+
+type oneRow struct {
+	value string
+	done  bool
+}
+
+func (r *oneRow) Next() bool {
+	if r.done {
+		return false
+	}
+	r.done = true
+	return true
+}
+
+func (r *oneRow) Scan(dest ...any) error {
+	if len(dest) != 1 {
+		return errors.New("oneRow: want exactly one destination")
+	}
+	p, ok := dest[0].(*string)
+	if !ok {
+		return errors.New("oneRow: destination is not a *string")
+	}
+	*p = r.value
+	return nil
+}
+
+func (r *oneRow) Close() error { return nil }
+func (r *oneRow) Err() error   { return nil }
+
+// The incompatible-mode list must contain the modes MySQL documents as
+// changing how SQL is parsed.
+//
+// THE CELL ABOVE CANNOT CATCH A SHRINKING LIST, and the mutation matrix is how
+// that surfaced: deleting "ANSI" and re-running left it green, because it
+// iterates the variable it is checking. A self-referential enumeration tests
+// that every listed thing behaves — never that the list is still complete.
+//
+// So this names the three INDEPENDENTLY, in the test, from what the modes mean
+// rather than from what the variable holds. That is a deliberate second
+// encoding: the register's `guard` answer, chosen because the alternative —
+// deriving the list from the server at runtime — would make the classifier's
+// safety depend on a query, and a target that answered wrongly would be
+// trusted.
+//
+//	NO_BACKSLASH_ESCAPES — a backslash stops escaping, so a literal ends
+//	                       somewhere else than the classifier thinks.
+//	ANSI_QUOTES          — a double quote becomes an identifier quote rather
+//	                       than a string quote.
+//	ANSI                 — a compound mode that IMPLIES ANSI_QUOTES, which is
+//	                       why listing the two above is not enough, and which
+//	                       is the entry a move-by-retyping lost.
+func TestTheIncompatibleModeListIsComplete(t *testing.T) {
+	want := []string{"NO_BACKSLASH_ESCAPES", "ANSI_QUOTES", "ANSI"}
+	have := map[string]bool{}
+	for _, m := range lexerIncompatibleModes {
+		have[m] = true
+	}
+	for _, w := range want {
+		if !have[w] {
+			t.Errorf("sql_mode %s is not in lexerIncompatibleModes. It changes "+
+				"how a statement must be read, so a session carrying it can "+
+				"execute a statement the classifier read differently.", w)
+		}
+	}
+	if len(lexerIncompatibleModes) < len(want) {
+		t.Errorf("the list has %d entries and at least %d are required; an entry "+
+			"was removed", len(lexerIncompatibleModes), len(want))
 	}
 }

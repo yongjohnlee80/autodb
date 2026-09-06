@@ -713,17 +713,22 @@ func truncate(s string, max int) string {
 // pgxpool AfterConnect hook (pgAfterConnectVerify), so statements run in
 // plain autocommit — which keeps transaction-prohibited DDL executable;
 // mysql has no per-connect seam in database/sql, so each statement runs
-// inside a transaction (one pinned session) verified by verifyGrammarQ
+// inside a transaction (one pinned session) verified by its dialect
 // first; sqlite's grammar is fixed.
 func (e *Engine) runQuery(ctx context.Context, target dao.DataConn, engineName engine.Name, sqlText string, res *Result, onRow func([]any) error) (int64, error) {
-	if engineName.VerifiesGrammarPerConnection() {
+	v, perStatement := dialectFor(engineName).(PerStatementGrammarVerifier)
+	if !perStatement {
+		// This target's grammar is established once — at connect, or by not
+		// being changeable at all — so the statement runs in plain autocommit.
+		// That is not only cheaper: it is what keeps transaction-prohibited
+		// DDL executable.
 		return e.queryOn(ctx, target, sqlText, res, onRow)
 	}
 	tx, err := target.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
-	if err := verifyGrammarQ(ctx, tx, engineName); err != nil {
+	if err := v.VerifyStatementGrammar(ctx, tx); err != nil {
 		_ = tx.Rollback()
 		return 0, err
 	}
@@ -786,14 +791,15 @@ func (e *Engine) queryOn(ctx context.Context, q dao.Querier, sqlText string, res
 // transaction-prohibited there, and DDL's implicit commit makes the trailing
 // COMMIT a harmless no-op.
 func (e *Engine) runExec(ctx context.Context, target dao.DataConn, engineName engine.Name, sqlText string, res *Result) error {
-	if engineName.VerifiesGrammarPerConnection() {
+	v, perStatement := dialectFor(engineName).(PerStatementGrammarVerifier)
+	if !perStatement {
 		return e.execOn(ctx, target, sqlText, res)
 	}
 	tx, err := target.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if err := verifyGrammarQ(ctx, tx, engineName); err != nil {
+	if err := v.VerifyStatementGrammar(ctx, tx); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
