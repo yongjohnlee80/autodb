@@ -10,7 +10,7 @@ import (
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
-// The connection card (ADR-0086 §8): what replaced a float holding nothing but
+// The connection card: what replaced a float holding nothing but
 // the secret.
 //
 // The old reveal showed a token and left the person to find out for themselves

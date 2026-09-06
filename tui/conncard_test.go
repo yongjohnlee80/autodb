@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// The connection card's CONTENT (ADR-0086 §8). Every fact here is one that was
+// The connection card's CONTENT. Every fact here is one that was
 // missing the first time a real GUI client was pointed at the front door, so
 // each is asserted rather than eyeballed.
 
@@ -139,7 +139,7 @@ func TestCard_FallsBackToTheConnectionNameWhenNoTargetIsKnown(t *testing.T) {
 	}
 }
 
-// MF1: the DSN the card SHOWS and the DSN the copy key HANDS OVER must be the
+// The DSN the card SHOWS and the DSN the copy key HANDS OVER must be the
 // same string.
 //
 // They were built twice from two separate computations, and a reviewer proved

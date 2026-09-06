@@ -14,7 +14,7 @@ import (
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
-// Management floats (ADR-0057 §9): connections, workspaces, and users each
+// Management floats: connections, workspaces, and users each
 // get a dedicated modal float — a table of rows plus single-key actions,
 // every action a client call, errors rendered from the wire's structured
 // message (already deny-before-disclose-filtered server-side).
@@ -238,7 +238,7 @@ func (m *Model) openConnManager() {
 		{Title: "ID", Width: 5, Cell: func(c ConnInfo) string { return strconv.FormatInt(c.ID, 10) }},
 		{Title: "NAME", Cell: func(c ConnInfo) string { return c.Name }},
 		{Title: "ENGINE", Width: 10, Cell: func(c ConnInfo) string { return c.Engine }},
-		// The front-door columns (ADR-0086 §9). FRONT DOOR reads yes/no rather
+		// The front-door columns. FRONT DOOR reads yes/no rather
 		// than the raw profile string, because "session" does not tell an
 		// operator what it means; TARGET DB is the name a client types into a
 		// Database field, and showing it is what would have made an evening's
@@ -321,7 +321,7 @@ This is an exposure decision and it is audited.
 // Deliberately prose and not a toggle. A label reading "enable front door
 // access" would be lying by omission: the profile changes execution semantics
 // beyond this surface, and the third consequence is one nobody would guess
-// from the name (ADR-0086 §9).
+// from the name.
 func (m *Model) openProfileSwitch(g *manager[ConnInfo], sel ConnInfo) {
 	if sel.Profile == meta.ProfileSession {
 		m.openLeader("close the front door on "+sel.Name+"?", []leaderEntry{
@@ -565,8 +565,8 @@ func (m *Model) openUserManager() {
 
 // --- ip allowlists ------------------------------------------------------------------
 
-// openAllowlistManager is the admin view of the GLOBAL allowlist (ADR-0075
-// §4 first layer): config-seeded CIDRs shown read-only beside the managed
+// openAllowlistManager is the admin view of the GLOBAL allowlist
+// (first layer): config-seeded CIDRs shown read-only beside the managed
 // store rows. The server refuses non-admin tokens; the float itself is not
 // role-gated so the refusal (and its audit row) stays observable.
 func (m *Model) openAllowlistManager() {
@@ -615,7 +615,7 @@ func (m *Model) openAllowlistManager() {
 	g.float = m.openFloat("ip allowlist (global)", g)
 }
 
-// openUserIPManager is the per-user allowlist view (ADR-0075 §4 second
+// openUserIPManager is the per-user allowlist view (second
 // layer) — one implementation for both reaches: the leader's "my allowed
 // IPs" (self-service) and the user manager's per-user entry (admin).
 // Authorization is the server's: self-or-admin, audited.
@@ -676,7 +676,7 @@ func (m *Model) openPATManager(userID int64, who string) {
 		{Title: "LAST USED", Width: 12, Cell: func(r PATRow) string { return shortStamp(r.LastUsed) }},
 		{Title: "IPS", Width: 8, Cell: func(r PATRow) string {
 			// NOT "any". An empty allowed_ips means the token inherits the
-			// user's admission set (ADR-0075 Amendment 1) — still bounded,
+			// user's admission set — still bounded,
 			// just not narrowed further by the token itself. "any" claimed
 			// the opposite, and did so for restricted tokens too while the
 			// CSV was being decoded as a list.
@@ -794,7 +794,7 @@ func shortStamp(s string) string {
 // openPATForm collects a token's name, lifetime and optional IP restriction.
 //
 // It loads the caller's own allowlist FIRST, because allowed_ips must be a
-// subset of it (ADR-0075 §4). Validating here means a bad entry is refused
+// subset of it. Validating here means a bad entry is refused
 // while the user still has the form open and can fix it, rather than coming
 // back as a wire error after the fact.
 func (m *Model) openPATForm(g *manager[PATRow], userID int64, who string) {
@@ -822,12 +822,12 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 		field("name (e.g. laptop-psql, jetbrains)"),
 		field("expires in days (blank = server default, max 365)"),
 		field("restrict to IPs, comma separated (blank = any of your allowed IPs)"),
-		// ADR-0086 §1: a token names exactly ONE connection. The field is
+		// A token names exactly ONE connection. The field is
 		// required because there is no unscoped form — a PAT that reached
 		// every connection its owner is granted is the blast radius this
 		// binding exists to shrink.
 		field("connection id (SPC c lists them; the token reaches ONLY this one)"),
-		// ADR-0086 §10. Offered here rather than hidden behind a separate
+		// The cleartext debugging class. Offered here rather than hidden behind a separate
 		// command because the ONLY way to get one is to ask at mint time, and
 		// the server refuses it unless the caller is an admin and this daemon
 		// is serving cleartext right now — so an ordinary user typing `y` gets
@@ -928,7 +928,7 @@ func connFor(conns []ConnInfo, id int64) ConnInfo {
 	return ConnInfo{ID: id, Name: fmt.Sprintf("conn:%d", id)}
 }
 
-// revealConnectionCard replaces revealPATSecret (ADR-0086 §8).
+// revealConnectionCard replaces revealPATSecret.
 //
 // The token is still shown once and is still unrecoverable — what changed is
 // that everything ELSE needed to use it is on the same screen, because the

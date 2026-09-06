@@ -1,7 +1,7 @@
 package tui_test
 
-// Alt+h/j/k/l pane motion (ADR-0064 §2.4, criterion 16) and the empty-note hint
-// (criterion 12).
+// Alt+h/j/k/l pane motion and the empty-note hint
+// (the same-schema visible subset).
 //
 // The Alt aliases exist because a browser keeps Ctrl-L for its address bar and
 // will not surrender it: measured 2026-08-24, Ctrl+H/J/K and Alt+H/L reach the
@@ -67,7 +67,7 @@ func TestHelpCardDocumentsTheBrowserChords(t *testing.T) {
 // the help card with About printing the exact path. Predicating only on "is this
 // the web frontend" told a session already reading the shared tree that it was
 // reading its own root — false, and the reason the Model is now told its mode
-// (lector r1 P1b on PR #5).
+// (raised in review).
 func TestWebHelpExplainsThePrivateNoteRoot(t *testing.T) {
 	h := startUIAuthed(t, startRealServer(t),
 		tuiapp.WithFrontend(tuiapp.FrontendWeb),
@@ -101,7 +101,7 @@ func TestWebHelpExplainsTheSharedNoteTree(t *testing.T) {
 	// And it must NOT repeat the private-root advice, which would be false here.
 	assertAbsentInScrollableFloat(t, h,
 		"a session already reading the shared tree is told it reads its own "+
-			"root and should set notes_mode=workspace — the false text lector caught",
+			"root and should set notes_mode=workspace — the false text review caught",
 		"YOUR OWN note root")
 }
 
@@ -148,7 +148,7 @@ func findInScrollableFloat(t *testing.T, h *uiHarness, what, sub string) {
 
 // assertAbsentInScrollableFloat pages the whole float, top to bottom, and
 // fails if ANY frame contains ANY of the forbidden substrings. Negative
-// scans need the same §10 synchronization as positive ones — MORE so: a
+// scans need the same synchronization as positive ones — MORE so: a
 // skipped page in a positive scan fails loudly, but a skipped page here
 // would hide forbidden text on an unexamined frame and pass falsely.
 func assertAbsentInScrollableFloat(t *testing.T, h *uiHarness, why string, forbidden ...string) {

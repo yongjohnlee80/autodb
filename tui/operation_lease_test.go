@@ -1,6 +1,6 @@
 package tui
 
-// The operation LEASE (ADR-0068 §2.2, lector r1 finding 4).
+// The operation LEASE.
 //
 // A retirement flag only stops operations that have not started. The previous
 // version checked `alive()` and released its mutex before touching the
@@ -91,7 +91,7 @@ func TestLiveStoreAdmitsWork(t *testing.T) {
 
 // Every public operation is bracketed. Enumerated rather than sampled, because
 // the previous version of this assertion listed the ones I remembered and
-// ListWorkspaceDirs was not among them (lector).
+// ListWorkspaceDirs was not among them.
 func TestEveryPublicOperationIsRefusedAfterRetirement(t *testing.T) {
 	ns, err := NewPersonalNotes(t.TempDir(), "alice")
 	if err != nil {

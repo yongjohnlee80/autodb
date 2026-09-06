@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
-// Model is the root component of `autodb --ui` (ADR-0057 §2): the
+// Model is the root component of `autodb --ui`: the
 // sqlit-style three-pane IDE — explorer | (query editor / results) — with
 // a status bar, the Space leader menu, modal management floats, per-widget
 // zoom, and the reconnect lifecycle. The Model owns the application keymap
@@ -26,7 +26,7 @@ type Model struct {
 	session *Session
 	// notes is nil until afterLogin builds it: with no authenticated subject
 	// there is no personal tree to read, and there must be no ownerless one to
-	// fall back to (ADR-0068 §2.2).
+	// fall back to.
 	notes    *NoteStore
 	notesFor NotesFactory
 	// identityEpoch increments whenever the signed-in identity changes. Delayed
@@ -70,7 +70,7 @@ type Model struct {
 	searchQuery       string // last / pattern; n and N walk its matches
 	about             AboutInfo
 	frontend          Frontend
-	noteView          NoteView // which note tree this session reads (ADR-0064 §2.3)
+	noteView          NoteView // which note tree this session reads
 	pendingPrompt     func()   // an auth prompt waiting for the splash to close
 	pendingFocus      bool     // afterLogin's editor focus, deferred past an open modal
 	splashShown       bool     // the About splash opens once, on the first frame
@@ -146,7 +146,7 @@ func (m *Model) Init(ctx *tui.Context) {
 		if !m.ownsConnection() {
 			// Web: the connection is the gateway's, shared across this user's tabs.
 			// Per-App reconnect would replace the client the other tabs use, so a
-			// real daemon loss ends this browser App instead (lector r4). The user
+			// real daemon loss ends this browser App instead. The user
 			// re-attaches through the gateway.
 			m.endForLostAuth()
 			return
@@ -171,7 +171,7 @@ func (m *Model) Init(ctx *tui.Context) {
 	// Web: the gateway already dialed and authenticated this session, which is
 	// shared across the user's tabs. Calling Connect here would replace the client
 	// every other tab is using and advance the shared generation, superseding their
-	// in-flight work (lector r4). Enter the post-connect flow directly at the
+	// in-flight work. Enter the post-connect flow directly at the
 	// current epoch instead — same handleStartup path, no reconnect.
 	m.setStatus("attaching…")
 	m.ctx.Go(func(context.Context) (any, error) {
@@ -278,7 +278,7 @@ func (m *Model) handleStartup(d startupDone) {
 	m.watchDisconnect()
 	if d.instanceChanged {
 		// A different server process answered: everything cached from the
-		// old one is void (ADR-0057 §7) — the session already dropped the
+		// old one is void — the session already dropped the
 		// token, the UI drops its rendered state.
 		m.resetServerUI()
 		m.setStatus("server instance changed — login required")
@@ -297,14 +297,14 @@ func (m *Model) handleStartup(d startupDone) {
 
 // restartServer stops the shared server and lets the reconnect spawn a
 // fresh one — the supported way to pick up a rebuilt binary, since
-// `--serve` deliberately outlives the TUI (ADR-0056 §3).
+// `--serve` deliberately outlives the TUI.
 func (m *Model) restartServer() {
 	if !m.canRestartDaemon() {
 		// Refused rather than hidden only: removing it from the menu keeps it out
 		// of a user's way, and this keeps it out of reach of anything that finds
 		// the action another way. Under --web-ui nothing in the process can start
 		// a daemon, so this keystroke would strand every session including other
-		// users' (ADR-0061 §2.7).
+		// users'.
 		m.setStatus("restarting the server is not available in the browser frontend — " +
 			"nothing here can start it again")
 		return
@@ -371,7 +371,7 @@ func (m *Model) resetServerUI() {
 // same way. The store itself then refuses further I/O, which is what stops a
 // closure that outlived the UI it belonged to: dismissing a modal does not stop
 // its callback, and the callback holds a plausible body and a valid-looking
-// handle (ADR-0068 §2.2).
+// handle.
 //
 // The epoch is bumped so results still in flight can tell they are stale. It is
 // deliberately separate from the store: the store refuses WRITES, the epoch
@@ -419,8 +419,8 @@ func (m *Model) current(epoch uint64) bool { return epoch == m.identityEpoch }
 // Before sign-in there is no authenticated subject, so there is no personal tree
 // — and deliberately no ownerless one to fall back to. Every write path goes
 // through here, so "the terminal cannot write a note before login" is ONE gate
-// rather than nine nil checks that each have to be remembered (ADR-0068
-// criterion 5).
+// rather than nine nil checks that each have to be remembered
+// (the identity-keyed design).
 func (m *Model) requireNotes() (*NoteStore, bool) {
 	if m.notes == nil {
 		m.setStatus("notes appear once you sign in")
@@ -434,10 +434,10 @@ func (m *Model) afterLogin() {
 	m.hadAuth = true
 
 	// The personal store is built HERE, from the daemon's canonical subject, and
-	// not before: this is the whole point of ADR-0068. A failure leaves no store
+	// not before: this is the whole point of the identity-keyed scheme. A failure leaves no store
 	// at all rather than falling back to the ownerless base — failing closed is
 	// the contract, because a fallback would reintroduce the shared tree at
-	// exactly the moment identity is uncertain (§2.2).
+	// exactly the moment identity is uncertain.
 	// The PREVIOUS identity is retired before the next one exists, so there is no
 	// window in which two identities' stores are both usable.
 	m.retireIdentity()
@@ -447,7 +447,7 @@ func (m *Model) afterLogin() {
 			// Reported INSTEAD of the login line, not before it. The success
 			// message used to overwrite this immediately, so the one case the user
 			// needed to see — signed in but with no notes — announced itself as an
-			// ordinary login (lector).
+			// ordinary login.
 			m.setError(fmt.Sprintf("signed in as %s, but notes are unavailable: %v", u.Name, err))
 			m.explorer.Reload()
 			return
@@ -540,7 +540,7 @@ func (m *Model) maybePromptLogin() {
 
 func (m *Model) openBootstrap() {
 	if !m.managesOwnAuth() {
-		// The gateway bootstraps the first admin on first login (§2.9); the App
+		// The gateway bootstraps the first admin on first login; the App
 		// never does. If this fired, the daemon has no users and the gateway should
 		// have handled it — ending is the safe refusal.
 		m.endForLostAuth()
@@ -572,7 +572,7 @@ func (m *Model) openBootstrap() {
 
 func (m *Model) openLogin() {
 	if !m.managesOwnAuth() {
-		// Web mode: the gateway owns authentication (§2.4). The App runs on a
+		// Web mode: the gateway owns authentication. The App runs on a
 		// session shared by all this user's tabs and must not re-authenticate it in
 		// place — that would mutate a connection the other tabs are using and could
 		// re-key it to another user. A lost or switched session is therefore
@@ -587,7 +587,7 @@ func (m *Model) openLogin() {
 	// destination: saving it afterwards writes one person's work into another's
 	// tree, and dropping it silently loses it. So the choice is made here, while
 	// the old store is still current — and CANCEL means the switch does not
-	// happen at all, not that it happens without saving (ADR-0068 §2.2).
+	// happen at all, not that it happens without saving.
 	if m.noteDirty && m.notes != nil {
 		name := "this note"
 		if m.curNote != nil {
@@ -655,7 +655,7 @@ func (m *Model) authTask(what string, fn func(context.Context, *Bound) error) bo
 
 // --- execution ---------------------------------------------------------------------
 
-// execDone carries two distinct identities (lector, PR #15 r0): gen is the
+// execDone carries two distinct identities: gen is the
 // CONNECTION epoch — it guards data crossing a reconnect; seq is the
 // EXECUTION identity — it guards latest-run UI state. A completion whose
 // seq is stale must be fully inert: a reconnect clears the running guard
@@ -755,7 +755,7 @@ func (m *Model) doOpenNote(wsID int64, name string) {
 	// Through the capability, not the field: this used to read m.notes directly,
 	// so it could launch a task against a nil store after a factory failure or
 	// before sign-in, and it carried no epoch — a load issued as one identity
-	// could repaint the next one's editor (lector, reproduced).
+	// could repaint the next one's editor.
 	cap, ok := m.captureNotes()
 	if !ok {
 		return
@@ -1023,7 +1023,7 @@ func (m *Model) setError(msg string) {
 // connLabel names the active connection for display.
 //
 // DEFENSIVE, not the fix for anything reported. An earlier commit claimed the
-// missing-name state explained Johno's report; lector showed it is NOT
+// missing-name state explained Johno's report; review showed it is NOT
 // production-reachable — applyWorkspaces fills connNames before it installs the
 // connection roots that table nodes descend from, and Clear() drops the map and
 // the whole tree together. The real defect was a stale activeWs, fixed in
@@ -1313,7 +1313,7 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 			// order). Everything below belongs to the newest run: clearing
 			// running would drop its in-flight guard, and any status —
 			// including the superseded message — would stomp its state.
-			// A stale completion is fully inert (lector, PR #15 r0).
+			// A stale completion is fully inert.
 			return true
 		}
 		m.running = false
@@ -1387,7 +1387,7 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 			}
 			return true
 		case 'w':
-			// Ctrl-w z is the vim-familiar zoom alias (ADR-0057 §2).
+			// Ctrl-w z is the vim-familiar zoom alias.
 			m.pendingCtrlW = true
 			return true
 		case 'h', 'j', 'k', 'l':
@@ -1398,14 +1398,14 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 	}
 	// Alt+h/j/k/l alias pane motion, because a BROWSER cannot always give us the
 	// Ctrl chords: Ctrl-L is the address bar in both Firefox and Chrome and is not
-	// preventable from the page (golib/tui ADR-0009 §2.9 Rule 1 hands reserved
+	// preventable from the page (the upstream rule hands reserved
 	// shortcuts to the browser deliberately). Measured 2026-08-24: Ctrl+H/J/K and
 	// Alt+H/L all reach the server; Ctrl+L/W/T never do.
 	//
 	// The alias is unconditional rather than FrontendWeb-only. A binding that
 	// exists in one frontend and not another is a worse surprise than a spare
 	// binding in the terminal, and the terminal has no conflicting use for Alt with
-	// these letters (ADR-0064 §2.4).
+	// these letters.
 	if k.Mods&tui.ModAlt != 0 {
 		switch k.Code {
 		case 'h', 'j', 'k', 'l':
@@ -1421,7 +1421,7 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 		m.openLeaderMenu()
 		return true
 	}
-	// q quits when nothing focused consumed it (ADR-0057 §2) — via a
+	// q quits when nothing focused consumed it — via a
 	// confirmation, so a stray `q` in a pane that did not consume it cannot
 	// end the session.
 	if k.Text == "q" && !m.modalOpen() {
@@ -1451,7 +1451,7 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 	return false
 }
 
-// leaderEntries is the single binding table (ADR-0057 §8): the leader
+// leaderEntries is the single binding table: the leader
 // menu executes it and the help float renders it.
 func (m *Model) leaderEntries() []leaderEntry {
 	connLabel, connRun := "disconnect", func() {
@@ -1492,7 +1492,7 @@ func (m *Model) leaderEntries() []leaderEntry {
 	}
 	// Session and connection lifecycle actions belong to a frontend that OWNS its
 	// session. The web frontend shares one connection per user across tabs and does
-	// not authenticate in-App (§2.4), so login/switch-user and disconnect/reconnect
+	// not authenticate in-App, so login/switch-user and disconnect/reconnect
 	// are withdrawn — a disconnect from one tab would drop the connection the others
 	// are using, and a switch-user would re-key it. Removed from the table, not
 	// shown-and-refused: a menu entry that always fails teaches distrust of the menu.
@@ -1538,7 +1538,7 @@ func (m *Model) confirmQuit() {
 func (m *Model) openLeaderMenu() { m.openLeader("SPC — commands", m.leaderEntries()) }
 
 // openHelp renders the binding table — the SAME data the leader executes —
-// plus the root-level keys (ADR-0057 §2/§8).
+// plus the root-level keys.
 func (m *Model) openHelp() {
 	var sb strings.Builder
 	sb.WriteString("SPC <key> — leader commands\n\n")
@@ -1560,7 +1560,7 @@ func (m *Model) openHelp() {
 	sb.WriteString("  SPC H          script history (who ran what, when)\n")
 	sb.WriteString("  SPC A          about: build, backend, and where state lives\n")
 	if m.frontend == FrontendWeb {
-		// Criterion 12 (ADR-0064 §2.3): an empty explorer must be explicable, and the
+		// Criterion 12: an empty explorer must be explicable, and the
 		// explorer pane is ~25 columns and truncates any sentence — so the explanation
 		// lives here, with About printing the exact path.
 		//
@@ -1659,7 +1659,7 @@ func cursorStyle(focused bool) style.Style {
 	return cursorRowBlurred
 }
 
-// --- cleartext front door warning (ADR-0086 §10, R7) -------------------------------
+// --- cleartext front door warning -------------------------------
 
 // probeFrontDoorTLS asks the daemon whether the attached front door is serving
 // without TLS, and raises the warning if it is.

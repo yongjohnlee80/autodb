@@ -20,7 +20,7 @@ func unconnected(opts ...Option) *Model {
 // In a terminal `SPC X` is safe: the daemon exits and Session.spawn starts a
 // replacement. Under `autodb --web-ui` the spawn is nil by design, so the same
 // keystroke strands every web session with no way back — including sessions
-// belonging to other people (ADR-0061 §2.7).
+// belonging to other people.
 //
 // Internal rather than in ui_test.go, which is package tui_test: the binding table
 // is unexported, and testing the rendered menu text instead would assert on
@@ -66,9 +66,9 @@ func TestLeaderEntries_WebFrontendWithdrawsTheRestartAction(t *testing.T) {
 // The web frontend must not offer, or perform, any action that re-authenticates or
 // disconnects its shared session.
 //
-// The pooled RPC session is shared across a user's tabs (ADR-0061 §2.3). In-App
+// The pooled RPC session is shared across a user's tabs. In-App
 // login/switch-user would re-key it to another user, and disconnect would drop the
-// connection the other tabs are using — the exact hazard lector r3 must-fix 1
+// connection the other tabs are using — the exact hazard review
 // reproduced. So in FrontendWeb these actions are gone from the binding table AND
 // the openers refuse, ending the browser App instead.
 func TestFrontendWeb_WithdrawsAuthAndConnectionActions(t *testing.T) {

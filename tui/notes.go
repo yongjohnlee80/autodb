@@ -16,7 +16,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/config"
 )
 
-// Notes are LOCAL .sql files (ADR-0057 §5): client-side artifacts grouped
+// Notes are LOCAL .sql files: client-side artifacts grouped
 // per workspace under an immutable-ID-keyed directory — display names are
 // server metadata, so a rename never moves files and a server-side delete
 // never touches them (orphans surface as detached). The filesystem contract
@@ -39,7 +39,7 @@ var ErrBadWorkspace = errors.New("tui: notes: workspace id is not a canonical po
 //
 // Validating only the enumeration left the rejected names ADDRESSABLE: a
 // negative id formats to `ws--1`, which Workspaces() correctly refuses to list
-// and Delete() would happily remove (wanda, ADR-0068 criterion 39). A name the
+// and Delete() would happily remove. A name the
 // store could not have produced must not be reachable by any route.
 //
 // Only positivity needs checking here: `ws-01`, `ws-1x` and an overflowed
@@ -49,7 +49,7 @@ var ErrBadWorkspace = errors.New("tui: notes: workspace id is not a canonical po
 // ErrRemovedNotDurable reports that a note WAS unlinked but the directory could
 // not be synced, so the removal may not survive a crash.
 //
-// Distinct from a delete failure on purpose (ADR-0068 rev 10, criterion 37): the
+// Distinct from a delete failure on purpose: the
 // file is already gone, so retrying would act on whatever next holds that name.
 // The caller reports uncertainty; it does not retry.
 var ErrRemovedNotDurable = errors.New("tui: notes: removed, but the directory could not be synced")
@@ -67,7 +67,7 @@ var noteName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._ -]*$`)
 // NoteStore manages one identity's per-workspace note folders.
 //
 // Notes are PERSONAL: keyed by (user, workspace) and visible only to their
-// owner (ADR-0068). The root is derived internally from a base directory and a
+// owner. The root is derived internally from a base directory and a
 // canonical subject, and there is deliberately NO exported way to construct a
 // store over an arbitrary final root — an ownerless `<base>` must not be
 // expressible, because that is the shape that made one frontend's notes visible
@@ -80,7 +80,7 @@ type NoteStore struct {
 	//
 	// It is also what makes the ZERO VALUE fail closed: `var s NoteStore` has no
 	// root, so every operation errors instead of resolving `./ws-1` relative to
-	// the process's working directory (lector r2 P5).
+	// the process's working directory.
 	confined *os.Root
 	root     string // for display only — About names the root a session reads
 	subject  string
@@ -88,7 +88,7 @@ type NoteStore struct {
 	// retired is set when this store's identity is no longer current. A retired
 	// store refuses ALL I/O: a retained closure that reaches it after a switch
 	// must fail rather than write, and it must fail rather than quietly write
-	// somewhere else (ADR-0068 §2.2).
+	// somewhere else.
 	mu      sync.Mutex
 	drained sync.Cond
 	retired bool
@@ -105,7 +105,7 @@ var ErrRetired = errors.New("tui: notes: this identity's store has been retired"
 // ErrForeignNote reports a Note handle minted by a DIFFERENT store. It is the
 // cross-identity guard: a handle carries the store that created it, so
 // bob.Save(aliceNote, …) is refused instead of writing Alice's body into Bob's
-// tree — which is exactly what it did before this ADR (lector's r1 probe).
+// tree — which is exactly what it did before this ADR.
 var ErrForeignNote = errors.New("tui: notes: note belongs to another identity's store")
 
 // Retire closes the store to new work and WAITS for admitted work to finish.
@@ -114,7 +114,7 @@ var ErrForeignNote = errors.New("tui: notes: note belongs to another identity's 
 // Waiting is the point. A flag alone only stops operations that have not started:
 // `alive()` released its mutex before the I/O it guarded, so Retire could return
 // while an admitted Save was still writing, and the caller would install the next
-// identity believing the previous one was finished (lector r1 finding 4).
+// identity believing the previous one was finished.
 func (s *NoteStore) Retire() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,7 +178,7 @@ func (s *NoteStore) owns(n *Note) error {
 //
 // The caller cannot choose the final directory. That is the point: `<base>`
 // itself has no user component, so a store rooted there would hand every
-// identity every other identity's notes (ADR-0068 §2.1, criteria 24-25).
+// identity every other identity's notes.
 func NewPersonalNotes(base, subject string) (*NoteStore, error) {
 	if base == "" {
 		return nil, errors.New("tui: empty notes base")
@@ -205,7 +205,7 @@ func NewPersonalNotes(base, subject string) (*NoteStore, error) {
 // when the frontend is constructed: the terminal builds its UI before anyone has
 // logged in, and its subject only exists after afterLogin reads
 // session.User().Name. Handing it a store at startup is what forced the terminal
-// onto an ownerless root in the first place (ADR-0068 §1.3, §2.2).
+// onto an ownerless root in the first place.
 //
 // A factory also keeps NoteStore's root immutable. A Rebind(subject) method was
 // rejected: it makes every existing holder of a *NoteStore a potential stale
@@ -221,7 +221,7 @@ func PersonalNotesIn(base string) NotesFactory {
 func (s *NoteStore) Subject() string { return s.subject }
 
 // Root reports the directory this store actually reads and writes, so About can
-// name it. It is always `<base>/u-<subject>` and never the base (ADR-0068 §2.2).
+// name it. It is always `<base>/u-<subject>` and never the base.
 func (s *NoteStore) Root() string { return s.root }
 
 // Note identifies one loaded note plus the identity captured at load time
@@ -233,7 +233,7 @@ type Note struct {
 
 	// store is the NoteStore that minted this handle. A Note is scoped to one
 	// identity: without this, a handle loaded as alice could be saved through
-	// bob's store and land in u-bob (ADR-0068 §2.2, criterion 8).
+	// bob's store and land in u-bob.
 	store *NoteStore
 
 	existed    bool
@@ -255,7 +255,7 @@ type Note struct {
 // Returning an error moves the enumeration to the compiler. An operation cannot
 // obtain a usable path without handling the failure, so a future method that
 // forgets the check does not compile — it does not merely go unnoticed until
-// someone greps for it (wanda, reviewing PR #7).
+// someone greps for it.
 func (s *NoteStore) workspaceDir(wsID int64) (string, error) {
 	if err := canonicalWorkspace(wsID); err != nil {
 		return "", err
@@ -284,7 +284,7 @@ func (s *NoteStore) fs() (*os.Root, error) {
 // openRegular opens a note through the confined root, refusing anything that is
 // not a regular file. os.Root will not let a symlink escape the root, but it
 // WILL follow one that stays inside it and will happily open a FIFO — neither is
-// a note (lector r2 P3).
+// a note.
 func (s *NoteStore) openRegular(rel string) (*os.File, error) {
 	root, err := s.fs()
 	if err != nil {
@@ -302,7 +302,7 @@ func (s *NoteStore) openRegular(rel string) (*os.File, error) {
 
 // syncConfinedDir fsyncs a directory THROUGH the confined root, so the
 // descriptor synced is the one the operation used — re-opening it by path lets a
-// replacement make this sync a different directory (lector r2 P3).
+// replacement make this sync a different directory.
 func (s *NoteStore) syncConfinedDir(rel string) error {
 	root, err := s.fs()
 	if err != nil {
@@ -379,7 +379,7 @@ func (s *NoteStore) Load(wsID int64, name string) (*Note, string, error) {
 // loadUnadmitted is Load's body, for callers that ALREADY hold an admission.
 // Create finishes by loading the note it just wrote; going through Load would
 // admit a second operation inside the first, which inflates the active count and
-// makes Retire's drain harder to reason about (lector r1 finding 4).
+// makes Retire's drain harder to reason about.
 func (s *NoteStore) loadUnadmitted(wsID int64, name string) (*Note, string, error) {
 	clean, err := CleanName(name)
 	if err != nil {
@@ -416,7 +416,7 @@ func (s *NoteStore) loadUnadmitted(wsID int64, name string) (*Note, string, erro
 // Save writes the note atomically: exclusive temp in the same directory,
 // write, file fsync — THEN the conflict check against the load-time
 // identity, immediately before the rename, so a concurrent edit during
-// the temp write is still caught and only ADR-0057's accepted
+// the temp write is still caught and only the accepted
 // check-to-rename instant remains. On success the note's identity
 // refreshes to the saved content.
 func (s *NoteStore) Save(n *Note, body string) error {
@@ -428,7 +428,7 @@ func (s *NoteStore) Save(n *Note, body string) error {
 	// current identity. Checked before anything touches the filesystem: a
 	// retained closure that reaches here after a switch has a valid-looking
 	// handle and a plausible body, and the only thing distinguishing it from a
-	// legitimate save is provenance (ADR-0068 §2.2).
+	// legitimate save is provenance.
 	if err := s.owns(n); err != nil {
 		return err
 	}
@@ -596,7 +596,7 @@ func (s *NoteStore) Delete(wsID int64, name string) error {
 	}
 	// Reject a final component that is a SYMLINK. os.Root refuses to escape, but
 	// Remove on a link inside the root removes the link, which is not the note
-	// the user asked to delete (lector r2 P3).
+	// the user asked to delete.
 	st, err := root.Lstat(rel)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -625,7 +625,7 @@ func (s *NoteStore) Delete(wsID int64, name string) error {
 // fsyncs the directory so the removal is durable.
 //
 // os.Root confines every operation to the opened directory: a component that is
-// a symlink pointing outside is refused rather than traversed. Lector reproduced
+// a symlink pointing outside is refused rather than traversed. Review reproduced
 // why that matters — replacing `<base>/ws-1` with a symlink made a path-based
 // os.Remove delete a file in an entirely different directory.
 //
@@ -637,7 +637,7 @@ func (s *NoteStore) Delete(wsID int64, name string) error {
 // the file and a retry is safe. A failed fsync happens AFTER the unlink, so the
 // file may already be gone: that is an uncertain partial result, and reporting it
 // as a delete failure invites a retry that would act on a different file
-// (ADR-0068 criteria 45-47).
+// (the identity-keyed notes design).
 func removeAt(base, rel string) (removed bool, err error) {
 	// The root is the BASE, and the workspace directory is a path COMPONENT of
 	// rel. Opening the workspace directory as the root would resolve it first —

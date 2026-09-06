@@ -1,9 +1,9 @@
 package tui
 
-// ADR-0068 criterion 39: a `ws-*` name the store could not have produced must be
+// A `ws-*` name the store could not have produced must be
 // UNADDRESSABLE, not merely unlisted.
 //
-// wanda's finding, and the fourth time in this ticket that I validated the
+// A review finding, and the fourth time in this ticket that I validated the
 // operation a criterion mentioned and left its siblings open: Workspaces()
 // refused to list `ws--1`, and Delete(-1, …) removed the file inside it anyway.
 // Being invisible in the UI is not the same as being unreachable by the API.

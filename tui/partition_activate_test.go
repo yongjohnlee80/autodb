@@ -6,7 +6,7 @@ import (
 	tui "github.com/yongjohnlee80/golib/tui"
 )
 
-// Criterion 13 (lector r1 A1): Enter on a NESTED partition child scaffolds a
+// Criterion 13: Enter on a NESTED partition child scaffolds a
 // SELECT from its trusted quoted identifier — the whole activate path through a
 // real tree, not just the quoted-map assertion the forest test makes.
 func TestActivateNestedPartitionChildScaffolds(t *testing.T) {

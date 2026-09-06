@@ -1,6 +1,6 @@
 package tui
 
-// ADR-0077 criterion 11 at the AUTODB level: because the partition forest is
+// At the AUTODB level: because the partition forest is
 // carried inside the `sec:` result (rather than merged into a topology side
 // map), rejecting a stale result rejects its whole topology atomically. These
 // tests drive the REAL generation protocol — expanding a node mints gen1,

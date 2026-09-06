@@ -1,7 +1,7 @@
 package tui
 
 // connLabel() is the single answer to "what do we call the active connection",
-// and three sites render it. Lector's review of b33c97b showed the title test
+// and three sites render it. A review of b33c97b showed the title test
 // passed even when connLabel() returned "" — it asserted only the ABSENCE of
 // "no connection" — so the fallback itself was unguarded, and two of the three
 // call sites had no control at all.

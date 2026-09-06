@@ -14,7 +14,7 @@ import (
 // can represent only one of those rendered parents, so one table subtree must
 // resolve to the wrong workspace.
 //
-// Written by lector reviewing item 5 r2; it failed and the cache was replaced by
+// Written during review; it failed and the cache was replaced by
 // rendered-ancestry resolution (explorer.WorkspaceOfNode). ADAPTED, not weakened:
 // the original used e.ConnWorkspace to pick which of the two workspaces the cache
 // would get wrong, and that method is gone because the cache WAS the defect. With
@@ -29,7 +29,7 @@ func TestLectorProbe_SharedConnectionKeepsItsRenderedWorkspace(t *testing.T) {
 	if _, err := sess.Connect(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := sess.Bind().Bootstrap(ctx, "root", "lector-item5-r2-probe"); err != nil {
+	if err := sess.Bind().Bootstrap(ctx, "root", "workspace-ancestry-probe"); err != nil {
 		t.Fatal(err)
 	}
 	b := sess.Bind()

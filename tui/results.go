@@ -12,7 +12,7 @@ import (
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
-// resultsPanel renders the last execution (ADR-0057 §4): a Table whose
+// resultsPanel renders the last execution: a Table whose
 // cells the widget layer ellipsizes, a pretty-JSON toggle (Objective 16),
 // an honest "more rows truncated" badge, and Enter/`v` value inspection in
 // a float. The Table is rebuilt per result — column sets change per query.

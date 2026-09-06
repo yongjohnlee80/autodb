@@ -1,13 +1,13 @@
 package tui
 
-// Execution-identity semantics (lector, PR #15 r0): execDone carries TWO
+// Execution-identity semantics: execDone carries TWO
 // identities. gen (the connection epoch) guards data crossing a reconnect;
 // seq (the execution identity) guards latest-run UI state. The reconnect
 // path clears the running guard (handleStartup), so a NEWER run can be
 // legally admitted while an OLDER one is still completing — and the old
 // completion must then be fully inert: it must not clear the new run's
 // guard, replace its status, or overwrite its results. These two tests pin
-// the two orders lector's probe distinguished.
+// the two orders the probe distinguished.
 
 import (
 	"context"

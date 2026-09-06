@@ -219,6 +219,17 @@ catch two; it found four.
   relative path, both against the bare-period cell, both from real code rather
   than an invented fixture. The remaining rungs are conversion work AND the
   cells' live review.
+  A FOURTH SURFACE ARRIVED WITH RUNG SEVEN: FILE NAMES. The tui rung ended
+  with one comment hit left, inside a file called `lector_item5_r2_probe_test.go`
+  — a reviewer's name and a review round, in the one piece of text a reader
+  meets before opening anything, and invisible to both existing cells because a
+  filename is neither a comment nor a string. Three surfaces now, each added
+  after a real package produced a coordinate the existing cells structurally
+  could not see, and each time the rule was already the rule — only the place it
+  was enforced was missing. The pattern predicts a fourth: identifiers. A
+  function named `testLectorR2Probe` passes all three cells today, and that is
+  recorded here rather than guarded, because no such identifier exists yet and a
+  guard written for a hypothetical is a guard nobody has seen fail.
   A THIRD ARM ARRIVED WITH RUNG THREE: the same rule applied to STRING
   LITERALS, after two coordinates survived a conversion because the comment
   cell structurally cannot see them — one of them printed to an operator's

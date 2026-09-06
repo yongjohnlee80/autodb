@@ -2,7 +2,7 @@ package tui
 
 import "testing"
 
-// ADR-0074 §7 rev 2: audit v2's status vocabulary has to survive a nine-cell
+// Audit v2's status vocabulary has to survive a nine-cell
 // column. The failure this guards is silent: a truncated label looks like a
 // status rather than like half of one.
 func TestStatusLabel_FitsTheColumnAndStaysDistinct(t *testing.T) {

@@ -141,7 +141,7 @@ func TestWithinAny_ContainmentNotEquality(t *testing.T) {
 }
 
 // TestWithinAny_RefusesOutside is the security half: allowed_ips must be a
-// SUBSET of the user's own rows (ADR-0075 §4). A token may not reach an
+// SUBSET of the user's own rows. A token may not reach an
 // address its owner cannot.
 func TestWithinAny_RefusesOutside(t *testing.T) {
 	own := []UserIPRow{{CIDR: "10.0.0.0/8"}, {CIDR: "192.168.68.0/24"}}
@@ -231,7 +231,7 @@ func wireRow(name, allowedIPs string, revoked bool) map[string]any {
 }
 
 // TestPATRowFromWire_RestrictedTokenIsNotRenderedAsUnrestricted is the
-// blocking defect lector caught. Decoding the CSV as a list yielded nil, and
+// blocking defect review caught. Decoding the CSV as a list yielded nil, and
 // the manager labelled the token "any" — telling the operator a restricted
 // credential carried no restriction. A display bug, but a security-display
 // bug: it misreports the blast radius of a live credential.
@@ -247,7 +247,7 @@ func TestPATRowFromWire_RestrictedTokenIsNotRenderedAsUnrestricted(t *testing.T)
 }
 
 func TestSplitAllowedIPs_EmptyAndWhitespace(t *testing.T) {
-	// Empty means "inherits the admission set" (Amendment 1), so it must
+	// Empty means "inherits the admission set", so it must
 	// decode to nothing rather than to one blank entry.
 	for _, s := range []string{"", "   ", ",", " , , "} {
 		if got := splitAllowedIPs(s); len(got) != 0 {

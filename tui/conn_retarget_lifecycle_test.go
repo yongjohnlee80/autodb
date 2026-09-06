@@ -1,6 +1,6 @@
 package tui
 
-// Item 5, blocker 1 (lector, b33c97b): the earlier tests installed a `tbl:` root
+// Item 5, blocker 1: the earlier tests installed a `tbl:` root
 // directly with connNames empty, which is NOT a production-reachable state —
 // applyWorkspaces fills connNames before it installs connection roots, and table
 // nodes only ever descend from those roots.
@@ -34,7 +34,7 @@ import (
 // `schema:<connID>:…`, `sec:…` and `tbl:…` with identical ids under both. A
 // global prefix search therefore returns the first workspace's copy and the walk
 // silently stops expanding the subtree it was asked about — which is exactly how
-// an earlier version of this helper made lector's shared-connection probe walk
+// an earlier version of this helper made the shared-connection probe walk
 // into the wrong workspace.
 func childWithPrefix(t *testing.T, sync func(func()), e *explorer, path []string, prefix string) string {
 	t.Helper()
@@ -178,7 +178,7 @@ func TestProductionLifecycle_TableActivationHasTheConnectionName(t *testing.T) {
 	t.Logf("activeConn=%d activeConnNm=%q title=%q", gotConn, gotNm, strings.TrimSpace(title))
 
 	// If production really does have the name, the title shows it and the id
-	// fallback is defensive only — which is exactly what lector asked me to settle.
+	// fallback is defensive only — which is exactly what review asked me to settle.
 	if gotNm == "" {
 		t.Errorf("PRODUCTION-REACHABLE missing name: connNames[%d] was empty at "+
 			"activation, so the reported symptom IS reachable and the fallback is "+
@@ -282,7 +282,7 @@ func TestProductionLifecycle_TableActivationSetsTheWorkspace(t *testing.T) {
 	}
 }
 
-// The CONSEQUENCE, not the intermediate variable (lector r2). activeWs is only
+// The CONSEQUENCE, not the intermediate variable. activeWs is only
 // worth asserting because of what it decides: saveNoteAs files the note into
 // <notesRoot>/ws-<activeWs>. Before the fix, activating a table under workspace
 // 2 left activeWs on workspace 1, so the note landed in workspace 1's tree —

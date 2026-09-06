@@ -157,7 +157,7 @@ func TestExplorerEnterOnTable_RetargetsTheConnection(t *testing.T) {
 	// What the user actually reads. A retarget the UI reports as "no connection"
 	// is indistinguishable from no retarget at all, which is the reported symptom.
 	// EXACT, not merely "not no-connection": a connLabel() returning "" renders
-	// "query → " and passed the earlier version of this assertion 20/20 (lector).
+	// "query → " and passed the earlier version of this assertion 20/20.
 	if titleLine == "" {
 		t.Fatal("no query title line was rendered at all")
 	}

@@ -1,6 +1,6 @@
 package tui
 
-// The cross-identity guard (ADR-0068 §2.2, criterion 8) — lector's r1 probe,
+// The cross-identity guard — a review probe,
 // made permanent.
 //
 // Before this ADR the probe succeeded: a Note handle minted through alice's

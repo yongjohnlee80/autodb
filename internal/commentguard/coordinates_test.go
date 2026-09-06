@@ -44,6 +44,7 @@ var certifiedClean = []string{
 	"core/engine",
 	"core/meta",
 	"core/auth",
+	"tui",
 }
 
 // Patterns that name a private artefact.
@@ -269,6 +270,64 @@ func TestCertifiedPackagesCiteNothingPrivateInStrings(t *testing.T) {
 					"comment:\n  %s", pkg, strings.Join(hits, "\n  "))
 			}
 		})
+	}
+}
+
+// A certified package's FILE NAMES must not be coordinates either.
+//
+// THE SURFACE NOBODY LOOKED AT. The tui rung ended with one comment hit left,
+// inside a file called `lector_item5_r2_probe_test.go` — a reviewer's name and
+// a review round, in the one piece of text a reader meets before opening
+// anything. The comment cell could not see it and neither could the string
+// cell, because a filename is neither.
+//
+// Three surfaces now: comments, string literals, file names. Each was added
+// after a real package produced a coordinate the existing cells structurally
+// could not see, and each time the rule was already the rule — only the place
+// it was enforced was missing. That is worth stating because the pattern
+// predicts a fourth: identifiers. A function called testLectorR2Probe would
+// pass all three cells today.
+//
+// SAME PATTERN, DELIBERATELY, for the reason the string cell gives: one regexp
+// for one rule means an arm added for any surface cannot silently miss for the
+// others.
+func TestCertifiedPackageFileNamesAreNotCoordinates(t *testing.T) {
+	root := "../.."
+	if len(certifiedClean) == 0 {
+		t.Fatal("certifiedClean is empty, so this cell asserts nothing")
+	}
+	checked := 0
+	var hits []string
+	for _, pkg := range certifiedClean {
+		files, err := filepath.Glob(filepath.Join(root, pkg, "*.go"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(files) == 0 {
+			t.Fatalf("no .go files under %s; this run proved nothing about %q",
+				filepath.Join(root, pkg), pkg)
+		}
+		for _, path := range files {
+			checked++
+			// Underscores are the separator in Go file names, so the name is
+			// read as words before matching: `lector_item5_r2_probe_test.go`
+			// carries "lector" and "r2" only once the separators are spaces.
+			name := strings.TrimSuffix(filepath.Base(path), ".go")
+			spaced := strings.ReplaceAll(name, "_", " ")
+			if m := coordinate.FindString(spaced); m != "" {
+				hits = append(hits, fmt.Sprintf("%s/%s.go  %q", pkg, name, m))
+			}
+		}
+	}
+	if checked < 50 {
+		t.Fatalf("inspected only %d file name(s); a clean result would mean the "+
+			"walk found nothing to look at", checked)
+	}
+	if len(hits) > 0 {
+		t.Errorf("file name(s) that are themselves coordinates:\n  %s\n\n"+
+			"A file name is the first text a reader meets, and it is the one "+
+			"piece they cannot skip. Name the file for what it tests.",
+			strings.Join(hits, "\n  "))
 	}
 }
 

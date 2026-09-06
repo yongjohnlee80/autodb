@@ -51,7 +51,7 @@ func TestCleartextBanner_States(t *testing.T) {
 }
 
 // setFrontDoorCleartext announces a TRANSITION. Re-announcing on every probe is
-// the sticky behaviour ADR-0086 R7 rules out, and silently inheriting a
+// the sticky behaviour the design rules out, and silently inheriting a
 // dismissal across a door that went secure and came back is the opposite
 // failure — this cell walks the whole cycle rather than one edge.
 func TestSetFrontDoorCleartext_TransitionsOnly(t *testing.T) {

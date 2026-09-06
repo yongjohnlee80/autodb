@@ -146,7 +146,7 @@ func (v *historyView) Children() iter.Seq[tui.Component] {
 
 var _ tui.Container = (*historyView)(nil)
 
-// statusLabel renders an outcome inside a narrow column (ADR-0074 §7 rev 2).
+// statusLabel renders an outcome inside a narrow column.
 //
 // The column is nine cells wide and audit v2's vocabulary is not:
 // "ok_pending_commit" and "outcome_unresolvable" would arrive truncated to

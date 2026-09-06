@@ -11,7 +11,7 @@ import (
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
-// explorer wires widget.Tree to the session (ADR-0057 §3): workspaces →
+// explorer wires widget.Tree to the session: workspaces →
 // {connections → schemas → tables|views|functions → columns, notes}. Every
 // expansion is generation-tokened lazy loading through the client seam;
 // every outcome — including errors — settles the node (SetChildren/
@@ -30,7 +30,7 @@ import (
 //	col:<conn>:<schema>:<table>:<name>
 //	note:<ws>:<file>  detached:<ws>
 //
-// A partitioned Postgres parent (ADR-0077) expands to two folders instead of
+// A partitioned Postgres parent expands to two folders instead of
 // columns directly; both name the parent table:
 //
 //	cols:<conn>:<schema>:<parent>   the parent's columns (lazy, like tbl:)
@@ -116,7 +116,7 @@ func (e *explorer) ConnName(id int64) string { return e.connNames[id] }
 //
 // A connID -> wsID cache CANNOT answer this. A connection may be attached to
 // several workspaces, so it has several rendered parents and a cache can hold
-// only the last one written — lector's probe attaches one connection to two
+// only the last one written — a probe attaches one connection to two
 // workspaces and shows one of the two subtrees then resolving to the wrong
 // workspace. Ancestry is the only thing that distinguishes them.
 //
@@ -132,7 +132,7 @@ func (e *explorer) WorkspaceOfNode(id string) int64 {
 	// silently answer for the wrong subtree. Both callers pass the selected node,
 	// so a mismatch means an off-cursor caller was added without deciding what
 	// position it means; 0 (leave activeWs alone) is the safe answer, and is
-	// deliberately not a best guess (lector r2).
+	// deliberately not a best guess.
 	rows := e.tree.VisibleRows()
 	c := e.tree.Cursor()
 	if c < 0 || c >= len(rows) || rows[c].ID() != id {
@@ -246,7 +246,7 @@ func (e *explorer) Reload() {
 	seq := e.seq
 	// Captured ON THE LOOP. Reading e.model.notes inside the worker was a data
 	// race on Model state and could observe a store the user had already switched
-	// away from (lector).
+	// away from.
 	cap, haveNotes := e.model.captureNotes()
 	epoch := e.model.identityEpoch
 	e.ctx.Go(func(c context.Context) (any, error) {
@@ -278,7 +278,7 @@ func (e *explorer) RefreshNotes(wsID int64) {
 }
 
 // Clear drops every server-derived node and cache (instance change —
-// ADR-0057 §7: nothing from the old server may keep rendering).
+// nothing from the old server may keep rendering).
 func (e *explorer) Clear() {
 	e.quoted = map[string]string{}
 	e.connNames = map[int64]string{}
@@ -332,7 +332,7 @@ func (e *explorer) applyWorkspaces(l wsLoaded) {
 	}
 	// The LEGACY section, replacing the old detached-notes node.
 	//
-	// Pre-ADR-0068 notes live at `<base>/ws-<id>/` and carry no owner, so the
+	// Notes from before the identity-keyed scheme live at `<base>/ws-<id>/` and carry no owner, so the
 	// personal tree cannot show them and nothing can decide whose they are. They
 	if len(roots) == 0 {
 		empty := widget.NewTreeNode("empty", "no workspaces — SPC w to create one", widget.WithLeaf())
@@ -347,7 +347,7 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 	sess := e.model.session.Bind() // pin the epoch at issuance
 	sgen := sess.Gen()
 	// Identity state captured ON THE LOOP, like the session epoch above it: the
-	// worker must not read Model fields (lector).
+	// worker must not read Model fields.
 	noteCap, haveNotes := e.model.captureNotes()
 	fail := func(err error) treeLoaded {
 		return treeLoaded{node: node, gen: gen, sgen: sgen, err: WireErrorMessage(err)}
@@ -403,7 +403,7 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 			}
 			if supported {
 				// Capability absence renders as an ABSENT section, never an
-				// error (ADR-0057 §3).
+				// error.
 				kids = append(kids, widget.NewTreeNode(
 					fmt.Sprintf("sec:%d:%s:functions", connID, encSeg(schema)), "functions"))
 			}
@@ -432,7 +432,7 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 			}
 			quoted := map[string]string{}
 			// The tables section nests Postgres partitions under their parent
-			// (ADR-0077); the views section stays a flat list.
+			// the views section stays a flat list.
 			if section == "views" {
 				var kids []*widget.TreeNode
 				for _, t := range tables {
@@ -479,7 +479,7 @@ func (e *explorer) loadChildren(node *widget.TreeNode, gen uint64) {
 }
 
 // buildTableForest turns the annotated table list into the top-level nodes of
-// the `tables` section, nesting Postgres partitions under their parent (ADR-0077).
+// the `tables` section, nesting Postgres partitions under their parent.
 //
 // It runs in the `sec:` worker, off the loop. Every node it builds is UNOWNED
 // here, so a partitioned parent's `SetChildren(0, …)` is static pre-assembly —
@@ -550,7 +550,7 @@ type treeLoaded struct {
 	node *widget.TreeNode
 	// epoch is the IDENTITY this load was issued under. sgen tracks the session,
 	// which retirement does not advance — so a personal-notes child result issued
-	// as alice could still install under bob (lector r2 P4).
+	// as alice could still install under bob.
 	//
 	// Zero means "not identity-scoped": a connections or schema listing comes from
 	// the daemon and is not one person's data.

@@ -15,7 +15,7 @@ import (
 	"github.com/yongjohnlee80/golib/server/rpc/msgpackrpc"
 )
 
-// Session is the TUI's ONLY path to the core (ADR-0057 §7 — the client
+// Session is the TUI's ONLY path to the core (the client
 // seam, even in-process): a golib rpc.Client plus the autodb handshake,
 // login state, and typed projections of the method surface. The reconnect
 // loop is driven by the client's Done()/Err() terminal signal; a changed
@@ -46,7 +46,7 @@ type Session struct {
 }
 
 // spawnProbeWindow bounds how long Connect keeps dialing after the first
-// failure before giving up (ADR-0056 §3 — a spawned server that exits
+// failure before giving up (a spawned server that exits
 // early keeps refusing dials, so the bounded window detects it too).
 const spawnProbeWindow = 15 * time.Second
 
@@ -192,7 +192,7 @@ func (b *Bound) ensure() error {
 	return nil
 }
 
-// Connect implements the FE contract (ADR-0056 §3): dial; on refusal spawn
+// Connect implements the FE contract: dial; on refusal spawn
 // `--serve` (when a spawner is configured) and retry with backoff inside a
 // bounded probe window; then hello at the current Protocol. It reports
 // whether the server INSTANCE changed versus the previous connection — the
@@ -292,7 +292,7 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 	instanceChanged = s.instance != "" && s.instance != inst
 	if instanceChanged {
 		// A new server process: the master key is locked again and every
-		// cached assumption is stale (ADR-0057 §7).
+		// cached assumption is stale.
 		s.token = ""
 		s.user = UserInfo{}
 	}
@@ -492,7 +492,7 @@ func (b *Bound) History(ctx context.Context, limit int64) ([]HistoryRow, error) 
 	return out, nil
 }
 
-// TxStatus is one transaction's resolved outcome (ADR-0074 §7, protocol 5).
+// TxStatus is one transaction's resolved outcome.
 //
 // The server folds its transition log before it gets here, so this is the
 // answer rather than the evidence: a consumer that had to fold the log itself
@@ -645,7 +645,7 @@ func (b *Bound) FrontDoorEndpoint(ctx context.Context) (FrontDoorEndpoint, error
 }
 
 // KeyslotStatus is what the daemon reports about its unattended unlock
-// (ADR-0087 §6).
+// (the locked-daemon contract).
 //
 // The daemon prints its banner ONCE, at start, to a terminal nobody may be
 // watching. This is how an operator asks later — from the TUI, at the moment
@@ -696,8 +696,8 @@ func (b *Bound) RemoveKeyslot(ctx context.Context) error {
 // SetConnectionProfile switches a connection's capability profile. Admin only.
 //
 // The caller is expected to have told the user what the switch turns on —
-// front-door reachability is only the first of three consequences (ADR-0086
-// §9), and a UI that said just "enable front door access" would be lying by
+// front-door reachability is only the first of three consequences,
+// and a UI that said just "enable front door access" would be lying by
 // omission.
 func (b *Bound) SetConnectionProfile(ctx context.Context, connID int64, profile string) error {
 	_, err := b.authed(ctx, "conn.set_profile", connID, profile)
@@ -780,7 +780,7 @@ func (b *Bound) DeleteWorkspace(ctx context.Context, wsID int64) error {
 
 // TableInfo is one explorer relation with its server-quoted identifier.
 //
-// Partitioned/IsPartition/Parent carry the Postgres partition role (ADR-0077),
+// Partitioned/IsPartition/Parent carry the Postgres partition role,
 // zero-valued on other dialects and un-partitioned relations. Parent is a
 // same-schema relation name only.
 type TableInfo struct {
@@ -1053,7 +1053,7 @@ func (b *Bound) RemoveAllowedIP(ctx context.Context, cidr string) error {
 	return err
 }
 
-// UserIPRow is one per-user allowlist row (ADR-0075 §4 second layer).
+// UserIPRow is one per-user allowlist row.
 type UserIPRow struct {
 	ID     int64
 	UserID int64
@@ -1146,7 +1146,7 @@ func patRowFromWire(m map[string]any) PATRow {
 
 // splitAllowedIPs parses the CSV, dropping blanks so " , " does not become a
 // phantom restriction. Empty yields nil, which means the token INHERITS the
-// user's admission set (ADR-0075 Amendment 1) rather than reaching nowhere.
+// user's admission set rather than reaching nowhere.
 func splitAllowedIPs(s string) []string {
 	var out []string
 	for _, part := range strings.Split(s, ",") {
@@ -1162,7 +1162,7 @@ func splitAllowedIPs(s string) []string {
 // days is 0 for the server default or 1..365; allowedIPs must be a subset of
 // the caller's own allowlist rows and is sent as the CSV the wire expects.
 //
-// connID is not optional (ADR-0086 §1): every PAT names exactly one
+// connID is not optional: every PAT names exactly one
 // connection, and the server refuses a mint against one the caller has no
 // grant on, one that is not enabled for front-door use, or one whose target
 // database name has not been recorded.

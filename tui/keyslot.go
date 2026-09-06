@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// The SERVICE KEYSLOT's operator surface (ADR-0087 §5, §6).
+// The SERVICE KEYSLOT's operator surface.
 //
 // The daemon prints its banner once, at start, to a terminal nobody may be
 // watching. This is the surface that answers the same question LATER — at the

@@ -1,6 +1,6 @@
 package tui
 
-// The identity TRANSITION (ADR-0068 §2.2). The store-level guards are tested in
+// The identity TRANSITION. The store-level guards are tested in
 // identity_guard_test.go; these assert the Model actually triggers them, because
 // a defence nothing invokes is not a defence.
 

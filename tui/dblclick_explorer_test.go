@@ -3,7 +3,7 @@ package tui
 // Item 2 consumer side: a DOUBLE-CLICK on a table must do what ENTER does —
 // scaffold a query — with no autodb code change, because the explorer already
 // subscribes to widget.ActivateEvent and golib now publishes it on a
-// double-click for branches as well as leaves (golib ADR-0010 §2.5).
+// double-click for branches as well as leaves.
 //
 // This is the assertion that makes "no autodb change is needed" a measured
 // claim rather than a reading of the subscription.

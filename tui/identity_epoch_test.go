@@ -1,6 +1,6 @@
 package tui
 
-// The identity EPOCH (ADR-0068 §2.2) — lector's reproduced probe.
+// The identity EPOCH — a reproduced probe.
 //
 // The epoch existed but nothing read it, which is worse than not having one: it
 // reads as protection. noteGen alone could not tell the difference, because
@@ -78,7 +78,7 @@ func TestLoadFromTheCurrentIdentityIsApplied(t *testing.T) {
 	}
 }
 
-// lector r2 P4 — a delayed PERSONAL-NOTES child result must not install under a
+// A delayed PERSONAL-NOTES child result must not install under a
 // later identity. sgen tracks the session, which retirement does not advance, so
 // it could not tell alice's listing from bob's.
 func TestDelayedPersonalTreeResultFromAPreviousIdentityIsDiscarded(t *testing.T) {

@@ -44,7 +44,7 @@ type Option func(*Model)
 // THE DAEMON DOWN, and whether that is safe depends entirely on who is hosting the
 // tree. In a terminal it is: the daemon exits, the next call fails, and the
 // session's spawn function starts a replacement. Under `autodb --web-ui` the spawn
-// is nil by design (ADR-0061 §2.2), so the same keystroke strands every web session
+// is nil by design, so the same keystroke strands every web session
 // with no way to bring the daemon back — including sessions belonging to other
 // people.
 //
@@ -59,24 +59,24 @@ const (
 	FrontendWeb
 )
 
-// WithFrontend declares the hosting frontend (ADR-0061 §2.7).
+// WithFrontend declares the hosting frontend.
 func WithFrontend(f Frontend) Option { return func(m *Model) { m.frontend = f } }
 
-// NoteView describes WHICH note tree this session actually reads (ADR-0064 §2.3).
+// NoteView describes WHICH note tree this session actually reads.
 //
 // The Model needs to be told, rather than inferring it from the frontend. A
 // browser session reads its own root by DEFAULT and the shared workspace tree when
 // the gateway is bound — and help text predicated on "is this the web frontend"
 // said "you are reading your own root, set notes_mode=workspace to share" even to
-// a session already in workspace mode, which was simply false (lector r1 on
-// PR #5).
+// a session already in workspace mode, which was simply false (raised in
+// review).
 type NoteView struct {
 	// Shared is true when this session reads the same workspace-keyed tree the
 	// terminal TUI writes, false when it reads a private per-identity root.
 	Shared bool
 	// (No path here on purpose. About carries the effective root, set by
 	// aboutForRoot; duplicating it in the view would be a second source of truth
-	// for the same fact — lector r2 non-blocking note.)
+	// for the same fact — a non-blocking review note.)
 }
 
 // WithNoteView tells the Model which tree it is reading, so help explains the
@@ -86,7 +86,7 @@ func WithNoteView(v NoteView) Option { return func(m *Model) { m.noteView = v } 
 // NoteViewOf reports the note view a host configured. Exported so a host can
 // assert its OWN wiring: the interesting bug is not "does the option work" but
 // "did the runner pass it", and that is only observable on the built Model
-// (lector r2 on PR #5).
+// (raised in review).
 func (m *Model) NoteViewOf() NoteView { return m.noteView }
 
 // AboutNotesDir reports the note root About will display, for the same reason.
@@ -102,7 +102,7 @@ func (m *Model) canRestartDaemon() bool { return m.frontend == FrontendTerminal 
 // all on a session it owns exclusively. The web frontend does NOT — the gateway
 // authenticates before the App is built, and the session is SHARED across the
 // user's tabs, so any in-App re-authentication would mutate a connection other
-// tabs are using and could re-key it to a different user (ADR-0061 §2.4; lector
+// tabs are using and could re-key it to a different user (review
 // r3). In the web frontend authentication is not the App's job, and a lost session
 // is terminal.
 func (m *Model) managesOwnAuth() bool { return m.frontend == FrontendTerminal }
@@ -113,7 +113,7 @@ func (m *Model) managesOwnAuth() bool { return m.frontend == FrontendTerminal }
 // the gateway dials the connection and shares it across the user's tabs, so an
 // App that connected or reconnected it on its own would replace the client every
 // other tab is using and advance the shared generation, invalidating their
-// in-flight work (ADR-0061 §2.3; lector r4). In the web frontend the connection
+// in-flight work. In the web frontend the connection
 // arrives ready and a loss is terminal.
 func (m *Model) ownsConnection() bool { return m.frontend == FrontendTerminal }
 
@@ -167,7 +167,7 @@ func (m *Model) aboutRows() [][2]string {
 // Before sign-in there is no identity and therefore no personal root, so About
 // says so rather than naming the base: showing `<base>` would name a directory
 // this session never reads and would suggest the ownerless tree is still in use
-// (ADR-0068 criteria 20-21).
+// (the identity-keyed notes design).
 func (m *Model) notesLine(info AboutInfo) string {
 	if m.notes != nil {
 		return m.notes.Root()
@@ -199,7 +199,7 @@ func backendBuildLine(frontend, backend string, canRestart bool) string {
 		return backend + " (matches this binary)"
 	}
 	// The SPC X remedy is only offered to a frontend that has it. Under --web-ui
-	// the restart action is withdrawn (§2.7), so pointing a browser user at a key
+	// the restart action is withdrawn, so pointing a browser user at a key
 	// that does not exist would be worse than saying nothing.
 	if canRestart {
 		return backend + " ≠ " + frontend + " — the running server is a DIFFERENT build. " +

@@ -9,7 +9,7 @@ import (
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
-// Modal float plumbing (ADR-0057 §9): every dialog is a widget.Float on the
+// Modal float plumbing: every dialog is a widget.Float on the
 // Model's OverlayHost, removed from the stack on dismiss (the ddex-server
 // recipe — floats must not accumulate as dead layers).
 
@@ -343,8 +343,8 @@ func (m *Model) openLeader(title string, entries []leaderEntry) {
 	lm.float = m.openFloat(title, lm)
 }
 
-// inspectFloat shows one result row as a navigable CELL list (ADR-0057
-// §4 — value inspection is per cell): j/k select a cell, `y` imports the
+// inspectFloat shows one result row as a navigable CELL list
+// (value inspection is per cell): j/k select a cell, `y` imports the
 // selected cell's FAITHFUL value into the editor's register, Enter opens
 // the full value in a scrollable float.
 type inspectFloat struct {

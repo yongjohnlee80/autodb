@@ -1,6 +1,6 @@
 package tui
 
-// buildTableForest is the tree side of ADR-0077: it nests Postgres partition
+// buildTableForest is the tree side of partition nesting: it nests Postgres partition
 // children under their parent (a `columns` folder + a `partitions (N)` folder),
 // preassembled so the whole forest installs atomically. These tests drive the
 // forest through a real widget.Tree — SetRoots + ExpandPath + VisibleRows — so
@@ -95,7 +95,7 @@ func TestBuildTableForest_NestsPartitionsUnderParent(t *testing.T) {
 
 // A sub-partitioned child (itself relkind 'p') nests recursively: under its
 // parent's partitions folder, and it in turn exposes its own columns +
-// partitions folders (ADR-0077 criterion 7).
+// partitions folders.
 func TestBuildTableForest_SubPartitionRecurses(t *testing.T) {
 	top := tbl("events")
 	top.Partitioned = true
@@ -128,7 +128,7 @@ func TestBuildTableForest_SubPartitionRecurses(t *testing.T) {
 
 // A cross-schema partition (Parent == "" in this listing) stays a top-level
 // table, and a parent whose only children are cross-schema shows partitions (0)
-// — the count is the VISIBLE same-schema subset (ADR-0077 criterion 12).
+// — the count is the VISIBLE same-schema subset.
 func TestBuildTableForest_CrossSchemaStaysTopLevelAndCountIsVisible(t *testing.T) {
 	parent := tbl("events")
 	parent.Partitioned = true
@@ -148,7 +148,7 @@ func TestBuildTableForest_CrossSchemaStaysTopLevelAndCountIsVisible(t *testing.T
 }
 
 // Regression: a schema with no partitions renders a flat list of tables that
-// each expand to columns — no folders — exactly as before ADR-0077 (criterion 2).
+// each expand to columns — no folders — exactly as before partitions were nested.
 func TestBuildTableForest_UnpartitionedIsFlat(t *testing.T) {
 	tr := treeOf(buildTableForest(1, "public",
 		[]TableInfo{tbl("users"), tbl("songs"), tbl("plays")}, map[string]string{}))
