@@ -133,6 +133,7 @@ func TestEachPredicateReadsItsOwnField(t *testing.T) {
 // can express without becoming a factory.
 var identityIsTheQuestion = map[string]string{
 	"core/exec/conns.go":      "picks the driver that opens the connection",
+	"core/exec/dialect.go":    "picks the DIALECT implementation — a factory, and the one place identity may decide, because what it returns is what every other site asks a capability of",
 	"core/exec/dsn.go":        "parses and validates a DSN with that engine's own parser",
 	"core/meta/meta.go":       "opens the meta store with the matching driver",
 	"core/meta/lease.go":      "takes a file lease or a database lease — different mechanisms",

@@ -164,6 +164,53 @@ The guard also refuses a **dead exemption** — one naming a file with no
 comparison in it. Two of the first list's entries were guesses at paths I had
 not opened, and an exemption nothing uses is not dormant: it stands ready to
 excuse whatever is written at that path next.
+## Phase: capability interfaces (sequence step 12, first of five)
+
+**Removed: PostgreSQL statement text from a function that takes any engine.**
+`armServerBelt` asked `HasServerStatementTimeout()` and then wrote
+`SET LOCAL idle_in_transaction_session_timeout` — the predicate answered WHICH
+engine correctly while the code that knows HOW stayed in the generic path.
+**Answer: derive.** `StatementTimeoutBelt` is an optional capability a dialect
+implements or does not; the generic path asks for a belt and hands it a
+deadline, and what the belt is made of stops being `core/exec`'s business.
+
+This is the second half of the work #104 began. The predicates removed the
+identity tests; they did not move the engine-specific code, and a predicate
+guarding an inlined implementation is a branch with a better name. A third
+engine now supplies an implementation rather than being added to a condition.
+
+**Left: `dialectFor`'s switch on engine identity**, exempted by name in the
+identity guard — a FACTORY is the one place identity may decide, because what
+it returns is the thing every other site asks a capability of. The guard caught
+it within a minute of the file being written, which is the exemption mechanism
+working the way it is supposed to: not preventing the comparison, but making
+someone say why.
+
+**Guarded in both directions.** The absent branch is the one that matters — a
+capability tested only where it is present is one nobody has proven is
+optional — so the negative cell drives every engine WITHOUT a belt through
+`armServerBelt` with a **nil transaction**, which is the strongest available
+witness that nothing executed. Its companion asserts some engine does implement
+one, because a `dialectFor` returning nil for everything would satisfy the
+negative cell for all three. A third cell pins interface and predicate
+together, so the table a reader consults cannot drift from the code that runs.
+
+**Four remain**: `RoutineIntrospector`, `GrammarPinner`, `TxReconciler`,
+`AdvisoryLocker`. The first carries a behaviour decision and is deliberately
+not folded in here — see the note below.
+
+**A behaviour fork, recorded rather than taken.** golib's `MysqlDialect`
+implements `dao.RoutineIntrospector`; autodb's `HasRoutineCatalog()` says MySQL
+has none, and the query under that gate is hardcoded `pg_proc` SQL. So the
+predicate describes AUTODB'S READINESS, not the target's capability — the same
+proxy-predicate defect one level deeper than #104 fixed, and the comment's
+"no catalog of this shape here" carries the admission in the word *here*.
+Converting it honestly turns reader-routine analysis ON for MySQL: a tightening
+(more analysed, so more refusable, never fewer) in a security path. It goes as
+its own change with a live-MySQL witness — including the case that is REFUSED,
+not only the case that is reached — because an enablement inferred from a
+compile-time interface is not an enablement anyone has seen work.
+
 ## The exemption mechanism has four parts
 
 Three answers in this register are **leave, exempted by name**, and the

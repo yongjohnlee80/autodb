@@ -4,8 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/yongjohnlee80/autodb/core/engine"
 	"time"
+
+	"github.com/yongjohnlee80/autodb/core/engine"
 
 	"github.com/yongjohnlee80/golib/dao"
 
@@ -94,12 +95,14 @@ func (l txLimits) serverBeltSeconds() int {
 // belt: the engine's own deadline is the guarantee, and a driver without the
 // GUC simply does not get the second layer.
 func armServerBelt(ctx context.Context, tx dao.TxConn, engineName engine.Name, l txLimits) error {
-	if !engineName.HasServerStatementTimeout() {
+	belt, ok := dialectFor(engineName).(StatementTimeoutBelt)
+	if !ok {
+		// This target has no belt of its own. Not an error: the engine's own
+		// deadline is the primary bound and still applies — the target simply
+		// does not carry the second layer.
 		return nil
 	}
-	_, err := tx.ExecContext(ctx,
-		fmt.Sprintf("SET LOCAL idle_in_transaction_session_timeout = '%ds'", l.serverBeltSeconds()))
-	return err
+	return belt.ArmIdleTransactionBelt(ctx, tx, l.serverBeltSeconds())
 }
 
 // connectionIsDebug reports whether a connection carries the debug profile,
