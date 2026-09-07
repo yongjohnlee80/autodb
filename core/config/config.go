@@ -152,6 +152,23 @@ type FrontDoor struct {
 	// ControlLaneBytes is the reserved control lane. Unset derives
 	// max_conns × 64 KiB, and it may only be RAISED above that.
 	ControlLaneBytes int64 `toml:"control_lane_bytes"`
+
+	// GeneralLaneBytes is the process-wide general lane (matrix §1.4): the
+	// budget segment input, retained statement/portal state and pending
+	// serialized output are charged against. Unset takes the 1 GiB default.
+	//
+	// It had no config surface at all until this key existed, which made it
+	// the only one of the three front-door budgets an operator could not
+	// move — its siblings above are both documented as movable in
+	// config.example.toml, and this is the largest of them. The listener
+	// still enforces §1.4's composition rule, so an explicit value may only
+	// RAISE the lane above the floor full occupancy needs.
+	//
+	// The floor is what makes this key matter on a small host: it derives
+	// from exec.max_sessions_global, so lowering the session cap lowers the
+	// floor and a modest machine can express an occupancy it can actually
+	// honour. See frontdoor.GeneralLaneFloor.
+	GeneralLaneBytes int64 `toml:"general_lane_bytes"`
 }
 
 // CleartextAcknowledgement is the only value insecure_disable_tls accepts.
@@ -188,6 +205,32 @@ func (f FrontDoor) EffectiveResidentBudget() int64 {
 		return f.ResidentBudgetBytes
 	}
 	return DefaultResidentBudgetBytes
+}
+
+// DefaultGeneralLaneBytes and MaxGeneralLaneBytes are matrix §1.4's general
+// budget and §9's ceiling.
+//
+// They live HERE, in the layer both the daemon and the listener read, so that
+// each figure is one literal. The frontdoor package refers to these rather
+// than restating them: a second copy of a budget is how the value an operator
+// sets and the value a listener enforces come to disagree, and this slice
+// exists because that had already happened once with the session cap.
+const (
+	DefaultGeneralLaneBytes int64 = 1 << 30
+	MaxGeneralLaneBytes     int64 = 4 << 30
+)
+
+// EffectiveGeneralLane is the general lane actually in force.
+//
+// One function, for the same reason EffectiveMaxLeases is one function: two
+// places deriving it separately is how a validator and the thing it guards end
+// up disagreeing, and here the disagreement would surface as statements
+// refused for backpressure that nothing is wrong with.
+func (f FrontDoor) EffectiveGeneralLane() int64 {
+	if f.GeneralLaneBytes > 0 {
+		return f.GeneralLaneBytes
+	}
+	return DefaultGeneralLaneBytes
 }
 
 // MaxSubjectLen bounds the directory component built from a username. Generous
@@ -882,6 +925,27 @@ func (f FrontDoor) validateBudgets(poolMaxConns int) error {
 			"ceiling of %d; the budget bounds what an authenticated population can "+
 			"hold at once, and a number above the ceiling is a bound the machine cannot honour "+
 			"rather than a larger one", ErrInvalid, f.ResidentBudgetBytes, MaxResidentBudgetBytes)
+	}
+
+	// The general lane, checked to the same depth as its sibling above.
+	//
+	// The FLOOR is deliberately not checked here. It composes over
+	// exec.max_sessions_global, and this method sees only the front-door
+	// section — the listener validates the relationships between sections
+	// before it binds (frontdoor.Open), which is the same seam max_leases
+	// already sits on. What config can check on its own it checks: that
+	// nobody wrote a negative where zero means the default, and that an
+	// explicit value is not above the ratified ceiling.
+	if f.GeneralLaneBytes < 0 {
+		return fmt.Errorf("%w: frontdoor.general_lane_bytes is %d; zero takes the %d default "+
+			"and a negative is not a budget", ErrInvalid, f.GeneralLaneBytes,
+			DefaultGeneralLaneBytes)
+	}
+	if f.GeneralLaneBytes > MaxGeneralLaneBytes {
+		return fmt.Errorf("%w: frontdoor.general_lane_bytes is %d, above matrix §9's ceiling "+
+			"of %d; the lane bounds what every session holds together, and a number above the "+
+			"ceiling is a bound the machine cannot honour rather than a larger one",
+			ErrInvalid, f.GeneralLaneBytes, MaxGeneralLaneBytes)
 	}
 
 	// The derivation, and the reason an explicit value may only be lower.

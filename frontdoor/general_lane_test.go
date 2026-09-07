@@ -1,6 +1,7 @@
 package frontdoor
 
 import (
+	"github.com/yongjohnlee80/autodb/core/config"
 	"sync"
 	"testing"
 	"time"
@@ -150,34 +151,112 @@ func TestLoop_TheLaneIsReleasedOnEveryStatementPath(t *testing.T) {
 }
 
 // matrix §1.4's composition rule for the general lane: the default is exactly the
-// floor, config may only raise it, and startup FAILS below it.
+// floor at the SHIPPED occupancy, config may only raise it, and startup FAILS
+// below it.
 //
 // The equality assertion is the load-bearing one. 256 × 4 MiB = 1 GiB is today's
 // default exactly, with zero margin — it fits by coincidence, not construction,
 // and this cell is what turns the coincidence into a checked invariant. If a
-// later change raises the watermark or the session cap, this fails rather than
-// letting the lane quietly over-commit.
+// later change raises the watermark or the default session cap, this fails rather
+// than letting the lane quietly over-commit.
 func TestGeneralLane_DefaultIsExactlyTheDerivedFloor(t *testing.T) {
-	if got, want := DefaultGeneralLaneBytes, GeneralLaneFloor(); got != want {
+	if got, want := DefaultGeneralLaneBytes, GeneralLaneFloor(config.DefaultMaxSessionsGlobal); got != want {
 		t.Fatalf("default lane %d != derived floor %d (%d sessions × %d watermark).\n"+
 			"The default is not a constant to keep in step by hand: either derive it, or the composition "+
-			"rule is not being applied.", got, want, generalLaneSessionCap, pendingOutputWatermark)
+			"rule is not being applied.", got, want, config.DefaultMaxSessionsGlobal, pendingOutputWatermark)
+	}
+}
+
+// THE FLOOR MUST TRACK THE CONFIGURED CAP, NOT A LITERAL.
+//
+// This is the cell the fix exists for, and it is written to FAIL against the
+// previous implementation: that one multiplied a local `generalLaneSessionCap =
+// 256` that no configuration reached, so every call returned 1 GiB no matter
+// what occupancy the operator had asked for. A lower cap returning a lower floor
+// is the whole mechanism — without it a small host cannot start at any setting,
+// because the lane it can afford is refused and the cap it lowered changed
+// nothing.
+//
+// Asserted as an EXACT product rather than merely "less than", because "smaller"
+// also passes for an arbitrary fudge factor, and the floor's meaning is one
+// output working set per session at full occupancy — a specific number.
+func TestGeneralLaneFloor_DerivesFromTheConfiguredSessionCap(t *testing.T) {
+	for _, cap := range []int{1, 8, 32, 64, 256, 1024} {
+		if got, want := GeneralLaneFloor(cap), int64(cap)*pendingOutputWatermark; got != want {
+			t.Errorf("GeneralLaneFloor(%d) = %d, want %d (%d sessions × %d watermark): "+
+				"the floor is not composing over the cap it was given",
+				cap, got, want, cap, pendingOutputWatermark)
+		}
+	}
+	// The direction that matters for a small host, stated as its own claim so a
+	// reader does not have to infer it from the table above.
+	if GeneralLaneFloor(64) >= GeneralLaneFloor(config.DefaultMaxSessionsGlobal) {
+		t.Error("lowering the session cap did not lower the floor: a modest host has no way to " +
+			"ask for a lane it can actually honour")
+	}
+}
+
+// A lane the SHIPPED floor refuses becomes legitimate once the occupancy it must
+// serve is lowered to match. This is the operator-facing consequence of the cell
+// above, and the reason the key was added: a 1 GB machine can run the front door
+// at a smaller cap instead of being unable to start at all.
+func TestGeneralLane_ASmallerCapAdmitsASmallerLane(t *testing.T) {
+	const cap = 64
+	lane := int64(cap) * pendingOutputWatermark // 256 MiB
+
+	if err := validateGeneralLane(lane, config.DefaultMaxSessionsGlobal); err == nil {
+		t.Fatalf("a %d-byte lane was accepted at the shipped cap of %d; it cannot hold one output "+
+			"working set per session and the guard is not guarding",
+			lane, config.DefaultMaxSessionsGlobal)
+	}
+	if err := validateGeneralLane(lane, cap); err != nil {
+		t.Fatalf("the same %d-byte lane was refused at a cap of %d, which is exactly the occupancy "+
+			"it serves: %v", lane, cap, err)
+	}
+}
+
+// A non-positive cap must take the shipped default, NOT compute a floor of zero.
+//
+// A floor of zero would accept any lane at all — including one byte — so the
+// guard would still be present, still be called, and observe nothing. That is
+// the failure direction that admits, and it is reachable from any caller that
+// has not resolved its config yet.
+func TestGeneralLaneFloor_NonPositiveCapTakesTheDefault(t *testing.T) {
+	want := GeneralLaneFloor(config.DefaultMaxSessionsGlobal)
+	for _, cap := range []int{0, -1, -256} {
+		if got := GeneralLaneFloor(cap); got != want {
+			t.Errorf("GeneralLaneFloor(%d) = %d, want the default-cap floor %d", cap, got, want)
+		}
+		if err := validateGeneralLane(1, cap); err == nil {
+			t.Errorf("a one-byte lane was accepted at cap %d: the floor collapsed to zero and the "+
+				"guard admits anything", cap)
+		}
 	}
 }
 
 func TestGeneralLane_StartupRefusesALaneBelowTheFloor(t *testing.T) {
-	if err := validateGeneralLane(GeneralLaneFloor() - 1); err == nil {
+	const cap = config.DefaultMaxSessionsGlobal
+	if err := validateGeneralLane(GeneralLaneFloor(cap)-1, cap); err == nil {
 		t.Fatal("a lane one byte below the floor was accepted; at full occupancy a session could not hold " +
 			"one output working set and the lane would refuse statements nothing is wrong with")
 	}
-	if err := validateGeneralLane(GeneralLaneFloor()); err != nil {
+	if err := validateGeneralLane(GeneralLaneFloor(cap), cap); err != nil {
 		t.Fatalf("the floor itself was refused: %v", err)
 	}
 	// Config may RAISE it.
-	if err := validateGeneralLane(GeneralLaneFloor() * 2); err != nil {
+	if err := validateGeneralLane(GeneralLaneFloor(cap)*2, cap); err != nil {
 		t.Fatalf("raising the lane was refused: %v", err)
 	}
-	if err := validateGeneralLane(generalLaneCeiling + 1); err == nil {
+	if err := validateGeneralLane(generalLaneCeiling+1, cap); err == nil {
 		t.Fatal("a lane above matrix §9's ceiling was accepted")
+	}
+}
+
+// The ceiling binds regardless of how high the cap is set, so an operator cannot
+// reach past matrix §9 by raising occupancy.
+func TestGeneralLane_CeilingBindsAtAnyCap(t *testing.T) {
+	if err := validateGeneralLane(generalLaneCeiling+1, 1<<20); err == nil {
+		t.Fatal("a lane above the ceiling was accepted by raising the session cap; the ceiling is " +
+			"not a function of occupancy")
 	}
 }

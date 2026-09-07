@@ -344,3 +344,89 @@ func TestFrontDoorOptions_SeamsAreTheEngine(t *testing.T) {
 		t.Errorf("Options.Authn is %T, want *coreexec.Engine", opts.Authn)
 	}
 }
+
+// THE BUDGET KEYS MUST REACH THE LISTENER.
+//
+// This is the cell whose absence let the general lane ship with no operator
+// surface at all: Options.GeneralLaneBytes was assigned NOWHERE outside tests,
+// so the listener took its default unconditionally and the 1 GiB figure was not
+// a default but the only reachable value. Every other budget on this surface was
+// wired; this one was declared and forgotten, which no cell noticed because
+// nothing asserted the seam.
+//
+// Both values are set to NON-DEFAULTS on purpose. Asserting against the default
+// would pass for a field that is never assigned -- the exact defect -- because
+// the value the listener ends up with is the default either way. A decoy is what
+// makes the assertion specific.
+func TestFrontDoorOptions_CarryTheMemoryBudgets(t *testing.T) {
+	t.Parallel()
+	const (
+		wantLane = 512 << 20 // not DefaultGeneralLaneBytes
+		wantCap  = 64        // not config.DefaultMaxSessionsGlobal
+	)
+	cfg := config.Default()
+	cfg.FrontDoor.GeneralLaneBytes = wantLane
+	cfg.Exec.MaxSessionsGlobal = wantCap
+
+	var eng *coreexec.Engine
+	opts := frontDoorOptions(cfg, eng, logger.Nop{})
+
+	if got := opts.GeneralLaneBytes; got != wantLane {
+		t.Errorf("Options.GeneralLaneBytes = %d, want %d: frontdoor.general_lane_bytes does not "+
+			"reach the listener, so the lane is whatever the default is no matter what the "+
+			"operator set", got, wantLane)
+	}
+	if got := opts.MaxSessionsGlobal; got != wantCap {
+		t.Errorf("Options.MaxSessionsGlobal = %d, want %d: the listener cannot derive the general "+
+			"lane's floor from the real occupancy, so lowering the session cap would not lower "+
+			"the floor and a small host could not start at any setting", got, wantCap)
+	}
+}
+
+// An UNSET lane must still arrive as the default rather than as zero.
+//
+// Zero is not "take the default" once it reaches the listener's validator by a
+// path that skips the resolution: EffectiveGeneralLane is what turns unset into
+// the default, and this asserts the daemon calls it rather than passing the raw
+// field through.
+func TestFrontDoorOptions_UnsetLaneArrivesAsTheDefault(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.FrontDoor.GeneralLaneBytes = 0
+
+	var eng *coreexec.Engine
+	opts := frontDoorOptions(cfg, eng, logger.Nop{})
+
+	if opts.GeneralLaneBytes != config.DefaultGeneralLaneBytes {
+		t.Errorf("Options.GeneralLaneBytes = %d, want the %d default", opts.GeneralLaneBytes,
+			config.DefaultGeneralLaneBytes)
+	}
+}
+
+// AN UNRESOLVED SESSION CAP MUST NOT REACH THE LISTENER.
+//
+// Asked for on review of #118. GeneralLaneFloor treats a non-positive cap as
+// the shipped default, which is the safe direction on its own -- a floor of
+// zero would accept a one-byte lane while still being present and consulted.
+// But that fallback also MASKS a caller that forgot to resolve the cap, which
+// is the very class of defect this slice fixed, so it is only acceptable while
+// the seam in front of it cannot deliver an unresolved value.
+//
+// This is the daemon half: what frontDoorOptions hands over is already
+// resolved, so production never relies on the fallback. The loader half -- that
+// no loaded config can carry a non-positive cap at all -- is
+// TestLoad_RejectsNonPositiveSessionCaps in core/config, and the fallback stops
+// being defensive if EITHER is relaxed.
+func TestFrontDoorOptions_SessionCapIsAlreadyResolved(t *testing.T) {
+	t.Parallel()
+	var eng *coreexec.Engine
+	opts := frontDoorOptions(config.Default(), eng, logger.Nop{})
+
+	if opts.MaxSessionsGlobal <= 0 {
+		t.Fatalf("Options.MaxSessionsGlobal = %d: the daemon is relying on the floor's "+
+			"defensive fallback rather than passing a resolved cap", opts.MaxSessionsGlobal)
+	}
+	if got, want := opts.MaxSessionsGlobal, config.DefaultMaxSessionsGlobal; got != want {
+		t.Errorf("Options.MaxSessionsGlobal = %d, want %d from a defaulted config", got, want)
+	}
+}

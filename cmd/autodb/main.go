@@ -561,6 +561,12 @@ func frontDoorOptions(cfg config.Config, eng *coreexec.Engine, oplog logger.Logg
 		AuthWorkers:       cfg.FrontDoor.AuthWorkers,
 		AuthFailuresPerIP: cfg.FrontDoor.AuthFailuresPerIP,
 		ControlLaneBytes:  cfg.FrontDoor.ControlLaneBytes,
+		GeneralLaneBytes:  cfg.FrontDoor.EffectiveGeneralLane(),
+		// The general lane's floor composes over the session cap (matrix §1.4), so the
+		// listener is told the occupancy it must serve rather than assuming the
+		// shipped one. Defaults are applied at config load and an explicit zero
+		// is rejected there, so this is always the operator's real cap.
+		MaxSessionsGlobal: cfg.Exec.MaxSessionsGlobal,
 		OnLog:             func(msg string) { logger.Notice(oplog, map[string]any{"frontdoor": msg}) },
 		OnEvent: func(e frontdoor.Event) {
 			// Emitted to the operational log, which is where every other

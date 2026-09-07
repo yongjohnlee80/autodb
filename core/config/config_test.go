@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -182,6 +183,152 @@ func TestLoad_ResidentBudgetCeiling(t *testing.T) {
 			if got := cfg.FrontDoor.EffectiveResidentBudget(); got != want {
 				t.Errorf("%s: effective budget = %d, want %d", c.name, got, want)
 			}
+		}
+	}
+}
+
+// The general lane's config surface. It had NONE until this key existed --
+// frontdoor.Options.GeneralLaneBytes was assigned nowhere outside tests -- so
+// this cell exists to keep the surface reachable, not merely correct. It is the
+// key an operator on a small host has to reach for.
+//
+// The FLOOR is not asserted here on purpose: it composes over
+// exec.max_sessions_global, and the listener owns cross-section relationships
+// (frontdoor.validateGeneralLane). What the config layer owns is the ceiling and
+// the negative, and those are what this checks.
+func TestLoad_GeneralLaneBytes(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "cert.pem")
+	key := filepath.Join(dir, "key.pem")
+	for _, p := range []string{cert, key} {
+		if err := os.WriteFile(p, []byte("placeholder"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := "[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
+		"tls_cert_file = \"" + cert + "\"\ntls_key_file = \"" + key + "\"\n" +
+		"tls_host_names = [\"autodb.example.com\"]\n"
+
+	for _, c := range []struct {
+		name    string
+		bytes   int64
+		wantErr bool
+		why     string
+	}{
+		{"unset takes the default", 0, false, ""},
+		{"a smaller lane, for a host that cannot honour a gibibyte", 256 << 20, false,
+			"the config layer accepts it; the listener judges it against the occupancy"},
+		{"one byte under the ceiling", MaxGeneralLaneBytes - 1, false, ""},
+		{"exactly the ceiling", MaxGeneralLaneBytes, false,
+			"the ratified ceiling is a permitted value, not the first refused one"},
+		{"one byte over the ceiling", MaxGeneralLaneBytes + 1, true,
+			"a lane above matrix section 9's ceiling is a bound the machine cannot honour"},
+		{"a negative", -1, true, "zero means the default; a negative is not a budget"},
+	} {
+		body := base
+		if c.bytes != 0 {
+			body += "general_lane_bytes = " + itoa(c.bytes) + "\n"
+		}
+		cfg, err := Load(write(t, body))
+		switch {
+		case c.wantErr && !errors.Is(err, ErrInvalid):
+			t.Errorf("%s: err = %v, want ErrInvalid -- %s", c.name, err, c.why)
+		case !c.wantErr && err != nil:
+			t.Errorf("%s: err = %v, want acceptance -- %s", c.name, err, c.why)
+		case !c.wantErr:
+			want := c.bytes
+			if want == 0 {
+				want = DefaultGeneralLaneBytes
+			}
+			if got := cfg.FrontDoor.EffectiveGeneralLane(); got != want {
+				t.Errorf("%s: effective lane = %d, want %d", c.name, got, want)
+			}
+		}
+	}
+}
+
+// THE KEY MUST ACTUALLY BE READ FROM THE FILE.
+//
+// Distinct from the table above, which would pass for a key the TOML decoder
+// silently ignored: unknown keys are rejected by this loader, so a WRONG tag
+// would fail loudly, but a field with no tag at all would decode to zero and
+// take the default while the test still saw acceptance. This asserts the value
+// arrived, and a decoy value proves the assertion is specific rather than
+// co-varying with the default.
+func TestLoad_GeneralLaneBytesIsReadFromTheFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "cert.pem")
+	key := filepath.Join(dir, "key.pem")
+	for _, p := range []string{cert, key} {
+		if err := os.WriteFile(p, []byte("placeholder"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const want = 1_500_000_000 // not the default, and not a round power of two
+	body := "[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
+		"tls_cert_file = \"" + cert + "\"\ntls_key_file = \"" + key + "\"\n" +
+		"tls_host_names = [\"autodb.example.com\"]\n" +
+		"general_lane_bytes = " + itoa(want) + "\n"
+
+	cfg, err := Load(write(t, body))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := cfg.FrontDoor.GeneralLaneBytes; got != want {
+		t.Errorf("GeneralLaneBytes = %d, want %d: the toml tag is not carrying the key", got, want)
+	}
+	if cfg.FrontDoor.EffectiveGeneralLane() == DefaultGeneralLaneBytes {
+		t.Error("the effective lane is the default even though the file set a different value")
+	}
+}
+
+// NO LOADED CONFIG MAY CARRY A NON-POSITIVE SESSION CAP.
+//
+// Asked for on review of #118. frontdoor.GeneralLaneFloor treats a
+// non-positive cap as the shipped default, which is the right direction for a
+// public API -- a floor of zero would admit a one-byte lane -- but it also
+// masks a caller that never resolved the cap. That fallback is defensible only
+// while nothing upstream can produce such a value, and this is the upstream
+// gate.
+//
+// THE PROPERTY, NOT ONE GATE, is what this pins, and it is worth saying why: a
+// first version asserted only errors.Is(err, ErrInvalid), which any invalid
+// config satisfies. Deleting the positivity check did NOT redden it, because
+// the per-user-vs-global relation caught the same input for a different reason
+// -- the cell passed while observing nothing about the thing it named. So the
+// assertion now requires the error to NAME max_sessions_global, and the honest
+// finding is that this input is refused by TWO independent gates. Removing
+// either one alone leaves the property intact; removing both is what this
+// fails on.
+//
+// The daemon-side half is TestFrontDoorOptions_SessionCapIsAlreadyResolved in
+// cmd/autodb.
+func TestLoad_RejectsNonPositiveSessionCaps(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name string
+		body string
+		says string
+	}{
+		{"global zero", "[exec]\nmax_sessions_global = 0\n", "max_sessions_global"},
+		{"global negative", "[exec]\nmax_sessions_global = -1\n", "max_sessions_global"},
+		{"per-user zero", "[exec]\nmax_sessions_per_user = 0\n", "max_sessions_per_user"},
+	} {
+		_, err := Load(write(t, c.body))
+		if !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: err = %v, want ErrInvalid — zero does not mean unlimited, and an "+
+				"unresolved cap reaching the front door would have its floor quietly "+
+				"computed from the shipped default instead", c.name, err)
+			continue
+		}
+		// Specificity: an ErrInvalid from some unrelated rule would otherwise
+		// stand in for this one.
+		if !strings.Contains(err.Error(), c.says) {
+			t.Errorf("%s: refused, but the error never mentions %q: %v — something else "+
+				"rejected this input, so the cap's own gate is unobserved",
+				c.name, c.says, err)
 		}
 	}
 }

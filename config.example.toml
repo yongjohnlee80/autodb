@@ -586,3 +586,40 @@ reserved_headroom = 4
 # processed while it is saturated. Derived as max_conns x 64 KiB when unset,
 # and it may only be raised above that.
 # control_lane_bytes = 20971520        # 320 x 64 KiB
+
+# The process-wide GENERAL lane: the budget that segment input, retained
+# statement/portal state and pending serialized output are all charged against.
+# Unset takes 1 GiB (ceiling 4 GiB; above it fails start).
+#
+# This is the LARGEST of the three budgets on this surface, and until this key
+# existed it was the only one an operator could not move -- the default was not
+# a default but the only reachable value.
+#
+# READ THIS BEFORE PUTTING THE FRONT DOOR ON A SMALL MACHINE. The lane is
+# ACCOUNTING, not an allocation: nothing is reserved at start, so a daemon whose
+# lane is larger than the machine will boot happily and idle at a fraction of it.
+# What the number governs is when BACKPRESSURE ENGAGES. Set it above what the
+# host can actually hold and the protection cannot fire before the OS
+# out-of-memory killer does -- the guard is present, is consulted, and observes
+# nothing. On a 1 GB host the shipped 1 GiB lane is exactly that situation.
+#
+# THE FLOOR, AND HOW TO LOWER IT. The lane may only be RAISED above the floor
+# that full occupancy needs, which is
+#
+#     exec.max_sessions_global x 4 MiB   (one output working set per session)
+#
+# so at the shipped cap of 256 the floor is 1 GiB and a smaller lane is refused
+# at start. Lowering the lane is therefore not the first move -- lowering
+# OCCUPANCY is. Reduce exec.max_sessions_global and the floor falls with it,
+# which is the honest way for a modest host to ask for a smaller lane: it serves
+# fewer sessions rather than promising more than it can hold. A cap of 64, for
+# instance, admits a 256 MiB lane.
+#
+# Two things this does NOT bound, because they are caps on ONE session rather
+# than a composition over all of them (matrix section 1.4): segment input at
+# 96 MiB per segment, and retained state at 16 MiB per session. Their sum over
+# the session cap far exceeds any lane, by design -- backpressure is what
+# enforces the whole while those bound the parts. One busy session can hold
+# ~116 MiB legitimately, so size the host for the sessions you actually expect,
+# not for the lane alone.
+# general_lane_bytes = 1073741824      # 1 GiB = 256 sessions x 4 MiB

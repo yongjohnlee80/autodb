@@ -201,7 +201,22 @@ type Options struct {
 
 	// GeneralLaneBytes is the process-wide general resident budget (matrix §1.4).
 	// Zero takes the 1 GiB default.
+	//
+	// Set from frontdoor.general_lane_bytes. Until that key existed this field
+	// was assigned nowhere outside tests, so the default was not a default —
+	// it was the only reachable value.
 	GeneralLaneBytes int64
+
+	// MaxSessionsGlobal is the effective exec.max_sessions_global, and it is
+	// here because the general lane's FLOOR composes over it (matrix §1.4): the lane
+	// must hold one output working set per session at full occupancy.
+	//
+	// It is passed in rather than assumed so that lowering the session cap
+	// lowers the floor. A listener that assumed the shipped 256 would refuse a
+	// lane that the operator's actual occupancy could be served by, which is
+	// how a small host ends up unable to start at any setting. Zero takes
+	// config.DefaultMaxSessionsGlobal.
+	MaxSessionsGlobal int
 
 	// MaxBodyBytes overrides the post-auth per-message cap. Clamped to
 	// PostAuthMaxBodyCeiling; zero means PostAuthMaxBodyLen.
@@ -350,7 +365,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	// that nothing is actually wrong with — which reads as a busy server, not as
 	// a misconfiguration.
 	if !opt.testUncheckedLane {
-		if err := validateGeneralLane(laneBytes); err != nil {
+		if err := validateGeneralLane(laneBytes, opt.MaxSessionsGlobal); err != nil {
 			return nil, err
 		}
 	}
