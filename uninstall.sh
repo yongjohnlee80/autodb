@@ -70,6 +70,9 @@ OPTIONS:
                        and exit. Changes nothing. This is what makes the
                        destructive surface testable rather than a matter of
                        reading the script.
+  --backup-only        Stop the service and take the archive, then STOP.
+                       Deletes nothing. Useful on its own, and it is how the
+                       archive path is exercised without a destructive run.
   --apply              Actually remove it.
   --backup-dir <dir>   Where to write the archive. Default: /var/backups
   --no-backup          Do not archive the meta store first. The encrypted
@@ -92,6 +95,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --check) MODE="check" ;;
     --print-targets) MODE="targets" ;;
+    --backup-only) MODE="backup" ;;
     --apply) MODE="apply" ;;
     --backup-dir) BACKUP_DIR="${2:?--backup-dir needs a path}"; shift ;;
     --no-backup) DO_BACKUP="no" ;;
@@ -145,7 +149,36 @@ tomlstr() { # tomlstr <section> <key>
 # Belt and braces on top of the structural fix: even though nothing is derived
 # by dirname any more, a path that arrives from a config still decides what gets
 # unlinked, so it is checked rather than trusted.
+# DENY is the coarse guard for paths THIS SCRIPT chose (its own defaults, the
+# --prefix binary). It is an exact-match list and that is all it is good for.
 DENY="/ /bin /boot /dev /etc /home /lib /lib32 /lib64 /media /mnt /opt /proc /root /run /sbin /srv /sys /tmp /usr /usr/bin /usr/lib /usr/local /usr/local/bin /usr/sbin /var /var/backups /var/lib /var/log /var/run /var/tmp"
+
+# ALLOW_ROOTS is the guard for paths a CONFIG chose, and it is a POSITIVE list
+# because a negative one cannot work here.
+#
+# A review proved that: the previous strict check refused a path whose parent
+# EQUALLED a denied directory, which stopped /etc/meta.db and did nothing at
+# all about /etc/ssh/sshd_config -- valid TOML, accepted, and unlinking it
+# locks you out of the machine. Enumerating every system path worth protecting
+# is a losing game; enumerating the few places a meta store legitimately lives
+# is a short, checkable list.
+#
+# A config-derived path must sit at least TWO components below one of these, so
+# a file directly inside a shared root (/var/lib/meta.db) is refused too -- an
+# autodb install owns a directory, it does not scatter files into /var/lib.
+ALLOW_ROOTS="/var/lib /var/opt /srv /opt /usr/local/share /tmp"
+[ -n "${HOME:-}" ] && ALLOW_ROOTS="$ALLOW_ROOTS $HOME"
+
+# allowed_under reports whether a canonical path sits inside a permitted root,
+# deep enough to be inside a directory of its own.
+allowed_under() {
+  for _r in $ALLOW_ROOTS; do
+    case "$1" in
+      "$_r"/*/*) return 0 ;;
+    esac
+  done
+  return 1
+}
 # safe_target <path> [strict] -- prints the canonical path, or fails.
 #
 # `strict` is passed for CONFIG-DERIVED paths and additionally refuses a target
@@ -181,18 +214,33 @@ safe_target() { # safe_target <path> [strict]
     return 1
   fi
   if [ "$_strict" = "strict" ]; then
-    _parent="$(dirname -- "$_c")"
-    for _d in $DENY; do
-      if [ "$_parent" = "$_d" ]; then
-        warn "refusing $_c: a config value must not place autodb files directly"
-        warn "  in $_parent, which is a system location. Put them in a directory"
-        warn "  of their own."
-        return 1
-      fi
-    done
+    # Positive containment, not absence-from-a-denylist. See ALLOW_ROOTS.
+    if ! allowed_under "$_c"; then
+      warn "refusing $_c: a config-supplied path must live at least two levels"
+      warn "  inside one of:$ALLOW_ROOTS"
+      warn "  This is an allowlist because a denylist cannot enumerate every"
+      warn "  system file worth protecting -- /etc/ssh/sshd_config is not a"
+      warn "  plausible meta store and will not be treated as one."
+      return 1
+    fi
   fi
   printf '%s' "$_c"
 }
+
+# THE CONFIG IS ONLY OURS TO DELETE IF IT IS OURS.
+#
+# --config takes an arbitrary path, and the script unlinks it at the end. A
+# path check cannot tell /etc/autodb/config.toml from /etc/ssh/sshd_config --
+# both sit one level under /etc -- so the discriminator has to be CONTENT. An
+# autodb config has autodb sections; a file with none of them is somebody
+# else's and this script has no business here at all.
+if [ -r "$CONFIG" ]; then
+  if ! grep -qE '^[[:space:]]*\[(meta|frontdoor|server|security|exec|web|history|tui)\][[:space:]]*$' "$CONFIG"; then
+    die "$CONFIG does not look like an autodb config: it has none of the
+       [meta] [frontdoor] [server] [security] [exec] sections. Refusing to
+       treat it as ours, and refusing to delete anything it names."
+  fi
+fi
 
 _p="$(tomlstr meta path)"
 _k="$(tomlstr security service_keyfile)"
@@ -269,11 +317,16 @@ if [ "$MODE" = "check" ]; then
   exit 0
 fi
 
+# --backup-only must still take the archive, so it falls through to the stop
+# and backup below and exits before anything is unlinked.
+
 # -------------------------------------------------------------------- confirm
 
-[ "$(id -u)" -eq 0 ] || die "--apply needs root"
+if [ "$MODE" = "apply" ]; then
+  [ "$(id -u)" -eq 0 ] || die "--apply needs root"
+fi
 
-if [ "$ASSUME_YES" != "yes" ] && [ -r /dev/tty ]; then
+if [ "$MODE" != "backup" ] && [ "$ASSUME_YES" != "yes" ] && [ -r /dev/tty ]; then
   say ""
   if [ "$DO_BACKUP" = "no" ]; then
     printf 'Remove all of the above WITHOUT a backup? Encrypted connection secrets will be unrecoverable. [yes/no]: ' > /dev/tty
@@ -298,15 +351,27 @@ fi
 step "Service"
 if [ -e "$UNIT" ]; then
   systemctl disable --now autodb-frontdoor 2>/dev/null || true
-  # Wait for it to actually be gone, rather than assuming disable --now
-  # returned after the process exited.
+  # WAIT FOR inactive, NOT FOR "not active".
+  #
+  # `is-active --quiet` was wrong here and a review caught it: it exits nonzero
+  # for `deactivating` as well as `inactive`, so the loop fell through while the
+  # process was still shutting down -- still able to flush the WAL, which is
+  # precisely the writer the archive below must not have. ActiveState is the
+  # state itself rather than a predicate over it.
   _w=0
-  while systemctl is-active --quiet autodb-frontdoor 2>/dev/null; do
+  while :; do
+    _st="$(systemctl show -p ActiveState --value autodb-frontdoor 2>/dev/null || printf 'inactive')"
+    case "$_st" in
+      inactive|failed|"") break ;;
+    esac
     _w=$(( _w + 1 ))
-    [ "$_w" -gt 30 ] && die "autodb-frontdoor did not stop; refusing to archive a live store"
+    if [ "$_w" -gt 60 ]; then
+      die "autodb-frontdoor is still $_st after ${_w}s; refusing to archive or
+       delete a store that may still have a writer attached"
+    fi
     sleep 1
   done
-  info "service stopped"
+  info "service stopped (ActiveState=$_st)"
 else
   info "no unit; nothing to stop"
 fi
@@ -320,15 +385,41 @@ if [ "$DO_BACKUP" = "yes" ]; then
     _stage="$(mktemp -d)"
     mkdir -p "$_stage/autodb-$_ts"
 
+    # EVERY COPY MUST SUCCEED, and a failure aborts before anything is
+    # deleted.
+    #
+    # A review found the opposite: each cp was `2>/dev/null || true`, so a full
+    # filesystem, an I/O error or a changed permission produced an archive with
+    # no meta.db in it -- and the script then deleted the real store. The whole
+    # point of taking a backup is that the deletion afterwards is survivable,
+    # and a silently partial archive removes exactly that property while
+    # looking like it provided it.
+    copy_or_abort() { # copy_or_abort <src>
+      if ! cp -p "$1" "$_stage/autodb-$_ts/"; then
+        rm -rf "$_stage"
+        die "could not copy $1 into the backup staging area.
+       NOTHING HAS BEEN DELETED. Fix the cause -- a full filesystem and a
+       permission change are the usual ones -- and run this again."
+      fi
+    }
+
     # ALL THREE sqlite files, or none of them is useful: the -wal holds
     # committed pages the main file does not have yet, so a lone meta.db can
-    # be an older database than the one that was running.
-    for f in "$STORE_FILE" "$STORE_FILE-wal" "$STORE_FILE-shm"; do
-      [ -e "$f" ] && cp -p "$f" "$_stage/autodb-$_ts/" 2>/dev/null || true
+    # be an older database than the one that was running. The main file is
+    # mandatory; the sidecars are copied when they exist, and a sidecar that
+    # exists and cannot be copied is a failure, not an absence.
+    copy_or_abort "$STORE_FILE"
+    for f in "$STORE_FILE-wal" "$STORE_FILE-shm"; do
+      [ -e "$f" ] && copy_or_abort "$f"
     done
-    [ -r "$CONFIG" ] && cp -p "$CONFIG" "$_stage/autodb-$_ts/" 2>/dev/null || true
+    [ -r "$CONFIG" ] && copy_or_abort "$CONFIG"
     # Certificates are reissuable, but keeping them saves redistributing ca.pem.
-    [ -d "$CONFIG_DIR/tls" ] && cp -rp "$CONFIG_DIR/tls" "$_stage/autodb-$_ts/" 2>/dev/null || true
+    if [ -d "$CONFIG_DIR/tls" ]; then
+      if ! cp -rp "$CONFIG_DIR/tls" "$_stage/autodb-$_ts/"; then
+        rm -rf "$_stage"
+        die "could not copy the TLS material into the backup. NOTHING HAS BEEN DELETED."
+      fi
+    fi
 
     # The keyfile is NOT copied. Stated in the archive itself so whoever finds
     # it later knows what it can and cannot open.
@@ -348,10 +439,38 @@ unwraps the master key, they cannot be read -- and there is no other copy of
 that key.
 README
 
-    tar -czf "$_archive" -C "$_stage" "autodb-$_ts"
+    if ! tar -czf "$_archive" -C "$_stage" "autodb-$_ts"; then
+      rm -rf "$_stage" "$_archive"
+      die "could not write $_archive. NOTHING HAS BEEN DELETED."
+    fi
     chmod 0600 "$_archive"
+
+    # VERIFY THE ARCHIVE BEFORE TRUSTING IT WITH THE ONLY COPY.
+    #
+    # tar exiting zero is not the same as the store being readable back out of
+    # it. This lists the archive and requires the store to be in there by name,
+    # so a truncated or mis-staged tarball is caught while the source still
+    # exists rather than after it does not.
+    _listing="$(tar -tzf "$_archive" 2>/dev/null)" || {
+      rm -rf "$_stage"
+      die "$_archive cannot be read back. NOTHING HAS BEEN DELETED."
+    }
+    _base="$(basename -- "$STORE_FILE")"
+    if ! printf '%s\n' "$_listing" | grep -qx "autodb-$_ts/$_base"; then
+      rm -rf "$_stage"
+      die "$_archive does not contain $_base. NOTHING HAS BEEN DELETED."
+    fi
+    for f in "$STORE_FILE-wal" "$STORE_FILE-shm"; do
+      [ -e "$f" ] || continue
+      if ! printf '%s\n' "$_listing" | grep -qx "autodb-$_ts/$(basename -- "$f")"; then
+        rm -rf "$_stage"
+        die "$_archive is missing $(basename -- "$f"), which exists on disk and is
+       part of the database. NOTHING HAS BEEN DELETED."
+      fi
+    done
     rm -rf "$_stage"
     info "wrote $_archive ($(du -h "$_archive" | awk '{print $1}'), mode 0600)"
+    info "verified: $_base and every existing sidecar are readable from it"
     [ -n "$KEYFILE" ] && [ -e "$KEYFILE" ] && \
       info "keyfile EXCLUDED from the archive and removed below: $KEYFILE"
   else
@@ -360,6 +479,12 @@ README
 fi
 
 # --------------------------------------------------------------------- remove
+
+if [ "$MODE" = "backup" ]; then
+  say ""
+  say "Backup only -- nothing was removed."
+  exit 0
+fi
 
 step "Unit"
 if [ -e "$UNIT" ]; then

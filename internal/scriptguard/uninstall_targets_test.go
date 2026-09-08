@@ -186,3 +186,75 @@ func contains(hay []string, needle string) bool {
 	}
 	return false
 }
+
+// NESTED SYSTEM PATHS, asked for on review of #122 r2.
+//
+// The r1 guard refused a path whose parent EQUALLED a denied directory. That
+// stopped /etc/meta.db and did nothing about /etc/ssh/sshd_config -- valid
+// TOML, accepted, and unlinking it locks you out of the machine. An
+// exact-parent denylist is not a system-tree guard, and the fix was to invert
+// the question: a config-derived path must sit inside a short allowlist of
+// places a meta store legitimately lives, rather than outside a long list of
+// places it must not.
+//
+// These are the descendant cases specifically. The direct-child cases live in
+// TestUninstallTargets_RefusesAStoreDirectlyInASystemDirectory above, and both
+// matter: passing one and failing the other is what happened.
+func TestUninstallTargets_RefusesNestedSystemPaths(t *testing.T) {
+	for _, path := range []string{
+		"/etc/ssh/sshd_config",      // the reproduction from the review
+		"/usr/local/bin/not-autodb", // a binary directory, not a data directory
+		"/etc/systemd/system/x.db",
+		"/usr/share/misc/meta.db",
+		"/boot/grub/meta.db",
+		"/var/lib/meta.db",        // inside a permitted root, but not in a directory of its own
+		"/var/log/autodb/meta.db", // a log tree is not a data tree
+	} {
+		body := "[meta]\nengine = \"sqlite\"\npath = \"" + path + "\"\n"
+		if got, err := targets(t, body); err == nil {
+			t.Errorf("accepted %q as a deletion target; resolved set:\n%v", path, got)
+		}
+	}
+}
+
+// The allowlist must still ADMIT the places a store actually lives, or the
+// guard above is satisfied by a script that can never uninstall anything.
+func TestUninstallTargets_AdmitsLegitimateDataLocations(t *testing.T) {
+	for _, path := range []string{
+		"/var/lib/autodb/meta.db",
+		"/var/opt/autodb/meta.db",
+		"/srv/autodb/meta.db",
+		"/opt/autodb/meta.db",
+	} {
+		body := "[meta]\nengine = \"sqlite\"\npath = \"" + path + "\"\n"
+		got, err := targets(t, body)
+		if err != nil {
+			t.Errorf("refused a legitimate store location %q", path)
+			continue
+		}
+		if !contains(got, path) {
+			t.Errorf("%q resolved but is not in the deletion set:\n%v", path, got)
+		}
+	}
+}
+
+// A FILE THAT IS NOT AN AUTODB CONFIG MUST NOT BE TOUCHED AT ALL.
+//
+// --config takes an arbitrary path and the script unlinks it at the end, so
+// `--config /etc/ssh/sshd_config` was a way to delete that file. No path rule
+// can separate it from /etc/autodb/config.toml -- both sit one level under
+// /etc -- so the discriminator is CONTENT: an autodb config has autodb
+// sections, and a file with none of them belongs to somebody else.
+func TestUninstallTargets_RefusesAFileThatIsNotAnAutodbConfig(t *testing.T) {
+	for _, body := range []string{
+		"Port 22\nPermitRootLogin no\n",        // sshd_config
+		"[Unit]\nDescription=something else\n", // a systemd unit
+		"{\n  \"json\": true\n}\n",             // not toml at all
+		"",                                     // empty
+	} {
+		if got, err := targets(t, body); err == nil {
+			t.Errorf("accepted a file with no autodb sections as our config;\n"+
+				"content was %q\nresolved set:\n%v", body, got)
+		}
+	}
+}

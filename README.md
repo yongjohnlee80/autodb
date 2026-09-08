@@ -477,9 +477,16 @@ its service account, and `--remove-swap` / `--remove-toolchain` also undo what
 
 ```sh
 sh uninstall.sh --check                             # list what would go; changes nothing
+sh uninstall.sh --print-targets                     # the exact deletion set, one path per line
+sh uninstall.sh --backup-only                       # take the archive and stop
 sudo sh uninstall.sh --apply
 sudo sh uninstall.sh --apply --remove-swap --remove-toolchain
 ```
+
+`--print-targets` is worth running before any `--apply`: it prints every path
+the script would unlink, so the destructive surface is something you read
+rather than infer. `--backup-only` stops the service, takes the archive, and
+removes nothing.
 
 **It archives the meta store first, and the archive deliberately excludes the
 service keyfile.** That store holds the encrypted connection secrets, and the
@@ -489,6 +496,20 @@ store *and* the keyfile in one tarball would be both halves of the envelope in a
 single file, which turns a backup into a credential. The store is archived at
 `0600`, the keyfile is left where it is, and the archive carries a `README`
 saying so. `--no-backup` skips the archive entirely.
+
+**Nothing is deleted unless the archive is good.** Every copy must succeed and
+the finished tarball is listed back and checked for the store by name; any
+failure aborts with the sources untouched and says so. A backup whose whole
+purpose is to make the following deletion survivable must not be allowed to be
+silently partial.
+
+**A config value cannot aim the deletion at your system.** Paths that come from
+the config must sit at least two levels inside a short allowlist of places a
+meta store legitimately lives — `/var/lib`, `/var/opt`, `/srv`, `/opt`,
+`/usr/local/share`, your home directory — and the config itself must contain
+recognisable autodb sections before the script treats it, or anything it names,
+as ours. That is an allowlist rather than a denylist because a denylist cannot
+enumerate every system file worth protecting.
 
 A PostgreSQL meta store is **not** touched: dropping a database is not an
 uninstaller's decision to make.
