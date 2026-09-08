@@ -440,21 +440,33 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
   means libpq's `prefer`, which silently falls back to plaintext. The one
   exception is a genuinely local channel — a unix socket or same-host loopback —
   via the deliberately named `allow_insecure_dsn`.
-- **Developers mint their own PATs through the TUI, and that needs the RPC
-  endpoint on a port.** autodb's shipped default for the frontend endpoint is a
-  unix socket at mode `0600`, re-applied on every bind — the socket file *is*
-  the access control, and a socket peer is exempt from the IP allowlist because
-  reaching it already proves same-user access. That is right for a laptop and
-  wrong for a server: the service runs as its own account, so nobody else on
-  the box can open it, and `auth.token_create` authorises **any authenticated
-  user** to mint a token bound to a connection they are granted. On a socket,
-  every credential request becomes a root operation. `install_frontdoor.sh`
-  therefore defaults this to a **loopback port** (7419), which moves the
-  boundary to `ip_allowlist` plus an autodb login. It also writes a
-  world-readable `client.toml` carrying only the address, so a developer can
-  run `autodb --ui --config /etc/autodb/client.toml` without being able to read
-  the server config — which may name a PostgreSQL DSN with a password in it.
-  `--rpc-socket` keeps the old behaviour.
+- **Developer self-service PAT minting needs the RPC endpoint on a port, and
+  that is an opt-in.** The frontend endpoint defaults to a unix socket at mode
+  `0600`, re-applied on every bind — the socket file *is* the access control,
+  and a socket peer is exempt from the IP allowlist because reaching it already
+  proves same-user access. On a host where autodb runs as a service that socket
+  belongs to the service account, so **only it and root can reach the TUI** —
+  and the TUI is where a developer mints their own token
+  (`auth.token_create` authorises any authenticated user, bound to a connection
+  they hold a grant on). On a socket, every credential request is a root
+  operation.
+
+  `--rpc-port` (7419) trades that for self-service. Be clear about the trade:
+  it replaces "same OS user" with "allowlist plus login", and **there is no
+  rate limiting on the RPC surface** — no connection, pre-auth or auth-failure
+  throttle exists there, and autodb's own config calls TCP M9-gated pending TLS
+  and rate limits. Every local account can then reach it and attempt logins. It
+  binds `127.0.0.1`, so nothing is reachable off-host either way. Choose it
+  when developer self-service is worth that on a box whose own accounts you
+  trust; the socket remains the default.
+
+  In port mode the installer also writes a world-readable `client.toml`
+  carrying the address, `client_only = true`, and nothing else — so a developer
+  can run `autodb --ui --config /etc/autodb/client.toml` without reading the
+  server config, which may name a PostgreSQL DSN with a password in it.
+  `client_only` matters on its own: without it, running the TUI while the
+  service is down would start a daemon as *them*, against their own empty meta
+  store, on the port the real service binds.
 - **Run `autodb --init` once** to create the first administrator and cut the
   unattended-unlock slot. It is the only surface that can do the second part:
   enrolling the slot is admin-only *and* only possible while the store is

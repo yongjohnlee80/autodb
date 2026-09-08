@@ -105,24 +105,33 @@ FD_PORT="5432"
 
 # THE RPC ENDPOINT -- the frontends' way in, distinct from the front door.
 #
-# A PORT BY DEFAULT HERE, and the reason is who has to reach it. autodb's
-# default is a unix socket at mode 0600, re-applied on every bind, and that
-# socket file IS the access control: reaching it proves same-user access, so a
-# socket peer is exempt from the IP allowlist entirely. Right for a laptop.
+# THE SOCKET IS THE DEFAULT, and a port is an explicit choice. Both halves of
+# that matter, so both reasons are written down.
 #
-# Wrong for this script's whole purpose. A service installed here runs as its
-# own account, so the socket is owned by that account and NOBODY ELSE ON THE
-# BOX CAN OPEN IT -- not another developer, not the operator's own login, only
-# root by permission bypass. And the TUI is where a developer mints their own
-# PAT (auth.token_create authorises any authenticated user, bound to a
-# connection they are granted), so a socket makes self-service minting
-# impossible and turns every credential request into a root operation.
+# WHY THE SOCKET IS SAFER. It is mode 0600, re-applied on every bind, and the
+# file IS the access control -- reaching it proves same-user access, which is
+# why a socket peer is exempt from the IP allowlist entirely.
 #
-# A loopback port moves the boundary from file ownership to the IP allowlist
-# plus an autodb login, which is exactly the multi-user model the config
-# documentation recommends. Remote access stays out of scope: this binds
-# 127.0.0.1, so it is reachable only by someone already on the host.
-RPC_MODE="port"       # port | socket
+# WHY ANYONE WOULD LEAVE IT. A service installed here runs as its own account,
+# so that socket is openable only by that account and root. Nobody else on the
+# box can run the TUI -- and the TUI is where a developer mints their own PAT
+# (auth.token_create authorises any authenticated user, bound to a connection
+# they hold a grant on). On a socket, every credential request becomes a root
+# operation.
+#
+# WHY IT IS NOT THE DEFAULT ANYWAY. A first version of this script defaulted
+# to the port and justified it by saying the login and rate limits stand in
+# the socket's place. THE RATE LIMITS DO NOT EXIST: there is no connection,
+# pre-auth or auth-failure throttle anywhere in rpc/ -- the only such throttle
+# is the front door's, a different surface -- and core/config says in as many
+# words that TCP is M9-gated pending TLS and rate limits. A review found the
+# claim before it shipped. So the port is materially weaker than the socket
+# against a local attacker, every local account can reach it and attempt a
+# login, and it is therefore something an operator ASKS FOR rather than
+# inherits.
+#
+# It binds 127.0.0.1, so nothing is reachable from off the host either way.
+RPC_MODE="socket"     # port | socket -- SOCKET IS THE SAFE DEFAULT
 RPC_PORT="7419"       # config.DefaultPort
 CLIENT_CONFIG=""      # world-readable endpoint-only config, written in port mode
 IP_ALLOWLIST='["127.0.0.1/32", "::1/128"]'
@@ -172,6 +181,11 @@ OPTIONS:
                        exit. Writes nothing. Useful for review, for diffing
                        against a running config, and for feeding to a
                        validator.
+  --print-client-config
+                       Print the world-readable CLIENT config (port mode
+                       only), to stdout, and exit. Writes nothing. This is
+                       what makes its contents assertable -- it must carry
+                       the address and nothing sensitive.
   --apply              Write the config and unit, and install Postgres if
                        that is the chosen meta store. Prompts for each
                        setting when run on a terminal.
@@ -195,6 +209,10 @@ OPTIONS:
   --rpc-socket         Use a unix socket for the RPC endpoint instead. Only
                        the account the service runs as (and root) can then
                        reach the TUI.
+  --allowlist <toml>   [security] ip_allowlist, as a TOML array. With
+                       --rpc-port it MUST admit 127.0.0.1 or the install is
+                       refused, because on a port that list gates local
+                       callers too.
   --no-cert            Do not issue TLS material. Leaves the door disabled.
   --no-init            Skip the first-run ceremony (autodb --init).
   --user <name>        Service account. Default: autodb
@@ -218,6 +236,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --check)  MODE="check" ;;
     --print-config) MODE="print" ;;
+    --print-client-config) MODE="printclient" ;;
     --apply)  MODE="apply" ;;
     --interactive)     INTERACTIVE="yes" ;;
     --non-interactive) INTERACTIVE="no" ;;
@@ -232,6 +251,7 @@ while [ $# -gt 0 ]; do
     --port)   FD_PORT="${2:?--port needs a number}"; BIND="${BIND_ADDR}:${FD_PORT}"; shift ;;
     --rpc-port) RPC_MODE="port"; RPC_PORT="${2:?--rpc-port needs a number}"; shift ;;
     --rpc-socket) RPC_MODE="socket" ;;
+    --allowlist) IP_ALLOWLIST="${2:?--allowlist needs a TOML array}"; shift ;;
     --no-cert) GEN_CERT="no" ;;
     --no-init) RUN_INIT="no" ;;
     --user)   RUN_USER="${2:?--user needs a name}"; shift ;;
@@ -252,7 +272,7 @@ done
 [ "$META_BACKEND" = "postgres" ] && {
   if [ -n "$META_DSN" ]; then META_BACKEND="pg-remote"; else META_BACKEND="pg-local"; fi
 }
-[ "$MODE" = "print" ] && MSG_FD=2
+case "$MODE" in print|printclient) MSG_FD=2 ;; esac
 
 case "$META_BACKEND" in
   ''|sqlite|pg-local|pg-remote) ;;
@@ -589,6 +609,37 @@ TOML
   fi
 }
 
+emit_client_config() {
+    cat <<TOML
+# autodb -- CLIENT config. Safe to read; safe to share on this host.
+#
+# It carries the daemon's address and nothing else. Use it to run the TUI as
+# your own user:
+#
+#   autodb --ui --config $CONFIG_DIR/client.toml
+#
+# and from there log in with your own autodb credentials and mint a PAT bound
+# to a connection you have been granted.
+#
+# The SERVER config beside this one is 0640 on purpose: it can name a
+# PostgreSQL DSN with a password in it, which a client has no need for.
+
+[server]
+port = $RPC_PORT
+bind = "127.0.0.1"
+
+# THIS CONFIG MAY NOT START A DAEMON.
+#
+# The TUI spawns `autodb --serve` when it cannot dial, which is right on a
+# single-user machine and a hazard here: if the service were down, this file
+# would start a daemon as YOU, against your own empty meta store, on the port
+# the real service binds -- handing you a store you could bootstrap as
+# administrator of, while the real service could no longer rebind. With this
+# set, a failed dial reports that nothing is listening instead.
+client_only = true
+TOML
+}
+
 # Resolve the backend before the first sizing pass, so --check reports the
 # same numbers --apply would use for the same flags. An unspecified backend
 # sizes as sqlite, which is what the interview will offer as its default.
@@ -600,6 +651,55 @@ compute_sizing
 reconcile_floor
 
 # ----------------------------------------------------------------- preflight
+
+# Checked here so it applies to --print-config and --non-interactive as well
+# as the interview: a refusal that only fires when somebody is watching is not
+# a guard.
+check_loopback_admission() {
+# LOOPBACK MUST BE ADMITTED WHEN THE ENDPOINT IS A PORT -- CHECKED, NOT REPAIRED.
+#
+# On a socket the allowlist is bypassed entirely: reaching the file proves
+# same-user access. On a port it becomes the gate, including for a TUI running
+# on this very machine, so an allowlist omitting loopback locks every local
+# account out -- the operator included -- and the symptom is a login refusal
+# with nothing visibly misconfigured.
+#
+# A first version ADDED loopback for the operator, and a review rejected that
+# twice over. Editing somebody's security policy on their behalf is the wrong
+# instinct whatever the motive. And the test it used, a substring search for
+# "127.0.0.1", matched an entry like 127.0.0.10/32 -- so a list that did NOT
+# admit loopback was read as one that did, nothing was added, and the lockout
+# happened anyway. The repair had the failure it was written to prevent.
+#
+# So: an EXACT check against the entries, and a refusal that says what to add.
+if [ "$RPC_MODE" = "port" ]; then
+  # Entry-wise, not substring: strip brackets and quotes, split on commas, and
+  # compare each entry whole. 127.0.0.10/32 is a different entry from
+  # 127.0.0.1/32 and must not be mistaken for it.
+  _has_loopback=no
+  _entries="$(printf '%s' "$IP_ALLOWLIST" | tr -d '[]"' | tr ',' '\n')"
+  for _e in $_entries; do
+    case "$_e" in
+      127.0.0.1|127.0.0.1/32|0.0.0.0/0) _has_loopback=yes ;;
+      # A prefix shorter than /32 that contains 127.0.0.1. Only the forms an
+      # operator plausibly writes are accepted; anything else is refused
+      # rather than guessed at.
+      127.0.0.0/8|127.0.0.0/16|127.0.0.0/24|127.0.0.1/8|127.0.0.1/16|127.0.0.1/24) _has_loopback=yes ;;
+    esac
+  done
+  if [ "$_has_loopback" != "yes" ]; then
+    die "the RPC endpoint is a loopback port but [security] ip_allowlist does not
+       admit 127.0.0.1:
+         $IP_ALLOWLIST
+       On a port that list is the gate for LOCAL callers too, so nobody on this
+       host could log in -- you included. Nothing has been written. Add
+       \"127.0.0.1/32\" to the list and run this again, or use the default
+       unix socket endpoint, where the allowlist does not apply."
+  fi
+fi
+}
+
+check_loopback_admission
 
 say ""
 say "autodb front-door sizing preflight"
@@ -650,6 +750,17 @@ fi
 
 if [ "$MODE" = "print" ]; then
   emit_config
+  exit 0
+fi
+
+if [ "$MODE" = "printclient" ]; then
+  if [ "$RPC_MODE" != "port" ]; then
+    die "there is no client config in socket mode: the socket is openable only
+       by the service account, so there is nothing a client config could hand
+       to anyone else. Pass --rpc-port to see it."
+  fi
+  CLIENT_CONFIG="$CONFIG_DIR/client.toml"
+  emit_client_config
   exit 0
 fi
 
@@ -776,13 +887,21 @@ say ""
 say "Frontend RPC endpoint -- how the TUI and editor integration reach the"
 say "daemon. This is NOT the front door; SQL clients never touch it."
 say ""
+say "  socket  (default) a unix socket at mode 0600. The file IS the access"
+say "          control, so only the service account and root can reach the"
+say "          TUI -- which means every PAT request is a root operation."
 say "  port    a loopback TCP port. Every account on this host can run the"
 say "          TUI with their own autodb login, which is where a developer"
-say "          MINTS THEIR OWN PAT. Reachable only from this machine."
-say "  socket  a unix socket at mode 0600. Only the service account and root"
-say "          can reach the TUI, so every PAT request becomes a root"
-say "          operation."
-ask_opt RPC_MODE "  rpc endpoint (port|socket)" "$RPC_MODE" port socket
+say "          MINTS THEIR OWN PAT."
+say ""
+say "  CHOOSING port IS A DELIBERATE WEAKENING. It replaces \"same OS user\""
+say "  with \"allowlist plus login\", and there is NO rate limiting on that"
+say "  surface -- no connection, pre-auth or auth-failure throttle exists in"
+say "  the RPC layer, and autodb'"'"'s own config calls TCP M9-gated pending TLS"
+say "  and rate limits. Every local account could then reach it and attempt"
+say "  logins. Choose it when developer self-service is worth that, and"
+say "  keep the host'"'"'s own accounts trusted."
+ask_opt RPC_MODE "  rpc endpoint (socket|port)" "$RPC_MODE" socket port
 if [ "$RPC_MODE" = "port" ]; then
   ask_uint RPC_PORT "  rpc port" "$RPC_PORT"
   [ "$RPC_PORT" -le 65535 ] || die "rpc port $RPC_PORT is out of range (1..65535)"
@@ -793,25 +912,6 @@ say "Client addresses allowed to reach this daemon, enforced at login."
 say "Loopback only is the safe default; widen it deliberately and narrowly."
 ask IP_ALLOWLIST "  ip_allowlist (TOML array)" "$IP_ALLOWLIST"
 
-# LOOPBACK MUST STAY ADMITTED WHEN THE ENDPOINT IS A PORT.
-#
-# On a socket the allowlist is bypassed entirely -- reaching the file proves
-# same-user access. On a port it becomes the gate, including for a TUI running
-# on this very machine. An allowlist that omits loopback then locks every local
-# account out of the daemon, including the operator, and the symptom is a login
-# refusal with nothing obviously misconfigured.
-if [ "$RPC_MODE" = "port" ]; then
-  case "$IP_ALLOWLIST" in
-    *127.0.0.1*) ;;
-    *)
-      warn "the allowlist does not admit 127.0.0.1, and the RPC endpoint is a"
-      warn "loopback port -- so nobody on this host could log in at all, the"
-      warn "operator included. Adding loopback to it."
-      IP_ALLOWLIST="$(printf '%s' "$IP_ALLOWLIST" | sed 's/^\[/["127.0.0.1\/32", "::1\/128", /')"
-      info "ip_allowlist is now $IP_ALLOWLIST"
-      ;;
-  esac
-fi
 
 # The meta answer may have changed what this host has to spare.
 compute_sizing
@@ -958,24 +1058,8 @@ if [ "$RPC_MODE" = "port" ]; then
     warn "$CLIENT_CONFIG exists; leaving it alone"
   else
     say "writing $CLIENT_CONFIG"
-    cat > "$CLIENT_CONFIG" <<TOML
-# autodb -- CLIENT config. Safe to read; safe to share on this host.
-#
-# It carries the daemon's address and nothing else. Use it to run the TUI as
-# your own user:
-#
-#   autodb --ui --config $CONFIG_DIR/client.toml
-#
-# and from there log in with your own autodb credentials and mint a PAT bound
-# to a connection you have been granted.
-#
-# The SERVER config beside this one is 0640 on purpose: it can name a
-# PostgreSQL DSN with a password in it, which a client has no need for.
+    emit_client_config > "$CLIENT_CONFIG"
 
-[server]
-port = $RPC_PORT
-bind = "127.0.0.1"
-TOML
     chmod 0644 "$CLIENT_CONFIG"
     info "any account on this host can run: autodb --ui --config $CLIENT_CONFIG"
   fi

@@ -54,6 +54,25 @@ bind = "127.0.0.1"
 # socket path.
 # socket = "/run/user/1000/autodb.sock"
 
+# Forbid this config from ever STARTING a daemon.
+#
+# The TUI spawns `autodb --serve` when it cannot dial, which is right on a
+# single-user machine: the first frontend to find nothing listening brings
+# the daemon up. It is WRONG for a config handed to somebody who is not the
+# operator.
+#
+# On a host where autodb runs as a system service, a developer needs a
+# readable config to run the TUI at all. If the service happens to be down,
+# that config would spawn a daemon AS THEM, against whatever meta store it
+# resolves to, on the port the real service binds -- handing them an empty
+# store they could bootstrap themselves as administrator of, while the real
+# service can no longer rebind.
+#
+# Set this in the config you distribute to people who only need to REACH the
+# daemon. It is a property of the file rather than a flag they must remember,
+# because the person holding it is not the person who knows to pass one.
+# client_only = false
+
 [meta]
 # autodb's OWN database: users, encrypted connection secrets, grants,
 # workspaces, sessions, the audit log, and script history. It is not one

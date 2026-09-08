@@ -48,6 +48,7 @@ DNS_NAME=""
 FD_PORT=""
 RPC_PORT=""
 RPC_SOCKET="no"
+KEEP_TMP="no"
 PREFIX="/usr/local/bin"
 ASSUME_YES="no"
 
@@ -102,6 +103,8 @@ OPTIONS:
                        TUI and mint their own PATs.
   --rpc-socket         Use a unix socket for the RPC endpoint instead, making
                        the TUI reachable only by the service account and root.
+  --keep-tmp           Leave the remote working directory (a clone plus the
+                       built binary, tens of MB) in place for debugging.
   --prefix <dir>       Where to install the binary. Default: /usr/local/bin
   --yes                Do not prompt before provisioning.
   -h, --help           Show this help.
@@ -131,6 +134,7 @@ while [ $# -gt 0 ]; do
     --port) FD_PORT="${2:?--port needs a number}"; shift ;;
     --rpc-port) RPC_PORT="${2:?--rpc-port needs a number}"; shift ;;
     --rpc-socket) RPC_SOCKET="yes" ;;
+    --keep-tmp) KEEP_TMP="yes" ;;
     --prefix) PREFIX="${2:?--prefix needs a directory}"; shift ;;
     --yes) ASSUME_YES="yes" ;;
     -h|--help) usage; exit 0 ;;
@@ -436,5 +440,17 @@ say ""
 say "Provisioned. The front door is NOT serving yet -- install_frontdoor.sh"
 say "writes it disabled until TLS material exists, because enabled without"
 say "TLS is refused at config load. Its closing notes list what remains."
-say ""
-info "leftover working directory on the VM: $REMOTE_TMP"
+# CLEAN UP AFTER OURSELVES. The working directory holds a git clone and a
+# built binary -- 43 MB measured on the droplet -- and reporting the path
+# rather than removing it meant every run left another copy behind. --keep-tmp
+# is there for the case the path was actually wanted, which is debugging a
+# failed build.
+if [ "$KEEP_TMP" = "yes" ]; then
+  say ""
+  info "working directory KEPT on the VM: $REMOTE_TMP"
+else
+  rsh "rm -rf $REMOTE_TMP" 2>/dev/null || true
+  say ""
+  info "removed the working directory on the VM ($REMOTE_TMP)"
+  info "  pass --keep-tmp to leave it for debugging"
+fi

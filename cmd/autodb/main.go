@@ -791,6 +791,21 @@ func isAddrInUse(err error) bool {
 // answers. The spawned child is detached into its own session with stdio
 // redirected to an owned log file — never the alternate-screen terminal —
 // and deliberately survives TUI exit (the shared server, Objective 25).
+// spawnFor decides whether this config may START a daemon, and is a named
+// function so the decision is testable without a terminal.
+//
+// nil means Session.Connect reports that nothing is listening instead of
+// becoming what listens. See config.Server.ClientOnly for why a distributed
+// config must never spawn: it would start a daemon as whoever holds the file,
+// against the meta store that file resolves to, on the port the real service
+// binds.
+func spawnFor(cfg config.Config, configPath string) func() (string, error) {
+	if cfg.Server.ClientOnly {
+		return nil
+	}
+	return func() (string, error) { return spawnServe(configPath) }
+}
+
 func runUI(configPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -812,8 +827,18 @@ func runUI(configPath string) error {
 	// forced the terminal onto the ownerless base.
 	notesFor := tuiapp.PersonalNotesIn(notesRoot)
 
-	spawn := func() (string, error) { return spawnServe(configPath) }
-	session := tuiapp.NewSessionOn(ep.Network, addr, logger.Nop{}, spawn)
+	// NO SPAWN FROM A CLIENT-ONLY CONFIG.
+	//
+	// Spawning on a failed dial is the right default for a single-user
+	// install. It is a hazard for a config distributed to somebody who is not
+	// the operator: they would start a daemon as themselves, against the meta
+	// store this config resolves to, on the port the real service binds --
+	// getting an empty store they could bootstrap as administrator of, while
+	// the real service cannot rebind. A review found it.
+	//
+	// nil spawn means Session.Connect reports that nothing is listening rather
+	// than becoming what listens.
+	session := tuiapp.NewSessionOn(ep.Network, addr, logger.Nop{}, spawnFor(cfg, configPath))
 	defer session.Close()
 
 	backend, err := tuiterm.Open()

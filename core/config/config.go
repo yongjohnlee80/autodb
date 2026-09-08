@@ -452,6 +452,25 @@ type Server struct {
 	// Socket overrides the unix socket path. Empty means
 	// $XDG_RUNTIME_DIR/autodb.sock. Ignored when Port is set.
 	Socket string `toml:"socket"`
+
+	// ClientOnly forbids this config from ever STARTING a daemon.
+	//
+	// The TUI spawns `autodb --serve` when it cannot dial, which is right on a
+	// laptop: the first frontend to find nothing listening brings the daemon
+	// up. It is wrong for a config handed to somebody who is not the operator.
+	//
+	// A review found what that costs. An installed service runs as its own
+	// account, so a developer needs a readable config to run the TUI at all --
+	// and if the service happens to be down, that config spawns a daemon AS
+	// THEM, against whatever meta store the config resolves to, on the port
+	// the real service uses. They get an empty store they could bootstrap
+	// themselves as administrator of, and the real service cannot rebind.
+	//
+	// So a config meant for a client says so, and the spawn seam is simply not
+	// wired. This is a property of the FILE rather than a flag the caller must
+	// remember, because the person holding it is not the person who knows to
+	// pass it.
+	ClientOnly bool `toml:"client_only"`
 }
 
 // Meta configures autodb's own management database.
