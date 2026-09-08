@@ -443,9 +443,13 @@ ip_allowlist = $IP_ALLOWLIST
 
 # Unattended unlock. Without it a reboot leaves the store LOCKED and every
 # front-door client gets 57P03 "the server is not accepting connections"
-# until a human logs in by hand. Enrol once from a running unlocked daemon:
-#   autodb keyslot enroll
-# then uncomment. The file must be 0600; autodb refuses a wider one.
+# until a human logs in by hand.
+#
+# Uncomment this, then cut the slot ONCE from a running, unlocked daemon:
+#   autodb --ui  ->  SPC K  ->  e
+# There is no `keyslot` subcommand: enrolment is admin-only and only possible
+# while unlocked, so it happens after a human has logged in and an installer
+# cannot do it for you. The file must be 0600; autodb refuses a wider one.
 # service_keyfile = "$KEY_DIR/service.key"
 
 [exec]
@@ -843,9 +847,10 @@ if [ "$START_NOW" != "yes" ]; then
   info "$_n. Start it:  systemctl enable --now autodb-frontdoor"
   _n=$(( _n + 1 ))
 fi
-info "$_n. Enrol the keyslot so a reboot does not lock the store:"
-info "     autodb keyslot enroll"
-info "   then uncomment service_keyfile in $CONFIG and restart."
+info "$_n. Enrol the keyslot so a reboot does not lock the store: uncomment"
+info "   service_keyfile in $CONFIG, then from a running, unlocked daemon"
+info "   run autodb --ui and press SPC K then e. It is admin-only and needs"
+info "   the store unlocked, so it cannot be done from here."
 _n=$(( _n + 1 ))
 info "$_n. Expose a connection for front-door use and mint a PAT bound to it."
 say ""

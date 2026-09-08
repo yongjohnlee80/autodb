@@ -138,7 +138,13 @@ ip_allowlist = ["127.0.0.1/32", "::1/128"]
 # Point this at a file and autodb unwraps the master key from it at start, with
 # no passphrase. Cut the slot ONCE from a running, unlocked daemon:
 #
-#   autodb keyslot enroll     # admin, while logged in — writes the keyfile
+#   autodb --ui   ->  SPC K  ->  e     # admin, while logged in
+#
+# There is no `keyslot` subcommand: enrolment is admin-only and possible only
+# while the store is UNLOCKED, because wrapping the master key requires
+# holding it. That means after a human has logged in, so it cannot be done by
+# an installer. The surfaces are the TUI (leader, then K, then e) and the
+# `keyslot.enroll` RPC method.
 #
 # It is the LUKS pattern: a keyfile slot added BESIDE the passphrase slots.
 # Every user's passphrase keeps working exactly as before, and unlocking the

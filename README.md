@@ -431,10 +431,13 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
   secrets are encrypted with a master key normally unwrapped by a passphrase at
   login, so after a restart every front-door client gets
   `57P03 "the server is not accepting connections"` until a human logs in by
-  hand. Run `autodb keyslot enroll` once from a running unlocked daemon, then set
-  `service_keyfile`. Give it **its own directory** — a keyfile beside the meta
-  store means one careless `tar` captures both halves of the envelope — and it
-  must be `0600`.
+  hand. Set `service_keyfile`, then cut the slot **once** from a running,
+  unlocked daemon: `autodb --ui`, then `SPC K`, then `e`. There is no `keyslot`
+  subcommand — enrolment is admin-only and only possible while unlocked, because
+  wrapping the master key requires holding it, so an installer cannot do it for
+  you. Give the keyfile **its own directory** — a keyfile beside the meta store
+  means one careless `tar` captures both halves of the envelope — and it must be
+  `0600`.
 - **`ip_allowlist` is loopback-only by default**, enforced at login, so nothing
   remote can log in until you widen it. Widen it deliberately and narrowly.
 - **A connection is not reachable until `profile = session`.** Exposing one is a
@@ -445,6 +448,43 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
   TLS handshakes land on that same core.
 - **Small VPSes usually ship with no swap.** Add some regardless; the daemon's
   budgets assume headroom the kernel does not otherwise have.
+
+### Provisioning a fresh VM
+
+[`provision_vm.sh`](provision_vm.sh) is the layer beneath the installer: it
+takes a **fresh** Linux VM over SSH and brings it to a built, configured front
+door. It owns the machine — swap, base packages, a `mise`-managed Go toolchain,
+cloning and building autodb — then hands off to `install_frontdoor.sh` for the
+service itself rather than duplicating it.
+
+```sh
+./provision_vm.sh --user root --host 203.0.113.10          # probe only; changes nothing
+./provision_vm.sh --user root --host vm.example.com --apply
+./provision_vm.sh root@203.0.113.10 --apply --meta pg-local
+```
+
+`--check` is the default: it connects, measures the host, prints the plan and
+the front-door sizing that host would get, and exits. Every step is idempotent,
+so a re-run repairs rather than duplicates.
+
+**It adds swap on small hosts, for a measured reason.** Compiling autodb peaks
+near 700 MiB of RSS in a single compile process even fully serialized
+(`modernc.org/sqlite` is the heavy one). On a 1 GB VPS with no swap — the
+default on most providers — the Go compiler gets OOM-killed. Disk is the cheap
+resource there, so it trades some for a build that finishes, and the swap keeps
+earning its place afterwards. `--prebuilt` cross-compiles locally and uploads
+the binary instead, for hosts too small even with swap.
+
+It installs the newest patch release in the Go **minor line** that `go.mod`
+requires, not the exact figure written there. That line is a minimum language
+version, not a toolchain pin, so installing it literally would build with the
+oldest compiler the module permits — and a stdlib that old carries advisories in
+`crypto/tls` and `crypto/x509` that a TLS-terminating front door should not be
+shipping with.
+
+**Validated on Ubuntu 24.04** (1 vCPU / 961 MiB) for the sqlite backend. The
+PostgreSQL install paths are still untested, and the service is left stopped
+until TLS material exists — see the caveats above.
 
 ## The terminal UI
 
@@ -706,6 +746,7 @@ deployments (see [docs/ops/postgres-meta-store.md](docs/ops/postgres-meta-store.
 | `config.example.toml` | Every setting, with its default and why it is that                             |
 | `install.sh`          | Installer: verified release download, or a Go build fallback                   |
 | `install_frontdoor.sh` | Front-door service setup: memory sizing preflight, config, systemd unit       |
+| `provision_vm.sh`     | Provisioning playbook: takes a fresh VM to a built, configured front door      |
 | `docs/media/`         | README demo recordings                                                         |
 
 ## Status & roadmap
