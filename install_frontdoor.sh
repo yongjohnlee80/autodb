@@ -610,14 +610,27 @@ TOML
 }
 
 emit_client_config() {
-    cat <<TOML
+    # STATIC PROSE GOES IN A QUOTED HEREDOC, and the variable-bearing lines are
+    # printf'd separately. That split is not style.
+    #
+    # A review found this function rendering with an UNQUOTED heredoc while its
+    # own comment contained backticks around a command name. Shell performed
+    # command substitution inside the heredoc, so merely RENDERING this config
+    # executed `autodb --serve` and pasted its diagnostic into the generated
+    # TOML. On a host with no service running, writing a client config would
+    # have started a server -- the exact hazard client_only exists to prevent,
+    # reintroduced by the comment explaining it.
+    #
+    # A quoted delimiter disables substitution entirely, which is why every
+    # block below that contains prose uses one.
+    cat <<'TOML'
 # autodb -- CLIENT config. Safe to read; safe to share on this host.
 #
 # It carries the daemon's address and nothing else. Use it to run the TUI as
 # your own user:
-#
-#   autodb --ui --config $CONFIG_DIR/client.toml
-#
+TOML
+    printf '#\n#   autodb --ui --config %s/client.toml\n#\n' "$CONFIG_DIR"
+    cat <<'TOML'
 # and from there log in with your own autodb credentials and mint a PAT bound
 # to a connection you have been granted.
 #
@@ -625,8 +638,9 @@ emit_client_config() {
 # PostgreSQL DSN with a password in it, which a client has no need for.
 
 [server]
-port = $RPC_PORT
-bind = "127.0.0.1"
+TOML
+    printf 'port = %s\nbind = "127.0.0.1"\n' "$RPC_PORT"
+    cat <<'TOML'
 
 # THIS CONFIG MAY NOT START A DAEMON.
 #
