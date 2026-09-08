@@ -16,6 +16,15 @@ go.work.sum
 # auto-agents workspace mailbox (v0.2.30+)
 .auto-agents/
 
+# Agent instructions injected into the worktree at spawn time -- auto-agents
+# writes CLAUDE.md at each agent's cwd, and the junie CLI keeps .junie/ there.
+# Same class as .auto-agents/ above: present in a live worktree, never source.
+# They left the tree dirty, so autodb-test.sh refused to attest its ledger
+# against the commit it had just tested. Root-anchored, so a CLAUDE.md the
+# project genuinely wants to track elsewhere is unaffected.
+/CLAUDE.md
+/.junie/
+
 # Neovim's own log, written into the cwd when a headless test run cannot
 # create its server socket. A test artifact, never source. auto-core already
 # ignores this; autodb did not, so a suite run left the tree dirty.
