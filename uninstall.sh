@@ -21,9 +21,15 @@
 # both the meta store and the service keyfile is the two halves of one
 # envelope in a single file -- exactly the "one careless tar" hazard the
 # config documentation warns about, and it would turn a backup into a
-# credential. The store is archived; the keyfile is left where it is and
-# reported. Without it the archive still needs a passphrase to open, which is
-# the property worth keeping.
+# credential.
+#
+# The keyfile is EXCLUDED FROM THE ARCHIVE and then DELETED with everything
+# else, which is worth stating precisely because an earlier version of this
+# comment said it was "left in place" and that was simply wrong. Losing it
+# costs nothing recoverable: it only ever unwrapped the master key for
+# unattended start, and the archive still carries every USER's
+# passphrase-wrapped slot -- so an operator who knows a user passphrase can
+# restore and open the store, while nobody who merely holds the archive can.
 #
 # POSIX sh. Read it before running it as root.
 
@@ -60,6 +66,10 @@ USAGE:
 OPTIONS:
   --check              List what would be removed. Changes NOTHING.
                        This is the default.
+  --print-targets      Print the resolved deletion set, one path per line,
+                       and exit. Changes nothing. This is what makes the
+                       destructive surface testable rather than a matter of
+                       reading the script.
   --apply              Actually remove it.
   --backup-dir <dir>   Where to write the archive. Default: /var/backups
   --no-backup          Do not archive the meta store first. The encrypted
@@ -81,6 +91,7 @@ USAGE
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) MODE="check" ;;
+    --print-targets) MODE="targets" ;;
     --apply) MODE="apply" ;;
     --backup-dir) BACKUP_DIR="${2:?--backup-dir needs a path}"; shift ;;
     --no-backup) DO_BACKUP="no" ;;
@@ -97,18 +108,126 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$BACKUP_DIR" ] || BACKUP_DIR="/var/backups"
 
-# Read the real paths out of the config when it is there, so an install that
-# moved its store is not left behind by an uninstaller using defaults.
-tomlstr() { # tomlstr <key>
+# Read the real paths out of the config, so an install that moved its store is
+# not left behind by an uninstaller using defaults.
+#
+# THIS IS NOT A TOML PARSER AND MUST NOT BE TRUSTED LIKE ONE. It is a
+# line-scanner that tracks the current [section] and accepts a plain
+# double-quoted scalar. It does not understand escapes, multi-line strings,
+# inline tables or dotted keys. Every value it produces is therefore treated as
+# UNTRUSTED INPUT and validated before anything is deleted -- see safe_target.
+#
+# A review found why that matters: an earlier version took dirname() of the
+# store path and recursively removed the result, so a perfectly valid
+# `path = "/etc/meta.db"` meant `rm -rf /etc`. Nothing about the generated
+# layout prevented that, and --config exists precisely so the layout can
+# differ. The fix is structural rather than a bigger denylist: this script no
+# longer DERIVES a directory to delete from a file path. It removes the files
+# it can name, and removes a directory only when that directory is empty
+# afterwards.
+tomlstr() { # tomlstr <section> <key>
   [ -r "$CONFIG" ] || return 0
-  sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONFIG" | head -1
+  awk -v want_s="$1" -v want_k="$2" '
+    /^[[:space:]]*\[/ { s=$0; gsub(/^[[:space:]]*\[|\][[:space:]]*$/,"",s); next }
+    {
+      line=$0
+      sub(/[[:space:]]*#.*$/,"",line)
+      if (s != want_s) next
+      if (match(line, "^[[:space:]]*" want_k "[[:space:]]*=[[:space:]]*\"")) {
+        v = line; sub("^[^\"]*\"", "", v); sub("\".*$", "", v)
+        print v; exit
+      }
+    }' "$CONFIG"
 }
-_p="$(tomlstr path)";            [ -n "$_p" ] && STATE_DIR="$(dirname "$_p")"
-_k="$(tomlstr service_keyfile)"; [ -n "$_k" ] && KEY_DIR="$(dirname "$_k")"
-META_ENGINE="$(tomlstr engine)"; [ -n "$META_ENGINE" ] || META_ENGINE="sqlite"
-STORE_FILE="$_p"
+
+# safe_target refuses a deletion target that is not plausibly ours.
+#
+# Belt and braces on top of the structural fix: even though nothing is derived
+# by dirname any more, a path that arrives from a config still decides what gets
+# unlinked, so it is checked rather than trusted.
+DENY="/ /bin /boot /dev /etc /home /lib /lib32 /lib64 /media /mnt /opt /proc /root /run /sbin /srv /sys /tmp /usr /usr/bin /usr/lib /usr/local /usr/local/bin /usr/sbin /var /var/backups /var/lib /var/log /var/run /var/tmp"
+# safe_target <path> [strict] -- prints the canonical path, or fails.
+#
+# `strict` is passed for CONFIG-DERIVED paths and additionally refuses a target
+# whose PARENT is a system location. That distinction matters: /usr/local/bin
+# is a system location and the binary legitimately lives in it, but a store at
+# /etc/meta.db is a config value reaching into one, and the two cannot be told
+# apart by the path alone -- only by whether we chose it or a file did.
+safe_target() { # safe_target <path> [strict]
+  _t="${1:-}"
+  _strict="${2:-}"
+  [ -n "$_t" ] || return 1
+  case "$_t" in
+    /*) ;;
+    *) warn "refusing a relative path: $_t"; return 1 ;;
+  esac
+  case "$_t" in
+    *..*) warn "refusing a path containing '..': $_t"; return 1 ;;
+  esac
+  # Canonicalise without requiring existence, so a symlinked parent cannot
+  # smuggle the target somewhere else.
+  _c="$(readlink -m -- "$_t" 2>/dev/null || printf '%s' "$_t")"
+  for _d in $DENY; do
+    if [ "$_c" = "$_d" ]; then
+      warn "refusing to touch $_c: it is a system location"
+      return 1
+    fi
+  done
+  # Two components minimum (/a/b), so a single top-level directory can never
+  # be a target even if the denylist misses its name.
+  _depth="$(printf '%s' "${_c#/}" | awk -F/ '{print NF}')"
+  if [ "${_depth:-0}" -lt 2 ]; then
+    warn "refusing $_c: too shallow to be an autodb path"
+    return 1
+  fi
+  if [ "$_strict" = "strict" ]; then
+    _parent="$(dirname -- "$_c")"
+    for _d in $DENY; do
+      if [ "$_parent" = "$_d" ]; then
+        warn "refusing $_c: a config value must not place autodb files directly"
+        warn "  in $_parent, which is a system location. Put them in a directory"
+        warn "  of their own."
+        return 1
+      fi
+    done
+  fi
+  printf '%s' "$_c"
+}
+
+_p="$(tomlstr meta path)"
+_k="$(tomlstr security service_keyfile)"
+META_ENGINE="$(tomlstr meta engine)"; [ -n "$META_ENGINE" ] || META_ENGINE="sqlite"
+
+# The store FILE, validated. Its directory is NOT inferred as a delete target.
+STORE_FILE=""
+if [ -n "$_p" ]; then
+  STORE_FILE="$(safe_target "$_p" strict)" || die "the config's [meta] path is not a safe target; refusing to continue"
+fi
+KEYFILE=""
+if [ -n "$_k" ]; then
+  KEYFILE="$(safe_target "$_k" strict)" || die "the config's [security] service_keyfile is not a safe target; refusing to continue"
+fi
+# The default directories are ours by construction, and still validated.
+STATE_DIR="$(safe_target "$STATE_DIR")" || die "state directory is not a safe target"
+KEY_DIR="$(safe_target "$KEY_DIR")"     || die "keyfile directory is not a safe target"
+CONFIG_DIR="$(safe_target "$CONFIG_DIR")" || die "config directory is not a safe target"
 
 # ------------------------------------------------------------------ inventory
+
+# Printed before the inventory so a caller can assert on the target set without
+# parsing prose. Every line is a path this script would unlink or rmdir.
+if [ "$MODE" = "targets" ]; then
+  [ -n "$STORE_FILE" ] && printf '%s\n%s-wal\n%s-shm\n' "$STORE_FILE" "$STORE_FILE" "$STORE_FILE"
+  printf '%s\n' "$STATE_DIR/autodb.sock"
+  [ -n "$KEYFILE" ] && printf '%s\n' "$KEYFILE"
+  printf '%s\n' "$CONFIG"
+  for f in ca.pem ca.key cert.pem key.pem intermediate.pem intermediate.key; do
+    printf '%s\n' "$CONFIG_DIR/tls/$f"
+  done
+  printf '%s\n' "$CONFIG_DIR/tls" "$PREFIX/autodb" "$STATE_DIR" "$KEY_DIR" "$CONFIG_DIR"
+  [ "$RM_SWAP" = "yes" ] && printf '%s\n' /swapfile
+  exit 0
+fi
 
 step "What is here"
 present() { [ -e "$1" ] && printf '  PRESENT  %s\n' "$1" || printf '  absent   %s\n' "$1"; }
@@ -167,6 +286,31 @@ fi
 
 # --------------------------------------------------------------------- backup
 
+# THE SERVICE STOPS FIRST, and that ordering is the whole basis of the backup
+# below being coherent.
+#
+# A review caught this the wrong way round: the archive was staged while the
+# daemon could still be writing, so copying meta.db with its -wal and -shm was
+# not a snapshot at all -- a commit or checkpoint landing mid-copy splits the
+# three files across states, and the header claimed a stopped-daemon rationale
+# the code did not honour. Copying all three together is only equivalent to a
+# checkpoint when there is no concurrent writer.
+step "Service"
+if [ -e "$UNIT" ]; then
+  systemctl disable --now autodb-frontdoor 2>/dev/null || true
+  # Wait for it to actually be gone, rather than assuming disable --now
+  # returned after the process exited.
+  _w=0
+  while systemctl is-active --quiet autodb-frontdoor 2>/dev/null; do
+    _w=$(( _w + 1 ))
+    [ "$_w" -gt 30 ] && die "autodb-frontdoor did not stop; refusing to archive a live store"
+    sleep 1
+  done
+  info "service stopped"
+else
+  info "no unit; nothing to stop"
+fi
+
 if [ "$DO_BACKUP" = "yes" ]; then
   step "Backup"
   if [ -n "$STORE_FILE" ] && [ -r "$STORE_FILE" ]; then
@@ -208,7 +352,8 @@ README
     chmod 0600 "$_archive"
     rm -rf "$_stage"
     info "wrote $_archive ($(du -h "$_archive" | awk '{print $1}'), mode 0600)"
-    [ -n "$_k" ] && [ -e "$_k" ] && info "keyfile left in place at $_k (NOT in the archive)"
+    [ -n "$KEYFILE" ] && [ -e "$KEYFILE" ] && \
+      info "keyfile EXCLUDED from the archive and removed below: $KEYFILE"
   else
     info "no meta store to archive"
   fi
@@ -216,9 +361,8 @@ fi
 
 # --------------------------------------------------------------------- remove
 
-step "Service"
+step "Unit"
 if [ -e "$UNIT" ]; then
-  systemctl disable --now autodb-frontdoor 2>/dev/null || true
   rm -f "$UNIT"; systemctl daemon-reload
   systemctl reset-failed autodb-frontdoor 2>/dev/null || true
   info "unit removed"
@@ -226,11 +370,45 @@ else
   info "no unit"
 fi
 
+# ---------------------------------------------------------------------- files
+#
+# NAMED FILES, THEN EMPTY DIRECTORIES. Nothing here recurses, and that is the
+# point: an uninstaller that computes a directory and removes it recursively is
+# one bad config value away from deleting a system tree, which is exactly the
+# defect a review found in the first version. Removing what we can name and
+# then rmdir'ing means a directory holding something we did not put there
+# SURVIVES, and says so, instead of being destroyed on our assumption.
 step "Files"
-for d in "$CONFIG_DIR" "$STATE_DIR" "$KEY_DIR"; do
-  if [ -e "$d" ]; then rm -rf "$d"; info "removed $d"; fi
+
+rm_file() { [ -e "$1" ] && { rm -f "$1"; info "removed $1"; }; }
+
+# The store and the two files that are part of it.
+if [ -n "$STORE_FILE" ]; then
+  rm_file "$STORE_FILE"; rm_file "$STORE_FILE-wal"; rm_file "$STORE_FILE-shm"
+fi
+# The socket the daemon binds, which lives beside the store by default.
+rm_file "$STATE_DIR/autodb.sock"
+rm_file "$KEYFILE"
+rm_file "$CONFIG"
+# TLS material is reissuable and ours by construction.
+if [ -d "$CONFIG_DIR/tls" ]; then
+  for f in ca.pem ca.key cert.pem key.pem intermediate.pem intermediate.key; do
+    rm_file "$CONFIG_DIR/tls/$f"
+  done
+  rmdir "$CONFIG_DIR/tls" 2>/dev/null && info "removed $CONFIG_DIR/tls" || true
+fi
+rm_file "$PREFIX/autodb"
+
+for d in "$STATE_DIR" "$KEY_DIR" "$CONFIG_DIR"; do
+  [ -d "$d" ] || continue
+  if rmdir "$d" 2>/dev/null; then
+    info "removed $d"
+  else
+    warn "$d is not empty and was LEFT IN PLACE; it holds something this"
+    warn "  installer did not create:"
+    ls -A "$d" 2>/dev/null | sed 's/^/    /' >&2
+  fi
 done
-[ -e "$PREFIX/autodb" ] && { rm -f "$PREFIX/autodb"; info "removed $PREFIX/autodb"; }
 
 if [ "$RM_USER" = "yes" ]; then
   step "Service account"
@@ -266,7 +444,9 @@ if [ "$META_ENGINE" = "postgres" ]; then
   info "an uninstaller's decision"
 fi
 [ "$DO_BACKUP" = "yes" ] && info "the backup archive in $BACKUP_DIR"
-[ -n "$_k" ] && info "nothing else references the keyfile path now"
+info "the service keyfile: excluded from the archive AND deleted. It only ever"
+info "  unwrapped the master key for unattended start; every user's own"
+info "  passphrase-wrapped slot is still in the archive"
 info "git, curl and other base packages"
 
 say ""

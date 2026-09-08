@@ -99,6 +99,7 @@ TLS_HOSTS=""
 TLS_DNS_NAME=""
 GEN_CERT="auto"       # auto | yes | no -- run `autodb --create-cert`
 RUN_INIT="auto"       # auto | yes | no -- run `autodb --init`
+INIT_DONE="no"        # set only once the ceremony actually succeeds
 BIND_ADDR="0.0.0.0"
 FD_PORT="5432"
 IP_ALLOWLIST='["127.0.0.1/32", "::1/128"]'
@@ -938,7 +939,9 @@ if [ "$RUN_INIT" != "no" ]; then
   ask_yn _doinit "create the first administrator and enable unattended unlock now?" "yes"
   if [ "$_doinit" = "yes" ]; then
     step "First-run ceremony"
-    if ! "$PREFIX/autodb" --config "$CONFIG" --init; then
+    if "$PREFIX/autodb" --config "$CONFIG" --init; then
+      INIT_DONE="yes"
+    else
       warn "--init did not complete. The config and unit are in place; run"
       warn "  $PREFIX/autodb --config $CONFIG --init"
       warn "again before starting the service, or a restart will leave the"
@@ -977,10 +980,21 @@ if [ "$START_NOW" != "yes" ]; then
   info "$_n. Start it:  systemctl enable --now autodb-frontdoor"
   _n=$(( _n + 1 ))
 fi
-info "$_n. Enrol the keyslot so a reboot does not lock the store: uncomment"
-info "   service_keyfile in $CONFIG, then from a running, unlocked daemon"
-info "   run autodb --ui and press SPC K then e. It is admin-only and needs"
-info "   the store unlocked, so it cannot be done from here."
+# WHAT --init ACTUALLY DID, rather than a recipe that may already be done. The
+# previous version told every operator to uncomment service_keyfile and go to
+# the TUI -- including the ones for whom this script had just written the key
+# and run the ceremony, so the instructions contradicted the install they were
+# printed for.
+if [ "$INIT_DONE" = "yes" ]; then
+  info "$_n. DONE already: the first administrator was created and the"
+  info "   unattended unlock enrolled, so a restart will not lock the store."
+else
+  info "$_n. Create the first administrator and enrol the unattended unlock:"
+  info "     $PREFIX/autodb --config $CONFIG --init"
+  info "   Needed before the service is useful, and before a restart can be"
+  info "   survived. It prompts for a passphrase, so it needs a terminal, and"
+  info "   it takes the instance lease -- run it with the service stopped."
+fi
 _n=$(( _n + 1 ))
 info "$_n. Expose a connection for front-door use and mint a PAT bound to it."
 say ""
