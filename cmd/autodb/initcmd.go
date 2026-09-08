@@ -138,7 +138,80 @@ func runInit(ctx context.Context, out io.Writer, configPath string, o initOpts) 
 		return err
 	}
 
-	return enrolKeyslot(ctx, out, svc, cfg, token)
+	if err := enrolKeyslot(ctx, out, svc, cfg, token); err != nil {
+		return err
+	}
+	return createUsers(ctx, out, svc, o, token)
+}
+
+// createUsers offers to add further accounts, which is the other half of a
+// first run.
+//
+// The ceremony used to stop at the administrator, so every developer account
+// still had to be made in the TUI afterwards -- and on an install whose RPC
+// endpoint is a unix socket, that meant root doing it for them. Creating them
+// here needs nothing this command does not already hold: CreateUser wants an
+// admin token and an unlocked store, and Bootstrap left both in this process.
+//
+// Empty name ends the loop, so an operator who wants only the administrator
+// presses return once.
+func createUsers(ctx context.Context, out io.Writer, svc *auth.Service, o initOpts, token string) error {
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Additional accounts. Each developer needs one to log in and mint their")
+	fmt.Fprintln(out, "own PAT; a token is minted BY the person who will use it, bound to a")
+	fmt.Fprintln(out, "connection you grant them. Leave the name empty to finish.")
+
+	// BOUNDED, so this terminates whatever the prompt returns. An interactive
+	// operator ends it with an empty line, but a caller that keeps answering
+	// the same thing -- a script, a stuck pipe -- would otherwise spin here
+	// forever, and a first-run ceremony that never returns is worse than one
+	// that stops asking.
+	const maxAccounts = 50
+	for n := 1; n <= maxAccounts; n++ {
+		fmt.Fprintln(out, "")
+		name, err := o.prompt(fmt.Sprintf("  account %d name (empty to finish)", n), "")
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(name) == "" {
+			if n == 1 {
+				fmt.Fprintln(out, "  none added; you can add them later from the TUI.")
+			}
+			return nil
+		}
+		if n == maxAccounts {
+			fmt.Fprintf(out, "  stopping after %d accounts; add any more from the TUI.\n", maxAccounts)
+		}
+
+		role, err := o.prompt("    role (editor|reader|admin)", meta.RoleEditor)
+		if err != nil {
+			return err
+		}
+		switch role {
+		case meta.RoleAdmin, meta.RoleEditor, meta.RoleReader:
+		default:
+			fmt.Fprintf(out, "    %q is not a role; skipped. Use editor, reader or admin.\n", role)
+			continue
+		}
+
+		// Re-asked, not skipped. Silently dropping an account because of a
+		// typo is how an operator ends up believing a developer exists.
+		pass, err := readNewPassphrase(out, o, "    passphrase")
+		if err != nil {
+			fmt.Fprintf(out, "    %v -- account %q not created.\n", err, name)
+			continue
+		}
+
+		// A failure here must not abandon the accounts already made, nor the
+		// administrator and keyslot that came before it. Reported and the loop
+		// continues.
+		if _, cerr := svc.CreateUser(ctx, token, name, pass, role, initAuditIP); cerr != nil {
+			fmt.Fprintf(out, "    could not create %q: %v\n", name, cerr)
+			continue
+		}
+		fmt.Fprintf(out, "    created %q as %s\n", name, role)
+	}
+	return nil
 }
 
 // admitBootstrap refuses an address the allowlist does not cover, BEFORE the
@@ -176,6 +249,49 @@ func admitBootstrap(ctx context.Context, svc *auth.Service) error {
 	return nil
 }
 
+// readNewPassphrase asks twice and RE-ASKS on a mismatch or a short entry.
+//
+// It used to abort the whole ceremony on the first mistyped confirmation, and
+// that is not a proportionate response to a typo: --init also enrols the
+// keyslot and the playbook only starts the service when --init succeeds, so a
+// single slip left an install with no administrator, no unattended unlock and
+// a stopped daemon -- and the operator had to work out which of those three
+// still needed doing.
+//
+// Bounded, because a prompt that can never be satisfied must still end: an
+// input source that keeps returning different values would otherwise spin
+// here. After the last attempt it gives up and says so, which is the same
+// outcome as before but reached only when the operator genuinely cannot enter
+// a matching pair.
+func readNewPassphrase(out io.Writer, o initOpts, label string) (string, error) {
+	const attempts = 3
+	for i := 1; i <= attempts; i++ {
+		pass, err := o.secret(label)
+		if err != nil {
+			return "", err
+		}
+		again, err := o.secret(label + " (again)")
+		if err != nil {
+			return "", err
+		}
+
+		switch {
+		case pass != again:
+			fmt.Fprintln(out, "    the two entries differ.")
+		case len(pass) < minPassphraseLen:
+			fmt.Fprintf(out, "    too short: %d characters, needs at least %d.\n",
+				len(pass), minPassphraseLen)
+		default:
+			return pass, nil
+		}
+
+		if i < attempts {
+			fmt.Fprintf(out, "    try again (%d of %d left).\n", attempts-i, attempts)
+		}
+	}
+	return "", fmt.Errorf("no matching passphrase after %d attempts; nothing was created", attempts)
+}
+
 // bootstrapAdmin creates the first administrator and returns its token.
 func bootstrapAdmin(ctx context.Context, out io.Writer, svc *auth.Service, o initOpts) (string, error) {
 	name, err := o.prompt("administrator name", defaultAdminName)
@@ -188,20 +304,11 @@ func bootstrapAdmin(ctx context.Context, out io.Writer, svc *auth.Service, o ini
 
 	// Twice, because a mistyped passphrase here is unrecoverable: it wraps a
 	// master key that exists nowhere else, so the store it protects would be
-	// permanently unopenable rather than merely locked out.
-	pass, err := o.secret("passphrase")
+	// permanently unopenable rather than merely locked out. And re-asked
+	// rather than fatal -- see readNewPassphrase.
+	pass, err := readNewPassphrase(out, o, "passphrase")
 	if err != nil {
 		return "", err
-	}
-	if len(pass) < minPassphraseLen {
-		return "", fmt.Errorf("passphrase is %d characters; it must be at least %d", len(pass), minPassphraseLen)
-	}
-	again, err := o.secret("passphrase (again)")
-	if err != nil {
-		return "", err
-	}
-	if pass != again {
-		return "", errors.New("the two passphrases differ; nothing was created")
 	}
 
 	token, ident, err := svc.Bootstrap(ctx, name, pass, initAuditIP)

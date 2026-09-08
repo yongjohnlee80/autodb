@@ -95,11 +95,13 @@ PG_DB="autodb"
 PG_ROLE=""           # defaults to RUN_USER, so peer auth works with no password
 TLS_CERT=""
 TLS_KEY=""
+TLS_CA=""             # private CA from --create-cert; the chain's trust root
 TLS_HOSTS=""
 TLS_DNS_NAME=""
 GEN_CERT="auto"       # auto | yes | no -- run `autodb --create-cert`
 RUN_INIT="auto"       # auto | yes | no -- run `autodb --init`
 INIT_DONE="no"        # set only once the ceremony actually succeeds
+KEEP_CONFIG="no"      # a re-run REPLACES the config unless this is set
 BIND_ADDR="0.0.0.0"
 FD_PORT="5432"
 
@@ -136,6 +138,16 @@ RPC_PORT="7419"       # config.DefaultPort
 CLIENT_CONFIG=""      # world-readable endpoint-only config, written in port mode
 IP_ALLOWLIST='["127.0.0.1/32", "::1/128"]'
 START_NOW="no"
+# STATE_OK is the startability of the STORE, tracked separately from START_NOW
+# (what the operator asked for) and from TLS_CERT (whether it can serve).
+#
+# A review caught the reason it has to exist: a failed hand_off_state only
+# warned, and the start at the bottom of this script consulted START_NOW and
+# TLS_CERT alone -- so a successful --create-cert plus "start now: yes" launched
+# the daemon into a store it cannot open. My comment there said "the caller
+# decides whether to start", and the caller IS this script.
+STATE_OK="yes"
+STARTED="no"
 CAP_OVERRIDE=""
 LANE_OVERRIDE=""
 
@@ -187,6 +199,10 @@ OPTIONS:
                        exit. Writes nothing. Useful for review, for diffing
                        against a running config, and for feeding to a
                        validator.
+  --hand-off           Give the meta store, the keyfile and the TLS material
+                       to the service account, then exit. For a caller that
+                       ran `autodb --init` itself: the ceremony runs as root,
+                       so without this the daemon cannot open its own store.
   --print-client-config
                        Print the world-readable CLIENT config (port mode
                        only), to stdout, and exit. Writes nothing. This is
@@ -197,6 +213,12 @@ OPTIONS:
                        setting when run on a terminal.
   --interactive        Force prompting even when stdin is not a terminal.
   --non-interactive    Never prompt; take flags and computed defaults.
+  --start              Enable and start the service at the end. Answers the
+                       interview's "start now?" without a terminal, so
+                       --non-interactive can reach it at all. The start is
+                       still withheld if TLS is not configured or if the store
+                       could not be handed to the service account.
+  --no-start           Do not start it (the default).
   --assume-ram <MiB>   Size for a host of this much RAM instead of the
                        detected figure -- plan a small VPS from a large
                        workstation.
@@ -221,6 +243,9 @@ OPTIONS:
                        callers too.
   --no-cert            Do not issue TLS material. Leaves the door disabled.
   --no-init            Skip the first-run ceremony (autodb --init).
+  --keep-config        Do not replace an existing config. Without this a
+                       re-run rewrites it, so the flags you pass actually
+                       take effect.
   --user <name>        Service account. Default: autodb
   --prefix <dir>       Where the autodb binary lives. Default: /usr/local/bin
   --config <path>      Config file to write. Default: /etc/autodb/config.toml
@@ -243,9 +268,16 @@ while [ $# -gt 0 ]; do
     --check)  MODE="check" ;;
     --print-config) MODE="print" ;;
     --print-client-config) MODE="printclient" ;;
+    --hand-off) MODE="handoff" ;;
     --apply)  MODE="apply" ;;
     --interactive)     INTERACTIVE="yes" ;;
     --non-interactive) INTERACTIVE="no" ;;
+    # --start makes "start it now" answerable WITHOUT a terminal. It was only
+    # ever an interview question, so --non-interactive could never start the
+    # service -- and the start gate below could not be exercised by a test
+    # without a person typing yes.
+    --start) START_NOW="yes" ;;
+    --no-start) START_NOW="no" ;;
     --assume-ram) ASSUME_RAM="${2:?--assume-ram needs a number of MiB}"; shift ;;
     --assume-cpus) ASSUME_CPUS="${2:?--assume-cpus needs a number}"; shift ;;
     --bind)   BIND="${2:?--bind needs an address}"
@@ -260,6 +292,7 @@ while [ $# -gt 0 ]; do
     --allowlist) IP_ALLOWLIST="${2:?--allowlist needs a TOML array}"; shift ;;
     --no-cert) GEN_CERT="no" ;;
     --no-init) RUN_INIT="no" ;;
+    --keep-config) KEEP_CONFIG="yes" ;;
     --user)   RUN_USER="${2:?--user needs a name}"; shift ;;
     --prefix) PREFIX="${2:?--prefix needs a directory}"; shift ;;
     --config) CONFIG="${2:?--config needs a path}"; CONFIG_DIR="$(dirname "$CONFIG")"; shift ;;
@@ -467,6 +500,12 @@ compute_sizing() {
   [ -n "$CAP_OVERRIDE" ] && CAP="$CAP_OVERRIDE"
   [ -n "$LANE_OVERRIDE" ] && LANE_MIB="$LANE_OVERRIDE"
 
+  # Must exceed reserved_headroom (4) with room to serve, and the shipped
+  # 2 x CPU default does not on a small host. Eight is the smallest value that
+  # leaves a usable lease budget at one core; a bigger box keeps its own.
+  POOL_MAX_CONNS=$(( 2 * NCPU ))
+  [ "$POOL_MAX_CONNS" -lt 8 ] && POOL_MAX_CONNS=8
+
   GOMEMLIMIT_MIB=$(( MEM_MIB * 75 / 100 ))
   MEMORYMAX_MIB=$(( MEM_MIB * 90 / 100 ))
 }
@@ -572,6 +611,19 @@ ip_allowlist = $IP_ALLOWLIST
 service_keyfile = "$KEY_DIR/service.key"
 
 [exec]
+# SET EXPLICITLY, because the shipped default is 2 x CPU COUNT and
+# reserved_headroom is 4 -- so on a 1 or 2 vCPU host the defaults contradict
+# each other and the config will not load at all:
+#
+#   1 vCPU -> pool_max_conns 2, headroom 4, leaves -2  INVALID
+#   2 vCPU -> pool_max_conns 4, headroom 4, leaves  0  INVALID
+#
+# That is not hypothetical: it stopped a real provisioning run on a 1 vCPU
+# droplet, and it stopped it inside --create-cert, which loads the config --
+# so the failure surfaced as "certificate generation failed" rather than as
+# "your config is invalid".
+pool_max_conns = $POOL_MAX_CONNS
+
 # Sized for this host. The general lane's floor is this number x ${WATERMARK_MIB} MiB, so
 # these two move TOGETHER -- raising the cap without raising the lane fails
 # start, which is the intended direction.
@@ -598,6 +650,13 @@ TOML
   fi
   if [ -n "$TLS_CERT" ]; then
     printf 'tls_cert_file = "%s"\ntls_key_file = "%s"\n' "$TLS_CERT" "$TLS_KEY"
+    # THE TRUST ROOT, without which the chain cannot verify. frontdoor builds
+    # its roots from tls_root_ca_file and falls back to the SYSTEM pool when it
+    # is unset -- which does not contain a private CA that --create-cert just
+    # made. The daemon then refuses to serve with "certificate signed by
+    # unknown authority", and prints the leaf's DNS names beside it, which
+    # reads as a hostname problem and is not one.
+    [ -n "$TLS_CA" ] && printf 'tls_root_ca_file = "%s"\n' "$TLS_CA"
   else
     cat <<TOML
 
@@ -613,6 +672,121 @@ TOML
 # tls_key_file  = "$CONFIG_DIR/tls/key.pem"
 TOML
   fi
+}
+
+# grant_tls_read gives the service account exactly what it needs to SERVE, and
+# nothing that lets it ISSUE.
+#
+# A first version chgrp'd the whole directory and chmod 0640'd every file in
+# it, which handed ca.key and intermediate.key to the service account's group.
+# certgen.go says of ca.key that it signs the intermediate and never leaves
+# this host -- so that made a compromised daemon able to mint certificates
+# every distributed ca.pem would trust, for any name it liked. A review caught
+# it. Serving needs the leaf key and the public chain; it never needs a
+# signing key.
+# NOTHING HERE IS MASKED, and each check is on the RESULTING STATE rather than
+# on the command's exit status.
+#
+# A review caught the version below this one: every chown and chmod ended in
+# `2>/dev/null || true`, so a real ownership failure -- a read-only or
+# mis-mounted state directory, a restrictive policy, a chmod refused -- still
+# printed "Handed off" and exited 0. That made the caller's start gate VACUOUS:
+# it could only ever observe ssh failing to reach the host, never the handoff
+# failing to do its job, so the daemon was still started into the
+# permission-denied crash loop by a different path.
+#
+# Verifying the state, not the call, is deliberate: a chown can succeed and
+# leave the wrong owner (a symlink, a racing remount), and the property the
+# daemon needs is who owns the file, not whether a command returned 0.
+grant_tls_read() {
+  _d="$CONFIG_DIR/tls"
+  # NO TLS MATERIAL YET IS LEGITIMATE -- the installer writes the front door
+  # disabled precisely because certificates may not exist. Absent is optional;
+  # present-and-unfixable is a failure.
+  [ -d "$_d" ] || return 0
+  _rc=0
+
+  # Traversal only: group-executable so the daemon can reach the files named
+  # below, NOT group-readable, so it cannot enumerate what else is there.
+  chgrp "$RUN_USER" "$_d" || { warn "cannot chgrp $_d to $RUN_USER"; _rc=1; }
+  chmod 0710 "$_d" || { warn "cannot chmod 0710 $_d"; _rc=1; }
+
+  for _f in key.pem cert.pem intermediate.pem ca.pem; do
+    [ -e "$_d/$_f" ] || continue
+    chgrp "$RUN_USER" "$_d/$_f" || { warn "cannot chgrp $_d/$_f"; _rc=1; }
+    chmod 0640 "$_d/$_f" || { warn "cannot chmod 0640 $_d/$_f"; _rc=1; }
+    _g="$(stat -c '%G' "$_d/$_f" 2>/dev/null || echo '?')"
+    [ "$_g" = "$RUN_USER" ] || {
+      warn "$_d/$_f is group $_g, not $RUN_USER -- the daemon cannot read it"; _rc=1; }
+  done
+
+  # SIGNING KEYS STAY root:root 0600, restated rather than left at whatever
+  # --create-cert produced, so this function is the whole policy -- and
+  # VERIFIED, because failing to lock them down is not a cosmetic miss: it
+  # leaves a compromised daemon able to mint certificates every distributed
+  # ca.pem would trust, for any name it likes.
+  for _f in ca.key intermediate.key; do
+    [ -e "$_d/$_f" ] || continue
+    chown root:root "$_d/$_f" || { warn "cannot chown $_d/$_f to root:root"; _rc=1; }
+    chmod 0600 "$_d/$_f" || { warn "cannot chmod 0600 $_d/$_f"; _rc=1; }
+    _m="$(stat -c '%U:%G %a' "$_d/$_f" 2>/dev/null || echo '?')"
+    [ "$_m" = "root:root 600" ] || {
+      warn "SIGNING KEY $_d/$_f is $_m, not root:root 600 -- refusing to call this"
+      warn "a successful handoff: the service account must never be able to sign"
+      _rc=1; }
+  done
+  return "$_rc"
+}
+
+# hand_off_state gives the meta store and the keyfile to the service account.
+#
+# ONE implementation, because there are two routes to needing it: this script
+# running --init itself, and the playbook running --init separately over a pty
+# and then starting the service. The first version only covered the first
+# route, so the normal playbook path still produced a root-owned store and the
+# daemon crash-looped on "permission denied" -- the very failure the handoff
+# was added to fix.
+hand_off_state() {
+  _rc=0
+  # THESE DIRECTORIES ARE EXPECTED, not optional: --apply creates both. Their
+  # absence here means the handoff is being run against a box that was never
+  # installed, and calling that a success is how a caller comes to start a
+  # daemon with no store to open.
+  for _p in "$STATE_DIR" "$KEY_DIR"; do
+    [ -d "$_p" ] || { warn "$_p does not exist; was the installer ever applied?"; _rc=1; }
+  done
+  [ "$_rc" -eq 0 ] || return 1
+
+  chown -R "$RUN_USER":"$RUN_USER" "$STATE_DIR" "$KEY_DIR" \
+    || { warn "cannot chown $STATE_DIR / $KEY_DIR to $RUN_USER"; _rc=1; }
+  # if/then, NOT `[ -e ] && chmod || true`: that shape returns the test's
+  # status and masks the chmod's, which is the trap this whole function was
+  # rewritten to remove.
+  if [ -e "$KEY_DIR/service.key" ]; then
+    chmod 0600 "$KEY_DIR/service.key" || { warn "cannot chmod the keyfile"; _rc=1; }
+  fi
+  chmod 0700 "$KEY_DIR" || { warn "cannot chmod 0700 $KEY_DIR"; _rc=1; }
+
+  # VERIFY WHAT THE DAEMON ACTUALLY NEEDS. The failure this exists to prevent
+  # is the daemon taking "permission denied" on the instance lease, which is a
+  # question about the OWNER of the store -- so that is what is asserted, on
+  # the directories and on each artifact the ceremony leaves behind.
+  for _p in "$STATE_DIR" "$KEY_DIR" "$STATE_DIR/meta.db" "$KEY_DIR/service.key"; do
+    [ -e "$_p" ] || continue
+    _u="$(stat -c '%U' "$_p" 2>/dev/null || echo '?')"
+    [ "$_u" = "$RUN_USER" ] || {
+      warn "$_p is owned by $_u, not $RUN_USER -- the daemon would fail to open it"
+      _rc=1; }
+  done
+
+  if [ "$_rc" -eq 0 ]; then
+    info "handed $STATE_DIR and $KEY_DIR to $RUN_USER"
+  else
+    # The old version printed this line unconditionally, so the output claimed
+    # a handoff that had not happened.
+    warn "the handoff did NOT complete; $STATE_DIR is not usable by $RUN_USER"
+  fi
+  return "$_rc"
 }
 
 emit_client_config() {
@@ -773,6 +947,39 @@ if [ "$MODE" = "print" ]; then
   exit 0
 fi
 
+if [ "$MODE" = "handoff" ]; then
+  [ "$(id -u)" -eq 0 ] || die "--hand-off needs root (it chowns the store and the keyfile)"
+  # THE UNIT IS THE SOURCE OF TRUTH FOR THE ACCOUNT, not --user.
+  #
+  # Handing the store to the wrong account produces exactly the failure this
+  # mode exists to prevent -- the daemon gets "permission denied" opening
+  # meta.db and crash-loops -- and --user can name a different account than the
+  # unit runs as by more than one route: the playbook passing --service-user,
+  # or the interview at install time being answered with a name of the
+  # operator's own. So when the unit exists, READ User= out of it. The value
+  # that decides who the daemon runs as is the value the handoff must use.
+  if [ -r "$UNIT" ]; then
+    _unit_user="$(sed -n 's/^User=[[:space:]]*//p' "$UNIT" | head -1)"
+    if [ -n "$_unit_user" ] && [ "$_unit_user" != "$RUN_USER" ]; then
+      warn "the unit runs as $_unit_user, not $RUN_USER -- handing the store to"
+      warn "$_unit_user, because that is the account that has to open it"
+      RUN_USER="$_unit_user"
+    fi
+  fi
+  id "$RUN_USER" >/dev/null 2>&1 || die "no such service account: $RUN_USER"
+  # BOTH helpers run before the verdict, so one failure does not hide the
+  # other's diagnosis -- an operator repairing this wants every reason at once.
+  _handoff_rc=0
+  hand_off_state || _handoff_rc=1
+  grant_tls_read || _handoff_rc=1
+  [ "$_handoff_rc" -eq 0 ] || die "the handoff FAILED (see the warnings above). The service
+       account cannot open its store, so DO NOT start the front door: it would
+       crash-loop on \"permission denied\" and bury the cause under the restarts."
+  say ""
+  say "Handed off. The service may now open its own store."
+  exit 0
+fi
+
 if [ "$MODE" = "printclient" ]; then
   if [ "$RPC_MODE" != "port" ]; then
     die "there is no client config in socket mode: the socket is openable only
@@ -917,10 +1124,10 @@ say ""
 say "  CHOOSING port IS A DELIBERATE WEAKENING. It replaces \"same OS user\""
 say "  with \"allowlist plus login\", and there is NO rate limiting on that"
 say "  surface -- no connection, pre-auth or auth-failure throttle exists in"
-say "  the RPC layer, and autodb'"'"'s own config calls TCP M9-gated pending TLS"
+say "  the RPC layer, and autodb's own config calls TCP M9-gated pending TLS"
 say "  and rate limits. Every local account could then reach it and attempt"
 say "  logins. Choose it when developer self-service is worth that, and"
-say "  keep the host'"'"'s own accounts trusted."
+say "  keep the host's own accounts trusted."
 ask_opt RPC_MODE "  rpc endpoint (socket|port)" "$RPC_MODE" socket port
 if [ "$RPC_MODE" = "port" ]; then
   ask_uint RPC_PORT "  rpc port" "$RPC_PORT"
@@ -1049,9 +1256,19 @@ install_postgres() {
 
 [ "$PG_LOCAL" = "yes" ] && install_postgres
 
-if [ -e "$CONFIG" ]; then
-  warn "$CONFIG exists; leaving it alone. Compare it against the numbers above."
+if [ -e "$CONFIG" ] && [ "$KEEP_CONFIG" = "yes" ]; then
+  warn "$CONFIG exists and --keep-config was given; leaving it alone."
 else
+  if [ -e "$CONFIG" ]; then
+    # A RE-RUN MUST REWRITE IT. Leaving an existing config alone meant every
+    # flag on a second --apply silently did nothing: --rpc-port, --port,
+    # --dns-name and the sizing were all computed, printed in the summary, and
+    # then discarded. An operator re-running to CHANGE something got the old
+    # config and no indication why.
+    cp -p "$CONFIG" "$CONFIG.bak" 2>/dev/null || true
+    warn "$CONFIG exists; REPLACING it (previous kept as $CONFIG.bak)."
+    warn "  pass --keep-config to preserve it instead."
+  fi
   say "writing $CONFIG"
   emit_config > "$CONFIG"
   chown root:"$RUN_USER" "$CONFIG"
@@ -1074,8 +1291,8 @@ fi
 # never touches it. It talks to the daemon.
 if [ "$RPC_MODE" = "port" ]; then
   CLIENT_CONFIG="$CONFIG_DIR/client.toml"
-  if [ -e "$CLIENT_CONFIG" ]; then
-    warn "$CLIENT_CONFIG exists; leaving it alone"
+  if [ -e "$CLIENT_CONFIG" ] && [ "$KEEP_CONFIG" = "yes" ]; then
+    warn "$CLIENT_CONFIG exists and --keep-config was given; leaving it alone"
   else
     say "writing $CLIENT_CONFIG"
     emit_client_config > "$CLIENT_CONFIG"
@@ -1141,17 +1358,36 @@ if [ "$GEN_CERT" != "no" ] && [ -z "$TLS_CERT" ] && [ -n "$TLS_HOSTS" ]; then
   if "$PREFIX/autodb" --config "$CONFIG" --create-cert; then
     TLS_CERT="$CONFIG_DIR/tls/cert.pem"
     TLS_KEY="$CONFIG_DIR/tls/key.pem"
+    TLS_CA="$CONFIG_DIR/tls/ca.pem"
     if [ -r "$TLS_CERT" ] && [ -r "$TLS_KEY" ]; then
       # Re-emit rather than sed the file: emit_config is the ONE place that
       # knows this config's shape, and patching it from outside is how the
       # generated file and the generator drift.
       emit_config > "$CONFIG.new" && mv "$CONFIG.new" "$CONFIG"
       chown root:"$RUN_USER" "$CONFIG"; chmod 0640 "$CONFIG"
-      # The private key is read by the service account, not the world.
-      chown root:"$RUN_USER" "$TLS_KEY" 2>/dev/null || true
-      chmod 0640 "$TLS_KEY" 2>/dev/null || true
-      info "front door ENABLED in $CONFIG"
-      info "give clients $CONFIG_DIR/tls/ca.pem and sslmode=verify-full"
+      # THE WHOLE DIRECTORY, not just the key. --create-cert runs as root, so
+      # everything it writes is root-owned and tls/ is 0700 -- and the daemon
+      # runs as the service account, which then cannot read cert.pem either.
+      # Fixing only the key left the next failure one line further on, which
+      # is exactly how it played out on a real host.
+      # A FAILURE HERE DISABLES THE FRONT DOOR rather than killing the run.
+      #
+      # The helpers now return non-zero, and this is the middle of --apply: the
+      # config and the unit are already written, so aborting would leave a
+      # half-configured box -- the exact outcome an earlier defect in this
+      # script produced. Enabling a front door whose key the daemon cannot read
+      # is worse than leaving it disabled, so the failure demotes the outcome
+      # and says what to fix.
+      if grant_tls_read; then
+        info "front door ENABLED in $CONFIG"
+        info "give clients $CONFIG_DIR/tls/ca.pem and sslmode=verify-full"
+      else
+        warn "the TLS material could not be made readable by $RUN_USER, so the"
+        warn "front door is being left DISABLED: enabling it would only produce a"
+        warn "daemon that cannot read its own key. Fix the warnings above, then:"
+        warn "  $0 --hand-off --config $CONFIG --user $RUN_USER"
+        TLS_CERT=""; TLS_KEY=""
+      fi
     else
       warn "--create-cert reported success but $TLS_CERT is not readable;"
       warn "leaving the front door disabled."
@@ -1182,7 +1418,28 @@ if [ "$RUN_INIT" != "no" ]; then
     step "First-run ceremony"
     if "$PREFIX/autodb" --config "$CONFIG" --init; then
       INIT_DONE="yes"
+      # THE CEREMONY RUNS AS ROOT, so meta.db, meta.db.lease-info and the
+      # keyfile are root-owned when it finishes -- and the daemon runs as the
+      # service account. Without this it crash-loops on "opening the meta
+      # store to lease it: permission denied", which reads like a corrupt
+      # store rather than an ownership mistake.
+      # Same reasoning as the TLS handoff above: report it, do not abort a run
+      # that has already written the config and the unit. The caller decides
+      # whether to start the service, and this is the sentence it decides on.
+      hand_off_state || {
+        # NOT A WARNING. This clears startability, because the start below is in
+        # this same script and a warning does not reach it.
+        STATE_OK="no"
+        warn "the store could not be handed to $RUN_USER, so the front door will"
+        warn "NOT be started: it would crash-loop on \"permission denied\" opening"
+        warn "its store. After fixing the warnings above:"
+        warn "  $0 --hand-off --config $CONFIG --user $RUN_USER"
+        warn "  systemctl enable --now autodb-frontdoor"
+      }
     else
+      # An unfinished ceremony means no administrator and no enrolled keyslot,
+      # so starting would serve a store nothing can unlock.
+      STATE_OK="no"
       warn "--init did not complete. The config and unit are in place; run"
       warn "  $PREFIX/autodb --config $CONFIG --init"
       warn "again before starting the service, or a restart will leave the"
@@ -1192,10 +1449,15 @@ if [ "$RUN_INIT" != "no" ]; then
 fi
 
 say ""
-if [ "$START_NOW" = "yes" ] && [ -n "$TLS_CERT" ]; then
+if [ "$START_NOW" = "yes" ] && [ -n "$TLS_CERT" ] && [ "$STATE_OK" = "yes" ]; then
   say "starting autodb-frontdoor"
   systemctl enable --now autodb-frontdoor
   systemctl --no-pager --lines=0 status autodb-frontdoor || true
+  STARTED="yes"
+elif [ "$START_NOW" = "yes" ] && [ "$STATE_OK" != "yes" ]; then
+  warn "not starting: the store is not usable by $RUN_USER (see the warnings"
+  warn "above). Starting would only crash-loop on \"permission denied\" and bury"
+  warn "the cause under systemd's restarts. Repair, then start it by hand."
 elif [ "$START_NOW" = "yes" ]; then
   warn "not starting: TLS is not configured, and a front door without it would"
   warn "either refuse to bind or serve every token in cleartext. Add the tls_*"
@@ -1217,7 +1479,9 @@ case "$IP_ALLOWLIST" in
     info "   remote can log in yet."
     _n=$(( _n + 1 )) ;;
 esac
-if [ "$START_NOW" != "yes" ]; then
+# STARTED, not START_NOW: asking for a start that was then withheld must still
+# leave the operator with the command to run.
+if [ "$STARTED" != "yes" ]; then
   info "$_n. Start it:  systemctl enable --now autodb-frontdoor"
   _n=$(( _n + 1 ))
 fi

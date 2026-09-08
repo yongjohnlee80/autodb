@@ -49,9 +49,15 @@ func quote(s string) string { return "\"" + s + "\"" }
 // scripted drives the ceremony without a terminal.
 func scripted(name string, secrets ...string) initOpts {
 	i := 0
+	asked := 0
 	return initOpts{
+		// The FIRST prompt is the administrator name; every later one takes the
+		// default. Without that the account-creation loop would be answered
+		// with the same name forever, because these cells answer every prompt
+		// identically and the ceremony now asks more than one question.
 		prompt: func(label, def string) (string, error) {
-			if name == "" {
+			asked++
+			if asked > 1 || name == "" {
 				return def, nil
 			}
 			return name, nil
@@ -127,47 +133,87 @@ func TestInit_NoKeyfileConfiguredStillCreatesTheAdmin(t *testing.T) {
 	}
 }
 
-// A MISTYPED PASSPHRASE MUST CREATE NOTHING.
+// A MISTYPED CONFIRMATION MUST BE RE-ASKED, NOT FATAL.
 //
-// This one is unrecoverable if it slips through: the passphrase wraps a master
-// key that exists nowhere else, so an install bootstrapped with a typo is
-// permanently unopenable rather than merely locked out. The confirmation is the
-// guard, and this is the cell that proves it guards.
-func TestInit_RefusesAMismatchedPassphraseWithoutCreatingAnything(t *testing.T) {
+// The first version aborted, and that was not proportionate: --init also
+// enrols the keyslot, and the playbook only starts the service when --init
+// succeeds -- so one typo left no administrator, no unattended unlock and a
+// stopped daemon, none of it named in the output. Johno hit exactly that on a
+// real host.
+//
+// So a wrong pair is followed by a re-ask, and a correct pair after it
+// SUCCEEDS. The secrets here are: mismatch, then a matching pair.
+func TestInit_ReAsksAfterAMismatchedPassphrase(t *testing.T) {
 	keyfile := filepath.Join(t.TempDir(), "service.key")
 	cfgPath := writeInitConfig(t, keyfile)
 
 	var out strings.Builder
 	err := runInit(context.Background(), &out, cfgPath,
-		scripted("root", "correct horse battery", "correct horse batteries"))
-	if err == nil {
-		t.Fatal("a mismatched confirmation was accepted; the store would be wrapped by a passphrase nobody knows")
+		scripted("root",
+			"correct horse battery", "correct horse batteries", // mismatch
+			"correct horse battery", "correct horse battery")) // then right
+	if err != nil {
+		t.Fatalf("a corrected passphrase was still refused: %v\n%s", err, out.String())
 	}
-	if !strings.Contains(err.Error(), "differ") {
-		t.Errorf("error does not name the cause: %v", err)
+	if !strings.Contains(out.String(), "the two entries differ") {
+		t.Errorf("the mismatch was not reported to the operator:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "created administrator") {
+		t.Errorf("the administrator was not created after the retry:\n%s", out.String())
+	}
+	// The keyslot must be enrolled too -- the point of not aborting is that
+	// the whole ceremony completes.
+	if _, serr := os.Stat(keyfile); serr != nil {
+		t.Errorf("the keyslot was not enrolled after a retry: %v", serr)
+	}
+}
+
+// A SHORT ENTRY IS ALSO RE-ASKED.
+func TestInit_ReAsksAfterAShortPassphrase(t *testing.T) {
+	cfgPath := writeInitConfig(t, "")
+	var out strings.Builder
+	err := runInit(context.Background(), &out, cfgPath,
+		scripted("root",
+			"short", "short", // both too short
+			"correct horse battery", "correct horse battery"))
+	if err != nil {
+		t.Fatalf("a corrected passphrase was still refused: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "too short") {
+		t.Errorf("the length problem was not reported:\n%s", out.String())
+	}
+}
+
+// AND THE RETRY IS BOUNDED, so a caller that can never satisfy it still ends.
+//
+// Three mismatched pairs exhaust the attempts. Nothing may be created, and the
+// store must still be bootstrappable afterwards -- a refusal that half-created
+// an administrator would be worse than the abort this replaced.
+func TestInit_GivesUpAfterRepeatedMismatches(t *testing.T) {
+	keyfile := filepath.Join(t.TempDir(), "service.key")
+	cfgPath := writeInitConfig(t, keyfile)
+
+	var out strings.Builder
+	err := runInit(context.Background(), &out, cfgPath,
+		scripted("root",
+			"correct horse battery", "wrong one",
+			"correct horse battery", "wrong two",
+			"correct horse battery", "wrong three"))
+	if err == nil {
+		t.Fatal("three mismatched pairs were accepted; the retry is not bounded")
+	}
+	if !strings.Contains(err.Error(), "attempts") {
+		t.Errorf("the failure does not say the attempts ran out: %v", err)
 	}
 	if _, serr := os.Stat(keyfile); serr == nil {
 		t.Error("a keyfile was written despite the refusal")
 	}
 
-	// And the store must still be bootstrappable afterwards -- a refusal that
-	// half-created a user would leave the install unrecoverable by a retry.
+	// Still bootstrappable, so the refusal was clean.
 	var out2 strings.Builder
 	if err := runInit(context.Background(), &out2, cfgPath,
 		scripted("root", "correct horse battery", "correct horse battery")); err != nil {
-		t.Fatalf("the retry after a refusal failed, so the refusal was not clean: %v", err)
-	}
-}
-
-func TestInit_RefusesAShortPassphrase(t *testing.T) {
-	cfgPath := writeInitConfig(t, "")
-	var out strings.Builder
-	err := runInit(context.Background(), &out, cfgPath, scripted("root", "short", "short"))
-	if err == nil {
-		t.Fatal("a passphrase under the floor was accepted")
-	}
-	if !strings.Contains(err.Error(), "at least") {
-		t.Errorf("error does not state the requirement: %v", err)
+		t.Fatalf("the retry after an exhausted ceremony failed: %v", err)
 	}
 }
 

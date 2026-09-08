@@ -1,0 +1,5 @@
+#!/bin/sh
+# Uploads succeed and are recorded; see ./ssh for why these two stubs exist.
+set -eu
+printf 'scp %s\n' "$*" >> "${FAKE_LOG:?FAKE_LOG must be set}"
+exit 0

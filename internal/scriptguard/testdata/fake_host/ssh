@@ -1,0 +1,52 @@
+#!/bin/sh
+# A FAKE HOST, so the start gate is assertable without a VM.
+#
+# Every remote action in provision_vm.sh goes through the `ssh` and `scp`
+# binaries, so putting these two stubs first on PATH turns the playbook into a
+# pure function of its own logic: each remote command is RECORDED, and one of
+# them can be made to FAIL. That is the whole seam -- no live host, no sudo, no
+# package manager.
+#
+#   FAKE_LOG          file every remote command is appended to
+#   FAKE_HANDOFF_RC   exit status for the --hand-off invocation (default 0)
+set -eu
+
+# The remote command is the last argument on both call shapes the playbook
+# uses: `ssh $OPTS target cmd` and `ssh -t $OPTS target cmd`.
+cmd=""
+for a in "$@"; do cmd="$a"; done
+
+printf '%s\n' "$cmd" >> "${FAKE_LOG:?FAKE_LOG must be set}"
+
+# The probe is the one command whose OUTPUT the playbook parses. Everything
+# downstream is a decision made from these values, so they are chosen to be a
+# host that passes every gate: root, systemd, a package manager, and enough RAM
+# that the sizing preflight does not refuse the box.
+case "$cmd" in
+  *os-release*)
+    cat <<'PROBE'
+os=debian
+osver=12
+pretty=Debian GNU/Linux 12 (bookworm)
+cpu=2
+mem=2048
+swap=0
+diskfree=20480
+arch=x86_64
+root=0
+pkg=apt-get
+sudo=yes
+systemd=yes
+mise=absent
+autodb=absent
+PROBE
+    exit 0
+    ;;
+  *--hand-off*)
+    # THE INJECTION POINT. A real handoff fails for ordinary reasons: the
+    # service account does not exist yet, chown is refused, the uploaded
+    # installer is gone.
+    exit "${FAKE_HANDOFF_RC:-0}"
+    ;;
+esac
+exit 0

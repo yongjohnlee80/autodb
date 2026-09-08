@@ -265,7 +265,8 @@ CONFIG_DIR="$(safe_target "$CONFIG_DIR")" || die "config directory is not a safe
 # Printed before the inventory so a caller can assert on the target set without
 # parsing prose. Every line is a path this script would unlink or rmdir.
 if [ "$MODE" = "targets" ]; then
-  [ -n "$STORE_FILE" ] && printf '%s\n%s-wal\n%s-shm\n' "$STORE_FILE" "$STORE_FILE" "$STORE_FILE"
+  [ -n "$STORE_FILE" ] && printf '%s\n%s-wal\n%s-shm\n%s.lease-info\n' \
+    "$STORE_FILE" "$STORE_FILE" "$STORE_FILE" "$STORE_FILE"
   printf '%s\n' "$STATE_DIR/autodb.sock"
   [ -n "$KEYFILE" ] && printf '%s\n' "$KEYFILE"
   printf '%s\n' "$CONFIG" "$CONFIG_DIR/client.toml"
@@ -540,6 +541,12 @@ rm_file() {
 # The store and the two files that are part of it.
 if [ -n "$STORE_FILE" ]; then
   rm_file "$STORE_FILE"; rm_file "$STORE_FILE-wal"; rm_file "$STORE_FILE-shm"
+  # THE INSTANCE LEASE sidecar, which is dot-separated rather than dash-
+  # separated like the other two -- so listing -wal and -shm did not cover it.
+  # A real uninstall left it behind and the state directory therefore survived,
+  # correctly refused by the rmdir guard as "holds something this installer did
+  # not create". The guard was right; the target list was incomplete.
+  rm_file "$STORE_FILE.lease-info"
 fi
 # The socket the daemon binds, which lives beside the store by default.
 rm_file "$STATE_DIR/autodb.sock"

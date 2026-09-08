@@ -672,7 +672,59 @@ func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
 // DefaultPath returns the default config file location:
 // $XDG_CONFIG_HOME/autodb/config.toml.
+// SystemPath is the system-wide config an installed service uses.
+//
+// It takes precedence over the per-user path when it EXISTS, and that ordering
+// is the point. On a host where autodb runs as a service, a frontend started
+// without --config previously resolved to the caller's own config, found
+// nothing listening on their own socket, and STARTED A PRIVATE DAEMON against
+// an empty per-user store -- which then asked them to create a first
+// administrator, on a machine that already had one. Two operators doing that
+// get two stores and neither is the service's.
+//
+// Only when it exists, because a laptop has no /etc/autodb and must keep its
+// per-user config.
+const SystemPath = "/etc/autodb/config.toml"
+
+// SystemClientPath is the world-readable client config an installer writes
+// beside the server one. It carries the daemon's address and nothing else.
+const SystemClientPath = "/etc/autodb/client.toml"
+
+// readable reports whether a path exists AND this process can open it.
+//
+// Existence is not enough here: the server config is deliberately 0640, so a
+// developer can see that it is there and still not read it. Choosing it on
+// existence alone would turn a working fallback into a permission error.
+func readable(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
+}
+
+// systemCandidates is the ordered system-wide search path, as a variable
+// rather than two inlined constants so a cell can point it at a temporary
+// directory and assert the ORDER and the readability rule. The order is the
+// behaviour here, and it decides where every unqualified invocation reads its
+// configuration -- not something to leave uncovered.
+var systemCandidates = []string{SystemPath, SystemClientPath}
+
 func DefaultPath() (string, error) {
+	// The service's own config first, for whoever can read it -- root, and the
+	// service account. It is the complete one: it names the meta store, which
+	// the client config deliberately does not, so anything that touches the
+	// store (--init, --serve, --migrate-to-postgres) must land here.
+	//
+	// Then the client config, which is 0644 precisely so an ordinary developer
+	// can reach the daemon without being able to read a config that may name a
+	// PostgreSQL DSN with a password in it.
+	for _, c := range systemCandidates {
+		if readable(c) {
+			return c, nil
+		}
+	}
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("config: resolving user config dir: %w", err)
