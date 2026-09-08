@@ -440,6 +440,21 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
   means libpq's `prefer`, which silently falls back to plaintext. The one
   exception is a genuinely local channel — a unix socket or same-host loopback —
   via the deliberately named `allow_insecure_dsn`.
+- **Developers mint their own PATs through the TUI, and that needs the RPC
+  endpoint on a port.** autodb's shipped default for the frontend endpoint is a
+  unix socket at mode `0600`, re-applied on every bind — the socket file *is*
+  the access control, and a socket peer is exempt from the IP allowlist because
+  reaching it already proves same-user access. That is right for a laptop and
+  wrong for a server: the service runs as its own account, so nobody else on
+  the box can open it, and `auth.token_create` authorises **any authenticated
+  user** to mint a token bound to a connection they are granted. On a socket,
+  every credential request becomes a root operation. `install_frontdoor.sh`
+  therefore defaults this to a **loopback port** (7419), which moves the
+  boundary to `ip_allowlist` plus an autodb login. It also writes a
+  world-readable `client.toml` carrying only the address, so a developer can
+  run `autodb --ui --config /etc/autodb/client.toml` without being able to read
+  the server config — which may name a PostgreSQL DSN with a password in it.
+  `--rpc-socket` keeps the old behaviour.
 - **Run `autodb --init` once** to create the first administrator and cut the
   unattended-unlock slot. It is the only surface that can do the second part:
   enrolling the slot is admin-only *and* only possible while the store is

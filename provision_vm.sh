@@ -46,6 +46,8 @@ META_DSN=""
 BIND="0.0.0.0:5432"
 DNS_NAME=""
 FD_PORT=""
+RPC_PORT=""
+RPC_SOCKET="no"
 PREFIX="/usr/local/bin"
 ASSUME_YES="no"
 
@@ -95,6 +97,11 @@ OPTIONS:
                        install_frontdoor.sh; omitted means the certificate is
                        issued for an IP address instead.
   --port <n>           Front-door port. Passed through.
+  --rpc-port <n>       Frontend RPC endpoint port (default 7419 downstream).
+                       This is what lets developers other than root run the
+                       TUI and mint their own PATs.
+  --rpc-socket         Use a unix socket for the RPC endpoint instead, making
+                       the TUI reachable only by the service account and root.
   --prefix <dir>       Where to install the binary. Default: /usr/local/bin
   --yes                Do not prompt before provisioning.
   -h, --help           Show this help.
@@ -122,6 +129,8 @@ while [ $# -gt 0 ]; do
     --bind) BIND="${2:?--bind needs an address}"; shift ;;
     --dns-name) DNS_NAME="${2:?--dns-name needs a name}"; shift ;;
     --port) FD_PORT="${2:?--port needs a number}"; shift ;;
+    --rpc-port) RPC_PORT="${2:?--rpc-port needs a number}"; shift ;;
+    --rpc-socket) RPC_SOCKET="yes" ;;
     --prefix) PREFIX="${2:?--prefix needs a directory}"; shift ;;
     --yes) ASSUME_YES="yes" ;;
     -h|--help) usage; exit 0 ;;
@@ -406,6 +415,8 @@ FD_APPLY="--apply --non-interactive --bind $BIND --prefix $PREFIX --meta $META"
 [ -n "$META_DSN" ] && FD_APPLY="$FD_APPLY --meta-dsn $META_DSN"
 [ -n "$DNS_NAME" ] && FD_APPLY="$FD_APPLY --dns-name $DNS_NAME"
 [ -n "$FD_PORT" ]  && FD_APPLY="$FD_APPLY --port $FD_PORT"
+[ -n "$RPC_PORT" ] && FD_APPLY="$FD_APPLY --rpc-port $RPC_PORT"
+[ "$RPC_SOCKET" = "yes" ] && FD_APPLY="$FD_APPLY --rpc-socket"
 # --init prompts for a passphrase on a terminal, and the remote side of this
 # playbook has none. So the ceremony is left for the operator rather than
 # half-run: install_frontdoor.sh reports the exact command at the end.
