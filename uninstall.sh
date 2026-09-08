@@ -268,7 +268,7 @@ if [ "$MODE" = "targets" ]; then
   [ -n "$STORE_FILE" ] && printf '%s\n%s-wal\n%s-shm\n' "$STORE_FILE" "$STORE_FILE" "$STORE_FILE"
   printf '%s\n' "$STATE_DIR/autodb.sock"
   [ -n "$KEYFILE" ] && printf '%s\n' "$KEYFILE"
-  printf '%s\n' "$CONFIG"
+  printf '%s\n' "$CONFIG" "$CONFIG_DIR/client.toml"
   for f in ca.pem ca.key cert.pem key.pem intermediate.pem intermediate.key; do
     printf '%s\n' "$CONFIG_DIR/tls/$f"
   done
@@ -545,6 +545,11 @@ fi
 rm_file "$STATE_DIR/autodb.sock"
 rm_file "$KEYFILE"
 rm_file "$CONFIG"
+# The CLIENT config, which install_frontdoor.sh writes beside the server one in
+# port mode. Missing it left /etc/autodb behind with a stale endpoint in it --
+# and the next install then found client.toml present and kept it, so a
+# reinstall on a different port would have handed developers the old address.
+rm_file "$CONFIG_DIR/client.toml"
 # TLS material is reissuable and ours by construction.
 if [ -d "$CONFIG_DIR/tls" ]; then
   for f in ca.pem ca.key cert.pem key.pem intermediate.pem intermediate.key; do
