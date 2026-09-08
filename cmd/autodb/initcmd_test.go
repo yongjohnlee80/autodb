@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -323,9 +324,10 @@ func TestInit_RerunRefusesWhenTheKeyfileIsCorrupt(t *testing.T) {
 		scripted("root", "correct horse battery", "correct horse battery")); err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	// Right size, right mode, wrong bytes: the shape that passes a existence
+	// Right size, right mode, wrong bytes: the shape that passes an existence
 	// check and fails the only thing that matters.
-	if err := os.WriteFile(keyfile, []byte(strings.Repeat("x", 32)), 0o600); err != nil {
+	corrupt := []byte(strings.Repeat("x", 32))
+	if err := os.WriteFile(keyfile, corrupt, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -336,5 +338,18 @@ func TestInit_RerunRefusesWhenTheKeyfileIsCorrupt(t *testing.T) {
 	}
 	if strings.Contains(second.String(), "already enabled") {
 		t.Errorf("output still claims the unlock is enabled:\n%s", second.String())
+	}
+	// THE BYTES MUST BE UNTOUCHED. Asked for on review: without comparing them
+	// this cell shows only that the rerun failed, not that it left the keyfile
+	// alone -- and "refuses but silently rewrites the file" is a distinct and
+	// worse outcome than either. The missing-file cell catches a replacement
+	// that CREATES; this catches one that OVERWRITES.
+	after, rerr := os.ReadFile(keyfile)
+	if rerr != nil {
+		t.Fatalf("the keyfile was removed by a refused rerun: %v", rerr)
+	}
+	if !bytes.Equal(after, corrupt) {
+		t.Errorf("the keyfile was rewritten by a refused rerun (%d bytes now, %d before): "+
+			"whichever half was still good has been stranded", len(after), len(corrupt))
 	}
 }

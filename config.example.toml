@@ -138,7 +138,11 @@ ip_allowlist = ["127.0.0.1/32", "::1/128"]
 # Point this at a file and autodb unwraps the master key from it at start, with
 # no passphrase. Cut the slot ONCE from a running, unlocked daemon:
 #
-#   autodb --ui   ->  SPC K  ->  e     # admin, while logged in
+#   autodb --init                      # creates the first admin AND cuts the slot
+#
+# or, on an install that already has users, from the TUI as an administrator:
+#
+#   autodb --ui   ->  SPC K  ->  e
 #
 # There is no `keyslot` subcommand: enrolment is admin-only and possible only
 # while the store is UNLOCKED, because wrapping the master key requires

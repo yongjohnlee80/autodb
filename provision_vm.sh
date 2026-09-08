@@ -44,6 +44,8 @@ BUILD="vm"           # vm | prebuilt
 META="sqlite"
 META_DSN=""
 BIND="0.0.0.0:5432"
+DNS_NAME=""
+FD_PORT=""
 PREFIX="/usr/local/bin"
 ASSUME_YES="no"
 
@@ -89,6 +91,10 @@ OPTIONS:
   --meta <backend>     sqlite (default) | pg-local | pg-remote
   --meta-dsn <dsn>     DSN, required with --meta pg-remote.
   --bind <addr>        Front-door bind address. Default: 0.0.0.0:5432
+  --dns-name <name>    DNS name for the TLS certificate. Passed through to
+                       install_frontdoor.sh; omitted means the certificate is
+                       issued for an IP address instead.
+  --port <n>           Front-door port. Passed through.
   --prefix <dir>       Where to install the binary. Default: /usr/local/bin
   --yes                Do not prompt before provisioning.
   -h, --help           Show this help.
@@ -114,6 +120,8 @@ while [ $# -gt 0 ]; do
     --meta) META="${2:?--meta needs a backend}"; shift ;;
     --meta-dsn) META_DSN="${2:?--meta-dsn needs a DSN}"; shift ;;
     --bind) BIND="${2:?--bind needs an address}"; shift ;;
+    --dns-name) DNS_NAME="${2:?--dns-name needs a name}"; shift ;;
+    --port) FD_PORT="${2:?--port needs a number}"; shift ;;
     --prefix) PREFIX="${2:?--prefix needs a directory}"; shift ;;
     --yes) ASSUME_YES="yes" ;;
     -h|--help) usage; exit 0 ;;
@@ -396,6 +404,12 @@ rsh "$REMOTE_TMP/remote.sh '$SUDO' '$R_PKG' '$SWAP_MIB' '$GO_VERSION' '$AUTODB_R
 step "Configuring the front door"
 FD_APPLY="--apply --non-interactive --bind $BIND --prefix $PREFIX --meta $META"
 [ -n "$META_DSN" ] && FD_APPLY="$FD_APPLY --meta-dsn $META_DSN"
+[ -n "$DNS_NAME" ] && FD_APPLY="$FD_APPLY --dns-name $DNS_NAME"
+[ -n "$FD_PORT" ]  && FD_APPLY="$FD_APPLY --port $FD_PORT"
+# --init prompts for a passphrase on a terminal, and the remote side of this
+# playbook has none. So the ceremony is left for the operator rather than
+# half-run: install_frontdoor.sh reports the exact command at the end.
+FD_APPLY="$FD_APPLY --no-init"
 rsh "$SUDO $REMOTE_TMP/install_frontdoor.sh $FD_APPLY"
 
 step "Result"

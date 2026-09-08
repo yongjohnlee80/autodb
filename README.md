@@ -359,6 +359,19 @@ sh install_frontdoor.sh --print-config              # the config it would write,
 sudo sh install_frontdoor.sh --apply                # prompts for each setting on a terminal
 ```
 
+`--apply` walks the whole bring-up rather than stopping at a config file. It
+asks for a **DNS name** — leave it empty and the certificate is issued for an
+**IP address** instead — then the **port**, because together those are what
+somebody types into a client. With an address to issue for it runs
+`autodb --create-cert`, writes the certificate paths in, and enables the
+surface. Then it runs [`autodb --init`](#running-the-front-door-as-a-service)
+for the first administrator and the unattended-unlock slot, and starts the
+service if you asked it to.
+
+That leaves one file to hand out: `ca.pem`, plus `sslmode=verify-full` in the
+client's DSN. For an internet-facing deployment prefer a real ACME certificate
+and pass `--no-cert`.
+
 `--check` is the default and never writes anything. `--apply` interviews you,
 pre-filling every answer with the computed default, so pressing return through
 the whole thing gives exactly the non-interactive result.
@@ -455,6 +468,30 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
   TLS handshakes land on that same core.
 - **Small VPSes usually ship with no swap.** Add some regardless; the daemon's
   budgets assume headroom the kernel does not otherwise have.
+
+### Removing it
+
+[`uninstall.sh`](uninstall.sh) removes the service, its config, its state and
+its service account, and `--remove-swap` / `--remove-toolchain` also undo what
+`provision_vm.sh` added underneath.
+
+```sh
+sh uninstall.sh --check                             # list what would go; changes nothing
+sudo sh uninstall.sh --apply
+sudo sh uninstall.sh --apply --remove-swap --remove-toolchain
+```
+
+**It archives the meta store first, and the archive deliberately excludes the
+service keyfile.** That store holds the encrypted connection secrets, and the
+master key that opens them lives only in its own keyslot envelope — there is no
+other copy, so deleting it destroys those secrets permanently. But putting the
+store *and* the keyfile in one tarball would be both halves of the envelope in a
+single file, which turns a backup into a credential. The store is archived at
+`0600`, the keyfile is left where it is, and the archive carries a `README`
+saying so. `--no-backup` skips the archive entirely.
+
+A PostgreSQL meta store is **not** touched: dropping a database is not an
+uninstaller's decision to make.
 
 ### Provisioning a fresh VM
 
@@ -754,6 +791,7 @@ deployments (see [docs/ops/postgres-meta-store.md](docs/ops/postgres-meta-store.
 | `install.sh`          | Installer: verified release download, or a Go build fallback                   |
 | `install_frontdoor.sh` | Front-door service setup: memory sizing preflight, config, systemd unit       |
 | `provision_vm.sh`     | Provisioning playbook: takes a fresh VM to a built, configured front door      |
+| `uninstall.sh`        | Removes the service, its config and state; archives the store first            |
 | `docs/media/`         | README demo recordings                                                         |
 
 ## Status & roadmap

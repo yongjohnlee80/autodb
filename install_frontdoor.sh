@@ -96,6 +96,11 @@ PG_ROLE=""           # defaults to RUN_USER, so peer auth works with no password
 TLS_CERT=""
 TLS_KEY=""
 TLS_HOSTS=""
+TLS_DNS_NAME=""
+GEN_CERT="auto"       # auto | yes | no -- run `autodb --create-cert`
+RUN_INIT="auto"       # auto | yes | no -- run `autodb --init`
+BIND_ADDR="0.0.0.0"
+FD_PORT="5432"
 IP_ALLOWLIST='["127.0.0.1/32", "::1/128"]'
 START_NOW="no"
 CAP_OVERRIDE=""
@@ -157,6 +162,11 @@ OPTIONS:
                        the single-core argon2 warning silently never fires
                        for the small VM you were sizing for.
   --bind <addr>        Front-door listen address. Default: 0.0.0.0:5432
+  --dns-name <name>    DNS name for the TLS certificate. Omitted means no
+                       name, and the certificate is issued for an IP address.
+  --port <n>           Front-door port. Default: 5432
+  --no-cert            Do not issue TLS material. Leaves the door disabled.
+  --no-init            Skip the first-run ceremony (autodb --init).
   --user <name>        Service account. Default: autodb
   --prefix <dir>       Where the autodb binary lives. Default: /usr/local/bin
   --config <path>      Config file to write. Default: /etc/autodb/config.toml
@@ -183,7 +193,15 @@ while [ $# -gt 0 ]; do
     --non-interactive) INTERACTIVE="no" ;;
     --assume-ram) ASSUME_RAM="${2:?--assume-ram needs a number of MiB}"; shift ;;
     --assume-cpus) ASSUME_CPUS="${2:?--assume-cpus needs a number}"; shift ;;
-    --bind)   BIND="${2:?--bind needs an address}"; shift ;;
+    --bind)   BIND="${2:?--bind needs an address}"
+              # Split so --port and the port prompt stay ONE setting rather
+              # than two that can disagree.
+              case "$BIND" in *:*) BIND_ADDR="${BIND%:*}"; FD_PORT="${BIND##*:}" ;; esac
+              shift ;;
+    --dns-name) TLS_DNS_NAME="${2:?--dns-name needs a name}"; shift ;;
+    --port)   FD_PORT="${2:?--port needs a number}"; BIND="${BIND_ADDR}:${FD_PORT}"; shift ;;
+    --no-cert) GEN_CERT="no" ;;
+    --no-init) RUN_INIT="no" ;;
     --user)   RUN_USER="${2:?--user needs a name}"; shift ;;
     --prefix) PREFIX="${2:?--prefix needs a directory}"; shift ;;
     --config) CONFIG="${2:?--config needs a path}"; CONFIG_DIR="$(dirname "$CONFIG")"; shift ;;
@@ -220,7 +238,8 @@ apply_backend() {
 }
 
 is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
-for pair in "assume-ram:$ASSUME_RAM" "assume-cpus:$ASSUME_CPUS" "sessions:$CAP_OVERRIDE" "lane:$LANE_OVERRIDE"; do
+for pair in "assume-ram:$ASSUME_RAM" "assume-cpus:$ASSUME_CPUS" "sessions:$CAP_OVERRIDE" \
+            "lane:$LANE_OVERRIDE" "port:$FD_PORT"; do
   _n="${pair%%:*}"; _v="${pair#*:}"
   [ -z "$_v" ] && continue
   is_uint "$_v" || die "--$_n needs a non-negative integer, got: $_v"
@@ -322,6 +341,17 @@ PKG=""
 for _c in apt-get dnf yum pacman apk zypper; do
   if command -v "$_c" >/dev/null 2>&1; then PKG="$_c"; break; fi
 done
+
+# detect_public_ip offers a default for the certificate's IP SAN.
+#
+# The route lookup is what the host uses to reach the internet, which is the
+# closest thing to "the address clients dial" that can be answered locally. It
+# is still only a GUESS -- see the prompt -- so it is offered, never assumed,
+# and an empty answer is not fatal because the operator may know better.
+detect_public_ip() {
+  ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' && return 0
+  hostname -I 2>/dev/null | awk '{print $1}'
+}
 
 pg_socket_dir() {
   for _d in /var/run/postgresql /run/postgresql; do
@@ -445,12 +475,16 @@ ip_allowlist = $IP_ALLOWLIST
 # front-door client gets 57P03 "the server is not accepting connections"
 # until a human logs in by hand.
 #
-# Uncomment this, then cut the slot ONCE from a running, unlocked daemon:
-#   autodb --ui  ->  SPC K  ->  e
-# There is no `keyslot` subcommand: enrolment is admin-only and only possible
-# while unlocked, so it happens after a human has logged in and an installer
-# cannot do it for you. The file must be 0600; autodb refuses a wider one.
-# service_keyfile = "$KEY_DIR/service.key"
+# SET, not commented, because the slot cannot be cut without it: enrolment
+# refuses outright when no path is configured. \`autodb --init\` cuts the slot
+# against this path; until it has, this key names a file that does not exist
+# yet, which is harmless -- the daemon reports the absence loudly and a
+# passphrase login still works.
+#
+# The file is 0600 and lives in its OWN directory, not beside the meta store:
+# the store and the key that opens it are two halves of one envelope, and one
+# careless tar of a shared directory captures both.
+service_keyfile = "$KEY_DIR/service.key"
 
 [exec]
 # Sized for this host. The general lane's floor is this number x ${WATERMARK_MIB} MiB, so
@@ -469,10 +503,16 @@ bind = "$BIND"
 # out-of-memory killer does.
 general_lane_bytes = $LANE_BYTES
 TOML
-  if [ -n "$TLS_CERT" ]; then
+  # tls_host_names goes in FIRST AND ALWAYS, because `autodb --create-cert`
+  # reads it to decide the certificate's SANs. Writing the names before the
+  # certificate exists is what lets one command issue material that matches
+  # the config, rather than two lists that agree until someone edits one.
+  if [ -n "$TLS_HOSTS" ]; then
     _hosts="$(printf '%s' "$TLS_HOSTS" | awk -F, '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); if($i!=""){printf "%s\"%s\"", (i>1?", ":""), $i}}}')"
-    printf '\ntls_cert_file = "%s"\ntls_key_file = "%s"\ntls_host_names = [%s]\n' \
-      "$TLS_CERT" "$TLS_KEY" "$_hosts"
+    printf '\ntls_host_names = [%s]\n' "$_hosts"
+  fi
+  if [ -n "$TLS_CERT" ]; then
+    printf 'tls_cert_file = "%s"\ntls_key_file = "%s"\n' "$TLS_CERT" "$TLS_KEY"
   else
     cat <<TOML
 
@@ -484,9 +524,8 @@ TOML
 # TLS is mandatory on this surface: a client using sslmode=require
 # authenticates nothing, so an active MITM collects every access token in
 # cleartext, and a token works from anywhere it is admitted until revoked.
-# tls_cert_file = "$CONFIG_DIR/fullchain.pem"
-# tls_key_file  = "$CONFIG_DIR/privkey.pem"
-# tls_host_names = ["db.example.com"]
+# tls_cert_file = "$CONFIG_DIR/tls/cert.pem"
+# tls_key_file  = "$CONFIG_DIR/tls/key.pem"
 TOML
   fi
 }
@@ -639,14 +678,40 @@ case "$META_BACKEND" in
 esac
 
 say ""
-say "TLS on the front door. Leave the certificate empty to write the keys"
-say "commented out and supply them later."
-ask TLS_CERT "  tls_cert_file" "$TLS_CERT"
-if [ -n "$TLS_CERT" ]; then
-  ask TLS_KEY   "  tls_key_file" "$TLS_KEY"
-  ask TLS_HOSTS "  tls_host_names (comma-separated)" "$TLS_HOSTS"
-  [ -n "$TLS_KEY" ] || die "a certificate without a key cannot serve TLS"
+say "TLS. The front door will not serve without it, and sslmode=verify-full"
+say "verifies the NAME a client dialled -- so the certificate has to carry"
+say "whatever your clients will actually type."
+say ""
+say "  Give a DNS name if this host has one. Leave it EMPTY to use the IP"
+say "  address instead, and the certificate will be issued for the IP."
+ask TLS_DNS_NAME "  DNS name (empty = use the IP address)" "$TLS_DNS_NAME"
+
+if [ -n "$TLS_DNS_NAME" ]; then
+  TLS_HOSTS="$TLS_DNS_NAME"
+else
+  # No name, so the certificate is issued for an ADDRESS. Offered rather than
+  # imposed: the address a client dials is not always the one this host sees
+  # itself as -- a NAT, a floating IP or a provider's public address all break
+  # that assumption, and sslmode=verify-full checks what the client typed.
+  _guess="$(detect_public_ip)"
+  say ""
+  say "  No DNS name. The certificate will be issued for an IP address, which"
+  say "  must be the address CLIENTS DIAL -- not necessarily the one this host"
+  say "  sees on its own interface. Behind NAT or a floating address those"
+  say "  differ, and verify-full checks the one the client typed."
+  ask TLS_HOSTS "  IP address clients will dial" "$_guess"
+  [ -n "$TLS_HOSTS" ] || die "no DNS name and no IP address: nothing to issue a certificate for"
 fi
+
+# THE PORT, asked here because it belongs with the address a client dials --
+# the two together are what somebody types into a client, and splitting them
+# across the interview is how one gets set and the other forgotten.
+say ""
+say "  The port the front door listens on. 5432 is what every PostgreSQL"
+say "  client tries first, so changing it means every client must be told."
+ask_uint FD_PORT "  front-door port" "$FD_PORT"
+[ "$FD_PORT" -le 65535 ] || die "port $FD_PORT is out of range (1..65535)"
+BIND="${BIND_ADDR}:${FD_PORT}"
 
 say ""
 say "Client addresses allowed to reach this daemon, enforced at login."
@@ -687,8 +752,13 @@ info "max_sessions_global: $CAP"
 info "general lane       : ${LANE_MIB} MiB (${LANE_BYTES} bytes)"
 info "GOMEMLIMIT         : ${GOMEMLIMIT_MIB} MiB"
 info "MemoryMax          : ${MEMORYMAX_MIB} MiB"
-if [ -n "$TLS_CERT" ]; then info "tls                : $TLS_CERT"
-else info "tls                : NOT configured (keys written commented out)"; fi
+if [ -n "$TLS_CERT" ]; then
+  info "tls                : $TLS_CERT (supplied)"
+elif [ -n "$TLS_HOSTS" ]; then
+  info "tls                : will be ISSUED for $TLS_HOSTS"
+else
+  info "tls                : NOT configured (keys written commented out)"
+fi
 info "start now          : $START_NOW"
 say ""
 
@@ -816,6 +886,66 @@ WantedBy=multi-user.target
 UNITFILE
 
 systemctl daemon-reload
+
+# ------------------------------------------------------------ TLS material
+#
+# AFTER the config, because `autodb --create-cert` reads tls_host_names from
+# it. That ordering is why the names were written first and the cert paths
+# were not: a config naming files that do not exist yet fails to load, and
+# --create-cert loads the config.
+
+if [ "$GEN_CERT" != "no" ] && [ -z "$TLS_CERT" ] && [ -n "$TLS_HOSTS" ]; then
+  step "Issuing TLS material for: $TLS_HOSTS"
+  if "$PREFIX/autodb" --config "$CONFIG" --create-cert; then
+    TLS_CERT="$CONFIG_DIR/tls/cert.pem"
+    TLS_KEY="$CONFIG_DIR/tls/key.pem"
+    if [ -r "$TLS_CERT" ] && [ -r "$TLS_KEY" ]; then
+      # Re-emit rather than sed the file: emit_config is the ONE place that
+      # knows this config's shape, and patching it from outside is how the
+      # generated file and the generator drift.
+      emit_config > "$CONFIG.new" && mv "$CONFIG.new" "$CONFIG"
+      chown root:"$RUN_USER" "$CONFIG"; chmod 0640 "$CONFIG"
+      # The private key is read by the service account, not the world.
+      chown root:"$RUN_USER" "$TLS_KEY" 2>/dev/null || true
+      chmod 0640 "$TLS_KEY" 2>/dev/null || true
+      info "front door ENABLED in $CONFIG"
+      info "give clients $CONFIG_DIR/tls/ca.pem and sslmode=verify-full"
+    else
+      warn "--create-cert reported success but $TLS_CERT is not readable;"
+      warn "leaving the front door disabled."
+      TLS_CERT=""; TLS_KEY=""
+    fi
+  else
+    warn "--create-cert failed; leaving the front door disabled. The config and"
+    warn "unit are in place, so fix the cause and re-run --apply."
+    TLS_CERT=""; TLS_KEY=""
+  fi
+fi
+
+# -------------------------------------------------------- first-run ceremony
+#
+# `autodb --init` creates the first administrator and cuts the
+# unattended-unlock slot. It has to happen with the service STOPPED, because
+# it takes the instance lease on the meta store -- which is also why it runs
+# here, after the unit exists but before anything starts it.
+#
+# Not something this script can do itself: enrolling the slot needs an
+# authenticated admin against an unlocked store, and only the process that
+# authenticated holds the master key.
+
+if [ "$RUN_INIT" != "no" ]; then
+  say ""
+  ask_yn _doinit "create the first administrator and enable unattended unlock now?" "yes"
+  if [ "$_doinit" = "yes" ]; then
+    step "First-run ceremony"
+    if ! "$PREFIX/autodb" --config "$CONFIG" --init; then
+      warn "--init did not complete. The config and unit are in place; run"
+      warn "  $PREFIX/autodb --config $CONFIG --init"
+      warn "again before starting the service, or a restart will leave the"
+      warn "store locked."
+    fi
+  fi
+fi
 
 say ""
 if [ "$START_NOW" = "yes" ] && [ -n "$TLS_CERT" ]; then
