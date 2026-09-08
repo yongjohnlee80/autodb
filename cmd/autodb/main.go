@@ -86,9 +86,18 @@ func main() {
 		"--create-cert: print ca.pem, the one file developers need, and exit")
 	certForce := flag.Bool("force", false,
 		"--create-cert: replace existing CA key material (invalidates every distributed ca.pem)")
+
+	// THE FIRST-RUN CEREMONY. Creating the first administrator and cutting the
+	// unattended-unlock slot both need an authenticated admin against an
+	// UNLOCKED store, which is a state a shell installer cannot reach -- so
+	// every scripted bring-up stopped short of a daemon that survives its own
+	// reboot. This is the one entry point that can, because it is the process
+	// that authenticates.
+	initRun := flag.Bool("init", false,
+		"create the first administrator and enrol the unattended unlock, then exit")
 	flag.Parse()
 
-	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *createCert, *port); err != nil {
+	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *createCert, *initRun, *port); err != nil {
 		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 		flag.Usage()
 		os.Exit(2)
@@ -100,6 +109,12 @@ func main() {
 	}
 
 	switch {
+	case *initRun:
+		if err := runInit(context.Background(), os.Stdout, *configPath, initOpts{}); err != nil {
+			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	case *createCert:
 		if err := runCreateCert(os.Stdout, *configPath, createCertOpts{
 			dir: *certDir, hosts: certHosts, leafOnly: *certLeafOnly,
@@ -157,7 +172,7 @@ const defaultWebPort = 7010
 // user explicitly passing a flag that will be ignored — would slip through
 // (raised in review). flag.CommandLine.Visit reports only what was
 // actually set.
-func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert bool, port int) error {
+func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun bool, port int) error {
 	portSet := false
 	flag.CommandLine.Visit(func(f *flag.Flag) {
 		if f.Name == "port" {
@@ -226,14 +241,14 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert bool, p
 	// --migrate-to-postgres is counted too, and it matters more than the
 	// others: it is FIRST in the dispatch switch, so an unnoticed
 	// `--migrate-to-postgres --serve` would migrate and never serve.
-	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG, createCert} {
+	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
-		return errors.New("--serve, --ui, --web-ui, --print-endpoint, --migrate-to-postgres " +
-			"and --create-cert are mutually exclusive; pass exactly one")
+		return errors.New("--serve, --ui, --web-ui, --print-endpoint, --migrate-to-postgres, " +
+			"--create-cert and --init are mutually exclusive; pass exactly one")
 	}
 	if webUI {
 		if port <= 0 || port > 65535 {

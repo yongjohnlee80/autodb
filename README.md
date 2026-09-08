@@ -427,6 +427,13 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
   means libpq's `prefer`, which silently falls back to plaintext. The one
   exception is a genuinely local channel — a unix socket or same-host loopback —
   via the deliberately named `allow_insecure_dsn`.
+- **Run `autodb --init` once** to create the first administrator and cut the
+  unattended-unlock slot. It is the only surface that can do the second part:
+  enrolling the slot is admin-only *and* only possible while the store is
+  unlocked, because wrapping the master key requires holding it — and
+  bootstrapping generates that key, so the token and the unlocked store arrive
+  together in one process. It takes the instance lease, so stop the service
+  first. Re-running is safe: an existing slot is reported, never replaced.
 - **Set up unattended unlock, or a reboot locks everyone out.** Connection
   secrets are encrypted with a master key normally unwrapped by a passphrase at
   login, so after a restart every front-door client gets

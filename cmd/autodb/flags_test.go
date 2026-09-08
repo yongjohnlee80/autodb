@@ -17,6 +17,7 @@ func TestCheckFlags(t *testing.T) {
 		serve, ui, webUI, printEndpoint bool
 		migrateToPG                     bool
 		createCert                      bool
+		initRun                         bool
 		port                            int
 		portSet                         bool
 		// certFlags are --create-cert's own flags, given by NAME so the cell
@@ -25,6 +26,7 @@ func TestCheckFlags(t *testing.T) {
 	}
 	ok := map[string]args{
 		"serve alone":          {serve: true, port: goodPort},
+		"init alone":           {initRun: true, port: goodPort},
 		"migrate alone":        {migrateToPG: true, port: goodPort},
 		"ui alone":             {ui: true, port: goodPort},
 		"web-ui alone":         {webUI: true, port: goodPort},
@@ -70,13 +72,22 @@ func TestCheckFlags(t *testing.T) {
 		// checked first and silently drop the other.
 		"leaf-only + export-ca": {createCert: true, port: goodPort,
 			certFlags: []string{"--leaf-only", "--export-ca"}},
+		// --init is a MODE, so it collides with every other mode. It sits
+		// first in the dispatch switch, which is exactly why an unnoticed
+		// `--init --serve` must be refused rather than silently initialising
+		// and never serving -- the same trap --migrate-to-postgres already
+		// carries a comment about.
+		"init + serve":       {initRun: true, serve: true, port: goodPort},
+		"init + ui":          {initRun: true, ui: true, port: goodPort},
+		"init + create-cert": {initRun: true, createCert: true, port: goodPort},
+		"init + migrate":     {initRun: true, migrateToPG: true, port: goodPort},
 	}
 
 	run := func(a args) error {
 		// checkFlags reads --port's PRESENCE from flag.CommandLine, so a fresh
 		// FlagSet is set up per case to reflect portSet.
 		reset(t, a.portSet, a.certFlags...)
-		return checkFlags(a.serve, a.ui, a.webUI, a.printEndpoint, a.migrateToPG, a.createCert, a.port)
+		return checkFlags(a.serve, a.ui, a.webUI, a.printEndpoint, a.migrateToPG, a.createCert, a.initRun, a.port)
 	}
 	for name, a := range ok {
 		t.Run("ok/"+name, func(t *testing.T) {
