@@ -163,6 +163,12 @@ PG_RESERVE_POLICY_MIB=384    # a co-hosted Postgres is a second tenant
 # validator or a diff without a banner in the middle of it.
 MSG_FD=1
 say()  { printf '%s\n' "$*" >&"$MSG_FD"; }
+# step() prints a phase heading. It exists here because this script CALLS it --
+# a runtime "step: not found" killed a real provisioning run after the unit was
+# written and before TLS was issued, because the idiom was copied from the
+# sibling scripts without the helper. `sh -n` cannot see an undefined function,
+# and every cell exited before reaching the apply path, so nothing caught it.
+step() { printf '\n=== %s\n' "$*" >&"$MSG_FD"; }
 info() { printf '  %s\n' "$*" >&"$MSG_FD"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }

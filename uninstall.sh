@@ -521,7 +521,21 @@ fi
 # SURVIVES, and says so, instead of being destroyed on our assumption.
 step "Files"
 
-rm_file() { [ -e "$1" ] && { rm -f "$1"; info "removed $1"; }; }
+# rm_file removes a file if it is there, and RETURNS SUCCESS EITHER WAY.
+#
+# The `if` is load-bearing under `set -eu`. Written as
+# `[ -e "$1" ] && { ...; }` the function's last command is a failing test
+# whenever the file is absent, so the function returns non-zero, and a
+# non-zero simple command under set -e KILLS THE SCRIPT. That is not
+# theoretical: it aborted a real uninstall run partway through the Files
+# section, on the first path that happened not to exist, leaving the install
+# half-removed. An absent file is the ordinary case for an uninstaller.
+rm_file() {
+  if [ -e "$1" ]; then
+    rm -f "$1"
+    info "removed $1"
+  fi
+}
 
 # The store and the two files that are part of it.
 if [ -n "$STORE_FILE" ]; then
