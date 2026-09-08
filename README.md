@@ -267,37 +267,6 @@ sh install.sh --binary              # never build; fail if no binary fits
 It never invokes `sudo`. If the prefix is not writable it says so and stops,
 and it tells you if the prefix is not on your `PATH`.
 
-**With Go** (1.25+):
-
-```sh
-go install github.com/yongjohnlee80/autodb/cmd/autodb@latest
-```
-
-**Manually** — grab a tarball from the
-[releases page](https://github.com/yongjohnlee80/autodb/releases/latest)
-(`linux`/`darwin` × `amd64`/`arm64`, each with a `.sha256`):
-
-```sh
-VERSION=v0.3.0 OS=linux ARCH=amd64
-curl -fsSLO "https://github.com/yongjohnlee80/autodb/releases/download/$VERSION/autodb-$VERSION-$OS-$ARCH.tar.gz"
-curl -fsSLO "https://github.com/yongjohnlee80/autodb/releases/download/$VERSION/autodb-$VERSION-$OS-$ARCH.tar.gz.sha256"
-sha256sum -c "autodb-$VERSION-$OS-$ARCH.tar.gz.sha256"
-tar xzf "autodb-$VERSION-$OS-$ARCH.tar.gz"
-install -m755 "autodb-$VERSION-$OS-$ARCH" ~/.local/bin/autodb
-```
-
-**From a clone** — needs Go 1.25+:
-
-```sh
-git clone https://github.com/yongjohnlee80/autodb.git
-cd autodb
-make build          # -> bin/autodb, version stamped from git describe
-```
-
-> In a bare-repo + worktree checkout, use the make targets (or pass
-> `-buildvcs=false`): Go's nested-VCS detection resolves to the bare store and
-> plain `go build` fails with "error obtaining VCS status".
-
 ### 2. First run
 
 ```sh
@@ -374,6 +343,108 @@ which reports the binary it resolved and from where, the endpoint, and the
 connection and login state. `setup()` itself is deliberately cheap — it
 connects nothing and opens nothing; the first command that needs the daemon
 brings it up and prompts for login.
+
+## Running the front door as a service
+
+`install.sh` installs the binary. [`install_frontdoor.sh`](install_frontdoor.sh)
+configures the PostgreSQL-wire front door as a **systemd service** on a host
+that already has it: a memory-sizing preflight, a config scaffold, an optional
+PostgreSQL meta store, and a unit with `Restart=on-failure`, `GOMEMLIMIT` and
+`MemoryMax`.
+
+```sh
+sh install_frontdoor.sh --check                     # measure and report; changes nothing
+sh install_frontdoor.sh --check --assume-ram 1024 --assume-cpus 1
+sh install_frontdoor.sh --print-config              # the config it would write, to stdout
+sudo sh install_frontdoor.sh --apply                # prompts for each setting on a terminal
+```
+
+`--check` is the default and never writes anything. `--apply` interviews you,
+pre-filling every answer with the computed default, so pressing return through
+the whole thing gives exactly the non-interactive result.
+
+### Why there is a sizing preflight
+
+The front door's memory budgets are **accounting, not allocations**, and nothing
+in autodb reads a physical-memory figure — there is no `GOMEMLIMIT`, no
+`MemAvailable` check. A daemon whose general lane is larger than its host will
+boot happily, idle at a fraction of it, and then be unable to apply backpressure
+before the kernel's out-of-memory killer arrives. The guard is present, is
+consulted, and observes nothing.
+
+So the preflight computes a lane and a session cap the host can actually honour,
+and refuses a host too small to serve even one session. `--assume-ram` and
+`--assume-cpus` size a machine you are not standing on, which is how a small VPS
+gets planned from a workstation. **Pass both** — with only the first, the CPU
+warnings describe your workstation and the single-core warning silently never
+fires for the VM you were sizing for.
+
+The two numbers move **together**: the general lane's floor is
+`max_sessions_global × 4 MiB`, so raising the cap without raising the lane fails
+at startup. Lowering the *cap* is how a modest host asks for a smaller lane — it
+serves fewer sessions rather than promising more than it can hold.
+
+### The meta store, as one choice of three
+
+autodb's own database — users, grants, encrypted connection secrets, the audit
+log. Not a database you connect *to*.
+
+| Choice | What it does |
+|---|---|
+| `sqlite` | One file, no server. The lighter choice on a small VPS. |
+| `pg-local` | Installs PostgreSQL here, creates the database and a role named after the service account so peer auth over the unix socket needs no stored password. |
+| `pg-remote` | An existing instance, by DSN. |
+
+A co-hosted PostgreSQL is charged its **own** reserve, and sizing is recomputed
+after that answer rather than before it — on a 1 GB host it takes the front door
+from 64 sessions to 32, and at 512 MB it is refused outright.
+
+### What to be aware of
+
+- **`--apply` is not yet proven on any host, and every distro branch is
+  untested.** `--check` and `--print-config` are safe and exercised. The five
+  package-manager branches (apt-get, dnf/yum, pacman, apk, zypper) are a best
+  effort at each distro's conventions, **not a support claim** — and a run on one
+  distro says nothing about the other four. Use a disposable VM for `--apply`
+  until that changes. The script header carries a per-distro status table.
+- **The sizing figures are provisional policy, not measurement.** Only the 4 MiB
+  watermark, the 256 default cap and the 1 GiB/4 GiB lane bounds come from the
+  code. The reserve fraction, the lane share and the PostgreSQL allowance are
+  conservative guesses chosen to fail toward a smaller front door. The header
+  documents how to replace them with real RSS figures.
+- **TLS is mandatory, so the front door ships disabled.** `enabled = true`
+  without both TLS keys is refused at config load — the daemon would not start at
+  all — so a config written before you have certificates sets `enabled = false`.
+  Add the `tls_*` keys and flip that line in the same edit. Without TLS a client
+  using `sslmode=require` authenticates nothing, and an active MITM collects
+  every access token in cleartext; a token works from anywhere it is admitted
+  until revoked.
+- **Migration from sqlite to PostgreSQL is ONE-WAY.** Decide before there is
+  production data.
+- **A PostgreSQL meta store's transport is checked at startup.** The DSN needs
+  `sslmode=verify-full` with an explicit `sslrootcert`, or autodb refuses to
+  start. `require` encrypts but authenticates nothing, and an absent `sslmode`
+  means libpq's `prefer`, which silently falls back to plaintext. The one
+  exception is a genuinely local channel — a unix socket or same-host loopback —
+  via the deliberately named `allow_insecure_dsn`.
+- **Set up unattended unlock, or a reboot locks everyone out.** Connection
+  secrets are encrypted with a master key normally unwrapped by a passphrase at
+  login, so after a restart every front-door client gets
+  `57P03 "the server is not accepting connections"` until a human logs in by
+  hand. Run `autodb keyslot enroll` once from a running unlocked daemon, then set
+  `service_keyfile`. Give it **its own directory** — a keyfile beside the meta
+  store means one careless `tar` captures both halves of the envelope — and it
+  must be `0600`.
+- **`ip_allowlist` is loopback-only by default**, enforced at login, so nothing
+  remote can log in until you widen it. Widen it deliberately and narrowly.
+- **A connection is not reachable until `profile = session`.** Exposing one is a
+  separate, deliberate step.
+- **On a 1 vCPU host, interactive logins are slow.** Front-door PAT auth is
+  SHA-256 and cheap, but passphrase login uses argon2id at `m=64 MiB, p=4` — four
+  parallel lanes serialized onto one core, each transiently allocating 64 MiB.
+  TLS handshakes land on that same core.
+- **Small VPSes usually ship with no swap.** Add some regardless; the daemon's
+  budgets assume headroom the kernel does not otherwise have.
 
 ## The terminal UI
 
@@ -634,6 +705,7 @@ deployments (see [docs/ops/postgres-meta-store.md](docs/ops/postgres-meta-store.
 | `docs/`               | Operational docs and the front-door protocol matrix                            |
 | `config.example.toml` | Every setting, with its default and why it is that                             |
 | `install.sh`          | Installer: verified release download, or a Go build fallback                   |
+| `install_frontdoor.sh` | Front-door service setup: memory sizing preflight, config, systemd unit       |
 | `docs/media/`         | README demo recordings                                                         |
 
 ## Status & roadmap

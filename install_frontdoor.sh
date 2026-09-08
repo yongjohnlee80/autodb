@@ -1,0 +1,851 @@
+#!/usr/bin/env sh
+#
+# autodb front-door service installer.
+#
+# Takes a host that ALREADY has the autodb binary (see install.sh) and
+# configures the PostgreSQL-wire front door to run as a systemd service:
+# a sizing preflight, a config scaffold, optionally a local PostgreSQL
+# meta store, and a unit with restart-on-failure and real memory limits.
+#
+#   ./install_frontdoor.sh --check                    # preflight, changes nothing
+#   ./install_frontdoor.sh --check --assume-ram 1024  # size a VPS from your laptop
+#   sudo ./install_frontdoor.sh --apply               # interactive on a terminal
+#   sudo ./install_frontdoor.sh --apply --non-interactive --bind 0.0.0.0:5432
+#
+# STATUS -- READ THIS BEFORE --apply.
+#
+#   --check and --print-config are exercised and safe: they read the host,
+#   print numbers, and change nothing.
+#
+#   --apply IS NOT YET PROVEN ON ANY HOST. Nothing below has been run end to
+#   end: the package installs, the PostgreSQL cluster init, the role and
+#   database creation, peer auth over the socket, and the systemd unit. Run
+#   it against a disposable VM first, never straight at a host you care
+#   about.
+#
+# DISTRO SUPPORT IS WRITTEN, NOT TESTED. The package-manager branches below
+# are coded for apt-get, dnf/yum, pacman, apk and zypper. The honest status
+# of every one of them is UNTESTED -- they are a best effort at each
+# distro's conventions, not a support claim. Each needs one real --apply run
+# on that distro before it means anything, and a run on one distro says
+# nothing about the other four.
+#
+#   apt-get (Debian/Ubuntu)  untested
+#   dnf / yum (RHEL family)  untested
+#   pacman (Arch)            untested
+#   apk (Alpine)             untested
+#   zypper (SUSE)            untested
+#
+# Update a row only when a real --apply has run on that distro, and say
+# which release it ran on.
+#
+# SIZING FIGURES ARE PROVISIONAL POLICY, NOT MEASUREMENT.
+#
+# The reserve fraction, the lane share and the Postgres reserve below are
+# CONSERVATIVE GUESSES chosen to fail toward a smaller front door. None is
+# derived from a measured resident set. They are deliberately cautious
+# because the failure they guard against is silent -- see below -- but they
+# are not production sizing guidance and should not be quoted as such.
+#
+# HOW TO REPLACE THEM WITH MEASUREMENT (do this once there is a real load):
+#   1. Run the front door at a known occupancy on the target host.
+#   2. Sample RSS at steady state and at peak:
+#        systemctl show -p MemoryCurrent autodb-frontdoor
+#        grep VmRSS /proc/$(pidof autodb)/status
+#   3. Compare peak RSS against general_lane_bytes + the per-session caps
+#      that were actually in flight. The gap is what RESERVE_FRACTION and
+#      LANE_SHARE are standing in for.
+#   4. Update the three constants below, and record the measurement (host,
+#      occupancy, peak RSS, date) beside them so the next person can tell a
+#      measured number from a guess.
+#
+# Until step 4 happens, treat every number this script prints as a starting
+# point to be checked on the host, not an answer.
+#
+# WHY THE PREFLIGHT EXISTS. autodb reads no physical-memory figure
+# anywhere -- no GOMEMLIMIT, no MemAvailable check, nothing. Its
+# front-door budgets are ACCOUNTING, not allocations, so a daemon whose
+# budgets exceed the machine starts happily, idles at a fraction of them,
+# and then has overload protection that cannot engage before the OS
+# out-of-memory killer does. The guard is present, is consulted, and
+# observes nothing. Sizing is an install-time decision, and this is where
+# it gets made.
+#
+# POSIX sh. Read it before running it as root.
+
+set -eu
+
+MODE="check"
+INTERACTIVE="auto"   # auto | yes | no
+PREFIX="${AUTODB_PREFIX:-/usr/local/bin}"
+CONFIG_DIR="/etc/autodb"
+CONFIG="$CONFIG_DIR/config.toml"
+UNIT="/etc/systemd/system/autodb-frontdoor.service"
+RUN_USER="autodb"
+BIND="0.0.0.0:5432"
+STATE_DIR="/var/lib/autodb"
+KEY_DIR="/var/lib/autodb-keys"
+ASSUME_RAM=""
+ASSUME_CPUS=""       # pair with --assume-ram: CPU warnings otherwise describe THIS host
+
+META_BACKEND=""      # sqlite | pg-local | pg-remote  (empty = ask, default sqlite)
+META_ENGINE="sqlite" # derived from META_BACKEND
+META_DSN=""
+PG_DB="autodb"
+PG_ROLE=""           # defaults to RUN_USER, so peer auth works with no password
+TLS_CERT=""
+TLS_KEY=""
+TLS_HOSTS=""
+IP_ALLOWLIST='["127.0.0.1/32", "::1/128"]'
+START_NOW="no"
+CAP_OVERRIDE=""
+LANE_OVERRIDE=""
+
+# Matrix figures. These MIRROR THE CODE and must stay in step with it:
+#   WATERMARK_MIB      frontdoor.pendingOutputWatermark  (4 MiB)
+#   MAX_CAP            config.DefaultMaxSessionsGlobal   (256)
+#   MAX_LANE_MIB       config.DefaultGeneralLaneBytes    (1 GiB)
+#   MAX_LANE_CEIL_MIB  config.MaxGeneralLaneBytes        (4 GiB)
+WATERMARK_MIB=4
+MAX_CAP=256
+MAX_LANE_MIB=1024
+MAX_LANE_CEIL_MIB=4096
+
+# PROVISIONAL POLICY -- unmeasured, conservative, and the numbers to revise
+# first once real RSS figures exist. See "SIZING FIGURES ARE PROVISIONAL" in
+# the header for how to replace them. These are NOT matrix figures and carry
+# none of their authority.
+RESERVE_DIVISOR=5            # hold back 1/5 of RAM for OS + runtime + buffers
+RESERVE_FLOOR_MIB=256        # ...but never less than this
+LANE_DIVISOR=3               # lane gets 1/3 of what remains
+PG_RESERVE_POLICY_MIB=384    # a co-hosted Postgres is a second tenant
+
+# Status goes to stdout normally, but to STDERR in --print-config mode, so
+# that stdout carries nothing but the config itself and can be piped into a
+# validator or a diff without a banner in the middle of it.
+MSG_FD=1
+say()  { printf '%s\n' "$*" >&"$MSG_FD"; }
+info() { printf '  %s\n' "$*" >&"$MSG_FD"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+autodb front-door service installer
+
+USAGE:
+  install_frontdoor.sh [OPTIONS]
+
+OPTIONS:
+  --check              Preflight and print the sizing verdict. Changes
+                       nothing. This is the default.
+  --print-config       Print the config this host would get, to stdout, and
+                       exit. Writes nothing. Useful for review, for diffing
+                       against a running config, and for feeding to a
+                       validator.
+  --apply              Write the config and unit, and install Postgres if
+                       that is the chosen meta store. Prompts for each
+                       setting when run on a terminal.
+  --interactive        Force prompting even when stdin is not a terminal.
+  --non-interactive    Never prompt; take flags and computed defaults.
+  --assume-ram <MiB>   Size for a host of this much RAM instead of the
+                       detected figure -- plan a small VPS from a large
+                       workstation.
+  --assume-cpus <n>    Likewise for the CPU count. Pass it WITH --assume-ram
+                       when sizing another machine: without it the CPU
+                       warnings describe the host you are standing on, so
+                       the single-core argon2 warning silently never fires
+                       for the small VM you were sizing for.
+  --bind <addr>        Front-door listen address. Default: 0.0.0.0:5432
+  --user <name>        Service account. Default: autodb
+  --prefix <dir>       Where the autodb binary lives. Default: /usr/local/bin
+  --config <path>      Config file to write. Default: /etc/autodb/config.toml
+  --meta <backend>     Meta store backend, one of:
+                         sqlite      one file, no server (default)
+                         pg-local    install a NEW local PostgreSQL here
+                         pg-remote   use an EXISTING PostgreSQL instance
+  --meta-dsn <dsn>     DSN for --meta pg-remote (required with it).
+  --sessions <n>       Override the computed max_sessions_global
+  --lane <MiB>         Override the computed general lane
+  -h, --help           Show this help
+
+The preflight NEVER changes anything, so run it first and read the
+numbers. --apply refuses on a host the front door cannot be sized onto.
+USAGE
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check)  MODE="check" ;;
+    --print-config) MODE="print" ;;
+    --apply)  MODE="apply" ;;
+    --interactive)     INTERACTIVE="yes" ;;
+    --non-interactive) INTERACTIVE="no" ;;
+    --assume-ram) ASSUME_RAM="${2:?--assume-ram needs a number of MiB}"; shift ;;
+    --assume-cpus) ASSUME_CPUS="${2:?--assume-cpus needs a number}"; shift ;;
+    --bind)   BIND="${2:?--bind needs an address}"; shift ;;
+    --user)   RUN_USER="${2:?--user needs a name}"; shift ;;
+    --prefix) PREFIX="${2:?--prefix needs a directory}"; shift ;;
+    --config) CONFIG="${2:?--config needs a path}"; CONFIG_DIR="$(dirname "$CONFIG")"; shift ;;
+    --meta)   META_BACKEND="${2:?--meta needs sqlite, pg-local or pg-remote}"; shift ;;
+    --meta-dsn) META_DSN="${2:?--meta-dsn needs a DSN}"; shift ;;
+    --sessions) CAP_OVERRIDE="${2:?--sessions needs a number}"; shift ;;
+    --lane)   LANE_OVERRIDE="${2:?--lane needs a number of MiB}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option: $1 (try --help)" ;;
+  esac
+  shift
+done
+
+# `postgres` is accepted as a convenience and resolved by whether a DSN was
+# supplied: a DSN means an existing instance, no DSN means install one here.
+[ "$META_BACKEND" = "postgres" ] && {
+  if [ -n "$META_DSN" ]; then META_BACKEND="pg-remote"; else META_BACKEND="pg-local"; fi
+}
+[ "$MODE" = "print" ] && MSG_FD=2
+
+case "$META_BACKEND" in
+  ''|sqlite|pg-local|pg-remote) ;;
+  *) die "--meta must be sqlite, pg-local or pg-remote, got: $META_BACKEND" ;;
+esac
+
+# apply_backend derives everything downstream from the single choice, so the
+# engine name, the locality and the DSN cannot disagree with each other.
+apply_backend() {
+  case "$META_BACKEND" in
+    sqlite)    META_ENGINE="sqlite";   PG_LOCAL="no"  ;;
+    pg-local)  META_ENGINE="postgres"; PG_LOCAL="yes" ;;
+    pg-remote) META_ENGINE="postgres"; PG_LOCAL="no"  ;;
+  esac
+}
+
+is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+for pair in "assume-ram:$ASSUME_RAM" "assume-cpus:$ASSUME_CPUS" "sessions:$CAP_OVERRIDE" "lane:$LANE_OVERRIDE"; do
+  _n="${pair%%:*}"; _v="${pair#*:}"
+  [ -z "$_v" ] && continue
+  is_uint "$_v" || die "--$_n needs a non-negative integer, got: $_v"
+done
+
+# Prompting reads /dev/tty rather than stdin, so this still works when the
+# script itself arrived through a pipe. Without a tty we never prompt: an
+# installer that blocks forever on a missing terminal is worse than one
+# that takes its defaults and says so.
+TTY_OK=0
+if [ -r /dev/tty ] && [ -w /dev/tty ]; then TTY_OK=1; fi
+case "$INTERACTIVE" in
+  yes) [ "$TTY_OK" -eq 1 ] || die "--interactive given but /dev/tty is unusable" ;;
+  no)  TTY_OK=0 ;;
+  auto) [ "$MODE" = "apply" ] || TTY_OK=0 ;;
+esac
+
+ask() {
+  _var="$1"; _prompt="$2"; _def="$3"
+  if [ "$TTY_OK" -eq 0 ]; then eval "$_var=\$_def"; return 0; fi
+  printf '%s [%s]: ' "$_prompt" "$_def" > /dev/tty
+  IFS= read -r _ans < /dev/tty || _ans=""
+  [ -z "$_ans" ] && _ans="$_def"
+  eval "$_var=\$_ans"
+}
+
+ask_opt() { # ask_opt <var> <prompt> <default> <allowed...>
+  _var="$1"; _prompt="$2"; _def="$3"; shift 3
+  while :; do
+    ask _o "$_prompt" "$_def"
+    for _c in "$@"; do
+      if [ "$_o" = "$_c" ]; then eval "$_var=\$_o"; return 0; fi
+    done
+    [ "$TTY_OK" -eq 0 ] && die "$_prompt: '$_o' is not one of: $*"
+    printf '  choose one of: %s\n' "$*" > /dev/tty
+  done
+}
+
+ask_yn() {
+  _var="$1"; _prompt="$2"; _def="$3"
+  if [ "$TTY_OK" -eq 0 ]; then eval "$_var=\$_def"; return 0; fi
+  while :; do
+    printf '%s [%s]: ' "$_prompt" "$_def" > /dev/tty
+    IFS= read -r _ans < /dev/tty || _ans=""
+    [ -z "$_ans" ] && _ans="$_def"
+    case "$_ans" in
+      y|Y|yes|YES|Yes) eval "$_var=yes"; return 0 ;;
+      n|N|no|NO|No)    eval "$_var=no";  return 0 ;;
+      *) printf '  please answer yes or no\n' > /dev/tty ;;
+    esac
+  done
+}
+
+ask_backend() { # ask_backend <var> <prompt> <default>
+  _var="$1"; _prompt="$2"; _def="${3:-sqlite}"
+  [ -z "$_def" ] && _def="sqlite"
+  while :; do
+    ask _b "$_prompt" "$_def"
+    case "$_b" in
+      1|sqlite)    eval "$_var=sqlite";    return 0 ;;
+      2|pg-local)  eval "$_var=pg-local";  return 0 ;;
+      3|pg-remote) eval "$_var=pg-remote"; return 0 ;;
+    esac
+    [ "$TTY_OK" -eq 0 ] && die "$_prompt: '$_b' is not 1, 2, 3, sqlite, pg-local or pg-remote"
+    printf '  choose 1, 2 or 3 (sqlite, pg-local, pg-remote)\n' > /dev/tty
+  done
+}
+
+ask_uint() {
+  _var="$1"; _prompt="$2"; _def="$3"
+  while :; do
+    ask _u "$_prompt" "$_def"
+    if is_uint "$_u" && [ "$_u" -gt 0 ]; then eval "$_var=\$_u"; return 0; fi
+    [ "$TTY_OK" -eq 0 ] && die "$_prompt: '$_u' is not a positive integer"
+    printf '  %s is not a positive integer\n' "$_u" > /dev/tty
+  done
+}
+
+# ------------------------------------------------------------- host detection
+
+if [ -n "$ASSUME_RAM" ]; then
+  MEM_MIB="$ASSUME_RAM"
+  [ "$MEM_MIB" -gt 0 ] || die "--assume-ram must be greater than zero"
+else
+  [ -r /proc/meminfo ] || die "cannot read /proc/meminfo; this targets Linux (or pass --assume-ram)"
+  _kib="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
+  [ -n "$_kib" ] || die "could not determine MemTotal"
+  MEM_MIB=$(( _kib / 1024 ))
+fi
+if [ -n "$ASSUME_CPUS" ]; then
+  NCPU="$ASSUME_CPUS"
+  [ "$NCPU" -gt 0 ] || die "--assume-cpus must be greater than zero"
+else
+  NCPU="$(nproc 2>/dev/null || echo 1)"
+fi
+
+# Package manager, for the Postgres path.
+PKG=""
+for _c in apt-get dnf yum pacman apk zypper; do
+  if command -v "$_c" >/dev/null 2>&1; then PKG="$_c"; break; fi
+done
+
+pg_socket_dir() {
+  for _d in /var/run/postgresql /run/postgresql; do
+    [ -d "$_d" ] && { printf '%s' "$_d"; return 0; }
+  done
+  # Not created until the cluster initialises; Debian and RHEL both use this.
+  printf '/var/run/postgresql'
+}
+
+# ------------------------------------------------------------------- sizing
+#
+# Recomputed after the interview, because whether Postgres shares this host
+# changes how much is left for the front door. Sizing before that question
+# is answered would hand out a budget the box no longer has.
+
+compute_sizing() {
+  # Held back for the kernel, the Go runtime, the meta store, per-connection
+  # TLS and bufio buffers (320 connections' worth are charged to NO budget),
+  # pgx target pools, and the 64 MiB transient spike each argon2id passphrase
+  # verification allocates. 20%, with a 256 MiB floor, because a percentage
+  # of a small number will not hold any of that.
+  # PROVISIONAL (see the header): a fifth of RAM, floor 256 MiB. Unmeasured.
+  RESERVE_MIB=$(( MEM_MIB / RESERVE_DIVISOR ))
+  [ "$RESERVE_MIB" -lt "$RESERVE_FLOOR_MIB" ] && RESERVE_MIB="$RESERVE_FLOOR_MIB"
+
+  # A CO-HOSTED POSTGRES IS A SECOND TENANT, so it gets its own reserve
+  # rather than quietly eating the front door's. Postgres ships
+  # shared_buffers at 128 MB plus per-backend work_mem and the WAL buffers
+  # on top; 384 MiB is a small-but-real cluster, not a generous one.
+  PG_RESERVE_MIB=0
+  if [ "$META_ENGINE" = "postgres" ] && [ "$PG_LOCAL" = "yes" ]; then
+    PG_RESERVE_MIB="$PG_RESERVE_POLICY_MIB"
+    RESERVE_MIB=$(( RESERVE_MIB + PG_RESERVE_MIB ))
+  fi
+
+  AVAIL_MIB=$(( MEM_MIB - RESERVE_MIB ))
+  [ "$AVAIL_MIB" -lt 0 ] && AVAIL_MIB=0
+
+  # A THIRD of what is left, not all of it. The lane bounds pending output
+  # only; segment input (96 MiB per segment) and retained state (16 MiB per
+  # session) are per-session CAPS charged as they occur, so one busy session
+  # can legitimately hold ~116 MiB the lane does not account for. A lane
+  # sized to the whole remainder leaves nothing for the caps beside it.
+  LANE_MIB=$(( AVAIL_MIB / LANE_DIVISOR ))
+  [ "$LANE_MIB" -gt "$MAX_LANE_MIB" ] && LANE_MIB="$MAX_LANE_MIB"
+
+  CAP=$(( LANE_MIB / WATERMARK_MIB ))
+  [ "$CAP" -gt "$MAX_CAP" ] && CAP="$MAX_CAP"
+  [ "$CAP" -lt 0 ] && CAP=0
+
+  # Re-derive the lane FROM the cap so the pair satisfies the floor exactly
+  # rather than approximately.
+  LANE_MIB=$(( CAP * WATERMARK_MIB ))
+
+  [ -n "$CAP_OVERRIDE" ] && CAP="$CAP_OVERRIDE"
+  [ -n "$LANE_OVERRIDE" ] && LANE_MIB="$LANE_OVERRIDE"
+
+  GOMEMLIMIT_MIB=$(( MEM_MIB * 75 / 100 ))
+  MEMORYMAX_MIB=$(( MEM_MIB * 90 / 100 ))
+}
+
+# THE FLOOR IS NOT NEGOTIABLE, so reconcile rather than emit a config that
+# fails start. A lane below cap x watermark is refused by the listener, and
+# discovering that from a service that will not boot is worse than being
+# told here.
+reconcile_floor() {
+  _floor=$(( CAP * WATERMARK_MIB ))
+  if [ "$LANE_MIB" -lt "$_floor" ]; then
+    warn "a ${LANE_MIB} MiB lane is below the floor ${CAP} sessions require (${_floor} MiB)."
+    warn "raising the lane to ${_floor} MiB -- lower the session cap if you wanted a smaller lane."
+    LANE_MIB="$_floor"
+  fi
+  [ "$LANE_MIB" -gt "$MAX_LANE_CEIL_MIB" ] &&
+    die "a ${LANE_MIB} MiB lane is above the ratified ${MAX_LANE_CEIL_MIB} MiB ceiling"
+  LANE_BYTES=$(( LANE_MIB * 1024 * 1024 ))
+}
+
+emit_config() {
+  # enabled = true REQUIRES both TLS keys -- the loader refuses the
+  # combination outright, because a client using sslmode=require
+  # authenticates nothing and an active MITM collects access tokens in
+  # cleartext. So a config written without TLS material ships with the
+  # surface OFF rather than shipping a file the daemon cannot load at all.
+  # Flip it to true in the same edit that adds the certificate.
+  FD_ENABLED=true
+  [ -z "$TLS_CERT" ] && FD_ENABLED=false
+    cat <<TOML
+# autodb -- front-door production config.
+# Generated by install_frontdoor.sh for a ${MEM_MIB} MiB / ${NCPU} CPU host.
+
+[server]
+socket = "$STATE_DIR/autodb.sock"
+
+[meta]
+engine = "$META_ENGINE"
+TOML
+  if [ "$META_ENGINE" = "postgres" ]; then
+    printf 'dsn = "%s"\n' "$META_DSN"
+    if [ "$PG_LOCAL" = "yes" ]; then
+      cat <<'TOML'
+
+# Reached over a local unix socket, which sslmode=verify-full cannot describe.
+# This key exists for exactly that case, and it is NAMED rather than implied so
+# that an insecure transport is visible to whoever reads this file. Do NOT set
+# it for a Postgres reached across a network: the meta store holds the audit
+# trail, the user records and the ENCRYPTED CONNECTION SECRETS.
+allow_insecure_dsn = true
+TOML
+    fi
+  else
+    printf 'path = "%s/meta.db"\n' "$STATE_DIR"
+  fi
+  cat <<TOML
+
+[security]
+# Enforced at login. Loopback only is the safe default -- widen DELIBERATELY
+# and narrowly to the addresses that must reach this daemon.
+ip_allowlist = $IP_ALLOWLIST
+
+# Unattended unlock. Without it a reboot leaves the store LOCKED and every
+# front-door client gets 57P03 "the server is not accepting connections"
+# until a human logs in by hand. Enrol once from a running unlocked daemon:
+#   autodb keyslot enroll
+# then uncomment. The file must be 0600; autodb refuses a wider one.
+# service_keyfile = "$KEY_DIR/service.key"
+
+[exec]
+# Sized for this host. The general lane's floor is this number x ${WATERMARK_MIB} MiB, so
+# these two move TOGETHER -- raising the cap without raising the lane fails
+# start, which is the intended direction.
+max_sessions_global = $CAP
+
+[frontdoor]
+enabled = $FD_ENABLED
+bind = "$BIND"
+
+# Sized for this host: $CAP sessions x ${WATERMARK_MIB} MiB = $LANE_MIB MiB.
+#
+# ACCOUNTING, not an allocation -- nothing is reserved at start. Set it above
+# what this machine can hold and backpressure cannot engage before the OS
+# out-of-memory killer does.
+general_lane_bytes = $LANE_BYTES
+TOML
+  if [ -n "$TLS_CERT" ]; then
+    _hosts="$(printf '%s' "$TLS_HOSTS" | awk -F, '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); if($i!=""){printf "%s\"%s\"", (i>1?", ":""), $i}}}')"
+    printf '\ntls_cert_file = "%s"\ntls_key_file = "%s"\ntls_host_names = [%s]\n' \
+      "$TLS_CERT" "$TLS_KEY" "$_hosts"
+  else
+    cat <<TOML
+
+# THE FRONT DOOR IS OFF ABOVE because TLS is not configured yet, and
+# enabled = true without both keys is refused at load -- the daemon would
+# not start at all. Set the three keys below and flip enabled to true in
+# the same edit.
+#
+# TLS is mandatory on this surface: a client using sslmode=require
+# authenticates nothing, so an active MITM collects every access token in
+# cleartext, and a token works from anywhere it is admitted until revoked.
+# tls_cert_file = "$CONFIG_DIR/fullchain.pem"
+# tls_key_file  = "$CONFIG_DIR/privkey.pem"
+# tls_host_names = ["db.example.com"]
+TOML
+  fi
+}
+
+# Resolve the backend before the first sizing pass, so --check reports the
+# same numbers --apply would use for the same flags. An unspecified backend
+# sizes as sqlite, which is what the interview will offer as its default.
+PG_LOCAL="no"
+[ -z "$META_BACKEND" ] && META_BACKEND="sqlite"
+apply_backend
+
+compute_sizing
+reconcile_floor
+
+# ----------------------------------------------------------------- preflight
+
+say ""
+say "autodb front-door sizing preflight"
+say "-----------------------------------"
+[ -n "$ASSUME_RAM" ] && info "RAM (assumed)       : ${MEM_MIB} MiB"
+[ -z "$ASSUME_RAM" ] && info "detected RAM        : ${MEM_MIB} MiB"
+[ -n "$ASSUME_CPUS" ] && info "CPUs (assumed)      : ${NCPU}"
+[ -z "$ASSUME_CPUS" ] && info "detected CPUs       : ${NCPU}"
+info "meta store          : ${META_ENGINE}$( [ "$PG_LOCAL" = yes ] && printf ' (installed locally)' )"
+info "held back for OS etc: ${RESERVE_MIB} MiB"
+[ "$PG_RESERVE_MIB" -gt 0 ] && info "  of which postgres : ${PG_RESERVE_MIB} MiB"
+info "general lane        : ${LANE_MIB} MiB  (shipped default ${MAX_LANE_MIB} MiB)"
+info "max_sessions_global : ${CAP}  (shipped default ${MAX_CAP})"
+info "GOMEMLIMIT          : ${GOMEMLIMIT_MIB} MiB"
+info "MemoryMax           : ${MEMORYMAX_MIB} MiB"
+say ""
+say "The reserve, lane share and postgres allowance behind these numbers are"
+say "PROVISIONAL policy, not measured figures -- deliberately conservative"
+say "guesses. Check them against real RSS on this host before treating any of"
+say "this as production sizing. The script header says how."
+say ""
+
+if [ "$CAP" -lt 1 ]; then
+  warn "this host cannot serve even ONE front-door session after the reserve."
+  [ "$PG_RESERVE_MIB" -gt 0 ] &&
+    warn "a co-hosted Postgres is taking ${PG_RESERVE_MIB} MiB of it; a managed or separate-host database would free that."
+  die "refusing to size the front door onto this host"
+fi
+
+if [ "$MEM_MIB" -lt 2048 ]; then
+  warn "under 2 GB. The front door will run at a REDUCED session cap (${CAP} rather"
+  warn "than ${MAX_CAP}). That is a real reduction in what this host serves, not a"
+  warn "tuning nicety: each session may hold up to ~116 MiB across the per-session"
+  warn "caps, which no budget on this surface accounts for."
+  if [ "$PG_RESERVE_MIB" -gt 0 ]; then
+    warn "AND Postgres is sharing this box. On a host this size, give the database"
+    warn "its own instance or use sqlite -- co-hosting both is the shape most"
+    warn "likely to end in an out-of-memory kill."
+  fi
+fi
+
+if [ "$NCPU" -lt 2 ]; then
+  warn "single CPU. Front-door PAT auth is SHA-256 and cheap, but argon2id"
+  warn "passphrase login is configured m=64 MiB, p=4 -- four parallel lanes"
+  warn "serialized onto one core, so interactive logins are ~4x slower than the"
+  warn "profile assumes, and TLS handshakes land on that same core."
+fi
+
+if [ "$MODE" = "print" ]; then
+  emit_config
+  exit 0
+fi
+
+if [ "$MODE" = "check" ]; then
+  say ""
+  say "Preflight only; nothing was changed. Re-run with --apply to install."
+  info "would write config : $CONFIG"
+  info "would write unit   : $UNIT"
+  [ "$PG_LOCAL" = "yes" ] && info "would install      : postgresql (via ${PKG:-<no package manager found>})"
+  say ""
+  exit 0
+fi
+
+# ------------------------------------------------------------------ interview
+#
+# Every prompt is pre-filled with the value the preflight computed or a flag
+# supplied, so pressing return through the whole interview yields exactly the
+# non-interactive result. The two paths must not diverge, or what an operator
+# reviews on screen stops being what gets written.
+
+warn "--apply has not been proved end to end on ANY host, and the"
+warn "package-manager branch for this distro is UNTESTED. It installs"
+warn "packages, creates a system user and writes a systemd unit. Use a"
+warn "disposable VM until you have seen it work."
+
+[ "$(id -u)" -eq 0 ] || die "--apply needs root (writes $UNIT)"
+[ -x "$PREFIX/autodb" ] || die "no autodb binary at $PREFIX/autodb; run install.sh first"
+
+if [ "$TTY_OK" -eq 1 ]; then
+  say "Configuration -- press return to accept each default."
+  say ""
+fi
+
+ask RUN_USER  "service account" "$RUN_USER"
+ask BIND      "front-door bind address" "$BIND"
+ask CONFIG    "config file path" "$CONFIG"
+CONFIG_DIR="$(dirname "$CONFIG")"
+ask STATE_DIR "state directory (sqlite meta store lives here)" "$STATE_DIR"
+ask KEY_DIR   "keyfile directory (MUST NOT be the state directory)" "$KEY_DIR"
+[ "$KEY_DIR" = "$STATE_DIR" ] && die "the keyfile directory must not be the state directory: the store and the key that opens it are two halves of one envelope, and one careless tar of that directory captures both"
+
+say ""
+say "Meta store -- autodb's OWN database (users, grants, encrypted connection"
+say "secrets, the audit log). NOT a database you connect TO."
+say ""
+say "  1) sqlite      one file, no server. Right when the clients are people"
+say "                 at a terminal, and the lighter choice on a small VPS."
+say "  2) pg-local    install a NEW PostgreSQL on this machine and create the"
+say "                 database and role. Connects over the unix socket."
+say "  3) pg-remote   use an EXISTING PostgreSQL instance you already run."
+say ""
+say "Postgres suits many users and long script retention. Migration from"
+say "sqlite is supported and ONE-WAY, so choose before there is real data."
+ask_backend META_BACKEND "  meta store (1|2|3, or a name)" "$META_BACKEND"
+apply_backend
+
+case "$META_BACKEND" in
+  pg-local)
+    [ -n "$PKG" ] || die "no supported package manager found; choose pg-remote and point --meta-dsn at an instance you install yourself"
+    say ""
+    ask PG_DB   "  database name" "$PG_DB"
+    ask PG_ROLE "  database role (matching the service account enables peer auth)" "${PG_ROLE:-$RUN_USER}"
+    say ""
+    say "  It will connect over the local unix socket, so [meta] allow_insecure_dsn"
+    say "  is set. That key exists precisely for this case -- a trusted local"
+    say "  channel -- and it is NAMED so the choice stays visible to whoever reads"
+    say "  the config. sslmode=verify-full cannot describe a unix socket."
+    ;;
+  pg-remote)
+    say ""
+    say "  Existing Postgres. Its transport is CHECKED AT STARTUP: the DSN needs"
+    say "  sslmode=verify-full with an explicit sslrootcert, or autodb refuses to"
+    say "  start. 'require' encrypts but authenticates NOTHING. An absent sslmode"
+    say "  is not unspecified -- libpq defaults to 'prefer', which silently falls"
+    say "  back to plaintext."
+    say "  If it is reached over a unix socket or same-host loopback, that is the"
+    say "  one case for allow_insecure_dsn, which you can add afterwards."
+    ask META_DSN "  dsn" "$META_DSN"
+    [ -n "$META_DSN" ] || die "pg-remote requires a dsn"
+    case "$META_DSN" in
+      *sslmode=verify-full*) ;;
+      *) warn "the DSN does not request sslmode=verify-full; autodb will refuse to start unless allow_insecure_dsn is set, and this store holds your encrypted connection secrets" ;;
+    esac
+    ;;
+esac
+
+say ""
+say "TLS on the front door. Leave the certificate empty to write the keys"
+say "commented out and supply them later."
+ask TLS_CERT "  tls_cert_file" "$TLS_CERT"
+if [ -n "$TLS_CERT" ]; then
+  ask TLS_KEY   "  tls_key_file" "$TLS_KEY"
+  ask TLS_HOSTS "  tls_host_names (comma-separated)" "$TLS_HOSTS"
+  [ -n "$TLS_KEY" ] || die "a certificate without a key cannot serve TLS"
+fi
+
+say ""
+say "Client addresses allowed to reach this daemon, enforced at login."
+say "Loopback only is the safe default; widen it deliberately and narrowly."
+ask IP_ALLOWLIST "  ip_allowlist (TOML array)" "$IP_ALLOWLIST"
+
+# The meta answer may have changed what this host has to spare.
+compute_sizing
+reconcile_floor
+
+say ""
+say "Memory sizing. These two move TOGETHER: the general lane's floor is"
+say "max_sessions_global x ${WATERMARK_MIB} MiB, so raising the cap without raising the"
+say "lane fails start. Lowering the CAP is how a small host asks for a"
+say "smaller lane."
+ask_uint CAP      "  max_sessions_global" "$CAP"
+ask_uint LANE_MIB "  general lane (MiB)" "$LANE_MIB"
+reconcile_floor
+
+say ""
+ask_yn START_NOW "enable and start the service now?" "$START_NOW"
+
+# -------------------------------------------------------------------- summary
+
+say ""
+say "About to write"
+say "--------------"
+info "config             : $CONFIG"
+info "unit               : $UNIT"
+info "service account    : $RUN_USER"
+info "bind               : $BIND"
+info "meta engine        : $META_ENGINE$( [ "$PG_LOCAL" = yes ] && printf ' (local install)' )"
+[ "$PG_LOCAL" = "yes" ] && info "  database/role    : $PG_DB / ${PG_ROLE:-$RUN_USER}"
+[ -n "$META_DSN" ] && [ "$PG_LOCAL" != "yes" ] && info "  dsn              : $META_DSN"
+info "state dir          : $STATE_DIR"
+info "keyfile dir        : $KEY_DIR"
+info "max_sessions_global: $CAP"
+info "general lane       : ${LANE_MIB} MiB (${LANE_BYTES} bytes)"
+info "GOMEMLIMIT         : ${GOMEMLIMIT_MIB} MiB"
+info "MemoryMax          : ${MEMORYMAX_MIB} MiB"
+if [ -n "$TLS_CERT" ]; then info "tls                : $TLS_CERT"
+else info "tls                : NOT configured (keys written commented out)"; fi
+info "start now          : $START_NOW"
+say ""
+
+ask_yn CONFIRM "proceed?" "yes"
+[ "$CONFIRM" = "yes" ] || die "aborted; nothing was written"
+say ""
+
+# ---------------------------------------------------------------------- apply
+
+id "$RUN_USER" >/dev/null 2>&1 || {
+  say "creating service account $RUN_USER"
+  useradd --system --home-dir "$STATE_DIR" --shell /usr/sbin/nologin "$RUN_USER"
+}
+
+mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$KEY_DIR"
+chown "$RUN_USER:$RUN_USER" "$STATE_DIR" "$KEY_DIR"
+# The keyfile directory is deliberately NOT the one holding the meta store.
+chmod 0700 "$KEY_DIR"
+
+install_postgres() {
+  say "installing PostgreSQL via $PKG"
+  case "$PKG" in
+    apt-get)
+      DEBIAN_FRONTEND=noninteractive apt-get update -qq
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql
+      ;;
+    dnf|yum)
+      "$PKG" install -y postgresql-server
+      # RHEL-family ships an uninitialised cluster.
+      if [ ! -s /var/lib/pgsql/data/PG_VERSION ]; then
+        postgresql-setup --initdb
+      fi
+      ;;
+    pacman)
+      pacman -Sy --noconfirm postgresql
+      if [ ! -s /var/lib/postgres/data/PG_VERSION ]; then
+        su - postgres -c "initdb --locale=C.UTF-8 -E UTF8 -D /var/lib/postgres/data"
+      fi
+      ;;
+    apk)
+      apk add --no-progress postgresql
+      if [ ! -s /var/lib/postgresql/data/PG_VERSION ]; then
+        su - postgres -c "initdb -D /var/lib/postgresql/data"
+      fi
+      ;;
+    zypper)
+      zypper --non-interactive install postgresql-server
+      ;;
+    *) die "no supported package manager for a Postgres install" ;;
+  esac
+
+  systemctl enable --now postgresql
+  # The cluster needs to be accepting connections before roles can be made.
+  _tries=0
+  until su - postgres -c "psql -tAc 'SELECT 1'" >/dev/null 2>&1; do
+    _tries=$(( _tries + 1 ))
+    [ "$_tries" -gt 30 ] && die "postgres did not become ready after 30s"
+    sleep 1
+  done
+
+  _role="${PG_ROLE:-$RUN_USER}"
+  # Idempotent: re-running the installer must not fail on an existing role.
+  su - postgres -c "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname='$_role'\"" \
+    | grep -q 1 || su - postgres -c "psql -c \"CREATE ROLE \\\"$_role\\\" LOGIN\""
+  su - postgres -c "psql -tAc \"SELECT 1 FROM pg_database WHERE datname='$PG_DB'\"" \
+    | grep -q 1 || su - postgres -c "createdb -O \"$_role\" \"$PG_DB\""
+
+  # Peer auth over the unix socket: the OS user the service runs as maps to
+  # the like-named Postgres role, so there is no password to store anywhere.
+  META_DSN="postgres:///${PG_DB}?host=$(pg_socket_dir)"
+  say "postgres ready; meta dsn is $META_DSN"
+}
+
+[ "$PG_LOCAL" = "yes" ] && install_postgres
+
+if [ -e "$CONFIG" ]; then
+  warn "$CONFIG exists; leaving it alone. Compare it against the numbers above."
+else
+  say "writing $CONFIG"
+  emit_config > "$CONFIG"
+  chown root:"$RUN_USER" "$CONFIG"
+  chmod 0640 "$CONFIG"
+fi
+
+say "writing $UNIT"
+_after="network-online.target"
+_wants="network-online.target"
+if [ "$PG_LOCAL" = "yes" ]; then
+  _after="$_after postgresql.service"
+  _wants="$_wants postgresql.service"
+fi
+cat > "$UNIT" <<UNITFILE
+[Unit]
+Description=autodb PostgreSQL-wire front door
+Documentation=https://github.com/yongjohnlee80/autodb
+After=$_after
+Wants=$_wants
+
+[Service]
+Type=simple
+User=$RUN_USER
+Group=$RUN_USER
+ExecStart=$PREFIX/autodb --serve --config $CONFIG
+Restart=on-failure
+RestartSec=5s
+
+# autodb reads no physical-memory figure of its own, so the ceiling is set
+# here. GOMEMLIMIT makes Go's collector aggressive BEFORE the kernel gets
+# violent; MemoryMax turns an overrun into a predictable cgroup kill of this
+# service rather than the OOM killer choosing a victim elsewhere on the box.
+Environment=GOMEMLIMIT=${GOMEMLIMIT_MIB}MiB
+MemoryMax=${MEMORYMAX_MIB}M
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=$STATE_DIR $KEY_DIR
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
+UNITFILE
+
+systemctl daemon-reload
+
+say ""
+if [ "$START_NOW" = "yes" ] && [ -n "$TLS_CERT" ]; then
+  say "starting autodb-frontdoor"
+  systemctl enable --now autodb-frontdoor
+  systemctl --no-pager --lines=0 status autodb-frontdoor || true
+elif [ "$START_NOW" = "yes" ]; then
+  warn "not starting: TLS is not configured, and a front door without it would"
+  warn "either refuse to bind or serve every token in cleartext. Add the tls_*"
+  warn "keys to $CONFIG first, then: systemctl enable --now autodb-frontdoor"
+fi
+
+say ""
+say "Installed. Remaining steps:"
+_n=1
+if [ -z "$TLS_CERT" ]; then
+  info "$_n. Put TLS material in place, uncomment the tls_* keys in $CONFIG,"
+  info "   and set [frontdoor] enabled = true -- it is false until TLS exists,"
+  info "   because enabled without TLS is refused at load."
+  _n=$(( _n + 1 ))
+fi
+case "$IP_ALLOWLIST" in
+  *127.0.0.1*)
+    info "$_n. Widen [security] ip_allowlist -- it is loopback-only, so nothing"
+    info "   remote can log in yet."
+    _n=$(( _n + 1 )) ;;
+esac
+if [ "$START_NOW" != "yes" ]; then
+  info "$_n. Start it:  systemctl enable --now autodb-frontdoor"
+  _n=$(( _n + 1 ))
+fi
+info "$_n. Enrol the keyslot so a reboot does not lock the store:"
+info "     autodb keyslot enroll"
+info "   then uncomment service_keyfile in $CONFIG and restart."
+_n=$(( _n + 1 ))
+info "$_n. Expose a connection for front-door use and mint a PAT bound to it."
+say ""
