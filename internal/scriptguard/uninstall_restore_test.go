@@ -146,11 +146,14 @@ func TestUninstallBackup_RestoresACommittedDatabase(t *testing.T) {
 // permissions-changed-underneath cases, which cannot be produced portably in
 // a test.
 //
-// LIMIT, stated rather than left implied: the archive VERIFICATION step (tar
-// listed back, store present by name) is a second layer that no cell here
-// triggers, because there is no portable way to make tar exit zero while
-// omitting a file it was handed. It is defence in depth behind this guard, not
-// something these cells prove.
+// LIMIT, stated rather than left implied: the POST-TAR verification branches
+// (archive listed back, store present by name) are not reached by any cell
+// here. There is no portable way to make tar exit zero while omitting a file
+// it was handed, and the one accidental trigger that existed -- a store name
+// grep read as a regex -- was a bug and is now fixed, which removed the vector
+// with it. What IS covered is the cleanup those branches share: every backup
+// failure goes through abort_backup, and this cell proves that helper removes
+// the staging area and leaves no archive behind.
 func TestUninstallBackup_AFailedCopyAbortsWithoutDeleting(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: an unreadable file is still readable, so this " +
@@ -202,5 +205,51 @@ func TestUninstallBackup_AFailedCopyAbortsWithoutDeleting(t *testing.T) {
 	// And no partial archive may be left looking like a good one.
 	if archives, _ := filepath.Glob(filepath.Join(backupDir, "autodb-*.tar.gz")); len(archives) != 0 {
 		t.Errorf("a partial archive was left behind: %v", archives)
+	}
+}
+
+// A FILENAME IS NOT A REGEX.
+//
+// Found while probing for a way to test the verification branches: the archive
+// check grepped for the store's name without -F, so a store called `me*ta.db`
+// failed its own verification. The archive was perfectly good and got deleted
+// for containing a name grep read as a pattern -- a false negative that
+// destroys a valid backup, which is worse than the missing check it was meant
+// to be.
+//
+// This is a regression cell, not a hypothetical: the failure was reproduced
+// before the fix.
+func TestUninstallBackup_StoreNameIsNotTreatedAsARegex(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A regex metacharacter in the name. `me*` as a pattern matches "m"
+	// followed by any number of "e" -- and so does NOT match the literal.
+	storePath := filepath.Join(stateDir, "me*ta.db")
+	if err := os.WriteFile(storePath, []byte("store"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storePath+"-wal", []byte("committed pages"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfgPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(cfgPath,
+		[]byte("[meta]\nengine = \"sqlite\"\npath = \""+storePath+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	backupDir := filepath.Join(dir, "backups")
+
+	out, err := exec.Command("sh", scriptPath(t), "--backup-only",
+		"--config", cfgPath, "--backup-dir", backupDir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("a store whose name contains a regex metacharacter failed its own "+
+			"verification: %v\n%s", err, out)
+	}
+	archives, _ := filepath.Glob(filepath.Join(backupDir, "autodb-*.tar.gz"))
+	if len(archives) != 1 {
+		t.Fatalf("expected one archive, found %v\n%s", archives, out)
 	}
 }

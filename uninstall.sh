@@ -394,10 +394,25 @@ if [ "$DO_BACKUP" = "yes" ]; then
     # point of taking a backup is that the deletion afterwards is survivable,
     # and a silently partial archive removes exactly that property while
     # looking like it provided it.
+    # ABORT THROUGH ONE PATH, and remove BOTH the staging area and the
+    # half-made archive.
+    #
+    # A review found the verification branches removing only the staging area,
+    # so a corrupt or incomplete tarball survived under a name that looks
+    # exactly like a completed backup -- something a later operator can trust,
+    # restore from, or delete the real data on the strength of. The failure
+    # that matters is not the tar exiting nonzero; it is the artifact left
+    # behind afterwards. One helper, so the next branch added here cannot
+    # remember one half and forget the other.
+    abort_backup() { # abort_backup <message...>
+      rm -rf "$_stage"
+      [ -n "${_archive:-}" ] && rm -f "$_archive"
+      die "$*"
+    }
+
     copy_or_abort() { # copy_or_abort <src>
       if ! cp -p "$1" "$_stage/autodb-$_ts/"; then
-        rm -rf "$_stage"
-        die "could not copy $1 into the backup staging area.
+        abort_backup "could not copy $1 into the backup staging area.
        NOTHING HAS BEEN DELETED. Fix the cause -- a full filesystem and a
        permission change are the usual ones -- and run this again."
       fi
@@ -416,8 +431,7 @@ if [ "$DO_BACKUP" = "yes" ]; then
     # Certificates are reissuable, but keeping them saves redistributing ca.pem.
     if [ -d "$CONFIG_DIR/tls" ]; then
       if ! cp -rp "$CONFIG_DIR/tls" "$_stage/autodb-$_ts/"; then
-        rm -rf "$_stage"
-        die "could not copy the TLS material into the backup. NOTHING HAS BEEN DELETED."
+        abort_backup "could not copy the TLS material into the backup. NOTHING HAS BEEN DELETED."
       fi
     fi
 
@@ -440,8 +454,7 @@ that key.
 README
 
     if ! tar -czf "$_archive" -C "$_stage" "autodb-$_ts"; then
-      rm -rf "$_stage" "$_archive"
-      die "could not write $_archive. NOTHING HAS BEEN DELETED."
+      abort_backup "could not write $_archive. NOTHING HAS BEEN DELETED."
     fi
     chmod 0600 "$_archive"
 
@@ -451,21 +464,24 @@ README
     # it. This lists the archive and requires the store to be in there by name,
     # so a truncated or mis-staged tarball is caught while the source still
     # exists rather than after it does not.
-    _listing="$(tar -tzf "$_archive" 2>/dev/null)" || {
-      rm -rf "$_stage"
-      die "$_archive cannot be read back. NOTHING HAS BEEN DELETED."
-    }
+    _listing="$(tar -tzf "$_archive" 2>/dev/null)" || \
+      abort_backup "the archive could not be read back and has been removed.
+       NOTHING HAS BEEN DELETED."
     _base="$(basename -- "$STORE_FILE")"
-    if ! printf '%s\n' "$_listing" | grep -qx "autodb-$_ts/$_base"; then
-      rm -rf "$_stage"
-      die "$_archive does not contain $_base. NOTHING HAS BEEN DELETED."
+    # -F, because the pattern is a FILENAME and not a regex. Without it a
+    # store called `me*ta.db` failed its own verification -- the archive was
+    # perfectly good and got deleted for containing a name grep read as a
+    # pattern. A false negative here destroys a valid backup, which is worse
+    # than the missing check it was meant to be.
+    if ! printf '%s\n' "$_listing" | grep -Fqx "autodb-$_ts/$_base"; then
+      abort_backup "the archive did not contain $_base and has been removed, so
+       nothing is left looking like a usable backup. NOTHING HAS BEEN DELETED."
     fi
     for f in "$STORE_FILE-wal" "$STORE_FILE-shm"; do
       [ -e "$f" ] || continue
-      if ! printf '%s\n' "$_listing" | grep -qx "autodb-$_ts/$(basename -- "$f")"; then
-        rm -rf "$_stage"
-        die "$_archive is missing $(basename -- "$f"), which exists on disk and is
-       part of the database. NOTHING HAS BEEN DELETED."
+      if ! printf '%s\n' "$_listing" | grep -Fqx "autodb-$_ts/$(basename -- "$f")"; then
+        abort_backup "the archive was missing $(basename -- "$f"), which exists on disk
+       and is part of the database, and has been removed. NOTHING HAS BEEN DELETED."
       fi
     done
     rm -rf "$_stage"
