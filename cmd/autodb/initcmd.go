@@ -36,14 +36,19 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// initAuditIP is the address this ceremony audits under.
+// initAuditIP is the address this ceremony acts and audits under.
 //
 // A local process has no peer address, and the audit row must say something
 // true rather than something empty. Loopback is what it is: the operation
-// arrived from this machine. It is also what the allowlist admits by default,
-// so an install that has narrowed [security] ip_allowlist to exclude loopback
-// refuses --init for the same reason it would refuse the TUI on the same box --
-// consistently, rather than because this command carved an exception.
+// arrived from this machine.
+//
+// It is NOT self-evidently admitted, which a first version of this file
+// asserted and a review disproved. Bootstrap takes an ip only for the session
+// and audit rows and checks admission NOWHERE, so an install whose
+// ip_allowlist excludes loopback would still have let --init create the
+// permanent administrator -- refusing only on a later rerun, by which time
+// there is nothing left to protect. admitBootstrap below is the gate that
+// makes the intended behaviour real.
 const initAuditIP = "127.0.0.1"
 
 // defaultAdminName is offered, never imposed. "root" is what an operator
@@ -114,6 +119,9 @@ func runInit(ctx context.Context, out io.Writer, configPath string, o initOpts) 
 
 	var token string
 	if needs {
+		if err := admitBootstrap(ctx, svc); err != nil {
+			return err
+		}
 		fmt.Fprintln(out, "No users exist yet. Creating the first administrator.")
 		fmt.Fprintln(out, "")
 		fmt.Fprintln(out, "This passphrase wraps the master key that encrypts every connection")
@@ -131,6 +139,41 @@ func runInit(ctx context.Context, out io.Writer, configPath string, o initOpts) 
 	}
 
 	return enrolKeyslot(ctx, out, svc, cfg, token)
+}
+
+// admitBootstrap refuses an address the allowlist does not cover, BEFORE the
+// irreversible effect.
+//
+// The webserver learned this the hard way and its gateway carries the finding:
+// a caller at a non-admitted address could reach Bootstrap, become the
+// permanent first administrator, and only then be refused. Nothing undoes an
+// account or restores one-shot bootstrap state, so the rightful operator would
+// find the daemon already claimed. This command had the same hole.
+//
+// THE ORDERING IS INVERTED HERE relative to ordinary login, deliberately and
+// for a reason that does not generalise: login checks the address after
+// credentials so that an early refusal cannot reveal whether a name exists.
+// Before bootstrap there are no accounts, so there is no such question to leak
+// -- while there IS an irreversible effect to protect, which login does not
+// have.
+//
+// The GLOBAL layer only, because there is no user whose rows could be
+// consulted. That is the strictest of the two layers rather than a relaxation:
+// an address no configured prefix covers cannot claim this daemon.
+func admitBootstrap(ctx context.Context, svc *auth.Service) error {
+	admitted, err := svc.IPAllowed(ctx, initAuditIP)
+	if err != nil {
+		return fmt.Errorf("checking address admission: %w", err)
+	}
+	if !admitted {
+		return fmt.Errorf("refusing to bootstrap from %s: no [security] ip_allowlist prefix "+
+			"covers it.\n"+
+			"       Creating the first administrator is irreversible, so it is gated on the\n"+
+			"       same allowlist every login is. Add a prefix that covers loopback (the\n"+
+			"       shipped default is 127.0.0.1/32 and ::1/128) and run --init again",
+			initAuditIP)
+	}
+	return nil
 }
 
 // bootstrapAdmin creates the first administrator and returns its token.
@@ -209,17 +252,34 @@ func enrolKeyslot(ctx context.Context, out io.Writer, svc *auth.Service, cfg con
 	case err == nil:
 		// enrolled just now; the report below says so.
 	case errors.Is(err, auth.ErrServiceKeyslotExists):
-		// ALREADY DONE IS NOT A FAILURE, and this case is the difference
-		// between a command an installer can re-run and one it cannot. The
-		// slot is cut once per install; a second --init finding it present has
-		// arrived at the state it was asked to produce. Erroring here made a
-		// repeat run fail on a healthy install, which is how an idempotent
-		// installer ends up reporting a problem that does not exist.
+		// ALREADY DONE IS NOT A FAILURE -- that is what makes this command
+		// safe for an installer to call unconditionally. But the SLOT ROW IS
+		// NOT EVIDENCE THE UNLOCK WORKS, which a first version of this file
+		// treated it as. EnrollServiceKeyslot returns Exists from the database
+		// row alone, before it ever opens service_keyfile, so a present row
+		// beside a deleted, wrong-moded or mismatched keyfile reported a
+		// reboot-safe install whose next start would sit locked. A review
+		// found it.
 		//
-		// Deliberately NOT re-cut: replacing a live slot would invalidate the
-		// keyfile the running daemon unlocks with, turning a no-op into an
-		// outage on the next restart.
+		// So prove the pair instead of trusting half of it, by doing exactly
+		// what the next boot does. A success here is the same success the
+		// daemon will have; a failure names which half is wrong.
+		//
+		// Still NOT re-cut on failure: replacing a live slot strands the
+		// keyfile that opened the old one and leaves the operator holding a
+		// file that looks exactly right. Recovery is theirs to choose.
+		if verr := svc.UnlockWithServiceKeyslot(ctx); verr != nil {
+			return fmt.Errorf("a service keyslot already exists, but it does not open: %w\n"+
+				"       The administrator is fine; the UNATTENDED UNLOCK IS NOT -- the next\n"+
+				"       restart will leave the store locked and front-door clients will get\n"+
+				"       57P03 until someone logs in by hand.\n"+
+				"       The slot row and %s disagree. Nothing was re-cut, because that would\n"+
+				"       strand whichever half is still good. Restore the keyfile from backup,\n"+
+				"       or remove the slot from a logged-in admin session (autodb --ui, SPC K)\n"+
+				"       and run --init again", verr, cfg.Security.ServiceKeyfile)
+		}
 		fmt.Fprintf(out, "Unattended unlock: already enabled (%s)\n", cfg.Security.ServiceKeyfile)
+		fmt.Fprintln(out, "  Verified by opening the slot, not by the presence of its row.")
 		return nil
 	default:
 		// Reported, not swallowed: the administrator exists either way, and an
@@ -270,8 +330,14 @@ func ttyPrompt(label, def string) (string, error) {
 // ttySecret reads a line without echoing it.
 //
 // NEVER from a flag or an environment variable: an argv passphrase is visible
-// in ps to every user on the box, and an environment one leaks into child
-// processes and crash dumps. The terminal is the only input for this.
+// in ps to every user on the box, and an environment one is inherited by every
+// child process. The terminal is the only input for this.
+//
+// It does NOT follow that the passphrase is unreachable once read. It becomes
+// an ordinary Go string with the lifetime the runtime gives it, so a core dump
+// of this process could still contain it. Removing the two channels an
+// unprivileged neighbour can read is what this buys; anything stronger would
+// need a deliberate dumpability design, and none is claimed here.
 func ttySecret(label string) (string, error) {
 	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {

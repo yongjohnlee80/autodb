@@ -12,11 +12,29 @@ import (
 // writeInitConfig builds a minimal, valid config for the ceremony. keyfile ==
 // "" leaves [security] service_keyfile unset, which is the opted-out install.
 func writeInitConfig(t *testing.T, keyfile string) string {
+	return writeInitConfigAllow(t, keyfile, "")
+}
+
+// writeInitConfigAllow additionally pins [security] ip_allowlist. An empty
+// allow takes the shipped default, which covers loopback.
+func writeInitConfigAllow(t *testing.T, keyfile, allow string) string {
+	return writeInitConfigAt(t, filepath.Join(t.TempDir(), "meta.db"), keyfile, allow)
+}
+
+// writeInitConfigAt pins the store path, so two configs can address ONE store --
+// which is how a cell observes whether a refused attempt left anything behind.
+func writeInitConfigAt(t *testing.T, storePath, keyfile, allow string) string {
 	t.Helper()
 	dir := t.TempDir()
-	body := "[meta]\nengine = \"sqlite\"\npath = " + quote(filepath.Join(dir, "meta.db")) + "\n"
+	body := "[meta]\nengine = \"sqlite\"\npath = " + quote(storePath) + "\n"
+	if keyfile != "" || allow != "" {
+		body += "\n[security]\n"
+	}
+	if allow != "" {
+		body += "ip_allowlist = [" + quote(allow) + "]\n"
+	}
 	if keyfile != "" {
-		body += "\n[security]\nservice_keyfile = " + quote(keyfile) + "\n"
+		body += "service_keyfile = " + quote(keyfile) + "\n"
 	}
 	p := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
@@ -199,5 +217,124 @@ func TestInit_SecondRunRefusesAWrongPassphrase(t *testing.T) {
 	if err := runInit(context.Background(), &second, cfgPath,
 		scripted("root", "wrong passphrase entirely")); err == nil {
 		t.Fatal("a wrong passphrase was accepted on the login path")
+	}
+}
+
+// P1a (review of #121): AN UNADMITTED ADDRESS MUST NOT CLAIM THE DAEMON.
+//
+// Bootstrap takes an ip only for its session and audit rows and checks
+// admission nowhere, so before admitBootstrap existed an install whose
+// ip_allowlist excluded loopback still let --init create the PERMANENT first
+// administrator, and refused only on a later rerun -- by which point there is
+// nothing left to protect. The webserver's gateway carries the same finding
+// about the same call.
+//
+// The second assertion is the load-bearing one: refusing is worthless if the
+// account was created on the way out, so the store must still be awaiting
+// bootstrap afterwards.
+func TestInit_RefusesBootstrapFromAnUnadmittedAddress(t *testing.T) {
+	store := filepath.Join(t.TempDir(), "meta.db")
+	// A prefix that cannot contain 127.0.0.1.
+	blocked := writeInitConfigAt(t, store, "", "10.99.0.0/24")
+
+	var out strings.Builder
+	err := runInit(context.Background(), &out, blocked,
+		scripted("root", "correct horse battery", "correct horse battery"))
+	if err == nil {
+		t.Fatal("bootstrap was allowed from an address no allowlist prefix covers; " +
+			"the first administrator is irreversible")
+	}
+	if !strings.Contains(err.Error(), "refusing to bootstrap") {
+		t.Errorf("error does not name the cause: %v", err)
+	}
+
+	// THE LOAD-BEARING HALF. Refusing is worthless if the account was created
+	// on the way out, and the gate runs before any output so the refusal alone
+	// proves nothing. So point a PERMISSIVE config at the SAME store: if it can
+	// still bootstrap, the refused attempt left the store virgin. If the
+	// account had been created, this would take the login path instead.
+	permissive := writeInitConfigAt(t, store, "", "127.0.0.1/32")
+	var out2 strings.Builder
+	if err := runInit(context.Background(), &out2, permissive,
+		scripted("root", "correct horse battery", "correct horse battery")); err != nil {
+		t.Fatalf("the same store could no longer be bootstrapped, so the refused attempt "+
+			"created something: %v\n%s", err, out2.String())
+	}
+	if !strings.Contains(out2.String(), "No users exist yet") {
+		t.Errorf("the store already had users after a refused bootstrap:\n%s", out2.String())
+	}
+}
+
+// The gate must ADMIT a covered address, or it is just an outage.
+func TestInit_AdmitsBootstrapFromAnExplicitlyAllowedAddress(t *testing.T) {
+	cfgPath := writeInitConfigAllow(t, "", "127.0.0.1/32")
+	var out strings.Builder
+	if err := runInit(context.Background(), &out, cfgPath,
+		scripted("root", "correct horse battery", "correct horse battery")); err != nil {
+		t.Fatalf("an explicitly allowed address was refused: %v", err)
+	}
+}
+
+// P1b (review of #121): A SLOT ROW IS NOT EVIDENCE THE UNLOCK WORKS.
+//
+// EnrollServiceKeyslot returns ErrServiceKeyslotExists from the database row
+// alone, before it opens service_keyfile. So reporting "already enabled" on
+// that error claimed a reboot-safe install while the keyfile was gone and the
+// next start would sit locked. These two cells are the deleted and the
+// corrupted half.
+func TestInit_RerunRefusesWhenTheKeyfileIsMissing(t *testing.T) {
+	keyfile := filepath.Join(t.TempDir(), "service.key")
+	cfgPath := writeInitConfig(t, keyfile)
+
+	var first strings.Builder
+	if err := runInit(context.Background(), &first, cfgPath,
+		scripted("root", "correct horse battery", "correct horse battery")); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if err := os.Remove(keyfile); err != nil {
+		t.Fatal(err)
+	}
+
+	var second strings.Builder
+	err := runInit(context.Background(), &second, cfgPath,
+		scripted("root", "correct horse battery"))
+	if err == nil {
+		t.Fatal("a rerun with the keyfile deleted reported success; the next restart " +
+			"would leave the store locked and clients getting 57P03")
+	}
+	if !strings.Contains(err.Error(), "does not open") {
+		t.Errorf("error does not name the cause: %v", err)
+	}
+	if strings.Contains(second.String(), "already enabled") {
+		t.Errorf("output still claims the unlock is enabled:\n%s", second.String())
+	}
+	// And it must not have re-cut, which would strand the surviving half.
+	if _, serr := os.Stat(keyfile); serr == nil {
+		t.Error("a replacement keyfile was written; the slot was re-cut behind the operator")
+	}
+}
+
+func TestInit_RerunRefusesWhenTheKeyfileIsCorrupt(t *testing.T) {
+	keyfile := filepath.Join(t.TempDir(), "service.key")
+	cfgPath := writeInitConfig(t, keyfile)
+
+	var first strings.Builder
+	if err := runInit(context.Background(), &first, cfgPath,
+		scripted("root", "correct horse battery", "correct horse battery")); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	// Right size, right mode, wrong bytes: the shape that passes a existence
+	// check and fails the only thing that matters.
+	if err := os.WriteFile(keyfile, []byte(strings.Repeat("x", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var second strings.Builder
+	if err := runInit(context.Background(), &second, cfgPath,
+		scripted("root", "correct horse battery")); err == nil {
+		t.Fatal("a rerun with a keyfile that does not match the slot reported success")
+	}
+	if strings.Contains(second.String(), "already enabled") {
+		t.Errorf("output still claims the unlock is enabled:\n%s", second.String())
 	}
 }
