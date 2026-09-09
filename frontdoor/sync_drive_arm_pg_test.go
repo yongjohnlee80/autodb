@@ -193,3 +193,73 @@ func TestPGFlushDrive_AWithheldFlushDoesNotDropTheSession(t *testing.T) {
 	}
 	t.Fatal("the recovering Sync never produced a readiness")
 }
+
+// AND THE ARM CARRIES THE TARGET'S ERROR, so a failed statement is reported as
+// failed rather than as unresolved.
+//
+// This exists because a mutation showed the other half unwitnessed. Reverting
+// the observation change — putting obs.targetErr back behind `own != nil`, so
+// the segment path records nothing — left every core/exec cell green. The arm
+// would have carried TargetErr nil on a segment that HAD errored, and Arm()
+// would have fallen to ArmUnresolved: "the statement ran and its outcome is not
+// known to the front door", told to a client whose statement demonstrably
+// failed at the target.
+//
+// "Unresolved" is the honest answer when nothing is known. Saying it when the
+// error was observed and thrown away is not honesty, it is a lost fact.
+func TestPGSyncDrive_TheArmReportsATargetFailureAsFailed(t *testing.T) {
+	_, secret, database, eng := pgLoopWithEngine(t)
+
+	// Sized so the target's own ErrorResponse is what trips the cap: the
+	// missing relation's name is long deliberately.
+	cap := int64(80)
+	_, events, listenAddr := listenerWith(t, Options{
+		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, testOutputCap: &cap,
+	})
+
+	fe := pgClient(t, listenAddr, secret, database)
+	// The statement fails AT THE TARGET (42P01). Still no Execute, so the Sync
+	// drive is the only thing that can deliver — or observe — anything.
+	fe.Send(&pgproto3.Parse{Name: "bad",
+		Query: "SELECT * FROM a_relation_that_does_not_exist_and_has_a_deliberately_long_name_x"})
+	fe.Send(&pgproto3.Describe{ObjectType: 'S', Name: "bad"})
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	sawGate := false
+	for range 32 {
+		m, err := fe.Receive()
+		if err != nil {
+			t.Fatalf("the front door closed without telling the client: %v", err)
+		}
+		if e, ok := m.(*pgproto3.ErrorResponse); ok && e.Detail == ruleOutputCap {
+			sawGate = true
+		}
+		if _, ok := m.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+	if !sawGate {
+		t.Skip("the cap did not withhold this segment's output, so there is no arm to " +
+			"inspect; the cell cannot show what it exists for")
+	}
+
+	var outcome string
+	for _, e := range events() {
+		if e.Kind == "fd.stmt_outcome" && e.Reason == ruleOutputCap {
+			outcome = e.Detail
+		}
+	}
+	if outcome == "" {
+		t.Fatalf("no fd.stmt_outcome audited.\nevents=%v", kinds(events()))
+	}
+	// THE PROPERTY: the observed target failure reached the arm. With the
+	// observation dropped this reads "not known to the front door" instead.
+	if strings.Contains(outcome, "not known to the front door") {
+		t.Errorf("the arm reported the outcome as UNRESOLVED for a statement that "+
+			"failed at the target — the observation was recorded and then thrown "+
+			"away: %q", outcome)
+	}
+}
