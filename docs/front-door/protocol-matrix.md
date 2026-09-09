@@ -156,7 +156,7 @@ a defect in this document, not an implementation freedom.
 | `S4 ready-I` | Authenticated; ExecSession open; idle, no transaction (`ReadyForQuery('I')`). |
 | `S4 ready-T` | In explicit transaction (`ReadyForQuery('T')`). |
 | `S4 ready-E` | Failed transaction (`ReadyForQuery('E')`) — recovery controls only (gate matrix). |
-| `S5 seg` | Inside an extended-query segment: entered by **any** extended-protocol message (`Parse`, `Bind`, `Describe`, `Execute`, `Close`, `Flush`) — a segment legally starts with `Bind`/`Describe`/`Execute` against named objects surviving from earlier segments — and left at `Sync`. Sub-state of any `S4`. |
+| `S5 seg` | Inside an extended-query segment: entered by **any** extended-protocol message (`Parse`, `Bind`, `Describe`, `Execute`, `Close`) — a segment legally starts with `Bind`/`Describe`/`Execute` against named objects surviving from earlier segments — and left at `Sync`. Sub-state of any `S4`. **`Flush` is the exception and this list used to include it loosely:** a `Flush` with nothing buffered creates no segment OBJECT and emits nothing (a documented protocol no-op, measured against a real server), so it opens no segment in the object sense; inside one it delivers what is queued and does **not** end it. **It is still charged against the segment lane** — see the Flush row. |
 | `S6 closing` | Terminate received, fatal error emitted, or lease/deadline expired; draining and releasing. |
 
 Startup-phase (`S0`–`S3`) denials are **uniform** (ADR-0075 MF5): the same
@@ -597,13 +597,13 @@ is read (criterion 3); oversized declared length refuses before any read.
 
 | Message | States | Decision | Gating | Charge | Audit | Refusal / notes |
 |---|---|---|---|---|---|---|
-| `Query` (simple) | S4-I/T/E | **Mapped: PostgreSQL implicit-transaction semantics** (MF2). Statements split and run in order; each individually classified/authorized/guarded; first error (gate or target) aborts the block, rolls back its earlier statements. Explicit `BEGIN`/`COMMIT` inside the buffer per PostgreSQL implicit-block rules (ExecSession state transitions, never passthrough). In S4-E: recovery controls only. | classify+authorize+guard per statement; attempt-before-effect per statement | general, hdr-first; output via pending-output watermark | `fd.stmt_attempt` per BUFFER on the feed / per STATEMENT in the durable record (note 1.3a); `fd.stmt_outcome` per statement | Empty query → `EmptyQueryResponse` + `ReadyForQuery` (control lane). |
+| `Query` (simple) | S4-I/T/E; **refused in S5** | **Mapped: PostgreSQL implicit-transaction semantics** (MF2). Statements split and run in order; each individually classified/authorized/guarded; first error (gate or target) aborts the block, rolls back its earlier statements. Explicit `BEGIN`/`COMMIT` inside the buffer per PostgreSQL implicit-block rules (ExecSession state transitions, never passthrough). In S4-E: recovery controls only. | classify+authorize+guard per statement; attempt-before-effect per statement | general, hdr-first; output via pending-output watermark | `fd.stmt_attempt` per BUFFER on the feed / per STATEMENT in the durable record (note 1.3a); `fd.stmt_outcome` per statement | Empty query → `EmptyQueryResponse` + `ReadyForQuery` (control lane). **Mid-segment (S5): refused with `0A000`, NOT a violation — note 4-Query-midsegment.** |
 | `Parse` | S4-I/T (opens S5) | **Native pinned-conn** (ADR MF3). Gated at Parse: classifier + profile + grants, with **immutable classification/guard metadata attached** to the statement. Retained capacity is **reserved BEFORE the Parse is forwarded**. Reservation order and the refused classes: **note 4-Parse** below. | classify+authorize at Parse | general, hdr-first + stage-2 delta; retained **reserved pre-forward**, finalized at `ParseComplete` | `fd.stmt_attempt` (parse-time gate) | Refused classes refuse **at Parse** with §8a; segment then discards through `Sync`. Reservation failure → `53400`, nothing forwarded. |
 | `Bind` | S5 | Native: raw parameter formats/values and per-column result formats preserved bit-for-bit to the pinned conn. ≤ 8192 params. **Portal retained capacity reserved BEFORE forwarding**, finalized at `BindComplete`, released on error. | none (authority is at Parse + Execute) | general, hdr-first + stage-2 delta (param array pre-allocation); retained reserved pre-forward | — | Param-count/size over limits → §8a refuse, discard-through-Sync. |
 | `Describe` (`S`/`P`) | S5 | Native passthrough: `ParameterDescription` + `RowDescription`/`NoData` from the pinned conn (Describe-before-Execute metadata preserved). | none | control-sized (general lane) | — | Unknown name → target's error verbatim. |
 | `Execute` | S5 | Native, **with Execute-time authority** (MF1): authority re-resolved + re-authorized at **every** Execute (portal re-executions included); fresh `fd.stmt_attempt` precedes every effect. Portal `maxRows` honored; `PortalSuspended` preserved; suspended portal buffers charge retained state. | re-authorize per Execute | general; output watermark; suspended buffers → retained | `fd.stmt_attempt`/`fd.stmt_outcome` per Execute | Grant revoked between Parse and Execute → §8a refuse at Execute (tested per ADR). |
 | `Close` (`S`/`P`) | S4/S5 (healthy) | Native; **releases** the named statement's/portal's retained charge, and closing a prepared statement **cascades to its portals** (§4a). Intake is control-lane-sized so saturation cannot block release — but during post-error discard it is discarded like everything else. Why, and how release still happens: **note 4-Close** below. | none | **control lane** | — | — |
-| `Flush` | S5 | Native passthrough to output pump. Discarded during post-error discard. | none | **control lane** | — | — |
+| `Flush` | S5 | Native passthrough to output pump: delivers everything the segment has queued **before** any `Sync`. Discarded during post-error discard. **ONLY `Sync` OWNS THE TERMINAL** — `Flush` sends no `ReadyForQuery` and does not end the segment, because a readiness here is read by the client as the answer to its NEXT command. Settled in code and recorded here. | none | **control lane** | — | A `Flush` with nothing buffered delivers nothing and creates no object: a protocol no-op, not a defect. **BUT IT IS COUNTED.** `H` is an extended type byte and only `Sync` is cap-exempt, so every `Flush` — empty or not — increments the segment lane's message count, and only `Sync` resets it. A client that flushes defensively inside one segment can therefore be refused `frontdoor/segment-cap` for sending nothing at all. The earlier wording here said an empty `Flush` established "no state", which was true of the objects and false of the accounting. |
 | `Sync` | S4/S5 | Native: closes the segment, resets its counters (10 000 msgs / 96 MiB), emits `ReadyForQuery` from the ExecSession state machine, ends post-error discard, releases the discarded segment's charges — and **destroys the objects that segment never confirmed**. Why a phantom object is worse than none: **note 4-Sync** below. | none | **control lane** | — | Always admissible, even at budget saturation (criterion 1). |
 | `Terminate` | any S4/S5 | Clean close: open tx → ROLLBACK via ExecSession (audited); session closed; lease + all charges released. | — | **control lane** | `fd.conn_close(cause=terminate)` | Always admissible. |
 | `CopyData`/`CopyDone`/`CopyFail` | any | **Protocol violation** (08P01): COPY is refused at classification, so no COPY sub-protocol is ever active; receiving these = fatal error + close. | — | control lane | `fd.refused` | COPY the *statement* refuses at Parse/Query gate with 0A000 (§7). |
@@ -633,6 +633,39 @@ replaced per protocol.
 **Refused classes** — COPY, LISTEN, cursor and PREPARE verbs — refuse **at
 Parse** with the §8a shape, and the segment then discards through `Sync`. A
 reservation failure refuses `53400` with nothing forwarded.
+
+**Note 4-Query-midsegment — a simple `Query` inside an open segment.**
+
+This row used to be scoped `S4-I/T/E` only, so the matrix said nothing about a
+simple `Query` arriving while an extended segment is open. It is reachable
+without `Flush`, by `Parse` then `Query`, and it is what libpq does if an
+application mixes the two protocols on one connection.
+
+**The conformance target, measured against a real server.** PostgreSQL answers
+the sequence normally: `ParseComplete`, then the `Query`'s own
+`RowDescription`/`DataRow`/`CommandComplete`, then exactly **one**
+`ReadyForQuery`. The simple `Query` implicitly ends the extended segment.
+
+**autodb refuses it, and that is a deliberate divergence.** The pinned
+connection's raw face is held by the in-flight segment, so the `Query` cannot be
+relayed without either abandoning the segment's state or interleaving two
+protocols on one connection. The refusal is `0A000` `feature_not_supported`:
+
+- **not** `08P01` — the client did not violate the protocol, it asked for
+  something real PostgreSQL supports and autodb does not;
+- **not** `FATAL`, and the connection stays usable: the guard refuses before
+  touching the wire, so the session is exactly as it was. The client's own
+  `Sync` still ends the segment the `Parse` opened and delivers its
+  `ParseComplete`;
+- **not** attributed to the target. Reporting our refusal as the target's
+  transport failing was a real defect (fixed in v0.3.1) and both the client's
+  error and the audit must agree it is ours.
+
+**Adopting PostgreSQL's behaviour is an open decision, not an oversight.** It
+would require the segment guard to release the raw face mid-segment, which is a
+change with its own risks; recorded here so the divergence is a documented
+limitation rather than a silence. Until then a client must `Sync` before sending
+a simple `Query`.
 
 **Note 4-Close — release during a discard.**
 

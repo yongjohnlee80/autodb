@@ -801,22 +801,57 @@ func recordedEffects(stopped *exec.EmitStopped, status byte, targetFailed bool) 
 // emitter saw, so a path without an engine report still says as much as it can
 // establish rather than defaulting to "unknown".
 func armFromWhatIsKnown(stopped *exec.EmitStopped, status byte, targetFailed bool) exec.EmitArm {
-	if stopped != nil {
-		return stopped.Arm()
+	observed := func() exec.EmitArm {
+		switch {
+		case targetFailed:
+			// Seen passing through the emitter: certain, just narrower than the
+			// engine's view.
+			return exec.ArmFailed
+		case status == txStatusInTx:
+			return exec.ArmPending
+		case status == txStatusAborted:
+			return exec.ArmAborted
+		default:
+			// Idle with nothing observed is NOT "committed".
+			return exec.ArmUnresolved
+		}
 	}
-	switch {
-	case targetFailed:
-		// Seen passing through the emitter: certain, just narrower than the
-		// engine's view.
-		return exec.ArmFailed
-	case status == txStatusInTx:
-		return exec.ArmPending
-	case status == txStatusAborted:
-		return exec.ArmAborted
-	default:
-		// Idle with nothing observed is NOT "committed".
-		return exec.ArmUnresolved
+	if stopped == nil {
+		return observed()
 	}
+	// THE ENGINE FIRST, BUT NOT WHEN IT SAYS IT DOES NOT KNOW.
+	//
+	// "Engine first" used to be unconditional, and that made the two sources a
+	// TRAP rather than a preference: an armed stop carrying no recorded outcome
+	// arms as Unresolved (EmitStopped.Arm's default), and returning it would
+	// discard an emitter observation that is CERTAIN — a target ErrorResponse
+	// that passed through the emitter is a fact, not an inference.
+	//
+	// Nothing arms that way today, because WireFlushSegment and
+	// WireSyncSegment do not arm at all and the drives that do own a statement
+	// outcome row. The trap is what a future arming would spring: the standing
+	// comment above this function warned that swapping the observation out
+	// "would make that path REPORT LESS than it does today", and a warning is
+	// not a mechanism.
+	//
+	// THIS IS NOT SUFFICIENT ON ITS OWN, and the first version of this comment
+	// claimed it was. Review measured the production path: reportOutputWithheld
+	// takes a non-nil report's TxStatus as the ONLY snapshot and treats an
+	// invalid one as session-lost, returning BEFORE recordedEffects is called.
+	// A Flush-shaped arm has TxStatus 0 — a Flush has no readiness to read — so
+	// arming that drive today would drop the session rather than reach this
+	// precedence at all, which is worse than the reporting regression this
+	// guards. Arming Flush/Sync therefore requires carrying a TRUTHFUL status
+	// snapshot from inside the drive, and this rule is a PREREQUISITE for that
+	// work rather than a substitute for it.
+	//
+	// Unresolved is the only arm treated this way. Every other arm is a
+	// positive finding from the drained tail, which the emitter cannot see past
+	// its own stop, so the engine's is the better answer.
+	if arm := stopped.Arm(); arm != exec.ArmUnresolved {
+		return arm
+	}
+	return observed()
 }
 
 // frameGateError turns the front door's OWN refusal into a matrix §8a ErrorResponse and
