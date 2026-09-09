@@ -53,6 +53,25 @@ type Config struct {
 	// any programmatic caller) never met a decoder, so nothing observed who
 	// chose what; a message built from an absent map must claim neither.
 	seen map[string]bool
+
+	// sourcePath is the file Load actually read, empty when none existed.
+	//
+	// Unexported and set ONLY by Load, so a Config built literally -- as a
+	// caller or a cell does -- carries no claim about where it came from. A
+	// zero value must not assert "there is a service on this host".
+	sourcePath string
+
+	// ServiceHostSeen records that a system SERVER config exists on this
+	// host, whether or not this process could read it. Existence is the
+	// signal: a 0640 file a developer cannot open still means the machine
+	// runs autodb as a service and they are not it.
+	//
+	// `toml:"-"` because it is an observation about the MACHINE, never a
+	// setting: a config file that could assert it would be claiming something
+	// about its own surroundings. Exported only so a cell outside this package
+	// can construct the true case -- SystemPath is a const, so a test in
+	// package main has no other way to stand on a service host.
+	ServiceHostSeen bool `toml:"-"`
 }
 
 // provenanceKnown reports whether a decoder observed this config at all.
@@ -70,6 +89,29 @@ func (c Config) wasSet(section, key string) bool {
 		return false
 	}
 	return c.seen[section+"."+key]
+}
+
+// SourcePath reports the config file that was read, or "" when none existed
+// and the built-in defaults apply.
+//
+// Exported because a refusal has to name the file it is refusing. Telling an
+// operator "this config may not do that" without saying WHICH config sends
+// them to edit the wrong one -- and on a service host there are three
+// plausible candidates.
+func (c Config) SourcePath() string { return c.sourcePath }
+
+// ForeignOnAServiceHost reports that this host has a system server config and
+// the config in hand is NOT it.
+//
+// The distinction matters for one decision: whether a frontend may become the
+// daemon. On a laptop with no service config, the first frontend to find
+// nothing listening should bring one up. On a host that HAS one, a frontend
+// must never -- it would bind the service's port against whatever store its
+// own config resolves to. ClientOnly covers the config the installer hands
+// out; this covers every OTHER file on such a host, including a developer's
+// own, which carries no client_only key and never will.
+func (c Config) ForeignOnAServiceHost() bool {
+	return c.ServiceHostSeen && c.sourcePath != systemServerPath()
 }
 
 // FrontDoor configures the PostgreSQL wire-protocol listener.
@@ -772,32 +814,102 @@ func readable(path string) bool {
 	return true
 }
 
-// systemCandidates is the ordered system-wide search path, as a variable
-// rather than two inlined constants so a cell can point it at a temporary
-// directory and assert the ORDER and the readability rule. The order is the
-// behaviour here, and it decides where every unqualified invocation reads its
-// configuration -- not something to leave uncovered.
+// exists reports whether a path is PRESENT, whether or not this process could
+// open it.
+//
+// Deliberately a different question from readable. "Is there a service config
+// on this host?" is answered by presence: the file is 0640 so a developer
+// cannot read it, and that must not be mistaken for its absence. os.Stat needs
+// only traversal on the parent, which /etc grants everyone.
+func exists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// systemCandidates is the ordered system-wide search path as
+// [SERVER, CLIENT], a variable rather than two inlined constants so a cell can
+// point it at a temporary directory and assert the ORDER and the readability
+// rule. The order is the behaviour here, and it decides where every
+// unqualified invocation reads its configuration -- not something to leave
+// uncovered.
 var systemCandidates = []string{SystemPath, SystemClientPath}
 
-func DefaultPath() (string, error) {
-	// The service's own config first, for whoever can read it -- root, and the
-	// service account. It is the complete one: it names the meta store, which
-	// the client config deliberately does not, so anything that touches the
-	// store (--init, --serve, --migrate-to-postgres) must land here.
-	//
-	// Then the client config, which is 0644 precisely so an ordinary developer
-	// can reach the daemon without being able to read a config that may name a
-	// PostgreSQL DSN with a password in it.
-	for _, c := range systemCandidates {
-		if readable(c) {
-			return c, nil
-		}
+// systemServerPath and systemClientPaths name the two roles in
+// systemCandidates, so the search order below reads as the rule it implements
+// rather than as slice arithmetic. Both tolerate a cell that has shortened the
+// list.
+func systemServerPath() string {
+	if len(systemCandidates) > 0 {
+		return systemCandidates[0]
 	}
+	return ""
+}
+
+func systemClientPaths() []string {
+	if len(systemCandidates) > 1 {
+		return systemCandidates[1:]
+	}
+	return nil
+}
+
+// UserConfigPath is where this user's OWN config lives:
+// $XDG_CONFIG_HOME/autodb/config.toml, else ~/.config/autodb/config.toml.
+//
+// It reports the path whether or not a file is there. Exported because a
+// refusal names the candidates an operator could reasonably have meant, and
+// this is one of them -- on a service host it is the file they would have to
+// create to get a config of their own.
+func UserConfigPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("config: resolving user config dir: %w", err)
 	}
 	return filepath.Join(dir, "autodb", "config.toml"), nil
+}
+
+func DefaultPath() (string, error) {
+	user, uerr := UserConfigPath()
+
+	// 1. The service's own config, for whoever can read it -- root, and the
+	//    service account. It is the complete one: it names the meta store,
+	//    which the client config deliberately does not, so anything that
+	//    touches the store (--init, --serve) must land here.
+	//
+	// 2. Then THIS USER'S OWN config, when they have written one. A file a
+	//    developer created deliberately outranks a generic handout: the
+	//    installer's client.toml is addressed to whoever happens to be on the
+	//    box, and a per-user config is addressed to one person who chose its
+	//    contents. Resolving past it meant a developer's own settings were
+	//    silently ignored on exactly the hosts where they had bothered to
+	//    write them.
+	//
+	// 3. Then the client config, which is 0644 precisely so an ordinary
+	//    developer can reach the daemon without being able to read a config
+	//    that may name a PostgreSQL DSN with a password in it.
+	//
+	// This ORDER is safe only because becoming the daemon is gated
+	// separately -- see Config.ForeignOnAServiceHost. Preferring a personal
+	// config on a service host would otherwise re-open the trap the previous
+	// order existed to close: a frontend that finds nothing listening and
+	// starts a private daemon on the service's port.
+	ordered := make([]string, 0, len(systemCandidates)+1)
+	if p := systemServerPath(); p != "" {
+		ordered = append(ordered, p)
+	}
+	if uerr == nil {
+		ordered = append(ordered, user)
+	}
+	ordered = append(ordered, systemClientPaths()...)
+
+	for _, c := range ordered {
+		if readable(c) {
+			return c, nil
+		}
+	}
+	if uerr != nil {
+		return "", uerr
+	}
+	return user, nil
 }
 
 // ResolvePath is where a config file WOULD be read from: the given path, or
@@ -827,6 +939,12 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	// Recorded BEFORE the decode, and by presence rather than readability:
+	// this is "does this host run autodb as a service", which is true of a
+	// config the caller cannot open. Set here rather than in the callers so
+	// there is one place that knows it, including the no-file path below --
+	// defaults on a service host must not spawn either.
+	cfg.ServiceHostSeen = exists(systemServerPath())
 	md, derr := toml.DecodeFile(path, &cfg)
 	err = derr
 	switch {
@@ -876,6 +994,11 @@ func Load(path string) (Config, error) {
 		cfg.seen[k.String()] = true
 	}
 	cfg.deriveSizing()
+	// A file was read, so the Config can say which one. The ErrNotExist branch
+	// above deliberately leaves this empty: "defaults, from nowhere" is a
+	// different fact from "this file", and a refusal that named a file which
+	// does not exist would send an operator to edit nothing.
+	cfg.sourcePath = path
 	return cfg, cfg.validate()
 }
 

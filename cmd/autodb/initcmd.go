@@ -85,6 +85,15 @@ func runInit(ctx context.Context, out io.Writer, configPath string, o initOpts) 
 		return err
 	}
 
+	// BEFORE the store is opened, because meta.Open on sqlite CREATES what it
+	// cannot find. By the time an error could be noticed downstream there is
+	// already a private database on disk with a first administrator in it.
+	if err := requireStoreConfig(cfg, "create the first administrator",
+		"Run the ceremony against the service's config, as root:\n"+
+			"       sudo autodb --config "+config.SystemPath+" --init"); err != nil {
+		return err
+	}
+
 	store, err := meta.Open(ctx, cfg.Meta)
 	if err != nil {
 		return fmt.Errorf("meta store: %w", err)

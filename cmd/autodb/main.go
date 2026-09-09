@@ -299,6 +299,14 @@ func runServe(configPath string) error {
 	if err != nil {
 		return err
 	}
+	// Before the bind, not after: a daemon that has already taken the
+	// service's port and then refuses is worse than one that never started,
+	// and the refusal is about the config rather than about the address.
+	if err := requireStoreConfig(cfg, "serve",
+		"The service's unit already passes the right config. Start it instead:\n"+
+			"       sudo systemctl start autodb-frontdoor"); err != nil {
+		return err
+	}
 	ep, err := cfg.Server.Endpoint()
 	if err != nil {
 		return err
@@ -827,6 +835,18 @@ func isAddrInUse(err error) bool {
 // binds.
 func spawnFor(cfg config.Config, configPath string) func() (string, error) {
 	if cfg.Server.ClientOnly {
+		return nil
+	}
+	// AND NOT FROM ANY OTHER FILE ON A HOST THAT HAS A SERVICE CONFIG.
+	//
+	// ClientOnly covers the file the installer hands out. It cannot cover a
+	// developer's OWN config, which carries no such key and never will -- and
+	// resolution now prefers that config over the handout, so on a service
+	// host it is the one a frontend is most likely to be holding. Spawning
+	// from it would bind the service's port against the developer's own store,
+	// which is the trap client_only was introduced to close, reached by a
+	// different file.
+	if cfg.ForeignOnAServiceHost() {
 		return nil
 	}
 	return func() (string, error) { return spawnServe(configPath) }

@@ -41,3 +41,28 @@ func TestSpawnFor_OrdinaryConfigStillSpawns(t *testing.T) {
 			"nothing listening would no longer bring the daemon up")
 	}
 }
+
+// AND NOT FROM A PERSONAL CONFIG ON A HOST THAT HAS A SERVICE CONFIG.
+//
+// client_only is a property of the file the installer writes, so it can only
+// ever protect that file. A developer's own ~/.config/autodb/config.toml
+// carries no such key -- and config resolution now PREFERS it over the
+// installer's handout, so on a service host it is the config a frontend is
+// most likely to be holding. Spawning from it lands the exact outcome
+// client_only exists to prevent, by a different route: a daemon started as the
+// developer, on the service's port, against the developer's own store.
+//
+// ServiceHostSeen is what Load records when /etc/autodb/config.toml is
+// PRESENT, readable or not -- the developer's case is that it is there and
+// 0640.
+func TestSpawnFor_RefusesAPersonalConfigOnAServiceHost(t *testing.T) {
+	t.Parallel()
+
+	var cfg config.Config
+	cfg.ServiceHostSeen = true
+	// SourcePath is empty here, so this config is not the service's own.
+	if got := spawnFor(cfg, "/home/someone/.config/autodb/config.toml"); got != nil {
+		t.Error("a personal config on a service host produced a spawn function: the " +
+			"developer's TUI would start a daemon on the port the real service binds")
+	}
+}

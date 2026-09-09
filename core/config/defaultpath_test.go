@@ -21,6 +21,11 @@ import (
 // choosing it on existence alone would turn a working fallback into a
 // permission error.
 func TestDefaultPath_PrefersReadableSystemConfigInOrder(t *testing.T) {
+	// HERMETIC: resolution consults this user's OWN config between the two
+	// system ones, so without redirecting XDG_CONFIG_HOME the cell reads the
+	// developer's real ~/.config/autodb/config.toml and its answer depends on
+	// whose machine it runs on.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
 	server := filepath.Join(dir, "config.toml")
 	client := filepath.Join(dir, "client.toml")
@@ -65,6 +70,11 @@ func TestDefaultPath_SkipsAnUnreadableSystemConfig(t *testing.T) {
 		t.Skip("running as root: an unreadable file is still readable, so this " +
 			"cell cannot create the condition it tests")
 	}
+	// HERMETIC: resolution consults this user's OWN config between the two
+	// system ones, so without redirecting XDG_CONFIG_HOME the cell reads the
+	// developer's real ~/.config/autodb/config.toml and its answer depends on
+	// whose machine it runs on.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	dir := t.TempDir()
 	server := filepath.Join(dir, "config.toml")
 	client := filepath.Join(dir, "client.toml")
