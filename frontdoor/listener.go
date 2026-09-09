@@ -135,8 +135,18 @@ type Listener struct {
 	// than by asserting arithmetic about one.
 	testDenialDelay time.Duration
 
-	// testPostDenialAuditDelay opens the interval BETWEEN the denial reaching
-	// the socket and the audit event being emitted. Test-only.
+	// testPostDenialAuditGate HOLDS the interval between the denial reaching
+	// the socket and the audit event being emitted, until a cell releases it.
+	// Test-only; nil outside this package's own cells, and the ordering it
+	// widens is unchanged.
+	//
+	// A BARRIER RATHER THAN A SLEEP, and that is the difference between a
+	// premise and a hope. The first version was a duration, and a cell using
+	// it had to assert "the event is not there yet" against a window it only
+	// believed was still open -- so a scheduler hiccup made the premise false
+	// and the cell skipped, exactly where the evidence was needed. With a
+	// channel the emit CANNOT have run while the gate is unclosed, so the
+	// absence is a fact and its failure is a real defect to report.
 	//
 	// It is a separate knob from testDenialDelay rather than a reuse of it,
 	// and the distinction is the whole point: testDenialDelay sleeps BEFORE
@@ -152,10 +162,7 @@ type Listener struct {
 	// (TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease, reasons=[]) that
 	// survived focused reruns, a whole-package run, and five packages driven
 	// concurrently, because the window is sub-millisecond.
-	//
-	// With this knob the window is as wide as a cell wants, so "wait for the
-	// event, do not sample it" becomes a claim that can be made to fail.
-	testPostDenialAuditDelay time.Duration
+	testPostDenialAuditGate <-chan struct{}
 
 	wg     sync.WaitGroup
 	closed chan struct{}
@@ -300,9 +307,9 @@ type Options struct {
 	testDeadlines   *deadlines
 	testDenialDelay time.Duration
 
-	// testPostDenialAuditDelay widens the send-then-emit interval on the
+	// testPostDenialAuditGate holds the send-then-emit interval open on the
 	// denial path. See the Listener field of the same name.
-	testPostDenialAuditDelay time.Duration
+	testPostDenialAuditGate <-chan struct{}
 
 	// testListener replaces the bind, so a cell can hand Serve a connection
 	// that pauses exactly where it wants to look. Unexported, in-package
@@ -403,7 +410,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 		l.dl = *opt.testDeadlines
 	}
 	l.testDenialDelay = opt.testDenialDelay
-	l.testPostDenialAuditDelay = opt.testPostDenialAuditDelay
+	l.testPostDenialAuditGate = opt.testPostDenialAuditGate
 	l.testInsideRegistration = opt.testInsideRegistration
 	return l, nil
 }
@@ -784,8 +791,8 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 	// THE CLIENT IS TOLD FIRST AND THE OPERATOR SECOND, deliberately. This
 	// knob only makes the gap between them observable; it is zero outside
 	// this package's own cells and the ordering is unchanged.
-	if l.testPostDenialAuditDelay > 0 {
-		time.Sleep(l.testPostDenialAuditDelay)
+	if l.testPostDenialAuditGate != nil {
+		<-l.testPostDenialAuditGate
 	}
 	l.onEvent(Event{Kind: "fd.auth_denied", Reason: outcome.Denied.String(), Peer: peer, Detail: out.RefusedParam})
 }

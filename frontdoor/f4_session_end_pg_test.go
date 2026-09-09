@@ -190,7 +190,9 @@ func refusedFor(evs []Event, reason string) bool {
 // every attempt to reproduce it: five focused runs, the whole frontdoor package
 // alone, and five PG-using packages driven concurrently against one database,
 // all green. The window is sub-millisecond, so rerunning was never going to
-// show it. testPostDenialAuditDelay exists to widen it deliberately.
+// show it. testPostDenialAuditGate exists to hold it open deliberately, and
+// this helper's own contract -- wait, do not sample -- is celled directly in
+// denial_audit_order_test.go against a source that is empty on its first call.
 //
 // The failure message reports what WAS audited, because "refused for another
 // reason" and "nothing recorded yet" are different diagnoses and the second is
