@@ -457,11 +457,15 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 // An empty segment is a NO-OP rather than an error: a client that flushes
 // defensively with nothing pending is doing something the protocol allows, and
 // golib refuses the flush because its own queue is empty.
+// It reports whether the segment DISPATCHED anything to the target, which is
+// the segment's answer to EmitStopped.Executed. A consumer cut can stop
+// delivery before any terminal frame is observed while the target is already
+// working, so "did anything run" cannot be read off the drain's observation.
 func deliverSegment(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
-	emit func(WireMessage) error) (extObservation, error) {
+	emit func(WireMessage) error) (bool, error) {
 
 	if len(o.segment) == 0 {
-		return extObservation{}, nil
+		return false, nil
 	}
 	// FLUSH ONLY WHEN THE TARGET OWES AN ANSWER.
 	//
@@ -481,16 +485,10 @@ func deliverSegment(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
 	dispatched := segmentAwaitsWire(o.segment)
 	if dispatched {
 		if ferr := pc.Flush(ctx); ferr != nil {
-			return extObservation{}, ferr
+			return false, ferr
 		}
 	}
-	_, obs, err := drainExtendedObserving(ctx, pc, o, nil, emit, nil)
-	// dispatched is the segment's own answer to "was anything sent to the
-	// target", which is what EmitStopped.Executed means. It is not derived from
-	// the observation, because a consumer cut can stop delivery before any
-	// terminal is seen while frames are already on the wire.
-	obs.dispatched = dispatched
-	return obs, err
+	return dispatched, drainExtended(ctx, pc, o, emit)
 }
 
 // segmentAwaitsWire reports whether any queued step's answer must come from the
@@ -547,7 +545,7 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	// END. Sync is what resets both tracks and leaves the wire usable, so
 	// returning early on a consumer stop would strand the connection in a state
 	// no later frame could recover.
-	obs, deliverErr := deliverSegment(ctx, pc, s.ext, emit)
+	dispatched, deliverErr := deliverSegment(ctx, pc, s.ext, emit)
 
 	targetStatus, serr := pc.Sync(ctx)
 	// Sync consumes through the terminal ReadyForQuery whatever happened, so the
@@ -623,8 +621,21 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	// whatever the consumer did, so dropping portals on 'I' and recording the
 	// status must happen either way. The old early return skipped both, leaving
 	// this end holding portals the backend had already destroyed.
+	// TargetErr IS DELIBERATELY nil, AND THAT IS NOT A GAP.
+	//
+	// A first version recorded the target's ErrorResponse on the segment path
+	// so the arm could carry it, and NO MUTATION COULD TELL THE DIFFERENCE --
+	// because armFromWhatIsKnown already recovers exactly that fact. When the
+	// engine's arm is Unresolved it falls through to the EMITTER's observation,
+	// and a target error that passed through the emitter has already set
+	// targetFailed there. Supplying it here as well would give one fact two
+	// sources, which is how the client's story and the audit's drifted apart in
+	// this area before.
+	//
+	// So the drive reports only what it alone knows: the consumer's cause, a
+	// truthful readiness byte, and whether anything was dispatched.
 	if deliverErr != nil {
-		return status, e.emitStoppedWithStatus(deliverErr, "", obs.dispatched, obs.targetErr, status)
+		return status, e.emitStoppedWithStatus(deliverErr, "", dispatched, nil, status)
 	}
 	return status, nil
 }
@@ -885,13 +896,6 @@ type extObservation struct {
 	// targetErr is the target's error, when the drain saw one.
 	targetErr *pgconn.PgError
 
-	// dispatched records that the segment sent frames to the TARGET, as opposed
-	// to holding only steps the front door answers itself. It is the segment's
-	// answer to EmitStopped.Executed: a consumer cut can stop delivery before
-	// any terminal frame is observed while the target is already working, so
-	// "did anything run" cannot be read off completed.
-	dispatched bool
-
 	// mine records whether the frame that failed belonged to THIS Execute's own
 	// statement or portal — its Parse, its Bind, or the Execute itself — rather
 	// than to an earlier object sharing the segment. It is the difference
@@ -1035,27 +1039,17 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, s
 		// loses the NOTIFICATION, not the completion, and recording it after a
 		// successful emit would turn a completed statement into an unresolved one
 		// for no reason but the client's timing.
-		// THE TARGET'S ERROR IS A FACT ABOUT THE SEGMENT, recorded whether or
-		// not an Execute owns this drain.
-		//
-		// It used to be gated behind `own != nil`, so the segment-delivery path
-		// -- Flush and Sync, which pass no owner -- observed NOTHING. That is
-		// why those drives could only ever return their drain's bare error:
-		// there was no observation to carry. `mine` is the ownership question
-		// and stays gated, because "this statement failed" versus "this
-		// statement never ran" only means something when there is a statement.
-		switch {
-		case m.Kind == "ErrorResponse":
-			obs.targetErr = m.Err
-			if own != nil {
-				obs.mine = own.owns(step)
+		if own != nil {
+			switch {
+			case m.Kind == "ErrorResponse":
+				obs.targetErr, obs.mine = m.Err, own.owns(step)
+			case step.exec && terminalForExecute(m.Kind):
+				obs.completed = true
+				// PortalSuspended is a terminal for the FRAME and not for the
+				// statement. Recorded here, beside the completion it is so
+				// easily mistaken for.
+				obs.suspended = m.Kind == "PortalSuspended"
 			}
-		case own != nil && step.exec && terminalForExecute(m.Kind):
-			obs.completed = true
-			// PortalSuspended is a terminal for the FRAME and not for the
-			// statement. Recorded here, beside the completion it is so
-			// easily mistaken for.
-			obs.suspended = m.Kind == "PortalSuspended"
 		}
 		// THE READING CONTINUES EVEN WHEN DELIVERY HAS STOPPED.
 		// The target's tail is what decides this statement's outcome, and if we

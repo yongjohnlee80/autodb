@@ -194,19 +194,25 @@ func TestPGFlushDrive_AWithheldFlushDoesNotDropTheSession(t *testing.T) {
 	t.Fatal("the recovering Sync never produced a readiness")
 }
 
-// AND THE ARM CARRIES THE TARGET'S ERROR, so a failed statement is reported as
-// failed rather than as unresolved.
+// AND A TARGET FAILURE ON THIS PATH IS REPORTED AS FAILED, NOT UNRESOLVED.
 //
-// This exists because a mutation showed the other half unwitnessed. Reverting
-// the observation change — putting obs.targetErr back behind `own != nil`, so
-// the segment path records nothing — left every core/exec cell green. The arm
-// would have carried TargetErr nil on a segment that HAD errored, and Arm()
-// would have fallen to ArmUnresolved: "the statement ran and its outcome is not
-// known to the front door", told to a client whose statement demonstrably
-// failed at the target.
+// The mechanism is worth naming, because I got it wrong first. My initial
+// version recorded the target's ErrorResponse on the segment path so the ARM
+// could carry it — and no mutation could tell the difference. Reverting that
+// change left every cell green, which is the signal that a change is
+// redundant rather than that the cell is weak.
 //
-// "Unresolved" is the honest answer when nothing is known. Saying it when the
-// error was observed and thrown away is not honesty, it is a lost fact.
+// The reason: armFromWhatIsKnown already recovers the fact. When the engine's
+// arm is Unresolved it falls through to the EMITTER's observation, and a
+// target error that passed through the emitter has already set targetFailed
+// there. Supplying it from the drive as well would give one fact two sources,
+// which is precisely how the client's story and the audit's drifted apart in
+// this area before.
+//
+// So the drive reports only what it alone knows, and this cell pins the
+// COMBINATION on the Sync-drive path: the drive's truthful status plus the
+// emitter's observation produce "failed", end to end, on a segment that no
+// Execute drive ever touched.
 func TestPGSyncDrive_TheArmReportsATargetFailureAsFailed(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 
@@ -255,8 +261,10 @@ func TestPGSyncDrive_TheArmReportsATargetFailureAsFailed(t *testing.T) {
 	if outcome == "" {
 		t.Fatalf("no fd.stmt_outcome audited.\nevents=%v", kinds(events()))
 	}
-	// THE PROPERTY: the observed target failure reached the arm. With the
-	// observation dropped this reads "not known to the front door" instead.
+	// THE PROPERTY: the combination reports a failure as a failure. If the
+	// precedence rule ever stops yielding to the emitter on an unresolved arm,
+	// this reads "not known to the front door" for a statement that visibly
+	// failed at the target.
 	if strings.Contains(outcome, "not known to the front door") {
 		t.Errorf("the arm reported the outcome as UNRESOLVED for a statement that "+
 			"failed at the target — the observation was recorded and then thrown "+
