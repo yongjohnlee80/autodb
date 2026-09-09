@@ -33,6 +33,13 @@ package frontdoor
 //     already present on its first look. Replacing waitForRefusal with a
 //     single immediate sample still passed 10/10.
 //
+// A third finding landed on the repair itself: the negative half borrowed a
+// &testing.T{} in another goroutine to capture waitForRefusal's Fatalf, which
+// is not a supported use of a runner-owned type. The bounded poll is now
+// refusalArrives, returning a bool, with waitForRefusal as the thin adapter --
+// so the negative is asked directly, of a value, with a 40ms budget instead of
+// the helper's five seconds.
+//
 // So the ordering is now held by a BARRIER, where the absence is a fact rather
 // than a hope and its failure is fatal; and the helper is celled DIRECTLY
 // against an event source that is absent on the first call and present after
@@ -43,6 +50,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 )
@@ -161,31 +169,57 @@ func TestWaitForRefusal_WaitsForALaterEventRatherThanSamplingOnce(t *testing.T) 
 	}
 }
 
-// AND IT STILL FAILS WHEN THE EVENT NEVER COMES, so the wait above is not
-// simply "keep looking until the deadline and pass".
+// AND IT STILL ANSWERS FALSE WHEN THE EVENT NEVER COMES, so the wait above is
+// not simply "keep looking until the deadline and pass".
 //
-// Asserted through the helper's own t.Fatalf, captured rather than triggered:
-// waitForRefusal takes *testing.T, so the only way to observe its failure
-// without failing this cell is to hand it a T of its own and run it where a
-// Fatal ends that goroutine and not this one.
-func TestWaitForRefusal_FailsWhenTheEventNeverArrives(t *testing.T) {
+// Asked of refusalArrives directly. The previous version handed waitForRefusal
+// a &testing.T{} in another goroutine to capture its Fatalf, and review
+// rejected that: testing.T is runner-owned, FailNow must run in the test
+// goroutine, and a zero-value T is not a supported failure-capture API however
+// reliably the current toolchain tolerates it. The poll is now separable, so
+// the answer is a bool and no T is borrowed -- and the budget can be short
+// instead of the helper's mandatory five seconds.
+func TestRefusalArrives_IsFalseWhenTheEventNeverArrives(t *testing.T) {
 	t.Parallel()
 
-	// A source that is empty forever. The helper's deadline is 5s, so this
-	// cell costs that -- which is the price of proving the negative, and it
-	// runs in parallel with the rest.
-	done := make(chan bool, 1)
-	go func() {
-		fake := &testing.T{}
-		defer func() {
-			// A t.FailNow inside a non-test goroutine ends it via runtime.Goexit,
-			// so the report has to be written from a deferred call.
-			done <- fake.Failed()
-		}()
-		waitForRefusal(fake, func() []Event { return nil }, "frontdoor/never", "an event that never lands")
-	}()
-	if !<-done {
-		t.Error("waitForRefusal returned successfully against an event source that never " +
-			"produced the refusal: the wait would then certify silence")
+	const budget = 40 * time.Millisecond
+
+	// POSITIVE CONTROL FIRST. A helper that answered false unconditionally
+	// would satisfy the negative below perfectly.
+	present := []Event{{Kind: "fd.auth_denied", Reason: "frontdoor/auth-store-error", Peer: "test"}}
+	if !refusalArrives(func() []Event { return present }, "frontdoor/auth-store-error", budget) {
+		t.Fatal("refusalArrives is false for a refusal that IS present: the instrument does " +
+			"not observe, so its false answer below would mean nothing")
+	}
+	// AND IT DISCRIMINATES BY REASON, not merely by the event existing. The
+	// pre-auth vocabulary is uniform on the wire, so "a refusal happened" and
+	// "the refusal I drove happened" are different facts.
+	if refusalArrives(func() []Event { return present }, "frontdoor/some-other-cause", budget) {
+		t.Error("refusalArrives is true for a reason that was never audited: a refusal for " +
+			"another cause looks identical on the wire and must not satisfy this")
+	}
+
+	// THE NEGATIVE. Empty forever, and the answer is false rather than a
+	// silence the caller reads as success.
+	if refusalArrives(func() []Event { return nil }, "frontdoor/never", budget) {
+		t.Error("refusalArrives is true against an event source that never produced the " +
+			"refusal: the wait would then certify silence")
+	}
+}
+
+// AND IT LOOKS ONCE EVEN WITH NO BUDGET AT ALL, which is the boundary a
+// deadline-first loop gets wrong.
+//
+// A `for time.Now().Before(deadline)` shape asks nothing when the budget is
+// zero and answers false about an event that was already there. That is the
+// sampling defect inverted, and it would make a zero-budget caller certify the
+// opposite of the truth.
+func TestRefusalArrives_SamplesOnceWithAZeroBudget(t *testing.T) {
+	t.Parallel()
+
+	present := []Event{{Kind: "fd.auth_denied", Reason: "frontdoor/auth-store-error", Peer: "test"}}
+	if !refusalArrives(func() []Event { return present }, "frontdoor/auth-store-error", 0) {
+		t.Error("refusalArrives took no sample at all with a zero budget, so it reported a " +
+			"refusal that was already present as absent")
 	}
 }

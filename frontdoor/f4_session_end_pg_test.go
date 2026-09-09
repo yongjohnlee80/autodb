@@ -197,14 +197,42 @@ func refusedFor(evs []Event, reason string) bool {
 // The failure message reports what WAS audited, because "refused for another
 // reason" and "nothing recorded yet" are different diagnoses and the second is
 // the one that wasted the time.
-func waitForRefusal(t *testing.T, events func() []Event, reason, what string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+// THE POLL IS SPLIT FROM THE T, so its FALSE answer can be celled directly.
+//
+// The wait used to be one function taking *testing.T, and the only way to
+// observe its failure was to hand it a T of its own and run it in another
+// goroutine. Review rejected that and was right: testing.T is runner-owned,
+// t.FailNow must run in the test goroutine, and a zero-value T is not a
+// supported failure-capture API however reliably this toolchain happens to
+// tolerate it. Splitting it also removes a mandatory five-second cell, because
+// the negative can now be asked with a short budget.
+//
+// refusalArrives reports whether a refusal under reason was audited within
+// the budget. It looks ONCE before consulting the deadline, so a zero budget
+// is a single sample rather than no sample at all.
+const refusalWait = 5 * time.Second
+
+func refusalArrives(events func() []Event, reason string, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for {
 		if refusedFor(events(), reason) {
-			return
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
 		}
 		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// waitForRefusal is the thin adapter: the poll above, plus the failure a cell
+// wants when it does not arrive. Nothing else lives here, which is why the
+// helper's behaviour is celled through refusalArrives rather than through a
+// captured T.
+func waitForRefusal(t *testing.T, events func() []Event, reason, what string) {
+	t.Helper()
+	if refusalArrives(events, reason, refusalWait) {
+		return
 	}
 	t.Fatalf("%s: no refusal was audited under %q within the deadline. The pre-auth "+
 		"vocabulary is uniform, so a refusal for another cause looks identical on the "+
