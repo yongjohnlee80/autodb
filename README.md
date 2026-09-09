@@ -347,11 +347,10 @@ brings it up and prompts for login.
 ## The commands, copy-pasteable
 
 Each script is self-contained — it needs nothing from a checkout but itself —
-so each of these is one `curl` and one run. Set the base once:
-
-```sh
-BASE=https://raw.githubusercontent.com/yongjohnlee80/autodb/main
-```
+so each of these is one `curl` and one run. Every URL is written out in full:
+each block stands alone, so copying one does not depend on having run an
+earlier one. A `$BASE` variable used to live here, and a block copied on its
+own then fetched from `/provision_vm.sh` with the host missing.
 
 ### Provision a host
 
@@ -359,8 +358,8 @@ BASE=https://raw.githubusercontent.com/yongjohnlee80/autodb/main
 itself**, so fetch both:
 
 ```sh
-curl -fsSL $BASE/provision_vm.sh      -o provision_vm.sh
-curl -fsSL $BASE/install_frontdoor.sh -o install_frontdoor.sh
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/provision_vm.sh      -o provision_vm.sh
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh
 chmod +x provision_vm.sh install_frontdoor.sh
 
 sh provision_vm.sh --check --user root --host <ip>       # probe only; changes nothing
@@ -373,7 +372,7 @@ is not required.
 ### Install or reconfigure the service on a host that has the binary
 
 ```sh
-curl -fsSL $BASE/install_frontdoor.sh -o install_frontdoor.sh
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh
 
 sh install_frontdoor.sh --check                 # measure this host and report
 sh install_frontdoor.sh --print-config          # the config it would write
@@ -383,7 +382,7 @@ sudo sh install_frontdoor.sh --apply            # interviews you for each settin
 ### Update to the newest release
 
 ```sh
-curl -fsSL $BASE/update_frontdoor.sh -o update_frontdoor.sh
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/update_frontdoor.sh -o update_frontdoor.sh
 
 sudo sh update_frontdoor.sh --check             # installed vs available
 sudo sh update_frontdoor.sh                     # build the newest tag and swap
@@ -393,7 +392,7 @@ sudo sh update_frontdoor.sh --ref v0.3.6        # or a specific tag, to go back
 ### Remove it
 
 ```sh
-curl -fsSL $BASE/uninstall.sh -o uninstall.sh
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/uninstall.sh -o uninstall.sh
 
 sudo sh uninstall.sh --check                    # the exact deletion set
 sudo sh uninstall.sh --apply                    # with a backup archive
