@@ -130,8 +130,10 @@ func TestExtPG_ADeliveryCutAtSyncStillDropsIdlePortals(t *testing.T) {
 	if err := f.eng.WireExecutePortal(ctx, sid, userID, "bk", 0, testIP, discardEmit); !errors.Is(err, ErrUnknownPortal) {
 		t.Errorf("Execute of the cut segment's portal = %v, want ErrUnknownPortal", err)
 	}
-	// And the prepared statement DOES survive, which is the other half of §4a —
-	// without this the cell would pass just as well if the cut wiped everything.
+	// And the prepared statement DOES survive. That is the other half of the
+	// object-lifetime rule -- portals die with the transaction, prepared
+	// statements outlive it -- and without asserting it this cell would pass
+	// just as well if the cut had wiped everything the segment created.
 	if err := f.eng.WireBind(ctx, sid, userID, "bk2", "bk", nil, nil, nil); err != nil {
 		t.Errorf("re-Bind of the prepared statement after the cut = %v; prepared statements "+
 			"outlive the transaction", err)
