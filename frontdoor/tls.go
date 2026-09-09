@@ -114,10 +114,8 @@ func LoadServerTLS(fd config.FrontDoor, now time.Time) (*tls.Config, error) {
 			CurrentTime:   now,
 			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		}); verr != nil {
-			return nil, fmt.Errorf("%w: the certificate does not verify for %q (it carries names %v) — "+
-				"clients using sslmode=verify-full would each fail on their own, reading it as a "+
-				"client-side problem. A missing intermediate looks exactly like this: %w",
-				ErrTLSMaterial, host, leaf.DNSNames, verr)
+			return nil, fmt.Errorf("%w: %s", ErrTLSMaterial,
+				describeVerifyFailure(host, certIdentities(leaf), fd.TLSRootCAFile, verr))
 		}
 	}
 
@@ -142,6 +140,118 @@ func LoadServerTLS(fd config.FrontDoor, now time.Time) (*tls.Config, error) {
 // silent fall back to system roots. Falling back would turn "my private CA
 // path has a typo" into "verification passes against roots that were never
 // meant to sign this", which is a weaker check wearing the same green.
+// trustSource names the store the verification actually consulted.
+//
+// A FACT ABOUT THIS PROCESS'S CONFIGURATION, and the one thing an operator can
+// act on when a chain fails. The old message never said it, so a private-CA
+// install that had forgotten tls_root_ca_file looked identical to one whose
+// certificate was simply wrong.
+func trustSource(caFile string) string {
+	if caFile == "" {
+		return "the host's system roots (no [frontdoor] tls_root_ca_file configured)"
+	}
+	return "tls_root_ca_file " + caFile
+}
+
+// certIdentities is every identity a certificate carries: DNS names AND IP
+// addresses, in one display.
+//
+// leaf.DNSNames alone was the whole set for as long as autodb issued DNS SANs
+// only. --create-cert takes addresses too and puts them in IPAddresses, where
+// they belong -- so the message reported a name set that was incomplete, and
+// for an IP-only certificate reported "carries []" while the x509 error
+// appended two lines later listed the addresses it actually covers. A message
+// that contradicts its own evidence is worse than a terse one: review's probe
+// configured 192.0.2.11 against a certificate for 192.0.2.10 and the headline
+// blamed a DNS name that had nothing to do with it.
+//
+// One function, used at the one call site, so the two branches that print
+// identities cannot drift apart.
+func certIdentities(leaf *x509.Certificate) []string {
+	out := make([]string, 0, len(leaf.DNSNames)+len(leaf.IPAddresses))
+	out = append(out, leaf.DNSNames...)
+	for _, ip := range leaf.IPAddresses {
+		// net.IP.String canonicalises, which is the form an operator sees in
+		// the x509 error and in their own config.
+		out = append(out, ip.String())
+	}
+	return out
+}
+
+// describeVerifyFailure turns one x509 verification failure into a message
+// about the RIGHT SUBJECT.
+//
+// leaf.Verify subsumes three different failures — the SAN check, the chain, and
+// server-auth key usage — and all three used to be formatted around the leaf's
+// DNSNames. That is correct for the first and misleading for the other two: on
+// a real bring-up it sent the operator to inspect SANs that were fine while the
+// trust root was unset, through sixty restarts.
+//
+// THE BRANCH COMES FROM THE ERROR'S TYPE, via errors.As, never from matching
+// its text. And the default branch is LABELLED rather than quietly folded into
+// one of the others: if a future Go changes these shapes, "unclassified" tells
+// the next reader the classification did not fire, where a confident wrong
+// branch would not.
+func describeVerifyFailure(host string, identities []string, caFile string, verr error) string {
+	// VALUE TARGETS, not pointers. crypto/x509 returns these errors BY VALUE,
+	// so errors.As against *x509.HostnameError matches nothing — my first
+	// version did exactly that and every real failure fell through to the
+	// unclassified branch. Which is the branch doing its job: it reported that
+	// the classification had not fired instead of picking a confident wrong
+	// answer, and that is what the label is for.
+	var (
+		nameErr  x509.HostnameError
+		authErr  x509.UnknownAuthorityError
+		validErr x509.CertificateInvalidError
+	)
+	switch {
+	case errors.As(verr, &nameErr):
+		// THE IDENTITIES ARE THE ANSWER HERE, and nothing else is implicated: the
+		// chain verified, so naming the trust root would misdirect.
+		return fmt.Sprintf("the certificate does not cover the configured name %q — it "+
+			"carries %v. Either add %q to the certificate (autodb --create-cert "+
+			"reads frontdoor.tls_host_names) or configure a name it already covers. "+
+			"Clients using sslmode=verify-full would each fail on their own, reading it "+
+			"as a client-side problem: %v", host, identities, host, verr)
+
+	case errors.As(verr, &authErr):
+		// LEAD WITH THE TRUST SOURCE. The SANs come last, because they are
+		// still useful and are not the headline.
+		//
+		// The unset root is offered as the FIRST THING TO CHECK, never as the
+		// cause: it does not prove an intermediate is missing, and it does not
+		// prove one is present. A chain can fail against system roots for
+		// several reasons, and a leaf whose intermediate really is absent
+		// fails the same way with the root configured.
+		lead := fmt.Sprintf("the certificate chain does not verify against %s",
+			trustSource(caFile))
+		checkFirst := "check that tls_cert_file is the FULL chain (leaf plus any " +
+			"intermediates), not the leaf alone"
+		if caFile == "" {
+			checkFirst = "on a private-CA install, the first thing to check is that " +
+				"[frontdoor] tls_root_ca_file names your CA — it is unset, so nothing " +
+				"but the system roots was trusted"
+		}
+		return fmt.Sprintf("%s.\n  %s.\n  The certificate itself is for %v, which is not "+
+			"what failed here: %v", lead, checkFirst, identities, verr)
+
+	case errors.As(verr, &validErr) && validErr.Reason == x509.IncompatibleUsage:
+		// A CERTIFICATE FOR A DIFFERENT JOB. Neither a name nor a chain
+		// problem, and the old message described it as both.
+		return fmt.Sprintf("the certificate is not valid for server authentication — it "+
+			"carries extended key usages that exclude it, so it cannot serve TLS whatever "+
+			"its names or chain are: %v", verr)
+
+	default:
+		// LABELLED, and carrying everything, because nothing narrowed it.
+		return fmt.Sprintf("the certificate does not verify for %q, and the failure is "+
+			"unclassified — none of the known shapes (name mismatch, unknown authority, "+
+			"key usage) matched, so this reports what happened rather than guessing why. "+
+			"Trust source: %s. Certificate identities: %v. Verification error: %v",
+			host, trustSource(caFile), identities, verr)
+	}
+}
+
 func trustRoots(caFile string) (*x509.CertPool, error) {
 	if caFile == "" {
 		pool, err := x509.SystemCertPool()

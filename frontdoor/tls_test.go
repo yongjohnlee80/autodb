@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,9 +33,26 @@ import (
 // intermediate to omit.
 type chain struct{ leafOnly, bundle, ca, key string }
 
+// issueChain builds a CA -> intermediate -> leaf chain covering hosts.
+//
+// hosts are SPLIT into DNS names and IP addresses by net.ParseIP, which is
+// exactly what certgen does for --create-cert. An address literal left in
+// DNSNames produces a certificate no verifier matches against a dialled IP, so
+// a cell written that way would be measuring a certificate that cannot exist
+// through any supported issuance path.
 func issueChain(t testing.TB, hosts []string, notBefore, notAfter time.Time) chain {
 	t.Helper()
 	dir := t.TempDir()
+
+	var dnsNames []string
+	var ipSANs []net.IP
+	for _, h := range hosts {
+		if ip := net.ParseIP(h); ip != nil {
+			ipSANs = append(ipSANs, ip)
+			continue
+		}
+		dnsNames = append(dnsNames, h)
+	}
 
 	mkCA := func(cn string, parent *x509.Certificate, parentKey *ecdsa.PrivateKey) (*x509.Certificate, *ecdsa.PrivateKey, []byte) {
 		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -79,7 +97,8 @@ func issueChain(t testing.TB, hosts []string, notBefore, notAfter time.Time) cha
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     hosts,
+		DNSNames:     dnsNames,
+		IPAddresses:  ipSANs,
 	}
 	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, interCert, &leafKey.PublicKey, interKey)
 	if err != nil {
@@ -163,8 +182,14 @@ func TestLoadServerTLS_RefusesUnusableMaterial(t *testing.T) {
 			fdWith(future.bundle, future.key, future.ca, host), "not valid until"},
 		{"a certificate beside the wrong key",
 			fdWith(good.bundle, other.key, good.ca, host), "do not form a usable pair"},
+		// Each row now asserts ITS OWN SUBJECT rather than a substring they all
+		// shared. "does not verify for" was true of a name mismatch, a broken
+		// chain and a wrong key usage alike, so a table row could pass on the
+		// wrong refusal; the failure taxonomy gave each one wording only it
+		// produces, and these expectations follow it.
 		{"a certificate that does not cover the configured name",
-			fdWith(good.bundle, good.key, good.ca, "other.example.com"), "does not verify for"},
+			fdWith(good.bundle, good.key, good.ca, "other.example.com"),
+			"does not cover the configured name"},
 
 		// The one the first version of this file missed entirely: a
 		// leaf served WITHOUT its intermediate parses perfectly, is in date,
@@ -174,7 +199,8 @@ func TestLoadServerTLS_RefusesUnusableMaterial(t *testing.T) {
 		// misconfiguration: a renewal that wrote cert.pem where fullchain.pem
 		// was meant.
 		{"a leaf served without its intermediate",
-			fdWith(good.leafOnly, good.key, good.ca, host), "does not verify for"},
+			fdWith(good.leafOnly, good.key, good.ca, host),
+			"chain does not verify against"},
 
 		// And the trust root itself must be real. Falling back to system
 		// roots on an unreadable CA file would turn a path typo into
