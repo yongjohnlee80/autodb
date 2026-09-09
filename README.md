@@ -346,68 +346,59 @@ brings it up and prompts for login.
 
 ## The commands, copy-pasteable
 
-Each script is self-contained — it needs nothing from a checkout but itself —
-so each of these is one `curl` and one run. Every URL is written out in full:
-each block stands alone, so copying one does not depend on having run an
-earlier one. A `$BASE` variable used to live here, and a block copied on its
-own then fetched from `/provision_vm.sh` with the host missing.
+**One block, one paste.** Every block below is a single command: click the copy
+icon, paste, done. Nothing to set first, and — except where a remote address is
+unavoidable — nothing to edit.
 
-### Provision a host
-
-`provision_vm.sh` calls `install_frontdoor.sh` and expects it **beside
-itself**, so fetch both:
+### Provision this machine
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/provision_vm.sh      -o provision_vm.sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh
-chmod +x provision_vm.sh install_frontdoor.sh
-
-sh provision_vm.sh --check --user root --host <ip>       # probe only; changes nothing
-sudo sh provision_vm.sh --apply --user root --host <ip>  # the whole bring-up
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/provision_vm.sh -o provision_vm.sh && curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh && chmod +x provision_vm.sh install_frontdoor.sh && sudo sh provision_vm.sh --apply --host 127.0.0.1
 ```
 
-`--host 127.0.0.1` provisions **this machine** — no ssh, no key, and `--user`
-is not required.
+Two files, because `provision_vm.sh` calls `install_frontdoor.sh` and expects
+it beside itself. `--host 127.0.0.1` means no ssh, no key, and no `--user`.
 
-### Install or reconfigure the service on a host that has the binary
+### See the plan first, change nothing
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/provision_vm.sh -o provision_vm.sh && curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh && sh provision_vm.sh --check --host 127.0.0.1
+```
 
-sh install_frontdoor.sh --check                 # measure this host and report
-sh install_frontdoor.sh --print-config          # the config it would write
-sudo sh install_frontdoor.sh --apply            # interviews you for each setting
+### Provision a remote host
+
+Replace the address — it is the only edit:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/provision_vm.sh -o provision_vm.sh && curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh && chmod +x provision_vm.sh install_frontdoor.sh && sudo sh provision_vm.sh --apply --user root --host 203.0.113.10
+```
+
+### Install or reconfigure the service where the binary is already present
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh && sudo sh install_frontdoor.sh --apply
 ```
 
 ### Update to the newest release
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/update_frontdoor.sh -o update_frontdoor.sh
-
-sudo sh update_frontdoor.sh --check             # installed vs available
-sudo sh update_frontdoor.sh                     # build the newest tag and swap
-sudo sh update_frontdoor.sh --ref v0.3.6        # or a specific tag, to go back
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/update_frontdoor.sh -o update_frontdoor.sh && sudo sh update_frontdoor.sh
 ```
 
 ### Remove it
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/uninstall.sh -o uninstall.sh
-
-sudo sh uninstall.sh --check                    # the exact deletion set
-sudo sh uninstall.sh --apply                    # with a backup archive
+curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/uninstall.sh -o uninstall.sh && sudo sh uninstall.sh --apply
 ```
+
+Every script takes `--check`, which changes nothing and prints what it would
+do, and `--help`, which lists every flag. Swap `--apply` for `--check` in any
+line above to rehearse it.
 
 **Read them before you run them, and there is deliberately no `curl | sh` line
 here.** They run as root, install a systemd unit and write TLS material;
 piping a script straight into a shell is precisely the arrangement that makes
-reading it first impossible. Every one has `--check`, which changes nothing,
-and `--help`, which lists every flag.
-
-```sh
-sh provision_vm.sh --help          # every flag, with what it means
-sh provision_vm.sh --print-flags   # the resolved contract; connects to nothing
-```
+reading it first impossible.
 
 ## Updating an install
 
