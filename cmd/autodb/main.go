@@ -111,8 +111,7 @@ func main() {
 	switch {
 	case *initRun:
 		if err := runInit(context.Background(), os.Stdout, *configPath, initOpts{}); err != nil {
-			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
-			os.Exit(1)
+			reportAndExit(err)
 		}
 		return
 	case *createCert:
@@ -120,41 +119,68 @@ func main() {
 			dir: *certDir, hosts: certHosts, leafOnly: *certLeafOnly,
 			force: *certForce, exportCA: *certExportCA,
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
-			os.Exit(1)
+			reportAndExit(err)
 		}
 	case *migrateToPG:
 		if err := runMigrateToPostgres(context.Background(), os.Stdout, migrateOpts{
 			from: *migrateFrom, to: *migrateTo, dryRun: *migrateDry,
 			allowInsecure: *migrateInsecure,
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
-			os.Exit(1)
+			reportAndExit(err)
 		}
 	case *printEndpoint:
 		if err := runPrintEndpoint(*configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
-			os.Exit(1)
+			reportAndExit(err)
 		}
 	case *serve:
 		if err := runServe(*configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
-			os.Exit(1)
+			reportAndExit(err)
 		}
 	case *ui:
 		if err := runUI(*configPath); err != nil {
-			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
-			os.Exit(1)
+			reportAndExit(err)
 		}
 	case *webUI:
 		if err := runWebUI(*configPath, *port); err != nil {
-			fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
-			os.Exit(1)
+			reportAndExit(err)
 		}
 	default:
 		flag.Usage()
 		os.Exit(1)
 	}
+}
+
+// exitConfig is the status for "your configuration is invalid", distinct from
+// every other failure (sysexits.h EX_CONFIG).
+//
+// A CODE, NOT PROSE, because a caller has to branch on it. Every subcommand
+// loads the config, so any of them can fail for a reason that has nothing to do
+// with what the operator asked for — and on the droplet one did:
+// `autodb --create-cert` refused because exec.pool_max_conns and
+// frontdoor.reserved_headroom could not both hold, and install_frontdoor.sh
+// reported "--create-cert failed; leaving the front door disabled". True, and
+// about the wrong subject: nothing was wrong with certificate generation. The
+// operator went looking at TLS.
+//
+// 2 is already flag-usage, so this is 78 rather than an overload of it.
+const exitConfig = 78
+
+// reportAndExit prints err and exits with the status that says what KIND of
+// failure it was.
+//
+// The framing comes from the error's type. errors.Is(err, config.ErrInvalid)
+// already distinguishes the two at every call site, so this is a wrapping
+// choice rather than new machinery — and it is in ONE place because the last
+// time a fix like this was applied per-command it was applied to one command
+// and the defect survived in the others.
+func reportAndExit(err error) {
+	if errors.Is(err, config.ErrInvalid) {
+		fmt.Fprintf(os.Stderr, "autodb: the configuration is invalid — this is not a "+
+			"failure of the command you ran:\n  %v\n", err)
+		os.Exit(exitConfig)
+	}
+	fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+	os.Exit(1)
 }
 
 // defaultWebPort is --web-ui's loopback port. A default at all is a convenience;

@@ -20,6 +20,10 @@ func TestExampleConfigMatchesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the shipped example does not load: %v", err)
 	}
+	// Provenance is not configuration: `seen` records which keys the decoder
+	// observed, so a loaded config has it populated and Default() cannot. The
+	// claim here is about the VALUES the example documents.
+	got.seen = nil
 	if want := Default(); !reflect.DeepEqual(got, want) {
 		t.Errorf("example diverges from the defaults it documents:\n got %+v\nwant %+v", got, want)
 	}

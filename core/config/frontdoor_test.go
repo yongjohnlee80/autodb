@@ -32,9 +32,11 @@ func TestFrontDoor_DisabledIsNotValidated(t *testing.T) {
 	}
 	// And the defaults are still the ADR's, so enabling it is one keystroke
 	// rather than a research exercise.
-	if c.FrontDoor.ReservedHeadroom != DefaultReservedHeadroom {
-		t.Errorf("reserved_headroom default = %d, want %d",
-			c.FrontDoor.ReservedHeadroom, DefaultReservedHeadroom)
+	// DERIVED FROM THIS MACHINE'S POOL, not a flat constant: the two were
+	// independent and contradicted each other below 3 vCPU.
+	if want := DefaultReservedHeadroom(c.Exec.PoolMaxConns); c.FrontDoor.ReservedHeadroom != want {
+		t.Errorf("reserved_headroom default = %d, want %d for a pool of %d",
+			c.FrontDoor.ReservedHeadroom, want, c.Exec.PoolMaxConns)
 	}
 	if c.FrontDoor.Bind == "" {
 		t.Error("bind has no default; enabling the front door would need two decisions, not one")

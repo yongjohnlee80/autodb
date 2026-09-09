@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/yongjohnlee80/autodb/core/engine"
+	"io/fs"
 	"net"
 	"net/netip"
 	"os"
@@ -37,6 +38,38 @@ type Config struct {
 	Web       Web       `toml:"web"`
 	Exec      Exec      `toml:"exec"`
 	FrontDoor FrontDoor `toml:"frontdoor"`
+
+	// seen records the keys the DECODER actually observed in the file, so a
+	// diagnostic can say which numbers an operator chose and which autodb
+	// supplied. Unexported and toml-invisible: it is not configuration.
+	//
+	// FROM THE DECODER, NEVER BY COMPARING A VALUE TO ITS DEFAULT. An operator
+	// who writes `reserved_headroom = 4` HAS set it, and telling them they did
+	// not — in the one message whose job is to say whose number is whose —
+	// would make the diagnostic wrong in exactly the way this record exists to
+	// prevent: a message that misnames whose decision a number was.
+	//
+	// NIL MEANS UNKNOWN, NOT "ALL DEFAULTED". A Config built in Go (Default(),
+	// any programmatic caller) never met a decoder, so nothing observed who
+	// chose what; a message built from an absent map must claim neither.
+	seen map[string]bool
+}
+
+// provenanceKnown reports whether a decoder observed this config at all.
+//
+// The distinction matters for wording: with no decoder there is no basis for
+// saying a value was defaulted OR chosen, and a message that asserts either is
+// making something up.
+func (c Config) provenanceKnown() bool { return c.seen != nil }
+
+// wasSet reports whether the file named this key. False for every key when
+// provenance is unknown — callers that care about the difference ask
+// provenanceKnown first.
+func (c Config) wasSet(section, key string) bool {
+	if c.seen == nil {
+		return false
+	}
+	return c.seen[section+"."+key]
 }
 
 // FrontDoor configures the PostgreSQL wire-protocol listener.
@@ -566,9 +599,12 @@ func Default() Config {
 			OutcomeRetentionInterval: Duration(DefaultOutcomeRetentionInterval),
 		},
 		FrontDoor: FrontDoor{
-			Enabled:          false,
-			Bind:             DefaultFrontDoorBind,
-			ReservedHeadroom: DefaultReservedHeadroom,
+			Enabled: false,
+			Bind:    DefaultFrontDoorBind,
+			// DERIVED FROM THE POOL, not a constant beside it. The two were
+			// independent and on a 1 vCPU host they contradicted: pool 2,
+			// headroom 4.
+			ReservedHeadroom: DefaultReservedHeadroom(DefaultPoolMaxConns()),
 		},
 	}
 }
@@ -605,10 +641,10 @@ const (
 	// exposing it is a decision an operator writes down.
 	DefaultFrontDoorBind = "127.0.0.1:5432"
 
-	// DefaultReservedHeadroom holds four connections of each target pool back
-	// from wire leases, for the interactive surfaces and the engine's own
-	// control queries.
-	DefaultReservedHeadroom = 4
+	// MaxReservedHeadroom is the most any pool holds back from wire leases,
+	// for the interactive surfaces and the engine's own control queries. It is
+	// a CEILING now rather than the value: see DefaultReservedHeadroom.
+	MaxReservedHeadroom = 4
 
 	// A tenth of the 90s idle-in-transaction bound: an expired transaction
 	// is rolled back within a few seconds of its deadline rather than at the
@@ -648,6 +684,38 @@ const (
 // for the sessions themselves. The ADR's sizing rule for tuning it upward is
 // MaxConns >= concurrent tx-holders + statement headroom.
 func DefaultPoolMaxConns() int { return 2 * runtime.NumCPU() }
+
+// DefaultReservedHeadroom is the headroom for a pool of this size.
+//
+// IT IS A FUNCTION OF THE POOL because the two numbers were independent and
+// jointly impossible on a small host: DefaultPoolMaxConns() is 2 x NumCPU, the
+// headroom was a flat 4, so a 1 vCPU machine shipped a pool of 2 with 4 held
+// back — the front door enabled with less than nothing to serve anyone with,
+// and exactly nothing at 2 vCPU. Nobody met it because install_frontdoor.sh
+// always emits pool_max_conns explicitly, sized for the host; an invariant
+// enforced by whoever happens to write the file is not an invariant.
+//
+// min(4, pool/2): 4 stays the intent, pool/2 is the bound that makes it
+// honourable, and pool <= 1 is stated rather than left to integer division. A
+// machine that can hold ONE connection cannot both reserve and serve, so the
+// front door gets it — a degraded install, not an invalid one, and the operator
+// is told rather than refused.
+//
+// THE POOL IS NEVER RAISED TO SATISFY THIS. exec.pool_max_conns is a claim on
+// the TARGET database's connection budget, a number the operator sized against
+// a server autodb does not own. Inflating it to fit an internal reservation
+// would take backends nobody granted and move the failure into somebody else's
+// production database at peak. A reservation may shrink to fit a pool; it may
+// never grow the pool to fit itself.
+func DefaultReservedHeadroom(poolMaxConns int) int {
+	if poolMaxConns <= 1 {
+		return 0
+	}
+	if half := poolMaxConns / 2; half < MaxReservedHeadroom {
+		return half
+	}
+	return MaxReservedHeadroom
+}
 
 // Duration is a TOML-friendly time.Duration: written as a string ("30m",
 // "90s") because an operator setting a timeout should not have to count
@@ -763,9 +831,28 @@ func Load(path string) (Config, error) {
 	err = derr
 	switch {
 	case errors.Is(err, os.ErrNotExist):
+		// NO FILE, so no decoder and no provenance: every value is a default
+		// and `seen` stays nil, which is correct — nothing observed a choice.
+		// Default() has already derived the headroom for this machine's pool.
 		return cfg, cfg.validate()
 	case err != nil:
-		return Config{}, fmt.Errorf("config: %s: %w", path, err)
+		// A FILE THAT DOES NOT PARSE IS AN INVALID CONFIGURATION, and has to
+		// be classified as one.
+		//
+		// Review drove the real binary with malformed TOML: it printed the raw
+		// parse error and exited 1, so install_frontdoor.sh still took its
+		// generic "--create-cert failed" branch — the exact wrong-subject
+		// framing EX_CONFIG exists to remove. My own cells covered only
+		// VALIDATION failures and I generalised from them.
+		//
+		// A FILESYSTEM failure is NOT reclassified: an unreadable file is a
+		// problem with the machine, not with what the operator wrote, and
+		// calling it a configuration error would send them to edit a file they
+		// cannot open. Content failures — syntax, type mismatch — are theirs.
+		if isFilesystemError(err) {
+			return Config{}, fmt.Errorf("config: %s: %w", path, err)
+		}
+		return Config{}, fmt.Errorf("%w: %s: %w", ErrInvalid, path, err)
 	}
 	if undecoded := md.Undecoded(); len(undecoded) > 0 {
 		// Keys the identity-keying change removed get a reason rather than a bare "unknown key".
@@ -783,7 +870,43 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("%w: %s: unknown keys: %v", ErrInvalid, path, undecoded)
 	}
+	// PROVENANCE, from the decoder's own record of what it saw.
+	cfg.seen = map[string]bool{}
+	for _, k := range md.Keys() {
+		cfg.seen[k.String()] = true
+	}
+	cfg.deriveSizing()
 	return cfg, cfg.validate()
+}
+
+// deriveSizing resolves the reserved headroom against the pool that is
+// actually in force, once the file has been decoded.
+//
+// ONLY WHEN THE OPERATOR DID NOT SET IT. An explicit reserved_headroom is an
+// INSTRUCTION: silently reducing it to fit would be autodb overriding a written
+// decision, which is the behaviour being removed here. So the
+// DEFAULT learns to fit the pool — including an explicitly-set pool, which is
+// the installer's case — and an explicit headroom that cannot hold gets an
+// error instead of a quiet correction.
+//
+// The pool is not touched here or anywhere: see DefaultReservedHeadroom.
+// isFilesystemError reports whether err is about REACHING the file rather than
+// about its contents.
+//
+// The split matters for what an operator is told to do: a syntax error means
+// "fix what you wrote", an EACCES means "fix the machine". Decided from the
+// error's type, not from its text — a *fs.PathError is what every os-level
+// failure carries, and toml's own content errors do not.
+func isFilesystemError(err error) bool {
+	var pathErr *fs.PathError
+	return errors.As(err, &pathErr)
+}
+
+func (c *Config) deriveSizing() {
+	if c.wasSet("frontdoor", "reserved_headroom") {
+		return
+	}
+	c.FrontDoor.ReservedHeadroom = DefaultReservedHeadroom(c.Exec.PoolMaxConns)
 }
 
 func (c Config) validate() error {
@@ -855,7 +978,7 @@ func (c Config) validate() error {
 			"so a transaction could sit well past its deadline before anything looked", ErrInvalid,
 			c.Exec.JanitorInterval.Duration(), c.Exec.IdleInTxTimeout.Duration())
 	}
-	if err := c.FrontDoor.validate(c.Exec.PoolMaxConns); err != nil {
+	if err := c.FrontDoor.validate(c.Exec.PoolMaxConns, c.sizingSource()); err != nil {
 		return err
 	}
 	if c.Exec.SessionIdleTimeout <= 0 {
@@ -891,7 +1014,37 @@ func (c Config) validate() error {
 // does not run the front door should not be asked to hold a certificate for
 // it, and refusing to start over an unused section would be a validator
 // enforcing a feature nobody asked for.
-func (f FrontDoor) validate(poolMaxConns int) error {
+// sizingSource describes where the two sizing numbers came from, for the
+// diagnostic — never for the arithmetic. The arithmetic must be right whether
+// or not anyone knows who chose the values.
+type sizingSource struct {
+	known       bool // a decoder observed this config
+	poolSet     bool
+	headroomSet bool
+}
+
+// describe names a value's origin in the operator's terms, or says nothing at
+// all when there is no basis for a claim.
+func (s sizingSource) describe(set bool, derivedFrom string) string {
+	switch {
+	case !s.known:
+		return ""
+	case set:
+		return " (which you set)"
+	default:
+		return " (autodb's default" + derivedFrom + ")"
+	}
+}
+
+func (c Config) sizingSource() sizingSource {
+	return sizingSource{
+		known:       c.provenanceKnown(),
+		poolSet:     c.wasSet("exec", "pool_max_conns"),
+		headroomSet: c.wasSet("frontdoor", "reserved_headroom"),
+	}
+}
+
+func (f FrontDoor) validate(poolMaxConns int, src sizingSource) error {
 	if !f.Enabled {
 		return nil
 	}
@@ -918,7 +1071,7 @@ func (f FrontDoor) validate(poolMaxConns int) error {
 	if f.CleartextDebug() {
 		// Cert, key and host names are not required in this mode — there is no
 		// identity to prove. Everything else below still applies.
-		return f.validateBudgets(poolMaxConns)
+		return f.validateBudgets(poolMaxConns, src)
 	}
 	// TLS is not optional on this surface and neither half of it is. A cert
 	// without a key cannot serve, and a key without a cert cannot prove
@@ -951,14 +1104,14 @@ func (f FrontDoor) validate(poolMaxConns int) error {
 			return fmt.Errorf("%w: frontdoor.tls_host_names[%d] is blank", ErrInvalid, i)
 		}
 	}
-	return f.validateBudgets(poolMaxConns)
+	return f.validateBudgets(poolMaxConns, src)
 }
 
 // validateBudgets checks the numeric limits, which apply in EVERY mode.
 // Extracted so the cleartext path shares them rather than restating them —
 // the exception is about TLS material, not about budgets, and a second copy
 // is how the two drift.
-func (f FrontDoor) validateBudgets(poolMaxConns int) error {
+func (f FrontDoor) validateBudgets(poolMaxConns int, src sizingSource) error {
 	if f.ReservedHeadroom < 0 {
 		return fmt.Errorf("%w: frontdoor.reserved_headroom is %d; it cannot be negative",
 			ErrInvalid, f.ReservedHeadroom)
@@ -1020,11 +1173,21 @@ func (f FrontDoor) validateBudgets(poolMaxConns int) error {
 	}
 
 	// The derivation, and the reason an explicit value may only be lower.
+	//
+	// THE MESSAGE NAMES WHOSE NUMBER IS WHOSE. The old text read as though the
+	// operator had chosen both, and on the droplet neither had been typed — so
+	// it showed somebody two figures they had never seen and asked them to
+	// reconcile them. With provenance unknown (a Config built in Go) it claims
+	// nothing, because there is nothing to claim.
 	derived := poolMaxConns - f.ReservedHeadroom
 	if derived < 1 {
-		return fmt.Errorf("%w: frontdoor.reserved_headroom (%d) leaves %d of exec.pool_max_conns "+
-			"(%d) for wire leases; the front door would be enabled with no capacity to serve "+
-			"anyone", ErrInvalid, f.ReservedHeadroom, derived, poolMaxConns)
+		return fmt.Errorf("%w: frontdoor.reserved_headroom (%d%s) leaves %d of "+
+			"exec.pool_max_conns (%d%s) for wire leases; the front door would be enabled "+
+			"with no capacity to serve anyone",
+			ErrInvalid,
+			f.ReservedHeadroom, src.describe(src.headroomSet, ""),
+			derived,
+			poolMaxConns, src.describe(src.poolSet, ", 2 x this host's cores"))
 	}
 	switch {
 	case f.MaxLeases == 0:

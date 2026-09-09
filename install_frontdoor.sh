@@ -451,6 +451,42 @@ ask_uint() {
   done
 }
 
+# cert_failure_note explains a FAILED --create-cert according to WHAT FAILED.
+#
+# autodb exits 78 (EX_CONFIG) when the failure is the configuration rather than
+# the command, and every subcommand loads the config -- so --create-cert can
+# fail for a reason that has nothing to do with certificates. That is not
+# hypothetical: it stopped a real 1 vCPU provisioning run, and this script
+# reported "--create-cert failed", which sent the operator to look at TLS.
+#
+# A FUNCTION so it can be driven without a host: see the define-only mode
+# below. The branch used to be inline in the apply path, reachable only through
+# a full provisioning run, so review could not see it execute.
+cert_failure_note() {
+  if [ "${1:-1}" -eq 78 ]; then
+    warn "the CONFIG is invalid -- certificate generation never ran. The message"
+    warn "above is autodb's; fix the setting it names in $CONFIG, then re-run:"
+    warn "  $0 --apply --config $CONFIG"
+  else
+    warn "--create-cert failed; leaving the front door disabled. The config and"
+    warn "unit are in place, so fix the cause and re-run --apply."
+  fi
+}
+
+# DEFINE-ONLY MODE: stop here with every function defined and nothing done.
+#
+# A testing seam, and an honest one. The reporting branches in this script were
+# reachable only through a full provisioning run, so a cell could assert their
+# text but never watch them execute -- which is how the handoff gate came to
+# need its own flag. This is the general form of that: a cell sources the
+# script, gets the functions, and drives one.
+#
+# Placed after every definition and BEFORE the first side effect, so sourcing
+# it cannot detect a host, write a file or start anything.
+if [ -n "${AUTODB_INSTALL_DEFINE_ONLY:-}" ]; then
+  return 0 2>/dev/null || exit 0
+fi
+
 # ------------------------------------------------------------- host detection
 
 if [ -n "$ASSUME_RAM" ]; then
@@ -1397,7 +1433,20 @@ systemctl daemon-reload
 
 if [ "$GEN_CERT" != "no" ] && [ -z "$TLS_CERT" ] && [ -n "$TLS_HOSTS" ]; then
   step "Issuing TLS material for: $TLS_HOSTS"
-  if "$PREFIX/autodb" --config "$CONFIG" --create-cert; then
+  # THE EXIT CODE DECIDES WHAT THIS FAILURE WAS ABOUT. autodb exits 78
+  # (EX_CONFIG) when the failure is the CONFIGURATION rather than the command,
+  # and every subcommand loads the config -- so --create-cert can fail for a
+  # reason that has nothing to do with certificates. That is not hypothetical:
+  # it stopped a real 1 vCPU provisioning run, and this script reported
+  # "--create-cert failed", which sent the operator to look at TLS.
+  #
+  # Branching on the CODE, not on the message: a script that grepped the
+  # daemon's prose would break the first time the wording improved.
+  # `if ...; then` rather than a bare call plus $?: set -e is in force, and a
+  # failing command outside a condition aborts the script -- which would take
+  # the run down at exactly the failure this branch exists to explain.
+  if "$PREFIX/autodb" --config "$CONFIG" --create-cert; then CERT_RC=0; else CERT_RC=$?; fi
+  if [ "$CERT_RC" -eq 0 ]; then
     TLS_CERT="$CONFIG_DIR/tls/cert.pem"
     TLS_KEY="$CONFIG_DIR/tls/key.pem"
     TLS_CA="$CONFIG_DIR/tls/ca.pem"
@@ -1436,8 +1485,7 @@ if [ "$GEN_CERT" != "no" ] && [ -z "$TLS_CERT" ] && [ -n "$TLS_HOSTS" ]; then
       TLS_CERT=""; TLS_KEY=""
     fi
   else
-    warn "--create-cert failed; leaving the front door disabled. The config and"
-    warn "unit are in place, so fix the cause and re-run --apply."
+    cert_failure_note "$CERT_RC"
     TLS_CERT=""; TLS_KEY=""
   fi
 fi
