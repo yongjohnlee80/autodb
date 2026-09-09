@@ -494,6 +494,12 @@ type HistoryRow struct {
 	RowCount  int64
 	Status    string
 	Error     string
+
+	// Suspended came back on its own key rather than as a status value,
+	// because status is the durability token and a suspended Execute did
+	// commit. A daemon that does not send the key yields false, which reads as
+	// "not suspended" -- the answer every pre-existing row deserves.
+	Suspended bool
 }
 
 func (b *Bound) History(ctx context.Context, limit int64) ([]HistoryRow, error) {
@@ -509,7 +515,7 @@ func (b *Bound) History(ctx context.Context, limit int64) ([]HistoryRow, error) 
 			Script: mS(m, "script"), StartedAt: mS(m, "started_at"),
 			Duration: time.Duration(mI(m, "duration_ms")) * time.Millisecond,
 			RowCount: mI(m, "row_count"), Status: mS(m, "status"),
-			Error: mS(m, "error"),
+			Error: mS(m, "error"), Suspended: mB(m, "suspended"),
 		})
 	}
 	return out, nil

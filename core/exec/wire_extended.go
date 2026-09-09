@@ -721,8 +721,8 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	if rerr := e.writeOutcomeTagged(recCtx, pol.Ident, connRow.ID, ip, attemptID,
-		duration, rowCount, status, errText, txID, tag); rerr != nil {
+	if rerr := e.writeOutcomeSuspended(recCtx, pol.Ident, connRow.ID, ip, attemptID,
+		duration, rowCount, status, errText, txID, tag, obs.suspended); rerr != nil {
 		return rerr
 	}
 
@@ -821,6 +821,15 @@ type extObservation struct {
 	// completed records that a TERMINAL frame for this Execute arrived, whether
 	// or not the client ever received it.
 	completed bool
+
+	// suspended records that the terminal was PortalSuspended — this Execute
+	// returned a page and left the statement unfinished.
+	//
+	// SEPARATE FROM completed, and both are true for a suspension: the Execute
+	// did terminate (that is what ends the frame) and the statement did not
+	// finish. Collapsing them is what made every page of a row-limited fetch
+	// record `ok`.
+	suspended bool
 
 	// targetErr is the target's error, when the drain saw one.
 	targetErr *pgconn.PgError
@@ -974,6 +983,10 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, s
 				obs.targetErr, obs.mine = m.Err, own.owns(step)
 			case step.exec && terminalForExecute(m.Kind):
 				obs.completed = true
+				// PortalSuspended is a terminal for the FRAME and not for the
+				// statement. Recorded here, beside the completion it is so
+				// easily mistaken for.
+				obs.suspended = m.Kind == "PortalSuspended"
 			}
 		}
 		// THE READING CONTINUES EVEN WHEN DELIVERY HAS STOPPED.

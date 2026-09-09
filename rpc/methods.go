@@ -677,6 +677,11 @@ func (s *Server) register() {
 				"script": r.Script, "started_at": r.StartedAt.Format(time.RFC3339),
 				"duration_ms": r.Duration.Milliseconds(), "row_count": r.RowCount,
 				"status": r.Status, "error": r.Error,
+				// A SEPARATE KEY, never a fifth status value: status is the
+				// durability token and a suspended Execute did commit. A
+				// client that does not know the key reads the same status it
+				// always did.
+				"suspended": r.Suspended,
 			})
 		}
 		return out, nil

@@ -669,9 +669,29 @@ func (e *Engine) writeOutcome(ctx context.Context, ident auth.Identity, connID i
 
 // writeOutcomeTagged is writeOutcome with the session tag on the audit line.
 func (e *Engine) writeOutcomeTagged(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status HistStatus, errText, txID, tag string) error {
+	return e.writeOutcomeSuspended(ctx, ident, connID, ip, histID, dur, rows, status, errText, txID, tag, false)
+}
+
+// writeOutcomeSuspended is writeOutcomeTagged plus the SUSPENSION axis.
+//
+// Separate from status, because they answer different questions: status says
+// what became of the EFFECT, this says whether the statement finished. A
+// suspended INSERT ... RETURNING inside a transaction is both suspended and
+// pending commit, and one token cannot carry both.
+//
+// The default is false through writeOutcomeTagged, which is correct for every
+// caller that cannot suspend: only an Execute with a row limit can, and a
+// simple Query or a completing Execute is finished by definition.
+func (e *Engine) writeOutcomeSuspended(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status HistStatus, errText, txID, tag string, suspended bool) error {
 	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
+		// SUSPENDED APPEARS IN THE AUDIT LINE TOO, not only in the history
+		// row. The two surfaces answer the same question for different
+		// readers, and an audit line that said `ok` for a page while the
+		// history row knew better would be the original defect with one extra
+		// place to look.
 		if err := e.auth.AuditTxCorrelated(tx, ident.UserID(), ip, "exec_result",
-			fmt.Sprintf("conn %d (%s, %d row(s), %dms)%s%s", connID, status, rows, dur.Milliseconds(),
+			fmt.Sprintf("conn %d (%s%s, %d row(s), %dms)%s%s", connID, status,
+				suspendedSuffix(suspended), rows, dur.Milliseconds(),
 				errSuffix(errText), auditTagSuffix(tag)), txID); err != nil {
 			return err
 		}
@@ -682,11 +702,29 @@ func (e *Engine) writeOutcomeTagged(ctx context.Context, ident auth.Identity, co
 			Set(meta.HistDurationMS, dur.Milliseconds()).
 			Set(meta.HistRowCount, rows).
 			Set(meta.HistStatus, status).Set(meta.HistError, errText).
+			Set(meta.HistSuspended, boolToFlag(suspended)).
 			Update(); err != nil {
 			return fmt.Errorf("exec: completing history: %w", err)
 		}
 		return nil
 	})
+}
+
+// boolToFlag is the 0/1 house representation for a boolean column.
+func boolToFlag(b bool) int64 {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// suspendedSuffix marks a page in the audit line. Empty for everything that
+// finished, so no existing line changes shape.
+func suspendedSuffix(suspended bool) string {
+	if suspended {
+		return " suspended"
+	}
+	return ""
 }
 
 func errSuffix(errText string) string {

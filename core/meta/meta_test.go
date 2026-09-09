@@ -218,6 +218,10 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 		// (it is a v1 table), so unlike pats' new columns this one does not
 		// vanish with its table and has to be named explicitly.
 		`ALTER TABLE connections DROP COLUMN target_db`,
+		// v15 adds script_history.suspended. script_history is a v1 table, so
+		// like connections.target_db the column outlives a table DROP and has
+		// to be named. This list is the contract the comment above describes.
+		`ALTER TABLE script_history DROP COLUMN suspended`,
 		`DELETE FROM schema_migrations WHERE version >= 7`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
@@ -318,6 +322,8 @@ func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
 		// (it is a v1 table), so unlike pats' new columns this one does not
 		// vanish with its table and has to be named explicitly.
 		`ALTER TABLE connections DROP COLUMN target_db`,
+		// v15 adds script_history.suspended — same DROP-list rule.
+		`ALTER TABLE script_history DROP COLUMN suspended`,
 		`DELETE FROM schema_migrations WHERE version >= 8`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {

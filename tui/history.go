@@ -34,9 +34,7 @@ func newHistoryView(m *Model, rows []HistoryRow) *historyView {
 		{Title: "WHO", Width: 12, Cell: func(r HistoryRow) string { return r.User }},
 		{Title: "CONNECTION", Width: 14, Cell: func(r HistoryRow) string { return r.Conn }},
 		{Title: "STATUS", Width: 9, Cell: func(r HistoryRow) string { return statusLabel(r.Status) }},
-		{Title: "ROWS", Width: 6, Cell: func(r HistoryRow) string {
-			return strconv.FormatInt(r.RowCount, 10)
-		}},
+		{Title: "ROWS", Width: 6, Cell: func(r HistoryRow) string { return rowCountText(r) }},
 		{Title: "TOOK", Width: 8, Cell: func(r HistoryRow) string { return r.Duration.String() }},
 		// Flex: whatever is left goes to the script preview.
 		{Title: "SCRIPT", Cell: func(r HistoryRow) string {
@@ -170,6 +168,26 @@ func statusLabel(status string) string {
 	return status
 }
 
+// rowCountText renders the row count, marking a SUSPENDED page with a trailing
+// "+".
+//
+// The row count is where suspension belongs, because that is the question it
+// answers: the statement was stopped by the row limit and had more to give.
+// "100" and "100+" are different facts, and before this the operator saw "100"
+// for both -- with no way to tell a complete result from a truncated one.
+//
+// It is deliberately NOT in the STATUS column. Status is the durability token:
+// "ok" means the effects are committed, which is equally true of a suspended
+// Execute. Folding suspension in there would trade one unanswerable question
+// for another.
+func rowCountText(r HistoryRow) string {
+	n := strconv.FormatInt(r.RowCount, 10)
+	if r.Suspended {
+		return n + "+"
+	}
+	return n
+}
+
 func scriptTitle(r HistoryRow) string {
 	title := whenText(r.StartedAt) + " · " + r.User
 	if r.Conn != "" {
@@ -177,6 +195,12 @@ func scriptTitle(r HistoryRow) string {
 	}
 	if r.Status != "" {
 		title += " · " + r.Status
+	}
+	// Spelled out in the detail view, where there is room for the word. The
+	// table has six columns of budget and a "+"; this is where an operator
+	// finds out what the "+" meant.
+	if r.Suspended {
+		title += " · suspended (row limit reached, more rows remained)"
 	}
 	return title
 }

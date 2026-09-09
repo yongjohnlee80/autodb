@@ -317,7 +317,24 @@ type HistoryEntry struct {
 	// whether its effect survives. Empty for autocommit, where the
 	// statement's own return already settles that.
 	TxID string
+	// Suspended reports that this Execute returned a PAGE and left the
+	// statement unfinished — a portal suspension.
+	//
+	// ITS OWN AXIS, orthogonal to Status. Status answers what became of the
+	// EFFECT; this answers whether the statement finished. A suspended
+	// INSERT ... RETURNING inside a transaction is both suspended and pending
+	// commit, and one token cannot say both — which is why this is a field and
+	// not an `ok_suspended` status.
+	//
+	// A 0/1 int64, like users.disabled and connections.debug: the column is
+	// INTEGER on both engines, and a Go bool cannot scan an int4 out of
+	// postgres. IsSuspended() is the predicate; the migration guards caught
+	// both halves of getting this wrong.
+	Suspended int64
 }
+
+// IsSuspended reports whether this Execute left the statement unfinished.
+func (h *HistoryEntry) IsSuspended() bool { return h.Suspended != 0 }
 
 type HistoryField string
 
@@ -335,6 +352,8 @@ const (
 	HistStatus     HistoryField = "status"
 	HistError      HistoryField = "error"
 	HistTxID       HistoryField = "tx_id"
+	// HistSuspended is the suspension axis — see HistoryEntry.Suspended.
+	HistSuspended HistoryField = "suspended"
 )
 
 // HistByID orders history by insertion, so the repair sweep can page it.
@@ -355,6 +374,7 @@ func newHistory(conn dao.DataConn) *dao.Schema[*HistoryEntry, HistoryField, Sort
 			HistStatus:     {Column: "status", Scan: func(r *HistoryEntry) any { return &r.Status }, Value: func(r *HistoryEntry) any { return string(r.Status) }},
 			HistError:      {Column: "error", Scan: func(r *HistoryEntry) any { return &r.Error }, Value: func(r *HistoryEntry) any { return r.Error }},
 			HistTxID:       {Column: "tx_id", Scan: func(r *HistoryEntry) any { return &r.TxID }, Value: func(r *HistoryEntry) any { return r.TxID }},
+			HistSuspended:  {Column: "suspended", Scan: func(r *HistoryEntry) any { return &r.Suspended }, Value: func(r *HistoryEntry) any { return r.Suspended }},
 		})
 }
 

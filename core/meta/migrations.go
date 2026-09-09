@@ -517,6 +517,48 @@ var migrations = []migration{
 				created_at BIGINT NOT NULL)`,
 		},
 	},
+	// v15: SUSPENSION IS ITS OWN AXIS, not a status token.
+	//
+	// An outcome row describes the EXECUTE, not the statement — it exists
+	// because that Execute was separately authorized. A row-limited fetch
+	// therefore writes one row per page, and every one of them said `ok`:
+	// measured on live PostgreSQL, SELECT generate_series(1,10) at maxRows=3
+	// produced four rows with one meaning, three of them false. The audit could
+	// not answer the question it exists to answer — did this statement finish?
+	//
+	// A SEPARATE COLUMN rather than a new status token, and the reasoning is
+	// what makes it a column:
+	//
+	//   - `status` answers what became of the EFFECT (ok, ok_pending_commit,
+	//     error, rolled_back). Suspension is orthogonal to that: a suspended
+	//     INSERT ... RETURNING inside a transaction is both suspended AND
+	//     pending commit, and one token cannot say both.
+	//   - An `ok_suspended` token would drop the pending/durable distinction
+	//     exactly where it matters, and on an AUDIT surface historical rows
+	//     must keep meaning what they meant when written. A new axis touches no
+	//     existing token; a re-scoped `ok` silently rewrites the past.
+	//   - Every future qualifier would double a token vocabulary. Two axes stay
+	//     two axes.
+	//
+	// FALSE, not NULL, for every historical row and for every statement that
+	// never suspended — the house pattern for "no value" here, and it keeps the
+	// read paths free of null handling. A historical row asserting `false` is
+	// making the same claim it always implied.
+	// A 0/1 INTEGER ON BOTH ENGINES — the house pattern, matching
+	// users.disabled and connections.debug rather than introducing a second
+	// convention for booleans.
+	//
+	// My first version used BOOLEAN on postgres and INTEGER on sqlite, and the
+	// migration-completeness guard caught it: the sqlite->postgres copy carried
+	// "0" into a column that reads back "false", so the two stores disagreed
+	// about a column whose row count matched. The v3 comment above already says
+	// why one convention beats two; I added the second one anyway.
+	{
+		Version: 15,
+		Both: []string{
+			`ALTER TABLE script_history ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0`,
+		},
+	},
 }
 
 // partitionVolumeTables is v11's computed step.

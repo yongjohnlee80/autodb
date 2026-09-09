@@ -32,6 +32,17 @@ type HistoryRow struct {
 	RowCount  int64
 	Status    string
 	Error     string
+
+	// Suspended is the SECOND axis, and it is not folded into Status.
+	//
+	// Status is the durability token -- "ok" means the effects are committed
+	// -- and a suspended Execute's effects are as durable as any other's, so
+	// overloading it would make a truthful answer to "did this commit?"
+	// unavailable. What suspension answers is a different question: whether
+	// the statement had MORE ROWS TO GIVE when the row limit stopped it. An
+	// operator reading history needs both, because "ok, 100 rows" and "ok, 100
+	// rows, and there were more" are different facts about the same run.
+	Suspended bool
 }
 
 // DefaultHistoryLimit bounds an unspecified request; MaxHistoryLimit
@@ -86,6 +97,11 @@ func (e *Engine) ListHistory(ctx context.Context, token string, limit int) ([]Hi
 			StartedAt: time.Unix(r.StartedAt, 0),
 			Duration:  time.Duration(r.DurationMS) * time.Millisecond,
 			RowCount:  r.RowCount, Status: string(r.Status), Error: r.Error,
+			// Through the entity's own predicate rather than by comparing the
+			// stored integer here: the 0/1-on-both-engines convention has one
+			// reader, and a second comparison written by hand is where the two
+			// engines drift apart.
+			Suspended: r.IsSuspended(),
 		})
 	}
 	return out, nil
