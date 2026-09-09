@@ -144,11 +144,15 @@ type openFloatRef struct {
 // formField is one labelled text input.
 type formField struct {
 	label string
+	// The options the caller asked for. The INPUT is built by newForm rather
+	// than here, because the advance hook has to close over the form and the
+	// field's index, and neither exists yet at this call site.
+	opts  []widget.TextInputOption
 	input *widget.TextInput
 }
 
 func field(label string, opts ...widget.TextInputOption) formField {
-	return formField{label: label, input: widget.NewTextInput(opts...)}
+	return formField{label: label, opts: opts}
 }
 
 // form is a column of labelled inputs, a hint footer and a status line.
@@ -185,9 +189,16 @@ func newForm(fields []formField, onSubmit func([]string) (bool, string)) *form {
 		onSubmit: onSubmit,
 	}
 	f.flex = tui.NewFlex(tui.Vertical)
-	for _, fd := range fields {
-		f.flex.Add(widget.NewText(fd.label, widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted))))
-		f.flex.Add(fd.input)
+	for i := range f.fields {
+		idx := i
+		opts := make([]widget.TextInputOption, 0, len(f.fields[i].opts)+1)
+		opts = append(opts, f.fields[i].opts...)
+		// THE ADVANCE RUNS ON THE KEY, NOT ON AN EVENT. See advanceOrSubmit.
+		opts = append(opts, widget.WithOnSubmit(func(string) { f.advanceOrSubmit(idx) }))
+		f.fields[i].input = widget.NewTextInput(opts...)
+		f.flex.Add(widget.NewText(f.fields[i].label,
+			widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted))))
+		f.flex.Add(f.fields[i].input)
 	}
 	f.flex.Add(f.status)
 	f.flex.Add(f.hint)
@@ -197,31 +208,40 @@ func newForm(fields []formField, onSubmit func([]string) (bool, string)) *form {
 func (f *form) Init(ctx *tui.Context) {
 	f.tui = ctx
 	ctx.Mount(f.flex)
-	tui.SubscribeScoped(ctx, func(ev widget.SubmitEvent) {
-		for i, fd := range f.fields {
-			if ev.Owner != fd.input.NodeID() {
-				continue
-			}
-			// THE LAST FIELD SUBMITS; every other one advances.
-			//
-			// Deciding by POSITION rather than by "is this the only field"
-			// keeps the single-field case correct for free: index 0 is also
-			// the last, so a one-field form (search, rename) submits on Enter
-			// exactly as it always did.
-			if i == len(f.fields)-1 {
-				f.submit()
-				return
-			}
-			if !ctx.FocusComponent(f.fields[i+1].input) {
-				// Focus could not move -- an unmounted or unfocusable field.
-				// Submitting would be worse than doing nothing: it would fire
-				// a form the operator has not finished, which is the very
-				// behaviour this replaced. Say so instead.
-				f.status.SetText("could not move to the next field; use Tab")
-			}
-			return
-		}
-	})
+}
+
+// advanceOrSubmit is Enter's whole behaviour, and it runs SYNCHRONOUSLY inside
+// the key handler -- via widget.WithOnSubmit, not via widget.SubmitEvent.
+//
+// The event cannot do this. golib's Bus.Publish queues delivery onto the
+// program lane, and the App selects between the input lane and the program
+// lane, so when a keystroke is already waiting Go picks between them
+// pseudo-randomly: the focus move landed before or after the next keystroke,
+// about half the time each, and the keystroke that lost went to the field the
+// operator had just left. Typing "demo" ENTER "sqlite" into the connection form
+// produced a name of "demos" and an engine of "qlite", so the daemon refused an
+// engine that does not exist. It passed locally, passed a full VM ledger, and
+// failed in CI at the same commit. Every paste is that race, because a paste is
+// a burst with none of a human's delay.
+//
+// THE LAST FIELD SUBMITS; every other one advances. Deciding by POSITION rather
+// than by "is this the only field" keeps the single-field case correct for
+// free: index 0 is also the last, so a one-field form (search, rename) submits
+// on Enter exactly as it always did.
+func (f *form) advanceOrSubmit(i int) {
+	if i < 0 || i >= len(f.fields) {
+		return
+	}
+	if i == len(f.fields)-1 {
+		f.submit()
+		return
+	}
+	// Focus could not move -- an unmounted or unfocusable field. Submitting
+	// would be worse than doing nothing: it would fire a form the operator has
+	// not finished, which is the very behaviour this replaced. Say so instead.
+	if f.tui == nil || !f.tui.FocusComponent(f.fields[i+1].input) {
+		f.status.SetText("could not move to the next field; use Tab")
+	}
 }
 
 func (f *form) submit() {

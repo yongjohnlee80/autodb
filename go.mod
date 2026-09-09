@@ -9,7 +9,7 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/lib/pq v1.12.3
-	github.com/yongjohnlee80/golib v0.5.14
+	github.com/yongjohnlee80/golib v0.5.15
 	golang.org/x/crypto v0.55.0
 	golang.org/x/term v0.45.0
 )

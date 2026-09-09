@@ -191,6 +191,39 @@ func (h *uiHarness) keys(s string) {
 	}
 }
 
+// paste injects a whole burst in ONE call, the way a paste arrives.
+//
+// This is not a convenience: it is the only way to reach the ordering the
+// per-key helpers hide. keys() calls Inject once per rune, and the loop leaves
+// the app enough room to drain its program lane between them -- so a form whose
+// Enter-advance rides a queued EVENT looks correct when driven that way, and
+// intermittently drops the next field's first character when driven by a real
+// paste or a fast typist. One batch removes that room.
+func (h *uiHarness) paste(evs ...tuicore.KeyEvent) {
+	h.t.Helper()
+	all := make([]tuicore.Event, 0, len(evs))
+	for _, e := range evs {
+		all = append(all, e)
+	}
+	if err := h.tb.Inject(all...); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+// runes turns a string into the key events that type it.
+func runes(s string) []tuicore.KeyEvent {
+	out := make([]tuicore.KeyEvent, 0, len(s))
+	for _, r := range s {
+		out = append(out, tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: r, Text: string(r)})
+	}
+	return out
+}
+
+// enter is the Enter key as an event, for building a burst.
+func enter() tuicore.KeyEvent {
+	return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyEnter}
+}
+
 // ctrl injects a Ctrl-modified key (pane motion).
 func (h *uiHarness) ctrl(code rune) {
 	if err := h.tb.Inject(tuicore.KeyEvent{
