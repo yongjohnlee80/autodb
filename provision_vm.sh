@@ -46,6 +46,24 @@ META_DSN=""
 BIND="0.0.0.0:5432"
 DNS_NAME=""
 FD_PORT=""
+# How many consecutive `active` samples count as "it stayed up". Three is
+# enough to outlast a daemon that dies on its first real work -- config load,
+# store open, lease -- and short enough not to stall a good run.
+#
+# A CONSTANT, NOT A TUNABLE, and the previous version of this comment is why.
+# It read "the number of samples that must agree is the property, and it stays"
+# while the value came from ${AUTODB_ACTIVE_STABLE_SAMPLES:-3} -- so the
+# property was asserted in prose and injectable in fact. Setting it to 0 makes
+# `[ "$_stable" -ge 0 ]` true at the first sample and the whole crash-loop gate
+# vacuous; measured, not deduced (see the zero-and-negative cell). A gate with
+# an off switch in the environment is not a gate, and there is no operator
+# reason to want fewer than three.
+ACTIVE_STABLE_SAMPLES=3
+# The GAP between samples is adjustable, because it is not the property: a cell
+# sets it to 0 so a crash-loop case does not spend thirty seconds proving what
+# it proves in thirty milliseconds. Validated as a non-negative integer, or
+# `sleep` would fail mid-poll on a typo and take the run down with it.
+ACTIVE_SAMPLE_SLEEP="${AUTODB_ACTIVE_SAMPLE_SLEEP:-1}"   # validated below, where die() exists
 RPC_PORT=""
 RPC_SOCKET="no"
 KEEP_TMP="no"
@@ -70,6 +88,14 @@ info() { printf '  %s\n' "$*"; }
 step() { printf '\n=== %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# THE SAMPLE GAP, validated HERE and not where it is assigned, because die() is
+# defined on the line above and a check that runs before its helper exits 127
+# with no message at all -- a failure mode this repo has already shipped once.
+case "$ACTIVE_SAMPLE_SLEEP" in
+  ''|*[!0-9]*) die "AUTODB_ACTIVE_SAMPLE_SLEEP must be a non-negative whole number of
+       seconds (got '$ACTIVE_SAMPLE_SLEEP')" ;;
+esac
 
 usage() {
   cat <<'USAGE'
@@ -231,6 +257,18 @@ if [ "$UNATTENDED" = "yes" ] && [ "$RUN_INIT" = "yes" ]; then
   INIT_DEFERRED="yes"
 fi
 
+# A LOOPBACK HOST MEANS THIS MACHINE, and provisioning it should not require
+# an sshd, a key or a login.
+#
+# Everything remote goes through exactly three functions, so local mode is a
+# different definition of those three rather than a second code path: the
+# probe, the uploads, the interview and the ceremony are all unchanged, and
+# there is no "if local" scattered through the body to drift out of step.
+LOCAL_MODE="no"
+case "$SSH_HOST" in
+  127.0.0.1|::1|localhost|localhost.localdomain) LOCAL_MODE="yes" ;;
+esac
+
 if [ "$MODE_FLAGS" = "yes" ]; then
   if [ "$RUN_INIT" = "yes" ]; then
     printf 'first-run: WILL PROMPT for the root passphrase and dev accounts\n'
@@ -253,9 +291,18 @@ if [ "$MODE_FLAGS" = "yes" ]; then
   # The installer is told NOT to start; this playbook owns the start, gated on
   # the ceremony and the handoff. Printed so the contract is assertable.
   printf 'installer-start: no (--no-start; the playbook owns the start)\n'
+  # LOCAL OR REMOTE, resolved from the host. Printed so the transport is
+  # assertable without a machine to reach.
+  printf 'transport: %s\n' "$( [ "$LOCAL_MODE" = yes ] && echo "local (this machine)" || echo "ssh ${SSH_USER:-<user>}@${SSH_HOST:-<host>}" )"
   exit 0
 fi
 
+# A LOCAL RUN NEEDS NO LOGIN. Requiring --user for 127.0.0.1 would be asking
+# which account to ssh into on a run that never opens a connection.
+if [ "$LOCAL_MODE" = "yes" ] && [ -z "$SSH_USER" ]; then
+  SSH_USER="$(id -un)"
+  TARGET="this machine"
+fi
 [ -n "$SSH_USER" ] || die "--user is required (the SSH login on the VM). Run with no
        arguments, or --help, for everything this accepts."
 [ -n "$SSH_HOST" ] || die "--host is required (the VM's IP address or DNS name). Run with
@@ -312,9 +359,26 @@ SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-
 [ -n "$SSH_KEY" ] && SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
 TARGET="$SSH_USER@$SSH_HOST"
 
-rsh()  { ssh $SSH_OPTS "$TARGET" "$@"; }
-rcp()  { scp -q $( [ -n "$SSH_KEY" ] && printf '%s' "-i $SSH_KEY" ) -P "$SSH_PORT" \
-           -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$1" "$TARGET:$2"; }
+if [ "$LOCAL_MODE" = "yes" ]; then
+  TARGET="this machine"
+  # `sh -c` because every call site passes ONE string built for a remote
+  # shell; running it through a shell locally keeps the quoting identical
+  # rather than re-deriving it for a second transport.
+  rsh()     { sh -c "$*"; }
+  rsh_tty() { sh -c "$*"; }
+  rcp()     { cp -- "$1" "$2"; }
+  # How to say "do this over there" in the closing notes. Empty locally,
+  # because there is no over there.
+  remote_cmd() { printf '%s' "$*"; }
+else
+  rsh()     { ssh $SSH_OPTS "$TARGET" "$@"; }
+  # A PTY for the two steps that ask questions -- the installer's interview and
+  # the first-run ceremony, which reads a passphrase with echo off.
+  rsh_tty() { ssh -t $SSH_OPTS "$TARGET" "$@"; }
+  rcp()     { scp -q $( [ -n "$SSH_KEY" ] && printf '%s' "-i $SSH_KEY" ) -P "$SSH_PORT" \
+                -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$1" "$TARGET:$2"; }
+  remote_cmd() { printf "ssh -t %s '%s'" "$TARGET" "$*"; }
+fi
 
 # ------------------------------------------------------------------- probe
 
@@ -423,7 +487,7 @@ sh "$FD_SCRIPT" $FD_ARGS 2>&1 | sed -n '/preflight/,$p' | sed 's/^/  /' || \
 
 if [ "$MODE" = "check" ]; then
   say ""
-  say "Probe only -- nothing on the VM was changed. Re-run with --apply to provision."
+  say "Probe only -- nothing was changed on $TARGET. Re-run with --apply to provision."
   exit 0
 fi
 
@@ -632,7 +696,7 @@ if [ "$UNATTENDED" = "yes" ]; then
   rsh "$SUDO $REMOTE_TMP/install_frontdoor.sh $FD_APPLY"
 else
   # A pty, so the interview's prompts and no-echo reads reach the operator.
-  ssh -t $SSH_OPTS "$TARGET" "$SUDO $REMOTE_TMP/install_frontdoor.sh $FD_APPLY"
+  rsh_tty "$SUDO $REMOTE_TMP/install_frontdoor.sh $FD_APPLY"
 fi
 
 # ------------------------------------------------------- first-run ceremony
@@ -644,7 +708,7 @@ fi
 # It runs with the service stopped, since --init takes the instance lease.
 if [ "$RUN_INIT" != "no" ]; then
   step "First-run ceremony (you will be asked to set the root password)"
-  if ssh -t $SSH_OPTS "$TARGET" "$SUDO $PREFIX/autodb --config $CONFIG_REMOTE --init"; then
+  if rsh_tty "$SUDO $PREFIX/autodb --config $CONFIG_REMOTE --init"; then
     INIT_OK="yes"
     # THE CEREMONY RAN AS ROOT, so the store, its lease sidecar and the keyfile
     # are root-owned -- and the service runs as its own account. The handoff
@@ -679,8 +743,8 @@ if [ "$RUN_INIT" != "no" ]; then
       warn "account cannot open it. NOT starting the front door -- it would only"
       warn "crash-loop on \"permission denied\" and hide the cause."
       warn "Repair, then start:"
-      warn "  ssh -t $TARGET '$SUDO $REMOTE_TMP/install_frontdoor.sh --hand-off --config $CONFIG_REMOTE --user $RUN_USER_REMOTE'"
-      warn "  ssh -t $TARGET '$SUDO systemctl enable --now autodb-frontdoor'"
+      warn "  $(remote_cmd "$SUDO $REMOTE_TMP/install_frontdoor.sh --hand-off --config $CONFIG_REMOTE --user $RUN_USER_REMOTE")"
+      warn "  $(remote_cmd "$SUDO systemctl enable --now autodb-frontdoor")"
     fi
   else
     INIT_OK="no"
@@ -692,7 +756,7 @@ if [ "$RUN_INIT" != "no" ]; then
     # directory stays, because the recovery command lives in it.
     KEEP_TMP="yes"
     warn "--init did not complete. Everything else is in place; run"
-    warn "  ssh -t $TARGET '$PREFIX/autodb --config $CONFIG_REMOTE --init'"
+    warn "  $(remote_cmd "$PREFIX/autodb --config $CONFIG_REMOTE --init")"
     warn "before starting the service, or a restart leaves the store locked."
   fi
 fi
@@ -721,25 +785,60 @@ if [ "$START_NOW" != "no" ] && [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-
   # freshly enabled unit legitimately reads "activating" for a moment, and a
   # single look would charge that as a failure.
   if rsh "$SUDO systemctl enable --now autodb-frontdoor"; then
+    # ONE `active` SAMPLE IS NOT A RUNNING DAEMON, and a review caught the
+    # previous version breaking out of this loop on the first one.
+    #
+    # The unit is Type=simple, so systemd marks it ACTIVE the moment it forks
+    # the process -- before the binary has read its config, opened its store or
+    # bound anything. A daemon that starts and dies immediately is therefore
+    # active, briefly, on its way to failed; and with Restart=on-failure it is
+    # active again a moment later. Sampling once and accepting the first
+    # `active` admits the exact crash loop this whole gate exists to catch,
+    # which is the third time this family of defect has been found in this
+    # branch: first the missing gate, then trusting enable's exit status, now
+    # trusting one reading of the state.
+    #
+    # So: active SUSTAINED across consecutive samples, with an UNCHANGED
+    # MainPID. A restart is what a crash loop does, and it changes MainPID --
+    # so the pid is the evidence that the process which was active a second ago
+    # is the same one that is active now.
     START_OK="no"
+    _stable=0
+    _pid=""
     _tries=0
-    while [ "$_tries" -lt 15 ]; do
-      _state="$(rsh "$SUDO systemctl show -p ActiveState --value autodb-frontdoor" 2>/dev/null || echo unknown)"
+    while [ "$_tries" -lt 30 ]; do
+      # Three properties in one round trip, one per line in the order asked.
+      _show="$(rsh "$SUDO systemctl show -p ActiveState -p MainPID -p NRestarts --value autodb-frontdoor" 2>/dev/null || printf 'unknown\n0\n0\n')"
+      _state="$(printf '%s\n' "$_show" | sed -n 1p)"
+      _mainpid="$(printf '%s\n' "$_show" | sed -n 2p)"
+      _restarts="$(printf '%s\n' "$_show" | sed -n 3p)"
       case "$_state" in
-        active)             START_OK="yes"; break ;;
-        activating|reloading) ;;                      # still coming up
-        *)                  break ;;                  # failed/inactive: done
+        active)
+          if [ -n "$_pid" ] && [ "$_mainpid" != "$_pid" ]; then
+            # It restarted between two samples: active, but not the same
+            # process. That is a crash loop wearing the right state.
+            _stable=0
+          else
+            _stable=$(( _stable + 1 ))
+          fi
+          _pid="$_mainpid"
+          [ "$_stable" -ge "$ACTIVE_STABLE_SAMPLES" ] && { START_OK="yes"; break; }
+          ;;
+        activating|reloading) _stable=0 ;;   # still coming up
+        *) break ;;                          # failed/inactive: done deciding
       esac
       _tries=$(( _tries + 1 ))
-      sleep 1
+      [ "$ACTIVE_SAMPLE_SLEEP" != "0" ] && sleep "$ACTIVE_SAMPLE_SLEEP"
     done
     if [ "$START_OK" = "yes" ]; then
-      info "service is ACTIVE"
+      info "service is ACTIVE and stayed up (pid $_pid, ${ACTIVE_STABLE_SAMPLES} samples)"
     else
-      warn "systemctl accepted the start but the unit is not active (ActiveState=${_state:-unknown})."
-      warn "A unit that starts and exits at once returns success from enable --now, so"
-      warn "this is the failure that used to be reported as a working install."
-      warn "  ssh $TARGET '$SUDO journalctl -u autodb-frontdoor -b --no-pager'"
+      warn "the unit did not stay active (ActiveState=${_state:-unknown}, MainPID=${_mainpid:-0}, NRestarts=${_restarts:-0})."
+      warn "Type=simple reports ACTIVE as soon as the process is forked, so a daemon"
+      warn "that starts and dies is briefly active on its way to failed -- and with"
+      warn "Restart=on-failure it is active again a moment later. This gate needs it"
+      warn "to STAY up, which it did not."
+      warn "  $(remote_cmd "$SUDO journalctl -u autodb-frontdoor -b --no-pager")"
     fi
   else
     START_OK="no"
@@ -796,7 +895,7 @@ if [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-no}" = "yes" ] && [ "${START
     _ui_sudo="${SUDO:+$SUDO }"
   fi
   say "Finish in the TUI, on the VM:"
-  say "  ssh -t $TARGET '${_ui_sudo}$PREFIX/autodb --ui --config $_ui_cfg'"
+  say "  $(remote_cmd "${_ui_sudo}$PREFIX/autodb --ui --config $_ui_cfg")"
   say ""
   say "  SPC K   INSPECT the service keyslot -- it should read as verified."
   say "          Do NOT cut one: --init already did, and a second attempt is"
@@ -823,8 +922,8 @@ if [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-no}" = "yes" ] && [ "${START
 elif [ "${START_OK:-skipped}" = "no" ]; then
   say "Provisioned, and the ceremony completed, BUT THE SERVICE DID NOT START."
   say ""
-  say "  ssh $TARGET '$SUDO systemctl status autodb-frontdoor'"
-  say "  ssh $TARGET '$SUDO journalctl -u autodb-frontdoor -b --no-pager'"
+  say "  $(remote_cmd "$SUDO systemctl status autodb-frontdoor")"
+  say "  $(remote_cmd "$SUDO journalctl -u autodb-frontdoor -b --no-pager")"
   say ""
   say "The store and TLS material are in place, so this is the daemon's own"
   say "start failure rather than anything left half-done above."
@@ -834,10 +933,10 @@ else
   say ""
   say "Recovery, in this order -- and note --init needs the service STOPPED,"
   say "because it takes the meta store's instance lease:"
-  say "  ssh -t $TARGET '$SUDO systemctl stop autodb-frontdoor'"
-  say "  ssh -t $TARGET '$SUDO $PREFIX/autodb --config $CONFIG_REMOTE --init'"
-  say "  ssh    $TARGET '$SUDO $REMOTE_TMP/install_frontdoor.sh --hand-off --config $CONFIG_REMOTE --user $RUN_USER_REMOTE'"
-  say "  ssh    $TARGET '$SUDO systemctl enable --now autodb-frontdoor'"
+  say "  $(remote_cmd "$SUDO systemctl stop autodb-frontdoor")"
+  say "  $(remote_cmd "$SUDO $PREFIX/autodb --config $CONFIG_REMOTE --init")"
+  say "  $(remote_cmd "$SUDO $REMOTE_TMP/install_frontdoor.sh --hand-off --config $CONFIG_REMOTE --user $RUN_USER_REMOTE")"
+  say "  $(remote_cmd "$SUDO systemctl enable --now autodb-frontdoor")"
   say ""
   say "Opening the TUI does NOT recover this: the daemon is not running, and"
   say "the client config forbids the TUI from starting one."

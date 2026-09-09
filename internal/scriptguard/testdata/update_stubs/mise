@@ -1,0 +1,21 @@
+#!/bin/sh
+# A LANDMINE for the global-config mutation, and a passthrough otherwise.
+#
+# `mise use -g` writes the operator's global config. This script's contract is
+# the binary and the unit, so touching it is out of scope -- and a permissive
+# stub would let the mutation return quietly and pass as a working run.
+set -eu
+printf 'mise %s\n' "$*" >> "$UPD_LOG"
+case " $* " in
+  *" use "*" -g "*|*" -g "*" use "*|*"use -g"*)
+    echo "FAIL: update_frontdoor mutated the GLOBAL mise config: mise $*" >&2
+    exit 97 ;;
+esac
+if [ "${1:-}" = "exec" ]; then
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in --) shift; break ;; *) shift ;; esac
+  done
+  exec "$@"
+fi
+exit 0

@@ -1,0 +1,30 @@
+#!/bin/sh
+# "Builds" by writing a binary that reports THE VERSION IT WAS STAMPED WITH.
+#
+# Taking the version out of -ldflags rather than from the environment is what
+# lets a cell distinguish the ref that was built from the ref that was asked
+# for: a run that resolved one tag and built another produces a binary that
+# says so.
+set -eu
+printf 'go %s\n' "$*" >> "${UPD_LOG:-/dev/null}"
+[ "${1:-}" = "build" ] || exit 0
+
+_out=""
+_ver="unstamped"
+_prev=""
+for _a in "$@"; do
+  [ "$_prev" = "-o" ] && _out="$_a"
+  case "$_prev" in
+    -ldflags) _ver="$(printf '%s\n' "$_a" | sed -n 's/.*-X main\.version=\([^ ]*\).*/\1/p')" ;;
+  esac
+  _prev="$_a"
+done
+[ -n "$_out" ] || exit 1
+[ -n "$_ver" ] || _ver="unstamped"
+
+cat > "$_out" <<INNER
+#!/bin/sh
+echo "autodb $_ver (deadbeef, built 2026-09-09T00:00:00Z)"
+INNER
+chmod +x "$_out"
+exit 0

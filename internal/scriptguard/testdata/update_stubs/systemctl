@@ -1,0 +1,51 @@
+#!/bin/sh
+# A UNIT WHOSE STATE IS A SCRIPTED SEQUENCE.
+#
+# The rollback path can only be reached by a new binary that starts and then
+# does NOT stay up, and "does not stay up" is a sequence of states over time --
+# so a stub with one constant state cannot reach that path at all, and cannot
+# tell a run that accepts the first `active` sample from one that requires
+# several.
+#
+# UPD_STATES is a comma-separated list of `state[:mainpid]`, consumed one entry
+# per poll and CYCLING at the end. Cycling rather than clamping: clamping to the
+# last entry makes a continuing crash loop unrepresentable, and a poll that
+# eventually sees a steady state passes for that reason rather than on merit.
+#
+# Only the three-property poll advances the cursor. The script also asks for
+# ActiveState alone -- once before the swap to learn whether the unit was
+# running, once at the end to report -- and letting those consume sequence
+# entries would silently shift every cell's timeline.
+#
+# Every invocation is appended to UPD_LOG, because "did it roll back" and "was
+# the unit left alone" are claims about which commands ran.
+set -eu
+LOG="${UPD_LOG:-/dev/null}"
+printf 'systemctl %s\n' "$*" >> "$LOG"
+
+case "${1:-}" in
+  show)
+    case " $* " in
+      *" MainPID "*)
+        _seq="${UPD_STATES:-active}"
+        _cur="$LOG.cursor"
+        _i=0
+        [ -r "$_cur" ] && _i="$(cat "$_cur")"
+        _n="$(printf '%s' "$_seq" | awk -F, '{print NF}')"
+        _entry="$(printf '%s' "$_seq" | cut -d, -f"$(( _i % _n + 1 ))")"
+        printf '%s' "$(( _i + 1 ))" > "$_cur"
+        _st="${_entry%%:*}"
+        _pid=4242
+        case "$_entry" in *:*) _pid="${_entry#*:}" ;; esac
+        # Mirrors the real `-p ActiveState -p MainPID -p NRestarts --value`
+        # order: three lines, no keys.
+        printf '%s\n%s\n%s\n' "$_st" "$_pid" "7"
+        ;;
+      *)
+        printf '%s\n' "${UPD_WAS_ACTIVE:-active}"
+        ;;
+    esac
+    ;;
+  *) : ;;
+esac
+exit 0

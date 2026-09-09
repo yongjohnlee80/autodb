@@ -288,8 +288,12 @@ func TestPlaybook_AnEnabledButDeadUnitIsAFailedRun(t *testing.T) {
 	if ok {
 		t.Errorf("a unit that accepted the start and is not active reported SUCCESS:\n%s", out)
 	}
-	if !strings.Contains(out, "not active") {
-		t.Errorf("the run does not say the unit is not active:\n%s", out)
+	// The wording is "did not stay active" since the gate began requiring
+	// SUSTAINED active; this case is the unit that never becomes active at
+	// all, which is a distinct input from active-then-failed and keeps its
+	// own cell.
+	if !strings.Contains(out, "did not stay active") {
+		t.Errorf("the run does not say the unit failed to stay up:\n%s", out)
 	}
 	if strings.Contains(out, "INSPECT the service keyslot") {
 		t.Errorf("a run whose unit is dead printed the success notes:\n%s", out)
@@ -361,5 +365,140 @@ func TestPlaybook_TheTUICommandFitsTheOperatorAndTheEndpoint(t *testing.T) {
 	}
 	if line = uiLine(lastRunOutput); strings.Contains(line, "sudo ") {
 		t.Errorf("a root login is told to sudo:\n  %s", line)
+	}
+}
+
+// ONE `active` SAMPLE IS NOT A RUNNING DAEMON.
+//
+// The unit is Type=simple, so systemd marks it ACTIVE the moment it forks the
+// process — before the binary has read its config, opened its store or bound
+// anything. A daemon that starts and dies is therefore briefly active on its
+// way to failed, and with Restart=on-failure it is active again a moment
+// later. A review found the gate breaking out on the FIRST active sample,
+// which admits the exact crash loop it exists to catch.
+//
+// This is the third time this family has been found in this branch: the
+// missing gate, then trusting enable's exit status, now trusting one reading
+// of the state. Each fix addressed the reported instance; this one addresses
+// the measurement.
+func TestPlaybook_ActiveMustBeSustained(t *testing.T) {
+	// Only the GAP is set. The sample COUNT is a constant in the script now,
+	// and a cell that passed its own count would be pinning a variable that no
+	// longer exists -- see TestPlaybook_SampleCountIsNotEnvironmentTunable.
+	fast := []string{"FAKE_HANDOFF_RC=0", "AUTODB_ACTIVE_SAMPLE_SLEEP=0"}
+
+	t.Run("sustained active is a successful run", func(t *testing.T) {
+		// THE POSITIVE CONTROL, first: without it a gate that rejected every
+		// start would satisfy both cases below.
+		_, ok := runEnv(t, append(fast, "FAKE_ACTIVE_STATES=active"))
+		if !ok {
+			t.Errorf("a unit that stayed active reported failure:\n%s", lastRunOutput)
+		}
+		if !strings.Contains(lastRunOutput, "stayed up") {
+			t.Errorf("the run does not say the unit stayed up:\n%s", lastRunOutput)
+		}
+	})
+
+	t.Run("active then failed is a failed run", func(t *testing.T) {
+		_, ok := runEnv(t, append(fast, "FAKE_ACTIVE_STATES=active,failed"))
+		out := lastRunOutput
+		if ok {
+			t.Errorf("a unit that went active and then failed reported SUCCESS -- this is the "+
+				"crash loop, accepted because the first sample looked right:\n%s", out)
+		}
+		if !strings.Contains(out, "did not stay active") {
+			t.Errorf("the run does not say the unit failed to stay up:\n%s", out)
+		}
+	})
+
+	t.Run("active with a new pid each sample is a crash loop", func(t *testing.T) {
+		// ALWAYS ACTIVE, never the same process. A state-only check cannot
+		// tell this from a healthy daemon; the MainPID can, because a restart
+		// is what a crash loop does.
+		_, ok := runEnv(t, append(fast, "FAKE_ACTIVE_STATES=active:11,active:22,active:33"))
+		out := lastRunOutput
+		if ok {
+			t.Errorf("a unit reporting active with a DIFFERENT pid every sample was accepted; "+
+				"that is a restart loop wearing the right state:\n%s", out)
+		}
+		if !strings.Contains(out, "MainPID") {
+			t.Errorf("the failure does not name the evidence it used:\n%s", out)
+		}
+	})
+}
+
+// THE SAMPLE COUNT HAS NO OFF SWITCH IN THE ENVIRONMENT.
+//
+// The count came from ${AUTODB_ACTIVE_STABLE_SAMPLES:-3} under a comment
+// saying "the number of samples that must agree is the property, and it
+// stays" -- the property asserted in prose and injectable in fact. With 0,
+// `[ "$_stable" -ge 0 ]` is true at the first sample and the gate above is
+// vacuous: a review found it, and the same hole was measured in
+// update_frontdoor.sh, where it accepted a broken binary and skipped the
+// rollback.
+//
+// So this cell drives the SAME crash loop the gate is for, with the count
+// injected, and the injection must change nothing. The values are the ones
+// somebody would really reach for -- 0 to "turn the wait off", 1 to "make it
+// quick", -1 by arithmetic accident -- plus a non-numeric, which must not turn
+// the comparison into a shell error that reads like a broken script.
+//
+// The mutation is restoring the environment read: every subtest then reports a
+// crash loop as a successful run.
+//
+// MEASURED, so the cell does not over-claim: under the mutation only 0, 1 and
+// -1 redden. An empty or non-numeric count makes `[ 1 -ge abc ]` a shell error,
+// the gate never succeeds, and the run fails closed -- so those two subtests
+// say nothing about the fix. They stay because fail-closed is the behaviour
+// worth pinning for a typo, and because a future "helpful" default that
+// silently substituted 1 for a bad value would redden them.
+func TestPlaybook_SampleCountIsNotEnvironmentTunable(t *testing.T) {
+	for _, injected := range []string{"0", "1", "-1", "", "abc"} {
+		t.Run("AUTODB_ACTIVE_STABLE_SAMPLES="+injected, func(t *testing.T) {
+			_, ok := runEnv(t, []string{"FAKE_HANDOFF_RC=0", "AUTODB_ACTIVE_SAMPLE_SLEEP=0",
+				"FAKE_ACTIVE_STATES=active,failed",
+				"AUTODB_ACTIVE_STABLE_SAMPLES=" + injected})
+			out := lastRunOutput
+			if ok {
+				t.Errorf("injecting %q made a crash loop report SUCCESS -- the gate can be "+
+					"turned off from the environment:\n%s", injected, out)
+			}
+			if !strings.Contains(out, "did not stay active") {
+				t.Errorf("injecting %q: the run does not say the unit failed to stay up:\n%s",
+					injected, out)
+			}
+		})
+	}
+}
+
+// AND THE GAP, which IS adjustable, refuses a value that is not a number.
+//
+// `sleep abc` fails, and it fails in the MIDDLE of the poll -- so a typo in an
+// operator's environment would abort the playbook between writing the unit and
+// deciding whether it came up. Refusing it before anything is touched is the
+// difference between a message and a mess.
+func TestPlaybook_SampleGapMustBeANumber(t *testing.T) {
+	for _, bad := range []string{"abc", "1.5", "-1", "1s"} {
+		t.Run(bad, func(t *testing.T) {
+			// NOT runEnv: that helper requires the fake host to have recorded
+			// something, and a run refused at flag validation has by
+			// definition touched no host. That is the property here -- the
+			// refusal lands before anything is reached.
+			cmd := exec.Command("sh", playbook(t), "--apply", "--user", "root",
+				"--host", "198.51.100.9", "--yes")
+			cmd.Env = append(os.Environ(), "AUTODB_ACTIVE_SAMPLE_SLEEP="+bad)
+			raw, err := cmd.CombinedOutput()
+			out := string(raw)
+			if err == nil {
+				t.Fatalf("a sample gap of %q was accepted:\n%s", bad, out)
+			}
+			if !strings.Contains(out, "AUTODB_ACTIVE_SAMPLE_SLEEP") {
+				t.Errorf("the refusal does not name the variable at fault:\n%s", out)
+			}
+			// And it refused EARLY: no ssh, no unit written, nothing probed.
+			if strings.Contains(out, "cpu / ram") {
+				t.Errorf("it probed the host before validating its own flags:\n%s", out)
+			}
+		})
 	}
 }

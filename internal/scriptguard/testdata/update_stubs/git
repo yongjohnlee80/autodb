@@ -1,0 +1,63 @@
+#!/bin/sh
+# Enough git to drive an update: the tag list "latest" is resolved from, a clone
+# that produces a buildable-looking tree, and a checkout that REFUSES an unknown
+# ref -- which is the whole point of the invalid-ref cell.
+set -eu
+LOG="${UPD_LOG:-/dev/null}"
+printf 'git %s\n' "$*" >> "$LOG"
+BAD="${UPD_BAD_REF:-__no_such_ref__}"
+
+# Skip leading global options so `git -C dir -c k=v checkout` is seen as
+# `checkout`.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c) shift 2 ;;
+    -C) shift 2 ;;
+    *) break ;;
+  esac
+done
+
+case "${1:-}" in
+  ls-remote)
+    # Deliberately out of lexical order, and including a non-release tag, so
+    # the script's own sort -V and its release-tag filter are exercised rather
+    # than assumed.
+    printf 'aaaa\trefs/tags/v0.3.10\n'
+    printf 'bbbb\trefs/tags/v0.3.9\n'
+    printf 'cccc\trefs/tags/v0.4.0-rc1\n'
+    ;;
+  clone)
+    case " $* " in
+      *" --branch $BAD "*)
+        # A shallow single-ref clone of a ref that does not exist FAILS, so the
+        # script falls back to a full clone and its checkout decides.
+        exit 1 ;;
+    esac
+    for _a in "$@"; do _dst="$_a"; done
+    mkdir -p "$_dst/cmd/autodb"
+    printf 'module github.com/yongjohnlee80/autodb\n\ngo 1.27\n' > "$_dst/go.mod"
+    printf 'package main\n' > "$_dst/cmd/autodb/main.go"
+    ;;
+  checkout)
+    for _a in "$@"; do _ref="$_a"; done
+    [ "$_ref" = "$BAD" ] && exit 1
+    ;;
+  rev-parse)
+    for _a in "$@"; do _last="$_a"; done
+    case "$_last" in
+      "$BAD"|"$BAD"*) exit 1 ;;
+    esac
+    # UPD_LIE_HEAD: the ref RESOLVES and the checkout SUCCEEDS, but the tree is
+    # left somewhere else. A `--branch` clone of a name that has moved, or a
+    # fallback checkout that quietly no-ops, both look exactly like this -- and
+    # the checkout's exit status cannot see it.
+    if [ -n "${UPD_LIE_HEAD:-}" ] && [ "$_last" = "HEAD" ]; then
+      printf '1111111111111111111111111111111111111111\n'
+    else
+      printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'
+    fi
+    ;;
+  describe) printf '%s\n' "${UPD_TARGET_VERSION:-v0.3.10}" ;;
+  *) : ;;
+esac
+exit 0

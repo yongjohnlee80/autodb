@@ -1,0 +1,6 @@
+#!/bin/sh
+# A LANDMINE, not a stub. Local mode must never reach for ssh, and the way to
+# prove that is to make reaching for it fail loudly rather than succeed
+# quietly: a permissive stub would let a regression pass as a working run.
+echo "FAIL: local mode invoked ssh: $*" >&2
+exit 97

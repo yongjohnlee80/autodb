@@ -51,10 +51,36 @@ PROBE
     exit "${FAKE_INIT_RC:-0}"
     ;;
   *"show -p ActiveState"*)
-    # THE UNIT'S REAL STATE, separately settable. `enable --now` returns 0 for
-    # a unit that starts and then dies at once, so a cell has to be able to
-    # say "the start was accepted AND the unit is not running".
-    printf '%s\n' "${FAKE_ACTIVE_STATE:-active}"
+    # THE UNIT'S STATE OVER TIME, because one reading cannot tell a daemon
+    # that stayed up from one that was merely forked.
+    #
+    # FAKE_ACTIVE_STATES is a comma-separated SEQUENCE, consumed one entry per
+    # call and repeating the last: "active,failed" is a unit that goes active
+    # and then dies, which a single constant state cannot express -- and that
+    # is precisely the case a review found still being accepted.
+    #
+    # Each entry may carry a pid as state:pid. A crash loop keeps reporting
+    # active with a DIFFERENT pid each time, so the pid is how a cell says
+    # "active, but not the same process".
+    #
+    # The cursor lives on disk because every call is a fresh process: this
+    # stub is invoked once per sample, not once per run.
+    _seq="${FAKE_ACTIVE_STATES:-${FAKE_ACTIVE_STATE:-active}}"
+    _cur="${FAKE_LOG}.statecursor"
+    _i=0
+    [ -r "$_cur" ] && _i="$(cat "$_cur")"
+    _n=$(printf '%s' "$_seq" | awk -F, '{print NF}')
+    # WRAPS rather than clamping. Clamping made a CONTINUING crash loop
+    # unrepresentable: the sequence ran out, the last entry repeated, and the
+    # repeated entry then looked perfectly stable -- so the cell passed while
+    # the script accepted a loop. Cycling keeps the loop looping.
+    _pick=$(( _i % _n + 1 ))
+    _entry="$(printf '%s' "$_seq" | cut -d, -f"$_pick")"
+    printf '%s' "$(( _i + 1 ))" > "$_cur"
+    _st="${_entry%%:*}"
+    _pid="4242"
+    case "$_entry" in *:*) _pid="${_entry#*:}" ;; esac
+    printf '%s\n%s\n%s\n' "$_st" "$_pid" "0"
     exit 0
     ;;
   *"systemctl enable --now autodb-frontdoor"*)

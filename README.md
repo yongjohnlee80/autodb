@@ -344,6 +344,111 @@ connection and login state. `setup()` itself is deliberately cheap — it
 connects nothing and opens nothing; the first command that needs the daemon
 brings it up and prompts for login.
 
+## The commands, copy-pasteable
+
+Each script is self-contained — it needs nothing from a checkout but itself —
+so each of these is one `curl` and one run. Set the base once:
+
+```sh
+BASE=https://raw.githubusercontent.com/yongjohnlee80/autodb/main
+```
+
+### Provision a host
+
+`provision_vm.sh` calls `install_frontdoor.sh` and expects it **beside
+itself**, so fetch both:
+
+```sh
+curl -fsSL $BASE/provision_vm.sh      -o provision_vm.sh
+curl -fsSL $BASE/install_frontdoor.sh -o install_frontdoor.sh
+chmod +x provision_vm.sh install_frontdoor.sh
+
+sh provision_vm.sh --check --user root --host <ip>       # probe only; changes nothing
+sudo sh provision_vm.sh --apply --user root --host <ip>  # the whole bring-up
+```
+
+`--host 127.0.0.1` provisions **this machine** — no ssh, no key, and `--user`
+is not required.
+
+### Install or reconfigure the service on a host that has the binary
+
+```sh
+curl -fsSL $BASE/install_frontdoor.sh -o install_frontdoor.sh
+
+sh install_frontdoor.sh --check                 # measure this host and report
+sh install_frontdoor.sh --print-config          # the config it would write
+sudo sh install_frontdoor.sh --apply            # interviews you for each setting
+```
+
+### Update to the newest release
+
+```sh
+curl -fsSL $BASE/update_frontdoor.sh -o update_frontdoor.sh
+
+sudo sh update_frontdoor.sh --check             # installed vs available
+sudo sh update_frontdoor.sh                     # build the newest tag and swap
+sudo sh update_frontdoor.sh --ref v0.3.6        # or a specific tag, to go back
+```
+
+### Remove it
+
+```sh
+curl -fsSL $BASE/uninstall.sh -o uninstall.sh
+
+sudo sh uninstall.sh --check                    # the exact deletion set
+sudo sh uninstall.sh --apply                    # with a backup archive
+```
+
+**Read them before you run them, and there is deliberately no `curl | sh` line
+here.** They run as root, install a systemd unit and write TLS material;
+piping a script straight into a shell is precisely the arrangement that makes
+reading it first impossible. Every one has `--check`, which changes nothing,
+and `--help`, which lists every flag.
+
+```sh
+sh provision_vm.sh --help          # every flag, with what it means
+sh provision_vm.sh --print-flags   # the resolved contract; connects to nothing
+```
+
+## Updating an install
+
+[`update_frontdoor.sh`](update_frontdoor.sh) resolves the **newest release tag**
+first, builds that, swaps the binary and restarts the unit. It touches the
+binary and the unit only — the config, the meta store, the TLS material and the
+unattended-unlock keyslot are neither read nor written, because an update is not
+a reinstall.
+
+```sh
+sudo sh update_frontdoor.sh --check        # installed vs available; changes nothing
+sudo sh update_frontdoor.sh                # do it
+sudo sh update_frontdoor.sh --ref v0.3.6   # a specific tag, e.g. to go back
+```
+
+The binary lives at `/usr/local/bin/autodb` (`--prefix` moves it); the config is
+`/etc/autodb/`. Those are separate on purpose, and it is why an update can
+replace one without touching the other.
+
+**It rolls back.** `systemctl restart` returns success for a unit that starts
+and then exits immediately, so "the restart worked" is not evidence the daemon
+is running. The previous binary is kept at `/usr/local/bin/autodb.previous`, the
+new one has to reach `ActiveState=active`, and if it does not the old binary
+goes back and the service is restarted on it. An update that leaves the front
+door down is worse than no update.
+
+## Provisioning this machine
+
+Give `provision_vm.sh` a loopback host and it provisions **the machine you are
+on**, over no transport at all — no sshd, no key, no login:
+
+```sh
+sudo sh provision_vm.sh --apply --host 127.0.0.1
+```
+
+`localhost` and `::1` do the same. `--user` is not required there, because
+there is nothing to log in to. Everything else is identical: the same sizing
+preflight, the same interview, the same first-run ceremony, and the closing
+notes print commands you can run directly rather than wrapped in `ssh`.
+
 ## Running the front door as a service
 
 `install.sh` installs the binary. [`install_frontdoor.sh`](install_frontdoor.sh)
