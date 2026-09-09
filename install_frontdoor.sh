@@ -99,6 +99,20 @@ TLS_CA=""             # private CA from --create-cert; the chain's trust root
 TLS_HOSTS=""
 TLS_DNS_NAME=""
 GEN_CERT="auto"       # auto | yes | no -- run `autodb --create-cert`
+# CLEARTEXT: serve the front door WITHOUT TLS.
+#
+# There was no way to install this. The config layer accepts it — one exact
+# sentence, insecure_disable_tls = "i-accept-that-every-pat-crosses-in-
+# cleartext", deliberately a sentence rather than a flag so that turning TLS
+# off cannot be done without stating what it costs — but the installer only
+# knew how to ship the surface OFF when TLS material was absent. So the one
+# supported way to get a cleartext front door was to install, watch it come up
+# disabled, and hand-edit the file the generator owns.
+#
+# It exists for a trusted network and for live testing of the bring-up itself,
+# which is what it was added for. It is NOT a convenience: every access token
+# crosses in cleartext and works from anywhere it is admitted until revoked.
+CLEARTEXT="no"
 RUN_INIT="auto"       # auto | yes | no -- run `autodb --init`
 INIT_DONE="no"        # set only once the ceremony actually succeeds
 KEEP_CONFIG="no"      # a re-run REPLACES the config unless this is set
@@ -175,6 +189,35 @@ PG_RESERVE_POLICY_MIB=384    # a co-hosted Postgres is a second tenant
 # validator or a diff without a banner in the middle of it.
 MSG_FD=1
 say()  { printf '%s\n' "$*" >&"$MSG_FD"; }
+# have_tty reports whether this process can actually USE a terminal.
+#
+# `[ -r /dev/tty ]` does not answer that, and every script here asked it. It
+# tests the PATH's permission bits, which are satisfied on any Linux box —
+# while a process with no controlling terminal (cron, CI, a systemd unit, a
+# backgrounded shell) gets ENXIO the moment it opens the device. Measured: in
+# `setsid sh -c ...` the test is TRUE and the very next write fails with "No
+# such device or address".
+#
+# So the confirmation prompt guarded by that test was reached in exactly the
+# environments it was meant to skip, and the run died at the prompt instead of
+# proceeding or refusing cleanly. Opening it is the only test that answers the
+# question.
+# A SUBSHELL, and that is not style. `:` is a POSIX SPECIAL BUILT-IN, and a
+# redirection error on a special built-in makes a non-interactive shell EXIT —
+# so `{ : < /dev/tty; }` does not return false when there is no terminal, it
+# kills the script. In exactly the case this function exists to detect.
+#
+# Measured: under `setsid`, the subshell form and a regular built-in (`true`)
+# both survive and report false, while the special-built-in form terminated the
+# script before the next line ran. My first version of this helper used it, and
+# it took the installer down silently on VM43 — exit 1, zero bytes on both
+# streams — which is the same failure mode as the guard it replaced, introduced
+# by the fix for it.
+#
+# The subshell is robust whichever built-in is used: an exit inside it is just a
+# status to the caller.
+have_tty() { ( : < /dev/tty ) 2>/dev/null; }
+
 # step() prints a phase heading. It exists here because this script CALLS it --
 # a runtime "step: not found" killed a real provisioning run after the unit was
 # written and before TLS was issued, because the idiom was copied from the
@@ -315,6 +358,7 @@ while [ $# -gt 0 ]; do
     --rpc-socket) RPC_MODE="socket"; mark RPC_PORT; mark RPC_MODE ;;
     --allowlist) IP_ALLOWLIST="${2:?--allowlist needs a TOML array}"; shift; mark IP_ALLOWLIST ;;
     --no-cert) GEN_CERT="no" ;;
+    --cleartext) CLEARTEXT="yes"; GEN_CERT="no"; mark CLEARTEXT ;;
     --no-init) RUN_INIT="no" ;;
     --keep-config) KEEP_CONFIG="yes" ;;
     --user)   RUN_USER="${2:?--user needs a name}"; shift; mark RUN_USER ;;
@@ -365,11 +409,25 @@ done
 # installer that blocks forever on a missing terminal is worse than one
 # that takes its defaults and says so.
 TTY_OK=0
-if [ -r /dev/tty ] && [ -w /dev/tty ]; then TTY_OK=1; fi
+if have_tty; then TTY_OK=1; fi
 case "$INTERACTIVE" in
   yes) [ "$TTY_OK" -eq 1 ] || die "--interactive given but /dev/tty is unusable" ;;
   no)  TTY_OK=0 ;;
-  auto) [ "$MODE" = "apply" ] || TTY_OK=0 ;;
+  # auto + apply + NO TERMINAL used to mean "take every default and mutate
+  # anyway", because ask() silently substitutes the default when TTY_OK is 0.
+  # That is the same fail-open shape review found in the other three scripts:
+  # the absence of a terminal authorized an unattended install nobody asked
+  # for. --non-interactive is the operator SAYING "take the defaults", and it
+  # is now required rather than inferred.
+  auto)
+    if [ "$MODE" = "apply" ] && [ "$TTY_OK" -eq 0 ]; then
+      die "refusing to --apply with no terminal and no explicit mode: there is
+       nothing to prompt on, so every answer would be a default this script
+       chose. Nothing has been changed. Pass --non-interactive to accept the
+       computed defaults deliberately, or run from a terminal to be asked."
+    fi
+    [ "$MODE" = "apply" ] || TTY_OK=0
+    ;;
 esac
 
 ask() {
@@ -471,6 +529,116 @@ cert_failure_note() {
     warn "--create-cert failed; leaving the front door disabled. The config and"
     warn "unit are in place, so fix the cause and re-run --apply."
   fi
+}
+
+# dsn_is_local reports whether a DSN names a channel that cannot leave this
+# host, which is the ONE case where allow_insecure_dsn is legitimate.
+#
+# COMPUTED, NOT ASKED. pg-remote used to warn that a DSN without
+# sslmode=verify-full would refuse to start and tell the operator they "can add
+# allow_insecure_dsn afterwards" -- after the run had written a config and tried
+# to start a daemon that could not load it. On a loopback DSN, which the same
+# paragraph calls the legitimate case, the script had every fact needed to get
+# it right and made the operator find out by failing. Measured on VM43, whose
+# Postgres does not speak TLS at all.
+#
+# LOCAL means a unix socket, 127.0.0.0/8, ::1 or the literal localhost.
+# Anything else is a network, and a network without verify-full stays refused:
+# this store holds the audit trail, the user records and the ENCRYPTED
+# CONNECTION SECRETS, so a predicate that guessed generously would be worse
+# than the warning it replaces.
+# host_is_local decides ONE host string, by exact match rather than by
+# substring.
+#
+# The substring version of this was a fail-open security defect, found on
+# review and reproduced through the real --print-config path:
+#
+#   postgres://u:p@db.example/m?host=localhost.evil&sslmode=disable
+#
+# matched `*host=localhost*` and emitted allow_insecure_dsn = true, permitting
+# plaintext transport to a REMOTE meta store -- the store holding the audit
+# trail, the user records and the encrypted connection secrets. The comment on
+# the old predicate said a version that "guessed generously would be worse than
+# the warning it replaces". It guessed generously.
+host_is_local() {
+  case "$1" in
+    /*)                  return 0 ;;   # a unix socket directory
+    localhost)           return 0 ;;   # EXACT, so localhost.evil is not local
+    ::1|0:0:0:0:0:0:0:1) return 0 ;;
+    *[!0-9.]*)           return 1 ;;   # not a bare IPv4 literal: not local
+  esac
+  # Digits and dots only from here. Require EXACTLY four octets, all in range,
+  # with 127 first -- so 127.0.0.1.evil.com (rejected above) and 1270.0.0.1
+  # and 127.1 are all refused rather than pattern-matched.
+  _ifs_save=$IFS
+  IFS=.
+  # shellcheck disable=SC2086
+  set -- $1
+  IFS=$_ifs_save
+  [ $# -eq 4 ] || return 1
+  [ "$1" = "127" ] || return 1
+  for _o in "$1" "$2" "$3" "$4"; do
+    case "$_o" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_o" -le 255 ] || return 1
+  done
+  return 0
+}
+
+# dsn_host_candidates prints EVERY host the DSN could resolve to, one per line.
+#
+# Every one, not the first: a URL can carry an authority host and a `host=`
+# query parameter at once, and which of them libpq honours is exactly the
+# ambiguity the exploit above turned on. Rather than model that precedence --
+# and be wrong for some client version -- this collects all of them and
+# dsn_is_local requires them all to be local. A DSN whose meaning depends on
+# precedence is refused, which is the right answer for a decision about
+# plaintext transport.
+dsn_host_candidates() {
+  # Keyword form and URL query string: every `host=` assignment, whether
+  # separated by spaces (keyword DSN) or by ? and & (URL query).
+  printf '%s' "$1" | tr '?& ' '\n\n\n' | while IFS= read -r _kv; do
+    case "$_kv" in host=*) printf '%s\n' "${_kv#host=}" ;; esac
+  done
+  # The URL authority, if this is a URL at all.
+  case "$1" in
+    *://*)
+      _rest=${1#*://}
+      _auth=${_rest%%/*}      # drop the path
+      _auth=${_auth%%\?*}     # and the query, for a URL with no path
+      _hostport=${_auth##*@}  # drop any userinfo
+      case "$_hostport" in
+        # A bracketed IPv6 literal keeps its colons; everything else splits on
+        # the port separator.
+        \[*\]*) printf '%s\n' "$(printf '%s' "$_hostport" | sed 's/^\[\([^]]*\)\].*/\1/')" ;;
+        *)      printf '%s\n' "${_hostport%%:*}" ;;
+      esac
+      ;;
+  esac
+}
+
+# dsn_is_local reports whether a DSN names a channel that cannot leave this
+# host, which is the ONE case where allow_insecure_dsn is legitimate.
+#
+# COMPUTED, NOT ASKED. pg-remote used to warn that a DSN without
+# sslmode=verify-full would refuse to start and tell the operator they "can add
+# allow_insecure_dsn afterwards" -- after the run had written a config and
+# tried to start a daemon that could not load it. On a loopback DSN the script
+# had every fact needed to get it right and made the operator find out by
+# failing. Measured on VM43, whose Postgres does not speak TLS at all.
+#
+# FAIL CLOSED, in both directions. Every candidate host must be provably local;
+# one that is not refuses the whole DSN. A DSN naming NO host is also refused
+# even though libpq would default it to a local socket -- refusing costs the
+# operator a warning they can answer, and guessing costs plaintext to a store
+# full of secrets.
+dsn_is_local() {
+  _seen=0
+  for _h in $(dsn_host_candidates "$1"); do
+    _seen=1
+    host_is_local "$_h" || return 1
+  done
+  [ "$_seen" -eq 1 ] || return 1
+  return 0
 }
 
 # DEFINE-ONLY MODE: stop here with every function defined and nothing done.
@@ -613,6 +781,11 @@ emit_config() {
   # Flip it to true in the same edit that adds the certificate.
   FD_ENABLED=true
   [ -z "$TLS_CERT" ] && FD_ENABLED=false
+  # CLEARTEXT enables it WITHOUT TLS material, which is the whole point: there
+  # is no identity to prove, so cert/key/host names are not required. The
+  # acknowledgement is what the loader checks, and it is written in full so the
+  # next reader of this file sees the sentence rather than a flag.
+  [ "$CLEARTEXT" = "yes" ] && FD_ENABLED=true
     cat <<TOML
 # autodb -- front-door production config.
 # Generated by install_frontdoor.sh for a ${MEM_MIB} MiB / ${NCPU} CPU host.
@@ -652,10 +825,11 @@ engine = "$META_ENGINE"
 TOML
   if [ "$META_ENGINE" = "postgres" ]; then
     printf 'dsn = "%s"\n' "$META_DSN"
-    if [ "$PG_LOCAL" = "yes" ]; then
+    if [ "$PG_LOCAL" = "yes" ] || dsn_is_local "$META_DSN"; then
       cat <<'TOML'
 
-# Reached over a local unix socket, which sslmode=verify-full cannot describe.
+# Reached over a channel that cannot leave this host, which
+# sslmode=verify-full cannot describe.
 # This key exists for exactly that case, and it is NAMED rather than implied so
 # that an insecure transport is visible to whoever reads this file. Do NOT set
 # it for a Postgres reached across a network: the meta store holds the audit
@@ -726,7 +900,21 @@ TOML
     _hosts="$(printf '%s' "$TLS_HOSTS" | awk -F, '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); if($i!=""){printf "%s\"%s\"", (i>1?", ":""), $i}}}')"
     printf '\ntls_host_names = [%s]\n' "$_hosts"
   fi
-  if [ -n "$TLS_CERT" ]; then
+  if [ "$CLEARTEXT" = "yes" ]; then
+    cat <<'TOML'
+
+# TLS IS OFF ON THIS FRONT DOOR, deliberately, and this sentence is the only
+# value the loader accepts for saying so. It is a sentence rather than a flag
+# because turning TLS off should not be possible without writing down what it
+# costs: every access token crosses this wire in CLEARTEXT, and a token works
+# from anywhere it is admitted until it is revoked.
+#
+# Legitimate for a trusted network and for testing the bring-up itself. On
+# anything reachable from a network you do not control, this is how tokens are
+# harvested. Remove this key and set the three tls_* keys to close it.
+insecure_disable_tls = "i-accept-that-every-pat-crosses-in-cleartext"
+TOML
+  elif [ -n "$TLS_CERT" ]; then
     printf 'tls_cert_file = "%s"\ntls_key_file = "%s"\n' "$TLS_CERT" "$TLS_KEY"
     # THE TRUST ROOT, without which the chain cannot verify. frontdoor builds
     # its roots from tls_root_ca_file and falls back to the SYSTEM pool when it
@@ -1147,7 +1335,14 @@ case "$META_BACKEND" in
     [ -n "$META_DSN" ] || die "pg-remote requires a dsn"
     case "$META_DSN" in
       *sslmode=verify-full*) ;;
-      *) warn "the DSN does not request sslmode=verify-full; autodb will refuse to start unless allow_insecure_dsn is set, and this store holds your encrypted connection secrets" ;;
+      *)
+        if dsn_is_local "$META_DSN"; then
+          say "  This DSN is loopback or a unix socket, so allow_insecure_dsn is set for"
+          say "  you and NAMED in the config: sslmode=verify-full cannot describe a"
+          say "  channel that never leaves the host."
+        else
+          warn "the DSN does not request sslmode=verify-full; autodb will refuse to start unless allow_insecure_dsn is set, and this store holds your encrypted connection secrets"
+        fi ;;
     esac
     ;;
 esac

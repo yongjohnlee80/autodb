@@ -26,8 +26,23 @@
 # than inlined through ssh, so nothing depends on nested quoting surviving
 # two shells.
 #
-# STATUS: the remote --apply path is being validated on a disposable VM.
-# Until that is recorded, treat --apply as unproven.
+# STATUS PER PACKAGE MANAGER -- what has actually been run, not what is
+# written. The branch that has never executed is the one that breaks, and a
+# single word like "supported" would cover all five equally.
+#
+#   apt-get      PROVEN end to end. A DigitalOcean droplet, Debian family,
+#                1 vCPU / 961 MiB: provisioning, TLS issuance, the first-run
+#                ceremony and a working JDBC client (2026-09-08).
+#   dnf / yum    WRITTEN, NEVER RUN. Also: the RHEL family ships PostgreSQL's
+#                cluster uninitialised, which the proven run never touched.
+#   pacman       WRITTEN, NEVER RUN. Same uninitialised-cluster caveat.
+#   apk          WRITTEN, NEVER RUN. Same, plus busybox utilities differ.
+#   zypper       WRITTEN, NEVER RUN.
+#
+# So --apply is proven on a Debian-family host and is a best effort anywhere
+# else. Use a disposable VM for the other four. Each is a best effort at that
+# distro's conventions and NOT a support claim: a run on one distro says
+# nothing about the other four.
 
 set -eu
 
@@ -66,6 +81,11 @@ ACTIVE_STABLE_SAMPLES=3
 ACTIVE_SAMPLE_SLEEP="${AUTODB_ACTIVE_SAMPLE_SLEEP:-1}"   # validated below, where die() exists
 RPC_PORT=""
 RPC_SOCKET="no"
+# CLEARTEXT: serve the front door WITHOUT TLS, forwarded to the installer.
+# Every access token then crosses the wire in cleartext and works from anywhere
+# it is admitted until revoked. For a trusted network, and for testing this
+# bring-up path itself.
+CLEARTEXT="no"
 KEEP_TMP="no"
 RUN_INIT="yes"        # run autodb --init over a pty; --no-init to skip
 UNATTENDED="no"       # answer the installer's interview with defaults
@@ -84,10 +104,61 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 FD_SCRIPT="$HERE/install_frontdoor.sh"
 
 say()  { printf '%s\n' "$*"; }
+# have_tty reports whether this process can actually USE a terminal.
+#
+# `[ -r /dev/tty ]` does not answer that, and every script here asked it. It
+# tests the PATH's permission bits, which are satisfied on any Linux box —
+# while a process with no controlling terminal (cron, CI, a systemd unit, a
+# backgrounded shell) gets ENXIO the moment it opens the device. Measured: in
+# `setsid sh -c ...` the test is TRUE and the very next write fails with "No
+# such device or address".
+#
+# So the confirmation prompt guarded by that test was reached in exactly the
+# environments it was meant to skip, and the run died at the prompt instead of
+# proceeding or refusing cleanly. Opening it is the only test that answers the
+# question.
+# A SUBSHELL, and that is not style. `:` is a POSIX SPECIAL BUILT-IN, and a
+# redirection error on a special built-in makes a non-interactive shell EXIT —
+# so `{ : < /dev/tty; }` does not return false when there is no terminal, it
+# kills the script. In exactly the case this function exists to detect.
+#
+# Measured: under `setsid`, the subshell form and a regular built-in (`true`)
+# both survive and report false, while the special-built-in form terminated the
+# script before the next line ran. My first version of this helper used it, and
+# it took the installer down silently on VM43 — exit 1, zero bytes on both
+# streams — which is the same failure mode as the guard it replaced, introduced
+# by the fix for it.
+#
+# The subshell is robust whichever built-in is used: an exit inside it is just a
+# status to the caller.
+have_tty() { ( : < /dev/tty ) 2>/dev/null; }
+
 info() { printf '  %s\n' "$*"; }
 step() { printf '\n=== %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
 die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+# shq quotes a value so it survives a shell REPARSE as exactly one argument.
+#
+# Every command this script runs is reparsed by a shell. Locally rsh() is
+# `sh -c "$*"`; remotely ssh joins its arguments and the REMOTE shell parses
+# the result. So a value concatenated into one of those strings is shell
+# syntax, not data.
+#
+# --config-remote accepts an arbitrary path, and review measured the
+# consequence: `/opt/autodb/custom config.toml` expanded to
+#
+#   --config /opt/autodb/custom config.toml
+#
+# which is `--config /opt/autodb/custom` plus a stray argument -- the installer
+# writes a file the operator never asked for. Shell metacharacters in a path
+# regain their syntax the same way.
+#
+# Single quotes, with embedded single quotes closed and re-escaped, which is
+# the one form that is safe for arbitrary bytes in POSIX sh.
+shq() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
 
 # THE SAMPLE GAP, validated HERE and not where it is assigned, because die() is
 # defined on the line above and a check that runs before its helper exits 127
@@ -164,6 +235,10 @@ OPTIONS:
                        `autodb --init` yourself afterwards; the closing notes
                        give the command.
   --no-start           Do not start the service after a successful --init.
+  --cleartext          Serve the front door WITHOUT TLS. Every access token
+                       then crosses in CLEARTEXT and works from anywhere it is
+                       admitted until revoked. Trusted networks and testing
+                       this bring-up only; forwarded to install_frontdoor.sh.
   --prefix <dir>       Where to install the binary. Default: /usr/local/bin
   --yes                Do not prompt before provisioning.
   -h, --help           Show this help.
@@ -226,6 +301,7 @@ while [ $# -gt 0 ]; do
     # asserting them should not require a reachable host.
     --print-flags) MODE_FLAGS="yes" ;;
     --no-start) START_NOW="no" ;;
+    --cleartext) CLEARTEXT="yes" ;;
     --config-remote) CONFIG_REMOTE="${2:?--config-remote needs a path}"; shift ;;
     --service-user) RUN_USER_REMOTE="${2:?--service-user needs a name}"; shift ;;
     --prefix) PREFIX="${2:?--prefix needs a directory}"; shift ;;
@@ -239,6 +315,36 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# --fd-port RESOLVES INTO BIND, HERE, before any consumer reads either.
+#
+# It did not, and the plan lied about the port: --fd-port set FD_PORT and
+# forwarded it to the installer while BIND kept its default, so
+# `--check --fd-port 5433` printed "front door : 0.0.0.0:5432" and the
+# installer was then told 5433. An operator reading the plan would provision a
+# port they had never been shown.
+#
+# That is not tidiness on a host where the default is occupied: VM43 runs
+# another project's PostgreSQL on 5432, and a plan naming 5432 for a run that
+# binds 5433 is misleading in both directions — it invites either a collision
+# or a panic about one.
+#
+# My first attempt put this beside FD_APPLY, which is AFTER the probe prints
+# the plan, so the report still lied while the forwarded flag was right. The
+# resolution has to precede every consumer, which is this file's own stated
+# rule: print what was resolved, not the flags that fed it.
+if [ -n "$FD_PORT" ]; then
+  BIND="${BIND%:*}:$FD_PORT"
+fi
+
+# --UNATTENDED ALSO MEANS "DO NOT ASK ME".
+#
+# It implied --no-init but not --yes, so an unattended run still stopped at the
+# "Provision this host?" confirmation. Combined with the /dev/tty guard above
+# that meant the documented automation path — the one thing --unattended is
+# for — could not complete: no terminal to answer with, and a prompt it reached
+# anyway. Measured on VM43: `--apply --unattended` died at that prompt.
+[ "$UNATTENDED" = "yes" ] && ASSUME_YES="yes"
 
 # --unattended CANNOT run the ceremony, so it implies --no-init.
 #
@@ -280,13 +386,38 @@ if [ "$MODE_FLAGS" = "yes" ]; then
   printf 'interview: %s\n' "$( [ "$UNATTENDED" = yes ] && echo defaults || echo interactive )"
   printf 'start:     %s\n' "$START_NOW"
   printf 'ref:       %s\n' "$AUTODB_REF"
+  # THE FRONT DOOR'S ADDRESS, resolved. --print-flags exists so the contract is
+  # assertable WITHOUT a machine to reach, and the one number an operator most
+  # needs to check before provisioning a shared host was absent from it: the
+  # port appeared only in --check's plan, which needs a live host. On a box
+  # where 5432 already belongs to something else, that is the difference
+  # between reading the plan and colliding with it.
+  printf 'front-door: %s\n' "$BIND"
   # The RESOLVED mode, not the flags that fed it: "installer default" told a
   # reader nothing, and the notes then guessed differently. Socket is the
   # installer's default, so that is what a bare run gets.
   printf 'rpc:       %s\n' "$( [ -n "$RPC_PORT" ] && echo "port $RPC_PORT" || echo "socket (installer default)" )"
-  printf 'dns:       %s\n' "${DNS_NAME:-<none, certificate for an IP>}"
+  # TLS, RESOLVED. In cleartext mode there is no certificate at all, so
+  # reporting a DNS name or "certificate for an IP" would describe material
+  # that will not exist. The three surfaces this script keeps in step are
+  # --print-flags, FD_APPLY and the closing notes; a mode present in one and
+  # absent from another is the drift that comment warns about, and --cleartext
+  # arrived in FD_APPLY without arriving here.
+  if [ "$CLEARTEXT" = "yes" ]; then
+    printf 'tls:       OFF (--cleartext) — every access token crosses in CLEARTEXT\n'
+    printf 'dns:       <none, no certificate is issued in cleartext mode>\n'
+  else
+    printf 'tls:       on (certificate issued by autodb --create-cert)\n'
+    printf 'dns:       %s\n' "${DNS_NAME:-<none, certificate for an IP>}"
+  fi
   # Printed as ONE line for BOTH consumers on purpose: the unit's User= and the
   # handoff target are the same value, and this is where that is assertable.
+  # REPORTED HERE TOO, because this surface exists to be assertable without a
+  # machine to reach -- and the config path was the one setting that reached
+  # FD_APPLY and never reached here. A path present in one surface and absent
+  # from another is exactly how it came to disagree with --init in the first
+  # place.
+  printf 'config:    %s (installer, --init, hand-off and the Result block)\n' "$CONFIG_REMOTE"
   printf 'service-user: %s (unit User= and handoff target)\n' "$RUN_USER_REMOTE"
   # The installer is told NOT to start; this playbook owns the start, gated on
   # the ceremony and the handoff. Printed so the contract is assertable.
@@ -381,6 +512,43 @@ else
 fi
 
 # ------------------------------------------------------------------- probe
+
+# THE COMPOSED COMMANDS, each built in exactly one place.
+#
+# These strings were written out three times apiece -- once to run, once in the
+# failure warning, once in the closing notes -- and a path that reached one
+# spelling and not another is precisely how --config came to disagree with
+# itself. One function each, consulted everywhere, and the quoting lives inside
+# it so no caller can forget.
+config_arg()  { printf '%s' "--config $(shq "$CONFIG_REMOTE")"; }
+init_cmd()    { printf '%s' "$SUDO $PREFIX/autodb $(config_arg) --init"; }
+handoff_cmd() { printf '%s' "$SUDO $REMOTE_TMP/install_frontdoor.sh --hand-off $(config_arg) --user $RUN_USER_REMOTE"; }
+
+# ui_cmd is the closing "finish in the TUI" line, and it goes through the same
+# boundary as everything else.
+#
+# It was the one use of a custom path that did not. Review measured it: the
+# emitted command is meant to be COPIED AND PASTED, so with
+# CONFIG_REMOTE=/opt/autodb/custom config.toml the operator pastes a command
+# that autodb receives as two arguments -- and a path with metacharacters
+# regains syntax in their shell rather than in ours. A line printed for a human
+# to run is as much a command as one we run ourselves.
+#
+# _ui_cfg is set by the caller: the client config in port mode, the server
+# config in socket mode. Both are derived from CONFIG_REMOTE, so both inherit
+# whatever the operator passed to --config-remote.
+ui_cmd() { printf '%s' "${_ui_sudo}$PREFIX/autodb --ui --config $(shq "$_ui_cfg")"; }
+
+# DEFINE-ONLY MODE: stop here with every helper defined and nothing done.
+#
+# The same seam install_frontdoor.sh carries, for the same reason: the command
+# composition above was reachable only through a full provisioning run, so a
+# cell could assert its text but never watch it built. Placed after every
+# definition and BEFORE the probe, which is the first thing that touches a
+# host.
+if [ -n "${AUTODB_PROVISION_DEFINE_ONLY:-}" ]; then
+  return 0 2>/dev/null || exit 0
+fi
 
 step "Probing $TARGET"
 PROBE="$(rsh 'set -eu
@@ -493,7 +661,25 @@ fi
 
 # ------------------------------------------------------------------- apply
 
-if [ "$ASSUME_YES" != "yes" ] && [ -r /dev/tty ]; then
+# NO TERMINAL MUST REFUSE, NOT AUTHORIZE.
+#
+# Review found this, and it is a regression my own fix introduced. The old
+# guard was `[ -r /dev/tty ]`, which is true on any Linux box, so the prompt
+# was always ATTEMPTED and a run with no controlling terminal died at the read
+# -- failing closed by accident. Correcting have_tty made the condition
+# truthful and, with the `&&` below, turned "no terminal" into "skip the
+# question and proceed", which is the one outcome a confirmation gate exists to
+# prevent. Measured under setsid: the whole condition was false and control
+# fell straight through to the mutation.
+#
+# So the absence of a terminal is now a refusal. Consent has to be given
+# explicitly, by a flag, because a cron job or a CI runner cannot be asked and
+# must not be assumed to have agreed.
+if [ "$ASSUME_YES" != "yes" ]; then
+  have_tty || die "refusing to provision $TARGET without confirmation: there is no
+       terminal to ask on, and neither --yes nor --unattended was given. Nothing
+       has been changed. Re-run with --yes (or --unattended) to consent up front,
+       or from a terminal to be asked."
   say ""
   printf 'Provision %s as described above? [yes/no]: ' "$TARGET" > /dev/tty
   IFS= read -r _a < /dev/tty || _a="no"
@@ -673,12 +859,29 @@ else
   RPC_EFFECTIVE="socket"
 fi
 
-FD_APPLY="--apply --no-start --bind $BIND --prefix $PREFIX --meta $META --user $RUN_USER_REMOTE"
-[ "$UNATTENDED" = "yes" ] && FD_APPLY="--apply --non-interactive --no-start --bind $BIND --prefix $PREFIX --meta $META --user $RUN_USER_REMOTE"
+# --config IS FORWARDED, and its absence was a real defect.
+#
+# Review found the phases disagreeing: --config-remote set CONFIG_REMOTE and
+# the --init and --hand-off phases both used it, while this list did not -- so
+# the installer wrote its OWN default, /etc/autodb/config.toml. A run with a
+# custom path therefore wrote the default config, then pointed --init at a path
+# that did not exist, where autodb falls back to its built-in defaults and
+# bootstraps a PRIVATE store. The same defect as the client-config trap, by a
+# different route, and the Result block then reported the unrelated default
+# file as success.
+#
+# One resolved path, used by every phase.
+FD_APPLY="--apply --no-start $(config_arg) --bind $BIND --prefix $PREFIX --meta $META --user $RUN_USER_REMOTE"
+[ "$UNATTENDED" = "yes" ] && FD_APPLY="--apply --non-interactive --no-start $(config_arg) --bind $BIND --prefix $PREFIX --meta $META --user $RUN_USER_REMOTE"
 [ -n "$META_DSN" ] && FD_APPLY="$FD_APPLY --meta-dsn $META_DSN"
 [ -n "$DNS_NAME" ] && FD_APPLY="$FD_APPLY --dns-name $DNS_NAME"
 [ -n "$FD_PORT" ]  && FD_APPLY="$FD_APPLY --port $FD_PORT"
 [ -n "$RPC_PORT" ] && FD_APPLY="$FD_APPLY --rpc-port $RPC_PORT"
+# CLEARTEXT is forwarded, not re-derived. The playbook CALLS the installer for
+# the service, so a mode the installer supports and the playbook cannot express
+# is a mode nobody can reach through the documented path -- which is what this
+# was: the installer grew --cleartext and this list did not.
+[ "$CLEARTEXT" = "yes" ] && FD_APPLY="$FD_APPLY --cleartext"
 [ "$RPC_SOCKET" = "yes" ] && FD_APPLY="$FD_APPLY --rpc-socket"
 # --init IS RUN, and it is run over a TERMINAL.
 #
@@ -708,7 +911,7 @@ fi
 # It runs with the service stopped, since --init takes the instance lease.
 if [ "$RUN_INIT" != "no" ]; then
   step "First-run ceremony (you will be asked to set the root password)"
-  if rsh_tty "$SUDO $PREFIX/autodb --config $CONFIG_REMOTE --init"; then
+  if rsh_tty "$(init_cmd)"; then
     INIT_OK="yes"
     # THE CEREMONY RAN AS ROOT, so the store, its lease sidecar and the keyfile
     # are root-owned -- and the service runs as its own account. The handoff
@@ -720,7 +923,7 @@ if [ "$RUN_INIT" != "no" ]; then
     # --no-init, so the normal playbook path still produced a root-owned store
     # and the daemon crash-looped on "permission denied".
     step "Handing the store and TLS material to the service account"
-    if rsh "$SUDO $REMOTE_TMP/install_frontdoor.sh --hand-off --config $CONFIG_REMOTE --user $RUN_USER_REMOTE"; then
+    if rsh "$(handoff_cmd)"; then
       HANDOFF_OK="yes"
     else
       # A FAILED HANDOFF GATES THE START, it does not merely warn.
@@ -743,7 +946,7 @@ if [ "$RUN_INIT" != "no" ]; then
       warn "account cannot open it. NOT starting the front door -- it would only"
       warn "crash-loop on \"permission denied\" and hide the cause."
       warn "Repair, then start:"
-      warn "  $(remote_cmd "$SUDO $REMOTE_TMP/install_frontdoor.sh --hand-off --config $CONFIG_REMOTE --user $RUN_USER_REMOTE")"
+      warn "  $(remote_cmd "$(handoff_cmd)")"
       warn "  $(remote_cmd "$SUDO systemctl enable --now autodb-frontdoor")"
     fi
   else
@@ -756,7 +959,7 @@ if [ "$RUN_INIT" != "no" ]; then
     # directory stays, because the recovery command lives in it.
     KEEP_TMP="yes"
     warn "--init did not complete. Everything else is in place; run"
-    warn "  $(remote_cmd "$PREFIX/autodb --config $CONFIG_REMOTE --init")"
+    warn "  $(remote_cmd "$PREFIX/autodb $(config_arg) --init")"
     warn "before starting the service, or a restart leaves the store locked."
   fi
 fi
@@ -845,12 +1048,23 @@ if [ "$START_NOW" != "no" ] && [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-
     warn "the service did not start; check: systemctl status autodb-frontdoor"
   fi
 fi
+# -f, NOT -r, in the Result block below. It answers whether the file was
+# WRITTEN; -r answers whether this process can read it, which is a different
+# question with a different answer: the config is root:autodb 0640 and the
+# block runs as the login user, so -r reported MISSING for a file that was
+# present. Measured on VM43, where the closing notes then handed the operator a
+# recovery sequence premised on a config that existed. Same shape as the
+# /dev/tty guard -- a permission bit standing in for a fact.
+#
+# The comment lives OUT here because the block is a double-quoted string, not a
+# heredoc: a comment with quote characters inside it broke the quoting, which
+# sh -n caught immediately.
 
 step "Result"
 rsh "set -eu
   printf '  binary   : %s\n' \"\$($PREFIX/autodb --version 2>/dev/null || echo present)\"
-  printf '  config   : %s\n' \"\$( [ -r /etc/autodb/config.toml ] && echo /etc/autodb/config.toml || echo MISSING )\"
-  printf '  unit     : %s\n' \"\$( [ -r /etc/systemd/system/autodb-frontdoor.service ] && echo installed || echo MISSING )\"
+  printf '  config   : %s\n' \"\$( [ -f $(shq "$CONFIG_REMOTE") ] && echo $(shq "$CONFIG_REMOTE") || echo MISSING )\"
+  printf '  unit     : %s\n' \"\$( [ -f /etc/systemd/system/autodb-frontdoor.service ] && echo installed || echo MISSING )\"
   printf '  swap     : %s MiB\n' \"\$(awk '/^SwapTotal:/{print int(\$2/1024)}' /proc/meminfo)\"
   printf '  service  : %s\n' \"\$(systemctl is-enabled autodb-frontdoor 2>/dev/null || echo not-enabled)\"
 "
@@ -895,7 +1109,7 @@ if [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-no}" = "yes" ] && [ "${START
     _ui_sudo="${SUDO:+$SUDO }"
   fi
   say "Finish in the TUI, on the VM:"
-  say "  $(remote_cmd "${_ui_sudo}$PREFIX/autodb --ui --config $_ui_cfg")"
+  say "  $(remote_cmd "$(ui_cmd)")"
   say ""
   say "  SPC K   INSPECT the service keyslot -- it should read as verified."
   say "          Do NOT cut one: --init already did, and a second attempt is"
@@ -934,17 +1148,28 @@ else
   say "Recovery, in this order -- and note --init needs the service STOPPED,"
   say "because it takes the meta store's instance lease:"
   say "  $(remote_cmd "$SUDO systemctl stop autodb-frontdoor")"
-  say "  $(remote_cmd "$SUDO $PREFIX/autodb --config $CONFIG_REMOTE --init")"
-  say "  $(remote_cmd "$SUDO $REMOTE_TMP/install_frontdoor.sh --hand-off --config $CONFIG_REMOTE --user $RUN_USER_REMOTE")"
+  say "  $(remote_cmd "$(init_cmd)")"
+  say "  $(remote_cmd "$(handoff_cmd)")"
   say "  $(remote_cmd "$SUDO systemctl enable --now autodb-frontdoor")"
   say ""
   say "Opening the TUI does NOT recover this: the daemon is not running, and"
   say "the client config forbids the TUI from starting one."
 fi
 say ""
-say "TLS: the front door is written DISABLED until TLS material exists,"
-say "because enabled without TLS is refused at config load. The installer's"
-say "closing notes list anything still outstanding."
+if [ "$CLEARTEXT" = "yes" ]; then
+  # THE THIRD SURFACE, and the one that was still wrong. --print-flags and the
+  # config were taught about cleartext; these closing notes still told every
+  # run that the front door was written DISABLED until TLS exists, which is
+  # false here and is the last thing an operator reads.
+  say "TLS: OFF on this front door (--cleartext). It is ENABLED and serving"
+  say "without TLS, so every access token crosses this wire in cleartext and"
+  say "works from anywhere it is admitted until revoked. Close it by removing"
+  say "insecure_disable_tls and setting the three tls_* keys."
+else
+  say "TLS: the front door is written DISABLED until TLS material exists,"
+  say "because enabled without TLS is refused at config load. The installer's"
+  say "closing notes list anything still outstanding."
+fi
 # CLEAN UP AFTER OURSELVES. The working directory holds a git clone and a
 # built binary -- 43 MB measured on the droplet -- and reporting the path
 # rather than removing it meant every run left another copy behind. --keep-tmp

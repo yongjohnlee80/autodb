@@ -525,12 +525,22 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
 
 ### What to be aware of
 
-- **`--apply` is not yet proven on any host, and every distro branch is
-  untested.** `--check` and `--print-config` are safe and exercised. The five
-  package-manager branches (apt-get, dnf/yum, pacman, apk, zypper) are a best
-  effort at each distro's conventions, **not a support claim** — and a run on one
-  distro says nothing about the other four. Use a disposable VM for `--apply`
-  until that changes. The script header carries a per-distro status table.
+- **`--apply` is proven on ONE package manager, and the other four are
+  untested.** It has run end to end on a Debian-family host — a DigitalOcean
+  droplet, 1 vCPU / 961 MiB, through provisioning, TLS issuance, the first-run
+  ceremony and a working JDBC client — so the **apt-get** branch is exercised,
+  not merely written.
+
+  The other four (dnf/yum, pacman, apk, zypper) remain a best effort at each
+  distro's conventions and **not a support claim**: a run on one distro says
+  nothing about the other four, and the RHEL family, Arch and Alpine also ship
+  PostgreSQL's cluster uninitialised, which that run never touched. Use a
+  disposable VM for `--apply` on anything but a Debian-family host. The script
+  header carries a per-distro status table.
+
+  This entry used to say `--apply` was "not yet proven on any host", which was
+  true when written and stopped being true on 2026-09-08. Narrowed to what is
+  tested rather than left overstating in either direction.
 - **The sizing figures are provisional policy, not measurement.** Only the 4 MiB
   watermark, the 256 default cap and the 1 GiB/4 GiB lane bounds come from the
   code. The reserve fraction, the lane share and the PostgreSQL allowance are

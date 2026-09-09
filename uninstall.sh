@@ -51,6 +51,35 @@ RM_USER="yes"
 ASSUME_YES="no"
 
 say()  { printf '%s\n' "$*"; }
+# have_tty reports whether this process can actually USE a terminal.
+#
+# `[ -r /dev/tty ]` does not answer that, and every script here asked it. It
+# tests the PATH's permission bits, which are satisfied on any Linux box —
+# while a process with no controlling terminal (cron, CI, a systemd unit, a
+# backgrounded shell) gets ENXIO the moment it opens the device. Measured: in
+# `setsid sh -c ...` the test is TRUE and the very next write fails with "No
+# such device or address".
+#
+# So the confirmation prompt guarded by that test was reached in exactly the
+# environments it was meant to skip, and the run died at the prompt instead of
+# proceeding or refusing cleanly. Opening it is the only test that answers the
+# question.
+# A SUBSHELL, and that is not style. `:` is a POSIX SPECIAL BUILT-IN, and a
+# redirection error on a special built-in makes a non-interactive shell EXIT —
+# so `{ : < /dev/tty; }` does not return false when there is no terminal, it
+# kills the script. In exactly the case this function exists to detect.
+#
+# Measured: under `setsid`, the subshell form and a regular built-in (`true`)
+# both survive and report false, while the special-built-in form terminated the
+# script before the next line ran. My first version of this helper used it, and
+# it took the installer down silently on VM43 — exit 1, zero bytes on both
+# streams — which is the same failure mode as the guard it replaced, introduced
+# by the fix for it.
+#
+# The subshell is robust whichever built-in is used: an exit inside it is just a
+# status to the caller.
+have_tty() { ( : < /dev/tty ) 2>/dev/null; }
+
 info() { printf '  %s\n' "$*"; }
 step() { printf '\n=== %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -327,7 +356,22 @@ if [ "$MODE" = "apply" ]; then
   [ "$(id -u)" -eq 0 ] || die "--apply needs root"
 fi
 
-if [ "$MODE" != "backup" ] && [ "$ASSUME_YES" != "yes" ] && [ -r /dev/tty ]; then
+# NO TERMINAL MUST REFUSE, NOT AUTHORIZE.
+#
+# Review found this, and it is a regression my own fix introduced. The old
+# guard was `[ -r /dev/tty ]`, true on any Linux box, so the prompt was always
+# ATTEMPTED and a run with no controlling terminal died at the read -- failing
+# closed by accident. Correcting have_tty made the condition truthful and, with
+# the `&&`, turned "no terminal" into "skip the question and proceed" -- the one
+# outcome a confirmation gate exists to prevent.
+#
+# Consent is now explicit or absent. A cron job cannot be asked and must not be
+# assumed to have agreed.
+if [ "$MODE" != "backup" ] && [ "$ASSUME_YES" != "yes" ]; then
+  have_tty || die "refusing to remove anything without confirmation: there is no terminal
+       to ask on and --yes was not given. NOTHING has been removed. This command
+       destroys the meta store, and with it every encrypted connection secret;
+       re-run with --yes only if that is what you intend."
   say ""
   if [ "$DO_BACKUP" = "no" ]; then
     printf 'Remove all of the above WITHOUT a backup? Encrypted connection secrets will be unrecoverable. [yes/no]: ' > /dev/tty

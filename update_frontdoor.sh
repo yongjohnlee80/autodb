@@ -22,6 +22,35 @@
 set -eu
 
 say()  { printf '%s\n' "$*"; }
+# have_tty reports whether this process can actually USE a terminal.
+#
+# `[ -r /dev/tty ]` does not answer that, and every script here asked it. It
+# tests the PATH's permission bits, which are satisfied on any Linux box —
+# while a process with no controlling terminal (cron, CI, a systemd unit, a
+# backgrounded shell) gets ENXIO the moment it opens the device. Measured: in
+# `setsid sh -c ...` the test is TRUE and the very next write fails with "No
+# such device or address".
+#
+# So the confirmation prompt guarded by that test was reached in exactly the
+# environments it was meant to skip, and the run died at the prompt instead of
+# proceeding or refusing cleanly. Opening it is the only test that answers the
+# question.
+# A SUBSHELL, and that is not style. `:` is a POSIX SPECIAL BUILT-IN, and a
+# redirection error on a special built-in makes a non-interactive shell EXIT —
+# so `{ : < /dev/tty; }` does not return false when there is no terminal, it
+# kills the script. In exactly the case this function exists to detect.
+#
+# Measured: under `setsid`, the subshell form and a regular built-in (`true`)
+# both survive and report false, while the special-built-in form terminated the
+# script before the next line ran. My first version of this helper used it, and
+# it took the installer down silently on VM43 — exit 1, zero bytes on both
+# streams — which is the same failure mode as the guard it replaced, introduced
+# by the fix for it.
+#
+# The subshell is robust whichever built-in is used: an exit inside it is just a
+# status to the caller.
+have_tty() { ( : < /dev/tty ) 2>/dev/null; }
+
 info() { printf '  %s\n' "$*"; }
 step() { printf '\n=== %s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -207,7 +236,22 @@ need systemctl
 [ -x "$PREFIX/autodb" ] || die "no autodb at $PREFIX/autodb — this updates an existing
        install; use provision_vm.sh or install_frontdoor.sh for a new one"
 
-if [ "$ASSUME_YES" != "yes" ] && [ -r /dev/tty ]; then
+# NO TERMINAL MUST REFUSE, NOT AUTHORIZE.
+#
+# Review found this, and it is a regression my own fix introduced. The old
+# guard was `[ -r /dev/tty ]`, true on any Linux box, so the prompt was always
+# ATTEMPTED and a run with no controlling terminal died at the read -- failing
+# closed by accident. Correcting have_tty made the condition truthful and, with
+# the `&&`, turned "no terminal" into "skip the question and proceed" -- the one
+# outcome a confirmation gate exists to prevent.
+#
+# Consent is now explicit or absent. A cron job cannot be asked and must not be
+# assumed to have agreed.
+if [ "$ASSUME_YES" != "yes" ]; then
+  have_tty || die "refusing to update $UNIT without confirmation: there is no terminal to
+       ask on and --yes was not given. Nothing has been changed. This command
+       stops the service, replaces its binary and restarts it; re-run with --yes
+       to consent up front."
   say ""
   printf 'Update %s from %s to %s? [yes/no]: ' "$UNIT" "$INSTALLED" "$TAG" > /dev/tty
   IFS= read -r _a < /dev/tty || _a="no"
