@@ -760,6 +760,24 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 func recordedEffects(stopped *exec.EmitStopped, status byte, targetFailed bool) (lead, clause, outcome string) {
 	arm := armFromWhatIsKnown(stopped, status, targetFailed)
 	switch arm {
+	case exec.ArmDeliveryStopped:
+		// A SEGMENT'S DELIVERY, NOT A STATEMENT'S EFFECTS.
+		//
+		// This says nothing about any statement, because the report it comes
+		// from describes none: a segment may carry no statement at all
+		// (Parse/Describe/Sync, which is what pgx's default mode and
+		// database/sql's Prepare send) or several, each already settled by its
+		// own Execute drive and its own outcome row.
+		//
+		// The previous wording for this case was the unresolved one below:
+		// "the statement ran and its outcome is not known ... read the table to
+		// find out". For a segment with no statement that is false twice over
+		// -- nothing ran, and there is no table to read -- and it sent an
+		// operator looking for effects that never existed.
+		return "the answers for this segment were not delivered",
+			"any statement in it keeps the outcome its own record already carries; " +
+				"this stop is about the DELIVERY of the segment's replies, not about effects",
+			string(arm)
 	case exec.ArmNoStatement:
 		// The empty query. Nothing ran, so there are no effects to speak about
 		// at all — and saying anything about them would be inventing a statement
@@ -818,6 +836,16 @@ func armFromWhatIsKnown(stopped *exec.EmitStopped, status byte, targetFailed boo
 	}
 	if stopped == nil {
 		return observed()
+	}
+	// A DELIVERY REPORT IS NEVER REPAIRED FROM THE EMITTER'S VIEW.
+	//
+	// The fallback below exists to recover a STATEMENT fact the engine could
+	// not determine. A delivery-scoped report is not an engine that failed to
+	// determine something — it is a report about a different subject, and
+	// "repairing" it with targetFailed or a transaction status would produce
+	// exactly the statement claim the scope exists to prevent.
+	if stopped.Delivery {
+		return exec.ArmDeliveryStopped
 	}
 	// THE ENGINE FIRST, BUT NOT WHEN IT SAYS IT DOES NOT KNOW.
 	//

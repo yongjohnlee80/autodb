@@ -545,7 +545,7 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	// END. Sync is what resets both tracks and leaves the wire usable, so
 	// returning early on a consumer stop would strand the connection in a state
 	// no later frame could recover.
-	dispatched, deliverErr := deliverSegment(ctx, pc, s.ext, emit)
+	_, deliverErr := deliverSegment(ctx, pc, s.ext, emit)
 
 	targetStatus, serr := pc.Sync(ctx)
 	// Sync consumes through the terminal ReadyForQuery whatever happened, so the
@@ -621,21 +621,39 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	// whatever the consumer did, so dropping portals on 'I' and recording the
 	// status must happen either way. The old early return skipped both, leaving
 	// this end holding portals the backend had already destroyed.
-	// TargetErr IS DELIBERATELY nil, AND THAT IS NOT A GAP.
+	// THE DELIVERY FAILURE IS REPORTED LAST, DELIVERY-SCOPED, WITH THE STATUS.
 	//
-	// A first version recorded the target's ErrorResponse on the segment path
-	// so the arm could carry it, and NO MUTATION COULD TELL THE DIFFERENCE --
-	// because armFromWhatIsKnown already recovers exactly that fact. When the
-	// engine's arm is Unresolved it falls through to the EMITTER's observation,
-	// and a target error that passed through the emitter has already set
-	// targetFailed there. Supplying it here as well would give one fact two
-	// sources, which is how the client's story and the audit's drifted apart in
-	// this area before.
+	// This is F2 item 6. The drive used to return `0, deliverErr` -- a bare
+	// emitFailure -- so the loop's `errors.As(err, &stopped)` found nothing.
+	// Arming it with 0 was the trap: 0 is not a valid status, and a non-nil
+	// report whose status is invalid is treated as session-lost, which would
+	// have dropped a session that was perfectly recoverable.
 	//
-	// So the drive reports only what it alone knows: the consumer's cause, a
-	// truthful readiness byte, and whether anything was dispatched.
+	// A truthful byte exists here and only here: Sync consumed through the
+	// terminal ReadyForQuery, and the drain kept OBSERVING after delivery
+	// stopped, so the status is post-tail exactly as the raw path's is.
+	//
+	// It carries `status`, NOT `targetStatus`. When a read-only wrap was open
+	// the target reports T for a transaction that is OURS, and putting that in
+	// the arm would tell a client with no transaction that its effects are
+	// pending inside one -- the confusion the wrap rule above exists to
+	// prevent, reintroduced through the arm.
+	//
+	// DELIVERY-SCOPED, and nothing else is filled in. A first version passed
+	// segmentAwaitsWire as Executed, and those are different contracts:
+	// segmentAwaitsWire means "some step's answer must come from the target",
+	// while Executed means "a statement was dispatched". Parse/Describe/Sync
+	// satisfies the first and not the second, so that arm told a client "the
+	// statement ran" for a segment carrying no statement -- and with a T status
+	// it would have said the effects were pending. Review named it, and the
+	// vocabulary is the fix rather than a better guess at Executed.
+	//
+	// It comes after the bookkeeping above, not before: Sync ENDED the segment
+	// whatever the consumer did, so dropping portals on 'I' and recording the
+	// status must happen either way. The old early return skipped both, leaving
+	// this end holding portals the backend had already destroyed.
 	if deliverErr != nil {
-		return status, e.emitStoppedWithStatus(deliverErr, "", dispatched, nil, status)
+		return status, e.deliveryStopped(deliverErr, status)
 	}
 	return status, nil
 }
