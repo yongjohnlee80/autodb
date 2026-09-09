@@ -151,15 +151,24 @@ func field(label string, opts ...widget.TextInputOption) formField {
 	return formField{label: label, input: widget.NewTextInput(opts...)}
 }
 
-// form is a column of labelled inputs with a status line; Enter in any
-// field submits. onSubmit returns the outcome: close the float, or show a
-// status message and keep it open.
+// form is a column of labelled inputs, a hint footer and a status line.
+//
+// ENTER ADVANCES UNLESS THE LAST FIELD HOLDS FOCUS. It used to submit from any
+// field, because widget.TextInput publishes SubmitEvent on Enter and this
+// subscriber treated every one of them as a submit. So typing a token name and
+// pressing Enter -- the obvious way to reach the next field -- submitted a
+// half-filled form, and nothing on screen said which key advanced. The footer
+// now says it, from the same vocabulary the `?` overlay uses.
+//
+// onSubmit returns the outcome: close the float, or show a status message and
+// keep it open.
 type form struct {
 	tui  *tui.Context
 	box  *widget.Box // set by the Model after openFloat for status updates
 	flex *tui.Flex
 
 	fields   []formField
+	hint     *widget.Text
 	status   *widget.Text
 	onSubmit func(values []string) (close bool, status string)
 	float    *widget.Float
@@ -167,7 +176,11 @@ type form struct {
 
 func newForm(fields []formField, onSubmit func([]string) (bool, string)) *form {
 	f := &form{
-		fields:   fields,
+		fields: fields,
+		// The footer, in the body rather than the Box: golib's Box offers a
+		// title and no footer, and the managers already put their hints in
+		// the body this way.
+		hint:     widget.NewText(hintLine(formHints()), widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted)), widget.WithWrapMode(widget.Wrap)),
 		status:   widget.NewText("", widget.WithTextStyle(style.New().Foreground(style.TokenError))),
 		onSubmit: onSubmit,
 	}
@@ -177,6 +190,7 @@ func newForm(fields []formField, onSubmit func([]string) (bool, string)) *form {
 		f.flex.Add(fd.input)
 	}
 	f.flex.Add(f.status)
+	f.flex.Add(f.hint)
 	return f
 }
 
@@ -184,11 +198,28 @@ func (f *form) Init(ctx *tui.Context) {
 	f.tui = ctx
 	ctx.Mount(f.flex)
 	tui.SubscribeScoped(ctx, func(ev widget.SubmitEvent) {
-		for _, fd := range f.fields {
-			if ev.Owner == fd.input.NodeID() {
+		for i, fd := range f.fields {
+			if ev.Owner != fd.input.NodeID() {
+				continue
+			}
+			// THE LAST FIELD SUBMITS; every other one advances.
+			//
+			// Deciding by POSITION rather than by "is this the only field"
+			// keeps the single-field case correct for free: index 0 is also
+			// the last, so a one-field form (search, rename) submits on Enter
+			// exactly as it always did.
+			if i == len(f.fields)-1 {
 				f.submit()
 				return
 			}
+			if !ctx.FocusComponent(f.fields[i+1].input) {
+				// Focus could not move -- an unmounted or unfocusable field.
+				// Submitting would be worse than doing nothing: it would fire
+				// a form the operator has not finished, which is the very
+				// behaviour this replaced. Say so instead.
+				f.status.SetText("could not move to the next field; use Tab")
+			}
+			return
 		}
 	})
 }

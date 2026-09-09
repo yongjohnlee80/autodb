@@ -27,7 +27,13 @@ import (
 )
 
 // startRealServer boots a full autodb server on a loopback port.
-func startRealServer(t *testing.T) (addr string) {
+// startRealServer starts a real RPC server for the UI to talk to.
+//
+// The variadic options exist so a cell can configure the SERVER-SIDE state a
+// flow depends on -- a front door with a CA file, for instance. Without them a
+// UI cell can only ever reach the branches that need no configuration, which
+// is how a card body nobody had rendered acquired a line nobody had asserted.
+func startRealServer(t *testing.T, opts ...rpc.Option) (addr string) {
 	t.Helper()
 	ctx := context.Background()
 	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
@@ -45,7 +51,8 @@ func startRealServer(t *testing.T) (addr string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "e2e", rpc.WithListener(ln))
+	srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "e2e",
+		append([]rpc.Option{rpc.WithListener(ln)}, opts...)...)
 	runCtx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Run(runCtx) }()

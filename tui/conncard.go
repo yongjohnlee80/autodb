@@ -1,12 +1,14 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"net"
 	"strings"
 
 	"github.com/yongjohnlee80/golib/tui"
+	"github.com/yongjohnlee80/golib/tui/style"
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
@@ -36,9 +38,36 @@ type connCard struct {
 	model  *Model
 	text   string
 	copies []cardCopy
+	// keys is the footer, and it is a footer rather than a title because the
+	// title was where these lived and a title is read once, before there is
+	// anything to copy. It also feeds the `?` overlay, so the two cannot
+	// disagree about what the keys are.
+	keys   []keyHint
 	editor *widget.Editor
 	ctx    *tui.Context
 	float  *widget.Float
+}
+
+// hints puts this card's keys in the overlay and the footer from one list.
+func (c *connCard) hints() []keyHint { return c.keys }
+
+// cardCopyKeys and cardKeyHints are the copy bindings and their footer, in ONE
+// place each, so a cell can assert what the surfaces actually build rather
+// than a copy of it written in a test.
+//
+// `y` IS ABSENT DELIBERATELY. It used to copy the token, which made a visual
+// selection uncopyable: the card claimed the key before the read-only editor
+// beneath could treat it as a yank.
+func cardCopyKeys(label, all string) []cardCopy {
+	return []cardCopy{{'Y', label, all}}
+}
+
+func cardKeyHints(allLabel string) []keyHint {
+	return []keyHint{
+		{"v/V then y", "copy a selection"},
+		{"Y", allLabel},
+		{"q/Esc", "close"},
+	}
 }
 
 // buildCardDSN renders the FRONT-DOOR DSN — the one a client dials.
@@ -105,16 +134,52 @@ func (c *connCard) Init(ctx *tui.Context) {
 	c.editor.SetReadOnly(true)
 	ctx.Mount(c.editor)
 	ctx.FocusComponent(c.editor)
+
+	// THE EDITOR'S OWN YANK REPORTS ITSELF.
+	//
+	// A visual selection copied with `y` is handled by the editor, not by this
+	// card -- which is the point: `y` means "copy what I selected", the thing
+	// a vim user already knows, and the card claiming it would make a
+	// selection uncopyable. But CopyToClipboard's result is consumed inside
+	// the widget, so without this the operator would see nothing and could not
+	// tell a copy that landed from one that never left the process.
+	tui.SubscribeScoped(ctx, func(ev widget.YankEvent) {
+		if ev.Owner != c.editor.NodeID() {
+			return
+		}
+		msg, okc, _ := copyReport(ev.ClipboardDelivered, true)
+		if okc {
+			c.model.setOK("selection: " + msg)
+		} else {
+			c.model.setError("selection: " + msg)
+		}
+	})
 }
 
 func (c *connCard) Layout(cs tui.Constraints) tui.Size {
 	w, h := cs.MaxW, cs.MaxH
-	sz := c.ctx.LayoutChild(c.editor, tui.Tight(tui.Size{W: w, H: h}))
+	// The last row belongs to the footer, so the editor gets one less. A
+	// footer drawn OVER the editor would cover a line of the thing being
+	// copied, which on a show-once card is unacceptable.
+	edH := h
+	if len(c.keys) > 0 && edH > 1 {
+		edH--
+	}
+	sz := c.ctx.LayoutChild(c.editor, tui.Tight(tui.Size{W: w, H: edH}))
 	c.ctx.PlaceChild(c.editor, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
 	return cs.Constrain(tui.Size{W: w, H: h})
 }
 
-func (c *connCard) Render(tui.Surface) {}
+func (c *connCard) Render(s tui.Surface) {
+	if len(c.keys) == 0 {
+		return
+	}
+	h := s.Size().H
+	if h < 1 {
+		return
+	}
+	drawTo(s, 0, h-1, hintLine(c.keys), style.New().Foreground(style.TokenTextMuted))
+}
 
 // HandleEvent owns the copy keys and NOTHING else — every other key falls
 // through to the read-only editor, which is what makes the card navigable.
@@ -290,4 +355,75 @@ func orNone(s string) string {
 		return "(unknown)"
 	}
 	return s
+}
+
+// openCAcert shows the front door's CA CERTIFICATE ITSELF, in a read-only vim
+// editor float that can be selected from and copied out of.
+//
+// The contents, not the path, and that is the whole point. `sslmode=verify-full`
+// plus this one file is what every client needs, and the path was useless to
+// the person who needs it: a developer running the TUI over a tunnel cannot
+// read a file on the daemon's host, and on the host itself /etc/autodb/tls is
+// 0710 -- traversal for the service account and root, nobody else. The card
+// used to print the path for exactly this purpose and it was removed as noise;
+// this is the surface that actually serves it.
+//
+// Same component as the token card, so the keys are the same ones: a visual
+// selection with `y`, everything with `Y`, and a footer that says so.
+func (m *Model) openCAcert() {
+	bound := m.session.Bind()
+	m.ctx.Go(func(c context.Context) (any, error) {
+		ca, err := bound.FrontDoorCAPem(c)
+		if err != nil {
+			msg := WireErrorMessage(err)
+			return managerReload{gen: bound.Gen(), apply: func() {
+				m.setError("CA certificate: " + msg)
+			}}, nil
+		}
+		return managerReload{gen: bound.Gen(), apply: func() { m.showCAcert(ca) }}, nil
+	})
+}
+
+func (m *Model) showCAcert(ca CAPem) {
+	if ca.SystemRoots {
+		// NOT an empty document. An install with no private CA is a different
+		// answer from one whose certificate could not be read, and a blank
+		// float would leave a reader unable to tell which they got.
+		m.openTextFloat("front-door CA certificate",
+			"This install has no private CA: [frontdoor] tls_root_ca_file is unset,\n"+
+				"so clients verify against their own system roots and there is no file\n"+
+				"to distribute.\n\n"+
+				"If the front door is using a private CA, set tls_root_ca_file in the\n"+
+				"daemon's config -- without it a verify-full client fails with\n"+
+				"\"unknown authority\" and the error names the certificate's HOST NAMES,\n"+
+				"which reads like a name mismatch and sends you the wrong way.\n")
+		return
+	}
+	if strings.TrimSpace(ca.PEM) == "" {
+		m.setError("CA certificate: the daemon returned an empty document for its configured " +
+			"CA file ([frontdoor] tls_root_ca_file)")
+		return
+	}
+	// THE CERTIFICATE ALONE. No path, anywhere on this surface.
+	//
+	// A footnote naming the file on the daemon's host was here, and a review
+	// caught it reintroducing the very thing the operator had asked to be
+	// removed from the reveal card. Two reasons beyond that ask: `SPC k` is
+	// offered to EVERY developer by design -- the certificate is the file you
+	// hand out -- so the footnote disclosed the daemon's filesystem layout to
+	// people who cannot read it and did not need it; and a PEM document with a
+	// trailing line of prose is one somebody selects whole in their terminal
+	// and pastes into a client.
+	body := ca.PEM
+	if !strings.HasSuffix(body, "\n") {
+		body += "\n"
+	}
+	card := &connCard{
+		model:  m,
+		text:   body,
+		copies: cardCopyKeys("the CA certificate", ca.PEM),
+		keys:   cardKeyHints("copy the certificate"),
+	}
+	card.float = m.openFloatPct("front-door CA certificate — hand this to clients",
+		card, scriptPct)
 }

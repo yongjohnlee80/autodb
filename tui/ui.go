@@ -1477,10 +1477,34 @@ func (m *Model) leaderEntries() []leaderEntry {
 		{'u', "users…", m.openUserManager},
 		{'i', "my allowed IPs…", func() { m.openUserIPManager(m.session.User().ID, "me") }},
 		{'T', "my access tokens…", func() { m.openPATManager(m.session.User().ID, "me") }},
-		{'I', "ip allowlist (admin)…", m.openAllowlistManager},
-		{'K', "service keyslot (admin)…", m.openKeyslotMenu},
 		{'H', "script history…", m.openHistory},
+		// The CA CERTIFICATE, and not admin-only: it is public by
+		// construction -- it is the file you hand out -- and every developer
+		// configuring a client needs it. Gating it would mean root couriering
+		// a public file to each of them.
+		{'k', "front-door CA certificate…", m.openCAcert},
 		{'g', "refresh explorer", m.explorer.Reload},
+	}
+	// THE TWO ADMIN SURFACES, offered only to an admin.
+	//
+	// Both carry "(admin)" in their label and both are refused server-side for
+	// anyone else -- so for an editor they were two entries that could only
+	// ever fail, which is exactly what this menu's own rule forbids. An editor
+	// reported finding them and reasonably read reachability as permission.
+	//
+	// The role is presentation only. The server decides: ListAllowedIPs and
+	// ServiceKeyslotStatusFor both resolve the role from the store on every
+	// call, so hiding these changes what is ADVERTISED, never what is allowed.
+	//
+	// `H` (script history) is deliberately NOT here. It is scoped per-user in
+	// core -- an editor sees their own executions, an admin sees all
+	// (core/exec/history.go) -- so it is a working feature for everyone, and
+	// its label carries no "(admin)" marker. Johno ruled it stays.
+	if m.session.IsAdmin() {
+		entries = append(entries,
+			leaderEntry{'I', "ip allowlist (admin)…", m.openAllowlistManager},
+			leaderEntry{'K', "service keyslot (admin)…", m.openKeyslotMenu},
+		)
 	}
 	// Offered only while the warning is up, following this menu's own rule
 	// that an entry which always fails teaches distrust of the menu. The

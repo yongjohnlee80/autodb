@@ -816,29 +816,58 @@ func (m *Model) openPATForm(g *manager[PATRow], userID int64, who string) {
 	})
 }
 
-func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []UserIPRow, active int) {
-	title := fmt.Sprintf("create token (%d of %d used)", active, auth.PATMaxPerUser)
-	m.openForm(title, []formField{
+// offersCleartextTokenField decides whether the cleartext-debugging question
+// is asked at all.
+//
+// FAILS HIDDEN: cleartextFD is false both for a TLS door and for one that
+// could not be probed, and an unprobed endpoint is not evidence of a cleartext
+// one. The safe answer to "we do not know" is not to ask.
+//
+// Presentation only. The server keeps all four of its checks -- admin,
+// serving cleartext now, a non-empty IP list, a /24 floor -- and remains
+// authoritative; this changes what is ASKED, never what is allowed.
+func (m *Model) offersCleartextTokenField() bool {
+	return m.session.IsAdmin() && m.cleartextFD
+}
+
+// patFormFields is the sheet an operator is shown. Pure, so the decision above
+// can be tested without mounting a float.
+func patFormFields(askCleartext bool) []formField {
+	fields := []formField{
 		field("name (e.g. laptop-psql, jetbrains)"),
 		field("expires in days (blank = server default, max 365)"),
 		field("restrict to IPs, comma separated (blank = any of your allowed IPs)"),
 		// A token names exactly ONE connection. The field is
-		// required because there is no unscoped form — a PAT that reached
+		// required because there is no unscoped form -- a PAT that reached
 		// every connection its owner is granted is the blast radius this
 		// binding exists to shrink.
 		field("connection id (SPC c lists them; the token reaches ONLY this one)"),
-		// The cleartext debugging class. Offered here rather than hidden behind a separate
-		// command because the ONLY way to get one is to ask at mint time, and
-		// the server refuses it unless the caller is an admin and this daemon
-		// is serving cleartext right now — so an ordinary user typing `y` gets
-		// a refusal that explains itself, not a silently weaker token.
-		field("cleartext debugging token? y/N (needs admin + a cleartext front door)"),
-	}, func(v []string) (bool, string) {
+	}
+	if askCleartext {
+		// Asked only where it can be answered. It used to be asked of
+		// everyone with its conditions in the label, which named a way to
+		// send credentials in the clear to someone who could not do it and
+		// had not asked.
+		fields = append(fields,
+			field("cleartext debugging token? y/N (this daemon is serving WITHOUT TLS)"))
+	}
+	return fields
+}
+
+func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []UserIPRow, active int) {
+	title := fmt.Sprintf("create token (%d of %d used)", active, auth.PATMaxPerUser)
+	askCleartext := m.offersCleartextTokenField()
+	fields := patFormFields(askCleartext)
+	m.openForm(title, fields, func(v []string) (bool, string) {
 		name := strings.TrimSpace(v[0])
 		if name == "" {
 			return false, "a name is required"
 		}
-		debugCleartext := strings.EqualFold(strings.TrimSpace(v[4]), "y")
+		// Read by presence, not by a fixed index: the field is absent for
+		// everyone who cannot use it, and indexing v[4] unconditionally would
+		// panic the moment it is.
+		debugCleartext := askCleartext && len(v) > 4 &&
+			strings.EqualFold(strings.TrimSpace(v[4]), "y")
 		connID, cerr := strconv.ParseInt(strings.TrimSpace(v[3]), 10, 64)
 		if cerr != nil || connID <= 0 {
 			// Refused HERE, while the form is still open and the value can be
@@ -909,7 +938,7 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 			return managerReload{gen: bound.Gen(), apply: func() {
 				g.model.setOK("create " + name + ": ok")
 				g.Reload()
-				m.revealConnectionCard(out, connFor(conns, connID), ep, who)
+				m.revealConnectionCard(out, connFor(conns, connID), ep, bound.User())
 			}}, nil
 		})
 		return true, ""
@@ -938,7 +967,37 @@ func connFor(conns []ConnInfo, id int64) ConnInfo {
 // complaint about the old one: the previous float held nothing but the secret,
 // so its single `y` was exactly right. Move instructions into the body and one
 // key would paste a paragraph into a password field.
-func (m *Model) revealConnectionCard(out PATSecret, conn ConnInfo, ep FrontDoorEndpoint, user string) {
+// THE ACCOUNT NAME COMES FROM THE SESSION, NOT FROM A CALLER.
+//
+// It used to be a parameter, and every caller passed the PAT manager's DISPLAY
+// LABEL — the literal string "me" (ui.go's leader entry). So the card printed
+// `user me` and baked it into the DSN and the JDBC URL it tells a developer to
+// copy, which the front door then refuses with
+// frontdoor/startup-user-mismatch: the startup `user` must equal the token
+// owner's name (EqualFold, core/exec/wire_session.go:214).
+//
+// openPATManager has exactly ONE caller, so there was no path that produced a
+// usable card. It cost a real operator their first client connection. Every
+// buildCardText test passed a real name, which is why the renderer was
+// correct and the WIRING was broken — so the cell for this drives the menu
+// path, not the renderer.
+//
+// Reading the session here rather than trusting an argument is the fix: no
+// call site CAN pass a label again, because none supplies the name at all.
+func (m *Model) revealConnectionCard(out PATSecret, conn ConnInfo, ep FrontDoorEndpoint, owner UserInfo) {
+	// THE OWNER IS PINNED, NOT LOOKED UP.
+	//
+	// Reading m.session.User() here was still wrong, and a review caught why:
+	// the mint runs asynchronously with a pinned token, and the reveal happens
+	// afterwards on the loop goroutine. A login switch in between -- which does
+	// NOT bump the session epoch when it reuses the connection -- would render
+	// one person's token in a DSN naming another. So the owner arrives from the
+	// same Bound that minted it.
+	//
+	// The parameter is a typed UserInfo rather than a string on purpose: the
+	// original defect was a caller passing the display label "me", and a label
+	// cannot be spelled as a UserInfo.
+	user := owner.Name
 	if user == "" {
 		// The card prints this into a DSN, so a blank would produce a broken
 		// line that LOOKS pasteable. Say it is unknown instead.
@@ -946,17 +1005,24 @@ func (m *Model) revealConnectionCard(out PATSecret, conn ConnInfo, ep FrontDoorE
 	}
 	// ONE computation. The copy key gets the SAME string the screen shows —
 	// see buildCardText for why that is not a stylistic preference.
-	text, dsn := buildCardText(out.Secret, conn, ep, user, shortStamp(out.ExpiresAt))
+	// The DSN is INSIDE the text, and `Y` now takes the whole card, so the
+	// separately-returned copy has no consumer left.
+	text, _ := buildCardText(out.Secret, conn, ep, user, shortStamp(out.ExpiresAt))
 	card := &connCard{
 		model: m,
 		text:  text,
-		copies: []cardCopy{
-			{'y', "token", out.Secret},
-			{'Y', "DSN", dsn},
-		},
+		// `y` IS DELIBERATELY NOT HERE.
+		//
+		// It used to copy the token, which made a visual selection
+		// uncopyable: the card claimed the key before the read-only editor
+		// beneath could treat it as a yank. `y` now means what it means
+		// everywhere else -- copy what I selected -- and `Y` takes the whole
+		// card. The editor reports its own copies (see connCard.Init), so a
+		// selection still says whether it reached the clipboard.
+		copies: cardCopyKeys("the whole card", text),
+		keys:   cardKeyHints("copy everything"),
 	}
-	card.float = m.openFloatPct("token "+out.Name+" — y: token, Y: DSN, q/Esc: close (shown once)",
-		card, scriptPct)
+	card.float = m.openFloatPct("token "+out.Name+" (shown once)", card, scriptPct)
 }
 
 // revealPATSecret shows a freshly minted token. The store keeps only a

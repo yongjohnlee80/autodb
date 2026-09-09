@@ -94,6 +94,39 @@ type Service struct {
 	// every developer being refused.
 	keyslotState ServiceKeyslotState
 
+	// keyslotNow is the SECOND record, and it exists because the first one is
+	// history. keyslotState is what the BOOT probe found and must never be
+	// rewritten; keyslotNow is what has been proven since. A review found the
+	// status reporting the boot failure verbatim after a SUCCESSFUL enrolment,
+	// because enrolment never refreshed anything and there was only one field
+	// to refresh -- so an operator was told their working install was broken,
+	// distrusted it, and rebooted to find out.
+	keyslotNow ServiceKeyslotCurrent
+
+	// keyslotGen orders enrol/remove against verification. A verification is
+	// slower than the mutation that triggered it, so without this a late
+	// verify could write "verified" after a removal and resurrect a claim for
+	// a slot that no longer exists.
+	keyslotGen uint64
+
+	// keyslotOpMu serializes a WHOLE enrol or remove -- database mutation,
+	// verification and the state it publishes -- as one transition.
+	//
+	// The generation counter alone was not enough, and a review showed why:
+	// the enrol took its generation AFTER its commit, so a removal could
+	// commit, publish "removed", and then be overwritten by the enrol's newer
+	// generation. Ordering a counter around one of the two steps cannot fix an
+	// interleaving of both. This makes the pair atomic instead, and leaves the
+	// counter to catch a verification arriving from anywhere else.
+	keyslotOpMu sync.Mutex
+
+	// hookAfterKeyslotCommit fires inside EnrollServiceKeyslot, after its
+	// database commit and before it verifies and publishes. nil in production;
+	// a cell sets it to drive a concurrent removal into precisely that
+	// window. Kept as a field rather than a package variable so parallel
+	// cells cannot reach into each other.
+	hookAfterKeyslotCommit func()
+
 	// patCompares counts PAT hash-and-compare operations for the
 	// comparable-work assertion. Per-service so parallel tests cannot
 	// interleave into each other's deltas.

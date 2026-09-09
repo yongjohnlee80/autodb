@@ -369,8 +369,14 @@ for the first administrator and the unattended-unlock slot, and starts the
 service if you asked it to.
 
 That leaves one file to hand out: `ca.pem`, plus `sslmode=verify-full` in the
-client's DSN. For an internet-facing deployment prefer a real ACME certificate
-and pass `--no-cert`.
+client's DSN. **`SPC k` in the TUI shows that certificate's contents** — not
+its path, which is no use to a developer on another machine, and unreadable
+even on the host unless you are root or the service account. It opens in a
+read-only vim editor: select and `y` to copy part of it, `Y` for the whole
+thing, and the footer names the keys.
+
+For an internet-facing deployment prefer a real ACME certificate and pass
+`--no-cert`.
 
 `--check` is the default and never writes anything. `--apply` interviews you,
 pre-filling every answer with the computed default, so pressing return through
@@ -595,10 +601,13 @@ Everything hangs off the leader key:
 | `SPC C`                 | choose which connection the query runs against                    |
 | `SPC c` `SPC w` `SPC u` | connections, workspaces, users                                    |
 | `SPC H`                 | script history — who ran what, when, against which connection     |
+| `SPC k`                 | the front door's CA certificate, as text you can copy out          |
+| `SPC T` / `SPC i`       | your access tokens / your allowed IPs                             |
 | `SPC n` `SPC s`         | new note / save note (per-workspace `.sql` files)                 |
 | `1`–`9`                 | in the explorer, jump to the connection wearing that number        |
 | `/` `n` `N`             | search the focused panel, next/previous match                     |
 | `SPC z` / `Ctrl-w z`    | zoom the focused pane                                             |
+| `v`/`V` then `y` · `Y`  | in any read-only card: copy a selection · copy the whole thing     |
 | `SPC x` / `SPC X`       | disconnect-reconnect / restart the backend (admin; terminal only) |
 
 Explorer rows carry both numbers you need:

@@ -242,11 +242,17 @@ if [ "$MODE_FLAGS" = "yes" ]; then
   printf 'interview: %s\n' "$( [ "$UNATTENDED" = yes ] && echo defaults || echo interactive )"
   printf 'start:     %s\n' "$START_NOW"
   printf 'ref:       %s\n' "$AUTODB_REF"
-  printf 'rpc:       %s\n' "$( [ -n "$RPC_PORT" ] && echo "port $RPC_PORT" || { [ "$RPC_SOCKET" = yes ] && echo socket || echo "installer default"; } )"
+  # The RESOLVED mode, not the flags that fed it: "installer default" told a
+  # reader nothing, and the notes then guessed differently. Socket is the
+  # installer's default, so that is what a bare run gets.
+  printf 'rpc:       %s\n' "$( [ -n "$RPC_PORT" ] && echo "port $RPC_PORT" || echo "socket (installer default)" )"
   printf 'dns:       %s\n' "${DNS_NAME:-<none, certificate for an IP>}"
   # Printed as ONE line for BOTH consumers on purpose: the unit's User= and the
   # handoff target are the same value, and this is where that is assertable.
   printf 'service-user: %s (unit User= and handoff target)\n' "$RUN_USER_REMOTE"
+  # The installer is told NOT to start; this playbook owns the start, gated on
+  # the ceremony and the handoff. Printed so the contract is assertable.
+  printf 'installer-start: no (--no-start; the playbook owns the start)\n'
   exit 0
 fi
 
@@ -572,8 +578,39 @@ step "Configuring the front door"
 # that merely happened to agree: --service-user retargeted only the handoff, so
 # passing it handed the store to one account while the unit ran as another --
 # the crash loop again, from a flag that looked like it was supported.
-FD_APPLY="--apply --bind $BIND --prefix $PREFIX --meta $META --user $RUN_USER_REMOTE"
-[ "$UNATTENDED" = "yes" ] && FD_APPLY="--apply --non-interactive --bind $BIND --prefix $PREFIX --meta $META --user $RUN_USER_REMOTE"
+# --no-start IS LOAD-BEARING, and its absence produced the worst failure of the
+# first real bring-up.
+#
+# THE PLAYBOOK OWNS THE START. That is what the INIT_OK/HANDOFF_OK gate below
+# exists for. The installer also offers to start the service -- interactively,
+# BEFORE this playbook runs its ceremony -- and `autodb --init` needs the
+# daemon STOPPED, because it takes the instance lease.
+#
+# So on the first real run the operator was asked "enable and start the service
+# now?", said yes, and the ceremony then failed on ErrLeaseHeld before
+# prompting for anything: no administrator, no keyslot, and a daemon serving a
+# store nobody could administer. From outside it looked like "--init never
+# asked me for a password". The playbook's own comment stated the precondition
+# its code did not enforce.
+#
+# Two owners for one action. Now there is one.
+# THE RPC ENDPOINT MODE IS RESOLVED ONCE, HERE.
+#
+# A review caught the notes deciding it a second time, differently: they took
+# "not --rpc-socket" to mean port, but the INSTALLER'S DEFAULT IS SOCKET
+# (install_frontdoor.sh RPC_MODE="socket" -- the safe default, since a 0600
+# socket is openable only by the service account and root). So a default run
+# advertised /etc/autodb/client.toml, a file socket mode never writes.
+#
+# One resolution, consulted everywhere: --print-flags, FD_APPLY, and the notes.
+if [ -n "$RPC_PORT" ]; then
+  RPC_EFFECTIVE="port"
+else
+  RPC_EFFECTIVE="socket"
+fi
+
+FD_APPLY="--apply --no-start --bind $BIND --prefix $PREFIX --meta $META --user $RUN_USER_REMOTE"
+[ "$UNATTENDED" = "yes" ] && FD_APPLY="--apply --non-interactive --no-start --bind $BIND --prefix $PREFIX --meta $META --user $RUN_USER_REMOTE"
 [ -n "$META_DSN" ] && FD_APPLY="$FD_APPLY --meta-dsn $META_DSN"
 [ -n "$DNS_NAME" ] && FD_APPLY="$FD_APPLY --dns-name $DNS_NAME"
 [ -n "$FD_PORT" ]  && FD_APPLY="$FD_APPLY --port $FD_PORT"
@@ -647,6 +684,13 @@ if [ "$RUN_INIT" != "no" ]; then
     fi
   else
     INIT_OK="no"
+    # A HELD CEREMONY IS A FAILED RUN, and its recovery material must survive.
+    #
+    # A review found this path exiting 0 while deleting the working directory
+    # and then telling the operator to run a script inside it. Both halves are
+    # now fixed: the status is non-zero (see the closing gate) and the
+    # directory stays, because the recovery command lives in it.
+    KEEP_TMP="yes"
     warn "--init did not complete. Everything else is in place; run"
     warn "  ssh -t $TARGET '$PREFIX/autodb --config $CONFIG_REMOTE --init'"
     warn "before starting the service, or a restart leaves the store locked."
@@ -658,8 +702,49 @@ fi
 # hold reports which one held it rather than a bare "not started".
 if [ "$START_NOW" != "no" ] && [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-no}" = "yes" ]; then
   step "Starting the front door"
-  rsh "$SUDO systemctl enable --now autodb-frontdoor" ||     warn "the service did not start; check: systemctl status autodb-frontdoor"
-  rsh "$SUDO systemctl is-active autodb-frontdoor" || true
+  # A REQUESTED START THAT FAILS IS A FAILED RUN.
+  #
+  # This was `|| warn`, so a refusing systemctl left the run reporting success
+  # AND printing the "Provisioned, finish in the TUI" notes -- instructions for
+  # a daemon that is not running. Tracked, reported, and charged to the exit
+  # status below.
+  # ENABLE IS NOT RUNNING, and treating it as such was the remaining hole.
+  #
+  # `systemctl enable --now` returns 0 for a unit that starts and then exits
+  # immediately -- which is exactly what a misconfigured front door does, and
+  # exactly the crash loop this whole change is about. The is-active check
+  # below existed already and its result was thrown away with `|| true`, so a
+  # review reproduced a run where enable returned 0, is-active returned 3, and
+  # the playbook still printed "Provisioned / finish in the TUI" and exited 0.
+  #
+  # ActiveState is polled rather than `is-active --quiet`-ed once, because a
+  # freshly enabled unit legitimately reads "activating" for a moment, and a
+  # single look would charge that as a failure.
+  if rsh "$SUDO systemctl enable --now autodb-frontdoor"; then
+    START_OK="no"
+    _tries=0
+    while [ "$_tries" -lt 15 ]; do
+      _state="$(rsh "$SUDO systemctl show -p ActiveState --value autodb-frontdoor" 2>/dev/null || echo unknown)"
+      case "$_state" in
+        active)             START_OK="yes"; break ;;
+        activating|reloading) ;;                      # still coming up
+        *)                  break ;;                  # failed/inactive: done
+      esac
+      _tries=$(( _tries + 1 ))
+      sleep 1
+    done
+    if [ "$START_OK" = "yes" ]; then
+      info "service is ACTIVE"
+    else
+      warn "systemctl accepted the start but the unit is not active (ActiveState=${_state:-unknown})."
+      warn "A unit that starts and exits at once returns success from enable --now, so"
+      warn "this is the failure that used to be reported as a working install."
+      warn "  ssh $TARGET '$SUDO journalctl -u autodb-frontdoor -b --no-pager'"
+    fi
+  else
+    START_OK="no"
+    warn "the service did not start; check: systemctl status autodb-frontdoor"
+  fi
 fi
 
 step "Result"
@@ -671,10 +756,96 @@ rsh "set -eu
   printf '  service  : %s\n' \"\$(systemctl is-enabled autodb-frontdoor 2>/dev/null || echo not-enabled)\"
 "
 
+# ------------------------------------------------------------ closing notes
+#
+# BRANCHED ON WHAT ACTUALLY HAPPENED, because the two outcomes need opposite
+# instructions and a single list was wrong for whichever one you got.
+#
+# The first version of these notes told everyone to press SPC K to cut a
+# keyslot. On the successful path `autodb --init` has ALREADY cut and VERIFIED
+# it (initcmd.go proves the pair by unwrapping rather than trusting the row),
+# so that instruction returns "a service keyslot already exists" -- an error on
+# the path that worked. And on the failed path the daemon is deliberately not
+# started, which client_only stops the TUI from fixing, so "open the TUI" is
+# not recovery either.
 say ""
-say "Provisioned. The front door is NOT serving yet -- install_frontdoor.sh"
-say "writes it disabled until TLS material exists, because enabled without"
-say "TLS is refused at config load. Its closing notes list what remains."
+if [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-no}" = "yes" ] && [ "${START_OK:-skipped}" != "no" ]; then
+  say "Provisioned. The administrator exists and the unattended unlock is"
+  say "enrolled AND verified, so a restart will not lock anybody out."
+  say ""
+  # WHICH CONFIG THE TUI SHOULD USE depends on the RPC endpoint. In port mode
+  # the installer writes a client.toml that is safe to read and carries
+  # client_only = true, which is what stops a failed dial from spawning a
+  # second daemon against an empty store. In socket mode there is no client
+  # config -- the socket is openable only by the service account and root --
+  # so the server config is the only route, and only for root.
+  if [ "$RPC_EFFECTIVE" = "port" ]; then
+    # A client config, readable by anyone on the box, carrying client_only.
+    _ui_cfg="$(dirname "$CONFIG_REMOTE")/client.toml"
+    _ui_sudo=""
+  else
+    # SOCKET MODE NEEDS PRIVILEGE, and the command has to say so.
+    #
+    # A review caught this printing a bare `autodb --ui --config
+    # /etc/autodb/config.toml` two lines above a paragraph explaining that only
+    # root and the service account can open the 0600 socket. For a non-root ssh
+    # login that command cannot work twice over: the socket is not openable, and
+    # the server config is root:$RUN_USER 0640 and not even readable. $SUDO is
+    # empty when the login IS root, so this adds nothing where nothing is needed.
+    _ui_cfg="$CONFIG_REMOTE"
+    _ui_sudo="${SUDO:+$SUDO }"
+  fi
+  say "Finish in the TUI, on the VM:"
+  say "  ssh -t $TARGET '${_ui_sudo}$PREFIX/autodb --ui --config $_ui_cfg'"
+  say ""
+  say "  SPC K   INSPECT the service keyslot -- it should read as verified."
+  say "          Do NOT cut one: --init already did, and a second attempt is"
+  say "          refused rather than silently replacing a working slot."
+  say "  SPC c   Connections. Add your target, then press 'e' on it to OPEN"
+  say "          THE FRONT DOOR for that connection. A new connection is"
+  say "          deliberately NOT reachable until you do -- the front door"
+  say "          refuses any connection whose profile is not 'session', and"
+  say "          so does minting a token against it."
+  say "  SPC u   Users and grants: each developer needs an account and a"
+  say "          grant on the connection they should reach."
+  say "  SPC T   Each developer mints their OWN token, bound to one"
+  say "          connection. The card it shows carries the DSN and JDBC URL."
+  say ""
+  if [ "$RPC_EFFECTIVE" = "port" ]; then
+    say "The RPC endpoint is on port $RPC_PORT (loopback), so a developer runs"
+    say "the TUI over an ssh tunnel and mints their own token without root."
+  else
+    say "The RPC endpoint is a unix SOCKET (the installer's default), openable"
+    say "only by $RUN_USER_REMOTE and root -- so the TUI above must be run as"
+    say "root, and there is no client config to hand to a developer. Re-run"
+    say "with --rpc-port to let developers mint their own tokens."
+  fi
+elif [ "${START_OK:-skipped}" = "no" ]; then
+  say "Provisioned, and the ceremony completed, BUT THE SERVICE DID NOT START."
+  say ""
+  say "  ssh $TARGET '$SUDO systemctl status autodb-frontdoor'"
+  say "  ssh $TARGET '$SUDO journalctl -u autodb-frontdoor -b --no-pager'"
+  say ""
+  say "The store and TLS material are in place, so this is the daemon's own"
+  say "start failure rather than anything left half-done above."
+else
+  say "Provisioned, BUT THE FIRST-RUN CEREMONY DID NOT COMPLETE, so the"
+  say "front door was deliberately not started."
+  say ""
+  say "Recovery, in this order -- and note --init needs the service STOPPED,"
+  say "because it takes the meta store's instance lease:"
+  say "  ssh -t $TARGET '$SUDO systemctl stop autodb-frontdoor'"
+  say "  ssh -t $TARGET '$SUDO $PREFIX/autodb --config $CONFIG_REMOTE --init'"
+  say "  ssh    $TARGET '$SUDO $REMOTE_TMP/install_frontdoor.sh --hand-off --config $CONFIG_REMOTE --user $RUN_USER_REMOTE'"
+  say "  ssh    $TARGET '$SUDO systemctl enable --now autodb-frontdoor'"
+  say ""
+  say "Opening the TUI does NOT recover this: the daemon is not running, and"
+  say "the client config forbids the TUI from starting one."
+fi
+say ""
+say "TLS: the front door is written DISABLED until TLS material exists,"
+say "because enabled without TLS is refused at config load. The installer's"
+say "closing notes list anything still outstanding."
 # CLEAN UP AFTER OURSELVES. The working directory holds a git clone and a
 # built binary -- 43 MB measured on the droplet -- and reporting the path
 # rather than removing it meant every run left another copy behind. --keep-tmp
@@ -696,7 +867,20 @@ fi
 # reporting success after refusing to start the service is how a broken host
 # gets treated as provisioned. HANDOFF_OK is unset on the --no-init route,
 # where there is no handoff to have failed, so that route stays a success.
+# A HELD OR BROKEN RUN EXITS NON-ZERO, whichever step held it.
+#
+# The gate used to consult the handoff alone, so a failed ceremony and a
+# refusing systemctl both reported success -- and a caller (CI, a wrapper, `&&`)
+# sees only the status. Each cause names itself.
 if [ "${HANDOFF_OK:-yes}" = "no" ]; then
   say ""
   die "provisioning did NOT complete: the store was not handed to $RUN_USER_REMOTE (see above)"
+fi
+if [ "$RUN_INIT" != "no" ] && [ "${INIT_OK:-no}" != "yes" ]; then
+  say ""
+  die "provisioning did NOT complete: the first-run ceremony did not finish (see above)"
+fi
+if [ "${START_OK:-skipped}" = "no" ]; then
+  say ""
+  die "provisioning did NOT complete: the front door was asked to start and did not (see above)"
 fi

@@ -87,6 +87,71 @@ func keyslotStatusText(st KeyslotStatus) string {
 	var b strings.Builder
 	p := func(f string, a ...any) { fmt.Fprintf(&b, f+"\n", a...) }
 
+	// THE HEADLINE IS WHAT IS TRUE NOW, and the boot probe is reported as
+	// history beneath it.
+	//
+	// A review of the field report found the two collapsed: the status came
+	// only from the boot probe, so an operator who cut a slot from this very
+	// modal was still told "no service keyfile" and reasonably concluded the
+	// enrolment had silently failed. It had not. What was stale was the
+	// reading, and the fix is to say WHEN each claim was taken.
+	if st.Checked && st.Verified && !st.Unlocked {
+		p("UNATTENDED UNLOCK: ENROLLED AND VERIFIED")
+		p("")
+		p("The service keyslot was proven to open this store%s.", atClause(st.VerifiedAt))
+		p("It did NOT open it at start — see below — so this daemon is running")
+		p("on a passphrase login. The NEXT restart will unlock unattended.")
+		p("")
+		p("A verification is not a promise about the future: the keyfile can")
+		p("still be deleted, re-moded or replaced after this check.")
+		p("")
+		p("At daemon start:")
+		p("  %s", firstLine(st.Reason))
+		return finishKeyslotText(&b, p, st)
+	}
+	// REMOVED is an assertive claim, so it requires a KNOWN absence. A review
+	// found this branch rendering an unanswered lookup as a deliberate
+	// removal: SlotPresent was derived from a query that mapped every failure
+	// to false, so a database hiccup during the boot probe told an operator
+	// somebody had deleted their keyslot.
+	if st.Checked && !st.Verified && !st.SlotPresent && st.SlotPresentKnown && st.Attempted {
+		// A deliberate removal. The boot record still says what happened at
+		// start, which remains true, and this does NOT claim the running
+		// process relocked — it holds the key it already unwrapped.
+		p("UNATTENDED UNLOCK: REMOVED")
+		p("")
+		p("The service keyslot was deleted%s, so the NEXT restart will need a", atClause(st.VerifiedAt))
+		p("passphrase login. This process still holds the key it already")
+		p("unwrapped, so work in flight is unaffected.")
+		return finishKeyslotText(&b, p, st)
+	}
+	if st.Checked && !st.SlotPresentKnown && st.VerifyReason != "" && !st.Unlocked {
+		// The store could not be asked. Reported as ignorance, because the
+		// alternative is inventing an answer.
+		p("UNATTENDED UNLOCK: CANNOT BE DETERMINED")
+		p("")
+		p("The keyslot could not be inspected%s:", atClause(st.VerifiedAt))
+		p("")
+		p("  %s", firstLine(st.VerifyReason))
+		p("")
+		p("This says nothing about whether a slot exists -- only that the store")
+		p("could not be read. Do not re-enroll on the strength of this screen.")
+		return finishKeyslotText(&b, p, st)
+	}
+	if st.Checked && !st.Verified && st.SlotPresent && st.VerifyReason != "" && !st.Unlocked {
+		// Committed and unverified: a real state, and the one an operator
+		// most needs named rather than folded into either success or failure.
+		p("UNATTENDED UNLOCK: CUT BUT NOT WORKING")
+		p("")
+		p("A service keyslot exists and it does NOT open this store:")
+		p("")
+		p("  %s", firstLine(st.VerifyReason))
+		p("")
+		p("Nothing was re-cut or removed, because that would strand whichever")
+		p("half is still good. The next restart leaves the store locked.")
+		return finishKeyslotText(&b, p, st)
+	}
+
 	switch {
 	case st.Unlocked:
 		p("UNATTENDED UNLOCK: ACTIVE")
@@ -112,6 +177,12 @@ func keyslotStatusText(st KeyslotStatus) string {
 		p("NOT an authentication failure, so nobody should be regenerating")
 		p("tokens over this.")
 	}
+	return finishKeyslotText(&b, p, st)
+}
+
+// finishKeyslotText appends the one claim that is about NOW rather than about
+// the keyslot, shared by every branch above so no branch can forget it.
+func finishKeyslotText(b *strings.Builder, p func(string, ...any), st KeyslotStatus) string {
 	p("")
 	if st.StoreUnlocked {
 		p("The store is UNLOCKED right now, so work is proceeding normally.")
@@ -120,6 +191,28 @@ func keyslotStatusText(st KeyslotStatus) string {
 		p("secret is refused until somebody logs in with a passphrase.")
 	}
 	return b.String()
+}
+
+// atClause dates a claim, because "was proven" without a when is the ambiguity
+// this whole change is about. Empty when the daemon did not report a time,
+// rather than inventing one.
+func atClause(ts string) string {
+	if strings.TrimSpace(ts) == "" {
+		return ""
+	}
+	return " at " + ts
+}
+
+// firstLine keeps a multi-line error from pushing the rest of the card off
+// screen; the full text is in the daemon log.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	if strings.TrimSpace(s) == "" {
+		return "(no reason recorded)"
+	}
+	return s
 }
 
 func (m *Model) confirmEnrollKeyslot() {

@@ -41,9 +41,7 @@ func (m *Model) currentHints() (title string, hs []keyHint) {
 		}
 		// A float without its own actions (form, help) still traps keys:
 		// report it rather than the panel behind it.
-		return f.title, []keyHint{
-			{"Tab", "next field"}, {"Enter", "submit"}, {"Esc", "cancel"},
-		}
+		return f.title, formHints()
 	}
 	switch {
 	case m.ctx.FocusWithin(m.explorerBox):
@@ -121,6 +119,25 @@ func (h *hintPanel) HandleEvent(ev tui.Event) bool {
 		return true
 	}
 	return false
+}
+
+// formHints is the ONE definition of a form's keys, shared by the footer the
+// form draws and by the `?` overlay.
+//
+// It said {"Enter","submit"} while Enter submitted from ANY field, and an
+// operator typing a name and pressing Enter had the form submit under them --
+// with nothing on screen to suggest otherwise. Enter now advances unless the
+// last field holds focus, and this text says exactly that. Two places
+// describing one behaviour is how they drift, so there is one.
+func formHints() []keyHint {
+	// Kept SHORT because it has to survive the form's narrow cap: the first
+	// wording wrapped mid-phrase ("submit (on the last / field)"), which reads
+	// worse than no footer. This fits on one line at the minimum width.
+	return []keyHint{
+		{"Tab/Enter", "next"},
+		{"Enter", "submit on last"},
+		{"Esc", "cancel"},
+	}
 }
 
 // hintLine renders the hints as a single wrapped footer string.

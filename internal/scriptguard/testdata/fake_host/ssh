@@ -33,14 +33,34 @@ mem=2048
 swap=0
 diskfree=20480
 arch=x86_64
-root=0
 pkg=apt-get
 sudo=yes
 systemd=yes
 mise=absent
 autodb=absent
 PROBE
+    # THE REMOTE UID, settable: the playbook derives $SUDO from it, and a
+    # non-root login is the case where a printed command needs privilege.
+    printf 'root=%s\n' "${FAKE_REMOTE_UID:-0}"
     exit 0
+    ;;
+  *--init*)
+    # THE CEREMONY. Failable, because a held ceremony must fail the run and
+    # keep the material its recovery command lives in -- a review found this
+    # path exiting 0 while deleting that directory.
+    exit "${FAKE_INIT_RC:-0}"
+    ;;
+  *"show -p ActiveState"*)
+    # THE UNIT'S REAL STATE, separately settable. `enable --now` returns 0 for
+    # a unit that starts and then dies at once, so a cell has to be able to
+    # say "the start was accepted AND the unit is not running".
+    printf '%s\n' "${FAKE_ACTIVE_STATE:-active}"
+    exit 0
+    ;;
+  *"systemctl enable --now autodb-frontdoor"*)
+    # A REQUESTED START THAT REFUSES. It used to leave the run reporting
+    # success and printing "finish in the TUI" for a daemon that was not up.
+    exit "${FAKE_START_RC:-0}"
     ;;
   *--hand-off*)
     # THE INJECTION POINT. A real handoff fails for ordinary reasons: the

@@ -102,6 +102,13 @@ var (
 	// live in different places on purpose, so having one
 	// without the other is a reachable state and gets its own name.
 	ErrNoServiceKeyslot = errors.New("auth: no service keyslot in this store")
+
+	// ErrKeyslotUnverified -- the slot COMMITTED and then failed to open the
+	// store. A distinct outcome from "enrolment failed", because a row and a
+	// keyfile now exist and the recovery is therefore different: nothing is
+	// re-cut or rolled back, since replacing a live slot strands whichever
+	// half is still good.
+	ErrKeyslotUnverified = errors.New("auth: the service keyslot was cut but does not open the store")
 )
 
 // serviceKEK derives the key-encryption key from a keyfile.
@@ -205,11 +212,145 @@ type ServiceKeyslotState struct {
 	Reason string
 }
 
-// ServiceKeyslotStatus reports the last unlock attempt.
+// ServiceKeyslotCurrent is what is true NOW, as distinct from what the boot
+// probe found. The two are separate records on purpose.
+//
+// A past check is not a future promise: the keyfile can be deleted, re-moded
+// or replaced after a verification, so this says what was proven and WHEN,
+// and never that the next restart will succeed.
+type ServiceKeyslotCurrent struct {
+	// Checked is false when nothing has been proven since start, in which case
+	// the boot record is the only evidence there is.
+	Checked bool
+	// Verified is true when the slot was proven to open the master key.
+	Verified bool
+	// At is when that proof (or failure) was taken.
+	At time.Time
+	// Reason names why the last verification failed, empty on success.
+	Reason string
+	// SlotPresent is whether a service slot existed at that moment. A removal
+	// sets this false WITHOUT touching the boot record and without claiming
+	// the running process has relocked -- it has not; it holds the key it
+	// already unwrapped.
+	//
+	// ONLY MEANINGFUL WHEN SlotPresenceKnown. A review caught the reason:
+	// this was derived from a query that mapped EVERY failure to false, and
+	// the UI reads "attempted, checked, not present" as a deliberate REMOVAL.
+	// So a database hiccup during the boot probe rendered as "an operator
+	// removed the slot" -- an assertive claim manufactured from an unanswered
+	// question. Absence and ignorance are different answers and now have
+	// different fields.
+	SlotPresent bool
+	// SlotPresenceKnown is false when the store could not be asked.
+	SlotPresenceKnown bool
+}
+
+// ServiceKeyslotStatus reports what the BOOT probe found. Immutable after
+// start: this is history, and rewriting it is how the modal came to report a
+// startup failure as a present fact.
 func (s *Service) ServiceKeyslotStatus() ServiceKeyslotState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.keyslotState
+}
+
+// ServiceKeyslotNow reports what has been proven since start.
+func (s *Service) ServiceKeyslotNow() ServiceKeyslotCurrent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.keyslotNow
+}
+
+// bumpKeyslotGen marks a mutation and returns the generation it produced. A
+// verification started under an older generation is discarded.
+func (s *Service) bumpKeyslotGen() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.keyslotGen++
+	return s.keyslotGen
+}
+
+// setKeyslotNow records a verification outcome, but only if no enrol or remove
+// has happened since it started. Reports whether it was kept.
+func (s *Service) setKeyslotNow(gen uint64, cur ServiceKeyslotCurrent) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if gen != s.keyslotGen {
+		return false
+	}
+	s.keyslotNow = cur
+	return true
+}
+
+// verifySlotOpens proves the pair by doing what the next boot does: read the
+// keyfile, find the slot, unwrap. It deliberately does NOT touch the boot
+// record -- which is why it calls unlockFromKeyfile rather than
+// UnlockWithServiceKeyslot, whose whole job is to write that record. Reusing
+// the latter for verification was the flaw in the first version of this fix:
+// it would have overwritten the very history it was meant to preserve.
+func (s *Service) verifySlotOpens(ctx context.Context, gen uint64) error {
+	err := s.unlockFromKeyfile(ctx)
+	cur := ServiceKeyslotCurrent{
+		Checked: true, Verified: err == nil, At: s.now(),
+	}
+	// ASKED, NOT INFERRED. Deriving this from the error class got it wrong for
+	// a missing KEYFILE: the slot row can be perfectly present while the file
+	// that opens it is gone, and reporting "no slot" then sends an operator to
+	// re-enroll -- which is refused, because the row is there.
+	cur.SlotPresent, cur.SlotPresenceKnown = s.serviceSlotPresence(ctx)
+	if err != nil {
+		cur.Reason = err.Error()
+	}
+	s.setKeyslotNow(gen, cur)
+	return err
+}
+
+// serviceSlotPresence answers the question the state fields actually ask, and
+// says whether it could be answered at all.
+//
+// ONLY ErrNoRows PROVES ABSENCE. An earlier version returned a bare bool and
+// mapped every other error to false, which manufactured a positive claim --
+// "the slot is gone" -- out of a failed query, and the UI then rendered that
+// as a deliberate removal. A store we cannot read tells us nothing about what
+// is in it.
+func (s *Service) serviceSlotPresence(ctx context.Context) (present, known bool) {
+	_, err := s.store.Keyslots.OnCtx(ctx).
+		With(meta.KeyslotKind, meta.KeyslotKindService).Get()
+	switch {
+	case err == nil:
+		return true, true
+	case errors.Is(err, dao.ErrNoRows):
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+// ServiceKeyslotStatusFor is the AUTHORIZED reading of the same state, and it
+// is what a remote caller gets.
+//
+// The status carries Reason, which is an err.Error() from the boot unlock
+// attempt: it names the configured keyfile PATH and distinguishes absent from
+// wrong-mode from corrupt. That is operational detail about how this install
+// protects its master key, and a review found the RPC verb gated on
+// ValidateToken alone -- so any authenticated editor could read it.
+//
+// ADMIN-ONLY, and that is what earns the detail: a reason this specific is
+// admissible precisely BECAUSE only an administrator can read it. Deny before
+// you disclose -- an ungranted caller learns nothing about what exists.
+//
+// The wire's coarse, fixed 57P03 for a locked store is a separate contract and
+// is unchanged: this decides who may read the DETAIL, never what the front
+// door says to a client.
+//
+// The check resolves the role from the store on every call, so a token minted
+// while its owner was an admin stops working the moment they are demoted --
+// a cached role in a client cannot outlive the grant.
+func (s *Service) ServiceKeyslotStatusFor(ctx context.Context, token string) (ServiceKeyslotState, error) {
+	if _, err := s.requireAdmin(ctx, token); err != nil {
+		return ServiceKeyslotState{}, err
+	}
+	return s.ServiceKeyslotStatus(), nil
 }
 
 // EnrollServiceKeyslot writes a keyfile and stores the master key wrapped by
@@ -226,6 +367,12 @@ func (s *Service) ServiceKeyslotStatus() ServiceKeyslotState {
 // cut it is exactly the row an investigation cannot account for — and this one
 // grants unattended access to every secret in the store.
 func (s *Service) EnrollServiceKeyslot(ctx context.Context, token, ip string) error {
+	// ONE TRANSITION: the row, the keyfile, the verification and the state it
+	// publishes. See keyslotOpMu for why a generation counter around the
+	// verification alone could not order this against a concurrent removal.
+	s.keyslotOpMu.Lock()
+	defer s.keyslotOpMu.Unlock()
+
 	ident, err := s.requireAdmin(ctx, token)
 	if err != nil {
 		return err
@@ -307,6 +454,40 @@ func (s *Service) EnrollServiceKeyslot(ctx context.Context, token, ip string) er
 		_ = os.Remove(s.keyfilePath)
 		return err
 	}
+
+	// THE POST-COMMIT WINDOW, exposed to tests only.
+	//
+	// This is the interval a review identified as the dangerous one: the row
+	// and keyfile exist, and the state that describes them has not been
+	// published yet. A concurrent removal landing here used to publish
+	// "removed" and then be overwritten by this enrolment's newer generation.
+	// Serializing the whole transition closes it -- and a hook is the only way
+	// to prove the window is closed rather than merely narrow, because a
+	// racing test cannot reliably hit an interval this short.
+	if s.hookAfterKeyslotCommit != nil {
+		s.hookAfterKeyslotCommit()
+	}
+
+	// THE ROW IS NOT EVIDENCE THE UNLOCK WORKS, so prove it by doing exactly
+	// what the next boot does -- and record the proof where a reader will look
+	// for it. Without this the status still showed the BOOT failure, so a
+	// successful enrolment looked like a silent no-op.
+	gen := s.bumpKeyslotGen()
+	if verr := s.verifySlotOpens(ctx, gen); verr != nil {
+		// A DISTINCT OUTCOME: the slot is committed and does not open. Not a
+		// success, and not the same as "enrolment failed" -- there is now a
+		// row and a keyfile to reason about, so the recovery differs.
+		//
+		// Deliberately NOT re-cut and NOT rolled back: replacing a live slot
+		// strands whichever half is good, and the operator gets to choose.
+		return fmt.Errorf("%w: the slot was cut but it does not open the store: %v\n"+
+			"       Nothing was re-cut or removed, because that would strand whichever\n"+
+			"       half is still good. The administrator is fine; the UNATTENDED UNLOCK\n"+
+			"       is not, so the next restart leaves the store locked and front-door\n"+
+			"       clients get 57P03 until someone logs in by hand. Inspect %s, then\n"+
+			"       remove the slot (autodb --ui, SPC K) and enroll again",
+			ErrKeyslotUnverified, verr, s.keyfilePath)
+	}
 	return nil
 }
 
@@ -317,6 +498,10 @@ func (s *Service) EnrollServiceKeyslot(ctx context.Context, token, ip string) er
 // without the keyfile is unattended access that quietly still works if the file
 // comes back.
 func (s *Service) RemoveServiceKeyslot(ctx context.Context, token, ip string) error {
+	// Same single transition as enrolment, for the same reason.
+	s.keyslotOpMu.Lock()
+	defer s.keyslotOpMu.Unlock()
+
 	ident, err := s.requireAdmin(ctx, token)
 	if err != nil {
 		return err
@@ -339,9 +524,29 @@ func (s *Service) RemoveServiceKeyslot(ctx context.Context, token, ip string) er
 	}); err != nil {
 		return err
 	}
-	// After the commit: the authoritative record is gone, so a keyfile left
-	// here is inert rather than dangerous, and a failure to unlink is worth
-	// reporting without un-removing the slot.
+	// THE STATE IS PUBLISHED BEFORE THE CLEANUP ERROR.
+	//
+	// A review found the unlink failure returning first, which left the
+	// current claim reading verified/slot-present AFTER the authoritative row
+	// was already gone -- the modal then reported unattended unlock as working
+	// for a slot that no longer existed. The ROW is what decides, so the truth
+	// goes out as soon as the row does.
+	//
+	// The boot record is untouched: deleting a slot does not change what
+	// happened at start. And this does NOT say the store relocked -- this
+	// process still holds the key it already unwrapped. What changed is the
+	// NEXT start.
+	gen := s.bumpKeyslotGen()
+	s.setKeyslotNow(gen, ServiceKeyslotCurrent{
+		Checked: true, Verified: false, At: s.now(),
+		// KNOWN absent, and known by construction: this code deleted the row
+		// in the transaction that just committed. Nothing needs asking.
+		SlotPresent: false, SlotPresenceKnown: true,
+		Reason: "the slot was removed; this install needs a passphrase login after a restart",
+	})
+
+	// Now the cleanup. Its failure is still an error the operator must see: a
+	// keyfile nobody deletes is a secret left on disk, even an inert one.
 	if s.keyfilePath != "" {
 		if rerr := os.Remove(s.keyfilePath); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
 			return fmt.Errorf("auth: the service keyslot was removed but its keyfile remains at "+
@@ -369,9 +574,11 @@ func (s *Service) UnlockWithServiceKeyslot(ctx context.Context) error {
 	err := s.unlockFromKeyfile(ctx)
 	if err != nil {
 		s.setKeyslotState(ServiceKeyslotState{Attempted: true, Reason: err.Error()})
+		s.seedKeyslotNow(ctx, false, err)
 		return err
 	}
 	s.setKeyslotState(ServiceKeyslotState{Attempted: true, Unlocked: true})
+	s.seedKeyslotNow(ctx, true, nil)
 	return nil
 }
 
@@ -409,6 +616,19 @@ func (s *Service) unlockFromKeyfile(ctx context.Context) error {
 	// a login does: if this process already holds a master key, one that
 	// disagrees is refused rather than adopted.
 	return s.withUnlock(mk, func() error { return nil })
+}
+
+// seedKeyslotNow initialises the current record from the boot probe, which IS
+// a verification -- taken at start. Everything after start overwrites it.
+func (s *Service) seedKeyslotNow(ctx context.Context, ok bool, err error) {
+	cur := ServiceKeyslotCurrent{Checked: true, Verified: ok, At: s.now()}
+	cur.SlotPresent, cur.SlotPresenceKnown = s.serviceSlotPresence(ctx)
+	if err != nil {
+		cur.Reason = err.Error()
+	}
+	s.mu.Lock()
+	s.keyslotNow = cur
+	s.mu.Unlock()
 }
 
 func (s *Service) setKeyslotState(st ServiceKeyslotState) {

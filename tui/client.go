@@ -162,6 +162,14 @@ type Bound struct {
 	cli   *golibrpc.Client
 	gen   uint64
 	token string
+	// user is pinned WITH the token, because they are two halves of one
+	// identity. A review found the PAT card reading the live session instead:
+	// the mint used this pinned token while the card read m.session.User()
+	// afterwards, so a login switch between the two rendered one person's
+	// token in a DSN naming another. A same-connection switch does not bump
+	// gen, so the epoch could not catch it -- the identity has to travel with
+	// the credential.
+	user UserInfo
 }
 
 // Bind pins the current epoch. Call it where the user's intent forms —
@@ -169,11 +177,16 @@ type Bound struct {
 func (s *Session) Bind() *Bound {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return &Bound{s: s, cli: s.client, gen: s.gen, token: s.token}
+	return &Bound{s: s, cli: s.client, gen: s.gen, token: s.token, user: s.user}
 }
 
 // Gen reports the pinned epoch (result tagging at issuance sites).
 func (b *Bound) Gen() uint64 { return b.gen }
+
+// User reports the identity pinned alongside the token, which is the account
+// whose credential this Bound acts with. Anything that RENDERS an identity for
+// work done through a Bound must take it from here, not from the live session.
+func (b *Bound) User() UserInfo { return b.user }
 
 // errSuperseded refuses work whose issuing epoch has been replaced.
 var errSuperseded = errors.New("tui: connection changed since this action was issued")
@@ -662,6 +675,21 @@ type KeyslotStatus struct {
 	// a failed keyslot followed by a passphrase login leaves the keyslot
 	// failed and the store open, and an operator needs both answers.
 	StoreUnlocked bool
+
+	// --- what has been proven SINCE start, which is a THIRD question ---
+	//
+	// The fields above are the boot probe's findings and never change. These
+	// are why: an operator who cut a slot from this very modal was still shown
+	// the startup failure, read it as a silent no-op, and rebooted the machine
+	// to find out whether it had worked. It had.
+	Checked      bool   // anything proven since start?
+	Verified     bool   // and did it open the store?
+	VerifiedAt   string // when (RFC3339, empty if never)
+	VerifyReason string // why not, if it did not
+	SlotPresent  bool   // did a slot exist at that moment...
+	// ...and could the store be asked at all. False means UNKNOWN, not
+	// absent: a failed lookup used to render as a deliberate removal.
+	SlotPresentKnown bool
 }
 
 // KeyslotStatus asks the daemon why it is (or is not) unlocked.
@@ -672,10 +700,16 @@ func (b *Bound) KeyslotStatus(ctx context.Context) (KeyslotStatus, error) {
 	}
 	m, _ := res.(map[string]any)
 	return KeyslotStatus{
-		Attempted:     mB(m, "attempted"),
-		Unlocked:      mB(m, "unlocked"),
-		Reason:        mS(m, "reason"),
-		StoreUnlocked: mB(m, "store_unlocked"),
+		Attempted:        mB(m, "attempted"),
+		Unlocked:         mB(m, "unlocked"),
+		Reason:           mS(m, "reason"),
+		StoreUnlocked:    mB(m, "store_unlocked"),
+		Checked:          mB(m, "checked"),
+		Verified:         mB(m, "verified"),
+		VerifiedAt:       mS(m, "verified_at"),
+		VerifyReason:     mS(m, "verify_reason"),
+		SlotPresent:      mB(m, "slot_present"),
+		SlotPresentKnown: mB(m, "slot_present_known"),
 	}, nil
 }
 
@@ -1180,6 +1214,38 @@ func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedI
 		Name:      mS(m, "name"),
 		Secret:    mS(m, "secret"),
 		ExpiresAt: mS(m, "expires_at"),
+	}, nil
+}
+
+// CAPem is the front door's CA certificate, as text.
+type CAPem struct {
+	// Path is where it lives on the DAEMON's host, shown for reference only:
+	// a developer running the TUI over a tunnel cannot read it, which is why
+	// this carries the contents.
+	Path string
+	// PEM is the certificate itself, empty when the install uses system roots.
+	PEM string
+	// SystemRoots distinguishes "no private CA" from "unreadable", so an empty
+	// document does not have to be guessed at.
+	SystemRoots bool
+}
+
+// FrontDoorCAPem fetches the CA certificate a client must trust.
+//
+// The CONTENTS, not the path: the path is useless to the person who needs it.
+// A developer running the TUI over a tunnel cannot read a file on the daemon's
+// host, and on the host itself /etc/autodb/tls is 0710, so only root and the
+// service account can traverse it.
+func (b *Bound) FrontDoorCAPem(ctx context.Context) (CAPem, error) {
+	res, err := b.authed(ctx, "frontdoor.ca_pem")
+	if err != nil {
+		return CAPem{}, err
+	}
+	m, _ := res.(map[string]any)
+	return CAPem{
+		Path:        mS(m, "path"),
+		PEM:         mS(m, "pem"),
+		SystemRoots: mB(m, "system_roots"),
 	}, nil
 }
 

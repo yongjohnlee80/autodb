@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/yongjohnlee80/autodb/core/engine"
+	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -409,17 +410,43 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		// Authenticated, like every other privileged verb: "is this install
-		// unlocked, and why not" is not a question an unauthenticated caller
-		// gets to ask (security-core-hardening R1).
-		if _, verr := s.auth.ValidateToken(ctx, token); verr != nil {
-			return nil, wireErr(verr)
+		// ADMIN-ONLY, and the authorization lives in core so this handler
+		// cannot be the place the rule is decided.
+		//
+		// It used to be ValidateToken alone, on the reasoning that "is this
+		// install unlocked, and why not" is not an UNAUTHENTICATED caller's
+		// question. True, and insufficient: Reason is an err.Error() from the
+		// boot unlock attempt and names the keyfile path, so an authenticated
+		// editor read operational detail about the master key's protection.
+		// R13 -- deny before you disclose.
+		st, err := s.auth.ServiceKeyslotStatusFor(ctx, token)
+		if err != nil {
+			return nil, wireErr(err)
 		}
-		st := s.auth.ServiceKeyslotStatus()
+		// TWO RECORDS, and they answer different questions. attempted/unlocked/
+		// reason are what the BOOT probe found and never change; the verified_*
+		// fields are what has been proven SINCE -- an enrolment or a removal.
+		// Collapsing them is why a successful enrolment kept reporting the
+		// startup failure.
+		now := s.auth.ServiceKeyslotNow()
+		verifiedAt := ""
+		if !now.At.IsZero() {
+			verifiedAt = now.At.UTC().Format(time.RFC3339)
+		}
 		return map[string]any{
 			"attempted": st.Attempted,
 			"unlocked":  st.Unlocked,
 			"reason":    st.Reason,
+
+			"checked":       now.Checked,
+			"verified":      now.Verified,
+			"verified_at":   verifiedAt,
+			"verify_reason": now.Reason,
+			"slot_present":  now.SlotPresent,
+			// Whether the question could be answered at all. Without it a
+			// failed lookup is indistinguishable from a deliberate removal,
+			// which is how the UI came to report one as the other.
+			"slot_present_known": now.SlotPresenceKnown,
 			// The store's CURRENT state, which is not the same question: a
 			// failed keyslot followed by a passphrase login leaves attempted
 			// false-ish and the store open, and an operator needs both.
@@ -1085,6 +1112,55 @@ func (s *Server) register() {
 	// It reports the LIVE listener, never config intent: a card printing the
 	// configured bind while the listener failed to start would send a
 	// developer to debug their client.
+	// THE CA CERTIFICATE ITSELF, not its path.
+	//
+	// It is the one file every client needs -- `sslmode=verify-full` plus this
+	// -- and the path was useless to the person who needs it: a developer
+	// running the TUI over a tunnel cannot read a file on the daemon's host,
+	// and on the host itself /etc/autodb/tls is 0710 so only root and the
+	// service account can even traverse it.
+	//
+	// AUTHENTICATED, NOT ADMIN-ONLY. A CA certificate is public by
+	// construction -- it is what you hand out -- and every developer who has
+	// to configure a client needs it. Gating it on admin would mean root
+	// couriering a public file to each of them.
+	//
+	// THE PATH COMES FROM CONFIG, NEVER FROM THE CALLER. This reads only the
+	// configured tls_root_ca_file; a caller-supplied path would make this an
+	// arbitrary-file-read verb wearing a certificate's name.
+	s.rpc.Handle("frontdoor.ca_pem", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.auth.ValidateToken(ctx, token); err != nil {
+			return nil, wireErr(err)
+		}
+		var info FrontDoorInfo
+		if s.frontDoor != nil {
+			info = s.frontDoor()
+		}
+		if strings.TrimSpace(info.RootCAFile) == "" {
+			// No private CA configured: the client should trust the system
+			// roots, and saying so is more useful than an empty document.
+			return map[string]any{"path": "", "pem": "", "system_roots": true}, nil
+		}
+		pem, rerr := os.ReadFile(info.RootCAFile)
+		if rerr != nil {
+			return nil, wireErr(fmt.Errorf("reading the CA certificate at %s: %w",
+				info.RootCAFile, rerr))
+		}
+		return map[string]any{
+			"path": info.RootCAFile,
+			"pem":  string(pem),
+			// Reported so a reader is not left wondering whether an empty
+			// document means "system roots" or "unreadable".
+			"system_roots": false,
+		}, nil
+	})
 	s.rpc.Handle("frontdoor.endpoint", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err

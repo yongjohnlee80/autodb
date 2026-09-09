@@ -262,6 +262,30 @@ The preflight NEVER changes anything, so run it first and read the
 numbers. --apply refuses on a host the front door cannot be sized onto.
 USAGE
 }
+# AN OPTION PASSED ON THE COMMAND LINE IS AN ANSWER, NOT A DEFAULT.
+#
+# Every question below took the current value as its DEFAULT and asked anyway,
+# so the interview could silently overturn a flag the caller passed
+# deliberately. That produced two real failures:
+#
+#   - The playbook runs this installer over `ssh -t` and then runs
+#     `autodb --init` itself, which needs the daemon STOPPED because --init
+#     takes the instance lease. The installer asked "enable and start the
+#     service now?", an operator said yes, and the ceremony then died on
+#     ErrLeaseHeld BEFORE prompting for anything -- which reads exactly like
+#     "it never asked me for a root password". No administrator, no keyslot,
+#     and a running daemon.
+#   - `--user` set the service account, and the interview let a typed answer
+#     disagree with the account the playbook then handed the store to. That
+#     one was contained by teaching --hand-off to read User= out of the unit;
+#     the underlying rule was never fixed.
+#
+# The rule lives in the ask helpers, keyed by VARIABLE NAME, so every question
+# inherits it and a new option cannot forget to honour its own flag.
+GIVEN=""
+mark()  { GIVEN="$GIVEN $1 "; }
+given() { case "$GIVEN" in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -276,28 +300,28 @@ while [ $# -gt 0 ]; do
     # ever an interview question, so --non-interactive could never start the
     # service -- and the start gate below could not be exercised by a test
     # without a person typing yes.
-    --start) START_NOW="yes" ;;
-    --no-start) START_NOW="no" ;;
+    --start) START_NOW="yes"; mark START_NOW ;;
+    --no-start) START_NOW="no"; mark START_NOW ;;
     --assume-ram) ASSUME_RAM="${2:?--assume-ram needs a number of MiB}"; shift ;;
     --assume-cpus) ASSUME_CPUS="${2:?--assume-cpus needs a number}"; shift ;;
     --bind)   BIND="${2:?--bind needs an address}"
               # Split so --port and the port prompt stay ONE setting rather
               # than two that can disagree.
               case "$BIND" in *:*) BIND_ADDR="${BIND%:*}"; FD_PORT="${BIND##*:}" ;; esac
-              shift ;;
-    --dns-name) TLS_DNS_NAME="${2:?--dns-name needs a name}"; shift ;;
-    --port)   FD_PORT="${2:?--port needs a number}"; BIND="${BIND_ADDR}:${FD_PORT}"; shift ;;
-    --rpc-port) RPC_MODE="port"; RPC_PORT="${2:?--rpc-port needs a number}"; shift ;;
-    --rpc-socket) RPC_MODE="socket" ;;
-    --allowlist) IP_ALLOWLIST="${2:?--allowlist needs a TOML array}"; shift ;;
+              shift; mark BIND; mark FD_PORT ;;
+    --dns-name) TLS_DNS_NAME="${2:?--dns-name needs a name}"; shift; mark TLS_DNS_NAME ;;
+    --port)   FD_PORT="${2:?--port needs a number}"; BIND="${BIND_ADDR}:${FD_PORT}"; shift; mark FD_PORT ;;
+    --rpc-port) RPC_MODE="port"; RPC_PORT="${2:?--rpc-port needs a number}"; shift; mark RPC_PORT; mark RPC_MODE ;;
+    --rpc-socket) RPC_MODE="socket"; mark RPC_PORT; mark RPC_MODE ;;
+    --allowlist) IP_ALLOWLIST="${2:?--allowlist needs a TOML array}"; shift; mark IP_ALLOWLIST ;;
     --no-cert) GEN_CERT="no" ;;
     --no-init) RUN_INIT="no" ;;
     --keep-config) KEEP_CONFIG="yes" ;;
-    --user)   RUN_USER="${2:?--user needs a name}"; shift ;;
+    --user)   RUN_USER="${2:?--user needs a name}"; shift; mark RUN_USER ;;
     --prefix) PREFIX="${2:?--prefix needs a directory}"; shift ;;
-    --config) CONFIG="${2:?--config needs a path}"; CONFIG_DIR="$(dirname "$CONFIG")"; shift ;;
-    --meta)   META_BACKEND="${2:?--meta needs sqlite, pg-local or pg-remote}"; shift ;;
-    --meta-dsn) META_DSN="${2:?--meta-dsn needs a DSN}"; shift ;;
+    --config) CONFIG="${2:?--config needs a path}"; CONFIG_DIR="$(dirname "$CONFIG")"; shift; mark CONFIG ;;
+    --meta)   META_BACKEND="${2:?--meta needs sqlite, pg-local or pg-remote}"; shift; mark META_BACKEND ;;
+    --meta-dsn) META_DSN="${2:?--meta-dsn needs a DSN}"; shift; mark META_DSN ;;
     --sessions) CAP_OVERRIDE="${2:?--sessions needs a number}"; shift ;;
     --lane)   LANE_OVERRIDE="${2:?--lane needs a number of MiB}"; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -350,6 +374,7 @@ esac
 
 ask() {
   _var="$1"; _prompt="$2"; _def="$3"
+  if given "$_var"; then return 0; fi
   if [ "$TTY_OK" -eq 0 ]; then eval "$_var=\$_def"; return 0; fi
   printf '%s [%s]: ' "$_prompt" "$_def" > /dev/tty
   IFS= read -r _ans < /dev/tty || _ans=""
@@ -357,20 +382,35 @@ ask() {
   eval "$_var=\$_ans"
 }
 
+# EACH WRAPPER OWNS ITS TARGET NAME, and that is not style.
+#
+# These helpers delegate to ask(), which assigns to whatever `_var` holds --
+# and `_var` is a GLOBAL, because POSIX sh has no locals. So a wrapper that
+# kept its caller's variable in `_var` had it overwritten by the nested call,
+# and its own write-back became `_o=$_o`: a no-op. A review reproduced it over
+# a pty -- entering 6000 for the front-door port left FD_PORT at 5432, and
+# choosing pg-remote left META_BACKEND at sqlite.
+#
+# Every multi-choice and numeric answer in the interview was silently
+# discarded, including the front-door port prompt this installer added for
+# exactly that purpose. Distinct names (_ovar/_uvar/_bvar) make the clobber
+# impossible rather than merely absent.
 ask_opt() { # ask_opt <var> <prompt> <default> <allowed...>
-  _var="$1"; _prompt="$2"; _def="$3"; shift 3
+  _ovar="$1"; _oprompt="$2"; _odef="$3"
+  if given "$_ovar"; then return 0; fi; shift 3
   while :; do
-    ask _o "$_prompt" "$_def"
+    ask _o "$_oprompt" "$_odef"
     for _c in "$@"; do
-      if [ "$_o" = "$_c" ]; then eval "$_var=\$_o"; return 0; fi
+      if [ "$_o" = "$_c" ]; then eval "$_ovar=\$_o"; return 0; fi
     done
-    [ "$TTY_OK" -eq 0 ] && die "$_prompt: '$_o' is not one of: $*"
+    [ "$TTY_OK" -eq 0 ] && die "$_oprompt: '$_o' is not one of: $*"
     printf '  choose one of: %s\n' "$*" > /dev/tty
   done
 }
 
 ask_yn() {
   _var="$1"; _prompt="$2"; _def="$3"
+  if given "$_var"; then return 0; fi
   if [ "$TTY_OK" -eq 0 ]; then eval "$_var=\$_def"; return 0; fi
   while :; do
     printf '%s [%s]: ' "$_prompt" "$_def" > /dev/tty
@@ -385,26 +425,28 @@ ask_yn() {
 }
 
 ask_backend() { # ask_backend <var> <prompt> <default>
-  _var="$1"; _prompt="$2"; _def="${3:-sqlite}"
+  _bvar="$1"; _bprompt="$2"; _def="${3:-sqlite}"
+  if given "$_bvar"; then return 0; fi
   [ -z "$_def" ] && _def="sqlite"
   while :; do
-    ask _b "$_prompt" "$_def"
+    ask _b "$_bprompt" "$_def"
     case "$_b" in
-      1|sqlite)    eval "$_var=sqlite";    return 0 ;;
-      2|pg-local)  eval "$_var=pg-local";  return 0 ;;
-      3|pg-remote) eval "$_var=pg-remote"; return 0 ;;
+      1|sqlite)    eval "$_bvar=sqlite";    return 0 ;;
+      2|pg-local)  eval "$_bvar=pg-local";  return 0 ;;
+      3|pg-remote) eval "$_bvar=pg-remote"; return 0 ;;
     esac
-    [ "$TTY_OK" -eq 0 ] && die "$_prompt: '$_b' is not 1, 2, 3, sqlite, pg-local or pg-remote"
+    [ "$TTY_OK" -eq 0 ] && die "$_bprompt: '$_b' is not 1, 2, 3, sqlite, pg-local or pg-remote"
     printf '  choose 1, 2 or 3 (sqlite, pg-local, pg-remote)\n' > /dev/tty
   done
 }
 
 ask_uint() {
-  _var="$1"; _prompt="$2"; _def="$3"
+  _uvar="$1"; _uprompt="$2"; _def="$3"
+  if given "$_uvar"; then return 0; fi
   while :; do
-    ask _u "$_prompt" "$_def"
-    if is_uint "$_u" && [ "$_u" -gt 0 ]; then eval "$_var=\$_u"; return 0; fi
-    [ "$TTY_OK" -eq 0 ] && die "$_prompt: '$_u' is not a positive integer"
+    ask _u "$_uprompt" "$_def"
+    if is_uint "$_u" && [ "$_u" -gt 0 ]; then eval "$_uvar=\$_u"; return 0; fi
+    [ "$TTY_OK" -eq 0 ] && die "$_uprompt: '$_u' is not a positive integer"
     printf '  %s is not a positive integer\n' "$_u" > /dev/tty
   done
 }
