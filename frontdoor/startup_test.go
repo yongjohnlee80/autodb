@@ -38,6 +38,21 @@ const unthrottled = 1 << 20
 // listenerWith starts a real listener on a real port with real TLS material,
 // merging the caller's options over the test defaults.
 func listenerWith(t testing.TB, opt Options) (*Listener, func() []Event, string) {
+	l, ev, addr, _ := listenerWithCA(t, opt)
+	return l, ev, addr
+}
+
+// listenerWithCA is listenerWith plus the CA backing the material it ACTUALLY
+// SERVES, so a cell can verify against that rather than against a second chain
+// that merely looks like it.
+//
+// RETURNED, not stashed in a package variable. The first version of this did
+// stash it, and the negative cells run t.Parallel(): each one overwrote the
+// others' CA, and the name cell's positive control failed with an ECDSA
+// verification failure against a root from a different test. Which is the
+// positive control doing its job — without it the cell would have "passed" on a
+// refusal that had nothing to do with the name.
+func listenerWithCA(t testing.TB, opt Options) (*Listener, func() []Event, string, string) {
 	t.Helper()
 	now := time.Now()
 	c := issueChain(t, []string{"autodb.example.com"}, now.Add(-time.Hour), now.Add(24*time.Hour))
@@ -68,7 +83,7 @@ func listenerWith(t testing.TB, opt Options) (*Listener, func() []Event, string)
 		defer mu.Unlock()
 		return append([]Event(nil), events...)
 	}
-	return l, snapshot, l.Addr().String()
+	return l, snapshot, l.Addr().String(), c.ca
 }
 
 func dial(t testing.TB, addr string) net.Conn {
