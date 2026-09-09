@@ -39,7 +39,14 @@ func TestLeaderEntries_WebFrontendWithdrawsTheRestartAction(t *testing.T) {
 
 	// The ZERO value is the terminal, so every existing caller keeps its behaviour
 	// without having to name it.
-	terminal := unconnected()
+	//
+	// WITH A SPAWNER, and that is the correction. This cell used to build the
+	// terminal with `unconnected()`, whose session has a NIL spawner — so it
+	// asserted that an install which cannot start a daemon still offers to
+	// restart one, which is the droplet defect stated as a requirement. The
+	// property it means is about the Frontend zero value, so it now holds the
+	// capability constant and varies only the frontend.
+	terminal := withSpawner()
 	if !has(terminal.leaderEntries(), 'X') {
 		t.Error("the terminal frontend lost its restart action: the zero value must " +
 			"keep existing behaviour")
@@ -82,7 +89,10 @@ func TestFrontendWeb_WithdrawsAuthAndConnectionActions(t *testing.T) {
 		return out
 	}
 
-	term := keys(unconnected())
+	// withSpawner, not unconnected: 'X' is in this list, and a nil spawner now
+	// withdraws it for a reason that has nothing to do with the frontend this
+	// cell is about.
+	term := keys(withSpawner())
 	for _, k := range []rune{'L', 'x', 'X'} {
 		if !term[k] {
 			t.Errorf("the terminal frontend lost SPC %c; the zero value must keep "+

@@ -100,6 +100,16 @@ func (s *Session) User() UserInfo {
 // IsAdmin reports whether the logged-in user is an admin.
 func (s *Session) IsAdmin() bool { return s.User().Role == "admin" }
 
+// CanSpawn reports whether this session may start a replacement daemon.
+//
+// It is the capability behind SPC X. `restartServer` shuts the daemon down and
+// relies on the disconnect watcher to start a fresh one, and that replacement
+// comes from here — so an action that stops the daemon has to ask this first.
+// A nil spawner is the deliberate state of a client_only config, which
+// install_frontdoor.sh writes so a config handed to somebody who is not the
+// operator cannot become what listens.
+func (s *Session) CanSpawn() bool { return s.spawn != nil }
+
 // Connected reports whether a live client is installed.
 func (s *Session) Connected() bool {
 	s.mu.Lock()

@@ -299,14 +299,33 @@ func (m *Model) handleStartup(d startupDone) {
 // fresh one — the supported way to pick up a rebuilt binary, since
 // `--serve` deliberately outlives the TUI.
 func (m *Model) restartServer() {
-	if !m.canRestartDaemon() {
-		// Refused rather than hidden only: removing it from the menu keeps it out
-		// of a user's way, and this keeps it out of reach of anything that finds
-		// the action another way. Under --web-ui nothing in the process can start
-		// a daemon, so this keystroke would strand every session including other
-		// users'.
+	// REFUSED, NOT MERELY HIDDEN. Removing it from the menu keeps it out of a
+	// user's way; this keeps it out of reach of anything that finds the action
+	// another way.
+	//
+	// BEFORE the connection check, because neither refusal depends on being
+	// connected: an install where the daemon cannot be restarted is one whether
+	// or not this client is talking to it, and reporting "not connected" first
+	// would send the operator to reconnect and press the key again.
+	//
+	// TWO REFUSALS, because they are two different installs and one message
+	// would misdirect half of them.
+	if m.frontend != FrontendTerminal {
+		// Nothing in the web process can start a daemon, so this keystroke
+		// would strand every session including other users'.
 		m.setStatus("restarting the server is not available in the browser frontend — " +
 			"nothing here can start it again")
+		return
+	}
+	if m.session == nil || !m.session.CanSpawn() {
+		// A service install. Stopping the daemon here left the front door down:
+		// the unit restarts on FAILURE and a clean shutdown is not one, and
+		// client_only forbids this process from starting a replacement. Naming
+		// the setting AND the command, because an operator at this terminal
+		// needs the next step, not a diagnosis.
+		m.setStatus("autodb is running as a system service here — the TUI cannot restart " +
+			"it. The config sets client_only, so nothing in this process may start a " +
+			"daemon. From a shell: sudo systemctl restart autodb-frontdoor")
 		return
 	}
 	if !m.session.Connected() {

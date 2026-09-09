@@ -3,7 +3,9 @@
 #
 # It resolves the newest release TAG first, builds THAT, replaces the binary and
 # restarts the unit. Nothing else: the config, the meta store, the TLS material
-# and the keyslot are untouched, because an update is not a reinstall.
+# and the keyslot are untouched, because an update is not a reinstall -- and the
+# unit FILE is not rewritten either, so the operator's memory limits and service
+# account survive. A release needing a changed unit needs install_frontdoor.sh.
 #
 #   sudo sh update_frontdoor.sh --check      # what it would do; changes nothing
 #   sudo sh update_frontdoor.sh              # do it
@@ -74,7 +76,10 @@ update_frontdoor.sh — build the latest autodb release and swap the binary in.
   --keep-tmp           Leave the build directory for inspection.
   -h, --help           This text.
 
-It touches the BINARY and the UNIT only. The config, the meta store, the TLS
+It replaces the BINARY and RESTARTS the unit. It does NOT write the unit file:
+your GOMEMLIMIT, MemoryMax, User= and Restart= settings survive an update
+untouched -- and a release that needs a CHANGED unit will not get one from here.
+install_frontdoor.sh owns that file. The config, the meta store, the TLS
 material and the unattended-unlock keyslot are not read and not written.
 USAGE
 }

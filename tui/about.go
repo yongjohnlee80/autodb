@@ -92,9 +92,21 @@ func (m *Model) NoteViewOf() NoteView { return m.noteView }
 // AboutNotesDir reports the note root About will display, for the same reason.
 func (m *Model) AboutNotesDir() string { return m.notesLine(m.about) }
 
-// canRestartDaemon reports whether this frontend may offer daemon-restart
-// actions.
-func (m *Model) canRestartDaemon() bool { return m.frontend == FrontendTerminal }
+// canRestartDaemon reports whether daemon-restart actions can COMPLETE here.
+//
+// Two conditions, and the second was missing. A terminal frontend is
+// necessary — nothing in the web process can start a daemon — but it was
+// treated as sufficient, which asks who is asking rather than what the action
+// needs. What it needs is a spawner: restartServer stops the daemon and the
+// disconnect watcher starts the replacement from Session.spawn.
+//
+// On a service install the client config carries client_only = true, so the
+// spawner is nil by design and the shutdown had no counterpart. An operator on
+// the droplet pressed SPC X and the front door stayed down: systemd had been
+// told to restart on FAILURE, and a clean shutdown is not one.
+func (m *Model) canRestartDaemon() bool {
+	return m.frontend == FrontendTerminal && m.session != nil && m.session.CanSpawn()
+}
 
 // managesOwnAuth reports whether this frontend authenticates its own session.
 //
