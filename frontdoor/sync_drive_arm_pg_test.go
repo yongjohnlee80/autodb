@@ -131,20 +131,41 @@ func TestPGSyncDrive_ADeliveryStopSaysNothingAboutAStatement(t *testing.T) {
 		t.Errorf("the client was not told its answers went undelivered: %q", gate.Message)
 	}
 
-	// DRIVE -> AUDIT, in the same vocabulary. One can be right while the other
-	// is silent, which is the shape of the defects this area keeps producing.
-	var outcome string
+	// DRIVE -> AUDIT, IN THE SAME VOCABULARY AND UNDER ITS OWN EVENT KIND.
+	//
+	// The first version of this cell asserted fd.stmt_outcome, and review
+	// caught it: the client's text had stopped inventing a statement and the
+	// EVENT KIND still did. That is worse where it lands -- an operator's
+	// tooling counts kinds rather than reading sentences, so a dashboard
+	// totalling statement outcomes counted a segment that ran nothing.
+	//
+	// Both halves are asserted. One kind being right while the other is still
+	// emitted would leave the miscount exactly as it was.
+	var detail string
 	for _, e := range events() {
-		if e.Kind == "fd.stmt_outcome" && e.Reason == ruleOutputCap {
-			outcome = e.Detail
+		if e.Kind == eventDeliveryStopped && e.Reason == ruleOutputCap {
+			detail = e.Detail
 		}
 	}
-	if outcome == "" {
-		t.Fatalf("no fd.stmt_outcome audited under %s.\nevents=%v", ruleOutputCap, kinds(events()))
+	if detail == "" {
+		t.Fatalf("no %s audited under %s.\nevents=%v", eventDeliveryStopped, ruleOutputCap, kinds(events()))
 	}
-	if !strings.Contains(outcome, string(exec.ArmDeliveryStopped)) {
-		t.Errorf("the audit recorded %q, not the delivery arm — the operator's record "+
-			"and the client's message must be the same answer", outcome)
+	if !strings.Contains(detail, "delivery=stopped") {
+		t.Errorf("the audit recorded %q, which does not say the delivery stopped", detail)
+	}
+	// AND NO STATEMENT OUTCOME, for a segment that carried no statement. This
+	// is the assertion review asked for, and it is the one that reddens if the
+	// event is emitted under the old kind as well as the new one.
+	if strings.Contains(detail, "effects=") {
+		t.Errorf("the delivery event carries an effects= token: %q — that field is read as "+
+			"the answer to what happened to a statement's effects, and this event knows "+
+			"of none", detail)
+	}
+	for _, e := range events() {
+		if e.Kind == eventStmtOutcome {
+			t.Errorf("a statement outcome was audited for a segment that dispatched no "+
+				"statement: %s reason=%q detail=%q", e.Kind, e.Reason, e.Detail)
+		}
 	}
 
 	// THE LOOP SEAM: A REPORT PREVENTS THE FALLBACK READ.

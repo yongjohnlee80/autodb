@@ -1555,22 +1555,36 @@ func TestLoop_EveryEmitStoppedArmHasItsOwnStory(t *testing.T) {
 		name      string
 		stop      *exec.EmitStopped
 		wantIn    string // must appear in what the client is told
-		wantOut   string // the audit's effects= word
+		wantOut   string // the audit detail that must appear
+		wantKind  string // the audit event KIND this arm records
 		forbid    string // must NOT appear — the story this arm is confused with
 		wantReady byte   // the readiness byte that must follow, or 0 to not check
 	}{
+		// THE DELIVERY ARM RECORDS A DIFFERENT KIND, and that is the point of
+		// wantKind existing. Review found the prose fixed and the event kind
+		// still claiming a statement, so "each arm has its own story" was only
+		// half the contract: each arm also has its own KIND, and this table is
+		// where a new arm inheriting the wrong one shows up.
+		//
+		// It is driven through the fake here because a delivery-scoped stop
+		// cannot arise from a simple Query in production — the live witness is
+		// the Parse/Describe/Sync cell. Which is the same reason this table
+		// exists at all: some arms are only reachable by handing the loop one.
+		{"delivery stopped", &exec.EmitStopped{Delivery: true, TxStatus: exec.TxStatusIdle},
+			"were not delivered", "delivery=stopped", eventDeliveryStopped,
+			"the statement ran", txStatusIdle},
 		{"no statement", &exec.EmitStopped{Executed: false, TxStatus: exec.TxStatusIdle},
-			"nothing ran", "no_statement", "effects are committed", txStatusIdle},
+			"nothing ran", "effects=no_statement", eventStmtOutcome, "effects are committed", txStatusIdle},
 		{"failed at the target", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusIdle, TargetErr: &pgconn.PgError{Code: "22012"}},
-			"failed at the target", "failed", "effects are committed", txStatusIdle},
+			"failed at the target", "effects=failed", eventStmtOutcome, "effects are committed", txStatusIdle},
 		{"pending inside a transaction", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusInTx},
-			"PENDING", "pending_commit", "effects are committed", txStatusInTx},
+			"PENDING", "effects=pending_commit", eventStmtOutcome, "effects are committed", txStatusInTx},
 		{"aborted transaction", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusAborted},
-			"aborted", "aborted", "effects are committed", txStatusAborted},
+			"aborted", "effects=aborted", eventStmtOutcome, "effects are committed", txStatusAborted},
 		{"completed", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusIdle, Outcome: exec.StatusOK},
-			"effects are committed", "completed", "not known", txStatusIdle},
+			"effects are committed", "effects=completed", eventStmtOutcome, "not known", txStatusIdle},
 		{"unresolved", &exec.EmitStopped{Executed: true, TxStatus: exec.TxStatusIdle},
-			"not known", "unresolvable", "effects are committed", txStatusIdle},
+			"not known", "effects=unresolvable", eventStmtOutcome, "effects are committed", txStatusIdle},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
 			t.Parallel()
@@ -1602,8 +1616,16 @@ func TestLoop_EveryEmitStoppedArmHasItsOwnStory(t *testing.T) {
 			if arm.forbid != "" && strings.Contains(said, arm.forbid) {
 				t.Fatalf("the %s arm told the client %q, which is another arm's story", arm.name, arm.forbid)
 			}
-			if !hasEventDetail(events(), "fd.stmt_outcome", "effects="+arm.wantOut) {
-				t.Fatalf("audit must record effects=%s; events=%v", arm.wantOut, events())
+			if !hasEventDetail(events(), arm.wantKind, arm.wantOut) {
+				t.Fatalf("audit must record %s carrying %q; events=%v", arm.wantKind, arm.wantOut, events())
+			}
+			// AND NOT UNDER ANY OTHER KIND. Without this the table would pass
+			// for a loop that emitted both, which is the miscount unchanged.
+			for _, other := range []string{eventStmtOutcome, eventDeliveryStopped} {
+				if other != arm.wantKind && hasEvent(events(), other, ruleOutputCap) {
+					t.Errorf("the %s arm also recorded a %s; one arm is one event",
+						arm.name, other)
+				}
 			}
 
 			// AND THE READINESS BYTE MUST AGREE WITH THE STORY. Reading

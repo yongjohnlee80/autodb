@@ -179,7 +179,10 @@ synthesized by the front door never impersonate the target: `S` (severity),
 internal reason recorded, wire reason generic), `fd.session_open` /
 `fd.session_close` (with ExecSession id), `fd.stmt_attempt` (before every
 effect — extended: at every `Execute`; see note 1.3a),
-`fd.stmt_outcome`, `fd.refused`
+`fd.stmt_outcome` (per statement for a simple `Query`, per `Execute` for the
+extended protocol), `fd.delivery_stopped` (a SEGMENT's replies were withheld
+— see §6.6; never `fd.stmt_outcome`, because the segment may have dispatched
+no statement at all), `fd.refused`
 (gate rule id), `fd.cancel_received` / `fd.cancel_applied` /
 `fd.cancel_stale`, `fd.backpressure_enter` / `fd.backpressure_exit`,
 `fd.budget_refuse` (rev 5: also the accept-time refusals —
@@ -779,10 +782,22 @@ two are different subjects and one segment can hold both, or neither:
 | `Parse` `Describe` `Sync` | "the statement ran; read the table to find out whether the effects were kept" | No statement was dispatched. There is no table to read. |
 | `Parse` `Bind` `Execute` `Sync`, cut at Sync | the Execute's outcome, re-derived from the delivery failure | The Execute already recorded its own outcome row; the delivery failure adds nothing to it. |
 
-So the segment-end drive reports `delivery_stopped`, the client is told *"the
-answers for this segment were not delivered"*, and the audit records
-`effects=delivery_stopped`. Each statement keeps whatever its own drive
-recorded.
+So the segment-end drive reports `delivery_stopped` and the client is told
+*"the answers for this segment were not delivered"*. Each statement keeps
+whatever its own drive recorded.
+
+**The audit records `fd.delivery_stopped`, not `fd.stmt_outcome`.** The kind is
+selected from the same arm the client's prose is, so the two cannot diverge.
+This was a second, quieter version of the same defect: with the prose corrected
+and the kind left alone, the sentence no longer invented a statement while the
+event still did — and that is worse where it lands, because an operator's
+tooling counts kinds rather than reading sentences, so a dashboard totalling
+statement outcomes counted segments that ran nothing. `fd.stmt_outcome` is
+contracted per statement (§1.3) and a delivery stop owns none.
+
+Its detail carries `scope=segment; delivery=stopped; output withheld: <rule>`
+and **no `effects=` token at all**. That token is read as the answer to what
+happened to a statement's effects, and this event knows of none.
 
 **Only `Sync` may report this, and `Flush` deliberately may not.** A report
 carries the readiness byte the loop would have emitted, and the loop treats a

@@ -697,10 +697,17 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 			return false
 		}
 	}
-	lead, effects, outcome := recordedEffects(stopped, status, targetFailed)
+	// ONE ARM, SHARED BY THE EVENT KIND AND THE PROSE.
+	//
+	// Derived here rather than inside recordedEffects so that the kind, the
+	// detail and the client's message are three renderings of the SAME answer.
+	// Two derivations of the arm is the same two-source split this whole path
+	// exists to prevent, one level out.
+	arm := armFromWhatIsKnown(stopped, status, targetFailed)
+	lead, effects, outcome := recordedEffects(arm)
 
-	l.onEvent(Event{Kind: "fd.stmt_outcome", Reason: reason.rule, Peer: peer,
-		Detail: fmt.Sprintf("effects=%s; output withheld: %s", outcome, reason.stopped)})
+	l.onEvent(Event{Kind: withheldEventKind(arm), Reason: reason.rule, Peer: peer,
+		Detail: withheldEventDetail(arm, outcome, reason.stopped)})
 	be.Send(gateError("ERROR", sqlStateProgramLimit,
 		lead+"; "+reason.stopped+" and its result was not fully delivered",
 		reason.rule, effects+"; "+reason.remedy))
@@ -726,6 +733,48 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 		return true
 	}
 	return l.sendReadinessWith(conn, be, status, closeReason)
+}
+
+// THE AUDIT EVENT KINDS A WITHHELD CYCLE CAN RECORD.
+//
+// eventStmtOutcome is documented per STATEMENT for a simple Query and per
+// EXECUTE for the extended protocol. That is a claim about a statement, and
+// emitting it for a segment that carried none is the same invention the
+// client's prose used to make: a Parse/Describe/Sync segment -- what pgx's
+// default exec mode and database/sql's Prepare send -- has no statement for an
+// outcome to belong to.
+//
+// So a delivery stop gets its OWN kind. Review found this after the prose was
+// fixed: the text no longer invented a statement and the event kind still did,
+// which is worse in the place it lands, because an operator's tooling counts
+// kinds rather than reading sentences. A dashboard totalling statement
+// outcomes would have counted segments that ran nothing.
+const (
+	eventStmtOutcome     = "fd.stmt_outcome"
+	eventDeliveryStopped = "fd.delivery_stopped"
+)
+
+// withheldEventKind names the event this arm records.
+func withheldEventKind(arm exec.EmitArm) string {
+	if arm == exec.ArmDeliveryStopped {
+		return eventDeliveryStopped
+	}
+	return eventStmtOutcome
+}
+
+// withheldEventDetail writes the detail line for that event.
+//
+// A DELIVERY STOP CARRIES NO `effects=` TOKEN AT ALL, deliberately. The token
+// is what an operator and their tooling read to learn what happened to a
+// statement's effects, and a delivery stop knows nothing about any -- each
+// statement in the segment keeps the outcome its own record already carries.
+// Writing `effects=delivery_stopped` would answer a question this event cannot
+// answer, in the field that is read as the answer.
+func withheldEventDetail(arm exec.EmitArm, outcome, stopped string) string {
+	if arm == exec.ArmDeliveryStopped {
+		return fmt.Sprintf("scope=segment; delivery=stopped; output withheld: %s", stopped)
+	}
+	return fmt.Sprintf("effects=%s; output withheld: %s", outcome, stopped)
 }
 
 // recordedEffects says what became of a statement whose output was cut short.
@@ -761,8 +810,7 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 // something the engine grew and the front door has not been taught, and saying
 // "not known" is the only honest answer to a vocabulary this function does not
 // speak — never a guess dressed as a fact.
-func recordedEffects(stopped *exec.EmitStopped, status byte, targetFailed bool) (lead, clause, outcome string) {
-	arm := armFromWhatIsKnown(stopped, status, targetFailed)
+func recordedEffects(arm exec.EmitArm) (lead, clause, outcome string) {
 	switch arm {
 	case exec.ArmDeliveryStopped:
 		// A SEGMENT'S DELIVERY, NOT A STATEMENT'S EFFECTS.
