@@ -427,7 +427,23 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 	// ordinary case for a client that flushes defensively; golib refuses it
 	// because its own queue is empty. Answering that refusal to the peer would
 	// break a correct client for doing something the protocol allows.
-	return deliverSegment(ctx, pc, s.ext, emit)
+	//
+	// FLUSH DOES NOT ARM AN EmitStopped, AND THAT IS THE ANSWER RATHER THAN A
+	// GAP. EmitStopped.TxStatus is documented as "the same byte the loop's
+	// readiness would carry", and a Flush does not end the segment, so there is
+	// no ReadyForQuery for it to carry: only Sync produces one. Arming here
+	// would mean either inventing a byte or passing 0 — and 0 is an invalid
+	// status, which reportOutputWithheld correctly treats as session-lost. A
+	// consumer that stopped reading mid-segment has NOT lost its session; the
+	// client can still Sync and recover the connection, so killing it would be
+	// strictly worse than the honest single snapshot the loop takes instead.
+	//
+	// The loop's own comment records this: the separate WireTxStatus read
+	// "remains only for the paths that have no report — the extended path
+	// today — where there is one snapshot anyway". One snapshot cannot
+	// disagree with itself, which is the whole hazard that path guards.
+	_, err = deliverSegment(ctx, pc, s.ext, emit)
+	return err
 }
 
 // deliverSegment answers every frame queued so far, or nothing when the segment
@@ -442,10 +458,10 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 // defensively with nothing pending is doing something the protocol allows, and
 // golib refuses the flush because its own queue is empty.
 func deliverSegment(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
-	emit func(WireMessage) error) error {
+	emit func(WireMessage) error) (extObservation, error) {
 
 	if len(o.segment) == 0 {
-		return nil
+		return extObservation{}, nil
 	}
 	// FLUSH ONLY WHEN THE TARGET OWES AN ANSWER.
 	//
@@ -462,12 +478,19 @@ func deliverSegment(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
 	// from the target, and that is exactly when there is something to flush.
 	// The drain itself needs no such guard — it answers synth steps from memory
 	// and only touches the wire for the others.
-	if segmentAwaitsWire(o.segment) {
+	dispatched := segmentAwaitsWire(o.segment)
+	if dispatched {
 		if ferr := pc.Flush(ctx); ferr != nil {
-			return ferr
+			return extObservation{}, ferr
 		}
 	}
-	return drainExtended(ctx, pc, o, emit)
+	_, obs, err := drainExtendedObserving(ctx, pc, o, nil, emit, nil)
+	// dispatched is the segment's own answer to "was anything sent to the
+	// target", which is what EmitStopped.Executed means. It is not derived from
+	// the observation, because a consumer cut can stop delivery before any
+	// terminal is seen while frames are already on the wire.
+	obs.dispatched = dispatched
+	return obs, err
 }
 
 // segmentAwaitsWire reports whether any queued step's answer must come from the
@@ -524,7 +547,7 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	// END. Sync is what resets both tracks and leaves the wire usable, so
 	// returning early on a consumer stop would strand the connection in a state
 	// no later frame could recover.
-	deliverErr := deliverSegment(ctx, pc, s.ext, emit)
+	obs, deliverErr := deliverSegment(ctx, pc, s.ext, emit)
 
 	targetStatus, serr := pc.Sync(ctx)
 	// Sync consumes through the terminal ReadyForQuery whatever happened, so the
@@ -540,12 +563,6 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	s.ext.releaseReadOnlyWrap(ctx)
 	if serr != nil {
 		return 0, serr
-	}
-	// THE WIRE FAILURE OUTRANKS THE DELIVERY FAILURE, deliberately: a broken
-	// wire is what the caller must act on, and a consumer that stopped reading
-	// is only worth reporting on a wire that still works.
-	if deliverErr != nil {
-		return 0, deliverErr
 	}
 
 	// THE READINESS BYTE IS THE CLIENT'S TRACK, NOT THE TARGET'S.
@@ -575,6 +592,40 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 		s.ext.dropAllPortals()
 	}
 	s.noteWireStatus(status)
+
+	// THE DELIVERY FAILURE IS REPORTED LAST, AND WITH THE STATUS ATTACHED.
+	//
+	// This is F2 item 6. The drive used to return `0, deliverErr` here -- a bare
+	// emitFailure -- so the loop's `errors.As(err, &stopped)` found nothing and
+	// reportOutputWithheld fell to its separate WireTxStatus read. Arming it
+	// with 0 was the trap: 0 is not a valid status, and a non-nil report whose
+	// status is invalid is treated as session-lost, which would have DROPPED a
+	// session that was perfectly recoverable.
+	//
+	// A truthful byte exists here and only here: Sync consumed through the
+	// terminal ReadyForQuery, and the drain kept OBSERVING after delivery
+	// stopped, so the status is post-tail exactly as the raw path's is.
+	//
+	// It carries `status`, NOT `targetStatus`. When a read-only wrap was open
+	// the target reports T for a transaction that is OURS, and putting that in
+	// the arm would tell a client with no transaction that its effects are
+	// pending inside one -- the very confusion the wrap rule above exists to
+	// prevent, reintroduced through the arm.
+	//
+	// Outcome is empty deliberately: a Sync owns no statement's outcome row.
+	// The Execute drive records one; Sync is a delivery request, and the
+	// statements it delivers answers for are settled by their own drives. Arm()
+	// then decides from what IS known -- a target error means Failed, an open
+	// or aborted transaction means Pending or Aborted, and nothing known means
+	// Unresolved, which is the honest answer rather than an invented one.
+	//
+	// It comes after the bookkeeping above, not before: Sync ENDED the segment
+	// whatever the consumer did, so dropping portals on 'I' and recording the
+	// status must happen either way. The old early return skipped both, leaving
+	// this end holding portals the backend had already destroyed.
+	if deliverErr != nil {
+		return status, e.emitStoppedWithStatus(deliverErr, "", obs.dispatched, obs.targetErr, status)
+	}
 	return status, nil
 }
 
@@ -834,6 +885,13 @@ type extObservation struct {
 	// targetErr is the target's error, when the drain saw one.
 	targetErr *pgconn.PgError
 
+	// dispatched records that the segment sent frames to the TARGET, as opposed
+	// to holding only steps the front door answers itself. It is the segment's
+	// answer to EmitStopped.Executed: a consumer cut can stop delivery before
+	// any terminal frame is observed while the target is already working, so
+	// "did anything run" cannot be read off completed.
+	dispatched bool
+
 	// mine records whether the frame that failed belonged to THIS Execute's own
 	// statement or portal — its Parse, its Bind, or the Execute itself — rather
 	// than to an earlier object sharing the segment. It is the difference
@@ -977,17 +1035,27 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, s
 		// loses the NOTIFICATION, not the completion, and recording it after a
 		// successful emit would turn a completed statement into an unresolved one
 		// for no reason but the client's timing.
-		if own != nil {
-			switch {
-			case m.Kind == "ErrorResponse":
-				obs.targetErr, obs.mine = m.Err, own.owns(step)
-			case step.exec && terminalForExecute(m.Kind):
-				obs.completed = true
-				// PortalSuspended is a terminal for the FRAME and not for the
-				// statement. Recorded here, beside the completion it is so
-				// easily mistaken for.
-				obs.suspended = m.Kind == "PortalSuspended"
+		// THE TARGET'S ERROR IS A FACT ABOUT THE SEGMENT, recorded whether or
+		// not an Execute owns this drain.
+		//
+		// It used to be gated behind `own != nil`, so the segment-delivery path
+		// -- Flush and Sync, which pass no owner -- observed NOTHING. That is
+		// why those drives could only ever return their drain's bare error:
+		// there was no observation to carry. `mine` is the ownership question
+		// and stays gated, because "this statement failed" versus "this
+		// statement never ran" only means something when there is a statement.
+		switch {
+		case m.Kind == "ErrorResponse":
+			obs.targetErr = m.Err
+			if own != nil {
+				obs.mine = own.owns(step)
 			}
+		case own != nil && step.exec && terminalForExecute(m.Kind):
+			obs.completed = true
+			// PortalSuspended is a terminal for the FRAME and not for the
+			// statement. Recorded here, beside the completion it is so
+			// easily mistaken for.
+			obs.suspended = m.Kind == "PortalSuspended"
 		}
 		// THE READING CONTINUES EVEN WHEN DELIVERY HAS STOPPED.
 		// The target's tail is what decides this statement's outcome, and if we
