@@ -135,6 +135,28 @@ type Listener struct {
 	// than by asserting arithmetic about one.
 	testDenialDelay time.Duration
 
+	// testPostDenialAuditDelay opens the interval BETWEEN the denial reaching
+	// the socket and the audit event being emitted. Test-only.
+	//
+	// It is a separate knob from testDenialDelay rather than a reuse of it,
+	// and the distinction is the whole point: testDenialDelay sleeps BEFORE
+	// sendDenial, so it delays when the client learns anything and cannot
+	// widen this interval at all. denial_timing_test depends on that
+	// placement for its own purpose.
+	//
+	// The interval exists because a refused client is told FIRST and the
+	// operator's event is emitted second, which is the right priority and is
+	// preserved. But it means a cell that reads the event log the instant the
+	// client sees its error can miss the event -- an unordered read across two
+	// goroutines. That produced an unreproducible gate failure
+	// (TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease, reasons=[]) that
+	// survived focused reruns, a whole-package run, and five packages driven
+	// concurrently, because the window is sub-millisecond.
+	//
+	// With this knob the window is as wide as a cell wants, so "wait for the
+	// event, do not sample it" becomes a claim that can be made to fail.
+	testPostDenialAuditDelay time.Duration
+
 	wg     sync.WaitGroup
 	closed chan struct{}
 	once   sync.Once
@@ -278,6 +300,10 @@ type Options struct {
 	testDeadlines   *deadlines
 	testDenialDelay time.Duration
 
+	// testPostDenialAuditDelay widens the send-then-emit interval on the
+	// denial path. See the Listener field of the same name.
+	testPostDenialAuditDelay time.Duration
+
 	// testListener replaces the bind, so a cell can hand Serve a connection
 	// that pauses exactly where it wants to look. Unexported, in-package
 	// only, and it exists because the accept-registration window cannot be
@@ -377,6 +403,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 		l.dl = *opt.testDeadlines
 	}
 	l.testDenialDelay = opt.testDenialDelay
+	l.testPostDenialAuditDelay = opt.testPostDenialAuditDelay
 	l.testInsideRegistration = opt.testInsideRegistration
 	return l, nil
 }
@@ -754,6 +781,12 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 	}
 	closeReason = outcome.Denied.String()
+	// THE CLIENT IS TOLD FIRST AND THE OPERATOR SECOND, deliberately. This
+	// knob only makes the gap between them observable; it is zero outside
+	// this package's own cells and the ordering is unchanged.
+	if l.testPostDenialAuditDelay > 0 {
+		time.Sleep(l.testPostDenialAuditDelay)
+	}
 	l.onEvent(Event{Kind: "fd.auth_denied", Reason: outcome.Denied.String(), Peer: peer, Detail: out.RefusedParam})
 }
 
