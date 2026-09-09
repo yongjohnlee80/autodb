@@ -8,9 +8,12 @@ package auth
 //     — they are listed so an admin can SEE the whole truth,
 //     but only store rows can be added or removed here.
 //   - The PER-USER allowlist (user_ip_allowlist) is the front door's second
-//     layer: a front-door login must pass both, and a PAT's allowed_ips
-//     must be a subset of the owner's rows. Users manage their OWN rows
-//     (self-service); admins manage anyone's. Every mutation is audited.
+//     layer, and it is an ALTERNATIVE rather than an additional hurdle: a
+//     login is admitted by the global list OR the user's rows, and a PAT's
+//     allowed_ips then narrows that result if it sets one. This said the login
+//     "must pass both", which is a stricter rule than the one that runs.
+//     Users manage their OWN rows (self-service); admins manage anyone's.
+//     Every mutation is audited.
 
 import (
 	"context"

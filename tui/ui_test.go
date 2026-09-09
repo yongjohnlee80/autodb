@@ -27,6 +27,22 @@ import (
 )
 
 // startRealServer boots a full autodb server on a loopback port.
+// testLogger forwards the daemon's log payloads into the test's own log, so a
+// failure dump carries them.
+type testLogger struct{ t *testing.T }
+
+func (l testLogger) Log(sev logger.Severity, payload any) {
+	// THE SET IS NAMED, not ordered. logger.Severity is a STRING: `sev <=
+	// SeverityError` compiles and compares lexically, which would have kept
+	// "Debug" and dropped "Warning" -- a filter that reads like a threshold and
+	// is not one. Info and Debug are excluded because a served-request line per
+	// keystroke would bury exactly what this is for.
+	switch sev {
+	case logger.SeverityWarning, logger.SeverityError, logger.SeverityCritical:
+		l.t.Logf("daemon [%v] %v", sev, payload)
+	}
+}
+
 // startRealServer starts a real RPC server for the UI to talk to.
 //
 // The variadic options exist so a cell can configure the SERVER-SIDE state a
@@ -51,8 +67,19 @@ func startRealServer(t *testing.T, opts ...rpc.Option) (addr string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// THE SERVER'S OWN ERRORS REACH THE TEST LOG.
+	//
+	// It ran with logger.Nop, so a handler failure reached the client as the
+	// bare "internal error" that wireErr gives anything it cannot make public,
+	// and the reason was discarded. On the 2026-09-09 VM43 run a connection
+	// creation failed exactly that way -- `create demo: internal error` in the
+	// status line and nothing anywhere else -- and the cause was not
+	// recoverable from the ledger. A harness that cannot say why its own
+	// daemon refused something is an instrument with no scale on it.
+	//
+	// The caller's own options come LAST so a cell can still override.
 	srv := rpc.New(svc, eng, config.Server{Bind: "127.0.0.1", Port: 0}, "e2e",
-		append([]rpc.Option{rpc.WithListener(ln)}, opts...)...)
+		append([]rpc.Option{rpc.WithListener(ln), rpc.WithLogger(testLogger{t})}, opts...)...)
 	runCtx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Run(runCtx) }()
@@ -155,6 +182,26 @@ func (h *uiHarness) waitFor(what, sub string) {
 	}
 	h.t.Fatalf("waiting for %s: %q never appeared.\nscreen:\n%s\n\nlast runtime trace:\n%s",
 		what, sub, h.screen(), h.trace.tail(40))
+}
+
+// waitForManagerRow waits until a manager LISTS the row, not merely until its
+// name appears somewhere on the screen.
+//
+// `waitFor(name)` was not that, and the difference cost a confusing failure.
+// The status line reports `create <name>: ok` -- or `create <name>: internal
+// error` -- and both contain the name, so the wait was satisfied whether the
+// row existed or the creation had FAILED. The cells then pressed `e` on an
+// empty list, nothing happened, and the run died 10 seconds later waiting for
+// unrelated prose. Both of the 2026-09-09 VM43 failures were that: one where
+// the row arrived just after the key, and one where the creation had failed
+// outright and the real message was sitting in the status line the whole time.
+//
+// "empty" is the managers' own empty-table text (managers.go, WithEmptyText),
+// so its absence is the list itself saying it has rows.
+func (h *uiHarness) waitForManagerRow(what, name string) {
+	h.t.Helper()
+	h.waitGone("the empty "+what+" list", "empty")
+	h.waitFor(what+" row", name)
 }
 
 // waitGone polls until a substring DISAPPEARS from the virtual screen.

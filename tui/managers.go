@@ -895,13 +895,26 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 				if p == "" {
 					continue
 				}
-				pfx, perr := parseCIDROrAddr(p)
-				if perr != nil {
+				// The SHAPE is still checked here, while the form is open and
+				// the value can be corrected -- a typo is worth catching
+				// before a round trip. What is no longer judged here is
+				// whether the address is inside the caller's own rows.
+				if _, perr := parseCIDROrAddr(p); perr != nil {
 					return false, p + " is not a valid IP or CIDR"
 				}
-				if !withinAny(pfx, own) {
-					return false, p + " is not inside your allowed IPs — add it there first"
-				}
+				// NO LOCAL REFUSAL FOR AN OUT-OF-SET ADDRESS ANY MORE.
+				//
+				// This used to refuse anything outside the caller's own rows
+				// with "add it there first" -- which was correct when the only
+				// answer was to go and do that, and is now the bug: a review
+				// found it rejecting every address that the new confirmation
+				// exists to offer, so the widening flow was UNREACHABLE. I
+				// built the mechanism and never drove the real form to it.
+				//
+				// The daemon still refuses an unapproved widening; what
+				// happens here is only that the address is allowed to REACH
+				// the preview, which decides whether to ask.
+				_ = own
 				ips = append(ips, p)
 			}
 		}
@@ -919,29 +932,133 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 		// must see, and the secret has to reach the screen on the loop
 		// goroutine in the same apply that reloads the list.
 		bound := g.bound
-		m.ctx.Go(func(c context.Context) (any, error) {
-			out, err := bound.CreatePAT(c, name, days, ips, connID, debugCleartext)
-			if err != nil {
-				msg := WireErrorMessage(err)
+		// THE WIDENING IS ASKED ABOUT BEFORE IT HAPPENS.
+		//
+		// A restriction naming an address outside the caller's own allowlist
+		// used to be refused outright. It can now be granted -- by adding
+		// that address to their OWN rows -- but that is a durable change to
+		// where the account may log in from, it admits their password logins
+		// and every inherit-empty token they hold, and it outlives the token
+		// that prompted it. This field is presented as a token restriction,
+		// so doing all that as a side effect of typing an address would be
+		// materially surprising. It gets an explicit question.
+		//
+		// Not for a debug token: its own list is the entire gate for that
+		// class, and widening the user's rows would create exposure it was
+		// never granted.
+		if !debugCleartext && len(ips) > 0 {
+			m.ctx.Go(func(c context.Context) (any, error) {
+				missing, perr := bound.PATAllowlistPreview(c, ips)
+				if perr != nil {
+					msg := WireErrorMessage(perr)
+					return managerReload{gen: bound.Gen(), apply: func() {
+						g.model.setError("create " + name + ": " + msg)
+					}}, nil
+				}
 				return managerReload{gen: bound.Gen(), apply: func() {
-					g.model.setError("create " + name + ": " + msg)
+					if len(missing) == 0 {
+						// Nothing to widen: the address is already covered,
+						// so there is nothing to ask and no row to add.
+						m.mintPAT(g, bound, name, days, ips, connID, debugCleartext, nil)
+						return
+					}
+					m.confirmAllowlistWidening(g, bound, name, days, ips, connID, missing)
 				}}, nil
-			}
-			// The endpoint is read on the SAME goroutine as the mint, so the
-			// card shows the front door as it is NOW rather than as it was
-			// when the manager last refreshed. A failure here does not lose
-			// the token: the card renders with what it has and says the
-			// endpoint is unknown, because the secret exists only in this
-			// reply and must reach the screen either way.
-			ep, _ := bound.FrontDoorEndpoint(c)
-			conns, _ := bound.Connections(c)
-			return managerReload{gen: bound.Gen(), apply: func() {
-				g.model.setOK("create " + name + ": ok")
-				g.Reload()
-				m.revealConnectionCard(out, connFor(conns, connID), ep, bound.User())
-			}}, nil
-		})
+			})
+			return true, ""
+		}
+		m.mintPAT(g, bound, name, days, ips, connID, debugCleartext, nil)
 		return true, ""
+	})
+}
+
+// confirmAllowlistWidening asks before adding rows to the caller's own
+// allowlist, and names the exact CIDRs it would add.
+//
+// DEFAULTS TO NO: the only key that proceeds is `y`, and Esc or q closes with
+// nothing done. The copy states all four consequences, because each one is a
+// thing an operator could reasonably not expect from a field labelled as a
+// token restriction.
+func (m *Model) confirmAllowlistWidening(g *manager[PATRow], bound *Bound,
+	name string, days int64, ips []string, connID int64, missing []string,
+) {
+	// ONE FLOAT: the exact set, the consequences, and the key that agrees, so
+	// the key cannot sit on top of what it is agreeing to. It was two stacked
+	// floats and a review found that the operator could press `y` while the
+	// addresses were hidden behind the modal asking about them.
+	//
+	// ONE entry, and it is `y`. Esc and q close it with nothing done, so the
+	// default is NO by construction rather than by a highlighted button
+	// somebody can tab onto and press.
+	m.openLeaderWithProse(
+		"add "+strconv.Itoa(len(missing))+" row(s) to your own allowlist?",
+		allowlistWideningProse(missing), []leaderEntry{
+			{'y', "yes — add them and mint the token", func() {
+				// The APPROVED SET is what was displayed, and it travels with the
+				// mint. The daemon recomputes what is actually missing under the
+				// owner's lock and may add nothing outside this set.
+				m.mintPAT(g, bound, name, days, ips, connID, false, missing)
+			}},
+		})
+}
+
+// allowlistWideningProse is what the operator reads before agreeing.
+//
+// Pure, so the copy can be asserted without mounting a float -- and it needs
+// asserting, because each of the four consequences is something a person could
+// reasonably not expect from a field labelled as a TOKEN restriction. Naming
+// the exact CIDRs matters for the same reason: "some addresses" is not consent.
+func allowlistWideningProse(missing []string) string {
+	var b strings.Builder
+	b.WriteString("To restrict this token that way, these must be added to YOUR OWN\n")
+	b.WriteString("allowlist:\n\n")
+	for _, c := range missing {
+		fmt.Fprintf(&b, "    %s\n", c)
+	}
+	b.WriteString("\nThat is not scoped to this token:\n\n")
+	b.WriteString("  - they are added to your STANDING allowlist;\n")
+	b.WriteString("  - they can admit your PASSWORD LOGIN and every token of yours\n")
+	b.WriteString("    that inherits your allowlist, not only this one;\n")
+	b.WriteString("  - they REMAIN after this token expires or is revoked;\n")
+	b.WriteString("  - removal is manual, from SPC i (my allowed IPs).\n")
+	return b.String()
+}
+
+// mintPAT performs the create and reveals the card.
+func (m *Model) mintPAT(g *manager[PATRow], bound *Bound,
+	name string, days int64, ips []string, connID int64, debugCleartext bool, approved []string,
+) {
+	m.ctx.Go(func(c context.Context) (any, error) {
+		out, stale, err := bound.CreatePAT(c, name, days, ips, connID, debugCleartext, approved)
+		if len(stale) > 0 {
+			// NOTHING WAS CREATED. The rows that would be added are no longer
+			// the rows that were approved -- something changed the allowlist
+			// in between -- so the operator is asked again, about the new set,
+			// rather than told a token failed.
+			return managerReload{gen: bound.Gen(), apply: func() {
+				g.model.setStatus("the allowlist changed; confirming again")
+				m.confirmAllowlistWidening(g, bound, name, days, ips, connID, stale)
+			}}, nil
+		}
+		if err != nil {
+			msg := WireErrorMessage(err)
+			return managerReload{gen: bound.Gen(), apply: func() {
+				g.model.setError("create " + name + ": " + msg)
+			}}, nil
+		}
+		// The endpoint is read on the SAME goroutine as the mint, so the card
+		// shows the front door as it is NOW rather than as it was when the
+		// manager last refreshed. A failure here does not lose the token: the
+		// card renders with what it has and says the endpoint is unknown,
+		// because the secret exists only in this reply and must reach the
+		// screen either way.
+		ep, _ := bound.FrontDoorEndpoint(c)
+		conns, _ := bound.Connections(c)
+		return managerReload{gen: bound.Gen(), apply: func() {
+			g.model.setOK("create " + name + ": ok")
+			g.Reload()
+			m.revealConnectionCard(out, connFor(conns, connID), ep, bound.User())
+		}}, nil
 	})
 }
 

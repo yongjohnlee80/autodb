@@ -127,6 +127,35 @@ type Service struct {
 	// cells cannot reach into each other.
 	hookAfterKeyslotCommit func()
 
+	// hookBeforeMintTx fires in CreatePAT after the outer validation and
+	// BEFORE the mint transaction takes its locks. nil in production; a cell
+	// sets it to disable the owner in exactly that window, which is the window
+	// where a stale operation could otherwise create a token plus standing
+	// allowlist rows for a disabled account. A racing goroutine cannot hit an
+	// interval this short reliably, and a cell that only sometimes observes
+	// the defect reports the fix as working.
+	hookBeforeMintTx func()
+
+	// hookAuditWrite fires INSIDE the audit write, once a row has actually been
+	// persisted, and its error propagates to the caller — so an injected
+	// failure rolls back the transaction the audit was riding.
+	//
+	// It is keyed by action because one transaction writes several audits and a
+	// cell needs to fail exactly one of them.
+	//
+	// WHY IT IS HERE AND NOT AT THE CALL SITE. It used to be
+	// hookBeforeRowAudit, fired in addMintAllowlistRows immediately before
+	// AuditTx. A review pointed out what that cell actually observed: with the
+	// seam upstream of the call, DELETING the AuditTx line or discarding its
+	// error left the injected failure firing all the same, so the mint still
+	// failed and the cell still passed — while the audit it was supposedly
+	// about had stopped happening. Injecting through persistence makes the
+	// failure reachable only by really writing the row and really honouring the
+	// error, which is the claim.
+	//
+	// nil in production.
+	hookAuditWrite func(action string) error
+
 	// patCompares counts PAT hash-and-compare operations for the
 	// comparable-work assertion. Per-service so parallel tests cannot
 	// interleave into each other's deltas.
@@ -307,6 +336,14 @@ func (s *Service) AuditTxCorrelated(tx *dao.Transaction, userID int64, ip, actio
 		Insert()
 	if err != nil {
 		return fmt.Errorf("auth: audit write failed: %w", err)
+	}
+	// AFTER the insert, so a cell's injected failure stands downstream of a row
+	// that was really written: the seam cannot be reached by a caller that
+	// skipped the audit.
+	if s.hookAuditWrite != nil {
+		if herr := s.hookAuditWrite(action); herr != nil {
+			return herr
+		}
 	}
 	return nil
 }

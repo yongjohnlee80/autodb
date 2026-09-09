@@ -52,7 +52,7 @@ func TestPATCard_NamesTheSessionAccountNotAUILabel(t *testing.T) {
 	h.keys(fmt.Sprintf("file:cardwire%d?mode=memory&cache=shared", time.Now().UnixNano()))
 	h.key(tuicore.KeyEnter)
 	h.waitGone("connection form", "new connection")
-	h.waitFor("created connection row", "demo")
+	h.waitForManagerRow("connections", "demo")
 
 	// AND IT MUST BE FRONT-DOOR ENABLED, or the mint itself is refused with
 	// "auth: connection is not enabled for front-door use" — a connection is

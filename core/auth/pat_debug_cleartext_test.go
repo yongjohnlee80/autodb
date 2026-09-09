@@ -79,19 +79,19 @@ func TestDebugCleartextMint_AdminOnly(t *testing.T) {
 	// POSITIVE CONTROL: the editor CAN mint an ordinary token against the same
 	// connection. Without this the refusal below could be any unrelated denial
 	// — a missing grant, a bad connection id — wearing the gate's name.
-	if _, err := s.CreatePAT(ctx, eveTok, "eve-ordinary", conn, 0, nil, false); err != nil {
+	if _, err := s.CreatePAT(ctx, eveTok, "eve-ordinary", conn, 0, nil, false, nil, testIP); err != nil {
 		t.Fatalf("an editor could not mint an ORDINARY token (%v); this cell cannot "+
 			"observe the debug gate, only the failure that precedes it", err)
 	}
 
-	_, err = s.CreatePAT(ctx, eveTok, "eve-debug", conn, 0, []string{"203.0.113.4/32"}, true)
+	_, err = s.CreatePAT(ctx, eveTok, "eve-debug", conn, 0, []string{"203.0.113.4/32"}, true, nil, testIP)
 	if !errors.Is(err, ErrPATDebugCleartextRefused) {
 		t.Fatalf("an EDITOR minted a cleartext debugging token: %v", err)
 	}
 
 	// And the admin is not refused for some unrelated reason — otherwise the
 	// gate would look correct while refusing everyone.
-	if _, err := s.CreatePAT(ctx, rootTok, "root-debug", conn, 0, []string{"203.0.113.4/32"}, true); err != nil {
+	if _, err := s.CreatePAT(ctx, rootTok, "root-debug", conn, 0, []string{"203.0.113.4/32"}, true, nil, testIP); err != nil {
 		t.Fatalf("an ADMIN was refused too (%v); the gate refuses everybody, which is not "+
 			"the same as refusing non-admins", err)
 	}
@@ -112,11 +112,11 @@ func TestDebugCleartextMint_RefusedWhenNotServingCleartext(t *testing.T) {
 
 	// CONTROL: an ordinary token mints fine here, so the refusal below is
 	// about the debug flag and not about this fixture being broken.
-	if _, err := s.CreatePAT(ctx, rootTok, "ordinary", conn, 0, nil, false); err != nil {
+	if _, err := s.CreatePAT(ctx, rootTok, "ordinary", conn, 0, nil, false, nil, testIP); err != nil {
 		t.Fatalf("an ordinary token could not be minted (%v); nothing below is observable", err)
 	}
 
-	_, err := s.CreatePAT(ctx, rootTok, "debug", conn, 0, []string{"203.0.113.4/32"}, true)
+	_, err := s.CreatePAT(ctx, rootTok, "debug", conn, 0, []string{"203.0.113.4/32"}, true, nil, testIP)
 	if !errors.Is(err, ErrPATDebugCleartextRefused) {
 		t.Fatalf("a debug token was minted on a TLS-only daemon: %v", err)
 	}
@@ -137,10 +137,10 @@ func TestDebugCleartextMint_UnwiredHookFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	conn := patConn(t, s, rootTok)
 
-	if _, err := s.CreatePAT(ctx, rootTok, "ordinary", conn, 0, nil, false); err != nil {
+	if _, err := s.CreatePAT(ctx, rootTok, "ordinary", conn, 0, nil, false, nil, testIP); err != nil {
 		t.Fatalf("control: an ordinary token could not be minted (%v)", err)
 	}
-	_, err := s.CreatePAT(ctx, rootTok, "debug", conn, 0, []string{"203.0.113.4/32"}, true)
+	_, err := s.CreatePAT(ctx, rootTok, "debug", conn, 0, []string{"203.0.113.4/32"}, true, nil, testIP)
 	if !errors.Is(err, ErrPATDebugCleartextRefused) {
 		t.Fatalf("an install that never wired the cleartext hook minted a debug token "+
 			"anyway: %v", err)
@@ -183,7 +183,7 @@ func TestDebugCleartextMint_RefusesBroadRanges(t *testing.T) {
 			ctx := context.Background()
 			conn := patConn(t, s, rootTok)
 
-			_, err := s.CreatePAT(ctx, rootTok, "debug", conn, 0, tc.ips, true)
+			_, err := s.CreatePAT(ctx, rootTok, "debug", conn, 0, tc.ips, true, nil, testIP)
 			refused := errors.Is(err, ErrPATDebugCleartextRefused)
 			if refused != tc.refused {
 				t.Fatalf("allowed_ips %v: refused=%v want %v (err %v)", tc.ips, refused, tc.refused, err)
@@ -204,7 +204,7 @@ func TestDebugCleartextMint_RefusesEmptyList(t *testing.T) {
 	rootTok, _ := mustBootstrap(t, s)
 	ctx := context.Background()
 
-	_, err := s.CreatePAT(ctx, rootTok, "debug", patConn(t, s, rootTok), 0, nil, true)
+	_, err := s.CreatePAT(ctx, rootTok, "debug", patConn(t, s, rootTok), 0, nil, true, nil, testIP)
 	if !errors.Is(err, ErrPATDebugCleartextRefused) {
 		t.Fatalf("a debug token with no allowed_ips was minted: %v", err)
 	}
@@ -229,10 +229,10 @@ func TestDebugCleartextMint_HasItsOwnAuditAction(t *testing.T) {
 	// is what empty means everywhere except the debug branch. A debug token's
 	// list is a perimeter of its own — the relaxation this gate compensates
 	// for — and that is exactly why the two must not share a message.
-	if _, err := s.CreatePAT(ctx, rootTok, "ordinary", conn, 0, nil, false); err != nil {
+	if _, err := s.CreatePAT(ctx, rootTok, "ordinary", conn, 0, nil, false, nil, testIP); err != nil {
 		t.Fatalf("CreatePAT(ordinary): %v", err)
 	}
-	if _, err := s.CreatePAT(ctx, rootTok, "debug", conn, 0, []string{"203.0.113.4/32"}, true); err != nil {
+	if _, err := s.CreatePAT(ctx, rootTok, "debug", conn, 0, []string{"203.0.113.4/32"}, true, nil, testIP); err != nil {
 		t.Fatalf("CreatePAT(debug): %v", err)
 	}
 	if n := auditCount(t, store, "pat_created_debug_cleartext"); n != 1 {
@@ -255,10 +255,10 @@ func TestDebugCleartextMint_PersistsTheFlag(t *testing.T) {
 	ctx := context.Background()
 	conn := patConn(t, s, rootTok)
 
-	if _, err := s.CreatePAT(ctx, rootTok, "ordinary", conn, 0, nil, false); err != nil {
+	if _, err := s.CreatePAT(ctx, rootTok, "ordinary", conn, 0, nil, false, nil, testIP); err != nil {
 		t.Fatalf("CreatePAT(ordinary): %v", err)
 	}
-	if _, err := s.CreatePAT(ctx, rootTok, "debug", conn, 0, []string{"203.0.113.4/32"}, true); err != nil {
+	if _, err := s.CreatePAT(ctx, rootTok, "debug", conn, 0, []string{"203.0.113.4/32"}, true, nil, testIP); err != nil {
 		t.Fatalf("CreatePAT(debug): %v", err)
 	}
 	n, err := store.PATs.OnCtx(ctx).With(meta.PATDebugCleartext, int64(1)).Count()

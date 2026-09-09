@@ -164,7 +164,15 @@ func splitPAT(token string) (selector, secret string, wellFormed bool) {
 //
 // The gates below run INSIDE the cap transaction and in this order, which is
 // itself part of the contract — see the comments on each.
-func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int64, lifetime time.Duration, allowedIPs []string, debugCleartext bool) (NewPAT, error) {
+// approvedToAdd is the EXACT canonical set the caller displayed and the
+// operator approved for addition to their own allowlist. Empty means no
+// widening was approved, and the subset refusal below stands unchanged -- a
+// caller that does not opt in cannot widen anything. See pat_allowlist.go.
+// ip is the caller's peer address, recorded in every audit row this writes.
+// It used to be hardcoded empty -- so the trail said WHO minted a token and
+// never from where, and the allowlist rows this now creates are exactly the
+// kind of change an investigation wants an address for.
+func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int64, lifetime time.Duration, allowedIPs []string, debugCleartext bool, approvedToAdd []string, ip string) (NewPAT, error) {
 	ident, err := s.ValidateToken(ctx, token)
 	if err != nil {
 		return NewPAT{}, err
@@ -195,6 +203,10 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 	expires := now.Add(lifetime)
 
 	var canonical string
+	// toAddRows is the set of the OWNER'S OWN allowlist rows this mint will
+	// create, decided under the owner's lock. Empty on every path that does
+	// not widen, which is every path that existed before.
+	var toAddRows []string
 	// SERIALIZE, then count, then insert.
 	//
 	// One transaction is not mutual exclusion. Under PostgreSQL READ
@@ -212,6 +224,9 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 	// allowlist cap, after review reproduced the same defect there (35 rows
 	// against a cap of 32). It was sitting in this package while I wrote the
 	// unsafe version.
+	if s.hookBeforeMintTx != nil {
+		s.hookBeforeMintTx()
+	}
 	err = s.inTx(ctx, func(tx *dao.Transaction) error {
 		if lerr := s.lockGuardRow(tx); lerr != nil {
 			return lerr
@@ -222,6 +237,37 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 			Set(meta.UserUpdatedAt, now.Unix()).Update(); lerr != nil {
 			return lerr
 		}
+
+		// FRESH AUTHORITY, UNDER THE LOCK.
+		//
+		// The session was resolved before this transaction opened. That is
+		// enough when the only write is a token, but this path can now create
+		// DURABLE ADMISSION -- so an admin disabling the owner between the
+		// outer check and this lock would otherwise leave a token plus
+		// standing rows for a disabled account, rows that become effective
+		// the moment it is re-enabled. Dormant standing admission is exactly
+		// what nobody audits.
+		//
+		// Either this commits before the disable, and the disable then makes
+		// the rows inert, or the disable wins and this commits nothing.
+		// AND THE FRESH IDENTITY IS THE ONE USED FROM HERE ON.
+		//
+		// A review caught the first version discarding it and continuing with
+		// the pre-lock identity, which left a deterministic hole: demote an
+		// admin before the lock and the debug-cleartext branch below still saw
+		// a stale admin role, so it could mint an ADMIN-ONLY credential for an
+		// account that no longer had the role. Re-checking and then not using
+		// the answer is worse than not checking -- it reads as a guard.
+		fresh, terr := s.resolveTokenTx(tx, token)
+		if terr != nil {
+			return terr
+		}
+		if fresh.UserID() != ident.UserID() {
+			// A token cannot change owner, so this is unreachable -- and
+			// cheap to refuse rather than reason about.
+			return ErrTokenInvalid
+		}
+		ident = fresh
 
 		// GATE 1 — THE GRANT, BEFORE THE CONNECTION ROW IS READ.
 		//
@@ -342,9 +388,17 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 		// from the global allowlist — they have no personal rows, and under
 		// the subset rule could not narrow a token at all.
 		if debugCleartext {
+			// A DEBUG TOKEN NEVER WIDENS THE USER ALLOWLIST. Its own list is
+			// the entire gate for that class, so adding user rows would be
+			// unnecessary for this token and would manufacture standing
+			// admission for later TLS and password use.
+			if len(approvedToAdd) > 0 {
+				return ErrPATDebugNoWiden
+			}
 			canonical, cerr = canonicalizeIPsUnchecked(allowedIPs)
 		} else {
-			canonical, cerr = s.canonicalAllowedIPs(ctx, tx, ident.UserID(), allowedIPs)
+			canonical, toAddRows, cerr = s.resolveMintAllowlist(
+				ctx, tx, ident.UserID(), allowedIPs, approvedToAdd)
 		}
 		if cerr != nil {
 			return cerr
@@ -380,7 +434,7 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 			return fmt.Errorf("%w: this install is at its limit of %d active tokens",
 				ErrPATCapExceeded, PATMaxGlobal)
 		}
-		if _, ierr := s.store.PATs.On(tx).
+		patID, ierr := s.store.PATs.On(tx).
 			Set(meta.PATSelector, selector).
 			Set(meta.PATSecretHash, patHash(secret)).
 			Set(meta.PATUserID, ident.UserID()).
@@ -390,11 +444,20 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 			Set(meta.PATDebugCleartext, boolToInt(debugCleartext)).
 			Set(meta.PATCreatedAt, now.Unix()).
 			Set(meta.PATExpiresAt, expires.Unix()).
-			Insert(); ierr != nil {
+			Insert()
+		if ierr != nil {
 			if errors.Is(ierr, dao.ErrDuplicate) {
 				return fmt.Errorf("%w: %q", ErrPATNameTaken, name)
 			}
 			return ierr
+		}
+		// THE ROWS COME AFTER THE TOKEN, so their provenance can name its
+		// immutable id -- and inside the same transaction, so a failure here
+		// rolls the token back too. A row pointing at a token that does not
+		// exist, or a token whose restriction its owner cannot satisfy, are
+		// both wrong; neither is reachable.
+		if aerr := s.addMintAllowlistRows(tx, ident.UserID(), patID, name, toAddRows, ip); aerr != nil {
+			return aerr
 		}
 		// The audit rides the SAME transaction as the insert: a token that
 		// exists with no record of its creation is exactly the token an
@@ -405,7 +468,7 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 			// from an ordinary one without anybody reading flags.
 			action = "pat_created_debug_cleartext"
 		}
-		return s.AuditTx(tx, ident.UserID(), "", action,
+		return s.AuditTx(tx, ident.UserID(), ip, action,
 			fmt.Sprintf("name %q conn %d expires %s", name, connID,
 				expires.UTC().Format(time.RFC3339)))
 	})

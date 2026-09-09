@@ -199,6 +199,46 @@ func wireErr(err error) error {
 
 // exactArgs enforces exact positional arity: trailing extras are an invalid
 // call, not silently ignored input.
+// argsBetween accepts a verb whose trailing arguments are OPTIONAL.
+//
+// It exists because adding a required argument to a live verb is a wire break:
+// every client pinned to the previous protocol would start failing on a call
+// that used to work. An optional trailing argument is additive, and its
+// ABSENCE has to mean the safe thing -- for the acknowledgement that permits
+// widening an allowlist, absent means "not approved", which is exactly
+// today's behaviour.
+func argsBetween(p []any, lo, hi int) error {
+	if len(p) < lo || len(p) > hi {
+		return &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+			Message: fmt.Sprintf("want %d..%d argument(s), got %d", lo, hi, len(p))}
+	}
+	return nil
+}
+
+// strsToAny converts a string slice for the reply.
+//
+// The codec encodes []any, not []string -- a []string comes back to the caller
+// as an INTERNAL ERROR, because the failure is in encoding the response and
+// the transport will not say more than that. Every existing handler that
+// returns a list does this conversion; two new ones did not, and the wire
+// cells are what found it. Without them the preview verb and the
+// stale-approval reply would both have failed in front of an operator.
+func strsToAny(in []string) []any {
+	out := make([]any, 0, len(in))
+	for _, s := range in {
+		out = append(out, s)
+	}
+	return out
+}
+
+// optStr reads a trailing optional string argument; absent yields "".
+func optStr(p []any, i int, name string) (string, error) {
+	if i >= len(p) {
+		return "", nil
+	}
+	return argStr(p, i, name)
+}
+
 func exactArgs(p []any, n int) error {
 	if len(p) != n {
 		return &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
@@ -864,7 +904,15 @@ func (s *Server) register() {
 	// shape a breaking change should have when the alternative is a credential
 	// that silently reaches everything its owner is granted.
 	s.rpc.Handle("auth.token_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
-		if err := exactArgs(req.Params, 6); err != nil {
+		// SIX OR SEVEN. The seventh is the operator's acknowledgement: the
+		// exact canonical CIDRs they were shown and approved for addition to
+		// their OWN allowlist.
+		//
+		// OPTIONAL, because making it required would break every client on
+		// the previous protocol for a call that used to work -- and because
+		// its absence has to mean the safe thing anyway: not approved, which
+		// leaves the core's subset refusal exactly as it was.
+		if err := argsBetween(req.Params, 6, 7); err != nil {
 			return nil, err
 		}
 		token, err := argStr(req.Params, 0, "token")
@@ -912,9 +960,28 @@ func (s *Server) register() {
 			return nil, wireErr(fmt.Errorf("%w: %d days requested; the range is 1..%d, or 0 for "+
 				"the default", auth.ErrPATBadExpiry, days, maxTokenDays))
 		}
+		rawApproved, err := optStr(req.Params, 6, "approved_ips")
+		if err != nil {
+			return nil, err
+		}
+		var approved []string
+		if strings.TrimSpace(rawApproved) != "" {
+			approved = strings.Split(rawApproved, ",")
+		}
 		out, cerr := s.auth.CreatePAT(ctx, token, name, connID,
-			time.Duration(days)*24*time.Hour, ips, debugCleartext != 0)
+			time.Duration(days)*24*time.Hour, ips, debugCleartext != 0, approved, peerIP(req))
 		if cerr != nil {
+			// A STALE ACKNOWLEDGEMENT IS ITS OWN OUTCOME, carried across the
+			// wire as data rather than as prose in an error string: the
+			// caller has to tell "needs fresh consent" from a fault so it can
+			// RE-PROMPT with the new set instead of reporting a failure.
+			var stale *auth.StaleApproval
+			if errors.As(cerr, &stale) {
+				return map[string]any{
+					"stale_approval": true,
+					"missing":        strsToAny(stale.Missing),
+				}, nil
+			}
 			return nil, wireErr(cerr)
 		}
 		return map[string]any{
@@ -926,6 +993,31 @@ func (s *Server) register() {
 		}, nil
 	})
 
+	// What minting with these restrictions would ADD to the caller's own
+	// allowlist. Presentation only: the mint recomputes it under the owner's
+	// lock and may add nothing that is not in the set then approved.
+	s.rpc.Handle("auth.token_allowlist_preview", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 2); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		rawIPs, err := argStr(req.Params, 1, "allowed_ips")
+		if err != nil {
+			return nil, err
+		}
+		var want []string
+		if strings.TrimSpace(rawIPs) != "" {
+			want = strings.Split(rawIPs, ",")
+		}
+		missing, merr := s.auth.PATAllowlistAdditions(ctx, token, want)
+		if merr != nil {
+			return nil, wireErr(merr)
+		}
+		return map[string]any{"missing": strsToAny(missing)}, nil
+	})
 	s.rpc.Handle("auth.token_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err

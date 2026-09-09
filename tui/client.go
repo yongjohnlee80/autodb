@@ -975,6 +975,23 @@ func mI(m map[string]any, k string) int64 {
 	return n
 }
 
+// mSS decodes a msgpack array of strings. The wire hands back []any, so each
+// element is asserted individually and a non-string is dropped rather than
+// panicking a UI goroutine on a malformed reply.
+func mSS(m map[string]any, k string) []string {
+	raw, _ := m[k].([]any)
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			out = append(out, s)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 func mB(m map[string]any, k string) bool {
 	b, _ := m[k].(bool)
 	return b
@@ -1200,21 +1217,49 @@ func splitAllowedIPs(s string) []string {
 // connection, and the server refuses a mint against one the caller has no
 // grant on, one that is not enabled for front-door use, or one whose target
 // database name has not been recorded.
-func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedIPs []string, connID int64, debugCleartext bool) (PATSecret, error) {
+// CreatePAT mints a token. approvedToAdd is the exact canonical set the
+// operator was SHOWN and approved for addition to their own allowlist; nil
+// means nothing was approved, and the daemon keeps its subset refusal.
+//
+// The second return is a STALE-APPROVAL set: non-nil means NOTHING was
+// created, because the rows that would now be added are no longer the rows
+// that were approved, and it carries the new exact set to re-confirm. It is a
+// separate return rather than an error because the caller must re-prompt, not
+// report a fault.
+func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedIPs []string, connID int64, debugCleartext bool, approvedToAdd []string) (PATSecret, []string, error) {
 	flag := int64(0)
 	if debugCleartext {
 		flag = 1
 	}
-	res, err := b.authed(ctx, "auth.token_create", name, days, strings.Join(allowedIPs, ","), connID, flag)
+	res, err := b.authed(ctx, "auth.token_create", name, days, strings.Join(allowedIPs, ","),
+		connID, flag, strings.Join(approvedToAdd, ","))
 	if err != nil {
-		return PATSecret{}, err
+		return PATSecret{}, nil, err
 	}
 	m, _ := res.(map[string]any)
+	if mB(m, "stale_approval") {
+		return PATSecret{}, mSS(m, "missing"), nil
+	}
 	return PATSecret{
 		Name:      mS(m, "name"),
 		Secret:    mS(m, "secret"),
 		ExpiresAt: mS(m, "expires_at"),
-	}, nil
+	}, nil, nil
+}
+
+// PATAllowlistPreview reports which CIDRs minting with these restrictions
+// would ADD to the caller's own allowlist. Empty means the operation does not
+// widen, and no confirmation is needed.
+//
+// Presentation only: the daemon recomputes this under the owner's lock and may
+// add nothing that is not in the set the operator then approved.
+func (b *Bound) PATAllowlistPreview(ctx context.Context, allowedIPs []string) ([]string, error) {
+	res, err := b.authed(ctx, "auth.token_allowlist_preview", strings.Join(allowedIPs, ","))
+	if err != nil {
+		return nil, err
+	}
+	m, _ := res.(map[string]any)
+	return mSS(m, "missing"), nil
 }
 
 // CAPem is the front door's CA certificate, as text.

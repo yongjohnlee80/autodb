@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"iter"
+	"strings"
 
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/style"
@@ -310,26 +311,58 @@ type leaderEntry struct {
 type leaderMenu struct {
 	widget.Base
 	entries []leaderEntry
-	float   *widget.Float
+	// prose is shown ABOVE the keys, in the SAME float.
+	//
+	// A confirmation used to be two floats: the text in one, the actionable
+	// menu stacked on top of it. A review found the consequence -- the
+	// operator can press the key that acts while the thing being agreed to
+	// sits behind the modal asking, and cancelling leaves the text floating
+	// with nothing to act on it. For a security decision that is not a layout
+	// preference. One surface: what you are agreeing to and the key that
+	// agrees cannot be separated.
+	prose []string
+	float *widget.Float
 }
 
 func (l *leaderMenu) AcceptsFocus() bool { return true }
 
 func (l *leaderMenu) Layout(c tui.Constraints) tui.Size {
-	return c.Constrain(tui.Size{
-		W: modalSpan(c.MaxW, leaderPct, leaderMinW, leaderMaxW),
-		H: min(c.MaxH, len(l.entries)+1),
-	})
+	h := len(l.entries) + 1
+	w := modalSpan(c.MaxW, leaderPct, leaderMinW, leaderMaxW)
+	if n := len(l.prose); n > 0 {
+		h += n + 1 // the prose, then a blank line before the keys
+		// Wide enough for the text it carries: a consent line that wraps or
+		// truncates is a consent line nobody read.
+		for _, line := range l.prose {
+			if len(line)+2 > w {
+				w = min(c.MaxW, len(line)+2)
+			}
+		}
+	}
+	return c.Constrain(tui.Size{W: w, H: min(c.MaxH, h)})
 }
 
 func (l *leaderMenu) Render(s tui.Surface) {
 	keySt := style.New().Foreground(style.TokenPrimary).Bold(true)
-	for i, e := range l.entries {
-		if i >= s.Size().H {
-			break
+	muted := style.New().Foreground(style.TokenTextMuted)
+	y := 0
+	for _, line := range l.prose {
+		if y >= s.Size().H {
+			return
 		}
-		s.SetCell(1, i, string(e.key), keySt)
-		drawTo(s, 4, i, e.label, style.New())
+		drawTo(s, 1, y, line, muted)
+		y++
+	}
+	if len(l.prose) > 0 {
+		y++ // the blank line
+	}
+	for _, e := range l.entries {
+		if y >= s.Size().H {
+			return
+		}
+		s.SetCell(1, y, string(e.key), keySt)
+		drawTo(s, 4, y, e.label, style.New())
+		y++
 	}
 }
 
@@ -391,6 +424,17 @@ func drawTo(s tui.Surface, x, y int, text string, st style.Style) {
 // (and made two very different prompts indistinguishable).
 func (m *Model) openLeader(title string, entries []leaderEntry) {
 	lm := &leaderMenu{entries: entries}
+	lm.float = m.openFloat(title, lm)
+}
+
+// openLeaderWithProse is a confirmation whose TEXT AND KEYS ARE ONE FLOAT.
+//
+// Use it wherever the decision needs the reader to have seen something
+// specific -- an exact set of addresses, a consequence they did not ask for.
+// Two stacked floats let the key that acts sit on top of the thing being
+// agreed to, which is how somebody confirms what they could not read.
+func (m *Model) openLeaderWithProse(title, prose string, entries []leaderEntry) {
+	lm := &leaderMenu{entries: entries, prose: strings.Split(strings.TrimRight(prose, "\n"), "\n")}
 	lm.float = m.openFloat(title, lm)
 }
 

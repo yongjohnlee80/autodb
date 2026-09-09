@@ -90,7 +90,7 @@ func TestWireOpen_TheLeasePinReadsClientEncodingToo(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pat, err := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("lp-%d", time.Now().UnixNano()), connID, 0, nil, false)
+			pat, err := f.svc.CreatePAT(ctx, f.rootTok, fmt.Sprintf("lp-%d", time.Now().UnixNano()), connID, 0, nil, false, nil, testIP)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -113,7 +113,7 @@ func pgLoopFull(t *testing.T, engOpts ...exec.Option) pgLoopHandles {
 		t.Fatalf("enabling the session profile: %v", err)
 	}
 
-	pat, err := svc.CreatePAT(ctx, rootTok, fmt.Sprintf("fd-loop-%d", time.Now().UnixNano()), connID, 0, nil, false)
+	pat, err := svc.CreatePAT(ctx, rootTok, fmt.Sprintf("fd-loop-%d", time.Now().UnixNano()), connID, 0, nil, false, nil, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}

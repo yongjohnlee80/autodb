@@ -432,10 +432,18 @@ func newAllowedIPs(conn dao.DataConn) *dao.Schema[*AllowedIP, AllowedIPField, So
 	})
 }
 
-// UserIP is one user_ip_allowlist row: the per-user layer of
-// the front door's two-layer IP model. A front-door login must pass BOTH the
-// global allowlist and the connecting user's rows, and a PAT's allowed_ips
-// must be a subset of these. Managed self-service (own rows) or by an admin.
+// UserIP is one user_ip_allowlist row: the per-user layer of the front door's
+// two-layer IP model.
+//
+// A front-door login is admitted by the global allowlist OR the connecting
+// user's rows -- EITHER, not both -- and a PAT's own allowed_ips then narrows
+// that result if it sets one. This said BOTH, which is a stricter rule than
+// the one that runs and would send a reader looking for a conjunction that
+// does not exist. The formula is
+// core/exec/wire_session.go's admission block, and
+// docs/front-door/protocol-matrix.md states it.
+//
+// Managed self-service (own rows) or by an admin.
 type UserIP struct {
 	ID        int64
 	UserID    int64

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -13,7 +12,6 @@ import (
 
 	"github.com/yongjohnlee80/golib/dao"
 
-	"github.com/yongjohnlee80/autodb/core/config"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -77,7 +75,7 @@ func mustPAT(t *testing.T, s *Service, tok, name string, ips ...string) NewPAT {
 	if err != nil {
 		t.Fatalf("resolving the caller for CreatePAT(%q): %v", name, err)
 	}
-	p, err := s.CreatePAT(ctx, tok, name, mustFrontDoorConn(t, s, ident.UserID()), 0, ips, false)
+	p, err := s.CreatePAT(ctx, tok, name, mustFrontDoorConn(t, s, ident.UserID()), 0, ips, false, nil, testIP)
 	if err != nil {
 		t.Fatalf("CreatePAT(%q): %v", name, err)
 	}
@@ -248,17 +246,17 @@ func TestPAT_CreateContract(t *testing.T) {
 	ctx := context.Background()
 
 	mustPAT(t, s, tok, "first")
-	if _, err := s.CreatePAT(ctx, tok, "first", patConn(t, s, tok), 0, nil, false); !errors.Is(err, ErrPATNameTaken) {
+	if _, err := s.CreatePAT(ctx, tok, "first", patConn(t, s, tok), 0, nil, false, nil, testIP); !errors.Is(err, ErrPATNameTaken) {
 		t.Errorf("a duplicate name = %v, want ErrPATNameTaken — a person with several tokens "+
 			"needs to know which is which when they come to revoke one", err)
 	}
-	if _, err := s.CreatePAT(ctx, tok, "", patConn(t, s, tok), 0, nil, false); err == nil {
+	if _, err := s.CreatePAT(ctx, tok, "", patConn(t, s, tok), 0, nil, false, nil, testIP); err == nil {
 		t.Error("an unnamed token was created")
 	}
-	if _, err := s.CreatePAT(ctx, tok, "too-long", patConn(t, s, tok), PATMaxLifetime+time.Hour, nil, false); !errors.Is(err, ErrPATBadExpiry) {
+	if _, err := s.CreatePAT(ctx, tok, "too-long", patConn(t, s, tok), PATMaxLifetime+time.Hour, nil, false, nil, testIP); !errors.Is(err, ErrPATBadExpiry) {
 		t.Errorf("an over-long lifetime = %v, want ErrPATBadExpiry", err)
 	}
-	if _, err := s.CreatePAT(ctx, tok, "negative", patConn(t, s, tok), -time.Hour, nil, false); !errors.Is(err, ErrPATBadExpiry) {
+	if _, err := s.CreatePAT(ctx, tok, "negative", patConn(t, s, tok), -time.Hour, nil, false, nil, testIP); !errors.Is(err, ErrPATBadExpiry) {
 		t.Errorf("a negative lifetime = %v, want ErrPATBadExpiry", err)
 	}
 
@@ -267,7 +265,7 @@ func TestPAT_CreateContract(t *testing.T) {
 	for i := 1; i < PATMaxPerUser; i++ {
 		mustPAT(t, s, tok, "fill-"+string(rune('a'+i)))
 	}
-	_, err := s.CreatePAT(ctx, tok, "one-too-many", patConn(t, s, tok), 0, nil, false)
+	_, err := s.CreatePAT(ctx, tok, "one-too-many", patConn(t, s, tok), 0, nil, false, nil, testIP)
 	if !errors.Is(err, ErrPATCapExceeded) {
 		t.Fatalf("token %d = %v, want ErrPATCapExceeded", PATMaxPerUser+1, err)
 	}
@@ -276,7 +274,7 @@ func TestPAT_CreateContract(t *testing.T) {
 	if err := s.RevokePAT(ctx, tok, 0, "first"); err != nil {
 		t.Fatalf("RevokePAT: %v", err)
 	}
-	if _, err := s.CreatePAT(ctx, tok, "after-revoke", patConn(t, s, tok), 0, nil, false); err != nil {
+	if _, err := s.CreatePAT(ctx, tok, "after-revoke", patConn(t, s, tok), 0, nil, false, nil, testIP); err != nil {
 		t.Errorf("revoking freed no slot: %v", err)
 	}
 }
@@ -306,15 +304,15 @@ func TestPAT_AllowedIPsMustBeASubset(t *testing.T) {
 
 	// WIDER than the user's row: refused. A token cannot widen where its
 	// owner may connect from, or the per-user layer is advisory.
-	if _, err := s.CreatePAT(ctx, tok, "wide", patConn(t, s, tok), 0, []string{"0.0.0.0/0"}, false); !errors.Is(err, ErrPATBadAllowedIPs) {
+	if _, err := s.CreatePAT(ctx, tok, "wide", patConn(t, s, tok), 0, []string{"0.0.0.0/0"}, false, nil, testIP); !errors.Is(err, ErrPATBadAllowedIPs) {
 		t.Errorf("a token wider than its owner's rows = %v, want ErrPATBadAllowedIPs", err)
 	}
 	// Outside them entirely: refused.
-	if _, err := s.CreatePAT(ctx, tok, "elsewhere", patConn(t, s, tok), 0, []string{"192.168.5.0/24"}, false); !errors.Is(err, ErrPATBadAllowedIPs) {
+	if _, err := s.CreatePAT(ctx, tok, "elsewhere", patConn(t, s, tok), 0, []string{"192.168.5.0/24"}, false, nil, testIP); !errors.Is(err, ErrPATBadAllowedIPs) {
 		t.Errorf("a token outside its owner's rows = %v, want ErrPATBadAllowedIPs", err)
 	}
 	// Not a CIDR at all.
-	if _, err := s.CreatePAT(ctx, tok, "junk", patConn(t, s, tok), 0, []string{"not-a-cidr"}, false); !errors.Is(err, ErrPATBadAllowedIPs) {
+	if _, err := s.CreatePAT(ctx, tok, "junk", patConn(t, s, tok), 0, []string{"not-a-cidr"}, false, nil, testIP); !errors.Is(err, ErrPATBadAllowedIPs) {
 		t.Errorf("junk allowed_ips = %v, want ErrPATBadAllowedIPs", err)
 	}
 	// Empty INHERITS rather than denying everything — an empty list that
@@ -460,29 +458,22 @@ func TestPAT_SubsetCheckIssuesOnTheCallersTransaction(t *testing.T) {
 // but it is a real serialization point and is named here rather than left for
 // someone to discover under load.
 func TestPAT_CapHoldsUnderConcurrency(t *testing.T) {
-	dsn := os.Getenv("TEST_PGURL")
-	if dsn == "" {
-		t.Skip("TEST_PGURL not set; the cap race only reproduces on PostgreSQL")
-	}
 	ctx := context.Background()
-	store, err := meta.Open(ctx, config.Meta{Engine: "postgres", DSN: dsn})
-	if err != nil {
-		t.Fatalf("meta.Open: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
+	// ITS OWN SCHEMA, because this cell was NOT RUNNING. On the 2026-09-09
+	// VM43 ledger it skipped against a freshly created database: a sibling PG
+	// cell bootstrapped the shared store first, and Bootstrap succeeds once,
+	// so this one took its skip branch and the cap race went unmeasured while
+	// the ledger read green. See pg_isolated_test.go.
+	store := pgIsolatedStore(t, "caprace")
 	s, err := New(store, WithConfigAllowlist([]string{"127.0.0.1/32", "::1/128"}))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	tok, _, err := s.Bootstrap(ctx, fmt.Sprintf("caprace%d", time.Now().UnixNano()),
-		"cap-race-passphrase", testIP)
-	if err != nil {
-		t.Skipf("bootstrap unavailable on this store: %v", err)
-	}
+	tok, _ := mustBootstrapPG(t, s, fmt.Sprintf("caprace%d", time.Now().UnixNano()))
 
 	// Fill to one below the cap, so exactly ONE more may be created.
 	for i := 0; i < PATMaxPerUser-1; i++ {
-		if _, cerr := s.CreatePAT(ctx, tok, fmt.Sprintf("fill-%02d", i), patConn(t, s, tok), 0, nil, false); cerr != nil {
+		if _, cerr := s.CreatePAT(ctx, tok, fmt.Sprintf("fill-%02d", i), patConn(t, s, tok), 0, nil, false, nil, testIP); cerr != nil {
 			t.Fatalf("prefill %d: %v", i, cerr)
 		}
 	}
@@ -518,7 +509,7 @@ func TestPAT_CapHoldsUnderConcurrency(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			_, errs[i] = s.CreatePAT(ctx, tok, fmt.Sprintf("race-%02d", i), patConn(t, s, tok), 0, nil, false)
+			_, errs[i] = s.CreatePAT(ctx, tok, fmt.Sprintf("race-%02d", i), patConn(t, s, tok), 0, nil, false, nil, testIP)
 		}(i)
 	}
 	close(start)
@@ -574,7 +565,7 @@ func TestPAT_DisabledOwnersTokenStopsWorking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	pat, err := s.CreatePAT(ctx, bobTok, "bobs-laptop", patConn(t, s, bobTok), 0, nil, false)
+	pat, err := s.CreatePAT(ctx, bobTok, "bobs-laptop", patConn(t, s, bobTok), 0, nil, false, nil, testIP)
 	if err != nil {
 		t.Fatalf("CreatePAT: %v", err)
 	}
