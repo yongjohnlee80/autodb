@@ -438,12 +438,12 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 	// client can still Sync and recover the connection, so killing it would be
 	// strictly worse than the honest single snapshot the loop takes instead.
 	//
-	// The loop's own comment records this: the separate WireTxStatus read
-	// "remains only for the paths that have no report — the extended path
-	// today — where there is one snapshot anyway". One snapshot cannot
-	// disagree with itself, which is the whole hazard that path guards.
-	_, err = deliverSegment(ctx, pc, s.ext, emit)
-	return err
+	// So the loop takes its ONE snapshot from its own WireTxStatus read on this
+	// path, which is what that read is for: a drive with no truthful byte to
+	// carry reports no byte, rather than a wrong one. Sync is the opposite case
+	// and does arm — see WireSyncSegment — so "the extended path never reports"
+	// is no longer true of the segment END, only of Flush.
+	return deliverSegment(ctx, pc, s.ext, emit)
 }
 
 // deliverSegment answers every frame queued so far, or nothing when the segment
@@ -457,15 +457,19 @@ func (e *Engine) WireFlushSegment(ctx context.Context, id SessionID, userID int6
 // An empty segment is a NO-OP rather than an error: a client that flushes
 // defensively with nothing pending is doing something the protocol allows, and
 // golib refuses the flush because its own queue is empty.
-// It reports whether the segment DISPATCHED anything to the target, which is
-// the segment's answer to EmitStopped.Executed. A consumer cut can stop
-// delivery before any terminal frame is observed while the target is already
-// working, so "did anything run" cannot be read off the drain's observation.
+// IT RETURNS ONLY AN ERROR, and an earlier version returned "did the segment
+// dispatch anything" beside it so the Sync drive could pass that as
+// EmitStopped.Executed. Review rejected the mapping and it was wrong:
+// segmentAwaitsWire means "some step's answer must come from the target",
+// while Executed means "a statement was dispatched", and Parse/Describe/Sync
+// satisfies the first and not the second. Once the Sync arm became
+// delivery-scoped nothing consumed the bool, so it is gone rather than kept as
+// a value both call sites discard.
 func deliverSegment(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
-	emit func(WireMessage) error) (bool, error) {
+	emit func(WireMessage) error) error {
 
 	if len(o.segment) == 0 {
-		return false, nil
+		return nil
 	}
 	// FLUSH ONLY WHEN THE TARGET OWES AN ANSWER.
 	//
@@ -482,13 +486,12 @@ func deliverSegment(ctx context.Context, pc golibpg.PinnedConn, o *extObjects,
 	// from the target, and that is exactly when there is something to flush.
 	// The drain itself needs no such guard — it answers synth steps from memory
 	// and only touches the wire for the others.
-	dispatched := segmentAwaitsWire(o.segment)
-	if dispatched {
+	if segmentAwaitsWire(o.segment) {
 		if ferr := pc.Flush(ctx); ferr != nil {
-			return false, ferr
+			return ferr
 		}
 	}
-	return dispatched, drainExtended(ctx, pc, o, emit)
+	return drainExtended(ctx, pc, o, emit)
 }
 
 // segmentAwaitsWire reports whether any queued step's answer must come from the
@@ -545,7 +548,7 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	// END. Sync is what resets both tracks and leaves the wire usable, so
 	// returning early on a consumer stop would strand the connection in a state
 	// no later frame could recover.
-	_, deliverErr := deliverSegment(ctx, pc, s.ext, emit)
+	deliverErr := deliverSegment(ctx, pc, s.ext, emit)
 
 	targetStatus, serr := pc.Sync(ctx)
 	// Sync consumes through the terminal ReadyForQuery whatever happened, so the
@@ -591,36 +594,6 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 	}
 	s.noteWireStatus(status)
 
-	// THE DELIVERY FAILURE IS REPORTED LAST, AND WITH THE STATUS ATTACHED.
-	//
-	// This is F2 item 6. The drive used to return `0, deliverErr` here -- a bare
-	// emitFailure -- so the loop's `errors.As(err, &stopped)` found nothing and
-	// reportOutputWithheld fell to its separate WireTxStatus read. Arming it
-	// with 0 was the trap: 0 is not a valid status, and a non-nil report whose
-	// status is invalid is treated as session-lost, which would have DROPPED a
-	// session that was perfectly recoverable.
-	//
-	// A truthful byte exists here and only here: Sync consumed through the
-	// terminal ReadyForQuery, and the drain kept OBSERVING after delivery
-	// stopped, so the status is post-tail exactly as the raw path's is.
-	//
-	// It carries `status`, NOT `targetStatus`. When a read-only wrap was open
-	// the target reports T for a transaction that is OURS, and putting that in
-	// the arm would tell a client with no transaction that its effects are
-	// pending inside one -- the very confusion the wrap rule above exists to
-	// prevent, reintroduced through the arm.
-	//
-	// Outcome is empty deliberately: a Sync owns no statement's outcome row.
-	// The Execute drive records one; Sync is a delivery request, and the
-	// statements it delivers answers for are settled by their own drives. Arm()
-	// then decides from what IS known -- a target error means Failed, an open
-	// or aborted transaction means Pending or Aborted, and nothing known means
-	// Unresolved, which is the honest answer rather than an invented one.
-	//
-	// It comes after the bookkeeping above, not before: Sync ENDED the segment
-	// whatever the consumer did, so dropping portals on 'I' and recording the
-	// status must happen either way. The old early return skipped both, leaving
-	// this end holding portals the backend had already destroyed.
 	// THE DELIVERY FAILURE IS REPORTED LAST, DELIVERY-SCOPED, WITH THE STATUS.
 	//
 	// This is F2 item 6. The drive used to return `0, deliverErr` -- a bare

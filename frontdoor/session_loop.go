@@ -667,8 +667,12 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 	// exists to prevent reappearing between the arm and the byte.
 	//
 	// So when the engine reported, its TxStatus is authoritative for BOTH. The
-	// separate read remains only for the paths that have no report — the
-	// extended path today — where there is one snapshot anyway.
+	// separate read remains only for the paths that have no report, where there
+	// is one snapshot anyway: the simple path when nothing armed, and
+	// WireFlushSegment, which deliberately does not arm because a Flush ends no
+	// segment and so has no readiness byte to carry. WireSyncSegment DOES
+	// report — it consumed through the terminal ReadyForQuery — so the extended
+	// segment end takes the report branch below.
 	// A REPORT THAT EXISTS IS THE ONLY SNAPSHOT, VALID OR NOT (r1 residual 1).
 	//
 	// The first repair asked `stopped != nil && validTxStatus(...)`, which reads
@@ -837,16 +841,20 @@ func armFromWhatIsKnown(stopped *exec.EmitStopped, status byte, targetFailed boo
 	if stopped == nil {
 		return observed()
 	}
-	// A DELIVERY REPORT IS NEVER REPAIRED FROM THE EMITTER'S VIEW.
+	// A DELIVERY REPORT IS NEVER REPAIRED FROM THE EMITTER'S VIEW, and it needs
+	// no clause here to say so. The fallback below fires only on
+	// exec.ArmUnresolved, and EmitStopped.Arm answers a delivery report from its
+	// FIRST arm — so a delivery report can never reach the fallback that would
+	// "repair" it with targetFailed or a transaction status and produce the
+	// statement claim the scope exists to prevent.
 	//
-	// The fallback below exists to recover a STATEMENT fact the engine could
-	// not determine. A delivery-scoped report is not an engine that failed to
-	// determine something — it is a report about a different subject, and
-	// "repairing" it with targetFailed or a transaction status would produce
-	// exactly the statement claim the scope exists to prevent.
-	if stopped.Delivery {
-		return exec.ArmDeliveryStopped
-	}
+	// An explicit `if stopped.Delivery` short-circuit stood here first. No
+	// mutation could distinguish it: deleting it left every witness green,
+	// because Arm() already returns the delivery arm. A guard nothing can
+	// falsify is not a second layer of safety, it is a second place to keep
+	// correct — so the ordering inside Arm() is the single mechanism, and the
+	// cell that pins it lives beside it.
+	//
 	// THE ENGINE FIRST, BUT NOT WHEN IT SAYS IT DOES NOT KNOW.
 	//
 	// "Engine first" used to be unconditional, and that made the two sources a
@@ -855,23 +863,32 @@ func armFromWhatIsKnown(stopped *exec.EmitStopped, status byte, targetFailed boo
 	// discard an emitter observation that is CERTAIN — a target ErrorResponse
 	// that passed through the emitter is a fact, not an inference.
 	//
-	// Nothing arms that way today, because WireFlushSegment and
-	// WireSyncSegment do not arm at all and the drives that do own a statement
-	// outcome row. The trap is what a future arming would spring: the standing
+	// Nothing arms Unresolved on this route today. The drives that own a
+	// statement carry its outcome row, WireFlushSegment does not arm at all,
+	// and WireSyncSegment arms DELIVERY-scoped, which Arm answers from its
+	// first case. The trap is what a future arming would spring: the standing
 	// comment above this function warned that swapping the observation out
 	// "would make that path REPORT LESS than it does today", and a warning is
 	// not a mechanism.
 	//
-	// THIS IS NOT SUFFICIENT ON ITS OWN, and the first version of this comment
-	// claimed it was. Review measured the production path: reportOutputWithheld
-	// takes a non-nil report's TxStatus as the ONLY snapshot and treats an
-	// invalid one as session-lost, returning BEFORE recordedEffects is called.
-	// A Flush-shaped arm has TxStatus 0 — a Flush has no readiness to read — so
-	// arming that drive today would drop the session rather than reach this
-	// precedence at all, which is worse than the reporting regression this
-	// guards. Arming Flush/Sync therefore requires carrying a TRUTHFUL status
-	// snapshot from inside the drive, and this rule is a PREREQUISITE for that
-	// work rather than a substitute for it.
+	// THIS RULE ALONE WAS NOT ENOUGH TO ARM Flush OR Sync, and the first
+	// version of this comment claimed it was. Two distinct behaviours sit
+	// below in reportOutputWithheld, and conflating them is what made a bare
+	// arm look harmless:
+	//
+	//   * NO report — the fallback WireTxStatus read. The session lives; the
+	//     loop just takes its snapshot a moment later. This is what an
+	//     unarmed drive got, and it is where the two-source split came from.
+	//   * A report whose TxStatus is INVALID — closeReason "session-lost",
+	//     returning BEFORE recordedEffects is reached. The session DIES.
+	//
+	// A Flush-shaped arm has TxStatus 0, because a Flush ends no segment and
+	// has no readiness to read, so arming Flush lands in the second case and
+	// kills a session the client could have recovered by Syncing — strictly
+	// worse than the reporting split. Sync is the case where a truthful byte
+	// exists: it consumed through the terminal ReadyForQuery. So the drive
+	// carrying a valid snapshot is the PRECONDITION for arming at all, which
+	// F2 item 6 satisfies for Sync and deliberately does not for Flush.
 	//
 	// Unresolved is the only arm treated this way. Every other arm is a
 	// positive finding from the drained tail, which the emitter cannot see past

@@ -603,8 +603,8 @@ is read (criterion 3); oversized declared length refuses before any read.
 | `Describe` (`S`/`P`) | S5 | Native passthrough: `ParameterDescription` + `RowDescription`/`NoData` from the pinned conn (Describe-before-Execute metadata preserved). | none | control-sized (general lane) | — | Unknown name → target's error verbatim. |
 | `Execute` | S5 | Native, **with Execute-time authority** (MF1): authority re-resolved + re-authorized at **every** Execute (portal re-executions included); fresh `fd.stmt_attempt` precedes every effect. Portal `maxRows` honored; `PortalSuspended` preserved; suspended portal buffers charge retained state. | re-authorize per Execute | general; output watermark; suspended buffers → retained | `fd.stmt_attempt`/`fd.stmt_outcome` per Execute | Grant revoked between Parse and Execute → §8a refuse at Execute (tested per ADR). |
 | `Close` (`S`/`P`) | S4/S5 (healthy) | Native; **releases** the named statement's/portal's retained charge, and closing a prepared statement **cascades to its portals** (§4a). Intake is control-lane-sized so saturation cannot block release — but during post-error discard it is discarded like everything else. Why, and how release still happens: **note 4-Close** below. | none | **control lane** | — | — |
-| `Flush` | S5 | Native passthrough to output pump: delivers everything the segment has queued **before** any `Sync`. Discarded during post-error discard. **ONLY `Sync` OWNS THE TERMINAL** — `Flush` sends no `ReadyForQuery` and does not end the segment, because a readiness here is read by the client as the answer to its NEXT command. Settled in code and recorded here. | none | **control lane** | — | A `Flush` with nothing buffered delivers nothing and creates no object: a protocol no-op, not a defect. **BUT IT IS COUNTED.** `H` is an extended type byte and only `Sync` is cap-exempt, so every `Flush` — empty or not — increments the segment lane's message count, and only `Sync` resets it. A client that flushes defensively inside one segment can therefore be refused `frontdoor/segment-cap` for sending nothing at all. The earlier wording here said an empty `Flush` established "no state", which was true of the objects and false of the accounting. |
-| `Sync` | S4/S5 | Native: closes the segment, resets its counters (10 000 msgs / 96 MiB), emits `ReadyForQuery` from the ExecSession state machine, ends post-error discard, releases the discarded segment's charges — and **destroys the objects that segment never confirmed**. Why a phantom object is worse than none: **note 4-Sync** below. | none | **control lane** | — | Always admissible, even at budget saturation (criterion 1). |
+| `Flush` | S5 | Native passthrough to output pump: delivers everything the segment has queued **before** any `Sync`. Discarded during post-error discard. **ONLY `Sync` OWNS THE TERMINAL** — `Flush` sends no `ReadyForQuery` and does not end the segment, because a readiness here is read by the client as the answer to its NEXT command. Settled in code and recorded here. | none | **control lane** | — | A `Flush` with nothing buffered delivers nothing and creates no object: a protocol no-op, not a defect. **BUT IT IS COUNTED.** `H` is an extended type byte and only `Sync` is cap-exempt, so every `Flush` — empty or not — increments the segment lane's message count, and only `Sync` resets it. A client that flushes defensively inside one segment can therefore be refused `frontdoor/segment-cap` for sending nothing at all. The earlier wording here said an empty `Flush` established "no state", which was true of the objects and false of the accounting. **A withheld `Flush` reports no stop — §6.6.** |
+| `Sync` | S4/S5 | Native: closes the segment, resets its counters (10 000 msgs / 96 MiB), **delivers everything the segment has queued**, emits `ReadyForQuery` from the ExecSession state machine, ends post-error discard, releases the discarded segment's charges — and **destroys the objects that segment never confirmed**. Why a phantom object is worse than none: **note 4-Sync** below. A consumer that stops reading mid-delivery is reported as a **delivery** stop, after the segment's end-of-life work — §6.6. | none | **control lane** | — | Always admissible, even at budget saturation (criterion 1). |
 | `Terminate` | any S4/S5 | Clean close: open tx → ROLLBACK via ExecSession (audited); session closed; lease + all charges released. | — | **control lane** | `fd.conn_close(cause=terminate)` | Always admissible. |
 | `CopyData`/`CopyDone`/`CopyFail` | any | **Protocol violation** (08P01): COPY is refused at classification, so no COPY sub-protocol is ever active; receiving these = fatal error + close. | — | control lane | `fd.refused` | COPY the *statement* refuses at Parse/Query gate with 0A000 (§7). |
 | `FunctionCall` (legacy fast-path) | any | **Refused** (0A000, §8a `frontdoor/no-fastpath`): legacy surface bypasses text classification by construction. | — | control lane | `fd.refused` | Connection stays usable (refusal, not violation). |
@@ -764,6 +764,47 @@ transaction to normal close. The slot ownership, race, audit, and failure
 contract is normative in
 the synchronous-demotion lifecycle reference in the knowledge base
 (`shared/reference/autodb-front-door-synchronous-demotion-lifecycle.md`).
+
+### 6.6 Withheld delivery is scoped to the DELIVERY, not to a statement
+
+*Ruling 2026-09-09 — F2 item 6.*
+
+When the front door stops handing a segment's replies to the client — its
+output budget bit, or the consumer went away — the stop it reports is about the
+**delivery of the segment's answers**, never about what a statement did. The
+two are different subjects and one segment can hold both, or neither:
+
+| Segment | What a statement-scoped stop would claim | What is actually known |
+|---|---|---|
+| `Parse` `Describe` `Sync` | "the statement ran; read the table to find out whether the effects were kept" | No statement was dispatched. There is no table to read. |
+| `Parse` `Bind` `Execute` `Sync`, cut at Sync | the Execute's outcome, re-derived from the delivery failure | The Execute already recorded its own outcome row; the delivery failure adds nothing to it. |
+
+So the segment-end drive reports `delivery_stopped`, the client is told *"the
+answers for this segment were not delivered"*, and the audit records
+`effects=delivery_stopped`. Each statement keeps whatever its own drive
+recorded.
+
+**Only `Sync` may report this, and `Flush` deliberately may not.** A report
+carries the readiness byte the loop would have emitted, and the loop treats a
+report whose status byte is not one of `I`/`T`/`E` as a lost session and
+closes. `Sync` consumed through the terminal `ReadyForQuery`, so a truthful
+byte exists. A `Flush` ends no segment and has none — the only value it could
+carry is `0` — so arming it would kill a connection the client could still
+recover by sending its own `Sync`. `Flush` therefore reports nothing and the
+loop takes its own snapshot.
+
+**The byte is the CLIENT's, not the target's.** A reader outside a client
+transaction runs inside the hidden `READ ONLY` transaction autodb opened, so
+the target answers `T` for a transaction that is ours (§6.1). The report
+carries the client's own status, or it would tell a session with no transaction
+that its effects are pending inside one — and a driver acts on that by sending
+the `COMMIT` it believes it owes.
+
+**Segment end-of-life still happens.** `Sync` ended the segment whatever the
+consumer did, so the discard sweep, the hidden wrap's rollback, the status
+record and §4a's idle-portal drop all run **before** the delivery failure is
+reported. Reporting first was a real defect: it left this end holding portals
+the backend had already destroyed.
 
 ---
 

@@ -1,56 +1,78 @@
 package frontdoor
 
-// F2 ITEM 6: THE SYNC DRIVE ARMS, AND WHAT IT ARMS REACHES BOTH SURFACES.
+// F2 ITEM 6: THE SYNC DRIVE ARMS, AND WHAT IT ARMS IS TRUE.
 //
-// The item asked for the Flush/Sync drives to arm an exec.EmitStopped and for
-// drive->wire and drive->audit witnesses. The prerequisite shipped earlier —
-// armFromWhatIsKnown now yields to the emitter only on ArmUnresolved — and the
-// drives themselves did not arm at all, so the precedence rule was unreachable
-// from a segment-ending call.
+// The item asked for the Flush/Sync drives to arm an exec.EmitStopped with
+// drive->wire and drive->audit witnesses. Review ruled the symmetric
+// requirement wrong and it is: Flush has no terminal byte and must stay
+// recoverable. Only Sync can arm truthfully.
 //
-// WHY ARMING NAIVELY WOULD HAVE BEEN WORSE THAN NOT ARMING. EmitStopped.TxStatus
-// is documented as "the same byte the loop's readiness would carry", and
-// reportOutputWithheld takes a non-nil report's status as its ONLY snapshot: an
-// invalid one means the phase is unknown, matrix §6.3 forbids inventing a
-// readiness, and the loop closes. A Flush-shaped arm carries 0 — a Flush does
-// not end the segment, so there is no ReadyForQuery for it to carry — and 0 is
-// not a valid status. Arming Flush would therefore DROP a session that was
-// perfectly recoverable, because the client can still Sync.
+// WHY ARMING NAIVELY IS WORSE THAN NOT ARMING. EmitStopped.TxStatus is "the
+// same byte the loop's readiness would carry", and reportOutputWithheld takes a
+// non-nil report's status as its ONLY snapshot: an invalid one means the phase
+// is unknown, matrix §6.3 forbids inventing a readiness, and the loop closes. A
+// Flush-shaped arm carries 0 -- a Flush does not end the segment, so there is
+// no ReadyForQuery for it to carry -- and 0 is not valid. Arming Flush would
+// drop a session the client could still recover by Syncing.
 //
-// So the two drives are NOT symmetric, and that asymmetry is the finding:
+// AND WHY THE SCOPE MATTERS MORE THAN THE ARM. A first version passed
+// segmentAwaitsWire as EmitStopped.Executed. Those are different contracts:
+// segmentAwaitsWire means "some step's answer must come from the target",
+// Executed means "a statement was dispatched". Parse/Describe/Sync satisfies
+// the first and not the second, so the arm reported a statement for a segment
+// that had none -- and the vocabulary it borrowed was already false there
+// before any of this work: the client was told
 //
-//   - SYNC has a truthful byte and only Sync does. It consumes through the
-//     terminal ReadyForQuery, and the drain keeps OBSERVING after delivery
-//     stops, so its status is post-tail exactly as the raw path's is. It arms.
-//   - FLUSH has no byte at all. It does not arm, and TestFlushDrive below pins
-//     that as a decision rather than an omission.
+//   "the statement ran and its outcome is not known to the front door
+//    ... read the table to find out"
 //
-// This cell drives a segment with NO EXECUTE — Parse/Describe/Sync, which is
-// what pgx's default exec mode and database/sql's Prepare send on every mode.
-// That is precisely the shape whose answers only the Sync drive delivers: the
-// Execute drive stops at its own terminal, so a segment carrying no Execute has
-// no other drive to deliver anything.
+// for a segment carrying no statement, sending an operator to inspect a table
+// for effects that never existed. Review named the coercion; the fix is the
+// SCOPE, and it corrects the pre-existing message as a consequence.
 
 import (
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/yongjohnlee80/autodb/core/exec"
 )
 
-func TestPGSyncDrive_TheArmReachesTheClientAndTheAudit(t *testing.T) {
+// countingQueries is the engine seam with the ONE call this cell is about
+// counted. Everything else delegates, so the path under test is the real one.
+type countingQueries struct {
+	QueryExecutor
+	txStatusReads atomic.Int64
+}
+
+func (c *countingQueries) WireTxStatus(id exec.SessionID, userID int64) (byte, error) {
+	c.txStatusReads.Add(1)
+	return c.QueryExecutor.WireTxStatus(id, userID)
+}
+
+// THE PRIMARY WITNESS: drive -> wire and drive -> audit, in the delivery
+// vocabulary, on a segment with NO EXECUTE.
+//
+// Parse/Describe/Sync is what pgx's default exec mode and database/sql's
+// Prepare send, and it is the shape whose answers only the Sync drive
+// delivers: the Execute drive stops at its own terminal, so a segment carrying
+// no Execute has no other drive to deliver anything.
+//
+// DELETING THE ARM REDDENS THIS. Without it reportOutputWithheld falls to its
+// separate WireTxStatus read, armFromWhatIsKnown has no report to prefer, and
+// the client gets the statement vocabulary again -- which is what the
+// assertions below refuse.
+func TestPGSyncDrive_ADeliveryStopSaysNothingAboutAStatement(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 
-	// Small enough that the Describe's answer is withheld on the first frame,
-	// large enough that nothing else in the exchange trips it.
 	cap := int64(64)
+	q := &countingQueries{QueryExecutor: eng}
 	_, events, listenAddr := listenerWith(t, Options{
-		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, testOutputCap: &cap,
+		Authn: eng, Queries: q, AuthFailuresPerIP: unthrottled, testOutputCap: &cap,
 	})
 
 	fe := pgClient(t, listenAddr, secret, database)
-	// NO EXECUTE. Parse, then Describe the statement, then Sync — the shape
-	// whose answers only the Sync drive delivers.
 	fe.Send(&pgproto3.Parse{Name: "s1", Query: "SELECT 1 AS one, 2 AS two, 3 AS three"})
 	fe.Send(&pgproto3.Describe{ObjectType: 'S', Name: "s1"})
 	fe.Send(&pgproto3.Sync{})
@@ -58,9 +80,6 @@ func TestPGSyncDrive_TheArmReachesTheClientAndTheAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// DRIVE -> WIRE. The client must be TOLD, and must get exactly one
-	// readiness — Sync's. Before the drive armed, a withheld tail on this shape
-	// produced a silent close: the arm was correct and nobody could see it.
 	var (
 		gate    *pgproto3.ErrorResponse
 		readies int
@@ -70,8 +89,7 @@ func TestPGSyncDrive_TheArmReachesTheClientAndTheAudit(t *testing.T) {
 		m, err := fe.Receive()
 		if err != nil {
 			t.Fatalf("reading the segment's answer: %v — the front door closed without "+
-				"telling the client anything. A truthful arm the client cannot be shown "+
-				"is not a truthful answer, and that silent close is what item 6 is about", err)
+				"telling the client anything", err)
 		}
 		if e, ok := m.(*pgproto3.ErrorResponse); ok && e.Detail == ruleOutputCap {
 			gate = e
@@ -83,31 +101,38 @@ func TestPGSyncDrive_TheArmReachesTheClientAndTheAudit(t *testing.T) {
 			break
 		}
 	}
+	// PREMISE, FATAL RATHER THAN SKIPPED. An earlier version skipped when the
+	// cap failed to bite, which meant this regression evidence could vanish
+	// silently the day the sizing drifted. If the premise stops holding, the
+	// cell is broken and must say so.
 	if gate == nil {
-		t.Fatal("the client was never told its output was withheld")
+		t.Fatalf("the output cap did not withhold this segment (cap=%d): the cell's own "+
+			"premise failed, so there is no arm to inspect. Re-size the cap rather than "+
+			"letting this pass", cap)
 	}
 	if readies != 1 {
 		t.Fatalf("readiness frames = %d, want exactly 1 (Sync's own)", readies)
 	}
-	// THE BYTE IS A REAL STATUS, not the zero that would have meant
-	// session-lost. Which of I/T/E it is depends on the target's phase; that it
-	// is one of them at all is the property item 6 turns on.
 	if !validTxStatus(ready.TxStatus) {
-		t.Errorf("readiness carried %q, which is not a valid status — an arm with an "+
-			"invalid byte is exactly the session-lost path the drive must not take",
-			ready.TxStatus)
+		t.Errorf("readiness carried %q, which is not a valid status", ready.TxStatus)
 	}
 
-	// The message must name the effects clause, which recordedEffects derives
-	// from the ARM. A client that is told its output stopped and nothing about
-	// its effects has been given half an answer.
-	if !strings.Contains(gate.Message, "not fully delivered") {
-		t.Errorf("the gate error does not say the result was not delivered: %q", gate.Message)
+	// THE CLIENT IS TOLD ABOUT DELIVERY, AND NOT ABOUT A STATEMENT.
+	if strings.Contains(gate.Message, "the statement ran") ||
+		strings.Contains(gate.Message, "the statement executed") {
+		t.Errorf("the client was told about a STATEMENT for a segment that carried "+
+			"none: %q", gate.Message)
+	}
+	if strings.Contains(gate.Hint, "read the table") {
+		t.Errorf("the hint sends an operator to read a table for effects that never "+
+			"existed: %q", gate.Hint)
+	}
+	if !strings.Contains(gate.Message, "were not delivered") {
+		t.Errorf("the client was not told its answers went undelivered: %q", gate.Message)
 	}
 
-	// DRIVE -> AUDIT. The operator's record must carry the same outcome the
-	// client was given. One can be right while the other is silent — that is
-	// the shape of the defects this whole area keeps producing.
+	// DRIVE -> AUDIT, in the same vocabulary. One can be right while the other
+	// is silent, which is the shape of the defects this area keeps producing.
 	var outcome string
 	for _, e := range events() {
 		if e.Kind == "fd.stmt_outcome" && e.Reason == ruleOutputCap {
@@ -115,25 +140,34 @@ func TestPGSyncDrive_TheArmReachesTheClientAndTheAudit(t *testing.T) {
 		}
 	}
 	if outcome == "" {
-		t.Fatalf("no fd.stmt_outcome audited under %s; the client was told and the "+
-			"operator was not.\nevents=%v", ruleOutputCap, kinds(events()))
+		t.Fatalf("no fd.stmt_outcome audited under %s.\nevents=%v", ruleOutputCap, kinds(events()))
 	}
-	if !strings.Contains(outcome, "effects=") {
-		t.Errorf("the audited outcome carries no effects clause: %q", outcome)
+	if !strings.Contains(outcome, string(exec.ArmDeliveryStopped)) {
+		t.Errorf("the audit recorded %q, not the delivery arm — the operator's record "+
+			"and the client's message must be the same answer", outcome)
+	}
+
+	// THE LOOP SEAM: A REPORT PREVENTS THE FALLBACK READ.
+	//
+	// reportOutputWithheld takes ONE snapshot. With a report it must use the
+	// report's status; the separate WireTxStatus read exists only for paths
+	// that have none. If the arm is deleted the loop consults it instead, and
+	// this count goes up — which is the structural discrimination review asked
+	// for, independent of any message text.
+	if n := q.txStatusReads.Load(); n != 0 {
+		t.Errorf("the loop read WireTxStatus %d time(s) although the drive supplied a "+
+			"report; two snapshots is how the effects clause and the readiness byte "+
+			"come to disagree", n)
 	}
 }
 
 // AND THE FLUSH DRIVE DELIBERATELY DOES NOT ARM.
 //
-// Pinned as a decision. A Flush does not end the segment, so there is no
-// readiness byte for an arm to carry; the only value available is 0, which
-// reportOutputWithheld treats as session-lost. A consumer that stopped reading
-// mid-segment has NOT lost its session — it can still Sync — so arming here
-// would destroy a recoverable connection to report a stop.
-//
-// The witness is that the session SURVIVES a withheld Flush: the client is told,
-// and its own Sync afterwards still ends the segment normally. If Flush ever
-// starts arming with a fabricated byte, the Sync below stops arriving.
+// Pinned as a decision, per review's ruling. A Flush does not end the segment,
+// so there is no readiness byte for an arm to carry; the only available value
+// is 0, which reportOutputWithheld treats as session-lost. A consumer that
+// stopped reading mid-segment has NOT lost its session — it can still Sync —
+// so arming here would destroy a recoverable connection to report a stop.
 func TestPGFlushDrive_AWithheldFlushDoesNotDropTheSession(t *testing.T) {
 	_, secret, database, eng := pgLoopWithEngine(t)
 
@@ -150,8 +184,6 @@ func TestPGFlushDrive_AWithheldFlushDoesNotDropTheSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The Flush's own answer may be withheld — that is the point — but the
-	// connection must still be usable afterwards.
 	sawGate := false
 	for range 16 {
 		m, err := fe.Receive()
@@ -169,8 +201,8 @@ func TestPGFlushDrive_AWithheldFlushDoesNotDropTheSession(t *testing.T) {
 		}
 	}
 	if !sawGate {
-		t.Skip("the cap did not stop this Flush's output; the cell cannot show the " +
-			"recovery it exists for without a withheld Flush")
+		t.Fatalf("the cap did not withhold this Flush's output (cap=%d): the cell's "+
+			"premise failed and the recovery it exists to show was never exercised", cap)
 	}
 
 	// THE RECOVERY. The client's own Sync still ends the segment.
@@ -192,82 +224,4 @@ func TestPGFlushDrive_AWithheldFlushDoesNotDropTheSession(t *testing.T) {
 		}
 	}
 	t.Fatal("the recovering Sync never produced a readiness")
-}
-
-// AND A TARGET FAILURE ON THIS PATH IS REPORTED AS FAILED, NOT UNRESOLVED.
-//
-// The mechanism is worth naming, because I got it wrong first. My initial
-// version recorded the target's ErrorResponse on the segment path so the ARM
-// could carry it — and no mutation could tell the difference. Reverting that
-// change left every cell green, which is the signal that a change is
-// redundant rather than that the cell is weak.
-//
-// The reason: armFromWhatIsKnown already recovers the fact. When the engine's
-// arm is Unresolved it falls through to the EMITTER's observation, and a
-// target error that passed through the emitter has already set targetFailed
-// there. Supplying it from the drive as well would give one fact two sources,
-// which is precisely how the client's story and the audit's drifted apart in
-// this area before.
-//
-// So the drive reports only what it alone knows, and this cell pins the
-// COMBINATION on the Sync-drive path: the drive's truthful status plus the
-// emitter's observation produce "failed", end to end, on a segment that no
-// Execute drive ever touched.
-func TestPGSyncDrive_TheArmReportsATargetFailureAsFailed(t *testing.T) {
-	_, secret, database, eng := pgLoopWithEngine(t)
-
-	// Sized so the target's own ErrorResponse is what trips the cap: the
-	// missing relation's name is long deliberately.
-	cap := int64(80)
-	_, events, listenAddr := listenerWith(t, Options{
-		Authn: eng, Queries: eng, AuthFailuresPerIP: unthrottled, testOutputCap: &cap,
-	})
-
-	fe := pgClient(t, listenAddr, secret, database)
-	// The statement fails AT THE TARGET (42P01). Still no Execute, so the Sync
-	// drive is the only thing that can deliver — or observe — anything.
-	fe.Send(&pgproto3.Parse{Name: "bad",
-		Query: "SELECT * FROM a_relation_that_does_not_exist_and_has_a_deliberately_long_name_x"})
-	fe.Send(&pgproto3.Describe{ObjectType: 'S', Name: "bad"})
-	fe.Send(&pgproto3.Sync{})
-	if err := fe.Flush(); err != nil {
-		t.Fatal(err)
-	}
-
-	sawGate := false
-	for range 32 {
-		m, err := fe.Receive()
-		if err != nil {
-			t.Fatalf("the front door closed without telling the client: %v", err)
-		}
-		if e, ok := m.(*pgproto3.ErrorResponse); ok && e.Detail == ruleOutputCap {
-			sawGate = true
-		}
-		if _, ok := m.(*pgproto3.ReadyForQuery); ok {
-			break
-		}
-	}
-	if !sawGate {
-		t.Skip("the cap did not withhold this segment's output, so there is no arm to " +
-			"inspect; the cell cannot show what it exists for")
-	}
-
-	var outcome string
-	for _, e := range events() {
-		if e.Kind == "fd.stmt_outcome" && e.Reason == ruleOutputCap {
-			outcome = e.Detail
-		}
-	}
-	if outcome == "" {
-		t.Fatalf("no fd.stmt_outcome audited.\nevents=%v", kinds(events()))
-	}
-	// THE PROPERTY: the combination reports a failure as a failure. If the
-	// precedence rule ever stops yielding to the emitter on an unresolved arm,
-	// this reads "not known to the front door" for a statement that visibly
-	// failed at the target.
-	if strings.Contains(outcome, "not known to the front door") {
-		t.Errorf("the arm reported the outcome as UNRESOLVED for a statement that "+
-			"failed at the target — the observation was recorded and then thrown "+
-			"away: %q", outcome)
-	}
 }
