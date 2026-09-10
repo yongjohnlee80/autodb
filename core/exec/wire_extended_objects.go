@@ -155,6 +155,12 @@ type extObjects struct {
 	// the connection — and the client must receive them in the order it asked.
 	segment []segStep
 
+	// pendingCloses are objects whose Close is QUEUED but not acknowledged by
+	// the target. Their records have already left the maps, so the names are
+	// free; this is what still remembers that the target may hold them. See
+	// notePendingClose.
+	pendingCloses []objectRef
+
 	// roWrap is the hidden READ ONLY transaction a reader's segment runs inside.
 	//
 	// F3a's guarantee is that the SERVER enforces what the classifier decided: a
@@ -205,6 +211,26 @@ type segStep struct {
 	// the drain is where the owner is known.
 	obj *objectRef
 
+	// closes names the object this frame DESTROYS, and it is dropped from the
+	// store when the target's CloseComplete is observed — not when the Close is
+	// queued.
+	//
+	// THE DIRECTION OF THE DIVERGENCE IS WHY THIS EXISTS. Close used to drop the
+	// object here and now, then queue the frame; a target error earlier in the
+	// segment discards everything through to Sync, that Close included, and the
+	// two ends part company with the TARGET holding a statement this end has
+	// forgotten. The next Parse of the name is then admitted here, relayed, and
+	// answered `42P05 prepared statement … already exists` — which a client
+	// cannot clear, because nothing it can send makes this end believe the
+	// statement exists.
+	//
+	// The opposite divergence is harmless by comparison: a record with no
+	// target-side object answers `ErrUnknownStatement` from here, which is ours,
+	// clean, and actionable. So the object leaves the store when its completion
+	// is SEEN, exactly as Parse and Bind finalize at the frame site rather than
+	// at the call.
+	closes *objectRef
+
 	// exec marks the Execute frame of the call that queued it.
 	//
 	// WITHOUT THIS THE OWNER OF A nil-obj FRAME IS AMBIGUOUS: Describe, Close and
@@ -250,6 +276,16 @@ func (o *extObjects) queueWireFor(kind objectKind, name string, seq uint64) {
 	o.segment = append(o.segment, segStep{obj: &objectRef{kind: kind, name: name, seq: seq}})
 }
 
+// queueWireClosing records a Close whose object is dropped when the target
+// confirms it. See segStep.closes.
+//
+// The generation is captured at queue time, like queueWireFor's, so a Close
+// cannot drop an object that was destroyed and re-created under the same name
+// while this frame was in flight — dropObject compares the seq.
+func (o *extObjects) queueWireClosing(kind objectKind, name string, seq uint64) {
+	o.segment = append(o.segment, segStep{closes: &objectRef{kind: kind, name: name, seq: seq}})
+}
+
 // queueExec records the Execute frame of the call that queued it. See
 // segStep.exec for why the Execute is marked rather than inferred.
 func (o *extObjects) queueExec() { o.segment = append(o.segment, segStep{exec: true}) }
@@ -272,6 +308,67 @@ func (o *extObjects) queueSynthFor(kind objectKind, name string, seq uint64, msg
 		synth: msgs,
 		obj:   &objectRef{kind: kind, name: name, seq: seq},
 	})
+}
+
+// notePendingClose records that a Close has been QUEUED for an object whose
+// record has already left the store, so the name is free for a replacement
+// Parse in the same segment while this end still remembers that the TARGET may
+// hold it.
+//
+// BOTH HALVES ARE REQUIRED, and a first version of this fix had only one. The
+// name must be freed at once, because a client with a statement cache Closes an
+// evicted entry and Parses its replacement UNDER THE SAME NAME in one segment —
+// pgx does exactly this, in one pipeline — and PostgreSQL serves it because it
+// processes the frames in order. Refusing that Parse as a duplicate breaks a
+// correct client, which is what TestExtPG_NamedStatementIsReusedAndEvictedLikeACache
+// says in its own words: "a cache could never replace an entry".
+//
+// But the pending record must also be kept, because a target error earlier in
+// the segment discards every queued frame including that Close, and then the
+// target still has the object. Forgetting it there is what produced the relayed
+// `42P05 prepared statement … already exists` this file's cells reproduce.
+func (o *extObjects) notePendingClose(ref objectRef) {
+	o.pendingCloses = append(o.pendingCloses, ref)
+}
+
+// confirmClose removes a pending close the target has acknowledged.
+func (o *extObjects) confirmClose(ref objectRef) {
+	for i, p := range o.pendingCloses {
+		if p == ref {
+			o.pendingCloses = append(o.pendingCloses[:i], o.pendingCloses[i+1:]...)
+			return
+		}
+	}
+}
+
+// closeUnconfirmed reports whether a statement of this name is still believed to
+// exist ON THE TARGET because its Close was queued and never acknowledged.
+//
+// It is consulted by Parse: when the answer is yes, the target holds an object
+// under that name and a bare Parse would be answered 42P05, so the Close is
+// re-issued ahead of it. That is the repair, placed where the information is
+// used rather than as a prologue nobody reads.
+func (o *extObjects) closeUnconfirmed(kind objectKind, name string) bool {
+	for _, p := range o.pendingCloses {
+		if p.kind == kind && p.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// clearPendingCloses forgets every pending close for this name, because a fresh
+// Close has just been queued ahead of a Parse that replaces it. Keeping the old
+// records would re-issue the repair on every later Parse of the name.
+func (o *extObjects) clearPendingCloses(kind objectKind, name string) {
+	kept := o.pendingCloses[:0]
+	for _, p := range o.pendingCloses {
+		if p.kind == kind && p.name == name {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	o.pendingCloses = kept
 }
 
 func newExtObjects() *extObjects {
