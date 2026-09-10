@@ -54,6 +54,7 @@ package exec
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -384,4 +385,56 @@ func TestExtPG_PendingClosesAreDeduplicatedByName(t *testing.T) {
 		t.Errorf("%d pending closes recorded for one name, want 1: session-scoped recovery "+
 			"state that grows per attempt grows for the life of the session", n)
 	}
+}
+
+// AT CAPACITY THE CLOSE IS REFUSED, NOT THE OBLIGATION DROPPED.
+//
+// A first version evicted the oldest pending record to keep the slice bounded.
+// Review named the trade correctly: that keeps a bound and silently restores the
+// original defect for the evicted name — nothing remembers the target still
+// holds it, so the next Parse of that name is relayed and answered 42P05, the
+// unrecoverable failure this file exists to prevent. A bounded slice is not
+// worth an unbounded correctness hole.
+//
+// A unit cell rather than a live-PG one: reaching the cap needs maxPendingCloses
+// distinct names outstanding in discarded segments, and driving that through a
+// real server would buy nothing the store's own state does not already show.
+func TestExtObjects_PendingCloseCapacityRefusesAndKeepsEveryObligation(t *testing.T) {
+	o := newExtObjects()
+
+	// PAST capacity, not merely to it. A first version of this cell filled to
+	// exactly maxPendingCloses and passed with the eviction restored, because
+	// an evict-on-append only fires on the record AFTER the cap — so the cell
+	// observed nothing. The mutation matrix caught that, which is what it is
+	// for.
+	const over = 5
+	for i := 0; i < maxPendingCloses+over; i++ {
+		o.notePendingClose(objectRef{kind: objectStatement, name: fmt.Sprintf("s%d", i)})
+	}
+	if !o.pendingCloseAtCapacity() {
+		t.Fatalf("positive control: %d records is not at capacity (%d), so this cell cannot "+
+			"observe anything about the cap", len(o.pendingCloses), maxPendingCloses)
+	}
+	// EVERY obligation is still there. This is the assertion the eviction broke.
+	if !o.closeUnconfirmed(objectStatement, "s0") {
+		t.Error("the OLDEST obligation was dropped: the target still holds s0, nothing " +
+			"remembers it, and the next Parse of that name is relayed into an " +
+			"unrecoverable 42P05")
+	}
+	for i := 0; i < maxPendingCloses+over; i++ {
+		n := fmt.Sprintf("s%d", i)
+		if !o.closeUnconfirmed(objectStatement, n) {
+			t.Errorf("obligation for %q was discarded to keep the slice bounded", n)
+		}
+	}
+	if len(o.pendingCloses) != maxPendingCloses+over {
+		t.Errorf("%d records held, want all %d — nothing may be dropped, because a dropped "+
+			"obligation is a name whose next Parse is relayed into an unrecoverable 42P05",
+			len(o.pendingCloses), maxPendingCloses+over)
+	}
+	// THE REFUSAL IS THE CALLER'S JOB, and it is what keeps this from growing:
+	// WireCloseStatement consults pendingCloseAtCapacity BEFORE it sends or
+	// drops anything, so the store never reaches this state through the wire.
+	// This cell reaches it directly to prove that the record-keeping itself
+	// never discards.
 }

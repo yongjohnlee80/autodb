@@ -47,6 +47,16 @@ var (
 	// ErrUnknownStatement is a Bind/Describe/Close naming a statement that does
 	// not exist (PostgreSQL 26000).
 	ErrUnknownStatement = errors.New("exec: prepared statement does not exist")
+	// ErrPendingCloseCap refuses a Close whose recovery obligation cannot be
+	// recorded, because the session already holds maxPendingCloses distinct
+	// names outstanding in discarded segments.
+	//
+	// IT REFUSES RATHER THAN FORGETTING. Freeing a name while losing the record
+	// that the target still holds it is the divergence this file exists to
+	// prevent, and it surfaces to a client as an unrecoverable 42P05. A session
+	// that reaches this cap is pathological — no real client produces it — so
+	// failing its Close loudly is the honest answer.
+	ErrPendingCloseCap = errors.New("exec: too many prepared statements are awaiting close confirmation on this session")
 
 	// ErrDuplicatePortal is a Bind naming a live NAMED portal (PostgreSQL
 	// 42P03). The unnamed portal is exempt, for the same reason as above.
@@ -366,15 +376,28 @@ func (o *extObjects) notePendingClose(ref objectRef) {
 	// this is session-scoped state that survives a discarded segment on purpose
 	// — so a session closing thousands of distinct names into discarded
 	// segments would otherwise grow without limit.
-	if len(o.pendingCloses) >= maxPendingCloses {
-		// A bound rather than unbounded growth. Reaching it means a session has
-		// this many distinct names outstanding in discarded segments, which is
-		// pathological; the oldest is dropped, so the repair degrades to the
-		// pre-fix behaviour for that one name rather than the session growing
-		// without limit.
-		o.pendingCloses = o.pendingCloses[1:]
-	}
 	o.pendingCloses = append(o.pendingCloses, ref)
+}
+
+// pendingCloseAtCapacity reports whether another recovery obligation can be
+// taken on.
+//
+// EVICTION WOULD BE A CORRECTNESS HOLE, and a first version evicted. Dropping
+// the oldest record keeps the slice bounded and silently restores the original
+// defect for the evicted name: nothing remembers that the target still holds
+// it, so the next Parse of that name is relayed and answered
+// `42P05 prepared statement … already exists` — the unrecoverable failure this
+// whole file exists to prevent. A bounded slice is not worth an unbounded
+// correctness hole.
+//
+// So capacity REFUSES instead, before anything is sent or dropped. At the cap a
+// session has this many distinct names outstanding in DISCARDED segments, which
+// no real client produces — pgx's default statement cache is 512 entries, and a
+// record only survives when its segment was discarded. Reaching it is
+// pathological, and the honest answer to a pathological session is to fail it
+// loudly rather than to quietly stop being able to repair it.
+func (o *extObjects) pendingCloseAtCapacity() bool {
+	return len(o.pendingCloses) >= maxPendingCloses
 }
 
 // maxPendingCloses bounds the session's pending-close recovery state. It is
