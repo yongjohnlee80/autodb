@@ -189,40 +189,139 @@ func TestExtPG_AConfirmedCloseLeavesNoPendingRepair(t *testing.T) {
 	}
 }
 
-// THE PORTAL PATH HAS THE SAME DEFECT AND THE SAME FIX.
+// THE REPAIR IS INVISIBLE TO THE CLIENT, and it is the finding
+// that mattered most.
 //
-// Narrower on purpose: matrix 4a drops every portal at an idle Sync, so a portal
-// cannot be orphaned across segments the way a statement can. What is asserted
-// is that the Close records a pending repair — the property the fix establishes
-// at this entry point.
-func TestExtPG_APortalCloseRecordsAPendingRepair(t *testing.T) {
+// The repair queues a real Close ahead of the Parse, and the drain forwards
+// every target response. So the first version put an unsolicited CloseComplete
+// in front of the client's ParseComplete — and a pipelining client tracks
+// expected response types IN ORDER, so that desynchronizes its
+// request/response pairing. The client this repair exists for is precisely such
+// a client, which would have made the fix worse than the defect.
+//
+// This asserts the EXACT client-visible sequence, not merely that a
+// ParseComplete arrives.
+func TestExtPG_TheRepairEmitsNothingTheClientDidNotAskFor(t *testing.T) {
 	f, _, sid, userID := extSession(t)
 	ctx := context.Background()
 
-	extPrepare(t, f, sid, userID, "p", "SELECT 1")
+	// Leave the target holding "keep" with its Close discarded.
+	extPrepare(t, f, sid, userID, "keep", "SELECT 1")
+	if _, err := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if err := f.eng.WireParse(ctx, sid, userID, "bad",
+		"SELECT * FROM autodb_no_such_table_9a7c", nil, testIP); err != nil {
+		t.Fatalf("premise: %v", err)
+	}
+	if err := f.eng.WireCloseStatement(ctx, sid, userID, "keep"); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
 	s, lerr := f.eng.sessions.lookup(sid, userID)
 	if lerr != nil {
 		t.Fatal(lerr)
 	}
-	if _, ok := s.ext.portals["p"]; !ok {
-		t.Fatal("positive control: no portal was bound, so this cell observes nothing")
+	if !s.ext.closeUnconfirmed(objectStatement, "keep") {
+		t.Fatal("positive control: no pending repair, so no repair will run and this cell " +
+			"asserts nothing")
 	}
 
-	if err := f.eng.WireClosePortal(ctx, sid, userID, "p"); err != nil {
-		t.Fatalf("close portal: %v", err)
+	// The repair runs inside this Parse. Record every frame the client sees.
+	if err := f.eng.WireParse(ctx, sid, userID, "keep", "SELECT 1", nil, testIP); err != nil {
+		t.Fatalf("re-Parse: %v", err)
 	}
-	if _, ok := s.ext.portals["p"]; ok {
-		t.Error("the portal name is still occupied, so a re-Bind of it would be refused")
+	var seen []string
+	if _, err := f.eng.WireSyncSegment(ctx, sid, userID, func(m WireMessage) error {
+		seen = append(seen, m.Kind)
+		return nil
+	}); err != nil {
+		t.Fatalf("sync: %v", err)
 	}
-	if !s.ext.closeUnconfirmed(objectPortal, "p") {
-		t.Error("the portal's Close recorded no pending repair: a discarded Close would " +
-			"leave the target holding a portal this end had forgotten")
+	// EXACTLY the client's own frame's answer, and nothing else.
+	want := []string{"ParseComplete"}
+	if len(seen) != len(want) || seen[0] != want[0] {
+		t.Errorf("the client saw %v, want %v — a frame it did not send produced a frame it "+
+			"can see, which is what desynchronizes a pipelining client", seen, want)
 	}
+	for _, k := range seen {
+		if k == "CloseComplete" {
+			t.Error("an unsolicited CloseComplete reached the client ahead of its " +
+				"ParseComplete: the repair must consume its own answer")
+		}
+	}
+}
 
+// AND THE REPAIR SURVIVES A SECOND DISCARD.
+//
+// The pending record used to be cleared when the repair was QUEUED. If a later
+// frame in that same segment errors, PostgreSQL discards the repair Close and
+// the Parse together, the target still holds the old statement, and with the
+// record already gone the next Parse no longer repairs it. The failure returns,
+// silently, one segment later.
+func TestExtPG_ADiscardedRepairStillRepairsOnTheNextParse(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx := context.Background()
+
+	extPrepare(t, f, sid, userID, "keep", "SELECT 1")
 	if _, err := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if s.ext.closeUnconfirmed(objectPortal, "p") {
-		t.Error("the pending repair survived a confirmed portal Close")
+	// Discard #1: the Close is swallowed.
+	if err := f.eng.WireParse(ctx, sid, userID, "bad1",
+		"SELECT * FROM autodb_no_such_table_9a7c", nil, testIP); err != nil {
+		t.Fatalf("premise: %v", err)
+	}
+	if err := f.eng.WireCloseStatement(ctx, sid, userID, "keep"); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	s, lerr := f.eng.sessions.lookup(sid, userID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	if !s.ext.closeUnconfirmed(objectStatement, "keep") {
+		t.Fatal("positive control: nothing pending after the first discard")
+	}
+
+	// Discard #2. THE ERROR MUST COME FIRST IN THE SEGMENT, or the repair lands
+	// and there is nothing to observe: PostgreSQL processes frames in order, so
+	// a repair queued ahead of the erroring frame is delivered normally. The
+	// first version of this cell queued them the other way round and passed for
+	// the wrong reason.
+	if err := f.eng.WireParse(ctx, sid, userID, "bad2",
+		"SELECT * FROM autodb_no_such_table_9a7c", nil, testIP); err != nil {
+		t.Fatalf("premise: %v", err)
+	}
+	if err := f.eng.WireParse(ctx, sid, userID, "keep", "SELECT 1", nil, testIP); err != nil {
+		t.Fatalf("re-Parse: %v", err)
+	}
+	if _, err := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if !s.ext.closeUnconfirmed(objectStatement, "keep") {
+		t.Fatal("the pending repair was lost when its own segment was discarded: the target " +
+			"still holds the statement and the next Parse will be relayed into 42P05")
+	}
+
+	// Third attempt, clean segment: the repair must still fire and succeed.
+	if err := f.eng.WireParse(ctx, sid, userID, "keep", "SELECT 1", nil, testIP); err != nil {
+		t.Fatalf("third re-Parse: %v", err)
+	}
+	if _, err := f.eng.WireSyncSegment(ctx, sid, userID, func(m WireMessage) error {
+		if m.Kind == "ErrorResponse" && m.Err != nil {
+			t.Errorf("the target answered %q (SQLSTATE %s) — the repair did not survive two "+
+				"discards", m.Err.Message, m.Err.Code)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if s.ext.closeUnconfirmed(objectStatement, "keep") {
+		t.Error("the pending repair survived a delivered repair Close")
 	}
 }

@@ -231,6 +231,18 @@ type segStep struct {
 	// at the call.
 	closes *objectRef
 
+	// internal marks a frame THIS END queued that the client never sent, so its
+	// answer settles state here and is NEVER emitted.
+	//
+	// Only the repair uses it (see WireParse). Review found the first version
+	// unsafe for the precise client it was written for: the repair queued a real
+	// Close and the drain forwards every target response, so a pgx pipeline --
+	// which tracks expected response types IN ORDER -- would receive an
+	// unsolicited CloseComplete before its ParseComplete and desynchronize its
+	// request/response pairing. A frame the client did not send must not produce
+	// a frame the client can see.
+	internal bool
+
 	// exec marks the Execute frame of the call that queued it.
 	//
 	// WITHOUT THIS THE OWNER OF A nil-obj FRAME IS AMBIGUOUS: Describe, Close and
@@ -286,6 +298,15 @@ func (o *extObjects) queueWireClosing(kind objectKind, name string, seq uint64) 
 	o.segment = append(o.segment, segStep{closes: &objectRef{kind: kind, name: name, seq: seq}})
 }
 
+// queueRepairClose records the repair's Close: its CloseComplete confirms the
+// pending close and is swallowed rather than delivered. See segStep.internal.
+func (o *extObjects) queueRepairClose(kind objectKind, name string, seq uint64) {
+	o.segment = append(o.segment, segStep{
+		internal: true,
+		closes:   &objectRef{kind: kind, name: name, seq: seq},
+	})
+}
+
 // queueExec records the Execute frame of the call that queued it. See
 // segStep.exec for why the Execute is marked rather than inferred.
 func (o *extObjects) queueExec() { o.segment = append(o.segment, segStep{exec: true}) }
@@ -328,18 +349,57 @@ func (o *extObjects) queueSynthFor(kind objectKind, name string, seq uint64, msg
 // target still has the object. Forgetting it there is what produced the relayed
 // `42P05 prepared statement … already exists` this file's cells reproduce.
 func (o *extObjects) notePendingClose(ref objectRef) {
+	// DEDUPLICATED, because this is session-scoped recovery state:
+	// it survives the discarded segment on purpose, so an undeduplicated append
+	// would grow for the life of a session that repeatedly Closes the same name
+	// into discarded segments. One record per name is all the repair needs — it
+	// asks "does the target still have this name", not "how many times".
+	for _, p := range o.pendingCloses {
+		if p.kind == ref.kind && p.name == ref.name {
+			return
+		}
+	}
+	if len(o.pendingCloses) >= maxPendingCloses {
+		// A bound rather than unbounded growth. Reaching it means a session has
+		// this many distinct names outstanding in discarded segments, which is
+		// pathological; the oldest is dropped, so the repair degrades to the
+		// pre-fix behaviour for that one name rather than the session growing
+		// without limit.
+		o.pendingCloses = o.pendingCloses[1:]
+	}
 	o.pendingCloses = append(o.pendingCloses, ref)
 }
 
+// maxPendingCloses bounds the session's pending-close recovery state. It is
+// generous relative to any real client: pgx's default statement-cache capacity
+// is 512, and a pending close only survives when its segment was DISCARDED.
+const maxPendingCloses = 1024
+
 // confirmClose removes a pending close the target has acknowledged.
+//
+// MATCHED ON KIND AND NAME, not on the whole ref including its generation. The
+// pending record answers one question — "does the target still hold something
+// under this name?" — so the NAME is its identity, and notePendingClose keeps
+// at most one record per name. The repair's own step carries no generation for
+// exactly this reason: it re-Closes a name, not a particular object, because
+// the object it is clearing was created before this end lost track of it.
 func (o *extObjects) confirmClose(ref objectRef) {
 	for i, p := range o.pendingCloses {
-		if p == ref {
+		if p.kind == ref.kind && p.name == ref.name {
 			o.pendingCloses = append(o.pendingCloses[:i], o.pendingCloses[i+1:]...)
 			return
 		}
 	}
 }
+
+// PORTALS KEEP NO PENDING STATE, and that asymmetry is deliberate.
+//
+// A portal cannot be orphaned across segments: matrix 4a drops every portal when
+// the target reports `I`, and an autocommit error still ends at `I`, so a
+// portal record cannot outlive the Sync that would have confirmed its Close.
+// A first version recorded pending closes for portals too, out of symmetry —
+// and nothing consumed them, so it was unbounded state that only grew. Removed.
+// The portal's Close therefore drops eagerly, as it always did.
 
 // closeUnconfirmed reports whether a statement of this name is still believed to
 // exist ON THE TARGET because its Close was queued and never acknowledged.
@@ -355,20 +415,6 @@ func (o *extObjects) closeUnconfirmed(kind objectKind, name string) bool {
 		}
 	}
 	return false
-}
-
-// clearPendingCloses forgets every pending close for this name, because a fresh
-// Close has just been queued ahead of a Parse that replaces it. Keeping the old
-// records would re-issue the repair on every later Parse of the name.
-func (o *extObjects) clearPendingCloses(kind objectKind, name string) {
-	kept := o.pendingCloses[:0]
-	for _, p := range o.pendingCloses {
-		if p.kind == kind && p.name == name {
-			continue
-		}
-		kept = append(kept, p)
-	}
-	o.pendingCloses = kept
 }
 
 func newExtObjects() *extObjects {
