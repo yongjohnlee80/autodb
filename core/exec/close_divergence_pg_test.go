@@ -325,3 +325,63 @@ func TestExtPG_ADiscardedRepairStillRepairsOnTheNextParse(t *testing.T) {
 		t.Error("the pending repair survived a delivered repair Close")
 	}
 }
+
+// AND THE PENDING STATE IS BOUNDED BY NAME, not by how often a name is closed.
+//
+// This is session-scoped recovery state: it survives the discarded segment on
+// purpose, which is exactly why it must not grow per attempt. A session that
+// repeatedly Closes the same name into discarded segments would otherwise
+// accumulate one record per attempt for its whole life.
+//
+// It has its own cell because the mutation matrix found nothing observing the
+// property. That investigation is what showed the property holds STRUCTURALLY:
+// notePendingClose is reached only when the name is in the store and its caller
+// removes it from the store in the same breath, so a second record needs a
+// Parse in between — and that Parse runs the repair, which clears the record.
+// The defensive deduplication a reviewer asked for turned out to be
+// unconstructible and was removed as dead code; this cell pins the invariant
+// that replaced it, and passes for the right reason rather than because of a
+// loop.
+func TestExtPG_PendingClosesAreDeduplicatedByName(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx := context.Background()
+
+	s, lerr := f.eng.sessions.lookup(sid, userID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+
+	// Close the SAME name into three separate discarded segments.
+	for i := range 3 {
+		extPrepare(t, f, sid, userID, "churn", "SELECT 1")
+		if _, err := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); err != nil {
+			t.Fatalf("sync %d: %v", i, err)
+		}
+		if err := f.eng.WireParse(ctx, sid, userID, "bad",
+			"SELECT * FROM autodb_no_such_table_9a7c", nil, testIP); err != nil {
+			t.Fatalf("premise %d: %v", i, err)
+		}
+		if err := f.eng.WireCloseStatement(ctx, sid, userID, "churn"); err != nil {
+			t.Fatalf("close %d: %v", i, err)
+		}
+		if _, err := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); err != nil {
+			t.Fatalf("sync after close %d: %v", i, err)
+		}
+	}
+	if !s.ext.closeUnconfirmed(objectStatement, "churn") {
+		t.Fatal("positive control: nothing pending after three discarded closes, so this " +
+			"cell cannot observe how many records were kept")
+	}
+	// ONE record, not three. The repair asks "does the target still hold this
+	// name" — a question one record answers.
+	var n int
+	for _, p := range s.ext.pendingCloses {
+		if p.kind == objectStatement && p.name == "churn" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d pending closes recorded for one name, want 1: session-scoped recovery "+
+			"state that grows per attempt grows for the life of the session", n)
+	}
+}
