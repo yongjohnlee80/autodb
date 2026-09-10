@@ -52,11 +52,58 @@ jobs:
         with:
           merge-multiple: true
           path: dist
-      - name: create release with gh
+      - name: publish the release and attach the artifacts
         env:
           GH_TOKEN: ${{ github.token }}
+        # CREATE-OR-UPLOAD, because `gh release create` FAILS OUTRIGHT when a
+        # release for the tag already exists, and that is a reachable state
+        # rather than an error:
+        #
+        #   - a maintainer wrote the release notes by hand before or just after
+        #     pushing the tag, which is the ordinary way to publish notes that
+        #     say more than --generate-notes can infer from commit subjects;
+        #   - the tag was pushed, the run failed for an unrelated reason, and
+        #     the retry finds its own half-finished release;
+        #   - the publish job is re-run from the Actions UI.
+        #
+        # Measured on v0.3.10 (2026-09-10): the four build jobs all succeeded,
+        # the release existed because it had been created by hand minutes
+        # earlier, and this step died with "a release with the same tag name
+        # already exists" — so the tag shipped with ZERO binaries while every
+        # artifact sat complete on the run. The binaries are the only part of
+        # this workflow a consumer cannot reproduce themselves, and they were
+        # the only part it dropped.
+        #
+        # So: create when absent, and upload either way. --clobber makes a
+        # re-run idempotent instead of failing on an asset that is already
+        # there.
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            dist/*.tar.gz dist/*.tar.gz.sha256
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists; keeping its notes"
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz dist/*.tar.gz.sha256 \
+            --clobber
+
+      - name: verify every artifact reached the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # THE STEP ABOVE CAN SUCCEED HAVING UPLOADED NOTHING, which is how this
+        # failure stayed invisible until someone looked at the release page. An
+        # upload of a glob that matched no files, or a partial upload, both exit
+        # 0. So the count is asserted: one tarball and one checksum per platform
+        # the build matrix produced.
+        run: |
+          set -euo pipefail
+          want=$(ls -1 dist/*.tar.gz dist/*.tar.gz.sha256 | wc -l)
+          got=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets | length')
+          echo "artifacts built: ${want}; assets on the release: ${got}"
+          if [ "${got}" -lt "${want}" ]; then
+            echo "::error::${got} assets on ${GITHUB_REF_NAME} but ${want} were built — the release is incomplete"
+            exit 1
+          fi
