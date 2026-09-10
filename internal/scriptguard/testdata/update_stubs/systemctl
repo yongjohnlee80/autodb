@@ -37,9 +37,37 @@ case "${1:-}" in
         _st="${_entry%%:*}"
         _pid=4242
         case "$_entry" in *:*) _pid="${_entry#*:}" ;; esac
-        # Mirrors the real `-p ActiveState -p MainPID -p NRestarts --value`
-        # order: three lines, no keys.
-        printf '%s\n%s\n%s\n' "$_st" "$_pid" "7"
+        # WHAT REAL systemctl DOES -- both halves of it.
+        #
+        # `--value` strips the keys; without it each line is KEY=VALUE. And the
+        # ORDER IS SYSTEMD'S TO CHOOSE, not the caller's. On the front-door
+        # droplet, `-p ActiveState -p MainPID -p NRestarts --value` came back as
+        # MainPID, NRestarts, ActiveState -- so a positional reader saw
+        # ActiveState=28797 and NRestarts=active, concluded the unit was not
+        # active, and rolled back an update that had come up cleanly.
+        #
+        # This stub used to hardcode the CALLER's order with the comment
+        # "mirrors the real ... order", which is precisely the script's own
+        # assumption. Verifier and code shared one blind spot, so no cell here
+        # could ever have caught the defect. UPD_SHOW_ORDER makes the order a
+        # parameter; the default stays the caller's order so existing cells
+        # describe the same host they always did.
+        _order="${UPD_SHOW_ORDER:-state,pid,restarts}"
+        _bare=""
+        case " $* " in *" --value "*) _bare="yes" ;; esac
+        for _f in $(printf '%s' "$_order" | tr ',' ' '); do
+          case "$_f" in
+            state)    _k="ActiveState"; _v="$_st" ;;
+            pid)      _k="MainPID";     _v="$_pid" ;;
+            restarts) _k="NRestarts";   _v="7" ;;
+            *) continue ;;
+          esac
+          if [ "$_bare" = "yes" ]; then
+            printf '%s\n' "$_v"
+          else
+            printf '%s=%s\n' "$_k" "$_v"
+          fi
+        done
         ;;
       *)
         printf '%s\n' "${UPD_WAS_ACTIVE:-active}"

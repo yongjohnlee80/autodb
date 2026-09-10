@@ -152,11 +152,33 @@ wait_active() {
   _tries=0
   ACTIVE_STATE="unknown"; ACTIVE_PID="0"; ACTIVE_RESTARTS="0"
   while [ "$_tries" -lt 30 ]; do
-    _show="$(systemctl show -p ActiveState -p MainPID -p NRestarts --value "$UNIT" 2>/dev/null \
-             || printf 'unknown\n0\n0\n')"
-    ACTIVE_STATE="$(printf '%s\n' "$_show" | sed -n 1p)"
-    ACTIVE_PID="$(printf '%s\n' "$_show" | sed -n 2p)"
-    ACTIVE_RESTARTS="$(printf '%s\n' "$_show" | sed -n 3p)"
+    # BY NAME, NOT BY POSITION. `systemctl show -p A -p B -p C` returns the
+    # properties in an order SYSTEMD chooses, and it is under no obligation to
+    # honour the order of the flags: a front-door host answered MainPID,
+    # NRestarts, ActiveState for exactly this call, while a newer systemd
+    # elsewhere answered in flag order -- so the positional read worked on the
+    # machine it was written on and failed in production.
+    #
+    # `--value` is what made it silent: it strips the keys, so a misaligned
+    # answer is indistinguishable from a correct one. The probe assigned a pid
+    # to ActiveState, matched no case, fell through to the catch-all, and rolled
+    # back an update whose unit was active with NRestarts=0 and a steady pid --
+    # while the closing report, which asks for ONE property and therefore
+    # cannot be misordered, printed "service : active" in the same run.
+    #
+    # Keeping the keys costs one sed expression per property and removes the
+    # assumption entirely.
+    _show="$(systemctl show -p ActiveState -p MainPID -p NRestarts "$UNIT" 2>/dev/null \
+             || printf 'ActiveState=unknown\nMainPID=0\nNRestarts=0\n')"
+    ACTIVE_STATE="$(printf '%s\n' "$_show" | sed -n 's/^ActiveState=//p' | sed -n 1p)"
+    ACTIVE_PID="$(printf '%s\n' "$_show" | sed -n 's/^MainPID=//p' | sed -n 1p)"
+    ACTIVE_RESTARTS="$(printf '%s\n' "$_show" | sed -n 's/^NRestarts=//p' | sed -n 1p)"
+    # A property that came back missing rather than misordered must read as
+    # unknown, the same as a failed call -- not as an empty string that the
+    # case below would silently treat as "not active".
+    [ -n "$ACTIVE_STATE" ] || ACTIVE_STATE="unknown"
+    [ -n "$ACTIVE_PID" ] || ACTIVE_PID="0"
+    [ -n "$ACTIVE_RESTARTS" ] || ACTIVE_RESTARTS="0"
     case "$ACTIVE_STATE" in
       active)
         if [ -n "$_seen_pid" ] && [ "$ACTIVE_PID" != "$_seen_pid" ]; then
@@ -301,13 +323,53 @@ info "at $(git -C "$SRC" rev-parse --short HEAD) ($TAG)"
 
 # ------------------------------------------------------------------- the build
 step "Building"
-GOBIN=""
+# mise CAN BE INSTALLED AND STILL INVISIBLE.
+#
+# sudo replaces PATH with sudoers' secure_path and never reads the operator's
+# shell rc, so `command -v mise` misses the mise the provisioner installed at
+# ~/.local/bin/mise -- and this script died with "no Go toolchain: install mise
+# or go" on a host that had both. provision_vm.sh already falls back to that
+# exact path; only this script asked `command -v` alone, which is the same
+# defect fixed in one entry point and not the other.
+#
+# The INVOKING user's home is searched too, and the mise found there is run
+# WITH that home: under sudo $HOME is root's, while the toolchain and mise's
+# global pin belong to whoever ran the command. Running it with root's home
+# instead makes mise re-download a toolchain the host already has.
+mise_owner_home() {
+  [ -n "${SUDO_USER:-}" ] || return 0
+  getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6
+}
+MISE=""
+MISE_RUN=""
 if command -v mise >/dev/null 2>&1; then
-  GOBIN="mise exec --"
+  MISE="mise"
+  MISE_RUN="mise"
+else
+  for _h in "${HOME:-}" "$(mise_owner_home)"; do
+    [ -n "$_h" ] || continue
+    if [ -x "$_h/.local/bin/mise" ]; then
+      MISE="$_h/.local/bin/mise"
+      MISE_RUN="env HOME=$_h $MISE"
+      info "found mise off PATH at $MISE (running it with HOME=$_h)"
+      break
+    fi
+  done
+fi
+
+GOBIN=""
+if [ -n "$MISE" ]; then
+  GOBIN="$MISE_RUN exec --"
   if [ -z "$GO_VERSION" ] && [ -r "$SRC/go.mod" ]; then
     # The MINOR line the source asks for, so a patch release of the toolchain
     # is allowed and a mismatch is not invented.
-    GO_VERSION="$(awk '/^go /{print $2}' "$SRC/go.mod" | head -1)"
+    #
+    # Taking $2 whole pinned the FULL patch ("1.25.3"), which is the opposite of
+    # what the sentence above promises: on a host provisioned with a newer patch
+    # in the same line, `mise exec go@1.25.3` fetches a SECOND toolchain to
+    # satisfy a pin nobody asked for. provision_vm.sh splits the field; this
+    # read it whole, so the two scripts disagreed about the same go.mod.
+    GO_VERSION="$(awk '/^go [0-9]/{split($2,v,"."); print v[1]"."v[2]; exit}' "$SRC/go.mod")"
   fi
   # NOTHING GLOBAL. `mise use -g` writes the operator's global config, which
   # this script has no business touching: its contract is the binary and the
@@ -315,7 +377,7 @@ if command -v mise >/dev/null 2>&1; then
   # the host as a side effect of an autodb update. `mise exec go@X --` pins the
   # toolchain for THIS build and leaves no trace.
   if [ -n "$GO_VERSION" ]; then
-    GOBIN="mise exec go@$GO_VERSION --"
+    GOBIN="$MISE_RUN exec go@$GO_VERSION --"
   fi
 elif command -v go >/dev/null 2>&1; then
   GOBIN=""
