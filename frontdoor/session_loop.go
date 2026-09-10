@@ -667,8 +667,12 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 	// exists to prevent reappearing between the arm and the byte.
 	//
 	// So when the engine reported, its TxStatus is authoritative for BOTH. The
-	// separate read remains only for the paths that have no report — the
-	// extended path today — where there is one snapshot anyway.
+	// separate read remains only for the paths that have no report, where there
+	// is one snapshot anyway: the simple path when nothing armed, and
+	// WireFlushSegment, which deliberately does not arm because a Flush ends no
+	// segment and so has no readiness byte to carry. WireSyncSegment DOES
+	// report — it consumed through the terminal ReadyForQuery — so the extended
+	// segment end takes the report branch below.
 	// A REPORT THAT EXISTS IS THE ONLY SNAPSHOT, VALID OR NOT (r1 residual 1).
 	//
 	// The first repair asked `stopped != nil && validTxStatus(...)`, which reads
@@ -693,10 +697,17 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 			return false
 		}
 	}
-	lead, effects, outcome := recordedEffects(stopped, status, targetFailed)
+	// ONE ARM, SHARED BY THE EVENT KIND AND THE PROSE.
+	//
+	// Derived here rather than inside recordedEffects so that the kind, the
+	// detail and the client's message are three renderings of the SAME answer.
+	// Two derivations of the arm is the same two-source split this whole path
+	// exists to prevent, one level out.
+	arm := armFromWhatIsKnown(stopped, status, targetFailed)
+	lead, effects, outcome := recordedEffects(arm)
 
-	l.onEvent(Event{Kind: "fd.stmt_outcome", Reason: reason.rule, Peer: peer,
-		Detail: fmt.Sprintf("effects=%s; output withheld: %s", outcome, reason.stopped)})
+	l.onEvent(Event{Kind: withheldEventKind(arm), Reason: reason.rule, Peer: peer,
+		Detail: withheldEventDetail(arm, outcome, reason.stopped)})
 	be.Send(gateError("ERROR", sqlStateProgramLimit,
 		lead+"; "+reason.stopped+" and its result was not fully delivered",
 		reason.rule, effects+"; "+reason.remedy))
@@ -722,6 +733,48 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 		return true
 	}
 	return l.sendReadinessWith(conn, be, status, closeReason)
+}
+
+// THE AUDIT EVENT KINDS A WITHHELD CYCLE CAN RECORD.
+//
+// eventStmtOutcome is documented per STATEMENT for a simple Query and per
+// EXECUTE for the extended protocol. That is a claim about a statement, and
+// emitting it for a segment that carried none is the same invention the
+// client's prose used to make: a Parse/Describe/Sync segment -- what pgx's
+// default exec mode and database/sql's Prepare send -- has no statement for an
+// outcome to belong to.
+//
+// So a delivery stop gets its OWN kind. Review found this after the prose was
+// fixed: the text no longer invented a statement and the event kind still did,
+// which is worse in the place it lands, because an operator's tooling counts
+// kinds rather than reading sentences. A dashboard totalling statement
+// outcomes would have counted segments that ran nothing.
+const (
+	eventStmtOutcome     = "fd.stmt_outcome"
+	eventDeliveryStopped = "fd.delivery_stopped"
+)
+
+// withheldEventKind names the event this arm records.
+func withheldEventKind(arm exec.EmitArm) string {
+	if arm == exec.ArmDeliveryStopped {
+		return eventDeliveryStopped
+	}
+	return eventStmtOutcome
+}
+
+// withheldEventDetail writes the detail line for that event.
+//
+// A DELIVERY STOP CARRIES NO `effects=` TOKEN AT ALL, deliberately. The token
+// is what an operator and their tooling read to learn what happened to a
+// statement's effects, and a delivery stop knows nothing about any -- each
+// statement in the segment keeps the outcome its own record already carries.
+// Writing `effects=delivery_stopped` would answer a question this event cannot
+// answer, in the field that is read as the answer.
+func withheldEventDetail(arm exec.EmitArm, outcome, stopped string) string {
+	if arm == exec.ArmDeliveryStopped {
+		return fmt.Sprintf("scope=segment; delivery=stopped; output withheld: %s", stopped)
+	}
+	return fmt.Sprintf("effects=%s; output withheld: %s", outcome, stopped)
 }
 
 // recordedEffects says what became of a statement whose output was cut short.
@@ -757,9 +810,26 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 // something the engine grew and the front door has not been taught, and saying
 // "not known" is the only honest answer to a vocabulary this function does not
 // speak — never a guess dressed as a fact.
-func recordedEffects(stopped *exec.EmitStopped, status byte, targetFailed bool) (lead, clause, outcome string) {
-	arm := armFromWhatIsKnown(stopped, status, targetFailed)
+func recordedEffects(arm exec.EmitArm) (lead, clause, outcome string) {
 	switch arm {
+	case exec.ArmDeliveryStopped:
+		// A SEGMENT'S DELIVERY, NOT A STATEMENT'S EFFECTS.
+		//
+		// This says nothing about any statement, because the report it comes
+		// from describes none: a segment may carry no statement at all
+		// (Parse/Describe/Sync, which is what pgx's default mode and
+		// database/sql's Prepare send) or several, each already settled by its
+		// own Execute drive and its own outcome row.
+		//
+		// The previous wording for this case was the unresolved one below:
+		// "the statement ran and its outcome is not known ... read the table to
+		// find out". For a segment with no statement that is false twice over
+		// -- nothing ran, and there is no table to read -- and it sent an
+		// operator looking for effects that never existed.
+		return "the answers for this segment were not delivered",
+			"any statement in it keeps the outcome its own record already carries; " +
+				"this stop is about the DELIVERY of the segment's replies, not about effects",
+			string(arm)
 	case exec.ArmNoStatement:
 		// The empty query. Nothing ran, so there are no effects to speak about
 		// at all — and saying anything about them would be inventing a statement
@@ -819,6 +889,20 @@ func armFromWhatIsKnown(stopped *exec.EmitStopped, status byte, targetFailed boo
 	if stopped == nil {
 		return observed()
 	}
+	// A DELIVERY REPORT IS NEVER REPAIRED FROM THE EMITTER'S VIEW, and it needs
+	// no clause here to say so. The fallback below fires only on
+	// exec.ArmUnresolved, and EmitStopped.Arm answers a delivery report from its
+	// FIRST arm — so a delivery report can never reach the fallback that would
+	// "repair" it with targetFailed or a transaction status and produce the
+	// statement claim the scope exists to prevent.
+	//
+	// An explicit `if stopped.Delivery` short-circuit stood here first. No
+	// mutation could distinguish it: deleting it left every witness green,
+	// because Arm() already returns the delivery arm. A guard nothing can
+	// falsify is not a second layer of safety, it is a second place to keep
+	// correct — so the ordering inside Arm() is the single mechanism, and the
+	// cell that pins it lives beside it.
+	//
 	// THE ENGINE FIRST, BUT NOT WHEN IT SAYS IT DOES NOT KNOW.
 	//
 	// "Engine first" used to be unconditional, and that made the two sources a
@@ -827,23 +911,32 @@ func armFromWhatIsKnown(stopped *exec.EmitStopped, status byte, targetFailed boo
 	// discard an emitter observation that is CERTAIN — a target ErrorResponse
 	// that passed through the emitter is a fact, not an inference.
 	//
-	// Nothing arms that way today, because WireFlushSegment and
-	// WireSyncSegment do not arm at all and the drives that do own a statement
-	// outcome row. The trap is what a future arming would spring: the standing
+	// Nothing arms Unresolved on this route today. The drives that own a
+	// statement carry its outcome row, WireFlushSegment does not arm at all,
+	// and WireSyncSegment arms DELIVERY-scoped, which Arm answers from its
+	// first case. The trap is what a future arming would spring: the standing
 	// comment above this function warned that swapping the observation out
 	// "would make that path REPORT LESS than it does today", and a warning is
 	// not a mechanism.
 	//
-	// THIS IS NOT SUFFICIENT ON ITS OWN, and the first version of this comment
-	// claimed it was. Review measured the production path: reportOutputWithheld
-	// takes a non-nil report's TxStatus as the ONLY snapshot and treats an
-	// invalid one as session-lost, returning BEFORE recordedEffects is called.
-	// A Flush-shaped arm has TxStatus 0 — a Flush has no readiness to read — so
-	// arming that drive today would drop the session rather than reach this
-	// precedence at all, which is worse than the reporting regression this
-	// guards. Arming Flush/Sync therefore requires carrying a TRUTHFUL status
-	// snapshot from inside the drive, and this rule is a PREREQUISITE for that
-	// work rather than a substitute for it.
+	// THIS RULE ALONE WAS NOT ENOUGH TO ARM Flush OR Sync, and the first
+	// version of this comment claimed it was. Two distinct behaviours sit
+	// below in reportOutputWithheld, and conflating them is what made a bare
+	// arm look harmless:
+	//
+	//   * NO report — the fallback WireTxStatus read. The session lives; the
+	//     loop just takes its snapshot a moment later. This is what an
+	//     unarmed drive got, and it is where the two-source split came from.
+	//   * A report whose TxStatus is INVALID — closeReason "session-lost",
+	//     returning BEFORE recordedEffects is reached. The session DIES.
+	//
+	// A Flush-shaped arm has TxStatus 0, because a Flush ends no segment and
+	// has no readiness to read, so arming Flush lands in the second case and
+	// kills a session the client could have recovered by Syncing — strictly
+	// worse than the reporting split. Sync is the case where a truthful byte
+	// exists: it consumed through the terminal ReadyForQuery. So the drive
+	// carrying a valid snapshot is the PRECONDITION for arming at all, which
+	// F2 item 6 satisfies for Sync and deliberately does not for Flush.
 	//
 	// Unresolved is the only arm treated this way. Every other arm is a
 	// positive finding from the drained tail, which the emitter cannot see past
