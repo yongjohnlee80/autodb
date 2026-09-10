@@ -252,6 +252,27 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	if serr := s.ext.putStatement(st); serr != nil {
 		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, serr)
 	}
+	// THE REPAIR, placed where the information is used.
+	//
+	// If a Close for this name was queued and never acknowledged, the segment
+	// carrying it was discarded and THE TARGET STILL HAS THE OBJECT. A bare
+	// Parse would be relayed and answered `42P05 prepared statement … already
+	// exists` — a failure the client cannot clear, because nothing it can send
+	// makes this end believe the statement exists.
+	//
+	// So the Close is re-issued ahead of the Parse. That is the sequence the
+	// client's own frames described before the discard swallowed one of them,
+	// and PostgreSQL processes them in order: Close destroys, Parse creates.
+	// A Close for an object the target does not have succeeds, so re-issuing is
+	// safe even if the first one did land and only its acknowledgement was lost.
+	if s.ext.closeUnconfirmed(objectStatement, name) {
+		if serr := pc.Send(ctx, golibpg.CloseStatementOp(name)); serr != nil {
+			s.ext.dropStatement(name)
+			return serr
+		}
+		s.ext.queueWire()
+		s.ext.clearPendingCloses(objectStatement, name)
+	}
 	if serr := pc.Send(ctx, golibpg.ParseOp(name, sqlText, paramOIDs)); serr != nil {
 		// The frame never left, so the object never existed on the target. The
 		// drop releases its reservation — the drop owns the charge.
@@ -369,16 +390,35 @@ func (e *Engine) WireCloseStatement(ctx context.Context, id SessionID, userID in
 	}
 	defer release()
 	// Close is not an error on a name that does not exist — PostgreSQL's own
-	// Close succeeds on a missing object — so the store's answer is not checked.
-	if st, err := s.ext.statement(name); err == nil && isSynthetic(st) {
+	// Close succeeds on a missing object — so the store's answer is not checked
+	// for admission. It IS consulted to decide what this frame destroys.
+	st, sterr := s.ext.statement(name)
+	if sterr == nil && isSynthetic(st) {
+		// Owned control and the empty statement never reached the target, so
+		// there is nothing to confirm and nothing that can be orphaned there.
 		s.ext.dropStatement(name)
 		s.ext.queueSynth(WireMessage{Kind: "CloseComplete"})
 		return nil
 	}
-	s.ext.dropStatement(name)
 	if serr := pc.Send(ctx, golibpg.CloseStatementOp(name)); serr != nil {
+		// The frame never reached the wire, so the target still holds what it
+		// held. The record stays, and this end goes on agreeing with it.
 		return serr
 	}
+	// THE NAME IS FREED AT ONCE, and the target's copy is REMEMBERED. Both
+	// halves are load-bearing — see notePendingClose for why either alone is
+	// wrong.
+	if sterr == nil {
+		ref := objectRef{kind: objectStatement, name: name, seq: st.seq}
+		s.ext.dropStatement(name)
+		s.ext.notePendingClose(ref)
+		s.ext.queueWireClosing(objectStatement, name, st.seq)
+		return nil
+	}
+	// A Close for a name this end does not hold. It may still be a name the
+	// target holds from a Close that was discarded, in which case the pending
+	// record is already there and a second Close is harmless — PostgreSQL's
+	// Close succeeds on a missing object.
 	s.ext.queueWire()
 	return nil
 }
@@ -390,16 +430,29 @@ func (e *Engine) WireClosePortal(ctx context.Context, id SessionID, userID int64
 		return err
 	}
 	defer release()
-	if prt, err := s.ext.portal(name); err == nil {
+	// THE SAME RULE AS WireCloseStatement, and it is here because the defect was
+	// the same at both entry points rather than only at the one a bug report
+	// named. A leaked portal produces a relayed "portal already exists" on the
+	// client's next Bind of that name, which is the same unrecoverable shape as
+	// the statement case one level down.
+	prt, prterr := s.ext.portal(name)
+	if prterr == nil {
 		if st, serr := s.ext.statement(prt.stmtName); serr == nil && isSynthetic(st) {
+			// Never reached the target; nothing to confirm.
 			s.ext.dropPortal(name)
 			s.ext.queueSynth(WireMessage{Kind: "CloseComplete"})
 			return nil
 		}
 	}
-	s.ext.dropPortal(name)
 	if serr := pc.Send(ctx, golibpg.ClosePortalOp(name)); serr != nil {
-		return serr
+		return serr // not dropped: the frame never reached the wire
+	}
+	if prterr == nil {
+		ref := objectRef{kind: objectPortal, name: name, seq: prt.seq}
+		s.ext.dropPortal(name)
+		s.ext.notePendingClose(ref)
+		s.ext.queueWireClosing(objectPortal, name, prt.seq)
+		return nil
 	}
 	s.ext.queueWire()
 	return nil
@@ -1061,6 +1114,14 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, s
 			// a no-op by design (matrix :270 as amended).
 			if step.obj != nil && completesObject(m.Kind) {
 				o.finalizeRetained(*step.obj)
+			}
+			// AND CONFIRMED AT THE FRAME SITE. The record has already left the
+			// store so the name is free; what this settles is whether the
+			// TARGET still holds the object. A Close the segment's discard
+			// swallowed never reaches here, so its pending record survives and
+			// Parse repairs it. See notePendingClose and segStep.closes.
+			if step.closes != nil && m.Kind == "CloseComplete" {
+				o.confirmClose(*step.closes)
 			}
 			return false, nil
 		}
