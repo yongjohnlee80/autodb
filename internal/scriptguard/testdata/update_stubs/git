@@ -35,7 +35,11 @@ case "${1:-}" in
     esac
     for _a in "$@"; do _dst="$_a"; done
     mkdir -p "$_dst/cmd/autodb"
-    printf 'module github.com/yongjohnlee80/autodb\n\ngo 1.27\n' > "$_dst/go.mod"
+    # A PATCH VERSION, because that is what a real go.mod carries and it is the
+    # only shape that can tell a MINOR-line pin from a full-patch pin: with a
+    # bare "go 1.27" both readings produce "1.27" and the difference is
+    # invisible to every cell.
+    printf 'module github.com/yongjohnlee80/autodb\n\ngo 1.27.3\n' > "$_dst/go.mod"
     printf 'package main\n' > "$_dst/cmd/autodb/main.go"
     ;;
   checkout)
