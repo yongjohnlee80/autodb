@@ -349,16 +349,23 @@ func (o *extObjects) queueSynthFor(kind objectKind, name string, seq uint64, msg
 // target still has the object. Forgetting it there is what produced the relayed
 // `42P05 prepared statement … already exists` this file's cells reproduce.
 func (o *extObjects) notePendingClose(ref objectRef) {
-	// DEDUPLICATED, because this is session-scoped recovery state:
-	// it survives the discarded segment on purpose, so an undeduplicated append
-	// would grow for the life of a session that repeatedly Closes the same name
-	// into discarded segments. One record per name is all the repair needs — it
-	// asks "does the target still have this name", not "how many times".
-	for _, p := range o.pendingCloses {
-		if p.kind == ref.kind && p.name == ref.name {
-			return
-		}
-	}
+	// AT MOST ONE RECORD PER NAME, and it holds STRUCTURALLY rather than by a
+	// check here. A first version deduplicated defensively; the mutation matrix
+	// showed nothing could observe the difference, and the reason is the
+	// invariant: this is reached only when the name IS in the store, and the
+	// caller removes it from the store in the same breath. A second record for
+	// one name therefore needs a Parse in between to put it back — and that
+	// Parse runs the repair, which clears the record. So a duplicate cannot be
+	// constructed, and a loop preventing it was dead code.
+	//
+	// TestExtPG_PendingClosesAreDeduplicatedByName pins the invariant, which is
+	// the thing worth asserting: it passes with or without a check, because what
+	// makes it true is the structure.
+	//
+	// THE BOUND BELOW IS DIFFERENT and stays. Distinct names DO accumulate —
+	// this is session-scoped state that survives a discarded segment on purpose
+	// — so a session closing thousands of distinct names into discarded
+	// segments would otherwise grow without limit.
 	if len(o.pendingCloses) >= maxPendingCloses {
 		// A bound rather than unbounded growth. Reaching it means a session has
 		// this many distinct names outstanding in discarded segments, which is
