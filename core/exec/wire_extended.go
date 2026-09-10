@@ -270,8 +270,19 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 			s.ext.dropStatement(name)
 			return serr
 		}
-		s.ext.queueWire()
-		s.ext.clearPendingCloses(objectStatement, name)
+		// INTERNAL, so its CloseComplete never reaches the client.
+		// The client did not send this frame; emitting its answer would put an
+		// unsolicited CloseComplete ahead of the ParseComplete and desynchronize
+		// a pipelining client's request/response pairing — the precise client
+		// this repair exists for.
+		//
+		// AND THE PENDING RECORD IS NOT CLEARED HERE. It is
+		// cleared when this step's CloseComplete is consumed. If a later frame
+		// in this segment errors, PostgreSQL discards the repair Close AND the
+		// Parse, the target still holds the old statement, and the record must
+		// survive so the NEXT Parse repairs it too. Clearing at queue time
+		// meant a second discard lost the repair silently.
+		s.ext.queueRepairClose(objectStatement, name, 0)
 	}
 	if serr := pc.Send(ctx, golibpg.ParseOp(name, sqlText, paramOIDs)); serr != nil {
 		// The frame never left, so the object never existed on the target. The
@@ -447,13 +458,14 @@ func (e *Engine) WireClosePortal(ctx context.Context, id SessionID, userID int64
 	if serr := pc.Send(ctx, golibpg.ClosePortalOp(name)); serr != nil {
 		return serr // not dropped: the frame never reached the wire
 	}
-	if prterr == nil {
-		ref := objectRef{kind: objectPortal, name: name, seq: prt.seq}
-		s.ext.dropPortal(name)
-		s.ext.notePendingClose(ref)
-		s.ext.queueWireClosing(objectPortal, name, prt.seq)
-		return nil
-	}
+	// NO PENDING RECORD FOR A PORTAL, deliberately. A portal cannot
+	// be orphaned across segments — matrix 4a drops every portal when the target
+	// reports `I`, and an autocommit error still ends at `I` — so there is
+	// nothing for a later frame to repair. A first version recorded one out of
+	// symmetry with the statement path, nothing consumed it, and it was
+	// unbounded state that only grew.
+	_ = prterr
+	s.ext.dropPortal(name)
 	s.ext.queueWire()
 	return nil
 }
@@ -1095,6 +1107,22 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, s
 				obs.suspended = m.Kind == "PortalSuspended"
 			}
 		}
+		// AN INTERNAL STEP'S ANSWER IS NEVER EMITTED. This end
+		// queued the frame, so the client is not expecting its reply; handing it
+		// over would put an unsolicited CloseComplete ahead of the answer to the
+		// frame the client DID send, and a pipelining client tracks expected
+		// response types in order. An ErrorResponse is the exception and falls
+		// through below: it abandons the segment, which the client must be told
+		// about because everything it queued behind is now discarded.
+		if step.internal && m.Kind != "ErrorResponse" {
+			if step.closes != nil && m.Kind == "CloseComplete" {
+				o.confirmClose(*step.closes)
+			}
+			if frameAnswered(m.Kind) {
+				return false, nil
+			}
+			continue
+		}
 		// THE READING CONTINUES EVEN WHEN DELIVERY HAS STOPPED.
 		// The target's tail is what decides this statement's outcome, and if we
 		// stop looking there is nobody left to tell. The result is ignored here
@@ -1123,6 +1151,7 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, s
 			if step.closes != nil && m.Kind == "CloseComplete" {
 				o.confirmClose(*step.closes)
 			}
+
 			return false, nil
 		}
 	}
