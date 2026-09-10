@@ -411,6 +411,14 @@ func (e *Engine) WireCloseStatement(ctx context.Context, id SessionID, userID in
 		s.ext.queueSynth(WireMessage{Kind: "CloseComplete"})
 		return nil
 	}
+	// REFUSED AT CAPACITY, before anything is sent or dropped. A Close whose
+	// recovery obligation cannot be recorded must not proceed: freeing the name
+	// while forgetting that the target still holds it is the original defect.
+	// Refusing here leaves the wire untouched and the store agreeing with the
+	// target, which is the only safe direction. See pendingCloseAtCapacity.
+	if sterr == nil && s.ext.pendingCloseAtCapacity() {
+		return ErrPendingCloseCap
+	}
 	if serr := pc.Send(ctx, golibpg.CloseStatementOp(name)); serr != nil {
 		// The frame never reached the wire, so the target still holds what it
 		// held. The record stays, and this end goes on agreeing with it.
