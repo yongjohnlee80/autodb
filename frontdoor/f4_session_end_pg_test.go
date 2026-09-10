@@ -3,6 +3,7 @@ package frontdoor
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
@@ -100,12 +101,7 @@ func TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease(t *testing.T) {
 			"the cap is not binding and this cell would report a released lease whatever " +
 			"the teardown did")
 	}
-	if !refusedFor(l.events(), exec.DenyLeaseCap) {
-		t.Fatalf("control: the second client was refused, but not for the lease cap — the "+
-			"pre-auth vocabulary is uniform, so a refusal for another cause looks identical "+
-			"on the wire and would not tell us A holds the lease.\nreasons=%v",
-			refusalReasons(l.events()))
-	}
+	waitForRefusal(t, l.events, exec.DenyLeaseCap, "control: A holds the only lease")
 
 	// 4. THE TEARDOWN. The socket dies with the segment open.
 	_ = conn.Close()
@@ -179,6 +175,69 @@ func refusedFor(evs []Event, reason string) bool {
 		}
 	}
 	return false
+}
+
+// waitForRefusal waits for a refusal AUDITED under reason, rather than sampling
+// the event log the moment the client sees its error.
+//
+// The listener writes the denial to the SOCKET and emits the event afterwards
+// -- the client is told first and the operator second, which is the right
+// priority and is unchanged -- so pgTryClient returns in the interval between
+// them. A cell reading l.events() there saw an EMPTY list and reported that the
+// refusal had some other cause.
+//
+// That produced a gate failure on a correct front door which then survived
+// every attempt to reproduce it: five focused runs, the whole frontdoor package
+// alone, and five PG-using packages driven concurrently against one database,
+// all green. The window is sub-millisecond, so rerunning was never going to
+// show it. testPostDenialAuditGate exists to hold it open deliberately, and
+// this helper's own contract -- wait, do not sample -- is celled directly in
+// denial_audit_order_test.go against a source that is empty on its first call.
+//
+// The failure message reports what WAS audited, because "refused for another
+// reason" and "nothing recorded yet" are different diagnoses and the second is
+// the one that wasted the time.
+// THE POLL IS SPLIT FROM THE T, so its FALSE answer can be celled directly.
+//
+// The wait used to be one function taking *testing.T, and the only way to
+// observe its failure was to hand it a T of its own and run it in another
+// goroutine. Review rejected that and was right: testing.T is runner-owned,
+// t.FailNow must run in the test goroutine, and a zero-value T is not a
+// supported failure-capture API however reliably this toolchain happens to
+// tolerate it. Splitting it also removes a mandatory five-second cell, because
+// the negative can now be asked with a short budget.
+//
+// refusalArrives reports whether a refusal under reason was audited within
+// the budget. It looks ONCE before consulting the deadline, so a zero budget
+// is a single sample rather than no sample at all.
+const refusalWait = 5 * time.Second
+
+func refusalArrives(events func() []Event, reason string, within time.Duration) bool {
+	deadline := time.Now().Add(within)
+	for {
+		if refusedFor(events(), reason) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// waitForRefusal is the thin adapter: the poll above, plus the failure a cell
+// wants when it does not arrive. Nothing else lives here, which is why the
+// helper's behaviour is celled through refusalArrives rather than through a
+// captured T.
+func waitForRefusal(t *testing.T, events func() []Event, reason, what string) {
+	t.Helper()
+	if refusalArrives(events, reason, refusalWait) {
+		return
+	}
+	t.Fatalf("%s: no refusal was audited under %q within the deadline. The pre-auth "+
+		"vocabulary is uniform, so a refusal for another cause looks identical on the "+
+		"wire and would not establish this.\nreasons audited=%v",
+		what, reason, refusalReasons(events()))
 }
 
 func refusalReasons(evs []Event) []string {

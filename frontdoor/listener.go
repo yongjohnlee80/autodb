@@ -135,6 +135,35 @@ type Listener struct {
 	// than by asserting arithmetic about one.
 	testDenialDelay time.Duration
 
+	// testPostDenialAuditGate HOLDS the interval between the denial reaching
+	// the socket and the audit event being emitted, until a cell releases it.
+	// Test-only; nil outside this package's own cells, and the ordering it
+	// widens is unchanged.
+	//
+	// A BARRIER RATHER THAN A SLEEP, and that is the difference between a
+	// premise and a hope. The first version was a duration, and a cell using
+	// it had to assert "the event is not there yet" against a window it only
+	// believed was still open -- so a scheduler hiccup made the premise false
+	// and the cell skipped, exactly where the evidence was needed. With a
+	// channel the emit CANNOT have run while the gate is unclosed, so the
+	// absence is a fact and its failure is a real defect to report.
+	//
+	// It is a separate knob from testDenialDelay rather than a reuse of it,
+	// and the distinction is the whole point: testDenialDelay sleeps BEFORE
+	// sendDenial, so it delays when the client learns anything and cannot
+	// widen this interval at all. denial_timing_test depends on that
+	// placement for its own purpose.
+	//
+	// The interval exists because a refused client is told FIRST and the
+	// operator's event is emitted second, which is the right priority and is
+	// preserved. But it means a cell that reads the event log the instant the
+	// client sees its error can miss the event -- an unordered read across two
+	// goroutines. That produced an unreproducible gate failure
+	// (TestPGF4_AMidSegmentTeardownReturnsTheLaneAndTheLease, reasons=[]) that
+	// survived focused reruns, a whole-package run, and five packages driven
+	// concurrently, because the window is sub-millisecond.
+	testPostDenialAuditGate <-chan struct{}
+
 	wg     sync.WaitGroup
 	closed chan struct{}
 	once   sync.Once
@@ -278,6 +307,10 @@ type Options struct {
 	testDeadlines   *deadlines
 	testDenialDelay time.Duration
 
+	// testPostDenialAuditGate holds the send-then-emit interval open on the
+	// denial path. See the Listener field of the same name.
+	testPostDenialAuditGate <-chan struct{}
+
 	// testListener replaces the bind, so a cell can hand Serve a connection
 	// that pauses exactly where it wants to look. Unexported, in-package
 	// only, and it exists because the accept-registration window cannot be
@@ -377,6 +410,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 		l.dl = *opt.testDeadlines
 	}
 	l.testDenialDelay = opt.testDenialDelay
+	l.testPostDenialAuditGate = opt.testPostDenialAuditGate
 	l.testInsideRegistration = opt.testInsideRegistration
 	return l, nil
 }
@@ -754,6 +788,12 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 	}
 	closeReason = outcome.Denied.String()
+	// THE CLIENT IS TOLD FIRST AND THE OPERATOR SECOND, deliberately. This
+	// knob only makes the gap between them observable; it is zero outside
+	// this package's own cells and the ordering is unchanged.
+	if l.testPostDenialAuditGate != nil {
+		<-l.testPostDenialAuditGate
+	}
 	l.onEvent(Event{Kind: "fd.auth_denied", Reason: outcome.Denied.String(), Peer: peer, Detail: out.RefusedParam})
 }
 
