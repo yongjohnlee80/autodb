@@ -1059,3 +1059,120 @@ func TestPooledDrive_WiringPinnedTxHandoff(t *testing.T) {
 		t.Fatalf("unpinned refusal = %v, want ErrStatementUnsupported", preErr)
 	}
 }
+
+// THE ORDERING DELTA, through the real session flow. A read-only
+// compat-profile unit whose statement violates BOTH the profile gate
+// (data-modifying CTE) and the reader stage (a UDF call) must answer the
+// PROFILE's identity — the flip the ruling decided, landed in this step.
+// The legacy session path would have answered reader-advanced-pattern;
+// the declared order answers statement-unsupported.
+func TestSessionDrive_OrderingDeltaAnswered(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A reader-granted user on the compat-profile connection. The
+	// dm-CTE-with-UDF statement violates both stages.
+	readerID, err := f.svc.CreateUser(ctx, f.rootTok, "delta-reader", "delta-pass-1", meta.RoleReader, testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerTok, _, err := f.svc.Login(ctx, "delta-reader", "delta-pass-1", testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.AddGrant(ctx, f.rootTok, readerID, f.connID, meta.RoleReader, testIP); err != nil {
+		t.Fatal(err)
+	}
+
+	// A reader-session: the statement is a data-modifying CTE (the compat
+	// profile refuses it) that also calls a function the reader stage
+	// would refuse. Admit-first answers the profile's identity.
+	sessID, err := f.eng.OpenSession(ctx, readerTok, f.connID, testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := "WITH x AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT coalesce(sum(x.id), 0) FROM x"
+	_, err = f.eng.SessionExecute(ctx, readerTok, sessID, sql, testIP)
+	if err == nil {
+		t.Fatal("the double-violating statement was admitted")
+	}
+	if !errors.Is(err, ErrStatementUnsupported) {
+		t.Fatalf("the session drive answered %v — the ordering ruling says profile admissibility "+
+			"precedes reader analysis: a compat dm-CTE is refused as statement-unsupported, "+
+			"not as a reader pattern (the reader analysis cannot see it at all until the "+
+			"analyzer phase)", err)
+	}
+}
+
+// A5, session-surface half: the same script through the POOLED drive
+// answers the same. (The pooled path always ran admit-first, so its
+// answer did not change — this cell pins that the two surfaces AGREE
+// after the flip, the cross-surface parity Johno's requirement asserts.)
+func TestSessionDrive_CrossSurfaceParityWithPooled(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	readerID, err := f.svc.CreateUser(ctx, f.rootTok, "parity-reader", "parity-pass-1", meta.RoleReader, testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerTok, _, err := f.svc.Login(ctx, "parity-reader", "parity-pass-1", testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.AddGrant(ctx, f.rootTok, readerID, f.connID, meta.RoleReader, testIP); err != nil {
+		t.Fatal(err)
+	}
+
+	sql := "WITH x AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT coalesce(sum(x.id), 0) FROM x"
+
+	// Pooled (stateless Execute): the profile refuses the dm-CTE.
+	pooledErr := f.execErr(t, readerTok, sql)
+
+	// Session: the same statement, the same refusal identity.
+	sessID, err := f.eng.OpenSession(ctx, readerTok, f.connID, testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, sessErr := f.eng.SessionExecute(ctx, readerTok, sessID, sql, testIP)
+
+	if !errors.Is(pooledErr, ErrStatementUnsupported) || !errors.Is(sessErr, ErrStatementUnsupported) {
+		t.Fatalf("cross-surface parity broken: pooled = %v, session = %v — the same script on "+
+			"the same connection must produce the same refusal identity on both surfaces",
+			pooledErr, sessErr)
+	}
+}
+
+// The wire-simple delta cell, chain-level: the wire gate's chain answers
+// the profile's identity for the double-violating reader statement —
+// the same flip the session drive's cell proved through its real flow,
+// asserted here for the wire composition (the frontdoor live-wire suite
+// exercises the migrated gate end to end).
+func TestWireSimpleDrive_OrderingDeltaAnswered(t *testing.T) {
+	stmt, err := Classify("WITH x AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT coalesce(sum(x.id), 0) FROM x", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := newChainTestEngine(t)
+	stages := []admission.Stage{
+		sizeCapStage{},
+		profileAdmitStage{profile: ProfileV1Compat},
+		readerAnalysisStage{userRoutines: nil}, // the profile answers before the reader stage is consulted
+		authorizeUnitStage{},
+		guardWhereStage{},
+	}
+	rep, rerr := admission.Compose(stages...).Run(
+		NewLegacyFactsForText(stmt, "WITH x AS ...", 90),
+		admission.Context{Phys: admission.PhysWire, ReadOnly: true, MaxStatementBytes: 1000})
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok := rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the double-violating statement was admitted")
+	}
+	if deny.Code != admission.CodeStatementUnsupported {
+		t.Fatalf("the wire chain answered %s — profile admissibility precedes reader analysis "+
+			"on EVERY surface; the flip that landed in this step", deny.Code)
+	}
+}
