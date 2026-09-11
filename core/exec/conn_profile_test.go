@@ -384,32 +384,30 @@ func TestSetConnectionProfile_UnknownProfileIsRefused(t *testing.T) {
 	}
 }
 
-// Capability changes are live admission changes, not network exposure
-// transitions. Existing wire sessions and their leases therefore remain.
-func TestSetConnectionProfile_LeavesOpenWireSessionsAlive(t *testing.T) {
-	t.Parallel()
-	f, _, secret, dbName := wireFixture(t)
+// A downgrade withdraws a real wire transaction before v1compat can strand it:
+// after the profile flips, both COMMIT and ROLLBACK are capability-refused.
+// Exposure remains enabled, because cleanup of a live capability is not a
+// reachability transition.
+func TestSetConnectionProfile_DowngradeWithdrawsOpenWireTransaction(t *testing.T) {
+	f, connID, sid, _, userID := pgWireSession(t)
 	ctx := context.Background()
-
-	res, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP)
-	if err != nil {
-		t.Fatalf("OpenWireSession: %v", err)
-	}
-	t.Cleanup(func() { f.eng.CloseWireSession(ctx, res.SessionID, res.UserID, testIP, "test") })
-	if n := f.eng.sessions.leaseCount(f.connID); n != 1 {
+	if n := f.eng.sessions.leaseCount(connID); n != 1 {
 		t.Fatalf("leases before the profile change = %d, want 1", n)
 	}
-
-	if err := f.eng.SetConnectionProfile(ctx, f.rootTok, f.connID, meta.ProfileV1Compat, testIP); err != nil {
+	if !sessionExists(f, sid, userID) {
+		t.Fatal("live transaction session vanished before the profile change")
+	}
+	if err := f.eng.SetConnectionProfile(ctx, f.rootTok, connID, meta.ProfileV1Compat, testIP); err != nil {
 		t.Fatalf("SetConnectionProfile: %v", err)
 	}
-	if n := f.eng.sessions.leaseCount(f.connID); n != 1 {
-		t.Fatalf("leases after the profile change = %d, want 1", n)
+	if sessionExists(f, sid, userID) {
+		t.Fatal("profile downgrade left the wire transaction session alive")
 	}
-	if _, err := f.eng.sessions.lookup(res.SessionID, res.UserID); err != nil {
-		t.Fatalf("profile change withdrew the live wire session: %v", err)
+	if n := f.eng.sessions.leaseCount(connID); n != 0 {
+		t.Fatalf("leases after the profile change = %d, want 0", n)
 	}
-	if !exposureOf(t, f, f.connID) {
+	if !exposureOf(t, f, connID) {
 		t.Fatal("profile change closed front-door exposure")
 	}
+	assertAuditContains(t, f, "session_closed", "profile-downgraded")
 }

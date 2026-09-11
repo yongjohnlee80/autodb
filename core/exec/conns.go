@@ -439,6 +439,16 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 	if err != nil {
 		return err
 	}
+	// Capability is live for every statement, so a downgrade cannot leave a
+	// wire transaction running under the broader profile that opened it. Under
+	// v1compat both COMMIT and ROLLBACK are refused; withdrawing the wire session
+	// rolls the target transaction back instead of stranding it while later DML
+	// appears to succeed. This is capability cleanup, not an exposure change:
+	// the exposure property and transition lock remain untouched.
+	if was == meta.ProfileSession && profile != meta.ProfileSession {
+		e.closeSessionsFor(ctx, connID, ip, "profile-downgraded")
+		e.sessions.clearDraining(connID)
+	}
 	return nil
 }
 
