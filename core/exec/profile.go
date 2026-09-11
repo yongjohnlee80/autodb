@@ -111,6 +111,14 @@ func (p Profile) admit(st Statement, onSession bool) error {
 			// admissible form at all. Collapsing the two into one message
 			// would tell a caller to stop trying when they should wait, or
 			// the reverse.
+			// Procedural execution is admitted HERE and placed by the
+			// procedural stage. Refusing it in this function would mean
+			// deciding a physical-context question with a boolean that
+			// cannot express it — the profile says the verb has an
+			// admissible form, and the stage says where.
+			if proceduralControlVerbs[st.Verb] {
+				return nil
+			}
 			if pendingControlVerbs[st.Verb] {
 				return fmt.Errorf("%w: %s (this profile will admit it in a restricted form; that gate is not built yet)",
 					ErrStatementUnsupported, st.Verb)
@@ -146,10 +154,24 @@ var statefulControlVerbs = map[string]bool{
 	"SET": true, "RESET": true, "LOCK": true,
 }
 
+// proceduralControlVerbs execute CODE at the target. They are classified as
+// control because they are neither a read nor a DML write, but unlike the
+// transaction and session-state verbs they are ordinary SQL the target runs:
+// they are DISPATCHED as text, and their effect is whatever the body does.
+//
+// The profile admits them; WHERE they are admissible is the procedural
+// stage's decision, because the answer is a physical-context fact this
+// function's one onSession boolean flattens away. A wire session's backend is
+// discarded at close; a pooled or RPC-session connection outlives the caller.
+// That difference is the whole rule, and it is the same difference the
+// session-state gate already makes between its two GUC models.
+var proceduralControlVerbs = map[string]bool{
+	"DO": true, "CALL": true,
+}
+
 // pendingControlVerbs have an admissible form the gate matrix defines but
 // which is not built yet — as opposed to the verbs that have none.
 var pendingControlVerbs = map[string]bool{
-	"CALL": true, "DO": true,
 	// Savepoints are planned and not built: ParseTxControl already refuses
 	// `ROLLBACK TO SAVEPOINT` with "savepoints are not implemented", and the
 	// bare SAVEPOINT/RELEASE verbs belong in the same bucket rather than in

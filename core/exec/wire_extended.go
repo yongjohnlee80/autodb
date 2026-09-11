@@ -149,7 +149,19 @@ var ErrExtendedUnsupportedTarget = errors.New("exec: the extended query protocol
 
 // isOwnedControl reports whether a prepared statement is transaction control the
 // session machine owns rather than SQL the target runs.
-func isOwnedControl(st *extStatement) bool { return st.stmt.Class == ClassControl }
+// isOwnedControl reports whether the front door ANSWERS this statement itself.
+//
+// The procedural verbs are the exception that makes the definition honest:
+// DO and CALL classify as control, but they are real SQL the TARGET runs, so
+// they are not owned and not synthetic. Treating them as owned sent them down
+// the front door's own reply path, where the Parse never reached the backend
+// and the Execute ran the text on a POOLED connection instead of the session's
+// pinned one — success reported, body run somewhere nobody could see it, and
+// the pooled connection left holding whatever the body did. The extended cells
+// caught it; the simple path never could, because it dispatches raw.
+func isOwnedControl(st *extStatement) bool {
+	return st.stmt.Class == ClassControl && !proceduralControlVerbs[st.stmt.Verb]
+}
 
 // isSynthetic reports whether a prepared statement is answered entirely by the
 // front door, without any frame reaching the target: owned transaction control,
@@ -238,7 +250,7 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	// it: wireControl, at Execute. That is deliberate parity — executeSessionUnit
 	// routes control BEFORE authorizeUnit/admit/guardWhere too, because the
 	// control floor is a different floor.
-	if stmt.Class == ClassControl {
+	if stmt.Class == ClassControl && !proceduralControlVerbs[stmt.Verb] {
 		// CHARGED LIKE ANY OTHER STATEMENT. Owned control never
 		// reaches the target, but the front door holds its text and metadata just
 		// the same — and an object outside the account is an object a session can

@@ -64,8 +64,10 @@ func TestAdmissionChainRendering_CriticalStageSlices(t *testing.T) {
 	assertOrder("wire reported grammar", stageOrder(wireGrammarAdmissionStages(nil)), "reportedgrammar")
 	assertOrder("extended Execute re-authorization", stageOrder(classAdmissionStages()), "authorizeunit")
 	assertOrder("read-only enforcement capability", stageOrder(readOnlyEnforcementStages()), "readonlyenforcement")
+	// The procedural stage sits with the profile: the extended protocol gates a
+	// procedural verb through THIS chain, so the placement rule has to be in it.
 	assertOrder("ordinary session policy", stageOrder(sessionAdmissionStages(ProfileV1Compat, nil)),
-		"profile -> readeranalysis -> authorizeunit -> guardwhere")
+		"profile -> procedural -> readeranalysis -> authorizeunit -> guardwhere")
 }
 
 func stageOrder(stages []admission.Stage) []string {

@@ -24,7 +24,7 @@ import (
 // denial arrives undeclared.
 
 var registeredAdmissionStages = []admission.Stage{
-	sizeCapStage{}, profileAdmitStage{}, readerAnalysisStage{},
+	sizeCapStage{}, profileAdmitStage{}, proceduralBlockStage{}, readerAnalysisStage{},
 	authorizeUnitStage{}, guardWhereStage{}, newSessionStateStage(), reportedGrammarStage{},
 	readOnlyEnforcementStage{},
 }
@@ -223,6 +223,78 @@ func (p profileAdmitStage) Apply(facts admission.Facts, ctx admission.Context) (
 		}), nil
 	}
 	return admission.NoContribution(), nil
+}
+
+// proceduralBlockStage places the procedural verbs — DO and CALL — on the
+// surfaces where they have a safe meaning.
+//
+// WHY A STAGE AND NOT A PROFILE BRANCH. The rule is a physical-context rule,
+// and Profile.admit is handed one boolean ("is the caller on a session") that
+// cannot express it. The profile keeps its own question — does this verb have
+// an admissible form at all — and this stage answers the second one, which is
+// the seam's whole claim: a new rule is a stage, not an edit to the core's
+// branches.
+//
+// WHY A PINNED WIRE SESSION AND NOWHERE ELSE. A DO body is one opaque token. It is
+// dollar-quoted PL/pgSQL (or any installed language) and no SQL lexer or AST
+// will ever see inside it, so the engine cannot know whether it contains a
+// SET — and a session-level SET left behind on a connection that goes back to
+// a pool is inherited by the NEXT caller. autodb cannot inspect its way out of
+// that, so it removes the hazard structurally instead: a wire session is
+// pinned to one backend for its whole life and that backend is DISCARDED at
+// close, never returned to the pool, so state the body leaves cannot reach
+// anybody else. A pooled connection and an RPC session's connection both
+// outlive the caller, and there the refusal stands.
+//
+// THE STAGE ASKS FOR THE BACKEND, NOT FOR THE TRANSPORT. PhysWire alone is a
+// proxy, and it drifts: a front-door session against a target that does not
+// speak the PostgreSQL wire protocol takes the decoded path, where statements
+// run on a POOLED target connection and nothing is discarded at close. The
+// premise this rule stands on is the pinned backend, so that is what it reads.
+//
+// That is the same distinction the session-state gate already makes between
+// its allowlist and its denylist models, drawn for the same reason. It is
+// stated once here rather than discovered twice.
+//
+// WHAT THIS STAGE DOES NOT DECIDE. Not the role floor. A reader is refused by
+// the reader analysis (DO and CALL are named advanced patterns) and by the
+// class floor (control maps to the DDL action, which a reader cannot take);
+// both run on the dispatch path and both would still refuse if this stage
+// admitted everything. Editors and admins clear them, which is the ruling
+// this gate implements: the verb is available to the roles that may write,
+// and refused to the roles that may not.
+type proceduralBlockStage struct{}
+
+func (proceduralBlockStage) Name() string { return "procedural" }
+
+func (proceduralBlockStage) ContextNeeds() admission.Needs {
+	return admission.Needs{ControlVerb: true}
+}
+
+func (proceduralBlockStage) DenyCodes() []admission.Code {
+	return []admission.Code{admission.CodeStatementUnsupported}
+}
+
+func (proceduralBlockStage) Apply(facts admission.Facts, ctx admission.Context) (admission.Contribution, error) {
+	if !proceduralControlVerbs[facts.Verb()] {
+		return admission.NoContribution(), nil
+	}
+	if ctx.Phys == admission.PhysWire && ctx.PinnedBackend {
+		return admission.NoContribution(), nil
+	}
+	err := fmt.Errorf("%w: %s executes code the engine cannot read, so it is admitted only on a "+
+		"front-door wire session, whose backend is discarded at close — on a connection that goes "+
+		"back to a pool, anything the body sets would be inherited by the next caller",
+		ErrStatementUnsupported, facts.Verb())
+	return admission.Deny(admission.Reason{
+		Code:     admission.CodeStatementUnsupported,
+		Class:    admission.ClassUnsupported,
+		Subject:  facts.Verb(),
+		Detail:   err.Error(),
+		Legacy:   err,
+		Hint:     "connect through the front door, which pins one backend for the session's whole life",
+		Continue: true,
+	}), nil
 }
 
 // readerAnalysisStage is the editors-first rule: reader units may not run

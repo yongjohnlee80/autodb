@@ -51,8 +51,29 @@ func postPolicyAdmissionStages(userRoutines func() (*udfSet, error)) []admission
 	}
 }
 
+// profileAdmissionStages is the capability composition every control route
+// consults. The procedural stage rides WITH the profile rather than in a
+// separate chain because the control routes have no later boundary — the
+// pooled control path's only gate is this one — so a placement rule composed
+// anywhere else would be absent exactly where it is needed.
 func profileAdmissionStages(profile Profile) []admission.Stage {
-	return []admission.Stage{profileAdmitStage{profile: profile}}
+	return []admission.Stage{profileAdmitStage{profile: profile}, proceduralBlockStage{}}
+}
+
+// proceduralAdmissionStages is what a DISPATCHED control statement must clear
+// beyond its placement: the reader analysis and the class floor.
+//
+// The control routes skip the session chain deliberately — a transaction verb
+// never reaches a target, so gating it as though it might is meaningless — and
+// that skip was written when every control verb either became an engine action
+// or was refused. A procedural verb is neither: it is forwarded as text. So
+// this chain asks the two questions the skip dropped, rather than inheriting a
+// bypass written for a different kind of statement.
+func proceduralAdmissionStages(userRoutines func() (*udfSet, error)) []admission.Stage {
+	return []admission.Stage{
+		readerAnalysisStage{userRoutines: userRoutines},
+		authorizeUnitStage{},
+	}
 }
 
 func classAdmissionStages() []admission.Stage {
@@ -70,6 +91,13 @@ func readOnlyEnforcementStages() []admission.Stage {
 func sessionAdmissionStages(profile Profile, userRoutines func() (*udfSet, error)) []admission.Stage {
 	return []admission.Stage{
 		profileAdmitStage{profile: profile},
+		// Composed here too, not only with the control routes: the extended
+		// protocol gates a procedural verb through THIS chain (it is not owned
+		// control, so Parse takes the ordinary route), and a placement rule
+		// missing from a chain that can see the verb is a hole by omission.
+		// It is ControlVerb-applicable, so it is absent for every ordinary
+		// statement by construction rather than by an early return.
+		proceduralBlockStage{},
 		readerAnalysisStage{userRoutines: userRoutines},
 		authorizeUnitStage{},
 		guardWhereStage{},
@@ -169,10 +197,10 @@ func (e *Engine) evaluateChain(stages []admission.Stage, facts admission.Facts, 
 
 // runProfileAdmission keeps control routing in its drive while moving the
 // capability decision behind the same profile stage ordinary statements use.
-func (e *Engine) runProfileAdmission(profile Profile, phys admission.PhysicalCtx, stmt Statement, sqlText string) (error, error) {
+func (e *Engine) runProfileAdmission(profile Profile, phys admission.PhysicalCtx, pinnedBackend bool, stmt Statement, sqlText string) (error, error) {
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
 	return e.evaluateChain(profileAdmissionStages(profile), facts,
-		admission.Context{Profile: string(profile), Phys: phys})
+		admission.Context{Profile: string(profile), Phys: phys, PinnedBackend: pinnedBackend})
 }
 
 // runClassAdmission asks the class-floor stage against one freshly resolved
@@ -238,12 +266,17 @@ func (e *Engine) sessionAdmissionCtx(connRow *meta.Connection, pol UnitPolicy, s
 		phys = admission.PhysWire
 	}
 	return admission.Context{
-		Profile:  string(e.profileFor(connRow)),
-		Phys:     phys,
-		ReadOnly: pol.ReadOnly,
-		MayWrite: pol.MayWrite,
-		TxOpen:   txOpen,
-		PinnedTx: txOpen, // the pinned fact is the transaction state, truthfully:
+		Profile: string(e.profileFor(connRow)),
+		Phys:    phys,
+		// The BACKEND fact, read from the session rather than inferred from
+		// the transport: a wire session against a target that does not speak
+		// the PostgreSQL wire protocol pins nothing, and its statements run
+		// on a pooled target connection like any other.
+		PinnedBackend: s.pinnedConn() != nil,
+		ReadOnly:      pol.ReadOnly,
+		MayWrite:      pol.MayWrite,
+		TxOpen:        txOpen,
+		PinnedTx:      txOpen, // the pinned fact is the transaction state, truthfully:
 		// PhysSession/PhysWire already supplies profile onSession; PinnedTx
 		// answers only whether THIS execution carries a pinned transaction,
 		// and a session outside one must not report true — a future stage
@@ -261,6 +294,19 @@ func (e *Engine) sessionAdmissionCtx(connRow *meta.Connection, pol UnitPolicy, s
 func (e *Engine) runSessionAdmission(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, txOpen bool, stmt Statement, sqlText string) (error, error) {
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
 	return e.evaluateChain(e.sessionStages(ctx, connRow), facts, e.sessionAdmissionCtx(connRow, pol, s, txOpen))
+}
+
+// runProceduralAdmission evaluates the dispatch gates for DO and CALL on a
+// wire session. The context comes from the production derivation the ordinary
+// session path uses, so the read-only verdict, the write floor and the
+// target's capabilities are the same facts, resolved the same way — a
+// hand-built context here would be a second opinion about the same unit.
+func (e *Engine) runProceduralAdmission(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, txOpen bool, stmt Statement, sqlText string) (error, error) {
+	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
+	stages := proceduralAdmissionStages(func() (*udfSet, error) {
+		return e.userRoutines(ctx, connRow)
+	})
+	return e.evaluateChain(stages, facts, e.sessionAdmissionCtx(connRow, pol, s, txOpen))
 }
 
 // renderAdmissionChains prints the current production stage compositions in a
@@ -298,6 +344,10 @@ func renderAdmissionChains() string {
 			chain(wireGrammarAdmissionStages(nil)), chain(sizeAdmissionStages()), chain(sizeAdmissionStages()), chain(sessionAdmissionStages(profile, nil)))
 		fmt.Fprintf(&b, "  wire-simple/raw-control-stateful: O1{%s} -> O2{%s} -> D{split + all-statements gate} -> O3{%s} -> D{Classify -> control route} -> O4{%s} -> D{control floor -> tx-state} -> O5{%s} -> D{join -> attempt -> raw-segment read-only wrap -> dispatch}\n",
 			chain(wireGrammarAdmissionStages(nil)), chain(sizeAdmissionStages()), chain(sizeAdmissionStages()), chain(profileAdmissionStages(profile)), chain(sessionStateAdmissionStages()))
+		fmt.Fprintf(&b, "  wire-simple/raw-control-procedural: O1{%s} -> O2{%s} -> D{split + all-statements gate} -> O3{%s} -> D{Classify -> control route} -> O4{%s} -> D{control floor -> procedural branch} -> O5{%s} -> D{tx-state -> join -> attempt -> raw-segment dispatch -> routine-cache invalidation}\n",
+			chain(wireGrammarAdmissionStages(nil)), chain(sizeAdmissionStages()), chain(sizeAdmissionStages()), chain(profileAdmissionStages(profile)), chain(proceduralAdmissionStages(nil)))
+		fmt.Fprintf(&b, "  wire-decoded-or-extended/control-procedural: D{decoded control route, or extended Execute of a deferred control -> wireControl} -> O1{%s} -> D{control floor -> procedural branch} -> O2{%s} -> D{tx-state -> attempt -> dispatch -> routine-cache invalidation}\n",
+			chain(profileAdmissionStages(profile)), chain(proceduralAdmissionStages(nil)))
 		fmt.Fprintf(&b, "  wire-simple/raw-control-transaction: O1{%s} -> O2{%s} -> D{split + all-statements gate} -> O3{%s} -> D{Classify -> owned-control route} -> O4{%s} -> D{control floor -> join -> attempt -> wireControl} -> O5{%s} -> D{control floor -> ParseTxControl -> handleTxControl}\n",
 			chain(wireGrammarAdmissionStages(nil)), chain(sizeAdmissionStages()), chain(sizeAdmissionStages()), chain(profileAdmissionStages(profile)), chain(profileAdmissionStages(profile)))
 		fmt.Fprintf(&b, "  wire-extended/Parse-ordinary: R{segment read-only wrap acquired at entry} -> O1{%s} -> O2{%s} -> D{Classify; empty/control branches away} -> O3{%s} -> D{statement resource reservation -> target Parse}\n",

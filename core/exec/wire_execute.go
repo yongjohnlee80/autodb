@@ -189,7 +189,7 @@ func (e *Engine) wireControl(
 	ctx context.Context, s *session, connRow *meta.Connection,
 	stmt Statement, pol UnitPolicy, sqlText, ip string, closeAfterRelease *bool,
 ) (*Result, error) {
-	admitErr, opErr := e.runProfileAdmission(e.profileFor(connRow), admission.PhysWire, stmt, sqlText)
+	admitErr, opErr := e.runProfileAdmission(e.profileFor(connRow), admission.PhysWire, s.pinnedConn() != nil, stmt, sqlText)
 	if opErr != nil {
 		return nil, opErr
 	}
@@ -210,6 +210,40 @@ func (e *Engine) wireControl(
 	// enforce the equivalent boundary here.
 	if stmt.Verb == "LOCK" && !pol.MayWrite {
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, auth.ErrDenied)
+	}
+
+	// DO and CALL are real SQL the target runs, dispatched as text. They take
+	// the ordinary execution unit, and they clear the gates a dispatched
+	// statement clears — the floors above are the control route's, and those
+	// admit a reader, which is right for BEGIN and wrong for a procedural body.
+	if proceduralControlVerbs[stmt.Verb] {
+		s.mu.Lock()
+		txOpen, aborted, pinned, txID := s.txPhase != txNone, s.txPhase == txAborted, s.tx, s.txID
+		s.mu.Unlock()
+		admitErr, opErr = e.runProceduralAdmission(ctx, s, pol, connRow, txOpen, stmt, sqlText)
+		if opErr != nil {
+			return nil, opErr
+		}
+		if admitErr != nil {
+			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
+		}
+		if aborted {
+			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAborted)
+		}
+		runCtx, endRun := s.runContext(ctx)
+		defer endRun()
+		res, rerr := e.executeUnit(runCtx, execUnit{
+			stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
+			pinned: pinned, txID: txID, tag: s.auditTag(), phys: admission.PhysWire,
+		})
+		if rerr == nil {
+			// The body is opaque, so a routine may have been defined or
+			// dropped inside it. Class-based invalidation cannot see that —
+			// DO is control, not DDL — and a stale routine set is how a
+			// reader reaches a function created a moment ago.
+			e.invalidateRoutines(connRow.ID)
+		}
+		return res, rerr
 	}
 
 	// SET and LOCK are real SQL that must reach the server; the transaction

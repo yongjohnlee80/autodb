@@ -151,6 +151,18 @@ type Context struct {
 	// facts.
 	PinnedTx bool
 
+	// PinnedBackend reports whether this execution is bound to a backend the
+	// session owns for its whole life and which is DISCARDED at close — never
+	// returned to a pool for another caller to inherit.
+	//
+	// It is its OWN fact, not read off Phys, because PhysWire is a proxy that
+	// drifts: a front-door session against a target that does not speak the
+	// PostgreSQL wire protocol is still PhysWire, and its statements run on a
+	// POOLED target connection. A rule whose premise is "nothing can leak to
+	// the next caller" must ask for that premise rather than for a transport
+	// that usually implies it.
+	PinnedBackend bool
+
 	// TargetCaps is what the connection's target can do, supplied by the
 	// engine per connection. The zero value means NO capabilities — a
 	// stage requiring any capability is unsatisfiable against it.
