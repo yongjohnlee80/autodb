@@ -492,6 +492,23 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	if err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
+	// ADMISSION, in the legacy order. The chain is SPLIT at the drive's
+	// I/O boundary, because that is where the legacy order put it: the
+	// intake bound and the capability profile run BEFORE the actual-class
+	// authorization (an unsupported statement must answer with the
+	// PROFILE's refusal even from a caller without the class grant), and
+	// the reader analysis and WHERE guard run AFTER the unit's policy is
+	// resolved (the reader stage needs the fresh read-only verdict).
+	preErr, opErr := e.runPrePolicyAdmission(ctx,
+		admissionInputs{connRow: connRow, phys: admission.PhysPooled, pinnedSet: pinned != nil},
+		stmt, sqlText)
+	if opErr != nil {
+		return nil, opErr
+	}
+	if preErr != nil {
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, preErr)
+	}
+
 	// Full authorization for the statement's actual class — the token-level
 	// grant lookup, which stays DRIVE-side: it is engine I/O against the
 	// caller's grants, not a policy snapshot check. A denial must NOT
@@ -508,22 +525,15 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	}
 	ident = authorized
 
-	// ADMISSION, through the one chain. The pasted gates — profile, reader
-	// analysis, the WHERE guard — are stages now; the drive supplies their
-	// inputs (the connection's profile, the policy snapshot, the physical
-	// context) and every refusal keeps its legacy identity through the
-	// chain's Reason mapping. The pooled path runs pooled, unless the
-	// caller's session holds a pinned transaction (the old gate's
-	// onSession fact, computed exactly where it always was).
-	admitErr, opErr := e.runAdmission(ctx,
-		admissionInputs{connRow: connRow, pol: unitPol, phys: admission.PhysPooled, pinnedSet: pinned != nil},
-		e.pooledStages(ctx, connRow),
-		stmt, sqlText, setNameLocal{})
+	// The policy-dependent stages, through the same declared machinery.
+	postErr, opErr := e.runPostPolicyAdmission(ctx,
+		admissionInputs{connRow: connRow, phys: admission.PhysPooled, pinnedSet: pinned != nil},
+		unitPol, stmt, sqlText)
 	if opErr != nil {
 		return nil, opErr
 	}
-	if admitErr != nil {
-		return nil, e.reject(ctx, ident, connID, ip, sqlText, admitErr)
+	if postErr != nil {
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, postErr)
 	}
 
 	var target dao.DataConn

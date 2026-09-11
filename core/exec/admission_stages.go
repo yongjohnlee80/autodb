@@ -119,8 +119,11 @@ func (p profileAdmitStage) DenyCodes() []admission.Code {
 	return []admission.Code{admission.CodeStatementUnsupported}
 }
 
-// Apply runs the legacy Profile.admit with the physical context's answer
-// to "is the caller the session path". The error identity —
+// Apply runs the legacy Profile.admit with the answer to "is the caller
+// the session path": an affirmative physical context (session or wire),
+// OR a pooled call carrying a pinned transaction — the legacy gate's
+// pinned != nil fact, which admitted the session profile's control
+// verbs inside a transaction a session held open. The error identity —
 // ErrStatementUnsupported, with the verb and the refusal's reason in the
 // text — is the compatibility surface callers' error handling is written
 // against; it rides verbatim in the Detail.
@@ -131,7 +134,7 @@ func (p profileAdmitStage) Apply(facts admission.Facts, ctx admission.Context) (
 		// gate would admit whatever the foreign facts describe.
 		return admission.NoContribution(), fmt.Errorf("admission: profile requires the legacy facts representation; got %T", facts)
 	}
-	onSession := ctx.Phys == admission.PhysSession || ctx.Phys == admission.PhysWire
+	onSession := ctx.Phys == admission.PhysSession || ctx.Phys == admission.PhysWire || ctx.PinnedTx
 	if err := p.profile.admit(lf.stmt, onSession); err != nil {
 		return admission.Deny(admission.Reason{
 			Code:     admission.CodeStatementUnsupported,

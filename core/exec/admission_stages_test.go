@@ -2,6 +2,8 @@ package exec
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -720,22 +722,34 @@ func TestForeignFacts_FailClosed(t *testing.T) {
 	}
 }
 
-// A4, drive-level: the pooled drive's chain is declared and identical
-// across surfaces. This cell pins the pooled composition's ORDER — the
-// value the wire drives will be required to match in their own cells.
+// A4, drive-level: the pooled drive's chain is declared, split at the
+// drive's I/O boundary exactly where the legacy order put it — the
+// intake bound and capability profile BEFORE the actual-class
+// authorization, the reader analysis and guard AFTER the unit policy.
+// This cell pins both halves' ORDER; the wire drives must match the
+// stage sequence (sizecap, profile … readeranalysis, guardwhere) with
+// their own boundary placement.
 func TestPooledDrive_ChainOrderIsDeclared(t *testing.T) {
 	e := newChainTestEngine(t)
-	got := admission.Compose(e.pooledStages(context.Background(), nil)...).Order()
-	want := []string{"sizecap", "profile", "readeranalysis", "guardwhere"}
-	if len(got) != len(want) {
-		t.Fatalf("pooled chain order = %v, want %v", got, want)
+	in := admissionInputs{phys: admission.PhysPooled}
+
+	pre := []admission.Stage{
+		sizeCapStage{},
+		profileAdmitStage{profile: e.profileFor(nil)},
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("pooled chain order = %v, want %v — the order is the policy; "+
-				"reordering is a reviewable change asserted here", got, want)
-		}
+	post := []admission.Stage{
+		readerAnalysisStage{userRoutines: nil},
+		guardWhereStage{},
 	}
+	gotPre := admission.Compose(pre...).Order()
+	gotPost := admission.Compose(post...).Order()
+	if fmt.Sprint(gotPre) != fmt.Sprint([]string{"sizecap", "profile"}) {
+		t.Fatalf("pre-policy half = %v, want [sizecap profile]", gotPre)
+	}
+	if fmt.Sprint(gotPost) != fmt.Sprint([]string{"readeranalysis", "guardwhere"}) {
+		t.Fatalf("post-policy half = %v, want [readeranalysis guardwhere]", gotPost)
+	}
+	_ = in
 }
 
 // THE ORDERING DELTA'S EVIDENCE CELL. The design's ruling: profile
@@ -791,4 +805,141 @@ func newChainTestEngine(t *testing.T) *Engine {
 	t.Helper()
 	e := &Engine{profile: ProfileV1Compat, maxStatementBytes: DefaultMaxStatementBytes}
 	return e
+}
+
+// The class-authorization precedence cell: a profile-invalid statement
+// whose actual class is UNGRANTED must answer with the PROFILE's refusal
+// — the legacy order's identity, not the class authorization's denial.
+// The split exists so this caller's answer cannot change: the pre-policy
+// half (sizecap, profile) runs before the drive's actual-class Authorize,
+// exactly where the legacy gate ran.
+func TestPooledDrive_ProfilePrecedesClassAuthorization(t *testing.T) {
+	// BEGIN under the v1compat profile: the profile refuses it (control
+	// statement). Its actual class is ClassControl, whose floor is DDL —
+	// a caller without the DDL grant would get auth.ErrDenied IF the
+	// class Authorize ran first; the legacy order answered the profile's
+	// ErrStatementUnsupported.
+	stmt, err := Classify("BEGIN", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ProfileV1Compat.admit(stmt, false); err == nil {
+		t.Fatal("premise wrong: v1compat admitted BEGIN")
+	}
+	e := newChainTestEngine(t)
+	preErr, opErr := e.runPrePolicyAdmission(context.Background(),
+		admissionInputs{phys: admission.PhysPooled}, stmt, "BEGIN")
+	if opErr != nil {
+		t.Fatal(opErr)
+	}
+	if preErr == nil {
+		t.Fatal("the pre-policy half admitted BEGIN — the profile stage is absent")
+	}
+	if !errors.Is(preErr, ErrStatementUnsupported) {
+		t.Fatalf("the pre-policy refusal is %v — want the PROFILE's ErrStatementUnsupported; "+
+			"a caller without the class grant must learn the profile's answer, which is "+
+			"the legacy order's identity", preErr)
+	}
+
+	// And the converse discriminator: a profile-VALID statement passes the
+	// pre-policy half, so the class Authorize's denial is what the caller
+	// sees when their grant is missing — the two halves answering in the
+	// legacy order.
+	stmt, err = Classify("DROP TABLE t", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ProfileV1Compat.admit(stmt, false); err != nil {
+		t.Fatalf("premise wrong: v1compat refused DDL: %v", err)
+	}
+	preErr, opErr = e.runPrePolicyAdmission(context.Background(),
+		admissionInputs{phys: admission.PhysPooled}, stmt, "DROP TABLE t")
+	if opErr != nil {
+		t.Fatal(opErr)
+	}
+	if preErr != nil {
+		t.Fatalf("the pre-policy half refused a profile-valid statement: %v — the class "+
+			"authorization's denial must be the one this caller sees, from the drive", preErr)
+	}
+}
+
+// The pinned-transaction execution-state cell: it admits the
+// session profile's control verbs on a POOLED call (the legacy gate's
+// pinned != nil answer), and the unpinned call refuses them — with the
+// transport staying PhysPooled in both, because the execution state is
+// its own fact.
+func TestPooledDrive_PinnedTxAdmitsControlVerbs(t *testing.T) {
+	stmt, err := Classify("BEGIN", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The session profile admits BEGIN on a session, refuses it off one.
+	if err := ProfileSession.admit(stmt, true); err != nil {
+		t.Fatalf("premise wrong: the session profile refused BEGIN on a session: %v", err)
+	}
+	if err := ProfileSession.admit(stmt, false); err == nil {
+		t.Fatal("premise wrong: the session profile admitted BEGIN off a session")
+	}
+
+	e := newChainTestEngine(t)
+	e.profile = ProfileSession
+	_ = e
+
+	stage := profileAdmitStage{profile: ProfileSession}
+
+	// PINNED: the pooled call carrying a pinned transaction admits the
+	// control verb — Phys stays Pooled, the execution state answers.
+	pinnedCtx := admission.Context{Phys: admission.PhysPooled, PinnedTx: true}
+	rep, rerr := admission.Compose(stage).Run(NewLegacyFactsForText(stmt, "BEGIN", 5), pinnedCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("a PINNED pooled call refused the session profile's control verb — " +
+			"the legacy gate's pinned != nil answer admitted it")
+	}
+
+	// UNPINNED: refused, same transport.
+	unpinnedCtx := admission.Context{Phys: admission.PhysPooled, PinnedTx: false}
+	rep, rerr = admission.Compose(stage).Run(NewLegacyFactsForText(stmt, "BEGIN", 5), unpinnedCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok := rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("an UNPINNED pooled call admitted the control verb — off a transaction " +
+			"it would run as text on a pooled connection and leave its state there")
+	}
+	if !errors.Is(reasonErr(deny), ErrStatementUnsupported) {
+		t.Fatalf("the unpinned refusal lost its identity: %v", reasonErr(deny))
+	}
+
+	// And the transport-corruption guard: the pinned fact must NOT make
+	// OnSession-applicable stages run — PinnedTx is execution state, not a
+	// physical context. A session-only stage stays absent on the pinned
+	// pooled call.
+	onSessionStage := pinnedProbeStage{}
+	rep, rerr = admission.Compose(onSessionStage).Run(NewLegacyFactsForText(stmt, "BEGIN", 5), pinnedCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("a PinnedTx pooled call satisfied an OnSession stage — the execution " +
+			"state leaked into physical applicability")
+	}
+}
+
+// pinnedProbeStage denies when consulted; it is applicable only on an
+// affirmative session physical context.
+type pinnedProbeStage struct{}
+
+func (pinnedProbeStage) Name() string { return "pinnedprobe" }
+func (pinnedProbeStage) ContextNeeds() admission.Needs {
+	return admission.Needs{OnSession: true}
+}
+func (pinnedProbeStage) DenyCodes() []admission.Code {
+	return []admission.Code{admission.CodeNoWhere}
+}
+func (pinnedProbeStage) Apply(admission.Facts, admission.Context) (admission.Contribution, error) {
+	return admission.Deny(admission.Reason{Code: admission.CodeNoWhere, Continue: true}), nil
 }
