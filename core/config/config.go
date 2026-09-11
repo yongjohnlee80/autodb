@@ -1,9 +1,27 @@
-// Package config loads autodb's TOML configuration.
+// Package config loads, decodes, and validates autodb's TOML configuration.
 //
-// The file is optional: a missing config yields the zero-config defaults, so
-// a first run needs no manual setup. A present file is decoded with
-// unknown-key rejection and validated — misconfiguration fails at Load, not
-// at first use.
+// The configuration file is optional: when absent, autodb boots with safe,
+// hardened zero-config defaults (local Unix domain socket, SQLite meta-store,
+// strict sizing limits). When present, the file is decoded with unknown-key
+// rejection and strict semantic validation—misconfigurations fail at Load time,
+// never midway through a production workflow.
+//
+// ============================================================================
+// CONFIGURATION SECTIONS HIERARCHY
+// ============================================================================
+//
+//	+------------------------------------------------------------------------+
+//	|                                Config                                  |
+//	+------------------------------------------------------------------------+
+//	| [server]    Socket rendezvous, TCP bind/port, max client connections   |
+//	| [meta]      Meta-store DSN, SSL mode, partition retention, engine type |
+//	| [history]   Audit trail retention days, max history entries            |
+//	| [security]  Master passphrase source, PBKDF2/Argon2 params, token TTL  |
+//	| [tui]       Vim mode bindings, status line styling, query editor theme |
+//	| [web]       Loopback HTTP/WebSocket UI port and CORS allowlists        |
+//	| [exec]      Query timeouts, idle-in-tx limits, max statement bytes     |
+//	| [frontdoor] PostgreSQL wire-protocol proxy listener, TLS certificates  |
+//	+------------------------------------------------------------------------+
 package config
 
 import (

@@ -78,6 +78,21 @@ type capabilities struct {
 	postgresWire bool
 }
 
+// CAPABILITY MATRIX:
+//
+//	+--------------------------------+----------+-------+--------+
+//	| Capability                     | Postgres | MySQL | SQLite |
+//	+--------------------------------+----------+-------+--------+
+//	| BackslashEscapes               |    No    |  Yes  |   No   |
+//	| VerifiesGrammarPerConnection   |   Yes    |   No  |  Yes   |
+//	| HasCommitStatusOracle          |   Yes    |   No  |   No   |
+//	| ReportsTransactionID           |   Yes    |   No  |   No   |
+//	| HasServerStatementTimeout      |   Yes    |   No  |   No   |
+//	| SupportsDeclarativePartition   |   Yes    |   No  |   No   |
+//	| HasRoutineCatalog              |   Yes    |   No  |   No   |
+//	| SupportsPostgresWire           |   Yes    |   No  |   No   |
+//	+--------------------------------+----------+-------+--------+
+//
 // The table. Every Name declared in this package must appear here, and
 // TestEveryEngineHasCapabilities is what makes that true rather than intended:
 // a missing row is not a compile error, it is a lookup that returns the zero

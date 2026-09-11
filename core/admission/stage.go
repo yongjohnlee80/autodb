@@ -140,27 +140,40 @@ func Risk(o Observation) Contribution { return Contribution{Risk: &o} }
 // NoContribution is the explicit empty verdict.
 func NoContribution() Contribution { return Contribution{} }
 
-// Stage is one admission step: a check composed into a chain, applicable
-// or not by construction, and permitted exactly one refusal currency.
+// Stage is the fundamental admission inspection unit composed into an evaluation chain.
 //
-// A stage's Apply returns a Contribution and an error, and the two answer
-// DIFFERENT questions. The Contribution is policy: what is wrong with the
-// statement. The error is operational: the STAGE broke — a catalog read
-// failed, a resolver is unreachable. An error is never a refusal, and a
-// refusal is never an error; conflating them is the failure the split
-// exists to prevent, because "the analyzer could not read the catalog"
-// and "the statement is refused" must reach the client differently.
+// Every stage inspects a statement's Facts against the execution Context.
 //
-// DISCLOSURE IS MANDATORY. DenyCodes declares every Code the stage can
-// deny with — nil for a stage that never denies. The registration walks
-// (the renderer-completeness check, the record-on-every-refusal
-// enumeration) derive their obligations from these declarations, so a
-// denying stage with an undeclared code is a refusal the pipeline's
-// consumers cannot know about: the orchestrator REJECTS a stage whose
-// Apply denies with a code it did not declare, loudly, at evaluation time.
-// An optional interface would let a denying stage evade every downstream
-// obligation while running normally — the central claim of the seam is
-// that it cannot.
+//	┌──────────────────────────────────────────────────────────────┐
+//	│                           Stage                              │
+//	├──────────────────────────────────────────────────────────────┤
+//	│ Name() string                                                │
+//	│ ContextNeeds() Needs                                         │
+//	│ DenyCodes() []Code      (MANDATORY DISCLOSURE)               │
+//	│ Apply(Facts, Context) -> (Contribution, error)               │
+//	└──────────────────────────────┬───────────────────────────────┘
+//	                               │
+//	                  +------------+------------+
+//	                  │                         │
+//	             Contribution                 error
+//	            (Policy Result)          (Infrastructure)
+//	                  │                         │
+//	         +--------+--------+          [Operational]
+//	         │                 │          e.g. Catalog
+//	       Deny              Risk         Read Failure
+//	  (Blocks Query)    (Metric Only)
+//
+// A stage's Apply returns a Contribution and an error, answering two
+// fundamentally DIFFERENT questions:
+//   - Contribution is policy: what is wrong with the statement itself.
+//   - error is operational: the stage broke (e.g. catalog read failed).
+//
+// An error is never a refusal, and a refusal is never an error; conflating
+// them is the architectural failure this split prevents.
+//
+// DISCLOSURE IS MANDATORY: DenyCodes declares every Code this stage can emit.
+// The Orchestrator strictly rejects any stage that attempts to deny with an
+// undeclared code at runtime.
 type Stage interface {
 	// Name is the stage's stable identity, used in chain renderings and
 	// order assertions.

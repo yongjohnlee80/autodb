@@ -28,22 +28,31 @@ func IsOperationalError(err error) bool {
 }
 
 // Orchestrator composes stages into one ordered chain and evaluates a
-// statement through it. The chain is DATA: composed once per profile,
-// rendered for review and assertion, and identical for a connection on
-// every surface — differing only where a stage is physically
-// inapplicable, never in SQL policy.
+// statement through it.
 //
-// THE CHAIN STOPS AT THE FIRST DENY, and that is a design property rather
-// than an economy: the first refusal is the fundamental one (the order is
-// declared so it stays that way — the most fundamental ground first), and
-// a caller told three things at once learns the wrong one first.
+// The chain is DATA: composed once per profile, rendered for review and
+// assertion, and identical for a connection across all frontends—differing
+// only where a stage is physically inapplicable, never in SQL policy.
 //
-// THE REGISTRATION IS THE DISCLOSURE SOURCE. Registered() exposes the
-// chain's stage names and every Code a stage can deny with, so the
-// renderer-completeness walk and the record-on-every-refusal enumeration
-// DISCOVER their obligations from the live chain rather than from a
-// hand-maintained list — one mechanism, two consumers, and a stage added
-// in a later phase cannot silently escape either.
+//	+-----------------------------------------------------------------------+
+//	|                         Orchestrator Chain                            |
+//	+-----------------------------------------------------------------------+
+//	| Stage 1: Size Intake Bound     (script-too-large)                     |
+//	|    │                                                                  |
+//	|    ▼                                                                  |
+//	| Stage 2: Predicate Guard       (mutation-without-predicate)           |
+//	|    │                                                                  |
+//	|    ▼                                                                  |
+//	| Stage 3: Routine Catalog Check (reader-advanced-pattern)              |
+//	|    │                                                                  |
+//	|    ▼                                                                  |
+//	| Stage 4: Session State & GUCs  (set-guc-refused, lock-outside-tx)     |
+//	+-----------------------------------------------------------------------+
+//
+// THE CHAIN STOPS AT THE FIRST DENY: This is a fundamental design property
+// rather than an economy. The first refusal is the most fundamental one,
+// and caller remediation is simpler when addressing the root violation
+// rather than confusing multiple secondary diagnostic messages.
 type Orchestrator struct {
 	stages []Stage
 }
@@ -63,23 +72,50 @@ func Compose(stages ...Stage) *Orchestrator {
 	return &Orchestrator{stages: stages}
 }
 
-// Run evaluates one statement's facts through the chain, in order, and
-// stops at the first deny. Stages whose declared needs the context cannot
-// supply are skipped — not consulted, not logged as empty, skipped —
-// because their absence is a property of the composition, decided when the
-// chain was built, not a runtime surprise.
+// Run evaluates one statement's facts through the chain in sequence.
 //
-// A DENY INTENTIONALLY SUPPRESSES RISK: when a stage contributes both a
-// denial and an observation, the denial wins and the observation is
-// dropped. A refused statement's analytics value is its refusal — the
-// record the disposition carries is the refusal itself. This is a
-// decision, documented here and asserted by the dual-arm cell, not an
-// accident of the return.
+// Execution terminates on the first stage that emits a denial, or aborts
+// if an operational error occurs:
 //
-// An operational error from a stage ABORTS the run and is returned as
-// itself. It is not a refusal: the caller must be able to tell "the
-// statement is refused" from "the pipeline could not decide", and the
-// Report type gives it that.
+//	             Orchestrator.Run(facts, ctx)
+//	                          │
+//	            ┌─────────────▼─────────────┐
+//	     ┌─────►│ Pick Next Stage in Chain  │
+//	     │      └─────────────┬─────────────┘
+//	     │                    │
+//	     │      ┌─────────────▼─────────────┐
+//	     │      │ Is Stage Applicable?      │
+//	     │      │ (Check Needs vs Context)  │
+//	     │      └──────┬─────────────┬──────┘
+//	     │          No │             │ Yes
+//	     │             │             ▼
+//	     │             │     ┌───────────────────────────┐
+//	     │             │     │ Stage.Apply(facts, ctx)   │
+//	     │             │     └─────────────┬─────────────┘
+//	     │             │                   │
+//	     │             │     ┌─────────────▼─────────────┐
+//	     │             │     │ Operational Error?        │
+//	     │             │     └──────┬─────────────┬──────┘
+//	     │             │        Yes │             │ No
+//	     │             │            │             ▼
+//	     │             │            │     ┌───────────────────────────┐
+//	     │             │            │     │ contrib.Deny != nil?      │
+//	     │             │            │     └──────┬─────────────┬──────┘
+//	     │             │        Abort │      Yes │             │ No
+//	     │             │      Pipeline│          │             ▼
+//	     │             │              │          │     ┌───────────────────────────┐
+//	     │             │              │          │     │ Record Risk Observation   │
+//	     │             │              │          │     └─────────────┬─────────────┘
+//	     │             │              │          │                   │
+//	     │             └──────────────┼──────────┼───────────────────┘
+//	     │                            │          │
+//	     ▼                            ▼          ▼
+//	(End of Chain)              ABORT RUN     STOP PIPELINE
+//	Return Report (Admitted)  OperationalErr  Return Report (Deny)
+//
+// A DENY SUPPRESSES RISK: When a stage emits both a denial and an observation,
+// the denial takes precedence and risk is dropped. The primary analytical
+// record of a denied statement is its denial reason.
 func (o *Orchestrator) Run(facts Facts, ctx Context) (Report, error) {
 	var rep Report
 	for _, s := range o.stages {

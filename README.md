@@ -75,8 +75,28 @@ assignments that decide what everyone else is allowed to do.*
 
 ## Security-first by design
 
-Every frontend is a client of one core. There is no path that skips the gates,
-because the gates are not in the frontends.
+Every frontend is a thin client of [`core`](core/). There is no path that skips the security gates, because all gates and execution logic live strictly within `core`:
+
+```
++-------------------------------------------------------------------------+
+|                           FRONTEND SURFACES                             |
+|  Terminal UI (TUI)  |  Neovim / autovim  |  Browser Web UI  | Front Door|
++------------------------------------+------------------------------------+
+                                     │ (RPC / IPC / Wire Protocol)
+                                     ▼
++-------------------------------------------------------------------------+
+|                              PACKAGE core                               |
+|  * config:     TOML validation, endpoints, hardened TLS transport       |
+|  * meta:       Relational store (Postgres/SQLite), audit trail, schemas |
+|  * auth:       Argon2id, AES-256-GCM keyslots, sessions, PATs, RBAC     |
+|  * admission:  Deterministic statement gate pipeline (ADR-0096)         |
+|  * engine:     Database engine types & capability matrix                |
+|  * exec:       Connection pools, leases, transactions, query streaming  |
++------------------------------------+------------------------------------+
+                                     │
+                                     ▼
+               Target Database (PostgreSQL, MySQL, SQLite)
+```
 
 **Identity and authorization.** Three roles ordered `reader < editor < admin`.
 Statements are classified — read / write / DDL / control — and a class is
@@ -85,39 +105,34 @@ connection. Connection-scoped actions require a grant **for admins too**: a
 globally-`reader` user never exceeds `SELECT`, whatever grants they hold.
 
 **Read-only means read-only.** `reader` users don't merely get their `UPDATE`s
-rejected by autodb. Through the front door — once it lands — they run inside
+rejected by autodb. Through the front door, they run inside
 **server-enforced read-only transactions**, so a write smuggled through a
 function, a procedure or dynamic SQL fails at PostgreSQL itself with SQLSTATE
 `25006`. The database enforces the boundary, not just the proxy in front of it.
 
-**Dangerous-statement detection — deterministic, out of the box.** A
-hand-written lexer — not a regex, and not a full parser — decides what a
-statement *is* before it runs. This layer needs no configuration, no network
-and no model; it is on from the first launch:
+**Deterministic statement admission pipeline (ADR-0096).** Rather than ad-hoc
+regexes, SQL statements pass through an ordered, extensible admission pipeline
+([`core/admission`](core/admission/)) that extracts statement facts and evaluates
+them against connection capabilities:
 
-- `UPDATE` / `DELETE` with no top-level `WHERE` clause is **blocked**.
-- **One statement per call on the single-statement path** — anything after a
-  top-level `;` is refused. The script runner deliberately *does* accept a
-  multi-statement buffer, but it splits the buffer and puts each statement
-  through the same classify → authorize → guard → audit path on its own, so
-  the audit record still equals exactly what ran. A script is not a
-  transaction, and a partial application says which statement failed and how
-  many had already run.
-- **Admission is the engine's decision against the connection's capability
-  profile**, not a tokenizer's: the `v1compat` profile refuses data-modifying
-  subqueries and CTEs outright, while the session profile admits them and
-  leaves them to the `WHERE` guard on their own merits. Transaction-control
-  and session-state statements (`BEGIN`, `SET`, `LOCK`, `PRAGMA`) are refused
-  off a session — on a pooled connection they would leave their state behind
-  for whoever gets that connection next.
-- Unterminated strings, comments and quotes are rejected as malformed rather
-  than guessed at.
-- Scripts over the size cap are rejected *before* execution.
+- **Intake size bounding**: Scripts exceeding the maximum statement bound are
+  rejected before parsing (`script-too-large`).
+- **Predicate guard**: `UPDATE` and `DELETE` without an affirmative `WHERE` clause
+  at parenthesis depth 0 are rejected (`mutation-without-predicate`).
+- **Routine catalog inspection**: Reader accounts attempting to execute user-defined
+  functions or procedural blocks are caught via catalog analysis (`reader-advanced-pattern`).
+- **Session-state & GUC protection**: Unauthorized session alterations (`SET`,
+  `LOCK`) off a stateful session are refused (`set-guc-refused`, `lock-outside-tx`).
+- **Single-statement enforcement**: The single-statement path rejects trailing
+  tokens after a top-level `;`. Multi-statement script buffers are split and
+  each statement is evaluated through the gate stack individually.
+- **Absence by construction**: Stages declare `Needs` (e.g. session transport,
+  routine catalog capability). Missing capabilities cause stages to be skipped
+  by construction rather than returning empty runtime contributions.
 
-These are the **syntactic** shapes — the ones a machine can be certain about.
+These are the **syntactic and structural** shapes — the ones a machine can be certain about.
 They catch the classic accidents (`DELETE FROM orders` with the `WHERE` still
-in your head) but they cannot tell a legitimate migration from a Friday-evening
-mistake that happens to be well-formed.
+in your head) before any packet reaches the backend.
 
 **AI inspection of the SQL — your model, your keys, never your data.**
 *(Accepted design, ADR-0076 — not yet implemented.)* On top of the

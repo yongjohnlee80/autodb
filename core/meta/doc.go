@@ -1,14 +1,48 @@
-// Package meta implements autodb's meta-store: the management
-// database holding users, connections, workspaces, grants, sessions, script
-// history, the audit log, the IP allowlist, and the store_meta key/value
-// table. It opens the configured engine (sqlite by default, postgres opt-in),
-// runs schema migrations, and exposes one immutable golib/dao Schema per
-// entity for the higher core layers (identity/authz in M3, execution in M4).
+// Package meta implements autodb's relational metadata repository.
 //
-// Portability rules: int64 autoincrement ids, timestamps as
-// unix seconds in integer columns, flags as 0/1 integers, enums as TEXT with
-// CHECK constraints — one scan shape across modernc/sqlite and pgx.
+// It encapsulates the management store holding users, connections, workspaces,
+// grants, sessions, personal access tokens (PATs), query history, the immutable
+// security audit trail, IP allowlists, transaction outcome logs, and encrypted
+// keyslot blobs.
 //
-// The one-way sqlite→postgres migration (Objective 6) lives in
-// MigrateToPostgres.
+// The meta-store supports two backends:
+//   - SQLite: Local embedded database, zero-config default for standalone developers.
+//   - PostgreSQL: High-availability networked database for production deployments.
+//
+// ============================================================================
+// META STORE ENTITY GRAPH & ARCHITECTURE
+// ============================================================================
+//
+//	                   +------------------------------------+
+//	                   |            StoreConfig             |
+//	                   |   (Engine: SQLite or Postgres)     |
+//	                   +-----------------+------------------+
+//	                                     │
+//	                                     ▼
+//	                   +------------------------------------+
+//	                   |             meta.Store             |
+//	                   +-----------------+------------------+
+//	                                     │
+//	     ┌───────────────────────────────┼───────────────────────────────┐
+//	     ▼                               ▼                               ▼
+//	[Identity & Security]     [Connections & Grants]           [Audit & Recovery]
+//	• Users                   • Connections                    • Audit
+//	• Sessions                • Workspaces                     • History
+//	• PATs                    • WorkspaceConns                 • TxOutcomes
+//	• AllowedIPs / UserIPs    • Grants                         • TxPending
+//	• Keyslots (AES-256)      • KV Settings
+//
+// ============================================================================
+// CROSS-DIALECT PORTABILITY INVARIANTS
+// ============================================================================
+//
+// To ensure exact binary and behavioral parity between SQLite and PostgreSQL:
+//  1. Primary Keys: int64 autoincrement integer IDs across all entity tables.
+//  2. Timestamps: Stored as 64-bit Unix seconds (integer columns), eliminating
+//     timezone parsing divergence across drivers.
+//  3. Booleans: Stored as 0/1 integers across all tables.
+//  4. Enums: Stored as TEXT with explicit CHECK constraints in SQL migrations.
+//  5. Unified DAO Schemas: Each entity is mapped to an immutable golib/dao Schema
+//     definition that generates parameterized queries for the active dialect.
 package meta
+

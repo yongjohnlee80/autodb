@@ -1,27 +1,47 @@
 package admission
 
-// Mutation is one data-modifying verb found below top level, with the guard
-// input for that verb at ITS OWN depth — a WHERE belonging to an inner
-// subquery is not a guard on the mutation that encloses it.
+// Mutation represents a data-modifying verb (INSERT, UPDATE, DELETE) identified
+// within a statement, recording its parenthesis nesting depth and whether a
+// WHERE predicate directly guards it at that exact depth.
+//
+// Nesting depth isolation is critical to preventing predicate confusion:
+//
+//	Depth 0: UPDATE users SET active = false WHERE id = 10;
+//	         └───────── Depth 0 Verb ────────┘ └ Depth 0 WHERE (Guarded)
+//
+//	Depth 0: DELETE FROM users
+//	Depth 1:   WHERE id IN (SELECT id FROM audit WHERE active = true);
+//	                        └─ Depth 1 subquery ─┘ └ Depth 1 WHERE ─┘
+//
+// A WHERE clause inside a nested subquery (depth 1) NEVER protects the outer
+// mutation (depth 0). The mutation guard requires an affirmative WHERE at
+// depth 0.
 type Mutation struct {
 	Verb     string // uppercase, e.g. "DELETE"
 	Depth    int    // the paren nesting depth the verb was found at
 	HasWhere bool   // a WHERE at exactly that depth after the verb
 }
 
-// Call is one function-call shape found anywhere in the statement, with its
-// schema qualifier when written. Keywords that happen to precede a paren
-// appear here too; they are harmless because no user-defined function can
-// be called by an unquoted keyword.
+// Call represents a function or procedure invocation identified anywhere in
+// the statement text.
 type Call struct {
 	Name   string // bare name, as lexed
 	Schema string // schema qualifier when written, "" otherwise
 }
 
-// FactClass is the authorization class: the MAXIMUM class of any verb in
-// the statement, so a read whose CTE body writes is authorized as a write.
-// Whether such a statement then EXECUTES is a stage's decision, not this
-// field's.
+// FactClass is the statement authorization category, representing the
+// maximum permission tier required by any clause within the statement:
+//
+//	ClassRead    (SELECT, EXPLAIN)
+//	    ▲
+//	ClassWrite   (INSERT, UPDATE, DELETE, MERGE)
+//	    ▲
+//	ClassDDL     (CREATE, ALTER, DROP, TRUNCATE, GRANT)
+//	    ▲
+//	ClassControl (BEGIN, COMMIT, ROLLBACK, SET, LOCK)
+//
+// For instance, a SELECT statement containing a data-modifying CTE is classified
+// as ClassWrite.
 type FactClass string
 
 const (
@@ -37,22 +57,22 @@ const (
 	ClassControl FactClass = "control"
 )
 
-// HasTopLevelWhere reports a mutation guard's depth-0 input: a WHERE at
-// paren depth 0 after the main verb.
+// Facts exposes the structural properties of a SQL statement extracted by
+// the lexer / parser frontend.
 //
-// Fact applicability is part of this interface: a stage declares which
-// facts it requires PRESENT, so a stage that needs a set-statement shape
-// is unsatisfiable on a chain whose facts carry none — absent by
-// construction, not by discipline. The optionals below return the zero
-// value and a false; a stage that never asks cannot be surprised by one
-// that is missing.
+// The interface is read-only and decoupled from the engine's internal AST types:
 //
-// LIFECYCLE SCOPE IS DELIBERATELY NOT HERE YET. The eventual contract —
-// per-fact provenance, per-stage scope requirements, per-Execute
-// recomputation — is introduced with the first drive step that recomputes
-// and asserts it, where it is enforced by the lifecycle mutation cells,
-// rather than frozen here as an unused scalar that claims a model the
-// code does not implement.
+//	+-------------------------------------------------------------------+
+//	|                             Facts                                 |
+//	+-------------------------------------------------------------------+
+//	| Verb()             -> Main classified SQL verb (e.g. "UPDATE")    |
+//	| Class()            -> Authorization category (Read/Write/DDL/Ctrl)|
+//	| HasTopLevelWhere() -> True if WHERE clause exists at depth 0      |
+//	| Mutations()        -> List of mutating verbs & nesting depths     |
+//	| Calls()            -> List of function / routine invocation shapes|
+//	| SetTarget()        -> GUC variable name, LOCAL flag, existence    |
+//	| TextLen()          -> Total statement text length in bytes        |
+//	+-------------------------------------------------------------------+
 type Facts interface {
 	// Verb is the classified main verb, uppercase.
 	Verb() string

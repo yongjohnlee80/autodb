@@ -1,9 +1,24 @@
 package admission
 
-// PhysicalCtx is the transport fact: where the statement is running. It is
-// a fact about the SURFACE, deliberately separate from the capability
-// policy — the profile selects which stages compose the chain, and the
-// physical context selects where a stage is applicable at all.
+// PhysicalCtx is the transport fact describing where and how the statement is running.
+//
+// It represents the physical execution surface rather than security policy:
+//
+//	+-----------------------------------------------------------------+
+//	|                          PhysicalCtx                            |
+//	+-----------------------------------------------------------------+
+//	| PhysPooled:  Stateless pooled database backend.                 |
+//	|              - No persistent wire connection.                   |
+//	|              - Transactions pinned only during active TX block. |
+//	+-----------------------------------------------------------------+
+//	| PhysSession: Stateful local IPC / TUI session (unix socket).    |
+//	|              - Interactive session lifecycle.                   |
+//	|              - Session control verbs (SET, LOCK) permitted.     |
+//	+-----------------------------------------------------------------+
+//	| PhysWire:    Dedicated PostgreSQL wire session (TCP daemon).    |
+//	|              - Pinned 1:1 to single backend for connection life.|
+//	|              - Emulates native PostgreSQL wire protocol.        |
+//	+-----------------------------------------------------------------+
 type PhysicalCtx int
 
 const (
@@ -76,11 +91,26 @@ func (c TargetCaps) String() string {
 	return join(parts, "+")
 }
 
-// Needs is what a stage requires of the context and facts to be
-// applicable. A stage that cannot be satisfied is not "deselected" on the
-// chain — it is UNSATISFIABLE there, and the composition says so rather
-// than the stage returning nothing at runtime. Absence by construction,
-// never by discipline.
+// Needs declares what an admission stage requires from Context and Facts to be
+// applicable.
+//
+// If any requirement is not satisfied by the runtime context or statement facts,
+// the Orchestrator skips the stage entirely ("Absence by Construction"):
+//
+//	+-------------------------+      +--------------------------+
+//	|     Stage.Needs         |  vs  |     Context & Facts      |
+//	+-------------------------+      +--------------------------+
+//	| OnSession: true         | <--- | PhysSession / PhysWire?  | -> (Mismatch: Skip)
+//	| ReadOnlyUnit: true      | <--- | ctx.ReadOnly == true?    | -> (Mismatch: Skip)
+//	| ControlVerb: true       | <--- | facts.Class() == Control | -> (Mismatch: Skip)
+//	| SetShape: true          | <--- | facts.SetTarget() exists?| -> (Mismatch: Skip)
+//	| TargetCaps: bits        | <--- | ctx.TargetCaps.Has(want) | -> (Mismatch: Skip)
+//	+-------------------------+      +--------------------------+
+//	                                              │
+//	                                    All Needs Satisfied?
+//	                                              │
+//	                                              ▼
+//	                                     Stage is APPLICABLE
 type Needs struct {
 	// OnSession: the stage requires an affirmative session-shaped physical
 	// context (session or wire). Pooled — and any zero or invalid physical
