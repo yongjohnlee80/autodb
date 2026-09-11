@@ -421,7 +421,12 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 			profile, meta.ProfileV1Compat, meta.ProfileSession)
 	}
 	e.exposureMu.Lock()
-	defer e.exposureMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			e.exposureMu.Unlock()
+		}
+	}()
 	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
 	if err != nil {
 		return err
@@ -473,6 +478,8 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 	if err != nil {
 		return err
 	}
+	e.exposureMu.Unlock()
+	locked = false
 
 	// A DOWNGRADE must close the connection's open wire sessions.
 	//
@@ -483,10 +490,11 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 	// changes underneath a client that is still connected. Worse than no
 	// effect, which is why this is not left to the next open.
 	//
-	// AFTER the commit, while the exposure transition lock still excludes wire
-	// opens. clearDraining then lets the connection be used again under its new
-	// profile — closeSessionsFor marks it draining, which is right for a delete
-	// and wrong here.
+	// AFTER the commit and outside the engine-wide exposure lock. Any open that
+	// completed before the commit is now registered and included below; any open
+	// after it reads the closed exposure value. clearDraining then lets the
+	// connection be used again under its new profile — closeSessionsFor marks it
+	// draining, which is right for a delete and wrong here.
 	if was == meta.ProfileSession && profile != meta.ProfileSession {
 		e.closeSessionsFor(ctx, connID, ip, "profile-downgraded")
 		e.sessions.clearDraining(connID)
@@ -508,7 +516,12 @@ func (e *Engine) SetConnectionExposure(ctx context.Context, token string, connID
 		return auth.ErrDenied
 	}
 	e.exposureMu.Lock()
-	defer e.exposureMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			e.exposureMu.Unlock()
+		}
+	}()
 	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
 	if err != nil {
 		return err
@@ -548,6 +561,8 @@ func (e *Engine) SetConnectionExposure(ctx context.Context, token string, connID
 	if err != nil {
 		return err
 	}
+	e.exposureMu.Unlock()
+	locked = false
 
 	if wasExposed && !exposed {
 		for _, s := range e.sessions.wireSessions(connID) {
