@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/yongjohnlee80/autodb/core/engine"
 	"strings"
@@ -111,14 +112,49 @@ func pgPrepareConnVerify() golibpg.Option {
 			} else if prevBefore != nil && !prevBefore(ctx, conn) {
 				return false, nil
 			}
-			var scs string
-			if err := conn.QueryRow(ctx, "SHOW standard_conforming_strings").Scan(&scs); err != nil {
-				return false, fmt.Errorf("exec: verifying standard_conforming_strings at checkout: %w", err)
+			// READ WHAT THE SERVER ALREADY TOLD US. DO NOT ASK.
+			//
+			// standard_conforming_strings is a GUC_REPORT parameter: PostgreSQL
+			// sends a ParameterStatus at startup and again on EVERY change,
+			// unprompted -- including a change made through
+			// `SELECT set_config(...)`, which is the form the SET denylist
+			// cannot intercept and the reason this check exists at all.
+			// Measured: set_config to 'off' updates the reported value with no
+			// query issued.
+			//
+			// Asking instead cost a round trip per checkout, and it is what
+			// made autodb unusable through its own front door. pgx names a
+			// cached statement `stmtcache_` + sha256(sql)[:24] -- a pure
+			// function of the SQL TEXT. A wire session pins ONE target backend
+			// and relays the client's Parse onto it, so when the client is also
+			// pgx in its shipped default it computes THE SAME NAME for this
+			// same text. autodb had already prepared it on that session, so the
+			// client's very first Parse came back 42P05 "already exists",
+			// deterministically, on a brand-new connection.
+			//
+			// The collision was never the disease. Issuing a statement to learn
+			// something the protocol reports is: it put autodb's own objects in
+			// the namespace it hands to clients. Reading the reported value
+			// takes autodb out of that namespace entirely, and is strictly more
+			// truthful -- it reflects every change the server announced rather
+			// than the value at the moment we happened to ask.
+			// The RULE lives in the dialect; only the TRANSPORT is here.
+			// pgconn already holds every ParameterStatus the server sent, so
+			// its lookup is handed over directly.
+			v, ok := dialectFor(engine.Postgres).(ReportedGrammarVerifier)
+			if !ok {
+				return false, fmt.Errorf(
+					"exec: the postgres dialect no longer verifies its parsing mode")
 			}
-			if !strings.EqualFold(strings.TrimSpace(scs), "on") {
-				// Drifted or hostile session: destroy it and let the pool
-				// retry on a fresh connection.
-				return false, nil
+			if verr := v.VerifyReportedGrammar(conn.PgConn().ParameterStatus); verr != nil {
+				if errors.Is(verr, ErrGrammarDrifted) {
+					// Drifted session: destroy it and let the pool retry on a
+					// fresh one, which self-heals.
+					return false, nil
+				}
+				// Unreadable, not drifted. Retrying would spin the pool's
+				// bounded attempts against a peer that will never answer.
+				return false, fmt.Errorf("exec: verifying the parsing mode at checkout: %w", verr)
 			}
 			return true, nil
 		}
@@ -129,7 +165,7 @@ func pgPrepareConnVerify() golibpg.Option {
 // string ("-c name=value --name=value …") — it does NOT implement libpq's
 // escaping grammar, so it exists only as a fast, clear failure at
 // creation time. The authoritative check is live per-connection
-// verification (pgAfterConnectVerify), which a smuggled setting cannot
+// verification (pgPrepareConnVerify), which a smuggled setting cannot
 // evade.
 func optionsSetsParam(options, name string) bool {
 	fields := strings.Fields(options)

@@ -159,6 +159,21 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 		_ = conn.Close()
 		return nil, verr
 	}
+	// A capability test, and postgres deliberately does not answer it.
+	//
+	// This probe runs a statement on a POOLED connection, which then goes back
+	// to the pool carrying whatever that statement left behind. A wire session
+	// later PINS a connection out of this same pool and relays a client's Parse
+	// onto it -- and pgx names a cached statement from a hash of the SQL text,
+	// so a client running the same text computes the same name. A probe here
+	// therefore handed autodb's own prepared statement to the next client to
+	// pin that connection, which answered its first Parse with 42P05.
+	//
+	// PostgreSQL implements ReportedGrammarVerifier instead: the parsing mode is
+	// checked at EVERY acquisition, from state the server reports unasked. That
+	// is strictly more often than once at open, and issues nothing. MySQL still
+	// implements this one -- sql_mode is not reported, database/sql offers no
+	// checkout seam, and no wire client shares a session with it.
 	if v, ok := dialectFor(row.Engine).(SessionGrammarVerifier); ok {
 		if verr := v.VerifySessionGrammar(ctx, conn); verr != nil {
 			_ = conn.Close()
