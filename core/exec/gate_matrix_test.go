@@ -71,6 +71,30 @@ var (
 	onRecordEntryRe = regexp.MustCompile(`(?m)^(\d+)\. \*\*(.+)$`)
 )
 
+// rowIdentities returns the Err identities named in the SENTINEL CELL of a
+// table row — the first cell only, never the whole row. A backticked Err
+// identity in a notes column (a row explaining, say, an ordering change by
+// naming the identity it displaces) is a MENTION, not a row identity: it
+// does not confer inventory membership, does not own coordinates, and does
+// not consume a justification token. Every row-scanning walk goes through
+// this one helper so the rule is written once.
+//
+// The sentinel cell is delimited by the row's first "|" after the leading
+// one, plus one more "|" — table syntax is one leading pipe and one pipe
+// per cell boundary, so cells[1] is the first cell and the identities are
+// those found within it.
+func rowIdentities(line string) []string {
+	cells := strings.Split(line, "|")
+	if len(cells) < 2 {
+		return nil
+	}
+	var ids []string
+	for _, m := range sentinelName.FindAllStringSubmatch(cells[1], -1) {
+		ids = append(ids, m[1])
+	}
+	return ids
+}
+
 // coordinateWindow is how far a DECLARATION anchor may drift from the
 // declared line before the walk calls it stale. Zero would fail on every
 // intervening edit; the window is the honest tolerance for line drift
@@ -247,9 +271,7 @@ func TestGateMatrix_RestrictedRowsDeclareJustification(t *testing.T) {
 		if strings.Contains(surfaces, "all four") {
 			continue
 		}
-		names := sentinelName.FindAllStringSubmatch(line, -1)
-		for _, nm := range names {
-			sentinel := nm[1]
+		for _, sentinel := range rowIdentities(line) {
 			tokens := justificationTokens(line, sentinel)
 			if len(tokens) == 0 {
 				t.Errorf("restricted row %s declares no Justification for %s — a cross-surface "+
@@ -326,15 +348,18 @@ func justificationTokens(line, sentinel string) []justTok {
 		}
 		toks = append(toks, justTok{category: m[1], section: sec, number: num, ref: "§" + m[2] + "." + m[3]})
 	}
-	// The token stream belongs to the whole row. Attribute tokens to
-	// sentinels by ORDER: names and tokens appear in the same order on a
-	// well-formed row. A row with fewer tokens than names is reported per
-	// sentinel by the caller (the sentinel whose turn has no token), which
-	// is the "one independently validated token per sentinel" obligation.
-	names := sentinelName.FindAllStringSubmatch(line, -1)
+	// The token stream belongs to the whole row. Attribute tokens to the
+	// row's IDENTITIES — first-cell names, never notes-column mentions —
+	// by ORDER: identities and tokens appear in the same order on a
+	// well-formed row. A row with fewer tokens than identities is reported
+	// per identity by the caller (the identity whose turn has no token),
+	// which is the "one independently validated token per identity"
+	// obligation. A notes-column mention never reaches here, so it can
+	// neither consume a token nor masquerade as declared.
+	ids := rowIdentities(line)
 	nameIdx := -1
-	for i, nm := range names {
-		if nm[1] == sentinel {
+	for i, id := range ids {
+		if id == sentinel {
 			nameIdx = i
 			break
 		}
@@ -496,14 +521,10 @@ func anyIdentifierUsedAtLine(f *ast.File, fset *token.FileSet, names []string, l
 func gateMatrixRowNamesInLine(t *testing.T, sentinel string) []string {
 	t.Helper()
 	for _, line := range gateMatrixInventoryLines(t) {
-		names := sentinelName.FindAllStringSubmatch(line, -1)
-		for _, m := range names {
-			if m[1] == sentinel {
-				out := make([]string, 0, len(names))
-				for _, n := range names {
-					out = append(out, n[1])
-				}
-				return out
+		ids := rowIdentities(line)
+		for _, id := range ids {
+			if id == sentinel {
+				return ids
 			}
 		}
 	}
@@ -554,11 +575,8 @@ func gateMatrixRowNames(t *testing.T) map[string]bool {
 	t.Helper()
 	rows := map[string]bool{}
 	for _, line := range gateMatrixInventoryLines(t) {
-		if !strings.HasPrefix(line, "| `") {
-			continue
-		}
-		for _, m := range sentinelName.FindAllStringSubmatch(line, -1) {
-			rows[m[1]] = true
+		for _, id := range rowIdentities(line) {
+			rows[id] = true
 		}
 	}
 	if len(rows) < 30 {
@@ -580,11 +598,8 @@ func gateMatrixRows(t *testing.T) map[string][]gateCoord {
 	t.Helper()
 	rows := map[string][]gateCoord{}
 	for _, line := range gateMatrixInventoryLines(t) {
-		if !strings.HasPrefix(line, "| `") {
-			continue
-		}
-		names := sentinelName.FindAllStringSubmatch(line, -1)
-		if len(names) == 0 {
+		ids := rowIdentities(line)
+		if len(ids) == 0 {
 			continue
 		}
 		for _, c := range coordRe.FindAllStringSubmatch(line, -1) {
@@ -592,8 +607,8 @@ func gateMatrixRows(t *testing.T) map[string][]gateCoord {
 			for _, ch := range c[2] {
 				n = n*10 + int(ch-'0')
 			}
-			for _, m := range names {
-				rows[m[1]] = append(rows[m[1]], gateCoord{file: c[1], line: n})
+			for _, id := range ids {
+				rows[id] = append(rows[id], gateCoord{file: c[1], line: n})
 			}
 		}
 	}
