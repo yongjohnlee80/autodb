@@ -627,3 +627,94 @@ func TestSessionStateAdapter_TwoGUCModelsDistinct(t *testing.T) {
 		t.Fatal("the empty chain denied — the mutation's premise is wrong")
 	}
 }
+
+// RESET parity on the wire: an admitted named RESET is ADMITTED (a
+// fall-through in the adapter used to deny it), and a refused RESET
+// keeps its identity.
+func TestSessionStateAdapter_ResetParityOnTheWire(t *testing.T) {
+	o := admission.Compose(newSessionStateStage())
+	wireCtx := admission.Context{Phys: admission.PhysWire, TxOpen: true}
+
+	// An admitted named RESET: the denylist does not name datestyle, and
+	// the wire's backend is discarded at close — resetting a setting is
+	// the caller's own business.
+	st, err := parseReset("RESET datestyle")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admitWireReset(st, false); err != nil {
+		t.Fatalf("premise wrong: the wire gate refused RESET datestyle: %v", err)
+	}
+	rep, rerr := o.Run(controlFacts(t, "RESET datestyle"), wireCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		deny, _ := rep.PrimaryDeny()
+		t.Fatalf("the adapter refused an admitted named RESET on the wire: %s — %s",
+			deny.Code, deny.Detail)
+	}
+
+	// A refused RESET: RESET ALL would reset the engine's own belts.
+	if err := admitWireReset(resetStatement{All: true}, false); err == nil {
+		t.Fatal("premise wrong: the wire gate admitted RESET ALL")
+	}
+	rep, rerr = o.Run(controlFacts(t, "RESET ALL"), wireCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok := rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted RESET ALL on the wire")
+	}
+	if deny.Code != admission.CodeWireSetRefused {
+		t.Fatalf("code = %s, want wire-set-refused", deny.Code)
+	}
+	if !strings.Contains(deny.Detail, ErrWireSetRefused.Error()) {
+		t.Fatalf("detail %q does not carry the wire sentinel's text", deny.Detail)
+	}
+}
+
+// Foreign facts FAIL CLOSED: a facts implementation the legacy adapters
+// cannot read must not turn a legacy refusal into an admission. The
+// composing-fake cell validates a second STAGE; it never licensed a
+// foreign FACTS carrier bypassing the legacy policy chain.
+type foreignFacts struct {
+	class admission.FactClass
+}
+
+func (f foreignFacts) Verb() string                  { return "UPDATE" }
+func (f foreignFacts) Class() admission.FactClass    { return f.class }
+func (foreignFacts) HasTopLevelWhere() bool          { return false }
+func (foreignFacts) Mutations() []admission.Mutation { return nil }
+func (foreignFacts) Calls() []admission.Call         { return nil }
+func (foreignFacts) SetTarget() (string, bool, bool) { return "", false, false }
+func (foreignFacts) TextLen() int                    { return 10 }
+
+func TestForeignFacts_FailClosed(t *testing.T) {
+	ctx := admission.Context{Phys: admission.PhysWire, TxOpen: true}
+
+	for _, tc := range []struct {
+		stage admission.Stage
+		class admission.FactClass
+	}{
+		{guardWhereStage{}, admission.ClassWrite},
+		{profileAdmitStage{ProfileV1Compat}, admission.ClassWrite},
+		{authorizeUnitStage{}, admission.ClassWrite},
+		{newSessionStateStage(), admission.ClassControl},
+	} {
+		// The fact's class must be one the stage APPLIES to (sessionstate
+		// is ControlVerb-gated); absence-by-construction is applicability,
+		// not a bypass — the fail-closed path is only reachable when the
+		// stage is consulted.
+		_, err := admission.Compose(tc.stage).Run(foreignFacts{class: tc.class}, ctx)
+		if err == nil {
+			t.Errorf("%s silently accepted foreign facts — a facts implementation the "+
+				"stage cannot read must not bypass the legacy gate", tc.stage.Name())
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.stage.Name()) {
+			t.Errorf("%s's fail-closed error does not name itself: %v", tc.stage.Name(), err)
+		}
+	}
+}
