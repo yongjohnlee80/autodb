@@ -200,9 +200,6 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 	if cerr != nil {
 		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, cerr)
 	}
-	if err := e.readerAnalysis(ctx, connRow, pol, stmt); err != nil { // the editors-first rule, stage
-		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, err)
-	}
 	s.mu.Lock()
 	txOpen, aborted := s.txPhase != txNone, s.txPhase == txAborted
 	s.mu.Unlock()
@@ -234,14 +231,16 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 		// classified is refused by ParseTxControl in handleTxControl.
 		return stmt, routeOwnedControl, nil
 	}
-	if err := e.authorizeUnit(stmt, pol); err != nil {
-		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, err)
+	// THE STATEMENT GATES, through the one chain — the declared order, and
+	// the ORDERING DELTA for this path: the legacy wire gate ran the
+	// reader analysis before the profile; the profile answers first now
+	// (removing the UDF cannot make a compat-profile dm-CTE runnable).
+	admitErr, opErr := e.runSessionAdmission(ctx, s, pol, connRow, txOpen, stmt, part)
+	if opErr != nil {
+		return Statement{}, 0, opErr
 	}
-	if err := e.profileFor(connRow).admit(stmt, true); err != nil {
-		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, err)
-	}
-	if err := guardWhere(stmt); err != nil {
-		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, err)
+	if admitErr != nil {
+		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, admitErr)
 	}
 	if aborted {
 		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, ErrTxAborted)
