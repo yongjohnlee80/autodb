@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -207,6 +208,102 @@ func TestSetConnectionExposure_DisablingClosesOpenWireSessions(t *testing.T) {
 	}
 	if _, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP); err != nil {
 		t.Fatalf("open after re-enabling exposure: %v", err)
+	}
+}
+
+// A slow withdrawal on one connection must not hold the engine-wide exposure
+// lock. The durable closed value already prevents any later open on that
+// connection; keeping the lock while a live statement quiesces only stalls
+// unrelated targets, for up to closeQuiesce per session.
+func TestExposureTransitions_SlowWithdrawalDoesNotBlockUnrelatedWireOpens(t *testing.T) {
+	tests := []struct {
+		name       string
+		transition func(context.Context, *fixture) error
+	}{
+		{"exposure disable", func(ctx context.Context, f *fixture) error {
+			return f.eng.SetConnectionExposure(ctx, f.rootTok, f.connID, false, testIP)
+		}},
+		{"profile compatibility downgrade", func(ctx context.Context, f *fixture) error {
+			return f.eng.SetConnectionProfile(ctx, f.rootTok, f.connID, meta.ProfileV1Compat, testIP)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f, _, _, _ := wireFixture(t)
+			ctx := context.Background()
+
+			otherID, err := f.eng.CreateConnection(ctx, f.rootTok, "unrelated", "sqlite",
+				"file:exposure-unrelated?mode=memory&cache=shared", testIP)
+			if err != nil {
+				t.Fatalf("CreateConnection: %v", err)
+			}
+			if err := f.eng.SetConnectionProfile(ctx, f.rootTok, otherID, meta.ProfileSession, testIP); err != nil {
+				t.Fatalf("exposing the unrelated connection during compatibility: %v", err)
+			}
+			otherPAT, err := f.svc.CreatePAT(ctx, f.rootTok, "unrelated-wire", otherID, 0, nil, false, nil, testIP)
+			if err != nil {
+				t.Fatalf("CreatePAT: %v", err)
+			}
+
+			tx := newControllableTx()
+			s, join := sessionWithInFlight(t, tx, false)
+			s.id = "slow-exposure-withdrawal"
+			s.connID = f.connID
+			if err := f.eng.sessions.admitWithLease(s, f.connID, WireSessionOverhead); err != nil {
+				t.Fatalf("admitting the slow wire session: %v", err)
+			}
+			released := false
+			releaseRun := func() {
+				if !released {
+					close(tx.release)
+					released = true
+				}
+				join()
+			}
+			defer releaseRun()
+			f.eng.closeQuiesce = time.Second
+
+			transitionErr := make(chan error, 1)
+			go func() {
+				transitionErr <- tc.transition(ctx, f)
+			}()
+			deadline := time.Now().Add(time.Second)
+			for s.get() != sessClosing && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if s.get() != sessClosing {
+				releaseRun()
+				t.Fatalf("transition did not reach the slow session: %v", <-transitionErr)
+			}
+
+			type openResult struct {
+				res WireSessionResult
+				err error
+			}
+			opened := make(chan openResult, 1)
+			go func() {
+				res, oerr := f.eng.OpenWireSession(ctx, otherPAT.Secret, "root", "unrelated", testIP)
+				opened <- openResult{res: res, err: oerr}
+			}()
+			select {
+			case got := <-opened:
+				if got.err != nil {
+					releaseRun()
+					<-transitionErr
+					t.Fatalf("unrelated wire open failed during slow withdrawal: %v", got.err)
+				}
+				f.eng.CloseWireSession(ctx, got.res.SessionID, got.res.UserID, testIP, "test")
+			case <-time.After(250 * time.Millisecond):
+				releaseRun()
+				<-transitionErr
+				t.Fatal("a slow exposure withdrawal blocked a wire open on another connection")
+			}
+
+			releaseRun()
+			if err := <-transitionErr; err != nil {
+				t.Fatalf("transition: %v", err)
+			}
+		})
 	}
 }
 

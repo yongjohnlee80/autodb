@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
+	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -101,5 +103,31 @@ func TestUnitPolicy_TheInternalSessionDoesNotInferWireSemanticsFromProfile(t *te
 	}
 	if len(rows) == 0 {
 		t.Fatal("the internal-session reader ran without an audit of classifier-only enforcement")
+	}
+}
+
+func TestUnitPolicy_AnUnsetPhysicalContextFailsClosed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newFixture(t)
+	row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := f.eng.target(ctx, f.connID, row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ident, err := f.svc.Authorize(ctx, f.rootTok, f.connID, auth.ActionRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, phys := range []admission.PhysicalCtx{0, 99} {
+		_, _, werr := f.eng.wrapReadOnly(ctx, target, ident, f.connID, testIP, "SELECT 1",
+			UnitPolicy{Role: meta.RoleReader, ReadOnly: true}, phys)
+		if !errors.Is(werr, ErrReadOnlyUnenforceable) {
+			t.Errorf("physical context %d returned %v, want ErrReadOnlyUnenforceable", phys, werr)
+		}
 	}
 }

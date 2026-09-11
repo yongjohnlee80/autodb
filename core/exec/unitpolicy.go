@@ -163,7 +163,14 @@ func (e *Engine) wrapReadOnly(
 		// remains exactly the boundary it has always been. The unit is
 		// AUDITED so the gap is visible rather than inferred from a driver's
 		// capabilities.
-		if phys == admission.PhysWire {
+		switch phys {
+		case admission.PhysWire:
+			return nil, nil, e.reject(ctx, ident, connID, ip, sqlText, ErrReadOnlyUnenforceable)
+		case admission.PhysPooled, admission.PhysSession:
+			// These surfaces retain the compatibility behavior below.
+		default:
+			// PhysicalCtx deliberately has no meaningful zero value. Treat an
+			// omitted or unknown surface as unable to prove the wire guarantee.
 			return nil, nil, e.reject(ctx, ident, connID, ip, sqlText, ErrReadOnlyUnenforceable)
 		}
 		e.auditBounded(ctx, ident.UserID(), ip, "readonly_unenforced",
