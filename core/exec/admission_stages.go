@@ -50,3 +50,38 @@ func (sizeCapStage) Apply(facts admission.Facts, ctx admission.Context) (admissi
 	}
 	return admission.NoContribution(), nil
 }
+
+// guardWhereStage is the WHERE guard: a mutation that can reach every row
+// must say which rows it means, at every depth — top level and inside
+// data-modifying CTEs alike. The rule is one sentence and the legacy
+// implementation is the whole of it; the adapter maps its two refusal
+// arms onto one code (the sentinel ErrNoWhere is the compatibility
+// surface for both) and preserves the error text verbatim in the Detail.
+type guardWhereStage struct{}
+
+func (guardWhereStage) Name() string { return "guardwhere" }
+
+func (guardWhereStage) ContextNeeds() admission.Needs { return admission.Needs{} }
+
+func (guardWhereStage) DenyCodes() []admission.Code {
+	return []admission.Code{admission.CodeNoWhere}
+}
+
+// Apply runs the legacy guard against the classifier verdict the facts
+// carry. The guard's own error is the identity: ErrNoWhere, with the
+// nested arm's verb and depth in the text.
+func (guardWhereStage) Apply(facts admission.Facts, _ admission.Context) (admission.Contribution, error) {
+	lf, ok := facts.(*LegacyFacts)
+	if !ok {
+		return admission.NoContribution(), nil
+	}
+	if err := guardWhere(lf.stmt); err != nil {
+		return admission.Deny(admission.Reason{
+			Code:     admission.CodeNoWhere,
+			Subject:  lf.stmt.Verb,
+			Detail:   err.Error(),
+			Continue: true,
+		}), nil
+	}
+	return admission.NoContribution(), nil
+}
