@@ -66,7 +66,7 @@ delivery.
 | sentinel | raised at | surfaces | layer | notes |
 |---|---|---|---|---|
 | `auth.ErrDenied` | the read floor (engine.go:471, session_engine.go:46), class floors (`authorizeUnit` wire_execute.go:231), control floors (wire_query.go:213-217, wire_execute.go:185-194) | all four | authority | The uniform denial — never discloses existence. Mapped to `CodeDenied`/SQLSTATE 42501-family per surface renderer. |
-| `ErrTxAborted` | decl session_tx.go:43; wire_execute.go:160/204, session_engine.go:175, wire_query.go:226/247 | session, wire simple, wire ext | authority | Failed-transaction state; recovery controls only.  Justification: applicability:§7.5. |
+| `ErrTxAborted` | decl session_tx.go:43; wire_execute.go:158/202, session_engine.go:175, wire_query.go:226/247 | session, wire simple, wire ext | authority | Failed-transaction state; recovery controls only.  Justification: applicability:§7.5. |
 | `ErrTxAlreadyOpen` | decl session_tx.go:34; session_tx.go:129 | session, wire (both via `handleTxControl`) | authority | BEGIN on an open transaction.  Justification: applicability:§7.5. |
 | `ErrNoOpenTx` | decl session_tx.go:37; session_tx.go:288 | session, wire | authority | COMMIT/ROLLBACK with nothing to finish.  Justification: applicability:§7.5. |
 | `ErrNoSuchTx` | decl txstatus.go:36; txstatus.go:83/:88 | session, wire, RPC status | authority | A transaction id with no progression — "not the caller's" answers exactly as "never existed", so tx.status cannot be used to discover which transaction ids exist.  Justification: applicability:§7.4. |

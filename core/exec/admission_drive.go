@@ -101,3 +101,59 @@ func (e *Engine) evaluateChain(stages []admission.Stage, facts admission.Facts, 
 	deny, _ := rep.PrimaryDeny()
 	return reasonErr(deny), nil
 }
+
+// sessionStages is the session drive's composition: exactly the gates its
+// legacy path ran, in the declared order. The session path's class floor
+// is the SNAPSHOT check (authorizeUnit against the already-resolved
+// policy) rather than the token-level grant lookup the pooled path runs,
+// so the snapshot-floor stage IS composed here.
+//
+// THE ORDERING DELTA LANDS HERE. The legacy session path ran reader
+// analysis BEFORE the profile gate; the declared order runs the profile
+// first, because removing the UDF cannot make a compat-profile
+// data-modifying CTE runnable. A read-only compat unit whose statement
+// violates both stages now answers statement-unsupported where the legacy
+// path answered reader-advanced-pattern — the ONE intentional behaviour
+// change of phase 1, recorded in the gate matrix's corpus prediction
+// (empty manifest delta, by construction) and asserted by the
+// ordering-delta cells.
+func (e *Engine) sessionStages(ctx context.Context, connRow *meta.Connection) []admission.Stage {
+	return []admission.Stage{
+		sizeCapStage{},
+		profileAdmitStage{profile: e.profileFor(connRow)},
+		readerAnalysisStage{userRoutines: func() (*udfSet, error) {
+			return e.userRoutines(ctx, connRow)
+		}},
+		authorizeUnitStage{},
+		guardWhereStage{},
+	}
+}
+
+// runSessionAdmission evaluates the session drive's chain for one
+// statement. The session path resolves its policy ONCE per unit before
+// this call (the fresh-per-unit read the never-cache rule requires) and
+// passes the snapshot; the whole gate sequence is pure, so it is ONE
+// evaluation, not split — the drive's I/O (policy resolve, transaction
+// authority preflight) all precedes it.
+func (e *Engine) runSessionAdmission(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, txOpen bool, stmt Statement, sqlText string) (error, error) {
+	var caps admission.TargetCaps
+	if connRow.Engine.HasRoutineCatalog() {
+		caps |= admission.CapRoutineCatalog
+	}
+	phys := admission.PhysSession
+	if s.wire {
+		phys = admission.PhysWire
+	}
+	actx := admission.Context{
+		Profile:           string(e.profileFor(connRow)),
+		Phys:              phys,
+		ReadOnly:          pol.ReadOnly,
+		MayWrite:          pol.MayWrite,
+		TxOpen:            txOpen,
+		PinnedTx:          true, // a session call carries the session's own transaction state
+		TargetCaps:        caps,
+		MaxStatementBytes: e.maxStatementBytes,
+	}
+	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
+	return e.evaluateChain(e.sessionStages(ctx, connRow), facts, actx)
+}

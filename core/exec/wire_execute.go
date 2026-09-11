@@ -136,26 +136,24 @@ func (e *Engine) executeSessionUnit(
 		return e.tokenControl(ctx, s, connRow, stmt, pol, sqlText, ip)
 	}
 
-	// The statement's own class, authorized against the SAME verdict the
-	// policy came from rather than by a second lookup. A second read is a
-	// second answer, and a unit that runs as one identity while being
-	// authorized as another is the gap this shares one read to close.
-	if err := e.readerAnalysis(ctx, connRow, pol, stmt); err != nil { // the editors-first rule, stage
-		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
-	}
-	if err := e.authorizeUnit(stmt, pol); err != nil {
-		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
-	}
-	if err := e.profileFor(connRow).admit(stmt, true); err != nil {
-		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
-	}
-	if err := guardWhere(stmt); err != nil {
-		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
-	}
-
+	// THE STATEMENT GATES, through the one chain — the declared order,
+	// which is THE ORDERING DELTA for this drive: the legacy session path
+	// ran the reader analysis BEFORE the profile gate; the profile runs
+	// first now, because removing the UDF cannot make a compat-profile
+	// data-modifying CTE runnable (the pipeline design's ruling). A
+	// read-only compat unit violating both now answers the profile's
+	// identity — the one intentional behaviour change of phase 1, its
+	// corpus prediction recorded in the gate matrix before this flip.
 	s.mu.Lock()
 	pinned, phase, txID := s.tx, s.txPhase, s.txID
 	s.mu.Unlock()
+	admitErr, opErr := e.runSessionAdmission(ctx, s, pol, connRow, phase != txNone, stmt, sqlText)
+	if opErr != nil {
+		return nil, opErr
+	}
+	if admitErr != nil {
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
+	}
 	if phase == txAborted {
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAborted)
 	}
