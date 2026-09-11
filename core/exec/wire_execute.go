@@ -239,7 +239,7 @@ func (e *Engine) wireControl(
 // read rather than by reading again. Read is the floor for standing at all —
 // a policy that exists means the caller cleared it — so what is left to decide
 // is whether the statement needs more than that.
-func (e *Engine) authorizeUnit(stmt Statement, pol UnitPolicy) error {
+func authorizeUnit(stmt Statement, pol UnitPolicy) error {
 	switch classToAction(stmt.Class) {
 	case auth.ActionRead:
 		return nil // standing IS the read floor
