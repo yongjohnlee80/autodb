@@ -17,6 +17,7 @@ import (
 // including the extended path's per-frame work).
 type LegacyFacts struct {
 	stmt    Statement
+	sqlText string
 	setName string
 	setLoc  bool
 	setOK   bool
@@ -32,7 +33,18 @@ type LegacyFacts struct {
 // text's length — the drive holds the text and the intake bound needs its
 // size; the classifier's verdict carries the shape, not the bytes.
 func NewLegacyFacts(stmt Statement, textLen int, setName string, setLocal, setOK bool) *LegacyFacts {
-	lf := &LegacyFacts{stmt: stmt, setName: setName, setLoc: setLocal, setOK: setOK, textLen: textLen}
+	return newLegacyFacts(stmt, "", textLen, setName, setLocal, setOK)
+}
+
+// NewLegacyFactsForText carries the raw SQL beside the verdict: the
+// SET/RESET gates parse the text itself (their lexical shape is their
+// own), and the drive holds it.
+func NewLegacyFactsForText(stmt Statement, sqlText string, textLen int) *LegacyFacts {
+	return newLegacyFacts(stmt, sqlText, textLen, "", false, false)
+}
+
+func newLegacyFacts(stmt Statement, sqlText string, textLen int, setName string, setLocal, setOK bool) *LegacyFacts {
+	lf := &LegacyFacts{stmt: stmt, sqlText: sqlText, setName: setName, setLoc: setLocal, setOK: setOK, textLen: textLen}
 	// Convert ONCE (the performance decision from the design review): the
 	// classifier's nested-mutation and call shapes become admission-local
 	// slices here, at construction, and the accessors hand back the cached

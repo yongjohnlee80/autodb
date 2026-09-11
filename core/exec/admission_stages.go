@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/yongjohnlee80/autodb/core/admission"
@@ -279,3 +280,122 @@ func classToActionFloor(c Class, ctx admission.Context) error {
 		return auth.ErrDenied
 	}
 }
+
+// sessionStateStage is the SET/LOCK gate: one stage, TWO GUC MODELS,
+// selected by the physical context. The pooled and RPC-session paths run
+// the ALLOWLIST (benign GUCs + mandatory LOCAL, because their connection
+// outlives the caller and state would leak to the next pool user); the
+// wire path runs the DENYLIST (the backend is discarded at close, so the
+// leak hazard does not exist and editors get PostgreSQL as it is).
+//
+// The two models are APPLICABILITY SETS OF ONE STAGE, not two stages: the
+// A13 mutation is that flattening them fails a cell, and keeping the
+// dispatch in one place is what lets the matrix state the divergence once
+// while the drives state it never.
+type sessionStateStage struct {
+	// parseSet and parseReset are supplied as closures for symmetry with
+	// the other adapters; they are the package's own pure functions and
+	// the tests drive the real ones.
+	parseSet   func(sqlText string) (setStatement, error)
+	parseReset func(sqlText string) (resetStatement, error)
+}
+
+func (sessionStateStage) Name() string { return "sessionstate" }
+
+func (sessionStateStage) ContextNeeds() admission.Needs {
+	return admission.Needs{ControlVerb: true}
+}
+
+func (s sessionStateStage) DenyCodes() []admission.Code {
+	return []admission.Code{
+		admission.CodeSetGUCRefused,
+		admission.CodeSetNotLocal,
+		admission.CodeSetOutsideTx,
+		admission.CodeLockOutsideTx,
+		admission.CodeWireSetRefused,
+		admission.CodeStatementUnsupported,
+	}
+}
+
+// Apply decides one control verb's session-state admissibility. The
+// facts carry the parsed set shape when the caller parsed one (the SET
+// and LOCK arms); the context carries the physical context that selects
+// the GUC model, the read-only policy, and whether the caller's
+// transaction is open.
+func (s sessionStateStage) Apply(facts admission.Facts, ctx admission.Context) (admission.Contribution, error) {
+	lf, ok := facts.(*LegacyFacts)
+	if !ok {
+		return admission.NoContribution(), nil
+	}
+	switch lf.stmt.Verb {
+	case "LOCK":
+		if err := admitLock(ctx.TxOpen); err != nil {
+			return denyFrom(err), nil
+		}
+		return admission.NoContribution(), nil
+	case "SET":
+		st, err := s.parseSet(lf.sqlText)
+		if err != nil {
+			return denyFrom(err), nil
+		}
+		if ctx.Phys == admission.PhysWire {
+			if err := admitWireSet(st, ctx.ReadOnly, ctx.TxOpen); err != nil {
+				return denyFrom(err), nil
+			}
+			return admission.NoContribution(), nil
+		}
+		if err := admitSet(st, ctx.TxOpen); err != nil {
+			return denyFrom(err), nil
+		}
+		return admission.NoContribution(), nil
+	case "RESET":
+		st, err := s.parseReset(lf.sqlText)
+		if err != nil {
+			return denyFrom(err), nil
+		}
+		if ctx.Phys == admission.PhysWire {
+			if err := admitWireReset(st, ctx.ReadOnly); err != nil {
+				return denyFrom(err), nil
+			}
+		}
+		// Off the wire, RESET has no meaning: pooled connections carry no
+		// session-level state a caller may have set (only SET LOCAL is
+		// admitted, and it reverts with the transaction) — the engine's
+		// own refusal, identity preserved.
+		return denyFrom(fmt.Errorf("%w: RESET has no meaning on a pooled connection; only a wire session holds settings",
+			ErrStatementUnsupported)), nil
+	default:
+		// A control verb the gate has no rule for: the engine's own
+		// catch-all refusal, identity preserved.
+		return denyFrom(fmt.Errorf("%w: %s", ErrStatementUnsupported, lf.stmt.Verb)), nil
+	}
+}
+
+// denyFrom maps a legacy gate error onto its Reason. Every sentinel the
+// SET/LOCK gates produce carries a distinct CODE, and the error's own
+// text — which the callers' handling is written against — rides verbatim
+// in the Detail. An unmapped error is mapped to statement-unsupported
+// rather than dropped: the refusal must reach the client with SOME
+// identity, never silently.
+func denyFrom(err error) admission.Contribution {
+	switch {
+	case errorsIs(err, ErrSetGUCRefused):
+		return admission.Deny(admission.Reason{Code: admission.CodeSetGUCRefused, Detail: err.Error(), Continue: true})
+	case errorsIs(err, ErrSetNotLocal):
+		return admission.Deny(admission.Reason{Code: admission.CodeSetNotLocal, Detail: err.Error(), Continue: true})
+	case errorsIs(err, ErrSetOutsideTx):
+		return admission.Deny(admission.Reason{Code: admission.CodeSetOutsideTx, Detail: err.Error(), Continue: true})
+	case errorsIs(err, ErrLockOutsideTx):
+		return admission.Deny(admission.Reason{Code: admission.CodeLockOutsideTx, Detail: err.Error(), Continue: true})
+	case errorsIs(err, ErrWireSetRefused):
+		return admission.Deny(admission.Reason{Code: admission.CodeWireSetRefused, Detail: err.Error(), Continue: true})
+	default:
+		return admission.Deny(admission.Reason{Code: admission.CodeStatementUnsupported, Detail: err.Error(), Continue: true})
+	}
+}
+
+// errorsIs and sqlText plumbing: the adapter reads the statement's SQL
+// text for the SET/RESET parse. The classifier's verdict does not carry
+// the raw text (it carries the shape), so the text rides the LegacyFacts
+// — supplied by the drive, which holds it.
+func errorsIs(err, target error) bool { return errors.Is(err, target) }
