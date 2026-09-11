@@ -91,17 +91,73 @@ func TestParsingGUC_ATargetReportingOffIsRefusedAtCheckout(t *testing.T) {
 			"observe the verifier unless the target really drifted", reported)
 	}
 
-	conn, err := openPostgres(ctx, "parsing-guc-off", dsn, pgPrepareConnVerify())
-	if err != nil {
-		return // refused at open: fail-closed, which is the point
+	// WHICHEVER STAGE REFUSES, the refusal has to be THE ONE THIS CELL NAMES.
+	//
+	// An earlier version returned as soon as openPostgres returned any error at
+	// all, on the reasoning that a refusal is a refusal. Review caught it and a
+	// decoy confirmed it: pointed at a dead port, the cell passed on
+	// "connect: connection refused" -- so a broken DSN, a TLS failure or a pool
+	// regression all counted as proof that the grammar check works. It asserted
+	// that something went wrong, which is not the claim.
+	refusal := func() error {
+		conn, oerr := openPostgres(ctx, "parsing-guc-off", dsn, pgPrepareConnVerify())
+		if oerr != nil {
+			return oerr
+		}
+		defer conn.Close()
+		got, qerr := scalarStringQ(ctx, conn, "SELECT 1")
+		if qerr == nil {
+			t.Fatalf("a target reporting standard_conforming_strings=off served a "+
+				"statement; the checkout verification is not enforcing anything (got %q)", got)
+		}
+		return qerr
+	}()
+	if !isCheckoutRefusal(refusal) {
+		t.Fatalf("the target was refused, but not by the checkout verification:\n  %v\n"+
+			"Only a refusal from the hook is evidence here; anything else means the "+
+			"connection failed for a reason this cell does not test.", refusal)
 	}
-	defer conn.Close()
-	got, qerr := scalarStringQ(ctx, conn, "SELECT 1")
-	if qerr == nil {
-		t.Fatalf("a target reporting standard_conforming_strings=off served a statement; "+
-			"the checkout verification is not enforcing anything (got %q)", got)
+	t.Logf("refused by the checkout hook, as it must be: %v", refusal)
+
+	// SPECIFICITY. isCheckoutRefusal has to tell the hook's refusal apart from
+	// an ordinary connection failure, or the assertion above is the bare
+	// err != nil it replaced. A DSN nothing answers must NOT satisfy it.
+	dead := func() error {
+		conn, oerr := openPostgres(ctx, "parsing-guc-dead",
+			"postgres://nobody:nope@127.0.0.1:1/nosuchdb?sslmode=disable", pgPrepareConnVerify())
+		if oerr != nil {
+			return oerr
+		}
+		defer conn.Close()
+		_, qerr := scalarStringQ(ctx, conn, "SELECT 1")
+		return qerr
+	}()
+	if dead == nil {
+		t.Fatal("a DSN pointing at a dead port succeeded; the decoy proves nothing")
 	}
-	t.Logf("refused, as it must be: %v", qerr)
+	if isCheckoutRefusal(dead) {
+		t.Errorf("an unreachable target reads as a checkout refusal:\n  %v\n"+
+			"the predicate does not discriminate, so the assertion above accepts "+
+			"failures that have nothing to do with the parsing mode", dead)
+	}
+}
+
+// isCheckoutRefusal reports whether err is the pool declining to hand out a
+// connection because the checkout hook rejected every candidate.
+//
+// Drift is signalled to pgxpool as (false, nil) -- destroy this one and try
+// another -- precisely so a drifted session self-heals. That carries no error
+// of ours to match on, so what surfaces is the pool giving up after its bounded
+// attempts. That wording is therefore the observable signature of a refusal,
+// and the decoy above is what keeps this honest: if it ever starts matching an
+// ordinary connection failure too, the cell says so instead of passing.
+func isCheckoutRefusal(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "too many failed attempts acquiring connection") ||
+		strings.Contains(msg, "never reported standard_conforming_strings")
 }
 
 // AND A TARGET REPORTING `on` IS SERVED.
