@@ -86,3 +86,80 @@ func (l *LegacyFacts) WithLen(n int) *LegacyFacts {
 	cp.textLen = n
 	return &cp
 }
+
+func TestGuardWhereAdapter_SameIdentityAsTheLegacyGuard(t *testing.T) {
+	ctx := admission.Context{}
+	o := admission.Compose(guardWhereStage{})
+
+	// Top-level arm: UPDATE without WHERE. The legacy guard and the
+	// adapter refuse with the same sentinel.
+	stmt, err := Classify("UPDATE t SET a = 1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guardWhere(stmt) == nil {
+		t.Fatal("the legacy guard admitted a top-level UPDATE without WHERE — the cell's premise is wrong")
+	}
+	rep, rerr := o.Run(NewLegacyFacts(stmt, len("UPDATE t SET a = 1"), "", false, false), ctx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok := rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted what the legacy guard refuses")
+	}
+	if deny.Code != admission.CodeNoWhere {
+		t.Fatalf("code = %s, want mutation-without-predicate", deny.Code)
+	}
+	if !strings.Contains(deny.Detail, ErrNoWhere.Error()) {
+		t.Fatalf("detail %q does not carry ErrNoWhere's text", deny.Detail)
+	}
+
+	// Nested arm: a data-modifying CTE's inner mutation without WHERE.
+	nestedSQL := "WITH x AS (DELETE FROM t RETURNING id) SELECT * FROM x"
+	stmt, err = Classify(nestedSQL, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guardWhere(stmt) == nil {
+		t.Fatal("the legacy guard admitted a nested mutation without WHERE — the cell's premise is wrong")
+	}
+	rep, rerr = o.Run(NewLegacyFacts(stmt, len(nestedSQL), "", false, false), ctx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok = rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted a nested mutation the legacy guard refuses")
+	}
+	if deny.Code != admission.CodeNoWhere {
+		t.Fatalf("nested arm code = %s, want mutation-without-predicate", deny.Code)
+	}
+
+	// The guarded half: a mutation WITH a predicate passes.
+	stmt, err = Classify("UPDATE t SET a = 1 WHERE id = 1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if guardWhere(stmt) != nil {
+		t.Fatal("the legacy guard refused a guarded UPDATE — the cell's premise is wrong")
+	}
+	rep, rerr = o.Run(NewLegacyFacts(stmt, 30, "", false, false), ctx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the adapter refused a guarded mutation")
+	}
+
+	// A3's mutation: the chain without the stage admits what the guard
+	// refuses — a drive that forgot the stage would run an unguarded
+	// full-table mutation.
+	rep, rerr = admission.Compose().Run(NewLegacyFacts(stmt, 30, "", false, false), ctx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the empty chain denied — the mutation's premise is wrong")
+	}
+}
