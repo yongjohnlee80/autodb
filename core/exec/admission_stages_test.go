@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/core/admission"
+	"github.com/yongjohnlee80/autodb/core/auth"
 )
 
 // The adapters' identity cells (A3): for every error identity the legacy
@@ -393,3 +394,82 @@ var errFakeCatalog = errFake{}
 type errFake struct{}
 
 func (errFake) Error() string { return "fake: catalog unreachable" }
+
+func TestAuthorizeUnitAdapter_SameIdentityAsTheLegacyFloor(t *testing.T) {
+	readerCtx := admission.Context{ReadOnly: true, MayWrite: false}
+	editorCtx := admission.Context{ReadOnly: false, MayWrite: true}
+	o := admission.Compose(authorizeUnitStage{})
+
+	// A read passes on any policy — standing IS the read floor.
+	stmt, err := Classify("SELECT 1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, rerr := o.Run(NewLegacyFacts(stmt, 8, "", false, false), readerCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the floor refused a read on a reader's policy")
+	}
+
+	// A write under a reader's policy: denied with the uniform identity.
+	stmt, err = Classify("UPDATE t SET a = 1 WHERE id = 1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authorizeUnitFloorPremise(stmt); err == nil {
+		t.Fatal("the legacy floor admitted a write on a reader's policy — premise wrong")
+	}
+	rep, rerr = o.Run(NewLegacyFacts(stmt, 30, "", false, false), readerCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok := rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted a write on a reader's policy")
+	}
+	if deny.Code != admission.CodeDenied {
+		t.Fatalf("code = %s, want denied", deny.Code)
+	}
+	if deny.Detail != auth.ErrDenied.Error() {
+		t.Fatalf("detail %q is not the sentinel's constant text %q — the uniform denial "+
+			"never discloses existence", deny.Detail, auth.ErrDenied.Error())
+	}
+
+	// The same write on an editor's policy: admitted.
+	rep, rerr = o.Run(NewLegacyFacts(stmt, 30, "", false, false), editorCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the floor refused a write on an editor's policy")
+	}
+
+	// A3's mutation: without the stage, the write runs on the reader's
+	// policy — exactly what a drive that forgot the floor would do.
+	rep, rerr = admission.Compose().Run(NewLegacyFacts(stmt, 30, "", false, false), readerCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the empty chain denied — the mutation's premise is wrong")
+	}
+}
+
+// authorizeUnitFloorPremise asks the legacy floor through a reader policy,
+// for the cell's premise assertion.
+func authorizeUnitFloorPremise(stmt Statement) error {
+	pol := UnitPolicy{ReadOnly: true, MayWrite: false}
+	switch classToAction(stmt.Class) {
+	case auth.ActionRead:
+		return nil
+	case auth.ActionWrite, auth.ActionDDL:
+		if !pol.MayWrite {
+			return auth.ErrDenied
+		}
+		return nil
+	default:
+		return auth.ErrDenied
+	}
+}

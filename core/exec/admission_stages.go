@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/yongjohnlee80/autodb/core/admission"
+	"github.com/yongjohnlee80/autodb/core/auth"
 )
 
 // The legacy guards, adapted to the admission seam. The ADAPTERS are
@@ -222,4 +223,59 @@ func (s readerAnalysisStage) Apply(facts admission.Facts, ctx admission.Context)
 		}
 	}
 	return admission.NoContribution(), nil
+}
+
+// authorizeUnitStage is the class floor: a statement's own class,
+// authorized against the policy verdict the engine already resolved. The
+// same rule auth.decide applies, asked of a snapshot rather than by
+// reading again — and AUTHORITY IS DELIBERATELY NOT CACHED HERE: the
+// drive re-resolves per Execute and hands this stage the fresh
+// snapshot, so a grant revoked between Parse and Execute refuses at the
+// next Execute, never at a remembered verdict.
+type authorizeUnitStage struct{}
+
+func (authorizeUnitStage) Name() string { return "authorizeunit" }
+
+func (authorizeUnitStage) ContextNeeds() admission.Needs { return admission.Needs{} }
+
+func (authorizeUnitStage) DenyCodes() []admission.Code {
+	return []admission.Code{admission.CodeDenied}
+}
+
+// Apply maps the statement's class onto the action it needs and asks the
+// policy snapshot. The denial is the UNIFORM authorization refusal —
+// never disclosing existence — and its identity is auth.ErrDenied, the
+// sentinel every caller's handling is written against.
+func (authorizeUnitStage) Apply(facts admission.Facts, ctx admission.Context) (admission.Contribution, error) {
+	lf, ok := facts.(*LegacyFacts)
+	if !ok {
+		return admission.NoContribution(), nil
+	}
+	if err := classToActionFloor(lf.stmt.Class, ctx); err != nil {
+		return admission.Deny(admission.Reason{
+			Code:     admission.CodeDenied,
+			Detail:   err.Error(),
+			Continue: true,
+		}), nil
+	}
+	return admission.NoContribution(), nil
+}
+
+// classToActionFloor asks the policy snapshot the statement's class floor
+// — the same decision authorizeUnit makes, expressed against the seam's
+// Context snapshot. Read is the floor for standing at all; write and DDL
+// need the write floor; an unmapped class is refused rather than waved
+// through.
+func classToActionFloor(c Class, ctx admission.Context) error {
+	switch classToAction(c) {
+	case auth.ActionRead:
+		return nil
+	case auth.ActionWrite, auth.ActionDDL:
+		if !ctx.MayWrite {
+			return auth.ErrDenied
+		}
+		return nil
+	default:
+		return auth.ErrDenied
+	}
 }
