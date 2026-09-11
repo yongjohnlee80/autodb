@@ -748,7 +748,7 @@ func truncate(s string, max int) string {
 //
 // Per-physical-session grammar guarantees differ by engine:
 // postgres verifies every physical connection at establish time via the
-// pgxpool AfterConnect hook (pgAfterConnectVerify), so statements run in
+// pgxpool PrepareConn hook (pgPrepareConnVerify), so statements run in
 // plain autocommit — which keeps transaction-prohibited DDL executable;
 // mysql has no per-connect seam in database/sql, so each statement runs
 // inside a transaction (one pinned session) verified by its dialect
@@ -823,7 +823,7 @@ func (e *Engine) queryOn(ctx context.Context, q dao.Querier, sqlText string, res
 }
 
 // runExec executes a write/DDL statement, with the same per-engine session
-// guarantees as runQuery. Postgres runs in autocommit (AfterConnect-verified
+// guarantees as runQuery. Postgres runs in autocommit (checkout-verified
 // connections) so VACUUM / CREATE DATABASE / CONCURRENTLY forms work; MySQL
 // pins a verified transaction — none of the accepted verbs are
 // transaction-prohibited there, and DDL's implicit commit makes the trailing

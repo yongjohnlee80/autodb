@@ -120,7 +120,13 @@ func TestAFixedGrammarImplementsNoVerifier(t *testing.T) {
 		d := dialectFor(n)
 		_, session := d.(SessionGrammarVerifier)
 		_, perStatement := d.(PerStatementGrammarVerifier)
-		if session || perStatement {
+		// THE THIRD CAPABILITY COUNTS TOO. PostgreSQL verifies from the
+		// ParameterStatus the server reports, so it implements neither of the
+		// two above — and a walk that knew only those would file it as a target
+		// whose grammar CANNOT DRIFT, which is the opposite of true and exactly
+		// the claim this cell exists to refuse.
+		_, reported := d.(ReportedGrammarVerifier)
+		if session || perStatement || reported {
 			continue
 		}
 		fixed++
@@ -129,6 +135,18 @@ func TestAFixedGrammarImplementsNoVerifier(t *testing.T) {
 		t.Fatal("no engine has a fixed grammar, so this cell asserts nothing — " +
 			"sqlite is expected to be one, and its absence here means either " +
 			"the dialect table changed or an empty verifier was added")
+	}
+	// Postgres CAN drift — a verb-level read may call set_config — so it must
+	// answer one of the three capabilities. If it answers none, the walk above
+	// has just filed it as fixed-grammar and the count says nothing.
+	pg := dialectFor(engine.Postgres)
+	_, pgSession := pg.(SessionGrammarVerifier)
+	_, pgPerStatement := pg.(PerStatementGrammarVerifier)
+	_, pgReported := pg.(ReportedGrammarVerifier)
+	if !pgSession && !pgPerStatement && !pgReported {
+		t.Error("postgres implements no grammar verifier, so a session whose parsing " +
+			"mode drifted would be served — and the count above silently treats it " +
+			"as a target that cannot drift")
 	}
 }
 
@@ -207,13 +225,36 @@ func TestEveryIncompatibleModeIsRefused(t *testing.T) {
 // ends, and accepts the setting that does not.
 func TestStandardConformingStringsOffIsRefused(t *testing.T) {
 	d := postgresDialect{}
-	if err := d.VerifySessionGrammar(context.Background(), &fixedQuerier{value: "off"}); err == nil {
+	reporting := func(v string) func(string) string {
+		return func(name string) string {
+			if name == "standard_conforming_strings" {
+				return v
+			}
+			return ""
+		}
+	}
+	if err := d.VerifyReportedGrammar(reporting("off")); err == nil {
 		t.Error("standard_conforming_strings=off was ACCEPTED; a backslash then " +
 			"escapes inside a literal and the classifier's idea of where the " +
 			"statement ends stops matching the server's")
+	} else if !errors.Is(err, ErrGrammarDrifted) {
+		// The checkout hook destroys and retries ONLY on drift. Refusing with a
+		// plain error instead would surface a pool acquisition failure for a
+		// session that self-heals on the next connection.
+		t.Errorf("a drifted session was refused with %v, which is not ErrGrammarDrifted, "+
+			"so the pool would not retry it on a fresh connection", err)
 	}
-	if err := d.VerifySessionGrammar(context.Background(), &fixedQuerier{value: "on"}); err != nil {
+	if err := d.VerifyReportedGrammar(reporting("on")); err != nil {
 		t.Errorf("standard_conforming_strings=on was refused (%v)", err)
+	}
+	// A target that never reported the parameter is NOT drift: there is nothing
+	// to retry into, and treating it as drift spins the pool's bounded attempts.
+	err := d.VerifyReportedGrammar(reporting(""))
+	if err == nil {
+		t.Error("a target that never reported standard_conforming_strings was ACCEPTED")
+	} else if errors.Is(err, ErrGrammarDrifted) {
+		t.Error("an unreported parsing mode was classified as drift; the pool would " +
+			"retry a peer that will never answer")
 	}
 }
 

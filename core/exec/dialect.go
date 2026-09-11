@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -114,6 +115,40 @@ type PerStatementGrammarVerifier interface {
 	VerifyStatementGrammar(ctx context.Context, q dao.Querier) error
 }
 
+// ReportedGrammarVerifier is a target whose parsing mode arrives as REPORTED
+// STATE rather than as an answer to a question.
+//
+// PostgreSQL marks standard_conforming_strings GUC_REPORT: a ParameterStatus
+// carries it at startup and again on EVERY change -- including a change made
+// through `SELECT set_config(...)`, the form a SET denylist cannot intercept
+// and the reason a drift check is needed at all. So the value is already on the
+// connection before anyone asks.
+//
+// Asking anyway cost a round trip and, far worse, a PREPARED STATEMENT in the
+// namespace a wire session hands to its client. pgx names a cached statement
+// from a hash of the SQL text, so a client running the same text computed the
+// same name and its first Parse came back 42P05 on a brand-new connection.
+// Reading what was reported takes autodb out of that namespace entirely.
+//
+// This is the third verifier, and the distinction between the three is the
+// point: "cannot drift" (no verifier), "can drift and must be asked" (MySQL),
+// "can drift and already told us" (PostgreSQL).
+//
+// The reader is a func rather than a map so a caller can pass pgconn's
+// ParameterStatus method directly, without copying its table.
+type ReportedGrammarVerifier interface {
+	VerifyReportedGrammar(reported func(name string) string) error
+}
+
+// ErrGrammarDrifted marks a session whose parsing mode is readable but wrong.
+//
+// It is separate from an unreadable one because the two need OPPOSITE handling
+// at a pool checkout: a drifted session is destroyed and the acquisition
+// retried on a fresh one, which self-heals; a target that reports nothing will
+// report nothing next time either, so retrying spins the pool's bounded
+// attempts against a peer that will never answer.
+var ErrGrammarDrifted = errors.New("exec: session parsing mode drifted")
+
 // lexerIncompatibleModes are the MySQL sql_mode flags that change how the
 // classifier must read a statement.
 //
@@ -124,18 +159,26 @@ type PerStatementGrammarVerifier interface {
 // the sweep's behaviour-preservation rule exists to catch.
 var lexerIncompatibleModes = []string{"NO_BACKSLASH_ESCAPES", "ANSI_QUOTES", "ANSI"}
 
-// VerifySessionGrammar checks standard_conforming_strings.
+// VerifyReportedGrammar checks standard_conforming_strings as the server
+// REPORTED it, issuing nothing.
 //
 // Off means a backslash escapes inside a single-quoted literal, which is the
 // one setting that changes where a PostgreSQL statement ENDS — so the
 // classifier's answer and the server's reading part company.
-func (postgresDialect) VerifySessionGrammar(ctx context.Context, q dao.Querier) error {
-	scs, err := scalarStringQ(ctx, q, "SHOW standard_conforming_strings")
-	if err != nil {
-		return fmt.Errorf("exec: reading standard_conforming_strings: %w", err)
+//
+// PostgreSQL deliberately does NOT implement VerifySessionGrammar: asking is
+// not a fallback here, it is the defect. See ReportedGrammarVerifier.
+func (postgresDialect) VerifyReportedGrammar(reported func(name string) string) error {
+	scs := strings.TrimSpace(reported("standard_conforming_strings"))
+	if scs == "" {
+		// Every PostgreSQL reports this parameter, so an empty value means the
+		// peer is not one, or the startup exchange was truncated. Not drift:
+		// there is nothing here to retry into.
+		return fmt.Errorf("exec: target never reported standard_conforming_strings")
 	}
-	if !strings.EqualFold(strings.TrimSpace(scs), "on") {
-		return fmt.Errorf("exec: session has standard_conforming_strings=off, which changes string parsing the classifier relies on")
+	if !strings.EqualFold(scs, "on") {
+		return fmt.Errorf("%w: standard_conforming_strings=%s, which changes string parsing the classifier relies on",
+			ErrGrammarDrifted, scs)
 	}
 	return nil
 }
