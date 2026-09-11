@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/golib/dao"
@@ -160,13 +161,21 @@ func (e *Engine) tokenControl(
 	ctx context.Context, s *session, connRow *meta.Connection,
 	stmt Statement, pol UnitPolicy, sqlText, ip string,
 ) (*Result, error) {
-	if err := e.profileFor(connRow).admit(stmt, true); err != nil {
-		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
+	admitErr, opErr := e.runProfileAdmission(e.profileFor(connRow), admission.PhysSession, stmt, sqlText)
+	if opErr != nil {
+		return nil, opErr
+	}
+	if admitErr != nil {
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 	}
 
 	if statefulControlVerbs[stmt.Verb] {
-		if err := e.authorizeUnit(stmt, pol); err != nil {
-			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
+		admitErr, opErr = e.runClassAdmission(pol, admission.PhysSession, stmt, sqlText)
+		if opErr != nil {
+			return nil, opErr
+		}
+		if admitErr != nil {
+			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 		}
 		s.mu.Lock()
 		txOpen, aborted, pinned, txID := s.txPhase != txNone, s.txPhase == txAborted, s.tx, s.txID
@@ -174,7 +183,7 @@ func (e *Engine) tokenControl(
 		if aborted {
 			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAborted)
 		}
-		if err := e.admitSessionState(ctx, s, pol.Ident, stmt.Verb, sqlText, ip, txOpen, pol.ReadOnly); err != nil {
+		if err := e.admitSessionState(ctx, s, pol, stmt, sqlText, ip, txOpen); err != nil {
 			return nil, err
 		}
 		runCtx, endRun := s.runContext(ctx)
@@ -192,7 +201,8 @@ func (e *Engine) tokenControl(
 	return e.handleTxControl(ctx, s, pol, connRow, tc, sqlText, ip)
 }
 
-// admitSessionState applies the stateful gate to SET and LOCK.
+// admitSessionState applies the orchestrated stateful gate and preserves the
+// drive-owned administrative floor for pooled/session SET.
 //
 // The role floor is here rather than in the gate because it is a policy
 // question, not a grammar one: SET LOCAL is admin-only by default per
@@ -201,76 +211,28 @@ func (e *Engine) tokenControl(
 // finely is not built yet, so the default stands alone for now — which is
 // the restrictive direction.
 func (e *Engine) admitSessionState(
-	ctx context.Context, s *session, ident auth.Identity,
-	verb, sqlText, ip string, txOpen, readOnly bool,
+	ctx context.Context, s *session, pol UnitPolicy,
+	stmt Statement, sqlText, ip string, txOpen bool,
 ) error {
-	// A WIRE session is a pinned PostgreSQL session whose backend dies with
-	// it (closeSession discards, never releases), so it runs under the
-	// DENYLIST: any setting not on it, session-level
-	// or LOCAL, for every role — readers additionally may not move
-	// search_path. No admin floor: the editors-first rule gives editors PostgreSQL as
-	// it is. The pooled path below is unchanged: its connection outlives the
-	// caller, so its allowlist-and-LOCAL rule still protects the next user.
 	s.mu.Lock()
 	wire := s.wire
 	s.mu.Unlock()
+	phys := admission.PhysSession
 	if wire {
-		switch verb {
-		case "LOCK":
-			if err := admitLock(txOpen); err != nil {
-				return e.rejectSession(ctx, s, ident, ip, sqlText, err)
-			}
-			return nil
-		case "SET":
-			st, err := parseSet(sqlText)
-			if err != nil {
-				return e.rejectSession(ctx, s, ident, ip, sqlText, err)
-			}
-			if err := admitWireSet(st, readOnly, txOpen); err != nil {
-				return e.rejectSession(ctx, s, ident, ip, sqlText, err)
-			}
-			return nil
-		case "RESET":
-			st, err := parseReset(sqlText)
-			if err != nil {
-				return e.rejectSession(ctx, s, ident, ip, sqlText, err)
-			}
-			if err := admitWireReset(st, readOnly); err != nil {
-				return e.rejectSession(ctx, s, ident, ip, sqlText, err)
-			}
-			return nil
-		}
-		return e.rejectSession(ctx, s, ident, ip, sqlText,
-			fmt.Errorf("%w: %s", ErrStatementUnsupported, verb))
+		phys = admission.PhysWire
 	}
-	switch verb {
-	case "LOCK":
-		if err := admitLock(txOpen); err != nil {
-			return e.rejectSession(ctx, s, ident, ip, sqlText, err)
-		}
-		return nil
-	case "SET":
-		st, err := parseSet(sqlText)
-		if err != nil {
-			return e.rejectSession(ctx, s, ident, ip, sqlText, err)
-		}
-		if err := admitSet(st, txOpen); err != nil {
-			return e.rejectSession(ctx, s, ident, ip, sqlText, err)
-		}
-		if ident.Role() != meta.RoleAdmin {
-			return e.rejectSession(ctx, s, ident, ip, sqlText,
-				fmt.Errorf("%w: SET LOCAL is admin-only by default", auth.ErrDenied))
-		}
-		return nil
-	case "RESET":
-		// Pooled connections carry no session-level state a caller may have
-		// set (only SET LOCAL is admitted, and it reverts with the
-		// transaction), so there is nothing a RESET could honestly undo.
-		return e.rejectSession(ctx, s, ident, ip, sqlText,
-			fmt.Errorf("%w: RESET has no meaning on a pooled connection; only a wire session holds settings", ErrStatementUnsupported))
+	admitErr, opErr := e.runSessionStateAdmission(pol, phys, txOpen, stmt, sqlText)
+	if opErr != nil {
+		return opErr
 	}
-	return e.rejectSession(ctx, s, ident, ip, sqlText,
-		fmt.Errorf("%w: %s", ErrStatementUnsupported, verb))
+	if admitErr != nil {
+		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
+	}
+	if !wire && stmt.Verb == "SET" && pol.Ident.Role() != meta.RoleAdmin {
+		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText,
+			fmt.Errorf("%w: SET LOCAL is admin-only by default", auth.ErrDenied))
+	}
+	return nil
 }
 
 // rejectSession audits a refusal on a session-scoped call and returns it.

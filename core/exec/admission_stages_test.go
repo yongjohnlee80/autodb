@@ -479,10 +479,6 @@ func authorizeUnitFloorPremise(stmt Statement) error {
 	}
 }
 
-func newSessionStateStage() sessionStateStage {
-	return sessionStateStage{parseSet: parseSet, parseReset: parseReset}
-}
-
 func controlFacts(t *testing.T, sql string) *LegacyFacts {
 	t.Helper()
 	stmt, err := Classify(sql, false)
@@ -726,27 +722,28 @@ func TestForeignFacts_FailClosed(t *testing.T) {
 
 // A4, drive-level: the pooled drive's chain is declared, split at the
 // drive's I/O boundary exactly where the legacy order put it — the
-// intake bound and capability profile BEFORE the actual-class
-// authorization, the reader analysis and guard AFTER the unit policy.
-// This cell pins both halves' ORDER; the wire drives must match the
-// stage sequence (sizecap, profile … readeranalysis, guardwhere) with
-// their own boundary placement.
+// intake bound BEFORE classification, capability profile BEFORE the
+// actual-class authorization, and reader analysis plus guard AFTER the unit
+// policy. This cell pins all three ordered sections; the wire drives must match
+// the sequence with their own boundary placement.
 func TestPooledDrive_ChainOrderIsDeclared(t *testing.T) {
 	e := newChainTestEngine(t)
 	in := admissionInputs{phys: admission.PhysPooled}
 
-	pre := []admission.Stage{
-		sizeCapStage{},
-		profileAdmitStage{profile: e.profileFor(nil)},
-	}
+	intake := []admission.Stage{sizeCapStage{}}
+	pre := []admission.Stage{profileAdmitStage{profile: e.profileFor(nil)}}
 	post := []admission.Stage{
 		readerAnalysisStage{userRoutines: nil},
 		guardWhereStage{},
 	}
+	gotIntake := admission.Compose(intake...).Order()
 	gotPre := admission.Compose(pre...).Order()
 	gotPost := admission.Compose(post...).Order()
-	if fmt.Sprint(gotPre) != fmt.Sprint([]string{"sizecap", "profile"}) {
-		t.Fatalf("pre-policy half = %v, want [sizecap profile]", gotPre)
+	if fmt.Sprint(gotIntake) != fmt.Sprint([]string{"sizecap"}) {
+		t.Fatalf("pre-classification intake = %v, want [sizecap]", gotIntake)
+	}
+	if fmt.Sprint(gotPre) != fmt.Sprint([]string{"profile"}) {
+		t.Fatalf("pre-policy half = %v, want [profile]", gotPre)
 	}
 	if fmt.Sprint(gotPost) != fmt.Sprint([]string{"readeranalysis", "guardwhere"}) {
 		t.Fatalf("post-policy half = %v, want [readeranalysis guardwhere]", gotPost)
@@ -813,7 +810,7 @@ func newChainTestEngine(t *testing.T) *Engine {
 // whose actual class is UNGRANTED must answer with the PROFILE's refusal
 // — the legacy order's identity, not the class authorization's denial.
 // The split exists so this caller's answer cannot change: the pre-policy
-// half (sizecap, profile) runs before the drive's actual-class Authorize,
+// half (profile) runs after the pre-classification size cap and before the drive's actual-class Authorize,
 // exactly where the legacy gate ran.
 func TestPooledDrive_ProfilePrecedesClassAuthorization(t *testing.T) {
 	// BEGIN under the v1compat profile: the profile refuses it (control

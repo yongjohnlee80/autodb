@@ -10,6 +10,7 @@ import (
 	"github.com/yongjohnlee80/golib/dao"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -169,8 +170,12 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	// Oversized input is refused BEFORE classification, exactly as the simple
 	// path refuses it: the audit record must equal
 	// what ran, and an unaudited tail must never execute.
-	if len(sqlText) > e.maxStatementBytes {
-		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrScriptTooLarge)
+	admitErr, opErr := e.runSizeAdmission(admission.PhysWire, sqlText)
+	if opErr != nil {
+		return opErr
+	}
+	if admitErr != nil {
+		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 	}
 	stmt, cerr := Classify(sqlText, connRow.Engine.BackslashEscapes())
 	if errors.Is(cerr, ErrEmptyStatement) {
@@ -224,7 +229,7 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	s.mu.Lock()
 	txOpen := s.txPhase != txNone
 	s.mu.Unlock()
-	admitErr, opErr := e.runSessionAdmission(ctx, s, pol, connRow, txOpen, stmt, sqlText)
+	admitErr, opErr = e.runSessionAdmission(ctx, s, pol, connRow, txOpen, stmt, sqlText)
 	if opErr != nil {
 		return opErr
 	}
@@ -698,8 +703,8 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 // WireExecutePortal re-authorizes and runs one portal, streaming the target's
 // own messages back through emit.
 //
-// THE RE-AUTHORIZATION IS THE POINT. Policy is resolved FRESH here and
-// authorizeUnit is re-run against the statement's stored, immutable
+// THE RE-AUTHORIZATION IS THE POINT. Policy is resolved FRESH here and the
+// class-authorization stage is re-run against the statement's stored, immutable
 // classification — on every Execute, including a portal being resumed after
 // PortalSuspended. A grant revoked between Parse and Execute refuses here, which
 // is the one condition the ADR names because it is the one that gets missed.
@@ -767,10 +772,14 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 		return derr
 	}
 
-	// Re-authorized against the IMMUTABLE classification. Same function, same
-	// rule, a new verdict — not a second authorization path.
-	if aerr := e.authorizeUnit(st.stmt, pol); aerr != nil {
-		return e.rejectSession(ctx, s, pol.Ident, ip, st.sql, aerr)
+	// Re-authorized through the orchestrator against the IMMUTABLE
+	// classification. Same stage, a fresh policy snapshot and a new verdict.
+	admitErr, opErr := e.runClassAdmission(pol, admission.PhysWire, st.stmt, st.sql)
+	if opErr != nil {
+		return opErr
+	}
+	if admitErr != nil {
+		return e.rejectSession(ctx, s, pol.Ident, ip, st.sql, admitErr)
 	}
 
 	s.mu.Lock()

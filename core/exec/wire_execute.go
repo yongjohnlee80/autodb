@@ -6,6 +6,7 @@ import (
 
 	"github.com/yongjohnlee80/golib/dao"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -117,8 +118,16 @@ func (e *Engine) executeSessionUnit(
 	// Placed above Classify so it also covers CONTROL statements: wireControl
 	// is reached only through the routing below, so a gate here is the single
 	// point that governs both.
-	if len(sqlText) > e.maxStatementBytes {
-		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrScriptTooLarge)
+	phys := admission.PhysSession
+	if wire {
+		phys = admission.PhysWire
+	}
+	admitErr, opErr := e.runSizeAdmission(phys, sqlText)
+	if opErr != nil {
+		return nil, opErr
+	}
+	if admitErr != nil {
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 	}
 
 	stmt, cerr := Classify(sqlText, connRow.Engine.BackslashEscapes())
@@ -147,7 +156,7 @@ func (e *Engine) executeSessionUnit(
 	s.mu.Lock()
 	pinned, phase, txID := s.tx, s.txPhase, s.txID
 	s.mu.Unlock()
-	admitErr, opErr := e.runSessionAdmission(ctx, s, pol, connRow, phase != txNone, stmt, sqlText)
+	admitErr, opErr = e.runSessionAdmission(ctx, s, pol, connRow, phase != txNone, stmt, sqlText)
 	if opErr != nil {
 		return nil, opErr
 	}
@@ -173,8 +182,12 @@ func (e *Engine) wireControl(
 	ctx context.Context, s *session, connRow *meta.Connection,
 	stmt Statement, pol UnitPolicy, sqlText, ip string,
 ) (*Result, error) {
-	if err := e.profileFor(connRow).admit(stmt, true); err != nil {
-		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, err)
+	admitErr, opErr := e.runProfileAdmission(e.profileFor(connRow), admission.PhysWire, stmt, sqlText)
+	if opErr != nil {
+		return nil, opErr
+	}
+	if admitErr != nil {
+		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 	}
 	// The floor follows the policy, exactly as it does on the token path: a
 	// unit that will run read-only needs the read floor, and anything that
@@ -201,7 +214,7 @@ func (e *Engine) wireControl(
 		if aborted {
 			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAborted)
 		}
-		if err := e.admitSessionState(ctx, s, pol.Ident, stmt.Verb, sqlText, ip, txOpen, pol.ReadOnly); err != nil {
+		if err := e.admitSessionState(ctx, s, pol, stmt, sqlText, ip, txOpen); err != nil {
 			return nil, err
 		}
 		runCtx, endRun := s.runContext(ctx)

@@ -209,6 +209,62 @@ func TestExtPG_GrantRevokedBetweenParseAndExecuteRefuses(t *testing.T) {
 	}
 }
 
+// A8's second boundary: authority is re-resolved and the class stage is rerun
+// between two Executes of the SAME suspended portal, not only between Parse and
+// its first Execute.
+func TestExtPG_GrantDemotedBetweenTwoExecutesOfOnePortalRefuses(t *testing.T) {
+	f, connID, sid, userID := extSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	table := fmt.Sprintf("ext_reauth_resume_%d", time.Now().UnixNano())
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID,
+		"CREATE TABLE "+table+" (note text NOT NULL)", testIP); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the target in the client's explicit transaction while the portal is
+	// suspended. After demotion, wireExtEntry therefore has no reason to open a
+	// new hidden reader wrap; the Execute-scoped class stage is the discriminator.
+	if begin := runRaw(t, f, sid, userID, "BEGIN"); begin.err != nil {
+		t.Fatalf("BEGIN as admin: %v", begin.err)
+	}
+	sql := "INSERT INTO " + table + " (note) SELECT 'row-' || g FROM generate_series(1, 2) AS g RETURNING note"
+	if err := f.eng.WireParse(ctx, sid, userID, "write-twice", sql, nil, testIP); err != nil {
+		t.Fatalf("Parse as admin: %v", err)
+	}
+	if err := f.eng.WireBind(ctx, sid, userID, "write-twice", "write-twice", nil, nil, nil); err != nil {
+		t.Fatalf("Bind as admin: %v", err)
+	}
+	var suspended bool
+	if err := f.eng.WireExecutePortal(ctx, sid, userID, "write-twice", 1, testIP, func(m WireMessage) error {
+		if m.Kind == "PortalSuspended" {
+			suspended = true
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("first Execute as admin: %v", err)
+	}
+	if !suspended {
+		t.Fatal("first Execute did not suspend the portal; the second call would not prove resume-time re-authorization")
+	}
+
+	setRole(t, f, userID, connID, meta.RoleReader)
+	var emitted int
+	err := f.eng.WireExecutePortal(ctx, sid, userID, "write-twice", 1, testIP, func(WireMessage) error {
+		emitted++
+		return nil
+	})
+	if !errors.Is(err, auth.ErrDenied) {
+		t.Fatalf("second Execute after demotion = %v, want auth.ErrDenied", err)
+	}
+	if emitted != 0 {
+		t.Fatalf("second Execute emitted %d target frames after authority was lost", emitted)
+	}
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
+		t.Fatalf("Sync after refused resume: %v", serr)
+	}
+}
+
 // The extended-Parse ordering deltas, through the real drive. Profile
 // admissibility answers before both reader analysis and class authorization.
 func TestExtPG_ParseAnswersTheProfileBeforeLaterStages(t *testing.T) {

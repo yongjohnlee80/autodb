@@ -313,6 +313,10 @@ type sessionStateStage struct {
 	parseReset func(sqlText string) (resetStatement, error)
 }
 
+func newSessionStateStage() sessionStateStage {
+	return sessionStateStage{parseSet: parseSet, parseReset: parseReset}
+}
+
 func (sessionStateStage) Name() string { return "sessionstate" }
 
 func (sessionStateStage) ContextNeeds() admission.Needs {

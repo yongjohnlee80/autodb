@@ -4,14 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/jackc/pgx/v5/pgconn"
-	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/yongjohnlee80/golib/dao"
+	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/yongjohnlee80/golib/dao"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
+
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -530,13 +532,19 @@ func (e *Engine) applyStartupGUCs(ctx context.Context, s *session, pc golibpg.Pi
 	sort.Strings(names)
 	for _, raw := range names {
 		name := strings.ToLower(raw)
-		if err := admitWireSet(setStatement{Name: name}, pol.ReadOnly, false); err != nil {
+		sqlText := "SET " + quoteIdent(name) + " TO " + quoteLiteral(gucs[raw])
+		stmt := Statement{Verb: "SET", Class: ClassControl}
+		admitErr, opErr := e.runSessionStateAdmission(pol, admission.PhysWire, false, stmt, sqlText)
+		if opErr != nil {
+			return opErr
+		}
+		if admitErr != nil {
 			e.auditBounded(ctx, userID, ip, "wire_startup_guc_refused",
-				fmt.Sprintf("conn %d: session %s: %s: %v", connID, s.id, name, err))
-			return err
+				fmt.Sprintf("conn %d: session %s: %s: %v", connID, s.id, name, admitErr))
+			return admitErr
 		}
 		var targetErr *pgconn.PgError
-		_, derr := sq.SimpleQuery(ctx, "SET "+quoteIdent(name)+" TO "+quoteLiteral(gucs[raw]), func(m golibpg.ExtendedMessage) error {
+		_, derr := sq.SimpleQuery(ctx, sqlText, func(m golibpg.ExtendedMessage) error {
 			if m.Kind == "ErrorResponse" && targetErr == nil {
 				targetErr = m.Err
 			}
