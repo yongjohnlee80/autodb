@@ -25,7 +25,7 @@ import (
 //
 // So the split is:
 //
-//   Parse    size check → Classify → authorizeUnit → profile.admit → guardWhere.
+//   Parse    size check → Classify → profile → reader analysis → authorize → guard.
 //            The resulting Statement is stored IMMUTABLY against the statement
 //            name. This is matrix §5's "Parse is gated (classifier + profile + grants)".
 //
@@ -148,10 +148,10 @@ func isSynthetic(st *extStatement) bool { return isOwnedControl(st) || st.empty 
 
 // WireParse gates one statement and records it under name.
 //
-// THE GATE IS THE SIMPLE PATH'S GATE, called in the same order with the same
-// functions — size, Classify, authorizeUnit, profile.admit, guardWhere. Nothing
-// here re-decides what those decide; the only difference is WHEN, because the
-// text arrives a frame earlier than the execution does.
+// THE GATE IS THE SIMPLE PATH'S GATE, evaluated by the same chain in the same
+// declared order. Size and classification stay at their transport positions;
+// the only difference is WHEN, because the text arrives a frame earlier than
+// the execution does.
 func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	name, sqlText string, paramOIDs []uint32, ip string) error {
 
@@ -221,24 +221,15 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 		s.ext.queueSynthFor(objectStatement, name, cst.seq, WireMessage{Kind: "ParseComplete"})
 		return nil
 	}
-	// AMENDMENT 6 RULE 2's reader stage, composed at the same point the simple
-	// path composes it: after Classify, before authorize/admit/guard. It is a
-	// STAGE, not a branch — the engine owns the analysis and both protocols call
-	// the one implementation, which is the whole reason it lives in the shared
-	// gate rather than here. Composing it means a reader is analysed on extended
-	// exactly as on simple; skipping it would enforce on one protocol and not the
-	// other, which is the shape the first rejection rule exists to catch.
-	if rerr := e.readerAnalysis(ctx, connRow, pol, stmt); rerr != nil {
-		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, rerr)
+	s.mu.Lock()
+	txOpen := s.txPhase != txNone
+	s.mu.Unlock()
+	admitErr, opErr := e.runSessionAdmission(ctx, s, pol, connRow, txOpen, stmt, sqlText)
+	if opErr != nil {
+		return opErr
 	}
-	if aerr := e.authorizeUnit(stmt, pol); aerr != nil {
-		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, aerr)
-	}
-	if aerr := e.profileFor(connRow).admit(stmt, true); aerr != nil {
-		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, aerr)
-	}
-	if gerr := guardWhere(stmt); gerr != nil {
-		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, gerr)
+	if admitErr != nil {
+		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 	}
 
 	// The name is claimed BEFORE the frame goes out, so a refused duplicate
