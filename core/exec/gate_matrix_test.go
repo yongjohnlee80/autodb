@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -123,20 +124,6 @@ func TestGateMatrix_EveryRowCoordinateResolves(t *testing.T) {
 	}
 
 	// The package's parsed ASTs, for structural raise-site verification.
-	fsets := map[string]*ast.File{}
-	for _, path := range goSourceFiles(t) {
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			t.Fatalf("parsing %s: %v", path, err)
-		}
-		fsets[filepath.Base(path)] = f
-	}
-	// lineOf resolves a file position base + AST to a line's source extent.
-	fsetFor := map[string]*token.FileSet{}
-	_ = fsetFor
-	_ = fsets
-	// (positions need the SAME fset used at parse time; keep pairs)
 	type parsedFile struct {
 		fset *token.FileSet
 		file *ast.File
@@ -164,37 +151,36 @@ func TestGateMatrix_EveryRowCoordinateResolves(t *testing.T) {
 			t.Errorf("matrix row %q has no file:line coordinate — an unlocated row cannot be re-verified", sentinel)
 			continue
 		}
-		declOK, raiseOK := false, false
-		raiseSites := 0
+		declOK := false
+		var badRaise []string
+		rowNames := gateMatrixRowNamesInLine(t, sentinel)
 		for _, c := range coords {
 			pf, haveFile := parsed[c.file]
 			if !haveFile {
-				stale = append(stale, sentinel+" (matrix cites "+c.file+":"+itoa(c.line)+", no such file in the package)")
-				raiseOK = true // counted via stale; don't double-report
+				badRaise = append(badRaise, c.file+":"+itoa(c.line)+" (no such file in the package)")
 				continue
 			}
-			pos := pf.fset.Position(pf.file.Package)
-			base := pos.Line
-			_ = base
 			if c.file == d.file && absInt(c.line-d.line) <= coordinateWindow {
 				declOK = true
 				continue
 			}
-			// A raise site: verified STRUCTURALLY. The sentinel's
-			// identifier must be used on that exact line of that file —
-			// an invented or drifted locator is red, not green-by-EOF.
-			raiseSites++
-			if identifierUsedAtLine(pf.file, pf.fset, sentinel, c.line) {
-				raiseOK = true
+			// A raise site: verified STRUCTURALLY, and EVERY one must
+			// verify — one good coordinate among stale ones would
+			// certify a row the code no longer matches, which is the
+			// exact failure the walk exists to catch. On a combined
+			// row the site is accepted if it uses ANY of the row's
+			// names — the row cites the pair's sites together.
+			if !anyIdentifierUsedAtLine(pf.file, pf.fset, rowNames, c.line) {
+				badRaise = append(badRaise, c.file+":"+itoa(c.line)+" (the line uses none of the row's identifiers)")
 			}
 		}
 		if !declOK {
 			stale = append(stale, sentinel+" (no declaration anchor: matrix cites "+coords[0].file+":"+
 				itoa(coords[0].line)+", declaration is at "+d.file+":"+itoa(d.line)+")")
 		}
-		if raiseSites > 0 && !raiseOK {
-			stale = append(stale, sentinel+" (every raise site failed structural verification — the cited "+
-				"lines do not use the identifier)")
+		if len(badRaise) > 0 {
+			stale = append(stale, sentinel+" — "+strconv.Itoa(len(badRaise))+" raise site(s) failed structural verification: "+
+				strings.Join(badRaise, "; "))
 		}
 	}
 	if len(stale) > 0 {
@@ -369,13 +355,24 @@ func discoverGateSentinels(t *testing.T) []sentinelDecl {
 // anywhere on the given line of the parsed file — the structural check
 // behind every raise-site coordinate.
 func identifierUsedAtLine(f *ast.File, fset *token.FileSet, name string, line int) bool {
+	return anyIdentifierUsedAtLine(f, fset, []string{name}, line)
+}
+
+// anyIdentifierUsedAtLine reports whether ANY of the named identifiers is
+// referenced on the given line. Combined rows verify their sites against
+// the row's full name set, because the row cites the pair's sites together.
+func anyIdentifierUsedAtLine(f *ast.File, fset *token.FileSet, names []string, line int) bool {
+	want := map[string]bool{}
+	for _, n := range names {
+		want[n] = true
+	}
 	found := false
 	ast.Inspect(f, func(n ast.Node) bool {
 		if found {
 			return false
 		}
 		idt, ok := n.(*ast.Ident)
-		if !ok || idt.Name != name {
+		if !ok || !want[idt.Name] {
 			return true
 		}
 		if fset.Position(idt.Pos()).Line == line {
@@ -385,6 +382,29 @@ func identifierUsedAtLine(f *ast.File, fset *token.FileSet, name string, line in
 		return true
 	})
 	return found
+}
+
+// gateMatrixRowNamesInLine returns every sentinel named on the same table
+// row as the given sentinel, so combined rows can verify raise sites
+// against the full name set of the row.
+func gateMatrixRowNamesInLine(t *testing.T, sentinel string) []string {
+	t.Helper()
+	for _, line := range strings.Split(readGateMatrix(t), "\n") {
+		if !strings.HasPrefix(line, "| `") {
+			continue
+		}
+		names := sentinelName.FindAllStringSubmatch(line, -1)
+		for _, m := range names {
+			if m[1] == sentinel {
+				out := make([]string, 0, len(names))
+				for _, n := range names {
+					out = append(out, n[1])
+				}
+				return out
+			}
+		}
+	}
+	return []string{sentinel}
 }
 
 type gateCoord struct {
@@ -414,6 +434,12 @@ func gateMatrixRowNames(t *testing.T) map[string]bool {
 // gateMatrixRows parses the inventory rows with their coordinates. A row is
 // any table line whose first cell is a `SentinelName` in backticks; the
 // coordinates are every "name.go:123" in the row.
+//
+// Slash-combined rows name several sentinels, and a coordinate is attributed
+// to EVERY name on the row — which means a combined row's coordinates must
+// use at least one of the row's names per line, and each name must still
+// find its declaration anchor among them. A combined row that cites a
+// coordinate using NONE of its names fails the walk.
 func gateMatrixRows(t *testing.T) map[string][]gateCoord {
 	t.Helper()
 	rows := map[string][]gateCoord{}
@@ -421,14 +447,16 @@ func gateMatrixRows(t *testing.T) map[string][]gateCoord {
 		if !strings.HasPrefix(line, "| `") {
 			continue
 		}
-		// A row may name several sentinels (the slash-combined rows), and
-		// the walk must hold each of them to the same obligations.
-		for _, m := range sentinelName.FindAllStringSubmatch(line, -1) {
-			for _, c := range coordRe.FindAllStringSubmatch(line, -1) {
-				n := 0
-				for _, ch := range c[2] {
-					n = n*10 + int(ch-'0')
-				}
+		names := sentinelName.FindAllStringSubmatch(line, -1)
+		if len(names) == 0 {
+			continue
+		}
+		for _, c := range coordRe.FindAllStringSubmatch(line, -1) {
+			n := 0
+			for _, ch := range c[2] {
+				n = n*10 + int(ch-'0')
+			}
+			for _, m := range names {
 				rows[m[1]] = append(rows[m[1]], gateCoord{file: c[1], line: n})
 			}
 		}
