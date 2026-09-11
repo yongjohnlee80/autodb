@@ -136,9 +136,17 @@ func pgLoopFull(t *testing.T, engOpts ...exec.Option) pgLoopHandles {
 // where the server's next word answers a Query.
 func pgClient(t *testing.T, addr, secret, database string) *pgproto3.Frontend {
 	t.Helper()
+	return pgClientAs(t, addr, secret, database, "root")
+}
+
+// pgClientAs authenticates as a NAMED user — the front door checks the
+// startup user against the PAT's owner, and the reader cells connect as
+// the reader, not as root.
+func pgClientAs(t *testing.T, addr, secret, database, user string) *pgproto3.Frontend {
+	t.Helper()
 
 	conn, fe := startupTo(t, addr, map[string]string{
-		"user": "root", "database": database, "application_name": "psql",
+		"user": user, "database": database, "application_name": "psql",
 	})
 	t.Cleanup(func() { _ = conn.Close() })
 	if _, err := fe.Receive(); err != nil {
@@ -1635,5 +1643,130 @@ func TestPostAuth_TheCapIsTheDocumentedSixtyFourMiB(t *testing.T) {
 	if got := l2.postAuthBodyLen(); got != PostAuthMaxBodyCeiling {
 		t.Fatalf("a 1 GiB configuration gave %d, want the %d ceiling (matrix :478)",
 			got, PostAuthMaxBodyCeiling)
+	}
+}
+
+// The simple-wire ordering-delta cell, through the REAL front door: a
+// reader wire session sends a statement that violates BOTH the compat
+// profile (data-modifying CTE) and the reader stage (a UDF call), and
+// the refusal that reaches the client is the PROFILE's — because the
+// migrated gate answers profile admissibility first. Under the legacy
+// wire order the reader analysis would have answered first, and the
+// message would name a user-defined function instead of the CTE.
+//
+// The discriminator is the MESSAGE: the profile's refusal names the
+// data-modifying subquery/CTE; the reader's names the function call.
+// Both are statement refusals on the wire; only the text tells them
+// apart, which is why this cell reads the ErrorResponse verbatim.
+func TestPGLoop_ReaderDmCTEWithUDFAnswersTheProfileRefusal(t *testing.T) {
+	l := pgLoopFull(t)
+	ctx := context.Background()
+
+	// A GENUINE READER UNIT: a reader-role user, granted READ on a second
+	// front-door-exposed connection, holding their own PAT — so the wire
+	// session's policy snapshot is read-only and the reader stage's arms
+	// are live. (The fixture's own client connects as the root admin,
+	// whose unit is not read-only and never consults the reader stage —
+	// which is why this cell builds its own.)
+	readerID, err := l.svc.CreateUser(ctx, l.rootTok, "delta-reader", "delta-reader-pass", meta.RoleReader, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("creating the reader user: %v", err)
+	}
+	dsn := os.Getenv("TEST_PGURL")
+	readerConnName := fmt.Sprintf("pgtarget-reader-%d", time.Now().UnixNano())
+	readerConnID, err := l.eng.CreateConnection(ctx, l.rootTok, readerConnName, "postgres", dsn, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("creating the reader connection: %v", err)
+	}
+	// The session profile: the front-door exposure opt-in (the profile's
+	// exposure job is still welded to the capability preset in this
+	// phase).
+	if err := l.store.Connections.OnCtx(ctx).With(meta.ConnID, readerConnID).
+		Set(meta.ConnProfile, string(exec.ProfileSession)).Update(); err != nil {
+		t.Fatalf("exposing the reader connection: %v", err)
+	}
+	if err := l.svc.AddGrant(ctx, l.rootTok, readerID, readerConnID, meta.RoleReader, "127.0.0.1"); err != nil {
+		t.Fatalf("granting the reader: %v", err)
+	}
+	readerTok, _, err := l.svc.Login(ctx, "delta-reader", "delta-reader-pass", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("reader login: %v", err)
+	}
+	pat, err := l.svc.CreatePAT(ctx, readerTok, "fd-delta-reader", readerConnID, 0, nil, false, nil, "127.0.0.1")
+	if err != nil {
+		t.Fatalf("minting the reader PAT: %v", err)
+	}
+
+	// THE COMPAT FLIP, MID-SESSION: the session OPENS on the exposure
+	// profile, then the connection's capability moves to compat — an
+	// admin flip, the same store update production uses, and every
+	// WireQuery re-resolves the row so the very next statement is gated
+	// under compat. (The delta is a COMPAT answer: the session profile
+	// admits guarded dm-CTEs.)
+	fe := pgClientAs(t, l.addr, pat.Secret, readerConnName, "delta-reader")
+	if err := l.store.Connections.OnCtx(ctx).With(meta.ConnID, readerConnID).
+		Set(meta.ConnProfile, string(exec.ProfileV1Compat)).Update(); err != nil {
+		t.Fatalf("setting the compat profile mid-session: %v", err)
+	}
+
+	// Scratch objects so BOTH arms are genuinely reachable: a table for
+	// the CTE's DELETE, and a user-defined function for the reader arm.
+	// Created by the ROOT client (a reader may not create objects —
+	// which the reader's own 42501 already proved); ordinary shared
+	// objects, because both connections point at the same target
+	// database.
+	rootFe := pgClient(t, l.addr, l.secret, l.database)
+	base := fmt.Sprintf("fd_delta_%d", time.Now().UnixNano())
+	table := base + "_t"
+	fn := base + "_f"
+	if msgs := query(t, rootFe, fmt.Sprintf("CREATE TABLE %s (id int)", table)); hasError(msgs) {
+		t.Fatalf("creating the scratch table: %v", errorText(msgs))
+	}
+	t.Cleanup(func() {
+		_ = query(t, rootFe, fmt.Sprintf("DROP TABLE IF EXISTS %s", table))
+		_ = query(t, rootFe, fmt.Sprintf("DROP FUNCTION IF EXISTS %s(int)", fn))
+	})
+	if msgs := query(t, rootFe, fmt.Sprintf(
+		"CREATE OR REPLACE FUNCTION %s(int) RETURNS int AS 'SELECT $1' LANGUAGE sql", fn)); hasError(msgs) {
+		t.Fatalf("creating the scratch function: %v", errorText(msgs))
+	}
+
+	// The double-violating statement: a data-modifying CTE (the compat
+	// profile's blanket refusal) whose body also calls the UDF (the reader
+	// stage's refusal).
+	sql := fmt.Sprintf(
+		"WITH x AS (DELETE FROM %s WHERE id = 1 RETURNING id) SELECT %s(coalesce(sum(id),0)::int) FROM x",
+		table, fn)
+	msgs := query(t, fe, sql)
+	e, ok := firstOfType[*pgproto3.ErrorResponse](msgs)
+	if !ok {
+		t.Fatalf("no refusal for the double-violating statement; got %v", kindsOf(msgs))
+	}
+	// THE DISCRIMINATOR: the profile's refusal names the CTE; the
+	// reader's would name the function. The migrated gate answers the
+	// profile first — the ordering ruling landed on this surface.
+	if !strings.Contains(e.Message, "data-modifying subquery/CTE") {
+		t.Fatalf("the wire refusal text does not carry the PROFILE's dm-CTE identity: %q — "+
+			"the reader analysis answered first; the gate order regressed", e.Message)
+	}
+	if strings.Contains(e.Message, "user-defined function") {
+		t.Fatalf("the wire refusal text carries the READER's identity: %q — reader-before-profile "+
+			"regressed on the wire gate", e.Message)
+	}
+
+	// ZERO DISPATCH: no rows, no CommandComplete — the refused statement
+	// never ran.
+	for _, m := range msgs {
+		if _, isRow := m.(*pgproto3.DataRow); isRow {
+			t.Fatal("a DataRow reached the client — the refused statement dispatched")
+		}
+		if _, isCC := m.(*pgproto3.CommandComplete); isCC {
+			t.Fatal("a CommandComplete reached the client — the refused statement ran")
+		}
+	}
+	// And the session survives the gate refusal (a refusal, not a violation).
+	next := query(t, fe, "SELECT 1")
+	if hasError(next) {
+		t.Fatalf("the session did not survive the gate refusal: %v", errorText(next))
 	}
 }
