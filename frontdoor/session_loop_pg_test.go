@@ -106,10 +106,11 @@ func pgLoopFull(t *testing.T, engOpts ...exec.Option) pgLoopHandles {
 	if err != nil {
 		t.Fatalf("CreateConnection: %v", err)
 	}
-	// The session profile: the front door's own profile, and the one that lets a
-	// transaction span statements.
+	// The fixture exercises both front-door reachability and session capability,
+	// so enable the two properties explicitly.
 	if err := store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
-		Set(meta.ConnProfile, string(exec.ProfileSession)).Update(); err != nil {
+		Set(meta.ConnProfile, string(exec.ProfileSession)).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
 		t.Fatalf("enabling the session profile: %v", err)
 	}
 
@@ -1678,11 +1679,10 @@ func TestPGLoop_ReaderDmCTEWithUDFAnswersTheProfileRefusal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating the reader connection: %v", err)
 	}
-	// The session profile: the front-door exposure opt-in (the profile's
-	// exposure job is still welded to the capability preset in this
-	// phase).
+	// This cell needs both properties: wire reachability and session capability.
 	if err := l.store.Connections.OnCtx(ctx).With(meta.ConnID, readerConnID).
-		Set(meta.ConnProfile, string(exec.ProfileSession)).Update(); err != nil {
+		Set(meta.ConnProfile, string(exec.ProfileSession)).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
 		t.Fatalf("exposing the reader connection: %v", err)
 	}
 	if err := l.svc.AddGrant(ctx, l.rootTok, readerID, readerConnID, meta.RoleReader, "127.0.0.1"); err != nil {
@@ -1697,8 +1697,8 @@ func TestPGLoop_ReaderDmCTEWithUDFAnswersTheProfileRefusal(t *testing.T) {
 		t.Fatalf("minting the reader PAT: %v", err)
 	}
 
-	// THE COMPAT FLIP, MID-SESSION: the session OPENS on the exposure
-	// profile, then the connection's capability moves to compat — an
+	// THE COMPAT FLIP, MID-SESSION: the session OPENS while exposed under the
+	// session profile, then the connection's capability moves to compat — an
 	// admin flip, the same store update production uses, and every
 	// WireQuery re-resolves the row so the very next statement is gated
 	// under compat. (The delta is a COMPAT answer: the session profile

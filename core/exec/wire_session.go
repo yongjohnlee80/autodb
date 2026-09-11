@@ -115,10 +115,12 @@ const (
 	// token is perfectly valid on the listener it was minted for.
 	DenyPATCleartextDebugInTLS = "frontdoor/pat-cleartext-debug-in-tls"
 	DenyNoGrant                = "frontdoor/no-grant"
-	DenyProfileRefuses         = "frontdoor/profile-not-front-door"
-	DenyLeaseCap               = "frontdoor/lease-cap-exceeded"
-	DenySessionCap             = "frontdoor/session-cap-exceeded"
-	DenyResidentBudget         = "frontdoor/resident-budget-exceeded"
+	// DenyProfileRefuses retains its published identity for compatibility;
+	// the explicit exposure property now drives this pre-disclosure refusal.
+	DenyProfileRefuses = "frontdoor/profile-not-front-door"
+	DenyLeaseCap       = "frontdoor/lease-cap-exceeded"
+	DenySessionCap     = "frontdoor/session-cap-exceeded"
+	DenyResidentBudget = "frontdoor/resident-budget-exceeded"
 	// DenyLeaseEncoding: the pinned target's server_encoding or client_encoding
 	// is not UTF8, or could not be established (matrix row 3.1: the lease is
 	// pinned UTF8; autodb does not transcode; the check FAILS CLOSED). On the
@@ -288,6 +290,11 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	if pat.ConnID == 0 {
 		return out, deny(DenyPATUnscoped)
 	}
+	// Hold the transition read lock through reservation, target pinning and
+	// publication. A disabling writer therefore either closes this fully
+	// initialized session, or commits first and makes this open read closed.
+	e.exposureMu.RLock()
+	defer e.exposureMu.RUnlock()
 	connRow, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, pat.ConnID).Get()
 	if err != nil {
 		if errors.Is(err, dao.ErrNoRows) {
@@ -338,6 +345,9 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		// here is what made the janitor read every wire session as revoked.
 		id: id, userID: pat.UserID, authority: auth.PATAuthority(pat.ID), connID: connRow.ID,
 		ctx: sctx, cancel: cancel, lastUsed: e.now(),
+	}
+	if h := e.hookBeforeWireAdmit; h != nil {
+		h()
 	}
 	if rerr := e.sessions.admitWithLease(s, connRow.ID, WireSessionOverhead); rerr != nil {
 		cancel()
@@ -420,12 +430,11 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	}, nil
 }
 
-// connectionFrontDoorExposed is the expansion-stage compatibility read. The
-// column is authoritative for newly represented exposure, while the profile
-// fallback preserves reachability until every consumer has moved to the new
-// property and the contract can be tightened independently.
+// connectionFrontDoorExposed reads the connection's explicit exposure decision.
+// Capability profiles do not participate: reachability is decided before any
+// statement exists and must default closed independently of SQL policy.
 func connectionFrontDoorExposed(row *meta.Connection) bool {
-	return row != nil && (row.FrontDoorExposed != 0 || row.Profile == meta.ProfileSession)
+	return row != nil && row.FrontDoorExposed != 0
 }
 
 // leaseEncodingRefusal reports why the lease cannot be established as UTF8:

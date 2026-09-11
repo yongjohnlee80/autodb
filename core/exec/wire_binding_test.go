@@ -130,7 +130,8 @@ func TestWireBinding_TwoConnectionsNamedTheSameDatabaseCannotBeConfused(t *testi
 		t.Fatalf("CreateConnection: %v", err)
 	}
 	if uerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, bID).
-		Set(meta.ConnProfile, meta.ProfileSession).Update(); uerr != nil {
+		Set(meta.ConnProfile, meta.ProfileSession).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); uerr != nil {
 		t.Fatalf("enabling the session profile: %v", uerr)
 	}
 	setTargetDB(t, f, bID, "test")

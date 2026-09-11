@@ -36,10 +36,11 @@ func pgSession(t *testing.T) (*fixture, int64, SessionID, string) {
 	if err != nil {
 		t.Fatalf("CreateConnection: %v", err)
 	}
-	// The session profile lives on the connection row, so the test enables
-	// it the way a deployment would.
+	// These shared fixtures exercise both the internal session and wire paths,
+	// so enable the capability and exposure properties explicitly.
 	if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
-		Set(meta.ConnProfile, string(ProfileSession)).Update(); err != nil {
+		Set(meta.ConnProfile, string(ProfileSession)).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
 		t.Fatalf("enabling the session profile: %v", err)
 	}
 

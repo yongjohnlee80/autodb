@@ -6,6 +6,7 @@ import (
 
 	"github.com/yongjohnlee80/golib/dao"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -74,18 +75,14 @@ func TestUnitPolicy_TheWrapRollsBackAndNeverCommits(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	f := newFixture(t)
-	connRow, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
-	if err != nil {
-		t.Fatal(err)
-	}
 	ident, err := f.svc.Authorize(ctx, f.rootTok, f.connID, auth.ActionRead)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	conn := &finalizerConn{tx: &finalizerTx{}}
-	tx, release, werr := f.eng.wrapReadOnly(ctx, conn, connRow, ident, f.connID, testIP,
-		"SELECT 1", UnitPolicy{Role: meta.RoleReader, ReadOnly: true})
+	tx, release, werr := f.eng.wrapReadOnly(ctx, conn, ident, f.connID, testIP,
+		"SELECT 1", UnitPolicy{Role: meta.RoleReader, ReadOnly: true}, admission.PhysPooled)
 	if werr != nil {
 		t.Fatalf("wrapReadOnly: %v", werr)
 	}

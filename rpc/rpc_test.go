@@ -219,6 +219,31 @@ func TestConnManagementOverWire(t *testing.T) {
 	if row["name"] != "target" || row["engine"] != "sqlite" || row["id"] != f.connID {
 		t.Fatalf("conn row: %#v", row)
 	}
+	if row["frontdoor_exposed"] != false {
+		t.Fatalf("new connection exposure = %#v, want false", row["frontdoor_exposed"])
+	}
+
+	errVal, _ = c.call("auth.user_create", f.rootTok, "exposure-editor", "editor-passphrase", "editor")
+	if errVal != nil {
+		t.Fatalf("user_create: %#v", errVal)
+	}
+	editorTok := c.login("exposure-editor", "editor-passphrase")
+	errVal, _ = c.call("conn.set_exposure", editorTok, f.connID, true)
+	mustErr(t, errVal, rpc.CodeDenied)
+	if errVal, _ = c.call("conn.set_exposure", f.rootTok, f.connID, true); errVal != nil {
+		t.Fatalf("conn.set_exposure: %#v", errVal)
+	}
+	errVal, result = c.call("conn.list", f.rootTok)
+	if errVal != nil {
+		t.Fatalf("conn.list after exposure: %#v", errVal)
+	}
+	row = result.([]any)[0].(map[string]any)
+	if row["frontdoor_exposed"] != true || row["profile"] != meta.ProfileV1Compat {
+		t.Fatalf("independent exposure row: %#v", row)
+	}
+	if f.auditCount(t, "connection_exposure_changed") != 1 {
+		t.Fatal("the administrative exposure change was not audited exactly once")
+	}
 
 	if errVal, _ := c.call("conn.test", f.rootTok, f.connID); errVal != nil {
 		t.Fatalf("conn.test: %#v", errVal)

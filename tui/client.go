@@ -606,10 +606,10 @@ type ConnInfo struct {
 	ID     int64
 	Name   string
 	Engine string
-	// Profile is the capability profile — "v1compat" or "session". Shown in
-	// the manager because exposing a connection to the front door is a
-	// decision an operator should not have to make from a name alone.
+	// Profile is the capability profile: "v1compat" or "session".
 	Profile string
+	// FrontDoorExposed is the independent network-reachability decision.
+	FrontDoorExposed bool
 	// TargetDB is the database name inside the connection's DSN, when the
 	// engine yields one. It is what a client types into a Database field, and
 	// the fact whose absence cost an evening.
@@ -626,7 +626,8 @@ func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
 		m, _ := row.(map[string]any)
 		out = append(out, ConnInfo{
 			ID: mI(m, "id"), Name: mS(m, "name"), Engine: mS(m, "engine"),
-			Profile: mS(m, "profile"), TargetDB: mS(m, "target_db"),
+			Profile: mS(m, "profile"), FrontDoorExposed: mB(m, "frontdoor_exposed"),
+			TargetDB: mS(m, "target_db"),
 		})
 	}
 	return out, nil
@@ -751,6 +752,13 @@ func (b *Bound) RemoveKeyslot(ctx context.Context) error {
 // omission.
 func (b *Bound) SetConnectionProfile(ctx context.Context, connID int64, profile string) error {
 	_, err := b.authed(ctx, "conn.set_profile", connID, profile)
+	return err
+}
+
+// SetConnectionExposure changes whether the front door may reach a connection.
+// The server requires administrative authority.
+func (b *Bound) SetConnectionExposure(ctx context.Context, connID int64, exposed bool) error {
+	_, err := b.authed(ctx, "conn.set_exposure", connID, exposed)
 	return err
 }
 

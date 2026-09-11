@@ -28,7 +28,9 @@ func openWire(t *testing.T, dsn, appName string) (f *fixture, connID int64, res 
 	if cerr != nil {
 		t.Fatalf("CreateConnection: %v", cerr)
 	}
-	if uerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Set(meta.ConnProfile, string(ProfileSession)).Update(); uerr != nil {
+	if uerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
+		Set(meta.ConnProfile, string(ProfileSession)).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); uerr != nil {
 		t.Fatal(uerr)
 	}
 	connRow, gerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
@@ -224,7 +226,9 @@ func TestWireOpen_FailsClosedWithoutReporterOrEncodingKeys(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Set(meta.ConnProfile, string(ProfileSession)).Update(); err != nil {
+			if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
+				Set(meta.ConnProfile, string(ProfileSession)).
+				Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
 				t.Fatal(err)
 			}
 			row, _ := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()

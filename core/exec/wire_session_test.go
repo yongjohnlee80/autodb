@@ -17,7 +17,8 @@ func wireFixture(t *testing.T) (*fixture, *meta.PAT, string, string) {
 	ctx := context.Background()
 
 	if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).
-		Set(meta.ConnProfile, string(ProfileSession)).Update(); err != nil {
+		Set(meta.ConnProfile, string(ProfileSession)).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
 		t.Fatalf("enabling the session profile: %v", err)
 	}
 	row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
@@ -45,7 +46,7 @@ func splitPATForTest(token string) (string, string, bool) {
 	return sel, sec, ok
 }
 
-func TestConnectionFrontDoorExposed_DualReadPreservesLegacyProfiles(t *testing.T) {
+func TestConnectionFrontDoorExposed_ReadsOnlyTheExposureProperty(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -53,8 +54,8 @@ func TestConnectionFrontDoorExposed_DualReadPreservesLegacyProfiles(t *testing.T
 		want bool
 	}{
 		{"unset stays closed", &meta.Connection{}, false},
-		{"legacy session profile stays exposed", &meta.Connection{Profile: meta.ProfileSession}, true},
-		{"new exposure column opens independently", &meta.Connection{Profile: meta.ProfileV1Compat, FrontDoorExposed: 1}, true},
+		{"session profile alone stays closed", &meta.Connection{Profile: meta.ProfileSession}, false},
+		{"exposure column opens independently", &meta.Connection{Profile: meta.ProfileV1Compat, FrontDoorExposed: 1}, true},
 		{"nil stays closed", nil, false},
 	}
 	for _, tc := range cases {
@@ -106,7 +107,7 @@ func TestOpenWireSession_AuthenticatesAndReserves(t *testing.T) {
 	}
 }
 
-func TestOpenWireSession_DualReadAdmitsTheExposureColumn(t *testing.T) {
+func TestOpenWireSession_ExposureColumnAdmitsIndependentlyOfProfile(t *testing.T) {
 	t.Parallel()
 	f, _, secret, dbName := wireFixture(t)
 	ctx := context.Background()
@@ -114,11 +115,11 @@ func TestOpenWireSession_DualReadAdmitsTheExposureColumn(t *testing.T) {
 	if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).
 		Set(meta.ConnProfile, meta.ProfileV1Compat).
 		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
-		t.Fatalf("setting transitional exposure state: %v", err)
+		t.Fatalf("setting independent exposure state: %v", err)
 	}
 	got, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP)
 	if err != nil {
-		t.Fatalf("frontdoor_exposed=1 was refused through the compatibility read: %v", err)
+		t.Fatalf("frontdoor_exposed=1 was refused because profile remained v1compat: %v", err)
 	}
 	f.eng.CloseWireSession(ctx, got.SessionID, got.UserID, testIP, "test")
 }
@@ -131,8 +132,8 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 	f, pat, secret, dbName := wireFixture(t)
 	ctx := context.Background()
 
-	// The profile refusal needs a token BOUND to a connection whose profile
-	// then stops admitting the front door — mint at `session`, then DOWNGRADE.
+	// The exposure refusal needs a token BOUND to a connection that was exposed
+	// when the token was minted and is then closed independently.
 	//
 	// Dialling some OTHER connection's name no longer reaches the profile
 	// gate at all: the token decides the target, so a name that
@@ -140,12 +141,11 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 	// before any profile is consulted. Reaching this branch therefore means
 	// constructing the state deliberately, which is what the ADR's cell 3
 	// calls for.
-	f2, pat2, secret2, dbName2 := wireFixture(t)
+	f2, _, secret2, dbName2 := wireFixture(t)
 	if uerr := f2.store.Connections.OnCtx(ctx).With(meta.ConnID, f2.connID).
-		Set(meta.ConnProfile, meta.ProfileV1Compat).Update(); uerr != nil {
-		t.Fatalf("downgrading the profile: %v", uerr)
+		Set(meta.ConnFrontDoorExposed, int64(0)).Update(); uerr != nil {
+		t.Fatalf("closing front-door exposure: %v", uerr)
 	}
-	_ = pat2
 
 	for _, tc := range []struct {
 		name   string
@@ -174,7 +174,7 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 			_, e := f.eng.OpenWireSession(ctx, secret, "root", "no-such-db", testIP)
 			return e
 		}, DenyDatabaseMismatch},
-		{"a connection whose profile refuses the front door", func() error {
+		{"a connection whose exposure property refuses the front door", func() error {
 			_, e := f2.eng.OpenWireSession(ctx, secret2, "root", dbName2, testIP)
 			return e
 		}, DenyProfileRefuses},
@@ -193,6 +193,12 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 				t.Errorf("a refused connection left %d lease(s) behind", n)
 			}
 		})
+	}
+	f2.eng.mu.Lock()
+	_, targetOpened := f2.eng.conns[f2.connID]
+	f2.eng.mu.Unlock()
+	if targetOpened {
+		t.Fatal("the exposure refusal opened the target pool; the gate must deny before dial")
 	}
 	_ = pat
 }

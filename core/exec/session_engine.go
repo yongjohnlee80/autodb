@@ -190,7 +190,7 @@ func (e *Engine) tokenControl(
 		defer endRun()
 		return e.executeUnit(runCtx, execUnit{
 			stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
-			pinned: pinned, txID: txID,
+			pinned: pinned, txID: txID, phys: admission.PhysSession,
 		})
 	}
 
