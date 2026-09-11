@@ -175,7 +175,7 @@ func TestChain_StopsAtTheFirstDeny(t *testing.T) {
 	// caller would learn the fundamental ground but the later stages would
 	// have run, which the order is not allowed to let happen.
 	if len(rep.Deny) != 1 {
-		t.Fatalf("the chain collected %d denials — it must stop at the first; a later " +
+		t.Fatalf("the chain collected %d denials — it must stop at the first; a later "+
 			"stage's refusal must never overwrite, join, or shadow the fundamental one",
 			len(rep.Deny))
 	}
