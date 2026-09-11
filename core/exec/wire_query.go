@@ -231,10 +231,10 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 		// classified is refused by ParseTxControl in handleTxControl.
 		return stmt, routeOwnedControl, nil
 	}
-	// THE STATEMENT GATES, through the one chain — the declared order, and
-	// the ORDERING DELTA for this path: the legacy wire gate ran the
-	// reader analysis before the profile; the profile answers first now
-	// (removing the UDF cannot make a compat-profile dm-CTE runnable).
+	// THE STATEMENT GATES, through the one chain. The profile now answers
+	// before both reader analysis and class authorization; the gate matrix
+	// records both intentional identity changes from the legacy wire order.
+	// Named cells pin each collision independently from preservation evidence.
 	admitErr, opErr := e.runSessionAdmission(ctx, s, pol, connRow, txOpen, stmt, part)
 	if opErr != nil {
 		return Statement{}, 0, opErr

@@ -45,7 +45,7 @@ delivery.
 
 | sentinel | raised at | surfaces | layer | notes |
 |---|---|---|---|---|
-| `ErrStatementUnsupported` | decl classify.go:52; raised classify.go:517, classify.go:573 and classify.go:609 (the classifier's own shape refusals: nested data-modifying verb, PRAGMA-shaped and unclassifiable tokens); profile.go:74, profile.go:85, profile.go:104 and profile.go:116 (`Profile.admit`'s arms) | all four (each via its own admit site) | capability (+ classify shape arms) | The v1compat arms (control, data-modifying CTE) and the session-profile arms (control off-session, pending-control verbs, no-admissible-form verbs) are uniform text per arm. **The phase-1 ordering ruling changes ONE cross-surface answer**: a read-only v1compat unit whose data-modifying CTE also calls a user-defined function moves from `ErrReaderAdvancedPattern` (wire paths, reader first) to `ErrStatementUnsupported` (profile first) — decided, matrix §7.4 of the pipeline design.  Justification: divergence:§6.3 and §6.5 — ordering (§6.3) and onSession control verbs (§6.5)； divergence:§6.3 — the ordering flip; reader-stage reach itself is all-surface； divergence:§6.3 and §6.5 — ordering (§6.3) and onSession control verbs (§6.5). |
+| `ErrStatementUnsupported` | decl classify.go:52; raised classify.go:517, classify.go:573 and classify.go:609 (the classifier's own shape refusals: nested data-modifying verb, PRAGMA-shaped and unclassifiable tokens); profile.go:74, profile.go:85, profile.go:104 and profile.go:116 (`Profile.admit`'s arms) | all four (each via its own admit site) | capability (+ classify shape arms) | The v1compat arms (control, data-modifying CTE) and the session-profile arms (control off-session, pending-control verbs, no-admissible-form verbs) are uniform text per arm. **One phase-1 ordering decision changes two collision classes on migrated session paths**: a read-only v1compat data-modifying CTE with a UDF moves from `ErrReaderAdvancedPattern` to `ErrStatementUnsupported`; without a UDF it moves from `auth.ErrDenied` to `ErrStatementUnsupported`. Profile admissibility is deliberately first in both cases. Justification: divergence:§6.3 and §6.5 — profile ordering (§6.3) and onSession control verbs (§6.5). |
 | `ErrNoWhere` | decl classify.go:57; profile.go:203 (top-level UPDATE/DELETE), :211 (nested mutation without WHERE at depth) | all four | guard | Uniform text both arms. |
 | `ErrReaderAdvancedPattern` | decl reader_analysis.go:64; reader_analysis.go:91 (qualified UDF call), :93 (bare UDF call), :110 (DO/CALL verb), :122 (catalog unreadable — operational, still this identity) | pooled, session, wire simple, wire ext (at Parse) | reader | Reader units only (`pol.ReadOnly`); needs a PostgreSQL-family target (`HasRoutineCatalog`). The catalog-unreadable arm (:122) is the operational-failure identity — distinct from the three policy arms in meaning, same sentinel.  Justification: divergence:§6.3 — the ordering flip; reader-stage reach itself is all-surface. |
 | `ErrReadOnlyUnenforceable` | decl unitpolicy.go:104; unitpolicy.go:167 (pooled wrap on a target with no TxBeginner, session profile), wire_extended.go:788 (execute-scoped: reader whose wrap is absent mid-segment — demotion or wrap failure) | pooled (v1compat: audited-and-ran, NOT refused — see notes), session, wire ext | authority (enforcement) | **v1compat asymmetry, decided**: on the pooled path a non-transactional target under v1compat runs under classifier enforcement only, with an `readonly_unenforced` audit line (the auditBounded call just below the refusal) — refusing would take the reader role away from every SQLite-class target for a guarantee never offered there. The session-profile arm refuses (fail closed) because the front door promises server-enforced read-only.  Justification: divergence:§6.2. |
@@ -65,7 +65,7 @@ delivery.
 
 | sentinel | raised at | surfaces | layer | notes |
 |---|---|---|---|---|
-| `auth.ErrDenied` | the read floor (engine.go:471, session_engine.go:46), class floors (`authorizeUnit` wire_execute.go:231), control floors (wire_query.go:213-217, wire_execute.go:185-194) | all four | authority | The uniform denial — never discloses existence. Mapped to `CodeDenied`/SQLSTATE 42501-family per surface renderer. |
+| `auth.ErrDenied` | the read floor (engine.go:471, session_engine.go:46), class floors (`authorizeUnit` wire_execute.go:231), control floors (wire_query.go:213-217, wire_execute.go:185-194) | all four | authority | The uniform denial — never discloses existence. Mapped to `CodeDenied`/SQLSTATE 42501-family per surface renderer. A profile-invalid statement is refused earlier as `ErrStatementUnsupported`; §6.3 records the deliberate capability disclosure this creates for an otherwise-ungranted class. |
 | `ErrTxAborted` | decl session_tx.go:43; wire_execute.go:158/202, session_engine.go:175, wire_query.go:223/246 | session, wire simple, wire ext | authority | Failed-transaction state; recovery controls only.  Justification: applicability:§7.5. |
 | `ErrTxAlreadyOpen` | decl session_tx.go:34; session_tx.go:129 | session, wire (both via `handleTxControl`) | authority | BEGIN on an open transaction.  Justification: applicability:§7.5. |
 | `ErrNoOpenTx` | decl session_tx.go:37; session_tx.go:288 | session, wire | authority | COMMIT/ROLLBACK with nothing to finish.  Justification: applicability:§7.5. |
@@ -107,7 +107,7 @@ one of these entries.
 
 1. **`ErrEmptyStatement`** — raised on token paths; tolerated on the wire (EmptyQueryResponse; empty Parse legal and charged). Decision: guard empty scripts UI-side. (Row §1.)
 2. **`ErrReadOnlyUnenforceable`** — v1compat pooled runs unenforced with an audit line; session-profile pooled refuses; wire ext execute-scoped arm refuses. Decision: the promise differs by profile and surface because the guarantee offered differs. (Row §2.)
-3. **`ErrStatementUnsupported` vs `ErrReaderAdvancedPattern` ordering** — the wire paths currently run reader analysis BEFORE the profile gate; pooled runs the reverse. **Decided (pipeline design matrix §7.4): profile admissibility precedes reader analysis everywhere**, because removing the UDF cannot make a v1compat data-modifying CTE runnable. This is the ONE intentional identity change of phase 1; its corpus rows are enumerated as a prediction before the flip, and per-row deltas go to a ruling, never to quiet regeneration.
+3. **Profile admissibility before reader analysis and class authorization** — legacy session and wire paths ran `readerAnalysis → authorizeUnit → profile.admit`; pooled already put the profile first. **Decided (Johno, 2026-09-11; pipeline design §7.4): keep profile first everywhere.** One ordering decision therefore creates two intentional identity changes on the migrated paths. A read-only v1compat data-modifying CTE with a UDF moves from `ErrReaderAdvancedPattern` to `ErrStatementUnsupported`; one without a UDF moves from `auth.ErrDenied` to `ErrStatementUnsupported`. The second flip reveals that the profile cannot run the statement where the old flat authorization denial revealed no capability detail. That disclosure is accepted in favor of a uniform, fundamental answer: granting the class or removing the UDF still cannot make a profile-invalid statement runnable. The affected corpus classes are predicted before the flip; per-row deltas go to a ruling, never to quiet regeneration.
 4. **GUC models** — pooled allowlist (`ErrSetGUCRefused`/`ErrSetNotLocal`) vs wire denylist (`ErrWireSetRefused`; `ErrSetOutsideTx` has an arm on both models). Decision: the leak hazard genuinely differs (backend discarded at close); the phase-1 chain keeps them as two applicability sets of one stage. (Rows §3.)
 5. **`onSession` control verbs** — `BEGIN`/`COMMIT`/`ROLLBACK`/`SET`/`RESET`/`LOCK` are admitted on the session profile ONLY on a session (engine action, never forwarded text); off one they refuse with `ErrStatementUnsupported`. The pooled `run` passes `pinned != nil`; every other admit site passes literal `true` because the surface implies it. (Row §2.)
 6. **`ErrGrammarDrifted` timing** — raised at pool checkout (acquisition) today; the per-statement pinned-session re-read lands with the phase-1 A26 fold, at which point the wire surfaces gain the per-statement refusal. A deliberate, dated divergence in WHEN the identity is raised, not whether it can be. (Row §3.)
@@ -145,20 +145,21 @@ and to name one of these entries.
   (§7, physics: the raising frame does not exist elsewhere) — and the
   named on-record entry must carry the sentinel.
 
-## 9. Corpus prediction for the phase-1 ordering flip (recorded BEFORE any
-    drive changes; see divergence §6.3)
+## 9. Corpus prediction for the phase-1 profile-ordering flips
 
-The one intentional behaviour change of phase 1 moves the wire paths' reader
-analysis to AFTER the profile gate. If any corpus statement sits in the
-affected class — a read-only v1compat unit whose data-modifying CTE also
-calls a user-defined function — its client-visible refusal identity changes
-from the reader stage's to the profile's.
+(Recorded BEFORE any drive changes; see divergence §6.3.)
+
+One intentional ordering decision moves both reader analysis and class
+authorization after the profile gate on the migrated session paths. It creates
+two client-visible identity changes for read-only v1compat data-modifying CTEs:
+with a UDF, the reader stage's identity changes to the profile's; without a UDF,
+the class authorization identity changes to the profile's.
 
 **The prediction: the manifest delta is EMPTY, and it is empty by
 construction, not by luck.** The corpus replay's gate decision
 (`gateDecision` in the corpus test: profile admit, then the WHERE guard)
-never runs the reader stage at all, so no ordering change between admit and
-reader analysis can reach the manifest. The one `refused:nested-mutation`
+never runs reader analysis OR class authorization, so neither profile-ordering
+change can reach the manifest. The one `refused:nested-mutation`
 row in the committed manifest (000005_update_backfill_contacts.sql,
 ordinal 3, verb UPDATE) refuses at the profile gate in BOTH orders and keeps
 its identity.
@@ -167,7 +168,7 @@ its identity.
 manifest has no third story available — it is a DEFECT, enumerated per row
 (old identity, new identity) and surfaced for a ruling; it is not a
 regeneration and not a carve-out. The structural reason is asserted by a
-cell (`TestGateMatrix_CorpusReplayCannotSeeTheReaderStage`), which fails if
-the replay ever grows a reader-analysis arm, because at that point the
-prediction above goes stale and must be re-derived and re-recorded BEFORE
-the corpus runs again.
+cell (`TestGateMatrix_CorpusReplayCannotSeeLaterAdmissionStages`), which fails
+if the replay ever grows a reader-analysis or class-authorization arm, because
+at that point the prediction above goes stale and must be re-derived and
+re-recorded BEFORE the corpus runs again.

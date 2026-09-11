@@ -1061,18 +1061,16 @@ func TestPooledDrive_WiringPinnedTxHandoff(t *testing.T) {
 	}
 }
 
-// THE ORDERING DELTA, through the real session flow. A read-only
-// compat-profile unit whose statement violates BOTH the profile gate
-// (data-modifying CTE) and the reader stage (a UDF call) must answer the
-// PROFILE's identity — the flip the ruling decided, landed in this step.
-// The legacy session path would have answered reader-advanced-pattern;
-// the declared order answers statement-unsupported.
-func TestSessionDrive_OrderingDeltaAnswered(t *testing.T) {
+// The profile-before-authorization ordering delta, through the real session
+// flow. A read-only compat-profile unit whose data-modifying CTE violates both
+// the profile and class floor must answer the profile's identity. The legacy
+// session path authorized first and answered auth.ErrDenied.
+func TestSessionDrive_ProfilePrecedesClassAuthorization(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 
-	// A reader-granted user on the compat-profile connection. The
-	// dm-CTE-with-UDF statement violates both stages.
+	// A reader-granted user on the compat-profile connection. The dm-CTE has
+	// no UDF, so reader analysis passes and authorization is the competing gate.
 	readerID, err := f.svc.CreateUser(ctx, f.rootTok, "delta-reader", "delta-pass-1", meta.RoleReader, testIP)
 	if err != nil {
 		t.Fatal(err)
@@ -1085,9 +1083,8 @@ func TestSessionDrive_OrderingDeltaAnswered(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A reader-session: the statement is a data-modifying CTE (the compat
-	// profile refuses it) that also calls a function the reader stage
-	// would refuse. Admit-first answers the profile's identity.
+	// The compat profile refuses the data-modifying CTE while its write class
+	// exceeds the reader's grant. Profile-first answers statement-unsupported.
 	sessID, err := f.eng.OpenSession(ctx, readerTok, f.connID, testIP)
 	if err != nil {
 		t.Fatal(err)
@@ -1097,11 +1094,13 @@ func TestSessionDrive_OrderingDeltaAnswered(t *testing.T) {
 	if err == nil {
 		t.Fatal("the double-violating statement was admitted")
 	}
+	if errors.Is(err, auth.ErrDenied) {
+		t.Fatalf("the session drive answered with class authorization's identity: %v", err)
+	}
 	if !errors.Is(err, ErrStatementUnsupported) {
 		t.Fatalf("the session drive answered %v — the ordering ruling says profile admissibility "+
-			"precedes reader analysis: a compat dm-CTE is refused as statement-unsupported, "+
-			"not as a reader pattern (the reader analysis cannot see it at all until the "+
-			"analyzer phase)", err)
+			"precedes class authorization: a compat dm-CTE is refused as statement-unsupported, "+
+			"not with the flat authorization denial", err)
 	}
 }
 
@@ -1144,12 +1143,10 @@ func TestSessionDrive_CrossSurfaceParityWithPooled(t *testing.T) {
 	}
 }
 
-// The wire-simple delta cell, chain-level: the wire gate's chain answers
-// the profile's identity for the double-violating reader statement —
-// the same flip the session drive's cell proved through its real flow,
-// asserted here for the wire composition (the frontdoor live-wire suite
-// exercises the migrated gate end to end).
-func TestWireSimpleDrive_OrderingDeltaAnswered(t *testing.T) {
+// The wire-simple profile-before-authorization cell, at chain level. The
+// front-door live-wire suite exercises the migrated gate end to end; this cell
+// isolates the identity collision and pins the wire composition's order.
+func TestWireSimpleDrive_ProfilePrecedesClassAuthorization(t *testing.T) {
 	stmt, err := Classify("WITH x AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT coalesce(sum(x.id), 0) FROM x", false)
 	if err != nil {
 		t.Fatal(err)
@@ -1157,7 +1154,7 @@ func TestWireSimpleDrive_OrderingDeltaAnswered(t *testing.T) {
 	stages := []admission.Stage{
 		sizeCapStage{},
 		profileAdmitStage{profile: ProfileV1Compat},
-		readerAnalysisStage{userRoutines: nil}, // the profile answers before the reader stage is consulted
+		readerAnalysisStage{userRoutines: nil},
 		authorizeUnitStage{},
 		guardWhereStage{},
 	}
@@ -1172,8 +1169,8 @@ func TestWireSimpleDrive_OrderingDeltaAnswered(t *testing.T) {
 		t.Fatal("the double-violating statement was admitted")
 	}
 	if deny.Code != admission.CodeStatementUnsupported {
-		t.Fatalf("the wire chain answered %s — profile admissibility precedes reader analysis "+
-			"on EVERY surface; the flip that landed in this step", deny.Code)
+		t.Fatalf("the wire chain answered %s — profile admissibility precedes class authorization "+
+			"on every surface; auth.ErrDenied must not hide the profile refusal", deny.Code)
 	}
 }
 
