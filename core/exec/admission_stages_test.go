@@ -473,3 +473,157 @@ func authorizeUnitFloorPremise(stmt Statement) error {
 		return auth.ErrDenied
 	}
 }
+
+func newSessionStateStage() sessionStateStage {
+	return sessionStateStage{parseSet: parseSet, parseReset: parseReset}
+}
+
+func controlFacts(t *testing.T, sql string) *LegacyFacts {
+	t.Helper()
+	stmt, err := Classify(sql, false)
+	if err != nil {
+		t.Fatalf("classifying %q: %v", sql, err)
+	}
+	return NewLegacyFactsForText(stmt, sql, len(sql))
+}
+
+func TestSessionStateAdapter_TwoGUCModelsDistinct(t *testing.T) {
+	o := admission.Compose(newSessionStateStage())
+
+	// THE TWO MODELS, same setting, different surfaces:
+	//
+	// temp_buffers is NOT on the pooled allowlist — SET LOCAL temp_buffers on a
+	// pooled/session context refuses with the allowlist identity; on the
+	// wire context (denylist model, editors get PostgreSQL as it is) the
+	// same statement is admitted.
+	setLocal := "SET LOCAL temp_buffers = '8MB'"
+	pooledCtx := admission.Context{Phys: admission.PhysPooled, TxOpen: true}
+	wireCtx := admission.Context{Phys: admission.PhysWire, TxOpen: true}
+
+	st, err := parseSet(setLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admitSet(st, true); err == nil {
+		t.Fatal("the pooled allowlist admitted temp_buffers — premise wrong")
+	}
+	rep, rerr := o.Run(controlFacts(t, setLocal), pooledCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok := rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted SET LOCAL temp_buffers on the pooled model")
+	}
+	if deny.Code != admission.CodeSetGUCRefused {
+		t.Fatalf("code = %s, want set-guc-refused (the allowlist arm)", deny.Code)
+	}
+	if !strings.Contains(deny.Detail, ErrSetGUCRefused.Error()) {
+		t.Fatalf("detail %q does not carry the sentinel's text", deny.Detail)
+	}
+
+	rep, rerr = o.Run(controlFacts(t, setLocal), wireCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the wire DENYLIST refused temp_buffers — the denylist admits everything not named")
+	}
+
+	// THE MODELS DISAGREE IN BOTH DIRECTIONS, each with its own identity.
+	//
+	// search_path: the POOLED model refuses it in every form (a
+	// grammar-changing setting desynchronizes the classifier) — the
+	// wire model admits it for EDITORS (the backend is discarded at
+	// close, the parsing hazard is pinned by the lease, and the
+	// denylist does not name it) and refuses it for READERS (the
+	// catalog-name shadowing the reader analysis relies on).
+	pooledEditor := admission.Context{Phys: admission.PhysSession, TxOpen: true}
+	wireEditor := admission.Context{Phys: admission.PhysWire, TxOpen: true, ReadOnly: false}
+	readerWire := admission.Context{Phys: admission.PhysWire, TxOpen: true, ReadOnly: true}
+	setSP := "SET LOCAL search_path = public"
+	st, err = parseSet(setSP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admitSet(st, true); err == nil {
+		t.Fatal("the pooled allowlist admitted search_path — premise wrong (it is grammar-refused in every form)")
+	}
+	rep, rerr = o.Run(controlFacts(t, setSP), pooledEditor)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok = rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted search_path on the pooled model — the grammar arm")
+	}
+	if deny.Code != admission.CodeSetGUCRefused {
+		t.Fatalf("pooled code = %s, want set-guc-refused (the grammar arm)", deny.Code)
+	}
+	// The wire EDITOR: admitted.
+	rep, rerr = o.Run(controlFacts(t, setSP), wireEditor)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the wire denylist refused an editor's search_path — editors get PostgreSQL as it is")
+	}
+	// The wire READER: refused with the denylist's own identity.
+	rep, rerr = o.Run(controlFacts(t, setSP), readerWire)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok = rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted a reader's search_path on the wire")
+	}
+	if deny.Code != admission.CodeWireSetRefused {
+		t.Fatalf("code = %s, want wire-set-refused (the denylist arm)", deny.Code)
+	}
+
+	// A13's mutation: FLATTEN the two models — make the pooled path use
+	// the denylist too — and one side's cells redden. Drive both arms
+	// with one flattened stage and both must fail somewhere: here the
+	// pooled temp_buffers case flips from refused to admitted, so the FIRST
+	// cell above is the A13 proof (its premise is that the allowlist
+	// refuses temp_buffers; flattening breaks it). The reverse flattening
+	// (wire uses the allowlist) reddens the temp_buffers-on-wire case. Both
+	// directions are pinned by the two cells above.
+
+	// LOCK outside a transaction: the same rule on both models.
+	lockCtx := admission.Context{Phys: admission.PhysSession, TxOpen: false}
+	rep, rerr = o.Run(controlFacts(t, "LOCK TABLE t"), lockCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok = rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted LOCK outside a transaction")
+	}
+	if deny.Code != admission.CodeLockOutsideTx {
+		t.Fatalf("code = %s, want lock-outside-tx", deny.Code)
+	}
+
+	// The RESET-on-pooled refusal and the RESET ALL wire refusal, identities
+	// preserved.
+	rep, rerr = o.Run(controlFacts(t, "RESET ALL"), admission.Context{Phys: admission.PhysWire})
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok = rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted RESET ALL on the wire")
+	}
+	if !strings.Contains(deny.Detail, ErrWireSetRefused.Error()) {
+		t.Fatalf("detail %q does not carry the wire sentinel's text", deny.Detail)
+	}
+
+	// The chain without the stage: the refused SETs above run.
+	rep, rerr = admission.Compose().Run(controlFacts(t, setLocal), pooledCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the empty chain denied — the mutation's premise is wrong")
+	}
+}
