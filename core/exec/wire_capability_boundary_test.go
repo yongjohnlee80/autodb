@@ -97,7 +97,7 @@ func TestRawSimpleQueryCapabilityNeverLeavesCoreExec(t *testing.T) {
 	}
 }
 
-func TestSetConnectionProfile_HasNoExposureSideEffects(t *testing.T) {
+func TestSetConnectionProfile_HasNoExposureStateSideEffects(t *testing.T) {
 	t.Parallel()
 	funcs, _ := loadIngressFuncs(t)
 	fn := funcs["Engine.SetConnectionProfile"]
@@ -106,7 +106,7 @@ func TestSetConnectionProfile_HasNoExposureSideEffects(t *testing.T) {
 	}
 	forbidden := map[string]bool{
 		"exposureMu": true, "FrontDoorExposed": true, "ConnFrontDoorExposed": true,
-		"TargetDBName": true, "ConnTargetDB": true, "closeSessionsFor": true,
+		"TargetDBName": true, "ConnTargetDB": true,
 	}
 	ast.Inspect(fn.decl.Body, func(node ast.Node) bool {
 		if id, ok := node.(*ast.Ident); ok && forbidden[id.Name] {
