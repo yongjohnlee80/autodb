@@ -65,7 +65,7 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 				return map[ConnField]any{ConnID: r.ID, ConnName: r.Name, ConnEngine: r.Engine.String(),
 					ConnDSNEnc: nb(r.DSNEnc), ConnCreatedBy: r.CreatedBy,
 					ConnCreatedAt: r.CreatedAt, ConnUpdatedAt: r.UpdatedAt,
-					ConnProfile: r.Profile, ConnDebug: r.Debug,
+					ConnProfile: r.Profile, ConnFrontDoorExposed: r.FrontDoorExposed, ConnDebug: r.Debug,
 					ConnPoolMaxConns: r.PoolMaxConns, ConnTargetDB: r.TargetDB}
 			})
 		}},

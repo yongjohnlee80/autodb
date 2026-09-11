@@ -312,7 +312,7 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	// connection: no target is reachable through this surface
 	// by default, so adding the listener does not silently expose every
 	// database the daemon knows about.
-	if e.profileFor(connRow) != ProfileSession {
+	if !connectionFrontDoorExposed(connRow) {
 		return out, deny(DenyProfileRefuses)
 	}
 
@@ -418,6 +418,14 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		AdmissionSource: src, PATName: pat.Name, UserName: owner.Name,
 		ParameterStatuses: statuses, ApplicationName: req.ApplicationName,
 	}, nil
+}
+
+// connectionFrontDoorExposed is the expansion-stage compatibility read. The
+// column is authoritative for newly represented exposure, while the profile
+// fallback preserves reachability until every consumer has moved to the new
+// property and the contract can be tightened independently.
+func connectionFrontDoorExposed(row *meta.Connection) bool {
+	return row != nil && (row.FrontDoorExposed != 0 || row.Profile == meta.ProfileSession)
 }
 
 // leaseEncodingRefusal reports why the lease cannot be established as UTF8:

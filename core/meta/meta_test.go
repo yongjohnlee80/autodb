@@ -222,6 +222,8 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 		// like connections.target_db the column outlives a table DROP and has
 		// to be named. This list is the contract the comment above describes.
 		`ALTER TABLE script_history DROP COLUMN suspended`,
+		// v16 adds connections.frontdoor_exposed — same DROP-list rule.
+		`ALTER TABLE connections DROP COLUMN frontdoor_exposed`,
 		`DELETE FROM schema_migrations WHERE version >= 7`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
@@ -324,6 +326,8 @@ func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
 		`ALTER TABLE connections DROP COLUMN target_db`,
 		// v15 adds script_history.suspended — same DROP-list rule.
 		`ALTER TABLE script_history DROP COLUMN suspended`,
+		// v16 adds connections.frontdoor_exposed — same DROP-list rule.
+		`ALTER TABLE connections DROP COLUMN frontdoor_exposed`,
 		`DELETE FROM schema_migrations WHERE version >= 8`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
