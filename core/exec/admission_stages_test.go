@@ -1153,7 +1153,6 @@ func TestWireSimpleDrive_OrderingDeltaAnswered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	e := newChainTestEngine(t)
 	stages := []admission.Stage{
 		sizeCapStage{},
 		profileAdmitStage{profile: ProfileV1Compat},
