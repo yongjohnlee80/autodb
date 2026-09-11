@@ -116,6 +116,9 @@ func TestSetConnectionProfile_HasNoExposureStateSideEffects(t *testing.T) {
 	})
 }
 
+// This text scan is a naming tripwire, not the orthogonality proof: aliases can
+// evade it and comments can trigger it. The four behavioral quadrants and the
+// PAT/RPC/TUI cells above own the actual exposure/profile contract.
 func TestExposureSurfaces_DoNotUseCapabilityProfiles(t *testing.T) {
 	t.Parallel()
 	_, here, _, _ := runtime.Caller(0)
