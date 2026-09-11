@@ -97,6 +97,11 @@ type Connection struct {
 	// sessions is a per-connection decision rather than something a schema
 	// upgrade did on your behalf.
 	Profile string
+	// FrontDoorExposed is the connection's independent front-door reachability
+	// flag. During the profile-split migration, callers preserve legacy
+	// behaviour by also consulting Profile; a later contraction removes that
+	// compatibility read. 0/1, matching users.disabled.
+	FrontDoorExposed int64
 	// Debug marks a connection used for debugging against a live target, and
 	// it takes the longer idle-in-transaction bound,
 	// because a developer paused at a breakpoint inside a transaction should
@@ -148,32 +153,34 @@ const (
 type ConnField string
 
 const (
-	ConnID           ConnField = "id"
-	ConnName         ConnField = "name"
-	ConnEngine       ConnField = "engine"
-	ConnDSNEnc       ConnField = "dsn_enc"
-	ConnProfile      ConnField = "profile"
-	ConnDebug        ConnField = "debug"
-	ConnPoolMaxConns ConnField = "pool_max_conns"
-	ConnCreatedBy    ConnField = "created_by"
-	ConnCreatedAt    ConnField = "created_at"
-	ConnUpdatedAt    ConnField = "updated_at"
-	ConnTargetDB     ConnField = "target_db"
+	ConnID               ConnField = "id"
+	ConnName             ConnField = "name"
+	ConnEngine           ConnField = "engine"
+	ConnDSNEnc           ConnField = "dsn_enc"
+	ConnProfile          ConnField = "profile"
+	ConnFrontDoorExposed ConnField = "frontdoor_exposed"
+	ConnDebug            ConnField = "debug"
+	ConnPoolMaxConns     ConnField = "pool_max_conns"
+	ConnCreatedBy        ConnField = "created_by"
+	ConnCreatedAt        ConnField = "created_at"
+	ConnUpdatedAt        ConnField = "updated_at"
+	ConnTargetDB         ConnField = "target_db"
 )
 
 func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort, int64] {
 	return schema(conn, "connections", ConnID, map[ConnField]dao.Field[*Connection]{
-		ConnID:           {Column: "id", Scan: func(r *Connection) any { return &r.ID }},
-		ConnName:         {Column: "name", Scan: func(r *Connection) any { return &r.Name }, Value: func(r *Connection) any { return r.Name }},
-		ConnEngine:       {Column: "engine", Scan: func(r *Connection) any { return &r.Engine }, Value: func(r *Connection) any { return r.Engine.String() }},
-		ConnProfile:      {Column: "profile", Scan: func(r *Connection) any { return &r.Profile }, Value: func(r *Connection) any { return r.Profile }},
-		ConnDebug:        {Column: "debug", Scan: func(r *Connection) any { return &r.Debug }, Value: func(r *Connection) any { return r.Debug }},
-		ConnPoolMaxConns: {Column: "pool_max_conns", Scan: func(r *Connection) any { return &r.PoolMaxConns }, Value: func(r *Connection) any { return r.PoolMaxConns }},
-		ConnDSNEnc:       {Column: "dsn_enc", Scan: func(r *Connection) any { return &r.DSNEnc }, Value: func(r *Connection) any { return r.DSNEnc }},
-		ConnCreatedBy:    {Column: "created_by", Scan: func(r *Connection) any { return &r.CreatedBy }, Value: func(r *Connection) any { return r.CreatedBy }},
-		ConnCreatedAt:    {Column: "created_at", Scan: func(r *Connection) any { return &r.CreatedAt }, Value: func(r *Connection) any { return r.CreatedAt }},
-		ConnUpdatedAt:    {Column: "updated_at", Scan: func(r *Connection) any { return &r.UpdatedAt }, Value: func(r *Connection) any { return r.UpdatedAt }},
-		ConnTargetDB:     {Column: "target_db", Scan: func(r *Connection) any { return &r.TargetDB }, Value: func(r *Connection) any { return r.TargetDB }},
+		ConnID:               {Column: "id", Scan: func(r *Connection) any { return &r.ID }},
+		ConnName:             {Column: "name", Scan: func(r *Connection) any { return &r.Name }, Value: func(r *Connection) any { return r.Name }},
+		ConnEngine:           {Column: "engine", Scan: func(r *Connection) any { return &r.Engine }, Value: func(r *Connection) any { return r.Engine.String() }},
+		ConnProfile:          {Column: "profile", Scan: func(r *Connection) any { return &r.Profile }, Value: func(r *Connection) any { return r.Profile }},
+		ConnFrontDoorExposed: {Column: "frontdoor_exposed", Scan: func(r *Connection) any { return &r.FrontDoorExposed }, Value: func(r *Connection) any { return r.FrontDoorExposed }},
+		ConnDebug:            {Column: "debug", Scan: func(r *Connection) any { return &r.Debug }, Value: func(r *Connection) any { return r.Debug }},
+		ConnPoolMaxConns:     {Column: "pool_max_conns", Scan: func(r *Connection) any { return &r.PoolMaxConns }, Value: func(r *Connection) any { return r.PoolMaxConns }},
+		ConnDSNEnc:           {Column: "dsn_enc", Scan: func(r *Connection) any { return &r.DSNEnc }, Value: func(r *Connection) any { return r.DSNEnc }},
+		ConnCreatedBy:        {Column: "created_by", Scan: func(r *Connection) any { return &r.CreatedBy }, Value: func(r *Connection) any { return r.CreatedBy }},
+		ConnCreatedAt:        {Column: "created_at", Scan: func(r *Connection) any { return &r.CreatedAt }, Value: func(r *Connection) any { return r.CreatedAt }},
+		ConnUpdatedAt:        {Column: "updated_at", Scan: func(r *Connection) any { return &r.UpdatedAt }, Value: func(r *Connection) any { return r.UpdatedAt }},
+		ConnTargetDB:         {Column: "target_db", Scan: func(r *Connection) any { return &r.TargetDB }, Value: func(r *Connection) any { return r.TargetDB }},
 	})
 }
 

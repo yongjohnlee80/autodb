@@ -464,8 +464,13 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 	}
 
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
+		exposed := int64(0)
+		if profile == meta.ProfileSession {
+			exposed = 1
+		}
 		if uerr := e.store.Connections.On(tx).With(meta.ConnID, connID).
-			Set(meta.ConnProfile, profile).Set(meta.ConnTargetDB, targetDB).
+			Set(meta.ConnProfile, profile).Set(meta.ConnFrontDoorExposed, exposed).
+			Set(meta.ConnTargetDB, targetDB).
 			Set(meta.ConnUpdatedAt, e.now().Unix()).Update(); uerr != nil {
 			return uerr
 		}

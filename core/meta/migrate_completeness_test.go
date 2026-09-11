@@ -271,12 +271,12 @@ func seedEverything(t *testing.T, s *Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// profile, debug and pool_max_conns are the three that were dropped, so
-	// all three are deliberately non-default here.
+	// Every post-v1 connection property is deliberately non-default here.
 	connID, err := s.Connections.OnCtx(ctx).
 		Set(ConnName, "gold").Set(ConnEngine, "postgres").Set(ConnDSNEnc, []byte("enc")).
 		Set(ConnCreatedBy, rootID).Set(ConnCreatedAt, int64(13)).Set(ConnUpdatedAt, int64(14)).
-		Set(ConnProfile, "session").Set(ConnDebug, int64(1)).Set(ConnPoolMaxConns, int64(5)).
+		Set(ConnProfile, "session").Set(ConnFrontDoorExposed, int64(1)).
+		Set(ConnDebug, int64(1)).Set(ConnPoolMaxConns, int64(5)).
 		Insert()
 	if err != nil {
 		t.Fatal(err)

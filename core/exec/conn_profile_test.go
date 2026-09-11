@@ -58,6 +58,29 @@ func TestSetConnectionProfile_AdminOnly(t *testing.T) {
 	}
 }
 
+func TestSetConnectionProfile_DualWritesExposureDuringCompatibility(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	for _, profile := range []string{meta.ProfileSession, meta.ProfileV1Compat} {
+		if err := f.eng.SetConnectionProfile(ctx, f.rootTok, f.connID, profile, testIP); err != nil {
+			t.Fatalf("setting profile %q: %v", profile, err)
+		}
+		row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := int64(0)
+		if profile == meta.ProfileSession {
+			want = 1
+		}
+		if row.FrontDoorExposed != want {
+			t.Fatalf("profile %q wrote frontdoor_exposed=%d, want %d", profile, row.FrontDoorExposed, want)
+		}
+	}
+}
+
 // An unknown profile fails CLOSED, at the call, rather than being stored and
 // admitting nothing at the next statement.
 func TestSetConnectionProfile_UnknownProfileIsRefused(t *testing.T) {

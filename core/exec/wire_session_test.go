@@ -45,6 +45,27 @@ func splitPATForTest(token string) (string, string, bool) {
 	return sel, sec, ok
 }
 
+func TestConnectionFrontDoorExposed_DualReadPreservesLegacyProfiles(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		row  *meta.Connection
+		want bool
+	}{
+		{"unset stays closed", &meta.Connection{}, false},
+		{"legacy session profile stays exposed", &meta.Connection{Profile: meta.ProfileSession}, true},
+		{"new exposure column opens independently", &meta.Connection{Profile: meta.ProfileV1Compat, FrontDoorExposed: 1}, true},
+		{"nil stays closed", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := connectionFrontDoorExposed(tc.row); got != tc.want {
+				t.Fatalf("connectionFrontDoorExposed(%+v) = %t, want %t", tc.row, got, tc.want)
+			}
+		})
+	}
+}
+
 // Matrix row 2.7's chain, end to end. The happy path FIRST: without it every
 // refusal below could be a function that refuses everything.
 func TestOpenWireSession_AuthenticatesAndReserves(t *testing.T) {
@@ -83,6 +104,23 @@ func TestOpenWireSession_AuthenticatesAndReserves(t *testing.T) {
 	if f.eng.sessions.residentHeld() != 0 {
 		t.Errorf("resident after close = %d, want 0", f.eng.sessions.residentHeld())
 	}
+}
+
+func TestOpenWireSession_DualReadAdmitsTheExposureColumn(t *testing.T) {
+	t.Parallel()
+	f, _, secret, dbName := wireFixture(t)
+	ctx := context.Background()
+
+	if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).
+		Set(meta.ConnProfile, meta.ProfileV1Compat).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
+		t.Fatalf("setting transitional exposure state: %v", err)
+	}
+	got, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP)
+	if err != nil {
+		t.Fatalf("frontdoor_exposed=1 was refused through the compatibility read: %v", err)
+	}
+	f.eng.CloseWireSession(ctx, got.SessionID, got.UserID, testIP, "test")
 }
 
 // Every refusal is a DISTINCT internal reason and the SAME denial to the

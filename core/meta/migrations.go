@@ -559,6 +559,18 @@ var migrations = []migration{
 			`ALTER TABLE script_history ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0`,
 		},
 	},
+	// v16 expands front-door exposure into its own connection property without
+	// changing which existing rows are reachable. The safe default is closed;
+	// the data step then records the exposure already implied by the session
+	// capability profile. Keeping both statements in one migration prevents a
+	// process from observing the new column before its historical rows agree.
+	{
+		Version: 16,
+		Both: []string{
+			`ALTER TABLE connections ADD COLUMN frontdoor_exposed INTEGER NOT NULL DEFAULT 0`,
+			`UPDATE connections SET frontdoor_exposed = 1 WHERE profile = 'session'`,
+		},
+	},
 }
 
 // partitionVolumeTables is v11's computed step.
