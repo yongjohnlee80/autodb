@@ -3,6 +3,7 @@ package exec
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
@@ -416,3 +417,62 @@ func denyFrom(err error) admission.Contribution {
 // the raw text (it carries the shape), so the text rides the LegacyFacts
 // — supplied by the drive, which holds it.
 func errorsIs(err, target error) bool { return errors.Is(err, target) }
+
+// reasonErr maps a Reason back onto the LEGACY SENTINEL its code stands
+// for, so the drives' rejection paths keep the identity — including the
+// errors.Is chain — the callers' error handling is written against. The
+// compatibility surface this phase preserves is the sentinel WRAP, not
+// merely the text: tests and callers ask errors.Is(err, sentinel), so
+// the returned error must wrap the sentinel with the arm's own message.
+//
+// The adapters compose their Details as "<sentinel text><arm detail>",
+// so the reconstruction is the sentinel wrapped with everything the arm
+// appended beyond the sentinel's own text — the exact shape
+// fmt.Errorf("%w: ...", sentinel) produced before the move.
+func reasonErr(r admission.Reason) error {
+	sentinel, ok := legacySentinelFor(r.Code)
+	if !ok {
+		return fmt.Errorf("exec: unmapped admission code %q (detail %q) — a refusal with no "+
+			"identity mapping must never reach the client", r.Code, r.Detail)
+	}
+	suffix := strings.TrimPrefix(r.Detail, sentinel.Error())
+	if suffix == r.Detail && r.Detail != "" {
+		// The detail is not sentinel-prefixed (a future stage's shape);
+		// keep the sentinel wrap and append the detail as context.
+		return fmt.Errorf("%w: %s", sentinel, r.Detail)
+	}
+	if suffix == "" {
+		return sentinel
+	}
+	return fmt.Errorf("%w%s", sentinel, suffix)
+}
+
+// legacySentinelFor is the code→sentinel table: the identity each
+// refusal keeps.
+func legacySentinelFor(c admission.Code) (error, bool) {
+	switch c {
+	case admission.CodeScriptTooLarge:
+		return ErrScriptTooLarge, true
+	case admission.CodeNoWhere:
+		return ErrNoWhere, true
+	case admission.CodeStatementUnsupported:
+		return ErrStatementUnsupported, true
+	case admission.CodeReaderAdvancedPattern:
+		return ErrReaderAdvancedPattern, true
+	case admission.CodeSetGUCRefused:
+		return ErrSetGUCRefused, true
+	case admission.CodeSetNotLocal:
+		return ErrSetNotLocal, true
+	case admission.CodeSetOutsideTx:
+		return ErrSetOutsideTx, true
+	case admission.CodeLockOutsideTx:
+		return ErrLockOutsideTx, true
+	case admission.CodeWireSetRefused:
+		return ErrWireSetRefused, true
+	case admission.CodeDenied:
+		return auth.ErrDenied, true
+	case admission.CodeReadOnlyUnenforceable:
+		return ErrReadOnlyUnenforceable, true
+	}
+	return nil, false
+}

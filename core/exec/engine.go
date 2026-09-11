@@ -12,6 +12,7 @@ import (
 	"github.com/yongjohnlee80/golib/dao"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
@@ -491,18 +492,11 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	if err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
 	}
-	// Admission. The classifier said what this IS; the profile says whether
-	// this engine runs it. It sits after classification and
-	// before authorization deliberately: an ungranted caller is already gone
-	// by here, refused at the read floor above, so a refusal message that
-	// names the verb cannot leak anything to someone who was not allowed to
-	// ask.
-	if err := e.profileFor(connRow).admit(stmt, pinned != nil); err != nil {
-		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
-	}
-	// Full authorization for the statement's actual class. A denial must
-	// NOT discard the caller's identity — the rejection audits under the
-	// real user.
+	// Full authorization for the statement's actual class — the token-level
+	// grant lookup, which stays DRIVE-side: it is engine I/O against the
+	// caller's grants, not a policy snapshot check. A denial must NOT
+	// discard the caller's identity — the rejection audits under the real
+	// user.
 	authorized, err := e.auth.Authorize(ctx, token, connID, classToAction(stmt.Class))
 	if err != nil {
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
@@ -513,11 +507,23 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 		return nil, e.reject(ctx, ident, connID, ip, sqlText, uperr)
 	}
 	ident = authorized
-	if err := e.readerAnalysis(ctx, connRow, unitPol, stmt); err != nil { // the editors-first rule, stage
-		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
+
+	// ADMISSION, through the one chain. The pasted gates — profile, reader
+	// analysis, the WHERE guard — are stages now; the drive supplies their
+	// inputs (the connection's profile, the policy snapshot, the physical
+	// context) and every refusal keeps its legacy identity through the
+	// chain's Reason mapping. The pooled path runs pooled, unless the
+	// caller's session holds a pinned transaction (the old gate's
+	// onSession fact, computed exactly where it always was).
+	admitErr, opErr := e.runAdmission(ctx,
+		admissionInputs{connRow: connRow, pol: unitPol, phys: admission.PhysPooled, pinnedSet: pinned != nil},
+		e.pooledStages(ctx, connRow),
+		stmt, sqlText, setNameLocal{})
+	if opErr != nil {
+		return nil, opErr
 	}
-	if err := guardWhere(stmt); err != nil {
-		return nil, e.reject(ctx, ident, connID, ip, sqlText, err)
+	if admitErr != nil {
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, admitErr)
 	}
 
 	var target dao.DataConn
