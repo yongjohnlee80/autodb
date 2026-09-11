@@ -293,6 +293,26 @@ func TestConnManagementOverWire(t *testing.T) {
 	}
 }
 
+func TestConnectionLifecycleRefusalsAreMappedOverWire(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	c := f.session(t)
+
+	errVal, _ := c.call("conn.create", f.rootTok, "target", "sqlite",
+		fmt.Sprintf("file:rpc_duplicate_%d?mode=memory&cache=shared", fixtureSeq.Add(1)))
+	if msg := mustErr(t, errVal, golibrpc.CodeInvalidParams); msg != exec.ErrConnectionNameTaken.Error() {
+		t.Fatalf("duplicate-name message = %q, want opaque sentinel %q", msg, exec.ErrConnectionNameTaken)
+	}
+
+	if errVal, _ = c.call("exec.run", f.rootTok, f.connID, "SELECT 1"); errVal != nil {
+		t.Fatalf("seeding connection history: %#v", errVal)
+	}
+	errVal, _ = c.call("conn.delete", f.rootTok, f.connID)
+	if msg := mustErr(t, errVal, golibrpc.CodeInvalidParams); msg != exec.ErrConnectionHasHistory.Error() {
+		t.Fatalf("history-blocked deletion message = %q, want opaque sentinel %q", msg, exec.ErrConnectionHasHistory)
+	}
+}
+
 func TestProbe(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)

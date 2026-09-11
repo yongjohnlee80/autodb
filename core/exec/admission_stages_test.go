@@ -15,7 +15,7 @@ import (
 
 // The adapters' identity cells (A3): for every error identity the legacy
 // guard produced, the adapter refuses the same input with the same
-// identity — the Reason's Code and Detail — and the mutation is the stage's
+// identity — the Reason's Code, Detail, and explicit Legacy value — and the mutation is the stage's
 // deletion from the chain (that identity stops being produced).
 //
 // The mapping table is the reviewed artifact: each row names the sentinel
@@ -33,17 +33,39 @@ func factsFor(t *testing.T, sql string, textLen int) *LegacyFacts {
 	return NewLegacyFacts(stmt, textLen, "", false, false)
 }
 
-func TestReasonErr_PreservesReasonAndLegacyIdentity(t *testing.T) {
+func TestAdmissionError_PreservesReasonAndLegacyIdentity(t *testing.T) {
 	t.Parallel()
 	want := admission.Reason{Code: admission.CodeNoWhere, Class: admission.ClassPermission,
-		Subject: "DELETE", Detail: ErrNoWhere.Error(), Continue: true}
-	err := reasonErr(want)
+		Subject: "DELETE", Detail: ErrNoWhere.Error(), Legacy: ErrNoWhere, Continue: true}
+	err := AdmissionError(want)
 	if !errors.Is(err, ErrNoWhere) {
 		t.Fatalf("legacy identity lost: %v", err)
 	}
 	got, ok := AdmissionReason(err)
 	if !ok || got != want {
 		t.Fatalf("AdmissionReason = %+v, %v; want %+v, true", got, ok, want)
+	}
+}
+
+func TestAdmissionError_PreservesEveryExistingSentinel(t *testing.T) {
+	t.Parallel()
+	for _, sentinel := range legacyAdmissionSentinels {
+		err := AdmissionError(admission.Reason{
+			Code: "compatibility-test", Detail: sentinel.Error() + ": stage context", Legacy: sentinel,
+		})
+		if !errors.Is(err, sentinel) {
+			t.Errorf("AdmissionError(%q) lost errors.Is identity %v: %v", sentinel, sentinel, err)
+		}
+	}
+}
+
+func TestAdmissionError_DetailCannotInventLegacyIdentity(t *testing.T) {
+	t.Parallel()
+	err := AdmissionError(admission.Reason{
+		Code: "novel-rule", Detail: ErrNoWhere.Error() + ": unrelated analyzer prose",
+	})
+	if errors.Is(err, ErrNoWhere) {
+		t.Fatalf("novel detail acquired ErrNoWhere identity from display prose: %v", err)
 	}
 }
 
@@ -61,7 +83,7 @@ func TestReportedGrammarStage_PreservesNamedDriftRefusal(t *testing.T) {
 	if !ok || reason.Code != admission.CodeGrammarDrifted || reason.Class != admission.ClassUnsupported {
 		t.Fatalf("reported grammar drift = %+v, %v", reason, ok)
 	}
-	if got := reasonErr(reason); !errors.Is(got, ErrGrammarDrifted) {
+	if got := AdmissionError(reason); !errors.Is(got, ErrGrammarDrifted) {
 		t.Fatalf("reported grammar refusal lost ErrGrammarDrifted: %v", got)
 	}
 }
@@ -407,8 +429,14 @@ func TestReaderAnalysisAdapter_SameIdentityAsTheLegacyStage(t *testing.T) {
 		t.Fatal("the stage's operational failure was swallowed — 'could not decide' must " +
 			"reach the caller differently from 'refused'")
 	}
-	if !strings.Contains(rerr.Error(), "routine catalog could not be read") {
-		t.Fatalf("the operational error does not carry the legacy text: %v", rerr)
+	if errors.Is(rerr, ErrReaderAdvancedPattern) {
+		t.Fatalf("catalog failure was published as reader policy: %v", rerr)
+	}
+	if !errors.Is(rerr, errFakeCatalog) {
+		t.Fatalf("catalog failure lost its server-side cause: %v", rerr)
+	}
+	if !strings.Contains(rerr.Error(), "reading target routine catalog") {
+		t.Fatalf("the operational error does not identify the failed operation: %v", rerr)
 	}
 	rep2, _ := admission.Compose(broken).Run(NewLegacyFacts(stmt, 20, "", false, false), readerCtx)
 	_ = rep2
@@ -429,6 +457,39 @@ var errFakeCatalog = errFake{}
 type errFake struct{}
 
 func (errFake) Error() string { return "fake: catalog unreachable" }
+
+func TestEvaluateChain_NovelDefaultCodeNeedsNoCoreMapping(t *testing.T) {
+	t.Parallel()
+	e := newChainTestEngine(t)
+	want := admission.Reason{
+		Code: "future-default-rule", Class: admission.ClassProgramLimit,
+		Span: 23, Subject: "future subject", Detail: "future stage refused this shape",
+		Hint: "change the shape", Continue: true,
+	}
+	refusal, opErr := e.evaluateChain([]admission.Stage{novelDefaultStage{reason: want}},
+		factsFor(t, "SELECT 1", 8), admission.Context{})
+	if opErr != nil || refusal == nil {
+		t.Fatalf("evaluateChain = refusal %v, operational %v", refusal, opErr)
+	}
+	got, ok := AdmissionReason(refusal)
+	if !ok || got != want {
+		t.Fatalf("AdmissionReason = %+v, %v; want %+v, true", got, ok, want)
+	}
+	for _, sentinel := range legacyAdmissionSentinels {
+		if errors.Is(refusal, sentinel) {
+			t.Fatalf("novel refusal acquired unrelated legacy identity %v", sentinel)
+		}
+	}
+}
+
+type novelDefaultStage struct{ reason admission.Reason }
+
+func (s novelDefaultStage) Name() string                  { return "novel-default" }
+func (s novelDefaultStage) ContextNeeds() admission.Needs { return admission.Needs{} }
+func (s novelDefaultStage) DenyCodes() []admission.Code   { return []admission.Code{s.reason.Code} }
+func (s novelDefaultStage) Apply(admission.Facts, admission.Context) (admission.Contribution, error) {
+	return admission.Deny(s.reason), nil
+}
 
 func TestAuthorizeUnitAdapter_SameIdentityAsTheLegacyFloor(t *testing.T) {
 	readerCtx := admission.Context{ReadOnly: true, MayWrite: false}
@@ -741,14 +802,9 @@ func TestForeignFacts_FailClosed(t *testing.T) {
 // the sequence with their own boundary placement.
 func TestPooledDrive_ChainOrderIsDeclared(t *testing.T) {
 	e := newChainTestEngine(t)
-	in := admissionInputs{phys: admission.PhysPooled}
-
-	intake := []admission.Stage{sizeCapStage{}}
-	pre := []admission.Stage{profileAdmitStage{profile: e.profileFor(nil)}}
-	post := []admission.Stage{
-		readerAnalysisStage{userRoutines: nil},
-		guardWhereStage{},
-	}
+	intake := sizeAdmissionStages()
+	pre := profileAdmissionStages(e.profileFor(nil))
+	post := postPolicyAdmissionStages(nil)
 	gotIntake := admission.Compose(intake...).Order()
 	gotPre := admission.Compose(pre...).Order()
 	gotPost := admission.Compose(post...).Order()
@@ -761,7 +817,6 @@ func TestPooledDrive_ChainOrderIsDeclared(t *testing.T) {
 	if fmt.Sprint(gotPost) != fmt.Sprint([]string{"readeranalysis", "guardwhere"}) {
 		t.Fatalf("post-policy half = %v, want [readeranalysis guardwhere]", gotPost)
 	}
-	_ = in
 }
 
 // THE ORDERING DELTA'S EVIDENCE CELL. The design's ruling: profile
@@ -922,8 +977,8 @@ func TestPooledDrive_PinnedTxAdmitsControlVerbs(t *testing.T) {
 		t.Fatal("an UNPINNED pooled call admitted the control verb — off a transaction " +
 			"it would run as text on a pooled connection and leave its state there")
 	}
-	if !errors.Is(reasonErr(deny), ErrStatementUnsupported) {
-		t.Fatalf("the unpinned refusal lost its identity: %v", reasonErr(deny))
+	if !errors.Is(AdmissionError(deny), ErrStatementUnsupported) {
+		t.Fatalf("the unpinned refusal lost its identity: %v", AdmissionError(deny))
 	}
 
 	// And the transport-corruption guard: the pinned fact must NOT make

@@ -194,6 +194,8 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 	// constructing the state deliberately, which is what the ADR's cell 3
 	// calls for.
 	f2, _, secret2, dbName2 := wireFixture(t)
+	wireAdmitCalls := 0
+	f2.eng.hookBeforeWireAdmit = func() { wireAdmitCalls++ }
 	if uerr := f2.store.Connections.OnCtx(ctx).With(meta.ConnID, f2.connID).
 		Set(meta.ConnFrontDoorExposed, int64(0)).Update(); uerr != nil {
 		t.Fatalf("closing front-door exposure: %v", uerr)
@@ -245,6 +247,15 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 				t.Errorf("a refused connection left %d lease(s) behind", n)
 			}
 		})
+	}
+	if wireAdmitCalls != 0 {
+		t.Fatalf("the exposure refusal reached the reservation boundary %d time(s); the gate must deny first", wireAdmitCalls)
+	}
+	if n := f2.eng.sessions.leaseCount(f2.connID); n != 0 {
+		t.Fatalf("the exposure refusal left %d target lease(s) behind", n)
+	}
+	if n := f2.eng.sessions.residentHeld(); n != 0 {
+		t.Fatalf("the exposure refusal left %d resident bytes reserved", n)
 	}
 	f2.eng.mu.Lock()
 	_, targetOpened := f2.eng.conns[f2.connID]

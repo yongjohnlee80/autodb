@@ -14,10 +14,31 @@ type ingressFunc struct {
 	key, name, recv, file string
 	decl                  *ast.FuncDecl
 	calls                 map[string]bool
+	targets               map[string]bool
 	classifies, executes  bool
+	dispatches            bool
 	classifyAt, executeAt token.Pos
+	dispatchAt            []token.Pos
 	sizeAt, policyAt      token.Pos
-	classAt               token.Pos
+	classAt, grammarAt    token.Pos
+}
+
+var ingressNonStatementDispatchExempt = map[string]string{
+	"Engine.ListColumns":            "engine-authored catalog introspection, not client SQL",
+	"Engine.ListRoutines":           "engine-authored catalog introspection, not client SQL",
+	"Engine.ListSchemas":            "engine-authored catalog introspection, not client SQL",
+	"Engine.ListTables":             "engine-authored catalog introspection, not client SQL",
+	"Engine.ReconcileConnection":    "internal transaction-outcome recovery",
+	"Engine.ReconcileOutcomes":      "internal transaction-outcome recovery",
+	"Engine.StartOutcomeReconciler": "internal transaction-outcome recovery loop",
+	"Engine.TestConnection":         "engine-authored target health probe",
+	"Engine.WireBind":               "protocol object operation; executes no statement",
+	"Engine.WireClosePortal":        "protocol object operation; executes no statement",
+	"Engine.WireCloseStatement":     "protocol object operation; executes no statement",
+	"Engine.WireDescribePortal":     "protocol object operation; executes no statement",
+	"Engine.WireDescribeStatement":  "protocol object operation; executes no statement",
+	"Engine.WireFlushSegment":       "protocol flush; executes no statement",
+	"Engine.WireSyncSegment":        "protocol synchronization; executes no statement",
 }
 
 func loadIngressFuncs(t *testing.T) (map[string]*ingressFunc, map[string][]string) {
@@ -47,7 +68,10 @@ func loadIngressFuncs(t *testing.T) (map[string]*ingressFunc, map[string][]strin
 			if recv != "" {
 				key = recv + "." + key
 			}
-			n := &ingressFunc{key: key, name: fn.Name.Name, recv: recv, file: path, decl: fn, calls: map[string]bool{}}
+			n := &ingressFunc{
+				key: key, name: fn.Name.Name, recv: recv, file: path, decl: fn,
+				calls: map[string]bool{}, targets: map[string]bool{},
+			}
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
 				call, ok := node.(*ast.CallExpr)
 				if !ok {
@@ -56,6 +80,7 @@ func loadIngressFuncs(t *testing.T) (map[string]*ingressFunc, map[string][]strin
 				name := ingressCallName(call)
 				if name != "" {
 					n.calls[name] = true
+					n.targets[ingressCallTarget(call, fn)] = true
 				}
 				if name == "Classify" {
 					n.classifies = true
@@ -70,10 +95,20 @@ func loadIngressFuncs(t *testing.T) (map[string]*ingressFunc, map[string][]strin
 				if name == "runClassAdmission" {
 					n.classAt = call.Pos()
 				}
+				if name == "runWireGrammarAdmission" {
+					n.grammarAt = call.Pos()
+				}
+				if name == "queryOn" || name == "execOn" || name == "runQuery" || name == "runExec" || name == "sessionSimpleQuery" ||
+					name == "QueryContext" || name == "ExecContext" || name == "SimpleQuery" {
+					n.dispatches = true
+					n.dispatchAt = append(n.dispatchAt, call.Pos())
+				}
 				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "ExecuteOp" {
 					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "golibpg" {
 						n.executes = true
+						n.dispatches = true
 						n.executeAt = call.Pos()
+						n.dispatchAt = append(n.dispatchAt, call.Pos())
 					}
 				}
 				return true
@@ -86,6 +121,30 @@ func loadIngressFuncs(t *testing.T) (map[string]*ingressFunc, map[string][]strin
 		}
 	}
 	return funcs, byName
+}
+
+func reachesTargetDispatch(start string, funcs map[string]*ingressFunc, byName map[string][]string) bool {
+	seen := map[string]bool{}
+	queue := []string{start}
+	for len(queue) > 0 {
+		key := queue[0]
+		queue = queue[1:]
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		fn := funcs[key]
+		if fn == nil {
+			continue
+		}
+		if fn.dispatches {
+			return true
+		}
+		for target := range fn.targets {
+			queue = appendIngressTarget(queue, target, funcs, byName)
+		}
+	}
+	return false
 }
 
 func receiverName(fn *ast.FuncDecl) string {
@@ -111,6 +170,27 @@ func ingressCallName(call *ast.CallExpr) string {
 	default:
 		return ""
 	}
+}
+
+func ingressCallTarget(call *ast.CallExpr, fn *ast.FuncDecl) string {
+	name := ingressCallName(call)
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return name
+	}
+	receiver, ok := sel.X.(*ast.Ident)
+	if !ok || fn.Recv == nil || len(fn.Recv.List) != 1 || len(fn.Recv.List[0].Names) != 1 ||
+		receiver.Name != fn.Recv.List[0].Names[0].Name {
+		return name
+	}
+	return receiverName(fn) + "." + name
+}
+
+func appendIngressTarget(queue []string, target string, funcs map[string]*ingressFunc, byName map[string][]string) []string {
+	if _, ok := funcs[target]; ok {
+		return append(queue, target)
+	}
+	return append(queue, byName[target]...)
 }
 
 func ingressRunAnchor(fn *ast.FuncDecl) bool {
@@ -152,8 +232,12 @@ func reachesIngress(start, anchor string, funcs map[string]*ingressFunc, byName 
 			continue
 		}
 		seen[key] = true
-		for name := range funcs[key].calls {
-			queue = append(queue, byName[name]...)
+		fn := funcs[key]
+		if fn == nil {
+			continue
+		}
+		for target := range fn.targets {
+			queue = appendIngressTarget(queue, target, funcs, byName)
 		}
 	}
 	return false
@@ -161,7 +245,10 @@ func reachesIngress(start, anchor string, funcs map[string]*ingressFunc, byName 
 
 // A16 is discovered from executable shape, not maintained as a drive list:
 // Engine methods that classify SQL, plus the method that sends ExecuteOp for a
-// stored immutable classification, must all reach the sole orchestrator anchor.
+// stored immutable classification, must all have the sole orchestrator in their
+// production call graph. Direct dispatches in those methods are additionally
+// ordered after their local admission calls below; behavioral coverage of the
+// four supported ingress surfaces lives in the gate matrix.
 func TestAdmissionIngressClosure_AllDiscoveredDrivesReachOrchestrator(t *testing.T) {
 	funcs, byName := loadIngressFuncs(t)
 	var anchors []string
@@ -176,7 +263,17 @@ func TestAdmissionIngressClosure_AllDiscoveredDrivesReachOrchestrator(t *testing
 
 	var drives []string
 	for key, fn := range funcs {
-		if fn.recv == "Engine" && (fn.classifies || fn.executes) {
+		exportedSQLDrive := fn.recv == "Engine" && ast.IsExported(fn.name) && reachesTargetDispatch(key, funcs, byName)
+		if reason, exempt := ingressNonStatementDispatchExempt[key]; exempt {
+			if reason == "" {
+				t.Errorf("ingress exemption %s has no reason", key)
+			}
+			if !exportedSQLDrive {
+				t.Errorf("ingress exemption %s no longer names an exported dispatch-reaching Engine method", key)
+			}
+			continue
+		}
+		if fn.recv == "Engine" && (fn.classifies || fn.executes || exportedSQLDrive) {
 			drives = append(drives, key)
 		}
 	}
@@ -202,6 +299,26 @@ func TestAdmissionIngressClosure_AllDiscoveredDrivesReachOrchestrator(t *testing
 		if fn.executes && (fn.classAt == token.NoPos || fn.classAt > fn.executeAt) {
 			t.Errorf("execute drive %s (%s) does not run fresh class admission before ExecuteOp", drive, fn.file)
 		}
+		for _, dispatchAt := range fn.dispatchAt {
+			switch {
+			case fn.executes && (fn.classAt == token.NoPos || fn.classAt > dispatchAt):
+				t.Errorf("execute drive %s (%s) can dispatch before fresh class admission", drive, fn.file)
+			case fn.classifies && (fn.policyAt == token.NoPos || fn.policyAt > dispatchAt):
+				t.Errorf("classifying drive %s (%s) can dispatch before statement-policy admission", drive, fn.file)
+			}
+		}
+	}
+	for _, key := range []string{"Engine.wireAdmit", "Engine.WireParse", "Engine.WireExecutePortal"} {
+		fn := funcs[key]
+		if fn == nil || fn.grammarAt == token.NoPos {
+			t.Errorf("%s does not run reported-grammar admission", key)
+		}
+	}
+	if fn := funcs["Engine.WireParse"]; fn != nil && fn.grammarAt > fn.sizeAt {
+		t.Error("Engine.WireParse moved reportedgrammar after sizecap")
+	}
+	if fn := funcs["Engine.WireExecutePortal"]; fn != nil && (fn.classAt == token.NoPos || fn.grammarAt > fn.classAt) {
+		t.Error("Engine.WireExecutePortal must run reportedgrammar before execute-scoped authorizeunit")
 	}
 }
 
@@ -240,7 +357,7 @@ func TestAdmissionIngressClosure_NoLegacyPolicyGuardCallsOutsideAdapters(t *test
 			if lit, ok := node.(*ast.CompositeLit); ok {
 				if typ, ok := lit.Type.(*ast.Ident); ok && typ.Name == "sizeCapStage" {
 					sizeStageInstances++
-					if fn.key != "Engine.runSizeAdmission" {
+					if fn.key != "sizeAdmissionStages" {
 						t.Errorf("sizeCapStage composed outside the pre-classification intake helper in %s (%s)", fn.key, fn.file)
 					}
 				}
@@ -263,9 +380,36 @@ func TestAdmissionIngressClosure_NoLegacyPolicyGuardCallsOutsideAdapters(t *test
 	if sizeStageInstances != 1 {
 		t.Errorf("production sizeCapStage instances = %d, want exactly one pre-classification adapter anchor", sizeStageInstances)
 	}
+	if run := funcs["Engine.runSizeAdmission"]; run == nil || !run.calls["sizeAdmissionStages"] {
+		t.Error("Engine.runSizeAdmission does not consume the canonical sizeAdmissionStages factory")
+	}
 	for guard, want := range wantCalls {
 		if got := gotCalls[guard]; got != want {
 			t.Errorf("production calls to %s = %d, want %d; adapter anchor moved or a bypass survived", guard, got, want)
+		}
+	}
+}
+
+func TestAdmissionChainRendering_ProductionAndRendererShareFactories(t *testing.T) {
+	funcs, _ := loadIngressFuncs(t)
+	wants := map[string]string{
+		"Engine.runSizeAdmission":         "sizeAdmissionStages",
+		"Engine.runWireGrammarAdmission":  "wireGrammarAdmissionStages",
+		"Engine.runPrePolicyAdmission":    "profileAdmissionStages",
+		"Engine.runPostPolicyAdmission":   "postPolicyAdmissionStages",
+		"Engine.runProfileAdmission":      "profileAdmissionStages",
+		"Engine.runClassAdmission":        "classAdmissionStages",
+		"Engine.runSessionStateAdmission": "sessionStateAdmissionStages",
+		"Engine.sessionStages":            "sessionAdmissionStages",
+	}
+	for production, factory := range wants {
+		fn := funcs[production]
+		if fn == nil || !fn.calls[factory] {
+			t.Errorf("%s does not consume canonical factory %s", production, factory)
+		}
+		renderer := funcs["renderAdmissionChains"]
+		if renderer == nil || !renderer.calls[factory] {
+			t.Errorf("renderAdmissionChains does not consume production factory %s", factory)
 		}
 	}
 }

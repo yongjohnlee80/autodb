@@ -175,7 +175,7 @@ func (e *Engine) WireQuery(ctx context.Context, id SessionID, userID int64, sqlT
 		return 0, auth.ErrDenied // never disclose which connections exist
 	}
 	if !connRow.Engine.SpeaksPostgresWire() {
-		return e.wireQueryDecoded(ctx, s, pol, connRow, sqlText, ip, emit)
+		return e.wireQueryDecoded(ctx, s, pol, connRow, sqlText, ip, emit, closeAfterRelease)
 	}
 	return e.wireQueryRaw(ctx, s, pol, connRow, sqlText, ip, emit, closeAfterRelease)
 }
@@ -382,11 +382,14 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 				return 0, aerr
 			}
 			outcomes[i] = outcome{attempt: aid, txID: txBefore, ran: true, status: StatusOK}
-			res, cerr := e.wireControl(ctx, s, connRow, stmts[i], pol, parts[i], ip)
+			res, cerr := e.wireControl(ctx, s, connRow, stmts[i], pol, parts[i], ip, closeAfterRelease)
 			if cerr != nil {
 				// The owner refused (or the target did): the buffer stops here.
 				outcomes[i].status, outcomes[i].errText = StatusError, truncate(cerr.Error(), maxErrorBytes)
 				if rerr := record(); rerr != nil {
+					if errors.Is(cerr, ErrWireFaceLost) {
+						return 0, errors.Join(cerr, rerr)
+					}
 					return 0, rerr
 				}
 				return e.wireTargetError(s, cerr, emit)
@@ -424,9 +427,29 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		// the status reported below stays the client's own track.
 		var releaseWrap func()
 		if pol.ReadOnly && !inTx {
-			rotx, rerr := pc.BeginSessionTx(runCtx, dao.TxOptions{Access: dao.TxReadOnly})
+			rotx, rerr := e.beginProxiedTx(runCtx, pc, dao.TxOptions{Access: dao.TxReadOnly})
 			if rerr != nil {
-				return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, rerr)
+				sequenceRefusal := errors.Is(rerr, golibpg.ErrSegmentInFlight)
+				wireUnusable := pinnedBeginWireUnusable(rerr)
+				failure := error(&admission.OperationalError{Stage: "readonlyenforcement", Cause: rerr})
+				if sequenceRefusal {
+					failure = ErrWireSequenceRefused
+				} else if wireUnusable {
+					*closeAfterRelease = s.transferClose(ip, reasonRawFaceLost)
+					failure = wireFaceLost(&admission.OperationalError{Stage: "readonlyenforcement", Cause: rerr})
+				}
+				errText := truncate(rerr.Error(), maxErrorBytes)
+				for i := el.first; i <= el.last; i++ {
+					outcomes[i].status, outcomes[i].errText = StatusError, errText
+				}
+				if recErr := record(); recErr != nil {
+					return 0, errors.Join(failure, recErr)
+				}
+				if wireUnusable {
+					e.auditBounded(ctx, s.userID, ip, "wire_raw_face_lost",
+						fmt.Sprintf("conn %d: session %s: read-only BEGIN: %v", s.connID, s.id, rerr))
+				}
+				return 0, failure
 			}
 			releaseWrap = func() {
 				cctx, ccancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
@@ -443,7 +466,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		emitFailedAt := -1 // first statement index whose frames the client did NOT receive
 		cutStmt := -1      // the statement the frame that failed to emit belonged to
 		var targetErr *pgconn.PgError
-		status, derr := sq.SimpleQuery(runCtx, segment, func(m golibpg.ExtendedMessage) error {
+		status, derr := e.sessionSimpleQuery(runCtx, sq, sessionSQLClient, segment, func(m golibpg.ExtendedMessage) error {
 			owner := group // before CommandComplete advances it
 			switch m.Kind {
 			case "CommandComplete":
@@ -738,9 +761,9 @@ func tagRowCount(tag string) int64 {
 // wireQueryDecoded is the producer for NON-postgres targets: the decoded
 // Result re-encoded as text-format wire messages. Results past the engine's
 // page are REFUSED, not truncated.
-func (e *Engine) wireQueryDecoded(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, sqlText, ip string, emit func(WireMessage) error) (byte, error) {
+func (e *Engine) wireQueryDecoded(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, sqlText, ip string, emit func(WireMessage) error, closeAfterRelease *bool) (byte, error) {
 	_ = connRow
-	res, err := e.executeSessionUnit(ctx, s, pol, sqlText, ip, true)
+	res, err := e.executeSessionUnit(ctx, s, pol, sqlText, ip, true, closeAfterRelease)
 	if err != nil {
 		return e.wireTargetError(s, err, emit)
 	}

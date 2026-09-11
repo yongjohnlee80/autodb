@@ -1,6 +1,9 @@
 package exec
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -11,6 +14,12 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/yongjohnlee80/autodb/core/admission"
+	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/engine"
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // The admission gate matrix walk — every refusal sentinel this package
@@ -60,6 +69,9 @@ var (
 	sentinelName = regexp.MustCompile("`(Err[A-Za-z]+)`")
 	// coordRe matches a "name.go:123" coordinate.
 	coordRe = regexp.MustCompile(`([a-z_]+\.go):(\d+)`)
+	// shorthandCoordRe rejects ":123" references because the structural walk
+	// cannot identify which source file they claim to locate.
+	shorthandCoordRe = regexp.MustCompile(`(^|[ ,;])(:[0-9]+)|/[0-9]+`)
 	// justRe matches one justification declaration: category plus the
 	// referenced numbered entry as a section-qualified anchor, read as
 	// category, matrix section, entry within it — a divergence token names
@@ -191,8 +203,11 @@ func TestGateMatrix_EveryRowCoordinateResolves(t *testing.T) {
 				badRaise = append(badRaise, c.file+":"+itoa(c.line)+" (no such file in the package)")
 				continue
 			}
-			if c.file == d.file && absInt(c.line-d.line) <= coordinateWindow {
+			if c.decl && c.file == d.file && absInt(c.line-d.line) <= coordinateWindow {
 				declOK = true
+				continue
+			}
+			if c.decl {
 				continue
 			}
 			// A raise site: verified STRUCTURALLY, and EVERY one must
@@ -431,6 +446,429 @@ func TestGateMatrix_CorpusReplayCannotSeeLaterAdmissionStages(t *testing.T) {
 	}
 }
 
+type gateBehaviorCase struct {
+	id, mode, sql, profile, policy string
+	txOpen                         bool
+	want                           map[string]gateBehaviorExpectation
+}
+
+type gateBehaviorExpectation struct {
+	kind, identity, reason string
+}
+
+var gateBehaviorSurfaces = []string{"pooled", "session", "wire simple", "wire extended"}
+
+// TestGateMatrix_BehavioralCasesAreStableAndExhaustive is the schema and
+// completeness control for the executable matrix. It discovers the refusal
+// set from the production stage registry; adding a registered denial without a
+// committed case therefore fails before the behavior runner can silently miss
+// it.
+func TestGateMatrix_BehavioralCasesAreStableAndExhaustive(t *testing.T) {
+	cases := gateMatrixBehaviorCases(t)
+	stableID := regexp.MustCompile(`^A27-[A-Z]+-[0-9]{3}$`)
+	seenIDs := map[string]bool{}
+	covered := map[admission.Code]bool{}
+	unreachable := 0
+
+	for _, tc := range cases {
+		if !stableID.MatchString(tc.id) {
+			t.Errorf("behavior case ID %q is not a stable A27-<AREA>-<NNN> handle", tc.id)
+		}
+		if seenIDs[tc.id] {
+			t.Errorf("behavior case ID %q is duplicated", tc.id)
+		}
+		seenIDs[tc.id] = true
+		for _, surface := range gateBehaviorSurfaces {
+			want, ok := tc.want[surface]
+			if !ok {
+				t.Errorf("%s has no explicit %s expectation", tc.id, surface)
+				continue
+			}
+			switch want.kind {
+			case "pass":
+			case "refuse":
+				_, ok := gateBehaviorSentinel(want.identity)
+				if !ok {
+					t.Errorf("%s/%s names unknown refusal identity %q", tc.id, surface, want.identity)
+				}
+			case "unreachable":
+				unreachable++
+				if strings.TrimSpace(want.reason) == "" {
+					t.Errorf("%s/%s marks unreachable without a physical reason", tc.id, surface)
+				}
+			default:
+				t.Errorf("%s/%s has unknown expectation kind %q", tc.id, surface, want.kind)
+			}
+		}
+	}
+	for _, tc := range cases {
+		for _, surface := range gateBehaviorSurfaces {
+			if tc.want[surface].kind == "unreachable" {
+				continue
+			}
+			got := runGateBehaviorCell(t, tc, surface)
+			if reason, ok := AdmissionReason(got); ok {
+				covered[reason.Code] = true
+			}
+		}
+	}
+	if unreachable == 0 {
+		t.Fatal("behavior matrix marks no physically unreachable cells; absence is being hidden as pass")
+	}
+	for _, code := range RegisteredAdmissionCodes() {
+		if !covered[code] {
+			t.Errorf("registered admission refusal %q has no behavioral surface cell that produces it", code)
+		}
+	}
+}
+
+// TestGateMatrix_BehavioralSurfaceCells is generated from the committed table
+// in §10. It drives the production no-I/O admission compositions for each
+// physical context. The separate production-ingress cell below proves those
+// compositions remain connected to all four executable surfaces.
+func TestGateMatrix_BehavioralSurfaceCells(t *testing.T) {
+	for _, tc := range gateMatrixBehaviorCases(t) {
+		tc := tc
+		for _, surface := range gateBehaviorSurfaces {
+			surface := surface
+			want := tc.want[surface]
+			t.Run(tc.id+"/"+strings.ReplaceAll(surface, " ", "-"), func(t *testing.T) {
+				if want.kind == "unreachable" {
+					t.Skip("physically unreachable: " + want.reason)
+				}
+				got := runGateBehaviorCell(t, tc, surface)
+				if mismatch := gateBehaviorMismatch(want, got); mismatch != "" {
+					t.Fatal(mismatch)
+				}
+			})
+		}
+	}
+}
+
+// TestGateMatrix_MutationControl_OneSurfaceBypassIsDetected names the mutation
+// this addition exists to catch. Coordinates and row membership are unchanged
+// when one surface returns nil before a gate; the behavioral matcher must red.
+func TestGateMatrix_MutationControl_OneSurfaceBypassIsDetected(t *testing.T) {
+	for _, tc := range gateMatrixBehaviorCases(t) {
+		if tc.id != "A27-GUARD-001" {
+			continue
+		}
+		if got := gateBehaviorMismatch(tc.want["wire simple"], nil); got == "" {
+			t.Fatal("a simulated wire-simple bypass satisfied the committed refusal cell")
+		}
+		return
+	}
+	t.Fatal("A27-GUARD-001 mutation control is missing from the committed matrix")
+}
+
+func TestGateMatrix_GuardCellUsesEveryProductionIngress(t *testing.T) {
+	const table = "a27_guard"
+	setup := func(t *testing.T, f *fixture) {
+		t.Helper()
+		ctx := context.Background()
+		if _, err := f.eng.Execute(ctx, f.rootTok, f.connID, "CREATE TABLE "+table+" (n INTEGER NOT NULL)", testIP); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.eng.Execute(ctx, f.rootTok, f.connID, "INSERT INTO "+table+" (n) VALUES (1)", testIP); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_, _ = f.eng.Execute(context.Background(), f.rootTok, f.connID, "DROP TABLE IF EXISTS "+table, testIP)
+		})
+	}
+	assertUnchanged := func(t *testing.T, f *fixture) {
+		t.Helper()
+		result, err := f.eng.Execute(context.Background(), f.rootTok, f.connID, "SELECT n FROM "+table, testIP)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Rows) != 1 || fmt.Sprint(result.Rows[0][0]) != "1" {
+			t.Fatalf("refused mutation changed the target: rows = %v", result.Rows)
+		}
+	}
+
+	t.Run("pooled", func(t *testing.T) {
+		f := newFixture(t)
+		setup(t, f)
+		_, err := f.eng.Execute(context.Background(), f.rootTok, f.connID, "UPDATE "+table+" SET n = 2", testIP)
+		if !errors.Is(err, ErrNoWhere) {
+			t.Fatalf("pooled production ingress returned %v, want ErrNoWhere", err)
+		}
+		assertUnchanged(t, f)
+	})
+
+	t.Run("rpc-session", func(t *testing.T) {
+		f := newFixture(t)
+		setup(t, f)
+		if err := f.store.Connections.OnCtx(context.Background()).With(meta.ConnID, f.connID).
+			Set(meta.ConnProfile, meta.ProfileSession).Update(); err != nil {
+			t.Fatal(err)
+		}
+		sid, err := f.eng.OpenSession(context.Background(), f.rootTok, f.connID, testIP)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.eng.SessionExecute(context.Background(), f.rootTok, sid, "UPDATE "+table+" SET n = 2", testIP)
+		if !errors.Is(err, ErrNoWhere) {
+			t.Fatalf("RPC-session production ingress returned %v, want ErrNoWhere", err)
+		}
+		assertUnchanged(t, f)
+	})
+
+	t.Run("wire-simple", func(t *testing.T) {
+		f, _, secret, dbName := wireFixture(t)
+		setup(t, f)
+		opened, err := f.eng.OpenWireSession(context.Background(), secret, "root", dbName, testIP)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = f.eng.WireQuery(context.Background(), opened.SessionID, opened.UserID,
+			"UPDATE "+table+" SET n = 2", testIP, func(WireMessage) error { return nil })
+		if !errors.Is(err, ErrNoWhere) {
+			t.Fatalf("wire-simple production ingress returned %v, want ErrNoWhere", err)
+		}
+		assertUnchanged(t, f)
+	})
+
+	t.Run("wire-extended", func(t *testing.T) {
+		f, connID, sid, _, userID := pgWireSession(t)
+		setup(t, f)
+		err := f.eng.WireParse(context.Background(), sid, userID, "a27",
+			"UPDATE "+table+" SET n = 2", nil, testIP)
+		if !errors.Is(err, ErrNoWhere) {
+			t.Fatalf("wire-extended production ingress returned %v, want ErrNoWhere", err)
+		}
+		if connID != f.connID {
+			t.Fatalf("live fixture connection = %d, want %d", connID, f.connID)
+		}
+		assertUnchanged(t, f)
+	})
+}
+
+func runGateBehaviorCell(t *testing.T, tc gateBehaviorCase, surface string) error {
+	t.Helper()
+	profile := Profile(tc.profile)
+	pol := UnitPolicy{ReadOnly: tc.policy == "reader", MayWrite: tc.policy == "editor"}
+	phys := admission.PhysPooled
+	if surface == "session" {
+		phys = admission.PhysSession
+	} else if strings.HasPrefix(surface, "wire ") {
+		phys = admission.PhysWire
+	}
+	e := &Engine{profile: profile, maxStatementBytes: DefaultMaxStatementBytes}
+	connRow := &meta.Connection{ID: 27, Profile: string(profile), Engine: engine.Postgres}
+	e.udfCache = map[int64]*udfSet{27: {
+		bare: map[string]bool{"write_a_row": true}, qualified: map[string]bool{"app.write_a_row": true}, loaded: time.Now(),
+	}}
+	ctx := context.Background()
+
+	switch tc.mode {
+	case "intake":
+		e.maxStatementBytes = 8
+		refusal, opErr := e.runSizeAdmission(phys, tc.sql)
+		return gateBehaviorResult(refusal, opErr)
+	case "empty":
+		switch surface {
+		case "pooled", "session":
+			_, err := Classify(tc.sql, false)
+			return err
+		case "wire simple":
+			parts, _, err := splitStatementSpans(tc.sql, false)
+			if errors.Is(err, ErrEmptyStatement) || len(parts) == 0 {
+				return nil
+			}
+			return err
+		case "wire extended":
+			_, err := Classify(tc.sql, false)
+			if errors.Is(err, ErrEmptyStatement) {
+				return nil
+			}
+			return err
+		}
+	case "reported-grammar":
+		if surface == "pooled" {
+			return (postgresDialect{}).VerifyReportedGrammar(func(string) string { return "off" })
+		}
+		stage := reportedGrammarStage{verify: func() error {
+			return fmt.Errorf("%w: standard_conforming_strings=off", ErrGrammarDrifted)
+		}}
+		refusal, opErr := e.evaluateChain([]admission.Stage{stage},
+			NewLegacyFactsForText(Statement{}, tc.sql, len(tc.sql)), admission.Context{Phys: phys})
+		return gateBehaviorResult(refusal, opErr)
+	case "enforcement":
+		refusal, opErr := e.runReadOnlyEnforcementAdmission(phys, false)
+		return gateBehaviorResult(refusal, opErr)
+	}
+
+	stmt, err := Classify(tc.sql, false)
+	if err != nil {
+		return err
+	}
+	if tc.mode == "profile" {
+		if surface == "pooled" {
+			refusal, opErr := e.runPrePolicyAdmission(ctx,
+				admissionInputs{connRow: connRow, phys: phys}, stmt, tc.sql)
+			return gateBehaviorResult(refusal, opErr)
+		}
+		refusal, opErr := e.runProfileAdmission(profile, phys, stmt, tc.sql)
+		return gateBehaviorResult(refusal, opErr)
+	}
+	if tc.mode == "control" {
+		if surface == "pooled" {
+			refusal, opErr := e.runPrePolicyAdmission(ctx,
+				admissionInputs{connRow: connRow, phys: phys, pinnedSet: tc.txOpen}, stmt, tc.sql)
+			if err := gateBehaviorResult(refusal, opErr); err != nil {
+				return err
+			}
+		} else {
+			refusal, opErr := e.runProfileAdmission(profile, phys, stmt, tc.sql)
+			if err := gateBehaviorResult(refusal, opErr); err != nil {
+				return err
+			}
+		}
+		if surface == "pooled" || surface == "session" {
+			refusal, opErr := e.runClassAdmission(pol, phys, stmt, tc.sql)
+			if err := gateBehaviorResult(refusal, opErr); err != nil {
+				return err
+			}
+		} else if (!pol.MayWrite && !pol.ReadOnly) || (stmt.Verb == "LOCK" && !pol.MayWrite) {
+			return auth.ErrDenied
+		}
+		refusal, opErr := e.runSessionStateAdmission(pol, phys, tc.txOpen, stmt, tc.sql)
+		return gateBehaviorResult(refusal, opErr)
+	}
+	if tc.mode != "statement" {
+		t.Fatalf("%s has unsupported behavior mode %q", tc.id, tc.mode)
+	}
+	if surface == "pooled" {
+		refusal, opErr := e.runPrePolicyAdmission(ctx,
+			admissionInputs{connRow: connRow, phys: phys}, stmt, tc.sql)
+		if err := gateBehaviorResult(refusal, opErr); err != nil {
+			return err
+		}
+		refusal, opErr = e.runClassAdmission(pol, phys, stmt, tc.sql)
+		if err := gateBehaviorResult(refusal, opErr); err != nil {
+			return err
+		}
+		refusal, opErr = e.runPostPolicyAdmission(ctx,
+			admissionInputs{connRow: connRow, phys: phys}, pol, stmt, tc.sql)
+		return gateBehaviorResult(refusal, opErr)
+	}
+	s := &session{wire: phys == admission.PhysWire}
+	refusal, opErr := e.runSessionAdmission(ctx, s, pol, connRow, tc.txOpen, stmt, tc.sql)
+	return gateBehaviorResult(refusal, opErr)
+}
+
+func gateBehaviorResult(refusal, opErr error) error {
+	if opErr != nil {
+		return opErr
+	}
+	return refusal
+}
+
+func gateBehaviorMismatch(want gateBehaviorExpectation, got error) string {
+	switch want.kind {
+	case "pass":
+		if got != nil {
+			return fmt.Sprintf("got refusal %v, want pass", got)
+		}
+	case "refuse":
+		sentinel, ok := gateBehaviorSentinel(want.identity)
+		if !ok {
+			return fmt.Sprintf("unknown expected identity %q", want.identity)
+		}
+		if got == nil {
+			return fmt.Sprintf("gate bypass: got pass, want refusal %s", want.identity)
+		}
+		if !errors.Is(got, sentinel) {
+			return fmt.Sprintf("got refusal %v, want identity %s", got, want.identity)
+		}
+	default:
+		return "unreachable cells must not be executed"
+	}
+	return ""
+}
+
+func gateBehaviorSentinel(name string) (error, bool) {
+	sentinels := map[string]error{
+		"ErrScriptTooLarge":        ErrScriptTooLarge,
+		"ErrEmptyStatement":        ErrEmptyStatement,
+		"ErrStatementUnsupported":  ErrStatementUnsupported,
+		"ErrReaderAdvancedPattern": ErrReaderAdvancedPattern,
+		"ErrNoWhere":               ErrNoWhere,
+		"auth.ErrDenied":           auth.ErrDenied,
+		"ErrSetGUCRefused":         ErrSetGUCRefused,
+		"ErrSetNotLocal":           ErrSetNotLocal,
+		"ErrSetOutsideTx":          ErrSetOutsideTx,
+		"ErrLockOutsideTx":         ErrLockOutsideTx,
+		"ErrWireSetRefused":        ErrWireSetRefused,
+		"ErrGrammarDrifted":        ErrGrammarDrifted,
+		"ErrReadOnlyUnenforceable": ErrReadOnlyUnenforceable,
+	}
+	err, ok := sentinels[name]
+	return err, ok
+}
+
+func gateMatrixBehaviorCases(t *testing.T) []gateBehaviorCase {
+	t.Helper()
+	lines := strings.Split(readGateMatrix(t), "\n")
+	block := sectionBlock(t, lines, "## 10. Matrix-driven behavioral cells")
+	var out []gateBehaviorCase
+	for _, line := range strings.Split(block, "\n") {
+		if !strings.HasPrefix(line, "| `A27-") {
+			continue
+		}
+		cells := strings.Split(line, "|")
+		if len(cells) != 12 {
+			t.Fatalf("behavior row has %d cells, want 10: %s", len(cells)-2, line)
+		}
+		value := func(i int) string { return strings.Trim(strings.TrimSpace(cells[i]), "`") }
+		txOpen, err := strconv.ParseBool(value(6))
+		if err != nil {
+			t.Fatalf("%s has invalid tx-open value %q", value(1), value(6))
+		}
+		tc := gateBehaviorCase{
+			id: value(1), mode: value(2), sql: value(3), profile: value(4), policy: value(5), txOpen: txOpen,
+			want: map[string]gateBehaviorExpectation{},
+		}
+		if tc.sql == "<empty>" {
+			tc.sql = ""
+		}
+		for i, surface := range gateBehaviorSurfaces {
+			tc.want[surface] = parseGateBehaviorExpectation(t, tc.id, surface, value(7+i))
+		}
+		out = append(out, tc)
+	}
+	if len(out) < 10 {
+		t.Fatalf("parsed only %d behavioral cases from the committed matrix", len(out))
+	}
+	return out
+}
+
+func parseGateBehaviorExpectation(t *testing.T, id, surface, raw string) gateBehaviorExpectation {
+	t.Helper()
+	if raw == "pass" {
+		return gateBehaviorExpectation{kind: "pass"}
+	}
+	for _, prefix := range []string{"refuse:", "unreachable:"} {
+		if strings.HasPrefix(raw, prefix) {
+			value := strings.TrimSpace(strings.TrimPrefix(raw, prefix))
+			if value == "" {
+				t.Fatalf("%s/%s has empty %s expectation", id, surface, strings.TrimSuffix(prefix, ":"))
+			}
+			out := gateBehaviorExpectation{kind: strings.TrimSuffix(prefix, ":")}
+			if out.kind == "refuse" {
+				out.identity = value
+			} else {
+				out.reason = value
+			}
+			return out
+		}
+	}
+	t.Fatalf("%s/%s has invalid expectation %q", id, surface, raw)
+	return gateBehaviorExpectation{}
+}
+
 // discoverGateSentinels finds every `ErrX = errors.New(...)` var declaration
 // in this package's non-test sources. AST-based so a comment mentioning
 // errors.New cannot fake an entry. Coverage boundary: declarations only —
@@ -533,6 +971,7 @@ func gateMatrixRowNamesInLine(t *testing.T, sentinel string) []string {
 type gateCoord struct {
 	file string
 	line int
+	decl bool
 }
 
 // gateMatrixInventoryLines returns ONLY the lines of the canonical inventory:
@@ -601,13 +1040,19 @@ func gateMatrixRows(t *testing.T) map[string][]gateCoord {
 		if len(ids) == 0 {
 			continue
 		}
-		for _, c := range coordRe.FindAllStringSubmatch(line, -1) {
+		if shorthand := shorthandCoordRe.FindString(line); shorthand != "" {
+			t.Fatalf("matrix row %s uses unvalidated shorthand coordinate %s; repeat the source filename", ids[0], strings.TrimSpace(shorthand))
+		}
+		for _, index := range coordRe.FindAllStringSubmatchIndex(line, -1) {
+			c := coordRe.FindStringSubmatch(line[index[0]:index[1]])
 			n := 0
 			for _, ch := range c[2] {
 				n = n*10 + int(ch-'0')
 			}
+			before := line[:index[0]]
+			decl := strings.Contains(before, "decl ") && !strings.Contains(before, ";")
 			for _, id := range ids {
-				rows[id] = append(rows[id], gateCoord{file: c[1], line: n})
+				rows[id] = append(rows[id], gateCoord{file: c[1], line: n, decl: decl})
 			}
 		}
 	}
