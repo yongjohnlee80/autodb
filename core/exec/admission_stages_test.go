@@ -9,6 +9,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -1176,39 +1177,44 @@ func TestWireSimpleDrive_OrderingDeltaAnswered(t *testing.T) {
 	}
 }
 
-// The PinnedTx truthfulness cells: the field's contract says the
-// execution carries a pinned transaction, so a session call OUTSIDE a
-// transaction must report false — PhysSession/PhysWire already supplies
-// profile onSession; a constant true is false state a future stage could
-// consume incorrectly.
+// The PinnedTx truthfulness cell: the production derivation
+// sessionAdmissionCtx maps txOpen truthfully onto PinnedTx — a session
+// call OUTSIDE a transaction must report false, and PhysSession/PhysWire
+// already supplies profile onSession; a constant true is false state a
+// future stage could consume incorrectly. The cell invokes the production
+// helper so a regression to constant true REDs.
 func TestSessionDrive_PinnedTxIsTruthful(t *testing.T) {
 	stmt, err := Classify("BEGIN", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Premise: the session profile admits BEGIN on a session context
-	// either way — the discriminator is what the STAGE sees, so the cell
-	// uses a probe that consumes PinnedTx directly.
-	probe := pinnedTxProbe{}
 	facts := NewLegacyFactsForText(stmt, "BEGIN", 5)
+	e := newChainTestEngine(t)
+	connRow := &meta.Connection{Engine: engine.SQLite}
+	s := &session{wire: true}
+	pol := UnitPolicy{}
 
-	// Outside a transaction: PinnedTx must be FALSE (with the wire
-	// physical context still supplying onSession affirmatively).
-	rep, rerr := admission.Compose(probe).Run(facts, admission.Context{Phys: admission.PhysWire, PinnedTx: false})
+	// Outside a transaction: production PinnedTx must be FALSE.
+	ctx := e.sessionAdmissionCtx(connRow, pol, s, false)
+	if ctx.PinnedTx {
+		t.Fatalf("production PinnedTx is true outside a transaction — derivation regressed to constant true")
+	}
+	rep, rerr := admission.Compose(pinnedTxProbe{}).Run(facts, ctx)
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
-	if !rep.IsDenied() {
-		t.Fatal("the probe did not run")
-	}
 	deny, _ := rep.PrimaryDeny()
 	if deny.Subject != "false" {
-		t.Fatalf("outside a transaction, PinnedTx read as %s — the field must report the "+
-			"transaction state truthfully", deny.Subject)
+		t.Fatalf("outside a transaction, PinnedTx read as %s — the field must report "+
+			"the transaction state truthfully", deny.Subject)
 	}
 
 	// Inside one: true.
-	rep, rerr = admission.Compose(probe).Run(facts, admission.Context{Phys: admission.PhysWire, PinnedTx: true})
+	ctx = e.sessionAdmissionCtx(connRow, pol, s, true)
+	if !ctx.PinnedTx {
+		t.Fatalf("production PinnedTx is false inside a transaction")
+	}
+	rep, rerr = admission.Compose(pinnedTxProbe{}).Run(facts, ctx)
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
