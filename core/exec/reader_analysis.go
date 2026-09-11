@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -77,51 +78,42 @@ type udfSet struct {
 	loaded    time.Time
 }
 
-// readerCallCheck is the pure decision: given the calls the lexer found and
-// the target's user-routine set, does the statement invoke user code? A
-// schema-qualified call outside the catalog schemas is user code by
-// construction; a bare call is user code when the target has a routine of that
-// name. Catalog-qualified calls are always allowed.
-func readerCallCheck(calls []FunctionCall, set *udfSet) error {
-	for _, c := range calls {
-		switch {
-		case c.Schema == "pg_catalog" || c.Schema == "information_schema":
-			continue
-		case c.Schema != "":
-			return fmt.Errorf("%w: %s.%s()", ErrReaderAdvancedPattern, c.Schema, c.Name)
-		case set != nil && set.bare[c.Name]:
-			return fmt.Errorf("%w: %s()", ErrReaderAdvancedPattern, c.Name)
-		}
+// readerAnalysis is the canonical legacy rule invoked by its Stage adapter.
+// Policy refusal and catalog failure are separate returns because the seam must
+// distinguish "denied" from "could not decide".
+func readerAnalysis(facts admission.Facts, ctx admission.Context, userRoutines func() (*udfSet, error)) (string, error, error) {
+	if !ctx.ReadOnly {
+		return "", nil, nil
 	}
-	return nil
-}
-
-// readerAnalysis is the stage. Composed after Classify in every gate sequence
-// (token path, wire simple path, wire raw path; the extended path's Parse
-// calls it at the same point). No-op for non-reader units and for statements
-// without call shapes; procedural verbs are refused by class before this
-// stage runs and are named here only for the refusal text.
-func (e *Engine) readerAnalysis(ctx context.Context, connRow *meta.Connection, pol UnitPolicy, stmt Statement) error {
-	if !pol.ReadOnly {
-		return nil
-	}
-	switch stmt.Verb {
+	switch facts.Verb() {
 	case "DO", "CALL":
-		return fmt.Errorf("%w: %s", ErrReaderAdvancedPattern, stmt.Verb)
+		return facts.Verb(), fmt.Errorf("%w: %s", ErrReaderAdvancedPattern, facts.Verb()), nil
 	}
-	if len(stmt.Calls) == 0 || !connRow.Engine.HasRoutineCatalog() {
+	calls := facts.Calls()
+	if len(calls) == 0 || !ctx.TargetCaps.Has(admission.CapRoutineCatalog) {
 		// Non-postgres targets have no catalog of this shape here; their reader
 		// safety rests on the classifier and the driver's read-only transaction.
-		return nil
+		return "", nil, nil
 	}
-	set, err := e.userRoutines(ctx, connRow)
+	set, err := userRoutines()
 	if err != nil {
 		// Without the catalog the stage cannot tell user code from the language;
 		// refusing every call would break ordinary reader queries (count, now).
 		// The READ ONLY wrap still stands. Audited by the caller's rejection path.
-		return fmt.Errorf("%w: the target's routine catalog could not be read (%v)", ErrReaderAdvancedPattern, err)
+		return "", nil, fmt.Errorf("%w: the target's routine catalog could not be read (%v)", ErrReaderAdvancedPattern, err)
 	}
-	return readerCallCheck(stmt.Calls, set)
+	for _, call := range calls {
+		switch {
+		case call.Schema == "pg_catalog" || call.Schema == "information_schema":
+			continue
+		case call.Schema != "":
+			subject := call.Schema + "." + call.Name
+			return subject, fmt.Errorf("%w: %s()", ErrReaderAdvancedPattern, subject), nil
+		case set != nil && set.bare[call.Name]:
+			return call.Name, fmt.Errorf("%w: %s()", ErrReaderAdvancedPattern, call.Name), nil
+		}
+	}
+	return "", nil, nil
 }
 
 // userRoutines returns the connection's user-routine set, loading it from the

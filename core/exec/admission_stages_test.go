@@ -304,9 +304,6 @@ func TestReaderAnalysisAdapter_SameIdentityAsTheLegacyStage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := readerCallCheck(stmt.Calls, set); err == nil {
-		t.Fatal("the legacy check admitted a bare UDF call — premise wrong")
-	}
 	rep, rerr = o.Run(NewLegacyFacts(stmt, 20, "", false, false), readerCtx)
 	if rerr != nil {
 		t.Fatal(rerr)
@@ -423,7 +420,7 @@ func TestAuthorizeUnitAdapter_SameIdentityAsTheLegacyFloor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := authorizeUnitFloorPremise(stmt); err == nil {
+	if err := authorizeUnit(stmt, UnitPolicy{ReadOnly: true, MayWrite: false}); err == nil {
 		t.Fatal("the legacy floor admitted a write on a reader's policy — premise wrong")
 	}
 	rep, rerr = o.Run(NewLegacyFacts(stmt, 30, "", false, false), readerCtx)
@@ -459,23 +456,6 @@ func TestAuthorizeUnitAdapter_SameIdentityAsTheLegacyFloor(t *testing.T) {
 	}
 	if rep.IsDenied() {
 		t.Fatal("the empty chain denied — the mutation's premise is wrong")
-	}
-}
-
-// authorizeUnitFloorPremise asks the legacy floor through a reader policy,
-// for the cell's premise assertion.
-func authorizeUnitFloorPremise(stmt Statement) error {
-	pol := UnitPolicy{ReadOnly: true, MayWrite: false}
-	switch classToAction(stmt.Class) {
-	case auth.ActionRead:
-		return nil
-	case auth.ActionWrite, auth.ActionDDL:
-		if !pol.MayWrite {
-			return auth.ErrDenied
-		}
-		return nil
-	default:
-		return auth.ErrDenied
 	}
 }
 

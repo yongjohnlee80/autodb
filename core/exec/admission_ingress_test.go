@@ -227,8 +227,8 @@ func TestAdmissionIngressClosure_NoLegacyPolicyGuardCallsOutsideAdapters(t *test
 		"admitSet":       1,
 		"admitWireSet":   1,
 		"admitWireReset": 1,
-		"authorizeUnit":  0,
-		"readerAnalysis": 0,
+		"authorizeUnit":  1,
+		"readerAnalysis": 1,
 	}
 	gotCalls := map[string]int{}
 	sizeStageInstances := 0
@@ -310,6 +310,10 @@ func guardCallAllowed(fn *ingressFunc, guard string) bool {
 		return fn.recv == "guardWhereStage" && fn.name == "Apply"
 	case "admitLock", "admitSet", "admitWireSet", "admitWireReset":
 		return fn.recv == "sessionStateStage" && fn.name == "Apply"
+	case "authorizeUnit":
+		return fn.recv == "authorizeUnitStage" && fn.name == "Apply"
+	case "readerAnalysis":
+		return fn.recv == "readerAnalysisStage" && fn.name == "Apply"
 	default:
 		return false
 	}

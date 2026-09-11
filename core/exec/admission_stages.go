@@ -187,52 +187,17 @@ func (readerAnalysisStage) DenyCodes() []admission.Code {
 // The DO/CALL arm is denied by verb; the call arms are denied against the
 // target's own routine set.
 func (s readerAnalysisStage) Apply(facts admission.Facts, ctx admission.Context) (admission.Contribution, error) {
-	switch facts.Verb() {
-	case "DO", "CALL":
+	subject, denyErr, opErr := readerAnalysis(facts, ctx, s.userRoutines)
+	if opErr != nil {
+		return admission.NoContribution(), opErr
+	}
+	if denyErr != nil {
 		return admission.Deny(admission.Reason{
 			Code:     admission.CodeReaderAdvancedPattern,
-			Subject:  facts.Verb(),
-			Detail:   fmt.Errorf("%w: %s", ErrReaderAdvancedPattern, facts.Verb()).Error(),
+			Subject:  subject,
+			Detail:   denyErr.Error(),
 			Continue: true,
 		}), nil
-	}
-	if len(facts.Calls()) == 0 {
-		return admission.NoContribution(), nil
-	}
-	// THE CATALOG ARM IS CAPABILITY-GATED, per-arm: without a routine
-	// catalog the call analysis is absent by construction (the legacy
-	// no-op), and the DO/CALL arm above still denied — the verb switch
-	// preceded the catalog check in the legacy code too.
-	if !ctx.TargetCaps.Has(admission.CapRoutineCatalog) {
-		return admission.NoContribution(), nil
-	}
-	set, err := s.userRoutines()
-	if err != nil {
-		// The stage BROKE — the catalog could not be read. Not a refusal:
-		// the caller must be able to tell 'refused' from 'could not
-		// decide', and the legacy text rides in the wrap.
-		return admission.NoContribution(), fmt.Errorf("%w: the target's routine catalog could not be read (%v)",
-			ErrReaderAdvancedPattern, err)
-	}
-	for _, c := range facts.Calls() {
-		switch {
-		case c.Schema == "pg_catalog" || c.Schema == "information_schema":
-			continue
-		case c.Schema != "":
-			return admission.Deny(admission.Reason{
-				Code:     admission.CodeReaderAdvancedPattern,
-				Subject:  c.Schema + "." + c.Name,
-				Detail:   fmt.Errorf("%w: %s.%s()", ErrReaderAdvancedPattern, c.Schema, c.Name).Error(),
-				Continue: true,
-			}), nil
-		case set.bare[c.Name]:
-			return admission.Deny(admission.Reason{
-				Code:     admission.CodeReaderAdvancedPattern,
-				Subject:  c.Name,
-				Detail:   fmt.Errorf("%w: %s()", ErrReaderAdvancedPattern, c.Name).Error(),
-				Continue: true,
-			}), nil
-		}
 	}
 	return admission.NoContribution(), nil
 }
@@ -265,7 +230,7 @@ func (authorizeUnitStage) Apply(facts admission.Facts, ctx admission.Context) (a
 		// would authorize whatever class the foreign facts claim.
 		return admission.NoContribution(), fmt.Errorf("admission: authorizeunit requires the legacy facts representation; got %T", facts)
 	}
-	if err := classToActionFloor(lf.stmt.Class, ctx); err != nil {
+	if err := authorizeUnit(lf.stmt, UnitPolicy{ReadOnly: ctx.ReadOnly, MayWrite: ctx.MayWrite}); err != nil {
 		return admission.Deny(admission.Reason{
 			Code:     admission.CodeDenied,
 			Detail:   err.Error(),
@@ -273,25 +238,6 @@ func (authorizeUnitStage) Apply(facts admission.Facts, ctx admission.Context) (a
 		}), nil
 	}
 	return admission.NoContribution(), nil
-}
-
-// classToActionFloor asks the policy snapshot the statement's class floor
-// — the same decision authorizeUnit makes, expressed against the seam's
-// Context snapshot. Read is the floor for standing at all; write and DDL
-// need the write floor; an unmapped class is refused rather than waved
-// through.
-func classToActionFloor(c Class, ctx admission.Context) error {
-	switch classToAction(c) {
-	case auth.ActionRead:
-		return nil
-	case auth.ActionWrite, auth.ActionDDL:
-		if !ctx.MayWrite {
-			return auth.ErrDenied
-		}
-		return nil
-	default:
-		return auth.ErrDenied
-	}
 }
 
 // sessionStateStage is the SET/LOCK gate: one stage, TWO GUC MODELS,
