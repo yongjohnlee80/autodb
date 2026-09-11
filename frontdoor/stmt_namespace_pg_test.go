@@ -68,13 +68,16 @@ func TestStmtNamespace_AClientMayPrepareTheTextAutodbVerifiesWith(t *testing.T) 
 	}
 }
 
-// AND THE SESSION STILL CARRIES NO AUTODB-OWNED PREPARED STATEMENT.
+// AND THE SESSION STILL CARRIES NO AUTODB-OWNED NAMED OBJECT.
 //
 // The cell above would also pass if autodb kept preparing its statement under
 // some OTHER name -- which would leave the same defect waiting for the next
-// text a client happens to share. This one asserts the namespace itself: after
-// a session is open and has served a statement, pg_prepared_statements holds
-// exactly what the CLIENT put there and nothing else.
+// text a client happens to share. This one asserts every PostgreSQL namespace
+// with a catalog view: after a session is open and has served a statement,
+// prepared statements, protocol/SQL cursors and temporary relations hold
+// exactly what the CLIENT put there and nothing else. Savepoint-producing verbs
+// are refused by ProfileSession and PostgreSQL exposes no savepoint catalog;
+// autodb issues no such control-plane command.
 func TestStmtNamespace_AutodbLeavesNoPreparedStatementOnTheSession(t *testing.T) {
 	cfg, err := pgx.ParseConfig(driverDSN(t))
 	if err != nil {
@@ -92,16 +95,33 @@ func TestStmtNamespace_AutodbLeavesNoPreparedStatementOnTheSession(t *testing.T)
 	}
 	defer conn.Close(context.Background())
 
-	var n int
+	var prepared, cursors, tempRelations int
 	if err := conn.QueryRow(ctx,
-		"SELECT count(*) FROM pg_prepared_statements").Scan(&n); err != nil {
-		t.Fatalf("counting prepared statements: %v", err)
+		`SELECT
+			(SELECT count(*) FROM pg_prepared_statements),
+			(SELECT count(*) FROM pg_cursors),
+			(SELECT count(*) FROM pg_class
+			  WHERE relpersistence = 't' AND relnamespace = pg_my_temp_schema())`).
+		Scan(&prepared, &cursors, &tempRelations); err != nil {
+		t.Fatalf("counting session object namespaces: %v", err)
 	}
-	if n != 0 {
+	if prepared != 0 {
 		var names string
 		_ = conn.QueryRow(ctx,
 			"SELECT string_agg(name, ', ') FROM pg_prepared_statements").Scan(&names)
 		t.Errorf("the session carries %d prepared statement(s) the client never created: %s",
-			n, names)
+			prepared, names)
+	}
+	if cursors != 0 {
+		var names string
+		_ = conn.QueryRow(ctx, "SELECT string_agg(name, ', ') FROM pg_cursors").Scan(&names)
+		t.Errorf("the session carries %d cursor/portal(s) the client never created: %s", cursors, names)
+	}
+	if tempRelations != 0 {
+		var names string
+		_ = conn.QueryRow(ctx, `SELECT string_agg(relname, ', ') FROM pg_class
+			WHERE relpersistence = 't' AND relnamespace = pg_my_temp_schema()`).Scan(&names)
+		t.Errorf("the session carries %d temporary relation(s) the client never created: %s",
+			tempRelations, names)
 	}
 }

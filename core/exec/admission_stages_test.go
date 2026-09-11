@@ -33,6 +33,39 @@ func factsFor(t *testing.T, sql string, textLen int) *LegacyFacts {
 	return NewLegacyFacts(stmt, textLen, "", false, false)
 }
 
+func TestReasonErr_PreservesReasonAndLegacyIdentity(t *testing.T) {
+	t.Parallel()
+	want := admission.Reason{Code: admission.CodeNoWhere, Class: admission.ClassPermission,
+		Subject: "DELETE", Detail: ErrNoWhere.Error(), Continue: true}
+	err := reasonErr(want)
+	if !errors.Is(err, ErrNoWhere) {
+		t.Fatalf("legacy identity lost: %v", err)
+	}
+	got, ok := AdmissionReason(err)
+	if !ok || got != want {
+		t.Fatalf("AdmissionReason = %+v, %v; want %+v, true", got, ok, want)
+	}
+}
+
+func TestReportedGrammarStage_PreservesNamedDriftRefusal(t *testing.T) {
+	t.Parallel()
+	stage := reportedGrammarStage{verify: func() error {
+		return fmt.Errorf("%w: standard_conforming_strings=off", ErrGrammarDrifted)
+	}}
+	rep, err := admission.Compose(stage).Run(factsFor(t, "SELECT 1", 8),
+		admission.Context{Phys: admission.PhysWire})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reason, ok := rep.PrimaryDeny()
+	if !ok || reason.Code != admission.CodeGrammarDrifted || reason.Class != admission.ClassUnsupported {
+		t.Fatalf("reported grammar drift = %+v, %v", reason, ok)
+	}
+	if got := reasonErr(reason); !errors.Is(got, ErrGrammarDrifted) {
+		t.Fatalf("reported grammar refusal lost ErrGrammarDrifted: %v", got)
+	}
+}
+
 func TestSizeCapAdapter_SameIdentityAsTheLegacyCheck(t *testing.T) {
 	ctx := admission.Context{MaxStatementBytes: 100}
 

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/exec"
 )
@@ -750,8 +751,9 @@ func (l *Listener) reportOutputWithheld(conn net.Conn, be *pgproto3.Backend,
 // kinds rather than reading sentences. A dashboard totalling statement
 // outcomes would have counted segments that ran nothing.
 const (
-	eventStmtOutcome     = "fd.stmt_outcome"
-	eventDeliveryStopped = "fd.delivery_stopped"
+	eventStmtOutcome      = "fd.stmt_outcome"
+	eventDeliveryStopped  = "fd.delivery_stopped"
+	eventStmtParseRefused = "fd.stmt_parse_refused"
 )
 
 // withheldEventKind names the event this arm records.
@@ -953,6 +955,18 @@ func armFromWhatIsKnown(stopped *exec.EmitStopped, status byte, targetFailed boo
 func (l *Listener) frameGateError(conn net.Conn, be *pgproto3.Backend, sess exec.WireSessionResult,
 	err error, peer string, closeReason *string) bool {
 
+	if reason, ok := exec.AdmissionReason(err); ok {
+		frame := admissionErrorFrame(reason, true)
+		rule := string(reason.Code)
+		l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: reason.Detail})
+		be.Send(frame)
+		if !reason.Continue {
+			_ = l.flushBounded(conn, be)
+			*closeReason = rule
+			return false
+		}
+		return l.sendReadiness(conn, be, sess, peer, closeReason)
+	}
 	code, rule, hint, fatal := classifyGateError(err)
 	l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()})
 
@@ -972,6 +986,35 @@ func (l *Listener) frameGateError(conn net.Conn, be *pgproto3.Backend, sess exec
 	// idle: a gate refusal INSIDE a transaction leaves that transaction open,
 	// and telling the client "idle" would invite it to start another.
 	return l.sendReadiness(conn, be, sess, peer, closeReason)
+}
+
+// admissionErrorFrame renders a structured admission refusal without learning
+// individual rule identities. Disclosure is explicit: pre-disclosure callers
+// receive one uniform answer; authenticated sessions receive the full Reason.
+func admissionErrorFrame(reason admission.Reason, disclosed bool) *pgproto3.ErrorResponse {
+	if !disclosed {
+		return gateError("FATAL", DenialSQLState, DenialMessage, "frontdoor/denied", "")
+	}
+	severity := "ERROR"
+	if !reason.Continue {
+		severity = "FATAL"
+	}
+	code := "42501"
+	switch reason.Class {
+	case admission.ClassUnsupported:
+		code = sqlStateFeatureNotSupported
+	case admission.ClassProgramLimit:
+		code = sqlStateProgramLimit
+	}
+	return &pgproto3.ErrorResponse{
+		Severity: severity,
+		Code:     code,
+		Message:  reason.Detail,
+		Detail:   string(reason.Code),
+		Hint:     reason.Hint,
+		Position: int32(reason.Span),
+		Where:    reason.Subject,
+	}
 }
 
 // applyDispatch emits a decision's frame, if it has one, and records its audit
@@ -1415,6 +1458,10 @@ func (a *outputAccountant) emit(m exec.WireMessage) error {
 	l, conn, be, peer := a.l, a.conn, a.be, a.peer
 	if m.Err != nil {
 		a.targetFailed = true
+		if m.TargetFrame == "Parse" {
+			l.onEvent(Event{Kind: eventStmtParseRefused, Reason: m.Err.Code, Peer: peer,
+				Detail: fmt.Sprintf("%s; sqlstate=%s", portalIdent("stmt", m.TargetObjectName), m.Err.Code)})
+		}
 	}
 	frame, ferr := backendFrame(m)
 	if ferr != nil {

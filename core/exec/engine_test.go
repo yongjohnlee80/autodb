@@ -152,6 +152,9 @@ func TestEngine_ConnectionManagement(t *testing.T) {
 	if _, err := f.eng.CreateConnection(ctx, readerTok, "nope", "sqlite", "file:x?mode=memory", testIP); !errors.Is(err, auth.ErrDenied) {
 		t.Errorf("reader CreateConnection err = %v, want ErrDenied", err)
 	}
+	if _, err := f.eng.CreateConnection(ctx, f.rootTok, "target", "sqlite", "file:duplicate?mode=memory", testIP); !errors.Is(err, ErrConnectionNameTaken) {
+		t.Errorf("duplicate-name CreateConnection err = %v, want ErrConnectionNameTaken", err)
+	}
 
 	// Visibility: admin sees all; reader sees granted only; ciphertext is
 	// never returned.
@@ -170,8 +173,8 @@ func TestEngine_ConnectionManagement(t *testing.T) {
 
 	// Deletion: refused while history exists; fine for an unused one.
 	f.exec(t, f.rootTok, "CREATE TABLE t (id INTEGER PRIMARY KEY)") // creates history
-	if err := f.eng.DeleteConnection(ctx, f.rootTok, f.connID, testIP); err == nil {
-		t.Error("deleted a connection with recorded history")
+	if err := f.eng.DeleteConnection(ctx, f.rootTok, f.connID, testIP); !errors.Is(err, ErrConnectionHasHistory) {
+		t.Errorf("DeleteConnection with history = %v, want ErrConnectionHasHistory", err)
 	}
 	spare, err := f.eng.CreateConnection(ctx, f.rootTok, "spare", "sqlite",
 		fmt.Sprintf("file:spare%d?mode=memory&cache=shared", fixtureSeq.Add(1)), testIP)

@@ -268,6 +268,22 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 func (l *Listener) frameExtendedError(conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, err error, peer string, seg *segmentLane, closeReason *string) bool {
 
+	if reason, ok := exec.AdmissionReason(err); ok {
+		frame := admissionErrorFrame(reason, true)
+		rule := string(reason.Code)
+		l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: reason.Detail})
+		be.Send(frame)
+		if ferr := l.flushBounded(conn, be); ferr != nil {
+			*closeReason = "write-failed"
+			return false
+		}
+		if !reason.Continue {
+			*closeReason = rule
+			return false
+		}
+		seg.discarding = true
+		return true
+	}
 	code, rule, hint, fatal := classifyGateError(err)
 	l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()})
 

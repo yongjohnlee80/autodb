@@ -166,11 +166,18 @@ func (e *Engine) WireParse(ctx context.Context, id SessionID, userID int64,
 	if perr != nil {
 		return perr
 	}
+	admitErr, opErr := e.runWireGrammarAdmission(s)
+	if opErr != nil {
+		return opErr
+	}
+	if admitErr != nil {
+		return e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
+	}
 
 	// Oversized input is refused BEFORE classification, exactly as the simple
 	// path refuses it: the audit record must equal
 	// what ran, and an unaudited tail must never execute.
-	admitErr, opErr := e.runSizeAdmission(admission.PhysWire, sqlText)
+	admitErr, opErr = e.runSizeAdmission(admission.PhysWire, sqlText)
 	if opErr != nil {
 		return opErr
 	}
@@ -734,6 +741,13 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	if polErr != nil {
 		return polErr
 	}
+	admitErr, opErr := e.runWireGrammarAdmission(s)
+	if opErr != nil {
+		return opErr
+	}
+	if admitErr != nil {
+		return e.rejectSession(ctx, s, pol.Ident, ip, st.sql, admitErr)
+	}
 
 	// OWNED CONTROL resolves to the session's machine and is answered with the
 	// protocol's fixed reply for a control statement. wireControl is the SAME
@@ -774,7 +788,7 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 
 	// Re-authorized through the orchestrator against the IMMUTABLE
 	// classification. Same stage, a fresh policy snapshot and a new verdict.
-	admitErr, opErr := e.runClassAdmission(pol, admission.PhysWire, st.stmt, st.sql)
+	admitErr, opErr = e.runClassAdmission(pol, admission.PhysWire, st.stmt, st.sql)
 	if opErr != nil {
 		return opErr
 	}
@@ -1135,7 +1149,17 @@ func answerOneFrame(ctx context.Context, pc golibpg.PinnedConn, o *extObjects, s
 		// The target's tail is what decides this statement's outcome, and if we
 		// stop looking there is nobody left to tell. The result is ignored here
 		// deliberately — that is the whole fix.
-		_ = deliver(extToWire(m))
+		wire := extToWire(m)
+		if m.Kind == "ErrorResponse" && step.obj != nil {
+			switch step.obj.kind {
+			case objectStatement:
+				wire.TargetFrame = "Parse"
+			case objectPortal:
+				wire.TargetFrame = "Bind"
+			}
+			wire.TargetObjectName = step.obj.name
+		}
+		_ = deliver(wire)
 		if m.Kind == "ErrorResponse" {
 			// A pre-Complete error: the target created nothing, so the object's
 			// reservation goes back. The drop owns it, as everywhere else.

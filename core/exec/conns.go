@@ -33,6 +33,9 @@ var (
 	openPostgres = postgres.OpenNamed
 	openMySQL    = mysql.OpenNamed
 	openSQLite   = sqlite.OpenNamed
+
+	ErrConnectionNameTaken  = errors.New("exec: connection name is already in use")
+	ErrConnectionHasHistory = errors.New("exec: connection has recorded history and cannot be deleted")
 )
 
 // target returns the cached dao connection for connID, opening it on first
@@ -331,6 +334,9 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 			Set(meta.ConnCreatedAt, now).Set(meta.ConnUpdatedAt, now).
 			Insert()
 		if terr != nil {
+			if errors.Is(terr, dao.ErrDuplicate) {
+				return fmt.Errorf("%w: %q: %w", ErrConnectionNameTaken, name, terr)
+			}
 			return terr
 		}
 		enc, terr := e.auth.EncryptSecret([]byte(dsn), id)
@@ -551,7 +557,7 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.store.Connections.On(tx).With(meta.ConnID, connID).Delete(); err != nil {
 			if errors.Is(err, dao.ErrForeignKey) {
-				return fmt.Errorf("exec: connection %q has recorded history and cannot be deleted: %w", row.Name, err)
+				return fmt.Errorf("%w: %q: %w", ErrConnectionHasHistory, row.Name, err)
 			}
 			return err
 		}

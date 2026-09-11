@@ -2,9 +2,11 @@ package exec
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 )
 
 // The drives' side of the seam: composing the one declared chain for one
@@ -36,6 +38,26 @@ func (e *Engine) runSizeAdmission(phys admission.PhysicalCtx, sqlText string) (e
 	facts := NewLegacyFactsForText(Statement{}, sqlText, len(sqlText))
 	return e.evaluateChain([]admission.Stage{sizeCapStage{}}, facts,
 		admission.Context{Phys: phys, MaxStatementBytes: e.maxStatementBytes})
+}
+
+// runWireGrammarAdmission re-reads PostgreSQL's captured ParameterStatus state
+// before each statement-bearing wire operation. It performs no target query,
+// so the client-visible prepared-statement and portal namespaces stay untouched.
+func (e *Engine) runWireGrammarAdmission(s *session) (error, error) {
+	pc := s.pinnedConn()
+	if pc == nil {
+		return nil, nil
+	}
+	reporter, ok := e.reporterFor(pc).(golibpg.ParameterStatusReporter)
+	if !ok {
+		return nil, fmt.Errorf("exec: pinned PostgreSQL session has no reported parameter status capability")
+	}
+	statuses := reporter.ReportedParameterStatuses()
+	stage := reportedGrammarStage{verify: func() error {
+		return (postgresDialect{}).VerifyReportedGrammar(func(name string) string { return statuses[name] })
+	}}
+	return e.evaluateChain([]admission.Stage{stage}, NewLegacyFactsForText(Statement{}, "", 0),
+		admission.Context{Phys: admission.PhysWire})
 }
 
 // runPrePolicyAdmission evaluates the capability stage whose legacy position

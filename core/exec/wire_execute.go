@@ -92,6 +92,13 @@ func (e *Engine) wireAdmit(ctx context.Context, s *session, sqlText, ip string, 
 	if demoted {
 		return UnitPolicy{}, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAuthorityChanged)
 	}
+	admitErr, opErr := e.runWireGrammarAdmission(s)
+	if opErr != nil {
+		return UnitPolicy{}, opErr
+	}
+	if admitErr != nil {
+		return UnitPolicy{}, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
+	}
 	return pol, nil
 }
 
