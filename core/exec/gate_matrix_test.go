@@ -374,7 +374,7 @@ func readGateMatrix(t *testing.T) string {
 	}
 	s := string(body)
 	if !strings.Contains(s, "Known asymmetries, on record") {
-		t.Fatalf("%s is missing its asymmetries section — a matrix without the stated decisions " +
+		t.Fatalf("%s is missing its asymmetries section — a matrix without the stated decisions "+
 			"is an inventory, not a specification", gateMatrixPath)
 	}
 	return s
