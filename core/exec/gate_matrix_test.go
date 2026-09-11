@@ -60,8 +60,14 @@ var (
 	sentinelName = regexp.MustCompile("`(Err[A-Za-z]+)`")
 	// coordRe matches a "name.go:123" coordinate.
 	coordRe = regexp.MustCompile(`([a-z_]+\.go):(\d+)`)
-	// justRe matches a row's declared justification category.
-	justRe = regexp.MustCompile(`Justification: (divergence|applicability)`)
+	// justRe matches one justification declaration: category plus the
+	// referenced numbered entry as a section-qualified anchor, e.g.
+	// "divergence:§6.3" (the policy section, entry 3) or
+	// "applicability:§7.1" (the boundaries section, entry 1).
+	justRe = regexp.MustCompile(`(divergence|applicability):§(\d+)\.(\d+)`)
+	// onRecordEntryRe matches a numbered on-record entry:
+	// "N. **...** — text", capturing the number and the entry's text.
+	onRecordEntryRe = regexp.MustCompile(`(?m)^(\d+)\. \*\*(.+)$`)
 )
 
 // coordinateWindow is how far a DECLARATION anchor may drift from the
@@ -213,18 +219,22 @@ func TestGateMatrix_ExemptionsAreReal(t *testing.T) {
 // (a decision with an observable cross-surface consequence; the gate
 // matrix's policy section) or applicability (physics: the raising frame
 // does not exist on the other surface; the gate matrix's applicability
-// section) — and the declared category must actually name its sentinel in
-// that on-record section of docs/admission-gate-matrix.md. A restricted row
-// with no category, or a category whose section does not carry the name,
-// fails the walk.
+// section). The declaration is a per-sentinel `category:§N` token, and the
+// walk verifies ALL THREE halves of it: the category names the right
+// on-record section (divergence → policy, applicability → boundaries), the
+// referenced numbered entry EXISTS in that section, and that entry's text
+// contains the sentinel. A first-match category for the whole line, or a
+// sentinel appearing somewhere in the section but justified by a different
+// entry, both fail. Combined rows need one independently validated token
+// per sentinel.
 func TestGateMatrix_RestrictedRowsDeclareJustification(t *testing.T) {
 	body := readGateMatrix(t)
 	lines := strings.Split(body, "\n")
 
-	sect6 := sectionBlock(t, lines, "## 6. Policy and semantic divergences")
-	sect7 := sectionBlock(t, lines, "## 7. Physical applicability boundaries")
+	policyEntries := onRecordEntries(t, lines, "## 6. Policy and semantic divergences")
+	boundEntries := onRecordEntries(t, lines, "## 7. Physical applicability boundaries")
 
-	for _, line := range lines {
+	for _, line := range gateMatrixInventoryLines(t) {
 		if !strings.HasPrefix(line, "| `") || strings.HasPrefix(line, "| `sentinel`") {
 			continue
 		}
@@ -236,28 +246,121 @@ func TestGateMatrix_RestrictedRowsDeclareJustification(t *testing.T) {
 		if strings.Contains(surfaces, "all four") {
 			continue
 		}
-		m := justRe.FindStringSubmatch(line)
-		if m == nil {
-			t.Errorf("restricted row %s declares no Justification category — a cross-surface "+
-				"restriction that is neither a recorded divergence nor a recorded applicability "+
-				"boundary reads as a bug rather than a decision",
-				strings.TrimSpace(cells[1]))
-			continue
-		}
 		names := sentinelName.FindAllStringSubmatch(line, -1)
 		for _, nm := range names {
-			want := nm[1]
-			block := sect6
-			if m[1] == "applicability" {
-				block = sect7
+			sentinel := nm[1]
+			tokens := justificationTokens(line, sentinel)
+			if len(tokens) == 0 {
+				t.Errorf("restricted row %s declares no Justification for %s — a cross-surface "+
+					"restriction that is neither a recorded divergence nor a recorded applicability "+
+					"boundary reads as a bug rather than a decision",
+					strings.TrimSpace(cells[1]), sentinel)
+				continue
 			}
-			if !strings.Contains(block, "`"+want+"`") && !strings.Contains(block, want) {
-				t.Errorf("restricted row %s declares Justification %s, but the named on-record section "+
-					"does not carry the sentinel — the category and the entry must agree",
-					want, m[1])
+			for _, tok := range tokens {
+				// The category and the referenced SECTION must agree:
+				// divergence tokens point into the policy section (§6),
+				// applicability tokens into the boundaries section (§7).
+				// A crossed reference — a divergence justified by physics,
+				// or physics wearing a decision's number — is exactly the
+				// conflation the split exists to prevent.
+				entries := policyEntries
+				section := "the policy divergences"
+				wantSection := 6
+				if tok.category == "applicability" {
+					entries = boundEntries
+					section = "the applicability boundaries"
+					wantSection = 7
+				}
+				if tok.section != wantSection {
+					t.Errorf("restricted row %s declares Justification %s:%s — the category and the "+
+						"referenced section disagree (a %s is justified by the %s section's entries)",
+						sentinel, tok.category, tok.ref, tok.category, section)
+					continue
+				}
+				entry, ok := entries[tok.number]
+				if !ok {
+					t.Errorf("restricted row %s declares Justification %s:%s, but entry %s does not "+
+						"exist in %s section — an unresolvable reference certifies nothing",
+						sentinel, tok.category, tok.ref, tok.ref, section)
+					continue
+				}
+				if !strings.Contains(entry, sentinel) {
+					t.Errorf("restricted row %s declares Justification %s:%s, but entry %s does not "+
+						"carry the sentinel — the category and the entry must agree",
+						sentinel, tok.category, tok.ref, tok.ref)
+				}
 			}
 		}
 	}
+}
+
+// justTok is one parsed `category:§N.M` declaration.
+type justTok struct {
+	category string // divergence | applicability
+	section  int    // the referenced matrix section (6 or 7)
+	number   int    // the entry's number within that section
+	ref      string // the literal reference, e.g. "§7.1"
+}
+
+// justificationTokens extracts every `category:§N` token that follows the
+// named sentinel's justification. On a combined row each sentinel needs
+// its own token(s); the tokens are taken from the Justification segment of
+// the row and matched in order — a sentinel named by NONE of the row's
+// tokens is undeclared, which is the failure the caller reports.
+func justificationTokens(line, sentinel string) []justTok {
+	idx := strings.Index(line, "Justification:")
+	if idx < 0 {
+		return nil
+	}
+	seg := line[idx:]
+	var toks []justTok
+	for _, m := range justRe.FindAllStringSubmatch(seg, -1) {
+		sec, num := 0, 0
+		for _, ch := range m[2] {
+			sec = sec*10 + int(ch-'0')
+		}
+		for _, ch := range m[3] {
+			num = num*10 + int(ch-'0')
+		}
+		toks = append(toks, justTok{category: m[1], section: sec, number: num, ref: "§" + m[2] + "." + m[3]})
+	}
+	// The token stream belongs to the whole row. Attribute tokens to
+	// sentinels by ORDER: names and tokens appear in the same order on a
+	// well-formed row. A row with fewer tokens than names is reported per
+	// sentinel by the caller (the sentinel whose turn has no token), which
+	// is the "one independently validated token per sentinel" obligation.
+	names := sentinelName.FindAllStringSubmatch(line, -1)
+	nameIdx := -1
+	for i, nm := range names {
+		if nm[1] == sentinel {
+			nameIdx = i
+			break
+		}
+	}
+	if nameIdx < 0 || nameIdx >= len(toks) {
+		return nil
+	}
+	return []justTok{toks[nameIdx]}
+}
+
+// onRecordEntries parses a numbered-entry section ("1. **...** — text")
+// into a map of entry number → entry text.
+func onRecordEntries(t *testing.T, lines []string, header string) map[int]string {
+	t.Helper()
+	block := sectionBlock(t, lines, header)
+	entries := map[int]string{}
+	for _, m := range onRecordEntryRe.FindAllStringSubmatch(block, -1) {
+		n := 0
+		for _, ch := range m[1] {
+			n = n*10 + int(ch-'0')
+		}
+		entries[n] = m[2]
+	}
+	if len(entries) < 5 {
+		t.Fatalf("section %q parsed only %d numbered entries — the parser is not reaching the entries", header, len(entries))
+	}
+	return entries
 }
 
 // The corpus prediction's structural premise, asserted rather than trusted:
@@ -391,10 +494,7 @@ func anyIdentifierUsedAtLine(f *ast.File, fset *token.FileSet, names []string, l
 // against the full name set of the row.
 func gateMatrixRowNamesInLine(t *testing.T, sentinel string) []string {
 	t.Helper()
-	for _, line := range strings.Split(readGateMatrix(t), "\n") {
-		if !strings.HasPrefix(line, "| `") {
-			continue
-		}
+	for _, line := range gateMatrixInventoryLines(t) {
 		names := sentinelName.FindAllStringSubmatch(line, -1)
 		for _, m := range names {
 			if m[1] == sentinel {
@@ -414,12 +514,45 @@ type gateCoord struct {
 	line int
 }
 
+// gateMatrixInventoryLines returns ONLY the lines of the canonical inventory:
+// the interval from the first §1 table through the end of §5. The on-record
+// sections (policy divergences, physical applicability) and every later
+// section are excluded — a sentinel named in a TABLE there is a mention,
+// not a membership, and a deleted inventory row must not be resurrected by
+// an entry added to an on-record section. The boundary is computed, not a
+// hand-maintained line number: the interval starts at the "## 1." header
+// and ends at the "## 6." header, so renumbering the on-record sections
+// cannot silently widen the inventory.
+func gateMatrixInventoryLines(t *testing.T) []string {
+	t.Helper()
+	lines := strings.Split(readGateMatrix(t), "\n")
+	start, end := -1, -1
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "## 1. "):
+			start = i
+		case start >= 0 && strings.HasPrefix(l, "## 6. "):
+			end = i
+		}
+		if end >= 0 {
+			break
+		}
+	}
+	if start < 0 || end < 0 {
+		t.Fatalf("%s lacks the §1..§5 inventory interval (found §1 at line %d, §6 at %d) — the walk's "+
+			"membership boundary is computed from these headers and cannot work without them",
+			gateMatrixPath, start, end)
+	}
+	return lines[start:end]
+}
+
 // gateMatrixRowNames is the row-scoped membership set: every sentinel named
-// in a §1–§5 inventory table row. Prose mentions do not count.
+// in a §1–§5 inventory table row. Mentions elsewhere — prose, the on-record
+// sections, any table outside the interval — do not count.
 func gateMatrixRowNames(t *testing.T) map[string]bool {
 	t.Helper()
 	rows := map[string]bool{}
-	for _, line := range strings.Split(readGateMatrix(t), "\n") {
+	for _, line := range gateMatrixInventoryLines(t) {
 		if !strings.HasPrefix(line, "| `") {
 			continue
 		}
@@ -428,14 +561,14 @@ func gateMatrixRowNames(t *testing.T) map[string]bool {
 		}
 	}
 	if len(rows) < 30 {
-		t.Fatalf("only %d sentinel rows parsed from %s — the parser is not reaching the table", len(rows), gateMatrixPath)
+		t.Fatalf("only %d sentinel rows parsed from the %s inventory interval — the parser is not reaching the table", len(rows), gateMatrixPath)
 	}
 	return rows
 }
 
 // gateMatrixRows parses the inventory rows with their coordinates. A row is
-// any table line whose first cell is a `SentinelName` in backticks; the
-// coordinates are every "name.go:123" in the row.
+// any inventory-interval table line whose first cell is a `SentinelName`
+// in backticks; the coordinates are every "name.go:123" in the row.
 //
 // Slash-combined rows name several sentinels, and a coordinate is attributed
 // to EVERY name on the row — which means a combined row's coordinates must
@@ -445,7 +578,7 @@ func gateMatrixRowNames(t *testing.T) map[string]bool {
 func gateMatrixRows(t *testing.T) map[string][]gateCoord {
 	t.Helper()
 	rows := map[string][]gateCoord{}
-	for _, line := range strings.Split(readGateMatrix(t), "\n") {
+	for _, line := range gateMatrixInventoryLines(t) {
 		if !strings.HasPrefix(line, "| `") {
 			continue
 		}
@@ -464,7 +597,7 @@ func gateMatrixRows(t *testing.T) map[string][]gateCoord {
 		}
 	}
 	if len(rows) < 30 {
-		t.Fatalf("only %d sentinel rows parsed from %s — the parser is not reaching the table", len(rows), gateMatrixPath)
+		t.Fatalf("only %d sentinel rows parsed from the %s inventory interval — the parser is not reaching the table", len(rows), gateMatrixPath)
 	}
 	return rows
 }
