@@ -8,8 +8,10 @@ import (
 	"net"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/exec"
 )
 
@@ -247,6 +249,14 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 	}
 
 	if err != nil {
+		var deferred *exec.DeferredExtendedRefusal
+		if errors.As(err, &deferred) && validTxStatus(deferred.TxStatus) {
+			if !l.frameExtendedError(conn, be, sess, deferred, peer, seg, closeReason) {
+				return false
+			}
+			seg.discarding = false
+			return l.sendReadinessWith(conn, be, deferred.TxStatus, closeReason)
+		}
 		return l.frameExtendedError(conn, be, sess, err, peer, seg, closeReason)
 	}
 	if !validTxStatus(status) {
@@ -268,21 +278,34 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 func (l *Listener) frameExtendedError(conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, err error, peer string, seg *segmentLane, closeReason *string) bool {
 
-	if reason, ok := exec.AdmissionReason(err); ok {
-		frame := admissionErrorFrame(reason, true)
-		rule := string(reason.Code)
-		l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: reason.Detail})
-		be.Send(frame)
-		if ferr := l.flushBounded(conn, be); ferr != nil {
-			*closeReason = "write-failed"
-			return false
+	if !errors.Is(err, exec.ErrWireFaceLost) && !admission.IsOperationalError(err) {
+		if reason, ok := frameableAdmissionReason(err); ok {
+			frame := admissionErrorFrame(reason, true)
+			rule := string(reason.Code)
+			l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: reason.Detail})
+			be.Send(frame)
+			if ferr := l.flushBounded(conn, be); ferr != nil {
+				*closeReason = "write-failed"
+				return false
+			}
+			if !reason.Continue {
+				*closeReason = rule
+				return false
+			}
+			seg.discarding = true
+			return true
 		}
-		if !reason.Continue {
-			*closeReason = rule
-			return false
+		var target *pgconn.PgError
+		if errors.As(err, &target) {
+			l.onEvent(Event{Kind: "fd.refused", Reason: target.Code, Peer: peer, Detail: target.Message})
+			be.Send(targetErrorFrame(target))
+			if ferr := l.flushBounded(conn, be); ferr != nil {
+				*closeReason = "write-failed"
+				return false
+			}
+			seg.discarding = true
+			return true
 		}
-		seg.discarding = true
-		return true
 	}
 	code, rule, hint, fatal := classifyGateError(err)
 	l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()})
@@ -388,6 +411,16 @@ func (l *Listener) admitSegmentFrame(conn net.Conn, be *pgproto3.Backend, fr *fr
 	// any more than the crossing frame's was. What changes is that it is not
 	// re-judged and not re-reported.
 	if seg.discarding {
+		if h.typ == 'H' {
+			// PostgreSQL ignores Flush after a segment error, but its ErrorResponse
+			// is already outbound. Flush this proxy's buffered response before
+			// discarding the client's empty Flush frame.
+			if ferr := l.flushBounded(conn, be); ferr != nil {
+				*closeReason = "write-failed"
+				return false
+			}
+			seg.ran = false
+		}
 		fr.skipFrame(h)
 		return true
 	}
@@ -671,6 +704,9 @@ func (l *Listener) runExtendedStream(ctx context.Context, conn net.Conn, be *pgp
 		// Every branch above returned, so reaching here means the drive completed,
 		// nothing was withheld or unframeable, AND the bytes are on the wire.
 		seg.ran = false
+	}
+	if acct.targetFailed {
+		seg.discarding = true
 	}
 	// AN EXECUTE DOES NOT FLUSH. The client asks for delivery with Flush or Sync,
 	// exactly as it would of PostgreSQL; sending an Execute's output before the

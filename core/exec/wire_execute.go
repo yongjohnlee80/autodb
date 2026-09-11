@@ -67,7 +67,7 @@ func (e *Engine) wireExecuteClaimed(ctx context.Context, s *session, sqlText, ip
 			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
 		}
 	}
-	return e.executeSessionUnit(ctx, s, pol, sqlText, ip, true)
+	return e.executeSessionUnit(ctx, s, pol, sqlText, ip, true, closeAfterRelease)
 }
 
 // wireAdmit is the wire path's preamble, shared by the decoded and the raw
@@ -107,7 +107,7 @@ func (e *Engine) wireAdmit(ctx context.Context, s *session, sqlText, ip string, 
 // Control authorization remains surface-owned because its two independent
 // gates are load-bearing P2 evidence; ordinary execution shares everything.
 func (e *Engine) executeSessionUnit(
-	ctx context.Context, s *session, pol UnitPolicy, sqlText, ip string, wire bool,
+	ctx context.Context, s *session, pol UnitPolicy, sqlText, ip string, wire bool, closeAfterRelease *bool,
 ) (*Result, error) {
 
 	connRow, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, s.connID).Get()
@@ -147,9 +147,9 @@ func (e *Engine) executeSessionUnit(
 	// the same reason.
 	if stmt.Class == ClassControl {
 		if wire {
-			return e.wireControl(ctx, s, connRow, stmt, pol, sqlText, ip)
+			return e.wireControl(ctx, s, connRow, stmt, pol, sqlText, ip, closeAfterRelease)
 		}
-		return e.tokenControl(ctx, s, connRow, stmt, pol, sqlText, ip)
+		return e.tokenControl(ctx, s, connRow, stmt, pol, sqlText, ip, closeAfterRelease)
 	}
 
 	// THE STATEMENT GATES, through the one chain. The legacy session path
@@ -187,7 +187,7 @@ func (e *Engine) executeSessionUnit(
 // wireControl routes a transaction verb on a PAT-backed wire session.
 func (e *Engine) wireControl(
 	ctx context.Context, s *session, connRow *meta.Connection,
-	stmt Statement, pol UnitPolicy, sqlText, ip string,
+	stmt Statement, pol UnitPolicy, sqlText, ip string, closeAfterRelease *bool,
 ) (*Result, error) {
 	admitErr, opErr := e.runProfileAdmission(e.profileFor(connRow), admission.PhysWire, stmt, sqlText)
 	if opErr != nil {
@@ -236,7 +236,7 @@ func (e *Engine) wireControl(
 	if perr != nil {
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
 	}
-	return e.handleTxControl(ctx, s, pol, connRow, tc, sqlText, ip)
+	return e.handleTxControl(ctx, s, pol, connRow, tc, sqlText, ip, closeAfterRelease)
 }
 
 // authorizeUnit decides a statement's class against an ALREADY-RESOLVED
@@ -304,7 +304,7 @@ func (e *Engine) executeUnit(ctx context.Context, u execUnit) (*Result, error) {
 		wrapped, release, werr := e.wrapReadOnly(ctx, target, u.pol.Ident,
 			u.connRow.ID, u.ip, u.sqlText, u.pol, u.phys)
 		if werr != nil {
-			return nil, werr
+			return nil, e.rejectRecordedAttempt(ctx, u.pol.Ident, u.connRow.ID, u.ip, u.sqlText, attemptID, werr)
 		}
 		if release != nil {
 			defer release()

@@ -511,6 +511,56 @@ func TestAdmission_ADiscardingSegmentIsNotReAdmittedFrameByFrame(t *testing.T) {
 	}
 }
 
+func TestAdmission_DiscardedFlushDeliversBufferedError(t *testing.T) {
+	l, conn, be, fr, refusals := admissionHarness(t)
+	be.Send(gateError("ERROR", sqlStateFeatureNotSupported,
+		"deferred segment refusal", "frontdoor/deferred", "issue Sync"))
+	seg := &segmentLane{discarding: true, ran: true}
+	closeReason := ""
+
+	if !l.admitSegmentFrame(conn, be, fr, seg, frameHeader{typ: 'H', declared: 4}, "probe", &closeReason) {
+		t.Fatalf("discarded Flush closed the session: %s", closeReason)
+	}
+	if seg.ran {
+		t.Fatal("discarded Flush delivered output but left the segment-stall arm set")
+	}
+	if got := refusals(); got != 1 {
+		t.Fatalf("discarded Flush delivered %d buffered ErrorResponses, want 1", got)
+	}
+}
+
+func TestExtendedSync_DeferredRefusalIsFollowedByReadiness(t *testing.T) {
+	q := okQueries()
+	q.syncErr = &exec.DeferredExtendedRefusal{Cause: exec.ErrWireSequenceRefused, TxStatus: txStatusIdle}
+	_, _, addr := listenerWith(t, Options{
+		Authn: &fakeAuth{result: goodSession()}, Queries: q, AuthFailuresPerIP: unthrottled,
+	})
+	conn, fe := authenticated(t, addr)
+	defer func() { _ = conn.Close() }()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	fe.Send(&pgproto3.Sync{})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	first, err := fe.Receive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusal, ok := first.(*pgproto3.ErrorResponse)
+	if !ok || refusal.Detail != "frontdoor/sequence-unsupported" {
+		t.Fatalf("first Sync response = %#v, want deferred sequence ErrorResponse", first)
+	}
+	second, err := fe.Receive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, ok := second.(*pgproto3.ReadyForQuery)
+	if !ok || ready.TxStatus != txStatusIdle {
+		t.Fatalf("second Sync response = %#v, want idle ReadyForQuery", second)
+	}
+}
+
 // AND THE FRAMES BEHIND THE BREACH ARE SKIPPED, NOT DECODED — MEASURED.
 //
 // This cell exists because a mutation found nothing. Dropping fr.skipFrame(h)

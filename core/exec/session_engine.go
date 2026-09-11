@@ -150,7 +150,7 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 	if demoted {
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrTxAuthorityChanged)
 	}
-	return e.executeSessionUnit(ctx, s, pol, sqlText, ip, false)
+	return e.executeSessionUnit(ctx, s, pol, sqlText, ip, false, closeAfterRelease)
 }
 
 // tokenControl preserves the token path's ClassControl authorization floor.
@@ -159,7 +159,7 @@ func (e *Engine) SessionExecute(ctx context.Context, token string, id SessionID,
 // mutation cell independently discriminating.
 func (e *Engine) tokenControl(
 	ctx context.Context, s *session, connRow *meta.Connection,
-	stmt Statement, pol UnitPolicy, sqlText, ip string,
+	stmt Statement, pol UnitPolicy, sqlText, ip string, closeAfterRelease *bool,
 ) (*Result, error) {
 	admitErr, opErr := e.runProfileAdmission(e.profileFor(connRow), admission.PhysSession, stmt, sqlText)
 	if opErr != nil {
@@ -198,7 +198,7 @@ func (e *Engine) tokenControl(
 	if perr != nil {
 		return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
 	}
-	return e.handleTxControl(ctx, s, pol, connRow, tc, sqlText, ip)
+	return e.handleTxControl(ctx, s, pol, connRow, tc, sqlText, ip, closeAfterRelease)
 }
 
 // admitSessionState applies the orchestrated stateful gate and preserves the

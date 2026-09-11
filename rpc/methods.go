@@ -5,13 +5,14 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
-	"github.com/yongjohnlee80/autodb/core/engine"
 	"os"
 	"reflect"
 	"strings"
 	"time"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/exec"
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
 )
@@ -187,11 +188,26 @@ var publicErrs = []struct {
 // decides what is deliberately public — and it publishes the MATCHED
 // SENTINEL's constant text, never err.Error(): a future wrapper adding
 // context ("user 42 from 10.0.0.9: %w") would otherwise export its whole
-// contextual string across the disclosure boundary. Anything unmapped
-// stays server-side and reaches the peer as a generic internal error.
+// contextual string across the disclosure boundary. Structured admission
+// refusals retain the established RPC taxonomy while publishing their
+// stage-authored actionable Detail. Plain legacy sentinel errors still publish
+// only the sentinel's constant text.
+// Anything else stays server-side and reaches the peer as a generic internal
+// error.
 func wireErr(err error) error {
 	if err == nil {
 		return nil
+	}
+	if admission.IsOperationalError(err) {
+		return err
+	}
+	if reason, ok := exec.AdmissionReason(err); ok {
+		for _, pe := range publicErrs {
+			if errors.Is(err, pe.sentinel) {
+				return &golibrpc.Error{Code: pe.code, Message: reason.Detail}
+			}
+		}
+		return &golibrpc.Error{Code: CodeStatementRejected, Message: reason.Detail}
 	}
 	for _, pe := range publicErrs {
 		if errors.Is(err, pe.sentinel) {

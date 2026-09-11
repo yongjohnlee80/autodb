@@ -1,9 +1,31 @@
 package admission
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// OperationalError means an admission stage could not answer its policy
+// question. It is not a refusal: surfaces keep the wrapped cause server-side
+// and project a stable opaque operational response to the client.
+type OperationalError struct {
+	Stage string
+	Cause error
+}
+
+func (e *OperationalError) Error() string {
+	return fmt.Sprintf("admission: stage %s broke: %v", e.Stage, e.Cause)
+}
+
+func (e *OperationalError) Unwrap() error { return e.Cause }
+
+// IsOperationalError reports whether a pipeline evaluation broke rather than
+// producing a refusal.
+func IsOperationalError(err error) bool {
+	var operational *OperationalError
+	return errors.As(err, &operational)
+}
 
 // Orchestrator composes stages into one ordered chain and evaluates a
 // statement through it. The chain is DATA: composed once per profile,
@@ -66,7 +88,7 @@ func (o *Orchestrator) Run(facts Facts, ctx Context) (Report, error) {
 		}
 		contrib, err := s.Apply(facts, ctx)
 		if err != nil {
-			return Report{}, fmt.Errorf("admission: stage %s broke: %w", s.Name(), err)
+			return Report{}, &OperationalError{Stage: s.Name(), Cause: err}
 		}
 		if contrib.Deny != nil {
 			// AN UNDECLARED DENIAL IS A DISCLOSURE VIOLATION, rejected
@@ -76,8 +98,9 @@ func (o *Orchestrator) Run(facts Facts, ctx Context) (Report, error) {
 			// pipeline's consumers cannot know about — honoring it would
 			// silently exempt it from every obligation the seam promises.
 			if !declaresCode(s, contrib.Deny.Code) {
-				return Report{}, fmt.Errorf("admission: stage %s denied with undeclared code %q — "+
-					"declare it in DenyCodes or do not deny with it", s.Name(), contrib.Deny.Code)
+				return Report{}, &OperationalError{Stage: s.Name(), Cause: fmt.Errorf(
+					"denied with undeclared code %q — declare it in DenyCodes or do not deny with it",
+					contrib.Deny.Code)}
 			}
 			rep.Deny = append(rep.Deny, *contrib.Deny)
 			return rep, nil

@@ -131,6 +131,9 @@ func TestA14_AnErrorIsNeverADenial(t *testing.T) {
 	if !strings.Contains(err.Error(), "stage broken broke") {
 		t.Fatalf("the error does not name the stage that broke: %v", err)
 	}
+	if !IsOperationalError(err) {
+		t.Fatalf("the stage failure is not typed as operational: %v", err)
+	}
 	rep := Report{}
 	_ = rep
 	// And the denial half: the run that errors must NOT have produced a

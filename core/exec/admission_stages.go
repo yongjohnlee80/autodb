@@ -3,7 +3,6 @@ package exec
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
@@ -27,6 +26,7 @@ import (
 var registeredAdmissionStages = []admission.Stage{
 	sizeCapStage{}, profileAdmitStage{}, readerAnalysisStage{},
 	authorizeUnitStage{}, guardWhereStage{}, newSessionStateStage(), reportedGrammarStage{},
+	readOnlyEnforcementStage{},
 }
 
 var admissionRegistry = admission.Compose(registeredAdmissionStages...)
@@ -36,6 +36,39 @@ var admissionRegistry = admission.Compose(registeredAdmissionStages...)
 // captured ParameterStatus state and never creates an object on the target.
 type reportedGrammarStage struct {
 	verify func() error
+}
+
+// readOnlyEnforcementStage decides whether a surface that promises target-side
+// read-only enforcement may proceed when the target cannot host a read-only
+// transaction. Establishing the transaction remains a drive-owned effect after
+// the attempt record; this stage owns only the refusal decision.
+type readOnlyEnforcementStage struct{}
+
+func (readOnlyEnforcementStage) Name() string { return "readonlyenforcement" }
+
+func (readOnlyEnforcementStage) ContextNeeds() admission.Needs {
+	return admission.Needs{ReadOnlyUnit: true}
+}
+
+func (readOnlyEnforcementStage) DenyCodes() []admission.Code {
+	return []admission.Code{admission.CodeReadOnlyUnenforceable}
+}
+
+func (readOnlyEnforcementStage) Apply(_ admission.Facts, ctx admission.Context) (admission.Contribution, error) {
+	if ctx.TargetCaps.Has(admission.CapTxReadOnly) {
+		return admission.NoContribution(), nil
+	}
+	if ctx.Phys == admission.PhysPooled || ctx.Phys == admission.PhysSession {
+		return admission.NoContribution(), nil
+	}
+	return admission.Deny(admission.Reason{
+		Code:     admission.CodeReadOnlyUnenforceable,
+		Class:    admission.ClassUnsupported,
+		Detail:   ErrReadOnlyUnenforceable.Error(),
+		Legacy:   ErrReadOnlyUnenforceable,
+		Hint:     "use a target that can enforce read-only transactions",
+		Continue: true,
+	}), nil
 }
 
 func (reportedGrammarStage) Name() string { return "reportedgrammar" }
@@ -56,7 +89,7 @@ func (s reportedGrammarStage) Apply(admission.Facts, admission.Context) (admissi
 		if errors.Is(err, ErrGrammarDrifted) {
 			return admission.Deny(admission.Reason{
 				Code: admission.CodeGrammarDrifted, Class: admission.ClassUnsupported,
-				Detail: err.Error(), Continue: true,
+				Detail: err.Error(), Legacy: err, Continue: true,
 			}), nil
 		}
 		return admission.NoContribution(), err
@@ -89,6 +122,7 @@ func (sizeCapStage) Apply(facts admission.Facts, ctx admission.Context) (admissi
 			Class:    admission.ClassProgramLimit,
 			Subject:  fmt.Sprintf("%d bytes", facts.TextLen()),
 			Detail:   ErrScriptTooLarge.Error(),
+			Legacy:   ErrScriptTooLarge,
 			Continue: true,
 		}), nil
 	}
@@ -130,6 +164,7 @@ func (guardWhereStage) Apply(facts admission.Facts, _ admission.Context) (admiss
 			Class:    admission.ClassPermission,
 			Subject:  lf.stmt.Verb,
 			Detail:   err.Error(),
+			Legacy:   err,
 			Continue: true,
 		}), nil
 	}
@@ -183,6 +218,7 @@ func (p profileAdmitStage) Apply(facts admission.Facts, ctx admission.Context) (
 			Class:    admission.ClassUnsupported,
 			Subject:  lf.stmt.Verb,
 			Detail:   err.Error(),
+			Legacy:   err,
 			Continue: true,
 		}), nil
 	}
@@ -240,6 +276,7 @@ func (s readerAnalysisStage) Apply(facts admission.Facts, ctx admission.Context)
 			Class:    admission.ClassPermission,
 			Subject:  subject,
 			Detail:   denyErr.Error(),
+			Legacy:   denyErr,
 			Continue: true,
 		}), nil
 	}
@@ -279,6 +316,7 @@ func (authorizeUnitStage) Apply(facts admission.Facts, ctx admission.Context) (a
 			Code:     admission.CodeDenied,
 			Class:    admission.ClassPermission,
 			Detail:   err.Error(),
+			Legacy:   err,
 			Continue: true,
 		}), nil
 	}
@@ -396,17 +434,17 @@ func (s sessionStateStage) Apply(facts admission.Facts, ctx admission.Context) (
 func denyFrom(err error) admission.Contribution {
 	switch {
 	case errorsIs(err, ErrSetGUCRefused):
-		return admission.Deny(admission.Reason{Code: admission.CodeSetGUCRefused, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeSetGUCRefused, Class: admission.ClassUnsupported, Detail: err.Error(), Legacy: err, Continue: true})
 	case errorsIs(err, ErrSetNotLocal):
-		return admission.Deny(admission.Reason{Code: admission.CodeSetNotLocal, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeSetNotLocal, Class: admission.ClassUnsupported, Detail: err.Error(), Legacy: err, Continue: true})
 	case errorsIs(err, ErrSetOutsideTx):
-		return admission.Deny(admission.Reason{Code: admission.CodeSetOutsideTx, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeSetOutsideTx, Class: admission.ClassUnsupported, Detail: err.Error(), Legacy: err, Continue: true})
 	case errorsIs(err, ErrLockOutsideTx):
-		return admission.Deny(admission.Reason{Code: admission.CodeLockOutsideTx, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeLockOutsideTx, Class: admission.ClassUnsupported, Detail: err.Error(), Legacy: err, Continue: true})
 	case errorsIs(err, ErrWireSetRefused):
-		return admission.Deny(admission.Reason{Code: admission.CodeWireSetRefused, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeWireSetRefused, Class: admission.ClassUnsupported, Detail: err.Error(), Legacy: err, Continue: true})
 	default:
-		return admission.Deny(admission.Reason{Code: admission.CodeStatementUnsupported, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeStatementUnsupported, Class: admission.ClassUnsupported, Detail: err.Error(), Legacy: err, Continue: true})
 	}
 }
 
@@ -416,33 +454,20 @@ func denyFrom(err error) admission.Contribution {
 // — supplied by the drive, which holds it.
 func errorsIs(err, target error) bool { return errors.Is(err, target) }
 
-// reasonErr maps a Reason back onto the LEGACY SENTINEL its code stands
-// for, so the drives' rejection paths keep the identity — including the
-// errors.Is chain — the callers' error handling is written against. The
-// compatibility surface this phase preserves is the sentinel WRAP, not
-// merely the text: tests and callers ask errors.Is(err, sentinel), so
-// the returned error must wrap the sentinel with the arm's own message.
+// AdmissionError carries a structured refusal through the existing Go error
+// paths. It never interprets Reason.Code: a novel default-handled code must
+// cross the core without a core mapping edit.
 //
-// The adapters compose their Details as "<sentinel text><arm detail>",
-// so the reconstruction is the sentinel wrapped with everything the arm
-// appended beyond the sentinel's own text — the exact shape
-// fmt.Errorf("%w: ...", sentinel) produced before the move.
-func reasonErr(r admission.Reason) error {
-	sentinel, ok := legacySentinelFor(r.Code)
-	if !ok {
-		return fmt.Errorf("exec: unmapped admission code %q (detail %q) — a refusal with no "+
-			"identity mapping must never reach the client", r.Code, r.Detail)
-	}
-	suffix := strings.TrimPrefix(r.Detail, sentinel.Error())
-	var legacy error
-	if suffix == r.Detail && r.Detail != "" {
-		// The detail is not sentinel-prefixed (a future stage's shape);
-		// keep the sentinel wrap and append the detail as context.
-		legacy = fmt.Errorf("%w: %s", sentinel, r.Detail)
-	} else if suffix == "" {
-		legacy = sentinel
-	} else {
-		legacy = fmt.Errorf("%w%s", sentinel, suffix)
+// Phase 1's adapters carry their established errors.Is identity explicitly in
+// Reason.Legacy. Display prose is not compatibility metadata: changing Detail
+// cannot add or remove a sentinel identity.
+func AdmissionError(r admission.Reason) error {
+	legacy := r.Legacy
+	if legacy == nil {
+		legacy = errors.New(r.Detail)
+		if r.Detail == "" {
+			legacy = errors.New("exec: admission refused")
+		}
 	}
 	return admissionRefusal{reason: r, legacy: legacy}
 }
@@ -465,36 +490,22 @@ func AdmissionReason(err error) (admission.Reason, bool) {
 	return refusal.reason, true
 }
 
-// legacySentinelFor is the code→sentinel table: the identity each
-// refusal keeps.
-func legacySentinelFor(c admission.Code) (error, bool) {
-	switch c {
-	case admission.CodeScriptTooLarge:
-		return ErrScriptTooLarge, true
-	case admission.CodeNoWhere:
-		return ErrNoWhere, true
-	case admission.CodeStatementUnsupported:
-		return ErrStatementUnsupported, true
-	case admission.CodeReaderAdvancedPattern:
-		return ErrReaderAdvancedPattern, true
-	case admission.CodeSetGUCRefused:
-		return ErrSetGUCRefused, true
-	case admission.CodeSetNotLocal:
-		return ErrSetNotLocal, true
-	case admission.CodeSetOutsideTx:
-		return ErrSetOutsideTx, true
-	case admission.CodeLockOutsideTx:
-		return ErrLockOutsideTx, true
-	case admission.CodeWireSetRefused:
-		return ErrWireSetRefused, true
-	case admission.CodeDenied:
-		return auth.ErrDenied, true
-	case admission.CodeReadOnlyUnenforceable:
-		return ErrReadOnlyUnenforceable, true
-	case admission.CodeGrammarDrifted:
-		return ErrGrammarDrifted, true
-	}
-	return nil, false
+// legacyAdmissionSentinels is compatibility data, not denial policy. New
+// analyzer rules do not belong here; only an already-supported errors.Is
+// identity does.
+var legacyAdmissionSentinels = []error{
+	ErrScriptTooLarge,
+	ErrNoWhere,
+	ErrStatementUnsupported,
+	ErrReaderAdvancedPattern,
+	ErrSetGUCRefused,
+	ErrSetNotLocal,
+	ErrSetOutsideTx,
+	ErrLockOutsideTx,
+	ErrWireSetRefused,
+	auth.ErrDenied,
+	ErrReadOnlyUnenforceable,
+	ErrGrammarDrifted,
 }
 
 // RegisteredAdmissionCodes exposes the live stage declarations used by
@@ -512,7 +523,3 @@ func RegisteredAdmissionCodes() []admission.Code {
 	}
 	return out
 }
-
-// AdmissionSentinel returns the compatibility sentinel for one registered
-// admission code.
-func AdmissionSentinel(code admission.Code) (error, bool) { return legacySentinelFor(code) }

@@ -3,8 +3,10 @@ package rpc
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/exec"
 	golibrpc "github.com/yongjohnlee80/golib/server/rpc"
@@ -38,16 +40,48 @@ func TestWireErrUnmappedPassesThrough(t *testing.T) {
 
 func TestWireErr_RegisteredAdmissionCodesAreMapped(t *testing.T) {
 	t.Parallel()
-	for _, code := range exec.RegisteredAdmissionCodes() {
-		sentinel, ok := exec.AdmissionSentinel(code)
-		if !ok {
-			t.Errorf("registered admission code %q has no compatibility sentinel", code)
+	codes := exec.RegisteredAdmissionCodes()
+	if len(codes) == 0 {
+		t.Fatal("production admission registration yielded no RPC mapping obligations")
+	}
+	for _, code := range codes {
+		marker := "registered admission refusal " + string(code)
+		var public *golibrpc.Error
+		if !errors.As(wireErr(exec.AdmissionError(admission.Reason{Code: code, Detail: marker})), &public) {
+			t.Errorf("registered admission code %q has no public RPC mapping", code)
 			continue
 		}
-		var public *golibrpc.Error
-		if !errors.As(wireErr(sentinel), &public) {
-			t.Errorf("registered admission code %q (%v) has no public RPC mapping", code, sentinel)
+		if public.Code != CodeStatementRejected || public.Message != marker {
+			t.Errorf("registered admission code %q mapped to %+v", code, public)
 		}
+	}
+}
+
+func TestWireErr_AdmissionDetailPrecedesLegacySentinelFallback(t *testing.T) {
+	detail := exec.ErrNoWhere.Error() + ": UPDATE at nesting depth 2"
+	err := exec.AdmissionError(admission.Reason{
+		Code: admission.CodeNoWhere, Class: admission.ClassPermission, Detail: detail,
+	})
+	got, ok := wireErr(err).(*golibrpc.Error)
+	if !ok {
+		t.Fatalf("wire error = %T, want *rpc.Error", wireErr(err))
+	}
+	if got.Code != CodeStatementRejected || got.Message != detail {
+		t.Fatalf("wire error = %#v, want statement-rejected with actionable detail %q", got, detail)
+	}
+}
+
+func TestWireErr_CatalogOperationalFailureStaysOpaqueWithCause(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("target catalog prod-secret at 10.0.0.5")
+	in := &admission.OperationalError{Stage: "readeranalysis", Cause: fmt.Errorf("%w: %w", auth.ErrDenied, cause)}
+	out := wireErr(in)
+	var public *golibrpc.Error
+	if errors.As(out, &public) {
+		t.Fatalf("catalog operational failure was published to the client: %+v", public)
+	}
+	if out != in || !errors.Is(out, cause) || !strings.Contains(out.Error(), cause.Error()) {
+		t.Fatalf("server-side catalog cause was not preserved: %v", out)
 	}
 }
 

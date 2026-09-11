@@ -163,15 +163,12 @@ func (e *Engine) wrapReadOnly(
 		// remains exactly the boundary it has always been. The unit is
 		// AUDITED so the gap is visible rather than inferred from a driver's
 		// capabilities.
-		switch phys {
-		case admission.PhysWire:
-			return nil, nil, e.reject(ctx, ident, connID, ip, sqlText, ErrReadOnlyUnenforceable)
-		case admission.PhysPooled, admission.PhysSession:
-			// These surfaces retain the compatibility behavior below.
-		default:
-			// PhysicalCtx deliberately has no meaningful zero value. Treat an
-			// omitted or unknown surface as unable to prove the wire guarantee.
-			return nil, nil, e.reject(ctx, ident, connID, ip, sqlText, ErrReadOnlyUnenforceable)
+		admitErr, opErr := e.runReadOnlyEnforcementAdmission(phys, false)
+		if opErr != nil {
+			return nil, nil, opErr
+		}
+		if admitErr != nil {
+			return nil, nil, admitErr
 		}
 		e.auditBounded(ctx, ident.UserID(), ip, "readonly_unenforced",
 			fmt.Sprintf("conn %d: role %s: this target cannot host a read-only transaction; "+
@@ -181,7 +178,7 @@ func (e *Engine) wrapReadOnly(
 
 	rotx, err := beginner.BeginTx(ctx, dao.TxOptions{Access: dao.TxReadOnly})
 	if err != nil {
-		return nil, nil, e.reject(ctx, ident, connID, ip, sqlText, err)
+		return nil, nil, &admission.OperationalError{Stage: "readonlyenforcement", Cause: err}
 	}
 	// ROLLED BACK, never committed: a read-only transaction has nothing to
 	// commit, and a rollback cannot return an ambiguous outcome — so the

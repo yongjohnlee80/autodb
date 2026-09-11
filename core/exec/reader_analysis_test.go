@@ -37,8 +37,8 @@ func TestReaderAnalysisStage_Decision(t *testing.T) {
 		if rep.IsDenied() != tc.want {
 			t.Fatalf("[%s] refused=%v want %v", tc.name, rep.IsDenied(), tc.want)
 		}
-		if deny, ok := rep.PrimaryDeny(); ok && !errors.Is(reasonErr(deny), ErrReaderAdvancedPattern) {
-			t.Fatalf("[%s] wrong error type: %v", tc.name, reasonErr(deny))
+		if deny, ok := rep.PrimaryDeny(); ok && !errors.Is(AdmissionError(deny), ErrReaderAdvancedPattern) {
+			t.Fatalf("[%s] wrong error type: %v", tc.name, AdmissionError(deny))
 		}
 	}
 }
@@ -66,7 +66,7 @@ func TestReaderAnalysisStage_NoOpForEditors(t *testing.T) {
 	if !ok {
 		t.Fatal("reader DO was admitted by the stage")
 	}
-	if !errors.Is(reasonErr(deny), ErrReaderAdvancedPattern) {
-		t.Fatalf("reader DO not refused by the stage: %v", reasonErr(deny))
+	if !errors.Is(AdmissionError(deny), ErrReaderAdvancedPattern) {
+		t.Fatalf("reader DO not refused by the stage: %v", AdmissionError(deny))
 	}
 }

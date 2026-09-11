@@ -100,7 +100,7 @@ func readerAnalysis(facts admission.Facts, ctx admission.Context, userRoutines f
 		// Without the catalog the stage cannot tell user code from the language;
 		// refusing every call would break ordinary reader queries (count, now).
 		// The READ ONLY wrap still stands. Audited by the caller's rejection path.
-		return "", nil, fmt.Errorf("%w: the target's routine catalog could not be read (%v)", ErrReaderAdvancedPattern, err)
+		return "", nil, fmt.Errorf("exec: reading target routine catalog: %w", err)
 	}
 	for _, call := range calls {
 		switch {

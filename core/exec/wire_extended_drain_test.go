@@ -197,6 +197,28 @@ func TestExtDrain_OwnedControlIsAnsweredLocallyAndInOrder(t *testing.T) {
 	}
 }
 
+func TestExtDrain_DeferredRefusalKeepsItsSegmentPosition(t *testing.T) {
+	o := newExtObjects()
+	o.queueSynth(WireMessage{Kind: "ParseComplete"})
+	o.queueSynth(WireMessage{Kind: "BindComplete"})
+	o.queueRefusal(&DeferredExtendedRefusal{Cause: ErrWireSequenceRefused})
+	o.queueSynth(WireMessage{Kind: "CommandComplete", Tag: "must-not-pass-refusal"})
+	if segmentAwaitsWire(o.segment) {
+		t.Fatal("a synthetic segment with a deferred refusal was mistaken for target-bound work")
+	}
+
+	var got []string
+	_, err := drainExtendedCounting(context.Background(), &hostileConn{}, o,
+		func(m WireMessage) error { got = append(got, m.Kind); return nil }, nil)
+	if !errors.Is(err, ErrWireSequenceRefused) {
+		t.Fatalf("drain error = %v, want deferred ErrWireSequenceRefused", err)
+	}
+	want := []string{"ParseComplete", "BindComplete"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("frames before deferred refusal = %v, want %v", got, want)
+	}
+}
+
 // A Describe of a control statement answers ParameterDescription + NoData: no
 // parameters, no rows. Both are one frame's answer, so the drain must not stop
 // at the first.

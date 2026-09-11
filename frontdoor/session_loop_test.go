@@ -236,6 +236,10 @@ func (q *fakeQueries) WireSyncSegment(_ context.Context, _ exec.SessionID, _ int
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.syncErr != nil {
+		var deferred *exec.DeferredExtendedRefusal
+		if errors.As(q.syncErr, &deferred) {
+			return deferred.TxStatus, q.syncErr
+		}
 		return 0, q.syncErr
 	}
 	return q.txStatus, nil

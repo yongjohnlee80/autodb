@@ -94,6 +94,14 @@ type Engine struct {
 	// EXACT bytes handed to the wire. Cells use it to prove the gate ran on the
 	// same text that was dispatched and that refused buffers dispatch nothing.
 	hookRawDispatch func(sqlText string)
+	// hookSessionSQL observes SQL operations on a proxied backend with their
+	// owner. It is test-only evidence for namespaces PostgreSQL cannot catalog,
+	// notably savepoints; client relay and autodb control work stay distinct.
+	hookSessionSQL func(sessionSQLOrigin, string)
+	// hookBeginProxiedTx injects transaction-establishment failures after a real
+	// wire session is pinned. It keeps the raw producer's completed-attempt
+	// failure path observable without replacing the pinned transport.
+	hookBeginProxiedTx func(context.Context, golibpg.PinnedConn, dao.TxOptions) (dao.ContextTxConn, error)
 	// hookWrapPinned, when set, substitutes the value whose ParameterStatusReporter
 	// capability OpenWireSessionWith consults (tests: a wrapper without the
 	// capability, or with an incomplete set) so row 3.1's fail-closed arms can be
@@ -571,7 +579,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 		wrapped, release, werr := e.wrapReadOnly(ctx, target, ident, connID, ip, sqlText,
 			unitPol, admission.PhysPooled)
 		if werr != nil {
-			return nil, werr
+			return nil, e.rejectRecordedAttempt(ctx, ident, connID, ip, sqlText, attemptID, werr)
 		}
 		if release != nil {
 			defer release()
@@ -580,7 +588,6 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 			pinned = wrapped
 		}
 	}
-
 	res := &Result{Verb: stmt.Verb, Class: stmt.Class}
 	start := e.now()
 	var runErr error
@@ -624,6 +631,34 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 func (e *Engine) reject(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string, cause error) error {
 	detail := fmt.Sprintf("conn %d: %v: %s", connID, cause, truncate(sqlText, maxAuditSQLBytes))
 	if err := e.auth.Audit(ctx, ident.UserID(), ip, "exec_rejected", detail); err != nil {
+		return err
+	}
+	return cause
+}
+
+// rejectRecordedAttempt records the terminal refusal and advances the history
+// row atomically. StatusError is honest here: the statement did not execute,
+// and the exec_rejected audit action preserves that it was refused rather than
+// failed by the target.
+func (e *Engine) rejectRecordedAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string, histID int64, cause error) error {
+	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	errText := truncate(cause.Error(), maxErrorBytes)
+	detail := fmt.Sprintf("conn %d: %v: %s", connID, cause, truncate(sqlText, maxAuditSQLBytes))
+	if err := dao.RunTx(recCtx, func(tx *dao.Transaction) error {
+		if err := e.auth.AuditTx(tx, ident.UserID(), ip, "exec_rejected", detail); err != nil {
+			return err
+		}
+		if !e.history || histID == 0 {
+			return nil
+		}
+		if err := e.store.History.On(tx).With(meta.HistID, histID).
+			Set(meta.HistStatus, StatusError).Set(meta.HistError, errText).
+			Update(); err != nil {
+			return fmt.Errorf("exec: completing refused history: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return err
 	}
 	return cause

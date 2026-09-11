@@ -212,6 +212,9 @@ type extObjects struct {
 // frames is answered by the front door; an empty one is answered by the server.
 type segStep struct {
 	synth []WireMessage
+	// refusal is a front-door-owned error whose response belongs at this exact
+	// position in the segment. It is returned only after earlier replies drain.
+	refusal error
 
 	// obj names the object this frame CREATES, when it creates one. Nil for
 	// frames that create nothing (Describe, Execute, Close).
@@ -325,6 +328,10 @@ func (o *extObjects) queueExec() { o.segment = append(o.segment, segStep{exec: t
 // shapes the protocol defines for it.
 func (o *extObjects) queueSynth(msgs ...WireMessage) {
 	o.segment = append(o.segment, segStep{synth: msgs})
+}
+
+func (o *extObjects) queueRefusal(err error) {
+	o.segment = append(o.segment, segStep{refusal: err})
 }
 
 // queueSynthFor is queueSynth for a frame that CREATES an object.

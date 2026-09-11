@@ -151,7 +151,6 @@ func TestNoHandRolledSessionClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	checked, implHasBegin := 0, false
-	wireExtExemptionUsed := false
 	var offenders []string
 
 	for _, path := range files {
@@ -188,28 +187,6 @@ func TestNoHandRolledSessionClaim(t *testing.T) {
 					implHasBegin = true
 					return true
 				}
-				// wireExtEntry is EXEMPT BY NAME, and the exemption is a
-				// GUARDED CLAIM rather than a bypass — see
-				// TestOnlyTheTwoAdmissionPathsEnforceTransactionAuthority, which
-				// fails the day its premise stops being true.
-				//
-				// Its release is `func() { s.finish() }` — no closeAfterRelease,
-				// no finishClosing. TRACED, not assumed: the close comes from
-				// transferDemotionClose, which is reached only when
-				// enforceTransactionAuthority returns an error, and that function
-				// has exactly two non-test callers — session_engine.go (the token
-				// path) and wire_execute.go (inside wireAdmit). The extended path
-				// calls resolveUnitPolicy three times and enforceTransactionAuthority
-				// never, so the demotion close cannot arise there.
-				//
-				// So the simpler release is CORRECT, not an oversight, and folding
-				// it into claimSession would ADD a close path the extended protocol
-				// does not have. Exempted by NAME rather than by shape so a future
-				// hand-rolled claim cannot inherit the exemption by looking similar.
-				if fd.Name.Name == "wireExtEntry" {
-					wireExtExemptionUsed = true
-					return true
-				}
 				offenders = append(offenders,
 					filepath.Base(path)+" in "+fd.Name.Name)
 				return true
@@ -225,23 +202,6 @@ func TestNoHandRolledSessionClaim(t *testing.T) {
 	if !implHasBegin {
 		t.Fatal("claimSession does not call s.begin(); the assertion below then holds " +
 			"because the session claim has ceased to exist, which is the vacuous pass")
-	}
-	// AND THE EXEMPTION MUST STILL BE LIVE.
-	//
-	// A named exemption for a site that no longer exists is not dormant: it
-	// stands ready to excuse whatever is written under that name next. If
-	// wireExtEntry stops claiming a session itself, this guard silently
-	// pre-authorises whatever a future wireExtEntry does with s.begin().
-	//
-	// The fourth part of the exemption mechanism, after: exempt by name, state
-	// the reason, guard the premise. Adopted across every named-exemption guard
-	// in the tree after a sibling guard's first exemption list was found to
-	// carry four entries naming sites that had none — every one of them a path
-	// guessed at rather than opened.
-	if !wireExtExemptionUsed {
-		t.Fatal("wireExtEntry does not call s.begin(), so its exemption is dead. " +
-			"An exemption nothing uses does not lapse — it waits, and excuses the " +
-			"next thing written there.")
 	}
 	if len(offenders) > 0 {
 		t.Fatalf("s.begin() is called outside claimSession:\n  %s\n\n"+

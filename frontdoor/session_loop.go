@@ -955,7 +955,7 @@ func armFromWhatIsKnown(stopped *exec.EmitStopped, status byte, targetFailed boo
 func (l *Listener) frameGateError(conn net.Conn, be *pgproto3.Backend, sess exec.WireSessionResult,
 	err error, peer string, closeReason *string) bool {
 
-	if reason, ok := exec.AdmissionReason(err); ok {
+	if reason, ok := frameableAdmissionReason(err); ok {
 		frame := admissionErrorFrame(reason, true)
 		rule := string(reason.Code)
 		l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: reason.Detail})
@@ -1190,6 +1190,10 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 		return sqlStateProtocolViolation, "frontdoor/wire-face-lost",
 			"the session's connection to the target failed; reconnect", true
 
+	case admission.IsOperationalError(err):
+		return "58000", "frontdoor/admission-unavailable",
+			"retry the statement; if admission remains unavailable, ask the operator", false
+
 	case errors.Is(err, exec.ErrWireSequenceRefused):
 		// OUR refusal, not the target's transport dying. golib's guard declined
 		// the call before it reached the wire, so the connection is exactly as it
@@ -1279,7 +1283,20 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 // for a caller to read; it never includes internal identifiers, which travel in
 // the audit row instead.
 func gateMessage(err error) string {
+	if errors.Is(err, exec.ErrWireFaceLost) {
+		return "the session's connection to the target failed"
+	}
+	if admission.IsOperationalError(err) {
+		return "the admission pipeline could not evaluate this statement"
+	}
 	return err.Error()
+}
+
+func frameableAdmissionReason(err error) (admission.Reason, bool) {
+	if errors.Is(err, exec.ErrWireFaceLost) {
+		return admission.Reason{}, false
+	}
+	return exec.AdmissionReason(err)
 }
 
 // estimateFrameBytes approximates a message's serialized size for the watermark.

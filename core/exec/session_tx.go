@@ -6,13 +6,15 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"github.com/yongjohnlee80/autodb/core/engine"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/yongjohnlee80/golib/dao"
+	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -91,7 +93,7 @@ func newTxID() (string, error) {
 // transition. It runs with the session's execution slot already claimed.
 func (e *Engine) handleTxControl(
 	ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection,
-	tc TxControl, sqlText, ip string,
+	tc TxControl, sqlText, ip string, closeAfterRelease *bool,
 ) (*Result, error) {
 	ident := pol.Ident
 	// AND CHAIN is recognized and refused rather than dropped. Honouring it
@@ -107,7 +109,7 @@ func (e *Engine) handleTxControl(
 
 	switch tc.Action {
 	case TxBegin:
-		return e.beginTx(ctx, s, pol, connRow, tc, sqlText, ip)
+		return e.beginTx(ctx, s, pol, connRow, tc, sqlText, ip, closeAfterRelease)
 	case TxCommit:
 		return e.finishTx(ctx, s, ident, ip, sqlText, true)
 	case TxRollback:
@@ -119,7 +121,7 @@ func (e *Engine) handleTxControl(
 // beginTx opens the session's transaction.
 func (e *Engine) beginTx(
 	ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection,
-	tc TxControl, sqlText, ip string,
+	tc TxControl, sqlText, ip string, closeAfterRelease *bool,
 ) (*Result, error) {
 	ident := pol.Ident
 	s.mu.Lock()
@@ -139,12 +141,13 @@ func (e *Engine) beginTx(
 	// that cannot host a session should say so when the session tries to use
 	// one, not once a transaction is already open and uncleanable.
 	sess, ok := target.(dao.SessionTxBeginner)
+	var pc golibpg.PinnedConn
 	// A wire session that has pinned its backend (WireQuery) opens the
 	// transaction THROUGH the pinned handle, so the raw simple-query face and
 	// this transaction share one backend connection. Opening it on the pool
 	// instead would put the client's statements on a different connection than
 	// its BEGIN — outside the transaction it believes it is in.
-	if pc := s.pinnedConn(); pc != nil {
+	if pc = s.pinnedConn(); pc != nil {
 		sess, ok = pc, true
 	}
 	if !ok {
@@ -191,14 +194,38 @@ func (e *Engine) beginTx(
 
 	// The transaction is opened on the SESSION's context, which outlives this
 	// call — that is what lets a COMMIT arriving later find it alive.
-	tx, err := sess.BeginSessionTx(s.ctx, tc.Options)
+	var tx dao.ContextTxConn
+	if pc != nil {
+		tx, err = e.beginProxiedTx(s.ctx, pc, tc.Options)
+	} else {
+		tx, err = sess.BeginSessionTx(s.ctx, tc.Options)
+	}
 	if err != nil {
+		if pc != nil && pinnedBeginWireUnusable(err) {
+			state, reason := meta.TxRolledBack, meta.ReasonBeginFailed
+			if pinnedBeginResponseLost(err) {
+				// BEGIN crossed the wire and no server answer arrived. There is no
+				// honest rolled-back claim and no reusable session.
+				state, reason = meta.TxUnresolvable, meta.ReasonUnanswered
+			}
+			if closeAfterRelease != nil {
+				*closeAfterRelease = s.transferClose(ip, reasonRawFaceLost)
+			}
+			e.noteTxOutcome(ctx, txTransition{
+				txID: txID, state: state, reason: reason,
+				userID: ident.UserID(), connectionID: s.connID,
+			})
+			return nil, wireFaceLost(&admission.OperationalError{Stage: "transactioncontrol", Cause: err})
+		}
+		if pc != nil && errors.Is(err, golibpg.ErrSegmentInFlight) {
+			err = ErrWireSequenceRefused
+		}
 		// The write-ahead row is now an opened transition for a transaction
 		// that never started. Terminate it here rather than leaving an orphan
 		// the reconciler would have to puzzle over forever: nothing reached
 		// the target, so rolled_back is not a guess.
 		e.noteTxOutcome(ctx, txTransition{
-			txID: txID, state: meta.TxRolledBack, reason: meta.ReasonSessionClosed,
+			txID: txID, state: meta.TxRolledBack, reason: meta.ReasonBeginFailed,
 			userID: ident.UserID(), connectionID: s.connID,
 		})
 		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, err)
@@ -245,6 +272,17 @@ func (e *Engine) beginTx(
 		return nil, err
 	}
 	return &Result{Verb: tc.Verb, Class: ClassControl}, nil
+}
+
+func pinnedBeginResponseLost(err error) bool {
+	var dispatchAware interface{ SafeToRetry() bool }
+	return errors.As(err, &dispatchAware) && !dispatchAware.SafeToRetry()
+}
+
+func pinnedBeginWireUnusable(err error) bool {
+	return pinnedBeginResponseLost(err) ||
+		errors.Is(err, golibpg.ErrPoisoned) || errors.Is(err, golibpg.ErrReleased) ||
+		errors.Is(err, golibpg.ErrTxStillOpen)
 }
 
 // captureTargetXID reads the target's transaction id for the reconciler.

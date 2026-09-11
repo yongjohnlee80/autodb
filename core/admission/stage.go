@@ -97,6 +97,11 @@ type Reason struct {
 	// the explanation without the conflation.
 	Detail string
 
+	// Legacy preserves an established Go errors.Is identity while old callers
+	// migrate to the structured Reason. It is compatibility metadata, never
+	// rendered or interpreted as policy; new analyzer rules leave it nil.
+	Legacy error
+
 	// Hint is an actionable recovery note when the rule has one.
 	Hint string
 

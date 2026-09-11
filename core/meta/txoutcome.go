@@ -80,11 +80,15 @@ const (
 
 	// ReasonTimeout is the reaper's auto-rollback (idle or max duration).
 	ReasonTimeout = "timeout"
-	// ReasonUnanswered: the COMMIT was dispatched and the server never
-	// answered — a transport or context failure, not a deadline. Distinct
+	// ReasonUnanswered: a transaction boundary was dispatched and the server
+	// never answered — a transport or context failure, not a deadline. Distinct
 	// from ReasonTimeout so an operator is not told a timeout occurred when
 	// none did.
 	ReasonUnanswered = "server-unanswered"
+
+	// ReasonBeginFailed means BEGIN definitely did not take effect. The server
+	// either refused it or the driver proved that nothing was dispatched.
+	ReasonBeginFailed = "begin-failed"
 	// ReasonConnectionGone: the connection row was deleted, so no oracle can
 	// be consulted for this transaction again. Distinct from ReasonNoOracle,
 	// which is about the DIALECT having no oracle at all.

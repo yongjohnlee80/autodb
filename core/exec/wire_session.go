@@ -322,7 +322,6 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	if !connectionFrontDoorExposed(connRow) {
 		return out, deny(DenyProfileRefuses)
 	}
-
 	// 4c. The `database` field is now a CONSISTENCY CHECK, not a lookup key
 	// (as ruled).
 	//
@@ -561,7 +560,7 @@ func (e *Engine) applyStartupGUCs(ctx context.Context, s *session, pc golibpg.Pi
 			return admitErr
 		}
 		var targetErr *pgconn.PgError
-		_, derr := sq.SimpleQuery(ctx, sqlText, func(m golibpg.ExtendedMessage) error {
+		_, derr := e.sessionSimpleQuery(ctx, sq, sessionSQLAutodb, sqlText, func(m golibpg.ExtendedMessage) error {
 			if m.Kind == "ErrorResponse" && targetErr == nil {
 				targetErr = m.Err
 			}

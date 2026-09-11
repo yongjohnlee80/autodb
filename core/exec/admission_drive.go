@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -32,11 +33,54 @@ type admissionInputs struct {
 	pinnedSet bool // the pooled drive's onSession fact: a pinned transaction
 }
 
+// These factories are the production compositions. Keep stage construction
+// here: the drives and the chain renderer both consume these exact slices, so
+// the committed rendering changes when production order or membership changes.
+func sizeAdmissionStages() []admission.Stage {
+	return []admission.Stage{sizeCapStage{}}
+}
+
+func wireGrammarAdmissionStages(verify func() error) []admission.Stage {
+	return []admission.Stage{reportedGrammarStage{verify: verify}}
+}
+
+func postPolicyAdmissionStages(userRoutines func() (*udfSet, error)) []admission.Stage {
+	return []admission.Stage{
+		readerAnalysisStage{userRoutines: userRoutines},
+		guardWhereStage{},
+	}
+}
+
+func profileAdmissionStages(profile Profile) []admission.Stage {
+	return []admission.Stage{profileAdmitStage{profile: profile}}
+}
+
+func classAdmissionStages() []admission.Stage {
+	return []admission.Stage{authorizeUnitStage{}}
+}
+
+func sessionStateAdmissionStages() []admission.Stage {
+	return []admission.Stage{newSessionStateStage()}
+}
+
+func readOnlyEnforcementStages() []admission.Stage {
+	return []admission.Stage{readOnlyEnforcementStage{}}
+}
+
+func sessionAdmissionStages(profile Profile, userRoutines func() (*udfSet, error)) []admission.Stage {
+	return []admission.Stage{
+		profileAdmitStage{profile: profile},
+		readerAnalysisStage{userRoutines: userRoutines},
+		authorizeUnitStage{},
+		guardWhereStage{},
+	}
+}
+
 // runSizeAdmission evaluates the intake bound before classification. A zero
 // Statement is intentional: this stage needs only the raw text length.
 func (e *Engine) runSizeAdmission(phys admission.PhysicalCtx, sqlText string) (error, error) {
 	facts := NewLegacyFactsForText(Statement{}, sqlText, len(sqlText))
-	return e.evaluateChain([]admission.Stage{sizeCapStage{}}, facts,
+	return e.evaluateChain(sizeAdmissionStages(), facts,
 		admission.Context{Phys: phys, MaxStatementBytes: e.maxStatementBytes})
 }
 
@@ -53,10 +97,10 @@ func (e *Engine) runWireGrammarAdmission(s *session) (error, error) {
 		return nil, fmt.Errorf("exec: pinned PostgreSQL session has no reported parameter status capability")
 	}
 	statuses := reporter.ReportedParameterStatuses()
-	stage := reportedGrammarStage{verify: func() error {
+	stages := wireGrammarAdmissionStages(func() error {
 		return (postgresDialect{}).VerifyReportedGrammar(func(name string) string { return statuses[name] })
-	}}
-	return e.evaluateChain([]admission.Stage{stage}, NewLegacyFactsForText(Statement{}, "", 0),
+	})
+	return e.evaluateChain(stages, NewLegacyFactsForText(Statement{}, "", 0),
 		admission.Context{Phys: admission.PhysWire})
 }
 
@@ -77,9 +121,7 @@ func (e *Engine) runPrePolicyAdmission(ctx context.Context, in admissionInputs, 
 		PinnedTx: in.pinnedSet,
 	}
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
-	stages := []admission.Stage{
-		profileAdmitStage{profile: e.profileFor(in.connRow)},
-	}
+	stages := profileAdmissionStages(e.profileFor(in.connRow))
 	return e.evaluateChain(stages, facts, actx)
 }
 
@@ -103,12 +145,9 @@ func (e *Engine) runPostPolicyAdmission(ctx context.Context, in admissionInputs,
 		TargetCaps: caps,
 	}
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
-	stages := []admission.Stage{
-		readerAnalysisStage{userRoutines: func() (*udfSet, error) {
-			return e.userRoutines(ctx, in.connRow)
-		}},
-		guardWhereStage{},
-	}
+	stages := postPolicyAdmissionStages(func() (*udfSet, error) {
+		return e.userRoutines(ctx, in.connRow)
+	})
 	return e.evaluateChain(stages, facts, actx)
 }
 
@@ -125,14 +164,14 @@ func (e *Engine) evaluateChain(stages []admission.Stage, facts admission.Facts, 
 		return nil, nil
 	}
 	deny, _ := rep.PrimaryDeny()
-	return reasonErr(deny), nil
+	return AdmissionError(deny), nil
 }
 
 // runProfileAdmission keeps control routing in its drive while moving the
 // capability decision behind the same profile stage ordinary statements use.
 func (e *Engine) runProfileAdmission(profile Profile, phys admission.PhysicalCtx, stmt Statement, sqlText string) (error, error) {
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
-	return e.evaluateChain([]admission.Stage{profileAdmitStage{profile: profile}}, facts,
+	return e.evaluateChain(profileAdmissionStages(profile), facts,
 		admission.Context{Profile: string(profile), Phys: phys})
 }
 
@@ -141,7 +180,7 @@ func (e *Engine) runProfileAdmission(profile Profile, phys admission.PhysicalCtx
 // the chain; WireExecutePortal invokes this anew for every Execute.
 func (e *Engine) runClassAdmission(pol UnitPolicy, phys admission.PhysicalCtx, stmt Statement, sqlText string) (error, error) {
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
-	return e.evaluateChain([]admission.Stage{authorizeUnitStage{}}, facts,
+	return e.evaluateChain(classAdmissionStages(), facts,
 		admission.Context{Phys: phys, ReadOnly: pol.ReadOnly, MayWrite: pol.MayWrite})
 }
 
@@ -149,8 +188,18 @@ func (e *Engine) runClassAdmission(pol UnitPolicy, phys admission.PhysicalCtx, s
 // while moving the SET/RESET/LOCK policy decision behind its adapter.
 func (e *Engine) runSessionStateAdmission(pol UnitPolicy, phys admission.PhysicalCtx, txOpen bool, stmt Statement, sqlText string) (error, error) {
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
-	return e.evaluateChain([]admission.Stage{newSessionStateStage()}, facts,
+	return e.evaluateChain(sessionStateAdmissionStages(), facts,
 		admission.Context{Phys: phys, ReadOnly: pol.ReadOnly, MayWrite: pol.MayWrite, TxOpen: txOpen})
+}
+
+func (e *Engine) runReadOnlyEnforcementAdmission(phys admission.PhysicalCtx, available bool) (error, error) {
+	var caps admission.TargetCaps
+	if available {
+		caps |= admission.CapTxReadOnly
+	}
+	return e.evaluateChain(readOnlyEnforcementStages(), NewLegacyFactsForText(Statement{}, "", 0), admission.Context{
+		Phys: phys, ReadOnly: true, TargetCaps: caps,
+	})
 }
 
 // sessionStages is the session drive's composition: exactly the gates its
@@ -169,14 +218,9 @@ func (e *Engine) runSessionStateAdmission(pol UnitPolicy, phys admission.Physica
 // The session, wire-simple and extended-Parse discriminator cells pin each
 // collision independently from the preservation evidence.
 func (e *Engine) sessionStages(ctx context.Context, connRow *meta.Connection) []admission.Stage {
-	return []admission.Stage{
-		profileAdmitStage{profile: e.profileFor(connRow)},
-		readerAnalysisStage{userRoutines: func() (*udfSet, error) {
-			return e.userRoutines(ctx, connRow)
-		}},
-		authorizeUnitStage{},
-		guardWhereStage{},
-	}
+	return sessionAdmissionStages(e.profileFor(connRow), func() (*udfSet, error) {
+		return e.userRoutines(ctx, connRow)
+	})
 }
 
 // sessionAdmissionCtx is the production Context construction for the
@@ -217,4 +261,55 @@ func (e *Engine) sessionAdmissionCtx(connRow *meta.Connection, pol UnitPolicy, s
 func (e *Engine) runSessionAdmission(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, txOpen bool, stmt Statement, sqlText string) (error, error) {
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
 	return e.evaluateChain(e.sessionStages(ctx, connRow), facts, e.sessionAdmissionCtx(connRow, pol, s, txOpen))
+}
+
+// renderAdmissionChains prints the current production stage compositions in a
+// reviewable drive map. Every O stage list comes from the same factory used by
+// production. D and R annotations are explanatory topology, intentionally
+// review-maintained rather than claimed as source-derived control-flow proof.
+func renderAdmissionChains() string {
+	chain := func(stages []admission.Stage) string {
+		rendered := admission.Compose(stages...).Render()
+		for _, stage := range stages {
+			if profile, ok := stage.(profileAdmitStage); ok {
+				return strings.Replace(rendered, profile.Name(), fmt.Sprintf("%s(%s)", profile.Name(), profile.profile), 1)
+			}
+		}
+		return rendered
+	}
+	var b strings.Builder
+	for _, profile := range []Profile{ProfileV1Compat, ProfileSession} {
+		fmt.Fprintf(&b, "profile=%s\n", profile)
+		fmt.Fprintf(&b, "  pooled/ordinary: O1{%s} -> D{Classify} -> O2{%s} -> D{actual-class grant + fresh policy} -> O3{%s} -> D{attempt} -> O4{%s if target capability absent} -> D{per-statement read-only wrap or compatibility audit -> dispatch}\n",
+			chain(sizeAdmissionStages()), chain(profileAdmissionStages(profile)), chain(postPolicyAdmissionStages(nil)), chain(readOnlyEnforcementStages()))
+		fmt.Fprintf(&b, "  pooled/control: O1{%s} -> D{Classify} -> O2{%s} -> D{off-session control refusal; no later boundary}\n",
+			chain(sizeAdmissionStages()), chain(profileAdmissionStages(profile)))
+		fmt.Fprintf(&b, "  rpc-session/ordinary: O1{%s} -> D{Classify; control branches away} -> O2{%s} -> D{tx-state -> attempt} -> O3{%s if target capability absent} -> D{per-statement read-only wrap or compatibility audit -> dispatch}\n",
+			chain(sizeAdmissionStages()), chain(sessionAdmissionStages(profile, nil)), chain(readOnlyEnforcementStages()))
+		fmt.Fprintf(&b, "  rpc-session/control-stateful: O1{%s} -> D{Classify -> control route} -> O2{%s} -> D{control floor} -> O3{%s} -> D{tx-state} -> O4{%s} -> D{RPC SET admin floor -> attempt -> per-statement read-only wrap -> dispatch}\n",
+			chain(sizeAdmissionStages()), chain(profileAdmissionStages(profile)), chain(classAdmissionStages()), chain(sessionStateAdmissionStages()))
+		fmt.Fprintf(&b, "  rpc-session/control-transaction: O1{%s} -> D{Classify -> control route} -> O2{%s} -> D{control floor -> ParseTxControl -> handleTxControl}\n",
+			chain(sizeAdmissionStages()), chain(profileAdmissionStages(profile)))
+		fmt.Fprintf(&b, "  wire-simple/decoded-ordinary: D{reported grammar bypass: no pinned PostgreSQL backend} -> O1{%s} -> D{Classify; control branches away} -> O2{%s} -> D{tx-state -> attempt} -> O3{%s if target capability absent} -> D{per-statement read-only wrap or refusal -> decoded dispatch}\n",
+			chain(sizeAdmissionStages()), chain(sessionAdmissionStages(profile, nil)), chain(readOnlyEnforcementStages()))
+		fmt.Fprintf(&b, "  wire-simple/decoded-control: D{reported grammar bypass: no pinned PostgreSQL backend} -> O1{%s} -> D{Classify -> control route} -> O2{%s} -> D{control floor -> stateful or transaction branch -> stateful only: tx-state} -> O3{%s} -> D{stateful: attempt -> per-statement read-only wrap -> decoded dispatch; transaction: ParseTxControl -> handleTxControl}\n",
+			chain(sizeAdmissionStages()), chain(profileAdmissionStages(profile)), chain(sessionStateAdmissionStages()))
+		fmt.Fprintf(&b, "  wire-simple/raw-ordinary: O1{%s} -> O2{%s} -> D{split + all-statements gate} -> O3{%s} -> D{Classify; control branches away} -> O4{%s} -> D{join -> attempts -> raw-segment read-only wrap -> dispatch}\n",
+			chain(wireGrammarAdmissionStages(nil)), chain(sizeAdmissionStages()), chain(sizeAdmissionStages()), chain(sessionAdmissionStages(profile, nil)))
+		fmt.Fprintf(&b, "  wire-simple/raw-control-stateful: O1{%s} -> O2{%s} -> D{split + all-statements gate} -> O3{%s} -> D{Classify -> control route} -> O4{%s} -> D{control floor -> tx-state} -> O5{%s} -> D{join -> attempt -> raw-segment read-only wrap -> dispatch}\n",
+			chain(wireGrammarAdmissionStages(nil)), chain(sizeAdmissionStages()), chain(sizeAdmissionStages()), chain(profileAdmissionStages(profile)), chain(sessionStateAdmissionStages()))
+		fmt.Fprintf(&b, "  wire-simple/raw-control-transaction: O1{%s} -> O2{%s} -> D{split + all-statements gate} -> O3{%s} -> D{Classify -> owned-control route} -> O4{%s} -> D{control floor -> join -> attempt -> wireControl} -> O5{%s} -> D{control floor -> ParseTxControl -> handleTxControl}\n",
+			chain(wireGrammarAdmissionStages(nil)), chain(sizeAdmissionStages()), chain(sizeAdmissionStages()), chain(profileAdmissionStages(profile)), chain(profileAdmissionStages(profile)))
+		fmt.Fprintf(&b, "  wire-extended/Parse-ordinary: R{segment read-only wrap acquired at entry} -> O1{%s} -> O2{%s} -> D{Classify; empty/control branches away} -> O3{%s} -> D{statement resource reservation -> target Parse}\n",
+			chain(wireGrammarAdmissionStages(nil)), chain(sizeAdmissionStages()), chain(sessionAdmissionStages(profile, nil)))
+		fmt.Fprintf(&b, "  wire-extended/Parse-control: R{segment read-only wrap acquired at entry} -> O1{%s} -> O2{%s} -> D{Classify -> deferred control: reserve/store only; admission waits for Execute}\n",
+			chain(wireGrammarAdmissionStages(nil)), chain(sizeAdmissionStages()))
+		fmt.Fprintf(&b, "  wire-extended/Execute-ordinary: R{segment read-only wrap acquired/retained at entry} -> D{portal lookup -> fresh policy} -> O1{%s} -> O2{%s} -> D{tx-state + inspect segment wrap} -> O3{%s if reader wrap absent} -> D{attempt -> ExecuteOp}\n",
+			chain(wireGrammarAdmissionStages(nil)), chain(classAdmissionStages()), chain(readOnlyEnforcementStages()))
+		fmt.Fprintf(&b, "  wire-extended/Execute-deferred-control: R{segment read-only wrap acquired/retained at entry} -> D{portal lookup -> fresh policy} -> O1{%s} -> D{release segment wrap -> wireControl} -> O2{%s} -> D{control floor -> stateful or transaction branch -> stateful only: tx-state} -> O3{%s} -> D{stateful: attempt -> dispatch; transaction: ParseTxControl -> handleTxControl}\n",
+			chain(wireGrammarAdmissionStages(nil)), chain(profileAdmissionStages(profile)), chain(sessionStateAdmissionStages()))
+		fmt.Fprintf(&b, "  wire-startup/GUC: D{authenticate -> authorize target -> exposure -> reserve -> pin/checkout grammar -> UTF-8 lease -> fresh policy} -> O1{%s} -> D{target SET; repeat per GUC}\n",
+			chain(sessionStateAdmissionStages()))
+	}
+	return b.String()
 }

@@ -137,15 +137,22 @@ func TestWireQueryRaw_OneRefusedStatementRefusesTheWholeBufferBeforeDispatch(t *
 	t.Cleanup(func() {
 		_, _ = f.eng.Execute(context.Background(), f.rootTok, connID, "DROP TABLE IF EXISTS "+table, testIP)
 	})
-	r := runRaw(t, f, sid, userID, "SELECT 1; DELETE FROM "+table)
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("putting the wire session outside a client transaction: %v", rb.err)
+	}
+	r := runRaw(t, f, sid, userID, "INSERT INTO "+table+" VALUES (1); DELETE FROM "+table)
 	if r.err == nil {
-		t.Fatal("a buffer containing an unguarded DELETE was accepted")
+		t.Error("a buffer containing an unguarded DELETE was accepted")
 	}
 	if len(r.dispatch) != 0 {
-		t.Fatalf("the wire saw %d dispatch(es) %q; a refused buffer must dispatch nothing — not even the statements before the refused one", len(r.dispatch), r.dispatch)
+		t.Errorf("the wire saw %d dispatch(es) %q; a refused buffer must dispatch nothing — not even the statements before the refused one", len(r.dispatch), r.dispatch)
 	}
 	if len(r.msgs) != 0 {
-		t.Fatalf("%d messages emitted for a refused buffer, want 0", len(r.msgs))
+		t.Errorf("%d messages emitted for a refused buffer, want 0", len(r.msgs))
+	}
+	out, err := f.eng.Execute(ctx, f.rootTok, connID, "SELECT count(*) FROM "+table, testIP)
+	if err != nil || fmt.Sprint(out.Rows[0][0]) != "0" {
+		t.Fatalf("count = %v err %v, want 0; the admitted prefix took effect before the later refusal", out.Rows, err)
 	}
 }
 
