@@ -125,6 +125,17 @@ func NoContribution() Contribution { return Contribution{} }
 // refusal is never an error; conflating them is the failure the split
 // exists to prevent, because "the analyzer could not read the catalog"
 // and "the statement is refused" must reach the client differently.
+//
+// DISCLOSURE IS MANDATORY. DenyCodes declares every Code the stage can
+// deny with — nil for a stage that never denies. The registration walks
+// (the renderer-completeness check, the record-on-every-refusal
+// enumeration) derive their obligations from these declarations, so a
+// denying stage with an undeclared code is a refusal the pipeline's
+// consumers cannot know about: the orchestrator REJECTS a stage whose
+// Apply denies with a code it did not declare, loudly, at evaluation time.
+// An optional interface would let a denying stage evade every downstream
+// obligation while running normally — the central claim of the seam is
+// that it cannot.
 type Stage interface {
 	// Name is the stage's stable identity, used in chain renderings and
 	// order assertions.
@@ -134,6 +145,11 @@ type Stage interface {
 	// chain composition that cannot supply the declared needs makes the
 	// stage ABSENT by construction — inapplicable, not silently empty.
 	ContextNeeds() Needs
+
+	// DenyCodes declares every Code this stage can deny with; nil for a
+	// pure observer. The disclosure is the obligation: the orchestrator
+	// rejects an undeclared denial rather than letting it run.
+	DenyCodes() []Code
 
 	// Apply evaluates one statement's facts in one context.
 	Apply(Facts, Context) (Contribution, error)

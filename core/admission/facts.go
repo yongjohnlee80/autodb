@@ -1,56 +1,5 @@
 package admission
 
-// Scope names the lifecycle a fact belongs to. The extended protocol has no
-// single intake moment — Parse, Bind, Describe and Execute arrive as
-// separate frames over time — so every fact declares when it was fixed and
-// what invalidates it, and every stage declares which scopes it reads.
-//
-// The failure mode this exists to prevent is silent: a chain that ran once
-// per statement and cached its verdict would cache AUTHORITY, so a grant
-// revoked between Parse and Execute would stop refusing — the exact defect
-// the engine's never-cache-authority rule exists to prevent, reintroduced
-// one level up. Caching a portal fact at statement scope is the same class:
-// two Binds of one statement would share the first's parameters.
-type Scope int
-
-const (
-	// ScopeStatement: fixed at Parse; invalidated by closing the named
-	// statement or replacing the unnamed one. Classification and shape
-	// facts live here — they are immutable for the statement's life.
-	ScopeStatement Scope = iota + 1
-
-	// ScopePortal: fixed at Bind; invalidated by closing the portal, by a
-	// transaction's end, or by re-binding. Parameter values and result
-	// formats are portal facts, never statement facts.
-	ScopePortal
-
-	// ScopeSegment: acquired at the first frame of a send-capable segment;
-	// invalidated by Sync, by a target error's discard, or by Terminate.
-	// The extended path's read-only wrap is a segment-scoped RESOURCE,
-	// acquired before any statement exists to record an attempt for.
-	ScopeSegment
-
-	// ScopeExecute: re-fixed at EVERY Execute; nothing survives between two
-	// Executes of the same portal. Authority, grants, role and transaction
-	// state live here — re-resolved, never cached.
-	ScopeExecute
-)
-
-// String names the scope for chain renderings and diagnostics.
-func (s Scope) String() string {
-	switch s {
-	case ScopeStatement:
-		return "statement"
-	case ScopePortal:
-		return "portal"
-	case ScopeSegment:
-		return "segment"
-	case ScopeExecute:
-		return "execute"
-	}
-	return "unknown"
-}
-
 // Mutation is one data-modifying verb found below top level, with the guard
 // input for that verb at ITS OWN depth — a WHERE belonging to an inner
 // subquery is not a guard on the mutation that encloses it.
@@ -97,10 +46,14 @@ const (
 // construction, not by discipline. The optionals below return the zero
 // value and a false; a stage that never asks cannot be surprised by one
 // that is missing.
+//
+// LIFECYCLE SCOPE IS DELIBERATELY NOT HERE YET. The eventual contract —
+// per-fact provenance, per-stage scope requirements, per-Execute
+// recomputation — is introduced with the first drive step that recomputes
+// and asserts it, where it is enforced by the lifecycle mutation cells,
+// rather than frozen here as an unused scalar that claims a model the
+// code does not implement.
 type Facts interface {
-	// Scope reports the finest lifecycle scope these facts are valid at.
-	Scope() Scope
-
 	// Verb is the classified main verb, uppercase.
 	Verb() string
 
