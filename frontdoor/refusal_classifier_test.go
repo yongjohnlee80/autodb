@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/exec"
 )
 
@@ -71,6 +72,27 @@ func TestRefusalClassifier_OneSentinelIsARefusalAndTheRestStayFatal(t *testing.T
 				t.Errorf("fatal = %v, want %v", fatal, c.fatal)
 			}
 		})
+	}
+}
+
+func TestAdmissionErrorFrame_TwoDisclosureModes(t *testing.T) {
+	t.Parallel()
+	reason := admission.Reason{
+		Code: admission.CodeStatementUnsupported, Class: admission.ClassUnsupported,
+		Span: 7, Subject: "UPDATE", Detail: "profile refuses UPDATE", Hint: "change the statement", Continue: true,
+	}
+	post := admissionErrorFrame(reason, true)
+	if post.Code != sqlStateFeatureNotSupported || post.Severity != "ERROR" ||
+		post.Message != reason.Detail || post.Detail != string(reason.Code) ||
+		post.Hint != reason.Hint || post.Position != 7 || post.Where != reason.Subject {
+		t.Fatalf("post-disclosure frame lost Reason fields: %+v", post)
+	}
+	pre := admissionErrorFrame(reason, false)
+	if pre.Code != DenialSQLState || pre.Message != DenialMessage || pre.Detail != "frontdoor/denied" {
+		t.Fatalf("pre-disclosure frame is not uniform: %+v", pre)
+	}
+	if pre.Position != 0 || pre.Where != "" || pre.Hint != "" {
+		t.Fatalf("pre-disclosure frame leaked Reason fields: %+v", pre)
 	}
 }
 

@@ -110,6 +110,12 @@ var publicErrs = []struct {
 	{exec.ErrMalformedStatement, CodeStatementRejected},
 	{exec.ErrNoWhere, CodeStatementRejected},
 	{exec.ErrScriptTooLarge, CodeStatementRejected},
+	{exec.ErrReaderAdvancedPattern, CodeStatementRejected},
+	{exec.ErrWireSetRefused, CodeStatementRejected},
+	{exec.ErrReadOnlyUnenforceable, CodeStatementRejected},
+	{exec.ErrGrammarDrifted, CodeStatementRejected},
+	{exec.ErrConnectionNameTaken, golibrpc.CodeInvalidParams},
+	{exec.ErrConnectionHasHistory, golibrpc.CodeInvalidParams},
 	// Workspace not-found is admin-only reachable (Manage authz runs
 	// BEFORE the lookup, so R13 ordering holds) and carries no internals.
 	{exec.ErrWorkspaceNotFound, golibrpc.CodeInvalidParams},

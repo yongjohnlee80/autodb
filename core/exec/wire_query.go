@@ -64,6 +64,11 @@ type WireMessage struct {
 	Notice       *pgconn.Notice
 	Notification *pgconn.Notification
 
+	// TargetFrame and TargetObjectName attribute a target ErrorResponse to the
+	// extended-protocol frame it answered. They are audit metadata only and are
+	// never serialized to the client.
+	TargetFrame, TargetObjectName string
+
 	ParameterName, ParameterValue string
 }
 

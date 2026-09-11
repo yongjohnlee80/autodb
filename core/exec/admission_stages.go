@@ -24,6 +24,46 @@ import (
 // deny with — mandatory disclosure, rejected at evaluation time if a
 // denial arrives undeclared.
 
+var registeredAdmissionStages = []admission.Stage{
+	sizeCapStage{}, profileAdmitStage{}, readerAnalysisStage{},
+	authorizeUnitStage{}, guardWhereStage{}, newSessionStateStage(), reportedGrammarStage{},
+}
+
+var admissionRegistry = admission.Compose(registeredAdmissionStages...)
+
+// reportedGrammarStage refuses a pinned PostgreSQL session after its reported
+// parsing mode has drifted from the classifier's assumptions. The check reads
+// captured ParameterStatus state and never creates an object on the target.
+type reportedGrammarStage struct {
+	verify func() error
+}
+
+func (reportedGrammarStage) Name() string { return "reportedgrammar" }
+
+func (reportedGrammarStage) ContextNeeds() admission.Needs {
+	return admission.Needs{OnSession: true}
+}
+
+func (reportedGrammarStage) DenyCodes() []admission.Code {
+	return []admission.Code{admission.CodeGrammarDrifted}
+}
+
+func (s reportedGrammarStage) Apply(admission.Facts, admission.Context) (admission.Contribution, error) {
+	if s.verify == nil {
+		return admission.NoContribution(), nil
+	}
+	if err := s.verify(); err != nil {
+		if errors.Is(err, ErrGrammarDrifted) {
+			return admission.Deny(admission.Reason{
+				Code: admission.CodeGrammarDrifted, Class: admission.ClassUnsupported,
+				Detail: err.Error(), Continue: true,
+			}), nil
+		}
+		return admission.NoContribution(), err
+	}
+	return admission.NoContribution(), nil
+}
+
 // sizeCapStage is the intake bound: reject oversized text BEFORE
 // classification, so the audit record always equals what ran — never
 // execute an unaudited tail. It is the first stage in every chain and the
@@ -46,6 +86,7 @@ func (sizeCapStage) Apply(facts admission.Facts, ctx admission.Context) (admissi
 	if ctx.MaxStatementBytes > 0 && facts.TextLen() > ctx.MaxStatementBytes {
 		return admission.Deny(admission.Reason{
 			Code:     admission.CodeScriptTooLarge,
+			Class:    admission.ClassProgramLimit,
 			Subject:  fmt.Sprintf("%d bytes", facts.TextLen()),
 			Detail:   ErrScriptTooLarge.Error(),
 			Continue: true,
@@ -86,6 +127,7 @@ func (guardWhereStage) Apply(facts admission.Facts, _ admission.Context) (admiss
 	if err := guardWhere(lf.stmt); err != nil {
 		return admission.Deny(admission.Reason{
 			Code:     admission.CodeNoWhere,
+			Class:    admission.ClassPermission,
 			Subject:  lf.stmt.Verb,
 			Detail:   err.Error(),
 			Continue: true,
@@ -138,6 +180,7 @@ func (p profileAdmitStage) Apply(facts admission.Facts, ctx admission.Context) (
 	if err := p.profile.admit(lf.stmt, onSession); err != nil {
 		return admission.Deny(admission.Reason{
 			Code:     admission.CodeStatementUnsupported,
+			Class:    admission.ClassUnsupported,
 			Subject:  lf.stmt.Verb,
 			Detail:   err.Error(),
 			Continue: true,
@@ -194,6 +237,7 @@ func (s readerAnalysisStage) Apply(facts admission.Facts, ctx admission.Context)
 	if denyErr != nil {
 		return admission.Deny(admission.Reason{
 			Code:     admission.CodeReaderAdvancedPattern,
+			Class:    admission.ClassPermission,
 			Subject:  subject,
 			Detail:   denyErr.Error(),
 			Continue: true,
@@ -233,6 +277,7 @@ func (authorizeUnitStage) Apply(facts admission.Facts, ctx admission.Context) (a
 	if err := authorizeUnit(lf.stmt, UnitPolicy{ReadOnly: ctx.ReadOnly, MayWrite: ctx.MayWrite}); err != nil {
 		return admission.Deny(admission.Reason{
 			Code:     admission.CodeDenied,
+			Class:    admission.ClassPermission,
 			Detail:   err.Error(),
 			Continue: true,
 		}), nil
@@ -351,17 +396,17 @@ func (s sessionStateStage) Apply(facts admission.Facts, ctx admission.Context) (
 func denyFrom(err error) admission.Contribution {
 	switch {
 	case errorsIs(err, ErrSetGUCRefused):
-		return admission.Deny(admission.Reason{Code: admission.CodeSetGUCRefused, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeSetGUCRefused, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
 	case errorsIs(err, ErrSetNotLocal):
-		return admission.Deny(admission.Reason{Code: admission.CodeSetNotLocal, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeSetNotLocal, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
 	case errorsIs(err, ErrSetOutsideTx):
-		return admission.Deny(admission.Reason{Code: admission.CodeSetOutsideTx, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeSetOutsideTx, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
 	case errorsIs(err, ErrLockOutsideTx):
-		return admission.Deny(admission.Reason{Code: admission.CodeLockOutsideTx, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeLockOutsideTx, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
 	case errorsIs(err, ErrWireSetRefused):
-		return admission.Deny(admission.Reason{Code: admission.CodeWireSetRefused, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeWireSetRefused, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
 	default:
-		return admission.Deny(admission.Reason{Code: admission.CodeStatementUnsupported, Detail: err.Error(), Continue: true})
+		return admission.Deny(admission.Reason{Code: admission.CodeStatementUnsupported, Class: admission.ClassUnsupported, Detail: err.Error(), Continue: true})
 	}
 }
 
@@ -389,15 +434,35 @@ func reasonErr(r admission.Reason) error {
 			"identity mapping must never reach the client", r.Code, r.Detail)
 	}
 	suffix := strings.TrimPrefix(r.Detail, sentinel.Error())
+	var legacy error
 	if suffix == r.Detail && r.Detail != "" {
 		// The detail is not sentinel-prefixed (a future stage's shape);
 		// keep the sentinel wrap and append the detail as context.
-		return fmt.Errorf("%w: %s", sentinel, r.Detail)
+		legacy = fmt.Errorf("%w: %s", sentinel, r.Detail)
+	} else if suffix == "" {
+		legacy = sentinel
+	} else {
+		legacy = fmt.Errorf("%w%s", sentinel, suffix)
 	}
-	if suffix == "" {
-		return sentinel
+	return admissionRefusal{reason: r, legacy: legacy}
+}
+
+type admissionRefusal struct {
+	reason admission.Reason
+	legacy error
+}
+
+func (e admissionRefusal) Error() string { return e.legacy.Error() }
+func (e admissionRefusal) Unwrap() error { return e.legacy }
+
+// AdmissionReason recovers the structured refusal without weakening legacy
+// sentinel identity for existing callers.
+func AdmissionReason(err error) (admission.Reason, bool) {
+	var refusal admissionRefusal
+	if !errors.As(err, &refusal) {
+		return admission.Reason{}, false
 	}
-	return fmt.Errorf("%w%s", sentinel, suffix)
+	return refusal.reason, true
 }
 
 // legacySentinelFor is the code→sentinel table: the identity each
@@ -426,6 +491,28 @@ func legacySentinelFor(c admission.Code) (error, bool) {
 		return auth.ErrDenied, true
 	case admission.CodeReadOnlyUnenforceable:
 		return ErrReadOnlyUnenforceable, true
+	case admission.CodeGrammarDrifted:
+		return ErrGrammarDrifted, true
 	}
 	return nil, false
 }
+
+// RegisteredAdmissionCodes exposes the live stage declarations used by
+// renderer and audit completeness walks.
+func RegisteredAdmissionCodes() []admission.Code {
+	seen := map[admission.Code]bool{}
+	var out []admission.Code
+	for _, reg := range admissionRegistry.Registered() {
+		for _, code := range reg.DenyCod {
+			if !seen[code] {
+				seen[code] = true
+				out = append(out, code)
+			}
+		}
+	}
+	return out
+}
+
+// AdmissionSentinel returns the compatibility sentinel for one registered
+// admission code.
+func AdmissionSentinel(code admission.Code) (error, bool) { return legacySentinelFor(code) }

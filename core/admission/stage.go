@@ -7,6 +7,16 @@ package admission
 // mapping table is a renaming, not a redefinition.
 type Code string
 
+// RefusalClass is the protocol-neutral recovery class a surface maps onto its
+// own status vocabulary.
+type RefusalClass uint8
+
+const (
+	ClassPermission RefusalClass = iota + 1
+	ClassUnsupported
+	ClassProgramLimit
+)
+
 const (
 	// CodeStatementUnsupported: the statement class is not supported
 	// through the engine on this profile — control verbs off a session,
@@ -54,6 +64,10 @@ const (
 	// CodeReadOnlyUnenforceable: a read-only unit on a target that cannot
 	// host a read-only transaction, where the promise was made.
 	CodeReadOnlyUnenforceable Code = "read-only-unenforceable"
+
+	// CodeGrammarDrifted refuses a pinned session whose target parsing mode no
+	// longer matches the mode under which autodb classifies SQL.
+	CodeGrammarDrifted Code = "grammar-drifted"
 )
 
 // Reason is ONE refusal's protocol-neutral identity: what was refused, on
@@ -67,6 +81,9 @@ type Reason struct {
 	// carries it.
 	Code Code
 
+	// Class lets a surface select its status family without knowing the rule.
+	Class RefusalClass
+
 	// Span is the refusal's position in the statement text, 1-based, or
 	// 0 when the refusal is not positional.
 	Span int
@@ -79,6 +96,9 @@ type Reason struct {
 	// would re-merge policy with operational failure; this field keeps
 	// the explanation without the conflation.
 	Detail string
+
+	// Hint is an actionable recovery note when the rule has one.
+	Hint string
 
 	// Continue reports whether the SESSION remains usable after this
 	// refusal — an ERROR, not a FATAL. Whether a locked store leaves a

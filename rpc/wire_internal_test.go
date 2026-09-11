@@ -36,6 +36,21 @@ func TestWireErrUnmappedPassesThrough(t *testing.T) {
 	}
 }
 
+func TestWireErr_RegisteredAdmissionCodesAreMapped(t *testing.T) {
+	t.Parallel()
+	for _, code := range exec.RegisteredAdmissionCodes() {
+		sentinel, ok := exec.AdmissionSentinel(code)
+		if !ok {
+			t.Errorf("registered admission code %q has no compatibility sentinel", code)
+			continue
+		}
+		var public *golibrpc.Error
+		if !errors.As(wireErr(sentinel), &public) {
+			t.Errorf("registered admission code %q (%v) has no public RPC mapping", code, sentinel)
+		}
+	}
+}
+
 // Protocol 5 added the session verbs and no codes for what they refuse,
 // so every session error fell through wireErr unmapped and reached the client
 // as a generic internal failure. A client cannot act on that: "the server
