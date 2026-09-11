@@ -139,6 +139,18 @@ type Context struct {
 	// Aborted reports a failed transaction (recovery controls only).
 	Aborted bool
 
+	// PinnedTx reports whether the caller's execution carries a pinned
+	// transaction — the legacy onSession fact, carried as its OWN field
+	// and deliberately independent of the physical transport. A pooled
+	// stateless call with a session-held transaction pinned is STILL
+	// PhysPooled (transport applicability must not be corrupted), but the
+	// session profile admits its control verbs inside that transaction,
+	// exactly as the legacy gate's pinned != nil answer did. Relabelling
+	// the call as a session would let OnSession-applicable stages run on
+	// a pooled connection; the separate field keeps the two facts two
+	// facts.
+	PinnedTx bool
+
 	// TargetCaps is what the connection's target can do, supplied by the
 	// engine per connection. The zero value means NO capabilities — a
 	// stage requiring any capability is unsatisfiable against it.

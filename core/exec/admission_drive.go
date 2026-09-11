@@ -30,51 +30,69 @@ type admissionInputs struct {
 	pinnedSet bool // the pooled drive's onSession fact: a pinned transaction
 }
 
-// runAdmission composes the declared chain for these inputs, evaluates
-// one statement's facts, and returns the legacy error identity for a
-// refusal — or nil when the statement is admitted.
+// runPrePolicyAdmission evaluates the stages whose legacy position is
+// BEFORE the drive's class authorization and unit-policy resolution:
+// the intake bound and the capability profile. The ORDER the legacy
+// path ran is load-bearing — the profile's ErrStatementUnsupported for
+// an unsupported statement must precede the actual-class Authorize's
+// auth.ErrDenied, because a caller without the class grant who sends a
+// profile-invalid statement must learn the PROFILE's answer, not the
+// grant's (found in the step-3 review; the reorder changed refusal
+// identity for exactly that caller).
 //
-// The stage set is the same for every surface (size before understanding,
-// capability before reader analysis, the guard after the class floor);
-// what differs per drive is the INPUTS, and the inputs are data, not
-// code paths. The session-state stage is composed only where control
-// verbs reach it — on the pooled path the profile layer refuses every
-// control statement, so the stage would never be consulted and is
-// omitted by construction.
-//
-// err is ALWAYS an operational failure (a stage broke); a refusal is the
-// returned legacy error with err == nil. The two must never be confused:
-// "the pipeline could not decide" and "the statement is refused" reach
-// the client differently, and the split is the seam's central promise.
-func (e *Engine) runAdmission(ctx context.Context, in admissionInputs, stages []admission.Stage, stmt Statement, sqlText string, setOK setNameLocal) (error, error) {
-	// The per-evaluation stage inputs, as closures over values the drive
-	// already holds. The reader stage's catalog read is engine I/O bound
-	// to this connection; the profile comes from this connection's row.
+// Operational error: a stage broke; refusal: the legacy identity.
+func (e *Engine) runPrePolicyAdmission(ctx context.Context, in admissionInputs, stmt Statement, sqlText string) (error, error) {
+	actx := admission.Context{
+		Profile:           string(e.profileFor(in.connRow)),
+		Phys:              in.phys,
+		PinnedTx:          in.pinnedSet,
+		MaxStatementBytes: e.maxStatementBytes,
+	}
+	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
+	stages := []admission.Stage{
+		sizeCapStage{},
+		profileAdmitStage{profile: e.profileFor(in.connRow)},
+	}
+	return e.evaluateChain(stages, facts, actx)
+}
+
+// runPostPolicyAdmission evaluates the stages whose legacy position is
+// AFTER the drive's unit-policy resolution: the reader analysis (needs
+// the policy snapshot's read-only verdict and the connection's target
+// capabilities) and the WHERE guard. The policy snapshot arrives as
+// input — resolved FRESH by the drive at every unit, never cached here.
+func (e *Engine) runPostPolicyAdmission(ctx context.Context, in admissionInputs, pol UnitPolicy, stmt Statement, sqlText string) (error, error) {
 	var caps admission.TargetCaps
 	if in.connRow.Engine.HasRoutineCatalog() {
 		caps |= admission.CapRoutineCatalog
 	}
-
-	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
-	if setOK.ok {
-		facts = NewLegacyFacts(stmt, len(sqlText), setOK.name, setOK.local, true)
-		facts.sqlText = sqlText
-	}
-
 	actx := admission.Context{
 		Profile:           string(e.profileFor(in.connRow)),
 		Phys:              in.phys,
-		ReadOnly:          in.pol.ReadOnly,
-		MayWrite:          in.pol.MayWrite,
+		PinnedTx:          in.pinnedSet,
+		ReadOnly:          pol.ReadOnly,
+		MayWrite:          pol.MayWrite,
 		TxOpen:            in.txOpen,
-		Aborted:           false,
 		TargetCaps:        caps,
 		MaxStatementBytes: e.maxStatementBytes,
 	}
+	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
+	stages := []admission.Stage{
+		readerAnalysisStage{userRoutines: func() (*udfSet, error) {
+			return e.userRoutines(ctx, in.connRow)
+		}},
+		guardWhereStage{},
+	}
+	return e.evaluateChain(stages, facts, actx)
+}
 
+// evaluateChain runs one composed slice and maps the outcome onto the
+// drive's two-error convention: refusal (legacy identity, op == nil) or
+// operational break (refusal == nil, op != nil). The invariant is
+// exclusive — exactly one is non-nil — and held by exactly this helper.
+func (e *Engine) evaluateChain(stages []admission.Stage, facts admission.Facts, actx admission.Context) (error, error) {
 	rep, rerr := admission.Compose(stages...).Run(facts, actx)
 	if rerr != nil {
-		// A stage broke: operational, not a refusal.
 		return nil, rerr
 	}
 	if !rep.IsDenied() {
@@ -82,30 +100,4 @@ func (e *Engine) runAdmission(ctx context.Context, in admissionInputs, stages []
 	}
 	deny, _ := rep.PrimaryDeny()
 	return reasonErr(deny), nil
-}
-
-// pooledStages is the pooled drive's composition: exactly the gates its
-// legacy path ran, in the declared order — size before understanding,
-// capability before reader analysis, the guard last. The class floor is
-// the token-level grant Authorize the drive performs itself (a class
-// action lookup the chain cannot see), so the snapshot-floor stage is
-// NOT composed here: adding it would tighten behaviour, which phase 1
-// forbids.
-func (e *Engine) pooledStages(ctx context.Context, connRow *meta.Connection) []admission.Stage {
-	return []admission.Stage{
-		sizeCapStage{},
-		profileAdmitStage{profile: e.profileFor(connRow)},
-		readerAnalysisStage{userRoutines: func() (*udfSet, error) {
-			return e.userRoutines(ctx, connRow)
-		}},
-		guardWhereStage{},
-	}
-}
-
-// setNameLocal is the parsed set-statement shape, for the drives that
-// parsed one before admission (the SET/LOCK arms on the session paths).
-type setNameLocal struct {
-	name  string
-	local bool
-	ok    bool
 }
