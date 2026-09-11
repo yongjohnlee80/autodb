@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,6 +206,84 @@ func TestExtPG_GrantRevokedBetweenParseAndExecuteRefuses(t *testing.T) {
 	}
 	if got := fmt.Sprint(out.Rows[0][0]); got != "0" {
 		t.Errorf("the refused INSERT wrote %s row(s); the refusal came after the effect", got)
+	}
+}
+
+// The extended-Parse ordering delta, through the real drive. The reader's
+// statement violates both the compat profile and reader analysis; the one
+// declared chain answers with the profile identity before consulting the
+// target's routine catalog.
+func TestExtPG_ParseAnswersTheProfileBeforeReaderAnalysis(t *testing.T) {
+	f, connID, sid, userID, table, fn := readerWireSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
+		Set(meta.ConnProfile, string(ProfileV1Compat)).Update(); err != nil {
+		t.Fatalf("setting the compat profile: %v", err)
+	}
+	sql := fmt.Sprintf(
+		"WITH x AS (DELETE FROM %s WHERE note = 'missing' RETURNING note) SELECT %s() FROM x",
+		table, fn)
+	err := f.eng.WireParse(ctx, sid, userID, "delta", sql, nil, testIP)
+	if !errors.Is(err, ErrStatementUnsupported) {
+		t.Fatalf("Parse of the double-violating statement = %v, want ErrStatementUnsupported; "+
+			"the declared profile-before-reader order did not reach the extended drive", err)
+	}
+	if errors.Is(err, ErrReaderAdvancedPattern) {
+		t.Fatalf("Parse answered with the reader-analysis identity: %v", err)
+	}
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
+		t.Fatalf("Sync after the refused Parse: %v", serr)
+	}
+}
+
+// The segment's hidden read-only wrap is acquired at candidate entry, before
+// Parse knows whether it will reject, answer synthetically, or route control.
+// The frame claim is released when Parse returns while the wrap remains until
+// Sync ends the segment.
+func TestExtPG_CandidateParseWrapOutlivesEachFrameAndEndsAtSync(t *testing.T) {
+	f, _, sid, userID, _, _ := readerWireSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	s, lerr := f.eng.sessions.lookup(sid, userID)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	cases := []struct {
+		name    string
+		sql     string
+		wantErr error
+	}{
+		{name: "rejected", sql: strings.Repeat("x", f.eng.maxStatementBytes+1), wantErr: ErrScriptTooLarge},
+		{name: "empty", sql: ""},
+		{name: "owned-control", sql: "BEGIN"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := f.eng.WireParse(ctx, sid, userID, tc.name, tc.sql, nil, testIP)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Parse = %v, want %v", err, tc.wantErr)
+			}
+
+			s.mu.Lock()
+			busy := s.busy
+			s.mu.Unlock()
+			if busy {
+				t.Fatal("Parse returned with the per-frame session claim still held")
+			}
+			if s.ext == nil || s.ext.roWrap == nil {
+				t.Fatal("candidate Parse returned without the segment-scoped read-only wrap")
+			}
+
+			if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
+				t.Fatalf("Sync: %v", serr)
+			}
+			if s.ext.roWrap != nil {
+				t.Fatal("Sync ended the segment but left its read-only wrap open")
+			}
+		})
 	}
 }
 
@@ -542,6 +621,48 @@ func TestExtPG_BinaryParameterFormatIsRelayedVerbatim(t *testing.T) {
 	}
 	if len(row) != 4 || row[3] != 42 {
 		t.Fatalf("binary $1=41 + 1 came back as %v; want the binary 42 — a parameter format or OID was rewritten", row)
+	}
+}
+
+// Bind facts live at portal scope: two portals made from one statement retain
+// their own parameter values. Sharing a statement-scoped parameter snapshot
+// would make one of these Executes return the other portal's value.
+func TestExtPG_TwoPortalsRetainDistinctBindParameters(t *testing.T) {
+	f, _, sid, userID := extSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	if err := f.eng.WireParse(ctx, sid, userID, "shared", "SELECT $1::text", []uint32{25}, testIP); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	portals := []struct {
+		name, value string
+	}{
+		{name: "first", value: "alpha"},
+		{name: "second", value: "beta"},
+	}
+	for _, portal := range portals {
+		if err := f.eng.WireBind(ctx, sid, userID, portal.name, "shared",
+			[][]byte{[]byte(portal.value)}, nil, nil); err != nil {
+			t.Fatalf("bind %s: %v", portal.name, err)
+		}
+	}
+	for _, portal := range portals {
+		var got string
+		if err := f.eng.WireExecutePortal(ctx, sid, userID, portal.name, 0, testIP, func(m WireMessage) error {
+			if m.Kind == "DataRow" && len(m.Values) == 1 {
+				got = string(m.Values[0])
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("execute %s: %v", portal.name, err)
+		}
+		if got != portal.value {
+			t.Fatalf("portal %s returned %q, want its own Bind value %q", portal.name, got, portal.value)
+		}
+	}
+	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
+		t.Fatalf("Sync: %v", serr)
 	}
 }
 
