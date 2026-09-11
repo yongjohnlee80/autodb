@@ -9,6 +9,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // The adapters' identity cells (A3): for every error identity the legacy
@@ -942,4 +943,119 @@ func (pinnedProbeStage) DenyCodes() []admission.Code {
 }
 func (pinnedProbeStage) Apply(admission.Facts, admission.Context) (admission.Contribution, error) {
 	return admission.Deny(admission.Reason{Code: admission.CodeNoWhere, Continue: true}), nil
+}
+
+// The drive-wiring discriminators: the handoff from Engine.run into the
+// split chain is proven through the REAL pooled flow — Execute, token,
+// connection, statement — because a cell on the helper alone stays green
+// when the call is severed from the dispatch.
+//
+// The discriminated callers:
+//   - profile-INVALID + class-UNGRANTED: the pre-policy half must answer
+//     ErrStatementUnsupported (the profile's identity), which proves the
+//     pre-policy call runs BEFORE the class Authorize in run;
+//   - profile-VALID + class-UNGRANTED: the class Authorize must answer
+//     auth.ErrDenied, which proves the Authorize still runs after the
+//     pre-half and its denial reaches the caller;
+//   - PINNED vs UNPINNED pooled control verbs through
+//     runPrePolicyAdmission with admissionInputs — proving the transfer
+//     of the pinned fact from run's own argument into the chain context.
+func TestPooledDrive_WiringPrecedesClassAuthorization(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A reader-granted user (no DDL grant). BEGIN's actual class is
+	// control, whose floor is DDL — ungranted for the reader.
+	readerID, err := f.svc.CreateUser(ctx, f.rootTok, "wiring-reader", "wiring-pass-1", meta.RoleReader, testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	readerTok, _, err := f.svc.Login(ctx, "wiring-reader", "wiring-pass-1", testIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.AddGrant(ctx, f.rootTok, readerID, f.connID, meta.RoleReader, testIP); err != nil {
+		t.Fatal(err)
+	}
+
+	// Profile-INVALID + class-UNGRANTED: BEGIN under the default
+	// (compat) profile is a profile refusal FIRST. The reader has no DDL
+	// grant, so IF the class Authorize ran first the answer would be
+	// auth.ErrDenied; the legacy order — and the split — answer the
+	// profile's identity.
+	if err := f.execErr(t, readerTok, "BEGIN"); !errors.Is(err, ErrStatementUnsupported) {
+		t.Fatalf("profile-invalid + ungranted: err = %v, want ErrStatementUnsupported — the "+
+			"pre-policy half is not wired before the class Authorize", err)
+	}
+
+	// Profile-VALID + class-UNGRANTED: DROP TABLE is admitted by the
+	// compat profile, so the pre-half passes it and the class Authorize's
+	// denial is what the caller sees.
+	if err := f.execErr(t, readerTok, "DROP TABLE t"); !errors.Is(err, auth.ErrDenied) {
+		t.Fatalf("profile-valid + ungranted: err = %v, want auth.ErrDenied — the class "+
+			"Authorize is not wired after the pre-policy half", err)
+	}
+
+	// The audit records back the identity: the profile refusal and the
+	// grant refusal both produced exec_rejected rows, and the store keeps
+	// the refusal texts.
+	n := f.auditCount(t, "exec_rejected")
+	if n < 2 {
+		t.Fatalf("audit rows = %d, want >= 2 — both refusals must record", n)
+	}
+}
+
+// The pinned handoff: run's own pinned argument reaches the chain context
+// through runPrePolicyAdmission — admitted when pinned, refused when not,
+// with the transport staying pooled in both.
+func TestPooledDrive_WiringPinnedTxHandoff(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+
+	// A session-profile connection, so the control-verb admission rides
+	// the pinned fact. The fixture's engine default is compat; set the
+	// connection's profile through the store the way production does.
+	// (The fixture shares one connection; a second one keeps this cell
+	// independent of the others' expectations.)
+	connRow, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	connRow.Profile = string(ProfileSession)
+	if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Set(meta.ConnProfile, string(ProfileSession)).Update(); err != nil {
+		t.Fatalf("setting the session profile on the fixture connection: %v", err)
+	}
+
+	stmt, err := Classify("BEGIN", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// PINNED through the helper the drive calls, with the inputs the
+	// drive passes: admitted.
+	preErr, opErr := f.eng.runPrePolicyAdmission(ctx,
+		admissionInputs{connRow: connRow, phys: admission.PhysPooled, pinnedSet: true},
+		stmt, "BEGIN")
+	if opErr != nil {
+		t.Fatal(opErr)
+	}
+	if preErr != nil {
+		t.Fatalf("pinned pooled BEGIN refused through the wired helper: %v — the pinned "+
+			"fact did not transfer", preErr)
+	}
+
+	// UNPINNED: refused with the profile identity.
+	preErr, opErr = f.eng.runPrePolicyAdmission(ctx,
+		admissionInputs{connRow: connRow, phys: admission.PhysPooled, pinnedSet: false},
+		stmt, "BEGIN")
+	if opErr != nil {
+		t.Fatal(opErr)
+	}
+	if preErr == nil {
+		t.Fatal("unpinned pooled BEGIN admitted — the control verb would run as text on " +
+			"a pooled connection")
+	}
+	if !errors.Is(preErr, ErrStatementUnsupported) {
+		t.Fatalf("unpinned refusal = %v, want ErrStatementUnsupported", preErr)
+	}
 }
