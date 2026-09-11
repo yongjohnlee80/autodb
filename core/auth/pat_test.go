@@ -18,11 +18,9 @@ import (
 // mustFrontDoorConn returns the id of a connection a PAT may legally be bound
 // to, creating it (and the caller's grant on it) on first use.
 //
-// A mint is gated on FOUR things: a grant, profile = session, engine =
-// postgres, and a recorded target_db. A fixture missing any of them makes every
-// mint observe THE GATE rather than whatever the test is about — so the
-// fixture supplies all four, and the tests that exist to exercise the gates
-// call CreatePAT directly with a deliberately broken connection instead.
+// A mint is gated on a grant and explicit front-door exposure. The fixture uses
+// the v1compat capability deliberately: PAT reachability must not reconstruct
+// exposure from the SQL policy profile.
 func mustFrontDoorConn(t *testing.T, s *Service, userID int64) int64 {
 	t.Helper()
 	ctx := context.Background()
@@ -34,7 +32,8 @@ func mustFrontDoorConn(t *testing.T, s *Service, userID int64) int64 {
 	}
 	id, err := s.store.Connections.OnCtx(ctx).
 		Set(meta.ConnName, name).Set(meta.ConnEngine, "postgres").
-		Set(meta.ConnProfile, meta.ProfileSession).
+		Set(meta.ConnProfile, meta.ProfileV1Compat).
+		Set(meta.ConnFrontDoorExposed, int64(1)).
 		Set(meta.ConnTargetDB, "fixture_db").
 		Set(meta.ConnDSNEnc, []byte{1}).Set(meta.ConnCreatedBy, userID).
 		Set(meta.ConnCreatedAt, int64(1)).Set(meta.ConnUpdatedAt, int64(1)).Insert()
@@ -53,6 +52,39 @@ func mustFrontDoorConn(t *testing.T, s *Service, userID int64) int64 {
 		t.Fatalf("granting the fixture connection: %v", gerr)
 	}
 	return id
+}
+
+func TestPAT_MintDependsOnExposureNotCapabilityProfile(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		profile string
+		exposed int64
+		want    bool
+	}{
+		{"v1compat closed", meta.ProfileV1Compat, 0, false},
+		{"session closed", meta.ProfileSession, 0, false},
+		{"v1compat exposed", meta.ProfileV1Compat, 1, true},
+		{"session exposed", meta.ProfileSession, 1, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, store, _ := newSvc(t)
+			tok, ident := mustBootstrap(t, s)
+			connID := mustFrontDoorConn(t, s, ident.UserID())
+			if err := store.Connections.OnCtx(context.Background()).With(meta.ConnID, connID).
+				Set(meta.ConnProfile, tc.profile).Set(meta.ConnFrontDoorExposed, tc.exposed).Update(); err != nil {
+				t.Fatal(err)
+			}
+			_, err := s.CreatePAT(context.Background(), tok, "matrix", connID, 0, nil, false, nil, testIP)
+			if tc.want && err != nil {
+				t.Fatalf("exposed connection was refused: %v", err)
+			}
+			if !tc.want && !errors.Is(err, ErrPATConnNotFrontDoor) {
+				t.Fatalf("closed connection returned %v, want ErrPATConnNotFrontDoor", err)
+			}
+		})
+	}
 }
 
 // patConn is mustFrontDoorConn for a call site that has a token rather than a

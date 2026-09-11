@@ -98,9 +98,7 @@ type Connection struct {
 	// upgrade did on your behalf.
 	Profile string
 	// FrontDoorExposed is the connection's independent front-door reachability
-	// flag. During the profile-split migration, callers preserve legacy
-	// behaviour by also consulting Profile; a later contraction removes that
-	// compatibility read. 0/1, matching users.disabled.
+	// flag. 0/1, matching users.disabled.
 	FrontDoorExposed int64
 	// Debug marks a connection used for debugging against a live target, and
 	// it takes the longer idle-in-transaction bound,
@@ -138,13 +136,9 @@ func (c *Connection) IsDebug() bool { return c.Debug != 0 }
 
 // Connection capability profiles — the permitted values of connections.profile.
 //
-// They live HERE, in the package that owns the column, because both layers
-// above need them and neither may import the other: core/auth gates PAT
-// minting on a connection's profile and core/exec decides
-// statement admission from it, while core/auth sits BELOW core/exec and cannot
-// reach exec.Profile. Defining the literal a second time in auth would make
-// three copies of one fact — the migration DDL's default being the first.
-// exec.Profile is derived from these rather than restating them.
+// They live HERE, in the package that owns the column. core/exec derives its
+// capability presets from these rather than restating the migration DDL's
+// default as another copy.
 const (
 	ProfileV1Compat = "v1compat"
 	ProfileSession  = "session"

@@ -56,9 +56,8 @@ func TestPATCard_NamesTheSessionAccountNotAUILabel(t *testing.T) {
 
 	// AND IT MUST BE FRONT-DOOR ENABLED, or the mint itself is refused with
 	// "auth: connection is not enabled for front-door use" — a connection is
-	// deliberately unreachable until its profile says otherwise. This is the
-	// third thing D1's closing notes now tell an operator, and it turns out
-	// the mint path enforces it too, not just login.
+	// deliberately unreachable until its independent exposure property says
+	// otherwise. The mint path enforces that decision too, not just login.
 	h.keys("e")
 	h.waitFor("front-door prose", "Opening the front door")
 	h.waitFor("front-door confirm", "open the front door on demo?")

@@ -96,3 +96,50 @@ func TestRawSimpleQueryCapabilityNeverLeavesCoreExec(t *testing.T) {
 		t.Fatalf("SimpleQuerier is asserted at %d site(s) in core/exec, want exactly 1 (the gated dispatch): %v", len(sites), sites)
 	}
 }
+
+func TestSetConnectionProfile_HasNoExposureSideEffects(t *testing.T) {
+	t.Parallel()
+	funcs, _ := loadIngressFuncs(t)
+	fn := funcs["Engine.SetConnectionProfile"]
+	if fn == nil {
+		t.Fatal("Engine.SetConnectionProfile not found")
+	}
+	forbidden := map[string]bool{
+		"exposureMu": true, "FrontDoorExposed": true, "ConnFrontDoorExposed": true,
+		"TargetDBName": true, "ConnTargetDB": true, "closeSessionsFor": true,
+	}
+	ast.Inspect(fn.decl.Body, func(node ast.Node) bool {
+		if id, ok := node.(*ast.Ident); ok && forbidden[id.Name] {
+			t.Errorf("SetConnectionProfile still references exposure concern %q", id.Name)
+		}
+		return true
+	})
+}
+
+func TestExposureSurfaces_DoNotUseCapabilityProfiles(t *testing.T) {
+	t.Parallel()
+	_, here, _, _ := runtime.Caller(0)
+	repo := filepath.Clean(filepath.Join(filepath.Dir(here), "..", ".."))
+	for _, root := range []string{"core/auth", "frontdoor", "rpc", "tui"} {
+		err := filepath.WalkDir(filepath.Join(repo, root), func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			text := string(body)
+			if strings.Contains(text, "ProfileSession") || strings.Contains(text, "ProfileV1Compat") {
+				t.Errorf("%s uses a capability profile in an exposure surface", path)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}

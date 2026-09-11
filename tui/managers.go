@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
-	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/style"
 	"github.com/yongjohnlee80/golib/tui/widget"
@@ -238,13 +237,12 @@ func (m *Model) openConnManager() {
 		{Title: "ID", Width: 5, Cell: func(c ConnInfo) string { return strconv.FormatInt(c.ID, 10) }},
 		{Title: "NAME", Cell: func(c ConnInfo) string { return c.Name }},
 		{Title: "ENGINE", Width: 10, Cell: func(c ConnInfo) string { return c.Engine }},
-		// The front-door columns. FRONT DOOR reads yes/no rather
-		// than the raw profile string, because "session" does not tell an
-		// operator what it means; TARGET DB is the name a client types into a
+		// The front-door columns. FRONT DOOR reads the independent exposure
+		// property; TARGET DB is the name a client types into a
 		// Database field, and showing it is what would have made an evening's
 		// confusion visible in seconds.
 		{Title: "FRONT DOOR", Width: 11, Cell: func(c ConnInfo) string {
-			if c.Profile == meta.ProfileSession {
+			if c.FrontDoorExposed {
 				return "yes"
 			}
 			return "no"
@@ -272,7 +270,7 @@ func (m *Model) openConnManager() {
 			}},
 			{'e', "front door…", func(sel ConnInfo, ok bool) {
 				if ok {
-					m.openProfileSwitch(g, sel)
+					m.openExposureSwitch(g, sel)
 				}
 			}},
 			{'w', "attach→ws", func(sel ConnInfo, ok bool) {
@@ -289,45 +287,23 @@ func (m *Model) openConnManager() {
 // A raw literal on purpose: this is a screen of text, and building it from
 // escaped fragments is how it acquires a stray newline nobody notices until it
 // is in front of the person making an exposure decision.
-const frontDoorProse = `Opening the front door on this connection changes FOUR
-things, not one — and the last one can TAKE SOMETHING AWAY.
-Read them before you decide.
+const frontDoorProse = `Opening the front door changes this connection's network
+reachability. It does not change its SQL capability profile.
 
-  1. REACHABILITY. Anyone holding an access token bound to this
+Anyone holding an access token bound to this
      connection, and a grant on it, can reach it from the network —
      from any address their account is admitted from.
-
-  2. GUARDED DATA-MODIFYING CTEs become admissible. Today this
-     connection refuses ANY statement carrying one, outright.
-
-  3. TRANSACTION CONTROL becomes admissible on a session. BEGIN,
-     COMMIT and ROLLBACK are refused here today and will start
-     being accepted, performed as engine state transitions rather
-     than forwarded to the target as text.
-
-  4. READERS MAY STOP WORKING. A reader runs inside a
-     server-enforced read-only transaction. If this connection's
-     driver cannot host one, every reader unit on it will be
-     REFUSED here, where today it runs under classifier
-     enforcement instead. Drivers without that capability at
-     present: sqlite. postgres and mysql are unaffected.
 
 This is an exposure decision and it is audited.
 `
 
-// openProfileSwitch asks whether to expose a connection to the front door, and
-// SAYS WHAT THAT TURNS ON.
-//
-// Deliberately prose and not a toggle. A label reading "enable front door
-// access" would be lying by omission: the profile changes execution semantics
-// beyond this surface, and the third consequence is one nobody would guess
-// from the name.
-func (m *Model) openProfileSwitch(g *manager[ConnInfo], sel ConnInfo) {
-	if sel.Profile == meta.ProfileSession {
+// openExposureSwitch asks whether to expose a connection to the front door.
+func (m *Model) openExposureSwitch(g *manager[ConnInfo], sel ConnInfo) {
+	if sel.FrontDoorExposed {
 		m.openLeader("close the front door on "+sel.Name+"?", []leaderEntry{
 			{'y', "close it — open sessions are dropped", func() {
 				managerCall(g, "front door off "+sel.Name, func(c context.Context, b *Bound) error {
-					return b.SetConnectionProfile(c, sel.ID, meta.ProfileV1Compat)
+					return b.SetConnectionExposure(c, sel.ID, false)
 				})
 			}},
 		})
@@ -343,7 +319,7 @@ func (m *Model) openProfileSwitch(g *manager[ConnInfo], sel ConnInfo) {
 	m.openLeader("open the front door on "+sel.Name+"?", []leaderEntry{
 		{'y', "yes — expose it, and audit the change", func() {
 			managerCall(g, "front door on "+sel.Name, func(c context.Context, b *Bound) error {
-				return b.SetConnectionProfile(c, sel.ID, meta.ProfileSession)
+				return b.SetConnectionExposure(c, sel.ID, true)
 			})
 		}},
 	})

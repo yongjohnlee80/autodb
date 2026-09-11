@@ -387,7 +387,7 @@ flowchart TD
     F --> G["user enabled"]
     G --> H["IP admission<br/><b>global allowlist OR user rows</b>"]
     H --> I["PAT <code>allowed_ips</code>, if set"]
-    I --> J["target valid<br/><i>connection exists, enabled,<br/>grant held, profile admits</i>"]
+    I --> J["target valid<br/><i>connection exists, enabled,<br/>grant held, explicitly exposed</i>"]
     J --> K["ATOMIC RESERVATION<br/>user slot + global slot<br/>+ target lease + overhead"]
     K --> L["authenticated — S4"]
     B & C & D & E & F & G & H & I & J & K --> X["uniform denial 28000<br/>close · reason audited only"]
@@ -414,8 +414,9 @@ An **empty `allowed_ips` inherits** the admission set — it does not mean
 "nowhere". The admission source, global or user-row, is audited.
 
 **Target validation**, checked in the same chain: the `database` connection
-exists, is enabled, the user holds a grant on it, and its profile admits
-front-door use.
+exists, is enabled, the user holds a grant on it, and its independent exposure
+property admits front-door use. Its SQL capability profile is not part of this
+decision.
 
 **Attempt limits.**
 

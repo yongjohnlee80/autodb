@@ -598,8 +598,8 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
   `0600`.
 - **`ip_allowlist` is loopback-only by default**, enforced at login, so nothing
   remote can log in until you widen it. Widen it deliberately and narrowly.
-- **A connection is not reachable until `profile = session`.** Exposing one is a
-  separate, deliberate step.
+- **A connection is not reachable until `frontdoor_exposed = true`.** Exposure
+  is a separate, deliberate step and does not change its SQL capability profile.
 - **On a 1 vCPU host, interactive logins are slow.** Front-door PAT auth is
   SHA-256 and cheap, but passphrase login uses argon2id at `m=64 MiB, p=4` — four
   parallel lanes serialized onto one core, each transiently allocating 64 MiB.

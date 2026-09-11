@@ -68,7 +68,7 @@ var (
 	// This one IS distinguishable, and safely so: it is reached only AFTER the
 	// grant check has passed, so it discloses nothing the caller was not
 	// already entitled to know. It is also the one refusal that must be
-	// actionable — a token bound to a v1compat connection would be a
+	// actionable — a token bound to an unexposed connection would be a
 	// credential that cannot be used anywhere, and telling someone that at 2am
 	// is worse than refusing to create it.
 	ErrPATConnNotFrontDoor = errors.New("auth: connection is not enabled for front-door use")
@@ -315,10 +315,9 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 		// Refused at MINT rather than only at connect: a token
 		// that cannot be used anywhere is worth refusing to create, and the
 		// message names the remedy.
-		if connRow.Profile != meta.ProfileSession {
-			return fmt.Errorf("%w: %q has profile %q. Enable front-door use on it first — and read "+
-				"what that turns on before you do, because it also changes how statements are "+
-				"admitted on that connection", ErrPATConnNotFrontDoor, connRow.Name, connRow.Profile)
+		if connRow.FrontDoorExposed == 0 {
+			return fmt.Errorf("%w: %q is not exposed. Enable front-door use on it first",
+				ErrPATConnNotFrontDoor, connRow.Name)
 		}
 
 		// GATE 3 — the cleartext debugging credential class.
