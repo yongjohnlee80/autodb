@@ -129,13 +129,12 @@ func (e *Engine) sessionStages(ctx context.Context, connRow *meta.Connection) []
 	}
 }
 
-// runSessionAdmission evaluates the session drive's chain for one
-// statement. The session path resolves its policy ONCE per unit before
-// this call (the fresh-per-unit read the never-cache rule requires) and
-// passes the snapshot; the whole gate sequence is pure, so it is ONE
-// evaluation, not split — the drive's I/O (policy resolve, transaction
-// authority preflight) all precedes it.
-func (e *Engine) runSessionAdmission(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, txOpen bool, stmt Statement, sqlText string) (error, error) {
+// sessionAdmissionCtx is the production Context construction for the
+// session drive. Extracted so the PinnedTx derivation (txOpen → PinnedTx,
+// truthfully) is testable through the seam the drive actually calls — a
+// hand-constructed Context in the test would stay green when the
+// derivation regresses to constant true.
+func (e *Engine) sessionAdmissionCtx(connRow *meta.Connection, pol UnitPolicy, s *session, txOpen bool) admission.Context {
 	var caps admission.TargetCaps
 	if connRow.Engine.HasRoutineCatalog() {
 		caps |= admission.CapRoutineCatalog
@@ -144,7 +143,7 @@ func (e *Engine) runSessionAdmission(ctx context.Context, s *session, pol UnitPo
 	if s.wire {
 		phys = admission.PhysWire
 	}
-	actx := admission.Context{
+	return admission.Context{
 		Profile:  string(e.profileFor(connRow)),
 		Phys:     phys,
 		ReadOnly: pol.ReadOnly,
@@ -158,6 +157,15 @@ func (e *Engine) runSessionAdmission(ctx context.Context, s *session, pol UnitPo
 		TargetCaps:        caps,
 		MaxStatementBytes: e.maxStatementBytes,
 	}
+}
+
+// runSessionAdmission evaluates the session drive's chain for one
+// statement. The session path resolves its policy ONCE per unit before
+// this call (the fresh-per-unit read the never-cache rule requires) and
+// passes the snapshot; the whole gate sequence is pure, so it is ONE
+// evaluation, not split — the drive's I/O (policy resolve, transaction
+// authority preflight) all precedes it.
+func (e *Engine) runSessionAdmission(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, txOpen bool, stmt Statement, sqlText string) (error, error) {
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
-	return e.evaluateChain(e.sessionStages(ctx, connRow), facts, actx)
+	return e.evaluateChain(e.sessionStages(ctx, connRow), facts, e.sessionAdmissionCtx(connRow, pol, s, txOpen))
 }
