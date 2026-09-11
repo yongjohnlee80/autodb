@@ -132,3 +132,94 @@ func (p profileAdmitStage) Apply(facts admission.Facts, ctx admission.Context) (
 	}
 	return admission.NoContribution(), nil
 }
+
+// readerAnalysisStage is the editors-first rule: reader units may not run
+// advanced patterns — user-defined function calls, procedural blocks —
+// that could carry a write or a state change past the read-only wrap.
+//
+// THE CATALOG'S I/O FAILURE IS AN OPERATIONAL ERROR, NOT A REFUSAL. This
+// is the split the seam exists to make: 'the target's routine catalog
+// could not be read' means the STAGE could not decide, and it returns the
+// error rather than a denial — exactly as the legacy code's caller's
+// rejection path treated it, but now structurally distinguishable from the
+// three policy arms (qualified UDF call, bare UDF call, DO/CALL verb).
+//
+// Applicability is declarative: ReadOnlyUnit (the stage runs for reader
+// units only). The routine-catalog requirement is PER-ARM, not
+// stage-wide: the DO/CALL verb arm denies on every target (the legacy
+// code's verb switch precedes the catalog check), while the CALL arms
+// consult the catalog only where one exists — a target without the
+// capability skips the call analysis by construction, exactly the
+// legacy no-op arm, whose reader safety rests on the classifier and the
+// driver's read-only transaction.
+type readerAnalysisStage struct {
+	// userRoutines resolves the target's user-defined routine set, or
+	// fails operationally. The ENGINE supplies the closure — the catalog
+	// read is engine I/O, and the stage holds the function rather than
+	// the engine itself so the composition stays a value.
+	userRoutines func() (*udfSet, error)
+}
+
+func (readerAnalysisStage) Name() string { return "readeranalysis" }
+
+func (readerAnalysisStage) ContextNeeds() admission.Needs {
+	return admission.Needs{ReadOnlyUnit: true}
+}
+
+func (readerAnalysisStage) DenyCodes() []admission.Code {
+	return []admission.Code{admission.CodeReaderAdvancedPattern}
+}
+
+// Apply decides the reader's advanced-pattern question for one statement.
+// The DO/CALL arm is denied by verb; the call arms are denied against the
+// target's own routine set.
+func (s readerAnalysisStage) Apply(facts admission.Facts, ctx admission.Context) (admission.Contribution, error) {
+	switch facts.Verb() {
+	case "DO", "CALL":
+		return admission.Deny(admission.Reason{
+			Code:     admission.CodeReaderAdvancedPattern,
+			Subject:  facts.Verb(),
+			Detail:   fmt.Errorf("%w: %s", ErrReaderAdvancedPattern, facts.Verb()).Error(),
+			Continue: true,
+		}), nil
+	}
+	if len(facts.Calls()) == 0 {
+		return admission.NoContribution(), nil
+	}
+	// THE CATALOG ARM IS CAPABILITY-GATED, per-arm: without a routine
+	// catalog the call analysis is absent by construction (the legacy
+	// no-op), and the DO/CALL arm above still denied — the verb switch
+	// preceded the catalog check in the legacy code too.
+	if !ctx.TargetCaps.Has(admission.CapRoutineCatalog) {
+		return admission.NoContribution(), nil
+	}
+	set, err := s.userRoutines()
+	if err != nil {
+		// The stage BROKE — the catalog could not be read. Not a refusal:
+		// the caller must be able to tell 'refused' from 'could not
+		// decide', and the legacy text rides in the wrap.
+		return admission.NoContribution(), fmt.Errorf("%w: the target's routine catalog could not be read (%v)",
+			ErrReaderAdvancedPattern, err)
+	}
+	for _, c := range facts.Calls() {
+		switch {
+		case c.Schema == "pg_catalog" || c.Schema == "information_schema":
+			continue
+		case c.Schema != "":
+			return admission.Deny(admission.Reason{
+				Code:     admission.CodeReaderAdvancedPattern,
+				Subject:  c.Schema + "." + c.Name,
+				Detail:   fmt.Errorf("%w: %s.%s()", ErrReaderAdvancedPattern, c.Schema, c.Name).Error(),
+				Continue: true,
+			}), nil
+		case set.bare[c.Name]:
+			return admission.Deny(admission.Reason{
+				Code:     admission.CodeReaderAdvancedPattern,
+				Subject:  c.Name,
+				Detail:   fmt.Errorf("%w: %s()", ErrReaderAdvancedPattern, c.Name).Error(),
+				Continue: true,
+			}), nil
+		}
+	}
+	return admission.NoContribution(), nil
+}

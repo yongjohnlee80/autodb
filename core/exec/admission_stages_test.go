@@ -267,3 +267,129 @@ func TestProfileAdmitAdapter_SameIdentityAsTheLegacyGate(t *testing.T) {
 		t.Fatal("the empty chain denied — the mutation's premise is wrong")
 	}
 }
+
+func TestReaderAnalysisAdapter_SameIdentityAsTheLegacyStage(t *testing.T) {
+	readerCtx := admission.Context{ReadOnly: true, Phys: admission.PhysWire, TargetCaps: admission.CapRoutineCatalog}
+	writerCtx := admission.Context{ReadOnly: false}
+	set := &udfSet{bare: map[string]bool{"write_a_row": true}, qualified: map[string]bool{}}
+
+	stage := readerAnalysisStage{userRoutines: func() (*udfSet, error) { return set, nil }}
+	o := admission.Compose(stage)
+
+	// The DO arm: denied by verb, same sentinel.
+	stmt, err := Classify("DO $$ BEGIN END $$", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, rerr := o.Run(NewLegacyFacts(stmt, 20, "", false, false), readerCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok := rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted a reader's DO block")
+	}
+	if deny.Code != admission.CodeReaderAdvancedPattern {
+		t.Fatalf("code = %s, want reader-advanced-pattern", deny.Code)
+	}
+
+	// The bare-UDF arm: a call the target's catalog answers to.
+	stmt, err = Classify("SELECT write_a_row()", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := readerCallCheck(stmt.Calls, set); err == nil {
+		t.Fatal("the legacy check admitted a bare UDF call — premise wrong")
+	}
+	rep, rerr = o.Run(NewLegacyFacts(stmt, 20, "", false, false), readerCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok = rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted a bare UDF call")
+	}
+	if !strings.Contains(deny.Detail, ErrReaderAdvancedPattern.Error()) {
+		t.Fatalf("detail %q does not carry the sentinel's text", deny.Detail)
+	}
+
+	// The qualified arm.
+	stmt, err = Classify("SELECT app.write_a_row()", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, rerr = o.Run(NewLegacyFacts(stmt, 24, "", false, false), readerCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if _, ok := rep.PrimaryDeny(); !ok {
+		t.Fatal("the adapter admitted a schema-qualified UDF call")
+	}
+
+	// Catalog calls stay allowed — they are the language.
+	stmt, err = Classify("SELECT count(*) FROM t", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, rerr = o.Run(NewLegacyFacts(stmt, 22, "", false, false), readerCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the adapter refused an ordinary catalog-function query")
+	}
+
+	// APPLICABILITY, both halves: a writer's unit never consults the
+	// stage; a target without the routine-catalog capability makes it
+	// absent by construction (the legacy no-op arm).
+	rep, rerr = o.Run(NewLegacyFacts(stmt, 22, "", false, false), writerCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the reader stage ran on a WRITER's unit — editors get PostgreSQL as it is")
+	}
+	noCapCtx := admission.Context{ReadOnly: true, TargetCaps: 0}
+	stmt, err = Classify("SELECT write_a_row()", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep, rerr = o.Run(NewLegacyFacts(stmt, 20, "", false, false), noCapCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the reader stage denied on a target without the catalog capability — " +
+			"its reader safety rests on the classifier and the driver's read-only transaction, by construction")
+	}
+
+	// THE OPERATIONAL SPLIT: a broken catalog read surfaces as an ERROR,
+	// never as a denial — the split this seam exists to make.
+	broken := readerAnalysisStage{userRoutines: func() (*udfSet, error) { return nil, errFakeCatalog }}
+	_, rerr = admission.Compose(broken).Run(NewLegacyFacts(stmt, 20, "", false, false), readerCtx)
+	if rerr == nil {
+		t.Fatal("the stage's operational failure was swallowed — 'could not decide' must " +
+			"reach the caller differently from 'refused'")
+	}
+	if !strings.Contains(rerr.Error(), "routine catalog could not be read") {
+		t.Fatalf("the operational error does not carry the legacy text: %v", rerr)
+	}
+	rep2, _ := admission.Compose(broken).Run(NewLegacyFacts(stmt, 20, "", false, false), readerCtx)
+	_ = rep2
+
+	// A3's mutation: the chain without the stage admits the UDF call.
+	rep, rerr = admission.Compose().Run(NewLegacyFacts(stmt, 20, "", false, false), readerCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the empty chain denied — the mutation's premise is wrong")
+	}
+}
+
+// errFakeCatalog is the operational failure the broken-catalog cell uses.
+var errFakeCatalog = errFake{}
+
+type errFake struct{}
+
+func (errFake) Error() string { return "fake: catalog unreachable" }
