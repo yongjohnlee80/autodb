@@ -61,9 +61,10 @@ var (
 	// coordRe matches a "name.go:123" coordinate.
 	coordRe = regexp.MustCompile(`([a-z_]+\.go):(\d+)`)
 	// justRe matches one justification declaration: category plus the
-	// referenced numbered entry as a section-qualified anchor, e.g.
-	// "divergence:§6.3" (the policy section, entry 3) or
-	// "applicability:§7.1" (the boundaries section, entry 1).
+	// referenced numbered entry as a section-qualified anchor, read as
+	// category, matrix section, entry within it — a divergence token names
+	// the policy-divergences section and an applicability token the
+	// boundaries section.
 	justRe = regexp.MustCompile(`(divergence|applicability):§(\d+)\.(\d+)`)
 	// onRecordEntryRe matches a numbered on-record entry:
 	// "N. **...** — text", capturing the number and the entry's text.
@@ -259,8 +260,8 @@ func TestGateMatrix_RestrictedRowsDeclareJustification(t *testing.T) {
 			}
 			for _, tok := range tokens {
 				// The category and the referenced SECTION must agree:
-				// divergence tokens point into the policy section (§6),
-				// applicability tokens into the boundaries section (§7).
+				// divergence tokens point into the policy-divergences section and
+				// applicability tokens into the boundaries section.
 				// A crossed reference — a divergence justified by physics,
 				// or physics wearing a decision's number — is exactly the
 				// conflation the split exists to prevent.
@@ -300,7 +301,7 @@ type justTok struct {
 	category string // divergence | applicability
 	section  int    // the referenced matrix section (6 or 7)
 	number   int    // the entry's number within that section
-	ref      string // the literal reference, e.g. "§7.1"
+	ref      string // the literal section-qualified reference
 }
 
 // justificationTokens extracts every `category:§N` token that follows the
@@ -539,7 +540,7 @@ func gateMatrixInventoryLines(t *testing.T) []string {
 		}
 	}
 	if start < 0 || end < 0 {
-		t.Fatalf("%s lacks the §1..§5 inventory interval (found §1 at line %d, §6 at %d) — the walk's "+
+		t.Fatalf("%s lacks the first-inventory-to-on-record section interval (found the first at line %d, the policy section at %d) — the walk's "+
 			"membership boundary is computed from these headers and cannot work without them",
 			gateMatrixPath, start, end)
 	}
