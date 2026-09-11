@@ -811,8 +811,11 @@ func TestPooledDrive_ChainOrderIsDeclared(t *testing.T) {
 	if fmt.Sprint(gotIntake) != fmt.Sprint([]string{"sizecap"}) {
 		t.Fatalf("pre-classification intake = %v, want [sizecap]", gotIntake)
 	}
-	if fmt.Sprint(gotPre) != fmt.Sprint([]string{"profile"}) {
-		t.Fatalf("pre-policy half = %v, want [profile]", gotPre)
+	// The procedural stage rides with the profile: the control routes have no
+	// later boundary, so a placement rule composed anywhere else would be
+	// absent exactly where it decides.
+	if fmt.Sprint(gotPre) != fmt.Sprint([]string{"profile", "procedural"}) {
+		t.Fatalf("pre-policy half = %v, want [profile procedural]", gotPre)
 	}
 	if fmt.Sprint(gotPost) != fmt.Sprint([]string{"readeranalysis", "guardwhere"}) {
 		t.Fatalf("post-policy half = %v, want [readeranalysis guardwhere]", gotPost)

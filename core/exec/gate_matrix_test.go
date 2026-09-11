@@ -707,7 +707,7 @@ func runGateBehaviorCell(t *testing.T, tc gateBehaviorCase, surface string) erro
 				admissionInputs{connRow: connRow, phys: phys}, stmt, tc.sql)
 			return gateBehaviorResult(refusal, opErr)
 		}
-		refusal, opErr := e.runProfileAdmission(profile, phys, stmt, tc.sql)
+		refusal, opErr := e.runProfileAdmission(profile, phys, phys == admission.PhysWire, stmt, tc.sql)
 		return gateBehaviorResult(refusal, opErr)
 	}
 	if tc.mode == "control" {
@@ -718,7 +718,7 @@ func runGateBehaviorCell(t *testing.T, tc gateBehaviorCase, surface string) erro
 				return err
 			}
 		} else {
-			refusal, opErr := e.runProfileAdmission(profile, phys, stmt, tc.sql)
+			refusal, opErr := e.runProfileAdmission(profile, phys, phys == admission.PhysWire, stmt, tc.sql)
 			if err := gateBehaviorResult(refusal, opErr); err != nil {
 				return err
 			}

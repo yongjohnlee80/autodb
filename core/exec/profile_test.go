@@ -230,9 +230,27 @@ func TestProfileSession_AdmitsTransactionControlOnly(t *testing.T) {
 		}
 	}
 
-	// A verb whose admissible form the gate matrix defines but which is not
-	// built: CALL and DO await the procedure capability of §6a.
+	// The procedural verbs pass the COARSE gate, like SET and LOCK and for the
+	// same reason: WHERE they are admissible is a physical-context question,
+	// and this function is handed one boolean that cannot express it. The
+	// procedural stage decides it (TestProceduralStage_*), so a refusal here
+	// would be the profile answering a question it cannot see.
 	for _, sql := range []string{"CALL do_thing(1)", "DO $$ BEGIN PERFORM 1; END $$"} {
+		st, _ := Classify(sql, false)
+		if err := ProfileSession.admit(st, true); err != nil {
+			t.Errorf("session admit(%q) = %v, want the procedural stage to decide it", sql, err)
+		}
+		// v1compat still refuses them outright, unchanged: a legacy surface
+		// does not start running procedural bodies because a gate was built.
+		if err := ProfileV1Compat.admit(st, true); !errors.Is(err, ErrStatementUnsupported) {
+			t.Errorf("v1compat admit(%q) = %v, want ErrStatementUnsupported", sql, err)
+		}
+	}
+
+	// A verb whose admissible form the gate matrix defines but which is not
+	// built. SAVEPOINT is the remaining one; the refusal must read as "wait",
+	// not as "never".
+	for _, sql := range []string{"SAVEPOINT s1", "RELEASE s1"} {
 		st, _ := Classify(sql, false)
 		err := ProfileSession.admit(st, true)
 		if !errors.Is(err, ErrStatementUnsupported) {

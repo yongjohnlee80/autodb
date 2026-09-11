@@ -215,7 +215,7 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 	txOpen, aborted := s.txPhase != txNone, s.txPhase == txAborted
 	s.mu.Unlock()
 	if stmt.Class == ClassControl {
-		admitErr, opErr = e.runProfileAdmission(e.profileFor(connRow), admission.PhysWire, stmt, part)
+		admitErr, opErr = e.runProfileAdmission(e.profileFor(connRow), admission.PhysWire, s.pinnedConn() != nil, stmt, part)
 		if opErr != nil {
 			return Statement{}, 0, opErr
 		}
@@ -227,6 +227,25 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 		}
 		if stmt.Verb == "LOCK" && !pol.MayWrite {
 			return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, auth.ErrDenied)
+		}
+		if proceduralControlVerbs[stmt.Verb] {
+			// DO and CALL are real SQL the TARGET runs, so they take the raw
+			// route like any dispatched statement — and clear the gates a
+			// dispatched statement clears. The control route's own floors
+			// above are not those gates: they admit a reader (ReadOnly, not
+			// MayWrite), which is right for BEGIN and wrong for a procedural
+			// body that can COMMIT out of the read-only wrap.
+			admitErr, opErr = e.runProceduralAdmission(ctx, s, pol, connRow, txOpen, stmt, part)
+			if opErr != nil {
+				return Statement{}, 0, opErr
+			}
+			if admitErr != nil {
+				return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, admitErr)
+			}
+			if aborted {
+				return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, ErrTxAborted)
+			}
+			return stmt, routeRaw, nil
 		}
 		if statefulControlVerbs[stmt.Verb] {
 			// SET / RESET / LOCK: admitted stateful controls. The wire admission
@@ -579,7 +598,11 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		// local gate would keep saying T over a backend that is in E.
 		s.noteWireStatus(status)
 		for i := el.first; i <= el.last; i++ {
-			if stmts[i].Class == ClassDDL {
+			// A procedural body is opaque, so it counts as DDL here even
+			// though its class is control: a DO block can CREATE FUNCTION and
+			// the class-based test cannot see it. A stale routine set is how a
+			// reader reaches a function created a moment ago.
+			if stmts[i].Class == ClassDDL || proceduralControlVerbs[stmts[i].Verb] {
 				e.invalidateRoutines(connRow.ID)
 				break
 			}

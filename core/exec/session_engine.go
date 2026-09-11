@@ -161,7 +161,7 @@ func (e *Engine) tokenControl(
 	ctx context.Context, s *session, connRow *meta.Connection,
 	stmt Statement, pol UnitPolicy, sqlText, ip string, closeAfterRelease *bool,
 ) (*Result, error) {
-	admitErr, opErr := e.runProfileAdmission(e.profileFor(connRow), admission.PhysSession, stmt, sqlText)
+	admitErr, opErr := e.runProfileAdmission(e.profileFor(connRow), admission.PhysSession, false, stmt, sqlText)
 	if opErr != nil {
 		return nil, opErr
 	}
