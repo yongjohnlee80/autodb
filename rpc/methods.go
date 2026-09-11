@@ -1283,8 +1283,8 @@ func (s *Server) register() {
 		}, nil
 	})
 
-	// conn.set_profile remains its own audited capability change. During the
-	// expansion window, the core also mirrors the old exposure implication.
+	// conn.set_profile is an audited capability change, independent of network
+	// exposure.
 	s.rpc.Handle("conn.set_profile", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err

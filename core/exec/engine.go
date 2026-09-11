@@ -77,7 +77,7 @@ type Engine struct {
 	mu    sync.Mutex
 	conns map[int64]dao.DataConn
 	// exposureMu lets wire opens run concurrently, but serializes each complete
-	// open against exposure/profile transitions through session withdrawal.
+	// open against exposure transitions through session withdrawal.
 	exposureMu sync.RWMutex
 	// opening reserves a connID while its driver is connecting, so the open
 	// happens outside e.mu without two callers racing to publish two pools.

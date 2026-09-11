@@ -47,8 +47,8 @@ type fixture struct {
 	addr    string
 }
 
-// frontDoorConn creates a connection a PAT may legally be bound to:
-// postgres, session profile, with a target_db derived from its DSN.
+// frontDoorConn creates an explicitly exposed v1compat connection a PAT may
+// legally be bound to, with a target_db derived from its DSN.
 //
 // Created ON DEMAND rather than in newFixture, and that is the point: adding
 // it to the shared fixture changed what conn.list returns and broke an
@@ -66,9 +66,9 @@ func (f *fixture) frontDoorConn(t *testing.T) int64 {
 		t.Fatalf("CreateConnection(front door): %v", err)
 	}
 	if uerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, id).
-		Set(meta.ConnProfile, meta.ProfileSession).
+		Set(meta.ConnProfile, meta.ProfileV1Compat).
 		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); uerr != nil {
-		t.Fatalf("enabling the session profile: %v", uerr)
+		t.Fatalf("enabling front-door exposure: %v", uerr)
 	}
 	return id
 }

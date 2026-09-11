@@ -36,11 +36,10 @@ func pgSession(t *testing.T) (*fixture, int64, SessionID, string) {
 	if err != nil {
 		t.Fatalf("CreateConnection: %v", err)
 	}
-	// These shared fixtures exercise both the internal session and wire paths,
-	// so enable the capability and exposure properties explicitly.
+	// The internal session requires the session capability, not front-door
+	// exposure. Keeping this row closed proves the two surfaces are independent.
 	if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
-		Set(meta.ConnProfile, string(ProfileSession)).
-		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
+		Set(meta.ConnProfile, string(ProfileSession)).Update(); err != nil {
 		t.Fatalf("enabling the session profile: %v", err)
 	}
 

@@ -244,6 +244,42 @@ func TestConnManagementOverWire(t *testing.T) {
 	if f.auditCount(t, "connection_exposure_changed") != 1 {
 		t.Fatal("the administrative exposure change was not audited exactly once")
 	}
+	if errVal, _ = c.call("exec.run", f.rootTok, f.connID, "SELECT 1"); errVal != nil {
+		t.Fatalf("exec.run while exposed: %#v", errVal)
+	}
+	if errVal, _ = c.call("exec.run_script", f.rootTok, f.connID, "SELECT 1"); errVal != nil {
+		t.Fatalf("TUI exec.run_script while exposed: %#v", errVal)
+	}
+
+	if errVal, _ = c.call("conn.set_profile", f.rootTok, f.connID, meta.ProfileSession); errVal != nil {
+		t.Fatalf("conn.set_profile: %#v", errVal)
+	}
+	errVal, result = c.call("conn.list", f.rootTok)
+	if errVal != nil {
+		t.Fatalf("conn.list after profile change: %#v", errVal)
+	}
+	row = result.([]any)[0].(map[string]any)
+	if row["frontdoor_exposed"] != true || row["profile"] != meta.ProfileSession {
+		t.Fatalf("profile change altered exposure: %#v", row)
+	}
+
+	if errVal, _ = c.call("conn.set_exposure", f.rootTok, f.connID, false); errVal != nil {
+		t.Fatalf("closing exposure: %#v", errVal)
+	}
+	errVal, result = c.call("conn.list", f.rootTok)
+	if errVal != nil {
+		t.Fatalf("conn.list after closing exposure: %#v", errVal)
+	}
+	row = result.([]any)[0].(map[string]any)
+	if row["frontdoor_exposed"] != false || row["profile"] != meta.ProfileSession {
+		t.Fatalf("exposure change altered profile: %#v", row)
+	}
+	if errVal, _ = c.call("exec.run", f.rootTok, f.connID, "SELECT 1"); errVal != nil {
+		t.Fatalf("exec.run changed when RPC exposure closed: %#v", errVal)
+	}
+	if errVal, _ = c.call("exec.run_script", f.rootTok, f.connID, "SELECT 1"); errVal != nil {
+		t.Fatalf("TUI exec.run_script changed when exposure closed: %#v", errVal)
+	}
 
 	if errVal, _ := c.call("conn.test", f.rootTok, f.connID); errVal != nil {
 		t.Fatalf("conn.test: %#v", errVal)

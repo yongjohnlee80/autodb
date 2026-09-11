@@ -745,11 +745,6 @@ func (b *Bound) RemoveKeyslot(ctx context.Context) error {
 }
 
 // SetConnectionProfile switches a connection's capability profile. Admin only.
-//
-// The caller is expected to have told the user what the switch turns on —
-// front-door reachability is only the first of three consequences,
-// and a UI that said just "enable front door access" would be lying by
-// omission.
 func (b *Bound) SetConnectionProfile(ctx context.Context, connID int64, profile string) error {
 	_, err := b.authed(ctx, "conn.set_profile", connID, profile)
 	return err

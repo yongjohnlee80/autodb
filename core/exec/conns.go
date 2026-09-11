@@ -393,10 +393,6 @@ func (e *Engine) ListConnections(ctx context.Context, token string) ([]*meta.Con
 
 // SetConnectionProfile changes a connection's capability profile.
 //
-// During the exposure migration this method still mirrors the old implication
-// into frontdoor_exposed. New callers use SetConnectionExposure; removing this
-// compatibility write is a separate contract step.
-//
 // The capability itself changes two statement-admission decisions:
 //
 //  1. data-modifying CTEs whose mutations are guarded become admissible, where
@@ -420,13 +416,6 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 		return fmt.Errorf("exec: unknown capability profile %q (want %q or %q)",
 			profile, meta.ProfileV1Compat, meta.ProfileSession)
 	}
-	e.exposureMu.Lock()
-	locked := true
-	defer func() {
-		if locked {
-			e.exposureMu.Unlock()
-		}
-	}()
 	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
 	if err != nil {
 		return err
@@ -438,37 +427,9 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 	if was == profile {
 		return nil
 	}
-	if !e.auth.Unlocked() {
-		// Required because enabling the front door records the target's
-		// database name below, which means decrypting the DSN. Not a
-		// hardship: the caller has just authenticated interactively, and a
-		// login is what unwraps the store.
-		return auth.ErrLocked
-	}
-
-	// The target database name, recorded when a connection is first exposed.
-	// It is what lets an introspecting client reconnect by the name the TARGET
-	// reported rather than the name autodb gave the connection — the defect
-	// this ADR exists to fix. Derived only when missing: re-deriving would
-	// clobber a value an operator may have corrected by hand.
-	targetDB := row.TargetDB
-	if profile == meta.ProfileSession && targetDB == "" {
-		dsn, derr := e.auth.DecryptSecret(row.DSNEnc, connID)
-		if derr != nil {
-			return derr
-		}
-		if targetDB, derr = TargetDBName(row.Engine, string(dsn)); derr != nil {
-			return derr
-		}
-	}
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
-		exposed := int64(0)
-		if profile == meta.ProfileSession {
-			exposed = 1
-		}
 		if uerr := e.store.Connections.On(tx).With(meta.ConnID, connID).
-			Set(meta.ConnProfile, profile).Set(meta.ConnFrontDoorExposed, exposed).
-			Set(meta.ConnTargetDB, targetDB).
+			Set(meta.ConnProfile, profile).
 			Set(meta.ConnUpdatedAt, e.now().Unix()).Update(); uerr != nil {
 			return uerr
 		}
@@ -477,27 +438,6 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 	})
 	if err != nil {
 		return err
-	}
-	e.exposureMu.Unlock()
-	locked = false
-
-	// A DOWNGRADE must close the connection's open wire sessions.
-	//
-	// The front-door reachability gate runs at OPEN only, but per-statement
-	// admission reads the profile LIVE on every statement path — so a
-	// downgrade would otherwise HALF-APPLY: admission tightens immediately
-	// while the session stays alive and keeps its lease, and its behaviour
-	// changes underneath a client that is still connected. Worse than no
-	// effect, which is why this is not left to the next open.
-	//
-	// AFTER the commit and outside the engine-wide exposure lock. Any open that
-	// completed before the commit is now registered and included below; any open
-	// after it reads the closed exposure value. clearDraining then lets the
-	// connection be used again under its new profile — closeSessionsFor marks it
-	// draining, which is right for a delete and wrong here.
-	if was == meta.ProfileSession && profile != meta.ProfileSession {
-		e.closeSessionsFor(ctx, connID, ip, "profile-downgraded")
-		e.sessions.clearDraining(connID)
 	}
 	return nil
 }

@@ -2,11 +2,13 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/golib/dao"
 )
 
 // wireFixture builds an engine with a front-door-enabled connection, a user
@@ -124,6 +126,56 @@ func TestOpenWireSession_ExposureColumnAdmitsIndependentlyOfProfile(t *testing.T
 	f.eng.CloseWireSession(ctx, got.SessionID, got.UserID, testIP, "test")
 }
 
+func TestExposureAndCapability_AllFourCombinationsAreIndependent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		profile string
+		exposed int64
+	}{
+		{meta.ProfileV1Compat, 0},
+		{meta.ProfileSession, 0},
+		{meta.ProfileV1Compat, 1},
+		{meta.ProfileSession, 1},
+	}
+	for _, tc := range tests {
+		state := "closed"
+		if tc.exposed != 0 {
+			state = "exposed"
+		}
+		t.Run(tc.profile+"/"+state, func(t *testing.T) {
+			f, _, secret, dbName := wireFixture(t)
+			ctx := context.Background()
+			if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).
+				Set(meta.ConnProfile, tc.profile).Set(meta.ConnFrontDoorExposed, tc.exposed).Update(); err != nil {
+				t.Fatal(err)
+			}
+
+			wire, wireErr := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP)
+			if tc.exposed != 0 {
+				if wireErr != nil {
+					t.Fatalf("exposed connection refused wire open: %v", wireErr)
+				}
+				f.eng.CloseWireSession(ctx, wire.SessionID, wire.UserID, testIP, "test")
+			} else if DenialReason(wireErr) != DenyProfileRefuses {
+				t.Fatalf("closed connection wire open = %v (%q), want %q", wireErr, DenialReason(wireErr), DenyProfileRefuses)
+			}
+
+			internal, err := f.eng.OpenSession(ctx, f.rootTok, f.connID, testIP)
+			if err != nil {
+				t.Fatalf("exposure affected internal session open: %v", err)
+			}
+			t.Cleanup(func() { _ = f.eng.CloseSession(ctx, f.rootTok, internal, testIP) })
+			_, capabilityErr := f.eng.SessionExecute(ctx, f.rootTok, internal, "BEGIN", testIP)
+			if tc.profile == meta.ProfileV1Compat && !errors.Is(capabilityErr, ErrStatementUnsupported) {
+				t.Fatalf("v1compat BEGIN = %v, want ErrStatementUnsupported", capabilityErr)
+			}
+			if tc.profile == meta.ProfileSession && !errors.Is(capabilityErr, dao.ErrUnsupported) {
+				t.Fatalf("session BEGIN = %v, want the SQLite transaction-capability error after admission", capabilityErr)
+			}
+		})
+	}
+}
+
 // Every refusal is a DISTINCT internal reason and the SAME denial to the
 // caller. A client that could tell "no such database" from "no grant" from
 // "wrong token" could map the install without ever holding a credential.
@@ -138,7 +190,7 @@ func TestOpenWireSession_EveryRefusalIsAuditedDistinctlyAndDeniedUniformly(t *te
 	// Dialling some OTHER connection's name no longer reaches the profile
 	// gate at all: the token decides the target, so a name that
 	// is not the bound connection's is a database MISMATCH and is refused
-	// before any profile is consulted. Reaching this branch therefore means
+	// before exposure is consulted. Reaching this branch therefore means
 	// constructing the state deliberately, which is what the ADR's cell 3
 	// calls for.
 	f2, _, secret2, dbName2 := wireFixture(t)
