@@ -83,7 +83,8 @@ func TestWireOpen_TheLeasePinReadsClientEncodingToo(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
-				Set(meta.ConnProfile, string(ProfileSession)).Update(); err != nil {
+				Set(meta.ConnProfile, string(ProfileSession)).
+				Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
 				t.Fatal(err)
 			}
 			row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()

@@ -66,7 +66,8 @@ func (f *fixture) frontDoorConn(t *testing.T) int64 {
 		t.Fatalf("CreateConnection(front door): %v", err)
 	}
 	if uerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, id).
-		Set(meta.ConnProfile, meta.ProfileSession).Update(); uerr != nil {
+		Set(meta.ConnProfile, meta.ProfileSession).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); uerr != nil {
 		t.Fatalf("enabling the session profile: %v", uerr)
 	}
 	return id

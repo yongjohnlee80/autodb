@@ -393,23 +393,15 @@ func (e *Engine) ListConnections(ctx context.Context, token string) ([]*meta.Con
 
 // SetConnectionProfile changes a connection's capability profile.
 //
-// It is its OWN method with its OWN audit action rather than a field inside a
-// generic update, because switching a connection to the session profile is a
-// real exposure decision and belongs in the trail as one. An operator reading
-// the audit log should be able to count these without parsing a diff.
+// During the exposure migration this method still mirrors the old implication
+// into frontdoor_exposed. New callers use SetConnectionExposure; removing this
+// compatibility write is a separate contract step.
 //
-// ADMIN ONLY. CreateConnection admits editors, but creating a connection and
-// EXPOSING one are different acts: after this call, anyone holding a PAT bound
-// to it and a grant on it can reach it from the network. The ADR did not name
-// a role, so this is the implementation's choice and is flagged as such.
+// The capability itself changes two statement-admission decisions:
 //
-// What the profile actually changes, which is why the TUI modal that calls this
-// carries prose rather than a toggle:
-//
-//  1. front-door reachability — the connection becomes dialable;
-//  2. data-modifying CTEs whose mutations are guarded become admissible, where
+//  1. data-modifying CTEs whose mutations are guarded become admissible, where
 //     v1compat refuses any statement carrying one outright;
-//  3. transaction control becomes admissible ON A SESSION — v1compat refuses
+//  2. transaction control becomes admissible ON A SESSION — v1compat refuses
 //     every control-class statement, while session admits BEGIN/COMMIT/ROLLBACK
 //     and performs them as engine state transitions rather than forwarding text.
 func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID int64, profile, ip string) error {
@@ -428,6 +420,8 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 		return fmt.Errorf("exec: unknown capability profile %q (want %q or %q)",
 			profile, meta.ProfileV1Compat, meta.ProfileSession)
 	}
+	e.exposureMu.Lock()
+	defer e.exposureMu.Unlock()
 	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
 	if err != nil {
 		return err
@@ -462,7 +456,6 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 			return derr
 		}
 	}
-
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		exposed := int64(0)
 		if profile == meta.ProfileSession {
@@ -490,14 +483,76 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 	// changes underneath a client that is still connected. Worse than no
 	// effect, which is why this is not left to the next open.
 	//
-	// AFTER the commit, deliberately. The committed profile is what stops new
-	// sessions opening, so closing first would leave a window in which one
-	// could be opened onto the profile being removed. clearDraining then lets
-	// the connection be used again under its new profile — closeSessionsFor
-	// marks it draining, which is right for a delete and wrong here.
+	// AFTER the commit, while the exposure transition lock still excludes wire
+	// opens. clearDraining then lets the connection be used again under its new
+	// profile — closeSessionsFor marks it draining, which is right for a delete
+	// and wrong here.
 	if was == meta.ProfileSession && profile != meta.ProfileSession {
 		e.closeSessionsFor(ctx, connID, ip, "profile-downgraded")
 		e.sessions.clearDraining(connID)
+	}
+	return nil
+}
+
+// SetConnectionExposure changes whether the front door may accept a session
+// for one connection. It is independent of the SQL capability profile.
+//
+// ADMIN ONLY. Exposure is a network-reachability decision, so a connection
+// creator cannot publish it merely because they may use it through RPC/TUI.
+func (e *Engine) SetConnectionExposure(ctx context.Context, token string, connID int64, exposed bool, ip string) error {
+	ident, err := e.auth.ValidateToken(ctx, token)
+	if err != nil {
+		return err
+	}
+	if ident.Role() != meta.RoleAdmin {
+		return auth.ErrDenied
+	}
+	e.exposureMu.Lock()
+	defer e.exposureMu.Unlock()
+	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
+	if err != nil {
+		return err
+	}
+	wasExposed := row.FrontDoorExposed != 0
+	if wasExposed == exposed {
+		return nil
+	}
+
+	targetDB := row.TargetDB
+	if exposed && targetDB == "" {
+		if !e.auth.Unlocked() {
+			return auth.ErrLocked
+		}
+		dsn, derr := e.auth.DecryptSecret(row.DSNEnc, connID)
+		if derr != nil {
+			return derr
+		}
+		if targetDB, derr = TargetDBName(row.Engine, string(dsn)); derr != nil {
+			return derr
+		}
+	}
+
+	value := int64(0)
+	if exposed {
+		value = 1
+	}
+	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
+		if uerr := e.store.Connections.On(tx).With(meta.ConnID, connID).
+			Set(meta.ConnFrontDoorExposed, value).Set(meta.ConnTargetDB, targetDB).
+			Set(meta.ConnUpdatedAt, e.now().Unix()).Update(); uerr != nil {
+			return uerr
+		}
+		return e.auth.AuditTx(tx, ident.UserID(), ip, "connection_exposure_changed",
+			fmt.Sprintf("%s: %t -> %t", row.Name, wasExposed, exposed))
+	})
+	if err != nil {
+		return err
+	}
+
+	if wasExposed && !exposed {
+		for _, s := range e.sessions.wireSessions(connID) {
+			e.closeSession(ctx, s, ip, "exposure-disabled")
+		}
 	}
 	return nil
 }

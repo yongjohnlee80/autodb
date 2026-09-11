@@ -47,7 +47,8 @@ func pgWireSession(t *testing.T) (f *fixture, connID int64, sid SessionID, pat *
 		t.Fatalf("CreateConnection: %v", err)
 	}
 	if uerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
-		Set(meta.ConnProfile, string(ProfileSession)).Update(); uerr != nil {
+		Set(meta.ConnProfile, string(ProfileSession)).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); uerr != nil {
 		t.Fatalf("enabling the session profile: %v", uerr)
 	}
 	connRow, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()

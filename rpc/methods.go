@@ -1178,10 +1178,10 @@ func (s *Server) register() {
 				"id": c.ID, "name": c.Name, "engine": c.Engine.String(),
 				"created_by": c.CreatedBy, "created_at": c.CreatedAt,
 				"updated_at": c.UpdatedAt,
-				// The manager shows what a connection's profile IS
-				// and what it points at, so an operator is not deciding
-				// whether to expose something from its name alone.
-				"profile": c.Profile, "target_db": c.TargetDB,
+				// Exposure and capability are separate facts. Returning both
+				// prevents clients from reconstructing one from the other.
+				"profile": c.Profile, "frontdoor_exposed": c.FrontDoorExposed != 0,
+				"target_db": c.TargetDB,
 			})
 		}
 		return out, nil
@@ -1283,10 +1283,8 @@ func (s *Server) register() {
 		}, nil
 	})
 
-	// conn.set_profile is its OWN verb, not a field on a generic update:
-	// switching a connection to the session profile is an
-	// exposure decision and gets its own audit action so an operator can count
-	// them.
+	// conn.set_profile remains its own audited capability change. During the
+	// expansion window, the core also mirrors the old exposure implication.
 	s.rpc.Handle("conn.set_profile", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
@@ -1304,6 +1302,24 @@ func (s *Server) register() {
 			return nil, err
 		}
 		return nil, wireErr(s.eng.SetConnectionProfile(ctx, token, connID, profile, peerIP(req)))
+	})
+	s.rpc.Handle("conn.set_exposure", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		exposed, err := argBool(req.Params, 2, "exposed")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.eng.SetConnectionExposure(ctx, token, connID, exposed, peerIP(req)))
 	})
 	s.rpc.Handle("conn.test", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {

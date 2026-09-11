@@ -76,6 +76,9 @@ type Engine struct {
 
 	mu    sync.Mutex
 	conns map[int64]dao.DataConn
+	// exposureMu lets wire opens run concurrently, but serializes each complete
+	// open against exposure/profile transitions through session withdrawal.
+	exposureMu sync.RWMutex
 	// opening reserves a connID while its driver is connecting, so the open
 	// happens outside e.mu without two callers racing to publish two pools.
 	opening map[int64]chan struct{}
@@ -96,6 +99,9 @@ type Engine struct {
 	// capability, or with an incomplete set) so row 3.1's fail-closed arms can be
 	// observed without a real target that lacks them.
 	hookWrapPinned func(golibpg.PinnedConn) any
+	// hookBeforeWireAdmit pauses a wire open after its durable exposure read
+	// but before its registry reservation. Test-only race-window control.
+	hookBeforeWireAdmit func()
 	// closeQuiesce is how long a close waits for an in-flight statement. It
 	// is a FIELD rather than a package variable so a test can shorten it on
 	// its own engine: a shared variable that parallel tests reassign is a
@@ -562,7 +568,8 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 
 	// THE AUTOCOMMIT READ-ONLY WRAP (F3a). See wrapReadOnly.
 	if pinned == nil && unitPol.ReadOnly {
-		wrapped, release, werr := e.wrapReadOnly(ctx, target, connRow, ident, connID, ip, sqlText, unitPol)
+		wrapped, release, werr := e.wrapReadOnly(ctx, target, ident, connID, ip, sqlText,
+			unitPol, admission.PhysPooled)
 		if werr != nil {
 			return nil, werr
 		}

@@ -10,9 +10,9 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
-// SetConnectionProfile — the opt-in surface that did not exist.
-// Before this, exposing a connection to the front door meant hand-editing
-// SQLite; the gate shipped and worked while the switch had no home.
+// SetConnectionProfile remains the capability control while the migration
+// compatibility write is present. SetConnectionExposure is the independent
+// administrative reachability control.
 
 func profileOf(t *testing.T, f *fixture, connID int64) string {
 	t.Helper()
@@ -21,6 +21,15 @@ func profileOf(t *testing.T, f *fixture, connID int64) string {
 		t.Fatalf("reading the connection: %v", err)
 	}
 	return row.Profile
+}
+
+func exposureOf(t *testing.T, f *fixture, connID int64) bool {
+	t.Helper()
+	row, err := f.store.Connections.OnCtx(context.Background()).With(meta.ConnID, connID).Get()
+	if err != nil {
+		t.Fatalf("reading the connection: %v", err)
+	}
+	return row.FrontDoorExposed != 0
 }
 
 // ADMIN ONLY, and both halves — a one-sided cell passes for an implementation
@@ -42,8 +51,7 @@ func TestSetConnectionProfile_AdminOnly(t *testing.T) {
 	}
 
 	if err := f.eng.SetConnectionProfile(ctx, eddieTok, f.connID, meta.ProfileSession, testIP); !errors.Is(err, auth.ErrDenied) {
-		t.Fatalf("an editor exposed a connection to the front door: %v — creating a connection "+
-			"and EXPOSING one are different acts", err)
+		t.Fatalf("an editor changed a connection capability profile: %v", err)
 	}
 	if got := profileOf(t, f, f.connID); got == meta.ProfileSession {
 		t.Fatal("the refused call changed the profile anyway")
@@ -78,6 +86,227 @@ func TestSetConnectionProfile_DualWritesExposureDuringCompatibility(t *testing.T
 		if row.FrontDoorExposed != want {
 			t.Fatalf("profile %q wrote frontdoor_exposed=%d, want %d", profile, row.FrontDoorExposed, want)
 		}
+	}
+}
+
+func TestSetConnectionExposure_AdminOnlyAndIndependentOfProfile(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+
+	if exposureOf(t, f, f.connID) {
+		t.Fatal("a newly created connection is exposed by default")
+	}
+	if _, err := f.svc.CreateUser(ctx, f.rootTok, "eddie-exposure", "eddie-passphrase-long", "editor", testIP); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	editorTok, _, err := f.svc.Login(ctx, "eddie-exposure", "eddie-passphrase-long", testIP)
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	if err := f.eng.SetConnectionExposure(ctx, editorTok, f.connID, true, testIP); !errors.Is(err, auth.ErrDenied) {
+		t.Fatalf("an editor exposed a connection: %v", err)
+	}
+	if exposureOf(t, f, f.connID) {
+		t.Fatal("the refused exposure call changed the row")
+	}
+	if err := f.eng.SetConnectionExposure(ctx, f.rootTok, f.connID, true, testIP); err != nil {
+		t.Fatalf("admin was refused: %v", err)
+	}
+	if !exposureOf(t, f, f.connID) {
+		t.Fatal("the admin call did not expose the connection")
+	}
+	if got := profileOf(t, f, f.connID); got != meta.ProfileV1Compat {
+		t.Fatalf("exposure changed capability profile to %q", got)
+	}
+
+	audits, err := f.store.Audit.OnCtx(ctx).With(meta.AuditAction, "connection_exposure_changed").Select()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) != 1 {
+		t.Fatalf("exposure audit rows = %d, want 1", len(audits))
+	}
+}
+
+func TestSetConnectionExposure_RecordsTargetDatabaseWithoutClobberingIt(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := context.Background()
+	connID, err := f.eng.CreateConnection(ctx, f.rootTok, "exposure-target", "postgres",
+		"postgres://u:p@127.0.0.1:5432/lm_prod?sslmode=disable", testIP)
+	if err != nil {
+		t.Fatalf("CreateConnection: %v", err)
+	}
+	if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
+		Set(meta.ConnTargetDB, "").Update(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.eng.SetConnectionExposure(ctx, f.rootTok, connID, true, testIP); err != nil {
+		t.Fatalf("SetConnectionExposure: %v", err)
+	}
+	row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.TargetDB != "lm_prod" {
+		t.Fatalf("target_db = %q, want %q derived from the DSN", row.TargetDB, "lm_prod")
+	}
+
+	if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
+		Set(meta.ConnTargetDB, "operator_value").Update(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.eng.SetConnectionExposure(ctx, f.rootTok, connID, false, testIP); err != nil {
+		t.Fatalf("disabling exposure: %v", err)
+	}
+	if err := f.eng.SetConnectionExposure(ctx, f.rootTok, connID, true, testIP); err != nil {
+		t.Fatalf("re-enabling exposure: %v", err)
+	}
+	row, err = f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.TargetDB != "operator_value" {
+		t.Fatalf("target_db = %q; exposure round trip clobbered the operator value", row.TargetDB)
+	}
+}
+
+func TestSetConnectionExposure_DisablingClosesOpenWireSessions(t *testing.T) {
+	t.Parallel()
+	f, _, secret, dbName := wireFixture(t)
+	ctx := context.Background()
+	internalID, err := f.eng.OpenSession(ctx, f.rootTok, f.connID, testIP)
+	if err != nil {
+		t.Fatalf("OpenSession: %v", err)
+	}
+
+	if _, err = f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP); err != nil {
+		t.Fatalf("OpenWireSession: %v", err)
+	}
+	if n := f.eng.sessions.leaseCount(f.connID); n != 1 {
+		t.Fatalf("leases before disabling exposure = %d, want 1", n)
+	}
+
+	if err := f.eng.SetConnectionExposure(ctx, f.rootTok, f.connID, false, testIP); err != nil {
+		t.Fatalf("SetConnectionExposure: %v", err)
+	}
+	if n := f.eng.sessions.leaseCount(f.connID); n != 0 {
+		t.Fatalf("leases after disabling exposure = %d, want 0", n)
+	}
+	if _, err := f.eng.SessionExecute(ctx, f.rootTok, internalID, "SELECT 1", testIP); err != nil {
+		t.Fatalf("disabling network exposure closed the internal session: %v", err)
+	}
+	if _, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP); DenialReason(err) != DenyProfileRefuses {
+		t.Fatalf("open after disabling exposure = %v (%q), want %q", err, DenialReason(err), DenyProfileRefuses)
+	}
+
+	if err := f.eng.SetConnectionExposure(ctx, f.rootTok, f.connID, true, testIP); err != nil {
+		t.Fatalf("re-enabling exposure: %v", err)
+	}
+	if _, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP); err != nil {
+		t.Fatalf("open after re-enabling exposure: %v", err)
+	}
+}
+
+func TestSetConnectionExposure_DisableWinsAgainstAnOpenThatReadTheOldValue(t *testing.T) {
+	t.Parallel()
+	f, _, secret, dbName := wireFixture(t)
+	ctx := context.Background()
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	f.eng.hookBeforeWireAdmit = func() {
+		close(reached)
+		<-release
+	}
+
+	opened := make(chan WireSessionResult, 1)
+	openErr := make(chan error, 1)
+	go func() {
+		res, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP)
+		opened <- res
+		openErr <- err
+	}()
+	<-reached
+	if f.eng.exposureMu.TryLock() {
+		f.eng.exposureMu.Unlock()
+		close(release)
+		<-opened
+		<-openErr
+		t.Fatal("wire open did not hold the exposure transition lock after reading the row")
+	}
+	disableErr := make(chan error, 1)
+	go func() {
+		disableErr <- f.eng.SetConnectionExposure(ctx, f.rootTok, f.connID, false, testIP)
+	}()
+	close(release)
+	res := <-opened
+	if err := <-openErr; err != nil {
+		t.Fatalf("the open that owned the transition lock was refused: %v", err)
+	}
+	if err := <-disableErr; err != nil {
+		t.Fatalf("SetConnectionExposure: %v", err)
+	}
+	if _, err := f.eng.sessions.lookup(res.SessionID, res.UserID); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("the completed wire open survived disabling exposure: %v", err)
+	}
+	if n := f.eng.sessions.leaseCount(f.connID); n != 0 {
+		t.Fatalf("stale open left %d wire leases, want 0", n)
+	}
+
+	f.eng.hookBeforeWireAdmit = nil
+	if err := f.eng.SetConnectionExposure(ctx, f.rootTok, f.connID, true, testIP); err != nil {
+		t.Fatalf("re-enabling exposure: %v", err)
+	}
+	if _, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP); err != nil {
+		t.Fatalf("wire block survived re-enabling exposure: %v", err)
+	}
+}
+
+func TestSetConnectionProfile_CompatibilityDowngradeBlocksAStaleWireOpen(t *testing.T) {
+	t.Parallel()
+	f, _, secret, dbName := wireFixture(t)
+	ctx := context.Background()
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	f.eng.hookBeforeWireAdmit = func() {
+		close(reached)
+		<-release
+	}
+	opened := make(chan WireSessionResult, 1)
+	openErr := make(chan error, 1)
+	go func() {
+		res, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP)
+		opened <- res
+		openErr <- err
+	}()
+
+	<-reached
+	if f.eng.exposureMu.TryLock() {
+		f.eng.exposureMu.Unlock()
+		close(release)
+		<-opened
+		<-openErr
+		t.Fatal("wire open did not hold the exposure transition lock after reading the row")
+	}
+	downgradeErr := make(chan error, 1)
+	go func() {
+		downgradeErr <- f.eng.SetConnectionProfile(ctx, f.rootTok, f.connID, meta.ProfileV1Compat, testIP)
+	}()
+	close(release)
+	res := <-opened
+	if err := <-openErr; err != nil {
+		t.Fatalf("the open that owned the transition lock was refused: %v", err)
+	}
+	if err := <-downgradeErr; err != nil {
+		t.Fatalf("SetConnectionProfile: %v", err)
+	}
+	if _, err := f.eng.sessions.lookup(res.SessionID, res.UserID); !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("the completed wire open survived the compatibility downgrade: %v", err)
+	}
+	if n := f.eng.sessions.leaseCount(f.connID); n != 0 {
+		t.Fatalf("stale open left %d wire leases, want 0", n)
 	}
 }
 

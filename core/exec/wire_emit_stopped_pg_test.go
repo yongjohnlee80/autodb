@@ -240,7 +240,9 @@ func TestWireQuery_EmitStopped_OtherSites(t *testing.T) {
 		if err != nil {
 			t.Fatalf("CreateConnection sqlite: %v", err)
 		}
-		if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Set(meta.ConnProfile, string(ProfileSession)).Update(); err != nil {
+		if err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
+			Set(meta.ConnProfile, string(ProfileSession)).
+			Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
 			t.Fatal(err)
 		}
 		row, _ := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()

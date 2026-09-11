@@ -7,8 +7,8 @@ import (
 
 	"github.com/yongjohnlee80/golib/dao"
 
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
-	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // THE SHARED EXECUTION-UNIT POLICY (the F3a seam
@@ -143,8 +143,8 @@ func (p UnitPolicy) applyTo(opts *dao.TxOptions) (overridden bool) {
 // is unavailable but not promised, and an error when it is unavailable and
 // was.
 func (e *Engine) wrapReadOnly(
-	ctx context.Context, target dao.DataConn, connRow *meta.Connection,
-	ident auth.Identity, connID int64, ip, sqlText string, pol UnitPolicy,
+	ctx context.Context, target dao.DataConn, ident auth.Identity, connID int64,
+	ip, sqlText string, pol UnitPolicy, phys admission.PhysicalCtx,
 ) (dao.TxConn, func(), error) {
 
 	beginner, ok := target.(dao.TxBeginner)
@@ -152,18 +152,18 @@ func (e *Engine) wrapReadOnly(
 		// THE TARGET CANNOT HOST A READ-ONLY TRANSACTION, and what to do
 		// about that depends on whether the guarantee was PROMISED.
 		//
-		// On the session profile it was: that is the front door's surface,
-		// where a reader is told the database itself enforces the boundary.
+		// On the wire surface it was: a reader is told the database itself
+		// enforces the boundary.
 		// Running unwrapped there would make the promise false while looking
 		// identical, so it fails closed.
 		//
-		// On v1compat it was not. SQLite has no per-transaction read-only
+		// On RPC/TUI surfaces it was not. SQLite has no per-transaction read-only
 		// mode, so refusing would take the reader role away from every such
 		// target for a guarantee never offered on it — and the classifier
 		// remains exactly the boundary it has always been. The unit is
 		// AUDITED so the gap is visible rather than inferred from a driver's
 		// capabilities.
-		if e.profileFor(connRow) == ProfileSession {
+		if phys == admission.PhysWire {
 			return nil, nil, e.reject(ctx, ident, connID, ip, sqlText, ErrReadOnlyUnenforceable)
 		}
 		e.auditBounded(ctx, ident.UserID(), ip, "readonly_unenforced",

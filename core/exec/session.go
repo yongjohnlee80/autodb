@@ -483,6 +483,20 @@ func (r *sessionRegistry) clearDraining(connID int64) {
 	r.mu.Unlock()
 }
 
+// wireSessions returns the front-door sessions on connID. Internal sessions
+// have no wire lease and are deliberately excluded.
+func (r *sessionRegistry) wireSessions(connID int64) []*session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []*session
+	for _, s := range r.byID {
+		if s.connID == connID && s.reservation.LeaseConn != 0 {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // isDraining reports whether a connection is shutting down.
 func (r *sessionRegistry) isDraining(connID int64) bool {
 	r.mu.Lock()

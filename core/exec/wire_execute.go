@@ -171,7 +171,7 @@ func (e *Engine) executeSessionUnit(
 	defer endRun()
 	res, rerr := e.executeUnit(runCtx, execUnit{
 		stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
-		pinned: pinned, txID: txID, tag: s.auditTag(),
+		pinned: pinned, txID: txID, tag: s.auditTag(), phys: phys,
 	})
 	s.noteStatementOutcome(rerr)
 	return res, rerr
@@ -221,7 +221,7 @@ func (e *Engine) wireControl(
 		defer endRun()
 		return e.executeUnit(runCtx, execUnit{
 			stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
-			pinned: pinned, txID: txID, tag: s.auditTag(),
+			pinned: pinned, txID: txID, tag: s.auditTag(), phys: admission.PhysWire,
 		})
 	}
 
@@ -267,6 +267,7 @@ type execUnit struct {
 	pinned  dao.TxConn
 	txID    string
 	tag     string // session stamp for audit lines; empty on the token path
+	phys    admission.PhysicalCtx
 }
 
 // executeUnit is the shared tail: attempt record, read-only wrap, target,
@@ -293,8 +294,8 @@ func (e *Engine) executeUnit(ctx context.Context, u execUnit) (*Result, error) {
 
 	pinned := u.pinned
 	if pinned == nil && u.pol.ReadOnly {
-		wrapped, release, werr := e.wrapReadOnly(ctx, target, u.connRow, u.pol.Ident,
-			u.connRow.ID, u.ip, u.sqlText, u.pol)
+		wrapped, release, werr := e.wrapReadOnly(ctx, target, u.pol.Ident,
+			u.connRow.ID, u.ip, u.sqlText, u.pol, u.phys)
 		if werr != nil {
 			return nil, werr
 		}

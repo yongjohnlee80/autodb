@@ -19,7 +19,9 @@ func openWireGUCs(t *testing.T, f *fixture, dsn string, gucs map[string]string) 
 	if cerr != nil {
 		t.Fatalf("CreateConnection: %v", cerr)
 	}
-	if uerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Set(meta.ConnProfile, string(ProfileSession)).Update(); uerr != nil {
+	if uerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
+		Set(meta.ConnProfile, string(ProfileSession)).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); uerr != nil {
 		t.Fatal(uerr)
 	}
 	connRow, gerr := f.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
@@ -118,7 +120,9 @@ func TestWireOpen_StartupGUCsMeetTheSameDenylistAsSET(t *testing.T) {
 	if cerr != nil {
 		t.Fatalf("CreateConnection: %v", cerr)
 	}
-	if err := f2.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Set(meta.ConnProfile, string(ProfileSession)).Update(); err != nil {
+	if err := f2.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).
+		Set(meta.ConnProfile, string(ProfileSession)).
+		Set(meta.ConnFrontDoorExposed, int64(1)).Update(); err != nil {
 		t.Fatal(err)
 	}
 	row, _ := f2.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
