@@ -75,7 +75,12 @@ func (guardWhereStage) DenyCodes() []admission.Code {
 func (guardWhereStage) Apply(facts admission.Facts, _ admission.Context) (admission.Contribution, error) {
 	lf, ok := facts.(*LegacyFacts)
 	if !ok {
-		return admission.NoContribution(), nil
+		// FOREIGN FACTS FAIL CLOSED: this stage enforces the WHERE guard
+		// through the classifier's own verdict shape, and a facts
+		// implementation it cannot read is one it cannot enforce. A
+		// silent no-op would let an incompatible facts carrier bypass
+		// the guard entirely, so the stage says it broke — loudly.
+		return admission.NoContribution(), fmt.Errorf("admission: guardwhere requires the legacy facts representation; got %T", facts)
 	}
 	if err := guardWhere(lf.stmt); err != nil {
 		return admission.Deny(admission.Reason{
@@ -121,7 +126,9 @@ func (p profileAdmitStage) DenyCodes() []admission.Code {
 func (p profileAdmitStage) Apply(facts admission.Facts, ctx admission.Context) (admission.Contribution, error) {
 	lf, ok := facts.(*LegacyFacts)
 	if !ok {
-		return admission.NoContribution(), nil
+		// FOREIGN FACTS FAIL CLOSED — silently skipping the capability
+		// gate would admit whatever the foreign facts describe.
+		return admission.NoContribution(), fmt.Errorf("admission: profile requires the legacy facts representation; got %T", facts)
 	}
 	onSession := ctx.Phys == admission.PhysSession || ctx.Phys == admission.PhysWire
 	if err := p.profile.admit(lf.stmt, onSession); err != nil {
@@ -250,7 +257,9 @@ func (authorizeUnitStage) DenyCodes() []admission.Code {
 func (authorizeUnitStage) Apply(facts admission.Facts, ctx admission.Context) (admission.Contribution, error) {
 	lf, ok := facts.(*LegacyFacts)
 	if !ok {
-		return admission.NoContribution(), nil
+		// FOREIGN FACTS FAIL CLOSED — silently skipping the class floor
+		// would authorize whatever class the foreign facts claim.
+		return admission.NoContribution(), fmt.Errorf("admission: authorizeunit requires the legacy facts representation; got %T", facts)
 	}
 	if err := classToActionFloor(lf.stmt.Class, ctx); err != nil {
 		return admission.Deny(admission.Reason{
@@ -325,7 +334,9 @@ func (s sessionStateStage) DenyCodes() []admission.Code {
 func (s sessionStateStage) Apply(facts admission.Facts, ctx admission.Context) (admission.Contribution, error) {
 	lf, ok := facts.(*LegacyFacts)
 	if !ok {
-		return admission.NoContribution(), nil
+		// FOREIGN FACTS FAIL CLOSED — silently skipping the session-state
+		// gate would admit SET/LOCK shapes the gate exists to refuse.
+		return admission.NoContribution(), fmt.Errorf("admission: sessionstate requires the legacy facts representation; got %T", facts)
 	}
 	switch lf.stmt.Verb {
 	case "LOCK":
@@ -357,6 +368,12 @@ func (s sessionStateStage) Apply(facts admission.Facts, ctx admission.Context) (
 			if err := admitWireReset(st, ctx.ReadOnly); err != nil {
 				return denyFrom(err), nil
 			}
+			// ADMITTED on the wire: a named RESET the denylist does not
+			// refuse. Falling through to the pooled-path refusal below
+			// would deny every valid named RESET — the wire's backend is
+			// discarded at close, so resetting a setting is the caller's
+			// own business, which is why the two models diverge here too.
+			return admission.NoContribution(), nil
 		}
 		// Off the wire, RESET has no meaning: pooled connections carry no
 		// session-level state a caller may have set (only SET LOCAL is
