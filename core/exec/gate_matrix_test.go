@@ -563,22 +563,22 @@ func TestGateMatrix_MutationControl_OneSurfaceBypassIsDetected(t *testing.T) {
 
 func TestGateMatrix_GuardCellUsesEveryProductionIngress(t *testing.T) {
 	const table = "a27_guard"
-	setup := func(t *testing.T, f *fixture) {
+	setup := func(t *testing.T, f *fixture, connID int64) {
 		t.Helper()
 		ctx := context.Background()
-		if _, err := f.eng.Execute(ctx, f.rootTok, f.connID, "CREATE TABLE "+table+" (n INTEGER NOT NULL)", testIP); err != nil {
+		if _, err := f.eng.Execute(ctx, f.rootTok, connID, "CREATE TABLE "+table+" (n INTEGER NOT NULL)", testIP); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.eng.Execute(ctx, f.rootTok, f.connID, "INSERT INTO "+table+" (n) VALUES (1)", testIP); err != nil {
+		if _, err := f.eng.Execute(ctx, f.rootTok, connID, "INSERT INTO "+table+" (n) VALUES (1)", testIP); err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() {
-			_, _ = f.eng.Execute(context.Background(), f.rootTok, f.connID, "DROP TABLE IF EXISTS "+table, testIP)
+			_, _ = f.eng.Execute(context.Background(), f.rootTok, connID, "DROP TABLE IF EXISTS "+table, testIP)
 		})
 	}
-	assertUnchanged := func(t *testing.T, f *fixture) {
+	assertUnchanged := func(t *testing.T, f *fixture, connID int64) {
 		t.Helper()
-		result, err := f.eng.Execute(context.Background(), f.rootTok, f.connID, "SELECT n FROM "+table, testIP)
+		result, err := f.eng.Execute(context.Background(), f.rootTok, connID, "SELECT n FROM "+table, testIP)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -589,17 +589,17 @@ func TestGateMatrix_GuardCellUsesEveryProductionIngress(t *testing.T) {
 
 	t.Run("pooled", func(t *testing.T) {
 		f := newFixture(t)
-		setup(t, f)
+		setup(t, f, f.connID)
 		_, err := f.eng.Execute(context.Background(), f.rootTok, f.connID, "UPDATE "+table+" SET n = 2", testIP)
 		if !errors.Is(err, ErrNoWhere) {
 			t.Fatalf("pooled production ingress returned %v, want ErrNoWhere", err)
 		}
-		assertUnchanged(t, f)
+		assertUnchanged(t, f, f.connID)
 	})
 
 	t.Run("rpc-session", func(t *testing.T) {
 		f := newFixture(t)
-		setup(t, f)
+		setup(t, f, f.connID)
 		if err := f.store.Connections.OnCtx(context.Background()).With(meta.ConnID, f.connID).
 			Set(meta.ConnProfile, meta.ProfileSession).Update(); err != nil {
 			t.Fatal(err)
@@ -612,12 +612,12 @@ func TestGateMatrix_GuardCellUsesEveryProductionIngress(t *testing.T) {
 		if !errors.Is(err, ErrNoWhere) {
 			t.Fatalf("RPC-session production ingress returned %v, want ErrNoWhere", err)
 		}
-		assertUnchanged(t, f)
+		assertUnchanged(t, f, f.connID)
 	})
 
 	t.Run("wire-simple", func(t *testing.T) {
 		f, _, secret, dbName := wireFixture(t)
-		setup(t, f)
+		setup(t, f, f.connID)
 		opened, err := f.eng.OpenWireSession(context.Background(), secret, "root", dbName, testIP)
 		if err != nil {
 			t.Fatal(err)
@@ -627,21 +627,18 @@ func TestGateMatrix_GuardCellUsesEveryProductionIngress(t *testing.T) {
 		if !errors.Is(err, ErrNoWhere) {
 			t.Fatalf("wire-simple production ingress returned %v, want ErrNoWhere", err)
 		}
-		assertUnchanged(t, f)
+		assertUnchanged(t, f, f.connID)
 	})
 
 	t.Run("wire-extended", func(t *testing.T) {
 		f, connID, sid, _, userID := pgWireSession(t)
-		setup(t, f)
+		setup(t, f, connID)
 		err := f.eng.WireParse(context.Background(), sid, userID, "a27",
 			"UPDATE "+table+" SET n = 2", nil, testIP)
 		if !errors.Is(err, ErrNoWhere) {
 			t.Fatalf("wire-extended production ingress returned %v, want ErrNoWhere", err)
 		}
-		if connID != f.connID {
-			t.Fatalf("live fixture connection = %d, want %d", connID, f.connID)
-		}
-		assertUnchanged(t, f)
+		assertUnchanged(t, f, connID)
 	})
 }
 
