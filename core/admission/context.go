@@ -36,15 +36,55 @@ func (p PhysicalCtx) String() string {
 	return "unknown"
 }
 
-// Needs is what a stage requires of the context to be applicable. A stage
-// that needs a session is not "deselected" on the pooled chain — it is
-// UNSATISFIABLE there, and the composition says so rather than the stage
-// returning nothing at runtime. Absence by construction, never by
-// discipline.
+// TargetCaps is the TARGET's capability set, supplied by the engine per
+// connection: what the database itself can do. A typed bitset rather than
+// a growing boolean per target fact, so a stage declares its requirement
+// declaratively and the composition can make it absent by construction —
+// a reader-analysis stage requiring a routine catalog is unsatisfiable on
+// a target that has none, rather than discovering the absence in Apply and
+// returning an empty contribution.
+type TargetCaps uint
+
+const (
+	// CapRoutineCatalog: the target exposes a user-routine catalog the
+	// reader analysis can consult (PostgreSQL-family targets).
+	CapRoutineCatalog TargetCaps = 1 << iota
+
+	// CapTxReadOnly: the target can host a server-enforced read-only
+	// transaction.
+	CapTxReadOnly
+)
+
+// Has reports whether every capability in want is present.
+func (c TargetCaps) Has(want TargetCaps) bool { return c&want == want }
+
+// String renders the set for diagnostics.
+func (c TargetCaps) String() string {
+	if c == 0 {
+		return "none"
+	}
+	var parts []string
+	if c&CapRoutineCatalog != 0 {
+		parts = append(parts, "routine-catalog")
+	}
+	if c&CapTxReadOnly != 0 {
+		parts = append(parts, "tx-readonly")
+	}
+	if len(parts) == 0 {
+		return "unknown-bits"
+	}
+	return join(parts, "+")
+}
+
+// Needs is what a stage requires of the context and facts to be
+// applicable. A stage that cannot be satisfied is not "deselected" on the
+// chain — it is UNSATISFIABLE there, and the composition says so rather
+// than the stage returning nothing at runtime. Absence by construction,
+// never by discipline.
 type Needs struct {
-	// OnSession: the stage requires a session-shaped physical context
-	// (session or wire). The GUC denylist stage sets this; the pooled
-	// allowlist stage does not.
+	// OnSession: the stage requires an affirmative session-shaped physical
+	// context (session or wire). Pooled — and any zero or invalid physical
+	// context — does not satisfy it.
 	OnSession bool
 
 	// ReadOnlyUnit: the stage applies to reader units only (the reader
@@ -59,6 +99,10 @@ type Needs struct {
 	// facts (the GUC stages). On a chain whose facts carry no set shape
 	// the stage is unsatisfiable.
 	SetShape bool
+
+	// TargetCaps: the stage requires these target capabilities. A target
+	// without them makes the stage absent by construction.
+	TargetCaps TargetCaps
 }
 
 // Context is the dynamic half of a stage's input: the connection's
@@ -95,6 +139,24 @@ type Context struct {
 	// Aborted reports a failed transaction (recovery controls only).
 	Aborted bool
 
+	// TargetCaps is what the connection's target can do, supplied by the
+	// engine per connection. The zero value means NO capabilities — a
+	// stage requiring any capability is unsatisfiable against it.
+	TargetCaps TargetCaps
+
 	// MaxStatementBytes is the intake bound the size stage enforces.
 	MaxStatementBytes int
+}
+
+// join is strings.Join without importing strings — the leaf keeps its
+// import set to the stdlib's most basic surface deliberately.
+func join(parts []string, sep string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += sep
+		}
+		out += p
+	}
+	return out
 }

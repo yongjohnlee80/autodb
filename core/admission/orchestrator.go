@@ -47,6 +47,13 @@ func Compose(stages ...Stage) *Orchestrator {
 // because their absence is a property of the composition, decided when the
 // chain was built, not a runtime surprise.
 //
+// A DENY INTENTIONALLY SUPPRESSES RISK: when a stage contributes both a
+// denial and an observation, the denial wins and the observation is
+// dropped. A refused statement's analytics value is its refusal — the
+// record the disposition carries is the refusal itself. This is a
+// decision, documented here and asserted by the dual-arm cell, not an
+// accident of the return.
+//
 // An operational error from a stage ABORTS the run and is returned as
 // itself. It is not a refusal: the caller must be able to tell "the
 // statement is refused" from "the pipeline could not decide", and the
@@ -62,6 +69,16 @@ func (o *Orchestrator) Run(facts Facts, ctx Context) (Report, error) {
 			return Report{}, fmt.Errorf("admission: stage %s broke: %w", s.Name(), err)
 		}
 		if contrib.Deny != nil {
+			// AN UNDECLARED DENIAL IS A DISCLOSURE VIOLATION, rejected
+			// rather than honored. The registration walks that protect the
+			// renderer and the record derive their obligations from
+			// DenyCodes; a denial the stage never declared is a refusal the
+			// pipeline's consumers cannot know about — honoring it would
+			// silently exempt it from every obligation the seam promises.
+			if !declaresCode(s, contrib.Deny.Code) {
+				return Report{}, fmt.Errorf("admission: stage %s denied with undeclared code %q — "+
+					"declare it in DenyCodes or do not deny with it", s.Name(), contrib.Deny.Code)
+			}
 			rep.Deny = append(rep.Deny, *contrib.Deny)
 			return rep, nil
 		}
@@ -90,7 +107,19 @@ func applicable(s Stage, facts Facts, ctx Context) bool {
 			return false
 		}
 	}
-	if n.OnSession && ctx.Phys == PhysPooled {
+	// ONSESSION IS AFFIRMATIVE, never "not pooled". The zero value of
+	// PhysicalCtx — and any invalid value a future edit could introduce —
+	// must NOT satisfy a session-only stage: a transport boundary that
+	// admits unknown contexts into session-only gates is the shape of a
+	// security hole, which is why the check asks "is it session or wire"
+	// rather than "is it not pooled".
+	if n.OnSession && ctx.Phys != PhysSession && ctx.Phys != PhysWire {
+		return false
+	}
+	// Target capabilities are applicability too: a stage requiring what
+	// the target cannot do is absent by construction, rather than
+	// discovering the absence in Apply and returning empty.
+	if !ctx.TargetCaps.Has(n.TargetCaps) {
 		return false
 	}
 	return true
@@ -120,29 +149,25 @@ type Registration struct {
 	DenyCod []Code // every Code the stage can deny with
 }
 
-// Registered exposes the chain's stages and their deny codes — the single
-// disclosure source for the renderer-completeness walk and the
-// record-on-every-refusal enumeration. A stage added later extends this
-// automatically; the walks fail until their obligations cover it, which is
-// the point of sharing the mechanism.
+// Registered exposes the chain's stages and their DECLARED deny codes —
+// the single disclosure source for the renderer-completeness walk and the
+// record-on-every-refusal enumeration. Disclosure is mandatory on Stage
+// itself (an observer declares nil), so every stage registers and a stage
+// added in a later phase cannot silently escape either walk.
 func (o *Orchestrator) Registered() []Registration {
 	out := make([]Registration, 0, len(o.stages))
 	for _, s := range o.stages {
-		if d, ok := s.(Denier); ok {
-			out = append(out, Registration{Name: s.Name(), DenyCod: d.DenyCodes()})
-			continue
-		}
-		out = append(out, Registration{Name: s.Name()})
+		out = append(out, Registration{Name: s.Name(), DenyCod: s.DenyCodes()})
 	}
 	return out
 }
 
-// Denier is the OPTIONAL disclosure a denying stage implements: every Code
-// it can deny with. It is optional because a stage that never denies (the
-// A15 fake, a pure risk observer) has nothing to disclose; it is an
-// interface rather than a Stage method because the registration mechanism
-// must work for ANY Stage without forcing every future observer to
-// implement a vestigial arm.
-type Denier interface {
-	DenyCodes() []Code
+// declaresCode reports whether the stage declared the given code.
+func declaresCode(s Stage, c Code) bool {
+	for _, d := range s.DenyCodes() {
+		if d == c {
+			return true
+		}
+	}
+	return false
 }

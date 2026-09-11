@@ -45,7 +45,6 @@ func (f fakeStage) Apply(facts Facts, _ Context) (Contribution, error) {
 // output) is Step 2's work and lives in core/exec; this one exists so the
 // package can test itself without importing anything.
 type fakeFacts struct {
-	scope     Scope
 	verb      string
 	class     FactClass
 	hasWhere  bool
@@ -57,7 +56,6 @@ type fakeFacts struct {
 	textLen   int
 }
 
-func (f fakeFacts) Scope() Scope                    { return f.scope }
 func (f fakeFacts) Verb() string                    { return f.verb }
 func (f fakeFacts) Class() FactClass                { return f.class }
 func (f fakeFacts) HasTopLevelWhere() bool          { return f.hasWhere }
@@ -67,7 +65,7 @@ func (f fakeFacts) SetTarget() (string, bool, bool) { return f.setName, f.setLoc
 func (f fakeFacts) TextLen() int                    { return f.textLen }
 
 func simpleFacts(verb string, class FactClass) fakeFacts {
-	return fakeFacts{scope: ScopeStatement, verb: verb, class: class, textLen: 100}
+	return fakeFacts{verb: verb, class: class, textLen: 100}
 }
 
 // A15: a second implementation composes into the chain without touching
@@ -117,6 +115,7 @@ type brokenStage struct{}
 
 func (brokenStage) Name() string        { return "broken" }
 func (brokenStage) ContextNeeds() Needs { return Needs{} }
+func (brokenStage) DenyCodes() []Code   { return nil }
 func (brokenStage) Apply(Facts, Context) (Contribution, error) {
 	return NoContribution(), errors.New("the stage itself broke")
 }
@@ -256,6 +255,7 @@ type needsStage struct {
 
 func (n needsStage) Name() string        { return n.name }
 func (n needsStage) ContextNeeds() Needs { return n.needs }
+func (n needsStage) DenyCodes() []Code   { return []Code{CodeNoWhere} }
 func (n needsStage) Apply(Facts, Context) (Contribution, error) {
 	return Deny(Reason{Code: CodeNoWhere, Continue: true}), nil
 }
@@ -284,7 +284,7 @@ func TestRegistered_IsTheDisclosureSource(t *testing.T) {
 		t.Fatalf("the fake's registration is wrong: %+v", regs[0])
 	}
 	if regs[1].Name != "broken" || len(regs[1].DenyCod) != 0 {
-		t.Fatalf("the non-denier's registration is wrong: %+v — optional disclosure means "+
+		t.Fatalf("the non-denier's registration is wrong: %+v — mandatory disclosure means an observer DECLARES nil, not "+
 			"no codes, not no entry", regs[1])
 	}
 }
@@ -299,4 +299,128 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// MF1: an OnSession stage is not consulted on the ZERO physical context or
+// any invalid value — the check is affirmative (session or wire), never
+// "not pooled". A transport boundary that admitted unknown contexts into
+// session-only gates would be a security hole wearing a default.
+func TestOnSession_IsAffirmative(t *testing.T) {
+	sessionStage := needsStage{Needs{OnSession: true}, "session"}
+
+	// The zero Context: no physical context at all. The stage must be
+	// absent — an unset transport is not a session.
+	if ranStage(t, sessionStage, simpleFacts("SELECT", ClassRead), Context{}) {
+		t.Error("an OnSession stage ran on the ZERO physical context — the check is " +
+			"not affirmative; an unset transport must never satisfy a session-only stage")
+	}
+
+	// An invalid PhysicalCtx (not one of the three defined values).
+	facts := simpleFacts("SELECT", ClassRead)
+	invalidCtx := Context{Phys: PhysicalCtx(99)}
+	if ranStage(t, sessionStage, facts, invalidCtx) {
+		t.Error("an OnSession stage ran on an INVALID physical context (99) — any " +
+			"future invalid value must fail toward absence, not toward admission")
+	}
+
+	// And the affirmative half: both session-shaped contexts satisfy it.
+	if !ranStage(t, sessionStage, facts, Context{Phys: PhysSession}) {
+		t.Error("an OnSession stage was absent on a session")
+	}
+	if !ranStage(t, sessionStage, facts, Context{Phys: PhysWire}) {
+		t.Error("an OnSession stage was absent on a wire session")
+	}
+}
+
+// MF2: a denial the stage did not declare is a disclosure violation — the
+// run REJECTS it loudly rather than honoring a refusal the pipeline's
+// consumers cannot know about. The registration walks derive their
+// obligations from DenyCodes; an undeclared denial would silently exempt
+// itself from every one of them.
+type stealthDenier struct{}
+
+func (stealthDenier) Name() string        { return "stealth" }
+func (stealthDenier) ContextNeeds() Needs { return Needs{} }
+func (stealthDenier) DenyCodes() []Code   { return nil } // declares NOTHING
+func (stealthDenier) Apply(Facts, Context) (Contribution, error) {
+	return Deny(Reason{Code: CodeNoWhere, Continue: true}), nil // denies anyway
+}
+
+func TestUndeclaredDenial_IsRejected(t *testing.T) {
+	o := Compose(stealthDenier{})
+	_, err := o.Run(simpleFacts("SELECT", ClassRead), Context{})
+	if err == nil {
+		t.Fatal("a stage denied with an undeclared code and the run honored it — the " +
+			"disclosure walks would never see this refusal")
+	}
+	if !strings.Contains(err.Error(), "undeclared code") {
+		t.Fatalf("the rejection does not say what was violated: %v", err)
+	}
+}
+
+// MF3: target capabilities are applicability, not runtime discovery. A
+// stage requiring the routine catalog is absent on a target without one —
+// the composition says so, rather than the stage discovering the absence
+// in Apply and returning an empty contribution.
+type capsStage struct {
+	name  string
+	needs TargetCaps
+}
+
+func (c capsStage) Name() string        { return c.name }
+func (c capsStage) ContextNeeds() Needs { return Needs{TargetCaps: c.needs} }
+func (c capsStage) DenyCodes() []Code   { return []Code{CodeNoWhere} }
+func (c capsStage) Apply(Facts, Context) (Contribution, error) {
+	return Deny(Reason{Code: CodeNoWhere, Continue: true}), nil
+}
+
+func TestTargetCaps_AreApplicability(t *testing.T) {
+	reader := capsStage{name: "reader", needs: CapRoutineCatalog}
+
+	// No capabilities declared on the context: the stage is absent.
+	if ranStage(t, reader, simpleFacts("SELECT", ClassRead), Context{}) {
+		t.Error("a stage requiring CapRoutineCatalog ran against the zero capability set — " +
+			"target capability must be applicability, not a runtime surprise")
+	}
+	// The wrong capability present: still absent.
+	if ranStage(t, reader, simpleFacts("SELECT", ClassRead), Context{TargetCaps: CapTxReadOnly}) {
+		t.Error("a stage requiring CapRoutineCatalog ran against a target offering only " +
+			"CapTxReadOnly — capability sets are conjunctive, not best-effort")
+	}
+	// The capability present: the stage runs.
+	if !ranStage(t, reader, simpleFacts("SELECT", ClassRead),
+		Context{TargetCaps: CapRoutineCatalog | CapTxReadOnly}) {
+		t.Error("a stage requiring CapRoutineCatalog was absent on a target that has it")
+	}
+}
+
+// The dual-arm decision, asserted: a contribution carrying BOTH a denial
+// and an observation denies, and the observation is intentionally dropped
+// — documented on Run, asserted here, not an accident of the return.
+type dualArmStage struct{}
+
+func (dualArmStage) Name() string        { return "dual" }
+func (dualArmStage) ContextNeeds() Needs { return Needs{} }
+func (dualArmStage) DenyCodes() []Code   { return []Code{CodeNoWhere} }
+func (dualArmStage) Apply(Facts, Context) (Contribution, error) {
+	return Contribution{
+		Deny: &Reason{Code: CodeNoWhere, Continue: true},
+		Risk: &Observation{Code: CodeReaderAdvancedPattern, Detail: "also risky"},
+	}, nil
+}
+
+func TestDualArm_DenialSuppressesRisk(t *testing.T) {
+	o := Compose(dualArmStage{})
+	rep, err := o.Run(simpleFacts("SELECT", ClassRead), Context{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.IsDenied() {
+		t.Fatal("the dual-arm contribution did not deny")
+	}
+	if len(rep.Risk) != 0 {
+		t.Fatalf("the suppressed risk leaked into the Report: %+v — the deny-wins rule "+
+			"is documented as intentional; the cell pins it so a future edit cannot "+
+			"change it silently", rep.Risk)
+	}
 }
