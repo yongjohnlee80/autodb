@@ -391,11 +391,10 @@ func onRecordEntries(t *testing.T, lines []string, header string) map[int]string
 
 // The corpus prediction's structural premise, asserted rather than trusted:
 // the committed manifest records profile-gate and WHERE-guard decisions only,
-// so the phase-1 ordering flip (profile admit vs reader analysis) cannot
-// reach it. This cell fails the moment the replay grows a reader-analysis
-// arm, because at that point the recorded prediction in the matrix document
-// is stale and must be re-derived BEFORE the corpus runs again.
-func TestGateMatrix_CorpusReplayCannotSeeTheReaderStage(t *testing.T) {
+// so neither phase-1 profile-ordering flip can reach it. This cell fails the
+// moment the replay grows reader-analysis or class-authorization logic, because
+// the matrix prediction is then stale and must be re-derived BEFORE replay.
+func TestGateMatrix_CorpusReplayCannotSeeLaterAdmissionStages(t *testing.T) {
 	src, err := os.ReadFile("corpus_test.go")
 	if err != nil {
 		t.Fatal(err)
@@ -411,10 +410,10 @@ func TestGateMatrix_CorpusReplayCannotSeeTheReaderStage(t *testing.T) {
 	end := strings.Index(text[declAt:], "\n}") + declAt
 	body := text[declAt:end]
 
-	for _, arm := range []string{"readerAnalysis", "ReaderAdvancedPattern"} {
+	for _, arm := range []string{"readerAnalysis", "ReaderAdvancedPattern", "authorizeUnit", "auth.ErrDenied"} {
 		if strings.Contains(body, arm) {
-			t.Fatalf("gateDecision now contains %q — the corpus replay CAN see the reader stage, "+
-				"so the phase-1 ordering flip may reach the committed manifest. The prediction "+
+			t.Fatalf("gateDecision now contains %q — the corpus replay CAN see a later admission stage, "+
+				"so a phase-1 profile-ordering flip may reach the committed manifest. The prediction "+
 				"recorded in the admission gate matrix §9 (empty delta, by construction) is "+
 				"STALE: re-derive it against the corpus rows in the affected class and record "+
 				"the new prediction BEFORE the corpus runs again, rather than letting this cell "+

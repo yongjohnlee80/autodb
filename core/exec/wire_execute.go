@@ -136,14 +136,14 @@ func (e *Engine) executeSessionUnit(
 		return e.tokenControl(ctx, s, connRow, stmt, pol, sqlText, ip)
 	}
 
-	// THE STATEMENT GATES, through the one chain — the declared order,
-	// which is THE ORDERING DELTA for this drive: the legacy session path
-	// ran the reader analysis BEFORE the profile gate; the profile runs
-	// first now, because removing the UDF cannot make a compat-profile
-	// data-modifying CTE runnable (the pipeline design's ruling). A
-	// read-only compat unit violating both now answers the profile's
-	// identity — the one intentional behaviour change of phase 1, its
-	// corpus prediction recorded in the gate matrix before this flip.
+	// THE STATEMENT GATES, through the one chain. The legacy session path
+	// ran reader analysis and class authorization before the profile gate;
+	// the profile runs first now. The gate matrix names both resulting
+	// identity changes and records why neither can reach the corpus manifest.
+	// A compat dm-CTE with a UDF previously answered reader-advanced-pattern;
+	// the same shape without a UDF previously answered auth.ErrDenied.
+	// Profile-first answers statement-unsupported in both cases, and named
+	// cells keep this accepted disclosure change separate from preservation.
 	s.mu.Lock()
 	pinned, phase, txID := s.tx, s.txPhase, s.txID
 	s.mu.Unlock()

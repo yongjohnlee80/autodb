@@ -209,11 +209,9 @@ func TestExtPG_GrantRevokedBetweenParseAndExecuteRefuses(t *testing.T) {
 	}
 }
 
-// The extended-Parse ordering delta, through the real drive. The reader's
-// statement violates both the compat profile and reader analysis; the one
-// declared chain answers with the profile identity before consulting the
-// target's routine catalog.
-func TestExtPG_ParseAnswersTheProfileBeforeReaderAnalysis(t *testing.T) {
+// The extended-Parse ordering deltas, through the real drive. Profile
+// admissibility answers before both reader analysis and class authorization.
+func TestExtPG_ParseAnswersTheProfileBeforeLaterStages(t *testing.T) {
 	f, connID, sid, userID, table, fn := readerWireSession(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -222,19 +220,39 @@ func TestExtPG_ParseAnswersTheProfileBeforeReaderAnalysis(t *testing.T) {
 		Set(meta.ConnProfile, string(ProfileV1Compat)).Update(); err != nil {
 		t.Fatalf("setting the compat profile: %v", err)
 	}
-	sql := fmt.Sprintf(
-		"WITH x AS (DELETE FROM %s WHERE note = 'missing' RETURNING note) SELECT %s() FROM x",
-		table, fn)
-	err := f.eng.WireParse(ctx, sid, userID, "delta", sql, nil, testIP)
-	if !errors.Is(err, ErrStatementUnsupported) {
-		t.Fatalf("Parse of the double-violating statement = %v, want ErrStatementUnsupported; "+
-			"the declared profile-before-reader order did not reach the extended drive", err)
+	cases := []struct {
+		name      string
+		sql       string
+		laterErr  error
+		laterGate string
+	}{
+		{
+			name:      "class-authorization",
+			sql:       fmt.Sprintf("WITH x AS (DELETE FROM %s WHERE note = 'missing' RETURNING note) SELECT count(*) FROM x", table),
+			laterErr:  auth.ErrDenied,
+			laterGate: "class authorization",
+		},
+		{
+			name:      "reader-analysis",
+			sql:       fmt.Sprintf("WITH x AS (DELETE FROM %s WHERE note = 'missing' RETURNING note) SELECT %s() FROM x", table, fn),
+			laterErr:  ErrReaderAdvancedPattern,
+			laterGate: "reader analysis",
+		},
 	}
-	if errors.Is(err, ErrReaderAdvancedPattern) {
-		t.Fatalf("Parse answered with the reader-analysis identity: %v", err)
-	}
-	if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
-		t.Fatalf("Sync after the refused Parse: %v", serr)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := f.eng.WireParse(ctx, sid, userID, tc.name, tc.sql, nil, testIP)
+			if !errors.Is(err, ErrStatementUnsupported) {
+				t.Fatalf("Parse of the double-violating statement = %v, want ErrStatementUnsupported; "+
+					"the declared profile-before-%s order did not reach the extended drive", err, tc.laterGate)
+			}
+			if errors.Is(err, tc.laterErr) {
+				t.Fatalf("Parse answered with the %s identity: %v", tc.laterGate, err)
+			}
+			if _, serr := f.eng.WireSyncSegment(ctx, sid, userID, discardEmit); serr != nil {
+				t.Fatalf("Sync after the refused Parse: %v", serr)
+			}
+		})
 	}
 }
 

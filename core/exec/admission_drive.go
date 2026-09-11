@@ -108,15 +108,15 @@ func (e *Engine) evaluateChain(stages []admission.Stage, facts admission.Facts, 
 // policy) rather than the token-level grant lookup the pooled path runs,
 // so the snapshot-floor stage IS composed here.
 //
-// THE ORDERING DELTA LANDS HERE. The legacy session path ran reader
-// analysis BEFORE the profile gate; the declared order runs the profile
-// first, because removing the UDF cannot make a compat-profile
-// data-modifying CTE runnable. A read-only compat unit whose statement
-// violates both stages now answers statement-unsupported where the legacy
-// path answered reader-advanced-pattern — the ONE intentional behaviour
-// change of phase 1, recorded in the gate matrix's corpus prediction
-// (empty manifest delta, by construction) and asserted by the
-// ordering-delta cells.
+// THE ORDERING DELTAS LAND HERE. The legacy session path ran reader analysis
+// and class authorization BEFORE the profile gate; the declared order runs the
+// profile first. A read-only compat data-modifying CTE now answers
+// statement-unsupported instead of reader-advanced-pattern when it calls a
+// UDF, or auth.ErrDenied when it does not. One profile-first decision creates
+// both intentional identity changes; the gate matrix records the disclosure
+// tradeoff and why neither can reach the corpus manifest.
+// The session, wire-simple and extended-Parse discriminator cells pin each
+// collision independently from the preservation evidence.
 func (e *Engine) sessionStages(ctx context.Context, connRow *meta.Connection) []admission.Stage {
 	return []admission.Stage{
 		sizeCapStage{},
