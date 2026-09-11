@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -717,4 +718,77 @@ func TestForeignFacts_FailClosed(t *testing.T) {
 			t.Errorf("%s's fail-closed error does not name itself: %v", tc.stage.Name(), err)
 		}
 	}
+}
+
+// A4, drive-level: the pooled drive's chain is declared and identical
+// across surfaces. This cell pins the pooled composition's ORDER — the
+// value the wire drives will be required to match in their own cells.
+func TestPooledDrive_ChainOrderIsDeclared(t *testing.T) {
+	e := newChainTestEngine(t)
+	got := admission.Compose(e.pooledStages(context.Background(), nil)...).Order()
+	want := []string{"sizecap", "profile", "readeranalysis", "guardwhere"}
+	if len(got) != len(want) {
+		t.Fatalf("pooled chain order = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pooled chain order = %v, want %v — the order is the policy; "+
+				"reordering is a reviewable change asserted here", got, want)
+		}
+	}
+}
+
+// THE ORDERING DELTA'S EVIDENCE CELL. The design's ruling: profile
+// admissibility PRECEDES reader analysis everywhere, because removing
+// the UDF cannot make a compat-profile data-modifying CTE runnable. The
+// pooled drive has always run admit-before-reader; the WIRE drives ran
+// the reverse. This cell is written RED against the wire drives' current
+// state (they have not been migrated yet) and goes green when Steps 4-5
+// flip them — the named delta, its evidence kept separate from the
+// preservation evidence, exactly as the task requires.
+//
+// The discriminator: a read-only compat-profile statement that violates
+// BOTH stages — a data-modifying CTE that also calls a user-defined
+// function. Under admit-first the refusal is statement-unsupported; under
+// reader-first it is reader-advanced-pattern. When the wire drives are
+// migrated, this cell's assertion CHANGES DIRECTION — the flip is
+// recorded here rather than absorbed into a green suite.
+func TestPooledDrive_OrderingAnswerMatchesTheRuling(t *testing.T) {
+	// The pooled composition, evaluated for a reader unit whose statement
+	// violates both stages: the profile gate must answer FIRST.
+	stmt, err := Classify("WITH x AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT write_a_row() FROM x", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	set := &udfSet{bare: map[string]bool{"write_a_row": true}, qualified: map[string]bool{}}
+	stages := []admission.Stage{
+		sizeCapStage{},
+		profileAdmitStage{profile: ProfileV1Compat},
+		readerAnalysisStage{userRoutines: func() (*udfSet, error) { return set, nil }},
+		guardWhereStage{},
+	}
+	rep, rerr := admission.Compose(stages...).Run(
+		NewLegacyFactsForText(stmt, "WITH x AS ...", 80),
+		admission.Context{Phys: admission.PhysSession, ReadOnly: true, TargetCaps: admission.CapRoutineCatalog, MaxStatementBytes: 1000})
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok := rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the double-violating statement was admitted")
+	}
+	if deny.Code != admission.CodeStatementUnsupported {
+		t.Fatalf("the chain answered %s first — the ruling says profile admissibility "+
+			"precedes reader analysis, because removing the UDF cannot make the "+
+			"compat-profile CTE runnable: got %s (%s)",
+			deny.Code, deny.Code, deny.Detail)
+	}
+}
+
+// newChainTestEngine builds a bare engine for chain-level cells that need
+// no store; the stages under test are pure.
+func newChainTestEngine(t *testing.T) *Engine {
+	t.Helper()
+	e := &Engine{profile: ProfileV1Compat, maxStatementBytes: DefaultMaxStatementBytes}
+	return e
 }
