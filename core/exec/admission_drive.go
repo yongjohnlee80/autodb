@@ -30,10 +30,17 @@ type admissionInputs struct {
 	pinnedSet bool // the pooled drive's onSession fact: a pinned transaction
 }
 
-// runPrePolicyAdmission evaluates the stages whose legacy position is
-// BEFORE the drive's class authorization and unit-policy resolution:
-// the intake bound and the capability profile. The ORDER the legacy
-// path ran is load-bearing — the profile's ErrStatementUnsupported for
+// runSizeAdmission evaluates the intake bound before classification. A zero
+// Statement is intentional: this stage needs only the raw text length.
+func (e *Engine) runSizeAdmission(phys admission.PhysicalCtx, sqlText string) (error, error) {
+	facts := NewLegacyFactsForText(Statement{}, sqlText, len(sqlText))
+	return e.evaluateChain([]admission.Stage{sizeCapStage{}}, facts,
+		admission.Context{Phys: phys, MaxStatementBytes: e.maxStatementBytes})
+}
+
+// runPrePolicyAdmission evaluates the capability stage whose legacy position
+// is BEFORE the drive's class authorization and unit-policy resolution. The
+// ORDER the legacy path ran is load-bearing — the profile's ErrStatementUnsupported for
 // an unsupported statement must precede the actual-class Authorize's
 // auth.ErrDenied, because a caller without the class grant who sends a
 // profile-invalid statement must learn the PROFILE's answer, not the
@@ -43,14 +50,12 @@ type admissionInputs struct {
 // Operational error: a stage broke; refusal: the legacy identity.
 func (e *Engine) runPrePolicyAdmission(ctx context.Context, in admissionInputs, stmt Statement, sqlText string) (error, error) {
 	actx := admission.Context{
-		Profile:           string(e.profileFor(in.connRow)),
-		Phys:              in.phys,
-		PinnedTx:          in.pinnedSet,
-		MaxStatementBytes: e.maxStatementBytes,
+		Profile:  string(e.profileFor(in.connRow)),
+		Phys:     in.phys,
+		PinnedTx: in.pinnedSet,
 	}
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
 	stages := []admission.Stage{
-		sizeCapStage{},
 		profileAdmitStage{profile: e.profileFor(in.connRow)},
 	}
 	return e.evaluateChain(stages, facts, actx)
@@ -67,14 +72,13 @@ func (e *Engine) runPostPolicyAdmission(ctx context.Context, in admissionInputs,
 		caps |= admission.CapRoutineCatalog
 	}
 	actx := admission.Context{
-		Profile:           string(e.profileFor(in.connRow)),
-		Phys:              in.phys,
-		PinnedTx:          in.pinnedSet,
-		ReadOnly:          pol.ReadOnly,
-		MayWrite:          pol.MayWrite,
-		TxOpen:            in.txOpen,
-		TargetCaps:        caps,
-		MaxStatementBytes: e.maxStatementBytes,
+		Profile:    string(e.profileFor(in.connRow)),
+		Phys:       in.phys,
+		PinnedTx:   in.pinnedSet,
+		ReadOnly:   pol.ReadOnly,
+		MayWrite:   pol.MayWrite,
+		TxOpen:     in.txOpen,
+		TargetCaps: caps,
 	}
 	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
 	stages := []admission.Stage{
@@ -102,6 +106,31 @@ func (e *Engine) evaluateChain(stages []admission.Stage, facts admission.Facts, 
 	return reasonErr(deny), nil
 }
 
+// runProfileAdmission keeps control routing in its drive while moving the
+// capability decision behind the same profile stage ordinary statements use.
+func (e *Engine) runProfileAdmission(profile Profile, phys admission.PhysicalCtx, stmt Statement, sqlText string) (error, error) {
+	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
+	return e.evaluateChain([]admission.Stage{profileAdmitStage{profile: profile}}, facts,
+		admission.Context{Profile: string(profile), Phys: phys})
+}
+
+// runClassAdmission asks the class-floor stage against one freshly resolved
+// policy snapshot. The caller owns resolution timing and never caches policy in
+// the chain; WireExecutePortal invokes this anew for every Execute.
+func (e *Engine) runClassAdmission(pol UnitPolicy, phys admission.PhysicalCtx, stmt Statement, sqlText string) (error, error) {
+	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
+	return e.evaluateChain([]admission.Stage{authorizeUnitStage{}}, facts,
+		admission.Context{Phys: phys, ReadOnly: pol.ReadOnly, MayWrite: pol.MayWrite})
+}
+
+// runSessionStateAdmission preserves the drive's routing and authority floors
+// while moving the SET/RESET/LOCK policy decision behind its adapter.
+func (e *Engine) runSessionStateAdmission(pol UnitPolicy, phys admission.PhysicalCtx, txOpen bool, stmt Statement, sqlText string) (error, error) {
+	facts := NewLegacyFactsForText(stmt, sqlText, len(sqlText))
+	return e.evaluateChain([]admission.Stage{newSessionStateStage()}, facts,
+		admission.Context{Phys: phys, ReadOnly: pol.ReadOnly, MayWrite: pol.MayWrite, TxOpen: txOpen})
+}
+
 // sessionStages is the session drive's composition: exactly the gates its
 // legacy path ran, in the declared order. The session path's class floor
 // is the SNAPSHOT check (authorizeUnit against the already-resolved
@@ -119,7 +148,6 @@ func (e *Engine) evaluateChain(stages []admission.Stage, facts admission.Facts, 
 // collision independently from the preservation evidence.
 func (e *Engine) sessionStages(ctx context.Context, connRow *meta.Connection) []admission.Stage {
 	return []admission.Stage{
-		sizeCapStage{},
 		profileAdmitStage{profile: e.profileFor(connRow)},
 		readerAnalysisStage{userRoutines: func() (*udfSet, error) {
 			return e.userRoutines(ctx, connRow)
@@ -154,8 +182,7 @@ func (e *Engine) sessionAdmissionCtx(connRow *meta.Connection, pol UnitPolicy, s
 		// answers only whether THIS execution carries a pinned transaction,
 		// and a session outside one must not report true — a future stage
 		// reading the contract would be lied to.
-		TargetCaps:        caps,
-		MaxStatementBytes: e.maxStatementBytes,
+		TargetCaps: caps,
 	}
 }
 

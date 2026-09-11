@@ -4,13 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
+
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/golib/dao"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
-	"strconv"
-	"strings"
 )
 
 // THE F1 WIRE SEAM.
@@ -193,8 +195,12 @@ const reasonRawFaceLost = "raw-face-lost"
 // gateWireStatement runs EVERY pre-dispatch check the decoded path runs, on ONE
 // statement of the buffer, and says where it may go. It dispatches nothing.
 func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, part, ip string) (Statement, wireRoute, error) {
-	if len(part) > e.maxStatementBytes {
-		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, ErrScriptTooLarge)
+	admitErr, opErr := e.runSizeAdmission(admission.PhysWire, part)
+	if opErr != nil {
+		return Statement{}, 0, opErr
+	}
+	if admitErr != nil {
+		return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, admitErr)
 	}
 	stmt, cerr := Classify(part, connRow.Engine.BackslashEscapes())
 	if cerr != nil {
@@ -204,8 +210,12 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 	txOpen, aborted := s.txPhase != txNone, s.txPhase == txAborted
 	s.mu.Unlock()
 	if stmt.Class == ClassControl {
-		if err := e.profileFor(connRow).admit(stmt, true); err != nil {
-			return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, err)
+		admitErr, opErr = e.runProfileAdmission(e.profileFor(connRow), admission.PhysWire, stmt, part)
+		if opErr != nil {
+			return Statement{}, 0, opErr
+		}
+		if admitErr != nil {
+			return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, admitErr)
 		}
 		if !pol.MayWrite && !pol.ReadOnly {
 			return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, auth.ErrDenied)
@@ -222,7 +232,7 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 			if aborted {
 				return Statement{}, 0, e.rejectSession(ctx, s, pol.Ident, ip, part, ErrTxAborted)
 			}
-			if err := e.admitSessionState(ctx, s, pol.Ident, stmt.Verb, part, ip, txOpen, pol.ReadOnly); err != nil {
+			if err := e.admitSessionState(ctx, s, pol, stmt, part, ip, txOpen); err != nil {
 				return Statement{}, 0, err
 			}
 			return stmt, routeRaw, nil
@@ -235,7 +245,7 @@ func (e *Engine) gateWireStatement(ctx context.Context, s *session, pol UnitPoli
 	// before both reader analysis and class authorization; the gate matrix
 	// records both intentional identity changes from the legacy wire order.
 	// Named cells pin each collision independently from preservation evidence.
-	admitErr, opErr := e.runSessionAdmission(ctx, s, pol, connRow, txOpen, stmt, part)
+	admitErr, opErr = e.runSessionAdmission(ctx, s, pol, connRow, txOpen, stmt, part)
 	if opErr != nil {
 		return Statement{}, 0, opErr
 	}
@@ -267,8 +277,12 @@ type wireElement struct {
 
 // wireQueryRaw is the postgres producer. See WireQuery.
 func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, sqlText, ip string, emit func(WireMessage) error, closeAfterRelease *bool) (byte, error) {
-	if len(sqlText) > e.maxStatementBytes {
-		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, ErrScriptTooLarge)
+	admitErr, opErr := e.runSizeAdmission(admission.PhysWire, sqlText)
+	if opErr != nil {
+		return 0, opErr
+	}
+	if admitErr != nil {
+		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, admitErr)
 	}
 	parts, spans, err := splitStatementSpans(sqlText, false)
 	if err != nil && !errors.Is(err, ErrEmptyStatement) {

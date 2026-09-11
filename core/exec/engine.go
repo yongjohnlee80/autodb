@@ -484,8 +484,12 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	// Reject oversized scripts BEFORE classification or execution: the
 	// audit/history record must equal exactly what ran — never execute an
 	// unaudited tail.
-	if len(sqlText) > e.maxStatementBytes {
-		return nil, e.reject(ctx, ident, connID, ip, sqlText, ErrScriptTooLarge)
+	admitErr, opErr := e.runSizeAdmission(admission.PhysPooled, sqlText)
+	if opErr != nil {
+		return nil, opErr
+	}
+	if admitErr != nil {
+		return nil, e.reject(ctx, ident, connID, ip, sqlText, admitErr)
 	}
 
 	stmt, err := Classify(sqlText, connRow.Engine.BackslashEscapes())
