@@ -210,11 +210,13 @@ func TestGateMatrix_ExemptionsAreReal(t *testing.T) {
 }
 
 // Every restricted-surface row must DECLARE its justification — divergence
-// (a decision with an observable cross-surface consequence, §6) or
-// applicability (physics: the raising frame does not exist on the other
-// surface, §7) — and the declared category must actually name its sentinel
-// in that on-record section. A restricted row with no category, or a
-// category whose section does not carry the name, fails the walk.
+// (a decision with an observable cross-surface consequence; the gate
+// matrix's policy section) or applicability (physics: the raising frame
+// does not exist on the other surface; the gate matrix's applicability
+// section) — and the declared category must actually name its sentinel in
+// that on-record section of docs/admission-gate-matrix.md. A restricted row
+// with no category, or a category whose section does not carry the name,
+// fails the walk.
 func TestGateMatrix_RestrictedRowsDeclareJustification(t *testing.T) {
 	body := readGateMatrix(t)
 	lines := strings.Split(body, "\n")
