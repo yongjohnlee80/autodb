@@ -1,6 +1,6 @@
 // Package admission provides the core statement admission pipeline vocabulary and orchestration.
 //
-// The admission pipeline is autodb's deterministic query inspection gate (ADR-0096).
+// The admission pipeline is autodb's deterministic query inspection gate.
 // Before any SQL statement is dispatched to a target database, it must be evaluated
 // through an ordered chain of admission stages to detect dangerous patterns, verify
 // transaction invariants, enforce predicate requirements, and block unauthorized GUC changes.

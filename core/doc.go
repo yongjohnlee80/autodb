@@ -109,7 +109,7 @@
 //    malicious write is smuggled through dynamic SQL or stored procedures, the
 //    underlying database engine aborts the transaction with SQLSTATE 25006.
 //
-// 5. Deterministic Statement Admission (ADR-0096)
+// 5. Deterministic Statement Admission
 //    Before any query reaches a backend connection, it is inspected by the
 //    admission pipeline (core/admission). Dangerous statements (e.g. UPDATE or
 //    DELETE without a top-level WHERE clause, unapproved session configuration
@@ -176,7 +176,7 @@
 //     per-engine capability bitsets (routine catalog, read-only transaction support).
 //
 //   - core/admission:
-//     Protocol-neutral SQL admission pipeline (ADR-0096). Defines statement
+//     Protocol-neutral SQL admission pipeline. Defines statement
 //     Facts, evaluation Context, Stage interfaces, Contribution outcomes (Deny/Risk),
 //     and the Orchestrator that halts on the first violated policy.
 //

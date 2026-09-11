@@ -22,7 +22,7 @@
 //	                         │
 //	                         ▼
 //	   [3. Statement Admission Pipeline] (admission_stages.go, core/admission)
-//	       • Evaluates ordered admission stages (ADR-0096).
+//	       • Evaluates ordered admission stages.
 //	       • Size bounds -> Predicate guards -> Routine checks -> GUC gates.
 //	       • Halts immediately on first violation with structured Reason.
 //	                         │
