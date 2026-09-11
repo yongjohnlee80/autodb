@@ -163,3 +163,107 @@ func TestGuardWhereAdapter_SameIdentityAsTheLegacyGuard(t *testing.T) {
 		t.Fatal("the empty chain denied — the mutation's premise is wrong")
 	}
 }
+
+func TestProfileAdmitAdapter_SameIdentityAsTheLegacyGate(t *testing.T) {
+	pooledCtx := admission.Context{Phys: admission.PhysPooled}
+	sessionCtx := admission.Context{Phys: admission.PhysSession}
+	v1compat := profileAdmitStage{ProfileV1Compat}
+	session := profileAdmitStage{ProfileSession}
+
+	// The compat profile refuses control statements, on and off a session
+	// alike — with the refusal text naming the verb.
+	stmt, err := Classify("BEGIN", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ProfileV1Compat.admit(stmt, true); err == nil {
+		t.Fatal("the legacy gate admitted BEGIN under v1compat — premise wrong")
+	}
+	for _, ctx := range []admission.Context{pooledCtx, sessionCtx} {
+		rep, rerr := admission.Compose(v1compat).Run(NewLegacyFacts(stmt, 5, "", false, false), ctx)
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		deny, ok := rep.PrimaryDeny()
+		if !ok {
+			t.Fatalf("the adapter admitted BEGIN under v1compat on %s", ctx.Phys)
+		}
+		if deny.Code != admission.CodeStatementUnsupported {
+			t.Fatalf("code = %s, want statement-unsupported", deny.Code)
+		}
+		if !strings.Contains(deny.Detail, ErrStatementUnsupported.Error()) {
+			t.Fatalf("detail %q does not carry the sentinel's text", deny.Detail)
+		}
+	}
+
+	// The compat profile refuses data-modifying CTEs.
+	stmt, err = Classify("WITH x AS (DELETE FROM t RETURNING id) SELECT * FROM x", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ProfileV1Compat.admit(stmt, true); err == nil {
+		t.Fatal("the legacy gate admitted a dm-CTE under v1compat — premise wrong")
+	}
+	rep, rerr := admission.Compose(v1compat).Run(NewLegacyFacts(stmt, 60, "", false, false), sessionCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if _, ok := rep.PrimaryDeny(); !ok {
+		t.Fatal("the adapter admitted a dm-CTE under v1compat")
+	}
+
+	// The session profile admits guarded dm-CTEs…
+	stmt, err = Classify("WITH x AS (DELETE FROM t WHERE id = 1 RETURNING id) SELECT * FROM x", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ProfileSession.admit(stmt, true); err != nil {
+		t.Fatalf("the legacy gate refused a guarded dm-CTE on the session profile: %v", err)
+	}
+	rep, rerr = admission.Compose(session).Run(NewLegacyFacts(stmt, 70, "", false, false), sessionCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the adapter refused a guarded dm-CTE on the session profile")
+	}
+
+	// …and routes control by the physical context: BEGIN is admitted ON a
+	// session and refused OFF one, with the same identity the legacy gate
+	// produced for the same call.
+	stmt, err = Classify("BEGIN", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ProfileSession.admit(stmt, false); err == nil {
+		t.Fatal("the legacy gate admitted BEGIN off a session on the session profile — premise wrong")
+	}
+	rep, rerr = admission.Compose(session).Run(NewLegacyFacts(stmt, 5, "", false, false), pooledCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, ok := rep.PrimaryDeny()
+	if !ok {
+		t.Fatal("the adapter admitted BEGIN off a session on the session profile")
+	}
+	if !strings.Contains(deny.Detail, ErrStatementUnsupported.Error()) {
+		t.Fatalf("detail %q does not carry the sentinel's text", deny.Detail)
+	}
+	rep, rerr = admission.Compose(session).Run(NewLegacyFacts(stmt, 5, "", false, false), sessionCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the adapter refused BEGIN on a session on the session profile")
+	}
+
+	// A3's mutation: without the stage, the compat profile's refusals
+	// vanish — a chain that forgot it would run control and dm-CTEs.
+	rep, rerr = admission.Compose().Run(NewLegacyFacts(stmt, 5, "", false, false), pooledCtx)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if rep.IsDenied() {
+		t.Fatal("the empty chain denied — the mutation's premise is wrong")
+	}
+}

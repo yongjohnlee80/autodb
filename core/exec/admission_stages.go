@@ -85,3 +85,50 @@ func (guardWhereStage) Apply(facts admission.Facts, _ admission.Context) (admiss
 	}
 	return admission.NoContribution(), nil
 }
+
+// profileAdmitStage is the capability profile: what this connection and
+// surface may run. It is the ONLY place a control statement's
+// admissibility is decided, and the ONE stage whose answer the phase-1
+// ordering ruling changes on the wire paths — profile admissibility
+// precedes reader analysis everywhere, because removing the UDF cannot
+// make a compat-profile data-modifying CTE runnable.
+//
+// The onSession fact the legacy gate took as a parameter is a PHYSICAL
+// CONTEXT fact, so it comes from Context: the pooled path passes
+// PhysPooled (its admit site computed pinned != nil; the drives will
+// keep passing the session's own physical context when a transaction is
+// pinned), and every session-shaped surface passes its affirmative
+// context. The stage asks; the drive supplies.
+type profileAdmitStage struct {
+	profile Profile
+}
+
+func (p profileAdmitStage) Name() string { return "profile" }
+
+func (p profileAdmitStage) ContextNeeds() admission.Needs { return admission.Needs{} }
+
+func (p profileAdmitStage) DenyCodes() []admission.Code {
+	return []admission.Code{admission.CodeStatementUnsupported}
+}
+
+// Apply runs the legacy Profile.admit with the physical context's answer
+// to "is the caller the session path". The error identity —
+// ErrStatementUnsupported, with the verb and the refusal's reason in the
+// text — is the compatibility surface callers' error handling is written
+// against; it rides verbatim in the Detail.
+func (p profileAdmitStage) Apply(facts admission.Facts, ctx admission.Context) (admission.Contribution, error) {
+	lf, ok := facts.(*LegacyFacts)
+	if !ok {
+		return admission.NoContribution(), nil
+	}
+	onSession := ctx.Phys == admission.PhysSession || ctx.Phys == admission.PhysWire
+	if err := p.profile.admit(lf.stmt, onSession); err != nil {
+		return admission.Deny(admission.Reason{
+			Code:     admission.CodeStatementUnsupported,
+			Subject:  lf.stmt.Verb,
+			Detail:   err.Error(),
+			Continue: true,
+		}), nil
+	}
+	return admission.NoContribution(), nil
+}
