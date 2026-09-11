@@ -1175,3 +1175,63 @@ func TestWireSimpleDrive_OrderingDeltaAnswered(t *testing.T) {
 			"on EVERY surface; the flip that landed in this step", deny.Code)
 	}
 }
+
+// The PinnedTx truthfulness cells: the field's contract says the
+// execution carries a pinned transaction, so a session call OUTSIDE a
+// transaction must report false — PhysSession/PhysWire already supplies
+// profile onSession; a constant true is false state a future stage could
+// consume incorrectly.
+func TestSessionDrive_PinnedTxIsTruthful(t *testing.T) {
+	stmt, err := Classify("BEGIN", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Premise: the session profile admits BEGIN on a session context
+	// either way — the discriminator is what the STAGE sees, so the cell
+	// uses a probe that consumes PinnedTx directly.
+	probe := pinnedTxProbe{}
+	facts := NewLegacyFactsForText(stmt, "BEGIN", 5)
+
+	// Outside a transaction: PinnedTx must be FALSE (with the wire
+	// physical context still supplying onSession affirmatively).
+	rep, rerr := admission.Compose(probe).Run(facts, admission.Context{Phys: admission.PhysWire, PinnedTx: false})
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !rep.IsDenied() {
+		t.Fatal("the probe did not run")
+	}
+	deny, _ := rep.PrimaryDeny()
+	if deny.Subject != "false" {
+		t.Fatalf("outside a transaction, PinnedTx read as %s — the field must report the "+
+			"transaction state truthfully", deny.Subject)
+	}
+
+	// Inside one: true.
+	rep, rerr = admission.Compose(probe).Run(facts, admission.Context{Phys: admission.PhysWire, PinnedTx: true})
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	deny, _ = rep.PrimaryDeny()
+	if deny.Subject != "true" {
+		t.Fatalf("inside a transaction, PinnedTx read as %s", deny.Subject)
+	}
+}
+
+// pinnedTxProbe reports the PinnedTx fact it was handed, for the
+// truthfulness cells.
+type pinnedTxProbe struct{}
+
+func (pinnedTxProbe) Name() string { return "pinnedtxprobe" }
+func (pinnedTxProbe) ContextNeeds() admission.Needs {
+	return admission.Needs{ControlVerb: true}
+}
+func (pinnedTxProbe) DenyCodes() []admission.Code {
+	return []admission.Code{admission.CodeNoWhere}
+}
+func (pinnedTxProbe) Apply(_ admission.Facts, ctx admission.Context) (admission.Contribution, error) {
+	return admission.Deny(admission.Reason{
+		Code:    admission.CodeNoWhere,
+		Subject: fmt.Sprint(ctx.PinnedTx),
+	}), nil
+}

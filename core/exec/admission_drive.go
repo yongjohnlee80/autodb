@@ -145,12 +145,16 @@ func (e *Engine) runSessionAdmission(ctx context.Context, s *session, pol UnitPo
 		phys = admission.PhysWire
 	}
 	actx := admission.Context{
-		Profile:           string(e.profileFor(connRow)),
-		Phys:              phys,
-		ReadOnly:          pol.ReadOnly,
-		MayWrite:          pol.MayWrite,
-		TxOpen:            txOpen,
-		PinnedTx:          true, // a session call carries the session's own transaction state
+		Profile:  string(e.profileFor(connRow)),
+		Phys:     phys,
+		ReadOnly: pol.ReadOnly,
+		MayWrite: pol.MayWrite,
+		TxOpen:   txOpen,
+		PinnedTx: txOpen, // the pinned fact is the transaction state, truthfully:
+		// PhysSession/PhysWire already supplies profile onSession; PinnedTx
+		// answers only whether THIS execution carries a pinned transaction,
+		// and a session outside one must not report true — a future stage
+		// reading the contract would be lied to.
 		TargetCaps:        caps,
 		MaxStatementBytes: e.maxStatementBytes,
 	}
