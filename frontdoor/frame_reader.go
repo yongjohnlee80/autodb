@@ -205,6 +205,8 @@ func (r *frameReader) consumeHeader() (frameHeader, bool) {
 // badByte reports the undefined type byte that stopped the stream.
 func (r *frameReader) badByte() byte { return r.bad }
 
+// Read implements io.Reader for frameReader. It feeds validated frame bytes to
+// the caller, draining skipped frames and bounding deliverable bytes per message.
 func (r *frameReader) Read(p []byte) (int, error) {
 	// A refused frame is discarded before anything else is served, so its body
 	// never reaches the Backend.

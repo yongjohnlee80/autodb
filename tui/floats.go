@@ -49,11 +49,13 @@ func (m *Model) openFloatPct(title string, content tui.Component, pct int) *widg
 		widget.WithSizeFraction(pct, pct))
 }
 
+// openFloatAt opens a floating window anchored at a specified screen position.
 func (m *Model) openFloatAt(title string, content tui.Component,
 	anchor widget.Anchor) *widget.Float {
 	return m.openFloatOpts(title, content, anchor)
 }
 
+// openFloatOpts constructs, registers, and mounts a floating modal layer with customizable options.
 func (m *Model) openFloatOpts(title string, content tui.Component,
 	anchor widget.Anchor, extra ...widget.FloatOption) *widget.Float {
 	// No fixed width: sizing is the CONTENT's job. style.Width sets
@@ -152,6 +154,7 @@ type formField struct {
 	input *widget.TextInput
 }
 
+// field constructs a formField descriptor with a label and optional text input configurations.
 func field(label string, opts ...widget.TextInputOption) formField {
 	return formField{label: label, opts: opts}
 }
@@ -167,6 +170,7 @@ func field(label string, opts ...widget.TextInputOption) formField {
 //
 // onSubmit returns the outcome: close the float, or show a status message and
 // keep it open.
+// form implements tui.Component, tui.EventReceiver, and tui.Container.
 type form struct {
 	tui  *tui.Context
 	box  *widget.Box // set by the Model after openFloat for status updates
@@ -179,6 +183,7 @@ type form struct {
 	float    *widget.Float
 }
 
+// newForm builds a vertically stacked form with text inputs, error status, and key guidance.
 func newForm(fields []formField, onSubmit func([]string) (bool, string)) *form {
 	f := &form{
 		fields: fields,
@@ -206,6 +211,7 @@ func newForm(fields []formField, onSubmit func([]string) (bool, string)) *form {
 	return f
 }
 
+// Init mounts the flex layout container and mounts all child input fields.
 func (f *form) Init(ctx *tui.Context) {
 	f.tui = ctx
 	ctx.Mount(f.flex)
@@ -245,6 +251,7 @@ func (f *form) advanceOrSubmit(i int) {
 	}
 }
 
+// submit gathers field values, executes onSubmit, and closes or displays error status.
 func (f *form) submit() {
 	values := make([]string, len(f.fields))
 	for i, fd := range f.fields {
@@ -260,6 +267,7 @@ func (f *form) submit() {
 	f.status.SetText(status)
 }
 
+// Layout sizes and positions the form flex container within width constraints.
 func (f *form) Layout(c tui.Constraints) tui.Size {
 	cc := c
 	// Text inputs are width-greedy, so a form is capped rather than
@@ -272,18 +280,24 @@ func (f *form) Layout(c tui.Constraints) tui.Size {
 	return cc.Constrain(sz)
 }
 
+// Render is a no-op as the mounted flex container and inputs render themselves.
 func (f *form) Render(tui.Surface) {}
 
+// HandleEvent returns false to allow events to bubble naturally to active inputs.
 func (f *form) HandleEvent(ev tui.Event) bool { return false }
 
 // form is transparent to the framework's focus walk (tui.Container):
 // without this, the modal Float's focus seeding cannot reach the text
 // inputs and the first keystrokes land in the wrong field.
 func (f *form) Add(...tui.Component) {}
+
+// Remove is a no-op container method satisfying tui.Container.
 func (f *form) Remove(tui.Component) {}
 
 // Move is a no-op — fixed shape, nothing to permute (see connPicker.Move).
 func (f *form) Move(tui.Component, int) {}
+
+// Children yields the root flex layout container satisfying tui.Container.
 func (f *form) Children() iter.Seq[tui.Component] {
 	return func(yield func(tui.Component) bool) {
 		yield(f.flex)
@@ -308,6 +322,7 @@ type leaderEntry struct {
 
 // leaderMenu is the which-key float: one more keypress executes and
 // dismisses; Esc cancels (the Float's own modal Esc handling).
+// leaderMenu implements tui.Component, tui.Focusable, and tui.EventReceiver.
 type leaderMenu struct {
 	widget.Base
 	entries []leaderEntry
@@ -324,8 +339,10 @@ type leaderMenu struct {
 	float *widget.Float
 }
 
+// AcceptsFocus reports whether leaderMenu accepts input focus (always true).
 func (l *leaderMenu) AcceptsFocus() bool { return true }
 
+// Layout computes the bounding dimensions of the leader menu based on prose and entries.
 func (l *leaderMenu) Layout(c tui.Constraints) tui.Size {
 	h := len(l.entries) + 1
 	w := modalSpan(c.MaxW, leaderPct, leaderMinW, leaderMaxW)
@@ -342,6 +359,7 @@ func (l *leaderMenu) Layout(c tui.Constraints) tui.Size {
 	return c.Constrain(tui.Size{W: w, H: min(c.MaxH, h)})
 }
 
+// Render paints the leader menu's descriptive prose and hotkey entries onto the surface.
 func (l *leaderMenu) Render(s tui.Surface) {
 	keySt := style.New().Foreground(style.TokenPrimary).Bold(true)
 	muted := style.New().Foreground(style.TokenTextMuted)
@@ -391,6 +409,8 @@ func leaderResolve(entries []leaderEntry, ev tui.Event) (idx int, dismiss bool) 
 	return -1, dismissKey(ev)
 }
 
+// HandleEvent handles key presses in the leader menu, executing the bound action
+// or dismissing the float when requested.
 func (l *leaderMenu) HandleEvent(ev tui.Event) bool {
 	idx, dismiss := leaderResolve(l.entries, ev)
 	switch {
@@ -453,6 +473,7 @@ type inspectFloat struct {
 	height  int
 }
 
+// openInspect opens an inspection float displaying all columns and values for a selected row.
 func (m *Model) openInspect(columns []string, row []any) {
 	iv := &inspectFloat{model: m, columns: columns, row: row}
 	iv.float = m.openFloat("row — j/k: cell, y: copy to clipboard, Enter: full value, q/Esc: close", iv)
@@ -473,6 +494,7 @@ func faithfulCell(v any) string {
 	}
 }
 
+// cell returns the cell value at index i, or nil if out of range.
 func (iv *inspectFloat) cell(i int) any {
 	if i < len(iv.row) {
 		return iv.row[i]
@@ -480,8 +502,12 @@ func (iv *inspectFloat) cell(i int) any {
 	return nil
 }
 
+// AcceptsFocus reports whether inspectFloat accepts keyboard focus.
+// Implements tui.Focusable.
 func (iv *inspectFloat) AcceptsFocus() bool { return true }
 
+// Layout calculates the dimensions of the row inspect float window.
+// Implements tui.Component.
 func (iv *inspectFloat) Layout(c tui.Constraints) tui.Size {
 	iv.height = min(c.MaxH, min(len(iv.columns), modalSpan(c.MaxH, valueHPct, valueMinH, valueMaxH)))
 	return c.Constrain(tui.Size{
@@ -490,6 +516,8 @@ func (iv *inspectFloat) Layout(c tui.Constraints) tui.Size {
 	})
 }
 
+// Render paints the list of column names and values, highlighting the selected cell.
+// Implements tui.Component.
 func (iv *inspectFloat) Render(s tui.Surface) {
 	if iv.cursor < iv.top {
 		iv.top = iv.cursor
@@ -513,6 +541,8 @@ func (iv *inspectFloat) Render(s tui.Surface) {
 	}
 }
 
+// HandleEvent handles keyboard navigation, copying, and detail expansion in the inspect float.
+// Implements tui.EventReceiver.
 func (iv *inspectFloat) HandleEvent(ev tui.Event) bool {
 	k, ok := ev.(tui.KeyEvent)
 	if !ok || k.Kind == tui.KeyRelease {
@@ -574,6 +604,8 @@ func (m *Model) openSecretFloat(title string, secret string) {
 	vf.float = m.openFloat(title, vf)
 }
 
+// valueFloat displays single value details or text in a scrollable, copyable float modal.
+// Implements tui.Component, tui.Focusable, and tui.EventReceiver.
 type valueFloat struct {
 	widget.Base
 	model *Model
@@ -587,8 +619,12 @@ type valueFloat struct {
 	secret bool
 }
 
+// AcceptsFocus reports whether valueFloat accepts keyboard focus.
+// Implements tui.Focusable.
 func (vf *valueFloat) AcceptsFocus() bool { return true }
 
+// Init initializes the value float component and mounts the internal buffer view.
+// Implements tui.Component.
 func (vf *valueFloat) Init(ctx *tui.Context) {
 	vf.Base.Init(ctx)
 	vf.ctx = ctx
@@ -597,6 +633,8 @@ func (vf *valueFloat) Init(ctx *tui.Context) {
 	vf.view.ScrollTo(0) // static content reads top-down, not log-tailed
 }
 
+// Layout sizes and places the buffer view within the modal constraints.
+// Implements tui.Component.
 func (vf *valueFloat) Layout(c tui.Constraints) tui.Size {
 	w := modalSpan(c.MaxW, valuePct, valueMinW, valueMaxW)
 	h := modalSpan(c.MaxH, valueHPct, valueMinH, valueMaxH)
@@ -605,8 +643,13 @@ func (vf *valueFloat) Layout(c tui.Constraints) tui.Size {
 	return c.Constrain(tui.Size{W: w, H: h})
 }
 
+// Render performs surface rendering for valueFloat (delegated to child buffer view).
+// Implements tui.Component.
 func (vf *valueFloat) Render(tui.Surface) {}
 
+// HandleEvent processes copy shortcuts ('y'), modal dismissal ('q'/Esc), or forwards
+// scroll navigation to the underlying buffer view.
+// Implements tui.EventReceiver.
 func (vf *valueFloat) HandleEvent(ev tui.Event) bool {
 	k, ok := ev.(tui.KeyEvent)
 	if !ok || k.Kind == tui.KeyRelease {

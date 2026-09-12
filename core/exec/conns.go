@@ -229,6 +229,8 @@ func (e *Engine) sqlPoolLimits(row *meta.Connection) func(*sql.DB) {
 	}
 }
 
+// pgPoolLimits creates a pgxpool configuration option setting connection limits
+// according to the connection row or engine defaults.
 func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 	max, idle, lifetime := e.poolLimitsFor(row)
 	return func(cfg *pgxpool.Config) {

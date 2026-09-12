@@ -280,6 +280,7 @@ func (g *Gateway) logRefusal(at, subject string) {
 	})
 }
 
+// Serve runs the web gateway HTTP and WebSocket server until ctx is canceled.
 func (g *Gateway) Serve(ctx context.Context) error {
 	logger.Info(g.cfg.Log, map[string]any{
 		"webserver": "gateway", "event": "serving",
@@ -307,6 +308,7 @@ type appRunner struct {
 	user    *userSession
 }
 
+// Run executes the interactive terminal user interface model in the browser context.
 func (r *appRunner) Run(ctx context.Context) error {
 	// The store is derived from the base and this session's CANONICAL subject;
 	// the final directory is not the caller's to choose. There is no mode and no
@@ -378,6 +380,7 @@ func aboutForRoot(base tuiapp.AboutInfo, root string) tuiapp.AboutInfo {
 // of truth about who a user is, and it is the daemon.
 type loginFactor struct{ gw *Gateway }
 
+// Kind implements auth.Factor for loginFactor, declaring it as an identity verification factor.
 func (*loginFactor) Kind() auth.FactorKind { return auth.FactorIdentity }
 
 // Claim names the principal before verifying, so auth.Throttle can key per-user
@@ -389,6 +392,7 @@ func (*loginFactor) Claim(r *auth.Request) string {
 	return r.Credentials["subject"].Reveal()
 }
 
+// Verify implements auth.Factor for loginFactor by proving the credentials against the autodb daemon.
 func (f *loginFactor) Verify(ctx context.Context, r *auth.Request) (auth.Contribution, error) {
 	user := r.Credentials["subject"].Reveal()
 	pass := r.Credentials["password"].Reveal()

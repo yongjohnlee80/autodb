@@ -64,6 +64,8 @@ type WireSessionResult struct {
 // every one of these into the same wire denial.
 type wireDenial struct{ reason string }
 
+// Error returns a formatted error string describing the wire denial reason.
+// wireDenial implements the error interface.
 func (e wireDenial) Error() string { return "frontdoor: " + e.reason }
 
 // DenialReason extracts the internal reason from an OpenWireSession error, or
@@ -77,6 +79,7 @@ func DenialReason(err error) string {
 	return ""
 }
 
+// deny constructs an internal wireDenial with the given reason string.
 func deny(reason string) error { return wireDenial{reason: reason} }
 
 // WireDenial builds a denial with the given internal reason.

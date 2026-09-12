@@ -37,6 +37,7 @@ type generalLane struct {
 	used  int64
 }
 
+// newGeneralLane constructs a process-wide general memory lane with the given byte ceiling.
 func newGeneralLane(limit int64) *generalLane {
 	l := &generalLane{limit: limit}
 	l.cond = sync.NewCond(&l.mu)

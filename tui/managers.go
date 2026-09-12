@@ -62,6 +62,8 @@ type manager[T any] struct {
 	applied uint64 // order; a stale row set must never overwrite a fresh one
 }
 
+// newManager initializes a generic table manager modal with data loading, action triggers, and hint footer.
+// manager implements tui.Component, tui.Focusable, and tui.EventReceiver.
 func newManager[T any](m *Model, cols []widget.TableColumn[T],
 	load func(context.Context, *Bound) ([]T, error), actions []managerAction[T]) *manager[T] {
 	mg := &manager[T]{
@@ -117,8 +119,10 @@ func (g *manager[T]) applyFilter() {
 	g.hint.SetText(g.hintLine())
 }
 
+// AcceptsFocus reports whether the manager modal accepts input focus (always true).
 func (g *manager[T]) AcceptsFocus() bool { return true }
 
+// Init mounts the table and hint widgets and triggers an initial data load.
 func (g *manager[T]) Init(ctx *tui.Context) {
 	g.Base.Init(ctx)
 	g.ctx = ctx
@@ -172,6 +176,7 @@ func managerWidthFor(availW, hintW int) int {
 	return w
 }
 
+// Layout computes the width from the hint footer line, arranges the table and hint view.
 func (g *manager[T]) Layout(c tui.Constraints) tui.Size {
 	w := managerWidthFor(c.MaxW, g.ctx.StringWidth(g.hintLine()))
 	// The key list wraps rather than truncating (Johno, M6 manual
@@ -186,8 +191,10 @@ func (g *manager[T]) Layout(c tui.Constraints) tui.Size {
 	return c.Constrain(tui.Size{W: w, H: h})
 }
 
+// Render is a no-op as the child table and hint widgets render themselves.
 func (g *manager[T]) Render(tui.Surface) {}
 
+// HandleEvent matches single-character key shortcuts against registered manager actions.
 func (g *manager[T]) HandleEvent(ev tui.Event) bool {
 	if dismissKey(ev) {
 		g.float.Hide()
@@ -232,6 +239,8 @@ func managerCall[T any](g *manager[T], what string, fn func(context.Context, *Bo
 
 // --- connections ---------------------------------------------------------------
 
+// openConnManager creates and displays an interactive modal manager table listing all
+// registered database connections, complete with CRUD operations and frontdoor configuration.
 func (m *Model) openConnManager() {
 	cols := []widget.TableColumn[ConnInfo]{
 		{Title: "ID", Width: 5, Cell: func(c ConnInfo) string { return strconv.FormatInt(c.ID, 10) }},
@@ -325,6 +334,7 @@ func (m *Model) openExposureSwitch(g *manager[ConnInfo], sel ConnInfo) {
 	})
 }
 
+// openConnForm opens a form modal to create a new database connection entry.
 func (m *Model) openConnForm(g *manager[ConnInfo]) {
 	m.openForm("new connection", []formField{
 		field("name"),
@@ -343,6 +353,7 @@ func (m *Model) openConnForm(g *manager[ConnInfo]) {
 	})
 }
 
+// openAttachForm opens a form modal to attach a connection to an existing workspace.
 func (m *Model) openAttachForm(g *manager[ConnInfo], connID int64, connName string) {
 	m.openForm("attach "+connName+" to workspace", []formField{
 		field("workspace id (SPC w lists them)"),
@@ -360,6 +371,8 @@ func (m *Model) openAttachForm(g *manager[ConnInfo], connID int64, connName stri
 
 // --- workspaces -------------------------------------------------------------------
 
+// openWorkspaceManager creates and displays an interactive modal table listing all
+// workspaces, supporting adding, renaming, deleting, and detaching connections.
 func (m *Model) openWorkspaceManager() {
 	cols := []widget.TableColumn[WorkspaceInfo]{
 		{Title: "ID", Width: 5, Cell: func(w WorkspaceInfo) string { return strconv.FormatInt(w.ID, 10) }},
@@ -428,6 +441,8 @@ func (m *Model) openWorkspaceManager() {
 
 // --- users -------------------------------------------------------------------------
 
+// openUserManager creates and displays an interactive modal table listing user accounts,
+// supporting user addition, password resets, role changes, enabling/disabling, and deletion.
 func (m *Model) openUserManager() {
 	cols := []widget.TableColumn[UserRow]{
 		{Title: "ID", Width: 5, Cell: func(u UserRow) string { return strconv.FormatInt(u.ID, 10) }},
@@ -830,6 +845,7 @@ func patFormFields(askCleartext bool) []formField {
 	return fields
 }
 
+// patForm renders the token creation modal form with CIDR selection and optional debug mode.
 func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []UserIPRow, active int) {
 	title := fmt.Sprintf("create token (%d of %d used)", active, auth.PATMaxPerUser)
 	askCleartext := m.offersCleartextTokenField()

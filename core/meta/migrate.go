@@ -279,6 +279,8 @@ func countableTables(ctx context.Context, s *Store) []countableTable {
 	}
 }
 
+// ensureEmpty checks that all metadata tables in the destination store contain
+// zero rows before proceeding with a migration.
 func ensureEmpty(ctx context.Context, dst *Store) error {
 	for _, c := range countableTables(ctx, dst) {
 		n, err := c.count()

@@ -165,7 +165,11 @@ type DeferredExtendedRefusal struct {
 	TxStatus byte
 }
 
+// Error returns the underlying refusal error string.
+// DeferredExtendedRefusal implements the error interface.
 func (e *DeferredExtendedRefusal) Error() string { return e.Cause.Error() }
+
+// Unwrap returns the underlying error cause for unwrapping and inspection.
 func (e *DeferredExtendedRefusal) Unwrap() error { return e.Cause }
 
 // WireParse gates one statement and records it under name.
@@ -1303,6 +1307,7 @@ func completesObject(kind string) bool {
 	return false
 }
 
+// frameAnswered reports whether an extended protocol message kind represents a definite response from the backend.
 func frameAnswered(kind string) bool {
 	switch kind {
 	case "ParseComplete", "BindComplete", "CloseComplete",

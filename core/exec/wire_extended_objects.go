@@ -330,6 +330,7 @@ func (o *extObjects) queueSynth(msgs ...WireMessage) {
 	o.segment = append(o.segment, segStep{synth: msgs})
 }
 
+// queueRefusal appends an engine-level refusal error step to the active pipeline segment.
 func (o *extObjects) queueRefusal(err error) {
 	o.segment = append(o.segment, segStep{refusal: err})
 }
@@ -454,6 +455,7 @@ func (o *extObjects) closeUnconfirmed(kind objectKind, name string) bool {
 	return false
 }
 
+// newExtObjects initializes tracking containers for prepared statements and open portals.
 func newExtObjects() *extObjects {
 	return &extObjects{
 		statements: make(map[string]*extStatement),
@@ -673,6 +675,7 @@ func (o *extObjects) namedStatements() int {
 	return n
 }
 
+// namedPortals returns the count of active portals excluding the unnamed portal.
 func (o *extObjects) namedPortals() int {
 	n := len(o.portals)
 	if _, ok := o.portals[""]; ok {

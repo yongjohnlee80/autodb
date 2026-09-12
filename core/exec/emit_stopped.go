@@ -76,6 +76,8 @@ type EmitStopped struct {
 	TargetErr *pgconn.PgError
 }
 
+// Error formats a descriptive message describing why execution or delivery was stopped.
+// EmitStopped implements the error interface.
 func (s *EmitStopped) Error() string {
 	if s.Delivery {
 		return fmt.Sprintf("exec: the segment's answers were not delivered (tx %s): %v",
@@ -170,6 +172,7 @@ func (s *EmitStopped) Unwrap() error { return s.Cause }
 // Unresolved reports the sixth arm: the outcome is not known to the front door.
 func (s *EmitStopped) Unresolved() bool { return s.Arm() == ArmUnresolved }
 
+// txStatusWord converts a wire transaction status byte into a human-readable string.
 func txStatusWord(b byte) string {
 	switch b {
 	case TxStatusIdle:

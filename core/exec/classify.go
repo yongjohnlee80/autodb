@@ -25,6 +25,8 @@ const (
 	ClassControl Class = "control"
 )
 
+// classRank assigns a strict integer precedence to each statement class
+// (DDL > Write > Read > Unknown) to determine overall statement authorization class.
 func classRank(c Class) int {
 	switch c {
 	case ClassRead:
@@ -159,6 +161,7 @@ var explainSkip = map[string]bool{
 	"TREE": true, "TRADITIONAL": true, "QUERY": true, "PLAN": true,
 }
 
+// verbClass maps an uppercase SQL keyword to its classification category (Read, Write, DDL).
 func verbClass(word string) (Class, bool) {
 	switch {
 	case readVerbs[word]:
@@ -229,6 +232,7 @@ func splitStatementSpans(sqlText string, backslashEscapes bool) ([]string, []stm
 	return parts, spans, err
 }
 
+// scanScript implements the core SQL tokenization loop for classification and statement splitting.
 func scanScript(sqlText string, backslashEscapes bool, split bool) (Statement, []string, []stmtSpan, error) {
 	var st Statement
 	var parts []string
@@ -685,14 +689,18 @@ func scanDollarQuote(s string, i int) (int, bool, error) {
 	return j + 1 + end + len(delim), true, nil
 }
 
+// isSpace reports whether byte c is a standard SQL whitespace character.
 func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f'
 }
 
+// isASCIILetter reports whether byte c is an ASCII alphabetic character.
 func isASCIILetter(c byte) bool { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }
 
+// isWordStart reports whether byte c is a valid initial character for an identifier or keyword.
 func isWordStart(c byte) bool { return isASCIILetter(c) || c == '_' || c >= 0x80 }
 
+// isWordChar reports whether byte c is a valid subsequent character for an identifier.
 func isWordChar(c byte) bool {
 	return isASCIILetter(c) || c == '_' || (c >= '0' && c <= '9') || c == '$' || c >= 0x80
 }

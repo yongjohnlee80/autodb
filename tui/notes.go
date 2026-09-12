@@ -54,6 +54,7 @@ var ErrBadWorkspace = errors.New("tui: notes: workspace id is not a canonical po
 // The caller reports uncertainty; it does not retry.
 var ErrRemovedNotDurable = errors.New("tui: notes: removed, but the directory could not be synced")
 
+// canonicalWorkspace validates that the given workspace identifier is positive and valid.
 func canonicalWorkspace(wsID int64) error {
 	if wsID <= 0 {
 		return fmt.Errorf("%w: %d", ErrBadWorkspace, wsID)
@@ -661,6 +662,7 @@ func removeAt(base, rel string) (removed bool, err error) {
 	return true, nil
 }
 
+// syncDir issues an fsync on the given directory path to ensure entry persistence.
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {

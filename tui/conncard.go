@@ -33,6 +33,8 @@ type cardCopy struct {
 	value string
 }
 
+// connCard is a modal floating component displaying connection details, credentials, and copy helpers.
+// connCard implements tui.Component, tui.EventReceiver, and tui.Container.
 type connCard struct {
 	widget.Base
 	model  *Model
@@ -62,6 +64,7 @@ func cardCopyKeys(label, all string) []cardCopy {
 	return []cardCopy{{'Y', label, all}}
 }
 
+// cardKeyHints formats the keybinding hint slice for connection cards.
 func cardKeyHints(allLabel string) []keyHint {
 	return []keyHint{
 		{"v/V then y", "copy a selection"},
@@ -122,8 +125,10 @@ func splitAddr(addr string) (host, port string) {
 	return h, p
 }
 
+// AcceptsFocus reports whether the card itself accepts direct focus (false, editor gets focus).
 func (c *connCard) AcceptsFocus() bool { return false }
 
+// Init mounts and focuses the read-only editor displaying card text.
 func (c *connCard) Init(ctx *tui.Context) {
 	c.Base.Init(ctx)
 	c.ctx = ctx
@@ -156,6 +161,7 @@ func (c *connCard) Init(ctx *tui.Context) {
 	})
 }
 
+// Layout arranges the editor and reserved footer within bounding constraints.
 func (c *connCard) Layout(cs tui.Constraints) tui.Size {
 	w, h := cs.MaxW, cs.MaxH
 	// The last row belongs to the footer, so the editor gets one less. A
@@ -170,6 +176,7 @@ func (c *connCard) Layout(cs tui.Constraints) tui.Size {
 	return cs.Constrain(tui.Size{W: w, H: h})
 }
 
+// Render paints the keybinding hint footer at the bottom of the card.
 func (c *connCard) Render(s tui.Surface) {
 	if len(c.keys) == 0 {
 		return
@@ -213,9 +220,16 @@ func (c *connCard) HandleEvent(ev tui.Event) bool {
 	return false
 }
 
+// Add is a no-op container method satisfying tui.Container.
 func (c *connCard) Add(...tui.Component)    {}
+
+// Remove is a no-op container method satisfying tui.Container.
 func (c *connCard) Remove(tui.Component)    {}
+
+// Move is a no-op container method satisfying tui.Container.
 func (c *connCard) Move(tui.Component, int) {}
+
+// Children yields the mounted editor child satisfying tui.Container.
 func (c *connCard) Children() iter.Seq[tui.Component] {
 	return func(yield func(tui.Component) bool) {
 		if c.editor != nil {
@@ -350,6 +364,7 @@ func cardDatabase(conn ConnInfo) string {
 	return conn.Name
 }
 
+// orNone returns string s if non-empty, otherwise "(unknown)".
 func orNone(s string) string {
 	if s == "" {
 		return "(unknown)"
@@ -384,6 +399,7 @@ func (m *Model) openCAcert() {
 	})
 }
 
+// showCAcert displays the CA certificate PEM text in a copyable floating modal.
 func (m *Model) showCAcert(ca CAPem) {
 	if ca.SystemRoots {
 		// NOT an empty document. An install with no private CA is a different

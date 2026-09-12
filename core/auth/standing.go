@@ -55,8 +55,10 @@ type AuthorityRef struct {
 	ID int64
 }
 
-// SessionAuthority and PATAuthority build the two forms.
+// SessionAuthority constructs an AuthorityRef for an active session.
 func SessionAuthority(id int64) AuthorityRef { return AuthorityRef{Kind: AuthoritySession, ID: id} }
+
+// PATAuthority constructs an AuthorityRef for a personal access token.
 func PATAuthority(id int64) AuthorityRef     { return AuthorityRef{Kind: AuthorityPAT, ID: id} }
 
 // Valid reports whether the reference names something re-checkable.
@@ -64,6 +66,8 @@ func (r AuthorityRef) Valid() bool {
 	return r.ID > 0 && (r.Kind == AuthoritySession || r.Kind == AuthorityPAT)
 }
 
+// String returns a human-readable representation of the AuthorityRef.
+// AuthorityRef implements fmt.Stringer.
 func (r AuthorityRef) String() string {
 	if !r.Valid() {
 		return "authority(unset)"

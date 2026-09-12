@@ -219,6 +219,7 @@ func exportCA(out io.Writer, dir string, cfg config.Config) error {
 	return nil
 }
 
+// quoteList formats a slice of strings into a comma-separated quoted string.
 func quoteList(items []string) string {
 	out := make([]string, 0, len(items))
 	for _, i := range items {
@@ -227,6 +228,7 @@ func quoteList(items []string) string {
 	return strings.Join(out, ", ")
 }
 
+// nameOr returns s if non-empty, otherwise returning fallback.
 func nameOr(s, fallback string) string {
 	if strings.TrimSpace(s) == "" {
 		return fallback
@@ -234,11 +236,13 @@ func nameOr(s, fallback string) string {
 	return s
 }
 
-// hostList is a repeatable/comma-separated --cert-hosts flag.
+// hostList is a repeatable/comma-separated --cert-hosts flag satisfying flag.Value.
 type hostList []string
 
+// String implements flag.Value for hostList.
 func (h *hostList) String() string { return strings.Join(*h, ",") }
 
+// Set implements flag.Value for hostList, splitting comma-separated host names.
 func (h *hostList) Set(v string) error {
 	for _, part := range strings.Split(v, ",") {
 		if p := strings.TrimSpace(part); p != "" {

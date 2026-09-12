@@ -62,6 +62,7 @@ const defaultAdminName = "root"
 // the install will ever hold.
 const minPassphraseLen = 8
 
+// initOpts configures terminal prompting handlers for the first-run ceremony.
 type initOpts struct {
 	// prompt reads a line, echoing it. Injected so cells drive the ceremony
 	// without a terminal.

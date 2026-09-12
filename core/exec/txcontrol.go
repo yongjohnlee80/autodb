@@ -443,6 +443,8 @@ func (t txToken) isName() bool {
 	return false
 }
 
+// String returns the string representation of a txToken, quoting identifiers when needed.
+// txToken implements fmt.Stringer.
 func (t txToken) String() string {
 	if t.kind == tokQuotedIdent {
 		return `"` + t.text + `"`
@@ -450,6 +452,7 @@ func (t txToken) String() string {
 	return t.text
 }
 
+// joinToks joins a slice of txToken tokens with spaces into a normalized string.
 func joinToks(toks []txToken) string {
 	parts := make([]string, len(toks))
 	for i, t := range toks {

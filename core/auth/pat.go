@@ -546,6 +546,8 @@ func containedInAny(n *net.IPNet, outer []*net.IPNet) bool {
 	return false
 }
 
+// randomToken generates cryptographically secure random bytes of length n
+// and returns them as a URL-safe unpadded base64-encoded string.
 func randomToken(n int) (string, error) {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
@@ -863,6 +865,8 @@ func (s *Service) claimPATNote(patID int64, now time.Time) bool {
 // quantity the coalescing bound is about is load on the meta store.
 func (s *Service) PATWriteCount() int64 { return s.patWrites.Load() }
 
+// boolToInt converts a boolean flag into an integer (1 for true, 0 for false)
+// suitable for SQL integer columns representing booleans.
 func boolToInt(b bool) int64 {
 	if b {
 		return 1
@@ -870,14 +874,6 @@ func boolToInt(b bool) int64 {
 	return 0
 }
 
-// canonicalizeIPsUnchecked validates and canonicalizes a token's allowed_ips
-// WITHOUT the subset check against its owner's rows.
-//
-// The parsing is identical to canonicalAllowedIPs — a bad CIDR is still a bad
-// CIDR — and only the containment test is dropped. Written as its own function
-// rather than a flag on the other one so the exemption is visible at every call
-// site: this is the ONE path on which a token may name an address its owner was
-// never admitted from, and it should not be reachable by passing false.
 // Prefix floors for a cleartext debugging token's allowed_ips.
 //
 // A /24 is 256 addresses — one office subnet, which is the smallest unit an
@@ -929,6 +925,14 @@ func refuseBroadDebugRanges(cidrs []string) error {
 	return nil
 }
 
+// canonicalizeIPsUnchecked validates and canonicalizes a token's allowed_ips
+// WITHOUT the subset check against its owner's rows.
+//
+// The parsing is identical to canonicalAllowedIPs — a bad CIDR is still a bad
+// CIDR — and only the containment test is dropped. Written as its own function
+// rather than a flag on the other one so the exemption is visible at every call
+// site: this is the ONE path on which a token may name an address its owner was
+// never admitted from, and it should not be reachable by passing false.
 func canonicalizeIPsUnchecked(cidrs []string) (string, error) {
 	if len(cidrs) == 0 {
 		return "", nil

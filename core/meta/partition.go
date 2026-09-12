@@ -498,6 +498,7 @@ func (s *Store) CheckLogicalIDUniqueness(ctx context.Context) error {
 	return nil
 }
 
+// joinStrings concatenates elements of a slice of strings using the specified separator.
 func joinStrings(in []string, sep string) string {
 	out := ""
 	for i, s := range in {

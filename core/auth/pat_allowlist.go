@@ -58,6 +58,8 @@ type StaleApproval struct {
 	Missing []string
 }
 
+// Error returns a formatted error message detailing the stale approval state.
+// StaleApproval implements the error interface.
 func (e *StaleApproval) Error() string {
 	return fmt.Sprintf("%v: now %s", ErrApprovalStale, strings.Join(e.Missing, ", "))
 }

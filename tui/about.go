@@ -129,6 +129,8 @@ func (m *Model) managesOwnAuth() bool { return m.frontend == FrontendTerminal }
 // arrives ready and a loss is terminal.
 func (m *Model) ownsConnection() bool { return m.frontend == FrontendTerminal }
 
+// aboutView is a modal component displaying system build information, connection status, and paths.
+// aboutView implements tui.Component, tui.Focusable, tui.EventReceiver, and tui.Container.
 type aboutView struct {
 	widget.Base
 	model *Model
@@ -136,6 +138,7 @@ type aboutView struct {
 	float *widget.Float
 }
 
+// aboutRows compiles the key-value system diagnostic pairs shown in the About dialog.
 func (m *Model) aboutRows() [][2]string {
 	info := m.about
 	pid, addr := m.session.ServerStatus()
@@ -221,17 +224,21 @@ func backendBuildLine(frontend, backend string, canRestart bool) string {
 		"An administrator must restart it from a terminal to pick up this one."
 }
 
+// openAbout displays the modal About dialog floating overlay.
 func (m *Model) openAbout() {
 	v := &aboutView{model: m, rows: m.aboutRows()}
 	v.float = m.openFloat("autodb — Enter or Esc to close", v)
 }
 
+// AcceptsFocus reports whether aboutView accepts user input focus (always true).
 func (v *aboutView) AcceptsFocus() bool { return true }
 
+// Layout computes the bounding box size for aboutView based on row count and constraints.
 func (v *aboutView) Layout(c tui.Constraints) tui.Size {
 	return c.Constrain(tui.Size{W: min(c.MaxW, 76), H: min(c.MaxH, len(v.rows))})
 }
 
+// Render paints the About rows onto the target surface.
 func (v *aboutView) Render(s tui.Surface) {
 	keySt := style.New().Foreground(style.TokenTextMuted)
 	valSt := style.New()
@@ -247,6 +254,7 @@ func (v *aboutView) Render(s tui.Surface) {
 	}
 }
 
+// HandleEvent intercepts dismissal keys (Esc, q, Enter) to hide the floating modal.
 // Enter, q, or Esc closes; the float handles Esc itself.
 func (v *aboutView) HandleEvent(ev tui.Event) bool {
 	if dismissKey(ev) {
@@ -260,21 +268,28 @@ func (v *aboutView) HandleEvent(ev tui.Event) bool {
 	return false
 }
 
+// Add is a no-op container method satisfying tui.Container.
 func (v *aboutView) Add(...tui.Component) {}
+
+// Remove is a no-op container method satisfying tui.Container.
 func (v *aboutView) Remove(tui.Component) {}
 
 // Move is a no-op — fixed shape, nothing to permute (see connPicker.Move).
 func (v *aboutView) Move(tui.Component, int) {}
+
+// Children returns an empty component iterator satisfying tui.Container.
 func (v *aboutView) Children() iter.Seq[tui.Component] {
 	return func(func(tui.Component) bool) {}
 }
 
+// hints returns contextual keybinding guidance for aboutView.
 func (v *aboutView) hints() []keyHint {
 	return []keyHint{{"Enter", "close"}, {"q/Esc", "close"}}
 }
 
 var _ tui.Container = (*aboutView)(nil)
 
+// firstNonEmpty returns string a if non-empty, otherwise fallback b.
 func firstNonEmpty(a, b string) string {
 	if a != "" {
 		return a

@@ -42,18 +42,23 @@ type reportedGrammarStage struct {
 // read-only enforcement may proceed when the target cannot host a read-only
 // transaction. Establishing the transaction remains a drive-owned effect after
 // the attempt record; this stage owns only the refusal decision.
+// readOnlyEnforcementStage implements admission.Stage.
 type readOnlyEnforcementStage struct{}
 
+// Name returns the stage identifier string ("readonlyenforcement").
 func (readOnlyEnforcementStage) Name() string { return "readonlyenforcement" }
 
+// ContextNeeds declares required context capabilities for read-only enforcement.
 func (readOnlyEnforcementStage) ContextNeeds() admission.Needs {
 	return admission.Needs{ReadOnlyUnit: true}
 }
 
+// DenyCodes lists denial codes that this stage may emit.
 func (readOnlyEnforcementStage) DenyCodes() []admission.Code {
 	return []admission.Code{admission.CodeReadOnlyUnenforceable}
 }
 
+// Apply evaluates target capabilities and rejects read-only execution if unsupported.
 func (readOnlyEnforcementStage) Apply(_ admission.Facts, ctx admission.Context) (admission.Contribution, error) {
 	if ctx.TargetCaps.Has(admission.CapTxReadOnly) {
 		return admission.NoContribution(), nil
@@ -71,16 +76,21 @@ func (readOnlyEnforcementStage) Apply(_ admission.Facts, ctx admission.Context) 
 	}), nil
 }
 
+// Name returns the stage identifier string ("reportedgrammar").
+// reportedGrammarStage implements admission.Stage.
 func (reportedGrammarStage) Name() string { return "reportedgrammar" }
 
+// ContextNeeds declares that this stage operates in session context.
 func (reportedGrammarStage) ContextNeeds() admission.Needs {
 	return admission.Needs{OnSession: true}
 }
 
+// DenyCodes returns the denial codes emitted for grammar drift.
 func (reportedGrammarStage) DenyCodes() []admission.Code {
 	return []admission.Code{admission.CodeGrammarDrifted}
 }
 
+// Apply executes grammar drift verification if configured.
 func (s reportedGrammarStage) Apply(admission.Facts, admission.Context) (admission.Contribution, error) {
 	if s.verify == nil {
 		return admission.NoContribution(), nil
@@ -101,12 +111,16 @@ func (s reportedGrammarStage) Apply(admission.Facts, admission.Context) (admissi
 // classification, so the audit record always equals what ran — never
 // execute an unaudited tail. It is the first stage in every chain and the
 // same rule at every one of the engine's former check sites.
+// sizeCapStage implements admission.Stage.
 type sizeCapStage struct{}
 
+// Name returns the stage identifier string ("sizecap").
 func (sizeCapStage) Name() string { return "sizecap" }
 
+// ContextNeeds returns empty requirements as size checks need only the script length.
 func (sizeCapStage) ContextNeeds() admission.Needs { return admission.Needs{} }
 
+// DenyCodes lists the script too large denial code.
 func (sizeCapStage) DenyCodes() []admission.Code {
 	return []admission.Code{admission.CodeScriptTooLarge}
 }
@@ -135,12 +149,16 @@ func (sizeCapStage) Apply(facts admission.Facts, ctx admission.Context) (admissi
 // implementation is the whole of it; the adapter maps its two refusal
 // arms onto one code (the sentinel ErrNoWhere is the compatibility
 // surface for both) and preserves the error text verbatim in the Detail.
+// guardWhereStage implements admission.Stage.
 type guardWhereStage struct{}
 
+// Name returns the stage identifier string ("guardwhere").
 func (guardWhereStage) Name() string { return "guardwhere" }
 
+// ContextNeeds declares required context fields for guardWhereStage.
 func (guardWhereStage) ContextNeeds() admission.Needs { return admission.Needs{} }
 
+// DenyCodes returns the denial codes emitted when WHERE is missing.
 func (guardWhereStage) DenyCodes() []admission.Code {
 	return []admission.Code{admission.CodeNoWhere}
 }
@@ -184,14 +202,18 @@ func (guardWhereStage) Apply(facts admission.Facts, _ admission.Context) (admiss
 // keep passing the session's own physical context when a transaction is
 // pinned), and every session-shaped surface passes its affirmative
 // context. The stage asks; the drive supplies.
+// profileAdmitStage implements admission.Stage.
 type profileAdmitStage struct {
 	profile Profile
 }
 
+// Name returns the stage identifier string ("profile").
 func (p profileAdmitStage) Name() string { return "profile" }
 
+// ContextNeeds declares required context fields for profileAdmitStage.
 func (p profileAdmitStage) ContextNeeds() admission.Needs { return admission.Needs{} }
 
+// DenyCodes returns denial codes emitted when a statement is not supported in the profile.
 func (p profileAdmitStage) DenyCodes() []admission.Code {
 	return []admission.Code{admission.CodeStatementUnsupported}
 }
@@ -252,12 +274,16 @@ type readerAnalysisStage struct {
 	userRoutines func() (*udfSet, error)
 }
 
+// Name returns the stage identifier string ("readeranalysis").
+// readerAnalysisStage implements admission.Stage.
 func (readerAnalysisStage) Name() string { return "readeranalysis" }
 
+// ContextNeeds declares that this stage needs read-only context configuration.
 func (readerAnalysisStage) ContextNeeds() admission.Needs {
 	return admission.Needs{ReadOnlyUnit: true}
 }
 
+// DenyCodes returns the denial codes emitted for advanced reader patterns.
 func (readerAnalysisStage) DenyCodes() []admission.Code {
 	return []admission.Code{admission.CodeReaderAdvancedPattern}
 }
@@ -290,12 +316,16 @@ func (s readerAnalysisStage) Apply(facts admission.Facts, ctx admission.Context)
 // drive re-resolves per Execute and hands this stage the fresh
 // snapshot, so a grant revoked between Parse and Execute refuses at the
 // next Execute, never at a remembered verdict.
+// authorizeUnitStage implements admission.Stage.
 type authorizeUnitStage struct{}
 
+// Name returns the stage identifier string ("authorizeunit").
 func (authorizeUnitStage) Name() string { return "authorizeunit" }
 
+// ContextNeeds returns empty requirements for authorization unit stage.
 func (authorizeUnitStage) ContextNeeds() admission.Needs { return admission.Needs{} }
 
+// DenyCodes returns the denial codes emitted for unauthorized operations.
 func (authorizeUnitStage) DenyCodes() []admission.Code {
 	return []admission.Code{admission.CodeDenied}
 }
@@ -334,6 +364,7 @@ func (authorizeUnitStage) Apply(facts admission.Facts, ctx admission.Context) (a
 // A13 mutation is that flattening them fails a cell, and keeping the
 // dispatch in one place is what lets the matrix state the divergence once
 // while the drives state it never.
+// sessionStateStage implements admission.Stage.
 type sessionStateStage struct {
 	// parseSet and parseReset are supplied as closures for symmetry with
 	// the other adapters; they are the package's own pure functions and
@@ -342,16 +373,20 @@ type sessionStateStage struct {
 	parseReset func(sqlText string) (resetStatement, error)
 }
 
+// newSessionStateStage constructs a new sessionStateStage with default parsers.
 func newSessionStateStage() sessionStateStage {
 	return sessionStateStage{parseSet: parseSet, parseReset: parseReset}
 }
 
+// Name returns the stage identifier string ("sessionstate").
 func (sessionStateStage) Name() string { return "sessionstate" }
 
+// ContextNeeds declares that this stage operates on control verbs.
 func (sessionStateStage) ContextNeeds() admission.Needs {
 	return admission.Needs{ControlVerb: true}
 }
 
+// DenyCodes returns the set of denial codes that sessionStateStage may emit.
 func (s sessionStateStage) DenyCodes() []admission.Code {
 	return []admission.Code{
 		admission.CodeSetGUCRefused,
@@ -472,12 +507,18 @@ func AdmissionError(r admission.Reason) error {
 	return admissionRefusal{reason: r, legacy: legacy}
 }
 
+// admissionRefusal wraps an admission.Reason with an underlying Go error for legacy compatibility.
+// admissionRefusal implements error.
 type admissionRefusal struct {
 	reason admission.Reason
 	legacy error
 }
 
+// Error returns the underlying legacy error message.
+// admissionRefusal implements the error interface.
 func (e admissionRefusal) Error() string { return e.legacy.Error() }
+
+// Unwrap reveals the underlying legacy error for errors.Is and errors.As matching.
 func (e admissionRefusal) Unwrap() error { return e.legacy }
 
 // AdmissionReason recovers the structured refusal without weakening legacy

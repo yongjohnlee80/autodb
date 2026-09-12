@@ -863,6 +863,7 @@ func systemServerPath() string {
 	return ""
 }
 
+// systemClientPaths returns the fallback client configuration candidate paths.
 func systemClientPaths() []string {
 	if len(systemCandidates) > 1 {
 		return systemCandidates[1:]
@@ -885,6 +886,7 @@ func UserConfigPath() (string, error) {
 	return filepath.Join(dir, "autodb", "config.toml"), nil
 }
 
+// DefaultPath returns the first existing configuration path discovered from system or user locations.
 func DefaultPath() (string, error) {
 	user, uerr := UserConfigPath()
 
@@ -1043,6 +1045,7 @@ func isFilesystemError(err error) bool {
 	return errors.As(err, &pathErr)
 }
 
+// deriveSizing calculates dependent headroom sizing if not explicitly configured.
 func (c *Config) deriveSizing() {
 	if c.wasSet("frontdoor", "reserved_headroom") {
 		return
@@ -1050,6 +1053,7 @@ func (c *Config) deriveSizing() {
 	c.FrontDoor.ReservedHeadroom = DefaultReservedHeadroom(c.Exec.PoolMaxConns)
 }
 
+// validate checks the semantic validity of configuration values across all sections.
 func (c Config) validate() error {
 	// Zero means "no TCP — use the local socket", so only a SET port is
 	// range-checked. A negative port is still a typo worth rejecting.
@@ -1177,6 +1181,7 @@ func (s sizingSource) describe(set bool, derivedFrom string) string {
 	}
 }
 
+// sizingSource extracts provenance state regarding connection pool and headroom sizing.
 func (c Config) sizingSource() sizingSource {
 	return sizingSource{
 		known:       c.provenanceKnown(),
@@ -1185,6 +1190,7 @@ func (c Config) sizingSource() sizingSource {
 	}
 }
 
+// validate checks the configuration values of the frontdoor section against pool limits.
 func (f FrontDoor) validate(poolMaxConns int, src sizingSource) error {
 	if !f.Enabled {
 		return nil

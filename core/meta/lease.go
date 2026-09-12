@@ -313,6 +313,8 @@ func (l *InstanceLease) heartbeat(ctx context.Context, every time.Duration) {
 	}
 }
 
+// rollbackQuietly aborts the given database transaction with a bounded 5-second
+// timeout to prevent hanging cleanup routines on connection failure.
 func rollbackQuietly(tx dao.ContextTxConn) error {
 	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

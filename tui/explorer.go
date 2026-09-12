@@ -59,8 +59,10 @@ type explorer struct {
 // grammar's only structural byte can never appear in a segment.
 var segEscaper = strings.NewReplacer("%", "%25", ":", "%3A")
 
+// encSeg escapes delimiter characters in node ID segments.
 func encSeg(s string) string { return segEscaper.Replace(s) }
 
+// decSeg unescapes delimiter characters in node ID segments.
 func decSeg(s string) string {
 	out, err := url.PathUnescape(s)
 	if err != nil {
@@ -90,10 +92,13 @@ func decSeg(s string) string {
 // Enter: a click now lands on the explorer, exactly as the keys do. The tree
 // still renders its cursor, because the highlight keys off FocusWithin the
 // explorer's box, not off the tree itself.
+// paneTree implements tui.Component and tui.Focusable.
 type paneTree struct{ *widget.Tree }
 
+// AcceptsFocus declines focus so focus always lands on the parent explorer component.
 func (*paneTree) AcceptsFocus() bool { return false }
 
+// newExplorer constructs an explorer pane backed by a paneTree component.
 func newExplorer(m *Model) *explorer {
 	return &explorer{
 		tree:   &paneTree{widget.NewTree(widget.WithTreeStyles(widget.ListStyles{CursorRow: cursorRowStyle}))},
@@ -158,8 +163,11 @@ func (e *explorer) WorkspaceOfNode(id string) int64 {
 	return 0
 }
 
+// AcceptsFocus reports whether the explorer accepts input focus (always true).
+// explorer implements tui.Component, tui.Focusable, and tui.EventReceiver.
 func (e *explorer) AcceptsFocus() bool { return true }
 
+// Init mounts the underlying tree component and wires expand/activate event subscribers.
 func (e *explorer) Init(ctx *tui.Context) {
 	e.Base.Init(ctx)
 	e.ctx = ctx
@@ -181,14 +189,17 @@ func (e *explorer) Init(ctx *tui.Context) {
 	})
 }
 
+// Layout sizes and positions the tree child within the allocated explorer box.
 func (e *explorer) Layout(c tui.Constraints) tui.Size {
 	sz := e.ctx.LayoutChild(e.tree, c)
 	e.ctx.PlaceChild(e.tree, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
 	return c.Constrain(sz)
 }
 
+// Render is a no-op as the mounted tree child renders itself.
 func (e *explorer) Render(tui.Surface) {}
 
+// HandleEvent manages task results, custom table scaffolding on Enter, and delegates to the tree.
 func (e *explorer) HandleEvent(ev tui.Event) bool {
 	if tr, ok := ev.(tui.TaskResult); ok {
 		return e.handleTask(tr)
@@ -286,6 +297,7 @@ func (e *explorer) Clear() {
 	e.MarkDirty()
 }
 
+// wsLoaded carries the result of an asynchronous workspace listing load.
 type wsLoaded struct {
 	// epoch is the identity this listing was issued under.
 	epoch    uint64
@@ -295,6 +307,7 @@ type wsLoaded struct {
 	noteDirs []int64
 }
 
+// applyWorkspaces merges freshly loaded workspaces and note folders into the tree roots.
 func (e *explorer) applyWorkspaces(l wsLoaded) {
 	if !e.model.current(l.epoch) {
 		return // listed under an identity that is no longer signed in
@@ -546,6 +559,7 @@ func buildTableForest(connID int64, schema string, tables []TableInfo, quoted ma
 	return top
 }
 
+// treeLoaded carries dynamically fetched child nodes and identifier mappings for a tree expansion.
 type treeLoaded struct {
 	node *widget.TreeNode
 	// epoch is the IDENTITY this load was issued under. sgen tracks the session,
@@ -575,6 +589,7 @@ func (e *explorer) handleTask(tr tui.TaskResult) bool {
 	return handled
 }
 
+// applyTask dispatches an incoming asynchronous task result to either workspace or tree population.
 func (e *explorer) applyTask(tr tui.TaskResult) bool {
 	l, ok := tr.Value.(treeLoaded)
 	if !ok {

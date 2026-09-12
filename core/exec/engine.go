@@ -310,6 +310,7 @@ func WithDebugTxLimits(debugIdle, ceiling time.Duration) Option {
 // it stays open.
 func DefaultPoolMaxConns() int { return 2 * runtime.NumCPU() }
 
+// WithPoolLimits configures connection pool sizing and lifecycle durations on the engine.
 func WithPoolLimits(maxConns int, idle, lifetime time.Duration) Option {
 	return func(e *Engine) {
 		if maxConns > 0 {
@@ -324,8 +325,10 @@ func WithPoolLimits(maxConns int, idle, lifetime time.Duration) Option {
 	}
 }
 
+// WithLogger registers an informational logging callback on the engine.
 func WithLogger(fn func(string)) Option { return func(e *Engine) { e.onLog = fn } }
 
+// WithMaxStatementBytes sets the maximum permitted size for an individual SQL statement script.
 func WithMaxStatementBytes(n int) Option {
 	return func(e *Engine) {
 		if n > 0 {
@@ -428,6 +431,8 @@ type Result struct {
 	Duration time.Duration
 }
 
+// classToAction maps a statement classification (Read, Write, Control, DDL)
+// to its corresponding authorization action enum.
 func classToAction(c Class) auth.Action {
 	switch c {
 	case ClassRead:
@@ -789,6 +794,7 @@ func suspendedSuffix(suspended bool) string {
 	return ""
 }
 
+// errSuffix appends an error message prefix with formatting if errText is non-empty.
 func errSuffix(errText string) string {
 	if errText == "" {
 		return ""

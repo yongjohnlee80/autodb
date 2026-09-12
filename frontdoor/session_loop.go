@@ -334,6 +334,8 @@ func (l *Listener) endOfRead(conn net.Conn, be *pgproto3.Backend, fr *frameReade
 	return l.endOfIdleWait(conn, be, err, peer, closeReason)
 }
 
+// endOfIdleWait handles an expired idle deadline or socket read error occurring while waiting
+// for the client to send a new statement frame.
 func (l *Listener) endOfIdleWait(conn net.Conn, be *pgproto3.Backend, err error, peer string, closeReason *string) error {
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {
@@ -1292,6 +1294,8 @@ func gateMessage(err error) string {
 	return err.Error()
 }
 
+// frameableAdmissionReason extracts a structured admission.Reason from err unless the
+// session interface has experienced an unrecoverable protocol loss.
 func frameableAdmissionReason(err error) (admission.Reason, bool) {
 	if errors.Is(err, exec.ErrWireFaceLost) {
 		return admission.Reason{}, false
@@ -1466,6 +1470,8 @@ type outputAccountant struct {
 	writeErr     error
 }
 
+// newOutputAccountant initializes an output accountant for tracking buffered bytes and
+// serializing wire frames to the client socket.
 func newOutputAccountant(l *Listener, conn net.Conn, be *pgproto3.Backend, peer string, held int64) *outputAccountant {
 	return &outputAccountant{l: l, conn: conn, be: be, peer: peer, held: held, withheld: outputComplete}
 }

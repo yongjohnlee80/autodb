@@ -66,6 +66,8 @@ const (
 	txAborted
 )
 
+// String returns the string representation of the txPhase enum value.
+// txPhase implements fmt.Stringer.
 func (p txPhase) String() string {
 	switch p {
 	case txNone:
@@ -274,11 +276,13 @@ func (e *Engine) beginTx(
 	return &Result{Verb: tc.Verb, Class: ClassControl}, nil
 }
 
+// pinnedBeginResponseLost reports whether an error during pinned BEGIN execution indicates a lost response.
 func pinnedBeginResponseLost(err error) bool {
 	var dispatchAware interface{ SafeToRetry() bool }
 	return errors.As(err, &dispatchAware) && !dispatchAware.SafeToRetry()
 }
 
+// pinnedBeginWireUnusable reports whether an error during pinned BEGIN rendered the wire connection unusable.
 func pinnedBeginWireUnusable(err error) bool {
 	return pinnedBeginResponseLost(err) ||
 		errors.Is(err, golibpg.ErrPoisoned) || errors.Is(err, golibpg.ErrReleased) ||
@@ -385,6 +389,7 @@ const (
 // events, and the crash cells observe the true sequence.
 var txBoundaryHook func(txBoundaryPoint)
 
+// boundaryReached fires the registered transaction boundary hook point if active.
 func boundaryReached(p txBoundaryPoint) {
 	if txBoundaryHook != nil {
 		txBoundaryHook(p)
@@ -489,6 +494,7 @@ func FinalizeOutcomes() []FinalizeOutcome {
 	}
 }
 
+// finalize coordinates committing or rolling back a transaction context and classifies the outcome.
 func (e *Engine) finalize(ctx context.Context, s *session, tx dao.ContextTxConn, commit bool) (FinalizeOutcome, error) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), txCleanupTimeout)
 	defer cancel()

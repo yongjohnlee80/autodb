@@ -18,6 +18,8 @@ import (
 // The table ellipsizes the script; Enter opens the full text in a
 // read-only vim viewer, the same move as inspecting a result row.
 
+// historyView displays executed script history in an interactive table modal.
+// Implements tui.Component, tui.Focusable, tui.EventReceiver, and tui.Container.
 type historyView struct {
 	widget.Base
 	model *Model
@@ -28,6 +30,7 @@ type historyView struct {
 	float *widget.Float
 }
 
+// newHistoryView constructs a new historyView for browsing recorded script execution rows.
 func newHistoryView(m *Model, rows []HistoryRow) *historyView {
 	cols := []widget.TableColumn[HistoryRow]{
 		{Title: "WHEN", Width: 20, Cell: func(r HistoryRow) string { return whenText(r.StartedAt) }},
@@ -59,6 +62,7 @@ func whenText(ts string) string {
 	return ts
 }
 
+// hints returns the key navigation and command hints shown below the table.
 func (v *historyView) hints() []keyHint {
 	return []keyHint{
 		{"j/k", "down / up"}, {"Enter", "show the full script"},
@@ -67,8 +71,12 @@ func (v *historyView) hints() []keyHint {
 	}
 }
 
+// AcceptsFocus reports whether historyView accepts keyboard focus.
+// Implements tui.Focusable.
 func (v *historyView) AcceptsFocus() bool { return true }
 
+// Init initializes the history view component and mounts the child table and hints.
+// Implements tui.Component.
 func (v *historyView) Init(ctx *tui.Context) {
 	v.Base.Init(ctx)
 	v.ctx = ctx
@@ -76,6 +84,7 @@ func (v *historyView) Init(ctx *tui.Context) {
 	ctx.Mount(v.hint)
 }
 
+// selected returns the currently highlighted HistoryRow, or false if nothing is selected.
 func (v *historyView) selected() (HistoryRow, bool) {
 	i, ok := v.table.List().Selected()
 	if !ok || i >= len(v.rows) {
@@ -84,6 +93,8 @@ func (v *historyView) selected() (HistoryRow, bool) {
 	return v.rows[i], true
 }
 
+// HandleEvent handles key navigation, full script inspection, yanking, or loading into editor.
+// Implements tui.EventReceiver.
 func (v *historyView) HandleEvent(ev tui.Event) bool {
 	k, ok := ev.(tui.KeyEvent)
 	if !ok || k.Kind == tui.KeyRelease {
@@ -116,6 +127,8 @@ func (v *historyView) HandleEvent(ev tui.Event) bool {
 	return v.table.HandleEvent(ev)
 }
 
+// Layout arranges the history table and bottom hint text within constraints.
+// Implements tui.Component.
 func (v *historyView) Layout(c tui.Constraints) tui.Size {
 	// The float owns the size (WithSizeFraction); the view fills it.
 	w, h := c.MaxW, c.MaxH
@@ -127,13 +140,23 @@ func (v *historyView) Layout(c tui.Constraints) tui.Size {
 	return c.Constrain(tui.Size{W: w, H: h})
 }
 
+// Render performs surface rendering for historyView (delegated to child table and hint).
+// Implements tui.Component.
 func (v *historyView) Render(tui.Surface) {}
 
+// Add is a no-op container stub.
+// Implements tui.Container.
 func (v *historyView) Add(...tui.Component) {}
+
+// Remove is a no-op container stub.
+// Implements tui.Container.
 func (v *historyView) Remove(tui.Component) {}
 
 // Move is a no-op — fixed shape, nothing to permute (see connPicker.Move).
 func (v *historyView) Move(tui.Component, int) {}
+
+// Children iterates over the mounted child components of historyView.
+// Implements tui.Container.
 func (v *historyView) Children() iter.Seq[tui.Component] {
 	return func(yield func(tui.Component) bool) {
 		if v.table != nil {
@@ -188,6 +211,7 @@ func rowCountText(r HistoryRow) string {
 	return n
 }
 
+// scriptTitle formats a descriptive header title for a historical execution record.
 func scriptTitle(r HistoryRow) string {
 	title := whenText(r.StartedAt) + " · " + r.User
 	if r.Conn != "" {
@@ -237,6 +261,8 @@ func (m *Model) openScript(title, script string) {
 	sv.float = m.openFloatPct(title, sv, scriptPct)
 }
 
+// scriptView hosts a read-only Editor component displaying a recorded script.
+// Implements tui.Component, tui.Focusable, tui.EventReceiver, and tui.Container.
 type scriptView struct {
 	widget.Base
 	model  *Model
@@ -246,8 +272,12 @@ type scriptView struct {
 	float  *widget.Float
 }
 
+// AcceptsFocus reports whether scriptView accepts keyboard focus (delegated to inner Editor).
+// Implements tui.Focusable.
 func (s *scriptView) AcceptsFocus() bool { return false }
 
+// Init initializes scriptView and mounts the read-only editor.
+// Implements tui.Component.
 func (s *scriptView) Init(ctx *tui.Context) {
 	s.Base.Init(ctx)
 	s.ctx = ctx
@@ -260,6 +290,8 @@ func (s *scriptView) Init(ctx *tui.Context) {
 	ctx.FocusComponent(s.editor)
 }
 
+// Layout sizes the editor to fill the modal float area.
+// Implements tui.Component.
 func (s *scriptView) Layout(c tui.Constraints) tui.Size {
 	// The float owns the size; the viewer fills it.
 	w, h := c.MaxW, c.MaxH
@@ -268,6 +300,8 @@ func (s *scriptView) Layout(c tui.Constraints) tui.Size {
 	return c.Constrain(tui.Size{W: w, H: h})
 }
 
+// Render performs surface rendering for scriptView (handled by child editor).
+// Implements tui.Component.
 func (s *scriptView) Render(tui.Surface) {}
 
 // The read-only vim viewer forwards keys to the focused Editor, which leaves an
@@ -282,11 +316,19 @@ func (s *scriptView) HandleEvent(ev tui.Event) bool {
 	return false
 }
 
+// Add is a no-op container stub.
+// Implements tui.Container.
 func (s *scriptView) Add(...tui.Component) {}
+
+// Remove is a no-op container stub.
+// Implements tui.Container.
 func (s *scriptView) Remove(tui.Component) {}
 
 // Move is a no-op — fixed shape, nothing to permute (see connPicker.Move).
 func (s *scriptView) Move(tui.Component, int) {}
+
+// Children iterates over the mounted child components of scriptView.
+// Implements tui.Container.
 func (s *scriptView) Children() iter.Seq[tui.Component] {
 	return func(yield func(tui.Component) bool) {
 		if s.editor != nil {
@@ -295,6 +337,7 @@ func (s *scriptView) Children() iter.Seq[tui.Component] {
 	}
 }
 
+// hints returns the key navigation and yank hints for the script viewer.
 func (s *scriptView) hints() []keyHint {
 	return []keyHint{
 		{"hjkl / w b", "move"}, {"v/V then y", "select and yank"},

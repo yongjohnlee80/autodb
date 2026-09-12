@@ -366,6 +366,7 @@ func (l *Listener) segmentMessageCap() int {
 	return maxSegmentMessages
 }
 
+// segmentByteCap returns the active ceiling in bytes for an extended query segment.
 func (l *Listener) segmentByteCap() int64 {
 	if l.testSegmentBytes != nil {
 		return *l.testSegmentBytes
@@ -515,6 +516,7 @@ func (s *segmentLane) addBytes(n int64) {
 	s.bytes += n
 }
 
+// segmentLane tracks per-segment message and byte accumulations across extended query pipelines.
 type segmentLane struct {
 	// ran records that this segment EXECUTED something, so the client has asked
 	// for output and owes us the Sync or Flush that collects it. It is what the

@@ -81,6 +81,8 @@ const (
 	sessClosed
 )
 
+// String returns a human-readable description of the sessionState lifecycle position.
+// sessionState implements fmt.Stringer.
 func (s sessionState) String() string {
 	switch s {
 	case sessOpen:
@@ -220,6 +222,7 @@ func (s *session) clearTxLocked() {
 	s.limits = txLimits{}
 }
 
+// get atomically loads and returns the current sessionState.
 func (s *session) get() sessionState { return sessionState(s.state.Load()) }
 
 // sessionRegistry holds the open sessions and enforces the caps.
@@ -260,6 +263,7 @@ type sessionRegistry struct {
 	hookAfterStateCheck func()
 }
 
+// newSessionRegistry initializes a sessionRegistry with per-user and global concurrency bounds.
 func newSessionRegistry(perUser, global int) *sessionRegistry {
 	return &sessionRegistry{
 		byID:       map[SessionID]*session{},

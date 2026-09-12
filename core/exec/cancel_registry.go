@@ -76,6 +76,7 @@ type cancelRegistry struct {
 	compares atomic.Int64
 }
 
+// newCancelRegistry initializes and returns an empty in-memory cancelRegistry.
 func newCancelRegistry() *cancelRegistry {
 	return &cancelRegistry{by: map[uint32]cancelTarget{}}
 }

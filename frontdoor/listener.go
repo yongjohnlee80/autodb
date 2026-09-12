@@ -507,6 +507,7 @@ type resolvedCaps struct {
 	lane       int64
 }
 
+// orDefault returns v if non-zero, otherwise falling back to def.
 func orDefault(v, def int) int {
 	if v == 0 {
 		return def
@@ -965,13 +966,14 @@ func (l *Listener) beginHandler() bool {
 	return true
 }
 
-// track and untrack maintain the live set Close ends.
+// track registers an active net.Conn in the live set so Close can terminate it.
 func (l *Listener) track(c net.Conn) {
 	l.liveMu.Lock()
 	l.live[c] = struct{}{}
 	l.liveMu.Unlock()
 }
 
+// untrack removes a net.Conn from the active connection set upon termination.
 func (l *Listener) untrack(c net.Conn) {
 	l.liveMu.Lock()
 	delete(l.live, c)

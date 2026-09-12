@@ -268,6 +268,8 @@ func (e *Engine) retryClose(ctx context.Context, s *session) bool {
 	return true
 }
 
+// finishClosing coordinates the final quiescing, rollback of uncommitted work,
+// audit recording, and removal of an active session from the registry.
 func (e *Engine) finishClosing(ctx context.Context, s *session) {
 	// No registry lock is held here: quiescing can block on a statement, and
 	// the published lock order forbids waiting on session I/O under the

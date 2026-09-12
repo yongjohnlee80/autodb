@@ -64,6 +64,7 @@ func (m *Model) openKeyslotMenu() {
 	})
 }
 
+// showKeyslot displays the current unattended unlock status and actions in a floating panel.
 func (m *Model) showKeyslot(st KeyslotStatus) {
 	m.openTextFloat("service keyslot", keyslotStatusText(st))
 	entries := []leaderEntry{
@@ -215,6 +216,7 @@ func firstLine(s string) string {
 	return s
 }
 
+// confirmEnrollKeyslot prompts confirmation before cutting and enrolling the unattended service keyslot.
 func (m *Model) confirmEnrollKeyslot() {
 	m.openTextFloat("enable the unattended unlock?", keyslotProse)
 	m.openLeader("enable the unattended unlock?", []leaderEntry{
@@ -234,6 +236,7 @@ func (m *Model) confirmEnrollKeyslot() {
 	})
 }
 
+// confirmRemoveKeyslot prompts confirmation before removing the unattended service keyslot.
 func (m *Model) confirmRemoveKeyslot() {
 	m.openTextFloat("disable the unattended unlock?",
 		"Removing the service keyslot deletes the slot AND its keyfile.\n\n"+

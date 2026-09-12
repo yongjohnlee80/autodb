@@ -117,6 +117,8 @@ func New(session *Session, notesFor NotesFactory, quit func(), opts ...Option) *
 // Root returns the mountable root component.
 func (m *Model) Root() tui.Component { return m }
 
+// Init mounts the overlay host, subscribes to global UI bus events, and kicks off connection startup.
+// Implements tui.Component.
 func (m *Model) Init(ctx *tui.Context) {
 	m.ctx = ctx
 	ctx.Mount(m.host)
@@ -184,6 +186,7 @@ func (m *Model) MarkDirtyAll() { m.ctx.MarkDirty() }
 
 // --- connection lifecycle -----------------------------------------------------
 
+// startupDone represents the result of the initial connection attempt and bootstrap check.
 type startupDone struct {
 	gen             uint64 // epoch Connect installed; stale if it moved on
 	instanceChanged bool
@@ -194,11 +197,13 @@ type startupDone struct {
 // showSplash opens the About modal on the loop, once the tree is live.
 type showSplash struct{}
 
+// disconnectedEvent is broadcast when the server RPC client connection terminates.
 type disconnectedEvent struct {
 	gen   uint64
 	cause string
 }
 
+// connectTask initiates an asynchronous connection to the autodb server and checks bootstrap state.
 func (m *Model) connectTask() {
 	if !m.ownsConnection() {
 		// Belt: Init and reconnect are gated already, but a shared pooled session
@@ -226,6 +231,7 @@ func (m *Model) connectTask() {
 	})
 }
 
+// reconnect re-establishes the server RPC connection.
 func (m *Model) reconnect() { m.connectTask() }
 
 // watchDisconnect publishes on the bus when the CURRENT client dies — the
@@ -248,6 +254,7 @@ func (m *Model) watchDisconnect() {
 	}()
 }
 
+// handleStartup transitions UI state upon completion of server connection and bootstrap checks.
 func (m *Model) handleStartup(d startupDone) {
 	m.connecting = false
 	m.running = false
@@ -448,6 +455,7 @@ func (m *Model) requireNotes() (*NoteStore, bool) {
 	return m.notes, true
 }
 
+// afterLogin configures the UI session state, loads personal notes, and initiates TLS probing after successful login.
 func (m *Model) afterLogin() {
 	u := m.session.User()
 	m.hadAuth = true
@@ -557,6 +565,7 @@ func (m *Model) maybePromptLogin() {
 
 // --- auth floats -----------------------------------------------------------------
 
+// openBootstrap prompts the user to create the first root administrator account.
 func (m *Model) openBootstrap() {
 	if !m.managesOwnAuth() {
 		// The gateway bootstraps the first admin on first login; the App
@@ -589,6 +598,7 @@ func (m *Model) openBootstrap() {
 	})
 }
 
+// openLogin opens a modal form for user sign-in.
 func (m *Model) openLogin() {
 	if !m.managesOwnAuth() {
 		// Web mode: the gateway owns authentication. The App runs on a
@@ -644,6 +654,7 @@ func (m *Model) openLogin() {
 	})
 }
 
+// authDone holds the completion status of an asynchronous authentication action.
 type authDone struct {
 	attempt uint64 // which attempt this settles; only the OWNER unlocks
 	gen     uint64
@@ -698,6 +709,7 @@ func (m *Model) runQuery() {
 	m.runSQL(sql)
 }
 
+// runSelection runs only the highlighted SQL text from the visual selection.
 func (m *Model) runSelection() {
 	sql := m.editor.SelectedText()
 	if strings.TrimSpace(sql) == "" {
@@ -707,6 +719,7 @@ func (m *Model) runSelection() {
 	m.runSQL(sql)
 }
 
+// runSQL submits SQL text for asynchronous execution against the active connection.
 func (m *Model) runSQL(sql string) {
 	if m.running {
 		m.setStatus("a query is already running")
@@ -738,6 +751,7 @@ func (m *Model) runSQL(sql string) {
 
 // --- notes ------------------------------------------------------------------------
 
+// noteLoaded carries the asynchronous load outcome of a note from disk.
 type noteLoaded struct {
 	// epoch is the identity this load was issued under. noteGen alone is not
 	// enough: retirement does not advance it, so a load from a previous identity
@@ -770,6 +784,7 @@ func (m *Model) openNote(wsID int64, name string) {
 	m.doOpenNote(wsID, name)
 }
 
+// doOpenNote launches an asynchronous task to read a note from disk and load it into the editor.
 func (m *Model) doOpenNote(wsID int64, name string) {
 	// Through the capability, not the field: this used to read m.notes directly,
 	// so it could launch a task against a nil store after a factory failure or
@@ -788,6 +803,7 @@ func (m *Model) doOpenNote(wsID int64, name string) {
 	})
 }
 
+// newNote prompts for a note title and creates a new .sql note file within the active workspace.
 func (m *Model) newNote() {
 	if m.activeWs == 0 {
 		m.setStatus("select a workspace (or one of its notes) first")
@@ -821,6 +837,7 @@ func (m *Model) newNote() {
 	})
 }
 
+// saveNote commits the active query editor contents to disk under the current note name or prompts for a new name.
 func (m *Model) saveNote() {
 	if m.curNote == nil {
 		// No note open: SAVE THE BUFFER under a new name. (It used to
@@ -888,6 +905,7 @@ func (m *Model) saveNoteAs(wsID int64, body string) {
 	})
 }
 
+// openConflict displays a resolution modal when on-disk note content differs from uncommitted editor changes.
 func (m *Model) openConflict(body string) {
 	note := m.curNote
 	m.openLeader(note.Name+" changed on disk", []leaderEntry{
@@ -948,6 +966,7 @@ func (m *Model) addConnectionToWorkspace(wsID int64) {
 
 // --- pane focus & zoom ------------------------------------------------------------
 
+// focusPane transfers input focus to the specified component or its target child.
 func (m *Model) focusPane(c tui.Component) {
 	// Panels that delegate (the results panel hosts either a table or the
 	// read-only JSON editor) hand focus to the child that draws the
@@ -1020,17 +1039,19 @@ func (m *Model) zoomToggle() {
 
 // --- status bar -------------------------------------------------------------------
 
+// setStatus displays an informational status message in the bottom bar.
 func (m *Model) setStatus(msg string) {
 	m.statusMsg, m.statusKind = msg, statusInfo
 	m.refreshStatus()
 }
 
-// setOK / setError report an outcome, coloured so it cannot be missed.
+// setOK reports a success outcome in the status bar.
 func (m *Model) setOK(msg string) {
 	m.statusMsg, m.statusKind = msg, statusOK
 	m.refreshStatus()
 }
 
+// setError displays a highlighted error message in the status bar.
 func (m *Model) setError(msg string) {
 	m.statusMsg, m.statusKind = msg, statusError
 	m.refreshStatus()
@@ -1063,6 +1084,7 @@ func (m *Model) connLabel() string {
 	return fmt.Sprintf("connection %d", m.activeConn)
 }
 
+// refreshQueryTitle updates the query panel title box with the active connection identifier.
 func (m *Model) refreshQueryTitle() {
 	// Keyed on activeConn, NOT on the name: activeConn is what Run() uses, so it
 	// is the only thing that may decide whether a connection exists.
@@ -1111,11 +1133,13 @@ func (m *Model) openConnPicker() {
 	})
 }
 
+// showConnPicker creates and presents the interactive modal connection picker.
 func (m *Model) showConnPicker(conns []ConnInfo) {
 	p := newConnPicker(m, conns)
 	p.float = m.openFloat("connection for this query", p)
 }
 
+// setActiveConn designates the active database connection for executing queries.
 func (m *Model) setActiveConn(c ConnInfo) {
 	m.activeConn, m.activeConnNm = c.ID, c.Name
 	m.refreshQueryTitle()
@@ -1138,6 +1162,7 @@ func (m *Model) serverStatusText() string {
 	}
 }
 
+// refreshStatus redraws the bottom status bar with mode indicators, connection info, and active hints.
 func (m *Model) refreshStatus() {
 	// The marker goes on the LEFT, which transient status messages never
 	// overwrite. On the right it would survive exactly until the next query.
@@ -1262,6 +1287,8 @@ func (m *Model) loadScaffold(sql string) {
 
 // --- layout / render / events ------------------------------------------------------
 
+// Layout arranges the host container across the full terminal surface.
+// Implements tui.Component.
 func (m *Model) Layout(c tui.Constraints) tui.Size {
 	m.applyCursorStyles() // cheap: only re-styles on a focus transition
 	sz := m.ctx.LayoutChild(m.host, c)
@@ -1269,8 +1296,12 @@ func (m *Model) Layout(c tui.Constraints) tui.Size {
 	return c.Constrain(sz)
 }
 
+// Render performs top-level surface drawing (handled by children).
+// Implements tui.Component.
 func (m *Model) Render(tui.Surface) {}
 
+// HandleEvent dispatches background task results, keyboard events, and focus transitions.
+// Implements tui.EventReceiver.
 func (m *Model) HandleEvent(ev tui.Event) bool {
 	switch t := ev.(type) {
 	case tui.TaskResult:
@@ -1288,6 +1319,7 @@ func (m *Model) HandleEvent(ev tui.Event) bool {
 	return false
 }
 
+// handleTask receives an asynchronous task result, applies state updates, and verifies session auth.
 func (m *Model) handleTask(tr tui.TaskResult) bool {
 	handled := m.applyTask(tr)
 	if handled {
@@ -1296,6 +1328,7 @@ func (m *Model) handleTask(tr tui.TaskResult) bool {
 	return handled
 }
 
+// applyTask matches specific task types to apply their state modifications.
 func (m *Model) applyTask(tr tui.TaskResult) bool {
 	switch v := tr.Value.(type) {
 	case showSplash:
@@ -1385,6 +1418,7 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 	return false
 }
 
+// handleKey processes root-level application key bindings such as zoom shortcuts, pane cycling, and leader triggers.
 func (m *Model) handleKey(k tui.KeyEvent) bool {
 	if k.Kind == tui.KeyRelease {
 		return false
@@ -1578,6 +1612,7 @@ func (m *Model) confirmQuit() {
 	})
 }
 
+// openLeaderMenu activates the interactive Spacebar leader command palette float.
 func (m *Model) openLeaderMenu() { m.openLeader("SPC — commands", m.leaderEntries()) }
 
 // openHelp renders the binding table — the SAME data the leader executes —

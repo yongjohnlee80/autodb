@@ -43,6 +43,8 @@ func newConnPicker(m *Model, conns []ConnInfo) *connPicker {
 	return p
 }
 
+// Init mounts the inner selection list and syncs cursor position to the active connection.
+// connPicker implements tui.Component.
 func (p *connPicker) Init(ctx *tui.Context) {
 	p.Base.Init(ctx)
 	p.ctx = ctx
@@ -56,6 +58,7 @@ func (p *connPicker) Init(ctx *tui.Context) {
 	}
 }
 
+// Layout arranges the list child within the floating modal constraints.
 func (p *connPicker) Layout(c tui.Constraints) tui.Size {
 	w := min(c.MaxW, 58)
 	h := min(c.MaxH, max(len(p.conns), 1))
@@ -64,8 +67,11 @@ func (p *connPicker) Layout(c tui.Constraints) tui.Size {
 	return c.Constrain(tui.Size{W: w, H: h})
 }
 
+// Render is a no-op as the mounted child list renders itself.
 func (p *connPicker) Render(tui.Surface) {}
 
+// HandleEvent handles dismissal keys and Enter selection on connection items.
+// connPicker implements tui.EventReceiver.
 func (p *connPicker) HandleEvent(ev tui.Event) bool {
 	if dismissKey(ev) {
 		p.float.Hide()
@@ -89,6 +95,8 @@ func (p *connPicker) HandleEvent(ev tui.Event) bool {
 // the modal float cannot reach the list, so it never gets focus — no
 // cursor, and Enter selects nothing.
 func (p *connPicker) Add(...tui.Component) {}
+
+// Remove is a no-op container method satisfying tui.Container.
 func (p *connPicker) Remove(tui.Component) {}
 
 // Move is a no-op: the picker is a fixed-shape container with a single
@@ -96,6 +104,8 @@ func (p *connPicker) Remove(tui.Component) {}
 // in v0.5.4; satisfying it honestly here means
 // doing nothing rather than pretending to reorder something.
 func (p *connPicker) Move(tui.Component, int) {}
+
+// Children iterates over the mounted list component satisfying tui.Container.
 func (p *connPicker) Children() iter.Seq[tui.Component] {
 	return func(yield func(tui.Component) bool) {
 		if p.list != nil {

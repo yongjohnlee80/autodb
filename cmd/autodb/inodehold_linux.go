@@ -33,6 +33,8 @@ func holdInode(path string) (inodeHold, error) {
 	return fdHold(fd), nil
 }
 
+// fdHold wraps a file descriptor implementing inodeHold.
 type fdHold int
 
+// release implements inodeHold by closing the held file descriptor.
 func (f fdHold) release() { _ = syscall.Close(int(f)) }

@@ -83,6 +83,7 @@ type deadlines struct {
 	frameStall time.Duration
 }
 
+// defaultDeadlines returns the standard phase deadline budget configuration for a frontdoor connection.
 func defaultDeadlines() deadlines {
 	return deadlines{
 		tls:     TLSHandshakeDeadline,
@@ -147,8 +148,10 @@ type cancelRequestError struct {
 	Secret    []byte
 }
 
+// Error implements the error interface for cancelRequestError.
 func (cancelRequestError) Error() string { return errCancelRequest.Error() }
 
+// Is implements error matching against the canonical errCancelRequest sentinel.
 func (cancelRequestError) Is(target error) bool { return target == errCancelRequest }
 
 // asCancelRequest extracts the presented pair when err is a CancelRequest.
@@ -529,7 +532,10 @@ func readStartupPacket(r io.Reader) ([]byte, error) {
 	return body, nil
 }
 
+// binaryBigEndianUint32 decodes a big-endian 32-bit unsigned integer from b.
 func binaryBigEndianUint32(b []byte) uint32 { return binary.BigEndian.Uint32(b) }
+
+// putUint32 encodes a big-endian 32-bit unsigned integer v into b.
 func putUint32(b []byte, v uint32)          { binary.BigEndian.PutUint32(b, v) }
 
 // sendDenial writes the uniform denial and flushes it.
@@ -545,8 +551,10 @@ func sendDenial(w interface {
 	return be.Flush()
 }
 
+// emptyReader implements io.Reader with zero deliverable bytes.
 type emptyReader struct{}
 
+// Read implements io.Reader for emptyReader, always returning an error.
 func (emptyReader) Read([]byte) (int, error) { return 0, errors.New("frontdoor: no reader") }
 
 // tlsFailure marks an S0 failure that is NOT an authentication event.
@@ -569,12 +577,15 @@ type tlsFailErr struct {
 	attributable bool
 }
 
+// Error implements the error interface for tlsFailErr.
 func (e tlsFailErr) Error() string { return "frontdoor: " + e.reason }
 
+// tlsFailure constructs a peer-attributable TLS failure error.
 func tlsFailure(reason string) error {
 	return tlsFailErr{reason: reason, attributable: true}
 }
 
+// tlsFailureDetail constructs a peer-attributable TLS failure error with diagnostic detail.
 func tlsFailureDetail(reason, detail string) error {
 	return tlsFailErr{reason: reason, detail: detail, attributable: true}
 }

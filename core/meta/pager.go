@@ -72,6 +72,8 @@ type SweepSpec[R any, C ~string, K ~string] struct {
 	After int64
 }
 
+// validate verifies that required cursor fields, key extractors, and page size
+// are populated on the SweepSpec before running a sweep pass.
 func (sp *SweepSpec[R, C, K]) validate() error {
 	if sp.Key == *new(C) || sp.ByKey == *new(K) {
 		return errors.New("meta: Sweep requires Key and ByKey — a bounded scan needs a position")

@@ -57,11 +57,13 @@ type sessions struct {
 	closed  bool
 }
 
+// poolEntry tracks an active RPC session for a user along with active browser tab references.
 type poolEntry struct {
 	sess *tuiapp.Session
 	refs int
 }
 
+// newSessions constructs a new reference-counted session pool.
 func newSessions(dial func(ctx context.Context) (*tuiapp.Session, error), log logger.Logger) *sessions {
 	if log == nil {
 		log = logger.Nop{}
@@ -189,6 +191,7 @@ func (p *sessions) release(subject string, e *poolEntry) {
 	p.logoutAndClose(subject, e.sess)
 }
 
+// logoutAndClose terminates the daemon session and closes the network connection.
 func (p *sessions) logoutAndClose(subject string, sess *tuiapp.Session) {
 	ctx, cancel := context.WithTimeout(context.Background(), LogoutTimeout)
 	defer cancel()

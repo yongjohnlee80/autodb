@@ -96,6 +96,8 @@ type admitter struct {
 	now func() time.Time
 }
 
+// newAdmitter constructs a new connection admitter with the specified concurrency caps,
+// pre-auth limits, failure thresholds, and output lane memory budgets.
 func newAdmitter(maxConns, maxPreAuth, failureLimit int, laneBytes int64, now func() time.Time) *admitter {
 	return &admitter{
 		maxConns: maxConns, maxPreAuth: maxPreAuth, laneBytes: laneBytes,
@@ -213,6 +215,8 @@ func (a *admitter) noteFailure(peer string) {
 	}
 }
 
+// throttledLocked determines if a peer host has exceeded the failure limit within
+// the active failure tracking window. Must be called while holding admitter.mu.
 func (a *admitter) throttledLocked(host string, now time.Time) bool {
 	live := prune(a.failures[host], now.Add(-AuthFailureWindow))
 	if len(live) == 0 {

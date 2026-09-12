@@ -289,6 +289,7 @@ func txStateFor(outcome FinalizeOutcome, err error) meta.TxState {
 	return meta.TxUnresolvable
 }
 
+// txOutcomeReason determines the metadata reason string for a recorded transaction outcome.
 func txOutcomeReason(outcome FinalizeOutcome, err error) string {
 	switch outcome {
 	case FinalizeRollbackFailed:

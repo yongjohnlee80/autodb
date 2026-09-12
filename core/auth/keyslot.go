@@ -582,6 +582,7 @@ func (s *Service) UnlockWithServiceKeyslot(ctx context.Context) error {
 	return nil
 }
 
+// unlockFromKeyfile unseals the service keyslot using the unattended keyfile.
 func (s *Service) unlockFromKeyfile(ctx context.Context) error {
 	keyfile, err := readKeyfile(s.keyfilePath)
 	if err != nil {
@@ -631,6 +632,7 @@ func (s *Service) seedKeyslotNow(ctx context.Context, ok bool, err error) {
 	s.mu.Unlock()
 }
 
+// setKeyslotState updates the active service keyslot status under lock.
 func (s *Service) setKeyslotState(st ServiceKeyslotState) {
 	s.mu.Lock()
 	s.keyslotState = st

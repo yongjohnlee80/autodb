@@ -155,6 +155,7 @@ const (
 // TxOutByID orders the outcome log by insertion, so retention can page it.
 const TxOutByID Sort = "id"
 
+// newTxOutcomes initializes and returns the typed DAO schema mapping for the tx_outcomes table.
 func newTxOutcomes(conn dao.DataConn) *dao.Schema[*TxOutcome, TxOutcomeField, Sort, int64] {
 	return sortableSchema(conn, "tx_outcomes", TxOutID,
 		map[Sort]string{TxOutByID: "id"},
@@ -217,6 +218,7 @@ const (
 // TxPendingSort is the queue's sort-key enum.
 type TxPendingSort = Sort
 
+// newTxPending initializes and returns the typed DAO schema mapping for the tx_pending table.
 func newTxPending(conn dao.DataConn) *dao.Schema[*TxPending, TxPendingField, Sort, int64] {
 	return sortableSchema(conn, "tx_pending", TxPendID,
 		map[Sort]string{TxPendByCreated: "created_at", TxPendByID: "id"},

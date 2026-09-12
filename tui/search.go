@@ -28,9 +28,14 @@ type searchTarget interface {
 
 // --- panel adapters -----------------------------------------------------------
 
+// explorerSearch adapts the explorer tree to the searchTarget interface.
+// explorerSearch implements searchTarget.
 type explorerSearch struct{ e *explorer }
 
+// name returns the display name of the search target ("explorer").
 func (s explorerSearch) name() string { return "explorer" }
+
+// rows extracts visible labels from the tree for searching.
 func (s explorerSearch) rows() []string {
 	nodes := s.e.tree.VisibleRows()
 	out := make([]string, len(nodes))
@@ -39,14 +44,27 @@ func (s explorerSearch) rows() []string {
 	}
 	return out
 }
+
+// cursor returns the current line position in the explorer.
 func (s explorerSearch) cursor() int  { return s.e.tree.Cursor() }
+
+// reveal jumps the tree cursor to row i.
 func (s explorerSearch) reveal(i int) { s.e.tree.SetCursor(i) }
 
+// editorSearch adapts the query editor to the searchTarget interface.
+// editorSearch implements searchTarget.
 type editorSearch struct{ m *Model }
 
+// name returns the display name of the search target ("query").
 func (s editorSearch) name() string   { return "query" }
+
+// rows returns the lines of text currently in the editor buffer.
 func (s editorSearch) rows() []string { return s.m.editor.Lines() }
+
+// cursor returns the editor's active line number.
 func (s editorSearch) cursor() int    { row, _ := s.m.editor.Line(); return row }
+
+// reveal navigates the editor cursor to row i and highlights the matching column.
 func (s editorSearch) reveal(i int) {
 	// Land on the match itself, not just its line.
 	col := 0
@@ -59,9 +77,14 @@ func (s editorSearch) reveal(i int) {
 	s.m.editor.SetLine(i, col)
 }
 
+// resultsSearch adapts the results table panel to the searchTarget interface.
+// resultsSearch implements searchTarget.
 type resultsSearch struct{ p *resultsPanel }
 
+// name returns the display name of the search target ("results").
 func (s resultsSearch) name() string { return "results" }
+
+// rows formats and returns rendered row strings from the results table.
 func (s resultsSearch) rows() []string {
 	if s.p.res == nil {
 		return nil
@@ -76,6 +99,8 @@ func (s resultsSearch) rows() []string {
 	}
 	return out
 }
+
+// cursor returns the selected row index in the results table.
 func (s resultsSearch) cursor() int {
 	if s.p.rawList == nil {
 		return 0
@@ -83,6 +108,8 @@ func (s resultsSearch) cursor() int {
 	i, _ := s.p.rawList.Selected()
 	return i
 }
+
+// reveal positions the results table cursor onto row i.
 func (s resultsSearch) reveal(i int) {
 	if s.p.rawList != nil {
 		s.p.rawList.SetCursor(i)
@@ -195,6 +222,7 @@ func (m *Model) jumpMatch(target searchTarget, dir int, includeCursor bool) {
 	}
 }
 
+// itoa converts an integer to its base-10 string representation without allocations.
 func itoa(i int) string {
 	if i == 0 {
 		return "0"

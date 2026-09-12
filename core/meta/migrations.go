@@ -763,10 +763,12 @@ func applyAll(ctx context.Context, ex migExec, d dao.Dialect, eng engine.Name) e
 	return nil
 }
 
+// currentVersion queries and returns the highest applied schema migration version on the connection.
 func currentVersion(ctx context.Context, conn dao.DataConn) (int64, error) {
 	return currentVersionOn(ctx, conn)
 }
 
+// currentVersionOn executes the version query against a migExec executor (connection or transaction).
 func currentVersionOn(ctx context.Context, ex migExec) (int64, error) {
 	rows, err := ex.QueryContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`)
 	if err != nil {

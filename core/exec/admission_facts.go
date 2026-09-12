@@ -43,6 +43,7 @@ func NewLegacyFactsForText(stmt Statement, sqlText string, textLen int) *LegacyF
 	return newLegacyFacts(stmt, sqlText, textLen, "", false, false)
 }
 
+// newLegacyFacts constructs a LegacyFacts instance wrapping a parsed SQL statement.
 func newLegacyFacts(stmt Statement, sqlText string, textLen int, setName string, setLocal, setOK bool) *LegacyFacts {
 	lf := &LegacyFacts{stmt: stmt, sqlText: sqlText, setName: setName, setLoc: setLocal, setOK: setOK, textLen: textLen}
 	// Convert ONCE (the performance decision from the design review): the
@@ -62,11 +63,23 @@ func newLegacyFacts(stmt Statement, sqlText string, textLen int, setName string,
 	return lf
 }
 
+// Verb returns the top-level SQL verb of the statement.
+// LegacyFacts implements admission.Facts.
 func (l *LegacyFacts) Verb() string                    { return l.stmt.Verb }
+
+// Class returns the admission fact classification of the statement.
 func (l *LegacyFacts) Class() admission.FactClass      { return admission.FactClass(l.stmt.Class) }
+
+// HasTopLevelWhere reports whether the top-level statement carries a WHERE clause.
 func (l *LegacyFacts) HasTopLevelWhere() bool          { return l.stmt.HasTopLevelWhere }
+
+// Mutations returns any nested data mutations within CTEs or subqueries.
 func (l *LegacyFacts) Mutations() []admission.Mutation { return l.mutations }
+
+// Calls returns all function/procedure invocations identified in the statement.
 func (l *LegacyFacts) Calls() []admission.Call         { return l.calls }
+
+// SetTarget returns configuration target parameters for SET commands.
 func (l *LegacyFacts) SetTarget() (string, bool, bool) {
 	return l.setName, l.setLoc, l.setOK
 }

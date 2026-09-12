@@ -14,10 +14,12 @@ type OperationalError struct {
 	Cause error
 }
 
+// Error implements the error interface for OperationalError.
 func (e *OperationalError) Error() string {
 	return fmt.Sprintf("admission: stage %s broke: %v", e.Stage, e.Cause)
 }
 
+// Unwrap returns the underlying cause of the operational error.
 func (e *OperationalError) Unwrap() error { return e.Cause }
 
 // IsOperationalError reports whether a pipeline evaluation broke rather than

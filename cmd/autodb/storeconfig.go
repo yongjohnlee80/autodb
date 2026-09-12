@@ -80,6 +80,7 @@ func describeSource(cfg config.Config) string {
 	return "(built-in defaults -- no config file was read)"
 }
 
+// configCandidate pairs a filesystem path with a diagnostic note about its status.
 type configCandidate struct {
 	path string
 	note string

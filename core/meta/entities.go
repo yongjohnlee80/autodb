@@ -70,6 +70,7 @@ const (
 	UserUpdatedAt UserField = "updated_at"
 )
 
+// newUsers initializes and returns the typed DAO schema mapping for the users table.
 func newUsers(conn dao.DataConn) *dao.Schema[*User, UserField, Sort, int64] {
 	return schema(conn, "users", UserID, map[UserField]dao.Field[*User]{
 		UserID:        {Column: "id", Scan: func(r *User) any { return &r.ID }},
@@ -161,6 +162,7 @@ const (
 	ConnTargetDB         ConnField = "target_db"
 )
 
+// newConnections initializes and returns the typed DAO schema mapping for the connections table.
 func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort, int64] {
 	return schema(conn, "connections", ConnID, map[ConnField]dao.Field[*Connection]{
 		ConnID:               {Column: "id", Scan: func(r *Connection) any { return &r.ID }},
@@ -195,6 +197,7 @@ const (
 	WsCreatedAt WorkspaceField = "created_at"
 )
 
+// newWorkspaces initializes and returns the typed DAO schema mapping for the workspaces table.
 func newWorkspaces(conn dao.DataConn) *dao.Schema[*Workspace, WorkspaceField, Sort, int64] {
 	return schema(conn, "workspaces", WsID, map[WorkspaceField]dao.Field[*Workspace]{
 		WsID:        {Column: "id", Scan: func(r *Workspace) any { return &r.ID }},
@@ -219,6 +222,7 @@ const (
 	WcConnID WsConnField = "connection_id"
 )
 
+// newWorkspaceConns initializes and returns the typed DAO schema mapping for the workspace_connections table.
 func newWorkspaceConns(conn dao.DataConn) *dao.Schema[*WorkspaceConn, WsConnField, Sort, int64] {
 	return schema(conn, "workspace_connections", WcID, map[WsConnField]dao.Field[*WorkspaceConn]{
 		WcID:     {Column: "id", Scan: func(r *WorkspaceConn) any { return &r.ID }},
@@ -250,6 +254,7 @@ const (
 	GrantCreatedAt GrantField = "created_at"
 )
 
+// newGrants initializes and returns the typed DAO schema mapping for the grants table.
 func newGrants(conn dao.DataConn) *dao.Schema[*Grant, GrantField, Sort, int64] {
 	return schema(conn, "grants", GrantID, map[GrantField]dao.Field[*Grant]{
 		GrantID:        {Column: "id", Scan: func(r *Grant) any { return &r.ID }},
@@ -287,6 +292,7 @@ const (
 	SessRevoked   SessionField = "revoked"
 )
 
+// newSessions initializes and returns the typed DAO schema mapping for the sessions table.
 func newSessions(conn dao.DataConn) *dao.Schema[*Session, SessionField, Sort, int64] {
 	return schema(conn, "sessions", SessID, map[SessionField]dao.Field[*Session]{
 		SessID:        {Column: "id", Scan: func(r *Session) any { return &r.ID }},
@@ -360,6 +366,7 @@ const (
 // HistByID orders history by insertion, so the repair sweep can page it.
 const HistByID Sort = "id"
 
+// newHistory initializes and returns the typed DAO schema mapping for the script_history table.
 func newHistory(conn dao.DataConn) *dao.Schema[*HistoryEntry, HistoryField, Sort, int64] {
 	return sortableSchema(conn, "script_history", HistID,
 		map[Sort]string{HistByID: "id"},
@@ -409,6 +416,7 @@ const (
 	AuditTxID      AuditField = "tx_id"
 )
 
+// newAudit initializes and returns the typed DAO schema mapping for the audit_log table.
 func newAudit(conn dao.DataConn) *dao.Schema[*AuditEntry, AuditField, Sort, int64] {
 	return schema(conn, "audit_log", AuditID, map[AuditField]dao.Field[*AuditEntry]{
 		AuditID:        {Column: "id", Scan: func(r *AuditEntry) any { return &r.ID }},
@@ -443,6 +451,7 @@ const (
 	IPCreatedAt AllowedIPField = "created_at"
 )
 
+// newAllowedIPs initializes and returns the typed DAO schema mapping for the ip_allowlist table.
 func newAllowedIPs(conn dao.DataConn) *dao.Schema[*AllowedIP, AllowedIPField, Sort, int64] {
 	return schema(conn, "ip_allowlist", IPID, map[AllowedIPField]dao.Field[*AllowedIP]{
 		IPID:        {Column: "id", Scan: func(r *AllowedIP) any { return &r.ID }},
@@ -483,6 +492,7 @@ const (
 	UIPCreatedAt UserIPField = "created_at"
 )
 
+// newUserIPs initializes and returns the typed DAO schema mapping for the user_ip_allowlist table.
 func newUserIPs(conn dao.DataConn) *dao.Schema[*UserIP, UserIPField, Sort, int64] {
 	return schema(conn, "user_ip_allowlist", UIPID, map[UserIPField]dao.Field[*UserIP]{
 		UIPID:        {Column: "id", Scan: func(r *UserIP) any { return &r.ID }},
@@ -532,6 +542,7 @@ const (
 // KeyslotKindService is the only kind the v14 CHECK permits.
 const KeyslotKindService = "service"
 
+// newKeyslots initializes and returns the typed DAO schema mapping for the keyslots table.
 func newKeyslots(conn dao.DataConn) *dao.Schema[*Keyslot, KeyslotField, Sort, string] {
 	return dao.New(conn,
 		dao.Table[*Keyslot, KeyslotField, Sort, string]("keyslots"),
@@ -563,6 +574,7 @@ const (
 	KVValue MetaKVField = "value"
 )
 
+// newKV initializes and returns the typed DAO schema mapping for the store_meta table.
 func newKV(conn dao.DataConn) *dao.Schema[*MetaKV, MetaKVField, Sort, string] {
 	return dao.New(conn,
 		dao.Table[*MetaKV, MetaKVField, Sort, string]("store_meta"),
@@ -648,6 +660,7 @@ const (
 	PATDebugCleartext PATField = "debug_cleartext"
 )
 
+// newPATs initializes and returns the typed DAO schema mapping for the pats table.
 func newPATs(conn dao.DataConn) *dao.Schema[*PAT, PATField, Sort, int64] {
 	return schema(conn, "pats", PATID, map[PATField]dao.Field[*PAT]{
 		PATID:         {Column: "id", Scan: func(r *PAT) any { return &r.ID }},

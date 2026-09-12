@@ -395,6 +395,7 @@ func (b *Bound) authed(ctx context.Context, method string, extra ...any) (any, e
 
 // --- typed projections -----------------------------------------------------
 
+// NeedsBootstrap queries the server to determine whether first-time admin setup is required.
 func (b *Bound) NeedsBootstrap(ctx context.Context) (bool, error) {
 	res, err := b.call(ctx, "auth.needs_bootstrap")
 	if err != nil {
@@ -436,6 +437,7 @@ func (s *Session) adoptLogin(res any, gen uint64) {
 	s.user = u
 }
 
+// Bootstrap creates the initial root administrator account and adopts the returned session.
 func (b *Bound) Bootstrap(ctx context.Context, name, pass string) error {
 	res, err := b.call(ctx, "auth.bootstrap", name, pass)
 	if err != nil {
@@ -445,6 +447,7 @@ func (b *Bound) Bootstrap(ctx context.Context, name, pass string) error {
 	return nil
 }
 
+// Login authenticates with a username and passphrase, updating the session on success.
 func (b *Bound) Login(ctx context.Context, name, pass string) error {
 	res, err := b.call(ctx, "auth.login", name, pass)
 	if err != nil {
@@ -469,6 +472,7 @@ func (b *Bound) LoginAt(ctx context.Context, name, pass, admissionIP string) err
 	return nil
 }
 
+// Logout revokes the current session on the server and clears local credentials.
 func (b *Bound) Logout(ctx context.Context) error {
 	if b.token == "" {
 		return nil
@@ -502,6 +506,7 @@ type HistoryRow struct {
 	Suspended bool
 }
 
+// History fetches recent script execution history records up to limit.
 func (b *Bound) History(ctx context.Context, limit int64) ([]HistoryRow, error) {
 	res, err := b.authed(ctx, "history.list", limit)
 	if err != nil {
@@ -567,6 +572,7 @@ func (b *Bound) PendingTx(ctx context.Context, limit int64) ([]TxStatus, error) 
 	return out, nil
 }
 
+// txStatusOf unpacks a wire map into a typed TxStatus record.
 func txStatusOf(m map[string]any) TxStatus {
 	t, _ := m["terminal"].(bool)
 	return TxStatus{
@@ -616,6 +622,7 @@ type ConnInfo struct {
 	TargetDB string
 }
 
+// Connections fetches all registered database connections.
 func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
 	res, err := b.authed(ctx, "conn.list")
 	if err != nil {
@@ -757,6 +764,7 @@ func (b *Bound) SetConnectionExposure(ctx context.Context, connID int64, exposed
 	return err
 }
 
+// CreateConnection registers a new database connection with name, engine dialect, and DSN.
 func (b *Bound) CreateConnection(ctx context.Context, name, engine, dsn string) (int64, error) {
 	res, err := b.authed(ctx, "conn.create", name, engine, dsn)
 	if err != nil {
@@ -766,11 +774,13 @@ func (b *Bound) CreateConnection(ctx context.Context, name, engine, dsn string) 
 	return id, nil
 }
 
+// TestConnection verifies connectivity to the database identified by connID.
 func (b *Bound) TestConnection(ctx context.Context, connID int64) error {
 	_, err := b.authed(ctx, "conn.test", connID)
 	return err
 }
 
+// DeleteConnection removes the registered connection identified by connID.
 func (b *Bound) DeleteConnection(ctx context.Context, connID int64) error {
 	_, err := b.authed(ctx, "conn.delete", connID)
 	return err
@@ -783,6 +793,7 @@ type WorkspaceInfo struct {
 	Connections []ConnInfo
 }
 
+// Workspaces returns the list of all workspaces and their attached connections.
 func (b *Bound) Workspaces(ctx context.Context) ([]WorkspaceInfo, error) {
 	res, err := b.authed(ctx, "workspace.list")
 	if err != nil {
@@ -802,6 +813,7 @@ func (b *Bound) Workspaces(ctx context.Context) ([]WorkspaceInfo, error) {
 	return out, nil
 }
 
+// CreateWorkspace creates a new named workspace group.
 func (b *Bound) CreateWorkspace(ctx context.Context, name string) (int64, error) {
 	res, err := b.authed(ctx, "workspace.create", name)
 	if err != nil {
@@ -811,21 +823,25 @@ func (b *Bound) CreateWorkspace(ctx context.Context, name string) (int64, error)
 	return id, nil
 }
 
+// RenameWorkspace renames an existing workspace.
 func (b *Bound) RenameWorkspace(ctx context.Context, wsID int64, name string) error {
 	_, err := b.authed(ctx, "workspace.rename", wsID, name)
 	return err
 }
 
+// AttachConnection associates a database connection with a workspace.
 func (b *Bound) AttachConnection(ctx context.Context, wsID, connID int64) error {
 	_, err := b.authed(ctx, "workspace.attach", wsID, connID)
 	return err
 }
 
+// DetachConnection disassociates a database connection from a workspace.
 func (b *Bound) DetachConnection(ctx context.Context, wsID, connID int64) error {
 	_, err := b.authed(ctx, "workspace.detach", wsID, connID)
 	return err
 }
 
+// DeleteWorkspace deletes a workspace group.
 func (b *Bound) DeleteWorkspace(ctx context.Context, wsID int64) error {
 	_, err := b.authed(ctx, "workspace.delete", wsID)
 	return err
@@ -846,6 +862,7 @@ type TableInfo struct {
 	Parent      string
 }
 
+// Schemas lists all schema names in the database for connID.
 func (b *Bound) Schemas(ctx context.Context, connID int64) ([]string, error) {
 	res, err := b.authed(ctx, "schema.schemas", connID)
 	if err != nil {
@@ -860,6 +877,7 @@ func (b *Bound) Schemas(ctx context.Context, connID int64) ([]string, error) {
 	return out, nil
 }
 
+// Tables lists all relations (tables, views, partitions) in schema for connID.
 func (b *Bound) Tables(ctx context.Context, connID int64, schema string) ([]TableInfo, error) {
 	res, err := b.authed(ctx, "schema.tables", connID, schema)
 	if err != nil {
@@ -886,6 +904,7 @@ type ColumnInfo struct {
 	PK       bool
 }
 
+// Columns lists all columns for table in schema for connID.
 func (b *Bound) Columns(ctx context.Context, connID int64, schema, table string) ([]ColumnInfo, error) {
 	res, err := b.authed(ctx, "schema.columns", connID, schema, table)
 	if err != nil {
@@ -909,6 +928,7 @@ type RoutineInfo struct {
 	Signature string
 }
 
+// Routines lists stored procedures or functions in schema for connID, reporting dialect support.
 func (b *Bound) Routines(ctx context.Context, connID int64, schema string) (supported bool, routines []RoutineInfo, err error) {
 	res, err := b.authed(ctx, "schema.routines", connID, schema)
 	if err != nil {
@@ -979,16 +999,19 @@ func (b *Bound) Run(ctx context.Context, connID int64, sql string) (*ExecResult,
 
 // --- wire decode helpers -----------------------------------------------------
 
+// asList safely unpacks a dynamic slice or returns nil.
 func asList(v any) []any {
 	l, _ := v.([]any)
 	return l
 }
 
+// mS retrieves a string value from a wire map by key.
 func mS(m map[string]any, k string) string {
 	s, _ := m[k].(string)
 	return s
 }
 
+// mI retrieves an int64 value from a wire map by key.
 func mI(m map[string]any, k string) int64 {
 	n, _ := m[k].(int64)
 	return n
@@ -1011,6 +1034,7 @@ func mSS(m map[string]any, k string) []string {
 	return out
 }
 
+// mB retrieves a boolean value from a wire map by key.
 func mB(m map[string]any, k string) bool {
 	b, _ := m[k].(bool)
 	return b
@@ -1034,6 +1058,7 @@ type UserRow struct {
 	Disabled bool
 }
 
+// Users lists all registered user accounts (admin only).
 func (b *Bound) Users(ctx context.Context) ([]UserRow, error) {
 	res, err := b.authed(ctx, "auth.user_list")
 	if err != nil {
@@ -1050,6 +1075,7 @@ func (b *Bound) Users(ctx context.Context) ([]UserRow, error) {
 	return out, nil
 }
 
+// CreateUser registers a new user with initial credentials and access role.
 func (b *Bound) CreateUser(ctx context.Context, name, pass, role string) (int64, error) {
 	res, err := b.authed(ctx, "auth.user_create", name, pass, role)
 	if err != nil {
@@ -1059,26 +1085,31 @@ func (b *Bound) CreateUser(ctx context.Context, name, pass, role string) (int64,
 	return id, nil
 }
 
+// SetUserRole modifies an existing user's authorization role.
 func (b *Bound) SetUserRole(ctx context.Context, userID int64, role string) error {
 	_, err := b.authed(ctx, "auth.user_role", userID, role)
 	return err
 }
 
+// SetUserDisabled enables or disables a user account.
 func (b *Bound) SetUserDisabled(ctx context.Context, userID int64, disabled bool) error {
 	_, err := b.authed(ctx, "auth.user_disable", userID, disabled)
 	return err
 }
 
+// RemoveUser permanently deletes a user account.
 func (b *Bound) RemoveUser(ctx context.Context, userID int64) error {
 	_, err := b.authed(ctx, "auth.user_remove", userID)
 	return err
 }
 
+// ResetUserPassphrase updates a user's login passphrase.
 func (b *Bound) ResetUserPassphrase(ctx context.Context, userID int64, newPass string) error {
 	_, err := b.authed(ctx, "auth.passphrase_reset", userID, newPass)
 	return err
 }
 
+// AddGrant awards connection access permissions to a user.
 func (b *Bound) AddGrant(ctx context.Context, userID, connID int64, role string) error {
 	_, err := b.authed(ctx, "auth.grant_add", userID, connID, role)
 	return err
@@ -1094,6 +1125,7 @@ type AllowlistEntry struct {
 	Config bool
 }
 
+// Allowlist retrieves the global CIDR allowlist entries.
 func (b *Bound) Allowlist(ctx context.Context) ([]AllowlistEntry, error) {
 	res, err := b.authed(ctx, "auth.allowlist_list")
 	if err != nil {
@@ -1113,11 +1145,13 @@ func (b *Bound) Allowlist(ctx context.Context) ([]AllowlistEntry, error) {
 	return out, nil
 }
 
+// AddAllowedIP appends a CIDR block and note to the global allowlist.
 func (b *Bound) AddAllowedIP(ctx context.Context, cidr, note string) error {
 	_, err := b.authed(ctx, "auth.allowlist_add", cidr, note)
 	return err
 }
 
+// RemoveAllowedIP deletes a CIDR block from the global allowlist.
 func (b *Bound) RemoveAllowedIP(ctx context.Context, cidr string) error {
 	_, err := b.authed(ctx, "auth.allowlist_remove", cidr)
 	return err
@@ -1131,6 +1165,7 @@ type UserIPRow struct {
 	Label  string
 }
 
+// UserIPs retrieves the per-user IP allowlist for userID.
 func (b *Bound) UserIPs(ctx context.Context, userID int64) ([]UserIPRow, error) {
 	res, err := b.authed(ctx, "auth.user_allowlist_list", userID)
 	if err != nil {
@@ -1154,6 +1189,7 @@ func (b *Bound) AddUserIP(ctx context.Context, userID int64, cidr, label string)
 	return err
 }
 
+// RemoveUserIP deletes an address entry from userID's allowlist.
 func (b *Bound) RemoveUserIP(ctx context.Context, userID, rowID int64) error {
 	_, err := b.authed(ctx, "auth.user_allowlist_remove", userID, rowID)
 	return err
@@ -1313,6 +1349,7 @@ func (b *Bound) FrontDoorCAPem(ctx context.Context) (CAPem, error) {
 	}, nil
 }
 
+// RevokePAT revokes a personal access token by name for userID.
 func (b *Bound) RevokePAT(ctx context.Context, userID int64, name string) error {
 	_, err := b.authed(ctx, "auth.token_revoke", userID, name)
 	return err

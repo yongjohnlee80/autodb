@@ -253,6 +253,7 @@ func Mentions(src, name string) bool {
 	return false
 }
 
+// isIdentByte reports whether byte c is a valid ASCII identifier byte (letter, digit, or underscore).
 func isIdentByte(c byte) bool {
 	return c == '_' || ('0' <= c && c <= '9') ||
 		('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z')

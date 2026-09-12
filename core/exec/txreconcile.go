@@ -61,6 +61,7 @@ type reconciler struct {
 	nextCheckout map[int64]time.Time
 }
 
+// newReconciler initializes an in-memory reconciler state tracker.
 func newReconciler() *reconciler {
 	return &reconciler{
 		inFlight:     map[string]bool{},
@@ -160,6 +161,7 @@ type pageCycle struct {
 	end    int64 // high-water mark for this rotation; 0 means none is open
 }
 
+// cycle returns the current pageCycle cursor and high-water mark for the specified scope.
 func (r *reconciler) cycle(scope int64) pageCycle {
 	r.mu.Lock()
 	defer r.mu.Unlock()

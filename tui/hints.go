@@ -86,8 +86,10 @@ type hintPanel struct {
 	float *widget.Float
 }
 
+// AcceptsFocus reports whether the hint panel accepts input focus (always true).
 func (h *hintPanel) AcceptsFocus() bool { return true }
 
+// Layout computes the bounding dimensions of the hintPanel based on its hint rows.
 func (h *hintPanel) Layout(c tui.Constraints) tui.Size {
 	return c.Constrain(tui.Size{
 		W: min(c.MaxW, hintWidth-2),
@@ -95,6 +97,7 @@ func (h *hintPanel) Layout(c tui.Constraints) tui.Size {
 	})
 }
 
+// Render paints key hints with styled key tokens and descriptions.
 func (h *hintPanel) Render(s tui.Surface) {
 	keySt := style.New().Foreground(style.TokenPrimary).Bold(true)
 	labelSt := style.New()

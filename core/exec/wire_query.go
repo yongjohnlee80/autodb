@@ -657,7 +657,11 @@ func (e *Engine) wireTargetError(s *session, err error, emit func(WireMessage) e
 // can be told apart from a wire failure golib reports through the same return.
 type emitFailure struct{ err error }
 
+// Error returns the underlying write error string.
+// emitFailure implements the error interface.
 func (f *emitFailure) Error() string { return f.err.Error() }
+
+// Unwrap returns the underlying write error.
 func (f *emitFailure) Unwrap() error { return f.err }
 
 // pinWireSession returns the session's pinned backend connection, pinning one

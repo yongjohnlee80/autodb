@@ -261,6 +261,7 @@ func optStr(p []any, i int, name string) (string, error) {
 	return argStr(p, i, name)
 }
 
+// exactArgs asserts that the positional argument slice p contains exactly n elements.
 func exactArgs(p []any, n int) error {
 	if len(p) != n {
 		return &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
@@ -269,6 +270,7 @@ func exactArgs(p []any, n int) error {
 	return nil
 }
 
+// argStr extracts a string argument at index i from positional parameter slice p.
 func argStr(p []any, i int, name string) (string, error) {
 	if i >= len(p) {
 		return "", &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
@@ -282,6 +284,7 @@ func argStr(p []any, i int, name string) (string, error) {
 	return s, nil
 }
 
+// argInt extracts an int64 argument at index i from positional parameter slice p.
 func argInt(p []any, i int, name string) (int64, error) {
 	if i >= len(p) {
 		return 0, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
@@ -295,6 +298,7 @@ func argInt(p []any, i int, name string) (int64, error) {
 	return n, nil
 }
 
+// argBool extracts a boolean argument at index i from positional parameter slice p.
 func argBool(p []any, i int, name string) (bool, error) {
 	if i >= len(p) {
 		return false, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
@@ -308,6 +312,7 @@ func argBool(p []any, i int, name string) (bool, error) {
 	return b, nil
 }
 
+// identMap projects an auth.Identity into an untyped dictionary for wire serialization.
 func identMap(id auth.Identity) map[string]any {
 	return map[string]any{"id": id.UserID(), "name": id.Name(), "role": id.Role()}
 }

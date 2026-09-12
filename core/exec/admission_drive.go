@@ -40,10 +40,12 @@ func sizeAdmissionStages() []admission.Stage {
 	return []admission.Stage{sizeCapStage{}}
 }
 
+// wireGrammarAdmissionStages creates the admission stage pipeline for validating wire grammar.
 func wireGrammarAdmissionStages(verify func() error) []admission.Stage {
 	return []admission.Stage{reportedGrammarStage{verify: verify}}
 }
 
+// postPolicyAdmissionStages constructs the admission stage pipeline executed after policy resolution.
 func postPolicyAdmissionStages(userRoutines func() (*udfSet, error)) []admission.Stage {
 	return []admission.Stage{
 		readerAnalysisStage{userRoutines: userRoutines},
@@ -51,22 +53,27 @@ func postPolicyAdmissionStages(userRoutines func() (*udfSet, error)) []admission
 	}
 }
 
+// profileAdmissionStages constructs the admission stage pipeline verifying engine profile constraints.
 func profileAdmissionStages(profile Profile) []admission.Stage {
 	return []admission.Stage{profileAdmitStage{profile: profile}}
 }
 
+// classAdmissionStages constructs the statement classification admission stage pipeline.
 func classAdmissionStages() []admission.Stage {
 	return []admission.Stage{authorizeUnitStage{}}
 }
 
+// sessionStateAdmissionStages constructs the session state admission stage pipeline.
 func sessionStateAdmissionStages() []admission.Stage {
 	return []admission.Stage{newSessionStateStage()}
 }
 
+// readOnlyEnforcementStages constructs the read-only enforcement stage pipeline.
 func readOnlyEnforcementStages() []admission.Stage {
 	return []admission.Stage{readOnlyEnforcementStage{}}
 }
 
+// sessionAdmissionStages constructs the complete multi-stage admission pipeline for an active session.
 func sessionAdmissionStages(profile Profile, userRoutines func() (*udfSet, error)) []admission.Stage {
 	return []admission.Stage{
 		profileAdmitStage{profile: profile},
@@ -192,6 +199,8 @@ func (e *Engine) runSessionStateAdmission(pol UnitPolicy, phys admission.Physica
 		admission.Context{Phys: phys, ReadOnly: pol.ReadOnly, MayWrite: pol.MayWrite, TxOpen: txOpen})
 }
 
+// runReadOnlyEnforcementAdmission runs admission checks specifically to enforce read-only
+// transaction capabilities against target backend settings.
 func (e *Engine) runReadOnlyEnforcementAdmission(phys admission.PhysicalCtx, available bool) (error, error) {
 	var caps admission.TargetCaps
 	if available {

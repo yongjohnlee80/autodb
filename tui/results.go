@@ -31,6 +31,7 @@ type resultsPanel struct {
 	current tui.Component
 }
 
+// newResultsPanel constructs the results display pane for table, JSON, and write summaries.
 func newResultsPanel(m *Model) *resultsPanel {
 	return &resultsPanel{
 		model: m,
@@ -57,6 +58,8 @@ func (p *resultsPanel) FocusTarget() tui.Component {
 	}
 }
 
+// Init mounts the initial placeholder text widget and initializes the panel.
+// resultsPanel implements tui.Component.
 func (p *resultsPanel) Init(ctx *tui.Context) {
 	p.Base.Init(ctx)
 	p.ctx = ctx
@@ -114,6 +117,7 @@ func (p *resultsPanel) ToggleJSON() {
 	p.rebuild()
 }
 
+// rebuild regenerates the view component (table, JSON editor, or text summary) for new query results.
 func (p *resultsPanel) rebuild() {
 	res := p.res
 	switch {
@@ -175,12 +179,14 @@ func (p *resultsPanel) rebuild() {
 	}
 }
 
+// Layout arranges the active results child within panel constraints.
 func (p *resultsPanel) Layout(c tui.Constraints) tui.Size {
 	sz := p.ctx.LayoutChild(p.current, c)
 	p.ctx.PlaceChild(p.current, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
 	return c.Constrain(tui.Size{W: boundedMaxAvail(c.MaxW, sz.W), H: boundedMaxAvail(c.MaxH, sz.H)})
 }
 
+// boundedMaxAvail returns measured size when bound is unbounded, otherwise bound.
 func boundedMaxAvail(bound, measured int) int {
 	if bound == tui.Unbounded {
 		return measured
@@ -188,6 +194,7 @@ func boundedMaxAvail(bound, measured int) int {
 	return bound
 }
 
+// Render is a no-op as the mounted current child renders itself.
 func (p *resultsPanel) Render(s tui.Surface) {}
 
 // StatusLine renders the result summary for the status bar.
@@ -206,6 +213,8 @@ func (p *resultsPanel) StatusLine() string {
 	return line
 }
 
+// HandleEvent intercepts the 'v' key to open the full row inspector, bubbling other events to child.
+// resultsPanel implements tui.EventReceiver.
 func (p *resultsPanel) HandleEvent(ev tui.Event) bool {
 	if k, ok := ev.(tui.KeyEvent); ok && k.Kind != tui.KeyRelease {
 		// Value inspection: v (or Enter via ActivateEvent below) opens the

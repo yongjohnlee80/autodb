@@ -177,6 +177,7 @@ func (e *Engine) reapExpired(ctx context.Context, now time.Time) int {
 // because permission was withdrawn, not because someone was slow.
 const reasonAuthorityRevoked = "authority-revoked"
 
+// rollbackExpired aborts an expired transaction on a session after quiescing in-flight statements.
 func (e *Engine) rollbackExpired(ctx context.Context, s *session, txID, reason string) {
 	// Cancel, then JOIN, then roll back. Without this the rollback was
 	// issued while a statement was still executing on the same connection —

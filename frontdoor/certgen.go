@@ -318,6 +318,7 @@ func normalizeDNSName(h string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
 }
 
+// ipStrings formats a slice of net.IP addresses into a sorted string slice.
 func ipStrings(ips []net.IP) []string {
 	out := make([]string, 0, len(ips))
 	for _, ip := range ips {
@@ -342,6 +343,7 @@ func permittedRanges(ips []net.IP) []*net.IPNet {
 	return out
 }
 
+// newKey generates an ECDSA P-256 private key for TLS certificates.
 func newKey() (*ecdsa.PrivateKey, error) {
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -350,6 +352,7 @@ func newKey() (*ecdsa.PrivateKey, error) {
 	return k, nil
 }
 
+// serial generates a cryptographically random 128-bit serial number for an X.509 certificate.
 func serial() (*big.Int, error) {
 	// 128 random bits, per the CA/Browser Forum's rule and for the same
 	// reason: a predictable serial is a hash-collision lever.
@@ -503,6 +506,7 @@ func loadIssuer(dir string) (*x509.Certificate, *x509.Certificate, *ecdsa.Privat
 	return ca, ic, key, nil
 }
 
+// readCert loads and parses a PEM-encoded X.509 certificate from the specified file path.
 func readCert(path string) (*x509.Certificate, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -584,6 +588,7 @@ func dropUnvouchable(issuer *x509.Certificate, dns []string, ips []net.IP) ([]st
 	return keptDNS, keptIPs, dropped
 }
 
+// ipNetStrings formats a slice of IPNet subnet masks into string representations.
 func ipNetStrings(ns []*net.IPNet) []string {
 	out := make([]string, 0, len(ns))
 	for _, n := range ns {
@@ -618,8 +623,10 @@ func dnsPermitted(name string, permitted []string) bool {
 	return false
 }
 
-func ipPermitted(ip net.IP, ranges []*net.IPNet) bool {
-	for _, r := range ranges {
+// ipPermitted implements RFC 5280 iPAddress tree matching: an address matches
+// a permitted range if the range contains it.
+func ipPermitted(ip net.IP, permitted []*net.IPNet) bool {
+	for _, r := range permitted {
 		if r.Contains(ip) {
 			return true
 		}
@@ -648,6 +655,7 @@ func refuseClobber(force bool, paths ...string) error {
 	return nil
 }
 
+// writePEM writes one or more PEM blocks to the designated file path with the given mode.
 func writePEM(path string, mode os.FileMode, blocks ...*pem.Block) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {

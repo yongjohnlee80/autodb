@@ -40,6 +40,7 @@ type kdfParams struct {
 	Salt    []byte
 }
 
+// newParams generates fresh random salt and sets default Argon2id parameters.
 func newParams() (kdfParams, error) {
 	salt := make([]byte, saltLen)
 	if _, err := rand.Read(salt); err != nil {
@@ -81,6 +82,7 @@ var profileV1 = kdfProfile{Memory: argonMemory, Time: argonTime, Threads: argonT
 // approvedProfiles is the exact set of (m, t, p) triples the KDF will run.
 var approvedProfiles = []kdfProfile{profileV1}
 
+// profileApproved reports whether parameter profile p matches an approved KDF profile.
 func profileApproved(p kdfProfile) bool {
 	for _, a := range approvedProfiles {
 		if a == p {

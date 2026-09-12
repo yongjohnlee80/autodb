@@ -46,6 +46,7 @@ const (
 	author  = "Yong Sung John Lee"
 )
 
+// main parses command-line flags and dispatches the requested operational mode.
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	serve := flag.Bool("serve", false, "run the RPC server")
@@ -816,15 +817,11 @@ func watchLease(ctx context.Context, lost <-chan struct{}, stop func(), warn fun
 	return fired
 }
 
+// isAddrInUse checks whether err indicates a syscall.EADDRINUSE bind failure.
 func isAddrInUse(err error) bool {
 	return errors.Is(err, syscall.EADDRINUSE)
 }
 
-// runUI starts the standalone TUI: it reaches the server ONLY
-// through the RPC client seam, spawning `autodb --serve` when nothing
-// answers. The spawned child is detached into its own session with stdio
-// redirected to an owned log file — never the alternate-screen terminal —
-// and deliberately survives TUI exit (the shared server, Objective 25).
 // spawnFor decides whether this config may START a daemon, and is a named
 // function so the decision is testable without a terminal.
 //
@@ -852,6 +849,7 @@ func spawnFor(cfg config.Config, configPath string) func() (string, error) {
 	return func() (string, error) { return spawnServe(configPath) }
 }
 
+// runUI connects to the running autodb daemon and launches the interactive terminal UI.
 func runUI(configPath string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {

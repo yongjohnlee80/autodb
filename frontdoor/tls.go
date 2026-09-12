@@ -252,6 +252,7 @@ func describeVerifyFailure(host string, identities []string, caFile string, verr
 	}
 }
 
+// trustRoots loads an x509.CertPool containing trust roots from caFile, or falls back to system roots.
 func trustRoots(caFile string) (*x509.CertPool, error) {
 	if caFile == "" {
 		pool, err := x509.SystemCertPool()

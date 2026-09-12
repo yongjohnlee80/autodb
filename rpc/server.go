@@ -122,6 +122,7 @@ type FrontDoorInfo struct {
 // Option configures a Server.
 type Option func(*options)
 
+// options holds optional configuration settings for constructing an RPC Server.
 type options struct {
 	logger    logger.Logger
 	listener  net.Listener
