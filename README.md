@@ -89,7 +89,7 @@ Every frontend is a thin client of [`core`](core/). There is no path that skips 
 |  * config:     TOML validation, endpoints, hardened TLS transport       |
 |  * meta:       Relational store (Postgres/SQLite), audit trail, schemas |
 |  * auth:       Argon2id, AES-256-GCM keyslots, sessions, PATs, RBAC     |
-|  * admission:  Deterministic statement gate pipeline (ADR-0096)         |
+|  * admission:  Deterministic statement gate pipeline                    |
 |  * engine:     Database engine types & capability matrix                |
 |  * exec:       Connection pools, leases, transactions, query streaming  |
 +------------------------------------+------------------------------------+
@@ -110,7 +110,7 @@ rejected by autodb. Through the front door, they run inside
 function, a procedure or dynamic SQL fails at PostgreSQL itself with SQLSTATE
 `25006`. The database enforces the boundary, not just the proxy in front of it.
 
-**Deterministic statement admission pipeline (ADR-0096).** Rather than ad-hoc
+**Deterministic statement admission pipeline.** Rather than ad-hoc
 regexes, SQL statements pass through an ordered, extensible admission pipeline
 ([`core/admission`](core/admission/)) that extracts statement facts and evaluates
 them against connection capabilities:
@@ -198,12 +198,9 @@ listen with an identity it cannot prove.
 
 ## The production front door
 
-> **Status: partially shipped.** ADR-0075 is accepted and implementation is
-> phased. Config + TLS-validated-before-bind, the pgwire startup/TLS
-> negotiation and the uniform denial shape, and Personal Access Tokens are
-> merged. The verification chain and session reservation (F0d) are in progress,
-> with budgets, deadlines and fuzzing (F0e) after it. **It is not yet usable
-> end to end** — the sections below describe the accepted design.
+> **Status: Production Front Door Active.** The PostgreSQL v3 wire protocol front door server
+> is fully integrated with autodb's unified statement admission pipeline, TLS negotiation,
+> Personal Access Token authentication, and streaming result protocols.
 
 autodb speaks the **PostgreSQL wire protocol**, so an unmodified application,
 `psql`, or a JetBrains data source connects *through autodb* with an ordinary
