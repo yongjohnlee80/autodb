@@ -96,10 +96,25 @@ func TestTargetBudget_TheFlagIsInTheHelp(t *testing.T) {
 	}
 }
 
-// --keep-config must not be overridden by the new requirement: an existing
-// config the operator asked to preserve stays exactly as it was.
-func TestTargetBudget_KeepConfigPreservesAnExistingChoice(t *testing.T) {
+// An existing config must survive a run that refuses, and the refusal must
+// happen before a backup is written.
+//
+// THE PREVIOUS VERSION OF THIS TEST WAS VACUOUS: it wrote a temp file, read it
+// straight back, and never invoked the installer at all. It would have stayed
+// green if the installer deleted the config outright. This one drives the real
+// decision path.
+func TestTargetBudget_OmissionLeavesAnExistingConfigAndWritesNoBackup(t *testing.T) {
 	t.Parallel()
+
+	// --apply refuses without root BEFORE it reaches the config block, so a
+	// non-root run would pass this test without ever exercising the ordering
+	// it exists to check. The first version of this test did exactly that:
+	// it saw a non-nil error, found the file intact, and reported success
+	// while nothing under test had run.
+	if os.Geteuid() != 0 {
+		t.Skip("--apply refuses without root before reaching the config block; " +
+			"the ordering is covered as root in testdata/apply_smoke.sh")
+	}
 
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.toml")
@@ -108,13 +123,72 @@ func TestTargetBudget_KeepConfigPreservesAnExistingChoice(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Nothing here should rewrite it; the assertion is that the file is
-	// untouched whatever the run decides to do.
-	after, err := os.ReadFile(cfg)
-	if err != nil {
-		t.Fatal(err)
+	out, err := runInstaller(t, "--apply", "--non-interactive",
+		"--config", cfg, "--assume-ram", "961", "--assume-cpus", "1")
+	if err == nil {
+		t.Fatalf("an --apply that omits the budget must refuse:\n%s", out)
+	}
+	// The refusal must be THE ONE UNDER TEST, not some earlier gate.
+	if !strings.Contains(out, "max_target_conns") {
+		t.Fatalf("the run refused for some other reason, so this cell proves nothing:\n%s", out)
+	}
+
+	after, rerr := os.ReadFile(cfg)
+	if rerr != nil {
+		t.Fatalf("the existing config was removed by a run that refused: %v", rerr)
 	}
 	if string(after) != original {
-		t.Errorf("an existing config was modified:\ngot  %q\nwant %q", after, original)
+		t.Errorf("a refused run rewrote the config:\ngot  %q\nwant %q", after, original)
 	}
+	if _, serr := os.Stat(cfg + ".bak"); serr == nil {
+		t.Error("a refused run wrote a .bak — refusing must happen BEFORE anything is " +
+			"touched, or the run that was going to fail still left a file behind")
+	}
+}
+
+// The interactive path: no default is accepted, an empty or unusable answer
+// re-prompts, and a valid one reaches the config.
+//
+// Driven under a real PTY, because the prompt only exists when there is a
+// terminal -- the non-interactive path refuses instead, so a pipe would test
+// the wrong branch entirely.
+func TestTargetBudget_InteractivePromptRefusesUntilUsable(t *testing.T) {
+	t.Parallel()
+
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Skip("script(1) unavailable: the prompt needs a PTY and a pipe tests the wrong branch")
+	}
+
+	// Empty, then not-a-number, then below the minimum, then usable. Each
+	// unusable answer must produce another prompt rather than a default.
+	// The answers go to SCRIPT'S stdin, which script forwards to the pty the
+	// installer reads through /dev/tty. Piping into the installer instead
+	// feeds its stdin, which the prompt never reads, and the run hangs.
+	answers := "\nlots\n1\n25\n"
+	sh := "sh " + shellQuote(installer(t)) +
+		" --print-config --interactive --assume-ram 961 --assume-cpus 1"
+	cmd := exec.Command("script", "-qec", sh, "/dev/null")
+	cmd.Stdin = strings.NewReader(answers)
+	raw, err := cmd.CombinedOutput()
+	out := string(raw)
+	if err != nil {
+		t.Fatalf("the interactive run failed: %v\n%s", err, out)
+	}
+
+	if n := strings.Count(out, "max_target_conns:"); n < 4 {
+		t.Errorf("the prompt appeared %d time(s); empty, non-numeric and below-minimum "+
+			"answers must each re-prompt rather than be accepted:\n%s", n, out)
+	}
+	if !strings.Contains(out, "max_target_conns = 25") {
+		t.Errorf("the accepted answer did not reach the config:\n%s", out)
+	}
+	// No default may be offered: a bracketed suggestion is how an operator
+	// ends up accepting a number nobody chose.
+	if strings.Contains(out, "max_target_conns [") {
+		t.Errorf("the prompt offered a default, which this key must never have:\n%s", out)
+	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

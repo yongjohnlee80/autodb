@@ -1620,6 +1620,12 @@ install_postgres() {
 if [ -e "$CONFIG" ] && [ "$KEEP_CONFIG" = "yes" ]; then
   warn "$CONFIG exists and --keep-config was given; leaving it alone."
 else
+  # FIRST, BEFORE ANYTHING IS TOUCHED. This was below the backup block, which
+  # meant an omitted budget refused only AFTER $CONFIG.bak had been written --
+  # so a run that was going to fail still left a file behind, which is the
+  # damage refusing early exists to prevent. The comment here claimed it ran
+  # before the backup while sitting after it, which is worse than no comment.
+  require_target_budget
   if [ -e "$CONFIG" ]; then
     # A RE-RUN MUST REWRITE IT. Leaving an existing config alone meant every
     # flag on a second --apply silently did nothing: --rpc-port, --port,
@@ -1630,10 +1636,6 @@ else
     warn "$CONFIG exists; REPLACING it (previous kept as $CONFIG.bak)."
     warn "  pass --keep-config to preserve it instead."
   fi
-  # Resolved BEFORE the write, and before the backup above is acted on: a
-  # refusal that fires after the old config is replaced has already done the
-  # damage it was meant to prevent.
-  require_target_budget
   say "writing $CONFIG"
   emit_config > "$CONFIG"
   chown root:"$RUN_USER" "$CONFIG"
