@@ -158,26 +158,82 @@ func TestAbsenceOfABudgetIsANilLedger(t *testing.T) {
 	var dialed int
 	dial := permitDialer(nil, func(context.Context, string, string) (net.Conn, error) {
 		dialed++
-		_, client := net.Pipe()
+		server, client := net.Pipe()
+		// BOTH ends closed. Leaking a hundred pipes to prove a counter is a
+		// test that measures one thing and costs another.
+		t.Cleanup(func() { _ = server.Close() })
 		return client, nil
 	})
 	for range 100 {
-		if _, err := dial(context.Background(), "tcp", "a"); err != nil {
+		c, err := dial(context.Background(), "tcp", "a")
+		if err != nil {
 			t.Fatalf("an unbudgeted dial was refused: %v", err)
 		}
+		_ = c.Close()
 	}
 	if dialed != 100 {
 		t.Errorf("dialed %d times, want 100", dialed)
 	}
 }
 
-// A budget below the viable minimum is raised to it rather than silently
-// meaning something else.
-func TestABudgetBelowTheMinimumBecomesTheMinimum(t *testing.T) {
-	for _, n := range []int{0, 1} {
-		if got := newPermitLedger(n).Snapshot().Configured; got != 2 {
-			t.Errorf("newPermitLedger(%d) configured = %d, want the minimum 2", n, got)
-		}
+// A LOW BUDGET IS HONOURED, NEVER RAISED.
+//
+// The previous version of this cell asserted that 1 becomes 2 and so
+// CERTIFIED A DEFECT: a caller authorising one socket would have had the
+// ledger claim two, quietly taking more of a production database than it was
+// permitted. A number the caller did not choose is not a safe default because
+// it is small.
+//
+// C=1 is a useless configuration and it is refused where configuration is
+// validated, with a message naming the key -- not corrected here into a
+// daemon that does something else.
+func TestALowBudgetIsHonouredNotRaised(t *testing.T) {
+	e := New(nil, nil, WithTargetConnBudget(1))
+
+	s := e.Settings().TargetConns
+	if s.Configured != 1 {
+		t.Fatalf("configured = %d, want the caller's 1 — the ledger must never claim "+
+			"more sockets than it was authorised", s.Configured)
+	}
+	if s.OrdinaryLimit != 0 || s.Outstanding != 0 || s.Effective != 1 || s.Draining {
+		t.Errorf("C=1 snapshot: ordinary=%d out=%d eff=%d draining=%v, want 0/0/1/false",
+			s.OrdinaryLimit, s.Outstanding, s.Effective, s.Draining)
+	}
+
+	// Every ordinary dial is refused, BEFORE the underlying dial runs.
+	var dialed int
+	dial := permitDialer(e.targetPermits, func(context.Context, string, string) (net.Conn, error) {
+		dialed++
+		server, client := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	})
+	if _, err := dial(context.Background(), "tcp", "a"); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Errorf("an ordinary dial at C=1 must be refused, got %v", err)
+	}
+	if dialed != 0 {
+		t.Errorf("the underlying dial ran %d time(s); the refusal must precede it", dialed)
+	}
+
+	// The one slot is the control lane's, and it is counted.
+	ctl, err := e.targetPermits.AcquireControl(context.Background())
+	if err != nil {
+		t.Fatalf("the single slot belongs to the control lane: %v", err)
+	}
+	if occ := e.Settings().TargetConns; occ.Control != 1 || occ.Outstanding != 1 {
+		t.Errorf("occupied at C=1: K=%d out=%d, want 1 and 1", occ.Control, occ.Outstanding)
+	}
+	// And only one.
+	waiting, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := e.targetPermits.AcquireControl(waiting); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a second control permit was granted at C=1: %v", err)
+	}
+	ctl.Release()
+
+	// Configuration still refuses it, visibly.
+	if err := e.SetTargetConnBudget(1); !errors.Is(err, ErrInvalidBudget) {
+		t.Errorf("SetTargetConnBudget(1) = %v, want a refusal", err)
 	}
 }
 

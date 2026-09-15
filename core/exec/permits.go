@@ -109,22 +109,28 @@ type permitLedger struct {
 	controlLane chan struct{}
 }
 
-// newPermitLedger builds a ledger for a budget of at least 2.
+// newPermitLedger builds a ledger for exactly the budget it is given.
+//
+// IT NEVER RAISES A BUDGET. An earlier version silently turned anything below
+// 2 into 2, which let a caller authorising ONE socket end up holding two --
+// the ledger claiming more of a production database than it was permitted,
+// quietly, which is the precise failure this whole mechanism exists to
+// prevent. A number the caller did not choose is not a safe default just
+// because it is small.
+//
+// A budget of 1 is therefore honoured as 1: the single slot is the control
+// lane's, the ordinary limit is 0, and every ordinary dial is refused. That is
+// a useless configuration, and it is REFUSED WHERE CONFIGURATION IS VALIDATED
+// rather than corrected here -- an operator gets a message naming the key, not
+// a daemon that quietly does something else.
 //
 // THERE IS NO "UNBOUNDED" LEDGER. A zero budget used to mean unlimited, which
-// was dead surface -- production reaches this only through
-// WithTargetConnBudget, which builds nothing below 1 -- and it was incoherent
-// besides: under rev4's algebra a zero-budget ledger reported Effective = O+1
-// and Draining = true the moment anything was acquired, so the sentinel
-// contradicted itself as soon as it was used.
-//
-// ABSENCE IS REPRESENTED BY A NIL LEDGER, which is what production already
-// does. An engine built without a budget has no ledger at all, and the dialer
-// returns the underlying dial untouched.
+// was dead surface and incoherent besides: under the O/K algebra it reported
+// Effective = O+1 and Draining = true the moment anything was acquired.
+// ABSENCE IS A NIL LEDGER, which is what production already does -- an engine
+// built without a budget has no ledger at all and the dialer returns the
+// underlying dial untouched.
 func newPermitLedger(budget int) *permitLedger {
-	if budget < 2 {
-		budget = 2
-	}
 	return &permitLedger{budget: budget, generation: 1, controlLane: make(chan struct{}, 1)}
 }
 
@@ -304,10 +310,13 @@ func (l *permitLedger) acquire(class DialClass) (*Permit, error) {
 // ordinaryLimitLocked is what ordinary work may take: one short of the budget,
 // because the last slot is the control lane's. Caller holds the lock.
 func (l *permitLedger) ordinaryLimitLocked() int {
-	if l.budget > 1 {
-		return l.budget - 1
+	// max(C-1, 0). At C=1 the single slot belongs to the control lane and
+	// ordinary work gets nothing -- which is what C=1 MEANS, rather than
+	// something to round away.
+	if l.budget < 1 {
+		return 0
 	}
-	return l.budget
+	return l.budget - 1
 }
 
 // effectiveLocked is the immediately exercisable ceiling: max(Configured,
