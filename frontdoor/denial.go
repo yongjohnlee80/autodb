@@ -2,6 +2,8 @@ package frontdoor
 
 import (
 	"github.com/jackc/pgx/v5/pgproto3"
+
+	"github.com/yongjohnlee80/autodb/core/outcome"
 )
 
 // The uniform external denial (matrix §1.2 and row 2.7).
@@ -138,7 +140,8 @@ const (
 
 // denial renders a refusal for a caller who has NOT proved who they are.
 func denial(reason denialReason) *pgproto3.ErrorResponse {
-	return denialFor(reason, false)
+	// NO WITNESS, NO CHARGE: the zero occurrence can only render uniformly.
+	return denialForOccurrence(outcome.Occurrence{Reason: outcome.ReasonID(reason)})
 }
 
 // denialFor renders a refusal, disclosing capacity only to an authorized
@@ -152,19 +155,38 @@ func denial(reason denialReason) *pgproto3.ErrorResponse {
 //
 // There is deliberately NO reason-to-code table. A table is how a uniform
 // surface becomes an enumerable one, one well-meaning row at a time.
-func denialFor(reason denialReason, disclosable bool) *pgproto3.ErrorResponse {
-	if disclosable {
-		return &pgproto3.ErrorResponse{
-			Severity:            "FATAL",
-			SeverityUnlocalized: "FATAL",
-			Code:                CapacitySQLState,
-			Message:             CapacityMessage,
-			// The stable rule id, exactly as every other denial: constant,
-			// never the cause.
-			Detail: "frontdoor/capacity",
-		}
+// denialForOccurrence is the ONE projection that may disclose capacity, and it
+// takes the typed occurrence rather than a Boolean.
+//
+// THE RULE IS A CONJUNCTION: authorized AND registered as capacity.
+//
+// It used to be the witness alone, and that was wrong in a way the tests
+// agreed with. The witness proves WHO the caller is; it does not prove WHAT
+// happened to them. A refusal raised after authorization for any other cause --
+// a missing grant, a refused profile, our own stored state -- would have been
+// rendered to the peer as "the database is at its connection limit", which is
+// both false and a disclosure nobody authorised: it reports the system's load
+// to a caller whose actual problem was something else entirely.
+//
+// Neither fact implies the other, so both are required. Removing either term
+// reopens one of the two holes.
+func denialForOccurrence(occ outcome.Occurrence) *pgproto3.ErrorResponse {
+	if occ.Disclosable && occ.Charge == outcome.Capacity {
+		return capacityFrame()
 	}
-	return denialUniform(reason)
+	return denialUniform(denialReason(occ.Reason))
+}
+
+func capacityFrame() *pgproto3.ErrorResponse {
+	return &pgproto3.ErrorResponse{
+		Severity:            "FATAL",
+		SeverityUnlocalized: "FATAL",
+		Code:                CapacitySQLState,
+		Message:             CapacityMessage,
+		// The stable rule id, exactly as every other denial: constant, never
+		// the cause.
+		Detail: "frontdoor/capacity",
+	}
 }
 
 func denialUniform(reason denialReason) *pgproto3.ErrorResponse {

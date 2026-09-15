@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+
+	"github.com/yongjohnlee80/autodb/core/outcome"
 )
 
 // The startup exchange (protocol matrix §2 rows 2.1–2.5a).
@@ -540,16 +542,22 @@ func putUint32(b []byte, v uint32)          { binary.BigEndian.PutUint32(b, v) }
 func sendDenial(w interface {
 	Write([]byte) (int, error)
 }, reason denialReason) error {
-	return sendDenialFor(w, reason, false)
+	// NO WITNESS AND NO CHARGE, so this can only ever render the uniform
+	// denial. Every pre-authentication refusal comes through here, and none of
+	// them has authorised anybody to be told anything.
+	return sendDenialOccurrence(w, outcome.Occurrence{Reason: outcome.ReasonID(reason)})
 }
 
 // sendDenialFor writes a refusal, disclosing capacity only on the engine's
 // witness that the caller was already authorized.
-func sendDenialFor(w interface {
+// sendDenialOccurrence writes the projection of a typed occurrence. It is the
+// only path that can disclose capacity, and it cannot be handed a naked
+// Boolean claiming the right to.
+func sendDenialOccurrence(w interface {
 	Write([]byte) (int, error)
-}, reason denialReason, disclosable bool) error {
+}, occ outcome.Occurrence) error {
 	be := pgproto3.NewBackend(emptyReader{}, w)
-	be.Send(denialFor(reason, disclosable))
+	be.Send(denialForOccurrence(occ))
 	return be.Flush()
 }
 

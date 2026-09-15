@@ -46,7 +46,15 @@ type Settings struct {
 
 // Settings returns the effective configuration.
 func (e *Engine) Settings() Settings {
-	p := e.currentPolicy()
+	// BOTH HALVES READ UNDER ONE LOCK.
+	//
+	// Loading the policy pointer here and taking the ledger snapshot
+	// afterwards is a torn read, and locking the WRITER did not prevent it: a
+	// reader could load the old pointer, be descheduled while a reload
+	// published, and come back to pair those old timeouts with the new budget.
+	// That tuple never existed at any instant, and the person it is handed to
+	// is the operator who just made the change and is looking for it.
+	p, conns := e.coherentPolicyAndLedger()
 	return Settings{
 		MaxStatementBytes:    e.maxStatementBytes,
 		MaxSessionsPerUser:   e.sessions.perUserCap,
@@ -62,16 +70,24 @@ func (e *Engine) Settings() Settings {
 		LeaseCap:             e.sessions.leaseCap,
 		ResidentBudget:       e.sessions.residentCap,
 		PolicyGeneration:     p.generation,
-		TargetConns:          e.targetConnSnapshot(),
+		TargetConns:          conns,
 	}
 }
 
-// targetConnSnapshot reads the ledger, or reports an absent budget.
-func (e *Engine) targetConnSnapshot() LedgerSnapshot {
+// coherentPolicyAndLedger reads the live policy and the ledger as ONE reading.
+//
+// With a ledger, the policy pointer is loaded INSIDE the ledger's lock, which
+// is the same lock a publication holds while it swaps that pointer. A reader
+// therefore sees either wholly the old pair or wholly the new one. Without a
+// ledger there is only the pointer, and a single atomic load is already
+// indivisible.
+func (e *Engine) coherentPolicyAndLedger() (*enginePolicy, LedgerSnapshot) {
 	if e.targetPermits == nil {
-		return LedgerSnapshot{}
+		return e.currentPolicy(), LedgerSnapshot{}
 	}
-	return e.targetPermits.Snapshot()
+	var p *enginePolicy
+	conns := e.targetPermits.snapshotWith(func() { p = e.currentPolicy() })
+	return p, conns
 }
 
 // setTargetConnBudget changes the aggregate budget on a running engine,
