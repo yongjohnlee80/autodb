@@ -85,11 +85,16 @@ func (l *permitLedger) Acquire() (release func(), err error) {
 // Serialized to one at a time: a cancel is connect, write sixteen bytes,
 // close, so one lane is enough, and more would be a second budget nobody
 // configured.
-func (l *permitLedger) AcquireControl() (release func(), err error) {
+// It WAITS for the lane rather than refusing it. Two statements cancelled at
+// once is ordinary, and an immediate refusal would silently lose the second
+// cancel — the caller has already given up on their query and has no way to
+// learn the cancel never went. The wait is bounded by the caller's own
+// context, which pgx already gives a deadline.
+func (l *permitLedger) AcquireControl(ctx context.Context) (release func(), err error) {
 	select {
 	case l.controlLane <- struct{}{}:
-	default:
-		return nil, ErrTargetBudgetExhausted
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 	rel, err := l.acquire(true)
 	if err != nil {
@@ -146,6 +151,25 @@ func (l *permitLedger) Budget() (budget int, generation uint64) {
 	return l.budget, l.generation
 }
 
+// dialClass marks a dial as a control socket rather than ordinary work.
+//
+// A PRIVATE KEY TYPE, so nothing outside this package can set it. The marker
+// decides which side of the budget a socket is charged to, and a value any
+// caller could plant would let ordinary traffic help itself to the reserved
+// lane.
+type dialClassKey struct{}
+
+// withControlDial marks a context as belonging to a control socket — today,
+// a cancellation request.
+func withControlDial(ctx context.Context) context.Context {
+	return context.WithValue(ctx, dialClassKey{}, true)
+}
+
+func isControlDial(ctx context.Context) bool {
+	v, _ := ctx.Value(dialClassKey{}).(bool)
+	return v
+}
+
 // permitDialer wraps a dial function so every socket to a target takes a
 // permit before it is opened and releases it when it closes.
 //
@@ -170,7 +194,21 @@ func permitDialer(l *permitLedger, dial func(ctx context.Context, network, addr 
 		dial = d.DialContext
 	}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		release, err := l.Acquire()
+		// A CANCELLATION IS A SECOND SOCKET, dialled through this same
+		// function (pgconn.CancelRequest), and it is needed exactly when every
+		// ordinary slot is spent. Charging it to the ordinary allowance would
+		// remove cancellation at the only moment anyone reaches for it, so it
+		// takes the reserved lane instead. The marker is set by autodb's own
+		// cancellation path and cannot be forged from outside this package.
+		var (
+			release func()
+			err     error
+		)
+		if isControlDial(ctx) {
+			release, err = l.AcquireControl(ctx)
+		} else {
+			release, err = l.Acquire()
+		}
 		if err != nil {
 			return nil, err
 		}

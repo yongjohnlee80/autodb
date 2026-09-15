@@ -36,9 +36,12 @@ out past the point the pool would have closed it.
 it — no error, no log line, just transactions dying at a bound no document
 describes.
 
-**The debug profile is deprecated.** Every session is now treated as a
-debugging session, so the two tiers have collapsed. The flag is retained to
-avoid a schema change and may only ever *lengthen* a bound, never shorten it.
+**The debug profile is deprecated and selects nothing.** Every session is now
+treated as a debugging session, so the two tiers have collapsed into one bound
+that both states receive. The flag and its configuration key are retained to
+avoid a schema change; configuration refuses a deprecated value that differs
+from the common one, because a key describing behaviour the runtime does not
+have is worse than one that is merely ignored.
 
 ## The connection budget
 

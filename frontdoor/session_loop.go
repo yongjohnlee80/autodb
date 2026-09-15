@@ -968,7 +968,29 @@ func (l *Listener) frameGateError(conn net.Conn, be *pgproto3.Backend, sess exec
 		return l.sendReadiness(conn, be, sess, peer, closeReason)
 	}
 	code, rule, hint, fatal := classifyGateError(err)
-	l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()})
+
+	// A PANIC IS NOT A REFUSAL, and must not be filed as one.
+	//
+	// fd.refused is the vocabulary of "we considered this and declined it".
+	// Emitting it for a crash tells an operator counting refusals that policy
+	// rejected a statement, when in fact we broke — the same conflation
+	// between our fault and the caller's that the charge classes exist to
+	// prevent, arriving through the event stream instead.
+	//
+	// err.Error() is withheld for the same reason: it carries the panic value
+	// and the stage's internals. Those belong in the operator's log, which
+	// already has them with the stack; the event carries the STAGE only, so
+	// the trail says which component broke without republishing its guts.
+	if stagePanicked := isStagePanic(err); stagePanicked {
+		l.onEvent(Event{
+			Kind:   "fd.internal_error",
+			Reason: rule,
+			Peer:   peer,
+			Detail: stagePanicDetail(err),
+		})
+	} else {
+		l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()})
+	}
 
 	severity := "ERROR"
 	if fatal {
@@ -1300,6 +1322,19 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 // error's own text for refusals the engine authored, because those were written
 // for a caller to read; it never includes internal identifiers, which travel in
 // the audit row instead.
+// stagePanicDetail names the stage that broke, and nothing else.
+//
+// Deliberately not the panic value: an event detail is republished more widely
+// than a log line, and the value can carry whatever the panicking code was
+// holding.
+func stagePanicDetail(err error) string {
+	var op *admission.OperationalError
+	if errors.As(err, &op) && op.Stage != "" {
+		return "stage " + op.Stage + " failed"
+	}
+	return "an internal stage failed"
+}
+
 // isStagePanic reports whether this error is a recovered panic rather than a
 // stage that answered "I cannot decide".
 func isStagePanic(err error) bool {

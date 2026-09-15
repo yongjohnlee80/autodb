@@ -248,6 +248,11 @@ func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 		// failed-dial release possible — see permitDialer.
 		if ledger != nil && cfg.ConnConfig != nil {
 			cfg.ConnConfig.DialFunc = permitDialer(ledger, cfg.ConnConfig.DialFunc)
+			// A cancellation dials a SECOND socket through the same DialFunc,
+			// so without this it is charged to the ordinary allowance and
+			// refused exactly when it is needed. This handler marks that dial
+			// so it takes the reserved lane instead.
+			cfg.ConnConfig.BuildContextWatcherHandler = buildControlCancelHandler
 		}
 	}
 }
