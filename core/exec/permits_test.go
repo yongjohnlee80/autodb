@@ -232,8 +232,8 @@ func TestALowBudgetIsHonouredNotRaised(t *testing.T) {
 	ctl.Release()
 
 	// Configuration still refuses it, visibly.
-	if err := e.SetTargetConnBudget(1); !errors.Is(err, ErrInvalidBudget) {
-		t.Errorf("SetTargetConnBudget(1) = %v, want a refusal", err)
+	if err := e.setTargetConnBudget(1); !errors.Is(err, ErrInvalidBudget) {
+		t.Errorf("setTargetConnBudget(1) = %v, want a refusal", err)
 	}
 }
 
@@ -618,7 +618,7 @@ func TestEngineTargetBudgetTransitions(t *testing.T) {
 	}
 
 	// 50 -> 25: drains, kills nothing.
-	if err := e.SetTargetConnBudget(25); err != nil {
+	if err := e.setTargetConnBudget(25); err != nil {
 		t.Fatalf("lowering the budget was refused: %v", err)
 	}
 	s := e.Settings().TargetConns
@@ -643,7 +643,7 @@ func TestEngineTargetBudgetTransitions(t *testing.T) {
 
 	// A refused update must change nothing, including the generation.
 	genBefore := e.Settings().TargetConns.Generation
-	if err := e.SetTargetConnBudget(0); !errors.Is(err, ErrInvalidBudget) {
+	if err := e.setTargetConnBudget(0); !errors.Is(err, ErrInvalidBudget) {
 		t.Fatalf("a nonpositive update was accepted: %v", err)
 	}
 	after := e.Settings().TargetConns
@@ -656,7 +656,7 @@ func TestEngineTargetBudgetTransitions(t *testing.T) {
 	}
 
 	// 25 -> 60: raising ends the drain immediately, without touching sockets.
-	if err := e.SetTargetConnBudget(60); err != nil {
+	if err := e.setTargetConnBudget(60); err != nil {
 		t.Fatal(err)
 	}
 	if up := e.Settings().TargetConns; up.Draining || up.Configured != 60 || up.Effective != 60 {
@@ -665,7 +665,7 @@ func TestEngineTargetBudgetTransitions(t *testing.T) {
 	}
 
 	// 60 -> 20: lowering again while still over.
-	if err := e.SetTargetConnBudget(20); err != nil {
+	if err := e.setTargetConnBudget(20); err != nil {
 		t.Fatal(err)
 	}
 	if down := e.Settings().TargetConns; !down.Draining || down.Configured != 20 || down.Effective != 50 {
@@ -730,7 +730,7 @@ func TestEngineTargetBudgetTransitions(t *testing.T) {
 // creating one nobody configured.
 func TestEngineWithoutABudgetRefusesLiveUpdates(t *testing.T) {
 	e := New(nil, nil)
-	if err := e.SetTargetConnBudget(25); !errors.Is(err, ErrInvalidBudget) {
+	if err := e.setTargetConnBudget(25); !errors.Is(err, ErrInvalidBudget) {
 		t.Errorf("err = %v, want a refusal", err)
 	}
 	if got := e.Settings().TargetConns; got.Configured != 0 {

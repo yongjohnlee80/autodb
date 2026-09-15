@@ -718,6 +718,25 @@ func startEngine(
 
 	eng := coreexec.New(store, svc, execOptions(cfg, onLog)...)
 
+	// A previously reloaded policy is applied BEFORE the janitor starts and
+	// before anything is served, so the bounds in force from the first sweep
+	// are the operator's and not the ones the config file still describes.
+	// This is what makes a reload survive a restart; without it the stored row
+	// records an intention nothing acts on.
+	//
+	// A stored policy that no longer validates STOPS THE DAEMON. It was valid
+	// when it was written, so if it is not valid now something underneath it
+	// changed -- and starting on a silently discarded policy would run bounds
+	// nobody chose while the operator surface reported the ones they did.
+	if err := eng.LoadDurablePolicy(serveCtx); err != nil {
+		// Torn down HERE. The caller registers its Close and stop defers only
+		// after a successful return, so an error from this point on leaks the
+		// engine's pools and the lease watcher unless this path cleans up.
+		_ = eng.Close()
+		stopServing()
+		return nil, nil, nil, nil, err
+	}
+
 	// And the janitor is STARTED. The timeout machinery is otherwise inert
 	// in production: reapExpired had no caller outside tests, so an
 	// abandoned transaction would hold locks on a live target for as long as

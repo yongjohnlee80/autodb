@@ -68,6 +68,12 @@ func (e *Engine) openSession(ctx context.Context, token string, connID int64, ip
 		ctx:       sctx,
 		cancel:    cancel,
 		lastUsed:  e.now(),
+		// A token session holds a backend for as long as its transaction
+		// lives, so it is a holder too and the heartbeat covers it. It has no
+		// PAT and no startup username: those render as explicit nulls rather
+		// than being invented.
+		holderIP:   ip,
+		acquiredAt: e.now(),
 	}
 	if err := e.sessions.admit(s); err != nil {
 		cancel()
@@ -190,7 +196,7 @@ func (e *Engine) tokenControl(
 		defer endRun()
 		return e.executeUnit(runCtx, execUnit{
 			stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
-			pinned: pinned, txID: txID, phys: admission.PhysSession,
+			pinned: pinned, txID: txID, phys: admission.PhysSession, s: s,
 		})
 	}
 
@@ -435,7 +441,7 @@ func (e *Engine) CloseAllSessions(ctx context.Context, reason string) {
 func (e *Engine) reapIdleSessions(ctx context.Context, now time.Time) int {
 	var n int
 	for _, s := range e.sessions.snapshot() {
-		if s.idleFor(now) >= e.sessionIdle {
+		if s.idleFor(now) >= e.currentPolicy().sessionIdle {
 			e.closeSession(ctx, s, "", "idle-timeout")
 			n++
 		}

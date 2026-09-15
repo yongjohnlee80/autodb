@@ -1058,6 +1058,16 @@ func (c *Config) deriveSizing() {
 	c.FrontDoor.ReservedHeadroom = DefaultReservedHeadroom(c.Exec.PoolMaxConns)
 }
 
+// Validate reports whether this configuration would be accepted at startup,
+// without loading a file.
+//
+// Exported so the rules can be checked from outside: core/exec carries its own
+// copy of the reloadable subset -- the two packages cannot import each other --
+// and a cell in cmd/autodb compares them. A bound the daemon refuses to start
+// on must not be reachable through a runtime reload, and nothing but a direct
+// comparison keeps two hand-maintained copies of one rule set honest.
+func (c Config) Validate() error { return c.validate() }
+
 func (c Config) validate() error {
 	// Zero means "no TCP — use the local socket", so only a SET port is
 	// range-checked. A negative port is still a typo worth rejecting.

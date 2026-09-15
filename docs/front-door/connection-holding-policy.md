@@ -43,6 +43,72 @@ avoid a schema change; configuration refuses a deprecated value that differs
 from the common one, because a key describing behaviour the runtime does not
 have is worse than one that is merely ignored.
 
+## Changing the bounds on a running daemon
+
+Every setting in the table above can be replaced without a restart:
+
+```
+policy.show    <token>
+policy.reload  <token> <session_idle_ms> <idle_in_tx_ms> <max_tx_ms> <max_tx_ceiling_ms> <max_target_conns>
+```
+
+`policy.show` needs only a valid token — an operator diagnosing "why did my
+transaction end" needs to see the bound that ended it. `policy.reload` is
+**admin only**, because these numbers decide how long anyone may hold a
+production connection.
+
+Four things about a reload are worth knowing before you use one.
+
+**It replaces all five values at once.** There is no way to change one and
+leave the others, and that is deliberate: a partial update needs a way to say
+"leave this alone", and the difference between *unset* and *zero* is exactly
+where a safety bound goes missing. Read the current values with `policy.show`,
+change the ones you mean to, and submit the whole set.
+
+**It is validated before anything moves.** The rules are the same ones the
+configuration file is held to at startup, so a reload cannot put the daemon
+into a state it would refuse to boot into. A rejected reload changes nothing —
+not the live bounds, not the stored policy, and no audit row is written.
+
+**It survives a restart.** The new policy is written to the meta store in the
+same transaction as its audit record, and the daemon applies it at startup
+before it serves anything. A change made at 3am is still in force after the
+next deploy. If a stored policy has stopped being valid — because the pool's
+idle time or the janitor's interval moved underneath it — the daemon **refuses
+to start** rather than quietly running bounds nobody chose.
+
+**Lowering the budget does not close anything.** See *Lowering the budget
+drains* below; the same is true here.
+
+The audit row is `policy_reloaded` and records the generation, every value
+before and after, and the user who made the change.
+
+## Every idle transaction announces itself
+
+An open transaction that has been idle for thirty minutes writes a high-severity
+`idle_in_transaction_holder` audit record, and another every thirty minutes
+after that until it either does something or is reclaimed.
+
+This is what makes a two-hour idle bound safe to have. The bound is generous
+because a developer debugging needs to think rather than race a clock — but
+generous bounds are only safe if somebody can see what is holding a lock while
+it is still holding it. Previously a holder was invisible until the moment it
+was reclaimed, so the trail recorded the ending and never the two hours of
+waiting that led there.
+
+Each record carries who is holding it, from where, since when, which token
+identifies them, how many other backends that same account is holding, how many
+statements the session has run, and a bounded preview of the last one. It
+carries no token, no password and no bind values. Fields that are genuinely
+unknown — the backend PID, which nothing in the pinned-connection seam exposes
+— say so explicitly rather than reporting a zero that reads like an answer.
+
+**It is a record, not a page.** The heartbeat never reclaims anything and never
+cancels anything; whether it wakes somebody is a routing decision made
+elsewhere. At the two-hour bound the reclamation record is what fires, and the
+heartbeat that would otherwise coincide with it is suppressed — so an episode
+reads 30m, 60m, 90m, then the ending, in that order, every time.
+
 ## The connection budget
 
 `exec.max_target_conns` is this instance's total production-connection budget:

@@ -151,10 +151,28 @@ func (l *permitLedger) SetBudget(n int) error {
 			"because one permit is reserved so a cancellation can still be delivered",
 			ErrInvalidBudget, n)
 	}
+	return l.setBudgetWith(n, nil)
+}
+
+// setBudgetWith changes the budget and runs publish -- if there is one --
+// while the ledger's lock is still held.
+//
+// The seam exists so a policy reload lands as ONE generation. Snapshot takes
+// this same lock, so no reader can observe the new budget beside the old
+// timeouts, or the reverse: the pair is either wholly before the change or
+// wholly after it. Two separate publishes would leave a window in which the
+// engine reported a configuration no operator ever asked for, and the window
+// is exactly when somebody is watching, because they just made the change.
+//
+// publish MUST NOT touch the ledger; it holds the lock.
+func (l *permitLedger) setBudgetWith(n int, publish func()) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.budget = n
 	l.generation++
+	if publish != nil {
+		publish()
+	}
 	return nil
 }
 

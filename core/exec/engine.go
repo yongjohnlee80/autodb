@@ -7,6 +7,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/engine"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -151,14 +152,20 @@ type Engine struct {
 	// sessions is the ExecSession registry. It has its own
 	// mutex; see session.go for the published lock order.
 	sessions *sessionRegistry
-	// sessionIdle is how long a session may sit unused before it is reaped.
-	sessionIdle time.Duration
-	// txLimits bound an open transaction; debugIdle and maxTxCeiling are the
-	// per-connection override and the install-wide cap on it.
-	txLimits     txLimits
-	debugIdle    time.Duration
-	maxTxCeiling time.Duration
-
+	// staged holds the bounds the construction options set. It is the SEED
+	// for the published policy and is never read after New returns -- every
+	// runtime read goes through currentPolicy, so a reload cannot be shadowed
+	// by a field somebody read directly out of the Engine.
+	staged enginePolicy
+	// policy is the live, reloadable set. Atomic because the janitor reads it
+	// on one goroutine while an operator may be replacing it on another.
+	policy atomic.Pointer[enginePolicy]
+	// policyGuard serialises reloads on this engine.
+	policyGuard sync.Mutex
+	// janitorSweep is the interval StartJanitor was given, kept so a reload
+	// can refuse a deadline shorter than the gap between sweeps. Atomic for
+	// the same reason.
+	janitorSweep atomic.Int64
 	// cancels maps a client's BackendKeyData pair to the session it may
 	// cancel. See cancel_registry.go.
 	cancels *cancelRegistry
@@ -270,7 +277,7 @@ func WithResidentBudget(bytes int64) Option {
 func WithSessionIdleTimeout(d time.Duration) Option {
 	return func(e *Engine) {
 		if d > 0 {
-			e.sessionIdle = d
+			e.staged.sessionIdle = d
 		}
 	}
 }
@@ -281,10 +288,10 @@ func WithSessionIdleTimeout(d time.Duration) Option {
 func WithTxLimits(idleInTx, maxTx time.Duration) Option {
 	return func(e *Engine) {
 		if idleInTx > 0 {
-			e.txLimits.idleInTx = idleInTx
+			e.staged.tx.idleInTx = idleInTx
 		}
 		if maxTx > 0 {
-			e.txLimits.maxTx = maxTx
+			e.staged.tx.maxTx = maxTx
 		}
 	}
 }
@@ -294,10 +301,10 @@ func WithTxLimits(idleInTx, maxTx time.Duration) Option {
 func WithDebugTxLimits(debugIdle, ceiling time.Duration) Option {
 	return func(e *Engine) {
 		if debugIdle > 0 {
-			e.debugIdle = debugIdle
+			e.staged.debugIdle = debugIdle
 		}
 		if ceiling > 0 {
-			e.maxTxCeiling = ceiling
+			e.staged.maxTxCeiling = ceiling
 		}
 	}
 }
@@ -366,13 +373,15 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		opening: map[int64]chan struct{}{},
 		history: true, maxRows: DefaultMaxRows, now: time.Now,
 		profile: ProfileV1Compat, maxStatementBytes: DefaultMaxStatementBytes,
-		sessions:     newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
-		sessionIdle:  DefaultSessionIdleTimeout,
-		txLimits:     defaultTxLimits(),
+		sessions: newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
+		staged: enginePolicy{
+			sessionIdle:  DefaultSessionIdleTimeout,
+			tx:           defaultTxLimits(),
+			debugIdle:    DefaultDebugIdleInTxTimeout,
+			maxTxCeiling: DefaultMaxTxDurationCeiling,
+		},
 		poolMaxConns: DefaultPoolMaxConns(), closeQuiesce: closeQuiesceTimeout, txQuiesce: quiesceTimeout, poolMaxConnIdleTime: DefaultPoolMaxConnIdleTime,
 		poolMaxConnLifetime: DefaultPoolMaxConnLifetime,
-		debugIdle:           DefaultDebugIdleInTxTimeout,
-		maxTxCeiling:        DefaultMaxTxDurationCeiling,
 		reconcile:           newReconciler(),
 		cancels:             newCancelRegistry(),
 	}
@@ -392,8 +401,24 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 	if e.pendingResidentCap > 0 {
 		e.sessions.residentCap = e.pendingResidentCap
 	}
+	// Generation ZERO is the configured policy: the one the daemon was started
+	// with, before any operator has reloaded anything. A durable override, when
+	// there is one, arrives later through LoadDurablePolicy and carries its own
+	// generation.
+	published := e.staged
+	e.policy.Store(&published)
 	return e
 }
+
+// currentPolicy is the ONLY way the running engine reads its bounds.
+//
+// Never nil: New publishes before returning, so every Engine that exists has a
+// policy. A nil check here would be a check for a state that cannot occur, and
+// the zero value it would have to fall back to is an unbounded transaction.
+func (e *Engine) currentPolicy() *enginePolicy { return e.policy.Load() }
+
+// janitorEvery reports the sweep interval, or zero before StartJanitor runs.
+func (e *Engine) janitorEvery() time.Duration { return time.Duration(e.janitorSweep.Load()) }
 
 // Close releases every cached target connection.
 func (e *Engine) Close() error {
@@ -691,13 +716,19 @@ func (e *Engine) rejectRecordedAttempt(ctx context.Context, ident auth.Identity,
 // recordAttempt writes the pre-execution audit row and, when history is on,
 // the pending history row; it returns that row's id (0 when history is off).
 func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText, txID string) (int64, error) {
-	return e.recordAttemptTagged(ctx, ident, connID, ip, sqlText, txID, "")
+	return e.recordAttemptTagged(ctx, nil, ident, connID, ip, sqlText, txID, "")
 }
 
 // recordAttemptTagged is recordAttempt with a session tag appended to the audit
 // detail — "session <id> app <label>" for wire units (matrix claim
 // 3.1:application_name#session-audit), empty for token units.
-func (e *Engine) recordAttemptTagged(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText, txID, tag string) (int64, error) {
+func (e *Engine) recordAttemptTagged(ctx context.Context, s *session, ident auth.Identity, connID int64, ip, sqlText, txID, tag string) (int64, error) {
+	// The session's own record of what it is doing, kept here because this is
+	// the single point every attempted statement passes through. nil on the
+	// sessionless token path.
+	if s != nil {
+		s.noteStatement(sqlText)
+	}
 	script := truncate(sqlText, maxAuditSQLBytes)
 	var histID int64
 	err := dao.RunTx(ctx, func(tx *dao.Transaction) error {
