@@ -143,15 +143,16 @@ func TestCapacityDisclosure_AnUnclassifiedRefusalStaysUniform(t *testing.T) {
 		t.Errorf("code = %q, want the uniform %q", frame.Code, DenialSQLState)
 	}
 
-	// And the listener's resolver returns exactly that for an identity the
-	// phase cannot own, rather than passing the witness through.
-	l := &Listener{onLog: func(string) {}}
+	// And a phase that ends on an identity it cannot own produces NO
+	// occurrence at all -- the runner refuses it -- so there is nothing for a
+	// renderer to disclose from. The witness cannot survive a failed
+	// resolution, because a failed resolution yields no result.
 	lc := testLifecycle(t)
-	got := l.denialOccurrence(lc, PhaseStartup, denialReason(exec.DenyLeaseCap), true)
-	if got.Disclosable || got.Charge == outcome.Capacity {
-		t.Errorf("an unresolvable denial kept its witness: %+v", got)
-	}
-	if denialForOccurrence(got).Code != DenialSQLState {
-		t.Error("an unresolvable denial rendered as capacity")
+	if _, err := lc.run(PhaseStartup, func() Outcome {
+		return Refuse(outcomeID(exec.DenyLeaseCap), WithWitness())
+	}); err == nil {
+		t.Error("the startup phase ended on the engine's capacity identity and the runner " +
+			"allowed it; the witness would then reach a renderer from a phase that " +
+			"cannot establish it")
 	}
 }

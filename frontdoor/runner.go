@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/yongjohnlee80/autodb/core/exec"
@@ -104,6 +105,21 @@ func packageLifecycle() (*outcome.Registry, map[PhaseName]Phase) {
 	return pkgLifecycleReg, pkgLifecyclePhases
 }
 
+// PhaseResult is what a phase concluded AND the validated occurrence for it.
+//
+// ONE RESOLUTION, CARRIED. Every consumer -- the throttle, the wire, the record
+// -- reads the same value. Each of them used to resolve the identity again
+// from whatever field was nearest, and two resolutions of one event is two
+// chances to disagree: the credential phase recorded a hard-coded identity
+// while the throttle consulted the one the source had actually chosen.
+type PhaseResult struct {
+	Outcome    Outcome
+	Occurrence outcome.Occurrence
+}
+
+// Continues reports whether the lifecycle proceeds past this phase.
+func (r PhaseResult) Continues() bool { return r.Outcome.Continues() }
+
 // run executes one phase and checks what it concluded.
 //
 // The error result is a PROGRAMMING error -- an undeclared identity, a rerun
@@ -111,10 +127,10 @@ func packageLifecycle() (*outcome.Registry, map[PhaseName]Phase) {
 // separate from the Outcome deliberately: a refusal is a normal thing for a
 // phase to conclude and travels in the Outcome, while these are faults in the
 // code that no peer caused and none should be told about.
-func (lc *lifecycle) run(name PhaseName, body func() Outcome) (Outcome, error) {
+func (lc *lifecycle) run(name PhaseName, body func() Outcome) (PhaseResult, error) {
 	p, known := lc.phases[name]
 	if !known {
-		return Outcome{}, fmt.Errorf("frontdoor: %s is not a declared phase", name)
+		return PhaseResult{}, fmt.Errorf("frontdoor: %s is not a declared phase", name)
 	}
 	if lc.ran[name] {
 		if p.Replay == ExactlyOnce {
@@ -124,7 +140,7 @@ func (lc *lifecycle) run(name PhaseName, body func() Outcome) (Outcome, error) {
 			// reservations against one release, or reading the next message
 			// as though it were this one. Nothing should promise a rerun the
 			// code cannot deliver, so the promise is declined.
-			return Outcome{}, fmt.Errorf("frontdoor: %s is exactly-once and has already run", name)
+			return PhaseResult{}, fmt.Errorf("frontdoor: %s is exactly-once and has already run", name)
 		}
 	}
 	lc.ran[name] = true
@@ -138,12 +154,12 @@ func (lc *lifecycle) run(name PhaseName, body func() Outcome) (Outcome, error) {
 		// end of its own logic, and the safe reading of "I did not say" is
 		// never "carry on" -- carrying on here would hand an unauthenticated
 		// connection to the next phase.
-		return Outcome{}, fmt.Errorf("frontdoor: %s concluded nothing; the zero outcome is not "+
+		return PhaseResult{}, fmt.Errorf("frontdoor: %s concluded nothing; the zero outcome is not "+
 			"a decision to proceed", name)
 	case verdictContinue:
 		// The only verdict with no identity: nothing happened that anyone
 		// needs to be able to name, because the lifecycle simply proceeds.
-		return got, nil
+		return PhaseResult{Outcome: got}, nil
 	}
 
 	// EVERY TERMINAL OUTCOME MUST NAME SOMETHING THIS PRODUCER DECLARED --
@@ -152,10 +168,39 @@ func (lc *lifecycle) run(name PhaseName, body func() Outcome) (Outcome, error) {
 	// is the check that stops a reason invented at a call site from arriving
 	// at the renderer looking exactly like a declared one, carrying whatever
 	// charge the renderer defaults to.
-	if _, err := lc.reg.Occur(p.Producer, got.reason, witnessOpts(got)...); err != nil {
-		return Outcome{}, err
+	occ, err := lc.reg.Occur(p.Producer, got.reason, witnessOpts(got)...)
+	if err != nil {
+		return PhaseResult{}, err
 	}
-	return got, nil
+
+	// THE VERDICT AND THE REGISTERED KIND MUST AGREE.
+	//
+	// Occur checked WHO may emit the identity and never WHAT KIND of thing it
+	// is, so a phase could Refuse with an identity registered as operational,
+	// or hand a control identity to Operational, and the registry would
+	// cheerfully return the declared kind for it. The record would then say a
+	// refusal happened where the declaration says our own failure did -- and
+	// the charge travels with the declaration, not the verdict, so the two
+	// disagreeing is how an ending gets classified as something it is not.
+	if want := kindFor(got.verdict); want != occ.Kind {
+		return PhaseResult{}, fmt.Errorf("frontdoor: %s ended %q as %s, but it is registered "+
+			"as %s; the verdict and the declaration disagree about what happened",
+			name, got.reason, want, occ.Kind)
+	}
+	return PhaseResult{Outcome: got, Occurrence: occ}, nil
+}
+
+// kindFor is the constructor's own claim about what kind of thing happened.
+func kindFor(v verdict) outcome.Kind {
+	switch v {
+	case verdictRefuse:
+		return outcome.Refusal
+	case verdictOperational:
+		return outcome.Operational
+	case verdictTerminalControl:
+		return outcome.Control
+	}
+	return outcome.KindUnset
 }
 
 func witnessOpts(o Outcome) []outcome.OccurOption {
@@ -185,27 +230,14 @@ func (lc *lifecycle) occurrence(name PhaseName, o Outcome) (outcome.Occurrence, 
 // which is what "the existing types adapt" means and what a cell asserts.
 func outcomeID(reason string) outcome.ReasonID { return outcome.ReasonID(reason) }
 
-// denialOccurrence resolves the typed occurrence for a refusal that is about
-// to be rendered.
+// NOTE: denialOccurrence and chargeFor are deliberately GONE.
 //
-// FAILS CLOSED. If the identity cannot be resolved -- an undeclared reason, the
-// wrong producer -- the zero occurrence is returned: no witness and no charge,
-// which the projection can only render as the uniform denial. A refusal we
-// cannot classify is precisely the one that must not be allowed to disclose
-// anything, and returning the reason with disclosure intact would let a
-// registration mistake become a capacity oracle.
-func (l *Listener) denialOccurrence(lc *lifecycle, phase PhaseName, reason denialReason, witness bool) outcome.Occurrence {
-	opts := []OutcomeOption{}
-	if witness {
-		opts = append(opts, WithWitness())
-	}
-	occ, err := lc.occurrence(phase, Refuse(outcomeID(reason.String()), opts...))
-	if err != nil {
-		l.onLog(fmt.Sprintf("frontdoor: %s produced an unresolvable denial %q: %v", phase, reason, err))
-		return outcome.Occurrence{Reason: outcome.ReasonID(reason)}
-	}
-	return occ
-}
+// They resolved an identity a second time, from whatever field was nearest,
+// for consumers that already had a validated one. Two resolutions of one event
+// is two chances to disagree, and they did: the credential phase recorded a
+// hard-coded identity while the throttle consulted the one the source had
+// actually chosen. Every consumer now reads the PhaseResult the phase
+// returned, and there is no helper left that could rebuild one.
 
 // ranPhases reports the phases this connection ran, in order.
 func (lc *lifecycle) ranPhases() []PhaseName {
@@ -226,23 +258,82 @@ func (lc *lifecycle) concluded(name PhaseName) (Outcome, bool) {
 	return Outcome{}, false
 }
 
-// chargeFor applies the throttle for a non-denial ending, from the identity's
-// REGISTERED class and nothing else.
+// lifecycleFault is the ONE place a fault in the runner itself is turned into
+// a record and an answer.
 //
-// An identity that cannot be resolved is not charged. A charge is a real cost
-// to a real developer -- ten of them bans their address for a minute -- and
-// charging one because our own registration was wrong is the failure this
-// whole vocabulary exists to stop.
-func (l *Listener) chargeFor(lc *lifecycle, phase PhaseName, id outcome.ReasonID, peer string) {
-	if id == "" {
-		return
-	}
-	occ, err := lc.occurrence(phase, Outcome{verdict: verdictOperational, reason: id})
+// IT GOES THROUGH THE REGISTRY LIKE EVERYTHING ELSE. The identity was declared
+// under a producer of its own and then emitted by hand at one site and not at
+// all at the others, so the one outcome class that describes OUR defects was
+// the one class never validated. A declared identity that production emits
+// without resolving is a row that proves nothing.
+//
+// WHAT THE PEER IS TOLD DEPENDS ON WHERE WE ARE, because the protocol does:
+//
+//   - Before the credential exchange there is nothing to say and often no way
+//     to say it -- a peer mid-TLS cannot read a PostgreSQL frame -- so the
+//     connection closes.
+//   - During it, the peer is owed the same uniform denial every other refusal
+//     gives them; silence there turns our one-line declaration mistake into a
+//     client hanging on a read.
+//   - After session open, on a QUIESCENT stream, they get a stable fatal
+//     internal error. Quiescent matters: injecting a frame into a stream that
+//     is mid-exchange corrupts it, and a corrupted stream is a worse answer
+//     than a closed one.
+//
+// Nothing here is charged. The peer did nothing.
+type faultStage uint8
+
+const (
+	// faultBeforeCredential is anything up to and including startup.
+	faultBeforeCredential faultStage = iota
+	// faultDuringCredential is the credential exchange, where the uniform
+	// denial is both available and owed.
+	faultDuringCredential
+	// faultAfterSessionOpen is a served connection.
+	faultAfterSessionOpen
+)
+
+func (l *Listener) lifecycleFault(lc *lifecycle, phase PhaseName, peer string, stage faultStage,
+	stream io.Writer, quiescent bool, cause error) {
+
+	// RESOLVED ONCE, through the registry, under the producer that owns it.
+	l.onLog(fmt.Sprintf("frontdoor: the %s phase for %s: %v", phase, peer, cause))
+
+	occ, err := lc.reg.Occur(ProducerLifecycle, outcomeID(OutcomeInternalError))
 	if err != nil {
-		l.onLog(fmt.Sprintf("frontdoor: %s produced an unclassifiable ending %q: %v", phase, id, err))
-		return
+		// NO EVENT. The identity is this package's own and declared in this
+		// package, so failing to resolve it means the declarations are broken
+		// -- and an identity we cannot validate must not enter the audit
+		// vocabulary, because an unvalidated identity in the trail is exactly
+		// what the registry exists to make impossible. The operator gets the
+		// whole of it in the log; the connection still ends, above.
+		l.onLog(fmt.Sprintf("frontdoor: the lifecycle fault identity does not resolve: %v", err))
+	} else {
+		safely(func() {
+			l.onEvent(Event{Kind: EventLifecycleFault, Reason: string(occ.Reason), Peer: peer,
+				Detail: string(phase)})
+		})
 	}
 	if occ.Charges() {
-		l.admit.noteFailure(peer)
+		// Unreachable while internal-error is registered None, and asserted
+		// rather than assumed: charging a peer for our defect is the failure
+		// this whole vocabulary exists to stop.
+		l.onLog("frontdoor: refusing to charge a peer for a lifecycle fault")
+	}
+
+	switch stage {
+	case faultDuringCredential:
+		if derr := sendDenial(stream, reasonPreAuthProtocolViolation); derr != nil {
+			l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
+		}
+	case faultAfterSessionOpen:
+		if !quiescent {
+			// A frame injected into a stream mid-exchange corrupts it. The
+			// close is the honest answer.
+			return
+		}
+		if derr := sendFatalInternal(stream); derr != nil {
+			l.onLog(fmt.Sprintf("frontdoor: writing the internal error to %s: %v", peer, derr))
+		}
 	}
 }

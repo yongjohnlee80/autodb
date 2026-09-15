@@ -108,6 +108,20 @@ type permitLedger struct {
 
 	// testBeforePublish pauses a publication while its lock is held.
 	testBeforePublish func()
+
+	// testAfterSelect pauses AFTER a generation has been chosen and BEFORE it
+	// is published.
+	//
+	// It sits at that seam precisely because the rejected shape -- choose,
+	// unlock, relock, publish -- puts the seam OUTSIDE the lock while the
+	// correct one keeps it inside. A cell pausing here therefore blocks a
+	// second caller in the correct shape and lets one through in the rejected
+	// one, which is the difference the cell has to be able to see.
+	//
+	// testBeforePublish cannot see it: it is inside the publication lock in
+	// both shapes, so the second caller blocks either way and the rejected
+	// shape passes.
+	testAfterSelect func()
 	// controlLane serializes the reserved slot to one holder.
 	controlLane chan struct{}
 }
@@ -174,7 +188,11 @@ func (l *permitLedger) SetBudget(n int) error {
 	// let two observers say whether they saw the same publication.
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.setBudgetLocked(n, l.generation+1, nil)
+	next := l.generation + 1
+	if l.testAfterSelect != nil {
+		l.testAfterSelect()
+	}
+	return l.setBudgetLocked(n, next, nil)
 }
 
 // setBudgetWith changes the budget and runs publish -- if there is one --

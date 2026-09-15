@@ -279,12 +279,14 @@ type Options struct {
 	// the phases it ran can be asserted.
 	testLifecycleReady func(peer string, lc *lifecycle)
 
-	// testHandshakeFail forces the success sequence to fail.
+	// testHandshakeFail fails the handshake BEFORE any of the success sequence
+	// is written.
 	//
 	// A cell cannot produce this by closing the client: the write buffers and
 	// returns nil, so the handshake SUCCEEDS and the connection ends as an
-	// ordinary peer-closed. The first version of the teardown cell did exactly
-	// that and proved nothing.
+	// ordinary peer-closed. Nor by failing afterwards -- the client has the
+	// readiness by then, and what is being tested is a write that did not
+	// land.
 	testHandshakeFail func() error
 
 	// testSegmentMsgs and testSegmentBytes lower the segment caps for a cell.
@@ -640,18 +642,21 @@ func (l *Listener) Serve(ctx context.Context) error {
 		switch {
 		case perr != nil:
 			// A fault in our own declarations. Refuse the connection rather
-			// than admit one whose accounting we could not record, and say so
-			// where an operator will see it.
-			l.onLog(fmt.Sprintf("frontdoor: the accept phase for %s: %v", peer, perr))
+			// than admit one whose accounting we could not record, and record
+			// it through the ONE fault path so it is validated like every
+			// other outcome.
+			//
+			// Nothing has negotiated anything yet, so there is no frame to
+			// send and the stage says so.
+			l.lifecycleFault(lc, PhaseAccept, peer, faultBeforeCredential, nil, false, perr)
+			// Defensive: a phase-lookup failure never ran the body, so nothing
+			// was reserved, and a refusal returns no ticket. It is here for an
+			// outcome that both takes the ticket and fails validation, which
+			// no current path produces.
 			if tkt != nil {
 				tkt.release()
 			}
 			_ = conn.Close()
-			// A DISTINCT EVENT KIND. fd.budget_refuse means a peer met a
-			// limit; filing our own defect under it would put our bugs into
-			// the capacity numbers an operator sizes the estate from. Nothing
-			// is charged: the peer did nothing.
-			l.onEvent(Event{Kind: "fd.lifecycle_fault", Reason: OutcomeInternalError, Peer: peer})
 			l.wg.Done()
 			continue
 		case !accepted.Continues():
@@ -817,7 +822,7 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 	var secure net.Conn
 	var out startupOutcome
 	var err error
-	if _, perr := lc.run(PhaseStartup, func() Outcome {
+	startup, perr := lc.run(PhaseStartup, func() Outcome {
 		secure, out, err = runStartup(raw, l.tls, l.cleartextDebug, l.now, l.dl)
 		switch {
 		case errors.Is(err, errCancelRequest):
@@ -831,7 +836,13 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 				if tf.attributable {
 					return Refuse(outcomeID(tf.reason), WithOutcomeDetail(tf.detail))
 				}
-				return Refuse(outcomeID(OutcomePeerGoneAtStart), WithOutcomeDetail(tf.detail))
+				// OPERATIONAL, NOT A REFUSAL. A peer that opened a connection
+				// and went away without asking for anything -- a port scan, a
+				// load balancer's health probe -- was refused nothing. We made
+				// no decision about them, and calling it a refusal would put a
+				// decision in the record that nobody took.
+				return Operational(outcomeID(OutcomePeerGoneAtStart), err,
+					WithOutcomeDetail(tf.detail))
 			}
 			// A startup failure with no taxonomy of its own. It ends the
 			// connection without a frame, exactly as the classified ones do.
@@ -847,7 +858,8 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			return Refuse(outcomeID(out.Denied.String()), WithOutcomeDetail(out.RefusedParam))
 		}
 		return Continue()
-	}); perr != nil {
+	})
+	if perr != nil {
 		// A FAULT IN OUR CODE ENDS THE CONNECTION. It does not log and carry
 		// on, and the first version of this did exactly that -- which meant a
 		// phase whose body never ran left the startup result at its zero value
@@ -857,8 +869,8 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 		//
 		// "The phase did not run" and "the phase succeeded" must never be the
 		// same thing to a reader, and the zero value makes them look alike.
-		closeReason = "internal-error"
-		l.onLog(fmt.Sprintf("frontdoor: the startup phase for %s: %v", peer, perr))
+		closeReason = OutcomeInternalError
+		l.lifecycleFault(lc, PhaseStartup, peer, faultBeforeCredential, nil, false, perr)
 		return
 	}
 	switch {
@@ -973,6 +985,9 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 	// to refuse would invite a peer to send a token we then have to be
 	// careful not to have learned anything from.
 	outcome := authOutcome{Denied: out.Denied}
+	// The credential phase's retained result, empty when the startup refusal
+	// meant the exchange never happened.
+	var credential PhaseResult
 	if outcome.Denied == "" {
 		// matrix §3.1's accept-with-a-note outcomes are audited at ACCEPTANCE, before
 		// the credential exchange: the parameter handling happened whether or
@@ -1007,15 +1022,20 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 		// boundary needs its own token, lock and rollback design -- a
 		// behaviour change, and not this.
 		var aerr error
-		if _, perr := lc.run(PhaseAuthenticateAndOpen, func() Outcome {
+		var perr error
+		credential, perr = lc.run(PhaseAuthenticateAndOpen, func() Outcome {
 			outcome, aerr = l.runAuth(ctx, stream, be, fr, out.Params, out.GUCs, peer)
 			switch {
 			case aerr != nil:
-				// The peer left mid-exchange, or the store would not answer.
-				// Which of those it was decides the CHARGE, and that decision
-				// is already made below by outcome.Peer -- this names the
-				// ending, not its attribution.
-				return Operational(outcomeID(OutcomeAuthReadFailed), aerr)
+				// THE IDENTITY THE SOURCE CHOSE, not one picked here.
+				//
+				// runAuth knows which of these happened -- the peer left, we
+				// had no worker, the exchange could not be set up -- and it
+				// says so. This used to hard-code the peer's identity while
+				// the throttle consulted the one runAuth had actually
+				// selected, so one event was recorded as two different things
+				// and only one of them decided the charge.
+				return Operational(outcome.Failure, aerr)
 			case outcome.Denied != "":
 				// THE WITNESS TRAVELS HERE. It came from the engine, which
 				// sets it only at a raise site reached with a verified
@@ -1029,7 +1049,8 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 				return Refuse(outcomeID(outcome.Denied.String()))
 			}
 			return Continue()
-		}); perr != nil {
+		})
+		if perr != nil {
 			// FAIL CLOSED, BUT STILL ANSWER. An unauthenticated connection
 			// must never reach the session loop because a phase was
 			// misdeclared -- but the peer is owed the same uniform denial
@@ -1040,23 +1061,19 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			// The uniform denial is the information-free answer, so sending it
 			// costs nothing and closing without it would turn a one-line
 			// declaration mistake into a client that hangs on a read.
-			closeReason = "internal-error"
-			l.onLog(fmt.Sprintf("frontdoor: the credential phase for %s: %v", peer, perr))
-			if derr := sendDenial(stream, reasonPreAuthProtocolViolation); derr != nil {
-				l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
-			}
+			closeReason = OutcomeInternalError
+			l.lifecycleFault(lc, PhaseAuthenticateAndOpen, peer, faultDuringCredential, stream, false, perr)
 			return
 		}
 		if aerr != nil {
 			closeReason = string(outcome.Failure)
 			l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s: %v", peer, aerr))
-			// CHARGED ONLY IF THE REGISTRY SAYS SO. A read that failed is the
-			// peer's doing; running out of credential workers, or a store
-			// that would not answer, is ours — and throttling an address for
-			// our own capacity is the same mistake as throttling one for our
-			// own outage. Those are now three identities with three registered
-			// classes rather than one identity and a Boolean beside it.
-			l.chargeFor(lc, PhaseAuthenticateAndOpen, outcome.Failure, peer)
+			// CHARGED FROM THE RETAINED OCCURRENCE. Not re-resolved: the
+			// phase already validated this identity, and resolving it a second
+			// time is a second chance to resolve it differently.
+			if credential.Occurrence.Charges() {
+				l.admit.noteFailure(peer)
+			}
 			return
 		}
 		if outcome.Denied == "" {
@@ -1065,15 +1082,14 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 		}
 	}
 
-	// THE OCCURRENCE IS THE SOLE THROTTLE AUTHORITY, and the same occurrence
-	// is what the wire is rendered from. There is no second table, no Boolean
-	// travelling beside it, and therefore no way for the two to disagree about
-	// whether a refusal costs the peer their allowance.
-	deniedPhase := PhaseAuthenticateAndOpen
+	// THE RETAINED OCCURRENCE IS THE SOLE AUTHORITY, for the throttle and for
+	// the wire alike. Whichever phase refused is the phase that resolved it,
+	// once; nothing here re-derives an identity from a field, which is what
+	// let two resolutions of one event disagree.
+	occ := credential.Occurrence
 	if out.Denied != "" {
-		deniedPhase = PhaseStartup
+		occ = startup.Occurrence
 	}
-	occ := l.denialOccurrence(lc, deniedPhase, outcome.Denied, outcome.Disclosable)
 	if occ.Charges() {
 		l.admit.noteFailure(peer)
 	}
@@ -1145,9 +1161,19 @@ func (l *Listener) serveSession(ctx context.Context, lc *lifecycle, stream net.C
 	// sequence, the session's publication to the trail, and the first arming
 	// of the between-messages budget.
 	handshake, herr := lc.run(PhaseHandshake, func() Outcome {
-		err := l.completeHandshake(be, sess, params, notes)
-		if err == nil && l.testHandshakeFail != nil {
+		// INJECTED BEFORE THE SEQUENCE, not after it.
+		//
+		// Running it afterwards meant AuthenticationOk, BackendKeyData and
+		// ReadyForQuery had all been flushed to the client before the
+		// "failure" was fabricated -- which is a handshake that SUCCEEDED
+		// followed by an invented error, and proves nothing about what
+		// happens when the write actually fails.
+		var err error
+		if l.testHandshakeFail != nil {
 			err = l.testHandshakeFail()
+		}
+		if err == nil {
+			err = l.completeHandshake(be, sess, params, notes)
 		}
 		if err != nil {
 			l.onLog(fmt.Sprintf("frontdoor: completing the handshake with %s: %v", peer, err))
@@ -1168,12 +1194,16 @@ func (l *Listener) serveSession(ctx context.Context, lc *lifecycle, stream net.C
 	case herr != nil:
 		// OUR OWN FAULT, and the session is already open -- so the teardown
 		// above still runs and the engine still learns the session ended.
+		//
+		// NOT QUIESCENT: the success sequence is part-written, and a frame
+		// injected into it would corrupt what the client is mid-way through
+		// reading. The close is the honest answer.
 		sessionReason = OutcomeInternalError
 		*closeReason = sessionReason
-		l.onLog(fmt.Sprintf("frontdoor: the handshake phase for %s: %v", peer, herr))
+		l.lifecycleFault(lc, PhaseHandshake, peer, faultAfterSessionOpen, stream, false, herr)
 		return
 	case !handshake.Continues():
-		sessionReason = string(handshake.Reason())
+		sessionReason = string(handshake.Outcome.Reason())
 		*closeReason = sessionReason
 		return
 	}
@@ -1217,9 +1247,12 @@ func (l *Listener) serveSession(ctx context.Context, lc *lifecycle, stream net.C
 	})
 	switch {
 	case serr != nil:
+		// QUIESCENT: the loop has returned, so nothing is part-written and the
+		// authenticated caller can be told the server failed rather than left
+		// to infer it from a closed socket.
 		sessionReason = OutcomeInternalError
-		l.onLog(fmt.Sprintf("frontdoor: the serve phase for %s: %v", peer, serr))
-	case served.Reason() == outcomeID(OutcomeSessionError):
+		l.lifecycleFault(lc, PhaseServe, peer, faultAfterSessionOpen, stream, true, serr)
+	case served.Outcome.Reason() == outcomeID(OutcomeSessionError):
 		sessionReason = OutcomeSessionError
 	}
 	*closeReason = sessionReason

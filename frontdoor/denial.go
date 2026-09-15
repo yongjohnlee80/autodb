@@ -1,6 +1,8 @@
 package frontdoor
 
 import (
+	"io"
+
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/yongjohnlee80/autodb/core/outcome"
@@ -221,3 +223,32 @@ func denialUniform(reason denialReason) *pgproto3.ErrorResponse {
 // String makes a reason usable in an audit detail without a conversion at
 // every call site.
 func (r denialReason) String() string { return string(r) }
+
+// InternalSQLState and InternalMessage are what an AUTHENTICATED caller is
+// told when our own lifecycle fails underneath them.
+//
+// 58000 internal_error is PostgreSQL's own code for exactly this, so every
+// client library already renders it as a server fault rather than as anything
+// the caller did. The message is fixed and carries no cause: which phase broke
+// is an operator's business, and the peer learns only that the server failed.
+//
+// It is sent ONLY to a caller who has already authenticated and only on a
+// quiescent stream. Before authentication the uniform denial is the whole of
+// what anyone is owed; mid-exchange, a frame would corrupt the stream.
+const (
+	InternalSQLState = "58000"
+	InternalMessage  = "the server failed while handling this connection"
+)
+
+// sendFatalInternal writes the stable internal-error frame.
+func sendFatalInternal(w io.Writer) error {
+	be := pgproto3.NewBackend(emptyReader{}, w)
+	be.Send(&pgproto3.ErrorResponse{
+		Severity:            "FATAL",
+		SeverityUnlocalized: "FATAL",
+		Code:                InternalSQLState,
+		Message:             InternalMessage,
+		Detail:              "frontdoor/internal",
+	})
+	return be.Flush()
+}

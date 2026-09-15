@@ -198,9 +198,14 @@ func TestPolicyCoherence_TheGenerationsHoldDuringADrain(t *testing.T) {
 // of the number is to let two observers say whether they saw one publication or
 // two.
 //
-// The barrier makes the interleaving deterministic. The first setter is held
-// inside the lock; the second is started and must block, because choosing and
-// publishing are now one critical section.
+// THE BARRIER SITS BETWEEN SELECTION AND PUBLICATION, and that placement is the
+// cell's entire discriminating power. The rejected shape puts that seam OUTSIDE
+// the lock; the correct one keeps it inside. So pausing there blocks the second
+// caller in the correct shape and lets it through in the rejected one.
+//
+// A barrier inside the publication lock -- which is where this cell first put
+// it -- cannot tell them apart: the second caller blocks in both shapes, reads
+// a fresh value afterwards, and the rejected shape passes.
 func TestPolicyCoherence_ConcurrentSettersCannotReuseAGeneration(t *testing.T) {
 	t.Parallel()
 	f := policyFixture(t)
@@ -209,7 +214,7 @@ func TestPolicyCoherence_ConcurrentSettersCannotReuseAGeneration(t *testing.T) {
 	atBarrier := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	led.testBeforePublish = func() {
+	led.testAfterSelect = func() {
 		once.Do(func() {
 			close(atBarrier)
 			<-release
@@ -225,15 +230,21 @@ func TestPolicyCoherence_ConcurrentSettersCannotReuseAGeneration(t *testing.T) {
 		t.Fatal("the first setter never reached the barrier")
 	}
 
-	// The first setter holds the lock and has chosen but not published. A
-	// second setter must not be able to choose from the same stale value.
+	// The first setter has CHOSEN and not published. In the correct shape it
+	// still holds the lock, so a second setter cannot choose from the stale
+	// value it left behind.
+	secondChose := make(chan struct{})
 	second := make(chan error, 1)
-	go func() { second <- led.SetBudget(41) }()
+	go func() {
+		close(secondChose)
+		second <- led.SetBudget(41)
+	}()
+	<-secondChose
 
 	select {
 	case <-second:
-		t.Fatal("a second setter chose a generation while the first held the lock; both " +
-			"can then publish the same number")
+		t.Fatal("a second setter completed while the first held its selection; both can " +
+			"then choose the same number")
 	case <-time.After(200 * time.Millisecond):
 	}
 
@@ -245,13 +256,13 @@ func TestPolicyCoherence_ConcurrentSettersCannotReuseAGeneration(t *testing.T) {
 		t.Fatalf("second setter: %v", err)
 	}
 
-	// TWO PUBLICATIONS, TWO GENERATIONS, and the later one wins the budget --
-	// the lock serialises them, so the last to hold it is the state that
-	// stands.
+	// TWO PUBLICATIONS, TWO GENERATIONS, ascending -- and the later one wins
+	// the budget, because the lock serialises them and the last to hold it is
+	// the state that stands.
 	got := led.Snapshot()
 	if got.Generation != 2 {
-		t.Errorf("generation after two setters = %d, want 2 — one of them reused the "+
-			"other's number", got.Generation)
+		t.Errorf("generation after two setters = %d, want 2 — one of them reused or "+
+			"reversed the other's number", got.Generation)
 	}
 	if got.Configured != 41 {
 		t.Errorf("budget = %d, want 41 from the setter that held the lock last", got.Configured)

@@ -69,6 +69,13 @@ const (
 	OutcomeInternalError = "internal-error"
 )
 
+// EventLifecycleFault is the audit kind for a fault in the runner itself.
+//
+// NEVER fd.budget_refuse. That kind means a peer met a limit, and filing our
+// own defects under it puts them among the capacity numbers an operator sizes
+// the estate from.
+const EventLifecycleFault = "fd.lifecycle_fault"
+
 // The cancel branch's identities.
 //
 // THESE WERE HOMELESS, and that is the whole reason this registry is named for
@@ -215,8 +222,15 @@ func credentialOutcomes(
 	out := []outcome.Decl{
 		// OURS: the store would not answer, or there is no credential store
 		// behind this listener yet. A peer holding a perfectly good token
-		// meets these through no fault of their own.
-		operational(reasonAuthStoreError),
+		// meets these through no fault of their own, so neither is charged.
+		//
+		// BOTH ARE REFUSALS, not operational endings, and the distinction is
+		// the wire. These are raised as denials and the peer receives the
+		// uniform denial frame; "operational" is for endings that produce no
+		// frame at all. Declaring one of them operational made the verdict and
+		// the declaration disagree the moment the runner started checking,
+		// which is the check doing its job.
+		refusal(reasonAuthStoreError, outcome.None),
 		refusal(reasonNoCredentialStore, outcome.None),
 		// A credential exchange the peer abandoned mid-way, and a fault in our
 		// own phase wiring. Neither is a refusal; both end the connection.
