@@ -137,14 +137,46 @@ func TestConcurrentAcquiresNeverExceedTheBudget(t *testing.T) {
 	}
 }
 
-// A budget of zero means unbounded, matching how the engine treats an unset
-// pool cap. the no-default rule requires the CONFIG to have no default; that is a
-// validation rule at load, not a reason for the ledger to invent a limit.
-func TestZeroBudgetIsUnbounded(t *testing.T) {
-	l := newPermitLedger(0)
-	for i := range 100 {
-		if _, err := l.Acquire(); err != nil {
-			t.Fatalf("acquire %d under an unset budget: %v", i, err)
+// Absence of a budget is a NIL ledger, not a zero one.
+//
+// A zero-budget ledger used to mean "unbounded" and was incoherent under the
+// O/K algebra: it reported Effective = O+1 and Draining = true as soon as
+// anything was acquired, so the sentinel contradicted itself in use. It was
+// also unreachable from production, which represents absence by having no
+// ledger at all.
+func TestAbsenceOfABudgetIsANilLedger(t *testing.T) {
+	e := New(nil, nil)
+	if e.targetPermits != nil {
+		t.Fatal("an engine built without a budget must have no ledger")
+	}
+	if got := e.Settings().TargetConns; got.Configured != 0 || got.Draining {
+		t.Errorf("no-budget snapshot = %+v, want a zeroed, non-draining reading", got)
+	}
+
+	// The dialer is the underlying one, unwrapped: nothing to count, nothing
+	// to refuse.
+	var dialed int
+	dial := permitDialer(nil, func(context.Context, string, string) (net.Conn, error) {
+		dialed++
+		_, client := net.Pipe()
+		return client, nil
+	})
+	for range 100 {
+		if _, err := dial(context.Background(), "tcp", "a"); err != nil {
+			t.Fatalf("an unbudgeted dial was refused: %v", err)
+		}
+	}
+	if dialed != 100 {
+		t.Errorf("dialed %d times, want 100", dialed)
+	}
+}
+
+// A budget below the viable minimum is raised to it rather than silently
+// meaning something else.
+func TestABudgetBelowTheMinimumBecomesTheMinimum(t *testing.T) {
+	for _, n := range []int{0, 1} {
+		if got := newPermitLedger(n).Snapshot().Configured; got != 2 {
+			t.Errorf("newPermitLedger(%d) configured = %d, want the minimum 2", n, got)
 		}
 	}
 }
@@ -203,10 +235,7 @@ func TestPermitDialerReleasesWhenTheSocketCloses(t *testing.T) {
 
 // A refused dial must not open a socket at all.
 func TestPermitDialerDoesNotDialWhenTheBudgetIsSpent(t *testing.T) {
-	l := newPermitLedger(0)
-	if err := l.SetBudget(2); err != nil { // 1 ordinary + 1 reserved
-		t.Fatal(err)
-	}
+	l := newPermitLedger(2) // 1 ordinary + 1 reserved
 	var dialed int
 	dial := permitDialer(l, func(context.Context, string, string) (net.Conn, error) {
 		dialed++
@@ -613,9 +642,20 @@ func TestEngineTargetBudgetTransitions(t *testing.T) {
 			0, idle.Outstanding, idle.Effective)
 	}
 
-	// Draining below the new budget clears the state.
+	// Draining below the new budget clears the state -- and the ceiling must
+	// fall MONOTONICALLY on the way. Observing only the endpoint would pass a
+	// ledger whose Effective bounced upward in the middle, which is exactly
+	// the defect the O+1 definition exists to prevent.
+	previous := e.Settings().TargetConns.Effective
 	for i := range 35 {
 		held[i].Release()
+		now := e.Settings().TargetConns.Effective
+		if now > previous {
+			t.Fatalf("effective rose %d -> %d while retiring ordinary socket %d; a drain "+
+				"generation's ceiling must converge downwards and never back up",
+				previous, now, i)
+		}
+		previous = now
 	}
 	// Retiring ordinary sockets converges the ceiling DOWN to Configured and
 	// never back up.
