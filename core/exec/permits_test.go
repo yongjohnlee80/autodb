@@ -10,7 +10,9 @@ import (
 )
 
 func TestPermitLedgerBoundsOutstandingSockets(t *testing.T) {
-	l := newPermitLedger(3)
+	// A budget of 4 leaves 3 for ordinary dials; the fourth is the reserved
+	// control lane.
+	l := newPermitLedger(4)
 	var releases []func()
 	for i := range 3 {
 		rel, err := l.Acquire()
@@ -30,7 +32,7 @@ func TestPermitLedgerBoundsOutstandingSockets(t *testing.T) {
 
 // Releasing twice must not manufacture a slot that does not exist.
 func TestReleaseIsIdempotent(t *testing.T) {
-	l := newPermitLedger(1)
+	l := newPermitLedger(2) // 1 ordinary + 1 reserved
 	rel, err := l.Acquire()
 	if err != nil {
 		t.Fatal(err)
@@ -45,14 +47,14 @@ func TestReleaseIsIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := l.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
-		t.Fatal("budget of 1 must still be 1 after repeated releases")
+		t.Fatal("the ordinary allowance must be unchanged after repeated releases")
 	}
 }
 
-// ADR 0181: lowering the budget must DRAIN, never kill. This is the 50 -> 25
+// the connection-budget policy: lowering the budget must DRAIN, never kill. This is the 50 -> 25
 // case with 50 sockets already open.
 func TestLoweringTheBudgetDrainsRatherThanKilling(t *testing.T) {
-	l := newPermitLedger(50)
+	l := newPermitLedger(51) // 50 ordinary + 1 reserved
 	var releases []func()
 	for range 50 {
 		rel, err := l.Acquire()
@@ -63,10 +65,10 @@ func TestLoweringTheBudgetDrainsRatherThanKilling(t *testing.T) {
 	}
 
 	_, genBefore := l.Budget()
-	l.SetBudget(25)
+	l.SetBudget(26) // 25 ordinary + 1 reserved
 	budget, genAfter := l.Budget()
-	if budget != 25 {
-		t.Fatalf("budget = %d, want 25", budget)
+	if budget != 26 {
+		t.Fatalf("budget = %d, want 26", budget)
 	}
 	if genAfter == genBefore {
 		t.Error("a budget change must open a new generation; monotonicity is per-generation")
@@ -95,7 +97,7 @@ func TestLoweringTheBudgetDrainsRatherThanKilling(t *testing.T) {
 // The ledger is the aggregate across targets, so concurrent acquirers must
 // never collectively exceed it.
 func TestConcurrentAcquiresNeverExceedTheBudget(t *testing.T) {
-	const budget = 8
+	const budget = 8 // 7 ordinary + 1 reserved
 	l := newPermitLedger(budget)
 
 	var (
@@ -124,8 +126,9 @@ func TestConcurrentAcquiresNeverExceedTheBudget(t *testing.T) {
 	}
 	wg.Wait()
 
-	if peak > budget {
-		t.Fatalf("peak outstanding = %d, budget = %d — the ledger over-granted", peak, budget)
+	if peak > budget-1 {
+		t.Fatalf("peak ordinary outstanding = %d, ordinary allowance = %d — the ledger over-granted",
+			peak, budget-1)
 	}
 	if l.Outstanding() != len(held) {
 		t.Fatalf("outstanding = %d, granted-and-held = %d", l.Outstanding(), len(held))
@@ -133,7 +136,7 @@ func TestConcurrentAcquiresNeverExceedTheBudget(t *testing.T) {
 }
 
 // A budget of zero means unbounded, matching how the engine treats an unset
-// pool cap. ADR 0181 D3 requires the CONFIG to have no default; that is a
+// pool cap. the no-default rule requires the CONFIG to have no default; that is a
 // validation rule at load, not a reason for the ledger to invent a limit.
 func TestZeroBudgetIsUnbounded(t *testing.T) {
 	l := newPermitLedger(0)
@@ -148,7 +151,7 @@ func TestZeroBudgetIsUnbounded(t *testing.T) {
 // the dial, release it when the socket closes, and release it if the dial
 // fails.
 func TestPermitDialerReleasesOnDialFailure(t *testing.T) {
-	l := newPermitLedger(1)
+	l := newPermitLedger(2)
 	boom := errors.New("connection refused")
 	dial := permitDialer(l, func(context.Context, string, string) (net.Conn, error) {
 		return nil, boom
@@ -166,7 +169,7 @@ func TestPermitDialerReleasesOnDialFailure(t *testing.T) {
 }
 
 func TestPermitDialerReleasesWhenTheSocketCloses(t *testing.T) {
-	l := newPermitLedger(1)
+	l := newPermitLedger(2) // 1 ordinary + 1 reserved
 	server, client := net.Pipe()
 	defer server.Close()
 
@@ -199,7 +202,7 @@ func TestPermitDialerReleasesWhenTheSocketCloses(t *testing.T) {
 // A refused dial must not open a socket at all.
 func TestPermitDialerDoesNotDialWhenTheBudgetIsSpent(t *testing.T) {
 	l := newPermitLedger(0)
-	l.SetBudget(1)
+	l.SetBudget(2) // 1 ordinary + 1 reserved
 	var dialed int
 	dial := permitDialer(l, func(context.Context, string, string) (net.Conn, error) {
 		dialed++
@@ -236,19 +239,27 @@ func TestDefaultTxLimitsMatchTheDeclaredConstants(t *testing.T) {
 	}
 }
 
-// The deprecated debug flag may lengthen the idle bound, never shorten it.
-func TestDebugProfileCannotShortenTheIdleBound(t *testing.T) {
+// The deprecated debug flag selects nothing: both states get the one common
+// bound, whatever the deprecated value says.
+func TestDebugFlagSelectsNothing(t *testing.T) {
 	base := txLimits{idleInTx: 2 * time.Hour, maxTx: 8 * time.Hour}
 
-	shorter := base.forConnection(true, 10*time.Minute, 8*time.Hour)
-	if shorter.idleInTx != 2*time.Hour {
-		t.Errorf("a debug connection got %v, want the base 2h — the flag must never "+
-			"hand a debugging session LESS tolerance than an ordinary one", shorter.idleInTx)
-	}
-
-	longer := base.forConnection(true, 4*time.Hour, 8*time.Hour)
-	if longer.idleInTx != 4*time.Hour {
-		t.Errorf("a longer debug bound was not applied: got %v, want 4h", longer.idleInTx)
+	for _, tc := range []struct {
+		name      string
+		debug     bool
+		debugIdle time.Duration
+	}{
+		{"not debug", false, 0},
+		{"debug, shorter deprecated value", true, 10 * time.Minute},
+		{"debug, longer deprecated value", true, 4 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := base.forConnection(tc.debug, tc.debugIdle, 8*time.Hour)
+			if got.idleInTx != 2*time.Hour {
+				t.Errorf("idleInTx = %v, want the one common 2h bound — the deprecated flag "+
+					"must not select a different behaviour", got.idleInTx)
+			}
+		})
 	}
 }
 
@@ -260,5 +271,34 @@ func TestTheCeilingDoesNotClipTheRuledMaximum(t *testing.T) {
 		t.Errorf("effective maxTx = %v, want %v — the ceiling clipped the ruled policy, "+
 			"which is the defect where a displayed 8h becomes a 30m runtime",
 			got.maxTx, DefaultMaxTxDuration)
+	}
+}
+
+// The reserved lane exists so a cancellation can still be delivered when every
+// ordinary slot is spent — which is exactly when someone reaches for cancel.
+func TestTheControlLaneSurvivesOrdinarySaturation(t *testing.T) {
+	l := newPermitLedger(3) // 2 ordinary + 1 reserved
+
+	for i := range 2 {
+		if _, err := l.Acquire(); err != nil {
+			t.Fatalf("ordinary acquire %d: %v", i, err)
+		}
+	}
+	if _, err := l.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatal("ordinary dials must stop one short of the budget")
+	}
+
+	rel, err := l.AcquireControl()
+	if err != nil {
+		t.Fatalf("the control lane must be available at ordinary saturation: %v", err)
+	}
+	// Serialized: one at a time is enough for connect-write-close, and more
+	// would be a second budget nobody configured.
+	if _, err := l.AcquireControl(); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatal("the control lane must admit one holder at a time")
+	}
+	rel()
+	if _, err := l.AcquireControl(); err != nil {
+		t.Fatalf("the lane must be reusable once released: %v", err)
 	}
 }

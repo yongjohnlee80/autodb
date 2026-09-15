@@ -619,6 +619,21 @@ func (l *Listener) Close() {
 	})
 }
 
+// safely runs a best-effort callback and swallows a panic from it.
+//
+// The callbacks here are supplied by the host, so this package cannot assume
+// they are total. It matters most on the cleanup path: a defer that has
+// already called recover cannot recover again, so a panicking observer there
+// would escape the goroutine and take the process down — turning a diagnostic
+// into the outage the diagnostic was reporting.
+//
+// It is deliberately silent. There is nowhere left to report to: the reporting
+// mechanism is what just failed.
+func safely(fn func()) {
+	defer func() { _ = recover() }()
+	fn()
+}
+
 // handle runs one connection: startup, authentication, and the session.
 //
 // Every exit path closes the connection and emits fd.conn_close, because a
@@ -629,9 +644,15 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 	l.track(raw)
 	closeReason := "peer-closed"
 	defer func() {
+		// UNCONDITIONAL, AND IN THIS ORDER. Untracking and closing must happen
+		// even if a callback below misbehaves, so they run before anything
+		// that calls out of this package — a socket left open because an
+		// observer panicked is a leak an anonymous peer can farm.
 		l.untrack(raw)
 		_ = raw.Close()
-		l.onEvent(Event{Kind: "fd.conn_close", Reason: closeReason, Peer: peer})
+		safely(func() {
+			l.onEvent(Event{Kind: "fd.conn_close", Reason: closeReason, Peer: peer})
+		})
 	}()
 	// ONE CONNECTION'S PANIC MUST NOT BE EVERY CONNECTION'S OUTAGE.
 	//
@@ -654,8 +675,20 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 			// Server-side only. The peer is told nothing about our crash
 			// beyond that the connection ended, and is NOT charged for it —
 			// our bug must not ban their address.
-			l.onLog(fmt.Sprintf("frontdoor: panic serving %s: %v\n%s", peer, r, debug.Stack()))
-			l.onEvent(Event{Kind: "fd.conn_panic", Reason: "panic", Peer: peer})
+			//
+			// EACH CALLBACK IS GUARDED SEPARATELY. These are host-supplied
+			// funcs, and this defer has already consumed its recover — so a
+			// panic inside onLog or onEvent would escape the goroutine and
+			// kill the process, which is the exact outcome this whole
+			// mechanism exists to prevent. Guarding them individually also
+			// means a broken logger cannot swallow the event, or vice versa.
+			stack := debug.Stack()
+			safely(func() {
+				l.onLog(fmt.Sprintf("frontdoor: panic serving %s: %v\n%s", peer, r, stack))
+			})
+			safely(func() {
+				l.onEvent(Event{Kind: "fd.conn_panic", Reason: "panic", Peer: peer})
+			})
 		}
 	}()
 	l.onEvent(Event{Kind: "fd.conn_open", Peer: peer})

@@ -11,13 +11,13 @@ import (
 // connection its operator allowed it to hold.
 //
 // It is a CAPACITY refusal and never charges the credential throttle — see
-// ChargeCapacity and ADR 0180.
+// ChargeCapacity and the charge-class policy.
 var ErrTargetBudgetExhausted = errors.New("exec: target connection budget exhausted")
 
 // permitLedger enforces `exec.max_target_conns`: the total number of sockets
 // this instance may have open to production targets, across every target.
 //
-// A RUNTIME PERMIT, NOT A SUM OF CONFIGURED CAPS (ADR 0181 D5). Summing each
+// A RUNTIME PERMIT, NOT A SUM OF CONFIGURED CAPS (The policy). Summing each
 // target's pool_max_conns pre-slices the budget: two targets configured at 8
 // each reserve 16 whether or not either is busy, so one target queues while
 // the other's slice sits idle and nothing can rebalance. A permit is taken
@@ -26,7 +26,7 @@ var ErrTargetBudgetExhausted = errors.New("exec: target connection budget exhaus
 //
 // Per-target pool_max_conns remains a technical CEILING on one pool. It is
 // not an allocation, and two targets may each be allowed more than the budget
-// — the ledger is what makes that safe (ADR 0181 D6).
+// — the ledger is what makes that safe (see docs/front-door/connection-holding-policy.md).
 type permitLedger struct {
 	mu          sync.Mutex
 	budget      int
@@ -39,10 +39,12 @@ type permitLedger struct {
 	// that wants to reason about a drain needs to know which generation it is
 	// looking at.
 	generation uint64
+	// controlLane serializes the reserved slot to one holder.
+	controlLane chan struct{}
 }
 
 func newPermitLedger(budget int) *permitLedger {
-	return &permitLedger{budget: budget, generation: 1}
+	return &permitLedger{budget: budget, generation: 1, controlLane: make(chan struct{}, 1)}
 }
 
 // SetBudget publishes a new budget as a new generation.
@@ -68,8 +70,50 @@ func (l *permitLedger) SetBudget(n int) {
 // called from every unwind path — dial failure, cancellation, close — without
 // the caller tracking whether it already ran.
 func (l *permitLedger) Acquire() (release func(), err error) {
+	return l.acquire(false)
+}
+
+// AcquireControl takes the RESERVED slot: the one an ordinary dial can never
+// have.
+//
+// A cancellation is a second, short-lived socket to the same server, and it is
+// needed exactly when every ordinary slot is spent — a developer cancels a
+// query because the system is busy, not because it is idle. Letting ordinary
+// traffic consume the whole budget therefore removes cancellation at the only
+// moment anyone reaches for it.
+//
+// Serialized to one at a time: a cancel is connect, write sixteen bytes,
+// close, so one lane is enough, and more would be a second budget nobody
+// configured.
+func (l *permitLedger) AcquireControl() (release func(), err error) {
+	select {
+	case l.controlLane <- struct{}{}:
+	default:
+		return nil, ErrTargetBudgetExhausted
+	}
+	rel, err := l.acquire(true)
+	if err != nil {
+		<-l.controlLane
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			rel()
+			<-l.controlLane
+		})
+	}, nil
+}
+
+func (l *permitLedger) acquire(control bool) (release func(), err error) {
 	l.mu.Lock()
-	if l.budget > 0 && l.outstanding >= l.budget {
+	// ORDINARY DIALS STOP ONE SHORT. The last permit is the control lane's,
+	// so a cancellation can always be delivered.
+	limit := l.budget
+	if !control && limit > 1 {
+		limit--
+	}
+	if l.budget > 0 && l.outstanding >= limit {
 		l.mu.Unlock()
 		return nil, ErrTargetBudgetExhausted
 	}
@@ -105,7 +149,7 @@ func (l *permitLedger) Budget() (budget int, generation uint64) {
 // permitDialer wraps a dial function so every socket to a target takes a
 // permit before it is opened and releases it when it closes.
 //
-// THE DIALER IS THE ONLY SEAM THAT SATISFIES ADR 0181, and the pool's own
+// THE DIALER IS THE ONLY SEAM THAT SATISFIES the connection-budget policy, and the pool's own
 // hooks do not. BeforeConnect can take a permit but has no handle on the
 // connection it produced, and BeforeClose has the connection but no way back
 // to the permit, so pairing them needs a correlation key the pool does not

@@ -242,7 +242,7 @@ func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 		if lifetime > 0 {
 			cfg.MaxConnLifetime = lifetime
 		}
-		// The aggregate budget (ADR 0181). MaxConns above bounds THIS pool;
+		// The aggregate budget (see docs/front-door/connection-holding-policy.md). MaxConns above bounds THIS pool;
 		// this bounds every pool together, which no per-pool number can do.
 		// Wrapping the dialer rather than the pool's hooks is what makes the
 		// failed-dial release possible — see permitDialer.

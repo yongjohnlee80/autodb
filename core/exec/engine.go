@@ -182,7 +182,7 @@ type Engine struct {
 	// connection row may lower poolMaxConns for itself but never raise it.
 	poolMaxConns int
 	// targetPermits bounds the AGGREGATE number of sockets open to targets,
-	// across every pool (ADR 0181). poolMaxConns is a per-pool ceiling and
+	// across every pool (see docs/front-door/connection-holding-policy.md). poolMaxConns is a per-pool ceiling and
 	// cannot express that: two pools of 8 against a budget of 10 are each
 	// individually legal and together are not.
 	//
@@ -304,7 +304,7 @@ func WithDebugTxLimits(debugIdle, ceiling time.Duration) Option {
 
 // WithLogger receives operational problems that have no caller to return to.
 // WithTargetConnBudget sets this instance's total production-connection
-// budget: the aggregate cap across every target pool (ADR 0181 D1).
+// budget: the aggregate cap across every target pool (see docs/front-door/connection-holding-policy.md).
 //
 // Zero or negative leaves it unbounded. The REQUIREMENT that an operator
 // choose a value lives in config validation, under the front door, because

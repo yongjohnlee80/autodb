@@ -468,7 +468,7 @@ func newBackendKey() (*pgproto3.BackendKeyData, error) {
 // failed login, and the tenth ban the source address.
 //
 // The classification now lives in core/exec beside the reasons themselves
-// (ADR 0180 §3.2), where an exhaustiveness test can prove none is missing. A
+// (see docs/front-door/connection-holding-policy.md), where an exhaustiveness test can prove none is missing. A
 // reason with no class charges — failing safe — but cannot reach production
 // unclassified, because that test fails the build first.
 func chargesThrottle(reason string) bool {

@@ -75,19 +75,20 @@ func defaultTxLimits() txLimits {
 // the operator decided, or the bound is advisory.
 func (l txLimits) forConnection(debug bool, debugIdle, ceiling time.Duration) txLimits {
 	out := l
-	// THE DEBUG PROFILE MAY ONLY LENGTHEN, NEVER SHORTEN. This used to assign,
-	// which was harmless while the base bound was ninety seconds and the debug
-	// bound ten minutes. With the base at two hours an assignment would have
-	// handed a connection flagged for DEBUGGING less tolerance than an
-	// ordinary one -- from a flag whose entire purpose is to grant more.
+	// THE DEBUG FLAG NO LONGER SELECTS ANYTHING. Every session is now treated
+	// as a debugging session, so there is ONE idle bound and both states get
+	// it. The parameters are retained so callers and the stored connection
+	// column need not change in the same release; config validation refuses a
+	// deprecated value that differs from the common one, so the two cannot
+	// silently disagree.
 	//
-	// Johno ruled on 2026-09-16 that every session is now treated as a debug
-	// session, so the two tiers have collapsed and IsDebug() is DEPRECATED. It
-	// is kept rather than removed to avoid a schema change inside a timeout
-	// change, and taking the maximum means it cannot do harm while it remains.
-	if debug && debugIdle > out.idleInTx {
-		out.idleInTx = debugIdle
-	}
+	// It used to ASSIGN debugIdle, which was harmless while the base bound was
+	// ninety seconds and the debug bound ten minutes. At a two-hour base that
+	// same line would have handed a connection flagged for DEBUGGING twelve
+	// times LESS tolerance than an ordinary one — from a flag whose entire
+	// purpose was to grant more.
+	_ = debug
+	_ = debugIdle
 	if ceiling > 0 && out.maxTx > ceiling {
 		out.maxTx = ceiling
 	}

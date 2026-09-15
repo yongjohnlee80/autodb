@@ -69,10 +69,12 @@ func TestTxLimits_CeilingCapsThePerConnectionOverride(t *testing.T) {
 	if got.maxTx != 30*time.Minute {
 		t.Errorf("maxTx = %s, want it capped at the 30m ceiling", got.maxTx)
 	}
-	// The debug profile lengthens the idle bound and nothing else.
+	// The debug profile is DEPRECATED and selects nothing: the idle bound is
+	// the one common value whatever the deprecated key says.
 	dbg := l.forConnection(true, 10*time.Minute, 30*time.Minute)
-	if dbg.idleInTx != 10*time.Minute {
-		t.Errorf("debug idle = %s, want 10m", dbg.idleInTx)
+	if dbg.idleInTx != l.idleInTx {
+		t.Errorf("debug idle = %s, want the common bound %s — the flag must not select",
+			dbg.idleInTx, l.idleInTx)
 	}
 	if dbg.maxTx != 30*time.Minute {
 		t.Errorf("debug maxTx = %s, want the ceiling still applied", dbg.maxTx)

@@ -148,7 +148,7 @@ func TestLoad_ResidentBudgetCeiling(t *testing.T) {
 		}
 	}
 	// exec.max_target_conns has no default and is required under the front
-	// door (ADR 0181 D3), so every enabled-front-door fixture must choose one.
+	// door (the no-default rule), so every enabled-front-door fixture must choose one.
 	base := "[exec]\nmax_target_conns = 25\n\n" +
 		"[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
 		"tls_cert_file = \"" + cert + "\"\ntls_key_file = \"" + key + "\"\n" +
@@ -210,7 +210,7 @@ func TestLoad_GeneralLaneBytes(t *testing.T) {
 		}
 	}
 	// exec.max_target_conns has no default and is required under the front
-	// door (ADR 0181 D3), so every enabled-front-door fixture must choose one.
+	// door (the no-default rule), so every enabled-front-door fixture must choose one.
 	base := "[exec]\nmax_target_conns = 25\n\n" +
 		"[frontdoor]\nenabled = true\nbind = \"127.0.0.1:5432\"\n" +
 		"tls_cert_file = \"" + cert + "\"\ntls_key_file = \"" + key + "\"\n" +

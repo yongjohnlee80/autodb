@@ -5,7 +5,7 @@ import "testing"
 // Every declared denial reason must carry a ruled charge class.
 //
 // This is the test that makes the registry a registry rather than a map with
-// gaps. The defect it exists to prevent is the one ADR 0180 was written for:
+// gaps. The defect it exists to prevent is the one this registry was written for:
 // a reason nobody classified being charged to the credential throttle by
 // default, silently, until a developer is banned for running out of capacity.
 func TestEveryDenialReasonHasAChargeClass(t *testing.T) {
@@ -16,7 +16,7 @@ func TestEveryDenialReasonHasAChargeClass(t *testing.T) {
 	}
 }
 
-// The eight reasons ADR 0180 §3.2 named as mis-charged must not charge.
+// The eight reasons the policy named as mis-charged must not charge.
 func TestTheMischargedReasonsNoLongerCharge(t *testing.T) {
 	for _, tc := range []struct {
 		reason string
