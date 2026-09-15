@@ -62,7 +62,13 @@ type WireSessionResult struct {
 
 // wireDenial carries the INTERNAL reason for an audit row. The caller turns
 // every one of these into the same wire denial.
-type wireDenial struct{ reason string }
+type wireDenial struct {
+	reason string
+	// authorized records that the credential had already verified when this
+	// refusal was raised. It is set by denyAfterAuthorization and by nothing
+	// else, so it cannot be claimed by a path that has not earned it.
+	authorized bool
+}
 
 func (e wireDenial) Error() string { return "frontdoor: " + e.reason }
 
@@ -78,6 +84,35 @@ func DenialReason(err error) string {
 }
 
 func deny(reason string) error { return wireDenial{reason: reason} }
+
+// denyAfterAuthorization builds a denial that CARRIES PROOF the caller was
+// already authorized when it was refused.
+//
+// THE WITNESS IS THE MECHANISM, not a label. A refusal may disclose "the
+// system is full" only to somebody who has already proved who they are --
+// telling an unauthenticated stranger that would hand them a capacity oracle.
+// Deciding that from the REASON would mean a table mapping reasons to wire
+// codes, and a table is how a uniform surface becomes an enumerable one, one
+// well-meaning row at a time.
+//
+// Carrying it in the value instead makes the exemption survive a reordering BY
+// CONSTRUCTION: move a capacity check above the credential check and there is
+// no authorized denial to build, so the wire silently stays uniform rather
+// than leaking. It can only be called from a site that has the verified
+// credential in hand.
+func denyAfterAuthorization(reason string) error {
+	return wireDenial{reason: reason, authorized: true}
+}
+
+// DenialDisclosable reports whether this denial may say what it was.
+//
+// True only for a refusal raised after the credential verified. A caller uses
+// it to choose a specific wire code; false means the uniform denial, which is
+// what every pre-authorization refusal gets.
+func DenialDisclosable(err error) bool {
+	var d wireDenial
+	return errors.As(err, &d) && d.authorized
+}
 
 // WireDenial builds a denial with the given internal reason.
 //
@@ -462,12 +497,18 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	if rerr := e.sessions.admitWithLease(s, connRow.ID, WireSessionOverhead); rerr != nil {
 		cancel()
 		switch {
+		// AUTHORIZED BY CONSTRUCTION: this is the reservation phase, reached
+		// only with a verified PAT bound to this connection. The caller has
+		// proved who they are, so they may be told the system is full rather
+		// than being handed the uniform denial that reads as "your credential
+		// is wrong" -- which is what sent a developer hunting a password
+		// problem that did not exist on 2026-09-15.
 		case errors.Is(rerr, ErrLeaseCapExceeded):
-			return out, deny(DenyLeaseCap)
+			return out, denyAfterAuthorization(DenyLeaseCap)
 		case errors.Is(rerr, ErrSessionCapExceeded):
-			return out, deny(DenySessionCap)
+			return out, denyAfterAuthorization(DenySessionCap)
 		case errors.Is(rerr, ErrResidentBudgetExceeded):
-			return out, deny(DenyResidentBudget)
+			return out, denyAfterAuthorization(DenyResidentBudget)
 		}
 		return out, rerr
 	}

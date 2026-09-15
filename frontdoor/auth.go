@@ -107,6 +107,11 @@ type authOutcome struct {
 	// Counts reports whether this denial is the PEER's fault and should be
 	// charged to their source address. A store failure is not.
 	Counts bool
+	// Disclosable carries the engine's witness that this refusal happened
+	// AFTER the credential verified, which is the only condition under which
+	// the wire may say what went wrong. Not derived from the reason: see
+	// exec.DenialDisclosable.
+	Disclosable bool
 	// Peer reports the same thing for a non-denial ERROR return: a read
 	// failure is the peer's doing, while running out of workers or a stuck
 	// store is ours. Separate from Counts because one accompanies a denial
@@ -237,7 +242,11 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	release()
 	if aerr != nil {
 		if reason := exec.DenialReason(aerr); reason != "" {
-			return authOutcome{Denied: denialReason(reason), Counts: chargesThrottle(reason)}, nil
+			return authOutcome{
+				Denied:      denialReason(reason),
+				Counts:      chargesThrottle(reason),
+				Disclosable: exec.DenialDisclosable(aerr),
+			}, nil
 		}
 		// A LOCKED STORE DOES NOT ARRIVE HERE, and an earlier version of this
 		// feature wrongly assumed it did.

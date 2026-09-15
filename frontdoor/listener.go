@@ -843,7 +843,7 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 	if l.testDenialDelay > 0 {
 		time.Sleep(l.testDenialDelay)
 	}
-	if derr := sendDenial(stream, outcome.Denied); derr != nil {
+	if derr := sendDenialFor(stream, outcome.Denied, outcome.Disclosable); derr != nil {
 		l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 	}
 	closeReason = outcome.Denied.String()

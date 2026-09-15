@@ -88,6 +88,19 @@ type admitter struct {
 	maxPreAuth   int
 	laneBytes    int64
 	failureLimit int
+	// maxPerSource bounds CONCURRENT connections from one address.
+	//
+	// It is the bound the 2026-09-15 lockout needed and did not have. The
+	// throttle counts FAILED credentials, so it cannot answer "one host is
+	// using everything" -- and because capacity refusals were charged to it,
+	// that question got answered by banning the host instead. This is the
+	// honest limit: a ceiling on concurrency, refused readably, never charged.
+	maxPerSource int
+	// perSource is live connections per address, and entries at zero are
+	// DELETED rather than left at 0. A map keyed by attacker-supplied
+	// addresses that only ever grows is a slow memory leak with a remote
+	// trigger.
+	perSource map[string]int
 
 	// failures records FAILED authentication and TLS-handshake events per
 	// source host, most recent last.
@@ -96,10 +109,23 @@ type admitter struct {
 	now func() time.Time
 }
 
+// DefaultMaxConnsPerSource is the ruled per-address concurrency allowance.
+//
+// EFFECTIVE VALUE IS min(50, maxConns): a per-source cap above the global one
+// can never bind, and publishing a number that cannot be reached is worse than
+// publishing none -- an operator would size against it.
+const DefaultMaxConnsPerSource = 50
+
 func newAdmitter(maxConns, maxPreAuth, failureLimit int, laneBytes int64, now func() time.Time) *admitter {
+	perSource := DefaultMaxConnsPerSource
+	if maxConns > 0 && maxConns < perSource {
+		perSource = maxConns
+	}
 	return &admitter{
 		maxConns: maxConns, maxPreAuth: maxPreAuth, laneBytes: laneBytes,
 		failureLimit: failureLimit,
+		maxPerSource: perSource,
+		perSource:    make(map[string]int),
 		failures:     make(map[string][]time.Time),
 		now:          now,
 	}
@@ -111,6 +137,9 @@ func newAdmitter(maxConns, maxPreAuth, failureLimit int, laneBytes int64, now fu
 // capacity the system does not have.
 type ticket struct {
 	a *admitter
+	// host is remembered so release decrements the SAME entry admit
+	// incremented, whatever the connection did in between.
+	host string
 
 	mu        sync.Mutex
 	inPreAuth bool
@@ -138,6 +167,13 @@ func (a *admitter) admit(peer string) (*ticket, denialReason) {
 	if a.conns >= a.maxConns {
 		return nil, reasonConnectionCap
 	}
+	// AFTER the global cap and BEFORE the pre-auth one. A host that has used
+	// its allowance is refused for that reason specifically, rather than
+	// competing for the anonymous-peer slots and being refused for a reason
+	// that names the wrong thing.
+	if a.maxPerSource > 0 && a.perSource[host] >= a.maxPerSource {
+		return nil, reasonSourceConnCap
+	}
 	if a.preAuth >= a.maxPreAuth {
 		return nil, reasonPreAuthConnCap
 	}
@@ -148,7 +184,8 @@ func (a *admitter) admit(peer string) (*ticket, denialReason) {
 	a.conns++
 	a.preAuth++
 	a.laneUsed += ControlLanePerConn
-	return &ticket{a: a, inPreAuth: true}, ""
+	a.perSource[host]++
+	return &ticket{a: a, inPreAuth: true, host: host}, ""
 }
 
 // leavePreAuth returns the pre-auth slot once the connection has
@@ -187,6 +224,16 @@ func (t *ticket) release() {
 		t.inPreAuth = false
 	}
 	t.a.laneUsed -= ControlLanePerConn
+	// ZERO ENTRIES ARE DELETED, not left at 0. The key is an address a peer
+	// chooses, so a map that only grows is a slow memory leak anyone can
+	// trigger by connecting from many sources.
+	if t.host != "" {
+		if n := t.a.perSource[t.host] - 1; n > 0 {
+			t.a.perSource[t.host] = n
+		} else {
+			delete(t.a.perSource, t.host)
+		}
+	}
 	t.a.mu.Unlock()
 }
 
