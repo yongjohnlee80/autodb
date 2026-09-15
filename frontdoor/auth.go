@@ -457,36 +457,24 @@ func newBackendKey() (*pgproto3.BackendKeyData, error) {
 //
 // Everything reaching here is post-verification, so the question is only
 // whether the fault is the credential's.
+// chargesThrottle decides whether a denial counts against the credential
+// throttle, by asking the registry that owns the ruling.
+//
+// THE OLD SHAPE WAS THE BUG. This was a switch with `default: return true`,
+// so every reason nobody had explicitly exempted was charged — and eight of
+// them were capacity, target state or our own configuration. That is the
+// mechanism that turned a full connection pool into a banned developer on
+// 2026-09-15: four leases granted, the fifth refused, the refusal filed as a
+// failed login, and the tenth ban the source address.
+//
+// The classification now lives in core/exec beside the reasons themselves
+// (ADR 0180 §3.2), where an exhaustiveness test can prove none is missing. A
+// reason with no class charges — failing safe — but cannot reach production
+// unclassified, because that test fails the build first.
 func chargesThrottle(reason string) bool {
-	switch reason {
-	case exec.DenyDatabaseMismatch:
-		// RULED by Johno, 2026-09-05. An introspecting client dials each
-		// database it discovered; DBeaver and pgAdmin default the field to
-		// `postgres`. Six discovered databases across two refreshes exceeds
-		// ten, so charging would lock the developer out of their own install
-		// and fill the trail with what an operator reads as a credential
-		// attack. It is a client misconfiguration, not an attack.
-		return false
-	case exec.DenyPATNotCleartextDebug, exec.DenyPATCleartextDebugInTLS:
-		// Mirrors of each other, and both mode-side: the token is perfectly
-		// valid on the listener it was minted for. The common case is a
-		// developer whose daemon restarted into the other mode, and a GUI
-		// client retrying would spend a ten-per-minute budget in seconds.
-		// Charging buys nothing against an attacker either — the wire is the
-		// uniform 28000, so there is no oracle to slow, and a leaked debug
-		// token probing production is a DETECTION concern already served by
-		// this reason's own audit identity.
-		return false
-	default:
-		// Credential-side, or not yet judged. Charging is the safe default for
-		// a reason nobody has reasoned about: it fails towards the throttle
-		// rather than towards an unmetered retry loop.
-		//
-		// NOTE: eight EXISTING reasons are mis-charged under this principle
-		// (capacity, target state, our own configuration). Johno has ruled they
-		// are to be corrected, in their own PR with its own review pass —
-		// deliberately not here, because re-judging live charging behaviour on
-		// seven unrelated reasons is a different change from this one.
+	class, ok := exec.DenialCharge(reason)
+	if !ok {
 		return true
 	}
+	return class.Charges()
 }

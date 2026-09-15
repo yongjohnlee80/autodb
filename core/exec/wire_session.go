@@ -133,6 +133,117 @@ const (
 	DenyStartupGUC = "frontdoor/startup-parameter-refused"
 )
 
+// ChargeClass says who a denial is ABOUT, which decides whether it counts
+// against the credential throttle.
+//
+// The distinction is the whole of ADR 0180. A front door that counts "we are
+// full" as "you guessed wrong" bans the developer it just refused for
+// capacity — which is exactly what happened on 2026-09-15, when a pool that
+// granted four leases filed the fifth connection as a failed login and the
+// tenth banned the source address.
+type ChargeClass uint8
+
+const (
+	// ChargeCredential: the caller presented something wrong. Charges.
+	ChargeCredential ChargeClass = iota
+	// ChargeProtocol: the caller's frames were malformed or disallowed. Charges.
+	ChargeProtocol
+	// ChargeCapacity: we ran out of something. NEVER charges — a queue is not
+	// evidence about a credential.
+	ChargeCapacity
+	// ChargeNone: our own fault — our store, our config, our bug. NEVER
+	// charges.
+	ChargeNone
+)
+
+// Charges reports whether this class counts against the credential throttle.
+func (c ChargeClass) Charges() bool { return c == ChargeCredential || c == ChargeProtocol }
+
+func (c ChargeClass) String() string {
+	switch c {
+	case ChargeCredential:
+		return "credential"
+	case ChargeProtocol:
+		return "protocol"
+	case ChargeCapacity:
+		return "capacity"
+	case ChargeNone:
+		return "none"
+	}
+	return "unknown"
+}
+
+// denialCharge is the registry: every post-verification denial reason, with
+// the class ADR 0180 §3.2 ruled for it.
+//
+// A MAP RATHER THAN A SWITCH WITH A DEFAULT, deliberately. The old switch
+// charged anything it had not been taught about, so eight reasons were
+// mis-charged silently and a ninth would have joined them unnoticed. Here a
+// new reason is ABSENT rather than wrong, and TestEveryDenialReasonHasACharge
+// fails the build until somebody classifies it.
+var denialCharge = map[string]ChargeClass{
+	// Credential — the caller presented something wrong. Unchanged.
+	DenyBadCredential: ChargeCredential,
+	DenyUserMismatch:  ChargeCredential,
+	DenyIPNotAdmitted: ChargeCredential,
+	DenyPATIPNarrowed: ChargeCredential,
+
+	// Capacity — we ran out. Ruled uncharged by ADR 0180 D2.
+	DenyLeaseCap:       ChargeCapacity,
+	DenySessionCap:     ChargeCapacity,
+	DenyResidentBudget: ChargeCapacity,
+
+	// None — our config, our stored state, our bug. Ruled uncharged by D3/D4.
+	// The last three each follow a VERIFIED PAT bound to the exact connection:
+	// the caller has already proved who they are, and what they met is a fact
+	// about what we stored. Charging them means a developer whose grant was
+	// never set up bans themselves by retrying.
+	DenyProfileRefuses: ChargeNone,
+	DenyLeaseEncoding:  ChargeNone,
+	DenyNoSuchDatabase: ChargeNone,
+	DenyNoGrant:        ChargeNone,
+	DenyPATUnscoped:    ChargeNone,
+
+	// Mode-side, and already uncharged before ADR 0180 — the token is valid on
+	// the listener it was minted for.
+	DenyPATNotCleartextDebug:   ChargeNone,
+	DenyPATCleartextDebugInTLS: ChargeNone,
+
+	// Client misconfiguration, not an attack: an introspecting client dials
+	// every database it discovered. Ruled by Johno, 2026-09-05.
+	DenyDatabaseMismatch: ChargeNone,
+
+	// POST-verification startup GUC. The pre-verification startup-policy
+	// refusal is a different identity and stays Protocol; this constant only
+	// ever names the post-verification outcome, which is after a verified PAT
+	// and is therefore a configuration mistake rather than credential
+	// grinding (ADR 0180 §3.2).
+	DenyStartupGUC: ChargeNone,
+}
+
+// DenialCharge returns the ruled class for a denial reason.
+//
+// The second result is false for a reason with no registered class. A caller
+// must fail SAFE — charge it — because an unclassified reason is one nobody
+// has reasoned about; but the exhaustiveness test means this cannot happen to
+// a reason declared in this file.
+func DenialCharge(reason string) (ChargeClass, bool) {
+	c, ok := denialCharge[reason]
+	return c, ok
+}
+
+// DenialReasons lists every declared post-verification denial reason, so the
+// exhaustiveness test can walk them.
+func DenialReasons() []string {
+	return []string{
+		DenyBadCredential, DenyUserMismatch, DenyIPNotAdmitted, DenyPATIPNarrowed,
+		DenyNoSuchDatabase, DenyPATUnscoped, DenyDatabaseMismatch,
+		DenyPATNotCleartextDebug, DenyPATCleartextDebugInTLS, DenyNoGrant,
+		DenyProfileRefuses, DenyLeaseCap, DenySessionCap, DenyResidentBudget,
+		DenyLeaseEncoding, DenyStartupGUC,
+	}
+}
+
 // WireSessionOverhead is the fixed memory charged for one wire session: the
 // ExecSession's own state — the session record, its registry and per-user
 // entries, the reservation itself, and the bookkeeping the engine keeps for
