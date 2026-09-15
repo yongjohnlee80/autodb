@@ -540,7 +540,17 @@ func (e *Engine) noteIdleHolder(ctx context.Context, s *session, now time.Time, 
 		s.mu.Unlock()
 		return
 	}
+	// THE INTERVAL IS CLAIMED, NOT SPENT. The cursor still moves here so a
+	// second sweep cannot claim the same interval concurrently, but the claim
+	// is RELEASED below if the record does not land.
+	//
+	// It used to be spent unconditionally, before a best-effort write that
+	// swallowed its own error: a store that timed out for a few seconds
+	// silently destroyed a required 30-, 60- or 90-minute record, and nothing
+	// ever retried it. An audit obligation that a transient outage can delete
+	// is not an obligation.
 	s.hbCursor = due
+	claimed := due
 	h := idleHolder{
 		session: s.id, connID: s.connID,
 		subject: s.userID, username: s.holderUser, ip: s.holderIP, patID: s.patID,
@@ -559,7 +569,21 @@ func (e *Engine) noteIdleHolder(ctx context.Context, s *session, now time.Time, 
 	// block the statement that is trying to end this very transaction.
 	s.mu.Unlock()
 
-	e.auditBounded(ctx, h.subject, h.ip, idleHolderAction, h.render())
+	if err := e.auditBoundedErr(ctx, h.subject, h.ip, idleHolderAction, h.render()); err != nil {
+		e.logf("auditing %s failed: %v", idleHolderAction, err)
+		// GIVE THE INTERVAL BACK so a later sweep retries it.
+		//
+		// Only if the cursor is still where this sweep left it: if the
+		// transaction ended, a new episode began, or the client made progress
+		// and rewound it, the interval this sweep claimed no longer exists and
+		// restoring the old value would resurrect a cursor from a transaction
+		// that is gone.
+		s.mu.Lock()
+		if s.hbCursor == claimed && s.hbTx == h.txID {
+			s.hbCursor = claimed - 1
+		}
+		s.mu.Unlock()
+	}
 }
 
 // effectiveDeadline is the earlier of the two bounds that can end an open

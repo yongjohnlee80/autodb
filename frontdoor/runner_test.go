@@ -166,23 +166,47 @@ func TestRunner_AnUndeclaredIdentityIsRefused(t *testing.T) {
 	}
 }
 
-// OPERATIONAL OUTCOMES CARRY NO IDENTITY AND ARE NOT CHECKED AGAINST ONE.
-// Our own read failure is not a thing the peer did, and inventing a declared
-// reason for it would put our outage into their vocabulary.
-func TestRunner_AnOperationalOutcomeNeedsNoDeclaredIdentity(t *testing.T) {
+// OPERATIONAL OUTCOMES ARE VALIDATED LIKE EVERY OTHER ENDING.
+//
+// They used to bypass the registry entirely, which made a registry built
+// expressly to give store failures and read failures a home unable to see the
+// outcomes it was created for. The raw error survives as operator detail; the
+// identity is what the registry checks.
+func TestRunner_AnOperationalOutcomeIsValidatedToo(t *testing.T) {
 	t.Parallel()
 	lc := testLifecycle(t)
 
 	boom := errors.New("the store would not answer")
-	got, err := lc.run(PhaseStartup, func() Outcome { return Operational(boom) })
+	got, err := lc.run(PhaseStartup, func() Outcome {
+		return Operational(outcomeID(OutcomeStartupFailed), boom)
+	})
 	if err != nil {
-		t.Fatalf("an operational outcome was rejected: %v", err)
+		t.Fatalf("a declared operational outcome was rejected: %v", err)
 	}
 	if !got.Terminal() || got.Continues() {
 		t.Error("an operational outcome does not end the connection")
 	}
 	if !errors.Is(got.Err(), boom) {
 		t.Errorf("the underlying failure was lost: %v", got.Err())
+	}
+
+	// AN UNDECLARED OPERATIONAL IDENTITY FAILS CLOSED, exactly as an
+	// undeclared refusal does.
+	lc2 := testLifecycle(t)
+	if _, err := lc2.run(PhaseStartup, func() Outcome {
+		return Operational("frontdoor/invented-operational", boom)
+	}); err == nil {
+		t.Error("an operational ending nobody declared passed the runner")
+	}
+
+	// AND ONE DECLARED BY A DIFFERENT PHASE FAILS TOO. Producer membership is
+	// what makes "what can happen here" answerable, and three phases sharing
+	// one producer is what made it unanswerable before.
+	lc3 := testLifecycle(t)
+	if _, err := lc3.run(PhaseStartup, func() Outcome {
+		return Operational(outcomeID(OutcomeHandshakeWrite), boom)
+	}); err == nil {
+		t.Error("the startup phase ended on the handshake phase's identity")
 	}
 }
 
@@ -394,7 +418,7 @@ func TestPhases_EveryRaisedReasonIsDeclaredByItsPhase(t *testing.T) {
 	t.Parallel()
 
 	byFile := map[string]outcome.ProducerID{
-		"auth.go":     ProducerCredential,
+		"auth.go":     ProducerAuthOpen,
 		"startup.go":  ProducerStartup,
 		"params.go":   ProducerStartup,
 		"listener.go": ProducerAccept,
@@ -492,4 +516,184 @@ func TestPhases_EveryRaisedReasonIsDeclaredByItsPhase(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("no denial raise sites were found; this cell is no longer checking anything")
 	}
+}
+
+// SIX PHASES, SIX DISTINCT PRODUCERS, and the set is exact.
+//
+// Three phases shared one producer before this. The registry could then say
+// that "credential-exchange" may emit a handshake-write failure, which answers
+// the question "what can happen HERE" with the union of three heres --
+// precisely the question producer membership exists to make answerable.
+//
+// The set is pinned exactly rather than merely checked for duplicates, so a
+// missing producer, a reused one, and a renamed one are all caught.
+func TestPhases_EveryPhaseHasItsOwnProducer(t *testing.T) {
+	t.Parallel()
+
+	want := map[PhaseName]outcome.ProducerID{
+		PhaseAccept:              ProducerAccept,
+		PhaseStartup:             ProducerStartup,
+		PhaseCancel:              ProducerCancel,
+		PhaseAuthenticateAndOpen: ProducerAuthOpen,
+		PhaseHandshake:           ProducerHandshake,
+		PhaseServe:               ProducerServe,
+	}
+
+	phases := lifecyclePhases()
+	if len(phases) != len(want) {
+		t.Fatalf("%d phases declared, want %d", len(phases), len(want))
+	}
+
+	seenProducer := map[outcome.ProducerID]PhaseName{}
+	for _, p := range phases {
+		expected, known := want[p.Name]
+		if !known {
+			t.Errorf("%s is not in the declared phase set", p.Name)
+			continue
+		}
+		if p.Producer != expected {
+			t.Errorf("%s has producer %q, want %q", p.Name, p.Producer, expected)
+		}
+		if other, dup := seenProducer[p.Producer]; dup {
+			t.Errorf("%s and %s share producer %q, so the registry cannot say which of "+
+				"them emitted an outcome", other, p.Name, p.Producer)
+		}
+		seenProducer[p.Producer] = p.Name
+		delete(want, p.Name)
+	}
+	for name := range want {
+		t.Errorf("%s is missing from the declared phases", name)
+	}
+
+	// AND THE ENGINE'S PRODUCER IS NOT ONE OF THEM. The engine raises the
+	// capacity refusals and this package renders them; they are two producers
+	// declaring one identity, which is the case producer-owned membership
+	// exists for. One shared id would collapse them into a duplicate pair.
+	for _, p := range phases {
+		if p.Producer == exec.Producer {
+			t.Errorf("%s uses the engine's own producer id %q; the engine declares these "+
+				"identities too, and a shared id makes those two declarations one "+
+				"duplicate rather than two producers", p.Name, exec.Producer)
+		}
+	}
+}
+
+// EVERY DECLARED PHASE ACTUALLY RUNS, and each scenario produces its exact
+// prefix and nothing after it.
+//
+// THIS IS THE CELL THAT WAS MISSING. Six phases were declared and three of
+// them -- accept, handshake and serve -- never reached the runner at all. The
+// tests passed, the golden trace passed, and the PR described a runner over
+// six phases, because nothing anywhere asserted that a declared phase ran. A
+// bypassed phase validates no outcome, cannot be held to running once, and is
+// not there for a scheduler to attach to.
+func TestPhases_EachScenarioRunsItsExactPrefix(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		name     string
+		scenario string
+		want     []PhaseName
+	}{
+		{
+			"a refusal at accept stops there",
+			"accept-refusal-source-cap",
+			[]PhaseName{PhaseAccept},
+		},
+		{
+			"a TLS failure reaches startup and no further",
+			"tls-failure",
+			[]PhaseName{PhaseAccept, PhaseStartup},
+		},
+		{
+			"a cancel runs startup then its own terminal phase",
+			"cancel-applied",
+			[]PhaseName{PhaseAccept, PhaseStartup, PhaseCancel},
+		},
+		{
+			"a denial stops after the credential exchange",
+			"auth-denied",
+			[]PhaseName{PhaseAccept, PhaseStartup, PhaseAuthenticateAndOpen},
+		},
+		{
+			"a served connection runs all of them",
+			"handshake-write-and-normal-close",
+			[]PhaseName{PhaseAccept, PhaseStartup, PhaseAuthenticateAndOpen, PhaseHandshake, PhaseServe},
+		},
+	} {
+		var sc baselineScenario
+		for _, s := range lifecycleScenarios() {
+			if s.name == c.scenario {
+				sc = s
+			}
+		}
+		if sc.name == "" {
+			t.Fatalf("%s: no scenario named %q", c.name, c.scenario)
+		}
+
+		got := phasesForScenario(t, sc)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: phases = %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: phase %d = %s, want %s (full: %v)", c.name, i, got[i], c.want[i], got)
+			}
+		}
+		// EXACTLY ONCE, each. Every phase is declared exactly-once, and a
+		// second run of one would be a second reservation or a second session.
+		seen := map[PhaseName]int{}
+		for _, p := range got {
+			seen[p]++
+			if seen[p] > 1 {
+				t.Errorf("%s: %s ran %d times", c.name, p, seen[p])
+			}
+		}
+	}
+}
+
+// phasesForScenario drives one baseline scenario and reports the phases its
+// connection ran.
+func phasesForScenario(t *testing.T, sc baselineScenario) []PhaseName {
+	t.Helper()
+	eng := &traceEngine{}
+	if sc.engine != nil {
+		sc.engine(eng)
+	}
+
+	var mu sync.Mutex
+	byPeer := map[string]*lifecycle{}
+	opt := sc.opt(eng)
+	opt.testLifecycleReady = func(peer string, lc *lifecycle) {
+		mu.Lock()
+		byPeer[peer] = lc
+		mu.Unlock()
+	}
+
+	l, events, addr := listenerWith(t, opt)
+	if sc.prepare != nil {
+		sc.prepare(l)
+	}
+	peer, _ := sc.drive(t, addr)
+	if sc.afterDrive != nil {
+		sc.afterDrive(t, l)
+	}
+
+	waitFor(t, "the connection's terminal event", func() bool {
+		for _, e := range events() {
+			if e.Peer == peer && (e.Kind == "fd.conn_close" || e.Kind == "fd.budget_refuse") {
+				return true
+			}
+		}
+		return false
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	lc, ok := byPeer[peer]
+	if !ok {
+		t.Fatalf("no lifecycle was recorded for %s, so this cell cannot see which phases ran", peer)
+	}
+	return lc.ranPhases()
 }

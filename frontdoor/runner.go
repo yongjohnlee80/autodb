@@ -45,6 +45,13 @@ type lifecycle struct {
 	reg    *outcome.Registry
 	phases map[PhaseName]Phase
 	ran    map[PhaseName]bool
+
+	// order records which phases ran, in order, so a cell can assert the exact
+	// prefix a scenario should produce. Production never reads it; it exists
+	// because "the runner drives every phase" is a claim that has to be
+	// checkable, and three phases were declared and bypassed before anyone
+	// noticed.
+	order []PhaseName
 }
 
 func (l *Listener) newLifecycle() *lifecycle {
@@ -112,6 +119,7 @@ func (lc *lifecycle) run(name PhaseName, body func() Outcome) (Outcome, error) {
 		}
 	}
 	lc.ran[name] = true
+	lc.order = append(lc.order, name)
 
 	got := body()
 
@@ -123,12 +131,14 @@ func (lc *lifecycle) run(name PhaseName, body func() Outcome) (Outcome, error) {
 		// connection to the next phase.
 		return Outcome{}, fmt.Errorf("frontdoor: %s concluded nothing; the zero outcome is not "+
 			"a decision to proceed", name)
-	case verdictContinue, verdictOperational:
+	case verdictContinue:
+		// The only verdict with no identity: nothing happened that anyone
+		// needs to be able to name, because the lifecycle simply proceeds.
 		return got, nil
 	}
 
-	// A REFUSAL OR A CONTROL OUTCOME MUST NAME SOMETHING THIS PRODUCER
-	// DECLARED. Checking it here, where the producer is still known, is what
+	// EVERY TERMINAL OUTCOME MUST NAME SOMETHING THIS PRODUCER DECLARED --
+	// operational endings included, which is what an outcome registry is for. Checking it here, where the producer is still known, is what
 	// makes "what can happen in this phase" an answerable question -- and it
 	// is the check that stops a reason invented at a call site from arriving
 	// at the renderer looking exactly like a declared one, carrying whatever
@@ -187,3 +197,6 @@ func (l *Listener) denialOccurrence(lc *lifecycle, phase PhaseName, reason denia
 	}
 	return occ
 }
+
+// ranPhases reports the phases this connection ran, in order.
+func (lc *lifecycle) ranPhases() []PhaseName { return append([]PhaseName(nil), lc.order...) }

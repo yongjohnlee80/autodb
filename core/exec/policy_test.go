@@ -307,3 +307,63 @@ func TestReloadPolicy_AuditsTheChangeWithoutSecrets(t *testing.T) {
 		t.Error("the operator's token is in the audit detail")
 	}
 }
+
+// A BOUND MUST RUN AT THE VALUE IT PERSISTS AS.
+//
+// The durable policy keeps milliseconds. A finer bound would run at the value
+// given and store as something else: a 1ns bound persists as zero, and the next
+// start refuses to boot on a policy the operator never wrote. It is refused
+// rather than rounded, because rounding means the daemon runs a bound nobody
+// chose while the audit row records the one they asked for.
+func TestReloadPolicy_RefusesADurationItCannotPersistExactly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := policyFixture(t)
+	before := f.eng.Settings()
+
+	for _, c := range []struct {
+		name string
+		mut  func(*PolicySpec)
+	}{
+		{"a sub-millisecond idle bound", func(s *PolicySpec) { s.IdleInTxTimeout = 90*time.Minute + time.Nanosecond }},
+		{"a sub-millisecond session bound", func(s *PolicySpec) { s.SessionIdleTimeout = 5*time.Minute + 500*time.Microsecond }},
+		{"a sub-millisecond maximum", func(s *PolicySpec) { s.MaxTxDuration = 6*time.Hour + time.Microsecond }},
+	} {
+		spec := goodSpec()
+		c.mut(&spec)
+		_, err := f.eng.ReloadPolicy(ctx, f.rootTok, spec, testIP)
+		if !errors.Is(err, ErrPolicyInvalid) {
+			t.Errorf("%s: err = %v, want ErrPolicyInvalid", c.name, err)
+		}
+	}
+
+	// NOTHING MOVED. The refusal happens before the store, the audit row and
+	// the generation, so a rejected duration leaves no trace but the error.
+	if got := f.eng.Settings(); got != before {
+		t.Error("a refused duration changed the live settings")
+	}
+	if n := f.auditCount(t, "policy_reloaded"); n != 0 {
+		t.Errorf("%d policy_reloaded rows after three refusals", n)
+	}
+
+	// AND THE ACCEPTED VALUES ROUND-TRIP EXACTLY. A whole number of
+	// milliseconds is what the durable form keeps, so what comes back after a
+	// restart is bit-for-bit what was asked for.
+	spec := goodSpec()
+	spec.IdleInTxTimeout = 90*time.Minute + 3*time.Millisecond
+	got, err := f.eng.ReloadPolicy(ctx, f.rootTok, spec, testIP)
+	if err != nil {
+		t.Fatalf("a millisecond-aligned bound was refused: %v", err)
+	}
+	if got.IdleInTxTimeout != spec.IdleInTxTimeout {
+		t.Errorf("idle = %v, want %v", got.IdleInTxTimeout, spec.IdleInTxTimeout)
+	}
+	restarted := New(f.store, f.svc, WithMaxRows(3), WithTargetConnBudget(25))
+	t.Cleanup(func() { _ = restarted.Close() })
+	if err := restarted.LoadDurablePolicy(ctx); err != nil {
+		t.Fatalf("LoadDurablePolicy: %v", err)
+	}
+	if v := restarted.Settings().IdleInTxTimeout; v != spec.IdleInTxTimeout {
+		t.Errorf("after restart idle = %v, want %v — the stored form lost precision", v, spec.IdleInTxTimeout)
+	}
+}

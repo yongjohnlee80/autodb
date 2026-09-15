@@ -41,6 +41,14 @@ type acceptToken struct {
 	// handlerDone discharges the WaitGroup add the accept loop performed.
 	handlerDone func()
 
+	// lc is the per-connection lifecycle, CREATED IN THE ACCEPT LOOP and
+	// carried here with the rest of the obligation.
+	//
+	// It travels with the token because the accept phase is the first phase:
+	// a lifecycle created later could not record that accept ran, and a phase
+	// that cannot be recorded cannot be enforced exactly-once either.
+	lc *lifecycle
+
 	spent atomic.Bool
 }
 

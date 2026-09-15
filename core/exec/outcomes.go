@@ -25,7 +25,12 @@ import (
 // -- splitting them would need its own token, lock and rollback design -- so
 // they are one producer, and saying otherwise would describe a structure the
 // code does not have.
-const Producer = outcome.ProducerID("authenticate-and-open")
+// It is ENGINE-SPECIFIC and distinct from the front door's phase of the same
+// job. Both declare these identities -- the engine raises them, the front door
+// renders them -- and a shared producer id would make those two declarations
+// one duplicate pair rather than the two producers the registry is built to
+// express.
+const Producer = outcome.ProducerID("engine-wire-session-open")
 
 // chargeOf maps the engine's own class onto the registry's.
 //

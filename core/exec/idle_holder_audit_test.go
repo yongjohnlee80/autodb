@@ -2,7 +2,9 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -336,5 +338,92 @@ func TestStatementPreview_IsBoundedAndUTF8Safe(t *testing.T) {
 	if field(t, recA, "last_statement_fingerprint") == field(t, recB, "last_statement_fingerprint") {
 		t.Error("two statements differing only past the preview cap share a fingerprint; " +
 			"the digest is being taken over the preview rather than the statement")
+	}
+}
+
+// AN OBLIGATION A BRIEF OUTAGE CAN DELETE IS NOT AN OBLIGATION.
+//
+// The heartbeat is required to appear every thirty minutes. The cursor used to
+// advance before a best-effort write that swallowed its own error, so a store
+// that timed out for a few seconds silently destroyed a required 30-, 60- or
+// 90-minute record and nothing ever retried it. The holder went on holding its
+// locks, unreported, and the trail showed a gap nobody could explain.
+//
+// The interval is now CLAIMED rather than spent: the claim is released when
+// the record does not land, and a later sweep takes it again.
+func TestIdleHolder_ATransientAuditFailureDoesNotSpendTheInterval(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f, s := holderFixture(t, 2*time.Hour, 8*time.Hour)
+
+	var failNext atomic.Bool
+	failNext.Store(true)
+	f.eng.hookAuditFail = func(action string) error {
+		if action == idleHolderAction && failNext.Swap(false) {
+			return errors.New("the meta store timed out")
+		}
+		return nil
+	}
+
+	idleFor(s, 30*time.Minute)
+	f.eng.reapExpired(ctx, time.Now())
+	if n := len(heartbeats(t, f)); n != 0 {
+		t.Fatalf("%d heartbeats recorded while the store was failing; this cell is not "+
+			"testing what it claims to", n)
+	}
+
+	// THE NEXT SWEEP TAKES THE INTERVAL AGAIN. Same interval, not the next
+	// one: the holder has been idle thirty minutes and that is the record that
+	// is owed.
+	f.eng.reapExpired(ctx, time.Now())
+	got := heartbeats(t, f)
+	if len(got) != 1 {
+		t.Fatalf("heartbeats after the store recovered = %d, want 1 — the interval was "+
+			"spent on a record nobody has", len(got))
+	}
+	if v := field(t, got[0], "heartbeat"); v != "30m0s" {
+		t.Errorf("the retried heartbeat = %s, want 30m0s", v)
+	}
+
+	// AND IT IS NOT DUPLICATED once it has landed.
+	f.eng.reapExpired(ctx, time.Now())
+	if n := len(heartbeats(t, f)); n != 1 {
+		t.Errorf("heartbeats after a successful write = %d, want 1; the interval was "+
+			"claimed twice", n)
+	}
+}
+
+// A CLAIM IS ONLY RELEASED IF NOTHING ELSE HAS MOVED THE CURSOR.
+//
+// The release exists to give a failed interval back. It must not give back an
+// interval somebody else has since claimed: if another sweep advanced the
+// cursor while this write was in flight, rewinding to this sweep's value would
+// hand out an interval that is already owned and produce the duplicate record
+// the cursor exists to prevent.
+func TestIdleHolder_AFailedWriteReleasesOnlyItsOwnClaim(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f, s := holderFixture(t, 2*time.Hour, 8*time.Hour)
+
+	f.eng.hookAuditFail = func(action string) error {
+		if action != idleHolderAction {
+			return nil
+		}
+		// Another sweep claims a later interval while this write is failing.
+		s.mu.Lock()
+		s.hbCursor = 7
+		s.mu.Unlock()
+		return errors.New("the meta store timed out")
+	}
+
+	idleFor(s, 90*time.Minute)
+	f.eng.reapExpired(ctx, time.Now())
+
+	s.mu.Lock()
+	got := s.hbCursor
+	s.mu.Unlock()
+	if got != 7 {
+		t.Errorf("cursor = %d, want 7 — the failed write rewound past a claim it does not "+
+			"own, which hands out an interval somebody else is already writing", got)
 	}
 }

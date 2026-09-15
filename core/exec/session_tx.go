@@ -615,11 +615,28 @@ func (e *Engine) quiesce(ctx context.Context, s *session, bound time.Duration) (
 // had become unresponsive would block a rollback path — the one path that
 // most needs to finish — for as long as the store took to answer.
 func (e *Engine) auditBounded(ctx context.Context, userID int64, ip, action, detail string) {
-	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
-	defer cancel()
-	if err := e.auth.Audit(actx, userID, ip, action, detail); err != nil {
+	if err := e.auditBoundedErr(ctx, userID, ip, action, detail); err != nil {
 		e.logf("auditing %s failed: %v", action, err)
 	}
+}
+
+// auditBoundedErr is auditBounded for a caller that must KNOW whether the row
+// landed.
+//
+// Most cleanup audits have nothing to do with a failure but log it: the
+// teardown they belong to is finishing either way. A record that is required
+// to appear on a schedule is different -- if it did not land, the thing that
+// claimed the interval has to give it back, or the interval is spent on a row
+// nobody has.
+func (e *Engine) auditBoundedErr(ctx context.Context, userID int64, ip, action, detail string) error {
+	if e.hookAuditFail != nil {
+		if err := e.hookAuditFail(action); err != nil {
+			return err
+		}
+	}
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditTimeout)
+	defer cancel()
+	return e.auth.Audit(actx, userID, ip, action, detail)
 }
 
 // auditTimeout bounds a cleanup audit. Generous, because losing the record of

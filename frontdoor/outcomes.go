@@ -20,9 +20,34 @@ const (
 	// ProducerCancel is the cancel-request branch: terminal, and it never
 	// authenticates.
 	ProducerCancel = outcome.ProducerID("cancel")
-	// ProducerCredential is the credential exchange this package drives
-	// around the engine's single open call.
-	ProducerCredential = outcome.ProducerID("credential-exchange")
+	// ProducerAuthOpen is the credential exchange this package drives around
+	// the engine's single open call.
+	ProducerAuthOpen = outcome.ProducerID("authenticate-and-open")
+	// ProducerHandshake is the success sequence and the transition into the
+	// session.
+	ProducerHandshake = outcome.ProducerID("handshake")
+	// ProducerServe is the session loop and its owned teardown.
+	ProducerServe = outcome.ProducerID("serve")
+)
+
+// The endings that are not refusals.
+//
+// THEY ARE THE CLOSE REASONS THE TRAIL ALREADY RECORDS, deliberately: naming
+// them anything else would change what an operator greps for in order to make
+// a registry tidier. What changes is that they are now declared, so a phase
+// cannot end on one nobody classified -- which is the whole reason this is an
+// outcome registry rather than a refusal registry.
+const (
+	OutcomeStartupFailed  = "startup-failed"
+	OutcomeAuthReadFailed = "auth-read-failed"
+	OutcomeHandshakeWrite = "handshake-write-failed"
+	OutcomeDeadlineArm    = "deadline"
+	OutcomeSessionError   = "session-error"
+	OutcomePeerClosed     = "peer-closed"
+	// OutcomeInternalError is a fault in OUR code -- a phase that could not
+	// run, an identity nobody declared. Never the peer's doing and never
+	// charged to them.
+	OutcomeInternalError = "internal-error"
 )
 
 // The cancel branch's identities.
@@ -126,6 +151,10 @@ func Outcomes() []outcome.Registration {
 			// load balancer's health probe, and banning those is an outage of
 			// our own making.
 			{ID: OutcomePeerGoneAtStart, Kind: outcome.Operational, Charge: outcome.None},
+			// A startup that failed for a reason with no taxonomy of its own,
+			// and a fault in our own phase wiring.
+			{ID: OutcomeStartupFailed, Kind: outcome.Operational, Charge: outcome.None},
+			{ID: OutcomeInternalError, Kind: outcome.Operational, Charge: outcome.None},
 		}},
 		{Producer: ProducerCancel, Outcomes: []outcome.Decl{
 			// A cancel presents no credential, so it cannot fail one. Control
@@ -134,7 +163,21 @@ func Outcomes() []outcome.Registration {
 			control(EventCancelApplied),
 			control(EventCancelStale),
 		}},
-		{Producer: ProducerCredential, Outcomes: credentialOutcomes(refusal, operational)},
+		{Producer: ProducerAuthOpen, Outcomes: credentialOutcomes(refusal, operational)},
+		{Producer: ProducerHandshake, Outcomes: []outcome.Decl{
+			// A write that failed is OURS or the network's, never a thing the
+			// peer did wrong, so none of these is charged.
+			{ID: OutcomeHandshakeWrite, Kind: outcome.Operational, Charge: outcome.None},
+			{ID: OutcomeDeadlineArm, Kind: outcome.Operational, Charge: outcome.None},
+			{ID: OutcomeInternalError, Kind: outcome.Operational, Charge: outcome.None},
+		}},
+		{Producer: ProducerServe, Outcomes: []outcome.Decl{
+			// The ordinary ending: the client said goodbye, or went away.
+			{ID: OutcomePeerClosed, Kind: outcome.Control, Charge: outcome.None},
+			{ID: OutcomeSessionError, Kind: outcome.Operational, Charge: outcome.None},
+			{ID: OutcomeDeadlineArm, Kind: outcome.Operational, Charge: outcome.None},
+			{ID: OutcomeInternalError, Kind: outcome.Operational, Charge: outcome.None},
+		}},
 	}
 }
 
@@ -161,6 +204,10 @@ func credentialOutcomes(
 		// meets these through no fault of their own.
 		operational(reasonAuthStoreError),
 		refusal(reasonNoCredentialStore, outcome.None),
+		// A credential exchange the peer abandoned mid-way, and a fault in our
+		// own phase wiring. Neither is a refusal; both end the connection.
+		{ID: OutcomeAuthReadFailed, Kind: outcome.Operational, Charge: outcome.None},
+		{ID: OutcomeInternalError, Kind: outcome.Operational, Charge: outcome.None},
 		// THEIRS: a frame that is not a password where a password belongs.
 		// This is the credential exchange being spoken wrongly, which is the
 		// same kind of thing as grinding it.
