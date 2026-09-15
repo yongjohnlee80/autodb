@@ -111,6 +111,25 @@ allow_insecure_dsn = false
 # lifetime, so a pool of 1 leaves nothing for the work beside it.
 pool_max_conns = 0
 
+# exec.max_target_conns -- THIS INSTANCE'S TOTAL PRODUCTION-CONNECTION BUDGET,
+# the number of sockets autodb may hold open to target databases at once,
+# across every target.
+#
+# NO DEFAULT, and REQUIRED when the front door is enabled (ADR 0181 D3). A
+# default would have autodb quietly claim a number nobody chose against a
+# database whose max_connections it cannot see, so it refuses to start instead
+# and asks you to decide once, visibly.
+#
+# CHOOSE AT MOST HALF THE TARGET SERVER'S max_connections. Guidance, not
+# validation: autodb cannot measure that limit. Summing across several autodb
+# instances against one server is yours to do.
+#
+# Distinct from pool_max_conns above, which is a technical ceiling on ONE
+# pool. This bounds the aggregate, so two targets may each be allowed more
+# than this -- the runtime permit ledger is what keeps the total true. Every
+# socket counts: query, health check, control, and one still being dialled.
+# max_target_conns = 50
+
 # sqlite only. Empty means $XDG_DATA_HOME/autodb/meta.db
 # (~/.local/share/autodb/meta.db). The -wal and -shm files beside it are
 # part of the database: copy all three together, or checkpoint first.

@@ -777,6 +777,11 @@ func execOptions(cfg config.Config, onLog func(string)) []coreexec.Option {
 		coreexec.WithSessionIdleTimeout(cfg.Exec.SessionIdleTimeout.Duration()),
 		coreexec.WithTxLimits(cfg.Exec.IdleInTxTimeout.Duration(), cfg.Exec.MaxTxDuration.Duration()),
 		coreexec.WithDebugTxLimits(cfg.Exec.DebugIdleInTxTimeout.Duration(), cfg.Exec.MaxTxDurationCeiling.Duration()),
+		// The AGGREGATE production-connection budget (ADR 0181). Distinct
+		// from WithPoolLimits below, which bounds one target pool: this bounds
+		// every pool together, and config validation requires it whenever the
+		// front door is enabled.
+		coreexec.WithTargetConnBudget(cfg.Exec.MaxTargetConns),
 		coreexec.WithPoolLimits(cfg.Exec.PoolMaxConns,
 			cfg.Exec.PoolMaxConnIdleTime.Duration(), cfg.Exec.PoolMaxConnLifetime.Duration()),
 		coreexec.WithLogger(onLog),

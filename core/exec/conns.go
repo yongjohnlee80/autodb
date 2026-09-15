@@ -231,6 +231,7 @@ func (e *Engine) sqlPoolLimits(row *meta.Connection) func(*sql.DB) {
 
 func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 	max, idle, lifetime := e.poolLimitsFor(row)
+	ledger := e.targetPermits
 	return func(cfg *pgxpool.Config) {
 		if max > 0 {
 			cfg.MaxConns = int32(max)
@@ -240,6 +241,13 @@ func (e *Engine) pgPoolLimits(row *meta.Connection) postgres.Option {
 		}
 		if lifetime > 0 {
 			cfg.MaxConnLifetime = lifetime
+		}
+		// The aggregate budget (ADR 0181). MaxConns above bounds THIS pool;
+		// this bounds every pool together, which no per-pool number can do.
+		// Wrapping the dialer rather than the pool's hooks is what makes the
+		// failed-dial release possible — see permitDialer.
+		if ledger != nil && cfg.ConnConfig != nil {
+			cfg.ConnConfig.DialFunc = permitDialer(ledger, cfg.ConnConfig.DialFunc)
 		}
 	}
 }

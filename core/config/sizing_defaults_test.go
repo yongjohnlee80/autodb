@@ -114,6 +114,7 @@ func TestSizing_TheDerivationNeverRaisesThePool(t *testing.T) {
 	c := mustLoad(t, `
 [exec]
 pool_max_conns = 3
+max_target_conns = 25
 
 [frontdoor]
 enabled = true
@@ -140,6 +141,11 @@ tls_host_names = ["autodb.example.com"]
 func TestSizing_ProvenanceCases(t *testing.T) {
 	t.Parallel()
 
+	// max_target_conns is required under an enabled front door (ADR 0181 D3).
+	// It lives here rather than in each case so a test that must leave
+	// pool_max_conns at its default still can: this sets the BUDGET only.
+	const execBlock = "[exec]\nmax_target_conns = 25\n\n"
+
 	const fdBlock = `
 enabled = true
 tls_cert_file = "/etc/autodb/cert.pem"
@@ -150,7 +156,7 @@ tls_host_names = ["autodb.example.com"]
 	t.Run("both default", func(t *testing.T) {
 		// Neither key present: the pair can no longer disagree, whatever this
 		// machine's core count is.
-		c := mustLoad(t, "[frontdoor]"+fdBlock)
+		c := mustLoad(t, execBlock+"[frontdoor]"+fdBlock)
 		pool := c.Exec.PoolMaxConns
 		if want := DefaultReservedHeadroom(pool); c.FrontDoor.ReservedHeadroom != want {
 			t.Errorf("headroom = %d, want the derived %d for a pool of %d",
@@ -159,11 +165,15 @@ tls_host_names = ["autodb.example.com"]
 	})
 
 	t.Run("pool explicit, headroom default", func(t *testing.T) {
-		// THE INSTALLER'S CONFIG, byte for byte: it emits pool_max_conns = 8
-		// and no headroom. It must be as valid as it is today, with the same
-		// headroom of 4 — a fix that changed what the installer produces would
-		// be a migration, not a fix.
-		c := mustLoad(t, "[exec]\npool_max_conns = 8\n\n[frontdoor]"+fdBlock)
+		// THE INSTALLER'S CONFIG, byte for byte: it emits pool_max_conns = 8,
+		// max_target_conns, and no headroom. It must be as valid as it is
+		// today, with the same headroom of 4 — a fix that changed what the
+		// installer produces would be a migration, not a fix.
+		//
+		// max_target_conns joined the installer's output when ADR 0181 made
+		// the budget required with no default; a fresh install that did not
+		// emit it would refuse to start.
+		c := mustLoad(t, "[exec]\npool_max_conns = 8\nmax_target_conns = 50\n\n[frontdoor]"+fdBlock)
 		if c.FrontDoor.ReservedHeadroom != 4 {
 			t.Errorf("headroom = %d, want 4 for the installer's pool of 8",
 				c.FrontDoor.ReservedHeadroom)
@@ -178,13 +188,13 @@ tls_host_names = ["autodb.example.com"]
 		// this is an ERROR, and the message must say the pool was a DEFAULT.
 		// An operator who set one number must not be shown two they never
 		// typed as though they had chosen both.
-		// NO [exec] SECTION: the pool must really be the default, or this
+		// pool_max_conns IS UNSET: the pool must really be the default, or this
 		// subtest is the both-explicit row wearing the wrong name — which is
 		// what the first version of it was. The headroom is large enough to be
 		// impossible against any machine's default pool, so the case is
 		// reachable without pinning this host's core count.
 		src := "[frontdoor]\nreserved_headroom = 1000" + fdBlock
-		msg := loadInvalid(t, src)
+		msg := loadInvalid(t, execBlock+src)
 		if !strings.Contains(msg, "reserved_headroom") {
 			t.Errorf("the error does not name the key the operator set: %s", msg)
 		}
@@ -201,7 +211,7 @@ tls_host_names = ["autodb.example.com"]
 	t.Run("both explicit and impossible", func(t *testing.T) {
 		// Exactly today's refusal. The fix must not make a bad explicit
 		// configuration acceptable.
-		src := "[exec]\npool_max_conns = 4\n\n[frontdoor]\nreserved_headroom = 4" + fdBlock
+		src := "[exec]\npool_max_conns = 4\nmax_target_conns = 25\n\n[frontdoor]\nreserved_headroom = 4" + fdBlock
 		msg := loadInvalid(t, src)
 		if !strings.Contains(msg, "no capacity to serve") {
 			t.Errorf("the refusal lost its wording: %s", msg)
@@ -232,6 +242,7 @@ func TestSizing_AKeySetToItsDefaultIsStillSet(t *testing.T) {
 	c := mustLoad(t, `
 [exec]
 pool_max_conns = 8
+max_target_conns = 25
 
 [frontdoor]
 enabled = true

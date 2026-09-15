@@ -164,6 +164,7 @@ STATE_OK="yes"
 STARTED="no"
 CAP_OVERRIDE=""
 LANE_OVERRIDE=""
+MAX_TARGET_CONNS_OVERRIDE=""
 
 # Matrix figures. These MIRROR THE CODE and must stay in step with it:
 #   WATERMARK_MIB      frontdoor.pendingOutputWatermark  (4 MiB)
@@ -368,6 +369,7 @@ while [ $# -gt 0 ]; do
     --meta-dsn) META_DSN="${2:?--meta-dsn needs a DSN}"; shift; mark META_DSN ;;
     --sessions) CAP_OVERRIDE="${2:?--sessions needs a number}"; shift ;;
     --lane)   LANE_OVERRIDE="${2:?--lane needs a number of MiB}"; shift ;;
+    --max-target-conns) MAX_TARGET_CONNS_OVERRIDE="${2:?--max-target-conns needs a number}"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
@@ -752,6 +754,18 @@ compute_sizing() {
   POOL_MAX_CONNS=$(( 2 * NCPU ))
   [ "$POOL_MAX_CONNS" -lt 8 ] && POOL_MAX_CONNS=8
 
+  # exec.max_target_conns has no default and is required under the front door
+  # (ADR 0181 D3), so the installer must emit a value or a fresh install will
+  # not start. Half of PostgreSQL's own default max_connections of 100 is the
+  # ADR's guidance, and 50 is what that yields.
+  #
+  # IT IS A STARTING POINT, NOT A MEASUREMENT. autodb cannot see the target
+  # server's max_connections, and an operator running several instances
+  # against one server must divide this themselves. --max-target-conns
+  # overrides it.
+  MAX_TARGET_CONNS=50
+  [ -n "$MAX_TARGET_CONNS_OVERRIDE" ] && MAX_TARGET_CONNS="$MAX_TARGET_CONNS_OVERRIDE"
+
   GOMEMLIMIT_MIB=$(( MEM_MIB * 75 / 100 ))
   MEMORYMAX_MIB=$(( MEM_MIB * 90 / 100 ))
 }
@@ -875,6 +889,24 @@ service_keyfile = "$KEY_DIR/service.key"
 # so the failure surfaced as "certificate generation failed" rather than as
 # "your config is invalid".
 pool_max_conns = $POOL_MAX_CONNS
+
+# THIS INSTANCE'S TOTAL PRODUCTION-CONNECTION BUDGET, across every target.
+#
+# It has NO DEFAULT and is REQUIRED when the front door is enabled (ADR 0181
+# D3): a default would have autodb quietly claim a number nobody chose against
+# a database whose max_connections it cannot see. The installer must therefore
+# emit one, or a fresh install will not start.
+#
+# CHOOSE AT MOST HALF THE TARGET SERVER'S max_connections. That is guidance,
+# not validation -- autodb cannot measure the server's limit and will not
+# pretend to. The value below assumes a PostgreSQL default of 100; change it
+# if your target says otherwise, and remember that summing across autodb
+# instances is yours to do.
+#
+# Distinct from pool_max_conns above, which is a technical ceiling on ONE
+# target pool. This bounds the aggregate, so two targets may each be allowed
+# more than this and the runtime permit ledger keeps the total true.
+max_target_conns = $MAX_TARGET_CONNS
 
 # Sized for this host. The general lane's floor is this number x ${WATERMARK_MIB} MiB, so
 # these two move TOGETHER -- raising the cap without raising the lane fails

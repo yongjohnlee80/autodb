@@ -180,7 +180,16 @@ type Engine struct {
 
 	// Target-pool bounds. Defaults are set in New; a
 	// connection row may lower poolMaxConns for itself but never raise it.
-	poolMaxConns        int
+	poolMaxConns int
+	// targetPermits bounds the AGGREGATE number of sockets open to targets,
+	// across every pool (ADR 0181). poolMaxConns is a per-pool ceiling and
+	// cannot express that: two pools of 8 against a budget of 10 are each
+	// individually legal and together are not.
+	//
+	// Nil means unbounded, which is what an install without the front door
+	// gets — the key is required only where production connections are
+	// actually spent.
+	targetPermits       *permitLedger
 	poolMaxConnIdleTime time.Duration
 	poolMaxConnLifetime time.Duration
 }
@@ -294,6 +303,21 @@ func WithDebugTxLimits(debugIdle, ceiling time.Duration) Option {
 }
 
 // WithLogger receives operational problems that have no caller to return to.
+// WithTargetConnBudget sets this instance's total production-connection
+// budget: the aggregate cap across every target pool (ADR 0181 D1).
+//
+// Zero or negative leaves it unbounded. The REQUIREMENT that an operator
+// choose a value lives in config validation, under the front door, because
+// that is the surface which spends the budget — an engine embedded without a
+// listener is not asked for a number it will never use.
+func WithTargetConnBudget(n int) Option {
+	return func(e *Engine) {
+		if n > 0 {
+			e.targetPermits = newPermitLedger(n)
+		}
+	}
+}
+
 // WithPoolLimits bounds each TARGET pool.
 //
 // maxConns is the install-wide ceiling: a connection row may ask for fewer,
