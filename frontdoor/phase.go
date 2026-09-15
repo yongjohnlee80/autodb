@@ -163,8 +163,19 @@ func Refuse(id outcome.ReasonID, opts ...OutcomeOption) Outcome {
 
 // Operational ends the connection because WE failed. It is never the peer's
 // doing and never charged to them.
-func Operational(err error) Outcome {
-	return Outcome{verdict: verdictOperational, err: err}
+//
+// IT CARRIES AN IDENTITY, and the first version did not. That made a registry
+// built expressly to give store failures, read failures and other non-refusal
+// endings a home unable to see the very outcomes it was created for: they
+// passed through the runner unvalidated and reached the record as a bare Go
+// error. The raw error stays as bounded operator detail; it is never the
+// identity, and it never reaches the peer.
+func Operational(id outcome.ReasonID, err error, opts ...OutcomeOption) Outcome {
+	o := Outcome{verdict: verdictOperational, reason: id, err: err}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	return o
 }
 
 // TerminalControl ends the connection having HANDLED something rather than
@@ -287,7 +298,7 @@ func lifecyclePhases() []Phase {
 			Replay: ExactlyOnce,
 		},
 		{
-			Name: PhaseAuthenticateAndOpen, Producer: ProducerCredential,
+			Name: PhaseAuthenticateAndOpen, Producer: ProducerAuthOpen,
 			// The engine call is given a deadline derived from the phase
 			// budget and honours it.
 			Cancel: CancelByContext,
@@ -296,7 +307,7 @@ func lifecyclePhases() []Phase {
 			Replay: ExactlyOnce,
 		},
 		{
-			Name: PhaseHandshake, Producer: ProducerCredential,
+			Name: PhaseHandshake, Producer: ProducerHandshake,
 			// Writing the success sequence is bounded by the socket's
 			// deadline.
 			Cancel: CancelBySocketDeadline,
@@ -305,7 +316,7 @@ func lifecyclePhases() []Phase {
 			Replay: ExactlyOnce,
 		},
 		{
-			Name: PhaseServe, Producer: ProducerCredential,
+			Name: PhaseServe, Producer: ProducerServe,
 			// The loop reads under the session's own deadlines; its TEARDOWN
 			// runs on a context with cancellation dropped, deliberately, so a
 			// shutdown does not abandon the cleanup it caused.

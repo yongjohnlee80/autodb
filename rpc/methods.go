@@ -5,6 +5,7 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"strings"
@@ -1376,6 +1377,19 @@ func (s *Server) register() {
 				return nil, ierr
 			}
 			vals[i] = v
+		}
+		// RANGE-CHECKED BEFORE MULTIPLICATION. int64 milliseconds times
+		// time.Millisecond overflows above roughly 2.9e8 years, and Go wraps
+		// silently -- so a large positive input would arrive as a negative
+		// duration, or as a small one, and be validated as though the operator
+		// had asked for it.
+		const maxMS = int64(math.MaxInt64) / int64(time.Millisecond)
+		for i, name := range names[:4] {
+			if vals[i] < 0 || vals[i] > maxMS {
+				return nil, fmt.Errorf("%s is %d; it must be between 0 and %d milliseconds, "+
+					"beyond which the conversion wraps into a different duration",
+					name, vals[i], maxMS)
+			}
 		}
 		ms := func(v int64) time.Duration { return time.Duration(v) * time.Millisecond }
 		set, rerr := s.eng.ReloadPolicy(ctx, token, exec.PolicySpec{

@@ -111,6 +111,9 @@ type Engine struct {
 	// hookBeforeWireAdmit pauses a wire open after its durable exposure read
 	// but before its registry reservation. Test-only race-window control.
 	hookBeforeWireAdmit func()
+	// hookAuditFail makes a bounded audit write fail, so a cell can prove what
+	// happens to an obligation whose record did not land. Nil in production.
+	hookAuditFail func(action string) error
 	// closeQuiesce is how long a close waits for an in-flight statement. It
 	// is a FIELD rather than a package variable so a test can shorten it on
 	// its own engine: a shared variable that parallel tests reassign is a

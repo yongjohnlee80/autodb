@@ -134,6 +134,20 @@ func (e *Engine) validatePolicy(s PolicySpec) error {
 			return fmt.Errorf("%w: %s %s must be positive — an unbounded transaction on a live "+
 				"database holds its locks until something else ends it", ErrPolicyInvalid, b.name, b.val)
 		}
+		// MILLISECOND-ALIGNED, because that is the resolution the durable form
+		// keeps. A bound expressed more finely would RUN at the value given
+		// and PERSIST as something else: a 1ns bound stores as zero, and the
+		// next start refuses to boot on a policy the operator never wrote.
+		//
+		// Refused rather than rounded. Rounding would mean the daemon ran a
+		// bound nobody chose while the audit row recorded the one they asked
+		// for, and the difference would surface as a transaction ending early
+		// for no reason anyone could find.
+		if b.val%time.Millisecond != 0 {
+			return fmt.Errorf("%w: %s (%v) is not a whole number of milliseconds, which is the "+
+				"resolution the stored policy keeps; it would run at one value and persist as "+
+				"another", ErrPolicyInvalid, b.name, b.val)
+		}
 	}
 	if s.MaxTxDuration > s.MaxTxDurationCeiling {
 		return fmt.Errorf("%w: max_tx_duration %s exceeds max_tx_duration_ceiling %s",

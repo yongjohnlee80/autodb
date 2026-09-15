@@ -141,6 +141,10 @@ type Listener struct {
 	// closing, so by the time it waits, no later Add can exist.
 	acceptMu sync.Mutex
 
+	// testLifecycleReady publishes each connection's lifecycle to a cell, so
+	// the phases it ran can be asserted. Nil in production.
+	testLifecycleReady func(peer string, lc *lifecycle)
+
 	// testDenialDelay slows the denial path. Test-only, and it exists so the
 	// timing harness can prove it detects a leak by measuring one rather
 	// than by asserting arithmetic about one.
@@ -267,6 +271,10 @@ type Options struct {
 
 	// testReaderReady publishes the per-session reader to a cell.
 	testReaderReady func(*frameReader)
+
+	// testLifecycleReady publishes each connection's lifecycle to a cell, so
+	// the phases it ran can be asserted.
+	testLifecycleReady func(peer string, lc *lifecycle)
 
 	// testSegmentMsgs and testSegmentBytes lower the segment caps for a cell.
 	testSegmentMsgs  *int
@@ -419,6 +427,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.queries = opt.Queries
 	l.testOutputCap = opt.testOutputCap
 	l.testReaderReady = opt.testReaderReady
+	l.testLifecycleReady = opt.testLifecycleReady
 	l.testSegmentMsgs = opt.testSegmentMsgs
 	l.testSegmentBytes = opt.testSegmentBytes
 	l.testWatermark = opt.testWatermark
@@ -596,8 +605,40 @@ func (l *Listener) Serve(ctx context.Context) error {
 		// the handler would bound nothing: by the time the budget said no,
 		// the memory it was protecting would already be allocated.
 		peer := conn.RemoteAddr().String()
-		tkt, refused := l.admit.admit(peer)
-		if tkt == nil {
+
+		// THE ACCEPT PHASE, run through the runner like every other.
+		//
+		// It is declared, so it is enforced: a declared phase that bypassed
+		// the runner could not validate its outcomes, could not be held to
+		// running once, and would be the one attachment point a scheduler
+		// needs missing.
+		lc := l.newLifecycle()
+		if l.testLifecycleReady != nil {
+			l.testLifecycleReady(peer, lc)
+		}
+		var tkt *ticket
+		var refused denialReason
+		accepted, perr := lc.run(PhaseAccept, func() Outcome {
+			tkt, refused = l.admit.admit(peer)
+			if tkt == nil {
+				return Refuse(outcomeID(refused.String()))
+			}
+			return Continue()
+		})
+		switch {
+		case perr != nil:
+			// A fault in our own declarations. Refuse the connection rather
+			// than admit one whose accounting we could not record, and say so
+			// where an operator will see it.
+			l.onLog(fmt.Sprintf("frontdoor: the accept phase for %s: %v", peer, perr))
+			if tkt != nil {
+				tkt.release()
+			}
+			_ = conn.Close()
+			l.onEvent(Event{Kind: "fd.budget_refuse", Reason: OutcomeInternalError, Peer: peer})
+			l.wg.Done()
+			continue
+		case !accepted.Continues():
 			// Closed WITHOUT a frame. Nothing has negotiated TLS yet, so a
 			// PostgreSQL error would be unreadable bytes to a client waiting
 			// for an 'S' or an 'N' — and the peer learns from the close
@@ -611,7 +652,9 @@ func (l *Listener) Serve(ctx context.Context) error {
 		// takes it. The accept loop has already added to the WaitGroup and
 		// taken the reservation; from here the handler owns both, plus the
 		// socket, and discharges all three together on every exit.
-		tok := &acceptToken{conn: conn, tkt: tkt, handlerDone: l.wg.Done}
+		// The SAME lifecycle travels with the token; the handler does not make
+		// a new one, or accept's record would be lost with it.
+		tok := &acceptToken{conn: conn, tkt: tkt, handlerDone: l.wg.Done, lc: lc}
 		go func() { l.handle(ctx, tok) }()
 	}
 }
@@ -701,7 +744,13 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 	// phase that may happen exactly once already has -- is per connection: a
 	// runner shared between them would refuse the second connection's startup
 	// on the grounds that the first one had a startup.
-	lc := l.newLifecycle()
+	lc := tok.lc
+	if lc == nil {
+		// A handler reached directly by a cell rather than through the accept
+		// loop. It still runs the same lifecycle; what it lacks is accept's
+		// own record, which that path never made.
+		lc = l.newLifecycle()
+	}
 	// REGISTERED FIRST SO IT RUNS LAST. Every defer below -- the panic
 	// boundary included -- completes before the token is discharged, which is
 	// what lets the panic handler set the close reason that the announcement
@@ -768,7 +817,9 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 				}
 				return Refuse(outcomeID(OutcomePeerGoneAtStart), WithOutcomeDetail(tf.detail))
 			}
-			return Operational(err)
+			// A startup failure with no taxonomy of its own. It ends the
+			// connection without a frame, exactly as the classified ones do.
+			return Operational(outcomeID(OutcomeStartupFailed), err)
 		}
 		return Continue()
 	}); perr != nil {
@@ -935,7 +986,11 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			outcome, aerr = l.runAuth(ctx, stream, be, fr, out.Params, out.GUCs, peer)
 			switch {
 			case aerr != nil:
-				return Operational(aerr)
+				// The peer left mid-exchange, or the store would not answer.
+				// Which of those it was decides the CHARGE, and that decision
+				// is already made below by outcome.Peer -- this names the
+				// ending, not its attribution.
+				return Operational(outcomeID(OutcomeAuthReadFailed), aerr)
 			case outcome.Denied != "":
 				// THE WITNESS TRAVELS HERE. It came from the engine, which
 				// sets it only at a raise site reached with a verified
@@ -981,7 +1036,7 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			return
 		}
 		if outcome.Denied == "" {
-			l.serveSession(ctx, stream, fr, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
+			l.serveSession(ctx, lc, stream, fr, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
 			return
 		}
 	} else {
@@ -1017,7 +1072,7 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 }
 
 // serveSession completes row 2.9 and runs the authenticated connection.
-func (l *Listener) serveSession(ctx context.Context, stream net.Conn, fr *frameReader, be *pgproto3.Backend,
+func (l *Listener) serveSession(ctx context.Context, lc *lifecycle, stream net.Conn, fr *frameReader, be *pgproto3.Backend,
 	tkt *ticket, sess exec.WireSessionResult, params map[string]string, notes []paramNote, peer string, closeReason *string) {
 
 	// THE POST-AUTH BODY CAP, applied at the handoff — after AuthenticationOk and
@@ -1064,27 +1119,35 @@ func (l *Listener) serveSession(ctx context.Context, stream net.Conn, fr *frameR
 	l.onEvent(Event{Kind: "fd.auth_ok", Peer: peer,
 		Detail: fmt.Sprintf("user=%s pat=%s admitted-by=%s", sess.UserName, sess.PATName, sess.AdmissionSource)})
 
-	if err := l.completeHandshake(be, sess, params, notes); err != nil {
-		sessionReason = "handshake-write-failed"
-		*closeReason = sessionReason
-		l.onLog(fmt.Sprintf("frontdoor: completing the handshake with %s: %v", peer, err))
-		return
-	}
-	l.onEvent(Event{Kind: "fd.session_open", Peer: peer, Detail: string(sess.SessionID)})
+	// THE HANDSHAKE PHASE wraps the effect it claims to own: the success
+	// sequence, the session's publication to the trail, and the first arming
+	// of the between-messages budget.
+	handshake, herr := lc.run(PhaseHandshake, func() Outcome {
+		if err := l.completeHandshake(be, sess, params, notes); err != nil {
+			l.onLog(fmt.Sprintf("frontdoor: completing the handshake with %s: %v", peer, err))
+			return Operational(outcomeID(OutcomeHandshakeWrite), err)
+		}
+		l.onEvent(Event{Kind: "fd.session_open", Peer: peer, Detail: string(sess.SessionID)})
 
-	// The FIRST arming of the between-messages budget. The session loop re-arms
-	// it per message, clears it for engine work, and swaps it for the
-	// partial-frame progress budget once a message has started — see
-	// session_loop.go, which owns those transitions.
-	//
-	// The previous comment here argued AGAINST re-arming in the loop, on the
-	// grounds that a second arming would mask the omission of this one. That
-	// reasoning protected a cell's discriminating power at the cost of a refresh
-	// the matrix requires (§8.4: "refreshed on message/state transitions"), and
-	// the cost was real: an absolute deadline armed once made the idle budget a
-	// cap on session LIFETIME.
-	if err := stream.SetDeadline(l.now().Add(l.dl.idle)); err != nil {
-		sessionReason = "deadline"
+		// The FIRST arming of the between-messages budget. The session loop
+		// re-arms it per message, clears it for engine work, and swaps it for
+		// the partial-frame progress budget once a message has started — see
+		// session_loop.go, which owns those transitions.
+		if err := stream.SetDeadline(l.now().Add(l.dl.idle)); err != nil {
+			return Operational(outcomeID(OutcomeDeadlineArm), err)
+		}
+		return Continue()
+	})
+	switch {
+	case herr != nil:
+		// OUR OWN FAULT, and the session is already open -- so the teardown
+		// above still runs and the engine still learns the session ended.
+		sessionReason = OutcomeInternalError
+		*closeReason = sessionReason
+		l.onLog(fmt.Sprintf("frontdoor: the handshake phase for %s: %v", peer, herr))
+		return
+	case !handshake.Continues():
+		sessionReason = string(handshake.Reason())
 		*closeReason = sessionReason
 		return
 	}
@@ -1094,18 +1157,39 @@ func (l *Listener) serveSession(ctx context.Context, stream net.Conn, fr *frameR
 	// remains only for a build with no query path at all, where refusing every
 	// statement with an accurate 0A000 is the honest answer rather than
 	// accepting one nothing can run.
-	var err error
+	// THE SERVE PHASE wraps the loop itself.
+	//
+	// Its TEARDOWN stays on the defer above rather than moving inside this
+	// body, and that is deliberate: the session is already open by the time
+	// the handshake phase runs, so a teardown that lived only here would be
+	// skipped when the handshake fails -- leaking a session on the engine and
+	// a cancel key pointing at it. The phase OWNS the teardown; the defer is
+	// how that ownership is discharged on every exit, including the ones that
+	// never reach this line.
+	served, serr := lc.run(PhaseServe, func() Outcome {
+		var err error
+		switch {
+		case l.onSession != nil:
+			err = l.onSession(ctx, stream, be, sess)
+		case l.queries != nil:
+			err = l.runSession(ctx, stream, fr, be, sess, peer, &sessionReason)
+		default:
+			err = l.defaultSession(ctx, stream, be, sess)
+		}
+		if err != nil {
+			l.onLog(fmt.Sprintf("frontdoor: the session for %s: %v", peer, err))
+			return Operational(outcomeID(OutcomeSessionError), err)
+		}
+		// The loop returned without error: the client said goodbye, or went
+		// away. The reason the loop itself recorded stands.
+		return TerminalControl(outcomeID(OutcomePeerClosed))
+	})
 	switch {
-	case l.onSession != nil:
-		err = l.onSession(ctx, stream, be, sess)
-	case l.queries != nil:
-		err = l.runSession(ctx, stream, fr, be, sess, peer, &sessionReason)
-	default:
-		err = l.defaultSession(ctx, stream, be, sess)
-	}
-	if err != nil {
-		sessionReason = "session-error"
-		l.onLog(fmt.Sprintf("frontdoor: the session for %s: %v", peer, err))
+	case serr != nil:
+		sessionReason = OutcomeInternalError
+		l.onLog(fmt.Sprintf("frontdoor: the serve phase for %s: %v", peer, serr))
+	case served.Reason() == outcomeID(OutcomeSessionError):
+		sessionReason = OutcomeSessionError
 	}
 	*closeReason = sessionReason
 }
