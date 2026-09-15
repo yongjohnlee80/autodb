@@ -497,29 +497,46 @@ func TestAPermitCarriesItsGrantTerms(t *testing.T) {
 
 // The EXPORTED engine path, across the transitions an operator actually makes.
 func TestEngineTargetBudgetTransitions(t *testing.T) {
-	// Built through the real constructor: Settings() reads session state a bare
-	// struct does not have, and the point of this cell is the EXPORTED path.
-	e := New(nil, nil, WithTargetConnBudget(51)) // 50 ordinary + 1 reserved
+	// THE OPERATOR'S NUMBER IS THE TOTAL, including the reserved control
+	// socket. An earlier version of this cell configured 51 and called it
+	// "50", which is the off-by-one that makes a test describe a policy
+	// nobody set: max_target_conns = 50 means fifty sockets, of which
+	// forty-nine are available to ordinary work.
+	e := New(nil, nil, WithTargetConnBudget(50))
+
+	if s := e.Settings().TargetConns; s.Configured != 50 || s.OrdinaryLimit != 49 {
+		t.Fatalf("configured=%d ordinary=%d, want 50 and 49 — the budget is the TOTAL",
+			s.Configured, s.OrdinaryLimit)
+	}
+
 	var held []*Permit
-	for range 50 {
+	for range 49 {
 		p, err := e.targetPermits.Acquire()
 		if err != nil {
 			t.Fatal(err)
 		}
 		held = append(held, p)
 	}
+	// The fiftieth is the control lane's and ordinary work cannot have it.
+	if _, err := e.targetPermits.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatal("ordinary work must stop at 49 of a 50 budget")
+	}
 
 	// 50 -> 25: drains, kills nothing.
-	if err := e.SetTargetConnBudget(26); err != nil {
+	if err := e.SetTargetConnBudget(25); err != nil {
 		t.Fatalf("lowering the budget was refused: %v", err)
 	}
 	s := e.Settings().TargetConns
-	if s.Outstanding != 50 || !s.Draining {
-		t.Fatalf("after 50->25: outstanding=%d draining=%v, want 50 and true",
+	if s.Configured != 25 || s.OrdinaryLimit != 24 {
+		t.Fatalf("after 50->25: configured=%d ordinary=%d, want 25 and 24",
+			s.Configured, s.OrdinaryLimit)
+	}
+	if s.Outstanding != 49 || !s.Draining {
+		t.Fatalf("outstanding=%d draining=%v, want 49 and true — lowering must not kill",
 			s.Outstanding, s.Draining)
 	}
-	if s.Effective != 50 {
-		t.Errorf("effective = %d, want 50 — during a drain the configured number is NOT "+
+	if s.Effective != 49 {
+		t.Errorf("effective = %d, want 49 — during a drain the configured number is NOT "+
 			"the number of sockets that exist, and an operator sizing a server needs "+
 			"the one that is true", s.Effective)
 	}
@@ -534,34 +551,45 @@ func TestEngineTargetBudgetTransitions(t *testing.T) {
 		t.Errorf("a REFUSED update advanced the generation %d -> %d; a reader comparing "+
 			"snapshots would believe the policy changed", genBefore, after.Generation)
 	}
-	if after.Configured != 26 {
+	if after.Configured != 25 {
 		t.Errorf("a refused update changed the budget to %d", after.Configured)
 	}
 
 	// 25 -> 60: raising ends the drain immediately, without touching sockets.
-	if err := e.SetTargetConnBudget(61); err != nil {
+	if err := e.SetTargetConnBudget(60); err != nil {
 		t.Fatal(err)
 	}
-	if up := e.Settings().TargetConns; up.Draining || up.Effective != 61 {
-		t.Errorf("after raising: draining=%v effective=%d, want false and 61",
-			up.Draining, up.Effective)
+	if up := e.Settings().TargetConns; up.Draining || up.Configured != 60 || up.Effective != 60 {
+		t.Errorf("after 25->60: draining=%v configured=%d effective=%d, want false, 60, 60",
+			up.Draining, up.Configured, up.Effective)
 	}
 
-	// 25 -> 20: lowering again while still over.
-	if err := e.SetTargetConnBudget(21); err != nil {
+	// 60 -> 20: lowering again while still over.
+	if err := e.SetTargetConnBudget(20); err != nil {
 		t.Fatal(err)
 	}
-	if down := e.Settings().TargetConns; !down.Draining || down.Effective != 50 {
-		t.Errorf("after lowering again: draining=%v effective=%d, want true and 50",
-			down.Draining, down.Effective)
+	if down := e.Settings().TargetConns; !down.Draining || down.Configured != 20 || down.Effective != 49 {
+		t.Errorf("after 60->20: draining=%v configured=%d effective=%d, want true, 20, 49",
+			down.Draining, down.Configured, down.Effective)
 	}
+
+	// A cancellation still goes through while draining, and is COUNTED.
+	ctl, err := e.targetPermits.AcquireControl(context.Background())
+	if err != nil {
+		t.Fatalf("a cancellation during a drain was refused: %v", err)
+	}
+	if counted := e.Settings().TargetConns.Outstanding; counted != 50 {
+		t.Errorf("outstanding = %d, want 50 — the control socket must be ACCOUNTED FOR, "+
+			"not exempted", counted)
+	}
+	ctl.Release()
 
 	// Draining below the new budget clears the state.
 	for i := range 35 {
 		held[i].Release()
 	}
-	if end := e.Settings().TargetConns; end.Draining || end.Outstanding != 15 {
-		t.Errorf("after draining: draining=%v outstanding=%d, want false and 15",
+	if end := e.Settings().TargetConns; end.Draining || end.Outstanding != 14 {
+		t.Errorf("after draining: draining=%v outstanding=%d, want false and 14",
 			end.Draining, end.Outstanding)
 	}
 }
