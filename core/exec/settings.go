@@ -70,6 +70,17 @@ func (e *Engine) targetConnSnapshot() LedgerSnapshot {
 
 // SetTargetConnBudget changes the aggregate budget on a running engine.
 //
+// NO OPERATOR SURFACE CALLS THIS YET, and that is stated rather than implied.
+// There is no reload path or admin method in this daemon to route it through,
+// so today it is reachable only from a program embedding the engine. Calling
+// it a "live update path" without that caveat would describe a capability an
+// operator does not have.
+//
+// It is here rather than deferred because the ledger's drain semantics are
+// what make a lowered budget safe, and they had no exercisable entry point at
+// all -- SetBudget was reachable only from tests, so the behaviour existed
+// without any way for the thing it was written for to reach it.
+//
 // THE PRODUCTION UPDATE PATH. Until this existed the budget could only be set
 // at construction and SetBudget was reachable only from tests — so the drain
 // semantics the ledger implements had no way to be exercised by the thing they

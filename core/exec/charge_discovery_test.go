@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -39,14 +40,44 @@ func discoverDenyConstants(t *testing.T) map[string]string {
 					continue
 				}
 				for i, name := range vs.Names {
-					if !strings.HasPrefix(name.Name, "Deny") || i >= len(vs.Values) {
+					if !strings.HasPrefix(name.Name, "Deny") {
+						continue
+					}
+					pos := fset.Position(name.Pos())
+
+					// FAILS CLOSED. The first version of this walk `continue`d
+					// whenever a Deny name was not a direct string literal at
+					// the same index -- so `const DenyAlias = DenyNoGrant`, an
+					// implicit grouped value, or any constant expression simply
+					// VANISHED from the discovered set, and omitting it from
+					// both the registry and DenialReasons stayed green. That is
+					// the same fail-open shape as the circular lists this walk
+					// replaced, one level down.
+					//
+					// Anything not exactly one direct string literal is an
+					// error demanding attention, not a thing to skip.
+					if i >= len(vs.Values) {
+						t.Errorf("%s at %s has no direct value (implicit grouped constant). "+
+							"This walk cannot classify it, and silence here is how an "+
+							"unclassified reason reaches production: give it an explicit "+
+							"string literal", name.Name, pos)
 						continue
 					}
 					lit, ok := vs.Values[i].(*ast.BasicLit)
 					if !ok || lit.Kind != token.STRING {
+						t.Errorf("%s at %s is not a direct string literal (an alias or an "+
+							"expression). Declare it as a literal so the discovery walk can "+
+							"see it, or it is invisible to the exhaustiveness check",
+							name.Name, pos)
 						continue
 					}
-					found[name.Name] = strings.Trim(lit.Value, `"`)
+					val, uerr := strconv.Unquote(lit.Value)
+					if uerr != nil {
+						t.Errorf("%s at %s has an unparseable literal %s: %v",
+							name.Name, pos, lit.Value, uerr)
+						continue
+					}
+					found[name.Name] = val
 				}
 			}
 		}
