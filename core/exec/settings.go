@@ -70,21 +70,18 @@ func (e *Engine) targetConnSnapshot() LedgerSnapshot {
 
 // SetTargetConnBudget changes the aggregate budget on a running engine.
 //
-// NO OPERATOR SURFACE CALLS THIS YET, and that is stated rather than implied.
-// There is no reload path or admin method in this daemon to route it through,
-// so today it is reachable only from a program embedding the engine. Calling
-// it a "live update path" without that caveat would describe a capability an
-// operator does not have.
+// INCOMPLETE, AND SAYING SO HERE DOES NOT MAKE IT COMPLETE. The accepted
+// policy requires the timeouts and the budget to publish as ONE generation
+// through an operator-reachable reload. This changes the budget alone, on one
+// running engine: there is no reload path or admin method in this daemon to
+// route it through, so today it is reachable only from a program embedding the
+// engine, and a change made through it does not survive a restart.
 //
-// It is here rather than deferred because the ledger's drain semantics are
-// what make a lowered budget safe, and they had no exercisable entry point at
-// all -- SetBudget was reachable only from tests, so the behaviour existed
-// without any way for the thing it was written for to reach it.
-//
-// THE PRODUCTION UPDATE PATH. Until this existed the budget could only be set
-// at construction and SetBudget was reachable only from tests — so the drain
-// semantics the ledger implements had no way to be exercised by the thing they
-// were written for.
+// It exists because the ledger's drain semantics had no exercisable entry
+// point at all -- the setter was reachable only from tests, so behaviour
+// existed that the thing it was written for could not reach. That is a reason
+// to keep it, not a reason to call it finished: the reload is outstanding work
+// tracked against the policy, and a comment cannot close it.
 //
 // It NEVER closes a socket. Lowering the budget below what is outstanding
 // leaves every live session alone and simply stops granting new permits, so
