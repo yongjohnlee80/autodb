@@ -308,7 +308,9 @@ func (l *Listener) frameExtendedError(conn net.Conn, be *pgproto3.Backend,
 		}
 	}
 	code, rule, hint, fatal := classifyGateError(err)
-	l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()})
+	// The SAME projection the simple path uses. Built inline here before, which
+	// is how a panic kept being filed as a refusal on this half.
+	l.onEvent(gateEvent(err, rule, peer))
 
 	severity := "ERROR"
 	if fatal {

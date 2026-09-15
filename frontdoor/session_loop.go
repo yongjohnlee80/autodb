@@ -969,28 +969,7 @@ func (l *Listener) frameGateError(conn net.Conn, be *pgproto3.Backend, sess exec
 	}
 	code, rule, hint, fatal := classifyGateError(err)
 
-	// A PANIC IS NOT A REFUSAL, and must not be filed as one.
-	//
-	// fd.refused is the vocabulary of "we considered this and declined it".
-	// Emitting it for a crash tells an operator counting refusals that policy
-	// rejected a statement, when in fact we broke — the same conflation
-	// between our fault and the caller's that the charge classes exist to
-	// prevent, arriving through the event stream instead.
-	//
-	// err.Error() is withheld for the same reason: it carries the panic value
-	// and the stage's internals. Those belong in the operator's log, which
-	// already has them with the stack; the event carries the STAGE only, so
-	// the trail says which component broke without republishing its guts.
-	if stagePanicked := isStagePanic(err); stagePanicked {
-		l.onEvent(Event{
-			Kind:   "fd.internal_error",
-			Reason: rule,
-			Peer:   peer,
-			Detail: stagePanicDetail(err),
-		})
-	} else {
-		l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()})
-	}
+	l.onEvent(gateEvent(err, rule, peer))
 
 	severity := "ERROR"
 	if fatal {
@@ -1322,6 +1301,35 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 // error's own text for refusals the engine authored, because those were written
 // for a caller to read; it never includes internal identifiers, which travel in
 // the audit row instead.
+// gateEvent projects a gate error into the event a surface emits.
+//
+// ONE PROJECTION, USED BY BOTH RENDERERS. The simple and extended paths each
+// built this inline, so fixing the panic case in one left the other filing a
+// crash as fd.refused with the panic value in its detail -- which is the whole
+// defect, still live, in the half nobody looked at.
+//
+// A PANIC IS NOT A REFUSAL. fd.refused is the vocabulary of "we considered
+// this and declined it". Emitting it for a crash tells an operator counting
+// refusals that policy rejected a statement when in fact we broke -- the same
+// conflation between our fault and the caller's that the charge classes exist
+// to prevent, arriving through the event stream instead.
+//
+// err.Error() is withheld for the same reason: it carries the panic value and
+// the stage's internals. Those belong in the operator's log, which already has
+// them with the stack; the event carries the STAGE only, so the trail says
+// which component broke without republishing its guts.
+func gateEvent(err error, rule, peer string) Event {
+	if isStagePanic(err) {
+		return Event{
+			Kind:   "fd.internal_error",
+			Reason: rule,
+			Peer:   peer,
+			Detail: stagePanicDetail(err),
+		}
+	}
+	return Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()}
+}
+
 // stagePanicDetail names the stage that broke, and nothing else.
 //
 // Deliberately not the panic value: an event detail is republished more widely
