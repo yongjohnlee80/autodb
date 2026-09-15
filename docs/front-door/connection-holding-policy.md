@@ -129,7 +129,8 @@ Monotonicity is therefore asserted per generation rather than absolutely, and
 rises within a generation.
 
 **The control lane is the one exception, and it is deliberate.** While
-draining, O is above C by definition — so a control lane that re-tested
+draining, O is above the ordinary limit C − 1 by definition — O = C is already
+draining — so a control lane that re-tested
 against the budget would refuse a cancellation precisely because too much work
 is already running, which is the moment cancelling matters most. Ordinary and
 unmarked dials stop; the marked control dial may still proceed.
