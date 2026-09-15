@@ -166,6 +166,37 @@ type session struct {
 	// lastUsed drives the idle timeout.
 	lastUsed time.Time
 
+	// The holder's identity, captured AT OPEN because that is the only place it
+	// is all in hand at once. The idle-in-transaction heartbeat fires from the
+	// janitor sweep, which has a session pointer and nothing else; re-deriving a
+	// username there would mean a store round trip inside the sweep loop, per
+	// holder, every thirty minutes -- a new failure mode in the one path that
+	// must keep running when the store is unhappy.
+	//
+	// patID is the PAT's ROW ID and never the token. It is what an operator
+	// needs in order to revoke, and worth nothing to anyone who reads the audit
+	// trail.
+	holderUser string
+	holderIP   string
+	patID      int64
+	// acquiredAt is when this session took its backend, which is a different
+	// question from when its current transaction opened.
+	acquiredAt time.Time
+
+	// stmts counts statements attempted on this session, and lastSQL keeps the
+	// most recent one's text for the heartbeat's preview. Guarded by mu.
+	stmts   int
+	lastSQL string
+
+	// hbTx and hbCursor are the heartbeat's monotonic emission cursor.
+	//
+	// The cursor exists so a sweep that runs every few seconds emits ONE record
+	// per thirty-minute interval rather than one per sweep. It is keyed by the
+	// transaction episode, so a new transaction on the same session starts at
+	// zero rather than inheriting the previous one's count.
+	hbTx     string
+	hbCursor int
+
 	// The session's one transaction. All of these
 	// fields are guarded by mu.
 	tx dao.ContextTxConn
@@ -505,6 +536,17 @@ func (r *sessionRegistry) isDraining(connID int64) bool {
 }
 
 // snapshot returns every open session.
+// holderCount reports how many sessions this account currently holds.
+//
+// The heartbeat carries it because one holder idling is a person thinking, and
+// the same person holding nine backends while idling is a leak -- and the
+// record that shows only the one backend cannot tell those apart.
+func (r *sessionRegistry) holderCount(userID int64) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.perUser[userID]
+}
+
 func (r *sessionRegistry) snapshot() []*session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -538,6 +580,24 @@ func (s *session) finish() {
 	if done != nil {
 		close(done)
 	}
+}
+
+// noteStatement records that a statement was attempted on this session.
+//
+// Called from the one place every attempt passes through, so the count cannot
+// drift between the simple, extended and token paths -- three separate hooks
+// is how one of them ends up not counting, and a holder that reports zero
+// statements looks like an idle connection rather than a long transaction.
+//
+// It keeps the statement TEXT, which is the same text already written to the
+// exec audit row and the history script column. Bind values are not part of
+// it: the extended protocol carries them separately and they are never
+// interpolated into what is stored here.
+func (s *session) noteStatement(sql string) {
+	s.mu.Lock()
+	s.stmts++
+	s.lastSQL = sql
+	s.mu.Unlock()
 }
 
 // idleFor reports how long the session has been idle.

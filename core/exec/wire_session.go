@@ -490,6 +490,11 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		// here is what made the janitor read every wire session as revoked.
 		id: id, userID: pat.UserID, authority: auth.PATAuthority(pat.ID), connID: connRow.ID,
 		ctx: sctx, cancel: cancel, lastUsed: e.now(),
+		// The holder's identity for the idle-in-transaction heartbeat, taken
+		// here because here is where it is known. owner.Name is the CANONICAL
+		// name, not the client's spelling of it, and pat.ID is the token's row
+		// -- never the token.
+		holderUser: owner.Name, holderIP: ip, patID: pat.ID, acquiredAt: e.now(),
 	}
 	if h := e.hookBeforeWireAdmit; h != nil {
 		h()

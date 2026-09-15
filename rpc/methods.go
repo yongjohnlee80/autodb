@@ -1343,6 +1343,53 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.eng.SetConnectionExposure(ctx, token, connID, exposed, peerIP(req)))
 	})
+	// The operator surface for the reloadable bounds. Without these the
+	// engine's reload existed and nothing could reach it, which is the state
+	// the accepted policy called out by name: a setter reachable only from a
+	// program embedding the engine is not an operator surface.
+	s.rpc.Handle("policy.show", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		return s.eng.ShowPolicy(ctx, token)
+	})
+	s.rpc.Handle("policy.reload", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 6); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		// Milliseconds, not duration strings. The wire carries a number that
+		// means one thing, rather than a format whose parser has to agree on
+		// both sides of a version boundary.
+		names := []string{"session_idle_ms", "idle_in_tx_ms", "max_tx_ms", "max_tx_ceiling_ms", "max_target_conns"}
+		vals := make([]int64, len(names))
+		for i, name := range names {
+			v, ierr := argInt(req.Params, i+1, name)
+			if ierr != nil {
+				return nil, ierr
+			}
+			vals[i] = v
+		}
+		ms := func(v int64) time.Duration { return time.Duration(v) * time.Millisecond }
+		set, rerr := s.eng.ReloadPolicy(ctx, token, exec.PolicySpec{
+			SessionIdleTimeout:   ms(vals[0]),
+			IdleInTxTimeout:      ms(vals[1]),
+			MaxTxDuration:        ms(vals[2]),
+			MaxTxDurationCeiling: ms(vals[3]),
+			MaxTargetConns:       int(vals[4]),
+		}, peerIP(req))
+		if rerr != nil {
+			return nil, wireErr(rerr)
+		}
+		return exec.PolicyView(set), nil
+	})
 	s.rpc.Handle("conn.test", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err

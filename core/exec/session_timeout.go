@@ -185,6 +185,15 @@ func (e *Engine) reapExpired(ctx context.Context, now time.Time) int {
 			}
 			reason := limits.expiredReason(now, last, opened)
 			if reason == "" {
+				// NOT EXPIRED, so the holder gets a heartbeat instead of an
+				// ending. The order of these two branches is what makes the
+				// 120-minute boundary deterministic rather than a race: at
+				// exactly the idle bound the timeout is what fires, and the
+				// heartbeat that would otherwise coincide with it is never
+				// reached. An episode therefore reads 30m, 60m, 90m, then the
+				// timeout -- never 120m twice, and never in an order that
+				// depends on which goroutine woke first.
+				e.noteIdleHolder(ctx, s, now, limits)
 				continue
 			}
 			e.rollbackExpired(ctx, s, txID, reason)
@@ -193,7 +202,7 @@ func (e *Engine) reapExpired(ctx context.Context, now time.Time) int {
 		}
 		// No transaction: the session's own idle timeout applies. This is
 		// what reaps a session whose client crashed without closing it.
-		if s.idleFor(now) >= e.sessionIdle {
+		if s.idleFor(now) >= e.currentPolicy().sessionIdle {
 			e.closeSession(ctx, s, "", "idle-timeout")
 			acted++
 		}
@@ -413,6 +422,9 @@ const quiesceTimeout = 10 * time.Second
 // StartJanitor runs the reaper until ctx is done. The daemon calls it once;
 // tests call reapExpired directly with their own clock.
 func (e *Engine) StartJanitor(ctx context.Context, every time.Duration) {
+	// Recorded so a later reload can refuse an idle bound shorter than the gap
+	// between sweeps -- a deadline nothing looks at in time is not a deadline.
+	e.janitorSweep.Store(int64(every))
 	if every <= 0 {
 		every = 15 * time.Second
 	}
@@ -490,4 +502,78 @@ func (e *Engine) revokeExpiredAuthority(
 	// a read-write transaction, which is the state the seam condition
 	// forbids.
 	return e.rollbackDemoted(ctx, s, tx, phase, txID, v.Role)
+}
+
+// noteIdleHolder emits the thirty-minute idle-in-transaction heartbeat for one
+// holder, at most once per interval per transaction episode.
+//
+// IT NEVER RECLAIMS ANYTHING. The observer and the ladder are deliberately
+// separate: a record that could also end a transaction would make every future
+// change to the audit cadence a change to reclamation behaviour, and the two
+// have different reviewers and different blast radii.
+func (e *Engine) noteIdleHolder(ctx context.Context, s *session, now time.Time, limits txLimits) {
+	// Taken BEFORE the session lock. The registry lock is the outer one
+	// everywhere else, and a single inversion here would be a deadlock that
+	// only appears when a sweep and an open collide.
+	holders := e.sessions.holderCount(s.userID)
+
+	s.mu.Lock()
+	idle := now.Sub(s.lastUsed)
+	// The cursor counts COMPLETED intervals, so it advances to 1 at 30m, 2 at
+	// 60m, and stays there until the next one is reached.
+	due := int(idle / idleHolderCadence)
+	if s.hbTx != s.txID {
+		// A new transaction episode on the same session. The cursor is keyed
+		// by the episode precisely so the second transaction does not inherit
+		// the first one's count and skip its own first heartbeat.
+		s.hbTx, s.hbCursor = s.txID, 0
+	}
+	if due <= s.hbCursor {
+		// Either this interval has already been reported, or the client did
+		// something and the idle clock went backwards. Rewinding the cursor is
+		// what re-arms the heartbeat for the next idle stretch -- without it,
+		// a transaction that worked at 95m would never report being idle
+		// again, because `due` would stay below a cursor of 3 forever.
+		if due < s.hbCursor {
+			s.hbCursor = due
+		}
+		s.mu.Unlock()
+		return
+	}
+	s.hbCursor = due
+	h := idleHolder{
+		session: s.id, connID: s.connID,
+		subject: s.userID, username: s.holderUser, ip: s.holderIP, patID: s.patID,
+		appName: s.appName, mayWrite: s.txOpenedMayWrite,
+		txID: s.txID, txPhase: s.txPhase,
+		acquiredAt: s.acquiredAt, txOpened: s.txOpened, lastActivity: s.lastUsed,
+		deadline: limits.effectiveDeadline(s.lastUsed, s.txOpened),
+		idle:     idle, txAge: now.Sub(s.txOpened),
+		stmts: s.stmts, accountHolders: holders,
+		lastSQL:  s.lastSQL,
+		interval: time.Duration(due) * idleHolderCadence,
+	}
+	// Copied under the lock, RENDERED AND WRITTEN OUTSIDE IT. Formatting a
+	// 256-byte preview and waiting on the meta store are both slow compared
+	// with the sweep, and doing either while holding the session lock would
+	// block the statement that is trying to end this very transaction.
+	s.mu.Unlock()
+
+	e.auditBounded(ctx, h.subject, h.ip, idleHolderAction, h.render())
+}
+
+// effectiveDeadline is the earlier of the two bounds that can end an open
+// transaction: idle-in-transaction measured from the last activity, and the
+// maximum duration measured from the open. Zero when neither is set.
+func (l txLimits) effectiveDeadline(lastActivity, opened time.Time) time.Time {
+	var out time.Time
+	if l.idleInTx > 0 {
+		out = lastActivity.Add(l.idleInTx)
+	}
+	if l.maxTx > 0 {
+		if d := opened.Add(l.maxTx); out.IsZero() || d.Before(out) {
+			out = d
+		}
+	}
+	return out
 }

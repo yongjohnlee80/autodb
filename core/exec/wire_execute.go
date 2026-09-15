@@ -178,7 +178,7 @@ func (e *Engine) executeSessionUnit(
 	defer endRun()
 	res, rerr := e.executeUnit(runCtx, execUnit{
 		stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
-		pinned: pinned, txID: txID, tag: s.auditTag(), phys: phys,
+		pinned: pinned, txID: txID, tag: s.auditTag(), phys: phys, s: s,
 	})
 	s.noteStatementOutcome(rerr)
 	return res, rerr
@@ -234,7 +234,7 @@ func (e *Engine) wireControl(
 		defer endRun()
 		res, rerr := e.executeUnit(runCtx, execUnit{
 			stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
-			pinned: pinned, txID: txID, tag: s.auditTag(), phys: admission.PhysWire,
+			pinned: pinned, txID: txID, tag: s.auditTag(), phys: admission.PhysWire, s: s,
 		})
 		if rerr == nil {
 			// The body is opaque, so a routine may have been defined or
@@ -262,7 +262,7 @@ func (e *Engine) wireControl(
 		defer endRun()
 		return e.executeUnit(runCtx, execUnit{
 			stmt: stmt, pol: pol, connRow: connRow, sqlText: sqlText, ip: ip,
-			pinned: pinned, txID: txID, tag: s.auditTag(), phys: admission.PhysWire,
+			pinned: pinned, txID: txID, tag: s.auditTag(), phys: admission.PhysWire, s: s,
 		})
 	}
 
@@ -308,7 +308,10 @@ type execUnit struct {
 	pinned  dao.TxConn
 	txID    string
 	tag     string // session stamp for audit lines; empty on the token path
-	phys    admission.PhysicalCtx
+	// s is the owning session, so the attempt can be counted against the
+	// holder that is running it. Never nil on either path that builds a unit.
+	s    *session
+	phys admission.PhysicalCtx
 }
 
 // executeUnit is the shared tail: attempt record, read-only wrap, target,
@@ -328,7 +331,7 @@ func (e *Engine) executeUnit(ctx context.Context, u execUnit) (*Result, error) {
 		target = t
 	}
 
-	attemptID, err := e.recordAttemptTagged(ctx, u.pol.Ident, u.connRow.ID, u.ip, u.sqlText, u.txID, u.tag)
+	attemptID, err := e.recordAttemptTagged(ctx, u.s, u.pol.Ident, u.connRow.ID, u.ip, u.sqlText, u.txID, u.tag)
 	if err != nil {
 		return nil, err
 	}

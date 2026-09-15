@@ -893,7 +893,7 @@ func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int
 	// `session <id> app "..."` search answered for one protocol and silently
 	// missed the other.
 	tag := s.auditTag()
-	attemptID, aerr := e.recordAttemptTagged(ctx, pol.Ident, connRow.ID, ip, st.sql, txID, tag)
+	attemptID, aerr := e.recordAttemptTagged(ctx, s, pol.Ident, connRow.ID, ip, st.sql, txID, tag)
 	if aerr != nil {
 		return aerr
 	}

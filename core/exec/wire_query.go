@@ -377,7 +377,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			if !o.ran {
 				// Never reached: no attempt row was written (no effect was ever
 				// possible), so write attempt and outcome together now.
-				aid, aerr := e.recordAttemptTagged(recCtx, pol.Ident, connRow.ID, ip, parts[i], "", tag)
+				aid, aerr := e.recordAttemptTagged(recCtx, s, pol.Ident, connRow.ID, ip, parts[i], "", tag)
 				if aerr != nil {
 					return aerr
 				}
@@ -396,7 +396,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			s.mu.Lock()
 			txBefore := s.txID
 			s.mu.Unlock()
-			aid, aerr := e.recordAttemptTagged(runCtx, pol.Ident, connRow.ID, ip, parts[i], txBefore, tag)
+			aid, aerr := e.recordAttemptTagged(runCtx, s, pol.Ident, connRow.ID, ip, parts[i], txBefore, tag)
 			if aerr != nil {
 				return 0, aerr
 			}
@@ -430,7 +430,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		txID, inTx := s.txID, s.tx != nil
 		s.mu.Unlock()
 		for i := el.first; i <= el.last; i++ {
-			aid, aerr := e.recordAttemptTagged(runCtx, pol.Ident, connRow.ID, ip, parts[i], txID, tag)
+			aid, aerr := e.recordAttemptTagged(runCtx, s, pol.Ident, connRow.ID, ip, parts[i], txID, tag)
 			if aerr != nil {
 				return 0, aerr
 			}

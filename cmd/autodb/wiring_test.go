@@ -519,3 +519,99 @@ func pgScratchStore(t *testing.T) (*meta.Store, string) {
 	t.Cleanup(func() { _ = s.Close() })
 	return s, dsn
 }
+
+// The reload's rules and the config file's rules must AGREE.
+//
+// They are two copies of one rule set, held apart because core/config must not
+// depend on core/exec and core/exec must not depend on core/config. Two copies
+// drift, and the way this one would drift is the dangerous way round: a bound
+// the config file refuses at startup, accepted by a reload at runtime. The
+// operator would then be running a configuration the daemon would refuse to
+// start on, and would discover it at the next restart -- which is to say, at
+// the worst possible moment.
+//
+// This cell is the only thing keeping them honest. It lives here because this
+// is the one package that may import both.
+func TestPolicyRules_TheReloadAgreesWithTheConfigFile(t *testing.T) {
+	t.Parallel()
+
+	// A configuration that validates, as the baseline every case perturbs.
+	base := func() config.Config {
+		var c config.Config
+		c.Exec = config.Exec{
+			MaxStatementBytes:    64 * 1024,
+			MaxSessionsPerUser:   8,
+			MaxSessionsGlobal:    256,
+			SessionIdleTimeout:   config.Duration(10 * time.Minute),
+			IdleInTxTimeout:      config.Duration(2 * time.Hour),
+			MaxTxDuration:        config.Duration(8 * time.Hour),
+			DebugIdleInTxTimeout: config.Duration(2 * time.Hour),
+			MaxTxDurationCeiling: config.Duration(8 * time.Hour),
+			PoolMaxConns:         20,
+			PoolMaxConnIdleTime:  config.Duration(10 * time.Minute),
+			PoolMaxConnLifetime:  config.Duration(60 * time.Minute),
+			JanitorInterval:      config.Duration(9 * time.Second),
+			MaxTargetConns:       25,
+		}
+		c.Meta = config.Meta{Engine: "sqlite", Path: ":memory:"}
+		c.FrontDoor = config.FrontDoor{
+			Enabled: true, Bind: "127.0.0.1:6543", MaxLeases: 4, ResidentBudgetBytes: 1 << 30,
+			TLSCertFile: "/dev/null", TLSKeyFile: "/dev/null",
+			TLSHostNames: []string{"autodb.example"},
+		}
+		return c
+	}
+
+	// THE BASELINE MUST VALIDATE, asserted rather than assumed. If it does
+	// not, every case below compares two refusals and agrees for the wrong
+	// reason -- the cell would pass while testing nothing.
+	if err := base().Validate(); err != nil {
+		t.Fatalf("the baseline configuration does not validate, so every case below would "+
+			"compare two refusals and agree vacuously: %v", err)
+	}
+
+	for _, c := range []struct {
+		name  string
+		apply func(*config.Exec)
+	}{
+		{"the baseline itself", func(*config.Exec) {}},
+		{"a zero idle-in-transaction bound", func(e *config.Exec) { e.IdleInTxTimeout = 0; e.DebugIdleInTxTimeout = 0 }},
+		{"a zero session idle bound", func(e *config.Exec) { e.SessionIdleTimeout = 0 }},
+		{"a maximum above the ceiling", func(e *config.Exec) { e.MaxTxDuration = config.Duration(9 * time.Hour) }},
+		{"a session idle longer than the pool's", func(e *config.Exec) { e.SessionIdleTimeout = config.Duration(11 * time.Minute) }},
+		{"a budget of one", func(e *config.Exec) { e.MaxTargetConns = 1 }},
+		{"an idle bound below the sweep interval", func(e *config.Exec) {
+			e.IdleInTxTimeout = config.Duration(5 * time.Second)
+			e.DebugIdleInTxTimeout = config.Duration(5 * time.Second)
+		}},
+	} {
+		cfg := base()
+		c.apply(&cfg.Exec)
+
+		// The engine is built from the SAME configuration, so both validators
+		// judge one set of numbers rather than two that happen to look alike.
+		eng := coreexec.New(nil, nil, execOptions(cfg, func(string) {})...)
+		sweepCtx, cancel := context.WithCancel(context.Background())
+		eng.StartJanitor(sweepCtx, cfg.Exec.JanitorInterval.Duration())
+		cancel()
+
+		spec := coreexec.PolicySpec{
+			SessionIdleTimeout:   cfg.Exec.SessionIdleTimeout.Duration(),
+			IdleInTxTimeout:      cfg.Exec.IdleInTxTimeout.Duration(),
+			MaxTxDuration:        cfg.Exec.MaxTxDuration.Duration(),
+			MaxTxDurationCeiling: cfg.Exec.MaxTxDurationCeiling.Duration(),
+			MaxTargetConns:       cfg.Exec.MaxTargetConns,
+		}
+
+		cerr := cfg.Validate()
+		configRefused := cerr != nil
+		reloadRefused := eng.ValidatePolicy(spec) != nil
+		if configRefused != reloadRefused {
+			verb := map[bool]string{true: "refuses", false: "accepts"}
+			t.Errorf("%s: the config file %s it but a reload %s it (config said: %v). A bound "+
+				"the daemon will not start on must not be reachable at runtime, and a bound "+
+				"the reload refuses must not be something an operator can put in the file",
+				c.name, verb[configRefused], verb[reloadRefused], cerr)
+		}
+	}
+}

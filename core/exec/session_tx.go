@@ -234,7 +234,8 @@ func (e *Engine) beginTx(
 	// The engine's own deadline is resolved first, then the server-side belt
 	// is armed BEHIND it, so the engine always fires first and the rollback
 	// lands on the path that can audit it.
-	limits := e.txLimits.forConnection(connectionIsDebug(connRow), e.debugIdle, e.maxTxCeiling)
+	ep := e.currentPolicy()
+	limits := ep.tx.forConnection(connectionIsDebug(connRow), ep.debugIdle, ep.maxTxCeiling)
 	if berr := armServerBelt(s.ctx, tx, connRow.Engine, limits); berr != nil {
 		// The belt is a belt. Losing it is worth recording, but the engine's
 		// own deadline is the guarantee and the transaction is usable.
