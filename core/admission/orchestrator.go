@@ -3,6 +3,7 @@ package admission
 import (
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 )
 
@@ -80,13 +81,49 @@ func Compose(stages ...Stage) *Orchestrator {
 // itself. It is not a refusal: the caller must be able to tell "the
 // statement is refused" from "the pipeline could not decide", and the
 // Report type gives it that.
+// PanicError is the cause an OperationalError carries when a stage panicked.
+//
+// A PANIC IS AN OPERATIONAL ERROR, NEVER A DENIAL. The distinction is the whole
+// point: a refusal is a policy answer this pipeline stands behind, and a stage
+// that panicked did not answer anything. Projecting a panic as a Deny would
+// publish a refusal reason no stage declared, charge the caller for our bug,
+// and — because the wire renders denials uniformly — make our crash
+// indistinguishable to an operator from a real policy decision.
+//
+// The stack is captured here rather than re-derived later: by the time the
+// caller sees the error, the panicking goroutine's stack is gone.
+type PanicError struct {
+	Value any
+	Stack []byte
+}
+
+func (e *PanicError) Error() string {
+	return fmt.Sprintf("panicked: %v", e.Value)
+}
+
+// applyStage runs one stage and converts a panic into an operational error.
+//
+// The recover lives HERE, around a single stage, and not around the whole
+// loop: containing it per stage is what lets the report name which stage
+// broke. A recover around Run would contain the same crash and lose the only
+// fact an operator needs to fix it.
+func applyStage(s Stage, facts Facts, ctx Context) (contrib Contribution, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			contrib = Contribution{}
+			err = &PanicError{Value: r, Stack: debug.Stack()}
+		}
+	}()
+	return s.Apply(facts, ctx)
+}
+
 func (o *Orchestrator) Run(facts Facts, ctx Context) (Report, error) {
 	var rep Report
 	for _, s := range o.stages {
 		if !applicable(s, facts, ctx) {
 			continue
 		}
-		contrib, err := s.Apply(facts, ctx)
+		contrib, err := applyStage(s, facts, ctx)
 		if err != nil {
 			return Report{}, &OperationalError{Stage: s.Name(), Cause: err}
 		}

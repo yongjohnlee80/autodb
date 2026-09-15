@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -631,6 +632,31 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		l.untrack(raw)
 		_ = raw.Close()
 		l.onEvent(Event{Kind: "fd.conn_close", Reason: closeReason, Peer: peer})
+	}()
+	// ONE CONNECTION'S PANIC MUST NOT BE EVERY CONNECTION'S OUTAGE.
+	//
+	// Without this, a panic anywhere below unwinds through the goroutine this
+	// connection was spawned on and takes the PROCESS with it — every other
+	// session, mid-transaction, on a daemon whose restart loop then reopens
+	// the socket into the same bug.
+	//
+	// Registered AFTER the close defer so it runs BEFORE it: this sets the
+	// reason, and the close above still performs the close. The connection is
+	// never resumed — post-panic state is exactly the state nobody reasoned
+	// about, so the only safe thing to do with it is end it.
+	//
+	// It is deliberately DEFENCE IN DEPTH. The admission runner recovers per
+	// stage and names which stage broke; this catches everything outside a
+	// stage, where no such name exists.
+	defer func() {
+		if r := recover(); r != nil {
+			closeReason = "internal-error"
+			// Server-side only. The peer is told nothing about our crash
+			// beyond that the connection ended, and is NOT charged for it —
+			// our bug must not ban their address.
+			l.onLog(fmt.Sprintf("frontdoor: panic serving %s: %v\n%s", peer, r, debug.Stack()))
+			l.onEvent(Event{Kind: "fd.conn_panic", Reason: "panic", Peer: peer})
+		}
 	}()
 	l.onEvent(Event{Kind: "fd.conn_open", Peer: peer})
 
