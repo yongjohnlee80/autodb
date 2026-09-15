@@ -68,7 +68,10 @@ chmod +x /usr/local/bin/systemctl
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 
 echo "--- install_frontdoor.sh --apply"
-sh /opt/install_frontdoor.sh --apply --non-interactive \
+# --max-target-conns is REQUIRED for --apply: exec.max_target_conns has no
+# default, and a non-interactive run that omits it is refused before anything
+# is written.
+sh /opt/install_frontdoor.sh --apply --non-interactive --max-target-conns 25 \
    --assume-ram 961 --assume-cpus 1 \
    --rpc-port 7419 --dns-name db.example.com --port 5432 \
    > /tmp/install.log 2>&1 || { cat /tmp/install.log; fail "install --apply exited non-zero"; }
@@ -289,7 +292,7 @@ CHOWN
 chmod +x /tmp/shadow-r/chown
 
 : > /tmp/systemctl.log
-PATH=/tmp/shadow-r:$PATH sh /opt/install_frontdoor.sh --apply --non-interactive --start \
+PATH=/tmp/shadow-r:$PATH sh /opt/install_frontdoor.sh --apply --non-interactive --max-target-conns 25 --start \
    --assume-ram 961 --assume-cpus 1 \
    --rpc-port 7419 --dns-name db.example.com --port 5432 \
    > /tmp/install-gated.log 2>&1 || true
@@ -305,7 +308,7 @@ echo "    a failed handoff withholds the installer's own start OK"
 # any path would satisfy the assertion above -- an instrument that cannot
 # observe the thing whose absence it is asserting. I have shipped that mistake.
 : > /tmp/systemctl.log
-sh /opt/install_frontdoor.sh --apply --non-interactive --start \
+sh /opt/install_frontdoor.sh --apply --non-interactive --max-target-conns 25 --start \
    --assume-ram 961 --assume-cpus 1 \
    --rpc-port 7419 --dns-name db.example.com --port 5432 \
    > /tmp/install-start.log 2>&1 || { cat /tmp/install-start.log; fail "a clean --apply --start exited non-zero"; }

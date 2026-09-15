@@ -132,7 +132,7 @@ func TestCleartext_OnlyALocalMetaDSNRelaxesTheTransport(t *testing.T) {
 // to honour it to be testing anything.
 func installerConfig(t *testing.T, args ...string) string {
 	t.Helper()
-	cmd := exec.Command("sh", append([]string{installer(t), "--print-config"}, args...)...)
+	cmd := exec.Command("sh", append([]string{installer(t), "--print-config", "--max-target-conns", "25"}, args...)...)
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf
 	out, err := cmd.Output()
