@@ -145,6 +145,9 @@ type Listener struct {
 	// the phases it ran can be asserted. Nil in production.
 	testLifecycleReady func(peer string, lc *lifecycle)
 
+	// testHandshakeFail forces the success sequence to fail. Nil in production.
+	testHandshakeFail func() error
+
 	// testDenialDelay slows the denial path. Test-only, and it exists so the
 	// timing harness can prove it detects a leak by measuring one rather
 	// than by asserting arithmetic about one.
@@ -275,6 +278,14 @@ type Options struct {
 	// testLifecycleReady publishes each connection's lifecycle to a cell, so
 	// the phases it ran can be asserted.
 	testLifecycleReady func(peer string, lc *lifecycle)
+
+	// testHandshakeFail forces the success sequence to fail.
+	//
+	// A cell cannot produce this by closing the client: the write buffers and
+	// returns nil, so the handshake SUCCEEDS and the connection ends as an
+	// ordinary peer-closed. The first version of the teardown cell did exactly
+	// that and proved nothing.
+	testHandshakeFail func() error
 
 	// testSegmentMsgs and testSegmentBytes lower the segment caps for a cell.
 	testSegmentMsgs  *int
@@ -428,6 +439,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.testOutputCap = opt.testOutputCap
 	l.testReaderReady = opt.testReaderReady
 	l.testLifecycleReady = opt.testLifecycleReady
+	l.testHandshakeFail = opt.testHandshakeFail
 	l.testSegmentMsgs = opt.testSegmentMsgs
 	l.testSegmentBytes = opt.testSegmentBytes
 	l.testWatermark = opt.testWatermark
@@ -635,7 +647,11 @@ func (l *Listener) Serve(ctx context.Context) error {
 				tkt.release()
 			}
 			_ = conn.Close()
-			l.onEvent(Event{Kind: "fd.budget_refuse", Reason: OutcomeInternalError, Peer: peer})
+			// A DISTINCT EVENT KIND. fd.budget_refuse means a peer met a
+			// limit; filing our own defect under it would put our bugs into
+			// the capacity numbers an operator sizes the estate from. Nothing
+			// is charged: the peer did nothing.
+			l.onEvent(Event{Kind: "fd.lifecycle_fault", Reason: OutcomeInternalError, Peer: peer})
 			l.wg.Done()
 			continue
 		case !accepted.Continues():
@@ -820,6 +836,15 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			// A startup failure with no taxonomy of its own. It ends the
 			// connection without a frame, exactly as the classified ones do.
 			return Operational(outcomeID(OutcomeStartupFailed), err)
+		}
+		// A STARTUP REFUSED ON POLICY IS THIS PHASE'S ENDING, and it used to
+		// be recorded as Continue while the handler reconstructed the refusal
+		// afterwards. The phase that made the decision is the one that must
+		// record it: a reconstruction is a second place the identity can be
+		// got wrong, and the phase trail said a refused connection had a
+		// successful startup.
+		if out.Denied != "" {
+			return Refuse(outcomeID(out.Denied.String()), WithOutcomeDetail(out.RefusedParam))
 		}
 		return Continue()
 	}); perr != nil {
@@ -1023,41 +1048,38 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			return
 		}
 		if aerr != nil {
-			closeReason = "auth-read-failed"
+			closeReason = string(outcome.Failure)
 			l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s: %v", peer, aerr))
-			// CHARGED ONLY IF IT WAS THEIRS. A read that failed is the
+			// CHARGED ONLY IF THE REGISTRY SAYS SO. A read that failed is the
 			// peer's doing; running out of credential workers, or a store
 			// that would not answer, is ours — and throttling an address for
 			// our own capacity is the same mistake as throttling one for our
-			// own outage.
-			if outcome.Peer {
-				l.admit.noteFailure(peer)
-			}
+			// own outage. Those are now three identities with three registered
+			// classes rather than one identity and a Boolean beside it.
+			l.chargeFor(lc, PhaseAuthenticateAndOpen, outcome.Failure, peer)
 			return
 		}
 		if outcome.Denied == "" {
 			l.serveSession(ctx, lc, stream, fr, be, tkt, outcome.Session, out.Params, out.Notes, peer, &closeReason)
 			return
 		}
-	} else {
-		// A startup refusal is the peer's doing and is charged like one.
-		outcome.Counts = true
 	}
 
-	if outcome.Counts {
-		l.admit.noteFailure(peer)
-	}
-	if l.testDenialDelay > 0 {
-		time.Sleep(l.testDenialDelay)
-	}
-	// THE TYPED OCCURRENCE, not a Boolean. Which phase produced the refusal
-	// decides which producer owns the identity, and the identity's registered
-	// charge is half the disclosure rule -- the witness alone never was.
+	// THE OCCURRENCE IS THE SOLE THROTTLE AUTHORITY, and the same occurrence
+	// is what the wire is rendered from. There is no second table, no Boolean
+	// travelling beside it, and therefore no way for the two to disagree about
+	// whether a refusal costs the peer their allowance.
 	deniedPhase := PhaseAuthenticateAndOpen
 	if out.Denied != "" {
 		deniedPhase = PhaseStartup
 	}
 	occ := l.denialOccurrence(lc, deniedPhase, outcome.Denied, outcome.Disclosable)
+	if occ.Charges() {
+		l.admit.noteFailure(peer)
+	}
+	if l.testDenialDelay > 0 {
+		time.Sleep(l.testDenialDelay)
+	}
 	if derr := sendDenialOccurrence(stream, occ); derr != nil {
 		l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 	}
@@ -1123,7 +1145,11 @@ func (l *Listener) serveSession(ctx context.Context, lc *lifecycle, stream net.C
 	// sequence, the session's publication to the trail, and the first arming
 	// of the between-messages budget.
 	handshake, herr := lc.run(PhaseHandshake, func() Outcome {
-		if err := l.completeHandshake(be, sess, params, notes); err != nil {
+		err := l.completeHandshake(be, sess, params, notes)
+		if err == nil && l.testHandshakeFail != nil {
+			err = l.testHandshakeFail()
+		}
+		if err != nil {
 			l.onLog(fmt.Sprintf("frontdoor: completing the handshake with %s: %v", peer, err))
 			return Operational(outcomeID(OutcomeHandshakeWrite), err)
 		}
@@ -1157,15 +1183,20 @@ func (l *Listener) serveSession(ctx context.Context, lc *lifecycle, stream net.C
 	// remains only for a build with no query path at all, where refusing every
 	// statement with an accurate 0A000 is the honest answer rather than
 	// accepting one nothing can run.
-	// THE SERVE PHASE wraps the loop itself.
+	// THE SERVE PHASE wraps the loop, AND ONLY THE LOOP.
 	//
-	// Its TEARDOWN stays on the defer above rather than moving inside this
-	// body, and that is deliberate: the session is already open by the time
-	// the handshake phase runs, so a teardown that lived only here would be
-	// skipped when the handshake fails -- leaking a session on the engine and
-	// a cancel key pointing at it. The phase OWNS the teardown; the defer is
-	// how that ownership is discharged on every exit, including the ones that
-	// never reach this line.
+	// THE OBLIGATION IT MIGHT LOOK LIKE IT OWNS BELONGS TO AUTH-OPEN. That
+	// phase acquires ONE authenticated-session obligation -- the engine
+	// session and the cancel key, which exist together from the moment it
+	// returns -- and that obligation spans Handshake and Serve. The defer
+	// above is where it is discharged, which is why it sits before the
+	// handshake rather than inside this phase: a teardown living only here
+	// would be skipped when the handshake fails, leaking a session on the
+	// engine and a cancel key pointing at whatever later takes the same
+	// process id.
+	//
+	// So serve owns the loop; auth-open owns the session. Reviewed and ruled
+	// 2026-09-16.
 	served, serr := lc.run(PhaseServe, func() Outcome {
 		var err error
 		switch {

@@ -46,12 +46,21 @@ type lifecycle struct {
 	phases map[PhaseName]Phase
 	ran    map[PhaseName]bool
 
-	// order records which phases ran, in order, so a cell can assert the exact
-	// prefix a scenario should produce. Production never reads it; it exists
-	// because "the runner drives every phase" is a claim that has to be
-	// checkable, and three phases were declared and bypassed before anyone
-	// noticed.
-	order []PhaseName
+	// order records which phases ran AND WHAT EACH CONCLUDED, in order, so a
+	// cell can assert the exact prefix a scenario should produce and the
+	// verdict each phase reached. Production never reads it.
+	//
+	// The conclusion is part of it because the prefix alone is not enough: a
+	// phase that returns Continue where it should refuse still RAN, so a cell
+	// watching only which phases executed cannot tell a recorded refusal from
+	// one reconstructed afterwards by somebody else.
+	order []phaseRecord
+}
+
+// phaseRecord is one phase's execution and its conclusion.
+type phaseRecord struct {
+	phase   PhaseName
+	outcome Outcome
 }
 
 func (l *Listener) newLifecycle() *lifecycle {
@@ -119,9 +128,9 @@ func (lc *lifecycle) run(name PhaseName, body func() Outcome) (Outcome, error) {
 		}
 	}
 	lc.ran[name] = true
-	lc.order = append(lc.order, name)
 
 	got := body()
+	lc.order = append(lc.order, phaseRecord{phase: name, outcome: got})
 
 	switch got.verdict {
 	case verdictUnset:
@@ -199,4 +208,41 @@ func (l *Listener) denialOccurrence(lc *lifecycle, phase PhaseName, reason denia
 }
 
 // ranPhases reports the phases this connection ran, in order.
-func (lc *lifecycle) ranPhases() []PhaseName { return append([]PhaseName(nil), lc.order...) }
+func (lc *lifecycle) ranPhases() []PhaseName {
+	out := make([]PhaseName, 0, len(lc.order))
+	for _, r := range lc.order {
+		out = append(out, r.phase)
+	}
+	return out
+}
+
+// concluded reports what a phase concluded, and whether it ran at all.
+func (lc *lifecycle) concluded(name PhaseName) (Outcome, bool) {
+	for _, r := range lc.order {
+		if r.phase == name {
+			return r.outcome, true
+		}
+	}
+	return Outcome{}, false
+}
+
+// chargeFor applies the throttle for a non-denial ending, from the identity's
+// REGISTERED class and nothing else.
+//
+// An identity that cannot be resolved is not charged. A charge is a real cost
+// to a real developer -- ten of them bans their address for a minute -- and
+// charging one because our own registration was wrong is the failure this
+// whole vocabulary exists to stop.
+func (l *Listener) chargeFor(lc *lifecycle, phase PhaseName, id outcome.ReasonID, peer string) {
+	if id == "" {
+		return
+	}
+	occ, err := lc.occurrence(phase, Outcome{verdict: verdictOperational, reason: id})
+	if err != nil {
+		l.onLog(fmt.Sprintf("frontdoor: %s produced an unclassifiable ending %q: %v", phase, id, err))
+		return
+	}
+	if occ.Charges() {
+		l.admit.noteFailure(peer)
+	}
+}

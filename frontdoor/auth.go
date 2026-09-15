@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/outcome"
 )
 
 // Authentication and session open (protocol matrix rows 2.6-2.9).
@@ -104,20 +105,21 @@ type CancelExecutor interface {
 type authOutcome struct {
 	Session exec.WireSessionResult
 	Denied  denialReason
-	// Counts reports whether this denial is the PEER's fault and should be
-	// charged to their source address. A store failure is not.
-	Counts bool
+	// Failure names a non-denial ending -- a read that broke, a worker we
+	// could not spare -- so the charge for it comes from the registry like
+	// every other outcome's.
+	//
+	// IT REPLACES TWO BOOLEANS. Counts and Peer said whether to charge, beside
+	// a registry that also said whether to charge, and the two could disagree:
+	// all three failure paths shared one identity registered as never-charged
+	// while a Boolean charged one of them. One authority, and it is the
+	// registered class.
+	Failure outcome.ReasonID
 	// Disclosable carries the engine's witness that this refusal happened
 	// AFTER the credential verified, which is the only condition under which
 	// the wire may say what went wrong. Not derived from the reason: see
 	// exec.DenialDisclosable.
 	Disclosable bool
-	// Peer reports the same thing for a non-denial ERROR return: a read
-	// failure is the peer's doing, while running out of workers or a stuck
-	// store is ours. Separate from Counts because one accompanies a denial
-	// and the other accompanies an error, and collapsing them would make the
-	// caller guess which it had.
-	Peer bool
 }
 
 // runAuth performs rows 2.6-2.8 on an established TLS connection.
@@ -182,7 +184,7 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	}
 
 	if err := conn.SetDeadline(authDeadline); err != nil {
-		return authOutcome{}, err
+		return authOutcome{Failure: outcomeID(OutcomeAuthSetupFailed)}, err
 	}
 	msg, err := be.Receive()
 	// The queue advances for auth's own frames too: it is shared with the session
@@ -195,14 +197,16 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// A read failure is not a denial: nothing was presented. It closes
 		// without a frame for the same reason a TLS failure does, and it IS
 		// the peer's doing, so it is charged to them.
-		return authOutcome{Peer: true}, err
+		// THEIRS: the peer went away, or never answered. Charged, and the
+		// registry is what says so.
+		return authOutcome{Failure: outcomeID(OutcomeAuthReadFailed)}, err
 	}
 	pm, ok := msg.(*pgproto3.PasswordMessage)
 	if !ok {
 		// A frame that is not type-`p` before authentication — a Query, a
 		// Parse. Unambiguous protocol violation, and the peer's fault, so it
 		// is charged to their address like any other failed attempt.
-		return authOutcome{Denied: reasonPreAuthProtocolViolation, Counts: true}, nil
+		return authOutcome{Denied: reasonPreAuthProtocolViolation}, nil
 	}
 
 	// THE WORKER GATE (matrix §9), taken here and not earlier.
@@ -220,8 +224,8 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// we could not spare presented something we never looked at, and
 		// charging that to their address would throttle them for our
 		// shortfall — the same distinction the store-failure path already
-		// draws. Peer stays false, so nothing is counted against them.
-		return authOutcome{}, werr
+		// draws. Its registered class is None, so nothing is counted.
+		return authOutcome{Failure: outcomeID(OutcomeAuthWorkerBusy)}, werr
 	}
 	res, aerr := l.authn.OpenWireSessionWith(authCtx, exec.WireOpen{
 		PAT: pm.Password, StartupUser: params["user"], Database: params["database"],
@@ -244,7 +248,6 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		if reason := exec.DenialReason(aerr); reason != "" {
 			return authOutcome{
 				Denied:      denialReason(reason),
-				Counts:      chargesThrottle(reason),
 				Disclosable: exec.DenialDisclosable(aerr),
 			}, nil
 		}
@@ -445,45 +448,4 @@ func newBackendKey() (*pgproto3.BackendKeyData, error) {
 		ProcessID: binary.BigEndian.Uint32(b[0:4]),
 		SecretKey: b[4:],
 	}, nil
-}
-
-// chargesThrottle decides whether a post-authentication refusal counts against
-// the per-source-IP throttle.
-//
-// THE PRINCIPLE has two axes, and the first is the one Johno's
-// ruling turned on — he did not say "a database mismatch", he said a mismatch
-// AFTER A VERIFIED PAT:
-//
-//	PRE-verification, the peer has proven nothing: charge anything
-//	attributable to them. That is the grinding defence, and an anonymous peer
-//	who can send unlimited malformed startups for free is what it exists to
-//	stop. Those refusals do not reach this function at all — they are charged
-//	by the startup path, deliberately.
-//
-//	POST-verification, a valid token was presented: charge only CREDENTIAL-side
-//	faults. The peer has proven possession and is by definition not grinding,
-//	so their configuration mistakes are not the throttle's business.
-//
-// Everything reaching here is post-verification, so the question is only
-// whether the fault is the credential's.
-// chargesThrottle decides whether a denial counts against the credential
-// throttle, by asking the registry that owns the ruling.
-//
-// THE OLD SHAPE WAS THE BUG. This was a switch with `default: return true`,
-// so every reason nobody had explicitly exempted was charged — and eight of
-// them were capacity, target state or our own configuration. That is the
-// mechanism that turned a full connection pool into a banned developer on
-// 2026-09-15: four leases granted, the fifth refused, the refusal filed as a
-// failed login, and the tenth ban the source address.
-//
-// The classification now lives in core/exec beside the reasons themselves
-// (see docs/front-door/connection-holding-policy.md), where an exhaustiveness test can prove none is missing. A
-// reason with no class charges — failing safe — but cannot reach production
-// unclassified, because that test fails the build first.
-func chargesThrottle(reason string) bool {
-	class, ok := exec.DenialCharge(reason)
-	if !ok {
-		return true
-	}
-	return class.Charges()
 }
