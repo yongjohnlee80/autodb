@@ -118,7 +118,14 @@ const coordinateWindow = 12
 // not gate refusals, with the reason. Adding an entry here is a reviewable
 // decision; the test fails if the reason is empty (an exemption without a
 // reason is a shrug).
-var gateMatrixWalkExempt = map[string]string{}
+var gateMatrixWalkExempt = map[string]string{
+	// ADR 0181's aggregate connection budget. It is declared and enforced by
+	// the permit ledger, but it is NOT a gate refusal: no admission stage can
+	// produce it, and the dial-path wiring that will raise it is outstanding.
+	// It earns a matrix row once it is raised where the gate can see it.
+	"ErrTargetBudgetExhausted": "target connection budget (ADR 0181); raised by the permit dialer " +
+		"before a socket is opened, not by an admission stage — the gate never sees it",
+}
 
 // sentinelDecl is one errors.New declaration found in the package.
 type sentinelDecl struct {

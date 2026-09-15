@@ -14,6 +14,10 @@ func fdCfg(mut func(*Config)) Config {
 	c.FrontDoor.TLSHostNames = []string{"autodb.example.com"}
 	c.Exec.PoolMaxConns = 10
 	c.FrontDoor.ReservedHeadroom = 4
+	// ADR 0181 D3: the budget has no default and is REQUIRED when the front
+	// door is enabled, so every front-door fixture must choose one — the same
+	// decision the operator is now forced to make.
+	c.Exec.MaxTargetConns = 25
 	if mut != nil {
 		mut(&c)
 	}
@@ -66,6 +70,7 @@ reserved_headroom = 4
 
 [exec]
 pool_max_conns = 10
+max_target_conns = 25
 `)
 
 	msg := loadInvalid(t, "[frontdoor]\nenabled = true\n")
@@ -156,5 +161,31 @@ func TestFrontDoor_EffectiveMaxLeases(t *testing.T) {
 	fd.ReservedHeadroom = 0
 	if got := fd.EffectiveMaxLeases(10); got != 10 {
 		t.Errorf("no headroom = %d, want the whole pool", got)
+	}
+}
+
+// ADR 0181 D3: no default, and required under the front door.
+//
+// A default would have autodb claim a number nobody chose against a
+// production database whose max_connections it cannot see. Refusing to start
+// is the point: the operator makes the decision once, visibly, instead of
+// discovering it from a saturated server.
+func TestFrontDoor_TargetBudgetIsRequiredAndHasNoDefault(t *testing.T) {
+	t.Parallel()
+
+	if got := Default().Exec.MaxTargetConns; got != 0 {
+		t.Errorf("exec.max_target_conns must have NO default, got %d", got)
+	}
+
+	c := fdCfg(func(c *Config) { c.Exec.MaxTargetConns = 0 })
+	if err := c.validate(); err == nil {
+		t.Fatal("an enabled front door with no target budget must not validate")
+	}
+
+	// A disabled front door is not asked for a budget it will never spend.
+	d := Default()
+	d.Exec.MaxTargetConns = 0
+	if err := d.validate(); err != nil {
+		t.Errorf("a disabled front door must not require the budget: %v", err)
 	}
 }

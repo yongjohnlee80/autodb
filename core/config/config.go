@@ -387,6 +387,32 @@ type Exec struct {
 	// may RUN is not a reason to store more of it.
 	MaxStatementBytes int `toml:"max_statement_bytes"`
 
+	// MaxTargetConns is this instance's TOTAL production-connection budget:
+	// the number of sockets autodb may have open to target databases at once,
+	// across every target.
+	//
+	// It is the one quantity autodb can actually enforce, and the only new
+	// key this design spends (ADR 0181 D1, ADR 0182 R6). Per-target
+	// `pool_max_conns` is a technical ceiling on ONE pool; this bounds the
+	// aggregate, so two targets may each be allowed more than this and the
+	// runtime permit ledger is what keeps the total true.
+	//
+	// CHOOSE IT AS AT MOST HALF THE SERVER'S max_connections. That is
+	// guidance, not validation: autodb cannot measure the server's limit and
+	// must not pretend to. Summing across instances is the operator's job and
+	// is stated as such rather than inferred.
+	//
+	// NO DEFAULT (D3). A wrong default over-claims a production database
+	// silently, and there is no value that is both conservative and useful.
+	// Unset with the front door enabled is a configuration error, not
+	// "unlimited" — see Validate.
+	//
+	// Every socket to a target is counted: query, health check, control, and
+	// one still being dialled. The meta store is excluded as a named product
+	// boundary, not because it is free; on a same-cluster deployment its
+	// connections come out of the half left to the server.
+	MaxTargetConns int `toml:"max_target_conns"`
+
 	// MaxSessionsPerUser and MaxSessionsGlobal bound the number of open
 	// ExecSessions. One transaction per session bounds pinned
 	// database connections, but not the session objects and timers
@@ -1103,6 +1129,21 @@ func (c Config) validate() error {
 	}
 	if err := c.FrontDoor.validate(c.Exec.PoolMaxConns, c.sizingSource()); err != nil {
 		return err
+	}
+	// ADR 0181 D3: NO DEFAULT, and REQUIRED under the front door — that is
+	// the surface which spends production connections. Defaulting it would
+	// have autodb quietly claim a number nobody chose against a database
+	// whose max_connections it cannot see.
+	//
+	// Checked AFTER the sizing validation above, deliberately. A pool and
+	// headroom that leave no capacity is a more specific and more actionable
+	// complaint than a missing key, and an operator should be told the thing
+	// they can act on first.
+	if c.FrontDoor.Enabled && c.Exec.MaxTargetConns <= 0 {
+		return fmt.Errorf("%w: exec.max_target_conns is required when the front door is enabled — "+
+			"it is this instance's TOTAL production-connection budget and has no default. "+
+			"Choose at most half the target server's max_connections; autodb cannot measure "+
+			"that limit and will not guess it", ErrInvalid)
 	}
 	if c.Exec.SessionIdleTimeout <= 0 {
 		return fmt.Errorf("%w: exec.session_idle_timeout %s must be positive — an unbounded idle window "+
