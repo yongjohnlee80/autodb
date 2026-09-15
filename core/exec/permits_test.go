@@ -470,8 +470,18 @@ func TestAPermitCarriesItsGrantTerms(t *testing.T) {
 	if ctl.Class != DialControl {
 		t.Errorf("class = %v, want control", ctl.Class)
 	}
-	if ctl.Limit != 6 {
-		t.Errorf("control limit = %d, want the full budget 6", ctl.Limit)
+	if ctl.Limit != 1 {
+		t.Errorf("control limit = %d, want 1 — the lane is one holder, whatever the "+
+			"budget is", ctl.Limit)
+	}
+	// The terms that disambiguate a grant during a drain. Limit alone cannot:
+	// a control permit's limit is 1 either way.
+	if ctl.ConfiguredTotal != 6 || ctl.EffectiveCeiling != 6 {
+		t.Errorf("control grant terms: configured=%d effective=%d, want 6 and 6",
+			ctl.ConfiguredTotal, ctl.EffectiveCeiling)
+	}
+	if ord.ConfiguredTotal != 6 {
+		t.Errorf("ordinary grant configured total = %d, want 6", ord.ConfiguredTotal)
 	}
 
 	// A permit granted before an update keeps the generation that admitted it:
@@ -535,10 +545,15 @@ func TestEngineTargetBudgetTransitions(t *testing.T) {
 		t.Fatalf("outstanding=%d draining=%v, want 49 and true — lowering must not kill",
 			s.Outstanding, s.Draining)
 	}
-	if s.Effective != 49 {
-		t.Errorf("effective = %d, want 49 — during a drain the configured number is NOT "+
-			"the number of sockets that exist, and an operator sizing a server needs "+
-			"the one that is true", s.Effective)
+	// Effective = max(Configured, O+1) = max(25, 50) = 50. The reserved slot is
+	// part of the ceiling whether or not a cancel is in flight.
+	if s.Ordinary != 49 || s.Control != 0 {
+		t.Fatalf("O=%d K=%d, want 49 and 0", s.Ordinary, s.Control)
+	}
+	if s.Effective != 50 {
+		t.Errorf("effective = %d, want 50 = max(Configured 25, O+1) — the ceiling counts "+
+			"the reserved slot at all times, because a cancel may arrive at any moment",
+			s.Effective)
 	}
 
 	// A refused update must change nothing, including the generation.
@@ -568,29 +583,50 @@ func TestEngineTargetBudgetTransitions(t *testing.T) {
 	if err := e.SetTargetConnBudget(20); err != nil {
 		t.Fatal(err)
 	}
-	if down := e.Settings().TargetConns; !down.Draining || down.Configured != 20 || down.Effective != 49 {
-		t.Errorf("after 60->20: draining=%v configured=%d effective=%d, want true, 20, 49",
+	if down := e.Settings().TargetConns; !down.Draining || down.Configured != 20 || down.Effective != 50 {
+		t.Errorf("after 60->20: draining=%v configured=%d effective=%d, want true, 20, 50",
 			down.Draining, down.Configured, down.Effective)
 	}
 
-	// A cancellation still goes through while draining, and is COUNTED.
+	// A cancellation still goes through while draining, is COUNTED in
+	// Outstanding, and does NOT move the ceiling.
+	idle := e.Settings().TargetConns
 	ctl, err := e.targetPermits.AcquireControl(context.Background())
 	if err != nil {
 		t.Fatalf("a cancellation during a drain was refused: %v", err)
 	}
-	if counted := e.Settings().TargetConns.Outstanding; counted != 50 {
-		t.Errorf("outstanding = %d, want 50 — the control socket must be ACCOUNTED FOR, "+
-			"not exempted", counted)
+	occupied := e.Settings().TargetConns
+	if occupied.Control != 1 || occupied.Outstanding != 50 {
+		t.Errorf("occupied: K=%d outstanding=%d, want 1 and 50 — the control socket must "+
+			"be ACCOUNTED FOR, not exempted", occupied.Control, occupied.Outstanding)
+	}
+	if occupied.Effective != idle.Effective {
+		t.Errorf("effective moved from %d to %d when the lane was occupied; a drain "+
+			"generation's ceiling must not rise and fall with cancel traffic",
+			idle.Effective, occupied.Effective)
 	}
 	ctl.Release()
+	if released := e.Settings().TargetConns; released.Control != 0 ||
+		released.Outstanding != idle.Outstanding || released.Effective != idle.Effective {
+		t.Errorf("after release: K=%d outstanding=%d effective=%d, want %d, %d, %d",
+			released.Control, released.Outstanding, released.Effective,
+			0, idle.Outstanding, idle.Effective)
+	}
 
 	// Draining below the new budget clears the state.
 	for i := range 35 {
 		held[i].Release()
 	}
-	if end := e.Settings().TargetConns; end.Draining || end.Outstanding != 14 {
+	// Retiring ordinary sockets converges the ceiling DOWN to Configured and
+	// never back up.
+	end := e.Settings().TargetConns
+	if end.Draining || end.Outstanding != 14 {
 		t.Errorf("after draining: draining=%v outstanding=%d, want false and 14",
 			end.Draining, end.Outstanding)
+	}
+	if end.Effective != 20 {
+		t.Errorf("effective = %d, want Configured 20 once drained — a drain must converge",
+			end.Effective)
 	}
 }
 
