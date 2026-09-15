@@ -164,12 +164,17 @@ func (l *permitLedger) SetBudget(n int) error {
 			ErrInvalidBudget, n)
 	}
 	// The caller has no policy to align with, so the generation simply
-	// advances. Every production path goes through the policy reload, which
-	// chooses the generation once and passes it to both sides.
+	// advances -- CHOSEN AND PUBLISHED IN ONE CRITICAL SECTION.
+	//
+	// It used to read generation+1 under the lock, release it, and reacquire
+	// to publish. Two callers could then read the same current value and
+	// publish the same next one, or publish in the reverse order to the one
+	// they chose in: a generation that repeats, or goes backwards, is worse
+	// than no generation at all, because the whole point of the number is to
+	// let two observers say whether they saw the same publication.
 	l.mu.Lock()
-	next := l.generation + 1
-	l.mu.Unlock()
-	return l.setBudgetWith(n, next, nil)
+	defer l.mu.Unlock()
+	return l.setBudgetLocked(n, l.generation+1, nil)
 }
 
 // setBudgetWith changes the budget and runs publish -- if there is one --
@@ -190,6 +195,13 @@ func (l *permitLedger) SetBudget(n int) error {
 func (l *permitLedger) setBudgetWith(n int, generation uint64, publish func()) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.setBudgetLocked(n, generation, publish)
+}
+
+// setBudgetLocked is setBudgetWith for a caller that already holds the lock,
+// so that choosing a generation and publishing it cannot be two critical
+// sections with a window between them.
+func (l *permitLedger) setBudgetLocked(n int, generation uint64, publish func()) error {
 	// A cell's barrier, held INSIDE the lock and before anything is published,
 	// so the reader ordering can be exercised deterministically rather than
 	// raced for. Nil outside this package's own cells.

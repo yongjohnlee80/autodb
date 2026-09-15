@@ -188,3 +188,72 @@ func TestPolicyCoherence_TheGenerationsHoldDuringADrain(t *testing.T) {
 			"state this cell claims to read", got.TargetConns.Outstanding, got.TargetConns.Configured)
 	}
 }
+
+// TWO SETTERS AT ONCE GET TWO DISTINCT, ASCENDING GENERATIONS.
+//
+// SetBudget used to read generation+1 under the lock, release it, and reacquire
+// to publish. Two callers could read the same current value and publish the
+// same next one, or publish in the reverse order to the one they chose in. A
+// generation that repeats or goes backwards is worse than none: the whole point
+// of the number is to let two observers say whether they saw one publication or
+// two.
+//
+// The barrier makes the interleaving deterministic. The first setter is held
+// inside the lock; the second is started and must block, because choosing and
+// publishing are now one critical section.
+func TestPolicyCoherence_ConcurrentSettersCannotReuseAGeneration(t *testing.T) {
+	t.Parallel()
+	f := policyFixture(t)
+	led := f.eng.targetPermits
+
+	atBarrier := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	led.testBeforePublish = func() {
+		once.Do(func() {
+			close(atBarrier)
+			<-release
+		})
+	}
+
+	first := make(chan error, 1)
+	go func() { first <- led.SetBudget(40) }()
+
+	select {
+	case <-atBarrier:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first setter never reached the barrier")
+	}
+
+	// The first setter holds the lock and has chosen but not published. A
+	// second setter must not be able to choose from the same stale value.
+	second := make(chan error, 1)
+	go func() { second <- led.SetBudget(41) }()
+
+	select {
+	case <-second:
+		t.Fatal("a second setter chose a generation while the first held the lock; both " +
+			"can then publish the same number")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("first setter: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("second setter: %v", err)
+	}
+
+	// TWO PUBLICATIONS, TWO GENERATIONS, and the later one wins the budget --
+	// the lock serialises them, so the last to hold it is the state that
+	// stands.
+	got := led.Snapshot()
+	if got.Generation != 2 {
+		t.Errorf("generation after two setters = %d, want 2 — one of them reused the "+
+			"other's number", got.Generation)
+	}
+	if got.Configured != 41 {
+		t.Errorf("budget = %d, want 41 from the setter that held the lock last", got.Configured)
+	}
+}

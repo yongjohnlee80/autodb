@@ -28,6 +28,14 @@ const (
 	ProducerHandshake = outcome.ProducerID("handshake")
 	// ProducerServe is the session loop and its owned teardown.
 	ProducerServe = outcome.ProducerID("serve")
+	// ProducerLifecycle owns faults in the RUNNER itself -- a phase that could
+	// not be looked up, an identity nobody declared.
+	//
+	// SEPARATE FROM EVERY PHASE, because it is not a thing that happened to
+	// the connection: it is a thing wrong with us. Attributing it to the phase
+	// it interrupted would file our own bug under that phase's vocabulary, and
+	// an operator counting startup failures would count our defects among them.
+	ProducerLifecycle = outcome.ProducerID("lifecycle-infrastructure")
 )
 
 // The endings that are not refusals.
@@ -38,12 +46,23 @@ const (
 // cannot end on one nobody classified -- which is the whole reason this is an
 // outcome registry rather than a refusal registry.
 const (
-	OutcomeStartupFailed  = "startup-failed"
+	OutcomeStartupFailed = "startup-failed"
+	// OutcomeAuthReadFailed is the peer abandoning the credential exchange, or
+	// sending something that is not a password where one belongs. Theirs, and
+	// charged: it is the same act as grinding a credential, one step earlier.
 	OutcomeAuthReadFailed = "auth-read-failed"
-	OutcomeHandshakeWrite = "handshake-write-failed"
-	OutcomeDeadlineArm    = "deadline"
-	OutcomeSessionError   = "session-error"
-	OutcomePeerClosed     = "peer-closed"
+	// OutcomeAuthWorkerBusy and OutcomeAuthSetupFailed are OURS.
+	//
+	// They used to share the identity above, which made the registry say one
+	// thing -- never charged -- while the code charged whichever of the three
+	// had happened to set a separate Boolean. A peer who waited for a worker
+	// we could not spare presented something we never looked at.
+	OutcomeAuthWorkerBusy  = "auth-worker-unavailable"
+	OutcomeAuthSetupFailed = "auth-setup-failed"
+	OutcomeHandshakeWrite  = "handshake-write-failed"
+	OutcomeDeadlineArm     = "deadline"
+	OutcomeSessionError    = "session-error"
+	OutcomePeerClosed      = "peer-closed"
 	// OutcomeInternalError is a fault in OUR code -- a phase that could not
 	// run, an identity nobody declared. Never the peer's doing and never
 	// charged to them.
@@ -130,16 +149,12 @@ func Outcomes() []outcome.Registration {
 			refusal(reasonStartupOptionsMalformed, outcome.Protocol),
 			refusal(reasonStartupDuplicateKey, outcome.Protocol),
 			refusal(reasonPreAuthOversize, outcome.Protocol),
-			// OURS, NOT THEIRS. A locked store is a state of this server; a
-			// peer holding a perfectly good token meets it through no fault
-			// of their own, and throttling them for our outage turns one
-			// incident into two.
+			// NOTE: reasonStoreLocked is NOT declared here. It has no
+			// production raise site -- the renderer still special-cases it, so
+			// the behaviour is ready for one -- and a declared identity that
+			// nothing can emit is a registry describing a system that does not
+			// exist. It is declared when something raises it.
 			//
-			// It is the ONE identity that changes what the wire says -- a
-			// running server that is not serving, identical for every caller
-			// and independent of any credential, so it cannot be used to
-			// learn anything about a resource.
-			refusal(reasonStoreLocked, outcome.None),
 			// The identities above are denial reasons; these four are the
 			// phase's other ways to end, and they end it WITHOUT a frame --
 			// a peer speaking raw TLS cannot read a PostgreSQL error.
@@ -154,7 +169,6 @@ func Outcomes() []outcome.Registration {
 			// A startup that failed for a reason with no taxonomy of its own,
 			// and a fault in our own phase wiring.
 			{ID: OutcomeStartupFailed, Kind: outcome.Operational, Charge: outcome.None},
-			{ID: OutcomeInternalError, Kind: outcome.Operational, Charge: outcome.None},
 		}},
 		{Producer: ProducerCancel, Outcomes: []outcome.Decl{
 			// A cancel presents no credential, so it cannot fail one. Control
@@ -169,14 +183,14 @@ func Outcomes() []outcome.Registration {
 			// peer did wrong, so none of these is charged.
 			{ID: OutcomeHandshakeWrite, Kind: outcome.Operational, Charge: outcome.None},
 			{ID: OutcomeDeadlineArm, Kind: outcome.Operational, Charge: outcome.None},
+		}},
+		{Producer: ProducerLifecycle, Outcomes: []outcome.Decl{
 			{ID: OutcomeInternalError, Kind: outcome.Operational, Charge: outcome.None},
 		}},
 		{Producer: ProducerServe, Outcomes: []outcome.Decl{
 			// The ordinary ending: the client said goodbye, or went away.
 			{ID: OutcomePeerClosed, Kind: outcome.Control, Charge: outcome.None},
 			{ID: OutcomeSessionError, Kind: outcome.Operational, Charge: outcome.None},
-			{ID: OutcomeDeadlineArm, Kind: outcome.Operational, Charge: outcome.None},
-			{ID: OutcomeInternalError, Kind: outcome.Operational, Charge: outcome.None},
 		}},
 	}
 }
@@ -206,8 +220,11 @@ func credentialOutcomes(
 		refusal(reasonNoCredentialStore, outcome.None),
 		// A credential exchange the peer abandoned mid-way, and a fault in our
 		// own phase wiring. Neither is a refusal; both end the connection.
-		{ID: OutcomeAuthReadFailed, Kind: outcome.Operational, Charge: outcome.None},
-		{ID: OutcomeInternalError, Kind: outcome.Operational, Charge: outcome.None},
+		// CHARGED, because it is the peer's doing. The registry is the only
+		// place that decides this now.
+		{ID: OutcomeAuthReadFailed, Kind: outcome.Operational, Charge: outcome.Protocol},
+		{ID: OutcomeAuthWorkerBusy, Kind: outcome.Operational, Charge: outcome.None},
+		{ID: OutcomeAuthSetupFailed, Kind: outcome.Operational, Charge: outcome.None},
 		// THEIRS: a frame that is not a password where a password belongs.
 		// This is the credential exchange being spoken wrongly, which is the
 		// same kind of thing as grinding it.
