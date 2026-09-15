@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 )
@@ -13,6 +14,9 @@ import (
 // It is a CAPACITY refusal and never charges the credential throttle — see
 // ChargeCapacity and the charge-class policy.
 var ErrTargetBudgetExhausted = errors.New("exec: target connection budget exhausted")
+
+// ErrInvalidBudget means a live budget update was refused.
+var ErrInvalidBudget = errors.New("exec: invalid target connection budget")
 
 // permitLedger enforces `exec.max_target_conns`: the total number of sockets
 // this instance may have open to production targets, across every target.
@@ -55,11 +59,62 @@ func newPermitLedger(budget int) *permitLedger {
 // new permit is granted above the new budget and outstanding DRAINS as work
 // finishes. The number becomes true by attrition, which is the only way it can
 // become true without breaking correct work.
-func (l *permitLedger) SetBudget(n int) {
+func (l *permitLedger) SetBudget(n int) error {
+	// A NONPOSITIVE BUDGET IS NOT "UNLIMITED", and accepting it here would make
+	// a live update the one way to remove a production-safety bound that
+	// configuration refuses to remove at startup.
+	if n < 2 {
+		return fmt.Errorf("%w: a live budget update to %d is refused; the minimum is 2, "+
+			"because one permit is reserved so a cancellation can still be delivered",
+			ErrInvalidBudget, n)
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.budget = n
 	l.generation++
+	return nil
+}
+
+// LedgerSnapshot is one coherent reading of the ledger.
+//
+// TAKEN UNDER ONE LOCK, because the fields only mean something together.
+// Reading outstanding and then budget separately can observe a state that
+// never existed — an outstanding count from before a resize against a budget
+// from after it — and an operator diagnosing saturation would be looking at a
+// number no moment ever held.
+type LedgerSnapshot struct {
+	// Configured is the operator's number.
+	Configured int
+	// OrdinaryLimit is what ordinary work may actually take: one short of
+	// Configured, because the last permit is the control lane's.
+	OrdinaryLimit int
+	// Outstanding may EXCEED Configured while a lowered budget drains. That is
+	// not an error and must not be rendered as one: nothing is killed to make
+	// the number true, so it becomes true by attrition.
+	Outstanding int
+	// Generation increments on every accepted update, so a reader can tell
+	// whether two snapshots describe the same policy.
+	Generation uint64
+	// Draining reports the state above plainly, so a caller does not have to
+	// re-derive it and get the comparison backwards.
+	Draining bool
+}
+
+// Snapshot returns a coherent reading of the ledger.
+func (l *permitLedger) Snapshot() LedgerSnapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ordinary := l.budget
+	if ordinary > 1 {
+		ordinary--
+	}
+	return LedgerSnapshot{
+		Configured:    l.budget,
+		OrdinaryLimit: ordinary,
+		Outstanding:   l.outstanding,
+		Generation:    l.generation,
+		Draining:      l.outstanding > l.budget,
+	}
 }
 
 // Acquire takes one permit, or reports that the budget is spent.
@@ -114,13 +169,23 @@ func (l *permitLedger) acquire(control bool) (release func(), err error) {
 	l.mu.Lock()
 	// ORDINARY DIALS STOP ONE SHORT. The last permit is the control lane's,
 	// so a cancellation can always be delivered.
-	limit := l.budget
-	if !control && limit > 1 {
-		limit--
-	}
-	if l.budget > 0 && l.outstanding >= limit {
-		l.mu.Unlock()
-		return nil, ErrTargetBudgetExhausted
+	//
+	// THE CONTROL LANE DOES NOT RE-TEST AGAINST outstanding, and that is
+	// deliberate. Its bound is the semaphore above — one holder, short-lived —
+	// and re-testing here would break it in the one state where cancelling
+	// matters most: while a LOWERED budget drains, outstanding is above the
+	// new number by definition, so a cancel would be refused precisely because
+	// too much work is already running. The reserved slot is a fixed +1 the
+	// operator's number accounts for, stated here rather than hidden.
+	if !control {
+		limit := l.budget
+		if limit > 1 {
+			limit--
+		}
+		if l.budget > 0 && l.outstanding >= limit {
+			l.mu.Unlock()
+			return nil, ErrTargetBudgetExhausted
+		}
 	}
 	l.outstanding++
 	l.mu.Unlock()

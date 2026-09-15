@@ -121,10 +121,13 @@ const coordinateWindow = 12
 var gateMatrixWalkExempt = map[string]string{
 	// the connection-budget policy's aggregate connection budget. It is declared and enforced by
 	// the permit ledger, but it is NOT a gate refusal: no admission stage can
-	// produce it, and the dial-path wiring that will raise it is outstanding.
-	// It earns a matrix row once it is raised where the gate can see it.
+	// produce it: it is raised by the dialer before a socket exists.
 	"ErrTargetBudgetExhausted": "target connection budget (see docs/front-door/connection-holding-policy.md); raised by the permit dialer " +
 		"before a socket is opened, not by an admission stage — the gate never sees it",
+	// A configuration refusal on a LIVE budget update, raised by the operator
+	// surface rather than by anything a statement passes through.
+	"ErrInvalidBudget": "live target-budget update refused; an operator-surface validation " +
+		"error, not a gate refusal — no statement path can raise it",
 }
 
 // sentinelDecl is one errors.New declaration found in the package.

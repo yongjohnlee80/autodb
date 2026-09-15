@@ -65,7 +65,9 @@ func TestLoweringTheBudgetDrainsRatherThanKilling(t *testing.T) {
 	}
 
 	_, genBefore := l.Budget()
-	l.SetBudget(26) // 25 ordinary + 1 reserved
+	if err := l.SetBudget(26); err != nil { // 25 ordinary + 1 reserved
+		t.Fatal(err)
+	}
 	budget, genAfter := l.Budget()
 	if budget != 26 {
 		t.Fatalf("budget = %d, want 26", budget)
@@ -202,7 +204,9 @@ func TestPermitDialerReleasesWhenTheSocketCloses(t *testing.T) {
 // A refused dial must not open a socket at all.
 func TestPermitDialerDoesNotDialWhenTheBudgetIsSpent(t *testing.T) {
 	l := newPermitLedger(0)
-	l.SetBudget(2) // 1 ordinary + 1 reserved
+	if err := l.SetBudget(2); err != nil { // 1 ordinary + 1 reserved
+		t.Fatal(err)
+	}
 	var dialed int
 	dial := permitDialer(l, func(context.Context, string, string) (net.Conn, error) {
 		dialed++
@@ -354,5 +358,90 @@ func TestExecPolicyMirrorIsTheRuledValues(t *testing.T) {
 			t.Errorf("%s = %v, want %v — the core/exec mirror has drifted from the ruled policy",
 				tc.name, tc.got, tc.want)
 		}
+	}
+}
+
+// A live update must not be able to remove a bound that configuration refuses
+// to remove at startup.
+func TestLiveBudgetUpdatesAreValidated(t *testing.T) {
+	l := newPermitLedger(10)
+	for _, n := range []int{0, -1, 1} {
+		if err := l.SetBudget(n); !errors.Is(err, ErrInvalidBudget) {
+			t.Errorf("SetBudget(%d) = %v, want a refusal — a nonpositive budget is not "+
+				"'unlimited', and 1 is consumed entirely by the reserved lane", n, err)
+		}
+	}
+	if got := l.Snapshot().Configured; got != 10 {
+		t.Errorf("a refused update changed the budget to %d", got)
+	}
+	if err := l.SetBudget(4); err != nil {
+		t.Fatalf("a valid update was refused: %v", err)
+	}
+}
+
+// The snapshot's fields only mean something together, so they are read under
+// one lock — and it must say plainly when a lowered budget is draining rather
+// than leaving a caller to compare two numbers and get it backwards.
+func TestSnapshotIsCoherentAndNamesTheDrain(t *testing.T) {
+	l := newPermitLedger(6) // 5 ordinary + 1 reserved
+
+	before := l.Snapshot()
+	if before.Configured != 6 || before.OrdinaryLimit != 5 {
+		t.Fatalf("configured=%d ordinary=%d, want 6 and 5", before.Configured, before.OrdinaryLimit)
+	}
+	if before.Draining {
+		t.Error("an untouched ledger is not draining")
+	}
+
+	for range 5 {
+		if _, err := l.Acquire(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.SetBudget(3); err != nil {
+		t.Fatal(err)
+	}
+
+	after := l.Snapshot()
+	if after.Generation <= before.Generation {
+		t.Error("an accepted update must open a new generation")
+	}
+	if after.Outstanding != 5 {
+		t.Errorf("outstanding = %d, want 5 — lowering the budget must not kill live work",
+			after.Outstanding)
+	}
+	if !after.Draining {
+		t.Error("outstanding above configured IS the drain; the snapshot must say so rather " +
+			"than leaving a caller to derive it")
+	}
+}
+
+// THE DRAIN CASE. While a lowered budget drains, outstanding is above the new
+// number by definition — so a control lane that re-tested against it would
+// refuse a cancellation precisely because too much work is already running,
+// which is the one moment cancelling matters most.
+func TestTheControlLaneSurvivesADrainingGeneration(t *testing.T) {
+	l := newPermitLedger(51) // 50 ordinary + 1 reserved
+	for range 50 {
+		if _, err := l.Acquire(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := l.SetBudget(26); err != nil { // 25 ordinary + 1 reserved
+		t.Fatal(err)
+	}
+
+	snap := l.Snapshot()
+	if !snap.Draining || snap.Outstanding <= snap.Configured {
+		t.Fatalf("expected a draining ledger, got %+v", snap)
+	}
+	// Ordinary work is correctly refused while over the new budget...
+	if _, err := l.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatal("no new ordinary permit may be granted above the lowered budget")
+	}
+	// ...and a cancellation still goes through.
+	if _, err := l.AcquireControl(context.Background()); err != nil {
+		t.Fatalf("a cancellation during a drain was refused: %v — this is the state where "+
+			"cancelling matters most", err)
 	}
 }
