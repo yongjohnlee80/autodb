@@ -47,7 +47,7 @@ have is worse than one that is merely ignored.
 
 `exec.max_target_conns` is this instance's total production-connection budget:
 the number of sockets it may have open to target databases at once, across
-every target.
+every target. Call it **C**. **C must be at least 2**, for the reason below.
 
 **It has no default and is required when the front door is enabled.** A
 default would have this process quietly claim a number nobody chose, against a
@@ -66,15 +66,85 @@ connections that actually exist.
 not an allocation, and two targets may each be allowed more than the budget —
 the ledger is what makes that safe.
 
-**Lowering the budget drains; it does not kill.** With 50 sockets open and a
-new budget of 25, no new permit is granted above the new budget and the number
-becomes true by attrition. Closing live sessions to make a number true would
-turn a configuration edit into an outage. Monotonicity is therefore asserted
-per generation rather than absolutely.
-
 **It is not the per-source connection cap.** That is a different resource,
 limiting concurrent connections from one address, and the two must not move
 together.
+
+### One slot is reserved for cancellation
+
+PostgreSQL does not cancel a statement on the session that issued it: it
+requires a **second connection** carrying the backend key. That second socket
+is dialled through the same path as ordinary work — so if ordinary work may
+take the whole budget, a cancellation is refused exactly when someone reaches
+for it, because a developer cancels a query when the system is busy, not when
+it is idle.
+
+So the last slot is reserved:
+
+- **ordinary limit = C − 1.** Ordinary dials stop one short.
+- **control limit = 1.** One holder at a time, serialized. A cancel is
+  connect, write sixteen bytes, close; one lane is enough, and more would be a
+  second budget nobody configured.
+- The control dial is **marked** before it is made, and only code inside the
+  engine can mark it, so ordinary traffic cannot help itself to the reserved
+  slot.
+- It is **exact-backend cancellation only** — that one statement, on that one
+  connection.
+
+**C ≥ 2** follows: at C = 1 the reserved slot consumes the whole budget and
+nothing is left for work.
+
+### The accounting
+
+Two occupancies are tracked separately:
+
+| Symbol | Meaning |
+| --- | --- |
+| **O** | ordinary sockets live or in flight |
+| **K** | control occupancy, 0 or 1 |
+
+| Quantity | Definition |
+| --- | --- |
+| `Outstanding` | **O + K** — every socket this instance holds |
+| `Effective` | **max(C, O + 1)** — the immediately exercisable ceiling |
+| `Draining` | **O > C − 1** |
+
+**`Effective` uses O + 1, not Outstanding**, and the +1 applies whether or not
+a cancel is in flight. The reserved slot is part of the ceiling at all times,
+because a cancel may arrive at any moment. Defining it against `Outstanding`
+instead makes the number rise and fall as short-lived cancel traffic comes and
+goes — within a single drain generation it would read 49, then 50, then 49,
+and an operator would see a drain apparently reverse.
+
+**The cancellation is counted, never exempt.** It occupies a slot and appears
+in `Outstanding`. What it must not do is move the ceiling.
+
+### Lowering the budget drains; it does not kill
+
+With 50 sockets open and a new budget of 25, nothing is closed. Ordinary dials
+stop; the number becomes true by attrition. Closing live sessions to make a
+configured number true would turn a configuration edit into an outage.
+Monotonicity is therefore asserted per generation rather than absolutely, and
+`Effective` converges **downwards** to C as ordinary sockets retire — it never
+rises within a generation.
+
+**The control lane is the one exception, and it is deliberate.** While
+draining, O is above C by definition — so a control lane that re-tested
+against the budget would refuse a cancellation precisely because too much work
+is already running, which is the moment cancelling matters most. Ordinary and
+unmarked dials stop; the marked control dial may still proceed.
+
+Worked, for C dropping 50 → 25 with 49 ordinary sockets held:
+
+| State | O | K | Outstanding | Effective |
+| --- | ---: | ---: | ---: | ---: |
+| idle lane | 49 | 0 | 49 | 50 |
+| cancel in flight | 49 | **1** | **50** | 50 |
+| cancel released | 49 | 0 | 49 | 50 |
+
+`Effective` is 50 throughout: `max(25, 49 + 1)`. It does not move when the
+lane fills and empties, and it falls towards 25 only as the 49 ordinary
+sockets retire.
 
 ## Charge classes
 

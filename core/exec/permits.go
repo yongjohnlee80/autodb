@@ -109,7 +109,22 @@ type permitLedger struct {
 	controlLane chan struct{}
 }
 
+// newPermitLedger builds a ledger for a budget of at least 2.
+//
+// THERE IS NO "UNBOUNDED" LEDGER. A zero budget used to mean unlimited, which
+// was dead surface -- production reaches this only through
+// WithTargetConnBudget, which builds nothing below 1 -- and it was incoherent
+// besides: under rev4's algebra a zero-budget ledger reported Effective = O+1
+// and Draining = true the moment anything was acquired, so the sentinel
+// contradicted itself as soon as it was used.
+//
+// ABSENCE IS REPRESENTED BY A NIL LEDGER, which is what production already
+// does. An engine built without a budget has no ledger at all, and the dialer
+// returns the underlying dial untouched.
 func newPermitLedger(budget int) *permitLedger {
+	if budget < 2 {
+		budget = 2
+	}
 	return &permitLedger{budget: budget, generation: 1, controlLane: make(chan struct{}, 1)}
 }
 
@@ -253,7 +268,7 @@ func (l *permitLedger) acquire(class DialClass) (*Permit, error) {
 	// operator's number accounts for, stated here rather than hidden.
 	if !control {
 		limit := l.ordinaryLimitLocked()
-		if l.budget > 0 && l.ordinary >= limit {
+		if l.ordinary >= limit {
 			l.mu.Unlock()
 			return nil, ErrTargetBudgetExhausted
 		}
