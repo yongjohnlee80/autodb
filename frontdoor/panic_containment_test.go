@@ -224,7 +224,7 @@ func TestHandleContainsAPanicFromAnExplodingCallback(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		l.handle(context.Background(), server, nil)
+		l.handle(context.Background(), &acceptToken{conn: server})
 	}()
 	select {
 	case <-done:
@@ -265,7 +265,7 @@ func TestHandleContainsAPanicFromAnExplodingCallback(t *testing.T) {
 	done2 := make(chan struct{})
 	go func() {
 		defer close(done2)
-		l.handle(context.Background(), server2, nil)
+		l.handle(context.Background(), &acceptToken{conn: server2})
 	}()
 	select {
 	case <-done2:

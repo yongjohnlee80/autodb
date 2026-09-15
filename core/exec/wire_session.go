@@ -16,6 +16,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/outcome"
 )
 
 // The front door's authentication chain (protocol matrix row 2.7).
@@ -277,8 +278,16 @@ var denialCharge = map[string]ChargeClass{
 // has reasoned about; but the exhaustiveness test means this cannot happen to
 // a reason declared in this file.
 func DenialCharge(reason string) (ChargeClass, bool) {
-	c, ok := denialCharge[reason]
-	return c, ok
+	// THROUGH THE REGISTRY, not the map beside it. The map is the
+	// DECLARATION; this is the lookup, and routing it through the composed
+	// registry is what makes the two one fact rather than two facts that
+	// happen to agree today. An identity the registry never heard of is
+	// refused here exactly as it would be at any other producer's emit site.
+	d, ok := engineRegistry.Lookup(outcome.ReasonID(reason))
+	if !ok {
+		return 0, false
+	}
+	return classOf(d.Charge)
 }
 
 // DenialReasons lists every declared post-verification denial reason, so the

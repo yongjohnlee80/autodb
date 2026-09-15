@@ -15,6 +15,7 @@ import (
 
 	"github.com/yongjohnlee80/autodb/core/config"
 	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/outcome"
 )
 
 // Listener is the front door's TCP listener.
@@ -49,6 +50,15 @@ type Listener struct {
 
 	// admit holds every accept-time budget and the per-source throttle.
 	admit *admitter
+
+	// outcomes is what this listener's phases may conclude, and phases is
+	// what each one declared about itself. Both are composed once in Open:
+	// a producer disagreeing with another, or a phase that has not said
+	// whether it may be re-run, is a programming error with a one-line fix,
+	// and catching it at the moment it fires means catching it during an
+	// incident.
+	outcomes *outcome.Registry
+	phases   map[PhaseName]Phase
 
 	// authSlots bounds CONCURRENT credential verifications (matrix §9's
 	// sixteen auth workers). A channel rather than a counter because the
@@ -365,6 +375,32 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	}
 	l := &Listener{ln: ln, tls: tlsCfg, cleartextDebug: opt.CleartextDebug,
 		closed: make(chan struct{}), live: map[net.Conn]struct{}{}}
+
+	// THE LISTENER DOES NOT OPEN IF ITS OWN VOCABULARY IS INCONSISTENT.
+	//
+	// Composition is where a duplicate declaration, or one identity that two
+	// producers describe differently, is caught. The alternative is catching
+	// it at the moment it fires, in whichever direction the last registration
+	// happened to win -- which is to say, during an incident.
+	reg, cerr := composeListenerOutcomes()
+	if cerr != nil {
+		_ = ln.Close()
+		return nil, cerr
+	}
+	l.outcomes = reg
+	l.phases = map[PhaseName]Phase{}
+	for _, p := range lifecyclePhases() {
+		if verr := p.validate(); verr != nil {
+			_ = ln.Close()
+			return nil, verr
+		}
+		if _, dup := l.phases[p.Name]; dup {
+			_ = ln.Close()
+			return nil, fmt.Errorf("frontdoor: phase %s is declared twice", p.Name)
+		}
+		l.phases[p.Name] = p
+	}
+
 	l.now = opt.Now
 	if l.now == nil {
 		l.now = time.Now
@@ -571,11 +607,12 @@ func (l *Listener) Serve(ctx context.Context) error {
 			l.wg.Done()
 			continue
 		}
-		go func() {
-			defer l.wg.Done()
-			defer tkt.release()
-			l.handle(ctx, conn, tkt)
-		}()
+		// THE THREE OBLIGATIONS BECOME ONE TOKEN, and exactly one consumer
+		// takes it. The accept loop has already added to the WaitGroup and
+		// taken the reservation; from here the handler owns both, plus the
+		// socket, and discharges all three together on every exit.
+		tok := &acceptToken{conn: conn, tkt: tkt, handlerDone: l.wg.Done}
+		go func() { l.handle(ctx, tok) }()
 	}
 }
 
@@ -639,21 +676,37 @@ func safely(fn func()) {
 // Every exit path closes the connection and emits fd.conn_close, because a
 // front door that leaks sockets under refusal is a front door an anonymous
 // peer can exhaust by being refused.
-func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
+func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
+	raw := tok.conn
+	tkt := tok.tkt
 	peer := raw.RemoteAddr().String()
-	l.track(raw)
+	tok.track(l)
 	closeReason := "peer-closed"
-	defer func() {
-		// UNCONDITIONAL, AND IN THIS ORDER. Untracking and closing must happen
-		// even if a callback below misbehaves, so they run before anything
-		// that calls out of this package — a socket left open because an
-		// observer panicked is a leak an anonymous peer can farm.
-		l.untrack(raw)
-		_ = raw.Close()
+	// UNCONDITIONAL, AND IN THIS ORDER — now derived from the token rather
+	// than from everyone remembering. Untracking and closing happen even if a
+	// callback misbehaves, so they run before anything that calls out of this
+	// package: a socket left open because an observer panicked is a leak an
+	// anonymous peer can farm.
+	//
+	// The token releases in reverse order of acquisition and exactly once,
+	// whichever of the paths below ends the connection. The close event is
+	// read through a pointer because the reason is decided later, by whichever
+	// phase ends this.
+	tok.announce = func() {
 		safely(func() {
 			l.onEvent(Event{Kind: "fd.conn_close", Reason: closeReason, Peer: peer})
 		})
-	}()
+	}
+	// ONE RUN THROUGH THE PHASES, PER CONNECTION. What it tracks -- whether a
+	// phase that may happen exactly once already has -- is per connection: a
+	// runner shared between them would refuse the second connection's startup
+	// on the grounds that the first one had a startup.
+	lc := l.newLifecycle()
+	// REGISTERED FIRST SO IT RUNS LAST. Every defer below -- the panic
+	// boundary included -- completes before the token is discharged, which is
+	// what lets the panic handler set the close reason that the announcement
+	// then carries.
+	defer tok.discharge()
 	// ONE CONNECTION'S PANIC MUST NOT BE EVERY CONNECTION'S OUTAGE.
 	//
 	// Without this, a panic anywhere below unwinds through the goroutine this
@@ -693,7 +746,45 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 	}()
 	l.onEvent(Event{Kind: "fd.conn_open", Peer: peer})
 
-	secure, out, err := runStartup(raw, l.tls, l.cleartextDebug, l.now, l.dl)
+	// THE STARTUP PHASE. Its body is the call that was already here; what is
+	// new is that it hands back a declared outcome, and that the identity it
+	// ends on has to be one this phase said it could produce.
+	var secure net.Conn
+	var out startupOutcome
+	var err error
+	if _, perr := lc.run(PhaseStartup, func() Outcome {
+		secure, out, err = runStartup(raw, l.tls, l.cleartextDebug, l.now, l.dl)
+		switch {
+		case errors.Is(err, errCancelRequest):
+			// Not this phase's ending: the cancel branch is its own phase and
+			// runs next. Startup's job -- reading the frame and deciding what
+			// it is -- is done and it succeeded.
+			return Continue()
+		case err != nil:
+			var tf tlsFailErr
+			if errors.As(err, &tf) {
+				if tf.attributable {
+					return Refuse(outcomeID(tf.reason), WithOutcomeDetail(tf.detail))
+				}
+				return Refuse(outcomeID(OutcomePeerGoneAtStart), WithOutcomeDetail(tf.detail))
+			}
+			return Operational(err)
+		}
+		return Continue()
+	}); perr != nil {
+		// A FAULT IN OUR CODE ENDS THE CONNECTION. It does not log and carry
+		// on, and the first version of this did exactly that -- which meant a
+		// phase whose body never ran left the startup result at its zero value
+		// and the code below read that as "startup succeeded". A connection
+		// would then proceed to the credential exchange having negotiated
+		// nothing.
+		//
+		// "The phase did not run" and "the phase succeeded" must never be the
+		// same thing to a reader, and the zero value makes them look alike.
+		closeReason = "internal-error"
+		l.onLog(fmt.Sprintf("frontdoor: the startup phase for %s: %v", peer, perr))
+		return
+	}
 	switch {
 	case errors.Is(err, errCancelRequest):
 		// ROW 2.3: the cancel connection is answered by processing the pair
@@ -706,35 +797,52 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		// that was cancelled learns what happened the ordinary way: its
 		// statement returns, cancelled, on its own connection.
 		closeReason = "cancel-request"
-		l.onEvent(Event{Kind: "fd.cancel_received", Peer: peer})
-		pid, secret, ok := asCancelRequest(err)
-		if !ok || l.cancels == nil {
-			// The honest degraded state, named so an operator reading the
-			// trail sees a listener that cannot resolve keys rather than one
-			// whose registry is mysteriously empty.
-			l.onEvent(Event{Kind: "fd.cancel_stale", Peer: peer, Detail: "no-cancel-registry"})
-			return
+		// A PHASE, AND A TERMINAL ONE. Nothing here is refused: a cancel
+		// request is HANDLED, and answered by closing because the peer
+		// presented no credential and is owed no information -- not even
+		// whether their request landed. That is why the outcome vocabulary is
+		// outcomes and not refusals; this branch had no home in a vocabulary
+		// named for denials, and lived as bare strings at the call site.
+		cancelOutcome, cerr := lc.run(PhaseCancel, func() Outcome {
+			l.onEvent(Event{Kind: EventCancelReceived, Peer: peer})
+			pid, secret, ok := asCancelRequest(err)
+			if !ok || l.cancels == nil {
+				// The honest degraded state, named so an operator reading the
+				// trail sees a listener that cannot resolve keys rather than
+				// one whose registry is mysteriously empty.
+				l.onEvent(Event{Kind: EventCancelStale, Peer: peer, Detail: "no-cancel-registry"})
+				return TerminalControl(EventCancelStale, WithOutcomeDetail("no-cancel-registry"))
+			}
+			key := exec.CancelKey{ProcessID: pid}
+			// The 3.0 cancel secret is a FIXED int32 and every client here was
+			// negotiated to 3.0 (row 2.5). A presented secret of any other
+			// length is a malformed request, not a truncation candidate: keeping
+			// only the first four bytes would let a frame carrying a valid
+			// secret plus trailing bytes be applied as though it had been
+			// well-formed. Refuse it as stale BEFORE
+			// the conversion, so it never reaches the registry — the same
+			// silent close as every other miss, because a malformed cancel is
+			// still a cancel that presented no credential.
+			if len(secret) != exec.CancelKeyLen {
+				l.onEvent(Event{Kind: EventCancelStale, Peer: peer, Detail: "malformed-cancel-secret"})
+				return TerminalControl(EventCancelStale, WithOutcomeDetail("malformed-cancel-secret"))
+			}
+			copy(key.Secret[:], secret)
+			if l.cancels.CancelByKey(ctx, key) {
+				l.onEvent(Event{Kind: EventCancelApplied, Peer: peer})
+				return TerminalControl(EventCancelApplied)
+			}
+			l.onEvent(Event{Kind: EventCancelStale, Peer: peer})
+			return TerminalControl(EventCancelStale)
+		})
+		if cerr != nil {
+			// A FAULT IN OUR CODE, not in the request: an identity nobody
+			// declared, or a phase asked to run twice. The peer is told
+			// nothing about it -- they are already being closed on -- and the
+			// operator gets the whole of it.
+			l.onLog(fmt.Sprintf("frontdoor: the cancel phase for %s: %v", peer, cerr))
 		}
-		key := exec.CancelKey{ProcessID: pid}
-		// The 3.0 cancel secret is a FIXED int32 and every client here was
-		// negotiated to 3.0 (row 2.5). A presented secret of any other
-		// length is a malformed request, not a truncation candidate: keeping
-		// only the first four bytes would let a frame carrying a valid
-		// secret plus trailing bytes be applied as though it had been
-		// well-formed. Refuse it as stale BEFORE
-		// the conversion, so it never reaches the registry — the same
-		// silent close as every other miss, because a malformed cancel is
-		// still a cancel that presented no credential.
-		if len(secret) != exec.CancelKeyLen {
-			l.onEvent(Event{Kind: "fd.cancel_stale", Peer: peer, Detail: "malformed-cancel-secret"})
-			return
-		}
-		copy(key.Secret[:], secret)
-		if l.cancels.CancelByKey(ctx, key) {
-			l.onEvent(Event{Kind: "fd.cancel_applied", Peer: peer})
-		} else {
-			l.onEvent(Event{Kind: "fd.cancel_stale", Peer: peer})
-		}
+		_ = cancelOutcome
 		return
 	case err != nil:
 		// A TLS-phase failure closes WITHOUT a denial frame. A peer speaking
@@ -813,8 +921,52 @@ func (l *Listener) handle(ctx context.Context, raw net.Conn, tkt *ticket) {
 		}
 		be := pgproto3.NewBackend(fr, stream)
 		be.SetMaxBodyLen(PreAuthMaxBodyLen)
+		// THE CREDENTIAL PHASE, wrapped whole.
+		//
+		// It is ONE phase because it is one call: the engine verifies the PAT,
+		// takes the atomic reservation, pins the backend, applies encoding and
+		// settings, and publishes the session without returning in between.
+		// Naming "credential" and "session open" as separate phases would
+		// describe a structure the code does not have, and giving them a real
+		// boundary needs its own token, lock and rollback design -- a
+		// behaviour change, and not this.
 		var aerr error
-		outcome, aerr = l.runAuth(ctx, stream, be, fr, out.Params, out.GUCs, peer)
+		if _, perr := lc.run(PhaseAuthenticateAndOpen, func() Outcome {
+			outcome, aerr = l.runAuth(ctx, stream, be, fr, out.Params, out.GUCs, peer)
+			switch {
+			case aerr != nil:
+				return Operational(aerr)
+			case outcome.Denied != "":
+				// THE WITNESS TRAVELS HERE. It came from the engine, which
+				// sets it only at a raise site reached with a verified
+				// credential and a checked grant already in hand -- and it is
+				// carried rather than re-derived, so a capacity check moved
+				// above either gate produces no witness and the surface stays
+				// uniform instead of leaking.
+				if outcome.Disclosable {
+					return Refuse(outcomeID(outcome.Denied.String()), WithWitness())
+				}
+				return Refuse(outcomeID(outcome.Denied.String()))
+			}
+			return Continue()
+		}); perr != nil {
+			// FAIL CLOSED, BUT STILL ANSWER. An unauthenticated connection
+			// must never reach the session loop because a phase was
+			// misdeclared -- but the peer is owed the same uniform denial
+			// every other refusal gives them, and silence here would be a new
+			// behaviour introduced by a bug in our declarations rather than
+			// by anything they did.
+			//
+			// The uniform denial is the information-free answer, so sending it
+			// costs nothing and closing without it would turn a one-line
+			// declaration mistake into a client that hangs on a read.
+			closeReason = "internal-error"
+			l.onLog(fmt.Sprintf("frontdoor: the credential phase for %s: %v", peer, perr))
+			if derr := sendDenial(stream, reasonPreAuthProtocolViolation); derr != nil {
+				l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
+			}
+			return
+		}
 		if aerr != nil {
 			closeReason = "auth-read-failed"
 			l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s: %v", peer, aerr))
