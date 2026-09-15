@@ -51,6 +51,12 @@ type Permit struct {
 	Limit int
 	// Class is which side of the budget it was charged to.
 	Class DialClass
+	// ConfiguredTotal and EffectiveCeiling are the operator's number and the
+	// immediately exercisable ceiling at grant time. Limit alone is ambiguous
+	// during a drain: a control permit's limit is 1 either way, which says
+	// nothing about the policy it was admitted under.
+	ConfiguredTotal  int
+	EffectiveCeiling int
 
 	once    sync.Once
 	release func()
@@ -81,9 +87,16 @@ func (p *Permit) Release() {
 // not an allocation, and two targets may each be allowed more than the budget
 // — the ledger is what makes that safe (see docs/front-door/connection-holding-policy.md).
 type permitLedger struct {
-	mu          sync.Mutex
-	budget      int
-	outstanding int
+	mu     sync.Mutex
+	budget int
+	// ordinary (O) and control (K) are counted SEPARATELY, and that is not
+	// bookkeeping taste. With one combined counter the effective ceiling rose
+	// and fell inside a single drain generation as the short-lived cancel
+	// socket came and went -- 49, then 50, then 49 -- which contradicts the
+	// rule that a drain converges monotonically. Separating them lets the
+	// ceiling be stated in terms of ordinary occupancy alone.
+	ordinary int
+	control  int
 	// generation increments on every budget change. It exists because a
 	// lowered budget cannot be enforced retroactively: with 50 sockets open
 	// and a new budget of 25, the invariant "outstanding <= budget" is FALSE
@@ -137,14 +150,22 @@ type LedgerSnapshot struct {
 	// OrdinaryLimit is what ordinary work may actually take: one short of
 	// Configured, because the last permit is the control lane's.
 	OrdinaryLimit int
-	// Outstanding may EXCEED Configured while a lowered budget drains. That is
+	// Ordinary (O) and Control (K) are the two occupancies, reported
+	// separately because the ceiling is stated in terms of O alone.
+	Ordinary int
+	Control  int
+	// Outstanding is O + K: every socket this instance holds.
+	//
+	// It may EXCEED Configured while a lowered budget drains. That is
 	// not an error and must not be rendered as one: nothing is killed to make
 	// the number true, so it becomes true by attrition.
 	Outstanding int
-	// Effective is what is actually in force right now: max(Configured,
-	// Outstanding). During a drain the configured number is NOT the number of
-	// sockets that exist, and an operator sizing a server needs the one that
-	// is true. Draining says the state; this says the quantity.
+	// Effective is the immediately exercisable ceiling: max(Configured, O+1).
+	//
+	// O+1, not Outstanding. The reserved slot counts whether or not a cancel
+	// is in flight, because one may arrive at any moment -- and counting it
+	// only while occupied made this number rise and fall INSIDE one drain
+	// generation, contradicting monotonic convergence.
 	Effective int
 	// Generation increments on every accepted update, so a reader can tell
 	// whether two snapshots describe the same policy.
@@ -158,21 +179,15 @@ type LedgerSnapshot struct {
 func (l *permitLedger) Snapshot() LedgerSnapshot {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	ordinary := l.budget
-	if ordinary > 1 {
-		ordinary--
-	}
-	effective := l.budget
-	if l.outstanding > effective {
-		effective = l.outstanding
-	}
 	return LedgerSnapshot{
 		Configured:    l.budget,
-		OrdinaryLimit: ordinary,
-		Outstanding:   l.outstanding,
-		Effective:     effective,
+		OrdinaryLimit: l.ordinaryLimitLocked(),
+		Ordinary:      l.ordinary,
+		Control:       l.control,
+		Outstanding:   l.ordinary + l.control,
+		Effective:     l.effectiveLocked(),
 		Generation:    l.generation,
-		Draining:      l.outstanding > l.budget,
+		Draining:      l.ordinary > l.ordinaryLimitLocked(),
 	}
 }
 
@@ -237,45 +252,77 @@ func (l *permitLedger) acquire(class DialClass) (*Permit, error) {
 	// too much work is already running. The reserved slot is a fixed +1 the
 	// operator's number accounts for, stated here rather than hidden.
 	if !control {
-		limit := l.budget
-		if limit > 1 {
-			limit--
-		}
-		if l.budget > 0 && l.outstanding >= limit {
+		limit := l.ordinaryLimitLocked()
+		if l.budget > 0 && l.ordinary >= limit {
 			l.mu.Unlock()
 			return nil, ErrTargetBudgetExhausted
 		}
 	}
-	l.outstanding++
-	granted := Permit{Generation: l.generation, Limit: l.limitFor(class), Class: class}
+	if control {
+		l.control++
+	} else {
+		l.ordinary++
+	}
+	granted := Permit{
+		Generation:       l.generation,
+		Class:            class,
+		ConfiguredTotal:  l.budget,
+		EffectiveCeiling: l.effectiveLocked(),
+		Limit:            l.limitForLocked(class),
+	}
 	l.mu.Unlock()
 
 	granted.release = func() {
 		l.mu.Lock()
-		if l.outstanding > 0 {
-			l.outstanding--
+		if control {
+			if l.control > 0 {
+				l.control--
+			}
+		} else if l.ordinary > 0 {
+			l.ordinary--
 		}
 		l.mu.Unlock()
 	}
 	return &granted, nil
 }
 
-// limitFor is the allowance in force for a class. Caller holds the lock.
-func (l *permitLedger) limitFor(class DialClass) int {
-	if class == DialControl {
-		return l.budget
-	}
+// ordinaryLimitLocked is what ordinary work may take: one short of the budget,
+// because the last slot is the control lane's. Caller holds the lock.
+func (l *permitLedger) ordinaryLimitLocked() int {
 	if l.budget > 1 {
 		return l.budget - 1
 	}
 	return l.budget
 }
 
-// Outstanding is how many permits are held right now.
+// effectiveLocked is the immediately exercisable ceiling: max(Configured,
+// O+1).
+//
+// O+1 RATHER THAN Outstanding, and the +1 applies whether or not the lane is
+// occupied. The reserved slot is part of the ceiling at all times -- a cancel
+// may arrive at any moment -- so counting it only while a cancel is in flight
+// made the number oscillate within one drain generation and contradicted the
+// monotonic-convergence rule. Caller holds the lock.
+func (l *permitLedger) effectiveLocked() int {
+	if l.ordinary+1 > l.budget {
+		return l.ordinary + 1
+	}
+	return l.budget
+}
+
+// limitForLocked is the allowance in force for a class at grant time.
+func (l *permitLedger) limitForLocked(class DialClass) int {
+	if class == DialControl {
+		return 1 // the lane is one holder, whatever the budget is
+	}
+	return l.ordinaryLimitLocked()
+}
+
+// Outstanding is every permit held right now: O + K.
 func (l *permitLedger) Outstanding() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.outstanding
+	return l.ordinary + l.control
 }
 
 // Budget reports the current budget and the generation it belongs to.
