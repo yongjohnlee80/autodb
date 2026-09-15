@@ -32,7 +32,9 @@ func installScript(t *testing.T) string {
 // printConfig runs --print-config and returns stdout, or the error and stderr.
 func printConfig(t *testing.T, args ...string) (string, string, error) {
 	t.Helper()
-	base := []string{installScript(t), "--print-config", "--assume-ram", "961", "--assume-cpus", "1"}
+	// exec.max_target_conns has no default and is required for a server
+	// config, so every --print-config helper supplies one explicitly.
+	base := []string{installScript(t), "--print-config", "--max-target-conns", "25", "--assume-ram", "961", "--assume-cpus", "1"}
 	cmd := exec.Command("sh", append(base, args...)...)
 	var errb strings.Builder
 	cmd.Stderr = &errb

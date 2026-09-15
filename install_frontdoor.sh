@@ -300,6 +300,15 @@ OPTIONS:
   --meta-dsn <dsn>     DSN for --meta pg-remote (required with it).
   --sessions <n>       Override the computed max_sessions_global
   --lane <MiB>         Override the computed general lane
+  --max-target-conns <n>
+                       REQUIRED for --apply and --print-config unless answered
+                       interactively. The TOTAL connections this instance may
+                       hold open to target databases, across every target. It
+                       has NO DEFAULT: choose at most half the target server's
+                       max_connections, and divide it yourself if several
+                       autodb instances share one server. Minimum 2, because
+                       one is reserved so a cancellation can always be
+                       delivered.
   -h, --help           Show this help
 
 The preflight NEVER changes anything, so run it first and read the
@@ -431,6 +440,49 @@ case "$INTERACTIVE" in
     [ "$MODE" = "apply" ] || TTY_OK=0
     ;;
 esac
+
+# A POSITIVE INTEGER, OR NOTHING. No default, by design.
+valid_budget() {
+  case "$1" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$1" -ge 2 ]
+}
+
+# require_target_budget resolves exec.max_target_conns, or refuses.
+#
+# IT IS CALLED ONLY BY THE MODES THAT EMIT A SERVER CONFIG. --print-client-config
+# describes how a CLIENT connects and has no business knowing the server's
+# share of a database, so making it answer this question would be a second
+# defect wearing the first one's clothes.
+#
+# There is deliberately no fallback value. autodb cannot see the target
+# server's max_connections, so any number chosen here would be a guess wearing
+# the authority of a default -- which is the exact failure the no-default rule
+# exists to prevent. Interactively we ask until the answer is usable;
+# non-interactively the flag is required and its absence stops the run BEFORE
+# anything is printed or written.
+require_target_budget() {
+  if valid_budget "$MAX_TARGET_CONNS"; then return 0; fi
+  if [ -n "$MAX_TARGET_CONNS" ]; then
+    die "--max-target-conns must be a whole number of at least 2 (got: $MAX_TARGET_CONNS). One connection is reserved so a cancellation can always be delivered."
+  fi
+  if [ "$TTY_OK" -eq 0 ]; then
+    die "exec.max_target_conns is required and has no default. Pass --max-target-conns <n>: the total connections this instance may hold to target databases, across every target. Choose at most half the target server's max_connections -- autodb cannot see that limit and will not guess it."
+  fi
+  while :; do
+    say ""
+    say "exec.max_target_conns -- the TOTAL connections this instance may hold open to"
+    say "target databases, across every target. There is no default: choose at most half"
+    say "the target server's max_connections, and divide it yourself if several autodb"
+    say "instances share one server. Minimum 2, because one is reserved so a cancellation"
+    say "can always be delivered."
+    printf '  max_target_conns: ' > /dev/tty
+    IFS= read -r _ans < /dev/tty || _ans=""
+    if valid_budget "$_ans"; then MAX_TARGET_CONNS="$_ans"; return 0; fi
+    say "  Not usable: a whole number of at least 2."
+  done
+}
 
 ask() {
   _var="$1"; _prompt="$2"; _def="$3"
@@ -766,16 +818,6 @@ compute_sizing() {
   # message naming it -- a better outcome than starting against a budget
   # nobody chose.
   MAX_TARGET_CONNS="$MAX_TARGET_CONNS_OVERRIDE"
-  ask_required MAX_TARGET_CONNS "Total connections this instance may hold to target databases (no default; at most half the server's max_connections)"
-  if [ -z "$MAX_TARGET_CONNS" ]; then
-    warn "exec.max_target_conns was not supplied, so it is not written to the config."
-    warn "The daemon will refuse to start until you set it. Re-run with --max-target-conns <n>,"
-    warn "or add it to [exec] yourself. It has no default by design: autodb cannot see the"
-    warn "target server's max_connections and will not guess a share of it."
-    MAX_TARGET_CONNS_LINE="# max_target_conns = <REQUIRED: set this, there is no default>"
-  else
-    MAX_TARGET_CONNS_LINE="max_target_conns = $MAX_TARGET_CONNS"
-  fi
 
   GOMEMLIMIT_MIB=$(( MEM_MIB * 75 / 100 ))
   MEMORYMAX_MIB=$(( MEM_MIB * 90 / 100 ))
@@ -917,7 +959,7 @@ pool_max_conns = $POOL_MAX_CONNS
 # Distinct from pool_max_conns above, which is a technical ceiling on ONE
 # target pool. This bounds the aggregate, so two targets may each be allowed
 # more than this and the runtime permit ledger keeps the total true.
-$MAX_TARGET_CONNS_LINE
+max_target_conns = $MAX_TARGET_CONNS
 
 # Sized for this host. The general lane's floor is this number x ${WATERMARK_MIB} MiB, so
 # these two move TOGETHER -- raising the cap without raising the lane fails
@@ -1252,6 +1294,9 @@ if [ "$NCPU" -lt 2 ]; then
 fi
 
 if [ "$MODE" = "print" ]; then
+  # BEFORE emit_config, so a missing budget stops the run rather than printing
+  # a config that cannot start.
+  require_target_budget
   emit_config
   exit 0
 fi
@@ -1585,6 +1630,10 @@ else
     warn "$CONFIG exists; REPLACING it (previous kept as $CONFIG.bak)."
     warn "  pass --keep-config to preserve it instead."
   fi
+  # Resolved BEFORE the write, and before the backup above is acted on: a
+  # refusal that fires after the old config is replaced has already done the
+  # damage it was meant to prevent.
+  require_target_budget
   say "writing $CONFIG"
   emit_config > "$CONFIG"
   chown root:"$RUN_USER" "$CONFIG"

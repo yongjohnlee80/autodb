@@ -79,7 +79,10 @@ func TestNoTTY_TheInstallerRefusesToApply(t *testing.T) {
 func TestNoTTY_AnExplicitNonInteractiveModeIsStillAllowed(t *testing.T) {
 	t.Parallel()
 
-	out, err := underSetsid(t, installer(t), "--print-config", "--non-interactive")
+	// The budget is supplied explicitly: it has no default, and a
+	// non-interactive run that omits it is refused by design — which is a
+	// DIFFERENT refusal from the no-terminal one under test here.
+	out, err := underSetsid(t, installer(t), "--print-config", "--non-interactive", "--max-target-conns", "25")
 	if err != nil {
 		t.Fatalf("--print-config --non-interactive was refused with no terminal, so the "+
 			"documented automation path is broken: %v\n%s", err, out)
