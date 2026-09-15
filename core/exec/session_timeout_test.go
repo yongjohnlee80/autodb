@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/yongjohnlee80/autodb/core/engine"
 	"strings"
 	"testing"
@@ -103,8 +104,20 @@ func TestArmServerBelt_UsesSetLocalOnPostgresOnly(t *testing.T) {
 	if !strings.Contains(got, "idle_in_transaction_session_timeout") {
 		t.Errorf("belt statement %q does not set the guard", got)
 	}
-	if !strings.Contains(got, "120s") {
-		t.Errorf("belt statement %q should carry the engine deadline plus the margin (90s+30s)", got)
+	// DERIVED, not restated. This used to hardcode "120s", which was the
+	// engine's own 90s bound plus the 30s margin — so it broke the moment the
+	// bound was ruled to two hours, and it would have gone on breaking at
+	// every future change while asserting nothing about the RELATION it
+	// exists to check.
+	//
+	// The relation is the whole point: the belt must sit BEHIND the engine's
+	// deadline, so the engine always fires first and can audit what it did. A
+	// belt that won the race would leave the engine reporting a rollback it
+	// did not perform.
+	wantBelt := fmt.Sprintf("%ds", int((defaultTxLimits().idleInTx + serverBeltMarginDefault).Seconds()))
+	if !strings.Contains(got, wantBelt) {
+		t.Errorf("belt statement %q should carry the engine deadline plus the margin (%v + %v = %s)",
+			got, defaultTxLimits().idleInTx, serverBeltMarginDefault, wantBelt)
 	}
 
 	// A driver without the GUC gets no belt and no error: the engine's own

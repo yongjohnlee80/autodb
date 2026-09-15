@@ -30,6 +30,15 @@ import (
 // Setting them the other way round would let the server win the race and
 // leave the engine reporting a rollback it did not perform.
 
+// serverBeltMarginDefault is how far BEHIND the engine's own deadline the
+// server-side belt is set, so the engine always fires first and can audit
+// what it did.
+//
+// It covers the reaper's tick, not a proportion of the bound, so it does NOT
+// scale with the timeout: at a two-hour idle bound thirty seconds is as
+// sufficient as it was at ninety.
+const serverBeltMarginDefault = 30 * time.Second
+
 // txLimits are the bounds on one session's transaction.
 type txLimits struct {
 	idleInTx time.Duration
@@ -39,12 +48,25 @@ type txLimits struct {
 	serverBeltMargin time.Duration
 }
 
-// defaultTxLimits mirrors the config defaults.
+// defaultTxLimits IS the config defaults, rather than a copy of them.
+//
+// IT USED TO RESTATE THEM AS LITERALS, and that made the bounds a lie waiting
+// to happen. These numbers live in three places -- core/config, the mirrored
+// constants in this package, and here -- and engine.go builds every Engine
+// from THIS one. So changing the two constant blocks and stopping there was a
+// no-op for real behaviour: the daemon would keep timing out at the old value
+// while the configuration reported the new one. Worse, four test files build
+// their fixtures from this function, so the suite would have agreed with the
+// bug and stayed green.
+//
+// The comment that used to sit here said it "mirrors the config defaults",
+// which was true by hand and enforced by nothing. Now it reads them, and
+// TestDefaultTxLimitsMatchTheDeclaredConstants fails if the copies drift.
 func defaultTxLimits() txLimits {
 	return txLimits{
-		idleInTx:         90 * time.Second,
-		maxTx:            5 * time.Minute,
-		serverBeltMargin: 30 * time.Second,
+		idleInTx:         DefaultIdleInTxTimeout,
+		maxTx:            DefaultMaxTxDuration,
+		serverBeltMargin: serverBeltMarginDefault,
 	}
 }
 
@@ -53,7 +75,17 @@ func defaultTxLimits() txLimits {
 // the operator decided, or the bound is advisory.
 func (l txLimits) forConnection(debug bool, debugIdle, ceiling time.Duration) txLimits {
 	out := l
-	if debug && debugIdle > 0 {
+	// THE DEBUG PROFILE MAY ONLY LENGTHEN, NEVER SHORTEN. This used to assign,
+	// which was harmless while the base bound was ninety seconds and the debug
+	// bound ten minutes. With the base at two hours an assignment would have
+	// handed a connection flagged for DEBUGGING less tolerance than an
+	// ordinary one -- from a flag whose entire purpose is to grant more.
+	//
+	// Johno ruled on 2026-09-16 that every session is now treated as a debug
+	// session, so the two tiers have collapsed and IsDebug() is DEPRECATED. It
+	// is kept rather than removed to avoid a schema change inside a timeout
+	// change, and taking the maximum means it cannot do harm while it remains.
+	if debug && debugIdle > out.idleInTx {
 		out.idleInTx = debugIdle
 	}
 	if ceiling > 0 && out.maxTx > ceiling {

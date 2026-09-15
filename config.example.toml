@@ -250,28 +250,53 @@ max_sessions_global = 256
 # Close a session that has no open transaction and has run no statement for
 # this long. This is what reaps sessions a crashed client never closed —
 # every close is audited.
-session_idle_timeout = "30m"
+#
+# SHORT ON PURPOSE. An idle session holding no transaction is the only thing
+# the scheduler can reclaim freely, so a long bound here starves everyone
+# else. Ten minutes also keeps it at or under pool_max_conn_idle_time, so an
+# idle session never holds a backend CHECKED OUT past the point the pool would
+# have closed it.
+session_idle_timeout = "10m"
 
 # Bounds on an OPEN transaction.
 #
 # These are not tuning knobs with a sensible "off". The target may be a live
 # production database, and a transaction abandoned between BEGIN and COMMIT
-# holds its locks until something ends it — nothing else will. 90 seconds of
-# idle is a person thinking between two statements; five minutes is the
-# outside edge of a deliberate piece of work. Both roll back automatically and
-# both are audited with which limit fired.
-idle_in_tx_timeout = "90s"
-max_tx_duration = "5m"
+# holds its locks until something ends it — nothing else will.
+#
+# THE TWO DO DIFFERENT JOBS, deliberately (Johno, 2026-09-16). The idle bound
+# catches the ABANDONED transaction: someone opens one and walks away, and it
+# is gone in two hours whatever the total says. The duration bound protects
+# the LONG BUT ATTENDED one — a developer working through something across a
+# day, touching it at least every couple of hours.
+#
+# So a forgotten transaction costs two hours, not eight, and nothing survives
+# overnight: leave at 18:00 and everything is released by 20:00 with nobody
+# intervening. Both roll back automatically and both are audited with which
+# limit fired. Idle in a transaction is also recorded at high severity every
+# thirty minutes, because the tolerance is deliberate and must stay visible
+# while it holds scarce capacity.
+#
+# An open transaction blocks VACUUM from cleaning rows only it can still see,
+# and holds every lock it took. If bloat appears on a busy target, THIS is the
+# dial to turn down first — it only ever ends transactions nobody is
+# attending.
+idle_in_tx_timeout = "2h"
+max_tx_duration = "8h"
 
-# The idle bound for connections marked debug: a developer paused at a
-# breakpoint inside a transaction should not be rolled back mid-step. Longer,
-# still bounded, still under the ceiling below.
-debug_idle_in_tx_timeout = "10m"
+# DEPRECATED. Every session is now treated as a debug session, so this no
+# longer selects a different tier; it is kept to avoid a schema change and may
+# only ever LENGTHEN the idle bound, never shorten it.
+debug_idle_in_tx_timeout = "2h"
 
 # The install-wide maximum a per-connection override may reach. Without it a
 # connection row could raise its own limit past whatever you decided here, and
 # the production-safety bound would be advisory.
-max_tx_duration_ceiling = "30m"
+#
+# IT MUST MOVE WITH max_tx_duration. Left lower, it silently clips the value
+# above — no error, no log line, just transactions dying early at a bound no
+# document describes.
+max_tx_duration_ceiling = "8h"
 
 # How many connections one TARGET pool may open. A pinned transaction holds a
 # physical connection for as long as its session keeps it open, so without a
@@ -549,7 +574,7 @@ reserved_headroom = 4
 # ---------------------------------------------------------------------------
 # HOW LONG AN IDLE FRONT-DOOR SESSION LIVES — set in [exec], not here.
 #
-#   [exec] session_idle_timeout = "30m"     (the default)
+#   [exec] session_idle_timeout = "10m"     (the default)
 #
 # It is documented here because this is the surface where you MEET it. A
 # front-door session is a real, pinned PostgreSQL backend on your target and it
@@ -576,7 +601,7 @@ reserved_headroom = 4
 # next query. Every close is audited.
 #
 # Related bounds on an OPEN transaction, also in [exec] and also deliberate:
-# idle_in_tx_timeout = "90s" and max_tx_duration = "5m". Those are not tuning
+# idle_in_tx_timeout = "2h" and max_tx_duration = "8h". Those are not tuning
 # knobs — a transaction abandoned between BEGIN and COMMIT holds locks on the
 # target until something ends it, and nothing else will.
 

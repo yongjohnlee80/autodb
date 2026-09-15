@@ -686,15 +686,15 @@ const (
 	DefaultMaxSessionsGlobal  = 256
 	// DefaultSessionIdleTimeout closes an idle session, which also reaps the
 	// ones a crashed client left behind.
-	DefaultSessionIdleTimeout = 30 * time.Minute
+	DefaultSessionIdleTimeout = 10 * time.Minute
 )
 
 // Transaction bounds.
 const (
-	DefaultIdleInTxTimeout      = 90 * time.Second
-	DefaultMaxTxDuration        = 5 * time.Minute
-	DefaultDebugIdleInTxTimeout = 10 * time.Minute
-	DefaultMaxTxDurationCeiling = 30 * time.Minute
+	DefaultIdleInTxTimeout      = 2 * time.Hour
+	DefaultMaxTxDuration        = 8 * time.Hour
+	DefaultDebugIdleInTxTimeout = 2 * time.Hour
+	DefaultMaxTxDurationCeiling = 8 * time.Hour
 
 	// Pool-lifecycle defaults are the engine's: idle 10m / lifetime 60m,
 	// so unused pools shrink to zero against a live production target. An
