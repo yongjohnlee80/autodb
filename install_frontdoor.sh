@@ -1551,6 +1551,25 @@ say ""
 
 # ---------------------------------------------------------------------- apply
 
+# NOTHING BELOW THIS LINE IS REVERSIBLE BY THIS SCRIPT, so the last mandatory
+# answer is resolved HERE -- before the first side effect of any kind.
+#
+# An earlier fix moved this to just before the config write, which was not far
+# enough: by then the run had already created a system account, made and
+# chowned directories, and installed, enabled and started PostgreSQL with a
+# role and a database. Refusing at that point still leaves a host that has been
+# extensively changed by a run which was never going to succeed. "Refuse before
+# writing anything" means anything.
+#
+# --keep-config with an existing file is the one bypass, and it is READ-ONLY:
+# that run does not write a config, so it does not need the budget the config
+# would have carried. The existing file keeps whatever it already says.
+if [ -e "$CONFIG" ] && [ "$KEEP_CONFIG" = "yes" ]; then
+  :
+else
+  require_target_budget
+fi
+
 id "$RUN_USER" >/dev/null 2>&1 || {
   say "creating service account $RUN_USER"
   useradd --system --home-dir "$STATE_DIR" --shell /usr/sbin/nologin "$RUN_USER"
@@ -1620,12 +1639,9 @@ install_postgres() {
 if [ -e "$CONFIG" ] && [ "$KEEP_CONFIG" = "yes" ]; then
   warn "$CONFIG exists and --keep-config was given; leaving it alone."
 else
-  # FIRST, BEFORE ANYTHING IS TOUCHED. This was below the backup block, which
-  # meant an omitted budget refused only AFTER $CONFIG.bak had been written --
-  # so a run that was going to fail still left a file behind, which is the
-  # damage refusing early exists to prevent. The comment here claimed it ran
-  # before the backup while sitting after it, which is worse than no comment.
-  require_target_budget
+  # The budget was resolved before the first side effect, up at the apply
+  # boundary. ONE OWNER: a second call here would be a second place for the
+  # policy to drift.
   if [ -e "$CONFIG" ]; then
     # A RE-RUN MUST REWRITE IT. Leaving an existing config alone meant every
     # flag on a second --apply silently did nothing: --rpc-port, --port,
