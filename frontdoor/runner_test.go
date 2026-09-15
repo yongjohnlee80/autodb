@@ -185,11 +185,11 @@ func TestRunner_AnOperationalOutcomeIsValidatedToo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a declared operational outcome was rejected: %v", err)
 	}
-	if !got.Terminal() || got.Continues() {
+	if !got.Outcome.Terminal() || got.Continues() {
 		t.Error("an operational outcome does not end the connection")
 	}
-	if !errors.Is(got.Err(), boom) {
-		t.Errorf("the underlying failure was lost: %v", got.Err())
+	if !errors.Is(got.Outcome.Err(), boom) {
+		t.Errorf("the underlying failure was lost: %v", got.Outcome.Err())
 	}
 
 	// AN UNDECLARED OPERATIONAL IDENTITY FAILS CLOSED, exactly as an
@@ -707,167 +707,135 @@ func lifecycleForScenario(t *testing.T, sc baselineScenario) *lifecycle {
 	return lc
 }
 
-// THE DECLARATIONS AND THE CODE MUST BE THE SAME SET, PER PRODUCER, in both
-// directions.
+// THE REGISTRY IS PINNED AS AN EXACT MANIFEST: producer, identity, kind and
+// charge, all four, in both directions.
 //
-// Per producer is the whole point, and a per-identity check is not enough: a
-// deadline row under serve looks fine to one, because handshake constructs
-// that identity somewhere. Reed's finding was precisely that shape.
+// WHAT THIS REPLACES was an inferred check, and inference was the problem. It
+// compared identity SETS, so a wrong kind or a wrong charge was invisible. It
+// exempted the engine's rows in one direction and skipped the lifecycle
+// producer entirely, so neither could go stale. And it decided "this phase can
+// emit that" by looking for the constant's NAME anywhere in a helper file,
+// which counts a mention in a comment as proof.
 //
-// Missing rows fail loudly at runtime, on whatever connection happened to hit
-// them -- which is how a declaration mistake gets found on a live denial path.
-// STALE rows fail nowhere at all: the registry describes outcomes that cannot
-// happen, and every question asked of it is answered about a system that does
-// not exist.
-//
-// Identities are attributed to a phase by reading the lc.run(PhaseX, ...)
-// closures, so the attribution is the code's rather than a table's.
-func TestOutcomes_EveryProducerDeclaresExactlyWhatItCanProduce(t *testing.T) {
+// A manifest cannot infer anything wrongly. Every row is written down, and
+// changing the registry without changing this list fails -- which is the point:
+// the charge a peer pays and the kind an operator reads are both here, and both
+// used to be changeable without any cell noticing.
+func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 	t.Parallel()
 
-	names := outcomeConstantNames(t)
-	if len(names) == 0 {
-		t.Fatal("no outcome identity constants resolved; the walk no longer sees them")
-	}
-	produced := producedByPhase(t, names)
-	if len(produced) == 0 {
-		t.Fatal("no phase was found producing anything; the walk is broken")
+	type row struct {
+		producer outcome.ProducerID
+		id       outcome.ReasonID
+		kind     outcome.Kind
+		charge   outcome.Charge
 	}
 
-	byPhase := map[PhaseName]outcome.ProducerID{}
-	for _, p := range lifecyclePhases() {
-		byPhase[p.Name] = p.Producer
-	}
-	engineOwned := map[outcome.ReasonID]bool{}
-	for _, d := range exec.Registration().Outcomes {
-		engineOwned[d.ID] = true
+	// Sorted by producer then identity, so a diff reads.
+	want := []row{
+		{"accept", "frontdoor/connection-cap", outcome.Refusal, outcome.Capacity},
+		{"accept", "frontdoor/control-lane-exhausted", outcome.Refusal, outcome.Capacity},
+		{"accept", "frontdoor/pre-auth-connection-cap", outcome.Refusal, outcome.Capacity},
+		{"accept", "frontdoor/source-connection-cap", outcome.Refusal, outcome.Capacity},
+		{"accept", "frontdoor/source-ip-throttled", outcome.Refusal, outcome.Credential},
+		{"authenticate-and-open", "auth-read-failed", outcome.Operational, outcome.Protocol},
+		{"authenticate-and-open", "auth-setup-failed", outcome.Operational, outcome.None},
+		{"authenticate-and-open", "auth-worker-unavailable", outcome.Operational, outcome.None},
+		{"authenticate-and-open", "frontdoor/auth-not-yet-available", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/auth-store-error", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/bad-credential", outcome.Refusal, outcome.Credential},
+		{"authenticate-and-open", "frontdoor/database-mismatch", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/ip-not-admitted", outcome.Refusal, outcome.Credential},
+		{"authenticate-and-open", "frontdoor/lease-cap-exceeded", outcome.Refusal, outcome.Capacity},
+		{"authenticate-and-open", "frontdoor/lease-encoding", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/no-grant", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/no-such-database", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/pat-allowed-ips", outcome.Refusal, outcome.Credential},
+		{"authenticate-and-open", "frontdoor/pat-cleartext-debug-in-tls", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/pat-not-cleartext-debug", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/pat-unscoped", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/pre-auth-protocol-violation", outcome.Refusal, outcome.Protocol},
+		{"authenticate-and-open", "frontdoor/profile-not-front-door", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/resident-budget-exceeded", outcome.Refusal, outcome.Capacity},
+		{"authenticate-and-open", "frontdoor/session-cap-exceeded", outcome.Refusal, outcome.Capacity},
+		{"authenticate-and-open", "frontdoor/startup-guc-refused", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/startup-user-mismatch", outcome.Refusal, outcome.Credential},
+		{"cancel", "fd.cancel_applied", outcome.Control, outcome.None},
+		{"cancel", "fd.cancel_received", outcome.Control, outcome.None},
+		{"cancel", "fd.cancel_stale", outcome.Control, outcome.None},
+		{"handshake", "deadline", outcome.Operational, outcome.None},
+		{"handshake", "handshake-write-failed", outcome.Operational, outcome.None},
+		{"lifecycle-infrastructure", "internal-error", outcome.Operational, outcome.None},
+		{"serve", "peer-closed", outcome.Control, outcome.None},
+		{"serve", "session-error", outcome.Operational, outcome.None},
+		{"startup", "direct-tls-unsupported", outcome.Refusal, outcome.Protocol},
+		{"startup", "frontdoor/pre-auth-message-too-large", outcome.Refusal, outcome.Protocol},
+		{"startup", "frontdoor/protocol-major-unsupported", outcome.Refusal, outcome.Protocol},
+		{"startup", "frontdoor/startup-duplicate-key", outcome.Refusal, outcome.Protocol},
+		{"startup", "frontdoor/startup-guc-count", outcome.Refusal, outcome.Protocol},
+		{"startup", "frontdoor/startup-malformed", outcome.Refusal, outcome.Protocol},
+		{"startup", "frontdoor/startup-options-malformed", outcome.Refusal, outcome.Protocol},
+		{"startup", "frontdoor/startup-parameter-refused", outcome.Refusal, outcome.Protocol},
+		{"startup", "frontdoor/tls-required", outcome.Refusal, outcome.Protocol},
+		{"startup", "peer-gone-before-startup", outcome.Operational, outcome.None},
+		{"startup", "startup-code-unknown", outcome.Refusal, outcome.Protocol},
+		{"startup", "startup-failed", outcome.Operational, outcome.None},
+		{"startup", "startup-unreadable", outcome.Refusal, outcome.Protocol},
+		{"startup", "tls-handshake", outcome.Refusal, outcome.Protocol},
 	}
 
-	declared := map[outcome.ProducerID]map[outcome.ReasonID]bool{}
+	got := map[row]bool{}
 	for _, reg := range Outcomes() {
-		if declared[reg.Producer] == nil {
-			declared[reg.Producer] = map[outcome.ReasonID]bool{}
-		}
 		for _, d := range reg.Outcomes {
-			declared[reg.Producer][d.ID] = true
-		}
-	}
-
-	for phase, ids := range produced {
-		producer, ok := byPhase[phase]
-		if !ok {
-			t.Errorf("%s produces outcomes and is not a declared phase", phase)
-			continue
-		}
-		// FORWARD: everything the phase can produce is declared by it.
-		for id := range ids {
-			if !declared[producer][id] {
-				t.Errorf("%s (%s) produces %q and does not declare it; it would fail "+
-					"closed at runtime, on whichever connection reached it first",
-					phase, producer, id)
+			r := row{reg.Producer, d.ID, d.Kind, d.Charge}
+			if got[r] {
+				t.Errorf("%s declares %q twice", reg.Producer, d.ID)
 			}
-		}
-		// BACKWARD: the producer declares nothing the phase cannot produce.
-		for id := range declared[producer] {
-			if engineOwned[id] || ids[id] {
-				continue
-			}
-			t.Errorf("%s (%s) declares %q and cannot produce it. A declared outcome that "+
-				"cannot happen makes the registry describe a system that does not exist",
-				phase, producer, id)
+			got[r] = true
 		}
 	}
-}
 
-// producedByPhase attributes each identity to the phase whose body can produce
-// it, by reading the lc.run(PhaseX, ...) closures and the helpers those
-// closures call.
-func producedByPhase(t *testing.T, names map[string]string) map[PhaseName]map[outcome.ReasonID]bool {
-	t.Helper()
-	fset := token.NewFileSet()
-	out := map[PhaseName]map[outcome.ReasonID]bool{}
-
-	add := func(phase PhaseName, ident string) {
-		v, known := names[ident]
-		if !known {
-			return
-		}
-		if out[phase] == nil {
-			out[phase] = map[outcome.ReasonID]bool{}
-		}
-		out[phase][outcome.ReasonID(v)] = true
+	wanted := map[row]bool{}
+	for _, r := range want {
+		wanted[r] = true
 	}
 
-	// Identities named inside a phase's own closure.
-	f, err := parser.ParseFile(fset, "listener.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parsing listener.go: %v", err)
+	// FORWARD: nothing is registered that the manifest does not list. This is
+	// what catches a changed kind or charge -- the tuple differs, so the row
+	// is both missing and unexpected, and both halves say so.
+	for r := range got {
+		if !wanted[r] {
+			t.Errorf("registered and not in the manifest: %s / %q / %s / %s",
+				r.producer, r.id, r.kind, r.charge)
+		}
 	}
-	ast.Inspect(f, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok || len(call.Args) != 2 {
-			return true
+	// BACKWARD: nothing is listed that is no longer registered.
+	for _, r := range want {
+		if !got[r] {
+			t.Errorf("in the manifest and not registered: %s / %q / %s / %s",
+				r.producer, r.id, r.kind, r.charge)
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok || sel.Sel.Name != "run" {
-			return true
-		}
-		phaseIdent, ok := call.Args[0].(*ast.Ident)
-		if !ok {
-			return true
-		}
-		phase := phaseNameFor(phaseIdent.Name)
-		if phase == "" {
-			t.Errorf("lc.run called with %s, which is not a known phase constant", phaseIdent.Name)
-			return true
-		}
-		ast.Inspect(call.Args[1], func(inner ast.Node) bool {
-			if id, ok := inner.(*ast.Ident); ok {
-				add(phase, id.Name)
-			}
-			return true
-		})
-		return true
-	})
+	}
 
-	// The helpers a phase calls out to. runAuth is reached only from the
-	// credential phase, and the startup parsing only from startup; asserted
-	// below rather than assumed.
-	for file, phase := range map[string]PhaseName{
-		"auth.go":    PhaseAuthenticateAndOpen,
-		"startup.go": PhaseStartup,
-		"params.go":  PhaseStartup,
-	} {
-		hf, herr := parser.ParseFile(fset, file, nil, 0)
-		if herr != nil {
-			t.Fatalf("parsing %s: %v", file, herr)
-		}
-		ast.Inspect(hf, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok {
-				add(phase, id.Name)
-			}
-			return true
-		})
+	// NOT VACUOUS. A manifest and a registry that both became empty would
+	// agree perfectly.
+	if len(want) < 40 || len(got) < 40 {
+		t.Fatalf("manifest has %d rows and the registry %d; something stopped registering",
+			len(want), len(got))
 	}
-	return out
-}
 
-func phaseNameFor(constName string) PhaseName {
-	switch constName {
-	case "PhaseAccept":
-		return PhaseAccept
-	case "PhaseStartup":
-		return PhaseStartup
-	case "PhaseCancel":
-		return PhaseCancel
-	case "PhaseAuthenticateAndOpen":
-		return PhaseAuthenticateAndOpen
-	case "PhaseHandshake":
-		return PhaseHandshake
-	case "PhaseServe":
-		return PhaseServe
+	// THE LIFECYCLE PRODUCER IS IN IT. It was skipped before, so its row could
+	// go stale without any cell noticing -- and it is the one producer whose
+	// identity describes OUR defects.
+	var sawLifecycle bool
+	for r := range got {
+		if r.producer == ProducerLifecycle {
+			sawLifecycle = true
+		}
 	}
-	return ""
+	if !sawLifecycle {
+		t.Error("the lifecycle-infrastructure producer registers nothing")
+	}
 }
 
 // outcomeConstantNames resolves this package's identity constants to values.
@@ -1004,12 +972,21 @@ func TestCharging_TheRegisteredClassIsTheOnlyAuthority(t *testing.T) {
 		{"the source throttle itself", PhaseAccept, string(reasonSourceThrottled), true,
 			"this one IS the per-source failure budget being spent"},
 	} {
+		// THROUGH THE RUNNER, WITH THE CONSTRUCTOR THE KIND REQUIRES.
+		//
+		// This used to call Refuse for every row and resolve the occurrence
+		// directly, so it built refusals out of identities registered as
+		// operational and never noticed -- the resolution path it used does
+		// not check the verdict against the declared kind, and the runner
+		// does. Going through the runner means each row also proves its own
+		// constructor is the right one.
 		lc := testLifecycle(t)
-		occ, err := lc.occurrence(c.phase, Refuse(outcomeID(c.id)))
+		res, err := lc.run(c.phase, func() Outcome { return constructFor(t, lc, c.phase, c.id) })
 		if err != nil {
-			t.Errorf("%s: %q is not declared by %s: %v", c.name, c.id, c.phase, err)
+			t.Errorf("%s: %q is not emittable by %s: %v", c.name, c.id, c.phase, err)
 			continue
 		}
+		occ := res.Occurrence
 		if occ.Charges() != c.charge {
 			t.Errorf("%s: %q charges = %t (class %s), want %t — %s",
 				c.name, c.id, occ.Charges(), occ.Charge, c.charge, c.why)
@@ -1148,7 +1125,7 @@ func TestRunner_AFailedHandshakeStillReleasesTheSession(t *testing.T) {
 	if err := fe.Flush(); err != nil {
 		t.Fatalf("credential: %v", err)
 	}
-	_ = readToEOF(t, tc)
+	wire := readToEOF(t, tc)
 
 	waitFor(t, "the connection to close", func() bool {
 		for _, e := range events() {
@@ -1179,6 +1156,15 @@ func TestRunner_AFailedHandshakeStillReleasesTheSession(t *testing.T) {
 		t.Error("fd.session_open fired for a handshake that failed")
 	}
 
+	// AND THE CLIENT GOT NO READINESS. This is what distinguishes a write that
+	// did not land from a sequence that completed and was then declared a
+	// failure: a client holding ReadyForQuery believes it has a session.
+	if len(wire) != 0 {
+		t.Errorf("the client received %d byte(s) before the failure: %s. A handshake that "+
+			"wrote its success sequence and then failed is not a handshake-write failure",
+			len(wire), strings.Join(describeWire(wire), "; "))
+	}
+
 	calls := eng.log()
 	var opened, revoked, closed bool
 	for _, c := range calls {
@@ -1201,5 +1187,362 @@ func TestRunner_AFailedHandshakeStillReleasesTheSession(t *testing.T) {
 	if !revoked {
 		t.Error("the cancel key was never revoked after the handshake failed — it points " +
 			"at a session that is gone, and at whatever later takes the same process id")
+	}
+}
+
+// constructFor builds the outcome whose verdict matches the identity's
+// declared kind, so a cell cannot accidentally assert a refusal built from an
+// operational identity.
+func constructFor(t *testing.T, lc *lifecycle, phase PhaseName, id string) Outcome {
+	t.Helper()
+	p, ok := lc.phases[phase]
+	if !ok {
+		t.Fatalf("%s is not a declared phase", phase)
+	}
+	d, ok := lc.reg.Lookup(outcome.ReasonID(id))
+	if !ok {
+		t.Fatalf("%q is declared by nobody", id)
+	}
+	_ = p
+	switch d.Kind {
+	case outcome.Refusal:
+		return Refuse(outcomeID(id))
+	case outcome.Operational:
+		return Operational(outcomeID(id), errors.New("the cell's stand-in cause"))
+	case outcome.Control:
+		return TerminalControl(outcomeID(id))
+	}
+	t.Fatalf("%q has kind %s, which no constructor produces", id, d.Kind)
+	return Outcome{}
+}
+
+// THE VERDICT AND THE REGISTERED KIND MUST AGREE.
+//
+// Occur checked WHO may emit an identity and never WHAT KIND of thing it is,
+// so a phase could Refuse with an identity registered as operational and the
+// registry would hand back the declared kind for it. The record would then say
+// a refusal happened where the declaration says our own failure did -- and the
+// charge travels with the declaration, not the verdict, so the two disagreeing
+// is how an ending gets classified as something it is not.
+func TestRunner_AVerdictThatContradictsItsDeclarationIsRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, c := range []struct {
+		name  string
+		phase PhaseName
+		build func() Outcome
+	}{
+		{
+			"a refusal built from an operational identity",
+			PhaseAuthenticateAndOpen,
+			func() Outcome { return Refuse(outcomeID(OutcomeAuthReadFailed)) },
+		},
+		{
+			"an operational ending built from a refusal identity",
+			PhaseStartup,
+			func() Outcome {
+				return Operational(outcomeID(string(reasonUnsupportedMajor)), errors.New("x"))
+			},
+		},
+		{
+			"a control ending built from a refusal identity",
+			PhaseAccept,
+			func() Outcome { return TerminalControl(outcomeID(string(reasonConnectionCap))) },
+		},
+		{
+			"a refusal built from a control identity",
+			PhaseCancel,
+			func() Outcome { return Refuse(outcomeID(EventCancelApplied)) },
+		},
+	} {
+		lc := testLifecycle(t)
+		_, err := lc.run(c.phase, c.build)
+		if err == nil {
+			t.Errorf("%s was accepted; the verdict and the declaration disagree about what "+
+				"happened, and the charge follows the declaration", c.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "registered as") {
+			t.Errorf("%s: err = %v, want it to name the disagreement", c.name, err)
+		}
+	}
+
+	// AND THE MATCHING CASES PASS, so the cell is not simply refusing
+	// everything that reaches it.
+	for _, c := range []struct {
+		name  string
+		phase PhaseName
+		build func() Outcome
+	}{
+		{"a refusal from a refusal identity", PhaseStartup,
+			func() Outcome { return Refuse(outcomeID(string(reasonUnsupportedMajor))) }},
+		{"an operational from an operational identity", PhaseAuthenticateAndOpen,
+			func() Outcome { return Operational(outcomeID(OutcomeAuthReadFailed), errors.New("x")) }},
+		{"a control from a control identity", PhaseCancel,
+			func() Outcome { return TerminalControl(outcomeID(EventCancelApplied)) }},
+	} {
+		lc := testLifecycle(t)
+		if _, err := lc.run(c.phase, c.build); err != nil {
+			t.Errorf("%s was refused: %v", c.name, err)
+		}
+	}
+}
+
+// A LIFECYCLE FAULT IS RESOLVED THROUGH THE REGISTRY, not emitted by hand.
+//
+// The identity was declared under a producer of its own and then emitted
+// manually at one site and not at all at the others, so the one outcome class
+// that describes OUR defects was the one class never validated.
+func TestRunner_ALifecycleFaultResolvesThroughItsProducer(t *testing.T) {
+	t.Parallel()
+
+	lc := testLifecycle(t)
+	occ, err := lc.reg.Occur(ProducerLifecycle, outcomeID(OutcomeInternalError))
+	if err != nil {
+		t.Fatalf("the lifecycle fault identity does not resolve: %v", err)
+	}
+	if occ.Kind != outcome.Operational {
+		t.Errorf("kind = %s, want operational: a fault in the runner is our failure, not a "+
+			"decision about the peer", occ.Kind)
+	}
+	if occ.Charges() {
+		t.Error("a lifecycle fault charges the peer for our defect")
+	}
+
+	// AND NO PHASE MAY CLAIM IT. Filing our own defect under the phase it
+	// interrupted puts our bugs into that phase's vocabulary, and an operator
+	// counting startup failures would count them.
+	for _, phase := range []PhaseName{PhaseAccept, PhaseStartup, PhaseAuthenticateAndOpen,
+		PhaseHandshake, PhaseServe} {
+		if _, err := lc.run(phase, func() Outcome {
+			return Operational(outcomeID(OutcomeInternalError), errors.New("x"))
+		}); err == nil {
+			t.Errorf("%s emitted the lifecycle fault identity as its own", phase)
+		}
+	}
+}
+
+// AN AUTHENTICATED CALLER ON A QUIESCENT STREAM IS TOLD THE SERVER FAILED.
+//
+// Before authentication there is nothing to say and often no way to say it.
+// Mid-sequence a frame would corrupt what the client is reading. But after
+// ReadyForQuery, between messages, the stream is quiescent and an authenticated
+// caller is owed better than a socket that closes for no stated reason -- they
+// will otherwise spend the morning looking at their network.
+//
+// The code is 58000, which every client already renders as a server fault
+// rather than as anything the caller did, and the message carries no cause.
+func TestRunner_AQuiescentAuthenticatedStreamGetsTheFatalInternalFrame(t *testing.T) {
+	t.Parallel()
+
+	eng := &traceEngine{session: goodSession()}
+	l, events, addr := listenerWith(t, Options{
+		Authn: eng, Cancels: eng, AuthFailuresPerIP: unthrottled,
+		// A session handler that returns immediately, so the serve phase ends
+		// with the stream quiescent.
+		OnSession: func(context.Context, net.Conn, *pgproto3.Backend, exec.WireSessionResult) error {
+			return nil
+		},
+	})
+	// Serve is declared but absent from the table, so the phase faults with
+	// the session already open and the stream between messages.
+	l.phases = map[PhaseName]Phase{}
+	for _, p := range lifecyclePhases() {
+		if p.Name == PhaseServe {
+			continue
+		}
+		l.phases[p.Name] = p
+	}
+
+	host := "127.0.0.1"
+	before := failureCount(l, host)
+
+	tc, fe := startupTo(t, addr, defaultParams())
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("auth request: %v", err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "autodb_pat_secret"})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("credential: %v", err)
+	}
+	wire := readToEOF(t, tc)
+
+	waitFor(t, "the connection to close", func() bool {
+		for _, e := range events() {
+			if e.Kind == "fd.conn_close" {
+				return true
+			}
+		}
+		return false
+	})
+
+	frames := strings.Join(describeWire(wire), "; ")
+	if !strings.Contains(frames, `C="`+InternalSQLState+`"`) {
+		t.Errorf("the authenticated caller was not told the server failed.\nwire: %s", frames)
+	}
+	if !strings.Contains(frames, InternalMessage) {
+		t.Errorf("the fatal frame carries a different message.\nwire: %s", frames)
+	}
+	// NO CAUSE. Which phase broke is the operator's business, so the fields
+	// are pinned exactly rather than searched for a phase name -- "serve"
+	// occurs inside "the server failed", and the first version of this
+	// assertion matched that and reported a leak where there was none.
+	if !strings.Contains(frames, `D="frontdoor/internal"`) {
+		t.Errorf("the detail is not the constant rule id.\nwire: %s", frames)
+	}
+	if strings.Contains(frames, OutcomeInternalError) {
+		t.Errorf("the internal identity reached the wire.\nwire: %s", frames)
+	}
+
+	// THE FAULT IS RECORDED AS OURS, and the peer is not charged for it.
+	var sawFault, sawBudget bool
+	for _, e := range events() {
+		switch e.Kind {
+		case EventLifecycleFault:
+			sawFault = true
+		case "fd.budget_refuse":
+			sawBudget = true
+		}
+	}
+	if !sawFault {
+		t.Error("no lifecycle fault was recorded")
+	}
+	if sawBudget {
+		t.Error("our fault was recorded as a capacity refusal")
+	}
+	if after := failureCount(l, host); after != before {
+		t.Errorf("throttle delta = %d, want 0", after-before)
+	}
+}
+
+// AN IDENTITY WE CANNOT VALIDATE DOES NOT REACH THE TRAIL.
+//
+// The lifecycle fault is resolved through the registry like every other
+// outcome. When it cannot be -- because the declarations themselves are broken
+// -- nothing is emitted: an unvalidated identity in the audit trail is exactly
+// what the registry exists to make impossible, and emitting one on the path
+// that reports OUR defects would be the worst place to start.
+func TestRunner_AnUnresolvableLifecycleFaultEmitsNothing(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var events []Event
+	var logs int
+	l := &Listener{
+		live: map[net.Conn]struct{}{}, closed: make(chan struct{}), now: time.Now,
+		onLog:   func(string) { mu.Lock(); logs++; mu.Unlock() },
+		onEvent: func(e Event) { mu.Lock(); events = append(events, e); mu.Unlock() },
+	}
+
+	// A registry without the lifecycle producer: the identity is declared by
+	// nobody it can be attributed to.
+	reg, err := outcome.Compose(Outcomes()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	phases := map[PhaseName]Phase{}
+	for _, p := range lifecyclePhases() {
+		phases[p.Name] = p
+	}
+	lc := &lifecycle{reg: reg, phases: phases, ran: map[PhaseName]bool{}}
+
+	l.lifecycleFault(lc, PhaseStartup, "127.0.0.1:1", faultBeforeCredential, nil, false,
+		errors.New("something broke"))
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, e := range events {
+		if e.Kind == EventLifecycleFault {
+			t.Errorf("an unvalidated identity reached the trail as %q", e.Reason)
+		}
+	}
+	// AND THE OPERATOR IS STILL TOLD. Silence everywhere would be worse than
+	// an unvalidated event.
+	if logs == 0 {
+		t.Error("nothing was logged, so the fault is invisible to anyone")
+	}
+}
+
+// THE PHASE RECORDS THE IDENTITY THE SOURCE CHOSE, end to end.
+//
+// runAuth knows which of three things happened -- the peer left, we had no
+// worker, the exchange could not be set up -- and says so. The phase used to
+// hard-code the peer's identity while the throttle consulted the one runAuth
+// had actually selected, so one event was recorded as two different things and
+// only one of them decided the charge.
+//
+// This drives the worker-shortfall branch for real: the slots are full and the
+// deadline is short, so the gate fails the way it does in production.
+func TestCharging_OurWorkerShortfallIsNotChargedToThePeer(t *testing.T) {
+	t.Parallel()
+
+	eng := &traceEngine{session: goodSession()}
+	l, events, addr := listenerWith(t, Options{
+		Authn: eng, Cancels: eng, AuthFailuresPerIP: unthrottled,
+	})
+	// Every credential worker is busy, and the phase's own budget is short.
+	l.authSlots = make(chan struct{}, 1)
+	l.authSlots <- struct{}{}
+	l.dl.auth = 100 * time.Millisecond
+
+	var mu sync.Mutex
+	byPeer := map[string]*lifecycle{}
+	l.testLifecycleReady = func(peer string, lc *lifecycle) {
+		mu.Lock()
+		byPeer[peer] = lc
+		mu.Unlock()
+	}
+
+	host := "127.0.0.1"
+	before := failureCount(l, host)
+
+	tc, fe := startupTo(t, addr, defaultParams())
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("auth request: %v", err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "autodb_pat_secret"})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("credential: %v", err)
+	}
+	peer := local(tc)
+	_ = readToEOF(t, tc)
+
+	waitFor(t, "the connection to close", func() bool {
+		for _, e := range events() {
+			if e.Peer == peer && e.Kind == "fd.conn_close" {
+				return true
+			}
+		}
+		return false
+	})
+
+	// THE CELL CHECKS ITS OWN PREMISE: the engine must never have been asked.
+	// If it was, the worker gate did not fail and this is testing something
+	// else entirely.
+	if len(eng.log()) != 0 {
+		t.Fatalf("the engine was reached, so the worker gate did not fail: %v", eng.log())
+	}
+
+	mu.Lock()
+	lc := byPeer[peer]
+	mu.Unlock()
+	if lc == nil {
+		t.Fatal("no lifecycle recorded")
+	}
+	concluded, ran := lc.concluded(PhaseAuthenticateAndOpen)
+	if !ran {
+		t.Fatal("the credential phase did not run")
+	}
+	if got := concluded.Reason(); got != outcomeID(OutcomeAuthWorkerBusy) {
+		t.Errorf("the phase recorded %q, want %q — it is naming the ending itself instead "+
+			"of carrying the one the source selected", got, OutcomeAuthWorkerBusy)
+	}
+
+	// AND THE PEER IS NOT CHARGED. This is the consequence: the hard-coded
+	// identity is registered Protocol, so recording it here would spend a
+	// developer's allowance for our own shortfall.
+	if after := failureCount(l, host); after != before {
+		t.Errorf("throttle delta = %d, want 0 — the peer waited for a worker we could not "+
+			"spare and presented something we never looked at", after-before)
 	}
 }

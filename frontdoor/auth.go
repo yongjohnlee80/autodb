@@ -164,7 +164,9 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	// fails for everyone who picks it.
 	be.Send(&pgproto3.AuthenticationCleartextPassword{})
 	if err := be.Flush(); err != nil {
-		return authOutcome{}, err
+		// OURS: the prompt could not be written. The peer has not been asked
+		// for anything yet, so there is nothing they could have done wrong.
+		return authOutcome{Failure: outcomeID(OutcomeAuthSetupFailed)}, err
 	}
 	// Row 2.8: after this, EVERY type-`p` frame decodes as a PasswordMessage,
 	// SASL- and GSS-shaped bytes included. There is no distinguishable SASL
@@ -180,7 +182,7 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	// frames must not take a SASL path should say which decode it wants
 	// rather than inherit one that exists to avoid breaking old callers.
 	if err := be.SetAuthType(pgproto3.AuthTypeCleartextPassword); err != nil {
-		return authOutcome{}, err
+		return authOutcome{Failure: outcomeID(OutcomeAuthSetupFailed)}, err
 	}
 
 	if err := conn.SetDeadline(authDeadline); err != nil {
