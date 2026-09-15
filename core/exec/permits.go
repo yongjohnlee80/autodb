@@ -18,6 +18,55 @@ var ErrTargetBudgetExhausted = errors.New("exec: target connection budget exhaus
 // ErrInvalidBudget means a live budget update was refused.
 var ErrInvalidBudget = errors.New("exec: invalid target connection budget")
 
+// DialClass says which side of the budget a socket was charged to.
+type DialClass uint8
+
+const (
+	// DialOrdinary is query, health-check and control-query traffic: it stops
+	// one short of the budget.
+	DialOrdinary DialClass = iota
+	// DialControl is the reserved lane — today, a cancellation.
+	DialControl
+)
+
+func (c DialClass) String() string {
+	if c == DialControl {
+		return "control"
+	}
+	return "ordinary"
+}
+
+// Permit is one granted socket allowance.
+//
+// IT CARRIES THE TERMS IT WAS GRANTED UNDER, not just a release. A permit
+// taken at a budget of 50 and released during a drain to 25 is correlated to
+// the generation that admitted it -- without that, an audit of a saturated or
+// draining moment cannot tell which policy each live socket was granted by,
+// and "outstanding is above the budget" looks like a bug rather than the drain
+// it is.
+type Permit struct {
+	// Generation is the ledger generation that granted it.
+	Generation uint64
+	// Limit is the allowance in force for this permit's class at grant time.
+	Limit int
+	// Class is which side of the budget it was charged to.
+	Class DialClass
+
+	once    sync.Once
+	release func()
+}
+
+// Release returns the permit. It is IDEMPOTENT: a permit released twice hands
+// out a slot that does not exist, one never released is a slot lost until
+// restart, and both are silent -- so the safe shape is one that can be called
+// from every unwind path without the caller tracking whether it already ran.
+func (p *Permit) Release() {
+	if p == nil {
+		return
+	}
+	p.once.Do(p.release)
+}
+
 // permitLedger enforces `exec.max_target_conns`: the total number of sockets
 // this instance may have open to production targets, across every target.
 //
@@ -92,6 +141,11 @@ type LedgerSnapshot struct {
 	// not an error and must not be rendered as one: nothing is killed to make
 	// the number true, so it becomes true by attrition.
 	Outstanding int
+	// Effective is what is actually in force right now: max(Configured,
+	// Outstanding). During a drain the configured number is NOT the number of
+	// sockets that exist, and an operator sizing a server needs the one that
+	// is true. Draining says the state; this says the quantity.
+	Effective int
 	// Generation increments on every accepted update, so a reader can tell
 	// whether two snapshots describe the same policy.
 	Generation uint64
@@ -108,10 +162,15 @@ func (l *permitLedger) Snapshot() LedgerSnapshot {
 	if ordinary > 1 {
 		ordinary--
 	}
+	effective := l.budget
+	if l.outstanding > effective {
+		effective = l.outstanding
+	}
 	return LedgerSnapshot{
 		Configured:    l.budget,
 		OrdinaryLimit: ordinary,
 		Outstanding:   l.outstanding,
+		Effective:     effective,
 		Generation:    l.generation,
 		Draining:      l.outstanding > l.budget,
 	}
@@ -124,8 +183,8 @@ func (l *permitLedger) Snapshot() LedgerSnapshot {
 // the process. Both are silent, so the safe shape is a release that can be
 // called from every unwind path — dial failure, cancellation, close — without
 // the caller tracking whether it already ran.
-func (l *permitLedger) Acquire() (release func(), err error) {
-	return l.acquire(false)
+func (l *permitLedger) Acquire() (*Permit, error) {
+	return l.acquire(DialOrdinary)
 }
 
 // AcquireControl takes the RESERVED slot: the one an ordinary dial can never
@@ -145,27 +204,27 @@ func (l *permitLedger) Acquire() (release func(), err error) {
 // cancel — the caller has already given up on their query and has no way to
 // learn the cancel never went. The wait is bounded by the caller's own
 // context, which pgx already gives a deadline.
-func (l *permitLedger) AcquireControl(ctx context.Context) (release func(), err error) {
+func (l *permitLedger) AcquireControl(ctx context.Context) (*Permit, error) {
 	select {
 	case l.controlLane <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	rel, err := l.acquire(true)
+	p, err := l.acquire(DialControl)
 	if err != nil {
 		<-l.controlLane
 		return nil, err
 	}
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			rel()
-			<-l.controlLane
-		})
-	}, nil
+	inner := p.release
+	p.release = func() {
+		inner()
+		<-l.controlLane
+	}
+	return p, nil
 }
 
-func (l *permitLedger) acquire(control bool) (release func(), err error) {
+func (l *permitLedger) acquire(class DialClass) (*Permit, error) {
+	control := class == DialControl
 	l.mu.Lock()
 	// ORDINARY DIALS STOP ONE SHORT. The last permit is the control lane's,
 	// so a cancellation can always be delivered.
@@ -188,18 +247,28 @@ func (l *permitLedger) acquire(control bool) (release func(), err error) {
 		}
 	}
 	l.outstanding++
+	granted := Permit{Generation: l.generation, Limit: l.limitFor(class), Class: class}
 	l.mu.Unlock()
 
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			l.mu.Lock()
-			if l.outstanding > 0 {
-				l.outstanding--
-			}
-			l.mu.Unlock()
-		})
-	}, nil
+	granted.release = func() {
+		l.mu.Lock()
+		if l.outstanding > 0 {
+			l.outstanding--
+		}
+		l.mu.Unlock()
+	}
+	return &granted, nil
+}
+
+// limitFor is the allowance in force for a class. Caller holds the lock.
+func (l *permitLedger) limitFor(class DialClass) int {
+	if class == DialControl {
+		return l.budget
+	}
+	if l.budget > 1 {
+		return l.budget - 1
+	}
+	return l.budget
 }
 
 // Outstanding is how many permits are held right now.
@@ -266,13 +335,13 @@ func permitDialer(l *permitLedger, dial func(ctx context.Context, network, addr 
 		// takes the reserved lane instead. The marker is set by autodb's own
 		// cancellation path and cannot be forged from outside this package.
 		var (
-			release func()
-			err     error
+			permit *Permit
+			err    error
 		)
 		if isControlDial(ctx) {
-			release, err = l.AcquireControl(ctx)
+			permit, err = l.AcquireControl(ctx)
 		} else {
-			release, err = l.Acquire()
+			permit, err = l.Acquire()
 		}
 		if err != nil {
 			return nil, err
@@ -282,10 +351,10 @@ func permitDialer(l *permitLedger, dial func(ctx context.Context, network, addr 
 			// The dial failed, raced or was cancelled. The permit goes back
 			// immediately: holding it would spend budget on a socket that
 			// does not exist.
-			release()
+			permit.Release()
 			return nil, err
 		}
-		return &permitConn{Conn: conn, release: release}, nil
+		return &permitConn{Conn: conn, permit: permit}, nil
 	}
 }
 
@@ -293,12 +362,11 @@ func permitDialer(l *permitLedger, dial func(ctx context.Context, network, addr 
 // socket is closed.
 type permitConn struct {
 	net.Conn
-	once    sync.Once
-	release func()
+	permit *Permit
 }
 
 func (c *permitConn) Close() error {
 	err := c.Conn.Close()
-	c.once.Do(c.release)
+	c.permit.Release()
 	return err
 }

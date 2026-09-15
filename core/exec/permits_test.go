@@ -19,7 +19,7 @@ func TestPermitLedgerBoundsOutstandingSockets(t *testing.T) {
 		if err != nil {
 			t.Fatalf("acquire %d: %v", i, err)
 		}
-		releases = append(releases, rel)
+		releases = append(releases, rel.Release)
 	}
 	if _, err := l.Acquire(); !errors.Is(err, ErrTargetBudgetExhausted) {
 		t.Fatalf("the fourth acquire must be refused, got %v", err)
@@ -33,13 +33,13 @@ func TestPermitLedgerBoundsOutstandingSockets(t *testing.T) {
 // Releasing twice must not manufacture a slot that does not exist.
 func TestReleaseIsIdempotent(t *testing.T) {
 	l := newPermitLedger(2) // 1 ordinary + 1 reserved
-	rel, err := l.Acquire()
+	p, err := l.Acquire()
 	if err != nil {
 		t.Fatal(err)
 	}
-	rel()
-	rel()
-	rel()
+	p.Release()
+	p.Release()
+	p.Release()
 	if got := l.Outstanding(); got != 0 {
 		t.Fatalf("outstanding = %d, want 0 — a double release invented capacity", got)
 	}
@@ -61,7 +61,7 @@ func TestLoweringTheBudgetDrainsRatherThanKilling(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		releases = append(releases, rel)
+		releases = append(releases, rel.Release)
 	}
 
 	_, genBefore := l.Budget()
@@ -119,7 +119,7 @@ func TestConcurrentAcquiresNeverExceedTheBudget(t *testing.T) {
 			}
 			mu.Lock()
 			granted++
-			held = append(held, rel)
+			held = append(held, rel.Release)
 			if granted > peak {
 				peak = granted
 			}
@@ -306,7 +306,7 @@ func TestTheControlLaneSurvivesOrdinarySaturation(t *testing.T) {
 	if _, err := l.AcquireControl(waiting); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("a second cancel must WAIT on its own context, got %v", err)
 	}
-	rel()
+	rel.Release()
 	if _, err := l.AcquireControl(context.Background()); err != nil {
 		t.Fatalf("the lane must be reusable once released: %v", err)
 	}
@@ -443,5 +443,137 @@ func TestTheControlLaneSurvivesADrainingGeneration(t *testing.T) {
 	if _, err := l.AcquireControl(context.Background()); err != nil {
 		t.Fatalf("a cancellation during a drain was refused: %v — this is the state where "+
 			"cancelling matters most", err)
+	}
+}
+
+// A grant carries the terms it was made under, so an audit of a saturated or
+// draining moment can say which policy admitted each live socket.
+func TestAPermitCarriesItsGrantTerms(t *testing.T) {
+	l := newPermitLedger(6) // 5 ordinary + 1 reserved
+
+	ord, err := l.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ord.Class != DialOrdinary {
+		t.Errorf("class = %v, want ordinary", ord.Class)
+	}
+	if ord.Limit != 5 {
+		t.Errorf("ordinary limit = %d, want 5 — one short of the budget", ord.Limit)
+	}
+	genAtGrant := ord.Generation
+
+	ctl, err := l.AcquireControl(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctl.Class != DialControl {
+		t.Errorf("class = %v, want control", ctl.Class)
+	}
+	if ctl.Limit != 6 {
+		t.Errorf("control limit = %d, want the full budget 6", ctl.Limit)
+	}
+
+	// A permit granted before an update keeps the generation that admitted it:
+	// that correlation is the whole reason the field exists.
+	if err := l.SetBudget(3); err != nil {
+		t.Fatal(err)
+	}
+	if ord.Generation != genAtGrant {
+		t.Errorf("a live permit's generation changed under it: %d -> %d",
+			genAtGrant, ord.Generation)
+	}
+	if now := l.Snapshot().Generation; now == genAtGrant {
+		t.Error("the ledger's generation did not advance on an accepted update")
+	}
+
+	ord.Release()
+	ord.Release()
+	ctl.Release()
+	if got := l.Outstanding(); got != 0 {
+		t.Errorf("outstanding = %d after releases, want 0", got)
+	}
+}
+
+// The EXPORTED engine path, across the transitions an operator actually makes.
+func TestEngineTargetBudgetTransitions(t *testing.T) {
+	// Built through the real constructor: Settings() reads session state a bare
+	// struct does not have, and the point of this cell is the EXPORTED path.
+	e := New(nil, nil, WithTargetConnBudget(51)) // 50 ordinary + 1 reserved
+	var held []*Permit
+	for range 50 {
+		p, err := e.targetPermits.Acquire()
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, p)
+	}
+
+	// 50 -> 25: drains, kills nothing.
+	if err := e.SetTargetConnBudget(26); err != nil {
+		t.Fatalf("lowering the budget was refused: %v", err)
+	}
+	s := e.Settings().TargetConns
+	if s.Outstanding != 50 || !s.Draining {
+		t.Fatalf("after 50->25: outstanding=%d draining=%v, want 50 and true",
+			s.Outstanding, s.Draining)
+	}
+	if s.Effective != 50 {
+		t.Errorf("effective = %d, want 50 — during a drain the configured number is NOT "+
+			"the number of sockets that exist, and an operator sizing a server needs "+
+			"the one that is true", s.Effective)
+	}
+
+	// A refused update must change nothing, including the generation.
+	genBefore := e.Settings().TargetConns.Generation
+	if err := e.SetTargetConnBudget(0); !errors.Is(err, ErrInvalidBudget) {
+		t.Fatalf("a nonpositive update was accepted: %v", err)
+	}
+	after := e.Settings().TargetConns
+	if after.Generation != genBefore {
+		t.Errorf("a REFUSED update advanced the generation %d -> %d; a reader comparing "+
+			"snapshots would believe the policy changed", genBefore, after.Generation)
+	}
+	if after.Configured != 26 {
+		t.Errorf("a refused update changed the budget to %d", after.Configured)
+	}
+
+	// 25 -> 60: raising ends the drain immediately, without touching sockets.
+	if err := e.SetTargetConnBudget(61); err != nil {
+		t.Fatal(err)
+	}
+	if up := e.Settings().TargetConns; up.Draining || up.Effective != 61 {
+		t.Errorf("after raising: draining=%v effective=%d, want false and 61",
+			up.Draining, up.Effective)
+	}
+
+	// 25 -> 20: lowering again while still over.
+	if err := e.SetTargetConnBudget(21); err != nil {
+		t.Fatal(err)
+	}
+	if down := e.Settings().TargetConns; !down.Draining || down.Effective != 50 {
+		t.Errorf("after lowering again: draining=%v effective=%d, want true and 50",
+			down.Draining, down.Effective)
+	}
+
+	// Draining below the new budget clears the state.
+	for i := range 35 {
+		held[i].Release()
+	}
+	if end := e.Settings().TargetConns; end.Draining || end.Outstanding != 15 {
+		t.Errorf("after draining: draining=%v outstanding=%d, want false and 15",
+			end.Draining, end.Outstanding)
+	}
+}
+
+// An engine built without a budget refuses a live update rather than silently
+// creating one nobody configured.
+func TestEngineWithoutABudgetRefusesLiveUpdates(t *testing.T) {
+	e := New(nil, nil)
+	if err := e.SetTargetConnBudget(25); !errors.Is(err, ErrInvalidBudget) {
+		t.Errorf("err = %v, want a refusal", err)
+	}
+	if got := e.Settings().TargetConns; got.Configured != 0 {
+		t.Errorf("an engine without a budget reported %d", got.Configured)
 	}
 }
