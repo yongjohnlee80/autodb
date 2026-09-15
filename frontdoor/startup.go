@@ -323,7 +323,7 @@ func runStartup(raw net.Conn, tlsCfg *tls.Config, cleartext bool, now func() tim
 		// STABLE reason an operator can count and the library's wording
 		// rides in the detail. A reason string that changes when a
 		// dependency rewords an error is a reason nobody can alert on.
-		return nil, startupOutcome{}, tlsFailureDetail("tls-handshake", err.Error())
+		return nil, startupOutcome{}, tlsFailureDetail(OutcomeTLSHandshake, err.Error())
 	}
 
 	return startupOnStream(secure, secure, dl, now)
@@ -628,11 +628,11 @@ const startupMinBody = 4
 func s0Failure(err error) error {
 	switch {
 	case strings.Contains(err.Error(), "unknown startup message code"):
-		return tlsFailure("startup-code-unknown")
+		return tlsFailure(OutcomeStartupCode)
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
-		return peerGone("peer-gone-before-startup")
+		return peerGone(OutcomePeerGoneAtStart)
 	default:
-		return tlsFailure("startup-unreadable")
+		return tlsFailure(OutcomeStartupUnread)
 	}
 }
 

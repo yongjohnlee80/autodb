@@ -1,0 +1,170 @@
+package frontdoor
+
+import (
+	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/outcome"
+)
+
+// The front door's own outcomes, declared per PHASE.
+//
+// The phases are the ones that exist, not the ones a tidy diagram would have.
+// Credential verification and session open are a single atomic call in the
+// engine today, so they are one producer there and appear here only as the
+// identities this package renders on their behalf.
+const (
+	// ProducerAccept is the synchronous outer loop: reserve or refuse, before
+	// a goroutine, a reader or a TLS buffer exists.
+	ProducerAccept = outcome.ProducerID("accept")
+	// ProducerStartup is TLS negotiation and the startup packet.
+	ProducerStartup = outcome.ProducerID("startup")
+	// ProducerCancel is the cancel-request branch: terminal, and it never
+	// authenticates.
+	ProducerCancel = outcome.ProducerID("cancel")
+	// ProducerCredential is the credential exchange this package drives
+	// around the engine's single open call.
+	ProducerCredential = outcome.ProducerID("credential-exchange")
+)
+
+// The cancel branch's identities.
+//
+// THESE WERE HOMELESS, and that is the whole reason this registry is named for
+// outcomes rather than refusals. A cancel request is not a denial: nothing was
+// refused, a request was handled and the connection closed. So these three
+// belonged to no vocabulary at all and lived as bare string literals at the
+// call site, where nothing could enumerate them, classify them, or notice one
+// going missing.
+//
+// They are constants now so the audit trail and the registry cannot disagree
+// about what an occurrence is called. The values are unchanged.
+const (
+	EventCancelReceived = "fd.cancel_received"
+	EventCancelApplied  = "fd.cancel_applied"
+	EventCancelStale    = "fd.cancel_stale"
+)
+
+// The startup phase's failure identities that are not denial reasons.
+//
+// HOMELESS IN THE SAME WAY THE CANCEL IDENTITIES WERE. A TLS handshake that
+// fails, a startup code nobody recognises, a frame that will not read, and a
+// peer that hung up before asking for anything are all outcomes of the startup
+// phase -- and none of them is a denial, so none had a place in a vocabulary
+// named for denials. They lived as bare literals at the call site.
+//
+// Their charges are the ones the code already applies, read off it rather than
+// decided here: the first three are attributable to the peer and counted, and
+// the last is explicitly not, because throttling a health probe for being a
+// health probe is an outage we would have configured ourselves.
+const (
+	OutcomeTLSHandshake    = "tls-handshake"
+	OutcomeStartupCode     = "startup-code-unknown"
+	OutcomeStartupUnread   = "startup-unreadable"
+	OutcomePeerGoneAtStart = "peer-gone-before-startup"
+)
+
+// Outcomes declares what each phase of this package can emit.
+//
+// CHARGES ARE THE RULED ONES AND NOTHING HERE RECLASSIFIES ANYTHING. Accept
+// refusals are capacity or throttle decisions and are not charged; startup and
+// pre-auth protocol failures are the peer speaking the protocol wrongly and
+// are; our own store failures are Operational and never the peer's doing.
+//
+// The one that is easy to get wrong, and was got wrong, is the accept-time
+// group. A connection refused because one host is already using its whole
+// allowance has not failed a credential -- it has met a concurrency ceiling --
+// and charging it is how a per-source limit becomes a per-source ban.
+func Outcomes() []outcome.Registration {
+	refusal := func(r denialReason, c outcome.Charge) outcome.Decl {
+		return outcome.Decl{ID: outcome.ReasonID(r), Kind: outcome.Refusal, Charge: c}
+	}
+	control := func(id string) outcome.Decl {
+		return outcome.Decl{ID: outcome.ReasonID(id), Kind: outcome.Control, Charge: outcome.None}
+	}
+	operational := func(r denialReason) outcome.Decl {
+		return outcome.Decl{ID: outcome.ReasonID(r), Kind: outcome.Operational, Charge: outcome.None}
+	}
+
+	return []outcome.Registration{
+		{Producer: ProducerAccept, Outcomes: []outcome.Decl{
+			// Charged: this one IS a per-source failure budget being spent.
+			refusal(reasonSourceThrottled, outcome.Credential),
+			// Not charged: capacity and concurrency. A peer refused because
+			// the system is full has done nothing wrong, and charging it is
+			// what turned a busy morning into a banned address.
+			refusal(reasonConnectionCap, outcome.Capacity),
+			refusal(reasonSourceConnCap, outcome.Capacity),
+			refusal(reasonPreAuthConnCap, outcome.Capacity),
+			refusal(reasonControlLaneExhausted, outcome.Capacity),
+		}},
+		{Producer: ProducerStartup, Outcomes: []outcome.Decl{
+			refusal(reasonPlaintextStartup, outcome.Protocol),
+			refusal(reasonDirectTLS, outcome.Protocol),
+			refusal(reasonUnsupportedMajor, outcome.Protocol),
+			refusal(reasonStartupMalformed, outcome.Protocol),
+			refusal(reasonStartupParamRefus, outcome.Protocol),
+			refusal(reasonStartupGUCCount, outcome.Protocol),
+			refusal(reasonStartupOptionsMalformed, outcome.Protocol),
+			refusal(reasonStartupDuplicateKey, outcome.Protocol),
+			refusal(reasonPreAuthOversize, outcome.Protocol),
+			// OURS, NOT THEIRS. A locked store is a state of this server; a
+			// peer holding a perfectly good token meets it through no fault
+			// of their own, and throttling them for our outage turns one
+			// incident into two.
+			//
+			// It is the ONE identity that changes what the wire says -- a
+			// running server that is not serving, identical for every caller
+			// and independent of any credential, so it cannot be used to
+			// learn anything about a resource.
+			refusal(reasonStoreLocked, outcome.None),
+			// The identities above are denial reasons; these four are the
+			// phase's other ways to end, and they end it WITHOUT a frame --
+			// a peer speaking raw TLS cannot read a PostgreSQL error.
+			{ID: OutcomeTLSHandshake, Kind: outcome.Refusal, Charge: outcome.Protocol},
+			{ID: OutcomeStartupCode, Kind: outcome.Refusal, Charge: outcome.Protocol},
+			{ID: OutcomeStartupUnread, Kind: outcome.Refusal, Charge: outcome.Protocol},
+			// NOT CHARGED, and the code already says why: a connection that
+			// opened and closed before asking anything is a port scan or a
+			// load balancer's health probe, and banning those is an outage of
+			// our own making.
+			{ID: OutcomePeerGoneAtStart, Kind: outcome.Operational, Charge: outcome.None},
+		}},
+		{Producer: ProducerCancel, Outcomes: []outcome.Decl{
+			// A cancel presents no credential, so it cannot fail one. Control
+			// rather than Refusal: nothing was denied, a request was handled.
+			control(EventCancelReceived),
+			control(EventCancelApplied),
+			control(EventCancelStale),
+		}},
+		{Producer: ProducerCredential, Outcomes: credentialOutcomes(refusal, operational)},
+	}
+}
+
+// credentialOutcomes is what the credential phase can end on.
+//
+// IT DECLARES THE ENGINE'S IDENTITIES AS WELL AS ITS OWN, and that is the case
+// that forced membership onto the producer rather than onto the reason. The
+// engine RAISES a capacity refusal; this phase is where it reaches the wire,
+// so this phase can end on it and must say so. An earlier shape put a single
+// phase on the reason, which makes one of the two lie about who it belongs to.
+//
+// The engine's half is DERIVED from the engine's own registration rather than
+// restated here. A second list would fall behind the first, and the way it
+// would fail is the worst available: a refusal the engine raises and this
+// phase has not declared is refused by the runner as a programming error --
+// during an incident, on the path that was already refusing somebody.
+func credentialOutcomes(
+	refusal func(denialReason, outcome.Charge) outcome.Decl,
+	operational func(denialReason) outcome.Decl,
+) []outcome.Decl {
+	out := []outcome.Decl{
+		// OURS: the store would not answer, or there is no credential store
+		// behind this listener yet. A peer holding a perfectly good token
+		// meets these through no fault of their own.
+		operational(reasonAuthStoreError),
+		refusal(reasonNoCredentialStore, outcome.None),
+		// THEIRS: a frame that is not a password where a password belongs.
+		// This is the credential exchange being spoken wrongly, which is the
+		// same kind of thing as grinding it.
+		refusal(reasonPreAuthProtocolViolation, outcome.Protocol),
+	}
+	return append(out, exec.Registration().Outcomes...)
+}

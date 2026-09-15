@@ -23,6 +23,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/config"
 	coreexec "github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/outcome"
 	"github.com/yongjohnlee80/autodb/frontdoor"
 	"github.com/yongjohnlee80/autodb/rpc"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
@@ -716,6 +717,19 @@ func startEngine(
 	// THROUGH the lease. So losing it is a shutdown, not a warning.
 	lost := watchLease(serveCtx, leaseLost, stopServing, onLog)
 
+	// THE OUTCOME REGISTRY IS COMPOSED BEFORE ANYTHING SERVES, and a daemon
+	// whose producers disagree does not start.
+	//
+	// Composition is where a duplicate declaration, an identity two producers
+	// describe differently, or an outcome nobody classified is caught. Every
+	// one of those is a programming error with a one-line fix, and the
+	// alternative to catching it here is catching it at the moment it fires --
+	// which is to say, during an incident, in whichever direction the last
+	// registration happened to win.
+	if _, err := composeOutcomes(); err != nil {
+		return nil, nil, nil, nil, err
+	}
+
 	eng := coreexec.New(store, svc, execOptions(cfg, onLog)...)
 
 	// A previously reloaded policy is applied BEFORE the janitor starts and
@@ -1368,4 +1382,18 @@ func lockedBanner(reason error) string {
 	fmt.Fprintln(&b, "  unlock this process now.")
 	fmt.Fprintln(&b, "==============================================================================")
 	return b.String()
+}
+
+// composeOutcomes assembles every producer's declarations into one registry.
+//
+// This is the only place that can: core/exec and frontdoor do not import each
+// other, and neither knows the other's identities. That is deliberate -- the
+// registry is a neutral vocabulary precisely so the packages can adapt to it
+// without adopting each other -- and it means the whole-system check belongs
+// at the top, where both are already in scope.
+func composeOutcomes() (*outcome.Registry, error) {
+	regs := []outcome.Registration{coreexec.Registration()}
+	regs = append(regs, coreexec.AdmissionOutcomes()...)
+	regs = append(regs, frontdoor.Outcomes()...)
+	return outcome.Compose(regs...)
 }
