@@ -540,8 +540,16 @@ func putUint32(b []byte, v uint32)          { binary.BigEndian.PutUint32(b, v) }
 func sendDenial(w interface {
 	Write([]byte) (int, error)
 }, reason denialReason) error {
+	return sendDenialFor(w, reason, false)
+}
+
+// sendDenialFor writes a refusal, disclosing capacity only on the engine's
+// witness that the caller was already authorized.
+func sendDenialFor(w interface {
+	Write([]byte) (int, error)
+}, reason denialReason, disclosable bool) error {
 	be := pgproto3.NewBackend(emptyReader{}, w)
-	be.Send(denial(reason))
+	be.Send(denialFor(reason, disclosable))
 	return be.Flush()
 }
 

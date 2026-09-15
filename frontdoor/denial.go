@@ -92,8 +92,15 @@ const (
 	// Accept-time refusals (matrix §1.4, §9). None of these reaches the
 	// wire either: a peer refused for capacity learns only that the
 	// connection closed, which is all a peer refused for anything learns.
-	reasonSourceThrottled      denialReason = "frontdoor/source-ip-throttled"
-	reasonConnectionCap        denialReason = "frontdoor/connection-cap"
+	reasonSourceThrottled denialReason = "frontdoor/source-ip-throttled"
+	reasonConnectionCap   denialReason = "frontdoor/connection-cap"
+	// reasonSourceConnCap: one address already holds its share of concurrent
+	// connections. Distinct from reasonSourceThrottled, which is about FAILED
+	// credentials: this peer may have presented nothing wrong at all and is
+	// simply using more than its allowance, so an operator reading
+	// "source-ip-throttled" would go looking for a credential attack that
+	// never happened.
+	reasonSourceConnCap        denialReason = "frontdoor/source-connection-cap"
 	reasonPreAuthConnCap       denialReason = "frontdoor/pre-auth-connection-cap"
 	reasonControlLaneExhausted denialReason = "frontdoor/control-lane-exhausted"
 
@@ -117,7 +124,50 @@ const (
 // DETAIL carries the front-door rule id rather than the cause, per matrix
 // §1.2: a synthesized error must never impersonate the target, and the rule
 // id is stable, which is what makes an audit trail greppable.
+// CapacitySQLState and CapacityMessage are what a fully authorized caller is
+// told when the system is full.
+//
+// 53300 too_many_connections is a code every client already understands, so
+// DataGrip and psql render it sensibly instead of showing a dropped socket.
+// The message is FIXED and carries no cause: which cap was reached is an
+// operator's business, kept in the audit trail.
+const (
+	CapacitySQLState = "53300"
+	CapacityMessage  = "the database is at its connection limit; try again shortly"
+)
+
+// denial renders a refusal for a caller who has NOT proved who they are.
 func denial(reason denialReason) *pgproto3.ErrorResponse {
+	return denialFor(reason, false)
+}
+
+// denialFor renders a refusal, disclosing capacity only to an authorized
+// caller.
+//
+// THE SECOND ARGUMENT IS A WITNESS, NOT A FLAG DERIVED FROM THE REASON. It
+// comes from the engine, set only where a refusal was raised with a verified
+// credential in hand. That is what makes the exemption survive a reordering:
+// move a capacity check above the credential check and no witness exists, so
+// this returns the uniform denial rather than leaking to a stranger.
+//
+// There is deliberately NO reason-to-code table. A table is how a uniform
+// surface becomes an enumerable one, one well-meaning row at a time.
+func denialFor(reason denialReason, disclosable bool) *pgproto3.ErrorResponse {
+	if disclosable {
+		return &pgproto3.ErrorResponse{
+			Severity:            "FATAL",
+			SeverityUnlocalized: "FATAL",
+			Code:                CapacitySQLState,
+			Message:             CapacityMessage,
+			// The stable rule id, exactly as every other denial: constant,
+			// never the cause.
+			Detail: "frontdoor/capacity",
+		}
+	}
+	return denialUniform(reason)
+}
+
+func denialUniform(reason denialReason) *pgproto3.ErrorResponse {
 	// THE ONE EXCEPTION, and it is a single named state rather than a table.
 	//
 	// The shape matters as much as the decision: a map from reason to code is
