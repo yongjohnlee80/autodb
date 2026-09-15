@@ -165,3 +165,25 @@ func (lc *lifecycle) occurrence(name PhaseName, o Outcome) (outcome.Occurrence, 
 // identity. It is a conversion and not a lookup: the value does not change,
 // which is what "the existing types adapt" means and what a cell asserts.
 func outcomeID(reason string) outcome.ReasonID { return outcome.ReasonID(reason) }
+
+// denialOccurrence resolves the typed occurrence for a refusal that is about
+// to be rendered.
+//
+// FAILS CLOSED. If the identity cannot be resolved -- an undeclared reason, the
+// wrong producer -- the zero occurrence is returned: no witness and no charge,
+// which the projection can only render as the uniform denial. A refusal we
+// cannot classify is precisely the one that must not be allowed to disclose
+// anything, and returning the reason with disclosure intact would let a
+// registration mistake become a capacity oracle.
+func (l *Listener) denialOccurrence(lc *lifecycle, phase PhaseName, reason denialReason, witness bool) outcome.Occurrence {
+	opts := []OutcomeOption{}
+	if witness {
+		opts = append(opts, WithWitness())
+	}
+	occ, err := lc.occurrence(phase, Refuse(outcomeID(reason.String()), opts...))
+	if err != nil {
+		l.onLog(fmt.Sprintf("frontdoor: %s produced an unresolvable denial %q: %v", phase, reason, err))
+		return outcome.Occurrence{Reason: outcome.ReasonID(reason)}
+	}
+	return occ
+}

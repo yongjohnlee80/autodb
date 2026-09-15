@@ -105,6 +105,9 @@ type permitLedger struct {
 	// that wants to reason about a drain needs to know which generation it is
 	// looking at.
 	generation uint64
+
+	// testBeforePublish pauses a publication while its lock is held.
+	testBeforePublish func()
 	// controlLane serializes the reserved slot to one holder.
 	controlLane chan struct{}
 }
@@ -131,7 +134,16 @@ type permitLedger struct {
 // built without a budget has no ledger at all and the dialer returns the
 // underlying dial untouched.
 func newPermitLedger(budget int) *permitLedger {
-	return &permitLedger{budget: budget, generation: 1, controlLane: make(chan struct{}, 1)}
+	// GENERATION ZERO IS THE CONFIGURED POLICY, and it starts here at zero for
+	// the same reason the engine's policy does: they are ONE generation, and
+	// two counters that start apart can never agree afterwards however
+	// carefully each is incremented.
+	//
+	// It used to start at 1. The engine's policy started at 0, each reload
+	// bumped both independently, and so after the first reload the policy
+	// reported generation 1 beside a ledger reporting 2 -- permanently offset,
+	// and described in the readout as "one generation".
+	return &permitLedger{budget: budget, generation: 0, controlLane: make(chan struct{}, 1)}
 }
 
 // SetBudget publishes a new budget as a new generation.
@@ -151,7 +163,13 @@ func (l *permitLedger) SetBudget(n int) error {
 			"because one permit is reserved so a cancellation can still be delivered",
 			ErrInvalidBudget, n)
 	}
-	return l.setBudgetWith(n, nil)
+	// The caller has no policy to align with, so the generation simply
+	// advances. Every production path goes through the policy reload, which
+	// chooses the generation once and passes it to both sides.
+	l.mu.Lock()
+	next := l.generation + 1
+	l.mu.Unlock()
+	return l.setBudgetWith(n, next, nil)
 }
 
 // setBudgetWith changes the budget and runs publish -- if there is one --
@@ -164,16 +182,43 @@ func (l *permitLedger) SetBudget(n int) error {
 // engine reported a configuration no operator ever asked for, and the window
 // is exactly when somebody is watching, because they just made the change.
 //
+// THE GENERATION IS GIVEN, NOT INVENTED. The policy owns it: a reload picks
+// one number and hands the same one to both sides, so a readout that reports
+// them together reports one fact rather than two counters that drifted apart.
+//
 // publish MUST NOT touch the ledger; it holds the lock.
-func (l *permitLedger) setBudgetWith(n int, publish func()) error {
+func (l *permitLedger) setBudgetWith(n int, generation uint64, publish func()) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// A cell's barrier, held INSIDE the lock and before anything is published,
+	// so the reader ordering can be exercised deterministically rather than
+	// raced for. Nil outside this package's own cells.
+	if l.testBeforePublish != nil {
+		l.testBeforePublish()
+	}
 	l.budget = n
-	l.generation++
+	l.generation = generation
 	if publish != nil {
 		publish()
 	}
 	return nil
+}
+
+// snapshotWith takes a coherent reading of the ledger AND of whatever else the
+// caller needs to pair with it, with both read under this lock.
+//
+// THE READER'S ORDERING IS THE POINT, and locking the writer was not enough.
+// A reader that loaded the policy pointer, was descheduled while a reload
+// published, and then took the ledger snapshot would pair the OLD timeouts
+// with the NEW budget -- a tuple no moment ever held, handed to the operator
+// who just made the change and is watching for it to land.
+func (l *permitLedger) snapshotWith(alongside func()) LedgerSnapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if alongside != nil {
+		alongside()
+	}
+	return l.snapshotLocked()
 }
 
 // LedgerSnapshot is one coherent reading of the ledger.
@@ -218,6 +263,10 @@ type LedgerSnapshot struct {
 func (l *permitLedger) Snapshot() LedgerSnapshot {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.snapshotLocked()
+}
+
+func (l *permitLedger) snapshotLocked() LedgerSnapshot {
 	return LedgerSnapshot{
 		Configured:    l.budget,
 		OrdinaryLimit: l.ordinaryLimitLocked(),

@@ -4,76 +4,154 @@ import (
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/outcome"
 )
 
-// A fully authorized caller refused for capacity is TOLD it was capacity.
+// WHEN MAY THE FRONT DOOR SAY MORE THAN "DENIED"?
 //
-// This is the developer-visible half of the 2026-09-15 lockout. The charge fix
-// stopped the ban; this stops the misdirection. A pool at its limit rendered
-// the uniform "authentication failed", so a developer whose credentials were
-// perfect went hunting a password problem that did not exist.
-func TestCapacityDisclosure_AnAuthorizedCallerIsToldItIsCapacity(t *testing.T) {
-	frame := denialFor(denialReason(exec.DenyLeaseCap), true)
+// Exactly when two independent facts both hold: the caller was authorized, and
+// the thing that happened to them was registered as capacity.
+//
+// THE FIRST VERSION OF THIS REQUIRED ONLY THE FIRST, and the cells agreed with
+// it because they passed the renderer a naked Boolean -- which is to say they
+// asserted the bug. The witness proves WHO the caller is. It does not prove
+// WHAT happened. A refusal raised after authorization for a missing grant, a
+// refused profile, or our own stored state would have been rendered to the peer
+// as "the database is at its connection limit": false, and a disclosure of the
+// system's load to somebody whose problem was something else.
+//
+// So the rule is a conjunction, and the whole truth table is below. Removing
+// either term reopens one of the two holes.
 
-	if frame.Code != CapacitySQLState {
-		t.Errorf("code = %q, want %q — a code every client already renders sensibly",
-			frame.Code, CapacitySQLState)
+// occurrenceFor builds the typed occurrence a phase would produce, through the
+// registry rather than by hand -- a cell that assembled one itself would be
+// asserting against a classification the system does not hold.
+func occurrenceFor(t *testing.T, phase PhaseName, reason string, witness bool) outcome.Occurrence {
+	t.Helper()
+	lc := testLifecycle(t)
+	opts := []OutcomeOption{}
+	if witness {
+		opts = append(opts, WithWitness())
 	}
-	if frame.Code == DenialSQLState {
-		t.Error("an authorized capacity refusal still reads as a credential failure")
+	occ, err := lc.occurrence(phase, Refuse(outcomeID(reason), opts...))
+	if err != nil {
+		t.Fatalf("resolving %q for %s: %v", reason, phase, err)
 	}
-	if frame.Message != CapacityMessage {
-		t.Errorf("message = %q, want the fixed capacity message", frame.Message)
+	return occ
+}
+
+func TestCapacityDisclosure_TheTruthTable(t *testing.T) {
+	t.Parallel()
+
+	// One reason per charge class, taken from what the system actually
+	// registers, so the table cannot drift from the classification.
+	cases := []struct {
+		name    string
+		phase   PhaseName
+		reason  string
+		charge  outcome.Charge
+		witness bool
+		want    string
+		why     string
+	}{
+		{
+			"authorized capacity", PhaseAuthenticateAndOpen, exec.DenyLeaseCap,
+			outcome.Capacity, true, CapacitySQLState,
+			"the one case that may disclose: the caller proved who they are and the system was full",
+		},
+		{
+			"unwitnessed capacity", PhaseAuthenticateAndOpen, exec.DenyLeaseCap,
+			outcome.Capacity, false, DenialSQLState,
+			"a capacity oracle for a peer who has proved nothing is what the uniform denial exists to prevent",
+		},
+		{
+			"authorized credential", PhaseAuthenticateAndOpen, exec.DenyBadCredential,
+			outcome.Credential, true, DenialSQLState,
+			"authorization proves the caller, not the cause; this is a credential failure and must read as one",
+		},
+		{
+			"authorized none", PhaseAuthenticateAndOpen, exec.DenyNoGrant,
+			outcome.None, true, DenialSQLState,
+			"a missing grant is our stored state, not our load; telling them we are full is simply false",
+		},
+		{
+			"authorized profile refusal", PhaseAuthenticateAndOpen, exec.DenyProfileRefuses,
+			outcome.None, true, DenialSQLState,
+			"the connection does not admit front-door use at all, which has nothing to do with capacity",
+		},
+		{
+			"authorized protocol", PhaseStartup, string(reasonUnsupportedMajor),
+			outcome.Protocol, true, DenialSQLState,
+			"a protocol refusal cannot carry a real witness, and must not disclose even if handed one",
+		},
 	}
-	// FIXED MESSAGE, NO CAUSE. Which cap was reached is the operator's
-	// business and stays in the audit trail.
-	for _, cap := range []string{exec.DenyLeaseCap, exec.DenySessionCap, exec.DenyResidentBudget} {
-		f := denialFor(denialReason(cap), true)
-		if f.Message != CapacityMessage {
-			t.Errorf("%s: message varies with the cause, which tells a caller which "+
-				"limit they hit", cap)
+
+	for _, c := range cases {
+		occ := occurrenceFor(t, c.phase, c.reason, c.witness)
+
+		// THE CELL CHECKS ITS OWN PREMISE. If the registry ever reclassified
+		// one of these, the case would silently stop testing the class it
+		// names and the table would look complete while covering five.
+		if occ.Charge != c.charge {
+			t.Fatalf("%s: %q is registered as %s, not %s — this case no longer tests the "+
+				"class it claims to", c.name, c.reason, occ.Charge, c.charge)
 		}
-		if f.Detail == cap {
-			t.Errorf("%s: the internal reason reached the wire", cap)
+		if occ.Disclosable != c.witness {
+			t.Fatalf("%s: witness = %t, want %t", c.name, occ.Disclosable, c.witness)
+		}
+
+		frame := denialForOccurrence(occ)
+		if frame.Code != c.want {
+			t.Errorf("%s: code = %q, want %q — %s", c.name, frame.Code, c.want, c.why)
+		}
+		if c.want == DenialSQLState && frame.Message != DenialMessage {
+			t.Errorf("%s: message = %q, want the uniform one", c.name, frame.Message)
+		}
+		// THE CAUSE NEVER REACHES THE WIRE, in either rendering.
+		if frame.Detail == c.reason || frame.Message == c.reason {
+			t.Errorf("%s: the internal reason reached the peer", c.name)
 		}
 	}
 }
 
-// WITHOUT THE WITNESS, NOTHING IS DISCLOSED. A stranger learns only that the
-// connection was refused, which is all a stranger learns about anything.
-func TestCapacityDisclosure_AStrangerLearnsNothing(t *testing.T) {
-	for _, reason := range []string{
-		exec.DenyLeaseCap, exec.DenySessionCap, exec.DenyResidentBudget,
-		exec.DenyBadCredential, exec.DenyNoGrant,
-	} {
-		frame := denialFor(denialReason(reason), false)
-		if frame.Code != DenialSQLState {
-			t.Errorf("%s: code = %q without a witness, want the uniform %q — a capacity "+
-				"oracle for an unauthenticated peer is exactly what the uniform denial "+
-				"exists to prevent", reason, frame.Code, DenialSQLState)
+// THE FIXED MESSAGE. Which cap was reached is the operator's business; a
+// message that varied with the cause would tell an authorized caller which
+// limit they hit, one reconnection at a time.
+func TestCapacityDisclosure_TheDisclosedMessageCarriesNoCause(t *testing.T) {
+	t.Parallel()
+	for _, reason := range []string{exec.DenyLeaseCap, exec.DenySessionCap, exec.DenyResidentBudget} {
+		occ := occurrenceFor(t, PhaseAuthenticateAndOpen, reason, true)
+		frame := denialForOccurrence(occ)
+		if frame.Code != CapacitySQLState {
+			t.Fatalf("%s: code = %q, want the capacity state", reason, frame.Code)
 		}
-		if frame.Message != DenialMessage {
-			t.Errorf("%s: message differs from the uniform one", reason)
+		if frame.Message != CapacityMessage {
+			t.Errorf("%s: message varies with the cause", reason)
+		}
+		if frame.Detail != "frontdoor/capacity" {
+			t.Errorf("%s: detail = %q, want the constant rule id", reason, frame.Detail)
 		}
 	}
 }
 
-// THE WITNESS COMES FROM THE ENGINE, and only from a refusal raised with a
-// verified credential in hand.
-//
-// This is what makes the exemption survive a reordering: a capacity check
-// moved above the credential check produces no witness, so the wire stays
-// uniform instead of leaking.
-func TestCapacityDisclosure_TheWitnessIsNotDerivedFromTheReason(t *testing.T) {
-	// A denial built the ordinary way -- as a pre-authorization refusal would
-	// be -- carries no witness, EVEN FOR A CAPACITY REASON.
-	plain := exec.WireDenial(exec.DenyLeaseCap)
-	if exec.DenialDisclosable(plain) {
-		t.Error("a denial built without the authorized constructor claims disclosure; " +
-			"the witness must be earned, not inferred from the reason")
+// AN UNRESOLVABLE REFUSAL DISCLOSES NOTHING. A registration mistake must not
+// become a capacity oracle, so the zero occurrence renders uniformly.
+func TestCapacityDisclosure_AnUnclassifiedRefusalStaysUniform(t *testing.T) {
+	t.Parallel()
+	frame := denialForOccurrence(outcome.Occurrence{Reason: "frontdoor/never-declared"})
+	if frame.Code != DenialSQLState {
+		t.Errorf("code = %q, want the uniform %q", frame.Code, DenialSQLState)
 	}
-	if frame := denialFor(denialReason(exec.DenyLeaseCap), exec.DenialDisclosable(plain)); frame.Code != DenialSQLState {
-		t.Errorf("code = %q for an unwitnessed capacity reason, want the uniform %q",
-			frame.Code, DenialSQLState)
+
+	// And the listener's resolver returns exactly that for an identity the
+	// phase cannot own, rather than passing the witness through.
+	l := &Listener{onLog: func(string) {}}
+	lc := testLifecycle(t)
+	got := l.denialOccurrence(lc, PhaseStartup, denialReason(exec.DenyLeaseCap), true)
+	if got.Disclosable || got.Charge == outcome.Capacity {
+		t.Errorf("an unresolvable denial kept its witness: %+v", got)
+	}
+	if denialForOccurrence(got).Code != DenialSQLState {
+		t.Error("an unresolvable denial rendered as capacity")
 	}
 }

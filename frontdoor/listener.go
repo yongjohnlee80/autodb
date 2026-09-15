@@ -995,7 +995,15 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 	if l.testDenialDelay > 0 {
 		time.Sleep(l.testDenialDelay)
 	}
-	if derr := sendDenialFor(stream, outcome.Denied, outcome.Disclosable); derr != nil {
+	// THE TYPED OCCURRENCE, not a Boolean. Which phase produced the refusal
+	// decides which producer owns the identity, and the identity's registered
+	// charge is half the disclosure rule -- the witness alone never was.
+	deniedPhase := PhaseAuthenticateAndOpen
+	if out.Denied != "" {
+		deniedPhase = PhaseStartup
+	}
+	occ := l.denialOccurrence(lc, deniedPhase, outcome.Denied, outcome.Disclosable)
+	if derr := sendDenialOccurrence(stream, occ); derr != nil {
 		l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 	}
 	closeReason = outcome.Denied.String()

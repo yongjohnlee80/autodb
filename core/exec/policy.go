@@ -243,12 +243,14 @@ func (e *Engine) publishPolicy(next *enginePolicy, budget int) {
 		e.policy.Store(next)
 		return
 	}
+	// ONE GENERATION, CHOSEN ONCE AND GIVEN TO BOTH SIDES. The policy owns the
+	// number; the ledger is told it rather than keeping a count of its own.
 	// The only way this errors is a budget below two, and validatePolicy has
 	// already refused that for every engine that HAS a ledger -- which is the
 	// only way to reach this line. Returning an error here would be a second
 	// path for a refusal that must happen before anything is written, and a
 	// caller reaching it would already have a durable record of the change.
-	_ = e.targetPermits.setBudgetWith(budget, func() { e.policy.Store(next) })
+	_ = e.targetPermits.setBudgetWith(budget, next.generation, func() { e.policy.Store(next) })
 }
 
 // policyAuditDetail renders the change. Numbers only: no token, no spec
