@@ -165,7 +165,21 @@ const (
 	// DenyStartupGUC: a startup parameter named a setting this session may not
 	// change, or the target refused to apply it.
 	// Uniform 28000 on the wire (matrix §7 ruling 4); the audit row names the key.
-	DenyStartupGUC = "frontdoor/startup-parameter-refused"
+	//
+	// IT USED TO SHARE ITS VALUE WITH THE FRONT DOOR'S PRE-VERIFICATION
+	// STARTUP REFUSAL, and the comment here asserted they were different
+	// identities while the string said they were one. They are not the same
+	// thing and they do not cost the same: the front door's fires before any
+	// credential and is charged as protocol grinding, while this one fires
+	// only after a PAT has been verified and is a configuration mistake
+	// nobody should be banned for.
+	//
+	// So an operator counting one string was counting both, and could not
+	// tell a peer probing the startup surface from a developer whose client
+	// sets a GUC the session may not. Two meanings, two charges, one
+	// identity — split here, keeping the pre-verification value unchanged
+	// because it is the one with the history in existing audit trails.
+	DenyStartupGUC = "frontdoor/startup-guc-refused"
 )
 
 // ChargeClass says who a denial is ABOUT, which decides whether it counts

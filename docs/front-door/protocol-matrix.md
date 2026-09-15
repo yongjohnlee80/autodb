@@ -522,7 +522,15 @@ flowchart TD
   round trip inside the session open, so an uncapped map would let an
   unauthenticated peer buy an arbitrary number for the price of one connection.
 - Refusal is the uniform denial (28000), audit
-  `frontdoor/startup-parameter-refused`, and it **withdraws the session**.
+  `frontdoor/startup-guc-refused`, and it **withdraws the session**.
+
+  *This audit identity was `frontdoor/startup-parameter-refused` until it was
+  split. That value still exists and now names only the front door's
+  **pre-verification** startup refusal, which fires before any credential and
+  is charged as protocol grinding. This one fires only after a PAT has been
+  verified and is not charged at all. One string was being used for both, so an
+  operator counting it could not tell a peer probing the startup surface from a
+  developer whose client sets a setting the session may not.*
 
 *Superseded: this row previously refused every unknown parameter, which meant
 lib/pq — whose config normalization hard-codes `datestyle` — could never open a
