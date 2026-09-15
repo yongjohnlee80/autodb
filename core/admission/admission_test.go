@@ -427,3 +427,80 @@ func TestDualArm_DenialSuppressesRisk(t *testing.T) {
 			"change it silently", rep.Risk)
 	}
 }
+
+// panickingStage panics instead of answering. ADR 0179 D1/D3: the runner
+// contains it, reports WHICH stage broke, and it is an operational error —
+// never a denial.
+type panickingStage struct{ name string }
+
+func (p panickingStage) Name() string        { return p.name }
+func (p panickingStage) ContextNeeds() Needs { return Needs{} }
+func (p panickingStage) DenyCodes() []Code   { return []Code{CodeStatementUnsupported} }
+func (p panickingStage) Apply(Facts, Context) (Contribution, error) {
+	panic("stage exploded")
+}
+
+func TestOrchestratorContainsAStagePanic(t *testing.T) {
+	o := Compose(panickingStage{name: "boom"})
+
+	rep, err := o.Run(simpleFacts("SELECT", ClassRead), Context{})
+
+	if err == nil {
+		t.Fatal("a panicking stage must produce an error; the run reported success")
+	}
+	var opErr *OperationalError
+	if !errors.As(err, &opErr) {
+		t.Fatalf("a panic must surface as *OperationalError, got %T: %v", err, err)
+	}
+	if opErr.Stage != "boom" {
+		t.Errorf("the error must name the stage that broke: got %q, want %q", opErr.Stage, "boom")
+	}
+	var panicErr *PanicError
+	if !errors.As(err, &panicErr) {
+		t.Fatalf("the cause must be a *PanicError so the stack survives, got %T", opErr.Cause)
+	}
+	if panicErr.Value != "stage exploded" {
+		t.Errorf("the panic value must be preserved: got %v", panicErr.Value)
+	}
+	if len(panicErr.Stack) == 0 {
+		t.Error("the stack must be captured at the panic; by the time a caller sees it, the goroutine's stack is gone")
+	}
+	// THE POINT OF THE WHOLE TEST. A panic that arrived as a denial would
+	// publish a refusal reason no stage declared and charge the caller for our
+	// bug.
+	if len(rep.Deny) != 0 {
+		t.Errorf("a panic must NEVER become a denial; got %d deny record(s)", len(rep.Deny))
+	}
+}
+
+// A stage that panics must not stop the ones before it from having run, and
+// must stop the ones after it — the same abort semantics as an operational
+// error, because that is what it is.
+func TestAStagePanicAbortsTheRunLikeAnyOperationalError(t *testing.T) {
+	var reached []string
+	o := Compose(
+		recordingStage{name: "first", seen: &reached},
+		panickingStage{name: "boom"},
+		recordingStage{name: "never", seen: &reached},
+	)
+
+	if _, err := o.Run(simpleFacts("SELECT", ClassRead), Context{}); err == nil {
+		t.Fatal("want an error from the panicking stage")
+	}
+	if len(reached) != 1 || reached[0] != "first" {
+		t.Errorf("stages before the panic must run and stages after must not: reached %v", reached)
+	}
+}
+
+type recordingStage struct {
+	name string
+	seen *[]string
+}
+
+func (r recordingStage) Name() string        { return r.name }
+func (r recordingStage) ContextNeeds() Needs { return Needs{} }
+func (r recordingStage) DenyCodes() []Code   { return nil }
+func (r recordingStage) Apply(Facts, Context) (Contribution, error) {
+	*r.seen = append(*r.seen, r.name)
+	return Contribution{}, nil
+}
