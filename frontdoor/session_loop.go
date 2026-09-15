@@ -1190,6 +1190,24 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 		return sqlStateProtocolViolation, "frontdoor/wire-face-lost",
 			"the session's connection to the target failed; reconnect", true
 
+	case isStagePanic(err):
+		// A STAGE PANICKED, WHICH IS NOT A RETRYABLE OUTAGE.
+		//
+		// This MUST be matched before the operational branch below, because a
+		// panic IS an operational error and would otherwise take that arm:
+		// non-fatal, "retry the statement", ReadyForQuery, session resumed.
+		// That is precisely wrong. Post-panic state is the state nobody
+		// reasoned about — a half-updated registry, a pinned backend mid-
+		// protocol — and inviting the client to retry on it turns our bug into
+		// their corrupted session.
+		//
+		// FATAL, so the connection closes and any pinned backend is discarded
+		// rather than reset and pooled. The message says nothing about the
+		// crash: the caller learns the session ended, and the stage name and
+		// stack go to the operator's trail, where they are useful.
+		return "58000", "frontdoor/internal-error",
+			"the session ended because of an internal error; reconnect", true
+
 	case admission.IsOperationalError(err):
 		return "58000", "frontdoor/admission-unavailable",
 			"retry the statement; if admission remains unavailable, ask the operator", false
@@ -1282,9 +1300,22 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 // error's own text for refusals the engine authored, because those were written
 // for a caller to read; it never includes internal identifiers, which travel in
 // the audit row instead.
+// isStagePanic reports whether this error is a recovered panic rather than a
+// stage that answered "I cannot decide".
+func isStagePanic(err error) bool {
+	var p *admission.PanicError
+	return errors.As(err, &p)
+}
+
 func gateMessage(err error) string {
 	if errors.Is(err, exec.ErrWireFaceLost) {
 		return "the session's connection to the target failed"
+	}
+	if isStagePanic(err) {
+		// Deliberately says less than the operational message below. The
+		// caller is owed the fact that their session ended, and nothing about
+		// our internals.
+		return "the session ended because of an internal error"
 	}
 	if admission.IsOperationalError(err) {
 		return "the admission pipeline could not evaluate this statement"

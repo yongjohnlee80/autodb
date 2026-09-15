@@ -283,8 +283,11 @@ func TestConnectionIsDebug_ReadsTheColumn(t *testing.T) {
 	if plain.idleInTx != 90*time.Second {
 		t.Errorf("non-debug idle = %s, want 90s", plain.idleInTx)
 	}
-	if dbg.idleInTx != 10*time.Minute {
-		t.Errorf("debug idle = %s, want 10m", dbg.idleInTx)
+	// DEPRECATED: the flag no longer selects a different bound. Both states
+	// get the one common value, which is what makes "every session is a debug
+	// session" true rather than merely stated.
+	if dbg.idleInTx != base.idleInTx {
+		t.Errorf("debug idle = %s, want the common bound %s", dbg.idleInTx, base.idleInTx)
 	}
 }
 

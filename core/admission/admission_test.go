@@ -428,7 +428,7 @@ func TestDualArm_DenialSuppressesRisk(t *testing.T) {
 	}
 }
 
-// panickingStage panics instead of answering. ADR 0179 D1/D3: the runner
+// panickingStage panics instead of answering. the runner
 // contains it, reports WHICH stage broke, and it is an operational error —
 // never a denial.
 type panickingStage struct{ name string }

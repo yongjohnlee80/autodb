@@ -392,7 +392,7 @@ type Exec struct {
 	// across every target.
 	//
 	// It is the one quantity autodb can actually enforce, and the only new
-	// key this design spends (ADR 0181 D1, ADR 0182 R6). Per-target
+	// key this design spends (the connection-budget policy D1, the one-new-key rule). Per-target
 	// `pool_max_conns` is a technical ceiling on ONE pool; this bounds the
 	// aggregate, so two targets may each be allowed more than this and the
 	// runtime permit ledger is what keeps the total true.
@@ -1130,7 +1130,7 @@ func (c Config) validate() error {
 	if err := c.FrontDoor.validate(c.Exec.PoolMaxConns, c.sizingSource()); err != nil {
 		return err
 	}
-	// ADR 0181 D3: NO DEFAULT, and REQUIRED under the front door — that is
+	// NO DEFAULT, and REQUIRED under the front door — that is
 	// the surface which spends production connections. Defaulting it would
 	// have autodb quietly claim a number nobody chose against a database
 	// whose max_connections it cannot see.
@@ -1139,6 +1139,38 @@ func (c Config) validate() error {
 	// headroom that leave no capacity is a more specific and more actionable
 	// complaint than a missing key, and an operator should be told the thing
 	// they can act on first.
+	// The deprecated debug bound must not disagree with the common one. It no
+	// longer selects anything, so a differing value is a configuration that
+	// says something the runtime will not do — worse than a value that is
+	// merely ignored, because an operator would believe it.
+	if c.Exec.DebugIdleInTxTimeout > 0 && c.Exec.IdleInTxTimeout > 0 &&
+		c.Exec.DebugIdleInTxTimeout != c.Exec.IdleInTxTimeout {
+		return fmt.Errorf("%w: exec.debug_idle_in_tx_timeout (%v) differs from exec.idle_in_tx_timeout (%v) — "+
+			"the debug profile is deprecated and no longer selects a different bound, so a differing "+
+			"value would describe behaviour the runtime does not have. Remove the key, or set it to match",
+			ErrInvalid, c.Exec.DebugIdleInTxTimeout.Duration(), c.Exec.IdleInTxTimeout.Duration())
+	}
+	// A VIABLE MINIMUM. One permit is reserved so a cancellation can always be
+	// delivered — a developer cancels a query because the system is busy, so a
+	// budget that leaves no room for the cancel removes it at the only moment
+	// anyone reaches for it. A budget of 1 would therefore serve nobody.
+	if c.FrontDoor.Enabled && c.Exec.MaxTargetConns == 1 {
+		return fmt.Errorf("%w: exec.max_target_conns is 1, which leaves nothing for ordinary work — "+
+			"one permit is reserved so a cancellation can still be delivered when every other "+
+			"slot is spent. Use at least 2", ErrInvalid)
+	}
+	// An idle session must not outlive the pool's own idle reaping, or it
+	// holds a backend CHECKED OUT past the point the pool would have closed
+	// it — which defeats the shrink-to-zero behaviour pool_max_conn_idle_time
+	// exists for, against a live production target.
+	if c.Exec.SessionIdleTimeout > 0 && c.Exec.PoolMaxConnIdleTime > 0 &&
+		c.Exec.SessionIdleTimeout > c.Exec.PoolMaxConnIdleTime {
+		return fmt.Errorf("%w: exec.session_idle_timeout (%v) exceeds exec.pool_max_conn_idle_time (%v) — "+
+			"an idle session would hold a backend checked out past the point the pool would have "+
+			"closed it, so unused pools could never shrink to zero against the target. Lower the "+
+			"session bound, or raise the pool's",
+			ErrInvalid, c.Exec.SessionIdleTimeout.Duration(), c.Exec.PoolMaxConnIdleTime.Duration())
+	}
 	if c.FrontDoor.Enabled && c.Exec.MaxTargetConns <= 0 {
 		return fmt.Errorf("%w: exec.max_target_conns is required when the front door is enabled — "+
 			"it is this instance's TOTAL production-connection budget and has no default. "+

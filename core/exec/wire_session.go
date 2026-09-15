@@ -136,7 +136,7 @@ const (
 // ChargeClass says who a denial is ABOUT, which decides whether it counts
 // against the credential throttle.
 //
-// The distinction is the whole of ADR 0180. A front door that counts "we are
+// The distinction is the whole of the charge-class policy. A front door that counts "we are
 // full" as "you guessed wrong" bans the developer it just refused for
 // capacity — which is exactly what happened on 2026-09-15, when a pool that
 // granted four leases filed the fifth connection as a failed login and the
@@ -174,7 +174,7 @@ func (c ChargeClass) String() string {
 }
 
 // denialCharge is the registry: every post-verification denial reason, with
-// the class ADR 0180 §3.2 ruled for it.
+// the class the policy ruled for it (see docs/front-door/connection-holding-policy.md).
 //
 // A MAP RATHER THAN A SWITCH WITH A DEFAULT, deliberately. The old switch
 // charged anything it had not been taught about, so eight reasons were
@@ -188,12 +188,12 @@ var denialCharge = map[string]ChargeClass{
 	DenyIPNotAdmitted: ChargeCredential,
 	DenyPATIPNarrowed: ChargeCredential,
 
-	// Capacity — we ran out. Ruled uncharged by ADR 0180 D2.
+	// Capacity — we ran out. Ruled uncharged: see docs/front-door/connection-holding-policy.md.
 	DenyLeaseCap:       ChargeCapacity,
 	DenySessionCap:     ChargeCapacity,
 	DenyResidentBudget: ChargeCapacity,
 
-	// None — our config, our stored state, our bug. Ruled uncharged by D3/D4.
+	// None — our config, our stored state, our bug. Ruled uncharged: see docs/front-door/connection-holding-policy.md.
 	// The last three each follow a VERIFIED PAT bound to the exact connection:
 	// the caller has already proved who they are, and what they met is a fact
 	// about what we stored. Charging them means a developer whose grant was
@@ -204,7 +204,7 @@ var denialCharge = map[string]ChargeClass{
 	DenyNoGrant:        ChargeNone,
 	DenyPATUnscoped:    ChargeNone,
 
-	// Mode-side, and already uncharged before ADR 0180 — the token is valid on
+	// Mode-side, and already uncharged before that ruling — the token is valid on
 	// the listener it was minted for.
 	DenyPATNotCleartextDebug:   ChargeNone,
 	DenyPATCleartextDebugInTLS: ChargeNone,
@@ -217,7 +217,7 @@ var denialCharge = map[string]ChargeClass{
 	// refusal is a different identity and stays Protocol; this constant only
 	// ever names the post-verification outcome, which is after a verified PAT
 	// and is therefore a configuration mistake rather than credential
-	// grinding (ADR 0180 §3.2).
+	// grinding (see docs/front-door/connection-holding-policy.md).
 	DenyStartupGUC: ChargeNone,
 }
 

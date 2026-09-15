@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func fdCfg(mut func(*Config)) Config {
@@ -14,7 +15,7 @@ func fdCfg(mut func(*Config)) Config {
 	c.FrontDoor.TLSHostNames = []string{"autodb.example.com"}
 	c.Exec.PoolMaxConns = 10
 	c.FrontDoor.ReservedHeadroom = 4
-	// ADR 0181 D3: the budget has no default and is REQUIRED when the front
+	// the budget has no default and is REQUIRED when the front
 	// door is enabled, so every front-door fixture must choose one — the same
 	// decision the operator is now forced to make.
 	c.Exec.MaxTargetConns = 25
@@ -164,7 +165,7 @@ func TestFrontDoor_EffectiveMaxLeases(t *testing.T) {
 	}
 }
 
-// ADR 0181 D3: no default, and required under the front door.
+// no default, and required under the front door.
 //
 // A default would have autodb claim a number nobody chose against a
 // production database whose max_connections it cannot see. Refusing to start
@@ -187,5 +188,47 @@ func TestFrontDoor_TargetBudgetIsRequiredAndHasNoDefault(t *testing.T) {
 	d.Exec.MaxTargetConns = 0
 	if err := d.validate(); err != nil {
 		t.Errorf("a disabled front door must not require the budget: %v", err)
+	}
+}
+
+// A budget of 1 leaves nothing for ordinary work once the control lane is
+// reserved.
+func TestFrontDoor_TargetBudgetOfOneIsRefused(t *testing.T) {
+	t.Parallel()
+
+	if err := fdCfg(func(c *Config) { c.Exec.MaxTargetConns = 1 }).validate(); err == nil {
+		t.Error("a budget of 1 must be refused: the reserved cancel lane would consume it")
+	}
+	if err := fdCfg(func(c *Config) { c.Exec.MaxTargetConns = 2 }).validate(); err != nil {
+		t.Errorf("a budget of 2 is the viable minimum, got: %v", err)
+	}
+}
+
+// An idle session must not outlive the pool's own idle reaping.
+func TestFrontDoor_SessionIdleMustNotExceedPoolIdle(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		session, pool Duration
+		wantErr       bool
+	}{
+		{"below", Duration(5 * time.Minute), Duration(10 * time.Minute), false},
+		{"equal", Duration(10 * time.Minute), Duration(10 * time.Minute), false},
+		{"above", Duration(11 * time.Minute), Duration(10 * time.Minute), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := fdCfg(func(c *Config) {
+				c.Exec.SessionIdleTimeout = tc.session
+				c.Exec.PoolMaxConnIdleTime = tc.pool
+			})
+			err := c.validate()
+			if tc.wantErr && err == nil {
+				t.Error("a session bound above the pool's idle reaping must be refused")
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("unexpected refusal: %v", err)
+			}
+		})
 	}
 }

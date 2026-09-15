@@ -141,7 +141,7 @@ tls_host_names = ["autodb.example.com"]
 func TestSizing_ProvenanceCases(t *testing.T) {
 	t.Parallel()
 
-	// max_target_conns is required under an enabled front door (ADR 0181 D3).
+	// max_target_conns is required under an enabled front door (the no-default rule).
 	// It lives here rather than in each case so a test that must leave
 	// pool_max_conns at its default still can: this sets the BUDGET only.
 	const execBlock = "[exec]\nmax_target_conns = 25\n\n"
@@ -170,7 +170,7 @@ tls_host_names = ["autodb.example.com"]
 		// today, with the same headroom of 4 — a fix that changed what the
 		// installer produces would be a migration, not a fix.
 		//
-		// max_target_conns joined the installer's output when ADR 0181 made
+		// max_target_conns joined the installer's output when the connection-budget policy made
 		// the budget required with no default; a fresh install that did not
 		// emit it would refuse to start.
 		c := mustLoad(t, "[exec]\npool_max_conns = 8\nmax_target_conns = 50\n\n[frontdoor]"+fdBlock)
