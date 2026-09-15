@@ -45,7 +45,7 @@ const (
 const (
 	DefaultMaxSessionsPerUser = 8
 	DefaultMaxSessionsGlobal  = 256
-	DefaultSessionIdleTimeout = 30 * time.Minute
+	DefaultSessionIdleTimeout = 10 * time.Minute
 
 	// Target-pool defaults, mirroring core/config so an
 	// engine built without options is bounded exactly as a defaulted daemon
@@ -54,10 +54,10 @@ const (
 	DefaultPoolMaxConnIdleTime = 10 * time.Minute
 	DefaultPoolMaxConnLifetime = 60 * time.Minute
 	// Transaction bounds, mirroring the config package's.
-	DefaultIdleInTxTimeout      = 90 * time.Second
-	DefaultMaxTxDuration        = 5 * time.Minute
-	DefaultDebugIdleInTxTimeout = 10 * time.Minute
-	DefaultMaxTxDurationCeiling = 30 * time.Minute
+	DefaultIdleInTxTimeout      = 2 * time.Hour
+	DefaultMaxTxDuration        = 8 * time.Hour
+	DefaultDebugIdleInTxTimeout = 2 * time.Hour
+	DefaultMaxTxDurationCeiling = 8 * time.Hour
 )
 
 // DefaultMaxStatementBytes is the default execution size cap, matching

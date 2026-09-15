@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestPermitLedgerBoundsOutstandingSockets(t *testing.T) {
@@ -214,5 +215,50 @@ func TestPermitDialerDoesNotDialWhenTheBudgetIsSpent(t *testing.T) {
 	}
 	if dialed != 1 {
 		t.Errorf("dialed %d times, want 1 — the refusal must happen BEFORE the dial", dialed)
+	}
+}
+
+// The three copies of the transaction bounds must agree.
+//
+// They live in core/config, in this package's mirror, and in defaultTxLimits.
+// engine.go builds every Engine from the last one, so a change to the first
+// two alone is a NO-OP that the rest of the suite would report as green --
+// which is exactly why this asserts the identity rather than the values.
+func TestDefaultTxLimitsMatchTheDeclaredConstants(t *testing.T) {
+	l := defaultTxLimits()
+	if l.idleInTx != DefaultIdleInTxTimeout {
+		t.Errorf("defaultTxLimits idleInTx = %v, constant = %v — the copies have drifted",
+			l.idleInTx, DefaultIdleInTxTimeout)
+	}
+	if l.maxTx != DefaultMaxTxDuration {
+		t.Errorf("defaultTxLimits maxTx = %v, constant = %v — the copies have drifted",
+			l.maxTx, DefaultMaxTxDuration)
+	}
+}
+
+// The deprecated debug flag may lengthen the idle bound, never shorten it.
+func TestDebugProfileCannotShortenTheIdleBound(t *testing.T) {
+	base := txLimits{idleInTx: 2 * time.Hour, maxTx: 8 * time.Hour}
+
+	shorter := base.forConnection(true, 10*time.Minute, 8*time.Hour)
+	if shorter.idleInTx != 2*time.Hour {
+		t.Errorf("a debug connection got %v, want the base 2h — the flag must never "+
+			"hand a debugging session LESS tolerance than an ordinary one", shorter.idleInTx)
+	}
+
+	longer := base.forConnection(true, 4*time.Hour, 8*time.Hour)
+	if longer.idleInTx != 4*time.Hour {
+		t.Errorf("a longer debug bound was not applied: got %v, want 4h", longer.idleInTx)
+	}
+}
+
+// The ceiling must not silently clip the ruled maximum.
+func TestTheCeilingDoesNotClipTheRuledMaximum(t *testing.T) {
+	l := txLimits{idleInTx: DefaultIdleInTxTimeout, maxTx: DefaultMaxTxDuration}
+	got := l.forConnection(false, 0, DefaultMaxTxDurationCeiling)
+	if got.maxTx != DefaultMaxTxDuration {
+		t.Errorf("effective maxTx = %v, want %v — the ceiling clipped the ruled policy, "+
+			"which is the defect where a displayed 8h becomes a 30m runtime",
+			got.maxTx, DefaultMaxTxDuration)
 	}
 }
