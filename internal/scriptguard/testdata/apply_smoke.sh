@@ -67,6 +67,27 @@ chmod +x /usr/local/bin/systemctl
 
 fail() { echo "SMOKE FAIL: $*" >&2; exit 1; }
 
+# THE BUDGET REFUSAL MUST FIRE BEFORE ANYTHING IS TOUCHED.
+#
+# Runs as root here, which is the only place --apply reaches the config block
+# at all -- outside a container it refuses for lack of root first, so a test
+# there would pass without exercising this.
+echo "--- install_frontdoor.sh --apply, budget omitted"
+mkdir -p /etc/autodb
+printf '[exec]\nmax_target_conns = 7\n' > /etc/autodb/config.toml
+cp -p /etc/autodb/config.toml /tmp/config.before
+sh /opt/install_frontdoor.sh --apply --non-interactive \
+   --assume-ram 961 --assume-cpus 1 \
+   --rpc-port 7419 --dns-name db.example.com --port 5432 \
+   > /tmp/omit.log 2>&1 && { cat /tmp/omit.log; fail "omitting max_target_conns was accepted"; }
+grep -q "max_target_conns" /tmp/omit.log \
+  || { cat /tmp/omit.log; fail "the run refused for some other reason, so this proves nothing"; }
+cmp -s /etc/autodb/config.toml /tmp/config.before \
+  || fail "a refused run rewrote the existing config"
+[ -e /etc/autodb/config.toml.bak ] \
+  && fail "a refused run wrote a .bak -- refusing must happen BEFORE anything is touched"
+rm -f /etc/autodb/config.toml
+
 echo "--- install_frontdoor.sh --apply"
 # --max-target-conns is REQUIRED for --apply: exec.max_target_conns has no
 # default, and a non-interactive run that omits it is refused before anything
