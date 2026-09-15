@@ -288,17 +288,71 @@ func TestTheControlLaneSurvivesOrdinarySaturation(t *testing.T) {
 		t.Fatal("ordinary dials must stop one short of the budget")
 	}
 
-	rel, err := l.AcquireControl()
+	rel, err := l.AcquireControl(context.Background())
 	if err != nil {
 		t.Fatalf("the control lane must be available at ordinary saturation: %v", err)
 	}
 	// Serialized: one at a time is enough for connect-write-close, and more
 	// would be a second budget nobody configured.
-	if _, err := l.AcquireControl(); !errors.Is(err, ErrTargetBudgetExhausted) {
-		t.Fatal("the control lane must admit one holder at a time")
+	// A second cancel WAITS for the lane rather than being lost: the caller has
+	// already given up on their query and has no way to learn the cancel never
+	// went.
+	waiting, cancelWait := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelWait()
+	if _, err := l.AcquireControl(waiting); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a second cancel must WAIT on its own context, got %v", err)
 	}
 	rel()
-	if _, err := l.AcquireControl(); err != nil {
+	if _, err := l.AcquireControl(context.Background()); err != nil {
 		t.Fatalf("the lane must be reusable once released: %v", err)
+	}
+}
+
+// The reserved lane is only reachable through the marker, and the marker is
+// only settable inside this package.
+func TestOnlyAMarkedDialTakesTheControlLane(t *testing.T) {
+	l := newPermitLedger(2) // 1 ordinary + 1 reserved
+	dial := permitDialer(l, func(context.Context, string, string) (net.Conn, error) {
+		_, client := net.Pipe()
+		return client, nil
+	})
+
+	// Saturate the ordinary allowance.
+	if _, err := dial(context.Background(), "tcp", "a"); err != nil {
+		t.Fatal(err)
+	}
+	// An UNMARKED dial cannot help itself to the reserved slot.
+	if _, err := dial(context.Background(), "tcp", "b"); !errors.Is(err, ErrTargetBudgetExhausted) {
+		t.Fatal("an ordinary dial must never consume the reserved lane")
+	}
+	// A MARKED dial gets it — this is a cancellation at saturation, which is
+	// the only moment cancellation matters.
+	if _, err := dial(withControlDial(context.Background()), "tcp", "cancel"); err != nil {
+		t.Fatalf("a cancellation at full budget must still be delivered: %v", err)
+	}
+}
+
+// The core/exec mirror of the policy defaults, pinned to literals.
+//
+// core/config carries the same numbers and pins them independently. Both are
+// literal on purpose: comparing one copy to the other passes when BOTH are
+// wrong, which is the failure mode a mirror invites.
+func TestExecPolicyMirrorIsTheRuledValues(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  time.Duration
+		want time.Duration
+	}{
+		{"session idle", DefaultSessionIdleTimeout, 10 * time.Minute},
+		{"idle in transaction", DefaultIdleInTxTimeout, 2 * time.Hour},
+		{"max transaction duration", DefaultMaxTxDuration, 8 * time.Hour},
+		{"max transaction ceiling", DefaultMaxTxDurationCeiling, 8 * time.Hour},
+		{"deprecated debug idle", DefaultDebugIdleInTxTimeout, 2 * time.Hour},
+		{"pool idle", DefaultPoolMaxConnIdleTime, 10 * time.Minute},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %v, want %v — the core/exec mirror has drifted from the ruled policy",
+				tc.name, tc.got, tc.want)
+		}
 	}
 }

@@ -754,17 +754,28 @@ compute_sizing() {
   POOL_MAX_CONNS=$(( 2 * NCPU ))
   [ "$POOL_MAX_CONNS" -lt 8 ] && POOL_MAX_CONNS=8
 
-  # exec.max_target_conns has no default and is required under the front door
-  # (ADR 0181 D3), so the installer must emit a value or a fresh install will
-  # not start. Half of PostgreSQL's own default max_connections of 100 is the
-  # ADR's guidance, and 50 is what that yields.
+  # exec.max_target_conns has NO DEFAULT on purpose, and the installer does not
+  # invent one. It is the share of a production database this instance may
+  # claim, and autodb cannot see that server's max_connections -- so a number
+  # chosen here would be a guess wearing the authority of a default, which is
+  # the exact failure the no-default rule exists to prevent.
   #
-  # IT IS A STARTING POINT, NOT A MEASUREMENT. autodb cannot see the target
-  # server's max_connections, and an operator running several instances
-  # against one server must divide this themselves. --max-target-conns
-  # overrides it.
-  MAX_TARGET_CONNS=50
-  [ -n "$MAX_TARGET_CONNS_OVERRIDE" ] && MAX_TARGET_CONNS="$MAX_TARGET_CONNS_OVERRIDE"
+  # Interactively we ASK, with guidance and no pre-filled number.
+  # Non-interactively --max-target-conns is required. If neither supplies a
+  # value the key is NOT WRITTEN, and the daemon refuses to start with a
+  # message naming it -- a better outcome than starting against a budget
+  # nobody chose.
+  MAX_TARGET_CONNS="$MAX_TARGET_CONNS_OVERRIDE"
+  ask_required MAX_TARGET_CONNS "Total connections this instance may hold to target databases (no default; at most half the server's max_connections)"
+  if [ -z "$MAX_TARGET_CONNS" ]; then
+    warn "exec.max_target_conns was not supplied, so it is not written to the config."
+    warn "The daemon will refuse to start until you set it. Re-run with --max-target-conns <n>,"
+    warn "or add it to [exec] yourself. It has no default by design: autodb cannot see the"
+    warn "target server's max_connections and will not guess a share of it."
+    MAX_TARGET_CONNS_LINE="# max_target_conns = <REQUIRED: set this, there is no default>"
+  else
+    MAX_TARGET_CONNS_LINE="max_target_conns = $MAX_TARGET_CONNS"
+  fi
 
   GOMEMLIMIT_MIB=$(( MEM_MIB * 75 / 100 ))
   MEMORYMAX_MIB=$(( MEM_MIB * 90 / 100 ))
@@ -906,7 +917,7 @@ pool_max_conns = $POOL_MAX_CONNS
 # Distinct from pool_max_conns above, which is a technical ceiling on ONE
 # target pool. This bounds the aggregate, so two targets may each be allowed
 # more than this and the runtime permit ledger keeps the total true.
-max_target_conns = $MAX_TARGET_CONNS
+$MAX_TARGET_CONNS_LINE
 
 # Sized for this host. The general lane's floor is this number x ${WATERMARK_MIB} MiB, so
 # these two move TOGETHER -- raising the cap without raising the lane fails
