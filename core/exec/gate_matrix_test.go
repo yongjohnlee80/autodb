@@ -128,6 +128,13 @@ var gateMatrixWalkExempt = map[string]string{
 	// surface rather than by anything a statement passes through.
 	"ErrInvalidBudget": "live target-budget update refused; an operator-surface validation " +
 		"error, not a gate refusal — no statement path can raise it",
+	// A request's backend connection could not be opened. Raised where a
+	// backend is acquired, BEFORE any statement is judged, so no admission
+	// stage can produce it — the same reason the budget sentinel above is
+	// exempt. Its client contract is specified and verified separately, in
+	// docs/front-door/dial-failed-client-verification.md.
+	"ErrDialFailed": "a request's backend connection could not be opened; raised at backend " +
+		"acquisition before any statement is judged, not by an admission stage — the gate never sees it",
 }
 
 // sentinelDecl is one errors.New declaration found in the package.
