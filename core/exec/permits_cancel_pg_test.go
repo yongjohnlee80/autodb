@@ -201,6 +201,31 @@ func saturate(t *testing.T, pool *pgxpool.Pool, l *permitLedger) []*pgxpool.Conn
 	return held
 }
 
+// occupy runs a long statement on one held connection and guarantees the
+// goroutine is finished before the test's connections are released.
+//
+// A bare `go func() { conn.Exec(...) }()` races: awaitTerminated proves the
+// SERVER stopped that backend, which says nothing about whether the client
+// goroutine has finished unwinding pgx's connection state. saturate's cleanup
+// then calls Release on a connection that goroutine is still writing to, and
+// -race reports it. Cleanups run last-registered-first, so registering the
+// wait here — always after saturate — drains the goroutine before the release.
+func occupy(t *testing.T, conn *pgxpool.Conn, ctx context.Context) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = conn.Exec(ctx, "SELECT pg_sleep(30)")
+	}()
+	t.Cleanup(func() {
+		select {
+		case <-done:
+		case <-time.After(20 * time.Second):
+			t.Error("the occupying statement never returned; its connection cannot be released safely")
+		}
+	})
+}
+
 // A cancellation must reach PostgreSQL when every ordinary slot is spent --
 // which is exactly when a developer reaches for it, because the system is
 // busy. Before the reserved lane existed, the cancel dial was charged to the
@@ -360,7 +385,7 @@ func TestLivePG_ControlAccountingIsExactWhileTheLaneIsOccupied(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _, _ = held[0].Exec(ctx, "SELECT pg_sleep(30)") }()
+	occupy(t, held[0], ctx)
 	awaitRunning(t, obs, pid, 10*time.Second)
 
 	barrier.armFor(true)
@@ -402,7 +427,7 @@ func TestLivePG_DrainAccountingHoldsAcrossCancelOccupancy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _, _ = held[0].Exec(ctx, "SELECT pg_sleep(30)") }()
+	occupy(t, held[0], ctx)
 	awaitRunning(t, obs, pid, 10*time.Second)
 
 	barrier.armFor(true)
@@ -457,7 +482,7 @@ func TestLivePG_OnlyOneControlDialEntersAtATime(t *testing.T) {
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		cancels[i] = cancel
-		go func() { _, _ = held[i].Exec(ctx, "SELECT pg_sleep(30)") }()
+		occupy(t, held[i], ctx)
 		awaitRunning(t, obs, pids[i], 10*time.Second)
 	}
 
