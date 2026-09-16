@@ -79,6 +79,11 @@ type Model struct {
 	cleartextSeen     bool     // the user dismissed the warning for this session
 	explorerFocused   bool     // last applied cursor styling (focused = cyan)
 	resultsFocused    bool
+	// lastPane is the workspace component focus should return to when the menu
+	// bar gives it up. Recorded on every deliberate pane focus, so a command
+	// invoked from the menu hands the keyboard back to where the operator was
+	// rather than to a bar that is about to close.
+	lastPane tui.Component
 	// catalog is every command and menu node, validated once at construction.
 	// Projections re-evaluate state; identity and closures are never rebuilt,
 	// because a command that is a different value each time it is read cannot
@@ -973,8 +978,35 @@ func (m *Model) focusPane(c tui.Component) {
 			c = target
 		}
 	}
+	m.lastPane = c
 	m.ctx.FocusComponent(c)
 	m.refreshStatus()
+}
+
+// restoreWorkspaceFocus puts the keyboard back on the pane the operator was
+// using before they reached for the menu.
+//
+// Called BEFORE a menu command runs, not after. widget.Menu invokes the
+// executor first and closes the cascade afterwards, and it never moves focus
+// itself — so a command that opens a dialog while the Menu still holds focus
+// gets the MENU recorded as that dialog's focus-scope return target, and
+// closing the dialog hands the keyboard to a bar that is by then shut and
+// empty. Restoring first makes the workspace the return target instead.
+//
+// Falls back to the editor: it is the pane an operator is in by default, and
+// leaving focus nowhere is worse than putting it somewhere reasonable.
+func (m *Model) restoreWorkspaceFocus() {
+	if m.ctx == nil {
+		return
+	}
+	target := m.lastPane
+	if target == nil {
+		target = m.editor
+	}
+	if target == nil {
+		return
+	}
+	m.ctx.FocusComponent(target)
 }
 
 // movePane implements DIRECTIONAL pane navigation over the layout
