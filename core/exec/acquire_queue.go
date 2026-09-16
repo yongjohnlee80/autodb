@@ -1,9 +1,7 @@
 package exec
 
 import (
-	"context"
 	"errors"
-	"sync"
 	"time"
 )
 
@@ -63,123 +61,22 @@ var ErrQueueTimeout = errors.New("exec: no connection became available within th
 // request that in fact waited, which is a lie to whoever reads the trail.
 var ErrAllCapacityInTransaction = errors.New("exec: every connection is held by a transaction within its bounds")
 
-// waiter is one request's place in line.
-type waiter struct {
-	connID int64
-	seq    uint64
-	// ready carries the granted permit. Buffered by one so a granting
-	// releaser never blocks on a waiter that has already given up: the send
-	// completes, and the abandoned permit is recovered by the waiter's own
-	// cleanup rather than by the releaser having to care.
-	ready chan *Permit
-}
-
-// acquireQueue orders the waiters for one instance's connection budget.
-type acquireQueue struct {
-	mu   sync.Mutex
-	seq  uint64
-	line []*waiter // ordered oldest-first; the head is next to be served
-
-	// now is the clock, injectable so a cell can drive the wait deterministically
-	// rather than by sleeping.
-	now func() time.Time
-}
-
-func newAcquireQueue() *acquireQueue {
-	return &acquireQueue{now: time.Now}
-}
-
-// Depth reports how many requests are waiting, for the pressure view.
-func (q *acquireQueue) Depth() int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return len(q.line)
-}
-
-// DepthFor reports how many of them are waiting on one connection.
-func (q *acquireQueue) DepthFor(connID int64) int {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	n := 0
-	for _, w := range q.line {
-		if w.connID == connID {
-			n++
-		}
-	}
-	return n
-}
-
-// Wait puts the caller in line and blocks until it is served, gives up, or the
-// wait expires.
+// ErrTargetGone is a request that was waiting for a connection an operator
+// removed while it waited.
 //
-// THE DEADLINE IS THE EARLIER OF THE TWO. A caller with five seconds left does
-// not get ninety; a caller with no deadline gets exactly ninety. Taking the
-// server's wait alone would hold a request long after its caller stopped
-// caring, and taking the caller's alone would let one caller occupy a queue
-// slot indefinitely.
-func (q *acquireQueue) Wait(ctx context.Context, connID int64) (*Permit, error) {
-	w := &waiter{connID: connID, ready: make(chan *Permit, 1)}
+// ANSWERED AT THE MOMENT OF REMOVAL, not by letting the wait expire. The two
+// are not the same answer: a timeout tells the caller the instance was busy and
+// invites a retry that can now never succeed, while this says the thing they
+// asked for no longer exists. Leaving them to time out would also leave the
+// queue able to grant a permit against a connection that is being torn down.
+var ErrTargetGone = errors.New("exec: the connection this request was waiting for was removed")
 
-	q.mu.Lock()
-	q.seq++
-	w.seq = q.seq
-	q.line = append(q.line, w)
-	q.mu.Unlock()
-
-	deadline := q.now().Add(queueWait)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	timer := time.NewTimer(time.Until(deadline))
-	defer timer.Stop()
-
-	select {
-	case p := <-w.ready:
-		return p, nil
-	case <-ctx.Done():
-		q.abandon(w)
-		return nil, context.Cause(ctx)
-	case <-timer.C:
-		q.abandon(w)
-		// THE RACE IS RESOLVED IN THE CALLER'S FAVOUR. A grant that landed in
-		// the same instant the timer fired is a grant: the permit exists and
-		// somebody paid for it, so returning a timeout here would strand a
-		// live permit and tell a served caller it was not served.
-		select {
-		case p := <-w.ready:
-			return p, nil
-		default:
-		}
-		return nil, ErrQueueTimeout
-	}
-}
-
-// abandon removes a waiter from the line.
-func (q *acquireQueue) abandon(w *waiter) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	for i, x := range q.line {
-		if x == w {
-			q.line = append(q.line[:i], q.line[i+1:]...)
-			return
-		}
-	}
-}
-
-// Grant hands a permit to the oldest waiter and reports whether anyone took it.
+// ErrEngineClosing is a request that was still in line when the instance began
+// shutting down.
 //
-// CALLED WHEN A PERMIT IS RELEASED, not on a timer. A queue drained by polling
-// adds latency to every grant and hides the moment capacity actually appeared;
-// handing it over at the release point makes "oldest granted after physical
-// release" literally what the code does.
-func (q *acquireQueue) Grant(p *Permit) bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.line) == 0 {
-		return false
-	}
-	w := q.line[0]
-	q.line = q.line[1:]
-	w.ready <- p
-	return true
-}
+// WITHOUT THIS, SHUTDOWN IS SILENTLY SLOW AND THEN WRONG. A waiter with no
+// deadline of its own would sit for the full ninety seconds after the engine
+// stopped serving, and a release landing in that window would hand it a permit
+// for a pool that is already closed. Waking every waiter at the start of
+// shutdown makes the wait end when serving ends.
+var ErrEngineClosing = errors.New("exec: the instance is shutting down")

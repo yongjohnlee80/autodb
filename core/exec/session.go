@@ -211,6 +211,11 @@ type session struct {
 	// forward, and otherwise the physical connection is closed. Handing it
 	// back unproved is how one developer's settings become another's.
 	pc golibpg.PinnedConn
+	// reg is the registry this session was admitted to, or nil for a session
+	// that never was. It exists so the transaction counter the admission queue
+	// reads can be maintained where transactions actually start and end.
+	reg *sessionRegistry
+
 	// ext is the session's extended-protocol namespace (F2, matrix §4a): its
 	// wire-level prepared statements and portals. Nil until the first extended
 	// frame, and dropped with the session, so the objects cannot outlive the
@@ -243,6 +248,9 @@ func (s *session) clearTxLocked() {
 	// does exactly this — must not be left naming a portal the backend destroyed.
 	if s.ext != nil {
 		s.ext.dropAllPortals()
+	}
+	if s.tx != nil {
+		s.reg.noteTxEnded(s.reservation.LeaseConn)
 	}
 	s.tx = nil
 	s.txPhase = txNone
@@ -277,6 +285,27 @@ type sessionRegistry struct {
 	leases   map[int64]int
 	leaseCap int
 
+	// line is the instance-wide order front-door requests wait in when a cap
+	// they could clear by waiting is reached. Guarded by mu, like every cap it
+	// schedules against -- see scheduler.go for why that is the whole design.
+	line    []*admitWaiter
+	lineSeq uint64
+	// closed is the reason the line stopped accepting waiters, or nil.
+	closed error
+	// now is the clock, injectable so a cell can drive a ninety-second wait
+	// without sleeping through it.
+	now func() time.Time
+	// hookWaiterQueued fires once a request is in line, so a cell can act on
+	// that fact instead of polling for it.
+	hookWaiterQueued func(seq uint64)
+
+	// inTx counts, per target, the sessions holding a wire lease with a
+	// transaction open. Kept as a COUNTER rather than derived by walking the
+	// sessions, because the walk has to take each session's own mutex and this
+	// is read while the registry mutex is held -- deriving it there would nest
+	// the two locks in the one order this package does not otherwise use.
+	inTx map[int64]int
+
 	// resident is the global weighted memory budget.
 	// The session's FIXED OVERHEAD is charged here as the fourth member of
 	// the reservation — its absence is what recreates the gap for memory
@@ -301,6 +330,7 @@ func newSessionRegistry(perUser, global int) *sessionRegistry {
 		perUserCap: perUser,
 		globalCap:  global,
 		leases:     map[int64]int{},
+		inTx:       map[int64]int{},
 	}
 }
 
@@ -357,7 +387,16 @@ type reservation struct {
 func (r *sessionRegistry) admitWithLease(s *session, leaseConn int64, overhead int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.admitLocked(s, leaseConn, overhead)
+}
 
+// admitLocked is admitWithLease's body with the lock already held.
+//
+// SPLIT OUT SO THE QUEUE CAN ADMIT A WAITER INSIDE THE SAME CRITICAL SECTION
+// AS THE RELEASE THAT FREED THE CAPACITY. Everything the four-member rule says
+// still holds: this is one atomic reservation, and the only change is who is
+// holding the lock when it runs.
+func (r *sessionRegistry) admitLocked(s *session, leaseConn int64, overhead int64) error {
 	if r.draining[s.connID] {
 		return fmt.Errorf("%w: connection %d", ErrConnectionDraining, s.connID)
 	}
@@ -407,7 +446,52 @@ func (r *sessionRegistry) admitWithLease(s *session, leaseConn int64, overhead i
 	}
 	r.resident += overhead
 	s.reservation = reservation{LeaseConn: leaseConn, Overhead: overhead}
+	// The session learns its registry here so that the transaction counter
+	// this schedules against can be kept at the two places a transaction
+	// actually begins and ends, rather than re-derived under the wrong lock.
+	s.reg = r
 	return nil
+}
+
+// noteTxOpened and noteTxEnded keep the per-target in-transaction count. Both
+// are called with the SESSION's mutex held and take the registry's, which is
+// the one nesting order this package uses.
+func (r *sessionRegistry) noteTxOpened(leaseConn int64) {
+	if r == nil || leaseConn == 0 {
+		return
+	}
+	r.mu.Lock()
+	r.inTx[leaseConn]++
+	r.mu.Unlock()
+}
+
+func (r *sessionRegistry) noteTxEnded(leaseConn int64) {
+	if r == nil || leaseConn == 0 {
+		return
+	}
+	r.mu.Lock()
+	if n := r.inTx[leaseConn] - 1; n > 0 {
+		r.inTx[leaseConn] = n
+	} else {
+		delete(r.inTx, leaseConn)
+	}
+	r.mu.Unlock()
+}
+
+// allLeasesInTransactionLocked reports whether every lease on this target is
+// held by a transaction that is still inside its bounds. Caller holds r.mu.
+//
+// READ FROM THE SAME SNAPSHOT AS THE CAP THAT JUST REFUSED, which is why it is
+// a counter and why this runs under the lock that made the refusal. Two
+// separately-taken readings could disagree, and the refusal identity they
+// decide -- "nothing is coming, do not wait" -- is exactly the one that must
+// not be issued on a stale view.
+func (r *sessionRegistry) allLeasesInTransactionLocked(leaseConn int64) bool {
+	if leaseConn == 0 || r.leaseCap <= 0 {
+		return false
+	}
+	held := r.leases[leaseConn]
+	return held >= r.leaseCap && r.inTx[leaseConn] >= held
 }
 
 // releaseReservation gives back everything admitWithLease took. Called from
@@ -523,6 +607,12 @@ func (r *sessionRegistry) remove(s *session) {
 		// target's lease cap — a leak that only shows up as a target
 		// mysteriously refusing connections it has capacity for.
 		r.releaseReservation(s)
+		// THE FREED CAPACITY GOES STRAIGHT TO THE LONGEST-WAITING REQUEST THAT
+		// CAN USE IT, INSIDE THIS SAME LOCK. Unlocking first and letting
+		// waiters race for it is the gap that makes a queue decorative: the
+		// slot would be exposed to every newcomer, and the request that waited
+		// longest is the least likely to be running at that instant.
+		r.serveLine()
 	}
 	r.mu.Unlock()
 }
