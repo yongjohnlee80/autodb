@@ -92,6 +92,15 @@ func (o *demandOwner) offer() {
 	}
 }
 
+// close ends the offer without consuming a notice, for the paths that leave the
+// loop rather than coming back round it.
+func (o *demandOwner) close() {
+	if o.live && o.token != 0 {
+		o.dr.RetireReceive(o.id, o.token)
+		o.token = 0
+	}
+}
+
 // retire closes it and returns any notice published inside it.
 func (o *demandOwner) retire() (exec.DemandNotice, bool) {
 	if !o.live {

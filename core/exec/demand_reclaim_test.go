@@ -95,12 +95,17 @@ func TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen(t *testing.T) {
 			s := demandHolder("holder", 1, 7, now.Add(-time.Hour))
 			tc.spoil(s)
 			r := demandRegistry(t, s)
+			before := s.get()
 			if _, ok := r.reserveDemandVictim(7, now); ok {
 				t.Fatalf("a holder was chosen while %s — %s", tc.name, tc.why)
 			}
-			if s.get() != sessOpen {
-				t.Error("a holder that was not chosen was left reserved for teardown, so " +
-					"it now serves nobody and nothing is coming to release its lease")
+			// COMPARED AGAINST WHAT IT WAS, not against open: one of these rows
+			// spoils the session by closing it, and asserting "still open"
+			// there would fail for the very reason the row exists.
+			if s.get() != before {
+				t.Errorf("the failed selection changed the holder's state from %v to %v; a "+
+					"holder left reserved for teardown serves nobody and nothing is "+
+					"coming to release its lease", before, s.get())
 			}
 		})
 	}
@@ -244,17 +249,30 @@ func TestDemandReclaim_AStaleGenerationCannotEndAReplacementSession(t *testing.T
 		t.Fatal("no holder was chosen")
 	}
 
-	// The chosen session ends on its own, and another takes its place.
+	// The chosen session ends on its own, and another takes its place IN THE
+	// SAME REGISTRY — which is the only way this means anything. Building the
+	// replacement in a fresh registry restarts the generation counter, so the
+	// cell would have been comparing two independent sequences and would have
+	// passed for a reason that has nothing to do with the guard.
 	r.remove(victim)
 	replacement := demandHolder("chosen", 2, 7, now)
-	r2 := demandRegistry(t, replacement)
+	r.mu.Lock()
+	r.byID[replacement.id] = replacement
+	replacement.reservation = reservation{LeaseConn: 7}
+	r.genSeq++
+	replacement.gen = r.genSeq
+	r.mu.Unlock()
+
 	if replacement.gen == v.notice.Gen {
-		t.Fatal("a claim taken against one session is valid against its replacement — a slow " +
+		t.Fatal("the replacement reused the generation of the session it replaced — a slow " +
 			"wake would end a session that was never selected")
 	}
-	e := &Engine{sessions: r2}
+	e := &Engine{sessions: r}
 	if e.FinishDemandReclaim(context.Background(), "chosen", v.notice.Gen, true) {
-		t.Error("a stale claim ended a replacement session")
+		t.Error("a notice about one session ended the session that replaced it")
+	}
+	if replacement.get() != sessOpen {
+		t.Error("the replacement session was torn down by a notice that was never about it")
 	}
 }
 

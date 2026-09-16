@@ -77,6 +77,11 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 	// waiting; the engine posts and knocks, and every byte the client sees is
 	// still written by this loop. See frontdoor/demand_wake.go.
 	owner := l.armDemandWake(sess, conn)
+	// CLOSED ON EVERY WAY OUT. An offer left open after this loop has gone
+	// invites the scheduler to reserve a session nobody is listening for, and
+	// knock into a connection that has no reader -- so the reservation would be
+	// inert and its lease held forever.
+	defer owner.close()
 
 	for {
 		// WHICH BUDGET IS OWED IS A QUESTION ABOUT THE STREAM, and the reader is
@@ -131,6 +136,16 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// it read, so pgproto3 still receives every byte — a reader that
 		// consumed them would split the stream, which is the failure the old
 		// peek-beside-the-Backend design caused.
+		// THE OFFER OPENS BEFORE THE WAIT, NOT AFTER IT.
+		//
+		// This is where a session actually sits when nobody is typing:
+		// waitHeader blocks until the client sends something. Opening the offer
+		// after it meant an idle session never published one at all, so the
+		// scheduler could never select it -- the feature would have been dead
+		// for exactly the population it exists to reclaim, and silently,
+		// because every part of it in isolation worked. Only driving the real
+		// loop showed it.
+		owner.offer()
 		fr.waitHeader()
 		preHeader, hadPre := fr.peekHeader()
 
@@ -179,7 +194,6 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// The offer opens here and is retired the instant the read returns, so
 		// the engine can only reserve this session while it is genuinely
 		// blocked and able to be told. See frontdoor/demand_wake.go.
-		owner.offer()
 		msg, err := be.Receive()
 		if n, woken := owner.retire(); woken {
 			// BEFORE EITHER msg OR err IS LOOKED AT. A frame that arrived in
