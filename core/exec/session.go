@@ -211,6 +211,12 @@ type session struct {
 	// forward, and otherwise the physical connection is closed. Handing it
 	// back unproved is how one developer's settings become another's.
 	pc golibpg.PinnedConn
+	// terminal is the single-use right to end this session, and wake reaches
+	// the one goroutine allowed to write to its client. Demand reclamation
+	// claims the first and calls the second; it never touches the wire itself.
+	terminal terminalClaim
+	wake     func(demandNotice)
+
 	// reg is the registry this session was admitted to, or nil for a session
 	// that never was. It exists so the transaction counter the admission queue
 	// reads can be maintained where transactions actually start and end.
@@ -291,6 +297,9 @@ type sessionRegistry struct {
 	// schedules against -- see scheduler.go for why that is the whole design.
 	line    []*admitWaiter
 	lineSeq uint64
+	// genSeq stamps each admitted session with a generation that is never
+	// reused. See terminalClaim.
+	genSeq uint64
 	// closed is the reason the line stopped accepting waiters, or nil.
 	closed error
 	// now is the clock, injectable so a cell can drive a ninety-second wait
@@ -302,6 +311,10 @@ type sessionRegistry struct {
 	// hookGivingUp fires after a caller has stopped waiting and before it
 	// leaves the line -- the window in which a grant can still reach it.
 	hookGivingUp func()
+	// onDemand asks an idle holder on a target to give up its lease, returning
+	// whether one was asked. Installed by the engine, which is the only thing
+	// that can reach a session's owner.
+	onDemand func(leaseConn int64) bool
 	// hookWaiterQueued fires once a request is in line, so a cell can act on
 	// that fact instead of polling for it.
 	hookWaiterQueued func(seq uint64)
@@ -464,6 +477,11 @@ func (r *sessionRegistry) admitLocked(s *session, leaseConn int64, overhead int6
 	}
 	r.resident += overhead
 	s.reservation = reservation{LeaseConn: leaseConn, Overhead: overhead}
+	// The generation is stamped at admission and never reused, so a terminal
+	// claim taken against this session cannot be honoured against whichever
+	// session next occupies its place.
+	r.genSeq++
+	s.terminal.gen.Store(r.genSeq)
 	// The session learns its registry here so that the transaction counter
 	// this schedules against can be kept at the two places a transaction
 	// actually begins and ends, rather than re-derived under the wrong lock.
