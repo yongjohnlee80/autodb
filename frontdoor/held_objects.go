@@ -233,6 +233,10 @@ type heldObjectRow struct {
 	condition heldCondition
 	// identity is the audit identity and the DETAIL rule id.
 	identity string
+	// kind is what this outcome IS, and it is carried per row rather than
+	// assumed for the table. Empty means Refusal, which is what every row here
+	// was before one of them stopped being one -- see heldObjectDecls.
+	kind     outcome.Kind
 	sqlState string
 	severity string
 	// message is the SAFE LITERAL: fixed text, naming nothing internal and
@@ -289,8 +293,11 @@ func heldObjectRegister() []heldObjectRow {
 		{
 			condition: condDemandReclaimed,
 			identity:  OutcomeDemandReclaimed,
-			sqlState:  sqlStateAdminShutdown,
-			severity:  "FATAL",
+			// Control, not Refusal: this side decided to end a session, rather
+			// than declining something a client asked for.
+			kind:     outcome.Control,
+			sqlState: sqlStateAdminShutdown,
+			severity: "FATAL",
 			message: "this session's server connection was reclaimed while the session was " +
 				"idle, so that a connection request that was waiting for one could be served",
 			hint: "reconnect; a session that is left idle may have its server connection " +
@@ -551,9 +558,23 @@ func heldObjectDecls() []outcome.Decl {
 	rows := heldObjectRegister()
 	out := make([]outcome.Decl, 0, len(rows))
 	for _, row := range rows {
+		// THE KIND COMES FROM THE ROW, NOT FROM THE TABLE IT IS IN.
+		//
+		// It used to be Refusal for everything here, which was true while every
+		// row was one: a client asked for something and was told no. Demand
+		// reclamation is not that. Nobody asked for anything and nobody was
+		// refused -- a session that was working perfectly well was ENDED, so
+		// the connection it held idle could serve somebody who had been
+		// waiting. Filing that as a refusal would put it beside "we would not
+		// do that for you", and an operator counting refusals would be counting
+		// sessions we chose to end.
+		kind := row.kind
+		if kind == outcome.KindUnset {
+			kind = outcome.Refusal
+		}
 		out = append(out, outcome.Decl{
 			ID:     outcome.ReasonID(row.identity),
-			Kind:   outcome.Refusal,
+			Kind:   kind,
 			Charge: outcome.NotApplicable,
 		})
 	}
