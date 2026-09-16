@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	tuicore "github.com/yongjohnlee80/golib/tui"
@@ -356,5 +357,58 @@ func TestForm_QIsTypedNotDismissed(t *testing.T) {
 	h.on(func() { open = h.m.modalOpen() })
 	if !open {
 		t.Fatal("`q` closed a FORM; it is a character there, and the exclusion is permanent")
+	}
+}
+
+// DISMISSAL PROVENANCE: the reason names WHICH ANSWER ended the dialog.
+//
+// It used to be hard-coded to Accept for every button, so a declining answer
+// reported acceptance — and Escape and `q` did too, because both resolve through
+// the Cancel-role button whose callback dismissed first, leaving golib's own
+// DismissCancel a no-op on an already-closed dialog. Anything listening for
+// provenance was told every exit was a yes.
+//
+// A table, because the affirmative case passing tells you nothing about the
+// three that were wrong.
+func TestDialog_DismissalReasonFollowsTheAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		what string
+		act  func(h *barHarness)
+		want widget.DismissReason
+	}{
+		{"the affirmative", func(h *barHarness) { h.key('y') }, widget.DismissAccept},
+		{"the declining answer", func(h *barHarness) { h.key('n') }, widget.DismissCancel},
+		{"Escape", func(h *barHarness) { h.key(tuicore.KeyEscape) }, widget.DismissCancel},
+		{"the dismiss key", func(h *barHarness) { h.key('q') }, widget.DismissCancel},
+	} {
+		t.Run(tc.what, func(t *testing.T) {
+			h := startBar(t, meta.RoleAdmin)
+			var got []widget.DismissReason
+			var mu sync.Mutex
+			h.on(func() {
+				tuicore.Subscribe(h.app.Bus(), func(ev widget.OverlayDismissedEvent) {
+					mu.Lock()
+					got = append(got, ev.Reason)
+					mu.Unlock()
+				})
+				h.m.openDialog("proceed?", "",
+					affirm('y', "Yes", func() {}),
+					decline('n', "No"))
+			})
+			h.waitUntil("the dialog is open", func() bool { return h.m.modalOpen() })
+
+			tc.act(h)
+			h.waitUntil("the dialog closed", func() bool { return !h.m.modalOpen() })
+			h.settle()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(got) != 1 {
+				t.Fatalf("published %d dismissals, want exactly 1: %v", len(got), got)
+			}
+			if got[0] != tc.want {
+				t.Errorf("%s reported %v, want %v", tc.what, got[0], tc.want)
+			}
+		})
 	}
 }
