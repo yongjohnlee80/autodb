@@ -318,19 +318,47 @@ func keysetOf(pref string) widget.Keyset {
 // status line says so rather than leaving a silent difference between what is
 // on screen and what will come back after a restart.
 func (m *Model) chooseEditorKeyset(pref string) {
+	// A CHOICE IS THE LATEST INTENT, and bumping here is what lets an in-flight
+	// sign-in read know it has been overtaken.
+	m.prefGen++
 	m.editor.SetKeyset(keysetOf(pref))
 	m.refreshStatus()
+	m.writeEditorKeyset(pref, m.prefGen)
+}
 
+// writeEditorKeyset persists one choice, ONE AT A TIME.
+//
+// Two writes in flight can be persisted in either order, and the store has no
+// opinion about which the operator made last — so the second choice can lose to
+// the first and the preference that comes back after a restart is the one they
+// changed their mind about. Only one write is outstanding; a choice made while
+// it is out replaces any other waiting one, because the operator's latest
+// answer is the only one worth writing.
+func (m *Model) writeEditorKeyset(pref string, gen uint64) {
+	if m.prefWriting {
+		m.prefPending, m.prefHasPending = pref, true
+		return
+	}
+	m.prefWriting = true
 	bound := m.session.Bind()
 	m.ctx.Go(func(ctx context.Context) (any, error) {
 		err := bound.SetOption(ctx, auth.OptionEditorKeyset, pref)
 		return managerReload{gen: bound.Gen(), apply: func() {
-			if err != nil {
+			m.prefWriting = false
+			// Reported only if this is still the operator's answer. A failure
+			// to save a choice they have already replaced is noise about a
+			// decision they have moved on from.
+			if err != nil && gen == m.prefGen {
 				m.setStatus("editor set to " + pref +
 					" for this session only — saving it failed: " + WireErrorMessage(err))
-				return
+			} else if err == nil && gen == m.prefGen {
+				m.setStatus("editor mode: " + pref)
 			}
-			m.setStatus("editor mode: " + pref)
+			if m.prefHasPending {
+				next := m.prefPending
+				m.prefHasPending, m.prefPending = false, ""
+				m.writeEditorKeyset(next, m.prefGen)
+			}
 		}}, nil
 	})
 }
@@ -338,17 +366,27 @@ func (m *Model) chooseEditorKeyset(pref string) {
 // applyStoredEditorKeyset reads the account's preference after a sign-in and
 // applies it.
 //
-// A MISSING PREFERENCE IS NOT AN ERROR and not a reason to say anything: an
-// account that has never chosen keeps the default, which is what "no preference"
-// means. Only a failed READ is worth a word, and even then the editor stays
-// usable on the default.
+// A MISSING PREFERENCE IS A PREFERENCE FOR THE DEFAULT, and saying so is the
+// fix for a real leak: this used to return early when an account had never
+// chosen, which left the editor on whatever the PREVIOUS account had selected.
+// Sign in as someone who likes TextEdit, sign out, sign in as someone who has
+// never chosen, and they get TextEdit — one person's setting applied to
+// another's session, silently.
+//
+// It also loses to a later choice. The read is issued at sign-in and may land
+// after the operator has picked from the menu, and the menu is the newer
+// intent; the generation captured here is how that is known.
 func (m *Model) applyStoredEditorKeyset() {
 	bound := m.session.Bind()
+	gen := m.prefGen
 	m.ctx.Go(func(ctx context.Context) (any, error) {
 		opts, err := bound.Options(ctx)
 		return managerReload{gen: bound.Gen(), apply: func() {
 			if !m.sameIdentity(bound) {
 				return // signed in as somebody else since; their preference, not this one
+			}
+			if gen != m.prefGen {
+				return // the operator has chosen since this was asked for
 			}
 			if err != nil {
 				m.setStatus("could not read your preferences: " + WireErrorMessage(err))
@@ -356,7 +394,7 @@ func (m *Model) applyStoredEditorKeyset() {
 			}
 			pref, ok := opts[auth.OptionEditorKeyset]
 			if !ok {
-				return
+				pref = auth.KeysetVim
 			}
 			m.editor.SetKeyset(keysetOf(pref))
 			m.refreshStatus()

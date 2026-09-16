@@ -135,10 +135,16 @@ func formHints() []keyHint {
 	// worse than no footer. This fits on one line at the minimum width.
 	//
 	// It no longer promises a submit on the last field, because there is none:
-	// Enter advances, the OK button submits, and a footer that says otherwise
-	// teaches a key that does not work.
+	// the OK button submits, and a footer that says otherwise teaches a key
+	// that does not work.
+	//
+	// IT NO LONGER PROMISES ENTER EITHER. Enter advances from a text field and
+	// OPENS THE OPTIONS on a select, so "Tab/Enter: next" is true of some rows
+	// and false of others — and the rows where it is false are the new ones the
+	// operator has not met before. Tab is the key that always means next, so
+	// Tab is what the footer names.
 	return []keyHint{
-		{"Tab/Enter", "next"},
+		{"Tab", "next"},
 		{"O", "OK"},
 		{"Esc", "cancel"},
 	}
