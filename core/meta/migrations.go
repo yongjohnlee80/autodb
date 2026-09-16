@@ -571,6 +571,28 @@ var migrations = []migration{
 			`UPDATE connections SET frontdoor_exposed = 1 WHERE profile = 'session'`,
 		},
 	},
+	// v17 gives a user somewhere to keep their preferences. The first is the
+	// editor keyset -- Vim or TextEdit -- which the TUI can offer as a menu
+	// only once the answer survives a restart.
+	//
+	// THE TWO ENGINES DIFFER, so this is not a Both. Postgres gets JSONB, which
+	// validates the document on write and can be queried field-wise later;
+	// SQLite has no such type and gets TEXT. One typed accessor reads both, so
+	// the difference stops at this line -- which is the only reason it is
+	// acceptable to have one at all.
+	//
+	// The default is an empty object rather than NULL: every existing row then
+	// answers "what are your preferences" with "none", and no reader needs a
+	// NULL branch that exists only for rows created before today.
+	{
+		Version: 17,
+		SQLite: []string{
+			`ALTER TABLE users ADD COLUMN options TEXT NOT NULL DEFAULT '{}'`,
+		},
+		Postgres: []string{
+			`ALTER TABLE users ADD COLUMN options JSONB NOT NULL DEFAULT '{}'::jsonb`,
+		},
+	},
 }
 
 // partitionVolumeTables is v11's computed step.

@@ -55,6 +55,15 @@ type User struct {
 	Disabled  int64 // 0/1 flag
 	CreatedAt int64 // unix seconds
 	UpdatedAt int64
+	// Options is this user's preferences as a JSON object: JSONB on postgres,
+	// TEXT on sqlite, one string here. It is a DOCUMENT rather than a column
+	// per preference because the set is open — the editor keyset is the first
+	// and will not be the last — and a migration per checkbox is a cost with
+	// no matching benefit.
+	//
+	// Never NULL: v17 defaults it to "{}", so a reader has one shape to handle
+	// rather than two.
+	Options string
 }
 
 type UserField string
@@ -68,6 +77,7 @@ const (
 	UserDisabled  UserField = "disabled"
 	UserCreatedAt UserField = "created_at"
 	UserUpdatedAt UserField = "updated_at"
+	UserOptions   UserField = "options"
 )
 
 func newUsers(conn dao.DataConn) *dao.Schema[*User, UserField, Sort, int64] {
@@ -80,6 +90,7 @@ func newUsers(conn dao.DataConn) *dao.Schema[*User, UserField, Sort, int64] {
 		UserDisabled:  {Column: "disabled", Scan: func(r *User) any { return &r.Disabled }, Value: func(r *User) any { return r.Disabled }},
 		UserCreatedAt: {Column: "created_at", Scan: func(r *User) any { return &r.CreatedAt }, Value: func(r *User) any { return r.CreatedAt }},
 		UserUpdatedAt: {Column: "updated_at", Scan: func(r *User) any { return &r.UpdatedAt }, Value: func(r *User) any { return r.UpdatedAt }},
+		UserOptions:   {Column: "options", Scan: func(r *User) any { return &r.Options }, Value: func(r *User) any { return r.Options }},
 	})
 }
 

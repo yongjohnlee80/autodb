@@ -224,6 +224,10 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 		`ALTER TABLE script_history DROP COLUMN suspended`,
 		// v16 adds connections.frontdoor_exposed — same DROP-list rule.
 		`ALTER TABLE connections DROP COLUMN frontdoor_exposed`,
+		// v17 adds users.options. `users` is a v1 table, so the column
+		// outlives a table DROP and has to be named, exactly like
+		// connections.target_db above.
+		`ALTER TABLE users DROP COLUMN options`,
 		`DELETE FROM schema_migrations WHERE version >= 7`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
@@ -328,6 +332,10 @@ func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
 		`ALTER TABLE script_history DROP COLUMN suspended`,
 		// v16 adds connections.frontdoor_exposed — same DROP-list rule.
 		`ALTER TABLE connections DROP COLUMN frontdoor_exposed`,
+		// v17 adds users.options. `users` is a v1 table, so the column
+		// outlives a table DROP and has to be named, exactly like
+		// connections.target_db above.
+		`ALTER TABLE users DROP COLUMN options`,
 		`DELETE FROM schema_migrations WHERE version >= 8`,
 	} {
 		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
