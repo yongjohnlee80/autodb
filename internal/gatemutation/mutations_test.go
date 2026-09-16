@@ -107,17 +107,63 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 			t.Errorf("control %q names a path outside the repository: %s", m.Name, m.File)
 		}
 	}
-	// THE COUNT IS EXACT, NOT A FLOOR. A floor of ten let thirteen controls
-	// become ten without a word, which is how coverage is lost quietly --
-	// three guarantees would stop being proven and every run would still look
-	// complete. Adding a control means raising this number deliberately;
-	// removing one means saying so out loud, here, in a diff somebody reads.
-	const declared = 13
-	if n := len(All()); n != declared {
-		t.Errorf("there are %d controls and this cell pins %d. If a control was added, raise "+
-			"the number. If one was removed, say which guarantee stopped being proven and "+
-			"why that is acceptable", n, declared)
+	// THE SET IS PINNED BY NAME, NOT BY SIZE.
+	//
+	// A count let one guarantee be deleted and an unrelated control added in
+	// the same change: the number stayed right, the guard stayed green, and a
+	// guarantee stopped being proven with nothing saying so. Membership is the
+	// property worth holding, so the expected names live below and a diff that
+	// changes coverage has to edit them -- which is where a reviewer can see
+	// what was lost.
+	want := expectedControls()
+	got := map[string]bool{}
+	for _, m := range All() {
+		got[m.Name] = true
 	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("control %q is gone. Say which guarantee stopped being proven and why "+
+				"that is acceptable, then remove it from expectedControls", name)
+		}
+	}
+	for name := range got {
+		if !want[name] {
+			t.Errorf("control %q is new and not in expectedControls; add it there in the same "+
+				"change, so coverage moves visibly", name)
+		}
+	}
+}
+
+// expectedControls is the set this suite expects to exist, by name.
+//
+// EDITED DELIBERATELY, IN THE SAME CHANGE AS THE CONTROL IT NAMES. That is the
+// point: coverage cannot move without somebody writing the move down.
+func expectedControls() map[string]bool {
+	names := []string{
+		"serve-line-at-enqueue",
+		"transaction-bound-is-a-deadline",
+		"cancellation-undoes-its-admission",
+		"line-skips-the-ineligible",
+		"timeout-unwraps-alone",
+		"server-wait-uses-its-seam",
+		"the-caller-owns-an-exact-tie",
+		"release-serves-the-line",
+		"expired-wait-names-its-blocker",
+		"the-wait-arm-comes-first",
+		"coordinates-come-from-the-code",
+		"the-matrix-is-current",
+		"identity-excludes-git",
+		"identity-requires-a-digest",
+		"identity-verifies-the-body",
+		"identity-refuses-an-empty-manifest",
+		"identity-keeps-evidence-outside-the-root",
+		"identity-refuses-two-authorities",
+	}
+	out := make(map[string]bool, len(names))
+	for _, n := range names {
+		out[n] = true
+	}
+	return out
 }
 
 // declaredTests maps every Test function name to the packages declaring it.

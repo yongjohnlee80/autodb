@@ -27,21 +27,37 @@ of them happened:
 Checked in, a control that has drifted fails a test *here*, cheaply, instead of
 being mis-run *there* and reported as a verdict.
 
-## What is here and what is not
+## Running them
 
-The **definitions** are here: which file, which exact anchor, what it becomes,
-which cell must fail, and one sentence saying what goes unproven if it survives.
-That last field is the one a reviewer reads when a control comes back green.
+```
+git archive HEAD | tar -x -C /tmp/disposable
+go run ./internal/gatemutation/cmd/mutate -root /tmp/disposable
+```
 
-The **runner** is not. Applying edits belongs to whatever executes the gate, on
-a disposable copy, per the test convention. This package is the contract that
-runner works from.
+`-only <name>` runs one. The runner exits non-zero if **any** control is GREEN
+or INVALID, because both mean a guarantee is not proven — a surviving mutant
+and an unrunnable control are different failures with the same consequence.
+
+It applies exactly one edit at a time, builds **before** running anything so
+nothing is scored on a tree that does not compile, requires the named cell's
+`=== RUN` marker to appear, and restores the file afterwards.
+
+**A control set with no runner is a contract nobody executes.** The definitions
+were checked in so they could not drift from the code; without something that
+consumes them, every run was still improvised from a prompt — which is how a
+control came to name a deleted test, and how another was scored against an
+anchor matching four rows instead of one. On its first real use the runner found
+two more: a replacement that left the tree uncompilable, and an anchor matching
+nothing. It reported both as INVALID rather than GREEN, which is the distinction
+that matters — one says the test is weak, the other says the run told you
+nothing.
 
 ## Reading a verdict
 
 - **RED** — the cell failed. The guarantee is proven.
 - **GREEN** — the cell passed with the code broken. The guarantee is *not*
   proven; read the control's `Guarantee` field for what is exposed.
-- **INVALID** — the tree would not build, the anchor did not match once, or the
-  named cell does not exist. That is a defect in the evidence plan, not a pass,
-  and it is the state these cells exist to prevent.
+- **INVALID** — the tree would not build, the anchor did not match exactly once,
+  the named cell never ran, or it timed out. That is a defect in the evidence
+  plan, not a pass. It is deliberately distinct from GREEN: conflating "this
+  test is weak" with "this run told us nothing" hides which one you have.
