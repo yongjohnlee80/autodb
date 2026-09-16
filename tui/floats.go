@@ -546,13 +546,13 @@ type leaderMenu struct {
 	entries []leaderEntry
 	// prose is shown ABOVE the keys, in the SAME float.
 	//
-	// A confirmation used to be two floats: the text in one, the actionable
-	// menu stacked on top of it. A review found the consequence -- the
-	// operator can press the key that acts while the thing being agreed to
-	// sits behind the modal asking, and cancelling leaves the text floating
-	// with nothing to act on it. For a security decision that is not a layout
-	// preference. One surface: what you are agreeing to and the key that
-	// agrees cannot be separated.
+	// NOTHING WRITES IT ANY MORE. The confirmations that needed prose beside
+	// their keys are dialogs now, and openLeaderWithProse went with them; what
+	// is left is the Space menu and the keyslot action list, neither of which
+	// carries prose. The field and its rendering stay because the leaderMenu
+	// still renders an empty prose correctly and a menu that grows a preamble
+	// is a plausible next request — but if that has not happened by the time
+	// somebody reads this, delete it.
 	prose []string
 	float *widget.Float
 }
@@ -663,17 +663,6 @@ func drawTo(s tui.Surface, x, y int, text string, st style.Style) {
 // (and made two very different prompts indistinguishable).
 func (m *Model) openLeader(title string, entries []leaderEntry) {
 	lm := &leaderMenu{entries: entries}
-	lm.float = m.openFloat(title, lm)
-}
-
-// openLeaderWithProse is a confirmation whose TEXT AND KEYS ARE ONE FLOAT.
-//
-// Use it wherever the decision needs the reader to have seen something
-// specific -- an exact set of addresses, a consequence they did not ask for.
-// Two stacked floats let the key that acts sit on top of the thing being
-// agreed to, which is how somebody confirms what they could not read.
-func (m *Model) openLeaderWithProse(title, prose string, entries []leaderEntry) {
-	lm := &leaderMenu{entries: entries, prose: strings.Split(strings.TrimRight(prose, "\n"), "\n")}
 	lm.float = m.openFloat(title, lm)
 }
 

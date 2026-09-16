@@ -704,20 +704,23 @@ func (m *Model) openLogin() {
 		if m.curNote != nil {
 			name = m.curNote.Name
 		}
-		m.openLeader("unsaved "+name+" — before switching identity", []leaderEntry{
-			{'s', "save it as " + m.notes.Subject() + ", then switch", func() {
+		// NO DEFAULT. Two of the three answers move on and one of those
+		// DISCARDS the note; the third stays put. There is no answer safe
+		// enough to sit under the cursor, so the operator names one.
+		m.openDialogNoDefault("unsaved "+name+" — before switching identity", "",
+			alternative('s', "Save as "+m.notes.Subject()+", then switch", func() {
 				m.saveNote()
 				if !m.noteDirty {
 					m.openLogin()
 				}
-			}},
-			{'d', "discard it and switch", func() {
+			}),
+			alternative('d', "Discard and switch", func() {
 				m.noteDirty = false
 				m.curNote = nil
 				m.openLogin()
-			}},
-			{'c', "cancel — stay signed in as " + m.notes.Subject(), func() {}},
-		})
+			}),
+			decline('c', "Stay as "+m.notes.Subject()),
+		)
 		return
 	}
 	m.authPromptPending = false
@@ -849,16 +852,18 @@ type noteLoaded struct {
 func (m *Model) openNote(wsID int64, name string) {
 	if m.noteDirty && m.curNote != nil {
 		cur := m.curNote.Name
-		m.openLeader("unsaved changes in "+cur, []leaderEntry{
-			{'s', "save " + cur + ", then open", func() {
+		// NO DEFAULT: one answer discards the operator's edits, so none of
+		// the three is safe enough to sit under the cursor.
+		m.openDialogNoDefault("unsaved changes in "+cur, "",
+			alternative('s', "Save "+cur+", then open", func() {
 				m.saveNote()
-				if !m.noteDirty { // a conflict float keeps it dirty; open aborts
+				if !m.noteDirty { // a conflict dialog keeps it dirty; open aborts
 					m.doOpenNote(wsID, name)
 				}
-			}},
-			{'d', "discard changes and open", func() { m.doOpenNote(wsID, name) }},
-			{'c', "cancel (keep editing)", func() {}},
-		})
+			}),
+			alternative('d', "Discard changes and open", func() { m.doOpenNote(wsID, name) }),
+			decline('c', "Keep editing"),
+		)
 		return
 	}
 	m.doOpenNote(wsID, name)
@@ -984,8 +989,11 @@ func (m *Model) saveNoteAs(wsID int64, body string) {
 
 func (m *Model) openConflict(body string) {
 	note := m.curNote
-	m.openLeader(note.Name+" changed on disk", []leaderEntry{
-		{'o', "overwrite the on-disk note", func() {
+	// NO DEFAULT: overwrite destroys whatever changed on disk, and the operator
+	// has not seen it. Nothing here is safe enough to be pre-selected.
+	m.openDialogNoDefault(note.Name+" changed on disk",
+		"Somebody or something else has written this note since you opened it.",
+		alternative('o', "Overwrite the on-disk note", func() {
 			ns, ok := m.requireNotes()
 			if !ok {
 				return
@@ -1002,10 +1010,10 @@ func (m *Model) openConflict(body string) {
 			}
 			m.noteDirty = false
 			m.setStatus("overwrote " + fresh.Name)
-		}},
-		{'s', "save as a new name", func() { m.saveNoteAs(note.WorkspaceID, body) }},
-		{'c', "cancel (keep editing)", func() {}},
-	})
+		}),
+		alternative('s', "Save as a new name", func() { m.saveNoteAs(note.WorkspaceID, body) }),
+		decline('c', "Keep editing"),
+	)
 }
 
 // addConnectionToWorkspace creates a connection AND attaches it to ws in
@@ -1717,14 +1725,19 @@ func (m *Model) leaderEntries() []leaderEntry {
 // confirmation; leaving it unbound lets leaderMenu's dismiss fallback cancel
 // instead, making a double-tap a safe no-op.
 func (m *Model) confirmQuit() {
-	m.openLeader("quit autodb?", []leaderEntry{
-		{'y', "quit", func() {
+	// SCRIMMED, and one of only two surfaces that are. The requirement names
+	// login and exit: there is nothing else to do in the application while this
+	// is up, which is the condition that earns fading the backdrop. Every other
+	// dialog leaves it live, because the operator is usually reading the thing
+	// behind it.
+	m.openDialogScrimmed("quit autodb?", "",
+		affirm('y', "Quit", func() {
 			if m.quit != nil {
 				m.quit()
 			}
-		}},
-		{'n', "stay", func() {}},
-	})
+		}),
+		decline('n', "Stay"),
+	)
 }
 
 func (m *Model) openLeaderMenu() { m.openLeader("SPC — commands", m.leaderEntries()) }

@@ -1,0 +1,187 @@
+package tui
+
+import (
+	"strings"
+
+	"github.com/yongjohnlee80/golib/tui"
+	"github.com/yongjohnlee80/golib/tui/widget"
+)
+
+// Dialogs: a question with answers, as a widget.Modal.
+//
+// THIS IS NOT A CONVERSION OF openLeader, and that distinction is the whole
+// reason this file exists. openLeader is shared by the quit confirmation, the
+// front-door prompts, the note-conflict prompts AND the Space menu itself;
+// converting the helper would drag the leader menu into being a dialog, which
+// it is not. Named surfaces move here one at a time; the helper stays where it
+// is, serving the menu.
+//
+// The panels do not move either. A manager is a LIST the operator works in with
+// a/e/d keys, and a Modal is a card with buttons: forcing one into the other
+// would add a button row nobody presses and take away nothing.
+
+// dialogAnswer is one button on a dialog.
+type dialogAnswer struct {
+	// mnemonic is the key that activates it, and it is the same key the leader
+	// version of this prompt used, so the muscle memory survives the change.
+	mnemonic rune
+	label    string
+	run      func()
+	// role decides Escape and initial focus. Exactly one answer may be
+	// ButtonRoleDefault, and some dialogs deliberately have none — see
+	// openDialogNoDefault.
+	role widget.ButtonRole
+}
+
+// affirm is the answer that does the thing, focused by default.
+func affirm(mnemonic rune, label string, run func()) dialogAnswer {
+	return dialogAnswer{mnemonic: mnemonic, label: label, run: run, role: widget.ButtonRoleDefault}
+}
+
+// decline is the answer that does nothing, resolved by Escape.
+func decline(mnemonic rune, label string) dialogAnswer {
+	return dialogAnswer{mnemonic: mnemonic, label: label, role: widget.ButtonRoleCancel}
+}
+
+// alternative is an answer that is neither: a third way out, such as "save as a
+// new name" on a conflict.
+func alternative(mnemonic rune, label string, run func()) dialogAnswer {
+	return dialogAnswer{mnemonic: mnemonic, label: label, run: run}
+}
+
+// openDialog asks a question. The backdrop stays live.
+func (m *Model) openDialog(title, prose string, answers ...dialogAnswer) *widget.Modal {
+	return m.openDialogOpts(title, prose, false, answers)
+}
+
+// openDialogScrimmed is openDialog for the surfaces the requirement names —
+// quit is the one here, login is a form. The backdrop fades because there is
+// nothing else to do until this is answered.
+func (m *Model) openDialogScrimmed(title, prose string, answers ...dialogAnswer) *widget.Modal {
+	return m.openDialogOpts(title, prose, true, answers)
+}
+
+// openDialogNoDefault asks a question with NO affirmative default, and it is a
+// named exception rather than a convenience.
+//
+// The allowlist-widening consent is built this way on purpose, and its own
+// comment records why: "ONE entry, and it is y. Esc and q close it with nothing
+// done, so the default is NO by construction rather than by a highlighted
+// button somebody can tab onto and press." A review already found that prompt
+// agreeing to something the operator could not see, and the affordance it must
+// not have is a focused, Enter-able yes.
+//
+// It refuses to build one with a default, because the next person to add an
+// answer here would otherwise reintroduce exactly that.
+func (m *Model) openDialogNoDefault(title, prose string, answers ...dialogAnswer) *widget.Modal {
+	for _, a := range answers {
+		if a.role == widget.ButtonRoleDefault {
+			panic("tui: openDialogNoDefault: answer " + string(a.mnemonic) +
+				" is ButtonRoleDefault; this surface exists to not have one")
+		}
+	}
+	return m.openDialogOpts(title, prose, false, answers)
+}
+
+func (m *Model) openDialogOpts(title, prose string, scrim bool, answers []dialogAnswer) *widget.Modal {
+	body := &dialogBody{}
+	if p := strings.TrimRight(prose, "\n"); p != "" {
+		body.prose = strings.Split(p, "\n")
+	}
+
+	var md *widget.Modal
+	buttons := make([]*widget.Button, 0, len(answers))
+	for _, a := range answers {
+		run := a.run
+		opts := []widget.ButtonOption{
+			widget.WithMnemonic(a.mnemonic),
+			widget.WithRole(a.role),
+			// EVERY ANSWER CLOSES THE DIALOG, including the ones that do
+			// something. A Modal dismisses itself for Escape and for nothing
+			// else: a button activation runs its callback and leaves the card
+			// on screen, which is how a confirmation comes to accept a second
+			// press of the same answer.
+			widget.WithOnActivate(func() {
+				if md != nil {
+					md.Dismiss(widget.DismissAccept)
+				}
+				if run != nil {
+					run()
+				}
+			}),
+		}
+		buttons = append(buttons, widget.NewButton(a.label, opts...))
+	}
+
+	// WithScrim at both ends: Modal defaults it to TRUE, the inverse of Float,
+	// so omitting it would fade the backdrop behind every dialog by doing
+	// nothing — the opposite of what this product asked for.
+	md = widget.NewModal(body,
+		widget.WithModalTitle(title),
+		widget.WithButtons(buttons...),
+		widget.WithScrim(scrim))
+	if err := md.Open(m.host); err != nil {
+		m.setError("open " + title + ": " + err.Error())
+		return nil
+	}
+	m.trackOverlay(modalOverlay{m: md}, body, title, nil)
+	return md
+}
+
+// dialogBody is the prose above the buttons. A dialog with nothing to say is
+// legitimate — "revoke this token?" is answered by its title — and renders as
+// an empty body rather than a special case.
+type dialogBody struct {
+	widget.Base
+	ctx   *tui.Context
+	prose []string
+	text  *widget.Text
+}
+
+func (d *dialogBody) Init(ctx *tui.Context) {
+	d.Base.Init(ctx)
+	d.ctx = ctx
+	if len(d.prose) == 0 {
+		return
+	}
+	d.text = widget.NewText(strings.Join(d.prose, "\n"),
+		widget.WithWrapMode(widget.Wrap))
+	ctx.Mount(d.text)
+}
+
+// Layout sizes to the PROSE, not to a fixed fraction.
+//
+// A consent line that wraps mid-phrase is a consent line nobody read, and the
+// leader confirmations this replaced widened themselves for exactly that
+// reason. The allowlist prose is pre-formatted with its own line breaks — an
+// indented list of CIDRs, a bulleted list of consequences — so a narrower box
+// re-wraps text that was already laid out and the result reads as damage.
+//
+// The screen still wins: whatever is asked for is clamped to what is offered.
+func (d *dialogBody) Layout(c tui.Constraints) tui.Size {
+	if d.text == nil || d.ctx == nil {
+		return tui.Size{}
+	}
+	cc := c
+	want := modalSpan(c.MaxW, dialogPct, dialogMinW, dialogMaxW)
+	for _, line := range d.prose {
+		if n := len([]rune(line)) + 1; n > want {
+			want = n
+		}
+	}
+	cc.MaxW = min(c.MaxW, want)
+	sz := d.ctx.LayoutChild(d.text, cc)
+	d.ctx.PlaceChild(d.text, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
+	return cc.Constrain(sz)
+}
+
+func (d *dialogBody) Render(tui.Surface) {}
+
+// The prose is wide enough to hold a CIDR list without wrapping mid-address,
+// which the allowlist consent needs, and capped so a one-line question does not
+// stretch across a wide terminal.
+const (
+	dialogPct  = 50
+	dialogMinW = 44
+	dialogMaxW = 72
+)

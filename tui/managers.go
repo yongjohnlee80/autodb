@@ -300,29 +300,38 @@ This is an exposure decision and it is audited.
 // openExposureSwitch asks whether to expose a connection to the front door.
 func (m *Model) openExposureSwitch(g *manager[ConnInfo], sel ConnInfo) {
 	if sel.FrontDoorExposed {
-		m.openLeader("close the front door on "+sel.Name+"?", []leaderEntry{
-			{'y', "close it — open sessions are dropped", func() {
+		// KEEPS A DEFAULT: the exposure is a switch and this flips it back.
+		// The dropped sessions are a consequence, not lost state — a client
+		// reconnects — and the rule is whether the thing being changed can be
+		// changed back.
+		m.openDialog("close the front door on "+sel.Name+"?",
+			"Open sessions on this connection are dropped.",
+			affirm('y', "Close it", func() {
 				managerCall(g, "front door off "+sel.Name, func(c context.Context, b *Bound) error {
 					return b.SetConnectionExposure(c, sel.ID, false)
 				})
-			}},
-		})
+			}),
+			decline('n', "Leave it open"),
+		)
 		return
 	}
 	target := sel.TargetDB
 	if target == "" {
 		target = "(none recorded — clients use the connection name)"
 	}
-	m.openTextFloat("front door: "+sel.Name+" ("+sel.Engine+")",
+	// The prose and the key that acts on it are ONE surface. They were two
+	// stacked floats, which is how an operator comes to expose a connection
+	// while the description of what that means is hidden behind the prompt.
+	m.openDialog("open the front door on "+sel.Name+"?",
 		frontDoorProse+"\nClients would connect with Database = "+target+
-			"\nor the connection name "+sel.Name+".\n")
-	m.openLeader("open the front door on "+sel.Name+"?", []leaderEntry{
-		{'y', "yes — expose it, and audit the change", func() {
+			"\nor the connection name "+sel.Name+".\n",
+		affirm('y', "Expose it", func() {
 			managerCall(g, "front door on "+sel.Name, func(c context.Context, b *Bound) error {
 				return b.SetConnectionExposure(c, sel.ID, true)
 			})
-		}},
-	})
+		}),
+		decline('n', "Leave it closed"),
+	)
 }
 
 func (m *Model) openConnForm(g *manager[ConnInfo]) {
@@ -689,14 +698,21 @@ func (m *Model) openPATManager(userID int64, who string) {
 				}
 				// Revocation is irreversible and immediately locks out
 				// whatever is using the token, so it asks first.
-				m.openLeader("revoke "+sel.Name+"?", []leaderEntry{
-					{'y', "revoke it", func() {
+				// NO DEFAULT: revocation is IRREVERSIBLE. The rule is
+				// irreversibility, not whether the operator asked — a token
+				// cannot be un-revoked, and whatever was using it is locked out
+				// the moment this lands. An answer that cannot be taken back
+				// does not get to sit under the cursor waiting for Enter.
+				m.openDialogNoDefault("revoke "+sel.Name+"?",
+					"Whatever is using this token is locked out immediately, "+
+						"and a revocation cannot be undone.",
+					alternative('y', "Revoke it", func() {
 						managerCall(g, "revoke "+sel.Name, func(c context.Context, b *Bound) error {
 							return b.RevokePAT(c, userID, sel.Name)
 						})
-					}},
-					{'n', "keep it", func() {}},
-				})
+					}),
+					decline('n', "Keep it"),
+				)
 			}},
 			// Revoked tokens are history, not choices: they accumulate
 			// for the life of the account and pushed the live ones off
@@ -1004,24 +1020,27 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 func (m *Model) confirmAllowlistWidening(g *manager[PATRow], bound *Bound,
 	name string, days int64, ips []string, connID int64, missing []string,
 ) {
-	// ONE FLOAT: the exact set, the consequences, and the key that agrees, so
-	// the key cannot sit on top of what it is agreeing to. It was two stacked
-	// floats and a review found that the operator could press `y` while the
-	// addresses were hidden behind the modal asking about them.
+	// ONE SURFACE: the exact set, the consequences, and the answer that agrees,
+	// so the answer cannot sit on top of what it is agreeing to. It was two
+	// stacked floats and a review found that the operator could press `y` while
+	// the addresses were hidden behind the modal asking about them.
 	//
-	// ONE entry, and it is `y`. Esc and q close it with nothing done, so the
-	// default is NO by construction rather than by a highlighted button
-	// somebody can tab onto and press.
-	m.openLeaderWithProse(
+	// NO DEFAULT BUTTON, and the helper refuses to build one. Becoming a dialog
+	// does not change the rule this surface was built around: the default is NO
+	// by construction rather than by a highlighted button somebody can tab onto
+	// and press. Cancel is offered because it is visible and Escape already
+	// means it; what must not exist is a focused, Enter-able yes.
+	m.openDialogNoDefault(
 		"add "+strconv.Itoa(len(missing))+" row(s) to your own allowlist?",
-		allowlistWideningProse(missing), []leaderEntry{
-			{'y', "yes — add them and mint the token", func() {
-				// The APPROVED SET is what was displayed, and it travels with the
-				// mint. The daemon recomputes what is actually missing under the
-				// owner's lock and may add nothing outside this set.
-				m.mintPAT(g, bound, name, days, ips, connID, false, missing)
-			}},
-		})
+		allowlistWideningProse(missing),
+		decline('n', "Cancel"),
+		alternative('y', "Add them and mint", func() {
+			// The APPROVED SET is what was displayed, and it travels with the
+			// mint. The daemon recomputes what is actually missing under the
+			// owner's lock and may add nothing outside this set.
+			m.mintPAT(g, bound, name, days, ips, connID, false, missing)
+		}),
+	)
 }
 
 // allowlistWideningProse is what the operator reads before agreeing.
