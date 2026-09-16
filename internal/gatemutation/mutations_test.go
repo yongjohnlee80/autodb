@@ -116,54 +116,60 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 	// changes coverage has to edit them -- which is where a reviewer can see
 	// what was lost.
 	want := expectedControls()
-	got := map[string]bool{}
+	got := map[string][3]string{}
 	for _, m := range All() {
-		got[m.Name] = true
+		got[m.Name] = [3]string{m.File, m.Package, m.Test}
 	}
-	for name := range want {
-		if !got[name] {
+	for name, fields := range want {
+		have, ok := got[name]
+		if !ok {
 			t.Errorf("control %q is gone. Say which guarantee stopped being proven and why "+
 				"that is acceptable, then remove it from expectedControls", name)
+			continue
+		}
+		if have != fields {
+			t.Errorf("control %q keeps its name but now attacks %v instead of %v; the set "+
+				"looks unchanged while what it proves has moved", name, have, fields)
 		}
 	}
 	for name := range got {
-		if !want[name] {
+		if _, ok := want[name]; !ok {
 			t.Errorf("control %q is new and not in expectedControls; add it there in the same "+
 				"change, so coverage moves visibly", name)
 		}
 	}
 }
 
-// expectedControls is the set this suite expects to exist, by name.
+// expectedControls is what this suite expects to exist, by name AND by the
+// three fields that say what a control actually attacks.
 //
-// EDITED DELIBERATELY, IN THE SAME CHANGE AS THE CONTROL IT NAMES. That is the
-// point: coverage cannot move without somebody writing the move down.
-func expectedControls() map[string]bool {
-	names := []string{
-		"serve-line-at-enqueue",
-		"transaction-bound-is-a-deadline",
-		"cancellation-undoes-its-admission",
-		"line-skips-the-ineligible",
-		"timeout-unwraps-alone",
-		"server-wait-uses-its-seam",
-		"the-caller-owns-an-exact-tie",
-		"release-serves-the-line",
-		"expired-wait-names-its-blocker",
-		"the-wait-arm-comes-first",
-		"coordinates-come-from-the-code",
-		"the-matrix-is-current",
-		"identity-excludes-git",
-		"identity-requires-a-digest",
-		"identity-verifies-the-body",
-		"identity-refuses-an-empty-manifest",
-		"identity-keeps-evidence-outside-the-root",
-		"identity-refuses-two-authorities",
+// NAMES ALONE WERE NOT ENOUGH. An existing name could be quietly retargeted to
+// a different file, package or cell while membership stayed green — the set
+// would look unchanged while what it proved had moved somewhere else entirely.
+// Edited deliberately, in the same change as the control it names, so coverage
+// cannot move without somebody writing the move down.
+func expectedControls() map[string][3]string {
+	return map[string][3]string{
+		// name: {File, Package, Test}
+		"serve-line-at-enqueue":                    {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_AnEligibleNewcomerIsServedAtEnqueueTime"},
+		"transaction-bound-is-a-deadline":          {"core/exec/session.go", "./core/exec/", "TestScheduler_AnExpiredTransactionIsNotAReasonToRefuse"},
+		"cancellation-undoes-its-admission":        {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_ACancellationThatLosesToAGrantUndoesTheAdmission"},
+		"line-skips-the-ineligible":                {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_AFullTargetDoesNotBlockTheRestOfTheLine"},
+		"timeout-unwraps-alone":                    {"core/exec/scheduler.go", "./core/exec/", "TestAdmissionWait_TheBlockingCapIsDiagnosisAndNotAnIdentity"},
+		"server-wait-uses-its-seam":                {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_TheServerWaitExpiresWithItsOwnIdentity"},
+		"the-caller-owns-an-exact-tie":             {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_OneBoundOwnsTheWaitDeterministically"},
+		"release-serves-the-line":                  {"core/exec/session.go", "./core/exec/", "TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting"},
+		"expired-wait-names-its-blocker":           {"core/exec/wire_session.go", "./core/exec/", "TestOpenWireSession_AWaitThatExpiresIsRecordedAsAWaitNotAsACapRefusal"},
+		"the-wait-arm-comes-first":                 {"core/exec/wire_session.go", "./core/exec/", "TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn"},
+		"coordinates-come-from-the-code":           {"internal/gatematrix/coords.go", "./internal/gatematrix/", "TestCoordinates_AMovedUseIsCorrected"},
+		"the-matrix-is-current":                    {"docs/admission-gate-matrix.md", "./internal/gatematrix/", "TestCoordinates_TheMatrixIsWhatTheGeneratorWouldWrite"},
+		"identity-excludes-git":                    {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AWorktreeGitFileIsNotPartOfTheFingerprint"},
+		"identity-requires-a-digest":               {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AManifestWithNoDigestIsRefused"},
+		"identity-verifies-the-body":               {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AManifestWithAnEditedBodyIsRefused"},
+		"identity-refuses-an-empty-manifest":       {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AnEmptyManifestIsRefused"},
+		"identity-keeps-evidence-outside-the-root": {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_EvidenceInsideTheRootIsRefused"},
+		"identity-refuses-two-authorities":         {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AManifestWithTwoDigestHeadersIsRefused"},
 	}
-	out := make(map[string]bool, len(names))
-	for _, n := range names {
-		out[n] = true
-	}
-	return out
 }
 
 // declaredTests maps every Test function name to the packages declaring it.

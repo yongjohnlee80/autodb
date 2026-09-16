@@ -45,6 +45,15 @@ type Mutation struct {
 	// Guarantee says, in one sentence, what goes unproven if this survives.
 	// It is the sentence a reviewer reads when a control comes back green.
 	Guarantee string
+	// Fails is the exact assertion the cell must fail on: a substring of the
+	// message that control is meant to provoke.
+	//
+	// WITHOUT IT, RED MEANS ONLY THAT THE FUNCTION FAILED. A neighbouring
+	// subtest, a fixture panic or an unrelated assertion all produce
+	// "--- FAIL: <Test>", and scoring those as proof credits a control for a
+	// failure it did not cause. Two of the identity controls were doing
+	// exactly that -- reddening through the check next door.
+	Fails string
 	// Timeout bounds the cell's run. Zero means the default.
 	//
 	// CARRIED PER CONTROL BECAUSE THE RIGHT BOUND IS A PROPERTY OF THE CELL,
@@ -188,7 +197,8 @@ func All() []Mutation {
 			File:        "internal/gateidentity/identity.go",
 			Anchor:      "\tif digest == \"\" {",
 			Replacement: "\tif false {",
-			Test:        "TestIdentity_AManifestThatCannotBeTrustedIsRefused",
+			Test:        "TestIdentity_AManifestWithNoDigestIsRefused",
+			Fails:       "carries no digest",
 			Guarantee: "that a manifest with no digest is refused rather than compared " +
 				"against nothing and reported as a pass",
 		},
@@ -200,7 +210,8 @@ func All() []Mutation {
 			// nothing, which the runner correctly refused to hide.
 			Anchor:      "\tif got := DigestOf(entries); got != digest {",
 			Replacement: "\tif got := DigestOf(entries); len(got) < 0 {",
-			Test:        "TestIdentity_AManifestThatCannotBeTrustedIsRefused",
+			Test:        "TestIdentity_AManifestWithAnEditedBodyIsRefused",
+			Fails:       "edited under an untouched header was accepted",
 			Guarantee: "that a manifest's header is re-derived from its own entries, without " +
 				"which a body edited under an untouched header reads as authoritative",
 		},
@@ -209,9 +220,15 @@ func All() []Mutation {
 			File:        "internal/gateidentity/identity.go",
 			Anchor:      "\tif len(entries) == 0 {",
 			Replacement: "\tif false {",
-			Test:        "TestIdentity_AManifestThatCannotBeTrustedIsRefused",
-			Guarantee: "that an empty manifest is refused rather than read as no-differences, " +
-				"which would pass any tree at all",
+			Test:        "TestIdentity_AnEmptyManifestIsRefused",
+			Fails:       "want it to say the manifest pins nothing",
+			// HONEST ABOUT WHAT THIS PROVES. An empty list still hashes to
+			// something, so the body check would refuse this manifest anyway --
+			// and report it as EDITED, sending somebody to look for tampering
+			// when the truth is that it describes nothing at all. What this
+			// control holds is that the refusal names its own cause.
+			Guarantee: "that an empty manifest is refused for describing nothing, rather than " +
+				"being reported as tampered with and sending somebody after the wrong fault",
 		},
 		{
 			Name: "identity-keeps-evidence-outside-the-root", Package: "./internal/gateidentity/",
@@ -219,6 +236,7 @@ func All() []Mutation {
 			Anchor:      "\treturn fmt.Errorf(\"%w: %s is inside %s\", ErrInsideRoot, absEv, absRoot)",
 			Replacement: "\treturn nil",
 			Test:        "TestIdentity_EvidenceInsideTheRootIsRefused",
+			Fails:       "was accepted; writing there changes the tree being fingerprinted",
 			Guarantee: "that a manifest cannot be written into the tree it fingerprints, which " +
 				"changes the thing it records and makes an exact copy read as changed",
 		},
@@ -228,6 +246,7 @@ func All() []Mutation {
 			Anchor:      "\tif headers > 1 {",
 			Replacement: "\tif false {",
 			Test:        "TestIdentity_AManifestWithTwoDigestHeadersIsRefused",
+			Fails:       "two digest headers was accepted",
 			Guarantee: "that one manifest asserts exactly one identity, so appending a line " +
 				"cannot change what a record claims",
 		},
