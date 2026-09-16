@@ -84,7 +84,23 @@ type Model struct {
 	// invoked from the menu hands the keyboard back to where the operator was
 	// rather than to a bar that is about to close.
 	lastPane tui.Component
-	menu     *widget.Menu // the top bar's menu; nil until New builds it
+
+	// Editor-preference coordination. THREE DIFFERENT RACES share this state,
+	// and each needs its own discriminator:
+	//
+	//   - prefGen is the LATEST INTENT. A stored preference read at sign-in must
+	//     lose to a choice the operator made while it was in flight, and the
+	//     only thing that distinguishes them is which came last.
+	//   - prefWriting and prefPending make the WRITER one-in-flight and
+	//     coalescing. Two writes racing can persist the older choice last, and
+	//     the store has no opinion about which arrived first.
+	//   - identity is fenced separately, on the Bound, because two accounts can
+	//     share a connection.
+	prefGen        uint64
+	prefWriting    bool
+	prefPending    string
+	prefHasPending bool
+	menu           *widget.Menu // the top bar's menu; nil until New builds it
 	// menuShown is the projection currently applied, so a reprojection that
 	// would change nothing does not disturb an open cascade.
 	menuShown []widget.MenuItemModel

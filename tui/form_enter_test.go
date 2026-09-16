@@ -110,7 +110,7 @@ func TestForm_FooterNamesTheKeysThatWork(t *testing.T) {
 	// Asserted as ONE unwrapped line: a footer that wraps mid-phrase reads
 	// worse than none, and the earlier wording did exactly that.
 	h.waitFor("the footer, on one line",
-		"Tab/Enter:next  O:OK  Esc:cancel")
+		"Tab:next  O:OK  Esc:cancel")
 }
 
 // A ONE-FIELD FORM GOES THROUGH THE BUTTON TOO.
@@ -153,13 +153,27 @@ func TestForm_ValidationFailureKeepsTheFormOpen(t *testing.T) {
 	h.waitFor("connections manager", "a:add")
 	h.keys("a")
 	h.waitFor("connection form", "new connection")
-	// Empty name, walk to the button, submit with everything empty.
-	h.key(tuicore.KeyEnter) // advance (empty name)
-	h.key(tuicore.KeyEnter) // advance (empty engine)
-	h.key(tuicore.KeyEnter) // last field: move to OK
-	h.key(tuicore.KeyEnter) // OK: submit
+	// TAB, NOT ENTER. Enter on the engine SELECT opens its options instead of
+	// advancing, so an Enter-walk never reaches the button and this cell used
+	// to assert against a form it had not submitted.
+	// THREE Tabs, not four. Focus starts ON the first field, so three moves
+	// reach OK and a fourth lands on Cancel — which dismisses the dialog and
+	// leaves the cell asserting against a form that was never submitted. The
+	// screen said so plainly: an empty connections manager and no dialog.
+	h.key(tuicore.KeyTab) // name -> engine select
+	h.key(tuicore.KeyTab) // engine -> dsn
+	h.key(tuicore.KeyTab) // dsn -> OK
+
+	// ABSENT FIRST. "all fields are required" is the form's own status text and
+	// appears nowhere else, unlike "name", which is a FIELD LABEL already on
+	// screen — the previous assertion matched that label and would have passed
+	// against a form that never submitted at all.
+	neverAppears(t, h, "the validation message before the submit",
+		"all fields are required", 200*time.Millisecond)
+
+	h.key(tuicore.KeyEnter) // OK
 	h.waitFor("the form stayed open", "new connection")
-	h.waitFor("and said what was wrong", "name")
+	h.waitFor("and said what was wrong", "all fields are required")
 }
 
 // focusChanges counts input-focus moves seen so far. The runtime trace is the
