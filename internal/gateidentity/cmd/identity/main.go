@@ -57,12 +57,17 @@ func main() {
 			"supply one, or they can disagree and the check will not notice")
 		os.Exit(2)
 	}
-	for _, meta := range []struct{ flag, val string }{{"-head", *head}, {"-base", *base}} {
-		if meta.val != "" && !isHex40(meta.val) {
-			fmt.Fprintf(os.Stderr, "identity: %s must be a full 40-character commit, got %q\n",
-				meta.flag, meta.val)
-			os.Exit(2)
-		}
+	// EACH ROUTE ON ITS OWN BRANCH, so a control can remove exactly one and a
+	// cell can name exactly one. A single loop over both meant deleting the
+	// check for one still failed through the other's assertion, and two command
+	// routes stayed unproven while the control looked RED.
+	if *head != "" && !isHex40(*head) {
+		fmt.Fprintf(os.Stderr, "identity: -head must be a full 40-character commit, got %q\n", *head)
+		os.Exit(2)
+	}
+	if *base != "" && !isHex40(*base) {
+		fmt.Fprintf(os.Stderr, "identity: -base must be a full 40-character commit, got %q\n", *base)
+		os.Exit(2)
 	}
 	if strings.ContainsAny(*note, "\r\n") {
 		// A NOTE WITH A NEWLINE CAN FORGE A HEADER. The manifest is
