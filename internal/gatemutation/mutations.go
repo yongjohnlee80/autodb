@@ -551,5 +551,17 @@ func All() []Mutation {
 			Guarantee: "that a request leaving the line gives its demand claim back, so the " +
 				"next holder to go idle is not ended for somebody who has gone",
 		},
+		{
+			Name: "an-offer-covers-only-a-wait", Package: "./frontdoor/",
+			File:        "frontdoor/session_loop.go",
+			Anchor:      "\t\toffered := !framed && !mid",
+			Replacement: "\t\toffered := true",
+			Test:        "TestDemandOfferWindow_NoOfferCoversAFrameTheClientAlreadyWon",
+			Timeout:     180 * time.Second,
+			Fails:       "published a receive offer with framed=",
+			Guarantee: "that a receive offer is published only when the wait genuinely " +
+				"begins between messages, so demand cannot reserve a session over a frame " +
+				"the client had already won and discard it",
+		},
 	}
 }
