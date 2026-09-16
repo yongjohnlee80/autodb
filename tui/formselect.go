@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 
+	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/widget"
@@ -280,4 +281,75 @@ func fixedSelect(label string, items []widget.SelectItem[int64]) formField {
 			count: len(items),
 		}
 	}}
+}
+
+// --- the editor profile -------------------------------------------------------
+
+// keysetOf maps the stored preference onto golib's profile. golib spells the
+// modeless standard profile KeysetStandard; the product calls it TextEdit, and
+// the two names meet here rather than in five call sites.
+func keysetOf(pref string) widget.Keyset {
+	if pref == auth.KeysetTextEdit {
+		return widget.KeysetStandard
+	}
+	return widget.KeysetVim
+}
+
+// chooseEditorKeyset switches the editor now and remembers the choice.
+//
+// THE LIVE EDITOR CHANGES IN PLACE, which is why this phase waited on golib
+// v0.5.24: until SetKeyset existed the only way to honour the choice was to
+// build a new Editor, and that throws away the buffer, the cursor and the undo
+// history. A preference change is not a reason to lose someone's work.
+//
+// The switch happens FIRST and the write follows. The operator asked for a
+// different editor, and they get one whether or not the daemon accepts the
+// preference; a failed write costs them the persistence, not the change. The
+// status line says so rather than leaving a silent difference between what is
+// on screen and what will come back after a restart.
+func (m *Model) chooseEditorKeyset(pref string) {
+	m.editor.SetKeyset(keysetOf(pref))
+	m.refreshStatus()
+
+	bound := m.session.Bind()
+	m.ctx.Go(func(ctx context.Context) (any, error) {
+		err := bound.SetOption(ctx, auth.OptionEditorKeyset, pref)
+		return managerReload{gen: bound.Gen(), apply: func() {
+			if err != nil {
+				m.setStatus("editor set to " + pref +
+					" for this session only — saving it failed: " + WireErrorMessage(err))
+				return
+			}
+			m.setStatus("editor mode: " + pref)
+		}}, nil
+	})
+}
+
+// applyStoredEditorKeyset reads the account's preference after a sign-in and
+// applies it.
+//
+// A MISSING PREFERENCE IS NOT AN ERROR and not a reason to say anything: an
+// account that has never chosen keeps the default, which is what "no preference"
+// means. Only a failed READ is worth a word, and even then the editor stays
+// usable on the default.
+func (m *Model) applyStoredEditorKeyset() {
+	bound := m.session.Bind()
+	m.ctx.Go(func(ctx context.Context) (any, error) {
+		opts, err := bound.Options(ctx)
+		return managerReload{gen: bound.Gen(), apply: func() {
+			if !m.sameIdentity(bound) {
+				return // signed in as somebody else since; their preference, not this one
+			}
+			if err != nil {
+				m.setStatus("could not read your preferences: " + WireErrorMessage(err))
+				return
+			}
+			pref, ok := opts[auth.OptionEditorKeyset]
+			if !ok {
+				return
+			}
+			m.editor.SetKeyset(keysetOf(pref))
+			m.refreshStatus()
+		}}, nil
+	})
 }

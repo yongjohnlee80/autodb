@@ -1,5 +1,7 @@
 package tui
 
+import "github.com/yongjohnlee80/autodb/core/auth"
+
 // THE CATALOG ITSELF. One literal per command, and the menu nodes the bar's
 // placements resolve against.
 //
@@ -72,6 +74,19 @@ func menuNodes() []MenuNode {
 		{ID: nodeEditor, Parent: nodeOptions, Label: "Editor", Hotkey: 'E', Order: 10},
 		{ID: nodeSystem, Label: "System", Hotkey: 'S', Order: 70},
 	}
+}
+
+// signedInToChooseAnEditor gates the editor-profile leaves.
+//
+// The preference belongs to an ACCOUNT, so before a sign-in there is nothing to
+// write it to. Dimmed with the reason rather than hidden: the choice exists and
+// the operator is one login away from it, which is what the three-state
+// presentation is for.
+func signedInToChooseAnEditor(m *Model) (bool, string) {
+	if m.session.User().ID == 0 {
+		return false, "sign in first — the preference is stored on your account"
+	}
+	return true, ""
 }
 
 // leader is a small constructor, so the catalog below reads as a table rather
@@ -362,13 +377,25 @@ func commandCatalog() []Command {
 			Menu: []MenuProjection{{Parent: nodeEdit, Label: "Paste", Hotkey: 'P', Order: 30}},
 		},
 		{
-			// Needs the user options JSONB column, which is Phase 2 work.
-			ID: "options.editor.vim", Lifecycle: Planned,
-			Menu: []MenuProjection{{Parent: nodeEditor, Label: "Vim mode", Hotkey: 'V', Order: 10}},
+			// THE FIRST Planned LEAF TO RETIRE, and the point of declaring the
+			// lifecycle at all: it was hidden because the preference had
+			// nowhere to live, and it is offered now because v17 gave it one.
+			//
+			// Enabled only while signed in — a preference belongs to an
+			// account, and there is no account to write it to before login.
+			ID:      "options.editor.vim",
+			Enabled: signedInToChooseAnEditor,
+			Run:     func(m *Model) { m.chooseEditorKeyset(auth.KeysetVim) },
+			Menu:    []MenuProjection{{Parent: nodeEditor, Label: "Vim mode", Hotkey: 'V', Order: 10}},
 		},
 		{
-			ID: "options.editor.nano", Lifecycle: Planned,
-			Menu: []MenuProjection{{Parent: nodeEditor, Label: "Nano mode", Hotkey: 'N', Order: 20}},
+			// TextEdit, not Nano. The Phase 1 menu tree said "Nano mode" and
+			// the acceptance requirement says TextEdit; the requirement wins,
+			// and the id is corrected with the label so the two cannot drift.
+			ID:      "options.editor.textedit",
+			Enabled: signedInToChooseAnEditor,
+			Run:     func(m *Model) { m.chooseEditorKeyset(auth.KeysetTextEdit) },
+			Menu:    []MenuProjection{{Parent: nodeEditor, Label: "TextEdit mode", Hotkey: 'T', Order: 20}},
 		},
 		{
 			// Open note has no command today: the explorer owns opening.

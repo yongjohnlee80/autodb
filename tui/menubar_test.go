@@ -56,7 +56,7 @@ func TestTheBarHasTheDesignedCategoriesInOrder(t *testing.T) {
 				found = true
 			}
 		}
-		if w == "Edit" || w == "Options" {
+		if w == "Edit" {
 			continue // asserted explicitly by the pruning cell
 		}
 		if !found {
@@ -69,18 +69,33 @@ func TestTheBarHasTheDesignedCategoriesInOrder(t *testing.T) {
 //
 // A category that opens onto nothing is worse than one that is not there: it
 // costs a keystroke to learn it has nothing for you, every time. Edit holds
-// only Planned leaves and Options only Planned ones, so both must be absent
-// entirely rather than present and empty.
+// only Planned leaves, so it must be absent entirely rather than present and
+// empty.
+//
+// OPTIONS USED TO BE THE SECOND EXAMPLE and is now the counter-example. Its
+// editor leaves were Planned because the preference had nowhere to live; v17
+// gave it one, they are Implemented, and the category is present — which is the
+// pruning rule working in the other direction and worth asserting for that
+// reason. A cell naming a category that "has only Planned leaves" is describing
+// a moment, not a rule, so it now says which rule each half is about.
 func TestCategoriesWithNothingLeftArePruned(t *testing.T) {
 	m := leaderModelFor(t, leaderState{role: meta.RoleAdmin, frontend: FrontendTerminal})
 	rows := m.menuModel()
-	for _, gone := range []string{"Edit", "Options"} {
+	for _, gone := range []string{"Edit"} {
 		for _, r := range rows {
 			if r.Label == gone {
 				t.Errorf("category %q survived with %d children; every leaf under "+
 					"it is Planned, so it should have pruned", gone, len(r.Children))
 			}
 		}
+	}
+	// Options is present because its leaves retired from Planned.
+	opts, ok := find(rows, widget.ItemID(nodeOptions))
+	if !ok {
+		t.Fatal("the Options category pruned; its editor leaves are Implemented now")
+	}
+	if len(opts.Children) == 0 {
+		t.Error("Options survived with no children, which is the state this cell exists to forbid")
 	}
 	// THE CONTROL: a category whose leaves DO survive is present and non-empty,
 	// so the assertion above is about pruning and not about categories being
