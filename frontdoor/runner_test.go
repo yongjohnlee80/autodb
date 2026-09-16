@@ -771,6 +771,14 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"cancel", "fd.cancel_stale", outcome.Control, outcome.None},
 		{"handshake", "deadline", outcome.Operational, outcome.None},
 		{"handshake", "handshake-write-failed", outcome.Operational, outcome.None},
+		// The held-object conditions. Every one is a decision not to proceed
+		// (Refusal) taken on an authenticated session that is already past
+		// every accept-time budget, so no per-source counter is in reach of
+		// them: NotApplicable, and deliberately not None.
+		{"held-objects", "frontdoor/duplicate-prepared-statement", outcome.Refusal, outcome.NotApplicable},
+		{"held-objects", "frontdoor/execution-state", outcome.Refusal, outcome.NotApplicable},
+		{"held-objects", "frontdoor/no-mechanism", outcome.Refusal, outcome.NotApplicable},
+		{"held-objects", "frontdoor/retained-budget", outcome.Refusal, outcome.NotApplicable},
 		{"lifecycle-infrastructure", "internal-error", outcome.Operational, outcome.None},
 		{"serve", "peer-closed", outcome.Control, outcome.None},
 		{"serve", "session-error", outcome.Operational, outcome.None},
@@ -841,6 +849,21 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 	}
 	if !sawLifecycle {
 		t.Error("the lifecycle-infrastructure producer registers nothing")
+	}
+
+	// THE HELD-OBJECT PRODUCER IS IN IT TOO, and for the same reason: its
+	// declarations are DERIVED from the register, so a register that stopped
+	// returning rows would leave this producer declaring nothing at all and
+	// both halves above would agree perfectly about an empty set.
+	var sawHeldObjects int
+	for r := range got {
+		if r.producer == ProducerHeldObjects {
+			sawHeldObjects++
+		}
+	}
+	if sawHeldObjects != len(heldObjectRegister()) {
+		t.Errorf("the held-objects producer registers %d identities and the register has %d rows",
+			sawHeldObjects, len(heldObjectRegister()))
 	}
 }
 
