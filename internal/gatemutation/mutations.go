@@ -19,6 +19,8 @@
 // drifted fails a test HERE rather than being silently mis-run there.
 package gatemutation
 
+import "time"
+
 // Mutation is one deliberate break and the cell that must notice it.
 type Mutation struct {
 	// Name is stable, because ledgers refer to these by name across runs.
@@ -43,6 +45,18 @@ type Mutation struct {
 	// Guarantee says, in one sentence, what goes unproven if this survives.
 	// It is the sentence a reviewer reads when a control comes back green.
 	Guarantee string
+	// Timeout bounds the cell's run. Zero means the default.
+	//
+	// CARRIED PER CONTROL BECAUSE THE RIGHT BOUND IS A PROPERTY OF THE CELL,
+	// not of the runner's mood on the day. A control whose cell detects a
+	// break by waiting out a real bound needs a longer one; a control whose
+	// cell should fail in milliseconds is better served by a short one, since
+	// a generous timeout turns "the seam was bypassed" into "something hung".
+	Timeout time.Duration
+	// Count repeats the cell. Non-zero only where a single run would be a
+	// lottery -- see the cancellation control, which was once green 249 times
+	// in 250 and is now deterministic but still worth repeating.
+	Count int
 }
 
 // All returns every control, in ledger order.
@@ -57,6 +71,8 @@ func All() []Mutation {
 			Anchor:      "\tr.serveLine()\n\tif w.state == waitResolved {",
 			Replacement: "\tif w.state == waitResolved {",
 			Test:        "TestScheduler_AnEligibleNewcomerIsServedAtEnqueueTime",
+			// Detects the break by waiting out the real server bound.
+			Timeout: 150 * time.Second,
 			Guarantee: "that a request whose own target is free is served when it arrives, " +
 				"rather than waiting for an unrelated release that may never come",
 		},
@@ -73,6 +89,7 @@ func All() []Mutation {
 			Anchor:      "\tif err := <-w.done; err == nil {\n\t\tr.remove(w.s)\n\t}",
 			Replacement: "\t_ = w",
 			Test:        "TestScheduler_ACancellationThatLosesToAGrantUndoesTheAdmission",
+			Count:       20,
 			Guarantee: "that an admission granted in the instant a caller gives up is handed " +
 				"back, rather than leaking a session nothing is coming to close",
 		},
@@ -165,6 +182,54 @@ func All() []Mutation {
 			Guarantee: "that a worktree and its .git-excluded copy can be compared at all, " +
 				"without which the identity gate rejects every honest copy and teaches " +
 				"everyone to ignore it",
+		},
+		{
+			Name: "identity-requires-a-digest", Package: "./internal/gateidentity/",
+			File:        "internal/gateidentity/identity.go",
+			Anchor:      "\tif digest == \"\" {",
+			Replacement: "\tif false {",
+			Test:        "TestIdentity_AManifestThatCannotBeTrustedIsRefused",
+			Guarantee: "that a manifest with no digest is refused rather than compared " +
+				"against nothing and reported as a pass",
+		},
+		{
+			Name: "identity-verifies-the-body", Package: "./internal/gateidentity/",
+			File: "internal/gateidentity/identity.go",
+			// Keeps the binding used, so the mutated tree still compiles: a
+			// replacement that fails to build is scored INVALID and proves
+			// nothing, which the runner correctly refused to hide.
+			Anchor:      "\tif got := DigestOf(entries); got != digest {",
+			Replacement: "\tif got := DigestOf(entries); len(got) < 0 {",
+			Test:        "TestIdentity_AManifestThatCannotBeTrustedIsRefused",
+			Guarantee: "that a manifest's header is re-derived from its own entries, without " +
+				"which a body edited under an untouched header reads as authoritative",
+		},
+		{
+			Name: "identity-refuses-an-empty-manifest", Package: "./internal/gateidentity/",
+			File:        "internal/gateidentity/identity.go",
+			Anchor:      "\tif len(entries) == 0 {",
+			Replacement: "\tif false {",
+			Test:        "TestIdentity_AManifestThatCannotBeTrustedIsRefused",
+			Guarantee: "that an empty manifest is refused rather than read as no-differences, " +
+				"which would pass any tree at all",
+		},
+		{
+			Name: "identity-keeps-evidence-outside-the-root", Package: "./internal/gateidentity/",
+			File:        "internal/gateidentity/identity.go",
+			Anchor:      "\treturn fmt.Errorf(\"%w: %s is inside %s\", ErrInsideRoot, absEv, absRoot)",
+			Replacement: "\treturn nil",
+			Test:        "TestIdentity_EvidenceInsideTheRootIsRefused",
+			Guarantee: "that a manifest cannot be written into the tree it fingerprints, which " +
+				"changes the thing it records and makes an exact copy read as changed",
+		},
+		{
+			Name: "identity-refuses-two-authorities", Package: "./internal/gateidentity/",
+			File:        "internal/gateidentity/identity.go",
+			Anchor:      "\tif headers > 1 {",
+			Replacement: "\tif false {",
+			Test:        "TestIdentity_AManifestWithTwoDigestHeadersIsRefused",
+			Guarantee: "that one manifest asserts exactly one identity, so appending a line " +
+				"cannot change what a record claims",
 		},
 	}
 }

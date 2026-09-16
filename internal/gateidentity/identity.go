@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -241,15 +242,30 @@ func fileSum(path string) (string, error) {
 // is identified by its path immediately.
 func ParseManifest(r io.Reader) ([]Entry, string, error) {
 	var (
-		entries []Entry
-		digest  string
+		entries  []Entry
+		digest   string
+		headers  int
+		declared = -1
 	)
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
 		line := sc.Text()
 		if strings.HasPrefix(line, "# digest ") {
+			// EXACTLY ONE, AND IT MUST LOOK LIKE A DIGEST. A second header
+			// silently winning would let anyone append one line to a manifest
+			// and change the identity it asserts, which is the whole of what
+			// this file is for.
+			headers++
 			digest = strings.TrimSpace(strings.TrimPrefix(line, "# digest "))
+			continue
+		}
+		if strings.HasPrefix(line, "# files ") {
+			n, cerr := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "# files ")))
+			if cerr != nil {
+				return nil, "", fmt.Errorf("gateidentity: unreadable file count: %q", line)
+			}
+			declared = n
 			continue
 		}
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -264,6 +280,17 @@ func ParseManifest(r io.Reader) ([]Entry, string, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return nil, "", err
+	}
+	if headers > 1 {
+		return nil, "", fmt.Errorf("gateidentity: the manifest carries %d digest headers; "+
+			"one of them is not the identity it claims", headers)
+	}
+	if digest != "" && !canonicalDigest(digest) {
+		return nil, "", fmt.Errorf("gateidentity: %q is not a digest", digest)
+	}
+	if declared >= 0 && declared != len(entries) {
+		return nil, "", fmt.Errorf("gateidentity: the manifest says %d files and lists %d; "+
+			"entries have been added or removed since it was written", declared, len(entries))
 	}
 	if len(entries) == 0 {
 		// AN EMPTY MANIFEST CANNOT PIN ANYTHING, and read as "no differences"
@@ -283,4 +310,71 @@ func ParseManifest(r io.Reader) ([]Entry, string, error) {
 			digest, got)
 	}
 	return entries, digest, nil
+}
+
+// canonicalDigest reports whether a recorded digest has the one shape this
+// package writes: sixty-four lowercase hexadecimal characters.
+//
+// CHECKED SO A NEAR-MISS CANNOT PASS AS AN IDENTITY. An empty string, a
+// truncation, or an upper-case variant would each compare unequal to a real
+// digest and produce a mismatch that reads like a changed tree rather than a
+// malformed record -- sending somebody to look for a difference that is not
+// there.
+func canonicalDigest(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ErrInsideRoot is an evidence file that would live inside the tree it
+// describes.
+//
+// A MANIFEST WRITTEN INTO ITS OWN FINGERPRINT ROOT CHANGES THE THING IT
+// RECORDS. The digest lands in the file, the file lands in the tree, and the
+// tree no longer has the digest the file asserts -- so an exact copy is
+// rejected and the gate cries wolf on correct input. It was documented and not
+// enforced, which is the same as not fixed: an old command line silently
+// recreates it.
+var ErrInsideRoot = errors.New("gateidentity: the evidence file would be inside the tree it describes")
+
+// CheckOutsideRoot refuses an evidence path at or beneath the fingerprint root.
+//
+// The path need not exist yet: for an output file its parent is resolved
+// instead, so a manifest about to be written is judged where it will land.
+func CheckOutsideRoot(root, evidence string) error {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	if resolved, rerr := filepath.EvalSymlinks(absRoot); rerr == nil {
+		absRoot = resolved
+	}
+	absEv, err := filepath.Abs(evidence)
+	if err != nil {
+		return err
+	}
+	// Resolve through whatever part of the path exists, so a not-yet-created
+	// file is judged by the directory it will be created in.
+	if resolved, rerr := filepath.EvalSymlinks(absEv); rerr == nil {
+		absEv = resolved
+	} else if parent, perr := filepath.EvalSymlinks(filepath.Dir(absEv)); perr == nil {
+		absEv = filepath.Join(parent, filepath.Base(absEv))
+	}
+
+	rel, err := filepath.Rel(absRoot, absEv)
+	if err != nil {
+		return nil // on different volumes it cannot be inside
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s is inside %s", ErrInsideRoot, absEv, absRoot)
 }

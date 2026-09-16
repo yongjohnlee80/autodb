@@ -260,3 +260,82 @@ func TestIdentity_AManifestThatCannotBeTrustedIsRefused(t *testing.T) {
 		t.Errorf("an untampered manifest was refused: %v", err)
 	}
 }
+
+// EVIDENCE MAY NOT LIVE INSIDE THE TREE IT DESCRIBES.
+//
+// A manifest written into its own fingerprint root changes what it records: the
+// digest lands in the file, the file lands in the tree, and an exact copy is
+// then rejected. That was documented and not enforced, which is the same as not
+// fixed — an old command line silently recreates it, and the gate cries wolf on
+// correct input.
+func TestIdentity_EvidenceInsideTheRootIsRefused(t *testing.T) {
+	root := sampleTree(t)
+	outside := filepath.Join(filepath.Dir(root), "ledger.manifest")
+
+	for _, tc := range []struct {
+		name     string
+		path     string
+		wantsErr bool
+	}{
+		{"beside the root", outside, false},
+		{"directly inside the root", filepath.Join(root, "local.manifest"), true},
+		{"nested inside the root", filepath.Join(root, "core", "exec", "m.manifest"), true},
+		{"the root itself", root, true},
+		{"reached by a dotted path", filepath.Join(root, "core", "..", "m.manifest"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := CheckOutsideRoot(root, tc.path)
+			if tc.wantsErr && err == nil {
+				t.Errorf("%s was accepted; writing there changes the tree being fingerprinted, "+
+					"so an exact copy would be reported as changed", tc.path)
+			}
+			if !tc.wantsErr && err != nil {
+				t.Errorf("%s was refused though it is outside the root: %v", tc.path, err)
+			}
+			if tc.wantsErr && err != nil && !errors.Is(err, ErrInsideRoot) {
+				t.Errorf("got %v, want it to identify as an inside-root refusal", err)
+			}
+		})
+	}
+}
+
+// A MANIFEST ASSERTS EXACTLY ONE IDENTITY.
+//
+// With a later header silently winning, appending a single line to a manifest
+// would change what it claims — and the file whose whole purpose is to pin a
+// tree would be the easiest thing in the ledger to rewrite.
+func TestIdentity_AManifestWithTwoDigestHeadersIsRefused(t *testing.T) {
+	dir := sampleTree(t)
+	_, entries, err := Digest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := "# digest " + DigestOf(entries) + "\n"
+	for _, e := range entries {
+		good += e.Sum + " " + e.Mode + " " + e.Path + "\n"
+	}
+
+	two := "# digest " + strings.Repeat("a", 64) + "\n" + good
+	if _, _, err := ParseManifest(strings.NewReader(two)); err == nil {
+		t.Error("a manifest with two digest headers was accepted; appending one line would " +
+			"change the identity it asserts")
+	}
+
+	// A near-miss must not read as a digest either: it would compare unequal to
+	// a real one and produce a mismatch that looks like a changed tree rather
+	// than a malformed record.
+	for _, bad := range []string{strings.Repeat("A", 64), strings.Repeat("a", 63), "not-a-digest"} {
+		body := "# digest " + bad + "\n" + strings.SplitN(good, "\n", 2)[1]
+		if _, _, err := ParseManifest(strings.NewReader(body)); err == nil {
+			t.Errorf("%q was accepted as a digest", bad)
+		}
+	}
+
+	// And a declared count that disagrees with the body is refused.
+	counted := "# digest " + DigestOf(entries) + "\n# files 999\n" +
+		strings.SplitN(good, "\n", 2)[1]
+	if _, _, err := ParseManifest(strings.NewReader(counted)); err == nil {
+		t.Error("a manifest claiming 999 files was accepted with far fewer; entries could be " +
+			"removed without the record noticing")
+	}
+}

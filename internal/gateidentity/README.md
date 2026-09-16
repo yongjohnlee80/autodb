@@ -23,12 +23,18 @@ go run ./internal/gateidentity/cmd/identity -dir . \
   -head "$(git rev-parse HEAD)" \
   -base "$(git merge-base HEAD origin/main)" \
   -note "<task id>" \
-  -manifest ../local.manifest
+  -manifest ../ledger/local.manifest
 ```
 
-Write the manifest **outside** the directory being fingerprinted. A manifest
-written into `-dir .` becomes part of the tree it describes, so the digest it
-records is one the tree no longer has the moment the file lands.
+Both paths must be **outside** the directory being fingerprinted, and that is
+enforced, not merely advised: a manifest written into `-dir .` becomes part of
+the tree it describes, so the digest it records is one the tree no longer has
+the moment the file lands — and an exact copy is then rejected. The CLI exits 2
+before writing or comparing if either path is at or beneath the root.
+
+`-expect` and `-against` may not be combined: a manifest recording one digest
+beside an `-expect` of another lets the check pass while holding a record that
+describes something else.
 
 Copy `local.manifest` to the machine that will run the gates, then there:
 

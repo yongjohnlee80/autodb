@@ -2,11 +2,11 @@
 //
 // Record, on the machine that owns the source:
 //
-//	go run ./internal/gateidentity/cmd/identity -dir . -manifest local.manifest
+//	go run ./internal/gateidentity/cmd/identity -dir . -manifest ../ledger/local.manifest
 //
 // Check, on the machine that will run the gates:
 //
-//	go run ./internal/gateidentity/cmd/identity -dir . -expect <digest> -manifest vm.manifest
+//	go run ./internal/gateidentity/cmd/identity -dir . -against ../ledger/local.manifest
 //
 // It exits non-zero when the tree does not match, which is the whole point: an
 // identity step that cannot fail attributes every green result beneath it to a
@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/yongjohnlee80/autodb/internal/gateidentity"
@@ -32,6 +33,44 @@ func main() {
 	note := flag.String("note", "", "free-text label, e.g. the task id")
 	against := flag.String("against", "", "manifest recorded by the source side; lets a mismatch name the files that differ")
 	flag.Parse()
+
+	// THE EVIDENCE MUST LIVE OUTSIDE WHAT IT DESCRIBES, AND THAT IS ENFORCED
+	// RATHER THAN DOCUMENTED. A manifest inside the fingerprint root changes
+	// the tree it records: the digest lands in the file, the file lands in the
+	// tree, and an exact copy is then rejected. Documented alone, an old
+	// command line silently recreates it -- so it is refused here, before
+	// anything is written or compared.
+	for _, ev := range []struct{ flag, path string }{{"-manifest", *manifest}, {"-against", *against}} {
+		if ev.path == "" {
+			continue
+		}
+		if cerr := gateidentity.CheckOutsideRoot(*dir, ev.path); cerr != nil {
+			fmt.Fprintf(os.Stderr, "identity: %s: %v\n", ev.flag, cerr)
+			os.Exit(2)
+		}
+	}
+	if *expect != "" && *against != "" {
+		// TWO AUTHORITIES, ONE ANSWER. A manifest recording digest A next to
+		// -expect B lets the command verify against B and exit 0 while holding
+		// a manifest that describes something else entirely.
+		fmt.Fprintln(os.Stderr, "identity: -expect and -against both claim the identity; "+
+			"supply one, or they can disagree and the check will not notice")
+		os.Exit(2)
+	}
+	for _, meta := range []struct{ flag, val string }{{"-head", *head}, {"-base", *base}} {
+		if meta.val != "" && !isHex40(meta.val) {
+			fmt.Fprintf(os.Stderr, "identity: %s must be a full 40-character commit, got %q\n",
+				meta.flag, meta.val)
+			os.Exit(2)
+		}
+	}
+	if strings.ContainsAny(*note, "\r\n") {
+		// A NOTE WITH A NEWLINE CAN FORGE A HEADER. The manifest is
+		// line-oriented, so anything that can inject a line can inject a
+		// "# digest" of its own choosing.
+		fmt.Fprintln(os.Stderr, "identity: -note must not contain line breaks")
+		os.Exit(2)
+	}
 
 	digest, entries, err := gateidentity.Digest(*dir)
 	if err != nil {
@@ -58,7 +97,7 @@ func main() {
 		for _, e := range entries {
 			fmt.Fprintf(&b, "%s %s %s\n", e.Sum, e.Mode, e.Path)
 		}
-		if werr := os.WriteFile(*manifest, []byte(b.String()), 0o644); werr != nil {
+		if werr := writeAtomic(*manifest, b.String()); werr != nil {
 			fmt.Fprintln(os.Stderr, "identity:", werr)
 			os.Exit(2)
 		}
@@ -105,4 +144,50 @@ func main() {
 		}
 		os.Exit(2)
 	}
+}
+
+// writeAtomic replaces a manifest in one step.
+//
+// AN INTERRUPTED WRITE MUST NOT DESTROY THE PREVIOUS EVIDENCE. Writing in
+// place leaves a truncated file if anything stops halfway, and a truncated
+// manifest is worse than an old one: it is unreadable at exactly the moment
+// somebody is trying to establish what was tested.
+func writeAtomic(path, body string) error {
+	dir := filepath.Dir(path)
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op once the rename succeeds
+	if _, err := f.WriteString(body); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// isHex40 reports whether a value is a full commit id.
+func isHex40(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }
