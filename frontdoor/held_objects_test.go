@@ -14,9 +14,13 @@ import (
 //
 // A cell that read the fields back out of the table it is checking would be
 // green for any values at all, which is the shape of a test that measures
-// nothing while reporting success. The eight columns below are the contract a
+// nothing while reporting success. The columns below are the contract a
 // client's recovery is written against: change one and this cell says so, and
 // whoever changed it has to say why in the same diff.
+//
+// IT PINS THE RUNTIME REGISTER, which is exhaustive over the object manager's
+// sentinels. The reserved rows are pinned separately, by the cell that also
+// asserts they are not runtime.
 func TestHeldObjects_EveryRowHasItsExactFields(t *testing.T) {
 	t.Parallel()
 
@@ -32,30 +36,46 @@ func TestHeldObjects_EveryRowHasItsExactFields(t *testing.T) {
 	}
 
 	want := map[heldCondition]row{
-		condNoMechanism: {
-			identity: "frontdoor/no-mechanism",
-			sqlState: "57P01",
-			severity: "FATAL",
-			message: "this connection held prepared statements or portals that cannot be " +
-				"moved to another server connection, and it reached the bound on how long " +
-				"one session may hold one",
-			hint: "reconnect; close prepared statements and portals when you have finished " +
-				"with them so the session can give its server connection back",
-			after:   endSession,
-			discard: false,
-			tx:      txNoneOpen,
-		},
-		condExecutionState: {
-			identity: "frontdoor/execution-state",
-			sqlState: "55000",
+		condDuplicateStatement: {
+			identity: "frontdoor/duplicate-prepared-statement",
+			sqlState: "42P05",
 			severity: "ERROR",
-			message: "this portal had already begun returning rows, so its execution cannot " +
-				"be resumed; it has been closed",
-			hint: "run the query again from the start; a portal that has begun returning " +
-				"rows holds a position inside a running query that nothing can reconstruct",
+			message:  "prepared statement already exists",
+			hint:     "close the prepared statement before reusing its name",
+			after:    keepSession,
+			discard:  true,
+			tx:       txUntouched,
+		},
+		condDuplicatePortal: {
+			identity: "frontdoor/duplicate-portal",
+			sqlState: "42P03",
+			severity: "ERROR",
+			message:  "portal already exists",
+			hint: "close the portal before reusing its name, or run it to completion " +
+				"first",
 			after:   keepSession,
 			discard: true,
-			tx:      txStatementAborted,
+			tx:      txUntouched,
+		},
+		condUnknownStatement: {
+			identity: "gate/unknown-statement",
+			sqlState: "26000",
+			severity: "ERROR",
+			message:  "prepared statement does not exist",
+			hint:     "parse the statement again before binding, describing or closing it",
+			after:    keepSession,
+			discard:  true,
+			tx:       txUntouched,
+		},
+		condUnknownPortal: {
+			identity: "gate/unknown-portal",
+			sqlState: "34000",
+			severity: "ERROR",
+			message:  "portal does not exist",
+			hint:     "bind the portal again before running, describing or closing it",
+			after:    keepSession,
+			discard:  true,
+			tx:       txUntouched,
 		},
 		condObjectRecordQuota: {
 			identity: "frontdoor/retained-budget",
@@ -68,15 +88,38 @@ func TestHeldObjects_EveryRowHasItsExactFields(t *testing.T) {
 			discard: true,
 			tx:      txUntouched,
 		},
-		condDuplicateStatement: {
-			identity: "frontdoor/duplicate-prepared-statement",
-			sqlState: "42P05",
+		condNamedObjectCap: {
+			identity: "frontdoor/named-object-cap",
+			sqlState: "53400",
 			severity: "ERROR",
-			message:  "prepared statement already exists",
-			hint:     "close the prepared statement before reusing its name",
+			message: "the session holds as many named prepared statements or portals as it " +
+				"is allowed",
+			hint:    "close unused prepared statements or portals, then retry",
+			after:   keepSession,
+			discard: true,
+			tx:      txUntouched,
+		},
+		condParamCap: {
+			identity: "frontdoor/param-cap",
+			sqlState: "54000",
+			severity: "ERROR",
+			message:  "this Bind carries more parameters than the front door admits",
+			hint:     "send fewer parameters in one Bind",
 			after:    keepSession,
 			discard:  true,
 			tx:       txUntouched,
+		},
+		condPendingCloseCap: {
+			identity: "frontdoor/pending-close-cap",
+			sqlState: "54000",
+			severity: "ERROR",
+			message: "the session holds as many prepared statements awaiting close " +
+				"confirmation as it is allowed",
+			hint: "end the extended segment with Sync so the outstanding closes are " +
+				"confirmed, then close the rest",
+			after:   keepSession,
+			discard: true,
+			tx:      txUntouched,
 		},
 	}
 
@@ -118,7 +161,12 @@ func TestHeldObjects_EveryRowHasItsExactFields(t *testing.T) {
 func TestHeldObjects_SeverityAgreesWithTheConnectionsFate(t *testing.T) {
 	t.Parallel()
 
-	for _, row := range heldObjectRegister() {
+	// THE RESERVED ROWS ARE CHECKED TOO. They are the contract the reclaiming
+	// code will render from, so a contradiction agreed now is a contradiction
+	// shipped later, and it would arrive in the change that has the least
+	// attention left over for it.
+	rows := append(heldObjectRegister(), heldObjectReserved()...)
+	for _, row := range rows {
 		fatal := row.after == endSession
 		if fatal && row.severity != "FATAL" {
 			t.Errorf("%q ends the connection but says severity %q", row.identity, row.severity)
@@ -146,7 +194,7 @@ func TestHeldObjects_TheSafeLiteralNamesNothingInternal(t *testing.T) {
 	t.Parallel()
 
 	forbidden := []string{"exec:", "frontdoor:", "autodb", "extObjects", "Err", "nil", "0x"}
-	for _, row := range heldObjectRegister() {
+	for _, row := range append(heldObjectRegister(), heldObjectReserved()...) {
 		for _, text := range []string{row.message, row.hint} {
 			if text == "" {
 				t.Errorf("%q has an empty message or hint; a client meeting it learns nothing",
@@ -267,7 +315,11 @@ func TestHeldObjects_EveryRowResolvesUnderItsOwnProducer(t *testing.T) {
 // The negative half is the load-bearing one. A mapping that matched too widely
 // would answer an unrelated refusal with a held-object row -- a client told its
 // prepared statement already exists for a statement it never prepared -- and
-// that failure is invisible from the positive cases alone.
+// that failure is invisible from the positive cases alone. The errors in the
+// negative list are the ones this switch sits next to on the same path: a lost
+// wire, an out-of-sequence frame, a dead session, a refusal the admission
+// pipeline owns. Each has its own answer in the catalogue, and each would be
+// silently reclassified by a register that matched one error too many.
 func TestHeldObjects_TheEngineErrorsMapToTheirRows(t *testing.T) {
 	t.Parallel()
 
@@ -277,7 +329,13 @@ func TestHeldObjects_TheEngineErrorsMapToTheirRows(t *testing.T) {
 		want heldCondition
 	}{
 		{"duplicate named parse", exec.ErrDuplicateStatement, condDuplicateStatement},
+		{"duplicate named bind", exec.ErrDuplicatePortal, condDuplicatePortal},
+		{"unknown statement", exec.ErrUnknownStatement, condUnknownStatement},
+		{"unknown portal", exec.ErrUnknownPortal, condUnknownPortal},
 		{"object record refused", exec.ErrRetainedBudget, condObjectRecordQuota},
+		{"named object cap", exec.ErrNamedObjectCap, condNamedObjectCap},
+		{"bind parameter cap", exec.ErrParamCap, condParamCap},
+		{"pending close cap", exec.ErrPendingCloseCap, condPendingCloseCap},
 	} {
 		got, ok := heldConditionFor(tc.err)
 		if !ok || got != tc.want {
@@ -294,11 +352,12 @@ func TestHeldObjects_TheEngineErrorsMapToTheirRows(t *testing.T) {
 		name string
 		err  error
 	}{
-		{"unknown statement", exec.ErrUnknownStatement},
-		{"unknown portal", exec.ErrUnknownPortal},
-		{"named object cap", exec.ErrNamedObjectCap},
-		{"bind parameter cap", exec.ErrParamCap},
-		{"duplicate portal", exec.ErrDuplicatePortal},
+		{"a lost wire", exec.ErrWireFaceLost},
+		{"a frame out of sequence", exec.ErrWireSequenceRefused},
+		{"a session that is gone", exec.ErrSessionNotFound},
+		{"more than one statement in a query", exec.ErrMultiStatement},
+		{"a statement past the size bound", exec.ErrScriptTooLarge},
+		{"a result the decoded producer cannot serve whole", exec.ErrDecodedResultTruncated},
 		{"an unrelated failure", errors.New("something else entirely")},
 	} {
 		if cond, ok := heldConditionFor(tc.err); ok {
@@ -307,16 +366,19 @@ func TestHeldObjects_TheEngineErrorsMapToTheirRows(t *testing.T) {
 	}
 }
 
-// THE TWO RENDERERS ANSWER ONE CONDITION THE SAME WAY.
+// THE TWO RENDERERS ANSWER ONE CONDITION THE SAME WAY, FOR EVERY CONDITION.
 //
 // The simple-query path and the extended path both refuse, and before the
 // register they each carried their own catalogue -- so one client could be told
 // two different SQLSTATEs for one condition depending on which protocol it
-// happened to be speaking, and a fix applied to one left the other wrong.
+// happened to be speaking, and a fix applied to one left the other wrong. The
+// loop runs over every sentinel rather than a chosen two, because that split is
+// exactly how a duplicate portal kept answering 42501 while a duplicate
+// statement answered 42P05.
 func TestHeldObjects_TheSimplePathAnswersFromTheSameRow(t *testing.T) {
 	t.Parallel()
 
-	for _, err := range []error{exec.ErrDuplicateStatement, exec.ErrRetainedBudget} {
+	for _, err := range objectSentinelErrors() {
 		cond, ok := heldConditionFor(err)
 		if !ok {
 			t.Fatalf("%v is not a held-object condition", err)
@@ -332,8 +394,16 @@ func TestHeldObjects_TheSimplePathAnswersFromTheSameRow(t *testing.T) {
 				"says %s/%s/%q/fatal=%v", err, code, rule, hint, fatal,
 				row.sqlState, row.identity, row.hint, row.after == endSession)
 		}
-		if msg := gateMessage(err); msg != row.message {
+		// THE MESSAGE IS THE ROW'S LITERAL AND NEVER THE ENGINE'S TEXT. The
+		// engine's errors all begin with their package name, so the second
+		// assertion here is the one that catches a condition falling through
+		// to the default: it would publish that name to the client.
+		msg := gateMessage(err)
+		if msg != row.message {
 			t.Errorf("the simple path tells the peer %q and the register says %q", msg, row.message)
+		}
+		if msg == err.Error() {
+			t.Errorf("%q reaches the peer as the engine's own error text", msg)
 		}
 	}
 }

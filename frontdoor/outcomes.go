@@ -253,6 +253,11 @@ func Outcomes() []outcome.Registration {
 		// The conditions a session's held prepared statements and portals
 		// produce, declared from the register that renders them so the two
 		// cannot drift.
+		//
+		// THE RUNTIME REGISTER ONLY. held_objects.go also carries a RESERVED
+		// table, whose rows have no producer yet; declaring those here would
+		// make this manifest claim a path the code does not have, and this
+		// manifest is what answers "what can happen in this phase".
 		{Producer: ProducerHeldObjects, Outcomes: heldObjectDecls()},
 		{Producer: ProducerServe, Outcomes: []outcome.Decl{
 			// The ordinary ending: the client said goodbye, or went away.

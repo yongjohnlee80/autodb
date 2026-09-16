@@ -771,14 +771,24 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"cancel", "fd.cancel_stale", outcome.Control, outcome.None},
 		{"handshake", "deadline", outcome.Operational, outcome.None},
 		{"handshake", "handshake-write-failed", outcome.Operational, outcome.None},
-		// The held-object conditions. Every one is a decision not to proceed
+		// The held-object conditions: one per object-manager sentinel
+		// core/exec can raise. Every one is a decision not to proceed
 		// (Refusal) taken on an authenticated session that is already past
 		// every accept-time budget, so no per-source counter is in reach of
 		// them: NotApplicable, and deliberately not None.
+		//
+		// frontdoor/no-mechanism and frontdoor/execution-state are NOT here,
+		// and their absence is asserted rather than assumed: they are reserved
+		// rows with no producer, and a manifest listing them would say this
+		// phase can end on something nothing raises.
+		{"held-objects", "frontdoor/duplicate-portal", outcome.Refusal, outcome.NotApplicable},
 		{"held-objects", "frontdoor/duplicate-prepared-statement", outcome.Refusal, outcome.NotApplicable},
-		{"held-objects", "frontdoor/execution-state", outcome.Refusal, outcome.NotApplicable},
-		{"held-objects", "frontdoor/no-mechanism", outcome.Refusal, outcome.NotApplicable},
+		{"held-objects", "frontdoor/named-object-cap", outcome.Refusal, outcome.NotApplicable},
+		{"held-objects", "frontdoor/param-cap", outcome.Refusal, outcome.NotApplicable},
+		{"held-objects", "frontdoor/pending-close-cap", outcome.Refusal, outcome.NotApplicable},
 		{"held-objects", "frontdoor/retained-budget", outcome.Refusal, outcome.NotApplicable},
+		{"held-objects", "gate/unknown-portal", outcome.Refusal, outcome.NotApplicable},
+		{"held-objects", "gate/unknown-statement", outcome.Refusal, outcome.NotApplicable},
 		{"lifecycle-infrastructure", "internal-error", outcome.Operational, outcome.None},
 		// A backend that could not be opened for ONE REQUEST. Its own
 		// producer, and deliberately not serve's: the session survives it, so

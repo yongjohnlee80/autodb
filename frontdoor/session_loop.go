@@ -1289,30 +1289,14 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 		return "42501", "gate/insufficient-privilege",
 			"the credential does not carry the privilege this statement needs", false
 
-	case errors.Is(err, exec.ErrParamCap):
-		// matrix §7 :384 — a PROGRAM limit (54000), not a configured quota: no operator
-		// setting raises it, so the remedy is to send fewer parameters.
-		return sqlStateProgramLimit, "frontdoor/param-cap",
-			"send fewer parameters in one Bind", false
-
-	case errors.Is(err, exec.ErrNamedObjectCap):
-		// matrix §7 :385. The connection stays: it is this Parse or Bind that is
-		// refused, and closing unused objects makes room.
-		return sqlStateConfiguredLimit, "frontdoor/named-object-cap",
-			"close unused prepared statements or portals, then retry", false
-
-	case errors.Is(err, exec.ErrUnknownStatement):
-		// PostgreSQL'S OWN CODE, not a front-door identity. A client naming a
-		// prepared statement that does not exist gets 26000 from a real server,
-		// and a driver's recovery is written against that. Falling through to the
-		// refusal default told it 42501 — that it lacked PRIVILEGES for a
-		// statement it had simply never successfully parsed.
-		return "26000", "gate/unknown-statement",
-			"the prepared statement does not exist; Parse it again", false
-
-	case errors.Is(err, exec.ErrUnknownPortal):
-		return "34000", "gate/unknown-portal",
-			"the portal does not exist; Bind it again", false
+	// NOTE: the object manager's sentinels — unknown statement or portal,
+	// duplicate name, and the three object quotas — are NOT cases here. They
+	// are answered by the held-object register at the top of this function,
+	// from the same row the extended path renders. They used to be four cases
+	// in this switch and two rows in the register, which is how a duplicate
+	// PORTAL came to answer 42501 while a duplicate STATEMENT answered 42P05:
+	// a second catalogue does not disagree all at once, it disagrees about
+	// whichever condition nobody added to both.
 
 	case errors.Is(err, exec.ErrSessionNotFound):
 		// The session is gone; there is nothing left to be ready for.
