@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"os"
@@ -238,43 +239,54 @@ func goRun(dir string, bound time.Duration, args ...string) (string, error) {
 	// default, so every build in it fails for a reason unrelated to the
 	// mutation.
 	cmd.Env = append(os.Environ(), "GOFLAGS=-buildvcs=false")
+	return runBounded(cmd, bound)
+}
+
+// runBounded runs a command in its own process group and kills the whole group
+// if it outlives the bound.
+//
+// SEPARATED FROM goRun SO IT CAN BE DRIVEN DIRECTLY. Containment is the one
+// path that cannot be proved by reading -- a group kill and a parent kill both
+// compile and both look right -- so the cell that proves it has to hand this
+// function a command of its own, with nothing else inside the measured window.
+func runBounded(cmd *exec.Cmd, bound time.Duration) (string, error) {
 	// ITS OWN PROCESS GROUP, so a timeout can kill the test binary too.
-	// Killing only the `go` parent leaves the child holding the output pipe,
-	// and the runner then waits on it forever — a containment bound that does
-	// not contain.
+	// Killing only the parent leaves the child holding the output pipe, and the
+	// wait below never returns — a containment bound that does not contain.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	// THE RESULT TRAVELS ON A CHANNEL, NOT IN SHARED VARIABLES.
+	// STARTED EXPLICITLY, AND THE PID IS TAKEN BEFORE ANY GOROUTINE EXISTS.
 	//
-	// The previous shape wrote out/err from a goroutine and then read them on
-	// the containment path without receiving — so if the child outlived the
-	// reap bound, the goroutine could still be writing while the runner read.
-	// A race inside the containment path is the worst place to have one: it is
-	// the code that runs precisely when something has already gone wrong.
-	type result struct {
-		out []byte
-		err error
+	// CombinedOutput does Start and Wait together, so the only way to reach the
+	// pid was to read cmd.Process from the containment path while that call was
+	// still running — a data race, found by -race, in the code that runs
+	// precisely when something has already gone wrong. Starting here means the
+	// pid is owned before anything else can touch the command.
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		return "", err
 	}
-	done := make(chan result, 1)
-	go func() {
-		o, e := cmd.CombinedOutput()
-		done <- result{o, e}
-	}()
+	pid := cmd.Process.Pid
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
 
 	select {
-	case r := <-done:
-		return string(r.out), r.err
+	case err := <-done:
+		// Wait has returned, so the writers are closed and the buffer is ours.
+		return buf.String(), err
 	case <-time.After(bound):
-		if cmd.Process != nil {
-			// The GROUP, not just the go parent: killing the parent leaves the
-			// test binary holding the pipe, and the wait below never returns.
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		// The GROUP, not just the parent.
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
 		select {
-		case r := <-done:
-			return string(r.out) + "\n[runner: containment timeout, process group killed]", errTimeout
+		case <-done:
+			return buf.String() + "\n[runner: containment timeout, process group killed]", errTimeout
 		case <-time.After(10 * time.Second):
-			// Nothing shared is read here, so nothing can race the goroutine.
+			// THE BUFFER IS NOT READ HERE. Something is still writing to it, and
+			// reading it to produce a nicer message would be the same race this
+			// function was rewritten to remove.
 			return "[runner: containment timeout; the process group did not reap within the " +
 				"bound, so no output is available]", errTimeout
 		}

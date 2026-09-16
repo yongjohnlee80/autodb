@@ -227,15 +227,19 @@ func TestCLI_HonestMetadataIsRecorded(t *testing.T) {
 	ledger := filepath.Join(filepath.Dir(root), "ledger.manifest")
 	head := strings.Repeat("a", 40)
 
+	base := strings.Repeat("b", 40)
 	if out, code := run(t, bin, "-dir", root, "-manifest", ledger,
-		"-head", head, "-base", strings.Repeat("b", 40), "-note", "task-42"); code != 0 {
+		"-head", head, "-base", base, "-note", "task-42"); code != 0 {
 		t.Fatalf("honest metadata exited %d: %s", code, out)
 	}
 	body, err := os.ReadFile(ledger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"# head " + head, "# note task-42"} {
+	// BASE IS ASSERTED TOO. Without it the command can accept a merge base and
+	// silently drop it while a cell named "HonestMetadataIsRecorded" stays
+	// green — provenance accepted and then lost.
+	for _, want := range []string{"# head " + head, "# base " + base, "# note task-42"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("the manifest does not carry %q, so its provenance was accepted and "+
 				"then dropped", want)
