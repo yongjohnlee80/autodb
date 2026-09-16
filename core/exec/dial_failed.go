@@ -37,10 +37,17 @@ import (
 // entitled to it. A dial failure happened before any of the client's work
 // reached anything; the text describes OUR topology, not their statement.
 //
-// So every dial failure produces the identical client shape and the stage and
-// the raw cause exist only in the audit, where an operator can tell a DNS
-// failure from a TLS one from an upstream authentication failure and the
-// client cannot.
+// So every dial failure produces the identical client shape, and the STAGE,
+// the attempt count and the connection's opaque id are what survive into the
+// audit -- enough for an operator to tell a DNS failure from a TLS one from an
+// upstream authentication failure, and to find the row.
+//
+// THE RAW CAUSE SURVIVES NOWHERE OUTSIDE THIS PROCESS. It used to reach the
+// audit, on the reasoning that the trail is the operator's and the wire is the
+// caller's. That reasoning does not hold: the audit detail becomes
+// EventDialFailed.Detail, published to whatever consumes the event stream, and
+// a driver's connect error carries the host, the role, the database and any
+// credential in the DSN. Cause is in-process only.
 
 // DialStage names WHICH part of opening a backend connection failed. It is an
 // audit fact: the wire shape is the same for every value here, and that
@@ -154,21 +161,28 @@ func normalizeStage(st DialStage) DialStage {
 // Exported because the failure is raised where a backend is acquired and
 // RENDERED in another package, and the cells that prove the client contract
 // have to be able to produce one without an unreachable target of their own.
-func NewDialFailure(cause error) *DialFailure {
-	return &DialFailure{stage: normalizeStage(dialStageOf(cause)), attempts: 1, cause: cause}
-}
-
-// ForConnection records which connection this failure is about. Returns the
-// same failure so a raise site can chain it onto a constructor.
-func (d *DialFailure) ForConnection(connID int64) *DialFailure {
-	d.connID = connID
-	return d
+// THE CONNECTION ID IS A PARAMETER, NOT A SETTER, AND THAT IS THE CORRECTION.
+//
+// It was a chainable ForConnection, and production never called it. Every
+// failure an operator actually saw said conn=0 while the only caller that set
+// an id was the test asserting ids can be set -- so the cell proved the
+// projection COULD carry the row and not that it DOES, which is the same shape
+// of miss as a cell that proves a helper and cannot see its caller.
+//
+// A mutator also lets the value change after the raise site decided it, and a
+// second caller can quietly not set it at all. As a parameter it cannot be
+// forgotten: adding a raise site that does not know its connection does not
+// compile, which is the point at which somebody has to think about it.
+func NewDialFailure(connID int64, cause error) *DialFailure {
+	return &DialFailure{stage: normalizeStage(dialStageOf(cause)), attempts: 1,
+		connID: connID, cause: cause}
 }
 
 // NewDialFailureAt builds one for a caller that already knows the stage,
 // because it was performing that stage when the failure happened.
-func NewDialFailureAt(stage DialStage, cause error) *DialFailure {
-	return &DialFailure{stage: normalizeStage(stage), attempts: 1, cause: cause}
+func NewDialFailureAt(connID int64, stage DialStage, cause error) *DialFailure {
+	return &DialFailure{stage: normalizeStage(stage), attempts: 1,
+		connID: connID, cause: cause}
 }
 
 // Error projects the fixed values and NOT the cause.
@@ -192,7 +206,8 @@ func (d *DialFailure) Error() string {
 
 // Is answers for the sentinel and for NOTHING ELSE. See the type comment: an
 // Unwrap to the cause would hand the cause to the front door's target-error
-// arm.
+// arm -- which is a second reason the cause is unreachable, beside the
+// projections no longer formatting it.
 func (d *DialFailure) Is(target error) bool { return target == ErrDialFailed }
 
 // Cause is the raw driver error, for the audit trail only.
@@ -320,9 +335,9 @@ func (e *Engine) acquireRequestBackend(ctx context.Context, s *session,
 	}
 	target, terr := e.target(ctx, connRow.ID, connRow)
 	if terr != nil {
-		return nil, requestTargetFailure(ctx, terr)
+		return nil, requestTargetFailure(ctx, connRow.ID, terr)
 	}
-	return acquireWithReArbitration(ctx, func() (golibpg.PinnedConn, error) {
+	return acquireWithReArbitration(ctx, connRow.ID, func() (golibpg.PinnedConn, error) {
 		return e.pinTargetBackend(ctx, s, target)
 	})
 }
@@ -360,7 +375,7 @@ func (e *Engine) acquireRequestBackend(ctx context.Context, s *session,
 // default arm that puts an unrecognised error's text on the wire, so returning
 // that error unframed would publish the install's topology to anyone holding a
 // socket, which is the exact disclosure this file exists to prevent.
-func requestTargetFailure(ctx context.Context, err error) error {
+func requestTargetFailure(ctx context.Context, connID int64, err error) error {
 	if ctx.Err() != nil {
 		return requestAbandoned(ctx)
 	}
@@ -372,7 +387,7 @@ func requestTargetFailure(ctx context.Context, err error) error {
 			return err
 		}
 	}
-	return NewDialFailure(err)
+	return NewDialFailure(connID, err)
 }
 
 // acquireWithReArbitration applies the bound to any acquisition.
@@ -382,7 +397,7 @@ func requestTargetFailure(ctx context.Context, err error) error {
 // measuring three things at once, and the one it is about — that a permanently
 // failing target costs exactly two arbitrations and not a loop of them — is the
 // one such a cell proves least directly.
-func acquireWithReArbitration(ctx context.Context,
+func acquireWithReArbitration(ctx context.Context, connID int64,
 	attempt func() (golibpg.PinnedConn, error)) (golibpg.PinnedConn, error) {
 
 	var last error
@@ -435,9 +450,16 @@ func acquireWithReArbitration(ctx context.Context,
 	}
 	if d, ok := DialFailureOf(last); ok {
 		d.attempts = made
+		// A FAILURE RAISED DEEPER MAY NOT HAVE KNOWN ITS CONNECTION, and this
+		// is the level that always does. Filling it here rather than trusting
+		// every inner raise site is what makes "no event says conn=0 when a
+		// row was known" a property of the path instead of a habit.
+		if d.connID == 0 {
+			d.connID = connID
+		}
 		return nil, d
 	}
-	f := NewDialFailure(last)
+	f := NewDialFailure(connID, last)
 	f.attempts = made
 	return nil, f
 }
