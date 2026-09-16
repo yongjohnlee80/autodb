@@ -8,40 +8,134 @@ import (
 	"testing"
 )
 
-// THE RAW CAUSE IS IN-PROCESS ONLY, AND THE COMMENTS MUST NOT SAY OTHERWISE.
-//
-// Two failure types used to format their driver cause into the audit detail,
-// which is published as an event Detail to whatever consumes the stream. Both
-// were corrected, and the prose prescribing the old contract went on standing
-// in five places — including the doc comments of the very functions that had
-// stopped doing it.
-//
-// THAT IS NOT A COSMETIC PROBLEM HERE. A comment saying "the stage and the raw
-// cause go to the audit" is an instruction to the next person who adds a
-// failure type or an audit projection, and they will follow it: it is the only
-// statement of intent in the file. The code and the comment disagreeing means
-// the next raise site is written against the defect.
-//
-// EXCLUSIONS ARE NARROW AND DELIBERATE. A comment that reports what a PAST
-// revision did — "used to", "no longer", "it was" — is history, and erasing
-// history is how the same mistake gets made twice. Those are allowed; a
-// sentence stating the rule in the present is not.
-func TestAuditContract_NoCommentStillPrescribesTheRawCause(t *testing.T) {
-	// Phrases that assert the removed contract as current.
-	forbidden := []string{
-		"raw cause go to the audit",
-		"raw cause goes to the audit",
-		"stage and the raw cause exist only in the audit",
-		"the audit records the cause",
-		"cause is here and nowhere else",
-		"audit is the only place it survives",
-		"the stage and the cause live",
-		"raw cause do reach the audit",
-	}
-	// Markers that make a sentence a report about the past rather than a rule.
-	historical := []string{"used to", "no longer", "it was ", "previously",
-		"earlier version", "this replaced", "corrected", "the defect", "which is the fix"}
+// forbiddenAuditPhrases assert the REMOVED contract as current: that the raw
+// driver cause survives into the audit trail. It does not. The audit detail
+// becomes an event Detail, published to whatever consumes the event stream, and
+// a driver's connect error carries the host, the role, the database and any
+// credential in the DSN.
+var forbiddenAuditPhrases = []string{
+	"raw cause go to the audit",
+	"raw cause goes to the audit",
+	"raw cause for the audit",
+	"stage and the raw cause exist only in the audit",
+	"the audit records the cause",
+	"cause is here and nowhere else",
+	"audit is the only place it survives",
+	"the stage and the cause live",
+	"raw cause do reach the audit",
+	"for the audit trail only",
+	"cause for the audit",
+}
 
+// historyMarkers turn an assertion into a report about a past revision.
+var historyMarkers = []string{"used to", "no longer", "previously", "earlier version",
+	"this replaced", "which this comment", "it was ", "had said", "once said"}
+
+// statesRemovedContract reports the first forbidden phrase a comment asserts in
+// the PRESENT, or "" when it asserts none.
+//
+// THE UNIT IS THE SENTENCE, NOT THE COMMENT GROUP, AND THAT IS THE FIX.
+//
+// The first version of this guard asked whether a history marker appeared
+// anywhere in the group. That made one "used to" exempt every present-tense
+// claim beside it, which is not a theoretical hole: two stale comments passed
+// this guard for a whole round, including the doc comment of Cause itself.
+//
+// It is also the same defect as the arrival guard's group-scoped scope
+// allowance, which I had already written up as a known limitation there. A
+// limitation recorded in one guard and then repeated in the next one is not a
+// limitation, it is a habit — so this one splits on sentence boundaries and
+// asks its question of each sentence alone.
+func statesRemovedContract(comment string) string {
+	for _, sentence := range splitSentences(strings.ToLower(comment)) {
+		for _, phrase := range forbiddenAuditPhrases {
+			if !strings.Contains(sentence, phrase) {
+				continue
+			}
+			historical := false
+			for _, marker := range historyMarkers {
+				if strings.Contains(sentence, marker) {
+					historical = true
+					break
+				}
+			}
+			if !historical {
+				return phrase
+			}
+		}
+	}
+	return ""
+}
+
+// splitSentences breaks comment prose into sentence-ish units. Line breaks
+// count as boundaries as well as full stops, because comment prose wraps and a
+// claim carried across two lines is still one claim per line for this purpose.
+func splitSentences(text string) []string {
+	var out []string
+	for _, line := range strings.Split(text, "\n") {
+		for _, part := range strings.Split(line, ". ") {
+			if s := strings.TrimSpace(part); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	// Adjacent line pairs too, so a phrase that wraps across a line break is
+	// still seen whole — with both lines' history markers in scope, which is
+	// the narrowest honest reading.
+	lines := strings.Split(text, "\n")
+	for i := 0; i+1 < len(lines); i++ {
+		out = append(out, strings.TrimSpace(lines[i]+" "+lines[i+1]))
+	}
+	return out
+}
+
+// THE PREDICATE ITSELF IS TESTED, on the exact statements that got past the
+// previous version.
+func TestStatesRemovedContract_JudgesEachSentenceOnItsOwn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+		want bool // true: must be reported
+	}{
+		{
+			"the exact Cause comment that passed the group-scoped guard",
+			"Cause is the raw driver error, for the audit trail only.",
+			true,
+		},
+		{
+			"the exact acquireRequestBackend sentence that passed it",
+			"before becoming a DialFailure carrying the stage and the raw cause for the audit and never for the wire.",
+			true,
+		},
+		{
+			"history THEN a current claim in one group — the hole being closed",
+			"The cause used to reach the wire, which was wrong.\n" +
+				"Cause is the raw driver error, for the audit trail only.",
+			true,
+		},
+		{
+			"genuine history in the same sentence",
+			"This comment used to say the raw cause goes to the audit, and that is no longer true.",
+			false,
+		},
+		{
+			"the effective rule, stated plainly",
+			"Stage, attempts and the connection's opaque id are durable; the raw cause is in-process only.",
+			false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := statesRemovedContract(tc.text)
+			if (got != "") != tc.want {
+				t.Errorf("statesRemovedContract = %q, want reported=%v\n  text: %s",
+					got, tc.want, tc.text)
+			}
+		})
+	}
+}
+
+// AND NO COMMENT IN THE TREE STATES IT.
+func TestAuditContract_NoCommentStillPrescribesTheRawCause(t *testing.T) {
 	roots := []string{"../../core/exec", "../../frontdoor"}
 
 	fset := token.NewFileSet()
@@ -55,26 +149,13 @@ func TestAuditContract_NoCommentStillPrescribesTheRawCause(t *testing.T) {
 			for name, file := range pkg.Files {
 				files++
 				for _, group := range file.Comments {
-					text := strings.ToLower(group.Text())
-					for _, phrase := range forbidden {
-						if !strings.Contains(text, phrase) {
-							continue
-						}
-						past := false
-						for _, h := range historical {
-							if strings.Contains(text, h) {
-								past = true
-								break
-							}
-						}
-						if !past {
-							t.Errorf("%s: a comment states the REMOVED audit contract as "+
-								"current: %q\n  The rule is: stage, attempts and the "+
-								"connection's opaque id are durable; the raw cause is "+
-								"in-process only. Say that, or mark the sentence as "+
-								"history.\n  comment at %s",
-								name, phrase, fset.Position(group.Pos()))
-						}
+					if phrase := statesRemovedContract(group.Text()); phrase != "" {
+						t.Errorf("%s: a comment states the REMOVED audit contract as "+
+							"current: %q\n  The rule is: stage, attempts and the "+
+							"connection's opaque id are durable; the raw cause is "+
+							"in-process only. Say that, or put the claim and its history "+
+							"in the SAME sentence.\n  comment at %s",
+							name, phrase, fset.Position(group.Pos()))
 					}
 				}
 			}

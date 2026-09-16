@@ -128,14 +128,14 @@ func TestConnectionUnusable_SimpleQueryGetsTheFixedFrameThenOneReadyForQuery(t *
 		t.Errorf("event reason = %q, want %q — the rule a client quotes and the identity an "+
 			"operator greps must be the same string", audited.Reason, ConnectionUnusableRule)
 	}
-	// THE SAFE TRIPLE, AND THIS CELL USED TO DEMAND THE OPPOSITE. It required
-	// the raw cause in the audit, on the reasoning that the audit is the only
-	// place it survives and an operator needs it. The reasoning was wrong
-	// about the audience: Event.Detail is published to whatever consumes the
-	// event stream, and the cause for a configuration failure carries the
-	// target host, any password passed as a query parameter, and a PAT in the
-	// username position. The stage, the connection's opaque id and the fixed
-	// literal are enough to find the row and know which check failed.
+	// THE SAFE TRIPLE, AND THIS CELL USED TO DEMAND THE OPPOSITE. It used to
+	// require the raw cause in the audit, on the reasoning that the audit was
+	// then the only place it survived and an operator needs it. That reasoning
+	// was wrong about the audience: Event.Detail is published to whatever
+	// consumes the event stream, and the cause for a configuration failure
+	// carries the target host, any password passed as a query parameter, and a
+	// PAT in the username position. The stage, the connection's opaque id and
+	// the fixed literal are enough to find the row and know which check failed.
 	for _, want := range []string{"stage=" + string(exec.ConfigStagePool), "conn=7",
 		string(exec.DetailPoolRefused)} {
 		if !strings.Contains(audited.Detail, want) {
