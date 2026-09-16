@@ -1062,9 +1062,10 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 				// uniform instead of leaking.
 				if outcome.Disclosable {
 					return Refuse(outcomeID(outcome.Denied.String()), WithWitness(),
-						RespondWith(WireUniformDenial))
+						WithOutcomeDetail(outcome.Detail), RespondWith(WireUniformDenial))
 				}
-				return Refuse(outcomeID(outcome.Denied.String()), RespondWith(WireUniformDenial))
+				return Refuse(outcomeID(outcome.Denied.String()),
+					WithOutcomeDetail(outcome.Detail), RespondWith(WireUniformDenial))
 			}
 			return Continue()
 		})

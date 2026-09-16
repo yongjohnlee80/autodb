@@ -264,6 +264,11 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 			return authOutcome{
 				Denied:      denialReason(reason),
 				Disclosable: exec.DenialDisclosable(aerr),
+				// Bounded operator diagnosis carried by the denial itself --
+				// which cap held a request that waited, for instance. It rides
+				// into the ONE occurrence this refusal becomes rather than
+				// being written as a second audit row beside it.
+				Detail: exec.DenialDetail(aerr),
 			}, nil
 		}
 		// A LOCKED STORE DOES ARRIVE HERE, AND THIS PACKAGE SAID IT COULD NOT.

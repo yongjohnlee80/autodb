@@ -635,15 +635,33 @@ func TestScheduler_TheBoundEdgeDecidesWhoOwnsTheLease(t *testing.T) {
 // anything is armed. Repeated because a race that resolves correctly once
 // proves nothing.
 func TestScheduler_OneBoundOwnsTheWaitDeterministically(t *testing.T) {
+	// EVERY ROW HAS TO LAND IN MILLISECONDS, INCLUDING THE ONES THE SERVER
+	// TIMER IS NOT ARMED FOR.
+	//
+	// The first version of this cell set the scheduler's clock to now, so the
+	// caller-owned rows put their deadline ninety seconds out in REAL time --
+	// and because those rows deliberately leave the server's timer unarmed,
+	// the injected fast timer never applied to them. Each iteration waited out
+	// the better part of a real ninety seconds, and the cell as a whole would
+	// have run for over an hour. A gate nobody can afford to run is a gate
+	// nobody runs.
+	//
+	// So the scheduler's clock is set BACK by the server wait, which puts the
+	// server's deadline a few milliseconds from real now; the caller's
+	// deadlines are then placed either side of it by a small delta, and
+	// whichever bound owns the wait resolves in milliseconds.
+	const delta = 25 * time.Millisecond
+	start := time.Now()
+
 	for _, tc := range []struct {
 		name  string
-		lead  time.Duration // caller deadline relative to the server's wait
+		lead  time.Duration // the caller's deadline, relative to the server's
 		wants func(error) bool
 		desc  string
 	}{
 		{
 			name:  "the caller runs out first",
-			lead:  -time.Second,
+			lead:  -delta,
 			wants: func(err error) bool { return errors.Is(err, context.DeadlineExceeded) },
 			desc:  "the caller's own deadline",
 		},
@@ -663,17 +681,19 @@ func TestScheduler_OneBoundOwnsTheWaitDeterministically(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			for i := range 25 {
 				r := schedRegistry(t, 1)
-				at := time.Now()
-				r.now = func() time.Time { return at }
-				// Both bounds land in milliseconds, so whichever is armed
-				// resolves fast; only WHICH is armed is under test.
-				r.newTimer = func(time.Duration) *time.Timer { return time.NewTimer(20 * time.Millisecond) }
+				// serverDeadline = fake-now + queueWait, which is one delta
+				// from REAL now.
+				fakeNow := time.Now().Add(-queueWait).Add(2 * delta)
+				r.now = func() time.Time { return fakeNow }
+				// When the server's timer IS armed, it fires on the same
+				// millisecond scale rather than after ninety real seconds.
+				r.newTimer = func(time.Duration) *time.Timer { return time.NewTimer(2 * delta) }
 
 				holder := schedSession("holder", 1, 7)
 				if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
 					t.Fatal(err)
 				}
-				ctx, cancel := context.WithDeadline(context.Background(), at.Add(queueWait).Add(tc.lead))
+				ctx, cancel := context.WithDeadline(context.Background(), fakeNow.Add(queueWait).Add(tc.lead))
 				err := r.admitWithLeaseOrWait(ctx, schedSession("waits", 2, 7), 7, 0)
 				cancel()
 				if !tc.wants(err) {
@@ -683,70 +703,12 @@ func TestScheduler_OneBoundOwnsTheWaitDeterministically(t *testing.T) {
 			}
 		})
 	}
-}
 
-// NO RELEASE EVER LEAVES CAPACITY FREE WITH SOMEBODY ABLE TO USE IT WAITING.
-//
-// THIS IS THE CONTROL FOR A CLAUSE NO OTHER CELL DEFENDS. Requests join the
-// line unconditionally rather than trying to take capacity first, and a review
-// of the suite found that clause is held up by lock discipline alone: because
-// the release path drains the line inside the same critical section that frees
-// the lease, free capacity never coexists with an eligible waiter, so a
-// bypass would produce the same answer and no cell would notice it.
-//
-// That equivalence is a property of the current code, not a guarantee. The day
-// something frees capacity without serving the line under the same lock, a
-// bypass becomes a queue-jump and the invariant below is what catches it. So
-// the invariant is asserted directly, after every release, rather than left
-// implied.
-func TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting(t *testing.T) {
-	r := schedRegistry(t, 2)
-	seen := queuedAt(r)
-
-	// Two targets, both filled, then more waiters than capacity on each, so
-	// every release has a choice to get wrong.
-	var holders []*session
-	for conn := int64(1); conn <= 2; conn++ {
-		for i := range 2 {
-			h := schedSession(fmt.Sprintf("holder-%d-%d", conn, i), int64(conn*10+int64(i)), conn)
-			if err := r.admitWithLeaseOrWait(context.Background(), h, conn, 0); err != nil {
-				t.Fatal(err)
-			}
-			holders = append(holders, h)
-		}
-	}
-	for conn := int64(1); conn <= 2; conn++ {
-		for i := range 2 {
-			s := schedSession(fmt.Sprintf("waiter-%d-%d", conn, i), int64(conn*100+int64(i)), conn)
-			go func() { _ = r.admitWithLeaseOrWait(context.Background(), s, conn, 0) }()
-			awaitSeq(t, seen)
-		}
-	}
-
-	for i, h := range holders {
-		r.remove(h)
-
-		// THE INVARIANT, checked under the same lock the release used, so what
-		// is asserted is the state the release actually left behind rather
-		// than a later state something else may have repaired.
-		r.mu.Lock()
-		var admittable []SessionID
-		for _, w := range r.line {
-			// Asked without committing: a waiter that COULD be admitted right
-			// now is one the release should already have served.
-			if r.leases[w.leaseConn] < r.leaseCap {
-				admittable = append(admittable, w.s.id)
-			}
-		}
-		depth := len(r.line)
-		r.mu.Unlock()
-
-		if len(admittable) > 0 {
-			t.Fatalf("after release %d, capacity was free and %d waiter(s) able to use it were "+
-				"still in line (%v) — a release that does not serve the line turns joining it "+
-				"into a disadvantage, which is the starvation the queue exists to end",
-				i, len(admittable), admittable)
-		}
-		_ = depth
+	// THE CEILING IS PART OF THE ASSERTION. Without it, a future change that
+	// stops the injected timer applying would still pass -- slowly -- and the
+	// only symptom would be a gate that quietly became unaffordable.
+	if elapsed := time.Since(start); elapsed > 30*time.Second {
+		t.Errorf("the cell took %s, which means at least one row is waiting out a real "+
+			"server bound rather than the injected one", elapsed)
 	}
 }

@@ -69,6 +69,20 @@ type wireDenial struct {
 	// refusal was raised. It is set by denyAfterAuthorization and by nothing
 	// else, so it cannot be claimed by a path that has not earned it.
 	authorized bool
+	// detail is bounded operator-facing diagnosis that travels WITH the
+	// denial rather than beside it.
+	//
+	// IT EXISTS SO THERE IS ONE RECORD AND NOT TWO. The first version of the
+	// expired-wait path wrote its own audit line for the blocking cap and then
+	// returned the denial, so a single refusal produced a side audit AND the
+	// registered occurrence -- two rows for one event, which is exactly what a
+	// single-occurrence rule exists to prevent, and which leaves anyone
+	// counting refusals double-counting them. Carried here, the diagnosis
+	// reaches the one occurrence that was always going to be written.
+	//
+	// It never reaches the wire: the client is told the uniform thing its
+	// reason maps to, and this is for the trail alone.
+	detail string
 }
 
 func (e wireDenial) Error() string { return "frontdoor: " + e.reason }
@@ -103,6 +117,23 @@ func deny(reason string) error { return wireDenial{reason: reason} }
 // credential in hand.
 func denyAfterAuthorization(reason string) error {
 	return wireDenial{reason: reason, authorized: true}
+}
+
+// denyAfterAuthorizationWithDetail is denyAfterAuthorization plus bounded
+// operator diagnosis for the one occurrence this denial becomes.
+func denyAfterAuthorizationWithDetail(reason, detail string) error {
+	return wireDenial{reason: reason, authorized: true, detail: detail}
+}
+
+// DenialDetail extracts the operator-facing diagnosis carried by a denial, or
+// "" when it carries none. Paired with DenialReason for the same reason: the
+// package that owns the vocabulary owns how it is read.
+func DenialDetail(err error) string {
+	var d wireDenial
+	if errors.As(err, &d) {
+		return d.detail
+	}
+	return ""
 }
 
 // DenialDisclosable reports whether this denial may say what it was.
@@ -567,16 +598,17 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		// recorded as one that was refused on arrival, so the identity that
 		// says it waited has to win before any cap arm can claim it.
 		case errors.Is(rerr, ErrQueueTimeout):
+			// THE BLOCKING CAP TRAVELS WITH THE DENIAL, NOT BESIDE IT. Writing
+			// a second audit row here would double-count one refusal: the
+			// denial below already becomes a registered occurrence, and the
+			// operator needs one record saying both what happened and which
+			// limit to raise.
+			detail := fmt.Sprintf("waited %s and was not served", queueWait)
 			var qt *QueueTimeoutError
 			if errors.As(rerr, &qt) && qt.BlockedBy() != nil {
-				// The blocking cap is the operator's remedy, so it goes to the
-				// trail -- and only to the trail. It is not the client's
-				// answer, and it is not an identity anything can match on.
-				e.auditBounded(ctx, pat.UserID, ip, "wire_admission_wait_expired",
-					fmt.Sprintf("conn %d: waited %s and was not served; blocked by: %v",
-						connRow.ID, queueWait, qt.BlockedBy()))
+				detail += "; blocked by: " + qt.BlockedBy().Error()
 			}
-			return out, denyAfterAuthorization(DenyQueueTimeout)
+			return out, denyAfterAuthorizationWithDetail(DenyQueueTimeout, detail)
 		case errors.Is(rerr, ErrLeaseCapExceeded):
 			return out, denyAfterAuthorization(DenyLeaseCap)
 		case errors.Is(rerr, ErrAllCapacityInTransaction):
