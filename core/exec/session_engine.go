@@ -336,6 +336,11 @@ func (e *Engine) finishClosing(ctx context.Context, s *session) {
 		}
 		return
 	}
+	// txResidue is what the release gate cannot see for itself: whether this
+	// session's transaction really ended. Only the code that ran the rollback
+	// knows, and a gate that assumed success would return a backend still
+	// holding the transaction's locks to the pool.
+	var txResidue error
 	if tx != nil {
 		// A FRESH bounded context: the session's own is cancelled by now, and
 		// a rollback that cannot run because its context is gone would leave
@@ -347,6 +352,7 @@ func (e *Engine) finishClosing(ctx context.Context, s *session) {
 		outcome := FinalizeRolledBack
 		if rerr != nil {
 			outcome = "rollback_failed"
+			txResidue = rerr
 			e.logf("session %s: rolling back %s on close: %v", s.id, txID, rerr)
 		}
 		e.noteTxOutcome(ctx, txTransition{
@@ -357,15 +363,25 @@ func (e *Engine) finishClosing(ctx context.Context, s *session) {
 			fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, reason))
 	}
 
-	// The pinned backend connection dies with the session. Discard, never
-	// Release: the wire carried this client's SET LOCALs, prepared names and
-	// possibly a poisoned raw face; the pool must destroy it, not recycle it.
+	// The pinned backend outlives the session ONLY IF a reset proves it carries
+	// nothing forward. The wire carried this client's settings, its prepared
+	// names, possibly its temporary tables and an advisory lock or two, and
+	// possibly a poisoned face; release_gate.go runs the reset, checks the
+	// connection reports itself idle afterwards, and hands it back to the pool
+	// only on complete success. Every other ending closes the socket. That
+	// decision is not taken here, so that there is exactly one of it.
 	s.mu.Lock()
 	pc := s.pc
 	s.pc = nil
 	s.mu.Unlock()
 	if pc != nil {
-		pc.Discard()
+		// A context WITHOUT the caller's cancellation, for the same reason the
+		// rollback above needs one: a reset that cannot run because its context
+		// is already gone would discard every backend on a shutdown path, and
+		// worse, would make the gate's verdict a property of the caller's
+		// deadline rather than of the backend.
+		verdict := e.releaseBackend(context.WithoutCancel(ctx), s, pc, txResidue)
+		e.noteBackendFate(ctx, s, ip, verdict)
 	}
 	// The session's own context is cancelled last, once nothing is running on
 	// it and the rollback has had its fresh context.

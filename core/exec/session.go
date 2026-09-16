@@ -205,9 +205,11 @@ type session struct {
 	// life. Every raw simple-query dispatch runs on it, and the session's
 	// transaction is opened THROUGH it (BeginSessionTx), so the raw face and the
 	// owned transaction share one backend — a statement inside BEGIN really runs
-	// inside it. Token sessions never set it. Discarded, never released, on
-	// close: the wire is the client's for the connection's life and a pooled
-	// recycle of it would carry session state to another user.
+	// inside it. Token sessions never set it. On close it goes through the
+	// release gate (release_gate.go) and nowhere else: the pool gets it back
+	// only when a reset has proved it carries none of this client's state
+	// forward, and otherwise the physical connection is closed. Handing it
+	// back unproved is how one developer's settings become another's.
 	pc golibpg.PinnedConn
 	// ext is the session's extended-protocol namespace (F2, matrix §4a): its
 	// wire-level prepared statements and portals. Nil until the first extended

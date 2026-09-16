@@ -114,6 +114,13 @@ type Engine struct {
 	// hookAuditFail makes a bounded audit write fail, so a cell can prove what
 	// happens to an obligation whose record did not land. Nil in production.
 	hookAuditFail func(action string) error
+	// backendReset replaces the reset a closing session runs before its
+	// backend may go back to the pool. It is empty in production, where the
+	// full plan runs; a test fills it with a plan that is missing one step so
+	// the leak that step exists to stop becomes observable. A FIELD rather
+	// than a package variable for the same reason as the quiesce bounds
+	// below: parallel tests reassigning a shared variable is a data race.
+	backendReset []resetStep
 	// closeQuiesce is how long a close waits for an in-flight statement. It
 	// is a FIELD rather than a package variable so a test can shorten it on
 	// its own engine: a shared variable that parallel tests reassign is a
