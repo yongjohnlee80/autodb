@@ -246,14 +246,34 @@ func All() []Mutation {
 				"accepted, which lets the check pass while the record describes something else",
 		},
 		{
-			Name: "cli-validates-its-metadata", Package: "./internal/gateidentity/cmd/identity/",
+			Name: "cli-validates-the-head", Package: "./internal/gateidentity/cmd/identity/",
 			File:        "internal/gateidentity/cmd/identity/main.go",
-			Anchor:      "\t\tif meta.val != \"\" && !isHex40(meta.val) {",
-			Replacement: "\t\tif false {",
-			Test:        "TestCLI_MalformedMetadataIsRefused",
-			Fails:       "want 2",
+			Anchor:      "\tif *head != \"\" && !isHex40(*head) {",
+			Replacement: "\tif false {",
+			Test:        "TestCLI_ShortHeadIsRefused",
+			Fails:       "short head exited",
 			Guarantee: "that a short or malformed commit id is refused, so a manifest cannot " +
 				"record a provenance nobody can resolve",
+		},
+		{
+			Name: "cli-validates-the-base", Package: "./internal/gateidentity/cmd/identity/",
+			File:        "internal/gateidentity/cmd/identity/main.go",
+			Anchor:      "\tif *base != \"\" && !isHex40(*base) {",
+			Replacement: "\tif false {",
+			Test:        "TestCLI_ShortBaseIsRefused",
+			Fails:       "short base exited",
+			Guarantee: "that a malformed merge base is refused on its own route, not merely " +
+				"because the head happened to be checked first",
+		},
+		{
+			Name: "cli-refuses-a-forged-note", Package: "./internal/gateidentity/cmd/identity/",
+			File:        "internal/gateidentity/cmd/identity/main.go",
+			Anchor:      "\tif strings.ContainsAny(*note, \"\\r\\n\") {",
+			Replacement: "\tif false {",
+			Test:        "TestCLI_NoteWithLineBreakIsRefused",
+			Fails:       "newline note exited",
+			Guarantee: "that a note cannot inject a line into a line-oriented manifest, and so " +
+				"cannot forge a digest header of its own choosing",
 		},
 		{
 			Name: "identity-requires-a-digest", Package: "./internal/gateidentity/",

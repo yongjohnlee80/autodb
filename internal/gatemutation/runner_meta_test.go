@@ -169,21 +169,22 @@ func TestRunner_AMutationThatBreaksTheBuildIsInvalid(t *testing.T) {
 	}
 }
 
-// THE SOURCE ROOT IS LEFT EXACTLY AS IT WAS FOUND.
+// THE MUTATED FILE'S BYTES COME BACK, THROUGH THE WHOLE RUNNER.
 //
-// One control leaving the tree dirty turns every later verdict into fiction,
-// and the failure is silent: the next control simply attacks something that is
-// already broken.
-func TestRunner_TheTreeIsRestoredAfterAControl(t *testing.T) {
+// NARROWED TO WHAT THIS CELL CAN ACTUALLY DISTINGUISH. It began and ended with
+// an unchanged 0644 target, so its mode comparison could not tell a real
+// restoration from one that never touched the mode at all — a decorative
+// assertion sitting beside a real one, which is worse than no assertion,
+// because it reads as coverage. Permission restoration is proved in
+// cmd/mutate/restore_test.go, where the mode is perturbed first and the cell
+// reddens if the chmod is removed. What this cell holds is the integration
+// contract: run a control end to end and the bytes are as they were.
+func TestRunner_TheMutatedFileIsRestoredAfterAControl(t *testing.T) {
 	bin, repo := runnerAt(t)
 	dir := disposable(t)
 
 	target := filepath.Join(dir, "internal/gateidentity/identity.go")
 	before, err := os.ReadFile(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	modeBefore, err := os.Stat(target)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,14 +200,6 @@ func TestRunner_TheTreeIsRestoredAfterAControl(t *testing.T) {
 	if string(after) != string(before) {
 		t.Error("the mutated file was not restored byte-for-byte, so every later control " +
 			"would attack a tree nobody has described")
-	}
-	modeAfter, err := os.Stat(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if modeAfter.Mode() != modeBefore.Mode() {
-		t.Errorf("the file's mode changed from %v to %v; a widened mode is a difference the "+
-			"next digest reports and nobody can explain", modeBefore.Mode(), modeAfter.Mode())
 	}
 }
 
@@ -256,5 +249,54 @@ func TestRunner_AControlWithoutAFingerprintIsInvalid(t *testing.T) {
 		t.Errorf("exit 0 for an unscoreable control\n%s", out)
 	}
 	_ = bin
+	_ = repo
+}
+
+// A FINGERPRINT THAT NEVER APPEARS IS NOT A PASS EITHER.
+//
+// The blank-fingerprint cell proves the definition guard. This one proves the
+// ATTRIBUTION boundary: a control whose named cell fails on some OTHER
+// assertion must not earn RED. That is the exact line that stops a neighbour's
+// failure being read as proof, and it can regress while the blank-fingerprint
+// cell stays green — they are different checks in different places.
+func TestRunner_AFailureOnTheWrongAssertionIsInvalid(t *testing.T) {
+	_, repo := runnerAt(t)
+	dir := disposable(t)
+
+	victim := filepath.Join(dir, "internal/gatemutation/mutations.go")
+	body, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Present, non-empty, and never emitted by anything.
+	stripped := strings.Replace(string(body),
+		`"the fingerprint changed when a worktree's .git FILE appeared"`,
+		`"this sentence appears in no assertion anywhere"`, 1)
+	if stripped == string(body) {
+		t.Fatal("could not retarget a fingerprint; this meta-cell is not testing what it claims")
+	}
+	if err := os.WriteFile(victim, []byte(stripped), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	built := filepath.Join(t.TempDir(), "mutate-copy")
+	build := exec.Command("go", "build", "-o", built, "./internal/gatemutation/cmd/mutate")
+	build.Dir = dir
+	build.Env = append(os.Environ(), "GOFLAGS=-buildvcs=false")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building the copy's runner: %v\n%s", err, out)
+	}
+
+	out, code := runRunner(t, built, dir, "-root", dir, "-only", "identity-excludes-git")
+	if !strings.Contains(out, "=INVALID") {
+		t.Errorf("a cell that failed on a different assertion earned something other than "+
+			"INVALID:\n%s", out)
+	}
+	if !strings.Contains(out, "not on the assertion this control claims") {
+		t.Errorf("the runner did not say the failure was unattributed:\n%s", out)
+	}
+	if code == 0 {
+		t.Errorf("exit 0 for an unattributed failure\n%s", out)
+	}
 	_ = repo
 }

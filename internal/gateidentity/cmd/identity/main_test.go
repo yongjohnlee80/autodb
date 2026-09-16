@@ -171,22 +171,75 @@ func TestCLI_ExpectAndAgainstTogetherAreRefused(t *testing.T) {
 	}
 }
 
-// METADATA THAT COULD FORGE A HEADER IS REFUSED.
-func TestCLI_MalformedMetadataIsRefused(t *testing.T) {
+// A SHORT HEAD IS REFUSED.
+//
+// ISOLATED PER ROUTE. One cell covering head, base and note meant a control
+// that bypassed only one of them still reddened through another's assertion,
+// so two command routes stayed unproven while the control looked convincing.
+func TestCLI_ShortHeadIsRefused(t *testing.T) {
 	bin := buildTool(t)
 	root := tree(t)
 	ledger := filepath.Join(filepath.Dir(root), "ledger.manifest")
 
-	for _, tc := range []struct{ name, flag, val string }{
-		{"a short head", "-head", "abc123"},
-		{"a note with a newline", "-note", "ok\n# digest " + strings.Repeat("b", 64)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			out, code := run(t, bin, "-dir", root, "-manifest", ledger, tc.flag, tc.val)
-			if code != 2 {
-				t.Errorf("exit %d, want 2: %s", code, out)
-			}
-		})
+	out, code := run(t, bin, "-dir", root, "-manifest", ledger, "-head", "abc123")
+	if code != 2 {
+		t.Errorf("short head exited %d, want 2: a manifest must not record a provenance "+
+			"nobody can resolve: %s", code, out)
+	}
+}
+
+// A SHORT BASE IS REFUSED.
+func TestCLI_ShortBaseIsRefused(t *testing.T) {
+	bin := buildTool(t)
+	root := tree(t)
+	ledger := filepath.Join(filepath.Dir(root), "ledger.manifest")
+
+	out, code := run(t, bin, "-dir", root, "-manifest", ledger,
+		"-head", strings.Repeat("a", 40), "-base", "def456")
+	if code != 2 {
+		t.Errorf("short base exited %d, want 2: %s", code, out)
+	}
+}
+
+// A NOTE CONTAINING A LINE BREAK IS REFUSED.
+//
+// The manifest is line-oriented, so anything able to inject a line is able to
+// inject a digest header of its own choosing.
+func TestCLI_NoteWithLineBreakIsRefused(t *testing.T) {
+	bin := buildTool(t)
+	root := tree(t)
+	ledger := filepath.Join(filepath.Dir(root), "ledger.manifest")
+
+	out, code := run(t, bin, "-dir", root, "-manifest", ledger,
+		"-note", "ok\n# digest "+strings.Repeat("b", 64))
+	if code != 2 {
+		t.Errorf("newline note exited %d, want 2: %s", code, out)
+	}
+}
+
+// HONEST METADATA IS ACCEPTED AND RECORDED.
+//
+// The positive control for the three refusals above: without it they are all
+// satisfied by a command that rejects every metadata value.
+func TestCLI_HonestMetadataIsRecorded(t *testing.T) {
+	bin := buildTool(t)
+	root := tree(t)
+	ledger := filepath.Join(filepath.Dir(root), "ledger.manifest")
+	head := strings.Repeat("a", 40)
+
+	if out, code := run(t, bin, "-dir", root, "-manifest", ledger,
+		"-head", head, "-base", strings.Repeat("b", 40), "-note", "task-42"); code != 0 {
+		t.Fatalf("honest metadata exited %d: %s", code, out)
+	}
+	body, err := os.ReadFile(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"# head " + head, "# note task-42"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the manifest does not carry %q, so its provenance was accepted and "+
+				"then dropped", want)
+		}
 	}
 }
 
