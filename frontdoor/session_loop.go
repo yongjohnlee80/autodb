@@ -81,7 +81,20 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 	// invites the scheduler to reserve a session nobody is listening for, and
 	// knock into a connection that has no reader -- so the reservation would be
 	// inert and its lease held forever.
-	defer owner.close()
+	//
+	// A NOTICE FOUND HERE IS AN INVARIANT FAILURE, NOT A TIDY-UP. Every path
+	// that can hold one is supposed to have acted on it already; finding one
+	// means a reservation was taken and abandoned, and the session it belongs
+	// to is sitting in closing with nothing coming to release its lease. So it
+	// is recorded loudly AND finalised, rather than discarded.
+	defer func() {
+		if n, woken := owner.close(); woken {
+			l.onEvent(Event{Kind: "fd.internal", Reason: OutcomeInternalError, Peer: peer,
+				Detail: "a demand reclamation notice was still pending when the session loop " +
+					"ended; finalising it here so its lease is released"})
+			owner.finalize(ctx, n, exec.DemandNotAttempted)
+		}
+	}()
 
 	for {
 		// WHICH BUDGET IS OWED IS A QUESTION ABOUT THE STREAM, and the reader is
@@ -147,6 +160,19 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// loop showed it.
 		owner.offer()
 		fr.waitHeader()
+		// RETIRED THE INSTANT THE WAIT ENDS, BEFORE THE FRAME IS LOOKED AT.
+		//
+		// waitHeader is where this loop actually blocks, so it is the whole of
+		// the window in which a notice can be delivered. Leaving the offer open
+		// past it let demand reserve a session mid-frame, and the branches
+		// below that return early -- an oversized header, a refused admission,
+		// a drain that failed -- would then leave with a notice nobody acted
+		// on, against a session already moved to closing. Its lease would never
+		// come back. Closing the window here means a header that has arrived
+		// has already won, and demand cannot reserve behind it.
+		if n, woken := owner.retire(); woken {
+			return l.endForDemand(ctx, conn, be, owner, n, peer, closeReason)
+		}
 		preHeader, hadPre := fr.peekHeader()
 
 		// OVER THE POST-AUTH CAP: refused HEADER-FIRST with the frame §7 gives it.
@@ -195,13 +221,6 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// the engine can only reserve this session while it is genuinely
 		// blocked and able to be told. See frontdoor/demand_wake.go.
 		msg, err := be.Receive()
-		if n, woken := owner.retire(); woken {
-			// BEFORE EITHER msg OR err IS LOOKED AT. A frame that arrived in
-			// the same instant belongs to a session the engine has already
-			// reserved for termination; dispatching it would give one ending
-			// two owners.
-			return l.endForDemand(ctx, conn, be, owner, n, peer, closeReason)
-		}
 		if hdr, ok := fr.consumeHeader(); ok && !hadPre {
 			// Reached only when the connection ended before a header framed.
 			if !l.admitSegmentFrame(conn, be, fr, &seg, hdr, peer, closeReason) {

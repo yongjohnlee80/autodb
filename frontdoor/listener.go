@@ -47,6 +47,10 @@ type Listener struct {
 	// behind the query path refuses every statement and says so, rather than
 	// accepting one it cannot run.
 	queries QueryExecutor
+	// hookDemandManifestBroken lets a cell drive the path where the demand
+	// terminal outcome is undeclared, without editing the declarations and
+	// thereby testing a different package than the one that ships.
+	hookDemandManifestBroken func() bool
 
 	// admit holds every accept-time budget and the per-source throttle.
 	admit *admitter

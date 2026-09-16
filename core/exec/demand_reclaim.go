@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"encoding/json"
 	"sort"
 	"time"
 )
@@ -36,6 +37,28 @@ import (
 // be terminated after becoming active. beginClose moves the session to closing,
 // which every dispatch path already refuses to serve, so reserving it both
 // settles ownership and stops new work in one compare-and-swap.
+
+// DemandDelivery says what the session's owner managed to tell its client
+// before the session ended.
+//
+// TYPED, BECAUSE IT ENDS UP IN A RECORD SOMEBODY READS BACK. It was a bool and
+// then a sentence; a bool cannot distinguish "we tried and the client had gone"
+// from "we never got as far as trying", and a sentence invites a downstream
+// regex nobody should be writing against an audit trail.
+type DemandDelivery string
+
+const (
+	// DemandDelivered: the frame was written and flushed.
+	DemandDelivered DemandDelivery = "delivered"
+	// DemandFlushFailed: the frame was written and the client did not take it.
+	// The session still ends -- holding its lease would punish everyone
+	// waiting in order to protect somebody who is not listening.
+	DemandFlushFailed DemandDelivery = "flush_failed"
+	// DemandNotAttempted: nothing was sent, because something upstream of the
+	// wire was wrong. The session still ends, and the record says the client
+	// was never told rather than implying it refused to listen.
+	DemandNotAttempted DemandDelivery = "not_attempted"
+)
 
 // DemandNotice is what the scheduler offers the session's owner. Exported
 // because the owner is the front door, in another package: this package decides
@@ -272,7 +295,7 @@ func (e *Engine) RegisterDemandWake(id SessionID, knock func()) {
 // THE RETURN VALUE IS NOT DECORATIVE. A caller that ignored it could record a
 // reclamation that another path had already performed, which is how one ending
 // becomes two entries in the trail and two releases of one lease.
-func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint64, delivered bool) bool {
+func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint64, delivery DemandDelivery) bool {
 	s, ok := e.sessions.byIDOnly(id)
 	if !ok || s.gen != gen {
 		// A generation that no longer matches is a notice about a session that
@@ -293,7 +316,7 @@ func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint
 	// The idle time is the justification for ending somebody's session and the
 	// delivery flag is whether they were told; both belong in the record beside
 	// the decision, not in a record of their own.
-	e.completeDemandReason(s, delivered)
+	e.completeDemandReason(s, delivery)
 
 	// NOT PRE-CLAIMED. The teardown slot is claimed by quiesce, inside
 	// finishClosing, and claiming it here first made this path wait on itself:
@@ -323,11 +346,11 @@ func (r *sessionRegistry) byIDOnly(id SessionID) (*session, bool) {
 
 // completeDemandReason folds what only the owner knew into the one record this
 // ending will leave.
-func (e *Engine) completeDemandReason(s *session, delivered bool) {
+func (e *Engine) completeDemandReason(s *session, delivery DemandDelivery) {
 	s.mu.Lock()
 	// The idle time is the one recorded AT SELECTION, not measured again now.
 	// See session.demandIdle.
-	s.closeWhy = ReasonDemandReclaimed + demandOutcomeSuffix(s.demandIdle, s.demandHeldObjects, delivered)
+	s.closeWhy = ReasonDemandReclaimed + demandOutcomeSuffix(s.demandIdle, s.demandHeldObjects, delivery)
 	s.mu.Unlock()
 }
 
@@ -344,14 +367,29 @@ func (s *session) holdsObjects() bool {
 }
 
 // demandOutcomeSuffix completes the close reason with what only the owner knew.
-func demandOutcomeSuffix(idle time.Duration, held bool, delivered bool) string {
-	told := "the client was told"
-	if !delivered {
-		told = "the client could not be told: the connection was already gone"
-	}
+// demandOutcomeSuffix serialises what only the owner knew, as DATA.
+//
+// CANONICAL JSON, NOT PROSE. The audit schema carries one detail string, and
+// the previous version filled it with an English sentence -- which reads well
+// and cannot be queried, so anything downstream that wanted the idle time or
+// the delivery outcome would have had to regex an audit trail. The reason
+// itself stays a stable identity and is never parsed; everything variable is a
+// field beside it.
+func demandOutcomeSuffix(idle time.Duration, held bool, delivery DemandDelivery) string {
 	state := "clean"
 	if held {
-		state = "holds-objects"
+		state = "holds_objects"
 	}
-	return " (idle " + idle.Round(time.Second).String() + "; " + state + "; " + told + ")"
+	payload, err := json.Marshal(struct {
+		ReclaimState   string         `json:"reclaim_state"`
+		IdleMS         int64          `json:"idle_ms"`
+		ClientDelivery DemandDelivery `json:"client_delivery"`
+	}{state, idle.Milliseconds(), delivery})
+	if err != nil {
+		// UNREACHABLE for a struct of two strings and an integer, and it
+		// degrades rather than losing the record: the stable reason above it
+		// is what an operator counts, and it is already written.
+		return " {}"
+	}
+	return " " + string(payload)
 }

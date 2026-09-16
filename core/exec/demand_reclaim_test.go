@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -268,7 +269,7 @@ func TestDemandReclaim_AStaleGenerationCannotEndAReplacementSession(t *testing.T
 			"wake would end a session that was never selected")
 	}
 	e := &Engine{sessions: r}
-	if e.FinishDemandReclaim(context.Background(), "chosen", v.notice.Gen, true) {
+	if e.FinishDemandReclaim(context.Background(), "chosen", v.notice.Gen, DemandDelivered) {
 		t.Error("a notice about one session ended the session that replaced it")
 	}
 	if replacement.get() != sessOpen {
@@ -408,61 +409,6 @@ func TestDemandReclaim_AStaleReceiveTokenIsIgnored(t *testing.T) {
 	}
 }
 
-// ONE ENDING LEAVES ONE RECORD, CARRYING WHAT ONLY THE OWNER KNEW.
-//
-// THIS IS THE CELL FOR A TRAIL THAT DOUBLE-COUNTED. The teardown already
-// records the session closing with the reclamation as its reason; the front
-// door used to write an event of its own beside it, so one ending produced two
-// entries and anyone counting reclamations counted them twice. The two facts
-// only the owner knows — how long the session had been silent, and whether its
-// client actually received the frame — now complete that single record instead
-// of justifying a second one.
-func TestDemandReclaim_TheOneRecordCarriesIdleTimeAndWhetherTheClientWasTold(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		delivered bool
-		wants     string
-	}{
-		{"the client received the frame", true, "the client was told"},
-		{"the client had already gone", false, "could not be told"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			now := time.Now()
-			s := demandHolder("holder", 1, 7, now.Add(-2*time.Hour))
-			r := demandRegistry(t, s)
-			e := &Engine{sessions: r, now: func() time.Time { return now }}
-
-			if _, ok := r.reserveDemandVictim(7, now); !ok {
-				t.Fatal("the holder was not reserved")
-			}
-
-			s.mu.Lock()
-			before := s.closeWhy
-			s.mu.Unlock()
-			if before != ReasonDemandReclaimed {
-				t.Fatalf("the reservation recorded %q, want the reclamation reason", before)
-			}
-
-			// Finalisation completes that reason rather than adding a record.
-			e.completeDemandReason(s, tc.delivered)
-
-			s.mu.Lock()
-			why := s.closeWhy
-			s.mu.Unlock()
-			if !strings.HasPrefix(why, ReasonDemandReclaimed) {
-				t.Errorf("close reason = %q, want it to still name the reclamation", why)
-			}
-			if !strings.Contains(why, "2h0m0s") {
-				t.Errorf("close reason = %q, want it to carry how long the session had been "+
-					"silent — that is the justification for ending it", why)
-			}
-			if !strings.Contains(why, tc.wants) {
-				t.Errorf("close reason = %q, want it to say %q", why, tc.wants)
-			}
-		})
-	}
-}
-
 // AN OFFER IS NEVER ISSUED WITHOUT A KNOCK TO GO WITH IT.
 //
 // The two guards protect different mistakes and both are wanted: this one stops
@@ -527,19 +473,44 @@ func TestDemandReclaim_TheRecordKeepsTheIdleTimeTheDecisionWasMadeOn(t *testing.
 
 	// Everything after selection takes time: the knock, the frame, the flush.
 	clock = at.Add(9 * time.Hour)
-	e.completeDemandReason(s, true)
+	e.completeDemandReason(s, DemandDelivered)
 
+	got := demandRecord(t, s).IdleMS
+	if want := (30 * time.Minute).Milliseconds(); got != want {
+		t.Errorf("idle_ms = %d, want the selection-time %d. Measuring the silence again when "+
+			"the record is written means a client that is slow to accept its frame "+
+			"inflates the justification for ending it", got, want)
+	}
+}
+
+// demandRecord decodes the fields a demand close records.
+//
+// ONE DECODER, SO NO CELL GOES BACK TO MATCHING PROSE. The detail is data
+// precisely so that nothing downstream has to regex an audit trail, and a test
+// that asserts substrings is the first thing downstream.
+func demandRecord(t *testing.T, s *session) struct {
+	ReclaimState   string         `json:"reclaim_state"`
+	IdleMS         int64          `json:"idle_ms"`
+	ClientDelivery DemandDelivery `json:"client_delivery"`
+} {
+	t.Helper()
 	s.mu.Lock()
 	why := s.closeWhy
 	s.mu.Unlock()
-	if !strings.Contains(why, "30m0s") {
-		t.Errorf("close reason = %q, want the thirty minutes of silence the decision rested "+
-			"on", why)
+
+	var got struct {
+		ReclaimState   string         `json:"reclaim_state"`
+		IdleMS         int64          `json:"idle_ms"`
+		ClientDelivery DemandDelivery `json:"client_delivery"`
 	}
-	if strings.Contains(why, "9h") {
-		t.Error("the record measured the silence again at the time of writing, so a client " +
-			"that was slow to accept its frame inflated the justification for ending it")
+	if !strings.HasPrefix(why, ReasonDemandReclaimed+" ") {
+		t.Fatalf("close reason = %q, want the stable identity first then its fields", why)
 	}
+	payload := strings.TrimPrefix(why, ReasonDemandReclaimed+" ")
+	if err := json.Unmarshal([]byte(payload), &got); err != nil {
+		t.Fatalf("the detail is not decodable data (%v): %q", err, payload)
+	}
+	return got
 }
 
 // A HOLDER OF OBJECTS IS ENDED LIKE ANY OTHER, AND THE RECORD SAYS WHICH IT WAS.
@@ -569,7 +540,7 @@ func TestDemandReclaim_AHolderOfObjectsIsEndedAndTheRecordSaysSo(t *testing.T) {
 					portals:    map[string]*extPortal{},
 				}
 			},
-			wants: "holds-objects",
+			wants: "holds_objects",
 		},
 		{
 			name: "a portal still on the backend",
@@ -579,7 +550,7 @@ func TestDemandReclaim_AHolderOfObjectsIsEndedAndTheRecordSaysSo(t *testing.T) {
 					portals:    map[string]*extPortal{"p1": {}},
 				}
 			},
-			wants: "holds-objects",
+			wants: "holds_objects",
 		},
 		{
 			name: "a queued Close the target may not have acted on",
@@ -590,7 +561,7 @@ func TestDemandReclaim_AHolderOfObjectsIsEndedAndTheRecordSaysSo(t *testing.T) {
 					pendingCloses: []objectRef{{}},
 				}
 			},
-			wants: "holds-objects",
+			wants: "holds_objects",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -605,64 +576,91 @@ func TestDemandReclaim_AHolderOfObjectsIsEndedAndTheRecordSaysSo(t *testing.T) {
 				t.Fatal("a holder was not reclaimed; holding objects must not make a session " +
 					"safe from reclamation, only differently recorded")
 			}
-			if got := v.notice.HeldObjects; got != (tc.wants == "holds-objects") {
+			if got := v.notice.HeldObjects; got != (tc.wants == "holds_objects") {
 				t.Errorf("notice.HeldObjects = %v for %s", got, tc.name)
 			}
 
-			e.completeDemandReason(s, true)
-			s.mu.Lock()
-			why := s.closeWhy
-			s.mu.Unlock()
-			if !strings.Contains(why, tc.wants) {
-				t.Errorf("close reason = %q, want it to record %q", why, tc.wants)
+			e.completeDemandReason(s, DemandDelivered)
+			if got := demandRecord(t, s).ReclaimState; got != tc.wants {
+				t.Errorf("reclaim_state = %q, want %q", got, tc.wants)
 			}
 		})
 	}
 }
 
-// ONE ENDING LEAVES ONE RECORD, WHETHER OR NOT THE CLIENT HEARD IT.
+// ONE ENDING LEAVES ONE RECORD, AS DATA, WHETHER OR NOT THE CLIENT HEARD IT.
 //
 // The flush-failed path is the one worth pinning. A client that has stopped
 // reading still has to be ended -- holding its lease would punish everybody
 // waiting to protect somebody who is not listening -- and it is exactly the
 // path where a second record, or none, would be easiest to miss.
-func TestDemandReclaim_OneRecordOnBothTheDeliveredAndUndeliveredPaths(t *testing.T) {
-	for _, delivered := range []bool{true, false} {
-		name := "the client was told"
-		if !delivered {
-			name = "the client had already gone"
-		}
-		t.Run(name, func(t *testing.T) {
+//
+// THE DETAIL IS DECODED, NOT MATCHED. An earlier version wrote an English
+// sentence and this cell asserted substrings of it, which meant the record read
+// well and could not be queried: anything downstream wanting the idle time or
+// the delivery outcome would have had to regex an audit trail. Asserting
+// against the decoded fields is what keeps it data.
+func TestDemandReclaim_OneRecordCarriesTheFactsAsData(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		delivery  DemandDelivery
+		held      bool
+		wantState string
+	}{
+		{"the client was told", DemandDelivered, false, "clean"},
+		{"the client had already gone", DemandFlushFailed, false, "clean"},
+		{"nothing could be sent at all", DemandNotAttempted, false, "clean"},
+		{"a holder of objects", DemandDelivered, true, "holds_objects"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			now := time.Now()
 			s := demandHolder("holder", 1, 7, now.Add(-45*time.Minute))
+			if tc.held {
+				s.ext = &extObjects{
+					statements: map[string]*extStatement{"s1": {}},
+					portals:    map[string]*extPortal{},
+				}
+			}
 			r := demandRegistry(t, s)
 			e := &Engine{sessions: r, now: func() time.Time { return now }}
 
 			if _, ok := r.reserveDemandVictim(7, now); !ok {
 				t.Fatal("the holder was not reserved")
 			}
-			e.completeDemandReason(s, delivered)
+			e.completeDemandReason(s, tc.delivery)
 
 			s.mu.Lock()
 			why := s.closeWhy
 			s.mu.Unlock()
 
-			// EXACTLY ONE reason, carrying every fact, rather than one reason
-			// plus a second record somewhere else saying the same thing.
+			// EXACTLY ONE stable reason, then fields -- not one reason plus a
+			// second record elsewhere saying the same thing.
 			if n := strings.Count(why, ReasonDemandReclaimed); n != 1 {
 				t.Errorf("the close reason names the reclamation %d times, want 1: %q", n, why)
 			}
-			for _, want := range []string{"45m0s", "clean"} {
-				if !strings.Contains(why, want) {
-					t.Errorf("close reason = %q, want it to carry %q", why, want)
-				}
+			if !strings.HasPrefix(why, ReasonDemandReclaimed+" ") {
+				t.Fatalf("close reason = %q, want the stable identity first then its fields", why)
 			}
-			told := "the client was told"
-			if !delivered {
-				told = "could not be told"
+
+			var got struct {
+				ReclaimState   string         `json:"reclaim_state"`
+				IdleMS         int64          `json:"idle_ms"`
+				ClientDelivery DemandDelivery `json:"client_delivery"`
 			}
-			if !strings.Contains(why, told) {
-				t.Errorf("close reason = %q, want it to say %q", why, told)
+			payload := strings.TrimPrefix(why, ReasonDemandReclaimed+" ")
+			if err := json.Unmarshal([]byte(payload), &got); err != nil {
+				t.Fatalf("the detail is not decodable data (%v): %q — anything wanting these "+
+					"facts would have to regex an audit trail", err, payload)
+			}
+			if got.ReclaimState != tc.wantState {
+				t.Errorf("reclaim_state = %q, want %q", got.ReclaimState, tc.wantState)
+			}
+			if got.ClientDelivery != tc.delivery {
+				t.Errorf("client_delivery = %q, want %q", got.ClientDelivery, tc.delivery)
+			}
+			if got.IdleMS != (45 * time.Minute).Milliseconds() {
+				t.Errorf("idle_ms = %d, want the selection-time %d",
+					got.IdleMS, (45 * time.Minute).Milliseconds())
 			}
 		})
 	}
