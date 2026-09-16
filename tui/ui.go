@@ -84,6 +84,7 @@ type Model struct {
 	// invoked from the menu hands the keyboard back to where the operator was
 	// rather than to a bar that is about to close.
 	lastPane tui.Component
+	menu     *widget.Menu // the top bar's menu; nil until New builds it
 	// catalog is every command and menu node, validated once at construction.
 	// Projections re-evaluate state; identity and closures are never rebuilt,
 	// because a command that is a different value each time it is read cannot
@@ -120,7 +121,6 @@ func New(session *Session, notesFor NotesFactory, quit func(), opts ...Option) *
 	dock := tui.NewDock()
 	dock.Pin(tui.DockBottom, m.status)
 	dock.Add(m.outer)
-	m.host = widget.NewOverlayHost(dock)
 
 	// AFTER the components exist, because the handlers close over them, and
 	// ONCE, because rebuilding identity per menu opening would make a command
@@ -132,6 +132,14 @@ func New(session *Session, notesFor NotesFactory, quit func(), opts ...Option) *
 	}
 	m.catalog = cat
 
+	// The bar is built after the catalog because its executor resolves through
+	// it, and pinned to the top of the same dock the status bar is pinned to
+	// the bottom of: OverlayHost > Dock[top bar, fill workspace, bottom status].
+	// The host wraps the whole dock, so a dialog opened from a menu row floats
+	// over the bar as well as the workspace.
+	dock.Pin(tui.DockTop, m.buildMenuBar())
+	m.host = widget.NewOverlayHost(dock)
+
 	return m
 }
 
@@ -141,6 +149,12 @@ func (m *Model) Root() tui.Component { return m }
 func (m *Model) Init(ctx *tui.Context) {
 	m.ctx = ctx
 	ctx.Mount(m.host)
+
+	// The bar has no rows until the catalog is projected for the current state.
+	// Done at mount rather than at construction because the projection asks the
+	// session who is signed in, and a model built before the tree exists cannot
+	// be handed to a widget that is not mounted yet.
+	m.refreshMenuModel()
 
 	tui.SubscribeScoped(ctx, func(ev widget.ModeChangedEvent) {
 		if ev.Owner == m.editor.NodeID() {
@@ -1331,6 +1345,9 @@ func (m *Model) HandleEvent(ev tui.Event) bool {
 		// meant a panel kept its focused color until something else
 		// happened to re-layout (Johno, M6 manual testing).
 		m.applyCursorStyles()
+		// A click into a pane means "I am done with the menu". Deliberately
+		// does not move focus: the click already chose where it goes.
+		m.closeMenuOnBlur()
 		return false
 	}
 	return false
@@ -1437,6 +1454,13 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 	if k.Kind == tui.KeyRelease {
 		return false
 	}
+	// THE BAR GETS FIRST REFUSAL, and takes almost nothing: F10, an Alt chord
+	// that names a visible category, and the FINAL Escape that leaves the menu.
+	// Navigation inside an open menu is the widget's, and intercepting it here
+	// would fork the arrow keys between this app and every other consumer.
+	if m.handleMenuKey(k) {
+		return true
+	}
 	ctrl := k.Mods&tui.ModCtrl != 0
 	if m.pendingCtrlW {
 		m.pendingCtrlW = false
@@ -1477,6 +1501,13 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 		switch k.Code {
 		case 'h', 'j', 'k', 'l':
 			m.movePane(k.Code)
+			return true
+		}
+		// ONLY NOW may the bar claim an Alt chord. Pane motion was here first
+		// and Home's mnemonic is H; taking the chord ahead of it silently broke
+		// Alt+h, which an existing cell caught. Every category stays reachable
+		// through F10 and the arrows, so this costs a keystroke, not a feature.
+		if m.handleMenuAlt(k) {
 			return true
 		}
 	}
