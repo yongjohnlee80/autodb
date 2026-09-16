@@ -532,8 +532,11 @@ func TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn(t *testing.T) {
 		t.Fatal("the fixture does not match both identities, so it cannot test the order")
 	}
 
-	got := admissionDenial(both)
-	if reason := DenialReason(got); reason != DenyQueueTimeout {
+	reason, _, ok := admissionAnswer(both)
+	if !ok {
+		t.Fatal("an expired wait was not recognised as an admission refusal at all")
+	}
+	if reason != DenyQueueTimeout {
 		t.Errorf("reason = %q, want %q — a request that waited was recorded as one refused "+
 			"on arrival, which is not true of it", reason, DenyQueueTimeout)
 	}
@@ -558,12 +561,14 @@ func TestAdmissionDenial_EveryAdmissionRefusalIsAnswered(t *testing.T) {
 		{ErrSessionCapExceeded, DenySessionCap},
 		{ErrResidentBudgetExceeded, DenyResidentBudget},
 	} {
-		if got := DenialReason(admissionDenial(tc.err)); got != tc.want {
-			t.Errorf("%v answered as %q, want %q", tc.err, got, tc.want)
+		got, _, ok := admissionAnswer(tc.err)
+		if !ok || got != tc.want {
+			t.Errorf("%v answered as %q (recognised=%v), want %q", tc.err, got, ok, tc.want)
 		}
 	}
 	// Something that is not an admission refusal must NOT be dressed as one.
-	if d := admissionDenial(errors.New("the meta store would not answer")); d != nil {
-		t.Errorf("an unrelated failure was answered as an admission denial: %v", d)
+	if _, _, ok := admissionAnswer(errors.New("the meta store would not answer")); ok {
+		t.Error("an unrelated failure was classified as an admission refusal, which would " +
+			"hand it a disclosable identity it never earned")
 	}
 }
