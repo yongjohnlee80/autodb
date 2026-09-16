@@ -91,14 +91,30 @@ type Model struct {
 	//   - prefGen is the LATEST INTENT. A stored preference read at sign-in must
 	//     lose to a choice the operator made while it was in flight, and the
 	//     only thing that distinguishes them is which came last.
-	//   - prefWriting and prefPending make the WRITER one-in-flight and
+	//   - prefActive and prefPending make the WRITER one-in-flight and
 	//     coalescing. Two writes racing can persist the older choice last, and
-	//     the store has no opinion about which arrived first.
+	//     the store has no opinion about which arrived first. The slot is a
+	//     TICKET rather than a flag, so retirement can hand it to the next
+	//     person instead of waiting on an RPC that may never return.
 	//   - identity is fenced separately, on the Bound, because two accounts can
 	//     share a connection.
-	prefGen     uint64
-	prefWriting bool
+	prefGen uint64
+	// prefTicket is monotonic; prefActive is the ticket of the write in flight,
+	// or 0 when idle.
+	//
+	// A TICKET RATHER THAN A BOOL, and the difference is a real defect: a bool
+	// says "somebody is writing" and cannot say WHO, so retiring an identity
+	// while its RPC is unfinished left the flag set and every later choice
+	// queued behind a write that might never come back. Retirement retires the
+	// TICKET, and the next person starts immediately; the abandoned completion
+	// still arrives and is recognised as no longer owning the writer.
+	prefTicket  uint64
+	prefActive  uint64
 	prefPending *prefIntent
+	// writeOption performs the preference RPC. Indirected so a cell can observe
+	// WHICH Bound the write actually used — the credential-rebinding defect is
+	// invisible to any test that cannot see that.
+	writeOption func(context.Context, *Bound, string) error
 	menu        *widget.Menu // the top bar's menu; nil until New builds it
 	// menuShown is the projection currently applied, so a reprojection that
 	// would change nothing does not disturb an open cascade.
@@ -112,7 +128,7 @@ type Model struct {
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
 func New(session *Session, notesFor NotesFactory, quit func(), opts ...Option) *Model {
-	m := &Model{session: session, notesFor: notesFor, quit: quit}
+	m := &Model{session: session, notesFor: notesFor, quit: quit, writeOption: optionWriter}
 	for _, o := range opts {
 		if o != nil {
 			o(m)
@@ -466,6 +482,10 @@ func (m *Model) retireIdentity() {
 	// completion still to arrive as well.
 	m.prefGen++
 	m.prefPending = nil
+	// THE TICKET IS RETIRED, NOT WAITED FOR. Leaving it active would make the
+	// next person's choice queue behind an RPC belonging to somebody who has
+	// signed out — and if that RPC never returns, behind it forever.
+	m.prefActive = 0
 }
 
 // notesCapability is what a background task may do with notes: a specific
@@ -1549,7 +1569,7 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 		// result type rather than a managerReload. The reload dispatcher drops
 		// a result whose connection generation has moved, which is right for
 		// ROWS and wrong for a writer ticket: dropping the completion leaves
-		// prefWriting true forever and no preference is ever written again.
+		// the writer owned forever and no preference ever written again.
 		// Currency decides what is REPORTED and what is dispatched next, never
 		// whether the ticket is returned.
 		m.settlePrefWrite(v)

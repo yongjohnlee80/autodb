@@ -340,8 +340,19 @@ type prefIntent struct {
 // see the dispatcher — because a ticket that can be dropped is a writer that
 // can stay busy forever.
 type prefWritten struct {
+	// ticket is the writer slot this completion was issued for. A completion
+	// whose ticket is no longer active owns nothing: it must not clear the
+	// writer, drain the queue, or report.
+	ticket uint64
 	intent prefIntent
 	err    error
+}
+
+// optionWriter is the preference RPC. It takes the Bound EXPLICITLY, which is
+// the point: a writer that reached for the session instead would send one
+// person's choice under whoever is signed in when it runs.
+func optionWriter(ctx context.Context, b *Bound, pref string) error {
+	return b.SetOption(ctx, auth.OptionEditorKeyset, pref)
 }
 
 // chooseEditorKeyset switches the editor now and remembers the choice.
@@ -374,14 +385,23 @@ func (m *Model) chooseEditorKeyset(pref string) {
 // any other waiting one, because the operator's latest answer is the only one
 // worth writing.
 func (m *Model) submitPref(in prefIntent) {
-	if m.prefWriting {
+	if m.prefActive != 0 {
 		queued := in
 		m.prefPending = &queued
 		return
 	}
-	m.prefWriting = true
+	m.prefTicket++
+	ticket := m.prefTicket
+	m.prefActive = ticket
+	write := m.writeOption
+	if write == nil {
+		write = optionWriter
+	}
 	m.ctx.Go(func(ctx context.Context) (any, error) {
-		return prefWritten{intent: in, err: in.bound.SetOption(ctx, auth.OptionEditorKeyset, in.pref)}, nil
+		// in.bound, NEVER m.session.Bind(). The credential is the one the
+		// operator chose under; re-binding here is the defect the capture
+		// exists to prevent.
+		return prefWritten{ticket: ticket, intent: in, err: write(ctx, in.bound, in.pref)}, nil
 	})
 }
 
@@ -392,7 +412,15 @@ func (m *Model) submitPref(in prefIntent) {
 // draining; none of it may decide whether another preference can ever be
 // written.
 func (m *Model) settlePrefWrite(v prefWritten) {
-	m.prefWriting = false
+	// A COMPLETION THAT NO LONGER OWNS THE WRITER OWNS NOTHING. It arrives
+	// after its identity was retired, or after its slot was taken; clearing the
+	// writer here would free a slot somebody else is using, draining the queue
+	// would dispatch their choice on this one's completion, and reporting would
+	// put a departed session's message on screen.
+	if v.ticket != m.prefActive {
+		return
+	}
+	m.prefActive = 0
 
 	// Reported only to the person who chose it, and only if they have not
 	// chosen again since. A failure to save a choice already replaced is noise
