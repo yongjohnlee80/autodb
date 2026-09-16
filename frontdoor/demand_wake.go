@@ -117,8 +117,13 @@ func (o *demandOwner) finalize(ctx context.Context, n exec.DemandNotice, d exec.
 }
 
 // retire closes it and returns any notice published inside it.
+//
+// A ZERO TOKEN MEANS NO OFFER WAS MADE, which is now an ordinary outcome
+// rather than an impossible one: the loop declines to offer when a frame is
+// already framed or in progress. Retiring an offer that was never opened must
+// be silent, not a registry call that could match somebody else's epoch.
 func (o *demandOwner) retire() (exec.DemandNotice, bool) {
-	if !o.live {
+	if !o.live || o.token == 0 {
 		return exec.DemandNotice{}, false
 	}
 	n, ok := o.dr.RetireReceive(o.id, o.token)

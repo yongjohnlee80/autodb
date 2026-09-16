@@ -158,7 +158,26 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		// for exactly the population it exists to reclaim, and silently,
 		// because every part of it in isolation worked. Only driving the real
 		// loop showed it.
-		owner.offer()
+		//
+		// BUT AN OFFER COVERS A WAIT, AND ONLY A WAIT. waitHeader returns
+		// immediately when a header is already framed, and the reader can also
+		// be part-way through a message left by the auth exchange's read-ahead.
+		// In both cases the client has already won before the offer would
+		// exist, and publishing one anyway opens a window -- short, and wide
+		// enough -- in which demand can reserve this session and take the
+		// notice first, discarding a frame that was never ours to discard.
+		//
+		// An offer is a promise that nothing is in flight. It may only be made
+		// when nothing is.
+		_, framed := fr.peekHeader()
+		mid := fr.midMessage()
+		offered := !framed && !mid
+		if offered {
+			owner.offer()
+		}
+		if h := l.hookOfferDecision; h != nil {
+			h(framed, mid, offered)
+		}
 		fr.waitHeader()
 		// RETIRED THE INSTANT THE WAIT ENDS, BEFORE THE FRAME IS LOOKED AT.
 		//

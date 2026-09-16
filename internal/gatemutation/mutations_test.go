@@ -156,6 +156,9 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 func expectedControls() map[string][3]string {
 	return map[string][3]string{
 		// name: {File, Package, Test}
+		"demand-retries-when-a-holder-becomes-askable": {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandRetry_AHolderThatBecomesAskableServesTheRequestThatAlreadyAsked"},
+		"demand-asks-only-for-what-is-missing":         {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandRetry_OneWaitingRequestReclaimsOneHolder"},
+		"a-departed-request-leaves-no-demand":          {"core/exec/scheduler.go", "./core/exec/", "TestDemandRetry_ACancelledRequestLeavesNoDemandBehind"},
 		// ---- L6b: demand reclamation ----
 		"demand-is-wired-to-the-scheduler":             {"core/exec/engine.go", "./core/exec/", "TestDemandReclaim_TheEngineWiresItToTheScheduler"},
 		"only-an-untroubled-holder-is-chosen":          {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen"},

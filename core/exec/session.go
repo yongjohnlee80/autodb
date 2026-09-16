@@ -378,6 +378,28 @@ type sessionRegistry struct {
 	// rather than be told nothing is.
 	txWithinBound map[int64]map[SessionID]time.Time
 
+	// demandMu guards demandWanted and demandPromised alone and is A LEAF, for
+	// exactly the reason txMu is: a demand reservation is taken under a
+	// SESSION's mutex, and recording it under the registry mutex from there
+	// would take registry-then-session in one place and session-then-registry
+	// in another. That is the inversion this package already refuses once.
+	demandMu sync.Mutex
+	// demandWanted counts, per target, the queued requests that need a lease
+	// reclaimed and have not been answered. ONE PER WAITER, cleared when the
+	// waiter leaves the line by any route.
+	demandWanted map[int64]int
+	// demandPromised is, per target, the sessions already reserved for
+	// reclamation whose leases have not yet come back.
+	//
+	// WITHOUT IT, DEMAND EITHER UNDER- OR OVER-SHOOTS. Asking once per arrival
+	// leaves a queued request waiting to expiry when a holder becomes
+	// reclaimable a moment later -- nothing releases on its own under
+	// lease-per-session, so nothing would ever ask again. Asking on every
+	// offer instead would end three sessions for one waiter. The retry is
+	// allowed only while more requests are waiting than reclamations are
+	// already coming.
+	demandPromised map[int64]map[SessionID]struct{}
+
 	// resident is the global weighted memory budget.
 	// The session's FIXED OVERHEAD is charged here as the fourth member of
 	// the reservation — its absence is what recreates the gap for memory
@@ -604,6 +626,11 @@ func (r *sessionRegistry) allLeasesInTransactionLocked(leaseConn int64) bool {
 // remove, so a session cannot leave the registry while still holding a lease.
 func (r *sessionRegistry) releaseReservation(s *session) {
 	if s.reservation.LeaseConn != 0 {
+		// THE PROMISE IS DISCHARGED WHERE THE LEASE COMES BACK, not where the
+		// reclamation was decided. Between those two points the lease is still
+		// held, and a retry that counted it as returned would reclaim a second
+		// session for a request the first one already answers.
+		r.dischargeDemand(s.reservation.LeaseConn, s.id)
 		if n := r.leases[s.reservation.LeaseConn]; n > 1 {
 			r.leases[s.reservation.LeaseConn] = n - 1
 		} else {

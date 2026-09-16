@@ -179,6 +179,11 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 				HeldObjects: s.demandHeldObjects,
 			}
 			knock = s.wake
+			// RECORDED IN THE SAME HOLD AS THE RESERVATION, through the leaf,
+			// so no second ask can be decided against a view in which this one
+			// has not happened yet. That window is exactly where over-reclaim
+			// would live.
+			r.promiseDemand(leaseConn, s.id)
 		}
 		notice := s.pendingNotice
 		s.mu.Unlock()
@@ -232,18 +237,40 @@ func (e *Engine) OfferReceive(id SessionID) uint64 {
 		return 0
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.wake == nil {
 		// NO OFFER WITHOUT A KNOCK. An offer says "I am blocked reading and can
 		// be told"; without a registered knock nothing can make that read
 		// return, so the offer would be a promise this session cannot keep --
 		// and the cost of believing it is a lease held forever by a session
 		// that has been closed and can serve nobody.
+		s.mu.Unlock()
 		return 0
 	}
 	s.tokenSeq++
 	s.recvToken = s.tokenSeq
-	return s.recvToken
+	token := s.recvToken
+	target := s.reservation.LeaseConn
+	s.mu.Unlock()
+
+	// THIS IS THE INSTANT A HOLDER BECOMES ASKABLE, and therefore the only
+	// event that can answer a request that arrived when nothing was.
+	//
+	// A lease is held for a session's whole lifetime, so on a full target
+	// nothing releases by itself: if the arrival ask found every holder busy,
+	// transacting or between offers, no further ask would ever be made and the
+	// queued request would wait out its whole bound. Publishing an offer is
+	// precisely the transition from unaskable to askable, so the ask belongs
+	// here -- and being an event, it costs nothing when nobody is waiting.
+	//
+	// OUTSIDE THIS SESSION'S LOCK. Selecting a victim takes the registry mutex
+	// and then each candidate's, this session among them.
+	//
+	// pressDemand asks only while more requests are waiting than reclamations
+	// are already coming, so a target with one waiter and several idle holders
+	// gives up one lease, not several.
+	e.sessions.pressDemand(target)
+
+	return token
 }
 
 // RetireReceive closes the offer and hands back any notice published inside it.
@@ -415,4 +442,104 @@ func demandOutcomeSuffix(idle time.Duration, held bool, delivery DemandDelivery)
 		return " {}"
 	}
 	return " " + string(payload)
+}
+
+// -- Demand accounting -------------------------------------------------------
+//
+// All four take demandMu and NOTHING ELSE, so any of them may be called from
+// under the registry mutex or from under a session's, which is the whole
+// reason this is a separate leaf rather than more state behind r.mu.
+
+// wantDemand records that one more queued request on this target needs a lease
+// reclaimed.
+func (r *sessionRegistry) wantDemand(leaseConn int64) {
+	if leaseConn == 0 {
+		return
+	}
+	r.demandMu.Lock()
+	defer r.demandMu.Unlock()
+	if r.demandWanted == nil {
+		r.demandWanted = map[int64]int{}
+	}
+	r.demandWanted[leaseConn]++
+}
+
+// dropDemand records that a queued request no longer needs one, whether it was
+// served, cancelled, expired or refused.
+func (r *sessionRegistry) dropDemand(leaseConn int64) {
+	if leaseConn == 0 {
+		return
+	}
+	r.demandMu.Lock()
+	defer r.demandMu.Unlock()
+	if n := r.demandWanted[leaseConn]; n > 1 {
+		r.demandWanted[leaseConn] = n - 1
+	} else {
+		// Deleted rather than left at zero: a map of every target that ever
+		// queued a request grows without bound on a long-lived daemon.
+		delete(r.demandWanted, leaseConn)
+	}
+}
+
+// promiseDemand records that a reclamation has been reserved on this target.
+func (r *sessionRegistry) promiseDemand(leaseConn int64, id SessionID) {
+	if leaseConn == 0 {
+		return
+	}
+	r.demandMu.Lock()
+	defer r.demandMu.Unlock()
+	if r.demandPromised == nil {
+		r.demandPromised = map[int64]map[SessionID]struct{}{}
+	}
+	if r.demandPromised[leaseConn] == nil {
+		r.demandPromised[leaseConn] = map[SessionID]struct{}{}
+	}
+	r.demandPromised[leaseConn][id] = struct{}{}
+}
+
+// dischargeDemand records that a reserved session's lease has come back.
+func (r *sessionRegistry) dischargeDemand(leaseConn int64, id SessionID) {
+	if leaseConn == 0 {
+		return
+	}
+	r.demandMu.Lock()
+	defer r.demandMu.Unlock()
+	m := r.demandPromised[leaseConn]
+	if m == nil {
+		return
+	}
+	delete(m, id)
+	if len(m) == 0 {
+		delete(r.demandPromised, leaseConn)
+	}
+}
+
+// demandOutstanding reports whether more requests are waiting on this target
+// than reclamations are already coming for it.
+func (r *sessionRegistry) demandOutstanding(leaseConn int64) bool {
+	if leaseConn == 0 {
+		return false
+	}
+	r.demandMu.Lock()
+	defer r.demandMu.Unlock()
+	return r.demandWanted[leaseConn] > len(r.demandPromised[leaseConn])
+}
+
+// pressDemand asks for one reclamation on this target, but only while one is
+// still owed.
+//
+// EVERY ASK GOES THROUGH HERE, the arrival and the retry alike, so there is
+// one place that decides whether asking is warranted. Called with no lock
+// held: selecting a victim reads sessions and knocks on a socket.
+func (r *sessionRegistry) pressDemand(leaseConn int64) bool {
+	if r == nil || !r.demandOutstanding(leaseConn) {
+		return false
+	}
+	r.mu.Lock()
+	demand := r.onDemand
+	r.mu.Unlock()
+	if demand == nil {
+		return false
+	}
+	return demand(leaseConn)
 }

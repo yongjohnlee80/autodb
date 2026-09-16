@@ -64,6 +64,9 @@ type admitWaiter struct {
 	// done carries the outcome. Buffered by one so the releasing path never
 	// blocks on a caller that has already given up.
 	done chan error
+	// wantsDemand records that this waiter contributed a demand claim, so the
+	// claim is dropped exactly once however the wait ends. Guarded by r.mu.
+	wantsDemand bool
 }
 
 // resolve delivers one outcome. Caller holds r.mu.
@@ -117,25 +120,35 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 		return ErrAllCapacityInTransaction
 	}
 
+	// THE CLAIM IS RECORDED UNDER THE HOLD THAT DECIDED THIS REQUEST WAITS.
+	// Taken here and not after unlocking, because between those two points a
+	// release could serve this waiter, and a claim recorded for a request that
+	// is no longer queued is one the retry would spend on nobody.
+	w.wantsDemand = true
+	r.wantDemand(leaseConn)
+
 	hook := r.hookWaiterQueued
-	demand := r.onDemand
 	r.mu.Unlock()
 
-	// ASK ONE IDLE HOLDER TO LEAVE, ONCE.
+	// ASK ONE IDLE HOLDER TO LEAVE, AND ASK AGAIN WHEN ONE BECOMES ASKABLE.
 	//
 	// Reached only by a request that is genuinely waiting and that row 5 did
 	// not refuse, so the target is full of holders that are not going to
-	// release on their own. Attempted ONCE rather than in a loop: a loop would
-	// turn one request's arrival into a sweep that ends every idle session on
-	// the target, when one lease is all that was asked for. Sustained pressure
-	// is the line's job, and the line is already holding this request.
+	// release on their own. Not a loop and not a poll: this is one ask, and
+	// the only other ask comes from a session opening a receive offer, which
+	// is the instant an unaskable holder becomes an askable one.
+	//
+	// ONE ASK ALONE WAS A LIVENESS BUG. If every holder was busy, transacting
+	// or between offers at this instant, nothing was reserved -- and because a
+	// lease is held for a session's whole lifetime, nothing releases on its
+	// own. When a holder finished and went back to reading, no one asked
+	// again, so this request could wait out its entire bound beside a holder
+	// that had been reclaimable for most of it.
 	//
 	// Outside the lock because selecting a victim reads sessions, and the freed
 	// lease is NOT handed back here -- it goes through the line like any other
 	// release, so demand cannot become a way to jump the queue.
-	if demand != nil {
-		demand(leaseConn)
-	}
+	r.pressDemand(leaseConn)
 
 	if hook != nil {
 		// Announced OUTSIDE the lock and only once the request is genuinely
@@ -265,10 +278,26 @@ func (r *sessionRegistry) dropFromLineLocked(w *admitWaiter) bool {
 		if x == w {
 			r.line = append(r.line[:i], r.line[i+1:]...)
 			w.state = waitResolved
+			r.clearDemandClaimLocked(w)
 			return true
 		}
 	}
 	return false
+}
+
+// clearDemandClaimLocked gives back this waiter's demand claim, once. Caller
+// holds r.mu.
+//
+// EVERY EXIT FROM THE LINE COMES THROUGH A CALLER OF THIS, which is the
+// property that keeps the count honest: a claim left behind by a cancelled
+// request would make the target look permanently short and reclaim a session
+// for somebody who has gone.
+func (r *sessionRegistry) clearDemandClaimLocked(w *admitWaiter) {
+	if !w.wantsDemand {
+		return
+	}
+	w.wantsDemand = false
+	r.dropDemand(w.leaseConn)
 }
 
 // serveLine admits everyone in the line who can be admitted now. Caller holds
@@ -293,6 +322,7 @@ func (r *sessionRegistry) serveLine() {
 				continue // not now; the place in line is kept
 			}
 			r.line = append(r.line[:i], r.line[i+1:]...)
+			r.clearDemandClaimLocked(w)
 			// A durable refusal is delivered to the waiter rather than
 			// swallowed: the client is entitled to the real reason, and
 			// leaving it in line would hold a connection open forever for a
@@ -331,6 +361,7 @@ func (r *sessionRegistry) closeLine() int {
 	}
 	n := len(r.line)
 	for _, w := range r.line {
+		r.clearDemandClaimLocked(w)
 		w.resolve(r.closed)
 	}
 	r.line = nil
@@ -369,6 +400,7 @@ func (r *sessionRegistry) beginDrainingTarget(connID int64) (int, []*session) {
 			// this says the thing they asked for no longer exists. The send
 			// cannot block: the outcome channel is buffered by one and each
 			// waiter is resolved exactly once.
+			r.clearDemandClaimLocked(w)
 			w.resolve(ErrTargetGone)
 			dropped++
 			continue
