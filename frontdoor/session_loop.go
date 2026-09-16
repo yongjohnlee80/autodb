@@ -1394,11 +1394,15 @@ func (l *Listener) emitGateEvent(err error, rule, peer string) {
 // code could raise, the trail carried an identity no producer owned, and both
 // halves looked correct in isolation.
 //
-// THE AUDIT IS WHERE THE STAGE AND THE CAUSE LIVE, and it is the only place.
-// An operator has to be able to tell a name that would not resolve from a
+// THE AUDIT IS WHERE THE STAGE, THE ATTEMPTS AND THE CONNECTION ID LIVE. An
+// operator has to be able to tell a name that would not resolve from a
 // certificate that expired from an upstream password that changed, because
-// those are three different repairs; the client must not be able to tell them
-// apart at all.
+// those are three different repairs, and has to be able to find the row; the
+// client must not be able to tell them apart at all.
+//
+// THE CAUSE DOES NOT LIVE HERE. This detail is published to whatever consumes
+// the event stream, and a driver's connect error carries the host, the role,
+// the database and any credential in the DSN.
 //
 // ITS OWN KIND, not fd.refused. A refusal is a decision we took about the
 // caller's work, and counting a target outage among them tells an operator

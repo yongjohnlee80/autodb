@@ -196,7 +196,9 @@ func NewConfigFailure(stage ConfigStage, connID int64, detail ConfigDetail, caus
 
 // Error names the stage and nothing else. The cause is deliberately absent:
 // this text reaches operator logs through paths that do not distinguish audit
-// from disclosure, and the audit records the cause explicitly through Cause.
+// from disclosure. The audit does not record the cause either -- stage,
+// connection id and the fixed literal are the durable facts, and Cause is
+// in-process only.
 func (c *ConfigFailure) Error() string {
 	return fmt.Sprintf("%s (%s)", ErrConnectionUnusable.Error(), c.stage)
 }

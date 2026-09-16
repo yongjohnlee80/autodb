@@ -22,8 +22,10 @@ import (
 //  1. The frame is EXACTLY one fixed SQLSTATE, severity and literal message,
 //     the same for every stage a dial can fail at.
 //  2. Nothing from the raw cause reaches any field of it.
-//  3. The stage and the raw cause DO reach the audit trail, because an
-//     operator has three different repairs to choose between.
+//  3. The stage, the attempt count and the connection's opaque id DO reach the
+//     audit trail, because an operator has three different repairs to choose
+//     between and has to find the row. The raw cause does NOT: the audit
+//     detail is published to whatever consumes the event stream.
 //  4. Recovery follows the protocol: in the extended protocol the client's
 //     remaining frames are discarded through its own matching Sync, and then
 //     there is ONE ReadyForQuery. Emitting readiness earlier would tell a
@@ -108,7 +110,7 @@ func TestDialFailed_SimpleQueryGetsTheFixedFrameThenOneReadyForQuery(t *testing.
 	t.Parallel()
 
 	q := okQueries()
-	q.err = exec.NewDialFailure(dialCause())
+	q.err = exec.NewDialFailure(1, dialCause())
 	q.txStatus = txStatusIdle
 	events, addr := loopListener(t, q)
 	conn, fe := authenticated(t, addr)
@@ -222,7 +224,7 @@ func TestDialFailed_EveryStageProducesTheIdenticalFrame(t *testing.T) {
 	var firstName string
 	for name, cause := range causes {
 		q := okQueries()
-		q.err = exec.NewDialFailure(cause)
+		q.err = exec.NewDialFailure(1, cause)
 		_, addr := loopListener(t, q)
 		conn, fe := authenticated(t, addr)
 
@@ -279,7 +281,7 @@ func TestDialFailed_ExtendedInputIsDiscardedThroughTheMatchingSync(t *testing.T)
 	t.Parallel()
 
 	q := okQueries()
-	q.parseErr = exec.NewDialFailure(dialCause())
+	q.parseErr = exec.NewDialFailure(1, dialCause())
 	q.txStatus = txStatusIdle
 	_, addr := loopListener(t, q)
 	conn, fe := authenticated(t, addr)
@@ -372,7 +374,7 @@ func TestDialFailed_AFailureAtExecuteStillEndsInOneReadyForQuery(t *testing.T) {
 	t.Parallel()
 
 	q := okQueries()
-	q.executeErr = exec.NewDialFailure(dialCause())
+	q.executeErr = exec.NewDialFailure(1, dialCause())
 	q.txStatus = txStatusIdle
 	_, addr := loopListener(t, q)
 	conn, fe := authenticated(t, addr)
@@ -505,7 +507,7 @@ func TestRequestAcquisition_TheProducerAndItsRaiseSitesAgreeBothWays(t *testing.
 		err  error
 		kind string
 	}{
-		{"a target that could not be reached", exec.NewDialFailure(dialCause()), EventDialFailed},
+		{"a target that could not be reached", exec.NewDialFailure(1, dialCause()), EventDialFailed},
 		{"a connection this install cannot serve",
 			exec.NewConfigFailure(exec.ConfigStagePool, 7, exec.DetailPoolRefused, errors.New("the pool would not build")),
 			EventConnectionUnusable},
@@ -614,7 +616,7 @@ func TestRequestAcquisition_AnUndeclaredIdentityReachesNoAuditRow(t *testing.T) 
 			h := newRenderHarness(t)
 			h.l.outcomes = stripped
 
-			if !r.render(h, exec.NewDialFailure(dialCause())) {
+			if !r.render(h, exec.NewDialFailure(1, dialCause())) {
 				t.Error("the renderer ended the session; a vocabulary problem of ours " +
 					"must not change what the client's session gets")
 			}

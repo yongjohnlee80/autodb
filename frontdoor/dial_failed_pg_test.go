@@ -78,7 +78,7 @@ func (q *dialFaultQueries) WireQuery(ctx context.Context, id exec.SessionID, use
 	sql, ip string, emit func(exec.WireMessage) error) (byte, error) {
 
 	if dialFaultArmed(sql) {
-		return 0, exec.NewDialFailure(dialFaultCause())
+		return 0, exec.NewDialFailure(1, dialFaultCause())
 	}
 	return q.Engine.WireQuery(ctx, id, userID, sql, ip, emit)
 }
@@ -87,7 +87,7 @@ func (q *dialFaultQueries) WireParse(ctx context.Context, id exec.SessionID, use
 	name, sqlText string, paramOIDs []uint32, ip string) error {
 
 	if dialFaultArmed(sqlText) {
-		return exec.NewDialFailure(dialFaultCause())
+		return exec.NewDialFailure(1, dialFaultCause())
 	}
 	return q.Engine.WireParse(ctx, id, userID, name, sqlText, paramOIDs, ip)
 }

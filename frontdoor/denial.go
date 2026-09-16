@@ -326,8 +326,9 @@ func sendFatalInternal(w io.Writer) error {
 // resolve, a socket that will not connect, a TLS handshake that will not
 // complete, a startup the target refuses, the credential autodb itself
 // presents, the settings re-applied to a fresh backend — reaches the client as
-// exactly these three values, and the stage and the raw cause go to the audit
-// trail alone.
+// exactly these three values, and the stage, the attempt count and the
+// connection's opaque id go to the audit trail. The raw cause goes nowhere
+// outside the process.
 //
 // What goes wrong otherwise is that the text upstream produces describes OUR
 // topology: it names the target host and port, the database, and the role

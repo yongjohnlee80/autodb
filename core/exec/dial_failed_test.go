@@ -42,7 +42,7 @@ func TestDialFailure_TheCauseIsNotReachableByUnwrapping(t *testing.T) {
 		Message: `password authentication failed for user "autodb"`,
 		Detail:  "Connection matched pg_hba.conf line 96",
 	}
-	f := NewDialFailure(upstream)
+	f := NewDialFailure(9, upstream)
 
 	var found *pgconn.PgError
 	if errors.As(error(f), &found) {
@@ -109,7 +109,7 @@ func TestDialFailure_StagesAreAttributedThroughTheNesting(t *testing.T) {
 		{"a deadline", fmt.Errorf("dialing: %w", context.DeadlineExceeded), DialStageConnect},
 		{"something nobody taught this", errors.New("a driver said something new"), DialStageUnclassified},
 	} {
-		if got := NewDialFailure(c.cause).Stage(); got != c.want {
+		if got := NewDialFailure(9, c.cause).Stage(); got != c.want {
 			t.Errorf("%s: stage = %q, want %q", c.name, got, c.want)
 		}
 	}
@@ -127,7 +127,7 @@ func TestDialFailure_OneReArbitrationMaximum(t *testing.T) {
 	t.Parallel()
 
 	attempts := 0
-	_, err := acquireWithReArbitration(context.Background(),
+	_, err := acquireWithReArbitration(context.Background(), 9,
 		func() (golibpg.PinnedConn, error) {
 			attempts++
 			return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
@@ -149,7 +149,7 @@ func TestDialFailure_OneReArbitrationMaximum(t *testing.T) {
 	// EXISTS. Without this the bound could be satisfied by never retrying at
 	// all, and the cell above would still pass.
 	attempts = 0
-	_, err = acquireWithReArbitration(context.Background(),
+	_, err = acquireWithReArbitration(context.Background(), 9,
 		func() (golibpg.PinnedConn, error) {
 			attempts++
 			if attempts == 1 {
@@ -193,7 +193,7 @@ func TestDialFailure_ACancelledRequestIsNotATargetOutage(t *testing.T) {
 	cancel()
 
 	attempts := 0
-	_, err := acquireWithReArbitration(ctx, func() (golibpg.PinnedConn, error) {
+	_, err := acquireWithReArbitration(ctx, 9, func() (golibpg.PinnedConn, error) {
 		attempts++
 		// A REAL DIAL ERROR, not context.Canceled. If the attempt returned the
 		// cancellation itself, a wrap that was still happening would produce a
@@ -235,7 +235,7 @@ func TestDialFailure_ACancellationReportsTheCauseTheCallerAttached(t *testing.T)
 	ctx, cancel := context.WithCancelCause(context.Background())
 	cancel(reason)
 
-	_, err := acquireWithReArbitration(ctx, func() (golibpg.PinnedConn, error) {
+	_, err := acquireWithReArbitration(ctx, 9, func() (golibpg.PinnedConn, error) {
 		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
 	})
 	if !errors.Is(err, reason) {
@@ -260,7 +260,7 @@ func TestDialFailure_AnExpiredRequestIsNotATargetOutage(t *testing.T) {
 	defer cancel()
 
 	attempts := 0
-	_, err := acquireWithReArbitration(ctx, func() (golibpg.PinnedConn, error) {
+	_, err := acquireWithReArbitration(ctx, 9, func() (golibpg.PinnedConn, error) {
 		attempts++
 		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
 	})

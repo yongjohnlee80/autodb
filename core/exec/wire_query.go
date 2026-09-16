@@ -803,7 +803,7 @@ func (e *Engine) pinTargetBackend(ctx context.Context, s *session, target dao.Da
 		// point: returning first and destroying later would leave a window in
 		// which a backend nobody could sanitise is still in the pool, and the
 		// next caller would inherit exactly the state this refused to accept.
-		return nil, NewDialFailureAt(DialStageSettings, cerr)
+		return nil, NewDialFailureAt(s.connID, DialStageSettings, cerr)
 	}
 	s.mu.Lock()
 	if s.pc != nil { // lost a race that the claim should make impossible; keep the first
