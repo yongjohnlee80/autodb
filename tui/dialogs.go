@@ -61,26 +61,47 @@ func (m *Model) openDialogScrimmed(title, prose string, answers ...dialogAnswer)
 	return m.openDialogOpts(title, prose, true, answers)
 }
 
-// openDialogNoDefault asks a question with NO affirmative default, and it is a
-// named exception rather than a convenience.
+// openDialogNoDefault asks a question whose affirmative must not be one keypress
+// away: nothing here may be reached by a bare Enter on an untouched dialog.
 //
-// The allowlist-widening consent is built this way on purpose, and its own
-// comment records why: "ONE entry, and it is y. Esc and q close it with nothing
-// done, so the default is NO by construction rather than by a highlighted
-// button somebody can tab onto and press." A review already found that prompt
-// agreeing to something the operator could not see, and the affordance it must
-// not have is a focused, Enter-able yes.
+// REMOVING THE ROLE IS NOT ENOUGH, and an earlier version of this helper got
+// that wrong in a way worth recording. It refused a ButtonRoleDefault answer and
+// stopped there — but golib's Modal seeds focus on the default button IF THERE
+// IS ONE, and otherwise on the FIRST ENABLED BUTTON. Delete and Revoke listed
+// their irreversible answer first, so focus landed on it and bare Enter deleted
+// the note. The guard checked the ROLE while the affordance is decided by ORDER,
+// and the cell that checked the guard agreed with it.
 //
-// It refuses to build one with a default, because the next person to add an
-// answer here would otherwise reintroduce exactly that.
+// So this does two things instead of one: it requires a declining answer, and it
+// puts that answer FIRST, which is what Modal's fallback actually consults. The
+// affirmative is still reachable by its mnemonic, by Tab, and by a click — it is
+// simply never the thing already under the cursor.
 func (m *Model) openDialogNoDefault(title, prose string, answers ...dialogAnswer) *widget.Modal {
-	for _, a := range answers {
+	var cancel int = -1
+	for i, a := range answers {
 		if a.role == widget.ButtonRoleDefault {
 			panic("tui: openDialogNoDefault: answer " + string(a.mnemonic) +
 				" is ButtonRoleDefault; this surface exists to not have one")
 		}
+		if a.role == widget.ButtonRoleCancel && cancel < 0 {
+			cancel = i
+		}
 	}
-	return m.openDialogOpts(title, prose, false, answers)
+	if cancel < 0 {
+		panic("tui: openDialogNoDefault: no declining answer. Modal focuses the " +
+			"first enabled button when nothing is default, so a dialog without " +
+			"one puts its affirmative under the cursor")
+	}
+	// The declining answer moves to the front, because FIRST is what Modal's
+	// focus fallback means by "safe".
+	ordered := make([]dialogAnswer, 0, len(answers))
+	ordered = append(ordered, answers[cancel])
+	for i, a := range answers {
+		if i != cancel {
+			ordered = append(ordered, a)
+		}
+	}
+	return m.openDialogOpts(title, prose, false, ordered)
 }
 
 func (m *Model) openDialogOpts(title, prose string, scrim bool, answers []dialogAnswer) *widget.Modal {
@@ -119,6 +140,16 @@ func (m *Model) openDialogOpts(title, prose string, scrim bool, answers []dialog
 	md = widget.NewModal(body,
 		widget.WithModalTitle(title),
 		widget.WithButtons(buttons...),
+		// `q` CLOSES A CONFIRMATION, as it always did. These surfaces were
+		// leaderMenu confirmations before the conversion and honoured `q`
+		// alongside Escape; a Modal traps focus and swallows it, so becoming a
+		// dialog silently took the key away while dismissKey's comment went on
+		// promising it. golib v0.5.25 added the option that gives it back.
+		//
+		// A dialog carries prose and buttons and nothing that accepts typed
+		// text, so there is no letter to lose — which is exactly why the FORMS
+		// do not declare it. See openFormOpts.
+		widget.WithModalDismissKeys('q'),
 		widget.WithScrim(scrim))
 	if err := md.Open(m.host); err != nil {
 		m.setError("open " + title + ": " + err.Error())
