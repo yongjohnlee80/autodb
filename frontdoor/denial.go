@@ -241,6 +241,73 @@ const (
 )
 
 // sendFatalInternal writes the stable internal-error frame.
+// A STARTUP THAT FAILED FOR OUR OWN REASONS TELLS THE CALLER THE CONNECTION IS
+// NOT AVAILABLE, AND ENDS.
+//
+// This is the shape the lockout this whole task exists to fix wore. A
+// PostgreSQL-wire session pins its backend DURING OpenWireSessionWith, before
+// the client ever sees ReadyForQuery, so a locked secret store or a connection
+// this install cannot serve surfaces inside authentication. Everything that
+// was not a denial was filed as an auth-store error and answered with the
+// uniform credential denial -- so a developer holding a perfectly good token,
+// against a target whose DSN we could not decrypt, was told their CREDENTIAL
+// was wrong. They then retried, and the retries were charged to their address.
+//
+// FATAL RATHER THAN ERROR, and that is what separates these from the
+// request-time shapes beside them. There is no session yet: no ReadyForQuery
+// has been sent, so there is nothing for the caller to carry on with, and a
+// non-fatal frame here would leave a client waiting for a readiness byte that
+// is never coming. The request-time versions stay ERROR precisely because
+// there a session DOES exist and does survive.
+//
+// 57P03 cannot_connect_now is PostgreSQL's own answer for "the server is not
+// accepting connections right now, try later", which is exactly true of a
+// locked store and tells the caller nothing about why. F0000 is the same code
+// the request-time configuration failure uses, so one identity spans both
+// lifecycles and an operator greps one string.
+type startupFatalFrame struct {
+	sqlState string
+	message  string
+	hint     string
+}
+
+// startupFatalFrames is the row table. The identity decides the frame, so the
+// wire and the audit cannot name two different things.
+func startupFatalFrames() map[outcome.ReasonID]startupFatalFrame {
+	return map[outcome.ReasonID]startupFatalFrame{
+		outcomeID(OutcomeStartupConnectionUnavailable): {
+			sqlState: "57P03",
+			message:  "this connection is not available right now",
+			hint:     "try again shortly; if it persists, ask an operator to check this connection",
+		},
+		outcomeID(OutcomeStartupConnectionUnusable): {
+			sqlState: ConnectionUnusableSQLState,
+			message:  ConnectionUnusableMessage,
+			hint:     "ask an operator to check this connection's configuration",
+		},
+	}
+}
+
+// sendStartupFatal writes the frame for one startup failure. It reports
+// whether the identity had a row: an identity with none must not reach the
+// wire at all, because the alternative is inventing a frame for it here.
+func sendStartupFatal(w io.Writer, id outcome.ReasonID) (bool, error) {
+	f, ok := startupFatalFrames()[id]
+	if !ok {
+		return false, nil
+	}
+	be := pgproto3.NewBackend(emptyReader{}, w)
+	be.Send(&pgproto3.ErrorResponse{
+		Severity:            "FATAL",
+		SeverityUnlocalized: "FATAL",
+		Code:                f.sqlState,
+		Message:             f.message,
+		Detail:              string(id),
+		Hint:                f.hint,
+	})
+	return true, be.Flush()
+}
+
 func sendFatalInternal(w io.Writer) error {
 	be := pgproto3.NewBackend(emptyReader{}, w)
 	be.Send(&pgproto3.ErrorResponse{

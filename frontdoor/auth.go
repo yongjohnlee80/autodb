@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/outcome"
 )
@@ -260,22 +261,42 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 				Disclosable: exec.DenialDisclosable(aerr),
 			}, nil
 		}
-		// A LOCKED STORE DOES NOT ARRIVE HERE, and an earlier version of this
-		// feature wrongly assumed it did.
+		// A LOCKED STORE DOES ARRIVE HERE, AND THIS PACKAGE SAID IT COULD NOT.
 		//
-		// The assumption came from a source trace — openTarget decrypts the
-		// DSN and returns ErrLocked — which is true of openTarget and false of
-		// this path: OpenWireSessionWith never opens a target. The DSN is
-		// decrypted at the FIRST STATEMENT, so a locked store lets a client
-		// authenticate and refuses its query, which is post-auth and handled
-		// in session_loop.go's classifyGateError.
+		// The claim that stood here was that OpenWireSessionWith never opens a
+		// target, so the DSN is decrypted at the first statement and a locked
+		// store lets a client authenticate and refuses its query. That is true
+		// of connections whose engine does not speak the PostgreSQL wire. It
+		// is FALSE of the ones this front door is for: OpenWireSessionWith
+		// pins the backend for a PostgreSQL-wire connection before the client
+		// is ever told the session is ready, so decrypting the DSN -- and
+		// resolving the target, and asserting the driver's capabilities --
+		// all happen INSIDE the credential phase.
 		//
-		// A branch for it here would be one that cannot fire, so there is not
-		// one. What guards the assumption instead is a cell that asserts the
-		// ARRIVAL POINT — that opening SUCCEEDS on a locked store and the
-		// first query fails — which reddens if anything ever moves the target
-		// open earlier, rather than a dead branch nobody would notice was
-		// dead.
+		// The cell that was supposed to guard the claim used a SQLite fixture,
+		// which never reaches the pin, so it proved the claim on the one
+		// engine the claim happens to hold for and said nothing about the
+		// others. A guard that cannot fail on the case it guards is not a
+		// guard; correcting that cell is part of this change.
+		//
+		// WHAT THE OLD CODE DID WITH IT IS THE LOCKOUT THIS WORK EXISTS TO
+		// FIX. Everything that was not a denial became an auth-store error
+		// answered with the uniform credential denial, so a developer holding
+		// a verified token, against a connection whose secret store was
+		// locked, was told their CREDENTIAL was wrong -- and their retries
+		// were charged to their address until it was throttled.
+		//
+		// So the two are branched before the generic arm, each with its own
+		// registered identity and its own safe FATAL frame. The caller learns
+		// that the connection is unavailable or misconfigured, which is true,
+		// costs them no failure budget, and tells them nothing about why.
+		if startup := startupFailureIdentity(aerr); startup != "" {
+			// THE RAW CAUSE GOES TO THE OPERATOR AND NOWHERE ELSE. It names
+			// the connection, and for a configuration failure the engine and
+			// whatever the DSN parser objected to.
+			l.onLog(fmt.Sprintf("frontdoor: starting a wire session for %s: %v", peer, aerr))
+			return authOutcome{Failure: startup, Respond: WireStartupFatal}, aerr
+		}
 		// A store failure. The wire still gets the uniform denial — telling
 		// a caller that our database is unreachable is an answer they have
 		// not earned either — but the audit says what it was, and the
@@ -467,4 +488,25 @@ func newBackendKey() (*pgproto3.BackendKeyData, error) {
 		ProcessID: binary.BigEndian.Uint32(b[0:4]),
 		SecretKey: b[4:],
 	}, nil
+}
+
+// startupFailureIdentity names the registered outcome for a wire-session open
+// that failed for one of OUR reasons, or "" when the failure is not one of
+// them.
+//
+// IT LISTS RATHER THAN INFERS, for the reason the acquisition path lists its
+// own answers: there is nothing in a wrapped error that distinguishes "the
+// secret store is locked" from "the target refused our credential", and
+// guessing would put a wrong fact in an operator's trail. A failure that is
+// not listed keeps the generic store-outage handling, which is the
+// conservative half -- an unlisted failure is answered with the uniform denial
+// rather than with a frame naming something we have not established.
+func startupFailureIdentity(err error) outcome.ReasonID {
+	switch {
+	case errors.Is(err, auth.ErrLocked):
+		return outcomeID(OutcomeStartupConnectionUnavailable)
+	case errors.Is(err, exec.ErrConnectionUnusable):
+		return outcomeID(OutcomeStartupConnectionUnusable)
+	}
+	return ""
 }

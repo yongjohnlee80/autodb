@@ -749,6 +749,8 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"authenticate-and-open", "auth-worker-unavailable", outcome.Operational, outcome.None},
 		{"authenticate-and-open", "frontdoor/auth-not-yet-available", outcome.Refusal, outcome.None},
 		{"authenticate-and-open", "frontdoor/auth-store-error", outcome.Operational, outcome.None},
+		{"authenticate-and-open", "frontdoor/startup-connection-unavailable", outcome.Operational, outcome.None},
+		{"authenticate-and-open", "frontdoor/startup-connection-unusable", outcome.Operational, outcome.None},
 		{"authenticate-and-open", "frontdoor/bad-credential", outcome.Refusal, outcome.Credential},
 		{"authenticate-and-open", "frontdoor/database-mismatch", outcome.Refusal, outcome.None},
 		{"authenticate-and-open", "frontdoor/ip-not-admitted", outcome.Refusal, outcome.Credential},

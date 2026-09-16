@@ -484,3 +484,73 @@ func TestAcquireRequestBackend_ConfigurationFaultsAreNeitherDialledNorRetried(t 
 		})
 	}
 }
+
+// THE PRODUCTION CALLER MUST NOT UNDO WHAT THE BOUNDARY DECIDED.
+//
+// THIS IS THE CELL THE LAST ROUND WAS MISSING, AND THE REASON IT WAS MISSED IS
+// WORTH WRITING DOWN. The boundary check was proved by calling
+// pinTargetBackend directly, which is the right way to prove a boundary and
+// the wrong way to prove a system: a helper that answers correctly and a
+// caller that overrides it are indistinguishable from a helper that answers
+// wrongly, and a cell that cannot see the caller cannot tell them apart. The
+// retry loop was retrying the capability failure and wrapping it, so
+// production returned DialFailed(unclassified, attempts=2) — a target outage
+// in the trail, an acquisition count for acquisitions that never happened, the
+// capability stage gone, and a second pin attempted against a driver already
+// known to be unusable.
+func TestAcquireRequestBackend_AnIncapableDriverIsRefusedOnceThroughTheProductionPath(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
+	if err != nil {
+		t.Fatalf("reading the connection row: %v", err)
+	}
+
+	c := newGateConn() // deliberately incapable: no Destroy method
+	pins := 0
+	origPin := pinSessionConn
+	t.Cleanup(func() { pinSessionConn = origPin })
+	pinSessionConn = func(context.Context, dao.DataConn) (golibpg.PinnedConn, error) {
+		pins++
+		return c, nil
+	}
+
+	s := &session{}
+	pc, aerr := f.eng.acquireRequestBackend(ctx, s, row)
+
+	if pc != nil {
+		t.Error("a pin was returned for a driver that cannot destroy a backend on demand")
+	}
+	cf, ok := ConfigFailureOf(aerr)
+	if !ok {
+		t.Fatalf("err = %v, want the capability failure to survive its caller", aerr)
+	}
+	if cf.Stage != ConfigStageCapability {
+		t.Errorf("stage = %q, want %q — the caller kept the error and lost what it said",
+			cf.Stage, ConfigStageCapability)
+	}
+	if errors.Is(aerr, ErrDialFailed) {
+		t.Error("this install's own missing capability was reported as a target outage; the " +
+			"operator's trail records a target that is perfectly healthy")
+	}
+	if d, isDial := DialFailureOf(aerr); isDial {
+		t.Errorf("a dial failure reached the caller claiming %d attempt(s); no permit was "+
+			"taken and no socket was opened", d.Attempts)
+	}
+
+	// EXACTLY ONE ARBITRATION. A second pin against a driver already known to
+	// be unusable spends an instance-wide permit to learn the same thing.
+	if pins != 1 {
+		t.Errorf("the backend was pinned %d time(s), want exactly 1", pins)
+	}
+	if c.discarded != 1 {
+		t.Errorf("discarded %d time(s), want 1: the member is clean and unused", c.discarded)
+	}
+	if len(c.ran) != 0 {
+		t.Errorf("%d statement(s) ran on a backend that should never have been used: %v",
+			len(c.ran), c.ran)
+	}
+	if got := s.pinnedConn(); got != nil {
+		t.Error("the rejected pin was stored on the session, where a later path can find it")
+	}
+}

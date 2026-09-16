@@ -231,16 +231,33 @@ func (e *Engine) releaseBackend(ctx context.Context, s *session, pc golibpg.Pinn
 // not an older driver — it is that invariant being broken, which is a defect
 // in this package and is logged as one rather than quietly absorbed.
 func (e *Engine) destroyBackend(_ context.Context, pc golibpg.PinnedConn) {
-	if golibpg.Destroy(pc) {
+	if d, ok := pc.(golibpg.Destroyer); ok {
+		d.Destroy()
 		return
 	}
-	// The lease is still relinquished. Refusing to would strand the pool
-	// member forever, which is worse than a member the pool may recycle, and
-	// this path is unreachable unless the boundary assertion has been removed.
+	// THE DEFENSIVE MISS DOES NOT HAND THE BACKEND BACK, AND THAT IS A CHANGE.
+	//
+	// It used to Discard here, on the reasoning that stranding a pool member
+	// forever is worse than one the pool may recycle. That reasoning is wrong
+	// for THIS member. Everything reaching this function is a backend a
+	// session has USED and whose reset could not be proved, so what Discard
+	// risks is not an idle slot: it is the driver's own reuse test deciding
+	// that a backend carrying another developer's session state is fit to
+	// serve the next one. That is the leak the whole release gate exists to
+	// prevent, reintroduced on the one path nobody expected to run.
+	//
+	// So it costs a pool slot instead, and says so loudly. The slot is
+	// recoverable by restarting; the contaminated session that would have been
+	// handed to the next caller is not.
+	//
+	// UNREACHABLE unless pinTargetBackend's boundary assertion has been
+	// removed, which is why this is logged as a defect in this package rather
+	// than as an older driver being coped with.
 	e.logf("BUG: a pinned backend reached destruction without the capability that " +
-		"pinTargetBackend requires of every pin; its session state could not be " +
-		"guaranteed cleared and the driver's own reuse test decided its fate")
-	pc.Discard()
+		"pinTargetBackend requires of every pin. Its lease is NOT being returned: its " +
+		"session state could not be cleared, and handing it back would let the driver's " +
+		"own reuse test give another caller's state to the next request. One pool slot " +
+		"is held until restart")
 }
 
 // proveBackendClean runs the gate's limbs in order and reports the first one

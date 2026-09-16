@@ -90,15 +90,25 @@ func TestLockedStore_OtherGateErrorsAreUnchanged(t *testing.T) {
 //
 // This is the cell that would have caught the original mistake. It asserts
 // that the credential phase does NOT special-case anything for a locked store,
-// which is correct precisely because a locked store never reaches it.
-func TestLockedStore_CredentialPhaseStillUniform(t *testing.T) {
+// / A LOCKED STORE DOES ARRIVE IN THE CREDENTIAL PHASE, AND IT IS NOT A
+// CREDENTIAL FAILURE.
+//
+// THIS CELL USED TO ASSERT THE OPPOSITE, AND ITS COMMENT EXPLAINED WHY IT
+// COULD NOT HAPPEN. The explanation was that OpenWireSessionWith never opens a
+// target, so the DSN is decrypted at the first statement. That holds for an
+// engine which does not speak the PostgreSQL wire, and this cell's fixture was
+// exactly that -- so it proved the claim on the one case the claim was true
+// for. A PostgreSQL-wire connection pins its backend INSIDE
+// OpenWireSessionWith, before ReadyForQuery, which is the case this front door
+// exists for.
+//
+// What the old handling did with it is the lockout this work exists to fix: a
+// verified token, a locked store, and the client told its CREDENTIAL was
+// refused -- then charged for each retry until its address was throttled.
+func TestLockedStore_StartupAnswersUnavailableAndChargesNobody(t *testing.T) {
 	t.Parallel()
-	// auth.ErrLocked cannot actually arrive here — OpenWireSessionWith never
-	// opens a target — but if a future change routed it here, it must not
-	// quietly become a second pre-auth code without the R13 argument being
-	// made again.
 	f := &fakeAuth{err: auth.ErrLocked}
-	_, addr := authListener(t, f)
+	events, addr := authListener(t, f)
 
 	tc, fe := startupTo(t, addr, defaultParams())
 	defer tc.Close()
@@ -117,11 +127,125 @@ func TestLockedStore_CredentialPhaseStillUniform(t *testing.T) {
 	if !ok {
 		t.Fatalf("got %T, want an ErrorResponse", msg)
 	}
-	if e.Code != DenialSQLState {
-		t.Errorf("the credential phase answered %q for a store error; pre-auth stays uniform "+
-			"unless the R13 argument is made again", e.Code)
+
+	if e.Code == DenialSQLState {
+		t.Error("a locked store was answered with the credential denial; the caller's token " +
+			"verified, and telling them otherwise is the lockout this work exists to fix")
 	}
-	if !errors.Is(auth.ErrLocked, auth.ErrLocked) {
-		t.Fatal("sanity")
+	if e.Code != "57P03" {
+		t.Errorf("SQLSTATE = %q, want 57P03 cannot_connect_now — the connection is not "+
+			"available right now, which is what is true", e.Code)
+	}
+	if e.Severity != "FATAL" || e.SeverityUnlocalized != "FATAL" {
+		t.Errorf("severity = %q/%q, want FATAL/FATAL: no ReadyForQuery has been sent, so "+
+			"there is no session for the caller to carry on with",
+			e.Severity, e.SeverityUnlocalized)
+	}
+	if e.Detail != string(outcomeID(OutcomeStartupConnectionUnavailable)) {
+		t.Errorf("detail = %q, want the registered identity %q",
+			e.Detail, OutcomeStartupConnectionUnavailable)
+	}
+	// NOTHING ABOUT WHY. The caller learns the connection is unavailable and
+	// not one thing more.
+	for _, field := range []string{e.Message, e.Detail, e.Hint} {
+		for _, tok := range []string{"locked", "secret", "store", "decrypt", "DSN"} {
+			if strings.Contains(strings.ToLower(field), strings.ToLower(tok)) {
+				t.Errorf("the frame carries %q; the caller learns why our store would not "+
+					"answer", tok)
+			}
+		}
+	}
+
+	// NO READINESS BYTE. A FATAL frame followed by a readiness byte would
+	// invite the client to carry on with a session that does not exist.
+	if next, rerr := fe.Receive(); rerr == nil {
+		if _, isReady := next.(*pgproto3.ReadyForQuery); isReady {
+			t.Error("a readiness byte followed the FATAL startup frame")
+		}
+	}
+
+	// THE AUDIT SAYS WHAT IT WAS, UNDER ITS OWN IDENTITY, AND THE ADDRESS IS
+	// NOT CHARGED. The charge is the half that locked the developer out: a
+	// credential-denial identity would count against their address.
+	var seen int
+	for _, ev := range events() {
+		if ev.Kind == EventAuthOperational && ev.Reason == string(outcomeID(OutcomeStartupConnectionUnavailable)) {
+			seen++
+		}
+		if ev.Kind == "fd.auth_denied" {
+			t.Errorf("a credential denial was recorded for a verified token: %+v", ev)
+		}
+	}
+	if seen != 1 {
+		t.Errorf("the startup identity reached the trail %d time(s), want exactly 1", seen)
+	}
+}
+
+// THE OTHER HALF OF THE SAME ARRIVAL: A CONNECTION THIS INSTALL CANNOT SERVE,
+// REACHING THE CLIENT DURING STARTUP RATHER THAN DURING A REQUEST.
+//
+// It travels the identical path — OpenWireSessionWith pins the backend before
+// ReadyForQuery, so the capability assertion and the DSN validation both run
+// inside the credential phase — and it must not become a credential denial
+// either. The frame differs from the request-time one in exactly one way, and
+// that way is the point: FATAL rather than ERROR, because there is no session
+// to survive.
+func TestStartupConfigFailure_IsNotACredentialDenial(t *testing.T) {
+	t.Parallel()
+	f := &fakeAuth{err: exec.NewConfigFailure(exec.ConfigStageCapability,
+		errors.New(`the resolved postgres driver for connection "billing-prod" cannot destroy a pinned backend`))}
+	events, addr := authListener(t, f)
+
+	tc, fe := startupTo(t, addr, defaultParams())
+	defer tc.Close()
+	if _, err := fe.Receive(); err != nil {
+		t.Fatal(err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "adb_pat_aaaaaaaaaa.bbbbbbbb"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := fe.Receive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("got %T, want an ErrorResponse", msg)
+	}
+
+	if e.Code == DenialSQLState {
+		t.Error("a misconfigured connection was answered with the credential denial")
+	}
+	if e.Code != ConnectionUnusableSQLState {
+		t.Errorf("SQLSTATE = %q, want %q — one code for this condition across both "+
+			"lifecycles, so an operator greps one string", e.Code, ConnectionUnusableSQLState)
+	}
+	if e.Severity != "FATAL" {
+		t.Errorf("severity = %q, want FATAL at startup: the request-time version of this "+
+			"is ERROR precisely because there a session exists and survives", e.Severity)
+	}
+	if e.Detail != string(outcomeID(OutcomeStartupConnectionUnusable)) {
+		t.Errorf("detail = %q, want %q", e.Detail, OutcomeStartupConnectionUnusable)
+	}
+	for _, field := range []string{e.Message, e.Detail, e.Hint} {
+		for _, tok := range []string{"billing-prod", "driver", "destroy", "pinned"} {
+			if strings.Contains(strings.ToLower(field), strings.ToLower(tok)) {
+				t.Errorf("the frame carries %q from the raw cause", tok)
+			}
+		}
+	}
+
+	var seen int
+	for _, ev := range events() {
+		if ev.Kind == EventAuthOperational && ev.Reason == string(outcomeID(OutcomeStartupConnectionUnusable)) {
+			seen++
+		}
+		if ev.Kind == "fd.auth_denied" {
+			t.Errorf("a credential denial was recorded for a verified token: %+v", ev)
+		}
+	}
+	if seen != 1 {
+		t.Errorf("the startup identity reached the trail %d time(s), want exactly 1", seen)
 	}
 }
