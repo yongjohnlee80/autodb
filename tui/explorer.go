@@ -635,6 +635,11 @@ func (e *explorer) addAt(id string) bool {
 		if ws == 0 {
 			return false
 		}
+		// STAYS A MENU, and this is the line the dialog/menu split turns on.
+		// A dialog asks about a decision the operator has already formed and
+		// wants confirmed; this offers two DIFFERENT operations and launches
+		// whichever is chosen. Giving it OK and Cancel would ask the operator
+		// to confirm which thing they are about to start.
 		e.model.openLeader("add to this workspace", []leaderEntry{
 			{'c', "add a connection", func() { e.model.addConnectionToWorkspace(ws) }},
 			{'n', "add a note", func() { e.model.activeWs = ws; e.model.newNote() }},
@@ -652,8 +657,16 @@ func (e *explorer) confirmDeleteNote(id string) {
 	}
 	wsID, _ := strconv.ParseInt(parts[1], 10, 64)
 	name := decSeg(parts[2])
-	e.model.openLeader("delete this note?", []leaderEntry{
-		{'y', "delete " + name, func() {
+	// NO DEFAULT, and the rule is IRREVERSIBILITY rather than who asked.
+	//
+	// I had argued the other way: the operator pressed delete, so the
+	// affirmative is what they came for. The ruling is that an answer which
+	// cannot be undone does not get to be the one a stray Enter reaches, and
+	// the intent behind opening the prompt does not change what happens if the
+	// wrong key lands on it. The file is gone; there is no note to restore.
+	e.model.openDialogNoDefault("delete this note?",
+		"The file is removed from disk. There is no undo.",
+		alternative('y', "Delete "+name, func() {
 			ns, ok := e.model.requireNotes()
 			if !ok {
 				return
@@ -671,9 +684,9 @@ func (e *explorer) confirmDeleteNote(id string) {
 			e.model.setStatus("deleted " + name)
 			e.RefreshNotes(wsID)
 			e.model.refreshStatus()
-		}},
-		{'n', "keep it", func() {}},
-	})
+		}),
+		decline('n', "Keep it"),
+	)
 }
 
 // activate handles an activation (Enter; leaves via the Tree's own event,

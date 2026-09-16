@@ -692,8 +692,8 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("saved note listed", "· frombuffer.sql")
 	h.keys("j") // onto the note
 	h.keys("d")
-	h.waitFor("delete confirm", "delete frombuffer.sql")
-	h.keys("y")
+	h.waitFor("delete confirm", "Delete frombuffer.sql")
+	h.keys("y") // the mnemonic still works; the label is a button now
 	h.waitFor("deleted", "deleted frombuffer.sql")
 	h.waitGone("note gone from the explorer", "· frombuffer.sql")
 	h.ctrl('l')
@@ -778,7 +778,7 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys(" more")
 	h.keys("jk")
 	h.leader("s")
-	h.waitFor("conflict float", "save as a new name")
+	h.waitFor("conflict dialog", "Save as a new name")
 	h.keys("s")
 	h.waitFor("save-as form", "save note as")
 	h.keys("scratch2")

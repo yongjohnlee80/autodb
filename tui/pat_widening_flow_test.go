@@ -54,10 +54,10 @@ func TestPATWidening_TheFormReachesTheConfirmation(t *testing.T) {
 	h.waitFor("it says password login too", "PASSWORD LOGIN")
 	h.waitFor("it says they outlive the token", "REMAIN after this token expires")
 	h.waitFor("it says removal is manual", "removal is manual")
-	// ONE SURFACE: the key that agrees is on the same float as the text it
+	// ONE SURFACE: the answer that agrees is on the same card as the text it
 	// agrees to. It was two stacked floats, and the operator could press `y`
 	// with the addresses hidden behind the modal asking about them.
-	h.waitFor("the key that agrees is visible with the text", "yes — add them and mint the token")
+	h.waitFor("the answer that agrees is visible with the text", "Add them and mint")
 }
 
 // DEFAULT NO. Esc closes it and nothing is created — no token, no row.
