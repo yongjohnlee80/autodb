@@ -99,6 +99,11 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(repoRoot, strings.TrimPrefix(m.Package, "./"))); err != nil {
 			t.Errorf("control %q names package %q, which does not exist: %v", m.Name, m.Package, err)
 		}
+		if m.Fails == "" {
+			t.Errorf("control %q declares no failure fingerprint; RED would then mean only "+
+				"that something in %s failed, which credits it for a neighbour's assertion",
+				m.Name, m.Test)
+		}
 		if len(m.Guarantee) < 30 {
 			t.Errorf("control %q does not say what goes unproven if it survives; a green "+
 				"verdict would be unreadable", m.Name)
@@ -164,6 +169,10 @@ func expectedControls() map[string][3]string {
 		"coordinates-come-from-the-code":           {"internal/gatematrix/coords.go", "./internal/gatematrix/", "TestCoordinates_AMovedUseIsCorrected"},
 		"the-matrix-is-current":                    {"docs/admission-gate-matrix.md", "./internal/gatematrix/", "TestCoordinates_TheMatrixIsWhatTheGeneratorWouldWrite"},
 		"identity-excludes-git":                    {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AWorktreeGitFileIsNotPartOfTheFingerprint"},
+		"cli-guards-the-recorded-manifest":         {"internal/gateidentity/cmd/identity/main.go", "./internal/gateidentity/cmd/identity/", "TestCLI_RecordingIntoTheRootIsRefused"},
+		"cli-guards-the-against-manifest":          {"internal/gateidentity/cmd/identity/main.go", "./internal/gateidentity/cmd/identity/", "TestCLI_CheckingAgainstAManifestInTheRootIsRefused"},
+		"cli-refuses-two-authorities":              {"internal/gateidentity/cmd/identity/main.go", "./internal/gateidentity/cmd/identity/", "TestCLI_ExpectAndAgainstTogetherAreRefused"},
+		"cli-validates-its-metadata":               {"internal/gateidentity/cmd/identity/main.go", "./internal/gateidentity/cmd/identity/", "TestCLI_MalformedMetadataIsRefused"},
 		"identity-requires-a-digest":               {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AManifestWithNoDigestIsRefused"},
 		"identity-verifies-the-body":               {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AManifestWithAnEditedBodyIsRefused"},
 		"identity-refuses-an-empty-manifest":       {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AnEmptyManifestIsRefused"},

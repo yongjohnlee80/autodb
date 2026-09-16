@@ -108,37 +108,51 @@ func TestCLI_AChangedTreeExitsOneAndNamesTheFile(t *testing.T) {
 	}
 }
 
-// EVIDENCE INSIDE THE ROOT IS REFUSED BEFORE ANYTHING IS WRITTEN.
+// RECORDING INTO THE ROOT IS REFUSED BEFORE ANYTHING IS WRITTEN.
 //
-// Both flags, because guarding one and forgetting the other is exactly the
-// shape the previous round shipped.
-func TestCLI_EvidenceInsideTheRootIsRefusedWithoutWriting(t *testing.T) {
+// ISOLATED, NOT A SUBTEST. Two routes into the same guard sharing one cell
+// means either can supply the failure, so a control that bypasses one of them
+// still reddens and looks proven.
+func TestCLI_RecordingIntoTheRootIsRefused(t *testing.T) {
 	bin := buildTool(t)
+	root := tree(t)
+	inside := filepath.Join(root, "local.manifest")
 
-	t.Run("recording into the root", func(t *testing.T) {
-		root := tree(t)
-		inside := filepath.Join(root, "local.manifest")
-		out, code := run(t, bin, "-dir", root, "-manifest", inside)
-		if code != 2 {
-			t.Errorf("exit %d, want 2: %s", code, out)
-		}
-		if _, err := os.Stat(inside); err == nil {
-			t.Error("the manifest was written anyway; the refusal must come before the write, " +
-				"or the tree is already changed by the time it is refused")
-		}
-	})
+	out, code := run(t, bin, "-dir", root, "-manifest", inside)
+	if code != 2 {
+		t.Errorf("exit %d for a manifest inside the root, want 2: %s", code, out)
+	}
+	if _, err := os.Stat(inside); err == nil {
+		t.Error("the manifest was written anyway; the refusal must come before the write, " +
+			"or the tree is already changed by the time it is refused")
+	}
+}
 
-	t.Run("checking against a manifest in the root", func(t *testing.T) {
-		root := tree(t)
-		inside := filepath.Join(root, "local.manifest")
-		if err := os.WriteFile(inside, []byte("# digest x\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		out, code := run(t, bin, "-dir", root, "-against", inside)
-		if code != 2 {
-			t.Errorf("exit %d, want 2: %s", code, out)
-		}
-	})
+// CHECKING AGAINST A MANIFEST IN THE ROOT IS REFUSED.
+func TestCLI_CheckingAgainstAManifestInTheRootIsRefused(t *testing.T) {
+	bin := buildTool(t)
+	root := tree(t)
+
+	// A VALID manifest, deliberately. An unreadable one also exits 2, so the
+	// cell would pass for the wrong reason and could not tell whether the
+	// containment guard ran at all — which is exactly what it did at first.
+	outside := filepath.Join(filepath.Dir(root), "ledger.manifest")
+	if _, code := run(t, bin, "-dir", root, "-manifest", outside); code != 0 {
+		t.Fatal("recording an honest manifest failed")
+	}
+	inside := filepath.Join(root, "local.manifest")
+	body, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(inside, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := run(t, bin, "-dir", root, "-against", inside)
+	if code != 2 {
+		t.Errorf("exit %d for an against-manifest inside the root, want 2: %s", code, out)
+	}
 }
 
 // TWO AUTHORITIES ARE REFUSED.
@@ -176,11 +190,14 @@ func TestCLI_MalformedMetadataIsRefused(t *testing.T) {
 	}
 }
 
-// AN INTERRUPTED WRITE LEAVES THE PREVIOUS EVIDENCE INTACT.
+// RECORDING REPLACES DETERMINISTICALLY AND LEAVES NO DEBRIS.
 //
-// Asserted by replacement rather than by interruption: the manifest is written
-// to a temp file and renamed, so a second recording never exposes a partial
-// file where the first one was.
+// NARROWED TO WHAT IT ACTUALLY PROVES. The title once claimed it showed an
+// interrupted write preserves the previous evidence; it shows no such thing,
+// because nothing here interrupts anything. What it does establish is that two
+// recordings of an unchanged tree agree and that no partial file is left beside
+// the manifest. The crash-durability claim needs an injected pre-rename failure
+// and is not made here.
 func TestCLI_RecordingReplacesAtomically(t *testing.T) {
 	bin := buildTool(t)
 	root := tree(t)

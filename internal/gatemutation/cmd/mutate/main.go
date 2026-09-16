@@ -158,18 +158,8 @@ func run(root string, m gatemutation.Mutation) (Verdict, string) {
 
 	out, v := exercise(root, m)
 
-	// RESTORED WITH ITS ORIGINAL BYTES AND MODE, AND THE RESTORE IS CHECKED.
-	// An unchecked restore lets one control poison every one after it, and a
-	// mode silently widened on an executable is a change the next digest will
-	// report as a mismatch nobody can explain.
-	if werr := os.WriteFile(path, original, info.Mode()); werr != nil {
-		return INVALID, "the file could not be restored, so no later control can be trusted: " + werr.Error()
-	}
-	if after, rerr := os.ReadFile(path); rerr != nil || string(after) != src {
-		return INVALID, "the file did not restore to its original bytes"
-	}
-	if got, serr := os.Stat(path); serr != nil || got.Mode() != info.Mode() {
-		return INVALID, "the file's mode was not restored"
+	if rerr := restore(path, original, info.Mode()); rerr != nil {
+		return INVALID, "the file could not be restored, so no later control can be trusted: " + rerr.Error()
 	}
 
 	switch v {
@@ -226,7 +216,15 @@ func exercise(root string, m gatemutation.Mutation) (string, Verdict) {
 	// THE CLAIMED ASSERTION, NOT MERELY THE FUNCTION. Without this a
 	// neighbouring subtest or an unrelated check credits the control for a
 	// failure it did not cause.
-	if m.Fails != "" && !strings.Contains(out, m.Fails) {
+	if m.Fails == "" {
+		// NO CONTROL SCORES WITHOUT ONE. An optional fingerprint is a
+		// permissive fallback, and the fallback is where the defect lives: a
+		// control with none earns RED from any failure in the named cell,
+		// including a neighbour's.
+		return "the control declares no failure fingerprint, so RED would mean only that " +
+			"something in " + m.Test + " failed:\n" + out, INVALID
+	}
+	if !strings.Contains(out, m.Fails) {
 		return "the cell failed, but not on the assertion this control claims (" +
 			m.Fails + "):\n" + out, INVALID
 	}
@@ -246,23 +244,40 @@ func goRun(dir string, bound time.Duration, args ...string) (string, error) {
 	// not contain.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	done := make(chan struct{})
-	var out []byte
-	var err error
-	go func() { out, err = cmd.CombinedOutput(); close(done) }()
+	// THE RESULT TRAVELS ON A CHANNEL, NOT IN SHARED VARIABLES.
+	//
+	// The previous shape wrote out/err from a goroutine and then read them on
+	// the containment path without receiving — so if the child outlived the
+	// reap bound, the goroutine could still be writing while the runner read.
+	// A race inside the containment path is the worst place to have one: it is
+	// the code that runs precisely when something has already gone wrong.
+	type result struct {
+		out []byte
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		o, e := cmd.CombinedOutput()
+		done <- result{o, e}
+	}()
+
 	select {
-	case <-done:
-		return string(out), err
+	case r := <-done:
+		return string(r.out), r.err
 	case <-time.After(bound):
 		if cmd.Process != nil {
+			// The GROUP, not just the go parent: killing the parent leaves the
+			// test binary holding the pipe, and the wait below never returns.
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 		select {
-		case <-done:
+		case r := <-done:
+			return string(r.out) + "\n[runner: containment timeout, process group killed]", errTimeout
 		case <-time.After(10 * time.Second):
-			// The group is gone; do not block the whole run on a reap.
+			// Nothing shared is read here, so nothing can race the goroutine.
+			return "[runner: containment timeout; the process group did not reap within the " +
+				"bound, so no output is available]", errTimeout
 		}
-		return string(out) + "\n[runner: containment timeout, process group killed]", errTimeout
 	}
 }
 
@@ -291,3 +306,39 @@ func indent(s string) string {
 	}
 	return strings.Join(lines, "\n")
 }
+
+// restore puts a mutated file back exactly as it was found, and proves it.
+//
+// os.WriteFile's PERMISSION ARGUMENT ONLY APPLIES WHEN IT CREATES THE FILE.
+// Writing over an existing path leaves the old mode untouched, so the previous
+// version claimed to restore the mode and did nothing of the kind — and its
+// meta-cell could not tell, because it began and ended at 0644 and never
+// perturbed the mode. A control that changes an executable's permission would
+// have left it changed while the runner reported a clean restore, and the next
+// identity digest would report a difference nobody could explain.
+func restore(path string, body []byte, mode os.FileMode) error {
+	if err := os.WriteFile(path, body, mode); err != nil {
+		return err
+	}
+	// EXPLICIT, because the write above will not do it for an existing file.
+	if err := os.Chmod(path, mode.Perm()); err != nil {
+		return err
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if string(after) != string(body) {
+		return errNotRestored
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if st.Mode().Perm() != mode.Perm() {
+		return fmt.Errorf("mode is %v after restore, want %v", st.Mode().Perm(), mode.Perm())
+	}
+	return nil
+}
+
+var errNotRestored = fmt.Errorf("mutate: the file did not restore to its original bytes")
