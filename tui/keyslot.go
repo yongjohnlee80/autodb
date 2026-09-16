@@ -216,9 +216,12 @@ func firstLine(s string) string {
 }
 
 func (m *Model) confirmEnrollKeyslot() {
-	m.openTextFloat("enable the unattended unlock?", keyslotProse)
-	m.openLeader("enable the unattended unlock?", []leaderEntry{
-		{'y', "yes — cut the slot and write the keyfile", func() {
+	// ONE SURFACE, and now one widget. This was a text float with an action
+	// float stacked on it, which a review found lets the operator agree while
+	// the thing being agreed to sits behind the modal asking about it. A dialog
+	// carries its own prose, so the two cannot be separated by construction.
+	m.openDialog("enable the unattended unlock?", keyslotProse,
+		affirm('y', "Yes — cut the slot", func() {
 			bound := m.session.Bind()
 			m.ctx.Go(func(c context.Context) (any, error) {
 				err := bound.EnrollKeyslot(c)
@@ -230,19 +233,25 @@ func (m *Model) confirmEnrollKeyslot() {
 					m.setOK("service keyslot cut — this daemon will unlock itself after a restart")
 				}}, nil
 			})
-		}},
-	})
+		}),
+		decline('n', "No"),
+	)
 }
 
 func (m *Model) confirmRemoveKeyslot() {
-	m.openTextFloat("disable the unattended unlock?",
+	// KEEPS A DEFAULT, under the same rule that took one away from delete and
+	// revoke. The test is whether the STATE can be restored, and this one can:
+	// re-enabling cuts a fresh slot and writes a new keyfile. The consequence
+	// is severe — the prose says so — but severity and irreversibility are
+	// different questions, and conflating them would leave no default anywhere
+	// and so no meaning in having one.
+	m.openDialog("disable the unattended unlock?",
 		"Removing the service keyslot deletes the slot AND its keyfile.\n\n"+
 			"After the next restart this daemon will be LOCKED until somebody\n"+
 			"logs in with a passphrase — which is an outage if autodb is the\n"+
 			"only path to your database.\n\n"+
-			"This process stays unlocked; nothing breaks until the next restart.\n")
-	m.openLeader("disable the unattended unlock?", []leaderEntry{
-		{'y', "yes — delete the slot and the keyfile", func() {
+			"This process stays unlocked; nothing breaks until the next restart.\n",
+		affirm('y', "Yes — delete it", func() {
 			bound := m.session.Bind()
 			m.ctx.Go(func(c context.Context) (any, error) {
 				err := bound.RemoveKeyslot(c)
@@ -254,6 +263,7 @@ func (m *Model) confirmRemoveKeyslot() {
 					m.setOK("service keyslot removed — the next restart will need a passphrase")
 				}}, nil
 			})
-		}},
-	})
+		}),
+		decline('n', "No"),
+	)
 }
