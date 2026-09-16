@@ -33,7 +33,7 @@ func hintCells(hs []keyHint) []string {
 func (m *Model) currentHints() (title string, hs []keyHint) {
 	for i := len(m.floats) - 1; i >= 0; i-- {
 		f := m.floats[i]
-		if !f.f.Shown() {
+		if !f.o.Shown() {
 			continue
 		}
 		if hp, ok := f.body.(hintProvider); ok {
