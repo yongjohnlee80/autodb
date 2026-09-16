@@ -147,45 +147,67 @@ func (v releaseVerdict) reason() string {
 func (e *Engine) releaseBackend(ctx context.Context, s *session, pc golibpg.PinnedConn, txResidue error) releaseVerdict {
 	v := e.proveBackendClean(ctx, s, pc, txResidue)
 	if !v.pooled {
-		discardBackend(ctx, pc)
+		e.destroyBackend(ctx, pc)
 		return v
 	}
 	if err := pc.Release(ctx); err != nil {
 		// The driver refused the handback — it disagrees with us about the
 		// connection's state. Its opinion wins: it is the side holding the
-		// socket. Discarding is idempotent, so this is safe even if the
+		// socket. Destroying is idempotent, so this is safe even if the
 		// refusal happened after the lease had already gone.
-		discardBackend(ctx, pc)
+		e.destroyBackend(ctx, pc)
 		return releaseVerdict{limb: releaseLimbHandback, detail: err.Error()}
 	}
 	return v
 }
 
-// discardBackend destroys the physical connection instead of letting the pool
+// destroyBackend closes the physical connection instead of letting the pool
 // keep it.
 //
 // GIVING THE LEASE BACK IS NOT THE SAME AS CLOSING THE SOCKET, and this cost a
-// live cell to discover. The driver's discard relinquishes the lease and then
-// decides for itself whether the member can be reused, and that decision is
-// made on wire mechanics alone: nothing in flight, nothing poisoned, no
-// transaction the driver itself opened. A backend whose reset the server just
-// refused passes every one of those tests — the wire is in perfect order and
-// the session state is exactly what we failed to clear — so the connection goes
-// straight back into the pool, which is the outcome this whole file exists to
-// prevent.
+// live cell to discover. The driver's ordinary discard relinquishes the lease
+// and then decides for itself whether the member can be reused, and that
+// decision is made on wire mechanics alone: nothing in flight, nothing
+// poisoned, no transaction the driver itself opened. A backend whose reset the
+// server just refused passes every one of those tests — the wire is in perfect
+// order and the session state is exactly what we failed to clear — so the
+// connection would go straight back into the pool, which is the outcome this
+// whole file exists to prevent.
 //
-// The driver cannot be blamed for that: session state is not something it can
-// see. So the connection is put into a state the driver CAN see is unprovable.
-// Queueing a frame and never flushing it leaves the outbound track mid-frame,
-// which is exactly the condition its reuse test treats as unreusable, and it
-// costs no round trip — the frame is buffered locally and the socket is closed
-// before anything is written. The frame chosen is a close of the unnamed portal
-// precisely because it would be harmless if it ever did reach a server.
+// THE DRIVER CANNOT BE BLAMED FOR THAT: session state is not something it can
+// see. It is autodb that holds the fact, so autodb has to state it, and the
+// driver offers an operation that takes the demand literally — poison under the
+// lock, interrupt and barrier behind any in-flight read or write, close the
+// socket, give the lease back — with no appeal to whether the wire looks
+// reusable. That operation is what this function calls.
 //
-// Every way the queueing can fail already means the handle is terminal or
-// mid-exchange, which is itself unreusable, so the error is not worth
-// inspecting: either way the connection cannot be recycled.
-func discardBackend(ctx context.Context, pc golibpg.PinnedConn) {
+// THE OBVIOUS ALTERNATIVE IS WRONG, AND IT IS WHAT THIS REPLACED. A caller can
+// arrange a wire state the driver's reuse test rejects — queue a frame, never
+// flush it — and let the driver reach the right conclusion for the wrong
+// reason. That couples a security property of this product to an unexported
+// predicate in a library: the day that predicate is widened for a perfectly
+// good reason, a failed reset silently becomes a reuse of contaminated state,
+// with nothing to compile against and no test anywhere that notices.
+//
+// THE FALLBACK IS THAT SAME WRONG THING, KEPT ONLY FOR AN OLDER DRIVER. A build
+// whose pinned connection predates the explicit operation cannot be destroyed
+// on demand, and refusing to relinquish the lease at all would be worse than a
+// weaker teardown — it would strand the member forever. So the old arrangement
+// runs, and it says so in the log, because an operator debugging a leaked
+// setting needs to know which of the two guarantees was in force.
+func (e *Engine) destroyBackend(ctx context.Context, pc golibpg.PinnedConn) {
+	if golibpg.Destroy(pc) {
+		return
+	}
+	e.logf("the target driver cannot destroy a pinned backend on demand; falling back " +
+		"to marking the lease unprovable, which relies on the driver's own reuse test " +
+		"and can recycle a backend whose session state could not be cleared")
+	// The frame chosen is a close of the unnamed portal precisely because it
+	// would be harmless if it ever did reach a server, and it costs no round
+	// trip: it is buffered locally and the socket is closed before anything is
+	// written. Every way the queueing can fail already means the handle is
+	// terminal or mid-exchange, which is itself unreusable, so the error is not
+	// worth inspecting — either way the connection cannot be recycled.
 	_ = pc.Send(ctx, golibpg.ClosePortalOp(""))
 	pc.Discard()
 }
@@ -360,6 +382,6 @@ func (e *Engine) proveCheckoutClean(ctx context.Context, pc golibpg.PinnedConn) 
 	if v.pooled {
 		return nil
 	}
-	discardBackend(ctx, pc)
+	e.destroyBackend(ctx, pc)
 	return fmt.Errorf("exec: the backend taken for this session could not be proved clean (%s)", v.reason())
 }

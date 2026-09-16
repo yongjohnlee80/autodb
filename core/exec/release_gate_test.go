@@ -108,6 +108,56 @@ func (c *facelessConn) SimpleQuery(context.Context, string, func(golibpg.Extende
 	panic("the faceless connection must not be asked for a simple query")
 }
 
+// destroyingConn is a gateConn whose driver ALSO carries explicit physical
+// destruction, which is the production shape. The two fakes exist side by side
+// because the gate has to be correct against both: a consumer building against
+// a driver that predates the capability still has to relinquish the lease.
+type destroyingConn struct {
+	gateConn
+	destroyed int
+}
+
+func (c *destroyingConn) Destroy() { c.destroyed++ }
+
+// gateBackend is one driver shape under test: the handle the gate is given, the
+// scripted connection behind it, how many times it was destroyed outright, and
+// which of the two teardowns this shape is REQUIRED to get.
+//
+// wantDestroy is declared by the shape rather than read back from what happened,
+// and that is the whole point of it. A cell that branched on the observed count
+// would pass a gate that never asked any driver to destroy anything: the capable
+// shape would simply be scored against the fallback's rules.
+type gateBackend struct {
+	pc          golibpg.PinnedConn
+	c           *gateConn
+	destroyed   func() int
+	wantDestroy bool
+}
+
+// gateBackends is BOTH driver shapes. Every cell that asserts what happens to an
+// unproved backend runs against both, because the property is that neither shape
+// ever pools one — not that the capable shape does the right thing and the other
+// is somebody else's problem.
+func gateBackends() []struct {
+	name string
+	make func() gateBackend
+} {
+	return []struct {
+		name string
+		make func() gateBackend
+	}{
+		{"the driver can destroy a backend on demand", func() gateBackend {
+			c := &destroyingConn{gateConn: *newGateConn()}
+			return gateBackend{pc: c, c: &c.gateConn,
+				destroyed: func() int { return c.destroyed }, wantDestroy: true}
+		}},
+		{"the driver predates explicit destruction", func() gateBackend {
+			c := newGateConn()
+			return gateBackend{pc: c, c: c, destroyed: func() int { return 0 }}
+		}},
+	}
+}
+
 // gateSession is the smallest session the gate will look at.
 func gateSession() *session {
 	return &session{id: SessionID("gate-session"), connID: 7, userID: 11}
@@ -220,43 +270,110 @@ func TestReleaseGate_NoUnprovedBackendIsEverPooled(t *testing.T) {
 			wantRan:  len(plan),
 		},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			c := newGateConn()
-			s := gateSession()
-			if tc.arrange != nil {
-				tc.arrange(c, s)
-			}
-			v := (&Engine{}).releaseBackend(context.Background(), s, c, tc.txResidue)
+		for _, shape := range gateBackends() {
+			t.Run(tc.name+" / "+shape.name, func(t *testing.T) {
+				b := shape.make()
+				c := b.c
+				s := gateSession()
+				if tc.arrange != nil {
+					tc.arrange(c, s)
+				}
+				v := (&Engine{}).releaseBackend(context.Background(), s, b.pc, tc.txResidue)
 
-			if v.pooled {
-				t.Fatalf("the backend was pooled although %s", tc.name)
-			}
-			if v.limb != tc.wantLimb {
-				t.Errorf("the verdict blames %q; it should blame %q, or an operator reading "+
-					"the audit record is sent to the wrong place: %s", v.limb, tc.wantLimb, v.reason())
-			}
-			if v.detail == "" {
-				t.Error("the verdict carries no reason, so the audit record would say only that " +
-					"something went wrong")
-			}
-			if c.discarded != 1 {
-				t.Errorf("discarded %d time(s); an unproved backend's socket must be closed "+
-					"exactly once", c.discarded)
-			}
-			if c.released != 0 {
-				t.Errorf("the connection was handed back to the pool %d time(s) although "+
-					"nothing was proved about it", c.released)
-			}
-			if c.marked != 1 {
-				t.Errorf("the lease was marked unprovable %d time(s), want 1. Without that "+
-					"mark the driver sees a healthy wire, decides the member is reusable, "+
-					"and puts the dirty backend back in the pool", c.marked)
-			}
-			if len(c.ran) != tc.wantRan {
-				t.Errorf("%d statement(s) reached the wire, expected %d: %v",
-					len(c.ran), tc.wantRan, c.ran)
-			}
-		})
+				if v.pooled {
+					t.Fatalf("the backend was pooled although %s", tc.name)
+				}
+				if v.limb != tc.wantLimb {
+					t.Errorf("the verdict blames %q; it should blame %q, or an operator reading "+
+						"the audit record is sent to the wrong place: %s", v.limb, tc.wantLimb, v.reason())
+				}
+				if v.detail == "" {
+					t.Error("the verdict carries no reason, so the audit record would say only that " +
+						"something went wrong")
+				}
+				if c.released != 0 {
+					t.Errorf("the connection was handed back to the pool %d time(s) although "+
+						"nothing was proved about it", c.released)
+				}
+				// The backend is destroyed EXACTLY ONE WAY, and which way depends
+				// only on what the driver can do. A capable driver is told to
+				// destroy it and is told nothing else; an older one gets the
+				// weaker arrangement and no destruction call it cannot answer.
+				if b.wantDestroy {
+					if destroyed := b.destroyed(); destroyed != 1 {
+						t.Errorf("destroyed %d time(s), want exactly 1: this driver can be "+
+							"told to destroy the backend and must be, rather than being "+
+							"steered into its own reuse test", destroyed)
+					}
+					if c.marked != 0 {
+						t.Errorf("the lease was marked unprovable %d time(s) as well as "+
+							"destroyed; the mark exists only for a driver that cannot be "+
+							"asked, and leaving it here keeps this product depending on "+
+							"the driver's private reuse test", c.marked)
+					}
+					if c.discarded != 0 {
+						t.Errorf("an ordinary discard ran %d time(s) after the backend was "+
+							"destroyed outright", c.discarded)
+					}
+				} else {
+					if c.discarded != 1 {
+						t.Errorf("discarded %d time(s); an unproved backend's socket must be "+
+							"closed exactly once", c.discarded)
+					}
+					if c.marked != 1 {
+						t.Errorf("the lease was marked unprovable %d time(s), want 1. Without "+
+							"that mark this driver sees a healthy wire, decides the member is "+
+							"reusable, and puts the dirty backend back in the pool", c.marked)
+					}
+				}
+				if len(c.ran) != tc.wantRan {
+					t.Errorf("%d statement(s) reached the wire, expected %d: %v",
+						len(c.ran), tc.wantRan, c.ran)
+				}
+			})
+		}
+	}
+}
+
+// The fallback is a WEAKER guarantee and has to announce itself. An operator
+// looking at a leaked setting needs to know which of the two arrangements was in
+// force on that target; silently doing the lesser thing would make the two
+// indistinguishable from outside.
+func TestReleaseGate_ADriverThatCannotDestroyOnDemandSaysSoInTheLog(t *testing.T) {
+	var lines []string
+	e := &Engine{onLog: func(s string) { lines = append(lines, s) }}
+	c := newGateConn()
+	c.targetErr["UNLISTEN *"] = &pgconn.PgError{Message: "permission denied"}
+
+	v := e.releaseBackend(context.Background(), gateSession(), c, nil)
+	if v.pooled {
+		t.Fatal("a backend whose reset the target refused was pooled")
+	}
+	var announced bool
+	for _, line := range lines {
+		if strings.Contains(line, "cannot destroy a pinned backend on demand") {
+			announced = true
+		}
+	}
+	if !announced {
+		t.Fatalf("the weaker teardown ran without saying so; the log held %v", lines)
+	}
+
+	// And a driver that CAN destroy says nothing of the kind, so the line means
+	// what it says rather than appearing on every release.
+	lines = nil
+	d := &destroyingConn{gateConn: *newGateConn()}
+	d.targetErr["UNLISTEN *"] = &pgconn.PgError{Message: "permission denied"}
+	if v := e.releaseBackend(context.Background(), gateSession(), d, nil); v.pooled {
+		t.Fatal("a backend whose reset the target refused was pooled")
+	}
+	for _, line := range lines {
+		if strings.Contains(line, "cannot destroy a pinned backend on demand") {
+			t.Fatalf("a capable driver was reported as incapable: %q", line)
+		}
+	}
+	if d.destroyed != 1 {
+		t.Fatalf("destroyed %d time(s), want 1", d.destroyed)
 	}
 }
 
