@@ -87,6 +87,17 @@ func main() {
 		controls = picked
 	}
 
+	// THE REAPER IS PART OF THE RESULT, so a ledger can be read years later
+	// without anyone having to remember how the run was invoked.
+	//
+	// A CONTROL CAME BACK GREEN BECAUSE OF A SHELL WRAPPER. The harness ran
+	// the runner as `docker run ... bash script.sh`, which makes bash pid 1.
+	// Bash reaps adopted orphans; `go test` and `go run` do not. A control
+	// that distinguishes a killed descendant from a reaped one therefore could
+	// not fail, and reported the code as sound while it was broken -- silently,
+	// because nothing in the output said which pid 1 the run had. It does now.
+	fmt.Printf("pid1=%s\n\n", pidOneName())
+
 	tally := map[Verdict]int{}
 	for _, m := range controls {
 		v, detail := run(abs, m)
@@ -354,3 +365,16 @@ func restore(path string, body []byte, mode os.FileMode) error {
 }
 
 var errNotRestored = fmt.Errorf("mutate: the file did not restore to its original bytes")
+
+// pidOneName reports what is running as pid 1, or why it could not be read.
+//
+// Named rather than judged. Whether a given pid 1 reaps is a fact about that
+// program, and a runner that tried to decide it would be guessing on behalf of
+// a reader who can simply be told.
+func pidOneName() string {
+	b, err := os.ReadFile("/proc/1/comm")
+	if err != nil {
+		return "unknown (" + err.Error() + ")"
+	}
+	return strings.TrimSpace(string(b))
+}
