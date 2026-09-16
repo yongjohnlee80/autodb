@@ -239,7 +239,7 @@ func All() []Mutation {
 			Anchor:      "\t\treserved := eligible && s.beginCloseLocked(\"\", ReasonDemandReclaimed)",
 			Replacement: "\t\ts.mu.Unlock()\n\t\ts.mu.Lock()\n\t\treserved := eligible && s.beginCloseLocked(\"\", ReasonDemandReclaimed)",
 			Test:        "TestDemandReclaim_NothingCanSlipBetweenJudgingAndClaiming",
-			Fails:       "although a statement started between the check and the claim",
+			Fails:       "the session's lock is released between judging it idle and claiming it",
 			Guarantee: "that a session cannot become active between being judged idle and " +
 				"being claimed, and so be terminated after it started work",
 		},

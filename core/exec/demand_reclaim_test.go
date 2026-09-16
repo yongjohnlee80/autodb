@@ -3,6 +3,10 @@ package exec
 import (
 	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -713,30 +717,84 @@ func TestDemandReclaim_TheEngineWiresItToTheScheduler(t *testing.T) {
 
 // THE PREDICATE AND THE RESERVATION HAPPEN UNDER ONE HOLD OF THE LOCK.
 //
-// THIS CELL EXISTS BECAUSE ITS CONTROL CAME BACK GREEN TOO. Releasing and
-// retaking the session's mutex between judging it idle and claiming it is
-// invisible unless something actually runs in the gap — so the control proved
-// nothing, and the guarantee rested on reading the code. The hook below is
-// something that runs in the gap: it makes the session busy, exactly as a
-// client's arriving statement would, and a reservation taken anyway is one
-// taken against a session that is no longer idle.
+// ASSERTED STRUCTURALLY, AND I WANT THE LIMIT STATED RATHER THAN IMPLIED --
+// the same choice, for the same reason, as TestClaimSessionReleasesBeforeItCloses.
+//
+// TWO BEHAVIOURAL VERSIONS OF THIS CELL CAME BACK GREEN, and the second failure
+// is the instructive one. It ran a competing goroutine that blocked on s.mu,
+// on the theory that a released hold would let it in. It never got in: a lone
+// Unlock immediately followed by a Lock is won by the unlocking goroutine,
+// which is already running and barges ahead of a woken waiter, and Go's
+// starvation hand-off needs a waiter to lose a round first -- which never
+// happens, because there is only one round. The gap is real and a blocked
+// waiter cannot observe it. Measured, not assumed: under the mutation the
+// competitor reported the session already `closing`.
+//
+// The first version was worse: it wrote s.busy without taking the mutex at
+// all, so it ran whether or not the hold had been released, and a recheck
+// beside it refused the reservation either way. That recheck, and the test
+// hook it hung on, existed only for that cell -- production code shaped by a
+// test that could not work -- and both are now gone.
+//
+// So this reads the source: inside reserveDemandVictim, between computing
+// eligibility and taking the close claim, the session's mutex must not be
+// released. A source-order assertion is weaker than a behavioural one. It is
+// much stronger than a control that cannot fail.
 func TestDemandReclaim_NothingCanSlipBetweenJudgingAndClaiming(t *testing.T) {
-	now := time.Now()
-	s := demandHolder("holder", 1, 7, now.Add(-time.Hour))
-	r := demandRegistry(t, s)
-
-	// Fires while the registry holds this session's lock, if it ever lets go.
-	r.hookDemandJudged = func() {
-		s.busy = true // no lock taken: only reachable if the hold was released
+	src, err := os.ReadFile("demand_reclaim.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	f, perr := parser.ParseFile(fset, "demand_reclaim.go", src, 0)
+	if perr != nil {
+		t.Fatal(perr)
 	}
 
-	v, ok := r.reserveDemandVictim(7, now)
-	if ok {
-		t.Errorf("reserved %q although a statement started between the check and the claim; "+
-			"the session would be terminated after becoming active, which is the one thing "+
-			"the predicate exists to prevent", v.s.id)
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "reserveDemandVictim" {
+			fn = fd
+			break
+		}
 	}
-	if s.get() != sessOpen {
-		t.Error("the holder was left reserved for teardown despite not being reserved")
+	if fn == nil {
+		t.Fatal("reserveDemandVictim is gone; this cell is asserting nothing")
+	}
+
+	var judged, claimed token.Pos
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.AssignStmt:
+			if judged == token.NoPos && len(v.Lhs) == 1 {
+				if id, ok := v.Lhs[0].(*ast.Ident); ok && id.Name == "eligible" {
+					judged = v.End()
+				}
+			}
+		case *ast.SelectorExpr:
+			if claimed == token.NoPos && v.Sel.Name == "beginCloseLocked" {
+				claimed = v.Pos()
+			}
+		}
+		return true
+	})
+	// BOTH ENDS MUST EXIST, or the window is empty and everything passes.
+	if judged == token.NoPos {
+		t.Fatal("no eligibility decision found in reserveDemandVictim")
+	}
+	if claimed == token.NoPos {
+		t.Fatal("no close claim found in reserveDemandVictim")
+	}
+	if claimed <= judged {
+		t.Fatal("the close claim does not follow the eligibility decision")
+	}
+
+	base := fset.File(fn.Pos()).Base()
+	window := string(src[int(judged)-base : int(claimed)-base])
+	if strings.Contains(window, "Unlock") {
+		t.Errorf("the session's lock is released between judging it idle and claiming it:\n%s\n"+
+			"a statement arriving in that gap makes the session active, and it is then "+
+			"reserved for teardown after it has started work — the one thing the "+
+			"predicate exists to prevent", strings.TrimSpace(window))
 	}
 }
