@@ -37,6 +37,8 @@ func TestPATCard_NamesTheSessionAccountNotAUILabel(t *testing.T) {
 	h.keys("demo-passphrase-1")
 	h.key(tuicore.KeyTab)
 	h.keys("demo-passphrase-1")
+	// TWO Enters: the first reaches OK, the second presses it. No field submits.
+	h.key(tuicore.KeyEnter)
 	h.key(tuicore.KeyEnter)
 	h.waitFor("login completion", "logged in as root")
 
@@ -45,12 +47,8 @@ func TestPATCard_NamesTheSessionAccountNotAUILabel(t *testing.T) {
 	h.waitFor("connections manager", "a:add")
 	h.keys("a")
 	h.waitFor("connection form", "new connection")
-	h.keys("demo")
-	h.key(tuicore.KeyTab)
-	h.keys("sqlite")
-	h.key(tuicore.KeyTab)
-	h.keys(fmt.Sprintf("file:cardwire%d?mode=memory&cache=shared", time.Now().UnixNano()))
-	h.key(tuicore.KeyEnter)
+	h.fillNewConnection("demo",
+		fmt.Sprintf("file:cardwire%d?mode=memory&cache=shared", time.Now().UnixNano()))
 	h.waitGone("connection form", "new connection")
 	h.waitForManagerRow("connections", "demo")
 
@@ -84,8 +82,15 @@ func TestPATCard_NamesTheSessionAccountNotAUILabel(t *testing.T) {
 	h.keys("30")
 	h.key(tuicore.KeyTab) // restrict to IPs: blank = inherit
 	h.key(tuicore.KeyTab)
-	h.keys("1")             // connection id -- the last field
-	h.key(tuicore.KeyEnter) // ...so this submits
+	// The connection is CHOSEN from a loaded list, not typed as an id -- and
+	// this is the field where typing the wrong number cost the most, because a
+	// token reaches exactly the one connection it names.
+	h.waitForOptions("connection (the token reaches ONLY this one)")
+	h.chooseMatching("demo")
+	// TAB, not Enter: Enter belongs to the select and would re-open its
+	// options. From a select the way out is Tab (or the O mnemonic).
+	h.key(tuicore.KeyTab)
+	h.key(tuicore.KeyEnter) // OK: submit
 
 	h.waitFor("the reveal card", "The token is shown ONCE")
 	card := h.screen()

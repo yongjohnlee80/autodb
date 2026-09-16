@@ -73,28 +73,9 @@ func (m *Model) openFloatOpts(title string, content tui.Component,
 	f := widget.NewFloat(box, opts...)
 	m.host.Attach(f)
 	f.Show()
-	m.floats = append(m.floats, openOverlayRef{o: f, body: content, title: title})
 	// Remove the layer once dismissed (Float hides itself on Esc; the
 	// ddex-server recipe — layers must not accumulate).
-	var unsub func()
-	unsub = tui.SubscribeScoped(m.ctx, func(ev widget.DismissEvent) {
-		if ev.Owner != f.NodeID() {
-			return
-		}
-		m.host.Stack.Remove(f)
-		for i, o := range m.floats {
-			if o.o == overlay(f) {
-				m.floats = append(m.floats[:i], m.floats[i+1:]...)
-				break
-			}
-		}
-		if unsub != nil {
-			unsub()
-		}
-		// A login prompt suppressed while this float was up fires now —
-		// the CodeAuth transition is retained, never dropped.
-		m.maybePromptLogin()
-	})
+	m.trackOverlay(f, content, title, func() { m.host.Stack.Remove(f) })
 	return f
 }
 
@@ -152,6 +133,64 @@ type overlay interface {
 	NodeID() tui.NodeID
 }
 
+// modalOverlay adapts widget.Modal, which spells the same three operations
+// differently: IsOpen for Shown, and Dismiss — which needs a REASON a bare
+// Hide() has nowhere to put. Programmatic is the right one here, because every
+// caller of Hide is the program closing a surface (a reconnect, a submit), not
+// the operator pressing anything.
+type modalOverlay struct{ m *widget.Modal }
+
+func (o modalOverlay) Shown() bool        { return o.m.IsOpen() }
+func (o modalOverlay) Hide()              { o.m.Dismiss(widget.DismissProgrammatic) }
+func (o modalOverlay) NodeID() tui.NodeID { return o.m.NodeID() }
+
+// trackOverlay registers an open surface and arranges its removal, for floats
+// and dialogs alike.
+//
+// TWO EVENTS, ONE PRUNE. A Float announces its closing with DismissEvent and a
+// Modal with OverlayDismissedEvent — different types carrying the same owner
+// NodeID. Subscribing to one of them would leave the other kind of surface in
+// the registry forever: the layer would stay listed after it closed, a deferred
+// login would wait behind a dialog that is no longer there, and `?` would
+// report a surface the operator had already dismissed. None of that fails
+// loudly, which is exactly why it has to be handled here rather than noticed
+// later.
+//
+// The prune is idempotent and owner-addressed, because these are not mutually
+// exclusive: a future surface that publishes both must be removed once.
+func (m *Model) trackOverlay(o overlay, body tui.Component, title string, detach func()) {
+	m.floats = append(m.floats, openOverlayRef{o: o, body: body, title: title})
+	var unsubs []func()
+	pruned := false
+	prune := func(owner tui.NodeID) {
+		if pruned || owner != o.NodeID() {
+			return
+		}
+		pruned = true
+		if detach != nil {
+			detach()
+		}
+		for i, e := range m.floats {
+			if e.o == o {
+				m.floats = append(m.floats[:i], m.floats[i+1:]...)
+				break
+			}
+		}
+		for _, u := range unsubs {
+			if u != nil {
+				u()
+			}
+		}
+		// A login prompt suppressed while this surface was up fires now —
+		// the CodeAuth transition is retained, never dropped.
+		m.maybePromptLogin()
+	}
+	unsubs = append(unsubs,
+		tui.SubscribeScoped(m.ctx, func(ev widget.DismissEvent) { prune(ev.Owner) }),
+		tui.SubscribeScoped(m.ctx, func(ev widget.OverlayDismissedEvent) { prune(ev.Owner) }),
+	)
+}
+
 // openOverlayRef remembers what an open surface is showing, so `?` can report
 // the keys of whatever currently owns the screen. Ordered: the slice is
 // append-only and the LAST shown entry is the topmost.
@@ -190,18 +229,19 @@ type formField struct {
 	// build makes the row's control, and it is a CLOSURE rather than a kind
 	// tag because a select's option type varies by field — int64 for ids,
 	// string for the enums — and a heterogeneous []formField cannot carry a
-	// type parameter. The closure captures it instead. onEnter is what Enter
-	// means for this row; see advanceOrSubmit for why it is a callback and not
-	// an event.
-	build func(onEnter func()) formControl
+	// type parameter. The closure captures it instead. It receives the form and
+	// its own index because a live select has to know, when its options finally
+	// arrive, whether the form they were asked for is still open.
+	build func(f *form, i int) formControl
 	ctl   formControl
 }
 
 func field(label string, opts ...widget.TextInputOption) formField {
-	return formField{label: label, build: func(onEnter func()) formControl {
+	return formField{label: label, build: func(f *form, i int) formControl {
 		o := make([]widget.TextInputOption, 0, len(opts)+1)
 		o = append(o, opts...)
-		o = append(o, widget.WithOnSubmit(func(string) { onEnter() }))
+		// THE ADVANCE RUNS ON THE KEY, NOT ON AN EVENT. See advanceOrSubmit.
+		o = append(o, widget.WithOnSubmit(func(string) { f.advanceOrSubmit(i) }))
 		return textControl{in: widget.NewTextInput(o...)}
 	}}
 }
@@ -254,10 +294,18 @@ type form struct {
 	flex *tui.Flex
 
 	fields   []formField
+	labels   []*widget.Text
 	hint     *widget.Text
 	status   *widget.Text
 	onSubmit func(values formValues) (close bool, status string)
-	float    *widget.Float
+	// surface is the dialog this form is the body of. A form closes itself
+	// through the overlay interface rather than a concrete widget, so the one
+	// submit path serves however the surface is presented.
+	surface overlay
+	// ok is the affirmative button. Enter on the last field moves focus HERE
+	// rather than submitting: no field submits, which is what frees Enter for
+	// a select to open its options.
+	ok *widget.Button
 }
 
 func newForm(fields []formField, onSubmit func(formValues) (bool, string)) *form {
@@ -271,12 +319,12 @@ func newForm(fields []formField, onSubmit func(formValues) (bool, string)) *form
 		onSubmit: onSubmit,
 	}
 	f.flex = tui.NewFlex(tui.Vertical)
+	f.labels = make([]*widget.Text, len(f.fields))
 	for i := range f.fields {
-		idx := i
-		// THE ADVANCE RUNS ON THE KEY, NOT ON AN EVENT. See advanceOrSubmit.
-		f.fields[i].ctl = f.fields[i].build(func() { f.advanceOrSubmit(idx) })
-		f.flex.Add(widget.NewText(f.fields[i].label,
-			widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted))))
+		f.fields[i].ctl = f.fields[i].build(f, i)
+		f.labels[i] = widget.NewText(f.fields[i].label,
+			widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted)))
+		f.flex.Add(f.labels[i])
 		f.flex.Add(f.fields[i].ctl.component())
 	}
 	f.flex.Add(f.status)
@@ -303,16 +351,22 @@ func (f *form) Init(ctx *tui.Context) {
 // failed in CI at the same commit. Every paste is that race, because a paste is
 // a burst with none of a human's delay.
 //
-// THE LAST FIELD SUBMITS; every other one advances. Deciding by POSITION rather
-// than by "is this the only field" keeps the single-field case correct for
-// free: index 0 is also the last, so a one-field form (search, rename) submits
-// on Enter exactly as it always did.
+// NO FIELD SUBMITS. Enter advances, and from the LAST field it moves to the OK
+// button rather than firing the form. The positional rule -- "the last field
+// submits" -- is deleted rather than worked around: it is the thing a select
+// could not live under, because Enter on a select opens its options and is
+// therefore not available to mean "submit" as well. With a button there is
+// nothing left for position to decide, and a one-field form behaves like every
+// other one instead of being a special case that happens to work.
 func (f *form) advanceOrSubmit(i int) {
 	if i < 0 || i >= len(f.fields) {
 		return
 	}
 	if i == len(f.fields)-1 {
-		f.submit()
+		if f.tui != nil && f.ok != nil && f.tui.FocusComponent(f.ok) {
+			return
+		}
+		f.status.SetText("use Tab to reach OK")
 		return
 	}
 	// Focus could not move -- an unmounted or unfocusable field. Submitting
@@ -323,15 +377,49 @@ func (f *form) advanceOrSubmit(i int) {
 	}
 }
 
+// open reports whether the form is still on screen. A live select's load
+// checks this before applying anything: options that arrive after the operator
+// has walked away belong to nobody.
+func (f *form) open() bool { return f.surface != nil && f.surface.Shown() }
+
+// refreshLabels re-renders each row's label with whatever its control has to
+// say about itself — loading, empty, or the error that stopped it.
+func (f *form) refreshLabels() {
+	for i := range f.fields {
+		if i >= len(f.labels) || f.labels[i] == nil {
+			continue
+		}
+		text := f.fields[i].label
+		if a, ok := f.fields[i].ctl.(labelAnnotator); ok {
+			text += a.annotation()
+		}
+		f.labels[i].SetText(text)
+	}
+}
+
 func (f *form) submit() {
+	// A control may refuse. A select whose options have not arrived, or whose
+	// load failed, cannot contribute an answer the operator actually chose —
+	// and submitting anyway would send a choice made from a list that was
+	// never fully shown.
+	for i := range f.fields {
+		g, ok := f.fields[i].ctl.(submitGate)
+		if !ok {
+			continue
+		}
+		if blocked, why := g.blocks(); blocked {
+			f.status.SetText(f.fields[i].label + ": " + why)
+			return
+		}
+	}
 	values := make(formValues, len(f.fields))
 	for i, fd := range f.fields {
 		values[i] = fd.ctl.value()
 	}
 	closeIt, status := f.onSubmit(values)
 	if closeIt {
-		if f.float != nil {
-			f.float.Hide()
+		if f.surface != nil {
+			f.surface.Hide()
 		}
 		return
 	}
@@ -371,9 +459,68 @@ func (f *form) Children() iter.Seq[tui.Component] {
 var _ tui.Container = (*form)(nil)
 
 // openForm builds a form float and wires the float back-reference.
+// openForm shows a form as a DIALOG: a titled card with the fields, and a
+// button row that is the only route to a submit.
+//
+// The button row is not decoration. Enter used to submit from the last field, a
+// rule decided by POSITION, and a select cannot live under it — Enter on a
+// select opens its options, so the key is already spoken for and the field can
+// neither advance nor submit with it. Advancing on the select's change event
+// instead would reintroduce the lane race that advanceOrSubmit exists to avoid.
+// A button removes the question rather than answering it.
 func (m *Model) openForm(title string, fields []formField, onSubmit func(formValues) (bool, string)) *form {
+	return m.openFormOpts(title, fields, onSubmit, false)
+}
+
+// openFormScrimmed is openForm for the surfaces the requirement singles out:
+// the backdrop fades because the operator has nothing else to do until this is
+// answered. Login is one; everything else keeps the live backdrop, because the
+// operator is usually reading the thing behind the dialog.
+func (m *Model) openFormScrimmed(title string, fields []formField, onSubmit func(formValues) (bool, string)) *form {
+	return m.openFormOpts(title, fields, onSubmit, true)
+}
+
+func (m *Model) openFormOpts(title string, fields []formField,
+	onSubmit func(formValues) (bool, string), scrim bool) *form {
 	fm := newForm(fields, onSubmit)
-	fm.float = m.openFloat(title, fm)
+	fm.ok = widget.NewButton("OK",
+		widget.WithRole(widget.ButtonRoleDefault),
+		widget.WithMnemonic('O'),
+		widget.WithOnActivate(fm.submit))
+	// THE CANCEL BUTTON DISMISSES ITSELF. Escape resolves the cancel ROLE and
+	// closes the dialog for you, but activating the button — clicking it, or
+	// Enter on it — runs its callback and nothing else. Without this, Escape
+	// worked and the button the operator can see did nothing.
+	var md *widget.Modal
+	cancel := widget.NewButton("Cancel",
+		widget.WithRole(widget.ButtonRoleCancel),
+		widget.WithMnemonic('C'),
+		widget.WithOnActivate(func() {
+			if md != nil {
+				md.Dismiss(widget.DismissCancel)
+			}
+		}))
+	// WithScrim is passed at BOTH ends on purpose. Modal defaults it to true —
+	// the inverse of Float's, which defaults to no scrim — so leaving it out
+	// would fade the backdrop behind every dialog by doing nothing, which is
+	// the opposite of what this product asked for.
+	md = widget.NewModal(fm,
+		widget.WithModalTitle(title),
+		widget.WithButtons(fm.ok, cancel),
+		widget.WithScrim(scrim))
+	if err := md.Open(m.host); err != nil {
+		m.setError("open " + title + ": " + err.Error())
+		return fm
+	}
+	fm.surface = modalOverlay{m: md}
+	m.trackOverlay(fm.surface, fm, title, nil)
+	// THE FIRST FIELD TAKES THE KEYBOARD, not the default button. Modal seeds
+	// focus onto the affirmative button, which is right for a confirmation and
+	// wrong for a form: the operator opened this to type, and would otherwise
+	// have to Tab backwards to reach the first thing they came for.
+	if len(fm.fields) > 0 && m.ctx != nil {
+		m.ctx.FocusComponent(fm.fields[0].ctl.component())
+	}
 	return fm
 }
 

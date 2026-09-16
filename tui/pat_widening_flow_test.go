@@ -39,8 +39,13 @@ func TestPATWidening_TheFormReachesTheConfirmation(t *testing.T) {
 	h.key(tuicore.KeyTab)
 	h.keys("203.0.113.7") // a BARE address, outside any row of ours
 	h.key(tuicore.KeyTab)
-	h.keys("1")
-	h.key(tuicore.KeyEnter)
+	// The connection is CHOSEN from a loaded list, not typed as an id.
+	h.waitForOptions("connection (the token reaches ONLY this one)")
+	h.chooseMatching("demo")
+	// TAB, not Enter: Enter belongs to the select and would re-open its
+	// options. From a select the way out is Tab (or the O mnemonic).
+	h.key(tuicore.KeyTab)
+	h.key(tuicore.KeyEnter) // OK: submit
 
 	// The confirmation, naming the canonical form of what was typed.
 	h.waitFor("the widening confirmation", "add 1 row(s) to your own allowlist?")
@@ -66,8 +71,13 @@ func TestPATWidening_CancellingCreatesNothing(t *testing.T) {
 	h.key(tuicore.KeyTab)
 	h.keys("203.0.113.7")
 	h.key(tuicore.KeyTab)
-	h.keys("1")
-	h.key(tuicore.KeyEnter)
+	// The connection is CHOSEN from a loaded list, not typed as an id.
+	h.waitForOptions("connection (the token reaches ONLY this one)")
+	h.chooseMatching("demo")
+	// TAB, not Enter: Enter belongs to the select and would re-open its
+	// options. From a select the way out is Tab (or the O mnemonic).
+	h.key(tuicore.KeyTab)
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitFor("the widening confirmation", "add 1 row(s) to your own allowlist?")
 
 	h.key(tuicore.KeyEscape)
@@ -98,8 +108,13 @@ func TestPATWidening_ConfirmingAddsTheRowAndMints(t *testing.T) {
 	h.key(tuicore.KeyTab)
 	h.keys("203.0.113.7")
 	h.key(tuicore.KeyTab)
-	h.keys("1")
-	h.key(tuicore.KeyEnter)
+	// The connection is CHOSEN from a loaded list, not typed as an id.
+	h.waitForOptions("connection (the token reaches ONLY this one)")
+	h.chooseMatching("demo")
+	// TAB, not Enter: Enter belongs to the select and would re-open its
+	// options. From a select the way out is Tab (or the O mnemonic).
+	h.key(tuicore.KeyTab)
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitFor("the widening confirmation", "add 1 row(s) to your own allowlist?")
 
 	h.keys("y")
@@ -132,6 +147,8 @@ func bootstrapAndConnect(t *testing.T, h *uiHarness) {
 	h.keys("demo-passphrase-1")
 	h.key(tuicore.KeyTab)
 	h.keys("demo-passphrase-1")
+	// TWO Enters: the first reaches OK, the second presses it. No field submits.
+	h.key(tuicore.KeyEnter)
 	h.key(tuicore.KeyEnter)
 	h.waitFor("login completion", "logged in as root")
 
@@ -139,12 +156,8 @@ func bootstrapAndConnect(t *testing.T, h *uiHarness) {
 	h.waitFor("connections manager", "a:add")
 	h.keys("a")
 	h.waitFor("connection form", "new connection")
-	h.keys("demo")
-	h.key(tuicore.KeyEnter)
-	h.keys("sqlite")
-	h.key(tuicore.KeyEnter)
-	h.keys(fmt.Sprintf("file:widen%d?mode=memory&cache=shared", time.Now().UnixNano()))
-	h.key(tuicore.KeyEnter)
+	h.fillNewConnection("demo",
+		fmt.Sprintf("file:widen%d?mode=memory&cache=shared", time.Now().UnixNano()))
 	h.waitGone("connection form", "new connection")
 	h.waitForManagerRow("connections", "demo")
 

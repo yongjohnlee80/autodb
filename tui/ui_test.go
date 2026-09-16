@@ -170,6 +170,54 @@ func startUI(t *testing.T, addr string) *uiHarness {
 
 func (h *uiHarness) screen() string { return h.tb.String() }
 
+// chooseOption drives a select: open the options, step down n times, commit.
+//
+// A closed select answers Enter by OPENING, never by advancing, so a fixture
+// cannot walk past one the way it walks past a text field. That is the select
+// working as intended — Enter belongs to whatever has focus — and it is why
+// these fixtures Tab between fields instead.
+func (h *uiHarness) chooseOption(n int) {
+	h.key(tuicore.KeyEnter)
+	for range n {
+		h.key(tuicore.KeyDown)
+	}
+	h.key(tuicore.KeyEnter)
+}
+
+// chooseMatching drives a FILTERED select: open the options, type enough to
+// single out the row, and commit the top match. The live id selects filter;
+// the three-item enums do not, and use chooseOption instead.
+func (h *uiHarness) chooseMatching(s string) {
+	h.key(tuicore.KeyEnter)
+	h.keys(s)
+	h.key(tuicore.KeyEnter)
+}
+
+// waitForOptions waits until a live select has its options. The row's LABEL
+// says which of the three load states it is in, so the fixture waits on the
+// thing the operator would read rather than on a sleep.
+func (h *uiHarness) waitForOptions(label string) {
+	h.waitGone(label+" options finished loading", label+" — loading…")
+}
+
+// engineSQLite is sqlite's position in the engine select: postgres, mysql,
+// sqlite. Named rather than spelled 2 at five call sites, so adding an engine
+// breaks one line instead of hiding a wrong choice in five.
+const engineSQLite = 2
+
+// fillNewConnection fills the new-connection dialog and presses OK: a name, the
+// engine CHOSEN from its options, a dsn, then the two Enters that reach the
+// button and activate it.
+func (h *uiHarness) fillNewConnection(name, dsn string) {
+	h.keys(name)
+	h.key(tuicore.KeyTab)
+	h.chooseOption(engineSQLite)
+	h.key(tuicore.KeyTab)
+	h.keys(dsn)
+	h.key(tuicore.KeyEnter) // last field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
+}
+
 // waitFor polls the virtual screen for a substring.
 func (h *uiHarness) waitFor(what, sub string) {
 	h.t.Helper()
@@ -266,9 +314,17 @@ func runes(s string) []tuicore.KeyEvent {
 	return out
 }
 
-// enter is the Enter key as an event, for building a burst.
+// enter, tab and down are single keys as events, for building a burst.
 func enter() tuicore.KeyEvent {
 	return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyEnter}
+}
+
+func tab() tuicore.KeyEvent {
+	return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyTab}
+}
+
+func down() tuicore.KeyEvent {
+	return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyDown}
 }
 
 // ctrl injects a Ctrl-modified key (pane motion).
@@ -375,6 +431,8 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("demo-passphrase-1")
 	h.key(tuicore.KeyTab)
 	h.keys("demo-passphrase-1")
+	// TWO Enters: the first reaches OK, the second presses it. No field submits.
+	h.key(tuicore.KeyEnter)
 	h.key(tuicore.KeyEnter)
 	h.waitFor("login completion", "logged in as root")
 
@@ -383,12 +441,8 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("connections manager", "a:add")
 	h.keys("a")
 	h.waitFor("connection form", "new connection")
-	h.keys("demo")
-	h.key(tuicore.KeyTab)
-	h.keys("sqlite")
-	h.key(tuicore.KeyTab)
-	h.keys(fmt.Sprintf("file:uie2e%d?mode=memory&cache=shared", time.Now().UnixNano()))
-	h.key(tuicore.KeyEnter)
+	h.fillNewConnection("demo",
+		fmt.Sprintf("file:uie2e%d?mode=memory&cache=shared", time.Now().UnixNano()))
 	// The submit closes the form — wait for that FIRST so the row
 	// assertions below can only match the reloaded manager table (the
 	// form held the same strings).
@@ -422,7 +476,8 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("a")
 	h.waitFor("workspace form", "new workspace")
 	h.keys("main")
-	h.key(tuicore.KeyEnter)
+	h.key(tuicore.KeyEnter) // last (only) field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitGone("workspace form", "new workspace")
 	h.waitFor("workspace row", "main")
 	h.key(tuicore.KeyEscape)
@@ -432,8 +487,14 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("connection row loaded", "demo") // rows land async; 'w' needs a selection
 	h.keys("w")                                // attach selected conn to a workspace
 	h.waitFor("attach form", "attach demo to workspace")
-	h.keys("1")
-	h.key(tuicore.KeyEnter)
+	// The workspace is CHOSEN now, not typed. Its options are loaded, so wait
+	// for them before reaching into the list.
+	h.waitForOptions("workspace")
+	h.chooseMatching("main")
+	// TAB, not Enter: Enter belongs to the select and would re-open its
+	// options. From a select the way out is Tab (or the O mnemonic).
+	h.key(tuicore.KeyTab)
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitGone("attach form", "attach demo to workspace")
 	time.Sleep(300 * time.Millisecond) // let the attach round-trip settle
 	h.key(tuicore.KeyEscape)
@@ -537,7 +598,8 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("/")
 	h.waitFor("search prompt", "search in results")
 	h.keys("beta")
-	h.key(tuicore.KeyEnter)
+	h.key(tuicore.KeyEnter) // last (only) field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitFor("results match", "beta: match 1/1 in the results")
 
 	// The explorer searches the VISIBLE node labels (a collapsed subtree
@@ -546,11 +608,13 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("/")
 	h.waitFor("search prompt", "search in explorer")
 	h.keys("notes")
-	h.key(tuicore.KeyEnter)
+	h.key(tuicore.KeyEnter) // last (only) field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitFor("explorer match", "notes: match 1/1 in the explorer")
 	h.keys("/")
-	h.keys("songs") // collapsed away → honestly reported as no match
-	h.key(tuicore.KeyEnter)
+	h.keys("songs")         // collapsed away → honestly reported as no match
+	h.key(tuicore.KeyEnter) // last (only) field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitFor("explorer miss", "no match for songs in the explorer")
 
 	// The query editor searches its own lines (the buffer was emptied by
@@ -562,7 +626,8 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("/")
 	h.waitFor("search prompt", "search in query")
 	h.keys("songs")
-	h.key(tuicore.KeyEnter)
+	h.key(tuicore.KeyEnter) // last (only) field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitFor("editor match", "songs: match 1/1 in the query")
 	h.keys("n") // single match: n wraps back onto it
 	h.waitFor("editor wrap", "songs: match 1/1 in the query")
@@ -607,7 +672,8 @@ func TestUIFullFlow(t *testing.T) {
 	h.leader("s")
 	h.waitFor("save-as prompt", "save note as")
 	h.keys("frombuffer")
-	h.key(tuicore.KeyEnter)
+	h.key(tuicore.KeyEnter) // last (only) field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitFor("buffer saved", "saved frombuffer.sql")
 	if body, err := os.ReadFile(filepath.Join(h.notesRoot, "u-root", "ws-1", "frombuffer.sql")); err != nil {
 		t.Fatalf("saved note: %v", err)
@@ -639,7 +705,8 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("a")
 	h.waitFor("note form from explorer", "new note")
 	h.keys("fromexplorer")
-	h.key(tuicore.KeyEnter)
+	h.key(tuicore.KeyEnter) // last (only) field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
 	// The FILE exists as soon as it is named, so the explorer shows it
 	// without waiting for a first save.
 	h.waitFor("created note listed", "· fromexplorer.sql")
@@ -694,7 +761,8 @@ func TestUIFullFlow(t *testing.T) {
 	h.leader("n")
 	h.waitFor("note form", "new note")
 	h.keys("scratch")
-	h.key(tuicore.KeyEnter)
+	h.key(tuicore.KeyEnter) // last (only) field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitFor("note open", "scratch.sql")
 	h.keys("i")
 	h.keys("-- v1")
@@ -714,7 +782,8 @@ func TestUIFullFlow(t *testing.T) {
 	h.keys("s")
 	h.waitFor("save-as form", "save note as")
 	h.keys("scratch2")
-	h.key(tuicore.KeyEnter)
+	h.key(tuicore.KeyEnter) // last (only) field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitFor("save-as done", "saved scratch2.sql")
 	saved, err := os.ReadFile(filepath.Join(h.notesRoot, "u-root", "ws-1", "scratch2.sql"))
 	if err != nil {
@@ -867,6 +936,8 @@ func TestRestartServerFromTUI(t *testing.T) {
 	h.keys("restart-passphrase")
 	h.key(tuicore.KeyTab)
 	h.keys("restart-passphrase")
+	// TWO Enters: the first reaches OK, the second presses it. No field submits.
+	h.key(tuicore.KeyEnter)
 	h.key(tuicore.KeyEnter)
 	h.waitFor("logged in", "logged in as root")
 
@@ -880,6 +951,8 @@ func TestRestartServerFromTUI(t *testing.T) {
 	h.keys("root")
 	h.key(tuicore.KeyTab)
 	h.keys("restart-passphrase")
+	// TWO Enters: the first reaches OK, the second presses it. No field submits.
+	h.key(tuicore.KeyEnter)
 	h.key(tuicore.KeyEnter)
 	h.waitFor("logged in again", "logged in as root")
 

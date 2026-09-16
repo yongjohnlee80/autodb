@@ -13,7 +13,7 @@ import (
 func formLabels(t *testing.T, m *Model) []string {
 	t.Helper()
 	var out []string
-	for _, fd := range patFormFields(m.offersCleartextTokenField()) {
+	for _, fd := range patFormFields(m, m.offersCleartextTokenField()) {
 		out = append(out, fd.label)
 	}
 	if len(out) == 0 {

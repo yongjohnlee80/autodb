@@ -133,9 +133,13 @@ func formHints() []keyHint {
 	// Kept SHORT because it has to survive the form's narrow cap: the first
 	// wording wrapped mid-phrase ("submit (on the last / field)"), which reads
 	// worse than no footer. This fits on one line at the minimum width.
+	//
+	// It no longer promises a submit on the last field, because there is none:
+	// Enter advances, the OK button submits, and a footer that says otherwise
+	// teaches a key that does not work.
 	return []keyHint{
 		{"Tab/Enter", "next"},
-		{"Enter", "submit on last"},
+		{"O", "OK"},
 		{"Esc", "cancel"},
 	}
 }

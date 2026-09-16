@@ -43,6 +43,13 @@ type Session struct {
 	token      string
 	user       UserInfo
 	gen        uint64 // state epoch; bumps when a (re)connect/disconnect BEGINS
+	// idEpoch is the IDENTITY epoch, and it is separate from gen because the
+	// two change independently. A sign-in over a live connection does not bump
+	// gen, and comparing the user's ID instead cannot see the case that matters
+	// most: the same person signing out and back in is a NEW session holding a
+	// NEW token, with the same id. Work issued before that must not be applied
+	// after it.
+	idEpoch uint64
 }
 
 // spawnProbeWindow bounds how long Connect keeps dialing after the first
@@ -74,6 +81,14 @@ func NewSessionOn(network, addr string, log logger.Logger, spawn func() (string,
 		network = "tcp"
 	}
 	return &Session{network: network, addr: addr, log: log, spawn: spawn}
+}
+
+// IdentityEpoch reports the identity epoch: it changes on every sign-in and
+// every sign-out, including a sign-out and back in as the same account.
+func (s *Session) IdentityEpoch() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.idEpoch
 }
 
 // Gen reports the state epoch (stale-task filtering in the UI).
@@ -180,6 +195,10 @@ type Bound struct {
 	// gen, so the epoch could not catch it -- the identity has to travel with
 	// the credential.
 	user UserInfo
+	// idEpoch pins the identity epoch current at Bind time, so a result can be
+	// refused when the person it was issued for is no longer the person signed
+	// in — including when that is the same account, signed in again.
+	idEpoch uint64
 }
 
 // Bind pins the current epoch. Call it where the user's intent forms —
@@ -187,11 +206,14 @@ type Bound struct {
 func (s *Session) Bind() *Bound {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return &Bound{s: s, cli: s.client, gen: s.gen, token: s.token, user: s.user}
+	return &Bound{s: s, cli: s.client, gen: s.gen, token: s.token, user: s.user, idEpoch: s.idEpoch}
 }
 
 // Gen reports the pinned epoch (result tagging at issuance sites).
 func (b *Bound) Gen() uint64 { return b.gen }
+
+// IdentityEpoch reports the identity epoch pinned at Bind time.
+func (b *Bound) IdentityEpoch() uint64 { return b.idEpoch }
 
 // User reports the identity pinned alongside the token, which is the account
 // whose credential this Bound acts with. Anything that RENDERS an identity for
@@ -318,6 +340,7 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 		// cached assumption is stale.
 		s.token = ""
 		s.user = UserInfo{}
+		s.idEpoch++
 	}
 	s.client = cli
 	s.instance = inst
@@ -385,6 +408,7 @@ func (b *Bound) authed(ctx context.Context, method string, extra ...any) (any, e
 			if b.s.gen == b.gen && b.s.token == b.token {
 				b.s.token = ""
 				b.s.user = UserInfo{}
+				b.s.idEpoch++
 			}
 			b.s.mu.Unlock()
 		}
@@ -434,6 +458,7 @@ func (s *Session) adoptLogin(res any, gen uint64) {
 	}
 	s.token = tok
 	s.user = u
+	s.idEpoch++
 }
 
 func (b *Bound) Bootstrap(ctx context.Context, name, pass string) error {
@@ -478,6 +503,7 @@ func (b *Bound) Logout(ctx context.Context) error {
 	if b.s.gen == b.gen && b.s.token == b.token {
 		b.s.token = ""
 		b.s.user = UserInfo{}
+		b.s.idEpoch++
 	}
 	b.s.mu.Unlock()
 	return err
