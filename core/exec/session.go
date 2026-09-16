@@ -241,6 +241,17 @@ type session struct {
 	// reservation, so the owner cannot be woken about a session that was not
 	// reserved, nor reserved without being told.
 	pendingNotice *DemandNotice
+	// demandFinal is this reclamation's single finalisation claim, set in the
+	// same hold that took the reservation and consumed by the one call that
+	// finalises it.
+	//
+	// THE GENERATION IS NOT ENOUGH ON ITS OWN. Identity plus generation stays
+	// valid until the session leaves the registry, so two callers presenting
+	// the same pair before removal both matched, both were told they owned the
+	// teardown, and both went on to tear down -- one ending written twice into
+	// the trail, by a return value whose whole job was to say that had not
+	// happened. A claim can be consumed; a name cannot.
+	demandFinal bool
 	// demandHeldObjects records whether the session held prepared statements or
 	// portals when it was selected. Kept for the same reason as demandIdle:
 	// the record has to say what was true when the choice was made.

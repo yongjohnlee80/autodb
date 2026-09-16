@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -172,6 +173,9 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 			// session cannot be reserved without its owner being told -- which
 			// is what stopped a lost race from ending somebody's session
 			// silently.
+			// ISSUED WITH THE RESERVATION, so exactly one finalisation exists
+			// for exactly one reservation.
+			s.demandFinal = true
 			s.demandIdle = now.Sub(s.lastUsed)
 			s.demandHeldObjects = s.holdsObjects()
 			s.pendingNotice = &DemandNotice{
@@ -348,7 +352,12 @@ func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint
 	// The idle time is the justification for ending somebody's session and the
 	// delivery flag is whether they were told; both belong in the record beside
 	// the decision, not in a record of their own.
-	e.completeDemandReason(s, delivery)
+	if !e.claimDemandFinalisation(s, delivery) {
+		// SOMEBODY ELSE OWNS THIS ENDING, or this caller has already finalised
+		// it. Returning here is what keeps one ending to one teardown, one
+		// audit line and one lease release.
+		return false
+	}
 
 	// NOT PRE-CLAIMED. The teardown slot is claimed by quiesce, inside
 	// finishClosing, and claiming it here first made this path wait on itself:
@@ -396,12 +405,28 @@ func (r *sessionRegistry) byIDOnly(id SessionID) (*session, bool) {
 
 // completeDemandReason folds what only the owner knew into the one record this
 // ending will leave.
-func (e *Engine) completeDemandReason(s *session, delivery DemandDelivery) {
+// claimDemandFinalisation consumes this session's finalisation claim and
+// records the outcome, or refuses.
+//
+// VALIDATED AND CONSUMED UNDER ONE HOLD, because a check and a claim in two
+// holds is the same race in a smaller window: both callers would see the claim
+// intact, and both would take it. Everything that decides is read here --
+// whether a claim is outstanding, whether the session is actually closing, and
+// whether it is closing for THIS reason -- so a caller that arrives against an
+// ordinary close, or a second time, is refused rather than allowed to write a
+// reclamation over somebody else's ending.
+func (e *Engine) claimDemandFinalisation(s *session, delivery DemandDelivery) bool {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.demandFinal || s.get() != sessClosing ||
+		!strings.HasPrefix(s.closeWhy, ReasonDemandReclaimed) {
+		return false
+	}
+	s.demandFinal = false
 	// The idle time is the one recorded AT SELECTION, not measured again now.
 	// See session.demandIdle.
 	s.closeWhy = ReasonDemandReclaimed + demandOutcomeSuffix(s.demandIdle, s.demandHeldObjects, delivery)
-	s.mu.Unlock()
+	return true
 }
 
 // holdsObjects reports whether anything of this session's lives on its backend.
