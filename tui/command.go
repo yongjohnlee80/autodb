@@ -98,6 +98,20 @@ func (a Audience) VisibleTo(role string) bool {
 	return rank >= 3
 }
 
+// foldRune is the case fold the MENU WIDGET uses to match a mnemonic.
+//
+// It must agree with upstream exactly. The widget folds ASCII, so a category
+// keyed 'S' and a leaf keyed 's' are ONE mnemonic at runtime — and validation
+// that compares raw runes accepts them as two, leaving whichever the widget
+// finds second unreachable by its own key. Keyed by the folded rune, the
+// collision is caught where it is declared.
+func foldRune(r rune) rune {
+	if r >= 'A' && r <= 'Z' {
+		return r + ('a' - 'A')
+	}
+	return r
+}
+
 // LeaderProjection is how a command appears on the SPC which-key menu.
 //
 // The leader's labels are deliberately long and descriptive ("run query
@@ -171,10 +185,6 @@ const (
 type Offering struct {
 	State  OfferState
 	Reason string // non-empty iff State == OfferDisabled
-	// Faulty marks a resolution that revealed a programming error — an Enabled
-	// predicate that refused without saying why. The row is refused either way;
-	// this is what lets a test tell a real refusal from a broken one.
-	Faulty bool
 }
 
 // Command is one thing the TUI can do.
@@ -220,16 +230,18 @@ func (c *Command) offering(m *Model) Offering {
 	if c.Enabled != nil {
 		if ok, reason := c.Enabled(m); !ok {
 			if reason == "" {
-				// A FAULT, NOT A DEFAULT. Substituting a friendly string here
-				// hid a broken predicate behind a plausible row and made the
-				// test that checked for it codify the papering-over. The row is
-				// still refused, and it now says WHICH command is wrong so the
-				// fault is findable rather than merely survivable.
-				return Offering{
-					State:  OfferDisabled,
-					Reason: "bug: " + string(c.ID) + " disabled without a reason",
-					Faulty: true,
-				}
+				// A PROGRAMMING ERROR, RAISED AS ONE. Two softer versions of
+				// this shipped first and both were wrong: a friendly substitute
+				// string hid the broken predicate behind a plausible row, and a
+				// Faulty flag that no production surface read was a marker for
+				// nobody — the malformed predicate still reached the operator
+				// either way, so there was no boundary at all.
+				//
+				// Same policy as a malformed catalog, which panics in New: a
+				// declaration this package got wrong is not a runtime condition
+				// to degrade around.
+				panic("tui: command " + string(c.ID) +
+					": Enabled refused without a reason")
 			}
 			return Offering{State: OfferDisabled, Reason: reason}
 		}
@@ -314,11 +326,11 @@ func NewCatalog(cmds []Command, nodes []MenuNode) (*Catalog, error) {
 		}
 		s.order[n.Order] = n.ID
 		if n.Hotkey != 0 {
-			if prev, dup := s.hotkey[n.Hotkey]; dup {
+			if prev, dup := s.hotkey[foldRune(n.Hotkey)]; dup {
 				return nil, fmt.Errorf("menu nodes %q and %q share hotkey %q under %q",
 					prev, n.ID, n.Hotkey, n.Parent)
 			}
-			s.hotkey[n.Hotkey] = n.ID
+			s.hotkey[foldRune(n.Hotkey)] = n.ID
 		}
 	}
 
@@ -388,11 +400,11 @@ func NewCatalog(cmds []Command, nodes []MenuNode) (*Catalog, error) {
 			}
 			s.order[mp.Order] = MenuNodeID(cmd.ID)
 			if mp.Hotkey != 0 {
-				if prev, dup := s.hotkey[mp.Hotkey]; dup {
+				if prev, dup := s.hotkey[foldRune(mp.Hotkey)]; dup {
 					return nil, fmt.Errorf("command %q and %q share hotkey %q under %q",
 						cmd.ID, prev, mp.Hotkey, mp.Parent)
 				}
-				s.hotkey[mp.Hotkey] = MenuNodeID(cmd.ID)
+				s.hotkey[foldRune(mp.Hotkey)] = MenuNodeID(cmd.ID)
 			}
 		}
 	}

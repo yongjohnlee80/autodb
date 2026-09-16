@@ -212,6 +212,40 @@ func (h *barHarness) click(x, y int) {
 	h.settle()
 }
 
+// cellOf finds the first screen cell of a piece of text, so a pointer cell is
+// located rather than guessed. A hard-coded coordinate that misses turns a
+// behaviour cell into a skip.
+func (h *barHarness) cellOf(text string) (int, int) {
+	h.t.Helper()
+	for y, line := range strings.Split(h.screen(), "\n") {
+		if i := strings.Index(line, text); i >= 0 {
+			return i, y
+		}
+	}
+	h.t.Fatalf("%q is not on screen\n%s", text, h.screen())
+	return 0, 0
+}
+
+// dismissOneFloat closes the topmost float and waits for it to go.
+func (h *barHarness) dismissOneFloat() {
+	h.t.Helper()
+	for range 6 {
+		var shown int
+		h.on(func() {
+			for _, f := range h.m.floats {
+				if f.f.Shown() {
+					shown++
+				}
+			}
+		})
+		if shown == 0 {
+			return
+		}
+		h.key(tuicore.KeyEscape)
+	}
+	h.t.Fatalf("a float would not close\n%s", h.screen())
+}
+
 // paneHolding reports which workspace pane holds focus, by name, or "".
 func (h *barHarness) paneHolding() string {
 	var name string
@@ -497,12 +531,25 @@ func TestTheMountedZoomOutRowFollowsTheZoomState(t *testing.T) {
 func TestActivatingADisabledRowDoesNothingAndKeepsTheMenuOpen(t *testing.T) {
 	h := startBar(t, meta.RoleAdmin)
 
-	var ran bool
-	h.on(func() {
-		ran = h.m.runMenuAction(tuicore.ActionInvocation{Action: commandAction{id: cmdZoomOut}})
-	})
-	if ran {
-		t.Error("a dimmed Zoom out was executed")
+	// THROUGH THE KEYBOARD, not by calling the executor. Calling it directly
+	// proves the guard and says nothing about what upstream does with the
+	// answer — and what upstream does is the claim in the name: an unhandled
+	// action must leave the cascade OPEN.
+	h.alt('v') // View
+	h.key('z') // Zoom
+	levels := h.openLevels()
+	if levels < 2 {
+		t.Fatalf("precondition failed: the Zoom submenu is not open (levels=%d)", levels)
+	}
+	h.key('o') // Zoom out, which is dimmed with nothing zoomed
+
+	if !h.menuActive() {
+		t.Error("the bar lost focus after a dimmed row was pressed")
+	}
+	if h.openLevels() != levels {
+		t.Errorf("the cascade moved (%d -> %d) after a dimmed row was pressed; "+
+			"that is indistinguishable from the command having run",
+			levels, h.openLevels())
 	}
 	var zoomed bool
 	h.on(func() { zoomed = h.m.zoomed })
@@ -588,11 +635,14 @@ func TestAMouseClickBecomesTheReturnTarget(t *testing.T) {
 		t.Fatalf("precondition failed: focus is in %q, want editor", got)
 	}
 
-	// Click into the explorer, which occupies the left column below the bar.
-	h.click(4, 4)
+	// The explorer occupies the left column under the bar. Located rather than
+	// guessed: a hard-coded cell that misses is a cell that skips, and a cell
+	// that skips proves nothing.
+	x, y := h.cellOf("explorer")
+	h.click(x, y+2)
 	if got := h.paneHolding(); got != "explorer" {
-		t.Skipf("the click did not land in the explorer (focus is %q); the "+
-			"fixture's geometry, not the behaviour, is what failed", got)
+		t.Fatalf("the click at (%d,%d) did not focus the explorer (focus %q)\n%s",
+			x, y+2, got, h.screen())
 	}
 
 	h.key(tuicore.KeyF10)
@@ -600,6 +650,41 @@ func TestAMouseClickBecomesTheReturnTarget(t *testing.T) {
 	if got := h.paneHolding(); got != "explorer" {
 		t.Errorf("after a click into the explorer and a visit to the bar, focus "+
 			"returned to %q; the click is where the operator was", got)
+	}
+}
+
+// TestAMouseClickOpensACategoryAndClickingAwayClosesIt.
+//
+// The pointer path end to end: a click on the bar opens that category, and a
+// click into a pane closes the cascade without stealing the click's focus.
+func TestAMouseClickOpensACategoryAndClickingAwayClosesIt(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+
+	// The QUERY pane, on the right, and located BEFORE the cascade opens. Home
+	// sits at the left edge so its dropdown falls over the explorer — clicking
+	// there would hit the menu, not a pane, and the cell would be asserting
+	// that a menu click closes the menu.
+	qx, qy := h.cellOf("query")
+
+	hx, hy := h.cellOf("Home")
+	h.click(hx, hy)
+	if !h.menuActive() {
+		t.Fatalf("clicking the Home category did not focus the bar\n%s", h.screen())
+	}
+	if h.openLevels() == 0 {
+		t.Errorf("clicking a category did not open it\n%s", h.screen())
+	}
+
+	h.click(qx+2, qy+2)
+	if h.openLevels() != 0 {
+		t.Errorf("the cascade survived a click into a pane and is covering it\n%s",
+			h.screen())
+	}
+	if h.menuActive() {
+		t.Error("the bar kept the keyboard after a click elsewhere")
+	}
+	if got := h.paneHolding(); got != "editor" {
+		t.Errorf("the click-away landed focus in %q, want the clicked query pane", got)
 	}
 }
 
@@ -642,11 +727,22 @@ func TestTabDoesNotStrandFocusInTheBar(t *testing.T) {
 	h.on(func() { h.m.focusPane(h.m.editor) })
 	h.settle()
 
-	for range 6 {
+	seenMenu := false
+	for range 12 {
 		h.key(tuicore.KeyTab)
+		if h.menuActive() {
+			seenMenu = true
+		}
 		if h.paneHolding() == "" && !h.menuActive() {
 			t.Fatalf("Tab left focus in neither a pane nor the bar\n%s", h.screen())
 		}
+	}
+	// The Menu is a focusable component, so traversal must actually REACH it.
+	// Without this the cell passes on a bar Tab can never get to, which is the
+	// opposite of the documented behaviour.
+	if !seenMenu {
+		t.Error("Tab never reached the bar; it is focusable and is documented as " +
+			"part of normal traversal")
 	}
 }
 
@@ -655,32 +751,55 @@ func TestTabDoesNotStrandFocusInTheBar(t *testing.T) {
 // The end-to-end shape of the focus contract: open a dialog from a menu row,
 // close it, and the keyboard is in the workspace — not on the bar, which is
 // shut by then, and not nowhere.
-func TestADialogOpenedFromTheBarReturnsToTheWorkspace(t *testing.T) {
-	h := startBar(t, meta.RoleAdmin)
-	h.on(func() { h.m.focusPane(h.m.explorer) })
-	h.settle()
-
-	// About is a menu row that opens a float.
-	h.on(func() { h.m.runMenuAction(tuicore.ActionInvocation{Action: commandAction{id: cmdAbout}}) })
-	h.settle()
-	var shown int
-	h.on(func() {
-		for _, f := range h.m.floats {
-			if f.f.Shown() {
-				shown++
+func TestADialogOpenedFromTheBarReturnsToItsOriginPane(t *testing.T) {
+	for _, origin := range []string{"editor", "explorer", "results"} {
+		t.Run(origin, func(t *testing.T) {
+			h := startBar(t, meta.RoleAdmin)
+			if origin == "results" {
+				h.showResults()
 			}
-		}
-	})
-	if shown == 0 {
-		t.Fatal("precondition failed: the About dialog did not open")
-	}
+			h.on(func() {
+				switch origin {
+				case "editor":
+					h.m.focusPane(h.m.editor)
+				case "explorer":
+					h.m.focusPane(h.m.explorer)
+				case "results":
+					h.m.focusPane(h.m.results)
+				}
+			})
+			h.settle()
+			if got := h.paneHolding(); got != origin {
+				t.Fatalf("precondition failed: focus is in %q, want %q", got, origin)
+			}
 
-	h.key(tuicore.KeyEscape)
-	h.settle()
-	if h.menuActive() {
-		t.Error("closing the dialog put the keyboard on the bar")
-	}
-	if got := h.paneHolding(); got == "" {
-		t.Errorf("closing the dialog left focus nowhere\n%s", h.screen())
+			// THROUGH THE MENU: Alt+S opens System, 'a' is About's mnemonic.
+			h.alt('s')
+			if h.openLevels() == 0 {
+				t.Fatal("precondition failed: System did not open")
+			}
+			h.key('a')
+
+			var shown int
+			h.on(func() {
+				for _, f := range h.m.floats {
+					if f.f.Shown() {
+						shown++
+					}
+				}
+			})
+			if shown == 0 {
+				t.Fatalf("precondition failed: About did not open\n%s", h.screen())
+			}
+
+			h.dismissOneFloat()
+			if h.menuActive() {
+				t.Error("closing the dialog put the keyboard on the bar")
+			}
+			if got := h.paneHolding(); got != origin {
+				t.Errorf("focus returned to %q, want the origin pane %q\n%s",
+					got, origin, h.screen())
+			}
+		})
 	}
 }

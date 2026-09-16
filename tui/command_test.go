@@ -9,6 +9,7 @@ package tui
 // defect fix rather than a regression and is asserted as such below.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -187,44 +188,99 @@ func TestTheThreeStatesResolveStrictestFirst(t *testing.T) {
 	}
 }
 
-// TestAPredicateThatRefusesWithoutSayingWhyIsReportedAsAFault.
+// TestAPredicateThatRefusesWithoutSayingWhyIsAProgrammingError.
 //
-// An earlier version substituted a friendly "unavailable right now" here, and
-// the test asserted the substitution — so a broken predicate produced a
-// plausible row and a green cell, which is the papering-over codified. The row
-// is still refused, and the resolution now says WHICH command is wrong and
-// marks itself faulty, so the fault is findable rather than merely survivable.
-func TestAPredicateThatRefusesWithoutSayingWhyIsReportedAsAFault(t *testing.T) {
+// TWO SOFTER VERSIONS OF THIS SHIPPED FIRST AND BOTH WERE WRONG. A friendly
+// substitute string hid the broken predicate behind a plausible row. Replacing
+// it with a Faulty flag was no better: no production surface read the flag, so
+// the malformed predicate still reached the operator and the "boundary" existed
+// only in this file. A marker nobody consumes is not a boundary.
+//
+// It panics now, with the command id, on the same policy as a malformed
+// catalog: a declaration this package got wrong is not a runtime condition to
+// degrade around.
+func TestAPredicateThatRefusesWithoutSayingWhyIsAProgrammingError(t *testing.T) {
 	m := &Model{session: NewSession("", nil, nil)}
 	m.session.user = UserInfo{Role: meta.RoleAdmin}
-	c := Command{
+
+	mute := Command{
 		ID: "probe.mute", Run: func(*Model) {},
 		Enabled: func(*Model) (bool, string) { return false, "" },
 	}
-	off := c.offering(m)
-	if off.State != OfferDisabled {
-		t.Fatalf("state = %d, want disabled", off.State)
-	}
-	if !off.Faulty {
-		t.Error("a predicate that refused without a reason was not marked faulty")
-	}
-	if !strings.Contains(off.Reason, "probe.mute") {
-		t.Errorf("the reason %q does not name the command, so the bug is not "+
-			"findable from the screen", off.Reason)
-	}
-	if c.offered(m) {
-		t.Error("a faulty refusal is still offered for activation")
-	}
+	func() {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Error("a predicate that refused without a reason did not panic")
+				return
+			}
+			if !strings.Contains(fmt.Sprint(r), "probe.mute") {
+				t.Errorf("the panic %v does not name the command, so the bug is "+
+					"not findable from the crash", r)
+			}
+		}()
+		mute.offering(m)
+	}()
 
-	// THE CONTROL: a predicate that DOES give a reason is an ordinary refusal
-	// and must not be marked faulty, or the flag means nothing.
+	// THE CONTROL: a predicate that gives a reason is an ordinary refusal and
+	// must NOT panic, or the boundary would reject correct code too.
 	ok := Command{
 		ID: "probe.ok", Run: func(*Model) {},
 		Enabled: func(*Model) (bool, string) { return false, "not yet" },
 	}
-	if got := ok.offering(m); got.Faulty || got.Reason != "not yet" {
-		t.Errorf("an ordinary refusal came back faulty=%v reason=%q", got.Faulty, got.Reason)
+	off := ok.offering(m)
+	if off.State != OfferDisabled || off.Reason != "not yet" {
+		t.Errorf("an ordinary refusal came back state=%d reason=%q", off.State, off.Reason)
 	}
+}
+
+// TestHotkeyCollisionsAreCaseFolded.
+//
+// The widget folds ASCII when matching a mnemonic, so a node keyed 'S' and a
+// leaf keyed 's' are ONE mnemonic at runtime. Validation that compared raw
+// runes accepted them as two and left whichever the widget found second
+// unreachable by its own key.
+func TestHotkeyCollisionsAreCaseFolded(t *testing.T) {
+	nodes := func(hotkey rune) []MenuNode {
+		return []MenuNode{
+			{ID: "top", Label: "Top", Order: 10},
+			{ID: "sub", Parent: "top", Label: "Sub", Hotkey: hotkey, Order: 10},
+		}
+	}
+	cmd := func(hotkey rune) []Command {
+		return []Command{{
+			ID: "a", Run: func(*Model) {},
+			Menu: []MenuProjection{{Parent: "top", Label: "A", Hotkey: hotkey, Order: 20}},
+		}}
+	}
+
+	t.Run("node S against leaf s", func(t *testing.T) {
+		if _, err := NewCatalog(cmd('s'), nodes('S')); err == nil {
+			t.Error("'S' and 's' were accepted as two mnemonics; the widget folds " +
+				"them into one and the second row becomes unreachable")
+		}
+	})
+	t.Run("node s against leaf S", func(t *testing.T) {
+		if _, err := NewCatalog(cmd('S'), nodes('s')); err == nil {
+			t.Error("the same collision in the other direction was accepted")
+		}
+	})
+	t.Run("leaf s against leaf S", func(t *testing.T) {
+		c := append(cmd('s'), Command{
+			ID: "b", Run: func(*Model) {},
+			Menu: []MenuProjection{{Parent: "top", Label: "B", Hotkey: 'S', Order: 30}},
+		})
+		if _, err := NewCatalog(c, nodes('Z')); err == nil {
+			t.Error("two leaves folding to one mnemonic were accepted")
+		}
+	})
+	// THE CONTROL: genuinely distinct letters still pass, so the rule is about
+	// folding and not about hotkeys being rejected outright.
+	t.Run("distinct letters are fine", func(t *testing.T) {
+		if _, err := NewCatalog(cmd('a'), nodes('S')); err != nil {
+			t.Errorf("distinct mnemonics were refused: %v", err)
+		}
+	})
 }
 
 // TestValidationRefusesSiblingCollisionsAcrossNodesAndLeaves.
@@ -284,13 +340,17 @@ func TestValidationRefusesSiblingCollisionsAcrossNodesAndLeaves(t *testing.T) {
 	})
 }
 
-// TestARejectedModelIsNotRememberedAsApplied.
+// TestNoProjectionIsCachedWhenNoneWasApplied.
 //
-// menuShown is the diff's baseline. Caching it before SetModel succeeded meant
-// a refused model was remembered as shown, and every later refresh diffed
-// against something the bar had never displayed — so the bar would never
-// recover.
-func TestARejectedModelIsNotRememberedAsApplied(t *testing.T) {
+// menuShown is the diff's baseline, and the ordering fix is that it advances
+// only after SetModel succeeds — otherwise a refused model is remembered as
+// shown and every later refresh diffs against something the bar never
+// displayed, so it can never recover.
+//
+// NAMED FOR WHAT IT ACTUALLY REACHES: the no-menu early return, not a SetModel
+// rejection. Forcing a rejection would mean building a model the validated
+// catalog cannot produce, which is complexity invented to satisfy a test.
+func TestNoProjectionIsCachedWhenNoneWasApplied(t *testing.T) {
 	m := leaderModelFor(t, leaderState{role: meta.RoleAdmin, frontend: FrontendTerminal})
 	if m.menuShown != nil {
 		t.Fatal("precondition failed: something is already cached")

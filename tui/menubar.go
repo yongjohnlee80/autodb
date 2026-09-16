@@ -111,15 +111,9 @@ func hotkeyIndex(label string, hotkey rune) int {
 	if hotkey == 0 {
 		return 0
 	}
-	lower := func(r rune) rune {
-		if r >= 'A' && r <= 'Z' {
-			return r + ('a' - 'A')
-		}
-		return r
-	}
 	i := 0
 	for _, r := range label {
-		if lower(r) == lower(hotkey) {
+		if foldRune(r) == foldRune(hotkey) {
 			return i
 		}
 		i++
@@ -251,14 +245,8 @@ func (m *Model) openMenuCategory(id widget.ItemID) bool {
 // category pruned for this operator cannot be opened by its Alt key — the
 // keystroke and the screen agree about what exists.
 func (m *Model) menuCategoryForMnemonic(r rune) (widget.ItemID, bool) {
-	lower := func(c rune) rune {
-		if c >= 'A' && c <= 'Z' {
-			return c + ('a' - 'A')
-		}
-		return c
-	}
 	for _, row := range m.menu.Model() {
-		if row.Hotkey != 0 && lower(row.Hotkey) == lower(r) {
+		if row.Hotkey != 0 && foldRune(row.Hotkey) == foldRune(r) {
 			return row.ID, true
 		}
 	}
