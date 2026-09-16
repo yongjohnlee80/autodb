@@ -85,6 +85,9 @@ type Model struct {
 	// rather than to a bar that is about to close.
 	lastPane tui.Component
 	menu     *widget.Menu // the top bar's menu; nil until New builds it
+	// menuShown is the projection currently applied, so a reprojection that
+	// would change nothing does not disturb an open cascade.
+	menuShown []widget.MenuItemModel
 	// catalog is every command and menu node, validated once at construction.
 	// Projections re-evaluate state; identity and closures are never rebuilt,
 	// because a command that is a different value each time it is read cannot
@@ -284,6 +287,9 @@ func (m *Model) watchDisconnect() {
 }
 
 func (m *Model) handleStartup(d startupDone) {
+	defer m.refreshMenuModel() // Startup settles the identity and the connection, and does not touch the
+	// status line, so the bar would otherwise keep a pre-login projection.
+
 	m.connecting = false
 	m.running = false
 	// A (re)connect INVALIDATES any in-flight attempt's guard ownership:
@@ -1201,6 +1207,11 @@ func (m *Model) serverStatusText() string {
 }
 
 func (m *Model) refreshStatus() {
+	// The bar is chrome too, and every path that refreshes the status line has
+	// changed something. The projection diffs, so this costs nothing when
+	// nothing moved.
+	m.refreshMenuModel()
+
 	// The marker goes on the LEFT, which transient status messages never
 	// overwrite. On the right it would survive exactly until the next query.
 	left := m.cleartextBannerText() + "-- " + m.editor.Mode().String() + " --  " + m.serverStatusText()
@@ -1592,8 +1603,15 @@ func (m *Model) openLeaderMenu() { m.openLeader("SPC — commands", m.leaderEntr
 func (m *Model) openHelp() {
 	var sb strings.Builder
 	sb.WriteString("SPC <key> — leader commands\n\n")
-	for _, e := range m.leaderEntries() {
-		fmt.Fprintf(&sb, "  %c   %s\n", e.key, e.label)
+	// PROJECTED, NOT RESTATED. This block is the whole of the command
+	// documentation: the four bindings that used to be repeated further down
+	// with different wording now carry that wording as their own long help, so
+	// each binding appears exactly once and cannot disagree with itself.
+	for _, r := range m.catalog.helpProjection(m) {
+		fmt.Fprintf(&sb, "  %c   %s\n", r.Key, r.Label)
+		if r.Help != "" {
+			fmt.Fprintf(&sb, "        %s\n", r.Help)
+		}
 	}
 	sb.WriteString("\nsearch\n\n")
 	sb.WriteString("  /              search the focused panel (explorer, query, results)\n")
@@ -1603,12 +1621,6 @@ func (m *Model) openHelp() {
 	sb.WriteString("  Alt-h/j/k/l    the same, for a browser: Ctrl-L is the address bar\n")
 	sb.WriteString("  Ctrl-w z       zoom focused pane\n")
 	sb.WriteString("  Ctrl-q         quit (q quits too when nothing consumes it)\n")
-	if m.canRestartDaemon() {
-		sb.WriteString("  SPC X          restart the server (picks up a rebuilt binary)\n")
-	}
-	sb.WriteString("  SPC C          choose which connection the query runs against\n")
-	sb.WriteString("  SPC H          script history (who ran what, when)\n")
-	sb.WriteString("  SPC A          about: build, backend, and where state lives\n")
 	if m.frontend == FrontendWeb {
 		// Criterion 12: an empty explorer must be explicable, and the
 		// explorer pane is ~25 columns and truncates any sentence — so the explanation
@@ -1761,6 +1773,9 @@ func (m *Model) setFrontDoorCleartext(on bool) {
 // and a warning that cannot be closed is a warning that stops being read. It is
 // the daemon banner, not this one, that has to survive being ignored.
 func (m *Model) dismissCleartextWarning() {
+	defer m.refreshMenuModel() // Dismissing the warning withdraws its own command, and this path does not
+	// refresh the status line.
+
 	if !m.cleartextFD {
 		m.setStatus("no cleartext warning to dismiss")
 		return

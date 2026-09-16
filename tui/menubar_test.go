@@ -225,3 +225,100 @@ func TestTheExecutorRefusesWhatItWillNotRun(t *testing.T) {
 type otherAction struct{}
 
 func (otherAction) ActionID() tui.ActionID { return "autodb.test.other" }
+
+// TestHelpDocumentsEachLeaderBindingExactlyOnce.
+//
+// The help screen used to project most of the list and then RESTATE four
+// bindings by hand, with different wording: SPC C appeared twice saying two
+// different things, and a reader had to guess which was current. Every binding
+// now comes from one place, and the long wording travels with the command.
+func TestHelpDocumentsEachLeaderBindingExactlyOnce(t *testing.T) {
+	for _, role := range []string{meta.RoleAdmin, meta.RoleEditor} {
+		m := leaderModelFor(t, leaderState{
+			role: role, frontend: FrontendTerminal, canSpawn: true,
+		})
+		rows := m.catalog.helpProjection(m)
+		if len(rows) == 0 {
+			t.Fatal("the help projection is empty")
+		}
+
+		// One row per offered leader binding, same key and same label.
+		leader := m.leaderEntries()
+		if len(rows) != len(leader) {
+			t.Errorf("%s: help has %d rows, the leader menu %d", role, len(rows), len(leader))
+		}
+		for i := range rows {
+			if i >= len(leader) {
+				break
+			}
+			if rows[i].Key != leader[i].key || rows[i].Label != leader[i].label {
+				t.Errorf("%s: help row %d is %q/%q, the leader shows %q/%q",
+					role, i, string(rows[i].Key), rows[i].Label,
+					string(leader[i].key), leader[i].label)
+			}
+		}
+		// And no key is documented twice.
+		seen := map[rune]int{}
+		for _, r := range rows {
+			seen[r.Key]++
+			if seen[r.Key] > 1 {
+				t.Errorf("%s: SPC %c is documented %d times", role, r.Key, seen[r.Key])
+			}
+		}
+	}
+}
+
+// TestTheFourRestatedBindingsKeptTheirWording.
+//
+// Removing the duplicates must not lose what they said. The longer wording was
+// better than the menu labels, so it moved onto the commands rather than being
+// deleted with the literals.
+func TestTheFourRestatedBindingsKeptTheirWording(t *testing.T) {
+	m := leaderModelFor(t, leaderState{
+		role: meta.RoleAdmin, frontend: FrontendTerminal, canSpawn: true,
+	})
+	want := map[rune]string{
+		'C': "choose which connection",
+		'H': "who ran what",
+		'A': "build, backend",
+		'X': "rebuilt binary",
+	}
+	got := map[rune]string{}
+	for _, r := range m.catalog.helpProjection(m) {
+		got[r.Key] = r.Help
+	}
+	for k, substr := range want {
+		if !strings.Contains(got[k], substr) {
+			t.Errorf("SPC %c lost its long help: have %q, want something containing %q",
+				k, got[k], substr)
+		}
+	}
+}
+
+// TestReprojectionIsANoOpWhenNothingChanged.
+//
+// The bar is reprojected from several places precisely so no one has to
+// remember all of them, which only works if an unnecessary call is free. A
+// SetModel that fires anyway would close the dropdown the operator has open.
+func TestReprojectionIsANoOpWhenNothingChanged(t *testing.T) {
+	m := leaderModelFor(t, leaderState{role: meta.RoleAdmin, frontend: FrontendTerminal})
+	a := m.menuModel()
+	b := m.menuModel()
+	if !sameMenuModel(a, b) {
+		t.Error("two projections of unchanged state differ, so every refresh " +
+			"would re-apply the model and disturb an open menu")
+	}
+}
+
+// TestReprojectionSeesARoleChange.
+//
+// The other direction: the diff must not be so coarse that a real change slips
+// through. A projection that never changes is as broken as one that always does.
+func TestReprojectionSeesARoleChange(t *testing.T) {
+	admin := leaderModelFor(t, leaderState{role: meta.RoleAdmin, frontend: FrontendTerminal})
+	editor := leaderModelFor(t, leaderState{role: meta.RoleEditor, frontend: FrontendTerminal})
+	if sameMenuModel(admin.menuModel(), editor.menuModel()) {
+		t.Error("an admin and an editor project the same bar; the admin-only " +
+			"commands are not being filtered, or the diff cannot see it")
+	}
+}

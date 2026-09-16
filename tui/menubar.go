@@ -331,21 +331,58 @@ func (m *Model) closeMenuOnBlur() {
 	m.menu.Close()
 }
 
-// refreshMenuModel reprojects the bar for the current state.
+// refreshMenuModel reprojects the bar if — and only if — the projection has
+// actually changed.
 //
-// Called whenever something the offered predicate reads has changed: the user
-// or role, the connection, the frontend's capabilities, the no-TLS banner, the
-// zoom. SetModel closes levels whose rows have disappeared and repairs the
-// selection, so a row vanishing under an open menu is defined behaviour rather
-// than a race.
+// IDEMPOTENT ON PURPOSE. The states the offered predicate reads are scattered:
+// login, connect, the no-TLS banner, zoom, the frontend's capabilities. Wiring
+// one call per transition means the next person to add a state has to know to
+// wire a seventh, and nothing fails when they forget — the bar just quietly
+// stops telling the truth. Diffing makes the call cheap enough to make from
+// everywhere that might matter, so being over-called is the safe failure.
+//
+// It also protects the open cascade: SetModel closes levels whose rows have
+// disappeared and repairs the selection, which is correct when something really
+// changed and disruptive when nothing did.
 func (m *Model) refreshMenuModel() {
 	if m.menu == nil {
 		return
 	}
-	if err := m.menu.SetModel(m.menuModel()); err != nil {
+	next := m.menuModel()
+	if sameMenuModel(m.menuShown, next) {
+		return
+	}
+	m.menuShown = next
+	if err := m.menu.SetModel(next); err != nil {
 		// A model this code built and the catalog validated should never be
-		// refused. Surfacing it is better than a bar that silently stops
-		// updating.
+		// refused. Surfacing it beats a bar that silently stops updating.
 		m.setError("menu: " + err.Error())
 	}
+}
+
+// sameMenuModel compares two projections on everything a reader can see.
+//
+// Action is compared by the command id it carries rather than by identity,
+// because a row rebuilt for the same command is the same row to the operator
+// and re-applying it would close their open dropdown for nothing.
+func sameMenuModel(a, b []widget.MenuItemModel) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		x, y := a[i], b[i]
+		if x.ID != y.ID || x.Label != y.Label || x.Enabled != y.Enabled ||
+			x.Accel != y.Accel || x.Hotkey != y.Hotkey || x.Kind != y.Kind {
+			return false
+		}
+		ax, _ := x.Action.(commandAction)
+		ay, _ := y.Action.(commandAction)
+		if ax.id != ay.id {
+			return false
+		}
+		if !sameMenuModel(x.Children, y.Children) {
+			return false
+		}
+	}
+	return true
 }

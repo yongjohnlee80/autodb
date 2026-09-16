@@ -112,6 +112,13 @@ type LeaderProjection struct {
 	// oracle rather than an approximation.
 	LabelFor func(*Model) string
 	Order    int
+	// Help is the longer explanation, shown indented under the row.
+	//
+	// It exists because the help screen used to REPEAT four bindings in a
+	// second block with better wording than the menu's own — so SPC C appeared
+	// twice, saying two different things, and a reader had to guess which was
+	// current. The wording moved here; the binding now appears once.
+	Help string
 }
 
 // text resolves the label for a state.
@@ -406,6 +413,43 @@ func (c *Catalog) leaderProjection(m *Model) []leaderEntry {
 	out := make([]leaderEntry, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, r.entry)
+	}
+	return out
+}
+
+// HelpRow is one line of the help screen's command section.
+type HelpRow struct {
+	Key   rune
+	Label string
+	Help  string
+}
+
+// helpProjection is the leader commands as the help screen shows them.
+//
+// The SAME projection the leader menu executes, so the documented bindings
+// cannot drift from the real ones — which is the property the old help screen
+// had for most of its list and lost for the four it restated by hand.
+func (c *Catalog) helpProjection(m *Model) []HelpRow {
+	type row struct {
+		order int
+		r     HelpRow
+	}
+	var rows []row
+	for i := range c.commands {
+		cmd := &c.commands[i]
+		if cmd.Leader == nil || cmd.offering(m).State == OfferHidden {
+			continue
+		}
+		rows = append(rows, row{order: cmd.Leader.Order, r: HelpRow{
+			Key:   cmd.Leader.Key,
+			Label: cmd.Leader.text(m),
+			Help:  cmd.Leader.Help,
+		}})
+	}
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].order < rows[j].order })
+	out := make([]HelpRow, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.r)
 	}
 	return out
 }

@@ -131,8 +131,10 @@ func commandCatalog() []Command {
 		},
 		{
 			ID: cmdConnPicker, Run: func(m *Model) { m.openConnPicker() },
-			Leader: leader('C', "select the query connection", 100),
-			Menu:   []MenuProjection{{Parent: nodeConns, Label: "Select…", Hotkey: 'S', Order: 10}},
+			Leader: &LeaderProjection{Key: 'C', Order: 100,
+				Label: "select the query connection",
+				Help:  "choose which connection the query runs against"},
+			Menu: []MenuProjection{{Parent: nodeConns, Label: "Select…", Hotkey: 'S', Order: 10}},
 		},
 		{
 			ID: cmdConnManager, Run: func(m *Model) { m.openConnManager() },
@@ -177,8 +179,10 @@ func commandCatalog() []Command {
 		},
 		{
 			ID: cmdHistory, Run: func(m *Model) { m.openHistory() },
-			Leader: leader('H', "script history…", 160),
-			Menu:   []MenuProjection{{Parent: nodeView, Label: "History…", Hotkey: 'H', Order: 20}},
+			Leader: &LeaderProjection{Key: 'H', Order: 160,
+				Label: "script history…",
+				Help:  "who ran what, when"},
+			Menu: []MenuProjection{{Parent: nodeView, Label: "History…", Hotkey: 'H', Order: 20}},
 		},
 		{
 			// PUBLIC BY CONSTRUCTION and deliberately not admin-gated: it is
@@ -267,12 +271,16 @@ func commandCatalog() []Command {
 			ID:      cmdRestart,
 			Visible: func(m *Model) bool { return m.canRestartDaemon() },
 			Run:     func(m *Model) { m.restartServer() },
-			Leader:  leader('X', "restart the server", 240),
+			Leader: &LeaderProjection{Key: 'X', Order: 240,
+				Label: "restart the server",
+				Help:  "picks up a rebuilt binary"},
 		},
 		{
 			ID: cmdAbout, Run: func(m *Model) { m.openAbout() },
-			Leader: leader('A', "about autodb", 250),
-			Menu:   []MenuProjection{{Parent: nodeSystem, Label: "About", Hotkey: 'A', Order: 60}},
+			Leader: &LeaderProjection{Key: 'A', Order: 250,
+				Label: "about autodb",
+				Help:  "build, backend, and where state lives"},
+			Menu: []MenuProjection{{Parent: nodeSystem, Label: "About", Hotkey: 'A', Order: 60}},
 		},
 		{
 			ID: cmdHelp, Run: func(m *Model) { m.openHelp() },
