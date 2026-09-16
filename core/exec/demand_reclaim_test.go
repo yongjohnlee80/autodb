@@ -81,6 +81,15 @@ func TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen(t *testing.T) {
 			spoil: func(s *session) { s.wake = nil; s.recvToken = 0 },
 			why:   "ending a session nobody can explain to is worse than not reclaiming it",
 		},
+		{
+			// ISOLATED FROM THE ROW ABOVE ON PURPOSE. Clearing both hides this
+			// shape: an offer that is open while no knock exists is a promise
+			// the session cannot keep, and believing it strands the lease
+			// behind a session that has been closed and serves nobody.
+			name:  "it offers to receive but nothing can knock",
+			spoil: func(s *session) { s.wake = nil },
+			why:   "nothing would make the owner's read return, so the notice sits unread",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := demandHolder("holder", 1, 7, now.Add(-time.Hour))
@@ -433,5 +442,84 @@ func TestDemandReclaim_TheOneRecordCarriesIdleTimeAndWhetherTheClientWasTold(t *
 				t.Errorf("close reason = %q, want it to say %q", why, tc.wants)
 			}
 		})
+	}
+}
+
+// AN OFFER IS NEVER ISSUED WITHOUT A KNOCK TO GO WITH IT.
+//
+// The two guards protect different mistakes and both are wanted: this one stops
+// a live offer existing at all, and the eligibility predicate stops a
+// reservation committing against one anyway.
+func TestDemandReclaim_NoOfferIsIssuedWithoutAKnock(t *testing.T) {
+	now := time.Now()
+	s := demandHolder("holder", 1, 7, now)
+	s.wake = nil
+	r := demandRegistry(t, s)
+	e := &Engine{sessions: r}
+
+	if token := e.OfferReceive(s.id); token != 0 {
+		t.Errorf("an offer was issued as token %d with no knock registered — nothing could "+
+			"make this owner's read return, so its lease would be stranded", token)
+	}
+}
+
+// THE NEXT ELIGIBLE HOLDER IS TAKEN WHEN ONE IS PASSED OVER.
+//
+// Passing over an ineligible candidate must not end the search, or one
+// unreachable session would protect every other holder on the target from ever
+// being reclaimed.
+func TestDemandReclaim_APassedOverHolderDoesNotEndTheSearch(t *testing.T) {
+	now := time.Now()
+	unreachable := demandHolder("offers-but-cannot-be-knocked", 1, 7, now.Add(-time.Hour))
+	unreachable.wake = nil // its offer stands, but nothing can knock
+	usable := demandHolder("reachable", 2, 7, now.Add(-time.Minute))
+	r := demandRegistry(t, unreachable, usable)
+
+	v, ok := r.reserveDemandVictim(7, now)
+	if !ok {
+		t.Fatal("no holder was reserved, though a reachable one was available")
+	}
+	if v.s != usable {
+		t.Errorf("reserved %q, want the holder that can actually be told", v.s.id)
+	}
+	if unreachable.get() != sessOpen {
+		t.Error("the unreachable holder was left reserved for teardown, so its lease is now " +
+			"held by a session that is closing and serves nobody")
+	}
+}
+
+// THE RECORD KEEPS THE SILENCE THAT JUSTIFIED THE DECISION, NOT THE SILENCE AT
+// THE TIME OF WRITING.
+//
+// THIS IS THE CELL FOR A NUMBER THAT WOULD HAVE LIED IN ITS OWN FAVOUR. The
+// ending is written after the knock, the frame and a bounded flush, so
+// measuring the silence again at that point means a slow or unresponsive client
+// inflates the very figure offered as the reason for ending it. The worse the
+// client behaves, the more justified the decision looks.
+func TestDemandReclaim_TheRecordKeepsTheIdleTimeTheDecisionWasMadeOn(t *testing.T) {
+	at := time.Now()
+	s := demandHolder("holder", 1, 7, at.Add(-30*time.Minute))
+	r := demandRegistry(t, s)
+	clock := at
+	e := &Engine{sessions: r, now: func() time.Time { return clock }}
+
+	if _, ok := r.reserveDemandVictim(7, clock); !ok {
+		t.Fatal("the holder was not reserved")
+	}
+
+	// Everything after selection takes time: the knock, the frame, the flush.
+	clock = at.Add(9 * time.Hour)
+	e.completeDemandReason(s, true)
+
+	s.mu.Lock()
+	why := s.closeWhy
+	s.mu.Unlock()
+	if !strings.Contains(why, "30m0s") {
+		t.Errorf("close reason = %q, want the thirty minutes of silence the decision rested "+
+			"on", why)
+	}
+	if strings.Contains(why, "9h") {
+		t.Error("the record measured the silence again at the time of writing, so a client " +
+			"that was slow to accept its frame inflated the justification for ending it")
 	}
 }

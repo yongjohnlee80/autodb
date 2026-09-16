@@ -241,6 +241,15 @@ type session struct {
 	// reservation, so the owner cannot be woken about a session that was not
 	// reserved, nor reserved without being told.
 	pendingNotice *DemandNotice
+	// demandIdle is how long this session had been silent AT THE MOMENT IT WAS
+	// SELECTED, kept because that is the fact the decision rested on.
+	//
+	// RECORDED RATHER THAN RECOMPUTED. The obvious thing is to measure the
+	// silence again when the ending is written, and it is wrong: by then the
+	// knock, the frame and a bounded flush have all happened, so a slow or
+	// unresponsive client inflates the very number offered as justification for
+	// ending it. The record has to say what was true when the choice was made.
+	demandIdle time.Duration
 
 	// reg is the registry this session was admitted to, or nil for a session
 	// that never was. It exists so the transaction counter the admission queue
