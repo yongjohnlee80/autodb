@@ -8,6 +8,52 @@ import (
 	"testing"
 )
 
+// arrivalClaim is one forbidden assertion and the words that make it correctly
+// scoped.
+type arrivalClaim struct {
+	claim string
+	scope []string
+}
+
+// arrivalClaims is the table, at package scope so the walk and the fixtures
+// cannot drift into testing different rules.
+var arrivalClaims = []arrivalClaim{
+	{"never opens a target", []string{"sqlite", "does not speak", "non-postgres", "not speak the wire"}},
+	{"cannot actually arrive here", []string{"sqlite", "does not speak", "non-postgres"}},
+	{"does not arrive here", []string{"sqlite", "does not speak", "non-postgres"}},
+	{"lets a client authenticate", []string{"sqlite", "does not speak", "non-postgres"}},
+	{"decrypted at the first statement", []string{"sqlite", "does not speak", "non-postgres", "engine"}},
+}
+
+// unscopedArrivalClaim returns the first claim a comment asserts without its
+// engine scope in the SAME sentence, or "" when it asserts none.
+//
+// THE WALK AND THE FIXTURES BOTH CALL THIS, AND THAT IS THE POINT. The
+// fixtures previously carried their own copy of this logic in a local closure.
+// They passed, and they would have gone on passing with the real walk reverted
+// to the weaker per-group rule -- a test of a duplicate is a test of nothing,
+// which is the same defect this guard family exists to catch, one level up.
+func unscopedArrivalClaim(comment string) string {
+	for _, sentence := range splitSentences(strings.ToLower(comment)) {
+		for _, c := range arrivalClaims {
+			if !strings.Contains(sentence, c.claim) {
+				continue
+			}
+			scoped := false
+			for _, w := range c.scope {
+				if strings.Contains(sentence, w) {
+					scoped = true
+					break
+				}
+			}
+			if !scoped {
+				return c.claim
+			}
+		}
+	}
+	return ""
+}
+
 // TWO CLAIMS ABOUT WHERE A LOCKED STORE ARRIVES HAVE EACH BEEN WRITTEN DOWN AS
 // THE WHOLE TRUTH, AND NEITHER IS.
 //
@@ -48,24 +94,11 @@ import (
 // identically, and the fixtures below pin that.
 
 func TestArrivalClaims_NoUnscopedStoreArrivalSurvivesInComments(t *testing.T) {
-	// Each forbidden claim, with the words that would make it correctly
-	// scoped. A comment may say the claim only if the scope is nearby.
-	claims := []struct {
-		claim string
-		scope []string
-	}{
-		{"never opens a target", []string{"sqlite", "does not speak", "non-postgres", "not speak the wire"}},
-		{"cannot actually arrive here", []string{"sqlite", "does not speak", "non-postgres"}},
-		{"does not arrive here", []string{"sqlite", "does not speak", "non-postgres"}},
-		{"lets a client authenticate", []string{"sqlite", "does not speak", "non-postgres"}},
-		{"decrypted at the first statement", []string{"sqlite", "does not speak", "non-postgres", "engine"}},
-	}
-
 	// EVERY STAGE-0 PACKAGE, NOT ONE. The guard lived in frontdoor and could
 	// only see frontdoor, so the same claim went on standing in core/exec --
 	// in the very cell whose SQLite fixture was the reason the claim was
-	// believed in the first place. A guard scoped more narrowly than the
-	// mistake certifies the half somebody already looked at.
+	// believed. A guard scoped more narrowly than the mistake certifies the
+	// half somebody already looked at.
 	roots := []string{"../../core/exec", "../../frontdoor", "../../core/auth", "../../rpc"}
 
 	fset := token.NewFileSet()
@@ -79,26 +112,15 @@ func TestArrivalClaims_NoUnscopedStoreArrivalSurvivesInComments(t *testing.T) {
 			for name, file := range pkg.Files {
 				files++
 				for _, group := range file.Comments {
-					for _, sentence := range splitSentences(strings.ToLower(group.Text())) {
-						for _, c := range claims {
-							if !strings.Contains(sentence, c.claim) {
-								continue
-							}
-							scoped := false
-							for _, s := range c.scope {
-								if strings.Contains(sentence, s) {
-									scoped = true
-									break
-								}
-							}
-							if !scoped {
-								t.Errorf("%s: a comment says %q without naming the engine it is true "+
-									"of.\n  A postgres-wire connection pins its backend inside "+
-									"OpenWireSessionWith, so the store IS read during the credential "+
-									"phase. Say which engine, or delete the claim.\n  comment at %s",
-									name, c.claim, fset.Position(group.Pos()))
-							}
-						}
+					// THE SAME PREDICATE THE FIXTURES CALL. Reverting it to a
+					// weaker rule must break both, which is what stops the
+					// fixtures from certifying a copy of themselves.
+					if claim := unscopedArrivalClaim(group.Text()); claim != "" {
+						t.Errorf("%s: a comment says %q without naming the engine it is true "+
+							"of.\n  A postgres-wire connection pins its backend inside "+
+							"OpenWireSessionWith, so the store IS read during the credential "+
+							"phase. Say which engine, or delete the claim.\n  comment at %s",
+							name, claim, fset.Position(group.Pos()))
 					}
 				}
 			}
@@ -123,31 +145,6 @@ func TestArrivalClaims_NoUnscopedStoreArrivalSurvivesInComments(t *testing.T) {
 // happens to wrap. The reflow cases exist because the per-group version was
 // replaced precisely for judging by proximity rather than by sentence.
 func TestArrivalClaims_ScopeIsPerSentenceAndReflowInvariant(t *testing.T) {
-	// The same claim and scope words the walk uses, so a fixture cannot drift
-	// from the thing it claims to pin.
-	claim := "never opens a target"
-	scope := []string{"sqlite", "does not speak", "non-postgres", "not speak the wire"}
-
-	// judge mirrors the walk's decision for one comment.
-	judge := func(comment string) bool { // true = reported as unscoped
-		for _, sentence := range splitSentences(strings.ToLower(comment)) {
-			if !strings.Contains(sentence, claim) {
-				continue
-			}
-			scoped := false
-			for _, s := range scope {
-				if strings.Contains(sentence, s) {
-					scoped = true
-					break
-				}
-			}
-			if !scoped {
-				return true
-			}
-		}
-		return false
-	}
-
 	for _, tc := range []struct {
 		name     string
 		comment  string
@@ -184,7 +181,7 @@ func TestArrivalClaims_ScopeIsPerSentenceAndReflowInvariant(t *testing.T) {
 		{"scoped, three lines", "For SQLite,\nOpenWireSessionWith\nnever opens a target.", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := judge(tc.comment); got != tc.reported {
+			if got := unscopedArrivalClaim(tc.comment) != ""; got != tc.reported {
 				t.Errorf("reported=%v, want %v\n  comment: %q", got, tc.reported, tc.comment)
 			}
 		})
