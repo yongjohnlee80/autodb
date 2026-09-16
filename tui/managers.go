@@ -330,8 +330,8 @@ func (m *Model) openConnForm(g *manager[ConnInfo]) {
 		field("name"),
 		field("engine (postgres | mysql | sqlite)"),
 		field("dsn (stored encrypted at rest)"),
-	}, func(v []string) (bool, string) {
-		name, engine, dsn := strings.TrimSpace(v[0]), strings.TrimSpace(v[1]), strings.TrimSpace(v[2])
+	}, func(v formValues) (bool, string) {
+		name, engine, dsn := v.str(0), v.str(1), v.str(2)
 		if name == "" || engine == "" || dsn == "" {
 			return false, "all fields are required"
 		}
@@ -346,8 +346,8 @@ func (m *Model) openConnForm(g *manager[ConnInfo]) {
 func (m *Model) openAttachForm(g *manager[ConnInfo], connID int64, connName string) {
 	m.openForm("attach "+connName+" to workspace", []formField{
 		field("workspace id (SPC w lists them)"),
-	}, func(v []string) (bool, string) {
-		wsID, err := strconv.ParseInt(strings.TrimSpace(v[0]), 10, 64)
+	}, func(v formValues) (bool, string) {
+		wsID, err := strconv.ParseInt(v.str(0), 10, 64)
 		if err != nil {
 			return false, "numeric workspace id required"
 		}
@@ -371,8 +371,8 @@ func (m *Model) openWorkspaceManager() {
 		func(c context.Context, b *Bound) ([]WorkspaceInfo, error) { return b.Workspaces(c) },
 		[]managerAction[WorkspaceInfo]{
 			{'a', "add", func(WorkspaceInfo, bool) {
-				m.openForm("new workspace", []formField{field("name")}, func(v []string) (bool, string) {
-					name := strings.TrimSpace(v[0])
+				m.openForm("new workspace", []formField{field("name")}, func(v formValues) (bool, string) {
+					name := v.str(0)
 					if name == "" {
 						return false, "name required"
 					}
@@ -387,8 +387,8 @@ func (m *Model) openWorkspaceManager() {
 				if !ok {
 					return
 				}
-				m.openForm("rename "+sel.Name, []formField{field("new name")}, func(v []string) (bool, string) {
-					name := strings.TrimSpace(v[0])
+				m.openForm("rename "+sel.Name, []formField{field("new name")}, func(v formValues) (bool, string) {
+					name := v.str(0)
 					if name == "" {
 						return false, "name required"
 					}
@@ -411,8 +411,8 @@ func (m *Model) openWorkspaceManager() {
 				}
 				m.openForm("detach connection from "+sel.Name, []formField{
 					field("connection id"),
-				}, func(v []string) (bool, string) {
-					id, err := strconv.ParseInt(strings.TrimSpace(v[0]), 10, 64)
+				}, func(v formValues) (bool, string) {
+					id, err := strconv.ParseInt(v.str(0), 10, 64)
 					if err != nil {
 						return false, "numeric connection id required"
 					}
@@ -449,8 +449,8 @@ func (m *Model) openUserManager() {
 					field("name"),
 					field("passphrase (min 8 chars)", widget.WithMask('*')),
 					field("role (admin | editor | reader)"),
-				}, func(v []string) (bool, string) {
-					name, pass, role := strings.TrimSpace(v[0]), v[1], strings.TrimSpace(v[2])
+				}, func(v formValues) (bool, string) {
+					name, pass, role := v.str(0), v.raw(1), v.str(2)
 					if name == "" || pass == "" || role == "" {
 						return false, "all fields are required"
 					}
@@ -467,8 +467,8 @@ func (m *Model) openUserManager() {
 				}
 				m.openForm("role for "+sel.Name, []formField{
 					field("role (admin | editor | reader)"),
-				}, func(v []string) (bool, string) {
-					role := strings.TrimSpace(v[0])
+				}, func(v formValues) (bool, string) {
+					role := v.str(0)
 					if role == "" {
 						return false, "role required"
 					}
@@ -484,12 +484,12 @@ func (m *Model) openUserManager() {
 				}
 				m.openForm("reset passphrase for "+sel.Name, []formField{
 					field("new passphrase (min 8 chars)", widget.WithMask('*')),
-				}, func(v []string) (bool, string) {
-					if len(v[0]) < 8 {
+				}, func(v formValues) (bool, string) {
+					if len(v.raw(0)) < 8 {
 						return false, "passphrase must be at least 8 characters"
 					}
 					managerCall(g, "reset "+sel.Name, func(c context.Context, b *Bound) error {
-						return b.ResetUserPassphrase(c, sel.ID, v[0])
+						return b.ResetUserPassphrase(c, sel.ID, v.raw(0))
 					})
 					return true, ""
 				})
@@ -515,12 +515,12 @@ func (m *Model) openUserManager() {
 				m.openForm("grant for "+sel.Name, []formField{
 					field("connection id"),
 					field("role (admin | editor | reader)"),
-				}, func(v []string) (bool, string) {
-					id, err := strconv.ParseInt(strings.TrimSpace(v[0]), 10, 64)
+				}, func(v formValues) (bool, string) {
+					id, err := strconv.ParseInt(v.str(0), 10, 64)
 					if err != nil {
 						return false, "numeric connection id required"
 					}
-					role := strings.TrimSpace(v[1])
+					role := v.str(1)
 					if role == "" {
 						return false, "role required"
 					}
@@ -564,13 +564,13 @@ func (m *Model) openAllowlistManager() {
 				m.openForm("new allowlist CIDR", []formField{
 					field("cidr (e.g. 192.168.68.0/24)"),
 					field("note"),
-				}, func(v []string) (bool, string) {
-					cidr := strings.TrimSpace(v[0])
+				}, func(v formValues) (bool, string) {
+					cidr := v.str(0)
 					if _, err := netip.ParsePrefix(cidr); err != nil {
 						return false, "not a valid CIDR (a.b.c.d/nn required here)"
 					}
 					managerCall(g, "add "+cidr, func(c context.Context, b *Bound) error {
-						return b.AddAllowedIP(c, cidr, strings.TrimSpace(v[1]))
+						return b.AddAllowedIP(c, cidr, v.str(1))
 					})
 					return true, ""
 				})
@@ -609,8 +609,8 @@ func (m *Model) openUserIPManager(userID int64, who string) {
 				m.openForm("allow an IP for "+who, []formField{
 					field("IP or CIDR (blank = the address of THIS session)"),
 					field("label (e.g. home, office)"),
-				}, func(v []string) (bool, string) {
-					cidr := strings.TrimSpace(v[0])
+				}, func(v formValues) (bool, string) {
+					cidr := v.str(0)
 					if cidr != "" {
 						if _, perr := netip.ParsePrefix(cidr); perr != nil {
 							if _, aerr := netip.ParseAddr(cidr); aerr != nil {
@@ -623,7 +623,7 @@ func (m *Model) openUserIPManager(userID int64, who string) {
 						what = "current address"
 					}
 					managerCall(g, "allow "+what, func(c context.Context, b *Bound) error {
-						return b.AddUserIP(c, userID, cidr, strings.TrimSpace(v[1]))
+						return b.AddUserIP(c, userID, cidr, v.str(1))
 					})
 					return true, ""
 				})
@@ -834,17 +834,17 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 	title := fmt.Sprintf("create token (%d of %d used)", active, auth.PATMaxPerUser)
 	askCleartext := m.offersCleartextTokenField()
 	fields := patFormFields(askCleartext)
-	m.openForm(title, fields, func(v []string) (bool, string) {
-		name := strings.TrimSpace(v[0])
+	m.openForm(title, fields, func(v formValues) (bool, string) {
+		name := v.str(0)
 		if name == "" {
 			return false, "a name is required"
 		}
 		// Read by presence, not by a fixed index: the field is absent for
-		// everyone who cannot use it, and indexing v[4] unconditionally would
-		// panic the moment it is.
-		debugCleartext := askCleartext && len(v) > 4 &&
-			strings.EqualFold(strings.TrimSpace(v[4]), "y")
-		connID, cerr := strconv.ParseInt(strings.TrimSpace(v[3]), 10, 64)
+		// everyone who cannot use it, and reading position 4 unconditionally
+		// would panic the moment it is. has() is why this cannot.
+		debugCleartext := askCleartext && v.has(4) &&
+			strings.EqualFold(v.str(4), "y")
+		connID, cerr := strconv.ParseInt(v.str(3), 10, 64)
 		if cerr != nil || connID <= 0 {
 			// Refused HERE, while the form is still open and the value can be
 			// corrected, rather than as a server round trip — the same reason
@@ -852,7 +852,7 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 			return false, "a numeric connection id is required — the token reaches only that connection"
 		}
 		var days int64
-		if d := strings.TrimSpace(v[1]); d != "" {
+		if d := v.str(1); d != "" {
 			n, err := strconv.ParseInt(d, 10, 64)
 			if err != nil {
 				return false, "days must be a whole number"
@@ -865,7 +865,7 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 			days = n
 		}
 		var ips []string
-		if raw := strings.TrimSpace(v[2]); raw != "" {
+		if raw := v.str(2); raw != "" {
 			for _, part := range strings.Split(raw, ",") {
 				p := strings.TrimSpace(part)
 				if p == "" {
