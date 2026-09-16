@@ -328,10 +328,15 @@ func (m *Model) openExposureSwitch(g *manager[ConnInfo], sel ConnInfo) {
 func (m *Model) openConnForm(g *manager[ConnInfo]) {
 	m.openForm("new connection", []formField{
 		field("name"),
-		field("engine (postgres | mysql | sqlite)"),
+		staticSelect("engine", engineItems()),
 		field("dsn (stored encrypted at rest)"),
 	}, func(v formValues) (bool, string) {
 		name, engine, dsn := v.str(0), v.str(1), v.str(2)
+		// The engine clause survives the select, and its MEANING changes: it
+		// used to catch an empty box, and now catches an unmade choice. What
+		// the select does remove is the invalid engine — there is no longer a
+		// spelling for one — which was never checked here anyway. The server
+		// still checks it, because the TUI is one client of several.
 		if name == "" || engine == "" || dsn == "" {
 			return false, "all fields are required"
 		}
@@ -345,11 +350,11 @@ func (m *Model) openConnForm(g *manager[ConnInfo]) {
 
 func (m *Model) openAttachForm(g *manager[ConnInfo], connID int64, connName string) {
 	m.openForm("attach "+connName+" to workspace", []formField{
-		field("workspace id (SPC w lists them)"),
+		liveSelect(m, "workspace", workspacesWithout(connID)),
 	}, func(v formValues) (bool, string) {
-		wsID, err := strconv.ParseInt(v.str(0), 10, 64)
-		if err != nil {
-			return false, "numeric workspace id required"
+		wsID, ok := v.id(0)
+		if !ok {
+			return false, "choose a workspace"
 		}
 		managerCall(g, fmt.Sprintf("attach %s→ws %d", connName, wsID), func(c context.Context, b *Bound) error {
 			return b.AttachConnection(c, wsID, connID)
@@ -410,11 +415,11 @@ func (m *Model) openWorkspaceManager() {
 					return
 				}
 				m.openForm("detach connection from "+sel.Name, []formField{
-					field("connection id"),
+					fixedSelect("connection", attachedItems(sel)),
 				}, func(v formValues) (bool, string) {
-					id, err := strconv.ParseInt(v.str(0), 10, 64)
-					if err != nil {
-						return false, "numeric connection id required"
+					id, ok := v.id(0)
+					if !ok {
+						return false, "choose a connection"
 					}
 					managerCall(g, "detach", func(c context.Context, b *Bound) error {
 						return b.DetachConnection(c, sel.ID, id)
@@ -448,7 +453,7 @@ func (m *Model) openUserManager() {
 				m.openForm("new user", []formField{
 					field("name"),
 					field("passphrase (min 8 chars)", widget.WithMask('*')),
-					field("role (admin | editor | reader)"),
+					staticSelect("role", roleItems()),
 				}, func(v formValues) (bool, string) {
 					name, pass, role := v.str(0), v.raw(1), v.str(2)
 					if name == "" || pass == "" || role == "" {
@@ -466,11 +471,11 @@ func (m *Model) openUserManager() {
 					return
 				}
 				m.openForm("role for "+sel.Name, []formField{
-					field("role (admin | editor | reader)"),
+					staticSelect("role", roleItems()),
 				}, func(v formValues) (bool, string) {
 					role := v.str(0)
 					if role == "" {
-						return false, "role required"
+						return false, "choose a role"
 					}
 					managerCall(g, "role "+sel.Name, func(c context.Context, b *Bound) error {
 						return b.SetUserRole(c, sel.ID, role)
@@ -513,16 +518,16 @@ func (m *Model) openUserManager() {
 					return
 				}
 				m.openForm("grant for "+sel.Name, []formField{
-					field("connection id"),
-					field("role (admin | editor | reader)"),
+					liveSelect(m, "connection", connectionOptions),
+					staticSelect("role", roleItems()),
 				}, func(v formValues) (bool, string) {
-					id, err := strconv.ParseInt(v.str(0), 10, 64)
-					if err != nil {
-						return false, "numeric connection id required"
+					id, ok := v.id(0)
+					if !ok {
+						return false, "choose a connection"
 					}
 					role := v.str(1)
 					if role == "" {
-						return false, "role required"
+						return false, "choose a role"
 					}
 					managerCall(g, "grant "+sel.Name, func(c context.Context, b *Bound) error {
 						return b.AddGrant(c, sel.ID, id, role)
@@ -806,9 +811,15 @@ func (m *Model) offersCleartextTokenField() bool {
 	return m.session.IsAdmin() && m.cleartextFD
 }
 
-// patFormFields is the sheet an operator is shown. Pure, so the decision above
-// can be tested without mounting a float.
-func patFormFields(askCleartext bool) []formField {
+// patFormFields is the sheet an operator is shown.
+//
+// It takes the Model because one row is no longer a box to type in: the
+// connection is chosen from a list the backend supplies, and the load has to be
+// issued against the session that asked for it. It is still testable without
+// mounting anything — the fields are values, and a field's LABEL is what the
+// cleartext decision is read from — but it is no longer pure, and saying so
+// here is cheaper than a reader discovering it.
+func patFormFields(m *Model, askCleartext bool) []formField {
 	fields := []formField{
 		field("name (e.g. laptop-psql, jetbrains)"),
 		field("expires in days (blank = server default, max 365)"),
@@ -817,7 +828,7 @@ func patFormFields(askCleartext bool) []formField {
 		// required because there is no unscoped form -- a PAT that reached
 		// every connection its owner is granted is the blast radius this
 		// binding exists to shrink.
-		field("connection id (SPC c lists them; the token reaches ONLY this one)"),
+		liveSelect(m, "connection (the token reaches ONLY this one)", reachableConnectionOptions),
 	}
 	if askCleartext {
 		// Asked only where it can be answered. It used to be asked of
@@ -830,10 +841,25 @@ func patFormFields(askCleartext bool) []formField {
 	return fields
 }
 
+// parseYesNo reads the one remaining free-text boolean. Blank is NO, because
+// the operator who skipped the field did not ask for the dangerous thing.
+// Anything outside the accepted spellings is REFUSED rather than read as no: a
+// person who typed "yeah" meant yes, and answering them with silence and a
+// no-cleartext token teaches nothing.
+func parseYesNo(s string) (yes bool, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "n", "no":
+		return false, true
+	case "y", "yes":
+		return true, true
+	}
+	return false, false
+}
+
 func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []UserIPRow, active int) {
 	title := fmt.Sprintf("create token (%d of %d used)", active, auth.PATMaxPerUser)
 	askCleartext := m.offersCleartextTokenField()
-	fields := patFormFields(askCleartext)
+	fields := patFormFields(m, askCleartext)
 	m.openForm(title, fields, func(v formValues) (bool, string) {
 		name := v.str(0)
 		if name == "" {
@@ -842,14 +868,34 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 		// Read by presence, not by a fixed index: the field is absent for
 		// everyone who cannot use it, and reading position 4 unconditionally
 		// would panic the moment it is. has() is why this cannot.
-		debugCleartext := askCleartext && v.has(4) &&
-			strings.EqualFold(v.str(4), "y")
-		connID, cerr := strconv.ParseInt(v.str(3), 10, 64)
-		if cerr != nil || connID <= 0 {
-			// Refused HERE, while the form is still open and the value can be
-			// corrected, rather than as a server round trip — the same reason
+		//
+		// STILL TEXT, AND THE ONLY ONE. Every other closed vocabulary in this
+		// package became a select; this one cannot yet, because a Select has no
+		// initial value and the safe answer here is NO — an unchosen select
+		// would read as "not asked" and a mistake would mint a cleartext
+		// credential. So the text is parsed STRICTLY instead: blank and the
+		// spellings of no mean no, the spellings of yes mean yes, and anything
+		// else is refused while the dialog stays open rather than being
+		// silently treated as no.
+		debugCleartext := false
+		if askCleartext && v.has(4) {
+			answer, ok := parseYesNo(v.str(4))
+			if !ok {
+				return false, "answer the cleartext question with y or n"
+			}
+			debugCleartext = answer
+		}
+		connID, chosen := v.id(3)
+		if !chosen {
+			// Refused HERE, while the dialog is still open and the choice can
+			// be made, rather than as a server round trip — the same reason
 			// the day range is mirrored below.
-			return false, "a numeric connection id is required — the token reaches only that connection"
+			//
+			// The check survives the select and its MEANING changes: it used to
+			// catch a number that was not one, and now catches a choice that
+			// was never made. What it can no longer catch is a WRONG id, and
+			// that is the point — there is no longer a way to type one.
+			return false, "choose the connection this token may reach"
 		}
 		var days int64
 		if d := v.str(1); d != "" {

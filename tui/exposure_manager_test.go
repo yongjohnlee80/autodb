@@ -4,12 +4,27 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
+// sourcePath resolves a file in THIS package from this test's own location,
+// not from the process working directory.
+//
+// A relative "managers.go" made this cell depend on where the process happened
+// to be standing, and this package contains a test that calls t.Chdir. The
+// dependency is invisible until the order changes, and then the failure reads
+// as a missing FILE rather than a moved CWD — so it is removed rather than
+// reasoned about.
+func sourcePath(name string) string {
+	_, self, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(self), name)
+}
+
 func TestConnectionManager_UsesExposureNotCapabilityProfile(t *testing.T) {
 	t.Parallel()
-	file, err := parser.ParseFile(token.NewFileSet(), "managers.go", nil, 0)
+	file, err := parser.ParseFile(token.NewFileSet(), sourcePath("managers.go"), nil, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

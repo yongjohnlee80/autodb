@@ -1,0 +1,283 @@
+package tui
+
+import (
+	"context"
+	"slices"
+
+	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/golib/tui"
+	"github.com/yongjohnlee80/golib/tui/widget"
+)
+
+// Select rows: the fields whose vocabulary the program already knows.
+//
+// A label that enumerates its valid values — "engine (postgres | mysql |
+// sqlite)" — is an input admitting it cannot show them, and "connection id"
+// is worse: it asks the operator to leave the form, find a list, remember a
+// number and come back. These rows carry the vocabulary instead.
+
+// loadState is where a live select is between being opened and having options.
+//
+// The three are kept APART because conflating any two of them lies to the
+// operator: an empty list and a failed fetch look identical on screen and mean
+// opposite things — one says "create one first", the other says "the server did
+// not answer".
+type loadState uint8
+
+const (
+	loadPending loadState = iota
+	loadReady
+	loadFailed
+)
+
+// selectControl is one select row. T is the type of the value it yields, which
+// is the id for the id fields and the word itself for the enums.
+type selectControl[T comparable] struct {
+	sel   *widget.Select[T]
+	state loadState
+	count int
+	err   error
+}
+
+func (c *selectControl[T]) component() tui.Component { return c.sel }
+
+// value yields the typed selection, or nil when the operator has chosen
+// nothing. nil rather than the zero value: for an id field, 0 is not "no
+// choice", it is a row number that does not exist, and the two must not
+// arrive at the backend looking the same.
+func (c *selectControl[T]) value() any {
+	v, ok := c.sel.Value()
+	if !ok {
+		return nil
+	}
+	return v
+}
+
+// annotation is what the row's label says about the load, and it is the whole
+// of D3's three states.
+func (c *selectControl[T]) annotation() string {
+	switch c.state {
+	case loadPending:
+		return " — loading…"
+	case loadFailed:
+		return " — could not load: " + WireErrorMessage(c.err)
+	}
+	if c.count == 0 {
+		return " — none yet"
+	}
+	return ""
+}
+
+// blocks refuses a submit the operator cannot have meant. A form submitted
+// while its options are still arriving would send whatever was chosen from an
+// incomplete list, and one submitted after a failed load would send nothing
+// from a list that was never shown.
+func (c *selectControl[T]) blocks() (bool, string) {
+	switch c.state {
+	case loadPending:
+		return true, "still loading the options"
+	case loadFailed:
+		return true, "the options could not be loaded: " + WireErrorMessage(c.err)
+	}
+	return false, ""
+}
+
+// labelAnnotator is a control whose row label has something to add.
+type labelAnnotator interface{ annotation() string }
+
+// submitGate is a control that can refuse a submit, with a reason.
+type submitGate interface{ blocks() (bool, string) }
+
+// staticSelect is a field whose vocabulary is fixed and known here: the engines
+// and the roles. It is NOT filtered — a three-item list needs no search box.
+func staticSelect(label string, items []widget.SelectItem[string]) formField {
+	return formField{label: label, build: func(f *form, i int) formControl {
+		return &selectControl[string]{
+			sel:   widget.NewSelect(widget.WithOptions(items)),
+			state: loadReady,
+			count: len(items),
+		}
+	}}
+}
+
+// liveSelect is a field whose options come from the backend.
+//
+// THE LOAD CLOSES OVER THE BOUND IT WAS ISSUED ON, and the result is applied
+// only if four things still hold. A form is a long-lived surface — it outlives
+// list refreshes, reconnects and, on a shared terminal, sign-ins — so each of
+// these is a way for options to arrive somewhere they do not belong:
+//
+//   - THE SESSION EPOCH still matches. Enforced one level up, by the
+//     managerReload dispatcher, which drops any result whose pinned gen is not
+//     the live one — so it is not repeated here. Duplicating it would leave two
+//     guards for one rule and no answer to which is authoritative.
+//   - THE FORM IS STILL OPEN, or the options land on a surface the operator
+//     dismissed, or worse, on the next form to occupy the same variable.
+//   - THE IDENTITY still matches. A same-connection sign-in switch does NOT
+//     bump the epoch, so the check above cannot see it — the same hole that
+//     once rendered one person's token in a DSN naming another, which is why
+//     Bound pins the user alongside the credential.
+//
+// A result failing either of the checks made here is DISCARDED, never merged
+// "just in case": a half-current list is the one outcome worse than an empty
+// one.
+//
+// There is deliberately NO latest-load check. A control issues exactly one
+// load, so there is no second result to arrive out of order, and a sequence
+// guard here would be a guard nothing could exercise. The day a field reloads
+// — options that depend on another field's choice would do it — is the day it
+// earns one.
+func liveSelect[T comparable](m *Model, label string,
+	load func(context.Context, *Bound) ([]widget.SelectItem[T], error)) formField {
+
+	return formField{label: label, build: func(f *form, i int) formControl {
+		c := &selectControl[T]{
+			// Filtered: a connection list is as long as the deployment, and a
+			// plain list of fifty is its own usability problem.
+			sel:   widget.NewSelect(widget.WithFilter[T](true)),
+			state: loadPending,
+		}
+		bound := m.session.Bind()
+		m.ctx.Go(func(ctx context.Context) (any, error) {
+			items, err := load(ctx, bound)
+			return managerReload{gen: bound.Gen(), apply: func() {
+				if !f.open() || !m.sameIdentity(bound) {
+					return
+				}
+				if err != nil {
+					c.state, c.err = loadFailed, err
+				} else {
+					c.sel.SetOptions(items)
+					c.state, c.count, c.err = loadReady, len(items), nil
+				}
+				f.refreshLabels()
+			}}, nil
+		})
+		return c
+	}}
+}
+
+// sameIdentity reports whether work issued on b belongs to the session signed
+// in now.
+//
+// IT COMPARES EPOCHS, NOT USER IDS. An id says WHO, and the question here is
+// WHICH SESSION: the same person signing out and back in holds a new token and
+// a new session, with the same id, and options fetched for the old one must not
+// be rendered into a form the new one is looking at. An id comparison cannot
+// see that case at all.
+//
+// The connection epoch is deliberately not checked here — the managerReload
+// dispatcher already refuses a superseded one, and a second copy of that rule
+// would leave no answer to which is authoritative.
+func (m *Model) sameIdentity(b *Bound) bool {
+	if b == nil || m.session == nil {
+		return false
+	}
+	return b.IdentityEpoch() == m.session.IdentityEpoch()
+}
+
+// engineItems and roleItems are the two closed vocabularies this product has.
+// They were in field LABELS until now, which is the whole defect.
+func engineItems() []widget.SelectItem[string] {
+	return []widget.SelectItem[string]{
+		{Label: "postgres", Value: "postgres"},
+		{Label: "mysql", Value: "mysql"},
+		{Label: "sqlite", Value: "sqlite"},
+	}
+}
+
+func roleItems() []widget.SelectItem[string] {
+	return []widget.SelectItem[string]{
+		{Label: "admin — everything, including users", Value: meta.RoleAdmin},
+		{Label: "editor — read and write data", Value: meta.RoleEditor},
+		{Label: "reader — read only", Value: meta.RoleReader},
+	}
+}
+
+// --- the catalogues -----------------------------------------------------------
+//
+// THE CATALOGUE IS ADDRESSED TO THE OPERATION, NOT TO THE NOUN. "Every
+// connection" is the right answer to almost none of these questions: detaching
+// offers what is attached, attaching offers what is not, and an operator handed
+// the wrong set will pick from it and learn they were wrong from a refusal that
+// arrives after the form has gone.
+
+// connectionOptions offers the connections the signed-in user can see, which is
+// the grant catalogue: an admin may grant another user access to any connection
+// the admin can reach, and the server refuses the rest.
+func connectionOptions(ctx context.Context, b *Bound) ([]widget.SelectItem[int64], error) {
+	return connectionItems(ctx, b, nil)
+}
+
+// reachableConnectionOptions is the TOKEN catalogue, and it is narrower: a
+// personal access token is used from outside, so a connection the front door
+// does not expose is one the token could never reach. Offering it would invite
+// an operator to mint a credential that cannot work and learn why later.
+func reachableConnectionOptions(ctx context.Context, b *Bound) ([]widget.SelectItem[int64], error) {
+	return connectionItems(ctx, b, func(c ConnInfo) bool { return c.FrontDoorExposed })
+}
+
+// connectionItems lists the caller's connections, optionally narrowed.
+func connectionItems(ctx context.Context, b *Bound,
+	keep func(ConnInfo) bool) ([]widget.SelectItem[int64], error) {
+	rows, err := b.Connections(ctx)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]widget.SelectItem[int64], 0, len(rows))
+	for _, r := range rows {
+		if keep != nil && !keep(r) {
+			continue
+		}
+		items = append(items, widget.SelectItem[int64]{
+			Label: r.Name + " (" + r.Engine + ")", Value: r.ID,
+		})
+	}
+	return items, nil
+}
+
+// workspacesWithout offers the workspaces this connection is NOT already
+// attached to, which is the attach question. Offering the ones it is already in
+// invites an operator to ask for something the server will refuse.
+func workspacesWithout(connID int64) func(context.Context, *Bound) ([]widget.SelectItem[int64], error) {
+	return func(ctx context.Context, b *Bound) ([]widget.SelectItem[int64], error) {
+		rows, err := b.Workspaces(ctx)
+		if err != nil {
+			return nil, err
+		}
+		items := make([]widget.SelectItem[int64], 0, len(rows))
+		for _, w := range rows {
+			if slices.ContainsFunc(w.Connections, func(c ConnInfo) bool { return c.ID == connID }) {
+				continue
+			}
+			items = append(items, widget.SelectItem[int64]{Label: w.Name, Value: w.ID})
+		}
+		return items, nil
+	}
+}
+
+// attachedItems is the detach catalogue, and it needs no load at all: the
+// workspace row the operator is standing on already carries its connections.
+// Fetching the whole server's list to filter it down would be slower and could
+// disagree with the row on screen.
+func attachedItems(ws WorkspaceInfo) []widget.SelectItem[int64] {
+	items := make([]widget.SelectItem[int64], 0, len(ws.Connections))
+	for _, c := range ws.Connections {
+		items = append(items, widget.SelectItem[int64]{
+			Label: c.Name + " (" + c.Engine + ")", Value: c.ID,
+		})
+	}
+	return items
+}
+
+// fixedSelect is a select over a catalogue already in hand — no load, so no
+// loading state and nothing to fail. Detach uses it.
+func fixedSelect(label string, items []widget.SelectItem[int64]) formField {
+	return formField{label: label, build: func(f *form, i int) formControl {
+		return &selectControl[int64]{
+			sel:   widget.NewSelect(widget.WithFilter[int64](true), widget.WithOptions(items)),
+			state: loadReady,
+			count: len(items),
+		}
+	}}
+}

@@ -100,6 +100,8 @@ func TestRestart_ServiceInstallKeepsTheDaemonRunning(t *testing.T) {
 	h.keys("service-passphrase")
 	h.key(tuicore.KeyTab)
 	h.keys("service-passphrase")
+	// TWO Enters: the first reaches OK, the second presses it. No field submits.
+	h.key(tuicore.KeyEnter)
 	h.key(tuicore.KeyEnter)
 	h.waitFor("logged in", "logged in as root")
 

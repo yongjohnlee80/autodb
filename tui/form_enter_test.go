@@ -18,7 +18,20 @@ import (
 //
 // Driven through the real form, because this is a keybinding: the defect lives
 // in the wiring between the widget's event and the form's reaction.
-func TestForm_EnterAdvancesAndOnlyTheLastFieldSubmits(t *testing.T) {
+// stillThere fails if want LEAVES the screen within d — the positive form of
+// neverAppears, for a claim about something that must persist.
+func stillThere(t *testing.T, h *uiHarness, what, want string, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if !strings.Contains(h.screen(), want) {
+			t.Fatalf("%s vanished (%q left the screen):\n%s", what, want, h.screen())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestForm_EnterAdvancesAndNoFieldSubmits(t *testing.T) {
 	h := startUI(t, startRealServer(t))
 	bootstrapRoot(t, h)
 
@@ -57,10 +70,24 @@ func TestForm_EnterAdvancesAndOnlyTheLastFieldSubmits(t *testing.T) {
 	// screen match cannot tell a filled field from its prompt.
 	h.waitForFocusChange("focus moved to the next field", focusBefore)
 
-	// The LAST field submits, and a closed float is that claim in full.
-	h.keys("sqlite")
-	h.key(tuicore.KeyEnter)
+	h.chooseOption(engineSQLite)
+	h.key(tuicore.KeyTab)
 	h.keys("file:formenter?mode=memory&cache=shared")
+
+	// THE LAST FIELD DOES NOT SUBMIT EITHER. Enter here moves to OK, and the
+	// form is still open afterwards -- that is the whole change, and it is
+	// what frees Enter for a select to open its options instead.
+	//
+	// THE WITNESS IS THE DIALOG'S OWN TITLE, held across a window. An earlier
+	// draft watched for "logged in as root" to NOT appear, which proved
+	// nothing: the bootstrap had already put that line on screen, so the
+	// assertion was true before the keystroke and would have stayed true under
+	// a mutation that submitted.
+	h.key(tuicore.KeyEnter)
+	h.waitFor("form still open after Enter on the LAST field", "new connection")
+	stillThere(t, h, "the connection dialog", "new connection", 400*time.Millisecond)
+
+	// OK submits, and a closed dialog is that claim in full.
 	h.key(tuicore.KeyEnter)
 	h.waitGone("connection form", "new connection")
 }
@@ -68,8 +95,9 @@ func TestForm_EnterAdvancesAndOnlyTheLastFieldSubmits(t *testing.T) {
 // THE FOOTER MUST SAY SO, and say what the form actually does.
 //
 // The shared vocabulary claimed {"Enter","submit"} while Enter submitted from
-// any field; now Enter advances unless the last field holds focus, and one
-// definition feeds both the footer and the `?` overlay so they cannot drift.
+// any field, then claimed "submit on last" while the last field submitted. Now
+// no field submits at all — OK does — and one definition feeds both the footer
+// and the `?` overlay so they cannot drift.
 func TestForm_FooterNamesTheKeysThatWork(t *testing.T) {
 	h := startUI(t, startRealServer(t))
 	bootstrapRoot(t, h)
@@ -82,26 +110,32 @@ func TestForm_FooterNamesTheKeysThatWork(t *testing.T) {
 	// Asserted as ONE unwrapped line: a footer that wraps mid-phrase reads
 	// worse than none, and the earlier wording did exactly that.
 	h.waitFor("the footer, on one line",
-		"Tab/Enter:next  Enter:submit on last  Esc:cancel")
+		"Tab/Enter:next  O:OK  Esc:cancel")
 }
 
-// A ONE-FIELD FORM STILL SUBMITS ON ENTER.
+// A ONE-FIELD FORM GOES THROUGH THE BUTTON TOO.
 //
-// Index 0 is also the last index, so the single-field case is correct by
-// construction rather than by a special case — but it is the case most likely
-// to be broken by a change to "advance", and search is the form people use
-// most, so it gets its own cell.
-func TestForm_SingleFieldStillSubmitsOnEnter(t *testing.T) {
+// It used to submit on Enter because index 0 is also the last index, and that
+// was the one case a reader could mistake for a rule. There is no rule now: the
+// single field advances to OK exactly like the last field of any other form, so
+// search — the form people use most — behaves like the rest rather than being
+// the exception that happens to work.
+func TestForm_SingleFieldNeedsTheButtonToo(t *testing.T) {
 	h := startUI(t, startRealServer(t))
 	bootstrapRoot(t, h)
 
-	// The editor pane, then search in it: one field, Enter submits.
 	h.leader("q")
 	h.keys("iSELECT 1")
 	h.key(tuicore.KeyEscape)
 	h.keys("/")
 	h.waitFor("search form", "search in")
 	h.keys("SELECT")
+
+	// One Enter is NOT a submit, even here.
+	h.key(tuicore.KeyEnter)
+	h.waitFor("search form still open after one Enter", "search in")
+
+	// The second reaches OK.
 	h.key(tuicore.KeyEnter)
 	h.waitGone("search form", "search in")
 }
@@ -109,8 +143,8 @@ func TestForm_SingleFieldStillSubmitsOnEnter(t *testing.T) {
 // A VALIDATION FAILURE KEEPS THE FORM OPEN AND SAYS WHY.
 //
 // The submit path reports either "close" or "stay with a message", and the
-// message is the only thing that tells an operator what to correct. Enter now
-// reaching submit only on the last field must not have changed that.
+// message is the only thing that tells an operator what to correct. Routing
+// every submit through OK must not have changed that.
 func TestForm_ValidationFailureKeepsTheFormOpen(t *testing.T) {
 	h := startUI(t, startRealServer(t))
 	bootstrapRoot(t, h)
@@ -119,10 +153,11 @@ func TestForm_ValidationFailureKeepsTheFormOpen(t *testing.T) {
 	h.waitFor("connections manager", "a:add")
 	h.keys("a")
 	h.waitFor("connection form", "new connection")
-	// Empty name, tab to the last field, submit.
+	// Empty name, walk to the button, submit with everything empty.
 	h.key(tuicore.KeyEnter) // advance (empty name)
 	h.key(tuicore.KeyEnter) // advance (empty engine)
-	h.key(tuicore.KeyEnter) // last field: submit, with everything empty
+	h.key(tuicore.KeyEnter) // last field: move to OK
+	h.key(tuicore.KeyEnter) // OK: submit
 	h.waitFor("the form stayed open", "new connection")
 	h.waitFor("and said what was wrong", "name")
 }
@@ -130,8 +165,16 @@ func TestForm_ValidationFailureKeepsTheFormOpen(t *testing.T) {
 // focusChanges counts input-focus moves seen so far. The runtime trace is the
 // evidence for a focus claim; the screen is not, because a form shows its
 // labels whether or not a field is filled.
+//
+// A SELECT COUNTS AS A FIELD. This used to count TextInput alone, and when the
+// engine row became a select the advance onto it stopped being visible here --
+// the focus moved, the counter could not see it, and the cell failed against
+// working code. A counter that recognises only one kind of field measures the
+// widget, not the claim.
 func (h *uiHarness) focusChanges() int {
-	return strings.Count(h.trace.tail(4000), "focus node=*widget.TextInput")
+	t := h.trace.tail(4000)
+	return strings.Count(t, "focus node=*widget.TextInput") +
+		strings.Count(t, "focus node=*widget.Select")
 }
 
 // waitForFocusChange waits until at least one further input focus move lands.
@@ -172,6 +215,11 @@ func bootstrapRoot(t *testing.T, h *uiHarness) {
 	h.keys("demo-passphrase-1")
 	h.key(tuicore.KeyTab)
 	h.keys("demo-passphrase-1")
+	// TWO Enters, and the second one is the submit. NO FIELD SUBMITS any more:
+	// Enter on the last field moves to OK, and Enter on OK activates it. The
+	// first of these used to be the whole submit, which is why this helper is
+	// where a form-contract change shows up across the entire suite.
+	h.key(tuicore.KeyEnter)
 	h.key(tuicore.KeyEnter)
 	h.waitFor("login completion", "logged in as root")
 }

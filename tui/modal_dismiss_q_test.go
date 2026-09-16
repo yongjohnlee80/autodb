@@ -30,6 +30,8 @@ func TestReadonlyModalsDismissOnQ(t *testing.T) {
 	h.keys("demo-passphrase-1")
 	h.key(tuicore.KeyTab)
 	h.keys("demo-passphrase-1")
+	// TWO Enters: the first reaches OK, the second presses it. No field submits.
+	h.key(tuicore.KeyEnter)
 	h.key(tuicore.KeyEnter)
 	h.waitFor("login completion", "logged in as root")
 

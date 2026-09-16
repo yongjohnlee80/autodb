@@ -364,6 +364,9 @@ func TestProductionLifecycle_NoteSavedAfterTableActivationLandsInThatWorkspace(t
 		_ = tb.Inject(tui.KeyEvent{Kind: tui.KeyPress, Code: r, Text: string(r)})
 		time.Sleep(10 * time.Millisecond)
 	}
+	// TWO Enters: the first reaches OK, the second presses it. No field submits.
+	_ = tb.Inject(tui.KeyEvent{Kind: tui.KeyPress, Code: tui.KeyEnter})
+	time.Sleep(20 * time.Millisecond)
 	_ = tb.Inject(tui.KeyEvent{Kind: tui.KeyPress, Code: tui.KeyEnter})
 	time.Sleep(300 * time.Millisecond)
 

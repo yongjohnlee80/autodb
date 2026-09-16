@@ -608,6 +608,9 @@ func (m *Model) openBootstrap() {
 	}
 	pass := field("root passphrase (also unlocks the master key)", widget.WithMask('*'))
 	confirm := field("confirm passphrase", widget.WithMask('*'))
+	// NOT SCRIMMED, and that is a ruling rather than an oversight: the backdrop
+	// fades for login and for quit, and the first-run bootstrap is neither. It
+	// is the first thing an operator sees, with nothing behind it worth hiding.
 	m.openForm("first run — create the root user", []formField{
 		field("root user name (default: root)"), pass, confirm,
 	}, func(v formValues) (bool, string) {
@@ -670,7 +673,9 @@ func (m *Model) openLogin() {
 		return
 	}
 	m.authPromptPending = false
-	m.openForm("login", []formField{
+	// Scrimmed: there is nothing else to do in the application until this is
+	// answered, which is the one condition that earns fading the backdrop.
+	m.openFormScrimmed("login", []formField{
 		field("user"), field("passphrase", widget.WithMask('*')),
 	}, func(v formValues) (bool, string) {
 		if v.str(0) == "" {
@@ -961,7 +966,7 @@ func (m *Model) openConflict(body string) {
 func (m *Model) addConnectionToWorkspace(wsID int64) {
 	m.openForm("add connection to workspace "+strconv.FormatInt(wsID, 10), []formField{
 		field("name"),
-		field("engine (postgres | mysql | sqlite)"),
+		staticSelect("engine", engineItems()),
 		field("dsn (stored encrypted at rest)"),
 	}, func(v formValues) (bool, string) {
 		name, engine, dsn := v.str(0), v.str(1), v.str(2)

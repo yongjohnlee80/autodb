@@ -122,7 +122,10 @@ func TestSearchThenEnter_LoadsTheScaffoldNotTheColumns(t *testing.T) {
 	}
 
 	typeStr("data_schema")
-	inject(tui.KeyEvent{Kind: tui.KeyPress, Code: tui.KeyEnter}) // submit
+	// TWO Enters: the first reaches OK, the second presses it. No field
+	// submits any more -- see TestForm_SingleFieldNeedsTheButtonToo.
+	inject(tui.KeyEvent{Kind: tui.KeyPress, Code: tui.KeyEnter})
+	inject(tui.KeyEvent{Kind: tui.KeyPress, Code: tui.KeyEnter})
 	time.Sleep(150 * time.Millisecond)
 
 	var afterSubmit, editorAfterSubmit string

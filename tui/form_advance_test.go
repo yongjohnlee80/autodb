@@ -50,6 +50,8 @@ func TestForm_EnterAdvancesBeforeTheNextKeystroke(t *testing.T) {
 	h.keys("demo-passphrase-1")
 	h.key(tuicore.KeyTab)
 	h.keys("demo-passphrase-1")
+	// TWO Enters: the first reaches OK, the second presses it. No field submits.
+	h.key(tuicore.KeyEnter)
 	h.key(tuicore.KeyEnter)
 	h.waitFor("login completion", "logged in as root")
 
@@ -58,15 +60,22 @@ func TestForm_EnterAdvancesBeforeTheNextKeystroke(t *testing.T) {
 	h.keys("a")
 	h.waitFor("connection form", "new connection")
 
-	// THE WHOLE FORM AS ONE BURST: name, Enter, engine, Enter, dsn, Enter.
+	// THE WHOLE FORM AS ONE BURST, which is the shape a paste has.
+	//
+	// The engine is a SELECT now, and Enter cannot walk past one: a closed
+	// select answers Enter by opening its options, which is the whole point of
+	// it. So the burst Tabs around the select and drives the popup with Down
+	// and Enter. The property under test is unchanged — a burst must land in
+	// the fields it was aimed at, not in the one the operator just left — and
+	// the text fields on either side of the select are where that is measured.
 	dsn := fmt.Sprintf("file:advance%d?mode=memory&cache=shared", time.Now().UnixNano())
 	var burst []tuicore.KeyEvent
 	burst = append(burst, runes("demo")...)
-	burst = append(burst, enter())
-	burst = append(burst, runes("sqlite")...)
-	burst = append(burst, enter())
+	burst = append(burst, tab())
+	burst = append(burst, enter(), down(), down(), enter()) // open, sqlite, commit
+	burst = append(burst, tab())
 	burst = append(burst, runes(dsn)...)
-	burst = append(burst, enter())
+	burst = append(burst, enter(), enter()) // reach OK, press it
 	h.paste(burst...)
 
 	h.waitGone("connection form", "new connection")
