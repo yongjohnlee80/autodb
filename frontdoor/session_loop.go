@@ -1171,16 +1171,24 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 
 	switch {
 	case errors.Is(err, auth.ErrLocked):
-		// THE STORE IS LOCKED. It surfaces HERE, at the first
-		// statement, and not during the credential exchange — measured, after
-		// an earlier version of this feature asserted the opposite from a
-		// source trace: OpenWireSessionWith never decrypts a DSN, so a locked
-		// store lets a client AUTHENTICATE and refuses its first query.
+		// THE STORE IS LOCKED, AND THIS IS ONE OF ITS TWO ARRIVALS.
 		//
-		// Post-auth, which makes this the ordinary case rather than a special
-		// one: this surface already "answers accurately after authentication"
-		// (see the SQLSTATE block above), so no pre-auth vocabulary changes
-		// and no deny-before-disclose argument is needed.
+		// Which one depends on the engine, and an earlier version of this
+		// comment asserted this arrival as the only one. For an engine that
+		// does not speak the PostgreSQL wire — SQLite, where the measurement
+		// behind that claim was taken — no target is opened at admission, the
+		// DSN is decrypted at the first statement, and a client authenticates
+		// before meeting this. For a postgres-wire connection the backend is
+		// pinned inside OpenWireSessionWith, so the store is read DURING the
+		// credential phase and the failure never reaches this function; that
+		// arrival is handled in auth.go with its own non-charging identity and
+		// a FATAL startup frame.
+		//
+		// This arm is the post-auth one, which makes it the ordinary case
+		// rather than a special one: this surface already answers accurately
+		// after authentication (see the SQLSTATE block above), so no pre-auth
+		// vocabulary changes here and no deny-before-disclose argument is
+		// needed for it.
 		//
 		// FATAL, because the session cannot become usable without an unlock:
 		// leaving the connection open would let a client retry into the same

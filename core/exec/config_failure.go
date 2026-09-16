@@ -57,6 +57,50 @@ const (
 	ConfigStageCapability ConfigStage = "capability"
 )
 
+// ConfigDetail is the WHOLE of what a configuration failure may say about
+// itself outside this package. It is a closed set of fixed literals chosen at
+// the raise site, never text formatted from a cause.
+//
+// A FORMATTED CAUSE WAS THE DEFECT. The audit detail used to be
+// "stage=%s cause=%v", and the cause for a DSN failure is the driver's parser
+// complaining about the DSN -- so the audit trail, and Event.Detail which is
+// published more widely than a log, carried the estate's topology and its
+// secrets. pgx redacts the password in a URL's userinfo and NOTHING else,
+// which measured out as: the host leaked; a password passed as a query
+// parameter leaked verbatim; and a PAT placed in the USERNAME position leaked
+// whole, because the redactor only looks at the password field.
+//
+// A CLOSED SET RATHER THAN A SANITISER, deliberately. A sanitiser is a list of
+// patterns that must keep up with every shape a secret can take, and the
+// measurement above is what keeping up looks like when it fails. A raise site
+// that must name one of these cannot leak something nobody thought of,
+// because it never holds the cause in the first place.
+type ConfigDetail string
+
+const (
+	// DetailUnknownEngine: the connection row names an engine not implemented.
+	DetailUnknownEngine ConfigDetail = "the connection names an engine this build does not implement"
+	// DetailDSNUnusable: the stored DSN did not survive the engine's own parser,
+	// or sets an option that would desynchronize the statement classifier.
+	DetailDSNUnusable ConfigDetail = "the stored connection string could not be used as written"
+	// DetailPoolRefused: the driver's pool object would not construct.
+	DetailPoolRefused ConfigDetail = "the driver would not build a connection pool for this connection"
+	// DetailGrammarUnproved: the target's parsing mode could not be established.
+	DetailGrammarUnproved ConfigDetail = "the target's statement parsing mode could not be established"
+	// DetailNoDestroy: the resolved driver cannot destroy a pinned backend.
+	DetailNoDestroy ConfigDetail = "the resolved driver cannot destroy a pinned backend on demand"
+	// DetailStoreUnavailable: the secret store would not answer. Raised in the
+	// front door rather than here, and declared here so the set stays closed.
+	DetailStoreUnavailable ConfigDetail = "the secret store for this connection would not answer"
+)
+
+// configDetails is every member of the closed set, for the walk that proves no
+// raise site invents one.
+func configDetails() []ConfigDetail {
+	return []ConfigDetail{DetailUnknownEngine, DetailDSNUnusable, DetailPoolRefused,
+		DetailGrammarUnproved, DetailNoDestroy, DetailStoreUnavailable}
+}
+
 // ErrConnectionUnusable is the sentinel every configuration failure carries,
 // so a renderer can recognise one without knowing any stage.
 var ErrConnectionUnusable = errors.New("exec: this connection cannot serve requests as it is configured")
@@ -74,7 +118,12 @@ var ErrConnectionUnusable = errors.New("exec: this connection cannot serve reque
 type ConfigFailure struct {
 	// Stage is which part of the configuration is wrong.
 	Stage ConfigStage
-	cause error
+	// ConnID is the connection's opaque numeric id. Safe to publish: it is a
+	// row number an operator looks up, not a name, a host or a credential.
+	ConnID int64
+	// Detail is the fixed literal this failure is allowed to say about itself.
+	Detail ConfigDetail
+	cause  error
 }
 
 // NewConfigFailure builds one for a stage the caller already knows.
@@ -84,8 +133,8 @@ type ConfigFailure struct {
 // configuration failure is raised by a call site in this package that knows
 // exactly which check it just failed. Inferring it would be guessing at
 // something already known.
-func NewConfigFailure(stage ConfigStage, cause error) *ConfigFailure {
-	return &ConfigFailure{Stage: stage, cause: cause}
+func NewConfigFailure(stage ConfigStage, connID int64, detail ConfigDetail, cause error) *ConfigFailure {
+	return &ConfigFailure{Stage: stage, ConnID: connID, Detail: detail, cause: cause}
 }
 
 // Error names the stage and nothing else. The cause is deliberately absent:
@@ -95,22 +144,33 @@ func (c *ConfigFailure) Error() string {
 	return fmt.Sprintf("%s (%s)", ErrConnectionUnusable.Error(), c.Stage)
 }
 
+// SafeLog is what a log line may say. Same content as the audit row, because
+// there is no second audience that has earned more: a log is copied into
+// tickets, pasted into chat and shipped to aggregators.
+func (c *ConfigFailure) SafeLog() string { return c.AuditDetail() }
+
 // Is answers for the sentinel alone, so errors.Is recognises the class without
 // reaching the cause.
 func (c *ConfigFailure) Is(target error) bool { return target == ErrConnectionUnusable }
 
-// AuditDetail is the operator's whole of it: the stage and the raw cause.
+// AuditDetail is the operator's whole of it: the stage, the connection's
+// opaque id, and the fixed literal the raise site chose.
 //
-// THE CAUSE IS HERE AND NOWHERE ELSE ON THE WAY OUT. An audit row is read by
-// someone who already has the connection row in front of them, so the DSN
-// parser's complaint is exactly what they need; the same text on the wire
-// would be this install's topology handed to whoever holds a socket.
+// IT DOES NOT CARRY THE CAUSE, and that is the fix rather than an omission.
+// An audit row is not a log line: Event.Detail is published to whatever
+// consumes the event stream, which is wider than the operator sitting with the
+// connection row in front of them. The three fields here are enough to find
+// the row and know which check failed, and none of them can carry a secret.
+// The cause stays private to this process; Cause exists for a caller that has
+// already decided it is safe to look, and no path out of this package calls it.
 func (c *ConfigFailure) AuditDetail() string {
-	return fmt.Sprintf("stage=%s cause=%v", c.Stage, c.cause)
+	return fmt.Sprintf("stage=%s conn=%d detail=%s", c.Stage, c.ConnID, c.Detail)
 }
 
-// Cause is the only way to the underlying error. Audit calls it; nothing on
-// the wire path does.
+// Cause is the only way to the underlying error. NOTHING ON THE WAY OUT OF
+// THIS PROCESS CALLS IT -- not the wire, not the audit, not the log. It exists
+// for a caller inside this package that has already established it is safe to
+// look, and the cell that walks the raise sites is what keeps it that way.
 func (c *ConfigFailure) Cause() error { return c.cause }
 
 // ConfigFailureOf reports whether an error is one, and which.

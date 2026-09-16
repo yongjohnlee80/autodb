@@ -91,6 +91,15 @@ func (f *fakeAuth) OpenWireSessionWith(ctx context.Context, req exec.WireOpen) (
 	return res, nil
 }
 
+// openedCredentials reports the credentials handed to the engine, in order.
+// It is the witness that verification was ATTEMPTED at all: a cell asserting
+// only what came back could pass with authentication skipped entirely.
+func (f *fakeAuth) openedCredentials() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.opened...)
+}
+
 // openedAppNames reports the labels handed to the engine, in order.
 func (f *fakeAuth) openedAppNames() []string {
 	f.mu.Lock()

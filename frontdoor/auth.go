@@ -121,6 +121,11 @@ type authOutcome struct {
 	// while a Boolean charged one of them. One authority, and it is the
 	// registered class.
 	Failure outcome.ReasonID
+	// Detail is the safe diagnostic for an error-driven ending: the closed-set
+	// literal, never a formatted cause. Carried so the startup endings can put
+	// something actionable in the trail without the audit row being the place
+	// a secret escapes.
+	Detail  string
 	Respond WireResponse
 	// Disclosable carries the engine's witness that this refusal happened
 	// AFTER the credential verified, which is the only condition under which
@@ -290,18 +295,32 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// registered identity and its own safe FATAL frame. The caller learns
 		// that the connection is unavailable or misconfigured, which is true,
 		// costs them no failure budget, and tells them nothing about why.
-		if startup := startupFailureIdentity(aerr); startup != "" {
-			// THE RAW CAUSE GOES TO THE OPERATOR AND NOWHERE ELSE. It names
-			// the connection, and for a configuration failure the engine and
-			// whatever the DSN parser objected to.
-			l.onLog(fmt.Sprintf("frontdoor: starting a wire session for %s: %v", peer, aerr))
-			return authOutcome{Failure: startup, Respond: WireStartupFatal}, aerr
+		if startup, detail := startupFailure(aerr); startup != "" {
+			// THE SAFE DIAGNOSTIC, AND NOT THE CAUSE, EVEN HERE.
+			//
+			// This used to log "%v" of the error, on the reasoning that a log
+			// is the operator's and the wire is the caller's. That reasoning
+			// does not survive contact with what a log actually is: it is
+			// copied into tickets, pasted into chat and shipped to
+			// aggregators. Measured, the cause for a DSN failure carried the
+			// target host, a password passed as a query parameter, and a
+			// PAT-shaped token in the username position -- pgx redacts the
+			// userinfo password and nothing else. The safe diagnostic names
+			// the stage, the connection's opaque id and which check failed,
+			// which is what an operator needs to find the row.
+			l.onLog(fmt.Sprintf("frontdoor: no wire session for %s: %s", peer, detail))
+			return authOutcome{Failure: startup, Detail: detail, Respond: WireStartupFatal}, aerr
 		}
 		// A store failure. The wire still gets the uniform denial — telling
 		// a caller that our database is unreachable is an answer they have
 		// not earned either — but the audit says what it was, and the
 		// address is NOT charged for our outage.
-		l.onLog(fmt.Sprintf("frontdoor: authenticating %s: %v", peer, aerr))
+		// THE SAME RULE FOR THE GENERIC ARM. What reaches here is whatever
+		// the engine returned, and this package cannot know what is in it, so
+		// it says which phase failed and nothing else. An operator with the
+		// peer and the timestamp can find the engine's own record.
+		l.onLog(fmt.Sprintf("frontdoor: authenticating %s: the credential store did not "+
+			"complete the exchange", peer))
 		// OURS, AND ERROR-DRIVEN, AND STILL OWED AN ANSWER. Three separate
 		// facts, carried separately: the identity is operational, the charge
 		// is none, and the peer gets the uniform denial because telling them
@@ -490,23 +509,27 @@ func newBackendKey() (*pgproto3.BackendKeyData, error) {
 	}, nil
 }
 
-// startupFailureIdentity names the registered outcome for a wire-session open
-// that failed for one of OUR reasons, or "" when the failure is not one of
-// them.
+// startupFailure names the registered outcome for a wire-session open that
+// failed for one of OUR reasons, with the fixed literal that may be published
+// about it, or "" when the failure is not one of them.
 //
 // IT LISTS RATHER THAN INFERS, for the reason the acquisition path lists its
 // own answers: there is nothing in a wrapped error that distinguishes "the
 // secret store is locked" from "the target refused our credential", and
 // guessing would put a wrong fact in an operator's trail. A failure that is
 // not listed keeps the generic store-outage handling, which is the
-// conservative half -- an unlisted failure is answered with the uniform denial
-// rather than with a frame naming something we have not established.
-func startupFailureIdentity(err error) outcome.ReasonID {
-	switch {
-	case errors.Is(err, auth.ErrLocked):
-		return outcomeID(OutcomeStartupConnectionUnavailable)
-	case errors.Is(err, exec.ErrConnectionUnusable):
-		return outcomeID(OutcomeStartupConnectionUnusable)
+// conservative half.
+//
+// THE DETAIL COMES FROM THE CLOSED SET, never from the error. A configuration
+// failure already carries the literal its raise site chose; a locked store has
+// no such carrier, so the one member of the set that describes it is named
+// here.
+func startupFailure(err error) (outcome.ReasonID, string) {
+	if c, ok := exec.ConfigFailureOf(err); ok {
+		return outcomeID(OutcomeStartupConnectionUnusable), c.AuditDetail()
 	}
-	return ""
+	if errors.Is(err, auth.ErrLocked) {
+		return outcomeID(OutcomeStartupConnectionUnavailable), string(exec.DetailStoreUnavailable)
+	}
+	return "", ""
 }
