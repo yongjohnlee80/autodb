@@ -190,15 +190,26 @@ func TestDialFailedPG_PgxKeepsTheSessionAcrossASimpleQueryFailure(t *testing.T) 
 		t.Fatalf("the statement after the dial failure returned %+v, want one row of 42", res)
 	}
 
-	var sawAudit bool
+	// THE TRAIL NAMES THE STAGE AND THE ATTEMPT COUNT, NOT THE TARGET. This
+	// cell used to require the target's address here. Event.Detail is
+	// published to whatever consumes the event stream, so a driver's connect
+	// error in it is a topology and credential disclosure rather than a
+	// debugging convenience.
+	var detail string
 	for _, ev := range events() {
-		if ev.Kind == EventDialFailed && strings.Contains(ev.Detail, "203.0.113.9") {
-			sawAudit = true
+		if ev.Kind == EventDialFailed {
+			detail = ev.Detail
 		}
 	}
-	if !sawAudit {
-		t.Error("the operator's trail has no dial-failure event carrying the cause; the " +
-			"client is denied it on the understanding that the operator is not")
+	if detail == "" {
+		t.Fatal("the operator's trail has no dial-failure event at all; the client is " +
+			"denied the detail on the understanding that the operator is not")
+	}
+	if !strings.Contains(detail, "stage=") || !strings.Contains(detail, "attempts=") {
+		t.Errorf("audit detail = %q, want the stage and the attempt count", detail)
+	}
+	if strings.Contains(detail, "203.0.113.9") || strings.Contains(detail, "6543") {
+		t.Errorf("audit detail = %q carries the target's address", detail)
 	}
 }
 

@@ -58,12 +58,27 @@ func TestDialFailure_TheCauseIsNotReachableByUnwrapping(t *testing.T) {
 		t.Error("Cause does not return the raw error; the operator's half of the contract " +
 			"is that the trail keeps what the wire discards")
 	}
-	if !strings.Contains(f.AuditDetail(), "28P01") {
-		t.Errorf("the audit detail %q does not carry the upstream cause", f.AuditDetail())
-	}
+	// THE AUDIT NAMES THE STAGE AND NOT THE CAUSE, and this cell used to
+	// require the opposite. A driver's connect error is shaped "failed to
+	// connect to host=... user=... database=... password=..." and for a URL
+	// DSN carries the whole connection string; this detail becomes
+	// EventDialFailed.Detail, which is published to whatever consumes the
+	// event stream. The stage is the repair an operator chooses between --
+	// DNS, TLS and an upstream password are three different ones -- and the
+	// cause stays in-process for a caller that has decided it is safe to look.
 	if !strings.Contains(f.AuditDetail(), "stage=authenticate") {
 		t.Errorf("the audit detail %q does not name the stage; DNS, TLS and an upstream "+
 			"password are three different repairs", f.AuditDetail())
+	}
+	for _, leak := range []string{"28P01", upstream.Message, "password"} {
+		if leak != "" && strings.Contains(f.AuditDetail(), leak) {
+			t.Errorf("the audit detail %q carries %q from the upstream cause",
+				f.AuditDetail(), leak)
+		}
+	}
+	if strings.Contains(f.Error(), "28P01") {
+		t.Errorf("Error() %q carries the upstream cause; this text reaches logs that do "+
+			"not distinguish audit from disclosure", f.Error())
 	}
 }
 
@@ -94,7 +109,7 @@ func TestDialFailure_StagesAreAttributedThroughTheNesting(t *testing.T) {
 		{"a deadline", fmt.Errorf("dialing: %w", context.DeadlineExceeded), DialStageConnect},
 		{"something nobody taught this", errors.New("a driver said something new"), DialStageUnclassified},
 	} {
-		if got := NewDialFailure(c.cause).Stage; got != c.want {
+		if got := NewDialFailure(c.cause).Stage(); got != c.want {
 			t.Errorf("%s: stage = %q, want %q", c.name, got, c.want)
 		}
 	}
@@ -125,9 +140,9 @@ func TestDialFailure_OneReArbitrationMaximum(t *testing.T) {
 	if !ok {
 		t.Fatalf("the acquisition returned %v, want a dial failure", err)
 	}
-	if d.Attempts != 2 {
+	if d.Attempts() != 2 {
 		t.Errorf("the failure reports %d attempts, want 2; an operator reading a trail "+
-			"full of these cannot otherwise tell one failure from a retry loop", d.Attempts)
+			"full of these cannot otherwise tell one failure from a retry loop", d.Attempts())
 	}
 
 	// A SECOND ATTEMPT THAT SUCCEEDS IS THE WHOLE REASON THE FIRST RETRY
@@ -354,8 +369,8 @@ func TestAcquireRequestBackend_ThePoolIsBuiltOnceAndBuildingItIsNotAnAttempt(t *
 			"unrecognised error's text on the wire, and that text names the connection, "+
 			"the host, the port and the database", aerr)
 	}
-	if c.Stage != ConfigStagePool {
-		t.Errorf("stage = %q, want %q", c.Stage, ConfigStagePool)
+	if c.Stage() != ConfigStagePool {
+		t.Errorf("stage = %q, want %q", c.Stage(), ConfigStagePool)
 	}
 	if _, isDial := DialFailureOf(aerr); isDial {
 		t.Error("a pool that was never built was reported as a target outage with an " +
@@ -462,8 +477,8 @@ func TestAcquireRequestBackend_ConfigurationFaultsAreNeitherDialledNorRetried(t 
 			if !ok {
 				t.Fatalf("err = %v, want a ConfigFailure", aerr)
 			}
-			if c.Stage != tc.want {
-				t.Errorf("stage = %q, want %q", c.Stage, tc.want)
+			if c.Stage() != tc.want {
+				t.Errorf("stage = %q, want %q", c.Stage(), tc.want)
 			}
 			if _, isDial := DialFailureOf(aerr); isDial {
 				t.Error("a configuration fault was reported as a target outage")
@@ -525,9 +540,9 @@ func TestAcquireRequestBackend_AnIncapableDriverIsRefusedOnceThroughTheProductio
 	if !ok {
 		t.Fatalf("err = %v, want the capability failure to survive its caller", aerr)
 	}
-	if cf.Stage != ConfigStageCapability {
+	if cf.Stage() != ConfigStageCapability {
 		t.Errorf("stage = %q, want %q — the caller kept the error and lost what it said",
-			cf.Stage, ConfigStageCapability)
+			cf.Stage(), ConfigStageCapability)
 	}
 	if errors.Is(aerr, ErrDialFailed) {
 		t.Error("this install's own missing capability was reported as a target outage; the " +
@@ -535,7 +550,7 @@ func TestAcquireRequestBackend_AnIncapableDriverIsRefusedOnceThroughTheProductio
 	}
 	if d, isDial := DialFailureOf(aerr); isDial {
 		t.Errorf("a dial failure reached the caller claiming %d attempt(s); no permit was "+
-			"taken and no socket was opened", d.Attempts)
+			"taken and no socket was opened", d.Attempts())
 	}
 
 	// EXACTLY ONE ARBITRATION. A second pin against a driver already known to

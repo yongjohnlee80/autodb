@@ -35,7 +35,7 @@ import (
 // again, SILENTLY, with every existing cell green: the injection cells inject
 // past the change and the RPC cell exercises another path. So this asserts not
 // only that the error IS ErrLocked but that it carries NO denial reason.
-func TestWireOpen_LockedStoreSurfacesAtTheFirstStatement(t *testing.T) {
+func TestWireOpen_OnASQLiteTargetTheLockedStoreSurfacesAtTheFirstStatement(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	f, _, secret, dbName := wireFixture(t)
@@ -64,13 +64,20 @@ func TestWireOpen_LockedStoreSurfacesAtTheFirstStatement(t *testing.T) {
 		t.Fatal("the fresh Service is already unlocked; this cell cannot observe a locked store")
 	}
 
-	// THE ARRIVAL POINT, and it is NOT where the design said it was.
+	// THE ARRIVAL POINT FOR THIS ENGINE, AND THE SCOPE IS THE WHOLE POINT.
 	//
-	// A1.3 asserted the lock surfaces during the credential exchange, from a
-	// source trace of openTarget. OpenWireSessionWith never opens a target, so
-	// the session OPENS on a locked store and the FIRST STATEMENT is refused.
-	// This cell pins both halves, because the front door's answer is built on
-	// which of them is true.
+	// This fixture is SQLite, which does NOT speak the PostgreSQL wire. For
+	// such an engine OpenWireSessionWith opens no target at admission, so the
+	// session OPENS on a locked store and the FIRST STATEMENT is refused.
+	//
+	// THE SAME SENTENCE IS FALSE FOR A POSTGRES-WIRE CONNECTION, which pins
+	// its backend inside OpenWireSessionWith before ReadyForQuery -- so there
+	// the store is read DURING the credential phase, and the front door owns
+	// that arrival with its own non-charging identity and a FATAL startup
+	// frame. This cell's unscoped ancestor claimed the first-statement arrival
+	// as the general rule and was believed for two review rounds, because its
+	// fixture could not reach the case that disproves it. It is the control
+	// for the non-wire engine now, and says so in its name.
 	res2, oerr := eng2.OpenWireSessionWith(ctx, WireOpen{
 		PAT: secret, StartupUser: "root", Database: dbName, IP: testIP,
 	})

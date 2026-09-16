@@ -284,12 +284,21 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// others. A guard that cannot fail on the case it guards is not a
 		// guard; correcting that cell is part of this change.
 		//
-		// WHAT THE OLD CODE DID WITH IT IS THE LOCKOUT THIS WORK EXISTS TO
-		// FIX. Everything that was not a denial became an auth-store error
-		// answered with the uniform credential denial, so a developer holding
-		// a verified token, against a connection whose secret store was
-		// locked, was told their CREDENTIAL was wrong -- and their retries
-		// were charged to their address until it was throttled.
+		// WHAT THE OLD CODE DID WITH IT. Everything that was not a denial
+		// became an auth-store error answered with the uniform credential
+		// denial, so a developer holding a verified token, against a
+		// connection whose secret store was locked, was told their CREDENTIAL
+		// was wrong.
+		//
+		// WHETHER THOSE RETRIES WERE ALSO CHARGED IS NOT ASSERTED HERE. An
+		// earlier version of this comment said they were, and that claim was
+		// never traced to a commit or to a charging occurrence -- the
+		// auth-store identity is registered ChargeNone, so the charge would
+		// have had to come from somewhere else, and nobody established where.
+		// What IS established, and is what this branch is for, is the wrong
+		// answer above. The throttling behaviour of the identity now selected
+		// is proved by the repetition cell in locked_store_test.go rather
+		// than asserted in prose.
 		//
 		// So the two are branched before the generic arm, each with its own
 		// registered identity and its own safe FATAL frame. The caller learns

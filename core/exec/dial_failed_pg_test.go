@@ -61,15 +61,15 @@ func TestDialFailedPG_ABackendThatCannotBeSanitisedAuditsAsSettings(t *testing.T
 			"door publishes an unrecognised error's text, and that text is the reset "+
 			"step and the target's own words", err)
 	}
-	if d.Stage != DialStageSettings {
+	if d.Stage() != DialStageSettings {
 		t.Errorf("the sanitation failure audits as stage %q, want %q. %q sends the operator "+
 			"to the network for a fault that is on the backend's session state: %s",
-			d.Stage, DialStageSettings, d.Stage, d.AuditDetail())
+			d.Stage(), DialStageSettings, d.Stage(), d.AuditDetail())
 	}
-	if d.Attempts < 1 || d.Attempts > dialAttemptsPerRequest {
+	if d.Attempts() < 1 || d.Attempts() > dialAttemptsPerRequest {
 		t.Errorf("the sanitation failure reports %d attempts; the bound is %d, and a permit "+
 			"is an instance-wide allowance other sessions are queued for",
-			d.Attempts, dialAttemptsPerRequest)
+			d.Attempts(), dialAttemptsPerRequest)
 	}
 	if s.pinnedConn() != nil {
 		t.Error("the session was left holding a backend whose state this package could not " +

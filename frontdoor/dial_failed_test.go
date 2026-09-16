@@ -174,10 +174,18 @@ func TestDialFailed_SimpleQueryGetsTheFixedFrameThenOneReadyForQuery(t *testing.
 		if ev.Reason != DialFailedRule {
 			t.Errorf("audit reason = %q, want %q", ev.Reason, DialFailedRule)
 		}
-		if !strings.Contains(ev.Detail, "stage=") || !strings.Contains(ev.Detail, "203.0.113.7") {
-			t.Errorf("audit detail = %q, want the stage and the raw cause — the operator "+
-				"has three different repairs to choose between and the client must not "+
-				"be able to tell them apart", ev.Detail)
+		// THE STAGE, NOT THE CAUSE. This cell used to require the target's
+		// address in the audit row; Event.Detail is published to whatever
+		// consumes the event stream, and a driver's connect error carries the
+		// host, the role, the database and any credential in the DSN.
+		if !strings.Contains(ev.Detail, "stage=") {
+			t.Errorf("audit detail = %q, want the stage — the operator has three different "+
+				"repairs to choose between", ev.Detail)
+		}
+		for _, tok := range causeTokens {
+			if strings.Contains(ev.Detail, tok) {
+				t.Errorf("audit detail = %q carries %q from the raw dial cause", ev.Detail, tok)
+			}
 		}
 	}
 	if !found {

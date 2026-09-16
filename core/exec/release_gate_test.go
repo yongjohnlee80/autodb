@@ -370,8 +370,8 @@ func TestPinTargetBackend_ADriverWithoutExplicitDestructionIsRefusedBeforeUse(t 
 	if !ok {
 		t.Fatalf("err = %v, want a ConfigFailure: nothing was dialled here", err)
 	}
-	if cf.Stage != ConfigStageCapability {
-		t.Errorf("stage = %q, want %q", cf.Stage, ConfigStageCapability)
+	if cf.Stage() != ConfigStageCapability {
+		t.Errorf("stage = %q, want %q", cf.Stage(), ConfigStageCapability)
 	}
 	if _, isDial := DialFailureOf(err); isDial {
 		t.Error("this install's own missing capability was reported as a target outage")
