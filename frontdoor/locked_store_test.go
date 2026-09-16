@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
@@ -351,14 +352,17 @@ func assertNoSinkLeaks(t *testing.T, authErr error, secrets []string, wantDetail
 	}
 
 	// SINK 2: the event stream, which is the wide one.
-	var detail string
-	var seen int
-	for _, ev := range events() {
-		if ev.Kind == EventAuthOperational {
-			seen++
-			detail = ev.Detail
-		}
-	}
+	//
+	// WAITED FOR, NOT SAMPLED. The client is told FIRST and the operator
+	// SECOND -- deliberately, and on the same ordering every other refusal
+	// path in this package uses -- so the frame arriving says nothing about
+	// whether the event has been emitted yet. Sampling here passed under
+	// ordinary scheduling and failed under -race, which is the worst way for a
+	// cell to be wrong: green locally, red in somebody else's CI, and looking
+	// like a product defect rather than a test that measured too early.
+	//
+	// Bounded so a genuinely missing event fails rather than hangs.
+	detail, seen := awaitOperationalDetail(t, events, 10*time.Second)
 	if seen != 1 {
 		t.Fatalf("the operational outcome reached the trail %d time(s), want exactly 1", seen)
 	}
@@ -480,19 +484,22 @@ func TestStartupFailure_VerifiesTheCredentialAndChargesNothing(t *testing.T) {
 
 	// NO CHARGE. Every occurrence is the non-charging startup identity, and
 	// none is a credential denial.
-	var startups int
-	for _, ev := range events() {
-		switch ev.Kind {
-		case EventAuthOperational:
-			if ev.Reason == string(outcomeID(OutcomeStartupConnectionUnusable)) {
-				startups++
-			}
-		case "fd.auth_denied":
-			t.Errorf("a credential denial was recorded for a verified token: %+v", ev)
-		}
-	}
+	//
+	// WAITED FOR, for the reason in awaitOperationalEvents: the last attempt's
+	// client had its frame before the last event was written, and CI read the
+	// trail in that window and reported 11 outcomes for 12 attempts. The exact
+	// count still has to hold once the trail has settled -- waiting is not
+	// loosening the assertion, it is measuring at a time when the assertion
+	// means something.
+	startups := len(awaitOperationalEvents(t, events,
+		string(outcomeID(OutcomeStartupConnectionUnusable)), attempts, 10*time.Second))
 	if startups != attempts {
 		t.Errorf("%d startup outcomes for %d attempts", startups, attempts)
+	}
+	for _, ev := range events() {
+		if ev.Kind == "fd.auth_denied" {
+			t.Errorf("a credential denial was recorded for a verified token: %+v", ev)
+		}
 	}
 
 	// THE PROOF THAT MATTERS: the same address, past the throttle's limit, is
@@ -521,5 +528,75 @@ func TestStartupFailure_VerifiesTheCredentialAndChargesNothing(t *testing.T) {
 			"was refused with %q/%q — the developer is locked out of a system that is "+
 			"working again, which is the whole of the incident this work exists to fix",
 			attempts, e.Code, e.Message)
+	}
+}
+
+// awaitOperationalEvents waits until at least want credential-phase
+// operational events carrying reason have been recorded, then returns them.
+//
+// THE CLIENT IS TOLD FIRST AND THE OPERATOR SECOND, so a cell that reads the
+// trail when the last client has its frame is reading a trail that is still
+// being written. This is the third cell on this branch to be caught by that,
+// and the first two were caught by other people's runs rather than mine --
+// once under -race by the reviewer, once by CI reporting 11 outcomes for 12
+// attempts. The scheduling that hides it locally is the scheduling I happen to
+// have.
+//
+// SO THE WAIT IS THE HELPER, not something each cell remembers to do. Bounded,
+// so a genuinely missing event fails rather than hangs, and it returns as soon
+// as the count is reached so a cell asserting an exact count still sees an
+// overshoot rather than waiting it out.
+func awaitOperationalEvents(t *testing.T, events func() []Event, reason string,
+	want int, within time.Duration) []Event {
+
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		var got []Event
+		for _, ev := range events() {
+			if ev.Kind == EventAuthOperational && (reason == "" || ev.Reason == reason) {
+				got = append(got, ev)
+			}
+		}
+		if len(got) >= want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// awaitOperationalDetail is the single-event case: the detail and the count.
+func awaitOperationalDetail(t *testing.T, events func() []Event, within time.Duration) (string, int) {
+	t.Helper()
+	got := awaitOperationalEvents(t, events, "", 1, within)
+	if len(got) == 0 {
+		return "", 0
+	}
+	return got[len(got)-1].Detail, len(got)
+}
+
+// awaitEvents is awaitOperationalEvents for any kind.
+//
+// GENERALIZED AFTER THE THIRD SIGHTING RATHER THAN THE FIRST. Every cell in
+// this package that reads the trail once the client has its frame is exposed
+// to the same window, because the front door answers the caller before it
+// records the outcome. Three of mine were caught by other people's runs. The
+// ones below are converted without waiting for a fourth report.
+func awaitEvents(t *testing.T, events func() []Event, kind string, want int,
+	within time.Duration) []Event {
+
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		var got []Event
+		for _, ev := range events() {
+			if ev.Kind == kind {
+				got = append(got, ev)
+			}
+		}
+		if len(got) >= want || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
