@@ -114,8 +114,11 @@ func All() []Mutation {
 		},
 		{
 			Name: "expired-wait-names-its-blocker", File: "core/exec/wire_session.go",
-			Anchor:      "\t\treturn denyAfterAuthorizationWithDetail(DenyQueueTimeout, detail)",
-			Replacement: "\t\treturn denyAfterAuthorization(DenyQueueTimeout)",
+			// Follows the code: the classifier now returns a reason and its
+			// detail rather than a finished denial, because stamping a refusal
+			// as disclosable belongs at the site that verified the credential.
+			Anchor:      "\t\treturn DenyQueueTimeout, d, true",
+			Replacement: "\t\treturn DenyQueueTimeout, \"\", true",
 			Test:        "TestOpenWireSession_AWaitThatExpiresIsRecordedAsAWaitNotAsACapRefusal",
 			Guarantee: "that the one record of an expired wait says which limit to raise, not " +
 				"merely that somebody waited",
