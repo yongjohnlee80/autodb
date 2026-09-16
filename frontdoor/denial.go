@@ -413,9 +413,12 @@ const (
 // connection_unusable_pg_test.go: real pgx against a real target reads the
 // code and the severity out of its own error type, is not closed by it, and
 // then runs real work on the same connection. The JDBC half has NOT been run
-// for this shape -- the dial-failure shape has a written manual procedure and
-// this one does not yet -- so F0000 rests on one client of the two, and saying
-// so here is the point of saying it at all.
+// for this shape, and neither has either client for the two FATAL startup
+// shapes below, so this rests on one client of two on one of three shapes.
+// The procedure that closes that is written out in
+// docs/front-door/startup-and-config-client-verification.md and is assigned to
+// the pre-cutover gate by Johno's ruling: L2-L5 may merge without it,
+// organization-wide JDBC use may not begin without it.
 const (
 	ConnectionUnusableSQLState = "F0000"
 
