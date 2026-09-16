@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -35,6 +36,12 @@ type demandEngine struct {
 	offered  chan uint64 // one send per offer, so a cell can wait for the loop to block
 	finished chan bool   // one send per finalisation, carrying `delivered`
 	finishes int
+
+	// The loop's fate, so a cell that is waiting on a frame can say why one
+	// never came instead of timing out.
+	loopDone   chan struct{}
+	loopReason *string
+	loopErr    *error
 }
 
 func newDemandEngine() *demandEngine {
@@ -116,6 +123,14 @@ func (d *demandEngine) finishCount() int {
 
 // drivenSession runs the real session loop over a pipe and gives the cell the
 // client end of it.
+//
+// THE LOOP'S EXIT IS WATCHED, NOT IGNORED. The first version started runSession
+// in a goroutine and dropped its return value, so when the loop ended early the
+// cell simply blocked on a frame that was never coming and died at the test
+// timeout — a hang where a diagnosis should have been. A hang says only "one of
+// these five cells is wrong"; the close reason says which decision the loop
+// took and why. Every wait below fails with that reason instead of waiting out
+// the clock.
 func drivenSession(t *testing.T, d *demandEngine) (*pgproto3.Frontend, *demandEngine, func() []Event, func() string) {
 	t.Helper()
 	client, server := net.Pipe()
@@ -127,12 +142,16 @@ func drivenSession(t *testing.T, d *demandEngine) (*pgproto3.Frontend, *demandEn
 
 	fr := newFrameReader(server)
 	be := pgproto3.NewBackend(fr, server)
-	var closeReason string
+	var (
+		closeReason string
+		loopErr     error
+	)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = l.runSession(context.Background(), server, fr, be, goodSession(), "127.0.0.1:5", &closeReason)
+		loopErr = l.runSession(context.Background(), server, fr, be, goodSession(), "127.0.0.1:5", &closeReason)
 	}()
+	d.loopDone, d.loopReason, d.loopErr = done, &closeReason, &loopErr
 
 	return pgproto3.NewFrontend(client, client), d, events, func() string {
 		select {
@@ -144,6 +163,43 @@ func drivenSession(t *testing.T, d *demandEngine) (*pgproto3.Frontend, *demandEn
 	}
 }
 
+// receiveOrExplain reads one frame, or fails with the reason the loop ended
+// rather than blocking until the test times out.
+func receiveOrExplain(t *testing.T, fe *pgproto3.Frontend, d *demandEngine) pgproto3.BackendMessage {
+	t.Helper()
+	type result struct {
+		msg pgproto3.BackendMessage
+		err error
+	}
+	got := make(chan result, 1)
+	go func() {
+		m, err := fe.Receive()
+		got <- result{m, err}
+	}()
+	select {
+	case r := <-got:
+		if r.err != nil {
+			t.Fatalf("the client got no frame, only a broken connection: %v%s", r.err, d.whyLoopEnded())
+		}
+		return r.msg
+	case <-time.After(5 * time.Second):
+		t.Fatalf("no frame arrived within five seconds%s", d.whyLoopEnded())
+		return nil
+	}
+}
+
+// whyLoopEnded reports how the session loop finished, if it has.
+func (d *demandEngine) whyLoopEnded() string {
+	select {
+	case <-d.loopDone:
+		return fmt.Sprintf(" — the session loop had already ended: closeReason=%q err=%v. "+
+			"It stopped before writing anything, so no frame was ever coming.",
+			*d.loopReason, *d.loopErr)
+	default:
+		return " — the session loop is still running, so it is blocked rather than finished."
+	}
+}
+
 // awaitOffer waits for the loop to be genuinely blocked reading.
 func awaitOffer(t *testing.T, d *demandEngine) {
 	t.Helper()
@@ -151,7 +207,7 @@ func awaitOffer(t *testing.T, d *demandEngine) {
 	case <-d.offered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the session loop never offered to receive, so it was never blocked reading " +
-			"and nothing could have been delivered to it")
+			"and nothing could have been delivered to it" + d.whyLoopEnded())
 	}
 }
 
@@ -168,10 +224,7 @@ func TestDrivenDemand_AnIdleClientIsToldBeforeTheConnectionEnds(t *testing.T) {
 		t.Fatal("the loop was not offering when the reclamation was attempted")
 	}
 
-	msg, err := fe.Receive()
-	if err != nil {
-		t.Fatalf("the client got no frame at all, only a broken connection: %v", err)
-	}
+	msg := receiveOrExplain(t, fe, d)
 	errResp, ok := msg.(*pgproto3.ErrorResponse)
 	if !ok {
 		t.Fatalf("the client received %T, want the terminal ErrorResponse", msg)
