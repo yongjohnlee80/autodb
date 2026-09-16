@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/yongjohnlee80/autodb/core/outcome"
 )
 
 // deadlineConn records which deadlines were set on it, and whether it was
@@ -120,11 +122,7 @@ func TestDemandKnock_AFailedWakeClosesTheTransport(t *testing.T) {
 // developer who had opened no statements would go hunting for statements they
 // never created.
 func TestDemandReclaimed_TheTerminalMessageIsTrueOfEveryHolderItEnds(t *testing.T) {
-	row, ok := heldObjectRowFor(condDemandReclaimed)
-	if !ok {
-		t.Fatal("demand reclamation has no registered terminal row, so it would end sessions " +
-			"with no explanation at all")
-	}
+	row := demandTerminalRow()
 	if row.identity != OutcomeDemandReclaimed {
 		t.Errorf("identity = %q, want %q — ending a session is not a capacity refusal and an "+
 			"operator must be able to count the two separately", row.identity, OutcomeDemandReclaimed)
@@ -164,5 +162,53 @@ func TestDemandReclaimed_TheNoMechanismRowIsNotClaimed(t *testing.T) {
 	if !reserved {
 		t.Error("the no-mechanism row is neither registered nor reserved, so its agreed wire " +
 			"answer has been lost rather than deferred")
+	}
+}
+
+// RECLAMATION IS NOT IN THE REGISTER OF REFUSALS, AND PUTTING IT BACK MUST HURT.
+//
+// THIS IS THE CELL THAT KEEPS THE BOUNDARY. The row lived in the held-object
+// register once, because frameHeldObject was a convenient way to send a fatal
+// frame -- and it inherited a contract about what it MEANT. Every row there is
+// a client asking for something and being told no, raised by an engine
+// sentinel. A termination we chose is neither. Left there, either an operator
+// counting refusals counts terminations too, or an invariant that holds for
+// every genuine member gets loosened to admit one that is not.
+func TestDemandReclaimed_ItsOutcomeIsNotAHeldObjectCondition(t *testing.T) {
+	for _, row := range heldObjectRegister() {
+		if row.identity == OutcomeDemandReclaimed {
+			t.Error("demand reclamation is back in the held-object register; it is not a " +
+				"condition a client's statements or portals produced, and it is not a refusal")
+		}
+	}
+	for _, row := range heldObjectReserved() {
+		if row.identity == OutcomeDemandReclaimed {
+			t.Error("demand reclamation is in the held-object RESERVED table, which is for " +
+				"object conditions awaiting a producer; it has a producer and is not one")
+		}
+	}
+
+	// Its own producer declares it, exactly once, as a Control.
+	var found int
+	for _, reg := range Outcomes() {
+		if reg.Producer != ProducerDemandReclamation {
+			continue
+		}
+		for _, d := range reg.Outcomes {
+			if string(d.ID) != OutcomeDemandReclaimed {
+				continue
+			}
+			found++
+			if d.Kind != outcome.Control {
+				t.Errorf("declared %s, want Control: nobody was refused, a session was ended", d.Kind)
+			}
+			if d.Charge != outcome.NotApplicable {
+				t.Errorf("charged %s, want NotApplicable: the session is long past every "+
+					"accept-time budget, so no per-source counter is in reach", d.Charge)
+			}
+		}
+	}
+	if found != 1 {
+		t.Errorf("its producer declares the outcome %d times, want exactly 1", found)
 	}
 }

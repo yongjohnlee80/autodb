@@ -305,6 +305,11 @@ func Outcomes() []outcome.Registration {
 		// make this manifest claim a path the code does not have, and this
 		// manifest is what answers "what can happen in this phase".
 		{Producer: ProducerHeldObjects, Outcomes: heldObjectDecls()},
+		// ENDING A SESSION IS ITS OWN PRODUCER. It is not a held-object
+		// condition -- nothing a client's statements or portals produced -- and
+		// it is not a refusal, so it sits beside that register rather than
+		// inside it. See demand_terminal.go.
+		{Producer: ProducerDemandReclamation, Outcomes: demandTerminalDecls()},
 		{Producer: ProducerServe, Outcomes: []outcome.Decl{
 			// The ordinary ending: the client said goodbye, or went away.
 			{ID: OutcomePeerClosed, Kind: outcome.Control, Charge: outcome.None},

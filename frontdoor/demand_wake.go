@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/outcome"
 )
 
 // THE CLIENT'S SOCKET HAS EXACTLY ONE WRITER, AND IT IS THE SESSION LOOP.
@@ -139,13 +140,19 @@ func (l *Listener) endForDemand(ctx context.Context, conn net.Conn, be *pgproto3
 	// read by anything that looks at it as a live budget.
 	_ = conn.SetReadDeadline(time.Time{})
 
-	row, ok := heldObjectRowFor(condDemandReclaimed)
-	if !ok {
-		// UNREACHABLE while the register carries the row, and it fails loudly
-		// rather than ending a session with no explanation, which is the one
-		// outcome this whole path exists to prevent.
+	// ITS OWN ROW, UNDER ITS OWN PRODUCER. Not frameHeldObject: that renders
+	// conditions a session's objects produced, and this is not one of those.
+	row := demandTerminalRow()
+	// OCCURRED UNDER ITS OWN PRODUCER, which is also the check that it is
+	// declared at all.
+	if _, oerr := l.registry().Occur(ProducerDemandReclamation, outcome.ReasonID(row.identity)); oerr != nil {
+		// FAILS CLOSED BEFORE AN UNCLASSIFIED IDENTITY REACHES THE WIRE. A
+		// frame whose outcome nothing declares is one no operator can count
+		// and no manifest describes, and it would be emitted at the exact
+		// moment we owe somebody an explanation.
 		l.onEvent(Event{Kind: "fd.internal", Reason: OutcomeInternalError, Peer: peer,
-			Detail: "demand reclamation has no registered terminal row to render"})
+			Detail: "demand reclamation's terminal outcome is not declared by its producer: " +
+				oerr.Error()})
 		*closeReason = "internal"
 		return nil
 	}
