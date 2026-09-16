@@ -108,11 +108,21 @@ func TestFrontendWeb_WithdrawsAuthAndConnectionActions(t *testing.T) {
 		}
 	}
 	// It still has to be a usable data client: the query and pane actions remain.
-	for _, k := range []rune{'r', 'e', 'q', 't', 'c', 'w', 'u'} {
+	//
+	// `u` USED TO BE IN THIS LIST and is deliberately no longer. It is the user
+	// manager, and core/auth.ListUsers opens with requireAdmin — so for the
+	// non-admin fixture here it was an entry that could only fail, which is the
+	// one thing this menu's rules forbid. It is admin-only now, and its absence
+	// belongs to the role rather than to the frontend this cell is about.
+	for _, k := range []rune{'r', 'e', 'q', 't', 'c', 'w'} {
 		if !web[k] {
 			t.Errorf("the web frontend lost SPC %c; withdrawing auth actions must not "+
 				"strip the data client", k)
 		}
+	}
+	if web['u'] {
+		t.Error("SPC u is offered to a non-admin; ListUsers requires admin, so the " +
+			"entry could only fail")
 	}
 }
 

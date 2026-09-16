@@ -79,6 +79,20 @@ type Model struct {
 	cleartextSeen     bool     // the user dismissed the warning for this session
 	explorerFocused   bool     // last applied cursor styling (focused = cyan)
 	resultsFocused    bool
+	// lastPane is the workspace component focus should return to when the menu
+	// bar gives it up. Recorded on every deliberate pane focus, so a command
+	// invoked from the menu hands the keyboard back to where the operator was
+	// rather than to a bar that is about to close.
+	lastPane tui.Component
+	menu     *widget.Menu // the top bar's menu; nil until New builds it
+	// menuShown is the projection currently applied, so a reprojection that
+	// would change nothing does not disturb an open cascade.
+	menuShown []widget.MenuItemModel
+	// catalog is every command and menu node, validated once at construction.
+	// Projections re-evaluate state; identity and closures are never rebuilt,
+	// because a command that is a different value each time it is read cannot
+	// be compared, cached, or trusted to be the one the user saw.
+	catalog *Catalog
 }
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
@@ -110,7 +124,25 @@ func New(session *Session, notesFor NotesFactory, quit func(), opts ...Option) *
 	dock := tui.NewDock()
 	dock.Pin(tui.DockBottom, m.status)
 	dock.Add(m.outer)
+
+	// AFTER the components exist, because the handlers close over them, and
+	// ONCE, because rebuilding identity per menu opening would make a command
+	// a different value every time it is read. A malformed catalog is a
+	// programming error that must not reach a user as a missing menu row.
+	cat, err := NewCatalog(commandCatalog(), menuNodes())
+	if err != nil {
+		panic("tui: command catalog is malformed: " + err.Error())
+	}
+	m.catalog = cat
+
+	// The bar is built after the catalog because its executor resolves through
+	// it, and pinned to the top of the same dock the status bar is pinned to
+	// the bottom of: OverlayHost > Dock[top bar, fill workspace, bottom status].
+	// The host wraps the whole dock, so a dialog opened from a menu row floats
+	// over the bar as well as the workspace.
+	dock.Pin(tui.DockTop, m.buildMenuBar())
 	m.host = widget.NewOverlayHost(dock)
+
 	return m
 }
 
@@ -120,6 +152,12 @@ func (m *Model) Root() tui.Component { return m }
 func (m *Model) Init(ctx *tui.Context) {
 	m.ctx = ctx
 	ctx.Mount(m.host)
+
+	// The bar has no rows until the catalog is projected for the current state.
+	// Done at mount rather than at construction because the projection asks the
+	// session who is signed in, and a model built before the tree exists cannot
+	// be handed to a widget that is not mounted yet.
+	m.refreshMenuModel()
 
 	tui.SubscribeScoped(ctx, func(ev widget.ModeChangedEvent) {
 		if ev.Owner == m.editor.NodeID() {
@@ -249,6 +287,9 @@ func (m *Model) watchDisconnect() {
 }
 
 func (m *Model) handleStartup(d startupDone) {
+	defer m.refreshMenuModel() // Startup settles the identity and the connection, and does not touch the
+	// status line, so the bar would otherwise keep a pre-login projection.
+
 	m.connecting = false
 	m.running = false
 	// A (re)connect INVALIDATES any in-flight attempt's guard ownership:
@@ -949,16 +990,74 @@ func (m *Model) addConnectionToWorkspace(wsID int64) {
 // --- pane focus & zoom ------------------------------------------------------------
 
 func (m *Model) focusPane(c tui.Component) {
-	// Panels that delegate (the results panel hosts either a table or the
-	// read-only JSON editor) hand focus to the child that draws the
-	// cursor and owns the keys.
+	// THE STABLE OWNER IS REMEMBERED, NOT THE DELEGATE. The results panel hosts
+	// either a table or the read-only JSON editor and swaps between them, which
+	// UNMOUNTS the one that was there — so remembering the delegate leaves a
+	// dead component as the place focus should return to, and the restore
+	// silently does nothing.
+	m.lastPane = c
+	m.ctx.FocusComponent(focusTargetOf(c))
+	m.refreshStatus()
+}
+
+// focusTargetOf resolves a panel that delegates to the child which draws the
+// cursor and owns the keys. Resolved at the moment of use, never cached.
+func focusTargetOf(c tui.Component) tui.Component {
 	if t, ok := c.(interface{ FocusTarget() tui.Component }); ok {
 		if target := t.FocusTarget(); target != nil {
-			c = target
+			return target
 		}
 	}
-	m.ctx.FocusComponent(c)
-	m.refreshStatus()
+	return c
+}
+
+// rememberFocusedPane records which workspace pane currently holds focus.
+//
+// Asked with FocusWithin rather than by comparing components, because focus
+// usually rests on a DESCENDANT — the editor inside its box, the table inside
+// the results panel — and an equality test would never match.
+func (m *Model) rememberFocusedPane() {
+	if m.ctx == nil {
+		return
+	}
+	for _, pane := range []tui.Component{m.editor, m.explorer, m.results} {
+		if pane == nil {
+			continue
+		}
+		if m.ctx.FocusWithin(pane) {
+			m.lastPane = pane
+			return
+		}
+	}
+}
+
+// restoreWorkspaceFocus puts the keyboard back on the pane the operator was
+// using before they reached for the menu.
+//
+// Called BEFORE a menu command runs, not after. widget.Menu invokes the
+// executor first and closes the cascade afterwards, and it never moves focus
+// itself — so a command that opens a dialog while the Menu still holds focus
+// gets the MENU recorded as that dialog's focus-scope return target, and
+// closing the dialog hands the keyboard to a bar that is by then shut and
+// empty. Restoring first makes the workspace the return target instead.
+//
+// Falls back to the editor: it is the pane an operator is in by default, and
+// leaving focus nowhere is worse than putting it somewhere reasonable.
+func (m *Model) restoreWorkspaceFocus() {
+	if m.ctx == nil {
+		return
+	}
+	// Tried in order, because FocusComponent REPORTS FAILURE and ignoring it is
+	// how focus ends up nowhere: the remembered pane, then the editor as the
+	// pane an operator is in by default.
+	for _, cand := range []tui.Component{m.lastPane, m.editor, m.explorer} {
+		if cand == nil {
+			continue
+		}
+		if m.ctx.FocusComponent(focusTargetOf(cand)) {
+			return
+		}
+	}
 }
 
 // movePane implements DIRECTIONAL pane navigation over the layout
@@ -998,7 +1097,39 @@ func (m *Model) movePane(dir rune) {
 }
 
 // zoomToggle maximizes the focused pane along the split chain (req 8).
+// zoomPaneTo focuses a pane and zooms it, which is what a menu leaf labelled
+// "Zoom ▸ Query editor" promises.
+//
+// zoomToggle acts on whatever has FOCUS, so a menu row naming a pane has to
+// move focus there first. Any existing zoom is released before the new one,
+// because the toggle would otherwise read the request as "unzoom" and leave the
+// operator on the pane they asked to enlarge, at its normal size.
+func (m *Model) zoomPaneTo(c tui.Component) {
+	if m.zoomed {
+		m.zoomToggle()
+	}
+	m.focusPane(c)
+	m.zoomToggle()
+}
+
+// zoomOut releases the zoom, and does nothing when nothing is zoomed.
+//
+// Its menu row is DISABLED rather than hidden in that state: the panes exist
+// and none is enlarged, so the command's moment has not come rather than never
+// coming, and hiding it would make the View menu change shape between openings.
+func (m *Model) zoomOut() {
+	if m.zoomed {
+		m.zoomToggle()
+	}
+}
+
 func (m *Model) zoomToggle() {
+	// THE STATE OWNER REPROJECTS. m.zoomed is what decides whether "Zoom out"
+	// is offered, and this is the only function that changes it — so without
+	// this, a mounted Zoom out row stays dimmed after zooming and stays
+	// enabled after unzooming. Deferred so both branches are covered whatever
+	// they return.
+	defer m.refreshMenuModel()
 	if m.zoomed {
 		m.outer.Zoom(widget.PaneNone)
 		m.inner.Zoom(widget.PaneNone)
@@ -1139,6 +1270,11 @@ func (m *Model) serverStatusText() string {
 }
 
 func (m *Model) refreshStatus() {
+	// The bar is chrome too, and every path that refreshes the status line has
+	// changed something. The projection diffs, so this costs nothing when
+	// nothing moved.
+	m.refreshMenuModel()
+
 	// The marker goes on the LEFT, which transient status messages never
 	// overwrite. On the right it would survive exactly until the next query.
 	left := m.cleartextBannerText() + "-- " + m.editor.Mode().String() + " --  " + m.serverStatusText()
@@ -1283,6 +1419,14 @@ func (m *Model) HandleEvent(ev tui.Event) bool {
 		// meant a panel kept its focused color until something else
 		// happened to re-layout (Johno, M6 manual testing).
 		m.applyCursorStyles()
+		// A MOUSE CLICK MOVES FOCUS WITHOUT GOING THROUGH focusPane, so the
+		// remembered owner has to be recovered from where focus actually
+		// landed — otherwise a menu command after a click returns the keyboard
+		// to whichever pane was last reached by keyboard.
+		m.rememberFocusedPane()
+		// A click into a pane means "I am done with the menu". Deliberately
+		// does not move focus: the click already chose where it goes.
+		m.closeMenuOnBlur()
 		return false
 	}
 	return false
@@ -1389,6 +1533,13 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 	if k.Kind == tui.KeyRelease {
 		return false
 	}
+	// THE BAR GETS FIRST REFUSAL, and takes almost nothing: F10, an Alt chord
+	// that names a visible category, and the FINAL Escape that leaves the menu.
+	// Navigation inside an open menu is the widget's, and intercepting it here
+	// would fork the arrow keys between this app and every other consumer.
+	if m.handleMenuKey(k) {
+		return true
+	}
 	ctrl := k.Mods&tui.ModCtrl != 0
 	if m.pendingCtrlW {
 		m.pendingCtrlW = false
@@ -1429,6 +1580,13 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 		switch k.Code {
 		case 'h', 'j', 'k', 'l':
 			m.movePane(k.Code)
+			return true
+		}
+		// ONLY NOW may the bar claim an Alt chord. Pane motion was here first
+		// and Home's mnemonic is H; taking the chord ahead of it silently broke
+		// Alt+h, which an existing cell caught. Every category stays reachable
+		// through F10 and the arrows, so this costs a keystroke, not a feature.
+		if m.handleMenuAlt(k) {
 			return true
 		}
 	}
@@ -1472,91 +1630,19 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 
 // leaderEntries is the single binding table: the leader
 // menu executes it and the help float renders it.
+// leaderEntries is the SPC menu, projected from the command catalog.
+//
+// It used to BE the catalog: one literal list, with the availability rules as
+// conditional appends around it. The declarations moved into tui/commands.go so
+// the top menu bar and the help screen could project the same set, and this
+// became a view. The four rules that list carried are
+// preserved there rather than here — an entry that can only fail is absent,
+// role decides only what is ADVERTISED, a frontend that does not own its
+// session is not offered session commands, and help renders from this data.
+//
+// Behaviour is unchanged with ONE deliberate exception, `u`; see cmdUsers.
 func (m *Model) leaderEntries() []leaderEntry {
-	connLabel, connRun := "disconnect", func() {
-		m.session.Disconnect()
-		m.setStatus("disconnected — SPC x reconnects")
-	}
-	if !m.session.Connected() {
-		connLabel, connRun = "connect", m.reconnect
-	}
-	entries := []leaderEntry{
-		{'r', "run query (selection when active)", m.runQuery},
-		{'R', "run selection only", m.runSelection},
-		{'j', "toggle results table/JSON", m.results.ToggleJSON},
-		{'z', "zoom focused pane (also Ctrl-w z)", m.zoomToggle},
-		{'e', "focus explorer", func() { m.focusPane(m.explorer) }},
-		{'q', "focus query editor", func() { m.focusPane(m.editor) }},
-		{'t', "focus results", func() { m.focusPane(m.results) }},
-		{'n', "new note", m.newNote},
-		{'s', "save note", m.saveNote},
-		{'C', "select the query connection", m.openConnPicker},
-		{'c', "connections…", m.openConnManager},
-		{'w', "workspaces…", m.openWorkspaceManager},
-		{'u', "users…", m.openUserManager},
-		{'i', "my allowed IPs…", func() { m.openUserIPManager(m.session.User().ID, "me") }},
-		{'T', "my access tokens…", func() { m.openPATManager(m.session.User().ID, "me") }},
-		{'H', "script history…", m.openHistory},
-		// The CA CERTIFICATE, and not admin-only: it is public by
-		// construction -- it is the file you hand out -- and every developer
-		// configuring a client needs it. Gating it would mean root couriering
-		// a public file to each of them.
-		{'k', "front-door CA certificate…", m.openCAcert},
-		{'g', "refresh explorer", m.explorer.Reload},
-	}
-	// THE TWO ADMIN SURFACES, offered only to an admin.
-	//
-	// Both carry "(admin)" in their label and both are refused server-side for
-	// anyone else -- so for an editor they were two entries that could only
-	// ever fail, which is exactly what this menu's own rule forbids. An editor
-	// reported finding them and reasonably read reachability as permission.
-	//
-	// The role is presentation only. The server decides: ListAllowedIPs and
-	// ServiceKeyslotStatusFor both resolve the role from the store on every
-	// call, so hiding these changes what is ADVERTISED, never what is allowed.
-	//
-	// `H` (script history) is deliberately NOT here. It is scoped per-user in
-	// core -- an editor sees their own executions, an admin sees all
-	// (core/exec/history.go) -- so it is a working feature for everyone, and
-	// its label carries no "(admin)" marker. Johno ruled it stays.
-	if m.session.IsAdmin() {
-		entries = append(entries,
-			leaderEntry{'I', "ip allowlist (admin)…", m.openAllowlistManager},
-			leaderEntry{'K', "service keyslot (admin)…", m.openKeyslotMenu},
-		)
-	}
-	// Offered only while the warning is up, following this menu's own rule
-	// that an entry which always fails teaches distrust of the menu. The
-	// handler still guards: the state can clear between opening this menu and
-	// choosing from it, since the probe applies on the loop goroutine.
-	if m.cleartextBannerText() != "" {
-		entries = append(entries,
-			leaderEntry{'!', "dismiss the no-TLS warning", m.dismissCleartextWarning})
-	}
-	// Session and connection lifecycle actions belong to a frontend that OWNS its
-	// session. The web frontend shares one connection per user across tabs and does
-	// not authenticate in-App, so login/switch-user and disconnect/reconnect
-	// are withdrawn — a disconnect from one tab would drop the connection the others
-	// are using, and a switch-user would re-key it. Removed from the table, not
-	// shown-and-refused: a menu entry that always fails teaches distrust of the menu.
-	if m.managesOwnAuth() {
-		entries = append(entries,
-			leaderEntry{'L', "login / switch user", m.openLogin},
-			leaderEntry{'x', connLabel, connRun},
-		)
-	}
-	// Only a frontend that can bring the daemon back may offer to take it down.
-	// Removed from the table rather than shown-and-refused: a menu entry that always
-	// fails is a menu entry that teaches the user to distrust the menu.
-	if m.canRestartDaemon() {
-		entries = append(entries, leaderEntry{'X', "restart the server", m.restartServer})
-	}
-	entries = append(entries, []leaderEntry{
-		{'A', "about autodb", m.openAbout},
-		{'?', "help", m.openHelp},
-		{'Q', "quit", m.confirmQuit},
-	}...)
-	return entries
+	return m.catalog.leaderProjection(m)
 }
 
 // confirmQuit asks before ending the session. Both quit paths route through
@@ -1585,8 +1671,15 @@ func (m *Model) openLeaderMenu() { m.openLeader("SPC — commands", m.leaderEntr
 func (m *Model) openHelp() {
 	var sb strings.Builder
 	sb.WriteString("SPC <key> — leader commands\n\n")
-	for _, e := range m.leaderEntries() {
-		fmt.Fprintf(&sb, "  %c   %s\n", e.key, e.label)
+	// PROJECTED, NOT RESTATED. This block is the whole of the command
+	// documentation: the four bindings that used to be repeated further down
+	// with different wording now carry that wording as their own long help, so
+	// each binding appears exactly once and cannot disagree with itself.
+	for _, r := range m.catalog.helpProjection(m) {
+		fmt.Fprintf(&sb, "  %c   %s\n", r.Key, r.Label)
+		if r.Help != "" {
+			fmt.Fprintf(&sb, "        %s\n", r.Help)
+		}
 	}
 	sb.WriteString("\nsearch\n\n")
 	sb.WriteString("  /              search the focused panel (explorer, query, results)\n")
@@ -1596,12 +1689,6 @@ func (m *Model) openHelp() {
 	sb.WriteString("  Alt-h/j/k/l    the same, for a browser: Ctrl-L is the address bar\n")
 	sb.WriteString("  Ctrl-w z       zoom focused pane\n")
 	sb.WriteString("  Ctrl-q         quit (q quits too when nothing consumes it)\n")
-	if m.canRestartDaemon() {
-		sb.WriteString("  SPC X          restart the server (picks up a rebuilt binary)\n")
-	}
-	sb.WriteString("  SPC C          choose which connection the query runs against\n")
-	sb.WriteString("  SPC H          script history (who ran what, when)\n")
-	sb.WriteString("  SPC A          about: build, backend, and where state lives\n")
 	if m.frontend == FrontendWeb {
 		// Criterion 12: an empty explorer must be explicable, and the
 		// explorer pane is ~25 columns and truncates any sentence — so the explanation
@@ -1754,6 +1841,9 @@ func (m *Model) setFrontDoorCleartext(on bool) {
 // and a warning that cannot be closed is a warning that stops being read. It is
 // the daemon banner, not this one, that has to survive being ignored.
 func (m *Model) dismissCleartextWarning() {
+	defer m.refreshMenuModel() // Dismissing the warning withdraws its own command, and this path does not
+	// refresh the status line.
+
 	if !m.cleartextFD {
 		m.setStatus("no cleartext warning to dismiss")
 		return

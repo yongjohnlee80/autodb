@@ -303,7 +303,15 @@ func (m *Model) openForm(title string, fields []formField, onSubmit func([]strin
 type leaderEntry struct {
 	key   rune
 	label string
-	run   func()
+	// run == nil marks a DISABLED row: shown, with its reason already folded
+	// into label, and its key does nothing. A command whose moment has not come
+	// teaches more visible than hidden, and hiding it makes the menu shift under
+	// the operator between openings.
+	//
+	// Encoded as a nil handler rather than a flag so the dozen unkeyed
+	// leaderEntry literals across this package keep compiling; "there is
+	// nothing to run" is also the honest reading of the state.
+	run func()
 }
 
 // leaderMenu is the which-key float: one more keypress executes and
@@ -394,6 +402,12 @@ func leaderResolve(entries []leaderEntry, ev tui.Event) (idx int, dismiss bool) 
 func (l *leaderMenu) HandleEvent(ev tui.Event) bool {
 	idx, dismiss := leaderResolve(l.entries, ev)
 	switch {
+	case idx >= 0 && l.entries[idx].run == nil:
+		// CONSUMED AND REFUSED, and the float STAYS OPEN. Closing on a dead key
+		// would be indistinguishable from having run the command, which is the
+		// one reading a disabled row must never produce. Consumed rather than
+		// ignored so the key does not fall through to whatever is behind.
+		return true
 	case idx >= 0:
 		l.float.Hide()
 		l.entries[idx].run()
