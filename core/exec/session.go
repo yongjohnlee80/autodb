@@ -299,6 +299,9 @@ type sessionRegistry struct {
 	// newTimer builds the server wait's timer, injectable so a cell can expire
 	// a ninety-second wait without waiting ninety seconds. See serverTimer.
 	newTimer func(time.Duration) *time.Timer
+	// hookGivingUp fires after a caller has stopped waiting and before it
+	// leaves the line -- the window in which a grant can still reach it.
+	hookGivingUp func()
 	// hookWaiterQueued fires once a request is in line, so a cell can act on
 	// that fact instead of polling for it.
 	hookWaiterQueued func(seq uint64)

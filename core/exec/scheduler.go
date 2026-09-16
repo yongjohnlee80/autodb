@@ -169,6 +169,14 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 // coming to close — the target would refuse connections it has capacity for,
 // which is the original incident wearing a different hat.
 func (r *sessionRegistry) giveUp(w *admitWaiter, own error) error {
+	if h := r.hookGivingUp; h != nil {
+		// INSIDE THE WINDOW. The caller has stopped waiting but has not yet
+		// left the line, which is the only instant in which a grant can still
+		// reach it -- and therefore the only instant in which the undo below
+		// matters. A cell that cannot stand here has to hope the race lands,
+		// and a race that has to be hoped for is not a test.
+		h()
+	}
 	if r.leaveLine(w) {
 		return own // still queued, so nothing was ever taken
 	}
