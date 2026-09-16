@@ -156,9 +156,22 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 func expectedControls() map[string][3]string {
 	return map[string][3]string{
 		// name: {File, Package, Test}
+		// ---- L6b: demand reclamation ----
+		"demand-is-wired-to-the-scheduler":             {"core/exec/engine.go", "./core/exec/", "TestDemandReclaim_TheEngineWiresItToTheScheduler"},
+		"only-an-untroubled-holder-is-chosen":          {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen"},
+		"predicate-and-reservation-are-one-hold":       {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_NothingCanSlipBetweenJudgingAndClaiming"},
+		"the-longest-silent-holder-is-chosen":          {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_TheLongestSilentHolderIsChosen"},
+		"a-stale-generation-is-refused":                {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_AStaleGenerationCannotEndAReplacementSession"},
+		"a-stale-receive-token-is-refused":             {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_AStaleReceiveTokenIsIgnored"},
+		"no-offer-without-a-knock":                     {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_NoOfferIsIssuedWithoutAKnock"},
+		"the-record-keeps-selection-time-state":        {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandReclaim_AHolderOfObjectsIsEndedAndTheRecordSaysSo"},
+		"the-knock-spares-the-write-deadline":          {"frontdoor/demand_wake.go", "./frontdoor/", "TestDemandKnock_TouchesTheReadDeadlineOnly"},
+		"the-offer-is-retired-at-the-wait":             {"frontdoor/session_loop.go", "./frontdoor/", "TestDrivenDemand_AnIdleClientIsToldBeforeTheConnectionEnds"},
+		"finalisation-is-total":                        {"frontdoor/demand_wake.go", "./frontdoor/", "TestDrivenDemand_AnUndeclaredOutcomeStillReleasesTheLease"},
+		"the-frame-precedes-the-release":               {"frontdoor/demand_wake.go", "./frontdoor/", "TestDrivenDemand_TheReleaseHappensPromptlyAfterTheFlush"},
+		"reclamation-is-a-control-not-a-refusal":       {"frontdoor/demand_terminal.go", "./frontdoor/", "TestDemandReclaimed_ItsOutcomeIsNotAHeldObjectCondition"},
+		"reclamation-is-charged-to-nobody":             {"frontdoor/demand_terminal.go", "./frontdoor/", "TestDemandReclaimed_ItsOutcomeIsNotAHeldObjectCondition"},
 		"serve-line-at-enqueue":                        {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_AnEligibleNewcomerIsServedAtEnqueueTime"},
-		"source-tree-refusal-borrows-its-precondition": {"internal/gatemutation/runner_meta_test.go", "./internal/gatemutation/", "TestRunner_ASourceTreeIsRefused"},
-		"containment-probe-trusts-signal-zero":         {"internal/gatemutation/cmd/mutate/containment_test.go", "./internal/gatemutation/cmd/mutate/", "TestRunBounded_KillsTheWholeProcessTree"},
 		"transaction-bound-is-a-deadline":              {"core/exec/session.go", "./core/exec/", "TestScheduler_AnExpiredTransactionIsNotAReasonToRefuse"},
 		"cancellation-undoes-its-admission":            {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_ACancellationThatLosesToAGrantUndoesTheAdmission"},
 		"line-skips-the-ineligible":                    {"core/exec/scheduler.go", "./core/exec/", "TestScheduler_AFullTargetDoesNotBlockTheRestOfTheLine"},
@@ -182,6 +195,8 @@ func expectedControls() map[string][3]string {
 		"identity-refuses-an-empty-manifest":           {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AnEmptyManifestIsRefused"},
 		"identity-keeps-evidence-outside-the-root":     {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_EvidenceInsideTheRootIsRefused"},
 		"identity-refuses-two-authorities":             {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AManifestWithTwoDigestHeadersIsRefused"},
+		"source-tree-refusal-borrows-its-precondition": {"internal/gatemutation/runner_meta_test.go", "./internal/gatemutation/", "TestRunner_ASourceTreeIsRefused"},
+		"containment-probe-trusts-signal-zero":         {"internal/gatemutation/cmd/mutate/containment_test.go", "./internal/gatemutation/cmd/mutate/", "TestRunBounded_KillsTheWholeProcessTree"},
 	}
 }
 

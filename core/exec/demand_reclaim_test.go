@@ -17,7 +17,17 @@ import (
 // chosen twice, or chosen and then never told.
 
 func demandHolder(id string, userID, connID int64, idleSince time.Time) *session {
-	s := &session{id: SessionID(id), userID: userID, connID: connID, lastUsed: idleSince}
+	// A COMPLETE ENOUGH SESSION TO BE TORN DOWN, not just to be judged.
+	//
+	// Without a context the teardown path nil-derefs, so a control that lets a
+	// reclamation proceed further than it should makes the cell PANIC instead
+	// of failing its assertion -- which the runner classifies as INVALID,
+	// correctly, because a crash proves nothing about the thing being claimed.
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &session{
+		id: SessionID(id), userID: userID, connID: connID, lastUsed: idleSince,
+		ctx: ctx, cancel: cancel,
+	}
 	s.wire = true
 	s.state.Store(int32(sessOpen))
 	s.wake = func() {}
@@ -268,9 +278,17 @@ func TestDemandReclaim_AStaleGenerationCannotEndAReplacementSession(t *testing.T
 		t.Fatal("the replacement reused the generation of the session it replaced — a slow " +
 			"wake would end a session that was never selected")
 	}
+	// ASSERTED AT THE RESOLUTION, NOT THROUGH THE TEARDOWN. What is claimed
+	// here is that the notice does not RESOLVE to the replacement; driving it
+	// through the close as well meant the failing case ran into teardown and
+	// panicked, and a panic says nothing about the claim.
 	e := &Engine{sessions: r}
-	if e.FinishDemandReclaim(context.Background(), "chosen", v.notice.Gen, DemandDelivered) {
-		t.Error("a notice about one session ended the session that replaced it")
+	if _, ok := e.demandTarget("chosen", v.notice.Gen); ok {
+		t.Error("a notice about one session resolved to the session that replaced it, so a " +
+			"slow wake would end somebody who was never selected")
+	}
+	if _, ok := e.demandTarget("chosen", replacement.gen); !ok {
+		t.Error("a notice carrying the replacement's own generation did not resolve to it")
 	}
 	if replacement.get() != sessOpen {
 		t.Error("the replacement session was torn down by a notice that was never about it")
@@ -663,5 +681,55 @@ func TestDemandReclaim_OneRecordCarriesTheFactsAsData(t *testing.T) {
 					got.IdleMS, (45 * time.Minute).Milliseconds())
 			}
 		})
+	}
+}
+
+// THE ENGINE ACTUALLY WIRES DEMAND TO THE SCHEDULER.
+//
+// THIS CELL EXISTS BECAUSE ITS CONTROL CAME BACK GREEN. Setting the engine's
+// reclaimer to nil broke nothing any cell could see: every part of demand
+// reclamation was proved in isolation, and nothing asserted that the scheduler
+// can reach it at all. A feature can be entirely correct and entirely
+// unreachable, which is how the first version of the admission queue shipped
+// as dead code — the same mistake, one layer up.
+func TestDemandReclaim_TheEngineWiresItToTheScheduler(t *testing.T) {
+	e := New(nil, nil)
+	if e.sessions == nil {
+		t.Fatal("the engine has no session registry")
+	}
+	if e.sessions.onDemand == nil {
+		t.Fatal("the engine did not install its reclaimer on the registry, so the scheduler " +
+			"can never ask for a lease back and every part of demand reclamation is correct " +
+			"and unreachable")
+	}
+}
+
+// THE PREDICATE AND THE RESERVATION HAPPEN UNDER ONE HOLD OF THE LOCK.
+//
+// THIS CELL EXISTS BECAUSE ITS CONTROL CAME BACK GREEN TOO. Releasing and
+// retaking the session's mutex between judging it idle and claiming it is
+// invisible unless something actually runs in the gap — so the control proved
+// nothing, and the guarantee rested on reading the code. The hook below is
+// something that runs in the gap: it makes the session busy, exactly as a
+// client's arriving statement would, and a reservation taken anyway is one
+// taken against a session that is no longer idle.
+func TestDemandReclaim_NothingCanSlipBetweenJudgingAndClaiming(t *testing.T) {
+	now := time.Now()
+	s := demandHolder("holder", 1, 7, now.Add(-time.Hour))
+	r := demandRegistry(t, s)
+
+	// Fires while the registry holds this session's lock, if it ever lets go.
+	r.hookDemandJudged = func() {
+		s.busy = true // no lock taken: only reachable if the hold was released
+	}
+
+	v, ok := r.reserveDemandVictim(7, now)
+	if ok {
+		t.Errorf("reserved %q although a statement started between the check and the claim; "+
+			"the session would be terminated after becoming active, which is the one thing "+
+			"the predicate exists to prevent", v.s.id)
+	}
+	if s.get() != sessOpen {
+		t.Error("the holder was left reserved for teardown despite not being reserved")
 	}
 }
