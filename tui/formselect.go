@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/widget"
@@ -179,12 +180,21 @@ func (m *Model) sameIdentity(b *Bound) bool {
 
 // engineItems and roleItems are the two closed vocabularies this product has.
 // They were in field LABELS until now, which is the whole defect.
+
+// engineItems is built from engine.All() rather than from three literals.
+//
+// core/engine owns these names and guards them: a literal here is an engine
+// identity written as text, where a typo is a silent no-match rather than a
+// compile error. Deriving the list also means a FOURTH engine appears in this
+// select by existing, instead of by somebody remembering to add it — which is
+// the same class of omission the select exists to remove from the operator.
 func engineItems() []widget.SelectItem[string] {
-	return []widget.SelectItem[string]{
-		{Label: "postgres", Value: "postgres"},
-		{Label: "mysql", Value: "mysql"},
-		{Label: "sqlite", Value: "sqlite"},
+	names := engine.All()
+	items := make([]widget.SelectItem[string], 0, len(names))
+	for _, n := range names {
+		items = append(items, widget.SelectItem[string]{Label: string(n), Value: string(n)})
 	}
+	return items
 }
 
 func roleItems() []widget.SelectItem[string] {
