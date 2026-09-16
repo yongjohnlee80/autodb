@@ -13,7 +13,11 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/yongjohnlee80/golib/dao"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
+	"github.com/yongjohnlee80/golib/dao/sqlite"
+
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // THE CAUSE MUST NOT BE REACHABLE BY UNWRAPPING, and this is the cell that
@@ -251,5 +255,107 @@ func TestDialFailure_AnExpiredRequestIsNotATargetOutage(t *testing.T) {
 	}
 	if errors.Is(err, ErrDialFailed) {
 		t.Errorf("an expired request is framed as a target outage: %v", err)
+	}
+}
+
+// A CONNECTION BEING DELETED IS ANSWERED WITH ITS OWN SENTINEL, AND COSTS NO
+// ARBITRATION AT ALL.
+//
+// A drain is autodb's own answer about its own record: the operator removed the
+// connection, the answer is settled, and it is actionable — the caller can be
+// told to stop using a connection that is going away. A dial failure is
+// deliberately the opposite: one fixed literal that names nothing, because its
+// text would otherwise describe our topology. Folding the first into the second
+// replaces a fact with "the target could not be reached", and the operator who
+// just ran the delete is told their database is down.
+//
+// THE SENTINEL IS THE MUTATION DETECTOR, not an incidental assertion. The
+// re-arbitration bound wraps whatever error it ends on, so a seam widened back
+// over target resolution cannot return this error unwrapped — the dial-failed
+// assertion below is what reddens when it is.
+func TestAcquireRequestBackend_ADrainKeepsItsOwnSentinel(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
+	if err != nil {
+		t.Fatalf("reading the connection row: %v", err)
+	}
+
+	// Positive control: the acquisition reaches target resolution at all. If
+	// it refused for some other reason the assertions below would pass on an
+	// error that had nothing to do with the drain.
+	if _, terr := f.eng.target(ctx, f.connID, row); terr != nil {
+		t.Fatalf("the target cannot be resolved even without a drain (%v), so this cell "+
+			"observes nothing", terr)
+	}
+	if _, pool := f.eng.beginDraining(f.connID); pool != nil {
+		_ = pool.Close()
+	}
+
+	_, aerr := f.eng.acquireRequestBackend(ctx, &session{}, row)
+	if !errors.Is(aerr, ErrConnectionDraining) {
+		t.Errorf("acquiring a backend for a draining connection returned %v, want the "+
+			"draining sentinel; the caller cannot act on anything else", aerr)
+	}
+	if errors.Is(aerr, ErrDialFailed) {
+		t.Errorf("a draining connection is reported as a dial failure (%v), so the client "+
+			"is told the target is unreachable and the operator's trail records a "+
+			"target outage for a connection they deleted themselves", aerr)
+	}
+	if d, ok := DialFailureOf(aerr); ok {
+		t.Errorf("a draining connection carries a dial failure (%s), which is what puts a "+
+			"target-outage record in the event stream", d.AuditDetail())
+	}
+}
+
+// THE TARGET POOL IS RESOLVED EXACTLY ONCE PER ACQUISITION, AND A FAILURE TO
+// RESOLVE IT IS STILL FRAMED.
+//
+// Two requirements meet here. Resolving the pool is not an arbitration — no
+// permit is sought, nothing is taken from the instance-wide allowance — so
+// doing it twice spends nothing and proves nothing, and it makes the attempt
+// count in the audit a number that no longer means "permits arbitrated for".
+// And a pool that will not open failed at the driver, so its error carries the
+// connection's name and the driver's own text: host, port, database, and the
+// role autodb connects as. The front door publishes an unrecognised error's
+// text, so that one must arrive framed.
+//
+// THE OPEN COUNT IS THE MUTATION DETECTOR. A retry seam widened back over
+// target resolution opens the pool twice, and only this cell sees it: the
+// error's shape is identical either way.
+func TestAcquireRequestBackend_TheTargetIsResolvedOnceAndItsFailureIsFramed(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
+	if err != nil {
+		t.Fatalf("reading the connection row: %v", err)
+	}
+	// Drop any pool creating the connection left cached, or target() answers
+	// from the cache and the driver seam below is never crossed.
+	f.eng.closeTarget(f.connID)
+
+	orig := openSQLite
+	t.Cleanup(func() { openSQLite = orig })
+	opens := 0
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	openSQLite = func(_ context.Context, _, _ string, _ ...sqlite.Option) (dao.DataConn, error) {
+		opens++
+		return nil, refused
+	}
+
+	_, aerr := f.eng.acquireRequestBackend(ctx, &session{}, row)
+	if opens != 1 {
+		t.Errorf("the target pool was opened %d times for one acquisition, want exactly 1; "+
+			"resolving a pool takes no permit, so a second resolution makes the attempt "+
+			"count in the audit mean something other than permits arbitrated for", opens)
+	}
+	d, ok := DialFailureOf(aerr)
+	if !ok {
+		t.Fatalf("a target that would not open returned %v unframed; the front door puts an "+
+			"unrecognised error's text on the wire, and that text names the connection, "+
+			"the host, the port and the database", aerr)
+	}
+	if d.Stage != DialStageConnect {
+		t.Errorf("a refused socket audits as stage %q, want %q", d.Stage, DialStageConnect)
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 
+	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -215,12 +216,29 @@ func dialStageOf(err error) DialStage {
 const dialAttemptsPerRequest = 2
 
 // acquireRequestBackend is the REQUEST-SCOPED backend acquisition, and the one
-// place a dial failure is raised.
+// place a dial failure is raised for a request.
 //
 // It returns the session's existing backend when it has one, so an established
-// session pays nothing here. When it has to acquire, a failure is retried
-// exactly once and then becomes a DialFailure carrying the stage and the raw
-// cause for the audit — never for the wire.
+// session pays nothing here. When it has to acquire, the target pool is
+// resolved FIRST and only the acquisition proper — taking a member and proving
+// that member clean — is retried, exactly once, before becoming a DialFailure
+// carrying the stage and the raw cause for the audit and never for the wire.
+//
+// THE TARGET MUST BE RESOLVED OUTSIDE THE RETRY BOUND, so that an attempt means
+// one thing: one arbitration for one permit. Resolving the pool answers
+// questions that have nothing to do with a permit — whether the connection is
+// being deleted, whether the secret store has been unlocked, whether this
+// process already holds a pool for it. What goes wrong when those sit inside
+// the bound is that a settled answer is asked for twice and then reported as a
+// target outage: an operator reading "2 attempts" is told a backend was
+// arbitrated for twice when no permit was ever sought, and a deleted connection
+// is reported as an unreachable database.
+//
+// THE OBVIOUS ALTERNATIVE — wrapping the whole pin in the bound because it is
+// one function call and reads as one step — is what this replaced, and the
+// reason it is wrong is that the bound exists to ration a scarce instance-wide
+// allowance. A bound that counts work which never touched the allowance is not
+// rationing anything.
 //
 // The retry re-enters the acquisition rather than looping over the dial itself,
 // deliberately: the permit is taken and released inside the driver's dialer, so
@@ -230,9 +248,45 @@ const dialAttemptsPerRequest = 2
 func (e *Engine) acquireRequestBackend(ctx context.Context, s *session,
 	connRow *meta.Connection) (golibpg.PinnedConn, error) {
 
+	if pc := s.pinnedConn(); pc != nil {
+		return pc, nil
+	}
+	target, terr := e.target(ctx, connRow.ID, connRow)
+	if terr != nil {
+		return nil, requestTargetFailure(terr)
+	}
 	return acquireWithReArbitration(ctx, func() (golibpg.PinnedConn, error) {
-		return e.pinWireSession(ctx, s, connRow)
+		return e.pinTargetBackend(ctx, s, target)
 	})
+}
+
+// requestTargetFailure decides what a failure to resolve the target pool IS.
+//
+// AUTODB'S OWN ANSWERS ABOUT A CONNECTION MUST REACH THE CALLER CARRYING THEIR
+// OWN SENTINEL, because every one of them is actionable and a dial failure is
+// deliberately not: the client shape for a dial failure is one fixed literal
+// that names nothing, so folding "this connection is being deleted" or "the
+// secret store is still locked" into it replaces a fact the operator can act on
+// with a uniform "the target could not be reached". The three below are the
+// answers target resolution produces WITHOUT going near a driver, and they are
+// listed rather than inferred because there is nothing in the error itself that
+// distinguishes them.
+//
+// EVERYTHING ELSE HERE CAME OUT OF THE DRIVER AND MUST BE FRAMED, and that is
+// why this is not simply a passthrough. Opening the pool decrypts a DSN and
+// hands it to the driver, and the error that comes back is wrapped with the
+// connection's name and the driver's own text — target host, port, database,
+// and the role autodb connects as. The front door's refusal renderer has a
+// default arm that puts an unrecognised error's text on the wire, so returning
+// that error unframed would publish the install's topology to anyone holding a
+// socket, which is the exact disclosure this file exists to prevent.
+func requestTargetFailure(err error) error {
+	for _, own := range []error{ErrConnectionDraining, auth.ErrLocked, context.Canceled} {
+		if errors.Is(err, own) {
+			return err
+		}
+	}
+	return NewDialFailure(err)
 }
 
 // acquireWithReArbitration applies the bound to any acquisition.

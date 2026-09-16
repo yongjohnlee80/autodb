@@ -715,6 +715,31 @@ func (e *Engine) pinWireSession(ctx context.Context, s *session, connRow *meta.C
 	if err != nil {
 		return nil, err
 	}
+	return e.pinTargetBackend(ctx, s, target)
+}
+
+// pinTargetBackend takes ONE member out of an already-resolved target pool,
+// proves that member is clean, and publishes it on the session.
+//
+// IT IS SPLIT OUT OF pinWireSession BECAUSE IT IS THE ONLY PART OF PINNING THAT
+// COSTS A PERMIT, and the re-arbitration bound a request acquisition applies is
+// a bound on permits. Resolving the pool decides whether the connection is
+// being deleted, whether the secret store is unlocked and whether a pool
+// already exists — none of which is arbitration, and all of which used to be
+// counted as an attempt and retried. What went wrong was an audit trail that
+// said a backend had been arbitrated for twice when no permit had been sought
+// at all.
+//
+// THE OBVIOUS ALTERNATIVE — leaving pinning as one function and bounding the
+// whole of it, since the caller only wants a backend — is what this replaced.
+// One function is convenient; it is not a permit.
+func (e *Engine) pinTargetBackend(ctx context.Context, s *session, target dao.DataConn) (golibpg.PinnedConn, error) {
+	// Re-checked here as well as by the caller: this runs under the
+	// re-arbitration bound, so a second attempt can find the pin another
+	// attempt published while this one was failing.
+	if pc := s.pinnedConn(); pc != nil {
+		return pc, nil
+	}
 	pc, err := golibpg.PinSessionConn(ctx, target)
 	if err != nil {
 		return nil, err
@@ -724,7 +749,24 @@ func (e *Engine) pinWireSession(ctx context.Context, s *session, connRow *meta.C
 	// this backend came from proves nothing about what is on it. Prove it here,
 	// before the session can run anything: see proveCheckoutClean.
 	if cerr := e.proveCheckoutClean(ctx, pc); cerr != nil {
-		return nil, cerr
+		// A BACKEND THIS PACKAGE COULD NOT SANITISE IS NAMED AS A SETTINGS
+		// FAILURE, AND IT IS NAMED EXPLICITLY RATHER THAN CLASSIFIED.
+		//
+		// Nothing in the error itself says "settings": the cause is whatever
+		// the reset step reported, which is ordinary target text that the
+		// stage classifier has no rule for and therefore files as
+		// unclassified. An operator reading "unclassified" learns nothing and
+		// goes looking at the network; the repair for this one is on the
+		// backend's session state, and the trail has to say so. This call site
+		// is the only place that KNOWS which stage was running, which is why
+		// the stage is passed instead of inferred.
+		//
+		// RAISED AFTER THE MEMBER IS DESTROYED, not before. proveCheckoutClean
+		// discards the connection it could not prove, and the ordering is the
+		// point: returning first and destroying later would leave a window in
+		// which a backend nobody could sanitise is still in the pool, and the
+		// next caller would inherit exactly the state this refused to accept.
+		return nil, NewDialFailureAt(DialStageSettings, cerr)
 	}
 	s.mu.Lock()
 	if s.pc != nil { // lost a race that the claim should make impossible; keep the first
