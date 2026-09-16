@@ -491,7 +491,9 @@ func TestDemandReclaim_TheRecordKeepsTheIdleTimeTheDecisionWasMadeOn(t *testing.
 
 	// Everything after selection takes time: the knock, the frame, the flush.
 	clock = at.Add(9 * time.Hour)
-	e.completeDemandReason(s, DemandDelivered)
+	if !e.claimDemandFinalisation(s, DemandDelivered) {
+		t.Fatal("the finalisation claim was refused for a freshly reserved session")
+	}
 
 	got := demandRecord(t, s).IdleMS
 	if want := (30 * time.Minute).Milliseconds(); got != want {
@@ -599,7 +601,9 @@ func TestDemandReclaim_AHolderOfObjectsIsEndedAndTheRecordSaysSo(t *testing.T) {
 				t.Errorf("notice.HeldObjects = %v for %s", got, tc.name)
 			}
 
-			e.completeDemandReason(s, DemandDelivered)
+			if !e.claimDemandFinalisation(s, DemandDelivered) {
+				t.Fatal("the finalisation claim was refused for a freshly reserved session")
+			}
 			if got := demandRecord(t, s).ReclaimState; got != tc.wants {
 				t.Errorf("reclaim_state = %q, want %q", got, tc.wants)
 			}
@@ -646,7 +650,9 @@ func TestDemandReclaim_OneRecordCarriesTheFactsAsData(t *testing.T) {
 			if _, ok := r.reserveDemandVictim(7, now); !ok {
 				t.Fatal("the holder was not reserved")
 			}
-			e.completeDemandReason(s, tc.delivery)
+			if !e.claimDemandFinalisation(s, tc.delivery) {
+				t.Fatal("the finalisation claim was refused for a freshly reserved session")
+			}
 
 			s.mu.Lock()
 			why := s.closeWhy

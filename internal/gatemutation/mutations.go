@@ -563,5 +563,26 @@ func All() []Mutation {
 				"begins between messages, so demand cannot reserve a session over a frame " +
 				"the client had already won and discard it",
 		},
+		{
+			Name: "a-finalisation-is-consumed-not-just-checked", Package: "./core/exec/",
+			File:        "core/exec/demand_reclaim.go",
+			Anchor:      "\ts.demandFinal = false\n",
+			Replacement: "",
+			Test:        "TestDemandFinalisation_ManyCallersPresentingOneNoticeYieldOneOwner",
+			Fails:       "callers were told they owned the teardown",
+			Guarantee: "that one reservation finalises once however many callers present " +
+				"its notice, so one ending is not written twice into the trail and one " +
+				"lease is not released twice",
+		},
+		{
+			Name: "a-finalisation-checks-the-ending-it-claims", Package: "./core/exec/",
+			File:        "core/exec/demand_reclaim.go",
+			Anchor:      "!strings.HasPrefix(s.closeWhy, ReasonDemandReclaimed) {",
+			Replacement: "!strings.HasPrefix(s.closeWhy, \"\") {",
+			Test:        "TestDemandFinalisation_ItIsRefusedAgainstAnEndingItDoesNotOwn",
+			Fails:       "does not own the ending",
+			Guarantee: "that a stale notice cannot write a reclamation over a session an " +
+				"operator or its own client ended, replacing a true record with a false one",
+		},
 	}
 }
