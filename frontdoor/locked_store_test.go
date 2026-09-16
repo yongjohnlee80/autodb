@@ -602,3 +602,72 @@ func awaitEvents(t *testing.T, events func() []Event, kind string, want int,
 		time.Sleep(2 * time.Millisecond)
 	}
 }
+
+// THE CLIENT IS TOLD FIRST AND THE OPERATOR SECOND, AND A CELL THAT SAMPLES
+// THE TRAIL ON THE FRAME'S ARRIVAL IS MEASURING TOO EARLY.
+//
+// WHY THIS IS ITS OWN CELL. The leak cell above used to read the event slice
+// the instant the client had its frame. That passed under ordinary scheduling
+// and failed under -race in a reviewer's run -- green here, red there, looking
+// like a product defect rather than a test that sampled too early. Making it
+// wait fixes the symptom; only this cell states WHY the wait is correct rather
+// than a sleep bolted on until the flake stopped.
+//
+// THIS CELL WAS ALSO WRITTEN ONCE BEFORE AND LOST. A later edit that
+// regenerated the helper block below sliced the file at the helper's comment
+// and replaced everything after it, taking this cell with it -- and it had
+// already been reported as evidence. Nothing noticed until the focused gate
+// was made to assert that each named cell actually RUNS, which is the argument
+// for anchoring those names rather than inferring them from a quiet suite.
+func TestStartupFailure_TheTrailIsWrittenAfterTheClientIsAnswered(t *testing.T) {
+	t.Parallel()
+
+	gate := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(gate) }) }
+
+	f := &fakeAuth{err: exec.NewConfigFailure(exec.ConfigStageCapability, 42,
+		exec.DetailNoDestroy, errors.New("the resolved driver cannot destroy a pinned backend"))}
+	_, events, addr := listenerWith(t, Options{
+		Authn: f, AuthFailuresPerIP: unthrottled, testPostDenialAuditGate: gate,
+	})
+	// Registered AFTER listenerWith so cleanups run LIFO and this unparks the
+	// serving goroutine BEFORE the listener's own cleanup waits on it.
+	t.Cleanup(release)
+
+	tc, fe := startupTo(t, addr, defaultParams())
+	defer tc.Close()
+	if _, err := fe.Receive(); err != nil {
+		t.Fatal(err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "adb_pat_aaaaaaaaaa.bbbbbbbb"})
+	if err := fe.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := fe.Receive()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := msg.(*pgproto3.ErrorResponse); !ok {
+		t.Fatalf("got %T, want the startup ErrorResponse", msg)
+	}
+
+	// THE CLIENT HAS ITS ANSWER AND THE TRAIL IS STILL EMPTY. This is what a
+	// cell sampling here would read, and it is empty for a reason rather than
+	// by accident.
+	for _, ev := range events() {
+		if ev.Kind == EventAuthOperational {
+			t.Fatalf("the operational event was written before the client was answered: %+v", ev)
+		}
+	}
+
+	release()
+	detail, seen := awaitOperationalDetail(t, events, 10*time.Second)
+	if seen != 1 {
+		t.Fatalf("after the barrier the operational outcome reached the trail %d time(s), "+
+			"want exactly 1", seen)
+	}
+	if !strings.Contains(detail, "conn=42") {
+		t.Errorf("detail = %q, want the connection id", detail)
+	}
+}
