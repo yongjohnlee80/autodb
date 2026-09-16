@@ -153,6 +153,14 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 		//     mistakes: that one stops a live offer existing without a knock,
 		//     and this one stops a reservation committing against one anyway.
 		eligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil
+		if h := r.hookDemandJudged; h != nil {
+			// INSIDE THE HOLD. A cell uses this to do what an arriving
+			// statement would do, which is the only way to tell a single hold
+			// apart from one that was released and retaken -- the difference
+			// is invisible unless something runs in the gap.
+			h()
+			eligible = eligible && !s.busy
+		}
 		// The reservation is taken INSIDE this same hold. It is the ordinary
 		// close claim, so it also settles ownership against the reaper, an
 		// operator's delete and the client's own disconnect.
@@ -296,11 +304,8 @@ func (e *Engine) RegisterDemandWake(id SessionID, knock func()) {
 // reclamation that another path had already performed, which is how one ending
 // becomes two entries in the trail and two releases of one lease.
 func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint64, delivery DemandDelivery) bool {
-	s, ok := e.sessions.byIDOnly(id)
-	if !ok || s.gen != gen {
-		// A generation that no longer matches is a notice about a session that
-		// has already ended. Declining is what stops it ending whichever
-		// session came after it.
+	s, ok := e.demandTarget(id, gen)
+	if !ok {
 		return false
 	}
 	// THE ONE RECORD OF THIS ENDING IS THE CLOSE'S OWN, AND IT IS COMPLETED
@@ -327,6 +332,24 @@ func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint
 	// the slot is quiesce's to take.
 	e.finishClosing(ctx, s)
 	return true
+}
+
+// demandTarget resolves a notice to the session it was actually about.
+//
+// SEPARATED SO THE REFUSAL CAN BE TESTED WITHOUT A TEARDOWN. The guarantee here
+// is about identity, not about closing: a notice whose generation no longer
+// matches is about a session that has already ended, and honouring it would end
+// whichever session came after it -- disconnecting somebody who was never
+// selected. Proving that through FinishDemandReclaim meant letting the failure
+// case run into the teardown, where a cell either needs a whole Engine or
+// panics; a panic proves nothing about the claim, which is why the runner
+// classifies one as INVALID rather than RED.
+func (e *Engine) demandTarget(id SessionID, gen uint64) (*session, bool) {
+	s, ok := e.sessions.byIDOnly(id)
+	if !ok || s.gen != gen {
+		return nil, false
+	}
+	return s, true
 }
 
 // ReasonDemandReclaimed is the audit identity for a session ended so its lease

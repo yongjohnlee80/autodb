@@ -349,6 +349,9 @@ type sessionRegistry struct {
 	// hookGivingUp fires after a caller has stopped waiting and before it
 	// leaves the line -- the window in which a grant can still reach it.
 	hookGivingUp func()
+	// hookDemandJudged fires while a candidate's lock is held, between the
+	// eligibility check and the reservation, so a cell can act in that window.
+	hookDemandJudged func()
 	// onDemand asks an idle holder on a target to give up its lease, returning
 	// whether one was asked. Installed by the engine, which is the only thing
 	// that can reach a session's owner.

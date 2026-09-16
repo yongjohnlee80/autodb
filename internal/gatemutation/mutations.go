@@ -207,6 +207,152 @@ func All() []Mutation {
 			Guarantee: "that a coordinate drifting out of step with the code is caught rather " +
 				"than discovered later by a downstream walk",
 		},
+		// ---- L6b: demand reclamation ----
+		//
+		// Every control below attacks a path that ENDS SOMEBODY'S SESSION. The
+		// cost of one of these being wrong is not a failed request; it is a
+		// developer disconnected for a reason that was not true, or a lease
+		// held for the life of the process by a session that serves nobody.
+		{
+			Name: "demand-is-wired-to-the-scheduler", Package: "./core/exec/",
+			File:        "core/exec/engine.go",
+			Anchor:      "\te.sessions.onDemand = e.demandReclaim",
+			Replacement: "\te.sessions.onDemand = nil",
+			Test:        "TestDemandReclaim_TheEngineWiresItToTheScheduler",
+			Fails:       "did not install its reclaimer on the registry",
+			Guarantee: "that demand reclamation is reachable from the scheduler at all, " +
+				"without which every part of it is correct and none of it runs",
+		},
+		{
+			Name: "only-an-untroubled-holder-is-chosen", Package: "./core/exec/",
+			File:        "core/exec/demand_reclaim.go",
+			Anchor:      "\t\teligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil",
+			Replacement: "\t\teligible := s.wire",
+			Test:        "TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen",
+			Fails:       "a holder was chosen while",
+			Guarantee: "that a session running a statement, holding a transaction, not " +
+				"listening, or unreachable is never terminated for capacity",
+		},
+		{
+			Name: "predicate-and-reservation-are-one-hold", Package: "./core/exec/",
+			File:        "core/exec/demand_reclaim.go",
+			Anchor:      "\t\treserved := eligible && s.beginCloseLocked(\"\", ReasonDemandReclaimed)",
+			Replacement: "\t\ts.mu.Unlock()\n\t\ts.mu.Lock()\n\t\treserved := eligible && s.beginCloseLocked(\"\", ReasonDemandReclaimed)",
+			Test:        "TestDemandReclaim_NothingCanSlipBetweenJudgingAndClaiming",
+			Fails:       "although a statement started between the check and the claim",
+			Guarantee: "that a session cannot become active between being judged idle and " +
+				"being claimed, and so be terminated after it started work",
+		},
+		{
+			Name: "the-longest-silent-holder-is-chosen", Package: "./core/exec/",
+			File:        "core/exec/demand_reclaim.go",
+			Anchor:      "\t\treturn candidates[i].idleFor(now) > candidates[j].idleFor(now)",
+			Replacement: "\t\treturn candidates[i].idleFor(now) < candidates[j].idleFor(now)",
+			Test:        "TestDemandReclaim_TheLongestSilentHolderIsChosen",
+			Fails:       "want the holder that had been silent longest",
+			Guarantee: "that the session ended is the one whose owner is least likely to " +
+				"notice, rather than somebody who paused for a moment",
+		},
+		{
+			Name: "a-stale-generation-is-refused", Package: "./core/exec/",
+			File:        "core/exec/demand_reclaim.go",
+			Anchor:      "\tif !ok || s.gen != gen {\n\t\treturn nil, false\n\t}",
+			Replacement: "\tif !ok {\n\t\treturn nil, false\n\t}",
+			Test:        "TestDemandReclaim_AStaleGenerationCannotEndAReplacementSession",
+			Fails:       "resolved to the session that replaced it",
+			Guarantee: "that a notice about one session cannot end whichever session replaced " +
+				"it, disconnecting somebody who was never selected",
+		},
+		{
+			Name: "a-stale-receive-token-is-refused", Package: "./core/exec/",
+			File:        "core/exec/demand_reclaim.go",
+			Anchor:      "\tif s.recvToken != token {",
+			Replacement: "\tif false {",
+			Test:        "TestDemandReclaim_AStaleReceiveTokenIsIgnored",
+			Fails:       "a stale token took the notice",
+			Guarantee: "that one read's outcome cannot close a later read's window and consume " +
+				"a notice meant for it",
+		},
+		{
+			Name: "no-offer-without-a-knock", Package: "./core/exec/",
+			File:        "core/exec/demand_reclaim.go",
+			Anchor:      "\tif s.wake == nil {",
+			Replacement: "\tif false {",
+			Test:        "TestDemandReclaim_NoOfferIsIssuedWithoutAKnock",
+			Fails:       "an offer was issued as token",
+			Guarantee: "that a session never advertises itself as reclaimable when nothing " +
+				"can wake its owner, which would strand the lease",
+		},
+		{
+			Name: "the-record-keeps-selection-time-state", Package: "./core/exec/",
+			File:        "core/exec/demand_reclaim.go",
+			Anchor:      "\t\t\ts.demandHeldObjects = s.holdsObjects()",
+			Replacement: "\t\t\ts.demandHeldObjects = false",
+			Test:        "TestDemandReclaim_AHolderOfObjectsIsEndedAndTheRecordSaysSo",
+			Fails:       "notice.HeldObjects = false",
+			Guarantee: "that a holder of objects is recorded as one, so an operator can tell " +
+				"clients leaving statements open from idle connections nobody closed",
+		},
+		{
+			Name: "the-knock-spares-the-write-deadline", Package: "./frontdoor/",
+			File:        "frontdoor/demand_wake.go",
+			Anchor:      "\t\tif err := conn.SetReadDeadline(now().Add(-time.Second)); err != nil {",
+			Replacement: "\t\tif err := conn.SetDeadline(now().Add(-time.Second)); err != nil {",
+			Test:        "TestDemandKnock_TouchesTheReadDeadlineOnly",
+			Fails:       "a blocked Receive is not interrupted",
+			Guarantee: "that waking the owner does not fail the very frame it is waking it to " +
+				"write, turning an explained ending into a silent disconnection",
+		},
+		{
+			Name: "the-offer-is-retired-at-the-wait", Package: "./frontdoor/",
+			File:        "frontdoor/session_loop.go",
+			Anchor:      "\t\tif n, woken := owner.retire(); woken {",
+			Replacement: "\t\tif n, woken := (exec.DemandNotice{}), false; woken {",
+			Test:        "TestDrivenDemand_AnIdleClientIsToldBeforeTheConnectionEnds",
+			Fails:       "want \"57P01\"",
+			Guarantee: "that a notice delivered while the loop waited is acted on, rather than " +
+				"leaving a reserved session with nobody to end it",
+		},
+		{
+			Name: "finalisation-is-total", Package: "./frontdoor/",
+			File:        "frontdoor/demand_wake.go",
+			Anchor:      "\t\to.dr.FinishDemandReclaim(ctx, n.ID, n.Gen, delivery)",
+			Replacement: "\t\tif delivery != exec.DemandNotAttempted {\n\t\t\to.dr.FinishDemandReclaim(ctx, n.ID, n.Gen, delivery)\n\t\t}",
+			Test:        "TestDrivenDemand_AnUndeclaredOutcomeStillReleasesTheLease",
+			Fails:       "the session was never finalised",
+			Guarantee: "that a reserved session is ended on every path, including the one " +
+				"where nothing could be sent -- otherwise its lease is held forever",
+		},
+		{
+			Name: "the-frame-precedes-the-release", Package: "./frontdoor/",
+			File:        "frontdoor/demand_wake.go",
+			Anchor:      "\t\tdelivery = exec.DemandDelivered",
+			Replacement: "\t\tdelivery = exec.DemandFlushFailed",
+			Test:        "TestDrivenDemand_TheReleaseHappensPromptlyAfterTheFlush",
+			Fails:       "though the client was reading",
+			Guarantee: "that the record distinguishes a client that was told from one that " +
+				"was not, which is the only evidence anyone was told at all",
+		},
+		{
+			Name: "reclamation-is-a-control-not-a-refusal", Package: "./frontdoor/",
+			File:        "frontdoor/demand_terminal.go",
+			Anchor:      "\t\tKind:   outcome.Control,",
+			Replacement: "\t\tKind:   outcome.Refusal,",
+			Test:        "TestDemandReclaimed_ItsOutcomeIsNotAHeldObjectCondition",
+			Fails:       "want Control: nobody was refused",
+			Guarantee: "that a session we chose to end is not counted among requests we " +
+				"refused, which are different numbers with different remedies",
+		},
+		{
+			Name: "reclamation-is-charged-to-nobody", Package: "./frontdoor/",
+			File:        "frontdoor/demand_terminal.go",
+			Anchor:      "\t\tCharge: outcome.NotApplicable,",
+			Replacement: "\t\tCharge: outcome.Credential,",
+			Test:        "TestDemandReclaimed_ItsOutcomeIsNotAHeldObjectCondition",
+			Fails:       "want NotApplicable",
+			Guarantee: "that ending somebody's session for capacity never charges their " +
+				"credential throttle, which would ban them for our decision",
+		},
 		{
 			Name: "identity-excludes-git", Package: "./internal/gateidentity/", File: "internal/gateidentity/identity.go",
 			Anchor:      "\t\".git\": true, \"node_modules\": true, \".cache\": true,",
