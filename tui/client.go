@@ -1090,6 +1090,32 @@ func (b *Bound) SetUserRole(ctx context.Context, userID int64, role string) erro
 	return err
 }
 
+// Options reads the signed-in account's preferences. Unknown keys are carried
+// through as stored: a key this build does not recognise belongs to a build
+// that does, and dropping it here is how a downgrade destroys a preference.
+func (b *Bound) Options(ctx context.Context) (map[string]string, error) {
+	res, err := b.authed(ctx, "auth.options_get")
+	if err != nil {
+		return nil, err
+	}
+	m, _ := res.(map[string]any)
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if sv, ok := v.(string); ok {
+			out[k] = sv
+		}
+	}
+	return out, nil
+}
+
+// SetOption writes ONE of the caller's own preferences. The daemon merges it
+// into the stored document under a lock, so a preference changed in another
+// session is not lost by this one.
+func (b *Bound) SetOption(ctx context.Context, key, value string) error {
+	_, err := b.authed(ctx, "auth.option_set", key, value)
+	return err
+}
+
 func (b *Bound) SetUserDisabled(ctx context.Context, userID int64, disabled bool) error {
 	_, err := b.authed(ctx, "auth.user_disable", userID, disabled)
 	return err
