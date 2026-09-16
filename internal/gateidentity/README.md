@@ -39,7 +39,7 @@ describes something else.
 Copy `local.manifest` to the machine that will run the gates, then there:
 
 ```
-go run ./internal/gateidentity/cmd/identity -dir . -against local.manifest
+go run ./internal/gateidentity/cmd/identity -dir . -against ../ledger/local.manifest
 ```
 
 It exits `0` when the trees match, `1` when they do not, and names the files

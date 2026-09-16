@@ -285,21 +285,24 @@ func ParseManifest(r io.Reader) ([]Entry, string, error) {
 		return nil, "", fmt.Errorf("gateidentity: the manifest carries %d digest headers; "+
 			"one of them is not the identity it claims", headers)
 	}
-	if digest != "" && !canonicalDigest(digest) {
+	if digest == "" {
+		return nil, "", errors.New("gateidentity: the manifest carries no digest header, " +
+			"so there is nothing to check a tree against")
+	}
+	if !canonicalDigest(digest) {
 		return nil, "", fmt.Errorf("gateidentity: %q is not a digest", digest)
+	}
+	// EMPTINESS IS REPORTED BEFORE THE BODY IS VERIFIED, and the order is the
+	// difference between a useful error and a misleading one. An empty list
+	// hashes to something, so the digest comparison below would fire first and
+	// report the manifest as EDITED -- sending somebody to look for tampering
+	// when the real fault is that it describes nothing at all.
+	if len(entries) == 0 {
+		return nil, "", errors.New("gateidentity: the manifest lists no files, so it pins nothing")
 	}
 	if declared >= 0 && declared != len(entries) {
 		return nil, "", fmt.Errorf("gateidentity: the manifest says %d files and lists %d; "+
 			"entries have been added or removed since it was written", declared, len(entries))
-	}
-	if len(entries) == 0 {
-		// AN EMPTY MANIFEST CANNOT PIN ANYTHING, and read as "no differences"
-		// it would make the gate pass on any tree at all.
-		return nil, "", errors.New("gateidentity: the manifest lists no files, so it pins nothing")
-	}
-	if digest == "" {
-		return nil, "", errors.New("gateidentity: the manifest carries no digest header, " +
-			"so there is nothing to check a tree against")
 	}
 	if got := DigestOf(entries); got != digest {
 		// THE HEADER IS NOT TAKEN ON TRUST. A body edited under an untouched

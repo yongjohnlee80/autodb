@@ -204,60 +204,91 @@ func TestIdentity_AWorktreeGitFileIsNotPartOfTheFingerprint(t *testing.T) {
 	}
 }
 
-// A MANIFEST IS CHECKED AGAINST ITSELF BEFORE IT IS BELIEVED.
-//
-// THESE ARE FAIL-OPEN CONTROLS. The manifest is the artifact that pins a tree,
-// so it is also the thing worth tampering with: a body edited under an
-// untouched header would have been read as authoritative, and an empty one read
-// as "no differences". Each row below is a manifest that must be REFUSED rather
-// than quietly believed.
-func TestIdentity_AManifestThatCannotBeTrustedIsRefused(t *testing.T) {
-	dir := sampleTree(t)
+// goodManifest is a manifest that honestly describes dir.
+func goodManifest(t *testing.T, dir string) (string, []Entry) {
+	t.Helper()
 	_, entries, err := Digest(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	good := "# digest " + DigestOf(entries) + "\n"
+	body := "# digest " + DigestOf(entries) + "\n"
 	for _, e := range entries {
-		good += e.Sum + " " + e.Mode + " " + e.Path + "\n"
+		body += e.Sum + " " + e.Mode + " " + e.Path + "\n"
 	}
+	return body, entries
+}
 
-	for _, tc := range []struct {
-		name  string
-		body  string
-		wants string
-	}{
-		{
-			name:  "a body edited under an untouched header",
-			body:  strings.Replace(good, entries[0].Sum, strings.Repeat("0", 64), 1),
-			wants: "edited since it was written",
-		},
-		{
-			name:  "no digest header at all",
-			body:  strings.SplitN(good, "\n", 2)[1],
-			wants: "carries no digest",
-		},
-		{
-			name:  "a header with no entries",
-			body:  "# digest " + DigestOf(entries) + "\n",
-			wants: "pins nothing",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := ParseManifest(strings.NewReader(tc.body))
-			if err == nil {
-				t.Fatalf("a manifest with %s was accepted; the artifact that pins the tree "+
-					"is the thing most worth tampering with", tc.name)
-			}
-			if !strings.Contains(err.Error(), tc.wants) {
-				t.Errorf("got %v, want it to say %q", err, tc.wants)
-			}
-		})
+// AN HONEST MANIFEST IS ACCEPTED.
+//
+// THE POSITIVE CONTROL FOR THE THREE REFUSALS BELOW. Without it they could all
+// be satisfied by a parser that refuses everything — a gate that cannot pass
+// rather than one that cannot fail, which is the same uselessness wearing the
+// opposite coat.
+func TestIdentity_AnHonestManifestIsAccepted(t *testing.T) {
+	body, entries := goodManifest(t, sampleTree(t))
+	got, digest, err := ParseManifest(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("an untampered manifest was refused: %v", err)
 	}
+	if len(got) != len(entries) {
+		t.Errorf("parsed %d entries, want %d", len(got), len(entries))
+	}
+	if digest != DigestOf(entries) {
+		t.Error("the parsed digest is not the one the manifest recorded")
+	}
+}
 
-	// And the honest one is still accepted, or the controls above prove nothing.
-	if _, _, err := ParseManifest(strings.NewReader(good)); err != nil {
-		t.Errorf("an untampered manifest was refused: %v", err)
+// A MANIFEST WITH NO DIGEST PINS NOTHING.
+//
+// Accepted, it would be compared against nothing and the check would report
+// success for work it did not do.
+func TestIdentity_AManifestWithNoDigestIsRefused(t *testing.T) {
+	body, _ := goodManifest(t, sampleTree(t))
+	headless := strings.SplitN(body, "\n", 2)[1]
+
+	_, _, err := ParseManifest(strings.NewReader(headless))
+	if err == nil {
+		t.Fatal("a manifest with no digest was accepted; there would be nothing to check a " +
+			"tree against and the gate would pass having compared nothing")
+	}
+	if !strings.Contains(err.Error(), "carries no digest") {
+		t.Errorf("got %v, want it to say the manifest carries no digest", err)
+	}
+}
+
+// A BODY EDITED UNDER AN UNTOUCHED HEADER IS NOT AUTHORITATIVE.
+//
+// The manifest is the artifact that pins a tree, so it is also the thing worth
+// tampering with. Believing the header without re-deriving it from the entries
+// beneath makes the one file nobody checks the one that decides everything.
+func TestIdentity_AManifestWithAnEditedBodyIsRefused(t *testing.T) {
+	dir := sampleTree(t)
+	body, entries := goodManifest(t, dir)
+	tampered := strings.Replace(body, entries[0].Sum, strings.Repeat("0", 64), 1)
+
+	_, _, err := ParseManifest(strings.NewReader(tampered))
+	if err == nil {
+		t.Fatal("a manifest with a body edited under an untouched header was accepted; the " +
+			"artifact that pins the tree is the thing most worth tampering with")
+	}
+	if !strings.Contains(err.Error(), "edited since it was written") {
+		t.Errorf("got %v, want it to say the manifest was edited since it was written", err)
+	}
+}
+
+// AN EMPTY MANIFEST WOULD PASS ANY TREE AT ALL.
+func TestIdentity_AnEmptyManifestIsRefused(t *testing.T) {
+	body, entries := goodManifest(t, sampleTree(t))
+	_ = body
+	headerOnly := "# digest " + DigestOf(entries) + "\n"
+
+	_, _, err := ParseManifest(strings.NewReader(headerOnly))
+	if err == nil {
+		t.Fatal("a manifest listing no files was accepted; read as no-differences it would " +
+			"pass any tree at all")
+	}
+	if !strings.Contains(err.Error(), "pins nothing") {
+		t.Errorf("got %v, want it to say the manifest pins nothing", err)
 	}
 }
 
