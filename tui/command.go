@@ -171,6 +171,10 @@ const (
 type Offering struct {
 	State  OfferState
 	Reason string // non-empty iff State == OfferDisabled
+	// Faulty marks a resolution that revealed a programming error — an Enabled
+	// predicate that refused without saying why. The row is refused either way;
+	// this is what lets a test tell a real refusal from a broken one.
+	Faulty bool
 }
 
 // Command is one thing the TUI can do.
@@ -216,7 +220,16 @@ func (c *Command) offering(m *Model) Offering {
 	if c.Enabled != nil {
 		if ok, reason := c.Enabled(m); !ok {
 			if reason == "" {
-				reason = "unavailable right now"
+				// A FAULT, NOT A DEFAULT. Substituting a friendly string here
+				// hid a broken predicate behind a plausible row and made the
+				// test that checked for it codify the papering-over. The row is
+				// still refused, and it now says WHICH command is wrong so the
+				// fault is findable rather than merely survivable.
+				return Offering{
+					State:  OfferDisabled,
+					Reason: "bug: " + string(c.ID) + " disabled without a reason",
+					Faulty: true,
+				}
 			}
 			return Offering{State: OfferDisabled, Reason: reason}
 		}
@@ -352,6 +365,38 @@ func NewCatalog(cmds []Command, nodes []MenuNode) (*Catalog, error) {
 			}
 		}
 	}
+	// Leaf placements share the sibling namespace with child NODES, so the
+	// collision check has to see both. Checking nodes against nodes only let a
+	// command sit on the same order or hotkey as a submenu beside it, where one
+	// of the two is unreachable by its key and their order is decided by luck.
+	for i := range c.commands {
+		cmd := &c.commands[i]
+		if len(cmd.Menu) > 1 {
+			return nil, fmt.Errorf("command %q declares %d menu placements; one "+
+				"command has one place on the bar, or its rows collide on the id "+
+				"they both carry", cmd.ID, len(cmd.Menu))
+		}
+		for _, mp := range cmd.Menu {
+			s := sibs[mp.Parent]
+			if s == nil {
+				s = &sib{order: map[int]MenuNodeID{}, hotkey: map[rune]MenuNodeID{}}
+				sibs[mp.Parent] = s
+			}
+			if prev, dup := s.order[mp.Order]; dup {
+				return nil, fmt.Errorf("command %q and %q share order %d under %q",
+					cmd.ID, prev, mp.Order, mp.Parent)
+			}
+			s.order[mp.Order] = MenuNodeID(cmd.ID)
+			if mp.Hotkey != 0 {
+				if prev, dup := s.hotkey[mp.Hotkey]; dup {
+					return nil, fmt.Errorf("command %q and %q share hotkey %q under %q",
+						cmd.ID, prev, mp.Hotkey, mp.Parent)
+				}
+				s.hotkey[mp.Hotkey] = MenuNodeID(cmd.ID)
+			}
+		}
+	}
+
 	return c, nil
 }
 

@@ -26,6 +26,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/golib/logger"
 	tuicore "github.com/yongjohnlee80/golib/tui"
+	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
 // barHarness runs a Model in a real App over a TestBackend.
@@ -197,6 +198,62 @@ func (h *barHarness) paneFocused() bool {
 }
 
 func (h *barHarness) screen() string { return h.tb.String() }
+
+// click presses and releases the primary button at a cell.
+func (h *barHarness) click(x, y int) {
+	h.t.Helper()
+	for _, k := range []tuicore.MouseKind{tuicore.MousePress, tuicore.MouseRelease} {
+		if err := h.tb.Inject(tuicore.MouseEvent{
+			Kind: k, Button: tuicore.MouseLeft, X: x, Y: y,
+		}); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	h.settle()
+}
+
+// paneHolding reports which workspace pane holds focus, by name, or "".
+func (h *barHarness) paneHolding() string {
+	var name string
+	h.on(func() {
+		for _, p := range []struct {
+			n string
+			c tuicore.Component
+		}{{"editor", h.m.editor}, {"explorer", h.m.explorer}, {"results", h.m.results}} {
+			if p.c != nil && h.m.ctx.FocusWithin(p.c) {
+				name = p.n
+				return
+			}
+		}
+	})
+	return name
+}
+
+// showResults gives the results panel content.
+//
+// Without it the panel has no table and no JSON view, AcceptsFocus is false by
+// design, and nothing inside it can hold the keyboard — so a cell about
+// returning focus TO results would be asserting against an empty panel rather
+// than against the behaviour.
+func (h *barHarness) showResults() {
+	h.t.Helper()
+	h.on(func() {
+		h.m.results.Show(&ExecResult{
+			Statements: 1, Verb: "SELECT", Class: "rows",
+			Columns: []string{"id", "name"},
+			Rows:    [][]any{{int64(1), "one"}, {int64(2), "two"}},
+		})
+	})
+	h.settle()
+}
+
+// zoomRow is the current Zoom-out row, for the reprojection cells.
+func (h *barHarness) zoomRow() (widget.MenuItemModel, bool) {
+	var row widget.MenuItemModel
+	var ok bool
+	h.on(func() { row, ok = find(h.m.menu.Model(), widget.ItemID(cmdZoomOut)) })
+	return row, ok
+}
 
 // TestTheBarIsDockedAboveTheWorkspace.
 func TestTheBarIsDockedAboveTheWorkspace(t *testing.T) {
@@ -397,5 +454,233 @@ func TestTheBarIsUnreachableWhileADialogIsUp(t *testing.T) {
 	if h.menuActive() {
 		t.Error("F10 reached the bar through a modal float; confinement is the " +
 			"thing that makes a dialog modal")
+	}
+}
+
+// TestTheMountedZoomOutRowFollowsTheZoomState.
+//
+// THE DEFECT: zoomToggle changed m.zoomed without reprojecting, so a MOUNTED
+// Zoom out row stayed dimmed after zooming and stayed enabled after unzooming.
+// The projection cell could not see this — it rebuilds the model — so it takes
+// a running app with the bar already mounted.
+func TestTheMountedZoomOutRowFollowsTheZoomState(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+
+	row, ok := h.zoomRow()
+	if !ok {
+		t.Fatal("Zoom out is not on the mounted bar")
+	}
+	if row.Enabled {
+		t.Fatal("precondition failed: Zoom out is enabled with nothing zoomed")
+	}
+
+	h.on(func() { h.m.zoomToggle() })
+	h.settle()
+	row, _ = h.zoomRow()
+	if !row.Enabled {
+		t.Error("the mounted Zoom out row is still dimmed after zooming; the " +
+			"state changed and the bar did not")
+	}
+
+	h.on(func() { h.m.zoomToggle() })
+	h.settle()
+	row, _ = h.zoomRow()
+	if row.Enabled {
+		t.Error("the mounted Zoom out row is still enabled after unzooming")
+	}
+}
+
+// TestActivatingADisabledRowDoesNothingAndKeepsTheMenuOpen.
+//
+// Upstream closes the cascade only when the executor reports handled, so a
+// dimmed row must refuse — otherwise it looks exactly like a command that ran.
+func TestActivatingADisabledRowDoesNothingAndKeepsTheMenuOpen(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+
+	var ran bool
+	h.on(func() {
+		ran = h.m.runMenuAction(tuicore.ActionInvocation{Action: commandAction{id: cmdZoomOut}})
+	})
+	if ran {
+		t.Error("a dimmed Zoom out was executed")
+	}
+	var zoomed bool
+	h.on(func() { zoomed = h.m.zoomed })
+	if zoomed {
+		t.Error("the refused command changed the zoom state anyway")
+	}
+}
+
+// TestFocusReturnsToEachPaneExactly.
+//
+// The three-pane return matrix. A menu command must hand the keyboard back to
+// the pane the operator came FROM, not to a default.
+func TestFocusReturnsToEachPaneExactly(t *testing.T) {
+	for _, want := range []string{"editor", "explorer", "results"} {
+		t.Run(want, func(t *testing.T) {
+			h := startBar(t, meta.RoleAdmin)
+			if want == "results" {
+				h.showResults()
+			}
+			h.on(func() {
+				switch want {
+				case "editor":
+					h.m.focusPane(h.m.editor)
+				case "explorer":
+					h.m.focusPane(h.m.explorer)
+				case "results":
+					h.m.focusPane(h.m.results)
+				}
+			})
+			h.settle()
+			if got := h.paneHolding(); got != want {
+				t.Fatalf("precondition failed: focus is in %q, want %q", got, want)
+			}
+
+			h.key(tuicore.KeyF10)
+			h.key(tuicore.KeyEscape)
+			if got := h.paneHolding(); got != want {
+				t.Errorf("after a visit to the bar focus is in %q, want %q back", got, want)
+			}
+		})
+	}
+}
+
+// TestTheResultsPanelSurvivesItsOwnSwap.
+//
+// THE DEFECT: focusPane remembered the results panel's DELEGATE — the table or
+// the JSON editor — and swapping between them unmounts the one that was there.
+// The remembered component was then dead, and the restore silently did nothing.
+func TestTheResultsPanelSurvivesItsOwnSwap(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.showResults()
+
+	h.on(func() { h.m.focusPane(h.m.results) })
+	h.settle()
+	if got := h.paneHolding(); got != "results" {
+		t.Fatalf("precondition failed: focus is in %q, want results", got)
+	}
+
+	// Swap the delegate out from under the remembered focus.
+	h.on(func() { h.m.results.ToggleJSON() })
+	h.settle()
+
+	h.key(tuicore.KeyF10)
+	h.key(tuicore.KeyEscape)
+	if got := h.paneHolding(); got != "results" {
+		t.Errorf("focus is in %q after the results panel swapped its child; the "+
+			"remembered target was the child, and it is gone", got)
+	}
+}
+
+// TestAMouseClickBecomesTheReturnTarget.
+//
+// A click moves focus without going through focusPane, so the remembered owner
+// has to be recovered from where focus actually landed — otherwise a menu
+// command after a click returns the keyboard to whichever pane was last reached
+// by KEYBOARD, which is not where the operator is looking.
+func TestAMouseClickBecomesTheReturnTarget(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+
+	h.on(func() { h.m.focusPane(h.m.editor) })
+	h.settle()
+	if got := h.paneHolding(); got != "editor" {
+		t.Fatalf("precondition failed: focus is in %q, want editor", got)
+	}
+
+	// Click into the explorer, which occupies the left column below the bar.
+	h.click(4, 4)
+	if got := h.paneHolding(); got != "explorer" {
+		t.Skipf("the click did not land in the explorer (focus is %q); the "+
+			"fixture's geometry, not the behaviour, is what failed", got)
+	}
+
+	h.key(tuicore.KeyF10)
+	h.key(tuicore.KeyEscape)
+	if got := h.paneHolding(); got != "explorer" {
+		t.Errorf("after a click into the explorer and a visit to the bar, focus "+
+			"returned to %q; the click is where the operator was", got)
+	}
+}
+
+// TestIntermediateEscapeUnwindsOneLevelAndKeepsTheBar.
+//
+// The staged Escape belongs to the widget: the first one closes a submenu, and
+// only the LAST one leaves the bar. Collapsing both into "close everything"
+// would make a mis-keyed submenu cost the whole navigation.
+func TestIntermediateEscapeUnwindsOneLevelAndKeepsTheBar(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+
+	h.alt('v') // View, which has a Zoom submenu
+	if h.openLevels() == 0 {
+		t.Fatal("precondition failed: View did not open")
+	}
+	levels := h.openLevels()
+
+	h.key(tuicore.KeyEscape)
+	if !h.menuActive() {
+		t.Error("the first Escape left the bar entirely; it should unwind one level")
+	}
+	if h.openLevels() >= levels {
+		t.Errorf("the first Escape unwound nothing (levels %d -> %d)",
+			levels, h.openLevels())
+	}
+
+	h.key(tuicore.KeyEscape)
+	if h.menuActive() {
+		t.Error("the final Escape did not leave the bar")
+	}
+}
+
+// TestTabDoesNotStrandFocusInTheBar.
+//
+// The Menu is focusable, so Tab includes it in traversal. What must not happen
+// is Tab leaving the operator somewhere they cannot type: whatever Tab does, a
+// workspace pane or the bar holds the keyboard afterwards, never nothing.
+func TestTabDoesNotStrandFocusInTheBar(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() { h.m.focusPane(h.m.editor) })
+	h.settle()
+
+	for range 6 {
+		h.key(tuicore.KeyTab)
+		if h.paneHolding() == "" && !h.menuActive() {
+			t.Fatalf("Tab left focus in neither a pane nor the bar\n%s", h.screen())
+		}
+	}
+}
+
+// TestADialogOpenedFromTheBarReturnsToTheWorkspace.
+//
+// The end-to-end shape of the focus contract: open a dialog from a menu row,
+// close it, and the keyboard is in the workspace — not on the bar, which is
+// shut by then, and not nowhere.
+func TestADialogOpenedFromTheBarReturnsToTheWorkspace(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() { h.m.focusPane(h.m.explorer) })
+	h.settle()
+
+	// About is a menu row that opens a float.
+	h.on(func() { h.m.runMenuAction(tuicore.ActionInvocation{Action: commandAction{id: cmdAbout}}) })
+	h.settle()
+	var shown int
+	h.on(func() {
+		for _, f := range h.m.floats {
+			if f.f.Shown() {
+				shown++
+			}
+		}
+	})
+	if shown == 0 {
+		t.Fatal("precondition failed: the About dialog did not open")
+	}
+
+	h.key(tuicore.KeyEscape)
+	h.settle()
+	if h.menuActive() {
+		t.Error("closing the dialog put the keyboard on the bar")
+	}
+	if got := h.paneHolding(); got == "" {
+		t.Errorf("closing the dialog left focus nowhere\n%s", h.screen())
 	}
 }

@@ -352,12 +352,16 @@ func (m *Model) refreshMenuModel() {
 	if sameMenuModel(m.menuShown, next) {
 		return
 	}
-	m.menuShown = next
 	if err := m.menu.SetModel(next); err != nil {
 		// A model this code built and the catalog validated should never be
-		// refused. Surfacing it beats a bar that silently stops updating.
+		// refused. Surfacing it beats a bar that silently stops updating — and
+		// the cache is NOT advanced, or a rejected model would be remembered as
+		// applied and every later refresh would diff against something the bar
+		// never showed.
 		m.setError("menu: " + err.Error())
+		return
 	}
+	m.menuShown = next
 }
 
 // sameMenuModel compares two projections on everything a reader can see.

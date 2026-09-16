@@ -990,17 +990,45 @@ func (m *Model) addConnectionToWorkspace(wsID int64) {
 // --- pane focus & zoom ------------------------------------------------------------
 
 func (m *Model) focusPane(c tui.Component) {
-	// Panels that delegate (the results panel hosts either a table or the
-	// read-only JSON editor) hand focus to the child that draws the
-	// cursor and owns the keys.
+	// THE STABLE OWNER IS REMEMBERED, NOT THE DELEGATE. The results panel hosts
+	// either a table or the read-only JSON editor and swaps between them, which
+	// UNMOUNTS the one that was there — so remembering the delegate leaves a
+	// dead component as the place focus should return to, and the restore
+	// silently does nothing.
+	m.lastPane = c
+	m.ctx.FocusComponent(focusTargetOf(c))
+	m.refreshStatus()
+}
+
+// focusTargetOf resolves a panel that delegates to the child which draws the
+// cursor and owns the keys. Resolved at the moment of use, never cached.
+func focusTargetOf(c tui.Component) tui.Component {
 	if t, ok := c.(interface{ FocusTarget() tui.Component }); ok {
 		if target := t.FocusTarget(); target != nil {
-			c = target
+			return target
 		}
 	}
-	m.lastPane = c
-	m.ctx.FocusComponent(c)
-	m.refreshStatus()
+	return c
+}
+
+// rememberFocusedPane records which workspace pane currently holds focus.
+//
+// Asked with FocusWithin rather than by comparing components, because focus
+// usually rests on a DESCENDANT — the editor inside its box, the table inside
+// the results panel — and an equality test would never match.
+func (m *Model) rememberFocusedPane() {
+	if m.ctx == nil {
+		return
+	}
+	for _, pane := range []tui.Component{m.editor, m.explorer, m.results} {
+		if pane == nil {
+			continue
+		}
+		if m.ctx.FocusWithin(pane) {
+			m.lastPane = pane
+			return
+		}
+	}
 }
 
 // restoreWorkspaceFocus puts the keyboard back on the pane the operator was
@@ -1019,14 +1047,17 @@ func (m *Model) restoreWorkspaceFocus() {
 	if m.ctx == nil {
 		return
 	}
-	target := m.lastPane
-	if target == nil {
-		target = m.editor
+	// Tried in order, because FocusComponent REPORTS FAILURE and ignoring it is
+	// how focus ends up nowhere: the remembered pane, then the editor as the
+	// pane an operator is in by default.
+	for _, cand := range []tui.Component{m.lastPane, m.editor, m.explorer} {
+		if cand == nil {
+			continue
+		}
+		if m.ctx.FocusComponent(focusTargetOf(cand)) {
+			return
+		}
 	}
-	if target == nil {
-		return
-	}
-	m.ctx.FocusComponent(target)
 }
 
 // movePane implements DIRECTIONAL pane navigation over the layout
@@ -1093,6 +1124,12 @@ func (m *Model) zoomOut() {
 }
 
 func (m *Model) zoomToggle() {
+	// THE STATE OWNER REPROJECTS. m.zoomed is what decides whether "Zoom out"
+	// is offered, and this is the only function that changes it — so without
+	// this, a mounted Zoom out row stays dimmed after zooming and stays
+	// enabled after unzooming. Deferred so both branches are covered whatever
+	// they return.
+	defer m.refreshMenuModel()
 	if m.zoomed {
 		m.outer.Zoom(widget.PaneNone)
 		m.inner.Zoom(widget.PaneNone)
@@ -1382,6 +1419,11 @@ func (m *Model) HandleEvent(ev tui.Event) bool {
 		// meant a panel kept its focused color until something else
 		// happened to re-layout (Johno, M6 manual testing).
 		m.applyCursorStyles()
+		// A MOUSE CLICK MOVES FOCUS WITHOUT GOING THROUGH focusPane, so the
+		// remembered owner has to be recovered from where focus actually
+		// landed — otherwise a menu command after a click returns the keyboard
+		// to whichever pane was last reached by keyboard.
+		m.rememberFocusedPane()
 		// A click into a pane means "I am done with the menu". Deliberately
 		// does not move focus: the click already chose where it goes.
 		m.closeMenuOnBlur()

@@ -187,20 +187,118 @@ func TestTheThreeStatesResolveStrictestFirst(t *testing.T) {
 	}
 }
 
-// TestADisabledCommandCarriesAReasonEvenIfItsPredicateForgets.
+// TestAPredicateThatRefusesWithoutSayingWhyIsReportedAsAFault.
 //
-// A false Enabled that returns "" is a programming error. It is caught at the
-// boundary and turned into a visible default rather than a blank row, because
-// the row is going on screen either way.
-func TestADisabledCommandCarriesAReasonEvenIfItsPredicateForgets(t *testing.T) {
+// An earlier version substituted a friendly "unavailable right now" here, and
+// the test asserted the substitution — so a broken predicate produced a
+// plausible row and a green cell, which is the papering-over codified. The row
+// is still refused, and the resolution now says WHICH command is wrong and
+// marks itself faulty, so the fault is findable rather than merely survivable.
+func TestAPredicateThatRefusesWithoutSayingWhyIsReportedAsAFault(t *testing.T) {
 	m := &Model{session: NewSession("", nil, nil)}
 	m.session.user = UserInfo{Role: meta.RoleAdmin}
-	c := Command{Run: func(*Model) {}, Enabled: func(*Model) (bool, string) { return false, "" }}
+	c := Command{
+		ID: "probe.mute", Run: func(*Model) {},
+		Enabled: func(*Model) (bool, string) { return false, "" },
+	}
 	off := c.offering(m)
 	if off.State != OfferDisabled {
 		t.Fatalf("state = %d, want disabled", off.State)
 	}
-	if off.Reason == "" {
-		t.Error("an empty reason reached the surface")
+	if !off.Faulty {
+		t.Error("a predicate that refused without a reason was not marked faulty")
+	}
+	if !strings.Contains(off.Reason, "probe.mute") {
+		t.Errorf("the reason %q does not name the command, so the bug is not "+
+			"findable from the screen", off.Reason)
+	}
+	if c.offered(m) {
+		t.Error("a faulty refusal is still offered for activation")
+	}
+
+	// THE CONTROL: a predicate that DOES give a reason is an ordinary refusal
+	// and must not be marked faulty, or the flag means nothing.
+	ok := Command{
+		ID: "probe.ok", Run: func(*Model) {},
+		Enabled: func(*Model) (bool, string) { return false, "not yet" },
+	}
+	if got := ok.offering(m); got.Faulty || got.Reason != "not yet" {
+		t.Errorf("an ordinary refusal came back faulty=%v reason=%q", got.Faulty, got.Reason)
+	}
+}
+
+// TestValidationRefusesSiblingCollisionsAcrossNodesAndLeaves.
+//
+// Child nodes and command placements share ONE sibling namespace. Checking
+// nodes against nodes only let a command sit on the same order or hotkey as a
+// submenu beside it: one of the two is then unreachable by its key, and which
+// comes first is decided by luck.
+func TestValidationRefusesSiblingCollisionsAcrossNodesAndLeaves(t *testing.T) {
+	nodes := []MenuNode{
+		{ID: "top", Label: "Top", Order: 10},
+		{ID: "sub", Parent: "top", Label: "Sub", Hotkey: 'S', Order: 10},
+	}
+	base := func() []Command {
+		return []Command{{
+			ID: "a", Run: func(*Model) {},
+			Menu: []MenuProjection{{Parent: "top", Label: "A", Hotkey: 'A', Order: 20}},
+		}}
+	}
+	// The control: no collision, so the shape is otherwise valid.
+	if _, err := NewCatalog(base(), nodes); err != nil {
+		t.Fatalf("precondition failed: %v", err)
+	}
+
+	t.Run("a leaf on a node's order", func(t *testing.T) {
+		c := base()
+		c[0].Menu[0].Order = 10 // same as "sub"
+		if _, err := NewCatalog(c, nodes); err == nil {
+			t.Error("a command and a submenu share an order under one parent")
+		}
+	})
+	t.Run("a leaf on a node's hotkey", func(t *testing.T) {
+		c := base()
+		c[0].Menu[0].Hotkey = 'S' // same as "sub"
+		if _, err := NewCatalog(c, nodes); err == nil {
+			t.Error("a command and a submenu share a hotkey under one parent")
+		}
+	})
+	t.Run("two leaves on one order", func(t *testing.T) {
+		c := append(base(), Command{
+			ID: "b", Run: func(*Model) {},
+			Menu: []MenuProjection{{Parent: "top", Label: "B", Hotkey: 'B', Order: 20}},
+		})
+		if _, err := NewCatalog(c, nodes); err == nil {
+			t.Error("two commands share an order under one parent")
+		}
+	})
+	t.Run("more than one placement per command", func(t *testing.T) {
+		c := base()
+		c[0].Menu = append(c[0].Menu, MenuProjection{
+			Parent: "sub", Label: "A again", Order: 10,
+		})
+		if _, err := NewCatalog(c, nodes); err == nil {
+			t.Error("a command with two placements was accepted; both rows would " +
+				"carry the same id")
+		}
+	})
+}
+
+// TestARejectedModelIsNotRememberedAsApplied.
+//
+// menuShown is the diff's baseline. Caching it before SetModel succeeded meant
+// a refused model was remembered as shown, and every later refresh diffed
+// against something the bar had never displayed — so the bar would never
+// recover.
+func TestARejectedModelIsNotRememberedAsApplied(t *testing.T) {
+	m := leaderModelFor(t, leaderState{role: meta.RoleAdmin, frontend: FrontendTerminal})
+	if m.menuShown != nil {
+		t.Fatal("precondition failed: something is already cached")
+	}
+	// No menu is mounted, so refreshMenuModel returns before applying anything
+	// and must leave the cache untouched.
+	m.refreshMenuModel()
+	if m.menuShown != nil {
+		t.Error("a projection was cached although none was applied")
 	}
 }
