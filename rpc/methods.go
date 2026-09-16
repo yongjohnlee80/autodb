@@ -568,6 +568,48 @@ func (s *Server) register() {
 		}
 		return id, nil
 	})
+	// --- auth: the caller's own preferences (no admin gate: your own account) ---
+	s.rpc.Handle("auth.options_get", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		opts, err := s.auth.UserOptions(ctx, token)
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		// Widened to any: the wire encoder has no view of map[string]string,
+		// and the TUI reads it back key by key.
+		out := make(map[string]any, len(opts))
+		for k, v := range opts {
+			out[k] = v
+		}
+		return out, nil
+	})
+	s.rpc.Handle("auth.option_set", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		key, err := argStr(req.Params, 1, "key")
+		if err != nil {
+			return nil, err
+		}
+		value, err := argStr(req.Params, 2, "value")
+		if err != nil {
+			return nil, err
+		}
+		if err := s.auth.SetUserOption(ctx, token, key, value, peerIP(req)); err != nil {
+			return nil, wireErr(err)
+		}
+		return true, nil
+	})
 	s.rpc.Handle("auth.user_role", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
