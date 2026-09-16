@@ -72,6 +72,13 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 	var seg segmentLane
 	defer seg.release(l)
 
+	// THE MAILBOX IS CREATED AND READ HERE AND NOWHERE ELSE. It is how the
+	// engine asks this session to give up its connection for somebody who is
+	// waiting; the engine posts and knocks, and every byte the client sees is
+	// still written by this loop. See frontdoor/demand_wake.go.
+	mbox := newDemandMailbox(conn, l.now)
+	reclaimer, canReclaim := l.armDemandWake(sess, mbox)
+
 	for {
 		// WHICH BUDGET IS OWED IS A QUESTION ABOUT THE STREAM, and the reader is
 		// the only thing that can answer it — so it is ASKED here rather than
@@ -178,6 +185,14 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			}
 		}
 		if err != nil {
+			// A NOTICE IN THE MAILBOX MEANS THIS READ WAS ENDED BY US, and that
+			// has to be told apart from a client that fell silent. Both arrive
+			// here as a timeout, and treating ours as an idle client would
+			// disconnect somebody with no explanation at the exact moment we
+			// owe them one.
+			if n, woken := mbox.take(); woken && canReclaim {
+				return l.endForDemand(ctx, conn, be, sess, reclaimer, n, peer, closeReason)
+			}
 			return l.endOfRead(conn, be, fr, &seg, err, peer, closeReason)
 		}
 

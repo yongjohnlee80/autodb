@@ -262,6 +262,27 @@ type heldObjectRow struct {
 // namespace it has filled, the frame that asks for too much at once.
 func heldObjectRegister() []heldObjectRow {
 	return []heldObjectRow{
+		// PROMOTED FROM THE RESERVED TABLE IN THE SAME CHANGE AS ITS PRODUCER,
+		// which is the rule that table states: a row without a producer claims
+		// a path the code does not have, and a producer without a row renders
+		// from nothing. The producer is demand reclamation -- see
+		// frontdoor/demand_wake.go and the engine's claimDemandVictim.
+		{
+			condition: condNoMechanism,
+			identity:  OutcomeNoMechanism,
+			sqlState:  sqlStateAdminShutdown,
+			severity:  "FATAL",
+			message: "this connection held prepared statements or portals that cannot be " +
+				"moved to another server connection, and it reached the bound on how long " +
+				"one session may hold one",
+			hint: "reconnect; close prepared statements and portals when you have finished " +
+				"with them so the session can give its server connection back",
+			after: endSession,
+			// Nothing follows a fatal frame: the connection closes, so there
+			// is no segment left to discard and no Sync to discard it to.
+			discard: false,
+			tx:      txNoneOpen,
+		},
 		{
 			condition: condDuplicateStatement,
 			identity:  OutcomeDuplicateStatement,
@@ -404,22 +425,6 @@ func heldObjectRegister() []heldObjectRow {
 // producer added without its row renders from nothing.
 func heldObjectReserved() []heldObjectRow {
 	return []heldObjectRow{
-		{
-			condition: condNoMechanism,
-			identity:  OutcomeNoMechanism,
-			sqlState:  sqlStateAdminShutdown,
-			severity:  "FATAL",
-			message: "this connection held prepared statements or portals that cannot be " +
-				"moved to another server connection, and it reached the bound on how long " +
-				"one session may hold one",
-			hint: "reconnect; close prepared statements and portals when you have finished " +
-				"with them so the session can give its server connection back",
-			after: endSession,
-			// Nothing follows a fatal frame: the connection closes, so there
-			// is no segment left to discard and no Sync to discard it to.
-			discard: false,
-			tx:      txNoneOpen,
-		},
 		{
 			condition: condExecutionState,
 			identity:  OutcomeExecutionState,
