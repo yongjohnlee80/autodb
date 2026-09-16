@@ -780,7 +780,12 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"held-objects", "frontdoor/no-mechanism", outcome.Refusal, outcome.NotApplicable},
 		{"held-objects", "frontdoor/retained-budget", outcome.Refusal, outcome.NotApplicable},
 		{"lifecycle-infrastructure", "internal-error", outcome.Operational, outcome.None},
-		{"serve", "dial-failed", outcome.Operational, outcome.NotApplicable},
+		// A backend that could not be opened for ONE REQUEST. Its own
+		// producer, and deliberately not serve's: the session survives it, so
+		// it is not one of the ways this connection ends. NotApplicable for
+		// the same reason the held-object rows are -- it happens past every
+		// accept-time budget, where no per-source counter is in reach.
+		{"request-acquisition", "frontdoor/dial-failed", outcome.Operational, outcome.NotApplicable},
 		{"serve", "peer-closed", outcome.Control, outcome.None},
 		{"serve", "session-error", outcome.Operational, outcome.None},
 		{"startup", "direct-tls-unsupported", outcome.Refusal, outcome.Protocol},

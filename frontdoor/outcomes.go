@@ -28,6 +28,23 @@ const (
 	ProducerHandshake = outcome.ProducerID("handshake")
 	// ProducerServe is the session loop and its owned teardown.
 	ProducerServe = outcome.ProducerID("serve")
+	// ProducerRequestAcquire is one request's attempt to obtain a backend.
+	//
+	// SEPARATE FROM SERVE, because what it produces is not an ending. Serve's
+	// outcomes are what finishes a CONNECTION -- the peer closed, the session
+	// errored -- and a backend that could not be opened finishes neither: the
+	// request fails, the client is told so, and the same session carries on
+	// and may be served by a different backend on its next statement. Filing a
+	// surviving request's outcome in the terminal connection phase's manifest
+	// makes "what can end this connection" unanswerable by listing something
+	// that does not.
+	//
+	// It is not a lifecycle phase either, and must not be made one. A phase
+	// runs at most once per connection in a fixed order; acquisition runs once
+	// per request, any number of times, on a connection that is already past
+	// every phase. A producer is the right unit for it because membership is
+	// the producer's and nothing about a producer claims to be a phase.
+	ProducerRequestAcquire = outcome.ProducerID("request-acquisition")
 	// ProducerLifecycle owns faults in the RUNNER itself -- a phase that could
 	// not be looked up, an identity nobody declared.
 	//
@@ -73,7 +90,17 @@ const (
 	// stage is a vocabulary the client can count: a caller who could tell
 	// "DNS" from "TLS" from "upstream authentication" apart by the shape of
 	// what came back would be reading our topology off our error surface.
-	OutcomeDialFailed = "dial-failed"
+	//
+	// THIS STRING IS ALSO THE STABLE RULE ID THE WIRE CARRIES IN DETAIL, and
+	// denial.go's DialFailedRule is defined FROM it rather than beside it.
+	// They were two literals that differed -- the declaration said
+	// "dial-failed" and every raise site wrote "frontdoor/dial-failed" -- so
+	// the declared identity was one nothing could reach and the recorded one
+	// was one nothing had declared, and neither half could notice because
+	// neither half ever met the other. One constant is what makes an operator
+	// reading a client's complaint and an operator grepping the trail land on
+	// the same row.
+	OutcomeDialFailed = "frontdoor/dial-failed"
 	// EventDialFailed is the audit kind for one.
 	//
 	// NOT fd.refused. That kind means we considered a caller's work and
@@ -231,27 +258,24 @@ func Outcomes() []outcome.Registration {
 			// The ordinary ending: the client said goodbye, or went away.
 			{ID: OutcomePeerClosed, Kind: outcome.Control, Charge: outcome.None},
 			{ID: OutcomeSessionError, Kind: outcome.Operational, Charge: outcome.None},
-			// A REQUEST'S BACKEND COULD NOT BE OPENED. It belongs to this
-			// producer because the session loop is where it happens and where
-			// it reaches the wire, and it is NOT an ending: the request fails
-			// and the loop carries on serving the same session, which is the
-			// property the whole shape exists to deliver.
-			//
-			// Operational, because it is an ending driven by an error rather
-			// than a decision anyone took. NotApplicable rather than None,
-			// because this happens on an authenticated session that is already
-			// past every accept-time budget: there is no per-source counter in
-			// reach, so "we decided not to charge it" would claim a decision
-			// nobody had the opportunity to make.
-			//
-			// REGISTERED ONLY AFTER BOTH CLIENTS PROVED THE SESSION
-			// SURVIVES. Real pgx and a real pgjdbc program each hit the shape
-			// in the simple AND the extended protocol, kept the connection,
-			// and then ran real work on it against a real target. If a client
-			// is ever found that treats the chosen code as connection-fatal,
-			// the CODE changes and this row stays — the promise is that the
-			// session survives, and the SQLSTATE is whatever keeps that
-			// promise true in real clients.
+		}},
+		// A REQUEST'S BACKEND COULD NOT BE OPENED.
+		//
+		// Operational, because it is driven by an error rather than by a
+		// decision anyone took. NotApplicable rather than None, because this
+		// happens on an authenticated session that is already past every
+		// accept-time budget: there is no per-source counter in reach, so "we
+		// decided not to charge it" would claim a decision nobody had the
+		// opportunity to make.
+		//
+		// REGISTERED ONLY AFTER BOTH CLIENTS PROVED THE SESSION SURVIVES. Real
+		// pgx and a real pgjdbc program each hit the shape in the simple AND
+		// the extended protocol, kept the connection, and then ran real work on
+		// it against a real target. If a client is ever found that treats the
+		// chosen code as connection-fatal, the CODE changes and this row stays
+		// — the promise is that the session survives, and the SQLSTATE is
+		// whatever keeps that promise true in real clients.
+		{Producer: ProducerRequestAcquire, Outcomes: []outcome.Decl{
 			{ID: OutcomeDialFailed, Kind: outcome.Operational, Charge: outcome.NotApplicable},
 		}},
 	}
