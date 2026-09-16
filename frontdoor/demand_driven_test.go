@@ -149,6 +149,11 @@ func drivenSession(t *testing.T, d *demandEngine) (*pgproto3.Frontend, *demandEn
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// CLOSED WHEN THE LOOP ENDS, because that is what the real caller does.
+		// Without it the client's end of the pipe never sees EOF, so a cell
+		// checking that the connection ends waits forever on a close the
+		// harness -- not the product -- failed to perform.
+		defer func() { _ = server.Close() }()
 		loopErr = l.runSession(context.Background(), server, fr, be, goodSession(), "127.0.0.1:5", &closeReason)
 	}()
 	d.loopDone, d.loopReason, d.loopErr = done, &closeReason, &loopErr
@@ -185,6 +190,31 @@ func receiveOrExplain(t *testing.T, fe *pgproto3.Frontend, d *demandEngine) pgpr
 	case <-time.After(5 * time.Second):
 		t.Fatalf("no frame arrived within five seconds%s", d.whyLoopEnded())
 		return nil
+	}
+}
+
+// expectConnectionEnds requires the client's next read to fail, within a bound.
+//
+// BOUNDED LIKE EVERY OTHER WAIT HERE. A bare Receive on a connection that stays
+// open blocks until the whole test binary is killed, and a package-wide timeout
+// panic discards the buffered output of every cell that had already recorded
+// something -- so one uninstrumented wait can destroy the evidence from all the
+// others. That is exactly what it did.
+func expectConnectionEnds(t *testing.T, fe *pgproto3.Frontend, d *demandEngine) {
+	t.Helper()
+	ended := make(chan error, 1)
+	go func() {
+		_, err := fe.Receive()
+		ended <- err
+	}()
+	select {
+	case err := <-ended:
+		if err == nil {
+			t.Error("the connection stayed open after a FATAL frame; a terminal frame " +
+				"followed by a session that carries on is worse than no frame at all")
+		}
+	case <-time.After(5 * time.Second):
+		t.Errorf("the connection did not end after the FATAL frame%s", d.whyLoopEnded())
 	}
 }
 
@@ -244,11 +274,8 @@ func TestDrivenDemand_AnIdleClientIsToldBeforeTheConnectionEnds(t *testing.T) {
 		t.Errorf("hint = %q, want it to name the client's only remedy", errResp.Hint)
 	}
 
-	// AND THEN THE CONNECTION ENDS. A terminal frame followed by a session that
-	// carries on would be worse than no frame at all.
-	if _, err := fe.Receive(); err == nil {
-		t.Error("the connection stayed open after a FATAL frame")
-	}
+	// AND THEN THE CONNECTION ENDS.
+	expectConnectionEnds(t, fe, d)
 	if reason := wait(); reason == "" {
 		t.Error("the loop recorded no close reason")
 	}
