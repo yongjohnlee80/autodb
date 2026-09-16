@@ -154,14 +154,6 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 		//     mistakes: that one stops a live offer existing without a knock,
 		//     and this one stops a reservation committing against one anyway.
 		eligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil
-		if h := r.hookDemandJudged; h != nil {
-			// INSIDE THE HOLD. A cell uses this to do what an arriving
-			// statement would do, which is the only way to tell a single hold
-			// apart from one that was released and retaken -- the difference
-			// is invisible unless something runs in the gap.
-			h()
-			eligible = eligible && !s.busy
-		}
 		// The reservation is taken INSIDE this same hold. It is the ordinary
 		// close claim, so it also settles ownership against the reaper, an
 		// operator's delete and the client's own disconnect.

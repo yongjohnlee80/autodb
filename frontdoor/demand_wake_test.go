@@ -75,7 +75,12 @@ func TestDemandKnock_TouchesTheReadDeadlineOnly(t *testing.T) {
 
 	read, write, both, closed := conn.counts()
 	if read != 1 {
-		t.Errorf("the knock set %d read deadlines, want 1 — a blocked Receive is not interrupted", read)
+		// FATAL, BECAUSE THE REST OF THIS CELL INDEXES readSet. It used to be
+		// an Errorf, so a knock that set no read deadline reached readSet[0]
+		// and PANICKED -- which the mutation runner scores INVALID, not red.
+		// The cell had already said the right thing and then destroyed its own
+		// verdict two lines later.
+		t.Fatalf("the knock set %d read deadlines, want 1 — a blocked Receive is not interrupted", read)
 	}
 	if write != 0 || both != 0 {
 		t.Errorf("the knock set %d write and %d combined deadlines, want 0 of each — a write "+
