@@ -254,12 +254,24 @@ func acquireWithReArbitration(ctx context.Context,
 			return pc, nil
 		}
 		last = err
-		// A CANCELLED OR EXPIRED REQUEST IS NOT A FAILING TARGET. Retrying one
-		// would spend a second permit on work the caller has already stopped
-		// waiting for, and would report the target as unreachable when the only
-		// thing that ended was the request.
+		// A CANCELLED OR EXPIRED REQUEST IS NOT A FAILING TARGET, AND IT MUST
+		// LEAVE THIS FUNCTION AS THE CANCELLATION IT IS.
+		//
+		// Two things go wrong if it does not. Retrying spends a second permit
+		// — an instance-wide allowance other sessions are queued for — on work
+		// the caller has already stopped waiting for. Reporting it as a dial
+		// failure is the worse half: a dial failure is rendered to the client
+		// as a target outage and written to the operator's trail as one, so a
+		// client that pressed Ctrl-C manufactures evidence that the database is
+		// unreachable, and somebody goes looking for a network fault that never
+		// existed.
+		//
+		// THE OBVIOUS ALTERNATIVE — stopping the retry here and letting the
+		// wrap below run anyway — is what this replaced. It fixes the permit
+		// half and leaves the false outage, which is the half the operator
+		// actually reads.
 		if ctx.Err() != nil {
-			break
+			return nil, requestAbandoned(ctx)
 		}
 	}
 	if d, ok := DialFailureOf(last); ok {
@@ -269,4 +281,21 @@ func acquireWithReArbitration(ctx context.Context,
 	f := NewDialFailure(last)
 	f.Attempts = made
 	return nil, f
+}
+
+// requestAbandoned is why the request ended, for a caller that stopped waiting.
+//
+// IT PREFERS THE CAUSE A CALLER ATTACHED over the bare sentinel, because a
+// front door that cancels a request for a reason of its own — a lease that
+// expired, a session that was closed underneath the statement — has already
+// written that reason down, and returning context.Canceled instead would throw
+// away the only description of what actually happened. A context cancelled
+// without a cause reports the sentinel, which is what context.Cause does on its
+// own; the explicit fallback is there for a context whose Done is closed but
+// which is not one this package derived.
+func requestAbandoned(ctx context.Context) error {
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	return ctx.Err()
 }

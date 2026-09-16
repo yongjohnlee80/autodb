@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -143,11 +144,28 @@ func TestDialFailure_OneReArbitrationMaximum(t *testing.T) {
 	}
 }
 
-// A REQUEST THE CALLER HAS ALREADY ABANDONED IS NOT RETRIED. Spending a second
-// permit on work nobody is waiting for takes capacity from a session that is,
-// and it would report the target as unreachable when the only thing that ended
-// was the request.
-func TestDialFailure_ACancelledRequestIsNotReArbitrated(t *testing.T) {
+// A REQUEST THE CALLER HAS ALREADY ABANDONED IS NOT A TARGET OUTAGE.
+//
+// Two separate things must hold, and the second is the one this cell exists
+// for. The request is not re-arbitrated, because spending a second permit — an
+// instance-wide allowance other sessions are queued for — on work nobody is
+// waiting for takes capacity from a session that is. And the error that comes
+// back IS the cancellation, not a dial failure wearing one as its cause.
+//
+// What goes wrong when the second half is missing is entirely on the operator's
+// side, which is why it survived so long: the retry stops, so nothing looks
+// wrong from the client's seat, and meanwhile every client that presses Ctrl-C
+// writes a target-outage event and a target-outage frame. An operator watching
+// that trail sees a database that cannot be reached and goes hunting a network
+// fault that never existed.
+//
+// THE TWO PREDICATES ASSERTED HERE ARE THE ONES THE FRONT DOOR ACTUALLY ASKS.
+// DialFailureOf is what decides whether the event stream gets a dial-failed
+// record instead of an ordinary refusal, and errors.Is against the sentinel is
+// what selects the retryable target-failure frame and its fixed literal. An
+// error that answers no to both cannot produce either, so proving these two is
+// proving the acceptance rather than approximating it.
+func TestDialFailure_ACancelledRequestIsNotATargetOutage(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -156,16 +174,82 @@ func TestDialFailure_ACancelledRequestIsNotReArbitrated(t *testing.T) {
 	attempts := 0
 	_, err := acquireWithReArbitration(ctx, func() (golibpg.PinnedConn, error) {
 		attempts++
-		return nil, context.Canceled
+		// A REAL DIAL ERROR, not context.Canceled. If the attempt returned the
+		// cancellation itself, a wrap that was still happening would produce a
+		// failure whose cause answered errors.Is for context.Canceled through
+		// no mechanism of this function's, and the cell would pass while the
+		// contradiction stood.
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
 	})
 	if attempts != 1 {
 		t.Errorf("an abandoned request was dialled %d times, want 1", attempts)
 	}
-	d, ok := DialFailureOf(err)
-	if !ok {
-		t.Fatalf("the acquisition returned %v, want a dial failure", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("a cancelled request returned %v, want an error that answers for "+
+			"context.Canceled — the caller stopped waiting and that is what happened", err)
 	}
-	if d.Attempts != 1 {
-		t.Errorf("the failure reports %d attempts, want 1", d.Attempts)
+	if errors.Is(err, ErrDialFailed) {
+		t.Errorf("a cancelled request answers for the dial-failed sentinel, so the front "+
+			"door renders it as a retryable target failure and tells the client the "+
+			"database is unreachable: %v", err)
+	}
+	if d, ok := DialFailureOf(err); ok {
+		t.Errorf("a cancelled request carries a dial failure (%s), so the front door's "+
+			"event builder writes a target-outage record for work the caller itself "+
+			"stopped", d.AuditDetail())
+	}
+}
+
+// A CANCELLATION CARRYING A CAUSE REPORTS THE CAUSE.
+//
+// A front door that cancels a request for a reason of its own — an expired
+// lease, a session closed underneath the statement — has already written that
+// reason down. Returning the bare sentinel would throw away the only
+// description of what actually happened, and the operator would be left with
+// "canceled" for every one of them.
+func TestDialFailure_ACancellationReportsTheCauseTheCallerAttached(t *testing.T) {
+	t.Parallel()
+
+	reason := errors.New("the session was closed while the statement was in flight")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(reason)
+
+	_, err := acquireWithReArbitration(ctx, func() (golibpg.PinnedConn, error) {
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	})
+	if !errors.Is(err, reason) {
+		t.Errorf("the acquisition returned %v, want the cause the caller attached", err)
+	}
+	if errors.Is(err, ErrDialFailed) {
+		t.Errorf("a cancellation with a cause is still framed as a target outage: %v", err)
+	}
+}
+
+// AN EXPIRED REQUEST IS THE SAME CASE AS A CANCELLED ONE.
+//
+// A deadline that passed is the caller's clock running out, not the target
+// failing to answer — and the stage classifier files context.DeadlineExceeded
+// as "connect", so a deadline that reached the wrap below would be reported as
+// a transport that would not open. That is a fact about our topology that is
+// simply untrue, and an operator would go and test a socket that is healthy.
+func TestDialFailure_AnExpiredRequestIsNotATargetOutage(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	attempts := 0
+	_, err := acquireWithReArbitration(ctx, func() (golibpg.PinnedConn, error) {
+		attempts++
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	})
+	if attempts != 1 {
+		t.Errorf("an expired request was dialled %d times, want 1", attempts)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("an expired request returned %v, want context.DeadlineExceeded", err)
+	}
+	if errors.Is(err, ErrDialFailed) {
+		t.Errorf("an expired request is framed as a target outage: %v", err)
 	}
 }
