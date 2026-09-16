@@ -233,7 +233,7 @@ func (h *barHarness) dismissOneFloat() {
 		var shown int
 		h.on(func() {
 			for _, f := range h.m.floats {
-				if f.f.Shown() {
+				if f.o.Shown() {
 					shown++
 				}
 			}
@@ -475,7 +475,7 @@ func TestTheBarIsUnreachableWhileADialogIsUp(t *testing.T) {
 	var shown int
 	h.on(func() {
 		for _, f := range h.m.floats {
-			if f.f.Shown() {
+			if f.o.Shown() {
 				shown++
 			}
 		}
@@ -783,7 +783,7 @@ func TestADialogOpenedFromTheBarReturnsToItsOriginPane(t *testing.T) {
 			var shown int
 			h.on(func() {
 				for _, f := range h.m.floats {
-					if f.f.Shown() {
+					if f.o.Shown() {
 						shown++
 					}
 				}

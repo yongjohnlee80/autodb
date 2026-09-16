@@ -73,7 +73,7 @@ func (m *Model) openFloatOpts(title string, content tui.Component,
 	f := widget.NewFloat(box, opts...)
 	m.host.Attach(f)
 	f.Show()
-	m.floats = append(m.floats, openFloatRef{f: f, body: content, title: title})
+	m.floats = append(m.floats, openOverlayRef{o: f, body: content, title: title})
 	// Remove the layer once dismissed (Float hides itself on Esc; the
 	// ddex-server recipe — layers must not accumulate).
 	var unsub func()
@@ -83,7 +83,7 @@ func (m *Model) openFloatOpts(title string, content tui.Component,
 		}
 		m.host.Stack.Remove(f)
 		for i, o := range m.floats {
-			if o.f == f {
+			if o.o == overlay(f) {
 				m.floats = append(m.floats[:i], m.floats[i+1:]...)
 				break
 			}
@@ -104,7 +104,7 @@ func (m *Model) openFloatOpts(title string, content tui.Component,
 // typed right behind an Esc from being swallowed.
 func (m *Model) modalOpen() bool {
 	for _, f := range m.floats {
-		if f.f.Shown() {
+		if f.o.Shown() {
 			return true
 		}
 	}
@@ -134,10 +134,29 @@ func dismissKey(ev tui.Event) bool {
 	return ok && k.Kind != tui.KeyRelease && k.Text == "q"
 }
 
-// openFloatRef remembers what a float is showing, so `?` can report the
-// keys of whatever currently owns the screen.
-type openFloatRef struct {
-	f     *widget.Float
+// overlay is the part of an open surface the Model has to be able to drive:
+// whether it is up, how to take it down, and which NodeID a DismissEvent will
+// name.
+//
+// It is an INTERFACE because a Modal is not a Float. Everything the Model
+// tracks today is a widget.Float, which satisfies this as it stands; the forms
+// become widget.Modal, which spells the same three operations differently and
+// arrives through an adapter. Without the interface the registry would simply
+// stop seeing the newest surfaces — and nothing would fail, which is the worst
+// shape a regression can take: a reconnect would leave a dialog on screen
+// showing data from a server that is gone, a deferred login prompt would open
+// on top of one, and `?` would report the panel behind it.
+type overlay interface {
+	Shown() bool
+	Hide()
+	NodeID() tui.NodeID
+}
+
+// openOverlayRef remembers what an open surface is showing, so `?` can report
+// the keys of whatever currently owns the screen. Ordered: the slice is
+// append-only and the LAST shown entry is the topmost.
+type openOverlayRef struct {
+	o     overlay
 	body  tui.Component
 	title string
 }

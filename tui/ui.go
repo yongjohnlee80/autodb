@@ -56,7 +56,7 @@ type Model struct {
 	noteDirty         bool
 	noteGen           uint64 // note-load generation; latest open wins
 	zoomed            bool
-	floats            []openFloatRef
+	floats            []openOverlayRef
 	statusMsg         string
 	statusKind        statusKind
 	running           bool
@@ -402,9 +402,9 @@ func (m *Model) promptOrQueue(open func()) {
 // dismissFloats hides every open float (a (re)connect invalidated the
 // state they were built against).
 func (m *Model) dismissFloats() {
-	for _, f := range append([]openFloatRef(nil), m.floats...) {
-		if f.f.Shown() {
-			f.f.Hide()
+	for _, f := range append([]openOverlayRef(nil), m.floats...) {
+		if f.o.Shown() {
+			f.o.Hide()
 		}
 	}
 }
