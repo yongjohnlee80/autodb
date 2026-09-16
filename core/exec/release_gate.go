@@ -36,14 +36,18 @@ import (
 // will ever say so. Uncertainty therefore resolves to discard, including
 // uncertainty this file cannot name yet.
 //
-// WHAT THIS GATE DOES NOT COVER, said plainly so nobody reads more into it: it
-// governs the backends autodb itself pins for a front-door session and later
-// hands back. Statements executed through the ordinary pooled path (conns.go)
-// are given a connection by the driver's own pool and returned to it by the
-// driver, with no seam here; a routine called from such a statement can still
-// change session state on a connection this gate never sees. Closing that is a
-// separate piece of work on the pool's acquire hook, not something to bolt onto
-// the session release path.
+// THE RULE HOLDS ON BOTH KINDS OF HANDBACK, and it has to. A front-door session
+// hands its pinned backend back through this file. An ordinary statement —
+// anything run outside a session — is given a connection by the driver's own
+// pool and returned to it by the driver, with no seam here at all; and a
+// statement can change session state without looking like it does, because a
+// plain SELECT that calls a routine which sets a configuration parameter leaves
+// that parameter behind. Sanitizing only the session path would leave
+// ordinary→ordinary as a cross-developer leak in the same shared pool, so the
+// plan below also runs on the driver's release hook (dsn.go). Both places drive
+// THE SAME plan through THE SAME verdict logic, deliberately: a second
+// implementation would be a second definition of "clean", and the two would
+// drift until one of them was wrong.
 
 // resetStep is ONE kind of state a backend can carry forward, paired with the
 // statement that removes it.
@@ -61,6 +65,21 @@ type resetStep struct {
 	carries string
 	// sql removes that state from the backend.
 	sql string
+	// invalidatesDriverCache marks a step whose effect the DRIVER also mirrors
+	// on its own side, so a transport that keeps such a mirror must carry this
+	// step through the driver's own call rather than straight down the wire.
+	//
+	// Exactly one step is like this, and it is the one that deallocates
+	// prepared statements: pgx caches a prepared statement per connection and
+	// names it from a hash of the SQL text, so a bare DEALLOCATE ALL removes the
+	// server's copy while leaving the driver certain its own still exists. The
+	// next statement with that text then fails on a connection the pool
+	// considers healthy, for a caller who did nothing wrong.
+	//
+	// The flag says WHAT is true of the step, not what any transport should do
+	// about it. The pinned face has no such cache and ignores it; the pooled
+	// runner (dsn.go) is the one that acts on it.
+	invalidatesDriverCache bool
 }
 
 // backendResetPlan is the whole reset, in the order PostgreSQL uses for DISCARD
@@ -74,15 +93,17 @@ type resetStep struct {
 // transaction is ended by the session's own owner before this plan ever runs.
 func backendResetPlan() []resetStep {
 	return []resetStep{
-		{"open cursors and held portals", "CLOSE ALL"},
-		{"a changed session authorization", "SET SESSION AUTHORIZATION DEFAULT"},
-		{"session settings the borrower changed", "RESET ALL"},
-		{"prepared statements, named and unnamed", "DEALLOCATE ALL"},
-		{"LISTEN registrations", "UNLISTEN *"},
-		{"advisory locks held for the life of the backend", "SELECT pg_advisory_unlock_all()"},
-		{"cached plans built under the borrower's settings", "DISCARD PLANS"},
-		{"sequence state cached for currval", "DISCARD SEQUENCES"},
-		{"temporary tables and everything else in the temp schema", "DISCARD TEMP"},
+		{carries: "open cursors and held portals", sql: "CLOSE ALL"},
+		{carries: "a changed session authorization", sql: "SET SESSION AUTHORIZATION DEFAULT"},
+		{carries: "session settings the borrower changed", sql: "RESET ALL"},
+		{carries: "prepared statements, named and unnamed", sql: "DEALLOCATE ALL",
+			invalidatesDriverCache: true},
+		{carries: "LISTEN registrations", sql: "UNLISTEN *"},
+		{carries: "advisory locks held for the life of the backend",
+			sql: "SELECT pg_advisory_unlock_all()"},
+		{carries: "cached plans built under the borrower's settings", sql: "DISCARD PLANS"},
+		{carries: "sequence state cached for currval", sql: "DISCARD SEQUENCES"},
+		{carries: "temporary tables and everything else in the temp schema", sql: "DISCARD TEMP"},
 	}
 }
 
@@ -240,29 +261,58 @@ func (e *Engine) proveBackendClean(ctx context.Context, s *session, pc golibpg.P
 	return e.runBackendReset(ctx, pc)
 }
 
+// backendResetRunner is the whole of what the reset plan needs from a backend:
+// run one statement on it, and report separately the three things that decide
+// the verdict — the transport failing, the target refusing, and the transaction
+// status the backend reports afterwards.
+//
+// It is an interface because the plan has to run on two backends that have
+// nothing else in common: a pinned connection's simple-query face, and the raw
+// connection the driver's pool hands to its release hook. Collapsing those into
+// one type is not possible; writing the plan twice is, and is exactly what must
+// not happen — see the header of this file. So the transport varies and the
+// plan, the order, the timeout, the limb names and the verdict do not.
+type backendResetRunner interface {
+	// runResetStatement carries one step and returns the backend's transaction
+	// status, the server's refusal if it refused, and a transport error if the
+	// wire itself failed. A server refusal is protocol data, not a Go error:
+	// the two mean different things to the verdict and must not be merged.
+	//
+	// It takes the whole step rather than its text because a transport may have
+	// to carry a step DIFFERENTLY — see resetStep.invalidatesDriverCache — and
+	// the decision of how to carry it belongs to the transport, not to the plan.
+	runResetStatement(ctx context.Context, step resetStep) (status byte, targetErr *pgconn.PgError, err error)
+}
+
 // runBackendReset runs the plan and reports the first step that could not be
 // completed. It is shared by the two moments a backend's cleanliness has to be
-// established — when a session gives one up, and when a session takes one — so
-// that "clean" cannot come to mean two different things.
+// established on a PINNED connection — when a session gives one up, and when a
+// session takes one — so that "clean" cannot come to mean two different things.
 func (e *Engine) runBackendReset(ctx context.Context, pc golibpg.PinnedConn) releaseVerdict {
 	sq, ferr := rawFace(pc)
 	if ferr != nil {
 		// Without a simple-query face there is no way to run a reset at all,
-		// so there is no way to prove anything. That is a discard, not an
+		// so there is no way to prove anything. That is a destroy, not an
 		// exemption.
 		return releaseVerdict{limb: releaseLimbFace, detail: ferr.Error()}
 	}
+	return e.runResetPlan(ctx, pinnedResetRunner{e: e, sq: sq})
+}
+
+// runResetPlan is THE reset. Every backend autodb sanitizes goes through this
+// loop, whichever transport carried it.
+//
+// The context is detached from the caller's before the timeout is applied.
+// A reset runs while a session is closing or while the driver is taking a
+// connection back, and in both cases the work that owned the context is already
+// over or already cancelled; inheriting that cancellation would abandon the
+// reset halfway and discard a backend for a reason that has nothing to do with
+// the backend.
+func (e *Engine) runResetPlan(ctx context.Context, r backendResetRunner) releaseVerdict {
 	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backendResetTimeout)
 	defer cancel()
 	for _, step := range e.resetPlan() {
-		var targetErr *pgconn.PgError
-		status, derr := e.sessionSimpleQuery(rctx, sq, sessionSQLAutodb, step.sql,
-			func(m golibpg.ExtendedMessage) error {
-				if m.Kind == "ErrorResponse" && targetErr == nil {
-					targetErr = m.Err
-				}
-				return nil
-			})
+		status, targetErr, derr := r.runResetStatement(rctx, step)
 		switch {
 		case derr != nil:
 			return releaseVerdict{limb: releaseLimbReset,
@@ -283,6 +333,31 @@ func (e *Engine) runBackendReset(ctx context.Context, pc golibpg.PinnedConn) rel
 		}
 	}
 	return releaseVerdict{pooled: true}
+}
+
+// pinnedResetRunner carries the plan over a pinned connection's simple-query
+// face, which is the only face that exists while a session owns the wire.
+type pinnedResetRunner struct {
+	e  *Engine
+	sq golibpg.SimpleQuerier
+}
+
+// runResetStatement carries every step the same way. The pinned face never runs
+// a statement through pgx's high-level machinery, so no driver-side cache can be
+// left disagreeing with the server and the step flag has nothing to change here.
+func (r pinnedResetRunner) runResetStatement(ctx context.Context, step resetStep) (byte, *pgconn.PgError, error) {
+	var targetErr *pgconn.PgError
+	status, err := r.e.sessionSimpleQuery(ctx, r.sq, sessionSQLAutodb, step.sql,
+		func(m golibpg.ExtendedMessage) error {
+			if m.Kind == "ErrorResponse" && targetErr == nil {
+				targetErr = m.Err
+			}
+			return nil
+		})
+	if err != nil {
+		return 0, nil, err
+	}
+	return status, targetErr, nil
 }
 
 // drainWire ends an extended-protocol exchange the client left open.
@@ -365,13 +440,18 @@ func resetPlanWithout(carries string) []resetStep {
 // work on a backend it cannot prove is clean.
 //
 // The release gate alone is not enough, and the reason is the pool this front
-// door shares with everything else autodb runs. An ordinary statement executed
-// outside any session borrows from the SAME pool and is returned to it by the
-// driver, with no seam here and no reset — and a statement can change session
-// state without looking like it does: a plain SELECT that calls a routine which
-// sets a configuration parameter leaves that parameter on the backend, and the
-// next borrower inherits it. A live cell in this package demonstrates exactly
-// that inheritance.
+// door shares with everything else autodb runs. A backend reaches a session
+// from a pool that also serves ordinary statements, connections that were idle
+// across a configuration change, and connections the driver established while
+// this process was doing something else entirely. A live cell in this package
+// demonstrates the inheritance directly.
+//
+// THE RELEASE HOOK DOES NOT MAKE THIS REDUNDANT, which is worth saying because
+// it looks like it should. The hook sanitizes a connection on its way back to
+// the pool; it cannot speak for one that never went through a release this
+// process saw, and a hook that failed silently would leave nothing between a
+// dirty backend and a client session. Proving at checkout is the check that
+// does not depend on any earlier check having run.
 //
 // So a session proves the backend it was handed, rather than trusting where it
 // came from. Failing the proof fails the pin: the client is told the target
