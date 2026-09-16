@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -299,13 +300,28 @@ func TestOpenWireSession_PATNarrowingIsEnforced(t *testing.T) {
 	}
 }
 
-// The lease cap refuses with its OWN audit identity while the wire sees the
-// same denial as everything else (matrix row 2.7, ruling 4).
-func TestOpenWireSession_LeaseCapHasItsOwnAuditIdentity(t *testing.T) {
+// A REQUEST THAT WAITED IS RECORDED AS HAVING WAITED, AND THE CAP THAT HELD IT
+// IS DIAGNOSIS RATHER THAN IDENTITY.
+//
+// This cell used to assert the opposite, and it was right at the time: before
+// the admission queue, a second wire session at the lease cap was refused on
+// arrival and DenyLeaseCap was the whole truth. It is no longer, and the
+// distinction matters to whoever reads the trail. A request that sat in line
+// for the full server wait did not meet a closed door -- it was taken
+// seriously, held, and never reached -- so recording it as an arrival refusal
+// would be a retroactive relabel of something that plainly did happen.
+//
+// The operator's remedy still depends on WHICH cap was in the way, so the cap
+// survives in the audit line rather than being thrown away.
+func TestOpenWireSession_AWaitThatExpiresIsRecordedAsAWaitNotAsACapRefusal(t *testing.T) {
 	t.Parallel()
 	f, _, secret, dbName := wireFixture(t)
 	ctx := context.Background()
 	f.eng.sessions.leaseCap = 1
+	// Expire the wait instead of sitting out ninety real seconds of it.
+	f.eng.sessions.newTimer = func(time.Duration) *time.Timer {
+		return time.NewTimer(20 * time.Millisecond)
+	}
 
 	first, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP)
 	if err != nil {
@@ -315,14 +331,56 @@ func TestOpenWireSession_LeaseCapHasItsOwnAuditIdentity(t *testing.T) {
 	if err == nil {
 		t.Fatal("a second wire session was admitted past a lease cap of 1")
 	}
-	if got := DenialReason(err); got != DenyLeaseCap {
-		t.Errorf("reason = %q, want %q — the operator's remedy for a full target pool differs "+
-			"from a full session cap, so the trail must say which it was", got, DenyLeaseCap)
+	if got := DenialReason(err); got != DenyQueueTimeout {
+		t.Errorf("reason = %q, want %q — the request waited the server's bound and was never "+
+			"reached, and a record saying it was refused on arrival is not true of it",
+			got, DenyQueueTimeout)
 	}
+
 	// Closing the first frees the lease for the next caller.
 	f.eng.CloseWireSession(ctx, first.SessionID, first.UserID, testIP, "test")
 	if _, err := f.eng.OpenWireSession(ctx, secret, "root", dbName, testIP); err != nil {
 		t.Errorf("closing a wire session did not free its lease: %v", err)
+	}
+}
+
+// THE BLOCKING CAP IS REACHABLE ONLY BY ASKING FOR IT.
+//
+// If it were wrapped so that errors.Is could match it, the front door's ordered
+// switch would select the cap arm before the wait arm and the queue-timeout
+// identity would be unreachable in production while still being registered --
+// a manifest entry for something that can never happen.
+func TestAdmissionWait_TheBlockingCapIsDiagnosisAndNotAnIdentity(t *testing.T) {
+	t.Parallel()
+	err := error(&QueueTimeoutError{blockedBy: ErrLeaseCapExceeded})
+
+	if !errors.Is(err, ErrQueueTimeout) {
+		t.Error("an expired wait does not identify as a queue timeout")
+	}
+	if errors.Is(err, ErrLeaseCapExceeded) {
+		t.Error("an expired wait identifies as a lease-cap refusal — an ordered errors.Is " +
+			"switch will select the cap arm and the wait will never be reported")
+	}
+	var qt *QueueTimeoutError
+	if !errors.As(err, &qt) || !errors.Is(qt.BlockedBy(), ErrLeaseCapExceeded) {
+		t.Error("the cap that blocked the request is not reachable for the operator record")
+	}
+}
+
+// The lease cap keeps its own identity where it is still an ARRIVAL refusal:
+// the internal admission path, which has no client to keep waiting and wants
+// the immediate answer.
+func TestAdmitWithLease_AnImmediateCapRefusalKeepsItsOwnIdentity(t *testing.T) {
+	t.Parallel()
+	r := newSessionRegistry(64, 64)
+	r.leaseCap = 1
+	if err := r.admitWithLease(&session{id: "first", userID: 1, connID: 7}, 7, 0); err != nil {
+		t.Fatal(err)
+	}
+	err := r.admitWithLease(&session{id: "second", userID: 2, connID: 7}, 7, 0)
+	if !errors.Is(err, ErrLeaseCapExceeded) {
+		t.Errorf("got %v, want the lease-cap refusal — the operator's remedy for a full "+
+			"target pool differs from one for a full session cap", err)
 	}
 }
 

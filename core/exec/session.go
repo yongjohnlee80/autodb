@@ -296,6 +296,9 @@ type sessionRegistry struct {
 	// now is the clock, injectable so a cell can drive a ninety-second wait
 	// without sleeping through it.
 	now func() time.Time
+	// newTimer builds the server wait's timer, injectable so a cell can expire
+	// a ninety-second wait without waiting ninety seconds. See serverTimer.
+	newTimer func(time.Duration) *time.Timer
 	// hookWaiterQueued fires once a request is in line, so a cell can act on
 	// that fact instead of polling for it.
 	hookWaiterQueued func(seq uint64)

@@ -562,13 +562,23 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		// than being handed the uniform denial that reads as "your credential
 		// is wrong" -- which is what sent a developer hunting a password
 		// problem that did not exist on 2026-09-15.
+		// THE WAIT IS TESTED BEFORE THE CAPS, and the order is the contract
+		// rather than a style choice. A request that waited must not be
+		// recorded as one that was refused on arrival, so the identity that
+		// says it waited has to win before any cap arm can claim it.
+		case errors.Is(rerr, ErrQueueTimeout):
+			var qt *QueueTimeoutError
+			if errors.As(rerr, &qt) && qt.BlockedBy() != nil {
+				// The blocking cap is the operator's remedy, so it goes to the
+				// trail -- and only to the trail. It is not the client's
+				// answer, and it is not an identity anything can match on.
+				e.auditBounded(ctx, pat.UserID, ip, "wire_admission_wait_expired",
+					fmt.Sprintf("conn %d: waited %s and was not served; blocked by: %v",
+						connRow.ID, queueWait, qt.BlockedBy()))
+			}
+			return out, denyAfterAuthorization(DenyQueueTimeout)
 		case errors.Is(rerr, ErrLeaseCapExceeded):
 			return out, denyAfterAuthorization(DenyLeaseCap)
-		// WAITED AND WAS NOT SERVED, which is a different thing from being
-		// refused on arrival and is told to the client as such: the instance
-		// took the request seriously, held it in line, and could not reach it.
-		case errors.Is(rerr, ErrQueueTimeout):
-			return out, denyAfterAuthorization(DenyQueueTimeout)
 		case errors.Is(rerr, ErrAllCapacityInTransaction):
 			return out, denyAfterAuthorization(DenyAllCapacityInTransaction)
 		case errors.Is(rerr, ErrTargetGone):

@@ -317,11 +317,10 @@ func (e *Engine) closeTarget(connID int64) {
 func (e *Engine) beginDraining(connID int64) ([]*session, dao.DataConn) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	// Answered BEFORE the sessions are drained: a request waiting for this
-	// connection is a request that would be admitted onto it a moment later,
-	// and the marking above is precisely the rule that forbids that.
-	e.sessions.dropTargetWaiters(connID)
-	drained := e.sessions.setDraining(connID)
+	// Marked, swept and snapshotted as ONE transition. Splitting them leaves a
+	// window in which a request joins the line after the sweep and before the
+	// mark, and nothing is left to tell it the connection is gone.
+	_, drained := e.sessions.beginDrainingTarget(connID)
 	pool, ok := e.conns[connID]
 	if !ok {
 		return drained, nil
