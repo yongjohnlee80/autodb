@@ -62,17 +62,56 @@ func TestRunBounded_KillsTheWholeProcessTree(t *testing.T) {
 	// process per control is how a gate machine degrades over a long run.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		err := syscall.Kill(pid, 0)
-		if err == syscall.ESRCH {
-			return // reaped, as required
-		}
-		if err != nil && err != syscall.EPERM {
+		gone, err := descendantIsGone(pid)
+		if err != nil {
 			t.Fatalf("checking descendant %d: %v", pid, err)
+		}
+		if gone {
+			return // killed, as required
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Errorf("descendant %d survived the containment timeout; killing the parent alone leaves "+
 		"the test binary and its children holding the output pipe", pid)
+}
+
+// descendantIsGone reports whether the descendant has stopped running.
+//
+// SIGNAL 0 ALONE CALLS A ZOMBIE ALIVE, AND THAT IS A FALSE RED ON THE ONE
+// MACHINE THIS CELL IS FOR. When the killed descendant's parent dies with it,
+// the descendant is reparented to pid 1 and stays a zombie until pid 1 reaps
+// it. Under the sanctioned container pid 1 is `go test`, which reaps nothing it
+// did not start, so the entry lingers -- and Kill(pid, 0) answers nil for a
+// lingering entry, because a zombie is still addressable. The cell then
+// reported that containment had failed while the process table showed the whole
+// group dead and the `sleep` already a zombie.
+//
+// So ask what the process IS rather than whether it can be addressed: a state
+// of Z is an exit that nobody has collected, which is the outcome this cell
+// wants. Signal 0 remains the first question because it is the portable one and
+// answers immediately once the entry is reaped.
+func descendantIsGone(pid int) (bool, error) {
+	switch err := syscall.Kill(pid, 0); err {
+	case syscall.ESRCH:
+		return true, nil
+	case nil, syscall.EPERM:
+	default:
+		return false, err
+	}
+	stat, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if os.IsNotExist(err) {
+		return true, nil
+	}
+	if err != nil {
+		// No procfs at all (not Linux, or it is not mounted). Signal 0 is then
+		// the only answer available, and it has already said "addressable".
+		return false, nil
+	}
+	// The command name sits in parentheses and may itself contain spaces, so
+	// the state is the first field AFTER the final ')'.
+	rest := stat[strings.LastIndexByte(string(stat), ')')+1:]
+	fields := strings.Fields(string(rest))
+	return len(fields) > 0 && fields[0] == "Z", nil
 }
 
 // buildHolder compiles the helper OUTSIDE the measured window.

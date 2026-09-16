@@ -97,9 +97,24 @@ func TestRunner_AnUnknownControlNameIsRefused(t *testing.T) {
 // between the edit and the restore.
 func TestRunner_ASourceTreeIsRefused(t *testing.T) {
 	bin, repo := runnerAt(t)
-	out, code := runRunner(t, bin, repo, "-root", repo, "-only", "identity-excludes-git")
+
+	// THE PRECONDITION IS CONSTRUCTED, NOT BORROWED FROM THE ENVIRONMENT.
+	//
+	// This used to pass the repository root and rely on it having a .git. It
+	// does when somebody runs the suite in a worktree, and it does NOT in the
+	// `git archive` tree the test convention mandates — so the guard could not
+	// fire, the runner exited 0, and the cell failed on exactly the artifact
+	// every gate run uses. A cell whose precondition comes from its
+	// surroundings is testing the surroundings.
+	dir := disposable(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out, code := runRunner(t, bin, repo, "-root", dir, "-only", "identity-excludes-git")
 	if code != 2 {
-		t.Errorf("exit %d for a root containing .git, want 2\n%s", code, out)
+		t.Errorf("exit %d for a root containing .git, want 2; mutating a source tree risks "+
+			"leaving somebody's work broken if the runner dies mid-control\n%s", code, out)
 	}
 }
 
