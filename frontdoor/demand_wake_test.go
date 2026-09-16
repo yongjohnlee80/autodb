@@ -1,0 +1,150 @@
+package frontdoor
+
+import (
+	"net"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/yongjohnlee80/autodb/core/exec"
+)
+
+// deadlineConn records which deadlines were set on it, and nothing else. The
+// wake's whole job is to end a blocked read, so which deadline it touches IS
+// the behaviour under test.
+type deadlineConn struct {
+	net.Conn
+	mu       sync.Mutex
+	readSet  []time.Time
+	writeSet []time.Time
+	bothSet  []time.Time
+}
+
+func (c *deadlineConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.readSet = append(c.readSet, t)
+	return nil
+}
+
+func (c *deadlineConn) SetWriteDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writeSet = append(c.writeSet, t)
+	return nil
+}
+
+func (c *deadlineConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.bothSet = append(c.bothSet, t)
+	return nil
+}
+
+func (c *deadlineConn) counts() (read, write, both int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.readSet), len(c.writeSet), len(c.bothSet)
+}
+
+// THE WAKE ENDS THE READ AND LEAVES THE WRITE ALONE.
+//
+// THIS IS THE CELL THAT PROTECTS THE EXPLANATION. The loop is woken precisely
+// so that it can WRITE a fatal frame saying why the session is ending. A
+// deadline in the past applied to both directions — the obvious thing to reach
+// for, and what the loop's other budgets use — would fail that write, and a
+// developer whose session was taken would get a silent disconnection instead of
+// the sentence explaining it. That is the outcome this entire path exists to
+// prevent, and it would look like a one-word difference in a diff.
+func TestDemandWake_TouchesTheReadDeadlineOnly(t *testing.T) {
+	now := time.Now()
+	conn := &deadlineConn{}
+	m := newDemandMailbox(conn, func() time.Time { return now })
+
+	m.post(exec.DemandNotice{Gen: 1, IdleFor: time.Hour})
+
+	read, write, both := conn.counts()
+	if read != 1 {
+		t.Errorf("the wake set %d read deadlines, want 1 — a blocked Receive is not interrupted", read)
+	}
+	if write != 0 || both != 0 {
+		t.Errorf("the wake set %d write and %d combined deadlines, want 0 of each — a write "+
+			"deadline in the past fails the fatal frame, and the client is disconnected "+
+			"with no explanation", write, both)
+	}
+	conn.mu.Lock()
+	armed := conn.readSet[0]
+	conn.mu.Unlock()
+	if !armed.Before(now) {
+		t.Errorf("the read deadline was set to %s, which is not in the past, so a read that is "+
+			"already blocked will not return", armed)
+	}
+}
+
+// THE NOTICE REACHES THE LOOP, AND ONLY THE LOOP READS IT.
+func TestDemandWake_TheNoticeIsDeliveredOnce(t *testing.T) {
+	conn := &deadlineConn{}
+	m := newDemandMailbox(conn, time.Now)
+	m.post(exec.DemandNotice{Gen: 7, IdleFor: 90 * time.Minute})
+
+	n, ok := m.take()
+	if !ok {
+		t.Fatal("the loop found no notice after one was posted")
+	}
+	if n.Gen != 7 || n.IdleFor != 90*time.Minute {
+		t.Errorf("notice = %+v, want the posted generation and idle time", n)
+	}
+	if _, again := m.take(); again {
+		t.Error("the same notice was delivered twice — one claim is one ending")
+	}
+}
+
+// A POST THAT CANNOT BE DELIVERED NEVER BLOCKS THE SCHEDULER.
+//
+// The engine posts while a request is waiting on it. If a post could block on a
+// loop that is busy — mid-query, or slow to come round — one idle client would
+// stall admission for everybody.
+func TestDemandWake_PostingNeverBlocks(t *testing.T) {
+	conn := &deadlineConn{}
+	m := newDemandMailbox(conn, time.Now)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Far more posts than the mailbox can hold, with nothing consuming.
+		for i := range 100 {
+			m.post(exec.DemandNotice{Gen: uint64(i)})
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("posting a notice blocked — a busy session loop can stall the admission queue")
+	}
+
+	if _, ok := m.take(); !ok {
+		t.Error("no notice survived")
+	}
+	if _, again := m.take(); again {
+		t.Error("more than one notice was queued; the claim behind them is single-use, so a " +
+			"second is a duplicate rather than new information")
+	}
+}
+
+// AN ORDINARY IDLE CLIENT IS NOT MISTAKEN FOR A RECLAIM.
+//
+// Both arrive at the loop as a read timeout. The mailbox is the only thing that
+// tells them apart, so an empty mailbox has to mean "this was the client", or
+// every silent client would be answered with a terminal frame blaming a
+// reclamation that never happened.
+func TestDemandWake_AnEmptyMailboxIsNotAWake(t *testing.T) {
+	conn := &deadlineConn{}
+	m := newDemandMailbox(conn, time.Now)
+	if _, ok := m.take(); ok {
+		t.Error("the loop read a notice nobody posted, so an ordinary idle timeout would be " +
+			"reported to the client as a demand reclamation")
+	}
+	if read, write, both := conn.counts(); read != 0 || write != 0 || both != 0 {
+		t.Errorf("a mailbox that was never posted to touched the connection (%d/%d/%d)", read, write, both)
+	}
+}

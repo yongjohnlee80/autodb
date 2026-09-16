@@ -133,7 +133,12 @@ func (r *sessionRegistry) claimDemandVictim(leaseConn int64, now time.Time) (dem
 		// handed to anyone else, which is why the answer for them is a framed
 		// ending rather than a silent handover: told what happened, they
 		// reconnect and rebuild what they had.
-		eligible := s.get() == sessOpen && s.wire && !s.busy && s.tx == nil
+		//   - no registered owner -> nothing can tell this client what
+		//     happened, and ending a session silently is worse than not
+		//     reclaiming it. Checked HERE rather than after the claim: a claim
+		//     spent on a session nobody can frame is a claim wasted, and the
+		//     request that triggered it waits the full bound for nothing.
+		eligible := s.get() == sessOpen && s.wire && !s.busy && s.tx == nil && s.wake != nil
 		s.mu.Unlock()
 		if eligible && (best == nil || idle > bestIdle) {
 			best, bestIdle = s, idle
