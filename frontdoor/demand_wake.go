@@ -62,7 +62,7 @@ type demandReclaimer interface {
 	RegisterDemandWake(id exec.SessionID, knock func())
 	OfferReceive(id exec.SessionID) uint64
 	RetireReceive(id exec.SessionID, token uint64) (exec.DemandNotice, bool)
-	FinishDemandReclaim(ctx context.Context, id exec.SessionID, gen uint64) bool
+	FinishDemandReclaim(ctx context.Context, id exec.SessionID, gen uint64, delivered bool) bool
 }
 
 // demandOwner brackets one session's blocking read.
@@ -112,10 +112,16 @@ func (o *demandOwner) retire() (exec.DemandNotice, bool) {
 // so a client that has stopped reading cannot hold the lease open forever, and
 // the release happens after.
 //
-// EXACTLY ONE OCCURRENCE IS WRITTEN, AND ONLY BY THE CALLER THAT ACTUALLY OWNED
-// THE TEARDOWN. Finalisation reports whether this reservation performed the
-// ending; if something else got there first, this path stays silent rather than
-// recording a second decision about one session.
+// EXACTLY ONE RECORD IS WRITTEN FOR THIS ENDING, AND IT IS NOT WRITTEN HERE.
+//
+// The engine's teardown already records the session closing, carrying the
+// reclamation as its reason. This path used to add an event of its own beside
+// it, so one ending produced two entries — anyone counting reclamations counted
+// them twice, and the two could disagree. What this side alone knows, whether
+// the client actually received the frame, is handed to that single record
+// instead. The ordinary close telemetry below stays generic: it says a session
+// ended, which is true of every session, and does not decide a second time that
+// this one was reclaimed.
 func (l *Listener) endForDemand(ctx context.Context, conn net.Conn, be *pgproto3.Backend,
 	o *demandOwner, n exec.DemandNotice, peer string, closeReason *string) error {
 
@@ -138,21 +144,13 @@ func (l *Listener) endForDemand(ctx context.Context, conn net.Conn, be *pgproto3
 	be.Send(gateError(row.severity, row.sqlState, row.message, row.identity, row.hint))
 	delivered := l.flushBounded(conn, be) == nil
 
-	// Finalise FIRST, then record — the record is only ours to write if we are
-	// the path that actually ended it.
-	if o.dr.FinishDemandReclaim(ctx, n.ID, n.Gen) {
-		l.onEvent(Event{Kind: "fd.session_ended", Reason: row.identity, Peer: peer,
-			Detail: demandDetail(n, delivered)})
+	if !o.dr.FinishDemandReclaim(ctx, n.ID, n.Gen, delivered) {
+		// Something else ended it first. It is ending either way; this path
+		// simply does not own the record of it, and must not write one.
+		l.onEvent(Event{Kind: "fd.internal", Reason: OutcomeInternalError, Peer: peer,
+			Detail: "a demand reclamation was framed but another path had already ended the session"})
 	}
-	*closeReason = "demand-reclaimed"
+	// Generic on purpose: the reclamation is recorded once, by the teardown.
+	*closeReason = "session-ended"
 	return nil
-}
-
-func demandDetail(n exec.DemandNotice, delivered bool) string {
-	told := "the client was told"
-	if !delivered {
-		told = "the client could not be told: the connection was already gone"
-	}
-	return "session ended so its connection could serve a waiting request; it had been idle " +
-		n.IdleFor.Round(time.Second).String() + "; " + told
 }

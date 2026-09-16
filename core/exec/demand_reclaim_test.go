@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -243,7 +244,7 @@ func TestDemandReclaim_AStaleGenerationCannotEndAReplacementSession(t *testing.T
 			"wake would end a session that was never selected")
 	}
 	e := &Engine{sessions: r2}
-	if e.FinishDemandReclaim(context.Background(), "chosen", v.notice.Gen) {
+	if e.FinishDemandReclaim(context.Background(), "chosen", v.notice.Gen, true) {
 		t.Error("a stale claim ended a replacement session")
 	}
 }
@@ -377,5 +378,60 @@ func TestDemandReclaim_AStaleReceiveTokenIsIgnored(t *testing.T) {
 	}
 	if _, woken := e.RetireReceive(s.id, fresh); !woken {
 		t.Error("the live token did not find the notice")
+	}
+}
+
+// ONE ENDING LEAVES ONE RECORD, CARRYING WHAT ONLY THE OWNER KNEW.
+//
+// THIS IS THE CELL FOR A TRAIL THAT DOUBLE-COUNTED. The teardown already
+// records the session closing with the reclamation as its reason; the front
+// door used to write an event of its own beside it, so one ending produced two
+// entries and anyone counting reclamations counted them twice. The two facts
+// only the owner knows — how long the session had been silent, and whether its
+// client actually received the frame — now complete that single record instead
+// of justifying a second one.
+func TestDemandReclaim_TheOneRecordCarriesIdleTimeAndWhetherTheClientWasTold(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		delivered bool
+		wants     string
+	}{
+		{"the client received the frame", true, "the client was told"},
+		{"the client had already gone", false, "could not be told"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			s := demandHolder("holder", 1, 7, now.Add(-2*time.Hour))
+			r := demandRegistry(t, s)
+			e := &Engine{sessions: r, now: func() time.Time { return now }}
+
+			if _, ok := r.reserveDemandVictim(7, now); !ok {
+				t.Fatal("the holder was not reserved")
+			}
+
+			s.mu.Lock()
+			before := s.closeWhy
+			s.mu.Unlock()
+			if before != ReasonDemandReclaimed {
+				t.Fatalf("the reservation recorded %q, want the reclamation reason", before)
+			}
+
+			// Finalisation completes that reason rather than adding a record.
+			e.completeDemandReason(s, tc.delivered)
+
+			s.mu.Lock()
+			why := s.closeWhy
+			s.mu.Unlock()
+			if !strings.HasPrefix(why, ReasonDemandReclaimed) {
+				t.Errorf("close reason = %q, want it to still name the reclamation", why)
+			}
+			if !strings.Contains(why, "2h0m0s") {
+				t.Errorf("close reason = %q, want it to carry how long the session had been "+
+					"silent — that is the justification for ending it", why)
+			}
+			if !strings.Contains(why, tc.wants) {
+				t.Errorf("close reason = %q, want it to say %q", why, tc.wants)
+			}
+		})
 	}
 }
