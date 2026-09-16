@@ -268,11 +268,12 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		}
 		// A LOCKED STORE DOES ARRIVE HERE, AND THIS PACKAGE SAID IT COULD NOT.
 		//
-		// The claim that stood here was that OpenWireSessionWith never opens a
-		// target, so the DSN is decrypted at the first statement and a locked
-		// store lets a client authenticate and refuses its query. That is true
-		// of connections whose engine does not speak the PostgreSQL wire. It
-		// is FALSE of the ones this front door is for: OpenWireSessionWith
+		// The claim that stood here was that, for an engine that does not
+		// speak the PostgreSQL wire, OpenWireSessionWith never opens a target,
+		// so for that engine the DSN is decrypted at the first statement and a
+		// locked store lets a client authenticate and refuses its query. That
+		// much is true of a non-wire engine such as SQLite. It is FALSE of the
+		// ones this front door is for: OpenWireSessionWith
 		// pins the backend for a PostgreSQL-wire connection before the client
 		// is ever told the session is ready, so decrypting the DSN -- and
 		// resolving the target, and asserting the driver's capabilities --
