@@ -62,7 +62,10 @@ func TestDemandWake_TouchesTheReadDeadlineOnly(t *testing.T) {
 	conn := &deadlineConn{}
 	m := newDemandMailbox(conn, func() time.Time { return now })
 
-	m.post(exec.DemandNotice{Gen: 1, IdleFor: time.Hour})
+	m.offer()
+	if !m.post(exec.DemandNotice{Gen: 1, IdleFor: time.Hour}) {
+		t.Fatal("a notice posted inside the receive window was refused")
+	}
 
 	read, write, both := conn.counts()
 	if read != 1 {
@@ -86,16 +89,17 @@ func TestDemandWake_TouchesTheReadDeadlineOnly(t *testing.T) {
 func TestDemandWake_TheNoticeIsDeliveredOnce(t *testing.T) {
 	conn := &deadlineConn{}
 	m := newDemandMailbox(conn, time.Now)
+	m.offer()
 	m.post(exec.DemandNotice{Gen: 7, IdleFor: 90 * time.Minute})
 
-	n, ok := m.take()
+	n, ok := m.retire()
 	if !ok {
 		t.Fatal("the loop found no notice after one was posted")
 	}
 	if n.Gen != 7 || n.IdleFor != 90*time.Minute {
 		t.Errorf("notice = %+v, want the posted generation and idle time", n)
 	}
-	if _, again := m.take(); again {
+	if _, again := m.retire(); again {
 		t.Error("the same notice was delivered twice — one claim is one ending")
 	}
 }
@@ -109,6 +113,7 @@ func TestDemandWake_PostingNeverBlocks(t *testing.T) {
 	conn := &deadlineConn{}
 	m := newDemandMailbox(conn, time.Now)
 
+	m.offer()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -123,10 +128,10 @@ func TestDemandWake_PostingNeverBlocks(t *testing.T) {
 		t.Fatal("posting a notice blocked — a busy session loop can stall the admission queue")
 	}
 
-	if _, ok := m.take(); !ok {
+	if _, ok := m.retire(); !ok {
 		t.Error("no notice survived")
 	}
-	if _, again := m.take(); again {
+	if _, again := m.retire(); again {
 		t.Error("more than one notice was queued; the claim behind them is single-use, so a " +
 			"second is a duplicate rather than new information")
 	}
@@ -141,7 +146,7 @@ func TestDemandWake_PostingNeverBlocks(t *testing.T) {
 func TestDemandWake_AnEmptyMailboxIsNotAWake(t *testing.T) {
 	conn := &deadlineConn{}
 	m := newDemandMailbox(conn, time.Now)
-	if _, ok := m.take(); ok {
+	if _, ok := m.retire(); ok {
 		t.Error("the loop read a notice nobody posted, so an ordinary idle timeout would be " +
 			"reported to the client as a demand reclamation")
 	}
@@ -150,36 +155,63 @@ func TestDemandWake_AnEmptyMailboxIsNotAWake(t *testing.T) {
 	}
 }
 
-// A WAKE THAT ARRIVES ALONGSIDE A CLIENT FRAME IS NOT LOST.
+// A NOTICE IS ONLY ACCEPTED WHILE THE OWNER CAN ACT ON IT.
 //
-// THIS CELL EXISTS BECAUSE WRITING IT FOUND THE BUG. The wake works by putting
-// a read deadline in the past, and the loop clears deadlines the moment a frame
-// arrives, because engine work is not between-messages time. So a notice posted
-// while a frame was already on the wire had its knock erased: the next read
-// blocked again, and the notice sat unread until the client happened to fall
-// silent. Meanwhile the request waiting for that lease waited its entire bound
-// for a reclamation that had already been decided.
+// THIS IS THE CELL THAT REPLACED A BROKEN DESIGN. The wake works by putting a
+// read deadline in the past, and the loop re-arms its ordinary deadline every
+// time round. A notice posted while the loop was BETWEEN reads therefore had
+// its knock erased a moment later: it went dormant, the session was never
+// reclaimed, and the request waiting for that lease waited its entire bound for
+// a reclamation that had already been decided and could never happen.
 //
-// The mailbox is therefore checked on BOTH paths — after a frame is read as
-// well as after a read ends — and the notice survives the deadline being
-// cleared, because it lives in the mailbox rather than in the deadline.
-func TestDemandWake_ANoticeSurvivesTheDeadlineBeingCleared(t *testing.T) {
+// So the window is open only between the loop arming its read and that read
+// returning, and a post outside it is REFUSED rather than silently dropped —
+// the scheduler needs to learn this session is not reclaimable so it can
+// reserve a different one instead of stranding this one.
+func TestDemandWake_ANoticeIsRefusedOutsideTheReceiveWindow(t *testing.T) {
 	conn := &deadlineConn{}
 	m := newDemandMailbox(conn, time.Now)
 
-	// The knock lands...
-	m.post(exec.DemandNotice{Gen: 3, IdleFor: time.Hour})
-	// ...and the loop clears deadlines because a frame arrived first.
-	_ = conn.SetDeadline(time.Time{})
-
-	n, ok := m.take()
-	if !ok {
-		t.Fatal("the notice was lost when the loop cleared its deadlines — the session would " +
-			"not be reclaimed, and the request waiting for its lease would wait the full " +
-			"bound for a reclamation that had already been decided")
+	if m.post(exec.DemandNotice{Gen: 1}) {
+		t.Error("a notice was accepted before the owner offered to receive one; its knock " +
+			"would be erased by the next re-arm and the lease would be stranded")
 	}
-	if n.Gen != 3 {
-		t.Errorf("notice generation = %d, want 3", n.Gen)
+	if read, _, _ := conn.counts(); read != 0 {
+		t.Error("a refused post still touched the connection")
+	}
+
+	m.offer()
+	if !m.post(exec.DemandNotice{Gen: 2}) {
+		t.Fatal("a notice posted inside the window was refused")
+	}
+
+	// The read returns: the window closes with it.
+	if _, ok := m.retire(); !ok {
+		t.Fatal("the notice was not delivered when the read returned")
+	}
+	if m.post(exec.DemandNotice{Gen: 3}) {
+		t.Error("a notice was accepted after the window closed")
+	}
+}
+
+// A SECOND NOTICE IS REFUSED WHILE ONE IS ALREADY PENDING.
+//
+// One reservation is one ending. Accepting a second would let two reservations
+// believe they own the same session.
+func TestDemandWake_ASecondNoticeIsRefusedWhileOneIsPending(t *testing.T) {
+	conn := &deadlineConn{}
+	m := newDemandMailbox(conn, time.Now)
+	m.offer()
+	if !m.post(exec.DemandNotice{Gen: 1}) {
+		t.Fatal("the first notice was refused")
+	}
+	if m.post(exec.DemandNotice{Gen: 2}) {
+		t.Error("a second notice was accepted while one was already pending — two " +
+			"reservations would each believe they own this session's ending")
+	}
+	n, _ := m.retire()
+	if n.Gen != 1 {
+		t.Errorf("delivered generation %d, want the first", n.Gen)
 	}
 }
 
@@ -191,10 +223,11 @@ func TestDemandWake_ANoticeSurvivesTheDeadlineBeingCleared(t *testing.T) {
 func TestDemandWake_OnlyOnePathCanActOnANotice(t *testing.T) {
 	conn := &deadlineConn{}
 	m := newDemandMailbox(conn, time.Now)
+	m.offer()
 	m.post(exec.DemandNotice{Gen: 5})
 
-	first, okFirst := m.take()
-	_, okSecond := m.take()
+	first, okFirst := m.retire()
+	_, okSecond := m.retire()
 
 	if !okFirst || first.Gen != 5 {
 		t.Fatalf("the first path did not receive the notice (got %+v, ok=%v)", first, okFirst)
