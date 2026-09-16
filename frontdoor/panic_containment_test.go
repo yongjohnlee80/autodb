@@ -74,7 +74,13 @@ type renderHarness struct {
 	be     *pgproto3.Backend
 	conn   net.Conn
 	events []Event
-	done   chan struct{}
+	// logs is the operator's half. It is captured rather than discarded
+	// because some outcomes deliberately produce a log line AND NO EVENT --
+	// an identity the registry refuses to validate is one of them -- and a
+	// harness that threw the log away could not tell that case from a path
+	// that silently did nothing at all.
+	logs []string
+	done chan struct{}
 }
 
 func newRenderHarness(t *testing.T) *renderHarness {
@@ -83,7 +89,7 @@ func newRenderHarness(t *testing.T) *renderHarness {
 	h := &renderHarness{conn: server, done: make(chan struct{})}
 	h.l = &Listener{
 		onEvent: func(e Event) { h.events = append(h.events, e) },
-		onLog:   func(string) {},
+		onLog:   func(m string) { h.logs = append(h.logs, m) },
 		now:     time.Now,
 		dl:      deadlines{outputStall: 2 * time.Second},
 	}

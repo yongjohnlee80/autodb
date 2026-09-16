@@ -316,5 +316,14 @@ const (
 	// DialFailedRule is the stable rule id that travels in DETAIL, exactly as
 	// every other front-door refusal carries one: constant, and never the
 	// cause.
-	DialFailedRule = "frontdoor/dial-failed"
+	//
+	// DEFINED FROM THE REGISTRY IDENTITY RATHER THAN BESIDE IT, because an
+	// identity spelled twice is an identity that can be spelled two ways. It
+	// was: the registry declared "dial-failed" while every raise site wrote
+	// this value, so the declaration named an outcome nothing could produce
+	// and the wire and the audit trail named one nothing had declared. Neither
+	// half could detect the other, because the two strings never met. One
+	// constant, one spelling, and the rule id a client quotes is the identity
+	// an operator greps for.
+	DialFailedRule = OutcomeDialFailed
 )

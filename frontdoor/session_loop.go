@@ -13,6 +13,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/admission"
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/exec"
+	"github.com/yongjohnlee80/autodb/core/outcome"
 )
 
 // THE POST-AUTH SESSION LOOP (F1's wire half).
@@ -969,7 +970,7 @@ func (l *Listener) frameGateError(conn net.Conn, be *pgproto3.Backend, sess exec
 	}
 	code, rule, hint, fatal := classifyGateError(err)
 
-	l.onEvent(gateEvent(err, rule, peer))
+	l.emitGateEvent(err, rule, peer)
 
 	severity := "ERROR"
 	if fatal {
@@ -1326,7 +1327,8 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 // error's own text for refusals the engine authored, because those were written
 // for a caller to read; it never includes internal identifiers, which travel in
 // the audit row instead.
-// gateEvent projects a gate error into the event a surface emits.
+// emitGateEvent projects a gate error into the event a surface emits, and
+// emits it.
 //
 // ONE PROJECTION, USED BY BOTH RENDERERS. The simple and extended paths each
 // built this inline, so fixing the panic case in one left the other filing a
@@ -1343,29 +1345,74 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 // the stage's internals. Those belong in the operator's log, which already has
 // them with the stack; the event carries the STAGE only, so the trail says
 // which component broke without republishing its guts.
-func gateEvent(err error, rule, peer string) Event {
+//
+// IT EMITS RATHER THAN RETURNING AN EVENT, and that is what changed. One of
+// the three shapes must be able to emit NOTHING: a dial failure is resolved
+// through the outcome registry first, and an identity the registry will not
+// validate must not enter the audit vocabulary. A function that handed an
+// Event back would have to hand one back for that case too, and every
+// candidate is wrong -- the zero Event is a row with no kind, and the
+// unvalidated one is precisely the row the registry exists to keep out.
+func (l *Listener) emitGateEvent(err error, rule, peer string) {
 	if d, ok := exec.DialFailureOf(err); ok {
-		// THE AUDIT IS WHERE THE STAGE AND THE CAUSE LIVE, and it is the only
-		// place. An operator has to be able to tell a name that would not
-		// resolve from a certificate that expired from an upstream password
-		// that changed, because those are three different repairs; the client
-		// must not be able to tell them apart at all.
-		//
-		// ITS OWN KIND, not fd.refused. A refusal is a decision we took about
-		// the caller's work, and counting a target outage among them tells an
-		// operator that policy rejected statements when in fact nothing about
-		// them was ever judged.
-		return Event{Kind: EventDialFailed, Reason: rule, Peer: peer, Detail: d.AuditDetail()}
+		l.emitDialFailed(d, peer)
+		return
 	}
 	if isStagePanic(err) {
-		return Event{
+		l.onEvent(Event{
 			Kind:   "fd.internal_error",
 			Reason: rule,
 			Peer:   peer,
 			Detail: stagePanicDetail(err),
-		}
+		})
+		return
 	}
-	return Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()}
+	l.onEvent(Event{Kind: "fd.refused", Reason: rule, Peer: peer, Detail: err.Error()})
+}
+
+// emitDialFailed records a request whose backend could not be opened.
+//
+// THE IDENTITY IS RESOLVED THROUGH THE REGISTRY BEFORE THE AUDIT ROW EXISTS,
+// under the producer that owns request acquisition, exactly as every other
+// outcome in this package is. What went wrong without it is that the rule id
+// travelled straight from a constant to the event, so nothing ever compared it
+// with what any producer had declared: the registry declared an identity no
+// code could raise, the trail carried an identity no producer owned, and both
+// halves looked correct in isolation.
+//
+// THE AUDIT IS WHERE THE STAGE AND THE CAUSE LIVE, and it is the only place.
+// An operator has to be able to tell a name that would not resolve from a
+// certificate that expired from an upstream password that changed, because
+// those are three different repairs; the client must not be able to tell them
+// apart at all.
+//
+// ITS OWN KIND, not fd.refused. A refusal is a decision we took about the
+// caller's work, and counting a target outage among them tells an operator
+// that policy rejected statements when in fact nothing about them was ever
+// judged.
+func (l *Listener) emitDialFailed(d *exec.DialFailure, peer string) {
+	occ, err := l.registry().Occur(ProducerRequestAcquire, outcomeID(OutcomeDialFailed),
+		outcome.WithDetail(d.AuditDetail()))
+	if err != nil {
+		// NO EVENT, and the client is still answered by the caller above. The
+		// identity is this package's own and declared in this package, so
+		// failing to resolve it means the declarations are broken -- and an
+		// unvalidated identity in the trail is the state the registry exists
+		// to make impossible. The operator gets the whole of it in the log.
+		l.onLog("frontdoor: the dial-failure identity does not resolve: " + err.Error())
+		return
+	}
+	if occ.Charges() {
+		// Unreachable while the identity is registered NotApplicable, and
+		// asserted rather than assumed: this happens on a session that is
+		// already past every accept-time budget, so there is no per-source
+		// counter it could legitimately reach, and charging a peer for a
+		// target outage is the failure the charge classes exist to stop.
+		l.onLog("frontdoor: refusing to charge a peer for a backend that could not be opened")
+		return
+	}
+	l.onEvent(Event{Kind: EventDialFailed, Reason: string(occ.Reason), Peer: peer,
+		Detail: occ.Detail})
 }
 
 // stagePanicDetail names the stage that broke, and nothing else.
