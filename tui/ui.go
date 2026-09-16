@@ -515,6 +515,9 @@ func (m *Model) afterLogin() {
 		m.notes = notes
 	}
 	m.setStatus(fmt.Sprintf("logged in as %s (%s)", u.Name, u.Role))
+	// The account's editor profile, if it has one. Async and silent when
+	// absent: a person who has never chosen keeps the default.
+	m.applyStoredEditorKeyset()
 	m.probeFrontDoorTLS()
 	m.explorer.Reload()
 	// Never yank focus out of an open modal. A frontend whose session arrives
