@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -201,5 +202,63 @@ func TestDemandWake_OnlyOnePathCanActOnANotice(t *testing.T) {
 	if okSecond {
 		t.Error("a second path through the loop also received the notice — the client would be " +
 			"sent two terminal frames and the lease released twice")
+	}
+}
+
+// THE TERMINAL MESSAGE SAYS ONLY WHAT IS TRUE OF EVERY SESSION IT ENDS.
+//
+// THIS CELL EXISTS BECAUSE THE FIRST VERSION SAID SOMETHING FALSE. It reused
+// the reserved no-mechanism row, which tells the client it held prepared
+// statements or portals. Selection deliberately does not require those — an
+// idle holder with an empty object store is reclaimed just the same — so most
+// clients ending this way would have been told something untrue about their own
+// session, in the one message whose whole job is to explain what happened. A
+// developer who had opened no statements would go hunting for statements they
+// never created.
+func TestDemandWake_TheTerminalMessageIsTrueOfEveryHolderItEnds(t *testing.T) {
+	row, ok := heldObjectRowFor(condDemandReclaimed)
+	if !ok {
+		t.Fatal("demand reclamation has no registered terminal row, so it would end sessions " +
+			"with no explanation at all")
+	}
+	if row.identity != OutcomeDemandReclaimed {
+		t.Errorf("identity = %q, want %q — ending a session is not a capacity refusal and an "+
+			"operator must be able to count the two separately", row.identity, OutcomeDemandReclaimed)
+	}
+	if row.severity != "FATAL" {
+		t.Errorf("severity = %q, want FATAL: the session is over", row.severity)
+	}
+	for _, claim := range []string{"prepared statement", "portal"} {
+		if strings.Contains(strings.ToLower(row.message), claim) {
+			t.Errorf("the message claims the client held a %s, which selection never required, "+
+				"so it is false for every holder with an empty object store", claim)
+		}
+	}
+	if !strings.Contains(strings.ToLower(row.hint), "reconnect") {
+		t.Errorf("hint = %q, want it to name reconnecting — it is the only remedy the client has", row.hint)
+	}
+}
+
+// THE NO-MECHANISM ROW STAYS RESERVED UNTIL SOMETHING CAN HONESTLY RAISE IT.
+//
+// A row in the runtime register claims a path the code has. Nothing classifies
+// the object-holding subset yet, so promoting it would make the manifest
+// describe an outcome no input can produce.
+func TestDemandWake_TheNoMechanismRowIsNotClaimedByDemandReclamation(t *testing.T) {
+	for _, row := range heldObjectRegister() {
+		if row.condition == condNoMechanism {
+			t.Error("the no-mechanism row is registered as producible, but nothing classifies " +
+				"the object-holding sessions it describes")
+		}
+	}
+	var reserved bool
+	for _, row := range heldObjectReserved() {
+		if row.condition == condNoMechanism {
+			reserved = true
+		}
+	}
+	if !reserved {
+		t.Error("the no-mechanism row is neither registered nor reserved, so its agreed wire " +
+			"answer has been lost rather than deferred")
 	}
 }

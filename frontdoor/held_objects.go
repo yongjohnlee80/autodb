@@ -66,6 +66,11 @@ const (
 	// re-created anywhere else and it has reached the bound on how long one
 	// session may hold one connection. RESERVED: see heldObjectReserved.
 	OutcomeNoMechanism = "frontdoor/no-mechanism"
+	// OutcomeDemandReclaimed is a session ended so that its server connection
+	// could serve a request that was waiting for one. Distinct from every
+	// capacity refusal: nobody was refused here, somebody was ENDED, and an
+	// operator reading the trail has to be able to count that separately.
+	OutcomeDemandReclaimed = "frontdoor/demand-reclaimed"
 	// OutcomeExecutionState is a portal that has already returned rows. It
 	// holds a cursor position inside a running query, which nothing this side
 	// can reconstruct, so it is closed and the client is told plainly.
@@ -184,6 +189,9 @@ const (
 	// Reserved. Promoted into heldObjectRegister in the same change that adds
 	// the code raising them -- see heldObjectReserved.
 	condNoMechanism
+	// condDemandReclaimed: an idle session whose server connection was taken
+	// back to serve a request that was waiting for one.
+	condDemandReclaimed
 	condExecutionState
 )
 
@@ -262,21 +270,31 @@ type heldObjectRow struct {
 // namespace it has filled, the frame that asks for too much at once.
 func heldObjectRegister() []heldObjectRow {
 	return []heldObjectRow{
-		// PROMOTED FROM THE RESERVED TABLE IN THE SAME CHANGE AS ITS PRODUCER,
-		// which is the rule that table states: a row without a producer claims
-		// a path the code does not have, and a producer without a row renders
-		// from nothing. The producer is demand reclamation -- see
-		// frontdoor/demand_wake.go and the engine's claimDemandVictim.
+		// DEMAND RECLAMATION'S OWN ROW, AND IT SAYS ONLY WHAT IS TRUE OF EVERY
+		// SESSION IT ENDS.
+		//
+		// The first version of this reused the reserved no-mechanism row,
+		// which tells the client it held prepared statements or portals. The
+		// selection predicate deliberately does not require those -- an idle
+		// holder with an empty object store is reclaimed just the same -- so
+		// most clients ending this way would have been told something false
+		// about their own session, and told it in the one message whose entire
+		// job is to explain what happened. A developer who had opened no
+		// statements would go looking for statements they never created.
+		//
+		// So this says what actually happened: the connection was taken back
+		// to serve somebody who was waiting, and reconnecting is the remedy.
+		// The no-mechanism row stays reserved until something classifies the
+		// object-holding subset and can honestly raise it.
 		{
-			condition: condNoMechanism,
-			identity:  OutcomeNoMechanism,
+			condition: condDemandReclaimed,
+			identity:  OutcomeDemandReclaimed,
 			sqlState:  sqlStateAdminShutdown,
 			severity:  "FATAL",
-			message: "this connection held prepared statements or portals that cannot be " +
-				"moved to another server connection, and it reached the bound on how long " +
-				"one session may hold one",
-			hint: "reconnect; close prepared statements and portals when you have finished " +
-				"with them so the session can give its server connection back",
+			message: "this session's server connection was reclaimed while the session was " +
+				"idle, so that a connection request that was waiting for one could be served",
+			hint: "reconnect; a session that is left idle may have its server connection " +
+				"reclaimed when others are waiting for one",
 			after: endSession,
 			// Nothing follows a fatal frame: the connection closes, so there
 			// is no segment left to discard and no Sync to discard it to.
@@ -425,6 +443,22 @@ func heldObjectRegister() []heldObjectRow {
 // producer added without its row renders from nothing.
 func heldObjectReserved() []heldObjectRow {
 	return []heldObjectRow{
+		{
+			condition: condNoMechanism,
+			identity:  OutcomeNoMechanism,
+			sqlState:  sqlStateAdminShutdown,
+			severity:  "FATAL",
+			message: "this connection held prepared statements or portals that cannot be " +
+				"moved to another server connection, and it reached the bound on how long " +
+				"one session may hold one",
+			hint: "reconnect; close prepared statements and portals when you have finished " +
+				"with them so the session can give its server connection back",
+			after: endSession,
+			// Nothing follows a fatal frame: the connection closes, so there
+			// is no segment left to discard and no Sync to discard it to.
+			discard: false,
+			tx:      txNoneOpen,
+		},
 		{
 			condition: condExecutionState,
 			identity:  OutcomeExecutionState,

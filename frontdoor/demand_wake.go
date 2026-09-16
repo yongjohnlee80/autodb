@@ -117,7 +117,7 @@ func (l *Listener) endForDemand(ctx context.Context, conn net.Conn, be *pgproto3
 	// would be read by anything that looks at it as a live budget.
 	_ = conn.SetReadDeadline(time.Time{})
 
-	row, ok := heldObjectRowFor(condNoMechanism)
+	row, ok := heldObjectRowFor(condDemandReclaimed)
 	if !ok {
 		// UNREACHABLE while the register carries the row, and it fails loudly
 		// rather than ending a session with no explanation, which is the one
