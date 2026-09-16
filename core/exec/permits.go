@@ -89,16 +89,6 @@ func (p *Permit) Release() {
 type permitLedger struct {
 	// queue orders the requests that could not be served immediately. Nil in
 	// the low-level cells that exercise the ledger's arithmetic alone.
-	queue *acquireQueue
-	// inTransaction reports how many outstanding ordinary sockets are held by
-	// a transaction still inside its bounds. Installed by the engine, which is
-	// the only thing that knows; see allCapacityInTransaction.
-	inTransaction func() int
-	// reclaimIdle asks the engine to take a backend from an idle holder and
-	// reports whether it freed one. Installed by the engine for the same
-	// reason: the ledger counts sockets, and only the engine knows which
-	// sessions are holding one without using it.
-	reclaimIdle func(context.Context) bool
 
 	mu     sync.Mutex
 	budget int
@@ -422,95 +412,8 @@ func (l *permitLedger) acquire(class DialClass) (*Permit, error) {
 		// an approximation of it. Only ordinary permits feed the queue: the
 		// control lane is a reserved single slot for cancellation and must
 		// never be handed to queued data-plane work.
-		if !control {
-			l.serveQueue()
-		}
 	}
 	return &granted, nil
-}
-
-// serveQueue re-takes the slot just freed and gives it to the oldest waiter.
-//
-// RE-ACQUIRED RATHER THAN PASSED ALONG, because the slot must stay accounted
-// for. Handing the caller's released permit object to a waiter would leave two
-// owners for one release closure; taking a fresh permit keeps every outstanding
-// socket represented by exactly one live permit, which is what the whole ledger
-// rests on. If nobody is waiting the slot simply stays free.
-func (l *permitLedger) serveQueue() {
-	if l.queue == nil || l.queue.Depth() == 0 {
-		return
-	}
-	p, err := l.acquire(DialOrdinary)
-	if err != nil {
-		return // the slot was taken by a direct acquirer in between; fine
-	}
-	if !l.queue.Grant(p) {
-		p.Release()
-	}
-}
-
-// AcquireOrWait takes an ordinary permit, or waits in line for one.
-//
-// THE REFUSAL AND THE WAIT ARE DIFFERENT ANSWERS AND ARE DECIDED BEFORE THE
-// QUEUE, not inside it. If every slot is held by a transaction still inside
-// its bounds then nothing is reclaimable now: no release is pending, so
-// queueing would mean waiting the full ninety seconds to be told the same
-// thing. That case is refused immediately, and it is refused ONLY here --
-// once a request is in the queue it resolves by grant, by the caller giving
-// up, or by the wait expiring, and never by being relabelled with a refusal
-// that claims it never queued.
-func (l *permitLedger) AcquireOrWait(ctx context.Context, connID int64) (*Permit, error) {
-	if p, err := l.acquire(DialOrdinary); err == nil {
-		return p, nil
-	} else if !errors.Is(err, ErrTargetBudgetExhausted) {
-		return nil, err
-	}
-	if l.allCapacityInTransaction() {
-		return nil, ErrAllCapacityInTransaction
-	}
-	// BEFORE MAKING ANYBODY WAIT, SEE IF A SLOT IS MERELY BEING HELD.
-	//
-	// A wire session keeps its backend for its whole life, so an idle session
-	// with no transaction and nothing on the server is holding capacity it is
-	// not using. Handing that over costs the holder nothing they can observe
-	// and costs the waiter ninety seconds they would otherwise spend queued.
-	// Tried ONCE: a loop here would turn one request's pressure into a sweep
-	// of every idle session, and the queue is the right place for sustained
-	// pressure.
-	if l.reclaimIdle != nil && l.reclaimIdle(ctx) {
-		if p, err := l.acquire(DialOrdinary); err == nil {
-			return p, nil
-		}
-		// The reclaimed slot was taken by somebody else in between. That is
-		// not a failure: they were ahead of us, and we queue as normal.
-	}
-	if l.queue == nil {
-		return nil, ErrTargetBudgetExhausted
-	}
-	return l.queue.Wait(ctx, connID)
-}
-
-// allCapacityInTransaction reports the ruled pre-enqueue condition: every
-// ordinary slot is held by a transaction that is still within its bounds.
-//
-// IT ASKS THE ENGINE RATHER THAN GUESSING. The ledger counts sockets; only the
-// session registry knows which of them are inside a live transaction, and a
-// ledger that inferred it from its own numbers would be asserting a
-// relationship it cannot see. With no reporter installed the answer is false,
-// which routes to the queue -- the conservative direction, because waiting and
-// being told no is worse service than a refusal but is never WRONG.
-func (l *permitLedger) allCapacityInTransaction() bool {
-	if l.inTransaction == nil {
-		return false
-	}
-	l.mu.Lock()
-	limit := l.ordinaryLimitLocked()
-	outstanding := l.ordinary
-	l.mu.Unlock()
-	if limit <= 0 || outstanding < limit {
-		return false
-	}
-	return l.inTransaction() >= outstanding
 }
 
 // ordinaryLimitLocked is what ordinary work may take: one short of the budget,

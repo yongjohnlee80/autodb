@@ -157,6 +157,22 @@ const (
 	DenyLeaseCap       = "frontdoor/lease-cap-exceeded"
 	DenySessionCap     = "frontdoor/session-cap-exceeded"
 	DenyResidentBudget = "frontdoor/resident-budget-exceeded"
+	// The four below all mean the request WAITED. They are separate identities
+	// from the caps above, and separate from each other, because an operator
+	// reading the trail has to be able to tell apart four different stories
+	// that a single "too many connections" would flatten into one: the
+	// instance was full for ninety seconds; the instance had nothing coming so
+	// did not make anyone wait; the target was removed out from under a
+	// waiting request; and the instance began shutting down. The first is
+	// pressure and warrants more capacity, the second is transaction
+	// behaviour, and the last two are operator actions.
+	DenyQueueTimeout = "frontdoor/queue-timeout"
+	// DenyAllCapacityInTransaction is the pre-enqueue refusal: every lease on
+	// the target is held by a transaction still inside its bounds, so nothing
+	// is going to be released and waiting would end in the same answer.
+	DenyAllCapacityInTransaction = "frontdoor/all-capacity-in-transaction"
+	DenyTargetGone               = "frontdoor/target-removed-while-waiting"
+	DenyEngineClosing            = "frontdoor/instance-shutting-down"
 	// DenyLeaseEncoding: the pinned target's server_encoding or client_encoding
 	// is not UTF8, or could not be established (matrix row 3.1: the lease is
 	// pinned UTF8; autodb does not transcode; the check FAILS CLOSED). On the
@@ -242,6 +258,15 @@ var denialCharge = map[string]ChargeClass{
 	DenyLeaseCap:       ChargeCapacity,
 	DenySessionCap:     ChargeCapacity,
 	DenyResidentBudget: ChargeCapacity,
+	// Waiting and not being served is the same KIND of answer as being refused
+	// on arrival: the caller presented nothing wrong, so none of these may
+	// touch the per-source throttle. Charging them would be worse than
+	// charging an ordinary capacity refusal -- a developer who queued politely
+	// for ninety seconds would be banned for their patience.
+	DenyQueueTimeout:             ChargeCapacity,
+	DenyAllCapacityInTransaction: ChargeCapacity,
+	DenyTargetGone:               ChargeCapacity,
+	DenyEngineClosing:            ChargeCapacity,
 
 	// None — our config, our stored state, our bug. Ruled uncharged: see docs/front-door/connection-holding-policy.md.
 	// The last three each follow a VERIFIED PAT bound to the exact connection:
@@ -299,6 +324,7 @@ func DenialReasons() []string {
 		DenyPATNotCleartextDebug, DenyPATCleartextDebugInTLS, DenyNoGrant,
 		DenyProfileRefuses, DenyLeaseCap, DenySessionCap, DenyResidentBudget,
 		DenyLeaseEncoding, DenyStartupGUC,
+		DenyQueueTimeout, DenyAllCapacityInTransaction, DenyTargetGone, DenyEngineClosing,
 	}
 }
 
@@ -522,7 +548,12 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	if h := e.hookBeforeWireAdmit; h != nil {
 		h()
 	}
-	if rerr := e.sessions.admitWithLease(s, connRow.ID, WireSessionOverhead); rerr != nil {
+	// WAITS ITS TURN RATHER THAN BEING REFUSED, when waiting could cure it.
+	// The refusals below are still reachable and still framed the same way --
+	// this changes only WHEN they are issued, and a capacity refusal now means
+	// the instance really had nothing coming rather than nothing at that
+	// instant. See scheduler.go.
+	if rerr := e.sessions.admitWithLeaseOrWait(ctx, s, connRow.ID, WireSessionOverhead); rerr != nil {
 		cancel()
 		switch {
 		// AUTHORIZED BY CONSTRUCTION: this is the reservation phase, reached
@@ -533,6 +564,17 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		// problem that did not exist on 2026-09-15.
 		case errors.Is(rerr, ErrLeaseCapExceeded):
 			return out, denyAfterAuthorization(DenyLeaseCap)
+		// WAITED AND WAS NOT SERVED, which is a different thing from being
+		// refused on arrival and is told to the client as such: the instance
+		// took the request seriously, held it in line, and could not reach it.
+		case errors.Is(rerr, ErrQueueTimeout):
+			return out, denyAfterAuthorization(DenyQueueTimeout)
+		case errors.Is(rerr, ErrAllCapacityInTransaction):
+			return out, denyAfterAuthorization(DenyAllCapacityInTransaction)
+		case errors.Is(rerr, ErrTargetGone):
+			return out, denyAfterAuthorization(DenyTargetGone)
+		case errors.Is(rerr, ErrEngineClosing):
+			return out, denyAfterAuthorization(DenyEngineClosing)
 		case errors.Is(rerr, ErrSessionCapExceeded):
 			return out, denyAfterAuthorization(DenySessionCap)
 		case errors.Is(rerr, ErrResidentBudgetExceeded):

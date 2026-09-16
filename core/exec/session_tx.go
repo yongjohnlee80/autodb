@@ -258,6 +258,7 @@ func (e *Engine) beginTx(
 
 	now := e.now()
 	s.mu.Lock()
+	s.reg.noteTxOpened(s.reservation.LeaseConn)
 	s.tx = tx
 	s.txPhase = txActive
 	s.txID = txID

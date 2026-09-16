@@ -341,16 +341,8 @@ func WithTargetConnBudget(n int) Option {
 			// one answers "exhausted" and leaves the caller to retry, which is
 			// the lottery this replaced: whoever retries at the right instant
 			// wins, regardless of who asked first.
-			e.targetPermits.queue = newAcquireQueue()
 			// And the ledger asks the registry which slots cannot be reclaimed,
 			// because only the registry knows. See allCapacityInTransaction.
-			e.targetPermits.inTransaction = func() int {
-				if e.sessions == nil {
-					return 0
-				}
-				return e.sessions.inTransactionHoldingBackend()
-			}
-			e.targetPermits.reclaimIdle = e.reclaimOneIdleBackend
 		}
 	}
 }
@@ -458,6 +450,13 @@ func (e *Engine) Close() error {
 	// REOPENS the pool that was just closed.
 	e.bgCancel()
 	e.bgWG.Wait()
+	// The line first: a waiter holds no resource, so nothing here depends on
+	// it, but leaving it would hold a client open for the full server wait
+	// after this instance stopped serving -- and a release landing in that
+	// window would admit it onto pools that are already closing.
+	if e.sessions != nil {
+		e.sessions.closeLine()
+	}
 	// Then sessions, for the same reason conn.delete closes them first: a
 	// pool closed under a live session is the undefined behaviour the design
 	// closes.
