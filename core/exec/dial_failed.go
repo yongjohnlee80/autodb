@@ -346,6 +346,25 @@ func acquireWithReArbitration(ctx context.Context,
 		if ctx.Err() != nil {
 			return nil, requestAbandoned(ctx)
 		}
+		// A CONNECTION THIS INSTALL CANNOT SERVE IS NOT A TARGET TO TRY AGAIN.
+		//
+		// This is where the separation was being undone. The classification at
+		// target resolution was correct and the check at the pin boundary was
+		// correct, and then this loop retried the failure and wrapped whatever
+		// came back, so a capability or configuration fault reached the caller
+		// as DialFailed(unclassified, attempts=2): a target outage in the
+		// operator's trail, a fabricated acquisition count, the capability
+		// stage gone, and a SECOND pin attempted against a driver already
+		// known to be unusable.
+		//
+		// A HELPER THAT ANSWERS CORRECTLY AND A CALLER THAT OVERRIDES IT IS
+		// THE SAME AS A HELPER THAT ANSWERS WRONGLY, and the cell that proved
+		// the boundary was calling pinTargetBackend directly, so it could not
+		// see its own caller. That is why the acceptance cell for this drives
+		// acquireRequestBackend instead.
+		if _, ok := ConfigFailureOf(err); ok {
+			return nil, err
+		}
 	}
 	if d, ok := DialFailureOf(last); ok {
 		d.Attempts = made

@@ -1101,6 +1101,25 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 					l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 				}
 			}
+			// A SESSION THAT COULD NOT START FOR OUR REASONS SAYS SO, FATALLY.
+			//
+			// The caller's credential verified; there is simply no session for
+			// it to have. The uniform denial would tell them the opposite and
+			// charge their address for our outage, which is the lockout this
+			// work exists to fix. The frame's code comes from the identity, so
+			// an identity with no row writes NOTHING rather than letting this
+			// invent one -- the peer is closed on, which is the safe answer.
+			if credential.Outcome.Wire() == WireStartupFatal {
+				sent, derr := sendStartupFatal(stream, credential.Occurrence.Reason)
+				if derr != nil {
+					l.onLog(fmt.Sprintf("frontdoor: writing the startup failure to %s: %v", peer, derr))
+				}
+				if !sent {
+					l.onLog(fmt.Sprintf("frontdoor: no startup frame is registered for %q; "+
+						"the peer was closed on rather than told something this package "+
+						"made up", credential.Occurrence.Reason))
+				}
+			}
 			// THE CLIENT IS TOLD FIRST AND THE OPERATOR SECOND, here as on
 			// every other refusal path, and parked on the same gate so the
 			// window is observable. Without the gate this ending would be the

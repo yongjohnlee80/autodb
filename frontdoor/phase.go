@@ -217,6 +217,16 @@ const (
 	// WireFatalInternal is the stable internal error, for an authenticated
 	// caller on a quiescent stream.
 	WireFatalInternal
+	// WireStartupFatal is a safe FATAL for a session that could not start for
+	// OUR reasons -- a locked store, a connection this install cannot serve.
+	//
+	// NOT WireUniformDenial, and the difference is the whole of MF4R-B: the
+	// uniform denial says "your credential was refused" to a caller whose
+	// credential verified, which is a lie that also costs them their address's
+	// failure budget. NOT WireFatalInternal either, which says "a fault in
+	// autodb" and names no connection-level cause. The frame's code comes from
+	// the outcome's identity, so the wire and the audit cannot disagree.
+	WireStartupFatal
 )
 
 func (w WireResponse) String() string {
@@ -225,6 +235,8 @@ func (w WireResponse) String() string {
 		return "uniform-denial"
 	case WireFatalInternal:
 		return "fatal-internal"
+	case WireStartupFatal:
+		return "startup-fatal"
 	}
 	return "nothing"
 }

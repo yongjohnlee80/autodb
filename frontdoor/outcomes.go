@@ -133,6 +133,27 @@ const (
 	// among target outages would put an install's own misconfiguration into
 	// the numbers an operator watches for target health.
 	EventConnectionUnusable = "fd.connection_unusable"
+	// OutcomeStartupConnectionUnavailable is a wire session that could not
+	// START because the secret store would not answer.
+	//
+	// NAMED FOR WHAT THE CALLER IS ENTITLED TO KNOW, not for what happened.
+	// The identity travels in the frame's DETAIL as the stable rule id, so an
+	// identity spelling "store-locked" would tell a client holding only a
+	// socket that our secret store is locked -- which is a fact about the
+	// estate, arrived at through the one field everyone assumed was safe
+	// because it is "just an id". The operator gets the real cause in the
+	// audit, where it belongs.
+	//
+	// SEPARATE FROM THE REQUEST-TIME IDENTITIES BECAUSE THE LIFECYCLE IS
+	// DIFFERENT AND THE CLIENT CONTRACT IS DIFFERENT. There is no session yet:
+	// no ReadyForQuery has been sent, nothing survives, and the frame is FATAL.
+	// Registering one identity for both lifecycles would put "the session
+	// survived" and "the connection ended" under one row, and an operator
+	// could not tell which happened.
+	OutcomeStartupConnectionUnavailable = "frontdoor/startup-connection-unavailable"
+	// OutcomeStartupConnectionUnusable is a wire session that could not start
+	// because the connection cannot serve requests as configured.
+	OutcomeStartupConnectionUnusable = "frontdoor/startup-connection-unusable"
 	// EventAuthOperational is the audit kind for an error-driven ending in the
 	// credential exchange.
 	//
@@ -345,6 +366,17 @@ func credentialOutcomes(
 		// (charge), and owed the uniform denial (wire) -- and the wire is
 		// carried on the outcome, so it need not distort the kind to get one.
 		{ID: outcome.ReasonID(reasonAuthStoreError), Kind: outcome.Operational, Charge: outcome.None},
+		// OURS TOO, AND ARRIVING HERE FOR A REASON THIS PACKAGE GOT WRONG
+		// ONCE. A PostgreSQL-wire session pins its backend inside
+		// OpenWireSessionWith, before the client sees ReadyForQuery, so a
+		// locked store and a connection this install cannot serve both
+		// surface DURING the credential phase. They were being folded into
+		// the store-outage identity and answered with the uniform credential
+		// denial, which told a developer holding a good token that their
+		// CREDENTIAL was wrong -- the exact shape of the lockout this work
+		// exists to fix. Neither is charged: the peer did nothing.
+		{ID: outcomeID(OutcomeStartupConnectionUnavailable), Kind: outcome.Operational, Charge: outcome.None},
+		{ID: outcomeID(OutcomeStartupConnectionUnusable), Kind: outcome.Operational, Charge: outcome.None},
 		// A listener with no credential store behind it yet is a DECISION not
 		// to serve, taken before anything failed.
 		refusal(reasonNoCredentialStore, outcome.None),

@@ -43,6 +43,10 @@ type gateConn struct {
 	releaseErr error
 	released   int
 	discarded  int
+	// destroyed counts explicit physical destruction. On gateConn rather than
+	// only on the double that offers the capability, so any fake can record
+	// which teardown it was given without a second counter to keep in step.
+	destroyed int
 	// marked counts the frames queued to make the lease unprovable, which is
 	// what forces the driver to close the socket rather than recycle it.
 	marked int
@@ -108,13 +112,12 @@ func (c *facelessConn) SimpleQuery(context.Context, string, func(golibpg.Extende
 	panic("the faceless connection must not be asked for a simple query")
 }
 
-// destroyingConn is a gateConn whose driver ALSO carries explicit physical
-// destruction, which is the production shape. The two fakes exist side by side
-// because the gate has to be correct against both: a consumer building against
-// a driver that predates the capability still has to relinquish the lease.
+// destroyingConn is a gateConn that carries explicit physical destruction,
+// which is the ONLY production shape: pinTargetBackend refuses any pin without
+// it, so a double lacking it models a state this package no longer reaches and
+// belongs solely in the cells that prove the refusal.
 type destroyingConn struct {
 	gateConn
-	destroyed int
 }
 
 func (c *destroyingConn) Destroy() { c.destroyed++ }
@@ -394,8 +397,13 @@ func TestReleaseGate_ABackendThatCannotBeResetIsNeverPooled(t *testing.T) {
 		t.Fatalf("a target with no simple-query face cannot be reset, so nothing can be "+
 			"proved about it; the gate said %q / pooled=%v", v.reason(), v.pooled)
 	}
-	if c.discarded != 1 {
-		t.Fatalf("discarded %d time(s), want 1", c.discarded)
+	if c.destroyed != 1 {
+		t.Fatalf("destroyed %d time(s), want 1: a backend nothing could be proved about "+
+			"is destroyed, not handed back", c.destroyed)
+	}
+	if c.discarded != 0 || c.released != 0 {
+		t.Fatalf("discarded %d and released %d time(s); both hand the lease back",
+			c.discarded, c.released)
 	}
 }
 
@@ -414,6 +422,12 @@ func (p pinnedWithoutFace) Receive(ctx context.Context) (golibpg.ExtendedMessage
 func (p pinnedWithoutFace) Sync(ctx context.Context) (byte, error) { return p.inner.Sync(ctx) }
 func (p pinnedWithoutFace) Release(ctx context.Context) error      { return p.inner.Release(ctx) }
 func (p pinnedWithoutFace) Discard()                               { p.inner.Discard() }
+
+// Destroy, because a production pin always has it: pinTargetBackend refuses
+// any that does not, so a double without it models a state this package no
+// longer reaches. Counted on the inner connection so the cell can assert which
+// teardown ran.
+func (p pinnedWithoutFace) Destroy() { p.inner.destroyed++ }
 func (p pinnedWithoutFace) BeginSessionTx(ctx context.Context, o dao.TxOptions) (dao.ContextTxConn, error) {
 	return p.inner.BeginSessionTx(ctx, o)
 }
@@ -554,3 +568,47 @@ func TestReleaseGate_APinnedConnectionIsHandedBackInExactlyOnePlace(t *testing.T
 // stubTxConn stands in for an attached transaction. The gate only ever asks
 // whether one is there.
 type stubTxConn struct{ dao.ContextTxConn }
+
+// A DIRTY BACKEND NOBODY CAN DESTROY IS NOT GIVEN BACK.
+//
+// This path is unreachable while pinTargetBackend's boundary assertion stands,
+// which is exactly why it is worth a cell: an unreachable path is one nobody
+// looks at, and the previous version of it handed the member to the pool. What
+// arrives here is a backend a session has USED whose reset could not be
+// proved, so a Discard is not an idle slot going back — it is the driver's own
+// reuse test being asked to decide whether another developer's session state
+// is fit to serve the next request. That decision is the leak the release gate
+// exists to prevent.
+//
+// The slot is recoverable by restarting. The contaminated session that would
+// otherwise reach the next caller is not.
+func TestDestroyBackend_AnIncapableDirtyMemberIsNotHandedBack(t *testing.T) {
+	var lines []string
+	e := &Engine{onLog: func(s string) { lines = append(lines, s) }}
+
+	c := newGateConn() // incapable: no Destroy
+	c.targetErr["UNLISTEN *"] = &pgconn.PgError{Message: "permission denied"}
+
+	v := e.releaseBackend(context.Background(), gateSession(), c, nil)
+	if v.pooled {
+		t.Fatal("a backend whose reset the target refused was pooled")
+	}
+	if c.released != 0 {
+		t.Errorf("released %d time(s); a member whose state could not be cleared must not "+
+			"go back to the pool", c.released)
+	}
+	if c.discarded != 0 {
+		t.Errorf("discarded %d time(s); Discard hands the lease back and lets the driver's "+
+			"own reuse test decide, which is how another caller inherits this session's "+
+			"state", c.discarded)
+	}
+	var announced bool
+	for _, line := range lines {
+		if strings.Contains(line, "NOT being returned") {
+			announced = true
+		}
+	}
+	if !announced {
+		t.Fatalf("a pool slot was held without saying so; the log held %v", lines)
+	}
+}
