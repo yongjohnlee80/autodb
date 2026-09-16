@@ -148,3 +148,58 @@ func TestDemandWake_AnEmptyMailboxIsNotAWake(t *testing.T) {
 		t.Errorf("a mailbox that was never posted to touched the connection (%d/%d/%d)", read, write, both)
 	}
 }
+
+// A WAKE THAT ARRIVES ALONGSIDE A CLIENT FRAME IS NOT LOST.
+//
+// THIS CELL EXISTS BECAUSE WRITING IT FOUND THE BUG. The wake works by putting
+// a read deadline in the past, and the loop clears deadlines the moment a frame
+// arrives, because engine work is not between-messages time. So a notice posted
+// while a frame was already on the wire had its knock erased: the next read
+// blocked again, and the notice sat unread until the client happened to fall
+// silent. Meanwhile the request waiting for that lease waited its entire bound
+// for a reclamation that had already been decided.
+//
+// The mailbox is therefore checked on BOTH paths — after a frame is read as
+// well as after a read ends — and the notice survives the deadline being
+// cleared, because it lives in the mailbox rather than in the deadline.
+func TestDemandWake_ANoticeSurvivesTheDeadlineBeingCleared(t *testing.T) {
+	conn := &deadlineConn{}
+	m := newDemandMailbox(conn, time.Now)
+
+	// The knock lands...
+	m.post(exec.DemandNotice{Gen: 3, IdleFor: time.Hour})
+	// ...and the loop clears deadlines because a frame arrived first.
+	_ = conn.SetDeadline(time.Time{})
+
+	n, ok := m.take()
+	if !ok {
+		t.Fatal("the notice was lost when the loop cleared its deadlines — the session would " +
+			"not be reclaimed, and the request waiting for its lease would wait the full " +
+			"bound for a reclamation that had already been decided")
+	}
+	if n.Gen != 3 {
+		t.Errorf("notice generation = %d, want 3", n.Gen)
+	}
+}
+
+// THE TERMINAL OWNER IS SINGULAR EVEN WHEN THE CLIENT IS TALKING.
+//
+// Two paths through the loop can now find the same notice — the one after a
+// frame and the one after a read ends. Only the first may act on it, or the
+// client is framed twice and the lease released twice.
+func TestDemandWake_OnlyOnePathCanActOnANotice(t *testing.T) {
+	conn := &deadlineConn{}
+	m := newDemandMailbox(conn, time.Now)
+	m.post(exec.DemandNotice{Gen: 5})
+
+	first, okFirst := m.take()
+	_, okSecond := m.take()
+
+	if !okFirst || first.Gen != 5 {
+		t.Fatalf("the first path did not receive the notice (got %+v, ok=%v)", first, okFirst)
+	}
+	if okSecond {
+		t.Error("a second path through the loop also received the notice — the client would be " +
+			"sent two terminal frames and the lease released twice")
+	}
+}

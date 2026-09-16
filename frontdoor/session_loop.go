@@ -205,6 +205,19 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			return nil
 		}
 
+		// A WAKE THAT ARRIVED ALONGSIDE THIS FRAME IS STILL OWED AN ANSWER.
+		//
+		// The wake works by putting a read deadline in the past, and the clear
+		// immediately above removes it -- so a demand notice posted while this
+		// frame was already on the wire would have had its knock erased and sat
+		// unread until the client happened to fall silent. The request waiting
+		// for the lease would have waited its whole bound for a reclamation
+		// that had in fact been decided. Checked here, the frame is simply the
+		// last thing this session does.
+		if n, woken := mbox.take(); woken && canReclaim {
+			return l.endForDemand(ctx, conn, be, sess, reclaimer, n, peer, closeReason)
+		}
+
 		// DISCARD-THROUGH-SYNC APPLIES TO EVERY MESSAGE, and it has to be here —
 		// before the decision table, before the extended routing, before Query —
 		// because PostgreSQL's rule is about the SEGMENT, not about one protocol's
