@@ -111,17 +111,33 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 		// statements or portals is precisely the holder whose backend cannot be
 		// handed to anyone else, which is why the answer for them is a framed
 		// ending rather than a silent handover.
-		eligible := s.wire && !s.busy && s.tx == nil && s.reclaimable.Load()
+		eligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0
 		// The reservation is taken INSIDE this same hold. It is the ordinary
 		// close claim, so it also settles ownership against the reaper, an
 		// operator's delete and the client's own disconnect.
 		reserved := eligible && s.beginCloseLocked("", ReasonDemandReclaimed)
-		idle := now.Sub(s.lastUsed)
-		gen, id := s.gen, s.id
+		var knock func()
+		if reserved {
+			// PUBLISHED UNDER THE SAME LOCK AS THE RESERVATION. The owner
+			// cannot be woken about a session that was not reserved, and a
+			// session cannot be reserved without its owner being told -- which
+			// is what stopped a lost race from ending somebody's session
+			// silently.
+			s.pendingNotice = &DemandNotice{
+				Gen: s.gen, ID: s.id, IdleFor: now.Sub(s.lastUsed),
+			}
+			knock = s.wake
+		}
+		notice := s.pendingNotice
 		s.mu.Unlock()
 
 		if reserved {
-			return demandVictim{s: s, notice: DemandNotice{Gen: gen, ID: id, IdleFor: idle}}, true
+			if knock != nil {
+				// Outside the lock: the knock touches the client's connection,
+				// and nothing that touches a socket runs under this mutex.
+				knock()
+			}
+			return demandVictim{s: s, notice: *notice}, true
 		}
 	}
 	return demandVictim{}, false
@@ -149,60 +165,70 @@ func (e *Engine) demandReclaim(leaseConn int64) bool {
 		return false
 	}
 
-	if wake := v.s.takeWake(); wake != nil && wake(v.notice) {
-		// The owner has it. It will frame its client and then finalise, which
-		// is what releases the lease.
-		return true
-	}
-
-	// NOBODY ACCEPTED IT, AND THE SESSION IS ALREADY RESERVED FOR TEARDOWN.
-	//
-	// Leaving it there would be the worst of both outcomes: the session is
-	// closing, so it serves nobody, and nothing is coming to finish it, so its
-	// lease is never released and the target loses capacity permanently. The
-	// owner raced away between the eligibility check and the offer, so this
-	// ending cannot be explained to the client -- but it still has to happen,
-	// and the record says the client was not told.
-	e.logf("connection %d: session %s was reserved for demand reclamation but its owner "+
-		"stopped listening before the notice could be offered; ending it unannounced",
-		v.s.connID, v.s.id)
-	e.finishClosing(context.WithoutCancel(e.bgCtx), v.s)
+	// The owner has it: reserving and telling it were the same operation. It
+	// will frame its client and then finalise, which is what releases the lease.
+	_ = v
 	return true
 }
 
-// registerWake publishes the callback the session's owner listens on. Called
-// once, by the owner, at session open.
-func (s *session) registerWake(f func(DemandNotice) bool) {
-	s.mu.Lock()
-	s.wake = f
-	s.mu.Unlock()
-}
-
-func (s *session) takeWake() func(DemandNotice) bool {
+// OfferReceive opens this session's receive offer and returns the token its
+// owner must present to close it. Called immediately before the owner blocks
+// reading from its client.
+func (e *Engine) OfferReceive(id SessionID) uint64 {
+	s, ok := e.sessions.byIDOnly(id)
+	if !ok {
+		return 0
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.wake
+	s.tokenSeq++
+	s.recvToken = s.tokenSeq
+	return s.recvToken
 }
 
-// RegisterDemandWake publishes the callback the session's owner listens on, and
-// OfferReceiveEpoch says when that owner is actually able to act on a notice.
+// RetireReceive closes the offer and hands back any notice published inside it.
 //
-// A session whose owner is not currently offering is never selected. Ending a
-// session nobody can explain it to is worse than not reclaiming it, and a
-// notice nobody consumes strands the lease it was meant to free.
-func (e *Engine) RegisterDemandWake(id SessionID, f func(DemandNotice) bool) {
-	if s, ok := e.sessions.byIDOnly(id); ok {
-		s.registerWake(f)
+// CALLED AS THE READ RETURNS, BEFORE THE FRAME OR THE ERROR IS LOOKED AT. Both
+// a delivered frame and a knock bring the owner back here; taking the notice
+// first is what makes the winner explicit, because a frame belonging to a
+// session already reserved for termination must not be dispatched.
+//
+// A STALE TOKEN RETIRES NOTHING. It would mean this call belongs to an offer
+// that has already been closed, and honouring it would let one read's outcome
+// close a later read's window.
+func (e *Engine) RetireReceive(id SessionID, token uint64) (DemandNotice, bool) {
+	s, ok := e.sessions.byIDOnly(id)
+	if !ok || token == 0 {
+		return DemandNotice{}, false
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.recvToken != token {
+		return DemandNotice{}, false
+	}
+	s.recvToken = 0
+	n := s.pendingNotice
+	s.pendingNotice = nil
+	if n == nil {
+		return DemandNotice{}, false
+	}
+	return *n, true
 }
 
-// SetReclaimable is called by the session's owner to open and close the window
-// in which a terminal notice can be delivered: opened immediately before it
-// blocks reading from its client, closed as that read returns.
-func (e *Engine) SetReclaimable(id SessionID, offering bool) {
-	if s, ok := e.sessions.byIDOnly(id); ok {
-		s.reclaimable.Store(offering)
+// RegisterDemandWake publishes the knock that makes this session's owner return
+// from its blocked read. Called once, by the owner, at session open.
+//
+// A session whose owner is not currently offering to receive is never selected,
+// which OfferReceive and RetireReceive decide. Ending a session nobody can
+// explain it to is worse than not reclaiming it.
+func (e *Engine) RegisterDemandWake(id SessionID, knock func()) {
+	s, ok := e.sessions.byIDOnly(id)
+	if !ok {
+		return
 	}
+	s.mu.Lock()
+	s.wake = knock
+	s.mu.Unlock()
 }
 
 // FinishDemandReclaim completes a reclamation the owner has now told its client
@@ -225,12 +251,13 @@ func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint
 		// session came after it.
 		return false
 	}
-	if !s.claimTeardown() {
-		// Reserved by this reclamation, but finished by something else in the
-		// meantime. It is ending either way; this caller simply does not own
-		// the record of it.
-		return false
-	}
+	// NOT PRE-CLAIMED. The teardown slot is claimed by quiesce, inside
+	// finishClosing, and claiming it here first made this path wait on itself:
+	// the claim creates the channel that the join then waits on, and only the
+	// deferred release closes it, so every successful reclamation sat out the
+	// full quiesce bound before releasing the lease it had just freed. The
+	// reservation this caller already holds is what proves its right to act;
+	// the slot is quiesce's to take.
 	e.finishClosing(ctx, s)
 	return true
 }

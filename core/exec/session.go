@@ -211,26 +211,36 @@ type session struct {
 	// forward, and otherwise the physical connection is closed. Handing it
 	// back unproved is how one developer's settings become another's.
 	pc golibpg.PinnedConn
+	// tokenSeq issues recvToken values. Monotonic, so a retired offer can never
+	// be confused with a later one.
+	tokenSeq uint64
 	// gen is this session's generation, stamped at admission and never reused,
 	// so a notice posted about one session cannot be honoured against whichever
 	// session next occupies its place.
 	gen uint64
-	// wake offers a terminal notice to the one goroutine allowed to write to
-	// this session's client, and reports whether that goroutine accepted it.
-	// Demand reclamation reserves the session and calls this; it never touches
-	// the wire itself.
-	wake func(DemandNotice) bool
-	// reclaimable is true only while the owner is actually blocked reading from
-	// its client and able to act on a notice. See the receive epoch in
-	// frontdoor/demand_wake.go.
+	// wake knocks on this session's owner so its blocked read returns. It
+	// carries nothing: everything the owner needs is published under this
+	// session's mutex before the knock, so the knock cannot arrive without
+	// what it is about.
+	wake func()
+
+	// recvToken is the owner's receive offer: non-zero only between the owner
+	// arming its read and that read returning, and a new value each time.
+	// Guarded by mu.
 	//
-	// A STATICALLY REGISTERED CALLBACK IS NOT ENOUGH, which is what this
-	// replaced. The callback lived for the whole session, so a notice could be
-	// posted while the loop was between reads -- and the wake, which works by
-	// putting a read deadline in the past, would then be overwritten by the
-	// loop re-arming its ordinary budget. The notice went dormant and the
-	// request waiting for the lease waited its whole bound for nothing.
-	reclaimable atomic.Bool
+	// ONE PIECE OF STATE, IN ONE PLACE, GUARDED BY THE LOCK THAT TAKES THE
+	// RESERVATION. It replaced a pair -- a flag here and a mailbox in the front
+	// door -- which could disagree: the scheduler could read the flag as open,
+	// reserve the session for termination, and only then find the mailbox
+	// closed because the read had already returned. The session was then ended
+	// with no way to tell its client, having lost a race its client had in fact
+	// won. With the offer and the reservation under the same mutex, a
+	// reservation is never taken against an offer that has gone.
+	recvToken uint64
+	// pendingNotice is published under mu in the SAME critical section as the
+	// reservation, so the owner cannot be woken about a session that was not
+	// reserved, nor reserved without being told.
+	pendingNotice *DemandNotice
 
 	// reg is the registry this session was admitted to, or nil for a session
 	// that never was. It exists so the transaction counter the admission queue

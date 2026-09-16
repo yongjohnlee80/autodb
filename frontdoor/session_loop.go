@@ -177,8 +177,8 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			fr.allow(preHeader)
 		}
 		// The offer opens here and is retired the instant the read returns, so
-		// the engine can only select this session while it is genuinely
-		// blocked and able to act. See frontdoor/demand_wake.go.
+		// the engine can only reserve this session while it is genuinely
+		// blocked and able to be told. See frontdoor/demand_wake.go.
 		owner.offer()
 		msg, err := be.Receive()
 		if n, woken := owner.retire(); woken {

@@ -18,8 +18,9 @@ func demandHolder(id string, userID, connID int64, idleSince time.Time) *session
 	s := &session{id: SessionID(id), userID: userID, connID: connID, lastUsed: idleSince}
 	s.wire = true
 	s.state.Store(int32(sessOpen))
-	s.wake = func(DemandNotice) bool { return true }
-	s.reclaimable.Store(true)
+	s.wake = func() {}
+	s.tokenSeq++
+	s.recvToken = s.tokenSeq
 	return s
 }
 
@@ -65,7 +66,7 @@ func TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen(t *testing.T) {
 		},
 		{
 			name:  "its owner is not currently able to act",
-			spoil: func(s *session) { s.reclaimable.Store(false) },
+			spoil: func(s *session) { s.recvToken = 0 },
 			why: "a notice posted now would be erased by the owner re-arming its own " +
 				"deadline, stranding the lease this was meant to free",
 		},
@@ -76,7 +77,7 @@ func TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen(t *testing.T) {
 		},
 		{
 			name:  "nothing can reach its client",
-			spoil: func(s *session) { s.wake = nil; s.reclaimable.Store(false) },
+			spoil: func(s *session) { s.wake = nil; s.recvToken = 0 },
 			why:   "ending a session nobody can explain to is worse than not reclaiming it",
 		},
 	} {
@@ -289,5 +290,92 @@ func TestDemandReclaim_TheFreedLeaseGoesToTheLongestWaiter(t *testing.T) {
 		t.Fatalf("the request that caused the reclaim took the lease it freed (err=%v) — "+
 			"demand must not be a way around the line", err)
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// THE OFFER, THE RESERVATION AND THE NOTICE ARE ONE OPERATION.
+//
+// THIS IS THE CELL FOR A RACE THAT USED TO END SOMEBODY'S SESSION SILENTLY.
+// The receive window used to live in the front door while the engine kept a
+// flag, so the scheduler could read the flag as open, reserve a session for
+// termination, and only then discover the window had closed because the
+// client's own frame had arrived. The session was ended with no way to tell it
+// — a race the client had won, repaired by terminating them.
+//
+// Now a reservation is only ever taken against a live offer, under the lock
+// that holds both, and the notice is published in the same breath. Retiring the
+// offer first means no reservation can follow it.
+func TestDemandReclaim_ARetiredOfferCannotBeReserved(t *testing.T) {
+	now := time.Now()
+	s := demandHolder("holder", 1, 7, now.Add(-time.Hour))
+	r := demandRegistry(t, s)
+	e := &Engine{sessions: r}
+
+	// The owner's read returns first: the offer closes.
+	if _, woken := e.RetireReceive(s.id, s.recvToken); woken {
+		t.Fatal("a notice was delivered when none had been published")
+	}
+	if _, ok := r.reserveDemandVictim(7, now); ok {
+		t.Error("a session was reserved after its owner had stopped listening; it would be " +
+			"terminated with no way to tell it, having lost a race it had in fact won")
+	}
+	if s.get() != sessOpen {
+		t.Error("the session was left reserved for teardown after a failed selection")
+	}
+}
+
+// A RESERVED SESSION'S OWNER IS ALWAYS TOLD.
+//
+// The reverse of the cell above: if the reservation committed, the notice is
+// there for the owner to find, because both happened under one lock.
+func TestDemandReclaim_AReservationAlwaysCarriesItsNotice(t *testing.T) {
+	now := time.Now()
+	s := demandHolder("holder", 1, 7, now.Add(-90*time.Minute))
+	r := demandRegistry(t, s)
+	e := &Engine{sessions: r}
+	token := s.recvToken
+
+	v, ok := r.reserveDemandVictim(7, now)
+	if !ok {
+		t.Fatal("an eligible holder was not reserved")
+	}
+	n, woken := e.RetireReceive(s.id, token)
+	if !woken {
+		t.Fatal("the reserved session's owner found no notice, so it would dispatch the " +
+			"client's next frame on a session already promised to somebody else")
+	}
+	if n.Gen != v.notice.Gen || n.ID != s.id {
+		t.Errorf("notice = %+v, want the one the reservation published", n)
+	}
+	if n.IdleFor < 89*time.Minute {
+		t.Errorf("idle time = %s, want roughly ninety minutes — it is the justification for "+
+			"ending somebody's session", n.IdleFor)
+	}
+}
+
+// A STALE TOKEN RETIRES NOTHING.
+//
+// It would mean the call belongs to an offer that has already been closed, and
+// honouring it would let one read's outcome close a later read's window.
+func TestDemandReclaim_AStaleReceiveTokenIsIgnored(t *testing.T) {
+	now := time.Now()
+	s := demandHolder("holder", 1, 7, now)
+	r := demandRegistry(t, s)
+	e := &Engine{sessions: r}
+
+	stale := s.recvToken
+	fresh := e.OfferReceive(s.id)
+	if fresh == stale {
+		t.Fatal("a new offer reused the retired offer's token")
+	}
+	if _, ok := r.reserveDemandVictim(7, now); !ok {
+		t.Fatal("the holder was not reserved")
+	}
+	if _, woken := e.RetireReceive(s.id, stale); woken {
+		t.Error("a stale token took the notice, so the offer it belonged to could close a " +
+			"window that had already been reopened")
+	}
+	if _, woken := e.RetireReceive(s.id, fresh); !woken {
+		t.Error("the live token did not find the notice")
 	}
 }
