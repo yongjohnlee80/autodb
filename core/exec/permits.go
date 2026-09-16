@@ -94,6 +94,11 @@ type permitLedger struct {
 	// a transaction still inside its bounds. Installed by the engine, which is
 	// the only thing that knows; see allCapacityInTransaction.
 	inTransaction func() int
+	// reclaimIdle asks the engine to take a backend from an idle holder and
+	// reports whether it freed one. Installed by the engine for the same
+	// reason: the ledger counts sockets, and only the engine knows which
+	// sessions are holding one without using it.
+	reclaimIdle func(context.Context) bool
 
 	mu     sync.Mutex
 	budget int
@@ -462,6 +467,22 @@ func (l *permitLedger) AcquireOrWait(ctx context.Context, connID int64) (*Permit
 	}
 	if l.allCapacityInTransaction() {
 		return nil, ErrAllCapacityInTransaction
+	}
+	// BEFORE MAKING ANYBODY WAIT, SEE IF A SLOT IS MERELY BEING HELD.
+	//
+	// A wire session keeps its backend for its whole life, so an idle session
+	// with no transaction and nothing on the server is holding capacity it is
+	// not using. Handing that over costs the holder nothing they can observe
+	// and costs the waiter ninety seconds they would otherwise spend queued.
+	// Tried ONCE: a loop here would turn one request's pressure into a sweep
+	// of every idle session, and the queue is the right place for sustained
+	// pressure.
+	if l.reclaimIdle != nil && l.reclaimIdle(ctx) {
+		if p, err := l.acquire(DialOrdinary); err == nil {
+			return p, nil
+		}
+		// The reclaimed slot was taken by somebody else in between. That is
+		// not a failure: they were ahead of us, and we queue as normal.
 	}
 	if l.queue == nil {
 		return nil, ErrTargetBudgetExhausted

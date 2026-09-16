@@ -350,6 +350,7 @@ func WithTargetConnBudget(n int) Option {
 				}
 				return e.sessions.inTransactionHoldingBackend()
 			}
+			e.targetPermits.reclaimIdle = e.reclaimOneIdleBackend
 		}
 	}
 }
