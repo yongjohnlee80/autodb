@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -509,5 +510,60 @@ func TestAdmissionWait_TheDiagnosisIsForTheTrailAndNotTheClient(t *testing.T) {
 	if strings.Contains(err.Error(), "lease-cap") {
 		t.Error("the error's own text names an internal limit; the detail is for the audit " +
 			"row, and anything built from Error() would carry it further than intended")
+	}
+}
+
+// THE WAIT OUTRANKS THE CAP IT WAITED ON, WHATEVER THE ERROR MATCHES.
+//
+// THIS CELL EXISTS BECAUSE A MUTATION SURVIVED. Moving the lease-cap arm above
+// the wait arm changed nothing and every test stayed green — the reordering is
+// inert today only because QueueTimeoutError unwraps to the timeout alone, so a
+// cap arm can never claim an expired wait from any position. That left the
+// identity protected by exactly one mechanism while the comment beside it
+// called the order a contract. Two layers were claimed; one was real.
+//
+// So the order is pinned directly, with an error that genuinely satisfies BOTH
+// identities. If the arms are reordered, this fails — independently of whatever
+// shape Unwrap happens to have.
+func TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn(t *testing.T) {
+	t.Parallel()
+	both := fmt.Errorf("%w: %w", ErrQueueTimeout, ErrLeaseCapExceeded)
+	if !errors.Is(both, ErrQueueTimeout) || !errors.Is(both, ErrLeaseCapExceeded) {
+		t.Fatal("the fixture does not match both identities, so it cannot test the order")
+	}
+
+	got := admissionDenial(both)
+	if reason := DenialReason(got); reason != DenyQueueTimeout {
+		t.Errorf("reason = %q, want %q — a request that waited was recorded as one refused "+
+			"on arrival, which is not true of it", reason, DenyQueueTimeout)
+	}
+}
+
+// EVERY ADMISSION REFUSAL HAS AN ANSWER, AND NOTHING ELSE CLAIMS ONE.
+//
+// A refusal with no arm falls through to the raw error, which reaches the
+// client as an unclassified failure rather than a framed one — and an identity
+// nobody maps is one no operator can count.
+func TestAdmissionDenial_EveryAdmissionRefusalIsAnswered(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{ErrQueueTimeout, DenyQueueTimeout},
+		{ErrLeaseCapExceeded, DenyLeaseCap},
+		{ErrAllCapacityInTransaction, DenyAllCapacityInTransaction},
+		{ErrTargetGone, DenyTargetGone},
+		{ErrEngineClosing, DenyEngineClosing},
+		{ErrSessionCapExceeded, DenySessionCap},
+		{ErrResidentBudgetExceeded, DenyResidentBudget},
+	} {
+		if got := DenialReason(admissionDenial(tc.err)); got != tc.want {
+			t.Errorf("%v answered as %q, want %q", tc.err, got, tc.want)
+		}
+	}
+	// Something that is not an admission refusal must NOT be dressed as one.
+	if d := admissionDenial(errors.New("the meta store would not answer")); d != nil {
+		t.Errorf("an unrelated failure was answered as an admission denial: %v", d)
 	}
 }
