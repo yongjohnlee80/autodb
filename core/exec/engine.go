@@ -120,7 +120,13 @@ type Engine struct {
 	// the leak that step exists to stop becomes observable. A FIELD rather
 	// than a package variable for the same reason as the quiesce bounds
 	// below: parallel tests reassigning a shared variable is a data race.
-	backendReset []resetStep
+	//
+	// ATOMIC because the plan is now read from a goroutine this package does
+	// not own: pgxpool calls AfterRelease on its own goroutine, so the hook in
+	// dsn.go reads this while the test that installed the plan is still
+	// running and may already be clearing it. A plain slice field was a race
+	// even though every production write happens once, at construction.
+	backendReset atomic.Pointer[[]resetStep]
 	// closeQuiesce is how long a close waits for an in-flight statement. It
 	// is a FIELD rather than a package variable so a test can shorten it on
 	// its own engine: a shared variable that parallel tests reassign is a

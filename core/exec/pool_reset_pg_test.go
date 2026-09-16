@@ -100,7 +100,7 @@ func TestPoolResetPG_NothingAnOrdinaryStatementLeavesIsVisibleToTheNext(t *testi
 func runPoolLeakCell(t *testing.T, cell leakCell, plan []resetStep) (probed, firstPID, secondPID string) {
 	t.Helper()
 	lt := newLeakTarget(t)
-	lt.f.eng.backendReset = plan
+	lt.f.eng.setResetPlan(plan)
 
 	firstPID = lt.poolScalar(t, "SELECT pg_backend_pid()::text")
 	lt.poolExec(t, cell.take)
@@ -131,7 +131,7 @@ func TestPoolResetPG_AnOrdinaryStatementsStateDoesNotReachAWireSession(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			lt := newLeakTarget(t)
-			lt.f.eng.backendReset = tc.plan
+			lt.f.eng.setResetPlan(tc.plan)
 
 			firstPID := lt.poolScalar(t, "SELECT pg_backend_pid()::text")
 			lt.poolExec(t, "SELECT set_config('autodb.ordinary_to_wire', 'taken', false)")
@@ -171,7 +171,7 @@ func TestPoolResetPG_AWireSessionsStateDoesNotReachAnOrdinaryStatement(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			lt := newLeakTarget(t)
-			lt.f.eng.backendReset = tc.plan
+			lt.f.eng.setResetPlan(tc.plan)
 
 			b := lt.open(t)
 			b.run("SELECT set_config('autodb.wire_to_ordinary', 'taken', false)")
@@ -205,10 +205,10 @@ func TestPoolResetPG_AResetTheTargetRefusesDestroysThePooledBackend(t *testing.T
 	lt := newLeakTarget(t)
 
 	firstPID := lt.poolScalar(t, "SELECT pg_backend_pid()::text")
-	lt.f.eng.backendReset = append(backendResetPlan(),
-		resetStep{carries: "a state no server can discard", sql: "DISCARD NOTHING_LIKE_THIS"})
+	lt.f.eng.setResetPlan(append(backendResetPlan(),
+		resetStep{carries: "a state no server can discard", sql: "DISCARD NOTHING_LIKE_THIS"}))
 	lt.poolExec(t, "SELECT 1")
-	lt.f.eng.backendReset = nil
+	lt.f.eng.setResetPlan(nil)
 
 	if second := lt.poolScalar(t, "SELECT pg_backend_pid()::text"); second == firstPID {
 		t.Fatalf("backend %s came back after a reset the target refused. A connection the "+

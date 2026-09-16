@@ -111,10 +111,21 @@ func backendResetPlan() []resetStep {
 // production and a test fills it to run a DELIBERATELY INCOMPLETE reset, which
 // is the only way to show that each step is load-bearing rather than decorative.
 func (e *Engine) resetPlan() []resetStep {
-	if len(e.backendReset) > 0 {
-		return e.backendReset
+	if p := e.backendReset.Load(); p != nil && len(*p) > 0 {
+		return *p
 	}
 	return backendResetPlan()
+}
+
+// setResetPlan installs a deliberately incomplete plan. Test-only; a nil plan
+// restores the production one. It exists so the plan is published atomically,
+// because the pool's release hook reads it from pgxpool's own goroutine.
+func (e *Engine) setResetPlan(plan []resetStep) {
+	if plan == nil {
+		e.backendReset.Store(nil)
+		return
+	}
+	e.backendReset.Store(&plan)
 }
 
 // backendResetTimeout bounds the whole reset. It is generous because the reset

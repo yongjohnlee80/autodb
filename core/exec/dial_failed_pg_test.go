@@ -50,9 +50,9 @@ func TestDialFailedPG_ABackendThatCannotBeSanitisedAuditsAsSettings(t *testing.T
 	// A reset step no server can run, installed AFTER the open: the same plan
 	// runs when a session TAKES a backend, so a broken plan up front would
 	// simply stop the session opening and this cell would observe nothing.
-	lt.f.eng.backendReset = append(backendResetPlan(),
-		resetStep{carries: "a state no server can discard", sql: "DISCARD NOTHING_LIKE_THIS"})
-	t.Cleanup(func() { lt.f.eng.backendReset = nil })
+	lt.f.eng.setResetPlan(append(backendResetPlan(),
+		resetStep{carries: "a state no server can discard", sql: "DISCARD NOTHING_LIKE_THIS"}))
+	t.Cleanup(func() { lt.f.eng.setResetPlan(nil) })
 
 	_, err := lt.f.eng.acquireRequestBackend(ctx, s, lt.row)
 	d, ok := DialFailureOf(err)

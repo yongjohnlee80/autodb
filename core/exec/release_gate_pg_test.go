@@ -296,7 +296,7 @@ func TestReleaseGatePG_NothingOneSessionLeavesIsVisibleToTheNext(t *testing.T) {
 func runLeakCell(t *testing.T, cell leakCell, plan []resetStep) (probed, firstPID, secondPID string) {
 	t.Helper()
 	lt := newLeakTarget(t)
-	lt.f.eng.backendReset = plan
+	lt.f.eng.setResetPlan(plan)
 
 	first := lt.open(t)
 	first.run(cell.take)
@@ -364,10 +364,10 @@ func TestReleaseGatePG_AResetTheTargetRefusesDiscardsTheBackend(t *testing.T) {
 	// of a reset that fails partway — and it is installed here rather than up
 	// front because the same plan runs when a session TAKES a backend, and a
 	// broken plan would simply stop the session opening.
-	lt.f.eng.backendReset = append(backendResetPlan(),
-		resetStep{carries: "a state no server can discard", sql: "DISCARD NOTHING_LIKE_THIS"})
+	lt.f.eng.setResetPlan(append(backendResetPlan(),
+		resetStep{carries: "a state no server can discard", sql: "DISCARD NOTHING_LIKE_THIS"}))
 	first.close()
-	lt.f.eng.backendReset = nil
+	lt.f.eng.setResetPlan(nil)
 
 	details := auditDetail(t, lt.f, "backend_discarded")
 	if len(details) != 1 {
@@ -443,7 +443,7 @@ func TestReleaseGatePG_ABackendDirtiedByThePooledPathIsProvedAtCheckout(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			lt := newLeakTarget(t)
-			lt.f.eng.backendReset = tc.plan
+			lt.f.eng.setResetPlan(tc.plan)
 
 			// Not a session: the plain pooled execution path, which returns
 			// the connection to the pool the moment it is done.
