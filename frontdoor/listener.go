@@ -148,6 +148,10 @@ type Listener struct {
 	// testHandshakeFail forces the success sequence to fail. Nil in production.
 	testHandshakeFail func() error
 
+	// testBeforeDeadlineArm pauses between the flush and the deadline arming.
+	// Nil in production.
+	testBeforeDeadlineArm func()
+
 	// testDenialDelay slows the denial path. Test-only, and it exists so the
 	// timing harness can prove it detects a leak by measuring one rather
 	// than by asserting arithmetic about one.
@@ -278,6 +282,16 @@ type Options struct {
 	// testLifecycleReady publishes each connection's lifecycle to a cell, so
 	// the phases it ran can be asserted.
 	testLifecycleReady func(peer string, lc *lifecycle)
+
+	// testBeforeDeadlineArm pauses between the success sequence being flushed
+	// and the idle deadline being armed.
+	//
+	// That gap is a real fork in the shutdown path: a Close landing inside it
+	// makes the arming fail and the session end "deadline", while one landing
+	// after it makes the read fail and the session end "peer-closed". Both are
+	// correct, only one can be the recorded trace, and a cell can only pin the
+	// choice if it can reach the other branch on purpose.
+	testBeforeDeadlineArm func()
 
 	// testHandshakeFail fails the handshake BEFORE any of the success sequence
 	// is written.
@@ -442,6 +456,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	l.testReaderReady = opt.testReaderReady
 	l.testLifecycleReady = opt.testLifecycleReady
 	l.testHandshakeFail = opt.testHandshakeFail
+	l.testBeforeDeadlineArm = opt.testBeforeDeadlineArm
 	l.testSegmentMsgs = opt.testSegmentMsgs
 	l.testSegmentBytes = opt.testSegmentBytes
 	l.testWatermark = opt.testWatermark
@@ -855,7 +870,8 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 		// got wrong, and the phase trail said a refused connection had a
 		// successful startup.
 		if out.Denied != "" {
-			return Refuse(outcomeID(out.Denied.String()), WithOutcomeDetail(out.RefusedParam))
+			return Refuse(outcomeID(out.Denied.String()), WithOutcomeDetail(out.RefusedParam),
+				RespondWith(WireUniformDenial))
 		}
 		return Continue()
 	})
@@ -1027,15 +1043,16 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			outcome, aerr = l.runAuth(ctx, stream, be, fr, out.Params, out.GUCs, peer)
 			switch {
 			case aerr != nil:
-				// THE IDENTITY THE SOURCE CHOSE, not one picked here.
+				// THE IDENTITY AND THE RESPONSE THE SOURCE CHOSE, neither
+				// picked here.
 				//
 				// runAuth knows which of these happened -- the peer left, we
-				// had no worker, the exchange could not be set up -- and it
-				// says so. This used to hard-code the peer's identity while
-				// the throttle consulted the one runAuth had actually
-				// selected, so one event was recorded as two different things
-				// and only one of them decided the charge.
-				return Operational(outcome.Failure, aerr)
+				// had no worker, the store would not answer -- and whether the
+				// peer is owed an answer. This used to hard-code the peer's
+				// identity while the throttle consulted the one runAuth had
+				// actually selected, so one event was recorded as two
+				// different things and only one of them decided the charge.
+				return Operational(outcome.Failure, aerr, RespondWith(outcome.Respond))
 			case outcome.Denied != "":
 				// THE WITNESS TRAVELS HERE. It came from the engine, which
 				// sets it only at a raise site reached with a verified
@@ -1044,9 +1061,10 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 				// above either gate produces no witness and the surface stays
 				// uniform instead of leaking.
 				if outcome.Disclosable {
-					return Refuse(outcomeID(outcome.Denied.String()), WithWitness())
+					return Refuse(outcomeID(outcome.Denied.String()), WithWitness(),
+						RespondWith(WireUniformDenial))
 				}
-				return Refuse(outcomeID(outcome.Denied.String()))
+				return Refuse(outcomeID(outcome.Denied.String()), RespondWith(WireUniformDenial))
 			}
 			return Continue()
 		})
@@ -1074,6 +1092,30 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			if credential.Occurrence.Charges() {
 				l.admit.noteFailure(peer)
 			}
+			// AND ANSWERED AS THE PHASE SAID, not as the kind implies. A store
+			// outage is error-driven and still owes the caller the uniform
+			// denial; a peer that went away is owed nothing and could not read
+			// it anyway.
+			if credential.Outcome.Wire() == WireUniformDenial {
+				if derr := sendDenialOccurrence(stream, credential.Occurrence); derr != nil {
+					l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
+				}
+			}
+			// THE CLIENT IS TOLD FIRST AND THE OPERATOR SECOND, here as on
+			// every other refusal path, and parked on the same gate so the
+			// window is observable. Without the gate this ending would be the
+			// one path whose ordering nothing checked.
+			if l.testPostDenialAuditGate != nil {
+				<-l.testPostDenialAuditGate
+			}
+			// ITS OWN EVENT KIND. An error-driven ending in the credential
+			// exchange is not a credential denial, and filing it as one
+			// inflates the number an operator watches for credential attacks
+			// with events that are our fault.
+			safely(func() {
+				l.onEvent(Event{Kind: EventAuthOperational, Reason: string(outcome.Failure),
+					Peer: peer})
+			})
 			return
 		}
 		if outcome.Denied == "" {
@@ -1185,6 +1227,9 @@ func (l *Listener) serveSession(ctx context.Context, lc *lifecycle, stream net.C
 		// re-arms it per message, clears it for engine work, and swaps it for
 		// the partial-frame progress budget once a message has started — see
 		// session_loop.go, which owns those transitions.
+		if l.testBeforeDeadlineArm != nil {
+			l.testBeforeDeadlineArm()
+		}
 		if err := stream.SetDeadline(l.now().Add(l.dl.idle)); err != nil {
 			return Operational(outcomeID(OutcomeDeadlineArm), err)
 		}

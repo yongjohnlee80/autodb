@@ -105,9 +105,14 @@ type CancelExecutor interface {
 type authOutcome struct {
 	Session exec.WireSessionResult
 	Denied  denialReason
-	// Failure names a non-denial ending -- a read that broke, a worker we
-	// could not spare -- so the charge for it comes from the registry like
-	// every other outcome's.
+	// Failure names an ERROR-DRIVEN ending -- a read that broke, a worker we
+	// could not spare, a store that would not answer -- so the charge for it
+	// comes from the registry like every other outcome's.
+	//
+	// Respond says what the peer is told, and it is carried rather than
+	// inferred: an error-driven ending may still owe the caller the uniform
+	// denial, which is why a store outage does not have to become a "refusal"
+	// in order to write bytes.
 	//
 	// IT REPLACES TWO BOOLEANS. Counts and Peer said whether to charge, beside
 	// a registry that also said whether to charge, and the two could disagree:
@@ -115,6 +120,7 @@ type authOutcome struct {
 	// while a Boolean charged one of them. One authority, and it is the
 	// registered class.
 	Failure outcome.ReasonID
+	Respond WireResponse
 	// Disclosable carries the engine's witness that this refusal happened
 	// AFTER the credential verified, which is the only condition under which
 	// the wire may say what went wrong. Not derived from the reason: see
@@ -165,7 +171,8 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 	be.Send(&pgproto3.AuthenticationCleartextPassword{})
 	if err := be.Flush(); err != nil {
 		// OURS: the prompt could not be written. The peer has not been asked
-		// for anything yet, so there is nothing they could have done wrong.
+		// for anything yet, so there is nothing they could have done wrong,
+		// and the socket is in no state to carry an answer.
 		return authOutcome{Failure: outcomeID(OutcomeAuthSetupFailed)}, err
 	}
 	// Row 2.8: after this, EVERY type-`p` frame decodes as a PasswordMessage,
@@ -274,7 +281,17 @@ func (l *Listener) runAuth(ctx context.Context, conn net.Conn, be *pgproto3.Back
 		// not earned either — but the audit says what it was, and the
 		// address is NOT charged for our outage.
 		l.onLog(fmt.Sprintf("frontdoor: authenticating %s: %v", peer, aerr))
-		return authOutcome{Denied: reasonAuthStoreError}, nil
+		// OURS, AND ERROR-DRIVEN, AND STILL OWED AN ANSWER. Three separate
+		// facts, carried separately: the identity is operational, the charge
+		// is none, and the peer gets the uniform denial because telling them
+		// our database is unreachable is an answer they have not earned
+		// either.
+		//
+		// It was briefly declared a refusal purely because it writes bytes,
+		// which conflated the wire with the kind and filed a store outage
+		// under the number an operator watches for credential attacks.
+		return authOutcome{Failure: outcomeID(string(reasonAuthStoreError)),
+			Respond: WireUniformDenial}, aerr
 	}
 	return authOutcome{Session: res}, nil
 }

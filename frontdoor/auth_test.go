@@ -396,12 +396,21 @@ func TestAuth_StoreFailureIsNotACredentialFailure(t *testing.T) {
 		t.Fatalf("got %T/%v, want the uniform denial", msg, msg)
 	}
 
-	waitFor(t, "the audit row", func() bool { _, ok := find(events(), "fd.auth_denied"); return ok })
-	denied, _ := find(events(), "fd.auth_denied")
-	if denied.Reason != string(reasonAuthStoreError) {
-		t.Errorf("audited reason = %q, want %q — filing our own outage under a credential cause "+
-			"inflates the count an operator alerts on with events that are our fault",
-			denied.Reason, reasonAuthStoreError)
+	// A DEDICATED EVENT KIND, not a reason inside the denial kind.
+	//
+	// This cell used to accept fd.auth_denied with a distinguishing reason,
+	// which is the thing its own name says must not happen: an operator
+	// counting fd.auth_denied to watch for credential attacks was counting our
+	// store outages among them, and no reason field prevents that -- the count
+	// is of the kind.
+	waitFor(t, "the audit row", func() bool { _, ok := find(events(), EventAuthOperational); return ok })
+	failed, _ := find(events(), EventAuthOperational)
+	if failed.Reason != string(reasonAuthStoreError) {
+		t.Errorf("audited reason = %q, want %q", failed.Reason, reasonAuthStoreError)
+	}
+	if _, denied := find(events(), "fd.auth_denied"); denied {
+		t.Error("our own outage was ALSO filed as a credential denial, which is the count " +
+			"an operator alerts on")
 	}
 }
 

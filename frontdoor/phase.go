@@ -147,6 +147,8 @@ type Outcome struct {
 	// authorized is the disclosure witness, carried per event. It is never
 	// derived from the reason -- see core/outcome.
 	authorized bool
+	// wire is what the peer is told. Carried, never inferred from the kind.
+	wire WireResponse
 }
 
 // Continue means the phase is done and the next one may run.
@@ -190,6 +192,43 @@ func TerminalControl(id outcome.ReasonID, opts ...OutcomeOption) Outcome {
 	return o
 }
 
+// WireResponse is what the PEER is told, which is a third question and not a
+// consequence of either of the other two.
+//
+// It used to be inferred: a refusal was assumed to carry a frame and an
+// operational ending not to. That is false in both directions -- a TLS failure
+// is a refusal with no frame at all, and a store outage is error-driven and
+// still owes the caller the uniform denial -- and inferring it is what pushed a
+// store outage into being declared a refusal purely because it writes bytes.
+//
+// The phase states it, because the phase is what knows the protocol state.
+type WireResponse uint8
+
+const (
+	// WireNothing is the zero value and the safe default: say nothing.
+	//
+	// A peer mid-TLS cannot read a PostgreSQL frame, and one that has gone
+	// away cannot read anything. Silence is also the only answer that cannot
+	// disclose something by accident, which is the right default for a value
+	// somebody might forget to set.
+	WireNothing WireResponse = iota
+	// WireUniformDenial is the one shape every refusal shares.
+	WireUniformDenial
+	// WireFatalInternal is the stable internal error, for an authenticated
+	// caller on a quiescent stream.
+	WireFatalInternal
+)
+
+func (w WireResponse) String() string {
+	switch w {
+	case WireUniformDenial:
+		return "uniform-denial"
+	case WireFatalInternal:
+		return "fatal-internal"
+	}
+	return "nothing"
+}
+
 // OutcomeOption sets what varies per event rather than per identity.
 type OutcomeOption func(*Outcome)
 
@@ -198,6 +237,15 @@ type OutcomeOption func(*Outcome)
 // one input that decides whether the surface says more than "denied", so every
 // use of it should be visible in review.
 func WithWitness() OutcomeOption { return func(o *Outcome) { o.authorized = true } }
+
+// RespondWith states what the peer is told. Absent it, nothing is said, which
+// is the only default that cannot disclose anything by accident.
+func RespondWith(w WireResponse) OutcomeOption {
+	return func(o *Outcome) { o.wire = w }
+}
+
+// Wire reports what this outcome says to the peer.
+func (o Outcome) Wire() WireResponse { return o.wire }
 
 // WithOutcomeDetail records the internal particular for the operator's record.
 func WithOutcomeDetail(detail string) OutcomeOption {

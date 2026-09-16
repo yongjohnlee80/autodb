@@ -214,30 +214,21 @@ func witnessOpts(o Outcome) []outcome.OccurOption {
 	return opts
 }
 
-// occurrence projects a phase's outcome into the registry's runtime value, for
-// the record. It is the ONLY way an occurrence is built, so the witness cannot
-// be attached anywhere the phase did not attach it.
-func (lc *lifecycle) occurrence(name PhaseName, o Outcome) (outcome.Occurrence, error) {
-	p, known := lc.phases[name]
-	if !known {
-		return outcome.Occurrence{}, fmt.Errorf("frontdoor: %s is not a declared phase", name)
-	}
-	return lc.reg.Occur(p.Producer, o.reason, witnessOpts(o)...)
-}
-
-// outcomeID converts a phase's own reason string to the registry's neutral
-// identity. It is a conversion and not a lookup: the value does not change,
-// which is what "the existing types adapt" means and what a cell asserts.
-func outcomeID(reason string) outcome.ReasonID { return outcome.ReasonID(reason) }
-
-// NOTE: denialOccurrence and chargeFor are deliberately GONE.
+// NOTE: denialOccurrence, chargeFor and lifecycle.occurrence are deliberately
+// GONE, all three.
 //
-// They resolved an identity a second time, from whatever field was nearest,
+// Each resolved an identity a second time, from whatever field was nearest,
 // for consumers that already had a validated one. Two resolutions of one event
 // is two chances to disagree, and they did: the credential phase recorded a
 // hard-coded identity while the throttle consulted the one the source had
-// actually chosen. Every consumer now reads the PhaseResult the phase
-// returned, and there is no helper left that could rebuild one.
+// actually chosen.
+//
+// The last of them survived as a "just for tests" helper, which is how the
+// shape stays available: a cell written against it asserts a projection
+// production no longer performs, and the next author reads that cell as
+// evidence the path exists. Every consumer reads the PhaseResult its phase
+// returned; a cell that wants an occurrence runs the phase, and one that wants
+// the registry calls Occur directly.
 
 // ranPhases reports the phases this connection ran, in order.
 func (lc *lifecycle) ranPhases() []PhaseName {
@@ -297,7 +288,22 @@ func (l *Listener) lifecycleFault(lc *lifecycle, phase PhaseName, peer string, s
 	stream io.Writer, quiescent bool, cause error) {
 
 	// RESOLVED ONCE, through the registry, under the producer that owns it.
-	l.onLog(fmt.Sprintf("frontdoor: the %s phase for %s: %v", phase, peer, cause))
+	// EVERY CALLBACK HERE IS GUARDED SEPARATELY.
+	//
+	// These are host-supplied funcs, and this path runs where there is no
+	// recovery boundary above it: the ACCEPT fault fires on the accept
+	// goroutine, before any handler exists, so a panicking application logger
+	// escapes Serve itself and takes the listener down -- which is the outage
+	// the whole containment mechanism exists to prevent, reached through the
+	// code that reports our own defects.
+	//
+	// Individually, not as a group: a broken logger must not swallow the
+	// event, and a broken observer must not swallow the log. Losing both would
+	// leave a fault invisible; losing one leaves it half-reported, which is
+	// strictly better and is all that is on offer once a callback misbehaves.
+	safely(func() {
+		l.onLog(fmt.Sprintf("frontdoor: the %s phase for %s: %v", phase, peer, cause))
+	})
 
 	occ, err := lc.reg.Occur(ProducerLifecycle, outcomeID(OutcomeInternalError))
 	if err != nil {
@@ -307,7 +313,9 @@ func (l *Listener) lifecycleFault(lc *lifecycle, phase PhaseName, peer string, s
 		// vocabulary, because an unvalidated identity in the trail is exactly
 		// what the registry exists to make impossible. The operator gets the
 		// whole of it in the log; the connection still ends, above.
-		l.onLog(fmt.Sprintf("frontdoor: the lifecycle fault identity does not resolve: %v", err))
+		safely(func() {
+			l.onLog(fmt.Sprintf("frontdoor: the lifecycle fault identity does not resolve: %v", err))
+		})
 	} else {
 		safely(func() {
 			l.onEvent(Event{Kind: EventLifecycleFault, Reason: string(occ.Reason), Peer: peer,
@@ -318,13 +326,18 @@ func (l *Listener) lifecycleFault(lc *lifecycle, phase PhaseName, peer string, s
 		// Unreachable while internal-error is registered None, and asserted
 		// rather than assumed: charging a peer for our defect is the failure
 		// this whole vocabulary exists to stop.
-		l.onLog("frontdoor: refusing to charge a peer for a lifecycle fault")
+		safely(func() { l.onLog("frontdoor: refusing to charge a peer for a lifecycle fault") })
 	}
 
 	switch stage {
 	case faultDuringCredential:
+		// THE WRITE IS OUTSIDE THE GUARD, deliberately: it is our own code on
+		// a socket, not a host callback, and swallowing its failure would hide
+		// a broken stream behind a mechanism meant for broken observers.
 		if derr := sendDenial(stream, reasonPreAuthProtocolViolation); derr != nil {
-			l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
+			safely(func() {
+				l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
+			})
 		}
 	case faultAfterSessionOpen:
 		if !quiescent {
@@ -333,7 +346,14 @@ func (l *Listener) lifecycleFault(lc *lifecycle, phase PhaseName, peer string, s
 			return
 		}
 		if derr := sendFatalInternal(stream); derr != nil {
-			l.onLog(fmt.Sprintf("frontdoor: writing the internal error to %s: %v", peer, derr))
+			safely(func() {
+				l.onLog(fmt.Sprintf("frontdoor: writing the internal error to %s: %v", peer, derr))
+			})
 		}
 	}
 }
+
+// outcomeID converts a phase's own reason string to the registry's neutral
+// identity. It is a conversion and not a lookup: the value does not change,
+// which is what "the existing types adapt" means and what a cell asserts.
+func outcomeID(reason string) outcome.ReasonID { return outcome.ReasonID(reason) }
