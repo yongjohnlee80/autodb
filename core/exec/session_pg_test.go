@@ -288,8 +288,15 @@ func TestSessionPG_AbortedTransactionAcceptsOnlyRollback(t *testing.T) {
 }
 
 // The idle-in-transaction limit really rolls a transaction back, and the
-// audit says which limit fired. Driven by the injected clock, so the test
-// does not wait 90 seconds to prove a 90-second rule.
+// audit says which limit fired. Driven by the injected clock, so the test does
+// not wait two hours to prove a two-hour rule.
+//
+// THE ADVANCE MOVES WITH THE BOUND. It was ten minutes, which cleared the old
+// ninety-second limit comfortably and then quietly cleared nothing at all once
+// the ruled bound became two hours -- the reaper correctly acted on no
+// sessions and the cell read that as a broken reaper. A cell that hard-codes a
+// span outlives the rule it was sized against, so this one is derived from the
+// limit in force.
 func TestSessionPG_IdleInTransactionRollsBackAndAudits(t *testing.T) {
 	f, connID, sid, table := pgSession(t)
 	ctx := context.Background()
@@ -297,8 +304,9 @@ func TestSessionPG_IdleInTransactionRollsBackAndAudits(t *testing.T) {
 	mustSession(t, f, sid, "BEGIN")
 	mustSession(t, f, sid, "INSERT INTO "+table+" (note) VALUES ('timed-out')")
 
-	// Well past the idle bound.
-	if n := f.eng.reapExpired(ctx, time.Now().Add(10*time.Minute)); n != 1 {
+	// Well past the idle bound, whatever it currently is.
+	past := defaultTxLimits().idleInTx + time.Minute
+	if n := f.eng.reapExpired(ctx, time.Now().Add(past)); n != 1 {
 		t.Fatalf("the reaper acted on %d sessions, want 1", n)
 	}
 	if n := countRows(t, f, connID, table); n != 0 {
