@@ -63,6 +63,17 @@ const (
 	OutcomeDeadlineArm     = "deadline"
 	OutcomeSessionError    = "session-error"
 	OutcomePeerClosed      = "peer-closed"
+	// EventAuthOperational is the audit kind for an error-driven ending in the
+	// credential exchange.
+	//
+	// NOT fd.auth_denied. A peer may have presented a perfectly good
+	// credential and been refused because our own store was unreachable;
+	// filing that under the denial kind inflates the number an operator
+	// watches for credential attacks with events that are our fault. The code
+	// already said so in a comment and then did the opposite, because the
+	// store outage travelled down the common denial path.
+	EventAuthOperational = "fd.auth_failed"
+
 	// OutcomeInternalError is a fault in OUR code -- a phase that could not
 	// run, an identity nobody declared. Never the peer's doing and never
 	// charged to them.
@@ -224,13 +235,15 @@ func credentialOutcomes(
 		// behind this listener yet. A peer holding a perfectly good token
 		// meets these through no fault of their own, so neither is charged.
 		//
-		// BOTH ARE REFUSALS, not operational endings, and the distinction is
-		// the wire. These are raised as denials and the peer receives the
-		// uniform denial frame; "operational" is for endings that produce no
-		// frame at all. Declaring one of them operational made the verdict and
-		// the declaration disagree the moment the runner started checking,
-		// which is the check doing its job.
-		refusal(reasonAuthStoreError, outcome.None),
+		// THE STORE OUTAGE IS OPERATIONAL, and it still writes a frame.
+		//
+		// It was briefly a refusal on the grounds that it renders one, which
+		// conflated three separate questions. It is error-driven (kind), ours
+		// (charge), and owed the uniform denial (wire) -- and the wire is
+		// carried on the outcome, so it need not distort the kind to get one.
+		{ID: outcome.ReasonID(reasonAuthStoreError), Kind: outcome.Operational, Charge: outcome.None},
+		// A listener with no credential store behind it yet is a DECISION not
+		// to serve, taken before anything failed.
 		refusal(reasonNoCredentialStore, outcome.None),
 		// A credential exchange the peer abandoned mid-way, and a fault in our
 		// own phase wiring. Neither is a refusal; both end the connection.

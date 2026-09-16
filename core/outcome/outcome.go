@@ -60,8 +60,22 @@ const (
 	// Control is a protocol action that is not a refusal: a cancel request
 	// arriving, a terminal branch that never authenticates.
 	Control
-	// Operational is our own failure -- a read that broke, a store that would
-	// not answer. Never the peer's doing and never charged to them.
+	// Operational is an ENDING DRIVEN BY AN ERROR rather than by a decision:
+	// a read that broke, a store that would not answer, a peer that went away
+	// mid-exchange.
+	//
+	// IT SAYS NOTHING ABOUT ATTRIBUTION, and the first version of this comment
+	// said it did -- "never the peer's doing and never charged". That was
+	// wrong twice over. A peer abandoning the credential exchange is an
+	// error-driven ending AND squarely theirs; a store outage is error-driven
+	// and squarely ours. Reading attribution off the kind forced one of those
+	// two to be misfiled, and the fix was to reclassify one of them by what
+	// the WIRE does -- which is a third question again.
+	//
+	// So: Kind says what sort of ending it was. Charge alone says who is
+	// answerable. What the peer is told is decided by protocol state at the
+	// projection, not here. Three questions, three answers, and none of them
+	// may be inferred from another.
 	Operational
 	// Note is an observation recorded beside an accepted outcome, such as a
 	// startup parameter that was adjusted rather than refused.
@@ -83,6 +97,10 @@ func (k Kind) String() string {
 }
 
 // Charge is what this outcome costs the peer's source address.
+//
+// THE SOLE ANSWER TO ATTRIBUTION, independent of Kind. An error-driven ending
+// may be the peer's doing or ours, and a decision may be either; nothing about
+// one axis constrains the other.
 type Charge uint8
 
 const (

@@ -85,6 +85,7 @@ wire:
 events:
   fd.conn_open
   fd.tls_ok
+  fd.auth_failed reason=auth-read-failed
   fd.conn_close reason=auth-read-failed
 close-reason: auth-read-failed
 charge-delta: 1

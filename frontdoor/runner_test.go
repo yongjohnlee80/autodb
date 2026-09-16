@@ -226,11 +226,17 @@ func TestRunner_TheWitnessReachesTheOccurrenceOnlyWhenGiven(t *testing.T) {
 		{"without", Refuse(outcomeID(exec.DenyLeaseCap)), false},
 		{"with", Refuse(outcomeID(exec.DenyLeaseCap), WithWitness()), true},
 	} {
+		// THROUGH THE PHASE, because that is the only projection production
+		// performs. A helper that projected one for cells alone would keep the
+		// second-resolution shape alive in the tests after it was deleted from
+		// the code.
 		lc := testLifecycle(t)
-		occ, err := lc.occurrence(PhaseAuthenticateAndOpen, c.out)
+		out := c.out
+		res, err := lc.run(PhaseAuthenticateAndOpen, func() Outcome { return out })
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
+		occ := res.Occurrence
 		if occ.Disclosable != c.want {
 			t.Errorf("%s the witness: Disclosable = %t, want %t", c.name, occ.Disclosable, c.want)
 		}
@@ -742,7 +748,7 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"authenticate-and-open", "auth-setup-failed", outcome.Operational, outcome.None},
 		{"authenticate-and-open", "auth-worker-unavailable", outcome.Operational, outcome.None},
 		{"authenticate-and-open", "frontdoor/auth-not-yet-available", outcome.Refusal, outcome.None},
-		{"authenticate-and-open", "frontdoor/auth-store-error", outcome.Refusal, outcome.None},
+		{"authenticate-and-open", "frontdoor/auth-store-error", outcome.Operational, outcome.None},
 		{"authenticate-and-open", "frontdoor/bad-credential", outcome.Refusal, outcome.Credential},
 		{"authenticate-and-open", "frontdoor/database-mismatch", outcome.Refusal, outcome.None},
 		{"authenticate-and-open", "frontdoor/ip-not-admitted", outcome.Refusal, outcome.Credential},
@@ -1040,16 +1046,11 @@ func TestCharging_TheRegisteredClassIsTheOnlyAuthority(t *testing.T) {
 func TestRunner_AnAcceptFaultIsNotACapacityRefusal(t *testing.T) {
 	t.Parallel()
 
-	l, events, addr := listenerWith(t, Options{AuthFailuresPerIP: unthrottled})
 	// A phase table that is present but missing accept: the one shape that
-	// makes the fault path reachable.
-	l.phases = map[PhaseName]Phase{}
-	for _, p := range lifecyclePhases() {
-		if p.Name == PhaseAccept {
-			continue
-		}
-		l.phases[p.Name] = p
-	}
+	// makes the fault path reachable. Installed BEFORE Serve, or it is a write
+	// to a field the accept loop is already reading.
+	l, events, addr := listenerWithPrepare(t, Options{AuthFailuresPerIP: unthrottled},
+		withoutPhase(PhaseAccept))
 
 	host := "127.0.0.1"
 	before := failureCount(l, host)
@@ -1336,23 +1337,16 @@ func TestRunner_AQuiescentAuthenticatedStreamGetsTheFatalInternalFrame(t *testin
 	t.Parallel()
 
 	eng := &traceEngine{session: goodSession()}
-	l, events, addr := listenerWith(t, Options{
+	// Serve is declared but absent from the table, so the phase faults with
+	// the session already open and the stream between messages.
+	l, events, addr := listenerWithPrepare(t, Options{
 		Authn: eng, Cancels: eng, AuthFailuresPerIP: unthrottled,
 		// A session handler that returns immediately, so the serve phase ends
 		// with the stream quiescent.
 		OnSession: func(context.Context, net.Conn, *pgproto3.Backend, exec.WireSessionResult) error {
 			return nil
 		},
-	})
-	// Serve is declared but absent from the table, so the phase faults with
-	// the session already open and the stream between messages.
-	l.phases = map[PhaseName]Phase{}
-	for _, p := range lifecyclePhases() {
-		if p.Name == PhaseServe {
-			continue
-		}
-		l.phases[p.Name] = p
-	}
+	}, withoutPhase(PhaseServe))
 
 	host := "127.0.0.1"
 	before := failureCount(l, host)
@@ -1477,21 +1471,22 @@ func TestCharging_OurWorkerShortfallIsNotChargedToThePeer(t *testing.T) {
 	t.Parallel()
 
 	eng := &traceEngine{session: goodSession()}
-	l, events, addr := listenerWith(t, Options{
-		Authn: eng, Cancels: eng, AuthFailuresPerIP: unthrottled,
-	})
-	// Every credential worker is busy, and the phase's own budget is short.
-	l.authSlots = make(chan struct{}, 1)
-	l.authSlots <- struct{}{}
-	l.dl.auth = 100 * time.Millisecond
-
 	var mu sync.Mutex
 	byPeer := map[string]*lifecycle{}
-	l.testLifecycleReady = func(peer string, lc *lifecycle) {
-		mu.Lock()
-		byPeer[peer] = lc
-		mu.Unlock()
-	}
+	// Every credential worker is busy and the phase's own budget is short --
+	// installed before Serve, like every other reach into a listener.
+	l, events, addr := listenerWithPrepare(t, Options{
+		Authn: eng, Cancels: eng, AuthFailuresPerIP: unthrottled,
+		testLifecycleReady: func(peer string, lc *lifecycle) {
+			mu.Lock()
+			byPeer[peer] = lc
+			mu.Unlock()
+		},
+	}, func(l *Listener) {
+		l.authSlots = make(chan struct{}, 1)
+		l.authSlots <- struct{}{}
+		l.dl.auth = 100 * time.Millisecond
+	})
 
 	host := "127.0.0.1"
 	before := failureCount(l, host)
@@ -1544,5 +1539,103 @@ func TestCharging_OurWorkerShortfallIsNotChargedToThePeer(t *testing.T) {
 	if after := failureCount(l, host); after != before {
 		t.Errorf("throttle delta = %d, want 0 — the peer waited for a worker we could not "+
 			"spare and presented something we never looked at", after-before)
+	}
+}
+
+// A PANICKING LOGGER MUST NOT TAKE THE LISTENER DOWN FROM THE ACCEPT LOOP.
+//
+// The accept fault fires on the accept goroutine, BEFORE any handler exists
+// and so before any recovery boundary. An unguarded host callback there escapes
+// Serve itself and ends the listener -- which is the outage the containment
+// mechanism exists to prevent, reached through the very code that reports our
+// own defects.
+//
+// Each callback is guarded separately, so a broken logger cannot swallow the
+// event: the fault stays half-reported rather than invisible.
+func TestRunner_APanickingLoggerAtAcceptDoesNotEndTheListener(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var events []Event
+	// Accept is declared but absent, so the phase faults on the accept
+	// goroutine with a logger that explodes.
+	l, _, addr := listenerWithPrepare(t, Options{
+		AuthFailuresPerIP: unthrottled,
+		OnLog:             func(string) { panic("the application logger exploded") },
+		OnEvent: func(e Event) {
+			mu.Lock()
+			events = append(events, e)
+			mu.Unlock()
+		},
+	}, withoutPhase(PhaseAccept))
+
+	host := "127.0.0.1"
+	before := failureCount(l, host)
+
+	c := dial(t, addr)
+	peer := local(c)
+	_ = readToEOF(t, c)
+
+	// THE EVENT STILL LANDS, despite the logger panicking beside it.
+	waitFor(t, "the fault event", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, e := range events {
+			if e.Peer == peer && e.Kind == EventLifecycleFault {
+				return true
+			}
+		}
+		return false
+	})
+
+	mu.Lock()
+	for _, e := range events {
+		if e.Peer == peer && e.Kind == "fd.budget_refuse" {
+			t.Error("our fault was recorded as a capacity refusal")
+		}
+	}
+	mu.Unlock()
+
+	if after := failureCount(l, host); after != before {
+		t.Errorf("throttle delta = %d, want 0", after-before)
+	}
+
+	// EVERYTHING COMES BACK, exactly once.
+	waitFor(t, "the accept-time reservation to be released", func() bool {
+		return liveConns(l) == 0
+	})
+	if got := resourcesAfter(l); !strings.Contains(got, "conns=0 pre-auth=0 control-lane-bytes=0 per-source=[] tracked=0") {
+		t.Errorf("a fault with a panicking logger leaked: %s", got)
+	}
+
+	// AND THE LISTENER IS STILL SERVING. This is the property the whole
+	// mechanism is for: a second connection is accepted after the first one
+	// was handled by an exploding observer.
+	second := dial(t, addr)
+	_ = readToEOF(t, second)
+	waitFor(t, "the second connection to be handled", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, e := range events {
+			if e.Kind == EventLifecycleFault {
+				n++
+			}
+		}
+		return n >= 2
+	})
+}
+
+// withoutPhase builds a prepare func that installs every declared phase except
+// one, which is how a cell makes the runner's fault path reachable.
+func withoutPhase(absent PhaseName) func(*Listener) {
+	return func(l *Listener) {
+		l.phases = map[PhaseName]Phase{}
+		for _, p := range lifecyclePhases() {
+			if p.Name == absent {
+				continue
+			}
+			l.phases[p.Name] = p
+		}
 	}
 }

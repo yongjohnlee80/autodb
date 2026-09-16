@@ -38,7 +38,23 @@ const unthrottled = 1 << 20
 // listenerWith starts a real listener on a real port with real TLS material,
 // merging the caller's options over the test defaults.
 func listenerWith(t testing.TB, opt Options) (*Listener, func() []Event, string) {
-	l, ev, addr, _ := listenerWithCA(t, opt)
+	l, ev, addr, _ := listenerWithCA(t, opt, nil)
+	return l, ev, addr
+}
+
+// listenerWithPrepare is listenerWith with a mutator applied BETWEEN Open and
+// Serve.
+//
+// THAT WINDOW IS THE ONLY SAFE ONE. A cell that reaches into a listener after
+// Serve has started -- lowering a cap, removing a phase, filling the worker
+// slots -- writes a field the accept loop is already reading, and the race
+// detector says so. Several cells did exactly that, and the resulting reports
+// are indistinguishable from a production race until somebody reads the stack.
+//
+// The listener is fully constructed here and nothing has connected yet, so the
+// mutator is the last writer before any reader exists.
+func listenerWithPrepare(t testing.TB, opt Options, prepare func(*Listener)) (*Listener, func() []Event, string) {
+	l, ev, addr, _ := listenerWithCA(t, opt, prepare)
 	return l, ev, addr
 }
 
@@ -52,7 +68,7 @@ func listenerWith(t testing.TB, opt Options) (*Listener, func() []Event, string)
 // verification failure against a root from a different test. Which is the
 // positive control doing its job — without it the cell would have "passed" on a
 // refusal that had nothing to do with the name.
-func listenerWithCA(t testing.TB, opt Options) (*Listener, func() []Event, string, string) {
+func listenerWithCA(t testing.TB, opt Options, prepare func(*Listener)) (*Listener, func() []Event, string, string) {
 	t.Helper()
 	now := time.Now()
 	c := issueChain(t, []string{"autodb.example.com"}, now.Add(-time.Hour), now.Add(24*time.Hour))
@@ -74,6 +90,10 @@ func listenerWithCA(t testing.TB, opt Options) (*Listener, func() []Event, strin
 	l, err := Open("127.0.0.1:0", cfg, opt)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
+	}
+	// BEFORE Serve: see listenerWithPrepare.
+	if prepare != nil {
+		prepare(l)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = l.Serve(ctx) }()

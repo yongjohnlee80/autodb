@@ -165,12 +165,18 @@ func pgTryClient(t *testing.T, addr, secret, database string) (*pgproto3.Fronten
 	}
 }
 
-// A pre-auth refusal is audited as fd.auth_denied — matched on the KIND as well
-// as the reason, so a reason string appearing on some other event cannot stand
-// in for the denial this control is about.
+// A pre-auth refusal is audited as fd.auth_denied, or as fd.auth_failed when
+// the exchange ended on an error of ours rather than on a decision about the
+// caller — matched on the KIND as well as the reason, so a reason string
+// appearing on some other event cannot stand in for the ending this control is
+// about.
+//
+// BOTH KINDS, because the ordering contract these helpers police -- the client
+// is told before the operator -- applies to both, and a helper that saw only
+// denials would let an error-driven ending cross the gate unnoticed.
 func refusedFor(evs []Event, reason string) bool {
 	for _, e := range evs {
-		if e.Kind == "fd.auth_denied" && e.Reason == reason {
+		if (e.Kind == "fd.auth_denied" || e.Kind == EventAuthOperational) && e.Reason == reason {
 			return true
 		}
 	}
@@ -243,7 +249,7 @@ func waitForRefusal(t *testing.T, events func() []Event, reason, what string) {
 func refusalReasons(evs []Event) []string {
 	var out []string
 	for _, e := range evs {
-		if e.Kind == "fd.auth_denied" || e.Kind == "fd.refused" {
+		if e.Kind == "fd.auth_denied" || e.Kind == EventAuthOperational || e.Kind == "fd.refused" {
 			out = append(out, e.Kind+":"+e.Reason)
 		}
 	}

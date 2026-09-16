@@ -147,7 +147,7 @@ func verifyingClient(t testing.TB, addr, serverName, caFile string) error {
 // `sslmode=verify-full` failure an operator actually hits.
 func TestNegativeWire_ClientRejectsAHostnameMismatch(t *testing.T) {
 	t.Parallel()
-	_, _, addr, ca := listenerWithCA(t, Options{})
+	_, _, addr, ca := listenerWithCA(t, Options{}, nil)
 
 	// The listener's material covers autodb.example.com (listenerWith's
 	// fixture). Dial claiming to be somebody else.
@@ -178,7 +178,7 @@ func TestNegativeWire_ClientRejectsAHostnameMismatch(t *testing.T) {
 // would be decoration.
 func TestNegativeWire_ClientRejectsAnUntrustedCA(t *testing.T) {
 	t.Parallel()
-	_, _, addr, ca := listenerWithCA(t, Options{})
+	_, _, addr, ca := listenerWithCA(t, Options{}, nil)
 
 	// System roots only -- nil RootCAs, not an empty pool. The private CA is
 	// not among them.
@@ -293,7 +293,7 @@ func TestNegativeWire_NoClientCertificateIsEverRequested(t *testing.T) {
 
 	// And a client offering NO certificate connects normally, which is the
 	// behaviour the absence is for.
-	_, _, addr, ca := listenerWithCA(t, Options{})
+	_, _, addr, ca := listenerWithCA(t, Options{}, nil)
 	if err := verifyingClient(t, addr, "autodb.example.com", ca); err != nil {
 		t.Errorf("a client with no certificate was refused: %v", err)
 	}

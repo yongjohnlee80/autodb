@@ -23,21 +23,26 @@ import (
 // So the rule is a conjunction, and the whole truth table is below. Removing
 // either term reopens one of the two holes.
 
-// occurrenceFor builds the typed occurrence a phase would produce, through the
-// registry rather than by hand -- a cell that assembled one itself would be
-// asserting against a classification the system does not hold.
+// occurrenceFor builds the typed occurrence a phase would produce BY RUNNING
+// THE PHASE, not by asking a helper to project one.
+//
+// It used to call a lifecycle.occurrence helper that existed only for cells.
+// That is how a removed shape stays available: a cell written against it
+// asserts a projection production no longer performs, and the next author
+// reads the cell as evidence the path exists.
 func occurrenceFor(t *testing.T, phase PhaseName, reason string, witness bool) outcome.Occurrence {
 	t.Helper()
 	lc := testLifecycle(t)
-	opts := []OutcomeOption{}
-	if witness {
-		opts = append(opts, WithWitness())
+	opts := []OutcomeOption{WithWitness()}
+	if !witness {
+		opts = opts[:0]
 	}
-	occ, err := lc.occurrence(phase, Refuse(outcomeID(reason), opts...))
+	opts = append(opts, RespondWith(WireUniformDenial))
+	res, err := lc.run(phase, func() Outcome { return Refuse(outcomeID(reason), opts...) })
 	if err != nil {
-		t.Fatalf("resolving %q for %s: %v", reason, phase, err)
+		t.Fatalf("running %s with %q: %v", phase, reason, err)
 	}
-	return occ
+	return res.Occurrence
 }
 
 func TestCapacityDisclosure_TheTruthTable(t *testing.T) {

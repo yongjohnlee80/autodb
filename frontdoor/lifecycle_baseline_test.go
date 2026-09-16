@@ -138,6 +138,10 @@ type baselineScenario struct {
 	engine func(*traceEngine)
 	// prepare adjusts the listener's own state before anything connects.
 	prepare func(*Listener)
+	// awaitSession installs a session handler that signals once the handshake
+	// has completed, and makes the harness wait for that signal before
+	// afterDrive runs.
+	awaitSession bool
 	// drive talks to the listener and returns the SUBJECT connection's local
 	// address together with everything the server sent it, having read to
 	// EOF. Returning no bytes is a RESULT, not a failure: several of these
@@ -311,7 +315,8 @@ func lifecycleScenarios() []baselineScenario {
 				}
 				return local(tc), readThroughReady(t, tc)
 			},
-			afterDrive: func(t *testing.T, l *Listener) { l.Close() },
+			afterDrive:   func(t *testing.T, l *Listener) { l.Close() },
+			awaitSession: true,
 		},
 	}
 }
@@ -549,15 +554,43 @@ func runScenario(t *testing.T, sc baselineScenario) string {
 	if sc.engine != nil {
 		sc.engine(eng)
 	}
-	l, events, addr := listenerWith(t, sc.opt(eng))
-	if sc.prepare != nil {
-		sc.prepare(l)
+	opt := sc.opt(eng)
+	inSession := make(chan struct{})
+	if sc.awaitSession {
+		var once sync.Once
+		// BEHAVES AS THE DEFAULT HANDLER DOES -- it reads until the connection
+		// ends -- and signals first. Substituting it changes no observable
+		// behaviour for a client that sends nothing after its readiness, which
+		// is what the golden proves by not moving.
+		opt.OnSession = func(_ context.Context, _ net.Conn, be *pgproto3.Backend, _ exec.WireSessionResult) error {
+			once.Do(func() { close(inSession) })
+			for {
+				if _, err := be.Receive(); err != nil {
+					return nil
+				}
+			}
+		}
 	}
+	// PREPARE RUNS BEFORE Serve. Applying it afterwards is a write to a field
+	// the accept loop is already reading -- the source-cap scenario lowers
+	// exactly such a field -- and the race detector reports it as
+	// indistinguishable from a production race.
+	l, events, addr := listenerWithPrepare(t, opt, sc.prepare)
 
 	host := "127.0.0.1"
 	before := failureCount(l, host)
 
 	peer, wire := sc.drive(t, addr)
+	if sc.awaitSession {
+		// PAST THE FORK. The handler runs only after the handshake phase has
+		// armed the idle deadline, so Close below cannot land on the near side
+		// of it and produce the other of the two correct endings.
+		select {
+		case <-inSession:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the session handler never ran, so the shutdown barrier proves nothing")
+		}
+	}
 	if sc.afterDrive != nil {
 		sc.afterDrive(t, l)
 	}
@@ -837,4 +870,94 @@ func wireOf(trace string) string {
 	}
 	out, _, _ := strings.Cut(rest, "events:\n")
 	return out
+}
+
+// THE FORK THE SHUTDOWN BARRIER CLOSES IS REAL, and this reaches the other
+// branch on purpose.
+//
+// Between flushing the success sequence and arming the idle deadline there is
+// a gap. A Close landing inside it makes the arming fail and the session end
+// "deadline"; one landing after it makes the read fail and the session end
+// "peer-closed". Both are correct behaviours and only one can be the recorded
+// trace.
+//
+// The baseline picks the second by waiting until the server is demonstrably
+// past the gap. That is only worth anything if the first is genuinely
+// reachable -- otherwise the barrier is excluding nothing and the trace would
+// be stable without it. So this cell steps into the gap and shows the other
+// ending, which is what makes the barrier a choice rather than a hope.
+func TestLifecycleBaseline_TheShutdownForkIsRealAndTheBarrierSelectsOne(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	atGap := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+
+	eng := &traceEngine{session: goodSession()}
+	l, events, addr := listenerWith(t, Options{
+		Authn: eng, Cancels: eng, AuthFailuresPerIP: unthrottled,
+		testBeforeDeadlineArm: func() {
+			once.Do(func() {
+				close(atGap)
+				<-release
+			})
+		},
+	})
+	_ = ctx
+
+	tc, fe := startupTo(t, addr, defaultParams())
+	if _, err := fe.Receive(); err != nil {
+		t.Fatalf("auth request: %v", err)
+	}
+	fe.Send(&pgproto3.PasswordMessage{Password: "autodb_pat_secret"})
+	if err := fe.Flush(); err != nil {
+		t.Fatalf("credential: %v", err)
+	}
+
+	select {
+	case <-atGap:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handshake never reached the gap between the flush and the arming")
+	}
+
+	// CLOSE THE SOCKET INSIDE THE GAP. Arming a deadline on a closed
+	// connection fails, which is the branch this cell exists to reach.
+	//
+	// The tracked connection is closed DIRECTLY rather than through Close():
+	// Close waits for in-flight handlers, and the handler it would wait for is
+	// the one parked in this gap -- so calling it here deadlocks on itself.
+	// Closing the live set is exactly what Close does to it, without the wait.
+	l.liveMu.Lock()
+	closed := len(l.live)
+	for c := range l.live {
+		_ = c.Close()
+	}
+	l.liveMu.Unlock()
+	if closed == 0 {
+		t.Fatal("no connection was tracked, so nothing was closed inside the gap")
+	}
+	close(release)
+	_ = readToEOF(t, tc)
+
+	waitFor(t, "the session to end", func() bool {
+		for _, e := range events() {
+			if e.Kind == "fd.session_close" {
+				return true
+			}
+		}
+		return false
+	})
+
+	var reason string
+	for _, e := range events() {
+		if e.Kind == "fd.session_close" {
+			reason = e.Reason
+		}
+	}
+	if reason != OutcomeDeadlineArm {
+		t.Fatalf("session_close reason = %q, want %q. If this branch is unreachable the "+
+			"shutdown barrier is excluding nothing, and the recorded trace would be stable "+
+			"without it", reason, OutcomeDeadlineArm)
+	}
 }
