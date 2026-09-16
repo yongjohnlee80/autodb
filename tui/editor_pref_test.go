@@ -73,6 +73,22 @@ type recordingWriter struct {
 	calls   []prefCall
 	release chan struct{}
 	once    sync.Once
+	// blockEvery holds EVERY write, not only the first.
+	//
+	// THE TWO CELLS WANT OPPOSITE THINGS FROM THE SECOND WRITE, and leaving
+	// that implicit made one of them flaky. The latest-pending cell needs the
+	// queued second write to RUN, so it can observe the operator's newest
+	// choice reaching the RPC. The late-completion cell needs the second write
+	// NOT to finish, because it asserts on the writer's state while that write
+	// is still out -- and a second call that returned immediately let its
+	// completion race the assertion, settle the ticket it was about to check,
+	// and clear the slot to zero.
+	//
+	// That is a race in this harness, not in the writer: the assertion was
+	// right and the test simply could not say when the write it was asking
+	// about would land. It failed roughly a third of the time under -race,
+	// which CI doubles by running -count=2.
+	blockEvery bool
 }
 
 func newRecordingWriter() *recordingWriter {
@@ -84,9 +100,11 @@ func (w *recordingWriter) write(ctx context.Context, b *Bound, pref string) erro
 	first := len(w.calls) == 0
 	w.calls = append(w.calls, prefCall{bound: b, pref: pref})
 	w.mu.Unlock()
-	// Only the first call blocks. A queued second write must be able to RUN
-	// once released, which is the whole thing the latest-pending cell observes.
-	if first {
+	// Only the first call blocks, unless the cell asked for all of them. A
+	// queued second write must be able to RUN once released, which is the whole
+	// thing the latest-pending cell observes -- but a cell that asserts while a
+	// write is still out has to be able to KEEP it out. See blockEvery.
+	if first || w.blockEvery {
 		select {
 		case <-w.release:
 		case <-ctx.Done():
@@ -166,6 +184,13 @@ func TestPrefWriter_RetirementFreesTheWriterForTheNextIdentity(t *testing.T) {
 func TestPrefWriter_ALateCompletionDoesNotDisturbTheNewWriter(t *testing.T) {
 	h := prefModel(t)
 	w := newRecordingWriter()
+	// B MUST STILL BE OUT WHEN THIS CELL LOOKS AT THE WRITER. Everything below
+	// asks what A's late completion did to B's ticket, which is only a question
+	// while B's own completion has not arrived. Letting B finish meant its
+	// completion sometimes settled the very ticket the assertion was about to
+	// read, and the cell reported a cleared slot as the defect it was looking
+	// for -- a failure of the harness wearing the costume of a real finding.
+	w.blockEvery = true
 	defer close(w.release)
 	h.on(func() { h.m.writeOption = w.write })
 
