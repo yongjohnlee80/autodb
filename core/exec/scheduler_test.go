@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -301,7 +302,21 @@ func TestScheduler_TheServerWaitExpiresWithItsOwnIdentity(t *testing.T) {
 	// Expire the wait rather than sleeping through ninety seconds of it. The
 	// clock decides which bound owns the wait; only the timer decides when it
 	// fires, so this is the seam that has to move.
-	r.newTimer = func(time.Duration) *time.Timer { return time.NewTimer(20 * time.Millisecond) }
+	//
+	// THE SEAM IS COUNTED, AND THE CELL IS TIMED. Asserting only the identity
+	// of the answer left this green when the seam was bypassed entirely: the
+	// real ninety-second timer gives the SAME answer, just ninety seconds
+	// later, so the cell passed in 90.01s instead of 0.02s and reported
+	// success. A refactor that hard-codes the timer would keep every scheduler
+	// test green while turning a five-second gate into a multi-minute one --
+	// and once the wait exceeds the test timeout it stops looking like a
+	// refactor at all and starts looking like a hang.
+	var armed atomic.Int32
+	r.newTimer = func(time.Duration) *time.Timer {
+		armed.Add(1)
+		return time.NewTimer(20 * time.Millisecond)
+	}
+	start := time.Now()
 
 	holder := schedSession("holder", 1, 7)
 	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
@@ -317,6 +332,14 @@ func TestScheduler_TheServerWaitExpiresWithItsOwnIdentity(t *testing.T) {
 	}
 	if n := r.leaseCount(7); n != 1 {
 		t.Errorf("lease count = %d, want 1 — an expired wait took a lease", n)
+	}
+	if armed.Load() == 0 {
+		t.Error("the wait was never armed through the injected timer, so this cell is " +
+			"measuring a real ninety-second bound and only appears to be fast")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("the wait took %s: the server bound is not being driven by the seam, and a "+
+			"gate that costs this much per cell is one people stop running", elapsed)
 	}
 }
 
@@ -710,5 +733,71 @@ func TestScheduler_OneBoundOwnsTheWaitDeterministically(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 30*time.Second {
 		t.Errorf("the cell took %s, which means at least one row is waiting out a real "+
 			"server bound rather than the injected one", elapsed)
+	}
+}
+
+// NO RELEASE EVER LEAVES CAPACITY FREE WITH SOMEBODY ABLE TO USE IT WAITING.
+//
+// THIS IS THE CONTROL FOR A CLAUSE NO OTHER CELL DEFENDS. Requests join the
+// line unconditionally rather than trying to take capacity first, and a review
+// of the suite found that clause is held up by lock discipline alone: because
+// the release path drains the line inside the same critical section that frees
+// the lease, free capacity never coexists with an eligible waiter, so a
+// bypass would produce the same answer and no cell would notice it.
+//
+// That equivalence is a property of the current code, not a guarantee. The day
+// something frees capacity without serving the line under the same lock, a
+// bypass becomes a queue-jump and the invariant below is what catches it. So
+// the invariant is asserted directly, after every release, rather than left
+// implied.
+func TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting(t *testing.T) {
+	r := schedRegistry(t, 2)
+	seen := queuedAt(r)
+
+	// Two targets, both filled, then more waiters than capacity on each, so
+	// every release has a choice to get wrong.
+	var holders []*session
+	for conn := int64(1); conn <= 2; conn++ {
+		for i := range 2 {
+			h := schedSession(fmt.Sprintf("holder-%d-%d", conn, i), int64(conn*10+int64(i)), conn)
+			if err := r.admitWithLeaseOrWait(context.Background(), h, conn, 0); err != nil {
+				t.Fatal(err)
+			}
+			holders = append(holders, h)
+		}
+	}
+	for conn := int64(1); conn <= 2; conn++ {
+		for i := range 2 {
+			s := schedSession(fmt.Sprintf("waiter-%d-%d", conn, i), int64(conn*100+int64(i)), conn)
+			go func() { _ = r.admitWithLeaseOrWait(context.Background(), s, conn, 0) }()
+			awaitSeq(t, seen)
+		}
+	}
+
+	for i, h := range holders {
+		r.remove(h)
+
+		// THE INVARIANT, checked under the same lock the release used, so what
+		// is asserted is the state the release actually left behind rather
+		// than a later state something else may have repaired.
+		r.mu.Lock()
+		var admittable []SessionID
+		for _, w := range r.line {
+			// Asked without committing: a waiter that COULD be admitted right
+			// now is one the release should already have served.
+			if r.leases[w.leaseConn] < r.leaseCap {
+				admittable = append(admittable, w.s.id)
+			}
+		}
+		depth := len(r.line)
+		r.mu.Unlock()
+
+		if len(admittable) > 0 {
+			t.Fatalf("after release %d, capacity was free and %d waiter(s) able to use it were "+
+				"still in line (%v) — a release that does not serve the line turns joining it "+
+				"into a disadvantage, which is the starvation the queue exists to end",
+				i, len(admittable), admittable)
+		}
+		_ = depth
 	}
 }

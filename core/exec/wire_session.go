@@ -359,6 +359,58 @@ func DenialReasons() []string {
 	}
 }
 
+// admissionDenial turns an admission refusal into the answer its caller gets,
+// or nil for something that is not an admission refusal at all.
+//
+// EXTRACTED SO THE ORDER CAN BE TESTED, because the order is load-bearing and
+// nothing held it. Mutation testing moved the lease-cap arm above the wait arm
+// and every cell stayed green: the reordering is inert TODAY only because
+// QueueTimeoutError unwraps to the timeout alone, so a cap arm can never claim
+// an expired wait from any position. That makes the identity safe by exactly
+// one mechanism while the comment beside it claimed two. Reachable as a
+// function, the order can be pinned directly -- by handing it an error that
+// genuinely matches both and requiring the wait to win.
+//
+// AUTHORIZED BY CONSTRUCTION: every arm here is reached only in the reservation
+// phase, with a verified PAT bound to this connection. The caller has proved
+// who they are, so they may be told the system is full rather than handed the
+// uniform denial that reads as "your credential is wrong" -- which is what sent
+// a developer hunting a password problem that did not exist on 2026-09-15.
+func admissionDenial(rerr error) error {
+	switch {
+	// THE WAIT IS TESTED BEFORE THE CAPS, and the order is the contract rather
+	// than a style choice. A request that waited must not be recorded as one
+	// that was refused on arrival, so the identity that says it waited has to
+	// win before any cap arm can claim it -- even for an error that satisfies
+	// both, which is what TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn
+	// hands it.
+	case errors.Is(rerr, ErrQueueTimeout):
+		// THE BLOCKING CAP TRAVELS WITH THE DENIAL, NOT BESIDE IT. Writing a
+		// second audit row would double-count one refusal: the denial below
+		// already becomes a registered occurrence, and the operator needs one
+		// record saying both what happened and which limit to raise.
+		detail := fmt.Sprintf("waited %s and was not served", queueWait)
+		var qt *QueueTimeoutError
+		if errors.As(rerr, &qt) && qt.BlockedBy() != nil {
+			detail += "; blocked by: " + qt.BlockedBy().Error()
+		}
+		return denyAfterAuthorizationWithDetail(DenyQueueTimeout, detail)
+	case errors.Is(rerr, ErrLeaseCapExceeded):
+		return denyAfterAuthorization(DenyLeaseCap)
+	case errors.Is(rerr, ErrAllCapacityInTransaction):
+		return denyAfterAuthorization(DenyAllCapacityInTransaction)
+	case errors.Is(rerr, ErrTargetGone):
+		return denyAfterAuthorization(DenyTargetGone)
+	case errors.Is(rerr, ErrEngineClosing):
+		return denyAfterAuthorization(DenyEngineClosing)
+	case errors.Is(rerr, ErrSessionCapExceeded):
+		return denyAfterAuthorization(DenySessionCap)
+	case errors.Is(rerr, ErrResidentBudgetExceeded):
+		return denyAfterAuthorization(DenyResidentBudget)
+	}
+	return nil
+}
+
 // WireSessionOverhead is the fixed memory charged for one wire session: the
 // ExecSession's own state — the session record, its registry and per-user
 // entries, the reservation itself, and the bookkeeping the engine keeps for
@@ -586,41 +638,8 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	// instant. See scheduler.go.
 	if rerr := e.sessions.admitWithLeaseOrWait(ctx, s, connRow.ID, WireSessionOverhead); rerr != nil {
 		cancel()
-		switch {
-		// AUTHORIZED BY CONSTRUCTION: this is the reservation phase, reached
-		// only with a verified PAT bound to this connection. The caller has
-		// proved who they are, so they may be told the system is full rather
-		// than being handed the uniform denial that reads as "your credential
-		// is wrong" -- which is what sent a developer hunting a password
-		// problem that did not exist on 2026-09-15.
-		// THE WAIT IS TESTED BEFORE THE CAPS, and the order is the contract
-		// rather than a style choice. A request that waited must not be
-		// recorded as one that was refused on arrival, so the identity that
-		// says it waited has to win before any cap arm can claim it.
-		case errors.Is(rerr, ErrQueueTimeout):
-			// THE BLOCKING CAP TRAVELS WITH THE DENIAL, NOT BESIDE IT. Writing
-			// a second audit row here would double-count one refusal: the
-			// denial below already becomes a registered occurrence, and the
-			// operator needs one record saying both what happened and which
-			// limit to raise.
-			detail := fmt.Sprintf("waited %s and was not served", queueWait)
-			var qt *QueueTimeoutError
-			if errors.As(rerr, &qt) && qt.BlockedBy() != nil {
-				detail += "; blocked by: " + qt.BlockedBy().Error()
-			}
-			return out, denyAfterAuthorizationWithDetail(DenyQueueTimeout, detail)
-		case errors.Is(rerr, ErrLeaseCapExceeded):
-			return out, denyAfterAuthorization(DenyLeaseCap)
-		case errors.Is(rerr, ErrAllCapacityInTransaction):
-			return out, denyAfterAuthorization(DenyAllCapacityInTransaction)
-		case errors.Is(rerr, ErrTargetGone):
-			return out, denyAfterAuthorization(DenyTargetGone)
-		case errors.Is(rerr, ErrEngineClosing):
-			return out, denyAfterAuthorization(DenyEngineClosing)
-		case errors.Is(rerr, ErrSessionCapExceeded):
-			return out, denyAfterAuthorization(DenySessionCap)
-		case errors.Is(rerr, ErrResidentBudgetExceeded):
-			return out, denyAfterAuthorization(DenyResidentBudget)
+		if denial := admissionDenial(rerr); denial != nil {
+			return out, denial
 		}
 		return out, rerr
 	}
