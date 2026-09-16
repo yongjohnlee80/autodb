@@ -80,7 +80,7 @@ func (e *Engine) wireExtEntry(ctx context.Context, id SessionID, userID int64, w
 		release()
 		return nil, nil, nil, nil, nil, ErrExtendedUnsupportedTarget
 	}
-	pc, perr := e.pinWireSession(ctx, s, connRow)
+	pc, perr := e.acquireRequestBackend(ctx, s, connRow)
 	if perr != nil {
 		release()
 		return nil, nil, nil, nil, nil, perr

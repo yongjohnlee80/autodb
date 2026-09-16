@@ -342,7 +342,9 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		plan = []wireElement{{first: 0, last: -1}} // the empty frame
 	}
 
-	pc, perr := e.pinWireSession(ctx, s, connRow)
+	// REQUEST-SCOPED, so a backend that cannot be reached fails THIS buffer and
+	// leaves the session open for the next one.
+	pc, perr := e.acquireRequestBackend(ctx, s, connRow)
 	if perr != nil {
 		return 0, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
 	}

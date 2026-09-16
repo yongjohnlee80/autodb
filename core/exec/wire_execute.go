@@ -63,7 +63,7 @@ func (e *Engine) wireExecuteClaimed(ctx context.Context, s *session, sqlText, ip
 	// while later raw statements ran on the pinned connection would put the
 	// client's statements outside the transaction it believes it is in.
 	if connRow, cerr := e.store.Connections.OnCtx(ctx).With(meta.ConnID, s.connID).Get(); cerr == nil && connRow.Engine.SpeaksPostgresWire() {
-		if _, perr := e.pinWireSession(ctx, s, connRow); perr != nil {
+		if _, perr := e.acquireRequestBackend(ctx, s, connRow); perr != nil {
 			return nil, e.rejectSession(ctx, s, pol.Ident, ip, sqlText, perr)
 		}
 	}
