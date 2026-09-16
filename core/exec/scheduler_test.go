@@ -39,6 +39,39 @@ func queuedAt(r *sessionRegistry) chan uint64 {
 	return seen
 }
 
+// mustAdmit takes a lease on a target that is free right now, and fails the
+// cell if that does not happen promptly.
+//
+// SETUP THAT BLOCKS FOREVER REPORTS NOTHING. Nearly every cell below opens by
+// seeding a holder -- a request against a free target, which must be granted
+// at once and is never the thing under test. When a change breaks dispatch at
+// arrival, that opening line blocks instead: the cell never reaches its own
+// assertion, the suite's timeout eventually prints a goroutine dump, and a
+// mutation run scores the control INVALID. INVALID is the worst of the three
+// verdicts, because it is not a failure anybody can read AND it leaves the
+// guarantee unproven -- the run told us nothing. A control against this file
+// came back INVALID for exactly this reason, and the cell it named was
+// correct; only its setup was unbounded.
+//
+// The bound is deliberately far larger than any wait a cell exercises. It is
+// not an oracle and must never become one: it exists so that a broken
+// scheduler produces a named failure instead of a hung suite.
+func mustAdmit(t *testing.T, r *sessionRegistry, s *session, conn int64) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- r.admitWithLeaseOrWait(context.Background(), s, conn, 0) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("seeding a holder on free target %d (%s): %v", conn, s.id, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("seeding a holder on free target %d (%s) never completed; a request that "+
+			"can be granted the moment it arrives is instead waiting, so the queue is not "+
+			"dispatching at arrival at all", conn, s.id)
+	}
+}
+
 // awaitSeq waits for one more waiter to reach the line.
 func awaitSeq(t *testing.T, seen chan uint64) uint64 {
 	t.Helper()
@@ -64,9 +97,7 @@ func TestScheduler_ServesInArrivalOrderAcrossTargets(t *testing.T) {
 	holders := make([]*session, 3)
 	for i := range holders {
 		holders[i] = schedSession(fmt.Sprintf("holder-%d", i), int64(100+i), int64(i+1))
-		if err := r.admitWithLeaseOrWait(context.Background(), holders[i], int64(i+1), 0); err != nil {
-			t.Fatalf("seeding target %d: %v", i+1, err)
-		}
+		mustAdmit(t, r, holders[i], int64(i+1))
 	}
 
 	const waiters = 3
@@ -127,9 +158,7 @@ func TestScheduler_ANewcomerCannotStepAroundTheLine(t *testing.T) {
 	seen := queuedAt(r)
 
 	holder := schedSession("holder", 1, 7)
-	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, holder, 7)
 
 	old := schedSession("the-one-who-waited", 2, 7)
 	oldDone := make(chan error, 1)
@@ -175,9 +204,7 @@ func TestScheduler_AFullTargetDoesNotBlockTheRestOfTheLine(t *testing.T) {
 	busyHolder := schedSession("busy-holder", 1, 1)
 	quietHolder := schedSession("quiet-holder", 2, 2)
 	for s, conn := range map[*session]int64{busyHolder: 1, quietHolder: 2} {
-		if err := r.admitWithLeaseOrWait(context.Background(), s, conn, 0); err != nil {
-			t.Fatal(err)
-		}
+		mustAdmit(t, r, s, conn)
 	}
 
 	blocked := schedSession("waits-on-the-busy-target", 3, 1)
@@ -221,9 +248,7 @@ func TestScheduler_AbandonedWaitHoldsNothing(t *testing.T) {
 	seen := queuedAt(r)
 
 	holder := schedSession("holder", 1, 7)
-	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, holder, 7)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	gone := schedSession("gives-up", 2, 7)
@@ -256,9 +281,7 @@ func TestScheduler_ACancellationThatLosesToAGrantUndoesTheAdmission(t *testing.T
 	seen := queuedAt(r)
 
 	holder := schedSession("holder", 1, 7)
-	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, holder, 7)
 
 	// THE RACE IS FORCED, NOT AWAITED. The grant is made to land in the exact
 	// window between the caller giving up and its leaving the line. Running
@@ -317,9 +340,7 @@ func TestScheduler_TheServerWaitExpiresWithItsOwnIdentity(t *testing.T) {
 		return time.NewTimer(20 * time.Millisecond)
 	}
 	holder := schedSession("holder", 1, 7)
-	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, holder, 7)
 
 	// THE WAIT RUNS CONCURRENTLY SO A BYPASSED SEAM IS DIAGNOSED IN A SECOND
 	// RATHER THAN IN NINETY.
@@ -372,9 +393,7 @@ func TestScheduler_TheServerWaitExpiresWithItsOwnIdentity(t *testing.T) {
 func TestScheduler_TheCallerDeadlineCapsTheServerWait(t *testing.T) {
 	r := schedRegistry(t, 1)
 	holder := schedSession("holder", 1, 7)
-	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, holder, 7)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
 	defer cancel()
@@ -414,9 +433,7 @@ func TestScheduler_TheServerWaitIsNinetySecondsAndNotDerived(t *testing.T) {
 func TestScheduler_AllCapacityInTransactionRefusesBeforeQueueing(t *testing.T) {
 	r := schedRegistry(t, 1)
 	holder := schedSession("in-transaction", 1, 7)
-	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, holder, 7)
 	r.noteTxOpened(7, holder.id, time.Now().Add(time.Hour))
 
 	start := time.Now()
@@ -441,9 +458,7 @@ func TestScheduler_ReclaimableCapacityQueuesRatherThanRefusing(t *testing.T) {
 	r := schedRegistry(t, 1)
 	seen := queuedAt(r)
 	holder := schedSession("idle-holder", 1, 7)
-	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, holder, 7)
 	// No transaction noted: this holder could release at any moment.
 
 	done := make(chan error, 1)
@@ -470,9 +485,7 @@ func TestScheduler_RemovingATargetAnswersOnlyItsOwnWaiters(t *testing.T) {
 	r := schedRegistry(t, 1)
 	seen := queuedAt(r)
 	for s, conn := range map[*session]int64{schedSession("h1", 1, 1): 1, schedSession("h2", 2, 2): 2} {
-		if err := r.admitWithLeaseOrWait(context.Background(), s, conn, 0); err != nil {
-			t.Fatal(err)
-		}
+		mustAdmit(t, r, s, conn)
 	}
 
 	doomed := make(chan error, 1)
@@ -518,9 +531,7 @@ func TestScheduler_ShutdownAnswersTheLineAndRefusesLaterArrivals(t *testing.T) {
 	r := schedRegistry(t, 1)
 	seen := queuedAt(r)
 	holder := schedSession("holder", 1, 7)
-	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, holder, 7)
 	done := make(chan error, 1)
 	go func() { done <- r.admitWithLeaseOrWait(context.Background(), schedSession("waits", 2, 7), 7, 0) }()
 	awaitSeq(t, seen)
@@ -544,9 +555,7 @@ func TestScheduler_ShutdownAnswersTheLineAndRefusesLaterArrivals(t *testing.T) {
 func TestScheduler_ARefusalWaitingCannotCureIsAnsweredImmediately(t *testing.T) {
 	r := schedRegistry(t, 4)
 	r.perUserCap = 1
-	if err := r.admitWithLeaseOrWait(context.Background(), schedSession("first", 1, 7), 7, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, schedSession("first", 1, 7), 7)
 	err := r.admitWithLeaseOrWait(context.Background(), schedSession("second-for-same-user", 1, 7), 7, 0)
 	if !errors.Is(err, ErrSessionCapExceeded) {
 		t.Fatalf("got %v, want the per-user cap refusal", err)
@@ -570,9 +579,7 @@ func TestScheduler_AnEligibleNewcomerIsServedAtEnqueueTime(t *testing.T) {
 	seen := queuedAt(r)
 
 	full := schedSession("holds-the-full-target", 1, 1)
-	if err := r.admitWithLeaseOrWait(context.Background(), full, 1, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, full, 1)
 
 	stuck := schedSession("waits-on-the-full-target", 2, 1)
 	stuckDone := make(chan error, 1)
@@ -615,9 +622,7 @@ func TestScheduler_AnExpiredTransactionIsNotAReasonToRefuse(t *testing.T) {
 	r := schedRegistry(t, 1)
 	seen := queuedAt(r)
 	holder := schedSession("holds-an-expired-transaction", 1, 7)
-	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-		t.Fatal(err)
-	}
+	mustAdmit(t, r, holder, 7)
 	// Open, and already past its outer bound.
 	r.noteTxOpened(7, holder.id, time.Now().Add(-time.Second))
 
@@ -657,9 +662,7 @@ func TestScheduler_TheBoundEdgeDecidesWhoOwnsTheLease(t *testing.T) {
 			r := schedRegistry(t, 1)
 			r.now = func() time.Time { return at }
 			holder := schedSession("holder", 1, 7)
-			if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-				t.Fatal(err)
-			}
+			mustAdmit(t, r, holder, 7)
 			r.noteTxOpened(7, holder.id, tc.until)
 
 			r.mu.Lock()
@@ -735,9 +738,7 @@ func TestScheduler_OneBoundOwnsTheWaitDeterministically(t *testing.T) {
 				r.newTimer = func(time.Duration) *time.Timer { return time.NewTimer(2 * delta) }
 
 				holder := schedSession("holder", 1, 7)
-				if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
-					t.Fatal(err)
-				}
+				mustAdmit(t, r, holder, 7)
 				ctx, cancel := context.WithDeadline(context.Background(), fakeNow.Add(queueWait).Add(tc.lead))
 				err := r.admitWithLeaseOrWait(ctx, schedSession("waits", 2, 7), 7, 0)
 				cancel()
@@ -782,9 +783,7 @@ func TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting(t *testing.T) {
 	for conn := int64(1); conn <= 2; conn++ {
 		for i := range 2 {
 			h := schedSession(fmt.Sprintf("holder-%d-%d", conn, i), int64(conn*10+int64(i)), conn)
-			if err := r.admitWithLeaseOrWait(context.Background(), h, conn, 0); err != nil {
-				t.Fatal(err)
-			}
+			mustAdmit(t, r, h, conn)
 			holders = append(holders, h)
 		}
 	}
