@@ -795,19 +795,6 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		// phase can end on something nothing raises. frontdoor/demand-reclaimed
 		// IS here because it acquired a producer -- the row and the code that
 		// raises it landed together, which is what that reserved table asks.
-		// DEMAND RECLAMATION IS THE ONE ROW HERE THAT IS NOT A REFUSAL.
-		//
-		// Nobody was refused: a session that was running perfectly well was
-		// ENDED, so that the connection it was holding idle could serve a
-		// request that had been waiting for one. Recording it as a refusal
-		// would file it beside "we would not do that for you", and an operator
-		// counting refusals would count sessions we chose to end. Control,
-		// because it is a decision this side took deliberately, and
-		// NotApplicable for the same reason as its neighbours: the session is
-		// long past every accept-time budget, so no per-source counter is in
-		// reach and "we decided not to charge it" would claim a decision nobody
-		// had the opportunity to make.
-		{"held-objects", "frontdoor/demand-reclaimed", outcome.Control, outcome.NotApplicable},
 		{"held-objects", "frontdoor/duplicate-portal", outcome.Refusal, outcome.NotApplicable},
 		{"held-objects", "frontdoor/duplicate-prepared-statement", outcome.Refusal, outcome.NotApplicable},
 		{"held-objects", "frontdoor/named-object-cap", outcome.Refusal, outcome.NotApplicable},
@@ -816,6 +803,14 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"held-objects", "frontdoor/retained-budget", outcome.Refusal, outcome.NotApplicable},
 		{"held-objects", "gate/unknown-portal", outcome.Refusal, outcome.NotApplicable},
 		{"held-objects", "gate/unknown-statement", outcome.Refusal, outcome.NotApplicable},
+		// ENDING A SESSION HAS ITS OWN PRODUCER, beside the held-object
+		// register rather than inside it. Nobody was refused: a session that
+		// was working perfectly well was ENDED, so the connection it held idle
+		// could serve somebody who had been waiting. It is also not a condition
+		// a client's statements or portals produced, which is what that
+		// register is for -- it lived there once only because the frame
+		// rendering was convenient, and inherited a meaning that did not fit.
+		{"demand-reclamation", "frontdoor/demand-reclaimed", outcome.Control, outcome.NotApplicable},
 		{"lifecycle-infrastructure", "internal-error", outcome.Operational, outcome.None},
 		// A backend that could not be opened for ONE REQUEST. Its own
 		// producer, and deliberately not serve's: the session survives it, so
