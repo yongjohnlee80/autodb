@@ -135,14 +135,17 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	var conn dao.DataConn
 	switch row.Engine {
 	case engine.Postgres:
-		// Checkout-time grammar verification via pgxpool's PrepareConn
-		// hook: the session's parsing mode is verified before EVERY
-		// acquisition, so neither a fresh incompatible connection nor a
-		// session mutated after pooling (set_config through a verb-level
-		// read) can serve a statement. Autocommit is preserved, keeping
-		// transaction-prohibited DDL executable.
+		// The two pool hooks that keep a shared backend honest, composed
+		// here because they answer two halves of one question. Checkout
+		// (PrepareConn) verifies the parsing mode before EVERY acquisition,
+		// so neither a fresh incompatible connection nor one mutated after
+		// pooling can serve a statement. Release (AfterRelease) runs the
+		// session release gate's own reset plan on every connection the
+		// driver takes back, so an ordinary statement cannot hand its
+		// session state to the next borrower. Both fail closed: a
+		// connection that cannot be proved is destroyed, not reused.
 		conn, err = openPostgres(ctx, name, string(dsn),
-			pgPrepareConnVerify(), e.pgPoolLimits(row))
+			pgPrepareConnVerify(), e.pgAfterReleaseReset(connID), e.pgPoolLimits(row))
 	case engine.MySQL:
 		conn, err = openMySQL(ctx, name, string(dsn), mysql.Option(e.sqlPoolLimits(row)))
 	case engine.SQLite:

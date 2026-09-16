@@ -9,6 +9,7 @@ import (
 
 	drvmysql "github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/yongjohnlee80/golib/dao"
@@ -159,6 +160,103 @@ func pgPrepareConnVerify() golibpg.Option {
 			return true, nil
 		}
 	}
+}
+
+// pgAfterReleaseReset returns a golib postgres.Option installing a pgxpool
+// AfterRelease hook that runs THE SAME reset plan the session release gate runs
+// (release_gate.go) on every ordinary connection the driver takes back, and
+// destroys the connection when the reset cannot be proved.
+//
+// THE ORDINARY PATH LEAKS TOO, and only this closes it. The session release
+// gate governs the backends autodb pins for a front-door session. An ordinary
+// statement borrows from the SAME pool, and the driver returns it with no seam
+// autodb owns — so a plain SELECT that calls a routine which sets a
+// configuration parameter leaves that parameter on a connection the next
+// ordinary statement, belonging to a different developer, is handed. Sanitation
+// at session checkout protects the session and nobody else; ordinary→ordinary
+// was, until this hook, an unguarded exchange of session state.
+//
+// RELEASE, NOT ACQUIRE, and the difference is not a preference. A connection
+// cleaned on the way out is clean for the whole time it sits idle, so every
+// borrower is protected by one run of the plan rather than each borrower paying
+// for its own. Acquire-time sanitation would also run under the CALLER'S
+// context: a cancelled request would skip the reset on the connection it just
+// dirtied, which is precisely the case that most needs it. And pgxpool calls
+// this hook only on a connection it is willing to reuse — a closed, busy or
+// mid-transaction one is destroyed before the hook is reached — so the hook is
+// asked exactly the question it can answer.
+//
+// THE COST IS REAL AND IS THE POINT. Every ordinary statement now pays the
+// plan's round trips when its connection goes back. That buys the guarantee
+// that nothing a statement leaves behind can reach the next borrower, and the
+// alternative on offer was to keep the leak. pgxpool runs this hook on its own
+// goroutine, so the statement's own latency is unchanged; what a saturated pool
+// pays is the wait for the member to come back.
+//
+// Returning false destroys the connection, which is the same answer the release
+// gate gives a reset it cannot prove: a discarded backend costs one reconnect,
+// a wrongly pooled one hands a stranger's session state to the next person.
+//
+// Existing AfterRelease hooks are chained first, and a refusal from one of them
+// stands — this hook may only ever be the stricter of the two.
+func (e *Engine) pgAfterReleaseReset(connID int64) golibpg.Option {
+	return func(cfg *pgxpool.Config) {
+		prev := cfg.AfterRelease
+		cfg.AfterRelease = func(conn *pgx.Conn) bool {
+			if prev != nil && !prev(conn) {
+				return false
+			}
+			v := e.runResetPlan(context.Background(), poolResetRunner{conn: conn})
+			if v.pooled {
+				return true
+			}
+			e.logf("connection %d: a pooled backend was destroyed rather than reused (%s)",
+				connID, v.reason())
+			return false
+		}
+	}
+}
+
+// poolResetRunner carries the reset plan over the connection pgxpool hands its
+// release hook.
+//
+// It dispatches through the SIMPLE protocol rather than pgx's high-level query
+// path, for the same reason the session path uses the simple-query face: the
+// reset statements must not enter pgx's prepared-statement cache. A cached
+// statement is named from a hash of its SQL text, a wire client later pinning
+// this same connection computes the same name for the same text, and autodb's
+// own objects in that namespace are what answered a client's first Parse with
+// 42P05.
+//
+// THE ONE STEP THAT CANNOT GO STRAIGHT DOWN THE WIRE is the deallocation, and
+// finding that out cost a live cell. pgx caches a prepared statement per
+// connection; a bare DEALLOCATE ALL removes the server's copy and leaves pgx
+// certain its own still exists, so the next ordinary statement with that text
+// came back 26000 on a connection the pool considered healthy. The driver's own
+// DeallocateAll does both halves, and the plan marks the step that needs it
+// rather than this code matching on its text — a renamed or rewritten step must
+// not silently lose the client-side half.
+type poolResetRunner struct{ conn *pgx.Conn }
+
+func (r poolResetRunner) runResetStatement(ctx context.Context, step resetStep) (byte, *pgconn.PgError, error) {
+	pg := r.conn.PgConn()
+	var err error
+	if step.invalidatesDriverCache {
+		err = r.conn.DeallocateAll(ctx)
+	} else {
+		_, err = pg.Exec(ctx, step.sql).ReadAll()
+	}
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) {
+			// The server refused the statement and the wire is intact. That is
+			// protocol data, not a transport failure, and the verdict tells
+			// them apart.
+			return pg.TxStatus(), pgErr, nil
+		}
+		return 0, nil, err
+	}
+	return pg.TxStatus(), nil, nil
 }
 
 // optionsSetsParam is a BEST-EFFORT field matcher over a libpq-style options

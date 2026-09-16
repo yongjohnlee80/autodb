@@ -214,8 +214,13 @@ func leakCells() []leakCell {
 			name:    "a temporary table",
 			carries: "temporary tables and everything else in the temp schema",
 			take:    "CREATE TEMP TABLE autodb_leaked_temp (id int)",
-			probe: "SELECT count(*)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " +
-				"WHERE c.relname = 'autodb_leaked_temp' AND n.nspname LIKE 'pg\\_temp%'",
+			// SCOPED TO THIS BACKEND'S OWN TEMP SCHEMA, because pg_class is
+			// global to the database: a name-matching temp table belonging to
+			// any other backend — another cell of this matrix, running in
+			// parallel against the same database — would otherwise be counted
+			// here and reported as a leak that never happened.
+			probe: "SELECT count(*)::text FROM pg_class c " +
+				"WHERE c.relname = 'autodb_leaked_temp' AND c.relnamespace = pg_my_temp_schema()",
 			clean: "0",
 		},
 		{
