@@ -50,7 +50,7 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 			return copyAll(ctx, src.Users, dst.Users, func(r *User) map[UserField]any {
 				return map[UserField]any{UserID: r.ID, UserName: r.Name, UserRole: r.Role,
 					UserPassHash: nb(r.PassHash), UserMKWrapped: nb(r.MKWrapped), UserDisabled: r.Disabled,
-					UserCreatedAt: r.CreatedAt, UserUpdatedAt: r.UpdatedAt}
+					UserCreatedAt: r.CreatedAt, UserUpdatedAt: r.UpdatedAt, UserOptions: r.Options}
 			})
 		}},
 		{"connections", func() (int64, error) {
