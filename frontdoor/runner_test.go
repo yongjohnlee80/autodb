@@ -780,6 +780,7 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"held-objects", "frontdoor/no-mechanism", outcome.Refusal, outcome.NotApplicable},
 		{"held-objects", "frontdoor/retained-budget", outcome.Refusal, outcome.NotApplicable},
 		{"lifecycle-infrastructure", "internal-error", outcome.Operational, outcome.None},
+		{"serve", "dial-failed", outcome.Operational, outcome.NotApplicable},
 		{"serve", "peer-closed", outcome.Control, outcome.None},
 		{"serve", "session-error", outcome.Operational, outcome.None},
 		{"startup", "direct-tls-unsupported", outcome.Refusal, outcome.Protocol},

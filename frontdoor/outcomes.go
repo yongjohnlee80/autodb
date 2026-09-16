@@ -63,6 +63,24 @@ const (
 	OutcomeDeadlineArm     = "deadline"
 	OutcomeSessionError    = "session-error"
 	OutcomePeerClosed      = "peer-closed"
+	// OutcomeDialFailed is a request whose backend connection could not be
+	// opened, at any stage: the name, the socket, the TLS handshake, the
+	// startup exchange, the credential autodb presents upstream, or the
+	// settings re-applied to a fresh backend.
+	//
+	// ONE IDENTITY FOR EVERY STAGE, on purpose. The stage is a field on the
+	// audit detail rather than a second identity, because an identity per
+	// stage is a vocabulary the client can count: a caller who could tell
+	// "DNS" from "TLS" from "upstream authentication" apart by the shape of
+	// what came back would be reading our topology off our error surface.
+	OutcomeDialFailed = "dial-failed"
+	// EventDialFailed is the audit kind for one.
+	//
+	// NOT fd.refused. That kind means we considered a caller's work and
+	// declined it; a target that could not be reached judged nothing, and
+	// filing it under refusals puts a target outage among the numbers an
+	// operator watches for policy and for credential attacks.
+	EventDialFailed = "fd.dial_failed"
 	// EventAuthOperational is the audit kind for an error-driven ending in the
 	// credential exchange.
 	//
@@ -213,6 +231,28 @@ func Outcomes() []outcome.Registration {
 			// The ordinary ending: the client said goodbye, or went away.
 			{ID: OutcomePeerClosed, Kind: outcome.Control, Charge: outcome.None},
 			{ID: OutcomeSessionError, Kind: outcome.Operational, Charge: outcome.None},
+			// A REQUEST'S BACKEND COULD NOT BE OPENED. It belongs to this
+			// producer because the session loop is where it happens and where
+			// it reaches the wire, and it is NOT an ending: the request fails
+			// and the loop carries on serving the same session, which is the
+			// property the whole shape exists to deliver.
+			//
+			// Operational, because it is an ending driven by an error rather
+			// than a decision anyone took. NotApplicable rather than None,
+			// because this happens on an authenticated session that is already
+			// past every accept-time budget: there is no per-source counter in
+			// reach, so "we decided not to charge it" would claim a decision
+			// nobody had the opportunity to make.
+			//
+			// REGISTERED ONLY AFTER BOTH CLIENTS PROVED THE SESSION
+			// SURVIVES. Real pgx and a real pgjdbc program each hit the shape
+			// in the simple AND the extended protocol, kept the connection,
+			// and then ran real work on it against a real target. If a client
+			// is ever found that treats the chosen code as connection-fatal,
+			// the CODE changes and this row stays — the promise is that the
+			// session survives, and the SQLSTATE is whatever keeps that
+			// promise true in real clients.
+			{ID: OutcomeDialFailed, Kind: outcome.Operational, Charge: outcome.NotApplicable},
 		}},
 	}
 }

@@ -1202,6 +1202,27 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 		return sqlStateProtocolViolation, "frontdoor/wire-face-lost",
 			"the session's connection to the target failed; reconnect", true
 
+	case errors.Is(err, exec.ErrDialFailed):
+		// THE BACKEND FOR THIS REQUEST COULD NOT BE OPENED, AND THE SESSION
+		// SURVIVES IT.
+		//
+		// NOT FATAL, and that is the whole contract: the session is a logical
+		// thing that owns no backend between requests, so a backend that
+		// cannot be acquired fails the request and leaves the client exactly
+		// where it was — free to send the statement again, and free to have
+		// its next request served by a different backend entirely.
+		//
+		// The message is the FIXED literal rather than the error's own text.
+		// gateMessage below is where that is enforced; the default arm of this
+		// switch would have handed the driver's text — target host, port,
+		// database, and the role autodb connects as — straight to the client.
+		//
+		// MATCHED ON THE SENTINEL rather than on a type assertion so that a
+		// future acquisition path that wraps its own context around the
+		// failure still lands here. The cause is deliberately NOT reachable by
+		// unwrapping, so no arm above or below this one can dig it out.
+		return DialFailedSQLState, DialFailedRule, DialFailedHint, false
+
 	case isStagePanic(err):
 		// A STAGE PANICKED, WHICH IS NOT A RETRYABLE OUTAGE.
 		//
@@ -1323,6 +1344,19 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 // them with the stack; the event carries the STAGE only, so the trail says
 // which component broke without republishing its guts.
 func gateEvent(err error, rule, peer string) Event {
+	if d, ok := exec.DialFailureOf(err); ok {
+		// THE AUDIT IS WHERE THE STAGE AND THE CAUSE LIVE, and it is the only
+		// place. An operator has to be able to tell a name that would not
+		// resolve from a certificate that expired from an upstream password
+		// that changed, because those are three different repairs; the client
+		// must not be able to tell them apart at all.
+		//
+		// ITS OWN KIND, not fd.refused. A refusal is a decision we took about
+		// the caller's work, and counting a target outage among them tells an
+		// operator that policy rejected statements when in fact nothing about
+		// them was ever judged.
+		return Event{Kind: EventDialFailed, Reason: rule, Peer: peer, Detail: d.AuditDetail()}
+	}
 	if isStagePanic(err) {
 		return Event{
 			Kind:   "fd.internal_error",
@@ -1367,6 +1401,15 @@ func gateMessage(err error) string {
 	}
 	if errors.Is(err, exec.ErrWireFaceLost) {
 		return "the session's connection to the target failed"
+	}
+	if errors.Is(err, exec.ErrDialFailed) {
+		// THE FIXED LITERAL, NEVER THE ERROR'S OWN TEXT. The default return at
+		// the bottom of this function is err.Error(), and for this one error
+		// that text names the target host, its port, the database and the role
+		// autodb connects as. Every dial failure is byte-identical here so
+		// that two failures for two different reasons cannot be told apart by
+		// anyone holding only a socket.
+		return DialFailedMessage
 	}
 	if isStagePanic(err) {
 		// Deliberately says less than the operational message below. The
