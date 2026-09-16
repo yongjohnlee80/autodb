@@ -541,3 +541,129 @@ func TestDemandReclaim_TheRecordKeepsTheIdleTimeTheDecisionWasMadeOn(t *testing.
 			"that was slow to accept its frame inflated the justification for ending it")
 	}
 }
+
+// A HOLDER OF OBJECTS IS ENDED LIKE ANY OTHER, AND THE RECORD SAYS WHICH IT WAS.
+//
+// ADR 0188 once said an idle holder with an empty backend could have that
+// backend detached while its session carried on. This work proved that is not
+// reclamation in this architecture: the scheduled unit is the wire LEASE, held
+// for the session's whole lifetime, so detaching a backend frees nothing for
+// the request that is waiting. Both kinds therefore terminate.
+//
+// The distinction survives in the record rather than in the behaviour, and it
+// earns its place: a target whose reclamations are mostly holders of objects is
+// one where clients are leaving statements open, which is a different
+// operational story — and a different fix — from idle connections nobody closed.
+func TestDemandReclaim_AHolderOfObjectsIsEndedAndTheRecordSaysSo(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stock func(*session)
+		wants string
+	}{
+		{"an empty backend", func(*session) {}, "clean"},
+		{
+			name: "a prepared statement still on the backend",
+			stock: func(s *session) {
+				s.ext = &extObjects{
+					statements: map[string]*extStatement{"s1": {}},
+					portals:    map[string]*extPortal{},
+				}
+			},
+			wants: "holds-objects",
+		},
+		{
+			name: "a portal still on the backend",
+			stock: func(s *session) {
+				s.ext = &extObjects{
+					statements: map[string]*extStatement{},
+					portals:    map[string]*extPortal{"p1": {}},
+				}
+			},
+			wants: "holds-objects",
+		},
+		{
+			name: "a queued Close the target may not have acted on",
+			stock: func(s *session) {
+				s.ext = &extObjects{
+					statements:    map[string]*extStatement{},
+					portals:       map[string]*extPortal{},
+					pendingCloses: []objectRef{{}},
+				}
+			},
+			wants: "holds-objects",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			now := time.Now()
+			s := demandHolder("holder", 1, 7, now.Add(-time.Hour))
+			tc.stock(s)
+			r := demandRegistry(t, s)
+			e := &Engine{sessions: r, now: func() time.Time { return now }}
+
+			v, ok := r.reserveDemandVictim(7, now)
+			if !ok {
+				t.Fatal("a holder was not reclaimed; holding objects must not make a session " +
+					"safe from reclamation, only differently recorded")
+			}
+			if got := v.notice.HeldObjects; got != (tc.wants == "holds-objects") {
+				t.Errorf("notice.HeldObjects = %v for %s", got, tc.name)
+			}
+
+			e.completeDemandReason(s, true)
+			s.mu.Lock()
+			why := s.closeWhy
+			s.mu.Unlock()
+			if !strings.Contains(why, tc.wants) {
+				t.Errorf("close reason = %q, want it to record %q", why, tc.wants)
+			}
+		})
+	}
+}
+
+// ONE ENDING LEAVES ONE RECORD, WHETHER OR NOT THE CLIENT HEARD IT.
+//
+// The flush-failed path is the one worth pinning. A client that has stopped
+// reading still has to be ended -- holding its lease would punish everybody
+// waiting to protect somebody who is not listening -- and it is exactly the
+// path where a second record, or none, would be easiest to miss.
+func TestDemandReclaim_OneRecordOnBothTheDeliveredAndUndeliveredPaths(t *testing.T) {
+	for _, delivered := range []bool{true, false} {
+		name := "the client was told"
+		if !delivered {
+			name = "the client had already gone"
+		}
+		t.Run(name, func(t *testing.T) {
+			now := time.Now()
+			s := demandHolder("holder", 1, 7, now.Add(-45*time.Minute))
+			r := demandRegistry(t, s)
+			e := &Engine{sessions: r, now: func() time.Time { return now }}
+
+			if _, ok := r.reserveDemandVictim(7, now); !ok {
+				t.Fatal("the holder was not reserved")
+			}
+			e.completeDemandReason(s, delivered)
+
+			s.mu.Lock()
+			why := s.closeWhy
+			s.mu.Unlock()
+
+			// EXACTLY ONE reason, carrying every fact, rather than one reason
+			// plus a second record somewhere else saying the same thing.
+			if n := strings.Count(why, ReasonDemandReclaimed); n != 1 {
+				t.Errorf("the close reason names the reclamation %d times, want 1: %q", n, why)
+			}
+			for _, want := range []string{"45m0s", "clean"} {
+				if !strings.Contains(why, want) {
+					t.Errorf("close reason = %q, want it to carry %q", why, want)
+				}
+			}
+			told := "the client was told"
+			if !delivered {
+				told = "could not be told"
+			}
+			if !strings.Contains(why, told) {
+				t.Errorf("close reason = %q, want it to say %q", why, told)
+			}
+		})
+	}
+}

@@ -51,6 +51,18 @@ type DemandNotice struct {
 	// justification for ending somebody's session and belongs in the record
 	// beside the decision.
 	IdleFor time.Duration
+	// HeldObjects says whether the victim still had prepared statements or
+	// portals on its backend when it was selected.
+	//
+	// IT CHANGES NOTHING ABOUT WHAT HAPPENS AND EVERYTHING ABOUT THE RECORD.
+	// Both kinds terminate -- the scheduled unit is the wire lease, held for
+	// the session's lifetime, so detaching a backend frees nothing for anyone
+	// waiting, and an earlier design that kept the frontend session alive was
+	// not reclamation at all. But the two are worth telling apart afterwards:
+	// a target whose reclamations are mostly holders of objects is one where
+	// clients are leaving statements open, which is a different operational
+	// story from idle connections nobody closed.
+	HeldObjects bool
 }
 
 // demandVictim is one reserved session and the notice offered for it.
@@ -130,8 +142,10 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 			// is what stopped a lost race from ending somebody's session
 			// silently.
 			s.demandIdle = now.Sub(s.lastUsed)
+			s.demandHeldObjects = s.holdsObjects()
 			s.pendingNotice = &DemandNotice{
 				Gen: s.gen, ID: s.id, IdleFor: s.demandIdle,
+				HeldObjects: s.demandHeldObjects,
 			}
 			knock = s.wake
 		}
@@ -313,15 +327,31 @@ func (e *Engine) completeDemandReason(s *session, delivered bool) {
 	s.mu.Lock()
 	// The idle time is the one recorded AT SELECTION, not measured again now.
 	// See session.demandIdle.
-	s.closeWhy = ReasonDemandReclaimed + demandOutcomeSuffix(s.demandIdle, delivered)
+	s.closeWhy = ReasonDemandReclaimed + demandOutcomeSuffix(s.demandIdle, s.demandHeldObjects, delivered)
 	s.mu.Unlock()
 }
 
+// holdsObjects reports whether anything of this session's lives on its backend.
+// Caller holds s.mu.
+//
+// PENDING CLOSES COUNT AS PRESENT: a Close that is queued but not acknowledged
+// means the target may still hold the object, so the store is not yet empty.
+func (s *session) holdsObjects() bool {
+	if s.ext == nil {
+		return false
+	}
+	return len(s.ext.statements) > 0 || len(s.ext.portals) > 0 || len(s.ext.pendingCloses) > 0
+}
+
 // demandOutcomeSuffix completes the close reason with what only the owner knew.
-func demandOutcomeSuffix(idle time.Duration, delivered bool) string {
+func demandOutcomeSuffix(idle time.Duration, held bool, delivered bool) string {
 	told := "the client was told"
 	if !delivered {
 		told = "the client could not be told: the connection was already gone"
 	}
-	return " (idle " + idle.Round(time.Second).String() + "; " + told + ")"
+	state := "clean"
+	if held {
+		state = "holds-objects"
+	}
+	return " (idle " + idle.Round(time.Second).String() + "; " + state + "; " + told + ")"
 }

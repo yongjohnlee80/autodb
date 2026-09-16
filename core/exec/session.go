@@ -241,6 +241,10 @@ type session struct {
 	// reservation, so the owner cannot be woken about a session that was not
 	// reserved, nor reserved without being told.
 	pendingNotice *DemandNotice
+	// demandHeldObjects records whether the session held prepared statements or
+	// portals when it was selected. Kept for the same reason as demandIdle:
+	// the record has to say what was true when the choice was made.
+	demandHeldObjects bool
 	// demandIdle is how long this session had been silent AT THE MOMENT IT WAS
 	// SELECTED, kept because that is the fact the decision rested on.
 	//

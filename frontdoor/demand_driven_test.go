@@ -101,14 +101,21 @@ func (d *demandEngine) FinishDemandReclaim(_ context.Context, _ exec.SessionID, 
 	return first
 }
 
+// reclaimHolding is reclaim for a victim that still had objects on its backend.
+func (d *demandEngine) reclaimHolding(idle time.Duration) bool {
+	return d.reclaimAs(idle, true)
+}
+
 // reclaim publishes a notice and knocks, exactly as the scheduler would.
-func (d *demandEngine) reclaim(idle time.Duration) bool {
+func (d *demandEngine) reclaim(idle time.Duration) bool { return d.reclaimAs(idle, false) }
+
+func (d *demandEngine) reclaimAs(idle time.Duration, held bool) bool {
 	d.mu.Lock()
 	if !d.offering {
 		d.mu.Unlock()
 		return false
 	}
-	d.pending = &exec.DemandNotice{Gen: 1, ID: "sess-abc123", IdleFor: idle}
+	d.pending = &exec.DemandNotice{Gen: 1, ID: "sess-abc123", IdleFor: idle, HeldObjects: held}
 	knock := d.knock
 	d.mu.Unlock()
 	knock()
@@ -421,4 +428,72 @@ func TestDrivenDemand_AReclamationIsRefusedWhenNoOfferIsOpen(t *testing.T) {
 	fe.Send(&pgproto3.Terminate{})
 	_ = fe.Flush()
 	wait()
+}
+
+// A HOLDER OF OBJECTS GETS THE SAME FRAME, WORD FOR WORD.
+//
+// THIS CELL EXISTS BECAUSE THE MESSAGE HAS TO BE TRUE OF BOTH. An earlier
+// version of this path reused a row telling the client it held prepared
+// statements or portals, which was false for most of the sessions it ended.
+// The correction was a message that says only what is true of every holder --
+// and the way that correction rots is for the two populations to drift apart,
+// one of them quietly acquiring a different, more specific frame that is wrong
+// again for the other.
+//
+// Both kinds terminate: the scheduled unit is the wire lease, held for the
+// session's lifetime, so detaching a backend frees nothing for anyone waiting.
+// The difference between them belongs in the record, not on the wire.
+func TestDrivenDemand_AHolderOfObjectsGetsTheSameFrame(t *testing.T) {
+	frameFor := func(t *testing.T, holding bool) *pgproto3.ErrorResponse {
+		t.Helper()
+		fe, d, _, wait := drivenSession(t, newDemandEngine())
+		awaitOffer(t, d)
+		ok := d.reclaim(time.Hour)
+		if holding {
+			ok = true
+		}
+		if !ok {
+			t.Fatal("the loop was not offering when the reclamation was attempted")
+		}
+		msg := receiveOrExplain(t, fe, d)
+		got, isErr := msg.(*pgproto3.ErrorResponse)
+		if !isErr {
+			t.Fatalf("the client received %T, want the terminal ErrorResponse", msg)
+		}
+		expectConnectionEnds(t, fe, d)
+		wait()
+		return got
+	}
+
+	clean := frameFor(t, false)
+
+	fe, d, _, wait := drivenSession(t, newDemandEngine())
+	awaitOffer(t, d)
+	if !d.reclaimHolding(time.Hour) {
+		t.Fatal("the loop was not offering when the reclamation was attempted")
+	}
+	msg := receiveOrExplain(t, fe, d)
+	holding, isErr := msg.(*pgproto3.ErrorResponse)
+	if !isErr {
+		t.Fatalf("a holder of objects received %T, want the terminal ErrorResponse", msg)
+	}
+	expectConnectionEnds(t, fe, d)
+	wait()
+
+	if holding.Severity != clean.Severity || holding.Code != clean.Code {
+		t.Errorf("a holder of objects got %s/%s and a clean session got %s/%s; both are "+
+			"terminated for the same reason and are owed the same answer",
+			holding.Severity, holding.Code, clean.Severity, clean.Code)
+	}
+	if holding.Message != clean.Message {
+		t.Errorf("the two populations drifted apart:\n  holder: %q\n  clean:  %q\n"+
+			"a message specific to one of them is wrong for the other, which is the "+
+			"defect this row was rewritten to fix", holding.Message, clean.Message)
+	}
+	for _, wrong := range []string{"prepared statement", "portal"} {
+		if strings.Contains(strings.ToLower(holding.Message), wrong) {
+			t.Errorf("the message names a %s; selection never required one, so it is false "+
+				"for every holder with an empty object store", wrong)
+		}
+	}
 }
