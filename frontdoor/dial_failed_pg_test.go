@@ -195,11 +195,10 @@ func TestDialFailedPG_PgxKeepsTheSessionAcrossASimpleQueryFailure(t *testing.T) 
 	// published to whatever consumes the event stream, so a driver's connect
 	// error in it is a topology and credential disclosure rather than a
 	// debugging convenience.
+	// WAITED FOR, as above: the trail is written after the client is answered.
 	var detail string
-	for _, ev := range events() {
-		if ev.Kind == EventDialFailed {
-			detail = ev.Detail
-		}
+	if found := awaitEvents(t, events, EventDialFailed, 1, 10*time.Second); len(found) > 0 {
+		detail = found[len(found)-1].Detail
 	}
 	if detail == "" {
 		t.Fatal("the operator's trail has no dial-failure event at all; the client is " +

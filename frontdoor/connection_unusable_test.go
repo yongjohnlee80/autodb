@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
@@ -114,11 +115,13 @@ func TestConnectionUnusable_SimpleQueryGetsTheFixedFrameThenOneReadyForQuery(t *
 
 	// THE AUDIT GETS WHAT THE WIRE DOES NOT. The split is the whole design:
 	// one row an operator can act on, one frame that says nothing.
+	// WAITED FOR: the client is answered before the outcome is recorded, so
+	// reading the trail on the frame's arrival reads a trail still being
+	// written. See awaitEvents.
+	found := awaitEvents(t, events, EventConnectionUnusable, 1, 10*time.Second)
 	var audited *Event
-	for i := range events() {
-		if e := events()[i]; e.Kind == EventConnectionUnusable {
-			audited = &e
-		}
+	if len(found) > 0 {
+		audited = &found[len(found)-1]
 	}
 	if audited == nil {
 		t.Fatalf("no %s event was recorded; the operator has the client's complaint and "+

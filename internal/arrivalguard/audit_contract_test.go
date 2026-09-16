@@ -67,24 +67,54 @@ func statesRemovedContract(comment string) string {
 	return ""
 }
 
-// splitSentences breaks comment prose into sentence-ish units. Line breaks
-// count as boundaries as well as full stops, because comment prose wraps and a
-// claim carried across two lines is still one claim per line for this purpose.
+// splitSentences breaks comment prose into SENTENCES, independently of how the
+// prose happens to wrap.
+//
+// THE LINE WAS THE WRONG UNIT, AND THE ADJACENT-PAIR PATCH ONLY MOVED THE
+// BOUNDARY. Splitting per line made a claim wrapped across two lines invisible,
+// so a pair-wise join was bolted on; that made two-line claims visible and left
+// three-line ones invisible. A rule whose reach depends on where a comment
+// happens to wrap is not a rule, and bolting on triples would repeat the same
+// mistake with a bigger number.
+//
+// So a paragraph — consecutive non-blank lines — is joined into one string with
+// its whitespace normalized, and THEN split on sentence terminators. Wrapping
+// cannot change the answer, which is the property the guard needs. Blank lines
+// separate paragraphs because a paragraph break is a real boundary in prose,
+// and joining across one would let history two paragraphs up exempt a claim
+// that has nothing to do with it — the group-scoped defect at a smaller scale.
 func splitSentences(text string) []string {
 	var out []string
-	for _, line := range strings.Split(text, "\n") {
-		for _, part := range strings.Split(line, ". ") {
+	for _, para := range strings.Split(text, "\n\n") {
+		joined := strings.Join(strings.Fields(strings.ReplaceAll(para, "\n", " ")), " ")
+		if joined == "" {
+			continue
+		}
+		for _, part := range splitOnTerminators(joined) {
 			if s := strings.TrimSpace(part); s != "" {
 				out = append(out, s)
 			}
 		}
 	}
-	// Adjacent line pairs too, so a phrase that wraps across a line break is
-	// still seen whole — with both lines' history markers in scope, which is
-	// the narrowest honest reading.
-	lines := strings.Split(text, "\n")
-	for i := 0; i+1 < len(lines); i++ {
-		out = append(out, strings.TrimSpace(lines[i]+" "+lines[i+1]))
+	return out
+}
+
+// splitOnTerminators cuts after '.', '?' or '!' when the next character is a
+// space, and at the end of the string.
+func splitOnTerminators(s string) []string {
+	var out []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '.', '?', '!':
+			if i+1 >= len(s) || s[i+1] == ' ' {
+				out = append(out, s[start:i+1])
+				start = i + 1
+			}
+		}
+	}
+	if start < len(s) {
+		out = append(out, s[start:])
 	}
 	return out
 }
@@ -117,6 +147,48 @@ func TestStatesRemovedContract_JudgesEachSentenceOnItsOwn(t *testing.T) {
 			"genuine history in the same sentence",
 			"This comment used to say the raw cause goes to the audit, and that is no longer true.",
 			false,
+		},
+		{
+			// REED'S OWN MUTATION: the claim wrapped across THREE lines. The
+			// line-local version with an adjacent-pair patch could not see it,
+			// which is what proved the unit was wrong rather than merely tight.
+			"a current claim wrapped across three lines",
+			"the stage and the\nraw cause exist\nonly in the audit.",
+			true,
+		},
+		{
+			// The same wrap, genuinely historical. Wrapping must not change
+			// the answer in EITHER direction: a guard that only errs towards
+			// reporting is still a guard nobody can predict.
+			"genuine history wrapped across three lines",
+			"this comment used to say\nthe stage and the raw cause exist\nonly in the audit, and it no longer does.",
+			false,
+		},
+		{
+			// Two SEPARATE sentences that a naive join would run together,
+			// lending the first's history marker to the second.
+			"history in one sentence does not exempt the next",
+			"the cause used to reach the wire. Cause is the raw driver error, for the audit trail only.",
+			true,
+		},
+		{
+			// A paragraph break is a real boundary: history far above must not
+			// reach down. This is the group-scoped defect at a smaller scale.
+			"history two paragraphs above does not exempt a later claim",
+			"the cause used to reach the wire, which was wrong.\n\nsomething unrelated.\n\nCause is the raw driver error, for the audit trail only.",
+			true,
+		},
+		{
+			// WHY THE PARAGRAPH BOUNDARY EARNS ITS KEEP, and it took a
+			// mutation to find the case. With terminator splitting in place,
+			// joining paragraphs is usually harmless -- so the block-wide
+			// mutation passed until this case existed. A paragraph with no
+			// terminal punctuation (a heading, a list item, a trailing
+			// clause) runs into the next one when joined, and its history
+			// marker then exempts a claim it has nothing to do with.
+			"an unterminated history paragraph must not absorb the next",
+			"the cause used to reach the wire\n\nCause is the raw driver error, for the audit trail only.",
+			true,
 		},
 		{
 			"the effective rule, stated plainly",

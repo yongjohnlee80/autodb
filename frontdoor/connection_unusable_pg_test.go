@@ -107,11 +107,10 @@ func TestConnectionUnusablePG_PgxKeepsTheSessionAndLearnsNothing(t *testing.T) {
 	// THE CONNECTION STRING CARRIES. This cell used to require the raw cause
 	// here; Event.Detail is published to whatever consumes the event stream,
 	// and the cause names the host and can name a credential.
+	// WAITED FOR, as above: the trail is written after the client is answered.
 	var detail string
-	for _, ev := range events() {
-		if ev.Kind == EventConnectionUnusable {
-			detail = ev.Detail
-		}
+	if found := awaitEvents(t, events, EventConnectionUnusable, 1, 10*time.Second); len(found) > 0 {
+		detail = found[len(found)-1].Detail
 	}
 	if detail == "" {
 		t.Fatal("the operator's trail has no connection-unusable event; the client is " +
