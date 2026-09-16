@@ -210,7 +210,11 @@ func (d *DialFailure) Error() string {
 // projections no longer formatting it.
 func (d *DialFailure) Is(target error) bool { return target == ErrDialFailed }
 
-// Cause is the raw driver error, for the audit trail only.
+// Cause is the raw driver error, IN-PROCESS ONLY.
+//
+// Not the audit, which this comment used to say: the audit detail becomes
+// EventDialFailed.Detail and is published to whatever consumes the event
+// stream. Nothing on any path out of this process calls this.
 func (d *DialFailure) Cause() error { return d.cause }
 
 // AuditDetail is the operator's whole of it: stage, attempts and the
@@ -304,7 +308,9 @@ const dialAttemptsPerRequest = 2
 // session pays nothing here. When it has to acquire, the target pool is
 // resolved FIRST and only the acquisition proper — taking a member and proving
 // that member clean — is retried, exactly once, before becoming a DialFailure
-// carrying the stage and the raw cause for the audit and never for the wire.
+// carrying the stage, the attempt count and the connection's opaque id. Those
+// three are what the audit gets; the raw cause is in-process only and reaches
+// neither the audit nor the wire.
 //
 // THE TARGET MUST BE RESOLVED OUTSIDE THE RETRY BOUND, so that an attempt means
 // one thing: one arbitration for one permit. Resolving the pool answers
