@@ -252,3 +252,69 @@ func sendFatalInternal(w io.Writer) error {
 	})
 	return be.Flush()
 }
+
+// THE ONE CLIENT SHAPE FOR A FAILED BACKEND ACQUISITION.
+//
+// Every way a backend connection can fail to open — a name that will not
+// resolve, a socket that will not connect, a TLS handshake that will not
+// complete, a startup the target refuses, the credential autodb itself
+// presents, the settings re-applied to a fresh backend — reaches the client as
+// exactly these three values, and the stage and the raw cause go to the audit
+// trail alone.
+//
+// What goes wrong otherwise is that the text upstream produces describes OUR
+// topology: it names the target host and port, the database, and the role
+// autodb connects as. A client is entitled to the answer to its own statement
+// and to nothing about the estate behind the front door, and a surface that
+// varied by cause would let anyone with a TCP route enumerate that estate one
+// broken target at a time.
+//
+// THE OBVIOUS ALTERNATIVE IS A CLASS 08 CODE, AND IT IS THE ONE TO AVOID.
+// 08006 connection_failure says what happened in the plainest words the
+// standard has. What makes it the wrong choice is that class 08 is the class
+// clients and connection pools attach their OWN recovery rules to, and several
+// act on the two-character prefix alone: a pool that evicts on class 08 throws
+// the session away even where the driver would have kept it, which converts
+// "this request failed" into "your session died" without a single frame being
+// wrong. The promise this shape makes is that the session survives, so the
+// code must not be one whose fate is decided by each client's class policy.
+//
+// MEASURED, so the sentence above does not overclaim: neither pgx v5 nor
+// pgjdbc 42.7.4 closes the session on an ERROR-severity 08006 today. That is a
+// fact about two current versions rather than about the protocol, and it is
+// exactly the kind of fact a pool in front of either one overrides. The choice
+// does not rest on it.
+//
+// 58030 io_error is PostgreSQL's own code for "an I/O operation failed" and is
+// what a real server raises for a file it could not read — a server-side fault
+// that leaves the session exactly where it was, in a class nothing recovers
+// from by convention. The severity is ERROR rather than FATAL for the same
+// reason: FATAL means the backend is closing the connection, and this one is
+// not.
+//
+// THE CODE IS A VERIFIED CHOICE, NOT AN ASSERTED ONE. Both required clients
+// keep the session usable across it in the simple AND the extended protocol:
+// real pgx in dial_failed_pg_test.go, and a real pgjdbc program in
+// dial_failed_jdbc_pg_test.go, which reads back the driver's own SQLSTATE,
+// severity, closed and isValid and then runs real work on the same connection.
+// docs/front-door/dial-failed-client-verification.md is how to run either by
+// hand.
+const (
+	DialFailedSQLState = "58030"
+
+	// DialFailedMessage is the WHOLE of what the wire learns. No cause, no
+	// stage, no host, no DETAIL that varies: two dial failures for two
+	// different reasons are byte-identical to the client.
+	DialFailedMessage = "the database connection for this request could not be established"
+
+	// DialFailedHint states the property the shape promises, because a client
+	// that cannot tell a failed request from a failed session will throw the
+	// session away and reconnect — which is the load a dial failure can least
+	// afford.
+	DialFailedHint = "the session is still usable; send the statement again"
+
+	// DialFailedRule is the stable rule id that travels in DETAIL, exactly as
+	// every other front-door refusal carries one: constant, and never the
+	// cause.
+	DialFailedRule = "frontdoor/dial-failed"
+)
