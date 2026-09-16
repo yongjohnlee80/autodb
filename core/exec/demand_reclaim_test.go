@@ -533,11 +533,12 @@ func demandRecord(t *testing.T, s *session) struct {
 
 // A HOLDER OF OBJECTS IS ENDED LIKE ANY OTHER, AND THE RECORD SAYS WHICH IT WAS.
 //
-// ADR 0188 once said an idle holder with an empty backend could have that
-// backend detached while its session carried on. This work proved that is not
-// reclamation in this architecture: the scheduled unit is the wire LEASE, held
-// for the session's whole lifetime, so detaching a backend frees nothing for
-// the request that is waiting. Both kinds therefore terminate.
+// AN EARLIER DESIGN ALLOWED AN IDLE HOLDER WITH AN EMPTY BACKEND TO HAVE THAT
+// BACKEND DETACHED WHILE ITS SESSION CARRIED ON. That is not reclamation here,
+// and the reason is in this package: the scheduled unit is the wire LEASE,
+// taken in admitWithLeaseOrWait and held for the session's whole lifetime, so
+// detaching a backend frees no lease and the request waiting for one is no
+// better off. Both kinds therefore terminate.
 //
 // The distinction survives in the record rather than in the behaviour, and it
 // earns its place: a target whose reclamations are mostly holders of objects is
