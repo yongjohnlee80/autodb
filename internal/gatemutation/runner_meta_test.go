@@ -209,3 +209,52 @@ func TestRunner_TheTreeIsRestoredAfterAControl(t *testing.T) {
 			"next digest reports and nobody can explain", modeBefore.Mode(), modeAfter.Mode())
 	}
 }
+
+// A CONTROL WITH NO FAILURE FINGERPRINT CANNOT SCORE.
+//
+// RED without one means only that something in the named cell failed, which
+// credits a control for a neighbour's assertion. The runner must refuse rather
+// than fall back to the permissive reading.
+func TestRunner_AControlWithoutAFingerprintIsInvalid(t *testing.T) {
+	bin, repo := runnerAt(t)
+	dir := disposable(t)
+
+	// Strip the fingerprint from one control in the copy the runner reads.
+	victim := filepath.Join(dir, "internal/gatemutation/mutations.go")
+	body, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Matched on the quoted value alone: gofmt aligns struct fields, so the
+	// whitespace between the key and the value is not stable enough to match on.
+	stripped := strings.Replace(string(body),
+		`"the fingerprint changed when a worktree's .git FILE appeared"`, `""`, 1)
+	if stripped == string(body) {
+		t.Fatal("could not strip a fingerprint; this meta-cell is not testing what it claims")
+	}
+	if err := os.WriteFile(victim, []byte(stripped), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The runner reads its definitions from ITS OWN build, so run the copy's.
+	built := filepath.Join(t.TempDir(), "mutate-copy")
+	build := exec.Command("go", "build", "-o", built, "./internal/gatemutation/cmd/mutate")
+	build.Dir = dir
+	build.Env = append(os.Environ(), "GOFLAGS=-buildvcs=false")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building the copy's runner: %v\n%s", err, out)
+	}
+
+	out, code := runRunner(t, built, dir, "-root", dir, "-only", "identity-excludes-git")
+	if !strings.Contains(out, "=INVALID") {
+		t.Errorf("a control with no fingerprint was not INVALID:\n%s", out)
+	}
+	if !strings.Contains(out, "declares no failure fingerprint") {
+		t.Errorf("the runner did not say why:\n%s", out)
+	}
+	if code == 0 {
+		t.Errorf("exit 0 for an unscoreable control\n%s", out)
+	}
+	_ = bin
+	_ = repo
+}

@@ -80,8 +80,13 @@ func All() []Mutation {
 			Anchor:      "\tr.serveLine()\n\tif w.state == waitResolved {",
 			Replacement: "\tif w.state == waitResolved {",
 			Test:        "TestScheduler_AnEligibleNewcomerIsServedAtEnqueueTime",
-			// Detects the break by waiting out the real server bound.
-			Timeout: 150 * time.Second,
+			// CONTAINMENT, NOT THE ORACLE. The cell owns a two-second
+			// assertion and fails on it; this bound only stops a runaway. It
+			// was 150s, which let a control wait ten times longer than the
+			// policy it is meant to enforce and made the ledger unreplayable
+			// from the definition.
+			Timeout: 15 * time.Second,
+			Fails:   "a request for a FREE target waited behind the line",
 			Guarantee: "that a request whose own target is free is served when it arrives, " +
 				"rather than waiting for an unrelated release that may never come",
 		},
@@ -90,6 +95,7 @@ func All() []Mutation {
 			Anchor:      "\t\tif now.Before(until) {",
 			Replacement: "\t\tif true || now.Before(until) {",
 			Test:        "TestScheduler_AnExpiredTransactionIsNotAReasonToRefuse",
+			Fails:       "was read as capacity that is",
 			Guarantee: "that a transaction past its bound counts as capacity that IS coming, " +
 				"so a request is not told nothing is coming moments before it arrives",
 		},
@@ -99,6 +105,7 @@ func All() []Mutation {
 			Replacement: "\t_ = w",
 			Test:        "TestScheduler_ACancellationThatLosesToAGrantUndoesTheAdmission",
 			Count:       20,
+			Fails:       "after a cancelled request, want 0",
 			Guarantee: "that an admission granted in the instant a caller gives up is handed " +
 				"back, rather than leaking a session nothing is coming to close",
 		},
@@ -107,6 +114,7 @@ func All() []Mutation {
 			Anchor:      "\t\t\t\tw.blockedBy = err\n\t\t\t\tcontinue",
 			Replacement: "\t\t\t\tw.blockedBy = err\n\t\t\t\tbreak",
 			Test:        "TestScheduler_AFullTargetDoesNotBlockTheRestOfTheLine",
+			Fails:       "blocked a waiter for a target with capacity",
 			Guarantee: "that one saturated target cannot hold up every request for every " +
 				"other target",
 		},
@@ -115,6 +123,7 @@ func All() []Mutation {
 			Anchor:      "func (e *QueueTimeoutError) Unwrap() error { return ErrQueueTimeout }",
 			Replacement: "func (e *QueueTimeoutError) Unwrap() []error { return []error{ErrQueueTimeout, e.blockedBy} }",
 			Test:        "TestAdmissionWait_TheBlockingCapIsDiagnosisAndNotAnIdentity",
+			Fails:       "an expired wait identifies as a lease-cap refusal",
 			Guarantee: "that the blocking cap stays diagnosis rather than becoming an identity " +
 				"an ordered switch can select, which would make the queue-timeout answer " +
 				"unreachable in production while still registered",
@@ -124,6 +133,7 @@ func All() []Mutation {
 			Anchor:      "\t\ttimer := r.serverTimer(queueWait)",
 			Replacement: "\t\ttimer := time.NewTimer(queueWait)",
 			Test:        "TestScheduler_TheServerWaitExpiresWithItsOwnIdentity",
+			Fails:       "never armed through the injected timer",
 			Guarantee: "that the server's wait is armed through the injectable seam, without " +
 				"which a gate silently becomes a multi-minute one and eventually reads as a hang",
 		},
@@ -132,6 +142,7 @@ func All() []Mutation {
 			Anchor:      "\tif d, ok := ctx.Deadline(); !ok || d.After(serverDeadline) {",
 			Replacement: "\tif d, ok := ctx.Deadline(); !ok || !d.Before(serverDeadline) {",
 			Test:        "TestScheduler_OneBoundOwnsTheWaitDeterministically",
+			Fails:       "which bound owns the wait must not",
 			Guarantee: "that which bound owns a wait is decided by policy rather than by which " +
 				"channel the runtime happens to see first",
 		},
@@ -140,6 +151,7 @@ func All() []Mutation {
 			Anchor:      "\t\tr.serveLine()\n\t}\n\tr.mu.Unlock()",
 			Replacement: "\t}\n\tr.mu.Unlock()",
 			Test:        "TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting",
+			Fails:       "capacity was free and",
 			Guarantee: "that freed capacity never sits idle while somebody able to use it is " +
 				"still queued, which is what makes joining the line safe rather than a disadvantage",
 		},
@@ -151,6 +163,7 @@ func All() []Mutation {
 			Anchor:      "\t\treturn DenyQueueTimeout, d, true",
 			Replacement: "\t\treturn DenyQueueTimeout, \"\", true",
 			Test:        "TestOpenWireSession_AWaitThatExpiresIsRecordedAsAWaitNotAsACapRefusal",
+			Fails:       "want it to record that the request waited",
 			Guarantee: "that the one record of an expired wait says which limit to raise, not " +
 				"merely that somebody waited",
 		},
@@ -159,6 +172,7 @@ func All() []Mutation {
 			Anchor:      "\tcase errors.Is(rerr, ErrQueueTimeout):",
 			Replacement: "\tcase errors.Is(rerr, ErrLeaseCapExceeded):\n\t\treturn denyAfterAuthorization(DenyLeaseCap)\n\tcase errors.Is(rerr, ErrQueueTimeout):",
 			Test:        "TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn",
+			Fails:       "was recorded as one refused on arrival",
 			Guarantee: "that a request which waited is never recorded as one refused on arrival, " +
 				"independently of what the error happens to unwrap to",
 		},
@@ -167,6 +181,7 @@ func All() []Mutation {
 			Anchor:      "\tlines := strings.Split(doc, \"\\n\")",
 			Replacement: "\tif true {\n\t\treturn doc\n\t}\n\tlines := strings.Split(doc, \"\\n\")",
 			Test:        "TestCoordinates_AMovedUseIsCorrected",
+			Fails:       "the declaration was not located",
 			Guarantee: "that the generator reads the tree rather than echoing back the document " +
 				"it was handed",
 		},
@@ -180,6 +195,7 @@ func All() []Mutation {
 			Anchor:      "decl cancel_registry.go:138",
 			Replacement: "decl cancel_registry.go:999999",
 			Test:        "TestCoordinates_TheMatrixIsWhatTheGeneratorWouldWrite",
+			Fails:       "the matrix's coordinates are not what the code says",
 			Guarantee: "that a coordinate drifting out of step with the code is caught rather " +
 				"than discovered later by a downstream walk",
 		},
@@ -188,9 +204,56 @@ func All() []Mutation {
 			Anchor:      "\t\".git\": true, \"node_modules\": true, \".cache\": true,",
 			Replacement: "\t\"node_modules\": true, \".cache\": true,",
 			Test:        "TestIdentity_AWorktreeGitFileIsNotPartOfTheFingerprint",
+			Fails:       "the fingerprint changed when a worktree's .git FILE appeared",
 			Guarantee: "that a worktree and its .git-excluded copy can be compared at all, " +
 				"without which the identity gate rejects every honest copy and teaches " +
 				"everyone to ignore it",
+		},
+		// ---- the command boundary ----
+		//
+		// The helpers are controlled above; these prove the EXECUTABLE actually
+		// asks them. A library that refuses correctly behind a command that
+		// never calls it is a hole in the one place it does not show, and every
+		// library-level control stays RED while the gate script sees nothing.
+		{
+			Name: "cli-guards-the-recorded-manifest", Package: "./internal/gateidentity/cmd/identity/",
+			File:        "internal/gateidentity/cmd/identity/main.go",
+			Anchor:      "\tfor _, ev := range []struct{ flag, path string }{{\"-manifest\", *manifest}, {\"-against\", *against}} {",
+			Replacement: "\tfor _, ev := range []struct{ flag, path string }{{\"-against\", *against}} {",
+			Test:        "TestCLI_RecordingIntoTheRootIsRefused",
+			Fails:       "for a manifest inside the root, want 2",
+			Guarantee: "that the command checks the RECORDED manifest's path, not only the " +
+				"one it compares against -- writing evidence into the tree changes what it records",
+		},
+		{
+			Name: "cli-guards-the-against-manifest", Package: "./internal/gateidentity/cmd/identity/",
+			File:        "internal/gateidentity/cmd/identity/main.go",
+			Anchor:      "{\"-manifest\", *manifest}, {\"-against\", *against}} {",
+			Replacement: "{\"-manifest\", *manifest}} {",
+			Test:        "TestCLI_CheckingAgainstAManifestInTheRootIsRefused",
+			Fails:       "for an against-manifest inside the root, want 2",
+			Guarantee: "that the command checks the manifest it compares against, without which " +
+				"an inside-root evidence file is read as an ordinary difference",
+		},
+		{
+			Name: "cli-refuses-two-authorities", Package: "./internal/gateidentity/cmd/identity/",
+			File:        "internal/gateidentity/cmd/identity/main.go",
+			Anchor:      "\tif *expect != \"\" && *against != \"\" {",
+			Replacement: "\tif false {",
+			Test:        "TestCLI_ExpectAndAgainstTogetherAreRefused",
+			Fails:       "must not both be accepted",
+			Guarantee: "that a manifest and a flag claiming different identities cannot both be " +
+				"accepted, which lets the check pass while the record describes something else",
+		},
+		{
+			Name: "cli-validates-its-metadata", Package: "./internal/gateidentity/cmd/identity/",
+			File:        "internal/gateidentity/cmd/identity/main.go",
+			Anchor:      "\t\tif meta.val != \"\" && !isHex40(meta.val) {",
+			Replacement: "\t\tif false {",
+			Test:        "TestCLI_MalformedMetadataIsRefused",
+			Fails:       "want 2",
+			Guarantee: "that a short or malformed commit id is refused, so a manifest cannot " +
+				"record a provenance nobody can resolve",
 		},
 		{
 			Name: "identity-requires-a-digest", Package: "./internal/gateidentity/",
