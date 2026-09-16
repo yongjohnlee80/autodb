@@ -336,6 +336,18 @@ func TestOpenWireSession_AWaitThatExpiresIsRecordedAsAWaitNotAsACapRefusal(t *te
 			"reached, and a record saying it was refused on arrival is not true of it",
 			got, DenyQueueTimeout)
 	}
+	// ONE RECORD CARRIES BOTH FACTS. The operator needs to know that the
+	// request waited AND which limit to raise; writing the second as its own
+	// audit row beside the refusal would double-count a single event, so the
+	// diagnosis travels with the denial.
+	detail := DenialDetail(err)
+	if !strings.Contains(detail, "waited") {
+		t.Errorf("denial detail = %q, want it to record that the request waited", detail)
+	}
+	if !strings.Contains(detail, ErrLeaseCapExceeded.Error()) {
+		t.Errorf("denial detail = %q, want it to name the cap that blocked the request — "+
+			"without it an operator knows a request waited but not which limit to raise", detail)
+	}
 
 	// Closing the first frees the lease for the next caller.
 	f.eng.CloseWireSession(ctx, first.SessionID, first.UserID, testIP, "test")
@@ -475,4 +487,27 @@ func TestOpenWireSession_TheRemainingRefusals(t *testing.T) {
 				"member and must refuse on its own", got, DenyResidentBudget)
 		}
 	})
+}
+
+// THE DIAGNOSIS NEVER REACHES THE CLIENT.
+//
+// It names an internal limit, so it belongs to the trail alone. The client is
+// told the uniform thing its reason maps to, exactly as every other refusal
+// raised after authorization is.
+func TestAdmissionWait_TheDiagnosisIsForTheTrailAndNotTheClient(t *testing.T) {
+	t.Parallel()
+	err := denyAfterAuthorizationWithDetail(DenyQueueTimeout, "waited 1m30s; blocked by: "+
+		ErrLeaseCapExceeded.Error())
+
+	if got := DenialReason(err); got != DenyQueueTimeout {
+		t.Errorf("reason = %q, want %q", got, DenyQueueTimeout)
+	}
+	if !DenialDisclosable(err) {
+		t.Error("a refusal raised after the credential verified is not disclosable, so an " +
+			"authorized developer would be told their credential was wrong")
+	}
+	if strings.Contains(err.Error(), "lease-cap") {
+		t.Error("the error's own text names an internal limit; the detail is for the audit " +
+			"row, and anything built from Error() would carry it further than intended")
+	}
 }
