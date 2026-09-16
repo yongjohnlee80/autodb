@@ -87,6 +87,14 @@ func (p *Permit) Release() {
 // not an allocation, and two targets may each be allowed more than the budget
 // — the ledger is what makes that safe (see docs/front-door/connection-holding-policy.md).
 type permitLedger struct {
+	// queue orders the requests that could not be served immediately. Nil in
+	// the low-level cells that exercise the ledger's arithmetic alone.
+	queue *acquireQueue
+	// inTransaction reports how many outstanding ordinary sockets are held by
+	// a transaction still inside its bounds. Installed by the engine, which is
+	// the only thing that knows; see allCapacityInTransaction.
+	inTransaction func() int
+
 	mu     sync.Mutex
 	budget int
 	// ordinary (O) and control (K) are counted SEPARATELY, and that is not
@@ -400,8 +408,88 @@ func (l *permitLedger) acquire(class DialClass) (*Permit, error) {
 			l.ordinary--
 		}
 		l.mu.Unlock()
+		// THE FREED SLOT GOES TO WHOEVER ASKED FIRST, HERE, NOT ON A TIMER.
+		//
+		// A queue drained by polling adds its poll interval to every grant and
+		// hides the moment capacity actually appeared. Handing the slot over
+		// at the release point is what makes "oldest waiter served as soon as
+		// a connection is physically free" the literal behaviour rather than
+		// an approximation of it. Only ordinary permits feed the queue: the
+		// control lane is a reserved single slot for cancellation and must
+		// never be handed to queued data-plane work.
+		if !control {
+			l.serveQueue()
+		}
 	}
 	return &granted, nil
+}
+
+// serveQueue re-takes the slot just freed and gives it to the oldest waiter.
+//
+// RE-ACQUIRED RATHER THAN PASSED ALONG, because the slot must stay accounted
+// for. Handing the caller's released permit object to a waiter would leave two
+// owners for one release closure; taking a fresh permit keeps every outstanding
+// socket represented by exactly one live permit, which is what the whole ledger
+// rests on. If nobody is waiting the slot simply stays free.
+func (l *permitLedger) serveQueue() {
+	if l.queue == nil || l.queue.Depth() == 0 {
+		return
+	}
+	p, err := l.acquire(DialOrdinary)
+	if err != nil {
+		return // the slot was taken by a direct acquirer in between; fine
+	}
+	if !l.queue.Grant(p) {
+		p.Release()
+	}
+}
+
+// AcquireOrWait takes an ordinary permit, or waits in line for one.
+//
+// THE REFUSAL AND THE WAIT ARE DIFFERENT ANSWERS AND ARE DECIDED BEFORE THE
+// QUEUE, not inside it. If every slot is held by a transaction still inside
+// its bounds then nothing is reclaimable now: no release is pending, so
+// queueing would mean waiting the full ninety seconds to be told the same
+// thing. That case is refused immediately, and it is refused ONLY here --
+// once a request is in the queue it resolves by grant, by the caller giving
+// up, or by the wait expiring, and never by being relabelled with a refusal
+// that claims it never queued.
+func (l *permitLedger) AcquireOrWait(ctx context.Context, connID int64) (*Permit, error) {
+	if p, err := l.acquire(DialOrdinary); err == nil {
+		return p, nil
+	} else if !errors.Is(err, ErrTargetBudgetExhausted) {
+		return nil, err
+	}
+	if l.allCapacityInTransaction() {
+		return nil, ErrAllCapacityInTransaction
+	}
+	if l.queue == nil {
+		return nil, ErrTargetBudgetExhausted
+	}
+	return l.queue.Wait(ctx, connID)
+}
+
+// allCapacityInTransaction reports the ruled pre-enqueue condition: every
+// ordinary slot is held by a transaction that is still within its bounds.
+//
+// IT ASKS THE ENGINE RATHER THAN GUESSING. The ledger counts sockets; only the
+// session registry knows which of them are inside a live transaction, and a
+// ledger that inferred it from its own numbers would be asserting a
+// relationship it cannot see. With no reporter installed the answer is false,
+// which routes to the queue -- the conservative direction, because waiting and
+// being told no is worse service than a refusal but is never WRONG.
+func (l *permitLedger) allCapacityInTransaction() bool {
+	if l.inTransaction == nil {
+		return false
+	}
+	l.mu.Lock()
+	limit := l.ordinaryLimitLocked()
+	outstanding := l.ordinary
+	l.mu.Unlock()
+	if limit <= 0 || outstanding < limit {
+		return false
+	}
+	return l.inTransaction() >= outstanding
 }
 
 // ordinaryLimitLocked is what ordinary work may take: one short of the budget,

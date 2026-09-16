@@ -432,6 +432,42 @@ func (r *sessionRegistry) releaseReservation(s *session) {
 }
 
 // leaseCount reports the wire leases held on a connection. Test-support.
+// inTransactionHoldingBackend counts the sessions that hold a physical backend
+// AND have a transaction open on it.
+//
+// THIS IS THE NUMBER THAT DECIDES WHETHER WAITING IS POINTLESS. A slot held by
+// an idle session can be reclaimed the moment somebody needs it; a slot held
+// by a live transaction cannot, because reclaiming it would roll back work the
+// caller has not finished and did not ask us to abandon. When every slot is
+// the second kind there is nothing for a newcomer to wait FOR, which is the
+// whole justification for refusing before the queue rather than after ninety
+// seconds in it.
+//
+// BOTH CONDITIONS, NOT EITHER. A session with an open transaction but no
+// pinned backend is holding no capacity, and counting it would refuse
+// newcomers on behalf of a slot that does not exist.
+func (r *sessionRegistry) inTransactionHoldingBackend() int {
+	r.mu.Lock()
+	sessions := make([]*session, 0, len(r.byID))
+	for _, s := range r.byID {
+		sessions = append(sessions, s)
+	}
+	r.mu.Unlock()
+
+	// Counted OUTSIDE the registry lock, because reading a session's own state
+	// takes that session's mutex and holding both at once is how this package
+	// would acquire a lock-ordering problem it does not have today.
+	n := 0
+	for _, s := range sessions {
+		s.mu.Lock()
+		if s.tx != nil && s.pc != nil {
+			n++
+		}
+		s.mu.Unlock()
+	}
+	return n
+}
+
 func (r *sessionRegistry) leaseCount(connID int64) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
