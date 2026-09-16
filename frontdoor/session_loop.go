@@ -1157,6 +1157,17 @@ const deadlineGoodbyeBudget = 2 * time.Second
 // generic one: a client branches on the code, and a wrong branch is a wrong
 // recovery.
 func classifyGateError(err error) (code, rule, hint string, fatal bool) {
+	// THE HELD-OBJECT REGISTER ANSWERS FIRST, and it answers from the same row
+	// the extended path renders. Two catalogues for one condition is two
+	// catalogues that can disagree, and the simple and extended paths would
+	// then tell one client two different SQLSTATEs for one refusal depending on
+	// which protocol it happened to be speaking.
+	if cond, ok := heldConditionFor(err); ok {
+		if row, known := heldObjectRowFor(cond); known {
+			return row.sqlState, row.identity, row.hint, row.after == endSession
+		}
+	}
+
 	switch {
 	case errors.Is(err, auth.ErrLocked):
 		// THE STORE IS LOCKED. It surfaces HERE, at the first
@@ -1268,13 +1279,6 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 		return sqlStateConfiguredLimit, "frontdoor/named-object-cap",
 			"close unused prepared statements or portals, then retry", false
 
-	case errors.Is(err, exec.ErrRetainedBudget):
-		// matrix §7 :381 — a CONFIGURED quota the operator can raise, which ruling 4
-		// separates from 54000's program limits. The connection stays: it is this
-		// Parse or Bind that is refused.
-		return sqlStateConfiguredLimit, "frontdoor/retained-budget",
-			"close unused prepared statements or portals, then retry", false
-
 	case errors.Is(err, exec.ErrUnknownStatement):
 		// PostgreSQL'S OWN CODE, not a front-door identity. A client naming a
 		// prepared statement that does not exist gets 26000 from a real server,
@@ -1351,6 +1355,16 @@ func isStagePanic(err error) bool {
 }
 
 func gateMessage(err error) string {
+	// A HELD-OBJECT CONDITION SAYS ITS REGISTER ROW'S LITERAL AND NEVER THE
+	// ERROR'S OWN TEXT. The engine's errors are written for an operator and
+	// carry their package's name; sending one to a client publishes an internal
+	// identifier and makes the peer-facing wording change whenever the engine
+	// rewords a variable.
+	if cond, ok := heldConditionFor(err); ok {
+		if row, known := heldObjectRowFor(cond); known {
+			return row.message
+		}
+	}
 	if errors.Is(err, exec.ErrWireFaceLost) {
 		return "the session's connection to the target failed"
 	}

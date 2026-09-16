@@ -278,6 +278,19 @@ func (l *Listener) runExtendedSync(conn net.Conn, be *pgproto3.Backend,
 func (l *Listener) frameExtendedError(conn net.Conn, be *pgproto3.Backend,
 	sess exec.WireSessionResult, err error, peer string, seg *segmentLane, closeReason *string) bool {
 
+	// A HELD-OBJECT CONDITION IS ANSWERED FROM ITS REGISTER ROW, RESOLVED
+	// THROUGH THE REGISTRY.
+	//
+	// It comes first because these are OUR decisions, taken against our own
+	// object graph before anything was forwarded, so they are neither an
+	// admission reason nor a target error and matching them later would be
+	// matching them by accident. Going through the registry is what makes the
+	// declaration mean something: a declared identity that production emits
+	// without resolving is a row that proves nothing.
+	if cond, ok := heldConditionFor(err); ok {
+		return l.frameHeldObject(conn, be, cond, err.Error(), peer, seg, closeReason)
+	}
+
 	if !errors.Is(err, exec.ErrWireFaceLost) && !admission.IsOperationalError(err) {
 		if reason, ok := frameableAdmissionReason(err); ok {
 			frame := admissionErrorFrame(reason, true)

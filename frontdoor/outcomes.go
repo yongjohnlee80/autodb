@@ -205,6 +205,10 @@ func Outcomes() []outcome.Registration {
 		{Producer: ProducerLifecycle, Outcomes: []outcome.Decl{
 			{ID: OutcomeInternalError, Kind: outcome.Operational, Charge: outcome.None},
 		}},
+		// The conditions a session's held prepared statements and portals
+		// produce, declared from the register that renders them so the two
+		// cannot drift.
+		{Producer: ProducerHeldObjects, Outcomes: heldObjectDecls()},
 		{Producer: ProducerServe, Outcomes: []outcome.Decl{
 			// The ordinary ending: the client said goodbye, or went away.
 			{ID: OutcomePeerClosed, Kind: outcome.Control, Charge: outcome.None},
