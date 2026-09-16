@@ -48,7 +48,7 @@ func (q *configFaultQueries) WireQuery(ctx context.Context, id exec.SessionID, u
 	sql, ip string, emit func(exec.WireMessage) error) (byte, error) {
 
 	if configFaultArmed(sql) {
-		return 0, exec.NewConfigFailure(exec.ConfigStagePool, configFaultCause())
+		return 0, exec.NewConfigFailure(exec.ConfigStagePool, 7, exec.DetailPoolRefused, configFaultCause())
 	}
 	return q.Engine.WireQuery(ctx, id, userID, sql, ip, emit)
 }
@@ -103,14 +103,29 @@ func TestConnectionUnusablePG_PgxKeepsTheSessionAndLearnsNothing(t *testing.T) {
 		t.Fatalf("the statement after the configuration failure returned %+v, want one row of 42", res)
 	}
 
-	var sawAudit bool
+	// THE TRAIL SAYS WHICH CHECK FAILED AND ON WHICH CONNECTION, AND NOTHING
+	// THE CONNECTION STRING CARRIES. This cell used to require the raw cause
+	// here; Event.Detail is published to whatever consumes the event stream,
+	// and the cause names the host and can name a credential.
+	var detail string
 	for _, ev := range events() {
-		if ev.Kind == EventConnectionUnusable && strings.Contains(ev.Detail, "billing-prod") {
-			sawAudit = true
+		if ev.Kind == EventConnectionUnusable {
+			detail = ev.Detail
 		}
 	}
-	if !sawAudit {
-		t.Error("the operator's trail has no connection-unusable event carrying the cause; " +
-			"the client is denied it on the understanding that the operator is not")
+	if detail == "" {
+		t.Fatal("the operator's trail has no connection-unusable event; the client is " +
+			"denied the detail on the understanding that the operator is not")
+	}
+	for _, want := range []string{"stage=" + string(exec.ConfigStagePool), "conn=7",
+		string(exec.DetailPoolRefused)} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("event detail = %q, want it to carry %q", detail, want)
+		}
+	}
+	for _, tok := range []string{"billing-prod", "autodb_rw", "db7.internal", "6432"} {
+		if strings.Contains(strings.ToLower(detail), strings.ToLower(tok)) {
+			t.Errorf("event detail carries %q from the raw cause: %q", tok, detail)
+		}
 	}
 }

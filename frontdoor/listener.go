@@ -1085,7 +1085,24 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 		}
 		if aerr != nil {
 			closeReason = string(outcome.Failure)
-			l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s: %v", peer, aerr))
+			// THE IDENTITY AND THE SAFE DETAIL, NEVER THE ERROR.
+			//
+			// This printed %v of whatever the engine returned. For the endings
+			// this package raises itself that is harmless, and that is exactly
+			// what made it easy to miss: the arm it also serves is the generic
+			// one, where the value is an arbitrary error from another package
+			// and this code cannot know what is inside it. Measured on the
+			// configuration path, an error of that shape carried the target
+			// host, a query-parameter password and a PAT. A log is copied into
+			// tickets and shipped to aggregators, so it gets the same closed
+			// vocabulary the audit row does.
+			if outcome.Detail != "" {
+				l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s ended as %s: %s",
+					peer, outcome.Failure, outcome.Detail))
+			} else {
+				l.onLog(fmt.Sprintf("frontdoor: the credential exchange with %s ended as %s",
+					peer, outcome.Failure))
+			}
 			// CHARGED FROM THE RETAINED OCCURRENCE. Not re-resolved: the
 			// phase already validated this identity, and resolving it a second
 			// time is a second chance to resolve it differently.
@@ -1132,8 +1149,13 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			// inflates the number an operator watches for credential attacks
 			// with events that are our fault.
 			safely(func() {
+				// THE DETAIL IS THE SAFE DIAGNOSTIC OR NOTHING. A startup that
+				// failed for our reasons now says which check failed and on
+				// which connection id, so the trail is actionable rather than
+				// a bare identity -- and it says it from the closed set, so
+				// this row cannot become the place a DSN escapes.
 				l.onEvent(Event{Kind: EventAuthOperational, Reason: string(outcome.Failure),
-					Peer: peer})
+					Peer: peer, Detail: outcome.Detail})
 			})
 			return
 		}

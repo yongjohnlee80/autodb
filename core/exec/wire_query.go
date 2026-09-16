@@ -778,7 +778,7 @@ func (e *Engine) pinTargetBackend(ctx context.Context, s *session, target dao.Da
 		// teardown for an UNUSED pin; destruction is for a backend a session
 		// has touched, which is the very thing this refuses to allow.
 		pc.Discard()
-		return nil, NewConfigFailure(ConfigStageCapability,
+		return nil, NewConfigFailure(ConfigStageCapability, s.connID, DetailNoDestroy,
 			errors.New("the resolved postgres driver cannot destroy a pinned backend on demand"))
 	}
 	// The pool is shared with every other statement autodb runs, and those

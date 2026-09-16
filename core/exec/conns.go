@@ -152,11 +152,11 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	// operator sent to check a DSN for a connection whose engine does not
 	// exist is being sent to the wrong place.
 	if !slices.Contains(engine.All(), row.Engine) {
-		return nil, NewConfigFailure(ConfigStageEngine,
+		return nil, NewConfigFailure(ConfigStageEngine, connID, DetailUnknownEngine,
 			fmt.Errorf("exec: connection %d has unknown engine %q", connID, row.Engine))
 	}
 	if verr := ValidateDSN(row.Engine, string(dsn)); verr != nil {
-		return nil, NewConfigFailure(ConfigStageDSN, verr)
+		return nil, NewConfigFailure(ConfigStageDSN, connID, DetailDSNUnusable, verr)
 	}
 	var conn dao.DataConn
 	switch row.Engine {
@@ -177,7 +177,7 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	case engine.SQLite:
 		conn, err = openSQLite(ctx, name, string(dsn), sqlite.Option(e.sqlPoolLimits(row)))
 	default:
-		return nil, NewConfigFailure(ConfigStageEngine,
+		return nil, NewConfigFailure(ConfigStageEngine, connID, DetailUnknownEngine,
 			fmt.Errorf("exec: connection %d has unknown engine %q", connID, row.Engine))
 	}
 	if err != nil {
@@ -186,7 +186,7 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 		// no socket and takes no permit. The wrapper keeps the connection's
 		// name for the audit — and the type keeps it off the wire, which the
 		// bare fmt.Errorf this replaced did not.
-		return nil, NewConfigFailure(ConfigStagePool,
+		return nil, NewConfigFailure(ConfigStagePool, connID, DetailPoolRefused,
 			fmt.Errorf("exec: opening connection %q: %w", row.Name, err))
 	}
 	// A capability test, and postgres deliberately does not answer it.
@@ -207,7 +207,7 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	if v, ok := dialectFor(row.Engine).(SessionGrammarVerifier); ok {
 		if verr := v.VerifySessionGrammar(ctx, conn); verr != nil {
 			_ = conn.Close()
-			return nil, NewConfigFailure(ConfigStageDSN, verr)
+			return nil, NewConfigFailure(ConfigStageDSN, connID, DetailGrammarUnproved, verr)
 		}
 	}
 	return conn, nil

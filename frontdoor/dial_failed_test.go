@@ -499,7 +499,7 @@ func TestRequestAcquisition_TheProducerAndItsRaiseSitesAgreeBothWays(t *testing.
 	}{
 		{"a target that could not be reached", exec.NewDialFailure(dialCause()), EventDialFailed},
 		{"a connection this install cannot serve",
-			exec.NewConfigFailure(exec.ConfigStagePool, errors.New("the pool would not build")),
+			exec.NewConfigFailure(exec.ConfigStagePool, 7, exec.DetailPoolRefused, errors.New("the pool would not build")),
 			EventConnectionUnusable},
 	}
 	for _, r := range renderers {
