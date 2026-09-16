@@ -337,6 +337,19 @@ func WithTargetConnBudget(n int) Option {
 	return func(e *Engine) {
 		if n > 0 {
 			e.targetPermits = newPermitLedger(n)
+			// THE QUEUE IS PART OF THE BUDGET, NOT AN ADD-ON. A ledger without
+			// one answers "exhausted" and leaves the caller to retry, which is
+			// the lottery this replaced: whoever retries at the right instant
+			// wins, regardless of who asked first.
+			e.targetPermits.queue = newAcquireQueue()
+			// And the ledger asks the registry which slots cannot be reclaimed,
+			// because only the registry knows. See allCapacityInTransaction.
+			e.targetPermits.inTransaction = func() int {
+				if e.sessions == nil {
+					return 0
+				}
+				return e.sessions.inTransactionHoldingBackend()
+			}
 		}
 	}
 }
