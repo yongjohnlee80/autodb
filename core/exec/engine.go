@@ -449,14 +449,15 @@ func (e *Engine) Close() error {
 	// race a checkout against a pool teardown — and a checkout that wins
 	// REOPENS the pool that was just closed.
 	e.bgCancel()
-	e.bgWG.Wait()
-	// The line first: a waiter holds no resource, so nothing here depends on
-	// it, but leaving it would hold a client open for the full server wait
-	// after this instance stopped serving -- and a release landing in that
-	// window would admit it onto pools that are already closing.
+	// THE LINE CLOSES WHEN SHUTDOWN BEGINS, NOT WHEN IT FINISHES. The outcome
+	// says the instance is shutting down, and it is: from this instant. Closing
+	// it after the wait below would leave requests joining a line, and being
+	// admitted from it, for however long a background worker takes to stop --
+	// onto pools this function is about to close.
 	if e.sessions != nil {
 		e.sessions.closeLine()
 	}
+	e.bgWG.Wait()
 	// Then sessions, for the same reason conn.delete closes them first: a
 	// pool closed under a live session is the undefined behaviour the design
 	// closes.

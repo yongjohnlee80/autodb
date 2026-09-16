@@ -3,7 +3,6 @@ package exec
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -126,25 +125,35 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 		hook(w.seq)
 	}
 
-	// THE TIMER CARRIES THE SERVER'S WAIT ONLY, and the caller's deadline is
-	// left to the caller's own context.
+	// WHICH BOUND OWNS THIS WAIT IS DECIDED HERE, ONCE, FROM THE TWO ABSOLUTE
+	// DEADLINES -- not by racing two channels and reporting whichever wins.
 	//
-	// IT USED TO CARRY THE EARLIER OF THE TWO, which was wrong in a way that
-	// shows up as a wrong answer rather than as a hang: when the caller's
-	// deadline was the earlier one, the timer and ctx.Done became ready in the
-	// same instant, and a select among ready cases picks at random. Half the
-	// time a client that had run out of its own time was told the SERVER's wait
-	// had expired. Both bounds still apply -- a client with five seconds left
-	// does not get ninety -- but each is now reported by the thing that owns it.
-	timer := time.NewTimer(queueWait)
-	defer timer.Stop()
+	// Both bounds apply: a client with five seconds left does not get ninety.
+	// But a select among cases that are ALREADY READY picks at random, so when
+	// the two deadlines coincide -- exactly what happens when the caller's is
+	// the earlier one and the server timer is armed to it -- the answer was a
+	// coin toss, and half the time a client that had run out of its own time
+	// was told the SERVER's wait had expired.
+	//
+	// So exactly one bound is armed. If the caller's deadline arrives no later
+	// than the server's, the caller's context owns the wait ALONE and the
+	// server's expiry channel stays nil, which blocks forever in a select. At
+	// exact equality the caller owns it, because "you ran out of time" is the
+	// more specific and more useful answer. Cancellation stays live either way.
+	serverDeadline := r.clock().Add(queueWait)
+	var serverExpiry <-chan time.Time
+	if d, ok := ctx.Deadline(); !ok || d.After(serverDeadline) {
+		timer := r.serverTimer(queueWait)
+		defer timer.Stop()
+		serverExpiry = timer.C
+	}
 
 	select {
 	case err := <-w.done:
 		return err
 	case <-ctx.Done():
 		return r.giveUp(w, context.Cause(ctx))
-	case <-timer.C:
+	case <-serverExpiry:
 		return r.giveUp(w, r.expiredWaitReason(w))
 	}
 }
@@ -171,28 +180,47 @@ func (r *sessionRegistry) giveUp(w *admitWaiter, own error) error {
 	return own
 }
 
-// expiredWaitReason names both what happened and what blocked it.
+// QueueTimeoutError is a wait that reached the server's bound without being
+// served, carrying the cap that held it as DIAGNOSIS rather than as identity.
 //
-// AN OPERATOR'S REMEDY DEPENDS ON WHICH CAP WAS IN THE WAY, so "you waited and
-// were not served" is not a sufficient answer on its own: a full target pool
-// and a full session cap are fixed by different changes, and the trail has to
-// say which one held this request. This was found by an existing cell going
-// red -- the queue had begun overwriting the specific cap identity with a
-// generic timeout, which would have left an operator reading the trail with no
-// idea which limit to raise.
+// IT UNWRAPS TO ErrQueueTimeout AND TO NOTHING ELSE, and that restraint is the
+// whole design. The obvious shape -- wrap both the timeout and the blocking cap
+// so errors.Is answers yes to each -- is what this replaced, and it was wrong
+// in a way that looked like extra information: the front door tests the cap
+// arms before the timeout arm, so EVERY expiry rendered as a plain cap refusal
+// and the queue-timeout identity became unreachable in production while
+// remaining registered. That is a retroactive relabel. A request that waited
+// ninety seconds would have been recorded as though it had been refused on
+// arrival, which is exactly the record the ruling forbids: once a request is in
+// the line it resolves by being admitted, by the caller giving up, or by its
+// wait expiring, and never by acquiring a refusal that claims it never waited.
 //
-// The returned error satisfies BOTH identities: the wait expired, AND the
-// lease cap is why. The front door renders the specific cap to the client,
-// while the waited-and-was-not-served fact stays available to anything reading
-// for pressure.
+// The cap is still worth knowing -- an operator's remedy for a full target pool
+// differs from one for a full session cap -- so it is reachable through
+// BlockedBy, which the audit projection asks for deliberately and no ordered
+// errors.Is switch can select by accident.
+type QueueTimeoutError struct{ blockedBy error }
+
+func (e *QueueTimeoutError) Error() string {
+	if e.blockedBy == nil {
+		return ErrQueueTimeout.Error()
+	}
+	return ErrQueueTimeout.Error() + " (blocked by: " + e.blockedBy.Error() + ")"
+}
+
+// Unwrap yields the timeout ALONE. See the type's comment.
+func (e *QueueTimeoutError) Unwrap() error { return ErrQueueTimeout }
+
+// BlockedBy is the cap that held this request, for the operator-facing record.
+// Nil when the wait expired without any cap having passed the request over.
+func (e *QueueTimeoutError) BlockedBy() error { return e.blockedBy }
+
+// expiredWaitReason builds the answer for a wait that was never reached.
 func (r *sessionRegistry) expiredWaitReason(w *admitWaiter) error {
 	r.mu.Lock()
 	blocked := w.blockedBy
 	r.mu.Unlock()
-	if blocked == nil {
-		return ErrQueueTimeout
-	}
-	return fmt.Errorf("%w: %w", ErrQueueTimeout, blocked)
+	return &QueueTimeoutError{blockedBy: blocked}
 }
 
 // leaveLine takes a waiter out of the line, reporting whether it was still
@@ -283,30 +311,55 @@ func (r *sessionRegistry) closeLine() int {
 	return n
 }
 
-// dropTargetWaiters refuses everyone waiting for one connection, because that
-// connection is being removed.
+// beginDrainingTarget marks a connection as shutting down, answers everyone
+// waiting for it, and returns the sessions that are on it — as ONE transition.
 //
-// ANSWERED AT THE MOMENT OF REMOVAL, not by letting the wait expire. A timeout
-// invites a retry that can now never succeed; this says the thing they asked
-// for no longer exists. It is called under the same intent as marking the
-// connection draining: a request may not be admitted onto a connection being
-// torn down, and a request waiting for one is exactly that request a moment
-// earlier.
-func (r *sessionRegistry) dropTargetWaiters(connID int64) int {
+// ONE CRITICAL SECTION, AND THAT IS THE WHOLE POINT. Marking and sweeping used
+// to be two calls, each taking this lock on its own, and the gap between them
+// was a hole a request could fall into: it could join the line AFTER the sweep
+// had answered every waiter and BEFORE draining was true, which left it waiting
+// on a connection that no longer exists with nothing left to tell it so. It
+// would have sat there until its wait expired and then been told the instance
+// was busy, which is false and sends whoever reads the trail looking for
+// capacity pressure that never happened.
+//
+// Done together, the transition has no inside. Every request is on exactly one
+// side of it: already waiting, and answered here; or arriving afterwards, and
+// refused by the draining mark before it can join anything.
+func (r *sessionRegistry) beginDrainingTarget(connID int64) (int, []*session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// MARK FIRST. Everything after this point in this critical section is
+	// cleanup of what was already there; nothing new can arrive behind it.
+	r.draining[connID] = true
+
 	kept := r.line[:0]
-	n := 0
+	dropped := 0
 	for _, w := range r.line {
 		if w.leaseConn == connID {
+			// ANSWERED AT THE MOMENT OF REMOVAL, not by letting the wait
+			// expire. A timeout invites a retry that can now never succeed;
+			// this says the thing they asked for no longer exists. The send
+			// cannot block: the outcome channel is buffered by one and each
+			// waiter is resolved exactly once.
 			w.resolve(ErrTargetGone)
-			n++
+			dropped++
 			continue
 		}
+		// Waiters for other connections are untouched: removing one target
+		// says nothing about the rest.
 		kept = append(kept, w)
 	}
 	r.line = kept
-	return n
+
+	var on []*session
+	for _, s := range r.byID {
+		if s.connID == connID {
+			on = append(on, s)
+		}
+	}
+	return dropped, on
 }
 
 // lineDepth reports how many requests are waiting, for the pressure view.
@@ -327,6 +380,21 @@ func (r *sessionRegistry) lineDepthFor(connID int64) int {
 		}
 	}
 	return n
+}
+
+// serverTimer builds the timer for the server's wait.
+//
+// A SEAM RATHER THAN A FAKE CLOCK. The clock decides which bound OWNS the wait;
+// the timer decides when it actually fires, and no amount of moving wall time
+// makes a real time.Timer fire sooner. A cell that wants to watch a wait expire
+// has to be able to expire it, and the alternative -- letting the cell sleep
+// through ninety real seconds -- is how a focused gate becomes something people
+// stop running.
+func (r *sessionRegistry) serverTimer(d time.Duration) *time.Timer {
+	if r.newTimer != nil {
+		return r.newTimer(d)
+	}
+	return time.NewTimer(d)
 }
 
 // clock is the registry's time source, injectable so a cell can drive the wait

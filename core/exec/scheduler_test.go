@@ -300,8 +300,10 @@ func TestScheduler_ACancellationThatLosesToAGrantUndoesTheAdmission(t *testing.T
 // A REQUEST THAT WAITS ITS TURN AND IS NEVER REACHED IS TOLD SO, DISTINCTLY.
 func TestScheduler_TheServerWaitExpiresWithItsOwnIdentity(t *testing.T) {
 	r := schedRegistry(t, 1)
-	// Drive the wait rather than sleeping through ninety seconds of it.
-	r.now = func() time.Time { return time.Now().Add(-queueWait).Add(40 * time.Millisecond) }
+	// Expire the wait rather than sleeping through ninety seconds of it. The
+	// clock decides which bound owns the wait; only the timer decides when it
+	// fires, so this is the seam that has to move.
+	r.newTimer = func(time.Duration) *time.Timer { return time.NewTimer(20 * time.Millisecond) }
 
 	holder := schedSession("holder", 1, 7)
 	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
@@ -437,8 +439,12 @@ func TestScheduler_RemovingATargetAnswersOnlyItsOwnWaiters(t *testing.T) {
 	go func() { spared <- r.admitWithLeaseOrWait(context.Background(), schedSession("w2", 4, 2), 2, 0) }()
 	awaitSeq(t, seen)
 
-	if n := r.dropTargetWaiters(1); n != 1 {
-		t.Fatalf("dropped %d waiters for the removed connection, want 1", n)
+	dropped, on := r.beginDrainingTarget(1)
+	if dropped != 1 {
+		t.Fatalf("answered %d waiters for the removed connection, want 1", dropped)
+	}
+	if len(on) != 1 {
+		t.Errorf("snapshot holds %d sessions on the removed connection, want 1", len(on))
 	}
 	if err := <-doomed; !errors.Is(err, ErrTargetGone) {
 		t.Errorf("got %v, want the target-removed answer", err)
@@ -447,6 +453,17 @@ func TestScheduler_RemovingATargetAnswersOnlyItsOwnWaiters(t *testing.T) {
 	case err := <-spared:
 		t.Fatalf("a waiter for a different connection was answered %v", err)
 	case <-time.After(50 * time.Millisecond):
+	}
+
+	// NOTHING MAY ARRIVE BEHIND THE TRANSITION. A request for the removed
+	// connection now meets the draining mark and is refused outright; if it
+	// could still join the line it would wait on a connection that no longer
+	// exists, with nothing left to tell it so.
+	late := schedSession("arrives-after-the-removal", 5, 1)
+	late.connID = 1
+	lateErr := r.admitWithLeaseOrWait(context.Background(), late, 1, 0)
+	if !errors.Is(lateErr, ErrConnectionDraining) {
+		t.Errorf("a request arriving after the removal got %v, want the draining refusal", lateErr)
 	}
 	if d := r.lineDepth(); d != 1 {
 		t.Errorf("line depth = %d, want 1", d)
@@ -607,6 +624,64 @@ func TestScheduler_TheBoundEdgeDecidesWhoOwnsTheLease(t *testing.T) {
 			r.mu.Unlock()
 			if got != tc.refuses {
 				t.Errorf("refuses-before-queueing = %v, want %v", got, tc.refuses)
+			}
+		})
+	}
+}
+
+// EXACTLY ONE BOUND OWNS EACH WAIT, AND WHICH ONE IS NOT A COIN TOSS.
+//
+// When both deadlines coincide, a select among ready cases picks at random, so
+// the answer a client received depended on scheduling rather than on policy.
+// Ownership is now decided once, from the two absolute deadlines, before
+// anything is armed. Repeated because a race that resolves correctly once
+// proves nothing.
+func TestScheduler_OneBoundOwnsTheWaitDeterministically(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		lead  time.Duration // caller deadline relative to the server's wait
+		wants func(error) bool
+		desc  string
+	}{
+		{
+			name:  "the caller runs out first",
+			lead:  -time.Second,
+			wants: func(err error) bool { return errors.Is(err, context.DeadlineExceeded) },
+			desc:  "the caller's own deadline",
+		},
+		{
+			name:  "the deadlines coincide exactly",
+			lead:  0,
+			wants: func(err error) bool { return errors.Is(err, context.DeadlineExceeded) },
+			desc:  "the caller's own deadline, which owns an exact tie",
+		},
+		{
+			name:  "the server runs out first",
+			lead:  time.Hour,
+			wants: func(err error) bool { return errors.Is(err, ErrQueueTimeout) },
+			desc:  "the server's wait",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := range 25 {
+				r := schedRegistry(t, 1)
+				at := time.Now()
+				r.now = func() time.Time { return at }
+				// Both bounds land in milliseconds, so whichever is armed
+				// resolves fast; only WHICH is armed is under test.
+				r.newTimer = func(time.Duration) *time.Timer { return time.NewTimer(20 * time.Millisecond) }
+
+				holder := schedSession("holder", 1, 7)
+				if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithDeadline(context.Background(), at.Add(queueWait).Add(tc.lead))
+				err := r.admitWithLeaseOrWait(ctx, schedSession("waits", 2, 7), 7, 0)
+				cancel()
+				if !tc.wants(err) {
+					t.Fatalf("run %d: got %v, want %s — which bound owns the wait must not "+
+						"depend on which channel the runtime happens to see first", i, err, tc.desc)
+				}
 			}
 		})
 	}
