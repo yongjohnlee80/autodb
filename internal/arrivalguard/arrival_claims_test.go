@@ -66,24 +66,25 @@ func TestArrivalClaims_NoUnscopedStoreArrivalSurvivesInComments(t *testing.T) {
 			for name, file := range pkg.Files {
 				files++
 				for _, group := range file.Comments {
-					text := strings.ToLower(group.Text())
-					for _, c := range claims {
-						if !strings.Contains(text, c.claim) {
-							continue
-						}
-						scoped := false
-						for _, s := range c.scope {
-							if strings.Contains(text, s) {
-								scoped = true
-								break
+					for _, sentence := range splitSentences(strings.ToLower(group.Text())) {
+						for _, c := range claims {
+							if !strings.Contains(sentence, c.claim) {
+								continue
 							}
-						}
-						if !scoped {
-							t.Errorf("%s: a comment says %q without naming the engine it is true "+
-								"of.\n  A postgres-wire connection pins its backend inside "+
-								"OpenWireSessionWith, so the store IS read during the credential "+
-								"phase. Say which engine, or delete the claim.\n  comment at %s",
-								name, c.claim, fset.Position(group.Pos()))
+							scoped := false
+							for _, s := range c.scope {
+								if strings.Contains(sentence, s) {
+									scoped = true
+									break
+								}
+							}
+							if !scoped {
+								t.Errorf("%s: a comment says %q without naming the engine it is true "+
+									"of.\n  A postgres-wire connection pins its backend inside "+
+									"OpenWireSessionWith, so the store IS read during the credential "+
+									"phase. Say which engine, or delete the claim.\n  comment at %s",
+									name, c.claim, fset.Position(group.Pos()))
+							}
 						}
 					}
 				}

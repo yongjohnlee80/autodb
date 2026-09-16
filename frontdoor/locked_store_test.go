@@ -26,10 +26,11 @@ import (
 //	                                    resolving the target and asserting
 //	                                    the driver's capabilities all happen
 //	                                    DURING the credential phase.
-//	engine does not                   : no target is opened at admission. The
-//	                                    DSN is decrypted at the first
-//	                                    statement, so the client authenticates
-//	                                    and its first query is refused.
+//	engine does not speak the wire    : no target is opened at admission, so
+//	                                    for such an engine the DSN is
+//	                                    decrypted at the first statement and
+//	                                    the client authenticates before its
+//	                                    first query is refused.
 //
 // BOTH WERE ASSERTED AS THE WHOLE TRUTH AT DIFFERENT TIMES, AND NEITHER IS.
 // The keyslot design claimed the credential phase; a measurement against a
@@ -37,8 +38,9 @@ import (
 // was real and its conclusion was scoped to the one engine it used — SQLite,
 // which does not speak the wire and so never reaches the pin. That scope was
 // then dropped, and the file carried "OpenWireSessionWith never opens a
-// target" as a general fact while the front door's entire purpose is the
-// engine for which it is false.
+// target" — true only of an engine that does not speak the wire — as though it
+// were a general fact, while the front door's entire purpose is the engine for
+// which it is false.
 //
 // What that cost: everything which was not a denial became an auth-store error
 // answered with the uniform credential denial, so a developer holding a
