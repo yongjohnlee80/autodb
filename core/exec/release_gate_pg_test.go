@@ -3,6 +3,7 @@ package exec
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -359,7 +360,7 @@ func TestReleaseGatePG_AResetTheTargetRefusesDiscardsTheBackend(t *testing.T) {
 	// front because the same plan runs when a session TAKES a backend, and a
 	// broken plan would simply stop the session opening.
 	lt.f.eng.backendReset = append(backendResetPlan(),
-		resetStep{"a state no server can discard", "DISCARD NOTHING_LIKE_THIS"})
+		resetStep{carries: "a state no server can discard", sql: "DISCARD NOTHING_LIKE_THIS"})
 	first.close()
 	lt.f.eng.backendReset = nil
 
@@ -460,4 +461,80 @@ func TestReleaseGatePG_ABackendDirtiedByThePooledPathIsProvedAtCheckout(t *testi
 			}
 		})
 	}
+}
+
+// THE GATE DESTROYS AN UNPROVED BACKEND ITSELF, rather than leaving it to
+// something downstream that happens to clean up after it.
+//
+// This cell exists because the cell above it can no longer tell the difference.
+// Once the driver's release hook runs the same reset plan, a gate that merely
+// HANDED BACK a backend whose reset had failed would still end with a destroyed
+// connection — the hook would refuse the same statement and destroy it — and the
+// new backend process id would prove nothing about the gate.
+//
+// So the gate is refused here for a reason the reset plan cannot reach: the
+// session's rollback failed. The plan itself is intact, so the release hook
+// would happily sanitize this connection and keep it. If the gate's destruction
+// degrades to an ordinary discard, the driver finds a quiescent healthy wire,
+// recycles it, and the second pin gets the SAME process id; if it degrades to a
+// plain release, the same thing happens one step earlier. Either way this cell
+// goes red, which is what makes it a proof rather than a restatement.
+func TestReleaseGatePG_AGateRefusalDestroysTheBackendOnItsOwn(t *testing.T) {
+	t.Parallel()
+	lt := newLeakTarget(t)
+	ctx := context.Background()
+
+	first, firstPID := lt.pinRaw(t)
+	v := lt.f.eng.releaseBackend(ctx, nil, first,
+		errors.New("rolling back the session's transaction: connection reset by peer"))
+	if v.pooled {
+		t.Fatalf("a backend whose rollback failed was handed back to the pool: %s", v.reason())
+	}
+	if v.limb != releaseLimbTransaction {
+		t.Fatalf("the verdict blames %q; this cell needs the transaction limb, because it is "+
+			"the one the reset plan cannot rescue: %s", v.limb, v.reason())
+	}
+
+	second, secondPID := lt.pinRaw(t)
+	defer second.Discard()
+	if secondPID == firstPID {
+		t.Fatalf("backend %s came back after the gate refused it. The gate must destroy the "+
+			"physical connection outright, not put it in a state it hopes the driver will "+
+			"reject", firstPID)
+	}
+}
+
+// pinRaw takes the target's one backend the way a session does, without opening
+// a session around it, and reports its process id. It is what lets a cell act on
+// the gate directly instead of through a session teardown that would run the
+// gate a second time.
+func (lt *leakTarget) pinRaw(t *testing.T) (golibpg.PinnedConn, string) {
+	t.Helper()
+	ctx := context.Background()
+	conn, err := lt.f.eng.target(ctx, lt.row.ID, lt.row)
+	if err != nil {
+		t.Fatalf("opening the target: %v", err)
+	}
+	pc, err := golibpg.PinSessionConn(ctx, conn)
+	if err != nil {
+		t.Fatalf("pinning the target's backend: %v", err)
+	}
+	sq, ferr := rawFace(pc)
+	if ferr != nil {
+		t.Fatalf("the pinned backend has no simple-query face: %v", ferr)
+	}
+	var pid string
+	if _, qerr := lt.f.eng.sessionSimpleQuery(ctx, sq, sessionSQLAutodb, "SELECT pg_backend_pid()",
+		func(m golibpg.ExtendedMessage) error {
+			if m.Kind == "DataRow" && len(m.Values) > 0 {
+				pid = string(bytes.Clone(m.Values[0]))
+			}
+			return nil
+		}); qerr != nil {
+		t.Fatalf("reading the backend process id: %v", qerr)
+	}
+	if pid == "" {
+		t.Fatal("the backend did not report a process id, so no cell can tell two backends apart")
+	}
+	return pc, pid
 }

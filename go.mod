@@ -32,3 +32,12 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.52.0 // indirect
 )
+
+// TEMPORARY, MUST NOT MERGE AS IT STANDS. The pinned connection's explicit
+// physical destruction (postgres.Destroyer) is committed on golib's
+// pinned-conn-destroy branch and is in no tagged release yet, so this branch is
+// built against a sibling checkout. Replace this directive with a real version
+// — the first golib tag that carries Destroyer — before merging. The path is
+// relative and points at golib's pinned-conn-destroy worktree; it resolves nowhere
+// else, which is the point: CI fails loudly rather than building the wrong golib.
+replace github.com/yongjohnlee80/golib => ../../golib/pinned-conn-destroy
