@@ -14,6 +14,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -53,12 +54,25 @@ func deliverPref(h *barHarness, v prefWritten) {
 	h.on(func() { h.m.applyTask(tuicore.TaskResult{Value: v}) })
 }
 
-// recordingWriter replaces the preference RPC with one that records WHICH Bound
-// it was handed and blocks until released, so a cell can hold a write open.
+// prefCall is one RPC the writer actually made: which Bound carried it, and
+// which preference it asked for.
+//
+// BOTH HALVES, because a cell that records only the Bound cannot tell whether
+// the SECOND write carried the latest choice — and a cell that records only the
+// preference cannot tell whose credential sent it.
+type prefCall struct {
+	bound *Bound
+	pref  string
+}
+
+// recordingWriter replaces the preference RPC with one that records each call
+// and blocks the FIRST until released, so a cell can hold one write open while
+// the model queues another behind it.
 type recordingWriter struct {
 	mu      sync.Mutex
-	bounds  []*Bound
+	calls   []prefCall
 	release chan struct{}
+	once    sync.Once
 }
 
 func newRecordingWriter() *recordingWriter {
@@ -67,19 +81,44 @@ func newRecordingWriter() *recordingWriter {
 
 func (w *recordingWriter) write(ctx context.Context, b *Bound, pref string) error {
 	w.mu.Lock()
-	w.bounds = append(w.bounds, b)
+	first := len(w.calls) == 0
+	w.calls = append(w.calls, prefCall{bound: b, pref: pref})
 	w.mu.Unlock()
-	select {
-	case <-w.release:
-	case <-ctx.Done():
+	// Only the first call blocks. A queued second write must be able to RUN
+	// once released, which is the whole thing the latest-pending cell observes.
+	if first {
+		select {
+		case <-w.release:
+		case <-ctx.Done():
+		}
 	}
 	return nil
 }
 
-func (w *recordingWriter) seen() []*Bound {
+func (w *recordingWriter) seen() []prefCall {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return append([]*Bound(nil), w.bounds...)
+	return append([]prefCall(nil), w.calls...)
+}
+
+func (w *recordingWriter) unblock() { w.once.Do(func() { close(w.release) }) }
+
+// awaitCalls waits until the writer has been entered n times. Waiting on an
+// OBSERVED call rather than on prefActive is the point: prefActive is set on
+// the loop before the task goroutine has reached the writer, so a cell that
+// keys off it can assert about an RPC that has not happened.
+func (w *recordingWriter) awaitCalls(t *testing.T, n int, what string) []prefCall {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := w.seen(); len(got) >= n {
+			return got
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s: the writer was entered %d time(s), want %d",
+		what, len(w.seen()), n)
+	return nil
 }
 
 // 1. B STARTS WHILE A IS STILL BLOCKED.
@@ -93,9 +132,12 @@ func TestPrefWriter_RetirementFreesTheWriterForTheNextIdentity(t *testing.T) {
 	defer close(w.release)
 	h.on(func() { h.m.writeOption = w.write })
 
-	// A chooses; the RPC blocks.
+	// A chooses; the RPC blocks. WAIT FOR THE WRITER TO BE ENTERED, not for
+	// prefActive — the flag is set on the loop before the task goroutine has
+	// reached the RPC, so keying off it asserts about a call that may not have
+	// happened yet.
 	h.on(func() { h.m.chooseEditorKeyset(auth.KeysetTextEdit) })
-	h.waitUntil("A's write is in flight", func() bool { return h.m.prefActive != 0 })
+	w.awaitCalls(t, 1, "A's write to reach the RPC")
 
 	// A signs out while it is still unfinished, and B chooses.
 	h.on(func() {
@@ -103,17 +145,20 @@ func TestPrefWriter_RetirementFreesTheWriterForTheNextIdentity(t *testing.T) {
 		h.m.chooseEditorKeyset(auth.KeysetVim)
 	})
 
-	var active uint64
+	// THE OBSERVABLE IS THE CALL, not prefActive. B's write does not block, so
+	// by the time the loop is asked, B may already have STARTED AND FINISHED —
+	// and prefActive would read 0 for the happy path and the broken one alike.
+	// An earlier version of this cell asserted prefActive != 0 and failed
+	// against working code for exactly that reason.
+	calls := w.awaitCalls(t, 2, "B's write to reach the RPC")
+
 	var pending bool
-	h.on(func() { active, pending = h.m.prefActive, h.m.prefPending != nil })
-	if active == 0 {
-		t.Fatal("B's choice never started; the writer is still owned by a departed identity")
-	}
+	h.on(func() { pending = h.m.prefPending != nil })
 	if pending {
-		t.Error("B's choice was queued rather than started")
+		t.Error("B's choice was left queued rather than dispatched")
 	}
-	if len(w.seen()) != 2 {
-		t.Errorf("the RPC ran %d times, want 2 — B never reached it", len(w.seen()))
+	if calls[1].pref != auth.KeysetVim {
+		t.Errorf("the second RPC carried %q, want B's choice %q", calls[1].pref, auth.KeysetVim)
 	}
 }
 
@@ -125,7 +170,7 @@ func TestPrefWriter_ALateCompletionDoesNotDisturbTheNewWriter(t *testing.T) {
 	h.on(func() { h.m.writeOption = w.write })
 
 	h.on(func() { h.m.chooseEditorKeyset(auth.KeysetTextEdit) })
-	h.waitUntil("A's write is in flight", func() bool { return h.m.prefActive != 0 })
+	w.awaitCalls(t, 1, "A's write to reach the RPC")
 	var aTicket uint64
 	h.on(func() { aTicket = h.m.prefActive })
 
@@ -158,30 +203,54 @@ func TestPrefWriter_ALateCompletionDoesNotDisturbTheNewWriter(t *testing.T) {
 }
 
 // 4. WITHIN ONE IDENTITY, THE LATEST PENDING CHOICE WINS.
+// 4. WITHIN ONE IDENTITY, THE LATEST PENDING CHOICE IS THE ONE ACTUALLY WRITTEN.
+//
+// THE ASSERTION IS THE SECOND RPC, not the queue. An earlier version of this
+// cell inspected prefPending and stopped there, and deleting the
+// `m.submitPref(*next)` that drains the queue left it green — the queue held the
+// right value and nobody ever sent it. What matters is which preference reaches
+// the daemon, so that is what this waits for.
 func TestPrefWriter_LatestPendingChoiceIsTheOneWritten(t *testing.T) {
 	h := prefModel(t)
 	w := newRecordingWriter()
+	defer w.unblock()
 	h.on(func() { h.m.writeOption = w.write })
 
-	h.on(func() {
-		h.m.chooseEditorKeyset(auth.KeysetVim) // starts
-	})
-	h.waitUntil("the first write is in flight", func() bool { return h.m.prefActive != 0 })
+	var firstBound *Bound
+	h.on(func() { h.m.chooseEditorKeyset(auth.KeysetVim) }) // starts, and blocks
+	first := w.awaitCalls(t, 1, "the first write to reach the RPC")
+	firstBound = first[0].bound
+
 	h.on(func() {
 		h.m.chooseEditorKeyset(auth.KeysetTextEdit) // queues
 		h.m.chooseEditorKeyset(auth.KeysetVim)      // replaces the queued one
+		h.m.chooseEditorKeyset(auth.KeysetTextEdit) // and again: the LATEST wins
 	})
 
-	var queued string
-	h.on(func() {
-		if h.m.prefPending != nil {
-			queued = h.m.prefPending.pref
-		}
-	})
-	if queued != auth.KeysetVim {
-		t.Errorf("queued %q, want the LATEST choice %q", queued, auth.KeysetVim)
+	// Release the first; the drain must now send the queued choice.
+	w.unblock()
+	calls := w.awaitCalls(t, 2, "the queued write to be dispatched")
+
+	if calls[1].pref != auth.KeysetTextEdit {
+		t.Errorf("the second RPC carried %q, want the LATEST choice %q",
+			calls[1].pref, auth.KeysetTextEdit)
 	}
-	close(w.release)
+	// The BOUND is not compared by pointer: Session.Bind() mints a fresh one per
+	// call, so two choices by the same person legitimately carry different
+	// objects. What must match is the identity inside it, and that the write
+	// carried the one captured AT THE CHOICE is the subject of its own cell.
+	if calls[1].bound == nil {
+		t.Fatal("the second RPC carried no Bound")
+	}
+	if calls[1].bound.IdentityEpoch() != firstBound.IdentityEpoch() {
+		t.Errorf("the second RPC carried identity epoch %d, want %d — the same "+
+			"person made both choices",
+			calls[1].bound.IdentityEpoch(), firstBound.IdentityEpoch())
+	}
+	if len(calls) != 2 {
+		t.Errorf("the writer ran %d times, want exactly 2 — the intermediate "+
+			"choices should have been coalesced away", len(calls))
+	}
 }
 
 // 5. THE CAPTURED BOUND IS THE ONE WRITTEN WITH.
@@ -205,7 +274,7 @@ func TestPrefWriter_WritesWithTheBoundCapturedAtChoice(t *testing.T) {
 	})
 	h.waitUntil("the RPC ran", func() bool { return len(w.seen()) == 1 })
 
-	if got := w.seen()[0]; got != chosen {
+	if got := w.seen()[0].bound; got != chosen {
 		t.Errorf("the write used a different Bound than the one captured at choice; "+
 			"got %p want %p", got, chosen)
 	}
@@ -355,4 +424,113 @@ func TestPrefRead_AStoredPreferenceIsHonoured(t *testing.T) {
 	if got != auth.KeysetTextEdit {
 		t.Errorf("resolveEditorPref = %q, want %q", got, auth.KeysetTextEdit)
 	}
+}
+
+// recordingReader holds a stored-preference read open, so a cell can land it
+// AFTER a later menu choice and see which one wins.
+type recordingReader struct {
+	mu      sync.Mutex
+	calls   int
+	opts    map[string]string
+	release chan struct{}
+	once    sync.Once
+}
+
+func newRecordingReader(opts map[string]string) *recordingReader {
+	return &recordingReader{opts: opts, release: make(chan struct{})}
+}
+
+func (r *recordingReader) read(ctx context.Context, b *Bound) (map[string]string, error) {
+	r.mu.Lock()
+	r.calls++
+	r.mu.Unlock()
+	select {
+	case <-r.release:
+	case <-ctx.Done():
+	}
+	return r.opts, nil
+}
+
+func (r *recordingReader) unblock() { r.once.Do(func() { close(r.release) }) }
+
+func (r *recordingReader) entered() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
+}
+
+// 7. A DELAYED STORED READ LOSES TO A LATER MENU CHOICE.
+//
+// THROUGH THE REAL PATH, not through resolveEditorPref. An earlier version of
+// the read cells called that helper directly, so disabling the
+// `gen != m.prefGen` comparison in applyStoredEditorKeyset left every cell green
+// — the ordering rule had no test at all. This one holds the read open, makes a
+// choice while it is in flight, releases it through the ordinary task path, and
+// asserts the newer choice survives.
+func TestPrefRead_ADelayedReadCannotOverwriteALaterChoice(t *testing.T) {
+	h := prefModel(t)
+	// The stored preference disagrees with what the operator is about to pick,
+	// so "the read lost" and "the read never happened" look different.
+	r := newRecordingReader(map[string]string{auth.OptionEditorKeyset: auth.KeysetVim})
+	defer r.unblock()
+	w := newRecordingWriter()
+	defer w.unblock()
+	h.on(func() { h.m.readOptions, h.m.writeOption = r.read, w.write })
+
+	h.on(func() { h.m.applyStoredEditorKeyset() })
+	waitFor(t, "the read to reach the RPC", func() bool { return r.entered() == 1 })
+
+	// The operator chooses while the read is still out. This is the newer intent.
+	h.on(func() { h.m.chooseEditorKeyset(auth.KeysetTextEdit) })
+	var afterChoice widget.Keyset
+	h.on(func() { afterChoice = h.m.editor.Keyset() })
+	if afterChoice != widget.KeysetStandard {
+		t.Fatalf("the menu choice did not apply: keyset = %v", afterChoice)
+	}
+
+	// Now let the stale read land, through the ordinary task path.
+	r.unblock()
+	h.settle()
+
+	var got widget.Keyset
+	h.on(func() { got = h.m.editor.Keyset() })
+	if got != widget.KeysetStandard {
+		t.Errorf("keyset = %v, want Standard — a read issued BEFORE the choice "+
+			"overwrote it", got)
+	}
+}
+
+// POSITIVE CONTROL: a read with no competing choice DOES apply. Without this,
+// the cell above would pass against an applyStoredEditorKeyset that never
+// applies anything.
+func TestPrefRead_AnUncontestedReadApplies(t *testing.T) {
+	h := prefModel(t)
+	r := newRecordingReader(map[string]string{auth.OptionEditorKeyset: auth.KeysetTextEdit})
+	h.on(func() { h.m.readOptions = r.read })
+
+	h.on(func() { h.m.applyStoredEditorKeyset() })
+	waitFor(t, "the read to reach the RPC", func() bool { return r.entered() == 1 })
+	r.unblock()
+	h.settle()
+
+	var got widget.Keyset
+	h.on(func() { got = h.m.editor.Keyset() })
+	if got != widget.KeysetStandard {
+		t.Errorf("keyset = %v, want Standard — an uncontested stored preference "+
+			"was not applied", got)
+	}
+}
+
+// waitFor polls a condition off the loop. The recording seams are guarded by
+// their own mutexes, so they are safe to read from here.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }

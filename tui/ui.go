@@ -115,6 +115,10 @@ type Model struct {
 	// WHICH Bound the write actually used — the credential-rebinding defect is
 	// invisible to any test that cannot see that.
 	writeOption func(context.Context, *Bound, string) error
+	// readOptions performs the preference READ. Indirected for the ordering: a
+	// stored read issued at sign-in must lose to a choice made while it is in
+	// flight, and a cell cannot prove that without holding the read open.
+	readOptions func(context.Context, *Bound) (map[string]string, error)
 	menu        *widget.Menu // the top bar's menu; nil until New builds it
 	// menuShown is the projection currently applied, so a reprojection that
 	// would change nothing does not disturb an open cascade.
@@ -128,7 +132,7 @@ type Model struct {
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
 func New(session *Session, notesFor NotesFactory, quit func(), opts ...Option) *Model {
-	m := &Model{session: session, notesFor: notesFor, quit: quit, writeOption: optionWriter}
+	m := &Model{session: session, notesFor: notesFor, quit: quit, writeOption: optionWriter, readOptions: optionReader}
 	for _, o := range opts {
 		if o != nil {
 			o(m)

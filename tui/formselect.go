@@ -355,6 +355,14 @@ func optionWriter(ctx context.Context, b *Bound, pref string) error {
 	return b.SetOption(ctx, auth.OptionEditorKeyset, pref)
 }
 
+// optionReader is the other half, and it is indirected for the same reason the
+// writer is: the ORDERING between a stored read and a later menu choice is the
+// thing under test, and a cell cannot schedule it without being able to hold
+// the read open.
+func optionReader(ctx context.Context, b *Bound) (map[string]string, error) {
+	return b.Options(ctx)
+}
+
 // chooseEditorKeyset switches the editor now and remembers the choice.
 //
 // THE LIVE EDITOR CHANGES IN PLACE, which is why this phase waited on golib
@@ -464,8 +472,12 @@ func (m *Model) applyStoredEditorKeyset() {
 	bound := m.session.Bind()
 	gen := m.prefGen
 	epoch := m.identityEpoch
+	read := m.readOptions
+	if read == nil {
+		read = optionReader
+	}
 	m.ctx.Go(func(ctx context.Context) (any, error) {
-		opts, err := bound.Options(ctx)
+		opts, err := read(ctx, bound)
 		return managerReload{gen: bound.Gen(), apply: func() {
 			if !m.current(epoch) {
 				return // signed in as somebody else since; their preference, not this one
