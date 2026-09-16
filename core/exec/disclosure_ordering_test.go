@@ -23,10 +23,22 @@ import (
 // is the ORDER, so the test reads the order.
 func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 	const (
-		witness        = "denyAfterAuthorization"
 		authentication = "VerifyPAT"     // proves WHO the caller is
 		authorization  = "AuthorizeUser" // proves they may hold this connection
 	)
+	// EVERY CONSTRUCTOR THAT STAMPS THE WITNESS, not just the first one.
+	//
+	// This was a single name, and a second constructor was added later that
+	// sets the same authorized flag while carrying operator detail. The walk
+	// could not see it, so calls to it were unguarded from the day it existed
+	// -- the guard was silent about a path it was written to cover, which is
+	// the failure mode it otherwise refuses to have. Any future constructor
+	// that sets `authorized` belongs in this set.
+	witnesses := map[string]bool{
+		"denyAfterAuthorization":           true,
+		"denyAfterAuthorizationWithDetail": true,
+	}
+	const witness = "denyAfterAuthorization*"
 
 	type site struct {
 		fn    string
@@ -59,7 +71,7 @@ func TestDisclosureWitness_IsUnreachableBeforeBothGates(t *testing.T) {
 				}
 				switch fun := call.Fun.(type) {
 				case *ast.Ident:
-					if fun.Name == witness {
+					if witnesses[fun.Name] {
 						calls = append(calls, call.Pos())
 					}
 				case *ast.SelectorExpr:

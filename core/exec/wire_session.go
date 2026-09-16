@@ -359,56 +359,58 @@ func DenialReasons() []string {
 	}
 }
 
-// admissionDenial turns an admission refusal into the answer its caller gets,
-// or nil for something that is not an admission refusal at all.
+// admissionAnswer names the answer an admission refusal earns, WITHOUT
+// claiming anything about who the caller is.
 //
-// EXTRACTED SO THE ORDER CAN BE TESTED, because the order is load-bearing and
-// nothing held it. Mutation testing moved the lease-cap arm above the wait arm
-// and every cell stayed green: the reordering is inert TODAY only because
-// QueueTimeoutError unwraps to the timeout alone, so a cap arm can never claim
-// an expired wait from any position. That makes the identity safe by exactly
-// one mechanism while the comment beside it claimed two. Reachable as a
-// function, the order can be pinned directly -- by handing it an error that
-// genuinely matches both and requiring the wait to win.
+// IT RETURNS A REASON, NOT A DENIAL, AND THAT DISTINCTION IS THE POINT. The
+// first version of this returned a finished denial built with
+// denyAfterAuthorization, which stamps a refusal as disclosable — safe to tell
+// the caller what actually happened rather than handing them the uniform
+// credential answer. A guard caught it immediately: that stamp was being
+// applied inside a function which never verifies a credential or checks a
+// grant, so the claim rested on a comment saying the caller had done it. "By
+// construction" is exactly what that guard exists to refuse, and it was right
+// to: a capacity check moved above either gate would have kept the stamp and
+// started telling unauthenticated callers how full the instance is.
 //
-// AUTHORIZED BY CONSTRUCTION: every arm here is reached only in the reservation
-// phase, with a verified PAT bound to this connection. The caller has proved
-// who they are, so they may be told the system is full rather than handed the
-// uniform denial that reads as "your credential is wrong" -- which is what sent
-// a developer hunting a password problem that did not exist on 2026-09-15.
-func admissionDenial(rerr error) error {
+// So the authorization stays where it is established. This says which refusal
+// it is; the caller, which has the verified credential and the checked grant in
+// hand, is what turns that into something disclosable.
+//
+// The ORDER remains the contract, and it is testable here precisely because
+// this is reachable without the rest of a session open — see
+// TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn.
+func admissionAnswer(rerr error) (reason, detail string, ok bool) {
 	switch {
-	// THE WAIT IS TESTED BEFORE THE CAPS, and the order is the contract rather
-	// than a style choice. A request that waited must not be recorded as one
-	// that was refused on arrival, so the identity that says it waited has to
-	// win before any cap arm can claim it -- even for an error that satisfies
-	// both, which is what TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn
-	// hands it.
+	// THE WAIT IS TESTED BEFORE THE CAPS. A request that waited must not be
+	// recorded as one refused on arrival, so the identity that says it waited
+	// has to win before any cap arm can claim it — even for an error that
+	// satisfies both.
 	case errors.Is(rerr, ErrQueueTimeout):
-		// THE BLOCKING CAP TRAVELS WITH THE DENIAL, NOT BESIDE IT. Writing a
-		// second audit row would double-count one refusal: the denial below
-		// already becomes a registered occurrence, and the operator needs one
-		// record saying both what happened and which limit to raise.
-		detail := fmt.Sprintf("waited %s and was not served", queueWait)
+		// THE BLOCKING CAP TRAVELS WITH THE DENIAL, NOT BESIDE IT. A second
+		// audit row would double-count one refusal: the denial the caller
+		// builds already becomes a registered occurrence, and the operator
+		// needs one record saying both what happened and which limit to raise.
+		d := fmt.Sprintf("waited %s and was not served", queueWait)
 		var qt *QueueTimeoutError
 		if errors.As(rerr, &qt) && qt.BlockedBy() != nil {
-			detail += "; blocked by: " + qt.BlockedBy().Error()
+			d += "; blocked by: " + qt.BlockedBy().Error()
 		}
-		return denyAfterAuthorizationWithDetail(DenyQueueTimeout, detail)
+		return DenyQueueTimeout, d, true
 	case errors.Is(rerr, ErrLeaseCapExceeded):
-		return denyAfterAuthorization(DenyLeaseCap)
+		return DenyLeaseCap, "", true
 	case errors.Is(rerr, ErrAllCapacityInTransaction):
-		return denyAfterAuthorization(DenyAllCapacityInTransaction)
+		return DenyAllCapacityInTransaction, "", true
 	case errors.Is(rerr, ErrTargetGone):
-		return denyAfterAuthorization(DenyTargetGone)
+		return DenyTargetGone, "", true
 	case errors.Is(rerr, ErrEngineClosing):
-		return denyAfterAuthorization(DenyEngineClosing)
+		return DenyEngineClosing, "", true
 	case errors.Is(rerr, ErrSessionCapExceeded):
-		return denyAfterAuthorization(DenySessionCap)
+		return DenySessionCap, "", true
 	case errors.Is(rerr, ErrResidentBudgetExceeded):
-		return denyAfterAuthorization(DenyResidentBudget)
+		return DenyResidentBudget, "", true
 	}
-	return nil
+	return "", "", false
 }
 
 // WireSessionOverhead is the fixed memory charged for one wire session: the
@@ -638,8 +640,15 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 	// instant. See scheduler.go.
 	if rerr := e.sessions.admitWithLeaseOrWait(ctx, s, connRow.ID, WireSessionOverhead); rerr != nil {
 		cancel()
-		if denial := admissionDenial(rerr); denial != nil {
-			return out, denial
+		// AUTHORIZED HERE, WHERE IT WAS ESTABLISHED. This is the reservation
+		// phase, reached only with a verified PAT bound to this connection and
+		// a checked grant, so the caller may be told the system is full rather
+		// than handed the uniform denial that reads as "your credential is
+		// wrong" -- which is what sent a developer hunting a password problem
+		// that did not exist on 2026-09-15. The stamp is applied at the site
+		// that did the verifying rather than inside the classifier.
+		if reason, detail, ok := admissionAnswer(rerr); ok {
+			return out, denyAfterAuthorizationWithDetail(reason, detail)
 		}
 		return out, rerr
 	}
