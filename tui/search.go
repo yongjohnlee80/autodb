@@ -110,8 +110,8 @@ func (m *Model) openSearch() {
 		return
 	}
 	m.openForm("search in "+target.name()+" — n: next, N: previous",
-		[]formField{field("pattern")}, func(v []string) (bool, string) {
-			q := strings.TrimSpace(v[0])
+		[]formField{field("pattern")}, func(v formValues) (bool, string) {
+			q := v.str(0)
 			if q == "" {
 				return false, "pattern required"
 			}

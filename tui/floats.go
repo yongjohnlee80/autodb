@@ -161,18 +161,80 @@ type openOverlayRef struct {
 	title string
 }
 
-// formField is one labelled text input.
+// formControl is one form row's widget and the answer it yields.
+//
+// IT YIELDS A TYPED VALUE, and that is the point of the interface. Every field
+// used to be a *widget.TextInput read back as a string, so a connection id went
+// out as text and came back through strconv — the stringly-typed round trip
+// that put "type a connection id" in the product to begin with. A select yields
+// the id it was GIVEN: the program keeps the number, the operator reads the
+// name.
+type formControl interface {
+	// component is the focusable widget the form lays out.
+	component() tui.Component
+	// value is the typed answer: a string from a text input, an int64 from an
+	// id select, whatever a select was parameterised with.
+	value() any
+}
+
+// textControl is a free-text row. Its answer is a string, untrimmed — trimming
+// is the caller's decision, because a passphrase is not trimmed and a name is.
+type textControl struct{ in *widget.TextInput }
+
+func (t textControl) component() tui.Component { return t.in }
+func (t textControl) value() any               { return t.in.Value() }
+
+// formField is one labelled row.
 type formField struct {
 	label string
-	// The options the caller asked for. The INPUT is built by newForm rather
-	// than here, because the advance hook has to close over the form and the
-	// field's index, and neither exists yet at this call site.
-	opts  []widget.TextInputOption
-	input *widget.TextInput
+	// build makes the row's control, and it is a CLOSURE rather than a kind
+	// tag because a select's option type varies by field — int64 for ids,
+	// string for the enums — and a heterogeneous []formField cannot carry a
+	// type parameter. The closure captures it instead. onEnter is what Enter
+	// means for this row; see advanceOrSubmit for why it is a callback and not
+	// an event.
+	build func(onEnter func()) formControl
+	ctl   formControl
 }
 
 func field(label string, opts ...widget.TextInputOption) formField {
-	return formField{label: label, opts: opts}
+	return formField{label: label, build: func(onEnter func()) formControl {
+		o := make([]widget.TextInputOption, 0, len(opts)+1)
+		o = append(o, opts...)
+		o = append(o, widget.WithOnSubmit(func(string) { onEnter() }))
+		return textControl{in: widget.NewTextInput(o...)}
+	}}
+}
+
+// formValues are a submitted form's answers, read by position and BY TYPE.
+//
+// The accessors are deliberately narrow. `str` trims, because every name, CIDR
+// and label in this package trims; `raw` does not, because a passphrase must
+// not; and `id` reports whether an id is actually present rather than handing
+// back a zero that reads like a real row.
+type formValues []any
+
+func (v formValues) has(i int) bool { return i >= 0 && i < len(v) }
+
+func (v formValues) raw(i int) string {
+	if !v.has(i) {
+		return ""
+	}
+	s, _ := v[i].(string)
+	return s
+}
+
+func (v formValues) str(i int) string { return strings.TrimSpace(v.raw(i)) }
+
+// id reports the row identity a select yielded. ok is false when the field is
+// absent, is not an id field, or holds no choice — a caller must not read 0 as
+// "the first row".
+func (v formValues) id(i int) (n int64, ok bool) {
+	if !v.has(i) {
+		return 0, false
+	}
+	n, ok = v[i].(int64)
+	return n, ok && n > 0
 }
 
 // form is a column of labelled inputs, a hint footer and a status line.
@@ -194,11 +256,11 @@ type form struct {
 	fields   []formField
 	hint     *widget.Text
 	status   *widget.Text
-	onSubmit func(values []string) (close bool, status string)
+	onSubmit func(values formValues) (close bool, status string)
 	float    *widget.Float
 }
 
-func newForm(fields []formField, onSubmit func([]string) (bool, string)) *form {
+func newForm(fields []formField, onSubmit func(formValues) (bool, string)) *form {
 	f := &form{
 		fields: fields,
 		// The footer, in the body rather than the Box: golib's Box offers a
@@ -211,14 +273,11 @@ func newForm(fields []formField, onSubmit func([]string) (bool, string)) *form {
 	f.flex = tui.NewFlex(tui.Vertical)
 	for i := range f.fields {
 		idx := i
-		opts := make([]widget.TextInputOption, 0, len(f.fields[i].opts)+1)
-		opts = append(opts, f.fields[i].opts...)
 		// THE ADVANCE RUNS ON THE KEY, NOT ON AN EVENT. See advanceOrSubmit.
-		opts = append(opts, widget.WithOnSubmit(func(string) { f.advanceOrSubmit(idx) }))
-		f.fields[i].input = widget.NewTextInput(opts...)
+		f.fields[i].ctl = f.fields[i].build(func() { f.advanceOrSubmit(idx) })
 		f.flex.Add(widget.NewText(f.fields[i].label,
 			widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted))))
-		f.flex.Add(f.fields[i].input)
+		f.flex.Add(f.fields[i].ctl.component())
 	}
 	f.flex.Add(f.status)
 	f.flex.Add(f.hint)
@@ -259,15 +318,15 @@ func (f *form) advanceOrSubmit(i int) {
 	// Focus could not move -- an unmounted or unfocusable field. Submitting
 	// would be worse than doing nothing: it would fire a form the operator has
 	// not finished, which is the very behaviour this replaced. Say so instead.
-	if f.tui == nil || !f.tui.FocusComponent(f.fields[i+1].input) {
+	if f.tui == nil || !f.tui.FocusComponent(f.fields[i+1].ctl.component()) {
 		f.status.SetText("could not move to the next field; use Tab")
 	}
 }
 
 func (f *form) submit() {
-	values := make([]string, len(f.fields))
+	values := make(formValues, len(f.fields))
 	for i, fd := range f.fields {
-		values[i] = fd.input.Value()
+		values[i] = fd.ctl.value()
 	}
 	closeIt, status := f.onSubmit(values)
 	if closeIt {
@@ -312,7 +371,7 @@ func (f *form) Children() iter.Seq[tui.Component] {
 var _ tui.Container = (*form)(nil)
 
 // openForm builds a form float and wires the float back-reference.
-func (m *Model) openForm(title string, fields []formField, onSubmit func([]string) (bool, string)) *form {
+func (m *Model) openForm(title string, fields []formField, onSubmit func(formValues) (bool, string)) *form {
 	fm := newForm(fields, onSubmit)
 	fm.float = m.openFloat(title, fm)
 	return fm

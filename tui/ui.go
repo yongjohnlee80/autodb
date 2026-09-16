@@ -610,19 +610,19 @@ func (m *Model) openBootstrap() {
 	confirm := field("confirm passphrase", widget.WithMask('*'))
 	m.openForm("first run — create the root user", []formField{
 		field("root user name (default: root)"), pass, confirm,
-	}, func(v []string) (bool, string) {
-		name := strings.TrimSpace(v[0])
+	}, func(v formValues) (bool, string) {
+		name := v.str(0)
 		if name == "" {
 			name = "root"
 		}
-		if v[1] != v[2] {
+		if v.raw(1) != v.raw(2) {
 			return false, "passphrases do not match"
 		}
-		if len(v[1]) < 8 {
+		if len(v.raw(1)) < 8 {
 			return false, "passphrase must be at least 8 characters"
 		}
 		if !m.authTask("bootstrap", func(c context.Context, b *Bound) error {
-			return b.Bootstrap(c, name, v[1])
+			return b.Bootstrap(c, name, v.raw(1))
 		}) {
 			return false, "another sign-in attempt is still running — retry in a moment"
 		}
@@ -672,12 +672,12 @@ func (m *Model) openLogin() {
 	m.authPromptPending = false
 	m.openForm("login", []formField{
 		field("user"), field("passphrase", widget.WithMask('*')),
-	}, func(v []string) (bool, string) {
-		if strings.TrimSpace(v[0]) == "" {
+	}, func(v formValues) (bool, string) {
+		if v.str(0) == "" {
 			return false, "user required"
 		}
 		if !m.authTask("login", func(c context.Context, b *Bound) error {
-			return b.Login(c, strings.TrimSpace(v[0]), v[1])
+			return b.Login(c, v.str(0), v.raw(1))
 		}) {
 			return false, "another sign-in attempt is still running — retry in a moment"
 		}
@@ -835,8 +835,8 @@ func (m *Model) newNote() {
 		return
 	}
 	wsID := m.activeWs
-	m.openForm("new note", []formField{field("name (.sql is appended)")}, func(v []string) (bool, string) {
-		clean, err := CleanName(strings.TrimSpace(v[0]))
+	m.openForm("new note", []formField{field("name (.sql is appended)")}, func(v formValues) (bool, string) {
+		clean, err := CleanName(v.str(0))
 		if err != nil {
 			return false, err.Error()
 		}
@@ -901,8 +901,8 @@ func (m *Model) saveNote() {
 // saveNoteAs writes the CAPTURED body under a new name (the conflict
 // float's save-as path — the body must never be re-loaded from disk).
 func (m *Model) saveNoteAs(wsID int64, body string) {
-	m.openForm("save note as", []formField{field("name (.sql is appended)")}, func(v []string) (bool, string) {
-		clean, err := CleanName(strings.TrimSpace(v[0]))
+	m.openForm("save note as", []formField{field("name (.sql is appended)")}, func(v formValues) (bool, string) {
+		clean, err := CleanName(v.str(0))
 		if err != nil {
 			return false, err.Error()
 		}
@@ -963,8 +963,8 @@ func (m *Model) addConnectionToWorkspace(wsID int64) {
 		field("name"),
 		field("engine (postgres | mysql | sqlite)"),
 		field("dsn (stored encrypted at rest)"),
-	}, func(v []string) (bool, string) {
-		name, engine, dsn := strings.TrimSpace(v[0]), strings.TrimSpace(v[1]), strings.TrimSpace(v[2])
+	}, func(v formValues) (bool, string) {
+		name, engine, dsn := v.str(0), v.str(1), v.str(2)
 		if name == "" || engine == "" || dsn == "" {
 			return false, "all fields are required"
 		}
