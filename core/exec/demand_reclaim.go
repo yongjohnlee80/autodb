@@ -2,7 +2,7 @@ package exec
 
 import (
 	"context"
-	"sync/atomic"
+	"sort"
 	"time"
 )
 
@@ -19,90 +19,59 @@ import (
 // SO AN IDLE HOLDER IS ENDED, AND IS TOLD SO. That is a real cost to a real
 // person and the design pays it deliberately rather than quietly: the client
 // receives the agreed fatal frame naming what happened and what to do about it,
-// BEFORE anything of theirs is torn down. A session that is merely disconnected
-// leaves a developer guessing, which is the failure this whole body of work
-// exists to stop.
+// BEFORE anything of theirs is torn down.
 //
 // THIS PACKAGE NEVER WRITES TO THE WIRE. The client's connection has exactly
 // one owner — the front door's session loop, which is blocked reading from it —
 // and a second writer would interleave bytes into a protocol stream mid-frame.
-// So the scheduler's whole job here is to CLAIM a victim and wake its owner.
-// The frame, the flush, the acknowledgement and the teardown all happen on the
-// loop, in that order, and the lease is not released until the client has been
-// told. See frontdoor/session_loop.go.
-
-// terminalClaim is the single-use right to end one session, bound to the
-// generation it was taken at.
+// So the scheduler reserves a victim and offers the notice to that owner. The
+// frame, the flush and the release all happen on the loop, in that order.
 //
-// SINGLE USE IS WHAT STOPS A DOUBLE ANSWER. Demand, the client's own
-// disconnect, an operator's connection delete and the idle reaper can all
-// decide to end the same session within the same instant. Exactly one may
-// frame it, audit it and release its lease; the others must find the claim
-// taken and do nothing. A second terminal frame on a closing connection is at
-// best noise and at worst a write into a socket another goroutine is closing.
-//
-// THE GENERATION IS WHAT STOPS A CLAIM KILLING A STRANGER. A claim taken
-// against a session that ends on its own before the wake arrives must not be
-// honoured by whatever session next occupies that connection: the loop
-// re-checks the generation it holds against the session's current one and
-// declines a mismatch.
-type terminalClaim struct {
-	// taken is the claim itself. Compare-and-swapped, so the winner is decided
-	// by the hardware rather than by a lock this path would otherwise have to
-	// take while holding the registry's.
-	taken atomic.Bool
-	gen   atomic.Uint64
-}
+// THE RESERVATION IS THE ORDINARY CLOSE STATE MACHINE, NOT A CLAIM BESIDE IT.
+// An earlier version kept its own single-use flag, which left two independent
+// answers to "who is ending this session": demand could reserve a session that
+// the reaper, an operator's connection delete, or the client's own disconnect
+// was already ending, and neither knew about the other. Worse, the flag stopped
+// nothing — a query arriving after selection would run, and the session would
+// be terminated after becoming active. beginClose moves the session to closing,
+// which every dispatch path already refuses to serve, so reserving it both
+// settles ownership and stops new work in one compare-and-swap.
 
-// claim takes the terminal right for this session, returning the generation the
-// holder must present, and whether it was taken.
-func (c *terminalClaim) claim() (uint64, bool) {
-	if !c.taken.CompareAndSwap(false, true) {
-		return 0, false
-	}
-	return c.gen.Load(), true
-}
-
-// valid reports whether a presented generation still matches.
-func (c *terminalClaim) valid(gen uint64) bool { return c.taken.Load() && c.gen.Load() == gen }
-
-// DemandNotice is what the scheduler hands the session's owner. Exported
+// DemandNotice is what the scheduler offers the session's owner. Exported
 // because the owner is the front door, in another package: this package decides
 // WHO gives up a lease, and the front door's session loop is the only thing
 // allowed to tell that client about it.
 type DemandNotice struct {
-	// Gen is the generation the claim was taken at; the owner presents it back
-	// so a claim cannot outlive the session it was taken against.
+	// Gen is the generation of the session this notice is about, so a notice
+	// cannot be honoured against whichever session next occupies its place.
 	Gen uint64
-	// IdleFor is how long the victim had been silent, for the audit line. The
-	// number is the justification for ending somebody's session and belongs in
-	// the record beside the decision.
+	// ID names that session, for the finalisation the owner performs.
+	ID SessionID
+	// IdleFor is how long the victim had been silent. The number is the
+	// justification for ending somebody's session and belongs in the record
+	// beside the decision.
 	IdleFor time.Duration
 }
 
-// demandVictim is one selected idle holder and the claim taken on it.
+// demandVictim is one reserved session and the notice offered for it.
 type demandVictim struct {
 	s      *session
 	notice DemandNotice
 }
 
-// claimDemandVictim selects an idle lease holder on this target and takes the
-// terminal claim on it, or reports none.
+// reserveDemandVictim finds an idle lease holder on this target and reserves it
+// for termination, or reports none.
 //
-// SELECTED OUTSIDE THE REGISTRY LOCK, DELIBERATELY. Judging a session takes
-// that session's own mutex, and taking it while holding the registry's would
-// nest the two locks in the order that makes demand reclamation deadlock
-// against everything else the registry does. So the candidates are snapshotted
-// under the registry lock and judged under their own, which is the same shape
-// every other cross-session count in this package uses.
+// CANDIDATES ARE JUDGED AND RESERVED UNDER THE SAME LOCK HOLD. The predicate
+// and the reservation used to be separated by an unlock, and a frame or a BEGIN
+// arriving in that gap meant a session could be selected while idle and
+// terminated while active. Here the decision and the claim are one critical
+// section per candidate, so a session that becomes busy simply fails the check.
 //
-// THE LONGEST-SILENT HOLDER IS CHOSEN, not the first one found. Every candidate
-// is equally reclaimable by the predicate, but they are not equally likely to
-// be missed: the developer who has been away an hour is the one whose session
-// costs the least to end, and choosing arbitrarily would sometimes end the
-// session of somebody who paused for thirty seconds while an hour-idle one sat
-// beside it.
-func (r *sessionRegistry) claimDemandVictim(leaseConn int64, now time.Time) (demandVictim, bool) {
+// A CANDIDATE THAT LOSES THE RESERVATION COSTS NOTHING. If something else is
+// already ending that session, the next candidate is tried; nothing has been
+// spent on the one that got away.
+func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (demandVictim, bool) {
 	r.mu.Lock()
 	candidates := make([]*session, 0, len(r.byID))
 	for _, s := range r.byID {
@@ -112,60 +81,60 @@ func (r *sessionRegistry) claimDemandVictim(leaseConn int64, now time.Time) (dem
 	}
 	r.mu.Unlock()
 
-	var best *session
-	var bestIdle time.Duration
+	// THE LONGEST-SILENT HOLDER IS TRIED FIRST. Every candidate is equally
+	// reclaimable by the predicate, but they are not equally cheap to end:
+	// choosing arbitrarily would sometimes end the session of somebody who
+	// paused for a moment while an hour-idle one sat beside it. Read outside
+	// the registry lock, and only as an ordering hint — the value that decides
+	// anything is re-read under each session's own lock below.
+	sort.SliceStable(candidates, func(i, j int) bool {
+		return candidates[i].idleFor(now) > candidates[j].idleFor(now)
+	})
+
 	for _, s := range candidates {
 		s.mu.Lock()
-		idle := now.Sub(s.lastUsed)
 		// EVERY CONDITION IS REQUIRED, and each names somebody who would be
 		// harmed rather than merely inconvenienced:
 		//
-		//   - not open        -> something already owns this teardown;
-		//   - not a wire session -> there is no client loop to frame it, and an
-		//     internal session has no one to tell;
-		//   - a request in flight -> ending it cancels work that is inside its
-		//     bounds, which the ruling forbids outright;
+		//   - not a wire session -> there is no client loop to frame it;
+		//   - a request in flight -> ending it cancels work inside its bounds,
+		//     which the ruling forbids outright;
 		//   - a transaction open -> ending it rolls back work the holder never
-		//     abandoned, and they find out from their next statement.
+		//     abandoned, and they find out from their next statement;
+		//   - not offering a receive epoch -> the owner is not blocked reading
+		//     from its client, so a notice posted now would be overwritten by
+		//     the loop re-arming its own deadline and would go dormant. The
+		//     lease would stay held and the waiting request would wait its
+		//     whole bound for a reclamation that had in fact been decided.
 		//
 		// What is NOT required is an empty object store. A holder with prepared
 		// statements or portals is precisely the holder whose backend cannot be
 		// handed to anyone else, which is why the answer for them is a framed
-		// ending rather than a silent handover: told what happened, they
-		// reconnect and rebuild what they had.
-		//   - no registered owner -> nothing can tell this client what
-		//     happened, and ending a session silently is worse than not
-		//     reclaiming it. Checked HERE rather than after the claim: a claim
-		//     spent on a session nobody can frame is a claim wasted, and the
-		//     request that triggered it waits the full bound for nothing.
-		eligible := s.get() == sessOpen && s.wire && !s.busy && s.tx == nil && s.wake != nil
+		// ending rather than a silent handover.
+		eligible := s.wire && !s.busy && s.tx == nil && s.reclaimable.Load()
+		// The reservation is taken INSIDE this same hold. It is the ordinary
+		// close claim, so it also settles ownership against the reaper, an
+		// operator's delete and the client's own disconnect.
+		reserved := eligible && s.beginCloseLocked("", ReasonDemandReclaimed)
+		idle := now.Sub(s.lastUsed)
+		gen, id := s.gen, s.id
 		s.mu.Unlock()
-		if eligible && (best == nil || idle > bestIdle) {
-			best, bestIdle = s, idle
+
+		if reserved {
+			return demandVictim{s: s, notice: DemandNotice{Gen: gen, ID: id, IdleFor: idle}}, true
 		}
 	}
-	if best == nil {
-		return demandVictim{}, false
-	}
-	gen, ok := best.terminal.claim()
-	if !ok {
-		// Something else took this teardown between the judgement and the
-		// claim. Reporting none is correct and costs one wait: the caller is
-		// already in line, and the release that other teardown performs will
-		// serve the line exactly as this one would have.
-		return demandVictim{}, false
-	}
-	return demandVictim{s: best, notice: DemandNotice{Gen: gen, IdleFor: bestIdle}}, true
+	return demandVictim{}, false
 }
 
 // demandReclaim asks an idle holder on this target to give up its lease, and
 // reports whether one was asked.
 //
-// IT RETURNS AS SOON AS THE OWNER IS WOKEN, not when the lease is free. The
+// IT RETURNS AS SOON AS THE OWNER HAS ACCEPTED, not when the lease is free. The
 // waiting is already handled: the caller is in line, and when the owner has
 // framed its client and torn down, the release serves the line in arrival
-// order. Blocking here would also let one request's demand hold the scheduler
-// open for however long a client takes to accept a frame.
+// order. Blocking here would let one request's demand hold the scheduler open
+// for however long a client takes to accept a frame.
 //
 // THE FREED LEASE IS NOT THE CALLER'S. It goes to the longest-waiting request
 // that can use it, which may well be somebody else. Handing it to whoever
@@ -175,91 +144,108 @@ func (e *Engine) demandReclaim(leaseConn int64) bool {
 	if e.sessions == nil {
 		return false
 	}
-	v, ok := e.sessions.claimDemandVictim(leaseConn, e.now())
+	v, ok := e.sessions.reserveDemandVictim(leaseConn, e.now())
 	if !ok {
 		return false
 	}
-	wake := v.s.takeWake()
-	if wake == nil {
-		// Claimed, but nothing can reach its client: the owner has already
-		// gone. Leaving the claim taken is correct — it stops anything else
-		// trying to frame a client nobody owns — and the session's own teardown
-		// releases the lease.
-		e.logf("connection %d: session %s was selected for demand reclamation but has no "+
-			"live owner to frame it; leaving its teardown to the owner that took it",
-			v.s.connID, v.s.id)
-		return false
+
+	if wake := v.s.takeWake(); wake != nil && wake(v.notice) {
+		// The owner has it. It will frame its client and then finalise, which
+		// is what releases the lease.
+		return true
 	}
-	wake(v.notice)
+
+	// NOBODY ACCEPTED IT, AND THE SESSION IS ALREADY RESERVED FOR TEARDOWN.
+	//
+	// Leaving it there would be the worst of both outcomes: the session is
+	// closing, so it serves nobody, and nothing is coming to finish it, so its
+	// lease is never released and the target loses capacity permanently. The
+	// owner raced away between the eligibility check and the offer, so this
+	// ending cannot be explained to the client -- but it still has to happen,
+	// and the record says the client was not told.
+	e.logf("connection %d: session %s was reserved for demand reclamation but its owner "+
+		"stopped listening before the notice could be offered; ending it unannounced",
+		v.s.connID, v.s.id)
+	e.finishClosing(context.WithoutCancel(e.bgCtx), v.s)
 	return true
 }
 
-// registerWake publishes the callback the front door's session loop listens on.
-// Called once, by the owner, at session open.
-func (s *session) registerWake(f func(DemandNotice)) {
+// registerWake publishes the callback the session's owner listens on. Called
+// once, by the owner, at session open.
+func (s *session) registerWake(f func(DemandNotice) bool) {
 	s.mu.Lock()
 	s.wake = f
 	s.mu.Unlock()
 }
 
-// takeWake reads the owner's wake callback.
-func (s *session) takeWake() func(DemandNotice) {
+func (s *session) takeWake() func(DemandNotice) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.wake
 }
 
-// FinishDemandReclaim releases a demand-reclaimed session once its owner has
-// told the client. Called by the front door's session loop, and only after the
-// fatal frame has been flushed.
+// RegisterDemandWake publishes the callback the session's owner listens on, and
+// OfferReceiveEpoch says when that owner is actually able to act on a notice.
+//
+// A session whose owner is not currently offering is never selected. Ending a
+// session nobody can explain it to is worse than not reclaiming it, and a
+// notice nobody consumes strands the lease it was meant to free.
+func (e *Engine) RegisterDemandWake(id SessionID, f func(DemandNotice) bool) {
+	if s, ok := e.sessions.byIDOnly(id); ok {
+		s.registerWake(f)
+	}
+}
+
+// SetReclaimable is called by the session's owner to open and close the window
+// in which a terminal notice can be delivered: opened immediately before it
+// blocks reading from its client, closed as that read returns.
+func (e *Engine) SetReclaimable(id SessionID, offering bool) {
+	if s, ok := e.sessions.byIDOnly(id); ok {
+		s.reclaimable.Store(offering)
+	}
+}
+
+// FinishDemandReclaim completes a reclamation the owner has now told its client
+// about, and reports whether THIS reservation owned the teardown.
 //
 // THE ORDER IS THE CONTRACT. Releasing before the client is told would let the
-// lease reach a new session — and the new session's first statement could reach
-// the target — while the old client still believes it holds a connection and
-// has been given no reason to think otherwise.
+// lease reach a new session -- whose first statement could reach the target --
+// while the old client still believes it holds a connection and has been given
+// no reason to think otherwise. So the owner calls this only after its frame
+// has been flushed.
+//
+// THE RETURN VALUE IS NOT DECORATIVE. A caller that ignored it could record a
+// reclamation that another path had already performed, which is how one ending
+// becomes two entries in the trail and two releases of one lease.
 func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint64) bool {
 	s, ok := e.sessions.byIDOnly(id)
-	if !ok || !s.terminal.valid(gen) {
-		// A generation that no longer matches is a claim against a session that
-		// has already ended. Declining is what stops it from ending whichever
+	if !ok || s.gen != gen {
+		// A generation that no longer matches is a notice about a session that
+		// has already ended. Declining is what stops it ending whichever
 		// session came after it.
 		return false
 	}
-	e.closeSession(ctx, s, "", ReasonDemandReclaimed)
+	if !s.claimTeardown() {
+		// Reserved by this reclamation, but finished by something else in the
+		// meantime. It is ending either way; this caller simply does not own
+		// the record of it.
+		return false
+	}
+	e.finishClosing(ctx, s)
 	return true
 }
 
 // ReasonDemandReclaimed is the audit identity for a session ended so its lease
-// could serve a waiting request. ONE identity, written once by the teardown
-// that owns the claim, so the record cannot say a session was ended twice for
-// the same reason.
+// could serve a waiting request.
 const ReasonDemandReclaimed = "demand-reclaimed"
 
 // byIDOnly looks a session up without the owner check the caller-facing lookup
-// applies. Used by the teardown path, which has already proved its right to act
-// through the terminal claim rather than through a caller's identity.
+// applies, and without its open-state requirement -- a session being ended is
+// exactly the one this path needs to find. It has already proved its right to
+// act by holding the reservation.
 func (r *sessionRegistry) byIDOnly(id SessionID) (*session, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s, ok := r.byID[id]
 	return s, ok
-}
-
-// RegisterDemandWake publishes the callback the session's owner listens on.
-//
-// CALLED ONCE, BY THE OWNER, AT SESSION OPEN. The callback is how this package
-// reaches the one goroutine permitted to write to that client's socket; there
-// is deliberately no other route, because a second writer would interleave
-// bytes into a protocol stream mid-frame.
-//
-// A session with no registered wake is simply never selected to give up its
-// lease: demand reclamation that cannot tell the client what happened does not
-// happen at all. That is the same fail-closed shape as the rest of this path --
-// ending somebody's session silently is worse than not reclaiming.
-func (e *Engine) RegisterDemandWake(id SessionID, f func(DemandNotice)) {
-	s, ok := e.sessions.byIDOnly(id)
-	if !ok {
-		return
-	}
-	s.registerWake(f)
 }

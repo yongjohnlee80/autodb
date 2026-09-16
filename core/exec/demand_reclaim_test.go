@@ -18,7 +18,8 @@ func demandHolder(id string, userID, connID int64, idleSince time.Time) *session
 	s := &session{id: SessionID(id), userID: userID, connID: connID, lastUsed: idleSince}
 	s.wire = true
 	s.state.Store(int32(sessOpen))
-	s.wake = func(DemandNotice) {}
+	s.wake = func(DemandNotice) bool { return true }
+	s.reclaimable.Store(true)
 	return s
 }
 
@@ -30,7 +31,7 @@ func demandRegistry(t *testing.T, holders ...*session) *sessionRegistry {
 		r.byID[s.id] = s
 		s.reservation = reservation{LeaseConn: s.connID}
 		r.genSeq++
-		s.terminal.gen.Store(r.genSeq)
+		s.gen = r.genSeq
 	}
 	return r
 }
@@ -63,13 +64,19 @@ func TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen(t *testing.T) {
 			why:   "something else already owns this teardown",
 		},
 		{
+			name:  "its owner is not currently able to act",
+			spoil: func(s *session) { s.reclaimable.Store(false) },
+			why: "a notice posted now would be erased by the owner re-arming its own " +
+				"deadline, stranding the lease this was meant to free",
+		},
+		{
 			name:  "it is not a front-door session",
 			spoil: func(s *session) { s.wire = false },
 			why:   "there is no client loop to frame it, and nobody to tell",
 		},
 		{
 			name:  "nothing can reach its client",
-			spoil: func(s *session) { s.wake = nil },
+			spoil: func(s *session) { s.wake = nil; s.reclaimable.Store(false) },
 			why:   "ending a session nobody can explain to is worse than not reclaiming it",
 		},
 	} {
@@ -77,11 +84,12 @@ func TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen(t *testing.T) {
 			s := demandHolder("holder", 1, 7, now.Add(-time.Hour))
 			tc.spoil(s)
 			r := demandRegistry(t, s)
-			if _, ok := r.claimDemandVictim(7, now); ok {
+			if _, ok := r.reserveDemandVictim(7, now); ok {
 				t.Fatalf("a holder was chosen while %s — %s", tc.name, tc.why)
 			}
-			if s.terminal.taken.Load() {
-				t.Error("the claim was spent on a holder that was not chosen")
+			if s.get() != sessOpen {
+				t.Error("a holder that was not chosen was left reserved for teardown, so " +
+					"it now serves nobody and nothing is coming to release its lease")
 			}
 		})
 	}
@@ -89,12 +97,16 @@ func TestDemandReclaim_OnlyAnUntroubledIdleHolderIsChosen(t *testing.T) {
 	t.Run("idle, quiet and reachable", func(t *testing.T) {
 		s := demandHolder("holder", 1, 7, now.Add(-time.Hour))
 		r := demandRegistry(t, s)
-		v, ok := r.claimDemandVictim(7, now)
+		v, ok := r.reserveDemandVictim(7, now)
 		if !ok {
 			t.Fatal("an idle holder with no transaction, no request in flight and a live owner was not chosen")
 		}
 		if v.s != s {
 			t.Error("a different session was chosen")
+		}
+		if s.get() != sessClosing {
+			t.Error("the chosen session was not reserved for teardown, so a statement " +
+				"arriving now would run on a session already promised to somebody else")
 		}
 		if v.notice.IdleFor < time.Hour {
 			t.Errorf("idle time recorded as %s, want at least an hour — it is the justification "+
@@ -115,7 +127,7 @@ func TestDemandReclaim_TheLongestSilentHolderIsChosen(t *testing.T) {
 	middling := demandHolder("away-for-a-minute", 3, 7, now.Add(-time.Minute))
 	r := demandRegistry(t, recent, ancient, middling)
 
-	v, ok := r.claimDemandVictim(7, now)
+	v, ok := r.reserveDemandVictim(7, now)
 	if !ok {
 		t.Fatal("no holder was chosen")
 	}
@@ -131,7 +143,7 @@ func TestDemandReclaim_TheLongestSilentHolderIsChosen(t *testing.T) {
 // Exactly one may frame it, record it and release its lease; a second terminal
 // frame is at best noise and at worst a write into a socket another goroutine
 // is closing.
-func TestDemandReclaim_TheClaimIsSingleUseUnderContention(t *testing.T) {
+func TestDemandReclaim_TheReservationIsSingleUseUnderContention(t *testing.T) {
 	now := time.Now()
 	s := demandHolder("contended", 1, 7, now.Add(-time.Hour))
 	r := demandRegistry(t, s)
@@ -146,7 +158,7 @@ func TestDemandReclaim_TheClaimIsSingleUseUnderContention(t *testing.T) {
 		go func() {
 			defer done.Done()
 			start.Wait()
-			if _, ok := r.claimDemandVictim(7, now); ok {
+			if _, ok := r.reserveDemandVictim(7, now); ok {
 				wins.Add(1)
 			}
 		}()
@@ -155,8 +167,54 @@ func TestDemandReclaim_TheClaimIsSingleUseUnderContention(t *testing.T) {
 	done.Wait()
 
 	if n := wins.Load(); n != 1 {
-		t.Errorf("%d of %d contenders claimed the same session, want exactly 1 — more than "+
-			"one terminal owner means a client is framed twice", n, racers)
+		t.Errorf("%d of %d contenders reserved the same session, want exactly 1 — more than "+
+			"one terminal owner means a client is framed twice and its lease released twice", n, racers)
+	}
+}
+
+// THE RESERVATION IS THE SAME ONE EVERY OTHER TEARDOWN CONTENDS FOR.
+//
+// Demand must not have a claim of its own beside the ordinary close, or the
+// reaper, an operator's connection delete and the client's own disconnect can
+// each decide to end the same session without knowing about this one.
+func TestDemandReclaim_OrdinaryCloseAndDemandContendForOneReservation(t *testing.T) {
+	now := time.Now()
+	s := demandHolder("contended", 1, 7, now.Add(-time.Hour))
+	r := demandRegistry(t, s)
+
+	// An ordinary close gets there first.
+	if !s.beginClose("", "client-closed") {
+		t.Fatal("the ordinary close could not reserve an open session")
+	}
+	if _, ok := r.reserveDemandVictim(7, now); ok {
+		t.Error("demand reserved a session an ordinary close was already ending — the client " +
+			"would be framed twice and the lease released twice")
+	}
+}
+
+// A SESSION THAT BECOMES ACTIVE IS NOT RESERVED.
+//
+// The predicate and the reservation happen under one hold of the session's
+// lock, so a statement arriving in between cannot be overtaken by a decision
+// that was true a moment earlier.
+func TestDemandReclaim_ASessionThatBecameActiveIsNotReserved(t *testing.T) {
+	now := time.Now()
+	busy := demandHolder("started-a-query", 1, 7, now.Add(-time.Hour))
+	busy.busy = true
+	quiet := demandHolder("still-idle", 2, 7, now.Add(-time.Minute))
+	r := demandRegistry(t, busy, quiet)
+
+	// The busy one has been idle longest, so it is tried first and must be
+	// passed over rather than reserved.
+	v, ok := r.reserveDemandVictim(7, now)
+	if !ok {
+		t.Fatal("no holder was reserved, though one was idle and quiet")
+	}
+	if v.s != quiet {
+		t.Errorf("reserved %q, want the holder that was not running a statement", v.s.id)
+	}
+	if busy.get() != sessOpen {
+		t.Error("the busy holder was left reserved for teardown")
 	}
 }
 
@@ -170,7 +228,7 @@ func TestDemandReclaim_AStaleGenerationCannotEndAReplacementSession(t *testing.T
 	now := time.Now()
 	victim := demandHolder("chosen", 1, 7, now.Add(-time.Hour))
 	r := demandRegistry(t, victim)
-	v, ok := r.claimDemandVictim(7, now)
+	v, ok := r.reserveDemandVictim(7, now)
 	if !ok {
 		t.Fatal("no holder was chosen")
 	}
@@ -179,7 +237,7 @@ func TestDemandReclaim_AStaleGenerationCannotEndAReplacementSession(t *testing.T
 	r.remove(victim)
 	replacement := demandHolder("chosen", 2, 7, now)
 	r2 := demandRegistry(t, replacement)
-	if replacement.terminal.valid(v.notice.Gen) {
+	if replacement.gen == v.notice.Gen {
 		t.Fatal("a claim taken against one session is valid against its replacement — a slow " +
 			"wake would end a session that was never selected")
 	}

@@ -211,11 +211,26 @@ type session struct {
 	// forward, and otherwise the physical connection is closed. Handing it
 	// back unproved is how one developer's settings become another's.
 	pc golibpg.PinnedConn
-	// terminal is the single-use right to end this session, and wake reaches
-	// the one goroutine allowed to write to its client. Demand reclamation
-	// claims the first and calls the second; it never touches the wire itself.
-	terminal terminalClaim
-	wake     func(DemandNotice)
+	// gen is this session's generation, stamped at admission and never reused,
+	// so a notice posted about one session cannot be honoured against whichever
+	// session next occupies its place.
+	gen uint64
+	// wake offers a terminal notice to the one goroutine allowed to write to
+	// this session's client, and reports whether that goroutine accepted it.
+	// Demand reclamation reserves the session and calls this; it never touches
+	// the wire itself.
+	wake func(DemandNotice) bool
+	// reclaimable is true only while the owner is actually blocked reading from
+	// its client and able to act on a notice. See the receive epoch in
+	// frontdoor/demand_wake.go.
+	//
+	// A STATICALLY REGISTERED CALLBACK IS NOT ENOUGH, which is what this
+	// replaced. The callback lived for the whole session, so a notice could be
+	// posted while the loop was between reads -- and the wake, which works by
+	// putting a read deadline in the past, would then be overwritten by the
+	// loop re-arming its ordinary budget. The notice went dormant and the
+	// request waiting for the lease waited its whole bound for nothing.
+	reclaimable atomic.Bool
 
 	// reg is the registry this session was admitted to, or nil for a session
 	// that never was. It exists so the transaction counter the admission queue
@@ -481,7 +496,7 @@ func (r *sessionRegistry) admitLocked(s *session, leaseConn int64, overhead int6
 	// claim taken against this session cannot be honoured against whichever
 	// session next occupies its place.
 	r.genSeq++
-	s.terminal.gen.Store(r.genSeq)
+	s.gen = r.genSeq
 	// The session learns its registry here so that the transaction counter
 	// this schedules against can be kept at the two places a transaction
 	// actually begins and ends, rather than re-derived under the wrong lock.
@@ -819,6 +834,17 @@ func (s *session) idleFor(now time.Time) time.Duration {
 func (s *session) beginClose(ip, reason string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.beginCloseLocked(ip, reason)
+}
+
+// beginCloseLocked is beginClose with the session's mutex already held.
+//
+// SPLIT OUT SO A CALLER CAN DECIDE AND RESERVE WITHOUT LETTING GO. Demand
+// reclamation has to check that a session is idle, quiet and reachable and then
+// claim it, and if it released the lock between those two steps the session
+// could start a statement in the gap -- so it would be terminated after
+// becoming active, which is the one thing the predicate exists to prevent.
+func (s *session) beginCloseLocked(ip, reason string) bool {
 	if !s.state.CompareAndSwap(int32(sessOpen), int32(sessClosing)) {
 		return false
 	}

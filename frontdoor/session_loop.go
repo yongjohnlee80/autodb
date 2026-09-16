@@ -76,8 +76,7 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 	// engine asks this session to give up its connection for somebody who is
 	// waiting; the engine posts and knocks, and every byte the client sees is
 	// still written by this loop. See frontdoor/demand_wake.go.
-	mbox := newDemandMailbox(conn, l.now)
-	reclaimer, canReclaim := l.armDemandWake(sess, mbox)
+	owner := l.armDemandWake(sess, conn)
 
 	for {
 		// WHICH BUDGET IS OWED IS A QUESTION ABOUT THE STREAM, and the reader is
@@ -177,7 +176,18 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			}
 			fr.allow(preHeader)
 		}
+		// The offer opens here and is retired the instant the read returns, so
+		// the engine can only select this session while it is genuinely
+		// blocked and able to act. See frontdoor/demand_wake.go.
+		owner.offer()
 		msg, err := be.Receive()
+		if n, woken := owner.retire(); woken {
+			// BEFORE EITHER msg OR err IS LOOKED AT. A frame that arrived in
+			// the same instant belongs to a session the engine has already
+			// reserved for termination; dispatching it would give one ending
+			// two owners.
+			return l.endForDemand(ctx, conn, be, owner, n, peer, closeReason)
+		}
 		if hdr, ok := fr.consumeHeader(); ok && !hadPre {
 			// Reached only when the connection ended before a header framed.
 			if !l.admitSegmentFrame(conn, be, fr, &seg, hdr, peer, closeReason) {
@@ -185,14 +195,6 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 			}
 		}
 		if err != nil {
-			// A NOTICE IN THE MAILBOX MEANS THIS READ WAS ENDED BY US, and that
-			// has to be told apart from a client that fell silent. Both arrive
-			// here as a timeout, and treating ours as an idle client would
-			// disconnect somebody with no explanation at the exact moment we
-			// owe them one.
-			if n, woken := mbox.take(); woken && canReclaim {
-				return l.endForDemand(ctx, conn, be, sess, reclaimer, n, peer, closeReason)
-			}
 			return l.endOfRead(conn, be, fr, &seg, err, peer, closeReason)
 		}
 
@@ -203,19 +205,6 @@ func (l *Listener) runSession(ctx context.Context, conn net.Conn, fr *frameReade
 		if err := conn.SetDeadline(time.Time{}); err != nil {
 			*closeReason = "deadline"
 			return nil
-		}
-
-		// A WAKE THAT ARRIVED ALONGSIDE THIS FRAME IS STILL OWED AN ANSWER.
-		//
-		// The wake works by putting a read deadline in the past, and the clear
-		// immediately above removes it -- so a demand notice posted while this
-		// frame was already on the wire would have had its knock erased and sat
-		// unread until the client happened to fall silent. The request waiting
-		// for the lease would have waited its whole bound for a reclamation
-		// that had in fact been decided. Checked here, the frame is simply the
-		// last thing this session does.
-		if n, woken := mbox.take(); woken && canReclaim {
-			return l.endForDemand(ctx, conn, be, sess, reclaimer, n, peer, closeReason)
 		}
 
 		// DISCARD-THROUGH-SYNC APPLIES TO EVERY MESSAGE, and it has to be here —
