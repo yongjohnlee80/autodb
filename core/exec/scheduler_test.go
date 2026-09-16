@@ -372,7 +372,7 @@ func TestScheduler_AllCapacityInTransactionRefusesBeforeQueueing(t *testing.T) {
 	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
 		t.Fatal(err)
 	}
-	r.noteTxOpened(7)
+	r.noteTxOpened(7, holder.id, time.Now().Add(time.Hour))
 
 	start := time.Now()
 	err := r.admitWithLeaseOrWait(context.Background(), schedSession("refused", 2, 7), 7, 0)
@@ -493,5 +493,121 @@ func TestScheduler_ARefusalWaitingCannotCureIsAnsweredImmediately(t *testing.T) 
 	}
 	if d := r.lineDepth(); d != 0 {
 		t.Errorf("line depth = %d, want 0 — a refusal waiting cannot cure was queued", d)
+	}
+}
+
+// A REQUEST WHOSE OWN TARGET IS FREE IS SERVED AT ONCE, EVEN BEHIND A LINE.
+//
+// THIS IS THE CELL THAT CATCHES A QUEUE THAT ONLY DISPATCHES ON RELEASE.
+// Joining the line unconditionally is what stops newcomers stepping around
+// waiting requests, but if nothing dispatches at that moment, a request for a
+// target with capacity sits behind waiters for a target that is full — and is
+// served only by some unrelated future release, or not at all. No release
+// happens anywhere in this cell: the admission has to come from the enqueue
+// itself.
+func TestScheduler_AnEligibleNewcomerIsServedAtEnqueueTime(t *testing.T) {
+	r := schedRegistry(t, 1)
+	seen := queuedAt(r)
+
+	full := schedSession("holds-the-full-target", 1, 1)
+	if err := r.admitWithLeaseOrWait(context.Background(), full, 1, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	stuck := schedSession("waits-on-the-full-target", 2, 1)
+	stuckDone := make(chan error, 1)
+	go func() { stuckDone <- r.admitWithLeaseOrWait(context.Background(), stuck, 1, 0) }()
+	awaitSeq(t, seen)
+
+	// Target 2 has never been touched, so it is free. Nothing is released
+	// during this cell.
+	free := make(chan error, 1)
+	go func() {
+		free <- r.admitWithLeaseOrWait(context.Background(), schedSession("wants-a-free-target", 3, 2), 2, 0)
+	}()
+
+	select {
+	case err := <-free:
+		if err != nil {
+			t.Fatalf("a request for a free target was answered %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a request for a FREE target waited behind the line — the queue dispatches " +
+			"only on release, so this request is served by an unrelated event or never")
+	}
+	select {
+	case err := <-stuckDone:
+		t.Fatalf("the waiter for the full target was served %v without a release", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if d := r.lineDepth(); d != 1 {
+		t.Errorf("line depth = %d, want 1 — the blocked waiter should still be waiting", d)
+	}
+}
+
+// A TRANSACTION PAST ITS BOUND MEANS CAPACITY IS COMING, SO THE REQUEST WAITS.
+//
+// Row 5 asks whether anything is going to be released, not whether a
+// transaction exists. A transaction already past its outer bound is going to be
+// reclaimed, so answering "nothing is coming" would be false — and the caller
+// would be refused moments before the capacity it asked for appeared.
+func TestScheduler_AnExpiredTransactionIsNotAReasonToRefuse(t *testing.T) {
+	r := schedRegistry(t, 1)
+	seen := queuedAt(r)
+	holder := schedSession("holds-an-expired-transaction", 1, 7)
+	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
+		t.Fatal(err)
+	}
+	// Open, and already past its outer bound.
+	r.noteTxOpened(7, holder.id, time.Now().Add(-time.Second))
+
+	done := make(chan error, 1)
+	go func() { done <- r.admitWithLeaseOrWait(context.Background(), schedSession("waits", 2, 7), 7, 0) }()
+	awaitSeq(t, seen)
+
+	select {
+	case err := <-done:
+		t.Fatalf("got %v — a transaction past its bound was read as capacity that is "+
+			"never coming, so the request was refused instead of waiting for the reclaim", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	r.remove(holder)
+	if err := <-done; err != nil {
+		t.Errorf("the waiter was not served once the expired holder released: %v", err)
+	}
+}
+
+// THE BOUND IS EXCLUSIVE AT ITS EDGE.
+//
+// Just inside the bound, the transaction still counts and the refusal stands.
+// At the bound and past it, the expiry rung owns the lease and capacity is
+// coming, so the request must be allowed to wait.
+func TestScheduler_TheBoundEdgeDecidesWhoOwnsTheLease(t *testing.T) {
+	at := time.Now()
+	for _, tc := range []struct {
+		name    string
+		until   time.Time
+		refuses bool
+	}{
+		{"just inside the bound", at.Add(time.Millisecond), true},
+		{"exactly at the bound", at, false},
+		{"past the bound", at.Add(-time.Millisecond), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := schedRegistry(t, 1)
+			r.now = func() time.Time { return at }
+			holder := schedSession("holder", 1, 7)
+			if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
+				t.Fatal(err)
+			}
+			r.noteTxOpened(7, holder.id, tc.until)
+
+			r.mu.Lock()
+			got := r.allLeasesInTransactionLocked(7)
+			r.mu.Unlock()
+			if got != tc.refuses {
+				t.Errorf("refuses-before-queueing = %v, want %v", got, tc.refuses)
+			}
+		})
 	}
 }
