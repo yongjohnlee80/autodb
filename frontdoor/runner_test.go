@@ -792,7 +792,22 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		// frontdoor/no-mechanism and frontdoor/execution-state are NOT here,
 		// and their absence is asserted rather than assumed: they are reserved
 		// rows with no producer, and a manifest listing them would say this
-		// phase can end on something nothing raises.
+		// phase can end on something nothing raises. frontdoor/demand-reclaimed
+		// IS here because it acquired a producer -- the row and the code that
+		// raises it landed together, which is what that reserved table asks.
+		// DEMAND RECLAMATION IS THE ONE ROW HERE THAT IS NOT A REFUSAL.
+		//
+		// Nobody was refused: a session that was running perfectly well was
+		// ENDED, so that the connection it was holding idle could serve a
+		// request that had been waiting for one. Recording it as a refusal
+		// would file it beside "we would not do that for you", and an operator
+		// counting refusals would count sessions we chose to end. Control,
+		// because it is a decision this side took deliberately, and
+		// NotApplicable for the same reason as its neighbours: the session is
+		// long past every accept-time budget, so no per-source counter is in
+		// reach and "we decided not to charge it" would claim a decision nobody
+		// had the opportunity to make.
+		{"held-objects", "frontdoor/demand-reclaimed", outcome.Control, outcome.NotApplicable},
 		{"held-objects", "frontdoor/duplicate-portal", outcome.Refusal, outcome.NotApplicable},
 		{"held-objects", "frontdoor/duplicate-prepared-statement", outcome.Refusal, outcome.NotApplicable},
 		{"held-objects", "frontdoor/named-object-cap", outcome.Refusal, outcome.NotApplicable},
