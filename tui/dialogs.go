@@ -114,6 +114,17 @@ func (m *Model) openDialogOpts(title, prose string, scrim bool, answers []dialog
 	buttons := make([]*widget.Button, 0, len(answers))
 	for _, a := range answers {
 		run := a.run
+		// THE REASON COMES FROM THE ROLE, not from the fact that a button was
+		// pressed. Hard-coding Accept made a DECLINING answer report acceptance
+		// — and worse, it silently swallowed Escape and `q` too: those resolve
+		// through the Cancel-role button, whose callback dismissed first as
+		// Accept, leaving golib's own DismissCancel a no-op on an already
+		// closed dialog. Anything listening for provenance was told every exit
+		// was a yes.
+		reason := widget.DismissAccept
+		if a.role == widget.ButtonRoleCancel {
+			reason = widget.DismissCancel
+		}
 		opts := []widget.ButtonOption{
 			widget.WithMnemonic(a.mnemonic),
 			widget.WithRole(a.role),
@@ -122,9 +133,12 @@ func (m *Model) openDialogOpts(title, prose string, scrim bool, answers []dialog
 			// else: a button activation runs its callback and leaves the card
 			// on screen, which is how a confirmation comes to accept a second
 			// press of the same answer.
+			//
+			// DISMISS BEFORE RUN stays: an action that opens another surface
+			// must not find this one still on top.
 			widget.WithOnActivate(func() {
 				if md != nil {
-					md.Dismiss(widget.DismissAccept)
+					md.Dismiss(reason)
 				}
 				if run != nil {
 					run()
