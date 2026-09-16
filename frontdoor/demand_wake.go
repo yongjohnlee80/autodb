@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"context"
+	"errors"
 	"net"
 	"time"
 
@@ -63,7 +64,7 @@ type demandReclaimer interface {
 	RegisterDemandWake(id exec.SessionID, knock func())
 	OfferReceive(id exec.SessionID) uint64
 	RetireReceive(id exec.SessionID, token uint64) (exec.DemandNotice, bool)
-	FinishDemandReclaim(ctx context.Context, id exec.SessionID, gen uint64, delivered bool) bool
+	FinishDemandReclaim(ctx context.Context, id exec.SessionID, gen uint64, delivery exec.DemandDelivery) bool
 }
 
 // demandOwner brackets one session's blocking read.
@@ -93,12 +94,25 @@ func (o *demandOwner) offer() {
 	}
 }
 
-// close ends the offer without consuming a notice, for the paths that leave the
-// loop rather than coming back round it.
-func (o *demandOwner) close() {
-	if o.live && o.token != 0 {
-		o.dr.RetireReceive(o.id, o.token)
-		o.token = 0
+// close ends the offer and reports any notice nobody acted on.
+//
+// IT RETURNS THE NOTICE RATHER THAN SWALLOWING IT. A notice found here means a
+// reservation was taken and abandoned: the session is already in closing, so
+// nothing else can end it, and its lease would be held for the life of the
+// process. The caller records that loudly and finalises it.
+func (o *demandOwner) close() (exec.DemandNotice, bool) {
+	if !o.live || o.token == 0 {
+		return exec.DemandNotice{}, false
+	}
+	n, ok := o.dr.RetireReceive(o.id, o.token)
+	o.token = 0
+	return n, ok
+}
+
+// finalize ends a reserved session without framing its client.
+func (o *demandOwner) finalize(ctx context.Context, n exec.DemandNotice, d exec.DemandDelivery) {
+	if o.live {
+		o.dr.FinishDemandReclaim(ctx, n.ID, n.Gen, d)
 	}
 }
 
@@ -140,33 +154,56 @@ func (l *Listener) endForDemand(ctx context.Context, conn net.Conn, be *pgproto3
 	// read by anything that looks at it as a live budget.
 	_ = conn.SetReadDeadline(time.Time{})
 
+	// ONCE WE HOLD A NOTICE, FINALISATION IS OWED NO MATTER WHAT HAPPENS NEXT.
+	//
+	// By the time this runs the scheduler has ALREADY moved the session to
+	// closing, so nothing else can end it: an ordinary close loses its
+	// compare-and-swap and walks away. An early return here therefore did not
+	// fail closed, it failed silently and permanently — the session served
+	// nobody, its lease was never released, and the request it was freed for
+	// waited its whole bound for capacity that existed and was unreachable.
+	// The deferred finaliser is what makes every path out of this function end
+	// the session exactly once.
+	delivery := exec.DemandNotAttempted
+	defer func() {
+		o.dr.FinishDemandReclaim(ctx, n.ID, n.Gen, delivery)
+		// Generic on purpose: the reclamation is recorded once, by the
+		// teardown, and this telemetry does not decide it a second time.
+		*closeReason = "session-ended"
+	}()
+
 	// ITS OWN ROW, UNDER ITS OWN PRODUCER. Not frameHeldObject: that renders
 	// conditions a session's objects produced, and this is not one of those.
+	// Occurring it is also the check that it is declared at all.
 	row := demandTerminalRow()
-	// OCCURRED UNDER ITS OWN PRODUCER, which is also the check that it is
-	// declared at all.
-	if _, oerr := l.registry().Occur(ProducerDemandReclamation, outcome.ReasonID(row.identity)); oerr != nil {
-		// FAILS CLOSED BEFORE AN UNCLASSIFIED IDENTITY REACHES THE WIRE. A
-		// frame whose outcome nothing declares is one no operator can count
-		// and no manifest describes, and it would be emitted at the exact
-		// moment we owe somebody an explanation.
+	if _, oerr := l.occurDemandTerminal(row.identity); oerr != nil {
+		// NOTHING IS SENT, AND THE SESSION STILL ENDS. A frame whose outcome
+		// nothing declares is one no operator can count and no manifest
+		// describes, and it would be emitted at the exact moment we owe
+		// somebody an explanation. The record says the client was never told,
+		// which is different from saying it would not listen.
 		l.onEvent(Event{Kind: "fd.internal", Reason: OutcomeInternalError, Peer: peer,
 			Detail: "demand reclamation's terminal outcome is not declared by its producer: " +
 				oerr.Error()})
-		*closeReason = "internal"
 		return nil
 	}
 
 	be.Send(gateError(row.severity, row.sqlState, row.message, row.identity, row.hint))
-	delivered := l.flushBounded(conn, be) == nil
-
-	if !o.dr.FinishDemandReclaim(ctx, n.ID, n.Gen, delivered) {
-		// Something else ended it first. It is ending either way; this path
-		// simply does not own the record of it, and must not write one.
-		l.onEvent(Event{Kind: "fd.internal", Reason: OutcomeInternalError, Peer: peer,
-			Detail: "a demand reclamation was framed but another path had already ended the session"})
+	if l.flushBounded(conn, be) == nil {
+		delivery = exec.DemandDelivered
+	} else {
+		delivery = exec.DemandFlushFailed
 	}
-	// Generic on purpose: the reclamation is recorded once, by the teardown.
-	*closeReason = "session-ended"
 	return nil
 }
+
+// occurDemandTerminal records the outcome under its own producer, and is the
+// seam a cell uses to drive the undeclared case without editing declarations.
+func (l *Listener) occurDemandTerminal(identity string) (outcome.Occurrence, error) {
+	if l.hookDemandManifestBroken != nil && l.hookDemandManifestBroken() {
+		return outcome.Occurrence{}, errUndeclaredDemandOutcome
+	}
+	return l.registry().Occur(ProducerDemandReclamation, outcome.ReasonID(identity))
+}
+
+var errUndeclaredDemandOutcome = errors.New("frontdoor: no producer declares the demand terminal outcome")

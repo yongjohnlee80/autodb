@@ -33,8 +33,12 @@ type demandEngine struct {
 	offering bool
 	pending  *exec.DemandNotice
 
-	offered  chan uint64 // one send per offer, so a cell can wait for the loop to block
-	finished chan bool   // one send per finalisation, carrying `delivered`
+	// breakManifest makes the terminal outcome undeclared, so a cell can drive
+	// the fail-closed path without editing the package's declarations.
+	breakManifest bool
+
+	offered  chan uint64              // one send per offer, so a cell can wait for the loop to block
+	finished chan exec.DemandDelivery // one send per finalisation, carrying what the client got
 	finishes int
 
 	// The loop's fate, so a cell that is waiting on a frame can say why one
@@ -48,7 +52,7 @@ func newDemandEngine() *demandEngine {
 	return &demandEngine{
 		fakeQueries: okQueries(),
 		offered:     make(chan uint64, 64),
-		finished:    make(chan bool, 8),
+		finished:    make(chan exec.DemandDelivery, 8),
 	}
 }
 
@@ -90,13 +94,13 @@ func (d *demandEngine) RetireReceive(_ exec.SessionID, token uint64) (exec.Deman
 	return *n, true
 }
 
-func (d *demandEngine) FinishDemandReclaim(_ context.Context, _ exec.SessionID, _ uint64, delivered bool) bool {
+func (d *demandEngine) FinishDemandReclaim(_ context.Context, _ exec.SessionID, _ uint64, delivery exec.DemandDelivery) bool {
 	d.mu.Lock()
 	d.finishes++
 	first := d.finishes == 1
 	d.mu.Unlock()
 	if first {
-		d.finished <- delivered
+		d.finished <- delivery
 	}
 	return first
 }
@@ -146,6 +150,7 @@ func drivenSession(t *testing.T, d *demandEngine) (*pgproto3.Frontend, *demandEn
 	l, events, _ := listenerWith(t, Options{
 		Authn: &fakeAuth{result: goodSession()}, Queries: d, AuthFailuresPerIP: unthrottled,
 	})
+	l.hookDemandManifestBroken = func() bool { return d.breakManifest }
 
 	fr := newFrameReader(server)
 	be := pgproto3.NewBackend(fr, server)
@@ -320,14 +325,14 @@ func TestDrivenDemand_TheReleaseHappensPromptlyAfterTheFlush(t *testing.T) {
 	start := time.Now()
 	d.reclaim(time.Hour)
 	select {
-	case delivered := <-d.finished:
+	case delivery := <-d.finished:
 		if elapsed := time.Since(start); elapsed > 3*time.Second {
 			t.Errorf("the lease was released %s after the frame — a reclamation that takes "+
 				"this long is waiting on something, and the request it was freeing "+
 				"capacity for is still waiting too", elapsed)
 		}
-		if !delivered {
-			t.Error("the record says the client was not told, though it was reading")
+		if delivery != exec.DemandDelivered {
+			t.Errorf("the record says %q, though the client was reading", delivery)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("the lease was never released")
@@ -444,56 +449,119 @@ func TestDrivenDemand_AReclamationIsRefusedWhenNoOfferIsOpen(t *testing.T) {
 // session's lifetime, so detaching a backend frees nothing for anyone waiting.
 // The difference between them belongs in the record, not on the wire.
 func TestDrivenDemand_AHolderOfObjectsGetsTheSameFrame(t *testing.T) {
+	// ONE PATH, TAKEN TWICE, so the two cannot drift apart in the harness
+	// either. The first version of this took a `holding` flag and then ignored
+	// it, publishing a clean notice both times — it compared one population
+	// with itself and would have passed however far the two had diverged.
 	frameFor := func(t *testing.T, holding bool) *pgproto3.ErrorResponse {
 		t.Helper()
 		fe, d, _, wait := drivenSession(t, newDemandEngine())
 		awaitOffer(t, d)
-		ok := d.reclaim(time.Hour)
-		if holding {
-			ok = true
-		}
-		if !ok {
+		if !d.reclaimAs(time.Hour, holding) {
 			t.Fatal("the loop was not offering when the reclamation was attempted")
 		}
 		msg := receiveOrExplain(t, fe, d)
 		got, isErr := msg.(*pgproto3.ErrorResponse)
 		if !isErr {
-			t.Fatalf("the client received %T, want the terminal ErrorResponse", msg)
+			t.Fatalf("holding=%v: the client received %T, want the terminal ErrorResponse",
+				holding, msg)
 		}
 		expectConnectionEnds(t, fe, d)
+		select {
+		case <-d.finished:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("holding=%v: the session was never finalised, so its lease is still held",
+				holding)
+		}
+		if n := d.finishCount(); n != 1 {
+			t.Errorf("holding=%v: finalisation ran %d times, want exactly 1", holding, n)
+		}
 		wait()
 		return got
 	}
 
 	clean := frameFor(t, false)
+	holding := frameFor(t, true)
 
-	fe, d, _, wait := drivenSession(t, newDemandEngine())
-	awaitOffer(t, d)
-	if !d.reclaimHolding(time.Hour) {
-		t.Fatal("the loop was not offering when the reclamation was attempted")
+	// BYTE-EQUIVALENT, FIELD BY FIELD. Their audit state differs; their wire
+	// answer must not. The way the earlier correction rots is for one
+	// population to acquire a more specific frame that is wrong for the other.
+	for _, f := range []struct {
+		name        string
+		clean, held string
+	}{
+		{"severity", clean.Severity, holding.Severity},
+		{"SQLSTATE", clean.Code, holding.Code},
+		{"message", clean.Message, holding.Message},
+		{"hint", clean.Hint, holding.Hint},
+	} {
+		if f.clean != f.held {
+			t.Errorf("%s differs between a clean session and a holder of objects:\n"+
+				"  clean:  %q\n  holder: %q", f.name, f.clean, f.held)
+		}
 	}
-	msg := receiveOrExplain(t, fe, d)
-	holding, isErr := msg.(*pgproto3.ErrorResponse)
-	if !isErr {
-		t.Fatalf("a holder of objects received %T, want the terminal ErrorResponse", msg)
-	}
-	expectConnectionEnds(t, fe, d)
-	wait()
-
-	if holding.Severity != clean.Severity || holding.Code != clean.Code {
-		t.Errorf("a holder of objects got %s/%s and a clean session got %s/%s; both are "+
-			"terminated for the same reason and are owed the same answer",
-			holding.Severity, holding.Code, clean.Severity, clean.Code)
-	}
-	if holding.Message != clean.Message {
-		t.Errorf("the two populations drifted apart:\n  holder: %q\n  clean:  %q\n"+
-			"a message specific to one of them is wrong for the other, which is the "+
-			"defect this row was rewritten to fix", holding.Message, clean.Message)
+	if clean.Severity != "FATAL" || clean.Code != sqlStateAdminShutdown {
+		t.Errorf("terminal frame is %s/%s, want FATAL/%s",
+			clean.Severity, clean.Code, sqlStateAdminShutdown)
 	}
 	for _, wrong := range []string{"prepared statement", "portal"} {
-		if strings.Contains(strings.ToLower(holding.Message), wrong) {
+		if strings.Contains(strings.ToLower(clean.Message), wrong) {
 			t.Errorf("the message names a %s; selection never required one, so it is false "+
 				"for every holder with an empty object store", wrong)
 		}
 	}
+	if !strings.Contains(strings.ToLower(clean.Hint), "reconnect") {
+		t.Errorf("hint = %q, want it to name the client's only remedy", clean.Hint)
+	}
+}
+
+// AN UNDECLARED OUTCOME SENDS NOTHING AND STILL RELEASES THE LEASE.
+//
+// THIS IS THE CELL FOR A FAILURE THAT WAS WORSE THAN THE ONE IT GUARDED.
+// Refusing to frame an outcome nothing declares is right — an identity no
+// manifest describes is one no operator can count. But returning at that point
+// left the session exactly where the scheduler had put it: already moved to
+// closing, so the ordinary close loses its compare-and-swap and walks away, and
+// the lease is held for the life of the process. The request it was freed for
+// then waits its whole bound for capacity that exists and is unreachable.
+//
+// So the refusal is total: no bytes, one internal fault, one finalisation
+// recorded as never-attempted, and the lease back.
+func TestDrivenDemand_AnUndeclaredOutcomeStillReleasesTheLease(t *testing.T) {
+	d := newDemandEngine()
+	d.breakManifest = true
+	fe, d, events, wait := drivenSession(t, d)
+	awaitOffer(t, d)
+
+	if !d.reclaim(time.Hour) {
+		t.Fatal("the loop was not offering when the reclamation was attempted")
+	}
+
+	// NOTHING IS SENT. The client's connection simply ends.
+	expectConnectionEnds(t, fe, d)
+
+	select {
+	case delivery := <-d.finished:
+		if delivery != exec.DemandNotAttempted {
+			t.Errorf("recorded %q, want %q — nothing was sent, and the record must not imply "+
+				"the client refused to listen", delivery, exec.DemandNotAttempted)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session was never finalised, so its lease is held forever by a session " +
+			"that is closing and serves nobody — the exact leak this path must not have")
+	}
+	if n := d.finishCount(); n != 1 {
+		t.Errorf("finalisation ran %d times, want exactly 1", n)
+	}
+
+	var faults int
+	for _, e := range events() {
+		if e.Kind == "fd.internal" {
+			faults++
+		}
+	}
+	if faults != 1 {
+		t.Errorf("recorded %d internal faults, want exactly 1 naming the undeclared outcome", faults)
+	}
+	wait()
 }
