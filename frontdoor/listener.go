@@ -52,6 +52,16 @@ type Listener struct {
 	// thereby testing a different package than the one that ships.
 	hookDemandManifestBroken func() bool
 
+	// hookOfferDecision fires at every pass of the session loop's read, with
+	// the reader state the decision was made on and what was decided.
+	//
+	// THE INVARIANT IS ONLY WORTH ASSERTING IF ITS PRECONDITION HAPPENS. A cell
+	// that merely sends a query and sees nothing go wrong proves nothing about
+	// the framed-header case, because a plain client never produces one. This
+	// reports every decision, so a cell can require that the interesting state
+	// OCCURRED and that no offer was published in it.
+	hookOfferDecision func(framed, mid, offered bool)
+
 	// admit holds every accept-time budget and the per-source throttle.
 	admit *admitter
 
