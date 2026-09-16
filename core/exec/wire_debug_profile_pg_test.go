@@ -39,23 +39,55 @@ func TestWireDebugProfile_ConnectionFlagGovernsTheWireSessionsIdleBound(t *testi
 		t.Fatalf("debug fixture status %q, want T", st)
 	}
 
-	// Two minutes idle: past the 90 s default, inside the 10 min debug bound.
-	later := time.Now().Add(2 * time.Minute)
-	if n := fn.eng.reapExpired(ctx, later); n != 1 {
-		t.Fatalf("normal connection: the sweep acted on %d session(s) at 2 min idle, want 1 — the 90 s bound must roll the transaction back", n)
+	// THE FLAG NO LONGER SELECTS ANYTHING, and this cell now proves that
+	// rather than the opposite.
+	//
+	// It used to assert that a debug-flagged connection got a LONGER bound: at
+	// two minutes idle the ordinary session was reaped by the ninety-second
+	// limit and the debug one survived to its ten-minute one. Both halves of
+	// that are gone. Every session is now treated as a debugging session and
+	// both take the same two-hour bound, so a cell asserting they differ is
+	// asserting behaviour that was deliberately retired.
+	//
+	// Retained rather than deleted, inverted rather than loosened: "the flag
+	// changes nothing" is a claim worth a cell, and it is the claim a reader
+	// of the deprecated flag most needs answered.
+	inside := time.Now().Add(defaultTxLimits().idleInTx - time.Minute)
+	if n := fn.eng.reapExpired(ctx, inside); n != 0 {
+		t.Fatalf("normal connection: the sweep acted on %d session(s) inside the bound, want 0", n)
 	}
-	if st, err := fn.eng.WireTxStatus(sidN, userN); err == nil && st == TxStatusInTx {
-		t.Fatalf("normal connection: transaction still open after the sweep (status %q)", st)
+	if n := fd.eng.reapExpired(ctx, inside); n != 0 {
+		t.Fatalf("debug connection: the sweep acted on %d session(s) inside the bound, want 0", n)
 	}
-	if n := fd.eng.reapExpired(ctx, later); n != 0 {
-		t.Fatalf("debug connection: the sweep acted on %d session(s) at 2 min idle, want 0 — the wire session must take the connection's debug bound", n)
+	for _, c := range []struct {
+		name   string
+		status func() (byte, error)
+	}{
+		{"normal", func() (byte, error) { return fn.eng.WireTxStatus(sidN, userN) }},
+		{"debug", func() (byte, error) { return fd.eng.WireTxStatus(sidD, userD) }},
+	} {
+		if st, err := c.status(); err != nil || st != TxStatusInTx {
+			t.Fatalf("%s connection: status %q err %v inside the bound, want T (still open)",
+				c.name, st, err)
+		}
 	}
-	if st, err := fd.eng.WireTxStatus(sidD, userD); err != nil || st != TxStatusInTx {
-		t.Fatalf("debug connection: status %q err %v after the sweep, want T (still open)", st, err)
+
+	// And past it, BOTH are reaped, at the same instant.
+	past := time.Now().Add(defaultTxLimits().idleInTx + time.Minute)
+	if n := fn.eng.reapExpired(ctx, past); n != 1 {
+		t.Fatalf("normal connection: the sweep acted on %d session(s) past the bound, want 1", n)
 	}
-	// Past the debug bound the transaction is rolled back too — the bound is a bound.
-	if n := fd.eng.reapExpired(ctx, time.Now().Add(DefaultDebugIdleInTxTimeout+time.Minute)); n != 1 {
-		t.Fatalf("debug connection: the sweep acted on %d session(s) past the 10 min debug bound, want 1", n)
+	if n := fd.eng.reapExpired(ctx, past); n != 1 {
+		t.Fatalf("debug connection: the sweep acted on %d session(s) past the bound, want 1 — "+
+			"the deprecated flag must not buy a longer bound", n)
+	}
+
+	// THE TWO BOUNDS ARE ONE NUMBER. Configuration refuses a deprecated value
+	// that differs from the common one, so a cell that let them drift apart
+	// would describe a daemon that cannot start.
+	if DefaultDebugIdleInTxTimeout != DefaultIdleInTxTimeout {
+		t.Errorf("the debug bound (%v) differs from the common one (%v); the flag selects "+
+			"something again", DefaultDebugIdleInTxTimeout, DefaultIdleInTxTimeout)
 	}
 	_ = connN
 }
