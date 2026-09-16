@@ -32,6 +32,22 @@ grant/role floors and the transaction-state machine; **resource** = object
 namespace and budget caps; **transport** = wire-level sequencing and
 delivery.
 
+> **The `raised at` coordinates in sections 1–5 are generated, not typed.** They
+> are derived from `core/exec`'s own syntax tree, using the same rule the
+> conformance walk applies: a cited raise line must carry an identifier naming
+> one of the row's sentinels. Keeping them by hand did not work — the change
+> that makes an update necessary is usually the change that moves the lines, so
+> a number read at the start of an edit is wrong by the end of it.
+>
+> After moving code in `core/exec`, run:
+>
+> ```
+> go run ./internal/gatematrix/cmd/coordgen -pkg ./core/exec -doc docs/admission-gate-matrix.md
+> ```
+>
+> `-check` reports staleness without writing. Every other cell in a row is prose
+> written by a person and is never touched.
+
 ## 1. Classification and shape (every surface, identity uniform)
 
 | sentinel | raised at | surfaces | layer | notes |
