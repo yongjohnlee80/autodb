@@ -250,7 +250,8 @@ func (s *session) clearTxLocked() {
 		s.ext.dropAllPortals()
 	}
 	if s.tx != nil {
-		s.reg.noteTxEnded(s.reservation.LeaseConn)
+		// Safe under s.mu: this takes the leaf lock only. See txMu.
+		s.reg.noteTxEnded(s.reservation.LeaseConn, s.id)
 	}
 	s.tx = nil
 	s.txPhase = txNone
@@ -299,12 +300,23 @@ type sessionRegistry struct {
 	// that fact instead of polling for it.
 	hookWaiterQueued func(seq uint64)
 
-	// inTx counts, per target, the sessions holding a wire lease with a
-	// transaction open. Kept as a COUNTER rather than derived by walking the
-	// sessions, because the walk has to take each session's own mutex and this
-	// is read while the registry mutex is held -- deriving it there would nest
-	// the two locks in the one order this package does not otherwise use.
-	inTx map[int64]int
+	// txMu guards txWithinBound alone and is A LEAF: nothing taken while it is
+	// held, ever. That is what makes it safe to update these facts from under
+	// a SESSION's mutex, which is where transactions actually begin and end.
+	//
+	// THE ALTERNATIVE WAS A LOCK INVERSION. Updating them under the registry
+	// mutex would mean taking registry-then-session in one place and
+	// session-then-registry in another, which is a deadlock the day anything
+	// under the registry lock reads a session -- and demand reclamation, which
+	// selects a session to terminate, is exactly that.
+	txMu sync.Mutex
+	// txWithinBound is, per target, when each transaction-holding session's
+	// outer bound expires. A DEADLINE RATHER THAN A COUNT, because the
+	// question row 5 asks is not "is a transaction open" but "is anything
+	// going to be released": a transaction already past its bound is going to
+	// be reclaimed, so capacity IS coming and the request must wait for it
+	// rather than be told nothing is.
+	txWithinBound map[int64]map[SessionID]time.Time
 
 	// resident is the global weighted memory budget.
 	// The session's FIXED OVERHEAD is charged here as the fourth member of
@@ -324,13 +336,13 @@ type sessionRegistry struct {
 
 func newSessionRegistry(perUser, global int) *sessionRegistry {
 	return &sessionRegistry{
-		byID:       map[SessionID]*session{},
-		perUser:    map[int64]int{},
-		draining:   map[int64]bool{},
-		perUserCap: perUser,
-		globalCap:  global,
-		leases:     map[int64]int{},
-		inTx:       map[int64]int{},
+		byID:          map[SessionID]*session{},
+		perUser:       map[int64]int{},
+		draining:      map[int64]bool{},
+		perUserCap:    perUser,
+		globalCap:     global,
+		leases:        map[int64]int{},
+		txWithinBound: map[int64]map[SessionID]time.Time{},
 	}
 }
 
@@ -453,29 +465,50 @@ func (r *sessionRegistry) admitLocked(s *session, leaseConn int64, overhead int6
 	return nil
 }
 
-// noteTxOpened and noteTxEnded keep the per-target in-transaction count. Both
-// are called with the SESSION's mutex held and take the registry's, which is
-// the one nesting order this package uses.
-func (r *sessionRegistry) noteTxOpened(leaseConn int64) {
+// noteTxOpened and noteTxEnded record when a lease-holding transaction's outer
+// bound expires. Safe to call with the session's mutex held: txMu is a leaf.
+func (r *sessionRegistry) noteTxOpened(leaseConn int64, id SessionID, boundUntil time.Time) {
 	if r == nil || leaseConn == 0 {
 		return
 	}
-	r.mu.Lock()
-	r.inTx[leaseConn]++
-	r.mu.Unlock()
+	r.txMu.Lock()
+	if r.txWithinBound[leaseConn] == nil {
+		r.txWithinBound[leaseConn] = map[SessionID]time.Time{}
+	}
+	r.txWithinBound[leaseConn][id] = boundUntil
+	r.txMu.Unlock()
 }
 
-func (r *sessionRegistry) noteTxEnded(leaseConn int64) {
+func (r *sessionRegistry) noteTxEnded(leaseConn int64, id SessionID) {
 	if r == nil || leaseConn == 0 {
 		return
 	}
-	r.mu.Lock()
-	if n := r.inTx[leaseConn] - 1; n > 0 {
-		r.inTx[leaseConn] = n
-	} else {
-		delete(r.inTx, leaseConn)
+	r.txMu.Lock()
+	if m := r.txWithinBound[leaseConn]; m != nil {
+		delete(m, id)
+		if len(m) == 0 {
+			// Deleted rather than left empty: a map of every target that ever
+			// held a transaction grows without bound on a long-lived daemon.
+			delete(r.txWithinBound, leaseConn)
+		}
 	}
-	r.mu.Unlock()
+	r.txMu.Unlock()
+}
+
+// txWithinBoundCount reports how many of a target's transactions are still
+// inside their bounds at this instant.
+func (r *sessionRegistry) txWithinBoundCount(leaseConn int64, now time.Time) int {
+	r.txMu.Lock()
+	defer r.txMu.Unlock()
+	n := 0
+	for _, until := range r.txWithinBound[leaseConn] {
+		// STRICTLY BEFORE, so the instant a bound expires the transaction stops
+		// counting. At equality the expiry rung owns it and capacity is coming.
+		if now.Before(until) {
+			n++
+		}
+	}
+	return n
 }
 
 // allLeasesInTransactionLocked reports whether every lease on this target is
@@ -491,7 +524,15 @@ func (r *sessionRegistry) allLeasesInTransactionLocked(leaseConn int64) bool {
 		return false
 	}
 	held := r.leases[leaseConn]
-	return held >= r.leaseCap && r.inTx[leaseConn] >= held
+	if held < r.leaseCap {
+		return false
+	}
+	// EVERY lease must be held by a transaction that is STILL INSIDE ITS
+	// BOUND. One that is past its bound is going to be reclaimed, so capacity
+	// is coming and this request must be allowed to wait for it -- telling it
+	// "nothing is coming" would be false, and it would be told so immediately
+	// rather than being served moments later.
+	return r.txWithinBoundCount(leaseConn, r.clock()) >= held
 }
 
 // releaseReservation gives back everything admitWithLease took. Called from

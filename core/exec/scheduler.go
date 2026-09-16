@@ -75,49 +75,50 @@ func (w *admitWaiter) resolve(err error) {
 // internal surfaces, which have no client to keep waiting and want the
 // immediate answer.
 func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, leaseConn, overhead int64) error {
+	w := &admitWaiter{s: s, leaseConn: leaseConn, overhead: overhead, done: make(chan error, 1)}
+
 	r.mu.Lock()
 	if r.closed != nil {
 		r.mu.Unlock()
 		return r.closed
 	}
 
-	// A NEWCOMER MAY NOT STEP AROUND A LINE THAT IS ALREADY WAITING, even when
-	// a slot is free at this instant. Trying the direct admission first
-	// whenever capacity allows is what recreates the starvation: the freed
-	// slot is exposed to every arriving request, and the request that has been
-	// waiting longest is the one least likely to be running at that moment.
-	if len(r.line) == 0 {
-		err := r.admitLocked(s, leaseConn, overhead)
-		if err == nil || !errors.Is(err, ErrLeaseCapExceeded) {
-			// Admitted, or refused for a reason waiting cannot cure. A
-			// per-user cap, a draining connection or an over-budget session is
-			// no better in ninety seconds than it is now, and queueing one
-			// would hold a client open to tell it the same thing later.
-			r.mu.Unlock()
-			return err
-		}
+	// JOIN THE LINE FIRST, THEN DISPATCH, BOTH UNDER THIS ONE LOCK.
+	//
+	// Joining unconditionally is what stops a newcomer stepping around
+	// requests that are already waiting: there is no path that takes capacity
+	// without going through the order. Dispatching in the same critical
+	// section is what stops the opposite failure -- a request whose own target
+	// is free sitting behind waiters for a target that is full, waiting for an
+	// unrelated release that might never come. serveLine admits the oldest
+	// ELIGIBLE request, so this request is admitted immediately if nothing
+	// older can use the capacity it is asking for, and waits otherwise.
+	r.lineSeq++
+	w.seq = r.lineSeq
+	r.line = append(r.line, w)
+	r.serveLine()
+	if w.state == waitResolved {
+		r.mu.Unlock()
+		return <-w.done
 	}
 
-	// EVERY SLOT IS HELD BY A TRANSACTION STILL INSIDE ITS BOUNDS: refuse
-	// rather than queue. Nothing is going to be released, so the wait would
-	// end in ninety seconds with the answer available now. Decided HERE and
-	// only here -- once a request is in the line it resolves by being
-	// admitted, by the caller giving up, or by its wait expiring, and never by
-	// being relabelled with a refusal that claims it never waited.
+	// NOTHING IS COMING, SO NOBODY IS MADE TO WAIT. Every lease on the target
+	// is held by a transaction still inside its bounds: no release is pending,
+	// so the wait would end ninety seconds later with the answer available
+	// now. Decided HERE and only here -- a request that goes on to wait never
+	// receives this identity, because a record claiming a request never waited
+	// has to be true of that request.
 	if r.allLeasesInTransactionLocked(leaseConn) {
+		r.dropFromLineLocked(w)
 		r.mu.Unlock()
 		return ErrAllCapacityInTransaction
 	}
 
-	w := &admitWaiter{s: s, leaseConn: leaseConn, overhead: overhead, done: make(chan error, 1)}
-	r.lineSeq++
-	w.seq = r.lineSeq
-	r.line = append(r.line, w)
 	hook := r.hookWaiterQueued
 	r.mu.Unlock()
 	if hook != nil {
-		// Announced OUTSIDE the lock and AFTER the waiter is in line, so a
-		// cell can drive the next step deterministically instead of sleeping.
+		// Announced OUTSIDE the lock and only once the request is genuinely
+		// waiting, so a cell can act on that fact instead of polling for it.
 		hook(w.seq)
 	}
 
@@ -169,6 +170,12 @@ func (r *sessionRegistry) giveUp(w *admitWaiter, own error) error {
 func (r *sessionRegistry) leaveLine(w *admitWaiter) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.dropFromLineLocked(w)
+}
+
+// dropFromLineLocked takes a waiter out of the line, reporting whether it was
+// still there. Caller holds r.mu.
+func (r *sessionRegistry) dropFromLineLocked(w *admitWaiter) bool {
 	for i, x := range r.line {
 		if x == w {
 			r.line = append(r.line[:i], r.line[i+1:]...)
@@ -209,13 +216,17 @@ func (r *sessionRegistry) serveLine() {
 	}
 }
 
-// isTransientCapacity reports whether waiting could plausibly cure this
-// refusal. Only these three are given back to the line; every other error is
-// this waiter's answer.
+// isTransientCapacity reports whether waiting is the right answer to this
+// refusal.
+//
+// ONLY THE TARGET'S LEASE CAP, and deliberately not the instance-wide caps
+// beside it. The lease cap is the one a colleague's session closing clears in
+// seconds, and it is the one the incident was about. A global session cap, a
+// per-user cap or an exhausted memory budget are facts about the instance or
+// about the caller's own footprint: holding a client open for ninety seconds
+// to tell it the same thing is worse than telling it now.
 func isTransientCapacity(err error) bool {
-	return errors.Is(err, ErrLeaseCapExceeded) ||
-		errors.Is(err, ErrSessionCapExceeded) ||
-		errors.Is(err, ErrResidentBudgetExceeded)
+	return errors.Is(err, ErrLeaseCapExceeded)
 }
 
 // closeLine refuses every waiter and every later arrival, once.
