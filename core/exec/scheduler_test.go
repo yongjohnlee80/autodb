@@ -259,40 +259,38 @@ func TestScheduler_ACancellationThatLosesToAGrantUndoesTheAdmission(t *testing.T
 		t.Fatal(err)
 	}
 
+	// THE RACE IS FORCED, NOT AWAITED. The grant is made to land in the exact
+	// window between the caller giving up and its leaving the line. Running
+	// the two concurrently and hoping reaches this window about once in every
+	// few hundred attempts -- which is to say a broken undo would pass the
+	// suite almost every time, and the cell would be decorative.
+	var once sync.Once
+	r.hookGivingUp = func() {
+		once.Do(func() { r.remove(holder) }) // grants to the waiter, here
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	racer := schedSession("granted-then-cancelled", 2, 7)
 	done := make(chan error, 1)
 	go func() { done <- r.admitWithLeaseOrWait(ctx, racer, 7, 0) }()
 	awaitSeq(t, seen)
-
-	// Grant and cancel in the same instant, from two goroutines, so the
-	// ownership decision is made under the registry mutex rather than by the
-	// order this cell happens to write them in.
-	var together sync.WaitGroup
-	together.Add(2)
-	go func() { defer together.Done(); r.remove(holder) }()
-	go func() { defer together.Done(); cancel() }()
-	together.Wait()
+	cancel()
 
 	err := <-done
-	if err == nil {
-		// The grant won outright and the caller kept the session: it is in the
-		// registry and the caller owns closing it. That is a legitimate
-		// outcome of this race.
-		if n := r.leaseCount(7); n != 1 {
-			t.Errorf("the request was served but holds %d leases, want 1", n)
-		}
-		return
-	}
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("got %v, want either a grant or the caller's cancellation", err)
+		t.Fatalf("got %v, want the caller's cancellation — the grant landed inside the "+
+			"give-up window, so the caller is gone and must be told so", err)
 	}
 	// The cancellation was reported, so NOTHING may still be held for it.
 	if n := r.leaseCount(7); n != 0 {
 		t.Errorf("lease count = %d after a cancelled request, want 0 — the admission "+
-			"granted in the same instant was never given back", n)
+			"granted in the same instant was never given back, so a session is held "+
+			"that nothing is coming to close", n)
 	}
-	if _, ok := r.byID[racer.id]; ok {
+	r.mu.Lock()
+	_, stillThere := r.byID[racer.id]
+	r.mu.Unlock()
+	if stillThere {
 		t.Error("the cancelled request's session is still in the registry")
 	}
 }
@@ -684,5 +682,71 @@ func TestScheduler_OneBoundOwnsTheWaitDeterministically(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// NO RELEASE EVER LEAVES CAPACITY FREE WITH SOMEBODY ABLE TO USE IT WAITING.
+//
+// THIS IS THE CONTROL FOR A CLAUSE NO OTHER CELL DEFENDS. Requests join the
+// line unconditionally rather than trying to take capacity first, and a review
+// of the suite found that clause is held up by lock discipline alone: because
+// the release path drains the line inside the same critical section that frees
+// the lease, free capacity never coexists with an eligible waiter, so a
+// bypass would produce the same answer and no cell would notice it.
+//
+// That equivalence is a property of the current code, not a guarantee. The day
+// something frees capacity without serving the line under the same lock, a
+// bypass becomes a queue-jump and the invariant below is what catches it. So
+// the invariant is asserted directly, after every release, rather than left
+// implied.
+func TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting(t *testing.T) {
+	r := schedRegistry(t, 2)
+	seen := queuedAt(r)
+
+	// Two targets, both filled, then more waiters than capacity on each, so
+	// every release has a choice to get wrong.
+	var holders []*session
+	for conn := int64(1); conn <= 2; conn++ {
+		for i := range 2 {
+			h := schedSession(fmt.Sprintf("holder-%d-%d", conn, i), int64(conn*10+int64(i)), conn)
+			if err := r.admitWithLeaseOrWait(context.Background(), h, conn, 0); err != nil {
+				t.Fatal(err)
+			}
+			holders = append(holders, h)
+		}
+	}
+	for conn := int64(1); conn <= 2; conn++ {
+		for i := range 2 {
+			s := schedSession(fmt.Sprintf("waiter-%d-%d", conn, i), int64(conn*100+int64(i)), conn)
+			go func() { _ = r.admitWithLeaseOrWait(context.Background(), s, conn, 0) }()
+			awaitSeq(t, seen)
+		}
+	}
+
+	for i, h := range holders {
+		r.remove(h)
+
+		// THE INVARIANT, checked under the same lock the release used, so what
+		// is asserted is the state the release actually left behind rather
+		// than a later state something else may have repaired.
+		r.mu.Lock()
+		var admittable []SessionID
+		for _, w := range r.line {
+			// Asked without committing: a waiter that COULD be admitted right
+			// now is one the release should already have served.
+			if r.leases[w.leaseConn] < r.leaseCap {
+				admittable = append(admittable, w.s.id)
+			}
+		}
+		depth := len(r.line)
+		r.mu.Unlock()
+
+		if len(admittable) > 0 {
+			t.Fatalf("after release %d, capacity was free and %d waiter(s) able to use it were "+
+				"still in line (%v) — a release that does not serve the line turns joining it "+
+				"into a disadvantage, which is the starvation the queue exists to end",
+				i, len(admittable), admittable)
+		}
+		_ = depth
 	}
 }
