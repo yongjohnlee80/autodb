@@ -755,6 +755,13 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		{"authenticate-and-open", "frontdoor/database-mismatch", outcome.Refusal, outcome.None},
 		{"authenticate-and-open", "frontdoor/ip-not-admitted", outcome.Refusal, outcome.Credential},
 		{"authenticate-and-open", "frontdoor/lease-cap-exceeded", outcome.Refusal, outcome.Capacity},
+		// The four answers a request can receive once it has WAITED for a
+		// lease. None is charged: the caller presented nothing wrong, and
+		// charging them would ban a developer for their patience.
+		{"authenticate-and-open", "frontdoor/queue-timeout", outcome.Refusal, outcome.Capacity},
+		{"authenticate-and-open", "frontdoor/all-capacity-in-transaction", outcome.Refusal, outcome.Capacity},
+		{"authenticate-and-open", "frontdoor/target-removed-while-waiting", outcome.Refusal, outcome.Capacity},
+		{"authenticate-and-open", "frontdoor/instance-shutting-down", outcome.Refusal, outcome.Capacity},
 		{"authenticate-and-open", "frontdoor/lease-encoding", outcome.Refusal, outcome.None},
 		{"authenticate-and-open", "frontdoor/no-grant", outcome.Refusal, outcome.None},
 		{"authenticate-and-open", "frontdoor/no-such-database", outcome.Refusal, outcome.None},

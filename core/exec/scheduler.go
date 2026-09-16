@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -58,6 +59,9 @@ type admitWaiter struct {
 	overhead  int64
 	seq       uint64
 	state     waitState
+	// blockedBy is the most recent capacity refusal that passed this waiter
+	// over. Guarded by r.mu, like everything else about the line.
+	blockedBy error
 	// done carries the outcome. Buffered by one so the releasing path never
 	// blocks on a caller that has already given up.
 	done chan error
@@ -122,14 +126,17 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 		hook(w.seq)
 	}
 
-	// THE DEADLINE IS THE EARLIER OF THE CLIENT'S AND THE SERVER'S. A client
-	// with five seconds left does not get ninety; one with no deadline gets
-	// exactly ninety.
-	deadline := r.clock().Add(queueWait)
-	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
-		deadline = d
-	}
-	timer := time.NewTimer(time.Until(deadline))
+	// THE TIMER CARRIES THE SERVER'S WAIT ONLY, and the caller's deadline is
+	// left to the caller's own context.
+	//
+	// IT USED TO CARRY THE EARLIER OF THE TWO, which was wrong in a way that
+	// shows up as a wrong answer rather than as a hang: when the caller's
+	// deadline was the earlier one, the timer and ctx.Done became ready in the
+	// same instant, and a select among ready cases picks at random. Half the
+	// time a client that had run out of its own time was told the SERVER's wait
+	// had expired. Both bounds still apply -- a client with five seconds left
+	// does not get ninety -- but each is now reported by the thing that owns it.
+	timer := time.NewTimer(queueWait)
 	defer timer.Stop()
 
 	select {
@@ -138,7 +145,7 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 	case <-ctx.Done():
 		return r.giveUp(w, context.Cause(ctx))
 	case <-timer.C:
-		return r.giveUp(w, ErrQueueTimeout)
+		return r.giveUp(w, r.expiredWaitReason(w))
 	}
 }
 
@@ -162,6 +169,30 @@ func (r *sessionRegistry) giveUp(w *admitWaiter, own error) error {
 		r.remove(w.s)
 	}
 	return own
+}
+
+// expiredWaitReason names both what happened and what blocked it.
+//
+// AN OPERATOR'S REMEDY DEPENDS ON WHICH CAP WAS IN THE WAY, so "you waited and
+// were not served" is not a sufficient answer on its own: a full target pool
+// and a full session cap are fixed by different changes, and the trail has to
+// say which one held this request. This was found by an existing cell going
+// red -- the queue had begun overwriting the specific cap identity with a
+// generic timeout, which would have left an operator reading the trail with no
+// idea which limit to raise.
+//
+// The returned error satisfies BOTH identities: the wait expired, AND the
+// lease cap is why. The front door renders the specific cap to the client,
+// while the waited-and-was-not-served fact stays available to anything reading
+// for pressure.
+func (r *sessionRegistry) expiredWaitReason(w *admitWaiter) error {
+	r.mu.Lock()
+	blocked := w.blockedBy
+	r.mu.Unlock()
+	if blocked == nil {
+		return ErrQueueTimeout
+	}
+	return fmt.Errorf("%w: %w", ErrQueueTimeout, blocked)
 }
 
 // leaveLine takes a waiter out of the line, reporting whether it was still
@@ -202,6 +233,9 @@ func (r *sessionRegistry) serveLine() {
 		for i, w := range r.line {
 			err := r.admitLocked(w.s, w.leaseConn, w.overhead)
 			if isTransientCapacity(err) {
+				// Remembered so an expired wait can name the cap that held it
+				// rather than only the fact that it waited.
+				w.blockedBy = err
 				continue // not now; the place in line is kept
 			}
 			r.line = append(r.line[:i], r.line[i+1:]...)
