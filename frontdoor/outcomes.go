@@ -108,6 +108,31 @@ const (
 	// filing it under refusals puts a target outage among the numbers an
 	// operator watches for policy and for credential attacks.
 	EventDialFailed = "fd.dial_failed"
+	// OutcomeConnectionUnusable is a request whose connection cannot serve it
+	// as configured: an engine this build does not implement, a stored DSN the
+	// engine's own parser rejects, a driver pool that would not construct, or a
+	// resolved driver missing a capability this product's guarantees depend on.
+	//
+	// SEPARATE FROM OutcomeDialFailed BECAUSE THE TWO ARE ANSWERED BY DIFFERENT
+	// PEOPLE. A dial failure sends an operator to a network; this sends them to
+	// a connection row or a dependency. Folding them together also falsifies
+	// the dial failure's own attempt count, which exists so that a target that
+	// failed once can be told from one being retried in a loop -- a
+	// configuration failure takes no permit and opens no socket, so its honest
+	// count is zero and it must not be reported as one.
+	//
+	// THIS STRING IS ALSO THE STABLE RULE ID THE WIRE CARRIES IN DETAIL, and
+	// denial.go's ConnectionUnusableRule is defined FROM it, for the reason the
+	// dial-failed pair is: an identity spelled twice is an identity that can be
+	// spelled two ways, and neither half can notice.
+	OutcomeConnectionUnusable = "frontdoor/connection-unusable"
+	// EventConnectionUnusable is the audit kind for one.
+	//
+	// NOT fd.refused and NOT fd.dial_failed. Nothing about the caller's work
+	// was judged, so it is not a refusal; nothing was dialled, so filing it
+	// among target outages would put an install's own misconfiguration into
+	// the numbers an operator watches for target health.
+	EventConnectionUnusable = "fd.connection_unusable"
 	// EventAuthOperational is the audit kind for an error-driven ending in the
 	// credential exchange.
 	//
@@ -282,6 +307,11 @@ func Outcomes() []outcome.Registration {
 		// whatever keeps that promise true in real clients.
 		{Producer: ProducerRequestAcquire, Outcomes: []outcome.Decl{
 			{ID: OutcomeDialFailed, Kind: outcome.Operational, Charge: outcome.NotApplicable},
+			// Operational for the same reason: error-driven, and answerable by
+			// nobody holding a socket. NotApplicable rather than None because
+			// the caller did nothing this could be charged against -- their
+			// credential was accepted and their statement was never judged.
+			{ID: OutcomeConnectionUnusable, Kind: outcome.Operational, Charge: outcome.NotApplicable},
 		}},
 	}
 }

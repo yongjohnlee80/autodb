@@ -253,7 +253,7 @@ func (e *Engine) acquireRequestBackend(ctx context.Context, s *session,
 	}
 	target, terr := e.target(ctx, connRow.ID, connRow)
 	if terr != nil {
-		return nil, requestTargetFailure(terr)
+		return nil, requestTargetFailure(ctx, terr)
 	}
 	return acquireWithReArbitration(ctx, func() (golibpg.PinnedConn, error) {
 		return e.pinTargetBackend(ctx, s, target)
@@ -262,15 +262,28 @@ func (e *Engine) acquireRequestBackend(ctx context.Context, s *session,
 
 // requestTargetFailure decides what a failure to resolve the target pool IS.
 //
+// THREE ANSWERS, AND ONLY THE THIRD IS A DIAL FAILURE. They are told apart by
+// who has to act on them and whether anything physical happened.
+//
+// THE CALLER GAVE UP. A context that is already done when target resolution
+// fails means the request was abandoned — cancelled, or past its deadline —
+// and the error the resolution produced is a consequence of that, not a fact
+// about the target. The caller's own cause is returned, exactly as the pin
+// loop does it. This was previously only half right: context.Canceled was
+// listed and passed through, but a DEADLINE that expired inside resolution
+// was not, so an abandoned request was reported to operators as a target
+// outage. Asking the context rather than listing sentinels is what makes the
+// two cases the same case.
+//
 // AUTODB'S OWN ANSWERS ABOUT A CONNECTION MUST REACH THE CALLER CARRYING THEIR
 // OWN SENTINEL, because every one of them is actionable and a dial failure is
 // deliberately not: the client shape for a dial failure is one fixed literal
 // that names nothing, so folding "this connection is being deleted" or "the
-// secret store is still locked" into it replaces a fact the operator can act on
-// with a uniform "the target could not be reached". The three below are the
-// answers target resolution produces WITHOUT going near a driver, and they are
-// listed rather than inferred because there is nothing in the error itself that
-// distinguishes them.
+// secret store is still locked" into it replaces a fact the operator can act
+// on with a uniform "the target could not be reached". They are listed rather
+// than inferred because there is nothing in the error itself that
+// distinguishes them. A configuration failure is already typed by the site
+// that raised it and needs no listing here.
 //
 // EVERYTHING ELSE HERE CAME OUT OF THE DRIVER AND MUST BE FRAMED, and that is
 // why this is not simply a passthrough. Opening the pool decrypts a DSN and
@@ -280,7 +293,13 @@ func (e *Engine) acquireRequestBackend(ctx context.Context, s *session,
 // default arm that puts an unrecognised error's text on the wire, so returning
 // that error unframed would publish the install's topology to anyone holding a
 // socket, which is the exact disclosure this file exists to prevent.
-func requestTargetFailure(err error) error {
+func requestTargetFailure(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return requestAbandoned(ctx)
+	}
+	if _, ok := ConfigFailureOf(err); ok {
+		return err
+	}
 	for _, own := range []error{ErrConnectionDraining, auth.ErrLocked, context.Canceled} {
 		if errors.Is(err, own) {
 			return err

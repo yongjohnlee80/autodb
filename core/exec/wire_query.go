@@ -733,6 +733,16 @@ func (e *Engine) pinWireSession(ctx context.Context, s *session, connRow *meta.C
 // THE OBVIOUS ALTERNATIVE — leaving pinning as one function and bounding the
 // whole of it, since the caller only wants a backend — is what this replaced.
 // One function is convenient; it is not a permit.
+// pinSessionConn is the driver's pin, behind a seam.
+//
+// A SEAM BECAUSE THE BOUNDARY CHECK BELOW CANNOT OTHERWISE BE PROVED. What it
+// refuses is a pin whose driver lacks a capability, and no real pool can be
+// made to produce one: golib's own pinned connection has it. The alternative
+// is to trust that the assertion is right by reading it, which is how the
+// fallback it replaced survived three reviews. openPostgres and its siblings
+// are seams in this package for the same reason.
+var pinSessionConn = golibpg.PinSessionConn
+
 func (e *Engine) pinTargetBackend(ctx context.Context, s *session, target dao.DataConn) (golibpg.PinnedConn, error) {
 	// Re-checked here as well as by the caller: this runs under the
 	// re-arbitration bound, so a second attempt can find the pin another
@@ -740,9 +750,36 @@ func (e *Engine) pinTargetBackend(ctx context.Context, s *session, target dao.Da
 	if pc := s.pinnedConn(); pc != nil {
 		return pc, nil
 	}
-	pc, err := golibpg.PinSessionConn(ctx, target)
+	pc, err := pinSessionConn(ctx, target)
 	if err != nil {
 		return nil, err
+	}
+	// THE CAPABILITY IS MANDATORY HERE, THOUGH IT IS OPTIONAL IN THE DRIVER.
+	//
+	// golib keeps Destroy behind an optional interface because PinnedConn is
+	// published and adding a method to it would break every explicit
+	// implementation. That is the right call THERE. It is the wrong call here:
+	// a pinned backend this package cannot destroy on demand is a backend
+	// whose failed reset falls back to asking the driver's own reuse test, and
+	// that test answers "reusable" for exactly the case that matters — the
+	// wire is in perfect order and the session state we could not clear is
+	// what it does not look at. The cross-developer isolation guarantee would
+	// degrade silently, with a green build and green tests, the day a
+	// dependency resolved to an implementation without it.
+	//
+	// SO IT IS ASSERTED ONCE, AT THE BOUNDARY, BEFORE THE MEMBER IS USED. A
+	// per-teardown fallback is a decision taken when it is already too late:
+	// the session has run the client's work on a backend nobody can destroy.
+	// Checked here, the only cost of an incapable driver is that this request
+	// does not start.
+	if _, ok := pc.(golibpg.Destroyer); !ok {
+		// Nothing has run on this member and no reset was attempted, so it is
+		// clean and the pool may have it straight back. Discard is the right
+		// teardown for an UNUSED pin; destruction is for a backend a session
+		// has touched, which is the very thing this refuses to allow.
+		pc.Discard()
+		return nil, NewConfigFailure(ConfigStageCapability,
+			errors.New("the resolved postgres driver cannot destroy a pinned backend on demand"))
 	}
 	// The pool is shared with every other statement autodb runs, and those
 	// borrow and return connections without passing the release gate, so where

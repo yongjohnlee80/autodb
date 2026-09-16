@@ -221,26 +221,25 @@ func (e *Engine) releaseBackend(ctx context.Context, s *session, pc golibpg.Pinn
 // good reason, a failed reset silently becomes a reuse of contaminated state,
 // with nothing to compile against and no test anywhere that notices.
 //
-// THE FALLBACK IS THAT SAME WRONG THING, KEPT ONLY FOR AN OLDER DRIVER. A build
-// whose pinned connection predates the explicit operation cannot be destroyed
-// on demand, and refusing to relinquish the lease at all would be worse than a
-// weaker teardown — it would strand the member forever. So the old arrangement
-// runs, and it says so in the log, because an operator debugging a leaked
-// setting needs to know which of the two guarantees was in force.
-func (e *Engine) destroyBackend(ctx context.Context, pc golibpg.PinnedConn) {
+// THERE IS NO FALLBACK, AND THAT IS THE CHANGE. The weaker teardown used to
+// live here for a driver without the capability. It is gone, because a
+// teardown is the wrong place to discover that this install cannot honour its
+// isolation guarantee: by then the session has already run the client's work
+// on a backend nobody can destroy. pinTargetBackend asserts the capability
+// when the member is pinned and still unused, so by the time any backend
+// reaches this function it is destructible. A false answer below is therefore
+// not an older driver — it is that invariant being broken, which is a defect
+// in this package and is logged as one rather than quietly absorbed.
+func (e *Engine) destroyBackend(_ context.Context, pc golibpg.PinnedConn) {
 	if golibpg.Destroy(pc) {
 		return
 	}
-	e.logf("the target driver cannot destroy a pinned backend on demand; falling back " +
-		"to marking the lease unprovable, which relies on the driver's own reuse test " +
-		"and can recycle a backend whose session state could not be cleared")
-	// The frame chosen is a close of the unnamed portal precisely because it
-	// would be harmless if it ever did reach a server, and it costs no round
-	// trip: it is buffered locally and the socket is closed before anything is
-	// written. Every way the queueing can fail already means the handle is
-	// terminal or mid-exchange, which is itself unreusable, so the error is not
-	// worth inspecting — either way the connection cannot be recycled.
-	_ = pc.Send(ctx, golibpg.ClosePortalOp(""))
+	// The lease is still relinquished. Refusing to would strand the pool
+	// member forever, which is worse than a member the pool may recycle, and
+	// this path is unreachable unless the boundary assertion has been removed.
+	e.logf("BUG: a pinned backend reached destruction without the capability that " +
+		"pinTargetBackend requires of every pin; its session state could not be " +
+		"guaranteed cleared and the driver's own reuse test decided its fate")
 	pc.Discard()
 }
 

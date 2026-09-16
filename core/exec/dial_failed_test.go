@@ -14,9 +14,11 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/yongjohnlee80/golib/dao"
+	"github.com/yongjohnlee80/golib/dao/mysql"
 	golibpg "github.com/yongjohnlee80/golib/dao/postgres"
 	"github.com/yongjohnlee80/golib/dao/sqlite"
 
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
@@ -308,22 +310,19 @@ func TestAcquireRequestBackend_ADrainKeepsItsOwnSentinel(t *testing.T) {
 	}
 }
 
-// THE TARGET POOL IS RESOLVED EXACTLY ONCE PER ACQUISITION, AND A FAILURE TO
-// RESOLVE IT IS STILL FRAMED.
+// THE POOL IS RESOLVED ONCE, AND BUILDING ONE IS NOT ACQUIRING ANYTHING.
 //
-// Two requirements meet here. Resolving the pool is not an arbitration — no
-// permit is sought, nothing is taken from the instance-wide allowance — so
-// doing it twice spends nothing and proves nothing, and it makes the attempt
-// count in the audit a number that no longer means "permits arbitrated for".
-// And a pool that will not open failed at the driver, so its error carries the
-// connection's name and the driver's own text: host, port, database, and the
-// role autodb connects as. The front door publishes an unrecognised error's
-// text, so that one must arrive framed.
+// This cell used to assert the opposite half of its own name. It drove a
+// failing pool construction and then required the result to be a DialFailure,
+// which pinned in place exactly the contradiction the review found: a
+// DialFailure reports Attempts, Attempts means permits arbitrated for, and
+// constructing a pool arbitrates for none. A test can lock a defect in as
+// firmly as a comment can, and this one did.
 //
-// THE OPEN COUNT IS THE MUTATION DETECTOR. A retry seam widened back over
-// target resolution opens the pool twice, and only this cell sees it: the
-// error's shape is identical either way.
-func TestAcquireRequestBackend_TheTargetIsResolvedOnceAndItsFailureIsFramed(t *testing.T) {
+// What is true, and is what it asserts now: the pool is built once per
+// acquisition, and a construction failure is a configuration fact carrying no
+// attempt count at all.
+func TestAcquireRequestBackend_ThePoolIsBuiltOnceAndBuildingItIsNotAnAttempt(t *testing.T) {
 	ctx := context.Background()
 	f := newFixture(t)
 	row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
@@ -345,17 +344,143 @@ func TestAcquireRequestBackend_TheTargetIsResolvedOnceAndItsFailureIsFramed(t *t
 
 	_, aerr := f.eng.acquireRequestBackend(ctx, &session{}, row)
 	if opens != 1 {
-		t.Errorf("the target pool was opened %d times for one acquisition, want exactly 1; "+
-			"resolving a pool takes no permit, so a second resolution makes the attempt "+
-			"count in the audit mean something other than permits arbitrated for", opens)
+		t.Errorf("the target pool was built %d times for one acquisition, want exactly 1; "+
+			"building a pool takes no permit, so a second one makes the attempt count in "+
+			"the audit mean something other than permits arbitrated for", opens)
 	}
-	d, ok := DialFailureOf(aerr)
+	c, ok := ConfigFailureOf(aerr)
 	if !ok {
-		t.Fatalf("a target that would not open returned %v unframed; the front door puts an "+
+		t.Fatalf("a pool that would not build returned %v; the front door puts an "+
 			"unrecognised error's text on the wire, and that text names the connection, "+
 			"the host, the port and the database", aerr)
 	}
-	if d.Stage != DialStageConnect {
-		t.Errorf("a refused socket audits as stage %q, want %q", d.Stage, DialStageConnect)
+	if c.Stage != ConfigStagePool {
+		t.Errorf("stage = %q, want %q", c.Stage, ConfigStagePool)
+	}
+	if _, isDial := DialFailureOf(aerr); isDial {
+		t.Error("a pool that was never built was reported as a target outage with an " +
+			"acquisition count; no permit was taken and no socket was opened")
+	}
+	// The cause is still reachable for the operator, and only through the
+	// accessor -- an errors.As that could find it would mean a renderer could too.
+	if !errors.Is(c.Cause(), refused) {
+		t.Errorf("the audit lost the cause: %v", c.Cause())
+	}
+}
+
+// A DEADLINE THAT EXPIRES WHILE THE TARGET IS BEING RESOLVED IS THE CALLER
+// GIVING UP, NOT THE TARGET FAILING.
+//
+// The previous classification listed context.Canceled and passed it through,
+// which made cancellation right and deadlines wrong: a request whose deadline
+// ran out inside resolution was reported to operators as a target outage, with
+// an attempt count for an attempt nobody made. Asking the context makes the
+// two the same case, which is what they always were.
+func TestAcquireRequestBackend_AnExpiredDeadlineInResolutionIsNotATargetOutage(t *testing.T) {
+	f := newFixture(t)
+	row, err := f.store.Connections.OnCtx(context.Background()).With(meta.ConnID, f.connID).Get()
+	if err != nil {
+		t.Fatalf("reading the connection row: %v", err)
+	}
+	f.eng.closeTarget(f.connID)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	orig := openSQLite
+	t.Cleanup(func() { openSQLite = orig })
+	opens := 0
+	openSQLite = func(_ context.Context, _, _ string, _ ...sqlite.Option) (dao.DataConn, error) {
+		opens++
+		// The caller gives up WHILE the pool is being built, which is the
+		// window the old code mis-filed. The error returned is a plausible
+		// driver error rather than the context's own, so a passthrough cannot
+		// satisfy this cell by accident.
+		cancel()
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	}
+
+	_, aerr := f.eng.acquireRequestBackend(ctx, &session{}, row)
+	if !errors.Is(aerr, context.Canceled) {
+		t.Fatalf("err = %v, want the caller's own cause", aerr)
+	}
+	if _, isDial := DialFailureOf(aerr); isDial {
+		t.Error("an abandoned request was reported as a target outage")
+	}
+	if _, isConfig := ConfigFailureOf(aerr); isConfig {
+		t.Error("an abandoned request was reported as a misconfigured connection")
+	}
+	if opens != 1 {
+		t.Errorf("the pool was built %d times, want 1: an abandoned request is not retried", opens)
+	}
+}
+
+// AUTODB'S OWN CONFIGURATION FAULTS RESOLVE ONCE, DISCLOSE NOTHING, AND ARE
+// NOT RETRIED.
+//
+// Each of these is a fact about this install rather than about a target, so
+// none may carry a dial failure's attempt count and none may be tried again:
+// a second attempt reaches the same connection row and the same dependency.
+func TestAcquireRequestBackend_ConfigurationFaultsAreNeitherDialledNorRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, f *fixture, row *meta.Connection) *int
+		want  ConfigStage
+	}{
+		{"an engine this build does not implement", func(t *testing.T, f *fixture, row *meta.Connection) *int {
+			row.Engine = "informix"
+			opens := 0
+			return &opens
+		}, ConfigStageEngine},
+		{"a stored DSN the engine's own parser rejects", func(t *testing.T, f *fixture, row *meta.Connection) *int {
+			row.Engine = engine.MySQL
+			enc, err := f.eng.auth.EncryptSecret([]byte("this is not a mysql dsn"), f.connID)
+			if err != nil {
+				t.Fatalf("sealing the DSN: %v", err)
+			}
+			row.DSNEnc = enc
+			opens := 0
+			orig := openMySQL
+			t.Cleanup(func() { openMySQL = orig })
+			openMySQL = func(_ context.Context, _, _ string, _ ...mysql.Option) (dao.DataConn, error) {
+				opens++
+				return nil, errors.New("should never be reached")
+			}
+			return &opens
+		}, ConfigStageDSN},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newFixture(t)
+			row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
+			if err != nil {
+				t.Fatalf("reading the connection row: %v", err)
+			}
+			f.eng.closeTarget(f.connID)
+			opens := tc.setup(t, f, row)
+
+			_, aerr := f.eng.acquireRequestBackend(ctx, &session{}, row)
+			c, ok := ConfigFailureOf(aerr)
+			if !ok {
+				t.Fatalf("err = %v, want a ConfigFailure", aerr)
+			}
+			if c.Stage != tc.want {
+				t.Errorf("stage = %q, want %q", c.Stage, tc.want)
+			}
+			if _, isDial := DialFailureOf(aerr); isDial {
+				t.Error("a configuration fault was reported as a target outage")
+			}
+			if *opens != 0 {
+				t.Errorf("a driver was constructed %d time(s) for a connection this package "+
+					"had already judged unusable", *opens)
+			}
+			// The whole of what leaves this package, checked against the
+			// things it must never carry. The cause holds them; Error() is
+			// what reaches a log that does not distinguish audit from wire.
+			for _, secret := range []string{"informix", "this is not a mysql dsn"} {
+				if strings.Contains(aerr.Error(), secret) {
+					t.Errorf("the error text carries %q, which names this install's own "+
+						"configuration: %q", secret, aerr.Error())
+				}
+			}
+		})
 	}
 }

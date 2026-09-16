@@ -199,13 +199,37 @@ func TestOpenTarget_EveryDriverBranchAppliesThePoolBounds(t *testing.T) {
 				t.Fatalf("reading the connection row: %v", err)
 			}
 			row.Engine = eng
+			// A DSN THIS ENGINE'S OWN PARSER ACCEPTS, because openTarget now
+			// validates before it constructs anything. Reusing one engine's
+			// DSN for all three used to reach the driver seam anyway -- the
+			// seam failed first and validation never ran -- so the fixture
+			// could carry a DSN no mysql parser would take and nothing said
+			// so. The branch cannot be reached at all now without one.
+			enc, eerr := f.eng.auth.EncryptSecret([]byte(dsnFor(eng, t)), f.connID)
+			if eerr != nil {
+				t.Fatalf("sealing the %s DSN: %v", eng, eerr)
+			}
+			row.DSNEnc = enc
 			e.closeTarget(f.connID)
 
 			// The open is expected to fail: the seam refuses on purpose. What
 			// matters is that the branch was REACHED and what it passed.
-			if _, err := e.target(t.Context(), f.connID, row); !errors.Is(err, stop) {
+			//
+			// REACHED THROUGH Cause, because a pool-construction failure is a
+			// ConfigFailure and that type does not unwrap: its whole purpose
+			// is that no errors.As walking a chain can reach a cause carrying
+			// the DSN, the host and the role. The accessor is the supported
+			// way in, and a cell that could reach it with errors.Is would be
+			// proving the disclosure guard absent.
+			_, err = e.target(t.Context(), f.connID, row)
+			cf, isConfig := ConfigFailureOf(err)
+			if !isConfig || !errors.Is(cf.Cause(), stop) {
 				t.Fatalf("the %s branch was not reached (err = %v); this test cannot observe "+
 					"what it passes to the driver", eng, err)
+			}
+			if cf.Stage != ConfigStagePool {
+				t.Errorf("%s: stage = %q, want %q -- constructing a pool is not a physical pin",
+					eng, cf.Stage, ConfigStagePool)
 			}
 
 			if eng == engine.Postgres {
@@ -286,4 +310,21 @@ func TestOpenTarget_TheSQLiteBoundActuallyLimitsTheDriver(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("the second query failed for the wrong reason: %v", err)
 	}
+}
+
+// dsnFor is a DSN the named engine's own parser accepts. The values are
+// unreachable on purpose: every caller here replaces the driver with a seam,
+// and a reachable address would make the cell depend on what is listening.
+func dsnFor(eng engine.Name, t *testing.T) string {
+	t.Helper()
+	switch eng {
+	case engine.Postgres:
+		return "postgres://u:p@127.0.0.1:1/db"
+	case engine.MySQL:
+		return "u:p@tcp(127.0.0.1:1)/db"
+	case engine.SQLite:
+		return "file:" + filepath.Join(t.TempDir(), "branch.db")
+	}
+	t.Fatalf("no DSN for engine %q; a new engine needs one here", eng)
+	return ""
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/yongjohnlee80/autodb/core/engine"
+	"slices"
 
 	"database/sql"
 	"time"
@@ -132,6 +133,31 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 		return nil, err
 	}
 	name := fmt.Sprintf("target-%d", connID)
+	// THE CONFIGURATION IS JUDGED BEFORE ANY DRIVER IS BUILT.
+	//
+	// This used to run after construction, which made a stored DSN this
+	// package refuses look like a driver failure: the pool was built, the
+	// validator then rejected it, and the error reached the acquisition path
+	// where everything that came out of a driver is framed as a dial failure.
+	// An operator read "the target could not be reached" about a target
+	// nothing had tried to reach, with an acquisition count for an
+	// acquisition that never happened. Checked here, an unusable DSN is what
+	// it is — a configuration fact — and it costs no allocation to find out.
+	//
+	// THE ENGINE IS JUDGED BEFORE THE DSN, because "unknown engine" is an
+	// answer ValidateDSN also gives and the two are different repairs. A row
+	// naming an engine this build does not implement is wrong about the
+	// engine; a row whose DSN will not parse is wrong about the DSN. Letting
+	// the DSN validator answer both filed the first as the second, and an
+	// operator sent to check a DSN for a connection whose engine does not
+	// exist is being sent to the wrong place.
+	if !slices.Contains(engine.All(), row.Engine) {
+		return nil, NewConfigFailure(ConfigStageEngine,
+			fmt.Errorf("exec: connection %d has unknown engine %q", connID, row.Engine))
+	}
+	if verr := ValidateDSN(row.Engine, string(dsn)); verr != nil {
+		return nil, NewConfigFailure(ConfigStageDSN, verr)
+	}
 	var conn dao.DataConn
 	switch row.Engine {
 	case engine.Postgres:
@@ -151,19 +177,17 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	case engine.SQLite:
 		conn, err = openSQLite(ctx, name, string(dsn), sqlite.Option(e.sqlPoolLimits(row)))
 	default:
-		return nil, fmt.Errorf("exec: connection %d has unknown engine %q", connID, row.Engine)
+		return nil, NewConfigFailure(ConfigStageEngine,
+			fmt.Errorf("exec: connection %d has unknown engine %q", connID, row.Engine))
 	}
 	if err != nil {
-		return nil, fmt.Errorf("exec: opening connection %q: %w", row.Name, err)
-	}
-	// Re-validate the stored DSN (driver parsers, not substrings) and probe
-	// one session's parsing mode for a fast, clear failure at first use.
-	// This is a BELT check only: the authoritative grammar verification runs
-	// per physical session at execution time (the per-statement verifier on the pinned
-	// TxConn in the engine's run path — raised in review).
-	if verr := ValidateDSN(row.Engine, string(dsn)); verr != nil {
-		_ = conn.Close()
-		return nil, verr
+		// POOL CONSTRUCTION IS NOT A PIN, so its failure is not a dial
+		// failure. Building the pool parses a config and allocates; it opens
+		// no socket and takes no permit. The wrapper keeps the connection's
+		// name for the audit — and the type keeps it off the wire, which the
+		// bare fmt.Errorf this replaced did not.
+		return nil, NewConfigFailure(ConfigStagePool,
+			fmt.Errorf("exec: opening connection %q: %w", row.Name, err))
 	}
 	// A capability test, and postgres deliberately does not answer it.
 	//
@@ -183,7 +207,7 @@ func (e *Engine) openTarget(ctx context.Context, connID int64, row *meta.Connect
 	if v, ok := dialectFor(row.Engine).(SessionGrammarVerifier); ok {
 		if verr := v.VerifySessionGrammar(ctx, conn); verr != nil {
 			_ = conn.Close()
-			return nil, verr
+			return nil, NewConfigFailure(ConfigStageDSN, verr)
 		}
 	}
 	return conn, nil
