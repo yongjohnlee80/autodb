@@ -17,8 +17,9 @@ import (
 
 // THE NO-DEFAULT RULE IS A MECHANISM, NOT A REQUEST.
 //
-// Four surfaces must not have a focused, Enter-able affirmative: the allowlist
-// consent, and the three prompts where one answer discards the operator's work.
+// SIX surfaces must not have a focused, Enter-able affirmative: note deletion
+// and token revocation (irreversible), the allowlist consent, and the three
+// prompts where one answer discards the operator's work.
 // A comment asking the next contributor not to add one is not a guard — this
 // is, and this cell is what says so.
 func TestOpenDialogNoDefault_RefusesADefaultAnswer(t *testing.T) {
@@ -199,5 +200,161 @@ func TestDialog_EscapeRunsNothing(t *testing.T) {
 	h.on(func() { got = ran })
 	if got {
 		t.Error("Escape ran the affirmative action")
+	}
+}
+
+// BARE ENTER MUST NOT FIRE AN IRREVERSIBLE ANSWER.
+//
+// THIS IS THE CELL THAT WAS MISSING, and its absence is why the defect shipped.
+// The first version of openDialogNoDefault refused a ButtonRoleDefault answer,
+// and a cell asserted that the refusal fired. Both worked. But Modal seeds focus
+// on the default button IF THERE IS ONE and otherwise on the FIRST ENABLED
+// BUTTON — so a dialog with no default still had its first answer under the
+// cursor, and Delete listed the irreversible one first. The guard measured the
+// ROLE; the affordance is decided by ORDER; the cell measured the guard.
+//
+// A reviewer pressing Enter on VM43 found it. This is that keypress.
+func TestDialogNoDefault_BareEnterDoesNotRunTheIrreversibleAnswer(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	ran := false
+	h.on(func() {
+		// Declared in the dangerous order on purpose: the affirmative FIRST,
+		// which is exactly how the delete and revoke call sites read.
+		h.m.openDialogNoDefault("delete it?", "There is no undo.",
+			alternative('y', "Delete", func() { ran = true }),
+			decline('n', "Cancel"))
+	})
+	h.waitUntil("the dialog is open", func() bool { return h.m.modalOpen() })
+
+	h.key(tuicore.KeyEnter)
+	h.settle()
+
+	var fired bool
+	h.on(func() { fired = ran })
+	if fired {
+		t.Fatal("bare Enter on an untouched dialog ran the irreversible answer; " +
+			"Modal focuses the first enabled button when nothing is default")
+	}
+}
+
+// POSITIVE CONTROL 1: the mnemonic still runs it. Without this, the cell above
+// would pass against a dialog whose affirmative is simply broken.
+func TestDialogNoDefault_TheMnemonicStillRunsTheAnswer(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	ran := false
+	h.on(func() {
+		h.m.openDialogNoDefault("delete it?", "There is no undo.",
+			alternative('y', "Delete", func() { ran = true }),
+			decline('n', "Cancel"))
+	})
+	h.waitUntil("the dialog is open", func() bool { return h.m.modalOpen() })
+
+	h.key('y')
+	h.waitUntil("the dialog closed", func() bool { return !h.m.modalOpen() })
+
+	var fired bool
+	h.on(func() { fired = ran })
+	if !fired {
+		t.Error("the mnemonic did not run the answer; the affirmative is unreachable")
+	}
+}
+
+// POSITIVE CONTROL 2: Enter DOES fire the affirmative on a dialog that declares
+// a default. So the first cell is about the no-default rule rather than about
+// Enter never activating anything.
+func TestDialog_WithADefaultBareEnterDoesRunIt(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	ran := false
+	h.on(func() {
+		h.m.openDialog("proceed?", "",
+			affirm('y', "Yes", func() { ran = true }),
+			decline('n', "No"))
+	})
+	h.waitUntil("the dialog is open", func() bool { return h.m.modalOpen() })
+
+	h.key(tuicore.KeyEnter)
+	h.waitUntil("the dialog closed", func() bool { return !h.m.modalOpen() })
+
+	var fired bool
+	h.on(func() { fired = ran })
+	if !fired {
+		t.Error("Enter did not activate the default answer")
+	}
+}
+
+// A no-default dialog with no declining answer is refused at construction,
+// because Modal would then focus whatever came first.
+func TestDialogNoDefault_RequiresADecliningAnswer(t *testing.T) {
+	m := &Model{}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("a dialog with no declining answer was accepted")
+		}
+		if msg, _ := r.(string); !strings.Contains(msg, "declining") {
+			t.Errorf("panic %q does not say what is missing", msg)
+		}
+	}()
+	m.openDialogNoDefault("q?", "", alternative('y', "Do it", func() {}))
+}
+
+// `q` PARITY, which the conversion took away silently.
+//
+// These surfaces were leaderMenu confirmations and honoured `q` alongside
+// Escape. A Modal traps focus and swallows it, so becoming a dialog removed the
+// key while dismissKey's comment went on promising it — nothing failed, and a
+// reviewer pressing the key on VM43 is what found it. golib v0.5.25 added
+// WithModalDismissKeys; these cells are what stop it going missing again.
+func TestDialog_QDismissesAConfirmation(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	ran := false
+	h.on(func() {
+		h.m.openDialog("proceed?", "This is the question.",
+			affirm('y', "Yes", func() { ran = true }),
+			decline('n', "No"))
+	})
+	h.waitUntil("the dialog is open", func() bool { return h.m.modalOpen() })
+
+	h.key('q')
+	h.waitUntil("`q` closed the confirmation", func() bool { return !h.m.modalOpen() })
+
+	var fired bool
+	h.on(func() { fired = ran })
+	if fired {
+		t.Error("`q` ran the affirmative; it must dismiss, not choose")
+	}
+}
+
+// AND ESCAPE STILL DOES TOO, so the cell above is about `q` being restored
+// rather than about dismissal in general.
+func TestDialog_EscapeDismissesAConfirmation(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() {
+		h.m.openDialog("proceed?", "", affirm('y', "Yes", func() {}), decline('n', "No"))
+	})
+	h.waitUntil("the dialog is open", func() bool { return h.m.modalOpen() })
+
+	h.key(tuicore.KeyEscape)
+	h.waitUntil("Escape closed the confirmation", func() bool { return !h.m.modalOpen() })
+}
+
+// A FORM DOES NOT TAKE `q`, and this is the exclusion dismissKey calls
+// permanent. `q` is a typed character in a CIDR, a note name, a passphrase or a
+// PAT label — a form that closed on it could not accept one.
+func TestForm_QIsTypedNotDismissed(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() {
+		h.m.openForm("name it", []formField{field("name")},
+			func(formValues) (bool, string) { return true, "" })
+	})
+	h.waitUntil("the form is open", func() bool { return h.m.modalOpen() })
+
+	h.key('q')
+	h.settle()
+
+	var open bool
+	h.on(func() { open = h.m.modalOpen() })
+	if !open {
+		t.Fatal("`q` closed a FORM; it is a character there, and the exclusion is permanent")
 	}
 }

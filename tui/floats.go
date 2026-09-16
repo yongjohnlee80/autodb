@@ -102,11 +102,16 @@ func (m *Model) modalOpen() bool {
 // character: dismissing there would make it impossible to type `q` into a CIDR,
 // a note name, a password, or a PAT label. That exclusion is permanent.
 //
-// The single-key surfaces — leaderMenu and the confirmations built on it — DO
-// honour it as of the quit-confirmation change, but only as a fallback after
-// their own bindings: see leaderMenu.HandleEvent. `q` there means "close this"
-// exactly when the menu has nothing else to say about it, which is why the SPC
-// menu's `q` (focus query editor) is unaffected.
+// The single-key surfaces — leaderMenu and the menus built on it — DO honour it,
+// but only as a fallback after their own bindings: see leaderMenu.HandleEvent.
+// `q` there means "close this" exactly when the menu has nothing else to say
+// about it, which is why the SPC menu's `q` (focus query editor) is unaffected.
+//
+// THE CONFIRMATIONS NO LONGER COME THROUGH HERE. They are widget.Modal now, and
+// they declare `q` to golib directly via WithModalDismissKeys — see
+// openDialogOpts. The rule is the same one this comment has always described;
+// only the mechanism moved. The forms declare nothing, which is this comment's
+// permanent exclusion, unchanged.
 //
 // golib's Editor leaves an unbound `q` to bubble in Normal mode, so even the
 // read-only vim viewer can use it.
@@ -504,6 +509,10 @@ func (m *Model) openFormOpts(title string, fields []formField,
 	// the inverse of Float's, which defaults to no scrim — so leaving it out
 	// would fade the backdrop behind every dialog by doing nothing, which is
 	// the opposite of what this product asked for.
+	// NO DISMISS KEY. `q` is a typed character in a form — a CIDR, a note name,
+	// a passphrase, a PAT label — and a form that closed on it could not accept
+	// one. dismissKey records this exclusion as permanent, and it survives the
+	// conversion to a dialog unchanged. Escape still closes.
 	md = widget.NewModal(fm,
 		widget.WithModalTitle(title),
 		widget.WithButtons(fm.ok, cancel),
