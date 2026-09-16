@@ -1203,6 +1203,24 @@ func classifyGateError(err error) (code, rule, hint string, fatal bool) {
 		return sqlStateProtocolViolation, "frontdoor/wire-face-lost",
 			"the session's connection to the target failed; reconnect", true
 
+	case errors.Is(err, exec.ErrConnectionUnusable):
+		// THIS CONNECTION CANNOT SERVE THE REQUEST AS IT IS CONFIGURED, AND
+		// THAT IS NOT A TARGET OUTAGE.
+		//
+		// The session survives for the same reason a dial failure lets it
+		// survive: nothing of the caller's was judged and no backend was ever
+		// theirs. What differs is who can act. Retrying reaches the same
+		// misconfigured row, so the hint does not invite one; it names the
+		// operator instead, without saying what is wrong, because what is
+		// wrong is the engine, the DSN or a dependency — all of them ours.
+		//
+		// MATCHED BEFORE THE DIAL-FAILED ARM. The two sentinels are distinct
+		// and neither error carries both, so the order cannot change an
+		// answer today; it is fixed anyway, because an ordering that is
+		// correct only because of a fact elsewhere is an ordering that breaks
+		// when that fact changes.
+		return ConnectionUnusableSQLState, ConnectionUnusableRule, ConnectionUnusableHint, false
+
 	case errors.Is(err, exec.ErrDialFailed):
 		// THE BACKEND FOR THIS REQUEST COULD NOT BE OPENED, AND THE SESSION
 		// SURVIVES IT.
@@ -1342,6 +1360,10 @@ func (l *Listener) emitGateEvent(err error, rule, peer string) {
 		l.emitDialFailed(d, peer)
 		return
 	}
+	if c, ok := exec.ConfigFailureOf(err); ok {
+		l.emitConnectionUnusable(c, peer)
+		return
+	}
 	if isStagePanic(err) {
 		l.onEvent(Event{
 			Kind:   "fd.internal_error",
@@ -1399,6 +1421,32 @@ func (l *Listener) emitDialFailed(d *exec.DialFailure, peer string) {
 		Detail: occ.Detail})
 }
 
+// emitConnectionUnusable records a request whose connection cannot serve it as
+// configured.
+//
+// THE IDENTITY IS RESOLVED THROUGH THE REGISTRY BEFORE THE AUDIT ROW EXISTS,
+// under the producer that owns request acquisition, exactly as the dial
+// failure beside it. The registry is what makes the declared identity and the
+// emitted one the same string; a row written straight to the audit would be
+// one nothing had declared, and nothing could notice.
+func (l *Listener) emitConnectionUnusable(c *exec.ConfigFailure, peer string) {
+	occ, err := l.registry().Occur(ProducerRequestAcquire, outcomeID(OutcomeConnectionUnusable),
+		outcome.WithDetail(c.AuditDetail()))
+	if err != nil {
+		l.onLog("frontdoor: the connection-unusable identity does not resolve: " + err.Error())
+		return
+	}
+	if occ.Charges() {
+		// Unreachable while the identity is registered NotApplicable, and
+		// asserted rather than assumed: charging a peer for this install's own
+		// misconfiguration is the failure the charge classes exist to stop.
+		l.onLog("frontdoor: refusing to charge a peer for a connection this install cannot serve")
+		return
+	}
+	l.onEvent(Event{Kind: EventConnectionUnusable, Reason: string(occ.Reason), Peer: peer,
+		Detail: occ.Detail})
+}
+
 // stagePanicDetail names the stage that broke, and nothing else.
 //
 // Deliberately not the panic value: an event detail is republished more widely
@@ -1432,6 +1480,12 @@ func gateMessage(err error) string {
 	}
 	if errors.Is(err, exec.ErrWireFaceLost) {
 		return "the session's connection to the target failed"
+	}
+	if errors.Is(err, exec.ErrConnectionUnusable) {
+		// THE FIXED LITERAL, for the reason below: a configuration failure's
+		// own text names the connection, the engine and whatever the DSN
+		// parser objected to.
+		return ConnectionUnusableMessage
 	}
 	if errors.Is(err, exec.ErrDialFailed) {
 		// THE FIXED LITERAL, NEVER THE ERROR'S OWN TEXT. The default return at

@@ -796,6 +796,7 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 		// the same reason the held-object rows are -- it happens past every
 		// accept-time budget, where no per-source counter is in reach.
 		{"request-acquisition", "frontdoor/dial-failed", outcome.Operational, outcome.NotApplicable},
+		{"request-acquisition", "frontdoor/connection-unusable", outcome.Operational, outcome.NotApplicable},
 		{"serve", "peer-closed", outcome.Control, outcome.None},
 		{"serve", "session-error", outcome.Operational, outcome.None},
 		{"startup", "direct-tls-unsupported", outcome.Refusal, outcome.Protocol},

@@ -135,6 +135,10 @@ var gateMatrixWalkExempt = map[string]string{
 	// docs/front-door/dial-failed-client-verification.md.
 	"ErrDialFailed": "a request's backend connection could not be opened; raised at backend " +
 		"acquisition before any statement is judged, not by an admission stage — the gate never sees it",
+	"ErrConnectionUnusable": "this connection cannot serve requests as configured; raised at target " +
+		"resolution and at the pin boundary, before any statement is judged — the gate never sees it. " +
+		"Its client shape is a fixed F0000 owned by the front door, and its audit identity is " +
+		"frontdoor/connection-unusable, which the front door's own bidirectional producer walk guards",
 }
 
 // sentinelDecl is one errors.New declaration found in the package.

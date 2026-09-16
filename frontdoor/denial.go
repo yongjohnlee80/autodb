@@ -327,3 +327,42 @@ const (
 	// an operator greps for.
 	DialFailedRule = OutcomeDialFailed
 )
+
+// A CONNECTION AUTODB CANNOT SERVE AS CONFIGURED GETS ITS OWN FIXED SHAPE.
+//
+// It is not a dial failure and must not borrow that code: an operator reading
+// a client's complaint should land on a different row than a target outage,
+// because the repair is a connection row or a dependency rather than a
+// network. It is not the internal-fault shape either, which is FATAL and ends
+// the connection -- this session is intact and every other connection it can
+// reach still works.
+//
+// F0000 config_file_error is PostgreSQL's own class for "this server's
+// configuration is wrong", raised at ERROR severity, which is exactly the
+// claim being made and exactly the severity that leaves the session where it
+// was. Class F0 is not in any client's reconnect-or-discard convention.
+//
+// THAT LAST SENTENCE IS AN ARGUMENT, AND THE MEASUREMENT IS IN
+// connection_unusable_pg_test.go: real pgx against a real target reads the
+// code and the severity out of its own error type, is not closed by it, and
+// then runs real work on the same connection. The JDBC half has NOT been run
+// for this shape -- the dial-failure shape has a written manual procedure and
+// this one does not yet -- so F0000 rests on one client of the two, and saying
+// so here is the point of saying it at all.
+const (
+	ConnectionUnusableSQLState = "F0000"
+
+	// ConnectionUnusableMessage is the WHOLE of what the wire learns. No
+	// stage, no engine, no DSN text, no connection name: two connections
+	// misconfigured two different ways are byte-identical to the client.
+	ConnectionUnusableMessage = "this connection is not configured to serve requests"
+
+	// ConnectionUnusableHint points at the only party who can act, without
+	// telling the client anything about what is wrong.
+	ConnectionUnusableHint = "the session is still usable; ask an operator to check this connection's configuration"
+
+	// ConnectionUnusableRule is the stable rule id that travels in DETAIL,
+	// defined FROM the registry identity rather than beside it so the two
+	// cannot drift apart unnoticed.
+	ConnectionUnusableRule = OutcomeConnectionUnusable
+)

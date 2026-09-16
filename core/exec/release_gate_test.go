@@ -123,21 +123,26 @@ func (c *destroyingConn) Destroy() { c.destroyed++ }
 // scripted connection behind it, how many times it was destroyed outright, and
 // which of the two teardowns this shape is REQUIRED to get.
 //
-// wantDestroy is declared by the shape rather than read back from what happened,
-// and that is the whole point of it. A cell that branched on the observed count
-// would pass a gate that never asked any driver to destroy anything: the capable
-// shape would simply be scored against the fallback's rules.
+// gateBackend is the one shape a backend can have by the time it reaches the
+// release gate.
+//
+// THERE USED TO BE TWO, AND THE SECOND IS GONE WITH THE FALLBACK IT SCORED. A
+// driver without explicit destruction cannot be pinned at all now:
+// pinTargetBackend asserts the capability while the member is still unused and
+// refuses the request otherwise, so a gate cell standing up an incapable driver
+// would be proving what happens in a state this package no longer reaches. The
+// deliberately incapable pin lives in exactly one place, the boundary cell that
+// proves it is turned away.
 type gateBackend struct {
-	pc          golibpg.PinnedConn
-	c           *gateConn
-	destroyed   func() int
-	wantDestroy bool
+	pc        golibpg.PinnedConn
+	c         *gateConn
+	destroyed func() int
 }
 
-// gateBackends is BOTH driver shapes. Every cell that asserts what happens to an
-// unproved backend runs against both, because the property is that neither shape
-// ever pools one — not that the capable shape does the right thing and the other
-// is somebody else's problem.
+// gateBackends is the shape every cell runs against. It is still a list, and
+// deliberately so: a second shape may exist again (a driver that destroys
+// asynchronously, say), and the cells should not have to be rewritten from a
+// single value back into a matrix to admit one.
 func gateBackends() []struct {
 	name string
 	make func() gateBackend
@@ -149,11 +154,7 @@ func gateBackends() []struct {
 		{"the driver can destroy a backend on demand", func() gateBackend {
 			c := &destroyingConn{gateConn: *newGateConn()}
 			return gateBackend{pc: c, c: &c.gateConn,
-				destroyed: func() int { return c.destroyed }, wantDestroy: true}
-		}},
-		{"the driver predates explicit destruction", func() gateBackend {
-			c := newGateConn()
-			return gateBackend{pc: c, c: c, destroyed: func() int { return 0 }}
+				destroyed: func() int { return c.destroyed }}
 		}},
 	}
 }
@@ -295,36 +296,26 @@ func TestReleaseGate_NoUnprovedBackendIsEverPooled(t *testing.T) {
 					t.Errorf("the connection was handed back to the pool %d time(s) although "+
 						"nothing was proved about it", c.released)
 				}
-				// The backend is destroyed EXACTLY ONE WAY, and which way depends
-				// only on what the driver can do. A capable driver is told to
-				// destroy it and is told nothing else; an older one gets the
-				// weaker arrangement and no destruction call it cannot answer.
-				if b.wantDestroy {
-					if destroyed := b.destroyed(); destroyed != 1 {
-						t.Errorf("destroyed %d time(s), want exactly 1: this driver can be "+
-							"told to destroy the backend and must be, rather than being "+
-							"steered into its own reuse test", destroyed)
-					}
-					if c.marked != 0 {
-						t.Errorf("the lease was marked unprovable %d time(s) as well as "+
-							"destroyed; the mark exists only for a driver that cannot be "+
-							"asked, and leaving it here keeps this product depending on "+
-							"the driver's private reuse test", c.marked)
-					}
-					if c.discarded != 0 {
-						t.Errorf("an ordinary discard ran %d time(s) after the backend was "+
-							"destroyed outright", c.discarded)
-					}
-				} else {
-					if c.discarded != 1 {
-						t.Errorf("discarded %d time(s); an unproved backend's socket must be "+
-							"closed exactly once", c.discarded)
-					}
-					if c.marked != 1 {
-						t.Errorf("the lease was marked unprovable %d time(s), want 1. Without "+
-							"that mark this driver sees a healthy wire, decides the member is "+
-							"reusable, and puts the dirty backend back in the pool", c.marked)
-					}
+				// THE BACKEND IS DESTROYED, AND DESTRUCTION IS THE ONLY THING
+				// THAT HAPPENS TO IT. Asserting the absence of the other two
+				// teardowns is the half that matters: a gate that destroyed
+				// AND marked the lease unprovable would pass a count-only
+				// check while still resting on the driver's private reuse
+				// test, which is the coupling this replaced.
+				if destroyed := b.destroyed(); destroyed != 1 {
+					t.Errorf("destroyed %d time(s), want exactly 1: an unproved backend is "+
+						"destroyed outright, not steered into the driver's own reuse test",
+						destroyed)
+				}
+				if c.marked != 0 {
+					t.Errorf("the lease was marked unprovable %d time(s) as well as "+
+						"destroyed; that mark is the discarded fallback and its return "+
+						"would put this product back on the driver's private reuse test",
+						c.marked)
+				}
+				if c.discarded != 0 {
+					t.Errorf("an ordinary discard ran %d time(s) after the backend was "+
+						"destroyed outright", c.discarded)
 				}
 				if len(c.ran) != tc.wantRan {
 					t.Errorf("%d statement(s) reached the wire, expected %d: %v",
@@ -335,45 +326,63 @@ func TestReleaseGate_NoUnprovedBackendIsEverPooled(t *testing.T) {
 	}
 }
 
-// The fallback is a WEAKER guarantee and has to announce itself. An operator
-// looking at a leaked setting needs to know which of the two arrangements was in
-// force on that target; silently doing the lesser thing would make the two
-// indistinguishable from outside.
-func TestReleaseGate_ADriverThatCannotDestroyOnDemandSaysSoInTheLog(t *testing.T) {
-	var lines []string
-	e := &Engine{onLog: func(s string) { lines = append(lines, s) }}
-	c := newGateConn()
-	c.targetErr["UNLISTEN *"] = &pgconn.PgError{Message: "permission denied"}
+// AN INCAPABLE DRIVER IS TURNED AWAY AT THE PIN, NOT COPED WITH AT TEARDOWN.
+//
+// This is the cell that replaced the fallback. The old arrangement discovered
+// at destruction time that this build could not destroy anything, by which
+// point a session had already run a client's work on the backend in question;
+// all it could do was say so in a log nobody reads until the leak is found.
+// The capability is a precondition of pinning now, so the only thing an
+// incapable driver can cost is a request that never starts.
+//
+// FOUR THINGS ARE ASSERTED AND THE LAST TWO ARE THE POINT. That the request
+// fails, and that it fails as a CONFIGURATION failure rather than a target
+// outage — nothing was dialled and no permit was taken, so reporting it as one
+// would put an install's own misconfiguration in the numbers an operator
+// watches for target health. Then: that the member went back to the pool
+// unused rather than being destroyed, because it is clean and destroying a
+// clean member for our own configuration's sake wastes a connection. And that
+// the session never saw it, because a handle stored and then rejected is a
+// handle some later path can still find.
+func TestPinTargetBackend_ADriverWithoutExplicitDestructionIsRefusedBeforeUse(t *testing.T) {
+	c := newGateConn() // deliberately incapable: no Destroy method
+	origPin := pinSessionConn
+	t.Cleanup(func() { pinSessionConn = origPin })
+	pinSessionConn = func(context.Context, dao.DataConn) (golibpg.PinnedConn, error) {
+		return c, nil
+	}
 
-	v := e.releaseBackend(context.Background(), gateSession(), c, nil)
-	if v.pooled {
-		t.Fatal("a backend whose reset the target refused was pooled")
-	}
-	var announced bool
-	for _, line := range lines {
-		if strings.Contains(line, "cannot destroy a pinned backend on demand") {
-			announced = true
-		}
-	}
-	if !announced {
-		t.Fatalf("the weaker teardown ran without saying so; the log held %v", lines)
-	}
+	e := &Engine{}
+	s := gateSession()
+	pc, err := e.pinTargetBackend(context.Background(), s, nil)
 
-	// And a driver that CAN destroy says nothing of the kind, so the line means
-	// what it says rather than appearing on every release.
-	lines = nil
-	d := &destroyingConn{gateConn: *newGateConn()}
-	d.targetErr["UNLISTEN *"] = &pgconn.PgError{Message: "permission denied"}
-	if v := e.releaseBackend(context.Background(), gateSession(), d, nil); v.pooled {
-		t.Fatal("a backend whose reset the target refused was pooled")
+	if err == nil {
+		t.Fatal("a driver that cannot destroy a pinned backend was accepted; every " +
+			"failed reset on it would fall back to the driver's own reuse test")
 	}
-	for _, line := range lines {
-		if strings.Contains(line, "cannot destroy a pinned backend on demand") {
-			t.Fatalf("a capable driver was reported as incapable: %q", line)
-		}
+	if pc != nil {
+		t.Error("a pin was returned alongside the error")
 	}
-	if d.destroyed != 1 {
-		t.Fatalf("destroyed %d time(s), want 1", d.destroyed)
+	cf, ok := ConfigFailureOf(err)
+	if !ok {
+		t.Fatalf("err = %v, want a ConfigFailure: nothing was dialled here", err)
+	}
+	if cf.Stage != ConfigStageCapability {
+		t.Errorf("stage = %q, want %q", cf.Stage, ConfigStageCapability)
+	}
+	if _, isDial := DialFailureOf(err); isDial {
+		t.Error("this install's own missing capability was reported as a target outage")
+	}
+	if len(c.ran) != 0 {
+		t.Errorf("%d statement(s) ran on a backend that should never have been used: %v",
+			len(c.ran), c.ran)
+	}
+	if c.discarded != 1 {
+		t.Errorf("discarded %d time(s), want 1: the member is clean and unused, so the "+
+			"pool may have it straight back", c.discarded)
+	}
+	if got := s.pinnedConn(); got != nil {
+		t.Error("the rejected pin was stored on the session, where a later path can find it")
 	}
 }
 

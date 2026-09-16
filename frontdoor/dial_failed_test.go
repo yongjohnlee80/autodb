@@ -487,17 +487,34 @@ func TestRequestAcquisition_TheProducerAndItsRaiseSitesAgreeBothWays(t *testing.
 	// counted per renderer so a surface that stopped recording is visible.
 	observed := map[outcome.ReasonID]int{}
 	renderers := productionRenderers()
+	// BOTH of this producer's failures are driven through both renderers. The
+	// walk is over the producer, not over one identity: an acquisition failure
+	// that acquired nothing and one that could not reach a target are declared
+	// together and must be reachable together, or the half nobody drives here
+	// is the half that rots.
+	raises := []struct {
+		name string
+		err  error
+		kind string
+	}{
+		{"a target that could not be reached", exec.NewDialFailure(dialCause()), EventDialFailed},
+		{"a connection this install cannot serve",
+			exec.NewConfigFailure(exec.ConfigStagePool, errors.New("the pool would not build")),
+			EventConnectionUnusable},
+	}
 	for _, r := range renderers {
-		h := newRenderHarness(t)
-		if !r.render(h, exec.NewDialFailure(dialCause())) {
-			t.Errorf("%s: the renderer ended the session for a dial failure; the whole "+
-				"shape exists to leave the session usable", r.name)
-		}
-		for _, e := range h.events {
-			if e.Kind != EventDialFailed {
-				continue
+		for _, raise := range raises {
+			h := newRenderHarness(t)
+			if !r.render(h, raise.err) {
+				t.Errorf("%s: the renderer ended the session for %s; both shapes exist to "+
+					"leave the session usable", r.name, raise.name)
 			}
-			observed[outcome.ReasonID(e.Reason)]++
+			for _, e := range h.events {
+				if e.Kind != raise.kind {
+					continue
+				}
+				observed[outcome.ReasonID(e.Reason)]++
+			}
 		}
 	}
 	if len(observed) == 0 {
