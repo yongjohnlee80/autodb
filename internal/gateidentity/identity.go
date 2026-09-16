@@ -129,12 +129,24 @@ func Digest(dir string) (string, []Entry, error) {
 	if err != nil {
 		return "", nil, err
 	}
+	return DigestOf(entries), entries, nil
+}
+
+// DigestOf folds a manifest's entries into its fingerprint.
+//
+// EXPORTED SO A RECORDED MANIFEST CAN BE CHECKED AGAINST ITSELF. A manifest
+// carries a digest in its header and the entries it was computed from, and
+// nothing forced those two to agree: an edited body under an untouched header
+// would have been read as authoritative, so the one artifact that exists to
+// pin a tree could have been quietly rewritten. The header is now re-derived
+// from the body before it is believed.
+func DigestOf(entries []Entry) string {
 	h := sha256.New()
 	for _, e := range entries {
 		_, _ = io.WriteString(h, e.line())
 		_, _ = io.WriteString(h, "\n")
 	}
-	return hex.EncodeToString(h.Sum(nil)), entries, nil
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Verify reports whether a tree matches an expected digest, and says WHAT
@@ -252,6 +264,23 @@ func ParseManifest(r io.Reader) ([]Entry, string, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return nil, "", err
+	}
+	if len(entries) == 0 {
+		// AN EMPTY MANIFEST CANNOT PIN ANYTHING, and read as "no differences"
+		// it would make the gate pass on any tree at all.
+		return nil, "", errors.New("gateidentity: the manifest lists no files, so it pins nothing")
+	}
+	if digest == "" {
+		return nil, "", errors.New("gateidentity: the manifest carries no digest header, " +
+			"so there is nothing to check a tree against")
+	}
+	if got := DigestOf(entries); got != digest {
+		// THE HEADER IS NOT TAKEN ON TRUST. A body edited under an untouched
+		// header would otherwise be believed, and the artifact that exists to
+		// pin a tree would be the thing that was tampered with.
+		return nil, "", fmt.Errorf("gateidentity: the manifest's header digest %s does not "+
+			"match its own entries (%s); it has been edited since it was written",
+			digest, got)
 	}
 	return entries, digest, nil
 }

@@ -316,14 +316,40 @@ func TestScheduler_TheServerWaitExpiresWithItsOwnIdentity(t *testing.T) {
 		armed.Add(1)
 		return time.NewTimer(20 * time.Millisecond)
 	}
-	start := time.Now()
-
 	holder := schedSession("holder", 1, 7)
 	if err := r.admitWithLeaseOrWait(context.Background(), holder, 7, 0); err != nil {
 		t.Fatal(err)
 	}
-	waiter := schedSession("times-out", 2, 7)
-	err := r.admitWithLeaseOrWait(context.Background(), waiter, 7, 0)
+
+	// THE WAIT RUNS CONCURRENTLY SO A BYPASSED SEAM IS DIAGNOSED IN A SECOND
+	// RATHER THAN IN NINETY.
+	//
+	// Checking the seam counter AFTER the wait returns is too late to be
+	// useful: the assertion is correct, but it can only speak once the real
+	// ninety-second bound has already been paid, so the cell reports the cost
+	// instead of avoiding it. A mutation run pays that thirteen times over,
+	// and a bound that grows past the test timeout stops looking like a
+	// bypassed seam and starts looking like a hang. Watching from outside, the
+	// cell can say what is wrong while it is still wrong.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	answered := make(chan error, 1)
+	go func() {
+		werr := r.admitWithLeaseOrWait(ctx, schedSession("times-out", 2, 7), 7, 0)
+		answered <- werr
+	}()
+
+	var err error
+	select {
+	case err = <-answered:
+	case <-time.After(2 * time.Second):
+		if armed.Load() == 0 {
+			t.Fatal("the wait was never armed through the injected timer, so this cell is " +
+				"sitting out a real ninety-second bound; the seam is bypassed")
+		}
+		t.Fatalf("the wait was armed through the seam %d time(s) but had not expired after "+
+			"two seconds, though the injected timer fires in twenty milliseconds", armed.Load())
+	}
 	if !errors.Is(err, ErrQueueTimeout) {
 		t.Fatalf("got %v, want the queue timeout", err)
 	}
@@ -336,10 +362,6 @@ func TestScheduler_TheServerWaitExpiresWithItsOwnIdentity(t *testing.T) {
 	if armed.Load() == 0 {
 		t.Error("the wait was never armed through the injected timer, so this cell is " +
 			"measuring a real ninety-second bound and only appears to be fast")
-	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("the wait took %s: the server bound is not being driven by the seam, and a "+
-			"gate that costs this much per cell is one people stop running", elapsed)
 	}
 }
 

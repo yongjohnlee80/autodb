@@ -88,6 +88,14 @@ func main() {
 		}
 	}
 	if expected == "" {
+		// FAIL RATHER THAN PASS SILENTLY. Reaching here with -against set and
+		// no digest to compare would mean the check ran, compared nothing, and
+		// exited 0 -- a gate reporting success for work it did not do, which is
+		// the exact failure this package was written to remove.
+		if *against != "" {
+			fmt.Fprintln(os.Stderr, "identity: the manifest supplied no digest to compare against")
+			os.Exit(2)
+		}
 		return
 	}
 	if err := gateidentity.Verify(*dir, expected, want); err != nil {
