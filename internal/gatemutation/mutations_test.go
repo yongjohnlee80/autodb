@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -49,7 +50,20 @@ func TestMutations_EveryAnchorMatchesExactlyOnce(t *testing.T) {
 func TestMutations_EveryNamedTestExists(t *testing.T) {
 	names := declaredTests(t)
 	for _, m := range All() {
-		if !names[m.Test] {
+		// IN THE PACKAGE THE CONTROL NAMES, not merely somewhere in the tree.
+		// A cell that exists in a different package is one the runner's
+		// `-run` will never select, so the control would apply its break and
+		// score a verdict against a test that never executed.
+		if pkgs := names[m.Test]; len(pkgs) > 0 && !pkgs[m.Package] {
+			where := make([]string, 0, len(pkgs))
+			for p := range pkgs {
+				where = append(where, p)
+			}
+			sort.Strings(where)
+			t.Errorf("control %q names %s in package %s, but that test is declared in %v",
+				m.Name, m.Test, m.Package, where)
+		}
+		if len(names[m.Test]) == 0 {
 			t.Errorf("control %q names %s, which no test file declares. Nothing can catch the "+
 				"break it applies, and what goes unproven is: %s", m.Name, m.Test, m.Guarantee)
 		}
@@ -74,6 +88,17 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 		if !strings.HasPrefix(m.Test, "Test") {
 			t.Errorf("control %q names %q, which is not a test", m.Name, m.Test)
 		}
+		// THE PACKAGE IS PART OF THE ADDRESS. A runner handed a bare test name
+		// must guess which package to run, and a wrong guess runs nothing --
+		// which is indistinguishable, in a ledger, from a control that ran and
+		// failed to discriminate.
+		if !strings.HasPrefix(m.Package, "./") || !strings.HasSuffix(m.Package, "/") {
+			t.Errorf("control %q names package %q; want a go-test path like ./core/exec/",
+				m.Name, m.Package)
+		}
+		if _, err := os.Stat(filepath.Join(repoRoot, strings.TrimPrefix(m.Package, "./"))); err != nil {
+			t.Errorf("control %q names package %q, which does not exist: %v", m.Name, m.Package, err)
+		}
 		if len(m.Guarantee) < 30 {
 			t.Errorf("control %q does not say what goes unproven if it survives; a green "+
 				"verdict would be unreadable", m.Name)
@@ -82,17 +107,24 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 			t.Errorf("control %q names a path outside the repository: %s", m.Name, m.File)
 		}
 	}
-	if len(All()) < 10 {
-		t.Errorf("only %d controls: the set has shrunk, which is how coverage is lost quietly",
-			len(All()))
+	// THE COUNT IS EXACT, NOT A FLOOR. A floor of ten let thirteen controls
+	// become ten without a word, which is how coverage is lost quietly --
+	// three guarantees would stop being proven and every run would still look
+	// complete. Adding a control means raising this number deliberately;
+	// removing one means saying so out loud, here, in a diff somebody reads.
+	const declared = 13
+	if n := len(All()); n != declared {
+		t.Errorf("there are %d controls and this cell pins %d. If a control was added, raise "+
+			"the number. If one was removed, say which guarantee stopped being proven and "+
+			"why that is acceptable", n, declared)
 	}
 }
 
-// declaredTests collects every Test function name in the repository.
-func declaredTests(t *testing.T) map[string]bool {
+// declaredTests maps every Test function name to the packages declaring it.
+func declaredTests(t *testing.T) map[string]map[string]bool {
 	t.Helper()
 	re := regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(`)
-	names := map[string]bool{}
+	names := map[string]map[string]bool{}
 	err := filepath.Walk(repoRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -110,8 +142,12 @@ func declaredTests(t *testing.T) map[string]bool {
 		if rerr != nil {
 			return rerr
 		}
+		pkg := "./" + filepath.ToSlash(filepath.Dir(strings.TrimPrefix(path, repoRoot+"/"))) + "/"
 		for _, m := range re.FindAllStringSubmatch(string(body), -1) {
-			names[m[1]] = true
+			if names[m[1]] == nil {
+				names[m[1]] = map[string]bool{}
+			}
+			names[m[1]][pkg] = true
 		}
 		return nil
 	})

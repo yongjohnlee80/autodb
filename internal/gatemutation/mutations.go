@@ -32,6 +32,11 @@ type Mutation struct {
 	Anchor string
 	// Replacement is what Anchor becomes.
 	Replacement string
+	// Package is the package the cell lives in, as `go test` takes it. A bare
+	// test name is ambiguous across packages, so a runner given only the name
+	// has to guess -- and a guess that picks the wrong package runs nothing,
+	// which reads exactly like a control that failed to discriminate.
+	Package string
 	// Test is the cell that must FAIL once the mutation is applied. It must
 	// exist; a control naming an absent test proves nothing and has happened.
 	Test string
@@ -48,7 +53,7 @@ type Mutation struct {
 func All() []Mutation {
 	return []Mutation{
 		{
-			Name: "serve-line-at-enqueue", File: "core/exec/scheduler.go",
+			Name: "serve-line-at-enqueue", Package: "./core/exec/", File: "core/exec/scheduler.go",
 			Anchor:      "\tr.serveLine()\n\tif w.state == waitResolved {",
 			Replacement: "\tif w.state == waitResolved {",
 			Test:        "TestScheduler_AnEligibleNewcomerIsServedAtEnqueueTime",
@@ -56,7 +61,7 @@ func All() []Mutation {
 				"rather than waiting for an unrelated release that may never come",
 		},
 		{
-			Name: "transaction-bound-is-a-deadline", File: "core/exec/session.go",
+			Name: "transaction-bound-is-a-deadline", Package: "./core/exec/", File: "core/exec/session.go",
 			Anchor:      "\t\tif now.Before(until) {",
 			Replacement: "\t\tif true || now.Before(until) {",
 			Test:        "TestScheduler_AnExpiredTransactionIsNotAReasonToRefuse",
@@ -64,7 +69,7 @@ func All() []Mutation {
 				"so a request is not told nothing is coming moments before it arrives",
 		},
 		{
-			Name: "cancellation-undoes-its-admission", File: "core/exec/scheduler.go",
+			Name: "cancellation-undoes-its-admission", Package: "./core/exec/", File: "core/exec/scheduler.go",
 			Anchor:      "\tif err := <-w.done; err == nil {\n\t\tr.remove(w.s)\n\t}",
 			Replacement: "\t_ = w",
 			Test:        "TestScheduler_ACancellationThatLosesToAGrantUndoesTheAdmission",
@@ -72,7 +77,7 @@ func All() []Mutation {
 				"back, rather than leaking a session nothing is coming to close",
 		},
 		{
-			Name: "line-skips-the-ineligible", File: "core/exec/scheduler.go",
+			Name: "line-skips-the-ineligible", Package: "./core/exec/", File: "core/exec/scheduler.go",
 			Anchor:      "\t\t\t\tw.blockedBy = err\n\t\t\t\tcontinue",
 			Replacement: "\t\t\t\tw.blockedBy = err\n\t\t\t\tbreak",
 			Test:        "TestScheduler_AFullTargetDoesNotBlockTheRestOfTheLine",
@@ -80,7 +85,7 @@ func All() []Mutation {
 				"other target",
 		},
 		{
-			Name: "timeout-unwraps-alone", File: "core/exec/scheduler.go",
+			Name: "timeout-unwraps-alone", Package: "./core/exec/", File: "core/exec/scheduler.go",
 			Anchor:      "func (e *QueueTimeoutError) Unwrap() error { return ErrQueueTimeout }",
 			Replacement: "func (e *QueueTimeoutError) Unwrap() []error { return []error{ErrQueueTimeout, e.blockedBy} }",
 			Test:        "TestAdmissionWait_TheBlockingCapIsDiagnosisAndNotAnIdentity",
@@ -89,7 +94,7 @@ func All() []Mutation {
 				"unreachable in production while still registered",
 		},
 		{
-			Name: "server-wait-uses-its-seam", File: "core/exec/scheduler.go",
+			Name: "server-wait-uses-its-seam", Package: "./core/exec/", File: "core/exec/scheduler.go",
 			Anchor:      "\t\ttimer := r.serverTimer(queueWait)",
 			Replacement: "\t\ttimer := time.NewTimer(queueWait)",
 			Test:        "TestScheduler_TheServerWaitExpiresWithItsOwnIdentity",
@@ -97,7 +102,7 @@ func All() []Mutation {
 				"which a gate silently becomes a multi-minute one and eventually reads as a hang",
 		},
 		{
-			Name: "the-caller-owns-an-exact-tie", File: "core/exec/scheduler.go",
+			Name: "the-caller-owns-an-exact-tie", Package: "./core/exec/", File: "core/exec/scheduler.go",
 			Anchor:      "\tif d, ok := ctx.Deadline(); !ok || d.After(serverDeadline) {",
 			Replacement: "\tif d, ok := ctx.Deadline(); !ok || !d.Before(serverDeadline) {",
 			Test:        "TestScheduler_OneBoundOwnsTheWaitDeterministically",
@@ -105,7 +110,7 @@ func All() []Mutation {
 				"channel the runtime happens to see first",
 		},
 		{
-			Name: "release-serves-the-line", File: "core/exec/session.go",
+			Name: "release-serves-the-line", Package: "./core/exec/", File: "core/exec/session.go",
 			Anchor:      "\t\tr.serveLine()\n\t}\n\tr.mu.Unlock()",
 			Replacement: "\t}\n\tr.mu.Unlock()",
 			Test:        "TestScheduler_AReleaseNeverLeavesAnAdmittableWaiterWaiting",
@@ -113,7 +118,7 @@ func All() []Mutation {
 				"still queued, which is what makes joining the line safe rather than a disadvantage",
 		},
 		{
-			Name: "expired-wait-names-its-blocker", File: "core/exec/wire_session.go",
+			Name: "expired-wait-names-its-blocker", Package: "./core/exec/", File: "core/exec/wire_session.go",
 			// Follows the code: the classifier now returns a reason and its
 			// detail rather than a finished denial, because stamping a refusal
 			// as disclosable belongs at the site that verified the credential.
@@ -124,7 +129,7 @@ func All() []Mutation {
 				"merely that somebody waited",
 		},
 		{
-			Name: "the-wait-arm-comes-first", File: "core/exec/wire_session.go",
+			Name: "the-wait-arm-comes-first", Package: "./core/exec/", File: "core/exec/wire_session.go",
 			Anchor:      "\tcase errors.Is(rerr, ErrQueueTimeout):",
 			Replacement: "\tcase errors.Is(rerr, ErrLeaseCapExceeded):\n\t\treturn denyAfterAuthorization(DenyLeaseCap)\n\tcase errors.Is(rerr, ErrQueueTimeout):",
 			Test:        "TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn",
@@ -132,7 +137,7 @@ func All() []Mutation {
 				"independently of what the error happens to unwrap to",
 		},
 		{
-			Name: "coordinates-come-from-the-code", File: "internal/gatematrix/coords.go",
+			Name: "coordinates-come-from-the-code", Package: "./internal/gatematrix/", File: "internal/gatematrix/coords.go",
 			Anchor:      "\tlines := strings.Split(doc, \"\\n\")",
 			Replacement: "\tif true {\n\t\treturn doc\n\t}\n\tlines := strings.Split(doc, \"\\n\")",
 			Test:        "TestCoordinates_AMovedUseIsCorrected",
@@ -140,7 +145,7 @@ func All() []Mutation {
 				"it was handed",
 		},
 		{
-			Name: "the-matrix-is-current", File: "docs/admission-gate-matrix.md",
+			Name: "the-matrix-is-current", Package: "./internal/gatematrix/", File: "docs/admission-gate-matrix.md",
 			// A UNIQUE coordinate, not a shared prefix. The first version used
 			// "decl session.go:", which matches four rows — so the control
 			// would have rewritten three rows it never meant to touch. Caught
@@ -153,7 +158,7 @@ func All() []Mutation {
 				"than discovered later by a downstream walk",
 		},
 		{
-			Name: "identity-excludes-git", File: "internal/gateidentity/identity.go",
+			Name: "identity-excludes-git", Package: "./internal/gateidentity/", File: "internal/gateidentity/identity.go",
 			Anchor:      "\t\".git\": true, \"node_modules\": true, \".cache\": true,",
 			Replacement: "\t\"node_modules\": true, \".cache\": true,",
 			Test:        "TestIdentity_AWorktreeGitFileIsNotPartOfTheFingerprint",

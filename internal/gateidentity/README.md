@@ -23,8 +23,12 @@ go run ./internal/gateidentity/cmd/identity -dir . \
   -head "$(git rev-parse HEAD)" \
   -base "$(git merge-base HEAD origin/main)" \
   -note "<task id>" \
-  -manifest local.manifest
+  -manifest ../local.manifest
 ```
+
+Write the manifest **outside** the directory being fingerprinted. A manifest
+written into `-dir .` becomes part of the tree it describes, so the digest it
+records is one the tree no longer has the moment the file lands.
 
 Copy `local.manifest` to the machine that will run the gates, then there:
 
