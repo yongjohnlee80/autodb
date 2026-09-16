@@ -9,7 +9,9 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/lib/pq v1.12.3
-	github.com/yongjohnlee80/golib v0.5.22
+	// v0.5.23 carries postgres.Destroyer, which the release gate requires of
+	// every pin. main pins v0.5.22, which predates it.
+	github.com/yongjohnlee80/golib v0.5.23
 	golang.org/x/crypto v0.55.0
 	golang.org/x/term v0.45.0
 )
@@ -32,12 +34,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.52.0 // indirect
 )
-
-// TEMPORARY, MUST NOT MERGE AS IT STANDS. The pinned connection's explicit
-// physical destruction (postgres.Destroyer) is committed on golib's
-// pinned-conn-destroy branch and is in no tagged release yet, so this branch is
-// built against a sibling checkout. Replace this directive with a real version
-// — the first golib tag that carries Destroyer — before merging. The path is
-// relative and points at golib's pinned-conn-destroy worktree; it resolves nowhere
-// else, which is the point: CI fails loudly rather than building the wrong golib.
-replace github.com/yongjohnlee80/golib => ../../golib/pinned-conn-destroy
