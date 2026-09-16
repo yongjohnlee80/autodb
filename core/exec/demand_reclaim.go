@@ -243,7 +243,7 @@ func (e *Engine) RegisterDemandWake(id SessionID, knock func()) {
 // THE RETURN VALUE IS NOT DECORATIVE. A caller that ignored it could record a
 // reclamation that another path had already performed, which is how one ending
 // becomes two entries in the trail and two releases of one lease.
-func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint64) bool {
+func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint64, delivered bool) bool {
 	s, ok := e.sessions.byIDOnly(id)
 	if !ok || s.gen != gen {
 		// A generation that no longer matches is a notice about a session that
@@ -251,6 +251,21 @@ func (e *Engine) FinishDemandReclaim(ctx context.Context, id SessionID, gen uint
 		// session came after it.
 		return false
 	}
+	// THE ONE RECORD OF THIS ENDING IS THE CLOSE'S OWN, AND IT IS COMPLETED
+	// HERE RATHER THAN DUPLICATED.
+	//
+	// The teardown already writes a session_closed line carrying this
+	// session's close reason, which is what a reclamation IS. The front door
+	// used to write a second line of its own beside it, so one ending produced
+	// two entries -- anyone counting reclamations counted them twice, and the
+	// two could disagree about what happened. The two facts only the owner
+	// knows, how long the session had been silent and whether its client
+	// actually received the frame, are folded into that single reason instead.
+	// The idle time is the justification for ending somebody's session and the
+	// delivery flag is whether they were told; both belong in the record beside
+	// the decision, not in a record of their own.
+	e.completeDemandReason(s, delivered)
+
 	// NOT PRE-CLAIMED. The teardown slot is claimed by quiesce, inside
 	// finishClosing, and claiming it here first made this path wait on itself:
 	// the claim creates the channel that the join then waits on, and only the
@@ -275,4 +290,21 @@ func (r *sessionRegistry) byIDOnly(id SessionID) (*session, bool) {
 	defer r.mu.Unlock()
 	s, ok := r.byID[id]
 	return s, ok
+}
+
+// completeDemandReason folds what only the owner knew into the one record this
+// ending will leave.
+func (e *Engine) completeDemandReason(s *session, delivered bool) {
+	s.mu.Lock()
+	s.closeWhy = ReasonDemandReclaimed + demandOutcomeSuffix(s.lastUsed, e.now(), delivered)
+	s.mu.Unlock()
+}
+
+// demandOutcomeSuffix completes the close reason with what only the owner knew.
+func demandOutcomeSuffix(lastUsed, now time.Time, delivered bool) string {
+	told := "the client was told"
+	if !delivered {
+		told = "the client could not be told: the connection was already gone"
+	}
+	return " (idle " + now.Sub(lastUsed).Round(time.Second).String() + "; " + told + ")"
 }
