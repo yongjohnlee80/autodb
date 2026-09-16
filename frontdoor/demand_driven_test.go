@@ -46,6 +46,39 @@ type demandEngine struct {
 	loopDone   chan struct{}
 	loopReason *string
 	loopErr    *error
+
+	// decisions records every offer decision the loop made, so a cell can
+	// require both that the interesting reader state OCCURRED and that no
+	// offer was published in it. Guarded by mu.
+	decisions []offerDecision
+	// clientConn is the raw client end, for a cell that must write bytes
+	// pgproto3 will not send -- half a header, for instance.
+	clientConn net.Conn
+	// preload is framed into the reader BEFORE the loop starts, reproducing
+	// what the auth exchange's read-ahead leaves behind when a client
+	// pipelines its first query with its last authentication message. That
+	// read is not yet bounded by an admitted frame, so it can frame a header
+	// the session loop has not asked for -- the one way a header is already
+	// pending when the loop makes its first offer decision.
+	preload []byte
+}
+
+// offerDecision is one pass of the loop's read: the reader state the decision
+// was made on, and what was decided.
+type offerDecision struct {
+	framed, mid, offered bool
+}
+
+func (d *demandEngine) noteOfferDecision(framed, mid, offered bool) {
+	d.mu.Lock()
+	d.decisions = append(d.decisions, offerDecision{framed, mid, offered})
+	d.mu.Unlock()
+}
+
+func (d *demandEngine) offerDecisions() []offerDecision {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]offerDecision(nil), d.decisions...)
 }
 
 func newDemandEngine() *demandEngine {
@@ -151,6 +184,8 @@ func drivenSession(t *testing.T, d *demandEngine) (*pgproto3.Frontend, *demandEn
 		Authn: &fakeAuth{result: goodSession()}, Queries: d, AuthFailuresPerIP: unthrottled,
 	})
 	l.hookDemandManifestBroken = func() bool { return d.breakManifest }
+	l.hookOfferDecision = d.noteOfferDecision
+	d.clientConn = client
 
 	fr := newFrameReader(server)
 	be := pgproto3.NewBackend(fr, server)
@@ -158,6 +193,14 @@ func drivenSession(t *testing.T, d *demandEngine) (*pgproto3.Frontend, *demandEn
 		closeReason string
 		loopErr     error
 	)
+	if len(d.preload) > 0 {
+		go func() { _, _ = client.Write(d.preload) }()
+		if !fr.waitHeader() {
+			t.Fatal("the preloaded frame was never framed, so the cell cannot reach the " +
+				"state it is about")
+		}
+	}
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
