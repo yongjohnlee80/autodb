@@ -111,7 +111,13 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 		// statements or portals is precisely the holder whose backend cannot be
 		// handed to anyone else, which is why the answer for them is a framed
 		// ending rather than a silent handover.
-		eligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0
+		//   - no knock registered -> there is nothing to make the owner's read
+		//     return, so the notice would sit unread and the lease would be
+		//     stranded by a session that is closing and serves nobody. Checked
+		//     here AS WELL AS in OfferReceive, because the two guard different
+		//     mistakes: that one stops a live offer existing without a knock,
+		//     and this one stops a reservation committing against one anyway.
+		eligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil
 		// The reservation is taken INSIDE this same hold. It is the ordinary
 		// close claim, so it also settles ownership against the reaper, an
 		// operator's delete and the client's own disconnect.
@@ -123,8 +129,9 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 			// session cannot be reserved without its owner being told -- which
 			// is what stopped a lost race from ending somebody's session
 			// silently.
+			s.demandIdle = now.Sub(s.lastUsed)
 			s.pendingNotice = &DemandNotice{
-				Gen: s.gen, ID: s.id, IdleFor: now.Sub(s.lastUsed),
+				Gen: s.gen, ID: s.id, IdleFor: s.demandIdle,
 			}
 			knock = s.wake
 		}
@@ -181,6 +188,14 @@ func (e *Engine) OfferReceive(id SessionID) uint64 {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.wake == nil {
+		// NO OFFER WITHOUT A KNOCK. An offer says "I am blocked reading and can
+		// be told"; without a registered knock nothing can make that read
+		// return, so the offer would be a promise this session cannot keep --
+		// and the cost of believing it is a lease held forever by a session
+		// that has been closed and can serve nobody.
+		return 0
+	}
 	s.tokenSeq++
 	s.recvToken = s.tokenSeq
 	return s.recvToken
@@ -296,15 +311,17 @@ func (r *sessionRegistry) byIDOnly(id SessionID) (*session, bool) {
 // ending will leave.
 func (e *Engine) completeDemandReason(s *session, delivered bool) {
 	s.mu.Lock()
-	s.closeWhy = ReasonDemandReclaimed + demandOutcomeSuffix(s.lastUsed, e.now(), delivered)
+	// The idle time is the one recorded AT SELECTION, not measured again now.
+	// See session.demandIdle.
+	s.closeWhy = ReasonDemandReclaimed + demandOutcomeSuffix(s.demandIdle, delivered)
 	s.mu.Unlock()
 }
 
 // demandOutcomeSuffix completes the close reason with what only the owner knew.
-func demandOutcomeSuffix(lastUsed, now time.Time, delivered bool) string {
+func demandOutcomeSuffix(idle time.Duration, delivered bool) string {
 	told := "the client was told"
 	if !delivered {
 		told = "the client could not be told: the connection was already gone"
 	}
-	return " (idle " + now.Sub(lastUsed).Round(time.Second).String() + "; " + told + ")"
+	return " (idle " + idle.Round(time.Second).String() + "; " + told + ")"
 }
