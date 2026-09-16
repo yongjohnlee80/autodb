@@ -1066,6 +1066,32 @@ func (m *Model) movePane(dir rune) {
 }
 
 // zoomToggle maximizes the focused pane along the split chain (req 8).
+// zoomPaneTo focuses a pane and zooms it, which is what a menu leaf labelled
+// "Zoom ▸ Query editor" promises.
+//
+// zoomToggle acts on whatever has FOCUS, so a menu row naming a pane has to
+// move focus there first. Any existing zoom is released before the new one,
+// because the toggle would otherwise read the request as "unzoom" and leave the
+// operator on the pane they asked to enlarge, at its normal size.
+func (m *Model) zoomPaneTo(c tui.Component) {
+	if m.zoomed {
+		m.zoomToggle()
+	}
+	m.focusPane(c)
+	m.zoomToggle()
+}
+
+// zoomOut releases the zoom, and does nothing when nothing is zoomed.
+//
+// Its menu row is DISABLED rather than hidden in that state: the panes exist
+// and none is enlarged, so the command's moment has not come rather than never
+// coming, and hiding it would make the View menu change shape between openings.
+func (m *Model) zoomOut() {
+	if m.zoomed {
+		m.zoomToggle()
+	}
+}
+
 func (m *Model) zoomToggle() {
 	if m.zoomed {
 		m.outer.Zoom(widget.PaneNone)

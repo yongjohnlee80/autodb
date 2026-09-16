@@ -132,35 +132,70 @@ func TestAdminLeavesAreAbsentForAnEditorRatherThanDimmed(t *testing.T) {
 	}
 }
 
-// TestADisabledRowIsVisibleAndSaysWhy.
+// TestZoomOutIsTheRealDisabledRow.
 //
-// The three-state contract at the bar. A transiently blocked command is shown,
-// not Enabled, and carries a non-empty reason — a dimmed row with no
-// explanation is a worse answer than no row.
-func TestADisabledRowIsVisibleAndSaysWhy(t *testing.T) {
+// The three-state contract with a SHIPPED command rather than an injected
+// probe. Nothing is zoomed at rest, so Zoom out is visible, dimmed, and says
+// why — hiding it would make the View menu change shape between openings, and
+// an operator who has never zoomed would never learn the command exists.
+func TestZoomOutIsTheRealDisabledRow(t *testing.T) {
 	m := leaderModelFor(t, leaderState{role: meta.RoleAdmin, frontend: FrontendTerminal})
-	// Inject a disabled command rather than depending on one existing: the
-	// contract is what matters, and wiring a real one is a later increment.
-	cmds := append(m.catalog.Commands(), Command{
-		ID: "probe.disabled", Run: func(*Model) {},
-		Enabled: func(*Model) (bool, string) { return false, "nothing is zoomed" },
-		Menu:    []MenuProjection{{Parent: nodeView, Label: "Probe", Order: 99}},
-	})
-	cat, err := NewCatalog(cmds, menuNodes())
-	if err != nil {
-		t.Fatalf("catalog: %v", err)
-	}
-	m.catalog = cat
 
-	row, ok := find(m.menuModel(), "probe.disabled")
+	row, ok := find(m.menuModel(), widget.ItemID(cmdZoomOut))
 	if !ok {
-		t.Fatal("a disabled command was hidden; it must be shown and dimmed")
+		t.Fatal("Zoom out is absent; a command whose moment has not come is " +
+			"dimmed, not hidden")
 	}
 	if row.Enabled {
-		t.Error("the row is Enabled; a disabled command must not be activatable")
+		t.Error("Zoom out is enabled with nothing zoomed")
 	}
-	if !strings.Contains(row.Accel, "nothing is zoomed") {
-		t.Errorf("the row does not carry its reason (Accel=%q)", row.Accel)
+	if !strings.Contains(row.Accel, "zoomed") {
+		t.Errorf("Zoom out does not say why it is dimmed (Accel=%q)", row.Accel)
+	}
+	if m.catalog.offeredID(m, cmdZoomOut) {
+		t.Error("a dimmed row reports itself offered; activating it would run")
+	}
+
+	// THE CONTROL: once something IS zoomed the same row is enabled and carries
+	// no reason, so the dimming is about the state and not about the row being
+	// permanently inert.
+	m.zoomed = true
+	row, _ = find(m.menuModel(), widget.ItemID(cmdZoomOut))
+	if !row.Enabled {
+		t.Error("Zoom out is still dimmed with a pane zoomed")
+	}
+	if row.Accel != "" {
+		t.Errorf("an enabled row still carries a reason: %q", row.Accel)
+	}
+	if !m.catalog.offeredID(m, cmdZoomOut) {
+		t.Error("Zoom out is enabled on screen but not offered for activation")
+	}
+}
+
+// TestTheZoomLeavesZoomRatherThanJustFocus.
+//
+// They were wired to the pane-FOCUS commands, so "Zoom ▸ Query editor" moved
+// focus and left the pane its normal size — a label that lied. Each leaf is now
+// its own command.
+func TestTheZoomLeavesZoomRatherThanJustFocus(t *testing.T) {
+	m := leaderModelFor(t, leaderState{role: meta.RoleAdmin, frontend: FrontendTerminal})
+	for _, id := range []CommandID{cmdZoomEditor, cmdZoomResults, cmdZoomExplorer} {
+		row, ok := find(m.menuModel(), widget.ItemID(id))
+		if !ok {
+			t.Errorf("%q is missing from the Zoom submenu", id)
+			continue
+		}
+		act, _ := row.Action.(commandAction)
+		if act.id != id {
+			t.Errorf("the %q row carries %q", id, act.id)
+		}
+	}
+	// And the focus commands are NOT there: focusing a pane is a leader thing,
+	// and putting it under Zoom is what made the labels wrong.
+	for _, id := range []CommandID{cmdFocusEditor, cmdFocusResults, cmdFocusExplorer} {
+		if _, ok := find(m.menuModel(), widget.ItemID(id)); ok {
+			t.Errorf("%q is on the bar under a Zoom label", id)
+		}
 	}
 }
 

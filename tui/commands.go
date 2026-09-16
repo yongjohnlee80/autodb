@@ -28,6 +28,10 @@ const (
 	cmdRunSelection  CommandID = "query.run_selection"
 	cmdToggleJSON    CommandID = "results.toggle_json"
 	cmdZoomToggle    CommandID = "view.zoom_toggle"
+	cmdZoomEditor    CommandID = "view.zoom_editor"
+	cmdZoomResults   CommandID = "view.zoom_results"
+	cmdZoomExplorer  CommandID = "view.zoom_explorer"
+	cmdZoomOut       CommandID = "view.zoom_out"
 	cmdFocusExplorer CommandID = "focus.explorer"
 	cmdFocusEditor   CommandID = "focus.editor"
 	cmdFocusResults  CommandID = "focus.results"
@@ -89,35 +93,69 @@ func commandCatalog() []Command {
 		{
 			ID: cmdRunSelection, Run: func(m *Model) { m.runSelection() },
 			Leader: leader('R', "run selection only", 20),
+			Menu: []MenuProjection{
+				{Parent: nodeRun, Label: "Execute selection", Hotkey: 'S', Order: 20},
+			},
 		},
 		{
 			ID: cmdToggleJSON, Run: func(m *Model) { m.results.ToggleJSON() },
 			Leader: leader('j', "toggle results table/JSON", 30),
+			Menu: []MenuProjection{
+				{Parent: nodeView, Label: "Results as table/JSON", Hotkey: 'R', Order: 30},
+			},
 		},
 		{
 			ID: cmdZoomToggle, Run: func(m *Model) { m.zoomToggle() },
 			Leader: leader('z', "zoom focused pane (also Ctrl-w z)", 40),
 		},
+		// THE ZOOM LEAVES ACTUALLY ZOOM. They were wired to the pane-FOCUS
+		// commands, which was a label that lied: "Zoom ▸ Query editor" moved
+		// focus and left the pane its normal size. Each one now focuses its
+		// pane and enlarges it.
 		{
-			ID: cmdFocusExplorer, Run: func(m *Model) { m.focusPane(m.explorer) },
-			Leader: leader('e', "focus explorer", 50),
-			Menu: []MenuProjection{
-				{Parent: nodeZoom, Label: "Explorer", Hotkey: 'E', Order: 30},
-			},
-		},
-		{
-			ID: cmdFocusEditor, Run: func(m *Model) { m.focusPane(m.editor) },
-			Leader: leader('q', "focus query editor", 60),
+			ID: cmdZoomEditor, Run: func(m *Model) { m.zoomPaneTo(m.editor) },
 			Menu: []MenuProjection{
 				{Parent: nodeZoom, Label: "Query editor", Hotkey: 'Q', Order: 10},
 			},
 		},
 		{
-			ID: cmdFocusResults, Run: func(m *Model) { m.focusPane(m.results) },
-			Leader: leader('t', "focus results", 70),
+			ID: cmdZoomResults, Run: func(m *Model) { m.zoomPaneTo(m.results) },
 			Menu: []MenuProjection{
 				{Parent: nodeZoom, Label: "Results", Hotkey: 'R', Order: 20},
 			},
+		},
+		{
+			ID: cmdZoomExplorer, Run: func(m *Model) { m.zoomPaneTo(m.explorer) },
+			Menu: []MenuProjection{
+				{Parent: nodeZoom, Label: "Explorer", Hotkey: 'E', Order: 30},
+			},
+		},
+		{
+			// THE FIRST REAL THREE-STATE ROW. Visible and dimmed with a reason
+			// while nothing is zoomed, rather than hidden: the panes are there
+			// and none is enlarged, so its moment has not come.
+			ID: cmdZoomOut, Run: func(m *Model) { m.zoomOut() },
+			Enabled: func(m *Model) (bool, string) {
+				if m.zoomed {
+					return true, ""
+				}
+				return false, "no pane is zoomed"
+			},
+			Menu: []MenuProjection{
+				{Parent: nodeZoom, Label: "Zoom out", Hotkey: 'O', Order: 40},
+			},
+		},
+		{
+			ID: cmdFocusExplorer, Run: func(m *Model) { m.focusPane(m.explorer) },
+			Leader: leader('e', "focus explorer", 50),
+		},
+		{
+			ID: cmdFocusEditor, Run: func(m *Model) { m.focusPane(m.editor) },
+			Leader: leader('q', "focus query editor", 60),
+		},
+		{
+			ID: cmdFocusResults, Run: func(m *Model) { m.focusPane(m.results) },
+			Leader: leader('t', "focus results", 70),
 		},
 		{
 			ID: cmdNewNote, Run: func(m *Model) { m.newNote() },
@@ -197,6 +235,9 @@ func commandCatalog() []Command {
 		{
 			ID: cmdRefresh, Run: func(m *Model) { m.explorer.Reload() },
 			Leader: leader('g', "refresh explorer", 180),
+			Menu: []MenuProjection{
+				{Parent: nodeView, Label: "Refresh explorer", Hotkey: 'F', Order: 40},
+			},
 		},
 		{
 			ID: cmdAllowlist, Audience: AudienceAdmin,
@@ -274,6 +315,9 @@ func commandCatalog() []Command {
 			Leader: &LeaderProjection{Key: 'X', Order: 240,
 				Label: "restart the server",
 				Help:  "picks up a rebuilt binary"},
+			Menu: []MenuProjection{
+				{Parent: nodeSystem, Label: "Restart server", Hotkey: 'R', Order: 45},
+			},
 		},
 		{
 			ID: cmdAbout, Run: func(m *Model) { m.openAbout() },
@@ -285,6 +329,9 @@ func commandCatalog() []Command {
 		{
 			ID: cmdHelp, Run: func(m *Model) { m.openHelp() },
 			Leader: leader('?', "help", 260),
+			Menu: []MenuProjection{
+				{Parent: nodeSystem, Label: "Help", Hotkey: 'H', Order: 55},
+			},
 		},
 		{
 			ID: cmdQuit, Run: func(m *Model) { m.confirmQuit() },
@@ -327,14 +374,6 @@ func commandCatalog() []Command {
 			// Open note has no command today: the explorer owns opening.
 			ID: "note.open", Lifecycle: Planned,
 			Menu: []MenuProjection{{Parent: nodeFile, Label: "Open note", Hotkey: 'O', Order: 20}},
-		},
-		{
-			// Zoom out is a distinct command from the zoom toggle and wants the
-			// visible-but-dimmed state rather than a hide: the panes exist and
-			// none is zoomed, so its moment has not come rather than never
-			// coming.
-			ID: "view.zoom_out", Lifecycle: Planned,
-			Menu: []MenuProjection{{Parent: nodeZoom, Label: "Zoom out", Hotkey: 'O', Order: 40}},
 		},
 	}
 }
