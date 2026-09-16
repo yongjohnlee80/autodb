@@ -58,17 +58,53 @@ func queuedAt(r *sessionRegistry) chan uint64 {
 // scheduler produces a named failure instead of a hung suite.
 func mustAdmit(t *testing.T, r *sessionRegistry, s *session, conn int64) {
 	t.Helper()
+	// CANCELLED BEFORE THE CELL LEAVES, so a diagnostic failure does not also
+	// strand a waiter. Seventeen cells use this; a helper that abandoned its
+	// goroutine on every timeout would leave the line populated by sessions no
+	// cell can account for, and the next cell's depth assertion would be
+	// answering for this one's wreckage.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	done := make(chan error, 1)
-	go func() { done <- r.admitWithLeaseOrWait(context.Background(), s, conn, 0) }()
+	go func() { done <- r.admitWithLeaseOrWait(ctx, s, conn, 0) }()
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("seeding a holder on free target %d (%s): %v", conn, s.id, err)
 		}
+		return
 	case <-time.After(5 * time.Second):
-		t.Fatalf("seeding a holder on free target %d (%s) never completed; a request that "+
-			"can be granted the moment it arrives is instead waiting, so the queue is not "+
-			"dispatching at arrival at all", conn, s.id)
+	}
+
+	cancel()
+	cleanedUp := "and the cancelled request returned"
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		// Said rather than assumed: a request that ignores cancellation is a
+		// second defect, and the cell that trips over it should name it.
+		cleanedUp = "and the cancelled request did NOT return, so it ignores cancellation too"
+	}
+	t.Fatalf("seeding a holder on free target %d (%s) never completed %s; a request that "+
+		"can be granted the moment it arrives is instead waiting, so the queue is not "+
+		"dispatching at arrival at all", conn, s.id, cleanedUp)
+}
+
+// seedHolder fills a target WITHOUT going through the arrival path.
+//
+// SETUP MUST NOT TRAVERSE THE SEAM UNDER TEST. The cell below is the one that
+// proves a request for a free target is served the moment it arrives, so a
+// change that breaks arrival dispatch must reach that cell's own assertion and
+// fail on its own words. Seeding the full target through the queue meant the
+// change broke the setup first: the cell died before it could say anything,
+// and the mutation control scored INVALID -- no failure to read, and the
+// guarantee left unproven. Reserving the lease directly keeps the mutated seam
+// out of the preconditions and leaves it in exactly one place: the assertion.
+func seedHolder(t *testing.T, r *sessionRegistry, s *session, conn int64) {
+	t.Helper()
+	if err := r.admitWithLease(s, conn, 0); err != nil {
+		t.Fatalf("reserving target %d for %s directly: %v", conn, s.id, err)
 	}
 }
 
@@ -579,7 +615,7 @@ func TestScheduler_AnEligibleNewcomerIsServedAtEnqueueTime(t *testing.T) {
 	seen := queuedAt(r)
 
 	full := schedSession("holds-the-full-target", 1, 1)
-	mustAdmit(t, r, full, 1)
+	seedHolder(t, r, full, 1)
 
 	stuck := schedSession("waits-on-the-full-target", 2, 1)
 	stuckDone := make(chan error, 1)
