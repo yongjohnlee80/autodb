@@ -333,5 +333,36 @@ func All() []Mutation {
 			Guarantee: "that one manifest asserts exactly one identity, so appending a line " +
 				"cannot change what a record claims",
 		},
+		{
+			// THESE TWO CONTROLS ATTACK CELLS, NOT PRODUCTION CODE, because
+			// for these two the cell IS the thing that was wrong. Both were
+			// green on a developer's worktree and red in the sanctioned
+			// container, which is the only place their verdict counts. A fix
+			// to a cell needs the same evidence as a fix to anything else:
+			// put the defect back, and require the cell to notice.
+			Name: "source-tree-refusal-borrows-its-precondition", Package: "./internal/gatemutation/",
+			File:   "internal/gatemutation/runner_meta_test.go",
+			Anchor: "\tout, code := runRunner(t, bin, repo, \"-root\", dir, \"-only\", \"identity-excludes-git\")",
+			Replacement: "\t_ = dir\n" +
+				"\tout, code := runRunner(t, bin, repo, \"-root\", repo, \"-only\", \"identity-excludes-git\")",
+			Test:  "TestRunner_ASourceTreeIsRefused",
+			Fails: "want 2",
+			Guarantee: "that the source-tree refusal builds the .git it needs instead of " +
+				"borrowing one from wherever it happens to run, so it proves the runner's " +
+				"refusal rather than the shape of the checkout",
+		},
+		{
+			Name: "containment-probe-trusts-signal-zero", Package: "./internal/gatemutation/cmd/mutate/",
+			File:        "internal/gatemutation/cmd/mutate/containment_test.go",
+			Anchor:      "\treturn len(fields) > 0 && fields[0] == \"Z\", nil",
+			Replacement: "\t_ = fields\n\treturn false, nil",
+			Test:        "TestRunBounded_KillsTheWholeProcessTree",
+			// ONLY DISCRIMINATES WHERE PID 1 DOES NOT REAP -- which is the
+			// sanctioned container, and is the whole reason the defect existed.
+			Timeout: 90 * time.Second,
+			Fails:   "survived the containment timeout",
+			Guarantee: "that a killed descendant nobody has reaped yet is read as dead, so " +
+				"the cell reports on containment rather than on whether pid 1 calls wait",
+		},
 	}
 }
