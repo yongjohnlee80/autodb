@@ -66,8 +66,11 @@ func (c *terminalClaim) claim() (uint64, bool) {
 // valid reports whether a presented generation still matches.
 func (c *terminalClaim) valid(gen uint64) bool { return c.taken.Load() && c.gen.Load() == gen }
 
-// demandNotice is what the scheduler hands the session's owner.
-type demandNotice struct {
+// DemandNotice is what the scheduler hands the session's owner. Exported
+// because the owner is the front door, in another package: this package decides
+// WHO gives up a lease, and the front door's session loop is the only thing
+// allowed to tell that client about it.
+type DemandNotice struct {
 	// Gen is the generation the claim was taken at; the owner presents it back
 	// so a claim cannot outlive the session it was taken against.
 	Gen uint64
@@ -80,7 +83,7 @@ type demandNotice struct {
 // demandVictim is one selected idle holder and the claim taken on it.
 type demandVictim struct {
 	s      *session
-	notice demandNotice
+	notice DemandNotice
 }
 
 // claimDemandVictim selects an idle lease holder on this target and takes the
@@ -147,7 +150,7 @@ func (r *sessionRegistry) claimDemandVictim(leaseConn int64, now time.Time) (dem
 		// serve the line exactly as this one would have.
 		return demandVictim{}, false
 	}
-	return demandVictim{s: best, notice: demandNotice{Gen: gen, IdleFor: bestIdle}}, true
+	return demandVictim{s: best, notice: DemandNotice{Gen: gen, IdleFor: bestIdle}}, true
 }
 
 // demandReclaim asks an idle holder on this target to give up its lease, and
@@ -188,14 +191,14 @@ func (e *Engine) demandReclaim(leaseConn int64) bool {
 
 // registerWake publishes the callback the front door's session loop listens on.
 // Called once, by the owner, at session open.
-func (s *session) registerWake(f func(demandNotice)) {
+func (s *session) registerWake(f func(DemandNotice)) {
 	s.mu.Lock()
 	s.wake = f
 	s.mu.Unlock()
 }
 
 // takeWake reads the owner's wake callback.
-func (s *session) takeWake() func(demandNotice) {
+func (s *session) takeWake() func(DemandNotice) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.wake
@@ -235,4 +238,23 @@ func (r *sessionRegistry) byIDOnly(id SessionID) (*session, bool) {
 	defer r.mu.Unlock()
 	s, ok := r.byID[id]
 	return s, ok
+}
+
+// RegisterDemandWake publishes the callback the session's owner listens on.
+//
+// CALLED ONCE, BY THE OWNER, AT SESSION OPEN. The callback is how this package
+// reaches the one goroutine permitted to write to that client's socket; there
+// is deliberately no other route, because a second writer would interleave
+// bytes into a protocol stream mid-frame.
+//
+// A session with no registered wake is simply never selected to give up its
+// lease: demand reclamation that cannot tell the client what happened does not
+// happen at all. That is the same fail-closed shape as the rest of this path --
+// ending somebody's session silently is worse than not reclaiming.
+func (e *Engine) RegisterDemandWake(id SessionID, f func(DemandNotice)) {
+	s, ok := e.sessions.byIDOnly(id)
+	if !ok {
+		return
+	}
+	s.registerWake(f)
 }

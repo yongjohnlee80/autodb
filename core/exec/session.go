@@ -215,7 +215,7 @@ type session struct {
 	// the one goroutine allowed to write to its client. Demand reclamation
 	// claims the first and calls the second; it never touches the wire itself.
 	terminal terminalClaim
-	wake     func(demandNotice)
+	wake     func(DemandNotice)
 
 	// reg is the registry this session was admitted to, or nil for a session
 	// that never was. It exists so the transaction counter the admission queue
