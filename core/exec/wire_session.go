@@ -565,6 +565,10 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 			// Row 3.1: the lease is pinned UTF8; autodb does not transcode.
 			e.auditBounded(ctx, pat.UserID, ip, "wire_lease_encoding_refused",
 				fmt.Sprintf("conn %d: session %s: target reports %s", connRow.ID, s.id, enc))
+			// Nothing has run on this backend — the refusal is about what the
+			// target reported at startup, not about anything this session did
+			// — so it is given back untouched. There is no state to reset and
+			// no reason to make the next caller pay for a reconnect.
 			pc.Discard()
 			s.mu.Lock()
 			s.pc = nil
@@ -579,7 +583,12 @@ func (e *Engine) OpenWireSessionWith(ctx context.Context, req WireOpen) (WireSes
 		// them. Any refusal — ours or the target's — withdraws the session.
 		if len(req.StartupGUCs) > 0 {
 			if gerr := e.applyStartupGUCs(ctx, s, pc, req.StartupGUCs, pat.UserID, ip, connRow.ID); gerr != nil {
-				pc.Discard()
+				// A refusal partway through leaves the settings that were
+				// already applied ON the backend, so this is not a fresh
+				// connection that can simply be handed back — it goes through
+				// the release gate like any other used one, and reaches the
+				// pool only if the reset proves it carries none of them.
+				e.noteBackendFate(ctx, s, ip, e.releaseBackend(ctx, s, pc, nil))
 				s.mu.Lock()
 				s.pc = nil
 				s.mu.Unlock()

@@ -717,9 +717,20 @@ func (e *Engine) pinWireSession(ctx context.Context, s *session, connRow *meta.C
 	if err != nil {
 		return nil, err
 	}
+	// The pool is shared with every other statement autodb runs, and those
+	// borrow and return connections without passing the release gate, so where
+	// this backend came from proves nothing about what is on it. Prove it here,
+	// before the session can run anything: see proveCheckoutClean.
+	if cerr := e.proveCheckoutClean(ctx, pc); cerr != nil {
+		return nil, cerr
+	}
 	s.mu.Lock()
 	if s.pc != nil { // lost a race that the claim should make impossible; keep the first
 		s.mu.Unlock()
+		// This backend was pinned a moment ago and nothing has run on it, so
+		// there is nothing to reset and no reason to close the socket: the
+		// pool can have it straight back. The release gate is for backends a
+		// session has USED.
 		pc.Discard()
 		return s.pinnedConn(), nil
 	}

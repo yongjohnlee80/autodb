@@ -23,13 +23,33 @@ type ingressFunc struct {
 	classAt, grammarAt    token.Pos
 }
 
+// EVERY ENTRY IS A METHOD THAT REACHES THE WIRE WITHOUT CARRYING A CLIENT'S
+// STATEMENT, and the reason says which kind it is.
+//
+// The teardown group below arrived together: a session that ends now runs a
+// reset on its backend before the pool may have it back (release_gate.go), and
+// every exported method that can end a session therefore reaches a dispatch.
+// None of them carries client SQL, and the reset deliberately does NOT pass the
+// statement gate — the gate refuses RESET ALL on the wire, which is correct for
+// a client and would make autodb unable to clean up after one. If the reset is
+// ever removed these entries stop naming dispatch-reaching methods and the
+// check above says so, so the exemption cannot outlive its reason.
 var ingressNonStatementDispatchExempt = map[string]string{
+	"Engine.Close":                  "engine-authored backend reset as sessions end; executes no client SQL",
+	"Engine.CloseAllSessions":       "engine-authored backend reset as sessions end; executes no client SQL",
+	"Engine.CloseSession":           "engine-authored backend reset as the session ends; executes no client SQL",
+	"Engine.CloseWireSession":       "engine-authored backend reset as the session ends; executes no client SQL",
+	"Engine.DeleteConnection":       "engine-authored backend reset as the connection's sessions end; executes no client SQL",
 	"Engine.ListColumns":            "engine-authored catalog introspection, not client SQL",
 	"Engine.ListRoutines":           "engine-authored catalog introspection, not client SQL",
 	"Engine.ListSchemas":            "engine-authored catalog introspection, not client SQL",
 	"Engine.ListTables":             "engine-authored catalog introspection, not client SQL",
+	"Engine.OpenSession":            "engine-authored backend reset when an open is withdrawn; executes no client SQL",
 	"Engine.ReconcileConnection":    "internal transaction-outcome recovery",
 	"Engine.ReconcileOutcomes":      "internal transaction-outcome recovery",
+	"Engine.SetConnectionExposure":  "engine-authored backend reset as withdrawn sessions end; executes no client SQL",
+	"Engine.SetConnectionProfile":   "engine-authored backend reset as withdrawn sessions end; executes no client SQL",
+	"Engine.StartJanitor":           "engine-authored backend reset as swept sessions end; executes no client SQL",
 	"Engine.StartOutcomeReconciler": "internal transaction-outcome recovery loop",
 	"Engine.TestConnection":         "engine-authored target health probe",
 	"Engine.WireBind":               "protocol object operation; executes no statement",
