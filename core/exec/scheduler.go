@@ -118,7 +118,25 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 	}
 
 	hook := r.hookWaiterQueued
+	demand := r.onDemand
 	r.mu.Unlock()
+
+	// ASK ONE IDLE HOLDER TO LEAVE, ONCE.
+	//
+	// Reached only by a request that is genuinely waiting and that row 5 did
+	// not refuse, so the target is full of holders that are not going to
+	// release on their own. Attempted ONCE rather than in a loop: a loop would
+	// turn one request's arrival into a sweep that ends every idle session on
+	// the target, when one lease is all that was asked for. Sustained pressure
+	// is the line's job, and the line is already holding this request.
+	//
+	// Outside the lock because selecting a victim reads sessions, and the freed
+	// lease is NOT handed back here -- it goes through the line like any other
+	// release, so demand cannot become a way to jump the queue.
+	if demand != nil {
+		demand(leaseConn)
+	}
+
 	if hook != nil {
 		// Announced OUTSIDE the lock and only once the request is genuinely
 		// waiting, so a cell can act on that fact instead of polling for it.

@@ -411,6 +411,10 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 	for _, o := range opts {
 		o(e)
 	}
+	// Stamped LAST for the same reason as the caps below: WithSessionLimits
+	// builds a fresh registry, so a reclaimer installed before it would be
+	// silently dropped and demand reclamation would never fire.
+	e.sessions.onDemand = e.demandReclaim
 	// The registry-scoped caps are stamped LAST, because WithSessionLimits
 	// builds a fresh registry and would otherwise drop whichever of these
 	// ran before it. Order-independence is the point: these two are the
