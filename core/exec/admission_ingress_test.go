@@ -40,6 +40,7 @@ var ingressNonStatementDispatchExempt = map[string]string{
 	"Engine.CloseSession":           "engine-authored backend reset as the session ends; executes no client SQL",
 	"Engine.CloseWireSession":       "engine-authored backend reset as the session ends; executes no client SQL",
 	"Engine.DeleteConnection":       "engine-authored backend reset as the connection's sessions end; executes no client SQL",
+	"Engine.FinishDemandReclaim":    "engine-authored backend reset as a reclaimed session ends; executes no client SQL",
 	"Engine.ListColumns":            "engine-authored catalog introspection, not client SQL",
 	"Engine.ListRoutines":           "engine-authored catalog introspection, not client SQL",
 	"Engine.ListSchemas":            "engine-authored catalog introspection, not client SQL",
