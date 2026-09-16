@@ -664,7 +664,24 @@ func TestScheduler_AnExpiredTransactionIsNotAReasonToRefuse(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- r.admitWithLeaseOrWait(context.Background(), schedSession("waits", 2, 7), 7, 0) }()
-	awaitSeq(t, seen)
+
+	// EITHER IT JOINS THE LINE OR IT IS ANSWERED, AND BOTH ARE AWAITED HERE.
+	//
+	// Waiting only for the queue announcement made this cell fail on the wrong
+	// thing. The refusal it exists to catch is issued BEFORE a request is
+	// announced -- it never joins the line at all -- so the cell died at the
+	// announcement with "no request reached the line" and the mutation control
+	// against it was scored INVALID: a failure nobody could read, and the
+	// guarantee left unproven. The refusal is now one of the outcomes this
+	// waits for, so it is reported in the words that name it.
+	select {
+	case <-seen:
+	case err := <-done:
+		t.Fatalf("got %v — a transaction past its bound was read as capacity that is "+
+			"never coming, so the request was refused instead of waiting for the reclaim", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request neither joined the line nor was answered")
+	}
 
 	select {
 	case err := <-done:

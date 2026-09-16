@@ -169,8 +169,16 @@ func All() []Mutation {
 		},
 		{
 			Name: "the-wait-arm-comes-first", Package: "./core/exec/", File: "core/exec/wire_session.go",
-			Anchor:      "\tcase errors.Is(rerr, ErrQueueTimeout):",
-			Replacement: "\tcase errors.Is(rerr, ErrLeaseCapExceeded):\n\t\treturn denyAfterAuthorization(DenyLeaseCap)\n\tcase errors.Is(rerr, ErrQueueTimeout):",
+			Anchor: "\tcase errors.Is(rerr, ErrQueueTimeout):",
+			// THE REPLACEMENT RETURNS admissionAnswer's OWN TUPLE, and that is
+			// not a detail. It used to call denyAfterAuthorization, which
+			// returns an error -- correct when the control was written, wrong
+			// the moment admissionAnswer's signature changed to
+			// (reason, detail string, ok bool). A mutation that does not
+			// compile is scored INVALID, so this control was unscorable on
+			// every head from that day until it was noticed, and silently: a
+			// guarantee nobody was proving, sitting in a list of guarantees.
+			Replacement: "\tcase errors.Is(rerr, ErrLeaseCapExceeded):\n\t\treturn DenyLeaseCap, \"\", true\n\tcase errors.Is(rerr, ErrQueueTimeout):",
 			Test:        "TestAdmissionDenial_TheWaitOutranksTheCapItWaitedOn",
 			Fails:       "was recorded as one refused on arrival",
 			Guarantee: "that a request which waited is never recorded as one refused on arrival, " +
