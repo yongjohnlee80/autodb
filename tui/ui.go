@@ -79,6 +79,11 @@ type Model struct {
 	cleartextSeen     bool     // the user dismissed the warning for this session
 	explorerFocused   bool     // last applied cursor styling (focused = cyan)
 	resultsFocused    bool
+	// catalog is every command and menu node, validated once at construction.
+	// Projections re-evaluate state; identity and closures are never rebuilt,
+	// because a command that is a different value each time it is read cannot
+	// be compared, cached, or trusted to be the one the user saw.
+	catalog *Catalog
 }
 
 // New assembles the Model. Call tui.NewApp(model.Root(), …) to run it.
@@ -111,6 +116,17 @@ func New(session *Session, notesFor NotesFactory, quit func(), opts ...Option) *
 	dock.Pin(tui.DockBottom, m.status)
 	dock.Add(m.outer)
 	m.host = widget.NewOverlayHost(dock)
+
+	// AFTER the components exist, because the handlers close over them, and
+	// ONCE, because rebuilding identity per menu opening would make a command
+	// a different value every time it is read. A malformed catalog is a
+	// programming error that must not reach a user as a missing menu row.
+	cat, err := NewCatalog(commandCatalog(), menuNodes())
+	if err != nil {
+		panic("tui: command catalog is malformed: " + err.Error())
+	}
+	m.catalog = cat
+
 	return m
 }
 
@@ -1472,91 +1488,19 @@ func (m *Model) handleKey(k tui.KeyEvent) bool {
 
 // leaderEntries is the single binding table: the leader
 // menu executes it and the help float renders it.
+// leaderEntries is the SPC menu, projected from the command catalog.
+//
+// It used to BE the catalog: one literal list, with the availability rules as
+// conditional appends around it. The declarations moved into tui/commands.go so
+// the top menu bar and the help screen could project the same set, and this
+// became a view. The four rules that list carried are
+// preserved there rather than here — an entry that can only fail is absent,
+// role decides only what is ADVERTISED, a frontend that does not own its
+// session is not offered session commands, and help renders from this data.
+//
+// Behaviour is unchanged with ONE deliberate exception, `u`; see cmdUsers.
 func (m *Model) leaderEntries() []leaderEntry {
-	connLabel, connRun := "disconnect", func() {
-		m.session.Disconnect()
-		m.setStatus("disconnected — SPC x reconnects")
-	}
-	if !m.session.Connected() {
-		connLabel, connRun = "connect", m.reconnect
-	}
-	entries := []leaderEntry{
-		{'r', "run query (selection when active)", m.runQuery},
-		{'R', "run selection only", m.runSelection},
-		{'j', "toggle results table/JSON", m.results.ToggleJSON},
-		{'z', "zoom focused pane (also Ctrl-w z)", m.zoomToggle},
-		{'e', "focus explorer", func() { m.focusPane(m.explorer) }},
-		{'q', "focus query editor", func() { m.focusPane(m.editor) }},
-		{'t', "focus results", func() { m.focusPane(m.results) }},
-		{'n', "new note", m.newNote},
-		{'s', "save note", m.saveNote},
-		{'C', "select the query connection", m.openConnPicker},
-		{'c', "connections…", m.openConnManager},
-		{'w', "workspaces…", m.openWorkspaceManager},
-		{'u', "users…", m.openUserManager},
-		{'i', "my allowed IPs…", func() { m.openUserIPManager(m.session.User().ID, "me") }},
-		{'T', "my access tokens…", func() { m.openPATManager(m.session.User().ID, "me") }},
-		{'H', "script history…", m.openHistory},
-		// The CA CERTIFICATE, and not admin-only: it is public by
-		// construction -- it is the file you hand out -- and every developer
-		// configuring a client needs it. Gating it would mean root couriering
-		// a public file to each of them.
-		{'k', "front-door CA certificate…", m.openCAcert},
-		{'g', "refresh explorer", m.explorer.Reload},
-	}
-	// THE TWO ADMIN SURFACES, offered only to an admin.
-	//
-	// Both carry "(admin)" in their label and both are refused server-side for
-	// anyone else -- so for an editor they were two entries that could only
-	// ever fail, which is exactly what this menu's own rule forbids. An editor
-	// reported finding them and reasonably read reachability as permission.
-	//
-	// The role is presentation only. The server decides: ListAllowedIPs and
-	// ServiceKeyslotStatusFor both resolve the role from the store on every
-	// call, so hiding these changes what is ADVERTISED, never what is allowed.
-	//
-	// `H` (script history) is deliberately NOT here. It is scoped per-user in
-	// core -- an editor sees their own executions, an admin sees all
-	// (core/exec/history.go) -- so it is a working feature for everyone, and
-	// its label carries no "(admin)" marker. Johno ruled it stays.
-	if m.session.IsAdmin() {
-		entries = append(entries,
-			leaderEntry{'I', "ip allowlist (admin)…", m.openAllowlistManager},
-			leaderEntry{'K', "service keyslot (admin)…", m.openKeyslotMenu},
-		)
-	}
-	// Offered only while the warning is up, following this menu's own rule
-	// that an entry which always fails teaches distrust of the menu. The
-	// handler still guards: the state can clear between opening this menu and
-	// choosing from it, since the probe applies on the loop goroutine.
-	if m.cleartextBannerText() != "" {
-		entries = append(entries,
-			leaderEntry{'!', "dismiss the no-TLS warning", m.dismissCleartextWarning})
-	}
-	// Session and connection lifecycle actions belong to a frontend that OWNS its
-	// session. The web frontend shares one connection per user across tabs and does
-	// not authenticate in-App, so login/switch-user and disconnect/reconnect
-	// are withdrawn — a disconnect from one tab would drop the connection the others
-	// are using, and a switch-user would re-key it. Removed from the table, not
-	// shown-and-refused: a menu entry that always fails teaches distrust of the menu.
-	if m.managesOwnAuth() {
-		entries = append(entries,
-			leaderEntry{'L', "login / switch user", m.openLogin},
-			leaderEntry{'x', connLabel, connRun},
-		)
-	}
-	// Only a frontend that can bring the daemon back may offer to take it down.
-	// Removed from the table rather than shown-and-refused: a menu entry that always
-	// fails is a menu entry that teaches the user to distrust the menu.
-	if m.canRestartDaemon() {
-		entries = append(entries, leaderEntry{'X', "restart the server", m.restartServer})
-	}
-	entries = append(entries, []leaderEntry{
-		{'A', "about autodb", m.openAbout},
-		{'?', "help", m.openHelp},
-		{'Q', "quit", m.confirmQuit},
-	}...)
-	return entries
+	return m.catalog.leaderProjection(m)
 }
 
 // confirmQuit asks before ending the session. Both quit paths route through
