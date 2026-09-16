@@ -96,11 +96,10 @@ type Model struct {
 	//     the store has no opinion about which arrived first.
 	//   - identity is fenced separately, on the Bound, because two accounts can
 	//     share a connection.
-	prefGen        uint64
-	prefWriting    bool
-	prefPending    string
-	prefHasPending bool
-	menu           *widget.Menu // the top bar's menu; nil until New builds it
+	prefGen     uint64
+	prefWriting bool
+	prefPending *prefIntent
+	menu        *widget.Menu // the top bar's menu; nil until New builds it
 	// menuShown is the projection currently applied, so a reprojection that
 	// would change nothing does not disturb an open cascade.
 	menuShown []widget.MenuItemModel
@@ -461,6 +460,12 @@ func (m *Model) retireIdentity() {
 	m.identityEpoch++
 	m.curNote = nil
 	m.noteDirty = false
+	// A QUEUED PREFERENCE BELONGS TO WHOEVER CHOSE IT. Leaving it here would
+	// write one person's choice under the next person's credential the moment
+	// the in-flight write finishes. Bumping the generation retires any
+	// completion still to arrive as well.
+	m.prefGen++
+	m.prefPending = nil
 }
 
 // notesCapability is what a background task may do with notes: a specific
@@ -1538,6 +1543,16 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 		m.explorer.RefreshNotes(v.note.WorkspaceID) // a brand-new note appears
 		m.ctx.FocusComponent(m.editor)
 		m.refreshStatus()
+		return true
+	case prefWritten:
+		// SETTLED UNCONDITIONALLY, and that is the whole reason this is its own
+		// result type rather than a managerReload. The reload dispatcher drops
+		// a result whose connection generation has moved, which is right for
+		// ROWS and wrong for a writer ticket: dropping the completion leaves
+		// prefWriting true forever and no preference is ever written again.
+		// Currency decides what is REPORTED and what is dispatched next, never
+		// whether the ticket is returned.
+		m.settlePrefWrite(v)
 		return true
 	case managerReload:
 		if v.gen != m.session.Gen() {
