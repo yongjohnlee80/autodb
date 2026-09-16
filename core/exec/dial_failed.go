@@ -98,14 +98,55 @@ var ErrDialFailed = errors.New("exec: the backend connection for this request co
 // So the cause is reachable only through Cause, which nothing on the wire path
 // calls, and errors.Is answers for the sentinel alone.
 type DialFailure struct {
-	// Stage is which part of opening the connection failed.
-	Stage DialStage
-	// Attempts is how many acquisitions were made before giving up. It is
-	// bounded by dialAttemptsPerRequest and is recorded so an operator reading
-	// a trail full of these can tell a target that failed once from one that
-	// is being retried in a loop — and so a test can prove the bound holds.
-	Attempts int
-	cause    error
+	// EVERY FIELD IS PRIVATE, AND THAT IS A CORRECTION RATHER THAN A STYLE.
+	//
+	// Stage and Attempts were exported, which made two things possible that
+	// should not have been. A caller outside this package could assign
+	// DialStage("<anything>") into Stage -- the type is a defined string, so
+	// the conversion compiles -- and that text then appeared in Error and in
+	// the audit row. And any holder could mutate a failure after it was
+	// raised, so what the audit recorded need not be what the raise site
+	// decided. Accessors below give every legitimate reader what it needs.
+	stage    DialStage
+	attempts int
+	// connID is the connection's opaque numeric id. Safe to publish: a row
+	// number an operator looks up, never a name, a host or a credential.
+	connID int64
+	cause  error
+}
+
+// Stage is which part of opening the connection failed.
+func (d *DialFailure) Stage() DialStage { return d.stage }
+
+// Attempts is how many acquisitions were made before giving up.
+func (d *DialFailure) Attempts() int { return d.attempts }
+
+// ConnID is the connection this failure is about, or zero when the raise site
+// did not know it.
+func (d *DialFailure) ConnID() int64 { return d.connID }
+
+// dialStages is every stage this package may record, for the normalization
+// below and for the walk that proves nothing else reaches a projection.
+func dialStages() []DialStage {
+	return []DialStage{DialStageResolve, DialStageConnect, DialStageTLS,
+		DialStageAuthenticate, DialStageStartup, DialStageSettings, DialStageUnclassified}
+}
+
+// normalizeStage maps anything not declared here onto the unclassified stage.
+//
+// AN UNKNOWN VALUE IS NOT PASSED THROUGH, because passing it through is how a
+// projection of "fixed values only" stops being one: a caller that can get an
+// arbitrary string into the field can get it onto the wire's DETAIL and into
+// the operator's trail. Unclassified is a real stage with a real meaning --
+// "this package could not attribute it" -- which is exactly true of a value
+// this package does not recognise.
+func normalizeStage(st DialStage) DialStage {
+	for _, known := range dialStages() {
+		if st == known {
+			return st
+		}
+	}
+	return DialStageUnclassified
 }
 
 // NewDialFailure builds a dial failure for a cause, classifying its stage.
@@ -114,18 +155,39 @@ type DialFailure struct {
 // RENDERED in another package, and the cells that prove the client contract
 // have to be able to produce one without an unreachable target of their own.
 func NewDialFailure(cause error) *DialFailure {
-	return &DialFailure{Stage: dialStageOf(cause), Attempts: 1, cause: cause}
+	return &DialFailure{stage: normalizeStage(dialStageOf(cause)), attempts: 1, cause: cause}
+}
+
+// ForConnection records which connection this failure is about. Returns the
+// same failure so a raise site can chain it onto a constructor.
+func (d *DialFailure) ForConnection(connID int64) *DialFailure {
+	d.connID = connID
+	return d
 }
 
 // NewDialFailureAt builds one for a caller that already knows the stage,
 // because it was performing that stage when the failure happened.
 func NewDialFailureAt(stage DialStage, cause error) *DialFailure {
-	return &DialFailure{Stage: stage, Attempts: 1, cause: cause}
+	return &DialFailure{stage: normalizeStage(stage), attempts: 1, cause: cause}
 }
 
+// Error projects the fixed values and NOT the cause.
+//
+// THE CAUSE USED TO BE HERE, AND IT IS THE SAME DEFECT THE CONFIGURATION
+// FAILURE BESIDE THIS ONE WAS CORRECTED FOR -- found there, fixed there, and
+// left standing here because this type was the model the fix was copied FROM.
+// A driver's connect error is shaped "failed to connect to host=... user=...
+// database=... password=..." and, for a URL DSN, carries the whole connection
+// string; measured, this projection reproduced the host, the role, the
+// database, a plaintext password, a PAT and a query-parameter secret.
+//
+// This text reaches operator logs through paths that do not distinguish audit
+// from disclosure, and it is the same string the audit row publishes. The
+// stage says which component broke, which is what an operator acts on; the
+// cause is reachable in-process through Cause and nowhere else.
 func (d *DialFailure) Error() string {
-	return fmt.Sprintf("%s: stage %s after %d attempt(s): %v",
-		ErrDialFailed.Error(), d.Stage, d.Attempts, d.cause)
+	return fmt.Sprintf("%s: stage %s after %d attempt(s)",
+		ErrDialFailed.Error(), d.stage, d.attempts)
 }
 
 // Is answers for the sentinel and for NOTHING ELSE. See the type comment: an
@@ -136,10 +198,15 @@ func (d *DialFailure) Is(target error) bool { return target == ErrDialFailed }
 // Cause is the raw driver error, for the audit trail only.
 func (d *DialFailure) Cause() error { return d.cause }
 
-// AuditDetail is the operator's whole of it: stage, attempts and raw cause, in
-// one line an operator can grep.
+// AuditDetail is the operator's whole of it: stage, attempts and the
+// connection's opaque id, in one line an operator can grep.
+//
+// NO CAUSE. This string becomes EventDialFailed.Detail, which is published to
+// whatever consumes the event stream -- wider than the operator's terminal,
+// and wide enough that a driver's connect error appearing here is a
+// credential and topology disclosure rather than a debugging convenience.
 func (d *DialFailure) AuditDetail() string {
-	return fmt.Sprintf("stage=%s attempts=%d cause=%v", d.Stage, d.Attempts, d.cause)
+	return fmt.Sprintf("stage=%s attempts=%d conn=%d", d.stage, d.attempts, d.connID)
 }
 
 // DialFailureOf extracts a dial failure from an error chain.
@@ -367,11 +434,11 @@ func acquireWithReArbitration(ctx context.Context,
 		}
 	}
 	if d, ok := DialFailureOf(last); ok {
-		d.Attempts = made
+		d.attempts = made
 		return nil, d
 	}
 	f := NewDialFailure(last)
-	f.Attempts = made
+	f.attempts = made
 	return nil, f
 }
 

@@ -55,6 +55,10 @@ const (
 	// operation this product's guarantees depend on — today, destroying a
 	// pinned backend on demand.
 	ConfigStageCapability ConfigStage = "capability"
+	// ConfigStageUnclassified is what an unrecognised stage normalizes to. It
+	// is a real answer -- this package could not attribute it -- rather than a
+	// hole through which an arbitrary string reaches a projection.
+	ConfigStageUnclassified ConfigStage = "unclassified"
 )
 
 // ConfigDetail is the WHOLE of what a configuration failure may say about
@@ -92,13 +96,15 @@ const (
 	// DetailStoreUnavailable: the secret store would not answer. Raised in the
 	// front door rather than here, and declared here so the set stays closed.
 	DetailStoreUnavailable ConfigDetail = "the secret store for this connection would not answer"
+	// DetailUnclassified is what an unrecognised detail normalizes to.
+	DetailUnclassified ConfigDetail = "this connection could not be used, and the reason was not classified"
 )
 
 // configDetails is every member of the closed set, for the walk that proves no
 // raise site invents one.
 func configDetails() []ConfigDetail {
 	return []ConfigDetail{DetailUnknownEngine, DetailDSNUnusable, DetailPoolRefused,
-		DetailGrammarUnproved, DetailNoDestroy, DetailStoreUnavailable}
+		DetailGrammarUnproved, DetailNoDestroy, DetailStoreUnavailable, DetailUnclassified}
 }
 
 // ErrConnectionUnusable is the sentinel every configuration failure carries,
@@ -116,14 +122,64 @@ var ErrConnectionUnusable = errors.New("exec: this connection cannot serve reque
 // it anyway. The cause is reachable only through Cause, which nothing on the
 // wire path calls.
 type ConfigFailure struct {
-	// Stage is which part of the configuration is wrong.
-	Stage ConfigStage
-	// ConnID is the connection's opaque numeric id. Safe to publish: it is a
-	// row number an operator looks up, not a name, a host or a credential.
-	ConnID int64
-	// Detail is the fixed literal this failure is allowed to say about itself.
-	Detail ConfigDetail
+	// EVERY FIELD IS PRIVATE, AND THE CLOSED SET IS NOT ENOUGH WITHOUT THAT.
+	//
+	// ConfigStage and ConfigDetail are defined string types, so
+	// ConfigDetail("<anything>") compiles anywhere. Exported fields therefore
+	// let a caller outside this package inject arbitrary text into a
+	// projection whose entire promise is that it carries only fixed literals,
+	// and let any holder mutate a failure after the raise site had decided
+	// what it says. The AST walk over raise sites cannot see either: it reads
+	// constructor arguments in ONE package, and neither injection goes
+	// through a constructor there.
+	//
+	// So the fields are private, the constructor normalizes, and the walk
+	// stays as defence in depth rather than as the guarantee.
+	stage  ConfigStage
+	connID int64
+	detail ConfigDetail
 	cause  error
+}
+
+// Stage is which part of the configuration is wrong.
+func (c *ConfigFailure) Stage() ConfigStage { return c.stage }
+
+// ConnID is the connection's opaque numeric id. Safe to publish: a row number
+// an operator looks up, never a name, a host or a credential.
+func (c *ConfigFailure) ConnID() int64 { return c.connID }
+
+// Detail is the fixed literal this failure is allowed to say about itself.
+func (c *ConfigFailure) Detail() ConfigDetail { return c.detail }
+
+// configStages is every stage this package may record.
+func configStages() []ConfigStage {
+	return []ConfigStage{ConfigStageEngine, ConfigStageDSN, ConfigStagePool,
+		ConfigStageCapability, ConfigStageUnclassified}
+}
+
+// normalizeConfigStage and normalizeConfigDetail map anything not declared
+// here onto the unclassified members.
+//
+// AN UNKNOWN VALUE IS NEVER PASSED THROUGH. A projection that promises fixed
+// literals and then forwards whatever it was handed is not a projection, and
+// "unclassified" is the honest answer for a value this package does not
+// recognise -- the same answer the dial stages give.
+func normalizeConfigStage(st ConfigStage) ConfigStage {
+	for _, known := range configStages() {
+		if st == known {
+			return st
+		}
+	}
+	return ConfigStageUnclassified
+}
+
+func normalizeConfigDetail(d ConfigDetail) ConfigDetail {
+	for _, known := range configDetails() {
+		if d == known {
+			return d
+		}
+	}
+	return DetailUnclassified
 }
 
 // NewConfigFailure builds one for a stage the caller already knows.
@@ -134,14 +190,15 @@ type ConfigFailure struct {
 // exactly which check it just failed. Inferring it would be guessing at
 // something already known.
 func NewConfigFailure(stage ConfigStage, connID int64, detail ConfigDetail, cause error) *ConfigFailure {
-	return &ConfigFailure{Stage: stage, ConnID: connID, Detail: detail, cause: cause}
+	return &ConfigFailure{stage: normalizeConfigStage(stage), connID: connID,
+		detail: normalizeConfigDetail(detail), cause: cause}
 }
 
 // Error names the stage and nothing else. The cause is deliberately absent:
 // this text reaches operator logs through paths that do not distinguish audit
 // from disclosure, and the audit records the cause explicitly through Cause.
 func (c *ConfigFailure) Error() string {
-	return fmt.Sprintf("%s (%s)", ErrConnectionUnusable.Error(), c.Stage)
+	return fmt.Sprintf("%s (%s)", ErrConnectionUnusable.Error(), c.stage)
 }
 
 // SafeLog is what a log line may say. Same content as the audit row, because
@@ -164,7 +221,7 @@ func (c *ConfigFailure) Is(target error) bool { return target == ErrConnectionUn
 // The cause stays private to this process; Cause exists for a caller that has
 // already decided it is safe to look, and no path out of this package calls it.
 func (c *ConfigFailure) AuditDetail() string {
-	return fmt.Sprintf("stage=%s conn=%d detail=%s", c.Stage, c.ConnID, c.Detail)
+	return fmt.Sprintf("stage=%s conn=%d detail=%s", c.stage, c.connID, c.detail)
 }
 
 // Cause is the only way to the underlying error. NOTHING ON THE WAY OUT OF

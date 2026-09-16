@@ -227,9 +227,9 @@ func TestOpenTarget_EveryDriverBranchAppliesThePoolBounds(t *testing.T) {
 				t.Fatalf("the %s branch was not reached (err = %v); this test cannot observe "+
 					"what it passes to the driver", eng, err)
 			}
-			if cf.Stage != ConfigStagePool {
+			if cf.Stage() != ConfigStagePool {
 				t.Errorf("%s: stage = %q, want %q -- constructing a pool is not a physical pin",
-					eng, cf.Stage, ConfigStagePool)
+					eng, cf.Stage(), ConfigStagePool)
 			}
 
 			if eng == engine.Postgres {

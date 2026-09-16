@@ -1,4 +1,4 @@
-package frontdoor
+package arrivalguard_test
 
 import (
 	"go/parser"
@@ -48,35 +48,43 @@ func TestArrivalClaims_NoUnscopedStoreArrivalSurvivesInComments(t *testing.T) {
 		{"decrypted at the first statement", []string{"sqlite", "does not speak", "non-postgres", "engine"}},
 	}
 
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fs.FileInfo) bool { return true }, parser.ParseComments)
-	if err != nil {
-		t.Fatalf("parsing frontdoor: %v", err)
-	}
+	// EVERY STAGE-0 PACKAGE, NOT ONE. The guard lived in frontdoor and could
+	// only see frontdoor, so the same claim went on standing in core/exec --
+	// in the very cell whose SQLite fixture was the reason the claim was
+	// believed in the first place. A guard scoped more narrowly than the
+	// mistake certifies the half somebody already looked at.
+	roots := []string{"../../core/exec", "../../frontdoor", "../../core/auth", "../../rpc"}
 
+	fset := token.NewFileSet()
 	files := 0
-	for _, pkg := range pkgs {
-		for name, file := range pkg.Files {
-			files++
-			for _, group := range file.Comments {
-				text := strings.ToLower(group.Text())
-				for _, c := range claims {
-					if !strings.Contains(text, c.claim) {
-						continue
-					}
-					scoped := false
-					for _, s := range c.scope {
-						if strings.Contains(text, s) {
-							scoped = true
-							break
+	for _, root := range roots {
+		pkgs, perr := parser.ParseDir(fset, root, func(fs.FileInfo) bool { return true }, parser.ParseComments)
+		if perr != nil {
+			t.Fatalf("parsing %s: %v", root, perr)
+		}
+		for _, pkg := range pkgs {
+			for name, file := range pkg.Files {
+				files++
+				for _, group := range file.Comments {
+					text := strings.ToLower(group.Text())
+					for _, c := range claims {
+						if !strings.Contains(text, c.claim) {
+							continue
 						}
-					}
-					if !scoped {
-						t.Errorf("%s: a comment says %q without naming the engine it is true "+
-							"of.\n  A postgres-wire connection pins its backend inside "+
-							"OpenWireSessionWith, so the store IS read during the credential "+
-							"phase. Say which engine, or delete the claim.\n  comment at %s",
-							name, c.claim, fset.Position(group.Pos()))
+						scoped := false
+						for _, s := range c.scope {
+							if strings.Contains(text, s) {
+								scoped = true
+								break
+							}
+						}
+						if !scoped {
+							t.Errorf("%s: a comment says %q without naming the engine it is true "+
+								"of.\n  A postgres-wire connection pins its backend inside "+
+								"OpenWireSessionWith, so the store IS read during the credential "+
+								"phase. Say which engine, or delete the claim.\n  comment at %s",
+								name, c.claim, fset.Position(group.Pos()))
+						}
 					}
 				}
 			}
@@ -84,8 +92,11 @@ func TestArrivalClaims_NoUnscopedStoreArrivalSurvivesInComments(t *testing.T) {
 	}
 
 	// THE VACUITY FLOOR. A walk that parsed nothing passes in silence, and a
-	// package layout change is exactly how this stops watching anything.
-	if files < 10 {
-		t.Fatalf("walked %d files in frontdoor; the guard is not reaching the package", files)
+	// package layout change is exactly how this stops watching anything. Sized
+	// to the four packages, so losing one fails here rather than quietly
+	// halving the guard's reach.
+	if files < 80 {
+		t.Fatalf("walked %d files across %d Stage-0 packages; the guard is not reaching "+
+			"them and is certifying nothing", files, len(roots))
 	}
 }
