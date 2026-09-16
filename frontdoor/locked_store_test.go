@@ -178,11 +178,13 @@ func TestLockedStore_StartupAnswersUnavailableAndChargesNobody(t *testing.T) {
 	// THE AUDIT SAYS WHAT IT WAS, UNDER ITS OWN IDENTITY, AND THE ADDRESS IS
 	// NOT CHARGED. The charge is the half that locked the developer out: a
 	// credential-denial identity would count against their address.
-	var seen int
+	// WAITED FOR, for the reason in awaitOperationalEvents: the client is
+	// answered before the outcome is recorded. Converted here without waiting
+	// for it to fail, because its sibling cell failed this way under coverage
+	// instrumentation and this one is the same shape.
+	seen := len(awaitOperationalEvents(t, events,
+		string(outcomeID(OutcomeStartupConnectionUnavailable)), 1, 10*time.Second))
 	for _, ev := range events() {
-		if ev.Kind == EventAuthOperational && ev.Reason == string(outcomeID(OutcomeStartupConnectionUnavailable)) {
-			seen++
-		}
 		if ev.Kind == "fd.auth_denied" {
 			t.Errorf("a credential denial was recorded for a verified token: %+v", ev)
 		}
@@ -247,17 +249,20 @@ func TestStartupConfigFailure_IsNotACredentialDenial(t *testing.T) {
 		}
 	}
 
-	var seen int
+	// WAITED FOR, not sampled: the client is answered before the outcome is
+	// recorded. This cell sampled, passed for three rounds, and failed the
+	// first time it ran under coverage instrumentation -- which is slower, and
+	// so lost the race the ordinary run happened to win. It is the fourth cell
+	// on this branch caught by the same window.
+	seen := len(awaitOperationalEvents(t, events,
+		string(outcomeID(OutcomeStartupConnectionUnusable)), 1, 10*time.Second))
+	if seen != 1 {
+		t.Errorf("the startup identity reached the trail %d time(s), want exactly 1", seen)
+	}
 	for _, ev := range events() {
-		if ev.Kind == EventAuthOperational && ev.Reason == string(outcomeID(OutcomeStartupConnectionUnusable)) {
-			seen++
-		}
 		if ev.Kind == "fd.auth_denied" {
 			t.Errorf("a credential denial was recorded for a verified token: %+v", ev)
 		}
-	}
-	if seen != 1 {
-		t.Errorf("the startup identity reached the trail %d time(s), want exactly 1", seen)
 	}
 }
 
