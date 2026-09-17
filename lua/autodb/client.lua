@@ -31,6 +31,12 @@ local M = {}
 -- newer one needs a newer plugin — because "protocol mismatch" alone
 -- sends people to the wrong fix.
 --
+-- 6: sys.pressure, the front door's live pressure view. The verb is
+-- reached from a menu entry, so a plugin that can see the entry and a
+-- daemon that cannot answer it is exactly the pairing this number
+-- exists to stop: without the bump the user gets "unknown method" for
+-- something their own menu offered them.
+--
 -- 5 (ADR-0074 R5): the ExecSession surface (exec.session_open /
 -- session_close / session_run), and exec.run_script now runs a script
 -- that CONTAINS a transaction boundary inside one transaction. That
@@ -38,7 +44,7 @@ local M = {}
 -- `BEGIN; …; COMMIT;` a user could already send means something
 -- different now, so a stale pairing has to fail at the handshake
 -- rather than silently apply half a script.
-M.PROTOCOL = 5
+M.PROTOCOL = 6
 
 ---@class AutodbClientOpts
 ---@field addr string                 -- socket path, or host:port for TCP

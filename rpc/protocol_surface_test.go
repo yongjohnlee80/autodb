@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -173,5 +175,40 @@ func TestProtocol_AClientAtTheCurrentVersionReachesTheNewVerb(t *testing.T) {
 	if got, _ := sess["value"].(int64); got != 3 {
 		t.Errorf("sessions value = %v, want 3 — the verb answered without carrying the "+
 			"view it exists to carry", sess["value"])
+	}
+}
+
+// THE TWO HALVES OF THE HANDSHAKE SHIP TOGETHER, SO THEY AGREE.
+//
+// FOUND BY CI, WHICH IS ONE STEP TOO LATE AND EXACTLY THE STEP THIS CELL
+// REMOVES. The number lives twice: here, and in lua/autodb/client.lua, which
+// is the frontend this repository ships. Bumping one and not the other
+// produces a plugin and a daemon out of the same commit that refuse each
+// other at the handshake — "protocol mismatch: client 5, server 6", which is
+// the message a STALE pairing is supposed to produce and is nonsense from a
+// matched one.
+//
+// The mismatch is the whole point of the number when the two are versioned
+// apart, and a bug when they are versioned together. Nothing but this cell
+// distinguishes the two cases.
+func TestProtocol_TheShippedFrontendSpeaksTheSameNumber(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "lua", "autodb", "client.lua"))
+	if err != nil {
+		t.Fatalf("the frontend this repository ships is not there: %v", err)
+	}
+	m := regexp.MustCompile(`(?m)^M\.PROTOCOL\s*=\s*(\d+)\s*$`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatal("lua/autodb/client.lua no longer declares M.PROTOCOL on its own line, " +
+			"so the two halves of the handshake are no longer comparable")
+	}
+	lua, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lua != rpc.Protocol {
+		t.Errorf("the shipped plugin speaks protocol %d and this daemon speaks %d. "+
+			"They come out of one commit, so at runtime they will refuse each other "+
+			"with the message a STALE pairing produces — and the user is sent to "+
+			"refresh a binary that is already correct", lua, rpc.Protocol)
 	}
 }

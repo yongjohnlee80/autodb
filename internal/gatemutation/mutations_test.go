@@ -180,6 +180,7 @@ func expectedControls() map[string][3]string {
 		"pressure-a-new-verb-cannot-be-silent":               {"rpc/methods.go", "./rpc/", "TestProtocol_TheVerbSurfaceIsPinned"},
 		"pressure-the-surface-stays-off-routable-interfaces": {"webserver/gateway.go", "./cmd/autodb/", "TestPressureTunnel_TheSurfaceIsUnreachableOffLoopback"},
 		"pressure-the-forward-reaches-the-real-address":      {"webserver/gateway.go", "./cmd/autodb/", "TestPressureTunnel_TheDocumentedForwardReachesTheSurface"},
+		"pressure-the-shipped-frontend-agrees":               {"lua/autodb/client.lua", "./rpc/", "TestProtocol_TheShippedFrontendSpeaksTheSameNumber"},
 		"pressure-only-a-refusal-that-landed-counts":         {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_AFailedWriteIsNotCountedAsARefusal"},
 		"pressure-a-denial-lasts-a-full-window":              {"core/pressure/window.go", "./core/pressure/", "TestWindow_ADenialLastsAtLeastAFullWindowWhereverItLands"},
 		"pressure-a-closing-tick-does-not-dispatch":          {"frontdoor/pressure_loop.go", "./frontdoor/", "TestPressureLoop_ATickArrivingAtShutdownDoesNotDispatch"},
