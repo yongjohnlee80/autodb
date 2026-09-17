@@ -313,13 +313,18 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, rol
 	}
 	p("host         %s", orNone(dialHost))
 	p("port         %s", orNone(port))
-	p("user         %s", user)
+	// WHAT THIS TOKEN CAN DO, BESIDE WHO IT IS, AND ON THE SAME LINE.
+	//
+	// A credential's reach is not inferable from the account name, and this
+	// card is the one place the credential is ever shown, so it is the one
+	// chance to say what was granted. On its OWN line it cost a row, and this
+	// card turned out to have none spare: it ended exactly at the last row the
+	// float renders, so one added line pushed the show-once warning off the
+	// bottom and two cells that wait for it went red.
 	if role != "" {
-		// WHAT THIS TOKEN CAN DO, beside who it is. A credential's reach is
-		// not inferable from the account name, and the card is the one place
-		// the credential is ever shown -- so it is also the one chance to say
-		// what was granted.
-		p("role         %s", role)
+		p("user         %s        (role %s)", user, role)
+	} else {
+		p("user         %s", user)
 	}
 	p("sslmode      %s", sslmode)
 	if ep.RootCAFile != "" && sslmode != cardSSLModeOff {
@@ -335,7 +340,17 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, rol
 	}
 	p("")
 	p("token        %s", secret)
-	p("")
+	// DIRECTLY UNDER THE CREDENTIAL, NOT AT THE END OF THE CARD.
+	//
+	// It was the last line, which was right while the card ended two rows
+	// below the token -- and it was sitting on the very last row the float
+	// renders, so the first line added anywhere above pushed it off the
+	// bottom. A reader who dismisses this card before scrolling has lost the
+	// credential for good, so the sentence saying so must not depend on the
+	// card being short. Under the token it is out of view only if the token
+	// is too, and it takes the blank line that used to sit here rather than
+	// costing a new one.
+	p("The token is shown ONCE and cannot be recovered. Copy it before closing.")
 	dsn := buildCardDSN(dialHost, port, user, secret, cardDatabase(conn), sslmode, ep.RootCAFile)
 	p("DSN")
 	p("  %s", dsn)
@@ -344,7 +359,6 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, rol
 	p("  %s", buildCardJDBC(dialHost, port, user, secret, cardDatabase(conn), sslmode, ep.RootCAFile))
 	p("")
 	writeCardBudget(p, ep)
-	p("The token is shown ONCE and cannot be recovered. Copy it before closing.")
 	return b.String(), dsn
 }
 
