@@ -166,6 +166,13 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 		// So the claim is taken atomically, under this candidate's own lock,
 		// against the same state the reservation commits to. demandMu is a leaf
 		// and nothing that touches a socket runs while it is held.
+		if h := r.hookAtDemandClaim; h != nil && eligible {
+			// AT THE CLAIM BOUNDARY, under this candidate's own lock. The
+			// binding test convention requires a concurrency cell to FORCE the
+			// window rather than hope for it, and this window is one statement
+			// wide -- unreachable from outside the function.
+			h(s.id)
+		}
 		claimed := eligible && r.tryPromiseDemand(leaseConn, s.id)
 		// The reservation is taken INSIDE this same hold. It is the ordinary
 		// close claim, so it also settles ownership against the reaper, an
