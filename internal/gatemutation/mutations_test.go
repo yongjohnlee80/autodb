@@ -156,6 +156,20 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 func expectedControls() map[string][3]string {
 	return map[string][3]string{
 		// name: {File, Package, Test}
+		"pressure-a-throttled-source-is-credential":    {"core/pressure/readings.go", "./core/pressure/", "TestReadings_AThrottledSourceIsCredentialAndThenGoes"},
+		"pressure-unconfigured-caps-emit-nothing":      {"core/pressure/readings.go", "./core/pressure/", "TestReadings_UnconfiguredCapsProduceNoRows"},
+		"pressure-stale-subjects-expire":               {"core/pressure/dimension.go", "./core/pressure/", "TestDimension_StaleSubjectsAreDroppedOnTheTickThatReads"},
+		"pressure-the-remainder-is-rendered":           {"core/pressure/dimension.go", "./core/pressure/", "TestDimension_TheSummaryNamesWhatItLeftOut"},
+		"pressure-ties-are-broken":                     {"core/pressure/dimension.go", "./core/pressure/", "TestDimension_TiesAreBrokenLexicographicallyAndRepeatably"},
+		"pressure-the-recent-survive":                  {"core/pressure/dimension.go", "./core/pressure/", "TestDimension_TheLeastRecentIsDropped"},
+		"pressure-dimensions-are-capped":               {"core/pressure/dimension.go", "./core/pressure/", "TestDimension_ItStaysBoundedUnderAFloodOfSubjects"},
+		"pressure-a-read-evicts":                       {"core/pressure/window.go", "./core/pressure/", "TestWindow_ItReturnsToZeroWithoutAnyFurtherWrites"},
+		"pressure-the-window-slides":                   {"core/pressure/window.go", "./core/pressure/", "TestWindow_TheOldestBucketFallsOutFirst"},
+		"pressure-a-straddling-burst-sums":             {"core/pressure/window.go", "./core/pressure/", "TestWindow_ABurstAcrossABoundarySums"},
+		"pressure-a-vanished-subject-still-clears":     {"core/pressure/pressure.go", "./core/pressure/", "TestPressure_ASignalWhoseSubjectIsGoneIsCleared"},
+		"pressure-classes-stay-apart":                  {"core/pressure/pressure.go", "./core/pressure/", "TestPressure_TheTwoClassesRaiseAndClearIndependently"},
+		"pressure-a-clear-carries-its-threshold":       {"core/pressure/pressure.go", "./core/pressure/", "TestPressure_TheOccupancyBoundaryIsExact"},
+		"pressure-hysteresis-is-two-numbers":           {"core/pressure/pressure.go", "./core/pressure/", "TestPressure_AHoveringFigureRaisesOnceAndClearsOnce"},
 		"a-demand-unit-is-spent-where-it-is-checked":   {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce"},
 		"a-finalisation-is-consumed-not-just-checked":  {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandFinalisation_ManyCallersPresentingOneNoticeYieldOneOwner"},
 		"a-finalisation-checks-the-ending-it-claims":   {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandFinalisation_ItIsRefusedAgainstAnEndingItDoesNotOwn"},
