@@ -8,6 +8,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/pressure"
 	"net"
 	"os"
+	"sort"
 	"sync"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
@@ -26,6 +27,11 @@ import (
 // helloing an old server must be REFUSED at the handshake, not surprised
 // by method-not-found. The server speaks exactly one
 // protocol version; there is no negotiation.
+// Protocol 6 added sys.pressure, the front door's live pressure view. A bump
+// rather than a silent addition because this comment already says why: a newer
+// frontend meeting an older daemon must be told at the handshake, not left to
+// discover "unknown method" for an entry it can see in its own menu. The
+// surface is reached from a menu item, so that is exactly how it would present.
 // Protocol 5 added the ExecSession surface — exec.session_open,
 // exec.session_close, exec.session_run — and made exec.run_script atomic for
 // a script that contains a transaction boundary. The atomicity is why this is
@@ -39,7 +45,7 @@ import (
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 5
+const Protocol int64 = 6
 
 // Session keys the gate and the hello handler share.
 const (
@@ -86,8 +92,41 @@ type Server struct {
 	// which is the one instant nobody is asking about.
 	pressure func() (pressure.Snapshot, error)
 
+	// verbs is every method name this server registered, recorded as it
+	// registers them. It exists because the rule above — bump Protocol when
+	// the verb surface changes — was a rule with no enforcement, and it was
+	// duly broken: sys.pressure shipped on protocol 5. A comment cannot fail
+	// a build. This set can, and does, in TestProtocol_TheVerbSurfaceIsPinned.
+	verbs map[string]struct{}
+
 	stop     chan struct{} // closed by RequestShutdown
 	stopOnce sync.Once
+}
+
+// handle registers a method and records its name. Every registration goes
+// through here rather than straight to the transport, so the recorded surface
+// cannot drift from the served one: a verb added by the usual copy-paste is
+// recorded by the same line that serves it.
+func (s *Server) handle(method string, h golibrpc.Handler) {
+	if _, dup := s.verbs[method]; dup {
+		// Two registrations of one name means the second silently wins and a
+		// whole method is unreachable. Refuse to start rather than serve a
+		// surface nobody wrote down.
+		panic("rpc: duplicate method registration: " + method)
+	}
+	s.verbs[method] = struct{}{}
+	s.rpc.Handle(method, h)
+}
+
+// Verbs reports the registered method surface, sorted. The pin cell reads it;
+// so could an operator asking what a running daemon actually answers.
+func (s *Server) Verbs() []string {
+	out := make([]string, 0, len(s.verbs))
+	for v := range s.verbs {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // FrontDoorInfo is what a client needs in order to dial the front door, read
@@ -191,6 +230,7 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 		notesDir:  o.notesDir,
 		frontDoor: o.frontDoor,
 		pressure:  o.pressure,
+		verbs:     make(map[string]struct{}),
 	}
 
 	ropts := []golibrpc.Option{

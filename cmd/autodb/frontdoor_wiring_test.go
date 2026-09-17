@@ -481,3 +481,30 @@ func TestFrontDoorWiring_ANilAuditSinkIsSafe(t *testing.T) {
 	opts := frontDoorOptions(config.Default(), eng, logger.Nop{}, nil)
 	opts.OnEvent(frontdoor.Event{Kind: frontdoor.EventPressure, Reason: "x", Detail: "{}"})
 }
+
+// THE LISTENER IS GIVEN SOMETHING TO OBSERVE, OR THE WHOLE SURFACE IS DEAD.
+//
+// FOUND IN REVIEW, AND IT IS THE FAILURE THE COMMENT ABOVE frontDoorOptions
+// WARNS ABOUT IN SO MANY WORDS: the frontdoor suite stayed green because each of
+// its cells supplies the seam itself. The library was verified; the wiring was
+// not. Without Capacity the listener never builds a meter, so no refusal is
+// counted, no crossing is emitted, no audit row is written and sys.pressure
+// answers that nothing is observing — every piece correct, and the feature dead
+// in any configured daemon.
+func TestFrontDoorWiring_TheListenerIsGivenSomethingToObserve(t *testing.T) {
+	eng := coreexec.New(nil, nil)
+	t.Cleanup(func() { _ = eng.Close() })
+
+	opts := frontDoorOptions(config.Default(), eng, logger.Nop{}, nil)
+	if opts.Capacity == nil {
+		t.Fatal("the front door is assembled with nothing to read occupancy from, so it " +
+			"builds no meter: refusals go uncounted, crossings are never emitted, and " +
+			"the pressure view reports that nothing is observing — on every real daemon")
+	}
+	// And it is the engine itself rather than a placeholder: the view must
+	// describe the same instance that is refusing people.
+	if opts.Capacity != frontdoor.CapacityReader(eng) {
+		t.Error("the capacity reader is not the engine; the view would describe a " +
+			"different instance than the one refusing people")
+	}
+}

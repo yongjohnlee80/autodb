@@ -318,12 +318,12 @@ func identMap(id auth.Identity) map[string]any {
 // mechanical projection: decode positional args, call the core with the
 // peer IP threaded through, map the result/error. No business logic.
 func (s *Server) register() {
-	s.rpc.Handle("sys.hello", s.helloHandler)
+	s.handle("sys.hello", s.helloHandler)
 	s.registerPressure()
 	s.registerM6()
 
 	// --- auth: sessions & bootstrap ---
-	s.rpc.Handle("auth.needs_bootstrap", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.needs_bootstrap", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 0); err != nil {
 			return nil, err
 		}
@@ -346,7 +346,7 @@ func (s *Server) register() {
 	// ORDINARY login (credentials first, admission second) does not apply
 	// here and its inverse is correct: the address is checked BEFORE the
 	// side effect, because the side effect cannot be undone.
-	s.rpc.Handle("auth.global_ip_admitted", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.global_ip_admitted", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -360,7 +360,7 @@ func (s *Server) register() {
 		}
 		return admitted, nil
 	})
-	s.rpc.Handle("auth.bootstrap", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.bootstrap", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -378,7 +378,7 @@ func (s *Server) register() {
 		}
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
-	s.rpc.Handle("auth.login", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.login", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -413,7 +413,7 @@ func (s *Server) register() {
 	// all, so a caller who forged one would be no better off than by calling
 	// auth.login instead. The daemon's own peer allowlist still applies to
 	// the connection itself and is not forgeable from here.
-	s.rpc.Handle("auth.login_at", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.login_at", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -441,7 +441,7 @@ func (s *Server) register() {
 	//
 	// keyslot.enroll is the ONE-TIME step the acceptance story allows: an
 	// admin, already logged in, cuts a slot so no later restart needs a human.
-	s.rpc.Handle("keyslot.enroll", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("keyslot.enroll", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -451,7 +451,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.EnrollServiceKeyslot(ctx, token, peerIP(req)))
 	})
-	s.rpc.Handle("keyslot.remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("keyslot.remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -467,7 +467,7 @@ func (s *Server) register() {
 	// refused. It reports the LAST ATTEMPT rather than re-reading the keyfile,
 	// because the question is "what happened at boot", not "what would happen
 	// now".
-	s.rpc.Handle("keyslot.status", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("keyslot.status", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -518,7 +518,7 @@ func (s *Server) register() {
 			"store_unlocked": s.auth.Unlocked(),
 		}, nil
 	})
-	s.rpc.Handle("auth.logout", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.logout", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -528,7 +528,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.Logout(ctx, token, peerIP(req)))
 	})
-	s.rpc.Handle("auth.whoami", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.whoami", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -544,7 +544,7 @@ func (s *Server) register() {
 	})
 
 	// --- auth: user management (admin, token-first) ---
-	s.rpc.Handle("auth.user_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.user_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 4); err != nil {
 			return nil, err
 		}
@@ -571,7 +571,7 @@ func (s *Server) register() {
 		return id, nil
 	})
 	// --- auth: the caller's own preferences (no admin gate: your own account) ---
-	s.rpc.Handle("auth.options_get", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.options_get", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -591,7 +591,7 @@ func (s *Server) register() {
 		}
 		return out, nil
 	})
-	s.rpc.Handle("auth.option_set", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.option_set", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -612,7 +612,7 @@ func (s *Server) register() {
 		}
 		return true, nil
 	})
-	s.rpc.Handle("auth.user_role", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.user_role", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -630,7 +630,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.SetUserRole(ctx, token, userID, role, peerIP(req)))
 	})
-	s.rpc.Handle("auth.user_disable", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.user_disable", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -648,7 +648,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.SetUserDisabled(ctx, token, userID, disabled, peerIP(req)))
 	})
-	s.rpc.Handle("auth.user_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.user_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -662,7 +662,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.RemoveUser(ctx, token, userID, peerIP(req)))
 	})
-	s.rpc.Handle("auth.passphrase_change", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.passphrase_change", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -684,7 +684,7 @@ func (s *Server) register() {
 	// returns the LAST statement's result. The core splits with the
 	// classifier's own lexer and runs each statement through the normal
 	// guarded path — the wire adds nothing.
-	s.rpc.Handle("exec.run_script", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("exec.run_script", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -720,7 +720,7 @@ func (s *Server) register() {
 	// history.list is the script-history read side (Objective 5/20). The
 	// CORE decides what the caller may see (admins everything, everyone
 	// else their own executions) — the wire just projects it.
-	s.rpc.Handle("history.list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("history.list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -758,7 +758,7 @@ func (s *Server) register() {
 	// outlives its frontends, so restarting it needs an authorized
 	// remote path — a rebuilt binary otherwise keeps serving from the
 	// old process). Admin-only, audited BEFORE the effect (R6).
-	s.rpc.Handle("sys.shutdown", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("sys.shutdown", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -778,7 +778,7 @@ func (s *Server) register() {
 		return map[string]any{"stopping": true}, nil
 	})
 
-	s.rpc.Handle("auth.passphrase_reset", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.passphrase_reset", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -798,7 +798,7 @@ func (s *Server) register() {
 	})
 
 	// --- auth: grants & allowlist (admin, token-first) ---
-	s.rpc.Handle("auth.grant_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.grant_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 4); err != nil {
 			return nil, err
 		}
@@ -820,7 +820,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.AddGrant(ctx, token, userID, connID, role, peerIP(req)))
 	})
-	s.rpc.Handle("auth.grant_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.grant_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -838,7 +838,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.RemoveGrant(ctx, token, userID, connID, peerIP(req)))
 	})
-	s.rpc.Handle("auth.allowlist_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.allowlist_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -856,7 +856,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.AddAllowedIP(ctx, token, cidr, note, peerIP(req)))
 	})
-	s.rpc.Handle("auth.allowlist_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.allowlist_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -870,7 +870,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.RemoveAllowedIP(ctx, token, cidr, peerIP(req)))
 	})
-	s.rpc.Handle("auth.allowlist_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.allowlist_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -895,7 +895,7 @@ func (s *Server) register() {
 		}
 		return map[string]any{"config": cfgOut, "rows": outRows}, nil
 	})
-	s.rpc.Handle("auth.user_allowlist_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.user_allowlist_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -941,7 +941,7 @@ func (s *Server) register() {
 	// evaluating the prefixes itself — would put a second implementation of
 	// admission in a second process, and the day they disagree is a day
 	// someone is admitted somewhere the rules say they are not.
-	s.rpc.Handle("auth.ip_admitted", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.ip_admitted", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -975,7 +975,7 @@ func (s *Server) register() {
 	// clean arity error rather than minting something unbound — which is the
 	// shape a breaking change should have when the alternative is a credential
 	// that silently reaches everything its owner is granted.
-	s.rpc.Handle("auth.token_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.token_create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		// SIX OR SEVEN. The seventh is the operator's acknowledgement: the
 		// exact canonical CIDRs they were shown and approved for addition to
 		// their OWN allowlist.
@@ -1068,7 +1068,7 @@ func (s *Server) register() {
 	// What minting with these restrictions would ADD to the caller's own
 	// allowlist. Presentation only: the mint recomputes it under the owner's
 	// lock and may add nothing that is not in the set then approved.
-	s.rpc.Handle("auth.token_allowlist_preview", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.token_allowlist_preview", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -1090,7 +1090,7 @@ func (s *Server) register() {
 		}
 		return map[string]any{"missing": strsToAny(missing)}, nil
 	})
-	s.rpc.Handle("auth.token_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.token_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -1123,7 +1123,7 @@ func (s *Server) register() {
 		return out, nil
 	})
 
-	s.rpc.Handle("auth.token_revoke", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.token_revoke", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -1145,7 +1145,7 @@ func (s *Server) register() {
 		return map[string]any{"revoked": true}, nil
 	})
 
-	s.rpc.Handle("auth.user_allowlist_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.user_allowlist_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 4); err != nil {
 			return nil, err
 		}
@@ -1173,7 +1173,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.auth.AddUserIP(ctx, token, userID, cidr, label, peerIP(req)))
 	})
-	s.rpc.Handle("auth.user_allowlist_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.user_allowlist_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -1193,7 +1193,7 @@ func (s *Server) register() {
 	})
 
 	// --- conn: connection management ---
-	s.rpc.Handle("conn.create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("conn.create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 4); err != nil {
 			return nil, err
 		}
@@ -1227,7 +1227,7 @@ func (s *Server) register() {
 		}
 		return id, nil
 	})
-	s.rpc.Handle("conn.list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("conn.list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -1253,7 +1253,7 @@ func (s *Server) register() {
 		}
 		return out, nil
 	})
-	s.rpc.Handle("conn.delete", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("conn.delete", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -1292,7 +1292,7 @@ func (s *Server) register() {
 	// THE PATH COMES FROM CONFIG, NEVER FROM THE CALLER. This reads only the
 	// configured tls_root_ca_file; a caller-supplied path would make this an
 	// arbitrary-file-read verb wearing a certificate's name.
-	s.rpc.Handle("frontdoor.ca_pem", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("frontdoor.ca_pem", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -1325,7 +1325,7 @@ func (s *Server) register() {
 			"system_roots": false,
 		}, nil
 	})
-	s.rpc.Handle("frontdoor.endpoint", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("frontdoor.endpoint", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -1352,7 +1352,7 @@ func (s *Server) register() {
 
 	// conn.set_profile is an audited capability change, independent of network
 	// exposure.
-	s.rpc.Handle("conn.set_profile", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("conn.set_profile", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -1370,7 +1370,7 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.eng.SetConnectionProfile(ctx, token, connID, profile, peerIP(req)))
 	})
-	s.rpc.Handle("conn.set_exposure", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("conn.set_exposure", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -1392,7 +1392,7 @@ func (s *Server) register() {
 	// engine's reload existed and nothing could reach it, which is the state
 	// the accepted policy called out by name: a setter reachable only from a
 	// program embedding the engine is not an operator surface.
-	s.rpc.Handle("policy.show", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("policy.show", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -1402,7 +1402,7 @@ func (s *Server) register() {
 		}
 		return s.eng.ShowPolicy(ctx, token)
 	})
-	s.rpc.Handle("policy.reload", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("policy.reload", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 6); err != nil {
 			return nil, err
 		}
@@ -1448,7 +1448,7 @@ func (s *Server) register() {
 		}
 		return exec.PolicyView(set), nil
 	})
-	s.rpc.Handle("conn.test", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("conn.test", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -1472,7 +1472,7 @@ func (s *Server) register() {
 	// The session id is opaque and engine-issued. It is deliberately NOT the
 	// auth token and NOT the TCP connection: a client may hold several, and
 	// one dying must not take the others with it.
-	s.rpc.Handle("exec.session_open", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("exec.session_open", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -1495,7 +1495,7 @@ func (s *Server) register() {
 	// connection, and closing rolls back any transaction still open on it.
 	// A client that crashes without calling this is reaped by the engine's
 	// idle timeout — this verb is the polite path, not the only one.
-	s.rpc.Handle("exec.session_close", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("exec.session_close", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -1516,7 +1516,7 @@ func (s *Server) register() {
 	// Session-scoped run. The connection is the SESSION's — the caller does
 	// not pass one, and cannot redirect a session at another connection
 	// mid-transaction.
-	s.rpc.Handle("exec.session_run", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("exec.session_run", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -1551,7 +1551,7 @@ func (s *Server) register() {
 	// caller's unresolved ones, oldest first. Both are scoped in core: a
 	// transaction that is not the caller's answers exactly as one that never
 	// existed, so the id space cannot be used to discover what exists.
-	s.rpc.Handle("tx.status", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("tx.status", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		n := len(req.Params)
 		if n != 2 && n != 3 {
 			return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
@@ -1603,7 +1603,7 @@ func (s *Server) register() {
 		return map[string]any{"pending": out}, nil
 	})
 
-	s.rpc.Handle("exec.run", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("exec.run", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -1721,7 +1721,7 @@ func wireVal(v any) any {
 // call, sentinel-constant-only disclosure, wire-vocabulary normalization.
 func (s *Server) registerM6() {
 	// --- schema introspection (authz ≥ reader happens in the core, R13) ---
-	s.rpc.Handle("schema.schemas", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("schema.schemas", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -1743,7 +1743,7 @@ func (s *Server) registerM6() {
 		}
 		return out, nil
 	})
-	s.rpc.Handle("schema.tables", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("schema.tables", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -1774,7 +1774,7 @@ func (s *Server) registerM6() {
 		}
 		return out, nil
 	})
-	s.rpc.Handle("schema.columns", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("schema.columns", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 4); err != nil {
 			return nil, err
 		}
@@ -1808,7 +1808,7 @@ func (s *Server) registerM6() {
 		}
 		return out, nil
 	})
-	s.rpc.Handle("schema.routines", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("schema.routines", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -1839,7 +1839,7 @@ func (s *Server) registerM6() {
 		return map[string]any{"supported": supported, "routines": list}, nil
 	})
 
-	s.rpc.Handle("auth.user_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("auth.user_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -1861,7 +1861,7 @@ func (s *Server) registerM6() {
 	})
 
 	// --- workspaces ---
-	s.rpc.Handle("workspace.create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("workspace.create", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -1879,7 +1879,7 @@ func (s *Server) registerM6() {
 		}
 		return id, nil
 	})
-	s.rpc.Handle("workspace.list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("workspace.list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}
@@ -1906,7 +1906,7 @@ func (s *Server) registerM6() {
 		}
 		return out, nil
 	})
-	s.rpc.Handle("workspace.rename", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("workspace.rename", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -1924,7 +1924,7 @@ func (s *Server) registerM6() {
 		}
 		return nil, wireErr(s.eng.RenameWorkspace(ctx, token, wsID, name, peerIP(req)))
 	})
-	s.rpc.Handle("workspace.delete", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("workspace.delete", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
 			return nil, err
 		}
@@ -1938,7 +1938,7 @@ func (s *Server) registerM6() {
 		}
 		return nil, wireErr(s.eng.DeleteWorkspace(ctx, token, wsID, peerIP(req)))
 	})
-	s.rpc.Handle("workspace.attach", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("workspace.attach", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -1956,7 +1956,7 @@ func (s *Server) registerM6() {
 		}
 		return nil, wireErr(s.eng.AttachConnection(ctx, token, wsID, connID, peerIP(req)))
 	})
-	s.rpc.Handle("workspace.detach", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("workspace.detach", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
 		}
@@ -2009,7 +2009,7 @@ func toAnyList(in []string) []any {
 // that is Johno's to make. Widening this is one line, and narrowing it after
 // somebody has built on it is not, so it starts narrow.
 func (s *Server) registerPressure() {
-	s.rpc.Handle("sys.pressure", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+	s.handle("sys.pressure", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err
 		}

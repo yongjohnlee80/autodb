@@ -45,6 +45,10 @@ type fixture struct {
 	connID  int64
 	eng     *exec.Engine
 	addr    string
+
+	// srv is the server object itself, for the few claims that are about the
+	// daemon rather than about a round-trip -- the pinned verb surface, so far.
+	srv *rpc.Server
 }
 
 // frontDoorConn creates an explicitly exposed v1compat connection a PAT may
@@ -145,7 +149,8 @@ func newFixtureWithAuth(t *testing.T, authOpts []auth.Option, opts ...rpc.Option
 			time.Sleep(time.Millisecond)
 		}
 	}
-	return &fixture{store: store, svc: svc, rootTok: rootTok, connID: connID, eng: eng, addr: srv.Addr()}
+	return &fixture{store: store, svc: svc, rootTok: rootTok, connID: connID, eng: eng,
+		addr: srv.Addr(), srv: srv}
 }
 
 // client is a raw msgpack-RPC test client.

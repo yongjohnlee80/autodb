@@ -629,7 +629,14 @@ func frontDoorOptions(cfg config.Config, eng *coreexec.Engine, oplog logger.Logg
 		Cancels: eng,
 		// The post-auth query path. Without it the listener authenticates a
 		// client and then refuses every statement it sends.
-		Queries:           eng,
+		Queries: eng,
+		// WITHOUT THIS THE METER IS NEVER BUILT and every part of the pressure
+		// surface is correct and unreachable. The listener only observes when
+		// it is given something to read occupancy from, so the whole feature
+		// was dead in a configured daemon while its own suite stayed green --
+		// each cell supplied the seam itself, exactly as the comment above this
+		// function warns.
+		Capacity:          eng,
 		MaxConns:          cfg.FrontDoor.MaxConns,
 		PreAuthMaxConns:   cfg.FrontDoor.PreAuthConns,
 		AuthWorkers:       cfg.FrontDoor.AuthWorkers,
