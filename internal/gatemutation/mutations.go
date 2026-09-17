@@ -62,6 +62,17 @@ type Mutation struct {
 	// cell should fail in milliseconds is better served by a short one, since
 	// a generous timeout turns "the seam was bypassed" into "something hung".
 	Timeout time.Duration
+	// Race runs the cell under the detector.
+	//
+	// FOR CONTROLS WHOSE BREAK IS A RACE AND NOTHING ELSE. A lock released one
+	// line too early changes no result, returns no error and fails no
+	// assertion; the only witness is the detector. Without this the control
+	// would be applied, the cell would pass, and the runner would score it
+	// GREEN -- reporting that a guarantee is unproven when in truth the run
+	// was never equipped to see it. Off by default because -race costs about
+	// ten times the wall clock and most controls have a real assertion to fail
+	// on.
+	Race bool
 	// Count repeats the cell. Non-zero only where a single run would be a
 	// lottery -- see the cancellation control, which was once green 249 times
 	// in 250 and is now deterministic but still worth repeating.
@@ -729,9 +740,16 @@ func All() []Mutation {
 		},
 		{
 			Name: "pressure-only-capacity-refusals-count", Package: "./frontdoor/",
-			File:        "frontdoor/pressure_tick.go",
-			Anchor:      "\tif occ.Charge != outcome.Capacity {\n\t\treturn\n\t}\n",
-			Replacement: "",
+			File: "frontdoor/pressure_tick.go",
+			// REPOINTED WHEN THE EARLY RETURN LEFT. The anchor used to be the
+			// guard itself -- `if occ.Charge != outcome.Capacity { return }` --
+			// which turned out to be doing two jobs: keeping credential
+			// refusals out of the rate, which is right, and keeping them out of
+			// the breakdown entirely, which was the defect. Removing the guard
+			// is no longer available as a mutation, so the break is now the
+			// opposite one: count every class in the rate.
+			Anchor:      "\tif occ.Charge == outcome.Capacity {\n\t\tm.denials.Add(now)\n\t}",
+			Replacement: "\tm.denials.Add(now)",
 			Test:        "TestPressureTick_OnlyCapacityRefusalsAreCounted",
 			Fails:       "a capacity rate must not count",
 			Guarantee:   "that a credential refusal never enters the capacity rate, which would put password guessing into a signal an operator answers by resizing a pool",
@@ -933,6 +951,76 @@ func All() []Mutation {
 			Test:        "TestPressureDoc_TheTunnelRecipeMatchesTheBuild",
 			Fails:       "the recipe forwards to remote port",
 			Guarantee:   "that the documented tunnel names the port this build actually serves, since a recipe pasted under pressure that fails teaches somebody the surface does not work",
+		},
+		{
+			Name: "pressure-the-daemon-is-given-something-to-observe", Package: "./cmd/autodb/",
+			File:        "cmd/autodb/main.go",
+			Anchor:      "\t\tCapacity:          eng,\n",
+			Replacement: "",
+			Test:        "TestFrontDoorWiring_TheListenerIsGivenSomethingToObserve",
+			Fails:       "builds no meter",
+			Guarantee:   "that a configured daemon actually builds a meter, since without one no refusal is counted, no crossing is emitted, no audit row is written, and the whole surface is correct and dead",
+		},
+		{
+			Name: "pressure-credential-refusals-reach-the-view", Package: "./frontdoor/",
+			File:        "frontdoor/pressure_tick.go",
+			Anchor:      "\tm.breakdown.Add(pressure.DenialKey{Reason: string(occ.Reason), Class: pressureClass(occ.Charge)}, now)",
+			Replacement: "\tif occ.Charge != outcome.Capacity {\n\t\tm.mu.Unlock()\n\t\treturn\n\t}\n\tm.breakdown.Add(pressure.DenialKey{Reason: string(occ.Reason), Class: pressureClass(occ.Charge)}, now)",
+			Test:        "TestPressureTick_CredentialRefusalsRenderWithoutRaisingTheCapacityRate",
+			Fails:       "left no row in the breakdown",
+			Guarantee:   "that a credential refusal reaches the view at all, since the class column is the one thing distinguishing a full pool from somebody guessing passwords -- the distinction the incident got wrong",
+		},
+		{
+			Name: "pressure-the-snapshot-holds-its-lock", Package: "./frontdoor/",
+			File:        "frontdoor/pressure_loop.go",
+			Anchor:      "\tl.meter.mu.Lock()\n\tdefer l.meter.mu.Unlock()\n\tdenials := l.meter.breakdown.Rows(now)\n\tomitted := l.meter.breakdown.Omitted()",
+			Replacement: "\tl.meter.mu.Lock()\n\tdenials := l.meter.breakdown.Rows(now)\n\tomitted := l.meter.breakdown.Omitted()\n\tl.meter.mu.Unlock()",
+			Test:        "TestPressureSnapshot_AReaderAndTheTickOverlap",
+			// THE ONLY CONTROL HERE WHOSE BREAK HAS NO ASSERTION TO FAIL. A
+			// lock released one line early returns the same snapshot and the
+			// same error; the detector is the whole witness, so this control
+			// scores nothing without -race.
+			Race:      true,
+			Timeout:   90 * time.Second,
+			Fails:     "race detected during execution of test",
+			Guarantee: "that the view is assembled under the lock the tick writes the latch beneath, since an operator opens this surface precisely when the tick has the most to write",
+		},
+		{
+			Name: "pressure-the-protocol-bump-is-not-optional", Package: "./rpc/",
+			File:        "rpc/server.go",
+			Anchor:      "const Protocol int64 = 6",
+			Replacement: "const Protocol int64 = 5",
+			Test:        "TestProtocol_TheVerbSurfaceIsPinned",
+			Fails:       "does not record",
+			Guarantee:   "that a verb cannot be added on an unchanged protocol number, which is exactly what happened to sys.pressure while a cell pinning the number to 5 stayed green",
+		},
+		{
+			Name: "pressure-a-new-verb-cannot-be-silent", Package: "./rpc/",
+			File:        "rpc/methods.go",
+			Anchor:      "func (s *Server) registerPressure() {\n",
+			Replacement: "func (s *Server) registerPressure() {\n\ts.handle(\"sys.unrecorded\", func(ctx context.Context, req *golibrpc.Request) (any, error) { return nil, nil })\n",
+			Test:        "TestProtocol_TheVerbSurfaceIsPinned",
+			Fails:       "does not record",
+			Guarantee:   "that adding a verb is a visible diff rather than one registration line among sixty-two, since the handshake is the only thing that can tell a newer frontend it has reached an older daemon",
+		},
+		{
+			Name: "pressure-the-surface-stays-off-routable-interfaces", Package: "./cmd/autodb/",
+			File:        "webserver/gateway.go",
+			Anchor:      "func ListenAddr(port int) string { return fmt.Sprintf(\"127.0.0.1:%d\", port) }",
+			Replacement: "func ListenAddr(port int) string { return fmt.Sprintf(\"0.0.0.0:%d\", port) }",
+			Test:        "TestPressureTunnel_TheSurfaceIsUnreachableOffLoopback",
+			Fails:       "a routable address",
+			Guarantee:   "that the browser surface is unreachable without the forward, since it reports other people's session counts and the addresses being refused, and a widened bind would leave every tunnel cell passing",
+		},
+		{
+			Name: "pressure-the-forward-reaches-the-real-address", Package: "./cmd/autodb/",
+			File:        "webserver/gateway.go",
+			Anchor:      "func ListenAddr(port int) string { return fmt.Sprintf(\"127.0.0.1:%d\", port) }",
+			Replacement: "func ListenAddr(port int) string { return fmt.Sprintf(\"127.0.0.1:%d\", port+1) }",
+			Test:        "TestPressureTunnel_TheDocumentedForwardReachesTheSurface",
+			Timeout:     90 * time.Second,
+			Fails:       "nothing answered through the forward",
+			Guarantee:   "that the documented forward arrives at the address the gateway actually computes, rather than at a number two documents happen to agree on",
 		},
 	}
 }
