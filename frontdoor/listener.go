@@ -52,6 +52,10 @@ type Listener struct {
 	// thereby testing a different package than the one that ships.
 	hookDemandManifestBroken func() bool
 
+	// meter counts wire refusals and latches pressure signals. Nil when
+	// nothing is observing, which must change nothing a client can see.
+	meter *pressureMeter
+
 	// hookOfferDecision fires at every pass of the session loop's read, with
 	// the reader state the decision was made on and what was decided.
 	//
@@ -1129,7 +1133,7 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 			// denial; a peer that went away is owed nothing and could not read
 			// it anyway.
 			if credential.Outcome.Wire() == WireUniformDenial {
-				if derr := sendDenialOccurrence(stream, credential.Occurrence); derr != nil {
+				if derr := l.denyWithOccurrence(stream, credential.Occurrence); derr != nil {
 					l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 				}
 			}
@@ -1194,7 +1198,7 @@ func (l *Listener) handle(ctx context.Context, tok *acceptToken) {
 	if l.testDenialDelay > 0 {
 		time.Sleep(l.testDenialDelay)
 	}
-	if derr := sendDenialOccurrence(stream, occ); derr != nil {
+	if derr := l.denyWithOccurrence(stream, occ); derr != nil {
 		l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 	}
 	closeReason = outcome.Denied.String()
