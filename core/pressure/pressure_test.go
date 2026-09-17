@@ -84,6 +84,14 @@ func TestPressure_TheOccupancyBoundaryIsExact(t *testing.T) {
 		if len(ev) != 1 || ev[0].Entered {
 			t.Fatalf("cap %d did not clear at %d", tc.capacity, tc.clearAt)
 		}
+		// THE CLEAR CARRIES ITS OWN THRESHOLD, and this assertion was missing
+		// while the comment above promised it -- so returning a flat zero here
+		// survived every cell. The number beside the figure is the one an
+		// operator uses to know how much room came back.
+		if ev[0].Threshold != tc.clearAt {
+			t.Errorf("cap %d reported clear threshold %d, want %d",
+				tc.capacity, ev[0].Threshold, tc.clearAt)
+		}
 	}
 }
 
