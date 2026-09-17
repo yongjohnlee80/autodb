@@ -159,3 +159,49 @@ func (l *Listener) emitPressure(caps CapacityReader) {
 		l.onEvent(Event{Kind: EventPressure, Reason: ev.ID.String(), Detail: string(detail)})
 	}
 }
+
+// PressureSnapshot assembles the view from the same inputs the tick judges.
+//
+// THE SAME TRACKER, SO THE VIEW AND THE JOURNAL CANNOT DISAGREE. If this
+// assembled its own latch, a row could read calm on the screen while the event
+// stream said it had entered — at the same instant, about the same figure. One
+// latch, read twice.
+//
+// IT JUDGES NOTHING. Observe is the tick's job and runs on the tick's schedule;
+// a reader that also judged would raise and clear signals whenever somebody
+// happened to open the view, which would put an operator's own attention into
+// the event stream.
+func (l *Listener) PressureSnapshot(caps CapacityReader) (pressure.Snapshot, error) {
+	if l.meter == nil || caps == nil {
+		// NAMED, NOT EMPTY. An empty snapshot and a front door under no
+		// pressure render identically, and the whole point of this surface is
+		// that somebody can tell the difference.
+		return pressure.Snapshot{}, errPressureUnavailable
+	}
+	snap := caps.CapacitySnapshot()
+	now := l.meter.now()
+	lanes := l.admit.laneSnapshot(now)
+
+	throttled := make([]pressure.ThrottledRow, 0, len(lanes.Throttled))
+	for _, th := range lanes.Throttled {
+		throttled = append(throttled, pressure.ThrottledRow{Host: th.Host, Remaining: th.Remaining})
+	}
+
+	l.meter.mu.Lock()
+	denials := l.meter.breakdown.Rows(now)
+	omitted := l.meter.breakdown.Omitted()
+	tracker := l.meter.tracker
+	l.meter.mu.Unlock()
+
+	return tracker.Assemble(pressure.ViewInput{
+		Caps: pressure.Caps{
+			Sessions: snap.Sessions, SessionCap: snap.SessionCap,
+			PerUser: snap.PerUser, PerUserCap: snap.PerUserCap,
+			Leases: snap.Leases, LeaseCap: snap.LeaseCap,
+		},
+		Conns: lanes.Conns, MaxConns: lanes.MaxConns,
+		PreAuth: lanes.PreAuth, MaxPreAuth: lanes.MaxPreAuth,
+		Denials: denials, DenialsOmitted: omitted,
+		Throttled: throttled,
+	}), nil
+}

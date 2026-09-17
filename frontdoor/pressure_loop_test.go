@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -289,5 +290,72 @@ func TestPressureLoop_ATickArrivingAtShutdownDoesNotDispatch(t *testing.T) {
 	if len(*got) != 0 {
 		t.Errorf("a tick dispatched %v after the listener was closed; the surface would "+
 			"be reporting pressure about an instance that has stopped serving", *got)
+	}
+}
+
+// THE VIEW READS THE SAME LATCH THE JOURNAL DOES.
+//
+// A snapshot that judged for itself could show a row calm while the event
+// stream said it had entered — the same figure, the same instant, two answers.
+// This drives a crossing through the tick and then asks the snapshot.
+func TestPressureSnapshot_ItAgreesWithWhatWasEmitted(t *testing.T) {
+	at := time.Unix(0, 0)
+	l, got := pressListener(t, &at)
+	caps := fixedCaps{exec.CapacitySnapshot{Leases: map[int64]int{7: 10}, LeaseCap: 10}}
+
+	l.emitPressure(caps)
+	if len(*got) != 1 || !strings.Contains((*got)[0].Detail, `"state":"entered"`) {
+		t.Fatalf("the tick did not raise: %v", *got)
+	}
+
+	snap, err := l.PressureSnapshot(caps)
+	if err != nil {
+		t.Fatalf("reading the snapshot: %v", err)
+	}
+	if len(snap.Leases) != 1 || !snap.Leases[0].Raised {
+		t.Errorf("the journal says entered and the view shows %+v; one latch read twice "+
+			"must not give two answers about the same figure", snap.Leases)
+	}
+}
+
+// READING THE VIEW DOES NOT EMIT ANYTHING.
+//
+// Judging is the tick's job and runs on the tick's schedule. A reader that also
+// judged would raise and clear signals whenever somebody opened the view, which
+// puts an operator's own attention into the event stream they are reading.
+func TestPressureSnapshot_ReadingItRaisesNothing(t *testing.T) {
+	at := time.Unix(0, 0)
+	l, got := pressListener(t, &at)
+	caps := fixedCaps{exec.CapacitySnapshot{Leases: map[int64]int{7: 10}, LeaseCap: 10}}
+
+	for range 5 {
+		if _, err := l.PressureSnapshot(caps); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(*got) != 0 {
+		t.Errorf("reading the view five times emitted %v; an operator opening a surface "+
+			"must not appear in the record they are reading", *got)
+	}
+
+	// AND THE CROSSING IS STILL THE TICK'S TO REPORT. Asserting only that
+	// nothing was EMITTED missed the worse failure: a reader that judged
+	// silently would latch the signal, and the tick would then find nothing
+	// changed and report the crossing to nobody. The raise must survive having
+	// been looked at. Proven by mutating the reader to judge and watching the
+	// emitted-events assertion above pass unchanged.
+	l.emitPressure(caps)
+	if len(*got) != 1 || !strings.Contains((*got)[0].Detail, `"state":"entered"`) {
+		t.Errorf("after the view was read five times the tick emitted %v; reading a "+
+			"surface must not consume the transition the journal exists to record", *got)
+	}
+}
+
+// A VIEW WITH NOTHING BEHIND IT SAYS SO, RATHER THAN RENDERING CALM.
+func TestPressureSnapshot_NothingObservingIsAnError(t *testing.T) {
+	var l Listener // no meter
+	if _, err := l.PressureSnapshot(fixedCaps{}); err == nil {
+		t.Error("an unobserved listener returned a snapshot rather than an error; an " +
+			"empty view and a quiet front door render identically")
 	}
 }

@@ -1,6 +1,7 @@
 package frontdoor
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -23,15 +24,23 @@ const denialsToRaise = 5
 type pressureMeter struct {
 	mu      sync.Mutex
 	denials pressure.DenialWindow
-	tracker *pressure.Tracker
-	now     func() time.Time
+	// breakdown answers "what is refusing people", where denials answers only
+	// "how many". The rate signal needs the total; the view needs the split.
+	breakdown *pressure.DenialBreakdown
+	tracker   *pressure.Tracker
+	now       func() time.Time
 }
+
+// errPressureUnavailable is returned rather than an empty snapshot, because an
+// empty snapshot and a quiet front door render identically.
+var errPressureUnavailable = errors.New("frontdoor: pressure is not being observed on this instance")
 
 func newPressureMeter(now func() time.Time) *pressureMeter {
 	if now == nil {
 		now = time.Now
 	}
-	return &pressureMeter{tracker: pressure.NewTracker(now), now: now}
+	return &pressureMeter{tracker: pressure.NewTracker(now),
+		breakdown: pressure.NewDenialBreakdown(), now: now}
 }
 
 // recordDenial counts a refusal that reached the wire, if it was a capacity one.
@@ -46,7 +55,11 @@ func (m *pressureMeter) recordDenial(occ outcome.Occurrence) {
 		return
 	}
 	m.mu.Lock()
-	m.denials.Add(m.now())
+	now := m.now()
+	m.denials.Add(now)
+	// RECORDED IN THE SAME HOLD AS THE TOTAL, so the view's split and the
+	// signal's total can never describe different sets of refusals.
+	m.breakdown.Add(pressure.DenialKey{Reason: string(occ.Reason), Class: pressureClass(occ.Charge)}, now)
 	m.mu.Unlock()
 }
 
@@ -86,4 +99,13 @@ func (l *Listener) denyWithOccurrence(w interface {
 		l.meter.recordDenial(occ)
 	}
 	return nil
+}
+
+// pressureClass maps a charge class to the view's class. Capacity is ours;
+// everything else that reaches a client is theirs.
+func pressureClass(c outcome.Charge) pressure.Class {
+	if c == outcome.Capacity {
+		return pressure.Capacity
+	}
+	return pressure.Credential
 }
