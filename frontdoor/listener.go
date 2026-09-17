@@ -56,6 +56,14 @@ type Listener struct {
 	// nothing is observing, which must change nothing a client can see.
 	meter *pressureMeter
 
+	// capacity is what the pressure tick reads occupancy from. Nil when
+	// nothing is observing.
+	capacity CapacityReader
+
+	// testPressureInterval shortens the pressure tick so a cell can observe
+	// the loop rather than wait ten seconds for it. Test-only, in-package.
+	testPressureInterval time.Duration
+
 	// hookOfferDecision fires at every pass of the session loop's read, with
 	// the reader state the decision was made on and what was decided.
 	//
@@ -268,6 +276,12 @@ type Options struct {
 	// every statement with an accurate error rather than pretending.
 	Queries QueryExecutor
 
+	// Capacity lets the pressure tick read occupancy. Nil turns pressure
+	// reporting off entirely and changes nothing else — this is wiring, like
+	// Queries beside it, not a threshold: the scope is forbidden a new
+	// configuration key and has none.
+	Capacity CapacityReader
+
 	// GeneralLaneBytes is the process-wide general resident budget (matrix §1.4).
 	// Zero takes the 1 GiB default.
 	//
@@ -466,6 +480,10 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	if l.onEvent == nil {
 		l.onEvent = func(Event) {}
 	}
+	l.capacity = opt.Capacity
+	if l.capacity != nil {
+		l.meter = newPressureMeter(nil)
+	}
 	l.authn = opt.Authn
 	l.cancels = opt.Cancels
 	l.onSession = opt.OnSession
@@ -612,6 +630,10 @@ func (l *Listener) Addr() net.Addr { return l.ln.Addr() }
 
 // Serve accepts until ctx is cancelled or Close is called.
 func (l *Listener) Serve(ctx context.Context) error {
+	// STARTED HERE AND ON THE SAME WAITGROUP CLOSE WAITS ON, so a shut-down
+	// front door leaves nothing behind reporting pressure about an instance
+	// that has stopped serving.
+	l.runPressure(l.capacity)
 	go func() {
 		select {
 		case <-ctx.Done():
