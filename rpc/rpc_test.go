@@ -1164,15 +1164,23 @@ func TestProtocolBumpRefusesTheOlderClient(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
 
-	if rpc.Protocol != 5 {
-		t.Fatalf("Protocol = %d, want 5 — R5 changed what exec.run_script MEANS for a "+
-			"transactional script, and an unbumped handshake lets a client keep the old "+
-			"assumption against the new behaviour", rpc.Protocol)
-	}
+	// The literal `Protocol != 5` guard that stood here is GONE, and where it
+	// went matters. It was trying to catch an unaccompanied change to the verb
+	// surface, and it could only ever catch a change to the number -- so it
+	// failed at the one thing it was for: sys.pressure was added on protocol 5
+	// with this cell green. That job is now
+	// TestProtocol_TheVerbSurfaceIsPinned, which watches the surface itself.
+	//
+	// What remains here is the durable claim, and it does not move with the
+	// number: 4 is the last protocol that read `BEGIN; ...; COMMIT;` in
+	// exec.run_script as independent statements, so a client declaring it must
+	// never be admitted to a server that runs the same text in one transaction.
 	c := f.dial(t)
 	errVal, _ := c.call("sys.hello", map[string]any{"protocol": int64(4), "name": "stale"})
 	if errVal == nil {
-		t.Fatal("a protocol-4 client completed the handshake against a protocol-5 server")
+		t.Fatalf("a protocol-4 client completed the handshake against a protocol-%d "+
+			"server: it will send a transactional script and get the atomicity it was "+
+			"built to not expect", rpc.Protocol)
 	}
 }
 
