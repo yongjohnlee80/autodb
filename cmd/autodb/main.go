@@ -480,7 +480,16 @@ func runServe(configPath string) error {
 	// REFUSE — and a daemon that is going to refuse to start should do so
 	// before it has told anyone it is serving. After for the stop, so a wire
 	// session's teardown still has an engine to release into.
-	fd, fdServe, ferr := startFrontDoor(serveCtx, cfg, eng, oplog)
+	// The durable sink for pressure crossings. Failures are logged and never
+	// propagated: a meta-store hiccup must not take down the front door, and a
+	// missing troubleshooting row is not worth an outage.
+	fdAudit := func(action, detail string) {
+		if err := svc.Audit(serveCtx, 0, "", action, detail); err != nil {
+			logger.Notice(oplog, map[string]any{"frontdoor": "audit failed",
+				"action": action, "error": err.Error()})
+		}
+	}
+	fd, fdServe, ferr := startFrontDoor(serveCtx, cfg, eng, oplog, fdAudit)
 	if ferr != nil {
 		ln.Close()
 		return ferr
@@ -573,7 +582,7 @@ func runServe(configPath string) error {
 // without a front door, because an operator who configured one and got a
 // running process without it would have no reason to look.
 func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine,
-	oplog logger.Logger) (*frontdoor.Listener, <-chan error, error) {
+	oplog logger.Logger, audit auditSink) (*frontdoor.Listener, <-chan error, error) {
 
 	if !frontdoor.EnabledFrom(cfg.FrontDoor) {
 		return nil, nil, nil
@@ -582,7 +591,7 @@ func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine
 	if err != nil {
 		return nil, nil, fmt.Errorf("front door: %w", err)
 	}
-	l, err := frontdoor.Open(cfg.FrontDoor.Bind, tlsCfg, frontDoorOptions(cfg, eng, oplog))
+	l, err := frontdoor.Open(cfg.FrontDoor.Bind, tlsCfg, frontDoorOptions(cfg, eng, oplog, audit))
 	if err != nil {
 		return nil, nil, fmt.Errorf("front door: %w", err)
 	}
@@ -599,7 +608,11 @@ func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine
 // was never passed, every authenticated client got 0A000, and the whole
 // frontdoor suite stayed green because each of its cells supplies the seam
 // itself. The library was verified; the wiring was not.
-func frontDoorOptions(cfg config.Config, eng *coreexec.Engine, oplog logger.Logger) frontdoor.Options {
+// auditSink writes a durable row. Nil where nothing should be written.
+type auditSink func(action, detail string)
+
+func frontDoorOptions(cfg config.Config, eng *coreexec.Engine, oplog logger.Logger,
+	audit auditSink) frontdoor.Options {
 	return frontdoor.Options{
 		Authn:   eng,
 		Cancels: eng,
@@ -628,6 +641,25 @@ func frontDoorOptions(cfg config.Config, eng *coreexec.Engine, oplog logger.Logg
 			logger.Notice(oplog, map[string]any{
 				"frontdoor": e.Kind, "reason": e.Reason, "peer": e.Peer, "detail": e.Detail,
 			})
+			// A PRESSURE CROSSING IS ALSO WRITTEN DURABLY, and it is the one
+			// kind here that may be.
+			//
+			// The paragraph above withholds durable rows because an anonymous
+			// peer can make this process write, and that reasoning still holds
+			// for every per-refusal event: they arrive as fast as somebody can
+			// dial. A crossing is not one of those. It is a LATCHED
+			// TRANSITION -- one row when a figure crosses, one when it comes
+			// back, and hysteresis between the two thresholds so a hovering
+			// figure produces neither. No peer can raise the rate of these
+			// beyond the rate at which the situation itself actually changes.
+			//
+			// It is written for troubleshooting: the operational log is
+			// whatever the journal has kept, and the question this scope
+			// exists to answer -- "was the pool full at the time, and for how
+			// long" -- is asked days later, by somebody reading the meta store.
+			if audit != nil && e.Kind == frontdoor.EventPressure {
+				audit("frontdoor_pressure", e.Reason+" "+e.Detail)
+			}
 		},
 	}
 }
