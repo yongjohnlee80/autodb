@@ -166,13 +166,6 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 		// So the claim is taken atomically, under this candidate's own lock,
 		// against the same state the reservation commits to. demandMu is a leaf
 		// and nothing that touches a socket runs while it is held.
-		if h := r.hookAtDemandClaim; h != nil && eligible {
-			// AT THE CLAIM BOUNDARY, under this candidate's own lock. The
-			// binding test convention requires a concurrency cell to FORCE the
-			// window rather than hope for it, and this window is one statement
-			// wide -- unreachable from outside the function.
-			h(s.id)
-		}
 		claimed := eligible && r.tryPromiseDemand(leaseConn, s.id)
 		// The reservation is taken INSIDE this same hold. It is the ordinary
 		// close claim, so it also settles ownership against the reaper, an
@@ -592,6 +585,17 @@ func (r *sessionRegistry) pressDemand(leaseConn int64) bool {
 	// the reservation itself -- this answer is stale the instant it is read.
 	if r == nil || !r.demandOutstanding(leaseConn) {
 		return false
+	}
+	if h := r.hookAfterDemandCheck; h != nil {
+		// THE STALE-CHECK WINDOW, WHICH IS WHERE THE RACE ACTUALLY LIVED.
+		//
+		// Two callers can both read "one is still owed" here before either has
+		// selected anything, and both then go on to select. That is the window
+		// the old design lost a session in, and it is the only one a cell can
+		// hold both callers inside: further down, the candidate walk takes each
+		// candidate's mutex in turn, so the second caller is parked on a lock
+		// rather than deciding anything.
+		h()
 	}
 	r.mu.Lock()
 	demand := r.onDemand

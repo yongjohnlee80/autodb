@@ -203,26 +203,26 @@ func TestDemandRetry_ACancelledRequestLeavesNoDemandBehind(t *testing.T) {
 	}
 }
 
-// ONE WAITER IS SPENT ONCE, WITH THE WINDOW FORCED BY A SEAM, NOT BY TIMING.
+// ONE WAITER IS SPENT ONCE, WITH BOTH CALLERS HELD INSIDE THE STALE WINDOW.
 //
-// THE FIRST VERSION OF THIS CELL PROVED LESS THAN IT CLAIMED. It opened both
-// offers before starting the goroutines, so the first offer had already
-// reserved a holder and only one eligible candidate remained when the two
-// callers were released; the launch gate was a starting pistol, not a barrier,
-// and the mutation was caught by repeated attempts rather than by simultaneity.
+// THIS CELL HAS BEEN WRONG TWICE, AND BOTH VERSIONS WERE WRONG ABOUT WHERE THE
+// RACE LIVES. The first opened both offers before starting its goroutines, so
+// one holder was already reserved and only one candidate remained; its launch
+// gate was a starting pistol, not a barrier. The second put a seam at the claim
+// boundary, which cannot hold two callers at once -- the candidate walk takes
+// each candidate's mutex in turn, so the second caller parks on a lock rather
+// than deciding anything -- and then inferred that non-arrival from a fixed
+// sleep, which the test convention forbids for exactly this reason.
 //
-// The seam below fires at the claim boundary with the candidate's own lock
-// held. One caller is held INSIDE that window while the other is released to
-// reach its own claim on a DIFFERENT candidate, which is the shape that ends
-// two sessions for one request when the claim is not atomic.
+// The window is earlier. Two callers can both pass pressDemand's advisory
+// outstanding check before either selects anything, and both then go on to
+// select. That is the window the old design lost a session in, and it is the
+// one both callers can genuinely be held inside. Afterwards the candidate walk
+// may serialise as it likes: the first claims and reserves A, and the second --
+// which passed the stale check when the unit looked free -- reaches B and must
+// be refused there.
 //
-// A NOTE ON WHAT CANNOT BE FORCED, because it bears on how much this proves:
-// reserveDemandVictim walks its candidates in one order and takes each
-// candidate's mutex in turn, so two callers cannot stand at the claim boundary
-// for the SAME candidate at once -- the second blocks on the first's lock. What
-// is forced here is the reachable half of the race: a second claim decided
-// while the first is in flight, on the next candidate. That is the decision
-// that must refuse.
+// The barrier is observable. Nothing here sleeps to infer a state.
 func TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce(t *testing.T) {
 	now := time.Now()
 	holders := []*session{
@@ -239,10 +239,9 @@ func TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce(t *testing.T) {
 	}()
 	awaitSeq(t, seen)
 
-	// OFFERS PUBLISHED DIRECTLY, not through OfferReceive. OfferReceive also
-	// presses demand, which would reserve a holder before the barrier is armed
-	// and leave only one eligible candidate -- the exact flaw in this cell's
-	// previous version.
+	// Receive state published DIRECTLY. Going through OfferReceive would press
+	// demand and reserve a holder before the barrier was armed, which is what
+	// hollowed out the first version of this cell.
 	for _, h := range holders {
 		h.mu.Lock()
 		h.busy = false
@@ -251,24 +250,12 @@ func TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce(t *testing.T) {
 		h.mu.Unlock()
 	}
 
-	var (
-		mu      sync.Mutex
-		reached []SessionID
-		held    = make(chan struct{})
-		first   = make(chan struct{})
-		once    sync.Once
-	)
-	r.hookAtDemandClaim = func(id SessionID) {
-		mu.Lock()
-		reached = append(reached, id)
-		n := len(reached)
-		mu.Unlock()
-		if n == 1 {
-			// HELD INSIDE THE WINDOW: the unit is not yet spent, and the
-			// second caller decides its own claim while that is true.
-			once.Do(func() { close(first) })
-			<-held
-		}
+	var passed sync.WaitGroup
+	passed.Add(len(holders))
+	release := make(chan struct{})
+	r.hookAfterDemandCheck = func() {
+		passed.Done()
+		<-release
 	}
 
 	var done sync.WaitGroup
@@ -276,46 +263,21 @@ func TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce(t *testing.T) {
 		done.Add(1)
 		go func() {
 			defer done.Done()
-			r.reserveDemandVictim(7, now)
+			r.pressDemand(7)
 		}()
 	}
 
+	bothPassed := make(chan struct{})
+	go func() { passed.Wait(); close(bothPassed) }()
 	select {
-	case <-first:
+	case <-bothPassed:
 	case <-time.After(5 * time.Second):
-		t.Fatal("no caller reached the claim boundary, so the window was never entered")
+		t.Fatal("both callers never passed the outstanding check together, so the stale " +
+			"window was never entered and this cell proves nothing")
 	}
-	// MEASURED, NOT ASSUMED: can the second caller reach its own claim while
-	// the first is held inside the window? It cannot, and the cell records that
-	// rather than implying otherwise. reserveDemandVictim walks one candidate
-	// order and takes each candidate's mutex in turn, so the second caller is
-	// parked on the first candidate's lock, not standing at a claim boundary.
-	time.Sleep(200 * time.Millisecond)
-	mu.Lock()
-	duringHold := len(reached)
-	mu.Unlock()
-	if duringHold > 1 {
-		t.Logf("two callers stood at the claim boundary together (%d); the candidate walk "+
-			"no longer serialises them, so this cell can be strengthened", duringHold)
-	}
-
-	close(held)
+	// Both are now past the advisory check, each believing a unit is free.
+	close(release)
 	done.Wait()
-
-	mu.Lock()
-	distinct := map[SessionID]bool{}
-	for _, id := range reached {
-		distinct[id] = true
-	}
-	mu.Unlock()
-	// BOTH CLAIMS WERE DECIDED AGAINST ONE UNIT, which is the reachable half of
-	// the race and the half that must refuse: the second caller decides its own
-	// claim on a different candidate after the first has spent the unit.
-	if len(distinct) < 2 {
-		t.Fatalf("only %d distinct candidate(s) reached the claim boundary, so two "+
-			"claims were never decided against one unit and this cell proves nothing",
-			len(distinct))
-	}
 
 	reserved := 0
 	for _, h := range holders {
@@ -330,6 +292,16 @@ func TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce(t *testing.T) {
 	}
 	if n := r.promisedCount(7); n != 1 {
 		t.Errorf("%d promises recorded for one waiter, want 1", n)
+	}
+	open := 0
+	for _, h := range holders {
+		if h.get() == sessOpen {
+			open++
+		}
+	}
+	if open != 1 {
+		t.Errorf("%d holders left open, want 1 — the second caller passed the stale check "+
+			"and must still have been refused at the claim", open)
 	}
 }
 
