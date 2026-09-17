@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/pressure"
 	"net"
 	"os"
 	"sync"
@@ -79,6 +80,12 @@ type Server struct {
 	// must not print.
 	frontDoor func() FrontDoorInfo
 
+	// pressure reads the front door's live pressure view, or nil when nothing
+	// is observing. A FUNCTION for the same reason frontDoor is one: a value
+	// captured at New would describe the instant the daemon assembled itself,
+	// which is the one instant nobody is asking about.
+	pressure func() (pressure.Snapshot, error)
+
 	stop     chan struct{} // closed by RequestShutdown
 	stopOnce sync.Once
 }
@@ -127,6 +134,7 @@ type options struct {
 	listener  net.Listener
 	notesDir  string
 	frontDoor func() FrontDoorInfo
+	pressure  func() (pressure.Snapshot, error)
 }
 
 // WithLogger sets the transport logger.
@@ -154,6 +162,16 @@ func WithNotesDir(dir string) Option {
 // config: rpc.New is called with cfg.Server and has never been handed
 // cfg.FrontDoor, and passing the config would answer the wrong question. What
 // a card needs is whether the listener BOUND and WHERE, not what was asked for.
+// WithPressure supplies a reader for the front door's live pressure view.
+//
+// Absent, the method answers that nothing is observing rather than returning an
+// empty view: an empty pressure report and a front door under no pressure at all
+// render identically, and the whole point of this surface is that somebody can
+// tell the difference.
+func WithPressure(fn func() (pressure.Snapshot, error)) Option {
+	return func(o *options) { o.pressure = fn }
+}
+
 func WithFrontDoor(fn func() FrontDoorInfo) Option {
 	return func(o *options) { o.frontDoor = fn }
 }
@@ -172,6 +190,7 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 		instance: newInstanceID(), stop: make(chan struct{}),
 		notesDir:  o.notesDir,
 		frontDoor: o.frontDoor,
+		pressure:  o.pressure,
 	}
 
 	ropts := []golibrpc.Option{

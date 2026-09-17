@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/pressure"
 	"math"
 	"net"
 	"os"
@@ -1656,5 +1657,55 @@ func TestKeyslot_StatusReportsARealFailure(t *testing.T) {
 	if m["store_unlocked"] != true {
 		t.Errorf("store_unlocked = %v; a failed keyslot over an open store must report both",
 			m["store_unlocked"])
+	}
+}
+
+// THE PRESSURE VIEW IS AUTHENTICATED, AND IT IS NOT AN ORDINARY USER'S.
+//
+// The view discloses operational detail about OTHER PEOPLE: which users hold
+// sessions, which source addresses are being held out, and what is being
+// refused. Nothing in the design settles who may read that, so it follows the
+// rule keyslot.status was corrected to after exactly this oversight — deny
+// before you disclose.
+//
+// The audience is an owner's decision and may widen. This cell is what makes
+// widening a deliberate act rather than a drift: change the rule and it fails.
+func TestPressure_TheViewIsAdminOnly(t *testing.T) {
+	// A READER THAT ALWAYS ANSWERS, so the ONLY thing that can refuse is the
+	// authority check. The first version of this cell used a fixture with no
+	// pressure reader at all, so the handler errored for everybody and the cell
+	// passed with the admin requirement removed — it was asserting that the
+	// method fails, which it did for the wrong reason.
+	f := newFixture(t, rpc.WithPressure(func() (pressure.Snapshot, error) {
+		return pressure.Snapshot{}, nil
+	}))
+	c := f.session(t)
+
+	errVal, _ := c.call("sys.pressure", "not-a-real-token")
+	if errVal == nil {
+		t.Fatal("sys.pressure answered an unauthenticated caller; whose sessions are " +
+			"open and which addresses are throttled is not a question anyone with a " +
+			"socket gets to ask")
+	}
+
+	// An ordinary editor is authenticated and still must not read it.
+	if errVal, _ := c.call("auth.user_create", f.rootTok,
+		"pressure-editor", "editor-passphrase", "editor"); errVal != nil {
+		t.Fatalf("creating the editor: %v", errVal)
+	}
+	editorTok := c.login("pressure-editor", "editor-passphrase")
+	errVal, _ = c.call("sys.pressure", editorTok)
+	if errVal == nil {
+		t.Error("sys.pressure answered a non-admin; the view reports other users' " +
+			"session counts and the source addresses being refused, and nothing in " +
+			"the design authorises disclosing those to every authenticated caller")
+	}
+
+	// AND AN ADMIN IS ANSWERED. Without this the cell passes when the method
+	// refuses everybody, which is how the first version survived having its
+	// authority check removed.
+	if errVal, _ := c.call("sys.pressure", f.rootTok); errVal != nil {
+		t.Errorf("sys.pressure refused an admin: %v — a surface nobody can open is "+
+			"the failure this whole scope exists to end", errVal)
 	}
 }
