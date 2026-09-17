@@ -91,3 +91,13 @@ func (w *rateWindow) total(now time.Time) int {
 	}
 	return sum
 }
+
+// DenialWindow is the exported face of the six-bucket rate window, so the front
+// door can count refusals without this package owning the front door's state.
+type DenialWindow struct{ w rateWindow }
+
+// Add records one denial at this instant.
+func (d *DenialWindow) Add(now time.Time) { d.w.add(now) }
+
+// Total reports the denials inside the window ending now, evicting as it reads.
+func (d *DenialWindow) Total(now time.Time) int { return d.w.total(now) }
