@@ -307,3 +307,23 @@ func hostOf(peer string) string {
 	}
 	return peer
 }
+
+// throttledSources lists the sources currently inside their failure window,
+// pruning as it reads.
+//
+// PRUNED ON THE READ, because a source that stopped failing an hour ago must
+// not still appear in a view of what is happening now — and because nothing
+// else would ever remove it if the source never dials again. The prune is the
+// same one the admission path uses, so the view and the decision cannot
+// disagree about who is throttled.
+func (a *admitter) throttledSources(now time.Time) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out []string
+	for host := range a.failures {
+		if a.throttledLocked(host, now) {
+			out = append(out, host)
+		}
+	}
+	return out
+}
