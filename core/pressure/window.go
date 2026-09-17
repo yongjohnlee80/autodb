@@ -107,8 +107,14 @@ func (w *rateWindow) total(now time.Time) int {
 	return sum
 }
 
-// DenialWindow is the exported face of the six-bucket rate window, so the front
+// DenialWindow is the exported face of the bucketed rate window, so the front
 // door can count refusals without this package owning the front door's state.
+//
+// THE COUNT IS NOT IN THIS SENTENCE, DELIBERATELY. It said "six-bucket" and
+// went stale the moment the ring grew to seven -- caught in review, one round
+// after the change. A doc comment that restates a constant is a second place
+// for the number to live and the one nobody updates, so this points at the
+// constant instead of repeating it. See buckets.
 type DenialWindow struct{ w rateWindow }
 
 // Add records one denial at this instant.
