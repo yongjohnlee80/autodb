@@ -78,7 +78,13 @@ func (d *Dimension) Subjects() []string {
 func (d *Dimension) Len() int { return len(d.seen) }
 
 // Omitted reports how many subjects have been dropped to stay within the cap
-// since the last time the count was read.
+// over this dimension's whole life. It is CUMULATIVE and reading it does not
+// reset it.
+//
+// An earlier version of this sentence said "since the last time the count was
+// read", which would make two readers interfere with each other and neither
+// able to say so. A running total is the honest shape for a figure a view
+// renders on every tick.
 //
 // THE NUMBER IS PART OF THE VIEW, not an implementation detail. A list silently
 // truncated at sixteen tells an operator that sixteen sources are throttled

@@ -188,8 +188,14 @@ func NewTracker(now func() time.Time) *Tracker {
 	return &Tracker{raised: map[ID]Signal{}, now: now}
 }
 
-// Observe judges every reading and returns the crossings, oldest identity
-// first so a run is stable enough to assert on.
+// Observe judges every reading and returns the crossings, ordered by signal
+// name and then subject so a run is stable enough to assert on.
+//
+// BY NAME, NOT BY AGE. An earlier version of this sentence said "oldest
+// identity first", which the code has never done -- there is no arrival order
+// recorded to sort by. A comment describing an ordering the code does not
+// produce is worse than none, because the next person writes an assertion
+// against it.
 //
 // READINGS ARE THE WHOLE TRUTH FOR THIS TICK. A signal that was raised and is
 // absent from this set has nothing left to be raised about -- the user
@@ -265,8 +271,19 @@ func (t *Tracker) clears(r Reading) bool {
 	switch r.Kind {
 	case Occupancy:
 		return r.Cap <= 0 || r.Value*100 <= r.Cap*clearPercent
-	case Rate, Count:
+	case Rate:
 		return r.Value == 0
+	case Count:
+		// A COUNT SIGNAL CLEARS BY VANISHING, NOT BY REACHING ZERO. Readings
+		// emits one row per subject that is presently counted -- a throttled
+		// source is there or it is not -- so a Count reading with a zero value
+		// is not a state this package can be in. The clear comes from the
+		// vanished-subject path instead.
+		//
+		// This branch used to return `r.Value == 0` and was dead: deleting it
+		// entirely left every cell passing, because the other path was already
+		// doing the work. Stating the reason is worth more than the line was.
+		return false
 	}
 	return false
 }

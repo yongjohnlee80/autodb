@@ -40,8 +40,7 @@ type rateWindow struct {
 	// to a window long past is recognised rather than added to. Storing the
 	// index rather than a timestamp is what makes a burst that spans two
 	// buckets SUM instead of resetting: both slots are current, so both count.
-	at    [buckets]int64
-	prime bool
+	at [buckets]int64
 }
 
 // index is the absolute bucket number for an instant. Absolute rather than
@@ -59,12 +58,16 @@ func (w *rateWindow) advance(now time.Time) {
 			w.at[i] = 0
 		}
 	}
-	w.prime = true
 }
 
 // add records one event at this instant.
+//
+// IT DOES NOT ADVANCE THE WHOLE WINDOW, and it used to. The reset below covers
+// the only slot add touches, and every reader advances before it sums -- so the
+// extra sweep was work that changed no answer. Proved by deleting it and
+// watching every cell still pass, which is also how it should have been
+// justified in the first place.
 func (w *rateWindow) add(now time.Time) {
-	w.advance(now)
 	cur := index(now)
 	slot := int(cur % buckets)
 	if w.at[slot] != cur {
