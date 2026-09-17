@@ -89,3 +89,69 @@ func TestR7_AnEmptyStoreIsNotACandidate(t *testing.T) {
 			"exactly the session that is pinning a backend")
 	}
 }
+
+// r7Session builds a session holding an object whose dependency has stalled.
+func r7Session(t *testing.T, at time.Time, stalled time.Duration) (*Engine, *session) {
+	t.Helper()
+	e := New(nil, nil)
+	t.Cleanup(func() { _ = e.Close() })
+	s := &session{id: "holder", userID: 1, connID: 7}
+	s.state.Store(int32(sessOpen))
+	s.lastUsed = at // wire-active
+	s.ext = newExtObjectsAt(func() time.Time { return at.Add(-stalled) })
+	if err := s.ext.putStatement(&extStatement{name: "prepared-and-forgotten"}); err != nil {
+		t.Fatal(err)
+	}
+	return e, s
+}
+
+// THE RUNG FIRES FOR A TALKING CLIENT THAT HAS STOPPED USING WHAT IT HOLDS.
+//
+// This is the whole point of the milestone: a backend pinned by an object
+// nobody has touched, on a connection nobody would call idle.
+func TestR7_AStalledDependencyOnALiveWireIsReclaimed(t *testing.T) {
+	at := time.Unix(0, 0).Add(100 * time.Hour)
+	e, s := r7Session(t, at, r7DependencyBound+time.Minute)
+
+	if !e.r7Expired(s, at, 10*time.Minute) {
+		t.Error("a session holding an object untouched for over the bound, on an active " +
+			"wire, was not reclaimed; nothing else ever reclaims it, which is the hole " +
+			"this rung exists to close")
+	}
+}
+
+// AND IT DOES NOT FIRE FOR ANYBODY WHO WOULD BE HARMED.
+//
+// Each row is somebody with work in progress or with nothing to reclaim. A rung
+// that took any of them would be worse than the leak it fixes.
+func TestR7_ItSparesEverySessionThatWouldBeHarmed(t *testing.T) {
+	at := time.Unix(0, 0).Add(100 * time.Hour)
+	for _, tc := range []struct {
+		name  string
+		spoil func(s *session)
+	}{
+		{"a request is in flight", func(s *session) { s.busy = true }},
+		{"a transaction is open", func(s *session) { s.tx = stubTxConn{} }},
+		{"it holds nothing", func(s *session) { s.ext = newExtObjectsAt(func() time.Time { return at }) }},
+		{"the wire has gone quiet", func(s *session) { s.lastUsed = at.Add(-time.Hour) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, s := r7Session(t, at, r7DependencyBound+time.Minute)
+			tc.spoil(s)
+			if e.r7Expired(s, at, 10*time.Minute) {
+				t.Errorf("the rung claimed a session where %s", tc.name)
+			}
+		})
+	}
+}
+
+// A DEPENDENCY STILL INSIDE ITS BOUND IS LEFT ALONE.
+func TestR7_ADependencyInsideItsBoundIsNotReclaimed(t *testing.T) {
+	at := time.Unix(0, 0).Add(100 * time.Hour)
+	e, s := r7Session(t, at, r7DependencyBound-time.Minute)
+	if e.r7Expired(s, at, 10*time.Minute) {
+		t.Error("a session one minute inside the bound was reclaimed; the bound is the " +
+			"promise, and a rung that fires early breaks it for everybody legitimately " +
+			"holding an object across a quiet period")
+	}
+}
