@@ -1022,5 +1022,14 @@ func All() []Mutation {
 			Fails:       "nothing answered through the forward",
 			Guarantee:   "that the documented forward arrives at the address the gateway actually computes, rather than at a number two documents happen to agree on",
 		},
+		{
+			Name: "pressure-the-shipped-frontend-agrees", Package: "./rpc/",
+			File:        "lua/autodb/client.lua",
+			Anchor:      "M.PROTOCOL = 6",
+			Replacement: "M.PROTOCOL = 5",
+			Test:        "TestProtocol_TheShippedFrontendSpeaksTheSameNumber",
+			Fails:       "refuse each other",
+			Guarantee:   "that the plugin and the daemon built from one commit speak one number, since a mismatch between them produces the message a STALE pairing gives and sends the user to refresh a binary that is already correct",
+		},
 	}
 }
