@@ -456,13 +456,67 @@ func (e *Engine) CloseAllSessions(ctx context.Context, reason string) {
 // rather than a sleep.
 func (e *Engine) reapIdleSessions(ctx context.Context, now time.Time) int {
 	var n int
+	idle := e.currentPolicy().sessionIdle
 	for _, s := range e.sessions.snapshot() {
-		if s.idleFor(now) >= e.currentPolicy().sessionIdle {
+		switch {
+		case s.idleFor(now) >= idle:
 			e.closeSession(ctx, s, "", "idle-timeout")
+			n++
+		case e.r7Expired(s, now, idle):
+			// R7. A SESSION THAT IS TALKING AND STILL NOT USING WHAT IT HOLDS.
+			//
+			// The idle rung above owns the quiet ones and is checked first, so
+			// the two cannot both claim a session and this one is reached only
+			// where the wire is active. That is the case an idle timer cannot
+			// see: prepared objects pin a backend for as long as the client
+			// keeps the connection warm, and nothing else ever reclaims them.
+			e.closeSession(ctx, s, "", ReasonR7DependencyTimeout)
 			n++
 		}
 	}
 	return n
+}
+
+// ReasonR7DependencyTimeout is the audit identity for a session ended because
+// what it was holding stopped moving.
+const ReasonR7DependencyTimeout = "r7-dependency-timeout"
+
+// r7DependencyBound is how long held objects may go without progress.
+//
+// TWO HOURS, AND IT IS A BOUND ON THE DEPENDENCY RATHER THAN ON THE WIRE. A
+// client legitimately holding a prepared statement across a quiet period is
+// doing nothing wrong; one that has not touched it in two hours while chatting
+// continuously has abandoned it in every sense except the protocol's.
+const r7DependencyBound = 2 * time.Hour
+
+// r7Expired reports whether this session has reached R7's bound.
+//
+// EVERY CONDITION IS REQUIRED, and each excludes somebody who would be harmed:
+//
+//   - nothing held -> it pins nothing, and the idle rung already owns it;
+//   - a request in flight -> ending it cancels work inside its bounds;
+//   - a transaction open -> ending it rolls back work nobody abandoned;
+//   - wire-idle past the idle bound -> that is the rung above, not this one,
+//     and letting both match would make which reason is recorded depend on
+//     evaluation order rather than on what happened.
+func (e *Engine) r7Expired(s *session, now time.Time, idle time.Duration) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.busy || s.tx != nil || s.ext == nil || !s.ext.holdsAnything() {
+		return false
+	}
+	// COMPUTED HERE RATHER THAN THROUGH idleFor, which takes this same mutex.
+	// Calling it from inside the hold would deadlock the janitor sweep against
+	// itself -- found by the compiler refusing an unrelated line, not by the
+	// deadlock, which would have appeared in production as a daemon that
+	// stopped reaping and never said why.
+	if now.Sub(s.lastUsed) >= idle {
+		return false
+	}
+	return s.ext.dependencyIdleFor(now) >= r7DependencyBound
 }
 
 // logf reports an operational problem that has no caller to return to.
