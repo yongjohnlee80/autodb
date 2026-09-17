@@ -386,6 +386,11 @@ type sessionRegistry struct {
 	// rather than be told nothing is.
 	txWithinBound map[int64]map[SessionID]time.Time
 
+	// hookAtDemandClaim fires immediately before a candidate's demand claim,
+	// with that candidate's lock held, so a cell can hold one caller inside the
+	// window while another reaches it.
+	hookAtDemandClaim func(id SessionID)
+
 	// demandMu guards demandWanted and demandPromised alone and is A LEAF, for
 	// exactly the reason txMu is: a demand reservation is taken under a
 	// SESSION's mutex, and recording it under the registry mutex from there

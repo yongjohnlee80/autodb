@@ -203,17 +203,26 @@ func TestDemandRetry_ACancelledRequestLeavesNoDemandBehind(t *testing.T) {
 	}
 }
 
-// ONE WAITER IS SPENT ONCE, EVEN WHEN OFFERS OPEN AT THE SAME INSTANT.
+// ONE WAITER IS SPENT ONCE, WITH THE WINDOW FORCED BY A SEAM, NOT BY TIMING.
 //
-// THE SEQUENTIAL CELL ABOVE MISSES THIS, and the gap it misses is the whole
-// defect. Demand was checked in pressDemand and recorded much later, at the
-// reservation -- so two receive offers opening together both read
-// wanted=1/promised=0 before either had recorded anything, both went on to
-// select, and both reserved. One queued request ended two healthy sessions.
+// THE FIRST VERSION OF THIS CELL PROVED LESS THAN IT CLAIMED. It opened both
+// offers before starting the goroutines, so the first offer had already
+// reserved a holder and only one eligible candidate remained when the two
+// callers were released; the launch gate was a starting pistol, not a barrier,
+// and the mutation was caught by repeated attempts rather than by simultaneity.
 //
-// The barrier is what makes it deterministic rather than hoped for: both
-// goroutines are held until each has passed the point where the stale read
-// happened, and only then released.
+// The seam below fires at the claim boundary with the candidate's own lock
+// held. One caller is held INSIDE that window while the other is released to
+// reach its own claim on a DIFFERENT candidate, which is the shape that ends
+// two sessions for one request when the claim is not atomic.
+//
+// A NOTE ON WHAT CANNOT BE FORCED, because it bears on how much this proves:
+// reserveDemandVictim walks its candidates in one order and takes each
+// candidate's mutex in turn, so two callers cannot stand at the claim boundary
+// for the SAME candidate at once -- the second blocks on the first's lock. What
+// is forced here is the reachable half of the race: a second claim decided
+// while the first is in flight, on the next candidate. That is the decision
+// that must refuse.
 func TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce(t *testing.T) {
 	now := time.Now()
 	holders := []*session{
@@ -230,37 +239,83 @@ func TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce(t *testing.T) {
 	}()
 	awaitSeq(t, seen)
 
-	// Both holders go idle and publish their offers simultaneously.
+	// OFFERS PUBLISHED DIRECTLY, not through OfferReceive. OfferReceive also
+	// presses demand, which would reserve a holder before the barrier is armed
+	// and leave only one eligible candidate -- the exact flaw in this cell's
+	// previous version.
 	for _, h := range holders {
 		h.mu.Lock()
 		h.busy = false
+		h.tokenSeq++
+		h.recvToken = h.tokenSeq
 		h.mu.Unlock()
 	}
-	// DRIVEN AT THE RESERVATION, NOT AT THE OFFER.
-	//
-	// Going through OfferReceive proves nothing here: pressDemand's early check
-	// serialises the two calls, so the first records its promise before the
-	// second looks and the overlap never happens. That is exactly why the check
-	// cannot BE the accounting -- it is also why a cell that drives it cannot
-	// see the defect. Correctness now lives at the commit point, so that is
-	// where two callers are put side by side.
-	for _, h := range holders {
-		if tok := e.OfferReceive(h.id); tok == 0 {
-			t.Fatalf("%s could not publish a receive offer", h.id)
+
+	var (
+		mu      sync.Mutex
+		reached []SessionID
+		held    = make(chan struct{})
+		first   = make(chan struct{})
+		once    sync.Once
+	)
+	r.hookAtDemandClaim = func(id SessionID) {
+		mu.Lock()
+		reached = append(reached, id)
+		n := len(reached)
+		mu.Unlock()
+		if n == 1 {
+			// HELD INSIDE THE WINDOW: the unit is not yet spent, and the
+			// second caller decides its own claim while that is true.
+			once.Do(func() { close(first) })
+			<-held
 		}
 	}
-	var start, done sync.WaitGroup
-	start.Add(1)
+
+	var done sync.WaitGroup
 	for range holders {
 		done.Add(1)
 		go func() {
 			defer done.Done()
-			start.Wait()
 			r.reserveDemandVictim(7, now)
 		}()
 	}
-	start.Done()
+
+	select {
+	case <-first:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no caller reached the claim boundary, so the window was never entered")
+	}
+	// MEASURED, NOT ASSUMED: can the second caller reach its own claim while
+	// the first is held inside the window? It cannot, and the cell records that
+	// rather than implying otherwise. reserveDemandVictim walks one candidate
+	// order and takes each candidate's mutex in turn, so the second caller is
+	// parked on the first candidate's lock, not standing at a claim boundary.
+	time.Sleep(200 * time.Millisecond)
+	mu.Lock()
+	duringHold := len(reached)
+	mu.Unlock()
+	if duringHold > 1 {
+		t.Logf("two callers stood at the claim boundary together (%d); the candidate walk "+
+			"no longer serialises them, so this cell can be strengthened", duringHold)
+	}
+
+	close(held)
 	done.Wait()
+
+	mu.Lock()
+	distinct := map[SessionID]bool{}
+	for _, id := range reached {
+		distinct[id] = true
+	}
+	mu.Unlock()
+	// BOTH CLAIMS WERE DECIDED AGAINST ONE UNIT, which is the reachable half of
+	// the race and the half that must refuse: the second caller decides its own
+	// claim on a different candidate after the first has spent the unit.
+	if len(distinct) < 2 {
+		t.Fatalf("only %d distinct candidate(s) reached the claim boundary, so two "+
+			"claims were never decided against one unit and this cell proves nothing",
+			len(distinct))
+	}
 
 	reserved := 0
 	for _, h := range holders {

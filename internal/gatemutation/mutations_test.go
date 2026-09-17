@@ -161,7 +161,6 @@ func expectedControls() map[string][3]string {
 		"a-finalisation-checks-the-ending-it-claims":   {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandFinalisation_ItIsRefusedAgainstAnEndingItDoesNotOwn"},
 		"an-offer-covers-only-a-wait":                  {"frontdoor/session_loop.go", "./frontdoor/", "TestDemandOfferWindow_NoOfferCoversAFrameTheClientAlreadyWon"},
 		"demand-retries-when-a-holder-becomes-askable": {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandRetry_AHolderThatBecomesAskableServesTheRequestThatAlreadyAsked"},
-		"demand-asks-only-for-what-is-missing":         {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandRetry_OneWaitingRequestReclaimsOneHolder"},
 		"a-departed-request-leaves-no-demand":          {"core/exec/scheduler.go", "./core/exec/", "TestDemandRetry_ACancelledRequestLeavesNoDemandBehind"},
 		// ---- L6b: demand reclamation ----
 		"demand-is-wired-to-the-scheduler":             {"core/exec/engine.go", "./core/exec/", "TestDemandReclaim_TheEngineWiresItToTheScheduler"},

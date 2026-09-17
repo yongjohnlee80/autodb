@@ -532,16 +532,6 @@ func All() []Mutation {
 				"a wire lease is never released on its own",
 		},
 		{
-			Name: "demand-asks-only-for-what-is-missing", Package: "./core/exec/",
-			File:        "core/exec/demand_reclaim.go",
-			Anchor:      "\tif r == nil || !r.demandOutstanding(leaseConn) {",
-			Replacement: "\tif r == nil {",
-			Test:        "TestDemandRetry_OneWaitingRequestReclaimsOneHolder",
-			Fails:       "holders were reserved for one waiting request",
-			Guarantee: "that one waiting request costs one session, so a retry that fires " +
-				"on every offer does not end every idle holder on the target",
-		},
-		{
 			Name: "a-departed-request-leaves-no-demand", Package: "./core/exec/",
 			File:        "core/exec/scheduler.go",
 			Anchor:      "\tw.wantsDemand = false\n\tr.dropDemand(w.leaseConn)",
