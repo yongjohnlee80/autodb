@@ -156,6 +156,13 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 func expectedControls() map[string][3]string {
 	return map[string][3]string{
 		// name: {File, Package, Test}
+		"pressure-every-refusal-is-counted":            {"frontdoor/listener.go", "./frontdoor/", "TestPressureTick_NoRefusalBypassesTheCounter"},
+		"pressure-only-capacity-refusals-count":        {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_OnlyCapacityRefusalsAreCounted"},
+		"pressure-observability-never-withholds":       {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_NothingObservingStillRefuses"},
+		"pressure-the-journal-keeps-the-class":         {"frontdoor/pressure_loop.go", "./frontdoor/", "TestPressureLoop_AThrottledSourceReachesTheJournalAsCredential"},
+		"pressure-the-journal-keeps-the-figures":       {"frontdoor/pressure_loop.go", "./frontdoor/", "TestPressureLoop_TheIncidentReachesTheJournal"},
+		"pressure-clears-reach-the-journal":            {"frontdoor/pressure_loop.go", "./frontdoor/", "TestPressureLoop_TheClearIsEmittedToo"},
+		"pressure-the-tick-is-waited-for":              {"frontdoor/pressure_loop.go", "./frontdoor/", "TestPressureLoop_CloseWaitsForTheTick"},
 		"pressure-a-throttled-source-is-credential":    {"core/pressure/readings.go", "./core/pressure/", "TestReadings_AThrottledSourceIsCredentialAndThenGoes"},
 		"pressure-unconfigured-caps-emit-nothing":      {"core/pressure/readings.go", "./core/pressure/", "TestReadings_UnconfiguredCapsProduceNoRows"},
 		"pressure-stale-subjects-expire":               {"core/pressure/dimension.go", "./core/pressure/", "TestDimension_StaleSubjectsAreDroppedOnTheTickThatReads"},
