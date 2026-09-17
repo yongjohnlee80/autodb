@@ -2,6 +2,7 @@ package exec
 
 import (
 	"errors"
+	"time"
 
 	"github.com/yongjohnlee80/golib/dao"
 )
@@ -150,6 +151,20 @@ type extPortal struct {
 type extObjects struct {
 	statements map[string]*extStatement
 	portals    map[string]*extPortal
+
+	// now is the clock, injectable so a cell can age a two-hour bound without
+	// waiting two hours.
+	now func() time.Time
+	// lastProgress is when this session last ADVANCED OR CLEARED what its held
+	// objects are waiting for: an object created, used, closed, or a close
+	// confirmed.
+	//
+	// IT IS NOT WIRE ACTIVITY, AND THE DIFFERENCE IS THE WHOLE POINT. A client
+	// that keeps chatting but never executes what it prepared pins a backend
+	// indefinitely, and a wire-idle timer never notices because the wire is not
+	// idle. So ordinary traffic does not touch this; only operations that move
+	// the dependency do.
+	lastProgress time.Time
 
 	// segment is the ORDER in which this segment's queued frames will be
 	// answered, one step per frame.
@@ -322,7 +337,10 @@ func (o *extObjects) queueRepairClose(kind objectKind, name string, seq uint64) 
 
 // queueExec records the Execute frame of the call that queued it. See
 // segStep.exec for why the Execute is marked rather than inferred.
-func (o *extObjects) queueExec() { o.segment = append(o.segment, segStep{exec: true}) }
+func (o *extObjects) queueExec() {
+	o.noteProgress()
+	o.segment = append(o.segment, segStep{exec: true})
+}
 
 // queueSynth records a frame the front door answers itself, with the fixed
 // shapes the protocol defines for it.
@@ -421,6 +439,7 @@ const maxPendingCloses = 1024
 // exactly this reason: it re-Closes a name, not a particular object, because
 // the object it is clearing was created before this end lost track of it.
 func (o *extObjects) confirmClose(ref objectRef) {
+	o.noteProgress()
 	for i, p := range o.pendingCloses {
 		if p.kind == ref.kind && p.name == ref.name {
 			o.pendingCloses = append(o.pendingCloses[:i], o.pendingCloses[i+1:]...)
@@ -454,11 +473,42 @@ func (o *extObjects) closeUnconfirmed(kind objectKind, name string) bool {
 	return false
 }
 
-func newExtObjects() *extObjects {
-	return &extObjects{
-		statements: make(map[string]*extStatement),
-		portals:    make(map[string]*extPortal),
+func newExtObjects() *extObjects { return newExtObjectsAt(time.Now) }
+
+func newExtObjectsAt(now func() time.Time) *extObjects {
+	if now == nil {
+		now = time.Now
 	}
+	return &extObjects{
+		statements:   make(map[string]*extStatement),
+		portals:      make(map[string]*extPortal),
+		now:          now,
+		lastProgress: now(),
+	}
+}
+
+// noteProgress stamps the dependency clock.
+//
+// CALLED ONLY WHERE THE DEPENDENCY ACTUALLY MOVES. Adding it to a general wire
+// path would turn this back into the wire-idle timer it exists not to be.
+func (o *extObjects) noteProgress() {
+	if o.now != nil {
+		o.lastProgress = o.now()
+	}
+}
+
+// dependencyIdleFor reports how long the held objects have been waiting.
+func (o *extObjects) dependencyIdleFor(now time.Time) time.Duration {
+	if o.lastProgress.IsZero() {
+		return 0
+	}
+	return now.Sub(o.lastProgress)
+}
+
+// holdsAnything reports whether the store is non-empty, which is the other half
+// of R7's precondition: a session holding nothing pins nothing.
+func (o *extObjects) holdsAnything() bool {
+	return len(o.statements) > 0 || len(o.portals) > 0 || len(o.pendingCloses) > 0
 }
 
 // putStatement records a parsed statement, applying matrix §4a's replacement rule.
@@ -467,6 +517,7 @@ func newExtObjects() *extObjects {
 // first. Replacement cascades, because the portals of the statement that is
 // going away cannot outlive it.
 func (o *extObjects) putStatement(st *extStatement) error {
+	o.noteProgress()
 	if st.name != "" {
 		if _, live := o.statements[st.name]; live {
 			return ErrDuplicateStatement
@@ -520,6 +571,7 @@ func (o *extObjects) statement(name string) (*extStatement, error) {
 // putPortal records a bound portal, applying matrix §4a's replacement rule and
 // registering it for its statement's cascade.
 func (o *extObjects) putPortal(p *extPortal) error {
+	o.noteProgress()
 	st, err := o.statement(p.stmtName)
 	if err != nil {
 		return err
@@ -560,6 +612,7 @@ func (o *extObjects) portal(name string) (*extPortal, error) {
 // cascade matrix §4a calls protocol-documented. Reported so a caller can tell a real
 // close from a no-op on a name that was never there.
 func (o *extObjects) dropStatement(name string) bool {
+	o.noteProgress()
 	st, ok := o.statements[name]
 	if !ok {
 		return false
@@ -581,6 +634,7 @@ func (o *extObjects) dropStatement(name string) bool {
 // dropPortal releases one portal and unregisters it from its statement, so the
 // statement's cascade set does not accumulate names of portals already gone.
 func (o *extObjects) dropPortal(name string) bool {
+	o.noteProgress()
 	p, ok := o.portals[name]
 	if !ok {
 		return false
@@ -602,6 +656,7 @@ func (o *extObjects) dropPortal(name string) bool {
 // all of those and a portal that outlived its transaction would execute against
 // a snapshot that no longer exists.
 func (o *extObjects) dropAllPortals() {
+	o.noteProgress()
 	for _, st := range o.statements {
 		st.portals = make(map[string]struct{})
 	}
@@ -616,6 +671,7 @@ func (o *extObjects) dropAllPortals() {
 // two protocols (lib/pq does — it sends simple for parameterless statements)
 // depends on that being true here as well.
 func (o *extObjects) dropUnnamed() {
+	o.noteProgress()
 	o.dropPortal("")
 	o.dropStatement("")
 }
