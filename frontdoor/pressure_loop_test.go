@@ -386,8 +386,10 @@ type gateCaps struct {
 }
 
 func (g *gateCaps) CapacitySnapshot() exec.CapacitySnapshot {
-	g.once.Do(func() { close(g.entered) })
-	<-g.release
+	g.once.Do(func() {
+		close(g.entered)
+		<-g.release // only the FIRST call waits; the rest are the sustained load
+	})
 	return g.snap
 }
 
@@ -395,38 +397,47 @@ func TestPressureSnapshot_AReaderAndTheTickOverlap(t *testing.T) {
 	at := time.Unix(0, 0)
 	l, _ := pressListener(t, &at)
 
-	caps := &gateCaps{
-		snap:    exec.CapacitySnapshot{Sessions: 9, SessionCap: 10, Leases: map[int64]int{7: 9}, LeaseCap: 10},
-		entered: make(chan struct{}),
-		release: make(chan struct{}),
-	}
+	// THE TICK MUST KEEP WRITING, and the first version of this cell did not
+	// make it. Observe only touches the latch when a signal ENTERS or CLEARS;
+	// a steady 90% raises once and then writes nothing for the rest of the
+	// run. So the readings oscillate: nine sessions of ten raises, five of ten
+	// clears, and every pass is a map write for the reader to collide with.
+	// Without that the control came back green with the lock removed — the
+	// window was open and there was nothing crossing it.
+	high := exec.CapacitySnapshot{Sessions: 9, SessionCap: 10}
+	low := exec.CapacitySnapshot{Sessions: 5, SessionCap: 10}
 
+	caps := &gateCaps{snap: high, entered: make(chan struct{}), release: make(chan struct{})}
+
+	const passes = 500
 	var wg sync.WaitGroup
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if _, err := l.PressureSnapshot(caps); err != nil {
-			t.Errorf("PressureSnapshot: %v", err)
+		// The first call parks inside CapacitySnapshot, one step from the
+		// tracker, and is released by the ticker below. The rest keep the
+		// pressure on so a single unlucky interleaving is not the whole proof.
+		for range passes {
+			if _, err := l.PressureSnapshot(caps); err != nil {
+				t.Errorf("PressureSnapshot: %v", err)
+				return
+			}
 		}
 	}()
 
-	<-caps.entered // the reader is parked one step from the tracker
+	<-caps.entered // the reader is parked, about to touch the tracker
 
-	// Drive the tick while it is parked. Each pass both writes the latch
-	// (Observe) and appends to the breakdown, which is the other structure the
-	// reader is about to walk.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := range 200 {
-			l.meter.recordDenial(outcome.Occurrence{
-				Reason: outcome.ReasonID("frontdoor/lease-cap-exceeded"),
-				Charge: outcome.Capacity,
-			})
-			if i == 0 {
-				close(caps.release) // reader proceeds INTO the tracker, mid-run
+		close(caps.release) // it proceeds INTO the tracker, now
+		for i := range passes {
+			snap := high
+			if i%2 == 1 {
+				snap = low
 			}
-			l.emitPressure(fixedCaps{caps.snap})
+			l.emitPressure(fixedCaps{snap})
 		}
 	}()
 
