@@ -101,8 +101,31 @@ func (l *Listener) runPressure(caps CapacityReader) {
 			case <-l.closed:
 				return
 			case <-t.C:
-				l.emitPressure(caps)
 			}
+			if l.testBeforeEmit != nil {
+				// Between the tick and the decision to dispatch -- the window a
+				// cell has to be able to close the listener inside, or the
+				// guarantee below rests on winning a race by luck.
+				l.testBeforeEmit()
+			}
+			// CHECKED AGAIN, AFTER THE TICK AND BEFORE DISPATCH. The select
+			// above is free to pick the ticker when both are ready, so the
+			// close signal alone is not enough to stop a dispatch that was
+			// already armed.
+			//
+			// THE GUARANTEE IS THAT NO DISPATCH STARTS ONCE CLOSE IS VISIBLE,
+			// and that is the strongest one available here: Close waits on the
+			// WaitGroup this loop is registered on, so a dispatch already
+			// running finishes before Close returns. Claiming more -- that no
+			// event can be emitted after the close signal at all -- would need
+			// the emit to hold a lock Close also takes, and emit calls a host
+			// callback, which must never run under the accept barrier.
+			select {
+			case <-l.closed:
+				return
+			default:
+			}
+			l.emitPressure(caps)
 		}
 	}()
 }

@@ -1,6 +1,7 @@
 package frontdoor
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -185,5 +186,40 @@ func TestPressureTick_TheWrapperIsWhatCounts(t *testing.T) {
 			"the one place a refusal is counted, so a wrapper that only sends leaves "+
 			"every signal quiet while the door is being shut in people's faces",
 			denialsToRaise, ev)
+	}
+}
+
+// failingWriter refuses everything, like a peer that has already gone.
+type failingWriter struct{ err error }
+
+func (f failingWriter) Write([]byte) (int, error) { return 0, f.err }
+
+// A REFUSAL THAT NEVER REACHED THE CLIENT IS NOT COUNTED.
+//
+// FOUND IN REVIEW, AND THE CONTRACT WAS ALREADY WRITTEN DOWN. The comment on
+// pressureMeter says the count is of WIRE refusals — "a refusal that was decided
+// and then never sent did not shut anything" — and the code counted before
+// writing. A peer that had already gone therefore raised capacity pressure that
+// nobody had been refused by, which is a signal reporting the front door under
+// strain when the truth is that clients are disconnecting.
+func TestPressureTick_AFailedWriteIsNotCountedAsARefusal(t *testing.T) {
+	at := time.Unix(0, 0)
+	l := &Listener{meter: newPressureMeter(func() time.Time { return at })}
+
+	for range denialsToRaise * 3 {
+		err := l.denyWithOccurrence(failingWriter{errors.New("broken pipe")},
+			outcome.Occurrence{
+				Reason: outcome.ReasonID("frontdoor/lease-cap-exceeded"),
+				Charge: outcome.Capacity,
+			})
+		if err == nil {
+			t.Fatal("a write to a broken peer reported success")
+		}
+	}
+
+	if ev := l.meter.tick(pressure.Caps{SessionCap: 100}, nil); len(ev) != 0 {
+		t.Errorf("%d refusals that never reached anybody raised %v; the door was not "+
+			"shut in anyone's face, and an operator reading this would go looking for "+
+			"a capacity problem that does not exist", denialsToRaise*3, ev)
 	}
 }

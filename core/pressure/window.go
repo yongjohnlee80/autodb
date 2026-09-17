@@ -14,18 +14,33 @@ const (
 	// Window is how far back the denial rate looks.
 	Window = time.Minute
 
-	// buckets divides the window so it can move without a list of timestamps.
-	//
-	// SIX FIXED BUCKETS, NOT A SLICE THAT GROWS. Keeping one entry per denial
-	// makes the memory a function of how badly things are going, which is the
-	// worst possible time to start allocating -- a burst would cost most
-	// exactly when the front door has least to spare. Six is coarse enough to
-	// be free and fine enough that the window slides rather than jumping.
-	buckets = 6
-)
+	// bucketSpan is how long each bucket covers. Fixed, and deliberately NOT
+	// derived as Window/buckets -- see below.
+	bucketSpan = 10 * time.Second
 
-// bucketSpan is how long each bucket covers.
-const bucketSpan = Window / buckets
+	// buckets is how many spans the ring holds.
+	//
+	// FIXED BUCKETS, NOT A SLICE THAT GROWS. Keeping one entry per denial makes
+	// memory a function of how badly things are going, which is the worst
+	// possible moment to start allocating: a burst would cost most exactly when
+	// the front door has least to spare.
+	//
+	// SEVEN, NOT SIX, AND THE EXTRA ONE IS NOT SPARE CAPACITY. A bucket ages
+	// out on ITS OWN age, not on the age of the events inside it, so a ring
+	// spanning exactly Window under-retains everything that did not land at the
+	// start of a bucket. At six ten-second buckets a denial arriving at t=9.999s
+	// was discarded at t=60.0s -- fifty seconds of retention for a figure
+	// documented as "denials in the last minute". The seventh bucket is what
+	// makes the guarantee "at least Window" rather than "up to Window", and
+	// under-retention is the quiet direction to be wrong in: the rate reads
+	// lower than the truth, so the signal raises late, during the burst the
+	// threshold exists for.
+	//
+	// Found in review. The ADR's acceptance text says six; it is amended
+	// alongside this, because a document naming a number the code does not use
+	// is the next person's wrong assumption.
+	buckets = 7
+)
 
 // rateWindow counts events over a sliding window in fixed buckets.
 //
