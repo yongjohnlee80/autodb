@@ -187,13 +187,16 @@ func (l *Listener) PressureSnapshot(caps CapacityReader) (pressure.Snapshot, err
 		throttled = append(throttled, pressure.ThrottledRow{Host: th.Host, Remaining: th.Remaining})
 	}
 
+	// HELD ACROSS Assemble, WHICH READS THE LATCH THE TICK MUTATES. The first
+	// version released the lock and then called Assemble on the tracker it had
+	// just copied a pointer to -- a read of raised signals racing Observe's
+	// writes, on a surface somebody opens precisely when the tick is busiest.
 	l.meter.mu.Lock()
+	defer l.meter.mu.Unlock()
 	denials := l.meter.breakdown.Rows(now)
 	omitted := l.meter.breakdown.Omitted()
-	tracker := l.meter.tracker
-	l.meter.mu.Unlock()
 
-	return tracker.Assemble(pressure.ViewInput{
+	return l.meter.tracker.Assemble(pressure.ViewInput{
 		Caps: pressure.Caps{
 			Sessions: snap.Sessions, SessionCap: snap.SessionCap,
 			PerUser: snap.PerUser, PerUserCap: snap.PerUserCap,

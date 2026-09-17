@@ -83,6 +83,18 @@ type Config struct {
 	newModel func(*tuiapp.Session, tuiapp.NotesFactory, func(), ...tuiapp.Option) *tuiapp.Model
 }
 
+// ListenAddr is where the browser surface listens, and the ONLY place that is
+// decided.
+//
+// LOOPBACK IS NOT A DEFAULT HERE; IT IS THE POSTURE. A status surface reporting
+// other people's session counts and the source addresses being refused does not
+// belong on a routable interface, and the operations page tells an operator to
+// reach it over an SSH forward precisely because of that. The address is one
+// function rather than three string literals because the page, the handler's
+// origin check and the listener must agree: when they did not, the page named a
+// port the build had never used.
+func ListenAddr(port int) string { return fmt.Sprintf("127.0.0.1:%d", port) }
+
 // Gateway is the `--web-ui` web-server: it terminates authentication, owns the
 // per-user RPC sessions, caps concurrency, and serves the existing TUI to a
 // browser.
@@ -234,7 +246,7 @@ func New(cfg Config) (*Gateway, error) {
 	}
 	g.mgr = mgr
 
-	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
+	addr := ListenAddr(cfg.Port)
 	h, err := web.NewHandler(web.Config{
 		Addr:        addr,
 		Policy:      attach,
@@ -283,7 +295,7 @@ func (g *Gateway) logRefusal(at, subject string) {
 func (g *Gateway) Serve(ctx context.Context) error {
 	logger.Info(g.cfg.Log, map[string]any{
 		"webserver": "gateway", "event": "serving",
-		"url":    fmt.Sprintf("http://127.0.0.1:%d/", g.cfg.Port),
+		"url":    "http://" + ListenAddr(g.cfg.Port) + "/",
 		"daemon": g.cfg.Addr, "max_sessions": g.cfg.MaxSessions,
 	})
 	err := g.handler.Serve(ctx)

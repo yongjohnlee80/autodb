@@ -223,3 +223,72 @@ func TestPressureTick_AFailedWriteIsNotCountedAsARefusal(t *testing.T) {
 			"a capacity problem that does not exist", denialsToRaise*3, ev)
 	}
 }
+
+// AND CREDENTIAL REFUSALS DO REACH THE VIEW — WHICH IS WHY THE CLASS COLUMN EXISTS.
+//
+// FOUND IN REVIEW. The cell above asserts what must NOT happen: a credential
+// refusal must not raise the capacity rate. It cannot see what must happen, and
+// the implementation it was written against had an early return at the top of
+// recordDenial that dropped non-capacity refusals entirely. Both cells passed.
+// The class column could only ever say "capacity", so the one question this
+// surface was built to answer — is this a full pool or somebody guessing
+// passwords, the question the incident got wrong — had a hardcoded answer.
+//
+// This is the recurring shape: a cell asserting an output cannot see whether a
+// mechanism inside it did any work, because something downstream compensates.
+// Here the output is "no event", and dropping the input produces it just as
+// faithfully as classifying the input correctly does.
+func TestPressureTick_CredentialRefusalsRenderWithoutRaisingTheCapacityRate(t *testing.T) {
+	at := time.Unix(0, 0)
+	m := newPressureMeter(func() time.Time { return at })
+
+	for range 10 {
+		m.recordDenial(outcome.Occurrence{
+			Reason: outcome.ReasonID("frontdoor/bad-password"), Charge: outcome.Credential})
+	}
+	for range 2 {
+		m.recordDenial(outcome.Occurrence{
+			Reason: outcome.ReasonID("frontdoor/lease-cap-exceeded"), Charge: outcome.Capacity})
+	}
+
+	m.mu.Lock()
+	rows := m.breakdown.Rows(at)
+	rate := m.denials.Total(at)
+	m.mu.Unlock()
+
+	byReason := make(map[string]pressure.DenialRow, len(rows))
+	for _, r := range rows {
+		byReason[r.Reason] = r
+	}
+
+	bad, ok := byReason["frontdoor/bad-password"]
+	if !ok {
+		t.Fatalf("ten credential refusals left no row in the breakdown (%v): an operator "+
+			"reading this view during a password-guessing run is told the door is quiet, "+
+			"which is the incident's own wrong answer served back through the fix for it",
+			rows)
+	}
+	if bad.Count != 10 {
+		t.Errorf("the credential row counts %d, want 10", bad.Count)
+	}
+	if bad.Class != pressure.Credential {
+		t.Errorf("the credential row is classed %s, want credential — the split is the "+
+			"only thing distinguishing a full pool from somebody guessing", bad.Class)
+	}
+
+	cap_, ok := byReason["frontdoor/lease-cap-exceeded"]
+	if !ok {
+		t.Fatal("the capacity refusals left no row either")
+	}
+	if cap_.Class != pressure.Capacity {
+		t.Errorf("the capacity row is classed %s, want capacity", cap_.Class)
+	}
+
+	// The rate is the half that stays capacity-only. Twelve refusals happened;
+	// two of them were ours.
+	if rate != 2 {
+		t.Errorf("the capacity rate counts %d of twelve refusals, want 2: ten of them "+
+			"were people failing to authenticate, and counting those here sends an "+
+			"operator to resize a pool that is not full", rate)
+	}
+}

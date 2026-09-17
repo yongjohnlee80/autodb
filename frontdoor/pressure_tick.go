@@ -51,15 +51,23 @@ func newPressureMeter(now func() time.Time) *pressureMeter {
 // That is the incident's own mistake, and the charge class is the field that
 // already answers the question -- so it is read rather than re-derived.
 func (m *pressureMeter) recordDenial(occ outcome.Occurrence) {
-	if occ.Charge != outcome.Capacity {
-		return
-	}
 	m.mu.Lock()
 	now := m.now()
-	m.denials.Add(now)
-	// RECORDED IN THE SAME HOLD AS THE TOTAL, so the view's split and the
-	// signal's total can never describe different sets of refusals.
+	// THE BREAKDOWN TAKES EVERY CLASS; ONLY THE RATE IS CAPACITY-ONLY.
+	//
+	// The early return that used to stand here meant a credential refusal never
+	// reached the view at all, so the class column could only ever say
+	// "capacity" -- the split this surface exists for was dead, and no cell
+	// noticed because the throttled-source rows come from the admitter rather
+	// than from here.
+	//
+	// The rate stays capacity-only for the reason it always was: a capacity
+	// signal that counted password guessing sends an operator to resize a pool
+	// over it.
 	m.breakdown.Add(pressure.DenialKey{Reason: string(occ.Reason), Class: pressureClass(occ.Charge)}, now)
+	if occ.Charge == outcome.Capacity {
+		m.denials.Add(now)
+	}
 	m.mu.Unlock()
 }
 

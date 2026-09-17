@@ -359,3 +359,76 @@ func TestPressureSnapshot_NothingObservingIsAnError(t *testing.T) {
 			"empty view and a quiet front door render identically")
 	}
 }
+
+// THE TICK AND A READER RUN AT THE SAME INSTANT, AND THE DETECTOR SAYS SO.
+//
+// FOUND IN REVIEW. PressureSnapshot took meter.mu, copied what it needed,
+// released it, and then called Assemble on the tracker — whose latch the tick
+// is writing inside Observe. Every existing cell drove the tick and the reader
+// in sequence, so the window was never open while anything looked through it.
+//
+// The overlap is FORCED rather than hoped for: the capacity reader blocks
+// inside the snapshot's own call to CapacitySnapshot, which is the first thing
+// PressureSnapshot does and is outside the lock, so the reader is parked at the
+// exact point where it is about to touch the tracker. The tick is then driven
+// hard from another goroutine. A sleep would only make the overlap likely; this
+// makes it certain, and it is the only arrangement under which -race has
+// anything to say.
+//
+// The timing this defends is not exotic. An operator opens the pressure view
+// precisely when the door is busy, which is precisely when the tick has the
+// most to write.
+type gateCaps struct {
+	snap    exec.CapacitySnapshot
+	entered chan struct{} // closed once the reader is inside
+	release chan struct{} // closed to let it continue
+	once    sync.Once
+}
+
+func (g *gateCaps) CapacitySnapshot() exec.CapacitySnapshot {
+	g.once.Do(func() { close(g.entered) })
+	<-g.release
+	return g.snap
+}
+
+func TestPressureSnapshot_AReaderAndTheTickOverlap(t *testing.T) {
+	at := time.Unix(0, 0)
+	l, _ := pressListener(t, &at)
+
+	caps := &gateCaps{
+		snap:    exec.CapacitySnapshot{Sessions: 9, SessionCap: 10, Leases: map[int64]int{7: 9}, LeaseCap: 10},
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if _, err := l.PressureSnapshot(caps); err != nil {
+			t.Errorf("PressureSnapshot: %v", err)
+		}
+	}()
+
+	<-caps.entered // the reader is parked one step from the tracker
+
+	// Drive the tick while it is parked. Each pass both writes the latch
+	// (Observe) and appends to the breakdown, which is the other structure the
+	// reader is about to walk.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range 200 {
+			l.meter.recordDenial(outcome.Occurrence{
+				Reason: outcome.ReasonID("frontdoor/lease-cap-exceeded"),
+				Charge: outcome.Capacity,
+			})
+			if i == 0 {
+				close(caps.release) // reader proceeds INTO the tracker, mid-run
+			}
+			l.emitPressure(fixedCaps{caps.snap})
+		}
+	}()
+
+	wg.Wait()
+}

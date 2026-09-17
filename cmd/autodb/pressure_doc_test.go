@@ -1,11 +1,14 @@
 package main
 
 import (
+	"net"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/yongjohnlee80/autodb/webserver"
 )
 
 // THE DOCUMENTED RECIPE IS EXERCISED, NOT TRUSTED.
@@ -56,15 +59,19 @@ func TestPressureDoc_TheLoopbackClaimIsTrue(t *testing.T) {
 		t.Fatal("the page no longer explains why a tunnel is needed at all")
 	}
 
-	// The gateway composes its listen address from the port and nothing else.
-	src, err := os.ReadFile("../../webserver/gateway.go")
+	// ASKED OF THE BUILD, NOT GREPPED OUT OF IT. This read the gateway's source
+	// for a literal until webserver.ListenAddr existed to be called; a cell
+	// matching source text fails on a reformat and passes on a rewrite, which is
+	// the wrong way round.
+	addr := webserver.ListenAddr(defaultWebPort)
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("the browser surface listens on %q, which is not a host:port", addr)
 	}
-	if !strings.Contains(string(src), `fmt.Sprintf("127.0.0.1:%d", cfg.Port)`) {
-		t.Error("the web gateway no longer binds 127.0.0.1 unconditionally, so the page " +
-			"is describing a posture this build does not have — and is telling an " +
-			"operator to tunnel to something that may be reachable without one")
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		t.Errorf("the web gateway listens on %q, so the page is describing a posture "+
+			"this build does not have — and is telling an operator to tunnel to "+
+			"something that may be reachable without one", addr)
 	}
 }
 
