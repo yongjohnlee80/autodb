@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"iter"
 	"time"
@@ -55,6 +56,20 @@ type pressureRow struct {
 	head   bool
 }
 
+// sessionPressure reads the view over the session's own RPC.
+//
+// BOUNDED, BECAUSE A VIEW THAT HANGS IS WORSE THAN ONE THAT ERRORS. This opens
+// on a keystroke during an incident; if the daemon is the thing in trouble, a
+// surface that never paints tells the operator nothing and takes the keystroke
+// with it. A refusal they can read beats a spinner they cannot.
+type sessionPressure struct{ s *Session }
+
+func (p sessionPressure) Pressure() (pressure.Snapshot, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return p.s.Bind().Pressure(ctx)
+}
+
 func (m *Model) openPressure() {
 	v := &pressureView{rows: m.pressureRows()}
 	v.float = m.openFloat("front-door pressure — Enter or Esc to close", v)
@@ -62,11 +77,18 @@ func (m *Model) openPressure() {
 
 // pressureRows renders the snapshot, or says plainly why it cannot.
 func (m *Model) pressureRows() []pressureRow {
-	if m.pressure == nil {
+	src := m.pressure
+	if src == nil && m.session != nil {
+		// THE ORDINARY CASE. An explicit source is for cells and for any
+		// frontend that reads from somewhere else; a real session reads over
+		// its own RPC without being told to.
+		src = sessionPressure{m.session}
+	}
+	if src == nil {
 		return []pressureRow{{label: "unavailable",
 			value: "no pressure source is wired into this session"}}
 	}
-	snap, err := m.pressure.Pressure()
+	snap, err := src.Pressure()
 	if err != nil {
 		// NAMED, NOT BLANK. A view that renders an empty table when it could
 		// not read is indistinguishable from a front door under no pressure at
@@ -209,3 +231,107 @@ func (v *pressureView) hints() []keyHint {
 }
 
 var _ tui.Container = (*pressureView)(nil)
+
+// Pressure asks the daemon for the front door's live view.
+//
+// THE DECODE IS EXPLICIT AND FORGIVING OF SHAPE, NOT OF MEANING. A field the
+// daemon stops sending decodes as its zero rather than failing the whole call,
+// because a view that refuses to render because one row moved is worse than a
+// view with one row missing. What it will NOT do is invent: a missing cap stays
+// zero, which the surface renders as "no limit" rather than as a breach.
+func (b *Bound) Pressure(ctx context.Context) (pressure.Snapshot, error) {
+	res, err := b.authed(ctx, "sys.pressure")
+	if err != nil {
+		return pressure.Snapshot{}, err
+	}
+	m, _ := res.(map[string]any)
+	return pressureOf(m), nil
+}
+
+func pressureOf(m map[string]any) pressure.Snapshot {
+	s := pressure.Snapshot{
+		Sessions: pressureRowOf(mapAt(m, "sessions")),
+		Conns:    pressureRowOf(mapAt(m, "conns")),
+		PreAuth:  pressureRowOf(mapAt(m, "pre_auth")),
+
+		PerUserOmitted:   intAt(m, "per_user_omitted"),
+		LeasesOmitted:    intAt(m, "leases_omitted"),
+		DenialsOmitted:   intAt(m, "denials_omitted"),
+		ThrottledOmitted: intAt(m, "throttled_omitted"),
+	}
+	for _, r := range sliceAt(m, "per_user") {
+		s.PerUser = append(s.PerUser, pressureRowOf(r))
+	}
+	for _, r := range sliceAt(m, "leases") {
+		s.Leases = append(s.Leases, pressureRowOf(r))
+	}
+	for _, d := range sliceAt(m, "denials") {
+		s.Denials = append(s.Denials, pressure.DenialRow{
+			DenialKey: pressure.DenialKey{
+				Reason: strAt(d, "reason"), Class: pressureClassOf(strAt(d, "class")),
+			},
+			Count: intAt(d, "count"),
+		})
+	}
+	for _, th := range sliceAt(m, "throttled") {
+		s.Throttled = append(s.Throttled, pressure.ThrottledRow{
+			Host:      strAt(th, "host"),
+			Remaining: time.Duration(intAt(th, "remaining_seconds")) * time.Second,
+		})
+	}
+	return s
+}
+
+func pressureRowOf(m map[string]any) pressure.Row {
+	return pressure.Row{
+		Label: strAt(m, "label"), Subject: strAt(m, "subject"),
+		Value: intAt(m, "value"), Cap: intAt(m, "cap"), Raised: boolAt(m, "raised"),
+	}
+}
+
+// pressureClassOf maps the wire name back.
+//
+// AN UNKNOWN CLASS IS CREDENTIAL, NOT CAPACITY. If a future daemon sends a class
+// this build does not know, the safe reading is the one that does NOT tell an
+// operator the pool is full — a wrong "capacity" sends somebody to resize
+// something, and a wrong "credential" sends them to look at a client.
+func pressureClassOf(s string) pressure.Class {
+	if s == pressure.Capacity.String() {
+		return pressure.Capacity
+	}
+	return pressure.Credential
+}
+
+func mapAt(m map[string]any, k string) map[string]any {
+	v, _ := m[k].(map[string]any)
+	return v
+}
+
+func sliceAt(m map[string]any, k string) []map[string]any {
+	raw, _ := m[k].([]any)
+	out := make([]map[string]any, 0, len(raw))
+	for _, r := range raw {
+		if rm, ok := r.(map[string]any); ok {
+			out = append(out, rm)
+		}
+	}
+	return out
+}
+
+func strAt(m map[string]any, k string) string { v, _ := m[k].(string); return v }
+func boolAt(m map[string]any, k string) bool  { v, _ := m[k].(bool); return v }
+
+// intAt reads a number the encoder may have given back as any width.
+func intAt(m map[string]any, k string) int {
+	switch v := m[k].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case uint64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
+}

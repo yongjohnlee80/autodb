@@ -130,3 +130,60 @@ func TestPressureView_AWaitIsReadable(t *testing.T) {
 		t.Errorf("rendered %q with sub-second precision nobody needs", value)
 	}
 }
+
+// THE WIRE SHAPE ROUND-TRIPS, INCLUDING THE PARTS THAT ARE EASY TO LOSE.
+//
+// The daemon renders the view onto plain values and this decodes them back. A
+// field that silently decoded as zero would put a calm row on the screen while
+// the front door was full, which is the failure mode the whole scope exists to
+// remove — so the round trip is asserted rather than assumed.
+func TestPressureDecode_TheViewSurvivesTheWire(t *testing.T) {
+	// Exactly what the daemon sends, including the integer widths msgpack
+	// hands back rather than the ones Go would have used.
+	wire := map[string]any{
+		"sessions": map[string]any{"label": "sessions.global", "subject": "",
+			"value": uint64(9), "cap": int64(10), "raised": true},
+		"per_user": []any{map[string]any{"label": "sessions.user", "subject": "7",
+			"value": float64(8), "cap": int64(10), "raised": true}},
+		"per_user_omitted": int64(24),
+		"denials": []any{map[string]any{"reason": "frontdoor/lease-cap-exceeded",
+			"class": "capacity", "count": int64(7)}},
+		"throttled": []any{map[string]any{"host": "10.0.0.9",
+			"remaining_seconds": int64(42)}},
+		"throttled_omitted": int64(3),
+	}
+
+	got := pressureOf(wire)
+	if got.Sessions.Value != 9 || got.Sessions.Cap != 10 || !got.Sessions.Raised {
+		t.Errorf("sessions decoded as %+v", got.Sessions)
+	}
+	if len(got.PerUser) != 1 || got.PerUser[0].Subject != "7" || got.PerUser[0].Value != 8 {
+		t.Errorf("per-user decoded as %+v", got.PerUser)
+	}
+	if got.PerUserOmitted != 24 || got.ThrottledOmitted != 3 {
+		t.Errorf("the remainders decoded as %d and %d, want 24 and 3 — a list that "+
+			"loses its remainder tells the operator the problem is smaller than it is",
+			got.PerUserOmitted, got.ThrottledOmitted)
+	}
+	if len(got.Denials) != 1 || got.Denials[0].Class != pressure.Capacity {
+		t.Errorf("denials decoded as %+v; losing the class is what sends somebody to "+
+			"resize a pool over password guessing", got.Denials)
+	}
+	if len(got.Throttled) != 1 || got.Throttled[0].Remaining != 42*time.Second {
+		t.Errorf("throttled decoded as %+v", got.Throttled)
+	}
+}
+
+// AN UNKNOWN CLASS IS READ AS CREDENTIAL, NOT CAPACITY.
+//
+// If a future daemon sends a class this build does not know, the safe reading is
+// the one that does NOT tell an operator the pool is full: a wrong "capacity"
+// sends somebody to resize something, a wrong "credential" sends them to look at
+// a client. Guessing wrong in the second direction costs an hour; in the first
+// it costs a change to production capacity.
+func TestPressureDecode_AnUnknownClassIsNotReadAsCapacity(t *testing.T) {
+	if got := pressureClassOf("something-this-build-has-never-heard-of"); got == pressure.Capacity {
+		t.Error("an unrecognised class decoded as capacity; a wrong capacity reading " +
+			"sends somebody to change production capacity over nothing")
+	}
+}
