@@ -88,6 +88,20 @@ func TestR7_AnEmptyStoreIsNotACandidate(t *testing.T) {
 		t.Error("a store with a parsed statement reports holding nothing; R7 would skip " +
 			"exactly the session that is pinning a backend")
 	}
+
+	// A CLOSE THAT THE TARGET HAS NOT CONFIRMED IS STILL HELD STATE, and this
+	// case had no coverage: the cell above keeps a statement in the store, so
+	// dropping pendingCloses from the check changed nothing and the control for
+	// it came back GREEN. The name is free on our side while the TARGET may
+	// still hold the object, which is precisely the state that pins a backend
+	// without anything obvious in the maps.
+	empty := newExtObjectsAt(func() time.Time { return at })
+	empty.notePendingClose(objectRef{})
+	if !empty.holdsAnything() {
+		t.Error("a store whose only content is an unconfirmed close reports holding " +
+			"nothing; the target may still hold that object, and R7 would skip the " +
+			"session pinning it")
+	}
 }
 
 // r7Session builds a session holding an object whose dependency has stalled.
