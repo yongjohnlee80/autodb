@@ -536,18 +536,6 @@ func putUint32(b []byte, v uint32)          { binary.BigEndian.PutUint32(b, v) }
 
 // sendDenial writes the uniform denial and flushes it.
 //
-// Separated from the decision so every refusal path emits the SAME bytes:
-// one construction site is what makes "indistinguishable across causes" a
-// property of the code rather than a habit of whoever wrote each branch.
-func sendDenial(w interface {
-	Write([]byte) (int, error)
-}, reason denialReason) error {
-	// NO WITNESS AND NO CHARGE, so this can only ever render the uniform
-	// denial. Every pre-authentication refusal comes through here, and none of
-	// them has authorised anybody to be told anything.
-	return sendDenialOccurrence(w, outcome.Occurrence{Reason: outcome.ReasonID(reason)})
-}
-
 // sendDenialFor writes a refusal, disclosing capacity only on the engine's
 // witness that the caller was already authorized.
 // sendDenialOccurrence writes the projection of a typed occurrence. It is the

@@ -156,6 +156,7 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 func expectedControls() map[string][3]string {
 	return map[string][3]string{
 		// name: {File, Package, Test}
+		"pressure-the-wrapper-is-what-counts":          {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_TheWrapperIsWhatCounts"},
 		"pressure-every-refusal-is-counted":            {"frontdoor/listener.go", "./frontdoor/", "TestPressureTick_NoRefusalBypassesTheCounter"},
 		"pressure-only-capacity-refusals-count":        {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_OnlyCapacityRefusalsAreCounted"},
 		"pressure-observability-never-withholds":       {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_NothingObservingStillRefuses"},

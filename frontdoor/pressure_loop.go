@@ -59,7 +59,21 @@ func (l *Listener) runPressure(caps CapacityReader) {
 	if l.meter == nil || caps == nil {
 		return
 	}
+	// REGISTERED BEHIND THE ACCEPT BARRIER, like every handler. Close crosses
+	// acceptMu and only then waits, so a bare Add here could run after Wait had
+	// already begun -- which is WaitGroup misuse and panics the process. Taking
+	// the barrier makes the registration either wholly before Close's wait or
+	// refused, and a listener already closing starts nothing.
+	l.acceptMu.Lock()
+	select {
+	case <-l.closed:
+		l.acceptMu.Unlock()
+		return
+	default:
+	}
 	l.wg.Add(1)
+	l.acceptMu.Unlock()
+
 	go func() {
 		defer l.wg.Done()
 		every := pressureInterval
@@ -74,6 +88,15 @@ func (l *Listener) runPressure(caps CapacityReader) {
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
+			// THE CLOSE SIGNAL IS CHECKED FIRST, ALONE. A select over both is
+			// free to pick either when both are ready, so a tick landing at the
+			// same moment as shutdown could report pressure about an instance
+			// that has stopped serving -- rarely, and therefore confusingly.
+			select {
+			case <-l.closed:
+				return
+			default:
+			}
 			select {
 			case <-l.closed:
 				return

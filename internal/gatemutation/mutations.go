@@ -775,11 +775,20 @@ func All() []Mutation {
 		{
 			Name: "pressure-the-tick-is-waited-for", Package: "./frontdoor/",
 			File:        "frontdoor/pressure_loop.go",
-			Anchor:      "\tl.wg.Add(1)\n\tgo func() {\n\t\tdefer l.wg.Done()",
-			Replacement: "\tgo func() {",
+			Anchor:      "\tl.wg.Add(1)\n\tl.acceptMu.Unlock()",
+			Replacement: "	l.acceptMu.Unlock()",
 			Test:        "TestPressureLoop_CloseWaitsForTheTick",
 			Fails:       "Close finished while the tick was still inside the reader",
 			Guarantee:   "that closing the front door waits for the pressure tick, so a restarting host does not accumulate one ticker per restart reporting on instances that have stopped serving",
+		},
+		{
+			Name: "pressure-the-wrapper-is-what-counts", Package: "./frontdoor/",
+			File:        "frontdoor/pressure_tick.go",
+			Anchor:      "\tif l.meter != nil {\n\t\tl.meter.recordDenial(occ)\n\t}\n",
+			Replacement: "",
+			Test:        "TestPressureTick_TheWrapperIsWhatCounts",
+			Fails:       "the wrapper is the one place a refusal is counted",
+			Guarantee:   "that the wrapper every refusal is routed through actually counts, since a structural guard proving the route and a charge guard driving the meter directly both survive a wrapper that only sends",
 		},
 	}
 }

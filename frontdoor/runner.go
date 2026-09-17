@@ -334,7 +334,8 @@ func (l *Listener) lifecycleFault(lc *lifecycle, phase PhaseName, peer string, s
 		// THE WRITE IS OUTSIDE THE GUARD, deliberately: it is our own code on
 		// a socket, not a host callback, and swallowing its failure would hide
 		// a broken stream behind a mechanism meant for broken observers.
-		if derr := sendDenial(stream, reasonPreAuthProtocolViolation); derr != nil {
+		if derr := l.denyWithOccurrence(stream,
+			outcome.Occurrence{Reason: outcome.ReasonID(reasonPreAuthProtocolViolation)}); derr != nil {
 			safely(func() {
 				l.onLog(fmt.Sprintf("frontdoor: writing the denial to %s: %v", peer, derr))
 			})
