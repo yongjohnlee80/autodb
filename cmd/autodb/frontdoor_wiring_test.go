@@ -11,10 +11,12 @@ import (
 	"encoding/binary"
 	"encoding/pem"
 	"errors"
+	"github.com/yongjohnlee80/autodb/frontdoor"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,7 +104,7 @@ func TestStartFrontDoor_ListensAndHasTheEngineBehindIt(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	l, _, err := startFrontDoor(ctx, cfg, eng, logger.Nop{})
+	l, _, err := startFrontDoor(ctx, cfg, eng, logger.Nop{}, nil)
 	if err != nil {
 		t.Fatalf("startFrontDoor: %v", err)
 	}
@@ -163,7 +165,7 @@ func TestStartFrontDoor_DisabledStartsNothing(t *testing.T) {
 	t.Parallel()
 	var cfg config.Config
 	cfg.FrontDoor = config.FrontDoor{Enabled: false, Bind: "127.0.0.1:0"}
-	l, _, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{})
+	l, _, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{}, nil)
 	if err != nil {
 		t.Fatalf("a disabled front door returned an error: %v", err)
 	}
@@ -183,7 +185,7 @@ func TestStartFrontDoor_UnusableMaterialFailsTheStart(t *testing.T) {
 	t.Parallel()
 	// Expired: valid PEM, valid key pair, and not something that may serve.
 	cfg := frontDoorConfig(t, time.Now().Add(-time.Hour))
-	l, _, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{})
+	l, _, err := startFrontDoor(context.Background(), cfg, coreexec.New(nil, nil), logger.Nop{}, nil)
 	if err == nil {
 		if l != nil {
 			l.Close()
@@ -305,7 +307,7 @@ func TestSuperviseFrontDoor_StopsWithTheServeContext(t *testing.T) {
 func TestFrontDoorOptions_CarryEverySeam(t *testing.T) {
 	t.Parallel()
 	var eng *coreexec.Engine // the wiring is the subject, not the engine
-	opts := frontDoorOptions(config.Default(), eng, logger.Nop{})
+	opts := frontDoorOptions(config.Default(), eng, logger.Nop{}, nil)
 
 	if opts.Queries == nil {
 		t.Error("Options.Queries is nil: the front door would authenticate every " +
@@ -334,7 +336,7 @@ func TestFrontDoorOptions_CarryEverySeam(t *testing.T) {
 func TestFrontDoorOptions_SeamsAreTheEngine(t *testing.T) {
 	t.Parallel()
 	var eng *coreexec.Engine
-	opts := frontDoorOptions(config.Default(), eng, logger.Nop{})
+	opts := frontDoorOptions(config.Default(), eng, logger.Nop{}, nil)
 
 	if _, ok := opts.Queries.(*coreexec.Engine); !ok {
 		t.Errorf("Options.Queries is %T, want *coreexec.Engine — the front door must "+
@@ -369,7 +371,7 @@ func TestFrontDoorOptions_CarryTheMemoryBudgets(t *testing.T) {
 	cfg.Exec.MaxSessionsGlobal = wantCap
 
 	var eng *coreexec.Engine
-	opts := frontDoorOptions(cfg, eng, logger.Nop{})
+	opts := frontDoorOptions(cfg, eng, logger.Nop{}, nil)
 
 	if got := opts.GeneralLaneBytes; got != wantLane {
 		t.Errorf("Options.GeneralLaneBytes = %d, want %d: frontdoor.general_lane_bytes does not "+
@@ -395,7 +397,7 @@ func TestFrontDoorOptions_UnsetLaneArrivesAsTheDefault(t *testing.T) {
 	cfg.FrontDoor.GeneralLaneBytes = 0
 
 	var eng *coreexec.Engine
-	opts := frontDoorOptions(cfg, eng, logger.Nop{})
+	opts := frontDoorOptions(cfg, eng, logger.Nop{}, nil)
 
 	if opts.GeneralLaneBytes != config.DefaultGeneralLaneBytes {
 		t.Errorf("Options.GeneralLaneBytes = %d, want the %d default", opts.GeneralLaneBytes,
@@ -420,7 +422,7 @@ func TestFrontDoorOptions_UnsetLaneArrivesAsTheDefault(t *testing.T) {
 func TestFrontDoorOptions_SessionCapIsAlreadyResolved(t *testing.T) {
 	t.Parallel()
 	var eng *coreexec.Engine
-	opts := frontDoorOptions(config.Default(), eng, logger.Nop{})
+	opts := frontDoorOptions(config.Default(), eng, logger.Nop{}, nil)
 
 	if opts.MaxSessionsGlobal <= 0 {
 		t.Fatalf("Options.MaxSessionsGlobal = %d: the daemon is relying on the floor's "+
@@ -429,4 +431,53 @@ func TestFrontDoorOptions_SessionCapIsAlreadyResolved(t *testing.T) {
 	if got, want := opts.MaxSessionsGlobal, config.DefaultMaxSessionsGlobal; got != want {
 		t.Errorf("Options.MaxSessionsGlobal = %d, want %d from a defaulted config", got, want)
 	}
+}
+
+// A PRESSURE CROSSING REACHES THE DURABLE TRAIL, AND ONLY A CROSSING DOES.
+//
+// The policy above OnEvent withholds durable rows from front-door events
+// because an anonymous peer can otherwise make this process write. That
+// reasoning holds for everything arriving per refusal and does not hold for a
+// latched transition, so the exception has to be exactly one kind wide — and a
+// cell has to prove it is, or the next event kind added quietly inherits it.
+func TestFrontDoorWiring_OnlyPressureCrossingsAreWrittenDurably(t *testing.T) {
+	eng := coreexec.New(nil, nil)
+	t.Cleanup(func() { _ = eng.Close() })
+
+	var written []string
+	opts := frontDoorOptions(config.Default(), eng, logger.Nop{},
+		func(action, detail string) { written = append(written, action+"|"+detail) })
+
+	opts.OnEvent(frontdoor.Event{Kind: frontdoor.EventPressure,
+		Reason: "leases.target{7}", Detail: `{"state":"entered"}`})
+	if len(written) != 1 {
+		t.Fatalf("a pressure crossing wrote %d durable rows, want 1: %v", len(written), written)
+	}
+	if !strings.Contains(written[0], "leases.target{7}") ||
+		!strings.Contains(written[0], "entered") {
+		t.Errorf("the row is %q; it must carry which signal crossed and which way, or it "+
+			"answers nothing days later", written[0])
+	}
+
+	// Every other kind stays in the operational log alone.
+	written = nil
+	for _, kind := range []string{"fd.refused", "fd.conn_open", "fd.tls_fail", "fd.conn_close"} {
+		opts.OnEvent(frontdoor.Event{Kind: kind, Reason: "whatever", Peer: "10.0.0.1:5"})
+	}
+	if len(written) != 0 {
+		t.Errorf("per-connection events wrote %v to the durable trail; those arrive as "+
+			"fast as somebody can dial, which is the write amplification the policy "+
+			"above OnEvent exists to refuse", written)
+	}
+}
+
+// AND NOTHING IS WRITTEN WHEN THERE IS NOWHERE TO WRITE.
+//
+// The sink is nil in every assembly without a meta store, and a front door must
+// not depend on one to serve.
+func TestFrontDoorWiring_ANilAuditSinkIsSafe(t *testing.T) {
+	eng := coreexec.New(nil, nil)
+	t.Cleanup(func() { _ = eng.Close() })
+	opts := frontDoorOptions(config.Default(), eng, logger.Nop{}, nil)
+	opts.OnEvent(frontdoor.Event{Kind: frontdoor.EventPressure, Reason: "x", Detail: "{}"})
 }
