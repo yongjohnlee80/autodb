@@ -69,16 +69,19 @@ type Model struct {
 	pendingCtrlW      bool   // Ctrl-w chord prefix (Ctrl-w z = zoom alias)
 	searchQuery       string // last / pattern; n and N walk its matches
 	about             AboutInfo
-	frontend          Frontend
-	noteView          NoteView // which note tree this session reads
-	pendingPrompt     func()   // an auth prompt waiting for the splash to close
-	pendingFocus      bool     // afterLogin's editor focus, deferred past an open modal
-	splashShown       bool     // the About splash opens once, on the first frame
-	connectedOnce     bool     // a later connect is a RE-connect: stale floats go
-	cleartextFD       bool     // the ATTACHED front door is serving without TLS
-	cleartextSeen     bool     // the user dismissed the warning for this session
-	explorerFocused   bool     // last applied cursor styling (focused = cyan)
-	resultsFocused    bool
+	// pressure is where the pressure view reads from. Nil when nothing is
+	// wired, which the view reports rather than hiding the command.
+	pressure        PressureSource
+	frontend        Frontend
+	noteView        NoteView // which note tree this session reads
+	pendingPrompt   func()   // an auth prompt waiting for the splash to close
+	pendingFocus    bool     // afterLogin's editor focus, deferred past an open modal
+	splashShown     bool     // the About splash opens once, on the first frame
+	connectedOnce   bool     // a later connect is a RE-connect: stale floats go
+	cleartextFD     bool     // the ATTACHED front door is serving without TLS
+	cleartextSeen   bool     // the user dismissed the warning for this session
+	explorerFocused bool     // last applied cursor styling (focused = cyan)
+	resultsFocused  bool
 	// lastPane is the workspace component focus should return to when the menu
 	// bar gives it up. Recorded on every deliberate pane focus, so a command
 	// invoked from the menu hands the keyboard back to where the operator was

@@ -95,6 +95,10 @@ func baseRows(connLabel string) []string {
 		"L login / switch user",
 		"x " + connLabel,
 		"A about autodb",
+		// Added with the pressure view. The menu is pinned so an addition has to
+		// be declared here rather than appearing quietly -- which is the point of
+		// pinning it, and is how this entry was noticed.
+		"P front-door pressure",
 		"? help",
 		"Q quit",
 	}
