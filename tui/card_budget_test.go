@@ -175,9 +175,9 @@ func TestCardBudget_TheSettingsNameTheClientTheyBelongTo(t *testing.T) {
 // passed, and was then DELETED. Two things were wrong with it. It handed
 // cardCopyKeys a DSN rather than the value production passes, so it asserted a
 // property of its own argument -- the same shape as the defects this milestone
-// keeps turning up. And the contract it named is not this card's: ADR 0184
-// section 6 says "the copy keys still yield the token alone", but `Y` was since
-// changed to copy the WHOLE card deliberately, because a token-only `y` claimed
+// keeps turning up. And the contract it named is not this card's: the design
+// says "the copy keys still yield the token alone", but `Y` was since changed
+// to copy the WHOLE card deliberately, because a token-only `y` claimed
 // the key before the read-only editor beneath could treat it as a yank, which
 // made a visual selection uncopyable.
 //
