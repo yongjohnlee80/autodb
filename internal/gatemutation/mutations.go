@@ -236,8 +236,8 @@ func All() []Mutation {
 		{
 			Name: "predicate-and-reservation-are-one-hold", Package: "./core/exec/",
 			File:        "core/exec/demand_reclaim.go",
-			Anchor:      "\t\treserved := eligible && s.beginCloseLocked(\"\", ReasonDemandReclaimed)",
-			Replacement: "\t\ts.mu.Unlock()\n\t\ts.mu.Lock()\n\t\treserved := eligible && s.beginCloseLocked(\"\", ReasonDemandReclaimed)",
+			Anchor:      "\t\treserved := claimed && s.beginCloseLocked(\"\", ReasonDemandReclaimed)",
+			Replacement: "\t\ts.mu.Unlock()\n\t\ts.mu.Lock()\n\t\treserved := claimed && s.beginCloseLocked(\"\", ReasonDemandReclaimed)",
 			Test:        "TestDemandReclaim_NothingCanSlipBetweenJudgingAndClaiming",
 			Fails:       "the session's lock is released between judging it idle and claiming it",
 			Guarantee: "that a session cannot become active between being judged idle and " +
@@ -583,6 +583,18 @@ func All() []Mutation {
 			Fails:       "does not own the ending",
 			Guarantee: "that a stale notice cannot write a reclamation over a session an " +
 				"operator or its own client ended, replacing a true record with a false one",
+		},
+		{
+			Name: "a-demand-unit-is-spent-where-it-is-checked", Package: "./core/exec/",
+			File:   "core/exec/demand_reclaim.go",
+			Anchor: "\tif r.demandWanted[leaseConn] <= len(r.demandPromised[leaseConn]) {\n\t\treturn false\n\t}\n",
+			// Unconditional promise: exactly the shape the defect had, and it
+			// compiles, which a bare deletion of the whole function would not.
+			Replacement: "",
+			Test:        "TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce",
+			Fails:       "sessions reserved for one waiter after concurrent offers",
+			Guarantee: "that one queued request spends one demand unit however many offers " +
+				"open at once, so it cannot end several healthy sessions to answer itself",
 		},
 	}
 }

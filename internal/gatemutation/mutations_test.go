@@ -156,6 +156,7 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 func expectedControls() map[string][3]string {
 	return map[string][3]string{
 		// name: {File, Package, Test}
+		"a-demand-unit-is-spent-where-it-is-checked":   {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce"},
 		"a-finalisation-is-consumed-not-just-checked":  {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandFinalisation_ManyCallersPresentingOneNoticeYieldOneOwner"},
 		"a-finalisation-checks-the-ending-it-claims":   {"core/exec/demand_reclaim.go", "./core/exec/", "TestDemandFinalisation_ItIsRefusedAgainstAnEndingItDoesNotOwn"},
 		"an-offer-covers-only-a-wait":                  {"frontdoor/session_loop.go", "./frontdoor/", "TestDemandOfferWindow_NoOfferCoversAFrameTheClientAlreadyWon"},

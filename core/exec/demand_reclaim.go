@@ -154,10 +154,30 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 		//     mistakes: that one stops a live offer existing without a knock,
 		//     and this one stops a reservation committing against one anyway.
 		eligible := s.wire && !s.busy && s.tx == nil && s.recvToken != 0 && s.wake != nil
+		// THE DEMAND UNIT IS SPENT HERE, NOT WHERE IT WAS CHECKED.
+		//
+		// pressDemand's check is an optimisation and nothing more. Two receive
+		// offers opening at once both read wanted=1/promised=0 before either
+		// had recorded anything, both went on to select, and both reserved --
+		// one queued request ending two healthy sessions. A check and a spend
+		// in different critical sections is not accounting; it is a race with
+		// bookkeeping attached.
+		//
+		// So the claim is taken atomically, under this candidate's own lock,
+		// against the same state the reservation commits to. demandMu is a leaf
+		// and nothing that touches a socket runs while it is held.
+		claimed := eligible && r.tryPromiseDemand(leaseConn, s.id)
 		// The reservation is taken INSIDE this same hold. It is the ordinary
 		// close claim, so it also settles ownership against the reaper, an
 		// operator's delete and the client's own disconnect.
-		reserved := eligible && s.beginCloseLocked("", ReasonDemandReclaimed)
+		reserved := claimed && s.beginCloseLocked("", ReasonDemandReclaimed)
+		if claimed && !reserved {
+			// GIVEN BACK BEFORE MOVING ON. The close claim can be lost to the
+			// reaper or the client's own disconnect; a demand unit left spent
+			// on a candidate nobody reserved would make the target look
+			// answered and strand the request that is still waiting.
+			r.dischargeDemand(leaseConn, s.id)
+		}
 		var knock func()
 		if reserved {
 			// PUBLISHED UNDER THE SAME LOCK AS THE RESERVATION. The owner
@@ -166,7 +186,9 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 			// is what stopped a lost race from ending somebody's session
 			// silently.
 			// ISSUED WITH THE RESERVATION, so exactly one finalisation exists
-			// for exactly one reservation.
+			// for exactly one reservation. The demand unit was already spent
+			// above, atomically, which is what makes this reservation the only
+			// one that could have happened.
 			s.demandFinal = true
 			s.demandIdle = now.Sub(s.lastUsed)
 			s.demandHeldObjects = s.holdsObjects()
@@ -179,7 +201,6 @@ func (r *sessionRegistry) reserveDemandVictim(leaseConn int64, now time.Time) (d
 			// so no second ask can be decided against a view in which this one
 			// has not happened yet. That window is exactly where over-reclaim
 			// would live.
-			r.promiseDemand(leaseConn, s.id)
 		}
 		notice := s.pendingNotice
 		s.mu.Unlock()
@@ -498,13 +519,22 @@ func (r *sessionRegistry) dropDemand(leaseConn int64) {
 	}
 }
 
-// promiseDemand records that a reclamation has been reserved on this target.
-func (r *sessionRegistry) promiseDemand(leaseConn int64, id SessionID) {
+// tryPromiseDemand spends one demand unit on this session, or refuses.
+//
+// CHECKING AND SPENDING ARE THE SAME OPERATION, which is the whole point of it
+// returning a bool. Reading "is one still owed" and recording "this one is
+// answering it" in two critical sections lets every concurrent offer read the
+// same encouraging answer and act on it, which is how one waiting request came
+// to end several sessions.
+func (r *sessionRegistry) tryPromiseDemand(leaseConn int64, id SessionID) bool {
 	if leaseConn == 0 {
-		return
+		return false
 	}
 	r.demandMu.Lock()
 	defer r.demandMu.Unlock()
+	if r.demandWanted[leaseConn] <= len(r.demandPromised[leaseConn]) {
+		return false
+	}
 	if r.demandPromised == nil {
 		r.demandPromised = map[int64]map[SessionID]struct{}{}
 	}
@@ -512,6 +542,7 @@ func (r *sessionRegistry) promiseDemand(leaseConn int64, id SessionID) {
 		r.demandPromised[leaseConn] = map[SessionID]struct{}{}
 	}
 	r.demandPromised[leaseConn][id] = struct{}{}
+	return true
 }
 
 // dischargeDemand records that a reserved session's lease has come back.
@@ -549,6 +580,9 @@ func (r *sessionRegistry) demandOutstanding(leaseConn int64) bool {
 // one place that decides whether asking is warranted. Called with no lock
 // held: selecting a victim reads sessions and knocks on a socket.
 func (r *sessionRegistry) pressDemand(leaseConn int64) bool {
+	// AN OPTIMISATION, NOT THE ACCOUNTING. It spares a pointless walk over the
+	// candidates when nothing is owed. Correctness rests on tryPromiseDemand at
+	// the reservation itself -- this answer is stale the instant it is read.
 	if r == nil || !r.demandOutstanding(leaseConn) {
 		return false
 	}
@@ -559,4 +593,13 @@ func (r *sessionRegistry) pressDemand(leaseConn int64) bool {
 		return false
 	}
 	return demand(leaseConn)
+}
+
+// promisedCount reports how many reclamations are already coming for a target.
+// Test-support: the accounting is the guarantee, so a cell has to be able to
+// read it rather than infer it from how many sessions happen to be closing.
+func (r *sessionRegistry) promisedCount(leaseConn int64) int {
+	r.demandMu.Lock()
+	defer r.demandMu.Unlock()
+	return len(r.demandPromised[leaseConn])
 }
