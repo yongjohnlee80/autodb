@@ -156,6 +156,12 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 func expectedControls() map[string][3]string {
 	return map[string][3]string{
 		// name: {File, Package, Test}
+		"r7-the-clock-is-not-a-wire-timer":               {"core/exec/wire_extended_objects.go", "./core/exec/", "TestR7_OrdinaryTrafficDoesNotAdvanceTheDependencyClock"},
+		"r7-using-an-object-is-progress":                 {"core/exec/wire_extended_objects.go", "./core/exec/", "TestR7_TouchingTheObjectsResetsTheClock"},
+		"r7-a-pending-close-is-still-held":               {"core/exec/wire_extended_objects.go", "./core/exec/", "TestR7_AnEmptyStoreIsNotACandidate"},
+		"r7-the-rung-fires":                              {"core/exec/session_engine.go", "./core/exec/", "TestR7_AStalledDependencyOnALiveWireIsReclaimed"},
+		"r7-it-spares-work-in-flight":                    {"core/exec/session_engine.go", "./core/exec/", "TestR7_ItSparesEverySessionThatWouldBeHarmed"},
+		"r7-the-bound-is-the-promise":                    {"core/exec/session_engine.go", "./core/exec/", "TestR7_ADependencyInsideItsBoundIsNotReclaimed"},
 		"pressure-the-breakdown-keeps-the-class":         {"core/pressure/breakdown.go", "./core/pressure/", "TestBreakdown_OneReasonUnderTwoClassesDoesNotMerge"},
 		"pressure-the-breakdown-ages-out":                {"core/pressure/breakdown.go", "./core/pressure/", "TestBreakdown_RowsLeaveWhenTheWindowPasses"},
 		"pressure-the-breakdown-is-bounded":              {"core/pressure/breakdown.go", "./core/pressure/", "TestBreakdown_ItStaysBoundedAndSaysWhatItDropped"},
