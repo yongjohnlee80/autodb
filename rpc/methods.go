@@ -5,6 +5,7 @@ import (
 	"encoding"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/pressure"
 	"math"
 	"os"
 	"reflect"
@@ -318,6 +319,7 @@ func identMap(id auth.Identity) map[string]any {
 // peer IP threaded through, map the result/error. No business logic.
 func (s *Server) register() {
 	s.rpc.Handle("sys.hello", s.helloHandler)
+	s.registerPressure()
 	s.registerM6()
 
 	// --- auth: sessions & bootstrap ---
@@ -1993,4 +1995,97 @@ func toAnyList(in []string) []any {
 		out = append(out, s)
 	}
 	return out
+}
+
+// registerPressure exposes the front door's pressure view.
+//
+// ADMIN-ONLY FOR NOW, AND DELIBERATELY SO RATHER THAN BY DEFAULT. The view
+// discloses operational detail about other people: which users hold sessions,
+// which source addresses are being held out, and what is being refused. Nothing
+// in the design settles who may read that, so it follows the rule keyslot.status
+// was corrected to — deny before you disclose.
+//
+// The capability is what matters now and the audience is a separate decision
+// that is Johno's to make. Widening this is one line, and narrowing it after
+// somebody has built on it is not, so it starts narrow.
+func (s *Server) registerPressure() {
+	s.rpc.Handle("sys.pressure", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		// The authorization lives in core, so this handler cannot be the place
+		// the rule is decided.
+		if _, err := s.auth.RequireAdminToken(ctx, token); err != nil {
+			return nil, wireErr(err)
+		}
+		if s.pressure == nil {
+			return nil, wireErr(errNoPressure)
+		}
+		snap, err := s.pressure()
+		if err != nil {
+			return nil, wireErr(err)
+		}
+		return pressureWire(snap), nil
+	})
+}
+
+// errNoPressure is returned rather than an empty view, because an empty view and
+// a quiet front door read the same on a screen.
+var errNoPressure = errors.New("pressure is not being observed on this instance")
+
+// pressureWire projects the view onto plain values.
+//
+// AN EXPLICIT WIRE SHAPE, NOT THE INTERNAL STRUCT. Returning the snapshot
+// directly made every field of an internal type part of a protocol: renaming one
+// would silently change what a frontend receives, and a type the encoder cannot
+// handle -- a Duration, say -- becomes an "internal error" a caller cannot act
+// on. That is how this was found: a cell required an admin to be ANSWERED, not
+// merely not-denied, and the answer was a marshalling failure.
+//
+// Durations are rendered as whole seconds, because the receiver is a surface
+// somebody reads and a wait in nanoseconds is a true figure nobody can use.
+func pressureWire(s pressure.Snapshot) map[string]any {
+	row := func(r pressure.Row) map[string]any {
+		return map[string]any{
+			"label": r.Label, "subject": r.Subject,
+			"value": r.Value, "cap": r.Cap, "raised": r.Raised,
+		}
+	}
+	rows := func(in []pressure.Row) []any {
+		out := make([]any, 0, len(in))
+		for _, r := range in {
+			out = append(out, row(r))
+		}
+		return out
+	}
+	denials := make([]any, 0, len(s.Denials))
+	for _, d := range s.Denials {
+		denials = append(denials, map[string]any{
+			"reason": d.Reason, "class": d.Class.String(), "count": d.Count,
+		})
+	}
+	throttled := make([]any, 0, len(s.Throttled))
+	for _, th := range s.Throttled {
+		throttled = append(throttled, map[string]any{
+			"host": th.Host, "remaining_seconds": int64(th.Remaining / time.Second),
+		})
+	}
+	return map[string]any{
+		"sessions": row(s.Sessions),
+		"conns":    row(s.Conns),
+		"pre_auth": row(s.PreAuth),
+
+		"per_user":          rows(s.PerUser),
+		"per_user_omitted":  s.PerUserOmitted,
+		"leases":            rows(s.Leases),
+		"leases_omitted":    s.LeasesOmitted,
+		"denials":           denials,
+		"denials_omitted":   s.DenialsOmitted,
+		"throttled":         throttled,
+		"throttled_omitted": s.ThrottledOmitted,
+	}
 }

@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/yongjohnlee80/autodb/core/engine"
+	"github.com/yongjohnlee80/autodb/core/pressure"
 	"net"
 	"os"
 	"os/exec"
@@ -544,9 +545,19 @@ func runServe(configPath string) error {
 		}
 		return info
 	}
+	// READ LIVE, ON EVERY CALL, from the listener that is actually serving.
+	// A nil listener answers with the error rather than an empty view, for the
+	// same reason the view itself does: an empty pressure report and a front
+	// door under no pressure read identically on a screen.
+	pressureState := func() (pressure.Snapshot, error) {
+		if fd == nil {
+			return pressure.Snapshot{}, errNoFrontDoor
+		}
+		return fd.PressureSnapshot(eng)
+	}
 	srv := rpc.New(svc, eng, cfg.Server, version,
 		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot),
-		rpc.WithFrontDoor(frontDoorState))
+		rpc.WithFrontDoor(frontDoorState), rpc.WithPressure(pressureState))
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)
 	// A lease loss is reported as the failure it is. Without this the
@@ -1429,3 +1440,8 @@ func composeOutcomes() (*outcome.Registry, error) {
 	regs = append(regs, frontdoor.Outcomes()...)
 	return outcome.Compose(regs...)
 }
+
+// errNoFrontDoor is what the pressure reader answers when the pgwire surface is
+// switched off: there is no pressure because there is no door, which is a
+// different statement from "no pressure".
+var errNoFrontDoor = errors.New("the front door is not enabled on this instance")

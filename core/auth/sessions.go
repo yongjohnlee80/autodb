@@ -369,3 +369,19 @@ func (s *Service) revokeAllSessionsTx(tx *dao.Transaction, userID, exceptSessID 
 	}
 	return q.Set(meta.SessRevoked, int64(1)).Update()
 }
+
+// RequireAdminToken is requireAdmin for callers outside this package.
+//
+// EXPORTED RELUCTANTLY, AND NARROWLY. The pattern elsewhere is that core owns
+// the whole operation — ServiceKeyslotStatusFor authorizes and then answers, so
+// the handler cannot be the place the rule is decided. That works when the data
+// lives here. The front door's pressure view does not: it is assembled from the
+// listener and the engine, neither of which this package should reach into.
+//
+// So the check is exported rather than the operation, and it returns the
+// Identity so a caller that needs to attribute what it does next can. It
+// decides one thing — is this token an admin's — and a caller that wants a
+// different rule must not build it out of this one.
+func (s *Service) RequireAdminToken(ctx context.Context, token string) (Identity, error) {
+	return s.requireAdmin(ctx, token)
+}
