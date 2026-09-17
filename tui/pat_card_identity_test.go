@@ -50,7 +50,7 @@ func TestRevealCard_UsesThePinnedOwnerNotTheCurrentSession(t *testing.T) {
 	}
 
 	text, dsn := buildCardText("adb_pat_secret.value", ConnInfo{Name: "demo", TargetDB: "gold"},
-		liveEndpointForIdentityTest(), bound.User().Name, "2027-01-01")
+		liveEndpointForIdentityTest(), bound.User().Name, bound.User().Role, "2027-01-01")
 	if strings.Contains(text, "bob") || strings.Contains(dsn, "bob") {
 		t.Errorf("the card names the CURRENT session user, not the token's owner:\n%s\n%s", text, dsn)
 	}

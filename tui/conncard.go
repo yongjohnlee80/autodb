@@ -258,7 +258,7 @@ func cardSSLMode(ep FrontDoorEndpoint) string {
 // That is the worst shape a bug can take here. The user copies with `Y` and
 // pastes without re-reading; the screen is what they trust. One computation,
 // one string, handed to both.
-func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, expires string) (string, string) {
+func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, role, expires string) (string, string) {
 	var b strings.Builder
 	p := func(f string, a ...any) { fmt.Fprintf(&b, f+"\n", a...) }
 
@@ -314,6 +314,13 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, exp
 	p("host         %s", orNone(dialHost))
 	p("port         %s", orNone(port))
 	p("user         %s", user)
+	if role != "" {
+		// WHAT THIS TOKEN CAN DO, beside who it is. A credential's reach is
+		// not inferable from the account name, and the card is the one place
+		// the credential is ever shown -- so it is also the one chance to say
+		// what was granted.
+		p("role         %s", role)
+	}
 	p("sslmode      %s", sslmode)
 	if ep.RootCAFile != "" && sslmode != cardSSLModeOff {
 		p("sslrootcert  %s", ep.RootCAFile)
@@ -336,8 +343,106 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, exp
 	p("JDBC")
 	p("  %s", buildCardJDBC(dialHost, port, user, secret, cardDatabase(conn), sslmode, ep.RootCAFile))
 	p("")
+	writeCardBudget(p, ep)
 	p("The token is shown ONCE and cannot be recovered. Copy it before closing.")
 	return b.String(), dsn
+}
+
+// writeCardBudget prints the ceilings this token will meet and what to set.
+//
+// A SHARED CEILING CANNOT YIELD A PRIVATE NUMBER, and three attempts to derive
+// one all failed the same way. "Idle should equal open" hoards leases other
+// people are waiting for. "Up to your allotted share" named a mechanism that
+// does not exist -- admission is first-come-first-served with no per-user
+// slices. "The per-user cap divided by the databases you connect to" hands the
+// whole shared cap to every process: two Label Manager processes each follow
+// four-and-four and together ask for sixteen against a cap of eight, and the
+// same breaks with two tokens, two users behind one NAT, or a replica set.
+//
+// Deriving a share needs inputs this card does not have and cannot have -- how
+// many processes this developer will run, how many replicas, who else is
+// behind their source address, who is competing right now. So the card stops
+// computing. It shows the ceilings WITH THEIR SCOPE, states the multiplier as
+// a formula the reader applies to their own situation, gives one worked
+// example and says it is one, and then says where the real number comes from:
+// an operator.
+//
+// NOT LIVE AVAILABILITY, EITHER. This card is shown once and cannot be
+// recovered, so a count of backends free at this instant is stale before it is
+// read. Live figures belong in the pressure view, which carries a timestamp.
+//
+// THIS BLOCK IS A BRIDGE. The acceptance rules say a developer configures
+// nothing; today they must, or the front door refuses them. When the scheduler
+// lands this is demoted to latency advice or removed, and that obligation is a
+// capability test carried by the change that makes it obsolete -- not a note
+// here, because a plan to delete something later is the kind of plan that does
+// not happen.
+func writeCardBudget(p func(string, ...any), ep FrontDoorEndpoint) {
+	// Nothing to say when the door is not configured: the warning at the top
+	// of the card already says the token cannot be used anywhere.
+	if !ep.Configured() {
+		return
+	}
+
+	p("LIMITS THAT APPLY TO THIS TOKEN")
+	p("  These are ceilings, and they are SHARED. None of them is yours alone.")
+	p("")
+	p("  %-22s %-9s %s", "sessions per user", cardCap(ep.MaxSessionsPerUser),
+		"you, across every database you connect to")
+	p("  %-22s %-9s %s", "sessions, instance", cardCap(ep.MaxSessionsGlobal),
+		"everyone using this autodb")
+	p("  %-22s %-9s %s", "backend connections", cardCap(ep.MaxTargetConns),
+		"everyone, across every target database")
+	p("")
+	// The per-source row is ABSENT, not approximated. What exists per source
+	// today is a credential and TLS failure count in a window, and the
+	// temporary throttle that follows it -- a rate limit on FAILURES, not a
+	// ceiling on concurrent capacity. Printing the throttle here as though it
+	// were a concurrency cap would teach exactly the wrong model of what is
+	// limiting somebody, which is the confusion the incident behind this work
+	// was made of.
+	p("  Your demand is  processes x databases x connections-per-pool.")
+	p("  A second process doubles it. Apply the formula to your own setup; the")
+	p("  card cannot know how many processes or replicas you will run, or who")
+	p("  else is behind your address.")
+	p("")
+	p("  Worked example, and it is an EXAMPLE, not a rule:")
+	p("    one process, two databases, nobody else competing, cap of eight")
+	p("    -> four connections per pool.")
+	p("")
+	p("  Your real number is an allocation the OPERATOR makes. Ask them.")
+	p("")
+	p("WHAT TO SET, FOR THE CLIENT YOU ARE USING")
+	p("  Label Manager (lm-http, gold-http)")
+	p("    PG_MAX_OPEN_CONNS / PG_MAX_IDLE_CONNS")
+	p("    -- Label Manager's OWN environment variables, read by its config.")
+	p("       Not a Postgres setting and not a database/sql one.")
+	p("  Any other Go database/sql application")
+	p("    pool.SetMaxOpenConns(n) / pool.SetMaxIdleConns(n)")
+	p("  A JDBC application using HikariCP")
+	p("    maximumPoolSize / minimumIdle")
+	p("  DataGrip")
+	p("    its own connection-pool setting, in the data-source options.")
+	p("    NOT a HikariCP property, and not something an application sets.")
+	p("  psql")
+	p("    nothing -- one connection per session.")
+	p("")
+	p("  Reopening is not free: every new connection costs a TLS handshake, a")
+	p("  token verification and a fresh admission.")
+	p("")
+}
+
+// cardCap renders one ceiling, or says the daemon did not report it.
+//
+// ZERO IS NOT A CAP OF ZERO. An older daemon answering a newer frontend sends
+// nothing for these fields, and printing "0" there tells a developer they may
+// open no sessions at all -- a confident wrong answer where the honest one is
+// that this daemon does not say.
+func cardCap(n int) string {
+	if n <= 0 {
+		return "not reported"
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // cardDatabase is what the client should put in its Database field: the

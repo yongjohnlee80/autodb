@@ -1347,6 +1347,13 @@ func (s *Server) register() {
 			"host_names":   toAnyList(info.HostNames),
 			"root_ca_file": info.RootCAFile,
 			"cleartext":    info.Cleartext,
+
+			// ADDITIVE, so no protocol bump: an older frontend ignores these
+			// and a newer one reads absent as absent. The verb surface is
+			// unchanged, which is what the handshake number tracks.
+			"max_sessions_per_user": int64(info.MaxSessionsPerUser),
+			"max_sessions_global":   int64(info.MaxSessionsGlobal),
+			"max_target_conns":      int64(info.MaxTargetConns),
 		}, nil
 	})
 

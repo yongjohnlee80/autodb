@@ -163,6 +163,21 @@ type FrontDoorInfo struct {
 	// only for this state. A consumer reading config for itself would be
 	// reading INTENT, and this struct reports the LIVE listener.
 	Cleartext bool
+
+	// The STABLE CEILINGS that apply to a token minted here, and not one
+	// figure more.
+	//
+	// NOT LIVE AVAILABILITY. The card is shown once and cannot be recovered,
+	// so a count of backends free right now is stale before it is read and
+	// misleading afterwards; live figures belong in the pressure view, where
+	// they carry a timestamp.
+	//
+	// Zero means THIS DAEMON DID NOT REPORT IT — an older daemon answering a
+	// newer frontend — and the card says so rather than printing a cap of
+	// zero, which reads as "you may open none".
+	MaxSessionsPerUser int
+	MaxSessionsGlobal  int
+	MaxTargetConns     int
 }
 
 // Option configures a Server.

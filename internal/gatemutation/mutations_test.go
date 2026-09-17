@@ -253,6 +253,15 @@ func expectedControls() map[string][3]string {
 		"identity-refuses-two-authorities":             {"internal/gateidentity/identity.go", "./internal/gateidentity/", "TestIdentity_AManifestWithTwoDigestHeadersIsRefused"},
 		"source-tree-refusal-borrows-its-precondition": {"internal/gatemutation/runner_meta_test.go", "./internal/gatemutation/", "TestRunner_ASourceTreeIsRefused"},
 		"containment-probe-trusts-signal-zero":         {"internal/gatemutation/cmd/mutate/containment_test.go", "./internal/gatemutation/cmd/mutate/", "TestRunBounded_KillsTheWholeProcessTree"},
+
+		// L1's other half: the connection card carries the budget.
+		"card-a-ceiling-shows-its-figure":        {"tui/conncard.go", "./tui/", "TestCardBudget_TheCeilingsCarryTheirScope"},
+		"card-an-unreported-ceiling-is-not-zero": {"tui/conncard.go", "./tui/", "TestCardBudget_AnUnreportedCeilingSaysSoRatherThanSayingZero"},
+		"card-offers-no-private-number":          {"tui/conncard.go", "./tui/", "TestCardBudget_ItOffersNoPrivateNumber"},
+		"card-advertises-no-per-source-cap":      {"tui/conncard.go", "./tui/", "TestCardBudget_NoPerSourceConcurrencyCapIsAdvertised"},
+		"card-settings-name-their-client":        {"tui/conncard.go", "./tui/", "TestCardBudget_TheSettingsNameTheClientTheyBelongTo"},
+		"card-shows-no-live-availability":        {"tui/conncard.go", "./tui/", "TestCardBudget_ItShowsNoLiveAvailability"},
+		"card-an-unusable-token-gets-no-advice":  {"tui/conncard.go", "./tui/", "TestCardBudget_AnUnusableTokenGetsNoBudgetBlock"},
 	}
 }
 

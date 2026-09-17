@@ -669,6 +669,13 @@ type FrontDoorEndpoint struct {
 	RootCAFile string
 	// Cleartext reports that the live listener is serving WITHOUT TLS.
 	Cleartext bool
+
+	// The stable ceilings that apply to a token minted here. Zero means this
+	// daemon did not report the figure, which is a different statement from a
+	// cap of zero and is rendered differently.
+	MaxSessionsPerUser int
+	MaxSessionsGlobal  int
+	MaxTargetConns     int
 }
 
 // Configured reports whether a token minted now could actually be used.
@@ -691,6 +698,10 @@ func (b *Bound) FrontDoorEndpoint(ctx context.Context) (FrontDoorEndpoint, error
 		Addr:       mS(m, "addr"),
 		RootCAFile: mS(m, "root_ca_file"),
 		Cleartext:  mB(m, "cleartext"),
+
+		MaxSessionsPerUser: int(mI(m, "max_sessions_per_user")),
+		MaxSessionsGlobal:  int(mI(m, "max_sessions_global")),
+		MaxTargetConns:     int(mI(m, "max_target_conns")),
 	}
 	for _, h := range asList(m["host_names"]) {
 		if s, ok := h.(string); ok {
