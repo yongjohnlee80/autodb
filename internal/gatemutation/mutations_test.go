@@ -156,6 +156,9 @@ func TestMutations_TheSetIsWellFormed(t *testing.T) {
 func expectedControls() map[string][3]string {
 	return map[string][3]string{
 		// name: {File, Package, Test}
+		"pressure-only-a-refusal-that-landed-counts":   {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_AFailedWriteIsNotCountedAsARefusal"},
+		"pressure-a-denial-lasts-a-full-window":        {"core/pressure/window.go", "./core/pressure/", "TestWindow_ADenialLastsAtLeastAFullWindowWhereverItLands"},
+		"pressure-a-closing-tick-does-not-dispatch":    {"frontdoor/pressure_loop.go", "./frontdoor/", "TestPressureLoop_ATickArrivingAtShutdownDoesNotDispatch"},
 		"pressure-the-wrapper-is-what-counts":          {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_TheWrapperIsWhatCounts"},
 		"pressure-every-refusal-is-counted":            {"frontdoor/listener.go", "./frontdoor/", "TestPressureTick_NoRefusalBypassesTheCounter"},
 		"pressure-only-capacity-refusals-count":        {"frontdoor/pressure_tick.go", "./frontdoor/", "TestPressureTick_OnlyCapacityRefusalsAreCounted"},

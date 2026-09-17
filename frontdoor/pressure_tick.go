@@ -72,8 +72,18 @@ func (m *pressureMeter) tick(caps pressure.Caps, throttled []string) []pressure.
 func (l *Listener) denyWithOccurrence(w interface {
 	Write([]byte) (int, error)
 }, occ outcome.Occurrence) error {
+	// SENT FIRST, COUNTED ONLY IF IT LANDED. The comment on pressureMeter says
+	// the count is of WIRE refusals -- "a refusal that was decided and then
+	// never sent did not shut anything" -- and the first version of this
+	// function counted before writing, so a peer that had already gone raised
+	// capacity pressure nobody had been refused by. A contract stated in one
+	// file and broken three functions below it is worse than an unstated one,
+	// because a reader stops checking.
+	if err := sendDenialOccurrence(w, occ); err != nil {
+		return err
+	}
 	if l.meter != nil {
 		l.meter.recordDenial(occ)
 	}
-	return sendDenialOccurrence(w, occ)
+	return nil
 }

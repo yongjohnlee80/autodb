@@ -64,6 +64,10 @@ type Listener struct {
 	// the loop rather than wait ten seconds for it. Test-only, in-package.
 	testPressureInterval time.Duration
 
+	// testBeforeEmit fires between the pressure tick and the decision to
+	// dispatch, so a cell can close the listener inside that window.
+	testBeforeEmit func()
+
 	// hookOfferDecision fires at every pass of the session loop's read, with
 	// the reader state the decision was made on and what was decided.
 	//

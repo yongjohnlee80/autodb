@@ -106,3 +106,29 @@ func TestWindow_TheOldestBucketFallsOutFirst(t *testing.T) {
 			"bucket, not reset", got, buckets-1)
 	}
 }
+
+// A DENIAL IS RETAINED FOR AT LEAST THE WHOLE WINDOW, WHEREVER IT LANDS.
+//
+// FOUND IN REVIEW, AND THE ARITHMETIC IS THE POINT. With the ring spanning
+// exactly Window, a denial arriving just before a bucket boundary shares that
+// bucket's fate — and the bucket ages out on ITS age, not the denial's. At ten
+// seconds a bucket, an event at t=9.999s was dropped at t=60.0s: fifty seconds
+// of retention for a signal documented as "denials in the last minute".
+//
+// Under-retention is the quiet failure. The rate reads lower than the truth, so
+// the signal raises later than it should, and the one time that matters is a
+// burst — the case the threshold exists for.
+func TestWindow_ADenialLastsAtLeastAFullWindowWhereverItLands(t *testing.T) {
+	// Worst case: an event at the very end of a bucket.
+	born := time.Unix(0, 0).Add(bucketSpan - time.Millisecond)
+	var w rateWindow
+	w.add(born)
+
+	atFullWindow := born.Add(Window)
+	if got := w.total(atFullWindow); got != 1 {
+		t.Errorf("a denial %s old has already been dropped (total=%d); the signal is "+
+			"documented as the last %s, and under-retention makes the rate read lower "+
+			"than the truth exactly during the burst the threshold exists for",
+			Window, got, Window)
+	}
+}

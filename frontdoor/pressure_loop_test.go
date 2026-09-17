@@ -252,3 +252,42 @@ func TestPressureLoop_NoReaderStartsNothing(t *testing.T) {
 		t.Errorf("a listener with nothing observing emitted %v", *got)
 	}
 }
+
+// A TICK THAT FIRES AS THE LISTENER CLOSES DOES NOT DISPATCH.
+//
+// FOUND IN REVIEW. Checking the close signal before the select narrows the
+// window; it does not close it, because a select with both cases ready is free
+// to pick the ticker. The seam below puts the close INSIDE that window rather
+// than racing it, so this is a decision rather than a coin toss.
+//
+// THE GUARANTEE IS THAT NO DISPATCH STARTS ONCE CLOSE IS VISIBLE. Claiming more
+// would need the emit to hold a lock Close also takes, and the emit calls a host
+// callback, which must never run under the accept barrier. A dispatch already
+// running is covered by the WaitGroup: Close waits for it.
+func TestPressureLoop_ATickArrivingAtShutdownDoesNotDispatch(t *testing.T) {
+	at := time.Unix(0, 0)
+	l, got := pressListener(t, &at)
+	l.closed = make(chan struct{})
+	l.testPressureInterval = time.Millisecond
+
+	var once sync.Once
+	l.testBeforeEmit = func() {
+		// The tick has fired and the dispatch has not been decided yet.
+		once.Do(func() { close(l.closed) })
+	}
+
+	l.runPressure(fixedCaps{exec.CapacitySnapshot{Leases: map[int64]int{7: 10}, LeaseCap: 10}})
+
+	waited := make(chan struct{})
+	go func() { l.wg.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the loop never returned after being closed inside the tick window")
+	}
+
+	if len(*got) != 0 {
+		t.Errorf("a tick dispatched %v after the listener was closed; the surface would "+
+			"be reporting pressure about an instance that has stopped serving", *got)
+	}
+}
