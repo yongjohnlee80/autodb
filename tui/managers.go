@@ -1165,7 +1165,7 @@ func (m *Model) revealConnectionCard(out PATSecret, conn ConnInfo, ep FrontDoorE
 	// see buildCardText for why that is not a stylistic preference.
 	// The DSN is INSIDE the text, and `Y` now takes the whole card, so the
 	// separately-returned copy has no consumer left.
-	text, _ := buildCardText(out.Secret, conn, ep, user, shortStamp(out.ExpiresAt))
+	text, _ := buildCardText(out.Secret, conn, ep, user, owner.Role, shortStamp(out.ExpiresAt))
 	card := &connCard{
 		model: m,
 		text:  text,

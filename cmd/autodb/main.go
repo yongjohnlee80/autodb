@@ -534,6 +534,13 @@ func runServe(configPath string) error {
 			Enabled:    cfg.FrontDoor.Enabled,
 			HostNames:  cfg.FrontDoor.TLSHostNames,
 			RootCAFile: cfg.FrontDoor.TLSRootCAFile,
+
+			// The ceilings a token minted here will actually meet. Read from
+			// the same cfg the engine was built from, so the card and the
+			// admitter cannot disagree about what the limit is.
+			MaxSessionsPerUser: cfg.Exec.MaxSessionsPerUser,
+			MaxSessionsGlobal:  cfg.Exec.MaxSessionsGlobal,
+			MaxTargetConns:     cfg.Exec.MaxTargetConns,
 		}
 		if fd != nil {
 			info.Listening = true

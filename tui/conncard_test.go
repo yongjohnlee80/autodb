@@ -23,7 +23,7 @@ func liveEndpoint() FrontDoorEndpoint {
 // The single fact whose absence cost an hour: what to type into Database.
 func TestCard_NamesTheTargetDatabase(t *testing.T) {
 	conn := ConnInfo{ID: 1, Name: "lm-local-test", Engine: "postgres", TargetDB: "test", Profile: "session"}
-	got, _ := buildCardText("adb_pat_xxx.yyy", conn, liveEndpoint(), "root", "2026-12-01")
+	got, _ := buildCardText("adb_pat_xxx.yyy", conn, liveEndpoint(), "root", "editor", "2026-12-01")
 
 	if !strings.Contains(got, "test") {
 		t.Fatal("the card does not name the target database")
@@ -43,7 +43,7 @@ func TestCard_NamesTheTargetDatabase(t *testing.T) {
 // Host and port come from the LIVE listener, never from a default.
 func TestCard_ReadsHostAndPortFromTheLiveListener(t *testing.T) {
 	conn := ConnInfo{ID: 1, Name: "c", TargetDB: "db", Profile: "session"}
-	got, _ := buildCardText("s", conn, liveEndpoint(), "root", "")
+	got, _ := buildCardText("s", conn, liveEndpoint(), "root", "editor", "")
 
 	if !strings.Contains(got, "6432") {
 		t.Fatalf("the live port is missing:\n%s", got)
@@ -65,7 +65,7 @@ func TestCard_ReadsHostAndPortFromTheLiveListener(t *testing.T) {
 func TestCard_WarnsWhenTheTokenCannotBeUsed(t *testing.T) {
 	conn := ConnInfo{ID: 1, Name: "c", TargetDB: "db"}
 
-	off, _ := buildCardText("s", conn, FrontDoorEndpoint{Enabled: false}, "root", "")
+	off, _ := buildCardText("s", conn, FrontDoorEndpoint{Enabled: false}, "root", "editor", "")
 	if !strings.Contains(off, "CANNOT BE USED") {
 		t.Fatal("minting on an install with the front door OFF produced no warning — the old " +
 			"reveal said nothing at all, which is the defect")
@@ -74,7 +74,7 @@ func TestCard_WarnsWhenTheTokenCannotBeUsed(t *testing.T) {
 		t.Error("the warning does not say how to fix it")
 	}
 
-	failed, _ := buildCardText("s", conn, FrontDoorEndpoint{Enabled: true, Listening: false}, "root", "")
+	failed, _ := buildCardText("s", conn, FrontDoorEndpoint{Enabled: true, Listening: false}, "root", "editor", "")
 	if !strings.Contains(failed, "NO LISTENER IS RUNNING") {
 		t.Fatal("enabled-but-not-listening is not distinguished from disabled")
 	}
@@ -85,7 +85,7 @@ func TestCard_WarnsWhenTheTokenCannotBeUsed(t *testing.T) {
 
 	// And a working endpoint carries NO warning — without this the cell passes
 	// for a card that always warns.
-	ok, _ := buildCardText("s", conn, liveEndpoint(), "root", "")
+	ok, _ := buildCardText("s", conn, liveEndpoint(), "root", "editor", "")
 	if strings.Contains(ok, "CANNOT BE USED") {
 		t.Error("a healthy front door still warned")
 	}
@@ -95,7 +95,7 @@ func TestCard_WarnsWhenTheTokenCannotBeUsed(t *testing.T) {
 // credentials would turn a credential reveal into a database password leak.
 func TestCard_DSNIsTheFrontDoorNotTheTarget(t *testing.T) {
 	conn := ConnInfo{ID: 1, Name: "c", TargetDB: "db", Profile: "session"}
-	got, _ := buildCardText("adb_pat_tok", conn, liveEndpoint(), "alice", "")
+	got, _ := buildCardText("adb_pat_tok", conn, liveEndpoint(), "alice", "editor", "")
 
 	if !strings.Contains(got, "alice:adb_pat_tok@") {
 		t.Fatalf("the DSN does not authenticate as the autodb user with the token:\n%s", got)
@@ -115,7 +115,7 @@ func TestCard_AWildcardBindIsNotOfferedAsAHost(t *testing.T) {
 	ep := liveEndpoint()
 	ep.Addr = "0.0.0.0:6432"
 	ep.HostNames = nil
-	got, _ := buildCardText("s", ConnInfo{Name: "c", TargetDB: "db"}, ep, "root", "")
+	got, _ := buildCardText("s", ConnInfo{Name: "c", TargetDB: "db"}, ep, "root", "editor", "")
 
 	if strings.Contains(got, "host         0.0.0.0") {
 		t.Error("the card offered 0.0.0.0 as a Host value; it is not dialable as written")
@@ -129,7 +129,7 @@ func TestCard_AWildcardBindIsNotOfferedAsAHost(t *testing.T) {
 // which the front door's consistency check also accepts.
 func TestCard_FallsBackToTheConnectionNameWhenNoTargetIsKnown(t *testing.T) {
 	conn := ConnInfo{ID: 1, Name: "sqlite-thing", Engine: "sqlite"}
-	got, _ := buildCardText("s", conn, liveEndpoint(), "root", "")
+	got, _ := buildCardText("s", conn, liveEndpoint(), "root", "editor", "")
 
 	if !strings.Contains(got, "use the connection name") {
 		t.Errorf("the card does not explain the fallback:\n%s", got)
@@ -154,7 +154,7 @@ func TestCard_TheCopiedDSNIsTheDisplayedDSN(t *testing.T) {
 	// there is more than one to choose from.
 	ep.HostNames = []string{"db.example.test", "alt.example.test"}
 
-	text, dsn := buildCardText("tok-123", conn, ep, "johno", "")
+	text, dsn := buildCardText("tok-123", conn, ep, "johno", "editor", "")
 
 	if dsn == "" {
 		t.Fatal("no DSN returned")
@@ -172,7 +172,7 @@ func TestCard_TheCopiedDSNIsTheDisplayedDSN(t *testing.T) {
 // reading a card that opens with the token already has what they came for.
 func TestCard_TheWarningComesBeforeTheToken(t *testing.T) {
 	conn := ConnInfo{ID: 1, Name: "c", TargetDB: "db"}
-	text, _ := buildCardText("tok", conn, FrontDoorEndpoint{Enabled: false}, "root", "")
+	text, _ := buildCardText("tok", conn, FrontDoorEndpoint{Enabled: false}, "root", "editor", "")
 
 	warn := strings.Index(text, "CANNOT BE USED")
 	tok := strings.Index(text, "token        tok")
@@ -194,7 +194,7 @@ func TestCard_CleartextListener(t *testing.T) {
 	ep := liveEndpoint()
 	ep.Cleartext = true
 	conn := ConnInfo{ID: 1, Name: "lm-local-test", Engine: "postgres", TargetDB: "test", Profile: "session"}
-	text, dsn := buildCardText("adb_pat_xxx.yyy", conn, ep, "root", "2026-12-01")
+	text, dsn := buildCardText("adb_pat_xxx.yyy", conn, ep, "root", "editor", "2026-12-01")
 
 	if !strings.Contains(dsn, "sslmode=disable") {
 		t.Errorf("the copied DSN does not disable TLS against a cleartext listener:\n%s", dsn)
@@ -238,7 +238,7 @@ func TestCard_CleartextListener(t *testing.T) {
 // pass every assertion above, so the ordinary case asserts the opposite of each.
 func TestCard_TLSListenerIsUnchanged(t *testing.T) {
 	conn := ConnInfo{ID: 1, Name: "lm-local-test", Engine: "postgres", TargetDB: "test", Profile: "session"}
-	text, dsn := buildCardText("adb_pat_xxx.yyy", conn, liveEndpoint(), "root", "2026-12-01")
+	text, dsn := buildCardText("adb_pat_xxx.yyy", conn, liveEndpoint(), "root", "editor", "2026-12-01")
 
 	if !strings.Contains(dsn, "sslmode=verify-full") {
 		t.Errorf("the DSN no longer pins verify-full against a TLS listener:\n%s", dsn)
