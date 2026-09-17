@@ -2,6 +2,7 @@ package frontdoor
 
 import (
 	"net"
+	"sort"
 	"sync"
 	"time"
 )
@@ -326,4 +327,73 @@ func (a *admitter) throttledSources(now time.Time) []string {
 		}
 	}
 	return out
+}
+
+// ThrottledSource is one source inside its failure window, and how much longer
+// it has to wait.
+type ThrottledSource struct {
+	Host      string
+	Remaining time.Duration
+}
+
+// LaneSnapshot is the accept-time occupancy and throttle state the pressure
+// view reports. A read of figures that already exist, taken in one hold.
+type LaneSnapshot struct {
+	Conns, MaxConns     int
+	PreAuth, MaxPreAuth int
+	Throttled           []ThrottledSource
+}
+
+// laneSnapshot reads the accept-time state, pruning expired failures as it goes.
+//
+// ONE HOLD, for the reason the registry's snapshot takes one: figures read
+// separately can disagree with each other, and a view showing a pre-auth count
+// above its own cap reads as the instrument being broken rather than as a
+// sampling artefact.
+func (a *admitter) laneSnapshot(now time.Time) LaneSnapshot {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	snap := LaneSnapshot{
+		Conns: a.conns, MaxConns: a.maxConns,
+		PreAuth: a.preAuth, MaxPreAuth: a.maxPreAuth,
+	}
+	for host := range a.failures {
+		if !a.throttledLocked(host, now) {
+			continue
+		}
+		snap.Throttled = append(snap.Throttled, ThrottledSource{
+			Host: host, Remaining: a.throttleRemainingLocked(host, now),
+		})
+	}
+	sort.Slice(snap.Throttled, func(i, j int) bool {
+		if snap.Throttled[i].Remaining != snap.Throttled[j].Remaining {
+			return snap.Throttled[i].Remaining > snap.Throttled[j].Remaining
+		}
+		return snap.Throttled[i].Host < snap.Throttled[j].Host
+	})
+	return snap
+}
+
+// throttleRemainingLocked says how much longer this source stays throttled.
+//
+// IT IS NOT "THE OLDEST FAILURE PLUS THE WINDOW", which is the obvious answer
+// and is wrong whenever a source has failed MORE than the limit. The throttle
+// lifts when the live count drops BELOW the limit, so what matters is when
+// enough of them have aged out -- with n live failures and a limit of k, that
+// is the (n-k+1)th oldest expiring, not the first. Reporting the first would
+// promise a source was about to be let in while it still had four failures in
+// the window, and an operator who acts on that number finds nothing changed.
+//
+// Caller holds a.mu, and has already established the source IS throttled.
+func (a *admitter) throttleRemainingLocked(host string, now time.Time) time.Duration {
+	live := a.failures[host]
+	if len(live) < a.failureLimit {
+		return 0
+	}
+	// live is append-ordered, which is ascending by time.
+	lifts := live[len(live)-a.failureLimit].Add(AuthFailureWindow)
+	if d := lifts.Sub(now); d > 0 {
+		return d
+	}
+	return 0
 }
