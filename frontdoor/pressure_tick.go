@@ -8,6 +8,11 @@ import (
 	"github.com/yongjohnlee80/autodb/core/pressure"
 )
 
+// denialsToRaise is the capacity-refusal count that raises the rate signal. It
+// mirrors the library's own threshold so a cell can drive the wrapper to a
+// crossing without reaching into the package for it.
+const denialsToRaise = 5
+
 // pressureMeter counts the refusals a pressure tick needs and holds the latch
 // that turns crossings into events.
 //

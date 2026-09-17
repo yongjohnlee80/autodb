@@ -51,6 +51,27 @@ func TestPressureLoop_TheIncidentReachesTheJournal(t *testing.T) {
 	if len(*got) != 2 {
 		t.Fatalf("the incident shape emitted %d events, want 2 (%v)", len(*got), *got)
 	}
+
+	// WHICH SIGNALS, NOT JUST HOW MANY. The first version counted two events
+	// and checked their shape, so emitting the denial rate TWICE and dropping
+	// the lease signal entirely passed it -- the operator would then be told
+	// denials were rising and never told the pool was full, which is the half
+	// of the incident that explains the other half.
+	seen := map[string]int{}
+	for _, e := range *got {
+		var d pressureDetail
+		if err := json.Unmarshal([]byte(e.Detail), &d); err != nil {
+			t.Fatalf("detail %q is not readable: %v", e.Detail, err)
+		}
+		seen[d.Signal]++
+	}
+	for _, want := range []string{pressure.DenialsRate, pressure.LeasesTarget} {
+		if seen[want] != 1 {
+			t.Errorf("signal %q appeared %d times, want exactly 1; emitted set was %v",
+				want, seen[want], seen)
+		}
+	}
+
 	for _, e := range *got {
 		if e.Kind != EventPressure {
 			t.Errorf("event kind %q, want %q", e.Kind, EventPressure)
@@ -211,9 +232,22 @@ func TestPressureLoop_NoReaderStartsNothing(t *testing.T) {
 	l.closed = make(chan struct{})
 
 	l.runPressure(nil)
-	close(l.closed)
-	l.wg.Wait()
 
+	// WAITED WITHOUT CLOSING, WHICH IS THE WHOLE ASSERTION. The first version
+	// closed the listener first -- so a goroutine that HAD been registered
+	// would see the close, exit at once, and let Wait return, leaving nothing
+	// to observe. Spawning unconditionally left this cell green. If anything
+	// was registered, this Wait blocks and the cell says so.
+	waited := make(chan struct{})
+	go func() { l.wg.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(time.Second):
+		t.Fatal("a listener with nothing observing registered a goroutine anyway; it " +
+			"would wake on a ticker to read nothing for the life of the process")
+	}
+
+	close(l.closed)
 	if len(*got) != 0 {
 		t.Errorf("a listener with nothing observing emitted %v", *got)
 	}

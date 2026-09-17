@@ -34,9 +34,18 @@ func TestPressureTick_NoRefusalBypassesTheCounter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The only places allowed to call the raw projection: the wrapper that
-	// counts, and the pre-auth helper that delegates to it.
-	allowed := map[string]bool{"denyWithOccurrence": true, "sendDenial": true}
+	// THE ONLY LEGITIMATE CALLER IS THE WRAPPER THAT COUNTS. There used to be a
+	// second name on this list -- a pre-auth helper whose comment called it a
+	// delegate. It was not: it called the projection directly and counted
+	// nothing, so anybody calling it bypassed the meter entirely, and the guard
+	// said nothing because the bypass was on its own allow-list.
+	//
+	// That is how a guard rots into folklore: the list is the easy place to add
+	// a name when the rule trips you, and each addition is individually
+	// defensible. There is no list now. The helper was deleted and its single
+	// caller routed through the wrapper, so this is a rule about one function
+	// rather than a rule with exceptions.
+	allowed := map[string]bool{"denyWithOccurrence": true}
 
 	var offenders []string
 	for _, pkg := range pkgs {
@@ -112,21 +121,69 @@ func TestPressureTick_OnlyCapacityRefusalsAreCounted(t *testing.T) {
 	}
 }
 
-// A NIL METER CHANGES NOTHING A CLIENT CAN SEE.
+// A NIL METER CHANGES NOTHING A CLIENT CAN SEE, BYTE FOR BYTE.
 //
-// Observability must never be able to withhold an answer. A listener with
-// nothing observing it still refuses, and still refuses identically.
+// Observability must never be able to withhold or alter an answer. The first
+// version of this cell asserted only that SOMETHING was written, so writing
+// rubbish when nothing was observing passed it -- which is a worse failure than
+// writing nothing, because the client gets a frame it cannot parse and the
+// cause looks like a protocol fault rather than a missing meter.
 func TestPressureTick_NothingObservingStillRefuses(t *testing.T) {
-	var l Listener // meter is nil
-	var got strings.Builder
-	if err := l.denyWithOccurrence(&got, outcome.Occurrence{
+	occ := outcome.Occurrence{
 		Reason: outcome.ReasonID("frontdoor/lease-cap-exceeded"),
 		Charge: outcome.Capacity,
-	}); err != nil {
+	}
+
+	var withMeter, without strings.Builder
+	observed := &Listener{meter: newPressureMeter(nil)}
+	if err := observed.denyWithOccurrence(&withMeter, occ); err != nil {
+		t.Fatalf("refusing with a meter installed: %v", err)
+	}
+	var blind Listener // meter is nil
+	if err := blind.denyWithOccurrence(&without, occ); err != nil {
 		t.Fatalf("refusing with nothing observing: %v", err)
 	}
-	if got.Len() == 0 {
-		t.Error("the client was sent nothing because no meter was installed; " +
-			"observability must never be able to withhold an answer")
+
+	if without.Len() == 0 {
+		t.Fatal("the client was sent nothing because no meter was installed")
+	}
+	if without.String() != withMeter.String() {
+		t.Errorf("the refusal differs by whether anything was observing:\n  observed: %q\n"+
+			"  blind:    %q\nobservability may not alter what a client is told",
+			withMeter.String(), without.String())
+	}
+}
+
+// REFUSING THROUGH THE WRAPPER ACTUALLY COUNTS.
+//
+// FOUND BY REPLAYING A REVIEWER'S MUTATION AND WATCHING IT SURVIVE. The
+// structural cell proves every refusal is ROUTED through the wrapper, and the
+// charge cell proves the meter ignores non-capacity refusals — but both drive
+// the meter directly, so deleting the count from the wrapper itself broke
+// neither. Every refusal would have gone politely through a function that did
+// nothing, and the signal would simply have been quiet.
+//
+// Two guards either side of a gap is how a gap survives review: each one is
+// satisfied, and neither is looking at the thing between them.
+func TestPressureTick_TheWrapperIsWhatCounts(t *testing.T) {
+	at := time.Unix(0, 0)
+	l := &Listener{meter: newPressureMeter(func() time.Time { return at })}
+	var sink strings.Builder
+
+	for range denialsToRaise {
+		if err := l.denyWithOccurrence(&sink, outcome.Occurrence{
+			Reason: outcome.ReasonID("frontdoor/lease-cap-exceeded"),
+			Charge: outcome.Capacity,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ev := l.meter.tick(pressure.Caps{SessionCap: 100}, nil)
+	if len(ev) != 1 || !ev[0].Entered || ev[0].ID.Name != pressure.DenialsRate {
+		t.Fatalf("refusing %d clients through the wrapper produced %v; the wrapper is "+
+			"the one place a refusal is counted, so a wrapper that only sends leaves "+
+			"every signal quiet while the door is being shut in people's faces",
+			denialsToRaise, ev)
 	}
 }
