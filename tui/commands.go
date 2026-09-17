@@ -55,6 +55,7 @@ const (
 	cmdConnToggle    CommandID = "session.connection_toggle"
 	cmdRestart       CommandID = "server.restart"
 	cmdAbout         CommandID = "app.about"
+	cmdPressure      CommandID = "app.pressure"
 	cmdHelp          CommandID = "app.help"
 	cmdQuit          CommandID = "app.quit"
 )
@@ -333,6 +334,18 @@ func commandCatalog() []Command {
 			Menu: []MenuProjection{
 				{Parent: nodeSystem, Label: "Restart server", Hotkey: 'R', Order: 45},
 			},
+		},
+		{
+			// REGISTERED WHETHER OR NOT A SOURCE IS WIRED. A menu entry that
+			// disappears when its backing is absent is indistinguishable from
+			// one that was never built, and somebody looking for it during an
+			// incident concludes the feature does not exist. The view says what
+			// is missing instead.
+			ID: cmdPressure, Run: func(m *Model) { m.openPressure() },
+			Leader: &LeaderProjection{Key: 'P', Order: 255,
+				Label: "front-door pressure",
+				Help:  "what the front door holds, and what it is refusing"},
+			Menu: []MenuProjection{{Parent: nodeSystem, Label: "Pressure", Hotkey: 'P', Order: 52}},
 		},
 		{
 			ID: cmdAbout, Run: func(m *Model) { m.openAbout() },
