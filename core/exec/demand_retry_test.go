@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -199,5 +200,125 @@ func TestDemandRetry_ACancelledRequestLeavesNoDemandBehind(t *testing.T) {
 	if holder.get() != sessOpen {
 		t.Error("an idle holder was ended for a request that had already gone; a stale " +
 			"demand claim costs somebody their session for nobody's benefit")
+	}
+}
+
+// ONE WAITER IS SPENT ONCE, EVEN WHEN OFFERS OPEN AT THE SAME INSTANT.
+//
+// THE SEQUENTIAL CELL ABOVE MISSES THIS, and the gap it misses is the whole
+// defect. Demand was checked in pressDemand and recorded much later, at the
+// reservation -- so two receive offers opening together both read
+// wanted=1/promised=0 before either had recorded anything, both went on to
+// select, and both reserved. One queued request ended two healthy sessions.
+//
+// The barrier is what makes it deterministic rather than hoped for: both
+// goroutines are held until each has passed the point where the stale read
+// happened, and only then released.
+func TestDemandRetry_ConcurrentOffersSpendOneWaiterOnce(t *testing.T) {
+	now := time.Now()
+	holders := []*session{
+		unofferedHolder("holder-a", 1, 7, now.Add(-2*time.Hour)),
+		unofferedHolder("holder-b", 2, 7, now.Add(-time.Hour)),
+	}
+	e := demandEngineWith(t, len(holders), holders...)
+	r := e.sessions
+	seen := queuedAt(r)
+
+	go func() {
+		_ = r.admitWithLeaseOrWait(context.Background(),
+			schedSession("the-only-request-waiting", 9, 7), 7, 0)
+	}()
+	awaitSeq(t, seen)
+
+	// Both holders go idle and publish their offers simultaneously.
+	for _, h := range holders {
+		h.mu.Lock()
+		h.busy = false
+		h.mu.Unlock()
+	}
+	// DRIVEN AT THE RESERVATION, NOT AT THE OFFER.
+	//
+	// Going through OfferReceive proves nothing here: pressDemand's early check
+	// serialises the two calls, so the first records its promise before the
+	// second looks and the overlap never happens. That is exactly why the check
+	// cannot BE the accounting -- it is also why a cell that drives it cannot
+	// see the defect. Correctness now lives at the commit point, so that is
+	// where two callers are put side by side.
+	for _, h := range holders {
+		if tok := e.OfferReceive(h.id); tok == 0 {
+			t.Fatalf("%s could not publish a receive offer", h.id)
+		}
+	}
+	var start, done sync.WaitGroup
+	start.Add(1)
+	for range holders {
+		done.Add(1)
+		go func() {
+			defer done.Done()
+			start.Wait()
+			r.reserveDemandVictim(7, now)
+		}()
+	}
+	start.Done()
+	done.Wait()
+
+	reserved := 0
+	for _, h := range holders {
+		if h.get() != sessOpen {
+			reserved++
+		}
+	}
+	if reserved != 1 {
+		t.Errorf("%d sessions reserved for one waiter after concurrent offers, want 1 — "+
+			"a demand unit checked in one critical section and spent in another is read "+
+			"as unspent by everybody who looks before the first one records it", reserved)
+	}
+	if n := r.promisedCount(7); n != 1 {
+		t.Errorf("%d promises recorded for one waiter, want 1", n)
+	}
+}
+
+// AN ASK THAT NOBODY IS WAITING ON RESERVES NOBODY.
+//
+// The claim outlives the check, so a candidate committing after the waiter has
+// gone would end a session for a request that no longer exists. Proved at the
+// commit point rather than at the ask, because that is where the decision is
+// now made.
+func TestDemandRetry_AnOfferAfterTheWaiterHasGoneReservesNobody(t *testing.T) {
+	now := time.Now()
+	holder := unofferedHolder("holder", 1, 7, now.Add(-time.Hour))
+	e := demandEngineWith(t, 1, holder)
+	r := e.sessions
+	seen := queuedAt(r)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	gone := make(chan error, 1)
+	go func() { gone <- r.admitWithLeaseOrWait(ctx, schedSession("gives-up", 2, 7), 7, 0) }()
+	awaitSeq(t, seen)
+
+	cancel()
+	select {
+	case <-gone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancelled request never returned")
+	}
+
+	// The candidate becomes eligible only now, after the waiter has left.
+	holder.mu.Lock()
+	holder.busy = false
+	holder.mu.Unlock()
+	e.OfferReceive(holder.id)
+
+	// And the reservation is attempted directly too, so the refusal is proved
+	// at the commit point and not merely at pressDemand's early check.
+	if v, ok := r.reserveDemandVictim(7, now); ok {
+		t.Errorf("reserved %q for a request that had already gone; the claim is what "+
+			"authorises ending somebody's session, and there was none to spend", v.s.id)
+	}
+	if holder.get() != sessOpen {
+		t.Error("an idle holder was ended although nobody was waiting for its lease")
+	}
+	if n := r.promisedCount(7); n != 0 {
+		t.Errorf("%d promises recorded with no waiter, want 0", n)
 	}
 }

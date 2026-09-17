@@ -44,11 +44,22 @@ func demandRegistry(t *testing.T, holders ...*session) *sessionRegistry {
 	t.Helper()
 	r := newSessionRegistry(64, 64)
 	r.leaseCap = 1
+	targets := map[int64]bool{}
 	for _, s := range holders {
 		r.byID[s.id] = s
 		s.reservation = reservation{LeaseConn: s.connID}
 		r.genSeq++
 		s.gen = r.genSeq
+		targets[s.connID] = true
+	}
+	// ONE WAITING REQUEST PER TARGET, because a reservation now spends a demand
+	// unit and there is no unit without somebody waiting. Every cell built on
+	// this helper asks WHO may be chosen, which presupposes that choosing is
+	// warranted at all -- so the premise is supplied here rather than left for
+	// each cell to remember. A cell that wants to prove the opposite, that an
+	// ask with nobody waiting reserves nobody, builds its own registry.
+	for conn := range targets {
+		r.wantDemand(conn)
 	}
 	return r
 }
