@@ -201,9 +201,12 @@ func exercise(root string, m gatemutation.Mutation) (string, Verdict) {
 	if count < 1 {
 		count = 1
 	}
-	out, err := goRun(root, timeout+30*time.Second, "test", m.Package,
-		"-run", "^"+m.Test+"$", fmt.Sprintf("-count=%d", count), "-v",
-		"-timeout", timeout.String())
+	args := []string{"test", m.Package, "-run", "^" + m.Test + "$",
+		fmt.Sprintf("-count=%d", count), "-v", "-timeout", timeout.String()}
+	if m.Race {
+		args = append(args, "-race")
+	}
+	out, err := goRun(root, timeout+30*time.Second, args...)
 
 	// THE CELL MUST HAVE ACTUALLY RUN. A -run matching nothing exits 0 and
 	// reads exactly like a passing test.
