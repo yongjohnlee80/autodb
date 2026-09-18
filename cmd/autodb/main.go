@@ -533,7 +533,7 @@ func runServe(configPath string) error {
 		// PER CALL, not captured once: the whole point is that a reload moves
 		// these, so a value read at wiring time would be the startup config
 		// wearing a different name.
-		settings := eng.Settings()
+		perUser, global, targetConns := frontDoorCeilings(eng)
 		info := rpc.FrontDoorInfo{
 			Enabled:    cfg.FrontDoor.Enabled,
 			HostNames:  cfg.FrontDoor.TLSHostNames,
@@ -551,9 +551,9 @@ func runServe(configPath string) error {
 			//
 			// Settings() takes the policy and the ledger under ONE lock, so
 			// these three cannot come from two different generations.
-			MaxSessionsPerUser: settings.MaxSessionsPerUser,
-			MaxSessionsGlobal:  settings.MaxSessionsGlobal,
-			MaxTargetConns:     settings.TargetConns.Configured,
+			MaxSessionsPerUser: perUser,
+			MaxSessionsGlobal:  global,
+			MaxTargetConns:     targetConns,
 		}
 		if fd != nil {
 			info.Listening = true
@@ -1472,3 +1472,22 @@ func composeOutcomes() (*outcome.Registry, error) {
 // switched off: there is no pressure because there is no door, which is a
 // different statement from "no pressure".
 var errNoFrontDoor = errors.New("the front door is not enabled on this instance")
+
+// frontDoorCeilings reads the ceilings a token minted here will actually meet.
+//
+// FROM THE ENGINE, NOT FROM THE STARTUP CONFIG. cfg is what the daemon booted
+// with and never changes. policy.reload moves the live budget, and
+// LoadDurablePolicy applies a stored one before the janitor even starts — so a
+// card reading cfg quotes a number the admitter has already stopped using, to
+// the operator who just changed it and is looking for the new one.
+//
+// Settings() takes the policy and the ledger under ONE lock, so the three
+// figures cannot be paired from two different generations.
+//
+// It is a named function rather than three lines inside the closure so the
+// reload case has something to test; the closure itself is not reachable from
+// a cell.
+func frontDoorCeilings(eng *coreexec.Engine) (maxSessionsPerUser, maxSessionsGlobal, maxTargetConns int) {
+	s := eng.Settings()
+	return s.MaxSessionsPerUser, s.MaxSessionsGlobal, s.TargetConns.Configured
+}
