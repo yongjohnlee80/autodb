@@ -63,6 +63,12 @@ type workspacePanel struct {
 	all []WorkspaceInfo
 	// shown is what the left table displays; selection indexes into THIS.
 	shown []WorkspaceInfo
+	// seeded records that the keyboard has been placed. See Layout.
+	seeded bool
+	// shownFor is the workspace whose connections the right table currently
+	// holds. The left list moves its own cursor now, so nothing calls back
+	// into the panel when it does -- this is what notices.
+	shownFor int64
 	// at is the section with the keyboard. The styles and the footer are both
 	// recomputed from it, so they cannot drift apart.
 	at wsSection
@@ -108,7 +114,20 @@ func (m *Model) openWorkspaceManager() {
 	p.float = m.openFloat("workspaces", p)
 }
 
-func (p *workspacePanel) AcceptsFocus() bool { return true }
+// AcceptsFocus is FALSE, and that is what makes the focus query answerable.
+//
+// The panel used to take the keyboard itself and hand events down by calling
+// each section's HandleEvent directly. The sections therefore worked without
+// ever being focused -- arrows moved a table that golib did not think had the
+// keyboard -- so FocusWithin could not tell the two sections apart, and the
+// only thing that could was the panel's own p.at. That is the second model
+// this file just deleted; leaving the panel focusable would have kept it alive
+// in a different form.
+//
+// Focus lives on the tables and the button now. Keys still arrive here,
+// because a key event bubbles from the focused node up through its ancestors,
+// and this panel is one.
+func (p *workspacePanel) AcceptsFocus() bool { return false }
 
 func (p *workspacePanel) dismiss() {
 	if p.float != nil {
@@ -123,41 +142,94 @@ func (p *workspacePanel) Init(ctx *tui.Context) {
 	ctx.Mount(p.connsBox)
 	ctx.Mount(p.close)
 	ctx.Mount(p.hint)
+	// THE RIGHT TABLE FOLLOWS THE LEFT CURSOR, on the list's OWN event.
+	//
+	// The panel no longer sees the arrow keys -- the focused list handles them
+	// and they never bubble -- so nothing calls back into this code when the
+	// selection moves. Reconciling in Layout was the first answer and the
+	// wrong one: a cursor move re-renders without necessarily re-laying out,
+	// so the connections lagged a frame or did not follow at all.
+	tui.SubscribeScoped(ctx, func(ev widget.SelectionChangedEvent) {
+		if ev.Owner != p.ws.List().NodeID() {
+			return
+		}
+		p.syncConns()
+	})
 	p.refresh()
-	// SEED THE FOCUS EXPLICITLY. The Float would otherwise pick, and what it
-	// picks is the first focusable child -- which is right today and is a
-	// property of declaration order, not of intent. The left list is where an
-	// operator opening this modal is going.
-	p.focusOn(wsWorkspaces)
 	p.Reload()
 }
 
 // --- focus ---------------------------------------------------------------------
 
-// focusOn moves the keyboard and REPAINTS BOTH SECTIONS, because "which list is
-// active" is a statement about the pair: highlighting the new one without
-// dimming the old leaves two cursors that look equally live.
+// focusOn moves the keyboard, then repaints.
+//
+// IT PAINTS FROM ACTUAL FOCUS, NOT FROM p.at, and the order matters: the move
+// happens first and the colours are read back from the framework afterwards.
+//
+// Painting from p.at was a SECOND MODEL of which section is live, kept in step
+// with the real one by hand -- and it drifted. The box borders come from
+// golib's own FocusWithin and were right; the row cursors came from p.at and
+// were not, so the cyan sat on the list the arrow keys did not move. Johno
+// found it by pressing them. One source of truth removes the class: if the
+// keyboard did not end up where focusOn asked, the colours now say so instead
+// of asserting where it was supposed to go.
 func (p *workspacePanel) focusOn(s wsSection) {
 	p.at = s
-	p.ws.List().SetStyles(listStyles(s == wsWorkspaces))
-	p.conns.List().SetStyles(listStyles(s == wsConnections))
+	if p.ctx != nil {
+		switch s {
+		// THE LIST, NOT THE TABLE. widget.Table is not focusable -- only the
+		// List inside it is -- so focusing the Table returned false and left
+		// the keyboard wherever it was. That is the whole of why FocusWithin
+		// could not tell the sections apart.
+		case wsWorkspaces:
+			p.ctx.FocusComponent(p.ws.List())
+		case wsConnections:
+			p.ctx.FocusComponent(p.conns.List())
+		case wsButtons:
+			p.ctx.FocusComponent(p.close)
+		}
+	}
+	p.repaint()
+	p.refreshHint()
+}
+
+// repaint colours each list from where the keyboard ACTUALLY is.
+//
+// Both are set on every call, because "which section is live" is a statement
+// about the pair: lighting the arriving one without dimming the departing one
+// leaves two cursors that look equally live -- and with the keyboard on the
+// Close button NEITHER list is live, which is the stop that showed all three
+// lit at once.
+func (p *workspacePanel) repaint() {
 	if p.ctx == nil {
 		return
 	}
-	switch s {
-	case wsWorkspaces:
-		p.ctx.FocusComponent(p.ws)
-	case wsConnections:
-		p.ctx.FocusComponent(p.conns)
-	case wsButtons:
-		p.ctx.FocusComponent(p.close)
+	p.ws.List().SetStyles(listStyles(p.ctx.FocusWithin(p.wsBox)))
+	p.conns.List().SetStyles(listStyles(p.ctx.FocusWithin(p.connsBox)))
+}
+
+// liveSection reports where the keyboard IS, falling back to p.at before the
+// tree is mounted. Read by the footer for the same reason repaint reads it:
+// what a key does is decided by real focus, so what the footer says it does
+// has to come from there too.
+func (p *workspacePanel) liveSection() wsSection {
+	if p.ctx == nil {
+		return p.at
 	}
-	p.refreshHint()
+	switch {
+	case p.ctx.FocusWithin(p.wsBox):
+		return wsWorkspaces
+	case p.ctx.FocusWithin(p.connsBox):
+		return wsConnections
+	case p.ctx.FocusWithin(p.close):
+		return wsButtons
+	}
+	return p.at
 }
 
 // next is the Tab order: workspaces, connections, buttons, round again.
 func (p *workspacePanel) next() wsSection {
-	switch p.at {
+	switch p.liveSection() {
 	case wsWorkspaces:
 		return wsConnections
 	case wsConnections:
@@ -196,7 +268,25 @@ func (p *workspacePanel) Reload() {
 func (p *workspacePanel) refresh() {
 	p.shown = p.all
 	p.ws.SetItems(p.shown)
+	p.shownFor = 0
 	p.conns.SetItems(p.selectedConns())
+	p.refreshHint()
+}
+
+// syncConns republishes the right table for whatever the left cursor is on.
+func (p *workspacePanel) syncConns() {
+	w, ok := p.selected()
+	if !ok {
+		p.shownFor = 0
+		p.conns.SetItems(nil)
+		p.refreshHint()
+		return
+	}
+	if w.ID == p.shownFor {
+		return
+	}
+	p.shownFor = w.ID
+	p.conns.SetItems(w.Connections)
 	p.refreshHint()
 }
 
@@ -241,7 +331,7 @@ func (p *workspacePanel) selectedConn() (ConnInfo, bool) {
 // of splitting them: `a` and `d` mean different things on either side, and a
 // footer listing both meanings at once would be a footer nobody can act on.
 func (p *workspacePanel) hints() []keyHint {
-	switch p.at {
+	switch p.liveSection() {
 	case wsWorkspaces:
 		del := "delete"
 		if w, ok := p.selected(); ok && len(w.Connections) > 0 {
@@ -274,22 +364,37 @@ func (p *workspacePanel) hints() []keyHint {
 func (p *workspacePanel) refreshHint() { p.hint.SetText(hintLine(p.hints())) }
 
 func (p *workspacePanel) HandleEvent(ev tui.Event) bool {
+	if _, ok := ev.(tui.FocusEvent); ok {
+		// ANY focus change repaints, not only the ones focusOn made. A click
+		// moves focus without going through it.
+		p.repaint()
+		p.refreshHint()
+		return false
+	}
 	if dismissKey(ev) {
 		p.dismiss()
 		return true
 	}
 	k, ok := ev.(tui.KeyEvent)
 	if !ok || k.Kind == tui.KeyRelease {
-		return p.forward(ev)
+		// NOT FORWARDED BY SECTION. A mouse event is addressed by POSITION,
+		// and the framework has already hit-tested it to the component under
+		// the pointer; routing it again by whichever section holds the
+		// keyboard sent a click on the Close button to a table instead, which
+		// is why the button could not be clicked.
+		return false
 	}
 	if k.Code == tui.KeyTab {
 		p.focusOn(p.next())
 		return true
 	}
+	// NOT CONSUMED. With focus on the list, the list has already handled its
+	// own navigation before this bubbles -- so anything reaching here with no
+	// text is not ours.
 	if k.Text == "" {
-		return p.forward(ev)
+		return false
 	}
-	switch p.at {
+	switch p.liveSection() {
 	case wsWorkspaces:
 		switch []rune(k.Text)[0] {
 		case 'a':
@@ -312,26 +417,7 @@ func (p *workspacePanel) HandleEvent(ev tui.Event) bool {
 			return true
 		}
 	}
-	return p.forward(ev)
-}
-
-// forward hands the event to the focused section, and REPUBLISHES THE RIGHT
-// TABLE after a move on the left: the connections shown are a projection of the
-// left selection, so a cursor move that did not republish them would leave one
-// workspace's connections labelled as another's.
-func (p *workspacePanel) forward(ev tui.Event) bool {
-	switch p.at {
-	case wsWorkspaces:
-		handled := p.ws.HandleEvent(ev)
-		if handled {
-			p.conns.SetItems(p.selectedConns())
-			p.refreshHint()
-		}
-		return handled
-	case wsConnections:
-		return p.conns.HandleEvent(ev)
-	}
-	return p.close.HandleEvent(ev)
+	return false
 }
 
 // --- actions -------------------------------------------------------------------
@@ -485,6 +571,18 @@ func (p *workspacePanel) detachConn() {
 // --- layout --------------------------------------------------------------------
 
 func (p *workspacePanel) Layout(c tui.Constraints) tui.Size {
+	// SEED THE KEYBOARD ON THE FIRST LAYOUT, not in Init.
+	//
+	// Init runs DURING the mount, and a focus request made there lands before
+	// the subtree is placed -- it fails, and nothing tries again. The panel is
+	// not focusable itself, so a failed seed left the whole float with nothing
+	// holding the keyboard: every key went nowhere, and `a` on the workspace
+	// manager stopped opening the new-workspace form. Laying out once first
+	// means there is something to focus.
+	if !p.seeded && p.ctx != nil {
+		p.seeded = true
+		p.focusOn(wsWorkspaces)
+	}
 	w := managerWidthFor(c.MaxW, p.ctx.StringWidth(hintLine(p.hints())))
 	hintH := max(p.ctx.LayoutChild(p.hint, tui.Constraints{MaxW: w, MaxH: 4}).H, 1)
 	// One row for the rule, one for the button band.
