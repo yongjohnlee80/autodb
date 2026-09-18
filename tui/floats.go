@@ -311,9 +311,31 @@ type form struct {
 	// rather than submitting: no field submits, which is what frees Enter for
 	// a select to open its options.
 	ok *widget.Button
+	// submitted records that the form closed ITSELF, having accepted the
+	// answers. Dismissal is otherwise indistinguishable from a cancel: a
+	// successful submit hides the surface, and hiding it publishes the same
+	// event Escape does. Without this the cancel callback would run on every
+	// successful submit as well.
+	submitted bool
 }
 
-func newForm(fields []formField, onSubmit func(formValues) (bool, string)) *form {
+// values is the answers as the controls currently hold them.
+func (f *form) values() formValues {
+	v := make(formValues, len(f.fields))
+	for i, fd := range f.fields {
+		if fd.ctl == nil {
+			continue
+		}
+		v[i] = fd.ctl.value()
+	}
+	return v
+}
+
+// prose is rendered ABOVE the fields and is NOT a field. Keeping it out of
+// f.fields is what stops a line of text entering the focus traversal, where
+// Tab would stop on something nobody can type into and the operator would be
+// left pressing keys at a paragraph.
+func newForm(fields []formField, onSubmit func(formValues) (bool, string), prose []string) *form {
 	f := &form{
 		fields: fields,
 		// The footer, in the body rather than the Box: golib's Box offers a
@@ -324,6 +346,9 @@ func newForm(fields []formField, onSubmit func(formValues) (bool, string)) *form
 		onSubmit: onSubmit,
 	}
 	f.flex = tui.NewFlex(tui.Vertical)
+	for _, line := range prose {
+		f.flex.Add(widget.NewText(line, widget.WithWrapMode(widget.Wrap)))
+	}
 	f.labels = make([]*widget.Text, len(f.fields))
 	for i := range f.fields {
 		f.fields[i].ctl = f.fields[i].build(f, i)
@@ -417,12 +442,11 @@ func (f *form) submit() {
 			return
 		}
 	}
-	values := make(formValues, len(f.fields))
-	for i, fd := range f.fields {
-		values[i] = fd.ctl.value()
-	}
-	closeIt, status := f.onSubmit(values)
+	closeIt, status := f.onSubmit(f.values())
 	if closeIt {
+		// SET BEFORE THE HIDE, not after: Hide publishes the dismissal
+		// synchronously, and the cancel hook reads this flag from inside it.
+		f.submitted = true
 		if f.surface != nil {
 			f.surface.Hide()
 		}
@@ -473,8 +497,44 @@ var _ tui.Container = (*form)(nil)
 // neither advance nor submit with it. Advancing on the select's change event
 // instead would reintroduce the lane race that advanceOrSubmit exists to avoid.
 // A button removes the question rather than answering it.
+// formOpts are the modal's presentation choices.
+//
+// A STRUCT RATHER THAN MORE POSITIONAL ARGUMENTS. openFormOpts already took a
+// bare `scrim bool` that read as nothing at the call site, and the factory
+// needs four more. Named fields mean a reader sees which knob is being turned
+// without counting commas, and a new one does not touch every caller.
+type formOpts struct {
+	// scrim fades the backdrop. Default false: the operator is usually reading
+	// the thing behind the dialog.
+	scrim bool
+	// prose is shown ABOVE the fields, and is NOT a field. Keeping it out of
+	// the field list is what stops a non-focusable row entering the focus
+	// traversal, where Tab would stop on text nobody can type into.
+	prose []string
+	// okText renames the affirmative button.
+	okText string
+	// noCancel leaves only the affirmative button. For acknowledgements.
+	noCancel bool
+	// onCancel runs when the operator declines, and receives the answers as
+	// they stood — no binding has been written.
+	//
+	// IT IS WIRED TO THE DISMISSAL, NOT TO THE BUTTON, and the difference is
+	// narrow but real. Escape alone would not need it: widget.Modal resolves a
+	// dismiss request by activating the Cancel-ROLE button, so a callback
+	// hanging off that button already runs for Escape and for a host dismiss
+	// key.
+	//
+	// What it does not run for is a dialog with NO cancel button. An
+	// acknowledgement built with noCancel has no Cancel role for Modal to
+	// resolve against, so Escape closes it through the other arm of that
+	// branch and the button callback -- there being no button -- never runs.
+	// Hanging the callback off the dismissal instead covers that case and the
+	// ones the button covers, with one wire rather than two.
+	onCancel func(formValues)
+}
+
 func (m *Model) openForm(title string, fields []formField, onSubmit func(formValues) (bool, string)) *form {
-	return m.openFormOpts(title, fields, onSubmit, false)
+	return m.openFormOpts(title, fields, onSubmit, formOpts{})
 }
 
 // openFormScrimmed is openForm for the surfaces the requirement singles out:
@@ -482,15 +542,23 @@ func (m *Model) openForm(title string, fields []formField, onSubmit func(formVal
 // answered. Login is one; everything else keeps the live backdrop, because the
 // operator is usually reading the thing behind the dialog.
 func (m *Model) openFormScrimmed(title string, fields []formField, onSubmit func(formValues) (bool, string)) *form {
-	return m.openFormOpts(title, fields, onSubmit, true)
+	return m.openFormOpts(title, fields, onSubmit, formOpts{scrim: true})
 }
 
 func (m *Model) openFormOpts(title string, fields []formField,
-	onSubmit func(formValues) (bool, string), scrim bool) *form {
-	fm := newForm(fields, onSubmit)
-	fm.ok = widget.NewButton("OK",
+	onSubmit func(formValues) (bool, string), opts formOpts) *form {
+	fm := newForm(fields, onSubmit, opts.prose)
+	okText := opts.okText
+	if okText == "" {
+		okText = "OK"
+	}
+	// NO MNEMONIC ON THE AFFIRMATIVE. It used to carry 'O', which made a bare
+	// `o` activate it -- and `o` is a character an operator types into a name,
+	// a CIDR or a passphrase. Enter on the last field already reaches this
+	// button, and Tab reaches it from anywhere, so the mnemonic bought nothing
+	// and cost a letter.
+	fm.ok = widget.NewButton(okText,
 		widget.WithRole(widget.ButtonRoleDefault),
-		widget.WithMnemonic('O'),
 		widget.WithOnActivate(fm.submit))
 	// THE CANCEL BUTTON DISMISSES ITSELF. Escape resolves the cancel ROLE and
 	// closes the dialog for you, but activating the button — clicking it, or
@@ -501,6 +569,8 @@ func (m *Model) openFormOpts(title string, fields []formField,
 		widget.WithRole(widget.ButtonRoleCancel),
 		widget.WithMnemonic('C'),
 		widget.WithOnActivate(func() {
+			// Dismissing is ALL this does; opts.onCancel is reached through
+			// the dismissal hook, which Escape reaches too.
 			if md != nil {
 				md.Dismiss(widget.DismissCancel)
 			}
@@ -513,16 +583,25 @@ func (m *Model) openFormOpts(title string, fields []formField,
 	// a passphrase, a PAT label — and a form that closed on it could not accept
 	// one. dismissKey records this exclusion as permanent, and it survives the
 	// conversion to a dialog unchanged. Escape still closes.
+	buttons := []*widget.Button{fm.ok}
+	if !opts.noCancel {
+		buttons = append(buttons, cancel)
+	}
 	md = widget.NewModal(fm,
 		widget.WithModalTitle(title),
-		widget.WithButtons(fm.ok, cancel),
-		widget.WithScrim(scrim))
+		widget.WithButtons(buttons...),
+		widget.WithScrim(opts.scrim))
 	if err := md.Open(m.host); err != nil {
 		m.setError("open " + title + ": " + err.Error())
 		return fm
 	}
 	fm.surface = modalOverlay{m: md}
-	m.trackOverlay(fm.surface, fm, title, nil)
+	m.trackOverlay(fm.surface, fm, title, func() {
+		if fm.submitted || opts.onCancel == nil {
+			return
+		}
+		opts.onCancel(fm.values())
+	})
 	// THE FIRST FIELD TAKES THE KEYBOARD, not the default button. Modal seeds
 	// focus onto the affirmative button, which is right for a confirmation and
 	// wrong for a form: the operator opened this to type, and would otherwise
