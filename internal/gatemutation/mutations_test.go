@@ -257,9 +257,10 @@ func expectedControls() map[string][3]string {
 		// L1's other half: the connection card carries the budget.
 		"card-a-ceiling-shows-its-figure":        {"tui/conncard.go", "./tui/", "TestCardBudget_TheCeilingsCarryTheirScope"},
 		"card-an-unreported-ceiling-is-not-zero": {"tui/conncard.go", "./tui/", "TestCardBudget_AnUnreportedCeilingSaysSoRatherThanSayingZero"},
-		"card-offers-no-private-number":          {"tui/conncard.go", "./tui/", "TestCardBudget_ItOffersNoPrivateNumber"},
+		"card-does-no-arithmetic":                {"tui/conncard.go", "./tui/", "TestCardBudget_ItDoesNoArithmetic"},
 		"card-advertises-no-per-source-cap":      {"tui/conncard.go", "./tui/", "TestCardBudget_NoPerSourceConcurrencyCapIsAdvertised"},
-		"card-settings-name-their-client":        {"tui/conncard.go", "./tui/", "TestCardBudget_TheSettingsNameTheClientTheyBelongTo"},
+		"card-tells-nobody-to-configure-a-pool":  {"tui/conncard.go", "./tui/", "TestCardBudget_ItTellsNobodyToConfigureAPool"},
+		"card-the-connections-own-bound-leads":   {"tui/conncard.go", "./tui/", "TestCardBudget_TheConnectionsOwnBoundLeads"},
 		"card-shows-no-live-availability":        {"tui/conncard.go", "./tui/", "TestCardBudget_ItShowsNoLiveAvailability"},
 		"card-an-unusable-token-gets-no-advice":  {"tui/conncard.go", "./tui/", "TestCardBudget_AnUnusableTokenGetsNoBudgetBlock"},
 	}
