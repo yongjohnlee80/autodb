@@ -63,16 +63,45 @@ type admitWaiter struct {
 	blockedBy error
 	// done carries the outcome. Buffered by one so the releasing path never
 	// blocks on a caller that has already given up.
-	done chan error
+	//
+	// ONE VALUE, not an outcome field beside an error channel: the two would
+	// then be received out of step, and a reader could pair this wait's error
+	// with a neighbour's outcome.
+	done chan waitResult
 	// wantsDemand records that this waiter contributed a demand claim, so the
 	// claim is dropped exactly once however the wait ends. Guarded by r.mu.
 	wantsDemand bool
 }
 
 // resolve delivers one outcome. Caller holds r.mu.
-func (w *admitWaiter) resolve(err error) {
+//
+// THE OUTCOME IS AN ARGUMENT because only the raise site knows it. Deriving it
+// from err downstream is what the measurement design forbids, and the dispatch
+// site below is the proof: it resolves with nil on success and an arbitrary
+// policy refusal otherwise, and no error inspection can tell the second from
+// an error nobody has mapped.
+func (w *admitWaiter) resolve(outcome WaitOutcome, err error) {
 	w.state = waitResolved
-	w.done <- err
+	w.done <- waitResult{outcome: outcome, err: err}
+}
+
+// noteWaitOutcome reports one resolved wait to whoever is measuring.
+//
+// NIL-SAFE AND FIRE-AND-FORGET. An engine with no observer is the ordinary
+// embedded case, and measurement must never be able to fail an admission: the
+// observer is called after the lock is released and its result is ignored, so
+// a slow or panicking collector cannot become a scheduling fault. It runs on
+// the caller's goroutine deliberately -- a goroutine per resolved wait would
+// make the queue's cost depend on how many people are watching it.
+//
+// EXACTLY ONCE PER CALL to admitWithLeaseOrWait, at every exit. The cell for
+// that is the one worth having: a path that returns without reporting is an
+// outcome the breakdown silently loses while the totals still look right.
+func (r *sessionRegistry) noteWaitOutcome(o WaitOutcome) {
+	if r.onWaitResolved == nil {
+		return
+	}
+	r.onWaitResolved(o)
 }
 
 // admitWithLeaseOrWait admits a front-door session, or waits its turn.
@@ -81,11 +110,12 @@ func (w *admitWaiter) resolve(err error) {
 // internal surfaces, which have no client to keep waiting and want the
 // immediate answer.
 func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, leaseConn, overhead int64) error {
-	w := &admitWaiter{s: s, leaseConn: leaseConn, overhead: overhead, done: make(chan error, 1)}
+	w := &admitWaiter{s: s, leaseConn: leaseConn, overhead: overhead, done: make(chan waitResult, 1)}
 
 	r.mu.Lock()
 	if r.closed != nil {
 		r.mu.Unlock()
+		r.noteWaitOutcome(WaitShuttingDown)
 		return r.closed
 	}
 
@@ -105,7 +135,9 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 	r.serveLine()
 	if w.state == waitResolved {
 		r.mu.Unlock()
-		return <-w.done
+		res := <-w.done
+		r.noteWaitOutcome(res.outcome)
+		return res.err
 	}
 
 	// NOTHING IS COMING, SO NOBODY IS MADE TO WAIT. Every lease on the target
@@ -117,6 +149,7 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 	if r.allLeasesInTransactionLocked(leaseConn) {
 		r.dropFromLineLocked(w)
 		r.mu.Unlock()
+		r.noteWaitOutcome(WaitAllCapacityInTransaction)
 		return ErrAllCapacityInTransaction
 	}
 
@@ -180,11 +213,14 @@ func (r *sessionRegistry) admitWithLeaseOrWait(ctx context.Context, s *session, 
 	}
 
 	select {
-	case err := <-w.done:
-		return err
+	case res := <-w.done:
+		r.noteWaitOutcome(res.outcome)
+		return res.err
 	case <-ctx.Done():
+		r.noteWaitOutcome(WaitCancelledByRequest)
 		return r.giveUp(w, context.Cause(ctx))
 	case <-serverExpiry:
+		r.noteWaitOutcome(WaitExpired)
 		return r.giveUp(w, r.expiredWaitReason(w))
 	}
 }
@@ -213,7 +249,12 @@ func (r *sessionRegistry) giveUp(w *admitWaiter, own error) error {
 	}
 	// The line resolved it first. Take that outcome and undo it if it was an
 	// admission; a refusal needs nothing given back.
-	if err := <-w.done; err == nil {
+	// NOT NOTED HERE. The select arm above already reported the caller's
+	// outcome, which is the true one: the request did not get a connection,
+	// and a grant that was undone is not an admission. Noting the raced grant
+	// as well would count one wait twice and inflate the grant rate with
+	// admissions nobody received.
+	if res := <-w.done; res.err == nil {
 		r.remove(w.s)
 	}
 	return own
@@ -327,7 +368,14 @@ func (r *sessionRegistry) serveLine() {
 			// swallowed: the client is entitled to the real reason, and
 			// leaving it in line would hold a connection open forever for a
 			// cap that will never clear.
-			w.resolve(err)
+			// GRANTED OR A DURABLE REFUSAL, and this site is the only place
+			// that can tell: err is nil for an admission and an arbitrary
+			// policy refusal otherwise.
+			outcome := WaitGranted
+			if err != nil {
+				outcome = WaitDurableRefusal
+			}
+			w.resolve(outcome, err)
 			served = true
 			break
 		}
@@ -362,7 +410,7 @@ func (r *sessionRegistry) closeLine() int {
 	n := len(r.line)
 	for _, w := range r.line {
 		r.clearDemandClaimLocked(w)
-		w.resolve(r.closed)
+		w.resolve(WaitShuttingDown, r.closed)
 	}
 	r.line = nil
 	return n
@@ -401,7 +449,7 @@ func (r *sessionRegistry) beginDrainingTarget(connID int64) (int, []*session) {
 			// cannot block: the outcome channel is buffered by one and each
 			// waiter is resolved exactly once.
 			r.clearDemandClaimLocked(w)
-			w.resolve(ErrTargetGone)
+			w.resolve(WaitTargetGone, ErrTargetGone)
 			dropped++
 			continue
 		}
