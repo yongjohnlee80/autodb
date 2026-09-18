@@ -224,7 +224,7 @@ func listStyles(focused bool) widget.ListStyles {
 	// This was briefly INVERTED here -- focused receiving gray and unfocused
 	// receiving cyan -- because on a live terminal the accent kept landing on
 	// the list the keyboard was not in, and inverting the mapping made the
-	// screen right. Zen refused that on review and was correct to: it bakes an
+	// screen right. That was reverted on review, and rightly: it bakes an
 	// unexplained environment observation into an API whose parameter then
 	// lies, for every list surface in the application, and a caller reading
 	// listStyles(true) would get the opposite of what it asks for.
