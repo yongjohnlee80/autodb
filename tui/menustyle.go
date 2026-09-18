@@ -26,26 +26,44 @@ import (
 )
 
 // menuBarStyle dresses the top bar and every dropdown it opens.
-// menuBarStyle is the menu bar's look: PLAIN, not inverted.
+// menuBarStyle is the menu bar's look: black on white, like a title bar.
 //
-// It was black-on-white, which read as a title bar and was asked for. Johno
-// then wondered aloud whether that inversion was what made the list cursors
-// look inverted everywhere else -- the two are unrelated as far as the code
-// goes (this style is handed to the menu widget alone and names explicit
-// colours rather than Reverse), but that reasoning has been wrong enough today
-// that the experiment is worth more than the argument. Plain removes the
-// variable.
+// IT WAS BRIEFLY MADE PLAIN AND PUT BACK, and the result is recorded here so
+// nobody runs the experiment twice. The list cursors across the application
+// read backwards -- the accent landing on the section the keyboard was NOT in
+// -- and the standing fix for that is a reversed mapping in listStyles that is
+// measured from the screen rather than explained. Johno's hypothesis was that
+// this bar's inversion was leaking into them.
 //
-// SELECTED IS BOLD AND UNDERLINED rather than filled, so nothing in the bar
-// inverts anything. If the lists still read backwards with this in place, the
-// menu bar was never the cause.
+// IT IS NOT. With the bar drawn plain -- no fills, bold and underline for the
+// selected item -- the cursors read exactly as before. The bar was never the
+// cause, and whatever is inverting the cursors is still unaccounted for.
+//
+// Explicit colours rather than Reverse, because Reverse inverts whatever the
+// cell happens to hold and a menu bar wants one fixed look; and ANSI 7/0 rather
+// than tokens, because TokenForeground and TokenBackground both resolve to the
+// terminal's own defaults on an unthemed app, which would make the bar
+// indistinguishable from the content under it.
 var menuBarStyle = widget.NewMenuStyle(
-	style.New().Foreground(style.TokenForeground),
-	style.New().Foreground(style.TokenForeground).Bold(true).Underline(true),
+	style.New().
+		Background(style.ANSI(7)).
+		Foreground(style.ANSI(0)).
+		Bold(true),
+	style.New().
+		Background(style.ANSI(0)).
+		Foreground(style.ANSI(7)).
+		Bold(true),
 ).
-	WithArmed(style.New().Foreground(style.TokenForeground).Bold(true)).
-	WithDisabled(mutedStyle()).
-	WithAccel(style.New().Foreground(style.TokenForeground).Underline(true)).
+	WithArmed(style.New().
+		Background(style.ANSI(0)).
+		Foreground(style.ANSI(7))).
+	WithDisabled(style.New().
+		Background(style.ANSI(7)).
+		Foreground(style.ANSI(8))).
+	WithAccel(style.New().
+		Background(style.ANSI(7)).
+		Foreground(style.ANSI(8))).
 	WithBorder(style.New().
-		Foreground(style.TokenBorder).
+		Background(style.ANSI(7)).
+		Foreground(style.ANSI(0)).
 		Border(style.BorderNormal))
