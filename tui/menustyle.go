@@ -11,9 +11,9 @@ package tui
 // applications are the same shape — a golib TUI with a top bar over vim-ish
 // panes — and a developer who moves between them should not have to relearn
 // which strip is chrome. Where the editor's file also dresses its modals, this
-// one stops at the menu: autodb's dialogs are `widget.Modal` with the scrim
-// rules ADR 0101 D5 settled, and restyling them is a separate decision with a
-// separate blast radius.
+// one stops at the menu: autodb's dialogs are `widget.Modal` and deliberately
+// unscrimmed everywhere except login and exit, so restyling them is a separate
+// decision with a separate blast radius.
 //
 // ANSI 7 AND 0 RATHER THAN THEME TOKENS, for the same reason the editor uses
 // them: this is a fixed high-contrast chrome, not a themed surface. A token
@@ -46,9 +46,10 @@ var menuBarStyle = widget.NewMenuStyle(
 		Background(style.ANSI(0)).
 		Foreground(style.ANSI(7))).
 	// A DISABLED ROW IS SHOWN, NOT HIDDEN, and this is the colour that makes
-	// that readable. The catalog deliberately projects disabled commands with
-	// their reason in the accelerator column (ADR 0100), so these two styles
-	// carry real text in autodb rather than being defensive defaults.
+	// that readable. The command catalog deliberately projects disabled
+	// commands with their reason in the accelerator column — see menuModel in
+	// menubar.go — so these two styles carry real text in autodb rather than
+	// being defensive defaults.
 	WithDisabled(style.New().
 		Background(style.ANSI(7)).
 		Foreground(style.ANSI(8))).
