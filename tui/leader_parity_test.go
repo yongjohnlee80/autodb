@@ -94,6 +94,10 @@ func baseRows(connLabel string) []string {
 		"K service keyslot (admin)…",
 		"L login / switch user",
 		"x " + connLabel,
+		// Added with the Profile surface. Declared here for the same reason
+		// the pressure entry is: the menu is pinned so an addition has to be
+		// stated rather than appearing quietly.
+		"o profile",
 		"A about autodb",
 		// Added with the pressure view. The menu is pinned so an addition has to
 		// be declared here rather than appearing quietly -- which is the point of
