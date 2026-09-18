@@ -217,3 +217,11 @@ func listStyles(focused bool) widget.ListStyles {
 		CursorSelected: cursor,
 	}
 }
+
+// emptyPlaceholder is what an untouched text field shows.
+//
+// It is not decoration: an empty input on the card's own background is
+// indistinguishable from a blank line, so the field the operator is meant to
+// type into looks like a gap. The placeholder is muted and underlined, which
+// draws the editable region before there is any value to underline.
+const emptyPlaceholder = "empty…"

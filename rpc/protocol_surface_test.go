@@ -102,8 +102,8 @@ func TestProtocol_TheVerbSurfaceIsPinned(t *testing.T) {
 	for _, v := range prev {
 		inPrev[v] = true
 	}
-	if !inRecord["sys.pressure"] || inPrev["sys.pressure"] {
-		t.Errorf("protocol %d is supposed to be the one that added sys.pressure; the "+
+	if !inRecord["conn.rename"] || inPrev["conn.rename"] {
+		t.Errorf("protocol %d is supposed to be the one that added conn.rename; the "+
 			"records disagree", rpc.Protocol)
 	}
 }
@@ -111,7 +111,7 @@ func TestProtocol_TheVerbSurfaceIsPinned(t *testing.T) {
 // A CLIENT FROM BEFORE THE NEW VERB IS TURNED AWAY AT THE DOOR.
 //
 // This is the whole point of the bump, stated as behaviour: a frontend built
-// when the surface had no pressure view declares the old number, and is
+// when the surface had no connection rename declares the old number, and is
 // refused there and then rather than discovering the gap one menu entry at a
 // time. The session is poisoned too — an admitted-then-confused client is
 // worse than a refused one, because it has already drawn a UI it cannot back.

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"iter"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -41,7 +42,11 @@ type manager[T any] struct {
 	items []T // what the table SHOWS — selection indexes into THIS, so a
 	//            filtered manager must narrow items, not just the table,
 	//            or a row action reads the wrong record
-	hint    *widget.Text
+	hint *widget.Text
+	// close is the button an operator can SEE. `q` and Escape still work and
+	// the footer still names them, but a modal whose only exit is a key you
+	// have to already know is one you can feel trapped in.
+	close   *widget.Button
 	actions []managerAction[T]
 	// filter narrows all -> items. nil shows everything.
 	filter func([]T) []T
@@ -74,6 +79,13 @@ func newManager[T any](m *Model, cols []widget.TableColumn[T],
 		load:    load,
 		bound:   m.session.Bind(), // the epoch this manager view belongs to
 	}
+	mg.close = widget.NewButton("Close",
+		widget.WithRole(widget.ButtonRoleCancel),
+		widget.WithOnActivate(func() {
+			if mg.float != nil {
+				mg.float.Hide()
+			}
+		}))
 	mg.hint = widget.NewText(mg.hintLine(),
 		widget.WithTextStyle(mutedStyle()),
 		// The wrap is the NET, not the normal case: Layout widens the
@@ -126,6 +138,7 @@ func (g *manager[T]) Init(ctx *tui.Context) {
 	g.ctx = ctx
 	ctx.Mount(g.table)
 	ctx.Mount(g.hint)
+	ctx.Mount(g.close)
 	g.Reload()
 }
 
@@ -180,20 +193,55 @@ func (g *manager[T]) Layout(c tui.Constraints) tui.Size {
 	// testing: the users panel cut off "g:grant…"), so ask it how tall
 	// it needs to be and give the table the rest.
 	hintH := max(g.ctx.LayoutChild(g.hint, tui.Constraints{MaxW: w, MaxH: 4}).H, 1)
-	h := modalSpan(c.MaxH, managerHPct, managerMinH+hintH, managerMaxH+hintH)
-	tableH := max(h-hintH, 1)
+	// One row for the rule, one for the button band. See hrule: without the
+	// rule the footer reads as one more row of the table.
+	const chromeH = 2
+	h := modalSpan(c.MaxH, managerHPct, managerMinH+hintH+chromeH, managerMaxH+hintH+chromeH)
+	tableH := max(h-hintH-chromeH, 1)
 	g.ctx.LayoutChild(g.table, tui.Tight(tui.Size{W: w, H: tableH}))
 	g.ctx.PlaceChild(g.table, tui.Rect{X: 0, Y: 0, W: w, H: tableH})
 	g.ctx.PlaceChild(g.hint, tui.Rect{X: 0, Y: tableH, W: w, H: hintH})
+	bs := g.ctx.LayoutChild(g.close, tui.Constraints{MaxW: w, MaxH: 1})
+	g.ctx.PlaceChild(g.close, tui.Rect{X: max(w-bs.W, 0), Y: tableH + hintH + 1, W: bs.W, H: 1})
 	return c.Constrain(tui.Size{W: w, H: h})
 }
 
-func (g *manager[T]) Render(tui.Surface) {}
+// Render draws the rule between the rows and the footer band.
+func (g *manager[T]) Render(s tui.Surface) {
+	sz := s.Size()
+	y := sz.H - 2
+	if y < 1 {
+		return
+	}
+	for x := range sz.W {
+		s.SetCell(x, y, "─", mutedStyle())
+	}
+}
 
 func (g *manager[T]) HandleEvent(ev tui.Event) bool {
 	if dismissKey(ev) {
 		g.float.Hide()
 		return true
+	}
+	// TAB REACHES THE CLOSE BUTTON AND COMES BACK. A button nothing can focus
+	// is a picture of a button.
+	if k, ok := ev.(tui.KeyEvent); ok && k.Kind != tui.KeyRelease && k.Code == tui.KeyTab {
+		if g.ctx == nil {
+			return true
+		}
+		if g.ctx.FocusWithin(g.close) {
+			g.ctx.FocusComponent(g.table)
+		} else {
+			g.ctx.FocusComponent(g.close)
+		}
+		return true
+	}
+	// A ROW KEY IS THE TABLE'S, NOT THE BUTTON'S. While the Close button holds
+	// focus the action letters would otherwise still fire, so `d` on a
+	// manager whose cursor the operator has left would delete the row they
+	// last touched.
+	if g.ctx != nil && g.ctx.FocusWithin(g.close) {
+		return g.close.HandleEvent(ev)
 	}
 	if k, ok := ev.(tui.KeyEvent); ok && k.Kind != tui.KeyRelease && k.Text != "" {
 		r := []rune(k.Text)[0]
@@ -243,7 +291,12 @@ func (m *Model) openConnManager() {
 		// property; TARGET DB is the name a client types into a
 		// Database field, and showing it is what would have made an evening's
 		// confusion visible in seconds.
-		{Title: "FRONT DOOR", Width: 11, Cell: func(c ConnInfo) string {
+		// "PROXY" IS THE OPERATOR'S WORD FOR IT. The design documents call
+		// this the front door and go on doing so; what an operator reads on a
+		// connection row is whether autodb proxies it, which is the question
+		// they are actually asking. The stored property, the RPC verb and the
+		// ADRs are untouched -- only the label is.
+		{Title: "PROXY", Width: 7, Cell: func(c ConnInfo) string {
 			if c.FrontDoorExposed {
 				return "yes"
 			}
@@ -256,6 +309,19 @@ func (m *Model) openConnManager() {
 		func(c context.Context, b *Bound) ([]ConnInfo, error) { return b.Connections(c) },
 		[]managerAction[ConnInfo]{
 			{'a', "add", func(ConnInfo, bool) { m.openConnForm(g) }},
+			{'r', "rename", func(sel ConnInfo, ok bool) {
+				if !ok {
+					return
+				}
+				var name string
+				NewPromptModal(m, "rename "+sel.Name, "new name", sel.Name, &name).
+					WithSubmitFn(func(ModalResponse) error {
+						managerCall(g, "rename "+sel.Name, func(c context.Context, b *Bound) error {
+							return b.RenameConnection(c, sel.ID, name)
+						})
+						return nil
+					}).Open()
+			}},
 			{'t', "test", func(sel ConnInfo, ok bool) {
 				if ok {
 					managerCall(g, "test "+sel.Name, func(c context.Context, b *Bound) error {
@@ -264,13 +330,23 @@ func (m *Model) openConnManager() {
 				}
 			}},
 			{'d', "delete", func(sel ConnInfo, ok bool) {
-				if ok {
-					managerCall(g, "delete "+sel.Name, func(c context.Context, b *Bound) error {
-						return b.DeleteConnection(c, sel.ID)
-					})
+				if !ok {
+					return
 				}
+				// ASKED, NOT DONE. `d` is one keypress next to `t` for test,
+				// and deleting a connection is not undoable.
+				NewConfirmModal(m, "delete connection",
+					"Delete "+sel.Name+"? Grants and workspace links go with it.").
+					WithOkText("Delete").
+					WithCancelText("Keep").
+					WithSubmitFn(func(ModalResponse) error {
+						managerCall(g, "delete "+sel.Name, func(c context.Context, b *Bound) error {
+							return b.DeleteConnection(c, sel.ID)
+						})
+						return nil
+					}).Open()
 			}},
-			{'e', "front door…", func(sel ConnInfo, ok bool) {
+			{'e', "proxy enabled…", func(sel ConnInfo, ok bool) {
 				if ok {
 					m.openExposureSwitch(g, sel)
 				}
@@ -1162,4 +1238,18 @@ func withinAny(want netip.Prefix, own []UserIPRow) bool {
 		}
 	}
 	return false
+}
+
+// The manager is transparent to the framework's focus walk, so the table and
+// the Close button are both reachable.
+func (g *manager[T]) Add(...tui.Component)    {}
+func (g *manager[T]) Remove(tui.Component)    {}
+func (g *manager[T]) Move(tui.Component, int) {}
+func (g *manager[T]) Children() iter.Seq[tui.Component] {
+	return func(yield func(tui.Component) bool) {
+		if !yield(g.table) || !yield(g.hint) {
+			return
+		}
+		yield(g.close)
+	}
 }

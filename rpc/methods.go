@@ -1402,6 +1402,24 @@ func (s *Server) register() {
 		}
 		return nil, wireErr(s.eng.SetConnectionProfile(ctx, token, connID, profile, peerIP(req)))
 	})
+	s.handle("conn.rename", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 3); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		connID, err := argInt(req.Params, 1, "conn_id")
+		if err != nil {
+			return nil, err
+		}
+		name, err := argStr(req.Params, 2, "name")
+		if err != nil {
+			return nil, err
+		}
+		return nil, wireErr(s.eng.RenameConnection(ctx, token, connID, name, peerIP(req)))
+	})
 	s.handle("conn.set_exposure", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
 			return nil, err
