@@ -72,7 +72,10 @@ func TestForm_EnterAdvancesBeforeTheNextKeystroke(t *testing.T) {
 	var burst []tuicore.KeyEvent
 	burst = append(burst, runes("demo")...)
 	burst = append(burst, tab())
-	burst = append(burst, enter(), down(), down(), enter()) // open, sqlite, commit
+	// THREE Downs, not two: the catalogue is ["empty…", postgres, mysql,
+	// sqlite] now — every select carries a zero-valued sentinel so that a
+	// freshly opened one has chosen nothing. See withEmptyFirst.
+	burst = append(burst, enter(), down(), down(), down(), enter()) // open, sqlite, commit
 	burst = append(burst, tab())
 	burst = append(burst, runes(dsn)...)
 	burst = append(burst, enter(), enter()) // reach OK, press it

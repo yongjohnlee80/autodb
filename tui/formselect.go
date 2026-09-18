@@ -92,10 +92,32 @@ type submitGate interface{ blocks() (bool, string) }
 
 // staticSelect is a field whose vocabulary is fixed and known here: the engines
 // and the roles. It is NOT filtered — a three-item list needs no search box.
+// withEmptyFirst puts a ZERO-VALUED sentinel at the head of a catalogue.
+//
+// TWO THINGS AT ONCE, and the second is a real defect. golib's Select starts
+// with selected = 0, not -1, so a fresh select over a non-empty catalogue
+// SHOWS ITS FIRST OPTION AS IF THE OPERATOR HAD CHOSEN IT -- "new connection"
+// opened with the engine already reading postgres, and Value() agreed. A
+// sentinel at index 0 means the thing displayed on open is the thing that is
+// actually selected: nothing.
+//
+// It also gives the closed field the same "empty…" the text inputs show, and
+// puts a row in the list that can be highlighted to mean "no choice".
+//
+// The sentinel carries the ZERO value, so every existing emptiness check keeps
+// working unchanged: formValues.str reads "", and formValues.id refuses 0.
+func withEmptyFirst[T any](items []widget.SelectItem[T]) []widget.SelectItem[T] {
+	var zero T
+	out := make([]widget.SelectItem[T], 0, len(items)+1)
+	out = append(out, widget.SelectItem[T]{Label: emptyPlaceholder, Value: zero})
+	return append(out, items...)
+}
+
 func staticSelect(label string, items []widget.SelectItem[string]) formField {
 	return formField{label: label, build: func(f *form, i int) formControl {
+		opts := withEmptyFirst(items)
 		return &selectControl[string]{
-			sel:   widget.NewSelect(widget.WithOptions(items)),
+			sel:   widget.NewSelect(widget.WithOptions(opts)),
 			state: loadReady,
 			count: len(items),
 		}
@@ -149,7 +171,10 @@ func liveSelect[T comparable](m *Model, label string,
 				if err != nil {
 					c.state, c.err = loadFailed, err
 				} else {
-					c.sel.SetOptions(items)
+					// THE SENTINEL SURVIVES A LOAD. Without it a list that
+					// arrives late selects its first row on the operator's
+					// behalf -- see withEmptyFirst.
+					c.sel.SetOptions(withEmptyFirst(items))
 					c.state, c.count, c.err = loadReady, len(items), nil
 				}
 				f.refreshLabels()
@@ -277,7 +302,8 @@ func workspacesWithout(connID int64) func(context.Context, *Bound) ([]widget.Sel
 func fixedSelect(label string, items []widget.SelectItem[int64]) formField {
 	return formField{label: label, build: func(f *form, i int) formControl {
 		return &selectControl[int64]{
-			sel:   widget.NewSelect(widget.WithFilter[int64](true), widget.WithOptions(items)),
+			sel: widget.NewSelect(widget.WithFilter[int64](true),
+				widget.WithOptions(withEmptyFirst(items))),
 			state: loadReady,
 			count: len(items),
 		}

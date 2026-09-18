@@ -387,7 +387,9 @@ func TestWorkspacePanel_TheButtonStopDimsBothLists(t *testing.T) {
 //
 // Johno: "when moved away from it still highlighted".
 func TestWorkspacePanel_TheButtonDimsWhenTheKeyboardLeaves(t *testing.T) {
-	const liveBG = 8
+	// THE BUTTONS WERE NOT REVERSED. buttonStyle is its own mapping and still
+	// reads cyan-when-focused; only the LIST cursor was swapped.
+	const liveBG = 6
 	h := startBar(t, meta.RoleAdmin)
 	openWSPanel(t, h, []WorkspaceInfo{{ID: 1, Name: "alpha"}})
 	bgOf := func(text string) int {
@@ -410,8 +412,9 @@ func TestWorkspacePanel_TheButtonDimsWhenTheKeyboardLeaves(t *testing.T) {
 	if got := bgOf("Close"); got == liveBG {
 		t.Error("the Close button is still cyan after the keyboard left it")
 	}
-	if got := bgOf("alpha"); got != liveBG {
-		t.Errorf("the workspace cursor is ANSI %d after Tab returned to it, want ANSI %d", got, liveBG)
+	// THE LIST uses the reversed mapping; liveBG above is the BUTTON's.
+	if got := bgOf("alpha"); got != 8 {
+		t.Errorf("the workspace cursor is ANSI %d after Tab returned to it, want ANSI 8", got)
 	}
 }
 
@@ -502,7 +505,10 @@ func TestWorkspacePanel_TheAccentMarksTheListTheArrowsMove(t *testing.T) {
 func TestModalBodies_DoNotRouteNonKeyEvents(t *testing.T) {
 	pkg := parsePackage(t)
 	// The bodies that own a button and interpret keys for their children.
-	bodies := map[string]bool{"manager": false, "workspacePanel": false, "form": false}
+	// The bodies that FORWARD. form's HandleEvent forwards nothing -- it
+	// watches focus and returns false -- so it has nothing to get wrong here
+	// and asserting on it would only pin an unrelated implementation detail.
+	bodies := map[string]bool{"manager": false, "workspacePanel": false}
 
 	for _, p := range pkg {
 		for _, file := range p.Files {
