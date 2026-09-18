@@ -265,6 +265,18 @@ func (g *manager[T]) HandleEvent(ev tui.Event) bool {
 			}
 		}
 	}
+	// ONLY KEYS ARE FORWARDED. A mouse event is addressed by POSITION and the
+	// framework has already hit-tested it to the component under the pointer --
+	// golib's Button is fully Activatable and golib installs a press/release
+	// recognizer by default, so a click on the Close button activates it
+	// without any help from here. Handing every event to the table instead
+	// swallowed the release, so the press moved focus to the button and
+	// nothing else ever happened: "it just focuses". Johno found it on the
+	// connections manager, where the input modals opened FROM it worked fine --
+	// because those are built by the form path, which never did this.
+	if _, isKey := ev.(tui.KeyEvent); !isKey {
+		return false
+	}
 	return g.table.HandleEvent(ev)
 }
 

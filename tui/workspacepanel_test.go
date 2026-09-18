@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"go/ast"
 	"strings"
 	"testing"
 
@@ -484,4 +485,81 @@ func TestWorkspacePanel_TheAccentMarksTheListTheArrowsMove(t *testing.T) {
 	if got := bgOf("beta"); got == liveBG {
 		t.Error("the workspace list still wears the accent after the keyboard left it")
 	}
+}
+
+// A MODAL BODY DOES NOT SWALLOW POINTER EVENTS.
+//
+// Johno: the buttons on the input modals answered a mouse click while the ones
+// on the connections and workspace managers did not — "it just focuses". Those
+// two hand-built bodies were forwarding EVERY event to their table by the
+// section that held the keyboard; a mouse event is addressed by POSITION, and
+// the framework had already hit-tested it to the button. The press moved focus
+// and the release went to a table, so the gesture never completed.
+//
+// Read from the SOURCE, because the claim is about every modal body at once
+// and a rendered frame shows one. What is asserted is narrow and is the thing
+// that broke: a body's HandleEvent must not route a non-key event.
+func TestModalBodies_DoNotRouteNonKeyEvents(t *testing.T) {
+	pkg := parsePackage(t)
+	// The bodies that own a button and interpret keys for their children.
+	bodies := map[string]bool{"manager": false, "workspacePanel": false, "form": false}
+
+	for _, p := range pkg {
+		for _, file := range p.Files {
+			ast.Inspect(file, func(n ast.Node) bool {
+				fn, ok := n.(*ast.FuncDecl)
+				if !ok || fn.Name.Name != "HandleEvent" || fn.Recv == nil {
+					return true
+				}
+				name := receiverTypeName(fn.Recv)
+				if _, watched := bodies[name]; !watched {
+					return true
+				}
+				bodies[name] = true
+				// Every forward must be guarded by a check that has already
+				// excluded non-keys. The guard is spelled as a tui.KeyEvent
+				// assertion; require the body to contain one.
+				asks := false
+				ast.Inspect(fn.Body, func(m ast.Node) bool {
+					sel, ok := m.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "KeyEvent" {
+						return true
+					}
+					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "tui" {
+						asks = true
+					}
+					return true
+				})
+				if !asks {
+					t.Errorf("%s.HandleEvent forwards without ever asking whether the "+
+						"event is a key; a mouse click will be routed by keyboard focus", name)
+				}
+				return true
+			})
+		}
+	}
+	for name, seen := range bodies {
+		if !seen {
+			t.Errorf("no HandleEvent found for %s; this guard has stopped watching it", name)
+		}
+	}
+}
+
+// receiverTypeName is the bare type name of a method receiver, generics and
+// pointers stripped.
+func receiverTypeName(recv *ast.FieldList) string {
+	if recv == nil || len(recv.List) == 0 {
+		return ""
+	}
+	t := recv.List[0].Type
+	if star, ok := t.(*ast.StarExpr); ok {
+		t = star.X
+	}
+	if idx, ok := t.(*ast.IndexExpr); ok { // manager[T]
+		t = idx.X
+	}
+	if id, ok := t.(*ast.Ident); ok {
+		return id.Name
+	}
+	return ""
 }
