@@ -71,23 +71,15 @@ type Model struct {
 	about             AboutInfo
 	// pressure is where the pressure view reads from. Nil when nothing is
 	// wired, which the view reports rather than hiding the command.
-	pressure        PressureSource
-	frontend        Frontend
-	noteView        NoteView // which note tree this session reads
-	pendingPrompt   func()   // an auth prompt waiting for the splash to close
-	pendingFocus    bool     // afterLogin's editor focus, deferred past an open modal
-	splashShown     bool     // the About splash opens once, on the first frame
-	connectedOnce   bool     // a later connect is a RE-connect: stale floats go
-	cleartextFD     bool     // the ATTACHED front door is serving without TLS
-	cleartextSeen   bool     // the user dismissed the warning for this session
-	explorerFocused bool     // last applied cursor styling (focused = cyan)
-	resultsFocused  bool
-	// cursorStylesApplied records that the panels have been painted at least
-	// once, so the FIRST call is never skipped by the transition guard above.
-	// Without it, an initial focus state matching the zero value of the two
-	// fields above sends nothing, and the panels keep whatever look their
-	// constructors guessed.
-	cursorStylesApplied bool
+	pressure      PressureSource
+	frontend      Frontend
+	noteView      NoteView // which note tree this session reads
+	pendingPrompt func()   // an auth prompt waiting for the splash to close
+	pendingFocus  bool     // afterLogin's editor focus, deferred past an open modal
+	splashShown   bool     // the About splash opens once, on the first frame
+	connectedOnce bool     // a later connect is a RE-connect: stale floats go
+	cleartextFD   bool     // the ATTACHED front door is serving without TLS
+	cleartextSeen bool     // the user dismissed the warning for this session
 	// lastPane is the workspace component focus should return to when the menu
 	// bar gives it up. Recorded on every deliberate pane focus, so a command
 	// invoked from the menu hands the keyboard back to where the operator was

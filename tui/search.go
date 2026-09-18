@@ -1,7 +1,10 @@
 package tui
 
 import (
+	"fmt"
+	"os"
 	"strings"
+	"time"
 )
 
 // In-panel search (Johno, M6 manual testing): `/` prompts for a pattern,
@@ -226,18 +229,68 @@ func itoa(i int) string {
 // happens to match the zero value of the tracking field, nothing is ever sent
 // and the panels keep whatever their constructors guessed.
 func (m *Model) applyCursorStyles() {
+	if m.ctx == nil {
+		return
+	}
 	explorerOn := m.ctx.FocusWithin(m.explorerBox)
 	resultsOn := m.ctx.FocusWithin(m.resultsBox)
-	first := !m.cursorStylesApplied
-	m.cursorStylesApplied = true
-	if first || explorerOn != m.explorerFocused {
-		m.explorerFocused = explorerOn
-		m.explorer.tree.SetStyles(listStyles(explorerOn))
+
+	// NO CACHE, RECOMPUTED EVERY CALL. The transition guard that used to sit
+	// here is the shape every staleness this file has produced came in: a
+	// cached answer to "who has focus?" has to be invalidated by every path
+	// that can move focus, and those paths are not enumerable -- a click, a
+	// leader key, a float opening, a float closing, a repair after an unmount.
+	// Asking costs a struct assignment. Being wrong costs an operator the
+	// ability to tell which pane their keys reach.
+	m.explorer.tree.SetStyles(listStyles(explorerOn))
+	if m.results.rawList != nil {
+		m.results.rawList.SetStyles(listStyles(resultsOn))
 	}
-	if first || resultsOn != m.resultsFocused {
-		m.resultsFocused = resultsOn
-		if m.results.rawList != nil {
-			m.results.rawList.SetStyles(listStyles(resultsOn))
-		}
+	m.traceFocus(explorerOn, resultsOn)
+}
+
+// traceFocus records what the framework says about focus and what was painted
+// because of it, when AUTODB_FOCUS_TRACE names a file.
+//
+// THE INSTRUMENT THAT WAS MISSING. On a live terminal the accent lands on the
+// pane the keyboard is not in; in the test backend it does not, and every cell
+// written against this was written against the test backend. So the harness
+// cannot be the witness -- this reads the same values out of the RUNNING
+// binary, on the machine where the symptom is.
+//
+// Off unless the variable is set, appended rather than truncated, and failures
+// are swallowed: a diagnostic that can break the application it is diagnosing
+// is not one anybody will turn on.
+func (m *Model) traceFocus(explorerOn, resultsOn bool) {
+	path := os.Getenv("AUTODB_FOCUS_TRACE")
+	if path == "" {
+		return
 	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	// The BOX's own answer beside the one this code uses. widget.Box tracks
+	// focus from bubbling FocusEvents and its borders are truthful; this
+	// function queries Context.FocusWithin at the root. If those two ever
+	// disagree, that is the whole defect, and this is the line that says so.
+	fmt.Fprintf(f, "%s explorerOn=%v resultsOn=%v editorFocused=%v paneHolding=%q\n",
+		time.Now().Format("15:04:05.000"), explorerOn, resultsOn,
+		m.ctx.FocusWithin(m.editorBox), m.lastPaneName())
+}
+
+// lastPaneName names the pane the model believes the keyboard is in, for the
+// trace. It is the model's own opinion, deliberately: if it disagrees with the
+// FocusWithin answers beside it, the trace has caught the disagreement.
+func (m *Model) lastPaneName() string {
+	switch {
+	case m.ctx.FocusWithin(m.explorerBox):
+		return "explorer"
+	case m.ctx.FocusWithin(m.editorBox):
+		return "editor"
+	case m.ctx.FocusWithin(m.resultsBox):
+		return "results"
+	}
+	return "none"
 }
