@@ -1682,7 +1682,9 @@ func resultMap(res *exec.Result) map[string]any {
 }
 
 // wireVal normalizes one result cell. Types the codec carries pass through;
-// time.Time becomes RFC3339Nano; anything else stringifies — the FEs are
+// time.Time becomes RFC3339Nano; a 16-byte fixed ARRAY (a postgres uuid) takes
+// its canonical dashed form, because this is the last point it is
+// distinguishable from a bytea; anything else stringifies — the FEs are
 // display surfaces, and a lossy-but-visible cell beats a failed page.
 func wireVal(v any) any {
 	switch x := v.(type) {
@@ -1694,12 +1696,29 @@ func wireVal(v any) any {
 	}
 	// Fixed-size byte ARRAYS never match the []byte case above: a
 	// postgres uuid scans into [16]uint8, and the %v fallback would ship
-	// it as a decimal byte list. Carry the SAME BYTES as a []byte — how
-	// they read (uuid, text, hex) is the frontend's decision.
+	// it as a decimal byte list.
+	//
+	// A uuid (fixed ARRAY) and a bytea (SLICE) are distinct types HERE, and
+	// the same anonymous bytes once either is on the wire. So the canonical
+	// text form is decided here, at the last point the type still exists —
+	// not at the frontend, which cannot recover the difference and renders
+	// both through its generic binary-to-hex fallback. The earlier note that
+	// "how they read is the frontend's decision" described an ability the Lua
+	// frontend never had: it receives bytes with no type beside them.
+	//
+	// Length is part of the match rather than an afterthought. The premise is
+	// that only uuid scans into a fixed-size byte array, which is a property
+	// of pgx and not of this code; formatting exactly 16 bytes means a future
+	// codec returning some other fixed array stays visible bytes instead of
+	// being silently mislabelled as a uuid.
 	if rv := reflect.ValueOf(v); rv.Kind() == reflect.Array &&
 		rv.Type().Elem().Kind() == reflect.Uint8 {
 		b := make([]byte, rv.Len())
 		reflect.Copy(reflect.ValueOf(b), rv)
+		if len(b) == 16 {
+			return fmt.Sprintf("%x-%x-%x-%x-%x",
+				b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+		}
 		return b
 	}
 	// Driver types that know their own text form (pgtype values, decimals,
