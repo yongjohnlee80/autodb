@@ -106,18 +106,75 @@ func TestR7_AnEmptyStoreIsNotACandidate(t *testing.T) {
 }
 
 // r7Session builds a session holding an object whose dependency has stalled.
+//
+// It carries a cancel func because a session the reaper actually CLOSES runs
+// through finishClosing, which cancels it. Without one the fixture panics at
+// the moment the rung it is testing finally fires — so the cheapest fixture is
+// the one that can only be used to watch R7 not happen.
 func r7Session(t *testing.T, at time.Time, stalled time.Duration) (*Engine, *session) {
 	t.Helper()
 	e := New(nil, nil)
 	t.Cleanup(func() { _ = e.Close() })
-	s := &session{id: "holder", userID: 1, connID: 7}
+	return e, r7Holder(t, at, stalled)
+}
+
+// r7Holder builds just the session, so a cell that needs an engine which can
+// actually CLOSE one (audit sink and all) can supply its own.
+func r7Holder(t *testing.T, at time.Time, stalled time.Duration) *session {
+	t.Helper()
+	s := &session{id: "holder", userID: 1, connID: 7, cancel: func() {}}
 	s.state.Store(int32(sessOpen))
 	s.lastUsed = at // wire-active
 	s.ext = newExtObjectsAt(func() time.Time { return at.Add(-stalled) })
 	if err := s.ext.putStatement(&extStatement{name: "prepared-and-forgotten"}); err != nil {
 		t.Fatal(err)
 	}
-	return e, s
+	return s
+}
+
+// r7Register puts the session where the sweep will find it, and takes it back
+// out afterwards so engine shutdown does not walk a fixture it cannot tear down.
+func r7Register(t *testing.T, e *Engine, s *session) {
+	t.Helper()
+	e.sessions.mu.Lock()
+	e.sessions.byID[s.id] = s
+	e.sessions.mu.Unlock()
+	t.Cleanup(func() {
+		e.sessions.mu.Lock()
+		delete(e.sessions.byID, s.id)
+		e.sessions.mu.Unlock()
+	})
+}
+
+// R7 FIRES THROUGH THE REAPER THE JANITOR ACTUALLY RUNS.
+//
+// THIS CELL EXISTS BECAUSE THE RUNG DID NOT. R7 was originally written in a
+// second sweep, reapIdleSessions, which read exactly like the real one and had
+// no production caller whatsoever — StartJanitor calls reapExpired. Every R7
+// cell passed, the milestone read as delivered, and a running daemon would
+// never once have reclaimed a stalled holder.
+//
+// So this asserts REACHABILITY, which is a different property from the verdict
+// the cells above own: driven through reapExpired, with a stale held object on
+// an active wire, the session is actually closed and closed for R7's reason.
+func TestR7_TheJanitorsOwnReaperReclaimsAStalledHolder(t *testing.T) {
+	at := time.Unix(0, 0).Add(100 * time.Hour)
+	// A REAL ENGINE, because this cell lets the close actually happen and a
+	// close writes an audit row. The lighter New(nil, nil) fixture the verdict
+	// cells use cannot: it panics in the audit, which is its own small proof
+	// that those cells never reach the closing path.
+	e := newFixture(t).eng
+	s := r7Holder(t, at, r7DependencyBound+time.Minute)
+	r7Register(t, e, s)
+
+	if n := e.reapExpired(context.Background(), at); n != 1 {
+		t.Fatalf("reapExpired acted on %d session(s), want 1 — this is the sweep StartJanitor "+
+			"drives, and if R7 is not in it the rung cannot fire in a running daemon no "+
+			"matter how many unit cells pass", n)
+	}
+	if got := s.get(); got != sessClosed {
+		t.Errorf("the session is in state %v, want closed", got)
+	}
 }
 
 // THE RUNG FIRES FOR A TALKING CLIENT THAT HAS STOPPED USING WHAT IT HOLDS.
@@ -172,29 +229,24 @@ func TestR7_ItSparesEverySessionThatWouldBeHarmed(t *testing.T) {
 // call r7Expired directly and would hang to the package's ten-minute timeout
 // panic, which names nothing.
 //
-// This one drives the PRODUCTION sweep and bounds the wait, so a re-entrant
-// lock fails in a second with a message that says which lock and why.
+// This one drives reapExpired -- the sweep StartJanitor actually runs -- and
+// bounds the wait, so a re-entrant lock fails in a second with a message that
+// says which lock and why.
+//
+// IT SAID "the production sweep" WHILE CALLING reapIdleSessions, which nothing
+// in production called. The claim was false and the cell still passed, which is
+// the more useful half of the lesson: a cell can name the right property and
+// measure it somewhere the property does not matter.
 func TestR7_TheSweepDoesNotDeadlockOnTheSessionMutex(t *testing.T) {
 	at := time.Unix(0, 0).Add(100 * time.Hour)
 	// Deliberately INSIDE the bound: the sweep must reach r7Expired, take the
 	// lock and come back without closing anything. The lock path is the
 	// subject here, not the verdict -- which the cells above already own.
 	e, s := r7Session(t, at, r7DependencyBound-time.Minute)
-	e.sessions.mu.Lock()
-	e.sessions.byID[s.id] = s
-	e.sessions.mu.Unlock()
-	// The registry is the sweep's input, and it is also what engine shutdown
-	// walks. This fixture has no pool behind it, so leaving it registered makes
-	// the engine's own Close tear down a session that cannot be torn down.
-	// Take it back out the moment the sweep has read it.
-	defer func() {
-		e.sessions.mu.Lock()
-		delete(e.sessions.byID, s.id)
-		e.sessions.mu.Unlock()
-	}()
+	r7Register(t, e, s)
 
 	done := make(chan int, 1)
-	go func() { done <- e.reapIdleSessions(context.Background(), at) }()
+	go func() { done <- e.reapExpired(context.Background(), at) }()
 
 	select {
 	case n := <-done:

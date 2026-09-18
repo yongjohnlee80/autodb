@@ -1102,7 +1102,9 @@ func All() []Mutation {
 			Test:        "TestCardBudget_TheConnectionsOwnBoundLeads",
 			Fails:       "no line on the card contains",
 			Guarantee:   "that the bound actually governing this token is the one shown, since it is the number autodb holds a client to whether or not the client sized itself",
-			Name:        "r7-the-clock-is-not-a-wire-timer", Package: "./core/exec/",
+		},
+		{
+			Name: "r7-the-clock-is-not-a-wire-timer", Package: "./core/exec/",
 			File:        "core/exec/wire_extended_objects.go",
 			Anchor:      "func (o *extObjects) queueWire() { o.segment = append(o.segment, segStep{}) }",
 			Replacement: "func (o *extObjects) queueWire() {\n\to.noteProgress()\n\to.segment = append(o.segment, segStep{})\n}",

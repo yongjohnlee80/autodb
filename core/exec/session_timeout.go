@@ -202,8 +202,25 @@ func (e *Engine) reapExpired(ctx context.Context, now time.Time) int {
 		}
 		// No transaction: the session's own idle timeout applies. This is
 		// what reaps a session whose client crashed without closing it.
-		if s.idleFor(now) >= e.currentPolicy().sessionIdle {
+		//
+		// R7 IS THE SECOND RUNG AND IT LIVES HERE, in the reaper the janitor
+		// actually runs. It was originally written in a separate
+		// reapIdleSessions, which nothing but a test ever called — so the rung
+		// existed, passed its own cells, and never once fired in production.
+		idle := e.currentPolicy().sessionIdle
+		switch {
+		case s.idleFor(now) >= idle:
 			e.closeSession(ctx, s, "", "idle-timeout")
+			acted++
+		case e.r7Expired(s, now, idle):
+			// A SESSION THAT IS TALKING AND STILL NOT USING WHAT IT HOLDS.
+			//
+			// The idle rung above owns the quiet ones and is checked first, so
+			// the two cannot both claim a session and this one is reached only
+			// where the wire is active. That is the case an idle timer cannot
+			// see: prepared objects pin a backend for as long as the client
+			// keeps the connection warm, and nothing else ever reclaims them.
+			e.closeSession(ctx, s, "", ReasonR7DependencyTimeout)
 			acted++
 		}
 	}
