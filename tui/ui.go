@@ -150,9 +150,13 @@ func New(session *Session, notesFor NotesFactory, quit func(), opts ...Option) *
 	m.results = newResultsPanel(m)
 	m.explorer = newExplorer(m)
 
-	m.explorerBox = widget.NewBox(m.explorer, widget.WithTitle("explorer"))
-	m.editorBox = widget.NewBox(m.editor, widget.WithTitle("query"))
-	m.resultsBox = widget.NewBox(m.results, widget.WithTitle("results"))
+	panelBase, panelFocused := panelStyles()
+	m.explorerBox = widget.NewBox(m.explorer, widget.WithTitle("explorer"),
+		widget.WithStyle(panelBase), widget.WithFocusedStyle(panelFocused))
+	m.editorBox = widget.NewBox(m.editor, widget.WithTitle("query"),
+		widget.WithStyle(panelBase), widget.WithFocusedStyle(panelFocused))
+	m.resultsBox = widget.NewBox(m.results, widget.WithTitle("results"),
+		widget.WithStyle(panelBase), widget.WithFocusedStyle(panelFocused))
 	m.inner = widget.NewSplit(widget.Vertical, m.editorBox, m.resultsBox,
 		widget.WithRatio(0.55), widget.WithMinSizes(3, 3))
 	m.outer = widget.NewSplit(widget.Horizontal, m.explorerBox, m.inner,
@@ -1359,6 +1363,33 @@ func (m *Model) refreshStatus() {
 	right := m.statusMsg
 	if right == "" {
 		right = m.results.StatusLine()
+	}
+	// THE BUILD IDENTITY OWNS THE BOTTOM-RIGHT CORNER UNTIL SOMEBODY SIGNS IN.
+	//
+	// The login dialog is the one surface that fades the backdrop, and this is
+	// what shows through the scrim: which build is being signed into, when it
+	// was built, from which commit, by whom. It is the question an operator
+	// actually has in front of a login prompt on a host they just provisioned,
+	// and answering it after sign-in -- in About, behind a menu -- is answering
+	// it too late.
+	//
+	// It yields to a status message and to a result line, because both are
+	// about what the operator just did and this is not.
+	//
+	// APPENDED, NOT SUBSTITUTED. It first took the slot only when nothing else
+	// wanted it, and on the surface it exists for -- a freshly provisioned host
+	// -- something always did: "connecting to ..." occupies the right slot for
+	// the whole of the login prompt's life, so the build line never appeared on
+	// the one screen it was added for. It now sits after whatever else is
+	// there, which keeps it in the corner itself.
+	if m.session.User().Name == "" {
+		if bl := buildLine(m.about); bl != "" {
+			if right == "" {
+				right = bl
+			} else {
+				right += "   " + bl
+			}
+		}
 	}
 	if right == "" {
 		right = "SPC: commands ⋅ Ctrl-q: quit"

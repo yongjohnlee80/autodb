@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/yongjohnlee80/golib/tui"
-	"github.com/yongjohnlee80/golib/tui/style"
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
@@ -46,7 +45,7 @@ func newHistoryView(m *Model, rows []HistoryRow) *historyView {
 		widget.WithItems(rows, func(r HistoryRow) string { return r.Script }),
 		widget.WithListStyles[HistoryRow](widget.ListStyles{CursorRow: cursorRowStyle}))
 	v.hint = widget.NewText(hintLine(v.hints()),
-		widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted)),
+		widget.WithTextStyle(mutedStyle()),
 		widget.WithWrapMode(widget.Wrap))
 	return v
 }

@@ -61,7 +61,13 @@ func (m *Model) openFloatOpts(title string, content tui.Component,
 	// count passed here was silently discarded — openForm asked for 56
 	// and rendered 54, the help float asked for 64 and rendered 76.
 	// Bodies size themselves with modalSpan and follow a resize.
-	boxStyle := style.New().Border(style.BorderRounded)
+	// A FLOAT TAKES THE FOCUSED FRAME UNCONDITIONALLY. It is declared
+	// non-focusable -- focus belongs to the controls inside it -- so the Box's
+	// own focused/unfocused switch never fires; and a modal float is by
+	// definition the surface with the attention, so the faint frame would be
+	// wrong every time it was drawn. See panelStyles.
+	_, panelFocused := panelStyles()
+	boxStyle := panelFocused.Border(style.BorderRounded)
 	box := widget.NewBox(content,
 		widget.WithTitle(title),
 		widget.WithStyle(boxStyle),
@@ -243,7 +249,11 @@ type formField struct {
 
 func field(label string, opts ...widget.TextInputOption) formField {
 	return formField{label: label, build: func(f *form, i int) formControl {
-		o := make([]widget.TextInputOption, 0, len(opts)+1)
+		o := make([]widget.TextInputOption, 0, len(opts)+2)
+		// THE SHARED LOOK GOES ON FIRST so a caller's own styles, passed in
+		// opts, still win: WithTextInputStyles inherits from what is already
+		// set, and last writer decides.
+		o = append(o, widget.WithTextInputStyles(inputValueStyles()))
 		o = append(o, opts...)
 		// THE ADVANCE RUNS ON THE KEY, NOT ON AN EVENT. See advanceOrSubmit.
 		o = append(o, widget.WithOnSubmit(func(string) { f.advanceOrSubmit(i) }))
@@ -341,7 +351,7 @@ func newForm(fields []formField, onSubmit func(formValues) (bool, string), prose
 		// The footer, in the body rather than the Box: golib's Box offers a
 		// title and no footer, and the managers already put their hints in
 		// the body this way.
-		hint:     widget.NewText(hintLine(formHints()), widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted)), widget.WithWrapMode(widget.Wrap)),
+		hint:     widget.NewText(hintLine(formHints()), widget.WithTextStyle(mutedStyle()), widget.WithWrapMode(widget.Wrap)),
 		status:   widget.NewText("", widget.WithTextStyle(style.New().Foreground(style.TokenError))),
 		onSubmit: onSubmit,
 	}
@@ -353,10 +363,16 @@ func newForm(fields []formField, onSubmit func(formValues) (bool, string), prose
 	for i := range f.fields {
 		f.fields[i].ctl = f.fields[i].build(f, i)
 		f.labels[i] = widget.NewText(f.fields[i].label,
-			widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted)))
+			widget.WithTextStyle(inputLabelStyle()))
 		f.flex.Add(f.labels[i])
 		f.flex.Add(f.fields[i].ctl.component())
 	}
+	// THE FOOTER BAND. Everything below the rule is chrome: the status line
+	// that reports a refusal, and the key hints. Above it is the operator's
+	// data. The buttons golib draws after the body then sit below a line
+	// rather than below a sentence, which is what the hints used to look
+	// like -- one more text row of the modal's own content.
+	f.flex.Add(newHRule())
 	f.flex.Add(f.status)
 	f.flex.Add(f.hint)
 	return f
@@ -557,7 +573,11 @@ func (m *Model) openFormOpts(title string, fields []formField,
 	// a CIDR or a passphrase. Enter on the last field already reaches this
 	// button, and Tab reaches it from anywhere, so the mnemonic bought nothing
 	// and cost a letter.
-	fm.ok = widget.NewButton(okText,
+	// THE TWO BUTTONS ARE THE SAME WIDTH. "OK" beside "Cancel" rendered as a
+	// stub next to a slab, which reads as one real control and one afterthought
+	// -- and the affirmative was the stub.
+	labels := padButtonLabels([]string{okText, "Cancel"})
+	fm.ok = widget.NewButton(labels[0],
 		widget.WithRole(widget.ButtonRoleDefault),
 		widget.WithOnActivate(fm.submit))
 	// THE CANCEL BUTTON DISMISSES ITSELF. Escape resolves the cancel ROLE and
@@ -565,7 +585,7 @@ func (m *Model) openFormOpts(title string, fields []formField,
 	// Enter on it — runs its callback and nothing else. Without this, Escape
 	// worked and the button the operator can see did nothing.
 	var md *widget.Modal
-	cancel := widget.NewButton("Cancel",
+	cancel := widget.NewButton(labels[1],
 		widget.WithRole(widget.ButtonRoleCancel),
 		widget.WithMnemonic('C'),
 		widget.WithOnActivate(func() {
@@ -665,7 +685,7 @@ func (l *leaderMenu) Layout(c tui.Constraints) tui.Size {
 
 func (l *leaderMenu) Render(s tui.Surface) {
 	keySt := style.New().Foreground(style.TokenPrimary).Bold(true)
-	muted := style.New().Foreground(style.TokenTextMuted)
+	muted := mutedStyle()
 	y := 0
 	for _, line := range l.prose {
 		if y >= s.Size().H {
