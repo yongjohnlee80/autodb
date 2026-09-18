@@ -173,6 +173,9 @@ func (c *Catalog) offeredID(m *Model, id CommandID) bool {
 func (m *Model) buildMenuBar() *widget.MenuBar {
 	m.menu = widget.NewMenu(
 		widget.WithActionExecutor(m.runMenuAction),
+		// Black on white. The bar is the frame around the panes, not another
+		// pane; see menustyle.go for why it is ANSI rather than a token.
+		widget.WithMenuStyle(menuBarStyle),
 		// The app is vim-shaped, so hjkl navigates the menu too. A declared row
 		// hotkey still wins over the alias, so the category mnemonics stay
 		// reachable.
