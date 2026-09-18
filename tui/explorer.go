@@ -96,7 +96,7 @@ func (*paneTree) AcceptsFocus() bool { return false }
 
 func newExplorer(m *Model) *explorer {
 	return &explorer{
-		tree:   &paneTree{widget.NewTree(widget.WithTreeStyles(widget.ListStyles{CursorRow: cursorRowStyle}))},
+		tree:   &paneTree{widget.NewTree(widget.WithTreeStyles(listStyles(true)))},
 		model:  m,
 		quoted: map[string]string{}, connNames: map[int64]string{},
 	}

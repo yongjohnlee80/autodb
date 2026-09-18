@@ -43,7 +43,7 @@ func newHistoryView(m *Model, rows []HistoryRow) *historyView {
 	v := &historyView{model: m, rows: rows}
 	v.table = widget.NewTable(cols,
 		widget.WithItems(rows, func(r HistoryRow) string { return r.Script }),
-		widget.WithListStyles[HistoryRow](widget.ListStyles{CursorRow: cursorRowStyle}))
+		widget.WithListStyles[HistoryRow](listStyles(true)))
 	v.hint = widget.NewText(hintLine(v.hints()),
 		widget.WithTextStyle(mutedStyle()),
 		widget.WithWrapMode(widget.Wrap))

@@ -66,7 +66,10 @@ func newManager[T any](m *Model, cols []widget.TableColumn[T],
 	mg := &manager[T]{
 		model: m,
 		table: widget.NewTable(cols, widget.WithEmptyText[T]("empty"),
-			widget.WithListStyles[T](widget.ListStyles{CursorRow: cursorRowStyle})),
+			// A single-section manager's list always has the keyboard, so it
+			// always wears the focused cursor. See listStyles for why all four
+			// fields have to be stated.
+			widget.WithListStyles[T](listStyles(true))),
 		actions: actions,
 		load:    load,
 		bound:   m.session.Bind(), // the epoch this manager view belongs to
@@ -372,72 +375,6 @@ func (m *Model) openAttachForm(g *manager[ConnInfo], connID int64, connName stri
 }
 
 // --- workspaces -------------------------------------------------------------------
-
-func (m *Model) openWorkspaceManager() {
-	cols := []widget.TableColumn[WorkspaceInfo]{
-		{Title: "ID", Width: 5, Cell: func(w WorkspaceInfo) string { return strconv.FormatInt(w.ID, 10) }},
-		{Title: "NAME", Cell: func(w WorkspaceInfo) string { return w.Name }},
-		{Title: "CONNS", Width: 6, Cell: func(w WorkspaceInfo) string { return strconv.Itoa(len(w.Connections)) }},
-	}
-	var g *manager[WorkspaceInfo]
-	g = newManager(m, cols,
-		func(c context.Context, b *Bound) ([]WorkspaceInfo, error) { return b.Workspaces(c) },
-		[]managerAction[WorkspaceInfo]{
-			{'a', "add", func(WorkspaceInfo, bool) {
-				m.openForm("new workspace", []formField{field("name")}, func(v formValues) (bool, string) {
-					name := v.str(0)
-					if name == "" {
-						return false, "name required"
-					}
-					managerCall(g, "create "+name, func(c context.Context, b *Bound) error {
-						_, err := b.CreateWorkspace(c, name)
-						return err
-					})
-					return true, ""
-				})
-			}},
-			{'r', "rename", func(sel WorkspaceInfo, ok bool) {
-				if !ok {
-					return
-				}
-				m.openForm("rename "+sel.Name, []formField{field("new name")}, func(v formValues) (bool, string) {
-					name := v.str(0)
-					if name == "" {
-						return false, "name required"
-					}
-					managerCall(g, "rename "+sel.Name, func(c context.Context, b *Bound) error {
-						return b.RenameWorkspace(c, sel.ID, name)
-					})
-					return true, ""
-				})
-			}},
-			{'d', "delete", func(sel WorkspaceInfo, ok bool) {
-				if ok {
-					managerCall(g, "delete "+sel.Name, func(c context.Context, b *Bound) error {
-						return b.DeleteWorkspace(c, sel.ID)
-					})
-				}
-			}},
-			{'x', "detach conn", func(sel WorkspaceInfo, ok bool) {
-				if !ok {
-					return
-				}
-				m.openForm("detach connection from "+sel.Name, []formField{
-					fixedSelect("connection", attachedItems(sel)),
-				}, func(v formValues) (bool, string) {
-					id, ok := v.id(0)
-					if !ok {
-						return false, "choose a connection"
-					}
-					managerCall(g, "detach", func(c context.Context, b *Bound) error {
-						return b.DetachConnection(c, sel.ID, id)
-					})
-					return true, ""
-				})
-			}},
-		})
-	g.float = m.openFloat("workspaces", g)
-}
 
 // --- users -------------------------------------------------------------------------
 

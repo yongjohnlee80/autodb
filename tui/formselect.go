@@ -267,19 +267,10 @@ func workspacesWithout(connID int64) func(context.Context, *Bound) ([]widget.Sel
 	}
 }
 
-// attachedItems is the detach catalogue, and it needs no load at all: the
-// workspace row the operator is standing on already carries its connections.
-// Fetching the whole server's list to filter it down would be slower and could
-// disagree with the row on screen.
-func attachedItems(ws WorkspaceInfo) []widget.SelectItem[int64] {
-	items := make([]widget.SelectItem[int64], 0, len(ws.Connections))
-	for _, c := range ws.Connections {
-		items = append(items, widget.SelectItem[int64]{
-			Label: c.Name + " (" + c.Engine + ")", Value: c.ID,
-		})
-	}
-	return items
-}
+// attachedItems IS GONE with the detach form that was its only caller. The
+// workspace modal lists a workspace's connections beside it now, so detaching
+// is a key on the row rather than a select in a second modal built to show
+// the operator what was already there to be shown.
 
 // fixedSelect is a select over a catalogue already in hand — no load, so no
 // loading state and nothing to fail. Detach uses it.

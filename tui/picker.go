@@ -38,7 +38,7 @@ func newConnPicker(m *Model, conns []ConnInfo) *connPicker {
 			}
 			return mark + c.Name + "  (" + c.Engine + ", id " + strconv.FormatInt(c.ID, 10) + ")"
 		}),
-		widget.WithListStyles[ConnInfo](widget.ListStyles{CursorRow: cursorRowStyle}),
+		widget.WithListStyles[ConnInfo](listStyles(true)),
 	)
 	return p
 }

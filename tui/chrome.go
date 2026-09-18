@@ -186,3 +186,34 @@ func panelStyles() (base, focused style.Style) {
 	focused = style.New().BorderForeground(style.ANSI(15)).Faint(false).Bold(true)
 	return base, focused
 }
+
+// listStyles is how a row list paints its cursor, and it comes in two forms
+// because a modal with more than one list has to say WHICH one the keyboard is
+// in.
+//
+// focused: black on cyan. unfocused: cyan on gray. The pair reads as one
+// active section and one remembered position, rather than as two equal
+// selections with no way to tell which keystrokes will reach.
+//
+// ALL FOUR FIELDS ARE SET, AND CursorSelected IS THE ONE THAT MATTERED. golib
+// derives its default CursorSelected from its own default CursorRow at
+// construction, so a caller that overrode CursorRow alone left CursorSelected
+// holding the framework's inverted default -- and the row under the cursor in
+// these managers is ALSO the selected row, so that stale default is what
+// actually rendered. The cyan was configured and never drawn; what appeared
+// was an inverted slate bar, which is why the selected workspace looked like a
+// row in a list that had lost focus.
+func listStyles(focused bool) widget.ListStyles {
+	var cursor style.Style
+	if focused {
+		cursor = style.New().Background(style.ANSI(6)).Foreground(style.ANSI(0))
+	} else {
+		cursor = style.New().Background(style.ANSI(8)).Foreground(style.ANSI(6))
+	}
+	return widget.ListStyles{
+		Row:            style.New(),
+		CursorRow:      cursor,
+		SelectedRow:    cursor,
+		CursorSelected: cursor,
+	}
+}
