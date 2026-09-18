@@ -365,3 +365,46 @@ func TestChrome_TheFocusedRowIsMarked(t *testing.T) {
 		t.Fatalf("%d rows carry the focus marker, want exactly 1:\n%s", n, h.screen())
 	}
 }
+
+// THE BUTTONS SIT AGAINST THE RIGHT EDGE, and a blank row separates them from
+// the keys.
+//
+// Left-aligned, the button row and the hint line stacked into one column and
+// read as a caption on the buttons rather than as the footer of the form.
+func TestChrome_ButtonsAreRightAlignedAndSpacedFromTheKeys(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() {
+		h.m.openForm("endpoint", []formField{field("hostname")},
+			func(formValues) (bool, string) { return true, "" })
+	})
+	h.waitUntil("the form is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	lines := strings.Split(h.screen(), "\n")
+	button, ok := rowOf(lines, "OK")
+	if !ok {
+		t.Fatalf("the OK button is not on screen:\n%s", h.screen())
+	}
+	keys, ok := rowOf(lines, "Tab:next")
+	if !ok {
+		t.Fatalf("the key hints are not on screen:\n%s", h.screen())
+	}
+	// A BLANK ROW BETWEEN THEM, which is what "spaced" means and what an empty
+	// Text would have failed to reserve.
+	if keys-button < 2 {
+		t.Errorf("the keys are on row %d and the buttons on row %d; want a blank row between",
+			keys, button)
+	}
+
+	// RIGHT-ALIGNED: the buttons end nearer the card's right edge than its
+	// left, and further right than the left-aligned hint line begins.
+	bl, br := strings.Index(lines[button], "["), strings.LastIndex(lines[button], "]")
+	kl := strings.Index(lines[keys], "Tab:next")
+	if bl < 0 || br < 0 || kl < 0 {
+		t.Fatalf("could not locate the rows to compare:\n%s", h.screen())
+	}
+	if bl <= kl {
+		t.Errorf("the button row starts at column %d and the hints at %d; "+
+			"the buttons are not right-aligned", bl, kl)
+	}
+}

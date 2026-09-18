@@ -418,8 +418,18 @@ func newForm(fields []formField, onSubmit func(formValues) (bool, string), chrom
 	// them into the body took `y` away from the quit confirmation, because a
 	// body cannot resolve a bare letter without an action to carry it.
 	if len(f.fields) > 0 {
-		f.buttons = &hstack{}
+		f.buttons = &hstack{rightAlign: true}
 		f.flex.Add(f.buttons)
+		// A BLANK ROW between the buttons and the keys. Without it the hint
+		// line reads as a caption on the button row rather than as the footer
+		// of the whole form, and the two collide visually because one is
+		// right-aligned and the other left.
+		//
+		// A vspace rather than an empty widget.Text: a Text with no content
+		// measures to no content, so the row it was meant to reserve can
+		// collapse to nothing and the gap silently disappears. vspace asks for
+		// the rows and draws nothing in them.
+		f.flex.Add(newVSpace(1))
 		f.flex.Add(f.hint)
 	}
 	return f
@@ -1255,8 +1265,13 @@ var _ tui.Container = (*markedRow)(nil)
 // pays for it.
 type hstack struct {
 	widget.Base
-	ctx      *tui.Context
-	children []tui.Component
+	ctx *tui.Context
+	// rightAlign puts the row against the right edge of the space it is
+	// offered. Buttons sit there because that is the corner a hand looks for
+	// them in, and because it separates them from the left-aligned key hints
+	// underneath rather than stacking two rows into one column.
+	rightAlign bool
+	children   []tui.Component
 }
 
 func (h *hstack) add(c tui.Component) { h.children = append(h.children, c) }
@@ -1271,18 +1286,29 @@ func (h *hstack) Init(ctx *tui.Context) {
 	}
 }
 
+// Layout measures every child BEFORE placing any of them, which is what makes
+// right alignment possible: the row cannot know where it starts until it knows
+// how wide it is.
 func (h *hstack) Layout(c tui.Constraints) tui.Size {
-	x, tall := 0, 1
-	for _, ch := range h.children {
-		if x >= c.MaxW {
-			break
-		}
-		sz := h.ctx.LayoutChild(ch, tui.Constraints{MaxW: c.MaxW - x, MaxH: 1})
-		h.ctx.PlaceChild(ch, tui.Rect{X: x, Y: 0, W: sz.W, H: max(sz.H, 1)})
-		x += sz.W
-		tall = max(tall, sz.H)
+	sizes := make([]tui.Size, len(h.children))
+	total, tall := 0, 1
+	for i, ch := range h.children {
+		sizes[i] = h.ctx.LayoutChild(ch, tui.Constraints{MaxW: c.MaxW, MaxH: 1})
+		total += sizes[i].W
+		tall = max(tall, sizes[i].H)
 	}
-	return c.Constrain(tui.Size{W: x, H: tall})
+	x := 0
+	if h.rightAlign {
+		// Clamped at zero: a row wider than the space it was offered starts at
+		// the left edge and is clipped on the right, rather than starting off
+		// the card where its first button could not be seen at all.
+		x = max(c.MaxW-total, 0)
+	}
+	for i, ch := range h.children {
+		h.ctx.PlaceChild(ch, tui.Rect{X: x, Y: 0, W: sizes[i].W, H: max(sizes[i].H, 1)})
+		x += sizes[i].W
+	}
+	return c.Constrain(tui.Size{W: max(x, total), H: tall})
 }
 
 func (h *hstack) Render(tui.Surface) {}
@@ -1304,3 +1330,26 @@ func (h *hstack) Children() iter.Seq[tui.Component] {
 }
 
 var _ tui.Container = (*hstack)(nil)
+
+// vspace is a blank gap of a fixed number of rows.
+//
+// It exists because an empty widget.Text is not a blank line: a Text measures
+// its content, and content of "" measures to nothing, so a row added for
+// breathing space can collapse to zero height with nothing on screen to say it
+// was ever there. This asks for the rows and draws nothing into them.
+type vspace struct {
+	widget.Base
+	rows int
+}
+
+func newVSpace(rows int) *vspace { return &vspace{rows: max(rows, 1)} }
+
+func (v *vspace) AcceptsFocus() bool { return false }
+
+func (v *vspace) Layout(c tui.Constraints) tui.Size {
+	return c.Constrain(tui.Size{W: c.MaxW, H: v.rows})
+}
+
+func (v *vspace) Render(tui.Surface) {}
+
+func (v *vspace) HandleEvent(tui.Event) bool { return false }
