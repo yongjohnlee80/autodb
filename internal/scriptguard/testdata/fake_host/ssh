@@ -80,7 +80,36 @@ PROBE
     _st="${_entry%%:*}"
     _pid="4242"
     case "$_entry" in *:*) _pid="${_entry#*:}" ;; esac
-    printf '%s\n%s\n%s\n' "$_st" "$_pid" "0"
+    # WHAT REAL systemctl DOES -- both halves of it.
+    #
+    # `--value` strips the keys; without it each line is KEY=VALUE. And THE
+    # ORDER IS SYSTEMD'S TO CHOOSE, not the caller's: on the front-door droplet
+    # `-p ActiveState -p MainPID -p NRestarts` came back as MainPID, Result,
+    # NRestarts, ExecMainStatus, ActiveState, SubState.
+    #
+    # This stub used to print three BARE values in the caller's order, which
+    # baked the reader's own assumption into the thing meant to check it. The
+    # update stub had already been fixed for exactly this and carries the
+    # lesson: verifier and code shared one blind spot, so no cell here could
+    # catch the defect. FAKE_SHOW_ORDER makes the order a parameter; the
+    # default stays the caller's order so existing cells describe the same host
+    # they always did.
+    _order="${FAKE_SHOW_ORDER:-state,pid,restarts}"
+    _bare=""
+    case " $* " in *" --value "*) _bare="yes" ;; esac
+    for _f in $(printf '%s' "$_order" | tr ',' ' '); do
+      case "$_f" in
+        state)    _k="ActiveState"; _v="$_st" ;;
+        pid)      _k="MainPID";     _v="$_pid" ;;
+        restarts) _k="NRestarts";   _v="0" ;;
+        *) continue ;;
+      esac
+      if [ "$_bare" = "yes" ]; then
+        printf '%s\n' "$_v"
+      else
+        printf '%s=%s\n' "$_k" "$_v"
+      fi
+    done
     exit 0
     ;;
   *"systemctl enable --now autodb-frontdoor"*)
