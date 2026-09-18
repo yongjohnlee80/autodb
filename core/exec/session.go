@@ -357,6 +357,16 @@ type sessionRegistry struct {
 	// newTimer builds the server wait's timer, injectable so a cell can expire
 	// a ninety-second wait without waiting ninety seconds. See serverTimer.
 	newTimer func(time.Duration) *time.Timer
+	// onWaitResolved reports how each queued admission ended, for the
+	// scheduler's measurement. PRODUCTION observation, not a test hook: the
+	// hooks below exist so cells can act on an instant, and conflating the two
+	// would make a metric depend on a seam written for tests.
+	//
+	// It may not feed a control. admitWithLeaseOrWait returns only `error`, so
+	// there is no path for this value to reach a decision without somebody
+	// adding one.
+	onWaitResolved func(WaitOutcome)
+
 	// hookGivingUp fires after a caller has stopped waiting and before it
 	// leaves the line -- the window in which a grant can still reach it.
 	hookGivingUp func()
