@@ -88,7 +88,7 @@ func TestWorkspacePanel_TabCyclesThroughBothListsAndTheButtons(t *testing.T) {
 // back off the widgets would not have caught it either — they would both have
 // been "set".
 func TestWorkspacePanel_OnlyTheFocusedSectionWearsTheLiveCursor(t *testing.T) {
-	const liveBG, dimBG = 8, 6 // listStyles: cyan when focused, gray when not
+	const liveBG, dimBG = 6, 8 // listStyles: cyan when focused, gray when not
 	h := startBar(t, meta.RoleAdmin)
 	p := openWSPanel(t, h, []WorkspaceInfo{
 		{ID: 1, Name: "alpha", Connections: []ConnInfo{{ID: 10, Name: "a-db", Engine: "sqlite"}}},
@@ -282,7 +282,7 @@ func TestManager_TheExposureColumnReadsProxy(t *testing.T) {
 // two: if Tab and focusOn ever disagree about which section is live, only this
 // one can see it.
 func TestWorkspacePanel_TabRepaintsBothSections(t *testing.T) {
-	const liveBG, dimBG = 8, 6
+	const liveBG, dimBG = 6, 8
 	h := startBar(t, meta.RoleAdmin)
 	openWSPanel(t, h, []WorkspaceInfo{
 		{ID: 1, Name: "alpha", Connections: []ConnInfo{{ID: 10, Name: "a-db", Engine: "sqlite"}}},
@@ -340,7 +340,7 @@ func TestWorkspacePanel_BothSectionsAreBoxedAndTitled(t *testing.T) {
 // stop was never measured — and it is the one where BOTH lists have to dim,
 // because neither of them has the keyboard.
 func TestWorkspacePanel_TheButtonStopDimsBothLists(t *testing.T) {
-	const liveBG, dimBG = 8, 6
+	const liveBG, dimBG = 6, 8
 	h := startBar(t, meta.RoleAdmin)
 	openWSPanel(t, h, []WorkspaceInfo{
 		{ID: 1, Name: "alpha", Connections: []ConnInfo{{ID: 10, Name: "a-db", Engine: "sqlite"}}},
@@ -398,9 +398,8 @@ func TestWorkspacePanel_TheButtonDimsWhenTheKeyboardLeaves(t *testing.T) {
 	if got := bgOf("Close"); got == liveBG {
 		t.Error("the Close button is still cyan after the keyboard left it")
 	}
-	// THE LIST uses the reversed mapping; liveBG above is the BUTTON's.
-	if got := bgOf("alpha"); got != 8 {
-		t.Errorf("the workspace cursor is ANSI %d after Tab returned to it, want ANSI 8", got)
+	if got := bgOf("alpha"); got != liveBG {
+		t.Errorf("the workspace cursor is ANSI %d after Tab returned to it, want ANSI %d", got, liveBG)
 	}
 }
 
@@ -413,7 +412,7 @@ func TestWorkspacePanel_TheButtonDimsWhenTheKeyboardLeaves(t *testing.T) {
 // move it?" is the question an operator actually asks, so it is the one
 // asserted here.
 func TestWorkspacePanel_TheAccentMarksTheListTheArrowsMove(t *testing.T) {
-	const liveBG = 8
+	const liveBG = 6
 	h := startBar(t, meta.RoleAdmin)
 	p := openWSPanel(t, h, []WorkspaceInfo{
 		{ID: 1, Name: "alpha", Connections: []ConnInfo{

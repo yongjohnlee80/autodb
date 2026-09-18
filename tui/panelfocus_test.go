@@ -16,7 +16,7 @@ import (
 // inverted — and the difference is only visible if the focus moves the way an
 // operator moves it. An earlier probe drove focusPane() directly and passed.
 func TestPanels_TheExplorerCursorFollowsTheLeaderKeys(t *testing.T) {
-	const liveBG, dimBG = 8, 6
+	const liveBG, dimBG = 6, 8
 	h := startBar(t, meta.RoleAdmin)
 	h.on(func() {
 		h.m.explorer.tree.SetRoots(
