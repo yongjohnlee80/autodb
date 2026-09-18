@@ -337,6 +337,17 @@ func (m *Model) openConnManager() {
 		// connection row is whether autodb proxies it, which is the question
 		// they are actually asking. The stored property, the RPC verb and the
 		// ADRs are untouched -- only the label is.
+		// THE CAPABILITY IS ON THE ROW, beside the reachability it is
+		// constantly mistaken for. They are two independent decisions and the
+		// row showed only one of them, so a connection that authenticated and
+		// then refused its client's opening statement looked, from here,
+		// exactly like a working one.
+		{Title: "PROFILE", Width: 9, Cell: func(c ConnInfo) string {
+			if c.Profile == "" {
+				return "v1compat" // the column default, for a row that names none
+			}
+			return c.Profile
+		}},
 		{Title: "PROXY", Width: 7, Cell: func(c ConnInfo) string {
 			if c.FrontDoorExposed {
 				return "yes"
