@@ -451,31 +451,18 @@ func (e *Engine) CloseAllSessions(ctx context.Context, reason string) {
 	}
 }
 
-// reapIdleSessions closes sessions idle beyond the timeout. It is called by
-// the engine's janitor and is exported to the package's tests through a clock
-// rather than a sleep.
-func (e *Engine) reapIdleSessions(ctx context.Context, now time.Time) int {
-	var n int
-	idle := e.currentPolicy().sessionIdle
-	for _, s := range e.sessions.snapshot() {
-		switch {
-		case s.idleFor(now) >= idle:
-			e.closeSession(ctx, s, "", "idle-timeout")
-			n++
-		case e.r7Expired(s, now, idle):
-			// R7. A SESSION THAT IS TALKING AND STILL NOT USING WHAT IT HOLDS.
-			//
-			// The idle rung above owns the quiet ones and is checked first, so
-			// the two cannot both claim a session and this one is reached only
-			// where the wire is active. That is the case an idle timer cannot
-			// see: prepared objects pin a backend for as long as the client
-			// keeps the connection warm, and nothing else ever reclaims them.
-			e.closeSession(ctx, s, "", ReasonR7DependencyTimeout)
-			n++
-		}
-	}
-	return n
-}
+// reapIdleSessions IS DELETED, and this note is here so nobody re-adds it.
+//
+// It held the idle rung and R7, and read exactly like the sweep the janitor
+// runs — but StartJanitor calls reapExpired, and reapIdleSessions had NO
+// production caller at all. R7 therefore could not fire in a running daemon,
+// while its cells passed and the milestone read as delivered. Both rungs now
+// live in reapExpired (session_timeout.go), which is the one the janitor
+// drives, and the cells drive that.
+//
+// The lesson is the reason this comment exists rather than a silent deletion:
+// a second reaper that resembles the real one is indistinguishable from the
+// real one in a test, and the resemblance is what hid the defect.
 
 // ReasonR7DependencyTimeout is the audit identity for a session ended because
 // what it was holding stopped moving.
