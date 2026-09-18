@@ -1,6 +1,7 @@
 package exec
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -156,6 +157,56 @@ func TestR7_ItSparesEverySessionThatWouldBeHarmed(t *testing.T) {
 				t.Errorf("the rung claimed a session where %s", tc.name)
 			}
 		})
+	}
+}
+
+// THE SWEEP MUST NOT DEADLOCK AGAINST ITSELF.
+//
+// r7Expired computes the wire-idle age inline, under s.mu, instead of calling
+// s.idleFor -- which takes that same mutex. A sync.Mutex is not reentrant, so
+// the obvious tidy-up (reuse the helper that already does this) deadlocks the
+// janitor: the daemon stops reaping sessions and never says why.
+//
+// THAT DEFECT WAS CAUGHT BY THE COMPILER REFUSING AN UNRELATED LINE, NOT BY A
+// CELL, so until now nothing stopped it returning. The five cells above all
+// call r7Expired directly and would hang to the package's ten-minute timeout
+// panic, which names nothing.
+//
+// This one drives the PRODUCTION sweep and bounds the wait, so a re-entrant
+// lock fails in a second with a message that says which lock and why.
+func TestR7_TheSweepDoesNotDeadlockOnTheSessionMutex(t *testing.T) {
+	at := time.Unix(0, 0).Add(100 * time.Hour)
+	// Deliberately INSIDE the bound: the sweep must reach r7Expired, take the
+	// lock and come back without closing anything. The lock path is the
+	// subject here, not the verdict -- which the cells above already own.
+	e, s := r7Session(t, at, r7DependencyBound-time.Minute)
+	e.sessions.mu.Lock()
+	e.sessions.byID[s.id] = s
+	e.sessions.mu.Unlock()
+	// The registry is the sweep's input, and it is also what engine shutdown
+	// walks. This fixture has no pool behind it, so leaving it registered makes
+	// the engine's own Close tear down a session that cannot be torn down.
+	// Take it back out the moment the sweep has read it.
+	defer func() {
+		e.sessions.mu.Lock()
+		delete(e.sessions.byID, s.id)
+		e.sessions.mu.Unlock()
+	}()
+
+	done := make(chan int, 1)
+	go func() { done <- e.reapIdleSessions(context.Background(), at) }()
+
+	select {
+	case n := <-done:
+		if n != 0 {
+			t.Errorf("the sweep closed %d session(s); this fixture is one minute inside "+
+				"R7's bound and on a live wire, so it should have survived both rungs", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the janitor sweep never returned: r7Expired holds s.mu and is calling " +
+			"something that takes s.mu again (s.idleFor does exactly that). A sync.Mutex " +
+			"is not reentrant, so in production this is a daemon that silently stops " +
+			"reaping sessions -- no error, no log, just connections never given back")
 	}
 }
 
