@@ -187,7 +187,7 @@ func (v *pressureView) Layout(c tui.Constraints) tui.Size {
 
 func (v *pressureView) Render(s tui.Surface) {
 	headSt := style.New().Foreground(style.TokenPrimary)
-	keySt := style.New().Foreground(style.TokenTextMuted)
+	keySt := mutedStyle()
 	valSt := style.New()
 	raisedSt := style.New().Foreground(style.TokenError)
 	for i, r := range v.rows {

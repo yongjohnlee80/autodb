@@ -19,9 +19,15 @@ func TestReadonlyModalsDismissOnQ(t *testing.T) {
 
 	// The About splash is up before any login. q closes it — the same key
 	// the read-only floats behind the login honour.
-	h.waitFor("about splash", "Yong Sung John Lee")
+	// THE WITNESS IS THE REPOSITORY LINE, NOT THE AUTHOR. The author's name is
+	// no longer unique to this card: the backdrop now carries a build line --
+	// version, date, commit, author -- in its bottom-right corner until
+	// somebody signs in, so "the author is on screen" stopped meaning "the
+	// splash is up" and a wait for it to disappear could never succeed. The
+	// repository URL is rendered by the About card and by nothing else.
+	h.waitFor("about splash", "github.com/yongjohnlee80/autodb")
 	h.key('q')
-	h.waitGone("about splash dismissed by q", "Yong Sung John Lee")
+	h.waitGone("about splash dismissed by q", "github.com/yongjohnlee80/autodb")
 
 	// Bootstrap the root user so the manager floats are reachable.
 	h.waitFor("bootstrap float", "first run")

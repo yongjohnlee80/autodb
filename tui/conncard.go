@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/yongjohnlee80/golib/tui"
-	"github.com/yongjohnlee80/golib/tui/style"
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
@@ -178,7 +177,7 @@ func (c *connCard) Render(s tui.Surface) {
 	if h < 1 {
 		return
 	}
-	drawTo(s, 0, h-1, hintLine(c.keys), style.New().Foreground(style.TokenTextMuted))
+	drawTo(s, 0, h-1, hintLine(c.keys), mutedStyle())
 }
 
 // HandleEvent owns the copy keys and NOTHING else — every other key falls

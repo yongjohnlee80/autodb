@@ -422,7 +422,13 @@ func TestUIFullFlow(t *testing.T) {
 	h.waitFor("about meta store", "/tmp/meta.db")
 	h.waitFor("about repository", "github.com/yongjohnlee80/autodb")
 	h.key(tuicore.KeyEnter)
-	h.waitGone("about splash", "Yong Sung John Lee")
+	// THE WITNESS IS THE REPOSITORY LINE, NOT THE AUTHOR. The author's name is
+	// no longer unique to this card: the backdrop now carries a build line --
+	// version, date, commit, author -- in its bottom-right corner until
+	// somebody signs in, so "the author is on screen" stopped meaning "the
+	// splash is up" and a wait for it to disappear could never succeed. The
+	// repository URL is rendered by the About card and by nothing else.
+	h.waitGone("about splash", "github.com/yongjohnlee80/autodb")
 
 	// 1. First run: the bootstrap form appears (master passphrase setup).
 	h.waitFor("bootstrap float", "first run")

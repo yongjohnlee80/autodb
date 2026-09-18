@@ -233,7 +233,7 @@ func (v *aboutView) Layout(c tui.Constraints) tui.Size {
 }
 
 func (v *aboutView) Render(s tui.Surface) {
-	keySt := style.New().Foreground(style.TokenTextMuted)
+	keySt := mutedStyle()
 	valSt := style.New()
 	for i, r := range v.rows {
 		if i >= s.Size().H {

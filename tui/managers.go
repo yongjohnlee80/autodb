@@ -9,7 +9,6 @@ import (
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/golib/tui"
-	"github.com/yongjohnlee80/golib/tui/style"
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
@@ -73,7 +72,7 @@ func newManager[T any](m *Model, cols []widget.TableColumn[T],
 		bound:   m.session.Bind(), // the epoch this manager view belongs to
 	}
 	mg.hint = widget.NewText(mg.hintLine(),
-		widget.WithTextStyle(style.New().Foreground(style.TokenTextMuted)),
+		widget.WithTextStyle(mutedStyle()),
 		// The wrap is the NET, not the normal case: Layout widens the
 		// modal to fit this line whenever the terminal allows it, and a
 		// truncated key list is worse than a wrapped one on a terminal

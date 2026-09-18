@@ -111,8 +111,16 @@ func (m *Model) openDialogOpts(title, prose string, scrim bool, answers []dialog
 	}
 
 	var md *widget.Modal
+	// EVERY ANSWER IS THE SAME WIDTH, for the reason padButtonLabels gives:
+	// buttons sized by their own text turn "No" beside "Discard and switch"
+	// into a stub next to a slab.
+	texts := make([]string, len(answers))
+	for i, a := range answers {
+		texts[i] = a.label
+	}
+	texts = padButtonLabels(texts)
 	buttons := make([]*widget.Button, 0, len(answers))
-	for _, a := range answers {
+	for ai, a := range answers {
 		run := a.run
 		// THE REASON COMES FROM THE ROLE, not from the fact that a button was
 		// pressed. Hard-coding Accept made a DECLINING answer report acceptance
@@ -145,7 +153,7 @@ func (m *Model) openDialogOpts(title, prose string, scrim bool, answers []dialog
 				}
 			}),
 		}
-		buttons = append(buttons, widget.NewButton(a.label, opts...))
+		buttons = append(buttons, widget.NewButton(texts[ai], opts...))
 	}
 
 	// WithScrim at both ends: Modal defaults it to TRUE, the inverse of Float,
