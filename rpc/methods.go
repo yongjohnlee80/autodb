@@ -1239,6 +1239,27 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, wireErr(err)
 		}
+		// THE EFFECTIVE CAP, NOT THE REQUEST.
+		//
+		// A connection row's PoolMaxConns is a REQUEST -- poolLimitsFor keeps
+		// the SMALLER of it and the engine's own ceiling, and a row asking for
+		// more than the install allows simply does not get it. Publishing the
+		// row value made the card advertise 100 pooled connections on an
+		// install that would grant 8, under a heading promising ceilings the
+		// caller will actually meet.
+		//
+		// Read once, outside the loop: every row is bounded by the same engine
+		// ceiling, and taking it per row would let a concurrent reload split
+		// one list across two policies.
+		engineCeiling := s.eng.Settings().PoolMaxConns
+		effectivePool := func(request int64) int64 {
+			// Zero means the row asks for nothing of its own, so the engine's
+			// ceiling is the whole answer.
+			if request <= 0 || int(request) > engineCeiling {
+				return int64(engineCeiling)
+			}
+			return int64(request)
+		}
 		out := make([]any, 0, len(conns))
 		for _, c := range conns {
 			out = append(out, map[string]any{
@@ -1249,11 +1270,10 @@ func (s *Server) register() {
 				// prevents clients from reconstructing one from the other.
 				"profile": c.Profile, "frontdoor_exposed": c.FrontDoorExposed != 0,
 				"target_db": c.TargetDB,
-				// THIS CONNECTION'S OWN BOUND on pooled connections. Additive,
-				// so no protocol bump: the verb surface is unchanged. Zero
-				// means the connection sets none of its own and the engine's
-				// ceiling applies.
-				"pool_max_conns": c.PoolMaxConns,
+				// WHAT THIS CONNECTION WILL ACTUALLY BE HELD TO: the row's
+				// request and the engine's ceiling, whichever binds. Additive,
+				// so no protocol bump -- the verb surface is unchanged.
+				"pool_max_conns": effectivePool(c.PoolMaxConns),
 			})
 		}
 		return out, nil

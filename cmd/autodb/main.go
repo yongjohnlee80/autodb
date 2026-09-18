@@ -530,17 +530,30 @@ func runServe(configPath string) error {
 	// window is the drain rather than indefinite; it is named here rather than
 	// implied away.
 	frontDoorState := func() rpc.FrontDoorInfo {
+		// PER CALL, not captured once: the whole point is that a reload moves
+		// these, so a value read at wiring time would be the startup config
+		// wearing a different name.
+		settings := eng.Settings()
 		info := rpc.FrontDoorInfo{
 			Enabled:    cfg.FrontDoor.Enabled,
 			HostNames:  cfg.FrontDoor.TLSHostNames,
 			RootCAFile: cfg.FrontDoor.TLSRootCAFile,
 
-			// The ceilings a token minted here will actually meet. Read from
-			// the same cfg the engine was built from, so the card and the
-			// admitter cannot disagree about what the limit is.
-			MaxSessionsPerUser: cfg.Exec.MaxSessionsPerUser,
-			MaxSessionsGlobal:  cfg.Exec.MaxSessionsGlobal,
-			MaxTargetConns:     cfg.Exec.MaxTargetConns,
+			// The ceilings a token minted here will actually meet, READ FROM
+			// THE ENGINE rather than from the startup config.
+			//
+			// cfg is what the daemon booted with and never changes.
+			// policy.reload moves the live budget, and LoadDurablePolicy
+			// applies a stored one before the janitor even starts -- so a card
+			// reading cfg would quote a number the admitter had already stopped
+			// using, to the operator who had just changed it and was looking
+			// for the new one.
+			//
+			// Settings() takes the policy and the ledger under ONE lock, so
+			// these three cannot come from two different generations.
+			MaxSessionsPerUser: settings.MaxSessionsPerUser,
+			MaxSessionsGlobal:  settings.MaxSessionsGlobal,
+			MaxTargetConns:     settings.TargetConns.Configured,
 		}
 		if fd != nil {
 			info.Listening = true
