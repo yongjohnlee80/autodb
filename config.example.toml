@@ -418,6 +418,13 @@ outcome_retention_interval = "1h"
 #
 # OFF unless you turn it on. This surface speaks a protocol every client in
 # the world already knows how to dial, so switching it on is the decision.
+#
+# TURNING IT ON MAKES exec.max_target_conns MANDATORY. It has no default --
+# it is this instance's TOTAL production-connection budget and autodb cannot
+# see a target's max_connections to guess it -- so a config with the front
+# door enabled and no budget REFUSES TO START, and every command that loads
+# config says so rather than the one you ran. Set it above before you set
+# this.
 enabled = false
 
 # TCP only. The unix-socket LocalPeer exemption does NOT apply here -- a
