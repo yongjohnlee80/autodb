@@ -16,7 +16,7 @@ import (
 // inverted — and the difference is only visible if the focus moves the way an
 // operator moves it. An earlier probe drove focusPane() directly and passed.
 func TestPanels_TheExplorerCursorFollowsTheLeaderKeys(t *testing.T) {
-	const liveBG, dimBG = 6, 8
+	const liveBG, dimBG = 8, 6
 	h := startBar(t, meta.RoleAdmin)
 	h.on(func() {
 		h.m.explorer.tree.SetRoots(
@@ -59,7 +59,7 @@ func TestPanels_TheExplorerCursorFollowsTheLeaderKeys(t *testing.T) {
 		t.Fatalf("SPC e put the keyboard on %q, not the explorer", got)
 	}
 	if got := bg(); got != liveBG {
-		t.Errorf("with the keyboard on the EXPLORER its cursor is ANSI %d, want %d (cyan)", got, liveBG)
+		t.Errorf("with the keyboard on the EXPLORER its cursor is ANSI %d, want ANSI %d", got, liveBG)
 	}
 
 	// SPC q — the query editor. The explorer must give the accent up.
@@ -70,7 +70,7 @@ func TestPanels_TheExplorerCursorFollowsTheLeaderKeys(t *testing.T) {
 		t.Fatalf("SPC q put the keyboard on %q, not the editor", got)
 	}
 	if got := bg(); got != dimBG {
-		t.Errorf("with the keyboard on the EDITOR the explorer cursor is ANSI %d, want %d (gray) — "+
+		t.Errorf("with the keyboard on the EDITOR the explorer cursor is ANSI %d, want ANSI %d — "+
 			"the accent is on the pane the keyboard LEFT", got, dimBG)
 	}
 
@@ -79,6 +79,6 @@ func TestPanels_TheExplorerCursorFollowsTheLeaderKeys(t *testing.T) {
 	h.key('e')
 	h.settle()
 	if got := bg(); got != liveBG {
-		t.Errorf("returning to the explorer, its cursor is ANSI %d, want %d (cyan)", got, liveBG)
+		t.Errorf("returning to the explorer, its cursor is ANSI %d, want ANSI %d", got, liveBG)
 	}
 }
