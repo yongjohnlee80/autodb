@@ -1010,11 +1010,27 @@ if [ "$START_NOW" != "no" ] && [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-
     _pid=""
     _tries=0
     while [ "$_tries" -lt 30 ]; do
-      # Three properties in one round trip, one per line in the order asked.
-      _show="$(rsh "$SUDO systemctl show -p ActiveState -p MainPID -p NRestarts --value autodb-frontdoor" 2>/dev/null || printf 'unknown\n0\n0\n')"
-      _state="$(printf '%s\n' "$_show" | sed -n 1p)"
-      _mainpid="$(printf '%s\n' "$_show" | sed -n 2p)"
-      _restarts="$(printf '%s\n' "$_show" | sed -n 3p)"
+      # Three properties in one round trip, READ BY KEY.
+      #
+      # NOT --value AND NOT BY LINE NUMBER. systemd does not promise the order
+      # of the flags, and on a real host it does not honour it: a 1 vCPU
+      # Ubuntu droplet answered MainPID, Result, NRestarts, ExecMainStatus,
+      # ActiveState, SubState for exactly this call. Read positionally, the
+      # pid landed in _state, ActiveState landed in _restarts, the case
+      # matched no arm, and the catch-all declared a false FAILURE for a
+      # daemon that was active with NRestarts=0 and a steady pid -- which is
+      # precisely what update_frontdoor.sh had already been fixed for, and the
+      # fix was never carried here.
+      #
+      # Keeping the keys also makes the failure message honest: printing
+      # "ActiveState=20084" told the operator nothing except that something
+      # was wrong with the reader.
+      _show="$(rsh "$SUDO systemctl show -p ActiveState -p MainPID -p NRestarts autodb-frontdoor" 2>/dev/null \
+               || printf 'ActiveState=unknown\nMainPID=0\nNRestarts=0\n')"
+      _state="$(printf '%s\n' "$_show" | sed -n 's/^ActiveState=//p' | sed -n 1p)"
+      _mainpid="$(printf '%s\n' "$_show" | sed -n 's/^MainPID=//p' | sed -n 1p)"
+      _restarts="$(printf '%s\n' "$_show" | sed -n 's/^NRestarts=//p' | sed -n 1p)"
+      : "${_state:=unknown}" "${_mainpid:=0}" "${_restarts:=0}"
       case "$_state" in
         active)
           if [ -n "$_pid" ] && [ "$_mainpid" != "$_pid" ]; then
