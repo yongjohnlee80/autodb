@@ -2,8 +2,6 @@ package tui
 
 import (
 	"strings"
-
-	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
 // In-panel search (Johno, M6 manual testing): `/` prompts for a pattern,
@@ -209,20 +207,37 @@ func itoa(i int) string {
 
 // --- focus-dependent cursor styling -------------------------------------------
 
-// applyCursorStyles paints the focused panel's cursor cyan and every other
-// panel's gray (Johno, M6 manual testing) — the widgets cannot see focus
-// that rests on their delegating wrapper, so the Model tells them.
+// applyCursorStyles paints the focused panel's cursor cyan on black and every
+// other panel's cyan on gray — the widgets cannot see focus that rests on
+// their delegating wrapper, so the Model tells them.
+//
+// IT SENDS THE WHOLE ListStyles, and that is the correction. It used to send
+// widget.ListStyles{CursorRow: …} and nothing else. SetStyles keeps a field
+// whose replacement is the zero value, so the other three — including
+// CursorSelected, which is what these lists actually render, the row under the
+// cursor being also the selected row — kept whatever they held. The panels
+// were built with a complete style and then had one quarter of it overwritten
+// on every focus change, so a focused explorer went on wearing the look of a
+// blurred one. Fixing the CONSTRUCTORS was not enough: this is the other entry
+// point, and it is the one that runs on every keystroke that moves focus.
+//
+// THE FIRST CALL ALWAYS PAINTS. The transition guard below is what keeps this
+// cheap, and on its own it also means that when the initial focus state
+// happens to match the zero value of the tracking field, nothing is ever sent
+// and the panels keep whatever their constructors guessed.
 func (m *Model) applyCursorStyles() {
 	explorerOn := m.ctx.FocusWithin(m.explorerBox)
 	resultsOn := m.ctx.FocusWithin(m.resultsBox)
-	if explorerOn != m.explorerFocused {
+	first := !m.cursorStylesApplied
+	m.cursorStylesApplied = true
+	if first || explorerOn != m.explorerFocused {
 		m.explorerFocused = explorerOn
-		m.explorer.tree.SetStyles(widget.ListStyles{CursorRow: cursorStyle(explorerOn)})
+		m.explorer.tree.SetStyles(listStyles(explorerOn))
 	}
-	if resultsOn != m.resultsFocused {
+	if first || resultsOn != m.resultsFocused {
 		m.resultsFocused = resultsOn
 		if m.results.rawList != nil {
-			m.results.rawList.SetStyles(widget.ListStyles{CursorRow: cursorStyle(resultsOn)})
+			m.results.rawList.SetStyles(listStyles(resultsOn))
 		}
 	}
 }

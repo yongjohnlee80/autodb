@@ -134,6 +134,7 @@ func (m *Model) openDialogOpts(title, prose string, scrim bool, answers []dialog
 		opts := []widget.ButtonOption{
 			widget.WithMnemonic(a.mnemonic),
 			widget.WithRole(a.role),
+			widget.WithButtonStyle(buttonStyle()),
 			// EVERY ANSWER CLOSES THE DIALOG, including the ones that do
 			// something. A Modal dismisses itself for Escape and for nothing
 			// else: a button activation runs its callback and leaves the card

@@ -68,7 +68,11 @@ func (m *Model) openFloatOpts(title string, content tui.Component,
 	// definition the surface with the attention, so the faint frame would be
 	// wrong every time it was drawn. See panelStyles.
 	_, panelFocused := panelStyles()
-	boxStyle := panelFocused.Border(style.BorderRounded)
+	// PADDED. Without it the body starts against the border and ends against
+	// it, which reads as clipped rather than as laid out -- a column of table
+	// cells touching the frame on both sides, and a footer with nowhere to
+	// breathe. One column each side is enough to say the frame is a frame.
+	boxStyle := panelFocused.Border(style.BorderRounded).Padding(0, 1)
 	box := widget.NewBox(content,
 		widget.WithTitle(title),
 		widget.WithStyle(boxStyle),
@@ -310,8 +314,16 @@ type form struct {
 	box  *widget.Box // set by the Model after openFloat for status updates
 	flex *tui.Flex
 
-	fields   []formField
-	labels   []*widget.Text
+	fields []formField
+	labels []*widget.Text
+	// markers sit to the LEFT OF EACH CONTROL, on the row the value goes in,
+	// and carry the focus pointer.
+	//
+	// ON THE VALUE ROW, NOT ON THE LABEL. The label names the field; the row
+	// under it is where the operator is about to type, and that is the row
+	// they need told apart from the one below it. A pointer beside the label
+	// pointed at the name of the thing rather than at the thing.
+	markers  []*widget.Text
 	hint     *widget.Text
 	status   *widget.Text
 	onSubmit func(values formValues) (close bool, status string)
@@ -323,6 +335,19 @@ type form struct {
 	// rather than submitting: no field submits, which is what frees Enter for
 	// a select to open its options.
 	ok *widget.Button
+	// buttons is the affirmative/declining row, and it lives in the BODY
+	// rather than in the modal card.
+	//
+	// golib's modalCard lays out title, body and buttons in that order, so a
+	// footer placed in the body necessarily renders ABOVE the buttons -- and
+	// the key hints are a footer. Owning the row here is what lets the hints
+	// sit under it, which is where a reader looks for them.
+	//
+	// The cost is that the card has no Cancel ROLE to resolve a dismiss
+	// request against, so Escape takes widget.Modal's other branch and closes
+	// with DismissEscape. Nothing here depended on the reason: the cancel
+	// callback hangs off the DISMISSAL, which both branches reach.
+	buttons *hstack
 	// submitted records that the form closed ITSELF, having accepted the
 	// answers. Dismissal is otherwise indistinguishable from a cancel: a
 	// successful submit hides the surface, and hiding it publishes the same
@@ -343,11 +368,11 @@ func (f *form) values() formValues {
 	return v
 }
 
-// prose is rendered ABOVE the fields and is NOT a field. Keeping it out of
-// f.fields is what stops a line of text entering the focus traversal, where
-// Tab would stop on something nobody can type into and the operator would be
-// left pressing keys at a paragraph.
-func newForm(fields []formField, onSubmit func(formValues) (bool, string), prose []string) *form {
+// chrome carries the non-field rows, keyed by the field index they precede, so
+// a divider or a line of prose can sit between two inputs. They are NOT fields:
+// nothing in f.fields means nothing in the focus traversal, so Tab cannot stop
+// on a row there is no way to type into.
+func newForm(fields []formField, onSubmit func(formValues) (bool, string), chrome map[int][]tui.Component) *form {
 	f := &form{
 		fields: fields,
 		// The footer, in the body rather than the Box: golib's Box offers a
@@ -358,26 +383,72 @@ func newForm(fields []formField, onSubmit func(formValues) (bool, string), prose
 		onSubmit: onSubmit,
 	}
 	f.flex = tui.NewFlex(tui.Vertical)
-	for _, line := range prose {
-		f.flex.Add(widget.NewText(line, widget.WithWrapMode(widget.Wrap)))
+	addChrome := func(at int) {
+		for _, c := range chrome[at] {
+			f.flex.Add(c)
+		}
 	}
 	f.labels = make([]*widget.Text, len(f.fields))
+	f.markers = make([]*widget.Text, len(f.fields))
 	for i := range f.fields {
+		addChrome(i)
 		f.fields[i].ctl = f.fields[i].build(f, i)
 		f.labels[i] = widget.NewText(f.fields[i].label,
 			widget.WithTextStyle(inputLabelStyle()))
 		f.flex.Add(f.labels[i])
-		f.flex.Add(f.fields[i].ctl.component())
+		// The control shares its row with the marker, so the pointer sits
+		// immediately left of where the value appears.
+		f.markers[i] = widget.NewText(markerBlank, widget.WithTextStyle(mutedStyle()))
+		f.flex.Add(&markedRow{marker: f.markers[i], ctl: f.fields[i].ctl.component()})
 	}
-	// THE FOOTER BAND. Everything below the rule is chrome: the status line
-	// that reports a refusal, and the key hints. Above it is the operator's
-	// data. The buttons golib draws after the body then sit below a line
-	// rather than below a sentence, which is what the hints used to look
-	// like -- one more text row of the modal's own content.
+	// THE FOOTER BAND, in the order a reader uses it: a rule to close off the
+	// operator's data, then the refusal if there is one, then the buttons,
+	// then the keys. The hints go LAST because they describe how to reach
+	// what is above them, and a key list printed above its own controls
+	// reads as one more line of the form.
+	addChrome(len(f.fields))
 	f.flex.Add(newHRule())
 	f.flex.Add(f.status)
-	f.flex.Add(f.hint)
+	// THE BUTTON ROW AND THE KEY HINTS BELONG TO A FORM WITH FIELDS.
+	//
+	// A confirmation has none, so there is nothing to Tab between and nothing
+	// for a navigation footer to say -- it printed "Tab:next" over a pair of
+	// buttons. Its buttons stay in the CARD, where widget.Modal resolves their
+	// mnemonics and answers a dismiss request with the Cancel role; moving
+	// them into the body took `y` away from the quit confirmation, because a
+	// body cannot resolve a bare letter without an action to carry it.
+	if len(f.fields) > 0 {
+		f.buttons = &hstack{}
+		f.flex.Add(f.buttons)
+		f.flex.Add(f.hint)
+	}
 	return f
+}
+
+// setButtons fills the body's button row. Called before the modal is mounted,
+// so the children are in place by the time the framework walks them -- which
+// is also what puts them in the Tab order after the fields.
+func (f *form) setButtons(bs ...*widget.Button) {
+	if f.buttons == nil {
+		return
+	}
+	// LEFT-ALIGNED, AND NOT CENTRED WITH WEIGHTED SPACERS. Centring was tried
+	// with two empty children of equal weight, since tui.Flex has no
+	// justification of its own. A weighted child made the row greedy on the
+	// vertical flex's main axis: the modal grew to the full height it was
+	// offered and every row below the fields -- rule, status, buttons, hints
+	// -- rendered into blank space off the card. The buttons line up with the
+	// hint line beneath them instead, which is the column the rest of the
+	// footer band already uses.
+	for i, b := range bs {
+		if b == nil {
+			continue
+		}
+		if i > 0 {
+			f.buttons.add(widget.NewText("  "))
+		}
+		f.buttons.add(b)
+	}
 }
 
 func (f *form) Init(ctx *tui.Context) {
@@ -446,20 +517,33 @@ func (f *form) refreshLabels() {
 		if a, ok := f.fields[i].ctl.(labelAnnotator); ok {
 			text += a.annotation()
 		}
-		// A POINTER, NOT A RESTYLE. golib's Text takes its style at
-		// construction and offers no setter, so the marker is the whole of
-		// the indication -- and it is the part that survives a terminal
-		// dropping colours anyway. The two-space lead keeps the labels in one
-		// column, so the row moves nothing when the marker arrives.
-		if i == focused {
-			f.labels[i].SetText("▸ " + text)
+		// THE LABEL IS JUST THE LABEL. The pointer lives on the value row
+		// below it, in f.markers, so that it points at the place the operator
+		// is about to type rather than at the name of it.
+		f.labels[i].SetText(markerBlank + text)
+		if f.markers[i] == nil {
 			continue
 		}
-		f.labels[i].SetText("  " + text)
+		// A POINTER, NOT A RESTYLE. golib's TextInput and Select take their
+		// styles at construction and offer no setter, so a marker beside the
+		// control is the whole of the indication -- and it is the part that
+		// survives a terminal dropping colours anyway. Both states are the
+		// same width, so nothing moves when focus arrives.
+		if i == focused {
+			f.markers[i].SetText(markerFocused)
+			continue
+		}
+		f.markers[i].SetText(markerBlank)
 	}
 }
 
 // focusedField reports which row holds the keyboard, or -1.
+// The two marker states, the same width so the row does not shift.
+const (
+	markerFocused = "▸ "
+	markerBlank   = "  "
+)
+
 func (f *form) focusedField() int {
 	if f.tui == nil {
 		return -1
@@ -569,10 +653,13 @@ type formOpts struct {
 	// scrim fades the backdrop. Default false: the operator is usually reading
 	// the thing behind the dialog.
 	scrim bool
-	// prose is shown ABOVE the fields, and is NOT a field. Keeping it out of
-	// the field list is what stops a non-focusable row entering the focus
-	// traversal, where Tab would stop on text nobody can type into.
-	prose []string
+	// chrome is the non-field rows, keyed by the FIELD INDEX THEY PRECEDE.
+	// chrome[0] renders above the first field; chrome[len(fields)] after the
+	// last. Keeping them out of the field list is what stops a non-focusable
+	// row entering the focus traversal, where Tab would stop on something
+	// nobody can type into -- and keying them by position is what lets a rule
+	// sit BETWEEN two inputs rather than only above them all.
+	chrome map[int][]tui.Component
 	// okText renames the affirmative button.
 	okText string
 	// cancelText renames the declining one. "Stay" reads better than "Cancel"
@@ -612,17 +699,13 @@ func (m *Model) openForm(title string, fields []formField, onSubmit func(formVal
 	return m.openFormOpts(title, fields, onSubmit, formOpts{})
 }
 
-// openFormScrimmed is openForm for the surfaces the requirement singles out:
-// the backdrop fades because the operator has nothing else to do until this is
-// answered. Login is one; everything else keeps the live backdrop, because the
-// operator is usually reading the thing behind the dialog.
-func (m *Model) openFormScrimmed(title string, fields []formField, onSubmit func(formValues) (bool, string)) *form {
-	return m.openFormOpts(title, fields, onSubmit, formOpts{scrim: true})
-}
+// openFormScrimmed IS GONE. Login was its only caller, and login needs
+// formOpts now anyway to place the rule between its two rows -- so the helper
+// existed to hide one field of a struct the caller was already filling in.
 
 func (m *Model) openFormOpts(title string, fields []formField,
 	onSubmit func(formValues) (bool, string), opts formOpts) *form {
-	fm := newForm(fields, onSubmit, opts.prose)
+	fm := newForm(fields, onSubmit, opts.chrome)
 	okText := opts.okText
 	if okText == "" {
 		okText = "OK"
@@ -642,6 +725,7 @@ func (m *Model) openFormOpts(title string, fields []formField,
 	labels := padButtonLabels([]string{okText, cancelText})
 	okOpts := []widget.ButtonOption{
 		widget.WithRole(widget.ButtonRoleDefault),
+		widget.WithButtonStyle(buttonStyle()),
 		widget.WithOnActivate(fm.submit),
 	}
 	if opts.okMnemonic != 0 {
@@ -660,6 +744,7 @@ func (m *Model) openFormOpts(title string, fields []formField,
 	var md *widget.Modal
 	cancel := widget.NewButton(labels[1],
 		widget.WithRole(widget.ButtonRoleCancel),
+		widget.WithButtonStyle(buttonStyle()),
 		widget.WithMnemonic(cancelMnemonic(cancelText)),
 		widget.WithOnActivate(func() {
 			// Dismissing is ALL this does; opts.onCancel is reached through
@@ -676,14 +761,22 @@ func (m *Model) openFormOpts(title string, fields []formField,
 	// a passphrase, a PAT label — and a form that closed on it could not accept
 	// one. dismissKey records this exclusion as permanent, and it survives the
 	// conversion to a dialog unchanged. Escape still closes.
-	buttons := []*widget.Button{fm.ok}
+	bs := []*widget.Button{fm.ok}
 	if !opts.noCancel {
-		buttons = append(buttons, cancel)
+		bs = append(bs, cancel)
 	}
-	md = widget.NewModal(fm,
+	modalOpts := []widget.ModalOption{
 		widget.WithModalTitle(title),
-		widget.WithButtons(buttons...),
-		widget.WithScrim(opts.scrim))
+		widget.WithScrim(opts.scrim),
+	}
+	if len(fields) > 0 {
+		// IN THE BODY, so the key hints can sit beneath them. A card with no
+		// buttons is legal and draws none.
+		fm.setButtons(bs...)
+	} else {
+		modalOpts = append(modalOpts, widget.WithButtons(bs...))
+	}
+	md = widget.NewModal(fm, modalOpts...)
 	if err := md.Open(m.host); err != nil {
 		m.setError("open " + title + ": " + err.Error())
 		return fm
@@ -699,6 +792,10 @@ func (m *Model) openFormOpts(title string, fields []formField,
 	// focus onto the affirmative button, which is right for a confirmation and
 	// wrong for a form: the operator opened this to type, and would otherwise
 	// have to Tab backwards to reach the first thing they came for.
+	//
+	// A CONFIRMATION IS LEFT ALONE: its buttons are the card's, and Modal
+	// seeds the default one, which is the right answer when there is nothing
+	// to type into.
 	if len(fm.fields) > 0 && m.ctx != nil {
 		m.ctx.FocusComponent(fm.fields[0].ctl.component())
 	}
@@ -1091,3 +1188,119 @@ func cancelMnemonic(label string) rune {
 	}
 	return 'c'
 }
+
+// markedRow is one field's row: the focus pointer, then the control.
+//
+// A COMPONENT RATHER THAN A HORIZONTAL tui.Flex, and the difference is not
+// stylistic. A Flex passes its CROSS-axis constraint straight through, so a
+// width-greedy control handed an unbounded height claimed all of it; the row
+// then took the whole card on the enclosing vertical flex and the rule, the
+// status line, the buttons and the hints all rendered into blank space below
+// the border. Laying the two children out here is what bounds the height to
+// what the control actually needs.
+type markedRow struct {
+	widget.Base
+	ctx    *tui.Context
+	marker *widget.Text
+	ctl    tui.Component
+}
+
+func (r *markedRow) AcceptsFocus() bool { return false }
+
+func (r *markedRow) Init(ctx *tui.Context) {
+	r.Base.Init(ctx)
+	r.ctx = ctx
+	ctx.Mount(r.marker)
+	ctx.Mount(r.ctl)
+}
+
+func (r *markedRow) Layout(c tui.Constraints) tui.Size {
+	const markerW = 2
+	r.ctx.LayoutChild(r.marker, tui.Tight(tui.Size{W: markerW, H: 1}))
+	r.ctx.PlaceChild(r.marker, tui.Rect{X: 0, Y: 0, W: markerW, H: 1})
+	w := max(c.MaxW-markerW, 1)
+	// MaxH: 1. The control is a single line and says so here, which is the
+	// bound the Flex could not express.
+	sz := r.ctx.LayoutChild(r.ctl, tui.Constraints{MaxW: w, MaxH: 1})
+	h := max(sz.H, 1)
+	r.ctx.PlaceChild(r.ctl, tui.Rect{X: markerW, Y: 0, W: w, H: h})
+	return c.Constrain(tui.Size{W: markerW + w, H: h})
+}
+
+func (r *markedRow) Render(tui.Surface) {}
+
+func (r *markedRow) HandleEvent(tui.Event) bool { return false }
+
+// Transparent to the focus walk, so Tab reaches the control inside.
+func (r *markedRow) Add(...tui.Component)    {}
+func (r *markedRow) Remove(tui.Component)    {}
+func (r *markedRow) Move(tui.Component, int) {}
+func (r *markedRow) Children() iter.Seq[tui.Component] {
+	return func(yield func(tui.Component) bool) {
+		if !yield(r.marker) {
+			return
+		}
+		yield(r.ctl)
+	}
+}
+
+var _ tui.Container = (*markedRow)(nil)
+
+// hstack lays its children out left to right on ONE line.
+//
+// The same bound markedRow exists for, for the same reason: a horizontal
+// tui.Flex passes its cross-axis constraint through untouched, so the button
+// row handed an unbounded height claimed all of it and the hint line below it
+// rendered off the card. Nothing here needs the Flex's weighting, so nothing
+// pays for it.
+type hstack struct {
+	widget.Base
+	ctx      *tui.Context
+	children []tui.Component
+}
+
+func (h *hstack) add(c tui.Component) { h.children = append(h.children, c) }
+
+func (h *hstack) AcceptsFocus() bool { return false }
+
+func (h *hstack) Init(ctx *tui.Context) {
+	h.Base.Init(ctx)
+	h.ctx = ctx
+	for _, c := range h.children {
+		ctx.Mount(c)
+	}
+}
+
+func (h *hstack) Layout(c tui.Constraints) tui.Size {
+	x, tall := 0, 1
+	for _, ch := range h.children {
+		if x >= c.MaxW {
+			break
+		}
+		sz := h.ctx.LayoutChild(ch, tui.Constraints{MaxW: c.MaxW - x, MaxH: 1})
+		h.ctx.PlaceChild(ch, tui.Rect{X: x, Y: 0, W: sz.W, H: max(sz.H, 1)})
+		x += sz.W
+		tall = max(tall, sz.H)
+	}
+	return c.Constrain(tui.Size{W: x, H: tall})
+}
+
+func (h *hstack) Render(tui.Surface) {}
+
+func (h *hstack) HandleEvent(tui.Event) bool { return false }
+
+// Transparent to the focus walk, so Tab reaches the buttons.
+func (h *hstack) Add(...tui.Component)    {}
+func (h *hstack) Remove(tui.Component)    {}
+func (h *hstack) Move(tui.Component, int) {}
+func (h *hstack) Children() iter.Seq[tui.Component] {
+	return func(yield func(tui.Component) bool) {
+		for _, c := range h.children {
+			if !yield(c) {
+				return
+			}
+		}
+	}
+}
+
+var _ tui.Container = (*hstack)(nil)

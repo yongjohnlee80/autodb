@@ -354,3 +354,69 @@ func TestQuit_DecliningLeavesTheSessionAlone(t *testing.T) {
 	default:
 	}
 }
+
+// A RULE IS PLACED, AND IT LANDS WHERE IT WAS WRITTEN.
+//
+// The rows a caller passes are ordered, so a divider between two inputs has to
+// render between them — not hoisted above both, which is where every non-field
+// row used to go. A rule that always appears above the fields cannot separate
+// anything.
+func TestInputModal_ARulePlacedBetweenTwoInputsRendersBetweenThem(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	var first, second string
+	h.on(func() {
+		NewInputModal(h.m, "grouped",
+			NewTextInput("alpha", &first),
+			NewHorizontalRule(),
+			NewTextInput("omega", &second),
+		).WithSubmitFn(func(ModalResponse) error { return nil }).Open()
+	})
+	h.waitUntil("the modal is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	lines := strings.Split(h.screen(), "\n")
+	a, ok := rowOf(lines, "alpha")
+	if !ok {
+		t.Fatalf("the first label is not on screen:\n%s", h.screen())
+	}
+	o, ok := rowOf(lines, "omega")
+	if !ok {
+		t.Fatalf("the second label is not on screen:\n%s", h.screen())
+	}
+	found := false
+	for y := a + 1; y < o; y++ {
+		if strings.Contains(lines[y], strings.Repeat("─", 8)) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no rule between the two inputs (rows %d and %d):\n%s", a, o, h.screen())
+	}
+}
+
+// AND A RULE IS NOT A FIELD. It takes no cursor and no value, so the bindings
+// on either side of it stay in step with the controls.
+func TestInputModal_ARuleTakesNoCursorAndNoValue(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	var first, second string
+	h.on(func() {
+		NewInputModal(h.m, "grouped",
+			NewTextInput("alpha", &first),
+			NewHorizontalRule(),
+			NewTextInput("omega", &second),
+		).WithSubmitFn(func(ModalResponse) error { return nil }).Open()
+	})
+	h.waitUntil("the modal is open", func() bool { return h.m.modalOpen() })
+
+	typeText(h, "one")
+	h.key(tuicore.KeyEnter) // must reach the SECOND INPUT, not the rule
+	typeText(h, "two")
+	h.key(tuicore.KeyEnter)
+	h.key(tuicore.KeyEnter)
+	h.waitUntil("the modal submitted and closed", func() bool { return !h.m.modalOpen() })
+
+	if first != "one" || second != "two" {
+		t.Fatalf("bindings are %q/%q, want \"one\"/\"two\" — the advance did not skip the rule", first, second)
+	}
+}

@@ -82,8 +82,11 @@ func TestChrome_LabelIsBoldChipAndValueIsUnderlined(t *testing.T) {
 	if lab.Mask&tuicore.AttrBold == 0 {
 		t.Error("the input label is not bold")
 	}
-	if lab.BG.Kind == tuicore.CellColorDefault {
-		t.Error("the input label has no background; it should read as a chip of chrome")
+	// AND IT CARRIES NO FILL. The chip was tried and removed: a filled block
+	// behind two short words, wider than the word, read as a defect rather
+	// than as emphasis on an otherwise unfilled card.
+	if lab.BG.Kind != tuicore.CellColorDefault {
+		t.Errorf("the input label has a background fill (%v); bold alone is the separation", lab.BG.Kind)
 	}
 	if lab.Mask&tuicore.AttrUnderline != 0 {
 		t.Error("the LABEL is underlined; the underline belongs on the value")
@@ -135,11 +138,13 @@ func TestChrome_PadButtonLabels(t *testing.T) {
 	}
 }
 
-// THE RULE SEPARATES THE OPERATOR'S DATA FROM THE CHROME, and the buttons sit
-// below a line rather than below a sentence. golib's modal card has no footer
-// of its own, so without this the key hints render as one more line of the
-// modal's content, indistinguishable from the prose above them.
-func TestChrome_ARuleSitsBetweenTheBodyAndTheButtons(t *testing.T) {
+// THE FOOTER BAND READS TOP TO BOTTOM: rule, buttons, keys.
+//
+// The hints used to render ABOVE the buttons, because golib's modalCard lays
+// out title, body and buttons in that order and the hints are in the body. The
+// row is owned by the body now, which is what lets a key list sit beneath the
+// controls it describes rather than above them.
+func TestChrome_TheFooterBandIsRuleThenButtonsThenKeys(t *testing.T) {
 	h := startBar(t, meta.RoleAdmin)
 	h.on(func() {
 		h.m.openForm("endpoint", []formField{field("hostname")},
@@ -153,21 +158,58 @@ func TestChrome_ARuleSitsBetweenTheBodyAndTheButtons(t *testing.T) {
 	if !ok {
 		t.Fatalf("the modal title is not on screen:\n%s", h.screen())
 	}
-	button, ok := rowOf(lines, "  OK  ")
+	button, ok := rowOf(lines, "OK")
 	if !ok {
 		t.Fatalf("the OK button is not on screen:\n%s", h.screen())
 	}
+	keys, ok := rowOf(lines, "Tab:next")
+	if !ok {
+		t.Fatalf("the key hints are not on screen:\n%s", h.screen())
+	}
+
 	// A run of box-drawing dashes strictly between the title and the buttons
 	// can only be the rule: the card's own borders lie outside that span.
-	found := false
+	rule := -1
 	for y := title + 1; y < button; y++ {
 		if strings.Contains(lines[y], strings.Repeat("─", 8)) {
-			found = true
+			rule = y
 			break
 		}
 	}
-	if !found {
+	if rule < 0 {
 		t.Fatalf("no rule between the body and the buttons:\n%s", h.screen())
+	}
+	if !(rule < button && button < keys) {
+		t.Fatalf("the footer band is out of order: rule=%d buttons=%d keys=%d\n%s",
+			rule, button, keys, h.screen())
+	}
+}
+
+// THE FOOTER DOES NOT NAME A KEY THAT DOES NOT WORK. It went on advertising
+// `O:OK` after the mnemonic was removed from the affirmative button — in the
+// same function whose comment says a footer doing that teaches a key that does
+// not work.
+func TestChrome_TheFooterDoesNotAdvertiseTheRemovedMnemonic(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() {
+		h.m.openForm("endpoint", []formField{field("hostname")},
+			func(formValues) (bool, string) { return true, "" })
+	})
+	h.waitUntil("the form is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	if strings.Contains(h.screen(), "O:OK") {
+		t.Fatalf("the footer still advertises the removed `O` mnemonic:\n%s", h.screen())
+	}
+	// AND PRESSING IT DOES NOTHING, which is the behaviour the footer was
+	// misdescribing. A cell asserting only the text would pass for a form that
+	// had quietly kept the binding.
+	h.key('O')
+	h.settle()
+	var open bool
+	h.on(func() { open = h.m.modalOpen() })
+	if !open {
+		t.Fatal("`O` submitted the form; it is a character in a field, not an accelerator")
 	}
 }
 
@@ -260,12 +302,15 @@ func TestChrome_AnEmptyInputShowsItsPlaceholder(t *testing.T) {
 	}
 }
 
-// THE MARKER FOLLOWS THE KEYBOARD. The reported confusion was on a form whose
-// select gave no sign of holding focus: the operator did not know where they
-// were or what Enter would do, and pressed it to find out.
+// THE MARKER FOLLOWS THE KEYBOARD, AND IT SITS ON THE VALUE ROW.
+//
+// The reported confusion was on a form whose select gave no sign of holding
+// focus: the operator did not know where they were or what Enter would do, and
+// pressed it to find out. The pointer answers that — beside the place the value
+// appears, not beside the label, which names the field rather than being it.
 //
 // Both rows are asserted at each step, because "the marker moved" and "a
-// marker appeared" are different claims and only the first is the one wanted.
+// marker appeared" are different claims and only the first is wanted.
 func TestChrome_TheFocusedRowIsMarked(t *testing.T) {
 	h := startBar(t, meta.RoleAdmin)
 	h.on(func() {
@@ -275,19 +320,48 @@ func TestChrome_TheFocusedRowIsMarked(t *testing.T) {
 	h.waitUntil("the form is open", func() bool { return h.m.modalOpen() })
 	h.settle()
 
-	if !strings.Contains(h.screen(), "▸ hostname") {
-		t.Fatalf("the first row is not marked on open:\n%s", h.screen())
+	// markerRow reports which screen row carries the pointer.
+	markerRow := func(t *testing.T) int {
+		t.Helper()
+		lines := strings.Split(h.screen(), "\n")
+		for y, l := range lines {
+			if strings.Contains(l, strings.TrimSpace(markerFocused)) {
+				return y
+			}
+		}
+		t.Fatalf("no focus marker on screen:\n%s", h.screen())
+		return -1
 	}
-	if strings.Contains(h.screen(), "▸ port") {
-		t.Fatalf("a row that does not hold the keyboard is marked:\n%s", h.screen())
+	rowOfText := func(t *testing.T, want string) int {
+		t.Helper()
+		y, ok := rowOf(strings.Split(h.screen(), "\n"), want)
+		if !ok {
+			t.Fatalf("%q is not on screen:\n%s", want, h.screen())
+		}
+		return y
+	}
+
+	// THE MARKER IS BELOW ITS LABEL, which is what "on the value row" means.
+	// A pointer beside the label would sit on the same row as the label text.
+	first := markerRow(t)
+	if lab := rowOfText(t, "hostname"); first != lab+1 {
+		t.Fatalf("the marker is on row %d and the label \"hostname\" on row %d; "+
+			"it belongs on the value row directly beneath", first, lab)
 	}
 
 	h.key(tuicore.KeyTab)
 	h.settle()
-	if !strings.Contains(h.screen(), "▸ port") {
-		t.Fatalf("the marker did not follow Tab to the second row:\n%s", h.screen())
+
+	second := markerRow(t)
+	if second == first {
+		t.Fatalf("the marker did not follow Tab; still on row %d\n%s", first, h.screen())
 	}
-	if strings.Contains(h.screen(), "▸ hostname") {
-		t.Fatalf("the marker stayed on the row the keyboard left:\n%s", h.screen())
+	if lab := rowOfText(t, "port"); second != lab+1 {
+		t.Fatalf("after Tab the marker is on row %d and \"port\" on row %d", second, lab)
+	}
+	// AND ONLY ONE ROW CARRIES IT. A marker that appeared without the previous
+	// one clearing would leave two rows claiming the keyboard.
+	if n := strings.Count(h.screen(), strings.TrimSpace(markerFocused)); n != 1 {
+		t.Fatalf("%d rows carry the focus marker, want exactly 1:\n%s", n, h.screen())
 	}
 }

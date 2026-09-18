@@ -48,8 +48,17 @@ type workspacePanel struct {
 
 	ws    *widget.Table[WorkspaceInfo]
 	conns *widget.Table[ConnInfo]
-	close *widget.Button
-	hint  *widget.Text
+	// Each section is BOXED, with a title and a padded interior.
+	//
+	// The frame is the enclosure the two lists were missing -- they sat edge
+	// to edge with their columns touching, and nothing but a cursor colour
+	// said where one ended. It also carries the focus: widget.Box lights its
+	// border from FocusWithin, so the section holding the keyboard is named by
+	// its own frame rather than only by the shade of a selected row.
+	wsBox    *widget.Box
+	connsBox *widget.Box
+	close    *widget.Button
+	hint     *widget.Text
 
 	all []WorkspaceInfo
 	// shown is what the left table displays; selection indexes into THIS.
@@ -58,6 +67,8 @@ type workspacePanel struct {
 	// recomputed from it, so they cannot drift apart.
 	at wsSection
 
+	// ruleY is the row the divider is drawn on, decided in Layout.
+	ruleY   int
 	bound   *Bound
 	float   *widget.Float
 	seq     uint64
@@ -77,6 +88,14 @@ func (m *Model) openWorkspaceManager() {
 		{Title: "ENGINE", Width: 10, Cell: func(c ConnInfo) string { return c.Engine }},
 	}, widget.WithEmptyText[ConnInfo]("none attached — a:attach"),
 		widget.WithListStyles[ConnInfo](listStyles(false)))
+	base, focused := panelStyles()
+	// PADDING INSIDE THE FRAME. Without it the first column starts against the
+	// border and the last ends against it, which reads as clipped rather than
+	// as laid out.
+	p.wsBox = widget.NewBox(p.ws, widget.WithTitle("workspaces"),
+		widget.WithStyle(base.Padding(0, 1)), widget.WithFocusedStyle(focused))
+	p.connsBox = widget.NewBox(p.conns, widget.WithTitle("connections"),
+		widget.WithStyle(base.Padding(0, 1)), widget.WithFocusedStyle(focused))
 	p.hint = widget.NewText("", widget.WithTextStyle(mutedStyle()),
 		widget.WithWrapMode(widget.Wrap))
 	// CLOSE IS A BUTTON, not only a key. `q` and Escape still work and the
@@ -84,6 +103,7 @@ func (m *Model) openWorkspaceManager() {
 	// has to already know is a modal they can feel trapped in.
 	p.close = widget.NewButton("Close",
 		widget.WithRole(widget.ButtonRoleCancel),
+		widget.WithButtonStyle(buttonStyle()),
 		widget.WithOnActivate(func() { p.dismiss() }))
 	p.float = m.openFloat("workspaces", p)
 }
@@ -99,8 +119,8 @@ func (p *workspacePanel) dismiss() {
 func (p *workspacePanel) Init(ctx *tui.Context) {
 	p.Base.Init(ctx)
 	p.ctx = ctx
-	ctx.Mount(p.ws)
-	ctx.Mount(p.conns)
+	ctx.Mount(p.wsBox)
+	ctx.Mount(p.connsBox)
 	ctx.Mount(p.close)
 	ctx.Mount(p.hint)
 	p.refresh()
@@ -468,6 +488,7 @@ func (p *workspacePanel) Layout(c tui.Constraints) tui.Size {
 	w := managerWidthFor(c.MaxW, p.ctx.StringWidth(hintLine(p.hints())))
 	hintH := max(p.ctx.LayoutChild(p.hint, tui.Constraints{MaxW: w, MaxH: 4}).H, 1)
 	// One row for the rule, one for the button band.
+	// +2 rows and +2 columns per section for the box frames.
 	const chromeH = 2
 	h := modalSpan(c.MaxH, managerHPct, managerMinH+hintH+chromeH, managerMaxH+hintH+chromeH)
 	tableH := max(h-hintH-chromeH, 1)
@@ -478,16 +499,17 @@ func (p *workspacePanel) Layout(c tui.Constraints) tui.Size {
 	left := max(w*55/100, 1)
 	right := max(w-left, 1)
 
-	p.ctx.LayoutChild(p.ws, tui.Tight(tui.Size{W: left, H: tableH}))
-	p.ctx.PlaceChild(p.ws, tui.Rect{X: 0, Y: 0, W: left, H: tableH})
-	p.ctx.LayoutChild(p.conns, tui.Tight(tui.Size{W: right, H: tableH}))
-	p.ctx.PlaceChild(p.conns, tui.Rect{X: left, Y: 0, W: right, H: tableH})
-	p.ctx.PlaceChild(p.hint, tui.Rect{X: 0, Y: tableH, W: w, H: hintH})
-
-	// THE CLOSE BUTTON SITS BOTTOM-RIGHT, which is where a dialog's buttons
-	// are and therefore where a hand looks for one.
+	p.ctx.LayoutChild(p.wsBox, tui.Tight(tui.Size{W: left, H: tableH}))
+	p.ctx.PlaceChild(p.wsBox, tui.Rect{X: 0, Y: 0, W: left, H: tableH})
+	p.ctx.LayoutChild(p.connsBox, tui.Tight(tui.Size{W: right, H: tableH}))
+	p.ctx.PlaceChild(p.connsBox, tui.Rect{X: left, Y: 0, W: right, H: tableH})
+	// THE FOOTER BAND, TOP TO BOTTOM: rule, buttons, keys. The Close button
+	// sits bottom-right of the button row, where a hand looks for one, and
+	// ABOVE the hints -- which describe how to reach it.
+	p.ruleY = tableH
 	bs := p.ctx.LayoutChild(p.close, tui.Constraints{MaxW: w, MaxH: 1})
-	p.ctx.PlaceChild(p.close, tui.Rect{X: max(w-bs.W, 0), Y: tableH + hintH + 1, W: bs.W, H: 1})
+	p.ctx.PlaceChild(p.close, tui.Rect{X: max(w-bs.W, 0), Y: tableH + 1, W: bs.W, H: 1})
+	p.ctx.PlaceChild(p.hint, tui.Rect{X: 0, Y: tableH + 2, W: w, H: hintH})
 	return c.Constrain(tui.Size{W: w, H: h})
 }
 
@@ -495,12 +517,11 @@ func (p *workspacePanel) Layout(c tui.Constraints) tui.Size {
 // reason hrule gives: without it the hints read as one more row of the table.
 func (p *workspacePanel) Render(s tui.Surface) {
 	sz := s.Size()
-	y := sz.H - 2
-	if y < 1 {
+	if p.ruleY < 1 || p.ruleY >= sz.H {
 		return
 	}
 	for x := range sz.W {
-		s.SetCell(x, y, "─", mutedStyle())
+		s.SetCell(x, p.ruleY, "─", mutedStyle())
 	}
 }
 
@@ -511,7 +532,7 @@ func (p *workspacePanel) Remove(tui.Component)    {}
 func (p *workspacePanel) Move(tui.Component, int) {}
 func (p *workspacePanel) Children() iter.Seq[tui.Component] {
 	return func(yield func(tui.Component) bool) {
-		if !yield(p.ws) || !yield(p.conns) || !yield(p.hint) {
+		if !yield(p.wsBox) || !yield(p.connsBox) || !yield(p.hint) {
 			return
 		}
 		yield(p.close)
