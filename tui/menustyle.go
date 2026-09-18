@@ -26,37 +26,26 @@ import (
 )
 
 // menuBarStyle dresses the top bar and every dropdown it opens.
+// menuBarStyle is the menu bar's look: PLAIN, not inverted.
+//
+// It was black-on-white, which read as a title bar and was asked for. Johno
+// then wondered aloud whether that inversion was what made the list cursors
+// look inverted everywhere else -- the two are unrelated as far as the code
+// goes (this style is handed to the menu widget alone and names explicit
+// colours rather than Reverse), but that reasoning has been wrong enough today
+// that the experiment is worth more than the argument. Plain removes the
+// variable.
+//
+// SELECTED IS BOLD AND UNDERLINED rather than filled, so nothing in the bar
+// inverts anything. If the lists still read backwards with this in place, the
+// menu bar was never the cause.
 var menuBarStyle = widget.NewMenuStyle(
-	// Surface: the strip and the dropdown ground. Bold matches golib's own
-	// default — labels are chrome against the document, and weight is part of
-	// what separates them.
-	style.New().
-		Background(style.ANSI(7)).
-		Foreground(style.ANSI(0)).
-		Bold(true),
-	// Selected: inverted, which is how a bar has always shown the cursor.
-	style.New().
-		Background(style.ANSI(0)).
-		Foreground(style.ANSI(7)).
-		Bold(true),
+	style.New().Foreground(style.TokenForeground),
+	style.New().Foreground(style.TokenForeground).Bold(true).Underline(true),
 ).
-	// Armed is pressed-and-not-yet-released. Selected with the bold dropped, so
-	// a press reads as a change without the row jumping.
-	WithArmed(style.New().
-		Background(style.ANSI(0)).
-		Foreground(style.ANSI(7))).
-	// A DISABLED ROW IS SHOWN, NOT HIDDEN, and this is the colour that makes
-	// that readable. The command catalog deliberately projects disabled
-	// commands with their reason in the accelerator column — see menuModel in
-	// menubar.go — so these two styles carry real text in autodb rather than
-	// being defensive defaults.
-	WithDisabled(style.New().
-		Background(style.ANSI(7)).
-		Foreground(style.ANSI(8))).
-	WithAccel(style.New().
-		Background(style.ANSI(7)).
-		Foreground(style.ANSI(8))).
+	WithArmed(style.New().Foreground(style.TokenForeground).Bold(true)).
+	WithDisabled(mutedStyle()).
+	WithAccel(style.New().Foreground(style.TokenForeground).Underline(true)).
 	WithBorder(style.New().
-		Background(style.ANSI(7)).
-		Foreground(style.ANSI(0)).
+		Foreground(style.TokenBorder).
 		Border(style.BorderNormal))

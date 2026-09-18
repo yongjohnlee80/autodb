@@ -634,3 +634,69 @@ func TestManager_TheConnectionRowShowsItsCapabilityProfile(t *testing.T) {
 		t.Errorf("the PROXY column went missing:\n%s", got)
 	}
 }
+
+// AN EDIT FORM SHOWS WHAT EACH FIELD ALREADY IS.
+//
+// Johno: "the v1|session, proxy yes|no input fields are not populated with the
+// initial values". A select opens on nothing, which is right when creating and
+// wrong when editing — "leave it alone" and "it is unset" looked identical, and
+// an operator who meant to change it could not tell whether they had. That is
+// also why the exposure consent appeared to vanish: an untouched proxy field
+// submits no change, so nothing asked for consent to anything.
+func TestManager_TheEditFormShowsTheCurrentProxyAndProfile(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	var g *manager[ConnInfo]
+	h.on(func() {
+		h.m.openConnManager()
+		for _, f := range h.m.floats {
+			if got, ok := f.body.(*manager[ConnInfo]); ok {
+				g = got
+			}
+		}
+	})
+	h.waitUntil("the manager is open", func() bool { return g != nil })
+	h.on(func() {
+		h.m.openConnEdit(g, ConnInfo{
+			ID: 1, Name: "LmRO", Engine: "postgres",
+			Profile: "v1compat", FrontDoorExposed: true,
+		})
+	})
+	h.settle()
+
+	got := h.screen()
+	for _, want := range []string{"yes (unchanged)", "v1compat (unchanged)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q is not shown on the edit form:\n%s", want, got)
+		}
+	}
+}
+
+// AND IT REFLECTS THE OTHER STATE TOO, or the cell above passes for a form
+// that hard-codes one pair of words.
+func TestManager_TheEditFormReflectsAClosedFrontDoor(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	var g *manager[ConnInfo]
+	h.on(func() {
+		h.m.openConnManager()
+		for _, f := range h.m.floats {
+			if got, ok := f.body.(*manager[ConnInfo]); ok {
+				g = got
+			}
+		}
+	})
+	h.waitUntil("the manager is open", func() bool { return g != nil })
+	h.on(func() {
+		h.m.openConnEdit(g, ConnInfo{
+			ID: 2, Name: "closed", Engine: "sqlite",
+			Profile: "session", FrontDoorExposed: false,
+		})
+	})
+	h.settle()
+
+	got := h.screen()
+	for _, want := range []string{"no (unchanged)", "session (unchanged)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q is not shown on the edit form:\n%s", want, got)
+		}
+	}
+}
