@@ -345,3 +345,143 @@ func TestWorkspacePanel_BothSectionsAreBoxedAndTitled(t *testing.T) {
 		}
 	}
 }
+
+// WITH THE KEYBOARD ON THE BUTTON, NEITHER LIST IS LIVE.
+//
+// Johno: "making all three cyan highlighted, when the focus is on the button".
+// The Tab cell above only ever walks workspaces -> connections, so the third
+// stop was never measured — and it is the one where BOTH lists have to dim,
+// because neither of them has the keyboard.
+func TestWorkspacePanel_TheButtonStopDimsBothLists(t *testing.T) {
+	const liveBG, dimBG = 6, 8
+	h := startBar(t, meta.RoleAdmin)
+	openWSPanel(t, h, []WorkspaceInfo{
+		{ID: 1, Name: "alpha", Connections: []ConnInfo{{ID: 10, Name: "a-db", Engine: "sqlite"}}},
+	})
+	bgOf := func(t *testing.T, text string) int {
+		t.Helper()
+		at, _ := attrsOf(t, h, text)
+		if at.BG.Kind != tuicore.CellColorANSI {
+			return -1
+		}
+		return int(at.BG.Index)
+	}
+
+	h.key(tuicore.KeyTab) // connections
+	h.key(tuicore.KeyTab) // buttons
+	h.settle()
+
+	if got := bgOf(t, "alpha"); got == liveBG {
+		t.Error("with the keyboard on the button, the workspace list still wears the accent")
+	}
+	if got := bgOf(t, "a-db"); got == liveBG {
+		t.Error("with the keyboard on the button, the connection list still wears the accent")
+	}
+	if got := bgOf(t, "alpha"); got != dimBG {
+		t.Errorf("the workspace cursor is ANSI %d, want %d (gray)", got, dimBG)
+	}
+}
+
+// AND THE BUTTON GIVES THE ACCENT BACK WHEN THE KEYBOARD LEAVES IT.
+//
+// Johno: "when moved away from it still highlighted".
+func TestWorkspacePanel_TheButtonDimsWhenTheKeyboardLeaves(t *testing.T) {
+	const liveBG = 6
+	h := startBar(t, meta.RoleAdmin)
+	openWSPanel(t, h, []WorkspaceInfo{{ID: 1, Name: "alpha"}})
+	bgOf := func(text string) int {
+		at, _ := attrsOf(t, h, text)
+		if at.BG.Kind != tuicore.CellColorANSI {
+			return -1
+		}
+		return int(at.BG.Index)
+	}
+
+	h.key(tuicore.KeyTab)
+	h.key(tuicore.KeyTab) // on the button
+	h.settle()
+	if got := bgOf("Close"); got != liveBG {
+		t.Fatalf("the Close button is ANSI %d with the keyboard on it, want %d (cyan)", got, liveBG)
+	}
+
+	h.key(tuicore.KeyTab) // back to the workspaces
+	h.settle()
+	if got := bgOf("Close"); got == liveBG {
+		t.Error("the Close button is still cyan after the keyboard left it")
+	}
+	if got := bgOf("alpha"); got != liveBG {
+		t.Errorf("the workspace cursor is ANSI %d after Tab returned to it, want %d (cyan)", got, liveBG)
+	}
+}
+
+// THE CYAN SECTION IS THE ONE THE ARROW KEYS MOVE.
+//
+// This ties the colour to BEHAVIOUR, which is how Johno found the defect and
+// is the only thing that would have caught it: every earlier cell compared the
+// colours against p.at — the same bookkeeping that was producing them — so the
+// pair agreed with each other while both disagreed with the keyboard. "Can I
+// move it?" is the question an operator actually asks, so it is the one
+// asserted here.
+func TestWorkspacePanel_TheAccentMarksTheListTheArrowsMove(t *testing.T) {
+	const liveBG = 6
+	h := startBar(t, meta.RoleAdmin)
+	p := openWSPanel(t, h, []WorkspaceInfo{
+		{ID: 1, Name: "alpha", Connections: []ConnInfo{
+			{ID: 10, Name: "a-one", Engine: "sqlite"},
+			{ID: 11, Name: "a-two", Engine: "sqlite"},
+		}},
+		{ID: 2, Name: "beta", Connections: []ConnInfo{
+			{ID: 20, Name: "b-one", Engine: "postgres"},
+			{ID: 21, Name: "b-two", Engine: "postgres"},
+		}},
+	})
+	bgOf := func(text string) int {
+		at, _ := attrsOf(t, h, text)
+		if at.BG.Kind != tuicore.CellColorANSI {
+			return -1
+		}
+		return int(at.BG.Index)
+	}
+	wsRow := func() int {
+		var i int
+		h.on(func() { i, _ = p.ws.Selected() })
+		return i
+	}
+	connRow := func() int {
+		var i int
+		h.on(func() { i, _ = p.conns.Selected() })
+		return i
+	}
+
+	// On the workspaces: Down moves THAT list, and that list is the cyan one.
+	before := wsRow()
+	h.key(tuicore.KeyDown)
+	h.settle()
+	if wsRow() == before {
+		t.Fatal("Down did not move the workspace cursor on open; the keyboard is not where it looks")
+	}
+	if got := bgOf("beta"); got != liveBG {
+		t.Errorf("the list the arrows moved is ANSI %d, want %d (cyan) — "+
+			"the accent is on the list that does NOT respond", got, liveBG)
+	}
+
+	// Tab to the connections: now THAT list moves, and it wears the accent.
+	h.key(tuicore.KeyTab)
+	h.settle()
+	cBefore := connRow()
+	wBefore := wsRow()
+	h.key(tuicore.KeyDown)
+	h.settle()
+	if connRow() == cBefore {
+		t.Fatal("after Tab, Down did not move the connection cursor")
+	}
+	if wsRow() != wBefore {
+		t.Error("after Tab, Down moved the WORKSPACE cursor; the keyboard did not change sections")
+	}
+	if got := bgOf("b-two"); got != liveBG {
+		t.Errorf("the connection list the arrows moved is ANSI %d, want %d (cyan)", got, liveBG)
+	}
+	if got := bgOf("beta"); got == liveBG {
+		t.Error("the workspace list still wears the accent after the keyboard left it")
+	}
+}
