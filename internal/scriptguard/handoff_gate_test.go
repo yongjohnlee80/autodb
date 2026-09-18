@@ -312,6 +312,46 @@ func TestPlaybook_AnActiveUnitIsASuccessfulRun(t *testing.T) {
 	}
 }
 
+// SYSTEMD CHOOSES THE ORDER, AND THE PLAYBOOK MUST NOT CARE.
+//
+// `systemctl show -p A -p B -p C` does not promise to answer in the order
+// asked, and on the front-door droplet it did not: it returned MainPID,
+// Result, NRestarts, ExecMainStatus, ActiveState, SubState. The playbook read
+// the reply POSITIONALLY, so the pid landed in ActiveState, "active" landed in
+// NRestarts, the case matched no arm, and a healthy daemon was reported as a
+// failed start. Provisioning exited non-zero on a host that was fine.
+//
+// THIS CELL COULD NOT HAVE EXISTED BEFORE, and that is the more useful half.
+// The stub printed three bare values in the caller's order -- the reader's own
+// assumption, baked into the thing meant to check it -- so verifier and code
+// shared one blind spot and no cell here could catch the defect. The update
+// stub had already been fixed for this and carried the lesson; the fake host
+// had not. FAKE_SHOW_ORDER makes the order a parameter, and reversing it is
+// the input that reproduces the droplet.
+func TestPlaybook_TheUnitStateSurvivesSystemdsOwnOrdering(t *testing.T) {
+	for _, order := range []string{
+		"restarts,pid,state", // the droplet's shape: ActiveState answered LAST
+		"pid,restarts,state",
+		"state,pid,restarts", // the caller's order, which must keep working
+	} {
+		t.Run(order, func(t *testing.T) {
+			_, ok := runEnv(t, []string{
+				"FAKE_HANDOFF_RC=0", "FAKE_ACTIVE_STATE=active",
+				"FAKE_SHOW_ORDER=" + order,
+			})
+			if !ok {
+				t.Errorf("an ACTIVE unit was reported as a failed start because systemd "+
+					"answered in the order %q. The playbook is reading the reply by "+
+					"position; it must read it by key:\n%s", order, lastRunOutput)
+			}
+			if !strings.Contains(lastRunOutput, "service is ACTIVE") {
+				t.Errorf("the run does not confirm the unit came up (order %q):\n%s",
+					order, lastRunOutput)
+			}
+		})
+	}
+}
+
 // A PRINTED COMMAND MUST BE RUNNABLE BY THE PERSON IT IS PRINTED FOR.
 //
 // In socket mode the notes told a non-root ssh login to run
