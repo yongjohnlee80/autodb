@@ -89,8 +89,10 @@ func (w *admitWaiter) resolve(outcome WaitOutcome, err error) {
 //
 // NIL-SAFE AND FIRE-AND-FORGET. An engine with no observer is the ordinary
 // embedded case, and measurement must never be able to fail an admission: the
-// observer is called after the lock is released and its result is ignored, so
-// a slow or panicking collector cannot become a scheduling fault. It runs on
+// observer is called after the lock is released, its result is ignored, and a
+// panic from it is RECOVERED at the boundary below — so a slow or broken
+// collector cannot become a scheduling fault. The recovery is the mechanism;
+// without it this sentence was a promise the code did not keep. It runs on
 // the caller's goroutine deliberately -- a goroutine per resolved wait would
 // make the queue's cost depend on how many people are watching it.
 //
@@ -98,10 +100,26 @@ func (w *admitWaiter) resolve(outcome WaitOutcome, err error) {
 // that is the one worth having: a path that returns without reporting is an
 // outcome the breakdown silently loses while the totals still look right.
 func (r *sessionRegistry) noteWaitOutcome(o WaitOutcome) {
-	if r.onWaitResolved == nil {
+	obs := r.onWaitResolved
+	if obs == nil {
 		return
 	}
-	r.onWaitResolved(o)
+	// CONTAINED HERE, because the paragraph above PROMISED it and the call
+	// alone did not deliver it.
+	//
+	// The observer runs on the caller's goroutine after the scheduler has
+	// already moved its state: the lease is taken or given back, the line is
+	// updated, the session is registered or removed. A panic escaping from
+	// here would unwind through all of that and fault an admission that had
+	// ALREADY SUCCEEDED — so a broken collector would not merely lose a
+	// measurement, it would turn one into a refusal the caller cannot explain.
+	//
+	// DELIBERATELY SILENT. There is nowhere to report to: the thing that just
+	// failed is the reporting mechanism. Logging from inside a failed observer
+	// invites the same panic on the recovery path, and the engine's logger is
+	// not this function's to reach for.
+	defer func() { _ = recover() }()
+	obs(o)
 }
 
 // admitWithLeaseOrWait admits a front-door session, or waits its turn.
