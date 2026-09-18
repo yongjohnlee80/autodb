@@ -243,6 +243,16 @@ func TestManager_HasACloseButtonBelowARule(t *testing.T) {
 	if !found {
 		t.Fatalf("no rule above the Close button:\n%s", h.screen())
 	}
+	// AND THE KEYS ARE BELOW THE BUTTON, not above it. The hints describe how
+	// to reach the controls, so a key list printed above them reads as one
+	// more row of the table.
+	keys, ok := rowOf(lines, "q/Esc:close")
+	if !ok {
+		t.Fatalf("the key hints are not on screen:\n%s", h.screen())
+	}
+	if keys < button {
+		t.Fatalf("the key hints (row %d) are above the Close button (row %d)", keys, button)
+	}
 }
 
 // THE CONNECTION ROW SAYS "PROXY", which is the question an operator is
@@ -273,5 +283,65 @@ func TestManager_ConnectionsOfferRename(t *testing.T) {
 
 	if !strings.Contains(h.screen(), "r:rename") {
 		t.Fatalf("the connections manager does not offer rename:\n%s", h.screen())
+	}
+}
+
+// THE CURSOR FOLLOWS A REAL TAB, not a direct call to focusOn.
+//
+// The cell above drives focusOn itself, which proves focusOn paints correctly
+// and proves nothing about what a keypress does — and a keypress is what an
+// operator has. Johno reported the two sections looking inverted on a build
+// whose focusOn-driven cell was green, which is exactly the gap between the
+// two: if Tab and focusOn ever disagree about which section is live, only this
+// one can see it.
+func TestWorkspacePanel_TabRepaintsBothSections(t *testing.T) {
+	const liveBG, dimBG = 6, 8
+	h := startBar(t, meta.RoleAdmin)
+	openWSPanel(t, h, []WorkspaceInfo{
+		{ID: 1, Name: "alpha", Connections: []ConnInfo{{ID: 10, Name: "a-db", Engine: "sqlite"}}},
+	})
+
+	bgOf := func(t *testing.T, text string) int {
+		t.Helper()
+		at, _ := attrsOf(t, h, text)
+		if at.BG.Kind != tuicore.CellColorANSI {
+			t.Fatalf("%q has no ANSI background (kind %v)", text, at.BG.Kind)
+		}
+		return int(at.BG.Index)
+	}
+
+	// Opens on the workspaces: cyan left, gray right.
+	if got := bgOf(t, "alpha"); got != liveBG {
+		t.Fatalf("on open, the workspace cursor is ANSI %d, want %d (cyan)", got, liveBG)
+	}
+	if got := bgOf(t, "a-db"); got != dimBG {
+		t.Fatalf("on open, the connection cursor is ANSI %d, want %d (gray)", got, dimBG)
+	}
+
+	// ONE REAL TAB. Not focusOn.
+	h.key(tuicore.KeyTab)
+	h.settle()
+
+	if got := bgOf(t, "a-db"); got != liveBG {
+		t.Errorf("after Tab the connection cursor is ANSI %d, want %d (cyan) — "+
+			"the accent must follow the keyboard", got, liveBG)
+	}
+	if got := bgOf(t, "alpha"); got != dimBG {
+		t.Errorf("after Tab the workspace cursor is ANSI %d, want %d (gray) — "+
+			"the section the keyboard LEFT is still wearing the accent", got, dimBG)
+	}
+}
+
+// EACH SECTION IS ENCLOSED AND NAMED. Edge to edge, with their columns
+// touching, nothing but a cursor colour said where one list ended and the
+// other began.
+func TestWorkspacePanel_BothSectionsAreBoxedAndTitled(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	openWSPanel(t, h, []WorkspaceInfo{{ID: 1, Name: "alpha"}})
+	got := h.screen()
+	for _, want := range []string{"workspaces", "connections"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the %q section is not titled:\n%s", want, got)
+		}
 	}
 }

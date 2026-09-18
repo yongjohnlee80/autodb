@@ -86,6 +86,35 @@ func TestScrim_IsPassedByExactlyTwoCallSites(t *testing.T) {
 				}
 				return true
 			})
+			// AND THE STRUCT LITERAL SPELLING. Login asks for the scrim as a
+			// formOpts field rather than through a helper, and a guard that
+			// only knew the helper names stopped seeing it the moment that
+			// changed -- reporting one scrimmed surface where there were two,
+			// which is the direction that does not fail loudly.
+			ast.Inspect(file, func(n ast.Node) bool {
+				lit, ok := n.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				if id, ok := lit.Type.(*ast.Ident); !ok || id.Name != "formOpts" {
+					return true
+				}
+				for _, el := range lit.Elts {
+					kv, ok := el.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					k, ok := kv.Key.(*ast.Ident)
+					if !ok || k.Name != "scrim" {
+						continue
+					}
+					if v, ok := kv.Value.(*ast.Ident); ok && v.Name == "true" {
+						scrimmed["formOpts{scrim:true}"] =
+							append(scrimmed["formOpts{scrim:true}"], filepath.Base(name))
+					}
+				}
+				return true
+			})
 		}
 	}
 

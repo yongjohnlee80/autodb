@@ -18,25 +18,24 @@ import (
 )
 
 // inputLabelStyle is how EVERY text-input label in this application is drawn:
-// bold, on a slightly offset background, so the prompt reads as a chip of
-// chrome rather than as another line of the modal's prose.
+// bold, and nothing else.
+//
+// IT CARRIED A GRAY CHIP AND THE CHIP IS GONE. A filled background behind two
+// short words put a hard-edged block in the middle of an otherwise unfilled
+// card, and the block was wider than the word in a way that read as a defect
+// rather than as emphasis. Bold alone separates the prompt from the value
+// under it, which is all the separation a two-row field needs.
 //
 // THE UNDERLINE IS ON THE VALUE, NOT HERE — see inputValueStyles. Underlining
 // the label decorated the word the operator is not editing and left the field
 // they are editing with no edge at all; the two were the wrong way round.
-//
-// THE GRAY IS EXPLICIT, and TokenBoost is the trap it avoids. Boost reads like
-// "a slightly offset surface" and derives from TokenSurface, which derives from
-// TokenBackground, which is the terminal default — so on any theme that has not
-// overridden the chain it resolves to no chip at all. The label came out bold
-// on nothing. ANSI(8) is the palette's gray and is a gray on every terminal.
 //
 // It is a function rather than a package var because style.Style is a value
 // with a builder API — a shared var would hand every caller the same value to
 // keep modifying, and a caller that added one attribute would be editing a
 // copy while reading like it had changed the shared look.
 func inputLabelStyle() style.Style {
-	return style.New().Foreground(style.TokenForeground).Background(style.ANSI(8)).Bold(true)
+	return style.New().Foreground(style.TokenForeground).Bold(true)
 }
 
 // inputValueStyles underline what the operator types.
@@ -141,8 +140,18 @@ func (h *hrule) Layout(c tui.Constraints) tui.Size {
 	return c.Constrain(tui.Size{W: c.MaxW, H: 1})
 }
 
+// Render draws the line MUTED, which is the same correction the hint lines
+// needed and for the same reason: TokenBorder derives from TokenForeground, so
+// a rule asking for the border colour and nothing else comes out at the
+// brightness of the content it is separating. A divider that competes with
+// what it divides is not a divider.
+//
+// It spans whatever width it is given, which is the width the surrounding Flex
+// hands it rather than the card's -- so it can stop short of the border. Left
+// as it is deliberately: a rule that ran edge to edge would have to be drawn
+// by the card, and the card is golib's.
 func (h *hrule) Render(s tui.Surface) {
-	st := style.New().Foreground(style.TokenBorder)
+	st := mutedStyle()
 	w := s.Size().W
 	for x := range w {
 		s.SetCell(x, 0, "─", st)
@@ -182,8 +191,14 @@ func mutedStyle() style.Style {
 // would survive and the focused panel would be a faint white instead of a
 // white one.
 func panelStyles() (base, focused style.Style) {
-	base = style.New().BorderForeground(style.TokenBorder).Faint(true)
-	focused = style.New().BorderForeground(style.ANSI(15)).Faint(false).Bold(true)
+	// AN EXPLICIT GRAY, NOT Faint. The unfocused border first asked for
+	// TokenBorder with Faint(true), and came out white: TokenBorder derives
+	// from TokenForeground, and the Box draws its frame from the border COLOUR
+	// without carrying the style's text attributes, so the faint was never
+	// applied to a single border cell. Naming the gray is the only spelling
+	// that survives both.
+	base = style.New().BorderForeground(style.ANSI(8))
+	focused = style.New().BorderForeground(style.ANSI(15)).Bold(true)
 	return base, focused
 }
 
@@ -225,3 +240,21 @@ func listStyles(focused bool) widget.ListStyles {
 // type into looks like a gap. The placeholder is muted and underlined, which
 // draws the editable region before there is any value to underline.
 const emptyPlaceholder = "empty…"
+
+// buttonStyle is how EVERY button in this application is drawn.
+//
+// CYAN MEANS THE KEYBOARD IS HERE, which is the same thing it means on a list
+// row, so one colour answers "where am I?" everywhere rather than two
+// vocabularies the operator has to hold at once.
+//
+// AND AN UNFOCUSED BUTTON RECEDES. golib's default normal look is
+// TokenSurface behind TokenForeground, and its focused look is that REVERSED
+// -- which on a theme that leaves both as the terminal's own defaults comes
+// out as a near-white block. Every button on screen therefore read as
+// highlighted, including the ones nothing was pointing at, so the one that
+// Enter would actually press was indistinguishable from the rest.
+func buttonStyle() *widget.ButtonStyle {
+	normal := style.New().Foreground(style.ANSI(8))
+	focused := style.New().Background(style.ANSI(6)).Foreground(style.ANSI(0)).Bold(true)
+	return widget.NewButtonStyle(normal, focused)
+}

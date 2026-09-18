@@ -143,9 +143,14 @@ func formHints() []keyHint {
 	// and false of others — and the rows where it is false are the new ones the
 	// operator has not met before. Tab is the key that always means next, so
 	// Tab is what the footer names.
+	// AND IT NO LONGER PROMISES `O` EITHER, which it went on doing for a
+	// while after the mnemonic was removed from the affirmative button. The
+	// paragraph above says a footer that names a key which does not work
+	// teaches a key that does not work; this line was that, in the same
+	// function. The buttons now sit directly above this footer, so the way to
+	// reach them is visible rather than described.
 	return []keyHint{
 		{"Tab", "next"},
-		{"O", "OK"},
 		{"Esc", "cancel"},
 	}
 }

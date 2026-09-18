@@ -109,8 +109,15 @@ func TestForm_FooterNamesTheKeysThatWork(t *testing.T) {
 
 	// Asserted as ONE unwrapped line: a footer that wraps mid-phrase reads
 	// worse than none, and the earlier wording did exactly that.
+	//
+	// A LITERAL PIN DOES NOT VERIFY THAT THE KEYS WORK, and this cell is the
+	// proof: it went on asserting "O:OK" for as long as the footer went on
+	// printing it, which was long after the `O` mnemonic was removed from the
+	// affirmative button. It pins the WORDING. Whether a named key does
+	// anything is asserted by TestChrome_TheFooterDoesNotAdvertiseTheRemoved-
+	// Mnemonic, which presses it.
 	h.waitFor("the footer, on one line",
-		"Tab:next  O:OK  Esc:cancel")
+		"Tab:next  Esc:cancel")
 }
 
 // A ONE-FIELD FORM GOES THROUGH THE BUTTON TOO.

@@ -46,7 +46,10 @@ type manager[T any] struct {
 	// close is the button an operator can SEE. `q` and Escape still work and
 	// the footer still names them, but a modal whose only exit is a key you
 	// have to already know is one you can feel trapped in.
-	close   *widget.Button
+	close *widget.Button
+	// ruleY is the row the divider is drawn on, decided in Layout and read by
+	// Render — which is handed a surface and no idea where the table ended.
+	ruleY   int
 	actions []managerAction[T]
 	// filter narrows all -> items. nil shows everything.
 	filter func([]T) []T
@@ -81,6 +84,7 @@ func newManager[T any](m *Model, cols []widget.TableColumn[T],
 	}
 	mg.close = widget.NewButton("Close",
 		widget.WithRole(widget.ButtonRoleCancel),
+		widget.WithButtonStyle(buttonStyle()),
 		widget.WithOnActivate(func() {
 			if mg.float != nil {
 				mg.float.Hide()
@@ -195,26 +199,30 @@ func (g *manager[T]) Layout(c tui.Constraints) tui.Size {
 	hintH := max(g.ctx.LayoutChild(g.hint, tui.Constraints{MaxW: w, MaxH: 4}).H, 1)
 	// One row for the rule, one for the button band. See hrule: without the
 	// rule the footer reads as one more row of the table.
-	const chromeH = 2
+	// THE FOOTER BAND, TOP TO BOTTOM: rule, buttons, keys. The buttons sit
+	// ABOVE the hint line because the hints describe how to reach them, and a
+	// key list printed above its own controls reads as one more row of the
+	// table.
+	const chromeH = 2 // the rule, and the button row
 	h := modalSpan(c.MaxH, managerHPct, managerMinH+hintH+chromeH, managerMaxH+hintH+chromeH)
 	tableH := max(h-hintH-chromeH, 1)
 	g.ctx.LayoutChild(g.table, tui.Tight(tui.Size{W: w, H: tableH}))
 	g.ctx.PlaceChild(g.table, tui.Rect{X: 0, Y: 0, W: w, H: tableH})
-	g.ctx.PlaceChild(g.hint, tui.Rect{X: 0, Y: tableH, W: w, H: hintH})
+	g.ruleY = tableH
 	bs := g.ctx.LayoutChild(g.close, tui.Constraints{MaxW: w, MaxH: 1})
-	g.ctx.PlaceChild(g.close, tui.Rect{X: max(w-bs.W, 0), Y: tableH + hintH + 1, W: bs.W, H: 1})
+	g.ctx.PlaceChild(g.close, tui.Rect{X: max(w-bs.W, 0), Y: tableH + 1, W: bs.W, H: 1})
+	g.ctx.PlaceChild(g.hint, tui.Rect{X: 0, Y: tableH + 2, W: w, H: hintH})
 	return c.Constrain(tui.Size{W: w, H: h})
 }
 
 // Render draws the rule between the rows and the footer band.
 func (g *manager[T]) Render(s tui.Surface) {
 	sz := s.Size()
-	y := sz.H - 2
-	if y < 1 {
+	if g.ruleY < 1 || g.ruleY >= sz.H {
 		return
 	}
 	for x := range sz.W {
-		s.SetCell(x, y, "─", mutedStyle())
+		s.SetCell(x, g.ruleY, "─", mutedStyle())
 	}
 }
 

@@ -82,6 +82,12 @@ type Model struct {
 	cleartextSeen   bool     // the user dismissed the warning for this session
 	explorerFocused bool     // last applied cursor styling (focused = cyan)
 	resultsFocused  bool
+	// cursorStylesApplied records that the panels have been painted at least
+	// once, so the FIRST call is never skipped by the transition guard above.
+	// Without it, an initial focus state matching the zero value of the two
+	// fields above sends nothing, and the panels keep whatever look their
+	// constructors guessed.
+	cursorStylesApplied bool
 	// lastPane is the workspace component focus should return to when the menu
 	// bar gives it up. Recorded on every deliberate pane focus, so a command
 	// invoked from the menu hands the keyboard back to where the operator was
@@ -733,7 +739,10 @@ func (m *Model) openLogin() {
 	m.authPromptPending = false
 	// Scrimmed: there is nothing else to do in the application until this is
 	// answered, which is the one condition that earns fading the backdrop.
-	m.openFormScrimmed("login", []formField{
+	// A RULE BETWEEN THE TWO ROWS. Placed, not automatic: the caller is the
+	// one who knows where the groups are, and a divider applied to every gap
+	// separates nothing.
+	m.openFormOpts("login", []formField{
 		field("user"), field("passphrase", widget.WithMask('*')),
 	}, func(v formValues) (bool, string) {
 		if v.str(0) == "" {
@@ -745,7 +754,7 @@ func (m *Model) openLogin() {
 			return false, "another sign-in attempt is still running — retry in a moment"
 		}
 		return true, ""
-	})
+	}, formOpts{scrim: true, chrome: map[int][]tui.Component{1: {newHRule()}}})
 }
 
 type authDone struct {

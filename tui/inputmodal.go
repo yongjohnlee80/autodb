@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
@@ -77,8 +78,12 @@ type Input interface {
 	// later row's binding index off by one. A flag would have left all three
 	// as things each caller had to get right.
 	field() (formField, bool)
-	// text is what this row contributes above the fields. Empty for a field.
-	text() string
+	// chrome is the component a non-field row contributes. nil for a field.
+	//
+	// A COMPONENT RATHER THAN A STRING, so the row can be a divider as easily
+	// as a line of prose — and so a caller can place either BETWEEN two inputs
+	// rather than only above them all.
+	chrome() tui.Component
 	// commit writes the submitted value through the caller's binding. It runs
 	// ONLY on StatusSubmitted and only after every validator has passed, so a
 	// cancelled or invalid modal cannot leave a half-written struct behind.
@@ -138,7 +143,7 @@ func (t *textInputSpec) field() (formField, bool) {
 	return field(t.label, opts...), true
 }
 
-func (t *textInputSpec) text() string { return "" }
+func (t *textInputSpec) chrome() tui.Component { return nil }
 
 func (t *textInputSpec) validate(v formValues, i int) error {
 	s := v.str(i)
@@ -223,7 +228,7 @@ func (t *selectInputSpec) field() (formField, bool) {
 	return fixedSelect(t.label, t.items()), true
 }
 
-func (t *selectInputSpec) text() string { return "" }
+func (t *selectInputSpec) chrome() tui.Component { return nil }
 
 func (t *selectInputSpec) validate(v formValues, i int) error {
 	id, ok := v.id(i)
@@ -256,10 +261,29 @@ type textValueSpec struct{ text_ string }
 // confirmation asks, or a warning above the inputs. It takes no cursor.
 func NewTextValue(text string) *textValueSpec { return &textValueSpec{text_: text} }
 
-func (t *textValueSpec) field() (formField, bool)       { return formField{}, false }
-func (t *textValueSpec) text() string                   { return t.text_ }
+func (t *textValueSpec) field() (formField, bool) { return formField{}, false }
+func (t *textValueSpec) chrome() tui.Component {
+	return widget.NewText(t.text_, widget.WithWrapMode(widget.Wrap))
+}
 func (t *textValueSpec) validate(formValues, int) error { return nil }
 func (t *textValueSpec) commit(formValues, int)         {}
+
+// --- a divider ----------------------------------------------------------------
+
+type hruleSpec struct{}
+
+// NewHorizontalRule is a divider row, placed like any other input.
+//
+// NOT AUTOMATIC BETWEEN FIELDS. A login form of two rows wants one; a form of
+// six related fields would be cut into six pieces by the same rule applied by
+// default, and a divider that appears everywhere separates nothing. The caller
+// says where the groups are, because the caller is the one who knows.
+func NewHorizontalRule() *hruleSpec { return &hruleSpec{} }
+
+func (h *hruleSpec) field() (formField, bool)       { return formField{}, false }
+func (h *hruleSpec) chrome() tui.Component          { return newHRule() }
+func (h *hruleSpec) validate(formValues, int) error { return nil }
+func (h *hruleSpec) commit(formValues, int)         {}
 
 // --- the modal --------------------------------------------------------------
 
@@ -342,15 +366,17 @@ func (b *InputModal) Open() *form {
 	// field's rules and bound to the third field's variable, with nothing on
 	// screen to say so.
 	fields := make([]formField, 0, len(b.inputs))
-	prose := make([]string, 0, len(b.inputs))
+	// chrome[k] is what renders immediately BEFORE the k-th field, so the
+	// rows come out in the order the caller wrote them.
+	chrome := map[int][]tui.Component{}
 	// fieldOf[k] is the k-th field's input; validation and commit walk THIS,
 	// not b.inputs.
 	fieldOf := make([]Input, 0, len(b.inputs))
 	for _, in := range b.inputs {
 		f, ok := in.field()
 		if !ok {
-			if t := in.text(); t != "" {
-				prose = append(prose, t)
+			if c := in.chrome(); c != nil {
+				chrome[len(fields)] = append(chrome[len(fields)], c)
 			}
 			continue
 		}
@@ -379,7 +405,7 @@ func (b *InputModal) Open() *form {
 		return true, ""
 	}, formOpts{
 		scrim:      b.scrim,
-		prose:      prose,
+		chrome:     chrome,
 		okText:     b.okText,
 		cancelText: b.cancelText,
 		okMnemonic: b.okMnemonic,
