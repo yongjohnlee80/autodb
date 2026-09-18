@@ -87,7 +87,7 @@ func TestWorkspacePanel_TabCyclesThroughBothListsAndTheButtons(t *testing.T) {
 // back off the widgets would not have caught it either — they would both have
 // been "set".
 func TestWorkspacePanel_OnlyTheFocusedSectionWearsTheLiveCursor(t *testing.T) {
-	const liveBG, dimBG = 6, 8 // listStyles: cyan when focused, gray when not
+	const liveBG, dimBG = 8, 6 // listStyles: cyan when focused, gray when not
 	h := startBar(t, meta.RoleAdmin)
 	p := openWSPanel(t, h, []WorkspaceInfo{
 		{ID: 1, Name: "alpha", Connections: []ConnInfo{{ID: 10, Name: "a-db", Engine: "sqlite"}}},
@@ -104,20 +104,20 @@ func TestWorkspacePanel_OnlyTheFocusedSectionWearsTheLiveCursor(t *testing.T) {
 	}
 
 	if got := bgOf(t, "alpha"); got != liveBG {
-		t.Errorf("with the workspaces focused, the workspace cursor is ANSI %d, want %d (cyan)", got, liveBG)
+		t.Errorf("with the workspaces focused, the workspace cursor is ANSI %d, want ANSI %d", got, liveBG)
 	}
 	if got := bgOf(t, "a-db"); got != dimBG {
-		t.Errorf("with the workspaces focused, the connection cursor is ANSI %d, want %d (gray)", got, dimBG)
+		t.Errorf("with the workspaces focused, the connection cursor is ANSI %d, want ANSI %d", got, dimBG)
 	}
 
 	h.on(func() { p.focusOn(wsConnections) })
 	h.settle()
 
 	if got := bgOf(t, "alpha"); got != dimBG {
-		t.Errorf("after Tab, the workspace cursor is ANSI %d, want %d (gray)", got, dimBG)
+		t.Errorf("after Tab, the workspace cursor is ANSI %d, want ANSI %d", got, dimBG)
 	}
 	if got := bgOf(t, "a-db"); got != liveBG {
-		t.Errorf("after Tab, the connection cursor is ANSI %d, want %d (cyan)", got, liveBG)
+		t.Errorf("after Tab, the connection cursor is ANSI %d, want ANSI %d", got, liveBG)
 	}
 }
 
@@ -295,7 +295,7 @@ func TestManager_ConnectionsOfferRename(t *testing.T) {
 // two: if Tab and focusOn ever disagree about which section is live, only this
 // one can see it.
 func TestWorkspacePanel_TabRepaintsBothSections(t *testing.T) {
-	const liveBG, dimBG = 6, 8
+	const liveBG, dimBG = 8, 6
 	h := startBar(t, meta.RoleAdmin)
 	openWSPanel(t, h, []WorkspaceInfo{
 		{ID: 1, Name: "alpha", Connections: []ConnInfo{{ID: 10, Name: "a-db", Engine: "sqlite"}}},
@@ -312,10 +312,10 @@ func TestWorkspacePanel_TabRepaintsBothSections(t *testing.T) {
 
 	// Opens on the workspaces: cyan left, gray right.
 	if got := bgOf(t, "alpha"); got != liveBG {
-		t.Fatalf("on open, the workspace cursor is ANSI %d, want %d (cyan)", got, liveBG)
+		t.Fatalf("on open, the workspace cursor is ANSI %d, want ANSI %d", got, liveBG)
 	}
 	if got := bgOf(t, "a-db"); got != dimBG {
-		t.Fatalf("on open, the connection cursor is ANSI %d, want %d (gray)", got, dimBG)
+		t.Fatalf("on open, the connection cursor is ANSI %d, want ANSI %d", got, dimBG)
 	}
 
 	// ONE REAL TAB. Not focusOn.
@@ -323,11 +323,11 @@ func TestWorkspacePanel_TabRepaintsBothSections(t *testing.T) {
 	h.settle()
 
 	if got := bgOf(t, "a-db"); got != liveBG {
-		t.Errorf("after Tab the connection cursor is ANSI %d, want %d (cyan) — "+
+		t.Errorf("after Tab the connection cursor is ANSI %d, want ANSI %d — "+
 			"the accent must follow the keyboard", got, liveBG)
 	}
 	if got := bgOf(t, "alpha"); got != dimBG {
-		t.Errorf("after Tab the workspace cursor is ANSI %d, want %d (gray) — "+
+		t.Errorf("after Tab the workspace cursor is ANSI %d, want ANSI %d — "+
 			"the section the keyboard LEFT is still wearing the accent", got, dimBG)
 	}
 }
@@ -353,7 +353,7 @@ func TestWorkspacePanel_BothSectionsAreBoxedAndTitled(t *testing.T) {
 // stop was never measured — and it is the one where BOTH lists have to dim,
 // because neither of them has the keyboard.
 func TestWorkspacePanel_TheButtonStopDimsBothLists(t *testing.T) {
-	const liveBG, dimBG = 6, 8
+	const liveBG, dimBG = 8, 6
 	h := startBar(t, meta.RoleAdmin)
 	openWSPanel(t, h, []WorkspaceInfo{
 		{ID: 1, Name: "alpha", Connections: []ConnInfo{{ID: 10, Name: "a-db", Engine: "sqlite"}}},
@@ -378,7 +378,7 @@ func TestWorkspacePanel_TheButtonStopDimsBothLists(t *testing.T) {
 		t.Error("with the keyboard on the button, the connection list still wears the accent")
 	}
 	if got := bgOf(t, "alpha"); got != dimBG {
-		t.Errorf("the workspace cursor is ANSI %d, want %d (gray)", got, dimBG)
+		t.Errorf("the workspace cursor is ANSI %d, want ANSI %d", got, dimBG)
 	}
 }
 
@@ -386,7 +386,7 @@ func TestWorkspacePanel_TheButtonStopDimsBothLists(t *testing.T) {
 //
 // Johno: "when moved away from it still highlighted".
 func TestWorkspacePanel_TheButtonDimsWhenTheKeyboardLeaves(t *testing.T) {
-	const liveBG = 6
+	const liveBG = 8
 	h := startBar(t, meta.RoleAdmin)
 	openWSPanel(t, h, []WorkspaceInfo{{ID: 1, Name: "alpha"}})
 	bgOf := func(text string) int {
@@ -401,7 +401,7 @@ func TestWorkspacePanel_TheButtonDimsWhenTheKeyboardLeaves(t *testing.T) {
 	h.key(tuicore.KeyTab) // on the button
 	h.settle()
 	if got := bgOf("Close"); got != liveBG {
-		t.Fatalf("the Close button is ANSI %d with the keyboard on it, want %d (cyan)", got, liveBG)
+		t.Fatalf("the Close button is ANSI %d with the keyboard on it, want ANSI %d", got, liveBG)
 	}
 
 	h.key(tuicore.KeyTab) // back to the workspaces
@@ -410,7 +410,7 @@ func TestWorkspacePanel_TheButtonDimsWhenTheKeyboardLeaves(t *testing.T) {
 		t.Error("the Close button is still cyan after the keyboard left it")
 	}
 	if got := bgOf("alpha"); got != liveBG {
-		t.Errorf("the workspace cursor is ANSI %d after Tab returned to it, want %d (cyan)", got, liveBG)
+		t.Errorf("the workspace cursor is ANSI %d after Tab returned to it, want ANSI %d", got, liveBG)
 	}
 }
 
@@ -423,7 +423,7 @@ func TestWorkspacePanel_TheButtonDimsWhenTheKeyboardLeaves(t *testing.T) {
 // move it?" is the question an operator actually asks, so it is the one
 // asserted here.
 func TestWorkspacePanel_TheAccentMarksTheListTheArrowsMove(t *testing.T) {
-	const liveBG = 6
+	const liveBG = 8
 	h := startBar(t, meta.RoleAdmin)
 	p := openWSPanel(t, h, []WorkspaceInfo{
 		{ID: 1, Name: "alpha", Connections: []ConnInfo{
@@ -461,7 +461,7 @@ func TestWorkspacePanel_TheAccentMarksTheListTheArrowsMove(t *testing.T) {
 		t.Fatal("Down did not move the workspace cursor on open; the keyboard is not where it looks")
 	}
 	if got := bgOf("beta"); got != liveBG {
-		t.Errorf("the list the arrows moved is ANSI %d, want %d (cyan) — "+
+		t.Errorf("the list the arrows moved is ANSI %d, want ANSI %d — "+
 			"the accent is on the list that does NOT respond", got, liveBG)
 	}
 
@@ -479,7 +479,7 @@ func TestWorkspacePanel_TheAccentMarksTheListTheArrowsMove(t *testing.T) {
 		t.Error("after Tab, Down moved the WORKSPACE cursor; the keyboard did not change sections")
 	}
 	if got := bgOf("b-two"); got != liveBG {
-		t.Errorf("the connection list the arrows moved is ANSI %d, want %d (cyan)", got, liveBG)
+		t.Errorf("the connection list the arrows moved is ANSI %d, want ANSI %d", got, liveBG)
 	}
 	if got := bgOf("beta"); got == liveBG {
 		t.Error("the workspace list still wears the accent after the keyboard left it")

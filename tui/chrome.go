@@ -219,11 +219,19 @@ func panelStyles() (base, focused style.Style) {
 // was an inverted slate bar, which is why the selected workspace looked like a
 // row in a list that had lost focus.
 func listStyles(focused bool) widget.ListStyles {
+	// REVERSED, ON JOHNO'S INSTRUCTION AND HIS REPEATED OBSERVATION.
+	//
+	// Every surface put the cyan on the list the keyboard was NOT in: the
+	// explorer lit while the query editor had focus, the connections modal
+	// gray while it was the active float, the workspace section that would not
+	// move under the arrow keys wearing the accent. Measured from the screen
+	// rather than derived from the argument, which is what the argument was
+	// getting wrong.
 	var cursor style.Style
 	if focused {
-		cursor = style.New().Background(style.ANSI(6)).Foreground(style.ANSI(0))
-	} else {
 		cursor = style.New().Background(style.ANSI(8)).Foreground(style.ANSI(6))
+	} else {
+		cursor = style.New().Background(style.ANSI(6)).Foreground(style.ANSI(0))
 	}
 	return widget.ListStyles{
 		Row:            style.New(),
