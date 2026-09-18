@@ -479,6 +479,29 @@ func (b *Bound) Login(ctx context.Context, name, pass string) error {
 	return nil
 }
 
+// ChangePassphrase replaces the caller's OWN passphrase. Self-service: there
+// is no user id argument, because the daemon acts on whoever the token
+// resolves to and cannot be pointed at anybody else.
+//
+// THE CURRENT PASSPHRASE IS NOT A CONFIRMATION PROMPT, it is the key. The
+// account's master key is sealed under a KEK derived from the old passphrase,
+// so the daemon unwraps with the old and re-wraps with the new; without the
+// old one there is nothing to unwrap and the account's data would be
+// unreadable. That is why this cannot be a one-click reset, and why the
+// admin-only auth.passphrase_reset is a different verb — the service holds
+// its own copy of the master key and does not need the user's.
+// THROUGH authed, NOT call: the verb takes the token first, and authed is the
+// chokepoint that supplies it and invalidates the login state when the daemon
+// rejects it. Reaching for call here would send the old passphrase in the
+// token position — wrong arity, and past the one place that notices a token
+// has stopped being valid.
+func (b *Bound) ChangePassphrase(ctx context.Context, oldPass, newPass string) error {
+	_, err := b.authed(ctx, "auth.passphrase_change", oldPass, newPass)
+	return err
+}
+
+// LoginAt is Login with the admission address the CALLER observed — the web
+
 // LoginAt is Login with the admission address the CALLER observed — the web
 // gateway's browser peer, which the daemon cannot see for itself.
 //
@@ -853,6 +876,13 @@ func (b *Bound) CreateWorkspace(ctx context.Context, name string) (int64, error)
 	}
 	id, _ := res.(int64)
 	return id, nil
+}
+
+// RenameConnection relabels a connection. The name is a label: nothing dials
+// it and no credential contains it.
+func (b *Bound) RenameConnection(ctx context.Context, connID int64, name string) error {
+	_, err := b.authed(ctx, "conn.rename", connID, name)
+	return err
 }
 
 func (b *Bound) RenameWorkspace(ctx context.Context, wsID int64, name string) error {

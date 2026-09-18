@@ -241,3 +241,53 @@ func TestChrome_BuildLine(t *testing.T) {
 		})
 	}
 }
+
+// AN EMPTY FIELD LOOKS LIKE A FIELD. On the card's own background a blank
+// input is indistinguishable from a blank line, so the thing the operator is
+// meant to type into reads as a gap — which is most of why the connection form
+// was reported as hard to fill in.
+func TestChrome_AnEmptyInputShowsItsPlaceholder(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() {
+		h.m.openForm("endpoint", []formField{field("hostname")},
+			func(formValues) (bool, string) { return true, "" })
+	})
+	h.waitUntil("the form is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	if !strings.Contains(h.screen(), emptyPlaceholder) {
+		t.Fatalf("an empty input shows nothing at all:\n%s", h.screen())
+	}
+}
+
+// THE MARKER FOLLOWS THE KEYBOARD. The reported confusion was on a form whose
+// select gave no sign of holding focus: the operator did not know where they
+// were or what Enter would do, and pressed it to find out.
+//
+// Both rows are asserted at each step, because "the marker moved" and "a
+// marker appeared" are different claims and only the first is the one wanted.
+func TestChrome_TheFocusedRowIsMarked(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() {
+		h.m.openForm("endpoint", []formField{field("hostname"), field("port")},
+			func(formValues) (bool, string) { return true, "" })
+	})
+	h.waitUntil("the form is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	if !strings.Contains(h.screen(), "▸ hostname") {
+		t.Fatalf("the first row is not marked on open:\n%s", h.screen())
+	}
+	if strings.Contains(h.screen(), "▸ port") {
+		t.Fatalf("a row that does not hold the keyboard is marked:\n%s", h.screen())
+	}
+
+	h.key(tuicore.KeyTab)
+	h.settle()
+	if !strings.Contains(h.screen(), "▸ port") {
+		t.Fatalf("the marker did not follow Tab to the second row:\n%s", h.screen())
+	}
+	if strings.Contains(h.screen(), "▸ hostname") {
+		t.Fatalf("the marker stayed on the row the keyboard left:\n%s", h.screen())
+	}
+}

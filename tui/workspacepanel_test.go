@@ -219,3 +219,59 @@ func TestWorkspacePanel_HasACloseButton(t *testing.T) {
 		t.Fatalf("no Close button on the workspace modal:\n%s", h.screen())
 	}
 }
+
+// EVERY MANAGER HAS A CLOSE BUTTON AND A RULE. The connections manager is the
+// one the requirement named, but the affordance belongs to the shape, not to
+// that one screen — so it lives in the generic manager and they all get it.
+func TestManager_HasACloseButtonBelowARule(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() { h.m.openConnManager() })
+	h.waitUntil("the connections manager is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	lines := strings.Split(h.screen(), "\n")
+	button, ok := rowOf(lines, "Close")
+	if !ok {
+		t.Fatalf("no Close button on the connections manager:\n%s", h.screen())
+	}
+	found := false
+	for y := range button {
+		if strings.Contains(lines[y], strings.Repeat("─", 8)) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no rule above the Close button:\n%s", h.screen())
+	}
+}
+
+// THE CONNECTION ROW SAYS "PROXY", which is the question an operator is
+// actually asking of a connection: does autodb proxy it? The design documents
+// go on calling it the front door.
+func TestManager_TheExposureColumnReadsProxy(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() { h.m.openConnManager() })
+	h.waitUntil("the connections manager is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	got := h.screen()
+	if !strings.Contains(got, "PROXY") {
+		t.Fatalf("the exposure column does not read PROXY:\n%s", got)
+	}
+	if !strings.Contains(got, "proxy enabled") {
+		t.Fatalf("the exposure key does not read \"proxy enabled\":\n%s", got)
+	}
+}
+
+// RENAME IS OFFERED ON A CONNECTION. It was the one label an operator could
+// not correct without deleting the connection and building it again.
+func TestManager_ConnectionsOfferRename(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() { h.m.openConnManager() })
+	h.waitUntil("the connections manager is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	if !strings.Contains(h.screen(), "r:rename") {
+		t.Fatalf("the connections manager does not offer rename:\n%s", h.screen())
+	}
+}

@@ -255,6 +255,7 @@ func field(label string, opts ...widget.TextInputOption) formField {
 		// opts, still win: WithTextInputStyles inherits from what is already
 		// set, and last writer decides.
 		o = append(o, widget.WithTextInputStyles(inputValueStyles()))
+		o = append(o, widget.WithPlaceholder(emptyPlaceholder))
 		o = append(o, opts...)
 		// THE ADVANCE RUNS ON THE KEY, NOT ON AN EVENT. See advanceOrSubmit.
 		o = append(o, widget.WithOnSubmit(func(string) { f.advanceOrSubmit(i) }))
@@ -430,8 +431,13 @@ func (f *form) advanceOrSubmit(i int) {
 func (f *form) open() bool { return f.surface != nil && f.surface.Shown() }
 
 // refreshLabels re-renders each row's label with whatever its control has to
-// say about itself — loading, empty, or the error that stopped it.
+// say about itself — loading, empty, or the error that stopped it — and marks
+// the row the keyboard is in.
+//
+// THE FOCUSED ROW IS NAMED HERE because the control cannot name itself: golib's
+// inputs take their styles at construction. See focusedLabelStyle.
 func (f *form) refreshLabels() {
+	focused := f.focusedField()
 	for i := range f.fields {
 		if i >= len(f.labels) || f.labels[i] == nil {
 			continue
@@ -440,8 +446,33 @@ func (f *form) refreshLabels() {
 		if a, ok := f.fields[i].ctl.(labelAnnotator); ok {
 			text += a.annotation()
 		}
-		f.labels[i].SetText(text)
+		// A POINTER, NOT A RESTYLE. golib's Text takes its style at
+		// construction and offers no setter, so the marker is the whole of
+		// the indication -- and it is the part that survives a terminal
+		// dropping colours anyway. The two-space lead keeps the labels in one
+		// column, so the row moves nothing when the marker arrives.
+		if i == focused {
+			f.labels[i].SetText("▸ " + text)
+			continue
+		}
+		f.labels[i].SetText("  " + text)
 	}
+}
+
+// focusedField reports which row holds the keyboard, or -1.
+func (f *form) focusedField() int {
+	if f.tui == nil {
+		return -1
+	}
+	for i := range f.fields {
+		if f.fields[i].ctl == nil {
+			continue
+		}
+		if f.tui.FocusWithin(f.fields[i].ctl.component()) {
+			return i
+		}
+	}
+	return -1
 }
 
 func (f *form) submit() {
@@ -486,7 +517,21 @@ func (f *form) Layout(c tui.Constraints) tui.Size {
 
 func (f *form) Render(tui.Surface) {}
 
-func (f *form) HandleEvent(ev tui.Event) bool { return false }
+// HandleEvent watches focus so the row marker follows the keyboard.
+//
+// FocusEvent BUBBLES, which is what makes this work for the moves the form did
+// not make: Tab and a mouse click are the framework's, not this code's, and a
+// marker driven only from advanceOrSubmit would be correct exactly when the
+// operator used the one key the form controls.
+//
+// It returns false: the marker is a side effect, and the Model still wants the
+// same event.
+func (f *form) HandleEvent(ev tui.Event) bool {
+	if _, ok := ev.(tui.FocusEvent); ok {
+		f.refreshLabels()
+	}
+	return false
+}
 
 // form is transparent to the framework's focus walk (tui.Container):
 // without this, the modal Float's focus seeding cannot reach the text

@@ -27,6 +27,11 @@ import (
 // helloing an old server must be REFUSED at the handshake, not surprised
 // by method-not-found. The server speaks exactly one
 // protocol version; there is no negotiation.
+// Protocol 7 added conn.rename. The same reasoning as every bump below: a
+// connection's name is what an operator reads to tell one from another, the
+// rename is offered as a key in the connections manager, and a frontend
+// offering that key against a protocol-6 daemon would report "unknown method"
+// for something the operator can see. The handshake says it instead.
 // Protocol 6 added sys.pressure, the front door's live pressure view. A bump
 // rather than a silent addition because this comment already says why: a newer
 // frontend meeting an older daemon must be told at the handshake, not left to
@@ -45,7 +50,7 @@ import (
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 6
+const Protocol int64 = 7
 
 // Session keys the gate and the hello handler share.
 const (

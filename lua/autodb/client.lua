@@ -44,8 +44,7 @@ local M = {}
 -- `BEGIN; …; COMMIT;` a user could already send means something
 -- different now, so a stale pairing has to fail at the handshake
 -- rather than silently apply half a script.
-M.PROTOCOL = 6
-
+M.PROTOCOL = 7
 ---@class AutodbClientOpts
 ---@field addr string                 -- socket path, or host:port for TCP
 ---@field mode string?                -- "pipe" (default endpoint) or "tcp"

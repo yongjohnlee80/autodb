@@ -661,3 +661,48 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64,
 	// from where) — audit it.
 	return e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_ok", fmt.Sprintf("conn %d", connID))
 }
+
+// RenameConnection changes a managed connection's display name (admin token).
+//
+// THE NAME IS A LABEL AND NOTHING ELSE. It is not part of any credential, it is
+// not what a client dials, and nothing keys off it — the DSN, the target
+// database and the front-door exposure are all untouched here. So a rename
+// needs none of the session teardown that SetConnectionExposure and
+// DeleteConnection carry: there is no live session whose assumptions it
+// invalidates.
+//
+// It is still ADMIN AND AUDITED, because a connection's name is what every
+// other operator reads to decide which one they are looking at, and a rename
+// that no record explains is a connection that appears to have changed
+// identity.
+func (e *Engine) RenameConnection(ctx context.Context, token string, connID int64, name, ip string) error {
+	ident, err := e.auth.ValidateToken(ctx, token)
+	if err != nil {
+		return err
+	}
+	if ident.Role() != meta.RoleAdmin {
+		return auth.ErrDenied
+	}
+	if name == "" {
+		return errors.New("exec: connection name must not be empty")
+	}
+	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
+		row, terr := e.store.Connections.On(tx).With(meta.ConnID, connID).Get()
+		if terr != nil {
+			return terr
+		}
+		if row.Name == name {
+			return nil
+		}
+		if terr := e.store.Connections.On(tx).With(meta.ConnID, connID).
+			Set(meta.ConnName, name).
+			Set(meta.ConnUpdatedAt, e.now().Unix()).Update(); terr != nil {
+			return terr
+		}
+		// THE OLD NAME IS IN THE RECORD. An audit line naming only the new one
+		// cannot be read backwards: a reader looking for what happened to
+		// "prod-west" would find nothing.
+		return e.auth.AuditTx(tx, ident.UserID(), ip, "connection_rename",
+			fmt.Sprintf("%s -> %s", row.Name, name))
+	})
+}
