@@ -186,3 +186,46 @@ func TestWaitOutcome_EveryReturnPathReportsAnOutcome(t *testing.T) {
 			"the function body, so its silence is not evidence")
 	}
 }
+
+// A BROKEN COLLECTOR CANNOT FAULT AN ADMISSION.
+//
+// The observer runs on the caller's goroutine AFTER the scheduler has moved
+// its state — the lease is taken, the line updated, the session registered. A
+// panic escaping from it would unwind through all of that and turn an
+// admission that had already succeeded into a refusal the caller cannot
+// explain. Measurement must never be able to do that.
+//
+// THE COMMENT PROMISED THIS BEFORE THE CODE DID IT. Review caught the gap:
+// noteWaitOutcome said a panicking collector could not become a scheduling
+// fault and then called the observer bare. This cell is what makes the
+// sentence true.
+func TestWaitOutcome_APanickingObserverDoesNotFailTheAdmission(t *testing.T) {
+	r := schedRegistry(t, 2)
+	var called int
+	r.onWaitResolved = func(WaitOutcome) {
+		called++
+		panic("the collector is broken")
+	}
+
+	err := r.admitWithLeaseOrWait(context.Background(), schedSession("first", 1, 7), 7, 0)
+	if err != nil {
+		t.Fatalf("a panicking observer failed the admission: %v\n\n"+
+			"The session was already registered and its lease already taken when the observer "+
+			"ran, so this is not a lost measurement — it is a granted admission reported as a "+
+			"refusal", err)
+	}
+	if called != 1 {
+		t.Errorf("the observer ran %d times, want 1", called)
+	}
+
+	// AND THE REGISTRY IS STILL USABLE afterwards. A recover that left the
+	// scheduler wedged would pass the assertion above and fail the next
+	// caller, which is worse than failing this one.
+	if err := r.admitWithLeaseOrWait(context.Background(), schedSession("second", 2, 7), 7, 0); err != nil {
+		t.Errorf("the admission after a panicking observer failed: %v", err)
+	}
+	if called != 2 {
+		t.Errorf("the observer ran %d times in total, want 2 — a panic must not stop later "+
+			"waits being reported", called)
+	}
+}
