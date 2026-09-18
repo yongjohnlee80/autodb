@@ -40,6 +40,26 @@ import (
 	"github.com/yongjohnlee80/autodb/core/exec"
 )
 
+// THE EXACT WORDING EACH SHAPE OWES A CLIENT, written out here rather than read
+// from startupFatalFrames().
+//
+// READING THE PRODUCTION TABLE WOULD MEASURE NOTHING. A cell that compares the
+// frame against the same map the frame was rendered from agrees with any edit
+// to that map, including one that replaces both messages with the same
+// sentence. The point of a fixed literal is that it is an INDEPENDENT statement
+// of the contract, so changing the row reddens the cell.
+//
+// The earlier version of these cells asserted SQLSTATE, severity, detail and
+// mutual distinctness — which a driver rendering its own two generic strings
+// would have satisfied, since the procedure's requirement is the LITERAL and
+// distinctness only asks that the two differ.
+const (
+	startupUnavailableMessage = "this connection is not available right now"
+	startupUnavailableHint    = "try again shortly; if it persists, ask an operator to check this connection"
+	startupUnusableMessage    = "this connection is not configured to serve requests"
+	startupUnusableHint       = "ask an operator to check this connection's configuration"
+)
+
 // startupPgErr connects real pgx to a listener whose auth seam fails, and
 // returns the server error pgx parsed out of the startup exchange.
 //
@@ -102,6 +122,17 @@ func TestStartupPG_PgxSeesUnavailableAsAFatalServerError(t *testing.T) {
 		t.Errorf("pgx read detail %q, want the registered identity %q",
 			e.Detail, OutcomeStartupConnectionUnavailable)
 	}
+	// THE WORDING, not merely a wording. A driver that renders its own sentence
+	// here has replaced the operator-facing text the contract fixes.
+	if e.Message != startupUnavailableMessage {
+		t.Errorf("pgx read message %q, want the fixed literal %q",
+			e.Message, startupUnavailableMessage)
+	}
+	if e.Hint != startupUnavailableHint {
+		t.Errorf("pgx read hint %q, want the fixed literal %q — the hint is where "+
+			"\"try again shortly\" lives, and it is the actionable half",
+			e.Hint, startupUnavailableHint)
+	}
 	// NOTHING ABOUT WHY reaches the client, through a real driver either.
 	for _, field := range []string{e.Message, e.Detail, e.Hint} {
 		for _, tok := range []string{"locked", "secret", "store", "decrypt", "DSN"} {
@@ -139,6 +170,14 @@ func TestStartupPG_PgxSeesUnusableAsAFatalServerError(t *testing.T) {
 	}
 	if e.Detail != string(outcomeID(OutcomeStartupConnectionUnusable)) {
 		t.Errorf("pgx read detail %q, want %q", e.Detail, OutcomeStartupConnectionUnusable)
+	}
+	if e.Message != startupUnusableMessage {
+		t.Errorf("pgx read message %q, want the fixed literal %q",
+			e.Message, startupUnusableMessage)
+	}
+	if e.Hint != startupUnusableHint {
+		t.Errorf("pgx read hint %q, want the fixed literal %q — \"call an operator\" is "+
+			"the whole difference from the unavailable shape", e.Hint, startupUnusableHint)
 	}
 	// THE RAW CAUSE IS OPERATOR-ONLY, and a real driver must not be handed it.
 	for _, field := range []string{e.Message, e.Detail, e.Hint} {
