@@ -204,8 +204,17 @@ func (p *workspacePanel) repaint() {
 	if p.ctx == nil {
 		return
 	}
-	p.ws.List().SetStyles(listStyles(p.ctx.FocusWithin(p.wsBox)))
-	p.conns.List().SetStyles(listStyles(p.ctx.FocusWithin(p.connsBox)))
+	// THROUGH liveSection, WHICH HAS A FALLBACK. Asking FocusWithin directly
+	// paints both sections blurred whenever the framework holds no focus at
+	// all -- and it frequently does: a trace from a production host recorded
+	// 25 of 36 repaints reporting that nothing was focused, because a tree
+	// rebuild clears the focused node and nothing re-establishes it. Both
+	// sections then went gray while the arrow keys still moved one of them.
+	// liveSection falls back to p.at, which is the section this panel will
+	// actually route the next keystroke to.
+	live := p.liveSection()
+	p.ws.List().SetStyles(listStyles(live == wsWorkspaces))
+	p.conns.List().SetStyles(listStyles(live == wsConnections))
 }
 
 // liveSection reports where the keyboard IS, falling back to p.at before the

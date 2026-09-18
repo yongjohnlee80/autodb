@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/yongjohnlee80/golib/tui"
 )
 
 // In-panel search (Johno, M6 manual testing): `/` prompts for a pattern,
@@ -232,21 +234,40 @@ func (m *Model) applyCursorStyles() {
 	if m.ctx == nil {
 		return
 	}
-	explorerOn := m.ctx.FocusWithin(m.explorerBox)
-	resultsOn := m.ctx.FocusWithin(m.resultsBox)
-
-	// NO CACHE, RECOMPUTED EVERY CALL. The transition guard that used to sit
-	// here is the shape every staleness this file has produced came in: a
-	// cached answer to "who has focus?" has to be invalidated by every path
-	// that can move focus, and those paths are not enumerable -- a click, a
-	// leader key, a float opening, a float closing, a repair after an unmount.
-	// Asking costs a struct assignment. Being wrong costs an operator the
-	// ability to tell which pane their keys reach.
-	m.explorer.tree.SetStyles(listStyles(explorerOn))
+	live := m.livePane()
+	m.explorer.tree.SetStyles(listStyles(live == tui.Component(m.explorer)))
 	if m.results.rawList != nil {
-		m.results.rawList.SetStyles(listStyles(resultsOn))
+		m.results.rawList.SetStyles(listStyles(live == tui.Component(m.results)))
 	}
-	m.traceFocus(explorerOn, resultsOn)
+	m.traceFocus(live)
+}
+
+// livePane is the pane the operator's KEYS REACH, which is not always the pane
+// the framework calls focused.
+//
+// MEASURED, NOT ASSUMED. A trace taken from the running binary on a production
+// host recorded 25 of 36 repaints reporting that NO pane held focus -- and the
+// ordering showed why: a correct reading arrives when focus lands and is
+// overwritten within the same millisecond by several readings of "nothing is
+// focused". The explorer rebuilds its tree on connect, which mutates the node
+// tree and leaves the app's focused node cleared, and nothing re-establishes
+// it. Typing goes on working because this Model routes keys by its own
+// remembered pane rather than by framework focus, so the app never appeared
+// broken -- only the colours did, and they were telling the truth about a
+// framework state nobody else consulted.
+//
+// So the accent followed framework focus into nowhere, every pane was painted
+// blurred, and the operator navigating the explorer watched a gray cursor move.
+// The fix is to paint what the keys do: if the framework names a pane, that is
+// the live one; if it names none, the live one is the pane this Model will
+// route the next keystroke to.
+func (m *Model) livePane() tui.Component {
+	for _, pane := range []tui.Component{m.explorer, m.editor, m.results} {
+		if pane != nil && m.ctx.FocusWithin(pane) {
+			return pane
+		}
+	}
+	return m.lastPane
 }
 
 // traceFocus records what the framework says about focus and what was painted
@@ -261,7 +282,7 @@ func (m *Model) applyCursorStyles() {
 // Off unless the variable is set, appended rather than truncated, and failures
 // are swallowed: a diagnostic that can break the application it is diagnosing
 // is not one anybody will turn on.
-func (m *Model) traceFocus(explorerOn, resultsOn bool) {
+func (m *Model) traceFocus(live tui.Component) {
 	path := os.Getenv("AUTODB_FOCUS_TRACE")
 	if path == "" {
 		return
@@ -271,13 +292,27 @@ func (m *Model) traceFocus(explorerOn, resultsOn bool) {
 		return
 	}
 	defer f.Close()
-	// The BOX's own answer beside the one this code uses. widget.Box tracks
-	// focus from bubbling FocusEvents and its borders are truthful; this
-	// function queries Context.FocusWithin at the root. If those two ever
-	// disagree, that is the whole defect, and this is the line that says so.
-	fmt.Fprintf(f, "%s explorerOn=%v resultsOn=%v editorFocused=%v paneHolding=%q\n",
-		time.Now().Format("15:04:05.000"), explorerOn, resultsOn,
-		m.ctx.FocusWithin(m.editorBox), m.lastPaneName())
+	// BOTH ANSWERS, side by side: what the framework says, and what this code
+	// decided to paint. When they differ the fallback is doing its job, and a
+	// trace where they NEVER differ would mean the framework state had been
+	// repaired and the fallback could go.
+	fmt.Fprintf(f, "%s framework=%q painted=%q\n",
+		time.Now().Format("15:04:05.000"), m.lastPaneName(), m.paneName(live))
+}
+
+// paneName names a pane for the trace.
+func (m *Model) paneName(c tui.Component) string {
+	switch {
+	case c == nil:
+		return "none"
+	case c == tui.Component(m.explorer):
+		return "explorer"
+	case c == tui.Component(m.editor):
+		return "editor"
+	case c == tui.Component(m.results):
+		return "results"
+	}
+	return "other"
 }
 
 // lastPaneName names the pane the model believes the keyboard is in, for the
