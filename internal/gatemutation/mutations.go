@@ -112,7 +112,7 @@ func All() []Mutation {
 		},
 		{
 			Name: "cancellation-undoes-its-admission", Package: "./core/exec/", File: "core/exec/scheduler.go",
-			Anchor:      "\tif err := <-w.done; err == nil {\n\t\tr.remove(w.s)\n\t}",
+			Anchor:      "\tif res := <-w.done; res.err == nil {\n\t\tr.remove(w.s)\n\t}",
 			Replacement: "\t_ = w",
 			Test:        "TestScheduler_ACancellationThatLosesToAGrantUndoesTheAdmission",
 			Count:       20,
