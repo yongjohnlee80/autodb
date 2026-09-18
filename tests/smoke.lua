@@ -192,9 +192,17 @@ print("\n[3] lifecycle.resolve_endpoint — the binary owns the answer")
     local real = vim.fn.expand("~/.config")
     ok("p3: and it is not the operator's real config directory",
       vim.fn.resolve(cfg_home) ~= vim.fn.resolve(real), cfg_home)
-    ok("p3: and it holds no autodb config to be influenced by",
-      vim.fn.filereadable(cfg_home .. "/autodb/config.toml") == 0,
-      cfg_home .. "/autodb/config.toml")
+    -- AN EMPTY CONFIG FILE, PRESENT ON PURPOSE. An empty directory is not
+    -- isolation: with no user config the resolver falls through to
+    -- /etc/autodb/config.toml, which exists wherever the front door was
+    -- installed and sets server.port -- so the "default" endpoint came back
+    -- as tcp on exactly those hosts. A present-but-empty file wins over the
+    -- system one and specifies nothing.
+    local own = cfg_home .. "/autodb/config.toml"
+    ok("p3: and it has its own empty autodb config, which beats /etc/autodb",
+      vim.fn.filereadable(own) == 1, own)
+    ok("p3: and that config specifies nothing",
+      vim.fn.getfsize(own) == 0, tostring(vim.fn.getfsize(own)))
   end
 
   -- No port configured: the local socket is the default rendezvous.

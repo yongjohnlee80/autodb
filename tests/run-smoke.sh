@@ -40,7 +40,21 @@ mkdir -p "$XDG_DATA_HOME"
 # An EMPTY directory rather than an unset variable: unsetting it sends the
 # resolver to $HOME/.config, which is the very file being isolated from.
 export XDG_CONFIG_HOME="$smoke_xdg/config"
-mkdir -p "$XDG_CONFIG_HOME"
+mkdir -p "$XDG_CONFIG_HOME/autodb"
+
+# AND AN EMPTY CONFIG FILE IN IT, WHICH IS THE PART THAT ACTUALLY ISOLATES.
+#
+# An empty DIRECTORY is not enough. With no user config the resolver falls
+# through to the system path, /etc/autodb/config.toml, which exists on every
+# host where install_frontdoor.sh has run — and that file sets server.port, so
+# `--print-endpoint` answers `tcp 127.0.0.1:7419` instead of the unix socket
+# the default is supposed to be. Measured on VM43, where the suite's endpoint
+# cell failed for exactly this reason after XDG_CONFIG_HOME alone was isolated.
+#
+# A present-but-empty file wins over the system one and specifies nothing, so
+# "the default" means the compiled default rather than whatever this machine
+# has installed. That is what the endpoint cell is written to test.
+: > "$XDG_CONFIG_HOME/autodb/config.toml"
 
 # The five end-to-end sections need bin/autodb, which is gitignored — build it so
 # the suite's preconditions are met rather than skipped-into-failure.
