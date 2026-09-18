@@ -647,13 +647,7 @@ func TestUIFullFlow(t *testing.T) {
 	//     styled one way while it holds focus and another once focus
 	//     moves to the query editor — and the change lands on the focus
 	//     event itself, without waiting for some later re-layout.
-	// NAMED BY ROLE, NOT BY COLOUR. The accent and the dim shade were swapped
-	// on Johno's direct and repeated observation: on every live surface the
-	// cyan was sitting on the pane the keyboard was NOT in. The swap is
-	// measured from the screen and the cause is NOT yet explained, so these
-	// constants say which ROLE each value plays rather than naming a colour
-	// that would then have to be re-read every time the mapping moves.
-	const cyan, gray = 8, 6
+	const cyan, gray = 6, 8
 	h.ctrl('h')
 	h.waitCursorBG("explorer focused", cyan)
 	h.ctrl('l')

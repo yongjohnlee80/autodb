@@ -219,19 +219,33 @@ func panelStyles() (base, focused style.Style) {
 // was an inverted slate bar, which is why the selected workspace looked like a
 // row in a list that had lost focus.
 func listStyles(focused bool) widget.ListStyles {
-	// REVERSED, ON JOHNO'S INSTRUCTION AND HIS REPEATED OBSERVATION.
+	// THE PARAMETER MEANS WHAT IT SAYS. focused = the accent.
 	//
-	// Every surface put the cyan on the list the keyboard was NOT in: the
-	// explorer lit while the query editor had focus, the connections modal
-	// gray while it was the active float, the workspace section that would not
-	// move under the arrow keys wearing the accent. Measured from the screen
-	// rather than derived from the argument, which is what the argument was
-	// getting wrong.
+	// This was briefly INVERTED here -- focused receiving gray and unfocused
+	// receiving cyan -- because on a live terminal the accent kept landing on
+	// the list the keyboard was not in, and inverting the mapping made the
+	// screen right. Zen refused that on review and was correct to: it bakes an
+	// unexplained environment observation into an API whose parameter then
+	// lies, for every list surface in the application, and a caller reading
+	// listStyles(true) would get the opposite of what it asks for.
+	//
+	// The observation is real and is NOT yet explained. What is known: the box
+	// BORDERS are truthful, and they are driven by a different mechanism --
+	// widget.Box tracks focus from bubbling FocusEvents, where the loser's
+	// Gained:false bubbles through the losing box and the gainer's Gained:true
+	// through the gaining one. applyCursorStyles instead QUERIES
+	// Context.FocusWithin at the root, where both events arrive. Two
+	// mechanisms for one fact, and only one of them is believed.
+	//
+	// That is where the next diagnosis starts, and it needs an instrument that
+	// reads resolved cell attributes from the running binary rather than from
+	// the test backend -- the harness and the terminal disagree, and every cell
+	// written so far has been written against the harness.
 	var cursor style.Style
 	if focused {
-		cursor = style.New().Background(style.ANSI(8)).Foreground(style.ANSI(6))
-	} else {
 		cursor = style.New().Background(style.ANSI(6)).Foreground(style.ANSI(0))
+	} else {
+		cursor = style.New().Background(style.ANSI(8)).Foreground(style.ANSI(6))
 	}
 	return widget.ListStyles{
 		Row:            style.New(),

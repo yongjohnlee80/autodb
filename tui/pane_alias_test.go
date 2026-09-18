@@ -24,13 +24,7 @@ import (
 // aliases are required to reach the same states, so the test pins the ALIASING
 // rather than a particular layout.
 func TestAltPaneMotionMatchesCtrl(t *testing.T) {
-	// NAMED BY ROLE, NOT BY COLOUR. The accent and the dim shade were swapped
-	// on Johno's direct and repeated observation: on every live surface the
-	// cyan was sitting on the pane the keyboard was NOT in. The swap is
-	// measured from the screen and the cause is NOT yet explained, so these
-	// constants say which ROLE each value plays rather than naming a colour
-	// that would then have to be re-read every time the mapping moves.
-	const cyan, gray = 8, 6
+	const cyan, gray = 6, 8
 	h := startUIAuthed(t, startRealServer(t), tuiapp.WithFrontend(tuiapp.FrontendWeb))
 	h.waitFor("about splash", "Yong Sung John Lee")
 	h.key(tuicore.KeyEnter)
