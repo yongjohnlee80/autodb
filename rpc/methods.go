@@ -1249,6 +1249,11 @@ func (s *Server) register() {
 				// prevents clients from reconstructing one from the other.
 				"profile": c.Profile, "frontdoor_exposed": c.FrontDoorExposed != 0,
 				"target_db": c.TargetDB,
+				// THIS CONNECTION'S OWN BOUND on pooled connections. Additive,
+				// so no protocol bump: the verb surface is unchanged. Zero
+				// means the connection sets none of its own and the engine's
+				// ceiling applies.
+				"pool_max_conns": c.PoolMaxConns,
 			})
 		}
 		return out, nil

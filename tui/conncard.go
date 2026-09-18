@@ -358,40 +358,42 @@ func buildCardText(secret string, conn ConnInfo, ep FrontDoorEndpoint, user, rol
 	p("JDBC")
 	p("  %s", buildCardJDBC(dialHost, port, user, secret, cardDatabase(conn), sslmode, ep.RootCAFile))
 	p("")
-	writeCardBudget(p, ep)
+	writeCardBudget(p, conn, ep)
 	return b.String(), dsn
 }
 
-// writeCardBudget prints the ceilings this token will meet and what to set.
+// writeCardBudget prints the ceilings this token will meet.
 //
-// A SHARED CEILING CANNOT YIELD A PRIVATE NUMBER, and three attempts to derive
-// one all failed the same way. "Idle should equal open" hoards leases other
-// people are waiting for. "Up to your allotted share" named a mechanism that
-// does not exist -- admission is first-come-first-served with no per-user
-// slices. "The per-user cap divided by the databases you connect to" hands the
-// whole shared cap to every process: two Label Manager processes each follow
-// four-and-four and together ask for sixteen against a cap of eight, and the
-// same breaks with two tokens, two users behind one NAT, or a replica set.
+// IT TELLS NOBODY TO CONFIGURE ANYTHING. Johno's ruling: "we won't enforce
+// PG_MAX_OPEN_CONNS" and "Each conn should have allowed MAX CONNS to deal with
+// anyways." An earlier version of this block carried per-client pool recipes --
+// Label Manager's env vars, SetMaxOpenConns, HikariCP's maximumPoolSize,
+// DataGrip's data-source option. Every one of them asked a developer to know a
+// number, and the acceptance rules retire exactly that: a developer points an
+// application at the front door and it works. A surface that hands out sizing
+// advice is a surface teaching people the thing the scheduler exists to stop
+// them needing.
 //
-// Deriving a share needs inputs this card does not have and cannot have -- how
-// many processes this developer will run, how many replicas, who else is
-// behind their source address, who is competing right now. So the card stops
-// computing. It shows the ceilings WITH THEIR SCOPE, states the multiplier as
-// a formula the reader applies to their own situation, gives one worked
-// example and says it is one, and then says where the real number comes from:
-// an operator.
+// What replaces it is the bound that already does the work: each connection
+// carries its own ceiling on pooled connections, and autodb holds a client to
+// it whether or not the client sized itself. So the card reports what the
+// limits ARE and who they are shared with, and stops.
+//
+// A SHARED CEILING CANNOT YIELD A PRIVATE NUMBER, which is why it does not try
+// to derive one. Three attempts failed the same way. "Idle should equal open"
+// hoards leases other people are waiting for. "Up to your allotted share" named
+// a mechanism that does not exist -- admission is first-come-first-served with
+// no per-user slices. "The per-user cap divided by the databases you connect
+// to" hands the whole shared cap to every process: two Label Manager processes
+// each follow four-and-four and together ask for sixteen against a cap of
+// eight, and the same breaks with two tokens, two users behind one NAT, or a
+// replica set. Deriving a share needs inputs this card does not have and cannot
+// have.
 //
 // NOT LIVE AVAILABILITY, EITHER. This card is shown once and cannot be
 // recovered, so a count of backends free at this instant is stale before it is
 // read. Live figures belong in the pressure view, which carries a timestamp.
-//
-// THIS BLOCK IS A BRIDGE. The acceptance rules say a developer configures
-// nothing; today they must, or the front door refuses them. When the scheduler
-// lands this is demoted to latency advice or removed, and that obligation is a
-// capability test carried by the change that makes it obsolete -- not a note
-// here, because a plan to delete something later is the kind of plan that does
-// not happen.
-func writeCardBudget(p func(string, ...any), ep FrontDoorEndpoint) {
+func writeCardBudget(p func(string, ...any), conn ConnInfo, ep FrontDoorEndpoint) {
 	// Nothing to say when the door is not configured: the warning at the top
 	// of the card already says the token cannot be used anywhere.
 	if !ep.Configured() {
@@ -399,8 +401,15 @@ func writeCardBudget(p func(string, ...any), ep FrontDoorEndpoint) {
 	}
 
 	p("LIMITS THAT APPLY TO THIS TOKEN")
+	p("  You do not size anything. autodb holds you to these whether or not your")
+	p("  client is configured for them.")
 	p("  These are ceilings, and they are SHARED. None of them is yours alone.")
 	p("")
+	if conn.PoolMaxConns > 0 {
+		// THE ONE THAT ACTUALLY DEALS WITH IT, so it leads.
+		p("  %-22s %-9s %s", "this connection", cardCap(conn.PoolMaxConns),
+			"pooled connections to "+cardDatabase(conn))
+	}
 	p("  %-22s %-9s %s", "sessions per user", cardCap(ep.MaxSessionsPerUser),
 		"you, across every database you connect to")
 	p("  %-22s %-9s %s", "sessions, instance", cardCap(ep.MaxSessionsGlobal),
@@ -415,34 +424,8 @@ func writeCardBudget(p func(string, ...any), ep FrontDoorEndpoint) {
 	// were a concurrency cap would teach exactly the wrong model of what is
 	// limiting somebody, which is the confusion the incident behind this work
 	// was made of.
-	p("  Your demand is  processes x databases x connections-per-pool.")
-	p("  A second process doubles it. Apply the formula to your own setup; the")
-	p("  card cannot know how many processes or replicas you will run, or who")
-	p("  else is behind your address.")
-	p("")
-	p("  Worked example, and it is an EXAMPLE, not a rule:")
-	p("    one process, two databases, nobody else competing, cap of eight")
-	p("    -> four connections per pool.")
-	p("")
-	p("  Your real number is an allocation the OPERATOR makes. Ask them.")
-	p("")
-	p("WHAT TO SET, FOR THE CLIENT YOU ARE USING")
-	p("  Label Manager (lm-http, gold-http)")
-	p("    PG_MAX_OPEN_CONNS / PG_MAX_IDLE_CONNS")
-	p("    -- Label Manager's OWN environment variables, read by its config.")
-	p("       Not a Postgres setting and not a database/sql one.")
-	p("  Any other Go database/sql application")
-	p("    pool.SetMaxOpenConns(n) / pool.SetMaxIdleConns(n)")
-	p("  A JDBC application using HikariCP")
-	p("    maximumPoolSize / minimumIdle")
-	p("  DataGrip")
-	p("    its own connection-pool setting, in the data-source options.")
-	p("    NOT a HikariCP property, and not something an application sets.")
-	p("  psql")
-	p("    nothing -- one connection per session.")
-	p("")
-	p("  Reopening is not free: every new connection costs a TLS handshake, a")
-	p("  token verification and a fresh admission.")
+	p("  If you are being refused and want to know why, open the pressure view")
+	p("  (System -> Pressure). It carries a timestamp; this card does not.")
 	p("")
 }
 

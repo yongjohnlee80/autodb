@@ -640,6 +640,13 @@ type ConnInfo struct {
 	// engine yields one. It is what a client types into a Database field, and
 	// the fact whose absence cost an evening.
 	TargetDB string
+
+	// PoolMaxConns is this connection's OWN bound on pooled connections, and
+	// it is the number that actually deals with a client opening more than it
+	// should. Zero means the connection sets none and the engine's ceiling
+	// applies. Johno's ruling: "Each conn should have allowed MAX CONNS to
+	// deal with anyways."
+	PoolMaxConns int
 }
 
 func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
@@ -653,7 +660,7 @@ func (b *Bound) Connections(ctx context.Context) ([]ConnInfo, error) {
 		out = append(out, ConnInfo{
 			ID: mI(m, "id"), Name: mS(m, "name"), Engine: mS(m, "engine"),
 			Profile: mS(m, "profile"), FrontDoorExposed: mB(m, "frontdoor_exposed"),
-			TargetDB: mS(m, "target_db"),
+			TargetDB: mS(m, "target_db"), PoolMaxConns: int(mI(m, "pool_max_conns")),
 		})
 	}
 	return out, nil
