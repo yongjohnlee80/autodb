@@ -59,7 +59,7 @@ func TestHistogram_ExclusiveInternallyCumulativeOnExport(t *testing.T) {
 // owner — so if it does, the ordering assumption every duration signal rests
 // on has broken. Folding it into the first bin would hide that.
 func TestHistogram_ANegativeSampleIsRefused(t *testing.T) {
-	h := NewHistogram(LatencyEdgesMs)
+	h := NewHistogram(QueueWaitEdgesMs)
 	if h.Observe(-time.Second) {
 		t.Fatal("a negative duration was accepted")
 	}
@@ -68,69 +68,119 @@ func TestHistogram_ANegativeSampleIsRefused(t *testing.T) {
 	}
 }
 
-// THE SHARED EDGES CANNOT MEASURE A HOLD, WHICH IS WHY HOLDS HAVE THEIR OWN.
+// EVERY BOUND IS AN ACTUAL EDGE, AND A SAMPLE AT IT IS COUNTABLE.
 //
-// This is the finding the connection-holding ruling recorded and nobody
-// applied. With the shared edges every realistic hold lands in the overflow
-// bin, so the histogram reports that holds happen and says nothing about how
-// long they last — the only question it exists to answer.
-func TestHistogram_HoldEdgesDistinguishWhatLatencyEdgesCannot(t *testing.T) {
-	holds := []time.Duration{
-		2 * time.Minute,  // past the queue deadline
-		30 * time.Minute, // past session idle
-		3 * time.Hour,    // past idle-in-transaction
-		9 * time.Hour,    // past the total bound: genuinely overflow
-	}
+// The ratified requirement, in its own words: every boundary a signal exists
+// to diagnose must be an actual edge, otherwise the interesting case lands in
+// +Inf and the metric cannot answer the question it was built for.
+//
+// So this does not check the numbers against a copy of the list — that would
+// only prove the transcription. It drives a sample AT each bound and requires
+// it to land in a NAMED bin, which is the property the operator depends on.
+func TestHistogram_ASampleAtEachBoundIsCountable(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		edges []int64
+		at    time.Duration
+	}{
+		{"the 90s queue deadline", QueueWaitEdgesMs, 90 * time.Second},
+		{"the 10m session idle bound", BackendHoldEdgesMs, 10 * time.Minute},
+		{"the 2h idle-in-transaction bound", BackendHoldEdgesMs, 2 * time.Hour},
+		{"the 8h total transaction bound", BackendHoldEdgesMs, 8 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := tc.at.Milliseconds()
 
-	// THE CLAIM IS SEPARATION, NOT OVERFLOW. A first version of this cell
-	// asserted all four land in overflow, which is false: two minutes fits
-	// under the shared 300000ms top edge. The defect is not where they land
-	// but that the shared edges CANNOT TELL THEM APART — three of these four
-	// durations share one bin, so a reader cannot distinguish a half-hour hold
-	// from a nine-hour one.
-	shared := NewHistogram(LatencyEdgesMs)
-	for _, d := range holds {
-		shared.Observe(d)
-	}
-	if got := distinctBins(shared.Bins()); got > 2 {
-		t.Fatalf("the shared edges separated these holds into %d bins; this cell exists "+
-			"because they cannot separate them, and if that has changed the edges have moved "+
-			"and HoldEdgesMs may no longer be needed", got)
-	}
+			// THE BOUND IS AN EDGE, EXACTLY. "not in +Inf" is too weak and a
+			// control proved it: the hold set carries 12h of headroom above
+			// the 8h bound, so deleting the 8h edge still leaves an 8h sample
+			// countable — in the WRONG bin, lumped with everything up to 12h.
+			// An operator asking "are holds piling up AT the bound" would read
+			// that as fine.
+			var idx = -1
+			for i, e := range tc.edges {
+				if e == ms {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				t.Fatalf("%v (%dms) is not an edge of this set; the ratified rule is that "+
+					"every boundary a signal exists to diagnose must be an ACTUAL edge, so a "+
+					"sample at the bound falls in with everything below the next one",
+					tc.at, ms)
+			}
 
-	hold := NewHistogram(HoldEdgesMs)
-	for _, d := range holds {
-		hold.Observe(d)
-	}
-	bins := hold.Bins()
-	nonEmpty := distinctBins(bins)
-	if nonEmpty < 4 {
-		t.Errorf("the hold edges separated these four durations into %d bins, want 4; an "+
-			"operator asking whether holds are piling up against a bound needs them apart",
-			nonEmpty)
-	}
-	if got := bins[len(HoldEdgesMs)]; got != 1 {
-		t.Errorf("overflow holds %d samples, want 1 — only the 9h hold is past the 8h bound", got)
+			h := NewHistogram(tc.edges)
+			if !h.Observe(tc.at) {
+				t.Fatalf("%v was refused", tc.at)
+			}
+			bins := h.Bins()
+			if bins[idx] != 1 {
+				t.Errorf("a sample exactly at %v did not land in its own bin %d; `sample <= e` "+
+					"puts a bound INTO the bin it names, which is what makes the bound "+
+					"readable", tc.at, idx)
+			}
+			if overflow := bins[len(tc.edges)]; overflow != 0 {
+				t.Errorf("a sample at %v landed in +Inf", tc.at)
+			}
+		})
 	}
 }
 
-// THE LONG EDGES ARE THE RULED BOUNDS, EXACTLY.
+// AND THE TWO SETS EXIST BECAUSE ONE CANNOT DO BOTH JOBS.
 //
-// The register requires 90s/10m/2h/8h. A bin boundary sitting exactly on each
-// bound is what lets an operator read "piling up against the bound" directly
-// instead of doing arithmetic against numbers kept somewhere else.
-func TestHistogram_HoldEdgesCarryTheRuledBounds(t *testing.T) {
-	for _, want := range []int64{90_000, 600_000, 7_200_000, 28_800_000} {
-		var found bool
-		for _, e := range HoldEdgesMs {
-			if e == want {
-				found = true
-				break
-			}
+// The queue set stops at the 90-second deadline by design. Measuring a hold
+// with it puts every hold past that point in +Inf, which is what "no shared
+// edge set" was ruled to prevent. This cell is the reason there are two sets
+// rather than an observation about a mistake.
+func TestHistogram_TheQueueSetCannotResolveHoldBounds(t *testing.T) {
+	holds := []time.Duration{10 * time.Minute, 2 * time.Hour, 8 * time.Hour}
+
+	queue := NewHistogram(QueueWaitEdgesMs)
+	for _, d := range holds {
+		queue.Observe(d)
+	}
+	if got := queue.Bins()[len(QueueWaitEdgesMs)]; got != uint64(len(holds)) {
+		t.Fatalf("the queue set placed %d of %d hold bounds outside +Inf; if that has changed "+
+			"the sets have converged and one of them is no longer the ratified schema", got, len(holds))
+	}
+
+	hold := NewHistogram(BackendHoldEdgesMs)
+	for _, d := range holds {
+		hold.Observe(d)
+	}
+	if got := distinctBins(hold.Bins()); got != len(holds) {
+		t.Errorf("the hold set separated the three bounds into %d bins, want %d — an operator "+
+			"asking which bound holds are piling against needs them apart", got, len(holds))
+	}
+	if got := hold.Bins()[len(BackendHoldEdgesMs)]; got != 0 {
+		t.Errorf("%d of the three bounds landed in +Inf under the hold set", got)
+	}
+}
+
+// TWELVE EDGES, THIRTEEN BINS, BOTH SETS.
+//
+// The bin COUNT is what the design's cell arithmetic depends on, explicitly
+// not the edge values — so a set that changed its length would break
+// arithmetic elsewhere while every value in it still looked reasonable.
+func TestHistogram_BothRatifiedSetsAreTwelveEdges(t *testing.T) {
+	for name, edges := range map[string][]int64{
+		"queue_wait_ms":   QueueWaitEdgesMs,
+		"backend_hold_ms": BackendHoldEdgesMs,
+	} {
+		if len(edges) != 12 {
+			t.Errorf("%s has %d edges, want 12; the bin count is what the cell arithmetic "+
+				"depends on", name, len(edges))
 		}
-		if !found {
-			t.Errorf("%dms is not an edge; the ruled bounds are 90s, 10m, 2h and 8h and each "+
-				"must be a boundary", want)
+		h := NewHistogram(edges)
+		if got := len(h.Bins()); got != 13 {
+			t.Errorf("%s yields %d bins, want 13", name, got)
+		}
+		for i := 1; i < len(edges); i++ {
+			if edges[i] <= edges[i-1] {
+				t.Errorf("%s edges are not ascending at %d (%d after %d)", name, i, edges[i], edges[i-1])
+			}
 		}
 	}
 }

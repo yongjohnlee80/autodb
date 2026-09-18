@@ -2,40 +2,42 @@ package schedmetrics
 
 import "time"
 
-// LatencyEdgesMs are the shared duration-histogram edges: 12 edges, and with
-// the overflow, 13 exclusive internal bins.
+// PER-SIGNAL EDGE SETS. THERE IS NO SHARED SET.
 //
-// Fixed edges rather than sample lists, so exact totals survive eviction and
-// bucket choice — which is also why _count and _sum accompany every histogram
-// rather than being derived from the bins.
-var LatencyEdgesMs = []int64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000, 30000, 300000}
+// 0187 §3 said one set was "shared by every duration histogram", topping out
+// at five minutes. That was right at a 90-second bound and is wrong now, and
+// the connection-holding policy replaced it: each signal names its own set,
+// and every boundary a signal exists to diagnose must be an actual edge —
+// otherwise the interesting case lands in +Inf and the metric cannot answer
+// the question it was built for.
+//
+// TWELVE EDGES EACH, SO THIRTEEN BINS EACH. The bin count is deliberately
+// unchanged across both sets, because 0187's cell arithmetic depends on the
+// COUNT and not on the values.
+//
+// These are transcribed from the ratified table, not chosen here. An earlier
+// version of this file invented an eight-edge hold set and flagged it as a
+// deviation needing a ruling; the ruling already existed and had been missed.
 
-// HoldEdgesMs are the edges for how long a backend was HELD, which is a
-// different domain and needs different edges.
+// QueueWaitEdgesMs resolves the 90-second queue deadline, which is the last
+// edge rather than the overflow: a wait that reached its bound must be
+// countable, and a bound sitting in +Inf is the one sample you cannot see.
+var QueueWaitEdgesMs = []int64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 5000, 30000, 90_000}
+
+// BackendHoldEdgesMs resolves the three holding bounds — 10 minutes, 2 hours
+// and 8 hours — each of which is an exact edge.
 //
-// THE SHARED EDGES TOP OUT AT FIVE MINUTES AND A HOLD IS BOUNDED AT EIGHT
-// HOURS. Using them would put essentially every hold in the overflow bin: the
-// histogram would report that holds happen and say nothing whatever about how
-// long they last, which is the only question it exists to answer. The
-// connection-holding ruling flagged exactly this and the fix was never
-// applied.
-//
-// THE FOUR LONG EDGES ARE THE RULED BOUNDS THEMSELVES — 90s the queue
-// deadline, 10m the session idle timeout, 2h idle-in-transaction, 8h the total
-// transaction bound. That is deliberate: an operator reading this histogram is
-// asking "are holds piling up against a bound", and a bin boundary that sits
-// exactly on each bound answers it directly instead of requiring arithmetic
-// against numbers kept somewhere else.
-//
-// A DEVIATION FROM THE MEASUREMENT DESIGN'S "shared by every duration
-// histogram", recorded rather than quietly taken: the design predates the
-// holding ruling that moved these bounds from 90s/5m to 2h/8h.
-var HoldEdgesMs = []int64{
-	100, 1000, 5000, 30000,
-	90_000,     // the queue deadline
-	600_000,    // session idle
-	7_200_000,  // idle in transaction
-	28_800_000, // the total transaction bound
+// Reclamation and termination timing use this same set, per the same table.
+var BackendHoldEdgesMs = []int64{
+	1_000, 10_000, 60_000, 300_000,
+	600_000,    // 10 min — session idle
+	1_800_000,  // 30 min
+	3_600_000,  // 1 h
+	7_200_000,  // 2 h — idle in transaction
+	14_400_000, // 4 h
+	21_600_000, // 6 h
+	28_800_000, // 8 h — the total transaction bound
+	43_200_000, // 12 h — headroom above the bound, so a hold PAST it is still countable
 }
 
 // Histogram counts durations into exclusive internal bins.
