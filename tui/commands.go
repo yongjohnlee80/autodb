@@ -55,6 +55,7 @@ const (
 	cmdConnToggle    CommandID = "session.connection_toggle"
 	cmdRestart       CommandID = "server.restart"
 	cmdAbout         CommandID = "app.about"
+	cmdProfile       CommandID = "app.profile"
 	cmdPressure      CommandID = "app.pressure"
 	cmdHelp          CommandID = "app.help"
 	cmdQuit          CommandID = "app.quit"
@@ -346,6 +347,25 @@ func commandCatalog() []Command {
 				Label: "front-door pressure",
 				Help:  "what the front door holds, and what it is refusing"},
 			Menu: []MenuProjection{{Parent: nodeSystem, Label: "Pressure", Hotkey: 'P', Order: 52}},
+		},
+		{
+			// PROFILE IS OFFERED TO EVERYONE, unlike the Users manager beside
+			// it: the one thing here is a change to the caller's OWN account,
+			// which the daemon scopes to whoever the token resolves to and
+			// cannot be pointed at anybody else. Hiding it from editors would
+			// hide the only route they have to their own passphrase.
+			//
+			// It is hidden while nobody is signed in, because there is no
+			// account for it to be about.
+			ID:      cmdProfile,
+			Visible: func(m *Model) bool { return m.session.User().Name != "" },
+			Run:     func(m *Model) { m.openProfile() },
+			Leader: &LeaderProjection{Key: 'o', Order: 245,
+				Label: "profile",
+				Help:  "your account, and your own passphrase"},
+			Menu: []MenuProjection{ // 'F' because 'P' is Pressure's on this menu and 'O' is not in
+				// the word. proFile.
+				{Parent: nodeSystem, Label: "Profile…", Hotkey: 'F', Order: 5}},
 		},
 		{
 			ID: cmdAbout, Run: func(m *Model) { m.openAbout() },
