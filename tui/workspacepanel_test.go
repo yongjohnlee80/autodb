@@ -569,3 +569,50 @@ func receiverTypeName(recv *ast.FieldList) string {
 	}
 	return ""
 }
+
+// THE CAPABILITY PROFILE IS REACHABLE FROM THE CONNECTIONS MANAGER.
+//
+// conn.set_profile has been served since profiles existed, and
+// Bound.SetConnectionProfile has wrapped it just as long -- and no surface
+// called either, so the only way to move a connection off the default was to
+// write an RPC client. Johno found it from JetBrains: an exposed connection on
+// the default v1compat authenticates, opens a session, and refuses the
+// client's opening SET.
+func TestManager_ConnectionsOfferTheCapabilityProfile(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() { h.m.openConnManager() })
+	h.waitUntil("the connections manager is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	if !strings.Contains(h.screen(), "p:capability") {
+		t.Fatalf("the connections manager does not offer the capability profile:\n%s", h.screen())
+	}
+}
+
+// AND THE FORM NAMES BOTH PROFILES AND WHAT THE DEFAULT COSTS. A picker
+// listing two identifiers would make the operator guess which one their client
+// needs, which is the guess that produced the refusal.
+func TestManager_TheProfileFormSaysWhatTheDefaultRefuses(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	var g *manager[ConnInfo]
+	h.on(func() {
+		h.m.openConnManager()
+		for _, f := range h.m.floats {
+			if got, ok := f.body.(*manager[ConnInfo]); ok {
+				g = got
+			}
+		}
+	})
+	h.waitUntil("the manager is open", func() bool { return g != nil })
+	h.on(func() {
+		h.m.openConnProfile(g, ConnInfo{ID: 1, Name: "LmRO", Engine: "postgres"})
+	})
+	h.settle()
+
+	got := h.screen()
+	for _, want := range []string{"capability profile for LmRO", meta.ProfileV1Compat, meta.ProfileSession, "SET"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q is not on the profile form:\n%s", want, got)
+		}
+	}
+}

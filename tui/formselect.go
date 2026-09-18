@@ -222,6 +222,19 @@ func engineItems() []widget.SelectItem[string] {
 	return items
 }
 
+// profileItems is the capability vocabulary, with each option saying what it
+// COSTS rather than only what it is named.
+//
+// An operator choosing here is deciding whether ordinary clients can speak to
+// this connection at all: v1compat refuses every control statement, and the
+// first thing pgjdbc, psql and JetBrains all send is one.
+func profileItems() []widget.SelectItem[string] {
+	return []widget.SelectItem[string]{
+		{Label: meta.ProfileV1Compat + " — refuses SET/BEGIN; breaks most SQL clients", Value: meta.ProfileV1Compat},
+		{Label: meta.ProfileSession + " — admits session state over the front door", Value: meta.ProfileSession},
+	}
+}
+
 func roleItems() []widget.SelectItem[string] {
 	return []widget.SelectItem[string]{
 		{Label: "admin — everything, including users", Value: meta.RoleAdmin},
