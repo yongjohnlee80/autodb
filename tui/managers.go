@@ -433,11 +433,15 @@ func (m *Model) openExposureSwitch(g *manager[ConnInfo], sel ConnInfo) {
 }
 
 func (m *Model) openConnForm(g *manager[ConnInfo]) {
-	m.openForm("new connection", []formField{
+	connFields := []formField{
 		field("name"),
 		staticSelect("engine", engineItems()),
 		field("dsn (stored encrypted at rest)"),
-	}, func(v formValues) (bool, string) {
+	}
+	// A RULE BETWEEN EVERY PAIR. Each row here is a separate thing being
+	// asked for -- a name, an engine, a DSN -- so every gap is a real
+	// boundary rather than a break in one idea.
+	m.openFormOpts("new connection", connFields, func(v formValues) (bool, string) {
 		name, engine, dsn := v.str(0), v.str(1), v.str(2)
 		// The engine clause survives the select, and its MEANING changes: it
 		// used to catch an empty box, and now catches an unmade choice. What
@@ -452,7 +456,7 @@ func (m *Model) openConnForm(g *manager[ConnInfo]) {
 			return err
 		})
 		return true, ""
-	})
+	}, formOpts{chrome: rulesBetween(len(connFields))})
 }
 
 func (m *Model) openAttachForm(g *manager[ConnInfo], connID int64, connName string) {
@@ -908,7 +912,9 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 	title := fmt.Sprintf("create token (%d of %d used)", active, auth.PATMaxPerUser)
 	askCleartext := m.offersCleartextTokenField()
 	fields := patFormFields(m, askCleartext)
-	m.openForm(title, fields, func(v formValues) (bool, string) {
+	// Same reasoning as the connection form: a token's name, its expiry and
+	// its allowlist are three separate questions.
+	m.openFormOpts(title, fields, func(v formValues) (bool, string) {
 		name := v.str(0)
 		if name == "" {
 			return false, "a name is required"
@@ -1039,7 +1045,7 @@ func (m *Model) patForm(g *manager[PATRow], userID int64, who string, own []User
 		}
 		m.mintPAT(g, bound, name, days, ips, connID, debugCleartext, nil)
 		return true, ""
-	})
+	}, formOpts{chrome: rulesBetween(len(fields))})
 }
 
 // confirmAllowlistWidening asks before adding rows to the caller's own

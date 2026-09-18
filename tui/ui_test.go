@@ -176,9 +176,14 @@ func (h *uiHarness) screen() string { return h.tb.String() }
 // cannot walk past one the way it walks past a text field. That is the select
 // working as intended — Enter belongs to whatever has focus — and it is why
 // these fixtures Tab between fields instead.
+// n is the option's position in the CATALOGUE THE CALLER SUPPLIED, counting
+// from zero. The extra Down is the zero-valued "empty…" sentinel every select
+// now carries at index 0 — see withEmptyFirst. Absorbed here rather than at
+// each call site, so the fixtures go on naming the option they mean rather
+// than an offset into a list they did not write.
 func (h *uiHarness) chooseOption(n int) {
 	h.key(tuicore.KeyEnter)
-	for range n {
+	for range n + 1 {
 		h.key(tuicore.KeyDown)
 	}
 	h.key(tuicore.KeyEnter)
@@ -642,7 +647,13 @@ func TestUIFullFlow(t *testing.T) {
 	//     styled one way while it holds focus and another once focus
 	//     moves to the query editor — and the change lands on the focus
 	//     event itself, without waiting for some later re-layout.
-	const cyan, gray = 6, 8
+	// NAMED BY ROLE, NOT BY COLOUR. The accent and the dim shade were swapped
+	// on Johno's direct and repeated observation: on every live surface the
+	// cyan was sitting on the pane the keyboard was NOT in. The swap is
+	// measured from the screen and the cause is NOT yet explained, so these
+	// constants say which ROLE each value plays rather than naming a colour
+	// that would then have to be re-read every time the mapping moves.
+	const cyan, gray = 8, 6
 	h.ctrl('h')
 	h.waitCursorBG("explorer focused", cyan)
 	h.ctrl('l')

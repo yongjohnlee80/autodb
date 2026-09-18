@@ -643,6 +643,24 @@ func (f *form) Children() iter.Seq[tui.Component] {
 
 var _ tui.Container = (*form)(nil)
 
+// rulesBetween puts a divider between every pair of adjacent fields.
+//
+// PLACED BY THE CALLER, STILL. It is sugar over the chrome map for the forms
+// whose rows are each a separate thing being asked for -- a name, an engine, a
+// DSN -- where every gap is a real boundary. A form of closely related fields
+// would be cut into pieces by the same call, which is why it is not the
+// default.
+func rulesBetween(n int) map[int][]tui.Component {
+	if n < 2 {
+		return nil
+	}
+	out := make(map[int][]tui.Component, n-1)
+	for i := 1; i < n; i++ {
+		out[i] = []tui.Component{newHRule()}
+	}
+	return out
+}
+
 // openForm builds a form float and wires the float back-reference.
 // openForm shows a form as a DIALOG: a titled card with the fields, and a
 // button row that is the only route to a submit.
