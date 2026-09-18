@@ -529,42 +529,7 @@ func runServe(configPath string) error {
 	// still say listening. The daemon is on its way down in that case, so the
 	// window is the drain rather than indefinite; it is named here rather than
 	// implied away.
-	frontDoorState := func() rpc.FrontDoorInfo {
-		// PER CALL, not captured once: the whole point is that a reload moves
-		// these, so a value read at wiring time would be the startup config
-		// wearing a different name.
-		perUser, global, targetConns := frontDoorCeilings(eng)
-		info := rpc.FrontDoorInfo{
-			Enabled:    cfg.FrontDoor.Enabled,
-			HostNames:  cfg.FrontDoor.TLSHostNames,
-			RootCAFile: cfg.FrontDoor.TLSRootCAFile,
-
-			// The ceilings a token minted here will actually meet, READ FROM
-			// THE ENGINE rather than from the startup config.
-			//
-			// cfg is what the daemon booted with and never changes.
-			// policy.reload moves the live budget, and LoadDurablePolicy
-			// applies a stored one before the janitor even starts -- so a card
-			// reading cfg would quote a number the admitter had already stopped
-			// using, to the operator who had just changed it and was looking
-			// for the new one.
-			//
-			// Settings() takes the policy and the ledger under ONE lock, so
-			// these three cannot come from two different generations.
-			MaxSessionsPerUser: perUser,
-			MaxSessionsGlobal:  global,
-			MaxTargetConns:     targetConns,
-		}
-		if fd != nil {
-			info.Listening = true
-			info.Addr = fd.Addr().String()
-			// Read from the config that OPENED the listener, on the same
-			// branch that reports it listening — so "listening" and "how it
-			// is listening" cannot come from two different moments.
-			info.Cleartext = cfg.FrontDoor.CleartextDebug()
-		}
-		return info
-	}
+	frontDoorState := newFrontDoorState(cfg, eng, fd)
 	// READ LIVE, ON EVERY CALL, from the listener that is actually serving.
 	// A nil listener answers with the error rather than an empty view, for the
 	// same reason the view itself does: an empty pressure report and a front
@@ -1490,4 +1455,51 @@ var errNoFrontDoor = errors.New("the front door is not enabled on this instance"
 func frontDoorCeilings(eng *coreexec.Engine) (maxSessionsPerUser, maxSessionsGlobal, maxTargetConns int) {
 	s := eng.Settings()
 	return s.MaxSessionsPerUser, s.MaxSessionsGlobal, s.TargetConns.Configured
+}
+
+// newFrontDoorState builds the front-door projection the RPC surface publishes.
+//
+// A NAMED CONSTRUCTOR RATHER THAN AN INLINE CLOSURE so a cell can drive the
+// SHIPPED one. A test that reaches past this into frontDoorCeilings proves the
+// helper and nothing about the wiring -- and the wiring is where the defect
+// was: this projection read the immutable cfg.Exec while the admitter had
+// moved on. Rewiring it back to cfg must fail a test, which it cannot if no
+// test goes through here.
+func newFrontDoorState(cfg config.Config, eng *coreexec.Engine, fd *frontdoor.Listener) func() rpc.FrontDoorInfo {
+	return func() rpc.FrontDoorInfo {
+		// PER CALL, not captured once: the whole point is that a reload moves
+		// these, so a value read at wiring time would be the startup config
+		// wearing a different name.
+		perUser, global, targetConns := frontDoorCeilings(eng)
+		info := rpc.FrontDoorInfo{
+			Enabled:    cfg.FrontDoor.Enabled,
+			HostNames:  cfg.FrontDoor.TLSHostNames,
+			RootCAFile: cfg.FrontDoor.TLSRootCAFile,
+
+			// The ceilings a token minted here will actually meet, READ FROM
+			// THE ENGINE rather than from the startup config.
+			//
+			// cfg is what the daemon booted with and never changes.
+			// policy.reload moves the live budget, and LoadDurablePolicy
+			// applies a stored one before the janitor even starts -- so a card
+			// reading cfg would quote a number the admitter had already stopped
+			// using, to the operator who had just changed it and was looking
+			// for the new one.
+			//
+			// Settings() takes the policy and the ledger under ONE lock, so
+			// these three cannot come from two different generations.
+			MaxSessionsPerUser: perUser,
+			MaxSessionsGlobal:  global,
+			MaxTargetConns:     targetConns,
+		}
+		if fd != nil {
+			info.Listening = true
+			info.Addr = fd.Addr().String()
+			// Read from the config that OPENED the listener, on the same
+			// branch that reports it listening — so "listening" and "how it
+			// is listening" cannot come from two different moments.
+			info.Cleartext = cfg.FrontDoor.CleartextDebug()
+		}
+		return info
+	}
 }
