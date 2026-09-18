@@ -610,3 +610,27 @@ func TestManager_TheEditFormCarriesNameProxyAndProfile(t *testing.T) {
 		}
 	}
 }
+
+// THE ROW SHOWS THE CAPABILITY BESIDE THE REACHABILITY.
+//
+// They are two independent decisions and the row showed only one, so a
+// connection that authenticates and then refuses its client's opening
+// statement — v1compat exposed through the front door — looked from the
+// manager exactly like a working one. That is the state Johno spent an
+// afternoon inside.
+func TestManager_TheConnectionRowShowsItsCapabilityProfile(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	h.on(func() { h.m.openConnManager() })
+	h.waitUntil("the connections manager is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	got := h.screen()
+	if !strings.Contains(got, "PROFILE") {
+		t.Errorf("the connections table has no PROFILE column:\n%s", got)
+	}
+	// AND STILL SHOWS PROXY, or the column was renamed rather than added and
+	// the two decisions are once again one.
+	if !strings.Contains(got, "PROXY") {
+		t.Errorf("the PROXY column went missing:\n%s", got)
+	}
+}
