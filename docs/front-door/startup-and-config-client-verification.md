@@ -1,6 +1,8 @@
 # Verifying the startup and configuration client contracts
 
-**Status: ASSIGNED TO THE PRE-CUTOVER GATE. Not run.**
+**Status: the pgx half is RUN and its three negative controls are proven; the
+pgjdbc half is NOT run and the gate does not close without it.** Updated
+2026-09-18.
 
 Three client-facing shapes were added with the configuration-failure work and
 **only one of them is verified against a real client**. This document is the
@@ -13,16 +15,21 @@ record rather than an omission.
 | Shape | Where it is raised | pgx | pgjdbc |
 | --- | --- | --- | --- |
 | `F0000` **ERROR** — connection unusable, request time | a live session's request | **verified** (`frontdoor/connection_unusable_pg_test.go`) | **not run** |
-| `F0000` **FATAL** — connection unusable, startup | inside `OpenWireSessionWith` | not run | **not run** |
-| `57P03` **FATAL** — connection unavailable, startup | inside `OpenWireSessionWith` | not run | **not run** |
+| `F0000` **FATAL** — connection unusable, startup | inside `OpenWireSessionWith` | **verified** (`frontdoor/startup_client_pg_test.go`) | **not run** |
+| `57P03` **FATAL** — connection unavailable, startup | inside `OpenWireSessionWith` | **verified** (`frontdoor/startup_client_pg_test.go`) | **not run** |
 
 The request-time shape's pgx result is real: the driver reads the code and
 severity out of `pgconn.PgError`, is not closed by it, and runs real work on
 the same connection afterwards.
 
-The two startup shapes are proven only against this repository's own frontend
+The two startup shapes are now proven against real pgx as well
+(`frontdoor/startup_client_pg_test.go`), including that each carries its FIXED
+message and hint rather than merely a differing one, and that the two do not
+render identically to a reader. They remain unproven against pgjdbc.
+
+They were previously proven only against this repository's own frontend
 harness. That harness reads the bytes correctly by construction, which is
-exactly why it cannot answer the question that matters.
+exactly why it could not answer the question that matters.
 
 ## Why it matters, stated plainly
 
@@ -111,8 +118,21 @@ Each must redden, and each must be run rather than reasoned about:
   state. Whichever they do, the cell must notice.
 - Collapsing the two startup identities onto one SQLSTATE — the `distinct` row
   must fail.
-- Removing the `WireStartupFatal` arm in `listener.go` — the client must see a
-  credential denial, which is the defect this whole shape replaced.
+- Removing the `WireStartupFatal` arm in `listener.go` — the client must fail to
+  connect **without a parsed server error at all**.
+
+  **Corrected 2026-09-18, from running it.** This row predicted "the client must
+  see a credential denial, which is the defect this whole shape replaced." It
+  does not. With the arm disabled the listener closes the stream having sent no
+  frame, so there is nothing for a driver to parse: the observed pgx result is a
+  `*pgconn.ConnectError` wrapping `failed to receive message: unexpected EOF`,
+  and no `*pgconn.PgError` is produced.
+
+  The control still discriminates, and arguably more sharply — a bare transport
+  failure tells the operator nothing at all, where a credential denial would at
+  least have been a wrong answer they could act on. But the pass condition is
+  the absence of a server error, not the presence of a denial, and a cell
+  written to the old prediction would have looked for the wrong thing.
 
 ## Where this is tracked
 
