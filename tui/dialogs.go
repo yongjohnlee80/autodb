@@ -54,12 +54,10 @@ func (m *Model) openDialog(title, prose string, answers ...dialogAnswer) *widget
 	return m.openDialogOpts(title, prose, false, answers)
 }
 
-// openDialogScrimmed is openDialog for the surfaces the requirement names —
-// quit is the one here, login is a form. The backdrop fades because there is
-// nothing else to do until this is answered.
-func (m *Model) openDialogScrimmed(title, prose string, answers ...dialogAnswer) *widget.Modal {
-	return m.openDialogOpts(title, prose, true, answers)
-}
+// openDialogScrimmed IS GONE. Quit was its only caller and quit is built from
+// the modal factory now, which asks for the scrim with Scrimmed(). A helper
+// whose every caller has left is not "available for reuse" -- it is a second
+// way to do a thing, kept alive by the test that measures it.
 
 // openDialogNoDefault asks a question whose affirmative must not be one keypress
 // away: nothing here may be reached by a bare Enter on an untouched dialog.

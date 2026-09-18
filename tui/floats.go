@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"unicode"
 
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/style"
@@ -529,6 +530,19 @@ type formOpts struct {
 	prose []string
 	// okText renames the affirmative button.
 	okText string
+	// cancelText renames the declining one. "Stay" reads better than "Cancel"
+	// against an affirmative that says "Quit": the pair then names the two
+	// outcomes rather than one outcome and a refusal to choose.
+	cancelText string
+	// okMnemonic gives the affirmative a bare-letter accelerator.
+	//
+	// ONLY LEGAL WHEN THERE ARE NO FIELDS, and openFormOpts enforces it. A
+	// mnemonic is a bare keypress, and in a form every bare letter is a
+	// character somebody may type into a name, a CIDR or a passphrase -- which
+	// is exactly how the affirmative's old 'O' came to fire while an operator
+	// was typing. A confirmation has nothing to type into, so the collision
+	// cannot arise and the accelerator is free.
+	okMnemonic rune
 	// noCancel leaves only the affirmative button. For acknowledgements.
 	noCancel bool
 	// onCancel runs when the operator declines, and receives the answers as
@@ -576,10 +590,24 @@ func (m *Model) openFormOpts(title string, fields []formField,
 	// THE TWO BUTTONS ARE THE SAME WIDTH. "OK" beside "Cancel" rendered as a
 	// stub next to a slab, which reads as one real control and one afterthought
 	// -- and the affirmative was the stub.
-	labels := padButtonLabels([]string{okText, "Cancel"})
-	fm.ok = widget.NewButton(labels[0],
+	cancelText := opts.cancelText
+	if cancelText == "" {
+		cancelText = "Cancel"
+	}
+	labels := padButtonLabels([]string{okText, cancelText})
+	okOpts := []widget.ButtonOption{
 		widget.WithRole(widget.ButtonRoleDefault),
-		widget.WithOnActivate(fm.submit))
+		widget.WithOnActivate(fm.submit),
+	}
+	if opts.okMnemonic != 0 {
+		if len(fields) > 0 {
+			panic("tui: openFormOpts: an affirmative mnemonic on a form with " +
+				"fields. A mnemonic is a bare keypress and every bare letter is " +
+				"a character somebody may type into a field")
+		}
+		okOpts = append(okOpts, widget.WithMnemonic(opts.okMnemonic))
+	}
+	fm.ok = widget.NewButton(labels[0], okOpts...)
 	// THE CANCEL BUTTON DISMISSES ITSELF. Escape resolves the cancel ROLE and
 	// closes the dialog for you, but activating the button — clicking it, or
 	// Enter on it — runs its callback and nothing else. Without this, Escape
@@ -587,7 +615,7 @@ func (m *Model) openFormOpts(title string, fields []formField,
 	var md *widget.Modal
 	cancel := widget.NewButton(labels[1],
 		widget.WithRole(widget.ButtonRoleCancel),
-		widget.WithMnemonic('C'),
+		widget.WithMnemonic(cancelMnemonic(cancelText)),
 		widget.WithOnActivate(func() {
 			// Dismissing is ALL this does; opts.onCancel is reached through
 			// the dismissal hook, which Escape reaches too.
@@ -1004,4 +1032,17 @@ func copyReport(reachedClipboard, secret bool) (msg string, ok, dismiss bool) {
 func (m *Model) openTextFloat(title, text string) {
 	tf := &valueFloat{model: m, view: widget.NewBufferView(), value: text}
 	tf.float = m.openFloat(title, tf)
+}
+
+// cancelMnemonic is the declining button's accelerator: its own first letter,
+// so a button renamed to "Stay" answers to `s` rather than going on answering
+// to the 'C' of a word no longer on screen.
+//
+// Lower-cased because the mnemonic is matched against a bare keypress and an
+// operator presses `s`, not Shift-S.
+func cancelMnemonic(label string) rune {
+	for _, r := range strings.TrimSpace(label) {
+		return unicode.ToLower(r)
+	}
+	return 'c'
 }
