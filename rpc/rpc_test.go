@@ -231,6 +231,21 @@ func TestConnManagementOverWire(t *testing.T) {
 	editorTok := c.login("exposure-editor", "editor-passphrase")
 	errVal, _ = c.call("conn.set_exposure", editorTok, f.connID, true)
 	mustErr(t, errVal, rpc.CodeDenied)
+
+	// THE PROFILE BEFORE, READ RATHER THAN ASSUMED. What this cell proves is
+	// that exposure and capability are INDEPENDENT -- that opening the front
+	// door leaves the profile alone. It used to prove it by comparing against
+	// the literal v1compat, which was the same answer only for as long as a
+	// new connection was created on that profile. Creation writes the engine's
+	// default now, so the literal would report on the default while claiming
+	// to report on independence. Comparing before against after says the thing
+	// the cell is named for, whatever the default becomes.
+	errVal, result = c.call("conn.list", f.rootTok)
+	if errVal != nil {
+		t.Fatalf("conn.list before exposure: %#v", errVal)
+	}
+	profileBefore := result.([]any)[0].(map[string]any)["profile"]
+
 	if errVal, _ = c.call("conn.set_exposure", f.rootTok, f.connID, true); errVal != nil {
 		t.Fatalf("conn.set_exposure: %#v", errVal)
 	}
@@ -239,8 +254,9 @@ func TestConnManagementOverWire(t *testing.T) {
 		t.Fatalf("conn.list after exposure: %#v", errVal)
 	}
 	row = result.([]any)[0].(map[string]any)
-	if row["frontdoor_exposed"] != true || row["profile"] != meta.ProfileV1Compat {
-		t.Fatalf("independent exposure row: %#v", row)
+	if row["frontdoor_exposed"] != true || row["profile"] != profileBefore {
+		t.Fatalf("independent exposure row: exposure changed the profile from %v; %#v",
+			profileBefore, row)
 	}
 	if f.auditCount(t, "connection_exposure_changed") != 1 {
 		t.Fatal("the administrative exposure change was not audited exactly once")
