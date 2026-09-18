@@ -246,6 +246,16 @@ func profileItems() []widget.SelectItem[string] {
 	}
 }
 
+// yesNoItems is a boolean an operator reads. Empty means "leave it alone",
+// which is what an unchosen select already is -- so an edit form asks for a
+// value only where one is actually being changed.
+func yesNoItems() []widget.SelectItem[string] {
+	return []widget.SelectItem[string]{
+		{Label: "yes", Value: "yes"},
+		{Label: "no", Value: "no"},
+	}
+}
+
 func roleItems() []widget.SelectItem[string] {
 	return []widget.SelectItem[string]{
 		{Label: "admin — everything, including users", Value: meta.RoleAdmin},

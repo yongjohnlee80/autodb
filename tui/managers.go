@@ -49,7 +49,9 @@ type manager[T any] struct {
 	close *widget.Button
 	// ruleY is the row the divider is drawn on, decided in Layout and read by
 	// Render — which is handed a surface and no idea where the table ended.
-	ruleY   int
+	ruleY int
+	// seeded records that the keyboard has been placed on the rows. See Layout.
+	seeded  bool
 	actions []managerAction[T]
 	// filter narrows all -> items. nil shows everything.
 	filter func([]T) []T
@@ -192,6 +194,19 @@ func managerWidthFor(availW, hintW int) int {
 }
 
 func (g *manager[T]) Layout(c tui.Constraints) tui.Size {
+	// SEED THE KEYBOARD ON THE ROWS, ON THE FIRST LAYOUT AND NOT IN Init.
+	//
+	// Init runs DURING the mount, before the subtree is placed, so a focus
+	// request there fails and nothing tries again. The framework's own walk
+	// then picks the first focusable it can SEE -- and it cannot see into a
+	// Table, only the List inside it is focusable -- so the keyboard landed on
+	// the Close button, where the guard in HandleEvent routes every action
+	// letter to the button. `e`, `d` and `t` silently stopped working while
+	// the footer went on advertising them.
+	if !g.seeded && g.ctx != nil {
+		g.seeded = true
+		g.ctx.FocusComponent(g.table.List())
+	}
 	w := managerWidthFor(c.MaxW, g.ctx.StringWidth(g.hintLine()))
 	// The key list wraps rather than truncating (Johno, M6 manual
 	// testing: the users panel cut off "g:grant…"), so ask it how tall
@@ -237,8 +252,14 @@ func (g *manager[T]) HandleEvent(ev tui.Event) bool {
 		if g.ctx == nil {
 			return true
 		}
+		// THE LIST, NOT THE TABLE. widget.Table is not focusable -- only the
+		// List inside it is -- so FocusComponent(g.table) returns false and
+		// leaves the keyboard where it was. Focus then stayed on Close, and
+		// the guard below routes every action letter to the button while it
+		// holds focus: `e` and `d` stopped doing anything, silently, with the
+		// footer still advertising them.
 		if g.ctx.FocusWithin(g.close) {
-			g.ctx.FocusComponent(g.table)
+			g.ctx.FocusComponent(g.table.List())
 		} else {
 			g.ctx.FocusComponent(g.close)
 		}
@@ -329,18 +350,10 @@ func (m *Model) openConnManager() {
 		func(c context.Context, b *Bound) ([]ConnInfo, error) { return b.Connections(c) },
 		[]managerAction[ConnInfo]{
 			{'a', "add", func(ConnInfo, bool) { m.openConnForm(g) }},
-			{'r', "rename", func(sel ConnInfo, ok bool) {
-				if !ok {
-					return
+			{'e', "edit…", func(sel ConnInfo, ok bool) {
+				if ok {
+					m.openConnEdit(g, sel)
 				}
-				var name string
-				NewPromptModal(m, "rename "+sel.Name, "new name", sel.Name, &name).
-					WithSubmitFn(func(ModalResponse) error {
-						managerCall(g, "rename "+sel.Name, func(c context.Context, b *Bound) error {
-							return b.RenameConnection(c, sel.ID, name)
-						})
-						return nil
-					}).Open()
 			}},
 			{'t', "test", func(sel ConnInfo, ok bool) {
 				if ok {
@@ -366,17 +379,6 @@ func (m *Model) openConnManager() {
 						return nil
 					}).Open()
 			}},
-			{'p', "capability…", func(sel ConnInfo, ok bool) {
-				if !ok {
-					return
-				}
-				m.openConnProfile(g, sel)
-			}},
-			{'e', "proxy enabled…", func(sel ConnInfo, ok bool) {
-				if ok {
-					m.openExposureSwitch(g, sel)
-				}
-			}},
 			{'w', "attach→ws", func(sel ConnInfo, ok bool) {
 				if ok {
 					m.openAttachForm(g, sel.ID, sel.Name)
@@ -386,41 +388,85 @@ func (m *Model) openConnManager() {
 	g.float = m.openFloat("connections", g)
 }
 
-// openConnProfile changes a connection's capability profile.
+// openConnEdit is the connection's three editable properties in ONE modal:
+// its name, whether the front door carries it, and what SQL it may speak.
 //
-// THE VERB AND THE CLIENT CALL BOTH EXISTED AND NOTHING REACHED THEM. conn.set_profile
-// has been served since profiles were introduced and Bound.SetConnectionProfile
-// has wrapped it just as long, but no surface called either -- so the only way
-// to move a connection off the default was to write an RPC client. The default
-// is v1compat, which refuses every control statement; the first thing pgjdbc,
-// psql and JetBrains send over the front door is one. An exposed connection on
-// the default profile therefore authenticates, opens a session, and refuses the
-// client's opening statement, which is exactly what Johno hit from JetBrains.
+// THEY WERE THREE KEYS AND TWO OF THEM DID NOT EXIST. Renaming was `r`,
+// exposure was `e`, and the capability profile had no surface at all --
+// conn.set_profile has been served since profiles were introduced and
+// Bound.SetConnectionProfile has wrapped it just as long, with nothing calling
+// either. An operator could not move a connection off the default without
+// writing an RPC client, and the default refuses the opening statement of every
+// standard SQL client.
 //
-// SEPARATE FROM EXPOSURE, deliberately, and the exposure dialog says so: opening
-// the front door changes reachability and not capability. This is the other half
-// of that pair, and until now only one half had a way to be said.
-func (m *Model) openConnProfile(g *manager[ConnInfo], sel ConnInfo) {
-	m.openFormOpts("capability profile for "+sel.Name, []formField{
-		staticSelect("profile", profileItems()),
-	}, func(v formValues) (bool, string) {
-		profile := v.str(0)
-		if profile == "" {
-			return false, "choose a profile"
+// AN UNCHOSEN SELECT MEANS "LEAVE IT", which is what makes one form serve three
+// independent decisions: a select opens on its placeholder, and a field the
+// operator did not touch produces no call. Only what actually differs is sent,
+// each through its own audited verb -- rename, exposure and capability remain
+// three separate changes in the record, as they are three separate decisions.
+func (m *Model) openConnEdit(g *manager[ConnInfo], sel ConnInfo) {
+	fields := []formField{
+		field("name", widget.WithInitialValue(sel.Name)),
+		staticSelect("proxy enabled — front door reachability", yesNoItems()),
+		staticSelect("capability profile — what SQL clients may send", profileItems()),
+	}
+	m.openFormOpts("edit "+sel.Name, fields, func(v formValues) (bool, string) {
+		name, proxy, profile := v.str(0), v.str(1), v.str(2)
+		if name == "" {
+			return false, "a name is required"
 		}
-		managerCall(g, "profile "+sel.Name, func(c context.Context, b *Bound) error {
-			return b.SetConnectionProfile(c, sel.ID, profile)
-		})
+		apply := func() {
+			managerCall(g, "edit "+sel.Name, func(c context.Context, b *Bound) error {
+				if name != sel.Name {
+					if err := b.RenameConnection(c, sel.ID, name); err != nil {
+						return err
+					}
+				}
+				if profile != "" && profile != sel.Profile {
+					if err := b.SetConnectionProfile(c, sel.ID, profile); err != nil {
+						return err
+					}
+				}
+				if proxy != "" && (proxy == "yes") != sel.FrontDoorExposed {
+					return b.SetConnectionExposure(c, sel.ID, proxy == "yes")
+				}
+				return nil
+			})
+		}
+		// OPENING THE FRONT DOOR KEEPS ITS CONSENT STEP. Every other field
+		// here is reversible and local; this one puts a database on the
+		// network, is audited as an exposure decision, and had a screen of
+		// prose in front of it before this form existed. Folding it into a
+		// yes/no would have quietly deleted the one place that says what the
+		// answer means.
+		if proxy == "yes" && !sel.FrontDoorExposed {
+			target := sel.TargetDB
+			if target == "" {
+				target = "(none recorded — clients use the connection name)"
+			}
+			// OPENED AFTER THIS FORM HAS CLOSED, not from inside the submit.
+			//
+			// Returning true tears the form's surface down, and a dialog
+			// opened first goes down with it -- the consent screen flashed and
+			// vanished, and the exposure silently never happened. Deferring
+			// through the task path is how everything else in this file gets
+			// back onto the loop after a surface has settled.
+			bound := g.bound
+			m.ctx.Go(func(context.Context) (any, error) {
+				return managerReload{gen: bound.Gen(), apply: func() {
+					m.openDialog("open the front door on "+sel.Name+"?",
+						frontDoorProse+"\nClients would connect with Database = "+target+
+							"\nor the connection name "+sel.Name+".\n",
+						affirm('y', "Expose it", apply),
+						decline('n', "Leave it closed"),
+					)
+				}}, nil
+			})
+			return true, ""
+		}
+		apply()
 		return true, ""
-	}, formOpts{chrome: map[int][]tui.Component{0: {
-		widget.NewText("v1compat refuses SET, BEGIN and PRAGMA on every path.",
-			widget.WithWrapMode(widget.Wrap)),
-		widget.NewText("Standard SQL clients send one of those to open a connection,",
-			widget.WithWrapMode(widget.Wrap)),
-		widget.NewText("so an exposed connection needs session to be usable by them.",
-			widget.WithWrapMode(widget.Wrap)),
-		newHRule(),
-	}}})
+	}, formOpts{chrome: rulesBetween(3)})
 }
 
 // frontDoorProse is what an operator reads BEFORE exposing a connection.
@@ -428,14 +474,14 @@ func (m *Model) openConnProfile(g *manager[ConnInfo], sel ConnInfo) {
 // A raw literal on purpose: this is a screen of text, and building it from
 // escaped fragments is how it acquires a stray newline nobody notices until it
 // is in front of the person making an exposure decision.
-const frontDoorProse = `Opening the front door changes this connection's network
-reachability. It does not change its SQL capability profile.
+const frontDoorProse = `This makes the connection reachable through the front door. It does
+not change what SQL clients may send — that is the capability profile,
+set separately on this same form.
 
-Anyone holding an access token bound to this
-     connection, and a grant on it, can reach it from the network —
-     from any address their account is admitted from.
+Reaching it still takes an access token bound to this connection, a
+grant on it, and a source address the account is admitted from.
 
-This is an exposure decision and it is audited.
+The change is recorded in the audit log.
 `
 
 // openExposureSwitch asks whether to expose a connection to the front door.
