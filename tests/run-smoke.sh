@@ -23,7 +23,24 @@ smoke_xdg="$(mktemp -d "${TMPDIR:-/tmp}/autodb-smoke-xdg.XXXXXXXX")" || {
   exit 1
 }
 trap 'rm -rf -- "$smoke_xdg"' EXIT
-export XDG_DATA_HOME="$smoke_xdg"
+export XDG_DATA_HOME="$smoke_xdg/data"
+mkdir -p "$XDG_DATA_HOME"
+
+# AND THE CONFIG DIRECTORY, for the same reason and one more.
+#
+# The reason above applies unchanged: a run that reads the caller's real
+# config is a run whose result depends on the machine it is on. The one more
+# is that it ALREADY HAPPENED. tests/smoke.lua's endpoint cell asks the binary
+# where to dial with no --config, which resolves the DEFAULT user config —
+# and on a host whose real config enabled the front door without the (newly
+# mandatory) exec.max_target_conns, --print-endpoint exited non-zero and the
+# cell failed. 374 passed, 1 failed, and the failure was the operator's
+# config file rather than anything in this repository.
+#
+# An EMPTY directory rather than an unset variable: unsetting it sends the
+# resolver to $HOME/.config, which is the very file being isolated from.
+export XDG_CONFIG_HOME="$smoke_xdg/config"
+mkdir -p "$XDG_CONFIG_HOME"
 
 # The five end-to-end sections need bin/autodb, which is gitignored — build it so
 # the suite's preconditions are met rather than skipped-into-failure.

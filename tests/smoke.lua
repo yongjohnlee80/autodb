@@ -170,6 +170,33 @@ print("\n[3] lifecycle.resolve_endpoint — the binary owns the answer")
     return
   end
 
+  -- THE SUITE MUST NOT BE READING THE OPERATOR'S CONFIG.
+  --
+  -- The cell below asks the binary where to dial with NO --config, which
+  -- resolves the default user config directory. That is the point of the
+  -- cell -- it proves the default is a socket -- and it is also how this
+  -- suite once failed for a reason that had nothing to do with it: on a host
+  -- whose real ~/.config/autodb/config.toml enabled the front door without
+  -- the newly mandatory exec.max_target_conns, --print-endpoint exited 78 and
+  -- the cell reported a defect in the plugin.
+  --
+  -- tests/run-smoke.sh isolates XDG_CONFIG_HOME into its own temp root to fix
+  -- that. THIS asserts the isolation is still in place, because the fix is one
+  -- export line and nothing else would notice its removal: the suite would go
+  -- back to passing or failing according to whose machine it ran on, which is
+  -- indistinguishable from a real result until somebody's config differs.
+  local cfg_home = vim.env.XDG_CONFIG_HOME
+  ok("p3: the run has its own XDG_CONFIG_HOME",
+    cfg_home ~= nil and cfg_home ~= "", tostring(cfg_home))
+  if cfg_home and cfg_home ~= "" then
+    local real = vim.fn.expand("~/.config")
+    ok("p3: and it is not the operator's real config directory",
+      vim.fn.resolve(cfg_home) ~= vim.fn.resolve(real), cfg_home)
+    ok("p3: and it holds no autodb config to be influenced by",
+      vim.fn.filereadable(cfg_home .. "/autodb/config.toml") == 0,
+      cfg_home .. "/autodb/config.toml")
+  end
+
   -- No port configured: the local socket is the default rendezvous.
   local ep, eerr = lc.resolve_endpoint(bin, nil)
   ok("p3: resolves an endpoint", ep ~= nil, tostring(eerr))
