@@ -300,3 +300,57 @@ func TestInputModal_EscapeDeclinesAModalWithNoCancelButton(t *testing.T) {
 		t.Fatal("Escape on a button-less modal ran no cancel callback")
 	}
 }
+
+// THE QUIT CONFIRMATION IS A FACTORY MODAL, and it keeps the three things it
+// had: a bare-letter affirmative, a declining answer that NAMES its outcome,
+// and a faded backdrop.
+func TestQuit_IsAConfirmModalThatNamesBothOutcomes(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	quit := make(chan struct{}, 1)
+	h.on(func() {
+		h.m.quit = func() { quit <- struct{}{} }
+		h.m.confirmQuit()
+	})
+	h.waitUntil("the confirmation is open", func() bool { return h.m.modalOpen() })
+	h.settle()
+
+	got := h.screen()
+	for _, want := range []string{"quit autodb?", "Anything unsaved", "Quit", "Stay"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q is not on the quit confirmation:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Cancel") {
+		t.Errorf("the declining answer still reads \"Cancel\"; it should name the outcome")
+	}
+
+	// THE BARE LETTER STILL FIRES IT. A confirmation has nothing to type into,
+	// so the mnemonic cannot collide with a typed character.
+	h.key('y')
+	h.waitUntil("the confirmation closed", func() bool { return !h.m.modalOpen() })
+	select {
+	case <-quit:
+	default:
+		t.Fatal("`y` did not reach the affirmative")
+	}
+}
+
+// AND DECLINING DOES NOT QUIT. The cell above passes if every key quits.
+func TestQuit_DecliningLeavesTheSessionAlone(t *testing.T) {
+	h := startBar(t, meta.RoleAdmin)
+	quit := make(chan struct{}, 1)
+	h.on(func() {
+		h.m.quit = func() { quit <- struct{}{} }
+		h.m.confirmQuit()
+	})
+	h.waitUntil("the confirmation is open", func() bool { return h.m.modalOpen() })
+
+	h.key(tuicore.KeyEscape)
+	h.waitUntil("the confirmation closed", func() bool { return !h.m.modalOpen() })
+	h.settle()
+	select {
+	case <-quit:
+		t.Fatal("Escape on the quit confirmation ended the session")
+	default:
+	}
+}

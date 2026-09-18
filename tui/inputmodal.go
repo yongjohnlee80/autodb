@@ -265,14 +265,16 @@ func (t *textValueSpec) commit(formValues, int)         {}
 
 // InputModal is the builder. Nothing happens until Open.
 type InputModal struct {
-	m        *Model
-	title    string
-	inputs   []Input
-	okText   string
-	noCancel bool
-	scrim    bool
-	submit   func(ModalResponse) error
-	cancel   func(ModalResponse)
+	m          *Model
+	title      string
+	inputs     []Input
+	okText     string
+	cancelText string
+	okMnemonic rune
+	noCancel   bool
+	scrim      bool
+	submit     func(ModalResponse) error
+	cancel     func(ModalResponse)
 }
 
 // NewInputModal starts a modal with the given rows.
@@ -305,6 +307,21 @@ func (b *InputModal) WithCancelFn(fn func(ModalResponse)) *InputModal { b.cancel
 
 // WithOkText renames the confirming button. "CONFIRM", "Delete", "Sign in".
 func (b *InputModal) WithOkText(s string) *InputModal { b.okText = s; return b }
+
+// WithCancelText renames the declining button.
+//
+// Worth using whenever the affirmative names an ACT rather than an agreement:
+// "Quit" beside "Stay" names the two outcomes, where "Quit" beside "Cancel"
+// names one outcome and a refusal to choose. The declining button's mnemonic
+// follows its new text.
+func (b *InputModal) WithCancelText(s string) *InputModal { b.cancelText = s; return b }
+
+// WithOkMnemonic gives the affirmative a bare-letter accelerator.
+//
+// ONLY FOR MODALS WITH NO INPUTS, and it panics otherwise. In a form every
+// bare letter is a character somebody may type, which is how the affirmative's
+// old 'O' came to fire mid-word; a confirmation has nothing to type into.
+func (b *InputModal) WithOkMnemonic(r rune) *InputModal { b.okMnemonic = r; return b }
 
 // ExcludeCancel leaves only the confirming button.
 //
@@ -361,10 +378,12 @@ func (b *InputModal) Open() *form {
 		}
 		return true, ""
 	}, formOpts{
-		scrim:    b.scrim,
-		prose:    prose,
-		okText:   b.okText,
-		noCancel: b.noCancel,
+		scrim:      b.scrim,
+		prose:      prose,
+		okText:     b.okText,
+		cancelText: b.cancelText,
+		okMnemonic: b.okMnemonic,
+		noCancel:   b.noCancel,
 		onCancel: func(v formValues) {
 			if b.cancel == nil {
 				return

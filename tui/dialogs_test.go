@@ -59,6 +59,13 @@ func TestOpenDialogNoDefault_AcceptsAnswersWithoutOne(t *testing.T) {
 // scrim to TRUE — the inverse of Float — so a dialog added without thinking
 // about it fades the backdrop by doing nothing, and the count is what catches
 // a third one appearing.
+//
+// IT COUNTS EVERY SPELLING, NOT ONE HELPER EACH. It used to require exactly
+// one openDialogScrimmed and exactly one openFormScrimmed, which made the
+// guard a statement about two FUNCTIONS rather than about the scrim: moving
+// quit onto the modal factory, where the scrim is asked for with Scrimmed(),
+// would have left the guard counting a helper nobody calls and seeing nothing
+// at the surface that had actually changed. The union is the property.
 func TestScrim_IsPassedByExactlyTwoCallSites(t *testing.T) {
 	pkg := parsePackage(t)
 	scrimmed := map[string][]string{}
@@ -74,7 +81,7 @@ func TestScrim_IsPassedByExactlyTwoCallSites(t *testing.T) {
 					return true
 				}
 				switch sel.Sel.Name {
-				case "openDialogScrimmed", "openFormScrimmed":
+				case "openDialogScrimmed", "openFormScrimmed", "Scrimmed":
 					scrimmed[sel.Sel.Name] = append(scrimmed[sel.Sel.Name], filepath.Base(name))
 				}
 				return true
@@ -82,13 +89,25 @@ func TestScrim_IsPassedByExactlyTwoCallSites(t *testing.T) {
 		}
 	}
 
-	if got := len(scrimmed["openDialogScrimmed"]); got != 1 {
-		t.Errorf("openDialogScrimmed has %d call sites %v, want exactly 1 (quit)",
-			got, scrimmed["openDialogScrimmed"])
+	total := 0
+	for _, sites := range scrimmed {
+		total += len(sites)
 	}
-	if got := len(scrimmed["openFormScrimmed"]); got != 1 {
-		t.Errorf("openFormScrimmed has %d call sites %v, want exactly 1 (login)",
-			got, scrimmed["openFormScrimmed"])
+	if total != 2 {
+		t.Errorf("the scrim is requested at %d call sites %v, want exactly 2 (login and quit)",
+			total, scrimmed)
+	}
+	// AND BOTH ARE STILL THE NAMED ONES. A count of two is also what two NEW
+	// scrimmed surfaces would give after login and quit lost theirs, so the
+	// FILES are asserted too: login and quit both live in ui.go, and a scrim
+	// appearing anywhere else is the thing this guard exists to catch.
+	for fn, sites := range scrimmed {
+		for _, f := range sites {
+			if f != "ui.go" {
+				t.Errorf("%s asks for the scrim in %s; only login and quit (ui.go) may",
+					fn, f)
+			}
+		}
 	}
 }
 

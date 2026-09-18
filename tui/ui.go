@@ -1764,14 +1764,28 @@ func (m *Model) confirmQuit() {
 	// is up, which is the condition that earns fading the backdrop. Every other
 	// dialog leaves it live, because the operator is usually reading the thing
 	// behind it.
-	m.openDialogScrimmed("quit autodb?", "",
-		affirm('y', "Quit", func() {
+	//
+	// BUILT FROM THE FACTORY, like every other modal. A confirmation is an
+	// input modal with no inputs, so it is spelled as one rather than as a
+	// second implementation of buttons, dismissal and cancel routing that can
+	// disagree with the first.
+	//
+	// "Quit" beside "Stay" NAMES BOTH OUTCOMES. "Quit" beside "Cancel" names
+	// one outcome and a refusal to choose, which is the weaker pair to read
+	// under the hand that just pressed Ctrl-q by accident.
+	NewConfirmModal(m, "quit autodb?",
+		"This ends the session. Anything unsaved in the query buffer is lost.").
+		WithOkText("Quit").
+		WithOkMnemonic('y').
+		WithCancelText("Stay").
+		Scrimmed().
+		WithSubmitFn(func(ModalResponse) error {
 			if m.quit != nil {
 				m.quit()
 			}
-		}),
-		decline('n', "Stay"),
-	)
+			return nil
+		}).
+		Open()
 }
 
 func (m *Model) openLeaderMenu() { m.openLeader("SPC — commands", m.leaderEntries()) }
