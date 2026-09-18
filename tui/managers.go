@@ -366,6 +366,12 @@ func (m *Model) openConnManager() {
 						return nil
 					}).Open()
 			}},
+			{'p', "capability…", func(sel ConnInfo, ok bool) {
+				if !ok {
+					return
+				}
+				m.openConnProfile(g, sel)
+			}},
 			{'e', "proxy enabled…", func(sel ConnInfo, ok bool) {
 				if ok {
 					m.openExposureSwitch(g, sel)
@@ -378,6 +384,43 @@ func (m *Model) openConnManager() {
 			}},
 		})
 	g.float = m.openFloat("connections", g)
+}
+
+// openConnProfile changes a connection's capability profile.
+//
+// THE VERB AND THE CLIENT CALL BOTH EXISTED AND NOTHING REACHED THEM. conn.set_profile
+// has been served since profiles were introduced and Bound.SetConnectionProfile
+// has wrapped it just as long, but no surface called either -- so the only way
+// to move a connection off the default was to write an RPC client. The default
+// is v1compat, which refuses every control statement; the first thing pgjdbc,
+// psql and JetBrains send over the front door is one. An exposed connection on
+// the default profile therefore authenticates, opens a session, and refuses the
+// client's opening statement, which is exactly what Johno hit from JetBrains.
+//
+// SEPARATE FROM EXPOSURE, deliberately, and the exposure dialog says so: opening
+// the front door changes reachability and not capability. This is the other half
+// of that pair, and until now only one half had a way to be said.
+func (m *Model) openConnProfile(g *manager[ConnInfo], sel ConnInfo) {
+	m.openFormOpts("capability profile for "+sel.Name, []formField{
+		staticSelect("profile", profileItems()),
+	}, func(v formValues) (bool, string) {
+		profile := v.str(0)
+		if profile == "" {
+			return false, "choose a profile"
+		}
+		managerCall(g, "profile "+sel.Name, func(c context.Context, b *Bound) error {
+			return b.SetConnectionProfile(c, sel.ID, profile)
+		})
+		return true, ""
+	}, formOpts{chrome: map[int][]tui.Component{0: {
+		widget.NewText("v1compat refuses SET, BEGIN and PRAGMA on every path.",
+			widget.WithWrapMode(widget.Wrap)),
+		widget.NewText("Standard SQL clients send one of those to open a connection,",
+			widget.WithWrapMode(widget.Wrap)),
+		widget.NewText("so an exposed connection needs session to be usable by them.",
+			widget.WithWrapMode(widget.Wrap)),
+		newHRule(),
+	}}})
 }
 
 // frontDoorProse is what an operator reads BEFORE exposing a connection.
