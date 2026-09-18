@@ -372,6 +372,18 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 		var terr error
 		id, terr = e.store.Connections.On(tx).
 			Set(meta.ConnName, name).Set(meta.ConnEngine, engineName.String()).
+			// THE PROFILE IS WRITTEN EXPLICITLY, from the engine's configured
+			// default rather than from the column's.
+			//
+			// The DDL default is v1compat and stays that way, because it is
+			// what every EXISTING row was created under and moving it would
+			// rewrite the meaning of rows nobody touched. What changes is what
+			// a NEW connection is created as, which is the engine's decision
+			// and is now session: v1compat refuses every control statement,
+			// and the first thing a standard SQL client sends over the front
+			// door is one, so a connection created on it authenticates and
+			// then refuses its caller's opening statement.
+			Set(meta.ConnProfile, string(e.profile)).
 			Set(meta.ConnTargetDB, targetDB).
 			Set(meta.ConnDSNEnc, []byte{}).Set(meta.ConnCreatedBy, ident.UserID()).
 			Set(meta.ConnCreatedAt, now).Set(meta.ConnUpdatedAt, now).

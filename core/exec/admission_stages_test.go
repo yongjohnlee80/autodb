@@ -1135,6 +1135,9 @@ func TestPooledDrive_WiringPinnedTxHandoff(t *testing.T) {
 // session path authorized first and answered auth.ErrDenied.
 func TestSessionDrive_ProfilePrecedesClassAuthorization(t *testing.T) {
 	f := newFixture(t)
+	// THIS CELL IS ABOUT v1compat, so it asks for it: a new connection is
+	// created session-capable now.
+	useV1Compat(t, f)
 	ctx := context.Background()
 
 	// A reader-granted user on the compat-profile connection. The dm-CTE has
@@ -1178,6 +1181,9 @@ func TestSessionDrive_ProfilePrecedesClassAuthorization(t *testing.T) {
 // after the flip, the cross-surface parity Johno's requirement asserts.)
 func TestSessionDrive_CrossSurfaceParityWithPooled(t *testing.T) {
 	f := newFixture(t)
+	// THIS CELL IS ABOUT v1compat, so it asks for it: a new connection is
+	// created session-capable now.
+	useV1Compat(t, f)
 	ctx := context.Background()
 
 	readerID, err := f.svc.CreateUser(ctx, f.rootTok, "parity-reader", "parity-pass-1", meta.RoleReader, testIP)

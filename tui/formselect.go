@@ -229,9 +229,20 @@ func engineItems() []widget.SelectItem[string] {
 // this connection at all: v1compat refuses every control statement, and the
 // first thing pgjdbc, psql and JetBrains all send is one.
 func profileItems() []widget.SelectItem[string] {
+	// THE VALUES ARE LITERALS, NOT core/exec's CONSTANTS, and that is a
+	// boundary rather than an oversight. An exposure surface -- core/auth,
+	// frontdoor, rpc, tui -- carries profile values as OPAQUE STRINGS and
+	// never names them, which is what keeps capability and network exposure
+	// from growing into each other; rpc/methods.go passes conn.set_profile's
+	// argument straight through for the same reason, and a cell in core/exec
+	// scans these four trees for the constant names.
+	//
+	// The drift that spelling invites is caught in this package's own tests,
+	// which the scan excludes and which pin these two literals against the
+	// constants they must equal.
 	return []widget.SelectItem[string]{
-		{Label: meta.ProfileV1Compat + " — refuses SET/BEGIN; breaks most SQL clients", Value: meta.ProfileV1Compat},
-		{Label: meta.ProfileSession + " — admits session state over the front door", Value: meta.ProfileSession},
+		{Label: "v1compat — refuses SET/BEGIN; breaks most SQL clients", Value: "v1compat"},
+		{Label: "session — admits session state over the front door", Value: "session"},
 	}
 }
 
