@@ -399,6 +399,23 @@ func (m *Model) openConnManager() {
 	g.float = m.openFloat("connections", g)
 }
 
+// yesNo renders a boolean the way the select offers it.
+func yesNo(b bool) string {
+	if b {
+		return "yes"
+	}
+	return "no"
+}
+
+// profileOrDefault names the profile a row carries, or the one the column
+// default gives a row that names none.
+func profileOrDefault(p string) string {
+	if p == "" {
+		return "v1compat"
+	}
+	return p
+}
+
 // openConnEdit is the connection's three editable properties in ONE modal:
 // its name, whether the front door carries it, and what SQL it may speak.
 //
@@ -418,8 +435,10 @@ func (m *Model) openConnManager() {
 func (m *Model) openConnEdit(g *manager[ConnInfo], sel ConnInfo) {
 	fields := []formField{
 		field("name", widget.WithInitialValue(sel.Name)),
-		staticSelect("proxy enabled — front door reachability", yesNoItems()),
-		staticSelect("capability profile — what SQL clients may send", profileItems()),
+		staticSelectCurrent("proxy enabled — front door reachability",
+			yesNo(sel.FrontDoorExposed), yesNoItems()),
+		staticSelectCurrent("capability profile — what SQL clients may send",
+			profileOrDefault(sel.Profile), profileItems()),
 	}
 	m.openFormOpts("edit "+sel.Name, fields, func(v formValues) (bool, string) {
 		name, proxy, profile := v.str(0), v.str(1), v.str(2)

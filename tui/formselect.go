@@ -113,6 +113,30 @@ func withEmptyFirst[T any](items []widget.SelectItem[T]) []widget.SelectItem[T] 
 	return append(out, items...)
 }
 
+// staticSelectCurrent is staticSelect that SHOWS THE VALUE IT ALREADY HAS.
+//
+// A select opens on nothing, which is right for a form that is creating
+// something and wrong for one that is editing it: the operator could not see
+// what the connection's proxy or profile currently was, so "leave it alone"
+// and "it is unset" looked identical. Worse, an operator who meant to change
+// it could not tell whether they had.
+//
+// The current value goes in the PLACEHOLDER rather than the selection, because
+// the two say different things. A selection would be submitted; a placeholder
+// is what the field reads while nothing has been chosen, which is exactly the
+// state "leave it alone" needs to be.
+func staticSelectCurrent(label, current string, items []widget.SelectItem[string]) formField {
+	return formField{label: label, build: func(f *form, i int) formControl {
+		return &selectControl[string]{
+			sel: widget.NewSelect(
+				widget.WithOptions(withEmptyFirst(items)),
+				widget.WithSelectPlaceholder[string](current+" (unchanged)")),
+			state: loadReady,
+			count: len(items),
+		}
+	}}
+}
+
 func staticSelect(label string, items []widget.SelectItem[string]) formField {
 	return formField{label: label, build: func(f *form, i int) formControl {
 		opts := withEmptyFirst(items)
