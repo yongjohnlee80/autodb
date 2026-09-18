@@ -269,22 +269,8 @@ func TestManager_TheExposureColumnReadsProxy(t *testing.T) {
 	if !strings.Contains(got, "PROXY") {
 		t.Fatalf("the exposure column does not read PROXY:\n%s", got)
 	}
-	if !strings.Contains(got, "proxy enabled") {
-		t.Fatalf("the exposure key does not read \"proxy enabled\":\n%s", got)
-	}
-}
-
-// RENAME IS OFFERED ON A CONNECTION. It was the one label an operator could
-// not correct without deleting the connection and building it again.
-func TestManager_ConnectionsOfferRename(t *testing.T) {
-	h := startBar(t, meta.RoleAdmin)
-	h.on(func() { h.m.openConnManager() })
-	h.waitUntil("the connections manager is open", func() bool { return h.m.modalOpen() })
-	h.settle()
-
-	if !strings.Contains(h.screen(), "r:rename") {
-		t.Fatalf("the connections manager does not offer rename:\n%s", h.screen())
-	}
+	// The key is e:edit now; "proxy enabled" lives inside that form. What the
+	// ROW must say is PROXY.
 }
 
 // THE CURSOR FOLLOWS A REAL TAB, not a direct call to focusOn.
@@ -570,29 +556,37 @@ func receiverTypeName(recv *ast.FieldList) string {
 	return ""
 }
 
-// THE CAPABILITY PROFILE IS REACHABLE FROM THE CONNECTIONS MANAGER.
+// THE THREE EDITABLE PROPERTIES ARE ONE MODAL, reachable from the connections
+// manager.
 //
-// conn.set_profile has been served since profiles existed, and
-// Bound.SetConnectionProfile has wrapped it just as long -- and no surface
-// called either, so the only way to move a connection off the default was to
-// write an RPC client. Johno found it from JetBrains: an exposed connection on
-// the default v1compat authenticates, opens a session, and refuses the
-// client's opening SET.
-func TestManager_ConnectionsOfferTheCapabilityProfile(t *testing.T) {
+// Two of the three had no surface before. Renaming was a key; exposure was a
+// key; the capability profile had nothing at all — conn.set_profile was served
+// and Bound.SetConnectionProfile wrapped it, and nothing called either. Johno
+// found it from JetBrains: an exposed connection on the default v1compat
+// authenticates, opens a session, and refuses the client's opening SET.
+func TestManager_ConnectionsOfferOneEditModal(t *testing.T) {
 	h := startBar(t, meta.RoleAdmin)
 	h.on(func() { h.m.openConnManager() })
 	h.waitUntil("the connections manager is open", func() bool { return h.m.modalOpen() })
 	h.settle()
 
-	if !strings.Contains(h.screen(), "p:capability") {
-		t.Fatalf("the connections manager does not offer the capability profile:\n%s", h.screen())
+	got := h.screen()
+	if !strings.Contains(got, "e:edit") {
+		t.Errorf("the connections manager does not offer edit:\n%s", got)
+	}
+	// AND THE KEYS IT REPLACED ARE GONE, or the consolidation left two ways to
+	// do one thing and a footer naming both.
+	for _, stale := range []string{"r:rename", "e:proxy enabled"} {
+		if strings.Contains(got, stale) {
+			t.Errorf("%q survives alongside e:edit:\n%s", stale, got)
+		}
 	}
 }
 
-// AND THE FORM NAMES BOTH PROFILES AND WHAT THE DEFAULT COSTS. A picker
-// listing two identifiers would make the operator guess which one their client
-// needs, which is the guess that produced the refusal.
-func TestManager_TheProfileFormSaysWhatTheDefaultRefuses(t *testing.T) {
+// THE EDIT FORM CARRIES ALL THREE, and says what the capability choice costs.
+// A picker listing two identifiers would make the operator guess which their
+// client needs, and guessing wrong is what produced the refusal.
+func TestManager_TheEditFormCarriesNameProxyAndProfile(t *testing.T) {
 	h := startBar(t, meta.RoleAdmin)
 	var g *manager[ConnInfo]
 	h.on(func() {
@@ -605,14 +599,14 @@ func TestManager_TheProfileFormSaysWhatTheDefaultRefuses(t *testing.T) {
 	})
 	h.waitUntil("the manager is open", func() bool { return g != nil })
 	h.on(func() {
-		h.m.openConnProfile(g, ConnInfo{ID: 1, Name: "LmRO", Engine: "postgres"})
+		h.m.openConnEdit(g, ConnInfo{ID: 1, Name: "LmRO", Engine: "postgres", Profile: "v1compat"})
 	})
 	h.settle()
 
 	got := h.screen()
-	for _, want := range []string{"capability profile for LmRO", meta.ProfileV1Compat, meta.ProfileSession, "SET"} {
+	for _, want := range []string{"edit LmRO", "name", "proxy enabled", "capability profile"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("%q is not on the profile form:\n%s", want, got)
+			t.Errorf("%q is not on the edit form:\n%s", want, got)
 		}
 	}
 }

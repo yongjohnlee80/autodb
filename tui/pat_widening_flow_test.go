@@ -162,8 +162,16 @@ func bootstrapAndConnect(t *testing.T, h *uiHarness) {
 	h.waitForManagerRow("connections", "demo")
 
 	// The mint refuses a connection that is not front-door enabled.
+	// `e` is the edit form now; the proxy is one of its three fields and the
+	// exposure consent still stands in front of the change.
 	h.keys("e")
-	h.waitFor("front-door prose", "Opening the front door")
+	h.waitFor("the edit form", "edit demo")
+	h.key(tuicore.KeyTab)
+	h.chooseOption(0) // proxy: yes
+	h.key(tuicore.KeyTab)
+	h.key(tuicore.KeyTab)
+	h.key(tuicore.KeyEnter)
+	h.waitFor("front-door prose", "reachable through the front door")
 	h.keys("y")
 	h.waitFor("front door on", "front door on demo")
 	h.key(tuicore.KeyEscape)

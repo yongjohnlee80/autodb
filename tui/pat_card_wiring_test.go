@@ -56,8 +56,18 @@ func TestPATCard_NamesTheSessionAccountNotAUILabel(t *testing.T) {
 	// "auth: connection is not enabled for front-door use" — a connection is
 	// deliberately unreachable until its independent exposure property says
 	// otherwise. The mint path enforces that decision too, not just login.
+	// `e` OPENS THE EDIT FORM NOW, which carries the name, the proxy toggle
+	// and the capability profile together. Tab past the name, choose "yes" for
+	// the proxy, leave the profile alone, and submit — the exposure consent
+	// still stands in front of the change itself.
 	h.keys("e")
-	h.waitFor("front-door prose", "Opening the front door")
+	h.waitFor("the edit form", "edit demo")
+	h.key(tuicore.KeyTab) // name -> proxy select
+	h.chooseOption(0)     // "yes"
+	h.key(tuicore.KeyTab) // -> capability select, left unchosen
+	h.key(tuicore.KeyTab) // -> OK
+	h.key(tuicore.KeyEnter)
+	h.waitFor("front-door prose", "reachable through the front door")
 	h.waitFor("front-door confirm", "open the front door on demo?")
 	h.keys("y")
 	h.waitFor("front door on", "front door on demo")
