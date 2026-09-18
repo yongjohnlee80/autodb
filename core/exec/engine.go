@@ -244,6 +244,16 @@ func WithNow(now func() time.Time) Option { return func(e *Engine) { e.now = now
 // the default — it is kept, and every statement is refused by it, because a
 // misconfigured surface must fail closed rather than quietly become the
 // permissive one.
+// WithProfile sets the capability profile NEW connections are created with,
+// and the fallback for a row whose profile column is empty.
+//
+// The default is ProfileSession. It was ProfileV1Compat, which is the
+// behaviour that predates profiles and refuses every control statement -- and
+// a connection exposed through the front door on it authenticates, opens a
+// session, and refuses the client's first statement, because SET is the
+// opening move of pgjdbc, psql and every GUI client. v1compat remains
+// SELECTABLE and remains what existing rows carry; it is no longer what a new
+// connection is born as.
 func WithProfile(p Profile) Option { return func(e *Engine) { e.profile = p } }
 
 // WithMaxStatementBytes caps the size of one executable statement
@@ -394,7 +404,7 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 		conns:   map[int64]dao.DataConn{},
 		opening: map[int64]chan struct{}{},
 		history: true, maxRows: DefaultMaxRows, now: time.Now,
-		profile: ProfileV1Compat, maxStatementBytes: DefaultMaxStatementBytes,
+		profile: ProfileSession, maxStatementBytes: DefaultMaxStatementBytes,
 		sessions: newSessionRegistry(DefaultMaxSessionsPerUser, DefaultMaxSessionsGlobal),
 		staged: enginePolicy{
 			sessionIdle:  DefaultSessionIdleTimeout,

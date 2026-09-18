@@ -298,14 +298,46 @@ func TestMigration_ExistingConnectionsDefaultToV1Compat(t *testing.T) {
 	ctx := context.Background()
 
 	f := newFixture(t)
+
+	// A ROW THE SCHEMA FILLED IN, which is what a migrated connection is: the
+	// column was added with DEFAULT 'v1compat' and every pre-existing row took
+	// it. Inserted here WITHOUT naming a profile, exactly as the migration
+	// left them.
+	//
+	// THE CELL USED TO MEASURE THIS THROUGH CreateConnection, which was the
+	// same answer only for as long as creation had no opinion. Creation now
+	// writes the engine's default explicitly -- session, because v1compat
+	// refuses the opening statement of every standard SQL client -- so reading
+	// a created row would report on the new default while claiming to report
+	// on the migration. The invariant is unchanged and is asserted directly.
+	migrated, err := f.store.Connections.OnCtx(ctx).
+		Set(meta.ConnName, "migrated").Set(meta.ConnEngine, "sqlite").
+		Set(meta.ConnDSNEnc, []byte("enc")).Set(meta.ConnCreatedBy, int64(1)).
+		Set(meta.ConnCreatedAt, int64(1)).Set(meta.ConnUpdatedAt, int64(1)).
+		Insert()
+	if err != nil {
+		t.Fatalf("inserting a migration-shaped row: %v", err)
+	}
+	mrow, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, migrated).Get()
+	if err != nil {
+		t.Fatalf("reading the migrated connection: %v", err)
+	}
+	if mrow.Profile != string(ProfileV1Compat) {
+		t.Errorf("a row the migration filled in has profile %q, want %q — a migration must not "+
+			"turn sessions on for connections nobody opted in", mrow.Profile, ProfileV1Compat)
+	}
+
+	// AND A CONNECTION SOMEBODY CREATED IS SESSION-CAPABLE, which is the other
+	// half: without it this cell passes for a build that creates every
+	// connection on the legacy profile again.
 	row, err := f.store.Connections.OnCtx(ctx).With(meta.ConnID, f.connID).Get()
 	if err != nil {
 		t.Fatalf("reading the connection: %v", err)
 	}
-	if row.Profile != string(ProfileV1Compat) {
-		t.Errorf("a freshly created connection has profile %q, want %q — a migration must not "+
-			"turn sessions on for connections nobody opted in", row.Profile, ProfileV1Compat)
+	if row.Profile != string(ProfileSession) {
+		t.Errorf("a freshly created connection has profile %q, want %q", row.Profile, ProfileSession)
 	}
+	useV1Compat(t, f) // the transaction-control assertions below are v1compat's
 	if row.IsDebug() {
 		t.Error("a freshly created connection reads as debug — it would take the 10-minute idle bound")
 	}

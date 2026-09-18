@@ -41,6 +41,9 @@ func exposureOf(t *testing.T, f *fixture, connID int64) bool {
 func TestSetConnectionProfile_AdminOnly(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
+	// THIS CELL IS ABOUT v1compat, so it asks for it: a new connection is
+	// created session-capable now.
+	useV1Compat(t, f)
 	ctx := context.Background()
 
 	if _, err := f.svc.CreateUser(ctx, f.rootTok, "eddie", "eddie-passphrase-long", "editor", testIP); err != nil {
@@ -96,6 +99,9 @@ func TestSetConnectionProfile_PreservesExposure(t *testing.T) {
 func TestSetConnectionProfile_AuditFailureRollsBackCapabilityChange(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
+	// THIS CELL IS ABOUT v1compat, so it asks for it: a new connection is
+	// created session-capable now.
+	useV1Compat(t, f)
 	ctx := context.Background()
 	if _, err := f.store.Conn().ExecContext(ctx, `DROP TABLE audit_log`); err != nil {
 		t.Fatalf("dropping audit_log: %v", err)
@@ -111,6 +117,9 @@ func TestSetConnectionProfile_AuditFailureRollsBackCapabilityChange(t *testing.T
 func TestSetConnectionExposure_AdminOnlyAndIndependentOfProfile(t *testing.T) {
 	t.Parallel()
 	f := newFixture(t)
+	// THIS CELL IS ABOUT v1compat, so it asks for it: a new connection is
+	// created session-capable now.
+	useV1Compat(t, f)
 	ctx := context.Background()
 
 	if exposureOf(t, f, f.connID) {
@@ -410,4 +419,18 @@ func TestSetConnectionProfile_DowngradeWithdrawsOpenWireTransaction(t *testing.T
 		t.Fatal("profile change closed front-door exposure")
 	}
 	assertAuditContains(t, f, "session_closed", "profile-downgraded")
+}
+
+// useV1Compat puts the fixture's connection on the legacy profile.
+//
+// A NEW CONNECTION IS SESSION-CAPABLE NOW, so a cell whose subject is
+// v1compat's refusals has to ask for it rather than inherit it. These cells
+// did inherit it, and when the default moved they went on passing their own
+// assertions while testing a different profile than the one they name.
+func useV1Compat(t *testing.T, f *fixture) {
+	t.Helper()
+	if err := f.eng.SetConnectionProfile(context.Background(), f.rootTok,
+		f.connID, meta.ProfileV1Compat, testIP); err != nil {
+		t.Fatalf("putting the connection on %s: %v", meta.ProfileV1Compat, err)
+	}
 }
