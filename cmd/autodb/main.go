@@ -48,6 +48,27 @@ const (
 	author  = "Yong Sung John Lee"
 )
 
+// main is the root entry point of the autodb executable.
+// It parses CLI flags, validates mutual exclusivity, and dispatches to the
+// designated execution mode.
+//
+// Execution Switchboard:
+//
+//	                    CLI Arguments
+//	                          |
+//	                     flag.Parse()
+//	                          |
+//	                   checkFlags(...)
+//	                    /          \
+//	           [Invalid]            [Valid Mode]
+//	               |                      |
+//	       Exit Code 2 (Usage)            |
+//	          +---------------------------+---------------------------+
+//	          |             |             |             |             |
+//	          v             v             v             v             v
+//	       --init     --create-cert    --serve        --ui         --web-ui
+//	          |             |             |             |             |
+//	       runInit()  runCreateCert() runServe()     runUI()       runWebUI()
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	serve := flag.Bool("serve", false, "run the RPC server")
@@ -200,6 +221,21 @@ const defaultWebPort = 7010
 // user explicitly passing a flag that will be ignored — would slip through
 // (raised in review). flag.CommandLine.Visit reports only what was
 // actually set.
+//
+// Flag Exclusivity & Validation Rules:
+//
+//	+---------------+------------------------------------------+
+//	| Flag Set      | Target Mode Required                     |
+//	+---------------+------------------------------------------+
+//	| --port        | --web-ui only                            |
+//	| --from, --to  | --migrate-to-postgres only               |
+//	| --cert-*      | --create-cert only                       |
+//	| --leaf-only   | Mutually exclusive with --export-ca      |
+//	+---------------+------------------------------------------+
+//	| Primary Modes | Exactly one of: --serve, --ui, --web-ui, |
+//	|               | --print-endpoint, --migrate-to-postgres, |
+//	|               | --create-cert, --init                    |
+//	+---------------+------------------------------------------+
 func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun bool, port int) error {
 	portSet := false
 	flag.CommandLine.Visit(func(f *flag.Flag) {
@@ -292,6 +328,20 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRu
 // configured address; when it is already taken, probe the occupant — a
 // compatible autodb means "already running" (exit 0, the FE contract);
 // anything else is a loud error. Serves until SIGINT/SIGTERM, then drains.
+//
+// Daemon Startup & Supervision Pipeline:
+//
+//	 [Load Config] -> [Verify Store Config] -> [Listen & Probe Occupant]
+//	                                                      |
+//	 [Open Store]  <- [Acquire Lease]       <- [Pin Unix Socket Inode]
+//	       |
+//	 [Init Auth]   -> [Unattended Unlock]   -> [Start Engine]
+//	                                                  |
+//	 [Serve RPC]   <- [Start Front Door]    <- [Start Janitor & Roller]
+//	       |
+//	 [Wait for SIGINT / SIGTERM / Lost Lease / Front Door Failure]
+//	       |
+//	 [Graceful Shutdown & Remove Inode-Pinned Socket]
 func runServe(configPath string) error {
 	// config.Load owns path resolution: an empty path resolves to the
 	// default location, a missing file means defaults, and everything else
@@ -571,12 +621,24 @@ func runServe(configPath string) error {
 // second site testing cfg.Enabled is how a surface ends up half-started —
 // listening without its budgets, or budgeted without listening.
 //
-// The TLS material is proven BEFORE the bind, which is row 2.1b's requirement
+// The TLS material is proven BEFORE the bind, which is the requirement
 // and the reason Open takes a *tls.Config rather than file paths: a front door
 // that cannot prove who it is must not accept a connection in order to be
 // asked. A failure here fails the daemon rather than degrading to a daemon
 // without a front door, because an operator who configured one and got a
 // running process without it would have no reason to look.
+//
+// Front Door Supervision Architecture:
+//
+//	[startFrontDoor]
+//	       |
+//	frontdoor.Open(bind, tlsCfg, options)
+//	       |
+//	go l.Serve(ctx) ----> errc
+//	       |
+//	superviseFrontDoor(ctx, errc, stopServing, warn)
+//	       |
+//	(On Unexpected Error -> stopServing() -> Teardown Daemon)
 func startFrontDoor(ctx context.Context, cfg config.Config, eng *coreexec.Engine,
 	oplog logger.Logger, audit auditSink) (*frontdoor.Listener, <-chan error, error) {
 
@@ -709,6 +771,20 @@ func superviseFrontDoor(ctx context.Context, serveErr <-chan error, stop func(),
 // holds a lease it never reads is one that keeps serving after another engine
 // has taken the store. Both were true here, and neither was visible, because
 // the wiring was a handful of inline statements no test could reach.
+//
+// Engine Bootstrap & Background Loops:
+//
+//	startEngine()
+//	     |
+//	     +---> store.CheckLogicalIDUniqueness()
+//	     +---> watchLease(lostChan)
+//	     +---> composeOutcomes()
+//	     +---> coreexec.New(store, svc, options...)
+//	     +---> eng.LoadDurablePolicy()
+//	     +---> eng.StartJanitor(janitorInterval)
+//	     +---> store.RollPartitions() & startPartitionRoll()
+//	     +---> eng.StartOutcomeReconciler(reconcileInterval)
+//	     +---> eng.StartOutcomeRetention(retentionInterval)
 //
 // Returns the engine, the context the SERVER must run on, a channel that
 // closes if the lease is lost, and the stop function.
@@ -1090,6 +1166,18 @@ func configPathFor(explicit string) string {
 // owned append-only log (a stderr line into the alternate
 // screen would corrupt raw mode). It returns the log path so the session's
 // bounded probe window can point the operator at the failure diagnostics.
+//
+// Detached Child Process Hierarchy:
+//
+//	autodb --ui (Foreground TUI Process)
+//	     |
+//	     +--- exec.Command("autodb", "--serve", ...)
+//	     |    Setsid: true (New Process Group & Session)
+//	     |    Stdout: ~/.local/state/autodb/serve.log
+//	     |    Stderr: ~/.local/state/autodb/serve.log
+//	     |
+//	     v
+//	autodb --serve (Detached Daemon, survives TUI exit)
 func spawnServe(configPath string) (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -1295,6 +1383,22 @@ func (id socketIdentity) withInodeHeld(fn func()) {
 //
 // Split out from the defer so the decision is testable: the bug it fixes is
 // invisible to any test that only checks "the file is gone afterwards".
+//
+// Inode Pinning & Successor Collision Protection:
+//
+//	Predecessor                         Successor
+//	-----------                         ---------
+//	1. Bind Unix socket                 |
+//	2. O_PATH open (pin inode X)        |
+//	3. Serving...                       |
+//	|                                   4. Bind attempt fails
+//	5. Predecessor shutting down        5. Probe fails -> unlink stale socket
+//	|                                   6. Bind new socket (gets inode Y)
+//	7. removeIfStillOurs():             |
+//	   Stat path -> inode Y             |
+//	   Compare inode X == inode Y       |
+//	   MISMATCH -> Do not unlink!       |
+//	   Successor socket protected!      7. Successor serves unharmed
 func removeIfStillOurs(path string, id socketIdentity) {
 	id.withInodeHeld(func() {
 		if id.stat == nil {

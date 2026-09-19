@@ -43,6 +43,21 @@ type migrateOpts struct {
 }
 
 // runMigrateToPostgres performs (or rehearses) the migration.
+//
+// Catalog Migration Pipeline:
+//
+//	[Validate DSNs & Direction] -> [Acquire SQLite Lease (flock)]
+//	                                          |
+//	[Acquire PG Lease (Advisory)] <-----------+
+//	           |
+//	           +---> Verify Destination is Empty
+//	           |
+//	           +---> (If Dry-Run: Report Plan & Exit Clean)
+//	           |
+//	           v
+//	[Copy Sequences, Keyslots, Users, Grants, History, Notes]
+//	           |
+//	[Verify Row Parity & Integrity] -> [Commit & Release Leases]
 func runMigrateToPostgres(ctx context.Context, out io.Writer, o migrateOpts) error {
 	if o.from == "" || o.to == "" {
 		return errors.New("migrate-to-postgres: both --from (sqlite path) and --to (postgres DSN) are required")

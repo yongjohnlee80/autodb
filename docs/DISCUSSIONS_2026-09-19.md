@@ -219,37 +219,103 @@ This document captures architectural design observations, potential issues, and 
 
 ---
 
-## 5. Cross-Subsystem Architectural Observations
+## 5. Subsystem Analysis: `cmd/autodb`
 
-### 5.1 AST Reflection Coupling in `core/engine`
+### 5.1 CLI Mode Dispatch vs Subcommand Architecture
+- **Location**: `cmd/autodb/main.go` (`checkFlags`, `main`, lines 51–289)
+- **Mechanism**:
+  The binary uses top-level boolean flags (`--serve`, `--ui`, `--web-ui`, `--init`, `--create-cert`, `--migrate-to-postgres`, `--print-endpoint`) to switch execution modes, enforcing exclusivity via custom inspection of `flag.CommandLine.Visit`:
+  ```go
+  if modes > 1 {
+      return errors.New("--serve, --ui, ... are mutually exclusive; pass exactly one")
+  }
+  ```
+- **Architectural Assessment**:
+  - *Strength*: Keeps dependencies minimal without pulling heavy third-party CLI framework dependencies, ensuring fast compilation, minimal footprint, and zero dependency drift.
+  - *Trade-off*: Mode-specific flags (e.g. `--port` for `--web-ui`, `--from`/`--to` for `--migrate-to-postgres`, `--cert-*` for `--create-cert`) pollute the top-level flag namespace. Validating flag presence requires custom reflective parsing of `flag.CommandLine`.
+- **Recommendations**:
+  1. Consider migrating to POSIX-standard positional subcommands (`autodb serve`, `autodb ui`, `autodb web`, `autodb init`, `autodb cert create`, `autodb migrate pg`) using `flag.NewFlagSet` for each subcommand.
+  2. Each subcommand gets its own clean, isolated flag set and help text, eliminating runtime exclusivity validation errors and `--help` clutter.
+
+---
+
+### 5.2 Inode Pinning Portability and Unix Socket Invariants
+- **Location**: `cmd/autodb/main.go` (`socketIdentity`, `pinSocket`, `removeIfStillOurs`), `cmd/autodb/inodehold_linux.go`, `cmd/autodb/inodehold_other.go`
+- **Mechanism**:
+  Linux builds hold an open `O_PATH` descriptor to the bound socket file to pin the inode in kernel memory, preventing recycled inode collisions when verifying `os.SameFile` on shutdown. On non-Linux platforms (`!linux`), `holdInode` returns `nil`, falling back to bare `os.Stat`.
+- **Architectural Assessment**:
+  - *Strength*: Completely eliminates successor socket deletion on ext4/xfs filesystems under Linux.
+  - *Trade-off*: On macOS (Darwin) or BSD systems, if filesystems recycle vnode/inode numbers aggressively upon unlinking, rapid daemon restarts could theoretically reproduce the successor deletion race.
+- **Recommendations**:
+  1. On Darwin / BSD, investigate directory descriptor tracking (`open(dir, O_RDONLY)`) or lockfile pairings (e.g. `autodb.sock.lock` held exclusively via `flock`) to guard the socket cleanup phase portably across all POSIX OSes.
+
+---
+
+### 5.3 Process Supervision & Detached Subprocess Management
+- **Location**: `cmd/autodb/main.go` (`spawnServe`, lines 1165–1205)
+- **Mechanism**:
+  When `autodb --ui` launches and detects no active daemon, it forks a detached child process with `Setsid: true`, redirecting stdout and stderr to `~/.local/state/autodb/serve.log`.
+- **Architectural Assessment**:
+  - *Strength*: Seamless out-of-the-box single-user developer experience; the user types `autodb --ui` and everything starts up transparently.
+  - *Trade-off*: Detached processes spawned by a GUI/TUI app escape terminal process supervision. If the daemon encounters an unrecoverable failure later, or if multiple terminals race to spawn, orphaned processes can emerge without clear systemd/init supervision.
+- **Recommendations**:
+  1. Provide structured PID file management (`~/.local/state/autodb/serve.pid`) with stale PID cleanup.
+  2. In system environments where systemd is available, recommend or trigger systemd user service startup (`systemctl --user start autodb`) rather than raw background exec.
+
+---
+
+### 5.4 Unattended Unlock State Visibility & Alerting
+- **Location**: `cmd/autodb/main.go` (`lockedBanner`, lines 1400–1430)
+- **Mechanism**:
+  If the unattended unlock keyfile fails to decrypt the master key, `runServe` emits a prominent warning banner to stderr and remains up in a degraded state:
+  ```go
+  if uerr := svc.UnlockWithServiceKeyslot(ctx); uerr != nil {
+      fmt.Fprint(os.Stderr, lockedBanner(uerr))
+  }
+  ```
+- **Architectural Assessment**:
+  - *Strength*: Highly resilient: keyfile failure does not cause a crash loop, and an administrator can still authenticate interactively over RPC to supply the master passphrase.
+  - *Trade-off*: If `autodb --serve` runs as a system daemon with stderr piped to `journald` or a log file, nobody may see the stderr banner until client queries begin failing with `57P03`.
+- **Recommendations**:
+  1. Expose a dedicated health probe endpoint / status field in `rpc` (`sys.status` reporting `locked: true`) and in the PostgreSQL front door (e.g. connection notices or specific SQLSTATE telemetry).
+  2. Implement an optional webhook or alert script notification hook when the daemon boots into a locked degraded state.
+
+---
+
+## 6. Cross-Subsystem Architectural Observations
+
+### 6.1 AST Reflection Coupling in `core/engine`
 - In `core/engine/capabilities.go`, exported receiver methods on `Name` are verified by AST inspection in `capabilities_test.go` (`TestEachPredicateReadsItsOwnField`), requiring each method to strictly read `capsByName[n].<field>`.
 - *Observation*: While effective at preventing semantic divergence between capability names and backing fields, new helper methods cannot be added without updating test reflection expectations.
 - *Recommendation*: Document AST test coupling in `core/engine/README.md` (already done) and provide compiler-enforced interfaces rather than test-time AST assertions where possible.
 
-### 5.2 Dynamic Capacity versus Fixed Window in `core/pressure`
+### 6.2 Dynamic Capacity versus Fixed Window in `core/pressure`
 - In `core/pressure`, rate calculations are hardcoded to a 7-bucket sliding window with 1-second ticks.
 - *Observation*: In high-throughput deployments with sub-millisecond burst traffic, a 7-second sliding window may react too slowly to acute connection surges.
 - *Recommendation*: Consider exposing window bucket count and tick interval as configuration options in `core/config`, with sane defaults.
 
-### 5.3 Orthogonal Triad in `core/outcome`
+### 6.3 Orthogonal Triad in `core/outcome`
 - Decoupling Kind (structural category) from Charge (throttle attribution) and Wire Projection (authorization-dependent disclosure) provides a solid foundation for client security.
 - *Observation*: `frontdoor` and `rpc` should systematically adopt the Authorization Witness pattern (`outcome.Authorized()`) across all error paths to prevent telemetry leakage to unauthenticated probes.
 
 ---
 
-## 6. Prioritized Action Items for Next Sprints
+## 7. Prioritized Action Items for Next Sprints
 
 | Priority | Item | Component | Complexity | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | **High** | Replace per-wait goroutines in `generalLane.reserve` | `frontdoor` | Medium | Mitigate goroutine churn and timer allocations under memory contention. |
 | **Medium** | Single-flight login coalescing in `webserver` | `webserver` | Low | Prevent duplicate daemon dials during concurrent tab logins. |
 | **Medium** | Pair `execSeq` with active RPC query cancellation | `tui` | Medium | Cancel backend query tasks on preemption to release database compute. |
+| **Medium** | Positional subcommand grammar (`autodb serve`, `autodb ui`) | `cmd/autodb` | Medium | Replace top-level boolean flag dispatch with clean subcommand flag sets. |
 | **Medium** | Reconcile `gate/*` error IDs in `held_objects.go` | `frontdoor` | Low | Unify namespace under `frontdoor/*` with backward-compatible audit aliases. |
 | **Medium** | Minimum protocol floor & capability negotiation | `rpc` | Medium | Allow minor frontend version divergence without immediate connection poisoning. |
 | **Medium** | Standardize linear ownership tokens in `rpc` / `webserver` | `rpc`, `webserver` | Medium | Apply `acceptToken` LIFO pattern to streaming RPCs and HTTP websocket upgrades. |
+| **Low** | Portable socket lockfile guard for Darwin / BSD | `cmd/autodb` | Low | Complement Linux `O_PATH` inode hold with portable flock file guard. |
 | **Low** | Trusted proxy support for `webserver` IP allowlisting | `webserver` | Medium | Securely parse `X-Forwarded-For` when behind trusted ingress proxies. |
 | **Low** | Modularize root `Model` into focused sub-controllers | `tui` | Low | Decompose `ui.go` state density into layout, auth, and execution states. |
 | **Low** | Configurable pressure rate sliding window | `core/pressure` | Low | Allow tuning of window buckets for high-frequency burst environments. |
+
 
 
 
