@@ -22,6 +22,19 @@ import (
 // Every cross-goroutine result is generation-conditioned: session-derived
 // results carry the epoch they were issued under and are dropped when a
 // reconnect superseded them; note loads carry their own local generation.
+//
+//	  ┌─────────────────────────────────────────────────────────────┐
+//	  │ Top MenuBar: File   Edit   View   Connection   Query   Help │
+//	  ├──────────────────────┬──────────────────────────────────────┤
+//	  │                      │ Query Editor                         │
+//	  │                      │ (Vim Modal Motions + SQL Syntax)     │
+//	  │ Schema Explorer      ├──────────────────────────────────────┤
+//	  │ (Databases, Tables,  │ Results Panel                        │
+//	  │  Columns, Indexes)   │ (Tabular Data Grid + Pagination)     │
+//	  ├──────────────────────┴──────────────────────────────────────┤
+//	  │ StatusBar: [Mode] Connection | Workspace | Zoom | Dirty     │
+//	  └─────────────────────────────────────────────────────────────┘
+//
 type Model struct {
 	session *Session
 	// notes is nil until afterLogin builds it: with no authenticated subject

@@ -8,7 +8,25 @@ package tui
 // resolved from the catalog at activation time through the command id the row
 // carries, so there is no second handler map to drift out of step with the
 // first.
-
+//
+//	  ┌─────────────────────────────────────────────────────────────┐
+//	  │ Command Catalog (commandCatalog)                            │
+//	  │ • Stable nodes: MenuNode (Categories & Submenus)            │
+//	  │ • Placements: MenuPlacement (Order & Parent ID)             │
+//	  │ • Command definition: Command (ActionID, Keys, Offering)    │
+//	  └──────────────────────────────┬──────────────────────────────┘
+//	                                 │
+//	                                 ▼ menuModel()
+//	  ┌─────────────────────────────────────────────────────────────┐
+//	  │ widget.MenuBar                                              │
+//	  │ ├── File:       New Note, Open Note, Save, Quit             │
+//	  │ ├── Edit:       Copy DSN, Clear Results                     │
+//	  │ ├── View:       Toggle Explorer, Toggle Results, Zoom Pane  │
+//	  │ ├── Connection: Switch Connection, Add, Test, Reconnect     │
+//	  │ ├── Query:      Run Statement, Run Script, Cancel           │
+//	  │ └── Help:       About autodb, Keybindings, Pressure View    │
+//	  └─────────────────────────────────────────────────────────────┘
+//
 import (
 	"github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/widget"

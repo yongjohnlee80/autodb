@@ -22,7 +22,17 @@ import (
 // It is READ-ONLY BUT INTERACTIVE — a focused Editor with SetReadOnly, the same
 // contract as the script viewer — because a static dump cannot be navigated or
 // yanked from, and this is the only time the secret exists anywhere.
-
+//
+//	  ┌─────────────────────────────────────────────────────────────┐
+//	  │ Connection: [Name] (ID: 42)                                 │
+//	  ├─────────────────────────────────────────────────────────────┤
+//	  │ Host: db.example.com    Port: 5432                          │
+//	  │ User: postgres          Database: main                      │
+//	  │ Driver: pgx/v5          SSL: verify-full                    │
+//	  │ Password: [REDACTED]    (Press 'p' to reveal)               │
+//	  ├─────────────────────────────────────────────────────────────┤
+//	  │ Keys: [y]ank DSN  [p]assword  [t]est  [e]dit  [Esc]dismiss  │
+//	  └─────────────────────────────────────────────────────────────┘
 // cardCopy names what a copy key yields. TWO keys, because the card's body now
 // carries instructions: a single `y` over a screen of prose would paste a
 // paragraph into a password field.
