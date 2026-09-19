@@ -580,6 +580,25 @@ func (p *workspacePanel) detachConn() {
 // --- layout --------------------------------------------------------------------
 
 func (p *workspacePanel) Layout(c tui.Constraints) tui.Size {
+	// THE CURSOR STYLES ARE DERIVED HERE, beside the footer, and not pushed
+	// from wherever somebody remembered to push them.
+	//
+	// THIS IS THE ARCHITECTURAL FIX, and the screenshot that forced it showed
+	// the footer naming one section while the colours lit the other -- both
+	// reading the same liveSection(), disagreeing only about WHEN. hints() is
+	// recomputed on every Layout and was always fresh; SetStyles was pushed
+	// from two event sites and went stale between them.
+	//
+	// A derived visual property kept as mutable state, updated by imperative
+	// pushes, has one failure mode and it is unbounded: every new path that
+	// can change the underlying fact is a new place that must remember to
+	// push, and the bug is invisible until someone finds the path nobody
+	// thought of. Four attempts at this defect each found a different missing
+	// push site. Deriving it where the footer is derived ends the category:
+	// the two cannot disagree because they are computed from one call, in one
+	// place, on the same frame.
+	p.repaint()
+
 	// SEED THE KEYBOARD ON THE FIRST LAYOUT, not in Init.
 	//
 	// Init runs DURING the mount, and a focus request made there lands before

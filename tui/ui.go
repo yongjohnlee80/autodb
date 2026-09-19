@@ -1507,7 +1507,11 @@ func (m *Model) loadScaffold(sql string) {
 // --- layout / render / events ------------------------------------------------------
 
 func (m *Model) Layout(c tui.Constraints) tui.Size {
-	m.applyCursorStyles() // cheap: only re-styles on a focus transition
+	// DERIVED EVERY FRAME, like the status line beside it. See
+	// workspacePanel.Layout for why this is not an optimisation question: a
+	// derived property pushed on events goes stale at whichever path nobody
+	// thought to push from, and that set is not enumerable.
+	m.applyCursorStyles()
 	sz := m.ctx.LayoutChild(m.host, c)
 	m.ctx.PlaceChild(m.host, tui.Rect{X: 0, Y: 0, W: sz.W, H: sz.H})
 	return c.Constrain(sz)
