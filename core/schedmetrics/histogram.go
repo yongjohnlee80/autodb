@@ -49,16 +49,16 @@ var BackendHoldEdgesMs = []int64{
 // Cumulative() are separate methods for that reason, and the boundary cells
 // assert both.
 //
-//	  Sample Landings:
-//	  • Internal Storage (Bins()):
-//	      Exclusive: sample <= edge increments exactly ONE bucket.
-//	  • Export Projection (Cumulative()):
-//	      Monotonic running sum: bin[i] = sum(0..i), final bin == Count().
+//	Sample Landings:
+//	• Internal Storage (Bins()):
+//	    Exclusive: sample <= edge increments exactly ONE bucket.
+//	• Export Projection (Cumulative()):
+//	    Monotonic running sum: bin[i] = sum(0..i), final bin == Count().
 //
-//	  Sample: 45ms
-//	  Edges: [10ms, 50ms, 100ms, +Inf]
-//	  Internal:   [0, 1, 0, 0]
-//	  Cumulative: [0, 1, 1, 1]
+//	Sample: 45ms
+//	Edges: [10ms, 50ms, 100ms, +Inf]
+//	Internal:   [0, 1, 0, 0]
+//	Cumulative: [0, 1, 1, 1]
 type Histogram struct {
 	edges []int64
 	bins  []uint64 // len(edges)+1; the last is the +Inf overflow

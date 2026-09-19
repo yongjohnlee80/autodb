@@ -54,21 +54,21 @@ const (
 //
 // Execution Switchboard:
 //
-//	                    CLI Arguments
-//	                          |
-//	                     flag.Parse()
-//	                          |
-//	                   checkFlags(...)
-//	                    /          \
-//	           [Invalid]            [Valid Mode]
-//	               |                      |
-//	       Exit Code 2 (Usage)            |
-//	          +---------------------------+---------------------------+
-//	          |             |             |             |             |
-//	          v             v             v             v             v
-//	       --init     --create-cert    --serve        --ui         --web-ui
-//	          |             |             |             |             |
-//	       runInit()  runCreateCert() runServe()     runUI()       runWebUI()
+//	             CLI Arguments
+//	                   |
+//	              flag.Parse()
+//	                   |
+//	            checkFlags(...)
+//	             /          \
+//	    [Invalid]            [Valid Mode]
+//	        |                      |
+//	Exit Code 2 (Usage)            |
+//	   +---------------------------+---------------------------+
+//	   |             |             |             |             |
+//	   v             v             v             v             v
+//	--init     --create-cert    --serve        --ui         --web-ui
+//	   |             |             |             |             |
+//	runInit()  runCreateCert() runServe()     runUI()       runWebUI()
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	serve := flag.Bool("serve", false, "run the RPC server")
@@ -331,17 +331,17 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRu
 //
 // Daemon Startup & Supervision Pipeline:
 //
-//	 [Load Config] -> [Verify Store Config] -> [Listen & Probe Occupant]
-//	                                                      |
-//	 [Open Store]  <- [Acquire Lease]       <- [Pin Unix Socket Inode]
-//	       |
-//	 [Init Auth]   -> [Unattended Unlock]   -> [Start Engine]
-//	                                                  |
-//	 [Serve RPC]   <- [Start Front Door]    <- [Start Janitor & Roller]
-//	       |
-//	 [Wait for SIGINT / SIGTERM / Lost Lease / Front Door Failure]
-//	       |
-//	 [Graceful Shutdown & Remove Inode-Pinned Socket]
+//	[Load Config] -> [Verify Store Config] -> [Listen & Probe Occupant]
+//	                                                     |
+//	[Open Store]  <- [Acquire Lease]       <- [Pin Unix Socket Inode]
+//	      |
+//	[Init Auth]   -> [Unattended Unlock]   -> [Start Engine]
+//	                                                 |
+//	[Serve RPC]   <- [Start Front Door]    <- [Start Janitor & Roller]
+//	      |
+//	[Wait for SIGINT / SIGTERM / Lost Lease / Front Door Failure]
+//	      |
+//	[Graceful Shutdown & Remove Inode-Pinned Socket]
 func runServe(configPath string) error {
 	// config.Load owns path resolution: an empty path resolves to the
 	// default location, a missing file means defaults, and everything else

@@ -1,6 +1,6 @@
 // Package main implements the autodb unified CLI executable and daemon process.
 //
-// Subsystem Scope
+// # Subsystem Scope
 //
 // The autodb binary serves as the singular entry point for database administration,
 // query execution, daemon services, and operational ceremonies. It encapsulates:
@@ -45,5 +45,5 @@
 //     - 1: General runtime or system failure.
 //     - 2: Command-line usage or flag syntax error.
 //     - 78 (EX_CONFIG): Configuration parse failure, semantic constraint violation,
-//       or invalid budget pairing.
+//     or invalid budget pairing.
 package main

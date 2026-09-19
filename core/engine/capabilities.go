@@ -31,24 +31,24 @@ package engine
 // type so that adding an engine is filling in a row the compiler already
 // demands, and adding a capability is a field every existing row must answer.
 //
-//	                    ┌───────────────────────────┐
-//	                    │   Caller Decision Point   │
-//	                    │   (e.g., commit recovery) │
-//	                    └─────────────┬─────────────┘
-//	                                  │
-//	                                  ▼
-//	                  Does target support capability?
-//	                  [n.HasCommitStatusOracle()]
-//	                                  │
-//	                                  ▼
-//	                           capsByName[n]
-//	                  ┌───────────────┴───────────────┐
-//	                  │                               │
-//	                 YES                             NO
-//	                  │                               │
-//	                  ▼                               ▼
-//	         [Query Oracle]                  [Terminal Refusal]
-//	         (Postgres)                      (MySQL, SQLite)
+//	           ┌───────────────────────────┐
+//	           │   Caller Decision Point   │
+//	           │   (e.g., commit recovery) │
+//	           └─────────────┬─────────────┘
+//	                         │
+//	                         ▼
+//	         Does target support capability?
+//	         [n.HasCommitStatusOracle()]
+//	                         │
+//	                         ▼
+//	                  capsByName[n]
+//	         ┌───────────────┴───────────────┐
+//	         │                               │
+//	        YES                             NO
+//	         │                               │
+//	         ▼                               ▼
+//	[Query Oracle]                  [Terminal Refusal]
+//	(Postgres)                      (MySQL, SQLite)
 type capabilities struct {
 	// backslashEscapes: a backslash inside a single-quoted string literal
 	// escapes the next character, rather than being an ordinary backslash.
@@ -147,11 +147,11 @@ var capsByName = map[Name]capabilities{
 // sites that used to compute `engine == MySQL` to fill it were each restating
 // the engine's grammar as the engine's identity.
 //
-//	  String Literal Lexing:
-//	  • BackslashEscapes() == true (MySQL):
-//	      'foo\'bar' ───> token content: foo'bar (escaped quote does not terminate string)
-//	  • BackslashEscapes() == false (Postgres, SQLite):
-//	      'foo\'bar' ───> token content: foo\ followed by syntax error / boundary split
+//	String Literal Lexing:
+//	• BackslashEscapes() == true (MySQL):
+//	    'foo\'bar' ───> token content: foo'bar (escaped quote does not terminate string)
+//	• BackslashEscapes() == false (Postgres, SQLite):
+//	    'foo\'bar' ───> token content: foo\ followed by syntax error / boundary split
 func (n Name) BackslashEscapes() bool { return capsByName[n].backslashEscapes }
 
 // VerifiesGrammarPerConnection reports whether the driver offers a
@@ -161,10 +161,10 @@ func (n Name) BackslashEscapes() bool { return capsByName[n].backslashEscapes }
 // which costs a round trip and, more importantly, makes DDL that a transaction
 // prohibits unrunnable, so this is a question worth asking by name.
 //
-//	  • VerifiesGrammarPerConnection() == true (Postgres, SQLite):
-//	      Physical connection init verifies grammar parameters once per connection.
-//	  • VerifiesGrammarPerConnection() == false (MySQL):
-//	      Driver lacks per-connection seam; statements verify grammar per transaction.
+//   - VerifiesGrammarPerConnection() == true (Postgres, SQLite):
+//     Physical connection init verifies grammar parameters once per connection.
+//   - VerifiesGrammarPerConnection() == false (MySQL):
+//     Driver lacks per-connection seam; statements verify grammar per transaction.
 func (n Name) VerifiesGrammarPerConnection() bool {
 	return capsByName[n].grammarVerifiedPerConnection
 }
@@ -176,10 +176,10 @@ func (n Name) VerifiesGrammarPerConnection() bool {
 // is not merely unproven now but unprovable ever, requiring terminal refusal
 // rather than transparent retry.
 //
-//	  • HasCommitStatusOracle() == true (Postgres):
-//	      Reconciler queries commit status oracle using the transaction handle.
-//	  • HasCommitStatusOracle() == false (MySQL, SQLite):
-//	      Target cannot confirm committed state; caller receives terminal error.
+//   - HasCommitStatusOracle() == true (Postgres):
+//     Reconciler queries commit status oracle using the transaction handle.
+//   - HasCommitStatusOracle() == false (MySQL, SQLite):
+//     Target cannot confirm committed state; caller receives terminal error.
 func (n Name) HasCommitStatusOracle() bool { return capsByName[n].commitStatusOracle }
 
 // ReportsTransactionID reports whether the target exposes its own transaction
@@ -190,10 +190,10 @@ func (n Name) HasCommitStatusOracle() bool { return capsByName[n].commitStatusOr
 // ask about a handle later", and an engine could plausibly do the first
 // without the second.
 //
-//	  • ReportsTransactionID() == true (Postgres):
-//	      Server txid is captured while open and stored as handle for recovery.
-//	  • ReportsTransactionID() == false (MySQL, SQLite):
-//	      Target does not expose active transaction id.
+//   - ReportsTransactionID() == true (Postgres):
+//     Server txid is captured while open and stored as handle for recovery.
+//   - ReportsTransactionID() == false (MySQL, SQLite):
+//     Target does not expose active transaction id.
 func (n Name) ReportsTransactionID() bool { return capsByName[n].reportsTransactionID }
 
 // HasServerStatementTimeout reports whether the server enforces a statement
@@ -203,10 +203,10 @@ func (n Name) ReportsTransactionID() bool { return capsByName[n].reportsTransact
 // setting that terminates execution on the database engine even if the client
 // abruptly disconnects or hangs.
 //
-//	  • HasServerStatementTimeout() == true (Postgres):
-//	      Server arms statement_timeout to protect against orphaned query execution.
-//	  • HasServerStatementTimeout() == false (MySQL, SQLite):
-//	      Statement cancellation relies solely on client-side socket context closure.
+//   - HasServerStatementTimeout() == true (Postgres):
+//     Server arms statement_timeout to protect against orphaned query execution.
+//   - HasServerStatementTimeout() == false (MySQL, SQLite):
+//     Statement cancellation relies solely on client-side socket context closure.
 func (n Name) HasServerStatementTimeout() bool { return capsByName[n].serverStatementTimeout }
 
 // SupportsDeclarativePartitioning reports whether the engine can partition a
@@ -215,10 +215,10 @@ func (n Name) HasServerStatementTimeout() bool { return capsByName[n].serverStat
 // Enables volume tables (e.g. audit and metrics logs) to be rolled and dropped
 // as partition tables rather than sequentially pruned row by row.
 //
-//	  • SupportsDeclarativePartitioning() == true (Postgres):
-//	      Audit tables use declarative range/list partitioning and partition drops.
-//	  • SupportsDeclarativePartitioning() == false (MySQL, SQLite):
-//	      Audit storage relies on standard tables with row-level pruning.
+//   - SupportsDeclarativePartitioning() == true (Postgres):
+//     Audit tables use declarative range/list partitioning and partition drops.
+//   - SupportsDeclarativePartitioning() == false (MySQL, SQLite):
+//     Audit storage relies on standard tables with row-level pruning.
 func (n Name) SupportsDeclarativePartitioning() bool {
 	return capsByName[n].declarativePartitioning
 }
@@ -229,10 +229,10 @@ func (n Name) SupportsDeclarativePartitioning() bool {
 // Where it is false, reader safety rests on the statement classifier and the
 // driver's read-only transaction state rather than catalog routine inspection.
 //
-//	  • HasRoutineCatalog() == true (Postgres):
-//	      Target queries information_schema / pg_proc catalog to verify routine safety.
-//	  • HasRoutineCatalog() == false (MySQL, SQLite):
-//	      Safety rests on SQL lexing classification and driver read-only transactions.
+//   - HasRoutineCatalog() == true (Postgres):
+//     Target queries information_schema / pg_proc catalog to verify routine safety.
+//   - HasRoutineCatalog() == false (MySQL, SQLite):
+//     Safety rests on SQL lexing classification and driver read-only transactions.
 func (n Name) HasRoutineCatalog() bool { return capsByName[n].routineCatalog }
 
 // SpeaksPostgresWire reports whether a client's protocol frames can be relayed
@@ -242,8 +242,8 @@ func (n Name) HasRoutineCatalog() bool { return capsByName[n].routineCatalog }
 // PostgreSQL wire natively — decoding frames and re-issuing them as ordinary
 // statements — would silently drop the guarantees the client requested.
 //
-//	  • SpeaksPostgresWire() == true (Postgres):
-//	      Frontdoor can relay native frontend/backend wire protocol frames.
-//	  • SpeaksPostgresWire() == false (MySQL, SQLite):
-//	      Target does not speak PostgreSQL wire; must use SQL translation or driver.
+//   - SpeaksPostgresWire() == true (Postgres):
+//     Frontdoor can relay native frontend/backend wire protocol frames.
+//   - SpeaksPostgresWire() == false (MySQL, SQLite):
+//     Target does not speak PostgreSQL wire; must use SQL translation or driver.
 func (n Name) SpeaksPostgresWire() bool { return capsByName[n].postgresWire }

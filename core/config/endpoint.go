@@ -18,24 +18,24 @@ const SocketName = "autodb.sock"
 // Resolving the endpoint in a single canonical function ensures that standalone clients,
 // Neovim instances, and background daemons always converge on the exact same location.
 //
-//	                 [Server.Endpoint()]
-//	                          │
-//	                 s.Port > 0 (Configured)?
-//	                          │
-//	            YES ──────────┴────────── NO
-//	             │                         │
-//	             ▼                         ▼
-//	    ┌─────────────────┐       ┌─────────────────┐
-//	    │  Network: "tcp" │       │ Network: "unix" │
-//	    │  Address:       │       │ Path:           │
-//	    │  host:port      │       │ runtimeDir()/   │
-//	    │                 │       │ autodb.sock     │
-//	    └─────────────────┘       └────────┬────────┘
-//	                                       │
-//	                                       ▼
-//	                         [Kernel Length Validation]
-//	                         len(path) <= maxSocketPath (100B)
-//	                         (Guards sockaddr_un sun_path limit)
+//	             [Server.Endpoint()]
+//	                      │
+//	             s.Port > 0 (Configured)?
+//	                      │
+//	        YES ──────────┴────────── NO
+//	         │                         │
+//	         ▼                         ▼
+//	┌─────────────────┐       ┌─────────────────┐
+//	│  Network: "tcp" │       │ Network: "unix" │
+//	│  Address:       │       │ Path:           │
+//	│  host:port      │       │ runtimeDir()/   │
+//	│                 │       │ autodb.sock     │
+//	└─────────────────┘       └────────┬────────┘
+//	                                   │
+//	                                   ▼
+//	                     [Kernel Length Validation]
+//	                     len(path) <= maxSocketPath (100B)
+//	                     (Guards sockaddr_un sun_path limit)
 type Endpoint struct {
 	// Network is "unix" or "tcp", ready for net.Listen and net.Dial.
 	Network string
@@ -105,21 +105,21 @@ const maxSocketPath = 100
 //
 // Cross-platform resolution hierarchy:
 //
-//	                 [OS Environment Check]
-//	                           │
-//	                           ├──────────────── Linux ($XDG_RUNTIME_DIR)
-//	                           │                 • /run/user/$UID
-//	                           │                 • Mode 0700, owned by user
-//	                           │                 • tmpfs: cleared automatically on reboot
-//	                           │
-//	                           ├──────────────── Darwin (os.TempDir())
-//	                           │                 • $TMPDIR -> /var/folders/...
-//	                           │                 • Per-user isolated directory
-//	                           │                 • Mode 0700
-//	                           │
-//	                           └──────────────── Generic Fallback ($XDG_STATE_HOME)
-//	                                             • $XDG_STATE_HOME/autodb (or ~/.local/state/autodb)
-//	                                             • Explicitly created with mode 0700
+//	[OS Environment Check]
+//	          │
+//	          ├──────────────── Linux ($XDG_RUNTIME_DIR)
+//	          │                 • /run/user/$UID
+//	          │                 • Mode 0700, owned by user
+//	          │                 • tmpfs: cleared automatically on reboot
+//	          │
+//	          ├──────────────── Darwin (os.TempDir())
+//	          │                 • $TMPDIR -> /var/folders/...
+//	          │                 • Per-user isolated directory
+//	          │                 • Mode 0700
+//	          │
+//	          └──────────────── Generic Fallback ($XDG_STATE_HOME)
+//	                            • $XDG_STATE_HOME/autodb (or ~/.local/state/autodb)
+//	                            • Explicitly created with mode 0700
 func runtimeDir() (string, error) {
 	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
 		return d, nil

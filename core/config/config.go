@@ -918,16 +918,16 @@ func UserConfigPath() (string, error) {
 //
 // Search Order & Precedence:
 //
-//	  [1. System Server Config]   /etc/autodb/config.toml (Mode 0640)
-//	              │
-//	              ▼ (If missing or unreadable)
-//	  [2. User Workspace Config]  $XDG_CONFIG_HOME/autodb/config.toml
-//	              │
-//	              ▼ (If missing or unreadable)
-//	  [3. System Client Config]   /etc/autodb/client.toml (Mode 0644)
-//	              │
-//	              ▼ (If none are readable)
-//	  [4. Fallback Path]          User Workspace Path (Zero-config defaults apply)
+//	[1. System Server Config]   /etc/autodb/config.toml (Mode 0640)
+//	            │
+//	            ▼ (If missing or unreadable)
+//	[2. User Workspace Config]  $XDG_CONFIG_HOME/autodb/config.toml
+//	            │
+//	            ▼ (If missing or unreadable)
+//	[3. System Client Config]   /etc/autodb/client.toml (Mode 0644)
+//	            │
+//	            ▼ (If none are readable)
+//	[4. Fallback Path]          User Workspace Path (Zero-config defaults apply)
 //
 // Precedence rationale:
 //  1. The service's own config (/etc/autodb/config.toml) is read by root and the service account.

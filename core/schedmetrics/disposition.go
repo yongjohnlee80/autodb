@@ -10,33 +10,33 @@ import "fmt"
 // each axis answers one question — was a reset attempted and did it work, and
 // where did the backend go — and the two reconcile by construction.
 //
-//	                          [Backend Released]
-//	                                  │
-//	                  Was a reset attempted on backend?
-//	                                  │
-//	                 YES ─────────────┴───────────── NO
-//	                  │                              │
-//	          [Axis 1: ResetResult]                  │
-//	          • ResetClean                           │
-//	          • ResetFailed                          │
-//	                  │                              │
-//	                  └───────────────┬──────────────┘
-//	                                  │
-//	                       [Axis 2: BackendDisposition]
-//	                                  │
-//	         ┌────────────────────────┼────────────────────────┐
-//	         ▼                        ▼                        ▼
-//	  [DispositionPooled]   [DispositionDiscarded]   [DispositionClosed]
-//	  Returned to pool      Destroyed & evicted      Terminated cleanly
-//	                                  │
-//	                                  ▼
-//	                         [DiscardReason (Required)]
-//	                         • DiscardResetFailed
-//	                         • DiscardResetTimeout
-//	                         • DiscardNonIdleStatus
-//	                         • DiscardDialFailed
-//	                         • DiscardTargetChanged
-//	                         • DiscardShutdown
+//	                        [Backend Released]
+//	                                │
+//	                Was a reset attempted on backend?
+//	                                │
+//	               YES ─────────────┴───────────── NO
+//	                │                              │
+//	        [Axis 1: ResetResult]                  │
+//	        • ResetClean                           │
+//	        • ResetFailed                          │
+//	                │                              │
+//	                └───────────────┬──────────────┘
+//	                                │
+//	                     [Axis 2: BackendDisposition]
+//	                                │
+//	       ┌────────────────────────┼────────────────────────┐
+//	       ▼                        ▼                        ▼
+//	[DispositionPooled]   [DispositionDiscarded]   [DispositionClosed]
+//	Returned to pool      Destroyed & evicted      Terminated cleanly
+//	                                │
+//	                                ▼
+//	                       [DiscardReason (Required)]
+//	                       • DiscardResetFailed
+//	                       • DiscardResetTimeout
+//	                       • DiscardNonIdleStatus
+//	                       • DiscardDialFailed
+//	                       • DiscardTargetChanged
+//	                       • DiscardShutdown
 //
 // ResetResult is how a reset attempt ended. Recorded ONLY when a reset was
 // actually attempted, which is what makes the reconciliation below an

@@ -136,8 +136,9 @@ func patHash(secret string) []byte {
 // splitPAT separates a presented credential into selector and secret.
 //
 // Token format:
-//   "adb_pat_" + <selector: base64url, 12 chars> + "." + <secret: base64url, 43 chars>
-//   [ Prefix ]   [         Selector         ]   [.]   [         Secret         ]
+//
+//	"adb_pat_" + <selector: base64url, 12 chars> + "." + <secret: base64url, 43 chars>
+//	[ Prefix ]   [         Selector         ]   [.]   [         Secret         ]
 //
 // A malformed credential still yields a selector and a secret (both possibly
 // empty) rather than an early error, because the caller must do the same work
@@ -581,29 +582,29 @@ var _ = subtle.ConstantTimeCompare
 //
 // Verification Pipeline:
 //
-//   [Presented Token] ──> splitPAT ──> (selector, secret)
-//                                             │
-//                                ┌────────────┴────────────┐
-//                                ▼                         ▼
-//                            [Selector]                 [Secret]
-//                                │                         │
-//                                ▼                         ▼
-//                        Lookup Row by Sel          Compute SHA-256
-//                                │                         │
-//                     Found? ────┴──── Missing?            │
-//                       │                 │                │
-//                       ▼                 ▼                ▼
-//                  storedDigest =   storedDigest =    ConstantTimeCompare
-//                  row.SecretHash    decoyDigest      (digest, storedDigest)
-//                       │                 │                │
-//                       └────────┬────────┘                ▼
-//                                │                    Match & Valid?
-//                                └─────────────────────────┼──> ErrPATInvalid
-//                                                          ▼
-//                                                  Verify Owner Enabled
-//                                                          │
-//                                                          ▼
-//                                                    Return *meta.PAT
+//	[Presented Token] ──> splitPAT ──> (selector, secret)
+//	                                          │
+//	                             ┌────────────┴────────────┐
+//	                             ▼                         ▼
+//	                         [Selector]                 [Secret]
+//	                             │                         │
+//	                             ▼                         ▼
+//	                     Lookup Row by Sel          Compute SHA-256
+//	                             │                         │
+//	                  Found? ────┴──── Missing?            │
+//	                    │                 │                │
+//	                    ▼                 ▼                ▼
+//	               storedDigest =   storedDigest =    ConstantTimeCompare
+//	               row.SecretHash    decoyDigest      (digest, storedDigest)
+//	                    │                 │                │
+//	                    └────────┬────────┘                ▼
+//	                             │                    Match & Valid?
+//	                             └─────────────────────────┼──> ErrPATInvalid
+//	                                                       ▼
+//	                                               Verify Owner Enabled
+//	                                                       │
+//	                                                       ▼
+//	                                                 Return *meta.PAT
 func (s *Service) VerifyPAT(ctx context.Context, presented string) (*meta.PAT, error) {
 	selector, secret, wellFormed := splitPAT(presented)
 

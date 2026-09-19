@@ -45,24 +45,24 @@ type createCertOpts struct {
 //
 // Certificate Generation Flow:
 //
-//	 [Load Config] -> [Resolve Certificate Dir]
-//	                         |
-//	          +--------------+--------------+
-//	          |                             |
-//	     --export-ca                    Issue Certs
-//	          |                             |
-//	    [Print ca.pem]       [frontdoor.CreateCert(req)]
-//	    [Exit Clean]                        |
-//	                         +--------------+--------------+
-//	                         |                             |
-//	                    --leaf-only                      Full PKI
-//	                         |                             |
-//	                 [Reissue Leaf Cert]           [Generate Root CA]
-//	                 [Preserve Root CA]            [Issue Server Leaf]
-//	                         |                             |
-//	                         +--------------+--------------+
-//	                                        |
-//	                             [Report Paths & Exit]
+//	[Load Config] -> [Resolve Certificate Dir]
+//	                        |
+//	         +--------------+--------------+
+//	         |                             |
+//	    --export-ca                    Issue Certs
+//	         |                             |
+//	   [Print ca.pem]       [frontdoor.CreateCert(req)]
+//	   [Exit Clean]                        |
+//	                        +--------------+--------------+
+//	                        |                             |
+//	                   --leaf-only                      Full PKI
+//	                        |                             |
+//	                [Reissue Leaf Cert]           [Generate Root CA]
+//	                [Preserve Root CA]            [Issue Server Leaf]
+//	                        |                             |
+//	                        +--------------+--------------+
+//	                                       |
+//	                            [Report Paths & Exit]
 func runCreateCert(out io.Writer, configPath string, o createCertOpts) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {

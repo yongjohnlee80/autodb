@@ -10,15 +10,15 @@
 // To avoid flooding logs or flapping alerts, Tracker latches raised signals and
 // emits events only upon state transitions:
 //
-//	  100% ┤             ╭──╮
-//	   80% ┤────[ENTER]──╯  ╰──[STAYS ENTERED (Deadband)]
-//	   70% ┤───────────────────╰────────────[CLEAR]──────────────
-//	    0% ┼─────────────────────────────────────────────────────
-//	       t0   t1       t2    t3           t4                   t5
+//	100% ┤             ╭──╮
+//	 80% ┤────[ENTER]──╯  ╰──[STAYS ENTERED (Deadband)]
+//	 70% ┤───────────────────╰────────────[CLEAR]──────────────
+//	  0% ┼─────────────────────────────────────────────────────
+//	     t0   t1       t2    t3           t4                   t5
 //
-//	  Transitions:
-//	  • At t1: Event{Entered: true, Value: 80, Threshold: 80}
-//	  • At t4: Event{Entered: false, Value: 70, Threshold: 70}
+//	Transitions:
+//	• At t1: Event{Entered: true, Value: 80, Threshold: 80}
+//	• At t4: Event{Entered: false, Value: 70, Threshold: 70}
 //
 // Integer Hysteresis:
 //   - Occupancy Enter: Value*100 >= Cap*80 (80% utilization).
@@ -48,13 +48,13 @@
 // Rate signals (e.g. denials.rate) are measured across a moving 1-minute window
 // split into 10-second bucket spans:
 //
-//	  Bucket Index:   0       1       2       3       4       5       6
-//	  Time Span:    [0-10s] [10-20s][20-30s][30-40s][40-50s][50-60s][60-70s]
-//	                ┌───────┬───────┬───────┬───────┬───────┬───────┬───────┐
-//	  Counts:       │   1   │   0   │   2   │   3   │   0   │   1   │   0   │
-//	                └───────┴───────┴───────┴───────┴───────┴───────┴───────┘
-//	                                ▲                               ▲
-//	                                └── Window Spans at Least 60s ──┘
+//	Bucket Index:   0       1       2       3       4       5       6
+//	Time Span:    [0-10s] [10-20s][20-30s][30-40s][40-50s][50-60s][60-70s]
+//	              ┌───────┬───────┬───────┬───────┬───────┬───────┬───────┐
+//	Counts:       │   1   │   0   │   2   │   3   │   0   │   1   │   0   │
+//	              └───────┴───────┴───────┴───────┴───────┴───────┴───────┘
+//	                              ▲                               ▲
+//	                              └── Window Spans at Least 60s ──┘
 //
 // Seven buckets are used rather than six because buckets age out on bucket start
 // boundaries rather than individual event timestamps. Seven buckets guarantee that

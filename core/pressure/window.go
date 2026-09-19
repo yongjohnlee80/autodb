@@ -50,14 +50,14 @@ const (
 // ignore. Every method that consults the window advances it first, so a total
 // is always about the window ending now.
 //
-//	  Bucket Index:   0       1       2       3       4       5       6
-//	  Time Span:    [0-10s] [10-20s][20-30s][30-40s][40-50s][50-60s][60-70s]
-//	                ┌───────┬───────┬───────┬───────┬───────┬───────┬───────┐
-//	  counts:       │   1   │   0   │   2   │   3   │   0   │   1   │   0   │
-//	  at (epoch):   │ 10042 │ 10043 │ 10044 │ 10045 │ 10046 │ 10047 │ 10048 │
-//	                └───────┴───────┴───────┴───────┴───────┴───────┴───────┘
-//	                                ▲                               ▲
-//	                                └── Window Spans at Least 60s ──┘
+//	Bucket Index:   0       1       2       3       4       5       6
+//	Time Span:    [0-10s] [10-20s][20-30s][30-40s][40-50s][50-60s][60-70s]
+//	              ┌───────┬───────┬───────┬───────┬───────┬───────┬───────┐
+//	counts:       │   1   │   0   │   2   │   3   │   0   │   1   │   0   │
+//	at (epoch):   │ 10042 │ 10043 │ 10044 │ 10045 │ 10046 │ 10047 │ 10048 │
+//	              └───────┴───────┴───────┴───────┴───────┴───────┴───────┘
+//	                              ▲                               ▲
+//	                              └── Window Spans at Least 60s ──┘
 type rateWindow struct {
 	counts [buckets]int
 	// at is the bucket index each slot currently holds, so a slot that belongs

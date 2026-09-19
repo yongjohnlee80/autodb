@@ -34,21 +34,21 @@ type ThrottledRow struct {
 // figures independently is two chances to be subtly different -- and the first
 // time they disagree in front of an operator, both become untrustworthy.
 //
-//	  ┌─────────────────────────────────────────────────────────────┐
-//	  │ Snapshot (Unified Operator View Model)                      │
-//	  ├─────────────────────────────────────────────────────────────┤
-//	  │ Sessions (Global), Conns (Lane), PreAuth (Lane)             │
-//	  │ PerUser (Top users + PerUserOmitted remainder)              │
-//	  │ Leases (Top targets + LeasesOmitted remainder)              │
-//	  │ Denials (Sliding rate breakdown + DenialsOmitted)           │
-//	  │ Throttled (Active throttled IPs + ThrottledOmitted)         │
-//	  └──────────────────────────────┬──────────────────────────────┘
-//	                                 │
-//	                 Consistently Rendered By
-//	                                 │
-//	                 ┌───────────────┴───────────────┐
-//	                 ▼                               ▼
-//	        [Interactive TUI View]          [Admin Web HTTP API]
+//	┌─────────────────────────────────────────────────────────────┐
+//	│ Snapshot (Unified Operator View Model)                      │
+//	├─────────────────────────────────────────────────────────────┤
+//	│ Sessions (Global), Conns (Lane), PreAuth (Lane)             │
+//	│ PerUser (Top users + PerUserOmitted remainder)              │
+//	│ Leases (Top targets + LeasesOmitted remainder)              │
+//	│ Denials (Sliding rate breakdown + DenialsOmitted)           │
+//	│ Throttled (Active throttled IPs + ThrottledOmitted)         │
+//	└──────────────────────────────┬──────────────────────────────┘
+//	                               │
+//	               Consistently Rendered By
+//	                               │
+//	               ┌───────────────┴───────────────┐
+//	               ▼                               ▼
+//	      [Interactive TUI View]          [Admin Web HTTP API]
 type Snapshot struct {
 	Sessions Row
 	PerUser  []Row

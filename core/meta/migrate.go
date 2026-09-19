@@ -19,24 +19,24 @@ var ErrMigrate = errors.New("meta: engine migration refused")
 //
 // Migration Pipeline:
 //
-//	  [1. Precondition Checks]
-//	  • src.Engine() == SQLite && dst.Engine() == PostgreSQL
-//	  • Destination tables are completely empty (ensureEmpty)
-//	  • Pre-partition destination for historical audit/history records
-//	                 │
-//	                 ▼
-//	  [2. Topological Table Transfer]
-//	  • Copies entities strictly in foreign-key dependency order
-//	  • Preserves exact primary key IDs and timestamps
-//	                 │
-//	                 ▼
-//	  [3. PostgreSQL Sequence Synchronization]
-//	  • Advances BIGSERIAL sequences past MAX(id)
-//	                 │
-//	                 ▼
-//	  [4. Count & Parity Verification]
-//	  • Verifies exact row count equality across all tables
-//	  • Records "migrated_from" metadata timestamp
+//	[1. Precondition Checks]
+//	• src.Engine() == SQLite && dst.Engine() == PostgreSQL
+//	• Destination tables are completely empty (ensureEmpty)
+//	• Pre-partition destination for historical audit/history records
+//	               │
+//	               ▼
+//	[2. Topological Table Transfer]
+//	• Copies entities strictly in foreign-key dependency order
+//	• Preserves exact primary key IDs and timestamps
+//	               │
+//	               ▼
+//	[3. PostgreSQL Sequence Synchronization]
+//	• Advances BIGSERIAL sequences past MAX(id)
+//	               │
+//	               ▼
+//	[4. Count & Parity Verification]
+//	• Verifies exact row count equality across all tables
+//	• Records "migrated_from" metadata timestamp
 //
 // Operational safety:
 // The source SQLite database is accessed strictly in read-only mode and is left intact.

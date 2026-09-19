@@ -98,13 +98,13 @@ func All() []Name {
 // correct one, is a coin flip. A rejected name is a startup error a person can
 // read; an accepted alias is a class of bug nobody sees.
 //
-//	  [Input String: s]
-//	          │
-//	          ├─ Exact match in All() ───────> Return (Name, nil)
-//	          │  (Postgres, MySQL, SQLite)
-//	          │
-//	          └─ Typo, alias, case-fold ─────> Return ("", error)
-//	             (e.g., "Postgres", "sqlite3", " postgres")
+//	[Input String: s]
+//	        │
+//	        ├─ Exact match in All() ───────> Return (Name, nil)
+//	        │  (Postgres, MySQL, SQLite)
+//	        │
+//	        └─ Typo, alias, case-fold ─────> Return ("", error)
+//	           (e.g., "Postgres", "sqlite3", " postgres")
 func Parse(s string) (Name, error) {
 	for _, n := range All() {
 		if s == string(n) {
@@ -131,7 +131,7 @@ func (n Name) String() string { return string(n) }
 // came back as a bare "internal error" over the wire, two layers away from the
 // cause.
 //
-//	  [Name] ─── Value() ───> driver.Value (string) ───> database/sql driver
+//	[Name] ─── Value() ───> driver.Value (string) ───> database/sql driver
 func (n Name) Value() (driver.Value, error) { return string(n), nil }
 
 // Scan implements sql.Scanner so a Name can be read back from the meta store.
@@ -142,11 +142,11 @@ func (n Name) Value() (driver.Value, error) { return string(n), nil }
 // written by an older build with a spelling this build does not know is a fault
 // worth surfacing at the read, where the row id is still in hand.
 //
-//	  [src: any]
-//	      │
-//	      ├─ string / []byte ───> Parse(src) ───> *n = parsed, return nil
-//	      ├─ nil ───────────────────────────────> error: NULL is not an engine name
-//	      └─ other types ───────────────────────> error: cannot scan %T into an engine name
+//	[src: any]
+//	    │
+//	    ├─ string / []byte ───> Parse(src) ───> *n = parsed, return nil
+//	    ├─ nil ───────────────────────────────> error: NULL is not an engine name
+//	    └─ other types ───────────────────────> error: cannot scan %T into an engine name
 func (n *Name) Scan(src any) error {
 	switch v := src.(type) {
 	case nil:

@@ -30,20 +30,20 @@ type DenialKey struct {
 // unbounded source map would be. The cap costs nothing and removes a class of
 // mistake that would otherwise depend on everybody remembering.
 //
-//	  Refusal Arrival: Reason="pool_full", Class=Capacity
-//	                           │
-//	                           ▼
-//	              [DenialBreakdown.Add(k, now)]
-//	                           │
-//	               ┌───────────┴───────────┐
-//	               ▼                       ▼
-//	      [Dimension.Note(...)]     [rateWindow.add(now)]
-//	      Evicts LRU if > 16        Slides 7-bucket window
-//	               │                       │
-//	               └───────────┬───────────┘
-//	                           ▼
-//	              [prune: Evicts windows for keys
-//	               dropped by dimension]
+//	Refusal Arrival: Reason="pool_full", Class=Capacity
+//	                         │
+//	                         ▼
+//	            [DenialBreakdown.Add(k, now)]
+//	                         │
+//	             ┌───────────┴───────────┐
+//	             ▼                       ▼
+//	    [Dimension.Note(...)]     [rateWindow.add(now)]
+//	    Evicts LRU if > 16        Slides 7-bucket window
+//	             │                       │
+//	             └───────────┬───────────┘
+//	                         ▼
+//	            [prune: Evicts windows for keys
+//	             dropped by dimension]
 type DenialBreakdown struct {
 	windows map[DenialKey]*rateWindow
 	dim     *Dimension

@@ -13,21 +13,21 @@
 // autodb establishes upstream golib/dao as the single source of truth for dialect
 // strings. autodb introduces a defined type (Name) and nothing else:
 //
-//	  ┌─────────────────────────────────────────────────────────────┐
-//	  │ Upstream: golib/dao                                         │
-//	  │   dao.DialectPostgres = "postgres"                          │
-//	  │   dao.DialectMySQL    = "mysql"                             │
-//	  │   dao.DialectSQLite   = "sqlite"                            │
-//	  └──────────────────────────────┬──────────────────────────────┘
-//	                                 │ Sourced Without Local Mutation
-//	                                 ▼
-//	  ┌─────────────────────────────────────────────────────────────┐
-//	  │ autodb: core/engine                                         │
-//	  │   type Name string                                          │
-//	  │   const Postgres Name = dao.DialectPostgres                 │
-//	  │   const MySQL    Name = dao.DialectMySQL                    │
-//	  │   const SQLite   Name = dao.DialectSQLite                   │
-//	  └─────────────────────────────────────────────────────────────┘
+//	┌─────────────────────────────────────────────────────────────┐
+//	│ Upstream: golib/dao                                         │
+//	│   dao.DialectPostgres = "postgres"                          │
+//	│   dao.DialectMySQL    = "mysql"                             │
+//	│   dao.DialectSQLite   = "sqlite"                            │
+//	└──────────────────────────────┬──────────────────────────────┘
+//	                               │ Sourced Without Local Mutation
+//	                               ▼
+//	┌─────────────────────────────────────────────────────────────┐
+//	│ autodb: core/engine                                         │
+//	│   type Name string                                          │
+//	│   const Postgres Name = dao.DialectPostgres                 │
+//	│   const MySQL    Name = dao.DialectMySQL                    │
+//	│   const SQLite   Name = dao.DialectSQLite                   │
+//	└─────────────────────────────────────────────────────────────┘
 //
 // Sourcing constants directly from dao ensures that if an upstream identifier
 // changes, autodb tracks it at compile time.
@@ -45,15 +45,15 @@
 // Call sites throughout autodb ask questions about an engine's capabilities rather
 // than branching on its identity:
 //
-//	  FRAGILE (Identity Branching):
-//	    if conn.Engine != engine.Postgres {
-//	        // Assumes absence of Postgres means no commit status oracle
-//	    }
+//	FRAGILE (Identity Branching):
+//	  if conn.Engine != engine.Postgres {
+//	      // Assumes absence of Postgres means no commit status oracle
+//	  }
 //
-//	  ROBUST (Capability Query):
-//	    if conn.Engine.HasCommitStatusOracle() {
-//	        // Asks the domain question directly; holds true for any target
-//	    }
+//	ROBUST (Capability Query):
+//	  if conn.Engine.HasCommitStatusOracle() {
+//	      // Asks the domain question directly; holds true for any target
+//	  }
 //
 // Identity is merely evidence for a capability. Asking for capabilities ensures
 // that as new database engines are introduced, existing subsystems function

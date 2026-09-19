@@ -108,28 +108,28 @@ func applyStage(s Stage, facts Facts, ctx Context) (contrib Contribution, err er
 //
 // Pipeline Flow:
 //
-//	  [facts, ctx]
-//	       │
-//	       ▼
-//	  For each stage in stages:
-//	       │
-//	       ├── applicable(stage)? ──NO──> (skip stage)
-//	       │       │ YES
-//	       │       ▼
-//	       ├── applyStage(stage)  ──PANIC / ERR──> Return OperationalError
-//	       │       │
-//	       │       ▼
-//	       ├── contrib.Deny != nil?
-//	       │       │ YES
-//	       │       ├── !declaresCode(code)? ──YES──> Return OperationalError (Undeclared)
-//	       │       │ NO
-//	       │       ▼
-//	       │   Report.Deny = [reason] ──> HALT & Return Report (Risk Suppressed)
-//	       │
-//	       └── contrib.Risk != nil ──> Report.Risk += observation
-//	       │
-//	       ▼
-//	  Return Report (All stages admitted, risks collected)
+//	[facts, ctx]
+//	     │
+//	     ▼
+//	For each stage in stages:
+//	     │
+//	     ├── applicable(stage)? ──NO──> (skip stage)
+//	     │       │ YES
+//	     │       ▼
+//	     ├── applyStage(stage)  ──PANIC / ERR──> Return OperationalError
+//	     │       │
+//	     │       ▼
+//	     ├── contrib.Deny != nil?
+//	     │       │ YES
+//	     │       ├── !declaresCode(code)? ──YES──> Return OperationalError (Undeclared)
+//	     │       │ NO
+//	     │       ▼
+//	     │   Report.Deny = [reason] ──> HALT & Return Report (Risk Suppressed)
+//	     │
+//	     └── contrib.Risk != nil ──> Report.Risk += observation
+//	     │
+//	     ▼
+//	Return Report (All stages admitted, risks collected)
 //
 // A DENY INTENTIONALLY SUPPRESSES RISK: when a stage contributes both a
 // denial and an observation, the denial wins and the observation is

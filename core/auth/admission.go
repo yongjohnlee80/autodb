@@ -55,25 +55,25 @@ const (
 //
 // Admission Evaluation Flow:
 //
-//	         [Client IP]
-//	              │
-//	              ▼
-//	        ip == LocalPeer?
-//	              │
-//	     YES ─────┴───── NO
-//	      │               │
-//	      ▼               ▼
-//	 [AdmittedByGlobal]  In Global Allowlist (Config CIDRs ∪ ip_allowlist)?
-//	                     │
-//	                YES ─┴─ NO
-//	                 │       │
-//	                 ▼       ▼
-//	 [AdmittedByGlobal]     In User Allowlist (user_ips)?
-//	                         │
-//	                    YES ─┴─ NO
-//	                     │       │
-//	                     ▼       ▼
-//	   [AdmittedByUserRow]      [NotAdmitted]
+//	        [Client IP]
+//	             │
+//	             ▼
+//	       ip == LocalPeer?
+//	             │
+//	    YES ─────┴───── NO
+//	     │               │
+//	     ▼               ▼
+//	[AdmittedByGlobal]  In Global Allowlist (Config CIDRs ∪ ip_allowlist)?
+//	                    │
+//	               YES ─┴─ NO
+//	                │       │
+//	                ▼       ▼
+//	[AdmittedByGlobal]     In User Allowlist (user_ips)?
+//	                        │
+//	                   YES ─┴─ NO
+//	                    │       │
+//	                    ▼       ▼
+//	  [AdmittedByUserRow]      [NotAdmitted]
 //
 // The two layers are checked in the cheaper order — the global list is
 // usually a handful of prefixes already in memory, the user's rows are a
