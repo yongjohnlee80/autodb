@@ -49,6 +49,7 @@ var certifiedClean = []string{
 	"internal/vocabguard",
 	"frontdoor",
 	"core/exec",
+	"core/pressure",
 }
 
 // Patterns that name a private artefact.

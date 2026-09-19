@@ -35,6 +35,20 @@ type Caps struct {
 // zero. "No limit configured" is not a figure that can be a fraction of
 // anything, and a signal that can never raise is one more row an operator has
 // to learn to skip.
+//
+//	  [Observed State Inputs]
+//	  • Caps (Sessions, PerUser, Leases)
+//	  • Denials (moving window count)
+//	  • Throttled (remote source addresses)
+//	                │
+//	                ▼
+//	        [Readings(c, denials, throttled)]
+//	                │
+//	                ├─ SessionCap > 0 ───> Signal{sessions.global, Capacity, Occupancy}
+//	                ├─ PerUserCap > 0 ───> Signal{sessions.user{id}, Capacity, Occupancy}
+//	                ├─ LeaseCap > 0   ───> Signal{leases.target{id}, Capacity, Occupancy}
+//	                ├─ Denials        ───> Signal{denials.rate{capacity}, Capacity, Rate}
+//	                └─ Throttled      ───> Signal{sources.throttled{src}, Credential, Count}
 func Readings(c Caps, denials int, throttled []string) []Reading {
 	var out []Reading
 

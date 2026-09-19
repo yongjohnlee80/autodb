@@ -31,6 +31,17 @@ import (
 // remove -- somebody reads a credential-grinding signal as the pool being full
 // and resizes something that was never the problem. The two classes raise,
 // clear and are alerted on independently.
+//
+//	  ┌─────────────────────────────────────────────────────────────┐
+//	  │ Class: Capacity                                             │
+//	  │ • Resource bounds: Leases, global/user session limits       │
+//	  │ • Remediation: Enlarge pool, shed load, scale target backend │
+//	  └─────────────────────────────────────────────────────────────┘
+//	  ┌─────────────────────────────────────────────────────────────┐
+//	  │ Class: Credential                                           │
+//	  │ • Auth failures: Password brute-force, invalid bearer tokens│
+//	  │ • Remediation: Block source IP, revoke tokens, investigate  │
+//	  └─────────────────────────────────────────────────────────────┘
 type Class uint8
 
 const (
@@ -61,6 +72,15 @@ func (c Class) String() string {
 // so the only testable form is an absolute count in a fixed window. An earlier
 // revision gave only the occupancy rule and left the denial signal with no
 // stated threshold at all -- which is to say, untestable.
+//
+//	  ┌───────────┬──────────────────────────────────┬────────────────────────┐
+//	  │ Kind      │ Measurement Model                │ Crossing Thresholds    │
+//	  ├───────────┼──────────────────────────────────┼────────────────────────┤
+//	  │ Occupancy │ Value measured against a Cap     │ Enter >= 80%, Clear <= 70%│
+//	  │ Rate      │ Events in sliding time window    │ Enter >= 5/min, Clear = 0 │
+//	  │ Count     │ Instantaneous active entities    │ Enter >= 1, Clears by  │
+//	  │           │ (e.g. throttled source IPs)      │ vanishing from readings│
+//	  └───────────┴──────────────────────────────────┴────────────────────────┘
 type Kind uint8
 
 const (
@@ -190,6 +210,29 @@ func NewTracker(now func() time.Time) *Tracker {
 
 // Observe judges every reading and returns the crossings, ordered by signal
 // name and then subject so a run is stable enough to assert on.
+//
+//	                    ┌────────────────────────────┐
+//	                    │ Readings on Current Tick   │
+//	                    └─────────────┬──────────────┘
+//	                                  │
+//	                       For Each Reading r:
+//	                                  │
+//	                 Is r.ID currently in t.raised?
+//	                                  │
+//	                   NO ────────────┴──────────── YES
+//	                   │                            │
+//	             t.enters(r)?                 t.clears(r)?
+//	             ┌─────┴─────┐                ┌─────┴─────┐
+//	            YES         NO               YES         NO
+//	             │           │                │           │
+//	             ▼           ▼                ▼           ▼
+//	        [Add to raised] [Ignore]     [Delete raised] [Ignore]
+//	        Emit Entered                 Emit Cleared
+//	        Event                        Event
+//	                                  │
+//	                                  ▼
+//	                 Check raised signals not in readings:
+//	                 [Delete raised, emit Cleared Event (Value=0)]
 //
 // BY NAME, NOT BY AGE. An earlier version of this sentence said "oldest
 // identity first", which the code has never done -- there is no arrival order
