@@ -21,6 +21,13 @@ import "github.com/yongjohnlee80/autodb/core/exec"
 // added later while the total stays plausible. The raise sites now name their
 // outcome and the problem is gone rather than worked around.
 //
+//	  [core/exec.WaitOutcome Enum]
+//	                 │
+//	                 ├─ o == WaitOutcomeUnset ───> ("", false) [Suppressed]
+//	                 │
+//	                 └─ o != WaitOutcomeUnset ───> (o.String(), true) [Exported]
+//	                    (e.g., "acquired", "queue_timeout", "canceled")
+//
 // The second return is false only for the zero value, which is never reported.
 func Label(o exec.WaitOutcome) (string, bool) {
 	s := o.String()

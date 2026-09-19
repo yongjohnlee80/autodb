@@ -4,15 +4,15 @@ import "time"
 
 // PER-SIGNAL EDGE SETS. THERE IS NO SHARED SET.
 //
-// 0187 §3 said one set was "shared by every duration histogram", topping out
-// at five minutes. That was right at a 90-second bound and is wrong now, and
-// the connection-holding policy replaced it: each signal names its own set,
-// and every boundary a signal exists to diagnose must be an actual edge —
+// An earlier specification said one set was "shared by every duration histogram",
+// topping out at five minutes. That was right at a 90-second bound and is wrong
+// now, and the connection-holding policy replaced it: each signal names its own
+// set, and every boundary a signal exists to diagnose must be an actual edge —
 // otherwise the interesting case lands in +Inf and the metric cannot answer
 // the question it was built for.
 //
 // TWELVE EDGES EACH, SO THIRTEEN BINS EACH. The bin count is deliberately
-// unchanged across both sets, because 0187's cell arithmetic depends on the
+// unchanged across both sets, because the test cell arithmetic depends on the
 // COUNT and not on the values.
 //
 // These are transcribed from the ratified table, not chosen here. An earlier
@@ -48,6 +48,17 @@ var BackendHoldEdgesMs = []int64{
 // bins 0..i, which is the standard `le` form a scrape expects. Bins() and
 // Cumulative() are separate methods for that reason, and the boundary cells
 // assert both.
+//
+//	  Sample Landings:
+//	  • Internal Storage (Bins()):
+//	      Exclusive: sample <= edge increments exactly ONE bucket.
+//	  • Export Projection (Cumulative()):
+//	      Monotonic running sum: bin[i] = sum(0..i), final bin == Count().
+//
+//	  Sample: 45ms
+//	  Edges: [10ms, 50ms, 100ms, +Inf]
+//	  Internal:   [0, 1, 0, 0]
+//	  Cumulative: [0, 1, 1, 1]
 type Histogram struct {
 	edges []int64
 	bins  []uint64 // len(edges)+1; the last is the +Inf overflow
