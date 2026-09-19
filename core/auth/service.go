@@ -368,6 +368,12 @@ func connAAD(connID int64) string { return fmt.Sprintf("autodb:conn:%d:v1", conn
 
 // EncryptSecret seals a connection secret under the install master key,
 // bound to the connection's id. ErrLocked before first login.
+//
+// Cryptographic Envelope:
+//
+//	Plaintext Secret ──┐
+//	Master Key (DEK) ──┼──> [ AES-256-GCM Seal ] ──> Sealed Blob (Nonce ‖ Ciphertext)
+//	AAD Binding       ─┘    ("autodb:conn:<connID>:v1")
 func (s *Service) EncryptSecret(plaintext []byte, connID int64) ([]byte, error) {
 	mk, err := s.masterKey()
 	if err != nil {

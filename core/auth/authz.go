@@ -55,10 +55,29 @@ func requiredRank(a Action) int {
 // Authorize is the single permission gate: it resolves the
 // token to a FRESH identity (provenance + current authority)
 // and checks the action. ActionManage checks the global role alone.
-// Connection-scoped actions require a grant — for admins too (Objective
-// 13) — and the effective role is min(global role, grant role): a
-// globally-reader user never exceeds SELECT regardless of grants
-// (Objective 15). The fresh identity is returned for the caller's records.
+// Connection-scoped actions require a grant — for admins too — and the
+// effective role is min(global role, grant role): a globally-reader user
+// never exceeds SELECT regardless of grants. The fresh identity is returned
+// for the caller's records.
+//
+// Decision Flow:
+//
+//	           Is action == ActionManage?
+//	                   │
+//	          YES ─────┴───── NO
+//	           │               │
+//	           ▼               ▼
+//	   globalRole == admin?   Read Grant(userID, connID)
+//	           │               │
+//	     YES ──┴── NO    Found ┴ Missing
+//	      │         │      │        │
+//	      ▼         ▼      ▼        ▼
+//	    PERMIT    DENY   min(rank(global), rank(grant)) >= required(action)?
+//	                       │
+//	                 YES ──┴── NO
+//	                  │         │
+//	                  ▼         ▼
+//	                PERMIT    DENY
 func (s *Service) Authorize(ctx context.Context, token string, connID int64, action Action) (Identity, error) {
 	ident, _, err := s.resolveToken(ctx, token)
 	if err != nil {
