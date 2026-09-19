@@ -133,31 +133,76 @@ This document captures architectural design observations, potential issues, and 
 
 ---
 
-## 3. Cross-Subsystem Architectural Observations
+## 3. Subsystem Analysis: `tui`
 
-### 3.1 AST Reflection Coupling in `core/engine`
+### 3.1 State Density in the Root `Model`
+- **Location**: `tui/ui.go` (`Model` struct, lines 25–105)
+- **Mechanism**:
+  The root `Model` struct currently aggregates over 40 distinct fields, managing widget hierarchy, split ratios, active workspace/connection, query execution sequence, authentication attempts, splash banners, note dirty tracking, and editor preference coordination.
+- **Architectural Assessment**:
+  While consolidating state into a single model simplifies Neovim-style bubble event handling at the tail of the keymap chain, it creates high coupling. Methods in `ui.go`, `commands.go`, `managers.go`, and `explorer.go` directly mutate disparate model fields, making state transitions harder to audit.
+- **Recommendations**:
+  1. **Modular Sub-Controllers**: Partition `Model` into logical sub-states:
+     - `LayoutState`: split ratios, active pane, zoom state, `lastPane`.
+     - `ExecutionState`: `execSeq`, `running`, query cancel handles, pagination.
+     - `AuthState`: `identityEpoch`, `authSeq`, tokens, user profile.
+     - `NotesState`: `curNote`, `noteGen`, `noteDirty`.
+  2. Maintain `Model` as the orchestrator embedding these sub-controllers.
+
+---
+
+### 3.2 Generation Fencing vs Server-Side Context Cancellation
+- **Location**: `tui/ui.go` (lines 22–24, `execSeq` in query execution)
+- **Mechanism**:
+  When a user re-executes a query or navigates away, `execSeq` increments. When previous asynchronous RPC tasks complete, their callbacks compare the captured sequence against `m.execSeq` and discard outdated results.
+- **Architectural Assessment**:
+  - *Strength*: Perfectly guards the UI against race conditions and out-of-order UI rendering without requiring mutexes across the UI loop.
+  - *Opportunity*: While discarded on the client side, long-running queries continue executing on the remote PostgreSQL backend until completion, consuming database compute and backend connection permits.
+- **Recommendations**:
+  1. Pair `execSeq` with active context cancellation: store the active `context.CancelFunc` for the running query task, and invoke it when a new execution preempts the old one, transmitting an explicit cancel frame to the daemon.
+
+---
+
+### 3.3 In-Process RPC Loopback Overhead
+- **Location**: `tui/client.go`
+- **Mechanism**:
+  When `autodb --ui` runs in standalone mode (embedding the daemon and TUI in a single process), the TUI still connects through an in-memory loopback transport speaking Msgpack-RPC.
+- **Architectural Assessment**:
+  - *Strength*: Strictly enforces the single-source-of-truth invariant: all query execution, authorization, and audit logs pass through the exact same code paths whether invoked from Neovim, the CLI, or the TUI.
+  - *Trade-off*: Large result sets (e.g. 50,000 rows in the results table) are serialized to Msgpack binary and immediately deserialized within the same process heap.
+- **Recommendations**:
+  1. For in-process execution, explore an optional zero-copy in-memory channel transport that bypasses binary serialization while preserving the identical `rpc.Client` interface and security intercepts.
+
+---
+
+## 4. Cross-Subsystem Architectural Observations
+
+### 4.1 AST Reflection Coupling in `core/engine`
 - In `core/engine/capabilities.go`, exported receiver methods on `Name` are verified by AST inspection in `capabilities_test.go` (`TestEachPredicateReadsItsOwnField`), requiring each method to strictly read `capsByName[n].<field>`.
 - *Observation*: While effective at preventing semantic divergence between capability names and backing fields, new helper methods cannot be added without updating test reflection expectations.
 - *Recommendation*: Document AST test coupling in `core/engine/README.md` (already done) and provide compiler-enforced interfaces rather than test-time AST assertions where possible.
 
-### 3.2 Dynamic Capacity versus Fixed Window in `core/pressure`
+### 4.2 Dynamic Capacity versus Fixed Window in `core/pressure`
 - In `core/pressure`, rate calculations are hardcoded to a 7-bucket sliding window with 1-second ticks.
 - *Observation*: In high-throughput deployments with sub-millisecond burst traffic, a 7-second sliding window may react too slowly to acute connection surges.
 - *Recommendation*: Consider exposing window bucket count and tick interval as configuration options in `core/config`, with sane defaults.
 
-### 3.3 Orthogonal Triad in `core/outcome`
+### 4.3 Orthogonal Triad in `core/outcome`
 - Decoupling Kind (structural category) from Charge (throttle attribution) and Wire Projection (authorization-dependent disclosure) provides a solid foundation for client security.
 - *Observation*: `frontdoor` and `rpc` should systematically adopt the Authorization Witness pattern (`outcome.Authorized()`) across all error paths to prevent telemetry leakage to unauthenticated probes.
 
 ---
 
-## 4. Prioritized Action Items for Next Sprints
+## 5. Prioritized Action Items for Next Sprints
 
 | Priority | Item | Component | Complexity | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | **High** | Replace per-wait goroutines in `generalLane.reserve` | `frontdoor` | Medium | Mitigate goroutine churn and timer allocations under memory contention. |
+| **Medium** | Pair `execSeq` with active RPC query cancellation | `tui` | Medium | Cancel backend query tasks on preemption to release database compute. |
 | **Medium** | Reconcile `gate/*` error IDs in `held_objects.go` | `frontdoor` | Low | Unify namespace under `frontdoor/*` with backward-compatible audit aliases. |
 | **Medium** | Minimum protocol floor & capability negotiation | `rpc` | Medium | Allow minor frontend version divergence without immediate connection poisoning. |
 | **Medium** | Standardize linear ownership tokens in `rpc` / `webserver` | `rpc`, `webserver` | Medium | Apply `acceptToken` LIFO pattern to streaming RPCs and HTTP websocket upgrades. |
+| **Low** | Modularize root `Model` into focused sub-controllers | `tui` | Low | Decompose `ui.go` state density into layout, auth, and execution states. |
 | **Low** | Configurable pressure rate sliding window | `core/pressure` | Low | Allow tuning of window buckets for high-frequency burst environments. |
+
 
