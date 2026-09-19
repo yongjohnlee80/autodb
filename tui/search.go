@@ -308,6 +308,37 @@ func (m *Model) traceFocus(live tui.Component) {
 		m.paneName(m.lastPane), m.paneName(live))
 }
 
+// RuntimeTrace returns golib's runtime tracer aimed at the same file as
+// AUTODB_FOCUS_TRACE, or nil when the variable is unset -- which WithTrace
+// treats as "off".
+//
+// traceFocus records what this Model CONCLUDED about focus. This records what
+// the framework DID: every focus move with the component types on both ends,
+// every repair and the reason it ran, every scope opening and closing, and the
+// node that consumed each key. The two interleave in one file, so a line saying
+// no pane holds focus sits beside the transition that took it away and beside
+// the component that went on receiving the keys. That pairing is the question
+// a day of reading the code could not answer: the harness never loses focus,
+// and the production trace showed only that it was lost, not by whom.
+//
+// The file is opened once and kept, because the tracer runs synchronously on
+// the loop for every event and must stay cheap. Never closed: it lives as long
+// as the process does.
+func RuntimeTrace() tui.TraceFunc {
+	path := os.Getenv("AUTODB_FOCUS_TRACE")
+	if path == "" {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil
+	}
+	return func(ev tui.TraceEvent) {
+		fmt.Fprintf(f, "%s golib %-12s node=%d(%s) prev=%d(%s) %s\n",
+			time.Now().Format("15:04:05.000"), ev.Kind, ev.Node, ev.Comp, ev.Prev, ev.PrevComp, ev.Detail)
+	}
+}
+
 // paneName names a pane for the trace.
 func (m *Model) paneName(c tui.Component) string {
 	switch {
