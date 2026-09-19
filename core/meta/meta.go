@@ -14,9 +14,12 @@ import (
 	"github.com/yongjohnlee80/golib/dao/sqlite"
 )
 
-// Store is the opened meta-store: one dao connection, migrated to the
-// current schema, with one immutable dao Schema per entity. Higher core
-// layers (identity/authz in M3, execution in M4) build on these schemas.
+// Store represents an active connection to autodb's management database, migrated to
+// the current schema version and providing type-safe dao.Schema handles for all entities.
+//
+// Higher-level core packages (such as core/auth and core/exec) build directly upon
+// these schemas. Store is safe for concurrent use across goroutines: the underlying
+// database connection pool manages concurrent queries and transactions.
 type Store struct {
 	conn   dao.DataConn
 	engine engine.Name

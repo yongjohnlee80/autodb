@@ -14,16 +14,33 @@ import (
 // errors.Is.
 var ErrMigrate = errors.New("meta: engine migration refused")
 
-// MigrateToPostgres copies a sqlite meta-store into an empty postgres
-// meta-store — the one-way engine migration.
+// MigrateToPostgres executes a verified, one-way migration transferring all records
+// from a SQLite meta store into an empty PostgreSQL meta store.
 //
-// Preconditions (refused otherwise): src is sqlite, dst is postgres, both
-// are migrated to the same schema version (guaranteed by Open), and every
-// dst entity table is empty. Entities copy in FK-dependency order with ids
-// preserved; postgres id sequences are then advanced past the copied ids;
-// per-table counts are verified; finally store_meta gains a
-// "migrated_from" stamp. The source store is left untouched — the operator
-// retires it after verifying. There is no postgres→sqlite path.
+// Migration Pipeline:
+//
+//	  [1. Precondition Checks]
+//	  • src.Engine() == SQLite && dst.Engine() == PostgreSQL
+//	  • Destination tables are completely empty (ensureEmpty)
+//	  • Pre-partition destination for historical audit/history records
+//	                 │
+//	                 ▼
+//	  [2. Topological Table Transfer]
+//	  • Copies entities strictly in foreign-key dependency order
+//	  • Preserves exact primary key IDs and timestamps
+//	                 │
+//	                 ▼
+//	  [3. PostgreSQL Sequence Synchronization]
+//	  • Advances BIGSERIAL sequences past MAX(id)
+//	                 │
+//	                 ▼
+//	  [4. Count & Parity Verification]
+//	  • Verifies exact row count equality across all tables
+//	  • Records "migrated_from" metadata timestamp
+//
+// Operational safety:
+// The source SQLite database is accessed strictly in read-only mode and is left intact.
+// Reversing this operation (PostgreSQL -> SQLite) is not supported.
 func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 	if src.Engine() != engine.SQLite {
 		return fmt.Errorf("%w: source engine is %q, want sqlite", ErrMigrate, src.Engine())
