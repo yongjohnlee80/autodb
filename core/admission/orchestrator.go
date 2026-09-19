@@ -64,23 +64,6 @@ func Compose(stages ...Stage) *Orchestrator {
 	return &Orchestrator{stages: stages}
 }
 
-// Run evaluates one statement's facts through the chain, in order, and
-// stops at the first deny. Stages whose declared needs the context cannot
-// supply are skipped — not consulted, not logged as empty, skipped —
-// because their absence is a property of the composition, decided when the
-// chain was built, not a runtime surprise.
-//
-// A DENY INTENTIONALLY SUPPRESSES RISK: when a stage contributes both a
-// denial and an observation, the denial wins and the observation is
-// dropped. A refused statement's analytics value is its refusal — the
-// record the disposition carries is the refusal itself. This is a
-// decision, documented here and asserted by the dual-arm cell, not an
-// accident of the return.
-//
-// An operational error from a stage ABORTS the run and is returned as
-// itself. It is not a refusal: the caller must be able to tell "the
-// statement is refused" from "the pipeline could not decide", and the
-// Report type gives it that.
 // PanicError is the cause an OperationalError carries when a stage panicked.
 //
 // A PANIC IS AN OPERATIONAL ERROR, NEVER A DENIAL. The distinction is the whole
@@ -117,6 +100,48 @@ func applyStage(s Stage, facts Facts, ctx Context) (contrib Contribution, err er
 	return s.Apply(facts, ctx)
 }
 
+// Run evaluates one statement's facts through the chain, in order, and
+// stops at the first deny. Stages whose declared needs the context cannot
+// supply are skipped — not consulted, not logged as empty, skipped —
+// because their absence is a property of the composition, decided when the
+// chain was built, not a runtime surprise.
+//
+// Pipeline Flow:
+//
+//	  [facts, ctx]
+//	       │
+//	       ▼
+//	  For each stage in stages:
+//	       │
+//	       ├── applicable(stage)? ──NO──> (skip stage)
+//	       │       │ YES
+//	       │       ▼
+//	       ├── applyStage(stage)  ──PANIC / ERR──> Return OperationalError
+//	       │       │
+//	       │       ▼
+//	       ├── contrib.Deny != nil?
+//	       │       │ YES
+//	       │       ├── !declaresCode(code)? ──YES──> Return OperationalError (Undeclared)
+//	       │       │ NO
+//	       │       ▼
+//	       │   Report.Deny = [reason] ──> HALT & Return Report (Risk Suppressed)
+//	       │
+//	       └── contrib.Risk != nil ──> Report.Risk += observation
+//	       │
+//	       ▼
+//	  Return Report (All stages admitted, risks collected)
+//
+// A DENY INTENTIONALLY SUPPRESSES RISK: when a stage contributes both a
+// denial and an observation, the denial wins and the observation is
+// dropped. A refused statement's analytics value is its refusal — the
+// record the disposition carries is the refusal itself. This is a
+// decision, documented here and asserted by the dual-arm cell, not an
+// accident of the return.
+//
+// An operational error from a stage ABORTS the run and is returned as
+// itself. It is not a refusal: the caller must be able to tell "the
+// statement is refused" from "the pipeline could not decide", and the
+// Report type gives it that.
 func (o *Orchestrator) Run(facts Facts, ctx Context) (Report, error) {
 	var rep Report
 	for _, s := range o.stages {
@@ -154,6 +179,19 @@ func (o *Orchestrator) Run(facts Facts, ctx Context) (Report, error) {
 // as well as context applicability: a stage requiring a set shape on a
 // chain whose facts carry none is unsatisfiable, and the composition says
 // so rather than the stage returning nothing at runtime.
+//
+// Applicability Evaluation:
+//
+//	[Needs vs (Facts, Context)]
+//	           │
+//	           ├── Needs.ReadOnlyUnit && !ctx.ReadOnly ─────────> false
+//	           ├── Needs.ControlVerb && Class != Control ───────> false
+//	           ├── Needs.SetShape && !facts.HasSetTarget ───────> false
+//	           ├── Needs.OnSession && Phys ∉ {Session, Wire} ───> false
+//	           ├── !ctx.TargetCaps.Has(Needs.TargetCaps) ───────> false
+//	           │
+//	           ▼
+//	         true (Stage is applicable)
 func applicable(s Stage, facts Facts, ctx Context) bool {
 	n := s.ContextNeeds()
 	if n.ReadOnlyUnit && !ctx.ReadOnly {

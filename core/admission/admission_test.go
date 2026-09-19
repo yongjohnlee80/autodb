@@ -304,7 +304,7 @@ func equalStrings(a, b []string) bool {
 	return true
 }
 
-// MF1: an OnSession stage is not consulted on the ZERO physical context or
+// Invariant: an OnSession stage is not consulted on the ZERO physical context or
 // any invalid value — the check is affirmative (session or wire), never
 // "not pooled". A transport boundary that admitted unknown contexts into
 // session-only gates would be a security hole wearing a default.
@@ -335,7 +335,7 @@ func TestOnSession_IsAffirmative(t *testing.T) {
 	}
 }
 
-// MF2: a denial the stage did not declare is a disclosure violation — the
+// Invariant: a denial the stage did not declare is a disclosure violation — the
 // run REJECTS it loudly rather than honoring a refusal the pipeline's
 // consumers cannot know about. The registration walks derive their
 // obligations from DenyCodes; an undeclared denial would silently exempt
@@ -361,7 +361,7 @@ func TestUndeclaredDenial_IsRejected(t *testing.T) {
 	}
 }
 
-// MF3: target capabilities are applicability, not runtime discovery. A
+// Invariant: target capabilities are applicability, not runtime discovery. A
 // stage requiring the routine catalog is absent on a target without one —
 // the composition says so, rather than the stage discovering the absence
 // in Apply and returning an empty contribution.

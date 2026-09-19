@@ -143,6 +143,20 @@ func NoContribution() Contribution { return Contribution{} }
 // Stage is one admission step: a check composed into a chain, applicable
 // or not by construction, and permitted exactly one refusal currency.
 //
+// Apply Return Semantics:
+//
+//	Apply(Facts, Context) ──> (Contribution, error)
+//	                                │           │
+//	        ┌───────────────────────┘           └───────────────────────┐
+//	        ▼                                                           ▼
+//	   Contribution                                                   error
+//	(Policy Finding)                                           (Operational Fault)
+//	        │                                                           │
+//	  ┌─────┴───────────────┐                                     ┌─────┴───────────────┐
+//	  ▼                     ▼                                     ▼                     ▼
+//	Deny                   Risk                              Stage Panic           Catalog / DB
+//	(Statement Refused)  (Telemetry Observation)             (Wrapped by Pipeline)    Timeout / IO
+//
 // A stage's Apply returns a Contribution and an error, and the two answer
 // DIFFERENT questions. The Contribution is policy: what is wrong with the
 // statement. The error is operational: the STAGE broke — a catalog read
