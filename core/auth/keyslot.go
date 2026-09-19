@@ -356,6 +356,30 @@ func (s *Service) ServiceKeyslotStatusFor(ctx context.Context, token string) (Se
 // EnrollServiceKeyslot writes a keyfile and stores the master key wrapped by
 // it, so the NEXT start needs no passphrase.
 //
+// Enrollment Workflow:
+//
+//	[Admin Caller] ──> requireAdmin ──> Unlocked? ──> Verify No Existing Slot
+//	                                                         │
+//	                                                         ▼
+//	                                               Generate Keyfile (0600)
+//	                                               (32B CSPRNG, O_EXCL)
+//	                                                         │
+//	                                                         ▼
+//	                                                 Derive Service KEK
+//	                                                 (HKDF-SHA256)
+//	                                                         │
+//	                                                         ▼
+//	                                                 Wrap Master Key
+//	                                                 (AES-256-GCM Seal,
+//	                                                  AAD: "autodb:keyslot:service:v1")
+//	                                                         │
+//	                                                         ▼
+//	                                                 Commit Keyslot & Audit
+//	                                                 in Single DB Transaction
+//	                                                         │
+//	                                                         ▼
+//	                                                 Verify Slot Opens
+//
 // Admin-only and only while UNLOCKED, and both are structural rather than
 // policy: wrapping the master key requires HAVING it, so the slot can only be
 // cut from a process that already holds it — which today means after a human
@@ -557,6 +581,29 @@ func (s *Service) RemoveServiceKeyslot(ctx context.Context, token, ip string) er
 }
 
 // UnlockWithServiceKeyslot is the unattended unlock, run once at start.
+//
+// Unattended Unlock Pipeline:
+//
+//	[Daemon Startup] ──> keyfilePath configured?
+//	                           │
+//	                  YES ─────┴───── NO
+//	                   │               │
+//	                   ▼               ▼
+//	            readKeyfile(0600)   [Attempted = false, return nil]
+//	                   │
+//	            Read Keyslot Row
+//	                   │
+//	            Derive Service KEK (HKDF-SHA256)
+//	                   │
+//	            AES-256-GCM Open (AAD: "autodb:keyslot:service:v1")
+//	                   │
+//	            Unwrap Master Key into Process Memory
+//	                   │
+//	             Pass ─┴─ Fail
+//	              │         │
+//	              ▼         ▼
+//	       [Unlocked=true] [Attempted=true, Unlocked=false, Reason=err]
+//	       (Secrets ready) (Daemon stays running; manual login required)
 //
 // IT NEVER FAILS THE PROCESS. Fail closed on the SECRET, not on
 // the daemon: a start that refuses because a keyfile is unreadable converts a

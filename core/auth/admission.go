@@ -53,6 +53,28 @@ const (
 // IPAllowedForUser reports whether ip may be used by userID, and which layer
 // admitted it.
 //
+// Admission Evaluation Flow:
+//
+//	         [Client IP]
+//	              │
+//	              ▼
+//	        ip == LocalPeer?
+//	              │
+//	     YES ─────┴───── NO
+//	      │               │
+//	      ▼               ▼
+//	 [AdmittedByGlobal]  In Global Allowlist (Config CIDRs ∪ ip_allowlist)?
+//	                     │
+//	                YES ─┴─ NO
+//	                 │       │
+//	                 ▼       ▼
+//	 [AdmittedByGlobal]     In User Allowlist (user_ips)?
+//	                         │
+//	                    YES ─┴─ NO
+//	                     │       │
+//	                     ▼       ▼
+//	   [AdmittedByUserRow]      [NotAdmitted]
+//
 // The two layers are checked in the cheaper order — the global list is
 // usually a handful of prefixes already in memory, the user's rows are a
 // query — but the ORDER IS NOT A SHORTCUT: both are consulted when the first

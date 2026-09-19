@@ -135,6 +135,10 @@ func patHash(secret string) []byte {
 
 // splitPAT separates a presented credential into selector and secret.
 //
+// Token format:
+//   "adb_pat_" + <selector: base64url, 12 chars> + "." + <secret: base64url, 43 chars>
+//   [ Prefix ]   [         Selector         ]   [.]   [         Secret         ]
+//
 // A malformed credential still yields a selector and a secret (both possibly
 // empty) rather than an early error, because the caller must do the same work
 // for a malformed token as for a wrong one — see VerifyPAT.
@@ -574,6 +578,32 @@ var _ = subtle.ConstantTimeCompare
 // The comparison is constant-time for the same reason, one level down: a
 // byte-wise compare that stops at the first difference leaks how much of a
 // guess was right.
+//
+// Verification Pipeline:
+//
+//   [Presented Token] ──> splitPAT ──> (selector, secret)
+//                                             │
+//                                ┌────────────┴────────────┐
+//                                ▼                         ▼
+//                            [Selector]                 [Secret]
+//                                │                         │
+//                                ▼                         ▼
+//                        Lookup Row by Sel          Compute SHA-256
+//                                │                         │
+//                     Found? ────┴──── Missing?            │
+//                       │                 │                │
+//                       ▼                 ▼                ▼
+//                  storedDigest =   storedDigest =    ConstantTimeCompare
+//                  row.SecretHash    decoyDigest      (digest, storedDigest)
+//                       │                 │                │
+//                       └────────┬────────┘                ▼
+//                                │                    Match & Valid?
+//                                └─────────────────────────┼──> ErrPATInvalid
+//                                                          ▼
+//                                                  Verify Owner Enabled
+//                                                          │
+//                                                          ▼
+//                                                    Return *meta.PAT
 func (s *Service) VerifyPAT(ctx context.Context, presented string) (*meta.PAT, error) {
 	selector, secret, wellFormed := splitPAT(presented)
 
@@ -731,7 +761,7 @@ func (s *Service) RevokePAT(ctx context.Context, token string, userID int64, nam
 // the cell reported 2 compares against 1 and failed in CI while passing
 // everywhere I had run it. A shared counter read as a delta is not an
 // instrument, it is a race — the same class of mistake as the shared mutable
-// test knob that -race caught in R5.
+// test knob that -race caught during race testing.
 
 // PATCompareCount reads this service's counter. Test-support, exported
 // because the front-door package needs it once the auth chain lands.

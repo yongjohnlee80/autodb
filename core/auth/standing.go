@@ -113,6 +113,33 @@ const (
 // ResolveStanding re-reads a session's authority and reports what it may
 // still do.
 //
+// Evaluation Lifecycle:
+//
+//	[AuthorityRef] (Kind: Session | PAT, ID: rowID)
+//	       │
+//	       ▼
+//	Check Credential (Valid, Unrevoked, Unexpired)
+//	       │
+//	  Pass ┴ Fail ──> Standing: false, Reason: StandingCredential*
+//	   │
+//	   ▼
+//	Check User (Exists, Enabled)
+//	       │
+//	  Pass ┴ Fail ──> Standing: false, Reason: StandingOwnerDisabled
+//	   │
+//	   ▼
+//	Check Grant on Target Connection
+//	       │
+//	  Pass ┴ Fail ──> Standing: false, Reason: StandingNoGrant
+//	   │
+//	   ▼
+//	Compute Effective Role: min(userRole, grantRole)
+//	       │
+//	  ┌────┴───────────────────────────────┐
+//	  ▼                                    ▼
+//	Effective Role >= Read               Effective Role >= Write
+//	Standing: true                       MayWrite: true
+//
 // THE ONE RESOLVER. The janitor and every per-operation authorization on the
 // wire share it, because two implementations of "may this session continue"
 // drift, and the direction they drift in is the one nobody notices — a
