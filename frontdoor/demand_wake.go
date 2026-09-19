@@ -22,6 +22,27 @@ import (
 //
 // So the engine reserves and knocks; this file is the knock and the answer.
 //
+//	  ┌─────────────────────────────────────────────────────────────┐
+//	  │                   Engine Scheduler                          │
+//	  └──────────────┬──────────────────────────────▲───────────────┘
+//	                 │                              │
+//	      1. Reclaim backend lease       2. Check offer & reserve
+//	                 │                              │
+//	                 ▼                              │
+//	  ┌──────────────────────────────┐              │
+//	  │ knock(): SetReadDeadline(-1s)│              │
+//	  └──────────────┬───────────────┘              │
+//	                 │                              │
+//	                 ▼ (Interrupts blocked read)    │
+//	  ┌──────────────────────────────┐              │
+//	  │ Session Loop (frontdoor)     │              │
+//	  │ • Receive() unblocks         │              │
+//	  │ • RetireReceive() ───────────┴──────────────┘
+//	  │ • Write fatal ErrorResponse to client       │
+//	  │ • FinishDemandReclaim()                     │
+//	  │ • Close socket & cleanup                    │
+//	  └─────────────────────────────────────────────┘
+//
 // THE OFFER LIVES IN THE ENGINE, NOT HERE, AND THAT IS THE SECOND VERSION OF
 // THIS FILE. The first kept the receive window in a mailbox on this side while
 // the engine kept a flag on its side, and the two could disagree: the scheduler

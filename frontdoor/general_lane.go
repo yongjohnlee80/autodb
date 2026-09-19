@@ -27,7 +27,20 @@ import (
 // release, and the thing it does while waiting is flush, which is itself a
 // release. A budget whose remedy is refusal would turn a busy moment into a
 // failed statement.
-
+//
+//	  ┌─────────────────────────────────────────────────────────────┐
+//	  │                   Dual Memory Architecture                  │
+//	  ├──────────────────────────────┬──────────────────────────────┤
+//	  │ Control Lane (Per-Conn)      │ General Lane (Process-Wide)  │
+//	  ├──────────────────────────────┼──────────────────────────────┤
+//	  │ • 64 KiB fixed reservation   │ • 1 GiB shared pool          │
+//	  │ • Reserved at accept time    │ • Reserved per output/segment│
+//	  │ • Dedicated to releasing     │ • Enforces BACKPRESSURE      │
+//	  │   capacity (Sync, Close, X)  │   via sync.Cond wait queue   │
+//	  │ • Always guaranteed space    │ • Never refuses on transient │
+//	  │                              │   congestion                 │
+//	  └──────────────────────────────┴──────────────────────────────┘
+//
 // generalLane is the process-wide general budget. Reserve before serializing,
 // release when the bytes reach the socket.
 type generalLane struct {

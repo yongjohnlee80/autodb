@@ -42,6 +42,29 @@ func composeListenerOutcomes() (*outcome.Registry, error) {
 // phase that may run exactly once has already run. A runner shared between
 // connections would refuse the second connection's startup on the grounds that
 // the first one had a startup.
+//
+//	  [Incoming Connection]
+//	            │
+//	            ▼
+//	  ┌───────────────────┐
+//	  │ lifecycle.run()   │ ──► Verify Phase Known & ReplayMode (ExactlyOnce)
+//	  └─────────┬─────────┘
+//	            │
+//	            ▼
+//	       Execute Body
+//	            │
+//	            ▼
+//	      Evaluate Verdict
+//	      ├── verdictUnset ──► Fatal Fault (Closed)
+//	      ├── verdictContinue ──► Proceed to Next Phase
+//	      └── verdictRefuse / Operational / TerminalControl
+//	            │
+//	            ▼
+//	      Resolve Occurrence via Registry (outcome.Occur)
+//	      • ProducerID must match phase
+//	      • ReasonID must be declared
+//	      • Verdict Kind must match Declaration Kind
+//
 type lifecycle struct {
 	reg    *outcome.Registry
 	phases map[PhaseName]Phase

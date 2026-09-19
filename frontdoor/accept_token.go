@@ -22,6 +22,36 @@ import (
 //
 // EXACTLY ONE CONSUMER TAKES IT. The accept loop either refuses -- and
 // discharges here -- or spawns the handler, which discharges in its defer.
+//
+//	  [Incoming TCP Connection]
+//	             │
+//	             ▼
+//	    ┌─────────────────┐
+//	    │ Accept Loop     │ ──► Add to Listener.wg (Handler Registration)
+//	    │                 │ ──► Check admission & acquire capacity Ticket
+//	    └────────┬────────┘
+//	             │
+//	    ┌────────┴────────┐
+//	    │   acceptToken   │ ──► Linear ownership container
+//	    └────────┬────────┘
+//	             │
+//	      Admitted?
+//	      ┌──────┴──────┐
+//	     NO            YES
+//	      │             │
+//	      ▼             ▼
+//	 [Discharge]  [Transfer Token to Connection Handler]
+//	 (Immediate)        │
+//	                    ▼
+//	              [Session Loop Runs]
+//	                    │
+//	                    ▼
+//	              [Handler Defer: Discharge LIFO]
+//	              1. untrack()     (Remove from active list)
+//	              2. conn.Close()  (Close socket)
+//	              3. announce()    (Emit audit event)
+//	              4. tkt.release() (Return capacity ticket)
+//	              5. handlerDone() (Decrement WaitGroup)
 type acceptToken struct {
 	conn net.Conn
 	tkt  *ticket

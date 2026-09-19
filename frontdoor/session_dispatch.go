@@ -18,7 +18,21 @@ import (
 // replace that entry; they do not restructure the loop, and there is never a
 // second loop. Segment and object lifetime state stays engine-side, so nothing
 // in this file needs to remember anything between frames.
-
+//
+//	  [Incoming Frontend Frame]
+//	              │
+//	              ▼
+//	  Is Extended Protocol Frame? ('P','B','D','E','C','H','S')
+//	  ┌───────────┴───────────┐
+//	 YES                      NO
+//	  │                       │
+//	  ▼                       ▼
+//	[Route to Engine:    [session_dispatch.go]
+//	 session_extended.go] ├── 'Q' (Query) ──► exec.WireQuery
+//	                      ├── 'X' (Terminate) ──► endSession
+//	                      ├── 'F' (FunctionCall) ──► Refuse 0A000
+//	                      └── Unknown/Invalid ──► Fatal 08P01
+//
 // frameAfter says what the loop does once a decision's frame (if any) is on
 // the wire. The three values are the whole vocabulary: a frame is either the
 // end of the connection or it is not, and "discard the rest of the segment"
