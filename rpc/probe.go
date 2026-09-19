@@ -43,6 +43,23 @@ func probeLimits() *msgpack.Limits {
 // wrong msgid, an error reply, a malformed result — is ErrNotAutodb; a
 // foreign occupant must not be able to make the guard report
 // "already running".
+//
+//	  [autodb CLI Start]
+//	          │
+//	          ▼
+//	     Probe(addr)
+//	          │
+//	     Connection Status?
+//	     ├── Connection Refused ──► Start daemon normally (Fresh Instance)
+//	     └── Connection Accepted
+//	              │
+//	              ▼
+//	         Send sys.hello (no protocol)
+//	              │
+//	         Response Shape?
+//	         ├── autodb Hello Response ──► "Already Running" (Exit 0)
+//	         └── Foreign Frame / Error ──► ErrNotAutodb (Loud Crash / Port Conflict)
+//
 func Probe(ctx context.Context, addr string) (version string, err error) {
 	return ProbeOn(ctx, "tcp", addr)
 }

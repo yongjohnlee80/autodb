@@ -53,6 +53,19 @@ import (
 const Protocol int64 = 7
 
 // Session keys the gate and the hello handler share.
+//
+//	  [New Client Request]
+//	            │
+//	            ▼
+//	     Is sys.hello?
+//	     ┌──────┴──────┐
+//	    YES            NO
+//	     │              │
+//	     ▼              ▼
+//	[Check Protocol] [sessHello == true?]
+//	 ├── Match ──► sessHello = true       ├── YES ──► Proceed to Method Dispatch
+//	 └── Mismatch ──► sessRefused = true  └── NO ──► Refuse: CodeHandshakeRequired
+//	                  (Poisoned)
 const (
 	sessHello   = "hello"   // bool: compatible handshake completed
 	sessRefused = "refused" // bool: incompatible handshake; everything denied
