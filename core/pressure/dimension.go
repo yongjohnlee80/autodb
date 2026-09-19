@@ -32,6 +32,22 @@ const MaxSubjects = 16
 // deliberately random. The view would then show a different sixteen on each
 // read, which reads as flapping to the person watching it and is untestable
 // besides.
+//
+//	  Incoming Subject
+//	         │
+//	         ▼
+//	  ┌─────────────────────────┐
+//	  │ Dimension (Cap: 16)     │
+//	  │ • d.seen[subject] = now │
+//	  └────────────┬────────────┘
+//	               │
+//	         len > 16?
+//	         ┌─────┴─────┐
+//	        YES         NO
+//	         │           │
+//	         ▼           ▼
+//	    [Evict LRU]   [Retain]
+//	    omitted++
 type Dimension struct {
 	seen    map[string]time.Time
 	omitted int
