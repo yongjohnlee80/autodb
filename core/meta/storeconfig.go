@@ -8,21 +8,26 @@ import (
 	"github.com/yongjohnlee80/autodb/core/engine"
 )
 
-// What the meta store needs in order to open itself.
+// StoreConfig defines the structural interface required by core/meta to open and configure
+// the underlying database connection pool.
 //
-// AN INTERFACE DECLARED BY THE CONSUMER, which is the whole point: core/meta
-// used to import core/config to name the struct its own functions took, and a
-// storage layer that imports the configuration layer is upside down. The
-// dependency was not doing any work — this package reads exactly four values
-// out of that struct and nothing else — so it cost a package edge to say
-// "engine, path, DSN, pool bound".
+// Consumer-Driven Interface Decoupling:
+// To maintain clean package boundaries and avoid circular import dependencies between core/config
+// and core/meta, core/meta declares this consumer-side interface rather than importing config.Meta:
 //
-// Declared here and satisfied STRUCTURALLY, so config.Meta continues to be
-// accepted at every call site without core/config importing this package
-// either. Neither layer names the other. The alternative shapes were both
-// worse: a conversion function would have to live somewhere, and putting the
-// method on config.Meta would point the edge the other way — pulling the
-// database drivers into everything that reads a config file.
+//	  ┌──────────────────────┐             ┌──────────────────────┐
+//	  │     core/config      │             │      core/meta       │
+//	  │                      │             │                      │
+//	  │ struct Meta {        │             │ type StoreConfig     │
+//	  │   StoreEngine() ...  │             │   interface { ... }  │
+//	  │   StorePath() ...    │             └──────────▲───────────┘
+//	  │   StoreDSN() ...     │                        │
+//	  │   StorePoolMax...    │                        │ Satisfies
+//	  │ }                    │────────────────────────┘ Structurally
+//	  └──────────────────────┘
+//	  (Zero compile-time import dependencies between packages)
+//
+// Any struct implementing these four accessors is accepted by Open and OpenNoMigrate.
 type StoreConfig interface {
 	// StoreEngine is the backend: postgres or sqlite.
 	StoreEngine() engine.Name

@@ -42,9 +42,24 @@ import (
 // store cannot both be right about who owns a transaction.
 var ErrLeaseHeld = errors.New("meta: another autodb instance is already serving this meta store")
 
-// InstanceLease is a process-lifetime exclusive claim on one meta store.
+// InstanceLease represents an exclusive process-lifetime lease on a meta store.
+//
+// Lease Architecture & Dual Mechanisms:
+//
+//	                 [AcquireLease(ctx, store, cfg)]
+//	                                │
+//	                   Engine == SQLite or Postgres?
+//	                                │
+//	                 SQLite ────────┴──────── Postgres
+//	                   │                         │
+//	                   ▼                         ▼
+//	          [File Lock (flock)]       [Advisory Transaction Lock]
+//	          • <database>.lock         • Dedicated pgx connection
+//	          • Mode: LOCK_EX           • pg_try_advisory_xact_lock()
+//	          • Released by OS on exit  • Heartbeat ping every 10s
+//	                                    • Lost() channel fires on drop
 type InstanceLease struct {
-	// what identifies the store this lease covers, for messages.
+	// target identifies the store covered by this lease (file path or redacted DSN).
 	target string
 
 	mu       sync.Mutex
@@ -61,26 +76,20 @@ type InstanceLease struct {
 	beatFailed chan struct{}
 }
 
-// AcquireLease claims exclusive use of the meta store, or refuses.
+// AcquireLease claims exclusive ownership of the meta store, returning an InstanceLease
+// or ErrLeaseHeld if another instance is currently serving this database.
 //
-// It is called after the store is open (postgres needs the connection) and
-// before anything is served.
-// AcquireLease takes the single-instance lease for a store.
+// Concurrency guarantee:
+// Callers receive a unified InstanceLease handle regardless of the underlying engine.
+// The lease MUST be acquired immediately after opening the store and before admitting
+// any client traffic or executing background timers.
 //
-// ONE abstraction, two mechanisms. Callers get one type with one
-// Release, one Target and one Lost, and never branch on the engine — the
-// engine-specific state is a union inside InstanceLease rather than a second
-// type with a second lifecycle.
-//
-// ONE ASYMMETRY, stated because it is invisible otherwise: only the postgres
-// path can report a lease LOST. Lost() returns the heartbeat channel, which is
-// nil on the sqlite path, and a receive on a nil channel blocks forever — so a
-// sqlite daemon simply never observes a loss. That is correct rather than
-// missing: an flock is held by the process for its lifetime and cannot be
-// revoked under it, whereas a postgres advisory lock lives on a connection
-// that can drop. Anyone adding a third engine needs to decide which of those
-// two it resembles, and a nil Lost() is the deliberate answer for "cannot be
-// lost while we are alive", not an unimplemented stub.
+// Loss detection semantics:
+//   - SQLite: Uses an OS-held flock. The lock cannot be revoked during the process lifetime,
+//     so Lost() returns a nil channel (blocks indefinitely).
+//   - PostgreSQL: Holds a transaction-scoped advisory lock. If the database connection drops,
+//     the background heartbeat detects the failure and closes the channel returned by Lost(),
+//     prompting the daemon to shut down cleanly.
 func AcquireLease(ctx context.Context, s *Store, mcfg StoreConfig) (*InstanceLease, error) {
 	switch s.engine {
 	case engine.SQLite:
