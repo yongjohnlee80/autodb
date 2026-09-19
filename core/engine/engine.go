@@ -39,6 +39,16 @@ import (
 // The underlying string is the spelling that is PERSISTED — in the meta store's
 // connection rows and in the TOML config — so it is a stable format, not an
 // internal label. Changing a constant's value is a migration, not a rename.
+//
+//	                    ┌────────────────────────────┐
+//	                    │ Configuration (config.toml)│
+//	                    └─────────────┬──────────────┘
+//	                                  │ Parse()
+//	                                  ▼
+//	┌──────────────────┐        ┌───────────┐        ┌──────────────────┐
+//	│ Metadata Storage │<───────┤ Name Type │───────>│ Capabilities     │
+//	│ (conns table)    │ Value()└───────────┘ Scan() │ (capsByName)     │
+//	└──────────────────┘                             └──────────────────┘
 type Name string
 
 // THE VALUES COME FROM golib, AND THAT IS THE POINT.
@@ -87,6 +97,14 @@ func All() []Name {
 // engine can exist in the store — after which any comparison, including a
 // correct one, is a coin flip. A rejected name is a startup error a person can
 // read; an accepted alias is a class of bug nobody sees.
+//
+//	  [Input String: s]
+//	          │
+//	          ├─ Exact match in All() ───────> Return (Name, nil)
+//	          │  (Postgres, MySQL, SQLite)
+//	          │
+//	          └─ Typo, alias, case-fold ─────> Return ("", error)
+//	             (e.g., "Postgres", "sqlite3", " postgres")
 func Parse(s string) (Name, error) {
 	for _, n := range All() {
 		if s == string(n) {
@@ -112,6 +130,8 @@ func (n Name) String() string { return string(n) }
 // exactly what happened when the persisted field was first typed: conn.list
 // came back as a bare "internal error" over the wire, two layers away from the
 // cause.
+//
+//	  [Name] ─── Value() ───> driver.Value (string) ───> database/sql driver
 func (n Name) Value() (driver.Value, error) { return string(n), nil }
 
 // Scan implements sql.Scanner so a Name can be read back from the meta store.
@@ -121,6 +141,12 @@ func (n Name) Value() (driver.Value, error) { return string(n), nil }
 // is an error here rather than a Name that no comparison will ever match. A row
 // written by an older build with a spelling this build does not know is a fault
 // worth surfacing at the read, where the row id is still in hand.
+//
+//	  [src: any]
+//	      │
+//	      ├─ string / []byte ───> Parse(src) ───> *n = parsed, return nil
+//	      ├─ nil ───────────────────────────────> error: NULL is not an engine name
+//	      └─ other types ───────────────────────> error: cannot scan %T into an engine name
 func (n *Name) Scan(src any) error {
 	switch v := src.(type) {
 	case nil:
