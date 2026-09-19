@@ -210,43 +210,40 @@ func panelStyles() (base, focused style.Style) {
 // active section and one remembered position, rather than as two equal
 // selections with no way to tell which keystrokes will reach.
 //
-// ALL FOUR FIELDS ARE SET, AND CursorSelected IS THE ONE THAT MATTERED. golib
-// derives its default CursorSelected from its own default CursorRow at
-// construction, so a caller that overrode CursorRow alone left CursorSelected
-// holding the framework's inverted default -- and the row under the cursor in
-// these managers is ALSO the selected row, so that stale default is what
-// actually rendered. The cyan was configured and never drawn; what appeared
-// was an inverted slate bar, which is why the selected workspace looked like a
-// row in a list that had lost focus.
+// EVERY ATTRIBUTE THE STYLE MEANS IS STATED, INCLUDING THE ONES IT DOES NOT
+// WANT. golib merges a caller's row styles over its own defaults with
+// style.Inherit, whose contract is "an unset property keeps the current
+// value" -- at construction (WithTreeStyles, WithListStyles) and on every
+// SetStyles after. That contract is right for a host that toggles one colour
+// at runtime, and it has bitten this function twice:
+//
+//   - CursorSelected. golib derives its default from its default CursorRow, so
+//     overriding CursorRow alone left CursorSelected holding the framework's
+//     inverted default, and the row under the cursor in these managers is ALSO
+//     the selected row. All four fields are set for that reason.
+//
+//   - Reverse. golib's default CursorRow is style.New().Reverse(true), and
+//     List's default SelectedRow is Bold(true). A style that sets only colours
+//     inherits both and keeps them through every SetStyles that follows. The
+//     test backend records reverse as an attribute bit beside untouched
+//     colours, so every cell that read BG.Index was green; a terminal applies
+//     SGR 7 and SWAPS them. Focused black-on-cyan rendered as cyan-on-black,
+//     which reads as grayed out; unfocused cyan-on-gray rendered as gray text
+//     on a CYAN bar -- the accent, on the pane the keyboard was not in. Two
+//     days of focus diagnosis, a fallback that made it worse, and a framework
+//     trace proving focus was right the whole time, before the style itself
+//     was read back from the cells. Reverse(false) and Bold(false) below are
+//     the fix; the cell beside them reads the attribute bit that was always
+//     there to be read.
 func listStyles(focused bool) widget.ListStyles {
-	// THE PARAMETER MEANS WHAT IT SAYS. focused = the accent.
-	//
-	// This was briefly INVERTED here -- focused receiving gray and unfocused
-	// receiving cyan -- because on a live terminal the accent kept landing on
-	// the list the keyboard was not in, and inverting the mapping made the
-	// screen right. That was reverted on review, and rightly: it bakes an
-	// unexplained environment observation into an API whose parameter then
-	// lies, for every list surface in the application, and a caller reading
-	// listStyles(true) would get the opposite of what it asks for.
-	//
-	// The observation is real and is NOT yet explained. What is known: the box
-	// BORDERS are truthful, and they are driven by a different mechanism --
-	// widget.Box tracks focus from bubbling FocusEvents, where the loser's
-	// Gained:false bubbles through the losing box and the gainer's Gained:true
-	// through the gaining one. applyCursorStyles instead QUERIES
-	// Context.FocusWithin at the root, where both events arrive. Two
-	// mechanisms for one fact, and only one of them is believed.
-	//
-	// That is where the next diagnosis starts, and it needs an instrument that
-	// reads resolved cell attributes from the running binary rather than from
-	// the test backend -- the harness and the terminal disagree, and every cell
-	// written so far has been written against the harness.
 	var cursor style.Style
 	if focused {
 		cursor = style.New().Background(style.ANSI(6)).Foreground(style.ANSI(0))
 	} else {
 		cursor = style.New().Background(style.ANSI(8)).Foreground(style.ANSI(6))
 	}
+	// Stated, not assumed: see the Reverse paragraph above.
+	cursor = cursor.Reverse(false).Bold(false)
 	return widget.ListStyles{
 		Row:            style.New(),
 		CursorRow:      cursor,
