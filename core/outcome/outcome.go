@@ -47,6 +47,15 @@ type ProducerID string
 // Kind says what sort of thing happened. A refusal is not the only outcome a
 // phase produces, and calling this a refusal registry is what left cancels and
 // read errors homeless.
+//
+//	  ┌─────────────────────────────────────────────────────────────┐
+//	  │ Kind: Structural Outcome Category                           │
+//	  ├─────────────┬───────────────────────────────────────────────┤
+//	  │ Refusal     │ Decision not to proceed (e.g. invalid syntax) │
+//	  │ Control     │ Protocol lifecycle action (e.g. cancel frame) │
+//	  │ Operational │ Error-driven ending (e.g. connection broken)  │
+//	  │ Note        │ Informative observation (e.g. parameter reset)│
+//	  └─────────────┴───────────────────────────────────────────────┘
 type Kind uint8
 
 const (
@@ -101,6 +110,18 @@ func (k Kind) String() string {
 // THE SOLE ANSWER TO ATTRIBUTION, independent of Kind. An error-driven ending
 // may be the peer's doing or ours, and a decision may be either; nothing about
 // one axis constrains the other.
+//
+//	  ┌─────────────────────────────────────────────────────────────┐
+//	  │ Charge: Throttle Attribution Category                       │
+//	  ├───────────────┬───────────────────────┬─────────────────────┤
+//	  │ Charge Class  │ Who Is Answerable?    │ Increments Throttle?│
+//	  ├───────────────┼───────────────────────┼─────────────────────┤
+//	  │ Credential    │ Peer (Bad Secret)     │ YES (Charges IP)    │
+//	  │ Protocol      │ Peer (Bad Framing)    │ YES (Charges IP)    │
+//	  │ Capacity      │ System (Out of Space) │ NO  (Never Charged) │
+//	  │ None          │ System (Internal Err) │ NO  (Never Charged) │
+//	  │ NotApplicable │ Out of Throttle Scope │ NO  (Never Charged) │
+//	  └───────────────┴───────────────────────┴─────────────────────┘
 type Charge uint8
 
 const (

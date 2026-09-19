@@ -15,6 +15,25 @@ import "fmt"
 // So the thing that varies travels with the EVENT, not with the identity. A
 // renderer projects from an occurrence and never from a reason-only lookup,
 // and the witness below is the field it turns on.
+//
+//	  [Event Raised: Reason, Producer]
+//	                 │
+//	                 ▼
+//	    ┌─────────────────────────┐
+//	    │ Occurrence              │
+//	    │ • Reason, Producer      │
+//	    │ • Kind, Charge          │
+//	    │ • Disclosable (Witness) │
+//	    │ • Detail (Diagnostic)   │
+//	    └────────────┬────────────┘
+//	                 │
+//	       o.Disclosable == true?
+//	       ┌─────────┴─────────┐
+//	      YES                 NO
+//	       │                   │
+//	       ▼                   ▼
+//	  [Disclosed Error]   [Generic Refusal]
+//	  e.g. SQLSTATE 53300 e.g. SQLSTATE 28000
 type Occurrence struct {
 	Reason   ReasonID
 	Producer ProducerID

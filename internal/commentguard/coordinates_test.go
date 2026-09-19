@@ -51,6 +51,7 @@ var certifiedClean = []string{
 	"core/exec",
 	"core/pressure",
 	"core/schedmetrics",
+	"core/outcome",
 }
 
 // Patterns that name a private artefact.
