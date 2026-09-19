@@ -9,23 +9,44 @@ import (
 	"github.com/yongjohnlee80/autodb/core/engine"
 )
 
-// Meta-store DSN hardening.
+// Meta-store DSN hardening and transport verification.
 //
-// The meta store holds the audit trail, the user records and the encrypted
-// connection secrets. It is the one database whose compromise costs everything
-// the design exists to protect, and in production it is reached over a network
-// rather than through a file. So its transport is checked at config load
-// rather than left to whoever writes the DSN.
+// The meta store holds audit journals, user authorization credentials, and encrypted
+// connection secrets. In production environments where the meta store is hosted on
+// PostgreSQL across a network, transport security is strictly validated at config load.
 //
-// The rule is `sslmode=verify-full` with an explicit root certificate.
-// `require` is NOT sufficient and the distinction is not pedantry: `require`
-// encrypts but authenticates NOTHING — it accepts any certificate from
-// anything that answers on the address, so an active attacker who can redirect
-// the connection reads and rewrites the whole store. `verify-ca` proves the
-// certificate was issued by a CA you trust but not that it belongs to the host
-// you asked for; only `verify-full` checks both.
-
-// SSLMode names the transport modes libpq accepts, ordered by strength.
+// Verification Pipeline:
+//
+//	                 [Incoming Meta DSN]
+//	                          │
+//	                          ▼
+//	                 [dsnParams Parser]
+//	                 Extract sslmode and sslrootcert
+//	                 (Handles URL and keyword formats)
+//	                          │
+//	                          ▼
+//	               [checkMetaDSNTransport]
+//	                          │
+//	             sslmode == "verify-full"?
+//	                          │
+//	            YES ──────────┴────────── NO
+//	             │                         │
+//	             ▼                         ▼
+//	     Has sslrootcert?        Is allow_insecure_dsn true?
+//	             │                         │
+//	       YES ──┴── NO              YES ──┴── NO
+//	        │         │               │         │
+//	        ▼         ▼               ▼         ▼
+//	     [Pass]   [Refuse]         [Pass]   [Refuse: MITM Risk]
+//
+// Security rationale:
+// The enforced standard is `sslmode=verify-full` with an explicit root certificate (`sslrootcert`).
+// `sslmode=require` is explicitly refused: require encrypts the wire but authenticates nothing,
+// accepting any arbitrary certificate and allowing an active network attacker to intercept
+// credentials. `sslmode=verify-ca` verifies the issuing CA but does not verify hostname match.
+// Only `verify-full` proves both CA validity and hostname identity.
+//
+// SSLMode names the transport modes libpq accepts, ordered by increasing cryptographic strength.
 const (
 	sslDisable    = "disable"
 	sslAllow      = "allow"
@@ -121,20 +142,17 @@ func checkMetaDSNTransport(dsn string, allowInsecure bool) error {
 		"to say so deliberately", ErrInvalid, mode, why)
 }
 
-// EffectivePoolMaxConns reports the bound the meta pool will ACTUALLY use, and
-// where it came from.
+// EffectivePoolMaxConns determines the actual connection pool limit for the meta store
+// and identifies the configuration source that established it.
 //
-// One function decides, and both the validator and the connection opener call
-// it. That is the fix a review required: the bound used to be decided twice —
-// validation checked the TOML field while the opener treated a DSN-level
-// `pool_max_conns` as authoritative — so `dsn = "...?pool_max_conns=1"` walked
-// straight past the floor and produced a one-connection pool that the instance
-// lease could pin whole. Two independent decisions about one value is how a
-// guard ends up guarding the wrong thing.
+// Precedence hierarchy:
+//  1. Explicit TOML setting: `[meta] pool_max_conns` (highest precedence).
+//  2. DSN-level query parameter: `?pool_max_conns=N` (honors operator intent embedded in connection strings).
+//  3. Built-in default: `DefaultMetaPoolMaxConns` (8 connections).
 //
-// Precedence: an explicit [meta] pool_max_conns wins; otherwise a DSN that
-// names one is honoured (someone who wrote it there meant it); otherwise the
-// default. The floor applies to ALL of them.
+// Unification rationale:
+// Computing the effective bound in a single canonical function guarantees that the configuration
+// validator and the runtime connection pool initializer always agree on the pool bound.
 func (m Meta) EffectivePoolMaxConns() (n int, source string) {
 	if m.PoolMaxConns > 0 {
 		return m.PoolMaxConns, "[meta] pool_max_conns"
@@ -149,12 +167,13 @@ func (m Meta) EffectivePoolMaxConns() (n int, source string) {
 	return DefaultMetaPoolMaxConns, "the built-in default"
 }
 
-// checkMetaPoolFloor refuses an effective bound too small to work.
+// checkMetaPoolFloor enforces that the effective pool bound is at least MinMetaPoolMaxConns (2).
 //
-// Below two, an operation that pins a connection — the instance lease for the
-// daemon's lifetime, or the migration lock — leaves nothing for the work
-// beside it. That is not hypothetical: it deadlocked the migration runner
-// until its DDL moved onto the pinned transaction.
+// Concurrency constraint:
+// The background daemon locks a dedicated instance lease connection for its entire process
+// lifetime. Setting a pool bound of 1 would allow the lease to consume 100% of the pool,
+// completely starving background migrations and audit writers. A floor of 2 is the absolute
+// operational minimum.
 func checkMetaPoolFloor(m Meta) error {
 	if m.PoolMaxConns < 0 {
 		return fmt.Errorf("%w: [meta] pool_max_conns must not be negative (got %d)",
@@ -169,21 +188,13 @@ func checkMetaPoolFloor(m Meta) error {
 	return nil
 }
 
-// CheckOperational applies EVERY rule the loaded config would apply to this
-// Meta — transport AND the effective pool floor.
+// CheckOperational validates both transport security and connection pool bounds for
+// a Meta configuration object.
 //
-// Exported so the migration CLI can validate a DSN typed on the command line.
-// A check that only guards the config file is bypassed by the first tool that
-// takes a DSN as an argument.
-//
-// It is deliberately ONE method rather than two, and it replaced a
-// CheckDSNTransport that exposed only half the rule. The CLI called that half,
-// looked validated, and let `pool_max_conns=1` through — where the destination
-// lease pins the single connection and the migration runner then waits forever
-// for a second one, as a later review found. That is the same finding
-// reopened one layer out: the first was about one value being DECIDED twice, this
-// is about one rule being APPLIED in halves. An exported half is an invitation
-// to apply half, so there is no longer a half to call.
+// Exported usage:
+// CLI commands (such as --migrate-to-postgres) accept connection strings directly via flags.
+// Calling CheckOperational ensures that command-line DSNs adhere to the exact same transport
+// security rules (verify-full) and pool floor guarantees as configuration files.
 func (m Meta) CheckOperational() error {
 	if err := checkMetaDSNTransport(m.DSN, m.AllowInsecureDSN); err != nil {
 		return err
@@ -191,16 +202,16 @@ func (m Meta) CheckOperational() error {
 	return checkMetaPoolFloor(m)
 }
 
-// RedactDSN removes the password from a DSN so it can be printed.
+// RedactDSN masks sensitive credentials (passwords) from a connection string, producing
+// a safe representation suitable for terminal output, logging, and error reports.
 //
-// It handles BOTH forms, because the CLI accepts both. The URL-only version
-// printed `password=sekrit` verbatim for keyword-form DSNs (found in review0
-// ), and the report it appears in is the sort of thing an operator pastes
-// into a ticket — so that was a credential leak, not a cosmetic gap.
+// Grammar support:
+//   - URL format: `postgres://user:password@host/dbname` -> `postgres://user:***@host/dbname`
+//   - Keyword format: `host=... password='secret'` -> `host=... password=***`
 //
-// It lives beside dsnParams rather than in the CLI because both forms of the
-// same string are already understood here; a redactor that lives elsewhere is
-// a second, worse parser of the same grammar.
+// Robustness:
+// The keyword scanner properly handles single quotes and backslash escape sequences, ensuring
+// passwords containing spaces or special characters are completely redacted without leaking.
 func RedactDSN(dsn string) string {
 	trimmed := strings.TrimSpace(dsn)
 	if strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://") {

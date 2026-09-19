@@ -28,7 +28,28 @@ var ErrInvalid = errors.New("config: invalid configuration")
 // DefaultPort is the default msgpack-RPC port.
 const DefaultPort = 7419
 
-// Config is autodb's full configuration.
+// Config represents autodb's complete runtime configuration, incorporating
+// daemon RPC settings, metadata store configuration, execution boundaries,
+// security filters, and optional PostgreSQL wire frontdoor parameters.
+//
+// Component Architecture:
+//
+//	┌────────────────────────────────────────────────────────────────────────┐
+//	│                                Config                                  │
+//	├───────────────────┬───────────────────┬────────────────────────────────┤
+//	│ Server            │ Meta              │ History                        │
+//	│ • Port (TCP/Unix) │ • Backend Engine  │ • Query audit retention        │
+//	│ • ClientOnly mode │ • DSN & SSL mode  │ • Local execution recall       │
+//	├───────────────────┼───────────────────┼────────────────────────────────┤
+//	│ Security          │ TUI / Web         │ Exec                           │
+//	│ • IP Allowlist    │ • Notes directory │ • Statement byte limit         │
+//	│ • Service Keyfile │ • Terminal styles │ • Connection pools & timeouts  │
+//	├───────────────────┴───────────────────┴────────────────────────────────┤
+//	│ FrontDoor (PostgreSQL Wire Protocol Listener)                          │
+//	│ • TLS certificates & SAN hostnames                                     │
+//	│ • Reserved headroom & leased connections                               │
+//	│ • Resident memory budgets & general lane bytes                         │
+//	└────────────────────────────────────────────────────────────────────────┘
 type Config struct {
 	Server    Server    `toml:"server"`
 	Meta      Meta      `toml:"meta"`
@@ -893,31 +914,35 @@ func UserConfigPath() (string, error) {
 	return filepath.Join(dir, "autodb", "config.toml"), nil
 }
 
+// DefaultPath returns the resolved default configuration file path.
+//
+// Search Order & Precedence:
+//
+//	  [1. System Server Config]   /etc/autodb/config.toml (Mode 0640)
+//	              │
+//	              ▼ (If missing or unreadable)
+//	  [2. User Workspace Config]  $XDG_CONFIG_HOME/autodb/config.toml
+//	              │
+//	              ▼ (If missing or unreadable)
+//	  [3. System Client Config]   /etc/autodb/client.toml (Mode 0644)
+//	              │
+//	              ▼ (If none are readable)
+//	  [4. Fallback Path]          User Workspace Path (Zero-config defaults apply)
+//
+// Precedence rationale:
+//  1. The service's own config (/etc/autodb/config.toml) is read by root and the service account.
+//     It contains the authoritative meta-store credentials required for initialization and daemon operations.
+//  2. When the caller is an unprivileged user with their own workspace configuration, their explicit
+//     settings take precedence over generic system client handouts.
+//  3. The system client config (/etc/autodb/client.toml) provides world-readable connection details
+//     (such as the RPC socket/port) without exposing sensitive PostgreSQL meta credentials.
+//
+// Spoofing prevention:
+// This search order is safe on service hosts because spawning an embedded daemon is guarded
+// separately by Config.ForeignOnAServiceHost.
 func DefaultPath() (string, error) {
 	user, uerr := UserConfigPath()
 
-	// 1. The service's own config, for whoever can read it -- root, and the
-	//    service account. It is the complete one: it names the meta store,
-	//    which the client config deliberately does not, so anything that
-	//    touches the store (--init, --serve) must land here.
-	//
-	// 2. Then THIS USER'S OWN config, when they have written one. A file a
-	//    developer created deliberately outranks a generic handout: the
-	//    installer's client.toml is addressed to whoever happens to be on the
-	//    box, and a per-user config is addressed to one person who chose its
-	//    contents. Resolving past it meant a developer's own settings were
-	//    silently ignored on exactly the hosts where they had bothered to
-	//    write them.
-	//
-	// 3. Then the client config, which is 0644 precisely so an ordinary
-	//    developer can reach the daemon without being able to read a config
-	//    that may name a PostgreSQL DSN with a password in it.
-	//
-	// This ORDER is safe only because becoming the daemon is gated
-	// separately -- see Config.ForeignOnAServiceHost. Preferring a personal
-	// config on a service host would otherwise re-open the trap the previous
-	// order existed to close: a frontend that finds nothing listening and
-	// starts a private daemon on the service's port.
 	ordered := make([]string, 0, len(systemCandidates)+1)
 	if p := systemServerPath(); p != "" {
 		ordered = append(ordered, p)
