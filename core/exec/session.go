@@ -30,7 +30,7 @@ import (
 // so what lands with the transactions is the transaction, not also the
 // session machinery underneath it.
 //
-// LOCK ORDER, published because the ADR requires it and because getting it
+// LOCK ORDER, published because the architecture design requires it and because getting it
 // wrong is how this class of code deadlocks:
 //
 //	registry.mu  →  session.mu
@@ -73,6 +73,17 @@ var (
 )
 
 // sessionState is the lifecycle position. It only ever moves forward.
+//
+// Lifecycle State Machine:
+//
+//	[OpenSession] ──> sessOpen (active, executing queries)
+//	                     │
+//	       Close() ──────┼────── Timeout / Revocation
+//	                     ▼
+//	                sessClosing (drain in-flight queries up to closeQuiesce)
+//	                     │
+//	                     ▼
+//	                sessClosed (backend reset: DISCARD ALL, unregister)
 type sessionState int32
 
 const (

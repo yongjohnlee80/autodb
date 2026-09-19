@@ -86,6 +86,14 @@ func (p *Permit) Release() {
 // Per-target pool_max_conns remains a technical CEILING on one pool. It is
 // not an allocation, and two targets may each be allowed more than the budget
 // — the ledger is what makes that safe (see docs/front-door/connection-holding-policy.md).
+//
+// Budget Allocation Layout:
+//
+//	[Total Budget: N Sockets]
+//	┌───────────────────────────────────────────────────┬──────────────────┐
+//	│ Ordinary Sockets Lane (O <= budget - 1)           │ Control (1 slot) │
+//	│ (Queries, Health checks, Pool leases)             │ (Cancel queries) │
+//	└───────────────────────────────────────────────────┴──────────────────┘
 type permitLedger struct {
 	// queue orders the requests that could not be served immediately. Nil in
 	// the low-level cells that exercise the ledger's arithmetic alone.
