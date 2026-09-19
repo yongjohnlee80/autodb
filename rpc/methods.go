@@ -20,6 +20,21 @@ import (
 )
 
 // autodb wire error codes, alongside the transport's (-32601..-32001).
+//
+//	  [Internal Core Error Raised]
+//	                 │
+//	                 ▼
+//	        wireErr() Inspection
+//	                 │
+//	        Is in publicErrs?
+//	        ┌────────┴────────┐
+//	       YES               NO
+//	        │                 │
+//	        ▼                 ▼
+//	  [Public Code]     [Opaque Wire Error]
+//	  Return mapped     Return -32603 Internal Error
+//	  negative code     ("internal error")
+//
 const (
 	// CodeHandshakeRequired gates methods before a compatible sys.hello.
 	CodeHandshakeRequired int64 = -32021

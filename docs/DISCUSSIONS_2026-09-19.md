@@ -84,29 +84,80 @@ This document captures architectural design observations, potential issues, and 
 
 ---
 
-## 2. Cross-Subsystem Architectural Observations
+## 2. Subsystem Analysis: `rpc`
 
-### 2.1 AST Reflection Coupling in `core/engine`
+### 2.1 Strict Integer Protocol Versioning (`Protocol = 7`)
+- **Location**: `rpc/server.go` (lines 23–54)
+- **Mechanism**:
+  The daemon enforces a single strict integer protocol version (`Protocol = 7`). Any client connecting with a different protocol version is immediately poisoned at `sys.hello` with `CodeProtocolMismatch` (-32020), refusing all subsequent requests:
+  ```go
+  if info.Protocol != Protocol {
+      conn.Set(sessRefused, true)
+      return nil, &golibrpc.RPCError{Code: CodeProtocolMismatch, ...}
+  }
+  ```
+- **Architectural Assessment**:
+  - *Strength*: Prevents subtle protocol drift and "method not found" runtime surprises when frontends attempt to call newly added verbs (e.g. `conn.rename` or `sys.pressure`).
+  - *Trade-off*: Because autodb daemons are long-running background processes, updating the Neovim plugin or TUI binary immediately breaks communication with the active daemon, requiring a full daemon restart and connection dropped.
+- **Recommendations**:
+  1. **Minimum Supported Protocol Negotiation**: Consider supporting a `MinProtocol` floor (e.g. Protocol 5..7) allowing older frontends to continue operating on existing method subsets without being forcefully poisoned.
+  2. **Feature Capability Flags**: Along with version numbers, return a `capabilities: []string` array in the `sys.hello` response so clients can dynamically enable/disable UI actions without bumping the wire integer.
+
+---
+
+### 2.2 Positional Argument Decoding vs Keyed Struct Payloads
+- **Location**: `rpc/methods.go` (handlers across `methods.go`)
+- **Mechanism**:
+  RPC handlers decode incoming arguments as an untyped positional slice `[]any`:
+  ```go
+  token, _ := args[0].(string)
+  connID, _ := args[1].(string)
+  sql, _ := args[2].(string)
+  ```
+- **Architectural Assessment**:
+  Positional decoding makes extending existing methods fragile: optional parameters must always be appended to the end of argument lists, and omitting arguments requires transmitting `nil` placeholders.
+- **Recommendations**:
+  1. For complex administrative operations, migrate toward single-struct dictionary arguments (`map[string]any`) with schema validation.
+  2. Maintain positional signatures for high-frequency performance-critical paths (`exec.run`), but document rigid argument schemas.
+
+---
+
+### 2.3 Linear Error Allowlist Matching in `wireErr`
+- **Location**: `rpc/methods.go` (`wireErr` function, lines 98–150)
+- **Mechanism**:
+  `wireErr` performs a sequential linear scan over the `publicErrs` slice using `errors.Is(err, p.sentinel)` for every error produced by the daemon.
+- **Architectural Assessment**:
+  While secure by default (unmatched errors fall through to opaque generic internal errors), the slice contains over 30 sentinels. In high-frequency query pipelines where errors occur, linear traversal can be optimized.
+- **Recommendations**:
+  1. Index direct equality matches using a fast lookup table, falling back to `errors.Is` unwrapping only when wrapped error trees are encountered.
+
+---
+
+## 3. Cross-Subsystem Architectural Observations
+
+### 3.1 AST Reflection Coupling in `core/engine`
 - In `core/engine/capabilities.go`, exported receiver methods on `Name` are verified by AST inspection in `capabilities_test.go` (`TestEachPredicateReadsItsOwnField`), requiring each method to strictly read `capsByName[n].<field>`.
 - *Observation*: While effective at preventing semantic divergence between capability names and backing fields, new helper methods cannot be added without updating test reflection expectations.
 - *Recommendation*: Document AST test coupling in `core/engine/README.md` (already done) and provide compiler-enforced interfaces rather than test-time AST assertions where possible.
 
-### 2.2 Dynamic Capacity versus Fixed Window in `core/pressure`
+### 3.2 Dynamic Capacity versus Fixed Window in `core/pressure`
 - In `core/pressure`, rate calculations are hardcoded to a 7-bucket sliding window with 1-second ticks.
 - *Observation*: In high-throughput deployments with sub-millisecond burst traffic, a 7-second sliding window may react too slowly to acute connection surges.
 - *Recommendation*: Consider exposing window bucket count and tick interval as configuration options in `core/config`, with sane defaults.
 
-### 2.3 Orthogonal Triad in `core/outcome`
+### 3.3 Orthogonal Triad in `core/outcome`
 - Decoupling Kind (structural category) from Charge (throttle attribution) and Wire Projection (authorization-dependent disclosure) provides a solid foundation for client security.
 - *Observation*: `frontdoor` and `rpc` should systematically adopt the Authorization Witness pattern (`outcome.Authorized()`) across all error paths to prevent telemetry leakage to unauthenticated probes.
 
 ---
 
-## 3. Prioritized Action Items for Next Sprints
+## 4. Prioritized Action Items for Next Sprints
 
 | Priority | Item | Component | Complexity | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | **High** | Replace per-wait goroutines in `generalLane.reserve` | `frontdoor` | Medium | Mitigate goroutine churn and timer allocations under memory contention. |
 | **Medium** | Reconcile `gate/*` error IDs in `held_objects.go` | `frontdoor` | Low | Unify namespace under `frontdoor/*` with backward-compatible audit aliases. |
+| **Medium** | Minimum protocol floor & capability negotiation | `rpc` | Medium | Allow minor frontend version divergence without immediate connection poisoning. |
 | **Medium** | Standardize linear ownership tokens in `rpc` / `webserver` | `rpc`, `webserver` | Medium | Apply `acceptToken` LIFO pattern to streaming RPCs and HTTP websocket upgrades. |
 | **Low** | Configurable pressure rate sliding window | `core/pressure` | Low | Allow tuning of window buckets for high-frequency burst environments. |
+
