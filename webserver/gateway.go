@@ -374,7 +374,10 @@ func (r *appRunner) Run(ctx context.Context) error {
 		newModel = tuiapp.New
 	}
 	model := newModel(r.user.sess, notesFor, cancel, r.gw.modelOptions(notes.Root())...)
-	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(r.backend))
+	// The framework's own tracer shares the AUTODB_FOCUS_TRACE file with the
+	// Model's focus trace; nil when the variable is unset, which disables it.
+	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(r.backend),
+		tuicore.WithTrace(tuiapp.RuntimeTrace()))
 	return app.Run(ctx)
 }
 

@@ -1064,7 +1064,10 @@ func runUI(configPath string) error {
 			NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine.String(), MetaPath: metaPath,
 			ConfigPath: activeConfig,
 		}))
-	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(backend))
+	// The framework's own tracer shares the AUTODB_FOCUS_TRACE file with the
+	// Model's focus trace; nil when the variable is unset, which disables it.
+	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(backend),
+		tuicore.WithTrace(tuiapp.RuntimeTrace()))
 	return app.Run(ctx)
 }
 
