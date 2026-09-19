@@ -315,7 +315,3 @@ This document captures architectural design observations, potential issues, and 
 | **Low** | Trusted proxy support for `webserver` IP allowlisting | `webserver` | Medium | Securely parse `X-Forwarded-For` when behind trusted ingress proxies. |
 | **Low** | Modularize root `Model` into focused sub-controllers | `tui` | Low | Decompose `ui.go` state density into layout, auth, and execution states. |
 | **Low** | Configurable pressure rate sliding window | `core/pressure` | Low | Allow tuning of window buckets for high-frequency burst environments. |
-
-
-
-
