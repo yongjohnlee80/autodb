@@ -292,12 +292,20 @@ func (m *Model) traceFocus(live tui.Component) {
 		return
 	}
 	defer f.Close()
-	// BOTH ANSWERS, side by side: what the framework says, and what this code
-	// decided to paint. When they differ the fallback is doing its job, and a
-	// trace where they NEVER differ would mean the framework state had been
-	// repaired and the fallback could go.
-	fmt.Fprintf(f, "%s framework=%q painted=%q\n",
-		time.Now().Format("15:04:05.000"), m.lastPaneName(), m.paneName(live))
+	// THE BOXES AND THE PANES ARE ASKED SEPARATELY, because the contradiction
+	// this has to settle is that keys reach a pane while FocusWithin reports
+	// nothing for any of them. Either the focused node is not under the BOX
+	// this code asks about -- in which case asking the pane directly answers
+	// true and the query was simply aimed at the wrong component -- or focus
+	// really is nowhere, and the keys are arriving by a route that does not go
+	// through framework focus at all. Those need different fixes, and no
+	// amount of reading the code has distinguished them.
+	fmt.Fprintf(f, "%s box[e=%v q=%v r=%v] pane[e=%v q=%v r=%v] host=%v last=%q painted=%q\n",
+		time.Now().Format("15:04:05.000"),
+		m.ctx.FocusWithin(m.explorerBox), m.ctx.FocusWithin(m.editorBox), m.ctx.FocusWithin(m.resultsBox),
+		m.ctx.FocusWithin(m.explorer), m.ctx.FocusWithin(m.editor), m.ctx.FocusWithin(m.results),
+		m.ctx.FocusWithin(m.host),
+		m.paneName(m.lastPane), m.paneName(live))
 }
 
 // paneName names a pane for the trace.
