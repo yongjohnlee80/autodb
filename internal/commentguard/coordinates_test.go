@@ -44,6 +44,7 @@ var certifiedClean = []string{
 	"core/engine",
 	"core/meta",
 	"core/auth",
+	"core/admission",
 	"tui",
 	"internal/vocabguard",
 	"frontdoor",
