@@ -175,34 +175,81 @@ This document captures architectural design observations, potential issues, and 
 
 ---
 
-## 4. Cross-Subsystem Architectural Observations
+---
 
-### 4.1 AST Reflection Coupling in `core/engine`
+## 4. Subsystem Analysis: `webserver`
+
+### 4.1 Concurrent Login Session Pooling Race Condition
+- **Location**: `webserver/sessions.go` (`join` method, lines 72–105)
+- **Mechanism**:
+  When a user logs in, the HTTP handler dials the daemon and authenticates a fresh `tuiapp.Session`. It then calls `sessions.join(subject, fresh)`. If a pooled session already exists (e.g. from an existing open tab), `fresh` is marked surplus and the caller closes it:
+  ```go
+  if entry, ok := s.entries[subject]; ok {
+      entry.refs++
+      return entry.sess, true // true = fresh session is surplus, caller must close
+  }
+  ```
+- **Architectural Assessment**:
+  When a user opens multiple tabs simultaneously or refreshes several tabs concurrently, multiple redundant TCP dials and password authentication calls hit the daemon before the first session enters the pool.
+- **Recommendations**:
+  1. **Single-Flight Coalescing**: Introduce a `singleflight.Group` keyed by username for session acquisition, ensuring concurrent login requests await the first in-flight daemon dial rather than spawning redundant authentication handshakes.
+
+---
+
+### 4.2 Reverse Proxy Ingress and IP Allowlisting
+- **Location**: `webserver/gateway.go` (`ListenAddr`, lines 96–97)
+- **Mechanism**:
+  The gateway enforces a strict loopback posture (`127.0.0.1:port`) by default. IP allowlist checks (`ipallow.Checker`) read `r.RemoteAddr`.
+- **Architectural Assessment**:
+  - *Strength*: Prevents accidental exposure of the administrative web UI on routable network interfaces.
+  - *Constraint*: When deployed in Kubernetes or behind an organizational reverse proxy (e.g. Traefik/Nginx), `r.RemoteAddr` resolves to the proxy's internal IP. The IP allowlist either blocks all clients or permits all clients routed through that proxy.
+- **Recommendations**:
+  1. Provide an optional `TrustedProxies []netip.Prefix` configuration that securely inspects `X-Forwarded-For` only when the remote address matches a trusted proxy CIDR.
+
+---
+
+### 4.3 Browser Tab Refresh and Session Reconnection Churn
+- **Location**: `webserver/sessions.go` and `webserver/gateway.go`
+- **Mechanism**:
+  A browser reload drops the WebSocket connection, causing `web.Manager` to treat the previous session as detached (starting the 5-minute `DefaultIdle` timer). The newly loaded page establishes a brand new session, increasing `entry.refs`.
+- **Architectural Assessment**:
+  Rapidly reloading tabs causes reference counts to climb, delaying automatic logout when the user eventually closes their browser.
+- **Recommendations**:
+  1. Implement persistent client session identifiers in `sessionStorage` allowing reloaded tabs to reclaim their existing detached session slot before creating a new one.
+
+---
+
+## 5. Cross-Subsystem Architectural Observations
+
+### 5.1 AST Reflection Coupling in `core/engine`
 - In `core/engine/capabilities.go`, exported receiver methods on `Name` are verified by AST inspection in `capabilities_test.go` (`TestEachPredicateReadsItsOwnField`), requiring each method to strictly read `capsByName[n].<field>`.
 - *Observation*: While effective at preventing semantic divergence between capability names and backing fields, new helper methods cannot be added without updating test reflection expectations.
 - *Recommendation*: Document AST test coupling in `core/engine/README.md` (already done) and provide compiler-enforced interfaces rather than test-time AST assertions where possible.
 
-### 4.2 Dynamic Capacity versus Fixed Window in `core/pressure`
+### 5.2 Dynamic Capacity versus Fixed Window in `core/pressure`
 - In `core/pressure`, rate calculations are hardcoded to a 7-bucket sliding window with 1-second ticks.
 - *Observation*: In high-throughput deployments with sub-millisecond burst traffic, a 7-second sliding window may react too slowly to acute connection surges.
 - *Recommendation*: Consider exposing window bucket count and tick interval as configuration options in `core/config`, with sane defaults.
 
-### 4.3 Orthogonal Triad in `core/outcome`
+### 5.3 Orthogonal Triad in `core/outcome`
 - Decoupling Kind (structural category) from Charge (throttle attribution) and Wire Projection (authorization-dependent disclosure) provides a solid foundation for client security.
 - *Observation*: `frontdoor` and `rpc` should systematically adopt the Authorization Witness pattern (`outcome.Authorized()`) across all error paths to prevent telemetry leakage to unauthenticated probes.
 
 ---
 
-## 5. Prioritized Action Items for Next Sprints
+## 6. Prioritized Action Items for Next Sprints
 
 | Priority | Item | Component | Complexity | Description |
 | :--- | :--- | :--- | :--- | :--- |
 | **High** | Replace per-wait goroutines in `generalLane.reserve` | `frontdoor` | Medium | Mitigate goroutine churn and timer allocations under memory contention. |
+| **Medium** | Single-flight login coalescing in `webserver` | `webserver` | Low | Prevent duplicate daemon dials during concurrent tab logins. |
 | **Medium** | Pair `execSeq` with active RPC query cancellation | `tui` | Medium | Cancel backend query tasks on preemption to release database compute. |
 | **Medium** | Reconcile `gate/*` error IDs in `held_objects.go` | `frontdoor` | Low | Unify namespace under `frontdoor/*` with backward-compatible audit aliases. |
 | **Medium** | Minimum protocol floor & capability negotiation | `rpc` | Medium | Allow minor frontend version divergence without immediate connection poisoning. |
 | **Medium** | Standardize linear ownership tokens in `rpc` / `webserver` | `rpc`, `webserver` | Medium | Apply `acceptToken` LIFO pattern to streaming RPCs and HTTP websocket upgrades. |
+| **Low** | Trusted proxy support for `webserver` IP allowlisting | `webserver` | Medium | Securely parse `X-Forwarded-For` when behind trusted ingress proxies. |
 | **Low** | Modularize root `Model` into focused sub-controllers | `tui` | Low | Decompose `ui.go` state density into layout, auth, and execution states. |
 | **Low** | Configurable pressure rate sliding window | `core/pressure` | Low | Allow tuning of window buckets for high-frequency burst environments. |
+
 
 

@@ -47,6 +47,17 @@ var ErrForeignOccupant = errors.New("webserver: the address is occupied by somet
 // covered by passing a nil spawn function to the session, which makes
 // auto-starting structurally impossible rather than merely unreached. A reviewer
 // should check for both — only the second is a guarantee.
+//
+//	  Preflight(ctx, network, addr)
+//	               │
+//	               ▼
+//	        rpc.ProbeOn(addr)
+//	               │
+//	       Probe Result?
+//	       ├── err == nil ──► Return version, proceed to startup
+//	       ├── errors.Is(err, ErrNotAutodb) ──► Fail: ErrForeignOccupant
+//	       └── other error (connection refused) ──► Fail: ErrNoDaemon
+//
 func Preflight(ctx context.Context, network, addr string) (version string, err error) {
 	probeCtx, cancel := context.WithTimeout(ctx, PreflightTimeout)
 	defer cancel()
