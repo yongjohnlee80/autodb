@@ -14,36 +14,36 @@
 // When no explicit path is passed (--config=""), autodb searches candidate
 // locations in a strict, deterministic sequence:
 //
-//	                 [Start: Resolve Default Path]
-//	                               │
-//	                               ▼
-//	           ┌────────────────────────────────────────┐
-//	           │ 1. System Server: /etc/autodb/config.toml│
-//	           │    Mode 0640 (Root / Service Account)  │
-//	           └───────────────────┬────────────────────┘
-//	                               │ Present & Readable?
-//	                     YES ──────┴────── NO
-//	                      │                │
-//	                      ▼                ▼
-//	                 [Return Path]   ┌────────────────────────────────────────┐
-//	                                 │ 2. User Config:                        │
-//	                                 │    $XDG_CONFIG_HOME/autodb/config.toml │
-//	                                 │    (~/.config/autodb/config.toml)      │
-//	                                 └─────────────────┬──────────────────────┘
-//	                                                   │ Present & Readable?
-//	                                         YES ──────┴────── NO
-//	                                          │                │
-//	                                          ▼                ▼
-//	                                     [Return Path]   ┌────────────────────────────────────────┐
-//	                                                     │ 3. System Client:                      │
-//	                                                     │    /etc/autodb/client.toml             │
-//	                                                     │    Mode 0644 (World-Readable Client)   │
-//	                                                     └─────────────────┬──────────────────────┘
-//	                                                                       │ Present & Readable?
-//	                                                             YES ──────┴────── NO
-//	                                                              │                │
-//	                                                              ▼                ▼
-//	                                                         [Return Path]   [Return User Path (Defaults)]
+//	      [Start: Resolve Default Path]
+//	                    │
+//	                    ▼
+//	┌────────────────────────────────────────┐
+//	│ 1. System Server: /etc/autodb/config.toml│
+//	│    Mode 0640 (Root / Service Account)  │
+//	└───────────────────┬────────────────────┘
+//	                    │ Present & Readable?
+//	          YES ──────┴────── NO
+//	           │                │
+//	           ▼                ▼
+//	      [Return Path]   ┌────────────────────────────────────────┐
+//	                      │ 2. User Config:                        │
+//	                      │    $XDG_CONFIG_HOME/autodb/config.toml │
+//	                      │    (~/.config/autodb/config.toml)      │
+//	                      └─────────────────┬──────────────────────┘
+//	                                        │ Present & Readable?
+//	                              YES ──────┴────── NO
+//	                               │                │
+//	                               ▼                ▼
+//	                          [Return Path]   ┌────────────────────────────────────────┐
+//	                                          │ 3. System Client:                      │
+//	                                          │    /etc/autodb/client.toml             │
+//	                                          │    Mode 0644 (World-Readable Client)   │
+//	                                          └─────────────────┬──────────────────────┘
+//	                                                            │ Present & Readable?
+//	                                                  YES ──────┴────── NO
+//	                                                   │                │
+//	                                                   ▼                ▼
+//	                                              [Return Path]   [Return User Path (Defaults)]
 //
 // ============================================================================
 // SERVICE HOST DETECTION & SPOOFING PREVENTION
@@ -70,20 +70,20 @@
 // the TUI, administrative queries, or target databases, sizing parameters are
 // derived and bound as follows:
 //
-//	  [Host Hardware]
-//	         │
-//	         ▼
-//	  [PoolMaxConns = 2 × NumCPU()] ─────────────┐
-//	  (Default target pool bound)                │
-//	                                             ▼
-//	                             [DefaultReservedHeadroom(pool)]
-//	                             • min(4, pool / 2)
-//	                             • Ensures interactive/control queries survive
-//	                                             │
-//	                                             ▼
-//	                             [FrontDoor.EffectiveMaxLeases]
-//	                             • Derived: PoolMaxConns - ReservedHeadroom
-//	                             • Explicit max_leases may only be lower
+//	[Host Hardware]
+//	       │
+//	       ▼
+//	[PoolMaxConns = 2 × NumCPU()] ─────────────┐
+//	(Default target pool bound)                │
+//	                                           ▼
+//	                           [DefaultReservedHeadroom(pool)]
+//	                           • min(4, pool / 2)
+//	                           • Ensures interactive/control queries survive
+//	                                           │
+//	                                           ▼
+//	                           [FrontDoor.EffectiveMaxLeases]
+//	                           • Derived: PoolMaxConns - ReservedHeadroom
+//	                           • Explicit max_leases may only be lower
 //
 // Key invariant: A reservation may shrink to fit a small pool, but the pool is
 // NEVER automatically inflated to satisfy a reservation — doing so would over-claim

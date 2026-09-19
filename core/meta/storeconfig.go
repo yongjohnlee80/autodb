@@ -15,17 +15,17 @@ import (
 // To maintain clean package boundaries and avoid circular import dependencies between core/config
 // and core/meta, core/meta declares this consumer-side interface rather than importing config.Meta:
 //
-//	  ┌──────────────────────┐             ┌──────────────────────┐
-//	  │     core/config      │             │      core/meta       │
-//	  │                      │             │                      │
-//	  │ struct Meta {        │             │ type StoreConfig     │
-//	  │   StoreEngine() ...  │             │   interface { ... }  │
-//	  │   StorePath() ...    │             └──────────▲───────────┘
-//	  │   StoreDSN() ...     │                        │
-//	  │   StorePoolMax...    │                        │ Satisfies
-//	  │ }                    │────────────────────────┘ Structurally
-//	  └──────────────────────┘
-//	  (Zero compile-time import dependencies between packages)
+//	┌──────────────────────┐             ┌──────────────────────┐
+//	│     core/config      │             │      core/meta       │
+//	│                      │             │                      │
+//	│ struct Meta {        │             │ type StoreConfig     │
+//	│   StoreEngine() ...  │             │   interface { ... }  │
+//	│   StorePath() ...    │             └──────────▲───────────┘
+//	│   StoreDSN() ...     │                        │
+//	│   StorePoolMax...    │                        │ Satisfies
+//	│ }                    │────────────────────────┘ Structurally
+//	└──────────────────────┘
+//	(Zero compile-time import dependencies between packages)
 //
 // Any struct implementing these four accessors is accepted by Open and OpenNoMigrate.
 type StoreConfig interface {

@@ -53,20 +53,20 @@ func newParams() (kdfParams, error) {
 //
 // Key Derivation Pipeline:
 //
-//   Passphrase ────┐
-//   Salt (16B)  ───┼──> [ Argon2id KDF ] ──> 64-byte Output
-//   Profile Params ┘    (64MB, t=1, p=4)           │
-//                                     ┌────────────┴────────────┐
-//                                     ▼                         ▼
-//                               Bytes [0:32]              Bytes [32:64]
-//                               Key Encryption Key        Authentication Half
-//                               (KEK, ephemeral)                │
-//                                     │                         ▼
-//                                     │                  [ SHA-256 Hash ]
-//                                     ▼                         │
-//                               Unwrap Master Key               ▼
-//                               Via AES-256-GCM           Verify vs Stored
-//                                                         pass_hash Record
+//	Passphrase ────┐
+//	Salt (16B)  ───┼──> [ Argon2id KDF ] ──> 64-byte Output
+//	Profile Params ┘    (64MB, t=1, p=4)           │
+//	                                  ┌────────────┴────────────┐
+//	                                  ▼                         ▼
+//	                            Bytes [0:32]              Bytes [32:64]
+//	                            Key Encryption Key        Authentication Half
+//	                            (KEK, ephemeral)                │
+//	                                  │                         ▼
+//	                                  │                  [ SHA-256 Hash ]
+//	                                  ▼                         │
+//	                            Unwrap Master Key               ▼
+//	                            Via AES-256-GCM           Verify vs Stored
+//	                                                      pass_hash Record
 func deriveKeys(passphrase string, p kdfParams) (kek, authHalf []byte) {
 	out := argon2.IDKey([]byte(passphrase), p.Salt, p.Time, p.Memory, p.Threads, kdfLen)
 	return out[:keyLen], out[keyLen:]
@@ -161,9 +161,10 @@ func newKey() ([]byte, error) {
 // seal encrypts plaintext with AES-256-GCM under key: nonce ‖ ciphertext.
 //
 // Wire/storage layout:
-//   ┌──────────────────────────┬──────────────────────────────────────────┐
-//   │ Nonce (12 bytes, CSPRNG) │ Ciphertext + Auth Tag (16 bytes GCM tag) │
-//   └──────────────────────────┴──────────────────────────────────────────┘
+//
+//	┌──────────────────────────┬──────────────────────────────────────────┐
+//	│ Nonce (12 bytes, CSPRNG) │ Ciphertext + Auth Tag (16 bytes GCM tag) │
+//	└──────────────────────────┴──────────────────────────────────────────┘
 //
 // The aad string (Additional Authenticated Data) cryptographically binds the
 // resulting ciphertext to its domain context (e.g. connection ID or keyslot type).

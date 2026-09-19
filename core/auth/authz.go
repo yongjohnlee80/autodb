@@ -62,22 +62,22 @@ func requiredRank(a Action) int {
 //
 // Decision Flow:
 //
-//	           Is action == ActionManage?
-//	                   │
-//	          YES ─────┴───── NO
-//	           │               │
-//	           ▼               ▼
-//	   globalRole == admin?   Read Grant(userID, connID)
-//	           │               │
-//	     YES ──┴── NO    Found ┴ Missing
-//	      │         │      │        │
-//	      ▼         ▼      ▼        ▼
-//	    PERMIT    DENY   min(rank(global), rank(grant)) >= required(action)?
-//	                       │
-//	                 YES ──┴── NO
-//	                  │         │
-//	                  ▼         ▼
-//	                PERMIT    DENY
+//	        Is action == ActionManage?
+//	                │
+//	       YES ─────┴───── NO
+//	        │               │
+//	        ▼               ▼
+//	globalRole == admin?   Read Grant(userID, connID)
+//	        │               │
+//	  YES ──┴── NO    Found ┴ Missing
+//	   │         │      │        │
+//	   ▼         ▼      ▼        ▼
+//	 PERMIT    DENY   min(rank(global), rank(grant)) >= required(action)?
+//	                    │
+//	              YES ──┴── NO
+//	               │         │
+//	               ▼         ▼
+//	             PERMIT    DENY
 func (s *Service) Authorize(ctx context.Context, token string, connID int64, action Action) (Identity, error) {
 	ident, _, err := s.resolveToken(ctx, token)
 	if err != nil {

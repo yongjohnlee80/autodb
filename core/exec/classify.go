@@ -187,30 +187,30 @@ type FunctionCall struct {
 //
 // Classification Pipeline:
 //
-//	  [Raw SQL String]
-//	         │
-//	         ▼
-//	  [Lexer / Scanner] (scanScript)
-//	  • Skip leading whitespace, comments (--, /* */)
-//	  • Tokenize keywords, identifiers, string literals, dollar quotes
-//	  • Track paren nesting depth
-//	         │
-//	         ├── Multiple statements? ──YES──> ErrMultiStatement
-//	         ├── Unterminated token?  ──YES──> ErrMalformedStatement
-//	         │
-//	         ▼
-//	  [Extract Statement Properties]
-//	  • Main Verb (e.g. SELECT, INSERT, UPDATE, BEGIN)
-//	  • Scan CTEs / Subqueries for nested mutations (Verb, Depth, HasWhere)
-//	  • Scan Function Calls (Schema, Name, Quoted)
-//	  • Check Top-Level WHERE (for UPDATE/DELETE)
-//	         │
-//	         ▼
-//	  [Compute FactClass]
-//	  max(mainVerbClass, nestedVerbClasses)
-//	         │
-//	         ▼
-//	  Return Statement{Verb, Class, HasTopLevelWhere, Calls, Nested}
+//	[Raw SQL String]
+//	       │
+//	       ▼
+//	[Lexer / Scanner] (scanScript)
+//	• Skip leading whitespace, comments (--, /* */)
+//	• Tokenize keywords, identifiers, string literals, dollar quotes
+//	• Track paren nesting depth
+//	       │
+//	       ├── Multiple statements? ──YES──> ErrMultiStatement
+//	       ├── Unterminated token?  ──YES──> ErrMalformedStatement
+//	       │
+//	       ▼
+//	[Extract Statement Properties]
+//	• Main Verb (e.g. SELECT, INSERT, UPDATE, BEGIN)
+//	• Scan CTEs / Subqueries for nested mutations (Verb, Depth, HasWhere)
+//	• Scan Function Calls (Schema, Name, Quoted)
+//	• Check Top-Level WHERE (for UPDATE/DELETE)
+//	       │
+//	       ▼
+//	[Compute FactClass]
+//	max(mainVerbClass, nestedVerbClasses)
+//	       │
+//	       ▼
+//	Return Statement{Verb, Class, HasTopLevelWhere, Calls, Nested}
 //
 // The authorization class is the maximum verb class of the statement and of
 // any statement body nested in it, so a read whose CTE writes is authorized

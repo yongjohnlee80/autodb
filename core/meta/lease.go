@@ -46,18 +46,18 @@ var ErrLeaseHeld = errors.New("meta: another autodb instance is already serving 
 //
 // Lease Architecture & Dual Mechanisms:
 //
-//	                 [AcquireLease(ctx, store, cfg)]
-//	                                │
-//	                   Engine == SQLite or Postgres?
-//	                                │
-//	                 SQLite ────────┴──────── Postgres
-//	                   │                         │
-//	                   ▼                         ▼
-//	          [File Lock (flock)]       [Advisory Transaction Lock]
-//	          • <database>.lock         • Dedicated pgx connection
-//	          • Mode: LOCK_EX           • pg_try_advisory_xact_lock()
-//	          • Released by OS on exit  • Heartbeat ping every 10s
-//	                                    • Lost() channel fires on drop
+//	       [AcquireLease(ctx, store, cfg)]
+//	                      │
+//	         Engine == SQLite or Postgres?
+//	                      │
+//	       SQLite ────────┴──────── Postgres
+//	         │                         │
+//	         ▼                         ▼
+//	[File Lock (flock)]       [Advisory Transaction Lock]
+//	• <database>.lock         • Dedicated pgx connection
+//	• Mode: LOCK_EX           • pg_try_advisory_xact_lock()
+//	• Released by OS on exit  • Heartbeat ping every 10s
+//	                          • Lost() channel fires on drop
 type InstanceLease struct {
 	// target identifies the store covered by this lease (file path or redacted DSN).
 	target string

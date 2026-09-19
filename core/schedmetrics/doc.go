@@ -10,7 +10,7 @@
 //
 // Wait outcomes are derived directly from the typed exec.WaitOutcome enum:
 //
-//	  [core/exec.WaitOutcome] ───> Label(o) ───> Prometheus Label String
+//	[core/exec.WaitOutcome] ───> Label(o) ───> Prometheus Label String
 //
 // Rather than classifying error strings with a fallback "other" bucket (which
 // masks unclassified sentinels behind plausible totals), WaitLabels reflects the
@@ -23,33 +23,33 @@
 // Connection reset outcomes and release dispositions are tracked on separate,
 // orthogonal axes:
 //
-//	                          [Backend Released]
-//	                                  │
-//	                  Was a reset attempted on backend?
-//	                                  │
-//	                 YES ─────────────┴───────────── NO
-//	                  │                              │
-//	          [Axis 1: ResetResult]                  │
-//	          • ResetClean                           │
-//	          • ResetFailed                          │
-//	                  │                              │
-//	                  └───────────────┬──────────────┘
-//	                                  │
-//	                       [Axis 2: BackendDisposition]
-//	                                  │
-//	         ┌────────────────────────┼────────────────────────┐
-//	         ▼                        ▼                        ▼
-//	  [DispositionPooled]   [DispositionDiscarded]   [DispositionClosed]
-//	  Returned to target    Destroyed & evicted      Terminated cleanly
-//	  pool for reuse                 │
-//	                                 ▼
-//	                        [DiscardReason (Required)]
-//	                        • DiscardResetFailed
-//	                        • DiscardResetTimeout
-//	                        • DiscardNonIdleStatus
-//	                        • DiscardDialFailed
-//	                        • DiscardTargetChanged
-//	                        • DiscardShutdown
+//	                        [Backend Released]
+//	                                │
+//	                Was a reset attempted on backend?
+//	                                │
+//	               YES ─────────────┴───────────── NO
+//	                │                              │
+//	        [Axis 1: ResetResult]                  │
+//	        • ResetClean                           │
+//	        • ResetFailed                          │
+//	                │                              │
+//	                └───────────────┬──────────────┘
+//	                                │
+//	                     [Axis 2: BackendDisposition]
+//	                                │
+//	       ┌────────────────────────┼────────────────────────┐
+//	       ▼                        ▼                        ▼
+//	[DispositionPooled]   [DispositionDiscarded]   [DispositionClosed]
+//	Returned to target    Destroyed & evicted      Terminated cleanly
+//	pool for reuse                 │
+//	                               ▼
+//	                      [DiscardReason (Required)]
+//	                      • DiscardResetFailed
+//	                      • DiscardResetTimeout
+//	                      • DiscardNonIdleStatus
+//	                      • DiscardDialFailed
+//	                      • DiscardTargetChanged
+//	                      • DiscardShutdown
 //
 // Invariants enforced by DispositionCounts.Reconcile:
 //   - Invariant 1: resets <= releases (resets are counted only when attempted).

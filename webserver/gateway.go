@@ -99,31 +99,30 @@ func ListenAddr(port int) string { return fmt.Sprintf("127.0.0.1:%d", port) }
 // per-user RPC sessions, caps concurrency, and serves the existing TUI to a
 // browser.
 //
-//	  [Incoming HTTP / WebSocket Connection]
-//	                    │
-//	                    ▼
-//	  ┌─────────────────────────────────────┐
-//	  │ web.Handler                         │
-//	  │ ├── POST /login ──► SSO / Ticket    │
-//	  │ ├── GET /attach ──► Mint Ticket     │
-//	  │ └── WS /connect ──► WebSocket Term  │
-//	  └─────────────────┬───────────────────┘
-//	                    │
-//	                    ▼
-//	  ┌─────────────────────────────────────┐
-//	  │ web.Manager                         │
-//	  │ • Enforces MaxSessions cap          │
-//	  │ • Manages Virtual Terminal Host     │
-//	  │ • Reconnects detached sessions      │
-//	  └─────────────────┬───────────────────┘
-//	                    │
-//	                    ▼
-//	  ┌─────────────────────────────────────┐
-//	  │ sessions (Per-User Session Pool)    │
-//	  │ • Reference-counted tuiapp.Session  │
-//	  │ • Idle timeout & automatic logout   │
-//	  └─────────────────────────────────────┘
-//
+//	[Incoming HTTP / WebSocket Connection]
+//	                  │
+//	                  ▼
+//	┌─────────────────────────────────────┐
+//	│ web.Handler                         │
+//	│ ├── POST /login ──► SSO / Ticket    │
+//	│ ├── GET /attach ──► Mint Ticket     │
+//	│ └── WS /connect ──► WebSocket Term  │
+//	└─────────────────┬───────────────────┘
+//	                  │
+//	                  ▼
+//	┌─────────────────────────────────────┐
+//	│ web.Manager                         │
+//	│ • Enforces MaxSessions cap          │
+//	│ • Manages Virtual Terminal Host     │
+//	│ • Reconnects detached sessions      │
+//	└─────────────────┬───────────────────┘
+//	                  │
+//	                  ▼
+//	┌─────────────────────────────────────┐
+//	│ sessions (Per-User Session Pool)    │
+//	│ • Reference-counted tuiapp.Session  │
+//	│ • Idle timeout & automatic logout   │
+//	└─────────────────────────────────────┘
 type Gateway struct {
 	cfg     Config
 	pool    *sessions

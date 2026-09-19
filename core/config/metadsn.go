@@ -17,27 +17,27 @@ import (
 //
 // Verification Pipeline:
 //
-//	                 [Incoming Meta DSN]
-//	                          │
-//	                          ▼
-//	                 [dsnParams Parser]
-//	                 Extract sslmode and sslrootcert
-//	                 (Handles URL and keyword formats)
-//	                          │
-//	                          ▼
-//	               [checkMetaDSNTransport]
-//	                          │
-//	             sslmode == "verify-full"?
-//	                          │
-//	            YES ──────────┴────────── NO
-//	             │                         │
-//	             ▼                         ▼
-//	     Has sslrootcert?        Is allow_insecure_dsn true?
-//	             │                         │
-//	       YES ──┴── NO              YES ──┴── NO
-//	        │         │               │         │
-//	        ▼         ▼               ▼         ▼
-//	     [Pass]   [Refuse]         [Pass]   [Refuse: MITM Risk]
+//	            [Incoming Meta DSN]
+//	                     │
+//	                     ▼
+//	            [dsnParams Parser]
+//	            Extract sslmode and sslrootcert
+//	            (Handles URL and keyword formats)
+//	                     │
+//	                     ▼
+//	          [checkMetaDSNTransport]
+//	                     │
+//	        sslmode == "verify-full"?
+//	                     │
+//	       YES ──────────┴────────── NO
+//	        │                         │
+//	        ▼                         ▼
+//	Has sslrootcert?        Is allow_insecure_dsn true?
+//	        │                         │
+//	  YES ──┴── NO              YES ──┴── NO
+//	   │         │               │         │
+//	   ▼         ▼               ▼         ▼
+//	[Pass]   [Refuse]         [Pass]   [Refuse: MITM Risk]
 //
 // Security rationale:
 // The enforced standard is `sslmode=verify-full` with an explicit root certificate (`sslrootcert`).
