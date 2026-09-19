@@ -43,6 +43,17 @@ import (
 // `what` is the operation as a verb phrase and `remedy` the command line that
 // does it properly; both are supplied by the caller so the refusal reads as an
 // answer to what the operator actually ran.
+//
+// Client-Only Configuration Gate:
+//
+//	Target Operation (--serve / --init)
+//	               |
+//	     cfg.Server.ClientOnly?
+//	            /        \
+//	        [True]      [False]
+//	          |            |
+//	    [Refuse Fast]  [Permit Operation]
+//	  (Prevent Private Store Desync)
 func requireStoreConfig(cfg config.Config, what, remedy string) error {
 	if !cfg.Server.ClientOnly {
 		return nil

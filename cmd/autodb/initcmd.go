@@ -72,6 +72,14 @@ type initOpts struct {
 
 // runInit performs the first-run ceremony: create or authenticate an
 // administrator, then enrol the service keyslot if the config asked for one.
+//
+// First-Run Ceremony Pipeline:
+//
+//	[Load Config] -> [Verify Store Config] -> [Open Store Catalog]
+//	                                                 |
+//	[Wrap Master Key] <- [Admin Authenticated] <- [Acquire Lease]
+//	       |
+//	[Enrol Service Keyslot] -> [Emit Success Summary & Exit]
 func runInit(ctx context.Context, out io.Writer, configPath string, o initOpts) error {
 	if o.prompt == nil {
 		o.prompt = ttyPrompt
