@@ -48,6 +48,20 @@ var ErrIdentityDrift = errors.New("webserver: pooled session identity does not m
 // still using, and keeping one after the last tab closed would leave a user
 // logged into the daemon with nothing on screen. A count is the only thing that
 // answers "is anybody still here".
+//
+//	  [Browser Tab Connects]              [Browser Tab Closes]
+//	             │                                   │
+//	             ▼                                   ▼
+//	      join(subject)                       release(subject)
+//	             │                                   │
+//	     Entry in Pool?                      Decrement refs
+//	     ├── YES ──► Increment refs                  │
+//	     └── NO  ──► Create entry (refs=1)       refs == 0?
+//	                                             ├── NO  ──► Stay in pool
+//	                                             └── YES ──► Start DefaultIdle (5m)
+//	                                                         ├── Reconnect ──► Cancel timer
+//	                                                         └── Expiry ──► auth.logout & close
+//
 type sessions struct {
 	dial func(ctx context.Context) (*tuiapp.Session, error)
 	log  logger.Logger
