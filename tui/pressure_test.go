@@ -29,14 +29,18 @@ func renderedPressure(rows []pressureRow) string {
 // unreachable case and the unwired case must name themselves.
 func TestPressureView_AnUnreadableViewNamesItselfInsteadOfLookingCalm(t *testing.T) {
 	var m Model // no source wired
-	got := renderedPressure(m.pressureRows())
+	v := &pressureView{m: &m}
+	v.readNow(context.Background())
+	got := renderedPressure(v.rows)
 	if !strings.Contains(got, "unavailable") {
 		t.Errorf("an unwired view rendered %q; an empty table is indistinguishable from "+
 			"a front door under no pressure", got)
 	}
 
 	m.pressure = failingSource{errors.New("daemon not reachable")}
-	got = renderedPressure(m.pressureRows())
+	v = &pressureView{m: &m}
+	v.readNow(context.Background())
+	got = renderedPressure(v.rows)
 	if !strings.Contains(got, "unavailable") || !strings.Contains(got, "daemon not reachable") {
 		t.Errorf("a failed read rendered %q; it must name what went wrong", got)
 	}

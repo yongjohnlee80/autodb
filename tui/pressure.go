@@ -123,8 +123,7 @@ func (m *Model) openPressure() *pressureView {
 	// keystroke that opens this must produce a surface with figures on it, and
 	// the source already caps how long it may take; a refresh, by contrast,
 	// runs while somebody is reading and must never take the terminal with it.
-	snap, err := m.pressureSnapshot(context.Background())
-	v.apply(snap, err, time.Now())
+	v.readNow(context.Background())
 	v.float = m.openFloat("front-door pressure — Enter or Esc to close", v)
 	return v
 }
@@ -156,17 +155,17 @@ func (m *Model) pressureSnapshot(ctx context.Context) (pressure.Snapshot, error)
 
 var errNoPressureSource = errors.New("no pressure source is wired into this session")
 
-// pressureRows renders the snapshot, or says plainly why it cannot.
-func (m *Model) pressureRows() []pressureRow {
-	snap, err := m.pressureSnapshot(context.Background())
-	if err != nil {
-		// NAMED, NOT BLANK. A view that renders an empty table when it could
-		// not read is indistinguishable from a front door under no pressure at
-		// all, and that is the reading somebody will take at three in the
-		// morning.
-		return []pressureRow{{label: "unavailable", value: err.Error()}}
-	}
-	return pressureSnapshotRows(snap)
+// readNow performs the one blocking read the view opens on, and folds it in.
+//
+// A METHOD RATHER THAN TWO LINES INSIDE openPressure, so a cell asserting what
+// an unreadable view says drives THIS rather than a copy of it. The version
+// this replaced was a Model method that nothing but its own cell still called
+// once the refresh path existed: production code alive only because a test held
+// it up, which is how a cell comes to agree with something the product stopped
+// doing.
+func (v *pressureView) readNow(ctx context.Context) {
+	snap, err := v.m.pressureSnapshot(ctx)
+	v.apply(snap, err, time.Now())
 }
 
 // apply folds one refresh result into the view: a reading replaces the figures,
