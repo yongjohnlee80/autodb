@@ -594,9 +594,9 @@ func runServe(configPath string) error {
 		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot),
 		rpc.WithFrontDoor(frontDoorState), rpc.WithPressure(pressureState),
 		// Operator-facing error detail (a dial/config cause naming the target)
-		// is disclosed only when this surface is reachable from this host alone
-		// — a unix socket or a loopback TCP bind (ADR 0056 §4). ep is the
-		// resolved endpoint this daemon actually bound.
+		// is disclosed only when this surface is reachable from this host
+		// alone — a unix socket, or a loopback TCP bind. ep is the endpoint
+		// this daemon actually bound, not the one the config asked for.
 		rpc.WithDetailDisclosure(ep.HostLocalOnly()))
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)

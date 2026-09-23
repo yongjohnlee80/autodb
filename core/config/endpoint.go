@@ -51,12 +51,14 @@ func (e Endpoint) IsLocal() bool { return e.Network == "unix" }
 // a unix socket (local by construction, IsLocal) OR a TCP bind on a loopback
 // address. It is broader than IsLocal, which is unix-only.
 //
-// This is the boundary ADR 0056 §4 treats as the security boundary, and the
-// condition under which the RPC surface may disclose operator-facing error
-// detail (a dial/config cause names the target host, role, database and any
-// DSN credential). A TCP bind on a routable address is NOT host-local, so that
-// detail is never projected onto a wire another machine can read; wider
-// exposure waits for the M9 gate-guard ADR.
+// Being unreachable from another machine IS this transport's security
+// boundary: the RPC surface adds no authentication layer of its own, so where
+// it is bound is what protects it. That makes this the condition under which
+// the surface may disclose operator-facing error detail — a dial or config
+// cause names the target host, the role, the database and any credential in
+// the DSN. A TCP bind on a routable address is NOT host-local, so that detail
+// is never projected onto a wire another machine can read; disclosing it more
+// widely waits until this surface carries authentication of its own.
 //
 // The TCP host is always an IP literal here — config validation rejects a
 // non-parseable server.bind when the port is set — so no name resolution is
