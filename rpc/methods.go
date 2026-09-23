@@ -122,6 +122,12 @@ const (
 	// broke" and send an operator looking for a fault that does not exist.
 	CodeShutdownBlocked int64 = -32050
 
+	// CodeServerStopping refuses a transaction OPENING because a shutdown has
+	// been committed. Distinct from CodeShutdownBlocked, which refuses the
+	// SHUTDOWN: these are opposite sides of the same gate and a caller that
+	// conflated them would retry the wrong thing.
+	CodeServerStopping int64 = -32051
+
 	CodeDialFailed   int64 = -32048
 	CodeConfigFailed int64 = -32049
 )
@@ -205,6 +211,7 @@ var publicErrs = []struct {
 	// Transaction-state refusals all map to one code: the caller's next
 	// move is the same in every case — send a different statement, not this
 	// one again — and the sentinel's own text says which state it was in.
+	{exec.ErrServerStopping, CodeServerStopping},
 	{exec.ErrTxAlreadyOpen, CodeTxState},
 	{exec.ErrNoOpenTx, CodeTxState},
 	{exec.ErrTxAborted, CodeTxState},
@@ -871,7 +878,13 @@ func (s *Server) register() {
 		// The count is disclosed because the caller is an authenticated admin
 		// acting on their own install, and "something is open" is not a thing
 		// anybody can act on.
-		if n := s.eng.SessionsInTransaction(); n > 0 {
+		// ONE DECISION, NOT TWO. BeginShutdown closes transaction admission and
+		// counts under the same gate, so "nothing is open" and "nothing can
+		// open" are the same instant. Counting first and stopping afterwards
+		// was a check-then-act race: a BEGIN admitted between the two was torn
+		// down by the drain, which is the loss this refusal exists to prevent.
+		// It is not a DATA race, so -race could not have found it.
+		if n := s.eng.BeginShutdown(); n > 0 {
 			return nil, &golibrpc.Error{
 				Code: CodeShutdownBlocked,
 				Message: fmt.Sprintf("refusing to stop: %d session(s) hold an open "+
@@ -882,6 +895,10 @@ func (s *Server) register() {
 		}
 		if err := s.auth.Audit(ctx, ident.UserID(), peerIP(req),
 			"server_shutdown", "requested over rpc"); err != nil {
+			// Admission is CLOSED at this point and the shutdown is not
+			// happening, so it has to be reopened -- otherwise the daemon
+			// keeps refusing to begin transactions it is never going to end.
+			s.eng.AbortShutdown()
 			return nil, s.wireErr(err) // an unaudited privileged effect never happens
 		}
 		s.RequestShutdown()

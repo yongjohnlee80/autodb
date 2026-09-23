@@ -573,3 +573,22 @@ func (e *Engine) claimSession(ctx context.Context, s *session) (release func(), 
 // HOW MANY sessions they would be interrupting; "something is open" is not
 // something anyone can act on.
 func (e *Engine) SessionsInTransaction() int { return e.sessions.countInTransaction() }
+
+// BeginShutdown is the shutdown decision, taken as ONE step: it closes
+// transaction admission and reports how many transactions were open at the
+// instant it closed.
+//
+// Zero means admission STAYS closed and the caller may commit the shutdown.
+// Non-zero means nothing was closed and the caller must not stop. A caller that
+// got zero and then decided not to stop after all must call AbortShutdown, or
+// the daemon keeps refusing to begin transactions it is never going to end.
+//
+// Separate from SessionsInTransaction because that one only READS. Reading and
+// then acting are two steps with a window between them, and a BEGIN admitted
+// in that window was torn down by the drain -- which is the loss the refusal
+// exists to prevent.
+func (e *Engine) BeginShutdown() int { return e.sessions.closeTxAdmission() }
+
+// AbortShutdown reopens transaction admission after a shutdown that was
+// decided on but not carried out.
+func (e *Engine) AbortShutdown() { e.sessions.reopenTxAdmission() }

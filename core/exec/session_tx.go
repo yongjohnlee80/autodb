@@ -35,6 +35,12 @@ var (
 	// a refusal that says which is which.
 	ErrTxAlreadyOpen = errors.New("exec: this session already has an open transaction")
 
+	// ErrServerStopping refuses a transaction OPENING because a shutdown has
+	// been committed. Existing transactions are untouched -- they are what the
+	// shutdown waited for -- and this is the one thing that may no longer
+	// start, because starting it would only mean losing it at teardown.
+	ErrServerStopping = errors.New("exec: the server is stopping; no new transaction may begin")
+
 	// ErrNoOpenTx reports a COMMIT or ROLLBACK with nothing to finish.
 	ErrNoOpenTx = errors.New("exec: there is no open transaction in this session")
 
@@ -129,6 +135,24 @@ func (e *Engine) beginTx(
 	s.mu.Unlock()
 	if phase != txNone {
 		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, ErrTxAlreadyOpen)
+	}
+
+	// ADMISSION BEFORE ANYTHING REACHES THE TARGET. Held until the phase is
+	// published, so a shutdown deciding concurrently either waits for this
+	// attempt to land and then counts it, or closes admission first and this
+	// attempt is refused having started nothing. Both surfaces reach here --
+	// tokenControl and wireControl share handleTxControl -- so one gate covers
+	// both.
+	releaseAdmission, aerr := s.reg.enterTxStart()
+	if aerr != nil {
+		return nil, e.rejectSession(ctx, s, ident, ip, sqlText, aerr)
+	}
+	defer releaseAdmission()
+	if e.hookAfterTxAdmit != nil {
+		// Test-only seam: parks an admitted BEGIN inside the decision window
+		// so the interleaving can be driven deterministically rather than
+		// hoped for.
+		e.hookAfterTxAdmit()
 	}
 
 	target, err := e.target(ctx, s.connID, connRow)

@@ -337,6 +337,26 @@ type sessionRegistry struct {
 	perUser  map[int64]int
 	draining map[int64]bool
 
+	// txGate admits transaction OPENINGS, and is what makes "no transaction is
+	// open" and "none can begin" one decision instead of two.
+	//
+	// Counting alone was a check-then-act race: the shutdown handler read a
+	// zero, audited, and only then closed the server, and a BEGIN admitted in
+	// that window was torn down by the drain -- the exact loss the refusal
+	// exists to prevent. It is not a DATA race, so -race cannot see it.
+	//
+	// A transaction opening holds it for READ across the whole attempt,
+	// releasing only after the phase is published, so an admitted BEGIN is
+	// either finished or still counted. The shutdown decision takes it for
+	// WRITE, which both waits for those in-flight openings to land and stops
+	// new ones -- Go's RWMutex blocks arriving readers once a writer queues,
+	// which is the behaviour wanted here rather than an accident.
+	//
+	// Lock order is txGate -> mu -> session.mu. Nothing takes them the other
+	// way round.
+	txGate   sync.RWMutex
+	txClosed bool // guarded by txGate
+
 	perUserCap int
 	globalCap  int
 
@@ -734,7 +754,51 @@ func (r *sessionRegistry) inTransactionHoldingBackend() int {
 // Same lock discipline as its neighbour: snapshot the registry under r.mu,
 // then read each session's own state outside it, because taking both at once
 // is how this package would acquire a lock-ordering problem it does not have.
+// enterTxStart admits one transaction-opening attempt, returning the release
+// it must call once the phase is published (or the attempt has failed).
+//
+// The caller holds admission for the WHOLE attempt, network round trip
+// included. A shutdown deciding in that window waits for it, which is the
+// point: by the time the BEGIN reaches the target there is a real transaction,
+// and refusing it then would mean rolling back work already started.
+func (r *sessionRegistry) enterTxStart() (func(), error) {
+	r.txGate.RLock()
+	if r.txClosed {
+		r.txGate.RUnlock()
+		return nil, ErrServerStopping
+	}
+	return r.txGate.RUnlock, nil
+}
+
+// closeTxAdmission is the shutdown decision, taken as ONE step.
+//
+// It returns the number of transactions open at the instant admission closed.
+// Zero means admission STAYS closed and the caller may commit the shutdown;
+// non-zero means nothing was closed and the caller must not. A caller that
+// closed admission and then decided not to stop must reopenTxAdmission.
+func (r *sessionRegistry) closeTxAdmission() int {
+	r.txGate.Lock()
+	defer r.txGate.Unlock()
+	if n := r.countInTransactionLocked(); n > 0 {
+		return n
+	}
+	r.txClosed = true
+	return 0
+}
+
+func (r *sessionRegistry) reopenTxAdmission() {
+	r.txGate.Lock()
+	r.txClosed = false
+	r.txGate.Unlock()
+}
+
 func (r *sessionRegistry) countInTransaction() int {
+	r.txGate.RLock()
+	defer r.txGate.RUnlock()
+	return r.countInTransactionLocked()
+}
+
+func (r *sessionRegistry) countInTransactionLocked() int {
 	r.mu.Lock()
 	sessions := make([]*session, 0, len(r.byID))
 	for _, s := range r.byID {
