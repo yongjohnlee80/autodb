@@ -355,7 +355,9 @@ type sessionRegistry struct {
 	// Lock order is txGate -> mu -> session.mu. Nothing takes them the other
 	// way round.
 	txGate   sync.RWMutex
-	txClosed bool // guarded by txGate
+	txClosed bool   // guarded by txGate
+	txOwner  uint64 // guarded by txGate: which decision closed admission, 0 = none
+	txSeq    uint64 // guarded by txGate: monotonic source of owner tokens
 
 	perUserCap int
 	globalCap  int
@@ -776,20 +778,51 @@ func (r *sessionRegistry) enterTxStart() (func(), error) {
 // Zero means admission STAYS closed and the caller may commit the shutdown;
 // non-zero means nothing was closed and the caller must not. A caller that
 // closed admission and then decided not to stop must reopenTxAdmission.
-func (r *sessionRegistry) closeTxAdmission() int {
+// closeTxAdmission attempts to OWN a shutdown decision, returning the number of
+// transactions that blocked it and, when it succeeded, the token that owns it.
+//
+//	blockers > 0             admission untouched; transactions are open
+//	blockers == 0, token 0   ANOTHER decision already owns admission
+//	blockers == 0, token > 0 this caller owns it; admission is closed
+//
+// OWNERSHIP IS THE POINT, and returning a bare zero was not enough. The first
+// version answered 0 both when it newly closed admission and when admission was
+// ALREADY closed, and the reopen was unconditional. Two concurrent deciders
+// therefore both read "clear to stop": one could commit while the other's
+// failed audit reopened admission underneath its drain, which is the same lost
+// transaction by a longer route. The token makes the two answers distinguishable.
+func (r *sessionRegistry) closeTxAdmission() (int, uint64) {
 	r.txGate.Lock()
 	defer r.txGate.Unlock()
+	if r.txClosed {
+		// Someone else owns this. Checked BEFORE counting, because a count of
+		// zero under someone else's closed admission is their fact, not ours.
+		return 0, 0
+	}
 	if n := r.countInTransactionLocked(); n > 0 {
-		return n
+		return n, 0
 	}
 	r.txClosed = true
-	return 0
+	r.txSeq++
+	r.txOwner = r.txSeq
+	return 0, r.txOwner
 }
 
-func (r *sessionRegistry) reopenTxAdmission() {
+// reopenTxAdmission reopens admission for the decision that CLOSED it, and for
+// nothing else. It reports whether it did.
+//
+// A stale or absent token is a no-op rather than an error: a caller that never
+// owned the decision has nothing to undo, and letting it reopen anyway is
+// exactly the defect this replaced.
+func (r *sessionRegistry) reopenTxAdmission(token uint64) bool {
 	r.txGate.Lock()
+	defer r.txGate.Unlock()
+	if token == 0 || token != r.txOwner || !r.txClosed {
+		return false
+	}
 	r.txClosed = false
-	r.txGate.Unlock()
+	r.txOwner = 0
+	return true
 }
 
 func (r *sessionRegistry) countInTransaction() int {
