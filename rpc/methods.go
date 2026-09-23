@@ -906,8 +906,16 @@ func (s *Server) register() {
 					"progress on this server. Retry if it does not complete.",
 			}
 		}
-		if err := s.auth.Audit(ctx, ident.UserID(), peerIP(req),
-			"server_shutdown", "requested over rpc"); err != nil {
+		audit := func() error {
+			return s.auth.Audit(ctx, ident.UserID(), peerIP(req),
+				"server_shutdown", "requested over rpc")
+		}
+		if s.hookShutdownAudit != nil {
+			audit = func(next func() error) func() error {
+				return func() error { return s.hookShutdownAudit(next) }
+			}(audit)
+		}
+		if err := audit(); err != nil {
 			// This decision closed admission and is not going to stop, so it
 			// reopens it -- and only it can, because the token says so.
 			// Otherwise the daemon keeps refusing to begin transactions it is
