@@ -79,6 +79,38 @@ func TestScrubSecrets(t *testing.T) {
 			exactly: "dsn `host=h sslpassword=*** dbname=d` unusable",
 		},
 		{
+			// '&' is an ordinary byte of a keyword value (pinned against pgx in
+			// scrub_grammar_test.go). Splitting on it publishes the tail.
+			name:    "keyword value containing an ampersand",
+			in:      "failed to connect to `user=u password=ab&cd host=db7.internal`: refused",
+			gone:    []string{"ab&cd", "&cd"},
+			kept:    []string{"user=u", "host=db7.internal", "refused"},
+			exactly: "failed to connect to `user=u password=*** host=db7.internal`: refused",
+		},
+		{
+			// ...while in a URL query '&' DOES separate parameters, so the
+			// parameters after the secret must survive. Same byte, two grammars.
+			name:    "url query ampersand still separates parameters",
+			in:      "dsn `postgres://u@h:5432/d?sslpassword=ab&application_name=x` unusable",
+			gone:    []string{"sslpassword=ab"},
+			kept:    []string{"application_name=x", "h:5432"},
+			exactly: "dsn `postgres://u@h:5432/d?sslpassword=***&application_name=x` unusable",
+		},
+		{
+			name:    "vertical tab is libpq whitespace around the equals",
+			in:      "failed to connect to `user=u password\v=\vsecret host=h`: refused",
+			gone:    []string{"secret"},
+			kept:    []string{"user=u", "host=h", "refused"},
+			exactly: "failed to connect to `user=u password\v=\v*** host=h`: refused",
+		},
+		{
+			name:    "form feed is libpq whitespace around the equals",
+			in:      "failed to connect to `user=u password\f=\fsecret host=h`: refused",
+			gone:    []string{"secret"},
+			kept:    []string{"user=u", "host=h", "refused"},
+			exactly: "failed to connect to `user=u password\f=\f*** host=h`: refused",
+		},
+		{
 			name:    "no secret is left untouched",
 			in:      "failed to connect to `user=postgres database=tagus`: 34.118.163.29:5432: dial error: timeout: context deadline exceeded",
 			gone:    nil,

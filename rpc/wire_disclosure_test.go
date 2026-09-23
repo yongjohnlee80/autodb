@@ -92,6 +92,91 @@ func TestWireErr_DialFailure_UnparseableCauseFallsBackToTheShape(t *testing.T) {
 	}
 }
 
+// The grammar fixes must be reachable THROUGH causeOrShape, not merely correct
+// in the helper. Each row is a carrier form that previously leaked; each is
+// asserted on the message the RPC error actually carries.
+func TestWireErr_GrammarFormsAreScrubbedOnTheRealPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		cause string
+		gone  []string
+		kept  []string
+	}{
+		{
+			name:  "ampersand is an ordinary keyword value byte",
+			cause: "failed to connect to `user=u password=ab&cd host=db7.internal`: refused",
+			gone:  []string{"ab&cd", "&cd"},
+			kept:  []string{"host=db7.internal", "refused"},
+		},
+		{
+			name:  "vertical tab around the equals",
+			cause: "failed to connect to `user=u password\v=\vsecret host=db7.internal`: refused",
+			gone:  []string{"secret"},
+			kept:  []string{"host=db7.internal", "refused"},
+		},
+		{
+			name:  "form feed around the equals",
+			cause: "failed to connect to `user=u password\f=\fsecret host=db7.internal`: refused",
+			gone:  []string{"secret"},
+			kept:  []string{"host=db7.internal", "refused"},
+		},
+		{
+			name:  "backslash carries an unquoted value past a space",
+			cause: `failed to connect to ` + "`" + `user=u password=ab\ cd host=db7.internal` + "`" + `: refused`,
+			gone:  []string{`ab\ cd`, " cd"},
+			kept:  []string{"host=db7.internal", "refused"},
+		},
+		{
+			name:  "url query keeps the parameters after the secret",
+			cause: "dsn `postgres://u@h:5432/d?sslpassword=ab&application_name=x` unusable",
+			gone:  []string{"sslpassword=ab"},
+			kept:  []string{"application_name=x", "h:5432"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			de := exec.NewDialFailure(7, errors.New(tc.cause))
+			e := wireError(t, (&Server{discloseDetail: true}).wireErr(de))
+			if e.Message == de.Error() {
+				t.Fatalf("fell back to the shape on a parseable cause; the cell would "+
+					"pass for the wrong reason:\n  %s", e.Message)
+			}
+			for _, bad := range tc.gone {
+				if strings.Contains(e.Message, bad) {
+					t.Errorf("leaked %q on the real path:\n  %s", bad, e.Message)
+				}
+			}
+			for _, want := range tc.kept {
+				if !strings.Contains(e.Message, want) {
+					t.Errorf("lost the diagnosis %q:\n  %s", want, e.Message)
+				}
+			}
+		})
+	}
+}
+
+// causeOrShape's own contract, both directions, so neither arm can rot into
+// the other: a withholding surface never discloses even a clean cause, and a
+// disclosing surface never answers the shape for one.
+func TestCauseOrShape_BothDirections(t *testing.T) {
+	t.Parallel()
+	clean := errors.New("dial error: connection refused")
+	de := exec.NewDialFailure(7, clean)
+
+	if got := (&Server{discloseDetail: false}).causeOrShape(de, clean); got != de.Error() {
+		t.Errorf("off-host answered something other than the shape: %s", got)
+	}
+	if got := (&Server{discloseDetail: true}).causeOrShape(de, clean); got != clean.Error() {
+		t.Errorf("host-local did not answer the clean cause: %s", got)
+	}
+	// A nil cause has nothing to disclose and must not panic into one.
+	if got := (&Server{discloseDetail: true}).causeOrShape(de, nil); got != de.Error() {
+		t.Errorf("a nil cause did not answer the shape: %s", got)
+	}
+}
+
 func TestWireErr_ConfigFailure_HostLocalDisclosesScrubbedCause(t *testing.T) {
 	t.Parallel()
 	cf := exec.NewConfigFailure(exec.ConfigStageDSN, 7, exec.DetailDSNUnusable, errors.New(leakyCause))
