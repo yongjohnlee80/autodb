@@ -42,14 +42,20 @@ func TestShutdown_RefusesWhileATransactionIsOpen(t *testing.T) {
 		t.Fatalf("CreateConnection: %v", err)
 	}
 
-	// POSITIVE CONTROL FIRST. With nothing open the shutdown must be ALLOWED,
-	// or a handler that refused unconditionally would satisfy the assertion
-	// below while making the server impossible to stop. This fixture's server
-	// is never Run, so RequestShutdown only closes a channel nobody reads.
-	if errVal, _ := c.call("sys.shutdown", f.rootTok); errVal != nil {
-		t.Fatalf("shutdown refused with NO transaction open: %#v", errVal)
-	}
-
+	// ORDER IS FORCED, AND THE FIRST VERSION OF THIS CELL GOT IT WRONG.
+	//
+	// I put the allowed case first and wrote that "this fixture's server is
+	// never Run, so RequestShutdown only closes a channel nobody reads". The
+	// fixture DOES run it (fixture_test.go). So the control genuinely stopped
+	// the server and every later call on the connection returned "decode: EOF".
+	// The comment asserted something about the harness that nothing checked,
+	// and only the live gate caught it -- without TEST_PGURL this whole cell
+	// skips.
+	//
+	// A successful shutdown is therefore a ONE-SHOT effect, and the control has
+	// to come last. It is still a control: if the handler refused
+	// unconditionally the final call would fail, so "refuses" cannot pass by
+	// refusing everything.
 	sid, err := f.eng.OpenSession(ctx, f.rootTok, connID, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("OpenSession: %v", err)
@@ -57,9 +63,10 @@ func TestShutdown_RefusesWhileATransactionIsOpen(t *testing.T) {
 	if _, err := f.eng.SessionExecute(ctx, f.rootTok, sid, "BEGIN", "127.0.0.1"); err != nil {
 		t.Fatalf("BEGIN: %v", err)
 	}
+	// The premise, asserted rather than assumed: without an open transaction
+	// the refusal below would prove nothing.
 	if n := f.eng.SessionsInTransaction(); n != 1 {
-		t.Fatalf("the engine counts %d open transactions after BEGIN, want 1: the cell's "+
-			"premise does not hold and the refusal below would prove nothing", n)
+		t.Fatalf("the engine counts %d open transactions after BEGIN, want 1", n)
 	}
 
 	errVal, _ := c.call("sys.shutdown", f.rootTok)
@@ -75,12 +82,15 @@ func TestShutdown_RefusesWhileATransactionIsOpen(t *testing.T) {
 		}
 	}
 
-	// AND IT STOPS BLOCKING once the transaction ends -- a refusal that never
-	// lifts is an unstoppable server, not a safety property.
+	// AND IT STOPS BLOCKING once the transaction ends. This is the control, and
+	// it is also the end of the cell: it really does stop the server.
 	if _, err := f.eng.SessionExecute(ctx, f.rootTok, sid, "COMMIT", "127.0.0.1"); err != nil {
 		t.Fatalf("COMMIT: %v", err)
 	}
+	if n := f.eng.SessionsInTransaction(); n != 0 {
+		t.Fatalf("the engine still counts %d open transactions after COMMIT", n)
+	}
 	if errVal, _ := c.call("sys.shutdown", f.rootTok); errVal != nil {
-		t.Fatalf("shutdown still refused after COMMIT: %#v", errVal)
+		t.Fatalf("shutdown still refused after COMMIT, with nothing open: %#v", errVal)
 	}
 }
