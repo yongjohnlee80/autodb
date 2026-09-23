@@ -111,8 +111,9 @@ type Server struct {
 	pressure func() (pressure.Snapshot, error)
 
 	// discloseDetail is true when this RPC surface is reachable only from this
-	// host (unix socket or loopback TCP — the boundary ADR 0056 §4 relies on),
-	// so wireErr may disclose the raw cause of a dial/config failure to the
+	// host (unix socket or loopback TCP — which is what keeps this transport
+	// private, since it adds no authentication layer of its own), so that
+	// wireErr may disclose the raw cause of a dial/config failure to the
 	// operator on their own install. False on any off-host-reachable surface,
 	// where the cause is withheld and only the sentinel shape crosses. It is a
 	// capability fixed at assembly, not per-call, because the surface is.

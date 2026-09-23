@@ -254,12 +254,13 @@ func wireErr(err error) error {
 //
 // A *DialFailure / *ConfigFailure carries a cause that names the target host,
 // the role, the database and any credential in the DSN (see core/exec). On a
-// host-local surface — a unix socket, or a loopback TCP bind, the boundary
-// ADR 0056 §4 relies on — that cause is the operator's own to read on their
-// own install, so it is disclosed (the same reasoning the CodeKeyslot block
-// records). On a surface reachable off-host the cause is WITHHELD and only the
-// cause-free sentinel shape crosses, deferring wider exposure to the M9
-// gate-guard ADR. Either way this is the RPC surface only: the pgwire front
+// host-local surface — a unix socket, or a loopback TCP bind, which is what
+// keeps this transport private given it adds no authentication of its own —
+// that cause is the operator's own to read on their own install, so it is
+// disclosed (the same reasoning the CodeKeyslot block records). On a surface
+// reachable off-host the cause is WITHHELD and only the cause-free sentinel
+// shape crosses, until this surface carries authentication and rate limiting
+// of its own. Either way this is the RPC surface only: the pgwire front
 // door redacts these through a physically separate path (frontdoor/) that this
 // method never touches.
 func (s *Server) wireErr(err error) error {
