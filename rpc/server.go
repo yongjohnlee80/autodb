@@ -332,6 +332,19 @@ func (s *Server) Shutdown(ctx context.Context) error { return s.rpc.Shutdown(ctx
 // Addr reports the resolved listen address (real port after binding :0).
 func (s *Server) Addr() string { return s.rpc.Addr() }
 
+// DisclosesDetail reports whether this server may put operator-facing error
+// detail on the wire — the capability WithDetailDisclosure sets.
+//
+// Exported for the composition cell in cmd/autodb that pins the connection
+// between the endpoint this daemon bound and the capability of the server it
+// assembles. Without a way to OBSERVE the assembled capability from outside
+// this package, replacing the production WithDetailDisclosure(ep.HostLocalOnly())
+// with a constant — or dropping it — leaves every cell in rpc/ and core/config
+// green while the shipped TUI silently loses its detail, or an off-host bind
+// silently gains it. Production reads the field directly; this exists so the
+// wiring is assertable.
+func (s *Server) DisclosesDetail() bool { return s.discloseDetail }
+
 // gate enforces handshake-before-methods: sys.hello is the
 // only reachable method until a compatible hello lands; an incompatible
 // hello poisons the session — every later call, hello included, is refused

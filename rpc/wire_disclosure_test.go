@@ -72,6 +72,26 @@ func TestWireErr_DialFailure_OffHostWithholdsCause(t *testing.T) {
 	}
 }
 
+// A cause the scrubber cannot parse to the end of its password value is
+// withheld ENTIRELY, even on a host-local surface. Half-masked is worse than
+// absent: it reads as though it had been scrubbed.
+func TestWireErr_DialFailure_UnparseableCauseFallsBackToTheShape(t *testing.T) {
+	t.Parallel()
+	const unterminated = "failed to connect to `user=u password='never closed and the rest is secret"
+	de := exec.NewDialFailure(7, errors.New(unterminated))
+	e := wireError(t, (&Server{discloseDetail: true}).wireErr(de))
+
+	if e.Message != de.Error() {
+		t.Errorf("an unparseable cause was disclosed instead of withheld:\n got  %s\n want %s",
+			e.Message, de.Error())
+	}
+	for _, bad := range []string{"never closed", "secret", "password"} {
+		if strings.Contains(e.Message, bad) {
+			t.Errorf("withheld message still carries %q:\n  %s", bad, e.Message)
+		}
+	}
+}
+
 func TestWireErr_ConfigFailure_HostLocalDisclosesScrubbedCause(t *testing.T) {
 	t.Parallel()
 	cf := exec.NewConfigFailure(exec.ConfigStageDSN, 7, exec.DetailDSNUnusable, errors.New(leakyCause))

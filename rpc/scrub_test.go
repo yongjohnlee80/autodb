@@ -45,6 +45,40 @@ func TestScrubSecrets(t *testing.T) {
 			kept: []string{auth.PATPrefix, "28P01"},
 		},
 		{
+			// libpq keyword values may be single-quoted and contain spaces.
+			// The naive "value runs to the next space" rule masks only the
+			// first word and leaves the tail of the password in the message.
+			name:    "quoted value containing a space",
+			in:      "failed to connect to `user=autodb_rw password='se cret' host=db7.internal`: timeout",
+			gone:    []string{"se cret", "cret"},
+			kept:    []string{"user=autodb_rw", "host=db7.internal", "timeout"},
+			exactly: "failed to connect to `user=autodb_rw password=*** host=db7.internal`: timeout",
+		},
+		{
+			// Whitespace is permitted around '='. A rule anchored on the exact
+			// spelling "password=" does not match this at all.
+			name:    "whitespace around the equals",
+			in:      "failed to connect to `user=autodb_rw password = 'hunter2' host=db7.internal`: timeout",
+			gone:    []string{"hunter2"},
+			kept:    []string{"user=autodb_rw", "host=db7.internal"},
+			exactly: "failed to connect to `user=autodb_rw password = *** host=db7.internal`: timeout",
+		},
+		{
+			// The tail after the escape is the part a naive scanner leaks.
+			name:    "backslash-escaped quote inside a quoted value",
+			in:      `failed to connect to ` + "`" + `user=u password='he\'s in' host=h` + "`" + `: timeout`,
+			gone:    []string{`he\'s in`, "s in", "in'"},
+			kept:    []string{"user=u", "host=h", "timeout"},
+			exactly: "failed to connect to `user=u password=*** host=h`: timeout",
+		},
+		{
+			name:    "quoted sslpassword keeps the fields after it",
+			in:      "dsn `host=h sslpassword='a b c' dbname=d` unusable",
+			gone:    []string{"a b c", "b c"},
+			kept:    []string{"host=h", "dbname=d", "unusable"},
+			exactly: "dsn `host=h sslpassword=*** dbname=d` unusable",
+		},
+		{
 			name:    "no secret is left untouched",
 			in:      "failed to connect to `user=postgres database=tagus`: 34.118.163.29:5432: dial error: timeout: context deadline exceeded",
 			gone:    nil,
@@ -55,7 +89,10 @@ func TestScrubSecrets(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := scrubSecrets(tc.in)
+			got, confident := scrubSecrets(tc.in)
+			if !confident {
+				t.Fatalf("scrubSecrets reported no confidence on a parseable input:\n  %s", tc.in)
+			}
 			for _, bad := range tc.gone {
 				if strings.Contains(got, bad) {
 					t.Errorf("secret %q survived scrubbing:\n  %s", bad, got)
@@ -79,8 +116,37 @@ func TestScrubSecrets(t *testing.T) {
 func TestScrubSecrets_Idempotent(t *testing.T) {
 	t.Parallel()
 	in := "failed to connect to `postgres://u:pw@h:5432/d?sslpassword=x`: refused"
-	once := scrubSecrets(in)
-	if twice := scrubSecrets(once); twice != once {
+	once, ok1 := scrubSecrets(in)
+	twice, ok2 := scrubSecrets(once)
+	if !ok1 || !ok2 {
+		t.Fatalf("confidence lost across a re-scrub: %v %v", ok1, ok2)
+	}
+	if twice != once {
 		t.Errorf("not idempotent:\n once: %s\ntwice: %s", once, twice)
+	}
+}
+
+// An unterminated quote means the value's end is unknowable, so the remainder
+// may still hold the secret. The scrubber must REFUSE rather than publish a
+// half-masked string, and wireErr must then fall back to the cause-free shape.
+func TestScrubSecrets_UnterminatedQuoteRefuses(t *testing.T) {
+	t.Parallel()
+	in := "failed to connect to `user=u password='never closed and here is the rest"
+	got, confident := scrubSecrets(in)
+	if confident {
+		t.Errorf("reported confidence on an unterminated quoted value: %s", got)
+	}
+}
+
+// The word "password" in prose is not a carrier and must not eat the sentence.
+func TestScrubSecrets_ProseMentionIsNotACarrier(t *testing.T) {
+	t.Parallel()
+	in := "pq: password authentication failed for user \"autodb_rw\""
+	got, confident := scrubSecrets(in)
+	if !confident {
+		t.Fatal("prose mention reported no confidence")
+	}
+	if got != in {
+		t.Errorf("prose mention was altered:\n got  %s\n want %s", got, in)
 	}
 }

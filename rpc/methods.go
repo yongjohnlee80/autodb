@@ -268,26 +268,31 @@ func (s *Server) wireErr(err error) error {
 		return nil
 	}
 	if de, ok := exec.DialFailureOf(err); ok {
-		msg := de.Error() // fixed, cause-free shape
-		if s.discloseDetail {
-			if c := de.Cause(); c != nil {
-				// scrubSecrets, not the raw cause: a driver connect error is
-				// measured to carry a plaintext password / PAT / query secret.
-				msg = scrubSecrets(c.Error())
-			}
-		}
-		return &golibrpc.Error{Code: CodeDialFailed, Message: msg}
+		return &golibrpc.Error{Code: CodeDialFailed, Message: s.causeOrShape(de, de.Cause())}
 	}
 	if ce, ok := exec.ConfigFailureOf(err); ok {
-		msg := ce.Error() // fixed, cause-free shape
-		if s.discloseDetail {
-			if c := ce.Cause(); c != nil {
-				msg = scrubSecrets(c.Error())
-			}
-		}
-		return &golibrpc.Error{Code: CodeConfigFailed, Message: msg}
+		return &golibrpc.Error{Code: CodeConfigFailed, Message: s.causeOrShape(ce, ce.Cause())}
 	}
 	return wireErr(err)
+}
+
+// causeOrShape is the disclosure decision for one typed backend failure. It
+// answers the cause-free shape unless BOTH conditions hold: this surface may
+// disclose at all, and the cause scrubbed cleanly.
+//
+// A cause whose password value the scrubber could not parse to its end is
+// withheld ENTIRELY rather than published half-masked. A partly-masked
+// credential is worse than no detail, because it reads as though it had been
+// scrubbed — which is the defect the first version of the scrubber shipped.
+func (s *Server) causeOrShape(shaped, cause error) string {
+	if !s.discloseDetail || cause == nil {
+		return shaped.Error()
+	}
+	scrubbed, confident := scrubSecrets(cause.Error())
+	if !confident {
+		return shaped.Error()
+	}
+	return scrubbed
 }
 
 // --- positional argument decoding (msgpack-RPC params are arrays) ---
