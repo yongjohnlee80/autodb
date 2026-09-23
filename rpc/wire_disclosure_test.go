@@ -133,6 +133,24 @@ func TestWireErr_GrammarFormsAreScrubbedOnTheRealPath(t *testing.T) {
 			gone:  []string{"sslpassword=ab"},
 			kept:  []string{"application_name=x", "h:5432"},
 		},
+		{
+			name:  "percent-encoded query key still names the carrier",
+			cause: "dsn `postgres://u@h/db?pass%77ord=secret&application_name=x` unusable",
+			gone:  []string{"secret"},
+			kept:  []string{"application_name=x", "h/db"},
+		},
+		{
+			name:  "apostrophe is a url query value byte, not a boundary",
+			cause: "dsn `postgres://u@h/db?password=ab'cd&application_name=x` unusable",
+			gone:  []string{"ab'cd", "'cd"},
+			kept:  []string{"application_name=x", "h/db"},
+		},
+		{
+			name:  "backtick is a url query value byte, not a boundary",
+			cause: "dsn `postgres://u@h/db?password=ab`cd&application_name=x` unusable",
+			gone:  []string{"ab`cd", "cd&"},
+			kept:  []string{"application_name=x", "h/db"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

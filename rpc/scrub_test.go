@@ -111,6 +111,39 @@ func TestScrubSecrets(t *testing.T) {
 			exactly: "failed to connect to `user=u password\f=\f*** host=h`: refused",
 		},
 		{
+			name:    "percent-encoded query key is still a password carrier",
+			in:      "dsn `postgres://u@h/db?pass%77ord=secret&application_name=x` unusable",
+			gone:    []string{"secret"},
+			kept:    []string{"application_name=x", "h/db"},
+			exactly: "dsn `postgres://u@h/db?pass%77ord=***&application_name=x` unusable",
+		},
+		{
+			name:    "apostrophe inside a url query value",
+			in:      "dsn `postgres://u@h/db?password=ab'cd&application_name=x` unusable",
+			gone:    []string{"ab'cd", "'cd"},
+			kept:    []string{"application_name=x", "h/db"},
+			exactly: "dsn `postgres://u@h/db?password=***&application_name=x` unusable",
+		},
+		{
+			name:    "backtick inside a url query value, wrapped in backticks",
+			in:      "dsn `postgres://u@h/db?password=ab`cd&application_name=x` unusable",
+			gone:    []string{"ab`cd", "cd&"},
+			kept:    []string{"application_name=x", "h/db"},
+			exactly: "dsn `postgres://u@h/db?password=***&application_name=x` unusable",
+		},
+		{
+			// THE COST OF THE SAFE BOUNDARY RULE, pinned rather than left to be
+			// discovered. A quote is a legal query-value byte, so when the
+			// password is the LAST parameter a trailing wrapper cannot be told
+			// from the value and is absorbed into the mask. Punctuation is
+			// lost; the host, database and reason — the diagnosis — are not.
+			name:    "a trailing wrapper is absorbed when the secret is last",
+			in:      "dsn `postgres://u@h/db?password=secret` unusable",
+			gone:    []string{"secret"},
+			kept:    []string{"postgres://u@h/db", "unusable"},
+			exactly: "dsn `postgres://u@h/db?password=*** unusable",
+		},
+		{
 			name:    "no secret is left untouched",
 			in:      "failed to connect to `user=postgres database=tagus`: 34.118.163.29:5432: dial error: timeout: context deadline exceeded",
 			gone:    nil,

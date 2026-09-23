@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -44,10 +45,17 @@ const (
 )
 
 // urlSpanRe finds a URL-shaped token: a scheme, "://", then everything up to
-// whitespace or a quoting character. Driver errors quote a DSN in backticks or
-// single quotes, and the closing mark must survive rather than be eaten as
-// part of a query parameter.
-var urlSpanRe = regexp.MustCompile("[a-zA-Z][a-zA-Z0-9+.\\-]*://[^\\s`'\"]*")
+// whitespace.
+//
+// It deliberately does NOT stop at a quote or a backtick, though driver errors
+// usually WRAP a DSN in one. Measured against pgx, both are ordinary bytes of a
+// query value — `password=ab'cd` and "password=ab`cd" each resolve with the
+// quote inside the password — so treating the wrapper as a boundary truncates a
+// valid value and publishes its tail. The cost of the safe rule is cosmetic and
+// bounded: when a password is the LAST query parameter, a trailing wrapper is
+// absorbed into its mask, since nothing in the grammar distinguishes it from a
+// byte of the value. Punctuation is lost; no secret is.
+var urlSpanRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s]*`)
 
 // urlUserinfoRe masks the password half of a URL userinfo
 // ("scheme://user:pw@host"): only the segment between the first ':' after the
@@ -55,9 +63,8 @@ var urlSpanRe = regexp.MustCompile("[a-zA-Z][a-zA-Z0-9+.\\-]*://[^\\s`'\"]*")
 // and is not itself the secret.
 var urlUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://[^:/@\s]+:)[^@/\s]+@`)
 
-// urlQueryPasswordRe masks a "<x>password" QUERY PARAMETER's value. Here — and
-// only here — '&' ends the value, because here it starts the next parameter.
-var urlQueryPasswordRe = regexp.MustCompile(`(?i)([?&][a-z_]*password=)[^&]*`)
+// (Query parameters are split on '&' and matched by DECODED key rather than by
+// regex over the raw text — see maskURLSpan and isPasswordQueryKey.)
 
 // patRe masks a well-formed autodb PAT (adb_pat_<selector>.<secret>) while
 // keeping the prefix, so a reader still sees that a token was present rather
@@ -98,9 +105,48 @@ func scrubSecrets(s string) (string, bool) {
 	return patRe.ReplaceAllString(b.String(), auth.PATPrefix+mask), confident
 }
 
+// maskURLSpan masks the userinfo password and every "<x>password" QUERY
+// PARAMETER of one URL. Parameters are split on '&' — here, and only here, '&'
+// ends a value, because here it starts the next parameter — and each value is
+// masked whole, so a quote inside it is just a byte rather than a boundary.
+// Every other parameter is copied through untouched: they are the diagnosis.
 func maskURLSpan(u string) string {
 	u = urlUserinfoRe.ReplaceAllString(u, `${1}`+mask+`@`)
-	return urlQueryPasswordRe.ReplaceAllString(u, `${1}`+mask)
+
+	q := strings.IndexByte(u, '?')
+	if q < 0 {
+		return u
+	}
+	var b strings.Builder
+	b.WriteString(u[:q+1])
+	for i, param := range strings.Split(u[q+1:], "&") {
+		if i > 0 {
+			b.WriteByte('&')
+		}
+		eq := strings.IndexByte(param, '=')
+		if eq < 0 || !isPasswordQueryKey(param[:eq]) {
+			b.WriteString(param)
+			continue
+		}
+		b.WriteString(param[:eq+1]) // the key as written, then the mask
+		b.WriteString(mask)
+	}
+	return b.String()
+}
+
+// isPasswordQueryKey decides whether a query key names a password carrier,
+// percent-DECODING it first because pgx does: it accepts `pass%77ord=secret`
+// and resolves the password from it, so matching the raw spelling would leave
+// that value untouched.
+//
+// A key that will not decode is matched on its raw text instead of being
+// skipped — the failure direction is toward masking, never away from it.
+func isPasswordQueryKey(raw string) bool {
+	k := raw
+	if decoded, err := url.QueryUnescape(raw); err == nil {
+		k = decoded
+	}
+	return strings.HasSuffix(strings.ToLower(k), passwordKeyword)
 }
 
 // maskKeywordPasswords walks the libpq keyword/value grammar: a keyword ending
