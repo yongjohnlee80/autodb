@@ -252,9 +252,10 @@ func TestBoundPressure_TheInstantSurvivesTheWire(t *testing.T) {
 // AND AN ABSENT INSTANT CROSSES AS ABSENT.
 //
 // time.Time's zero value is not the epoch, and its UnixMilli is a large
-// negative number. Sent unconditionally it decodes to a date in the 1750s,
-// which a reader takes as a stall rather than as a field the daemon never
-// filled in — so "no instant" has to survive the wire as no instant.
+// negative number. Go reads that number straight back as the zero time, so this
+// cell holds on the Go side whichever way the daemon spells it; what it pins is
+// that an unstamped snapshot arrives unstamped rather than carrying a date
+// nobody set. The spelling itself is pinned on the wire, in rpc.
 func TestBoundPressure_AnAbsentInstantCrossesAsAbsent(t *testing.T) {
 	addr := bootPressureServer(t, func() (pressure.Snapshot, error) {
 		return pressure.Snapshot{Sessions: pressure.Row{Value: 9, Cap: 10}}, nil
