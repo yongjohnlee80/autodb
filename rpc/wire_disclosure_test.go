@@ -134,6 +134,12 @@ func TestWireErr_GrammarFormsAreScrubbedOnTheRealPath(t *testing.T) {
 			kept:  []string{"application_name=x", "h:5432"},
 		},
 		{
+			name:  "vertical tab ends a url span, exposing the carrier after it",
+			cause: "failed postgres://u@h/db\vpassword=secret host=db7.internal",
+			gone:  []string{"secret"},
+			kept:  []string{"postgres://u@h/db", "host=db7.internal"},
+		},
+		{
 			name:  "raw at-sign inside the userinfo password",
 			cause: "dsn `postgres://user:ab@cd@host/db` unusable",
 			gone:  []string{"ab@cd", "cd@host"},

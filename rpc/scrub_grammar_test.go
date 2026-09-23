@@ -1,6 +1,7 @@
 package rpc
 
 import (
+	"regexp"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -157,5 +158,32 @@ func TestPgxGrammar_RawSeparatorsInUserinfoAreRefused(t *testing.T) {
 			t.Errorf("pgx now ACCEPTS %q — maskURLUserinfo's authority boundary "+
 				"assumes it does not, and would truncate this password", dsn)
 		}
+	}
+}
+
+// THE DISCREPANCY THAT PRODUCED THE FIFTH FINDING, pinned so it cannot return.
+//
+// Go's regexp `\s` is NOT libpq's whitespace: it matches space, tab, newline,
+// form feed and carriage return, but not vertical tab (0x0B). Any boundary in
+// this file that means "libpq whitespace" must therefore use isDSNSpace and
+// never a regex class. This cell states that difference as a fact, so a future
+// reader reaches for the predicate rather than rediscovering the gap through a
+// leak.
+func TestGoRegexpWhitespaceIsNotLibpqWhitespace(t *testing.T) {
+	t.Parallel()
+	reSpace := regexp.MustCompile(`^\s$`)
+	for _, c := range []byte{' ', '\t', '\n', '\f', '\r'} {
+		if !reSpace.MatchString(string(c)) || !isDSNSpace(c) {
+			t.Errorf("0x%02X: regexp=%v isDSNSpace=%v, want both true",
+				c, reSpace.MatchString(string(c)), isDSNSpace(c))
+		}
+	}
+	const vtab = '\v'
+	if reSpace.MatchString(string(byte(vtab))) {
+		t.Error("Go's regexp \\s now matches vertical tab; the warning above is stale")
+	}
+	if !isDSNSpace(vtab) {
+		t.Error("isDSNSpace dropped vertical tab — a URL span or keyword value " +
+			"will now run through it and swallow the carrier after it")
 	}
 }

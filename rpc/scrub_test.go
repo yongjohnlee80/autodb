@@ -186,6 +186,19 @@ func TestScrubSecrets(t *testing.T) {
 			exactly: "dsn `postgres://user@host/db` unusable",
 		},
 		{
+			// A URL span must END at a vertical tab like any other libpq
+			// whitespace. It did not, because Go's regexp \s excludes 0x0B, so
+			// the span ran past it and SWALLOWED the keyword carrier after it:
+			// maskURLSpan does not look for one, and maskKeywordPasswords never
+			// saw the text. The whole string came back unchanged, with
+			// confidence.
+			name:    "a vertical tab ends a url span, exposing the carrier after it",
+			in:      "failed postgres://u@h/db\vpassword=secret host=h",
+			gone:    []string{"secret"},
+			kept:    []string{"postgres://u@h/db", "host=h"},
+			exactly: "failed postgres://u@h/db\vpassword=*** host=h",
+		},
+		{
 			name:    "no secret is left untouched",
 			in:      "failed to connect to `user=postgres database=tagus`: 34.118.163.29:5432: dial error: timeout: context deadline exceeded",
 			gone:    nil,

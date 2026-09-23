@@ -44,18 +44,52 @@ const (
 	passwordKeyword = "password"
 )
 
-// urlSpanRe finds a URL-shaped token: a scheme, "://", then everything up to
-// whitespace.
+// urlSchemeRe matches only where a URL span BEGINS: a scheme and "://". The
+// span's END is found by scanning with isDSNSpace — see urlSpans — and not with
+// a regex character class.
 //
-// It deliberately does NOT stop at a quote or a backtick, though driver errors
-// usually WRAP a DSN in one. Measured against pgx, both are ordinary bytes of a
-// query value — `password=ab'cd` and "password=ab`cd" each resolve with the
-// quote inside the password — so treating the wrapper as a boundary truncates a
-// valid value and publishes its tail. The cost of the safe rule is cosmetic and
-// bounded: when a password is the LAST query parameter, a trailing wrapper is
-// absorbed into its mask, since nothing in the grammar distinguishes it from a
-// byte of the value. Punctuation is lost; no secret is.
-var urlSpanRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s]*`)
+// THAT SPLIT IS THE WHOLE POINT. Go's regexp `\s` is five bytes: it matches
+// space, tab, newline, form feed and carriage return, but NOT vertical tab.
+// So `[^\s]*` claimed a whitespace boundary while implementing a different,
+// narrower one than isDSNSpace, and a span would run straight through a
+// vertical tab — swallowing a keyword carrier after it, which maskURLSpan does
+// not look for and maskKeywordPasswords then never sees. Measured: the whole of
+// "postgres://u@h/db\vpassword=secret host=h" came back unchanged, with
+// confidence. One predicate, used everywhere, is the fix.
+//
+// A span deliberately does NOT stop at a quote or a backtick, though driver
+// errors usually WRAP a DSN in one. Measured against pgx, both are ordinary
+// bytes of a query value — `password=ab'cd` and "password=ab`cd" each resolve
+// with the quote inside the password — so treating the wrapper as a boundary
+// truncates a valid value and publishes its tail. The cost of the safe rule is
+// cosmetic and bounded: when a password is the LAST query parameter, a trailing
+// wrapper is absorbed into its mask, since nothing in the grammar distinguishes
+// it from a byte of the value. Punctuation is lost; no secret is.
+var urlSchemeRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://`)
+
+// urlSpans locates every URL-shaped token: from a scheme's "://" to the first
+// libpq whitespace byte, by the SAME predicate the keyword scanner terminates
+// values with.
+func urlSpans(s string) [][2]int {
+	var spans [][2]int
+	for pos := 0; pos < len(s); {
+		loc := urlSchemeRe.FindStringIndex(s[pos:])
+		if loc == nil {
+			break
+		}
+		start := pos + loc[0]
+		end := start
+		for end < len(s) && !isDSNSpace(s[end]) {
+			end++
+		}
+		spans = append(spans, [2]int{start, end})
+		pos = end
+		if pos == start { // defensive: never fail to advance
+			pos++
+		}
+	}
+	return spans
+}
 
 // (The userinfo half is parsed rather than pattern-matched — see
 // maskURLUserinfo. A regex over "user:pw@" gets the boundaries wrong in both
@@ -85,15 +119,15 @@ func scrubSecrets(s string) (string, bool) {
 	confident := true
 	last := 0
 
-	for _, loc := range urlSpanRe.FindAllStringIndex(s, -1) {
+	for _, span := range urlSpans(s) {
 		// Text before this URL obeys keyword rules.
-		seg, ok := maskKeywordPasswords(s[last:loc[0]])
+		seg, ok := maskKeywordPasswords(s[last:span[0]])
 		b.WriteString(seg)
 		confident = confident && ok
 
 		// The URL itself obeys URL rules.
-		b.WriteString(maskURLSpan(s[loc[0]:loc[1]]))
-		last = loc[1]
+		b.WriteString(maskURLSpan(s[span[0]:span[1]]))
+		last = span[1]
 	}
 
 	seg, ok := maskKeywordPasswords(s[last:])
