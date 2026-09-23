@@ -2193,6 +2193,15 @@ var errNoPressure = errors.New("pressure is not being observed on this instance"
 //
 // Durations are rendered as whole seconds, because the receiver is a surface
 // somebody reads and a wait in nanoseconds is a true figure nobody can use.
+// wireMillis renders an instant for the wire, keeping "no instant" distinct
+// from "the epoch".
+func wireMillis(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixMilli()
+}
+
 func pressureWire(s pressure.Snapshot) map[string]any {
 	row := func(r pressure.Row) map[string]any {
 		return map[string]any{
@@ -2220,6 +2229,19 @@ func pressureWire(s pressure.Snapshot) map[string]any {
 		})
 	}
 	return map[string]any{
+		// WHEN THESE FIGURES WERE TRUE, stamped by the daemon rather than by
+		// the reader. A view that refreshes and a view that has stalled paint
+		// the same table; only this field tells them apart, so it travels with
+		// every snapshot and not merely with the ones somebody thought were
+		// interesting.
+		//
+		// Milliseconds since the epoch, because a time.Time does not survive
+		// this codec and a formatted string would make the RECEIVER's
+		// formatting decision here. A zero stamp is sent as zero rather than as
+		// the epoch's own millisecond count, so an absent time cannot arrive
+		// looking like 1970.
+		"taken_at": wireMillis(s.TakenAt),
+
 		"sessions": row(s.Sessions),
 		"conns":    row(s.Conns),
 		"pre_auth": row(s.PreAuth),

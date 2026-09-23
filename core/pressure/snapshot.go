@@ -50,6 +50,18 @@ type ThrottledRow struct {
 //	               ▼                               ▼
 //	      [Interactive TUI View]          [Admin Web HTTP API]
 type Snapshot struct {
+	// TakenAt is when these figures were true, stamped by the tracker's own
+	// clock at assembly.
+	//
+	// IT TRAVELS WITH THE FIGURES because the view that shows them refreshes,
+	// and a refreshed table is indistinguishable from a stalled one without
+	// it. The design note this implements puts it plainly: the connection card
+	// shows stable ceilings and never live availability, since it is displayed
+	// once and cannot be recovered -- live figures belong in the pressure view,
+	// WHERE THEY CARRY A TIMESTAMP. A number whose age nobody can see is the
+	// same trap the card avoids by refusing to show one at all.
+	TakenAt time.Time
+
 	Sessions Row
 	PerUser  []Row
 	Leases   []Row
@@ -98,6 +110,9 @@ const maxRows = MaxSubjects
 // subject so the rows do not reshuffle between reads.
 func (t *Tracker) Assemble(in ViewInput) Snapshot {
 	s := Snapshot{
+		// The tracker's clock, not time.Now: one clock for the whole of this
+		// package, so a cell that controls the windows controls the stamp too.
+		TakenAt:  t.now(),
 		Sessions: t.row(SessionsGlobal, "", in.Caps.Sessions, in.Caps.SessionCap),
 		Conns:    t.row("lane.conns", "", in.Conns, in.MaxConns),
 		PreAuth:  t.row("lane.preauth", "", in.PreAuth, in.MaxPreAuth),
