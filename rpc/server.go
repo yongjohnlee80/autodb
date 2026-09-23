@@ -119,6 +119,23 @@ type Server struct {
 	// capability fixed at assembly, not per-call, because the surface is.
 	discloseDetail bool
 
+	// hookShutdownAudit wraps sys.shutdown's audit write. nil in production.
+	//
+	// A DECISION IS OWNED FROM THE MOMENT IT CLOSES ADMISSION UNTIL IT COMMITS
+	// OR ABORTS, and the audit is the whole of that window. A second decision
+	// arriving inside it must be refused, and no cell can make that arrival
+	// happen without holding the first one still: the window is a few
+	// microseconds wide, and a racing goroutine that only sometimes lands in it
+	// reports a broken guard as working.
+	//
+	// AN INTERCEPTOR RATHER THAN A FLAG. A seam placed BESIDE the call, with
+	// its own copy of the abort that follows a failed audit, proves nothing
+	// about the handler's real failure path -- auth's own hookAuditWrite
+	// carries the record of a cell that passed while the audit it was about had
+	// stopped happening. Wrapping the call leaves the handler's abort and
+	// commit exactly where they are, and the cell drives them.
+	hookShutdownAudit func(next func() error) error
+
 	// verbs is every method name this server registered, recorded as it
 	// registers them. It exists because the rule above — bump Protocol when
 	// the verb surface changes — was a rule with no enforcement, and it was
