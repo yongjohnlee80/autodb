@@ -134,6 +134,18 @@ func TestWireErr_GrammarFormsAreScrubbedOnTheRealPath(t *testing.T) {
 			kept:  []string{"application_name=x", "h:5432"},
 		},
 		{
+			name:  "raw at-sign inside the userinfo password",
+			cause: "dsn `postgres://user:ab@cd@host/db` unusable",
+			gone:  []string{"ab@cd", "cd@host"},
+			kept:  []string{"@host/db", "unusable"},
+		},
+		{
+			name:  "raw at-sign inside the username",
+			cause: "dsn `postgres://us@er:pw@host/db` unusable",
+			gone:  []string{":pw@"},
+			kept:  []string{"us@er", "@host/db"},
+		},
+		{
 			name:  "percent-encoded query key still names the carrier",
 			cause: "dsn `postgres://u@h/db?pass%77ord=secret&application_name=x` unusable",
 			gone:  []string{"secret"},
