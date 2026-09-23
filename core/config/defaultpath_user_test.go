@@ -108,13 +108,22 @@ func TestDefaultPath_FallsBackToTheHandoutWhenTheUserHasNoConfig(t *testing.T) {
 	}
 }
 
-// BECOMING THE DAEMON IS GATED SEPARATELY FROM RESOLUTION.
+// BECOMING THE DAEMON IS GATED BY THE HOST, NOT BY WHICH FILE YOU HOLD.
 //
 // This is the mechanism that makes the order above safe. The question it
-// answers is "does this host run autodb as a service, and am I not it" --
-// decided by the PRESENCE of a system server config, because the developer's
-// whole situation is that the file is there and they cannot read it.
-func TestForeignOnAServiceHost(t *testing.T) {
+// answers is "does this host run autodb as a service" -- decided by the
+// PRESENCE of a system server config, because the developer's whole situation
+// is that the file is there and they cannot read it.
+//
+// THE LAST CASE IS INVERTED FROM THE ONE IT REPLACES. ServiceHostSeen used to
+// be narrowed by ForeignOnAServiceHost, which excluded the service's OWN
+// config on the stated grounds that calling it foreign "would stop the
+// installed daemon from serving". It would not have: that predicate was read
+// only by spawnFor, whose sole caller is runUI, and runServe never consulted
+// it. The exclusion bought nothing, and it let a frontend holding
+// /etc/autodb/config.toml spawn a detached daemon on the service's own ports
+// that then outlived it and kept the unit from starting.
+func TestServiceHostSeen_PresenceIsTheSignal(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: an unreadable file is still readable")
 	}
@@ -128,28 +137,28 @@ func TestForeignOnAServiceHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ForeignOnAServiceHost() {
-		t.Error("a personal config on a host with no service config was called foreign — " +
-			"that would remove the single-user install's ability to start its own daemon")
+	if cfg.ServiceHostSeen {
+		t.Error("a host with no service config was called a service host -- that would " +
+			"remove the single-user install's ability to start its own daemon")
 	}
 
-	// Now the host has one, and it is unreadable to us. Presence is the
-	// signal: every config that is not the service's own is foreign here.
+	// Now the host has one, and it is unreadable to us. PRESENCE is the
+	// signal, not readability.
 	writeMode(t, server, 0o000)
 	for _, path := range []string{user, client} {
 		cfg, err := Load(path)
 		if err != nil {
 			t.Fatalf("Load(%s): %v", path, err)
 		}
-		if !cfg.ForeignOnAServiceHost() {
-			t.Errorf("%s was not called foreign on a host whose service config exists — "+
+		if !cfg.ServiceHostSeen {
+			t.Errorf("%s did not see the service config that exists on this host -- "+
 				"a frontend holding it could bind the service's port against its own store",
 				path)
 		}
 	}
 
-	// Defaults, with no file read at all, are foreign too: the absence of a
-	// readable config does not make this host any less a service host.
+	// Defaults, with no file read at all: the absence of a READABLE config does
+	// not make this host any less a service host.
 	if err := os.Remove(client); err != nil {
 		t.Fatal(err)
 	}
@@ -160,12 +169,12 @@ func TestForeignOnAServiceHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.ForeignOnAServiceHost() {
-		t.Error("built-in defaults on a service host were not called foreign")
+	if !cfg.ServiceHostSeen {
+		t.Error("built-in defaults on a service host did not see the service host")
 	}
 
-	// And the service's OWN config is not foreign to itself, or the daemon
-	// systemd starts could not spawn or serve.
+	// AND THE SERVICE'S OWN CONFIG IS NO EXCEPTION -- the inverted assertion.
+	// Holding the service's config does not make a frontend the daemon.
 	if err := os.Chmod(server, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -173,8 +182,71 @@ func TestForeignOnAServiceHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ForeignOnAServiceHost() {
-		t.Error("the service's own config was called foreign on its own host — this " +
-			"would stop the installed daemon from serving")
+	if !cfg.ServiceHostSeen {
+		t.Error("the service's own config did not see its own host -- a frontend holding " +
+			"it would spawn a daemon on the service's ports and orphan it there")
+	}
+}
+
+// MAY A FRONTEND HOLDING THIS CONFIG BECOME THE DAEMON?
+//
+// The discriminating cell for the droplet defect, and it has to live in this
+// package: the old rule compared the config's SOURCE PATH against the system
+// server path, and sourcePath is unexported, so a cell in package main cannot
+// build a config that genuinely IS the service's own -- which is the only case
+// that was wrong.
+//
+// Load() gives us one. The final case is the whole point: under the previous
+// rule the service's own config was permitted to spawn, a frontend holding it
+// spawned a detached daemon on the service's own ports, and that daemon
+// outlived the frontend and kept the unit from starting.
+func TestMaySpawnDaemon_TheHostDecidesNotTheFile(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: an unreadable file is still readable")
+	}
+	server, client, user := serviceHostAt(t)
+	writeMode(t, client, 0o644)
+	writeMode(t, user, 0o600)
+
+	// POSITIVE CONTROL FIRST. On a host with no service config the frontend
+	// MUST still be able to bring a daemon up, or a rule that refused
+	// everywhere would satisfy every assertion below while removing the
+	// single-user install's whole startup path.
+	cfg, err := Load(user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.MaySpawnDaemon() {
+		t.Fatal("a personal config on a host with NO service config may not spawn: the " +
+			"single-user install can no longer start its own daemon")
+	}
+
+	// Now the host has a service config. Nothing on it may spawn.
+	writeMode(t, server, 0o000)
+	for _, path := range []string{user, client} {
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%s): %v", path, err)
+		}
+		if cfg.MaySpawnDaemon() {
+			t.Errorf("%s may spawn on a service host: it would bind the service's port "+
+				"against whatever store it resolves to", path)
+		}
+	}
+
+	// THE CASE THAT WAS WRONG: the service's OWN config, readable, on its own
+	// host. Holding it does not make a frontend the daemon -- systemd starts
+	// the daemon, and runServe never asks this question.
+	if err := os.Chmod(server, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(server)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaySpawnDaemon() {
+		t.Error("the service's OWN config may spawn on its own host: `autodb --ui " +
+			"--config /etc/autodb/config.toml` would spawn a detached daemon on the " +
+			"service's ports, orphan it there, and keep the unit from starting")
 	}
 }

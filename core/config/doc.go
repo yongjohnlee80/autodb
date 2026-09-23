@@ -58,9 +58,11 @@
 //
 //   - ServiceHostSeen: Evaluated via os.Stat on /etc/autodb/config.toml.
 //     Returns true even if the file is mode 0640 and unreadable by the caller.
-//   - ForeignOnAServiceHost: Evaluated when a loaded config is NOT the system
-//     server config on a host where ServiceHostSeen is true. In this state,
-//     spawning an embedded background daemon is strictly forbidden.
+//     Where it is true, spawning an embedded background daemon is strictly
+//     forbidden -- for EVERY config, including the service's own. The gate is
+//     the host's situation, not the file's identity: a frontend holding
+//     /etc/autodb/config.toml would otherwise spawn a daemon on the service's
+//     own ports and orphan it there.
 //
 // ============================================================================
 // CONNECTION SIZING & FRONTDOOR DERIVATION PIPELINE

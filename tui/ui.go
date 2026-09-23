@@ -413,12 +413,21 @@ func (m *Model) restartServer() {
 	if m.session == nil || !m.session.CanSpawn() {
 		// A service install. Stopping the daemon here left the front door down:
 		// the unit restarts on FAILURE and a clean shutdown is not one, and
-		// client_only forbids this process from starting a replacement. Naming
-		// the setting AND the command, because an operator at this terminal
-		// needs the next step, not a diagnosis.
-		m.setStatus("autodb is running as a system service here — the TUI cannot restart " +
-			"it. The config sets client_only, so nothing in this process may start a " +
-			"daemon. From a shell: sudo systemctl restart autodb-frontdoor")
+		// nothing in this process may start a replacement.
+		//
+		// TWO CAUSES NOW, AND THIS PROCESS CANNOT TELL THEM APART. The gate
+		// broadened: a frontend is refused when the config sets client_only OR
+		// when this host has a service config at all — the latter including the
+		// service's own file, which used to slip through and let this keystroke
+		// stop a systemd-managed daemon and leave a detached replacement
+		// squatting its ports.
+		//
+		// All restartServer sees is CanSpawn() == false. Asserting ONE of the
+		// two would be a guess, and a wrong one sends an operator hunting for a
+		// setting that is not set. So it states both and lets them look.
+		m.setStatus("autodb runs as a system service on this host, or this config sets " +
+			"client_only — either way nothing here may start a daemon, so the TUI " +
+			"cannot restart it. From a shell: sudo systemctl restart autodb-frontdoor")
 		return
 	}
 	if !m.session.Connected() {

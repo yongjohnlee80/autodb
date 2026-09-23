@@ -19,11 +19,13 @@ package main
 // a subcommand that printed and exited on its own would pass such a cell.
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // buildAutodb builds the binary under test once.
@@ -189,5 +191,93 @@ func TestExit_AValidConfigIsNotAConfigFailure(t *testing.T) {
 	}
 	if strings.Contains(string(out), "the configuration is invalid") {
 		t.Errorf("a valid config was described as invalid:\n%s", out)
+	}
+}
+
+// A PROCESS THAT DID NOT BECOME THE DAEMON MUST NOT EXIT ZERO.
+//
+// `--serve` used to print "already running" and return nil. For a human that
+// reads as reassurance; for the thing that actually runs `--serve` it is a
+// lie. The unit is Type=simple, so systemd reads a zero exit from the main
+// process as a clean, intentional stop: it records Result=success, leaves the
+// unit inactive/dead, and Restart=on-failure never engages. Measured on the
+// droplet -- ActiveState=inactive, SubState=dead, NRestarts=0, Result=success,
+// while the front door was down.
+//
+// Driven through the REAL BINARY for the reason stated at the top of this
+// file: the status and the stderr are exactly what systemd and an operator
+// see, and a cell over an extracted classifier would not have caught this.
+//
+// A unix endpoint rather than a port, so the cell allocates nothing global and
+// cannot collide with a developer's own daemon.
+func TestExit_AServeThatFoundAnOccupantIsNotASuccess(t *testing.T) {
+	bin := buildAutodb(t)
+
+	// Short base dir: the socket path carries a ~100-byte kernel bound, and a
+	// nested t.TempDir() under some CI roots does not fit.
+	run, err := os.MkdirTemp("", "adbrun")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(run) })
+	data := t.TempDir()
+
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	// port unset => a unix socket endpoint under XDG_RUNTIME_DIR.
+	if err := os.WriteFile(cfgPath, []byte("[frontdoor]\nenabled = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	env := append(os.Environ(),
+		"XDG_RUNTIME_DIR="+run, "XDG_DATA_HOME="+data, "XDG_STATE_HOME="+data,
+		"XDG_CONFIG_HOME="+filepath.Join(data, "config"),
+	)
+	sock := filepath.Join(run, "autodb.sock")
+
+	first := exec.Command(bin, "--config", cfgPath, "--serve")
+	first.Env = env
+	if err := first.Start(); err != nil {
+		t.Fatalf("starting the first daemon: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Process.Kill(); _, _ = first.Process.Wait() })
+
+	// POSITIVE CONTROL: the occupant must really be serving, or the second
+	// process would be exercising "nothing is listening" and this cell would
+	// pass for the wrong reason.
+	var up bool
+	for i := 0; i < 100; i++ {
+		if c, derr := net.Dial("unix", sock); derr == nil {
+			_ = c.Close()
+			up = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !up {
+		t.Fatalf("the first daemon never accepted on %s; the occupant this cell needs "+
+			"does not exist", sock)
+	}
+
+	second := exec.Command(bin, "--config", cfgPath, "--serve")
+	second.Env = env
+	out, err := second.CombinedOutput()
+	body := string(out)
+	code := second.ProcessState.ExitCode()
+
+	if err == nil || code == 0 {
+		t.Fatalf("a --serve that found an occupant exited 0: systemd records Result=success "+
+			"and leaves the unit dead, which is the defect this cell exists for:\n%s", body)
+	}
+	if code != exitAlreadyServing {
+		t.Errorf("exited %d, want %d (EX_UNAVAILABLE): a caller cannot tell "+
+			"'the endpoint is taken' apart from a crash:\n%s", code, exitAlreadyServing, body)
+	}
+	// And it still tells the operator what holds it -- the refusal has to be
+	// actionable, not merely non-zero.
+	if !strings.Contains(body, "already serving") {
+		t.Errorf("the refusal does not say another autodb is already serving:\n%s", body)
+	}
+	if !strings.Contains(body, sock) {
+		t.Errorf("the refusal does not name the endpoint that is taken:\n%s", body)
 	}
 }

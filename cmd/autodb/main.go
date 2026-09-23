@@ -188,6 +188,29 @@ func main() {
 // 2 is already flag-usage, so this is 78 rather than an overload of it.
 const exitConfig = 78
 
+// exitAlreadyServing is the status for "I was asked to serve and did not serve,
+// because another autodb already holds what I need" (sysexits.h EX_UNAVAILABLE).
+//
+// IT IS NOT ZERO, AND THAT IS THE WHOLE POINT. `--serve` used to print
+// "already running" and return nil. For a human that reads as reassurance; for
+// the thing that actually runs `--serve` it is a lie. The unit is Type=simple,
+// so systemd reads a zero exit from the main process as a clean, intentional
+// stop: it records Result=success, leaves the unit inactive/dead, and
+// Restart=on-failure never engages. Measured on the droplet — every field
+// reported success while the front door was down, which is the one failure
+// shape nothing prompts anyone to look at.
+//
+// A DISTINCT code rather than 1, because a caller has to tell this apart from
+// a genuine crash: this one means the endpoint or the store is taken, and the
+// operator's next move is to find out by what, not to read a stack trace.
+const exitAlreadyServing = 69
+
+// errAlreadyServing marks that refusal for reportAndExit. A sentinel rather
+// than an inline os.Exit for the reason stated above reportAndExit: exit
+// classification lives in ONE place, keyed off the error, so a second command
+// that grows this condition cannot miss it.
+var errAlreadyServing = errors.New("another autodb is already serving")
+
 // reportAndExit prints err and exits with the status that says what KIND of
 // failure it was.
 //
@@ -201,6 +224,14 @@ func reportAndExit(err error) {
 		fmt.Fprintf(os.Stderr, "autodb: the configuration is invalid — this is not a "+
 			"failure of the command you ran:\n  %v\n", err)
 		os.Exit(exitConfig)
+	}
+	// Both collisions land here: the endpoint is taken, or the meta store is.
+	// They were reported as DIFFERENT kinds of thing — the store collision
+	// already exited non-zero while the endpoint collision exited 0 — although
+	// an operator's next move is the same for both: find the other autodb.
+	if errors.Is(err, errAlreadyServing) || errors.Is(err, meta.ErrLeaseHeld) {
+		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+		os.Exit(exitAlreadyServing)
 	}
 	fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 	os.Exit(1)
@@ -374,8 +405,13 @@ func runServe(configPath string) error {
 		defer cancel()
 		occupant, perr := rpc.ProbeOn(probeCtx, ep.Network, addr)
 		if perr == nil {
-			fmt.Printf("autodb: already running on %s (version %s)\n", addr, occupant)
-			return nil
+			// NOT return nil. This process was asked to serve and did not
+			// serve; saying so with a zero status told systemd the job was
+			// done, and the unit went inactive reporting success while the
+			// front door was down. The message still names the occupant and
+			// its version, because that is what an operator needs next.
+			return fmt.Errorf("%w on %s (version %s); this process is not serving",
+				errAlreadyServing, addr, occupant)
 		}
 		return fmt.Errorf("bind %s: address in use, occupant is not a compatible autodb: %v", addr, perr)
 	}
@@ -982,10 +1018,7 @@ func isAddrInUse(err error) bool {
 // against the meta store that file resolves to, on the port the real service
 // binds.
 func spawnFor(cfg config.Config, configPath string) func() (string, error) {
-	if cfg.Server.ClientOnly {
-		return nil
-	}
-	// AND NOT FROM ANY OTHER FILE ON A HOST THAT HAS A SERVICE CONFIG.
+	// AND NOT FROM ANY FILE AT ALL ON A HOST THAT RUNS AUTODB AS A SERVICE.
 	//
 	// ClientOnly covers the file the installer hands out. It cannot cover a
 	// developer's OWN config, which carries no such key and never will -- and
@@ -994,7 +1027,30 @@ func spawnFor(cfg config.Config, configPath string) func() (string, error) {
 	// from it would bind the service's port against the developer's own store,
 	// which is the trap client_only was introduced to close, reached by a
 	// different file.
-	if cfg.ForeignOnAServiceHost() {
+	//
+	// THE PREDICATE USED TO BE "foreign on a service host", AND THAT LEFT THE
+	// SERVICE'S OWN CONFIG THROUGH. Its rule was already stated as "on a host
+	// that HAS one, a frontend must never" -- but it excluded the one file
+	// that IS the service's, so `autodb --ui --config /etc/autodb/config.toml`
+	// still got a spawner. It then spawned a detached daemon, with Setsid and
+	// no lifetime tie, on the service's own ports; that daemon outlived the
+	// TUI, re-parented to init, and held 5432 and 7419 so the unit could not
+	// start. Observed twice on the droplet.
+	//
+	// The daemon outliving a frontend is deliberate and stays (one shared
+	// server, many frontends). What is not deliberate is a frontend becoming
+	// the daemon on a host where systemd owns that job. So the question is the
+	// HOST's, not the file's: if a service config exists here, no frontend
+	// spawns, whichever config it happens to hold.
+	//
+	// This is also what withdraws SPC X's restart on a service install: the
+	// action is gated on CanSpawn, and restarting a systemd-managed daemon by
+	// spawning a detached replacement is the same defect wearing a keystroke.
+	//
+	// The rule itself is config.MaySpawnDaemon, beside the fields it reads --
+	// one of which is unexported, so a rule stated here could not be celled
+	// against a config that genuinely is the service's own.
+	if !cfg.MaySpawnDaemon() {
 		return nil
 	}
 	return func() (string, error) { return spawnServe(configPath) }
