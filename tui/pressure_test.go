@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -43,7 +44,7 @@ func TestPressureView_AnUnreadableViewNamesItselfInsteadOfLookingCalm(t *testing
 
 type failingSource struct{ err error }
 
-func (f failingSource) Pressure() (pressure.Snapshot, error) {
+func (f failingSource) Pressure(context.Context) (pressure.Snapshot, error) {
 	return pressure.Snapshot{}, f.err
 }
 

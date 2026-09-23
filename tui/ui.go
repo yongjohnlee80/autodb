@@ -1652,6 +1652,15 @@ func (m *Model) applyTask(tr tui.TaskResult) bool {
 		}
 		v.apply()
 		return true
+	case pressureLoaded:
+		// THE TICKET COMES BACK EITHER WAY; currency only decides what is
+		// shown. A reading fetched over a connection that has since been
+		// replaced is discarded -- the next tick is two seconds behind it --
+		// but the view is released from its in-flight state regardless, or one
+		// superseded result stops the surface refreshing for as long as it is
+		// open.
+		v.view.settle(v, m.session == nil || v.gen == m.session.Gen())
+		return true
 	}
 	if tr.Err != nil {
 		m.setStatus("task failed: " + tr.Err.Error())
