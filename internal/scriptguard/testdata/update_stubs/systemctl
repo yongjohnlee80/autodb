@@ -69,23 +69,56 @@ case "${1:-}" in
           fi
         done
         ;;
-      *" ExecMainStatus "*)
-        # HOW THE FAILED UNIT EXITED. Scripted, because the whole point of the
-        # rollback report is that 78 and 69 send an operator somewhere
-        # completely different from a crash -- and a stub with one answer
-        # cannot tell those branches apart.
-        printf '%s\n' "${UPD_EXIT_STATUS:-0}"
-        ;;
-      *" ExecMainCode "*)
-        # The siginfo code: 1 is CLD_EXITED, 2 is CLD_KILLED. Defaulting to 1
-        # keeps every existing cell describing a unit that exited rather than
-        # one that was signalled.
-        printf '%s\n' "${UPD_EXIT_CODE:-1}"
+      *" ExecMainStatus "*|*" ExecMainCode "*)
+        # HOW THE FAILED UNIT EXITED -- AND THEN HOW THE RECOVERED ONE HAS NOT.
+        #
+        # 78 and 69 send an operator somewhere completely different from a
+        # crash, so a stub with one answer cannot tell those branches apart.
+        # But ONE INVARIANT ANSWER IS ITS OWN DEFECT, and review found it: with
+        # these properties constant for the whole run, a read taken AFTER the
+        # rollback restarted the unit returns exactly what a read taken before
+        # it would have, so moving the query across the restart is invisible to
+        # every cell. The verifier could not distinguish the failure it is
+        # about from the recovery that replaced it.
+        #
+        # So the stub models what the host does. Before the rollback's restart,
+        # these describe the new binary's failure. Afterwards the unit is
+        # RUNNING the old binary and has not exited under this invocation at
+        # all, which real systemd reports as 0/0 -- and the script's own
+        # catch-all then says it "did not report how it exited", which is a
+        # sentence no semantic cell accepts. A stale read now fails loudly
+        # instead of passing silently.
+        #
+        # The rollback's restart is the SECOND `systemctl start`; the first is
+        # the one that launched the binary under test.
+        _starts=0
+        [ -r "$LOG.starts" ] && _starts="$(cat "$LOG.starts")"
+        case " $* " in
+          *" ExecMainStatus "*) _k_st="yes" ;;
+          *) _k_st="no" ;;
+        esac
+        if [ "$_starts" -ge 2 ]; then
+          printf '%s\n' 0
+        elif [ "$_k_st" = "yes" ]; then
+          printf '%s\n' "${UPD_EXIT_STATUS:-0}"
+        else
+          # The siginfo code: 1 is CLD_EXITED, 2 is CLD_KILLED. Defaulting to 1
+          # keeps every existing cell describing a unit that exited rather than
+          # one that was signalled.
+          printf '%s\n' "${UPD_EXIT_CODE:-1}"
+        fi
         ;;
       *)
         printf '%s\n' "${UPD_WAS_ACTIVE:-active}"
         ;;
     esac
+    ;;
+  start)
+    # COUNTED, because the exit-status answers above depend on whether the
+    # rollback has already put the old binary back.
+    _n=0
+    [ -r "$LOG.starts" ] && _n="$(cat "$LOG.starts")"
+    printf '%s' "$(( _n + 1 ))" > "$LOG.starts"
     ;;
   *) : ;;
 esac

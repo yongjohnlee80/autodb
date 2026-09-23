@@ -149,13 +149,23 @@ func TestUpdate_TheFailureIsReadBeforeTheRollbackRestartsTheUnit(t *testing.T) {
 	}
 	log := r.commands()
 
+	// EVERY READ, NOT A REPRESENTATIVE ONE. Review found this cell bounding the
+	// journal and the exit status while ExecMainCode rode along unasserted:
+	// moving only that query across the restart left all six cells green. A
+	// cell that names two of three reads reads as though it covers the
+	// ordering, which is worse than one that covers none.
 	readAt := strings.Index(log, "journalctl -u autodb-frontdoor")
 	statusAt := strings.Index(log, "show -p ExecMainStatus")
+	codeAt := strings.Index(log, "show -p ExecMainCode")
 	if readAt < 0 {
 		t.Fatalf("the journal was never read at all:\n%s", log)
 	}
 	if statusAt < 0 {
 		t.Fatalf("the exit status was never read at all:\n%s", log)
+	}
+	if codeAt < 0 {
+		t.Fatalf("the termination kind was never read at all, so nothing distinguishes "+
+			"an exit code from a signal number:\n%s", log)
 	}
 
 	// The rollback's restart is the SECOND `systemctl start` — the first is the
@@ -179,6 +189,10 @@ func TestUpdate_TheFailureIsReadBeforeTheRollbackRestartsTheUnit(t *testing.T) {
 	if statusAt > restart {
 		t.Errorf("the exit status was read AFTER the rollback restarted the unit, so it "+
 			"describes the recovery and not the failure:\n%s", log)
+	}
+	if codeAt > restart {
+		t.Errorf("the termination kind was read AFTER the rollback restarted the unit, so "+
+			"whether the failure exited or was signalled is decided by the recovery:\n%s", log)
 	}
 }
 
