@@ -64,6 +64,27 @@ func TestPgxGrammar_WhatTheScrubberMustAgreeWith(t *testing.T) {
 			dsn:  "postgres://u@h:5432/db?sslpassword=ab&application_name=x",
 			want: "", // password is not in the query; see sslpassword below
 		},
+		{
+			// pgx percent-DECODES the query key, so this names the password
+			// carrier. Matching the raw spelling leaves the value untouched.
+			name: "url query: a percent-encoded key still names the password",
+			dsn:  "postgres://u@h/db?pass%77ord=secret",
+			want: "secret",
+		},
+		{
+			// A quote is an ordinary byte of a URL query value. Ending a URL
+			// span at one truncates a valid password and publishes the tail.
+			name: "url query: apostrophe is an ordinary value byte",
+			dsn:  "postgres://u@h/db?password=ab'cd&application_name=x",
+			want: "ab'cd",
+		},
+		{
+			// Same for a backtick -- which is how driver errors usually WRAP a
+			// DSN, so "stop at the wrapper" is not a safe boundary rule either.
+			name: "url query: backtick is an ordinary value byte",
+			dsn:  "postgres://u@h/db?password=ab`cd&application_name=x",
+			want: "ab`cd",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
