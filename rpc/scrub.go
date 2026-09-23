@@ -17,25 +17,47 @@ import (
 // survives is what an operator acts on — the host, role, database, port, and
 // the network or configuration reason.
 //
-// It is best effort for UNSTRUCTURED secrets only. A bare high-entropy string
-// cannot be told from a hostname, a database name or an id without false
+// TWO CARRIERS, TWO GRAMMARS, AND THAT IS THE WHOLE DESIGN.
+//
+// A connection string reaches this function as either a URL or a libpq
+// keyword/value string, and they disagree about their own delimiters. In a URL
+// query '&' separates parameters; in keyword form '&' is an ordinary byte of
+// the value. One scanner applying one rule is therefore wrong for one of them,
+// and the wrong direction leaks: this file shipped a version that split
+// keyword values on '&' and published the tail of a real password.
+//
+// So URL spans are located first and masked by URL rules, and only the text
+// BETWEEN them is scanned as keyword/value. The grammar each half implements is
+// pinned against pgx — the parser autodb actually dials through — in
+// scrub_grammar_test.go, rather than against a reading of the documentation.
+// That file is the authority this one is checked against; every delimiter
+// decision below has a cell there.
+//
+// The remaining best-effort limit is for UNSTRUCTURED secrets only: a bare
+// high-entropy string cannot be told from a hostname or an id without false
 // positives, and a scrubber that mangles the diagnosis defeats the reason the
-// cause is shown at all. That limit does NOT extend to a declared carrier: for
-// a "<x>password" keyword the value is parsed by its actual grammar, because a
-// value parser that stops early leaks the tail of a real password. The first
-// version of this file did exactly that — `password='se cret'` masked only
-// `'se` and published ` cret'`.
+// cause is shown at all.
 
 const (
 	mask            = "***"
 	passwordKeyword = "password"
 )
 
+// urlSpanRe finds a URL-shaped token: a scheme, "://", then everything up to
+// whitespace or a quoting character. Driver errors quote a DSN in backticks or
+// single quotes, and the closing mark must survive rather than be eaten as
+// part of a query parameter.
+var urlSpanRe = regexp.MustCompile("[a-zA-Z][a-zA-Z0-9+.\\-]*://[^\\s`'\"]*")
+
 // urlUserinfoRe masks the password half of a URL userinfo
 // ("scheme://user:pw@host"): only the segment between the first ':' after the
 // authority starts and the '@'. The user is kept — it is operator-actionable
 // and is not itself the secret.
 var urlUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://[^:/@\s]+:)[^@/\s]+@`)
+
+// urlQueryPasswordRe masks a "<x>password" QUERY PARAMETER's value. Here — and
+// only here — '&' ends the value, because here it starts the next parameter.
+var urlQueryPasswordRe = regexp.MustCompile(`(?i)([?&][a-z_]*password=)[^&]*`)
 
 // patRe masks a well-formed autodb PAT (adb_pat_<selector>.<secret>) while
 // keeping the prefix, so a reader still sees that a token was present rather
@@ -54,17 +76,42 @@ var patRe = regexp.MustCompile(regexp.QuoteMeta(auth.PATPrefix) + `[A-Za-z0-9_\-
 // point: a half-masked credential is worse than no detail, because it looks
 // scrubbed.
 func scrubSecrets(s string) (string, bool) {
-	s = urlUserinfoRe.ReplaceAllString(s, `${1}`+mask+`@`)
-	s, confident := maskKeywordPasswords(s)
-	s = patRe.ReplaceAllString(s, auth.PATPrefix+mask)
-	return s, confident
+	var b strings.Builder
+	confident := true
+	last := 0
+
+	for _, loc := range urlSpanRe.FindAllStringIndex(s, -1) {
+		// Text before this URL obeys keyword rules.
+		seg, ok := maskKeywordPasswords(s[last:loc[0]])
+		b.WriteString(seg)
+		confident = confident && ok
+
+		// The URL itself obeys URL rules.
+		b.WriteString(maskURLSpan(s[loc[0]:loc[1]]))
+		last = loc[1]
+	}
+
+	seg, ok := maskKeywordPasswords(s[last:])
+	b.WriteString(seg)
+	confident = confident && ok
+
+	return patRe.ReplaceAllString(b.String(), auth.PATPrefix+mask), confident
+}
+
+func maskURLSpan(u string) string {
+	u = urlUserinfoRe.ReplaceAllString(u, `${1}`+mask+`@`)
+	return urlQueryPasswordRe.ReplaceAllString(u, `${1}`+mask)
 }
 
 // maskKeywordPasswords walks the libpq keyword/value grammar: a keyword ending
 // in "password", optional whitespace, '=', optional whitespace, then a value
-// that is either single-quoted (backslash escapes the next byte, so \' and \\
-// are legal inside) or an unquoted run. Only the VALUE is replaced, so every
-// field after it survives — the diagnosis is the reason this text is shown.
+// that is either single-quoted or an unquoted run. Only the VALUE is replaced,
+// so every field after it survives — the diagnosis is the reason this text is
+// shown at all.
+//
+// An unquoted value ends at libpq whitespace and NOWHERE ELSE: not at '&',
+// which is an ordinary value byte here, and not at an escaped byte, since a
+// backslash carries the value past the character after it.
 func maskKeywordPasswords(s string) (string, bool) {
 	var out strings.Builder
 	pos := 0
@@ -100,12 +147,8 @@ func maskKeywordPasswords(s string) (string, bool) {
 			continue
 		}
 
-		v := valStart
-		for v < len(s) && !isDSNSpace(s[v]) && s[v] != '&' {
-			v++
-		}
 		out.WriteString(mask)
-		pos = v
+		pos = endOfUnquotedValue(s, valStart)
 	}
 }
 
@@ -124,8 +167,29 @@ func endOfQuotedValue(s string, i int) (int, bool) {
 	return len(s), false
 }
 
+// endOfUnquotedValue returns the index one past the last byte of an unquoted
+// keyword value. A backslash carries the value past the next byte — measured:
+// pgx resolves `password=ab\ cd` to a value containing the space — so stopping
+// at that space would publish the tail.
+func endOfUnquotedValue(s string, i int) int {
+	for v := i; v < len(s); v++ {
+		if s[v] == '\\' {
+			v++
+			continue
+		}
+		if isDSNSpace(s[v]) {
+			return v
+		}
+	}
+	return len(s)
+}
+
+// isDSNSpace is libpq's ASCII whitespace class, all six bytes. Vertical tab and
+// form feed are in it: pgx accepts `password\v=\vsecret` and resolves the
+// password, so a scanner missing them fails to see a real carrier and discloses
+// the value whole.
 func isDSNSpace(c byte) bool {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+	return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r'
 }
 
 func skipDSNSpace(s string, i int) int {
