@@ -57,11 +57,9 @@ const (
 // byte of the value. Punctuation is lost; no secret is.
 var urlSpanRe = regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s]*`)
 
-// urlUserinfoRe masks the password half of a URL userinfo
-// ("scheme://user:pw@host"): only the segment between the first ':' after the
-// authority starts and the '@'. The user is kept — it is operator-actionable
-// and is not itself the secret.
-var urlUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://[^:/@\s]+:)[^@/\s]+@`)
+// (The userinfo half is parsed rather than pattern-matched — see
+// maskURLUserinfo. A regex over "user:pw@" gets the boundaries wrong in both
+// directions, because a raw '@' is legal on either side of the colon.)
 
 // (Query parameters are split on '&' and matched by DECODED key rather than by
 // regex over the raw text — see maskURLSpan and isPasswordQueryKey.)
@@ -111,7 +109,7 @@ func scrubSecrets(s string) (string, bool) {
 // masked whole, so a quote inside it is just a byte rather than a boundary.
 // Every other parameter is copied through untouched: they are the diagnosis.
 func maskURLSpan(u string) string {
-	u = urlUserinfoRe.ReplaceAllString(u, `${1}`+mask+`@`)
+	u = maskURLUserinfo(u)
 
 	q := strings.IndexByte(u, '?')
 	if q < 0 {
@@ -132,6 +130,48 @@ func maskURLSpan(u string) string {
 		b.WriteString(mask)
 	}
 	return b.String()
+}
+
+// maskURLUserinfo masks the password half of a URL's userinfo, if it has one.
+//
+// PARSED, NOT PATTERN-MATCHED, because every boundary here is somewhere a regex
+// guesses wrong — measured against pgx in scrub_grammar_test.go:
+//
+//   - The authority ends at the first '/', '?' or '#'. Safe because pgx REFUSES
+//     those bytes raw inside userinfo; a cell pins that refusal, so if it ever
+//     changes this stops being silently wrong.
+//   - The userinfo ends at the LAST '@' in the authority, not the first: a raw
+//     '@' is an ordinary byte of the password (`user:ab@cd@host` → `ab@cd`).
+//   - The password begins at the FIRST ':' in the userinfo: a raw ':' is legal
+//     in the password (`user:ab:cd@host` → `ab:cd`), and a raw '@' is legal in
+//     the USERNAME too (`us@er:pw@host`), which a "no @ before the colon"
+//     pattern refuses outright — matching nothing, and so masking nothing.
+//
+// The username is kept: it is operator-actionable and is not itself the secret.
+// So is everything after the '@', which for a multi-host DSN carries its own
+// colons and commas.
+func maskURLUserinfo(u string) string {
+	i := strings.Index(u, "://")
+	if i < 0 {
+		return u
+	}
+	start := i + len("://")
+
+	end := len(u)
+	if j := strings.IndexAny(u[start:], "/?#"); j >= 0 {
+		end = start + j
+	}
+	authority := u[start:end]
+
+	at := strings.LastIndexByte(authority, '@')
+	if at < 0 {
+		return u // no userinfo, so no password
+	}
+	colon := strings.IndexByte(authority[:at], ':')
+	if colon < 0 {
+		return u // a username with no password
+	}
+	return u[:start+colon+1] + mask + u[start+at:]
 }
 
 // isPasswordQueryKey decides whether a query key names a password carrier,
