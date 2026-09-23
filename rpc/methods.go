@@ -2193,8 +2193,20 @@ var errNoPressure = errors.New("pressure is not being observed on this instance"
 //
 // Durations are rendered as whole seconds, because the receiver is a surface
 // somebody reads and a wait in nanoseconds is a true figure nobody can use.
-// wireMillis renders an instant for the wire, keeping "no instant" distinct
-// from "the epoch".
+// wireMillis renders an instant for the wire. ABSENT IS ZERO.
+//
+// NOT FOR THIS PROCESS'S BENEFIT. Go's zero time survives UnixMilli intact --
+// it goes out as -62135596800000 and time.UnixMilli reads it back as a time
+// whose IsZero is true -- so a Go client is unharmed either way, and a mutation
+// removing this guard is invisible to every cell that decodes with Go.
+//
+// IT IS THE CONTRACT FOR EVERYONE ELSE. This surface has a client that is not
+// Go -- lua/autodb/client.lua, which already carries this verb in its protocol
+// notes -- and a reader that formats the number it is handed renders
+// -62135596800000 as 0001-01-01, or cannot represent it at all where dates
+// start at the epoch. "The daemon did not stamp this" has
+// to be recognisable without knowing how one language happens to spell its zero
+// value, so it is 0, and a cell in this package pins it.
 func wireMillis(t time.Time) int64 {
 	if t.IsZero() {
 		return 0
@@ -2237,9 +2249,7 @@ func pressureWire(s pressure.Snapshot) map[string]any {
 		//
 		// Milliseconds since the epoch, because a time.Time does not survive
 		// this codec and a formatted string would make the RECEIVER's
-		// formatting decision here. A zero stamp is sent as zero rather than as
-		// the epoch's own millisecond count, so an absent time cannot arrive
-		// looking like 1970.
+		// formatting decision here. Absent is sent as 0 -- see wireMillis.
 		"taken_at": wireMillis(s.TakenAt),
 
 		"sessions": row(s.Sessions),
