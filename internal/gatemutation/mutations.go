@@ -892,8 +892,8 @@ func All() []Mutation {
 		{
 			Name: "pressure-an-unreadable-view-says-so", Package: "./tui/",
 			File:        "tui/pressure.go",
-			Anchor:      "\t\treturn []pressureRow{{label: \"unavailable\", value: err.Error()}}",
-			Replacement: "\t\treturn nil",
+			Anchor:      "\t\t\tv.rows = []pressureRow{{label: \"unavailable\", value: v.failure}}",
+			Replacement: "\t\t\tv.rows = nil",
 			Test:        "TestPressureView_AnUnreadableViewNamesItselfInsteadOfLookingCalm",
 			Fails:       "it must name what went wrong",
 			Guarantee:   "that a view which could not read says so, since an empty pressure table and a front door under no pressure render identically",
