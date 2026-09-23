@@ -108,6 +108,10 @@ type Engine struct {
 	// capability, or with an incomplete set) so row 3.1's fail-closed arms can be
 	// observed without a real target that lacks them.
 	hookWrapPinned func(golibpg.PinnedConn) any
+	// hookAfterTxAdmit runs inside beginTx's admit->publish window, after
+	// transaction admission is held and before anything reaches the target.
+	// Test-only: it is how the shutdown interleaving is driven deterministically.
+	hookAfterTxAdmit func()
 	// hookBeforeWireAdmit pauses a wire open after its durable exposure read
 	// but before its registry reservation. Test-only race-window control.
 	hookBeforeWireAdmit func()
