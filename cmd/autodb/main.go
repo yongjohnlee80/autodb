@@ -591,13 +591,7 @@ func runServe(configPath string) error {
 		return fd.PressureSnapshot(eng)
 	}
 	srv := rpc.New(svc, eng, cfg.Server, version,
-		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot),
-		rpc.WithFrontDoor(frontDoorState), rpc.WithPressure(pressureState),
-		// Operator-facing error detail (a dial/config cause naming the target)
-		// is disclosed only when this surface is reachable from this host
-		// alone — a unix socket, or a loopback TCP bind. ep is the endpoint
-		// this daemon actually bound, not the one the config asked for.
-		rpc.WithDetailDisclosure(ep.HostLocalOnly()))
+		rpcServerOptions(ep, ln, oplog, notesRoot, frontDoorState, pressureState)...)
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)
 	// A lease loss is reported as the failure it is. Without this the
@@ -1577,6 +1571,38 @@ func frontDoorCeilings(eng *coreexec.Engine) (maxSessionsPerUser, maxSessionsGlo
 // was: this projection read the immutable cfg.Exec while the admitter had
 // moved on. Rewiring it back to cfg must fail a test, which it cannot if no
 // test goes through here.
+// rpcServerOptions is the EXACT option set runServe hands rpc.New.
+//
+// It is a named function rather than an inline list so the composition cell can
+// assert the connection between the endpoint this daemon actually bound and the
+// capabilities of the server built from it — specifically that detail
+// disclosure FOLLOWS ep.HostLocalOnly() and is not a constant. That connection
+// is invisible to every cell in rpc/ and core/config: those prove the predicate
+// and prove the gate, and stay green either way if the wire between them is
+// cut. This package already carries that lesson in its other wiring cells.
+//
+// Operator-facing error detail (a dial or config cause naming the target) is
+// disclosed only when this surface is reachable from this host alone — a unix
+// socket, or a loopback TCP bind. ep is the endpoint the daemon bound, not the
+// one the config asked for.
+func rpcServerOptions(
+	ep config.Endpoint,
+	ln net.Listener,
+	oplog logger.Logger,
+	notesRoot string,
+	frontDoorState func() rpc.FrontDoorInfo,
+	pressureState func() (pressure.Snapshot, error),
+) []rpc.Option {
+	return []rpc.Option{
+		rpc.WithListener(ln),
+		rpc.WithLogger(oplog),
+		rpc.WithNotesDir(notesRoot),
+		rpc.WithFrontDoor(frontDoorState),
+		rpc.WithPressure(pressureState),
+		rpc.WithDetailDisclosure(ep.HostLocalOnly()),
+	}
+}
+
 func newFrontDoorState(cfg config.Config, eng *coreexec.Engine, fd *frontdoor.Listener) func() rpc.FrontDoorInfo {
 	return func() rpc.FrontDoorInfo {
 		// PER CALL, not captured once: the whole point is that a reload moves
