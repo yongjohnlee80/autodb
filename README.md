@@ -291,7 +291,10 @@ autodb --version
 `--serve` binds the unix socket by default — or `127.0.0.1:<port>` when
 `[server] port` is set — drains gracefully on SIGINT/SIGTERM, and implements a
 single-instance guard: an endpoint held by a compatible autodb reports "already
-running" and exits 0, while a foreign occupant is a loud error. The
+running" and exits **69** (`EX_UNAVAILABLE`), while a foreign occupant is a loud
+error. Non-zero because that process was asked to serve and did not: under a
+`Type=simple` unit a zero exit reads as a clean stop, so systemd recorded
+`Result=success` and left the unit dead while the front door was down. The
 protocol handshake, method surface and error codes are documented in
 [rpc/README.md](rpc/README.md).
 
@@ -577,7 +580,11 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
   server config, which may name a PostgreSQL DSN with a password in it.
   `client_only` matters on its own: without it, running the TUI while the
   service is down would start a daemon as *them*, against their own empty meta
-  store, on the port the real service binds.
+  store, on the port the real service binds. It is no longer the only guard —
+  **no frontend spawns a daemon on a host that has a service config at all**,
+  whichever config it holds, including the service's own. That file used to be
+  excluded, and a TUI run against it spawned a detached daemon on the service's
+  own ports that outlived the TUI and kept the unit from starting.
 - **Run `autodb --init` once** to create the first administrator and cut the
   unattended-unlock slot. It is the only surface that can do the second part:
   enrolling the slot is admin-only *and* only possible while the store is

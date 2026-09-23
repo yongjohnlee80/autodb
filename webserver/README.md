@@ -67,7 +67,7 @@ The `--web-ui` gateway never starts the database engine backend itself; it requi
 ```
 
 ### Preflight Guarantees
-- **Asymmetric Startup Contract**: Unlike `--serve` (which exits 0 if a daemon is already running), `--web-ui` requires a running daemon and fails fast if none exists.
+- **Asymmetric Startup Contract**: `--serve` and `--web-ui` refuse to different things. `--serve` was asked to BECOME the daemon, so an existing one means it did not (and it exits non-zero saying so); `--web-ui` was asked to serve a UI OVER a daemon, so a missing one means it cannot. Neither ever spawns a backend here.
 - **Fail-Closed Auto-Start**: Guarantees that neither initial startup nor subsequent reconnect attempts will ever spawn an unmanaged background daemon.
 
 ---
