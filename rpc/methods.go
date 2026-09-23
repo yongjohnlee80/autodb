@@ -104,6 +104,17 @@ const (
 	// nothing like the front door's uniform credential denial, which is
 	// anonymous by design and never travels this wire.
 	CodeKeyslot int64 = -32047
+
+	// CodeDialFailed and CodeConfigFailed carry the two TYPED backend-acquisition
+	// failures onto the RPC wire. They exist because a dial that could not be
+	// established and a connection that cannot be used as configured have
+	// DIFFERENT REMEDIES — whitelist an IP / check the network, versus fix the
+	// connection's configuration — and a caller that cannot tell them apart is
+	// sent to the wrong file, exactly the split the codes above encode. What a
+	// caller reads in the Message depends on the SURFACE (see the wireErr
+	// method); the code, and therefore the remedy, does not.
+	CodeDialFailed   int64 = -32048
+	CodeConfigFailed int64 = -32049
 )
 
 // publicErrs is the whole disclosure allowlist: core sentinels whose
@@ -199,7 +210,10 @@ var publicErrs = []struct {
 	{exec.ErrLockOutsideTx, CodeStatementRejected},
 }
 
-// wireErr maps core errors onto the wire. The transport withholds any
+// wireErr maps SURFACE-INDEPENDENT core errors onto the wire; the surface-aware
+// (*Server).wireErr method below calls it after resolving the two typed
+// backend-acquisition failures whose disclosure DOES depend on the surface.
+// The transport withholds any
 // non-*Error text (deny-before-disclose), so this is the ONE place autodb
 // decides what is deliberately public — and it publishes the MATCHED
 // SENTINEL's constant text, never err.Error(): a future wrapper adding
@@ -231,6 +245,48 @@ func wireErr(err error) error {
 		}
 	}
 	return err // transport logs it; peer sees a generic internal error
+}
+
+// wireErr (method) is the surface-aware entry point every handler calls. It
+// resolves the two TYPED backend-acquisition failures here — because their
+// disclosure depends on the SURFACE this daemon serves — then defers every
+// surface-independent mapping to the package-level wireErr above.
+//
+// A *DialFailure / *ConfigFailure carries a cause that names the target host,
+// the role, the database and any credential in the DSN (see core/exec). On a
+// host-local surface — a unix socket, or a loopback TCP bind, the boundary
+// ADR 0056 §4 relies on — that cause is the operator's own to read on their
+// own install, so it is disclosed (the same reasoning the CodeKeyslot block
+// records). On a surface reachable off-host the cause is WITHHELD and only the
+// cause-free sentinel shape crosses, deferring wider exposure to the M9
+// gate-guard ADR. Either way this is the RPC surface only: the pgwire front
+// door redacts these through a physically separate path (frontdoor/) that this
+// method never touches.
+func (s *Server) wireErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	if de, ok := exec.DialFailureOf(err); ok {
+		msg := de.Error() // fixed, cause-free shape
+		if s.discloseDetail {
+			if c := de.Cause(); c != nil {
+				// scrubSecrets, not the raw cause: a driver connect error is
+				// measured to carry a plaintext password / PAT / query secret.
+				msg = scrubSecrets(c.Error())
+			}
+		}
+		return &golibrpc.Error{Code: CodeDialFailed, Message: msg}
+	}
+	if ce, ok := exec.ConfigFailureOf(err); ok {
+		msg := ce.Error() // fixed, cause-free shape
+		if s.discloseDetail {
+			if c := ce.Cause(); c != nil {
+				msg = scrubSecrets(c.Error())
+			}
+		}
+		return &golibrpc.Error{Code: CodeConfigFailed, Message: msg}
+	}
+	return wireErr(err)
 }
 
 // --- positional argument decoding (msgpack-RPC params are arrays) ---
@@ -342,7 +398,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		need, err := s.auth.NeedsBootstrap(ctx)
-		return need, wireErr(err)
+		return need, s.wireErr(err)
 	})
 	// auth.global_ip_admitted answers the GLOBAL layer alone, for a caller
 	// that has no user to ask about yet.
@@ -370,7 +426,7 @@ func (s *Server) register() {
 		}
 		admitted, aerr := s.auth.IPAllowed(ctx, addr)
 		if aerr != nil {
-			return nil, wireErr(aerr)
+			return nil, s.wireErr(aerr)
 		}
 		return admitted, nil
 	})
@@ -388,7 +444,7 @@ func (s *Server) register() {
 		}
 		token, id, err := s.auth.Bootstrap(ctx, name, pass, peerIP(req))
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
@@ -406,7 +462,7 @@ func (s *Server) register() {
 		}
 		token, id, err := s.auth.Login(ctx, name, pass, peerIP(req))
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
@@ -445,7 +501,7 @@ func (s *Server) register() {
 		}
 		token, id, err := s.auth.LoginAt(ctx, name, pass, peerIP(req), browser)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		return map[string]any{"token": token, "user": identMap(id)}, nil
 	})
@@ -463,7 +519,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.EnrollServiceKeyslot(ctx, token, peerIP(req)))
+		return nil, s.wireErr(s.auth.EnrollServiceKeyslot(ctx, token, peerIP(req)))
 	})
 	s.handle("keyslot.remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
@@ -473,7 +529,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.RemoveServiceKeyslot(ctx, token, peerIP(req)))
+		return nil, s.wireErr(s.auth.RemoveServiceKeyslot(ctx, token, peerIP(req)))
 	})
 	// keyslot.status is what makes the locked-daemon banner honest at a DISTANCE. The daemon prints
 	// its banner once, at start, to a terminal nobody may be watching; this is
@@ -500,7 +556,7 @@ func (s *Server) register() {
 		// R13 -- deny before you disclose.
 		st, err := s.auth.ServiceKeyslotStatusFor(ctx, token)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		// TWO RECORDS, and they answer different questions. attempted/unlocked/
 		// reason are what the BOOT probe found and never change; the verified_*
@@ -540,7 +596,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.Logout(ctx, token, peerIP(req)))
+		return nil, s.wireErr(s.auth.Logout(ctx, token, peerIP(req)))
 	})
 	s.handle("auth.whoami", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
@@ -552,7 +608,7 @@ func (s *Server) register() {
 		}
 		id, err := s.auth.ValidateToken(ctx, token)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		return identMap(id), nil
 	})
@@ -580,7 +636,7 @@ func (s *Server) register() {
 		}
 		id, err := s.auth.CreateUser(ctx, token, name, pass, role, peerIP(req))
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		return id, nil
 	})
@@ -595,7 +651,7 @@ func (s *Server) register() {
 		}
 		opts, err := s.auth.UserOptions(ctx, token)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		// Widened to any: the wire encoder has no view of map[string]string,
 		// and the TUI reads it back key by key.
@@ -622,7 +678,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if err := s.auth.SetUserOption(ctx, token, key, value, peerIP(req)); err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		return true, nil
 	})
@@ -642,7 +698,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.SetUserRole(ctx, token, userID, role, peerIP(req)))
+		return nil, s.wireErr(s.auth.SetUserRole(ctx, token, userID, role, peerIP(req)))
 	})
 	s.handle("auth.user_disable", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -660,7 +716,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.SetUserDisabled(ctx, token, userID, disabled, peerIP(req)))
+		return nil, s.wireErr(s.auth.SetUserDisabled(ctx, token, userID, disabled, peerIP(req)))
 	})
 	s.handle("auth.user_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
@@ -674,7 +730,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.RemoveUser(ctx, token, userID, peerIP(req)))
+		return nil, s.wireErr(s.auth.RemoveUser(ctx, token, userID, peerIP(req)))
 	})
 	s.handle("auth.passphrase_change", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -692,7 +748,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.ChangePassphrase(ctx, token, oldPass, newPass, peerIP(req)))
+		return nil, s.wireErr(s.auth.ChangePassphrase(ctx, token, oldPass, newPass, peerIP(req)))
 	})
 	// exec.run_script runs a multi-statement buffer sequentially and
 	// returns the LAST statement's result. The core splits with the
@@ -722,7 +778,7 @@ func (s *Server) register() {
 		// atomic is not three changes.
 		out, xerr := s.eng.ExecuteScriptAtomic(ctx, token, connID, sqlText, peerIP(req))
 		if xerr != nil {
-			return nil, wireErr(xerr)
+			return nil, s.wireErr(xerr)
 		}
 		reply := map[string]any{"statements": int64(out.Statements)}
 		if out.Last != nil {
@@ -748,7 +804,7 @@ func (s *Server) register() {
 		}
 		rows, herr := s.eng.ListHistory(ctx, token, int(limit))
 		if herr != nil {
-			return nil, wireErr(herr)
+			return nil, s.wireErr(herr)
 		}
 		out := make([]any, 0, len(rows))
 		for _, r := range rows {
@@ -782,11 +838,11 @@ func (s *Server) register() {
 		}
 		ident, aerr := s.auth.RequireAdmin(ctx, token)
 		if aerr != nil {
-			return nil, wireErr(aerr)
+			return nil, s.wireErr(aerr)
 		}
 		if err := s.auth.Audit(ctx, ident.UserID(), peerIP(req),
 			"server_shutdown", "requested over rpc"); err != nil {
-			return nil, wireErr(err) // an unaudited privileged effect never happens
+			return nil, s.wireErr(err) // an unaudited privileged effect never happens
 		}
 		s.RequestShutdown()
 		return map[string]any{"stopping": true}, nil
@@ -808,7 +864,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.ResetPassphrase(ctx, token, userID, newPass, peerIP(req)))
+		return nil, s.wireErr(s.auth.ResetPassphrase(ctx, token, userID, newPass, peerIP(req)))
 	})
 
 	// --- auth: grants & allowlist (admin, token-first) ---
@@ -832,7 +888,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.AddGrant(ctx, token, userID, connID, role, peerIP(req)))
+		return nil, s.wireErr(s.auth.AddGrant(ctx, token, userID, connID, role, peerIP(req)))
 	})
 	s.handle("auth.grant_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -850,7 +906,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.RemoveGrant(ctx, token, userID, connID, peerIP(req)))
+		return nil, s.wireErr(s.auth.RemoveGrant(ctx, token, userID, connID, peerIP(req)))
 	})
 	s.handle("auth.allowlist_add", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -868,7 +924,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.AddAllowedIP(ctx, token, cidr, note, peerIP(req)))
+		return nil, s.wireErr(s.auth.AddAllowedIP(ctx, token, cidr, note, peerIP(req)))
 	})
 	s.handle("auth.allowlist_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
@@ -882,7 +938,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.RemoveAllowedIP(ctx, token, cidr, peerIP(req)))
+		return nil, s.wireErr(s.auth.RemoveAllowedIP(ctx, token, cidr, peerIP(req)))
 	})
 	s.handle("auth.allowlist_list", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
@@ -894,7 +950,7 @@ func (s *Server) register() {
 		}
 		cfg, rows, err := s.auth.ListAllowedIPs(ctx, token)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		outRows := make([]any, 0, len(rows))
 		for _, r := range rows {
@@ -923,7 +979,7 @@ func (s *Server) register() {
 		}
 		rows, err := s.auth.UserIPs(ctx, token, userID)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		out := make([]any, 0, len(rows))
 		for _, r := range rows {
@@ -969,11 +1025,11 @@ func (s *Server) register() {
 		}
 		ident, verr := s.auth.ValidateToken(ctx, token)
 		if verr != nil {
-			return nil, wireErr(verr)
+			return nil, s.wireErr(verr)
 		}
 		src, aerr := s.auth.IPAllowedForUser(ctx, nil, ident.UserID(), addr)
 		if aerr != nil {
-			return nil, wireErr(aerr)
+			return nil, s.wireErr(aerr)
 		}
 		// The SOURCE is returned as well as the verdict, so the caller can
 		// audit which layer admitted rather than only that something did.
@@ -1043,7 +1099,7 @@ func (s *Server) register() {
 		// belongs here, on the wire value, before any arithmetic touches it.
 		const maxTokenDays = 365
 		if days < 0 || days > maxTokenDays {
-			return nil, wireErr(fmt.Errorf("%w: %d days requested; the range is 1..%d, or 0 for "+
+			return nil, s.wireErr(fmt.Errorf("%w: %d days requested; the range is 1..%d, or 0 for "+
 				"the default", auth.ErrPATBadExpiry, days, maxTokenDays))
 		}
 		rawApproved, err := optStr(req.Params, 6, "approved_ips")
@@ -1068,7 +1124,7 @@ func (s *Server) register() {
 					"missing":        strsToAny(stale.Missing),
 				}, nil
 			}
-			return nil, wireErr(cerr)
+			return nil, s.wireErr(cerr)
 		}
 		return map[string]any{
 			"name": out.Name,
@@ -1100,7 +1156,7 @@ func (s *Server) register() {
 		}
 		missing, merr := s.auth.PATAllowlistAdditions(ctx, token, want)
 		if merr != nil {
-			return nil, wireErr(merr)
+			return nil, s.wireErr(merr)
 		}
 		return map[string]any{"missing": strsToAny(missing)}, nil
 	})
@@ -1118,7 +1174,7 @@ func (s *Server) register() {
 		}
 		rows, lerr := s.auth.ListPATs(ctx, token, userID)
 		if lerr != nil {
-			return nil, wireErr(lerr)
+			return nil, s.wireErr(lerr)
 		}
 		out := make([]any, 0, len(rows))
 		for _, r := range rows {
@@ -1154,7 +1210,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if rerr := s.auth.RevokePAT(ctx, token, userID, name); rerr != nil {
-			return nil, wireErr(rerr)
+			return nil, s.wireErr(rerr)
 		}
 		return map[string]any{"revoked": true}, nil
 	})
@@ -1185,7 +1241,7 @@ func (s *Server) register() {
 		if cidr == "" {
 			cidr = peerIP(req)
 		}
-		return nil, wireErr(s.auth.AddUserIP(ctx, token, userID, cidr, label, peerIP(req)))
+		return nil, s.wireErr(s.auth.AddUserIP(ctx, token, userID, cidr, label, peerIP(req)))
 	})
 	s.handle("auth.user_allowlist_remove", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -1203,7 +1259,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.auth.RemoveUserIP(ctx, token, userID, rowID, peerIP(req)))
+		return nil, s.wireErr(s.auth.RemoveUserIP(ctx, token, userID, rowID, peerIP(req)))
 	})
 
 	// --- conn: connection management ---
@@ -1229,7 +1285,7 @@ func (s *Server) register() {
 		// a row that no later comparison matches.
 		eng, err := engine.Parse(engineArg)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		dsn, err := argStr(req.Params, 3, "dsn")
 		if err != nil {
@@ -1237,7 +1293,7 @@ func (s *Server) register() {
 		}
 		id, err := s.eng.CreateConnection(ctx, token, name, eng, dsn, peerIP(req))
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		return id, nil
 	})
@@ -1251,7 +1307,7 @@ func (s *Server) register() {
 		}
 		conns, err := s.eng.ListConnections(ctx, token)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		// THE EFFECTIVE CAP, NOT THE REQUEST.
 		//
@@ -1304,7 +1360,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.eng.DeleteConnection(ctx, token, connID, peerIP(req)))
+		return nil, s.wireErr(s.eng.DeleteConnection(ctx, token, connID, peerIP(req)))
 	})
 	// frontdoor.endpoint reports what a client must dial. It takes the bearer
 	// token and re-resolves authority like every other privileged verb
@@ -1340,7 +1396,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if _, err := s.auth.ValidateToken(ctx, token); err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		var info FrontDoorInfo
 		if s.frontDoor != nil {
@@ -1353,7 +1409,7 @@ func (s *Server) register() {
 		}
 		pem, rerr := os.ReadFile(info.RootCAFile)
 		if rerr != nil {
-			return nil, wireErr(fmt.Errorf("reading the CA certificate at %s: %w",
+			return nil, s.wireErr(fmt.Errorf("reading the CA certificate at %s: %w",
 				info.RootCAFile, rerr))
 		}
 		return map[string]any{
@@ -1373,7 +1429,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if _, err := s.auth.ValidateToken(ctx, token); err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		var info FrontDoorInfo
 		if s.frontDoor != nil {
@@ -1414,7 +1470,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.eng.SetConnectionProfile(ctx, token, connID, profile, peerIP(req)))
+		return nil, s.wireErr(s.eng.SetConnectionProfile(ctx, token, connID, profile, peerIP(req)))
 	})
 	s.handle("conn.rename", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -1432,7 +1488,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.eng.RenameConnection(ctx, token, connID, name, peerIP(req)))
+		return nil, s.wireErr(s.eng.RenameConnection(ctx, token, connID, name, peerIP(req)))
 	})
 	s.handle("conn.set_exposure", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -1450,7 +1506,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.eng.SetConnectionExposure(ctx, token, connID, exposed, peerIP(req)))
+		return nil, s.wireErr(s.eng.SetConnectionExposure(ctx, token, connID, exposed, peerIP(req)))
 	})
 	// The operator surface for the reloadable bounds. Without these the
 	// engine's reload existed and nothing could reach it, which is the state
@@ -1508,7 +1564,7 @@ func (s *Server) register() {
 			MaxTargetConns:       int(vals[4]),
 		}, peerIP(req))
 		if rerr != nil {
-			return nil, wireErr(rerr)
+			return nil, s.wireErr(rerr)
 		}
 		return exec.PolicyView(set), nil
 	})
@@ -1524,7 +1580,7 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.eng.TestConnection(ctx, token, connID, peerIP(req)))
+		return nil, s.wireErr(s.eng.TestConnection(ctx, token, connID, peerIP(req)))
 	})
 
 	// --- exec ---
@@ -1550,7 +1606,7 @@ func (s *Server) register() {
 		}
 		sid, oerr := s.eng.OpenSession(ctx, token, connID, peerIP(req))
 		if oerr != nil {
-			return nil, wireErr(oerr)
+			return nil, s.wireErr(oerr)
 		}
 		return map[string]any{"session_id": string(sid)}, nil
 	})
@@ -1572,7 +1628,7 @@ func (s *Server) register() {
 			return nil, err
 		}
 		if cerr := s.eng.CloseSession(ctx, token, exec.SessionID(sid), peerIP(req)); cerr != nil {
-			return nil, wireErr(cerr)
+			return nil, s.wireErr(cerr)
 		}
 		return map[string]any{"closed": true}, nil
 	})
@@ -1598,7 +1654,7 @@ func (s *Server) register() {
 		}
 		res, rerr := s.eng.SessionExecute(ctx, token, exec.SessionID(sid), sqlText, peerIP(req))
 		if rerr != nil {
-			return nil, wireErr(rerr)
+			return nil, s.wireErr(rerr)
 		}
 		return resultMap(res), nil
 	})
@@ -1644,7 +1700,7 @@ func (s *Server) register() {
 			}
 			st, terr := s.eng.TxOutcome(ctx, token, txID)
 			if terr != nil {
-				return nil, wireErr(terr)
+				return nil, s.wireErr(terr)
 			}
 			return txStatusMap(st), nil
 		}
@@ -1658,7 +1714,7 @@ func (s *Server) register() {
 		}
 		list, perr := s.eng.PendingOutcomes(ctx, token, limit)
 		if perr != nil {
-			return nil, wireErr(perr)
+			return nil, s.wireErr(perr)
 		}
 		out := make([]any, 0, len(list))
 		for _, st := range list {
@@ -1685,7 +1741,7 @@ func (s *Server) register() {
 		}
 		res, err := s.eng.Execute(ctx, token, connID, sqlText, peerIP(req))
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		return resultMap(res), nil
 	})
@@ -1818,7 +1874,7 @@ func (s *Server) registerM6() {
 		}
 		names, err := s.eng.ListSchemas(ctx, token, connID)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		out := make([]any, 0, len(names))
 		for _, n := range names {
@@ -1844,7 +1900,7 @@ func (s *Server) registerM6() {
 		}
 		tables, err := s.eng.ListTables(ctx, token, connID, schema)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		out := make([]any, 0, len(tables))
 		for _, t := range tables {
@@ -1879,7 +1935,7 @@ func (s *Server) registerM6() {
 		}
 		cols, err := s.eng.ListColumns(ctx, token, connID, schema, table)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		out := make([]any, 0, len(cols))
 		for _, c := range cols {
@@ -1909,7 +1965,7 @@ func (s *Server) registerM6() {
 		}
 		supported, routines, err := s.eng.ListRoutines(ctx, token, connID, schema)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		list := make([]any, 0, len(routines))
 		for _, r := range routines {
@@ -1932,7 +1988,7 @@ func (s *Server) registerM6() {
 		}
 		users, err := s.auth.ListUsers(ctx, token)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		out := make([]any, 0, len(users))
 		for _, u := range users {
@@ -1958,7 +2014,7 @@ func (s *Server) registerM6() {
 		}
 		id, err := s.eng.CreateWorkspace(ctx, token, name, peerIP(req))
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		return id, nil
 	})
@@ -1972,7 +2028,7 @@ func (s *Server) registerM6() {
 		}
 		views, err := s.eng.ListWorkspaces(ctx, token)
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		out := make([]any, 0, len(views))
 		for _, w := range views {
@@ -2005,7 +2061,7 @@ func (s *Server) registerM6() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.eng.RenameWorkspace(ctx, token, wsID, name, peerIP(req)))
+		return nil, s.wireErr(s.eng.RenameWorkspace(ctx, token, wsID, name, peerIP(req)))
 	})
 	s.handle("workspace.delete", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 2); err != nil {
@@ -2019,7 +2075,7 @@ func (s *Server) registerM6() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.eng.DeleteWorkspace(ctx, token, wsID, peerIP(req)))
+		return nil, s.wireErr(s.eng.DeleteWorkspace(ctx, token, wsID, peerIP(req)))
 	})
 	s.handle("workspace.attach", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -2037,7 +2093,7 @@ func (s *Server) registerM6() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.eng.AttachConnection(ctx, token, wsID, connID, peerIP(req)))
+		return nil, s.wireErr(s.eng.AttachConnection(ctx, token, wsID, connID, peerIP(req)))
 	})
 	s.handle("workspace.detach", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 3); err != nil {
@@ -2055,7 +2111,7 @@ func (s *Server) registerM6() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, wireErr(s.eng.DetachConnection(ctx, token, wsID, connID, peerIP(req)))
+		return nil, s.wireErr(s.eng.DetachConnection(ctx, token, wsID, connID, peerIP(req)))
 	})
 }
 
@@ -2103,14 +2159,14 @@ func (s *Server) registerPressure() {
 		// The authorization lives in core, so this handler cannot be the place
 		// the rule is decided.
 		if _, err := s.auth.RequireAdminToken(ctx, token); err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		if s.pressure == nil {
-			return nil, wireErr(errNoPressure)
+			return nil, s.wireErr(errNoPressure)
 		}
 		snap, err := s.pressure()
 		if err != nil {
-			return nil, wireErr(err)
+			return nil, s.wireErr(err)
 		}
 		return pressureWire(snap), nil
 	})
