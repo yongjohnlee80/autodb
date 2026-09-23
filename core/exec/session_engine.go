@@ -587,8 +587,10 @@ func (e *Engine) SessionsInTransaction() int { return e.sessions.countInTransact
 // then acting are two steps with a window between them, and a BEGIN admitted
 // in that window was torn down by the drain -- which is the loss the refusal
 // exists to prevent.
-func (e *Engine) BeginShutdown() int { return e.sessions.closeTxAdmission() }
+func (e *Engine) BeginShutdown() (blockers int, token uint64) {
+	return e.sessions.closeTxAdmission()
+}
 
 // AbortShutdown reopens transaction admission after a shutdown that was
 // decided on but not carried out.
-func (e *Engine) AbortShutdown() { e.sessions.reopenTxAdmission() }
+func (e *Engine) AbortShutdown(token uint64) bool { return e.sessions.reopenTxAdmission(token) }

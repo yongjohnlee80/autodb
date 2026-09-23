@@ -884,21 +884,35 @@ func (s *Server) register() {
 		// was a check-then-act race: a BEGIN admitted between the two was torn
 		// down by the drain, which is the loss this refusal exists to prevent.
 		// It is not a DATA race, so -race could not have found it.
-		if n := s.eng.BeginShutdown(); n > 0 {
+		blockers, owner := s.eng.BeginShutdown()
+		if blockers > 0 {
 			return nil, &golibrpc.Error{
 				Code: CodeShutdownBlocked,
 				Message: fmt.Sprintf("refusing to stop: %d session(s) hold an open "+
 					"transaction, and stopping now would roll back work that has not "+
 					"been committed. Commit or close them, or wait for the "+
-					"idle-in-transaction timeout to reap them.", n),
+					"idle-in-transaction timeout to reap them.", blockers),
+			}
+		}
+		if owner == 0 {
+			// ANOTHER DECISION OWNS ADMISSION, so this one neither commits nor
+			// aborts. Committing on top of it is not harmless: if that decision
+			// then abandons its shutdown it reopens admission, and stopping the
+			// server afterwards loses a transaction admitted in between -- the
+			// same loss as the original race, reached the long way round.
+			return nil, &golibrpc.Error{
+				Code: CodeShutdownBlocked,
+				Message: "refusing to stop: another shutdown decision is already in " +
+					"progress on this server. Retry if it does not complete.",
 			}
 		}
 		if err := s.auth.Audit(ctx, ident.UserID(), peerIP(req),
 			"server_shutdown", "requested over rpc"); err != nil {
-			// Admission is CLOSED at this point and the shutdown is not
-			// happening, so it has to be reopened -- otherwise the daemon
-			// keeps refusing to begin transactions it is never going to end.
-			s.eng.AbortShutdown()
+			// This decision closed admission and is not going to stop, so it
+			// reopens it -- and only it can, because the token says so.
+			// Otherwise the daemon keeps refusing to begin transactions it is
+			// never going to end.
+			s.eng.AbortShutdown(owner)
 			return nil, s.wireErr(err) // an unaudited privileged effect never happens
 		}
 		s.RequestShutdown()
