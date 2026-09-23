@@ -1,0 +1,24 @@
+#!/bin/sh
+# THE JOURNAL THE UPDATER MUST ACTUALLY PRINT.
+#
+# The defect this stub exists for is an updater that said "See the journal
+# above" having printed nothing from it, so the cells have to distinguish "the
+# lines reached the operator" from "a pointer to them did". That needs a
+# journal with recognisable CONTENT, not merely a command that succeeds.
+#
+# UPD_JOURNAL is the text to emit, newline-escaped as \n. UPD_JOURNAL_RC makes
+# the read FAIL, which is the case an operator hits on a host where the unit
+# has no journal at all -- and which must not abort a run that still has a
+# rollback to perform.
+#
+# Every invocation is logged, because WHEN it ran relative to the rollback's
+# restart is itself a claim: read afterwards, the journal describes the
+# recovery and not the failure.
+set -eu
+LOG="${UPD_LOG:-/dev/null}"
+printf 'journalctl %s\n' "$*" >> "$LOG"
+
+_rc="${UPD_JOURNAL_RC:-0}"
+[ "$_rc" = "0" ] || exit "$_rc"
+
+printf '%b\n' "${UPD_JOURNAL:-(no journal configured for this stub)}"

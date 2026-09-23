@@ -69,6 +69,19 @@ case "${1:-}" in
           fi
         done
         ;;
+      *" ExecMainStatus "*)
+        # HOW THE FAILED UNIT EXITED. Scripted, because the whole point of the
+        # rollback report is that 78 and 69 send an operator somewhere
+        # completely different from a crash -- and a stub with one answer
+        # cannot tell those branches apart.
+        printf '%s\n' "${UPD_EXIT_STATUS:-0}"
+        ;;
+      *" ExecMainCode "*)
+        # The siginfo code: 1 is CLD_EXITED, 2 is CLD_KILLED. Defaulting to 1
+        # keeps every existing cell describing a unit that exited rather than
+        # one that was signalled.
+        printf '%s\n' "${UPD_EXIT_CODE:-1}"
+        ;;
       *)
         printf '%s\n' "${UPD_WAS_ACTIVE:-active}"
         ;;

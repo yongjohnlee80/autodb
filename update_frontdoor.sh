@@ -146,6 +146,79 @@ done
 # evidence that the process active a second ago is the one active now.
 #
 # Sets ACTIVE_STATE, ACTIVE_PID and ACTIVE_RESTARTS for the caller's message.
+# exit_status_note turns a unit's last exit into a sentence naming the
+# OPERATOR'S NEXT ACTION, which is what differs between these cases.
+#
+# 78 and 69 earn their own branches because they send somebody somewhere
+# completely different from a crash. 78 is EX_CONFIG: the daemon read the
+# configuration, refused it, and said so -- nothing is wrong with the binary or
+# the host, and restarting cannot help. 69 is EX_UNAVAILABLE: it declined to
+# serve because another autodb already holds the address, so the thing to find
+# is the other process. Both are reported by autodb deliberately, and an
+# updater that folded them into "did not come up" throws away a diagnosis the
+# daemon had already made.
+exit_status_note() {
+  case "$1" in
+    78) printf '%s' "REFUSED THE CONFIGURATION; it did not crash. Fix the configuration and run this update again." ;;
+    69) printf '%s' "DECLINED TO SERVE because another autodb already holds the address. Find the other process; restarting will not help until it is gone." ;;
+    0)  printf '%s' "exited successfully and did not stay running, which for a daemon is still a failure to start." ;;
+    *)  printf '%s' "exited with a failure status. The lines below are what it said on the way out." ;;
+  esac
+}
+
+# report_failure prints what the unit that just failed already said about
+# itself: how it exited, and the lines it wrote on the way out.
+#
+# THE ROLLBACK IS NOT THE DEFECT; THE SILENCE IS. Observed on a production host
+# upgrading v0.3.14 to v0.3.17: the update built, swapped, failed to come up and
+# rolled back correctly, then told the operator "See the journal above." Nothing
+# from the journal had been printed. Reading it needed `sudo journalctl -u ...`,
+# which the operator had no reason to know and which their own account could not
+# do -- in neither `adm` nor `systemd-journal`. The cause was ONE LINE the
+# daemon had already written, in the clearest possible terms: that
+# exec.max_target_conns is required when the front door is enabled. The daemon
+# diagnosed itself perfectly and this script threw the diagnosis away.
+#
+# IT MUST RUN BEFORE THE ROLLBACK PUTS THE OLD BINARY BACK. The rollback
+# restarts this same unit, which replaces ExecMainStatus and appends to the
+# journal -- read afterwards, both describe the RECOVERY and not the failure,
+# and an operator would be handed the old binary's clean startup as the
+# explanation for why the new one died. The ordering is the whole of their
+# value, which is why a cell asserts it rather than this comment alone.
+#
+# ONE PROPERTY PER CALL, on purpose. This script learned the hard way that
+# `systemctl show -p A -p B --value` returns the properties in SYSTEMD's chosen
+# order and strips the keys that would reveal a mismatch. A single-property
+# call cannot be misordered, which is the same reasoning the closing report
+# already relies on.
+report_failure() {
+  _unit="$1"
+  _exit_status="$(systemctl show -p ExecMainStatus --value "$_unit" 2>/dev/null || printf '')"
+  _exit_code="$(systemctl show -p ExecMainCode --value "$_unit" 2>/dev/null || printf '')"
+  [ -n "$_exit_status" ] || _exit_status="unknown"
+  [ -n "$_exit_code" ] || _exit_code="unknown"
+
+  # ExecMainCode is the siginfo code: 1 is CLD_EXITED, so the status is an exit
+  # code; 2 is CLD_KILLED, so it is a SIGNAL NUMBER and reading it as an exit
+  # code would name the wrong thing entirely -- signal 9 is not EX_NOPERM.
+  case "$_exit_code" in
+    2) warn "$_unit was KILLED by signal $_exit_status" ;;
+    1) warn "$_unit exited with status $_exit_status -- $(exit_status_note "$_exit_status")" ;;
+    *) warn "$_unit did not report how it exited (ExecMainCode=$_exit_code, ExecMainStatus=$_exit_status)" ;;
+  esac
+
+  # THE LINES THEMSELVES, not a pointer to them. This runs as root, which the
+  # script already required, so it can read a journal the operator's own account
+  # cannot. A failure here is reported and does not abort the run: losing the
+  # explanation must not also lose the rollback.
+  step "What $_unit logged before it stopped"
+  if journalctl -u "$_unit" -n 30 --no-pager 2>/dev/null; then
+    :
+  else
+    warn "could not read the journal for $_unit; try: journalctl -u $_unit -b --no-pager"
+  fi
+}
+
 wait_active() {
   _stable=0
   _seen_pid=""
@@ -436,6 +509,10 @@ else
     # ROLL BACK. The daemon was running before this script touched it, and it
     # is not running now, so the change is undone rather than reported.
     warn "the new binary did not stay active (ActiveState=$ACTIVE_STATE, MainPID=$ACTIVE_PID, NRestarts=$ACTIVE_RESTARTS)"
+    # FIRST, WHILE IT IS STILL THE FAILURE BEING DESCRIBED. Everything below
+    # restarts this unit on the old binary, which overwrites the exit status and
+    # appends to the journal.
+    report_failure "$UNIT"
     warn "rolling back to the previous binary"
     install -m 0755 "$BACKUP" "$PREFIX/autodb"
     systemctl start "$UNIT" || true
@@ -456,7 +533,7 @@ info "service  : $(systemctl show -p ActiveState --value "$UNIT" 2>/dev/null || 
 info "previous : $BACKUP"
 say ""
 if [ "$ROLLED_BACK" = "yes" ]; then
-  die "the update was ROLLED BACK: $TAG did not come up. See the journal above."
+  die "the update was ROLLED BACK: $TAG did not come up. What it said is printed above, under \"What $UNIT logged\"."
 fi
 say "Updated to $_ver. The config, meta store, TLS material and keyslot were"
 say "not touched. The previous binary is at $BACKUP if you want it back:"
