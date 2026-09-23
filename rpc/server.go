@@ -110,6 +110,14 @@ type Server struct {
 	// which is the one instant nobody is asking about.
 	pressure func() (pressure.Snapshot, error)
 
+	// discloseDetail is true when this RPC surface is reachable only from this
+	// host (unix socket or loopback TCP — the boundary ADR 0056 §4 relies on),
+	// so wireErr may disclose the raw cause of a dial/config failure to the
+	// operator on their own install. False on any off-host-reachable surface,
+	// where the cause is withheld and only the sentinel shape crosses. It is a
+	// capability fixed at assembly, not per-call, because the surface is.
+	discloseDetail bool
+
 	// verbs is every method name this server registered, recorded as it
 	// registers them. It exists because the rule above — bump Protocol when
 	// the verb surface changes — was a rule with no enforcement, and it was
@@ -202,11 +210,12 @@ type FrontDoorInfo struct {
 type Option func(*options)
 
 type options struct {
-	logger    logger.Logger
-	listener  net.Listener
-	notesDir  string
-	frontDoor func() FrontDoorInfo
-	pressure  func() (pressure.Snapshot, error)
+	logger         logger.Logger
+	listener       net.Listener
+	notesDir       string
+	frontDoor      func() FrontDoorInfo
+	pressure       func() (pressure.Snapshot, error)
+	discloseDetail bool
 }
 
 // WithLogger sets the transport logger.
@@ -248,6 +257,20 @@ func WithFrontDoor(fn func() FrontDoorInfo) Option {
 	return func(o *options) { o.frontDoor = fn }
 }
 
+// WithDetailDisclosure enables operator-facing error detail on this RPC
+// surface — today, the raw cause of a *DialFailure / *ConfigFailure that the
+// wireErr method would otherwise reduce to its cause-free sentinel shape.
+//
+// Pass true ONLY for a surface reachable only from this host (a unix socket,
+// or a loopback TCP bind — config.Endpoint.HostLocalOnly), because that cause
+// names the target host, role, database and any DSN credential. The
+// composition root computes it from the resolved endpoint; every other caller
+// (tests, in-process assembly) leaves it false and gets the sentinel shape,
+// which is the safe default.
+func WithDetailDisclosure(v bool) Option {
+	return func(o *options) { o.discloseDetail = v }
+}
+
 // New assembles the server over an authenticated core. version is the
 // build-stamped autodb version reported by sys.hello.
 func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version string, opts ...Option) *Server {
@@ -260,10 +283,11 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 	s := &Server{
 		auth: authSvc, eng: eng, version: version,
 		instance: newInstanceID(), stop: make(chan struct{}),
-		notesDir:  o.notesDir,
-		frontDoor: o.frontDoor,
-		pressure:  o.pressure,
-		verbs:     make(map[string]struct{}),
+		notesDir:       o.notesDir,
+		frontDoor:      o.frontDoor,
+		pressure:       o.pressure,
+		discloseDetail: o.discloseDetail,
+		verbs:          make(map[string]struct{}),
 	}
 
 	ropts := []golibrpc.Option{

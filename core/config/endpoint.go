@@ -47,6 +47,32 @@ type Endpoint struct {
 // by construction (Unix domain socket) rather than by network filtering policy.
 func (e Endpoint) IsLocal() bool { return e.Network == "unix" }
 
+// HostLocalOnly reports whether this endpoint is reachable ONLY from this host:
+// a unix socket (local by construction, IsLocal) OR a TCP bind on a loopback
+// address. It is broader than IsLocal, which is unix-only.
+//
+// This is the boundary ADR 0056 §4 treats as the security boundary, and the
+// condition under which the RPC surface may disclose operator-facing error
+// detail (a dial/config cause names the target host, role, database and any
+// DSN credential). A TCP bind on a routable address is NOT host-local, so that
+// detail is never projected onto a wire another machine can read; wider
+// exposure waits for the M9 gate-guard ADR.
+//
+// The TCP host is always an IP literal here — config validation rejects a
+// non-parseable server.bind when the port is set — so no name resolution is
+// needed and a malformed address is treated conservatively as not host-local.
+func (e Endpoint) HostLocalOnly() bool {
+	if e.Network == "unix" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(e.Address)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // String renders the endpoint address for human-facing logging and the sys.hello RPC response.
 func (e Endpoint) String() string { return e.Address }
 

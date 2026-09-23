@@ -592,7 +592,12 @@ func runServe(configPath string) error {
 	}
 	srv := rpc.New(svc, eng, cfg.Server, version,
 		rpc.WithListener(ln), rpc.WithLogger(oplog), rpc.WithNotesDir(notesRoot),
-		rpc.WithFrontDoor(frontDoorState), rpc.WithPressure(pressureState))
+		rpc.WithFrontDoor(frontDoorState), rpc.WithPressure(pressureState),
+		// Operator-facing error detail (a dial/config cause naming the target)
+		// is disclosed only when this surface is reachable from this host alone
+		// — a unix socket or a loopback TCP bind (ADR 0056 §4). ep is the
+		// resolved endpoint this daemon actually bound.
+		rpc.WithDetailDisclosure(ep.HostLocalOnly()))
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)
 	// A lease loss is reported as the failure it is. Without this the
