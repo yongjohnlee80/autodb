@@ -41,9 +41,12 @@
 //     compatible daemon before binding ports or serving HTTP assets, failing fast
 //     rather than presenting broken user sessions.
 //  5. Standardized Exit Codes: Process exits adhere to sysexits conventions:
-//     - 0: Successful execution or probe confirmation of a compatible running daemon.
+//     - 0: Successful execution.
 //     - 1: General runtime or system failure.
 //     - 2: Command-line usage or flag syntax error.
+//     - 69 (EX_UNAVAILABLE): Asked to serve and did not, because another autodb
+//     already holds the endpoint or the meta store. Formerly 0 for the endpoint
+//     case, which a Type=simple unit reads as a clean stop.
 //     - 78 (EX_CONFIG): Configuration parse failure, semantic constraint violation,
 //     or invalid budget pairing.
 package main

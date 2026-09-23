@@ -863,8 +863,10 @@ func (s *Server) register() {
 		// contexts and waits for them to unwind; a session parked BETWEEN
 		// statements inside a transaction has no in-flight handler, so the drain
 		// never sees it and the target rolls its work back when the connection
-		// drops. ADR 0058 s3.7.3 ruled cancel-and-wait for in-flight STATEMENTS
-		// and left this case unstated; the amendment is recorded there.
+		// drops. The decided semantics for an in-flight STATEMENT are
+		// cancel-and-wait -- a long UPDATE is aborted and the caller is told so
+		// -- and that reasoning never covered a transaction sitting idle between
+		// statements, which loses accumulated work rather than one statement.
 		//
 		// The count is disclosed because the caller is an authenticated admin
 		// acting on their own install, and "something is open" is not a thing

@@ -14,8 +14,10 @@ import (
 // The drain does not cover this and never did. It cancels in-flight handler
 // contexts and waits for them to unwind; a session parked BETWEEN statements
 // inside a transaction has no in-flight handler, so the drain never sees it,
-// the connection drops, and the target rolls the work back. ADR 0058 s3.7.3
-// ruled cancel-and-wait for in-flight STATEMENTS and left this case unstated.
+// the connection drops, and the target rolls the work back. The decided
+// semantics for an in-flight STATEMENT are cancel-and-wait -- a long UPDATE is
+// aborted and the caller told so -- and that reasoning never covered a
+// transaction idle between statements, which loses accumulated work instead.
 //
 // DRIVEN OVER THE WIRE, because the refusal has to be in the path an operator
 // actually takes. A cell over the engine's counter alone would stay green with

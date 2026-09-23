@@ -37,11 +37,13 @@ var ErrForeignOccupant = errors.New("webserver: the address is occupied by somet
 // Preflight refuses to start when there is no daemon to serve.
 //
 // `--web-ui` never starts a backend (requirement 5), so a missing daemon is a
-// startup failure rather than something to fix by spawning. Note the asymmetry
-// with `--serve`, which exits ZERO when it finds a daemon already running: for
-// that command an existing daemon means success, and for this one a missing
-// daemon means failure. Sharing an exit convention between the two would be
-// wrong in one direction or the other.
+// startup failure rather than something to fix by spawning.
+//
+// The asymmetry with `--serve` is about WHAT each command was asked to do, not
+// about a shared exit number. `--serve` was asked to become the daemon, so
+// finding one already there means it did not: it now refuses too, with its own
+// status. This command was asked to serve a UI over a daemon, so finding none
+// means it cannot. Both refuse; they refuse to different things.
 //
 // This is only half the guarantee. It covers startup; a later reconnect is
 // covered by passing a nil spawn function to the session, which makes
