@@ -409,7 +409,7 @@ func TestPressureView_ASupersededReadingIsDiscardedWithoutStallingTheNextOne(t *
 
 	superseded := aFullDoor()
 	superseded.Sessions = pressure.Row{Label: "sessions.global", Value: 1, Cap: 10}
-	v.settle(pressureLoaded{view: v, snap: superseded}, false)
+	v.settle(pressureLoaded{snap: superseded}, false)
 
 	if v.inFlight {
 		t.Error("a discarded reading left the view marked in-flight; every later tick " +
@@ -535,5 +535,76 @@ func TestPressureView_AStalledDaemonIsNotAskedAgainWhileItIsStillAnswering(t *te
 		t.Errorf("a daemon that had not answered yet was asked %d times; each tick "+
 			"holding its own connection is this surface adding load to the thing it "+
 			"exists to diagnose", got)
+	}
+}
+
+// cancellablePressure answers the first read at once, then blocks on the
+// context it was given and records that the context was cancelled.
+type cancellablePressure struct {
+	mu        sync.Mutex
+	calls     int
+	started   chan struct{} // the blocking read has begun
+	cancelled chan struct{} // ... and its context was cancelled
+}
+
+func (c *cancellablePressure) Pressure(ctx context.Context) (pressure.Snapshot, error) {
+	c.mu.Lock()
+	c.calls++
+	n := c.calls
+	c.mu.Unlock()
+	if n == 1 {
+		// The open read returns, so the view is on screen rather than the
+		// keystroke that opened it being stuck inside this call.
+		return aFullDoor(), nil
+	}
+	if n == 2 {
+		close(c.started)
+		<-ctx.Done()
+		close(c.cancelled)
+		return pressure.Snapshot{}, ctx.Err()
+	}
+	<-ctx.Done()
+	return pressure.Snapshot{}, ctx.Err()
+}
+
+// CLOSING THE VIEW CANCELS A READ THAT IS ALREADY RUNNING.
+//
+// STOPPING THE TIMER IS NOT STOPPING THE WORK, and review found the difference
+// the hard way. The timer was armed on the view's node from the start, so
+// closing the float did stop the NEXT tick — and the cell for that waited for a
+// fast read to finish before closing, so it only ever observed that no new
+// reads began. The read itself was dispatched on the MODEL's node, which
+// outlives every float: golib derives a task's context from its owner's, so an
+// in-flight read kept its connection to its own timeout against a daemon nobody
+// was watching, and then settled through a pointer to an unmounted view.
+//
+// "While open, and only while open" is a property of who owns the TASK.
+func TestPressureView_ClosingTheViewCancelsAReadAlreadyInFlight(t *testing.T) {
+	src := &cancellablePressure{
+		started:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+	}
+	h := startPressureApp(t, src)
+
+	var v *pressureView
+	h.on(func() { v = h.m.openPressure() })
+
+	// THE POSITIVE CONTROL, AND THIS CELL IS WORTHLESS WITHOUT IT. A read that
+	// never began is trivially "not still running", and every assertion below
+	// would pass against a view that had stopped refreshing entirely.
+	select {
+	case <-src.started:
+	case <-time.After(4 * pressureCadence):
+		t.Fatal("no refresh ever began, so there is no in-flight read to cancel")
+	}
+
+	h.on(func() { v.float.Hide() })
+
+	select {
+	case <-src.cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("closing the pressure view did not cancel the read it had in flight; " +
+			"it holds a connection to its own timeout against a daemon nobody is " +
+			"watching, and settles through a pointer to an unmounted view")
 	}
 }

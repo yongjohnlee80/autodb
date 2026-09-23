@@ -285,40 +285,61 @@ func (v *pressureView) Init(ctx *tui.Context) {
 // the daemon takes to answer — on the surface whose whole purpose is being
 // usable while the daemon is in trouble.
 func (v *pressureView) refresh() {
-	if v.inFlight || v.m == nil || v.m.ctx == nil || v.m.pressureSource() == nil {
+	if v.inFlight || v.ctx == nil || v.m == nil {
 		// ONE AT A TIME. A daemon taking longer than the cadence would
 		// otherwise accumulate a fetch per tick, each holding a connection,
 		// and the surface would be adding load to what it is diagnosing.
 		return
 	}
-	m := v.m
+	// RESOLVED HERE, ON THE LOOP, NOT INSIDE THE TASK. The source is read off
+	// Model fields the loop goroutine owns -- the session is replaced on a
+	// reconnect -- so a task that resolved it for itself would be reading them
+	// from another goroutine while the loop may be writing them.
+	src := v.m.pressureSource()
+	if src == nil {
+		return
+	}
 	// The epoch this reading is fetched under, so a result from a connection
 	// that has since been replaced can be recognised on arrival.
 	var gen uint64
-	if m.session != nil {
-		gen = m.session.Gen()
+	if v.m.session != nil {
+		gen = v.m.session.Gen()
 	}
 	v.inFlight = true
-	m.ctx.Go(func(c context.Context) (any, error) {
-		snap, err := m.pressureSnapshot(c)
-		return pressureLoaded{gen: gen, view: v, snap: snap, err: err}, nil
+	// OWNED BY THIS VIEW'S NODE, AND THAT IS THE WHOLE OF "ONLY WHILE OPEN".
+	//
+	// golib derives a task's context from its OWNER's node and cancels it when
+	// that owner unmounts. Dispatched on the MODEL's node -- which is what this
+	// did, and the model outlives every float -- closing the view stopped the
+	// next tick but not the read already in flight: it ran on against a daemon
+	// nobody was watching, for as long as its own timeout allowed, and then
+	// settled through a pointer to an unmounted view. The timer being
+	// view-owned was not enough, because a timer is not where the work is.
+	v.ctx.Go(func(c context.Context) (any, error) {
+		snap, err := src.Pressure(c)
+		return pressureLoaded{gen: gen, snap: snap, err: err}, nil
 	})
 }
 
 // pressureLoaded carries one refresh back onto the loop goroutine.
 //
-// ITS OWN RESULT TYPE RATHER THAN A managerReload, for the reason prefWritten
-// is: the reload dispatcher drops a result whose connection generation has
-// moved and never runs its apply, which for a TICKET would leak it and for THIS
-// would leave the view marked in-flight forever -- one dropped result and the
-// surface stops refreshing for as long as it is open, silently, which is the
-// exact failure this scope exists to remove. Currency decides what is SHOWN,
-// never whether the ticket comes back.
+// IT COMES BACK TO THE VIEW, NOT THROUGH THE MODEL'S RESULT DISPATCHER. That
+// dispatcher drops a result whose connection generation has moved and never
+// runs its apply, which here would leave the view marked in-flight forever --
+// one dropped result and the surface stops refreshing for as long as it is
+// open, silently, which is the exact failure this scope exists to remove. The
+// ticket comes back either way; currency decides only what is SHOWN. Routing it
+// to the view's own node is also what lets the task die with the view.
 type pressureLoaded struct {
 	gen  uint64
-	view *pressureView
 	snap pressure.Snapshot
 	err  error
+}
+
+// current answers whether a reading is still about the connection in front of
+// the operator.
+func (v *pressureView) current(gen uint64) bool {
+	return v.m == nil || v.m.session == nil || gen == v.m.session.Gen()
 }
 
 // settle returns the in-flight ticket and, if the reading is still current,
@@ -448,6 +469,14 @@ func (v *pressureView) Render(s tui.Surface) {
 }
 
 func (v *pressureView) HandleEvent(ev tui.Event) bool {
+	if tr, ok := ev.(tui.TaskResult); ok {
+		res, mine := tr.Value.(pressureLoaded)
+		if !mine {
+			return false
+		}
+		v.settle(res, tr.Err == nil && v.current(res.gen))
+		return true
+	}
 	if t, ok := ev.(tui.TickEvent); ok {
 		// THE AGE ADVANCES ON EVERY TICK, the figures only when one lands. A
 		// surface whose clock moved only on a successful refresh would show a
