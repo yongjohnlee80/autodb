@@ -121,18 +121,40 @@ func (c Config) wasSet(section, key string) bool {
 // plausible candidates.
 func (c Config) SourcePath() string { return c.sourcePath }
 
-// ForeignOnAServiceHost reports that this host has a system server config and
-// the config in hand is NOT it.
+// ForeignOnAServiceHost is GONE, and the reason is worth keeping.
 //
-// The distinction matters for one decision: whether a frontend may become the
-// daemon. On a laptop with no service config, the first frontend to find
-// nothing listening should bring one up. On a host that HAS one, a frontend
-// must never -- it would bind the service's port against whatever store its
-// own config resolves to. ClientOnly covers the config the installer hands
-// out; this covers every OTHER file on such a host, including a developer's
-// own, which carries no client_only key and never will.
-func (c Config) ForeignOnAServiceHost() bool {
-	return c.ServiceHostSeen && c.sourcePath != systemServerPath()
+// It reported "this host has a system server config and the config in hand is
+// NOT it", and it gated one decision: whether a frontend may become the
+// daemon. Excluding the service's own config from it was justified by the
+// claim that calling that config foreign "would stop the installed daemon from
+// serving".
+//
+// THAT CLAIM WAS FALSE. The predicate was only ever read by spawnFor, whose
+// sole caller is runUI. runServe -- the daemon systemd actually starts --
+// never consulted it, so nothing about serving depended on the exclusion. What
+// the exclusion did instead was let a frontend holding /etc/autodb/config.toml
+// spawn a detached daemon on the service's own ports, which then outlived it
+// and kept the unit from starting. Observed twice on the droplet.
+//
+// The decision is the HOST's, not the file's, so ServiceHostSeen is the whole
+// rule now and a separate predicate would only be somewhere for the two to
+// disagree again.
+
+// MaySpawnDaemon reports whether a frontend holding this config may bring a
+// daemon up itself.
+//
+// Two refusals, one question. ClientOnly is the installer's handout saying so
+// explicitly. ServiceHostSeen is the host saying it already has a daemon and
+// systemd starts it -- which holds for EVERY config on such a host, the
+// service's own included, because holding that file does not make a frontend
+// the daemon.
+//
+// The decision lives HERE, beside the fields it reads, rather than in the
+// caller: its inputs include an unexported source path, so a decision made in
+// package main could not be celled against a config that genuinely IS the
+// service's own -- which is precisely the case that was wrong before.
+func (c Config) MaySpawnDaemon() bool {
+	return !c.Server.ClientOnly && !c.ServiceHostSeen
 }
 
 // FrontDoor configures the PostgreSQL wire-protocol listener.
@@ -939,7 +961,8 @@ func UserConfigPath() (string, error) {
 //
 // Spoofing prevention:
 // This search order is safe on service hosts because spawning an embedded daemon is guarded
-// separately by Config.ForeignOnAServiceHost.
+// separately by ServiceHostSeen: where a service config exists, no frontend spawns,
+// whichever config the search order handed it.
 func DefaultPath() (string, error) {
 	user, uerr := UserConfigPath()
 

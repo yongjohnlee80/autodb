@@ -71,15 +71,23 @@ On a shared server hosting `autodb` as a system daemon, an unprivileged user run
                          │               • Frontend auto-spawns daemon
                          │                 if nothing is listening
                          ▼
-             Is loaded config == /etc/autodb/config.toml?
+             Does /etc/autodb/config.toml EXIST on this host?
                          │
              YES ────────┴──────── NO
               │                    │
               ▼                    ▼
-     [System Service]      [ForeignOnAServiceHost = true]
-     • Permitted to run    • FORBIDDEN from spawning a daemon
-       daemon (--serve)    • Prevents port collisions and
-                             unauthorized private meta-stores
+   [ServiceHostSeen]        [Single-user install]
+   • NO frontend spawns     • The first frontend to find
+     a daemon -- systemd      nothing listening brings the
+     owns that job            daemon up
+   • Applies to EVERY
+     config, the service's
+     own included: holding
+     it does not make a
+     frontend the daemon
+   • (`--serve` itself is
+     unaffected; it never
+     consults this)
 ```
 
 ---
