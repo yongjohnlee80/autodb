@@ -113,6 +113,15 @@ const (
 	// sent to the wrong file, exactly the split the codes above encode. What a
 	// caller reads in the Message depends on the SURFACE (see the wireErr
 	// method); the code, and therefore the remedy, does not.
+	// CodeShutdownBlocked reports that stopping the server now would sever open
+	// transactions, so it was NOT stopped.
+	//
+	// Its own code because the caller's next move is unlike every other refusal
+	// here: nothing is broken, nothing needs fixing, and retrying the identical
+	// call later is exactly right. A generic failure would read as "the shutdown
+	// broke" and send an operator looking for a fault that does not exist.
+	CodeShutdownBlocked int64 = -32050
+
 	CodeDialFailed   int64 = -32048
 	CodeConfigFailed int64 = -32049
 )
@@ -845,6 +854,29 @@ func (s *Server) register() {
 		ident, aerr := s.auth.RequireAdmin(ctx, token)
 		if aerr != nil {
 			return nil, s.wireErr(aerr)
+		}
+		// REFUSED BEFORE THE AUDIT, because a refusal is not a privileged
+		// effect -- nothing is stopped, so there is nothing that could have
+		// happened unaudited.
+		//
+		// THE DRAIN DOES NOT MAKE THIS SAFE. It cancels in-flight handler
+		// contexts and waits for them to unwind; a session parked BETWEEN
+		// statements inside a transaction has no in-flight handler, so the drain
+		// never sees it and the target rolls its work back when the connection
+		// drops. ADR 0058 s3.7.3 ruled cancel-and-wait for in-flight STATEMENTS
+		// and left this case unstated; the amendment is recorded there.
+		//
+		// The count is disclosed because the caller is an authenticated admin
+		// acting on their own install, and "something is open" is not a thing
+		// anybody can act on.
+		if n := s.eng.SessionsInTransaction(); n > 0 {
+			return nil, &golibrpc.Error{
+				Code: CodeShutdownBlocked,
+				Message: fmt.Sprintf("refusing to stop: %d session(s) hold an open "+
+					"transaction, and stopping now would roll back work that has not "+
+					"been committed. Commit or close them, or wait for the "+
+					"idle-in-transaction timeout to reap them.", n),
+			}
 		}
 		if err := s.auth.Audit(ctx, ident.UserID(), peerIP(req),
 			"server_shutdown", "requested over rpc"); err != nil {

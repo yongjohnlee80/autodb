@@ -719,6 +719,38 @@ func (r *sessionRegistry) inTransactionHoldingBackend() int {
 	return n
 }
 
+// countInTransaction counts the sessions that believe they are inside a
+// transaction.
+//
+// It asks each session for txPhase, which is what session.inTransaction()
+// reports and therefore what a CALLER's transaction state actually is. Note
+// the deliberate difference from inTransactionHoldingBackend above, which asks
+// whether a physical backend is pinned: that one answers a CAPACITY question
+// ("is this slot reclaimable"), and this one answers a DATA question ("would
+// stopping now throw away work somebody has not finished"). A session can be
+// in a transaction the engine has not pinned a backend for, and losing its
+// work is no less a loss for that.
+//
+// Same lock discipline as its neighbour: snapshot the registry under r.mu,
+// then read each session's own state outside it, because taking both at once
+// is how this package would acquire a lock-ordering problem it does not have.
+func (r *sessionRegistry) countInTransaction() int {
+	r.mu.Lock()
+	sessions := make([]*session, 0, len(r.byID))
+	for _, s := range r.byID {
+		sessions = append(sessions, s)
+	}
+	r.mu.Unlock()
+
+	n := 0
+	for _, s := range sessions {
+		if s.inTransaction() {
+			n++
+		}
+	}
+	return n
+}
+
 func (r *sessionRegistry) leaseCount(connID int64) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

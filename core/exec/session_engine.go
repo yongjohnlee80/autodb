@@ -558,3 +558,18 @@ func (e *Engine) claimSession(ctx context.Context, s *session) (release func(), 
 		}
 	}, &flag, nil
 }
+
+// SessionsInTransaction reports how many sessions currently hold an open
+// transaction.
+//
+// EXPORTED FOR THE SHUTDOWN DECISION. Stopping the server severs every open
+// transaction: the connections drop, the targets roll them back, and the work
+// a caller has not committed is gone. The drain does not cover this — it
+// cancels in-flight handler contexts and waits for them to unwind, so a
+// session parked BETWEEN statements inside a transaction has no in-flight
+// handler for the drain to see at all.
+//
+// A count rather than a boolean, because the caller has to tell an operator
+// HOW MANY sessions they would be interrupting; "something is open" is not
+// something anyone can act on.
+func (e *Engine) SessionsInTransaction() int { return e.sessions.countInTransaction() }
