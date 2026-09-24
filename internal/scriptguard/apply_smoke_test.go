@@ -83,11 +83,16 @@ func TestScripts_ApplyPathsRunToCompletion(t *testing.T) {
 	//
 	// `docker info` is the whole predicate: it reaches the daemon or it does
 	// not, which is exactly the capability this cell needs.
-	if err := dockerUsable(); err != nil {
-		t.Skipf("docker is not usable here (%v): the --apply paths cannot be "+
-			"exercised, so the two runtime-resolution defects this cell exists for "+
-			"are UNCOVERED in this run. CI runs on ubuntu-latest, where it does run.", err)
-	}
+	//
+	// AND THE SKIP IS NOT THE END OF IT. The sentence that stood here --
+	// "CI runs on ubuntu-latest, where it does run" -- was an assumption, and
+	// when it was checked on 2026-09-23 it could not be confirmed: without -v a
+	// cell that ran and a cell that skipped produce the same CI output. CI now
+	// sets SCRIPTGUARD_REQUIRE_DOCKER=1, which turns this skip into a failure
+	// there while a laptop keeps skipping honestly. See capability_test.go.
+	requireCapability(t, capDocker, dockerUsable(),
+		"the --apply paths cannot be exercised, so the two runtime-resolution "+
+			"defects this cell exists for are UNCOVERED in this run")
 
 	script, err := filepath.Abs(filepath.Join("testdata", "apply_smoke.sh"))
 	if err != nil {

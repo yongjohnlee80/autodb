@@ -41,10 +41,9 @@ import (
 // passing vacuously where setsid is unavailable.
 func underSetsid(t *testing.T, script string, args ...string) (string, error) {
 	t.Helper()
-	if _, err := exec.LookPath("setsid"); err != nil {
-		t.Skip("setsid unavailable: this cell cannot create the no-terminal condition " +
-			"it exists to test, and passing without it would be vacuous")
-	}
+	requireCapability(t, capSetsid, binaryProbe("setsid"),
+		"this cell cannot create the no-terminal condition it exists to test, "+
+			"so passing would be vacuous")
 	cmd := exec.Command("setsid", append([]string{"sh", script}, args...)...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
@@ -268,9 +267,9 @@ func TestNoTTY_TheUninstallerRefusesAndRemovesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := exec.LookPath("setsid"); err != nil {
-		t.Skip("setsid unavailable: cannot create the no-terminal condition")
-	}
+	requireCapability(t, capSetsid, binaryProbe("setsid"),
+		"cannot create the no-terminal condition, so the uninstaller's refusal "+
+			"without a terminal is unchecked")
 	cmd := exec.Command("setsid", "sh", uninstaller(t), "--apply", "--no-backup",
 		"--config", cfg, "--prefix", prefix)
 	cmd.Env = append(os.Environ(), "PATH="+stubBin+string(os.PathListSeparator)+os.Getenv("PATH"))
