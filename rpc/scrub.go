@@ -108,12 +108,16 @@ var patRe = regexp.MustCompile(regexp.QuoteMeta(auth.PATPrefix) + `[A-Za-z0-9_\-
 // scrubSecrets returns the cause with credentials masked, and whether that
 // result can be TRUSTED.
 //
-// A false second return means a password carrier was found whose value could
-// not be parsed to its end — an unterminated quote — so the remainder of the
-// string may still hold the secret. The caller must then disclose nothing and
-// fall back to the cause-free typed shape. Refusing to guess is the whole
-// point: a half-masked credential is worse than no detail, because it looks
-// scrubbed.
+// A false second return means the result cannot be trusted, and the caller must
+// then disclose nothing and fall back to the cause-free typed shape. Refusing
+// to guess is the whole point: a half-masked credential is worse than no
+// detail, because it looks scrubbed.
+//
+// Two independent things can produce it. A password carrier was found whose
+// value could not be parsed to its end — an unterminated quote — so the
+// remainder of the string may still hold the secret. Or the masked text was
+// handed back to pgx and a password still resolved from it, which means a
+// boundary in this file is wrong in a way this file cannot see.
 func scrubSecrets(s string) (string, bool) {
 	var b strings.Builder
 	confident := true
@@ -134,7 +138,15 @@ func scrubSecrets(s string) (string, bool) {
 	b.WriteString(seg)
 	confident = confident && ok
 
-	return patRe.ReplaceAllString(b.String(), auth.PATPrefix+mask), confident
+	out := patRe.ReplaceAllString(b.String(), auth.PATPrefix+mask)
+
+	// AND THEN THE RULES ARE CHECKED AGAINST THE RESULT. Everything above is
+	// this file's belief about two grammars; scrubbedCauseIsVerified hands the
+	// masked text back to pgx and asks whether a password still resolves from
+	// it. The r5 defect returned confident=true from exactly these lines while
+	// leaking, because it was a disagreement between two of this file's own
+	// boundaries rather than with pgx -- see scrub_postcondition.go.
+	return out, confident && scrubbedCauseIsVerified(out)
 }
 
 // maskURLSpan masks the userinfo password and every "<x>password" QUERY
