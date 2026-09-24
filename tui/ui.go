@@ -434,8 +434,101 @@ func (m *Model) restartServer() {
 		m.setStatus("not connected — SPC x connects (and spawns a server)")
 		return
 	}
-	m.setStatus("restarting the server…")
+	// ASK FIRST, AND SAY WHAT IS ABOUT TO BE CANCELLED.
+	//
+	// The confirmation has to state that running statements will be cancelled and
+	// name how many are in flight. Until now there was no confirmation at all: this went straight to the shutdown, so an operator
+	// restarted the front door with no statement of consequence and no figure,
+	// and whatever was mid-statement was cancelled without warning.
+	//
+	// The figure comes from the server, so reading it is a round trip and the
+	// prompt is opened when it returns.
+	m.setStatus("checking what a restart would interrupt…")
 	bound := m.session.Bind()
+	m.ctx.Go(func(c context.Context) (any, error) {
+		inflight, err := bound.InFlight(c)
+		return managerReload{gen: bound.Gen(), apply: func() {
+			m.confirmRestart(bound, inflight, err)
+		}}, nil
+	})
+}
+
+// confirmRestart asks, naming what is in flight, and restarts only on yes.
+//
+// THE COUNT IS A READING, NOT A GUARANTEE, and the wording is careful about it
+// in both directions. Between drawing this and the operator answering, sessions
+// open and close: the prompt states what was true when it was drawn and must
+// not imply the number still holds on confirm.
+//
+// AND IT IS NOT A SECOND ADMISSION GATE. A non-zero count does not disable the
+// affirmative and a failed read does not block the restart -- the server owns
+// the decision that makes shutdown safe, in one atomic step, and a check here
+// would only add a window between the reading and the act. This informs a
+// decision; it does not take one.
+func (m *Model) confirmRestart(bound *Bound, f InFlight, readErr error) {
+	// NOT Scrimmed(): the scrim is reserved for login and quit, and a cell pins
+	// that to exactly those two call sites. This is a confirmation like the
+	// manager deletes, which do not dim the screen either.
+	NewConfirmModal(m, "restart the server?", restartQuestion(f, readErr)).
+		WithOkText("Restart").
+		WithCancelText("Stay").
+		WithSubmitFn(func(ModalResponse) error {
+			m.beginRestart(bound)
+			return nil
+		}).
+		Open()
+}
+
+// restartQuestion is that text, kept free of the model so every
+// wording rule it carries has a direct cell instead of being reachable only
+// through a live server and a rendered screen.
+func restartQuestion(f InFlight, readErr error) string {
+	var b strings.Builder
+	b.WriteString("Restarting stops the server and starts a new one.\n\n")
+
+	switch {
+	case readErr != nil:
+		// STILL ASK. Not knowing what is in flight is a reason to be more
+		// careful, not a reason to skip the question -- and refusing the
+		// restart because a count could not be read would make an unrelated
+		// failure block an operator's recovery action.
+		b.WriteString("Any statement running now WILL BE CANCELLED.\n")
+		b.WriteString("How many are in flight could not be read: " +
+			WireErrorMessage(readErr) + "\n")
+	case f.Executing == 0:
+		b.WriteString("No statement was running a moment ago. Any that starts before you " +
+			"confirm WILL BE CANCELLED.\n")
+	case f.Executing == 1:
+		b.WriteString("1 statement was running a moment ago, and WILL BE CANCELLED.\n")
+	default:
+		fmt.Fprintf(&b, "%d statements were running a moment ago, and WILL BE CANCELLED.\n",
+			f.Executing)
+	}
+
+	// The OTHER population, named as itself. Open transactions are not what
+	// the confirmation is about, and a restart does not silently lose them --
+	// the server refuses while any are open -- so presenting them as work about
+	// to be cancelled would be untrue in the more alarming direction.
+	if f.InTransaction > 0 {
+		fmt.Fprintf(&b, "\n%s an open transaction. The server REFUSES to restart while any "+
+			"are open, so this will be declined rather than lose that work.\n",
+			plural(f.InTransaction, "session holds", "sessions hold"))
+	}
+
+	b.WriteString("\nThese figures were true when this prompt was drawn; sessions start and " +
+		"finish work continuously.")
+	return b.String()
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return fmt.Sprintf("%d %s", n, many)
+}
+
+func (m *Model) beginRestart(bound *Bound) {
+	m.setStatus("restarting the server…")
 	m.ctx.Go(func(c context.Context) (any, error) {
 		err := bound.ShutdownServer(c)
 		return managerReload{gen: bound.Gen(), apply: func() {

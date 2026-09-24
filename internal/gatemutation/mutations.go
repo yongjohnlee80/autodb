@@ -988,8 +988,8 @@ func All() []Mutation {
 		{
 			Name: "pressure-the-protocol-bump-is-not-optional", Package: "./rpc/",
 			File:        "rpc/server.go",
-			Anchor:      "const Protocol int64 = 7",
-			Replacement: "const Protocol int64 = 6",
+			Anchor:      "const Protocol int64 = 8",
+			Replacement: "const Protocol int64 = 7",
 			Test:        "TestProtocol_TheVerbSurfaceIsPinned",
 			Fails:       "does not record",
 			Guarantee:   "that a verb cannot be added on an unchanged protocol number, which is exactly what happened to sys.pressure while a cell pinning the number to 5 stayed green",
@@ -1025,8 +1025,8 @@ func All() []Mutation {
 		{
 			Name: "pressure-the-shipped-frontend-agrees", Package: "./rpc/",
 			File:        "lua/autodb/client.lua",
-			Anchor:      "M.PROTOCOL = 7",
-			Replacement: "M.PROTOCOL = 6",
+			Anchor:      "M.PROTOCOL = 8",
+			Replacement: "M.PROTOCOL = 7",
 			Test:        "TestProtocol_TheShippedFrontendSpeaksTheSameNumber",
 			Fails:       "refuse each other",
 			Guarantee:   "that the plugin and the daemon built from one commit speak one number, since a mismatch between them produces the message a STALE pairing gives and sends the user to refresh a binary that is already correct",

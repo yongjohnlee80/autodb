@@ -850,6 +850,44 @@ func (s *Server) register() {
 	// outlives its frontends, so restarting it needs an authorized
 	// remote path — a rebuilt binary otherwise keeps serving from the
 	// old process). Admin-only, audited BEFORE the effect (R6).
+	// WHAT A RESTART WOULD INTERRUPT, so the frontend can say it before asking.
+	//
+	// The restart confirmation has to state that running statements will be
+	// cancelled and name how many are in flight. The frontend runs in another
+	// process and cannot see the registry, so the figure has to come from here.
+	//
+	// TWO FIGURES, BECAUSE THEY ARE TWO DIFFERENT THINGS and reporting one as
+	// the other would tell an operator something untrue. `executing` is
+	// statements running right now -- the work the drain CANCELS, which is what
+	// the confirmation is about. `in_transaction` is sessions holding an open
+	// transaction, which a restart does NOT silently destroy: sys.shutdown
+	// refuses while any are open.
+	//
+	// ADMIN, matching sys.shutdown: this answers "what would happen if I
+	// restarted", so it is readable by exactly the people who could.
+	//
+	// IT IS NOT A GATE. The figures are a reading taken at a moment, and
+	// sessions start and finish statements without asking; the only safe
+	// shutdown decision is the single atomic step sys.shutdown already takes.
+	// Nothing here may be used to decide whether a shutdown is allowed, or the
+	// window between the read and the act becomes a place work is lost.
+	s.handle("sys.inflight", func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if err := exactArgs(req.Params, 1); err != nil {
+			return nil, err
+		}
+		token, err := argStr(req.Params, 0, "token")
+		if err != nil {
+			return nil, err
+		}
+		if _, aerr := s.auth.RequireAdmin(ctx, token); aerr != nil {
+			return nil, s.wireErr(aerr)
+		}
+		return map[string]any{
+			"executing":      int64(s.eng.SessionsExecuting()),
+			"in_transaction": int64(s.eng.SessionsInTransaction()),
+		}, nil
+	})
+
 	s.handle("sys.shutdown", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
 			return nil, err

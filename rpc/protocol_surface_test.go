@@ -13,6 +13,10 @@ import (
 	"github.com/yongjohnlee80/autodb/rpc"
 )
 
+// thisBumpAdded is the verb the CURRENT protocol number bought. Update it with
+// the number, in the same change: the pair is what makes a bump accountable.
+const thisBumpAdded = "sys.inflight"
+
 // goldenVerbs reads the recorded surface for one protocol number.
 func goldenVerbs(t *testing.T, proto int64) ([]string, bool) {
 	t.Helper()
@@ -102,9 +106,15 @@ func TestProtocol_TheVerbSurfaceIsPinned(t *testing.T) {
 	for _, v := range prev {
 		inPrev[v] = true
 	}
-	if !inRecord["conn.rename"] || inPrev["conn.rename"] {
-		t.Errorf("protocol %d is supposed to be the one that added conn.rename; the "+
-			"records disagree", rpc.Protocol)
+	// NAMED IN ONE PLACE. This used to be a verb spelled inline, which meant
+	// the next bump found the assertion by failing on the previous bump's verb
+	// and had to work out that the string was the thing to change. The constant
+	// says what it is for.
+	if !inRecord[thisBumpAdded] || inPrev[thisBumpAdded] {
+		t.Errorf("protocol %d is supposed to be the one that added %s; the records "+
+			"disagree. If this bump bought something else, say so here -- a bump whose "+
+			"purchase nobody can name is a bump that refuses old clients for nothing",
+			rpc.Protocol, thisBumpAdded)
 	}
 }
 
@@ -152,29 +162,84 @@ func TestProtocol_AClientFromBeforeTheNewVerbIsRefusedAtTheHandshake(t *testing.
 // The other half: a bump that refuses the old client and does not admit the
 // new one has only broken the surface. Paired with the cell above so neither
 // can pass by being uniformly closed.
+//
+// IT MUST CALL THE VERB THE BUMP BOUGHT. This cell used to call sys.pressure --
+// what the PREVIOUS bump bought -- while its name and its partner cell both
+// said sys.inflight. So the pairing was satisfied by a verb that had been
+// reachable for a whole protocol number, and the new one was never called by
+// anything. thisBumpAdded now names the verb in one place and this reads it.
 func TestProtocol_AClientAtTheCurrentVersionReachesTheNewVerb(t *testing.T) {
-	f := newFixture(t, rpc.WithPressure(func() (pressure.Snapshot, error) {
-		return pressure.Snapshot{
-			Sessions: pressure.Row{Label: "sessions", Value: 3, Cap: 10},
-		}, nil
-	}))
+	f := newFixture(t)
 	c := f.session(t) // hello at rpc.Protocol
 
-	errVal, result := c.call("sys.pressure", f.rootTok)
+	errVal, result := c.call(thisBumpAdded, f.rootTok)
 	if errVal != nil {
-		t.Fatalf("a current client was refused sys.pressure: %#v", errVal)
+		t.Fatalf("a current client was refused %s: %#v", thisBumpAdded, errVal)
 	}
 	m, ok := result.(map[string]any)
 	if !ok {
-		t.Fatalf("sys.pressure result shape: %#v", result)
+		t.Fatalf("%s result shape: %#v", thisBumpAdded, result)
 	}
-	sess, ok := m["sessions"].(map[string]any)
-	if !ok {
-		t.Fatalf("sessions row shape: %#v", m["sessions"])
+
+	// THE EXACT SHAPE, because the frontend reads two named fields and a reply
+	// carrying one of them would leave the prompt silently naming a zero.
+	for _, field := range []string{"executing", "in_transaction"} {
+		v, ok := m[field]
+		if !ok {
+			t.Errorf("%s does not carry %q, which the restart prompt reads", thisBumpAdded, field)
+			continue
+		}
+		if _, ok := v.(int64); !ok {
+			t.Errorf("%s.%s is %T, not a number the frontend can read", thisBumpAdded, field, v)
+		}
 	}
-	if got, _ := sess["value"].(int64); got != 3 {
-		t.Errorf("sessions value = %v, want 3 — the verb answered without carrying the "+
-			"view it exists to carry", sess["value"])
+	if len(m) != 2 {
+		t.Errorf("%s answered with %d fields, want exactly the two the prompt reads: %#v",
+			thisBumpAdded, len(m), m)
+	}
+	// An idle fixture is running nothing, and the verb must say so rather than
+	// answering with whatever is convenient.
+	if got, _ := m["executing"].(int64); got != 0 {
+		t.Errorf("executing = %d on an idle server, want 0", got)
+	}
+	if got, _ := m["in_transaction"].(int64); got != 0 {
+		t.Errorf("in_transaction = %d on an idle server, want 0", got)
+	}
+}
+
+// AND IT IS ADMIN-ONLY, matching the verb it exists to inform.
+//
+// It answers "what would happen if I restarted", so it is readable by exactly
+// the people who could restart. A boundary nothing asserts is a boundary that
+// drifts the first time the handler is edited.
+func TestProtocol_TheNewVerbIsAdminOnly(t *testing.T) {
+	f := newFixture(t)
+	c := f.session(t)
+
+	errVal, _ := c.call("auth.user_create", f.rootTok, "dev", "dev-passphrase-long", "editor")
+	if errVal != nil {
+		t.Fatalf("user_create: %#v", errVal)
+	}
+	errVal, loginRes := c.call("auth.login", "dev", "dev-passphrase-long")
+	if errVal != nil {
+		t.Fatalf("login: %#v", errVal)
+	}
+	lm, _ := loginRes.(map[string]any)
+	devTok, _ := lm["token"].(string)
+	if devTok == "" {
+		t.Fatalf("no token in the login reply: %#v", lm)
+	}
+
+	// POSITIVE CONTROL: the same call as root succeeds, so a refusal below is
+	// about the ROLE and not about the verb being broken.
+	if errVal, _ := c.call(thisBumpAdded, f.rootTok); errVal != nil {
+		t.Fatalf("an admin was refused %s: %#v", thisBumpAdded, errVal)
+	}
+
+	errVal, res := c.call(thisBumpAdded, devTok)
+	if errVal == nil {
+		t.Fatalf("an editor read %s, which reports what a restart would interrupt: %#v",
+			thisBumpAdded, res)
 	}
 }
 
