@@ -10,6 +10,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # THE RELEASE HISTORY IS TEST INPUT HERE, not decoration. The
+          # upgrade-path cells construct a host provisioned at a tag predating
+          # exec.max_target_conns by running THAT TAG'S OWN installer, which
+          # needs the tags and their trees. The default depth-1 checkout fetches
+          # neither, and those cells would skip -- so SCRIPTGUARD_REQUIRE_GITTAGS
+          # below turns removing this line into a failing build rather than a
+          # silent loss of the only coverage the upgrade transition has.
+          fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.x"
@@ -53,6 +62,7 @@ jobs:
         # docker requirement above now guarantees runs.
         env:
           SCRIPTGUARD_REQUIRE_DOCKER: "1"
+          SCRIPTGUARD_REQUIRE_GITTAGS: "1"
           SCRIPTGUARD_REQUIRE_SETSID: "1"
           SCRIPTGUARD_REQUIRE_SCRIPT: "1"
           SCRIPTGUARD_REQUIRE_UNPRIVILEGED: "1"

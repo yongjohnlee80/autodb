@@ -45,6 +45,7 @@ import (
 // it reads as coverage.
 const (
 	capDocker       = "docker"
+	capGitTags      = "gittags"
 	capRoot         = "root"
 	capScript       = "script"
 	capSetsid       = "setsid"
@@ -52,7 +53,7 @@ const (
 )
 
 var knownCapabilities = []string{
-	capDocker, capRoot, capScript, capSetsid, capUnprivileged,
+	capDocker, capGitTags, capRoot, capScript, capSetsid, capUnprivileged,
 }
 
 const requirementPrefix = "SCRIPTGUARD_REQUIRE_"
@@ -149,6 +150,39 @@ func requireCapability(t *testing.T, capability string, probe error, uncovered s
 func binaryProbe(name string) error {
 	_, err := exec.LookPath(name)
 	return err
+}
+
+// gitTagsProbe asks whether this checkout can reach the RELEASE HISTORY.
+//
+// IT FAILS CLOSED, AND THE FIRST VERSION DID NOT. That version asked only
+// whether any v* tag existed, which a depth-1 checkout satisfies: it carries
+// the one tag it was cloned at. Measured on a shallow clone of v0.3.21 --
+// shallow=true, tags=1 -- the probe passed, discovery then found no tag whose
+// installer it could read, and the upgrade cells SKIPPED and exited zero with
+// the requirement declared. The precise coverage loss the requirement exists to
+// prevent was certified green, which is the same fail-open shape this whole
+// mechanism was built to remove.
+//
+// So shallowness is asked about directly, rather than inferred from a symptom.
+func gitTagsProbe() error {
+	shallow, err := exec.Command("git", "rev-parse", "--is-shallow-repository").Output()
+	if err != nil {
+		return fmt.Errorf("git rev-parse failed, so this is not a usable checkout: %w", err)
+	}
+	if strings.TrimSpace(string(shallow)) != "false" {
+		return errors.New("this is a SHALLOW clone, so the release history is truncated and " +
+			"older tags' trees are absent (actions/checkout needs fetch-depth: 0)")
+	}
+
+	out, err := exec.Command("git", "tag", "--list", "v*").Output()
+	if err != nil {
+		return fmt.Errorf("git tag failed: %w", err)
+	}
+	if len(strings.TrimSpace(string(out))) == 0 {
+		return errors.New("this checkout has no version tags (actions/checkout needs " +
+			"fetch-depth: 0 and tags)")
+	}
+	return nil
 }
 
 func rootProbe() error {
