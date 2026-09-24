@@ -92,6 +92,38 @@ func TestWireErr_DialFailure_UnparseableCauseFallsBackToTheShape(t *testing.T) {
 	}
 }
 
+// AND THE POSTCONDITION IS REACHABLE THROUGH causeOrShape TOO, not merely
+// correct in isolation.
+//
+// A cause past maxVerifiableCause is the one withholding the postcondition can
+// produce on its own: the masking above it succeeds and reports confidence, and
+// the disclosure is refused anyway because the result was never verified. So
+// this cell fails if scrubbedCauseIsVerified is ever unwired from
+// scrubSecrets -- which is the way a net like this dies quietly.
+func TestWireErr_DialFailure_AnUnverifiableCauseFallsBackToTheShape(t *testing.T) {
+	t.Parallel()
+	oversized := "failed to connect to `user=u host=db7.internal`: " +
+		strings.Repeat("connection refused. ", 1+maxVerifiableCause/20)
+	if len(oversized) <= maxVerifiableCause {
+		t.Fatalf("this cell's premise is wrong: %d bytes is within the bound", len(oversized))
+	}
+
+	de := exec.NewDialFailure(7, errors.New(oversized))
+	e := wireError(t, (&Server{discloseDetail: true}).wireErr(de))
+	if e.Message != de.Error() {
+		t.Errorf("a cause too large to verify was disclosed instead of withheld:\n got  %s",
+			e.Message)
+	}
+
+	// And the bound is the ONLY reason: the same cause, short, is disclosed.
+	short := "failed to connect to `user=u host=db7.internal`: connection refused"
+	short_e := wireError(t, (&Server{discloseDetail: true}).wireErr(exec.NewDialFailure(7, errors.New(short))))
+	if !strings.Contains(short_e.Message, "db7.internal") {
+		t.Errorf("the short form was withheld too, so the cell above proves nothing about the bound:\n  %s",
+			short_e.Message)
+	}
+}
+
 // The grammar fixes must be reachable THROUGH causeOrShape, not merely correct
 // in the helper. Each row is a carrier form that previously leaked; each is
 // asserted on the message the RPC error actually carries.
