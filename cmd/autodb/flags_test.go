@@ -18,6 +18,7 @@ func TestCheckFlags(t *testing.T) {
 		migrateToPG                     bool
 		createCert                      bool
 		initRun                         bool
+		checkConfig                     bool
 		port                            int
 		portSet                         bool
 		// certFlags are --create-cert's own flags, given by NAME so the cell
@@ -26,6 +27,7 @@ func TestCheckFlags(t *testing.T) {
 	}
 	ok := map[string]args{
 		"serve alone":          {serve: true, port: goodPort},
+		"check-config alone":   {checkConfig: true, port: goodPort},
 		"init alone":           {initRun: true, port: goodPort},
 		"migrate alone":        {migrateToPG: true, port: goodPort},
 		"ui alone":             {ui: true, port: goodPort},
@@ -81,13 +83,23 @@ func TestCheckFlags(t *testing.T) {
 		"init + ui":          {initRun: true, ui: true, port: goodPort},
 		"init + create-cert": {initRun: true, createCert: true, port: goodPort},
 		"init + migrate":     {initRun: true, migrateToPG: true, port: goodPort},
+		// --check-config is a MODE too, and it sits FIRST in the dispatch
+		// switch -- so an unnoticed `--check-config --serve` would validate and
+		// never serve, which for a unit's ExecStart means a front door that
+		// exits 0 and never comes up. Exactly the trap --init and
+		// --migrate-to-postgres already carry comments about.
+		"check-config + serve":       {checkConfig: true, serve: true, port: goodPort},
+		"check-config + init":        {checkConfig: true, initRun: true, port: goodPort},
+		"check-config + create-cert": {checkConfig: true, createCert: true, port: goodPort},
+		"check-config + web-ui":      {checkConfig: true, webUI: true, port: goodPort},
 	}
 
 	run := func(a args) error {
 		// checkFlags reads --port's PRESENCE from flag.CommandLine, so a fresh
 		// FlagSet is set up per case to reflect portSet.
 		reset(t, a.portSet, a.certFlags...)
-		return checkFlags(a.serve, a.ui, a.webUI, a.printEndpoint, a.migrateToPG, a.createCert, a.initRun, a.port)
+		return checkFlags(a.serve, a.ui, a.webUI, a.printEndpoint, a.migrateToPG, a.createCert, a.initRun,
+			a.checkConfig, a.port)
 	}
 	for name, a := range ok {
 		t.Run("ok/"+name, func(t *testing.T) {

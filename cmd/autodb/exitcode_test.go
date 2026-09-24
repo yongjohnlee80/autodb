@@ -69,6 +69,12 @@ func TestExit_EveryEntryPointReportsAConfigFailureAsOne(t *testing.T) {
 	// Every flag that loads a config before doing anything else.
 	for _, flag := range []string{
 		"--create-cert", "--init", "--print-endpoint", "--serve", "--ui", "--web-ui",
+		// The pre-flight is in this table for the reason the table exists: the
+		// updater branches on its status, and a pre-flight that reported a bad
+		// config as an ordinary failure would be indistinguishable from one
+		// that could not run at all -- which the updater treats differently,
+		// because refusing on it would break every downgrade.
+		"--check-config",
 	} {
 		t.Run(flag, func(t *testing.T) {
 			cmd := exec.Command(bin, "--config", cfg, flag)
