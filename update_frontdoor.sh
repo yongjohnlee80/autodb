@@ -476,6 +476,73 @@ info "built $(du -m "$TMP/autodb" | awk '{print $1}') MiB"
 # even print its version is one nobody should take a daemon down for.
 info "reports: $("$TMP/autodb" --version)"
 
+# ------------------------------------------------- the configuration pre-flight
+#
+# THE FRONT DOOR MUST NOT GO DOWN FOR SOMETHING KNOWABLE WHILE IT IS STILL UP.
+#
+# Observed upgrading a production host across the release that made
+# exec.max_target_conns required: this script stopped a healthy service,
+# installed the new binary, watched it refuse the configuration with
+# 78/EX_CONFIG, and rolled back. Every byte needed to predict that was already
+# on disk -- the new binary was built two steps ago and the config had not
+# changed. The outage bought nothing.
+#
+# The config checked is the one the UNIT passes, read back from ExecStart rather
+# than assumed: a host can hold a service config and a client config at once,
+# and pre-flighting the wrong file is worse than not pre-flighting at all,
+# because it reports success.
+step "Checking the configuration against the new binary"
+PREFLIGHT_CONFIG="$(systemctl show -p ExecStart --value "$UNIT" 2>/dev/null |
+  sed -n 's/.*--config[= ]\([^ ";]*\).*/\1/p' | head -n 1)"
+if [ -n "$PREFLIGHT_CONFIG" ]; then
+  info "the unit reads $PREFLIGHT_CONFIG"
+  set -- --check-config --config "$PREFLIGHT_CONFIG"
+else
+  info "the unit names no --config; checking the default location"
+  set -- --check-config
+fi
+
+# WHAT COUNTS AS "CANNOT CHECK" IS NARROW, AND THE DEFAULT IS TO REFUSE.
+#
+# 78 is EX_CONFIG: the new binary read the configuration and will not accept it.
+# That stops the update.
+#
+# There is exactly ONE reason to continue anyway -- the build predates
+# --check-config, so the flag is unknown and no check happened. Refusing on that
+# would make every downgrade impossible. But "continue on anything that is not
+# 78" was too wide and defeated the pre-flight at its own seam: a refusal that
+# exited 1 rather than 78 was reported as an inability to check, and the healthy
+# service was stopped and swapped anyway. So the old-binary case is POSITIVELY
+# IDENTIFIED from Go's own message for an unknown flag, and every other status
+# -- an internal failure, a signal, anything unrecognised -- refuses, because a
+# pre-flight that behaved unexpectedly is not a pre-flight that passed.
+PREFLIGHT_OUT="$("$TMP/autodb" "$@" 2>&1)" && PREFLIGHT_RC=0 || PREFLIGHT_RC=$?
+case "$PREFLIGHT_RC" in
+  0)
+    printf '%s\n' "$PREFLIGHT_OUT" | sed 's/^/  /'
+    ;;
+  *)
+    # BOTH HALVES, and 2 is the whole reason the phrase is not enough on its own.
+    # Go's flag package exits 2 for an unknown flag; a crash that happened to
+    # carry the same text -- measured in review with exit 139, a segfault --
+    # matched a phrase-only test and was waved through as an old build, and the
+    # healthy service was stopped and swapped. An identification that a crash
+    # can satisfy is not an identification.
+    if [ "$PREFLIGHT_RC" = "2" ] &&
+       printf '%s' "$PREFLIGHT_OUT" | grep -q 'flag provided but not defined: -check-config'; then
+      warn "this build predates --check-config, so the configuration was NOT checked."
+      warn "Continuing, because refusing here would make every downgrade impossible -- but a"
+      warn "configuration this binary refuses will now be found only after the service stops."
+    else
+      printf '%s\n' "$PREFLIGHT_OUT" | sed 's/^/  /' >&2
+      die "the new binary REFUSES this host's configuration (exit $PREFLIGHT_RC).
+       Nothing has been stopped and nothing has been installed -- the front door is
+       still serving on the binary it was already running. Fix the configuration
+       named above and run this update again."
+    fi
+    ;;
+esac
+
 # ------------------------------------------------------------------- the swap
 step "Swapping the binary"
 BACKUP="$PREFIX/autodb.previous"

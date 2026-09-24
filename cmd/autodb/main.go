@@ -63,12 +63,18 @@ const (
 //	    [Invalid]            [Valid Mode]
 //	        |                      |
 //	Exit Code 2 (Usage)            |
-//	   +---------------------------+---------------------------+
-//	   |             |             |             |             |
-//	   v             v             v             v             v
-//	--init     --create-cert    --serve        --ui         --web-ui
-//	   |             |             |             |             |
-//	runInit()  runCreateCert() runServe()     runUI()       runWebUI()
+//	   +--------------+--------------+--------------+--------------+
+//	   |              |              |              |              |
+//	   v              v              v              v              v
+//	--check-config  --init     --create-cert    --serve     --ui / --web-ui
+//	   |              |              |              |              |
+//	runCheckConfig() runInit()  runCreateCert() runServe()  runUI()/runWebUI()
+//
+// --check-config is first in the dispatch because it is the only mode whose
+// contract is "decide and change nothing": it validates and exits 0, or 78 if
+// the configuration would not load. update_frontdoor.sh runs it against the
+// newly built binary BEFORE `systemctl stop`, so a healthy front door is never
+// taken down for a configuration that was already knowably refused.
 func main() {
 	showVersion := flag.Bool("version", false, "print version and exit")
 	serve := flag.Bool("serve", false, "run the RPC server")
@@ -118,9 +124,12 @@ func main() {
 	// that authenticates.
 	initRun := flag.Bool("init", false,
 		"create the first administrator and enrol the unattended unlock, then exit")
+	checkConfig := flag.Bool("check-config", false,
+		"validate the configuration and exit 0, or 78 if it would not load; touches nothing")
 	flag.Parse()
 
-	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *createCert, *initRun, *port); err != nil {
+	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *createCert, *initRun,
+		*checkConfig, *port); err != nil {
 		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 		flag.Usage()
 		os.Exit(2)
@@ -132,6 +141,14 @@ func main() {
 	}
 
 	switch {
+	case *checkConfig:
+		// First in the switch deliberately. It is the one mode whose whole
+		// contract is "decide and change nothing", so it must never be
+		// silently shadowed by a mode that acts.
+		if err := runCheckConfig(os.Stdout, *configPath); err != nil {
+			reportAndExit(err)
+		}
+		return
 	case *initRun:
 		if err := runInit(context.Background(), os.Stdout, *configPath, initOpts{}); err != nil {
 			reportAndExit(err)
@@ -267,7 +284,7 @@ const defaultWebPort = 7010
 //	|               | --print-endpoint, --migrate-to-postgres, |
 //	|               | --create-cert, --init                    |
 //	+---------------+------------------------------------------+
-func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun bool, port int) error {
+func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun, checkConfig bool, port int) error {
 	portSet := false
 	flag.CommandLine.Visit(func(f *flag.Flag) {
 		if f.Name == "port" {
@@ -336,14 +353,14 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRu
 	// --migrate-to-postgres is counted too, and it matters more than the
 	// others: it is FIRST in the dispatch switch, so an unnoticed
 	// `--migrate-to-postgres --serve` would migrate and never serve.
-	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun} {
+	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun, checkConfig} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
 		return errors.New("--serve, --ui, --web-ui, --print-endpoint, --migrate-to-postgres, " +
-			"--create-cert and --init are mutually exclusive; pass exactly one")
+			"--create-cert, --init and --check-config are mutually exclusive; pass exactly one")
 	}
 	if webUI {
 		if port <= 0 || port > 65535 {

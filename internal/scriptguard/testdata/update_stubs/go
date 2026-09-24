@@ -22,8 +22,26 @@ done
 [ -n "$_out" ] || exit 1
 [ -n "$_ver" ] || _ver="unstamped"
 
+# The built binary answers --check-config as well as --version, because the
+# updater now pre-flights the configuration before it stops anything and a stub
+# that could not answer would exercise only the "cannot check" branch.
+#
+# UPD_CHECK_RC is the status to return: 0 accepts, 78 is EX_CONFIG (the binary
+# read the config and refuses it), and anything else stands for a build that
+# does not understand the flag at all.
 cat > "$_out" <<INNER
 #!/bin/sh
+for _arg in "\$@"; do
+  if [ "\$_arg" = "--check-config" ]; then
+    _rc="\${UPD_CHECK_RC:-0}"
+    if [ "\$_rc" = "0" ]; then
+      echo "the configuration would load; nothing was started and nothing was written"
+    else
+      echo "\${UPD_CHECK_MSG:-autodb: the configuration is invalid}" >&2
+    fi
+    exit "\$_rc"
+  fi
+done
 echo "autodb $_ver (deadbeef, built 2026-09-09T00:00:00Z)"
 INNER
 chmod +x "$_out"

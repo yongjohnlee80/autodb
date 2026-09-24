@@ -69,6 +69,18 @@ case "${1:-}" in
           fi
         done
         ;;
+      *" ExecStart "*)
+        # The unit's command line, which is where the updater learns WHICH
+        # config the service actually reads. UPD_EXECSTART_CONFIG is the path
+        # to advertise; empty means a unit that names no --config.
+        if [ -n "${UPD_EXECSTART_CONFIG:-}" ]; then
+          printf '{ path=/usr/local/bin/autodb ; argv[]=/usr/local/bin/autodb --serve --config %s ; ignore_errors=no }\n' \
+            "$UPD_EXECSTART_CONFIG"
+        else
+          printf '{ path=/usr/local/bin/autodb ; argv[]=/usr/local/bin/autodb --serve ; ignore_errors=no }\n'
+        fi
+        exit 0
+        ;;
       *" ExecMainStatus "*|*" ExecMainCode "*)
         # HOW THE FAILED UNIT EXITED -- AND THEN HOW THE RECOVERED ONE HAS NOT.
         #

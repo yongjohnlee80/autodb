@@ -48,5 +48,9 @@
 //     already holds the endpoint or the meta store. Formerly 0 for the endpoint
 //     case, which a Type=simple unit reads as a clean stop.
 //     - 78 (EX_CONFIG): Configuration parse failure, semantic constraint violation,
-//     or invalid budget pairing.
+//     or invalid budget pairing. Also what --check-config returns when the
+//     configuration would not load, which is the status update_frontdoor.sh
+//     branches on: ONLY 78 stops an update, because any other non-zero means
+//     the check did not happen (a build predating the flag) rather than that
+//     the configuration is bad.
 package main
