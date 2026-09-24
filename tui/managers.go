@@ -677,7 +677,7 @@ func (m *Model) openUserManager() {
 					})
 				}
 			}},
-			{'g', "grant on conn", func(sel UserRow, ok bool) {
+			{'c', "grant on conn", func(sel UserRow, ok bool) {
 				if !ok {
 					return
 				}

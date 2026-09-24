@@ -75,7 +75,7 @@ func TestModalSpan_IsNotAFixedWidth(t *testing.T) {
 // worst case at roughly 111 columns:
 //
 //	a:add  r:set role  p:reset passphrase  x:enable/disable  D:remove
-//	g:grant on conn  i:allowed IPs…  q/Esc:close
+//	c:grant on conn  i:allowed IPs…  q/Esc:close
 //
 // Against the old fixed body width of 94 that wrapped at EVERY terminal size,
 // and each wrapped line costs a table row. Geometry is stated per case: these

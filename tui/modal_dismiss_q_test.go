@@ -51,9 +51,9 @@ func TestReadonlyModalsDismissOnQ(t *testing.T) {
 
 	// The users manager, the same.
 	h.leader("u")
-	h.waitFor("users manager", "g:grant on conn")
+	h.waitFor("users manager", "c:grant on conn")
 	h.key('q')
-	h.waitGone("users manager dismissed by q", "g:grant on conn")
+	h.waitGone("users manager dismissed by q", "c:grant on conn")
 
 	// About, reopened via SPC A, is a pure read-only card: q closes it too.
 	h.leader("A")

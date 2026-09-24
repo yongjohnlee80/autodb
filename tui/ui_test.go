@@ -477,7 +477,7 @@ func TestUIFullFlow(t *testing.T) {
 	//     "g:gr…" before the float widened and the footer wrapped).
 	h.leader("u")
 	h.waitFor("users manager", "a:add")
-	h.waitFor("full key list", "g:grant on conn")
+	h.waitFor("full key list", "c:grant on conn")
 	h.waitFor("reset key", "p:reset passphrase")
 	h.key(tuicore.KeyEscape)
 
