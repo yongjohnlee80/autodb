@@ -953,6 +953,20 @@ func TestRestartServerFromTUI(t *testing.T) {
 	h.waitFor("logged in", "logged in as root")
 
 	h.leader("X")
+	// The restart now ASKS first: it names what is in flight
+	// and says it will be cancelled. Enter takes the affirmative.
+	h.waitFor("restart confirmation", "restart the server?")
+	h.waitFor("restart states the consequence", "WILL BE CANCELLED")
+	h.waitFor("restart names the figure", "statement")
+	// ASKING IS NOT RESTARTING. A confirmRestart that opened the modal AND
+	// started the shutdown would satisfy every wording assertion while leaving
+	// the defect exactly as it was, so the state is checked while the question
+	// is still on screen and unanswered.
+	if s := h.screen(); strings.Contains(s, "restarting the server") ||
+		strings.Contains(s, "server stopping") {
+		t.Fatalf("the server was restarted by the act of asking:\n%s", s)
+	}
+	h.key(tuicore.KeyEnter)
 
 	// The end state is what matters and what is stable: the server
 	// drained, the reconnect spawned a replacement, and the new process

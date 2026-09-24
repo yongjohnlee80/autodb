@@ -574,6 +574,23 @@ func (e *Engine) claimSession(ctx context.Context, s *session) (release func(), 
 // something anyone can act on.
 func (e *Engine) SessionsInTransaction() int { return e.sessions.countInTransaction() }
 
+// SessionsExecuting reports how many sessions are running a statement now.
+//
+// EXPORTED FOR THE RESTART PROMPT, and it is deliberately not
+// SessionsInTransaction. The shutdown drain CANCELS in-flight handler contexts,
+// so the work a restart destroys without asking is the statements currently
+// running -- which is what an operator has to be told. Open transactions are a
+// different population and are already handled by a different mechanism:
+// BeginShutdown REFUSES to stop while any are open, so they are not silently
+// lost and the prompt must not present them as though they were.
+//
+// A READING, NOT A GUARANTEE. Sessions start and finish statements without
+// asking anyone, so this is true when it is taken and may be false a moment
+// later. It exists to inform a decision, not to make one: nothing may gate a
+// shutdown on it, because the gate that makes shutdown safe is BeginShutdown's
+// single atomic step, and a second check would only add a window.
+func (e *Engine) SessionsExecuting() int { return e.sessions.countExecuting() }
+
 // BeginShutdown is the shutdown decision, taken as ONE step: it closes
 // transaction admission and reports how many transactions were open at the
 // instant it closed.

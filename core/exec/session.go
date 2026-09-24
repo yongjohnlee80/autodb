@@ -848,6 +848,45 @@ func (r *sessionRegistry) countInTransactionLocked() int {
 	return n
 }
 
+// countExecuting reports how many sessions are RUNNING A STATEMENT right now.
+//
+// A DIFFERENT POPULATION FROM countInTransaction, and the distinction is the
+// whole reason this exists. A session parked between statements inside a
+// transaction is in a transaction and has nothing in flight; a session running
+// a statement outside one has work in flight and no transaction. Naming either
+// figure as the other tells an operator something untrue about what a restart
+// is about to cancel.
+func (r *sessionRegistry) countExecuting() int {
+	r.mu.Lock()
+	sessions := make([]*session, 0, len(r.byID))
+	for _, s := range r.byID {
+		sessions = append(sessions, s)
+	}
+	r.mu.Unlock()
+
+	n := 0
+	for _, s := range sessions {
+		if s.executing() {
+			n++
+		}
+	}
+	return n
+}
+
+// executing reports a session running a STATEMENT.
+//
+// NOT THE RAW busy BIT, and the difference is a figure an operator is shown.
+// busy is the one-slot gate, and claimTeardown takes that same slot while no
+// statement is running -- which is why tearingDown exists beside it, in its own
+// words, "so a refusal can say which it is". Counting the bit alone reported a
+// teardown reservation as a statement in flight, and the restart prompt then
+// told the operator that a statement which does not exist would be cancelled.
+func (s *session) executing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.busy && !s.tearingDown
+}
+
 func (r *sessionRegistry) leaseCount(connID int64) int {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -44,13 +44,15 @@ import (
 // `BEGIN; …; COMMIT;` to run_script got independent statements, and the same
 // text now runs in one transaction. Same verb, different meaning, so the
 // handshake has to separate them.
+// Protocol 8 added sys.inflight -- what a restart would interrupt, which the
+// restart confirmation has to name before it asks.
 // Protocol 4 added exec.run_script (3 added history.list and sys.shutdown). BUMP THIS whenever the
 // verb surface changes: the handshake is what tells a NEWER frontend that
 // it is talking to an OLDER server (the shared server outlives frontends
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 7
+const Protocol int64 = 8
 
 // Session keys the gate and the hello handler share.
 //

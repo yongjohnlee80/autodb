@@ -650,6 +650,34 @@ func (b *Bound) ShutdownServer(ctx context.Context) error {
 	return err
 }
 
+// InFlight is what a restart would interrupt, as it was at one moment.
+//
+// A READING, NOT A GUARANTEE, and the prompt built from it has to say so:
+// sessions start and finish statements without asking, so both figures may be
+// stale by the time an operator answers. Nothing may gate a restart on them --
+// the server owns that decision in a single atomic step.
+type InFlight struct {
+	// Executing is statements running right now. These are the work a restart
+	// CANCELS, which is what the confirmation is about.
+	Executing int
+	// InTransaction is sessions holding an open transaction. A restart does not
+	// silently destroy these: the server refuses to stop while any are open.
+	InTransaction int
+}
+
+// InFlight asks the server what a restart would interrupt.
+func (b *Bound) InFlight(ctx context.Context) (InFlight, error) {
+	res, err := b.authed(ctx, "sys.inflight")
+	if err != nil {
+		return InFlight{}, err
+	}
+	m, _ := res.(map[string]any)
+	return InFlight{
+		Executing:     int(mI(m, "executing")),
+		InTransaction: int(mI(m, "in_transaction")),
+	}, nil
+}
+
 // ConnInfo is one stored connection.
 type ConnInfo struct {
 	ID     int64
