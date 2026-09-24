@@ -291,10 +291,9 @@ func TestTTYGuard_NoScriptTestsTheDeviceByPermission(t *testing.T) {
 // no-tty branch is asserted rather than the tty one.
 func TestTTYGuard_TheHelperReturnsRatherThanExiting(t *testing.T) {
 	t.Parallel()
-	if _, err := exec.LookPath("setsid"); err != nil {
-		t.Skip("setsid unavailable: this cell cannot remove the controlling terminal, " +
-			"so it would pass without testing the case it exists for")
-	}
+	requireCapability(t, capSetsid, binaryProbe("setsid"),
+		"this cell cannot remove the controlling terminal, so the no-tty branch "+
+			"of the helper is unchecked and the cell would pass vacuously")
 
 	for _, name := range []string{
 		"provision_vm.sh", "install_frontdoor.sh", "update_frontdoor.sh", "uninstall.sh",

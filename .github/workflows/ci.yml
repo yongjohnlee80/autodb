@@ -31,6 +31,31 @@ jobs:
       # ships. -count=2 because a suite run once is a suite whose flakes are
       # someone else's problem later; the whole suite takes ~17s this way.
       - name: test
+        # DECLARE WHAT THIS RUNNER CAN DO. internal/scriptguard has cells that
+        # need a usable container runtime, setsid(1), script(1) or an
+        # unprivileged euid, and each of them SKIPS when the host cannot supply
+        # it. On a laptop that is right. Here it is wrong, and until now nothing
+        # could tell the two apart: this step has no -v, so a cell that ran and
+        # a cell that skipped produced byte-identical output and only a failure
+        # was ever visible. Trying to confirm the --apply container cell runs
+        # here (2026-09-23) turned up nothing better than elapsed time.
+        #
+        # Each variable turns that capability's skip into a FAILURE, so the
+        # coverage this workflow is trusted for is now gated rather than
+        # assumed. Every name is checked against the package's vocabulary by
+        # TestCapabilityGate_EveryDeclaredRequirementNamesAKnownCapability -- a
+        # typo here would otherwise be a gate that silently does nothing.
+        #
+        # root is deliberately absent: the runner is not root, so
+        # TestTargetBudget_OmissionLeavesAnExistingConfigAndWritesNoBackup still
+        # skips here and says so. Its ordering is covered as root inside the
+        # container the apply smoke starts -- which is exactly the cell the
+        # docker requirement above now guarantees runs.
+        env:
+          SCRIPTGUARD_REQUIRE_DOCKER: "1"
+          SCRIPTGUARD_REQUIRE_SETSID: "1"
+          SCRIPTGUARD_REQUIRE_SCRIPT: "1"
+          SCRIPTGUARD_REQUIRE_UNPRIVILEGED: "1"
         run: go test -race -count=2 ./...
       - name: static cross-build smoke
         run: |

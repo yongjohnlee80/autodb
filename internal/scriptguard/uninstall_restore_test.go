@@ -155,10 +155,9 @@ func TestUninstallBackup_RestoresACommittedDatabase(t *testing.T) {
 // failure goes through abort_backup, and this cell proves that helper removes
 // the staging area and leaves no archive behind.
 func TestUninstallBackup_AFailedCopyAbortsWithoutDeleting(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("running as root: an unreadable file is still readable, so this " +
-			"cell cannot create the condition it tests")
-	}
+	requireCapability(t, capUnprivileged, unprivilegedProbe(),
+		"an unreadable file is still readable to root, so this cell cannot create "+
+			"the failed-copy condition it tests")
 
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, "state")

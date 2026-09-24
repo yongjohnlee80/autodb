@@ -111,10 +111,10 @@ func TestTargetBudget_OmissionLeavesAnExistingConfigAndWritesNoBackup(t *testing
 	// it exists to check. The first version of this test did exactly that:
 	// it saw a non-nil error, found the file intact, and reported success
 	// while nothing under test had run.
-	if os.Geteuid() != 0 {
-		t.Skip("--apply refuses without root before reaching the config block; " +
-			"the ordering is covered as root in testdata/apply_smoke.sh")
-	}
+	requireCapability(t, capRoot, rootProbe(),
+		"--apply refuses without root before reaching the config block, so the "+
+			"ordering this cell exists for is not reached here; it is covered as "+
+			"root in testdata/apply_smoke.sh, which the container cell runs")
 
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.toml")
@@ -155,9 +155,9 @@ func TestTargetBudget_OmissionLeavesAnExistingConfigAndWritesNoBackup(t *testing
 func TestTargetBudget_InteractivePromptRefusesUntilUsable(t *testing.T) {
 	t.Parallel()
 
-	if _, err := exec.LookPath("script"); err != nil {
-		t.Skip("script(1) unavailable: the prompt needs a PTY and a pipe tests the wrong branch")
-	}
+	requireCapability(t, capScript, binaryProbe("script"),
+		"the prompt needs a PTY and a pipe tests the wrong branch, so the "+
+			"interactive budget prompt is unchecked")
 
 	// Empty, then not-a-number, then below the minimum, then usable. Each
 	// unusable answer must produce another prompt rather than a default.
