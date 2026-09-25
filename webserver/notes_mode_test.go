@@ -226,70 +226,52 @@ func TestNotesMode_AboutReportsTheEffectiveRoot(t *testing.T) {
 
 // The ACTUAL runner path, not the helper.
 //
-// Testing modelOptions() in isolation proved the helper and not its caller:
-// A review restored the old construction, left the helper intact, and every test
+// Testing hostOptions() in isolation proved the helper and not its caller: a
+// review restored the old construction, left the helper intact, and every test
 // stayed green while the About-path bug was back. This drives a REAL browser
-// session — login, ticket, attach — and captures the model factory appRunner must
+// session — login, ticket, attach — and captures the host factory appRunner must
 // go through, so a caller bypass fails here rather than passing quietly.
-func TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot(t *testing.T) {
-	// One case now: there are no modes. What the runner must still do is build the
-	// Model through the factory with the EFFECTIVE root — the caller-level control
-	// that a helper test cannot replace.
-	for _, tc := range []struct {
-		name       string
-		wantShared bool
-	}{
-		{"personal", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			daemon := startRealServer(t)
-			notesBase := t.TempDir()
+func TestNotesMode_RunnerBuildsTheHostWithTheEffectiveRoot(t *testing.T) {
+	daemon := startRealServer(t)
+	notesBase := t.TempDir()
 
-			var mu sync.Mutex
-			var built *tuiapp.Model
-			factory := func(sess *tuiapp.Session, notesFor tuiapp.NotesFactory, cancel func(),
-				opts ...tuiapp.Option) *tuiapp.Model {
-				m := tuiapp.New(sess, notesFor, cancel, opts...)
-				mu.Lock()
-				built = m
-				mu.Unlock()
-				return m
-			}
+	var mu sync.Mutex
+	var built *tuiapp.Options
+	factory := func(sess *tuiapp.Session, notesFor tuiapp.NotesFactory, cancel func(),
+		opt tuiapp.Options) (*tuiapp.Host, error) {
+		mu.Lock()
+		built = &opt
+		mu.Unlock()
+		return tuiapp.New(sess, notesFor, cancel, opt)
+	}
 
-			base := serveGatewayCfg(t, Config{
-				Network: "tcp", Addr: daemon, NotesRoot: notesBase,
-				About:    tuiapp.AboutInfo{NotesDir: notesBase, Version: "test"},
-				newModel: factory,
-			})
+	base := serveGatewayCfg(t, Config{
+		Network: "tcp", Addr: daemon, NotesRoot: notesBase,
+		About:   tuiapp.AboutInfo{NotesDir: notesBase, Version: "test"},
+		newHost: factory,
+	})
 
-			ticket, status := webLogin(t, base, "alice", "a long enough passphrase")
-			if status != http.StatusOK {
-				t.Fatalf("login: HTTP %d", status)
-			}
-			if _, painted := attach(t, base, ticket); !painted {
-				t.Fatal("the session never painted, so appRunner never built a model")
-			}
+	ticket, status := webLogin(t, base, "alice", "a long enough passphrase")
+	if status != http.StatusOK {
+		t.Fatalf("login: HTTP %d", status)
+	}
+	if _, painted := attach(t, base, ticket); !painted {
+		t.Fatal("the session never painted, so appRunner never built a host")
+	}
 
-			mu.Lock()
-			m := built
-			mu.Unlock()
-			if m == nil {
-				t.Fatal("appRunner did not build its Model through the factory: it bypassed " +
-					"the seam, so nothing here constrains what it passed")
-			}
-
-			wantRoot := notesBase
-			if !tc.wantShared {
-				wantRoot = filepath.Join(notesBase, "u-alice")
-			}
-			if got := m.AboutNotesDir(); got != wantRoot {
-				t.Errorf("About root = %q, want %q — the runner passed the wrong root, so "+
-					"About would describe a note tree the viewer is not looking at", got, wantRoot)
-			}
-			if got := m.NoteViewOf().Shared; got != tc.wantShared {
-				t.Errorf("NoteView.Shared = %v, want %v — help will describe the wrong mode",
-					got, tc.wantShared)
-			}
-		})
+	mu.Lock()
+	opt := built
+	mu.Unlock()
+	if opt == nil {
+		t.Fatal("appRunner did not build its host through the factory: it bypassed " +
+			"the seam, so nothing here constrains what it passed")
+	}
+	if got, want := opt.About.NotesDir, filepath.Join(notesBase, "u-alice"); got != want {
+		t.Errorf("About root = %q, want %q — the runner passed the wrong root, so "+
+			"About would describe a note tree the viewer is not looking at", got, want)
+	}
+	if opt.Frontend != tuiapp.FrontendWeb {
+		t.Errorf("Frontend = %v, want FrontendWeb — a browser session would be offered "+
+			"the daemon's shutdown", opt.Frontend)
 	}
 }

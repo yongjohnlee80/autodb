@@ -11,8 +11,8 @@ import (
 
 // TestEveryBlueprintFileParses: the blueprint — qml/blueprint/main.qml and the
 // panels, views, dialogs and managers it imports — is the design every screen
-// is built to. Until golib's vocabulary has what it uses (ADR-0197 §9), it is
-// held to QML syntax: each file parses.
+// is built to. Until golib's QML vocabulary has every type it uses, it is held
+// to QML syntax: each file parses.
 func TestEveryBlueprintFileParses(t *testing.T) {
 	root := os.DirFS("qml")
 	n := 0

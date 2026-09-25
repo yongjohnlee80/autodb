@@ -1129,18 +1129,21 @@ func runUI(configPath string) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	model := tuiapp.New(session, notesFor, cancel,
-		tuiapp.WithAbout(tuiapp.AboutInfo{
+	host, err := tuiapp.New(session, notesFor, cancel, tuiapp.Options{
+		About: tuiapp.AboutInfo{
 			Version: version, Commit: commit, BuildDate: buildDate,
 			Repo: repoURL, Author: author,
 			NotesDir: notesRoot, MetaEngine: cfg.Meta.Engine.String(), MetaPath: metaPath,
 			ConfigPath: activeConfig,
-		}))
-	// The framework's own tracer shares the AUTODB_FOCUS_TRACE file with the
-	// Model's focus trace; nil when the variable is unset, which disables it.
-	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(backend),
-		tuicore.WithTrace(tuiapp.RuntimeTrace()))
-	return app.Run(ctx)
+		},
+		// The framework's tracer writes to the AUTODB_FOCUS_TRACE file; nil
+		// when the variable is unset, which disables it.
+		App: []tuicore.AppOption{tuicore.WithBackend(backend), tuicore.WithTrace(tuiapp.RuntimeTrace())},
+	})
+	if err != nil {
+		return fmt.Errorf("terminal: %w", err)
+	}
+	return host.Run(ctx)
 }
 
 // runWebUI serves the TUI to a browser. It reaches the daemon ONLY

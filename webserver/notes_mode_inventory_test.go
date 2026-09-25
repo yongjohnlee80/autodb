@@ -23,11 +23,11 @@ import "testing"
 func TestNotesMode_TestInventory(t *testing.T) {
 	// Naming each test binds it: deleting one breaks the build here.
 	required := map[string]func(*testing.T){
-		"DefaultIsPerUserIsolation":                TestNotesMode_DefaultIsPerUserIsolation,
-		"UnsafeSubjectStillRefused":                TestNotesMode_UnsafeSubjectStillRefused,
-		"UnsafeSubjectCannotBootstrap":             TestNotesMode_UnsafeSubjectCannotBootstrap,
-		"AboutReportsTheEffectiveRoot":             TestNotesMode_AboutReportsTheEffectiveRoot,
-		"RunnerBuildsTheModelWithTheEffectiveRoot": TestNotesMode_RunnerBuildsTheModelWithTheEffectiveRoot,
+		"DefaultIsPerUserIsolation":               TestNotesMode_DefaultIsPerUserIsolation,
+		"UnsafeSubjectStillRefused":               TestNotesMode_UnsafeSubjectStillRefused,
+		"UnsafeSubjectCannotBootstrap":            TestNotesMode_UnsafeSubjectCannotBootstrap,
+		"AboutReportsTheEffectiveRoot":            TestNotesMode_AboutReportsTheEffectiveRoot,
+		"RunnerBuildsTheHostWithTheEffectiveRoot": TestNotesMode_RunnerBuildsTheHostWithTheEffectiveRoot,
 	}
 	const want = 5
 	if len(required) != want {

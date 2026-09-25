@@ -75,12 +75,12 @@ type Config struct {
 	// being abandoned rather than closed.
 	dial func(ctx context.Context) (*tuiapp.Session, error)
 
-	// newModel overrides how a per-session Model is built. Test seam only, and it
-	// exists for a specific reason: testing modelOptions() proves the HELPER, not
+	// newHost overrides how a per-session host is built. Test seam only, and it
+	// exists for a specific reason: testing hostOptions() proves the HELPER, not
 	// that appRunner calls it. Restoring the old construction while leaving the
 	// helper intact reintroduced the bug with every test green. A test
 	// that captures this factory fails if the runner stops going through it.
-	newModel func(*tuiapp.Session, tuiapp.NotesFactory, func(), ...tuiapp.Option) *tuiapp.Model
+	newHost func(*tuiapp.Session, tuiapp.NotesFactory, func(), tuiapp.Options) (*tuiapp.Host, error)
 }
 
 // ListenAddr is where the browser surface listens, and the ONLY place that is
@@ -369,31 +369,31 @@ func (r *appRunner) Run(ctx context.Context) error {
 	// it named <notes> while the session actually read <notes>/u-<subject> — About
 	// told the user the wrong path, which is precisely the confusion this exists
 	// to remove.
-	newModel := r.gw.cfg.newModel
-	if newModel == nil {
-		newModel = tuiapp.New
+	newHost := r.gw.cfg.newHost
+	if newHost == nil {
+		newHost = tuiapp.New
 	}
-	model := newModel(r.user.sess, notesFor, cancel, r.gw.modelOptions(notes.Root())...)
-	// The framework's own tracer shares the AUTODB_FOCUS_TRACE file with the
-	// Model's focus trace; nil when the variable is unset, which disables it.
-	app := tuicore.NewApp(model.Root(), tuicore.WithBackend(r.backend),
-		tuicore.WithTrace(tuiapp.RuntimeTrace()))
-	return app.Run(ctx)
+	host, err := newHost(r.user.sess, notesFor, cancel, r.gw.hostOptions(notes.Root(), r.backend))
+	if err != nil {
+		return fmt.Errorf("webserver: build the TUI: %w", err)
+	}
+	return host.Run(ctx)
 }
 
-// modelOptions is the ONE place a per-session Model is configured, so a test can
+// hostOptions is the ONE place a per-session host is configured, so a test can
 // exercise the wiring the runner actually uses.
 //
 // Testing the options individually was not enough: a review restored the old
-// construction — unchanged `WithAbout(cfg.About)` and no `WithNoteView` — and
-// every test still passed, because the tests applied the options themselves
-// instead of asking the runner for them. Deleting either line below
-// must now fail a test.
-func (g *Gateway) modelOptions(root string) []tuiapp.Option {
-	return []tuiapp.Option{
-		tuiapp.WithAbout(aboutForRoot(g.cfg.About, root)),
-		tuiapp.WithNoteView(tuiapp.NoteView{Shared: false}),
-		tuiapp.WithFrontend(tuiapp.FrontendWeb),
+// construction — the unchanged base About — and every test still passed,
+// because the tests applied the options themselves instead of asking the
+// runner for them. Changing a line below must now fail a test.
+func (g *Gateway) hostOptions(root string, backend tuicore.Backend) tuiapp.Options {
+	return tuiapp.Options{
+		About:    aboutForRoot(g.cfg.About, root),
+		Frontend: tuiapp.FrontendWeb,
+		// The framework's tracer writes to the AUTODB_FOCUS_TRACE file; nil
+		// when the variable is unset, which disables it.
+		App: []tuicore.AppOption{tuicore.WithBackend(backend), tuicore.WithTrace(tuiapp.RuntimeTrace())},
 	}
 }
 
