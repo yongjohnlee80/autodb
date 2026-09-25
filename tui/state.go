@@ -12,13 +12,25 @@ import "fmt"
 // imports.
 func (h *Host) state(theme string) map[string]any {
 	st := map[string]any{
-		// The status line: the backend, who is signed in, the last message.
-		"App.backend":  "Backend [disconnected]",
-		"App.identity": "",
-		"App.status":   "",
+		// The last message, on the status line's right.
+		"App.status": "",
 		// Where sign-in stands: "connecting", "disconnected", "bootstrap",
 		// "login" or "signed-in". A document opens its dialogs on it.
 		"App.auth": "connecting",
+		// The status line's slots: the backend on the left, who is signed
+		// in (and, with the workspace, where and which note) in the centre;
+		// the last message is App.status, on the right.
+		"App.statusLeft":   "Backend [disconnected]",
+		"App.statusCenter": "",
+		// The catalog as the document sees it (menu.go).
+		"App.menu":       h.menus.bar,
+		"App.leader":     h.menus.leader,
+		"App.leaderText": "",
+		"App.helpText":   "",
+		// The overlays' text.
+		"App.hints":        "",
+		"App.aboutText":    h.aboutText(),
+		"App.quitQuestion": "This ends the session. Anything unsaved in the query buffer is lost.",
 	}
 	for k, v := range themeState(theme) {
 		st[k] = v
@@ -29,8 +41,13 @@ func (h *Host) state(theme string) map[string]any {
 // setStatus puts a message on the status line.
 func (h *Host) setStatus(msg string) { h.set("App.status", msg) }
 
-// setAuth records where sign-in stands.
-func (h *Host) setAuth(state string) { h.set("App.auth", state) }
+// setAuth records where sign-in stands. What the catalog offers depends on
+// it, so the menus are projected again.
+func (h *Host) setAuth(state string) {
+	h.auth = state
+	h.set("App.auth", state)
+	h.reproject()
+}
 
 // set writes one source; an error — a name no source declares — is the host's
 // own mistake, and is kept for Run to return.
@@ -53,8 +70,10 @@ func (h *Host) keep(err error) {
 // refreshIdentity brings the status line's backend and user up to date with
 // the session.
 func (h *Host) refreshIdentity() {
-	h.set("App.backend", backendText(h.session))
-	h.set("App.identity", h.session.User().Name)
+	h.set("App.statusLeft", backendText(h.session))
+	h.set("App.statusCenter", h.session.User().Name)
+	h.set("App.aboutText", h.aboutText()) // the backend line follows the connection
+	h.reproject()                         // who is signed in decides what is offered
 }
 
 // backendText is the backend as the status line says it.

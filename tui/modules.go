@@ -24,7 +24,7 @@ import (
 var qmlEmbed embed.FS
 
 // qmlFiles is the qml directory as the root, so paths read as they do under
-// -dev: main.qml, themes/retro.qml.
+// -dev: main.qml, themes/{retro,mono,dark,light}.qml.
 var qmlFiles = func() fs.FS {
 	sub, err := fs.Sub(qmlEmbed, "qml")
 	if err != nil {
@@ -48,25 +48,33 @@ const moduleVersion = "1.0"
 // modulesFrom are the modules with their QML read from files: the embedded
 // copy, or a directory on disk under -dev.
 func (h *Host) modulesFrom(files fs.FS) []tuidecl.ProgramOption {
-	return []tuidecl.ProgramOption{
+	return append([]tuidecl.ProgramOption{
 		// The `autodb` module exports ONE singleton, App. Everything the
 		// document can reach of this program is under that name.
 		tuidecl.Singleton("autodb", moduleVersion, "App"),
 		tuidecl.Themes(files, "themes", "autodb.theme", moduleVersion),
 		// Qt Quick Controls' TextField and Popup, from golib.
 		tuidecl.Types(controls.Types()...),
+	}, screenModules(files)...)
+}
+
+// screenModules are the screens built so far, one component per file, each
+// imported by its folder's module. The rest of the design waits in
+// qml/blueprint/ until its stage builds it (blueprintModules).
+func screenModules(files fs.FS) []tuidecl.ProgramOption {
+	return []tuidecl.ProgramOption{
+		tuidecl.Components(files, "views", "autodb.views", moduleVersion),
+		tuidecl.Components(files, "dialogs", "autodb.dialogs", moduleVersion),
 	}
 }
 
-// screenModules are the screens, one component per file — the panes, the
-// views, the dialogs and the managers, each imported by its folder's module.
-// The blueprint (qml/blueprint/main.qml) uses them; main.qml takes them up as
-// golib gains what they need.
-func screenModules(files fs.FS) []tuidecl.ProgramOption {
+// blueprintModules are the design's components not built yet, under the same
+// module names, for the blueprint's own checks.
+func blueprintModules(files fs.FS) []tuidecl.ProgramOption {
 	return []tuidecl.ProgramOption{
-		tuidecl.Components(files, "panels", "autodb.panels", moduleVersion),
-		tuidecl.Components(files, "views", "autodb.views", moduleVersion),
-		tuidecl.Components(files, "dialogs", "autodb.dialogs", moduleVersion),
-		tuidecl.Components(files, "managers", "autodb.managers", moduleVersion),
+		tuidecl.Components(files, "blueprint/panels", "autodb.panels", moduleVersion),
+		tuidecl.Components(files, "blueprint/views", "autodb.views", moduleVersion),
+		tuidecl.Components(files, "blueprint/dialogs", "autodb.dialogs", moduleVersion),
+		tuidecl.Components(files, "blueprint/managers", "autodb.managers", moduleVersion),
 	}
 }
