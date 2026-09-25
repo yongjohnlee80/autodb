@@ -33,6 +33,12 @@ func themeOf(src []byte) string {
 	return ""
 }
 
+// pickTheme records the theme a layout imports as the one the screen wears.
+func (h *Host) pickTheme(src []byte) string {
+	h.theme = themeOf(src)
+	return h.theme
+}
+
 // themeState is App.theme: the theme the layout imports.
 func themeState(theme string) map[string]any {
 	return map[string]any{"App.theme": theme}
@@ -73,9 +79,11 @@ func (h *Host) useTheme(name string) {
 		if h.dev == "" {
 			h.layoutSrc = next
 		}
+		h.theme = name
 		for k, v := range themeState(name) {
 			h.set(k, v)
 		}
+		h.reproject() // the Theme menu's mark follows it
 		h.setStatus("theme: " + name)
 	})
 }

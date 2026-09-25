@@ -130,3 +130,17 @@ func (h *Host) watch(gen uint64) {
 		h.connect()
 	})
 }
+
+// toggleConnection is session.connection_toggle: one command whose label and
+// effect follow the connection. A chosen disconnect moves the generation, so
+// this connection's watcher stands down and the disconnect stays one.
+func (h *Host) toggleConnection() {
+	if h.session.Connected() {
+		h.session.Disconnect()
+		h.setAuth("disconnected")
+		h.setStatus("disconnected — SPC x reconnects")
+		h.refreshIdentity()
+		return
+	}
+	h.connect()
+}

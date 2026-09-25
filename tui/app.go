@@ -38,6 +38,17 @@ type Host struct {
 	quit     func()
 	frontend Frontend
 	catalog  *CatalogOf[*Host]
+	// menus are the catalog's projections the document binds (menu.go).
+	menus *menuModels
+	// theme is the theme the screen wears now: the layout's import, and each
+	// switch since (theme.go).
+	theme string
+	// about is the runner's build and location detail (about.go); notes is
+	// the signed-in user's note store, nil before sign-in.
+	about AboutInfo
+	notes *NoteStore
+	// auth is where sign-in stands, as App.auth tells the document.
+	auth string
 
 	// ctx bounds background work; cancel ends it when the program stops.
 	ctx    context.Context
@@ -73,6 +84,8 @@ type Options struct {
 	Dev string
 	// App are options for the tui.App: the backend, above all.
 	App []tuicore.AppOption
+	// About is the build and location detail About shows.
+	About AboutInfo
 }
 
 // New mounts qml/main.qml over session. Nothing runs until Run.
@@ -100,7 +113,7 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Host{session: session, notesFor: notesFor, quit: quit, frontend: opt.Frontend,
-		ctx: ctx, cancel: cancel, dev: opt.Dev}
+		ctx: ctx, cancel: cancel, dev: opt.Dev, about: opt.About}
 	cat, err := NewCatalogOf(catalogCommands(), menuNodes())
 	if err != nil {
 		// A malformed catalog is a programming error in this package, and
@@ -108,6 +121,7 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 		panic("tui: host catalog: " + err.Error())
 	}
 	h.catalog = cat
+	h.menus = newMenuModels()
 	return h
 }
 
@@ -120,6 +134,7 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 // host sharing it.
 func (h *Host) attach(p *tuidecl.Program) error {
 	h.p = p
+	h.reproject()
 	p.Post(h.start)
 	return nil
 }
@@ -154,7 +169,7 @@ func (h *Host) options(opt Options) []tuidecl.ProgramOption {
 		opts = append(h.modulesFrom(qmlFiles), tuidecl.LayoutSource("main.qml", src))
 	}
 	opts = append(opts,
-		tuidecl.Sources(h.state(themeOf(src))),
+		tuidecl.Sources(h.state(h.pickTheme(src))),
 		tuidecl.Handlers(h.commands()),
 		tuidecl.AppOptions(opt.App...),
 	)

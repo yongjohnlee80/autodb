@@ -25,10 +25,16 @@ func TestEveryHostQMLFileIsSound(t *testing.T) {
 // runHost starts the QML host against a real server.
 func runHost(t *testing.T, addr string) (*tuiapp.Host, *decltest.Screen) {
 	t.Helper()
+	return runHostSized(t, addr, 100, 12)
+}
+
+// runHostSized is runHost on a screen of the given size.
+func runHostSized(t *testing.T, addr string, w, h int) (*tuiapp.Host, *decltest.Screen) {
+	t.Helper()
 	session := tuiapp.NewSession(addr, logger.Nop{}, nil)
 	t.Cleanup(session.Close)
 	notesFor := tuiapp.PersonalNotesIn(filepath.Join(t.TempDir(), "notes"))
-	return tuiapp.RunHost(t, session, notesFor, tuiapp.Options{}, 100, 12)
+	return tuiapp.RunHost(t, session, notesFor, tuiapp.Options{}, w, h)
 }
 
 // lastRow is the status line.
@@ -38,13 +44,13 @@ func lastRow(s *decltest.Screen) string {
 }
 
 // TestTheHostConnectsAndSaysTheServerNeedsItsFirstUser: a fresh server has no
-// users; the host connects, names the backend, and says sign-in is bootstrap.
+// users; the host connects, names the backend, and sign-in is bootstrap.
 func TestTheHostConnectsAndSaysTheServerNeedsItsFirstUser(t *testing.T) {
 	addr := startRealServer(t)
-	_, s := runHost(t, addr)
+	h, s := runHost(t, addr)
 	s.WaitFor(t, "connected, needing its first user", func(string) bool {
 		row := lastRow(s)
-		return strings.Contains(row, "Backend") && strings.Contains(row, addr) && strings.Contains(row, "bootstrap")
+		return strings.Contains(row, "Backend") && strings.Contains(row, addr) && h.Auth() == "bootstrap"
 	})
 	s.WaitFor(t, "the connected message", func(sc string) bool { return strings.Contains(sc, "connected — autodb") })
 }
@@ -55,26 +61,26 @@ func TestTheHostConnectsAndSaysTheServerNeedsItsFirstUser(t *testing.T) {
 func TestTheConnectionToggleDisconnectsAndReconnects(t *testing.T) {
 	addr := startRealServer(t)
 	h, s := runHost(t, addr)
-	s.WaitFor(t, "connected", func(string) bool { return strings.Contains(lastRow(s), "bootstrap") })
+	s.WaitFor(t, "connected", func(string) bool { return h.Auth() == "bootstrap" })
 	h.RunCommand("session.connection_toggle")
 	s.WaitFor(t, "disconnected", func(sc string) bool {
 		return strings.Contains(sc, "SPC x reconnects") && strings.Contains(lastRow(s), "Backend [disconnected]")
 	})
 	time.Sleep(200 * time.Millisecond) // a watcher that redialed would be connecting by now
-	if row := lastRow(s); !strings.Contains(row, "disconnected") {
-		t.Fatalf("a chosen disconnect redialed: %q", row)
+	if a := h.Auth(); a != "disconnected" {
+		t.Fatalf("a chosen disconnect redialed: sign-in is %q", a)
 	}
 	h.RunCommand("session.connection_toggle")
-	s.WaitFor(t, "connected again", func(string) bool { return strings.Contains(lastRow(s), "bootstrap") })
+	s.WaitFor(t, "connected again", func(string) bool { return h.Auth() == "bootstrap" })
 }
 
 // TestAHostWithNoServerSaysTheConnectFailed: nothing listening, no spawner —
 // the status line says so, and sign-in is disconnected.
 func TestAHostWithNoServerSaysTheConnectFailed(t *testing.T) {
-	_, s := runHost(t, "127.0.0.1:1")
+	h, s := runHost(t, "127.0.0.1:1")
 	// The session probes for its whole spawn window before it gives up.
 	deadline := time.Now().Add(20 * time.Second)
-	for !(strings.Contains(s.String(), "connect failed") && strings.Contains(lastRow(s), "disconnected")) {
+	for !(strings.Contains(s.String(), "connect failed") && h.Auth() == "disconnected") {
 		if time.Now().After(deadline) {
 			t.Fatalf("no failure reported:\n%s", s.String())
 		}

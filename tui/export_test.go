@@ -27,6 +27,20 @@ func RunHost(t testing.TB, session *Session, notesFor NotesFactory, opt Options,
 	return h, s
 }
 
+// Auth is where sign-in stands, read on the loop.
+func (h *Host) Auth() string {
+	got := make(chan string, 1)
+	h.p.Post(func() { got <- h.auth })
+	return <-got
+}
+
+// Theme is the theme the screen wears, read on the loop.
+func (h *Host) Theme() string {
+	got := make(chan string, 1)
+	h.p.Post(func() { got <- h.theme })
+	return <-got
+}
+
 // RunCommand runs a catalog command on the loop, as App.run would.
 func (h *Host) RunCommand(id string) { h.p.Post(func() { h.catalog.runIfOffered(h, CommandID(id)) }) }
 
@@ -46,6 +60,5 @@ func BlueprintProgramOptionsFrom(files fs.FS, src []byte) []tuidecl.ProgramOptio
 	opt := Options{Layout: src}
 	h := newHost(nil, nil, nil, opt)
 	opts := h.options(opt)
-	opts = append(opts, screenModules(files)...)
 	return opts
 }

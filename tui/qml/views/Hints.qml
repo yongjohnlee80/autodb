@@ -1,7 +1,7 @@
 // Hints.qml — `?`: the keys that work where you are.
 //
-// Bottom-right, any key closes it. The host fills App.hints for the topmost
-// dialog, or else for the pane in use.
+// The host fills App.hints for the place the keyboard is, then opens this
+// card. Esc closes it.
 
 Popup {
     id: hints

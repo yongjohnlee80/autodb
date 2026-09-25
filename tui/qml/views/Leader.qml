@@ -1,31 +1,22 @@
 // Leader.qml — SPC's which-key menu: every command offered here, by key.
 //
-// A VIEW of the catalog (App.leader, a host model, one row per command:
-// key, label, enabled, reason, id). A disabled row stays, dimmed, saying why,
-// and its key does nothing; a hidden one is not in the model. Pressing a key
-// runs its command through the catalog; q dismisses only when q is unbound.
+// A VIEW of the catalog. App.leader is a host model, one row per command with
+// a leader key; App.leaderText is the same rows as the card shows them — key,
+// label, and a disabled command's reason. A hidden command is in neither.
+//
+// The rows are TEXT, not a list: a list takes the keyboard and eats j, k and
+// g, which are leader keys. With nothing focusable in it, every key reaches
+// the dialog's Shortcuts — one per row — and a key runs its command through
+// the catalog (App.leaderKey). A disabled command's key leaves the card open
+// and says why; Esc closes it.
 
-Popup {
+Dialog {
     id: leader
-    modal: true
-    Frame {
-        title: "SPC — commands"
-        Flex {
-            direction: Tui.Vertical
-            Repeater {
-                model: App.leader
-                Flex {
-                    direction: Tui.Horizontal
-                    enabled: model.enabled
-                    Text { text: model.key }
-                    Text { text: model.label }
-                    Shortcut {
-                        sequence: model.key
-                        enabled: model.enabled
-                        onActivated: App.run(model.id)
-                    }
-                }
-            }
-        }
+    title: "SPC — commands"
+    helpText: "a key runs its command · Esc closes"
+    Text { text: App.leaderText }
+    Repeater {
+        model: App.leader
+        Shortcut { sequence: model.key; onActivated: App.leaderKey(model.id) }
     }
 }
