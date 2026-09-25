@@ -6,6 +6,7 @@ import (
 
 	"github.com/yongjohnlee80/golib/decl"
 	"github.com/yongjohnlee80/golib/parse/qml"
+	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 )
 
 // THE APP SINGLETON'S COMMANDS — what the document invokes.
@@ -22,10 +23,14 @@ import (
 // except through the catalog.
 func (h *Host) commands() map[string]decl.HandlerFunc {
 	return map[string]decl.HandlerFunc{
-		"App.run":           oneString("App.run", "a command id", h.run),
-		"App.leaderKey":     oneString("App.leaderKey", "a command id", h.leaderKey),
-		"App.quitConfirmed": none(func() error { h.quitProgram(); return nil }),
-		"App.showHints":     none(h.showHints),
+		"App.run":               oneString("App.run", "a command id", h.run),
+		"App.leaderKey":         oneString("App.leaderKey", "a command id", h.leaderKey),
+		"App.quitConfirmed":     none(func() error { h.quitProgram(); return nil }),
+		"App.showHints":         none(h.showHints),
+		"App.login":             twoStrings("App.login", h.login),
+		"App.bootstrap":         threeStrings("App.bootstrap", h.bootstrap),
+		"App.signInDeclined":    none(h.signInDeclined),
+		"App.explorerActivated": oneIndex("App.explorerActivated", h.explorerActivated),
 	}
 }
 
@@ -105,6 +110,47 @@ func oneString(name, what string, fn func(string) error) decl.HandlerFunc {
 		}
 		return fn(args[0].Raw)
 	}
+}
+
+// strings is a command that takes n strings, in order.
+func strings_(name string, n int, fn func([]string) error) decl.HandlerFunc {
+	return func(args []qml.SpecValue) error {
+		if len(args) != n {
+			return fmt.Errorf("%s takes %d strings, and was given %d arguments", name, n, len(args))
+		}
+		vals := make([]string, n)
+		for i, a := range args {
+			if a.Kind != qml.SpecValueString {
+				return fmt.Errorf("%s takes %d strings; argument %d is not one", name, n, i+1)
+			}
+			vals[i] = a.Raw
+		}
+		return fn(vals)
+	}
+}
+
+// oneIndex is a command that takes a view's row Index, as a signal gives it.
+func oneIndex(name string, fn func(tuidecl.Index) error) decl.HandlerFunc {
+	return func(args []qml.SpecValue) error {
+		if len(args) != 1 {
+			return fmt.Errorf("%s takes a row's index", name)
+		}
+		ix, ok := args[0].Obj.(tuidecl.Index)
+		if !ok {
+			return fmt.Errorf("%s takes a row's index, not %s", name, args[0].Raw)
+		}
+		return fn(ix)
+	}
+}
+
+// twoStrings is a command that takes two strings.
+func twoStrings(name string, fn func(a, b string) error) decl.HandlerFunc {
+	return strings_(name, 2, func(v []string) error { return fn(v[0], v[1]) })
+}
+
+// threeStrings is a command that takes three strings.
+func threeStrings(name string, fn func(a, b, c string) error) decl.HandlerFunc {
+	return strings_(name, 3, func(v []string) error { return fn(v[0], v[1], v[2]) })
 }
 
 // open opens a dialog the document declares, by its id — the one thing a

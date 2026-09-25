@@ -3,11 +3,13 @@ package tui
 import (
 	"context"
 	"errors"
+	"github.com/yongjohnlee80/golib/decl"
 	"os"
 	"path/filepath"
 
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
+	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
 // Host is the program behind qml/main.qml: autodb's TUI written in QML.
@@ -47,8 +49,23 @@ type Host struct {
 	// the signed-in user's note store, nil before sign-in.
 	about AboutInfo
 	notes *NoteStore
-	// auth is where sign-in stands, as App.auth tells the document.
-	auth string
+	// auth is where sign-in stands, as App.auth tells the document; idEpoch
+	// counts the identities signed in, so a late answer asked under one is
+	// dropped under the next.
+	auth    string
+	idEpoch uint64
+	// The workspace (workspace.go, explorer.go, results.go): the query editor,
+	// the connection it runs on, the explorer's tree, the last result.
+	editor   *widget.Editor
+	active   activeConn
+	explorer *explorer
+	results  *results
+	// hadAuth is that this program has been signed in, which is what makes a
+	// token going empty a sign-out rather than the start. authSeq numbers the
+	// sign-in attempts; authAttempt is the running one's, 0 for none (auth.go).
+	hadAuth     bool
+	authSeq     uint64
+	authAttempt uint64
 
 	// ctx bounds background work; cancel ends it when the program stops.
 	ctx    context.Context
@@ -122,6 +139,7 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 	}
 	h.catalog = cat
 	h.menus = newMenuModels()
+	h.explorer, h.results = newExplorer(), newResults()
 	return h
 }
 
@@ -134,6 +152,10 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 // host sharing it.
 func (h *Host) attach(p *tuidecl.Program) error {
 	h.p = p
+	if err := h.attachWorkspace(); err != nil {
+		return err
+	}
+	h.explorer.model.OnFetch = h.fetchExplorer
 	h.reproject()
 	p.Post(h.start)
 	return nil
@@ -159,7 +181,11 @@ func (h *Host) options(opt Options) []tuidecl.ProgramOption {
 			tuidecl.Layout(files, "main.qml"),
 			// A refused edit is reported where the user is looking; the
 			// screen stays as it was until the next good save.
-			tuidecl.HotReload(tuidecl.OnReloadError(func(err error) { h.setStatus(err.Error()) })))
+			tuidecl.HotReload(tuidecl.OnReloadError(func(err error) { h.setStatus(err.Error()) }),
+				// An edit may change the theme import: the screen then
+				// wears the new theme, and what the program says it wears
+				// — App.theme, the Theme menu's mark — must follow.
+				tuidecl.OnReload(func(decl.Result) { h.followLayoutTheme() })))
 	} else {
 		src = opt.Layout
 		if src == nil {

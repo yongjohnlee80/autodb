@@ -65,6 +65,7 @@ func screenModules(files fs.FS) []tuidecl.ProgramOption {
 	return []tuidecl.ProgramOption{
 		tuidecl.Components(files, "views", "autodb.views", moduleVersion),
 		tuidecl.Components(files, "dialogs", "autodb.dialogs", moduleVersion),
+		tuidecl.Components(files, "panels", "autodb.panels", moduleVersion),
 	}
 }
 
@@ -72,7 +73,6 @@ func screenModules(files fs.FS) []tuidecl.ProgramOption {
 // module names, for the blueprint's own checks.
 func blueprintModules(files fs.FS) []tuidecl.ProgramOption {
 	return []tuidecl.ProgramOption{
-		tuidecl.Components(files, "blueprint/panels", "autodb.panels", moduleVersion),
 		tuidecl.Components(files, "blueprint/views", "autodb.views", moduleVersion),
 		tuidecl.Components(files, "blueprint/dialogs", "autodb.dialogs", moduleVersion),
 		tuidecl.Components(files, "blueprint/managers", "autodb.managers", moduleVersion),

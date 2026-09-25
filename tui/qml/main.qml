@@ -17,7 +17,8 @@ import tui 1.0
 import autodb 1.0                 // App: this program's state and commands
 import autodb.theme.retro 1.0     // the Theme singleton — Options › Theme switches it
 import autodb.views 1.0           // Leader, Hints, Help, About
-import autodb.dialogs 1.0         // ConfirmQuit
+import autodb.dialogs 1.0         // ConfirmQuit, Login, Bootstrap
+import autodb.panels 1.0          // Results
 
 Window {
     palette.window: Theme.app.window
@@ -106,12 +107,47 @@ Window {
 
     // ---- the workspace -----------------------------------------------------
     //
-    // The panes arrive with the workspace (the blueprint's Explorer,
-    // QueryEditor and Results); until then the program says where it stands.
-    Frame {
+    // The schema on the left, the query above its results on the right. The
+    // explorer's tree and the query editor are declared HERE, by id, because
+    // the host works them: it opens a folder the explorer's Enter names
+    // (explorerTree.toggleExpanded), and it reads the query and scaffolds one
+    // into it (editor). The results are a view of host sources, a component.
+    Split {
+        orientation: Tui.Horizontal
+        ratio: 0.25
         palette.window: Theme.document.window
         palette.windowText: Theme.document.windowText
-        Text { text: App.status }
+        palette.highlight: Theme.document.highlight
+        palette.base: Theme.document.base
+        palette.text: Theme.document.text
+
+        Frame {
+            title: "explorer"
+            // Enter on a row: a folder opens, a table scaffolds its query, and
+            // a connection — or anything under one — becomes the query's.
+            TreeView {
+                id: explorerTree
+                model: App.explorer
+                textRole: "label"
+                badgeRole: "badge"
+                onActivated: App.explorerActivated(index)
+            }
+        }
+
+        Split {
+            orientation: Tui.Vertical
+            ratio: 0.55
+            Frame {
+                title: App.queryTitle
+                // The keyboard starts here, and every card gives it back here.
+                Editor {
+                    id: editor
+                    focus: true
+                    keyset: App.keyset
+                }
+            }
+            Results { id: results }
+        }
     }
 
     // ---- the status line ---------------------------------------------------
@@ -132,4 +168,6 @@ Window {
     Help { id: help }
     About { id: about }
     ConfirmQuit { id: quit }
+    Login { id: login }
+    Bootstrap { id: bootstrap }
 }

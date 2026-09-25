@@ -16,17 +16,40 @@ import (
 
 func esc() tuicore.KeyEvent { return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyEscape} }
 
-// connected is the host over a real server, once it has connected — on a
-// screen tall enough for the help card's whole list.
+// connected is the host over a real server, signed in as its first user
+// through the first-run dialog — on a screen tall enough for the help card's
+// whole list.
 func connected(t *testing.T) (*tuiapp.Host, *decltest.Screen) {
 	t.Helper()
 	h, s := runHostSized(t, startRealServer(t), 100, 32)
-	s.WaitFor(t, "connected", func(string) bool { return h.Auth() == "bootstrap" })
+	bootstrapAs(t, h, s, "", "a long enough passphrase")
 	return h, s
 }
 
+func tab() tuicore.KeyEvent { return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyTab} }
+func enter() tuicore.KeyEvent {
+	return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyEnter}
+}
+
+// bootstrapAs answers the first-run dialog as a user does — the name (empty
+// for root), Tab, the passphrase, Tab, again, Enter — and waits for the
+// sign-in.
+func bootstrapAs(t *testing.T, h *tuiapp.Host, s *decltest.Screen, user, pass string) {
+	t.Helper()
+	s.WaitForText(t, "first run — create the root user")
+	keys := decltest.Type(user)
+	keys = append(keys, tab())
+	keys = append(keys, decltest.Type(pass)...)
+	keys = append(keys, tab())
+	keys = append(keys, decltest.Type(pass)...)
+	keys = append(keys, enter())
+	s.Keys(t, keys...)
+	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
+}
+
 // The menu bar is the catalog's top level: a menu whose every row is planned
-// is pruned, as the terminal program's bar was.
+// is pruned, as the terminal program's bar was — File and Edit, until the
+// notes and the editor's actions are built.
 func TestTheMenuBarShowsWhatTheCatalogOffers(t *testing.T) {
 	_, s := connected(t)
 	top := strings.Split(s.String(), "\n")[0]
@@ -35,7 +58,12 @@ func TestTheMenuBarShowsWhatTheCatalogOffers(t *testing.T) {
 			t.Errorf("the menu bar lacks %q: %q", want, top)
 		}
 	}
-	for _, pruned := range []string{"File", "Edit", "Run", "View"} {
+	for _, want := range []string{"Run", "View"} {
+		if !strings.Contains(top, want) {
+			t.Errorf("the menu bar lacks %q, whose commands are built: %q", want, top)
+		}
+	}
+	for _, pruned := range []string{"File", "Edit"} {
 		if strings.Contains(top, pruned) {
 			t.Errorf("the menu bar shows %q, whose every command is planned: %q", pruned, top)
 		}
@@ -49,12 +77,12 @@ func TestSpaceOpensTheLeaderMenu(t *testing.T) {
 	s.Keys(t, decltest.Rune(' '))
 	s.WaitForText(t, "SPC — commands")
 	sc := s.String()
-	for _, want := range []string{"x  disconnect", "A  about autodb", "?  help", "Q  quit"} {
+	for _, want := range []string{"x  disconnect", "L  login / switch user", "r  run query", "A  about autodb", "?  help", "Q  quit"} {
 		if !strings.Contains(sc, want) {
 			t.Errorf("the leader menu lacks %q:\n%s", want, sc)
 		}
 	}
-	for _, planned := range []string{"login / switch user", "restart the server"} {
+	for _, planned := range []string{"restart the server", "profile"} {
 		if strings.Contains(sc, planned) {
 			t.Errorf("the leader menu offers %q, which is planned:\n%s", planned, sc)
 		}

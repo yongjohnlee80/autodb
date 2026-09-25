@@ -1,0 +1,184 @@
+package tui_test
+
+import (
+	"context"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/yongjohnlee80/golib/logger"
+	tuicore "github.com/yongjohnlee80/golib/tui"
+	"github.com/yongjohnlee80/golib/tui/decl/decltest"
+
+	tuiapp "github.com/yongjohnlee80/autodb/tui"
+)
+
+// workspace_test.go holds signing in and the workspace: the explorer, the
+// query, and what a run returns — against a server seeded as an operator
+// leaves one.
+
+const rootPass = "a long enough passphrase"
+
+// seeded is a server with its root user, a workspace "main", and a SQLite
+// connection "bravo" in it holding the table items (two rows).
+func seeded(t *testing.T) string {
+	t.Helper()
+	addr := startRealServer(t)
+	sess := tuiapp.NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(sess.Close)
+	ctx := context.Background()
+	if _, err := sess.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Bind().Bootstrap(ctx, "root", rootPass); err != nil {
+		t.Fatal(err)
+	}
+	b := sess.Bind()
+	cid, err := b.CreateConnection(ctx, "bravo", "sqlite", filepath.Join(t.TempDir(), "b.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sql := range []string{
+		`CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)`,
+		`INSERT INTO items (name) VALUES ('ann'), ('bob')`,
+	} {
+		if _, err := b.Run(ctx, cid, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ws, err := b.CreateWorkspace(ctx, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AttachConnection(ctx, ws, cid); err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
+// loginAs answers the login dialog as a user does: the name, Tab, the
+// passphrase, Enter.
+func loginAs(t *testing.T, s *decltest.Screen, user, pass string) {
+	t.Helper()
+	s.WaitForText(t, "┌ sign in ")
+	keys := decltest.Type(user)
+	keys = append(keys, tab())
+	keys = append(keys, decltest.Type(pass)...)
+	keys = append(keys, enter())
+	s.Keys(t, keys...)
+}
+
+// signedIn is the host over the seeded server, signed in as root.
+func signedIn(t *testing.T) (*tuiapp.Host, *decltest.Screen) {
+	t.Helper()
+	h, s := runHostSized(t, seeded(t), 120, 32)
+	loginAs(t, s, "root", rootPass)
+	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
+	return h, s
+}
+
+func key(r rune) tuicore.KeyEvent { return decltest.Rune(r) }
+
+// A refused first-run answer opens the dialog again, saying why.
+func TestTheFirstRunDialogSaysWhyItRefused(t *testing.T) {
+	h, s := runHostSized(t, startRealServer(t), 100, 32)
+	s.WaitForText(t, "first run — create the root user")
+	keys := append([]tuicore.Event{tab()}, decltest.Type("one passphrase")...)
+	keys = append(keys, tab())
+	keys = append(keys, decltest.Type("another one")...)
+	s.Keys(t, append(keys, enter())...)
+	s.WaitFor(t, "the reason", func(sc string) bool {
+		return strings.Contains(sc, "first run — create the root user") && strings.Contains(sc, "the passphrases do not match")
+	})
+	if a := h.Auth(); a != "bootstrap" {
+		t.Errorf("a refused first run left sign-in at %q", a)
+	}
+}
+
+// A wrong passphrase is the server's refusal, on the login dialog's help line
+// when it opens again.
+func TestAWrongPassphraseIsRefused(t *testing.T) {
+	h, s := runHostSized(t, seeded(t), 100, 32)
+	loginAs(t, s, "root", "not the passphrase")
+	s.WaitFor(t, "refused, and asked again", func(sc string) bool {
+		return strings.Contains(sc, "┌ sign in ") && strings.Contains(sc, "bad credentials")
+	})
+	if a := h.Auth(); a != "login" {
+		t.Errorf("a refused login left sign-in at %q", a)
+	}
+}
+
+// Signed in, the explorer lists the workspaces; Enter opens a folder and makes
+// a connection the query's.
+func TestEnterOnAConnectionOpensItAndMakesItTheQuerys(t *testing.T) {
+	_, s := signedIn(t)
+	s.WaitForText(t, "main")
+	s.Keys(t, key(' '), key('e')) // SPC e: the explorer
+	s.Keys(t, enter())            // main opens
+	s.WaitForText(t, "connections")
+	s.Keys(t, key('j'), enter()) // connections opens
+	s.WaitForText(t, "bravo")
+	s.Keys(t, key('j'), enter()) // bravo opens, and is the query's
+	s.WaitFor(t, "the query targets bravo, opened", func(sc string) bool {
+		return strings.Contains(sc, "query → bravo") && rowUnder(s, "bravo sqlite", "main")
+	})
+}
+
+// Enter on a table scaffolds its SELECT into the query, which does not open;
+// SPC r runs it, and the rows are a table whose columns are the query's; SPC
+// j shows them as JSON.
+func TestATableScaffoldsItsQueryWhichRunsIntoTheResults(t *testing.T) {
+	_, s := signedIn(t)
+	s.WaitForText(t, "main")
+	s.Keys(t, key(' '), key('e'), enter())
+	s.WaitForText(t, "connections")
+	s.Keys(t, key('j'), enter())
+	s.WaitForText(t, "bravo")
+	s.Keys(t, key('j'), enter()) // bravo: its schemas
+	s.WaitFor(t, "bravo's schema", func(string) bool { return rowUnder(s, "bravo sqlite", "main") })
+	s.Keys(t, key('j'), enter()) // the schema: its sections
+	s.WaitFor(t, "the sections", func(sc string) bool { return strings.Contains(sc, "▸ tables") && strings.Contains(sc, "▸ views") })
+	s.Keys(t, key('j'), enter()) // tables
+	s.WaitFor(t, "the tables", func(string) bool { return rowUnder(s, "tables", "items") })
+	s.Keys(t, key('j'), enter()) // items: scaffolded
+	s.WaitFor(t, "the scaffold, the table not opened", func(sc string) bool {
+		return strings.Contains(sc, `SELECT * FROM "main"."items" LIMIT 100`) && strings.Contains(sc, "▸ items")
+	})
+	s.Keys(t, key(' '), key('r'))
+	s.WaitFor(t, "the rows", func(sc string) bool {
+		return strings.Contains(sc, "SELECT ok — 2 row(s)") && strings.Contains(sc, "ann") && strings.Contains(sc, "bob") && strings.Contains(sc, "name")
+	})
+	s.Keys(t, key(' '), key('j'))
+	s.WaitFor(t, "the JSON", func(sc string) bool { return strings.Contains(sc, `"name": "ann"`) })
+}
+
+// A run with no connection says so.
+func TestARunWithNoConnectionSaysSo(t *testing.T) {
+	_, s := signedIn(t)
+	s.Keys(t, key(' '), key('r'))
+	s.WaitForText(t, "no connection — Enter on one in the explorer")
+}
+
+func rows(s *decltest.Screen) []string { return strings.Split(s.String(), "\n") }
+
+// rowUnder reports whether the row after the first one holding above holds
+// text — a child shown right under its parent.
+func rowUnder(s *decltest.Screen, above, text string) bool {
+	rs := rows(s)
+	for i, r := range rs {
+		if strings.Contains(r, above) {
+			return i+1 < len(rs) && strings.Contains(rs[i+1], text)
+		}
+	}
+	return false
+}
+
+// rowOf is the first screen row holding text, -1 for none.
+func rowOf(s *decltest.Screen, text string) int {
+	for i, r := range rows(s) {
+		if strings.Contains(r, text) {
+			return i
+		}
+	}
+	return -1
+}

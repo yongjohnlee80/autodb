@@ -6,8 +6,9 @@
 Popup {
     id: hints
     modal: true
+    dim: false
     Frame {
         title: "keys here"
-        Text { text: App.hints }
+        Text { wrapMode: Tui.WordWrap; text: App.hints }
     }
 }

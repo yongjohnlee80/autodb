@@ -3,7 +3,9 @@
 
 Dialog {
     title: "help"
+    dim: false        // the backdrop fades only for sign-in and quitting
     standardButtons: Dialog.Close
+    defaultButton: Dialog.Close       // Enter closes it, as its help line says
     helpText: "Esc or Enter closes"
     Editor {
         readOnly: true
