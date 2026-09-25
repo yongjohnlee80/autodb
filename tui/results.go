@@ -30,9 +30,17 @@ type results struct {
 	asJSON  bool
 	running bool
 	seq     uint64
+	// run executes a query: the backend's, unless a test holds the answer.
+	// answered counts the answers that came back, applied or dropped.
+	run      func(ctx context.Context, b *Bound, connID int64, sql string) (*ExecResult, error)
+	answered int
 }
 
-func newResults() *results { return &results{model: tuidecl.NewListModel()} }
+func newResults() *results {
+	return &results{model: tuidecl.NewListModel(), run: func(ctx context.Context, b *Bound, connID int64, sql string) (*ExecResult, error) {
+		return b.Run(ctx, connID, sql)
+	}}
+}
 
 // resultsState are the results pane's sources, with nothing shown.
 func resultsState(r *results) map[string]any {
@@ -92,12 +100,14 @@ func (h *Host) runSQL(sql string) {
 		res *ExecResult
 		err error
 	}
+	run := r.run
 	do(h, func(ctx context.Context) ran {
-		res, err := bound.Run(ctx, connID, sql)
+		res, err := run(ctx, bound, connID, sql)
 		return ran{gen: bound.Gen(), res: res, err: err}
 	}, func(v ran) {
+		r.answered++
 		if seq != r.seq {
-			return // a newer run owns the pane and the guard
+			return // a newer run, or another identity, owns the pane and the guard
 		}
 		r.running = false
 		switch {

@@ -56,12 +56,12 @@ func seeded(t *testing.T) string {
 	return addr
 }
 
-// loginAs answers the login dialog as a user does: the name, Tab, the
-// passphrase, Enter.
+// loginAs answers the login dialog as a user does: the name — replacing the
+// one it remembers, Ctrl+U — Tab, the passphrase, Enter.
 func loginAs(t *testing.T, s *decltest.Screen, user, pass string) {
 	t.Helper()
 	s.WaitForText(t, "┌ sign in ")
-	keys := decltest.Type(user)
+	keys := append([]tuicore.Event{decltest.Ctrl('u')}, decltest.Type(user)...)
 	keys = append(keys, tab())
 	keys = append(keys, decltest.Type(pass)...)
 	keys = append(keys, enter())
@@ -78,6 +78,15 @@ func signedIn(t *testing.T) (*tuiapp.Host, *decltest.Screen) {
 }
 
 func key(r rune) tuicore.KeyEvent { return decltest.Rune(r) }
+
+func esc2() tuicore.KeyEvent { return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyEscape} }
+
+// typeInto types text into the query editor from Normal mode: i, the text, Esc.
+func typeInto(t *testing.T, s *decltest.Screen, text string) {
+	t.Helper()
+	keys := append([]tuicore.Event{key('i')}, decltest.Type(text)...)
+	s.Keys(t, append(keys, esc2())...)
+}
 
 // A refused first-run answer opens the dialog again, saying why.
 func TestTheFirstRunDialogSaysWhyItRefused(t *testing.T) {
