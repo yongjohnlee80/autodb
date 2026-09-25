@@ -9,17 +9,17 @@ import (
 )
 
 // export_test.go opens the QML host to the external tests: the same options
-// NewHost builds from, run on a test backend.
+// New builds from, run on a test backend.
 
-// HostProgramOptions are the program the QML check lints.
-func HostProgramOptions(opt HostOptions) []tuidecl.ProgramOption {
+// ProgramOptions are the program the QML check lints.
+func ProgramOptions(opt Options) []tuidecl.ProgramOption {
 	h := newHost(nil, nil, nil, opt)
 	return h.options(opt)
 }
 
-// RunHost runs the QML host over session on a test screen, as NewHost would:
+// RunHost runs the QML host over session on a test screen, as New would:
 // built, attached, then run. The host's background work stops with the test.
-func RunHost(t testing.TB, session *Session, notesFor NotesFactory, opt HostOptions, w, height int) (*Host, *decltest.Screen) {
+func RunHost(t testing.TB, session *Session, notesFor NotesFactory, opt Options, w, height int) (*Host, *decltest.Screen) {
 	t.Helper()
 	h := newHost(session, notesFor, nil, opt)
 	t.Cleanup(h.cancel)
@@ -43,7 +43,7 @@ func BlueprintProgramOptions() []tuidecl.ProgramOption {
 // BlueprintProgramOptionsFrom is the blueprint read from files, for a probe
 // over an edited copy.
 func BlueprintProgramOptionsFrom(files fs.FS, src []byte) []tuidecl.ProgramOption {
-	opt := HostOptions{Layout: src}
+	opt := Options{Layout: src}
 	h := newHost(nil, nil, nil, opt)
 	opts := h.options(opt)
 	opts = append(opts, screenModules(files)...)

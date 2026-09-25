@@ -13,37 +13,37 @@ import (
 // leader menu are views of this list; nothing else declares a command.
 
 const (
-	cmdHostQuit       CommandID = "app.quit"
-	cmdHostConnection CommandID = "session.connection_toggle"
-	cmdThemePrefix              = "options.theme."
+	cmdQuit        CommandID = "app.quit"
+	cmdConnection  CommandID = "session.connection_toggle"
+	cmdThemePrefix           = "options.theme."
 )
 
 const (
-	nodeHostHome    MenuNodeID = "home"
-	nodeHostOptions MenuNodeID = "options"
-	nodeHostTheme   MenuNodeID = "options.theme"
+	nodeHome    MenuNodeID = "home"
+	nodeOptions MenuNodeID = "options"
+	nodeTheme   MenuNodeID = "options.theme"
 )
 
-// hostMenuNodes is the bar's structure.
-func hostMenuNodes() []MenuNode {
+// menuNodes is the bar's structure.
+func menuNodes() []MenuNode {
 	return []MenuNode{
-		{ID: nodeHostHome, Label: "Home", Hotkey: 'H', Order: 10},
-		{ID: nodeHostOptions, Label: "Options", Hotkey: 'O', Order: 60},
-		{ID: nodeHostTheme, Parent: nodeHostOptions, Label: "Theme", Hotkey: 'T', Order: 20},
+		{ID: nodeHome, Label: "Home", Hotkey: 'H', Order: 10},
+		{ID: nodeOptions, Label: "Options", Hotkey: 'O', Order: 60},
+		{ID: nodeTheme, Parent: nodeOptions, Label: "Theme", Hotkey: 'T', Order: 20},
 	}
 }
 
-// hostCommands are the program's commands.
-func hostCommands() []CommandOf[*Host] {
+// catalogCommands are the program's commands.
+func catalogCommands() []CommandOf[*Host] {
 	cmds := []CommandOf[*Host]{
 		{
-			ID: cmdHostQuit, Lifecycle: Implemented, Audience: AudienceAll,
+			ID: cmdQuit, Lifecycle: Implemented, Audience: AudienceAll,
 			Run:    func(h *Host) { h.quitProgram() },
 			Leader: &LeaderProjectionOf[*Host]{Key: 'Q', Label: "quit", Order: 990},
-			Menu:   []MenuProjection{{Parent: nodeHostHome, Label: "Exit", Hotkey: 'X', Order: 90}},
+			Menu:   []MenuProjection{{Parent: nodeHome, Label: "Exit", Hotkey: 'X', Order: 90}},
 		},
 		{
-			ID: cmdHostConnection, Lifecycle: Implemented, Audience: AudienceAll,
+			ID: cmdConnection, Lifecycle: Implemented, Audience: AudienceAll,
 			Visible: func(h *Host) bool { return h.ownsConnection() },
 			Run: func(h *Host) {
 				if h.session.Connected() {
@@ -71,7 +71,7 @@ func hostCommands() []CommandOf[*Host] {
 		cmds = append(cmds, CommandOf[*Host]{
 			ID: CommandID(cmdThemePrefix + theme), Lifecycle: Implemented, Audience: AudienceAll,
 			Run: func(h *Host) { h.useTheme(theme) },
-			Menu: []MenuProjection{{Parent: nodeHostTheme, Label: themeLabel(theme),
+			Menu: []MenuProjection{{Parent: nodeTheme, Label: themeLabel(theme),
 				Hotkey: rune(theme[0]), Order: 10 + i}},
 		})
 	}

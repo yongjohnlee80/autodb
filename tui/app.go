@@ -19,14 +19,14 @@ import (
 //
 // The host is spread over one file per concern:
 //
-//	host.go           the Host, and NewHost, which assembles it
-//	host_modules.go   the QML the program ships, and the modules that offer it
-//	host_state.go     the App singleton's state: what the document reads
-//	host_commands.go  the App singleton's commands, all through the catalog
-//	host_catalog.go   the commands themselves
-//	host_session.go   connecting, reconnecting, and what the connection says
-//	host_theme.go     Option › Theme: switching the theme import at runtime
-//	host_work.go      background work, and bringing its result back
+//	app.go       the Host, and New, which assembles it
+//	modules.go   the QML the program ships, and the modules that offer it
+//	state.go     the App singleton's state: what the document reads
+//	commands.go  the App singleton's commands: what the document invokes
+//	catalog.go   the catalog's commands, which App.run runs
+//	session.go   connecting, reconnecting, and what the connection says
+//	theme.go     Option › Theme: switching the theme import at runtime
+//	work.go      background work, and bringing its result back
 //
 // The Go core it drives is the package's own and unchanged: Session and Bound
 // (the one door to the backend), the NoteStore, the command catalog, and the
@@ -57,8 +57,8 @@ type Host struct {
 	errs []error
 }
 
-// HostOptions are what NewHost needs from the program around it.
-type HostOptions struct {
+// Options are what New needs from the program around it.
+type Options struct {
 	// Frontend is the terminal's or the web's. The web serves the same program
 	// over golib's web backend; what differs is only what the frontend may do.
 	Frontend Frontend
@@ -75,11 +75,11 @@ type HostOptions struct {
 	App []tuicore.AppOption
 }
 
-// NewHost mounts qml/main.qml over session. Nothing runs until Run.
+// New mounts qml/main.qml over session. Nothing runs until Run.
 //
 // One tuidecl.NewProgram over Host.options, then the host attached to it — the
 // same options every test and the QML check build from.
-func NewHost(session *Session, notesFor NotesFactory, quit func(), opt HostOptions) (*Host, error) {
+func New(session *Session, notesFor NotesFactory, quit func(), opt Options) (*Host, error) {
 	h := newHost(session, notesFor, quit, opt)
 	p, err := tuidecl.NewProgram(h.options(opt)...)
 	if err != nil {
@@ -94,14 +94,14 @@ func NewHost(session *Session, notesFor NotesFactory, quit func(), opt HostOptio
 
 // newHost is the host before its program exists: options needs it, to hand
 // the document its commands.
-func newHost(session *Session, notesFor NotesFactory, quit func(), opt HostOptions) *Host {
+func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) *Host {
 	if quit == nil {
 		quit = func() {}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Host{session: session, notesFor: notesFor, quit: quit, frontend: opt.Frontend,
 		ctx: ctx, cancel: cancel, dev: opt.Dev}
-	cat, err := NewCatalogOf(hostCommands(), hostMenuNodes())
+	cat, err := NewCatalogOf(catalogCommands(), menuNodes())
 	if err != nil {
 		// A malformed catalog is a programming error in this package, and
 		// the one place that sees every case is the one that builds it.
@@ -111,7 +111,7 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt HostOptio
 	return h
 }
 
-// attach binds the host to the program built from its options — by NewHost,
+// attach binds the host to the program built from its options — by New,
 // or by a test running the same options through decltest.
 //
 // It STARTS NOTHING. The session starts on the program's first loop turn: work
@@ -132,9 +132,9 @@ func (h *Host) release(p *tuidecl.Program) error {
 
 // options are everything the program is: the modules the document may import,
 // the state it reads, the commands it invokes, the layout. ONE function, and
-// everything builds from it: NewHost, the test that checks every QML file, and
+// everything builds from it: New, the test that checks every QML file, and
 // every test that runs the screen. A program assembled twice is two programs.
-func (h *Host) options(opt HostOptions) []tuidecl.ProgramOption {
+func (h *Host) options(opt Options) []tuidecl.ProgramOption {
 	var opts []tuidecl.ProgramOption
 	var src []byte
 	if opt.Dev != "" {
