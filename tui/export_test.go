@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"io/fs"
 	"testing"
 
@@ -61,4 +62,27 @@ func BlueprintProgramOptionsFrom(files fs.FS, src []byte) []tuidecl.ProgramOptio
 	h := newHost(nil, nil, nil, opt)
 	opts := h.options(opt)
 	return opts
+}
+
+// HoldRuns makes every query wait for a result the test releases: each run
+// sends its release channel on started, and answers with what is sent there.
+func (h *Host) HoldRuns(started chan<- chan *ExecResult) {
+	h.results.run = func(ctx context.Context, _ *Bound, _ int64, _ string) (*ExecResult, error) {
+		release := make(chan *ExecResult)
+		started <- release
+		select {
+		case res := <-release:
+			return res, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// RunsAnswered is how many runs have come back, applied or dropped; read on
+// the loop.
+func (h *Host) RunsAnswered() int {
+	got := make(chan int, 1)
+	h.p.Post(func() { got <- h.results.answered })
+	return <-got
 }
