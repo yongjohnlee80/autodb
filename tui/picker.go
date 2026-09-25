@@ -11,8 +11,9 @@ import (
 // THE CONNECTION PICKER — SPC C: which connection this query runs on.
 //
 // It lists the connections of the workspace in use — every one the user can
-// reach when none is — with the active one chosen, and Enter makes a row the
-// query's. No typing: the explorer is for finding things, this is for
+// reach when none is, or when the one in use has none, as the legacy picker
+// did — with the active one chosen, and Enter makes a row the query's, in the
+// workspace that row lives in. No typing: the explorer is for finding things, this is for
 // switching.
 
 // pickerState is the picker's sources.
@@ -30,7 +31,9 @@ func (h *Host) openConnPicker() {
 	type listed struct {
 		gen   uint64
 		conns []ConnInfo
-		err   error
+		// scoped is that conns are the workspace's own, not the fallback.
+		scoped bool
+		err    error
 	}
 	h.setStatus("loading connections…")
 	do(h, func(ctx context.Context) listed {
@@ -46,10 +49,11 @@ func (h *Host) openConnPicker() {
 				}
 			}
 		}
-		if err == nil && len(conns) == 0 {
+		scoped := len(conns) > 0
+		if err == nil && !scoped {
 			conns, err = bound.Connections(ctx)
 		}
-		return listed{gen: bound.Gen(), conns: conns, err: err}
+		return listed{gen: bound.Gen(), conns: conns, scoped: scoped, err: err}
 	}, func(l listed) {
 		if l.gen != h.session.Gen() {
 			return
@@ -63,7 +67,14 @@ func (h *Host) openConnPicker() {
 			return
 		}
 		h.setStatus("")
-		rows, chosen := h.pickerRows(l.conns, wsID)
+		// The workspace in use tags the rows only when they are its own: a
+		// connection from the fallback list is tagged with the workspace it
+		// lives in, as it is when no workspace is in use.
+		in := wsID
+		if !l.scoped {
+			in = 0
+		}
+		rows, chosen := h.pickerRows(l.conns, in)
 		h.pickable.Reset(rows)
 		// Through -1: a binding applies what changes, and the picker must
 		// open on the active row even when it last opened on the same one.

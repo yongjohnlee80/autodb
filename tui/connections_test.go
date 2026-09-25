@@ -77,7 +77,9 @@ func TestDeletingAConnectionAsksFirst(t *testing.T) {
 	s.Keys(t, key('d'))
 	s.WaitForText(t, "┌ delete connection ")
 	s.Keys(t, key('k')) // Keep
-	s.WaitFor(t, "kept", func(sc string) bool { return !strings.Contains(sc, "┌ delete connection ") && strings.Contains(sc, "bravo") })
+	s.WaitFor(t, "kept", func(sc string) bool {
+		return !strings.Contains(sc, "┌ delete connection ") && strings.Contains(sc, "bravo")
+	})
 	s.Keys(t, key('d'))
 	s.WaitForText(t, "┌ delete connection ")
 	s.Keys(t, key('d')) // Delete

@@ -136,3 +136,19 @@ func (h *Host) PaneWithFocus() string {
 	h.p.Post(func() { got <- h.paneWithFocus() })
 	return <-got
 }
+
+// ActiveWorkspace is the workspace the query's connection was chosen in, read
+// on the loop.
+func (h *Host) ActiveWorkspace() int64 {
+	got := make(chan int64, 1)
+	h.p.Post(func() { got <- h.active.ws })
+	return <-got
+}
+
+// SetActiveWorkspace makes ws the workspace in use with no connection chosen:
+// the state a workspace reaches when its connections are detached.
+func (h *Host) SetActiveWorkspace(ws int64) {
+	done := make(chan struct{})
+	h.p.Post(func() { h.active = activeConn{ws: ws}; close(done) })
+	<-done
+}
