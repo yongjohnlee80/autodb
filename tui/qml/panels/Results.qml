@@ -13,9 +13,11 @@ Frame {
         TableView {
             visible: App.resultsAsTable
             model: App.results
+            Layout.fillHeight: true
         }
         Editor {
             visible: App.resultsAsJSON
+            Layout.fillHeight: true
             readOnly: true
             text: App.resultsJSON
         }

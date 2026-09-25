@@ -128,12 +128,14 @@ func (h *Host) afterSignIn() {
 			// notes is the one case the user must see.
 			h.setStatus(fmt.Sprintf("signed in as %s, but notes are unavailable: %v", u.Name, err))
 			h.reloadExplorer()
+			h.applyStoredKeyset()
 			return
 		}
 		h.notes = notes
 	}
 	h.setStatus(fmt.Sprintf("signed in as %s (%s)", u.Name, u.Role))
 	h.reloadExplorer()
+	h.applyStoredKeyset()
 }
 
 // retireIdentity ends the current identity's authority: its note store stops
@@ -145,6 +147,7 @@ func (h *Host) retireIdentity() {
 	h.notes = nil
 	h.idEpoch++
 	h.forgetWorkspace()
+	h.forgetPrefs()
 }
 
 // promptSignIn opens what sign-in now needs: the first-run dialog or the
@@ -165,8 +168,12 @@ func (h *Host) promptSignIn() {
 
 // promptLogin is session.login (SPC L): sign in, or switch user.
 func (h *Host) promptLogin() {
-	h.set("App.loginError", "")
-	h.open("login")
+	// Unsaved work is settled as the identity it belongs to, before another
+	// can sign in.
+	h.guardUnsaved(func() {
+		h.set("App.loginError", "")
+		h.open("login")
+	})
 }
 
 // checkAuth watches for the sign-in going away under a task: the session

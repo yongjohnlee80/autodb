@@ -60,6 +60,25 @@ type Host struct {
 	active   activeConn
 	explorer *explorer
 	results  *results
+	// buf is the note the query buffer holds (notebuffer.go); workspaces the
+	// signed-in user's workspaces, for the note-name dialog to choose from.
+	buf        noteBuffer
+	workspaces *tuidecl.ListModel
+	// prefs is the editor profile, stored on the account (editorpref.go).
+	prefs *editorPrefs
+	// zoomed is the pane that has the screen, "" for none (zoom.go).
+	zoomed string
+	// pickable is the connection picker's rows (picker.go).
+	pickable *tuidecl.ListModel
+	// conns is the connections manager, connForm what its form is for, and
+	// attach the connection its attach dialog is choosing for, over
+	// attachWs (connections.go); confirmThen is what a yes to the
+	// confirmation card runs (confirm.go).
+	conns       *manager[ConnInfo]
+	connForm    connForm
+	attaching   attachFor
+	attachWs    *tuidecl.ListModel
+	confirmThen func()
 	// hadAuth is that this program has been signed in, which is what makes a
 	// token going empty a sign-out rather than the start. authSeq numbers the
 	// sign-in attempts; authAttempt is the running one's, 0 for none (auth.go).
@@ -140,6 +159,11 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 	h.catalog = cat
 	h.menus = newMenuModels()
 	h.explorer, h.results = newExplorer(), newResults()
+	h.workspaces = tuidecl.NewListModel("id", "name")
+	h.prefs = newEditorPrefs()
+	h.pickable = tuidecl.NewListModel("key", "label", "id", "ws", "name")
+	h.conns = newConnectionsManager()
+	h.attachWs = tuidecl.NewListModel("key", "id", "name")
 	return h
 }
 

@@ -48,8 +48,8 @@ func bootstrapAs(t *testing.T, h *tuiapp.Host, s *decltest.Screen, user, pass st
 }
 
 // The menu bar is the catalog's top level: a menu whose every row is planned
-// is pruned, as the terminal program's bar was — File and Edit, until the
-// notes and the editor's actions are built.
+// is pruned, as the terminal program's bar was — Edit, until the editor's
+// actions are built.
 func TestTheMenuBarShowsWhatTheCatalogOffers(t *testing.T) {
 	_, s := connected(t)
 	top := strings.Split(s.String(), "\n")[0]
@@ -58,12 +58,12 @@ func TestTheMenuBarShowsWhatTheCatalogOffers(t *testing.T) {
 			t.Errorf("the menu bar lacks %q: %q", want, top)
 		}
 	}
-	for _, want := range []string{"Run", "View"} {
+	for _, want := range []string{"File", "Run", "View"} {
 		if !strings.Contains(top, want) {
 			t.Errorf("the menu bar lacks %q, whose commands are built: %q", want, top)
 		}
 	}
-	for _, pruned := range []string{"File", "Edit"} {
+	for _, pruned := range []string{"Edit"} {
 		if strings.Contains(top, pruned) {
 			t.Errorf("the menu bar shows %q, whose every command is planned: %q", pruned, top)
 		}

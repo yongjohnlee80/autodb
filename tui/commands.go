@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/yongjohnlee80/golib/decl"
@@ -31,6 +32,22 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.bootstrap":         threeStrings("App.bootstrap", h.bootstrap),
 		"App.signInDeclined":    none(h.signInDeclined),
 		"App.explorerActivated": oneIndex("App.explorerActivated", h.explorerActivated),
+		"App.queryEdited":       none(h.queryEdited),
+		"App.movePane":          oneString("App.movePane", "h, j, k or l", h.movePane),
+		"App.chooseConnection":  oneNumber("App.chooseConnection", "a row's index", h.chooseConnection),
+		"App.confirmed":         oneString("App.confirmed", "yes or no", h.confirmed),
+		"App.connectionAdd":     none(h.connectionAdd),
+		"App.connectionEdit":    oneNumber("App.connectionEdit", "a row's index", h.connectionEdit),
+		"App.connectionTest":    oneNumber("App.connectionTest", "a row's index", h.connectionTest),
+		"App.connectionDelete":  oneNumber("App.connectionDelete", "a row's index", h.connectionDelete),
+		"App.connectionAttach":  oneNumber("App.connectionAttach", "a row's index", h.connectionAttach),
+		"App.saveConnection": strings_("App.saveConnection", 5, func(v []string) error {
+			return h.saveConnection(v[0], v[1], v[2], v[3], v[4])
+		}),
+		"App.attachConnection": workspaceAndName(h.attachConnection),
+		"App.nameNote":         workspaceAndName(h.nameNote),
+		"App.unsaved":          oneString("App.unsaved", "save, discard or stay", h.unsavedAnswered),
+		"App.conflict":         oneString("App.conflict", "overwrite, saveas or keep", h.conflictAnswered),
 	}
 }
 
@@ -129,6 +146,20 @@ func strings_(name string, n int, fn func([]string) error) decl.HandlerFunc {
 	}
 }
 
+// oneNumber is a command that takes one whole number — a list row's index.
+func oneNumber(name, what string, fn func(int) error) decl.HandlerFunc {
+	return func(args []qml.SpecValue) error {
+		if len(args) != 1 || args[0].Kind != qml.SpecValueNumber {
+			return fmt.Errorf("%s takes %s", name, what)
+		}
+		n, err := strconv.Atoi(args[0].Raw)
+		if err != nil {
+			return fmt.Errorf("%s takes %s, not %s", name, what, args[0].Raw)
+		}
+		return fn(n)
+	}
+}
+
 // oneIndex is a command that takes a view's row Index, as a signal gives it.
 func oneIndex(name string, fn func(tuidecl.Index) error) decl.HandlerFunc {
 	return func(args []qml.SpecValue) error {
@@ -140,6 +171,24 @@ func oneIndex(name string, fn func(tuidecl.Index) error) decl.HandlerFunc {
 			return fmt.Errorf("%s takes a row's index, not %s", name, args[0].Raw)
 		}
 		return fn(ix)
+	}
+}
+
+// workspaceAndName is App.nameNote(workspace, name): a workspace id, as a
+// ComboBox's currentValue gives it, and a name.
+func workspaceAndName(fn func(int64, string) error) decl.HandlerFunc {
+	return func(args []qml.SpecValue) error {
+		if len(args) != 2 || args[1].Kind != qml.SpecValueString {
+			return fmt.Errorf("App.nameNote takes a workspace and a name")
+		}
+		if args[0].Raw == "" {
+			return fn(0, args[1].Raw) // nothing chosen: the host says so
+		}
+		ws, err := strconv.ParseInt(args[0].Raw, 10, 64)
+		if err != nil {
+			return fmt.Errorf("App.nameNote: %q is not a workspace id", args[0].Raw)
+		}
+		return fn(ws, args[1].Raw)
 	}
 }
 

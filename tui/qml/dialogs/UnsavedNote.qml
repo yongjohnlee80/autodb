@@ -1,9 +1,9 @@
 // UnsavedNote.qml — the note has unsaved changes: save, discard, or stay.
-// Three answers, none the default: an Enter must not throw work away.
+// Three answers and no default — a DialogButtonBox has none — so an Enter
+// cannot throw work away.
 
 Dialog {
     title: "unsaved note"
-    defaultButton: Dialog.NoButton
     Text { wrapMode: Tui.WordWrap; text: App.unsavedQuestion }
     DialogButtonBox {
         Button { text: "&Save";    DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole; onClicked: App.unsaved("save") }
