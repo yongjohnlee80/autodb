@@ -14,12 +14,12 @@ import (
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 )
 
-// host_test.go holds the QML host's foundation: every QML file it ships is
+// app_test.go holds the QML host's foundation: every QML file it ships is
 // sound, and the session lifecycle — connect, what sign-in it needs, disconnect
 // and reconnect — reaches the screen through the App sources.
 
 func TestEveryHostQMLFileIsSound(t *testing.T) {
-	decltest.Check(t, tuiapp.HostProgramOptions(tuiapp.HostOptions{})...)
+	decltest.Check(t, tuiapp.ProgramOptions(tuiapp.Options{})...)
 }
 
 // runHost starts the QML host against a real server.
@@ -28,7 +28,7 @@ func runHost(t *testing.T, addr string) (*tuiapp.Host, *decltest.Screen) {
 	session := tuiapp.NewSession(addr, logger.Nop{}, nil)
 	t.Cleanup(session.Close)
 	notesFor := tuiapp.PersonalNotesIn(filepath.Join(t.TempDir(), "notes"))
-	return tuiapp.RunHost(t, session, notesFor, tuiapp.HostOptions{}, 100, 12)
+	return tuiapp.RunHost(t, session, notesFor, tuiapp.Options{}, 100, 12)
 }
 
 // lastRow is the status line.
@@ -90,8 +90,8 @@ func TestBuildingAHostStartsNothingUntilItRuns(t *testing.T) {
 	session := tuiapp.NewSession(addr, logger.Nop{}, nil)
 	t.Cleanup(session.Close)
 	tb := tuicore.NewTestBackend(80, 10)
-	h, err := tuiapp.NewHost(session, tuiapp.PersonalNotesIn(t.TempDir()), nil,
-		tuiapp.HostOptions{App: []tuicore.AppOption{tuicore.WithBackend(tb), tuicore.WithMinFrameInterval(0)}})
+	h, err := tuiapp.New(session, tuiapp.PersonalNotesIn(t.TempDir()), nil,
+		tuiapp.Options{App: []tuicore.AppOption{tuicore.WithBackend(tb), tuicore.WithMinFrameInterval(0)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestTheWebHostJoinsTheSharedConnectionAndNeverRedials(t *testing.T) {
 	}
 	before := session.Gen()
 	notesFor := tuiapp.PersonalNotesIn(filepath.Join(t.TempDir(), "notes"))
-	_, s := tuiapp.RunHost(t, session, notesFor, tuiapp.HostOptions{Frontend: tuiapp.FrontendWeb}, 100, 12)
+	_, s := tuiapp.RunHost(t, session, notesFor, tuiapp.Options{Frontend: tuiapp.FrontendWeb}, 100, 12)
 	s.WaitFor(t, "the shared connection joined", func(string) bool {
 		row := lastRow(s)
 		return strings.Contains(row, addr) && !strings.Contains(row, "connecting")
