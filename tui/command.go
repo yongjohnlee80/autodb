@@ -117,14 +117,14 @@ func foldRune(r rune) rune {
 // The leader's labels are deliberately long and descriptive ("run query
 // (selection when active)") where a menu leaf wants "Execute". One shared title
 // would force one of the two surfaces to read wrong, so each owns its own.
-type LeaderProjection struct {
+type LeaderProjectionOf[H CommandHost] struct {
 	Key   rune
 	Label string
 	// LabelFor overrides Label when non-nil, for the one entry whose text is
 	// state-dependent: `x` reads "disconnect" while connected and "connect"
 	// while not. Preserving that exactly is what makes the parity test an
 	// oracle rather than an approximation.
-	LabelFor func(*Model) string
+	LabelFor func(H) string
 	Order    int
 	// Help is the longer explanation, shown indented under the row.
 	//
@@ -136,9 +136,9 @@ type LeaderProjection struct {
 }
 
 // text resolves the label for a state.
-func (p LeaderProjection) text(m *Model) string {
+func (p LeaderProjectionOf[H]) text(h H) string {
 	if p.LabelFor != nil {
-		return p.LabelFor(m)
+		return p.LabelFor(h)
 	}
 	return p.Label
 }
@@ -187,8 +187,24 @@ type Offering struct {
 	Reason string // non-empty iff State == OfferDisabled
 }
 
-// Command is one thing the TUI can do.
-type Command struct {
+// CommandHost is what a command runs against: the program that owns the
+// session. Its role decides the command's audience.
+type CommandHost interface {
+	commandRole() string
+}
+
+// Command, LeaderProjection and Catalog are the catalog over the terminal
+// Model; a program with another host instantiates the Of forms.
+type (
+	Command          = CommandOf[*Model]
+	LeaderProjection = LeaderProjectionOf[*Model]
+	Catalog          = CatalogOf[*Model]
+)
+
+func (m *Model) commandRole() string { return m.session.User().Role }
+
+// CommandOf is one thing the TUI can do.
+type CommandOf[H CommandHost] struct {
 	ID        CommandID
 	Lifecycle Lifecycle
 	Audience  Audience
@@ -196,7 +212,7 @@ type Command struct {
 	// Never the role — putting that here too would create two fields that can
 	// disagree about one question, and Audience is the one that answers it.
 	// nil means visible.
-	Visible func(*Model) bool
+	Visible func(H) bool
 	// Enabled is TRANSIENT refusal: false leaves the command visible but
 	// dimmed, carrying the returned reason. nil means enabled.
 	//
@@ -204,11 +220,11 @@ type Command struct {
 	// on EXISTS. The panes exist and none is zoomed, so "zoom out" is dimmed
 	// and says why; there is no session to switch on a frontend that does not
 	// own one, so that command is absent rather than permanently greyed.
-	Enabled func(*Model) (bool, string)
-	Run     func(*Model)
+	Enabled func(H) (bool, string)
+	Run     func(H)
 
-	Leader *LeaderProjection // nil: deliberately not on the leader menu
-	Menu   []MenuProjection  // empty: deliberately not on the bar
+	Leader *LeaderProjectionOf[H] // nil: deliberately not on the leader menu
+	Menu   []MenuProjection       // empty: deliberately not on the bar
 }
 
 // offering resolves the command's presentation, strictest first.
@@ -217,18 +233,18 @@ type Command struct {
 // than reconstructed per surface. A false Enabled MUST supply a reason: a blank
 // tooltip is a worse answer than no tooltip, and catching it at the boundary
 // turns an empty string into a visible bug rather than a silent one.
-func (c *Command) offering(m *Model) Offering {
+func (c *CommandOf[H]) offering(h H) Offering {
 	if c.Lifecycle != Implemented {
 		return Offering{State: OfferHidden}
 	}
-	if !c.Audience.VisibleTo(m.session.User().Role) {
+	if !c.Audience.VisibleTo(h.commandRole()) {
 		return Offering{State: OfferHidden}
 	}
-	if c.Visible != nil && !c.Visible(m) {
+	if c.Visible != nil && !c.Visible(h) {
 		return Offering{State: OfferHidden}
 	}
 	if c.Enabled != nil {
-		if ok, reason := c.Enabled(m); !ok {
+		if ok, reason := c.Enabled(h); !ok {
 			if reason == "" {
 				// A PROGRAMMING ERROR, RAISED AS ONE. Two softer versions of
 				// this shipped first and both were wrong: a friendly substitute
@@ -250,8 +266,8 @@ func (c *Command) offering(m *Model) Offering {
 }
 
 // offered is the activation gate: only an OfferOffered command may run.
-func (c *Command) offered(m *Model) bool {
-	return c.offering(m).State == OfferOffered
+func (c *CommandOf[H]) offered(h H) bool {
+	return c.offering(h).State == OfferOffered
 }
 
 // Catalog is the validated, immutable set of commands and menu nodes.
@@ -260,10 +276,10 @@ func (c *Command) offered(m *Model) bool {
 // re-evaluate state on every open; identity and closures are never rebuilt,
 // because a command that is a different value each time it is read cannot be
 // compared, cached or trusted to be the same command the user saw.
-type Catalog struct {
-	commands []Command
+type CatalogOf[H CommandHost] struct {
+	commands []CommandOf[H]
 	nodes    []MenuNode
-	byID     map[CommandID]*Command
+	byID     map[CommandID]*CommandOf[H]
 	nodeByID map[MenuNodeID]*MenuNode
 }
 
@@ -273,10 +289,15 @@ type Catalog struct {
 // catalog is a programming error that must not reach a user as a missing menu
 // row, and the one place that can catch every case is the place that builds it.
 func NewCatalog(cmds []Command, nodes []MenuNode) (*Catalog, error) {
-	c := &Catalog{
-		commands: append([]Command(nil), cmds...),
+	return NewCatalogOf(cmds, nodes)
+}
+
+// NewCatalogOf is NewCatalog for a catalog over any host.
+func NewCatalogOf[H CommandHost](cmds []CommandOf[H], nodes []MenuNode) (*CatalogOf[H], error) {
+	c := &CatalogOf[H]{
+		commands: append([]CommandOf[H](nil), cmds...),
 		nodes:    append([]MenuNode(nil), nodes...),
-		byID:     make(map[CommandID]*Command, len(cmds)),
+		byID:     make(map[CommandID]*CommandOf[H], len(cmds)),
 		nodeByID: make(map[MenuNodeID]*MenuNode, len(nodes)),
 	}
 	for i := range c.nodes {
@@ -414,16 +435,18 @@ func NewCatalog(cmds []Command, nodes []MenuNode) (*Catalog, error) {
 
 // Command looks a command up by id. The second result is false for an unknown
 // id, which is how a stale or forged action is refused rather than guessed at.
-func (c *Catalog) Command(id CommandID) (*Command, bool) {
+func (c *CatalogOf[H]) Command(id CommandID) (*CommandOf[H], bool) {
 	cmd, ok := c.byID[id]
 	return cmd, ok
 }
 
 // Commands enumerates every declared command, in declaration order.
-func (c *Catalog) Commands() []Command { return append([]Command(nil), c.commands...) }
+func (c *CatalogOf[H]) Commands() []CommandOf[H] {
+	return append([]CommandOf[H](nil), c.commands...)
+}
 
 // Nodes enumerates every declared menu node, in declaration order.
-func (c *Catalog) Nodes() []MenuNode { return append([]MenuNode(nil), c.nodes...) }
+func (c *CatalogOf[H]) Nodes() []MenuNode { return append([]MenuNode(nil), c.nodes...) }
 
 // leaderProjection returns the leader rows in Order — explicit, never inherited
 // from map iteration or declaration accident.
@@ -432,7 +455,7 @@ func (c *Catalog) Nodes() []MenuNode { return append([]MenuNode(nil), c.nodes...
 // is refused. Hiding it instead would make the menu shift under the operator
 // and teach nothing about what the surface can do; closing the float on a dead
 // key would read as though the command had run.
-func (c *Catalog) leaderProjection(m *Model) []leaderEntry {
+func (c *CatalogOf[H]) leaderProjection(h H) []leaderEntry {
 	type row struct {
 		order int
 		entry leaderEntry
@@ -443,11 +466,11 @@ func (c *Catalog) leaderProjection(m *Model) []leaderEntry {
 		if cmd.Leader == nil {
 			continue
 		}
-		off := cmd.offering(m)
+		off := cmd.offering(h)
 		if off.State == OfferHidden {
 			continue
 		}
-		label := cmd.Leader.text(m)
+		label := cmd.Leader.text(h)
 		id := cmd.ID
 		if off.State == OfferDisabled {
 			// The row stays, says why, and does nothing. Re-resolved at press
@@ -463,7 +486,7 @@ func (c *Catalog) leaderProjection(m *Model) []leaderEntry {
 		catalog := c
 		rows = append(rows, row{order: cmd.Leader.Order, entry: leaderEntry{
 			key: cmd.Leader.Key, label: label,
-			run: func() { catalog.runIfOffered(m, id) },
+			run: func() { catalog.runIfOffered(h, id) },
 		}})
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].order < rows[j].order })
@@ -486,7 +509,7 @@ type HelpRow struct {
 // The SAME projection the leader menu executes, so the documented bindings
 // cannot drift from the real ones — which is the property the old help screen
 // had for most of its list and lost for the four it restated by hand.
-func (c *Catalog) helpProjection(m *Model) []HelpRow {
+func (c *CatalogOf[H]) helpProjection(h H) []HelpRow {
 	type row struct {
 		order int
 		r     HelpRow
@@ -494,12 +517,12 @@ func (c *Catalog) helpProjection(m *Model) []HelpRow {
 	var rows []row
 	for i := range c.commands {
 		cmd := &c.commands[i]
-		if cmd.Leader == nil || cmd.offering(m).State == OfferHidden {
+		if cmd.Leader == nil || cmd.offering(h).State == OfferHidden {
 			continue
 		}
 		rows = append(rows, row{order: cmd.Leader.Order, r: HelpRow{
 			Key:   cmd.Leader.Key,
-			Label: cmd.Leader.text(m),
+			Label: cmd.Leader.text(h),
 			Help:  cmd.Leader.Help,
 		}})
 	}
@@ -517,11 +540,11 @@ func (c *Catalog) helpProjection(m *Model) []HelpRow {
 // can stay open while an async transition invalidates the row under it. Not
 // authorization — the server and the local capability checks remain that — but
 // the menu's truth contract: what is offered is what happens.
-func (c *Catalog) runIfOffered(m *Model, id CommandID) bool {
+func (c *CatalogOf[H]) runIfOffered(h H, id CommandID) bool {
 	cmd, ok := c.byID[id]
-	if !ok || !cmd.offered(m) {
+	if !ok || !cmd.offered(h) {
 		return false
 	}
-	cmd.Run(m)
+	cmd.Run(h)
 	return true
 }

@@ -176,9 +176,9 @@ func (m *Model) runMenuAction(inv tui.ActionInvocation) bool {
 
 // offeredID answers the activation question without running anything, so the
 // executor can refuse before it moves focus.
-func (c *Catalog) offeredID(m *Model, id CommandID) bool {
+func (c *CatalogOf[H]) offeredID(h H, id CommandID) bool {
 	cmd, ok := c.byID[id]
-	return ok && cmd.offered(m)
+	return ok && cmd.offered(h)
 }
 
 // ── THE CONTROLLER ──────────────────────────────────────────────────────────
