@@ -88,6 +88,58 @@ func TestUnsavedWorkIsAskedAboutBeforeSwitchingUser(t *testing.T) {
 	s.WaitForText(t, "┌ sign in ")
 }
 
+// Over unsaved edits, a new note asks first: Stay keeps the edits and names
+// nothing; Save writes them and then names the new one; Discard drops them and
+// then names it.
+func TestUnsavedWorkIsAskedAboutBeforeANewNote(t *testing.T) {
+	_, s, base := notesHost(t)
+	newNote(t, s, "draft")
+	typeInto(t, s, "select 2")
+	s.WaitFor(t, "unsaved", func(string) bool { return strings.Contains(lastRow(s), "draft.sql [+]") })
+	onDisk := func(name string) string {
+		files, _ := filepath.Glob(filepath.Join(base, "u-root", "*", name))
+		if len(files) != 1 {
+			return ""
+		}
+		b, _ := os.ReadFile(files[0])
+		return string(b)
+	}
+
+	s.Keys(t, key(' '), key('n'))
+	s.WaitForText(t, "┌ unsaved note ")
+	s.Keys(t, key('t')) // Stay
+	s.WaitFor(t, "stayed", func(sc string) bool {
+		return !strings.Contains(sc, "┌ unsaved note ") && strings.Contains(lastRow(s), "draft.sql [+]")
+	})
+	if strings.Contains(s.String(), "┌ new note ") {
+		t.Fatalf("Stay went on to name a new note:\n%s", s.String())
+	}
+
+	s.Keys(t, key(' '), key('n'))
+	s.WaitForText(t, "┌ unsaved note ")
+	s.Keys(t, key('s')) // Save, then the new note
+	s.WaitForText(t, "┌ new note ")
+	if got := onDisk("draft.sql"); !strings.Contains(got, "select 2") {
+		t.Errorf("Save did not write the draft first: draft.sql holds %q", got)
+	}
+	keys := append([]tuicore.Event{tab()}, decltest.Type("second")...)
+	s.Keys(t, append(keys, enter())...)
+	s.WaitFor(t, "created", func(sc string) bool { return strings.Contains(sc, "created second.sql") })
+
+	typeInto(t, s, "select 3")
+	s.WaitFor(t, "unsaved", func(string) bool { return strings.Contains(lastRow(s), "second.sql [+]") })
+	s.Keys(t, key(' '), key('n'))
+	s.WaitForText(t, "┌ unsaved note ")
+	s.Keys(t, key('d')) // Discard, then the new note
+	s.WaitForText(t, "┌ new note ")
+	keys = append([]tuicore.Event{tab()}, decltest.Type("third")...)
+	s.Keys(t, append(keys, enter())...)
+	s.WaitFor(t, "created", func(sc string) bool { return strings.Contains(sc, "created third.sql") })
+	if got := onDisk("second.sql"); strings.Contains(got, "select 3") {
+		t.Errorf("Discard wrote the edits: second.sql holds %q", got)
+	}
+}
+
 // A note written by something else since it was opened is not overwritten:
 // the save asks, and Keep leaves both as they were.
 func TestASaveOverAChangedNoteAsks(t *testing.T) {

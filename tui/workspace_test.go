@@ -124,10 +124,10 @@ func TestAWrongPassphraseIsRefused(t *testing.T) {
 func TestEnterOnAConnectionOpensItAndMakesItTheQuerys(t *testing.T) {
 	_, s := signedIn(t)
 	s.WaitForText(t, "main")
-	s.Keys(t, key(' '), key('e')) // SPC e: the explorer
-	s.Keys(t, enter())            // main opens
+	s.Keys(t, key(' '), key('e'))     // SPC e: the explorer
+	s.Keys(t, enter())                // main opens
 	s.WaitForText(t, "▸ connections") // the tree row, not the leader card's "connections"
-	s.Keys(t, key('j'), enter()) // connections opens
+	s.Keys(t, key('j'), enter())      // connections opens
 	s.WaitForText(t, "bravo")
 	s.Keys(t, key('j'), enter()) // bravo opens, and is the query's
 	s.WaitFor(t, "the query targets bravo, opened", func(sc string) bool {
@@ -210,4 +210,46 @@ func TestThePickerChoosesTheQuerysConnection(t *testing.T) {
 		return strings.Contains(sc, "query → bravo") && !strings.Contains(sc, "connection for this query")
 	})
 	s.WaitFor(t, "back on the query", func(string) bool { return h.PaneWithFocus() == "editor" })
+}
+
+// A workspace in use with no connections of its own lists every connection,
+// as the legacy picker does — and one chosen from that list is in the
+// workspace it lives in, not tagged with the empty one.
+func TestAConnectionPickedOutsideAnEmptyWorkspaceKeepsItsOwn(t *testing.T) {
+	addr := seeded(t)
+	admin := tuiapp.NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(admin.Close)
+	ctx := context.Background()
+	if _, err := admin.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Bind().Login(ctx, "root", rootPass); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := admin.Bind().CreateWorkspace(ctx, "empty")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wss, err := admin.Bind().Workspaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var main int64
+	for _, w := range wss {
+		if w.Name == "main" {
+			main = w.ID
+		}
+	}
+
+	h, s := runHostSized(t, addr, 120, 32)
+	loginAs(t, s, "root", rootPass)
+	s.WaitForText(t, "main (1)")
+	h.SetActiveWorkspace(empty)
+	s.Keys(t, key(' '), key('C'))
+	s.WaitFor(t, "the picker", func(sc string) bool { return strings.Contains(sc, "bravo  sqlite") })
+	s.Keys(t, enter())
+	s.WaitForText(t, "query → bravo")
+	if got := h.ActiveWorkspace(); got != main {
+		t.Errorf("bravo was chosen in workspace %d, want main's %d (the empty one is %d)", got, main, empty)
+	}
 }

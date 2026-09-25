@@ -137,8 +137,11 @@ func (h *Host) loadNote(wsID int64, name string) {
 	})
 }
 
-// newNote is note.new (SPC n): name a new, empty note.
-func (h *Host) newNote() { h.askNoteName("new", "new note", "") }
+// newNote is note.new (SPC n): name a new, empty note — after the open one's
+// unsaved changes are answered for, as opening another is.
+func (h *Host) newNote() {
+	h.guardUnsaved(func() { h.askNoteName("new", "new note", "") })
+}
 
 // saveNote is note.save (SPC s): the open note, or the buffer as a new one.
 func (h *Host) saveNote() {
