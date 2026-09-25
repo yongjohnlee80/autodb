@@ -1,12 +1,14 @@
 package tui_test
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/yongjohnlee80/golib/logger"
+	tuicore "github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
 
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
@@ -77,5 +79,57 @@ func TestAHostWithNoServerSaysTheConnectFailed(t *testing.T) {
 			t.Fatalf("no failure reported:\n%s", s.String())
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestBuildingAHostStartsNothingUntilItRuns: construction does not dial, spawn
+// or move the session's generation — a second host over the same session, or
+// one never run, cannot disturb it. The session starts when Run does.
+func TestBuildingAHostStartsNothingUntilItRuns(t *testing.T) {
+	addr := startRealServer(t)
+	session := tuiapp.NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(session.Close)
+	tb := tuicore.NewTestBackend(80, 10)
+	h, err := tuiapp.NewHost(session, tuiapp.PersonalNotesIn(t.TempDir()), nil,
+		tuiapp.HostOptions{App: []tuicore.AppOption{tuicore.WithBackend(tb), tuicore.WithMinFrameInterval(0)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if g := session.Gen(); g != 0 || session.Connected() {
+		t.Fatalf("an unrun host moved the session: gen %d, connected %v", g, session.Connected())
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- h.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(5 * time.Second)
+	for !session.Connected() {
+		if time.Now().After(deadline) {
+			t.Fatal("running the host never connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestTheWebHostJoinsTheSharedConnectionAndNeverRedials: the web's session is
+// the gateway's, already connected and shared by the user's tabs. The host
+// enters at its current generation — no Connect, no new generation.
+func TestTheWebHostJoinsTheSharedConnectionAndNeverRedials(t *testing.T) {
+	addr := startRealServer(t)
+	session := tuiapp.NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(session.Close)
+	if _, err := session.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	before := session.Gen()
+	notesFor := tuiapp.PersonalNotesIn(filepath.Join(t.TempDir(), "notes"))
+	_, s := tuiapp.RunHost(t, session, notesFor, tuiapp.HostOptions{Frontend: tuiapp.FrontendWeb}, 100, 12)
+	s.WaitFor(t, "the shared connection joined", func(string) bool {
+		row := lastRow(s)
+		return strings.Contains(row, addr) && !strings.Contains(row, "connecting")
+	})
+	if g := session.Gen(); g != before {
+		t.Fatalf("the web host redialed the shared session: gen %d → %d", before, g)
 	}
 }
