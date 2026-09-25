@@ -13,8 +13,9 @@
 Dialog {
     id: leader
     title: "SPC — commands"
+    dim: false        // the backdrop fades only for sign-in and quitting
     helpText: "a key runs its command · Esc closes"
-    Text { text: App.leaderText }
+    Text { wrapMode: Tui.WordWrap; text: App.leaderText }
     Repeater {
         model: App.leader
         Shortcut { sequence: model.key; onActivated: App.leaderKey(model.id) }

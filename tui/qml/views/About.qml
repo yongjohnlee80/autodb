@@ -2,7 +2,9 @@
 
 Dialog {
     title: "About autodb"
+    dim: false        // the backdrop fades only for sign-in and quitting
     standardButtons: Dialog.Ok
+    defaultButton: Dialog.Ok          // Enter closes it, as its help line says
     helpText: "Enter or Esc closes"
-    Text { text: App.aboutText }
+    Text { wrapMode: Tui.WordWrap; text: App.aboutText }
 }

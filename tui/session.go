@@ -89,8 +89,15 @@ func (h *Host) startupDone(s startup) {
 	switch {
 	case s.needsBootstrap:
 		h.setAuth("bootstrap")
+		h.promptSignIn()
 	case h.session.Token() == "":
 		h.setAuth("login")
+		h.promptSignIn()
+	case !h.hadAuth:
+		// Signed in already — the web's session, which the gateway signed in
+		// — or by a reconnect keeping the token: the identity takes effect
+		// the first time only.
+		h.afterSignIn()
 	default:
 		h.setAuth("signed-in")
 	}

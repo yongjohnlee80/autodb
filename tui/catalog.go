@@ -117,19 +117,19 @@ func leader(key rune, label string, order int) *LeaderProjectionOf[*Host] {
 func catalogCommands() []CommandOf[*Host] {
 	cmds := []CommandOf[*Host]{
 		{
-			ID: cmdRunQuery, Lifecycle: Planned,
+			ID: cmdRunQuery, Run: func(h *Host) { h.runQuery() },
 			Leader: leader('r', "run query (selection when active)", 10),
 			Menu:   []MenuProjection{{Parent: nodeRun, Label: "Execute", Hotkey: 'E', Order: 10}},
 		},
 		{
-			ID: cmdRunSelection, Lifecycle: Planned,
+			ID: cmdRunSelection, Run: func(h *Host) { h.runSelection() },
 			Leader: leader('R', "run selection only", 20),
 			Menu: []MenuProjection{
 				{Parent: nodeRun, Label: "Execute selection", Hotkey: 'S', Order: 20},
 			},
 		},
 		{
-			ID: cmdToggleJSON, Lifecycle: Planned,
+			ID: cmdToggleJSON, Run: func(h *Host) { h.toggleJSON() },
 			Leader: leader('j', "toggle results table/JSON", 30),
 			Menu: []MenuProjection{
 				{Parent: nodeView, Label: "Results as table/JSON", Hotkey: 'R', Order: 30},
@@ -171,15 +171,15 @@ func catalogCommands() []CommandOf[*Host] {
 			},
 		},
 		{
-			ID: cmdFocusExplorer, Lifecycle: Planned,
+			ID: cmdFocusExplorer, Run: func(h *Host) { h.focusPane("explorerTree") },
 			Leader: leader('e', "focus explorer", 50),
 		},
 		{
-			ID: cmdFocusEditor, Lifecycle: Planned,
+			ID: cmdFocusEditor, Run: func(h *Host) { h.focusPane("editor") },
 			Leader: leader('q', "focus query editor", 60),
 		},
 		{
-			ID: cmdFocusResults, Lifecycle: Planned,
+			ID: cmdFocusResults, Run: func(h *Host) { h.focusPane("results") },
 			Leader: leader('t', "focus results", 70),
 		},
 		{
@@ -258,7 +258,7 @@ func catalogCommands() []CommandOf[*Host] {
 			},
 		},
 		{
-			ID: cmdRefresh, Lifecycle: Planned,
+			ID: cmdRefresh, Run: func(h *Host) { h.reloadExplorer() },
 			Leader: leader('g', "refresh explorer", 180),
 			Menu: []MenuProjection{
 				{Parent: nodeView, Label: "Refresh explorer", Hotkey: 'F', Order: 40},
@@ -297,10 +297,10 @@ func catalogCommands() []CommandOf[*Host] {
 			// Session lifecycle belongs to a frontend that OWNS its session.
 			// The web frontend shares one connection per user across tabs, so a
 			// disconnect from one tab would drop the connection the others use.
-			ID:        cmdLogin,
-			Visible:   func(h *Host) bool { return h.ownsConnection() },
-			Lifecycle: Planned,
-			Leader:    leader('L', "login / switch user", 220),
+			ID:      cmdLogin,
+			Visible: func(h *Host) bool { return h.ownsConnection() },
+			Run:     func(h *Host) { h.promptLogin() },
+			Leader:  leader('L', "login / switch user", 220),
 			Menu: []MenuProjection{
 				{Parent: nodeSystem, Label: "Login / Switch user…", Hotkey: 'L', Order: 10},
 			},

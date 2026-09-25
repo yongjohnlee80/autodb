@@ -31,6 +31,18 @@ func (h *Host) state(theme string) map[string]any {
 		"App.hints":        "",
 		"App.aboutText":    h.aboutText(),
 		"App.quitQuestion": "This ends the session. Anything unsaved in the query buffer is lost.",
+		// Sign-in (auth.go): the name last tried, and why the last answer
+		// was refused — each dialog's help line.
+		"App.lastUser":       "",
+		"App.loginError":     "",
+		"App.bootstrapError": "",
+	}
+	// The workspace (workspace.go, explorer.go, results.go).
+	st["App.queryTitle"] = h.queryTitle()
+	st["App.explorer"] = h.explorer.model
+	st["App.keyset"] = "vim"
+	for k, v := range resultsState(h.results) {
+		st[k] = v
 	}
 	for k, v := range themeState(theme) {
 		st[k] = v

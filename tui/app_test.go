@@ -25,7 +25,7 @@ func TestEveryHostQMLFileIsSound(t *testing.T) {
 // runHost starts the QML host against a real server.
 func runHost(t *testing.T, addr string) (*tuiapp.Host, *decltest.Screen) {
 	t.Helper()
-	return runHostSized(t, addr, 100, 12)
+	return runHostSized(t, addr, 100, 32)
 }
 
 // runHostSized is runHost on a screen of the given size.

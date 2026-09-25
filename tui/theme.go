@@ -79,11 +79,32 @@ func (h *Host) useTheme(name string) {
 		if h.dev == "" {
 			h.layoutSrc = next
 		}
-		h.theme = name
-		for k, v := range themeState(name) {
-			h.set(k, v)
-		}
-		h.reproject() // the Theme menu's mark follows it
+		h.wearTheme(name)
 		h.setStatus("theme: " + name)
 	})
+}
+
+// followLayoutTheme brings the theme the program says it wears up to date with
+// the one -dev's main.qml imports, after an edit to it was applied.
+func (h *Host) followLayoutTheme() {
+	if h.dev == "" {
+		return
+	}
+	src, err := os.ReadFile(path.Join(h.dev, "main.qml"))
+	if err != nil {
+		return
+	}
+	if name := themeOf(src); name != "" && name != h.theme {
+		h.wearTheme(name)
+	}
+}
+
+// wearTheme records name as the theme the screen wears: App.theme, and the
+// Theme menu's mark.
+func (h *Host) wearTheme(name string) {
+	h.theme = name
+	for k, v := range themeState(name) {
+		h.set(k, v)
+	}
+	h.reproject()
 }
