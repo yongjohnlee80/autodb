@@ -193,16 +193,6 @@ type CommandHost interface {
 	commandRole() string
 }
 
-// Command, LeaderProjection and Catalog are the catalog over the terminal
-// Model; a program with another host instantiates the Of forms.
-type (
-	Command          = CommandOf[*Model]
-	LeaderProjection = LeaderProjectionOf[*Model]
-	Catalog          = CatalogOf[*Model]
-)
-
-func (m *Model) commandRole() string { return m.session.User().Role }
-
 // CommandOf is one thing the TUI can do.
 type CommandOf[H CommandHost] struct {
 	ID        CommandID
@@ -272,7 +262,7 @@ func (c *CommandOf[H]) offered(h H) bool {
 
 // Catalog is the validated, immutable set of commands and menu nodes.
 //
-// Built once, during New, after the Model's components exist. Projections
+// Built once, when the host is made, after its components exist. Projections
 // re-evaluate state on every open; identity and closures are never rebuilt,
 // because a command that is a different value each time it is read cannot be
 // compared, cached or trusted to be the same command the user saw.
@@ -283,16 +273,11 @@ type CatalogOf[H CommandHost] struct {
 	nodeByID map[MenuNodeID]*MenuNode
 }
 
-// NewCatalog validates and freezes a catalog, or reports why it cannot.
+// NewCatalogOf validates and freezes a catalog, or reports why it cannot.
 //
 // Validation is a constructor rather than a test helper on purpose: a malformed
 // catalog is a programming error that must not reach a user as a missing menu
 // row, and the one place that can catch every case is the place that builds it.
-func NewCatalog(cmds []Command, nodes []MenuNode) (*Catalog, error) {
-	return NewCatalogOf(cmds, nodes)
-}
-
-// NewCatalogOf is NewCatalog for a catalog over any host.
 func NewCatalogOf[H CommandHost](cmds []CommandOf[H], nodes []MenuNode) (*CatalogOf[H], error) {
 	c := &CatalogOf[H]{
 		commands: append([]CommandOf[H](nil), cmds...),
@@ -447,55 +432,6 @@ func (c *CatalogOf[H]) Commands() []CommandOf[H] {
 
 // Nodes enumerates every declared menu node, in declaration order.
 func (c *CatalogOf[H]) Nodes() []MenuNode { return append([]MenuNode(nil), c.nodes...) }
-
-// leaderProjection returns the leader rows in Order — explicit, never inherited
-// from map iteration or declaration accident.
-//
-// A DISABLED command is included, dimmed and carrying its reason, and its key
-// is refused. Hiding it instead would make the menu shift under the operator
-// and teach nothing about what the surface can do; closing the float on a dead
-// key would read as though the command had run.
-func (c *CatalogOf[H]) leaderProjection(h H) []leaderEntry {
-	type row struct {
-		order int
-		entry leaderEntry
-	}
-	var rows []row
-	for i := range c.commands {
-		cmd := &c.commands[i]
-		if cmd.Leader == nil {
-			continue
-		}
-		off := cmd.offering(h)
-		if off.State == OfferHidden {
-			continue
-		}
-		label := cmd.Leader.text(h)
-		id := cmd.ID
-		if off.State == OfferDisabled {
-			// The row stays, says why, and does nothing. Re-resolved at press
-			// time rather than trusting this closure: the float can be open
-			// while the state that disabled the row changes under it.
-			// nil handler IS the disabled marker; see leaderEntry.
-			label += " — " + off.Reason
-			rows = append(rows, row{order: cmd.Leader.Order, entry: leaderEntry{
-				key: cmd.Leader.Key, label: label, run: nil,
-			}})
-			continue
-		}
-		catalog := c
-		rows = append(rows, row{order: cmd.Leader.Order, entry: leaderEntry{
-			key: cmd.Leader.Key, label: label,
-			run: func() { catalog.runIfOffered(h, id) },
-		}})
-	}
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].order < rows[j].order })
-	out := make([]leaderEntry, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, r.entry)
-	}
-	return out
-}
 
 // HelpRow is one line of the help screen's command section.
 type HelpRow struct {
