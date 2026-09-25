@@ -68,8 +68,12 @@ func (h *Host) queryTitle() string {
 // scaffold puts sql in the query buffer and gives the keyboard to it — a
 // table's SELECT, from the explorer.
 func (h *Host) scaffold(sql string) {
-	h.editor.SetValue(sql)
-	h.focusEditor()
+	h.guardUnsaved(func() {
+		h.buf.note, h.buf.dirty = nil, false // the buffer is a query now, not the note
+		h.editor.SetValue(sql)
+		h.refreshWhere()
+		h.focusEditor()
+	})
 }
 
 // focusEditor moves the keyboard into the query editor.
@@ -89,5 +93,8 @@ func (h *Host) forgetWorkspace() {
 	h.active = activeConn{}
 	h.set("App.queryTitle", h.queryTitle())
 	h.explorer.clear()
+	h.workspaces.Reset(nil)
 	h.clearResults()
+	h.forgetNote()
+	h.refreshWhere()
 }

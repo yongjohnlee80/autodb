@@ -79,7 +79,9 @@ func signedIn(t *testing.T) (*tuiapp.Host, *decltest.Screen) {
 
 func key(r rune) tuicore.KeyEvent { return decltest.Rune(r) }
 
-func esc2() tuicore.KeyEvent { return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyEscape} }
+func esc2() tuicore.KeyEvent {
+	return tuicore.KeyEvent{Kind: tuicore.KeyPress, Code: tuicore.KeyEscape}
+}
 
 // typeInto types text into the query editor from Normal mode: i, the text, Esc.
 func typeInto(t *testing.T, s *decltest.Screen, text string) {
@@ -124,7 +126,7 @@ func TestEnterOnAConnectionOpensItAndMakesItTheQuerys(t *testing.T) {
 	s.WaitForText(t, "main")
 	s.Keys(t, key(' '), key('e')) // SPC e: the explorer
 	s.Keys(t, enter())            // main opens
-	s.WaitForText(t, "connections")
+	s.WaitForText(t, "▸ connections") // the tree row, not the leader card's "connections"
 	s.Keys(t, key('j'), enter()) // connections opens
 	s.WaitForText(t, "bravo")
 	s.Keys(t, key('j'), enter()) // bravo opens, and is the query's
@@ -137,10 +139,10 @@ func TestEnterOnAConnectionOpensItAndMakesItTheQuerys(t *testing.T) {
 // SPC r runs it, and the rows are a table whose columns are the query's; SPC
 // j shows them as JSON.
 func TestATableScaffoldsItsQueryWhichRunsIntoTheResults(t *testing.T) {
-	_, s := signedIn(t)
+	h, s := signedIn(t)
 	s.WaitForText(t, "main")
 	s.Keys(t, key(' '), key('e'), enter())
-	s.WaitForText(t, "connections")
+	s.WaitForText(t, "▸ connections") // the tree row, not the leader card's "connections"
 	s.Keys(t, key('j'), enter())
 	s.WaitForText(t, "bravo")
 	s.Keys(t, key('j'), enter()) // bravo: its schemas
@@ -157,7 +159,9 @@ func TestATableScaffoldsItsQueryWhichRunsIntoTheResults(t *testing.T) {
 	s.WaitFor(t, "the rows", func(sc string) bool {
 		return strings.Contains(sc, "SELECT ok — 2 row(s)") && strings.Contains(sc, "ann") && strings.Contains(sc, "bob") && strings.Contains(sc, "name")
 	})
-	s.Keys(t, key(' '), key('j'))
+	s.Keys(t, ctrl('j')) // with rows, the results take the keyboard
+	s.WaitFor(t, "the results in use", func(string) bool { return h.PaneWithFocus() == "results" })
+	s.Keys(t, ctrl('k'), key(' '), key('j'))
 	s.WaitFor(t, "the JSON", func(sc string) bool { return strings.Contains(sc, `"name": "ann"`) })
 }
 
@@ -190,4 +194,20 @@ func rowOf(s *decltest.Screen, text string) int {
 		}
 	}
 	return -1
+}
+
+// SPC C lists the connections; Enter on one makes it the query's, and the
+// keyboard goes back to the query.
+func TestThePickerChoosesTheQuerysConnection(t *testing.T) {
+	h, s := signedIn(t)
+	s.WaitForText(t, "main")
+	s.Keys(t, key(' '), key('C'))
+	s.WaitFor(t, "the picker", func(sc string) bool {
+		return strings.Contains(sc, "connection for this query") && strings.Contains(sc, "bravo  sqlite")
+	})
+	s.Keys(t, enter())
+	s.WaitFor(t, "bravo chosen", func(sc string) bool {
+		return strings.Contains(sc, "query → bravo") && !strings.Contains(sc, "connection for this query")
+	})
+	s.WaitFor(t, "back on the query", func(string) bool { return h.PaneWithFocus() == "editor" })
 }

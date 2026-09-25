@@ -43,12 +43,17 @@ Window {
     Shortcut { sequence: "Ctrl+Q"; onActivated: App.run("app.quit") }
     Shortcut { sequence: "q";      onActivated: quit.open() }
     Shortcut { sequence: "?";      onActivated: App.showHints() }
+    // Between the panes: Ctrl+h/j/k/l, and Alt+h/j/k/l for a browser that
+    // keeps Ctrl+L for its address bar.
+    Shortcut { sequence: "Ctrl+H"; onActivated: App.movePane("h") }
+    Shortcut { sequence: "Ctrl+J"; onActivated: App.movePane("j") }
+    Shortcut { sequence: "Ctrl+K"; onActivated: App.movePane("k") }
+    Shortcut { sequence: "Ctrl+L"; onActivated: App.movePane("l") }
+    Shortcut { sequence: "Alt+H";  onActivated: App.movePane("h") }
+    Shortcut { sequence: "Alt+J";  onActivated: App.movePane("j") }
+    Shortcut { sequence: "Alt+K";  onActivated: App.movePane("k") }
+    Shortcut { sequence: "Alt+L";  onActivated: App.movePane("l") }
     Shortcut { sequence: "/";      onActivated: search.open() }
-    Shortcut { sequence: "Ctrl+W"; onActivated: App.armZoom() }
-    Shortcut { sequence: "Ctrl+H"; onActivated: App.run("focus.left") }
-    Shortcut { sequence: "Ctrl+J"; onActivated: App.run("focus.down") }
-    Shortcut { sequence: "Ctrl+K"; onActivated: App.run("focus.up") }
-    Shortcut { sequence: "Ctrl+L"; onActivated: App.run("focus.right") }
 
     // ---- the menu bar: a view of the catalog -------------------------------
     //
@@ -97,6 +102,7 @@ Window {
 
         Frame {
             title: "explorer"
+            visible: App.explorerShown
             // Enter on a row: a folder opens, a table scaffolds its query, and
             // a connection — or anything under one — becomes the query's.
             TreeView {
@@ -111,16 +117,19 @@ Window {
         Split {
             orientation: Tui.Vertical
             ratio: 0.55
+            visible: App.rightShown
             Frame {
                 title: App.queryTitle
+                visible: App.editorShown
                 // The keyboard starts here, and every card gives it back here.
                 Editor {
                     id: editor
                     focus: true
                     keyset: App.keyset
+                    onTextChanged: App.queryEdited()   // an open note is now unsaved
                 }
             }
-            Results { id: results }
+            Results { id: results; visible: App.resultsShown }
         }
     }
 

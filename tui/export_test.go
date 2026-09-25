@@ -86,3 +86,53 @@ func (h *Host) RunsAnswered() int {
 	h.p.Post(func() { got <- h.results.answered })
 	return <-got
 }
+
+// Keyset is the editor profile shown now ("vim" or "textedit"), read on the loop.
+func (h *Host) Keyset() string {
+	got := make(chan string, 1)
+	h.p.Post(func() { got <- h.prefs.pref })
+	return <-got
+}
+
+// HoldPrefReads makes the stored-preference read wait for the options the test
+// sends on the channel it receives from started.
+func (h *Host) HoldPrefReads(started chan<- chan map[string]string) {
+	h.prefs.read = func(ctx context.Context, _ *Bound) (map[string]string, error) {
+		release := make(chan map[string]string)
+		started <- release
+		select {
+		case opts := <-release:
+			return opts, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// HoldPrefWrites records each write's preference on started and waits for the
+// test to release it.
+func (h *Host) HoldPrefWrites(started chan<- string, release <-chan struct{}) {
+	h.prefs.write = func(ctx context.Context, _ *Bound, pref string) error {
+		started <- pref
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+// PrefsSettled is how many preference reads and writes have come back.
+func (h *Host) PrefsSettled() int {
+	got := make(chan int, 1)
+	h.p.Post(func() { got <- h.prefs.settled })
+	return <-got
+}
+
+// PaneWithFocus is the pane holding the keyboard, by its document id.
+func (h *Host) PaneWithFocus() string {
+	got := make(chan string, 1)
+	h.p.Post(func() { got <- h.paneWithFocus() })
+	return <-got
+}

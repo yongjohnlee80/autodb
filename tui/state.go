@@ -40,8 +40,23 @@ func (h *Host) state(theme string) map[string]any {
 	// The workspace (workspace.go, explorer.go, results.go).
 	st["App.queryTitle"] = h.queryTitle()
 	st["App.explorer"] = h.explorer.model
-	st["App.keyset"] = "vim"
+	st["App.keyset"] = keysetValue(h.prefs.pref)
 	for k, v := range resultsState(h.results) {
+		st[k] = v
+	}
+	for k, v := range noteState(h) {
+		st[k] = v
+	}
+	for k, v := range zoomState() {
+		st[k] = v
+	}
+	for k, v := range pickerState(h) {
+		st[k] = v
+	}
+	for k, v := range connectionsState(h) {
+		st[k] = v
+	}
+	for k, v := range confirmState() {
 		st[k] = v
 	}
 	for k, v := range themeState(theme) {
@@ -83,7 +98,7 @@ func (h *Host) keep(err error) {
 // the session.
 func (h *Host) refreshIdentity() {
 	h.set("App.statusLeft", backendText(h.session))
-	h.set("App.statusCenter", h.session.User().Name)
+	h.set("App.statusCenter", h.where())
 	h.set("App.aboutText", h.aboutText()) // the backend line follows the connection
 	h.reproject()                         // who is signed in decides what is offered
 }

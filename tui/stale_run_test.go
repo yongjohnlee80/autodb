@@ -16,7 +16,7 @@ func TestARunAnsweredAfterTheIdentityChangedIsDropped(t *testing.T) {
 
 	s.WaitForText(t, "main")
 	s.Keys(t, key(' '), key('e'), enter())
-	s.WaitForText(t, "connections")
+	s.WaitForText(t, "▸ connections") // the tree row, not the leader card's "connections"
 	s.Keys(t, key('j'), enter())
 	s.WaitForText(t, "bravo")
 	s.Keys(t, key('j'), enter())
@@ -39,7 +39,7 @@ func TestARunAnsweredAfterTheIdentityChangedIsDropped(t *testing.T) {
 
 	// A new run is admitted at once — the old one's guard did not survive.
 	s.Keys(t, key(' '), key('e'), enter())
-	s.WaitForText(t, "connections")
+	s.WaitForText(t, "▸ connections") // the tree row, not the leader card's "connections"
 	s.Keys(t, key('j'), enter())
 	s.WaitForText(t, "bravo")
 	s.Keys(t, key('j'), enter())

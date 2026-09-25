@@ -30,8 +30,11 @@ import (
 // applied only if it still answers the question: the same connection
 // generation, the same listing (a refresh starts a new one), the same identity.
 //
+// A workspace also holds its notes: the signed-in user's own files
+// (notebuffer.go), read from the note store when the folder opens.
+//
 // ENTER ON A ROW (activated): a folder — a workspace, a connection, a schema, a
-// section — opens or closes, and a connection, or anything under one, becomes
+// section, the notes — opens or closes; a note opens in the query buffer; and a connection, or anything under one, becomes
 // the query's; a table scaffolds `SELECT * … LIMIT 100` and does not open (its
 // columns are `l`), as the terminal program's explorer did.
 
@@ -65,6 +68,24 @@ func (e *explorer) reset() {
 }
 
 func (e *explorer) connName(id int64) string { return e.names[id] }
+
+// indexOf is the Index of the row with key, among the rows loaded so far.
+func (e *explorer) indexOf(key string) (tuidecl.Index, bool) {
+	var find func(parent *tuidecl.Index) (tuidecl.Index, bool)
+	find = func(parent *tuidecl.Index) (tuidecl.Index, bool) {
+		for r := 0; r < e.model.RowCount(parent); r++ {
+			ix := tuidecl.Index{Row: r, Parent: parent}
+			if e.model.Key(ix) == key {
+				return ix, true
+			}
+			if found, ok := find(&ix); ok {
+				return found, true
+			}
+		}
+		return tuidecl.Index{}, false
+	}
+	return find(nil)
+}
 
 // clear shows nothing but why: nothing from a server or an identity that is
 // gone may keep rendering.
@@ -125,7 +146,10 @@ func (h *Host) applyWorkspaces(wss []WorkspaceInfo) {
 	for _, ws := range wss {
 		folder := fmt.Sprintf("conns:%d", ws.ID)
 		wsKey := fmt.Sprintf("ws:%d", ws.ID)
-		e.known[wsKey] = []tuidecl.TreeRow{row(folder, "connections", "", len(ws.Connections) > 0)}
+		e.known[wsKey] = []tuidecl.TreeRow{
+			row(folder, "connections", "", len(ws.Connections) > 0),
+			row(fmt.Sprintf("notes:%d", ws.ID), "notes", "", true),
+		}
 		conns := make([]tuidecl.TreeRow, 0, len(ws.Connections))
 		for _, c := range ws.Connections {
 			e.names[c.ID], e.wsOf[c.ID] = c.Name, ws.ID
@@ -139,12 +163,29 @@ func (h *Host) applyWorkspaces(wss []WorkspaceInfo) {
 		top = append(top, leafRow("empty", "no workspaces — an administrator creates one", ""))
 	}
 	e.model.SetChildren(nil, top)
+	ws := make([]tuidecl.Row, len(wss))
+	for i, w := range wss {
+		ws[i] = tuidecl.Row{"id": w.ID, "name": w.Name}
+	}
+	h.workspaces.Reset(ws)
 }
 
 // fetchExplorer is the view asking for a row's children.
 func (h *Host) fetchExplorer(ix tuidecl.Index) {
 	e := h.explorer
 	key := e.model.Key(ix)
+	if ws, ok := strings.CutPrefix(key, "notes:"); ok {
+		// The user's own files, read from the note store — after the view's
+		// own expand has finished.
+		id, _ := strconv.ParseInt(ws, 10, 64)
+		seq := e.seq
+		h.p.Post(func() {
+			if seq == e.seq {
+				h.setNotesFolder(ix, id)
+			}
+		})
+		return
+	}
 	if kids, ok := e.known[key]; ok {
 		// Known already; set after the view's own expand has finished.
 		seq := e.seq
@@ -328,13 +369,18 @@ func (h *Host) explorerActivated(ix tuidecl.Index) error {
 		h.useConnection(h.explorer.wsOf[id], id)
 	}
 	switch parts[0] {
+	case "note":
+		if ws, name, ok := noteOfKey(key); ok {
+			h.openNote(ws, name)
+		}
+		return nil
 	case "tbl":
 		// A table is used, not opened: its columns are `l`.
 		if q := h.explorer.quoted[key]; q != "" {
 			h.scaffold("SELECT * FROM " + q + " LIMIT 100")
 		}
 		return nil
-	case "ws", "conns", "conn", "schema", "sec", "cols", "part":
+	case "ws", "conns", "notes", "conn", "schema", "sec", "cols", "part":
 		return h.p.Call("explorerTree", "toggleExpanded", ix)
 	}
 	return nil

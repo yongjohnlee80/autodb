@@ -66,6 +66,7 @@ func screenModules(files fs.FS) []tuidecl.ProgramOption {
 		tuidecl.Components(files, "views", "autodb.views", moduleVersion),
 		tuidecl.Components(files, "dialogs", "autodb.dialogs", moduleVersion),
 		tuidecl.Components(files, "panels", "autodb.panels", moduleVersion),
+		tuidecl.Components(files, "managers", "autodb.managers", moduleVersion),
 	}
 }
 

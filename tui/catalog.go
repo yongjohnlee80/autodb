@@ -4,6 +4,8 @@ import (
 	"io/fs"
 	"path"
 	"strings"
+
+	"github.com/yongjohnlee80/autodb/core/auth"
 )
 
 // THE CATALOG — every command the program has, and the menu nodes the bar's
@@ -91,6 +93,9 @@ func menuNodes() []MenuNode {
 	}
 }
 
+// signedIn offers a command only while someone is signed in.
+func signedIn(h *Host) bool { return h.session.User().ID != 0 }
+
 // signedInToChooseAnEditor gates the editor-profile leaves.
 //
 // The preference belongs to an ACCOUNT, so before a sign-in there is nothing to
@@ -136,27 +141,27 @@ func catalogCommands() []CommandOf[*Host] {
 			},
 		},
 		{
-			ID: cmdZoomToggle, Lifecycle: Planned,
-			Leader: leader('z', "zoom focused pane (also Ctrl-w z)", 40),
+			ID: cmdZoomToggle, Run: func(h *Host) { h.zoomToggle() },
+			Leader: leader('z', "zoom the pane in use, or out", 40),
 		},
 		// THE ZOOM LEAVES ACTUALLY ZOOM. They were wired to the pane-FOCUS
 		// commands, which was a label that lied: "Zoom ▸ Query editor" moved
 		// focus and left the pane its normal size. Each one now focuses its
 		// pane and enlarges it.
 		{
-			ID: cmdZoomEditor, Lifecycle: Planned,
+			ID: cmdZoomEditor, Run: func(h *Host) { h.zoom(paneEditor) },
 			Menu: []MenuProjection{
 				{Parent: nodeZoom, Label: "Query editor", Hotkey: 'Q', Order: 10},
 			},
 		},
 		{
-			ID: cmdZoomResults, Lifecycle: Planned,
+			ID: cmdZoomResults, Run: func(h *Host) { h.zoom(paneResults) },
 			Menu: []MenuProjection{
 				{Parent: nodeZoom, Label: "Results", Hotkey: 'R', Order: 20},
 			},
 		},
 		{
-			ID: cmdZoomExplorer, Lifecycle: Planned,
+			ID: cmdZoomExplorer, Run: func(h *Host) { h.zoom(paneExplorer) },
 			Menu: []MenuProjection{
 				{Parent: nodeZoom, Label: "Explorer", Hotkey: 'E', Order: 30},
 			},
@@ -165,7 +170,7 @@ func catalogCommands() []CommandOf[*Host] {
 			// THE FIRST REAL THREE-STATE ROW. Visible and dimmed with a reason
 			// while nothing is zoomed, rather than hidden: the panes are there
 			// and none is enlarged, so its moment has not come.
-			ID: cmdZoomOut, Lifecycle: Planned,
+			ID: cmdZoomOut, Enabled: zoomedNow, Run: func(h *Host) { h.zoom("") },
 			Menu: []MenuProjection{
 				{Parent: nodeZoom, Label: "Zoom out", Hotkey: 'O', Order: 40},
 			},
@@ -183,24 +188,24 @@ func catalogCommands() []CommandOf[*Host] {
 			Leader: leader('t', "focus results", 70),
 		},
 		{
-			ID: cmdNewNote, Lifecycle: Planned,
+			ID: cmdNewNote, Run: func(h *Host) { h.newNote() },
 			Leader: leader('n', "new note", 80),
 			Menu:   []MenuProjection{{Parent: nodeFile, Label: "New note", Hotkey: 'N', Order: 10}},
 		},
 		{
-			ID: cmdSaveNote, Lifecycle: Planned,
+			ID: cmdSaveNote, Run: func(h *Host) { h.saveNote() },
 			Leader: leader('s', "save note", 90),
 			Menu:   []MenuProjection{{Parent: nodeFile, Label: "Save note", Hotkey: 'S', Order: 30}},
 		},
 		{
-			ID: cmdConnPicker, Lifecycle: Planned,
+			ID: cmdConnPicker, Visible: signedIn, Run: func(h *Host) { h.openConnPicker() },
 			Leader: &LeaderProjectionOf[*Host]{Key: 'C', Order: 100,
 				Label: "select the query connection",
 				Help:  "choose which connection the query runs against"},
 			Menu: []MenuProjection{{Parent: nodeConns, Label: "Select…", Hotkey: 'S', Order: 10}},
 		},
 		{
-			ID: cmdConnManager, Lifecycle: Planned,
+			ID: cmdConnManager, Visible: signedIn, Run: func(h *Host) { h.openConnections() },
 			Leader: leader('c', "connections…", 110),
 			Menu:   []MenuProjection{{Parent: nodeConns, Label: "Edit…", Hotkey: 'E', Order: 20}},
 		},
@@ -415,19 +420,19 @@ func catalogCommands() []CommandOf[*Host] {
 			//
 			// Enabled only while signed in — a preference belongs to an
 			// account, and there is no account to write it to before login.
-			ID:        "options.editor.vim",
-			Enabled:   signedInToChooseAnEditor,
-			Lifecycle: Planned,
-			Menu:      []MenuProjection{{Parent: nodeEditor, Label: "Vim mode", Hotkey: 'V', Order: 10}},
+			ID:      "options.editor.vim",
+			Enabled: signedInToChooseAnEditor,
+			Run:     func(h *Host) { h.chooseKeyset(auth.KeysetVim) },
+			Menu:    []MenuProjection{{Parent: nodeEditor, Label: "Vim mode", Hotkey: 'V', Order: 10}},
 		},
 		{
 			// TextEdit, not Nano. The Phase 1 menu tree said "Nano mode" and
 			// the acceptance requirement says TextEdit; the requirement wins,
 			// and the id is corrected with the label so the two cannot drift.
-			ID:        "options.editor.textedit",
-			Enabled:   signedInToChooseAnEditor,
-			Lifecycle: Planned,
-			Menu:      []MenuProjection{{Parent: nodeEditor, Label: "TextEdit mode", Hotkey: 'T', Order: 20}},
+			ID:      "options.editor.textedit",
+			Enabled: signedInToChooseAnEditor,
+			Run:     func(h *Host) { h.chooseKeyset(auth.KeysetTextEdit) },
+			Menu:    []MenuProjection{{Parent: nodeEditor, Label: "TextEdit mode", Hotkey: 'T', Order: 20}},
 		},
 		{
 			// Open note has no command today: the explorer owns opening.

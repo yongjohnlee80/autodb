@@ -7,6 +7,8 @@ import (
 	"unicode"
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
+
+	"github.com/yongjohnlee80/autodb/core/auth"
 )
 
 // THE CATALOG, AS THE DOCUMENT SEES IT — the menu bar, the leader menu and the
@@ -138,10 +140,16 @@ func (h *Host) projectBar() {
 
 // radioOf reports whether a command is one of a radio set, which set, and
 // whether it is the checked one: the themes, whose mark follows the theme the
-// layout imports.
+// layout imports, and the editor's keys, whose mark follows the account's.
 func (h *Host) radioOf(id CommandID) (group string, checked, ok bool) {
 	if theme, isTheme := strings.CutPrefix(string(id), cmdThemePrefix); isTheme {
 		return "theme", theme == h.theme, true
+	}
+	switch id {
+	case "options.editor.vim":
+		return "editor", h.prefs.pref == auth.KeysetVim, true
+	case "options.editor.textedit":
+		return "editor", h.prefs.pref == auth.KeysetTextEdit, true
 	}
 	return "", false, false
 }
@@ -168,7 +176,7 @@ func (h *Host) projectLeader() {
 			text += "  — " + off.Reason
 		}
 		entries = append(entries, entry{cmd.Leader.Order, tuidecl.Row{
-			"key": string(cmd.Leader.Key), "text": text,
+			"key": leaderSequence(cmd.Leader.Key), "text": text,
 			"enabled": off.State == OfferOffered, "id": string(cmd.ID),
 		}})
 	}
@@ -219,4 +227,13 @@ func withMnemonic(label string, hotkey rune) string {
 		}
 	}
 	return escaped + " (&" + string(hotkey) + ")"
+}
+
+// leaderSequence is a leader key as a Shortcut's sequence: a capital is
+// "Shift+C", as Qt spells it, so c and C are two keys.
+func leaderSequence(k rune) string {
+	if unicode.IsUpper(k) {
+		return "Shift+" + string(k)
+	}
+	return string(k)
 }
