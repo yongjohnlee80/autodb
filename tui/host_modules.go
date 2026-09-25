@@ -57,3 +57,16 @@ func (h *Host) modulesFrom(files fs.FS) []tuidecl.ProgramOption {
 		tuidecl.Types(controls.Types()...),
 	}
 }
+
+// screenModules are the screens, one component per file — the panes, the
+// views, the dialogs and the managers, each imported by its folder's module.
+// The blueprint (qml/blueprint/main.qml) uses them; main.qml takes them up as
+// golib gains what they need.
+func screenModules(files fs.FS) []tuidecl.ProgramOption {
+	return []tuidecl.ProgramOption{
+		tuidecl.Components(files, "panels", "autodb.panels", moduleVersion),
+		tuidecl.Components(files, "views", "autodb.views", moduleVersion),
+		tuidecl.Components(files, "dialogs", "autodb.dialogs", moduleVersion),
+		tuidecl.Components(files, "managers", "autodb.managers", moduleVersion),
+	}
+}

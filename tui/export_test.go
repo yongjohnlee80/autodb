@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"io/fs"
 	"testing"
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
@@ -28,3 +29,23 @@ func RunHost(t testing.TB, session *Session, notesFor NotesFactory, opt HostOpti
 
 // RunCommand runs a catalog command on the loop, as App.run would.
 func (h *Host) RunCommand(id string) { h.p.Post(func() { h.catalog.runIfOffered(h, CommandID(id)) }) }
+
+// BlueprintProgramOptions are the program with the blueprint screen as its
+// layout: what the blueprint test lints.
+func BlueprintProgramOptions() []tuidecl.ProgramOption {
+	src, err := fs.ReadFile(qmlFiles, "blueprint/main.qml")
+	if err != nil {
+		panic(err)
+	}
+	return BlueprintProgramOptionsFrom(qmlFiles, src)
+}
+
+// BlueprintProgramOptionsFrom is the blueprint read from files, for a probe
+// over an edited copy.
+func BlueprintProgramOptionsFrom(files fs.FS, src []byte) []tuidecl.ProgramOption {
+	opt := HostOptions{Layout: src}
+	h := newHost(nil, nil, nil, opt)
+	opts := h.options(opt)
+	opts = append(opts, screenModules(files)...)
+	return opts
+}
