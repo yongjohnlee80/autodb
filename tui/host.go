@@ -112,11 +112,15 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt HostOptio
 }
 
 // attach binds the host to the program built from its options — by NewHost,
-// or by a test running the same options through decltest — and starts the
-// session.
+// or by a test running the same options through decltest.
+//
+// It STARTS NOTHING. The session starts on the program's first loop turn: work
+// posted before Run waits for it, so a host that is built and never run never
+// dials, never spawns, and never moves a session's generation under another
+// host sharing it.
 func (h *Host) attach(p *tuidecl.Program) error {
 	h.p = p
-	h.start()
+	p.Post(h.start)
 	return nil
 }
 
