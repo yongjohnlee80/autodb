@@ -362,6 +362,20 @@ func (h *Host) NotePickerRows() int {
 	return <-rows
 }
 
+func (h *Host) QueryAndRegister() (value, register string, linewise bool) {
+	type state struct {
+		value, register string
+		linewise        bool
+	}
+	got := make(chan state, 1)
+	h.p.Post(func() {
+		reg, line := h.editor.Register()
+		got <- state{h.editor.Value(), reg, line}
+	})
+	v := <-got
+	return v.value, v.register, v.linewise
+}
+
 func (h *Host) QueryIsNormal() bool {
 	got := make(chan bool, 1)
 	h.p.Post(func() { got <- h.editor.Mode() == widget.ModeNormal })
