@@ -1,6 +1,9 @@
 // Attach.qml — put a connection in a workspace: one it is not in yet.
 
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: App.attachTitle
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok

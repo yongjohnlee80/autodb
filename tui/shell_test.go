@@ -128,7 +128,8 @@ func TestHintsSayTheKeys(t *testing.T) {
 	_, s := connected(t)
 	s.Keys(t, decltest.Rune('?'))
 	s.WaitFor(t, "the hints", func(sc string) bool {
-		return strings.Contains(sc, "keys here") && strings.Contains(sc, "the leader menu: every command") && strings.Contains(sc, "find in the focused query")
+		return strings.Contains(sc, "keys here") && strings.Contains(sc, "the leader menu: every command") &&
+			strings.Contains(sc, "find in the focused query") && strings.Contains(sc, "h / l     explorer: collapse / expand")
 	})
 	s.Keys(t, esc())
 	s.WaitFor(t, "the hints closed", func(sc string) bool { return !strings.Contains(sc, "keys here") })
@@ -163,6 +164,29 @@ func TestHelpListsTheLeader(t *testing.T) {
 	}
 }
 
+func TestQClosesHintsHelpAndQuitConfirmationWithoutQuitting(t *testing.T) {
+	_, s := connected(t)
+	s.Keys(t, decltest.Rune('?'))
+	s.WaitForText(t, "keys here")
+	s.Keys(t, decltest.Rune('q'))
+	s.WaitFor(t, "hints closed with q", func(sc string) bool { return !strings.Contains(sc, "keys here") })
+
+	s.Keys(t, decltest.Rune(' '), decltest.Rune('?'))
+	s.WaitForText(t, "Close(q)") // generated Dialog.Close uses the same label
+	s.Keys(t, decltest.Rune('q'))
+	s.WaitFor(t, "help closed with q", func(sc string) bool { return !strings.Contains(sc, "┌ help ") })
+
+	s.Keys(t, decltest.Rune('q'))
+	s.WaitForText(t, "quit autodb?")
+	s.Keys(t, decltest.Rune('q'))
+	s.WaitFor(t, "quit confirmation cancelled with q", func(sc string) bool { return !strings.Contains(sc, "quit autodb?") })
+	select {
+	case <-s.Quit():
+		t.Fatal("q in the quit confirmation quit the application")
+	default:
+	}
+}
+
 // q asks first: No stays, Yes quits.
 func TestQuittingAsksFirst(t *testing.T) {
 	_, s := connected(t)
@@ -181,13 +205,30 @@ func TestQuittingAsksFirst(t *testing.T) {
 	<-s.Quit()
 }
 
+func TestQuitDialogEnterActivatesTheFocusedButton(t *testing.T) {
+	_, s := connected(t)
+	s.Keys(t, decltest.Rune('q'))
+	s.WaitForText(t, "quit autodb?")
+	s.Keys(t, tab(), enter()) // No is focused, despite Yes appearing first.
+	s.WaitFor(t, "stayed after Enter on No", func(sc string) bool { return !strings.Contains(sc, "quit autodb?") })
+	select {
+	case <-s.Quit():
+		t.Fatal("Enter on No quit the program")
+	default:
+	}
+	s.Keys(t, decltest.Rune('q'))
+	s.WaitForText(t, "quit autodb?")
+	s.Keys(t, enter()) // Initial focus is on Yes.
+	<-s.Quit()
+}
+
 // Options › Theme switches the theme the layout imports, to each theme the
 // program ships — only the imported one is linted at build, so a theme that
 // does not load is found here — and the menu bar survives each switch.
 func TestAThemeCommandSwitchesTheTheme(t *testing.T) {
 	h, s := connected(t)
-	if got := h.Theme(); got != "retro" {
-		t.Fatalf("the screen starts in %q, want retro", got)
+	if got := h.Theme(); got != "dark" {
+		t.Fatalf("the screen starts in %q, want dark", got)
 	}
 	for _, theme := range []string{"mono", "dark", "light", "retro"} {
 		h.RunCommand("options.theme." + theme)

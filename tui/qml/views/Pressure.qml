@@ -1,5 +1,8 @@
 // A live, timestamped view of front-door capacity and refusals.
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: "pressure"
     dim: false
     standardButtons: Dialog.Close
@@ -7,6 +10,8 @@ Dialog {
     onOpened: App.pressureOpened()
     onRejected: App.pressureClosed()
     TableView {
+        palette.highlight: Theme.document.highlight
+        palette.highlightedText: Theme.document.highlightedText
         model: App.pressure
         TableViewColumn { role: "measure"; title: "MEASURE"; width: 28 }
         TableViewColumn { role: "value"; title: "VALUE"; width: 0 }

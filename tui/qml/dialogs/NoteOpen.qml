@@ -1,5 +1,8 @@
 // File → Open note: a literal name/workspace filter over this account's local notes.
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: "open a note"
     dim: false
     standardButtons: Dialog.Close
@@ -10,6 +13,8 @@ Dialog {
         direction: Tui.Vertical
         TextField { id: filter; placeholderText: "filter by note or workspace"; onTextEdited: App.noteOpenFilter(filter.text) }
         TableView {
+            palette.highlight: Theme.document.highlight
+            palette.highlightedText: Theme.document.highlightedText
             model: App.noteOpenRows
             Layout.fillHeight: true
             onActivated: App.noteOpenSelect(index)

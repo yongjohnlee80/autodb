@@ -39,7 +39,7 @@ import (
 // columns are `l`), as the terminal program's explorer did.
 
 // Roles of the explorer's rows.
-var explorerRoles = []string{"key", "label", "badge"}
+var explorerRoles = []string{"key", "label", "badge", "kind"}
 
 // explorer is the tree model and what the host keeps beside it.
 type explorer struct {
@@ -96,7 +96,8 @@ func (e *explorer) clear() {
 }
 
 func row(key, label, badge string, opens bool) tuidecl.TreeRow {
-	return tuidecl.TreeRow{Row: tuidecl.Row{"key": key, "label": label, "badge": badge}, HasChildren: opens}
+	kind, _, _ := strings.Cut(key, ":")
+	return tuidecl.TreeRow{Row: tuidecl.Row{"key": key, "label": label, "badge": badge, "kind": kind}, HasChildren: opens}
 }
 
 func leafRow(key, label, badge string) tuidecl.TreeRow { return row(key, label, badge, false) }

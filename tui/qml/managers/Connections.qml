@@ -8,6 +8,9 @@
 // what SQL a client may send over it.
 
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: "connections"
     dim: false
     helpText: App.connectionsStatus
@@ -15,6 +18,8 @@ Dialog {
     Flex {
         direction: Tui.Vertical
         TableView {
+            palette.highlight: Theme.document.highlight
+            palette.highlightedText: Theme.document.highlightedText
             id: table
             model: App.connectionRows
             TableViewColumn { role: "id";      title: "ID";        width: 5 }
@@ -31,6 +36,6 @@ Dialog {
         Button { text: "&Test";   DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionTest(table.currentIndex) }
         Button { text: "&Delete"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionDelete(table.currentIndex) }
         Button { text: "Attach to &workspace"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.connectionAttach(table.currentIndex) }
-        Button { text: "&Close";  DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: "Close(&q)";  DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

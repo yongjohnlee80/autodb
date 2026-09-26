@@ -50,17 +50,17 @@ func TestADevEditToTheThemeImportIsFollowed(t *testing.T) {
 	h, s := tuiapp.RunHost(t, tuiapp.NewSession("127.0.0.1:1", logger.Nop{}, nil), nil,
 		tuiapp.Options{Dev: dir}, 100, 20)
 	s.WaitForText(t, "Options")
-	if got := h.Theme(); got != "retro" {
-		t.Fatalf("the screen starts in %q, want retro", got)
+	if got := h.Theme(); got != "dark" {
+		t.Fatalf("the screen starts in %q, want dark", got)
 	}
 	main := filepath.Join(dir, "main.qml")
 	src, err := os.ReadFile(main)
 	if err != nil {
 		t.Fatal(err)
 	}
-	edited := strings.Replace(string(src), "import autodb.theme.retro 1.0", "import autodb.theme.mono 1.0", 1)
+	edited := strings.Replace(string(src), "import autodb.theme.dark 1.0", "import autodb.theme.mono 1.0", 1)
 	if edited == string(src) {
-		t.Fatal("main.qml imports no retro theme to edit")
+		t.Fatal("main.qml imports no dark theme to edit")
 	}
 	if err := os.WriteFile(main, []byte(edited), 0o644); err != nil {
 		t.Fatal(err)
@@ -77,16 +77,16 @@ func TestADevThemeFileEditRepaintsAndABadSaveKeepsTheLastGoodScreen(t *testing.T
 		tuiapp.Options{Dev: dir}, 100, 20)
 	s.WaitForText(t, "Options")
 	before := s.Backend.Snapshot()[0][0].Attrs.BG
-	file := filepath.Join(dir, "themes", "retro.qml")
+	file := filepath.Join(dir, "themes", "dark.qml")
 	src, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	from := "menu {\n        window: \"#aaaaaa\""
+	from := "menu {\n        window: \"#303030\""
 	to := "menu {\n        window: \"#123456\""
 	changed := strings.Replace(string(src), from, to, 1)
 	if changed == string(src) {
-		t.Fatal("the retro theme has no menu palette to edit")
+		t.Fatal("the dark theme has no menu palette to edit")
 	}
 	if err := os.WriteFile(file, []byte(changed), 0o644); err != nil {
 		t.Fatal(err)
@@ -99,7 +99,7 @@ func TestADevThemeFileEditRepaintsAndABadSaveKeepsTheLastGoodScreen(t *testing.T
 		t.Fatal(err)
 	}
 	s.WaitFor(t, "invalid edit reported", func(sc string) bool {
-		return strings.Contains(h.SourceText("App.status"), "retro.qml") && strings.Contains(sc, "Options")
+		return strings.Contains(h.SourceText("App.status"), "dark.qml") && strings.Contains(sc, "Options")
 	})
 	if got := s.Backend.Snapshot()[0][0].Attrs.BG; got != good {
 		t.Fatalf("invalid theme changed last good menu color: %+v -> %+v", good, got)

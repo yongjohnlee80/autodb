@@ -4,7 +4,11 @@
 // opens it again with the reason on its help line (App.noteNameError).
 
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: App.noteNameTitle
+    width: 72
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok          // Enter names it, from the name field too
     helpText: App.noteNameError

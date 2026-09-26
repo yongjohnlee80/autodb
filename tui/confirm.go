@@ -5,9 +5,8 @@ import "fmt"
 // A QUESTION BEFORE AN ACTION — delete this, open the front door on that.
 //
 // One confirmation card (dialogs/Confirm.qml), reused: its title, its text
-// and its two answers are the question's. The answer that acts is never the
-// default and never under the cursor by position alone: the card is a
-// DialogButtonBox, which has no default, so a stray Enter does nothing.
+// and its two answers are the question's. The harmless No answer takes
+// initial focus, so a stray Enter rejects rather than running the action.
 // The action runs after the card has closed, so a card it opens is not
 // stacked above a closing one.
 

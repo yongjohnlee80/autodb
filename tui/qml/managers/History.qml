@@ -1,11 +1,16 @@
 // Recorded query executions. The host owns selection, loading and copying.
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: "history"
     dim: false
     standardButtons: Dialog.Close
     helpText: App.historyStatus
     onRejected: App.historyClosed()
     TableView {
+        palette.highlight: Theme.document.highlight
+        palette.highlightedText: Theme.document.highlightedText
         id: table
         model: App.historyRows
         onActivated: App.historyShow(index)

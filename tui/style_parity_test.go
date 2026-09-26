@@ -32,6 +32,8 @@ func paintedLabel(t *testing.T, s *decltest.Screen, label string) tuicore.CellAt
 
 func TestTheExplorerSelectionChangesLookOnFocusAndReturnsToItsBlurredLook(t *testing.T) {
 	h, s := signedIn(t)
+	h.RunCommand("options.theme.retro") // these assertions pin the Retro palette
+	s.WaitFor(t, "retro palette", func(string) bool { return h.Theme() == "retro" })
 	s.WaitForText(t, "▸ main (1)")
 	blurred := paintedLabel(t, s, "main (1)")
 	blurredCorner := s.Backend.Snapshot()[1][0].Attrs
@@ -104,5 +106,33 @@ func TestAllShippedThemesKeepTheFocusedExplorerSelectionLegible(t *testing.T) {
 			cell := paintedLabel(t, s, "main (1)")
 			return cell.FG == tc.fg && cell.BG == tc.bg && cell.Mask&tuicore.AttrReverse == 0
 		})
+	}
+}
+
+func TestMonoMenuMnemonicInheritsBothNormalAndSelectedText(t *testing.T) {
+	h, s := signedIn(t)
+	h.RunCommand("options.theme.mono")
+	s.WaitFor(t, "mono menu", func(sc string) bool { return h.Theme() == "mono" && strings.Contains(sc, "View") })
+	viewX := strings.Index(strings.Split(s.String(), "\n")[0], "View")
+	if viewX < 0 {
+		t.Fatal("View menu title missing")
+	}
+	menuCells := func() (tuicore.CellAttrs, tuicore.CellAttrs) {
+		row := s.Backend.Snapshot()[0]
+		return row[viewX].Attrs, row[viewX+1].Attrs
+	}
+	key, text := menuCells()
+	if key.FG != text.FG || key.BG != text.BG || key.Mask&tuicore.AttrUnderline == 0 {
+		t.Fatalf("normal Mono mnemonic lost its row colour or underline: key %+v, text %+v", key, text)
+	}
+	normal := key
+	s.Keys(t, decltest.Alt('v'))
+	s.WaitForText(t, "Zoom")
+	key, text = menuCells()
+	if key.FG != text.FG || key.BG != text.BG || key.Mask&tuicore.AttrUnderline == 0 {
+		t.Fatalf("selected Mono mnemonic lost its row colour or underline: key %+v, text %+v", key, text)
+	}
+	if key.FG == normal.FG && key.BG == normal.BG {
+		t.Fatalf("opening View did not invert the selected menu title: %+v", key)
 	}
 }

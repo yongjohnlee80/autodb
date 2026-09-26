@@ -5,7 +5,11 @@
 // with the reason (App.bootstrapError).
 
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: "first run — create the root user"
+    width: 72
     dim: false        // the first thing an operator sees: nothing behind it to fade
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok          // Enter creates the user, from the last field too

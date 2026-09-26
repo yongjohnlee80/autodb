@@ -1,6 +1,10 @@
 // The token is bound to one offered connection. The backend revalidates it.
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: "create access token"
+    width: 72
     dim: false
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok

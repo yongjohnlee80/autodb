@@ -358,9 +358,12 @@ func (s *Session) Connect(ctx context.Context) (instanceChanged bool, err error)
 			// server outlives frontends (so it is usually the old one),
 			// but restarting it from a rebuilt binary makes the running
 			// TUI the old one instead. The server's message carries both
-			// numbers; add the instruction.
-			hint := "stop the running server so a current one starts: " +
-				"pkill -f 'autodb --serve'"
+			// numbers; add a safe recovery instruction. Never suggest a broad
+			// pkill: another autodb daemon may serve a different config or user.
+			hint := "stop the older server, then SPC x to reconnect"
+			if s.spawn == nil {
+				hint = "restart the older server with a matching build, then SPC x to reconnect"
+			}
 			if serverProto := protocolOf(re.Message); serverProto > rpc.Protocol {
 				hint = "this frontend is the older build — quit and relaunch it"
 			}

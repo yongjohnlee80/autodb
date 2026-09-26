@@ -1,8 +1,11 @@
 // UnsavedNote.qml — the note has unsaved changes: save, discard, or stay.
-// Three answers and no default — a DialogButtonBox has none — so an Enter
-// cannot throw work away.
+// Save takes initial focus: Enter saves, while Discard requires an explicit
+// mnemonic, focus move, or click, so a stray Enter cannot throw work away.
 
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: "unsaved note"
     Text { wrapMode: Tui.WordWrap; text: App.unsavedQuestion }
     DialogButtonBox {

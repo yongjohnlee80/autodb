@@ -15,7 +15,7 @@
 
 import tui 1.0
 import autodb 1.0                 // App: this program's state and commands
-import autodb.theme.retro 1.0     // the Theme singleton — Options › Theme switches it
+import autodb.theme.dark 1.0      // the Theme singleton — Options › Theme switches it
 import autodb.views 1.0           // Leader, Hints, Help, About
 import autodb.dialogs 1.0         // ConfirmQuit, Login, Bootstrap, the note dialogs, ConnPicker
 import autodb.panels 1.0          // Results
@@ -146,6 +146,19 @@ Window {
                 model: App.explorer
                 textRole: "label"
                 badgeRole: "badge"
+                // A row carries its semantic kind; the active theme chooses
+                // its color. Selection colors still take precedence.
+                delegate: Text {
+                    text: model.label
+                    color: model.kind === "ws" ? Theme.syntax.keyword :
+                           model.kind === "conn" ? Theme.syntax.function :
+                           model.kind === "schema" ? Theme.syntax.dataType :
+                           model.kind === "sec" ? Theme.syntax.controlFlow :
+                           model.kind === "tbl" ? Theme.syntax.attribute :
+                           model.kind === "col" ? Theme.syntax.constant :
+                           model.kind === "fn" ? Theme.syntax.specialChar :
+                           model.kind === "note" ? Theme.syntax.string : palette.text
+                }
                 onActivated: App.explorerActivated(index)
             }
         }

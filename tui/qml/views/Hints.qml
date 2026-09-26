@@ -1,14 +1,12 @@
 // Hints.qml — `?`: the keys that work where you are.
 //
 // The host fills App.hints for the place the keyboard is, then opens this
-// card. Esc closes it.
+// card. q or Esc closes it.
 
-Popup {
+Dialog {
     id: hints
-    modal: true
+    closeOnQ: true
     dim: false
-    Frame {
-        title: "keys here"
-        Text { wrapMode: Tui.WordWrap; text: App.hints }
-    }
+    title: "keys here"
+    Text { wrapMode: Tui.WordWrap; text: App.hints }
 }

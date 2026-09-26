@@ -1,6 +1,10 @@
 // One form for a new user, role, passphrase reset, or connection grant.
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: App.userFormTitle
+    width: 72
     dim: false
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok
