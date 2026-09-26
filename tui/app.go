@@ -96,6 +96,17 @@ type Host struct {
 	spaceAttachFor      int64
 	profileBound        *Bound
 	profilePending      bool
+	profileChange       func(context.Context, *Bound, string, string) error
+	users               *manager[UserRow]
+	userRoles           *tuidecl.ListModel
+	userConnections     *tuidecl.ListModel
+	userFormBound       *Bound
+	userFormMode        string
+	userFormUserID      int64
+	userFormSeq         uint64
+	addresses           *manager[addressRow]
+	addressGlobal       bool
+	addressUserID       int64
 	tokens              *manager[PATRow]
 	tokenConns          *tuidecl.ListModel
 	showRevoked         bool
@@ -210,6 +221,10 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 	h.pickable = tuidecl.NewListModel("key", "label", "id", "ws", "name")
 	h.conns = newConnectionsManager()
 	h.spaces = newWorkspaceManager(h)
+	h.users = newUserManager()
+	h.userRoles = userRoleModel()
+	h.userConnections = tuidecl.NewListModel("key", "id", "label")
+	h.addresses = newAddressManager()
 	h.spaceIndex = -1
 	h.spaceAttached = tuidecl.NewListModel("key", "name", "engine")
 	h.spaceOptions = tuidecl.NewListModel("key", "id", "name")

@@ -203,4 +203,7 @@ Window {
     WorkspaceName { id: workspaceName }
     WorkspaceAttach { id: workspaceAttach }
     Profile { id: profile }
+    Users { id: users }
+    UserForm { id: userForm }
+    Addresses { id: addresses }
 }

@@ -94,6 +94,30 @@ func (h *Host) CorruptMintReplyAfterCommit(committed chan<- struct{}) {
 
 func (h *Host) WaitMints() { h.mintWorkers.Wait() }
 
+func (h *Host) HoldProfileChanges(started chan<- chan error) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.profileChange = func(ctx context.Context, _ *Bound, _, _ string) error {
+			release := make(chan error)
+			started <- release
+			select {
+			case err := <-release:
+				return err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		close(ready)
+	})
+	<-ready
+}
+
+func (h *Host) ProfileChangePending() bool {
+	got := make(chan bool, 1)
+	h.p.Post(func() { got <- h.profilePending })
+	return <-got
+}
+
 func (h *Host) HoldTokenPreviews(started chan<- chan []string) {
 	ready := make(chan struct{})
 	h.p.Post(func() {
@@ -148,6 +172,48 @@ func (h *Host) SelectWorkspaceRow(i int) {
 	ready := make(chan struct{})
 	h.p.Post(func() { h.selectWorkspace(i); close(ready) })
 	<-ready
+}
+
+func (h *Host) SelectUserRow(i int) {
+	ready := make(chan struct{})
+	h.p.Post(func() { h.set("App.userIndex", i); close(ready) })
+	<-ready
+}
+
+func (h *Host) UsersCount() int {
+	got := make(chan int, 1)
+	h.p.Post(func() { got <- h.users.model.Len() })
+	return <-got
+}
+
+func (h *Host) SetTestSource(name string, value any) error {
+	done := make(chan error, 1)
+	h.p.Post(func() { done <- h.p.Set(name, value) })
+	return <-done
+}
+
+func (h *Host) SourceText(name string) string {
+	got := make(chan string, 1)
+	h.p.Post(func() {
+		v, _ := h.p.Tree().Source(name)
+		got <- v.Raw
+	})
+	return <-got
+}
+
+func (h *Host) SelectAddressCIDR(cidr string) bool {
+	got := make(chan bool, 1)
+	h.p.Post(func() {
+		for i, row := range h.addresses.rows {
+			if row.cidr == cidr {
+				h.set("App.addressIndex", i)
+				got <- true
+				return
+			}
+		}
+		got <- false
+	})
+	return <-got
 }
 
 func (h *Host) WorkspaceManagerCount() int {
