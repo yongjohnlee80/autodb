@@ -27,7 +27,7 @@ Theme {
     }
     document {
         window: "default"; windowText: "default"
-        highlight: "brightwhite"
+        highlight: "brightwhite"; highlightedText: "black"
         base: "default"; text: "default"
         selection: "white"; selectedText: "black"
     }

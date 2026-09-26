@@ -23,7 +23,7 @@ Theme {
     }
     document {
         window: "#1c1c1c"; windowText: "#8a8a8a"
-        highlight: "#87afd7"
+        highlight: "#87afd7"; highlightedText: "#000000"
         base: "#1c1c1c"; text: "#d0d0d0"
         selection: "#005f87"; selectedText: "#ffffff"
     }
