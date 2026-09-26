@@ -440,9 +440,9 @@ func catalogCommands() []CommandOf[*Host] {
 			Menu:    []MenuProjection{{Parent: nodeEditor, Label: "TextEdit mode", Hotkey: 'T', Order: 20}},
 		},
 		{
-			// Open note has no command today: the explorer owns opening.
-			ID: "note.open", Lifecycle: Planned,
-			Menu: []MenuProjection{{Parent: nodeFile, Label: "Open note", Hotkey: 'O', Order: 20}},
+			ID: "note.open", Visible: signedIn, Run: func(h *Host) { h.openNotePicker() },
+			Leader: leader('O', "open a note…", 85),
+			Menu:   []MenuProjection{{Parent: nodeFile, Label: "Open note…", Hotkey: 'O', Order: 20}},
 		},
 	}
 	// One command per theme the program ships: a new theme is a file.

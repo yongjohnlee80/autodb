@@ -78,8 +78,11 @@ type Host struct {
 	cardText string
 	// buf is the note the query buffer holds (notebuffer.go); workspaces the
 	// signed-in user's workspaces, for the note-name dialog to choose from.
-	buf        noteBuffer
-	workspaces *tuidecl.ListModel
+	buf            noteBuffer
+	workspaces     *tuidecl.ListModel
+	noteOpen       *noteOpenState
+	listNotes      func(*NoteStore, map[int64]string) ([]noteChoice, error)
+	noteOpenListed func() // test-only: the held listing callback reached the UI loop
 	// prefs is the editor profile, stored on the account (editorpref.go).
 	prefs *editorPrefs
 	// zoomed is the pane that has the screen, "" for none (zoom.go).
@@ -242,6 +245,7 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 	h.inspectRows = tuidecl.NewListModel("line")
 	h.pressure = newPressureView()
 	h.workspaces = tuidecl.NewListModel("id", "name")
+	h.noteOpen = newNoteOpenState()
 	h.prefs = newEditorPrefs()
 	h.pickable = tuidecl.NewListModel("key", "label", "id", "ws", "name")
 	h.conns = newConnectionsManager()
