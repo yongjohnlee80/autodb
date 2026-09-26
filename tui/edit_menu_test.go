@@ -27,7 +27,7 @@ func TestEditMenuUsesTheEditorRegisterAndTracksUnsavedNotes(t *testing.T) {
 			s.Keys(t, ctrl('h')) // the editor no longer owns focus
 			s.WaitFor(t, "explorer focused", func(string) bool { return h.PaneWithFocus() == "explorerTree" })
 			s.Keys(t, decltest.Alt('e'))
-			s.WaitForText(t, "Copy/Yank (register + clipboard)")
+			s.WaitForText(t, "Copy/Yank (register; clipboard if available)")
 			s.Keys(t, key('c')) // actual QML Edit menu projection, not a synthetic Editor key
 			s.WaitFor(t, "Copy reached the query", func(string) bool {
 				_, reg, linewise := h.QueryAndRegister()
