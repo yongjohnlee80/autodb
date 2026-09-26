@@ -336,6 +336,12 @@ func (h *Host) SetQueryCursor(row, col int) {
 	<-ready
 }
 
+func (h *Host) RetireWorkspaceForTest() {
+	ready := make(chan struct{})
+	h.p.Post(func() { h.forgetWorkspace(); close(ready) })
+	<-ready
+}
+
 func (h *Host) QueryIsNormal() bool {
 	got := make(chan bool, 1)
 	h.p.Post(func() { got <- h.editor.Mode() == widget.ModeNormal })

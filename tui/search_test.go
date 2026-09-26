@@ -77,6 +77,12 @@ func TestResultsSearchTargetsTheVisibleTableThenJSON(t *testing.T) {
 	if row, _ := h.SearchCursor("table"); row != 1 {
 		t.Fatalf("table search landed at row %d, want 1", row)
 	}
+	s.Keys(t, ctrl('k'), key('/'))
+	s.WaitForText(t, "┌ find in query ")
+	s.Keys(t, esc())
+	s.WaitFor(t, "cancelled search closed", func(sc string) bool { return !strings.Contains(sc, "┌ find in query ") })
+	s.Keys(t, ctrl('j'), key('n'))
+	s.WaitForText(t, "bob: match 1/1 in the table")
 	s.Keys(t, ctrl('k'), key(' '), key('j')) // toggle to JSON from query
 	s.WaitFor(t, "JSON mode bound", func(sc string) bool {
 		return strings.Contains(sc, "[") && strings.Contains(h.SourceText("App.resultsJSON"), `"name": "bob"`)
@@ -97,6 +103,18 @@ func TestResultsSearchTargetsTheVisibleTableThenJSON(t *testing.T) {
 	if strings.Contains(s.String(), "┌ find in json ") {
 		t.Fatal("accepted search left its modal open")
 	}
+}
+
+func TestSearchDialogClosesWhenItsWorkspaceIsRetired(t *testing.T) {
+	h, s := signedIn(t)
+	s.Keys(t, key('/'))
+	s.WaitForText(t, "┌ find in query ")
+	h.RetireWorkspaceForTest()
+	s.WaitFor(t, "search closed at workspace retirement", func(sc string) bool {
+		return !strings.Contains(sc, "┌ find in query ")
+	})
+	s.Keys(t, key('n'))
+	s.WaitForText(t, "no current search — / starts one")
 }
 
 func TestUnicodeQuerySearchLandsAtAGraphemeColumn(t *testing.T) {

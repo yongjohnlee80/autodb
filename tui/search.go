@@ -20,23 +20,25 @@ type searchState struct {
 func (h *Host) resultsMoved(row int) error { h.results.cursor = row; return nil }
 
 func (h *Host) openSearch() error {
+	var target string
 	switch h.paneWithFocus() {
 	case paneEditor:
-		h.search.target = "query"
+		target = "query"
 	case paneResults:
 		if h.results.last == nil {
 			h.setStatus("nothing to search in the results")
 			return nil
 		}
-		h.search.target = "table"
+		target = "table"
 		if h.results.asJSON {
-			h.search.target = "json"
+			target = "json"
 		}
 	default:
 		h.setStatus("focus the query or results pane before searching")
 		return nil
 	}
-	h.set("App.searchTitle", "find in "+h.search.target+" — n next, N previous")
+	h.searchPending = target
+	h.set("App.searchTitle", "find in "+target+" — n next, N previous")
 	h.set("App.searchError", "")
 	h.open("search")
 	return nil
@@ -48,10 +50,11 @@ func (h *Host) startSearch(pattern string) error {
 		h.p.Post(func() { h.open("search") })
 		return nil
 	}
-	if h.search.target == "" {
+	if h.searchPending == "" {
 		h.setStatus("search target changed — press / again")
 		return nil
 	}
+	h.search.target, h.searchPending = h.searchPending, ""
 	h.search.query = pattern
 	h.search.identity = h.session.IdentityEpoch()
 	h.search.resultSeq = h.results.seq
@@ -61,6 +64,8 @@ func (h *Host) startSearch(pattern string) error {
 	h.p.Post(func() { h.searchJump(+1, true) }) // after Search's modal closes
 	return nil
 }
+
+func (h *Host) searchCancelled() error { h.searchPending = ""; return nil }
 
 func (h *Host) searchNext() error     { h.searchJump(+1, false); return nil }
 func (h *Host) searchPrevious() error { h.searchJump(-1, false); return nil }

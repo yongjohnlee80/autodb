@@ -8,4 +8,5 @@ Dialog {
     helpText: App.searchError
     TextField { id: pattern; text: App.lastSearch; placeholderText: "find text" }
     onAccepted: App.search(pattern.text)
+    onRejected: App.searchCancelled()
 }
