@@ -48,9 +48,13 @@ func (h *Host) changePassphrase(oldPass, next, again string) error {
 	default:
 		h.profilePending = true
 		h.set("App.profileError", "changing passphrase…")
-		do(h, func(ctx context.Context) error { return b.ChangePassphrase(ctx, oldPass, next) }, func(err error) {
+		change := h.profileChange
+		if change == nil {
+			change = func(ctx context.Context, b *Bound, old, next string) error { return b.ChangePassphrase(ctx, old, next) }
+		}
+		do(h, func(ctx context.Context) error { return change(ctx, b, oldPass, next) }, func(err error) {
 			h.profilePending = false
-			if b.Gen() != h.session.Gen() || b.IdentityEpoch() != h.session.IdentityEpoch() {
+			if h.profileBound != b || b.Gen() != h.session.Gen() || b.IdentityEpoch() != h.session.IdentityEpoch() {
 				return
 			}
 			if err != nil {

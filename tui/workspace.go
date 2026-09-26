@@ -91,7 +91,7 @@ func (h *Host) focusPane(id string) {
 // the active connection, the explorer's rows, the last result.
 func (h *Host) forgetWorkspace() {
 	h.pressureClosed()
-	for _, id := range []string{"pressure", "card", "tokenForm", "tokens", "workspaceName", "workspaceAttach", "workspaceManager", "profile"} {
+	for _, id := range []string{"pressure", "card", "tokenForm", "tokens", "workspaceName", "workspaceAttach", "workspaceManager", "profile", "userForm", "users", "addresses"} {
 		if err := h.p.Call(id, "close"); err != nil {
 			h.keep(err)
 		}
@@ -108,6 +108,14 @@ func (h *Host) forgetWorkspace() {
 	h.spaceOptions.Reset(nil)
 	h.spaceSelectedID, h.spaceIndex, h.spaceFormID, h.spaceAttachFor = 0, -1, 0, 0
 	h.profileBound = nil
+	h.users.bound, h.userFormBound = nil, nil
+	h.users.all, h.users.rows = nil, nil
+	h.users.model.Reset(nil)
+	h.userConnections.Reset(nil)
+	h.userFormSeq++
+	h.addresses.bound = nil
+	h.addresses.rows, h.addresses.all = nil, nil
+	h.addresses.model.Reset(nil)
 	h.active = activeConn{}
 	h.set("App.queryTitle", h.queryTitle())
 	h.explorer.clear()

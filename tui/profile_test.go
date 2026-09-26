@@ -2,6 +2,7 @@ package tui_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -61,5 +62,37 @@ func TestProfileChangesOnlyTheSignedInAccountsPassphrase(t *testing.T) {
 	}
 	if err := verify.Bind().Login(ctx, "root", next); err != nil {
 		t.Fatal("new passphrase did not authenticate")
+	}
+}
+
+func TestOldProfileAnswerCannotChangeAReopenedDialog(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer error
+	}{
+		{"success", nil}, {"failure", errors.New("old attempt failed")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, s := signedIn(t)
+			started := make(chan chan error, 1)
+			h.HoldProfileChanges(started)
+			openProfile(t, s)
+			keys := append([]tuicore.Event{}, decltest.Type(rootPass)...)
+			keys = append(keys, tab())
+			keys = append(keys, decltest.Type("a different passphrase")...)
+			keys = append(keys, tab())
+			keys = append(keys, decltest.Type("a different passphrase")...)
+			keys = append(keys, tab(), key(' '))
+			s.Keys(t, keys...)
+			release := <-started
+			s.Keys(t, esc())
+			s.WaitFor(t, "profile closed", func(sc string) bool { return !strings.Contains(sc, "┌ profile ") })
+			openProfile(t, s) // same user and session, but a NEW dialog owner
+			release <- tc.answer
+			s.WaitFor(t, "old answer settled", func(string) bool { return !h.ProfileChangePending() })
+			if sc := s.String(); !strings.Contains(sc, "┌ profile ") || strings.Contains(sc, "old attempt failed") {
+				t.Fatal("an old Profile answer changed the new dialog")
+			}
+		})
 	}
 }

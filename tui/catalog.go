@@ -223,16 +223,17 @@ func catalogCommands() []CommandOf[*Host] {
 			// because the comment beside the other two calls them "THE TWO
 			// ADMIN SURFACES"; there are three.
 			ID: cmdUsers, Audience: AudienceAdmin,
-			Lifecycle: Planned,
-			Leader:    leader('u', "users…", 130),
+			Run:    func(h *Host) { h.openUsers() },
+			Leader: leader('u', "users…", 130),
 			Menu: []MenuProjection{
 				{Parent: nodeSystem, Label: "Users (admin)…", Hotkey: 'U', Order: 40},
 			},
 		},
 		{
-			ID:        cmdMyIPs,
-			Lifecycle: Planned,
-			Leader:    leader('i', "my allowed IPs…", 140),
+			ID:      cmdMyIPs,
+			Visible: signedIn,
+			Run:     func(h *Host) { h.openUserAddresses(h.session.User().ID, h.session.User().Name) },
+			Leader:  leader('i', "my allowed IPs…", 140),
 			Menu: []MenuProjection{
 				{Parent: nodeHome, Label: "My IP addresses…", Hotkey: 'I', Order: 30},
 			},
@@ -272,8 +273,8 @@ func catalogCommands() []CommandOf[*Host] {
 		},
 		{
 			ID: cmdAllowlist, Audience: AudienceAdmin,
-			Lifecycle: Planned,
-			Leader:    leader('I', "ip allowlist (admin)…", 190),
+			Run:    func(h *Host) { h.openGlobalAddresses() },
+			Leader: leader('I', "ip allowlist (admin)…", 190),
 			Menu: []MenuProjection{
 				{Parent: nodeSystem, Label: "Global IP addresses (admin)…", Hotkey: 'G', Order: 30},
 			},

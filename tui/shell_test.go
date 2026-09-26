@@ -153,13 +153,16 @@ func TestPressureOpensAndNamesMissingSource(t *testing.T) {
 // The leader's ? is help: the leader's commands, from the same projection the
 // leader runs.
 func TestHelpListsTheLeader(t *testing.T) {
-	_, s := connected(t)
+	h, s := connected(t)
 	s.Keys(t, decltest.Rune(' '))
 	s.WaitForText(t, "SPC — commands")
 	s.Keys(t, decltest.Rune('?'))
-	s.WaitFor(t, "help, listing the leader", func(sc string) bool {
-		return strings.Contains(sc, "SPC — the leader menu") && strings.Contains(sc, "about autodb")
-	})
+	s.WaitForText(t, "SPC — the leader menu")
+	// The card scrolls as the catalog grows; prove the WHOLE bound help text
+	// still includes a command even when it is below this viewport.
+	if help := h.SourceText("App.helpText"); !strings.Contains(help, "about autodb") || !strings.Contains(help, "o  profile") {
+		t.Fatal("help stopped projecting the complete leader catalog")
+	}
 }
 
 // q asks first: No stays, Yes quits.

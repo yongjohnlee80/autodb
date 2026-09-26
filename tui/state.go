@@ -71,6 +71,12 @@ func (h *Host) state(theme string) map[string]any {
 	}
 	st["App.profileText"] = ""
 	st["App.profileError"] = ""
+	for k, v := range userManagerState(h) {
+		st[k] = v
+	}
+	for k, v := range addressManagerState(h) {
+		st[k] = v
+	}
 	for k, v := range confirmState() {
 		st[k] = v
 	}
