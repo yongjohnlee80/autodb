@@ -131,6 +131,10 @@ func (h *Host) loadNote(wsID int64, name string) {
 			h.setStatus("note: " + l.err.Error())
 			return
 		}
+		if !l.note.existed {
+			h.setStatus("note no longer exists: " + name)
+			return
+		}
 		h.buf.note, h.buf.dirty = l.note, false
 		h.invalidateQuerySearch()
 		h.editor.SetValue(l.body)

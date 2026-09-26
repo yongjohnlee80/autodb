@@ -97,7 +97,7 @@ func (h *Host) focusPane(id string) {
 // the active connection, the explorer's rows, the last result.
 func (h *Host) forgetWorkspace() {
 	h.pressureClosed()
-	for _, id := range []string{"pressure", "card", "tokenForm", "tokens", "workspaceName", "workspaceAttach", "workspaceManager", "profile", "userForm", "users", "addresses", "history", "caCert", "keyslotConfirm", "keyslot", "widening", "search"} {
+	for _, id := range []string{"pressure", "card", "tokenForm", "tokens", "workspaceName", "workspaceAttach", "workspaceManager", "profile", "userForm", "users", "addresses", "history", "caCert", "keyslotConfirm", "keyslot", "widening", "search", "noteOpen"} {
 		if err := h.p.Call(id, "close"); err != nil {
 			h.keep(err)
 		}
@@ -143,6 +143,7 @@ func (h *Host) forgetWorkspace() {
 	h.forgetNote()
 	h.search = searchState{}
 	h.searchPending = ""
+	h.closeNoteOpen()
 	h.set("App.lastSearch", "")
 	h.clearFrontDoorWarning()
 	h.refreshWhere()

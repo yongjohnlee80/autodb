@@ -342,6 +342,26 @@ func (h *Host) RetireWorkspaceForTest() {
 	<-ready
 }
 
+func (h *Host) HoldNoteListing(started chan<- struct{}, resume <-chan struct{}, applied chan<- struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.noteOpenListed = func() { applied <- struct{}{} }
+		h.listNotes = func(store *NoteStore, names map[int64]string) ([]noteChoice, error) {
+			started <- struct{}{}
+			<-resume
+			return listNoteChoices(store, names)
+		}
+		close(ready)
+	})
+	<-ready
+}
+
+func (h *Host) NotePickerRows() int {
+	rows := make(chan int, 1)
+	h.p.Post(func() { rows <- h.noteOpen.model.Len() })
+	return <-rows
+}
+
 func (h *Host) QueryIsNormal() bool {
 	got := make(chan bool, 1)
 	h.p.Post(func() { got <- h.editor.Mode() == widget.ModeNormal })

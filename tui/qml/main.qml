@@ -204,6 +204,7 @@ Window {
     Login { id: login }
     Bootstrap { id: bootstrap }
     NoteName { id: noteName }
+    NoteOpen { id: noteOpen }
     UnsavedNote { id: unsaved }
     NoteConflict { id: conflict }
     ConnPicker { id: connPicker }

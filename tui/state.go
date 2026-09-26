@@ -57,6 +57,8 @@ func (h *Host) state(theme string) map[string]any {
 	for k, v := range noteState(h) {
 		st[k] = v
 	}
+	st["App.noteOpenRows"] = h.noteOpen.model
+	st["App.noteOpenStatus"] = ""
 	for k, v := range zoomState() {
 		st[k] = v
 	}
