@@ -74,6 +74,9 @@ func signedIn(t *testing.T) (*tuiapp.Host, *decltest.Screen) {
 	h, s := runHostSized(t, seeded(t), 120, 32)
 	loginAs(t, s, "root", rootPass)
 	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
+	s.WaitFor(t, "mounted query workspace", func(sc string) bool {
+		return strings.Contains(sc, "▸ main") && h.PaneWithFocus() == "editor"
+	})
 	return h, s
 }
 

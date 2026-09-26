@@ -67,3 +67,60 @@ func TestADevEditToTheThemeImportIsFollowed(t *testing.T) {
 	}
 	s.WaitFor(t, "the program to follow the edit", func(string) bool { return h.Theme() == "mono" })
 }
+
+func TestADevThemeFileEditRepaintsAndABadSaveKeepsTheLastGoodScreen(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS("qml")); err != nil {
+		t.Fatal(err)
+	}
+	h, s := tuiapp.RunHost(t, tuiapp.NewSession("127.0.0.1:1", logger.Nop{}, nil), nil,
+		tuiapp.Options{Dev: dir}, 100, 20)
+	s.WaitForText(t, "Options")
+	before := s.Backend.Snapshot()[0][0].Attrs.BG
+	file := filepath.Join(dir, "themes", "retro.qml")
+	src, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := "menu {\n        window: \"#aaaaaa\""
+	to := "menu {\n        window: \"#123456\""
+	changed := strings.Replace(string(src), from, to, 1)
+	if changed == string(src) {
+		t.Fatal("the retro theme has no menu palette to edit")
+	}
+	if err := os.WriteFile(file, []byte(changed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.WaitFor(t, "edited theme repainted live menu chrome", func(string) bool {
+		return s.Backend.Snapshot()[0][0].Attrs.BG != before
+	})
+	good := s.Backend.Snapshot()[0][0].Attrs.BG
+	if err := os.WriteFile(file, []byte("Theme {"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.WaitFor(t, "invalid edit reported", func(sc string) bool {
+		return strings.Contains(h.SourceText("App.status"), "retro.qml") && strings.Contains(sc, "Options")
+	})
+	if got := s.Backend.Snapshot()[0][0].Attrs.BG; got != good {
+		t.Fatalf("invalid theme changed last good menu color: %+v -> %+v", good, got)
+	}
+	if err := os.WriteFile(file, src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.WaitFor(t, "fixed theme restored", func(string) bool { return s.Backend.Snapshot()[0][0].Attrs.BG == before })
+	if h.PaneWithFocus() != "editor" {
+		t.Fatal("theme reload lost the stable query focus")
+	}
+	for _, color := range []string{"#112233", "#223344", "#334455"} {
+		next := strings.Replace(string(src), from, "menu {\n        window: \""+color+"\"", 1)
+		prior := s.Backend.Snapshot()[0][0].Attrs.BG
+		if err := os.WriteFile(file, []byte(next), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s.WaitFor(t, "repeated theme repaint", func(string) bool { return s.Backend.Snapshot()[0][0].Attrs.BG != prior })
+		explorer, results := h.ViewSubscriberCounts()
+		if explorer != 1 || results != 1 || h.PaneWithFocus() != "editor" {
+			t.Fatalf("theme reload leaked a view subscription or focus: explorer %d, results %d", explorer, results)
+		}
+	}
+}

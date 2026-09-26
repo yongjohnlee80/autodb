@@ -46,6 +46,8 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.tokensClosed":       none(h.tokensClosed),
 		"App.tokenRevoke":        oneNumber("App.tokenRevoke", "a token row", h.tokenRevoke),
 		"App.tokenToggleRevoked": none(h.tokenToggleRevoked),
+		"App.widenAccepted":      none(h.widenAccepted),
+		"App.widenCancelled":     none(h.widenCancelled),
 		"App.mintToken": strings_("App.mintToken", 5, func(v []string) error {
 			return h.mintToken(v[0], v[1], v[2], v[3], v[4])
 		}),
@@ -76,6 +78,11 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.historyShow":             oneNumber("App.historyShow", "a history row", h.historyShow),
 		"App.historyLoad":             oneNumber("App.historyLoad", "a history row", h.historyLoad),
 		"App.historyCopy":             oneNumber("App.historyCopy", "a history row", h.historyCopy),
+		"App.resultsMoved":            oneNumber("App.resultsMoved", "a result row", h.resultsMoved),
+		"App.openSearch":              none(h.openSearch),
+		"App.search":                  oneString("App.search", "a search pattern", h.startSearch),
+		"App.searchNext":              none(h.searchNext),
+		"App.searchPrevious":          none(h.searchPrevious),
 		"App.caClosed":                none(h.caClosed),
 		"App.copyCA":                  none(h.copyCA),
 		"App.restartConfirmed":        none(h.restartConfirmed),
@@ -163,6 +170,8 @@ func (h *Host) hints() string {
 		"q         quit (asks first)",
 		"Ctrl+Q    quit (asks first)",
 		"?         these keys",
+		"/         find in the focused query or results pane",
+		"n / N     next / previous match after searching",
 	}, "\n")
 }
 

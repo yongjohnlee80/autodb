@@ -203,6 +203,7 @@ func (h *Host) helpText() string {
 			fmt.Fprintf(&b, "       %s\n", r.Help)
 		}
 	}
+	b.WriteString("\nPane search: / finds in the focused query or results view; n/N move to the next/previous matching row.\n")
 	return b.String()
 }
 

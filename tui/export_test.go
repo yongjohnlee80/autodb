@@ -2,12 +2,14 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"sync"
 	"testing"
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
+	"github.com/yongjohnlee80/golib/tui/widget"
 )
 
 // export_test.go opens the QML host to the external tests: the same options
@@ -213,6 +215,22 @@ func (h *Host) FakeCA(ca CAPem) {
 	<-ready
 }
 
+func (h *Host) FakeFrontDoor(ep FrontDoorEndpoint) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.frontDoorProbe = func(context.Context, *Bound) (FrontDoorEndpoint, error) { return ep, nil }
+		h.probeFrontDoorTLS()
+		close(ready)
+	})
+	<-ready
+}
+
+func (h *Host) CleartextRisk() bool {
+	got := make(chan bool, 1)
+	h.p.Post(func() { got <- h.cleartextFD })
+	return <-got
+}
+
 func (h *Host) FakeRestart(called chan<- struct{}) {
 	ready := make(chan struct{})
 	h.p.Post(func() {
@@ -222,7 +240,7 @@ func (h *Host) FakeRestart(called chan<- struct{}) {
 	<-ready
 }
 
-func (h *Host) FakeKeyslot(st KeyslotStatus, enroll, remove chan<- struct{}) {
+func (h *Host) FakeKeyslot(st KeyslotStatus, enroll, remove chan<- struct{}, unverified bool) {
 	ready := make(chan struct{})
 	h.p.Post(func() {
 		var mu sync.Mutex
@@ -233,10 +251,16 @@ func (h *Host) FakeKeyslot(st KeyslotStatus, enroll, remove chan<- struct{}) {
 		}
 		h.keyslotEnroll = func(context.Context, *Bound) error {
 			mu.Lock()
-			st.Attempted, st.Checked, st.Verified = true, true, true
+			st.Attempted, st.Checked, st.Verified = true, true, !unverified
 			st.SlotPresent, st.SlotPresentKnown = true, true
+			if unverified {
+				st.VerifyReason = "verification failed after commit"
+			}
 			mu.Unlock()
 			enroll <- struct{}{}
+			if unverified {
+				return errors.New("slot was cut but did not open")
+			}
 			return nil
 		}
 		h.keyslotRemove = func(context.Context, *Bound) error {
@@ -252,7 +276,71 @@ func (h *Host) FakeKeyslot(st KeyslotStatus, enroll, remove chan<- struct{}) {
 	<-ready
 }
 
+func (h *Host) FakeKeyslotReadErrorAfterEnrollment(enroll chan<- struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		var mu sync.Mutex
+		reads := 0
+		h.keyslotRead = func(context.Context, *Bound) (KeyslotStatus, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			reads++
+			if reads > 1 {
+				return KeyslotStatus{}, errors.New("status lookup failed")
+			}
+			return KeyslotStatus{StoreUnlocked: true, SlotPresentKnown: true}, nil
+		}
+		h.keyslotEnroll = func(context.Context, *Bound) error {
+			enroll <- struct{}{}
+			return errors.New("slot was cut but did not open")
+		}
+		close(ready)
+	})
+	<-ready
+}
+
 func (h *Host) SourceBool(name string) bool { return h.SourceText(name) == "true" }
+
+func (h *Host) ViewSubscriberCounts() (explorer, results int) {
+	type counts struct{ explorer, results int }
+	got := make(chan counts, 1)
+	h.p.Post(func() { got <- counts{h.explorer.model.Subscribers(), h.results.model.Subscribers()} })
+	v := <-got
+	return v.explorer, v.results
+}
+
+func (h *Host) SearchCursor(target string) (int, int) {
+	type pos struct{ row, col int }
+	got := make(chan pos, 1)
+	h.p.Post(func() {
+		switch target {
+		case "query":
+			row, col := h.editor.Line()
+			got <- pos{row, col}
+		case "json":
+			row, col := h.jsonEditor.Line()
+			got <- pos{row, col}
+		case "table":
+			got <- pos{h.results.cursor, 0}
+		default:
+			got <- pos{-1, -1}
+		}
+	})
+	v := <-got
+	return v.row, v.col
+}
+
+func (h *Host) SetQueryCursor(row, col int) {
+	ready := make(chan struct{})
+	h.p.Post(func() { h.editor.SetLine(row, col); close(ready) })
+	<-ready
+}
+
+func (h *Host) QueryIsNormal() bool {
+	got := make(chan bool, 1)
+	h.p.Post(func() { got <- h.editor.Mode() == widget.ModeNormal })
+	return <-got
+}
 
 func (h *Host) SelectAddressCIDR(cidr string) bool {
 	got := make(chan bool, 1)

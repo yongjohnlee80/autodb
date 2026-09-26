@@ -121,6 +121,7 @@ func (h *Host) afterSignIn() {
 	h.set("App.bootstrapError", "")
 	h.setAuth("signed-in")
 	defer h.refreshIdentity()
+	h.probeFrontDoorTLS()
 	if h.notesFor != nil {
 		notes, err := h.notesFor(u.Name)
 		if err != nil {

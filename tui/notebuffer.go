@@ -58,6 +58,7 @@ func noteState(h *Host) map[string]any {
 
 // queryEdited is App.queryEdited: the user changed the buffer.
 func (h *Host) queryEdited() error {
+	h.invalidateQuerySearch()
 	if h.buf.note != nil && !h.buf.dirty {
 		h.buf.dirty = true
 		h.refreshWhere()
@@ -131,6 +132,7 @@ func (h *Host) loadNote(wsID int64, name string) {
 			return
 		}
 		h.buf.note, h.buf.dirty = l.note, false
+		h.invalidateQuerySearch()
 		h.editor.SetValue(l.body)
 		h.refreshWhere()
 		h.focusEditor()
@@ -268,6 +270,7 @@ func (h *Host) nameNote(wsID int64, name string) error {
 			return refuse(err.Error())
 		}
 		h.buf.note, h.buf.dirty = n, false
+		h.invalidateQuerySearch()
 		h.editor.SetValue("")
 		h.setStatus("created " + n.Name)
 	case "saveas":
