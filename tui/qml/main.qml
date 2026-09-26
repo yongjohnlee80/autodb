@@ -199,4 +199,7 @@ Window {
     Attach { id: attach }
     Tokens { id: tokens }
     TokenForm { id: tokenForm }
+    Workspaces { id: workspaceManager }
+    WorkspaceName { id: workspaceName }
+    WorkspaceAttach { id: workspaceAttach }
 }

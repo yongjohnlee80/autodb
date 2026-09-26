@@ -210,7 +210,7 @@ func catalogCommands() []CommandOf[*Host] {
 			Menu:   []MenuProjection{{Parent: nodeConns, Label: "Edit…", Hotkey: 'E', Order: 20}},
 		},
 		{
-			ID: cmdWorkspaces, Lifecycle: Planned,
+			ID: cmdWorkspaces, Visible: signedIn, Run: func(h *Host) { h.openWorkspaceManager() },
 			Leader: leader('w', "workspaces…", 120),
 			Menu:   []MenuProjection{{Parent: nodeHome, Label: "Workspaces…", Hotkey: 'W', Order: 10}},
 		},

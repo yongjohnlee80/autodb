@@ -23,6 +23,7 @@ type manager[T any] struct {
 	rows    []T
 	all     []T           // unfiltered answer, for views that hide historical rows
 	project func([]T) []T // loop-owned presentation filter; nil means every row
+	after   func()        // loop-owned hook after a refreshed model, for paired views
 	bound   *Bound
 	status  string // the source its help line reads
 	load    func(ctx context.Context, b *Bound) ([]T, error)
@@ -85,6 +86,9 @@ func (m *manager[T]) reproject() {
 		out[i] = m.row(r)
 	}
 	m.model.Reset(out)
+	if m.after != nil {
+		m.after()
+	}
 }
 
 // managerCall runs what under m's pinned connection, says how it went on

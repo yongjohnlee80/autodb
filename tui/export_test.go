@@ -73,6 +73,25 @@ func (h *Host) HoldMintAfterCommit(committed chan<- chan struct{}) {
 	<-ready
 }
 
+// CorruptMintReplyAfterCommit simulates a server reporting success without its
+// sole credential reply. The real scratch server commits first; only the
+// client-visible response is made malformed.
+func (h *Host) CorruptMintReplyAfterCommit(committed chan<- struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.tokenMint = func(ctx context.Context, b *Bound, in mintIntent, approved []string) (PATSecret, []string, error) {
+			_, stale, err := b.CreatePAT(ctx, in.name, in.days, in.ips, in.connID, in.debug, approved)
+			if err != nil || len(stale) != 0 {
+				return PATSecret{}, stale, err
+			}
+			committed <- struct{}{}
+			return decodeMintReply(in.name, nil)
+		}
+		close(ready)
+	})
+	<-ready
+}
+
 func (h *Host) WaitMints() { h.mintWorkers.Wait() }
 
 func (h *Host) HoldTokenPreviews(started chan<- chan []string) {
@@ -99,7 +118,43 @@ func (h *Host) TokenPreviewsAnswered() int {
 	return <-got
 }
 
+// DropMintHandoff models Program.Post accepting a callback that App.Run then
+// exits without draining. This is only used with Host.Run, whose shutdown waits
+// for the worker to compensate.
+func (h *Host) DropMintHandoff(posted chan<- struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.postMintHandoff = func(func()) { posted <- struct{}{} }
+		close(ready)
+	})
+	<-ready
+}
+
+func (h *Host) BeginTestMint(name string, connID int64) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.tokens.bound = h.session.Bind()
+		h.tokenSeq++
+		h.mintApproved(mintIntent{bound: h.tokens.bound, seq: h.tokenSeq,
+			name: name, connID: connID}, nil)
+		close(ready)
+	})
+	<-ready
+}
+
 func (h *Host) SessionEpoch() uint64 { return h.session.IdentityEpoch() }
+
+func (h *Host) SelectWorkspaceRow(i int) {
+	ready := make(chan struct{})
+	h.p.Post(func() { h.selectWorkspace(i); close(ready) })
+	<-ready
+}
+
+func (h *Host) WorkspaceManagerCount() int {
+	got := make(chan int, 1)
+	h.p.Post(func() { got <- h.spaces.model.Len() })
+	return <-got
+}
 
 // Auth is where sign-in stands, read on the loop.
 func (h *Host) Auth() string {
