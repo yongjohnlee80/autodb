@@ -23,10 +23,83 @@ func ProgramOptions(opt Options) []tuidecl.ProgramOption {
 func RunHost(t testing.TB, session *Session, notesFor NotesFactory, opt Options, w, height int) (*Host, *decltest.Screen) {
 	t.Helper()
 	h := newHost(session, notesFor, nil, opt)
-	t.Cleanup(h.cancel)
 	s := decltest.RunWith(t, w, height, h.attach, h.options(opt)...)
+	t.Cleanup(func() { h.cancel(); h.mintWorkers.Wait() })
 	return h, s
 }
+
+// HoldMintBeforeRPC suspends a real mint before its Bound call. The returned
+// channel is closed by the test after switching identity; no credential is
+// printed or replaced by a fake answer.
+func (h *Host) HoldMintBeforeRPC(started chan<- chan struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.tokenMint = func(ctx context.Context, b *Bound, in mintIntent, approved []string) (PATSecret, []string, error) {
+			release := make(chan struct{})
+			started <- release
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return PATSecret{}, nil, ctx.Err()
+			}
+			return b.CreatePAT(ctx, in.name, in.days, in.ips, in.connID, in.debug, approved)
+		}
+		close(ready)
+	})
+	<-ready
+}
+
+// HoldMintAfterCommit suspends a REAL successful RPC answer until the test
+// changes identity; the production worker must revoke it, not discard it.
+func (h *Host) HoldMintAfterCommit(committed chan<- chan struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.tokenMint = func(ctx context.Context, b *Bound, in mintIntent, approved []string) (PATSecret, []string, error) {
+			out, stale, err := b.CreatePAT(ctx, in.name, in.days, in.ips, in.connID, in.debug, approved)
+			if err != nil || len(stale) > 0 {
+				return out, stale, err
+			}
+			release := make(chan struct{})
+			committed <- release
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return out, stale, err
+			}
+			return out, stale, err
+		}
+		close(ready)
+	})
+	<-ready
+}
+
+func (h *Host) WaitMints() { h.mintWorkers.Wait() }
+
+func (h *Host) HoldTokenPreviews(started chan<- chan []string) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.tokenPreview = func(ctx context.Context, _ *Bound, _ []string) ([]string, error) {
+			release := make(chan []string)
+			started <- release
+			select {
+			case rows := <-release:
+				return rows, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		close(ready)
+	})
+	<-ready
+}
+
+func (h *Host) TokenPreviewsAnswered() int {
+	got := make(chan int, 1)
+	h.p.Post(func() { got <- h.previewAnswered })
+	return <-got
+}
+
+func (h *Host) SessionEpoch() uint64 { return h.session.IdentityEpoch() }
 
 // Auth is where sign-in stands, read on the loop.
 func (h *Host) Auth() string {

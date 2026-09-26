@@ -165,6 +165,45 @@ func TestATableScaffoldsItsQueryWhichRunsIntoTheResults(t *testing.T) {
 	s.WaitFor(t, "the JSON", func(sc string) bool { return strings.Contains(sc, `"name": "ann"`) })
 }
 
+// Enter on a result row opens its columns; Enter again shows the chosen value
+// without leaving the results pane's selection behind when the cards close.
+func TestAResultRowOpensItsFullValue(t *testing.T) {
+	h, s := signedIn(t)
+	s.WaitForText(t, "main")
+	s.Keys(t, key(' '), key('e'), enter())
+	s.WaitForText(t, "▸ connections")
+	s.Keys(t, key('j'), enter())
+	s.WaitForText(t, "bravo")
+	s.Keys(t, key('j'), enter())
+	s.WaitFor(t, "schema", func(string) bool { return rowUnder(s, "bravo sqlite", "main") })
+	s.Keys(t, key('j'), enter())
+	s.WaitForText(t, "▸ tables")
+	s.Keys(t, key('j'), enter())
+	s.WaitFor(t, "tables", func(string) bool { return rowUnder(s, "tables", "items") })
+	s.Keys(t, key('j'), enter())
+	s.WaitForText(t, `SELECT * FROM "main"."items" LIMIT 100`)
+	s.Keys(t, key(' '), key('r'))
+	s.WaitForText(t, "SELECT ok — 2 row(s)")
+	s.Keys(t, ctrl('j'), enter())
+	s.WaitFor(t, "the first result row's columns", func(sc string) bool {
+		return strings.Contains(sc, "┌ row ") && strings.Contains(sc, "name = ann")
+	})
+	s.Keys(t, key('j'), enter())
+	s.WaitFor(t, "the full value", func(sc string) bool {
+		return strings.Contains(sc, "┌ name ") && strings.Contains(sc, "ann")
+	})
+	s.Keys(t, tab(), key(' '))
+	s.Keys(t, esc())
+	s.WaitForText(t, "┌ row ")
+	s.Keys(t, esc())
+	s.WaitFor(t, "back to results", func(sc string) bool {
+		return h.PaneWithFocus() == "results" && !strings.Contains(sc, "┌ row ") &&
+			strings.Contains(sc, "value copied to the editor register")
+	})
+	s.Keys(t, ctrl('k'), key('p'))
+	s.WaitForText(t, "ann")
+}
+
 // A run with no connection says so.
 func TestARunWithNoConnectionSaysSo(t *testing.T) {
 	_, s := signedIn(t)

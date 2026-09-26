@@ -50,3 +50,37 @@ func TestARunAnsweredAfterTheIdentityChangedIsDropped(t *testing.T) {
 	(<-started) <- &tuiapp.ExecResult{Verb: "select", Columns: []string{"who"}, Rows: [][]any{{"the new identity's row"}}}
 	s.WaitForText(t, "the new identity's row")
 }
+
+// A fresh successful run can land while an operator is looking at the old
+// result's second column. Closing both cards before replacing the result keeps
+// the old value out of sight and never indexes that column in the new schema.
+func TestANarrowerResultRetiresAnOpenOldValue(t *testing.T) {
+	h, s := signedIn(t)
+	started := make(chan chan *tuiapp.ExecResult, 2)
+	h.HoldRuns(started)
+	s.WaitForText(t, "main")
+	s.Keys(t, key(' '), key('e'), enter())
+	s.WaitForText(t, "▸ connections")
+	s.Keys(t, key('j'), enter())
+	s.WaitForText(t, "bravo")
+	s.Keys(t, key('j'), enter())
+	s.WaitForText(t, "query → bravo")
+	s.Keys(t, key(' '), key('q'))
+	typeInto(t, s, "select 'something'")
+	s.Keys(t, key(' '), key('r'))
+	(<-started) <- &tuiapp.ExecResult{Verb: "select", Columns: []string{"id", "secret"}, Rows: [][]any{{1, "old secret"}}}
+	s.WaitForText(t, "old secret")
+
+	// Start the replacement while the previous table remains selectable.
+	s.Keys(t, key(' '), key('r'))
+	release := <-started
+	s.Keys(t, ctrl('j'), enter())
+	s.WaitForText(t, "secret = old secret")
+	s.Keys(t, key('j'), enter())
+	s.WaitForText(t, "┌ secret ")
+	release <- &tuiapp.ExecResult{Verb: "select", Columns: []string{"only"}, Rows: [][]any{{"new value"}}}
+	s.WaitFor(t, "new result with old cards closed", func(sc string) bool {
+		return h.RunsAnswered() == 2 && strings.Contains(sc, "new value") &&
+			!strings.Contains(sc, "old secret") && !strings.Contains(sc, "┌ secret ") && !strings.Contains(sc, "┌ row ")
+	})
+}

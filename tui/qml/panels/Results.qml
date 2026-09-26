@@ -14,6 +14,7 @@ Frame {
             visible: App.resultsAsTable
             model: App.results
             Layout.fillHeight: true
+            onActivated: App.inspectResult(index)
         }
         Editor {
             visible: App.resultsAsJSON

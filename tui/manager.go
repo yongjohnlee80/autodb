@@ -19,12 +19,14 @@ import (
 
 // manager is one administered list.
 type manager[T any] struct {
-	model  *tuidecl.ListModel
-	rows   []T
-	bound  *Bound
-	status string // the source its help line reads
-	load   func(ctx context.Context, b *Bound) ([]T, error)
-	row    func(T) tuidecl.Row
+	model   *tuidecl.ListModel
+	rows    []T
+	all     []T           // unfiltered answer, for views that hide historical rows
+	project func([]T) []T // loop-owned presentation filter; nil means every row
+	bound   *Bound
+	status  string // the source its help line reads
+	load    func(ctx context.Context, b *Bound) ([]T, error)
+	row     func(T) tuidecl.Row
 }
 
 func newManager[T any](status string, load func(context.Context, *Bound) ([]T, error), row func(T) tuidecl.Row, roles ...string) *manager[T] {
@@ -60,21 +62,29 @@ func reloadManager[T any](h *Host, m *manager[T], done string) {
 		rows, err := m.load(ctx, bound)
 		return listed{rows: rows, err: err}
 	}, func(l listed) {
-		if bound != m.bound || bound.Gen() != h.session.Gen() {
+		if bound != m.bound || bound.Gen() != h.session.Gen() || bound.IdentityEpoch() != h.session.IdentityEpoch() {
 			return // reopened, or over a connection that is gone
 		}
 		if l.err != nil {
 			h.set(m.status, WireErrorMessage(l.err))
 			return
 		}
-		m.rows = l.rows
-		out := make([]tuidecl.Row, len(l.rows))
-		for i, r := range l.rows {
-			out[i] = m.row(r)
-		}
-		m.model.Reset(out)
+		m.all = l.rows
+		m.reproject()
 		h.set(m.status, done)
 	})
+}
+
+func (m *manager[T]) reproject() {
+	m.rows = m.all
+	if m.project != nil {
+		m.rows = m.project(m.all)
+	}
+	out := make([]tuidecl.Row, len(m.rows))
+	for i, r := range m.rows {
+		out[i] = m.row(r)
+	}
+	m.model.Reset(out)
 }
 
 // managerCall runs what under m's pinned connection, says how it went on
@@ -85,7 +95,7 @@ func managerCall[T any](h *Host, m *manager[T], what string, fn func(context.Con
 		return
 	}
 	do(h, func(ctx context.Context) error { return fn(ctx, bound) }, func(err error) {
-		if bound.Gen() != h.session.Gen() {
+		if bound != m.bound || bound.Gen() != h.session.Gen() || bound.IdentityEpoch() != h.session.IdentityEpoch() {
 			h.set(m.status, what+": the connection changed — nothing was done here")
 			return
 		}
