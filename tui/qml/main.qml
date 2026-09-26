@@ -132,6 +132,7 @@ Window {
         palette.window: Theme.document.window
         palette.windowText: Theme.document.windowText
         palette.highlight: Theme.document.highlight
+        palette.highlightedText: Theme.document.highlightedText
         palette.base: Theme.document.base
         palette.text: Theme.document.text
 

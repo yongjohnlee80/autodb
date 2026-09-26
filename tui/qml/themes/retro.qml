@@ -31,7 +31,7 @@ Theme {
     // A document's surface: the panes' frames and what is in them.
     document {
         window: "#0000aa"; windowText: "#aaaaaa"
-        highlight: "#ffffff"
+        highlight: "#ffffff"; highlightedText: "#000000"
         base: "#0000aa"; text: "#ffff55"
         selection: "#00aaaa"; selectedText: "#000000"
     }
