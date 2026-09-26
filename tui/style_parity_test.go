@@ -84,14 +84,25 @@ func TestAllShippedThemesKeepTheFocusedExplorerSelectionLegible(t *testing.T) {
 	h, s := signedIn(t)
 	s.Keys(t, ctrl('h'))
 	s.WaitFor(t, "explorer focus", func(string) bool { return h.PaneWithFocus() == "explorerTree" })
-	for _, theme := range []string{"retro", "mono", "light", "dark"} {
-		h.RunCommand("options.theme." + theme)
-		s.WaitFor(t, theme+" explorer cursor", func(sc string) bool {
-			if h.Theme() != theme || h.PaneWithFocus() != "explorerTree" || !strings.Contains(sc, "main (1)") {
+	ansi := func(index uint8) tuicore.CellColor {
+		return tuicore.CellColor{Kind: tuicore.CellColorANSI, Index: index}
+	}
+	for _, tc := range []struct {
+		name   string
+		fg, bg tuicore.CellColor
+	}{
+		{"retro", color(0, 0, 0), color(0xff, 0xff, 0xff)},
+		{"mono", ansi(0), ansi(15)},
+		{"light", color(0xff, 0xff, 0xff), color(0, 0x5f, 0xd7)},
+		{"dark", color(0, 0, 0), color(0x87, 0xaf, 0xd7)},
+	} {
+		h.RunCommand("options.theme." + tc.name)
+		s.WaitFor(t, tc.name+" rendered explorer cursor", func(sc string) bool {
+			if h.Theme() != tc.name || h.PaneWithFocus() != "explorerTree" || !strings.Contains(sc, "main (1)") {
 				return false
 			}
 			cell := paintedLabel(t, s, "main (1)")
-			return cell.FG != cell.BG && cell.Mask&tuicore.AttrReverse == 0
+			return cell.FG == tc.fg && cell.BG == tc.bg && cell.Mask&tuicore.AttrReverse == 0
 		})
 	}
 }
