@@ -110,8 +110,14 @@ func (h *Host) readKeyslot(b *Bound, seq uint64, done string) {
 			return
 		}
 		if a.err != nil {
-			h.set("App.keyslotText", "keyslot status unavailable: "+WireErrorMessage(a.err))
-			h.set("App.keyslotStatus", "status could not be read")
+			h.set("App.keyslotText", "UNATTENDED UNLOCK: CANNOT BE DETERMINED\nStatus could not be read: "+WireErrorMessage(a.err))
+			h.set("App.keyslotCanEnable", false)
+			h.set("App.keyslotCanRemove", false)
+			status := "status could not be read"
+			if done != "" {
+				status = done + "; current state unavailable"
+			}
+			h.set("App.keyslotStatus", status)
 			return
 		}
 		h.keyslotState = a.st
@@ -169,10 +175,10 @@ func (h *Host) keyslotConfirmed() error {
 			return
 		}
 		if err != nil {
-			h.set("App.keyslotStatus", "service keyslot: "+WireErrorMessage(err))
-			return
+			done = "service keyslot: " + WireErrorMessage(err)
+			h.setStatus(done)
 		}
-		h.readKeyslot(b, seq, done)
+		h.readKeyslot(b, seq, done) // verification can fail AFTER the slot commits
 	})
 	return nil
 }
