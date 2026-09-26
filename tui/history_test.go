@@ -35,7 +35,10 @@ func TestMonoHistoryCursorHasVisibleContrast(t *testing.T) {
 	h, s := signedIn(t)
 	h.RunCommand("options.theme.mono")
 	s.Keys(t, key(' '), key('H'))
-	s.WaitForText(t, "┌ history ")
+	s.WaitFor(t, "loaded history rows", func(sc string) bool {
+		return strings.Contains(sc, "┌ history ") && strings.Contains(sc, "INSERT INTO") &&
+			!strings.Contains(sc, "loading…")
+	})
 	lines := strings.Split(s.String(), "\n")
 	row := -1
 	for i, line := range lines {
