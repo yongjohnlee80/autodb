@@ -401,22 +401,19 @@ func catalogCommands() []CommandOf[*Host] {
 		// is auditable in one place rather than being an absence nobody can
 		// see. Never projected into a live surface.
 		{
-			// The editor's semantic actions (ActCopy/ActCut/ActPaste) run
-			// through a PRIVATE execAction upstream; ActionForChord and
-			// ChordsForAction map chords without executing them. There is no
-			// programmatic seam for a menu command, and synthesizing Ctrl keys
-			// would be mode- and keymap-dependent. Not because focus loss
-			// clears the selection — it does not.
-			ID: "edit.copy", Lifecycle: Planned,
-			Menu: []MenuProjection{{Parent: nodeEdit, Label: "Copy/Yank", Hotkey: 'C', Order: 10}},
+			// These semantic actions operate on the query Editor even after
+			// a menu takes focus. Copy attempts system clipboard export; Cut
+			// and Paste use the editor's INTERNAL register only.
+			ID: "edit.copy", Visible: signedIn, Run: func(h *Host) { h.editor.Copy() },
+			Menu: []MenuProjection{{Parent: nodeEdit, Label: "Copy/Yank (register + clipboard)", Hotkey: 'C', Order: 10}},
 		},
 		{
-			ID: "edit.cut", Lifecycle: Planned,
-			Menu: []MenuProjection{{Parent: nodeEdit, Label: "Cut", Hotkey: 'T', Order: 20}},
+			ID: "edit.cut", Visible: signedIn, Run: func(h *Host) { h.editor.Cut() },
+			Menu: []MenuProjection{{Parent: nodeEdit, Label: "Cut to register", Hotkey: 'T', Order: 20}},
 		},
 		{
-			ID: "edit.paste", Lifecycle: Planned,
-			Menu: []MenuProjection{{Parent: nodeEdit, Label: "Paste", Hotkey: 'P', Order: 30}},
+			ID: "edit.paste", Visible: signedIn, Run: func(h *Host) { h.editor.Paste() },
+			Menu: []MenuProjection{{Parent: nodeEdit, Label: "Paste register", Hotkey: 'P', Order: 30}},
 		},
 		{
 			// THE FIRST Planned LEAF TO RETIRE, and the point of declaring the
