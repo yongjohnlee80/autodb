@@ -238,10 +238,10 @@ func catalogCommands() []CommandOf[*Host] {
 			},
 		},
 		{
-			ID:        cmdMyTokens,
-			Visible:   signedIn,
-			Run:       func(h *Host) { h.openTokens() },
-			Leader:    leader('T', "my access tokens…", 150),
+			ID:      cmdMyTokens,
+			Visible: signedIn,
+			Run:     func(h *Host) { h.openTokens() },
+			Leader:  leader('T', "my access tokens…", 150),
 			Menu: []MenuProjection{
 				{Parent: nodeHome, Label: "Access tokens…", Hotkey: 'A', Order: 40},
 			},
