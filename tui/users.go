@@ -245,7 +245,27 @@ func (h *Host) saveUser(name, role, connText, pass string) error {
 			return err
 		})
 	case "role":
-		managerCall(h, h.users, "role", func(ctx context.Context, b *Bound) error { return b.SetUserRole(ctx, userID, role) })
+		if userID == h.session.User().ID {
+			// A self-demotion changes the authority this TUI advertises. It
+			// cannot just reload Users: the catalog and every in-flight Bound
+			// were built under the old role, even though the server now denies it.
+			b := h.userFormBound
+			do(h, func(ctx context.Context) error { return b.SetUserRole(ctx, userID, role) }, func(err error) {
+				if b.Gen() != h.session.Gen() || b.IdentityEpoch() != h.session.IdentityEpoch() {
+					return
+				}
+				if err != nil {
+					h.set(h.users.status, "role: "+WireErrorMessage(err))
+					return
+				}
+				if b.adoptOwnRole(role) {
+					h.afterSignIn() // retires old-role UI and projects the new audience
+					h.setStatus("role changed to " + role + "; permissions refreshed")
+				}
+			})
+		} else {
+			managerCall(h, h.users, "role", func(ctx context.Context, b *Bound) error { return b.SetUserRole(ctx, userID, role) })
+		}
 	case "reset":
 		if len(pass) < 8 {
 			return h.refuseUserForm("passphrase must be at least 8 characters")

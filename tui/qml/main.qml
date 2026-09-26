@@ -206,4 +206,9 @@ Window {
     Users { id: users }
     UserForm { id: userForm }
     Addresses { id: addresses }
+    History { id: history }
+    CACert { id: caCert }
+    ConfirmRestart { id: restart }
+    Keyslot { id: keyslot }
+    KeyslotConfirm { id: keyslotConfirm }
 }

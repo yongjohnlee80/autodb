@@ -19,15 +19,16 @@ import (
 
 // manager is one administered list.
 type manager[T any] struct {
-	model   *tuidecl.ListModel
-	rows    []T
-	all     []T           // unfiltered answer, for views that hide historical rows
-	project func([]T) []T // loop-owned presentation filter; nil means every row
-	after   func()        // loop-owned hook after a refreshed model, for paired views
-	bound   *Bound
-	status  string // the source its help line reads
-	load    func(ctx context.Context, b *Bound) ([]T, error)
-	row     func(T) tuidecl.Row
+	model      *tuidecl.ListModel
+	rows       []T
+	all        []T           // unfiltered answer, for views that hide historical rows
+	project    func([]T) []T // loop-owned presentation filter; nil means every row
+	after      func()        // loop-owned hook after a refreshed model, for paired views
+	bound      *Bound
+	status     string // the source its help line reads
+	load       func(ctx context.Context, b *Bound) ([]T, error)
+	beforeLoad func(context.Context) // test seam for a worker held before its pinned load
+	row        func(T) tuidecl.Row
 }
 
 func newManager[T any](status string, load func(context.Context, *Bound) ([]T, error), row func(T) tuidecl.Row, roles ...string) *manager[T] {
@@ -54,13 +55,18 @@ func openManager[T any](h *Host, m *manager[T]) {
 // answered, which "loading…" stands in for meanwhile.
 func reloadManager[T any](h *Host, m *manager[T], done string) {
 	bound := m.bound
+	load := m.load // the scope is loop-owned and may change before the worker starts
+	before := m.beforeLoad
 	type listed struct {
 		rows []T
 		err  error
 	}
 	h.set(m.status, "loading…")
 	do(h, func(ctx context.Context) listed {
-		rows, err := m.load(ctx, bound)
+		if before != nil {
+			before(ctx)
+		}
+		rows, err := load(ctx, bound)
 		return listed{rows: rows, err: err}
 	}, func(l listed) {
 		if bound != m.bound || bound.Gen() != h.session.Gen() || bound.IdentityEpoch() != h.session.IdentityEpoch() {

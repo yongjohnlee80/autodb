@@ -77,12 +77,12 @@ func TestSpaceOpensTheLeaderMenu(t *testing.T) {
 	s.Keys(t, decltest.Rune(' '))
 	s.WaitForText(t, "SPC — commands")
 	sc := s.String()
-	for _, want := range []string{"x  disconnect", "L  login / switch user", "r  run query", "o  profile", "A  about autodb", "?  help", "Q  quit"} {
+	for _, want := range []string{"x  disconnect", "L  login / switch user", "r  run query", "H  script history", "k  front-door CA certificate", "K  service keyslot", "o  profile", "A  about autodb", "?  help", "Q  quit"} {
 		if !strings.Contains(sc, want) {
 			t.Errorf("the leader menu lacks %q:\n%s", want, sc)
 		}
 	}
-	for _, planned := range []string{"restart the server", "script history"} {
+	for _, planned := range []string{"restart the server"} {
 		if strings.Contains(sc, planned) {
 			t.Errorf("the leader menu offers %q, which is planned:\n%s", planned, sc)
 		}

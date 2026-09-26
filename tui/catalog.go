@@ -248,7 +248,7 @@ func catalogCommands() []CommandOf[*Host] {
 			},
 		},
 		{
-			ID: cmdHistory, Lifecycle: Planned,
+			ID: cmdHistory, Visible: signedIn, Run: func(h *Host) { h.openHistory() },
 			Leader: &LeaderProjectionOf[*Host]{Key: 'H', Order: 160,
 				Label: "script history…",
 				Help:  "who ran what, when"},
@@ -258,7 +258,7 @@ func catalogCommands() []CommandOf[*Host] {
 			// PUBLIC BY CONSTRUCTION and deliberately not admin-gated: it is
 			// the file you hand out, and every developer configuring a client
 			// needs it. Gating it would mean root couriering a public file.
-			ID: cmdCACert, Lifecycle: Planned,
+			ID: cmdCACert, Visible: signedIn, Run: func(h *Host) { h.openCA() },
 			Leader: leader('k', "front-door CA certificate…", 170),
 			Menu: []MenuProjection{
 				{Parent: nodeSystem, Label: "CA certificate…", Hotkey: 'C', Order: 20},
@@ -281,8 +281,8 @@ func catalogCommands() []CommandOf[*Host] {
 		},
 		{
 			ID: cmdKeyslot, Audience: AudienceAdmin,
-			Lifecycle: Planned,
-			Leader:    leader('K', "service keyslot (admin)…", 200),
+			Run:    func(h *Host) { h.openKeyslot() },
+			Leader: leader('K', "service keyslot (admin)…", 200),
 			Menu: []MenuProjection{
 				{Parent: nodeSystem, Label: "Service keyslot (admin)…", Hotkey: 'K', Order: 50},
 			},
@@ -333,8 +333,10 @@ func catalogCommands() []CommandOf[*Host] {
 		{
 			// Only a frontend that can bring the daemon back may offer to take
 			// it down.
-			ID:        cmdRestart,
-			Lifecycle: Planned,
+			ID:       cmdRestart,
+			Audience: AudienceAdmin,
+			Visible:  func(h *Host) bool { return h.canRestartDaemon() && h.session.Connected() },
+			Run:      func(h *Host) { h.open("restart") },
 			Leader: &LeaderProjectionOf[*Host]{Key: 'X', Order: 240,
 				Label: "restart the server",
 				Help:  "picks up a rebuilt binary"},

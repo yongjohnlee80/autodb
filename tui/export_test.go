@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"io/fs"
+	"sync"
 	"testing"
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
@@ -168,6 +169,8 @@ func (h *Host) BeginTestMint(name string, connID int64) {
 
 func (h *Host) SessionEpoch() uint64 { return h.session.IdentityEpoch() }
 
+func (h *Host) SessionRole() string { return h.session.User().Role }
+
 func (h *Host) SelectWorkspaceRow(i int) {
 	ready := make(chan struct{})
 	h.p.Post(func() { h.selectWorkspace(i); close(ready) })
@@ -201,6 +204,56 @@ func (h *Host) SourceText(name string) string {
 	return <-got
 }
 
+func (h *Host) FakeCA(ca CAPem) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.caFetch = func(context.Context, *Bound) (CAPem, error) { return ca, nil }
+		close(ready)
+	})
+	<-ready
+}
+
+func (h *Host) FakeRestart(called chan<- struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.restartCall = func(context.Context, *Bound) error { called <- struct{}{}; return nil }
+		close(ready)
+	})
+	<-ready
+}
+
+func (h *Host) FakeKeyslot(st KeyslotStatus, enroll, remove chan<- struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		var mu sync.Mutex
+		h.keyslotRead = func(context.Context, *Bound) (KeyslotStatus, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return st, nil
+		}
+		h.keyslotEnroll = func(context.Context, *Bound) error {
+			mu.Lock()
+			st.Attempted, st.Checked, st.Verified = true, true, true
+			st.SlotPresent, st.SlotPresentKnown = true, true
+			mu.Unlock()
+			enroll <- struct{}{}
+			return nil
+		}
+		h.keyslotRemove = func(context.Context, *Bound) error {
+			mu.Lock()
+			st.Attempted, st.Checked, st.Verified = true, true, false
+			st.SlotPresent, st.SlotPresentKnown = false, true
+			mu.Unlock()
+			remove <- struct{}{}
+			return nil
+		}
+		close(ready)
+	})
+	<-ready
+}
+
+func (h *Host) SourceBool(name string) bool { return h.SourceText(name) == "true" }
+
 func (h *Host) SelectAddressCIDR(cidr string) bool {
 	got := make(chan bool, 1)
 	h.p.Post(func() {
@@ -214,6 +267,28 @@ func (h *Host) SelectAddressCIDR(cidr string) bool {
 		got <- false
 	})
 	return <-got
+}
+
+func (h *Host) HoldAddressLoads(started chan<- chan struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		h.addresses.beforeLoad = func(ctx context.Context) {
+			release := make(chan struct{})
+			started <- release
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}
+		close(ready)
+	})
+	<-ready
+}
+
+func (h *Host) TraceAddressLoads(events chan<- string) {
+	ready := make(chan struct{})
+	h.p.Post(func() { h.addressTrace = func(scope string) { events <- scope }; close(ready) })
+	<-ready
 }
 
 func (h *Host) WorkspaceManagerCount() int {

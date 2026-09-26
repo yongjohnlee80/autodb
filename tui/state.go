@@ -77,6 +77,19 @@ func (h *Host) state(theme string) map[string]any {
 	for k, v := range addressManagerState(h) {
 		st[k] = v
 	}
+	st["App.historyRows"] = h.history.model
+	st["App.historyStatus"] = "Enter script · e load · y copy"
+	st["App.caTitle"] = ""
+	st["App.caText"] = ""
+	st["App.caStatus"] = ""
+	st["App.caCanCopy"] = false
+	st["App.restartQuestion"] = "Restart the server? Running statements may be interrupted. Open transactions can make shutdown refuse. A configured spawner must bring it back."
+	st["App.keyslotText"] = ""
+	st["App.keyslotStatus"] = ""
+	st["App.keyslotCanEnable"] = false
+	st["App.keyslotCanRemove"] = false
+	st["App.keyslotConfirmTitle"] = ""
+	st["App.keyslotQuestion"] = ""
 	for k, v := range confirmState() {
 		st[k] = v
 	}

@@ -258,6 +258,21 @@ func (b *Bound) withCurrentIdentity(show func()) bool {
 	return true
 }
 
+// adoptOwnRole follows a successful self-role mutation. The server has
+// committed the new authority; update this session's PRESENTATION role and
+// advance its identity epoch so work issued under the old admin view cannot
+// land under the new role. The token stays with its account.
+func (b *Bound) adoptOwnRole(role string) bool {
+	b.s.mu.Lock()
+	defer b.s.mu.Unlock()
+	if b.s.gen != b.gen || b.s.idEpoch != b.idEpoch || b.s.token != b.token || b.s.user.ID != b.user.ID {
+		return false
+	}
+	b.s.user.Role = role
+	b.s.idEpoch++
+	return true
+}
+
 // revokeMintedAfterSwitch is a NARROW compensating call for a mint which
 // already committed before the identity changed. The ordinary Bound RPC seam
 // correctly refuses stale identities; this one request is restricted to the

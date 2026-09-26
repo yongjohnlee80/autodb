@@ -51,6 +51,8 @@ github.com/yongjohnlee80/golib v0.5.34 h1:+cDm+M+lVPjf6QE1zO27hFC7GZeW1ZJhfeO1Ld
 github.com/yongjohnlee80/golib v0.5.34/go.mod h1:8C5jirm0P6lnk5MxCZKUf8mSND3w2JRq1CRBlV3YD0c=
 github.com/yongjohnlee80/golib v0.5.35-0.20260926030212-4444e5aaf616 h1:unRqGfPyRcLljDBbjEtZ/SWBJegUcDtW/sTXtMOhLWs=
 github.com/yongjohnlee80/golib v0.5.35-0.20260926030212-4444e5aaf616/go.mod h1:8C5jirm0P6lnk5MxCZKUf8mSND3w2JRq1CRBlV3YD0c=
+github.com/yongjohnlee80/golib v0.5.35 h1:JkJCYdOZ+n/43n/W+qnDoExkVhsRSYwnnTegWueuPWc=
+github.com/yongjohnlee80/golib v0.5.35/go.mod h1:8C5jirm0P6lnk5MxCZKUf8mSND3w2JRq1CRBlV3YD0c=
 golang.org/x/crypto v0.55.0 h1:+KWHjbgOaAQ66dh/YlkZKHlz9ZUlq61AFirAR9ntP8M=
 golang.org/x/crypto v0.55.0/go.mod h1:uq0V9dE/fzQuJtbnL+2EhWOE63vo164FY8xqEnV9xis=
 golang.org/x/mod v0.38.0 h1:MECBjubtXD7yj4HrhIUcywNaGeNVUdfVnxmPajOk4yk=
