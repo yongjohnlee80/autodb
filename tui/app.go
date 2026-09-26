@@ -58,10 +58,13 @@ type Host struct {
 	idEpoch uint64
 	// The workspace (workspace.go, explorer.go, results.go): the query editor,
 	// the connection it runs on, the explorer's tree, the last result.
-	editor   *widget.Editor
-	active   activeConn
-	explorer *explorer
-	results  *results
+	editor         *widget.Editor
+	jsonEditor     *widget.Editor
+	search         searchState
+	searchQueryRev uint64
+	active         activeConn
+	explorer       *explorer
+	results        *results
 	// The inspected row and its full values are host-owned; QML only shows
 	// the selected row and value (results.go).
 	inspectRows    *tuidecl.ListModel
@@ -122,6 +125,10 @@ type Host struct {
 	keyslotConfirmBound *Bound
 	keyslotConfirmSeq   uint64
 	keyslotConfirmMode  string
+	cleartextFD         bool
+	cleartextSeen       bool
+	frontDoorSeq        uint64
+	frontDoorProbe      func(context.Context, *Bound) (FrontDoorEndpoint, error)
 	tokens              *manager[PATRow]
 	tokenConns          *tuidecl.ListModel
 	showRevoked         bool
@@ -129,6 +136,8 @@ type Host struct {
 	tokenAllowCleartext bool
 	tokenSeq            uint64
 	tokenFormAccepted   bool
+	widenIntent         *mintIntent
+	widenMissing        []string
 	// Mint is the one background operation that cannot abandon its result on
 	// host shutdown: a committed show-once token must be shown or revoked.
 	tokenMint       func(context.Context, *Bound, mintIntent, []string) (PATSecret, []string, error)

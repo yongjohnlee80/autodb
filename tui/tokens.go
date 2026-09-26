@@ -287,7 +287,27 @@ func (h *Host) confirmMintWidening(in mintIntent, missing []string) {
 	// atomically and returns a stale set if the decision has changed.
 	body := "To restrict this token, these CIDRs must be added to YOUR standing allowlist:\n  " +
 		strings.Join(missing, "\n  ") + "\n\nThey also admit password logins and other inheriting tokens, remain after this token is revoked, and must be removed manually."
-	h.confirm("widen your allowlist?", body, "&Add and mint", "&Cancel", func() { h.mintApproved(in, missing) })
+	h.widenIntent = &in
+	h.widenMissing = append([]string(nil), missing...)
+	h.set("App.widenText", body)
+	h.open("widening")
+}
+
+func (h *Host) widenAccepted() error {
+	in, missing := h.widenIntent, h.widenMissing
+	h.widenIntent, h.widenMissing = nil, nil
+	h.set("App.widenText", "")
+	if in == nil || !h.tokenCurrent(in.bound) || in.seq != h.tokenSeq {
+		return nil
+	}
+	h.p.Post(func() { h.mintApproved(*in, missing) }) // after this dialog finishes closing
+	return nil
+}
+
+func (h *Host) widenCancelled() error {
+	h.widenIntent, h.widenMissing = nil, nil
+	h.set("App.widenText", "")
+	return nil
 }
 
 func (h *Host) mintApproved(in mintIntent, approved []string) {

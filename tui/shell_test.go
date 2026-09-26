@@ -130,7 +130,7 @@ func TestHintsSayTheKeys(t *testing.T) {
 	_, s := connected(t)
 	s.Keys(t, decltest.Rune('?'))
 	s.WaitFor(t, "the hints", func(sc string) bool {
-		return strings.Contains(sc, "keys here") && strings.Contains(sc, "the leader menu: every command")
+		return strings.Contains(sc, "keys here") && strings.Contains(sc, "the leader menu: every command") && strings.Contains(sc, "find in the focused query")
 	})
 	s.Keys(t, esc())
 	s.WaitFor(t, "the hints closed", func(sc string) bool { return !strings.Contains(sc, "keys here") })
@@ -160,7 +160,7 @@ func TestHelpListsTheLeader(t *testing.T) {
 	s.WaitForText(t, "SPC — the leader menu")
 	// The card scrolls as the catalog grows; prove the WHOLE bound help text
 	// still includes a command even when it is below this viewport.
-	if help := h.SourceText("App.helpText"); !strings.Contains(help, "about autodb") || !strings.Contains(help, "o  profile") {
+	if help := h.SourceText("App.helpText"); !strings.Contains(help, "about autodb") || !strings.Contains(help, "o  profile") || !strings.Contains(help, "Pane search: / finds") {
 		t.Fatal("help stopped projecting the complete leader catalog")
 	}
 }

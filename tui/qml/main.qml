@@ -43,6 +43,9 @@ Window {
     Shortcut { sequence: "q";      onActivated: App.run("app.quit") }
     Shortcut { sequence: "Ctrl+Q"; onActivated: App.run("app.quit") }
     Shortcut { sequence: "?";      onActivated: App.showHints() }
+    Shortcut { sequence: "/";      onActivated: App.openSearch() }
+    Shortcut { sequence: "n";      onActivated: App.searchNext() }
+    Shortcut { sequence: "Shift+N"; onActivated: App.searchPrevious() }
     // Between the panes: Ctrl+h/j/k/l, and Alt+h/j/k/l for a browser that
     // keeps Ctrl+L for its address bar.
     Shortcut { sequence: "Ctrl+H"; onActivated: App.movePane("h") }
@@ -161,7 +164,18 @@ Window {
                     onTextChanged: App.queryEdited()   // an open note is now unsaved
                 }
             }
-            Results { id: results; visible: App.resultsShown }
+            Frame {
+                id: results
+                title: "results"
+                visible: App.resultsShown
+                Flex {
+                    direction: Tui.Vertical
+                    Text { text: App.resultsSummary }
+                    Results { id: resultsBody; visible: App.resultsBodyShown; Layout.fillHeight: true }
+                    Editor { id: resultsJSON; readOnly: true; visible: App.resultsAsJSON
+                             text: App.resultsJSON; Layout.fillHeight: true }
+                }
+            }
         }
     }
 
@@ -199,6 +213,8 @@ Window {
     Attach { id: attach }
     Tokens { id: tokens }
     TokenForm { id: tokenForm }
+    Widening { id: widening }
+    Search { id: search }
     Workspaces { id: workspaceManager }
     WorkspaceName { id: workspaceName }
     WorkspaceAttach { id: workspaceAttach }

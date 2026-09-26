@@ -265,7 +265,7 @@ func catalogCommands() []CommandOf[*Host] {
 			},
 		},
 		{
-			ID: cmdRefresh, Run: func(h *Host) { h.reloadExplorer() },
+			ID: cmdRefresh, Run: func(h *Host) { h.reloadExplorer(); h.probeFrontDoorTLS() },
 			Leader: leader('g', "refresh explorer", 180),
 			Menu: []MenuProjection{
 				{Parent: nodeView, Label: "Refresh explorer", Hotkey: 'F', Order: 40},
@@ -296,9 +296,10 @@ func catalogCommands() []CommandOf[*Host] {
 			// wrong state. A permanently dimmed "dismiss the no-TLS warning" in
 			// a menu most operators open with no warning showing is clutter
 			// that teaches nothing.
-			ID:        cmdDismissTLS,
-			Lifecycle: Planned,
-			Leader:    leader('!', "dismiss the no-TLS warning", 210),
+			ID:      cmdDismissTLS,
+			Visible: func(h *Host) bool { return h.cleartextFD && !h.cleartextSeen },
+			Run:     func(h *Host) { h.dismissCleartextWarning() },
+			Leader:  leader('!', "dismiss the no-TLS warning", 210),
 		},
 		{
 			// Session lifecycle belongs to a frontend that OWNS its session.

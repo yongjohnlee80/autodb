@@ -5,26 +5,18 @@
 // run. The table's COLUMNS are the query's: App.results is a table model whose
 // columns the result sets, not this file.
 
-Frame {
-    title: "results"
-    Flex {
-        direction: Tui.Vertical
-        Text { text: App.resultsSummary }
-        TableView {
-            visible: App.resultsAsTable
-            model: App.results
-            Layout.fillHeight: true
-            onActivated: App.inspectResult(index)
-        }
-        Editor {
-            visible: App.resultsAsJSON
-            Layout.fillHeight: true
-            readOnly: true
-            text: App.resultsJSON
-        }
-        Text {
-            visible: App.resultsEmpty
-            text: "no results — SPC r runs the query"
-        }
+Flex {
+    direction: Tui.Vertical
+    TableView {
+        visible: App.resultsAsTable
+        model: App.results
+        currentIndex: App.resultsIndex
+        Layout.fillHeight: true
+        onCurrentIndexChanged: App.resultsMoved(index)
+        onActivated: App.inspectResult(index)
+    }
+    Text {
+        visible: App.resultsEmpty
+        text: "no results — SPC r runs the query"
     }
 }

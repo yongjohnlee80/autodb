@@ -47,6 +47,9 @@ func (h *Host) state(theme string) map[string]any {
 	for k, v := range resultsState(h.results) {
 		st[k] = v
 	}
+	st["App.searchTitle"] = "find"
+	st["App.searchError"] = ""
+	st["App.lastSearch"] = ""
 	st["App.pressure"] = h.pressure.model
 	st["App.pressureAge"] = ""
 	st["App.cardTitle"] = ""
@@ -83,6 +86,7 @@ func (h *Host) state(theme string) map[string]any {
 	st["App.caText"] = ""
 	st["App.caStatus"] = ""
 	st["App.caCanCopy"] = false
+	st["App.widenText"] = ""
 	st["App.restartQuestion"] = "Restart the server? Running statements may be interrupted. Open transactions can make shutdown refuse. A configured spawner must bring it back."
 	st["App.keyslotText"] = ""
 	st["App.keyslotStatus"] = ""
@@ -131,7 +135,7 @@ func (h *Host) keep(err error) {
 // refreshIdentity brings the status line's backend and user up to date with
 // the session.
 func (h *Host) refreshIdentity() {
-	h.set("App.statusLeft", backendText(h.session))
+	h.set("App.statusLeft", h.backendWithWarning())
 	h.set("App.statusCenter", h.where())
 	h.set("App.aboutText", h.aboutText()) // the backend line follows the connection
 	h.reproject()                         // who is signed in decides what is offered

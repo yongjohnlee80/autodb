@@ -26,6 +26,7 @@ import (
 // results is the last result and how it is shown.
 type results struct {
 	model   *tuidecl.ListModel
+	cursor  int
 	last    *ExecResult
 	asJSON  bool
 	running bool
@@ -45,12 +46,14 @@ func newResults() *results {
 // resultsState are the results pane's sources, with nothing shown.
 func resultsState(r *results) map[string]any {
 	return map[string]any{
-		"App.results":        r.model,
-		"App.resultsSummary": "",
-		"App.resultsAsTable": false,
-		"App.resultsAsJSON":  false,
-		"App.resultsJSON":    "",
-		"App.resultsEmpty":   true,
+		"App.results":          r.model,
+		"App.resultsSummary":   "",
+		"App.resultsAsTable":   false,
+		"App.resultsAsJSON":    false,
+		"App.resultsJSON":      "",
+		"App.resultsEmpty":     true,
+		"App.resultsBodyShown": true,
+		"App.resultsIndex":     0,
 	}
 }
 
@@ -164,14 +167,18 @@ func (h *Host) dropInspection() {
 
 // showResults sets the pane's sources from the last result.
 func (h *Host) showResults() {
+	h.invalidateResultsSearch()
 	r := h.results
+	r.cursor = 0
 	res := r.last
 	state := map[string]any{
-		"App.resultsSummary": "",
-		"App.resultsAsTable": false,
-		"App.resultsAsJSON":  false,
-		"App.resultsEmpty":   res == nil,
-		"App.resultsJSON":    "",
+		"App.resultsSummary":   "",
+		"App.resultsAsTable":   false,
+		"App.resultsAsJSON":    false,
+		"App.resultsEmpty":     res == nil,
+		"App.resultsJSON":      "",
+		"App.resultsBodyShown": !r.asJSON,
+		"App.resultsIndex":     0,
 	}
 	if res != nil {
 		state["App.resultsSummary"] = execSummary(res)

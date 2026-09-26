@@ -32,6 +32,11 @@ func (h *Host) attachWorkspace() error {
 		return fmt.Errorf("main.qml declares no Editor with id: editor")
 	}
 	h.editor = ed
+	json, ok := tuidecl.FindAs[*widget.Editor](h.p, "resultsJSON")
+	if !ok {
+		return fmt.Errorf("main.qml declares no read-only Editor with id: resultsJSON")
+	}
+	h.jsonEditor = json
 	return nil
 }
 
@@ -70,6 +75,7 @@ func (h *Host) queryTitle() string {
 func (h *Host) scaffold(sql string) {
 	h.guardUnsaved(func() {
 		h.buf.note, h.buf.dirty = nil, false // the buffer is a query now, not the note
+		h.invalidateQuerySearch()
 		h.editor.SetValue(sql)
 		h.refreshWhere()
 		h.focusEditor()
@@ -91,7 +97,7 @@ func (h *Host) focusPane(id string) {
 // the active connection, the explorer's rows, the last result.
 func (h *Host) forgetWorkspace() {
 	h.pressureClosed()
-	for _, id := range []string{"pressure", "card", "tokenForm", "tokens", "workspaceName", "workspaceAttach", "workspaceManager", "profile", "userForm", "users", "addresses", "history", "caCert", "keyslotConfirm", "keyslot"} {
+	for _, id := range []string{"pressure", "card", "tokenForm", "tokens", "workspaceName", "workspaceAttach", "workspaceManager", "profile", "userForm", "users", "addresses", "history", "caCert", "keyslotConfirm", "keyslot", "widening"} {
 		if err := h.p.Call(id, "close"); err != nil {
 			h.keep(err)
 		}
@@ -101,6 +107,8 @@ func (h *Host) forgetWorkspace() {
 	h.tokens.all, h.tokens.rows = nil, nil
 	h.tokens.model.Reset(nil)
 	h.tokenConns.Reset(nil)
+	h.widenIntent, h.widenMissing = nil, nil
+	h.set("App.widenText", "")
 	h.spaces.bound = nil
 	h.spaces.all, h.spaces.rows = nil, nil
 	h.spaces.model.Reset(nil)
@@ -133,5 +141,8 @@ func (h *Host) forgetWorkspace() {
 	h.workspaces.Reset(nil)
 	h.clearResults()
 	h.forgetNote()
+	h.search = searchState{}
+	h.set("App.lastSearch", "")
+	h.clearFrontDoorWarning()
 	h.refreshWhere()
 }

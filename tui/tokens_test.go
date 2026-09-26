@@ -200,7 +200,7 @@ func TestLeavingTokenManagerRetiresAnOldAllowlistPreview(t *testing.T) {
 	s.WaitFor(t, "manager closed", func(sc string) bool { return !strings.Contains(sc, "┌ my access tokens ") })
 	release <- []string{"203.0.113.1/32"}
 	s.WaitFor(t, "old preview answered", func(string) bool { return h.TokenPreviewsAnswered() == 1 })
-	if strings.Contains(s.String(), "widen your allowlist?") {
+	if strings.Contains(s.String(), "┌ allowlist widening ") {
 		t.Fatal("obsolete preview opened an approval prompt")
 	}
 	rows, err := inspect.PATs(context.Background(), inspect.User().ID)
@@ -210,6 +210,37 @@ func TestLeavingTokenManagerRetiresAnOldAllowlistPreview(t *testing.T) {
 	for _, r := range rows {
 		if r.Name == "abandoned" {
 			t.Fatal("obsolete preview minted a token")
+		}
+	}
+}
+
+func TestWideningShowsExactAccountWideConsequenceWithoutADefault(t *testing.T) {
+	h, s, inspect := readyTokenForm(t)
+	s.Keys(t, decltest.Type("requires-widening")...)
+	s.Keys(t, tab(), tab())
+	s.Keys(t, decltest.Type("198.51.100.5/32")...)
+	s.Keys(t, enter())
+	s.WaitForText(t, "┌ allowlist widening ")
+	if text := h.SourceText("App.widenText"); !strings.Contains(text, "198.51.100.5/32") ||
+		!strings.Contains(text, "standing allowlist") || !strings.Contains(text, "remain after this token is revoked") {
+		t.Fatal("widening card hid the exact CIDR or lasting account-wide consequence")
+	}
+	s.Keys(t, enter())
+	if !strings.Contains(s.String(), "┌ allowlist widening ") {
+		t.Fatal("bare Enter widened an account allowlist")
+	}
+	s.Keys(t, esc())
+	s.WaitFor(t, "widening declined", func(sc string) bool { return !strings.Contains(sc, "┌ allowlist widening ") })
+	if h.SourceText("App.widenText") != "" {
+		t.Fatal("declined account CIDRs remained in the QML source")
+	}
+	rows, err := inspect.PATs(context.Background(), inspect.User().ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.Name == "requires-widening" {
+			t.Fatal("declined widening minted a token")
 		}
 	}
 }

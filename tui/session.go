@@ -100,6 +100,7 @@ func (h *Host) startupDone(s startup) {
 		h.afterSignIn()
 	default:
 		h.setAuth("signed-in")
+		h.probeFrontDoorTLS()
 	}
 }
 
@@ -144,6 +145,7 @@ func (h *Host) watch(gen uint64) {
 func (h *Host) toggleConnection() {
 	if h.session.Connected() {
 		h.session.Disconnect()
+		h.clearFrontDoorWarning()
 		h.setAuth("disconnected")
 		h.setStatus("disconnected — SPC x reconnects")
 		h.refreshIdentity()

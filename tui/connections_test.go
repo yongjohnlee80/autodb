@@ -15,7 +15,9 @@ import (
 // openConnections is SPC c, waiting for the seeded row.
 func openConnections(t *testing.T, s *decltest.Screen) {
 	t.Helper()
-	s.Keys(t, key(' '), key('c'))
+	s.Keys(t, key(' '))
+	s.WaitForText(t, "SPC — commands")
+	s.Keys(t, key('c'))
 	s.WaitFor(t, "the connections", func(sc string) bool {
 		return strings.Contains(sc, "┌ connections ") && strings.Contains(sc, "bravo") && strings.Contains(sc, "session")
 	})
