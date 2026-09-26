@@ -202,4 +202,5 @@ Window {
     Workspaces { id: workspaceManager }
     WorkspaceName { id: workspaceName }
     WorkspaceAttach { id: workspaceAttach }
+    Profile { id: profile }
 }
