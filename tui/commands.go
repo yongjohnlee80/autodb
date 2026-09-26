@@ -81,6 +81,7 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.resultsMoved":            oneNumber("App.resultsMoved", "a result row", h.resultsMoved),
 		"App.openSearch":              none(h.openSearch),
 		"App.search":                  oneString("App.search", "a search pattern", h.startSearch),
+		"App.searchCancelled":         none(h.searchCancelled),
 		"App.searchNext":              none(h.searchNext),
 		"App.searchPrevious":          none(h.searchPrevious),
 		"App.caClosed":                none(h.caClosed),

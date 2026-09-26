@@ -61,6 +61,7 @@ type Host struct {
 	editor         *widget.Editor
 	jsonEditor     *widget.Editor
 	search         searchState
+	searchPending  string
 	searchQueryRev uint64
 	active         activeConn
 	explorer       *explorer
