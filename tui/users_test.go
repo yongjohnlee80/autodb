@@ -145,3 +145,67 @@ func TestUsersManagerToggleAndRemoveRequireTheChosenRow(t *testing.T) {
 		return strings.Contains(sc, "remove temp-reader: ok") && h.UsersCount() == 1
 	})
 }
+
+func TestSelfDemotionRetiresTheOldAdminMenuAudience(t *testing.T) {
+	addr := seeded(t)
+	setup := tuiapp.NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(setup.Close)
+	ctx := context.Background()
+	if _, err := setup.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.Bind().Login(ctx, "root", rootPass); err != nil {
+		t.Fatal(err)
+	}
+	users, err := setup.Bind().Users(ctx)
+	if err != nil || len(users) != 1 {
+		t.Fatal("scratch root not listed")
+	}
+	rootID := users[0].ID
+	otherID, err := setup.Bind().CreateUser(ctx, "other-admin", "another long passphrase", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.Bind().AddUserIP(ctx, otherID, "127.0.0.1/32", "local"); err != nil {
+		t.Fatal(err)
+	}
+	h, s := runHostSized(t, addr, 120, 32)
+	loginAs(t, s, "root", rootPass)
+	s.WaitFor(t, "root signed in", func(string) bool { return h.Auth() == "signed-in" })
+	openUsers(t, s)
+	s.Keys(t, key('r')) // root is the first row
+	s.WaitForText(t, "┌ role for root ")
+	if err := h.SetTestSource("App.userFormRoleIndex", 0); err != nil {
+		t.Fatal(err)
+	} // reader
+	s.Keys(t, tab(), enter())
+	s.WaitFor(t, "old admin presentation retired", func(sc string) bool {
+		return h.SessionRole() == "reader" && strings.Contains(sc, "role changed to reader") && !strings.Contains(sc, "┌ users ")
+	})
+	s.Keys(t, key(' '))
+	s.WaitForText(t, "SPC — commands")
+	if sc := s.String(); strings.Contains(sc, "u  users") || strings.Contains(sc, "I  ip allowlist") {
+		t.Fatal("a self-demoted reader kept admin-only menu actions")
+	}
+	verify := tuiapp.NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(verify.Close)
+	if _, err := verify.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := verify.Bind().Login(ctx, "other-admin", "another long passphrase"); err != nil {
+		t.Fatal("other admin could not sign in")
+	}
+	rows, err := verify.Bind().Users(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.ID == rootID {
+			if r.Role != "reader" {
+				t.Fatal("server did not apply root role change")
+			}
+			return
+		}
+	}
+	t.Fatal("root disappeared from the user list")
+}

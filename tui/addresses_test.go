@@ -43,3 +43,30 @@ func TestMyAddressesCanUseASingleHostAddress(t *testing.T) {
 		return strings.Contains(sc, "allow 192.0.2.4/32: ok") && strings.Contains(sc, "192.0.2.4/32")
 	})
 }
+
+func TestAddressLoadsKeepTheirOriginalScopeAcrossCloseAndReopen(t *testing.T) {
+	h, s := signedIn(t)
+	started := make(chan chan struct{}, 2)
+	reads := make(chan string, 2)
+	h.HoldAddressLoads(started)
+	h.TraceAddressLoads(reads)
+	s.Keys(t, key(' '), key('I'))
+	old := <-started // worker paused BEFORE reading the loop-owned load closure
+	s.WaitForText(t, "┌ ip allowlist (global) ")
+	s.Keys(t, esc())
+	s.WaitFor(t, "global list closed", func(sc string) bool { return !strings.Contains(sc, "┌ ip allowlist (global) ") })
+	s.Keys(t, key(' '), key('i'))
+	newLoad := <-started
+	s.WaitForText(t, "┌ allowed IPs — root ")
+	close(old)
+	if scope := <-reads; scope != "global" {
+		t.Fatalf("old worker read %q after its global view closed", scope)
+	}
+	close(newLoad)
+	if scope := <-reads; scope != "personal" {
+		t.Fatalf("new worker read %q instead of the personal list", scope)
+	}
+	s.WaitFor(t, "personal rows stayed scoped", func(sc string) bool {
+		return strings.Contains(sc, "┌ allowed IPs — root ") && !strings.Contains(sc, "config      127.0.0.1")
+	})
+}

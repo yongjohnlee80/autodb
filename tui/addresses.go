@@ -42,6 +42,9 @@ func (h *Host) openGlobalAddresses() {
 	}
 	h.addressGlobal, h.addressUserID = true, 0
 	h.addresses.load = func(ctx context.Context, b *Bound) ([]addressRow, error) {
+		if h.addressTrace != nil {
+			h.addressTrace("global")
+		}
 		entries, err := b.Allowlist(ctx)
 		if err != nil {
 			return nil, err
@@ -65,6 +68,9 @@ func (h *Host) openUserAddresses(userID int64, who string) {
 	}
 	h.addressGlobal, h.addressUserID = false, userID
 	h.addresses.load = func(ctx context.Context, b *Bound) ([]addressRow, error) {
+		if h.addressTrace != nil {
+			h.addressTrace("personal")
+		}
 		entries, err := b.UserIPs(ctx, userID)
 		if err != nil {
 			return nil, err

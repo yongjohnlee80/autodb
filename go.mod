@@ -11,7 +11,7 @@ require (
 	github.com/lib/pq v1.12.3
 	// v0.5.23 carries postgres.Destroyer, which the release gate requires of
 	// every pin. main pins v0.5.22, which predates it.
-	github.com/yongjohnlee80/golib v0.5.35-0.20260926030212-4444e5aaf616
+	github.com/yongjohnlee80/golib v0.5.35
 	golang.org/x/crypto v0.55.0
 	golang.org/x/term v0.45.0
 )

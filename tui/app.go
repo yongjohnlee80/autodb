@@ -105,8 +105,23 @@ type Host struct {
 	userFormUserID      int64
 	userFormSeq         uint64
 	addresses           *manager[addressRow]
+	addressTrace        func(string) // test-only observation of the RPC scope a pinned load chose
 	addressGlobal       bool
 	addressUserID       int64
+	history             *manager[HistoryRow]
+	caText              string
+	caSeq               uint64
+	caFetch             func(context.Context, *Bound) (CAPem, error)
+	restartCall         func(context.Context, *Bound) error
+	keyslotBound        *Bound
+	keyslotSeq          uint64
+	keyslotState        KeyslotStatus
+	keyslotRead         func(context.Context, *Bound) (KeyslotStatus, error)
+	keyslotEnroll       func(context.Context, *Bound) error
+	keyslotRemove       func(context.Context, *Bound) error
+	keyslotConfirmBound *Bound
+	keyslotConfirmSeq   uint64
+	keyslotConfirmMode  string
 	tokens              *manager[PATRow]
 	tokenConns          *tuidecl.ListModel
 	showRevoked         bool
@@ -225,6 +240,7 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 	h.userRoles = userRoleModel()
 	h.userConnections = tuidecl.NewListModel("key", "id", "label")
 	h.addresses = newAddressManager()
+	h.history = newHistoryManager()
 	h.spaceIndex = -1
 	h.spaceAttached = tuidecl.NewListModel("key", "name", "engine")
 	h.spaceOptions = tuidecl.NewListModel("key", "id", "name")
