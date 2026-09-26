@@ -6,7 +6,11 @@
 // starts empty each time.
 
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: "sign in"
+    width: 72
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok          // Enter signs in, from the last field too
     dim: true

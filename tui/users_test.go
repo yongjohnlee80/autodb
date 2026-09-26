@@ -137,9 +137,12 @@ func TestUsersManagerToggleAndRemoveRequireTheChosenRow(t *testing.T) {
 	s.Keys(t, key('v'))
 	s.WaitForText(t, "┌ remove user ")
 	s.Keys(t, enter())
-	if !strings.Contains(s.String(), "┌ remove user ") {
-		t.Fatal("bare Enter removed a user")
+	s.WaitFor(t, "removal declined", func(sc string) bool { return !strings.Contains(sc, "┌ remove user ") })
+	if h.UsersCount() != 2 {
+		t.Fatal("Enter on No removed a user")
 	}
+	s.Keys(t, key('v'))
+	s.WaitForText(t, "┌ remove user ")
 	s.Keys(t, key('r'))
 	s.WaitFor(t, "user removed", func(sc string) bool {
 		return strings.Contains(sc, "remove temp-reader: ok") && h.UsersCount() == 1

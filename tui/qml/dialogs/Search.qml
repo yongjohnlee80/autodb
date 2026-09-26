@@ -1,5 +1,8 @@
 // Literal row search in the pane that had focus when / was pressed.
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: App.searchTitle
     dim: false
     width: 48

@@ -11,7 +11,7 @@ import (
 // THE QML THIS PROGRAM SHIPS, and the modules a document imports it through.
 //
 //	import autodb 1.0               the App singleton          (declared)
-//	import autodb.theme.retro 1.0   a Theme singleton          (offered)
+//	import autodb.theme.dark 1.0    a Theme singleton          (offered)
 //
 // App is DECLARED: it is this program, and every document needs it. Themes are
 // OFFERED: importable, and read only when an import line names them — so only

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/logger"
@@ -31,13 +32,106 @@ func TestWorkspaceManagerListsAndCreates(t *testing.T) {
 	})
 }
 
+func TestWorkspaceManagerFocusedButtonsTakeEnter(t *testing.T) {
+	h, s := signedIn(t)
+	h.RunCommand("options.theme.retro") // focus-color assertion below is Retro-specific
+	s.WaitFor(t, "retro palette", func(string) bool { return h.Theme() == "retro" })
+	openWorkspaces(t, s)
+	normal := paintedLabel(t, s, "[ New ]")
+	// Focus starts in the first table; Tab crosses the second table and
+	// reaches the first action button. Exercise the actual keyboard path.
+	s.Keys(t, tab(), tab())
+	s.WaitFor(t, "New button visibly focused", func(string) bool {
+		return paintedLabel(t, s, "[ New ]") != normal
+	})
+	if focused := paintedLabel(t, s, "[ New ]"); focused.BG != color(0xff, 0xff, 0xff) {
+		t.Fatalf("focused New button is not visually distinct: normal %+v, focused %+v", normal, focused)
+	}
+	s.Keys(t, enter())
+	s.WaitForText(t, "┌ new workspace ")
+	s.Keys(t, esc()) // cancel the child dialog
+	s.WaitFor(t, "child dialog dismissed", func(sc string) bool {
+		return strings.Contains(sc, "┌ workspaces ") && !strings.Contains(sc, "┌ new workspace ")
+	})
+	// Tab through the remaining action buttons to Close.
+	s.Keys(t, tab(), tab(), tab(), tab(), tab())
+	s.Keys(t, enter())
+	s.WaitFor(t, "focused Close took Enter", func(sc string) bool {
+		return !strings.Contains(sc, "┌ workspaces ")
+	})
+}
+
+func TestWorkspaceManagerLeavesBackdropAndPaintsWholeTables(t *testing.T) {
+	h, s := signedIn(t)
+	h.RunCommand("options.theme.retro") // blue table-background assertions are Retro-specific
+	s.WaitFor(t, "retro palette", func(string) bool { return h.Theme() == "retro" })
+	openWorkspaces(t, s)
+	lines := strings.Split(s.String(), "\n")
+	top, left := -1, -1
+	for y, line := range lines {
+		if at := strings.Index(line, "┌ workspaces "); at >= 0 {
+			top, left = y, utf8.RuneCountInString(line[:at])
+			break
+		}
+	}
+	if top <= 0 || left <= 0 {
+		t.Fatalf("manager did not leave visible backdrop above and beside it:\n%s", s.String())
+	}
+	if top < 2 || left < 8 {
+		t.Fatalf("manager margins are too small: top %d, left %d", top, left)
+	}
+	grid := s.Backend.Snapshot()
+	headerY, nameX := -1, -1
+	for y, line := range lines {
+		if strings.Contains(line, "ID") && strings.Contains(line, "NAME") && strings.Contains(line, "CONNS") {
+			headerY, nameX = y, utf8.RuneCountInString(line[:strings.Index(line, "NAME")])
+			break
+		}
+	}
+	if headerY < 0 || headerY+8 >= len(grid) || nameX < 1 {
+		t.Fatalf("workspace table header was not found:\n%s", s.String())
+	}
+	blue := color(0, 0, 0xaa)
+	if got := grid[headerY][nameX-1].Attrs.BG; got != blue {
+		t.Errorf("gap between table column titles has background %+v, want table blue %+v", got, blue)
+	}
+	if got := grid[headerY+8][nameX].Attrs.BG; got != blue {
+		t.Errorf("empty table viewport has background %+v, want table blue %+v", got, blue)
+	}
+}
+
+func TestWorkspaceManagerButtonsRemainVisibleOnSmallTerminal(t *testing.T) {
+	addr := seeded(t)
+	h, s := runHostSized(t, addr, 80, 24)
+	loginAs(t, s, "root", rootPass)
+	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
+	openWorkspaces(t, s)
+	if sc := s.String(); !strings.Contains(sc, "[ Close(q) ]") || !strings.Contains(sc, "[ New ]") {
+		t.Fatalf("manager buttons were clipped on an 80-column terminal:\n%s", sc)
+	}
+}
+
+func TestWorkspaceDialogQClosesButDoesNotStealFormText(t *testing.T) {
+	_, s := signedIn(t)
+	openWorkspaces(t, s)
+	s.Keys(t, key('n'))
+	s.WaitForText(t, "┌ new workspace ")
+	s.Keys(t, key('q'))
+	s.WaitFor(t, "q typed into workspace name", func(sc string) bool {
+		return strings.Contains(sc, "┌ new workspace ") && strings.Contains(sc, "│ q ")
+	})
+	s.Keys(t, esc())
+	s.WaitFor(t, "name form dismissed", func(sc string) bool { return !strings.Contains(sc, "┌ new workspace ") })
+	s.Keys(t, key('q'))
+	s.WaitFor(t, "manager closed with q", func(sc string) bool { return !strings.Contains(sc, "┌ workspaces ") })
+}
+
 func TestWorkspaceManagerExplainsTheCascadeAndAllowsDetach(t *testing.T) {
 	_, s := signedIn(t)
 	openWorkspaces(t, s)
 	s.Keys(t, key('d'))
 	s.WaitForText(t, "┌ delete workspace ")
-	s.WaitForText(t, "including links added since this")
-	s.WaitForText(t, "view opened.")
+	s.WaitForText(t, "links added since this view opened.")
 	s.Keys(t, key('k'))
 	s.WaitForText(t, "┌ workspaces ")
 	s.Keys(t, key('t'))
@@ -78,10 +172,13 @@ func TestWorkspaceManagerDeletesOnlyAfterExplicitConfirmation(t *testing.T) {
 	h.SelectWorkspaceRow(1)
 	s.Keys(t, key('d'))
 	s.WaitForText(t, "┌ delete workspace ")
-	s.Keys(t, enter()) // no default on irreversible deletion
-	if !strings.Contains(s.String(), "┌ delete workspace ") {
-		t.Fatal("bare Enter deleted a workspace")
+	s.Keys(t, enter()) // No takes initial focus; Enter declines safely.
+	s.WaitFor(t, "deletion declined", func(sc string) bool { return !strings.Contains(sc, "┌ delete workspace ") })
+	if h.WorkspaceManagerCount() != 2 {
+		t.Fatal("Enter on Keep deleted a workspace")
 	}
+	s.Keys(t, key('d'))
+	s.WaitForText(t, "┌ delete workspace ")
 	s.Keys(t, key('d'))
 	s.WaitFor(t, "empty workspace deleted", func(sc string) bool {
 		return strings.Contains(sc, "delete scratch: ok") && h.WorkspaceManagerCount() == 1
@@ -119,8 +216,7 @@ func TestWorkspaceDeleteNamesAndAppliesConcurrentLinkCascade(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.Keys(t, key('d')) // the screen still shows its previous one-link snapshot
-	s.WaitForText(t, "including links added since this")
-	s.WaitForText(t, "view opened.")
+	s.WaitForText(t, "links added since this view opened.")
 	s.Keys(t, key('d'))
 	s.WaitFor(t, "workspace deleted", func(sc string) bool {
 		return strings.Contains(sc, "delete main: ok") && h.WorkspaceManagerCount() == 0

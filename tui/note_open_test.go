@@ -13,7 +13,7 @@ import (
 )
 
 func TestFileOpenNoteFiltersAndLoadsWithoutLosingUnsavedWork(t *testing.T) {
-	_, s, _ := notesHost(t)
+	h, s, _ := notesHost(t)
 	newNote(t, s, "first")
 	typeInto(t, s, "select 'saved first'")
 	s.Keys(t, key(' '), key('s'))
@@ -28,7 +28,9 @@ func TestFileOpenNoteFiltersAndLoadsWithoutLosingUnsavedWork(t *testing.T) {
 	})
 	s.Keys(t, decltest.Type("first")...)
 	s.WaitFor(t, "note filter", func(sc string) bool {
-		return strings.Contains(sc, "first.sql") && !strings.Contains(sc, "second.sql")
+		// The narrower dialog leaves the underlying status bar visible, and
+		// that still names the open second.sql. Check the picker model itself.
+		return strings.Contains(sc, "first.sql") && h.NotePickerRows() == 1
 	})
 	s.Keys(t, tab(), enter())
 	s.WaitForText(t, "┌ unsaved note ")

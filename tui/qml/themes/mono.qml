@@ -23,7 +23,7 @@ Theme {
     menu {
         window: "white"; windowText: "black"
         highlight: "black"; highlightedText: "white"
-        accent: "black"             // the underline marks the key; no colour
+        accent: "default"           // inherit each row's text colour across inversion
     }
     document {
         window: "default"; windowText: "default"

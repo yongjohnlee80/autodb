@@ -6,7 +6,11 @@
 // changed; opening the front door asks once more, after this closes.
 
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: App.connFormTitle
+    width: 72
     standardButtons: Dialog.Ok | Dialog.Cancel
     defaultButton: Dialog.Ok
     helpText: App.connFormError

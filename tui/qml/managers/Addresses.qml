@@ -1,5 +1,8 @@
 // One view for a user's own IPs and the admin global allowlist.
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: App.addressesTitle
     dim: false
     helpText: App.addressesStatus
@@ -7,6 +10,8 @@ Dialog {
     Flex {
         direction: Tui.Vertical
         TableView {
+            palette.highlight: Theme.document.highlight
+            palette.highlightedText: Theme.document.highlightedText
             id: table
             model: App.addressRows
             Layout.fillHeight: true
@@ -27,6 +32,6 @@ Dialog {
         Button { text: "&Add"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole
                  onClicked: { cidr.clear(); note.clear(); App.addressAdd(); cidr.forceActiveFocus() } }
         Button { text: "&Remove"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.addressRemove(table.currentIndex) }
-        Button { text: "&Close"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: "Close(&q)"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

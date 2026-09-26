@@ -12,7 +12,7 @@ import (
 //
 // A theme is chosen by one line of main.qml, its import:
 //
-//	import autodb.theme.retro 1.0
+//	import autodb.theme.dark 1.0
 //
 // so switching theme at runtime is that line, rewritten, and the layout
 // reloaded — the path a hot reload takes. Nothing the theme does not touch is

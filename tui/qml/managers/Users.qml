@@ -1,5 +1,8 @@
 // Admin-only account list: actions use the pinned manager identity.
 Dialog {
+    closeOnQ: true
+    maxWidthPercent: 80
+    maxHeightPercent: 80
     title: "users"
     dim: false
     helpText: App.usersStatus
@@ -7,6 +10,8 @@ Dialog {
     Flex {
         direction: Tui.Vertical
         TableView {
+            palette.highlight: Theme.document.highlight
+            palette.highlightedText: Theme.document.highlightedText
             id: table
             model: App.userRows
             currentIndex: App.userIndex
@@ -24,6 +29,6 @@ Dialog {
         Button { text: "Grant &connection"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userGrant(table.currentIndex) }
         Button { text: "&IPs"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userIPs(table.currentIndex) }
         Button { text: "Remo&ve"; DialogButtonBox.buttonRole: DialogButtonBox.ActionRole; onClicked: App.userRemove(table.currentIndex) }
-        Button { text: "&Done"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+        Button { text: "Close(&q)"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
     }
 }

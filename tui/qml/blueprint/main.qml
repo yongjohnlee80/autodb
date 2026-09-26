@@ -7,7 +7,7 @@
 
 import tui 1.0
 import autodb 1.0
-import autodb.theme.retro 1.0
+import autodb.theme.dark 1.0
 import autodb.panels 1.0          // Results
 import autodb.views 1.0           // Leader, Hints, Help, About, Pressure, Inspect, Value, ConnCard
 import autodb.dialogs 1.0         // Login, Bootstrap, confirmations, note dialogs, pickers

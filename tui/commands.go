@@ -176,6 +176,7 @@ func (h *Host) hints() string {
 		"?         these keys",
 		"/         find in the focused query or results pane",
 		"n / N     next / previous match after searching",
+		"h / l     explorer: collapse / expand; parent / first child",
 	}, "\n")
 }
 

@@ -18,7 +18,9 @@ Theme {
     app {
         window: "#aaaaaa"; windowText: "#000000"
         button: "#00aa00"; buttonText: "#000000"
-        highlight: "#00aa00"; highlightedText: "#ffffff"
+        // Focus must not resemble the normal green button: Enter follows
+        // focus, not the dialog's fallback/default action.
+        highlight: "#ffffff"; highlightedText: "#000000"
         base: "#0000aa"; text: "#ffffff"
         inactive { highlight: "#555555"; highlightedText: "#55ffff" }
         mid: "#555555"; light: "#ffffff"

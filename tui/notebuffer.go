@@ -19,8 +19,8 @@ import (
 // new one; SPC n names a new, empty one.
 //
 // UNSAVED WORK IS NEVER LOST QUIETLY. Opening another note, or switching user,
-// over unsaved edits asks first — save, discard, or stay — with no default,
-// because one answer throws work away. A note that changed on disk since it
+// over unsaved edits asks first — save, discard, or stay — with Save focused,
+// so Enter preserves the work. A note that changed on disk since it
 // was opened is not overwritten without asking either.
 //
 // A load is off the loop, and applied only if it is still the latest open and
