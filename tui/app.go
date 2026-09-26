@@ -87,6 +87,13 @@ type Host struct {
 	// attachWs (connections.go); confirmThen is what a yes to the
 	// confirmation card runs (confirm.go).
 	conns               *manager[ConnInfo]
+	spaces              *manager[WorkspaceInfo]
+	spaceAttached       *tuidecl.ListModel
+	spaceOptions        *tuidecl.ListModel
+	spaceIndex          int
+	spaceSelectedID     int64
+	spaceFormID         int64
+	spaceAttachFor      int64
 	tokens              *manager[PATRow]
 	tokenConns          *tuidecl.ListModel
 	showRevoked         bool
@@ -102,6 +109,9 @@ type Host struct {
 	mintWorkers     sync.WaitGroup
 	mintMu          sync.Mutex
 	mintErrors      []error
+	// An override is used only by the shutdown regression to model a posted
+	// UI callback that the stopped loop never drains.
+	postMintHandoff func(func())
 	connForm        connForm
 	attaching       attachFor
 	attachWs        *tuidecl.ListModel
@@ -197,6 +207,10 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 	h.prefs = newEditorPrefs()
 	h.pickable = tuidecl.NewListModel("key", "label", "id", "ws", "name")
 	h.conns = newConnectionsManager()
+	h.spaces = newWorkspaceManager(h)
+	h.spaceIndex = -1
+	h.spaceAttached = tuidecl.NewListModel("key", "name", "engine")
+	h.spaceOptions = tuidecl.NewListModel("key", "id", "name")
 	h.tokens = newTokenManager(h)
 	h.tokenConns = tuidecl.NewListModel("key", "id", "label")
 	h.attachWs = tuidecl.NewListModel("key", "id", "name")

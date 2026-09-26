@@ -49,14 +49,25 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.mintToken": strings_("App.mintToken", 5, func(v []string) error {
 			return h.mintToken(v[0], v[1], v[2], v[3], v[4])
 		}),
-		"App.movePane":         oneString("App.movePane", "h, j, k or l", h.movePane),
-		"App.chooseConnection": oneNumber("App.chooseConnection", "a row's index", h.chooseConnection),
-		"App.confirmed":        oneString("App.confirmed", "yes or no", h.confirmed),
-		"App.connectionAdd":    none(h.connectionAdd),
-		"App.connectionEdit":   oneNumber("App.connectionEdit", "a row's index", h.connectionEdit),
-		"App.connectionTest":   oneNumber("App.connectionTest", "a row's index", h.connectionTest),
-		"App.connectionDelete": oneNumber("App.connectionDelete", "a row's index", h.connectionDelete),
-		"App.connectionAttach": oneNumber("App.connectionAttach", "a row's index", h.connectionAttach),
+		"App.workspaceChosen":          oneNumber("App.workspaceChosen", "a workspace row", h.workspaceChosen),
+		"App.workspaceNew":             none(h.workspaceNew),
+		"App.workspaceManagerClosed":   none(h.workspaceManagerClosed),
+		"App.workspaceNameCancelled":   none(h.workspaceNameCancelled),
+		"App.workspaceAttachCancelled": none(h.workspaceAttachCancelled),
+		"App.workspaceRename":          oneNumber("App.workspaceRename", "a workspace row", h.workspaceRename),
+		"App.workspaceDelete":          oneNumber("App.workspaceDelete", "a workspace row", h.workspaceDelete),
+		"App.workspaceAttach":          oneNumber("App.workspaceAttach", "a workspace row", h.workspaceAttachTo),
+		"App.workspaceDetach":          twoNumbers("App.workspaceDetach", h.workspaceDetach),
+		"App.saveWorkspace":            oneString("App.saveWorkspace", "a workspace name", h.saveWorkspace),
+		"App.attachToWorkspace":        workspaceAndName(h.attachToWorkspace),
+		"App.movePane":                 oneString("App.movePane", "h, j, k or l", h.movePane),
+		"App.chooseConnection":         oneNumber("App.chooseConnection", "a row's index", h.chooseConnection),
+		"App.confirmed":                oneString("App.confirmed", "yes or no", h.confirmed),
+		"App.connectionAdd":            none(h.connectionAdd),
+		"App.connectionEdit":           oneNumber("App.connectionEdit", "a row's index", h.connectionEdit),
+		"App.connectionTest":           oneNumber("App.connectionTest", "a row's index", h.connectionTest),
+		"App.connectionDelete":         oneNumber("App.connectionDelete", "a row's index", h.connectionDelete),
+		"App.connectionAttach":         oneNumber("App.connectionAttach", "a row's index", h.connectionAttach),
 		"App.saveConnection": strings_("App.saveConnection", 5, func(v []string) error {
 			return h.saveConnection(v[0], v[1], v[2], v[3], v[4])
 		}),
@@ -173,6 +184,23 @@ func oneNumber(name, what string, fn func(int) error) decl.HandlerFunc {
 			return fmt.Errorf("%s takes %s, not %s", name, what, args[0].Raw)
 		}
 		return fn(n)
+	}
+}
+
+func twoNumbers(name string, fn func(int, int) error) decl.HandlerFunc {
+	return func(args []qml.SpecValue) error {
+		if len(args) != 2 || args[0].Kind != qml.SpecValueNumber || args[1].Kind != qml.SpecValueNumber {
+			return fmt.Errorf("%s takes two row indexes", name)
+		}
+		a, err := strconv.Atoi(args[0].Raw)
+		if err != nil {
+			return fmt.Errorf("%s: first row: %w", name, err)
+		}
+		b, err := strconv.Atoi(args[1].Raw)
+		if err != nil {
+			return fmt.Errorf("%s: second row: %w", name, err)
+		}
+		return fn(a, b)
 	}
 }
 

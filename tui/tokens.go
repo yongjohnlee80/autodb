@@ -2,10 +2,12 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
@@ -320,6 +322,12 @@ func (h *Host) mintApproved(in mintIntent, approved []string) {
 		}
 		out, stale, err := mint(ctx, in.bound, in, approved)
 		v := minted{out: out, stale: stale, err: err}
+		if errors.Is(err, errMintReplyUncertain) {
+			// The server reported success but the one-time answer is malformed.
+			// Ordinary create errors never enter this branch: revoking a name
+			// after a duplicate-name refusal could revoke an existing token.
+			v.revoked, v.compensation = h.compensateMint(in.bound, in.name)
+		}
 		if err == nil && len(stale) == 0 && out.Name != "" {
 			if !in.bound.currentIdentity() || h.ctx.Err() != nil {
 				v.revoked, v.compensation = h.compensateMint(in.bound, out.Name)
@@ -339,30 +347,52 @@ func (h *Host) mintApproved(in mintIntent, approved []string) {
 		if h.ctx.Err() != nil {
 			return
 		}
-		h.p.Post(func() {
-			if v.revoked || v.compensation != nil {
-				h.mintNotice(v.revoked)
-				return
-			}
-			if len(v.stale) > 0 {
-				if h.tokenCurrent(in.bound) && in.seq == h.tokenSeq {
-					h.confirmMintWidening(in, v.stale)
+		// No live token: status/confirmation is best effort; only a
+		// committed usable secret needs an acknowledged UI handoff.
+		if v.revoked || v.compensation != nil || len(v.stale) > 0 || v.err != nil {
+			h.p.Post(func() {
+				if v.revoked || v.compensation != nil {
+					h.mintNotice(v.revoked)
+					return
 				}
-				return
-			}
-			if v.err != nil {
-				if h.tokenCurrent(in.bound) {
-					h.set(h.tokens.status, "create "+in.name+": "+WireErrorMessage(v.err))
+				if len(v.stale) > 0 {
+					if h.tokenCurrent(in.bound) && in.seq == h.tokenSeq {
+						h.confirmMintWidening(in, v.stale)
+					}
+					return
 				}
+				if v.err != nil {
+					if h.tokenCurrent(in.bound) {
+						h.set(h.tokens.status, "create "+in.name+": "+WireErrorMessage(v.err))
+					}
+					return
+				}
+			})
+			return
+		}
+		// Posting is NOT delivery. Run may exit without draining this queue,
+		// so the worker remains alive until the UI acknowledges the card or
+		// shutdown marks the post abandoned and revokes the committed PAT.
+		var handoff struct {
+			sync.Mutex
+			handled    bool
+			abandoned  bool
+			compensate bool
+		}
+		delivered := make(chan struct{})
+		post := h.postMintHandoff
+		if post == nil {
+			post = h.p.Post
+		}
+		post(func() {
+			handoff.Lock()
+			defer handoff.Unlock()
+			if handoff.abandoned || h.ctx.Err() != nil {
 				return
 			}
-			// A switch can still win between worker completion and this loop
-			// turn; compensate that one too, rather than dropping its secret.
 			if !h.tokenCurrent(in.bound) || in.seq != h.tokenSeq {
-				h.compensateMintAsync(in.bound, v.out.Name)
-				return
-			}
-			shown := in.bound.withCurrentIdentity(func() {
+				handoff.compensate = true
+			} else if !in.bound.withCurrentIdentity(func() {
 				reloadManager(h, h.tokens, "create "+in.name+": ok")
 				conn := ConnInfo{ID: in.connID, Name: fmt.Sprintf("connection %d", in.connID)}
 				for _, c := range v.conns {
@@ -372,11 +402,34 @@ func (h *Host) mintApproved(in mintIntent, approved []string) {
 					}
 				}
 				h.showConnectionCard(v.out, conn, v.ep, in.bound.User())
-			})
-			if !shown {
-				h.compensateMintAsync(in.bound, v.out.Name)
+			}) {
+				handoff.compensate = true
 			}
+			handoff.handled = true
+			close(delivered)
 		})
+		timer := time.NewTimer(10 * time.Second)
+		select {
+		case <-delivered:
+		case <-h.ctx.Done():
+		case <-timer.C:
+		}
+		timer.Stop()
+		handoff.Lock()
+		if !handoff.handled {
+			handoff.abandoned, handoff.compensate = true, true
+		}
+		compensate := handoff.compensate
+		handoff.Unlock()
+		if compensate {
+			revoked, err := h.compensateMint(in.bound, v.out.Name)
+			if err != nil {
+				h.recordMintError(in.name, err)
+			}
+			if h.ctx.Err() == nil {
+				h.p.Post(func() { h.mintNotice(revoked) })
+			}
+		}
 	}()
 }
 
@@ -387,20 +440,6 @@ func (h *Host) compensateMint(b *Bound, name string) (bool, error) {
 		return false, err
 	}
 	return true, nil
-}
-
-func (h *Host) compensateMintAsync(b *Bound, name string) {
-	h.mintWorkers.Add(1)
-	go func() {
-		defer h.mintWorkers.Done()
-		revoked, err := h.compensateMint(b, name)
-		if err != nil {
-			h.recordMintError(name, err)
-		}
-		if h.ctx.Err() == nil {
-			h.p.Post(func() { h.mintNotice(revoked) })
-		}
-	}()
 }
 
 func (h *Host) recordMintError(name string, err error) {

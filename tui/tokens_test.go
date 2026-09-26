@@ -2,11 +2,13 @@ package tui_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/yongjohnlee80/golib/logger"
+	tuicore "github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
 
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
@@ -210,4 +212,121 @@ func TestLeavingTokenManagerRetiresAnOldAllowlistPreview(t *testing.T) {
 			t.Fatal("obsolete preview minted a token")
 		}
 	}
+}
+
+func TestMalformedSuccessfulMintReplyRevokesTheNewToken(t *testing.T) {
+	h, s, inspect := readyTokenForm(t)
+	committed := make(chan struct{}, 1)
+	h.CorruptMintReplyAfterCommit(committed)
+	s.Keys(t, decltest.Type("malformed-reply")...)
+	s.Keys(t, enter())
+	<-committed
+	h.WaitMints()
+	rows, err := inspect.PATs(context.Background(), inspect.User().ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.Name == "malformed-reply" {
+			if !r.Revoked {
+				t.Fatal("a committed mint with no showable reply remained live")
+			}
+			return
+		}
+	}
+	t.Fatal("scratch mint never committed, so the uncertain-outcome path was not exercised")
+}
+
+// The server has committed, but the UI loop has not processed the queued
+// card callback. Ending Run must make its worker revoke the credential before
+// returning, even when the posted callback is never delivered.
+func TestMintCommittedBeforeUndeliveredUIHandoffIsRevokedOnQuit(t *testing.T) {
+	addr := seeded(t)
+	setup := tuiapp.NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(setup.Close)
+	ctx := context.Background()
+	if _, err := setup.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.Bind().Login(ctx, "root", rootPass); err != nil {
+		t.Fatal(err)
+	}
+	connID, err := setup.Bind().CreateConnection(ctx, "bravo-pg", "postgres", "postgres://localhost:5432/app?sslmode=disable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setup.Bind().SetConnectionExposure(ctx, connID, true); err != nil {
+		t.Fatal(err)
+	}
+	uiSession := tuiapp.NewSession(addr, logger.Nop{}, nil)
+	t.Cleanup(uiSession.Close)
+	if _, err := uiSession.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := uiSession.Bind().Login(ctx, "root", rootPass); err != nil {
+		t.Fatal(err)
+	}
+	backend := tuicore.NewTestBackend(120, 32)
+	h, err := tuiapp.New(uiSession, tuiapp.PersonalNotesIn(t.TempDir()), nil,
+		tuiapp.Options{Frontend: tuiapp.FrontendWeb,
+			App: []tuicore.AppOption{tuicore.WithBackend(backend), tuicore.WithMinFrameInterval(0)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- h.Run(runCtx) }()
+	finished := false
+	t.Cleanup(func() {
+		cancel()
+		if !finished {
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Error("host did not stop")
+			}
+		}
+	})
+	deadline := time.Now().Add(4 * time.Second)
+	for h.Auth() != "signed-in" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.Auth() != "signed-in" {
+		t.Fatal("web host never joined the signed-in session")
+	}
+	committed := make(chan chan struct{}, 1)
+	posted := make(chan struct{}, 1)
+	h.HoldMintAfterCommit(committed)
+	h.DropMintHandoff(posted)
+	h.BeginTestMint("handoff-quit", connID)
+	release := <-committed
+	close(release)
+	select {
+	case <-posted:
+	case <-time.After(4 * time.Second):
+		t.Fatal("mint handoff was never posted")
+	}
+	h.Program().Quit()
+	select {
+	case err := <-done:
+		finished = true
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("host returned before compensating the dropped handoff")
+	}
+	rows, err := setup.Bind().PATs(context.Background(), setup.Bind().User().ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rows {
+		if r.Name == "handoff-quit" {
+			if !r.Revoked {
+				t.Fatal("successful mint survived a dropped UI handoff")
+			}
+			return
+		}
+	}
+	t.Fatal("scratch mint did not commit; shutdown control did not exercise the live credential")
 }

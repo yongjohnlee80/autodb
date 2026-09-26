@@ -1416,15 +1416,35 @@ func (b *Bound) CreatePAT(ctx context.Context, name string, days int64, allowedI
 	if err != nil {
 		return PATSecret{}, nil, err
 	}
-	m, _ := res.(map[string]any)
-	if mB(m, "stale_approval") {
-		return PATSecret{}, mSS(m, "missing"), nil
+	return decodeMintReply(name, res)
+}
+
+// errMintReplyUncertain means the server returned apparent success but omitted
+// the one-time credential. Unlike an ordinary create refusal, this outcome may
+// have committed and must be reconciled by the pinned owner before the UI exits.
+var errMintReplyUncertain = errors.New("tui: token mint succeeded without a usable one-time reply")
+
+func decodeMintReply(requested string, res any) (PATSecret, []string, error) {
+	m, ok := res.(map[string]any)
+	if !ok || m == nil {
+		return PATSecret{Name: requested}, nil, fmt.Errorf("%w: response is not an object", errMintReplyUncertain)
 	}
-	return PATSecret{
+	if mB(m, "stale_approval") {
+		missing := mSS(m, "missing")
+		if len(missing) == 0 {
+			return PATSecret{}, nil, fmt.Errorf("token mint approval was stale without replacement rows")
+		}
+		return PATSecret{}, missing, nil
+	}
+	out := PATSecret{
 		Name:      mS(m, "name"),
 		Secret:    mS(m, "secret"),
 		ExpiresAt: mS(m, "expires_at"),
-	}, nil, nil
+	}
+	if out.Name == "" || out.Secret == "" {
+		return PATSecret{Name: requested}, nil, fmt.Errorf("%w: name or secret is empty", errMintReplyUncertain)
+	}
+	return out, nil, nil
 }
 
 // PATAllowlistPreview reports which CIDRs minting with these restrictions
