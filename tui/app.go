@@ -6,7 +6,9 @@ import (
 	"github.com/yongjohnlee80/golib/decl"
 	"os"
 	"path/filepath"
+	"sync"
 
+	"github.com/yongjohnlee80/autodb/core/pressure"
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
 	"github.com/yongjohnlee80/golib/tui/widget"
@@ -60,6 +62,16 @@ type Host struct {
 	active   activeConn
 	explorer *explorer
 	results  *results
+	// The inspected row and its full values are host-owned; QML only shows
+	// the selected row and value (results.go).
+	inspectRows    *tuidecl.ListModel
+	inspected      []string
+	valueText      string
+	pressure       *pressureView
+	pressureSource interface {
+		Pressure(context.Context) (pressure.Snapshot, error)
+	}
+	cardText string
 	// buf is the note the query buffer holds (notebuffer.go); workspaces the
 	// signed-in user's workspaces, for the note-name dialog to choose from.
 	buf        noteBuffer
@@ -74,11 +86,26 @@ type Host struct {
 	// attach the connection its attach dialog is choosing for, over
 	// attachWs (connections.go); confirmThen is what a yes to the
 	// confirmation card runs (confirm.go).
-	conns       *manager[ConnInfo]
-	connForm    connForm
-	attaching   attachFor
-	attachWs    *tuidecl.ListModel
-	confirmThen func()
+	conns               *manager[ConnInfo]
+	tokens              *manager[PATRow]
+	tokenConns          *tuidecl.ListModel
+	showRevoked         bool
+	tokenFormBound      *Bound
+	tokenAllowCleartext bool
+	tokenSeq            uint64
+	tokenFormAccepted   bool
+	// Mint is the one background operation that cannot abandon its result on
+	// host shutdown: a committed show-once token must be shown or revoked.
+	tokenMint       func(context.Context, *Bound, mintIntent, []string) (PATSecret, []string, error)
+	tokenPreview    func(context.Context, *Bound, []string) ([]string, error)
+	previewAnswered int
+	mintWorkers     sync.WaitGroup
+	mintMu          sync.Mutex
+	mintErrors      []error
+	connForm        connForm
+	attaching       attachFor
+	attachWs        *tuidecl.ListModel
+	confirmThen     func()
 	// hadAuth is that this program has been signed in, which is what makes a
 	// token going empty a sign-out rather than the start. authSeq numbers the
 	// sign-in attempts; authAttempt is the running one's, 0 for none (auth.go).
@@ -106,6 +133,11 @@ type Host struct {
 
 // Options are what New needs from the program around it.
 type Options struct {
+	// PressureSource is an optional source for an operator view (including
+	// deterministic tests). Nil reads sys.pressure through the pinned RPC.
+	PressureSource interface {
+		Pressure(context.Context) (pressure.Snapshot, error)
+	}
 	// Frontend is the terminal's or the web's. The web serves the same program
 	// over golib's web backend; what differs is only what the frontend may do.
 	Frontend Frontend
@@ -148,7 +180,7 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 		quit = func() {}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	h := &Host{session: session, notesFor: notesFor, quit: quit, frontend: opt.Frontend,
+	h := &Host{session: session, notesFor: notesFor, quit: quit, frontend: opt.Frontend, pressureSource: opt.PressureSource,
 		ctx: ctx, cancel: cancel, dev: opt.Dev, about: opt.About}
 	cat, err := NewCatalogOf(catalogCommands(), menuNodes())
 	if err != nil {
@@ -159,10 +191,14 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 	h.catalog = cat
 	h.menus = newMenuModels()
 	h.explorer, h.results = newExplorer(), newResults()
+	h.inspectRows = tuidecl.NewListModel("line")
+	h.pressure = newPressureView()
 	h.workspaces = tuidecl.NewListModel("id", "name")
 	h.prefs = newEditorPrefs()
 	h.pickable = tuidecl.NewListModel("key", "label", "id", "ws", "name")
 	h.conns = newConnectionsManager()
+	h.tokens = newTokenManager(h)
+	h.tokenConns = tuidecl.NewListModel("key", "id", "label")
 	h.attachWs = tuidecl.NewListModel("key", "id", "name")
 	return h
 }
@@ -231,9 +267,12 @@ func (h *Host) options(opt Options) []tuidecl.ProgramOption {
 
 // Run runs the program until it quits or ctx ends, and releases it.
 func (h *Host) Run(ctx context.Context) error {
-	defer h.cancel()
 	err := h.p.Run(ctx)
-	return errors.Join(append([]error{err}, h.errs...)...)
+	h.cancel()
+	h.mintWorkers.Wait()
+	h.mintMu.Lock()
+	defer h.mintMu.Unlock()
+	return errors.Join(append(append([]error{err}, h.errs...), h.mintErrors...)...)
 }
 
 // Program is the running program, for a host embedding it (the web gateway).

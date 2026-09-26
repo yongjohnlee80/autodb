@@ -7,6 +7,7 @@
 //     import autodb.theme.light 1.0
 
 Theme {
+    pressureRaisedText: "#af0000"
     app {
         window: "#e4e4e4"; windowText: "#1c1c1c"
         button: "#d0d0d0"; buttonText: "#1c1c1c"

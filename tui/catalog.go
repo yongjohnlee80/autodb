@@ -239,7 +239,8 @@ func catalogCommands() []CommandOf[*Host] {
 		},
 		{
 			ID:        cmdMyTokens,
-			Lifecycle: Planned,
+			Visible:   signedIn,
+			Run:       func(h *Host) { h.openTokens() },
 			Leader:    leader('T', "my access tokens…", 150),
 			Menu: []MenuProjection{
 				{Parent: nodeHome, Label: "Access tokens…", Hotkey: 'A', Order: 40},
@@ -346,7 +347,7 @@ func catalogCommands() []CommandOf[*Host] {
 			// one that was never built, and somebody looking for it during an
 			// incident concludes the feature does not exist. The view says what
 			// is missing instead.
-			ID: cmdPressure, Lifecycle: Planned,
+			ID: cmdPressure, Audience: AudienceAdmin, Run: func(h *Host) { h.open("pressure") },
 			Leader: &LeaderProjectionOf[*Host]{Key: 'P', Order: 255,
 				Label: "front-door pressure",
 				Help:  "what the front door holds, and what it is refusing"},

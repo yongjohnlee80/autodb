@@ -116,6 +116,7 @@ func (h *Host) runSQL(sql string) {
 		case v.err != nil:
 			h.setStatus(WireErrorMessage(v.err))
 		default:
+			h.dropInspection() // cards may still show the previous run
 			r.last, r.asJSON = v.res, false
 			h.showResults()
 			h.setStatus(execSummary(v.res))
@@ -141,7 +142,24 @@ func (h *Host) clearResults() {
 	r.last, r.asJSON = nil, false
 	r.seq++ // a run in flight is answering a question nobody asks now
 	r.running = false
+	h.dropInspection()
 	h.showResults()
+}
+
+// dropInspection retires the cards and their host/QML values together. A run
+// may finish while someone is reading the previous result, not just when a
+// session disappears; neither old values nor old column indexes survive it.
+func (h *Host) dropInspection() {
+	h.inspected = nil
+	h.valueText = ""
+	h.inspectRows.Reset(nil)
+	h.set("App.valueText", "")
+	h.set("App.valueTitle", "")
+	for _, id := range []string{"value", "inspect"} {
+		if err := h.p.Call(id, "close"); err != nil {
+			h.keep(err)
+		}
+	}
 }
 
 // showResults sets the pane's sources from the last result.
@@ -194,6 +212,65 @@ func (h *Host) setTable(res *ExecResult) {
 	}
 	m.SetColumns(cols...)
 	m.Reset(rows)
+}
+
+// inspectResult opens a result row with every column's full value. The table
+// remains a compact summary; the source values, not its rendered cells, back
+// both the inspect view and the editor's copy register.
+func (h *Host) inspectResult(row int) error {
+	res := h.results.last
+	if res == nil || row < 0 || row >= len(res.Rows) {
+		return nil // a result can change between a table event and this handler
+	}
+	values := make([]string, len(res.Columns))
+	rows := make([]tuidecl.Row, len(res.Columns))
+	for col, name := range res.Columns {
+		value := "NULL"
+		if col < len(res.Rows[row]) {
+			value = fullCell(res.Rows[row][col])
+		}
+		values[col] = value
+		rows[col] = tuidecl.Row{"line": name + " = " + renderCell(value)}
+	}
+	h.inspected = values
+	h.inspectRows.Reset(rows)
+	h.open("inspect")
+	return nil
+}
+
+func (h *Host) openValue(col int) error {
+	if h.results.last == nil || col < 0 || col >= len(h.inspected) || col >= len(h.results.last.Columns) {
+		return nil
+	}
+	h.set("App.valueTitle", h.results.last.Columns[col])
+	h.valueText = h.inspected[col]
+	h.set("App.valueText", h.valueText)
+	h.open("value")
+	return nil
+}
+
+func (h *Host) copyInspected(col int) error {
+	if col >= 0 && col < len(h.inspected) {
+		h.editor.SetRegister(h.inspected[col], false)
+		h.setStatus("value copied to the editor register")
+	}
+	return nil
+}
+
+func (h *Host) copyValue() error {
+	h.editor.SetRegister(h.valueText, false)
+	h.setStatus("value copied to the editor register")
+	return nil
+}
+
+func fullCell(v any) string {
+	if b, ok := v.([]byte); ok {
+		return bytesText(b)
+	}
+	if v == nil {
+		return "NULL"
+	}
+	return fmt.Sprint(v)
 }
 
 // execSummary is a result in one line.

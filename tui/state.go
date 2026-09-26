@@ -30,6 +30,9 @@ func (h *Host) state(theme string) map[string]any {
 		// The overlays' text.
 		"App.hints":        "",
 		"App.aboutText":    h.aboutText(),
+		"App.inspectRows":  h.inspectRows,
+		"App.valueTitle":   "",
+		"App.valueText":    "",
 		"App.quitQuestion": "This ends the session. Anything unsaved in the query buffer is lost.",
 		// Sign-in (auth.go): the name last tried, and why the last answer
 		// was refused — each dialog's help line.
@@ -44,6 +47,10 @@ func (h *Host) state(theme string) map[string]any {
 	for k, v := range resultsState(h.results) {
 		st[k] = v
 	}
+	st["App.pressure"] = h.pressure.model
+	st["App.pressureAge"] = ""
+	st["App.cardTitle"] = ""
+	st["App.cardText"] = ""
 	for k, v := range noteState(h) {
 		st[k] = v
 	}
@@ -54,6 +61,9 @@ func (h *Host) state(theme string) map[string]any {
 		st[k] = v
 	}
 	for k, v := range connectionsState(h) {
+		st[k] = v
+	}
+	for k, v := range tokenState(h) {
 		st[k] = v
 	}
 	for k, v := range confirmState() {

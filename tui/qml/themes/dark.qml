@@ -7,6 +7,7 @@
 //     import autodb.theme.dark 1.0
 
 Theme {
+    pressureRaisedText: "#ff5f5f"
     app {
         window: "#3a3a3a"; windowText: "#dadada"
         button: "#4e4e4e"; buttonText: "#eeeeee"

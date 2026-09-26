@@ -12,6 +12,7 @@
 //     import autodb.theme.retro 1.0
 
 Theme {
+    pressureRaisedText: "#ff5555"
     // The APPLICATION palette: the Window sets it, and every surface that does
     // not set its own inherits it — the dialogs, their panes, the forms.
     app {

@@ -90,6 +90,17 @@ func (h *Host) focusPane(id string) {
 // forgetWorkspace drops what belonged to the signed-in identity or the server:
 // the active connection, the explorer's rows, the last result.
 func (h *Host) forgetWorkspace() {
+	h.pressureClosed()
+	for _, id := range []string{"pressure", "card", "tokenForm", "tokens"} {
+		if err := h.p.Call(id, "close"); err != nil {
+			h.keep(err)
+		}
+	}
+	h.cardClosed()
+	h.tokens.bound, h.tokenFormBound = nil, nil
+	h.tokens.all, h.tokens.rows = nil, nil
+	h.tokens.model.Reset(nil)
+	h.tokenConns.Reset(nil)
 	h.active = activeConn{}
 	h.set("App.queryTitle", h.queryTitle())
 	h.explorer.clear()

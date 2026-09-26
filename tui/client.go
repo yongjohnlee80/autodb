@@ -229,12 +229,45 @@ func (b *Bound) ensure() error {
 		return errors.New("tui: not connected")
 	}
 	b.s.mu.Lock()
-	current := b.s.gen == b.gen
+	current := b.s.gen == b.gen && b.s.idEpoch == b.idEpoch && b.s.token == b.token
 	b.s.mu.Unlock()
 	if !current {
 		return errSuperseded
 	}
 	return nil
+}
+
+// currentIdentity reports whether this exact credential still owns the session.
+// A login switch on the same client does not change the connection generation.
+func (b *Bound) currentIdentity() bool {
+	b.s.mu.Lock()
+	defer b.s.mu.Unlock()
+	return b.s.gen == b.gen && b.s.idEpoch == b.idEpoch && b.s.token == b.token
+}
+
+// withCurrentIdentity keeps a show-once reply and its pinned owner together
+// through the UI handoff. A concurrent login cannot replace the owner between
+// the final check and opening the card.
+func (b *Bound) withCurrentIdentity(show func()) bool {
+	b.s.mu.Lock()
+	defer b.s.mu.Unlock()
+	if b.s.gen != b.gen || b.s.idEpoch != b.idEpoch || b.s.token != b.token {
+		return false
+	}
+	show()
+	return true
+}
+
+// revokeMintedAfterSwitch is a NARROW compensating call for a mint which
+// already committed before the identity changed. The ordinary Bound RPC seam
+// correctly refuses stale identities; this one request is restricted to the
+// same pinned owner and newly minted name, using the old pinned client/token.
+func (b *Bound) revokeMintedAfterSwitch(ctx context.Context, name string) error {
+	if b.cli == nil {
+		return errSuperseded
+	}
+	_, err := b.cli.Call(ctx, "auth.token_revoke", b.token, b.user.ID, name)
+	return err
 }
 
 // Connect implements the FE contract: dial; on refusal spawn

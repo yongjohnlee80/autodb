@@ -136,6 +136,20 @@ func TestHintsSayTheKeys(t *testing.T) {
 	s.WaitFor(t, "the hints closed", func(sc string) bool { return !strings.Contains(sc, "keys here") })
 }
 
+// Pressure stays in the admin catalog even when this scratch server has no
+// meter. Opening it names the missing source instead of drawing a calm table.
+func TestPressureOpensAndNamesMissingSource(t *testing.T) {
+	_, s := connected(t)
+	s.Keys(t, decltest.Rune(' '))
+	s.WaitForText(t, "P  front-door pressure")
+	s.Keys(t, decltest.Rune('P'))
+	s.WaitFor(t, "the unavailable pressure view", func(sc string) bool {
+		return strings.Contains(sc, "┌ pressure ") && strings.Contains(sc, "unavailable")
+	})
+	s.Keys(t, esc())
+	s.WaitFor(t, "pressure closed", func(sc string) bool { return !strings.Contains(sc, "┌ pressure ") })
+}
+
 // The leader's ? is help: the leader's commands, from the same projection the
 // leader runs.
 func TestHelpListsTheLeader(t *testing.T) {

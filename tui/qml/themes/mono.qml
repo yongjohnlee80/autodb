@@ -11,6 +11,7 @@
 //     import autodb.theme.mono 1.0
 
 Theme {
+    pressureRaisedText: "black"
     app {
         window: "white"; windowText: "black"
         button: "white"; buttonText: "black"

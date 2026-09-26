@@ -182,6 +182,10 @@ Window {
     Hints { id: hints }
     Help { id: help }
     About { id: about }
+    Inspect { id: inspect }
+    Value { id: value }
+    Pressure { id: pressure }
+    ConnCard { id: card }
     ConfirmQuit { id: quit }
     Login { id: login }
     Bootstrap { id: bootstrap }
@@ -193,4 +197,6 @@ Window {
     Connections { id: connections }
     ConnectionForm { id: connectionForm }
     Attach { id: attach }
+    Tokens { id: tokens }
+    TokenForm { id: tokenForm }
 }
