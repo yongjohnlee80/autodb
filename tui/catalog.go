@@ -362,9 +362,9 @@ func catalogCommands() []CommandOf[*Host] {
 			//
 			// It is hidden while nobody is signed in, because there is no
 			// account for it to be about.
-			ID:        cmdProfile,
-			Visible:   func(h *Host) bool { return h.session.User().Name != "" },
-			Lifecycle: Planned,
+			ID:      cmdProfile,
+			Visible: func(h *Host) bool { return h.session.User().Name != "" },
+			Run:     func(h *Host) { h.openProfile() },
 			Leader: &LeaderProjectionOf[*Host]{Key: 'o', Order: 245,
 				Label: "profile",
 				Help:  "your account, and your own passphrase"},

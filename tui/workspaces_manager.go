@@ -152,12 +152,12 @@ func (h *Host) workspaceDelete(i int) error {
 		h.set(h.spaces.status, "choose a workspace first")
 		return nil
 	}
-	if len(w.Connections) != 0 {
-		h.set(h.spaces.status, "detach the workspace's connections before deleting it")
-		return nil
-	}
-	h.confirm("delete workspace", "Delete "+w.Name+"? Local .sql notes remain on disk; the server workspace cannot be restored.",
+	bound := h.spaces.bound // the question belongs to this exact session/manager opening
+	h.confirm("delete workspace", "Delete "+w.Name+"? Every connection attached when deletion commits will be unlinked, including links added since this view opened. The connection records and local .sql notes stay; the server workspace cannot be restored.",
 		"&Delete", "&Keep", func() {
+			if bound != h.spaces.bound || !h.workspaceWritable() {
+				return
+			}
 			managerCall(h, h.spaces, "delete "+w.Name, func(ctx context.Context, b *Bound) error {
 				return b.DeleteWorkspace(ctx, w.ID)
 			})

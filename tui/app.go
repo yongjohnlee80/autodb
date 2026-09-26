@@ -94,6 +94,8 @@ type Host struct {
 	spaceSelectedID     int64
 	spaceFormID         int64
 	spaceAttachFor      int64
+	profileBound        *Bound
+	profilePending      bool
 	tokens              *manager[PATRow]
 	tokenConns          *tuidecl.ListModel
 	showRevoked         bool

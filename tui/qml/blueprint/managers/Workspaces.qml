@@ -1,7 +1,8 @@
 // Workspaces.qml — workspaces, and the connections attached to each.
 //
-// Two tables side by side; the buttons act on the one in use. Deleting a
-// workspace that still has connections is refused, and the footer says why.
+// Two tables side by side; the buttons act on the one in use. Deletion
+// explicitly unlinks every attached connection at commit (Johno, 2026-09-26),
+// while retaining the connection records and local notes.
 
 Dialog {
     title: "workspaces"

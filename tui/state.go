@@ -69,6 +69,8 @@ func (h *Host) state(theme string) map[string]any {
 	for k, v := range workspaceManagerState(h) {
 		st[k] = v
 	}
+	st["App.profileText"] = ""
+	st["App.profileError"] = ""
 	for k, v := range confirmState() {
 		st[k] = v
 	}

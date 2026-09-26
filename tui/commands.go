@@ -54,6 +54,8 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.workspaceManagerClosed":   none(h.workspaceManagerClosed),
 		"App.workspaceNameCancelled":   none(h.workspaceNameCancelled),
 		"App.workspaceAttachCancelled": none(h.workspaceAttachCancelled),
+		"App.changePassphrase":         threeStrings("App.changePassphrase", h.changePassphrase),
+		"App.profileClosed":            none(h.profileClosed),
 		"App.workspaceRename":          oneNumber("App.workspaceRename", "a workspace row", h.workspaceRename),
 		"App.workspaceDelete":          oneNumber("App.workspaceDelete", "a workspace row", h.workspaceDelete),
 		"App.workspaceAttach":          oneNumber("App.workspaceAttach", "a workspace row", h.workspaceAttachTo),
