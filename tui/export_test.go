@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	tuidecl "github.com/yongjohnlee80/golib/tui/decl"
@@ -545,4 +546,76 @@ func (h *Host) SetAuditPageSize(n int64) {
 	done := make(chan struct{})
 	h.p.Post(func() { h.auditNav.pageSize = n; close(done) })
 	<-done
+}
+
+// HoldNextListLoad holds the NEXT load of the "history" or "audit" list, once,
+// before it asks the server: started receives the channel that releases it.
+// Later loads run as usual.
+func (h *Host) HoldNextListLoad(list string, started chan<- chan struct{}) {
+	var held atomic.Bool
+	hold := func(ctx context.Context) {
+		if held.Swap(true) {
+			return
+		}
+		release := make(chan struct{})
+		started <- release
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	}
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		switch list {
+		case "history":
+			h.history.beforeLoad = hold
+		case "audit":
+			h.audit.beforeLoad = hold
+		}
+		close(ready)
+	})
+	<-ready
+}
+
+// TraceListAnswers sends one event each time a "history" or "audit" load's
+// answer reaches the loop — the newest's or a stale one.
+func (h *Host) TraceListAnswers(list string, events chan<- struct{}) {
+	ready := make(chan struct{})
+	h.p.Post(func() {
+		f := func() { events <- struct{}{} }
+		switch list {
+		case "history":
+			h.history.completed = f
+		case "audit":
+			h.audit.completed = f
+		}
+		close(ready)
+	})
+	<-ready
+}
+
+// HistoryScripts are the history rows shown, by script.
+func (h *Host) HistoryScripts() []string {
+	got := make(chan []string, 1)
+	h.p.Post(func() {
+		var out []string
+		for _, r := range h.history.rows {
+			out = append(out, r.Script)
+		}
+		got <- out
+	})
+	return <-got
+}
+
+// AuditIDs are the audit rows shown, by id.
+func (h *Host) AuditIDs() []int64 {
+	got := make(chan []int64, 1)
+	h.p.Post(func() {
+		var out []int64
+		for _, r := range h.audit.rows {
+			out = append(out, r.ID)
+		}
+		got <- out
+	})
+	return <-got
 }
