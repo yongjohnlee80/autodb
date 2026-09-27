@@ -578,7 +578,7 @@ func runServe(configPath string) error {
 	// this inline, and deleting the janitor or the lease watcher from those
 	// lines broke no test at all. A call site that no test reaches is a call
 	// site that can be removed by accident.
-	eng, serveCtx, leaseLost, stopServing, err := startEngine(ctx, cfg, store, svc, lease.Lost(),
+	eng, serveCtx, leaseLost, stopServing, err := startEngine(ctx, cfg, store, svc, lease.Lost(), lease.Epoch(),
 		func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) })
 	if err != nil {
 		return err
@@ -871,6 +871,10 @@ func startEngine(
 	store *meta.Store,
 	svc *auth.Service,
 	leaseLost <-chan struct{},
+	// ownerEpoch is the lease's (meta.InstanceLease.Epoch): every attempt is
+	// stamped with it, and the recovery of a dead owner's attempts rests on it
+	// naming THIS holding of an exclusive lease.
+	ownerEpoch string,
 	onLog func(string),
 ) (*coreexec.Engine, context.Context, <-chan struct{}, func(), error) {
 	// REFUSE TO SERVE a store whose logical ids are not unique, BEFORE
@@ -918,7 +922,7 @@ func startEngine(
 		return nil, nil, nil, nil, err
 	}
 
-	eng := coreexec.New(store, svc, execOptions(cfg, onLog)...)
+	eng := coreexec.New(store, svc, append(execOptions(cfg, onLog), coreexec.WithOwnerEpoch(ownerEpoch))...)
 
 	// A previously reloaded policy is applied BEFORE the janitor starts and
 	// before anything is served, so the bounds in force from the first sweep

@@ -168,6 +168,7 @@ func TestReExportedStatusValuesMatchMeta(t *testing.T) {
 		{"StatusError", StatusError, meta.StatusError},
 		{"StatusRolledBack", StatusRolledBack, meta.StatusRolledBack},
 		{"StatusUnresolvable", StatusUnresolvable, meta.StatusUnresolvable},
+		{"StatusUnknown", StatusUnknown, meta.StatusUnknown},
 	}
 	// The list above is hand-written, so it is itself a thing that can fall
 	// behind. TestEveryHistoryStatusIsReExportedByName reads the source and

@@ -116,14 +116,16 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					HistConnID: r.ConnectionID, HistIP: r.IP, HistScript: r.Script,
 					HistStartedAt: r.StartedAt, HistDurationMS: r.DurationMS,
 					HistRowCount: r.RowCount, HistStatus: r.Status, HistError: r.Error,
-					HistTxID: r.TxID, HistSuspended: r.Suspended}
+					HistTxID: r.TxID, HistSuspended: r.Suspended,
+					HistAttemptID: r.AttemptID, HistAttemptOwner: r.AttemptOwner,
+					HistDisposition: r.Disposition}
 			})
 		}},
 		{"audit_log", func() (int64, error) {
 			return copyAll(ctx, src.Audit, dst.Audit, func(r *AuditEntry) map[AuditField]any {
 				return map[AuditField]any{AuditID: r.ID, AuditUserID: r.UserID, AuditIP: r.IP,
 					AuditAction: r.Action, AuditDetail: r.Detail, AuditCreatedAt: r.CreatedAt,
-					AuditTxID: r.TxID}
+					AuditTxID: r.TxID, AuditAttemptID: r.AttemptID, AuditConnID: r.ConnID}
 			})
 		}},
 		// The pending queue migrates too. It is derivable from the log, but

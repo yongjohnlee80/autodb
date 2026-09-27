@@ -153,8 +153,10 @@ type Engine struct {
 	hookQuiesceJoined func()
 
 	history bool
-	maxRows int
-	now     func() time.Time
+	// ownerEpoch stamps every attempt; see WithOwnerEpoch.
+	ownerEpoch string
+	maxRows    int
+	now        func() time.Time
 
 	// pendingLeaseCap and pendingResidentCap hold the registry-scoped caps
 	// until every option has run. See WithLeaseCap.
@@ -424,6 +426,11 @@ func New(store *meta.Store, authSvc *auth.Service, opts ...Option) *Engine {
 	e.bgCtx, e.bgCancel = context.WithCancel(context.Background())
 	for _, o := range opts {
 		o(e)
+	}
+	if e.ownerEpoch == "" {
+		// Never empty: an empty owner is what a row from before 000003 carries,
+		// and recovery settles those. See WithOwnerEpoch.
+		e.ownerEpoch = newAttemptID()
 	}
 	// Stamped LAST for the same reason as the caps below: WithSessionLimits
 	// builds a fresh registry, so a reclaimer installed before it would be
@@ -737,19 +744,20 @@ func (e *Engine) reject(ctx context.Context, ident auth.Identity, connID int64, 
 // row atomically. StatusError is honest here: the statement did not execute,
 // and the exec_rejected audit action preserves that it was refused rather than
 // failed by the target.
-func (e *Engine) rejectRecordedAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string, histID int64, cause error) error {
+func (e *Engine) rejectRecordedAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string, att Attempt, cause error) error {
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	errText := truncate(cause.Error(), maxErrorBytes)
 	detail := fmt.Sprintf("conn %d: %v: %s", connID, cause, truncate(sqlText, maxAuditSQLBytes))
 	if err := dao.RunTx(recCtx, func(tx *dao.Transaction) error {
-		if err := e.auth.AuditTx(tx, ident.UserID(), ip, "exec_rejected", detail); err != nil {
+		if err := e.auth.AuditTxRecord(tx, auth.AuditRecord{UserID: ident.UserID(), IP: ip,
+			Action: "exec_rejected", Detail: detail, AttemptID: att.ID, ConnID: connID}); err != nil {
 			return err
 		}
-		if !e.history || histID == 0 {
+		if !e.history || att.HistID == 0 {
 			return nil
 		}
-		if err := e.store.History.On(tx).With(meta.HistID, histID).
+		if err := e.store.History.On(tx).With(meta.HistID, att.HistID).
 			Set(meta.HistStatus, StatusError).Set(meta.HistError, errText).
 			Update(); err != nil {
 			return fmt.Errorf("exec: completing refused history: %w", err)
@@ -763,14 +771,14 @@ func (e *Engine) rejectRecordedAttempt(ctx context.Context, ident auth.Identity,
 
 // recordAttempt writes the pre-execution audit row and, when history is on,
 // the pending history row; it returns that row's id (0 when history is off).
-func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText, txID string) (int64, error) {
+func (e *Engine) recordAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText, txID string) (Attempt, error) {
 	return e.recordAttemptTagged(ctx, nil, ident, connID, ip, sqlText, txID, "")
 }
 
 // recordAttemptTagged is recordAttempt with a session tag appended to the audit
 // detail — "session <id> app <label>" for wire units (matrix claim
 // 3.1:application_name#session-audit), empty for token units.
-func (e *Engine) recordAttemptTagged(ctx context.Context, s *session, ident auth.Identity, connID int64, ip, sqlText, txID, tag string) (int64, error) {
+func (e *Engine) recordAttemptTagged(ctx context.Context, s *session, ident auth.Identity, connID int64, ip, sqlText, txID, tag string) (Attempt, error) {
 	// The session's own record of what it is doing, kept here because this is
 	// the single point every attempted statement passes through. nil on the
 	// sessionless token path.
@@ -778,30 +786,34 @@ func (e *Engine) recordAttemptTagged(ctx context.Context, s *session, ident auth
 		s.noteStatement(sqlText)
 	}
 	script := truncate(sqlText, maxAuditSQLBytes)
-	var histID int64
+	// The identity is minted HERE, the one point every attempted statement
+	// passes through, and nowhere else: this is the dispatch decision.
+	att := Attempt{ID: newAttemptID()}
 	err := dao.RunTx(ctx, func(tx *dao.Transaction) error {
-		if err := e.auth.AuditTxCorrelated(tx, ident.UserID(), ip, "exec",
-			fmt.Sprintf("conn %d: %s%s", connID, script, auditTagSuffix(tag)), txID); err != nil {
+		if err := e.auth.AuditTxRecord(tx, auth.AuditRecord{UserID: ident.UserID(), IP: ip,
+			Action: "exec", Detail: fmt.Sprintf("conn %d: %s%s", connID, script, auditTagSuffix(tag)),
+			TxID: txID, AttemptID: att.ID, ConnID: connID}); err != nil {
 			return err
 		}
 		if !e.history {
 			return nil
 		}
 		var terr error
-		histID, terr = e.store.History.On(tx).
+		att.HistID, terr = e.store.History.On(tx).
 			Set(meta.HistUserID, ident.UserID()).Set(meta.HistConnID, connID).
 			Set(meta.HistIP, ip).Set(meta.HistScript, script).
 			Set(meta.HistStartedAt, e.now().Unix()).
 			Set(meta.HistDurationMS, int64(0)).Set(meta.HistRowCount, int64(0)).
 			Set(meta.HistStatus, StatusRunning).Set(meta.HistError, "").
 			Set(meta.HistTxID, txID).
+			Set(meta.HistAttemptID, att.ID).Set(meta.HistAttemptOwner, e.ownerEpoch).
 			Insert()
 		if terr != nil {
 			return fmt.Errorf("exec: recording attempt: %w", terr)
 		}
 		return nil
 	})
-	return histID, err
+	return att, err
 }
 
 // recordOutcome appends the result audit row and advances the pending history
@@ -813,7 +825,7 @@ func (e *Engine) recordAttemptTagged(ctx context.Context, s *session, ident auth
 // COMMIT, and possibly by a different process after a crash. It is
 // ok-pending-commit until the boundary says otherwise, and the
 // transaction's terminal is what resolves it — see resolveHistory.
-func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, runErr error, txID string) error {
+func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, att Attempt, dur time.Duration, rows int64, runErr error, txID string) error {
 	status, errText := StatusOK, ""
 	switch {
 	case runErr != nil:
@@ -821,20 +833,20 @@ func (e *Engine) recordOutcome(ctx context.Context, ident auth.Identity, connID 
 	case txID != "":
 		status = StatusPendingCommit
 	}
-	return e.writeOutcome(ctx, ident, connID, ip, histID, dur, rows, status, errText, txID)
+	return e.writeOutcome(ctx, ident, connID, ip, att, dur, rows, status, errText, txID)
 }
 
 // writeOutcome records an attempt's outcome under an explicit status. The raw
 // wire producer uses it to record a statement that RAN and was then discarded
 // by the target's implicit-transaction rollback as StatusRolledBack — neither
 // ok (its effect is gone) nor error (it did not fail).
-func (e *Engine) writeOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status HistStatus, errText, txID string) error {
-	return e.writeOutcomeTagged(ctx, ident, connID, ip, histID, dur, rows, status, errText, txID, "")
+func (e *Engine) writeOutcome(ctx context.Context, ident auth.Identity, connID int64, ip string, att Attempt, dur time.Duration, rows int64, status HistStatus, errText, txID string) error {
+	return e.writeOutcomeTagged(ctx, ident, connID, ip, att, dur, rows, status, errText, txID, "")
 }
 
 // writeOutcomeTagged is writeOutcome with the session tag on the audit line.
-func (e *Engine) writeOutcomeTagged(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status HistStatus, errText, txID, tag string) error {
-	return e.writeOutcomeSuspended(ctx, ident, connID, ip, histID, dur, rows, status, errText, txID, tag, false)
+func (e *Engine) writeOutcomeTagged(ctx context.Context, ident auth.Identity, connID int64, ip string, att Attempt, dur time.Duration, rows int64, status HistStatus, errText, txID, tag string) error {
+	return e.writeOutcomeSuspended(ctx, ident, connID, ip, att, dur, rows, status, errText, txID, tag, false)
 }
 
 // writeOutcomeSuspended is writeOutcomeTagged plus the SUSPENSION axis.
@@ -847,23 +859,25 @@ func (e *Engine) writeOutcomeTagged(ctx context.Context, ident auth.Identity, co
 // The default is false through writeOutcomeTagged, which is correct for every
 // caller that cannot suspend: only an Execute with a row limit can, and a
 // simple Query or a completing Execute is finished by definition.
-func (e *Engine) writeOutcomeSuspended(ctx context.Context, ident auth.Identity, connID int64, ip string, histID int64, dur time.Duration, rows int64, status HistStatus, errText, txID, tag string, suspended bool) error {
+func (e *Engine) writeOutcomeSuspended(ctx context.Context, ident auth.Identity, connID int64, ip string, att Attempt, dur time.Duration, rows int64, status HistStatus, errText, txID, tag string, suspended bool) error {
 	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		// SUSPENDED APPEARS IN THE AUDIT LINE TOO, not only in the history
 		// row. The two surfaces answer the same question for different
 		// readers, and an audit line that said `ok` for a page while the
 		// history row knew better would be the original defect with one extra
 		// place to look.
-		if err := e.auth.AuditTxCorrelated(tx, ident.UserID(), ip, "exec_result",
-			fmt.Sprintf("conn %d (%s%s, %d row(s), %dms)%s%s", connID, status,
+		if err := e.auth.AuditTxRecord(tx, auth.AuditRecord{UserID: ident.UserID(), IP: ip,
+			Action: "exec_result",
+			Detail: fmt.Sprintf("conn %d (%s%s, %d row(s), %dms)%s%s", connID, status,
 				suspendedSuffix(suspended), rows, dur.Milliseconds(),
-				errSuffix(errText), auditTagSuffix(tag)), txID); err != nil {
+				errSuffix(errText), auditTagSuffix(tag)),
+			TxID: txID, AttemptID: att.ID, ConnID: connID}); err != nil {
 			return err
 		}
-		if !e.history || histID == 0 {
+		if !e.history || att.HistID == 0 {
 			return nil
 		}
-		if err := e.store.History.On(tx).With(meta.HistID, histID).
+		if err := e.store.History.On(tx).With(meta.HistID, att.HistID).
 			Set(meta.HistDurationMS, dur.Milliseconds()).
 			Set(meta.HistRowCount, rows).
 			Set(meta.HistStatus, status).Set(meta.HistError, errText).

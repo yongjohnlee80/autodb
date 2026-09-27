@@ -159,12 +159,26 @@ func startedEngine(t *testing.T, cfg config.Config, lost <-chan struct{}) (*core
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
-	eng, serveCtx, _, stop, err := startEngine(t.Context(), cfg, store, svc, lost, func(string) {})
+	eng, serveCtx, _, stop, err := startEngine(t.Context(), cfg, store, svc, lost, wiredEpoch, func(string) {})
 	if err != nil {
 		t.Fatalf("startEngine: %v", err)
 	}
 	t.Cleanup(func() { stop(); _ = eng.Close() })
 	return eng, serveCtx, store, svc, tok
+}
+
+// wiredEpoch stands in for the lease's epoch in startedEngine.
+const wiredEpoch = "0123456789abcdef0123456789abcdef"
+
+// The daemon stamps attempts with the LEASE's epoch, the one startEngine is
+// handed — recovery settles attempts whose epoch is not the serving daemon's,
+// and that is sound only because the lease is exclusive. An engine that minted
+// its own instead would stamp an epoch the lease never vouched for.
+func TestStartEngineStampsAttemptsWithTheLeaseEpoch(t *testing.T) {
+	eng, _, _, _, _ := startedEngine(t, execConfig(), make(chan struct{}))
+	if got := eng.OwnerEpoch(); got != wiredEpoch {
+		t.Errorf("startEngine's engine stamps epoch %q, want the lease's %q", got, wiredEpoch)
+	}
 }
 
 func execConfig() config.Config {
@@ -410,7 +424,7 @@ func TestStartEngine_RollsPartitionsAtStartup(t *testing.T) {
 
 	// THE PRODUCTION PATH.
 	eng, _, _, stop, err := startEngine(ctx, execConfig(), store, svc,
-		make(chan struct{}), func(string) {})
+		make(chan struct{}), "", func(string) {})
 	if err != nil {
 		t.Fatalf("startEngine refused to start: %v", err)
 	}
@@ -474,7 +488,7 @@ func TestStartEngine_RefusesAStoreWithDuplicateLogicalIDs(t *testing.T) {
 	}
 
 	eng, _, _, stop, err := startEngine(ctx, execConfig(), store, svc,
-		make(chan struct{}), func(string) {})
+		make(chan struct{}), "", func(string) {})
 	if err == nil {
 		stop()
 		_ = eng.Close()

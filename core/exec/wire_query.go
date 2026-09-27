@@ -358,7 +358,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 
 	// outcome is recorded per statement once the buffer has run or stopped.
 	type outcome struct {
-		attempt int64
+		attempt Attempt
 		txID    string
 		rows    int64
 		status  HistStatus

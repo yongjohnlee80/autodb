@@ -53,10 +53,10 @@ func TestAuditLine_CarriesTheSuspensionMarker(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			// histID 0: this cell is about the AUDIT line, and 0 skips the
+			// HistID 0: this cell is about the AUDIT line, and 0 skips the
 			// history update. The history column has its own cells; asserting
 			// both here would let one carry the other.
-			if err := f.eng.writeOutcomeSuspended(ctx, ident, f.connID, testIP, 0,
+			if err := f.eng.writeOutcomeSuspended(ctx, ident, f.connID, testIP, Attempt{ID: newAttemptID()},
 				7*time.Millisecond, 3, StatusOK, "", "", "", tc.suspended); err != nil {
 				t.Fatalf("writeOutcomeSuspended: %v", err)
 			}

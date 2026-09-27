@@ -2,6 +2,8 @@ package meta
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/yongjohnlee80/autodb/core/engine"
@@ -61,6 +63,13 @@ var ErrLeaseHeld = errors.New("meta: another autodb instance is already serving 
 type InstanceLease struct {
 	// target identifies the store covered by this lease (file path or redacted DSN).
 	target string
+
+	// epoch names this holding of the lease: random, minted when it is
+	// acquired, the same for the process's lifetime. Statement attempts are
+	// stamped with it (schema script 000003), and it is what makes recovery
+	// sound: the lease is exclusive, so while this process holds it an
+	// attempt stamped with ANY other epoch belongs to a process that is gone.
+	epoch string
 
 	mu       sync.Mutex
 	released bool
@@ -157,7 +166,7 @@ func acquireFileLease(path string) (*InstanceLease, error) {
 		// An in-memory store is private to the process by construction, so
 		// there is nothing to exclude. Returning a released lease keeps the
 		// caller's shape identical rather than making the gate optional.
-		return &InstanceLease{target: ":memory:", released: true}, nil
+		return &InstanceLease{target: ":memory:", released: true, epoch: newEpoch()}, nil
 	}
 	if path == "" {
 		p, err := DefaultPath()
@@ -214,7 +223,7 @@ func acquireFileLease(path string) (*InstanceLease, error) {
 		_ = info.Close()
 	}
 
-	return &InstanceLease{target: path, file: f}, nil
+	return &InstanceLease{target: path, file: f, epoch: newEpoch()}, nil
 }
 
 // --- postgres: an advisory lock on a pinned transaction ---------------------
@@ -276,6 +285,7 @@ func acquirePGLease(ctx context.Context, s *Store, dsn string) (*InstanceLease, 
 
 	l := &InstanceLease{
 		target:     fmt.Sprintf("postgres advisory key %d", key),
+		epoch:      newEpoch(),
 		tx:         tx,
 		beatDone:   make(chan struct{}),
 		beatFailed: make(chan struct{}),
@@ -394,4 +404,18 @@ func serverIdentity(ctx context.Context, q dao.Querier) (sysID, dbOID int64, err
 		return 0, 0, serr
 	}
 	return sysID, dbOID, nil
+}
+
+// Epoch is this holding's identity; see InstanceLease.epoch.
+func (l *InstanceLease) Epoch() string { return l.epoch }
+
+// newEpoch mints 128 random bits as 32 hex characters.
+func newEpoch() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// A dead entropy source is a broken host; an epoch that is not
+		// unique would let recovery settle a live process's attempts.
+		panic(fmt.Sprintf("meta: lease epoch: %v", err))
+	}
+	return hex.EncodeToString(b[:])
 }
