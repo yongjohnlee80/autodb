@@ -158,7 +158,9 @@ var publicErrs = []struct {
 	{exec.ErrReadOnlyUnenforceable, CodeStatementRejected},
 	{exec.ErrGrammarDrifted, CodeStatementRejected},
 	{exec.ErrConnectionNameTaken, golibrpc.CodeInvalidParams},
-	{exec.ErrConnectionHasHistory, golibrpc.CodeInvalidParams},
+	// An archived connection refuses use and change. Its constant text names
+	// no connection — the caller named it — so publishing it discloses nothing.
+	{exec.ErrConnectionArchived, golibrpc.CodeInvalidParams},
 	// Workspace not-found is admin-only reachable (Manage authz runs
 	// BEFORE the lookup, so R13 ordering holds) and carries no internals.
 	{exec.ErrWorkspaceNotFound, golibrpc.CodeInvalidParams},
@@ -1477,7 +1479,13 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErr(s.eng.DeleteConnection(ctx, token, connID, peerIP(req)))
+		// A connection with history is ARCHIVED rather than deleted; the
+		// caller is told which.
+		archived, derr := s.eng.DeleteConnection(ctx, token, connID, peerIP(req))
+		if derr != nil {
+			return nil, s.wireErr(derr)
+		}
+		return map[string]any{"archived": archived}, nil
 	})
 	// frontdoor.endpoint reports what a client must dial. It takes the bearer
 	// token and re-resolves authority like every other privileged verb

@@ -920,9 +920,16 @@ func (b *Bound) TestConnection(ctx context.Context, connID int64) error {
 	return err
 }
 
-func (b *Bound) DeleteConnection(ctx context.Context, connID int64) error {
-	_, err := b.authed(ctx, "conn.delete", connID)
-	return err
+// DeleteConnection deletes a connection, or archives it when it has history,
+// and reports which. An older daemon sends no "archived": it refused the
+// delete of a connection with history instead, so false is its truth.
+func (b *Bound) DeleteConnection(ctx context.Context, connID int64) (archived bool, err error) {
+	res, err := b.authed(ctx, "conn.delete", connID)
+	if err != nil {
+		return false, err
+	}
+	m, _ := res.(map[string]any)
+	return mB(m, "archived"), nil
 }
 
 // WorkspaceInfo is one workspace view row.

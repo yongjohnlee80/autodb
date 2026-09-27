@@ -171,18 +171,19 @@ func TestEngine_ConnectionManagement(t *testing.T) {
 		t.Errorf("TestConnection: %v", err)
 	}
 
-	// Deletion: refused while history exists; fine for an unused one.
+	// Deletion: a connection with history is archived (archive_test.go
+	// holds what that means); an unused one is deleted.
 	f.exec(t, f.rootTok, "CREATE TABLE t (id INTEGER PRIMARY KEY)") // creates history
-	if err := f.eng.DeleteConnection(ctx, f.rootTok, f.connID, testIP); !errors.Is(err, ErrConnectionHasHistory) {
-		t.Errorf("DeleteConnection with history = %v, want ErrConnectionHasHistory", err)
+	if archived, err := f.eng.DeleteConnection(ctx, f.rootTok, f.connID, testIP); err != nil || !archived {
+		t.Errorf("DeleteConnection with history = archived %v, %v; want archived", archived, err)
 	}
 	spare, err := f.eng.CreateConnection(ctx, f.rootTok, "spare", "sqlite",
 		fmt.Sprintf("file:spare%d?mode=memory&cache=shared", fixtureSeq.Add(1)), testIP)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := f.eng.DeleteConnection(ctx, f.rootTok, spare, testIP); err != nil {
-		t.Errorf("DeleteConnection(spare): %v", err)
+	if archived, err := f.eng.DeleteConnection(ctx, f.rootTok, spare, testIP); err != nil || archived {
+		t.Errorf("DeleteConnection(spare) = archived %v, %v; want deleted", archived, err)
 	}
 }
 

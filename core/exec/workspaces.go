@@ -130,8 +130,10 @@ func (e *Engine) AttachConnection(ctx context.Context, token string, wsID, connI
 			}
 			return terr
 		}
-		if _, terr := e.store.Connections.On(tx).With(meta.ConnID, connID).Get(); terr != nil {
+		if c, terr := e.store.Connections.On(tx).With(meta.ConnID, connID).Get(); terr != nil {
 			return terr
+		} else if c.IsArchived() {
+			return fmt.Errorf("%w: %q", ErrConnectionArchived, c.Name)
 		}
 		existing, terr := e.store.WorkspaceConns.On(tx).
 			With(meta.WcWsID, wsID).With(meta.WcConnID, connID).Select()
@@ -192,6 +194,9 @@ func (e *Engine) ListWorkspaces(ctx context.Context, token string) ([]WorkspaceV
 	}
 	connByID := make(map[int64]*meta.Connection, len(conns))
 	for _, c := range conns {
+		if c.IsArchived() {
+			continue // its links went with the archive; it is in no workspace
+		}
 		connByID[c.ID] = c
 	}
 

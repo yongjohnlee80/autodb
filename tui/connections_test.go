@@ -70,9 +70,8 @@ func TestAddingAConnection(t *testing.T) {
 	s.WaitFor(t, "created", func(sc string) bool { return strings.Contains(sc, "create delta: ok") && strings.Contains(sc, "delta") })
 }
 
-// Delete asks first; Keep leaves the connection, Delete sends the request and
-// shows the daemon's answer — bravo has recorded history, which the daemon
-// keeps it for.
+// Delete asks first; Keep leaves the connection; Delete, on bravo, which has
+// recorded history, ARCHIVES it: the manager says so and no longer lists it.
 func TestDeletingAConnectionAsksFirst(t *testing.T) {
 	_, s := signedIn(t)
 	openConnections(t, s)
@@ -85,5 +84,7 @@ func TestDeletingAConnectionAsksFirst(t *testing.T) {
 	s.Keys(t, key('d'))
 	s.WaitForText(t, "┌ delete connection ")
 	s.Keys(t, key('d')) // Delete
-	s.WaitForText(t, "delete bravo: exec: connection has recorded history")
+	s.WaitFor(t, "archived", func(sc string) bool {
+		return strings.Contains(sc, "archived bravo: its history is kept") && !rowBelow(s, "┌ connections ", "bravo  ")
+	})
 }

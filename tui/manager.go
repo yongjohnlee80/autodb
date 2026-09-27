@@ -100,20 +100,35 @@ func (m *manager[T]) reproject() {
 // managerCall runs what under m's pinned connection, says how it went on
 // m's help line, and reloads m and the explorer when it went well.
 func managerCall[T any](h *Host, m *manager[T], what string, fn func(context.Context, *Bound) error) {
+	managerCallSaying(h, m, what, func(ctx context.Context, b *Bound) (string, error) {
+		return what + ": ok", fn(ctx, b)
+	})
+}
+
+// managerCallSaying is managerCall for a call whose success has more to say
+// than "ok": fn returns the line shown once the rows are back.
+func managerCallSaying[T any](h *Host, m *manager[T], what string, fn func(context.Context, *Bound) (string, error)) {
 	bound := m.bound
 	if bound == nil {
 		return
 	}
-	do(h, func(ctx context.Context) error { return fn(ctx, bound) }, func(err error) {
+	type answered struct {
+		said string
+		err  error
+	}
+	do(h, func(ctx context.Context) answered {
+		said, err := fn(ctx, bound)
+		return answered{said, err}
+	}, func(a answered) {
 		if bound != m.bound || bound.Gen() != h.session.Gen() || bound.IdentityEpoch() != h.session.IdentityEpoch() {
 			h.set(m.status, what+": the connection changed — nothing was done here")
 			return
 		}
-		if err != nil {
-			h.set(m.status, what+": "+WireErrorMessage(err))
+		if a.err != nil {
+			h.set(m.status, what+": "+WireErrorMessage(a.err))
 			return
 		}
-		reloadManager(h, m, what+": ok")
+		reloadManager(h, m, a.said)
 		h.reloadExplorer()
 	})
 }

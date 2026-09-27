@@ -254,9 +254,17 @@ func (h *Host) connectionDelete(i int) error {
 		h.set(h.conns.status, "choose a connection first")
 		return nil
 	}
-	h.confirm("delete connection", "Delete "+c.Name+"? Its grants and workspace links go with it. This cannot be undone.",
+	h.confirm("delete connection", "Delete "+c.Name+"? Its grants and workspace links go with it. "+
+		"If it has history, it is ARCHIVED instead: its credentials are wiped, its access tokens revoked, "+
+		"and its history kept under the name \""+c.Name+" (archived)\". This cannot be undone.",
 		"&Delete", "&Keep", func() {
-			managerCall(h, h.conns, "delete "+c.Name, func(ctx context.Context, b *Bound) error { return b.DeleteConnection(ctx, c.ID) })
+			managerCallSaying(h, h.conns, "delete "+c.Name, func(ctx context.Context, b *Bound) (string, error) {
+				archived, err := b.DeleteConnection(ctx, c.ID)
+				if archived {
+					return "archived " + c.Name + ": its history is kept", err
+				}
+				return "delete " + c.Name + ": ok", err
+			})
 		})
 	return nil
 }

@@ -324,9 +324,18 @@ func TestConnectionLifecycleRefusalsAreMappedOverWire(t *testing.T) {
 	if errVal, _ = c.call("exec.run", f.rootTok, f.connID, "SELECT 1"); errVal != nil {
 		t.Fatalf("seeding connection history: %#v", errVal)
 	}
+	// A connection with history is archived, and the answer says so; a second
+	// delete of it is refused with the archived sentinel.
+	errVal, res := c.call("conn.delete", f.rootTok, f.connID)
+	if errVal != nil {
+		t.Fatalf("deleting a connection with history: %#v", errVal)
+	}
+	if m, _ := res.(map[string]any); m["archived"] != true {
+		t.Fatalf("conn.delete answered %#v, want archived true", res)
+	}
 	errVal, _ = c.call("conn.delete", f.rootTok, f.connID)
-	if msg := mustErr(t, errVal, golibrpc.CodeInvalidParams); msg != exec.ErrConnectionHasHistory.Error() {
-		t.Fatalf("history-blocked deletion message = %q, want opaque sentinel %q", msg, exec.ErrConnectionHasHistory)
+	if msg := mustErr(t, errVal, golibrpc.CodeInvalidParams); !strings.Contains(msg, exec.ErrConnectionArchived.Error()) {
+		t.Fatalf("deleting an archived connection: message %q, want the archived sentinel %q", msg, exec.ErrConnectionArchived)
 	}
 }
 

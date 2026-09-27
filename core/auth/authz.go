@@ -149,6 +149,9 @@ func (s *Service) AddGrant(ctx context.Context, token string, userID, connID int
 		return fmt.Errorf("auth: invalid grant role %q", role)
 	}
 	return s.inTx(ctx, func(tx *dao.Transaction) error {
+		if c, cerr := s.store.Connections.On(tx).With(meta.ConnID, connID).Get(); cerr == nil && c.IsArchived() {
+			return fmt.Errorf("%w: %q", meta.ErrConnectionArchived, c.Name)
+		}
 		_, err := s.store.Grants.On(tx).
 			Set(meta.GrantUserID, userID).Set(meta.GrantConnID, connID).
 			Set(meta.GrantRole, role).Set(meta.GrantGrantedBy, actor.userID).
