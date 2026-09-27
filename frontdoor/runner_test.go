@@ -740,6 +740,7 @@ func TestOutcomes_TheRegistryMatchesItsManifestExactly(t *testing.T) {
 	// Sorted by producer then identity, so a diff reads.
 	want := []row{
 		{"accept", "frontdoor/connection-cap", outcome.Refusal, outcome.Capacity},
+		{"accept", "frontdoor/server-stopping", outcome.Refusal, outcome.Capacity},
 		{"accept", "frontdoor/control-lane-exhausted", outcome.Refusal, outcome.Capacity},
 		{"accept", "frontdoor/pre-auth-connection-cap", outcome.Refusal, outcome.Capacity},
 		{"accept", "frontdoor/source-connection-cap", outcome.Refusal, outcome.Capacity},

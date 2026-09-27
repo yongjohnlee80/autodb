@@ -777,6 +777,13 @@ func (e *Engine) WireSyncSegment(ctx context.Context, id SessionID, userID int64
 // is the one condition the ADR names because it is the one that gets missed.
 func (e *Engine) WireExecutePortal(ctx context.Context, id SessionID, userID int64,
 	portalName string, maxRows uint32, ip string, emit func(WireMessage) error) error {
+	// The statement gate: an idle shutdown's decision counts this statement
+	// from here until it returns, its terminal recorded (idle_shutdown.go).
+	leave, err := e.enterStatement()
+	if err != nil {
+		return err
+	}
+	defer leave()
 
 	if emit == nil {
 		return ErrWireEmitNil

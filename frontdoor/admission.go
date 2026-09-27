@@ -79,7 +79,19 @@ const (
 const failureSweepThreshold = 4096
 
 // admitter holds the accept-time counters and the per-source failure window.
+// WireGate is the engine's front-door admission: an idle shutdown closes it
+// in the same decision that finds no client connected (core/exec
+// idle_shutdown.go). While it is closed a connection is refused at accept.
+type WireGate interface {
+	AdmitWireConnection() (release func(), ok bool)
+}
+
 type admitter struct {
+	// gate is consulted BEFORE mu is taken, and its slot is held for the
+	// connection's whole life, so the engine's count is every connection this
+	// admitter has let in. Nil admits every connection.
+	gate WireGate
+
 	mu       sync.Mutex
 	conns    int
 	preAuth  int
@@ -145,6 +157,8 @@ type ticket struct {
 	mu        sync.Mutex
 	inPreAuth bool
 	released  bool
+	// gateRelease returns the engine's wire-admission slot; nil without a gate.
+	gateRelease func()
 }
 
 // admit reserves a connection's capacity, or names the reason it cannot.
@@ -156,6 +170,30 @@ type ticket struct {
 // closing: the decision is keyed on the source address alone, so it answers
 // no question the peer could not already answer about itself.
 func (a *admitter) admit(peer string) (*ticket, denialReason) {
+	// THE ENGINE'S GATE FIRST, outside a.mu: its lock and this one are never
+	// held together. A slot taken here is given back if this admitter then
+	// refuses, and otherwise travels with the ticket.
+	var gateRelease func()
+	if a.gate != nil {
+		rel, ok := a.gate.AdmitWireConnection()
+		if !ok {
+			return nil, reasonServerStopping
+		}
+		gateRelease = rel
+	}
+	t, reason := a.admitLocked(peer)
+	if t == nil {
+		if gateRelease != nil {
+			gateRelease()
+		}
+		return nil, reason
+	}
+	t.gateRelease = gateRelease
+	return t, reason
+}
+
+// admitLocked is admit's own reservation, under a.mu.
+func (a *admitter) admitLocked(peer string) (*ticket, denialReason) {
 	host := hostOf(peer)
 	now := a.now()
 
@@ -218,6 +256,9 @@ func (t *ticket) release() {
 		return
 	}
 	t.released = true
+	if t.gateRelease != nil {
+		defer t.gateRelease() // after a.mu is released below: never held together
+	}
 	t.a.mu.Lock()
 	t.a.conns--
 	if t.inPreAuth {

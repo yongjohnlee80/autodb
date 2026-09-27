@@ -322,6 +322,10 @@ func TestFrontDoorOptions_CarryEverySeam(t *testing.T) {
 	if opts.Cancels == nil {
 		t.Error("Options.Cancels is nil: CancelRequest would resolve to nothing")
 	}
+	if opts.Gate == nil {
+		t.Error("Options.Gate is nil: an idle restart would count no client connected " +
+			"and then admit one before it stops, which the restart drops")
+	}
 }
 
 // TestFrontDoorOptions_SeamsAreTheEngine checks WHAT was wired, not merely that

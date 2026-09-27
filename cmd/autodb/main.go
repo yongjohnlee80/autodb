@@ -751,6 +751,9 @@ func frontDoorOptions(cfg config.Config, eng *coreexec.Engine, oplog logger.Logg
 	return frontdoor.Options{
 		Authn:   eng,
 		Cancels: eng,
+		// The wire gate an idle restart closes: without it the restart could
+		// admit a client between counting none and stopping.
+		Gate: eng,
 		// The post-auth query path. Without it the listener authenticates a
 		// client and then refuses every statement it sends.
 		Queries: eng,

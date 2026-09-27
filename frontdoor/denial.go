@@ -98,6 +98,9 @@ const (
 	// connection closed, which is all a peer refused for anything learns.
 	reasonSourceThrottled denialReason = "frontdoor/source-ip-throttled"
 	reasonConnectionCap   denialReason = "frontdoor/connection-cap"
+	// reasonServerStopping: an idle shutdown has closed wire admission; the
+	// daemon is restarting and a new one will accept.
+	reasonServerStopping denialReason = "frontdoor/server-stopping"
 	// reasonSourceConnCap: one address already holds its share of concurrent
 	// connections. Distinct from reasonSourceThrottled, which is about FAILED
 	// credentials: this peer may have presented nothing wrong at all and is

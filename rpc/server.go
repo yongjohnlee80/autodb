@@ -45,8 +45,9 @@ import (
 // text now runs in one transaction. Same verb, different meaning, so the
 // handshake has to separate them.
 // Protocol 9 added history.search (history filtered and paged),
-// dispositions.list (what attempts ended as) and audit.search (the audit log,
-// filtered and paged).
+// dispositions.list (what attempts ended as), audit.search (the audit log,
+// filtered and paged) and sys.restart_if_idle (stop only if nothing would be
+// interrupted, for an update to take effect).
 // Protocol 8 added sys.inflight -- what a restart would interrupt, which the
 // restart confirmation has to name before it asks.
 // Protocol 4 added exec.run_script (3 added history.list and sys.shutdown). BUMP THIS whenever the
