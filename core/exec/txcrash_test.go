@@ -68,6 +68,10 @@ func TestMain(m *testing.M) {
 // by TestSessionTx_OpenedIsWrittenAheadOfTheTargetBegin, which reads the
 // ordering off the log the production path produced.
 func runCrashChild(phase string) {
+	if phase == attemptCrashPhase {
+		runAttemptChild()
+		return
+	}
 	ctx := context.Background()
 	fail := func(format string, a ...any) {
 		fmt.Fprintf(os.Stdout, "CHILD-ERROR: "+format+"\n", a...)
