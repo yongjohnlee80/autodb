@@ -86,6 +86,15 @@ func (h *Host) commands() map[string]decl.HandlerFunc {
 		"App.historyClearFilter":     none(h.historyClearFilter),
 		"App.historyNextPage":        none(h.historyNextPage),
 		"App.historyPrevPage":        none(h.historyPrevPage),
+		"App.auditClosed":            none(h.auditClosed),
+		"App.auditFilter":            none(h.auditFilterOpen),
+		"App.auditFilterCancelled":   none(h.auditFilterCancelled),
+		"App.auditClearFilter":       none(h.auditClearFilter),
+		"App.auditNextPage":          none(h.auditNextPage),
+		"App.auditPrevPage":          none(h.auditPrevPage),
+		"App.auditFilterApply": strings_("App.auditFilterApply", 6, func(v []string) error {
+			return h.auditFilterApply(v[0], v[1], v[2], v[3], v[4], v[5])
+		}),
 		"App.historyFilterApply": strings_("App.historyFilterApply", 6, func(v []string) error {
 			return h.historyFilterApply(v[0], v[1], v[2], v[3], v[4], v[5])
 		}),

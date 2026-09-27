@@ -57,6 +57,7 @@ const (
 	cmdMyIPs         CommandID = "ip.mine"
 	cmdMyTokens      CommandID = "token.mine"
 	cmdHistory       CommandID = "history.open"
+	cmdAudit         CommandID = "audit.open"
 	cmdCACert        CommandID = "frontdoor.cacert"
 	cmdRefresh       CommandID = "explorer.refresh"
 	cmdAllowlist     CommandID = "ip.allowlist"
@@ -253,6 +254,14 @@ func catalogCommands() []CommandOf[*Host] {
 				Label: "script history…",
 				Help:  "who ran what, when"},
 			Menu: []MenuProjection{{Parent: nodeView, Label: "History…", Hotkey: 'H', Order: 20}},
+		},
+		{
+			// The audit log is every user's, so it is an admin's.
+			ID: cmdAudit, Audience: AudienceAdmin, Run: func(h *Host) { h.openAudit() },
+			Leader: &LeaderProjectionOf[*Host]{Key: 'a', Order: 165,
+				Label: "audit log…",
+				Help:  "everything the server recorded, searchable"},
+			Menu: []MenuProjection{{Parent: nodeSystem, Label: "Audit log (admin)…", Hotkey: 'D', Order: 42}},
 		},
 		{
 			// PUBLIC BY CONSTRUCTION and deliberately not admin-gated: it is

@@ -539,3 +539,10 @@ func (h *Host) SetHistoryPageSize(n int64) {
 	h.p.Post(func() { h.hist.pageSize = n; close(done) })
 	<-done
 }
+
+// SetAuditPageSize makes the audit log page by n rows.
+func (h *Host) SetAuditPageSize(n int64) {
+	done := make(chan struct{})
+	h.p.Post(func() { h.auditNav.pageSize = n; close(done) })
+	<-done
+}

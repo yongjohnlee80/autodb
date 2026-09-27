@@ -1580,3 +1580,75 @@ func (b *Bound) RevokePAT(ctx context.Context, userID int64, name string) error 
 	_, err := b.authed(ctx, "auth.token_revoke", userID, name)
 	return err
 }
+
+// AuditRow is one audit row, as audit.search answers it.
+type AuditRow struct {
+	ID        int64
+	User      string
+	IP        string
+	Action    string
+	Detail    string
+	ConnID    int64
+	Conn      string
+	CreatedAt string
+}
+
+// AuditQuery is an audit search: every field optional, combined with AND.
+type AuditQuery struct {
+	ConnID, WorkspaceID, UserID int64
+	From, To                    int64 // unix seconds, [From, To); 0 is unbounded
+	Actions                     []string
+	Limit                       int64
+	Before                      *AuditCursor
+}
+
+// AuditCursor is where a next audit page starts.
+type AuditCursor struct{ CreatedAt, ID int64 }
+
+// AuditPage is one page of audit.search.
+type AuditPage struct {
+	Rows []AuditRow
+	Next *AuditCursor
+	// ConnFilterSince is when the audit log began recording connections, in
+	// unix seconds (0 if unknown): a connection or workspace filter covers
+	// rows from then on.
+	ConnFilterSince int64
+}
+
+// SearchAudit is one page of audit.search, for an admin.
+func (b *Bound) SearchAudit(ctx context.Context, q AuditQuery) (AuditPage, error) {
+	filter := map[string]any{}
+	for k, v := range map[string]int64{"connection_id": q.ConnID, "workspace_id": q.WorkspaceID,
+		"user_id": q.UserID, "from": q.From, "to": q.To, "limit": q.Limit} {
+		if v != 0 {
+			filter[k] = v
+		}
+	}
+	if len(q.Actions) > 0 {
+		actions := make([]any, len(q.Actions))
+		for i, a := range q.Actions {
+			actions[i] = a
+		}
+		filter["actions"] = actions
+	}
+	if q.Before != nil {
+		filter["before"] = map[string]any{"created_at": q.Before.CreatedAt, "id": q.Before.ID}
+	}
+	res, err := b.authed(ctx, "audit.search", filter)
+	if err != nil {
+		return AuditPage{}, err
+	}
+	m, _ := res.(map[string]any)
+	var page AuditPage
+	for _, row := range asList(m["rows"]) {
+		r, _ := row.(map[string]any)
+		page.Rows = append(page.Rows, AuditRow{ID: mI(r, "id"), User: mS(r, "user"), IP: mS(r, "ip"),
+			Action: mS(r, "action"), Detail: mS(r, "detail"), ConnID: mI(r, "connection_id"),
+			Conn: mS(r, "connection"), CreatedAt: mS(r, "created_at")})
+	}
+	if n, ok := m["next"].(map[string]any); ok {
+		page.Next = &AuditCursor{CreatedAt: mI(n, "created_at"), ID: mI(n, "id")}
+	}
+	page.ConnFilterSince = mI(m, "conn_filter_since")
+	return page, nil
+}

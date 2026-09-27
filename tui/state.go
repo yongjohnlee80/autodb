@@ -94,6 +94,16 @@ func (h *Host) state(theme string) map[string]any {
 	for _, k := range historyFilterIndexes {
 		st[k] = 0
 	}
+	st["App.auditRows"] = h.audit.model
+	st["App.auditStatus"] = auditHelp
+	st["App.auditSince"] = ""
+	st["App.auditSinceShown"] = false
+	st["App.auditConnChoices"] = h.auditNav.conns
+	st["App.auditSpaceChoices"] = h.auditNav.spaces
+	st["App.auditUserChoices"] = h.auditNav.users
+	for _, k := range auditFilterIndexes {
+		st[k] = 0
+	}
 	st["App.caTitle"] = ""
 	st["App.caText"] = ""
 	st["App.caStatus"] = ""

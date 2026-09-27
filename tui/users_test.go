@@ -187,7 +187,7 @@ func TestSelfDemotionRetiresTheOldAdminMenuAudience(t *testing.T) {
 	})
 	s.Keys(t, key(' '))
 	s.WaitForText(t, "SPC — commands")
-	if sc := s.String(); strings.Contains(sc, "u  users") || strings.Contains(sc, "I  ip allowlist") {
+	if sc := s.String(); strings.Contains(sc, "u  users") || strings.Contains(sc, "I  ip allowlist") || strings.Contains(sc, "a  audit log") {
 		t.Fatal("a self-demoted reader kept admin-only menu actions")
 	}
 	verify := tuiapp.NewSession(addr, logger.Nop{}, nil)
