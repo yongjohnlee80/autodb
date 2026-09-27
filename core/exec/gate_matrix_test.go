@@ -119,6 +119,13 @@ const coordinateWindow = 12
 // decision; the test fails if the reason is empty (an exemption without a
 // reason is a shrug).
 var gateMatrixWalkExempt = map[string]string{
+	// The terminal write's duplicate-delivery answers. Raised AFTER a statement
+	// was admitted and ran (or was refused), when its outcome is recorded — by
+	// the recorder, never by an admission stage.
+	"ErrDispositionConflict": "a terminal for an attempt that already has a different disposition; " +
+		"raised by the outcome recorder after admission, not by an admission stage — the gate never sees it",
+	"ErrNoAttempt": "a terminal for an attempt with no history row (a writer bug); raised by the outcome " +
+		"recorder after admission, not by an admission stage — the gate never sees it",
 	// the connection-budget policy's aggregate connection budget. It is declared and enforced by
 	// the permit ledger, but it is NOT a gate refusal: no admission stage can
 	// produce it: it is raised by the dialer before a socket exists.
