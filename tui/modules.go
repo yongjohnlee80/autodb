@@ -58,24 +58,13 @@ func (h *Host) modulesFrom(files fs.FS) []tuidecl.ProgramOption {
 	}, screenModules(files)...)
 }
 
-// screenModules are the screens built so far, one component per file, each
-// imported by its folder's module. The rest of the design waits in
-// qml/blueprint/ until its stage builds it (blueprintModules).
+// screenModules are the program's screens, one component per file, each
+// imported by its folder's module.
 func screenModules(files fs.FS) []tuidecl.ProgramOption {
 	return []tuidecl.ProgramOption{
 		tuidecl.Components(files, "views", "autodb.views", moduleVersion),
 		tuidecl.Components(files, "dialogs", "autodb.dialogs", moduleVersion),
 		tuidecl.Components(files, "panels", "autodb.panels", moduleVersion),
 		tuidecl.Components(files, "managers", "autodb.managers", moduleVersion),
-	}
-}
-
-// blueprintModules are the design's components not built yet, under the same
-// module names, for the blueprint's own checks.
-func blueprintModules(files fs.FS) []tuidecl.ProgramOption {
-	return []tuidecl.ProgramOption{
-		tuidecl.Components(files, "blueprint/views", "autodb.views", moduleVersion),
-		tuidecl.Components(files, "blueprint/dialogs", "autodb.dialogs", moduleVersion),
-		tuidecl.Components(files, "blueprint/managers", "autodb.managers", moduleVersion),
 	}
 }
