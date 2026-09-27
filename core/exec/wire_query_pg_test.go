@@ -674,3 +674,45 @@ func TestWireQueryRaw_EmitterFailureStillAppliesTheDrainedStatus(t *testing.T) {
 		t.Fatalf("ROLLBACK: %v", rb.err)
 	}
 }
+
+// A client that disconnects part-way through an IMPLICIT block leaves every
+// statement's EFFECT unresolvable — the block may have rolled back — but the
+// ATTEMPTS differ: one whose CommandComplete the engine saw completed; one
+// whose end nobody saw is unknown. Read off status alone, both would be one.
+func TestWireQueryRaw_ACutImplicitBlockKeepsTheObservedCompletion(t *testing.T) {
+	f, connID, sid, _, userID := pgWireSession(t)
+	f.eng.history = true
+	ctx := context.Background()
+	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {
+		t.Fatalf("ROLLBACK the fixture's transaction: %v", rb.err)
+	}
+	table := fmt.Sprintf("raw_cutblock_%d", fixtureSeq.Add(1))
+	if _, err := f.eng.Execute(ctx, f.rootTok, connID, "CREATE TABLE "+table+" (n int4)", testIP); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = f.eng.Execute(context.Background(), f.rootTok, connID, "DROP TABLE IF EXISTS "+table, testIP)
+	})
+	ins, sel := "INSERT INTO "+table+" VALUES (1)", "SELECT n FROM "+table
+	gone := errors.New("the client went away")
+	sawFirst := false
+	_, err := f.eng.WireQuery(ctx, sid, userID, ins+"; "+sel, testIP, func(m WireMessage) error {
+		if sawFirst {
+			return gone // the SELECT's first frame: the client is gone
+		}
+		if m.Kind == "CommandComplete" {
+			sawFirst = true
+		}
+		return nil
+	})
+	if !errors.Is(err, gone) {
+		t.Fatalf("WireQuery = %v, want the emitter's error", err)
+	}
+	h := histRows(t, f, connID, ins, sel)
+	if h[0].Status != StatusUnresolvable || h[0].Disposition != meta.DispositionCompleted {
+		t.Errorf("the observed INSERT: %q/%q, want outcome_unresolvable/completed", h[0].Status, h[0].Disposition)
+	}
+	if h[1].Status != StatusUnresolvable || h[1].Disposition != meta.DispositionUnknown {
+		t.Errorf("the unobserved SELECT: %q/%q, want outcome_unresolvable/unknown", h[1].Status, h[1].Disposition)
+	}
+}

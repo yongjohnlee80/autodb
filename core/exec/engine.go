@@ -741,30 +741,42 @@ func (e *Engine) reject(ctx context.Context, ident auth.Identity, connID int64, 
 }
 
 // rejectRecordedAttempt records the terminal refusal and advances the history
-// row atomically. StatusError is honest here: the statement did not execute,
-// and the exec_rejected audit action preserves that it was refused rather than
-// failed by the target.
+// row atomically.
+//
+// The disposition is `refused`; the status stays `error`, which is what every
+// reader before dispositions saw for a refusal (the statement did not execute,
+// and the exec_rejected action told the two apart). The terminal goes through
+// settleTx, so a repeated refusal is a no-op and a refusal of an attempt that
+// already ended another way is a conflict — reported beside the refusal, which
+// is still the caller's answer.
 func (e *Engine) rejectRecordedAttempt(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string, att Attempt, cause error) error {
 	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	errText := truncate(cause.Error(), maxErrorBytes)
 	detail := fmt.Sprintf("conn %d: %v: %s", connID, cause, truncate(sqlText, maxAuditSQLBytes))
+	var conflict error
 	if err := dao.RunTx(recCtx, func(tx *dao.Transaction) error {
-		if err := e.auth.AuditTxRecord(tx, auth.AuditRecord{UserID: ident.UserID(), IP: ip,
-			Action: "exec_rejected", Detail: detail, AttemptID: att.ID, ConnID: connID}); err != nil {
-			return err
+		if e.history && att.HistID != 0 {
+			settled, serr := e.settleTx(tx, ident, ip, connID, att, meta.DispositionRefused,
+				map[meta.HistoryField]any{meta.HistStatus: StatusError, meta.HistError: errText})
+			if errors.Is(serr, ErrDispositionConflict) {
+				conflict = serr
+				return nil // commit: the conflict's own audit row is in tx
+			}
+			if serr != nil {
+				return serr
+			}
+			if !settled {
+				return nil // an identical repeat: its audit row is already there
+			}
 		}
-		if !e.history || att.HistID == 0 {
-			return nil
-		}
-		if err := e.store.History.On(tx).With(meta.HistID, att.HistID).
-			Set(meta.HistStatus, StatusError).Set(meta.HistError, errText).
-			Update(); err != nil {
-			return fmt.Errorf("exec: completing refused history: %w", err)
-		}
-		return nil
+		return e.auth.AuditTxRecord(tx, auth.AuditRecord{UserID: ident.UserID(), IP: ip,
+			Action: "exec_rejected", Detail: detail, AttemptID: att.ID, ConnID: connID})
 	}); err != nil {
 		return err
+	}
+	if conflict != nil {
+		return fmt.Errorf("%w (and recording it: %w)", cause, conflict)
 	}
 	return cause
 }
@@ -860,33 +872,57 @@ func (e *Engine) writeOutcomeTagged(ctx context.Context, ident auth.Identity, co
 // caller that cannot suspend: only an Execute with a row limit can, and a
 // simple Query or a completing Execute is finished by definition.
 func (e *Engine) writeOutcomeSuspended(ctx context.Context, ident auth.Identity, connID int64, ip string, att Attempt, dur time.Duration, rows int64, status HistStatus, errText, txID, tag string, suspended bool) error {
-	return dao.RunTx(ctx, func(tx *dao.Transaction) error {
+	// Completion is observed for every status but outcome_unresolvable, which
+	// the extended path writes only when it saw no CommandComplete. The
+	// simple-query path knows per statement and says so: writeOutcomeObserved.
+	return e.writeOutcomeObserved(ctx, ident, connID, ip, att, dur, rows, status, errText, txID, tag, suspended,
+		status != StatusUnresolvable)
+}
+
+// writeOutcomeObserved is writeOutcomeSuspended told whether the attempt's
+// completion was observed — see dispositionFor.
+func (e *Engine) writeOutcomeObserved(ctx context.Context, ident auth.Identity, connID int64, ip string, att Attempt, dur time.Duration, rows int64, status HistStatus, errText, txID, tag string, suspended, completionObserved bool) error {
+	disp, err := dispositionFor(status, completionObserved)
+	if err != nil {
+		return err
+	}
+	var conflict error
+	if err := dao.RunTx(ctx, func(tx *dao.Transaction) error {
+		// The history row FIRST: it decides whether this is the terminal at
+		// all. Only the write that made the attempt terminal gets an
+		// exec_result, so a retried terminal adds no second one.
+		if e.history && att.HistID != 0 {
+			settled, serr := e.settleTx(tx, ident, ip, connID, att, disp, map[meta.HistoryField]any{
+				meta.HistDurationMS: dur.Milliseconds(), meta.HistRowCount: rows,
+				meta.HistStatus: status, meta.HistError: errText,
+				meta.HistSuspended: boolToFlag(suspended),
+			})
+			if errors.Is(serr, ErrDispositionConflict) {
+				conflict = serr
+				return nil // commit: the conflict's own audit row is in tx
+			}
+			if serr != nil {
+				return serr
+			}
+			if !settled {
+				return nil
+			}
+		}
 		// SUSPENDED APPEARS IN THE AUDIT LINE TOO, not only in the history
 		// row. The two surfaces answer the same question for different
 		// readers, and an audit line that said `ok` for a page while the
 		// history row knew better would be the original defect with one extra
 		// place to look.
-		if err := e.auth.AuditTxRecord(tx, auth.AuditRecord{UserID: ident.UserID(), IP: ip,
+		return e.auth.AuditTxRecord(tx, auth.AuditRecord{UserID: ident.UserID(), IP: ip,
 			Action: "exec_result",
 			Detail: fmt.Sprintf("conn %d (%s%s, %d row(s), %dms)%s%s", connID, status,
 				suspendedSuffix(suspended), rows, dur.Milliseconds(),
 				errSuffix(errText), auditTagSuffix(tag)),
-			TxID: txID, AttemptID: att.ID, ConnID: connID}); err != nil {
-			return err
-		}
-		if !e.history || att.HistID == 0 {
-			return nil
-		}
-		if err := e.store.History.On(tx).With(meta.HistID, att.HistID).
-			Set(meta.HistDurationMS, dur.Milliseconds()).
-			Set(meta.HistRowCount, rows).
-			Set(meta.HistStatus, status).Set(meta.HistError, errText).
-			Set(meta.HistSuspended, boolToFlag(suspended)).
-			Update(); err != nil {
-			return fmt.Errorf("exec: completing history: %w", err)
-		}
-		return nil
-	})
+			TxID: txID, AttemptID: att.ID, ConnID: connID})
+	}); err != nil {
+		return err
+	}
+	return conflict
 }
 
 // boolToFlag is the 0/1 house representation for a boolean column.

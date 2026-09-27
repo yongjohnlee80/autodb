@@ -364,6 +364,11 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 		status  HistStatus
 		errText string
 		ran     bool
+		// completed is whether this statement's CommandComplete (or
+		// EmptyQueryResponse) was OBSERVED. A cut block marks every
+		// statement's effect unresolvable, and this is what still tells the
+		// attempts that finished from the ones whose end nobody saw.
+		completed bool
 	}
 	outcomes := make([]outcome, len(parts))
 	start := e.now()
@@ -385,7 +390,7 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 				}
 				o.attempt, o.status, o.errText = aid, StatusError, ErrNotExecuted.Error()
 			}
-			if werr := e.writeOutcomeTagged(recCtx, pol.Ident, connRow.ID, ip, o.attempt, dur, o.rows, o.status, o.errText, o.txID, tag); werr != nil {
+			if werr := e.writeOutcomeObserved(recCtx, pol.Ident, connRow.ID, ip, o.attempt, dur, o.rows, o.status, o.errText, o.txID, tag, false, o.completed); werr != nil {
 				return werr
 			}
 		}
@@ -493,9 +498,13 @@ func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, c
 			case "CommandComplete":
 				if group <= el.last {
 					outcomes[group].rows = tagRowCount(m.Tag)
+					outcomes[group].completed = true
 				}
 				group++
 			case "EmptyQueryResponse":
+				if group <= el.last {
+					outcomes[group].completed = true
+				}
 				group++
 			case "ErrorResponse":
 				if failed < 0 {

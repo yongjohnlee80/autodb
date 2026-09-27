@@ -97,18 +97,15 @@ func (e *Engine) projectHistoryTx(tx *dao.Transaction, txID string, state meta.T
 	if !e.projectable(txID, state) {
 		return nil
 	}
-	err := e.store.History.On(tx).
+	// Nothing pending is success, not failure: the ordinary case for a
+	// transaction that ran no statements, and for a repair pass over an
+	// already-projected group. Update reports no row count, so that case
+	// returns nil like any other.
+	return e.store.History.On(tx).
 		With(meta.HistTxID, txID).
 		With(meta.HistStatus, StatusPendingCommit).
 		Set(meta.HistStatus, historyStatusFor(state)).
 		Update()
-	if errors.Is(err, dao.ErrNoRows) {
-		// Nothing was pending. The ordinary case for a transaction that ran
-		// no statements, and for a repair pass over an already-projected
-		// group — both are success, not failure.
-		return nil
-	}
-	return err
 }
 
 // projectable reports whether this outcome has a history projection at all.
