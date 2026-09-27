@@ -161,6 +161,8 @@ var publicErrs = []struct {
 	// An archived connection refuses use and change. Its constant text names
 	// no connection — the caller named it — so publishing it discloses nothing.
 	{exec.ErrConnectionArchived, golibrpc.CodeInvalidParams},
+	// A history search naming no status: the caller's own filter, echoed.
+	{exec.ErrUnknownStatus, golibrpc.CodeInvalidParams},
 	// Workspace not-found is admin-only reachable (Manage authz runs
 	// BEFORE the lookup, so R13 ordering holds) and carries no internals.
 	{exec.ErrWorkspaceNotFound, golibrpc.CodeInvalidParams},
@@ -832,21 +834,11 @@ func (s *Server) register() {
 		}
 		out := make([]any, 0, len(rows))
 		for _, r := range rows {
-			out = append(out, map[string]any{
-				"id": r.ID, "user_id": r.UserID, "user": r.User,
-				"connection_id": r.ConnID, "connection": r.Conn, "ip": r.IP,
-				"script": r.Script, "started_at": r.StartedAt.Format(time.RFC3339),
-				"duration_ms": r.Duration.Milliseconds(), "row_count": r.RowCount,
-				"status": r.Status, "error": r.Error,
-				// A SEPARATE KEY, never a fifth status value: status is the
-				// durability token and a suspended Execute did commit. A
-				// client that does not know the key reads the same status it
-				// always did.
-				"suspended": r.Suspended,
-			})
+			out = append(out, historyRowWire(r))
 		}
 		return out, nil
 	})
+	s.registerHistorySearch()
 
 	// sys.shutdown drains this server. The shared server
 	// outlives its frontends, so restarting it needs an authorized

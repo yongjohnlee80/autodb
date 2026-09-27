@@ -126,6 +126,10 @@ var gateMatrixWalkExempt = map[string]string{
 		"raised by the outcome recorder after admission, not by an admission stage — the gate never sees it",
 	"ErrNoAttempt": "a terminal for an attempt with no history row (a writer bug); raised by the outcome " +
 		"recorder after admission, not by an admission stage — the gate never sees it",
+	// A history search naming a status that does not exist: the read side's
+	// own request validation, on a listing, never on a statement.
+	"ErrUnknownStatus": "a history search's status filter names no history status; request validation " +
+		"on the read side, not an admission stage — no statement path can raise it",
 	// the connection-budget policy's aggregate connection budget. It is declared and enforced by
 	// the permit ledger, but it is NOT a gate refusal: no admission stage can
 	// produce it: it is raised by the dialer before a socket exists.
