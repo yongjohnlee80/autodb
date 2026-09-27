@@ -126,10 +126,16 @@ func main() {
 		"create the first administrator and enrol the unattended unlock, then exit")
 	checkConfig := flag.Bool("check-config", false,
 		"validate the configuration and exit 0, or 78 if it would not load; touches nothing")
+	applyScripts := flag.Bool("apply-migration-scripts", false,
+		"apply the pending schema scripts to the meta store and exit (with --dry-run, list them); "+
+			"refused while a daemon serves the store")
+	revertScript := flag.String("revert-migration-script", "",
+		"revert schema script N, the latest applied, and exit: the first step of a downgrade; "+
+			"refused while a daemon serves the store")
 	flag.Parse()
 
 	if err := checkFlags(*serve, *ui, *webUI, *printEndpoint, *migrateToPG, *createCert, *initRun,
-		*checkConfig, *port); err != nil {
+		*checkConfig, *applyScripts, *revertScript != "", *port); err != nil {
 		fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
 		flag.Usage()
 		os.Exit(2)
@@ -146,6 +152,21 @@ func main() {
 		// contract is "decide and change nothing", so it must never be
 		// silently shadowed by a mode that acts.
 		if err := runCheckConfig(os.Stdout, *configPath); err != nil {
+			reportAndExit(err)
+		}
+		return
+	case *applyScripts || *revertScript != "":
+		n := 0
+		if *revertScript != "" {
+			var err error
+			if n, err = parseScriptNumber(*revertScript); err != nil {
+				fmt.Fprintf(os.Stderr, "autodb: %v\n", err)
+				os.Exit(2)
+			}
+		}
+		if err := runSchema(context.Background(), os.Stdout, *configPath, schemaOpts{
+			dryRun: *migrateDry, revert: n,
+		}); err != nil {
 			reportAndExit(err)
 		}
 		return
@@ -284,7 +305,8 @@ const defaultWebPort = 7010
 //	|               | --print-endpoint, --migrate-to-postgres, |
 //	|               | --create-cert, --init                    |
 //	+---------------+------------------------------------------+
-func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun, checkConfig bool, port int) error {
+func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun, checkConfig,
+	applyScripts, revertScript bool, port int) error {
 	portSet := false
 	flag.CommandLine.Visit(func(f *flag.Flag) {
 		if f.Name == "port" {
@@ -301,7 +323,8 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRu
 	var stray []string
 	flag.CommandLine.Visit(func(f *flag.Flag) {
 		for _, m := range migFlags {
-			if f.Name == m && !migrateToPG {
+			// --dry-run also belongs to --apply-migration-scripts.
+			if f.Name == m && !migrateToPG && !(m == "dry-run" && applyScripts) {
 				stray = append(stray, "--"+m)
 			}
 		}
@@ -353,14 +376,16 @@ func checkFlags(serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRu
 	// --migrate-to-postgres is counted too, and it matters more than the
 	// others: it is FIRST in the dispatch switch, so an unnoticed
 	// `--migrate-to-postgres --serve` would migrate and never serve.
-	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun, checkConfig} {
+	for _, on := range []bool{serve, ui, webUI, printEndpoint, migrateToPG, createCert, initRun, checkConfig,
+		applyScripts, revertScript} {
 		if on {
 			modes++
 		}
 	}
 	if modes > 1 {
 		return errors.New("--serve, --ui, --web-ui, --print-endpoint, --migrate-to-postgres, " +
-			"--create-cert, --init and --check-config are mutually exclusive; pass exactly one")
+			"--create-cert, --init, --check-config, --apply-migration-scripts and " +
+			"--revert-migration-script are mutually exclusive; pass exactly one")
 	}
 	if webUI {
 		if port <= 0 || port > 65535 {

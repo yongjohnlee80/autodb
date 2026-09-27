@@ -19,6 +19,7 @@ func TestCheckFlags(t *testing.T) {
 		createCert                      bool
 		initRun                         bool
 		checkConfig                     bool
+		applyScripts, revertScript      bool
 		port                            int
 		portSet                         bool
 		// certFlags are --create-cert's own flags, given by NAME so the cell
@@ -26,16 +27,20 @@ func TestCheckFlags(t *testing.T) {
 		certFlags []string
 	}
 	ok := map[string]args{
-		"serve alone":          {serve: true, port: goodPort},
-		"check-config alone":   {checkConfig: true, port: goodPort},
-		"init alone":           {initRun: true, port: goodPort},
-		"migrate alone":        {migrateToPG: true, port: goodPort},
-		"ui alone":             {ui: true, port: goodPort},
-		"web-ui alone":         {webUI: true, port: goodPort},
-		"print-endpoint alone": {printEndpoint: true, port: goodPort},
-		"web-ui with a port":   {webUI: true, port: 9999, portSet: true},
-		"no mode (usage)":      {port: goodPort},
-		"create-cert alone":    {createCert: true, port: goodPort},
+		"serve alone":         {serve: true, port: goodPort},
+		"check-config alone":  {checkConfig: true, port: goodPort},
+		"apply-scripts alone": {applyScripts: true, port: goodPort},
+		"revert-script alone": {revertScript: true, port: goodPort},
+		// --dry-run is --apply-migration-scripts' as well as the migration's.
+		"apply-scripts --dry-run": {applyScripts: true, port: goodPort, certFlags: []string{"--dry-run"}},
+		"init alone":              {initRun: true, port: goodPort},
+		"migrate alone":           {migrateToPG: true, port: goodPort},
+		"ui alone":                {ui: true, port: goodPort},
+		"web-ui alone":            {webUI: true, port: goodPort},
+		"print-endpoint alone":    {printEndpoint: true, port: goodPort},
+		"web-ui with a port":      {webUI: true, port: 9999, portSet: true},
+		"no mode (usage)":         {port: goodPort},
+		"create-cert alone":       {createCert: true, port: goodPort},
 		"create-cert with its own flags": {createCert: true, port: goodPort,
 			certFlags: []string{"--cert-dir=/tmp/x", "--leaf-only", "--force"}},
 		"create-cert export": {createCert: true, port: goodPort,
@@ -92,6 +97,11 @@ func TestCheckFlags(t *testing.T) {
 		"check-config + init":        {checkConfig: true, initRun: true, port: goodPort},
 		"check-config + create-cert": {checkConfig: true, createCert: true, port: goodPort},
 		"check-config + web-ui":      {checkConfig: true, webUI: true, port: goodPort},
+		// The schema verbs are modes: `--apply-migration-scripts --serve`
+		// would apply and never serve.
+		"apply-scripts + serve": {applyScripts: true, serve: true, port: goodPort},
+		"revert-script + apply": {revertScript: true, applyScripts: true, port: goodPort},
+		"revert-script + init":  {revertScript: true, initRun: true, port: goodPort},
 	}
 
 	run := func(a args) error {
@@ -99,7 +109,7 @@ func TestCheckFlags(t *testing.T) {
 		// FlagSet is set up per case to reflect portSet.
 		reset(t, a.portSet, a.certFlags...)
 		return checkFlags(a.serve, a.ui, a.webUI, a.printEndpoint, a.migrateToPG, a.createCert, a.initRun,
-			a.checkConfig, a.port)
+			a.checkConfig, a.applyScripts, a.revertScript, a.port)
 	}
 	for name, a := range ok {
 		t.Run("ok/"+name, func(t *testing.T) {
@@ -129,6 +139,7 @@ func reset(t *testing.T, portSet bool, extra ...string) {
 	fs.Bool("leaf-only", false, "")
 	fs.Bool("export-ca", false, "")
 	fs.Bool("force", false, "")
+	fs.Bool("dry-run", false, "")
 	args := append([]string{}, extra...)
 	if portSet {
 		args = append(args, "--port=7010")
