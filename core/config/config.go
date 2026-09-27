@@ -81,6 +81,8 @@ type Config struct {
 	// caller or a cell does -- carries no claim about where it came from. A
 	// zero value must not assert "there is a service on this host".
 	sourcePath string
+	// warnings are the unknown keys the file carried (Load).
+	warnings []string
 
 	// ServiceHostSeen records that a system SERVER config exists on this
 	// host, whether or not this process could read it. Existence is the
@@ -1004,6 +1006,28 @@ func ResolvePath(path string) (string, error) {
 	return DefaultPath()
 }
 
+// unknownKeyWarning says what an unrecognised key is and what to do.
+//
+// Keys a change removed get their reason rather than a bare "unknown key". An
+// operator who set notes_mode did so for isolation, and the one dangerous
+// outcome is their believing it still applies; the generic message would not
+// tell them it is gone or what replaced it.
+func unknownKeyWarning(path, key string) string {
+	switch key {
+	case "web.notes_mode", "web.notes_subject":
+		return fmt.Sprintf("%s: %s was removed when notes became identity-keyed — notes are now "+
+			"keyed by (user, workspace) in both frontends and are visible only to their owner, "+
+			"so no setting selects a note tree; it has no effect: delete this key", path, key)
+	}
+	return fmt.Sprintf("%s: %s is not a setting this release knows; it has no effect — "+
+		"delete it, or check its spelling", path, key)
+}
+
+// Warnings are what loading the configuration found worth saying but not
+// worth refusing: keys this release does not know. Whatever loaded the config
+// prints them.
+func (c Config) Warnings() []string { return c.warnings }
+
 // Load reads the configuration at path. An empty path resolves to
 // DefaultPath. A missing file is not an error — defaults apply. A present
 // file must decode without unknown keys and validate.
@@ -1046,21 +1070,13 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("%w: %s: %w", ErrInvalid, path, err)
 	}
-	if undecoded := md.Undecoded(); len(undecoded) > 0 {
-		// Keys the identity-keying change removed get a reason rather than a bare "unknown key".
-		// An operator who set notes_mode did so for isolation, and the one
-		// dangerous outcome is their believing it still applies; the generic
-		// message would not tell them it is gone or what replaced it.
-		for _, k := range undecoded {
-			switch k.String() {
-			case "web.notes_mode", "web.notes_subject":
-				return Config{}, fmt.Errorf("%w: %s: %s was removed when notes became identity-keyed — notes "+
-					"are now keyed by (user, workspace) in both frontends and are visible "+
-					"only to their owner, so no setting selects a note tree; delete this key",
-					ErrInvalid, path, k.String())
-			}
-		}
-		return Config{}, fmt.Errorf("%w: %s: unknown keys: %v", ErrInvalid, path, undecoded)
+	// AN UNKNOWN KEY IS A WARNING, NEVER A REFUSAL (docs/ops/schema-scripts.md): a key an
+	// older release knew and this one retired must not stop the daemon or an
+	// update. Every one is named, and printed by whatever loaded the config.
+	// A key recognised but set to something invalid still refuses — that is a
+	// wrong setting, not an old one — in validate below.
+	for _, k := range md.Undecoded() {
+		cfg.warnings = append(cfg.warnings, unknownKeyWarning(path, k.String()))
 	}
 	// PROVENANCE, from the decoder's own record of what it saw.
 	cfg.seen = map[string]bool{}

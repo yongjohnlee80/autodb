@@ -64,7 +64,7 @@ func runCheckConfig(w io.Writer, configPath string) error {
 }
 
 func checkConfiguration(w io.Writer, configPath string) error {
-	cfg, err := config.Load(configPath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
 	}

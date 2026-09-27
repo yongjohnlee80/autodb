@@ -44,10 +44,30 @@ func TestLoad_PartialFileMergesOverDefaults(t *testing.T) {
 	}
 }
 
-func TestLoad_UnknownKeysRejected(t *testing.T) {
+// An unknown key loads, and is a warning naming it (docs/ops/schema-scripts.md): a key an
+// older release knew must not stop the daemon or an update. The value it
+// carried has no effect — the setting it looks like keeps its default.
+func TestLoad_UnknownKeysWarn(t *testing.T) {
 	t.Parallel()
-	if _, err := Load(write(t, "[server]\nprot = 9000\n")); !errors.Is(err, ErrInvalid) {
-		t.Errorf("unknown key: err = %v, want ErrInvalid", err)
+	cfg, err := Load(write(t, "[server]\nprot = 9000\n"))
+	if err != nil {
+		t.Fatalf("an unknown key refused the load: %v", err)
+	}
+	w := cfg.Warnings()
+	if len(w) != 1 || !strings.Contains(w[0], "server.prot") || !strings.Contains(w[0], "no effect") {
+		t.Errorf("warnings %q, want one naming server.prot and saying it has no effect", w)
+	}
+	if cfg.Server.Port == 9000 {
+		t.Error("the misspelt key set the port it resembles")
+	}
+}
+
+// A recognised key with an invalid value still refuses: that is a wrong
+// setting, not an old one.
+func TestLoad_AnInvalidValueStillRefuses(t *testing.T) {
+	t.Parallel()
+	if _, err := Load(write(t, "[server]\nport = -1\nprot = 1\n")); !errors.Is(err, ErrInvalid) {
+		t.Errorf("an invalid port beside an unknown key: err = %v, want ErrInvalid", err)
 	}
 }
 
