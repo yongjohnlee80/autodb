@@ -252,6 +252,7 @@ func (h *Host) openValue(col int) error {
 	h.set("App.valueTitle", h.results.last.Columns[col])
 	h.valueText = h.inspected[col]
 	h.set("App.valueText", h.valueText)
+	h.set("App.valueSyntax", "") // a cell's value, not a script
 	h.open("value")
 	return nil
 }

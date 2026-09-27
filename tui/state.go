@@ -33,6 +33,7 @@ func (h *Host) state(theme string) map[string]any {
 		"App.inspectRows":  h.inspectRows,
 		"App.valueTitle":   "",
 		"App.valueText":    "",
+		"App.valueSyntax":  "", // a script's dialect; a cell's value is not SQL
 		"App.quitQuestion": "This ends the session. Anything unsaved in the query buffer is lost.",
 		// Sign-in (auth.go): the name last tried, and why the last answer
 		// was refused — each dialog's help line.
@@ -42,6 +43,7 @@ func (h *Host) state(theme string) map[string]any {
 	}
 	// The workspace (workspace.go, explorer.go, results.go).
 	st["App.queryTitle"] = h.queryTitle()
+	st["App.querySyntax"] = syntaxFor(h.explorer.engines[h.active.id])
 	st["App.explorer"] = h.explorer.model
 	st["App.keyset"] = keysetValue(h.prefs.pref)
 	for k, v := range resultsState(h.results) {

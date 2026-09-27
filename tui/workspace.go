@@ -47,6 +47,7 @@ func (h *Host) useConnection(ws, id int64) {
 	}
 	h.active = activeConn{ws: ws, id: id, name: h.explorer.connName(id)}
 	h.set("App.queryTitle", h.queryTitle())
+	h.set("App.querySyntax", syntaxFor(h.explorer.engines[id]))
 	h.setStatus("query connection: " + h.connLabel())
 }
 
