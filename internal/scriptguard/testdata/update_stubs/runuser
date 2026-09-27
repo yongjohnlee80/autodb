@@ -1,0 +1,6 @@
+#!/bin/sh
+# runuser -u USER -- CMD...: logged, then CMD run as this test's own user.
+printf 'runuser %s\n' "$*" >> "${UPD_LOG:-/dev/null}"
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+[ "${1:-}" = "--" ] && shift
+exec "$@"

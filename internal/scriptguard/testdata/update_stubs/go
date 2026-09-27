@@ -32,6 +32,28 @@ done
 cat > "$_out" <<INNER
 #!/bin/sh
 for _arg in "\$@"; do
+  # UPD_APPLY_RC / UPD_APPLY_MSG: how --apply-migration-scripts answers — 0
+  # applies, 2 with Go's unknown-flag message is a build from before the
+  # scripts, anything else a script that failed.
+  if [ "\$_arg" = "--apply-migration-scripts" ]; then
+    printf 'autodb %s\n' "\$*" >> "${UPD_LOG:-/dev/null}"
+    _rc="\${UPD_APPLY_RC:-0}"
+    if [ "\$_rc" = "0" ]; then
+      # UPD_APPLY_OUT: what a successful apply prints — by default nothing
+      # applied; a cell lists scripts to stand for a store it advanced.
+      printf '%b\n' "\${UPD_APPLY_OUT:-the schema is up to date (1 scripts applied)}"
+    else
+      echo "\${UPD_APPLY_MSG:-meta: schema script 000002_update_x.sql, line 3: boom}" >&2
+    fi
+    exit "\$_rc"
+  fi
+  # UPD_REVERT_RC: how --revert-migration-script answers (0 reverts).
+  if [ "\$_arg" = "--revert-migration-script" ]; then
+    printf 'autodb %s\n' "\$*" >> "${UPD_LOG:-/dev/null}"
+    _rc="\${UPD_REVERT_RC:-0}"
+    [ "\$_rc" = "0" ] && echo "reverted" || echo "meta: revert failed" >&2
+    exit "\$_rc"
+  fi
   if [ "\$_arg" = "--check-config" ]; then
     _rc="\${UPD_CHECK_RC:-0}"
     if [ "\$_rc" = "0" ]; then
