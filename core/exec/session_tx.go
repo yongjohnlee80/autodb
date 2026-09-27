@@ -296,7 +296,7 @@ func (e *Engine) beginTx(
 	s.targetXID = targetXID
 	s.mu.Unlock()
 
-	if err := e.auth.Audit(ctx, ident.UserID(), ip, "tx_opened",
+	if err := e.auth.AuditConn(ctx, s.connID, ident.UserID(), ip, "tx_opened",
 		fmt.Sprintf("conn %d: session %s: %s: %s", s.connID, s.id, txID, describeTxOptions(tc.Options))); err != nil {
 		return nil, err
 	}
@@ -373,7 +373,7 @@ func (e *Engine) finishTx(ctx context.Context, s *session, ident auth.Identity, 
 	s.lastUsed = e.now()
 	s.mu.Unlock()
 
-	if aerr := e.auth.Audit(context.WithoutCancel(ctx), ident.UserID(), ip, "tx_"+outcome,
+	if aerr := e.auth.AuditConn(context.WithoutCancel(ctx), s.connID, ident.UserID(), ip, "tx_"+outcome,
 		fmt.Sprintf("conn %d: session %s: %s", s.connID, s.id, txID)); aerr != nil {
 		return nil, aerr
 	}

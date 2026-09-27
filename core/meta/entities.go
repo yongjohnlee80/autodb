@@ -471,18 +471,27 @@ const (
 	AuditConnID    AuditField = "conn_id"
 )
 
+// The audit listing's keyset order: newest first by when the row was written,
+// then by id.
+const (
+	AuditByID        Sort = "audit_id"
+	AuditByCreatedAt Sort = "audit_created_at"
+)
+
 func newAudit(conn dao.DataConn) *dao.Schema[*AuditEntry, AuditField, Sort, int64] {
-	return schema(conn, "audit_log", AuditID, map[AuditField]dao.Field[*AuditEntry]{
-		AuditID:        {Column: "id", Scan: func(r *AuditEntry) any { return &r.ID }},
-		AuditUserID:    {Column: "user_id", Scan: func(r *AuditEntry) any { return &r.UserID }, Value: func(r *AuditEntry) any { return r.UserID }},
-		AuditIP:        {Column: "ip", Scan: func(r *AuditEntry) any { return &r.IP }, Value: func(r *AuditEntry) any { return r.IP }},
-		AuditAction:    {Column: "action", Scan: func(r *AuditEntry) any { return &r.Action }, Value: func(r *AuditEntry) any { return r.Action }},
-		AuditDetail:    {Column: "detail", Scan: func(r *AuditEntry) any { return &r.Detail }, Value: func(r *AuditEntry) any { return r.Detail }},
-		AuditCreatedAt: {Column: "created_at", Scan: func(r *AuditEntry) any { return &r.CreatedAt }, Value: func(r *AuditEntry) any { return r.CreatedAt }},
-		AuditTxID:      {Column: "tx_id", Scan: func(r *AuditEntry) any { return &r.TxID }, Value: func(r *AuditEntry) any { return r.TxID }},
-		AuditAttemptID: {Column: "attempt_id", Scan: func(r *AuditEntry) any { return &r.AttemptID }, Value: func(r *AuditEntry) any { return r.AttemptID }},
-		AuditConnID:    {Column: "conn_id", Scan: func(r *AuditEntry) any { return &r.ConnID }, Value: func(r *AuditEntry) any { return r.ConnID }},
-	})
+	return sortableSchema(conn, "audit_log", AuditID,
+		map[Sort]string{AuditByID: "id", AuditByCreatedAt: "created_at"},
+		map[AuditField]dao.Field[*AuditEntry]{
+			AuditID:        {Column: "id", Scan: func(r *AuditEntry) any { return &r.ID }},
+			AuditUserID:    {Column: "user_id", Scan: func(r *AuditEntry) any { return &r.UserID }, Value: func(r *AuditEntry) any { return r.UserID }},
+			AuditIP:        {Column: "ip", Scan: func(r *AuditEntry) any { return &r.IP }, Value: func(r *AuditEntry) any { return r.IP }},
+			AuditAction:    {Column: "action", Scan: func(r *AuditEntry) any { return &r.Action }, Value: func(r *AuditEntry) any { return r.Action }},
+			AuditDetail:    {Column: "detail", Scan: func(r *AuditEntry) any { return &r.Detail }, Value: func(r *AuditEntry) any { return r.Detail }},
+			AuditCreatedAt: {Column: "created_at", Scan: func(r *AuditEntry) any { return &r.CreatedAt }, Value: func(r *AuditEntry) any { return r.CreatedAt }},
+			AuditTxID:      {Column: "tx_id", Scan: func(r *AuditEntry) any { return &r.TxID }, Value: func(r *AuditEntry) any { return r.TxID }},
+			AuditAttemptID: {Column: "attempt_id", Scan: func(r *AuditEntry) any { return &r.AttemptID }, Value: func(r *AuditEntry) any { return r.AttemptID }},
+			AuditConnID:    {Column: "conn_id", Scan: func(r *AuditEntry) any { return &r.ConnID }, Value: func(r *AuditEntry) any { return r.ConnID }},
+		})
 }
 
 // --- ip allowlist -----------------------------------------------------------------

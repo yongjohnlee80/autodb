@@ -20,7 +20,15 @@ const thisBumpAdded = "history.search"
 // adminOnlyVerbs are the verbs whose answer describes the whole server, so
 // only an admin reads them: sys.inflight (what a restart would interrupt,
 // protocol 8) and dispositions.list (what every attempt ended as, protocol 9).
-var adminOnlyVerbs = []string{"sys.inflight", "dispositions.list"}
+// Each with the arguments after the token it takes.
+var adminOnlyVerbs = []struct {
+	verb string
+	args []any
+}{
+	{"sys.inflight", nil},
+	{"dispositions.list", nil},
+	{"audit.search", []any{map[string]any{}}},
+}
 
 // goldenVerbs reads the recorded surface for one protocol number.
 func goldenVerbs(t *testing.T, proto int64) ([]string, bool) {
@@ -260,14 +268,14 @@ func TestProtocol_TheServerWideVerbsAreAdminOnly(t *testing.T) {
 		t.Fatalf("no token in the login reply: %#v", lm)
 	}
 
-	for _, verb := range adminOnlyVerbs {
+	for _, v := range adminOnlyVerbs {
 		// POSITIVE CONTROL: the same call as root succeeds, so a refusal below
 		// is about the ROLE and not about the verb being broken.
-		if errVal, _ := c.call(verb, f.rootTok); errVal != nil {
-			t.Fatalf("an admin was refused %s: %#v", verb, errVal)
+		if errVal, _ := c.call(v.verb, append([]any{f.rootTok}, v.args...)...); errVal != nil {
+			t.Fatalf("an admin was refused %s: %#v", v.verb, errVal)
 		}
-		if errVal, res := c.call(verb, devTok); errVal == nil {
-			t.Errorf("an editor read %s, which describes the whole server: %#v", verb, res)
+		if errVal, res := c.call(v.verb, append([]any{devTok}, v.args...)...); errVal == nil {
+			t.Errorf("an editor read %s, which describes the whole server: %#v", v.verb, res)
 		}
 	}
 }

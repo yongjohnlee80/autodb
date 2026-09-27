@@ -109,3 +109,46 @@ func TestDispositionsList_AnswersTheCounts(t *testing.T) {
 		}
 	}
 }
+
+func TestAuditSearch_FiltersPagesAndSaysSinceWhenOverTheWire(t *testing.T) {
+	f := newFixture(t)
+	for i := int64(0); i < 3; i++ {
+		if _, err := f.store.Audit.OnCtx(context.Background()).
+			Set(meta.AuditUserID, int64(1)).Set(meta.AuditIP, "127.0.0.1").
+			Set(meta.AuditAction, "wire_probe").Set(meta.AuditDetail, "d").
+			Set(meta.AuditCreatedAt, int64(1788900000)+i).Set(meta.AuditTxID, "").
+			Set(meta.AuditConnID, f.connID).Insert(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c := f.session(t)
+	filter := map[string]any{"actions": []any{"wire_probe"}, "connection_id": f.connID, "limit": int64(2)}
+	errVal, res := c.call("audit.search", f.rootTok, filter)
+	if errVal != nil {
+		t.Fatalf("audit.search: %#v", errVal)
+	}
+	m := res.(map[string]any)
+	rows, _ := m["rows"].([]any)
+	next, _ := m["next"].(map[string]any)
+	if len(rows) != 2 || next == nil {
+		t.Fatalf("page 1: %d rows, next %#v; want 2 and a cursor", len(rows), m["next"])
+	}
+	if _, present := m["conn_filter_since"]; !present {
+		t.Error("audit.search carries no conn_filter_since")
+	}
+	if r := rows[0].(map[string]any); r["connection_id"] != f.connID || r["action"] != "wire_probe" {
+		t.Errorf("row %#v, want the probe on connection %d", r, f.connID)
+	}
+	filter["before"] = next
+	errVal, res = c.call("audit.search", f.rootTok, filter)
+	if errVal != nil {
+		t.Fatalf("audit.search page 2: %#v", errVal)
+	}
+	m = res.(map[string]any)
+	if rows, _ := m["rows"].([]any); len(rows) != 1 || m["next"] != nil {
+		t.Errorf("page 2: %d rows, next %#v; want the last and no cursor", len(rows), m["next"])
+	}
+	if errVal, _ := c.call("audit.search", f.rootTok, map[string]any{"action": []any{"x"}}); errCode(errVal) != int64(golibrpc.CodeInvalidParams) {
+		t.Errorf("an unknown filter key: %#v, want invalid params", errVal)
+	}
+}

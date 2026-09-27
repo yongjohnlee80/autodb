@@ -1,3 +1,4 @@
+audit.search
 auth.allowlist_add
 auth.allowlist_list
 auth.allowlist_remove
