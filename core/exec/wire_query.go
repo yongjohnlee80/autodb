@@ -301,6 +301,13 @@ type wireElement struct {
 
 // wireQueryRaw is the postgres producer. See WireQuery.
 func (e *Engine) wireQueryRaw(ctx context.Context, s *session, pol UnitPolicy, connRow *meta.Connection, sqlText, ip string, emit func(WireMessage) error, closeAfterRelease *bool) (byte, error) {
+	// The statement gate: an idle shutdown's decision counts this statement
+	// from here until it returns, its terminal recorded (idle_shutdown.go).
+	leave, err := e.enterStatement()
+	if err != nil {
+		return 0, err
+	}
+	defer leave()
 	admitErr, opErr := e.runSizeAdmission(admission.PhysWire, sqlText)
 	if opErr != nil {
 		return 0, opErr

@@ -266,6 +266,12 @@ type Options struct {
 	// Authn is the engine. Nil denies every connection, audited.
 	Authn Authenticator
 
+	// Gate is the engine's wire admission, consulted at accept: an idle
+	// shutdown closes it in the same decision that finds no client connected,
+	// so no client can connect between the count and the close. Nil admits
+	// every connection, as before.
+	Gate WireGate
+
 	// Cancels is the engine's cancel registry (matrix §6.4). Nil is a legal,
 	// degraded state — the same honesty as a nil Authn: a listener whose
 	// cancel key cannot be honoured emits BackendKeyData but every CancelRequest
@@ -519,6 +525,7 @@ func Open(addr string, tlsCfg *tls.Config, opt Options) (*Listener, error) {
 	}
 	l.general = newGeneralLane(laneBytes)
 	l.admit = newAdmitter(caps.maxConns, caps.preAuthMax, caps.failures, caps.lane, l.now)
+	l.admit.gate = opt.Gate
 	l.dl = defaultDeadlines()
 	l.authSlots = make(chan struct{}, caps.workers)
 	if opt.testDeadlines != nil {

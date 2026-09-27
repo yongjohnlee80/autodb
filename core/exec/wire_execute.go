@@ -320,6 +320,13 @@ type execUnit struct {
 // Everything after resolution, in one place, so the wire path and the token
 // path cannot drift about what running a statement means.
 func (e *Engine) executeUnit(ctx context.Context, u execUnit) (*Result, error) {
+	// The statement gate: an idle shutdown's decision counts this statement
+	// from here until it returns, its terminal recorded (idle_shutdown.go).
+	leave, err := e.enterStatement()
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
 	var target dao.DataConn
 	if u.pinned == nil {
 		t, err := e.target(ctx, u.connRow.ID, u.connRow)

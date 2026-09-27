@@ -244,6 +244,9 @@ func Outcomes() []outcome.Registration {
 			// the system is full has done nothing wrong, and charging it is
 			// what turned a busy morning into a banned address.
 			refusal(reasonConnectionCap, outcome.Capacity),
+			// Not charged: the daemon is restarting, which is ours, not the
+			// peer's.
+			refusal(reasonServerStopping, outcome.Capacity),
 			refusal(reasonSourceConnCap, outcome.Capacity),
 			refusal(reasonPreAuthConnCap, outcome.Capacity),
 			refusal(reasonControlLaneExhausted, outcome.Capacity),

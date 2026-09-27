@@ -157,8 +157,10 @@ type Engine struct {
 	ownerEpoch string
 	// unknowns is the recent unknowns this process produced, for the counts.
 	unknowns unknownLog
-	maxRows  int
-	now      func() time.Time
+	// idle is the statement and wire gates an idle shutdown decides under.
+	idle    idleGates
+	maxRows int
+	now     func() time.Time
 
 	// pendingLeaseCap and pendingResidentCap hold the registry-scoped caps
 	// until every option has run. See WithLeaseCap.
@@ -574,6 +576,13 @@ func (e *Engine) ExecuteStream(ctx context.Context, token string, connID int64, 
 // guard and the audit are identical either way, because a session changes
 // where a statement runs and never whether it is allowed to.
 func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, ip string, onRow func([]any) error, pinned dao.TxConn, txID string) (*Result, error) {
+	// The statement gate: an idle shutdown's decision counts this statement
+	// from here until it returns, its terminal recorded (idle_shutdown.go).
+	leave, err := e.enterStatement()
+	if err != nil {
+		return nil, err
+	}
+	defer leave()
 	// Provenance first: an invalid token gets no classification, no
 	// existence information, and a user-0 audit trail.
 	ident, err := e.auth.ValidateToken(ctx, token)

@@ -57,6 +57,7 @@ schema.tables
 sys.hello
 sys.inflight
 sys.pressure
+sys.restart_if_idle
 sys.shutdown
 tx.status
 workspace.attach
