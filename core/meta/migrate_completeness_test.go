@@ -2,6 +2,7 @@ package meta
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -130,6 +131,7 @@ func TestMigrateCompleteness_EveryColumnSurvives(t *testing.T) {
 
 	for _, c := range countableTables(ctx, dst) {
 		cols := columnsOf(t, src, c.name)
+		jsonCols := jsonColumnsOf(t, dst, c.name)
 		want := readAll(t, src, c.name, cols)
 		got := readAll(t, dst, c.name, cols)
 		if c.name == "store_meta" {
@@ -154,7 +156,7 @@ func TestMigrateCompleteness_EveryColumnSurvives(t *testing.T) {
 					t.Errorf("%s.%s is missing from the destination row", c.name, col)
 					continue
 				}
-				if wv != gv {
+				if !sameValue(wv, gv, jsonCols[col]) {
 					t.Errorf("%s.%s was not carried across: source %q, destination %q — the "+
 						"row count still matched, which is why nothing failed",
 						c.name, col, wv, gv)
@@ -162,6 +164,62 @@ func TestMigrateCompleteness_EveryColumnSurvives(t *testing.T) {
 			}
 		}
 	}
+}
+
+// sameValue reports whether a rendered source value and destination value are
+// one value. A JSON column is compared as JSON: sqlite keeps the document as
+// its TEXT, postgres returns JSONB decoded and re-spelt (keys reordered,
+// spacing its own), so the text differs where the document does not. Every
+// other column is compared exactly — the normalisation is JSON's alone, so a
+// column that was not carried still reads back as its default and differs.
+func sameValue(src, dst string, isJSON bool) bool {
+	if src == dst {
+		return true
+	}
+	if !isJSON {
+		return false
+	}
+	a, aok := canonicalJSON(src)
+	b, bok := canonicalJSON(dst)
+	return aok && bok && a == b
+}
+
+// canonicalJSON is s decoded and encoded again: one spelling per document.
+func canonicalJSON(s string) (string, bool) {
+	var v any
+	if err := json.Unmarshal([]byte(s), &v); err != nil {
+		return "", false
+	}
+	b, err := json.Marshal(v)
+	return string(b), err == nil
+}
+
+// jsonColumnsOf is the set of a table's json/jsonb columns on s — the
+// destination's, where the type is JSON's; empty on sqlite, which has none.
+func jsonColumnsOf(t *testing.T, s *Store, table string) map[string]bool {
+	t.Helper()
+	out := map[string]bool{}
+	if s.Engine() == "sqlite" {
+		return out
+	}
+	rows, err := s.Conn().QueryContext(context.Background(),
+		`SELECT column_name FROM information_schema.columns
+		  WHERE table_schema = current_schema() AND table_name = $1 AND data_type IN ('json', 'jsonb')`, table)
+	if err != nil {
+		t.Fatalf("reading the json columns of %s: %v", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		out[n] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // columnsOf reads a table's column names from the engine's own catalog.
@@ -250,6 +308,14 @@ func render(v any) string {
 		return string(x)
 	case nil:
 		return "<nil>"
+	case map[string]any, []any:
+		// A JSON document the driver decoded: spelt as JSON again, so it can
+		// be compared as one (sameValue).
+		b, err := json.Marshal(x)
+		if err != nil {
+			return fmt.Sprintf("%v", x)
+		}
+		return string(b)
 	default:
 		return fmt.Sprintf("%v", x)
 	}
@@ -267,7 +333,8 @@ func seedEverything(t *testing.T, s *Store) {
 	rootID, err := s.Users.OnCtx(ctx).
 		Set(UserName, "root").Set(UserRole, RoleAdmin).Set(UserPassHash, []byte("h")).
 		Set(UserMKWrapped, []byte("k")).Set(UserDisabled, int64(1)).
-		Set(UserCreatedAt, int64(11)).Set(UserUpdatedAt, int64(12)).Insert()
+		Set(UserCreatedAt, int64(11)).Set(UserUpdatedAt, int64(12)).
+		Set(UserOptions, `{"keyset": "vim", "theme": "retro"}`).Insert()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,4 +469,31 @@ func isolatedPGStore(t *testing.T, base, tag string) (*Store, string) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	return s, dsn
+}
+
+// The JSON comparison the completeness cell uses, held without a database:
+// one document in two spellings is one value, and a document that did not
+// arrive — its column left at the default — is not, nor is a non-JSON column
+// normalised.
+func TestMigrateCompleteness_JSONIsComparedByValueAndOnlyJSON(t *testing.T) {
+	src := `{"keyset": "vim", "theme": "retro"}`
+	decoded := render(map[string]any{"theme": "retro", "keyset": "vim"}) // as pgx returns JSONB
+	cases := []struct {
+		name     string
+		src, dst string
+		isJSON   bool
+		want     bool
+	}{
+		{"one document, two spellings", src, decoded, true, true},
+		{"the empty document, as sqlite and pgx give it", "{}", render(map[string]any{}), true, true},
+		{"a document left at the default", src, render(map[string]any{}), true, false},
+		{"a changed value", src, render(map[string]any{"theme": "dark", "keyset": "vim"}), true, false},
+		{"not a JSON column", `{"a": 1}`, `{"a":1}`, false, false},
+		{"text that is not JSON", "abc", "abc ", true, false},
+	}
+	for _, c := range cases {
+		if got := sameValue(c.src, c.dst, c.isJSON); got != c.want {
+			t.Errorf("%s: sameValue(%q, %q, %v) = %v, want %v", c.name, c.src, c.dst, c.isJSON, got, c.want)
+		}
+	}
 }
