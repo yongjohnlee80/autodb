@@ -418,7 +418,7 @@ func (e *Engine) CreateConnection(ctx context.Context, token, name string, engin
 		if terr != nil {
 			return fmt.Errorf("exec: granting creator ownership: %w", terr)
 		}
-		return e.auth.AuditTx(tx, creator.UserID(), ip, "connection_created",
+		return e.auth.AuditTxConn(tx, id, creator.UserID(), ip, "connection_created",
 			fmt.Sprintf("%s (%s), creator granted ownership", name, engineName))
 	})
 	if err != nil {
@@ -522,7 +522,7 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 			Set(meta.ConnUpdatedAt, e.now().Unix()).Update(); uerr != nil {
 			return uerr
 		}
-		return e.auth.AuditTx(tx, ident.UserID(), ip, "connection_profile_changed",
+		return e.auth.AuditTxConn(tx, connID, ident.UserID(), ip, "connection_profile_changed",
 			fmt.Sprintf("%s: %s -> %s", row.Name, was, profile))
 	})
 	if err != nil {
@@ -594,7 +594,7 @@ func (e *Engine) SetConnectionExposure(ctx context.Context, token string, connID
 			Set(meta.ConnUpdatedAt, e.now().Unix()).Update(); uerr != nil {
 			return uerr
 		}
-		return e.auth.AuditTx(tx, ident.UserID(), ip, "connection_exposure_changed",
+		return e.auth.AuditTxConn(tx, connID, ident.UserID(), ip, "connection_exposure_changed",
 			fmt.Sprintf("%s: %t -> %t", row.Name, wasExposed, exposed))
 	})
 	if err != nil {
@@ -649,7 +649,7 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 		if err := e.store.Connections.On(tx).With(meta.ConnID, connID).Delete(); err != nil {
 			return err
 		}
-		return e.auth.AuditTx(tx, ident.UserID(), ip, "connection_deleted", row.Name)
+		return e.auth.AuditTxConn(tx, connID, ident.UserID(), ip, "connection_deleted", row.Name)
 	})
 	if errors.Is(err, dao.ErrForeignKey) {
 		// Its history holds it: archive it instead, in a transaction of its
@@ -706,7 +706,7 @@ func (e *Engine) archiveTx(tx *dao.Transaction, actor int64, row *meta.Connectio
 		Set(meta.PATRevoked, int64(1)).Update(); err != nil && !errors.Is(err, dao.ErrNoRows) {
 		return fmt.Errorf("exec: archiving %q: revoking its access tokens: %w", row.Name, err)
 	}
-	return e.auth.AuditTx(tx, actor, ip, "connection_archived",
+	return e.auth.AuditTxConn(tx, row.ID, actor, ip, "connection_archived",
 		fmt.Sprintf("%s -> %s (its history is kept)", row.Name, name))
 }
 
@@ -756,7 +756,7 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64,
 	if err != nil {
 		// Connection failures are security-relevant signal (credential
 		// rotation, tampering) — audit them.
-		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_failed",
+		if aerr := e.auth.AuditConn(ctx, connID, ident.UserID(), ip, "conn_test_failed",
 			fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
 			return aerr
 		}
@@ -764,7 +764,7 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64,
 	}
 	rows, err := conn.QueryContext(ctx, "SELECT 1")
 	if err != nil {
-		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_failed",
+		if aerr := e.auth.AuditConn(ctx, connID, ident.UserID(), ip, "conn_test_failed",
 			fmt.Sprintf("conn %d probe: %v", connID, err)); aerr != nil {
 			return aerr
 		}
@@ -773,7 +773,7 @@ func (e *Engine) TestConnection(ctx context.Context, token string, connID int64,
 	if cerr := rows.Close(); cerr != nil {
 		// A close failure is a probe failure — audit it like one (found
 		// M4 r3 amendment: no unaudited exit path from TestConnection).
-		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "conn_test_failed",
+		if aerr := e.auth.AuditConn(ctx, connID, ident.UserID(), ip, "conn_test_failed",
 			fmt.Sprintf("conn %d close: %v", connID, cerr)); aerr != nil {
 			return aerr
 		}
@@ -828,7 +828,7 @@ func (e *Engine) RenameConnection(ctx context.Context, token string, connID int6
 		// THE OLD NAME IS IN THE RECORD. An audit line naming only the new one
 		// cannot be read backwards: a reader looking for what happened to
 		// "prod-west" would find nothing.
-		return e.auth.AuditTx(tx, ident.UserID(), ip, "connection_rename",
+		return e.auth.AuditTxConn(tx, connID, ident.UserID(), ip, "connection_rename",
 			fmt.Sprintf("%s -> %s", row.Name, name))
 	})
 }

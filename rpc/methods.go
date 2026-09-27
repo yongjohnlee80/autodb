@@ -839,6 +839,7 @@ func (s *Server) register() {
 		return out, nil
 	})
 	s.registerHistorySearch()
+	s.registerAuditSearch()
 
 	// sys.shutdown drains this server. The shared server
 	// outlives its frontends, so restarting it needs an authorized

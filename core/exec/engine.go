@@ -664,7 +664,7 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 	if pinned == nil {
 		target, err = e.target(ctx, connID, connRow)
 		if err != nil {
-			if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "exec_conn_failed",
+			if aerr := e.auth.AuditConn(ctx, connID, ident.UserID(), ip, "exec_conn_failed",
 				fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
 				return nil, aerr
 			}

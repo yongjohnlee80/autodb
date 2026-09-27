@@ -477,7 +477,7 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 			// from an ordinary one without anybody reading flags.
 			action = "pat_created_debug_cleartext"
 		}
-		return s.AuditTx(tx, ident.UserID(), ip, action,
+		return s.AuditTxConn(tx, connID, ident.UserID(), ip, action,
 			fmt.Sprintf("name %q conn %d expires %s", name, connID,
 				expires.UTC().Format(time.RFC3339)))
 	})

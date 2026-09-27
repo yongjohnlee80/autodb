@@ -370,6 +370,17 @@ func (s *Service) AuditTxRecord(tx *dao.Transaction, rec AuditRecord) error {
 	return nil
 }
 
+// AuditTxConn is AuditTx for a row about connection connID: the column a
+// search by connection, or by the workspaces it is in, reads.
+func (s *Service) AuditTxConn(tx *dao.Transaction, connID, userID int64, ip, action, detail string) error {
+	return s.AuditTxRecord(tx, AuditRecord{UserID: userID, IP: ip, Action: action, Detail: detail, ConnID: connID})
+}
+
+// AuditConn is Audit for a row about connection connID.
+func (s *Service) AuditConn(ctx context.Context, connID, userID int64, ip, action, detail string) error {
+	return s.AuditRecordCtx(ctx, AuditRecord{UserID: userID, IP: ip, Action: action, Detail: detail, ConnID: connID})
+}
+
 // AuditRecordCtx appends rec in a transaction of its own.
 func (s *Service) AuditRecordCtx(ctx context.Context, rec AuditRecord) error {
 	return s.inTx(ctx, func(tx *dao.Transaction) error { return s.AuditTxRecord(tx, rec) })

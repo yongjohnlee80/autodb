@@ -80,13 +80,13 @@ func (e *Engine) openSession(ctx context.Context, token string, connID int64, ip
 		// Cap refusals are audited: a caller hitting a limit repeatedly is
 		// either misbehaving or under-provisioned, and neither is visible
 		// without a record.
-		if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "session_refused",
+		if aerr := e.auth.AuditConn(ctx, connID, ident.UserID(), ip, "session_refused",
 			fmt.Sprintf("conn %d: %v", connID, err)); aerr != nil {
 			return nil, aerr
 		}
 		return nil, err
 	}
-	if aerr := e.auth.Audit(ctx, ident.UserID(), ip, "session_opened",
+	if aerr := e.auth.AuditConn(ctx, connID, ident.UserID(), ip, "session_opened",
 		fmt.Sprintf("conn %d: session %s", connID, id)); aerr != nil {
 		e.closeSession(context.WithoutCancel(ctx), s, ip, "audit-failed")
 		return nil, aerr
@@ -244,7 +244,7 @@ func (e *Engine) admitSessionState(
 // rejectSession audits a refusal on a session-scoped call and returns it.
 func (e *Engine) rejectSession(ctx context.Context, s *session, ident auth.Identity, ip, sqlText string, cause error) error {
 	detail := fmt.Sprintf("conn %d: session %s: %v: %s", s.connID, s.id, cause, truncate(sqlText, maxAuditSQLBytes))
-	if err := e.auth.Audit(ctx, ident.UserID(), ip, "exec_rejected", detail); err != nil {
+	if err := e.auth.AuditConn(ctx, s.connID, ident.UserID(), ip, "exec_rejected", detail); err != nil {
 		return err
 	}
 	return cause

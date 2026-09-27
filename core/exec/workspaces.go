@@ -146,7 +146,7 @@ func (e *Engine) AttachConnection(ctx context.Context, token string, wsID, connI
 				return terr
 			}
 		}
-		return e.auth.AuditTx(tx, ident.UserID(), ip, "workspace_attach",
+		return e.auth.AuditTxConn(tx, connID, ident.UserID(), ip, "workspace_attach",
 			fmt.Sprintf("workspace %d += connection %d", wsID, connID))
 	})
 }
@@ -162,7 +162,7 @@ func (e *Engine) DetachConnection(ctx context.Context, token string, wsID, connI
 			With(meta.WcWsID, wsID).With(meta.WcConnID, connID).Delete(); terr != nil {
 			return terr
 		}
-		return e.auth.AuditTx(tx, ident.UserID(), ip, "workspace_detach",
+		return e.auth.AuditTxConn(tx, connID, ident.UserID(), ip, "workspace_detach",
 			fmt.Sprintf("workspace %d -= connection %d", wsID, connID))
 	})
 }

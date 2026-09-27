@@ -166,7 +166,7 @@ func (s *Service) AddGrant(ctx context.Context, token string, userID, connID int
 		if err != nil {
 			return err
 		}
-		return s.AuditTx(tx, actor.userID, ip, "grant_added",
+		return s.AuditTxConn(tx, connID, actor.userID, ip, "grant_added",
 			fmt.Sprintf("user %d on connection %d as %s", userID, connID, role))
 	})
 }
@@ -182,7 +182,7 @@ func (s *Service) RemoveGrant(ctx context.Context, token string, userID, connID 
 			With(meta.GrantUserID, userID).With(meta.GrantConnID, connID).Delete(); err != nil {
 			return err
 		}
-		return s.AuditTx(tx, actor.userID, ip, "grant_removed",
+		return s.AuditTxConn(tx, connID, actor.userID, ip, "grant_removed",
 			fmt.Sprintf("user %d on connection %d", userID, connID))
 	})
 }
