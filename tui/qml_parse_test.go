@@ -9,11 +9,11 @@ import (
 	"github.com/yongjohnlee80/golib/parse/qml"
 )
 
-// TestEveryBlueprintFileParses: the blueprint — qml/blueprint/main.qml and the
-// panels, views, dialogs and managers it imports — is the design every screen
-// is built to. Until golib's QML vocabulary has every type it uses, it is held
-// to QML syntax: each file parses.
-func TestEveryBlueprintFileParses(t *testing.T) {
+// TestEveryQMLFileParses: every QML file the program embeds — main.qml, its
+// panels, views, dialogs and managers, and the themes — is valid QML syntax.
+// A file that fails to parse would otherwise surface only when the screen that
+// imports it is first opened.
+func TestEveryQMLFileParses(t *testing.T) {
 	root := os.DirFS("qml")
 	n := 0
 	err := fs.WalkDir(root, ".", func(p string, d fs.DirEntry, err error) error {
@@ -34,6 +34,6 @@ func TestEveryBlueprintFileParses(t *testing.T) {
 		t.Fatal(err)
 	}
 	if n < 30 {
-		t.Fatalf("parsed %d QML files; the blueprint has more — is the walk rooted right?", n)
+		t.Fatalf("parsed %d QML files; the program embeds more — is the walk rooted right?", n)
 	}
 }

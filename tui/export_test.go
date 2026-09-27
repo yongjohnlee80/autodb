@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"sync"
 	"testing"
 
@@ -441,25 +440,6 @@ func (h *Host) Theme() string {
 
 // RunCommand runs a catalog command on the loop, as App.run would.
 func (h *Host) RunCommand(id string) { h.p.Post(func() { h.catalog.runIfOffered(h, CommandID(id)) }) }
-
-// BlueprintProgramOptions are the program with the blueprint screen as its
-// layout: what the blueprint test lints.
-func BlueprintProgramOptions() []tuidecl.ProgramOption {
-	src, err := fs.ReadFile(qmlFiles, "blueprint/main.qml")
-	if err != nil {
-		panic(err)
-	}
-	return BlueprintProgramOptionsFrom(qmlFiles, src)
-}
-
-// BlueprintProgramOptionsFrom is the blueprint read from files, for a probe
-// over an edited copy.
-func BlueprintProgramOptionsFrom(files fs.FS, src []byte) []tuidecl.ProgramOption {
-	opt := Options{Layout: src}
-	h := newHost(nil, nil, nil, opt)
-	opts := h.options(opt)
-	return opts
-}
 
 // HoldRuns makes every query wait for a result the test releases: each run
 // sends its release channel on started, and answers with what is sent there.

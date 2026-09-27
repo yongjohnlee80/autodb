@@ -9,9 +9,6 @@
 // A palette is set ONCE, where it starts: the Window carries the application
 // palette; a surface that is a distinct part of the design overrides only its
 // own roles; everything else inherits.
-//
-// The blueprint (blueprint/main.qml) is the whole design; this screen takes up
-// its parts as they are built.
 
 import tui 1.0
 import autodb 1.0                 // App: this program's state and commands
