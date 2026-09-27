@@ -695,20 +695,32 @@ func withMigrationLock(ctx context.Context, conn dao.DataConn, run func(tx dao.C
 // pending versions in order — the WHOLE upgrade inside one driver transaction
 // (both engines support transactional DDL), so a failure leaves the store at
 // its original version rather than stranded between two. See applyAll.
-func runMigrations(ctx context.Context, conn dao.DataConn, eng engine.Name) error {
+//
+// It returns the warnings the upgrade found: applied schema scripts whose
+// digest no longer matches this binary's copy.
+func runMigrations(ctx context.Context, conn dao.DataConn, eng engine.Name) ([]string, error) {
+	var warnings []string
+	err := schemaTx(ctx, conn, eng, func(ex migExec) error {
+		var err error
+		warnings, err = applyAll(ctx, ex, conn.Dialect(), eng)
+		return err
+	})
+	return warnings, err
+}
+
+// schemaTx runs fn in the ONE transaction a schema change runs in: under the
+// cross-process migration lock on postgres; plainly on sqlite, where a file
+// store is single-writer and each test uses its own file or a private
+// in-memory database, so there is nothing to serialize against.
+func schemaTx(ctx context.Context, conn dao.DataConn, eng engine.Name, fn func(ex migExec) error) error {
 	if eng == engine.Postgres {
-		return withMigrationLock(ctx, conn, func(tx dao.ContextTxConn) error {
-			return applyAll(ctx, tx, conn.Dialect(), eng)
-		})
+		return withMigrationLock(ctx, conn, func(tx dao.ContextTxConn) error { return fn(tx) })
 	}
-	// sqlite: a file store is single-writer and each test uses its own file
-	// or a private in-memory database, so there is nothing to serialize
-	// against. One transaction all the same, for the atomicity below.
 	tx, err := conn.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("meta: beginning the migration transaction: %w", err)
 	}
-	if err := applyAll(ctx, tx, conn.Dialect(), eng); err != nil {
+	if err := fn(tx); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -742,26 +754,17 @@ type migExec interface {
 //
 // That second point is a deliberate SEMANTIC CHANGE, not a side effect: before
 // this, a failure at v10 left a store that had already committed v7..v9.
-func applyAll(ctx context.Context, ex migExec, d dao.Dialect, eng engine.Name) error {
-	const ledger = `CREATE TABLE IF NOT EXISTS schema_migrations (
-		version INTEGER PRIMARY KEY,
-		applied_at BIGINT NOT NULL)`
-	if _, err := ex.ExecContext(ctx, ledger); err != nil {
-		return fmt.Errorf("meta: creating schema_migrations: %w", err)
-	}
-
-	cur64, err := currentVersionOn(ctx, ex)
-	if err != nil {
-		return err
-	}
-	cur := int(cur64)
-	latest := migrations[len(migrations)-1].Version
-	if cur > latest {
-		return fmt.Errorf("meta: store schema version %d is newer than this binary's %d — refusing to open (downgrade guard)", cur, latest)
-	}
-
+//
+// Since the schema scripts (docs/ops/schema-scripts.md) this is the FROZEN LEGACY CHAIN: it brings a store at v1..v16
+// to v17, the schema script 000001 records (scripts.go). The list is never
+// appended again — a change is a script — and it runs only for a store whose
+// legacy ledger says it is older than v17.
+//
+// It applies the versions above cur through `through` — legacyBaseline in
+// production; a test building a store as an older binary left it stops lower.
+func applyLegacy(ctx context.Context, ex migExec, d dao.Dialect, eng engine.Name, cur, through int) error {
 	for _, m := range migrations {
-		if m.Version <= cur {
+		if m.Version <= cur || m.Version > through {
 			continue
 		}
 		stmts := m.stmts(eng)

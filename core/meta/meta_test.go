@@ -170,10 +170,9 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "meta.db")
 
-	s1, err := Open(ctx, config.Meta{Engine: "sqlite", Path: path})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	// A store genuinely at v6, as a binary of that version left it: the
+	// legacy chain through v6 and nothing else.
+	s1 := openLegacyStore(t, config.Meta{Engine: "sqlite", Path: path}, 6)
 	// Two unresolved transactions and one settled, written as a v6 store
 	// would have left them.
 	seed := func(txID, state string, seq int64) {
@@ -192,48 +191,6 @@ func TestMigrate_V7BackfillsTheExistingPendingBacklog(t *testing.T) {
 	seed("tx_done", "opened", 1)
 	seed("tx_done", "committed", 2)
 
-	// Roll the store back to v6: drop the queue and its ledger row, so the
-	// next Open genuinely applies v7 against a populated log.
-	for _, stmt := range []string{
-		// v14's table. A NEW table rather than a new column, so the rollback
-		// is a DROP rather than an ALTER — but it is the same lesson v13 taught
-		// here: a schema step this list does not undo makes the re-migration
-		// fail on its own success.
-		`DROP TABLE keyslots`,
-		`DROP TABLE tx_pending`,
-		// Everything from v7 on re-applies, so every artifact a >=7 migration
-		// creates must be dropped here too, or the re-run collides with it.
-		`DROP TABLE user_ip_allowlist`,
-		// Everything from v7 on, not just v7: currentVersion is the MAX, so
-		// leaving a later row behind would skip the re-application entirely.
-		//
-		// And every LATER migration's effect must be undone too, or its
-		// re-application fails. v10 adds tx_outcomes.collapsed_at, so the
-		// column goes here — the DROP list is part of adding a migration,
-		// not an afterthought.
-		`ALTER TABLE tx_outcomes DROP COLUMN collapsed_at`,
-		// v11 adds the pats table; same DROP-list rule.
-		`DROP TABLE pats`,
-		// v13 adds connections.target_db. `connections` is NOT dropped here
-		// (it is a v1 table), so unlike pats' new columns this one does not
-		// vanish with its table and has to be named explicitly.
-		`ALTER TABLE connections DROP COLUMN target_db`,
-		// v15 adds script_history.suspended. script_history is a v1 table, so
-		// like connections.target_db the column outlives a table DROP and has
-		// to be named. This list is the contract the comment above describes.
-		`ALTER TABLE script_history DROP COLUMN suspended`,
-		// v16 adds connections.frontdoor_exposed — same DROP-list rule.
-		`ALTER TABLE connections DROP COLUMN frontdoor_exposed`,
-		// v17 adds users.options. `users` is a v1 table, so the column
-		// outlives a table DROP and has to be named, exactly like
-		// connections.target_db above.
-		`ALTER TABLE users DROP COLUMN options`,
-		`DELETE FROM schema_migrations WHERE version >= 7`,
-	} {
-		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
-			t.Fatalf("rolling back to v6 (%s): %v", stmt, err)
-		}
-	}
 	_ = s1.Close()
 
 	s2, err := Open(ctx, config.Meta{Engine: "sqlite", Path: path})
@@ -278,10 +235,9 @@ func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "meta.db")
 
-	s1, err := Open(ctx, config.Meta{Engine: "sqlite", Path: path})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
+	// A store genuinely at v7: its queue has no owner column yet, which is
+	// the shape v8 meets in the field.
+	s1 := openLegacyStore(t, config.Meta{Engine: "sqlite", Path: path}, 7)
 	if _, err := s1.TxOutcomes.OnCtx(ctx).
 		Set(TxOutTxID, "tx_owned").Set(TxOutSeq, int64(1)).
 		Set(TxOutState, "opened").Set(TxOutReason, "").
@@ -292,56 +248,10 @@ func TestMigrate_V8BackfillsTheQueueOwner(t *testing.T) {
 	}
 	if _, err := s1.TxPending.OnCtx(ctx).
 		Set(TxPendTxID, "tx_owned").Set(TxPendConnID, int64(3)).
-		Set(TxPendUserID, int64(42)).Set(TxPendCreatedAt, int64(1)).Insert(); err != nil {
+		Set(TxPendCreatedAt, int64(1)).Insert(); err != nil {
 		t.Fatal(err)
 	}
 
-	// Roll back to v7 PROPERLY: recreate the table without the column, so v8
-	// runs against the shape it will actually meet in the field. Blanking the
-	// column instead would leave v8's ALTER to fail on a duplicate, and the
-	// test would be exercising its own setup rather than the upgrade.
-	for _, stmt := range []string{
-		`DROP INDEX idx_tx_pending_order`,
-		`DROP INDEX idx_tx_pending_user`,
-		`ALTER TABLE tx_pending RENAME TO tx_pending_v8`,
-		`CREATE TABLE tx_pending (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			tx_id TEXT NOT NULL UNIQUE,
-			connection_id BIGINT NOT NULL,
-			created_at BIGINT NOT NULL)`,
-		`INSERT INTO tx_pending (id, tx_id, connection_id, created_at)
-			SELECT id, tx_id, connection_id, created_at FROM tx_pending_v8`,
-		// v14's table. A NEW table rather than a new column, so the rollback
-		// is a DROP rather than an ALTER — but it is the same lesson v13 taught
-		// here: a schema step this list does not undo makes the re-migration
-		// fail on its own success.
-		`DROP TABLE keyslots`,
-		`DROP TABLE tx_pending_v8`,
-		// v9 re-applies as well; drop its artifact for the same reason.
-		`DROP TABLE user_ip_allowlist`,
-		// Same DROP-list rule as the v7 fixture: undo every later
-		// migration's effect or its re-application fails.
-		`ALTER TABLE tx_outcomes DROP COLUMN collapsed_at`,
-		// v11 adds the pats table; same DROP-list rule.
-		`DROP TABLE pats`,
-		// v13 adds connections.target_db. `connections` is NOT dropped here
-		// (it is a v1 table), so unlike pats' new columns this one does not
-		// vanish with its table and has to be named explicitly.
-		`ALTER TABLE connections DROP COLUMN target_db`,
-		// v15 adds script_history.suspended — same DROP-list rule.
-		`ALTER TABLE script_history DROP COLUMN suspended`,
-		// v16 adds connections.frontdoor_exposed — same DROP-list rule.
-		`ALTER TABLE connections DROP COLUMN frontdoor_exposed`,
-		// v17 adds users.options. `users` is a v1 table, so the column
-		// outlives a table DROP and has to be named, exactly like
-		// connections.target_db above.
-		`ALTER TABLE users DROP COLUMN options`,
-		`DELETE FROM schema_migrations WHERE version >= 8`,
-	} {
-		if _, err := s1.Conn().ExecContext(ctx, stmt); err != nil {
-			t.Fatalf("rolling back to v7 (%s): %v", stmt, err)
-		}
-	}
 	_ = s1.Close()
 
 	s2, err := Open(ctx, config.Meta{Engine: "sqlite", Path: path})

@@ -83,19 +83,5 @@ func TestMigrateV16_BackfillsEffectiveExposurePerRow(t *testing.T) {
 
 func openBeforeExposureMigration(t *testing.T, cfg config.Meta) *Store {
 	t.Helper()
-	full := migrations
-	capped := make([]migration, 0, len(full))
-	for _, m := range full {
-		if m.Version < 16 {
-			capped = append(capped, m)
-		}
-	}
-	migrations = capped
-	defer func() { migrations = full }()
-
-	s, err := Open(context.Background(), cfg)
-	if err != nil {
-		t.Fatalf("opening pre-v16 store: %v", err)
-	}
-	return s
+	return openLegacyStore(t, cfg, 15)
 }

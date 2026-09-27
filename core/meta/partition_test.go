@@ -58,25 +58,7 @@ func scratchDSN(t *testing.T) string {
 // replaced.
 func openAtVersion(t *testing.T, dsn string, v int) *Store {
 	t.Helper()
-	full := migrations
-	capped := make([]migration, 0, len(full))
-	for _, m := range full {
-		if m.Version <= v {
-			capped = append(capped, m)
-		}
-	}
-	if len(capped) == len(full) {
-		t.Fatalf("capping at v%d kept every migration — the ledger no longer has a "+
-			"version above %d, so this cell is not testing an upgrade", v, v)
-	}
-	migrations = capped
-	defer func() { migrations = full }()
-
-	s, err := Open(context.Background(), config.Meta{
-		Engine: "postgres", DSN: dsn, AllowInsecureDSN: true})
-	if err != nil {
-		t.Fatalf("opening the store at v%d: %v", v, err)
-	}
+	s := openLegacyStore(t, config.Meta{Engine: "postgres", DSN: dsn, AllowInsecureDSN: true}, v)
 	t.Cleanup(func() { _ = s.Close() })
 	return s
 }

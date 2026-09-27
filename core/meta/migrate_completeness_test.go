@@ -75,8 +75,10 @@ func TestMigrateCompleteness_CountableTablesCoversTheSchema(t *testing.T) {
 		if err := rows.Scan(&n); err != nil {
 			t.Fatal(err)
 		}
-		// The ledger is the runner's own bookkeeping, not migrated state.
-		if n != "schema_migrations" {
+		// The ledgers are the runner's own bookkeeping, not migrated state:
+		// each engine records ITS scripts (their digests differ by engine), and
+		// the destination's runner writes its own when the copy opens it.
+		if n != "schema_migrations" && n != "schema_version" {
 			live[n] = true
 		}
 	}

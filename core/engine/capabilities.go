@@ -95,6 +95,14 @@ type capabilities struct {
 	// re-issuing them as ordinary statements — would silently drop the
 	// guarantees the client asked for by using it.
 	postgresWire bool
+
+	// The lexical rules a SCRIPT is split by — where a statement ends — beyond
+	// the common ones: $$…$$ and $tag$…$tag$ strings (a function body full of
+	// semicolons is one statement), /* … /* … */ … */ nesting, and E'…' strings
+	// in which a backslash escapes. A wrong answer splits a statement in two.
+	dollarQuotedStrings   bool
+	nestedBlockComments   bool
+	escapeStringConstants bool
 }
 
 // The table. Every Name declared in this package must appear here, and
@@ -113,6 +121,9 @@ var capsByName = map[Name]capabilities{
 		declarativePartitioning:      true,
 		routineCatalog:               true,
 		postgresWire:                 true,
+		dollarQuotedStrings:          true,
+		nestedBlockComments:          true,
+		escapeStringConstants:        true,
 	},
 	MySQL: {
 		backslashEscapes: true,
@@ -247,3 +258,14 @@ func (n Name) HasRoutineCatalog() bool { return capsByName[n].routineCatalog }
 //   - SpeaksPostgresWire() == false (MySQL, SQLite):
 //     Target does not speak PostgreSQL wire; must use SQL translation or driver.
 func (n Name) SpeaksPostgresWire() bool { return capsByName[n].postgresWire }
+
+// DollarQuotedStrings reports whether $$…$$ and $tag$…$tag$ are string
+// literals, so a semicolon inside one does not end a statement.
+func (n Name) DollarQuotedStrings() bool { return capsByName[n].dollarQuotedStrings }
+
+// NestedBlockComments reports whether /* … */ comments nest.
+func (n Name) NestedBlockComments() bool { return capsByName[n].nestedBlockComments }
+
+// EscapeStringConstants reports whether E'…' is a string in which a backslash
+// escapes the next character.
+func (n Name) EscapeStringConstants() bool { return capsByName[n].escapeStringConstants }
