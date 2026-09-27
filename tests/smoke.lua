@@ -2346,7 +2346,10 @@ print("\n[21] autorestart — a stale backend restarts itself when idle (ADR-020
   local what = ar.on_restart_answer({ stopping = false, busy = { executing = 1, in_transaction = 0, wire_sessions = 0 } }, nil, ctx)
   alog.notify = orig_lnotify
   ok("p21: busy says what is running and restarts nothing",
-    what == "busy" and brought == 1 and toasts[1] ~= nil and toasts[1]:find("1 statement running", 1, true) ~= nil,
+    what == "busy" and brought == 1 and toasts[1] ~= nil and toasts[1]:find("1 statement running", 1, true) ~= nil
+      -- It promises what the code does: a retry at the next connection,
+      -- never a restart "once idle" that nothing schedules.
+      and toasts[1]:find("at the next connection", 1, true) ~= nil and toasts[1]:find("once idle", 1, true) == nil,
     tostring(toasts[1]))
   ok("p21: an older daemon without the verb leaves the warning to stand",
     ar.on_restart_answer(nil, { code = -32601, message = "method not found" }, ctx) == "unsupported" and brought == 1)
