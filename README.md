@@ -750,6 +750,8 @@ buffers — navigate, select and yank, never edit.
 **The server outlives the TUI by design** (one shared server, many frontends),
 so a rebuilt binary keeps talking to the process already running. `SPC X`
 restarts it from inside the UI; a protocol mismatch says which side is stale.
+Neovim restarts a stale server on its own when it is idle — see
+[Updating through Mason](docs/ops/schema-scripts.md#updating-through-mason-or-any-package-manager).
 
 ## Neovim
 

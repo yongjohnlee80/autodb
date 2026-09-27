@@ -100,10 +100,30 @@ yours to take.
 **Nothing changes until the daemon restarts.** A daemon started from Neovim
 is detached and shared: every Neovim instance and `autodb --ui` uses the same
 one. It keeps serving the old version after the binary is replaced. Neovim
-compares the daemon's version with the binary on disk when it connects,
-reports the backend as stale, and says to choose "restart the backend" in the
-autodb menu. It never restarts on its own, because a restart cancels running
-statements for every client.
+compares the daemon's version with the binary on disk when it connects.
+
+**Neovim restarts an idle daemon on its own** (ADR-0202). After you sign in as
+an admin, a stale daemon is asked to restart **only if it is idle**: no open
+transaction, no running statement, and no PostgreSQL client connected at all,
+because an idle client can still hold prepared statements or session settings
+a restart would destroy. The daemon decides that in one step and, when it is
+idle, stops admitting new work before it lets go, so nothing can start in
+between. Neovim then starts the new binary, reconnects, asks you to sign in to
+the new daemon, and says what the start did:
+
+    restarted the backend: autodb 0.4.2 — schema scripts applied: 000003_update_attempt_dispositions.sql; the store was backed up first to …/.autodb-backups/…
+
+- **Busy:** nothing restarts. Neovim says what is running ("2 statements
+  running, 1 PostgreSQL client connected") and asks again at the next
+  connect; or restart it yourself from the autodb menu once they finish.
+- **Not an admin:** the warning says to choose "restart the backend" in the
+  autodb menu, as before; an admin restarts it.
+- **The plugin is newer than the daemon** (a release that bumped the
+  protocol): the handshake cannot succeed, so Neovim reaches the old daemon
+  on a connection at the daemon's own protocol, used only for signing in and
+  restarting. A daemon with the idle restart is asked as above. An older one
+  gets a prompt that shows what is running and restarts only on a yes, which
+  cancels running statements.
 
 **The restart applies the scripts**, as at every start. The new daemon binds
 its socket before it opens the store, so a start while the old daemon still
@@ -112,15 +132,25 @@ one, the pending scripts run in one transaction. If they fail, the store is
 left as it was, the daemon exits, and Neovim shows its error. The previous
 binary can then be started again on the unchanged store.
 
-**Unlike the updater, the restart has no dry run, no prompt and no backup.**
-Every update script is additive (see below), so that is safe for the old
-binary. Before an update whose release notes name a script that changes data,
-do the updater's steps by hand:
+**A SQLite store is backed up before its schema changes.** When the start
+would change an existing SQLite store's schema, the daemon first writes a
+consistent copy (`VACUUM INTO`) to `.autodb-backups/` beside the store, and
+verifies it (`PRAGMA quick_check`) before any script runs. If the backup
+cannot be taken, the start stops and the store is untouched. A backup is the
+whole store — credentials, keyslots and history — so the directory is 0700,
+each file 0600, and the start refuses a directory that is not private. The
+three newest backups of a store are kept. A new store gets none; neither
+does PostgreSQL, because the daemon does not run `pg_dump`.
+
+**Unlike the updater, the restart has no dry run and no prompt.** Every
+update script is additive (see below), so that is safe for the old binary.
+Before an update whose release notes name a script that changes data, do the
+updater's steps by hand:
 
 1. stop the daemon: quit Neovim, then `kill -TERM <pid>`. The PID is on the
    TUI's status line. SIGTERM drains before the daemon exits;
-2. back up the meta store, meaning the SQLite file, or the PostgreSQL
-   database with `pg_dump`;
+2. back up the meta store: the SQLite file (the start's own backup covers
+   this too), or the PostgreSQL database with `pg_dump`;
 3. with the new binary, run `autodb --apply-migration-scripts --dry-run` to
    see what will run. It needs the daemon stopped, because it takes the lease;
 4. start Neovim. The frontend starts the new daemon, which applies them.
