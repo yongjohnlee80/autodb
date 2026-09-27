@@ -155,8 +155,10 @@ type Engine struct {
 	history bool
 	// ownerEpoch stamps every attempt; see WithOwnerEpoch.
 	ownerEpoch string
-	maxRows    int
-	now        func() time.Time
+	// unknowns is the recent unknowns this process produced, for the counts.
+	unknowns unknownLog
+	maxRows  int
+	now      func() time.Time
 
 	// pendingLeaseCap and pendingResidentCap hold the registry-scoped caps
 	// until every option has run. See WithLeaseCap.
@@ -895,6 +897,7 @@ func (e *Engine) writeOutcomeObserved(ctx context.Context, ident auth.Identity, 
 		return err
 	}
 	var conflict error
+	settledHere := !e.history || att.HistID == 0
 	if err := dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		// The history row FIRST: it decides whether this is the terminal at
 		// all. Only the write that made the attempt terminal gets an
@@ -915,6 +918,7 @@ func (e *Engine) writeOutcomeObserved(ctx context.Context, ident auth.Identity, 
 			if !settled {
 				return nil
 			}
+			settledHere = true
 		}
 		// SUSPENDED APPEARS IN THE AUDIT LINE TOO, not only in the history
 		// row. The two surfaces answer the same question for different
@@ -929,6 +933,12 @@ func (e *Engine) writeOutcomeObserved(ctx context.Context, ident auth.Identity, 
 			TxID: txID, AttemptID: att.ID, ConnID: connID})
 	}); err != nil {
 		return err
+	}
+	if disp == meta.DispositionUnknown && settledHere && e.history {
+		// The unobserved tail: its end was never seen. As loud as a dead
+		// owner's, and counted with them.
+		e.unknowns.note(att.ID)
+		e.logf("WARNING: statement attempt %s settled as unknown — %s", att.ID, errText)
 	}
 	return conflict
 }

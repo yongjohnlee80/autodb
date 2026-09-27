@@ -304,3 +304,27 @@ func ApplyScripts(ctx context.Context, s *Store) (ScriptStatus, error) {
 // SchemaWarnings are what the upgrade at Open found worth saying: applied
 // scripts whose digest changed. The daemon prints them at start.
 func (s *Store) SchemaWarnings() []string { return s.schemaWarnings }
+
+// ScriptAppliedAt is when the update script numbered n was applied to this
+// store, and whether it has been. A trend that starts at a script's change —
+// the dispositions counted from 000003, say — begins at this instant, and a
+// reader has to be told where that is rather than shown a continuous line.
+func (s *Store) ScriptAppliedAt(ctx context.Context, n int) (time.Time, bool, error) {
+	rows, err := s.conn.QueryContext(ctx, `SELECT script, applied_at FROM schema_version`)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("meta: reading schema_version: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	prefix := fmt.Sprintf("%06d_", n)
+	for rows.Next() {
+		var name string
+		var at int64
+		if err := rows.Scan(&name, &at); err != nil {
+			return time.Time{}, false, err
+		}
+		if strings.HasPrefix(name, prefix) {
+			return time.Unix(at, 0), true, rows.Err()
+		}
+	}
+	return time.Time{}, false, rows.Err()
+}
