@@ -85,7 +85,15 @@ func (h *Host) state(theme string) map[string]any {
 		st[k] = v
 	}
 	st["App.historyRows"] = h.history.model
-	st["App.historyStatus"] = "Enter script · e load · y copy"
+	st["App.historyStatus"] = historyHelp
+	st["App.historyConnChoices"] = h.hist.conns
+	st["App.historySpaceChoices"] = h.hist.spaces
+	st["App.historyUserChoices"] = h.hist.users
+	st["App.historyStatusChoices"] = h.hist.statuses
+	st["App.historyFilterUsers"] = false
+	for _, k := range historyFilterIndexes {
+		st[k] = 0
+	}
 	st["App.caTitle"] = ""
 	st["App.caText"] = ""
 	st["App.caStatus"] = ""
