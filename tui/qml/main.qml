@@ -256,6 +256,7 @@ Window {
     UserForm { id: userForm }
     Addresses { id: addresses }
     History { id: history }
+    HistoryFilter { id: historyFilter }
     CACert { id: caCert }
     ConfirmRestart { id: restart }
     Keyslot { id: keyslot }

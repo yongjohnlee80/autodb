@@ -117,6 +117,7 @@ type Host struct {
 	addressGlobal       bool
 	addressUserID       int64
 	history             *manager[HistoryRow]
+	hist                *historyNav // the history listing's filter, pages and filter form
 	caText              string
 	caSeq               uint64
 	caFetch             func(context.Context, *Bound) (CAPem, error)
@@ -257,6 +258,7 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 	h.userConnections = tuidecl.NewListModel("key", "id", "label")
 	h.addresses = newAddressManager()
 	h.history = newHistoryManager()
+	h.hist = newHistoryNav()
 	h.spaceIndex = -1
 	h.spaceAttached = tuidecl.NewListModel("key", "name", "engine")
 	h.spaceOptions = tuidecl.NewListModel("key", "id", "name")

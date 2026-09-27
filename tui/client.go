@@ -603,6 +603,21 @@ type HistoryRow struct {
 	// commit. A daemon that does not send the key yields false, which reads as
 	// "not suspended" -- the answer every pre-existing row deserves.
 	Suspended bool
+
+	// Disposition is what the attempt did (completed, failed, refused,
+	// rolled_back, unknown), beside Status's what became of its effect. Empty
+	// for a row that finished before dispositions.
+	Disposition string
+}
+
+func historyRowFrom(m map[string]any) HistoryRow {
+	return HistoryRow{
+		User: mS(m, "user"), ConnID: mI(m, "connection_id"), Conn: mS(m, "connection"), IP: mS(m, "ip"),
+		Script: mS(m, "script"), StartedAt: mS(m, "started_at"),
+		Duration: time.Duration(mI(m, "duration_ms")) * time.Millisecond,
+		RowCount: mI(m, "row_count"), Status: mS(m, "status"),
+		Error: mS(m, "error"), Suspended: mB(m, "suspended"), Disposition: mS(m, "disposition"),
+	}
 }
 
 func (b *Bound) History(ctx context.Context, limit int64) ([]HistoryRow, error) {
@@ -613,15 +628,54 @@ func (b *Bound) History(ctx context.Context, limit int64) ([]HistoryRow, error) 
 	var out []HistoryRow
 	for _, row := range asList(res) {
 		m, _ := row.(map[string]any)
-		out = append(out, HistoryRow{
-			User: mS(m, "user"), ConnID: mI(m, "connection_id"), Conn: mS(m, "connection"), IP: mS(m, "ip"),
-			Script: mS(m, "script"), StartedAt: mS(m, "started_at"),
-			Duration: time.Duration(mI(m, "duration_ms")) * time.Millisecond,
-			RowCount: mI(m, "row_count"), Status: mS(m, "status"),
-			Error: mS(m, "error"), Suspended: mB(m, "suspended"),
-		})
+		out = append(out, historyRowFrom(m))
 	}
 	return out, nil
+}
+
+// HistoryQuery is a history search: every field optional, combined with AND.
+type HistoryQuery struct {
+	ConnID, WorkspaceID, UserID int64
+	From, To                    int64 // unix seconds, [From, To); 0 is unbounded
+	Status                      string
+	Limit                       int64
+	Before                      *HistoryCursor
+}
+
+// HistoryCursor is where a next page starts.
+type HistoryCursor struct{ StartedAt, ID int64 }
+
+// SearchHistory is one page of history.search, and the next page's cursor
+// (nil at the end).
+func (b *Bound) SearchHistory(ctx context.Context, q HistoryQuery) ([]HistoryRow, *HistoryCursor, error) {
+	filter := map[string]any{}
+	for k, v := range map[string]int64{"connection_id": q.ConnID, "workspace_id": q.WorkspaceID,
+		"user_id": q.UserID, "from": q.From, "to": q.To, "limit": q.Limit} {
+		if v != 0 {
+			filter[k] = v
+		}
+	}
+	if q.Status != "" {
+		filter["status"] = []any{q.Status}
+	}
+	if q.Before != nil {
+		filter["before"] = map[string]any{"started_at": q.Before.StartedAt, "id": q.Before.ID}
+	}
+	res, err := b.authed(ctx, "history.search", filter)
+	if err != nil {
+		return nil, nil, err
+	}
+	m, _ := res.(map[string]any)
+	var out []HistoryRow
+	for _, row := range asList(m["rows"]) {
+		r, _ := row.(map[string]any)
+		out = append(out, historyRowFrom(r))
+	}
+	var next *HistoryCursor
+	if n, ok := m["next"].(map[string]any); ok {
+		next = &HistoryCursor{StartedAt: mI(n, "started_at"), ID: mI(n, "id")}
+	}
+	return out, next, nil
 }
 
 // TxStatus is one transaction's resolved outcome.

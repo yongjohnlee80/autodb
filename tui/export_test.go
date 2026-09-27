@@ -532,3 +532,10 @@ func (h *Host) SetActiveWorkspace(ws int64) {
 
 // ThemeNames are the themes this program ships, as Options › Theme lists them.
 func ThemeNames() []string { return themeNames() }
+
+// SetHistoryPageSize makes the history listing page by n rows.
+func (h *Host) SetHistoryPageSize(n int64) {
+	done := make(chan struct{})
+	h.p.Post(func() { h.hist.pageSize = n; close(done) })
+	<-done
+}

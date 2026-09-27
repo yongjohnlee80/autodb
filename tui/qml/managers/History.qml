@@ -24,4 +24,8 @@ Dialog {
     }
     Shortcut { sequence: "e"; onActivated: App.historyLoad(table.currentIndex) }
     Shortcut { sequence: "y"; onActivated: App.historyCopy(table.currentIndex) }
+    Shortcut { sequence: "f"; onActivated: App.historyFilter() }
+    Shortcut { sequence: "x"; onActivated: App.historyClearFilter() }
+    Shortcut { sequence: "n"; onActivated: App.historyNextPage() }
+    Shortcut { sequence: "p"; onActivated: App.historyPrevPage() }
 }
