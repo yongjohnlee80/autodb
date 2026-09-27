@@ -10,7 +10,13 @@ import (
 func TestGlobalAddressesAddAndRemoveAStoreRow(t *testing.T) {
 	h, s := signedIn(t)
 	s.Keys(t, key(' '), key('I'))
-	s.WaitForText(t, "┌ ip allowlist (global) ")
+	// The ROWS, not only the frame. The frame is drawn before the rows' load
+	// lands, and an 'r' in between finds no row ("choose an IP row first")
+	// whose message the load then wipes: under load that is the order, and
+	// "config entries are read-only" never appears.
+	s.WaitFor(t, "ip allowlist with its config rows", func(sc string) bool {
+		return strings.Contains(sc, "┌ ip allowlist (global) ") && strings.Contains(sc, "(config — read-only)")
+	})
 	s.Keys(t, key('r')) // config-seeded first row cannot be removed here
 	s.WaitForText(t, "config entries are read-only")
 	s.Keys(t, key('a'))
