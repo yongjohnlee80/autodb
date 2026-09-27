@@ -44,6 +44,8 @@ import (
 // `BEGIN; …; COMMIT;` to run_script got independent statements, and the same
 // text now runs in one transaction. Same verb, different meaning, so the
 // handshake has to separate them.
+// Protocol 9 added history.search (history filtered and paged) and
+// dispositions.list (what attempts ended as).
 // Protocol 8 added sys.inflight -- what a restart would interrupt, which the
 // restart confirmation has to name before it asks.
 // Protocol 4 added exec.run_script (3 added history.list and sys.shutdown). BUMP THIS whenever the
@@ -52,7 +54,7 @@ import (
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 8
+const Protocol int64 = 9
 
 // Session keys the gate and the hello handler share.
 //

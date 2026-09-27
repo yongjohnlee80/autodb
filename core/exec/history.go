@@ -2,8 +2,11 @@ package exec
 
 import (
 	"context"
-	"sort"
+	"errors"
+	"fmt"
 	"time"
+
+	"github.com/yongjohnlee80/golib/dao"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/meta"
@@ -43,6 +46,11 @@ type HistoryRow struct {
 	// operator reading history needs both, because "ok, 100 rows" and "ok, 100
 	// rows, and there were more" are different facts about the same run.
 	Suspended bool
+
+	// Disposition is what the attempt did — completed, failed, refused,
+	// rolled_back, unknown — the axis beside Status, which says what became
+	// of its effect. Empty for a row that finished before dispositions.
+	Disposition string
 }
 
 // DefaultHistoryLimit bounds an unspecified request; MaxHistoryLimit
@@ -52,42 +60,127 @@ const (
 	MaxHistoryLimit     = 500
 )
 
+// HistoryFilter narrows a history search. Every field is optional, and the
+// fields combine with AND.
+type HistoryFilter struct {
+	// ConnID, WorkspaceID and UserID keep rows of that connection, of any
+	// connection attached to that workspace NOW, and run by that user.
+	ConnID, WorkspaceID, UserID int64
+	// From and To keep rows that started in [From, To).
+	From, To time.Time
+	// Status keeps rows with one of these statuses.
+	Status []HistStatus
+	// Limit bounds the page: DefaultHistoryLimit when unset, at most
+	// MaxHistoryLimit.
+	Limit int
+	// Before continues a listing: the rows after this cursor, in its order.
+	Before *HistoryCursor
+}
+
+// HistoryCursor is a position in the listing's order — newest first, by when
+// the attempt started, then by id — as the keyset a next page starts from.
+type HistoryCursor struct {
+	StartedAt int64 // unix seconds, as stored
+	ID        int64
+}
+
+// ErrUnknownStatus reports a status filter naming no history status.
+var ErrUnknownStatus = errors.New("exec: not a history status")
+
 // ListHistory returns the most recent executions the caller may see,
 // newest first.
 func (e *Engine) ListHistory(ctx context.Context, token string, limit int) ([]HistoryRow, error) {
+	rows, _, err := e.SearchHistory(ctx, token, HistoryFilter{Limit: limit})
+	return rows, err
+}
+
+// SearchHistory returns one page of the executions the caller may see that
+// f keeps, newest first, and the cursor of the next page (nil at the end).
+//
+// THE FILTERS RUN IN THE QUERY, never over rows already read: the table grows
+// with every statement, and a page is only a page if the store stops at it.
+// The time range is also what prunes the monthly partitions on PostgreSQL.
+//
+// Disclosure is the core's: a caller who is not an admin sees only their own
+// rows, whatever UserID they send — their filter is ANDed with their own id,
+// so asking for another user's rows answers nothing.
+func (e *Engine) SearchHistory(ctx context.Context, token string, f HistoryFilter) ([]HistoryRow, *HistoryCursor, error) {
 	ident, err := e.auth.ValidateToken(ctx, token)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	limit := f.Limit
 	if limit <= 0 {
 		limit = DefaultHistoryLimit
 	}
 	limit = min(limit, MaxHistoryLimit)
 
-	rows, err := e.store.History.OnCtx(ctx).Select()
-	if err != nil {
-		return nil, err
+	q := e.store.History.OnCtx(ctx).
+		OrderBy(dao.Desc(meta.HistByStartedAt), dao.Desc(meta.HistByID))
+	if ident.Role() != "admin" {
+		q = q.With(meta.HistUserID, ident.UserID())
 	}
-	// Newest first. The dao's sort keys are schema-level; ordering here
-	// keeps the query portable across the sqlite and postgres stores.
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].StartedAt != rows[j].StartedAt {
-			return rows[i].StartedAt > rows[j].StartedAt
+	if f.UserID != 0 {
+		q = q.WithPredicate(dao.Eq(string(meta.HistUserID), f.UserID))
+	}
+	if f.ConnID != 0 {
+		q = q.WithPredicate(dao.Eq(string(meta.HistConnID), f.ConnID))
+	}
+	if f.WorkspaceID != 0 {
+		links, err := e.store.WorkspaceConns.OnCtx(ctx).With(meta.WcWsID, f.WorkspaceID).Select()
+		if err != nil {
+			return nil, nil, err
 		}
-		return rows[i].ID > rows[j].ID
-	})
-
-	admin := ident.Role() == "admin"
+		if len(links) == 0 {
+			return nil, nil, nil // no connection is in it, so no row can be
+		}
+		ids := make([]any, len(links))
+		for i, l := range links {
+			ids[i] = l.ConnectionID
+		}
+		q = q.WithPredicate(dao.In(string(meta.HistConnID), ids))
+	}
+	if !f.From.IsZero() {
+		q = q.WithPredicate(dao.Gte(string(meta.HistStartedAt), f.From.Unix()))
+	}
+	if !f.To.IsZero() {
+		q = q.WithPredicate(dao.Lt(string(meta.HistStartedAt), f.To.Unix()))
+	}
+	if len(f.Status) > 0 {
+		known := map[HistStatus]bool{}
+		for _, st := range meta.HistoryStatuses() {
+			known[st] = true
+		}
+		vs := make([]any, len(f.Status))
+		for i, st := range f.Status {
+			if !known[st] {
+				return nil, nil, fmt.Errorf("%w: %q", ErrUnknownStatus, st)
+			}
+			vs[i] = string(st)
+		}
+		q = q.WithPredicate(dao.In(string(meta.HistStatus), vs))
+	}
+	if c := f.Before; c != nil {
+		q = q.WithPredicate(dao.Or(
+			dao.Lt(string(meta.HistStartedAt), c.StartedAt),
+			dao.And(dao.Eq(string(meta.HistStartedAt), c.StartedAt), dao.Lt(string(meta.HistID), c.ID)),
+		))
+	}
+	// One more than the page, to know whether there is a next one.
+	rows, err := q.Limit(uint64(limit + 1)).Select()
+	if err != nil {
+		return nil, nil, err
+	}
+	var next *HistoryCursor
+	if len(rows) > limit {
+		rows = rows[:limit]
+		last := rows[len(rows)-1]
+		next = &HistoryCursor{StartedAt: last.StartedAt, ID: last.ID}
+	}
 	names := map[int64]string{}
 	conns := map[int64]string{}
-	out := make([]HistoryRow, 0, min(limit, len(rows)))
+	out := make([]HistoryRow, 0, len(rows))
 	for _, r := range rows {
-		if !admin && r.UserID != ident.UserID() {
-			continue // another user's script is not this caller's business
-		}
-		if len(out) == limit {
-			break
-		}
 		out = append(out, HistoryRow{
 			ID: r.ID, UserID: r.UserID, User: e.userName(ctx, names, r.UserID),
 			ConnID: r.ConnectionID, Conn: e.connName(ctx, conns, r.ConnectionID),
@@ -101,10 +194,11 @@ func (e *Engine) ListHistory(ctx context.Context, token string, limit int) ([]Hi
 			// stored integer here: the 0/1-on-both-engines convention has one
 			// reader, and a second comparison written by hand is where the two
 			// engines drift apart.
-			Suspended: r.IsSuspended(),
+			Suspended:   r.IsSuspended(),
+			Disposition: string(r.Disposition),
 		})
 	}
-	return out, nil
+	return out, next, nil
 }
 
 // userName resolves a user id to a display name, memoized per call.

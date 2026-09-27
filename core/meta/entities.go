@@ -402,11 +402,16 @@ const (
 )
 
 // HistByID orders history by insertion, so the repair sweep can page it.
-const HistByID Sort = "id"
+const (
+	HistByID Sort = "id"
+	// HistByStartedAt orders by when the attempt started: newest first,
+	// with HistByID breaking ties, is the history listing's keyset order.
+	HistByStartedAt Sort = "started_at"
+)
 
 func newHistory(conn dao.DataConn) *dao.Schema[*HistoryEntry, HistoryField, Sort, int64] {
 	return sortableSchema(conn, "script_history", HistID,
-		map[Sort]string{HistByID: "id"},
+		map[Sort]string{HistByID: "id", HistByStartedAt: "started_at"},
 		map[HistoryField]dao.Field[*HistoryEntry]{
 			HistID:           {Column: "id", Scan: func(r *HistoryEntry) any { return &r.ID }},
 			HistUserID:       {Column: "user_id", Scan: func(r *HistoryEntry) any { return &r.UserID }, Value: func(r *HistoryEntry) any { return r.UserID }},

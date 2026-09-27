@@ -15,7 +15,12 @@ import (
 
 // thisBumpAdded is the verb the CURRENT protocol number bought. Update it with
 // the number, in the same change: the pair is what makes a bump accountable.
-const thisBumpAdded = "sys.inflight"
+const thisBumpAdded = "history.search"
+
+// adminOnlyVerbs are the verbs whose answer describes the whole server, so
+// only an admin reads them: sys.inflight (what a restart would interrupt,
+// protocol 8) and dispositions.list (what every attempt ended as, protocol 9).
+var adminOnlyVerbs = []string{"sys.inflight", "dispositions.list"}
 
 // goldenVerbs reads the recorded surface for one protocol number.
 func goldenVerbs(t *testing.T, proto int64) ([]string, bool) {
@@ -172,7 +177,7 @@ func TestProtocol_AClientAtTheCurrentVersionReachesTheNewVerb(t *testing.T) {
 	f := newFixture(t)
 	c := f.session(t) // hello at rpc.Protocol
 
-	errVal, result := c.call(thisBumpAdded, f.rootTok)
+	errVal, result := c.call(thisBumpAdded, f.rootTok, map[string]any{})
 	if errVal != nil {
 		t.Fatalf("a current client was refused %s: %#v", thisBumpAdded, errVal)
 	}
@@ -180,22 +185,47 @@ func TestProtocol_AClientAtTheCurrentVersionReachesTheNewVerb(t *testing.T) {
 	if !ok {
 		t.Fatalf("%s result shape: %#v", thisBumpAdded, result)
 	}
+	// THE EXACT SHAPE: a page of rows and the cursor of the next, nil at the
+	// end. A frontend paging on a key that is not there would page forever or
+	// never.
+	if _, ok := m["rows"].([]any); !ok {
+		t.Errorf("%s.rows is %T, not a list", thisBumpAdded, m["rows"])
+	}
+	if next, present := m["next"]; !present || next != nil {
+		t.Errorf("%s.next on a short listing = %#v (present %v), want nil", thisBumpAdded, next, present)
+	}
+	if len(m) != 2 {
+		t.Errorf("%s answered with %d fields, want exactly rows and next: %#v", thisBumpAdded, len(m), m)
+	}
+}
+
+// sys.inflight answers exactly the two numbers the restart prompt reads.
+func TestSysInflight_AnswersExactlyWhatTheRestartPromptReads(t *testing.T) {
+	f := newFixture(t)
+	c := f.session(t)
+	errVal, result := c.call("sys.inflight", f.rootTok)
+	if errVal != nil {
+		t.Fatalf("sys.inflight: %#v", errVal)
+	}
+	m, ok := result.(map[string]any)
+	if !ok {
+		t.Fatalf("sys.inflight result shape: %#v", result)
+	}
 
 	// THE EXACT SHAPE, because the frontend reads two named fields and a reply
 	// carrying one of them would leave the prompt silently naming a zero.
 	for _, field := range []string{"executing", "in_transaction"} {
 		v, ok := m[field]
 		if !ok {
-			t.Errorf("%s does not carry %q, which the restart prompt reads", thisBumpAdded, field)
+			t.Errorf("sys.inflight does not carry %q, which the restart prompt reads", field)
 			continue
 		}
 		if _, ok := v.(int64); !ok {
-			t.Errorf("%s.%s is %T, not a number the frontend can read", thisBumpAdded, field, v)
+			t.Errorf("sys.inflight.%s is %T, not a number the frontend can read", field, v)
 		}
 	}
 	if len(m) != 2 {
-		t.Errorf("%s answered with %d fields, want exactly the two the prompt reads: %#v",
-			thisBumpAdded, len(m), m)
+		t.Errorf("sys.inflight answered with %d fields, want exactly the two the prompt reads: %#v", len(m), m)
 	}
 	// An idle fixture is running nothing, and the verb must say so rather than
 	// answering with whatever is convenient.
@@ -207,12 +237,12 @@ func TestProtocol_AClientAtTheCurrentVersionReachesTheNewVerb(t *testing.T) {
 	}
 }
 
-// AND IT IS ADMIN-ONLY, matching the verb it exists to inform.
-//
-// It answers "what would happen if I restarted", so it is readable by exactly
-// the people who could restart. A boundary nothing asserts is a boundary that
-// drifts the first time the handler is edited.
-func TestProtocol_TheNewVerbIsAdminOnly(t *testing.T) {
+// THE VERBS THAT DESCRIBE THE WHOLE SERVER ARE ADMIN-ONLY. sys.inflight
+// answers "what would happen if I restarted", readable by exactly the people
+// who could restart; dispositions.list counts every user's attempts. A
+// boundary nothing asserts is a boundary that drifts the first time the
+// handler is edited.
+func TestProtocol_TheServerWideVerbsAreAdminOnly(t *testing.T) {
 	f := newFixture(t)
 	c := f.session(t)
 
@@ -230,16 +260,15 @@ func TestProtocol_TheNewVerbIsAdminOnly(t *testing.T) {
 		t.Fatalf("no token in the login reply: %#v", lm)
 	}
 
-	// POSITIVE CONTROL: the same call as root succeeds, so a refusal below is
-	// about the ROLE and not about the verb being broken.
-	if errVal, _ := c.call(thisBumpAdded, f.rootTok); errVal != nil {
-		t.Fatalf("an admin was refused %s: %#v", thisBumpAdded, errVal)
-	}
-
-	errVal, res := c.call(thisBumpAdded, devTok)
-	if errVal == nil {
-		t.Fatalf("an editor read %s, which reports what a restart would interrupt: %#v",
-			thisBumpAdded, res)
+	for _, verb := range adminOnlyVerbs {
+		// POSITIVE CONTROL: the same call as root succeeds, so a refusal below
+		// is about the ROLE and not about the verb being broken.
+		if errVal, _ := c.call(verb, f.rootTok); errVal != nil {
+			t.Fatalf("an admin was refused %s: %#v", verb, errVal)
+		}
+		if errVal, res := c.call(verb, devTok); errVal == nil {
+			t.Errorf("an editor read %s, which describes the whole server: %#v", verb, res)
+		}
 	}
 }
 
