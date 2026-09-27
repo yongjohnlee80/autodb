@@ -711,7 +711,9 @@ case "$PKG" in
       $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl ca-certificates xz-utils
     fi ;;
   dnf|yum)  $SUDO "$PKG" install -y -q git curl ca-certificates xz ;;
-  pacman)   $SUDO pacman -Sy --noconfirm --needed git curl ca-certificates xz ;;
+  # -S, never -Sy or -Syu: on Arch a database refresh without the upgrade is a
+  # partial upgrade, and when to upgrade is the system owner's call.
+  pacman)   $SUDO pacman -S --noconfirm --needed git curl ca-certificates xz ;;
   apk)      $SUDO apk add --no-progress git curl ca-certificates xz ;;
   zypper)   $SUDO zypper --non-interactive install git curl ca-certificates xz ;;
 esac
