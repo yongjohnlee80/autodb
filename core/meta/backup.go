@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -54,6 +55,9 @@ const backupsKept = 3
 
 // backupName is a backup's collision-free name: the store's, the first step
 // the upgrade takes, the nanosecond, and 32 random bits.
+//
+// ownsBackup must recognise exactly this shape: rotation deletes what it
+// matches.
 func backupName(base, first string) (string, error) {
 	var rnd [4]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
@@ -233,9 +237,21 @@ func quickCheck(ctx context.Context, path string) error {
 	return rows.Err()
 }
 
+// backupShape is the part of backupName after "<store>.pre-": the first step
+// (a script's number, or legacy-v<N>), the nanosecond, and eight hex digits.
+var backupShape = regexp.MustCompile(`^([0-9]{6}|legacy-v[0-9]+)-[0-9]+-[0-9a-f]{8}\.bak$`)
+
+// ownsBackup reports whether name is one of base's backups, as backupName
+// names them. A file that merely shares the store's stem — the operator's
+// own "meta.db.pre-manual.bak" — is not, and rotation never touches it.
+func ownsBackup(base, name string) bool {
+	rest, ok := strings.CutPrefix(name, base+".pre-")
+	return ok && backupShape.MatchString(rest)
+}
+
 // rotateBackups keeps this store's newest backupsKept backups and removes the
-// rest — regular files only, named as this mechanism names them for THIS
-// store, so nothing else in the directory is touched. Called after the
+// rest — regular files only, named exactly as this mechanism names them for
+// THIS store, so nothing else in the directory is touched. Called after the
 // upgrade committed; a failure here is not the upgrade's.
 func (s *Store) rotateBackups() {
 	dir := filepath.Join(filepath.Dir(s.sqlitePath), backupDirName)
@@ -243,14 +259,14 @@ func (s *Store) rotateBackups() {
 	if err != nil {
 		return
 	}
-	prefix := filepath.Base(s.sqlitePath) + ".pre-"
+	base := filepath.Base(s.sqlitePath)
 	type own struct {
 		name string
 		mod  time.Time
 	}
 	var mine []own
 	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), prefix) || !strings.HasSuffix(e.Name(), ".bak") {
+		if !ownsBackup(base, e.Name()) {
 			continue
 		}
 		fi, err := os.Lstat(filepath.Join(dir, e.Name()))
