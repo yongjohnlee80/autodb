@@ -91,6 +91,54 @@ is no older schema to return to. The update/revert pairs start at 000002.
 Both commands refuse while a daemon is serving the store: they take its
 instance lease before anything changes.
 
+## Updating through Mason, or any package manager
+
+Mason, `go install`, Homebrew and distribution packages replace the **binary**
+only. No updater runs, so the steps `update_frontdoor.sh` takes for you are
+yours to take.
+
+**Nothing changes until the daemon restarts.** A daemon started from Neovim
+is detached and shared: every Neovim instance and `autodb --ui` uses the same
+one. It keeps serving the old version after the binary is replaced. Neovim
+compares the daemon's version with the binary on disk when it connects,
+reports the backend as stale, and says to choose "restart the backend" in the
+autodb menu. It never restarts on its own, because a restart cancels running
+statements for every client.
+
+**The restart applies the scripts**, as at every start. The new daemon binds
+its socket before it opens the store, so a start while the old daemon still
+runs is refused as "already running" and touches nothing. Once it is the only
+one, the pending scripts run in one transaction. If they fail, the store is
+left as it was, the daemon exits, and Neovim shows its error. The previous
+binary can then be started again on the unchanged store.
+
+**Unlike the updater, the restart has no dry run, no prompt and no backup.**
+Every update script is additive (see below), so that is safe for the old
+binary. Before an update whose release notes name a script that changes data,
+do the updater's steps by hand:
+
+1. stop the daemon: quit Neovim, then `kill -TERM <pid>`. The PID is on the
+   TUI's status line. SIGTERM drains before the daemon exits;
+2. back up the meta store, meaning the SQLite file, or the PostgreSQL
+   database with `pg_dump`;
+3. with the new binary, run `autodb --apply-migration-scripts --dry-run` to
+   see what will run. It needs the daemon stopped, because it takes the lease;
+4. start Neovim. The frontend starts the new daemon, which applies them.
+
+**Going back through the package manager** is fine while the older release
+knows every script the store has. A release from before the scripts (v0.3.x)
+reads the legacy ledger, which 000001 left at v17, and opens the store.
+Additive changes don't disturb it. A release that knows the scripts refuses a
+store holding one it lacks:
+
+    meta: the store has schema script 000003_…, which this binary does not — refusing to open (downgrade guard)
+
+A package manager can't resolve that for you. Follow **Downgrading** below, and
+run the reverts with the NEWER binary before the package manager installs the
+older one. Once the older one is installed, the newer binary, which is the only
+one that has the revert scripts, is gone. So keep a copy of it, or reinstall it
+long enough to revert.
+
 ## Downgrading
 
 A revert is the first step of a downgrade, and it runs against a stopped
