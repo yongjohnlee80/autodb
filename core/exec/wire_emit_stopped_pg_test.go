@@ -37,6 +37,7 @@ func TestWireQuery_EmitStopped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	f.expectUnknown() // the client is cut mid-response: the unobserved tail is unknown
 	ctx := context.Background()
 	q := func(sql string, emit func(WireMessage) error) (byte, error) {
 		return f.eng.WireQuery(ctx, res.SessionID, res.UserID, sql, testIP, emit)

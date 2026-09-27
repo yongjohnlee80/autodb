@@ -583,6 +583,7 @@ func emitFailRun(t *testing.T, f *fixture, sid SessionID, userID int64, sql stri
 // the unobserved tail is unresolvable.
 func TestWireQueryRaw_EmitterFailureNeverRecordsTheUnobservedTailAsOK(t *testing.T) {
 	f, connID, sid, _, userID := pgWireSession(t)
+	f.expectUnknown() // the client is cut mid-response: the unobserved tail is unknown
 	f.eng.history = true
 	ctx := context.Background()
 	table := fmt.Sprintf("raw_emitfail_%d", fixtureSeq.Add(1))
@@ -634,6 +635,7 @@ func TestWireQueryRaw_EmitterFailureNeverRecordsTheUnobservedTailAsOK(t *testing
 // statement passes the local T gate and only the target refuses it.
 func TestWireQueryRaw_EmitterFailureStillAppliesTheDrainedStatus(t *testing.T) {
 	f, connID, sid, _, userID := pgWireSession(t) // explicit tx open: T
+	f.expectUnknown()                             // the client is cut mid-response: the unobserved tail is unknown
 	f.eng.history = true
 	emitFailRun(t, f, sid, userID, "SELECT 1; SELECT 1/0") // the failure is drained unseen
 	if st, err := f.eng.WireTxStatus(sid, userID); err != nil || st != TxStatusAborted {
@@ -681,6 +683,7 @@ func TestWireQueryRaw_EmitterFailureStillAppliesTheDrainedStatus(t *testing.T) {
 // whose end nobody saw is unknown. Read off status alone, both would be one.
 func TestWireQueryRaw_ACutImplicitBlockKeepsTheObservedCompletion(t *testing.T) {
 	f, connID, sid, _, userID := pgWireSession(t)
+	f.expectUnknown() // the client is cut mid-response: the unobserved tail is unknown
 	f.eng.history = true
 	ctx := context.Background()
 	if rb := runRaw(t, f, sid, userID, "ROLLBACK"); rb.err != nil {

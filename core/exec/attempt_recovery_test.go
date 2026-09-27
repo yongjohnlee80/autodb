@@ -45,6 +45,7 @@ func attemptAudits(t *testing.T, f *fixture, attemptID string) int {
 
 func TestADeadOwnersRunningAttemptIsSettledAsUnknown(t *testing.T) {
 	onBothStores(t, func(t *testing.T, f *fixture) {
+		f.expectUnknown() // a dead owner's attempts are settled as unknown
 		att := deadAttempt(t, f)
 		recent, legacy := f.eng.RecoverDeadAttempts(context.Background())
 		if recent != 1 || legacy != 0 {
@@ -86,6 +87,7 @@ func TestThisProcesssOwnRunningAttemptIsLeftAlone(t *testing.T) {
 // the promise's sense, and turning them unknown would falsify every old row.
 func TestOnlyALegacyRunningRowIsSettledNeverAFinishedOne(t *testing.T) {
 	onBothStores(t, func(t *testing.T, f *fixture) {
+		f.expectUnknown() // a dead owner's attempts are settled as unknown
 		ctx := context.Background()
 		root := rootIdent(t, f)
 		ids := map[HistStatus]int64{}
@@ -125,6 +127,7 @@ func TestOnlyALegacyRunningRowIsSettledNeverAFinishedOne(t *testing.T) {
 // an upgrade is reported quietly, and counted apart.
 func TestOnlyARecentUnknownWarns(t *testing.T) {
 	onBothStores(t, func(t *testing.T, f *fixture) {
+		f.expectUnknown() // a dead owner's attempts are settled as unknown
 		ctx := context.Background()
 		var mu sync.Mutex
 		var logs []string
@@ -153,6 +156,7 @@ func TestOnlyARecentUnknownWarns(t *testing.T) {
 // The daemon's startup runs the recovery before it serves anything.
 func TestStartupRecoversADeadOwnersAttempts(t *testing.T) {
 	onBothStores(t, func(t *testing.T, f *fixture) {
+		f.expectUnknown() // a dead owner's attempts are settled as unknown
 		att := deadAttempt(t, f)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -299,6 +303,7 @@ func TestAKilledDaemonsAttemptIsSettledByTheNextOne(t *testing.T) {
 // leaves attempts the periodic pass settles, with no restart.
 func TestThePeriodicPassRecoversAnOwnerThatDiesWhileThisOneServes(t *testing.T) {
 	onBothStores(t, func(t *testing.T, f *fixture) {
+		f.expectUnknown() // a dead owner's attempts are settled as unknown
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		f.eng.StartOutcomeReconciler(ctx, 20*time.Millisecond)

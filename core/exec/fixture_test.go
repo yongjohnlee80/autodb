@@ -44,6 +44,8 @@ type fixture struct {
 	eng     *Engine
 	rootTok string
 	connID  int64
+	// unknownExpected: this cell produces an unknown on purpose.
+	unknownExpected bool
 }
 
 var fixtureSeq atomic.Int64
@@ -80,8 +82,28 @@ func newFixtureOn(t *testing.T, cfg config.Meta) *fixture {
 	if err != nil {
 		t.Fatalf("CreateConnection: %v", err)
 	}
-	return &fixture{store: store, svc: svc, eng: eng, rootTok: rootTok, connID: connID}
+	f := &fixture{store: store, svc: svc, eng: eng, rootTok: rootTok, connID: connID}
+	// `unknown` is unreachable in normal operation. So a cell that produced
+	// one fails, unless it produced it ON PURPOSE (a killed writer, a client
+	// cut mid-response) and said so. Registered last, so it runs before the
+	// store closes.
+	t.Cleanup(func() {
+		if f.unknownExpected {
+			return
+		}
+		n, err := store.History.OnCtx(context.Background()).
+			With(meta.HistDisposition, string(meta.DispositionUnknown)).Count()
+		if err == nil && n > 0 {
+			t.Errorf("%d attempt(s) ended unknown in a cell that did not expect it: unknown is "+
+				"unreachable in normal operation — call f.expectUnknown() in a cell that produces one on purpose", n)
+		}
+	})
+	return f
 }
+
+// expectUnknown declares that this cell produces an unknown disposition on
+// purpose, which the fixture's teardown would otherwise fail.
+func (f *fixture) expectUnknown() { f.unknownExpected = true }
 
 // exec runs one statement through the full Execute path and fails the test
 // on error.

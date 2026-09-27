@@ -87,6 +87,7 @@ func (e *Engine) RecoverDeadAttempts(ctx context.Context) (recent, legacy int) {
 			} else {
 				recent++
 				recentIDs = append(recentIDs, r.AttemptID)
+				e.unknowns.note(r.AttemptID)
 			}
 		}
 		if len(rows) < maxReconcileBatch {
