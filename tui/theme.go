@@ -33,9 +33,13 @@ func themeOf(src []byte) string {
 	return ""
 }
 
-// pickTheme records the theme a layout imports as the one the screen wears.
+// pickTheme records the theme a layout imports as the one the screen wears —
+// and, until the account says otherwise, as the theme preference's default.
 func (h *Host) pickTheme(src []byte) string {
 	h.theme = themeOf(src)
+	if p := h.themePref; p != nil && p.gen == 0 {
+		p.def, p.pref = h.theme, h.theme
+	}
 	return h.theme
 }
 

@@ -549,3 +549,6 @@ func (h *Host) SetActiveWorkspace(ws int64) {
 	h.p.Post(func() { h.active = activeConn{ws: ws}; close(done) })
 	<-done
 }
+
+// ThemeNames are the themes this program ships, as Options › Theme lists them.
+func ThemeNames() []string { return themeNames() }
