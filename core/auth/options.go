@@ -33,6 +33,14 @@ const (
 	KeysetTextEdit = "textedit"
 )
 
+// OptionTheme is the theme the TUI and the web UI wear: the one the account
+// last chose. The values are the themes the product ships.
+const OptionTheme = "theme"
+
+// Themes are the themes a client may store as OptionTheme. The TUI ships one
+// file per theme (tui/qml/themes); a test holds the two lists equal.
+var Themes = []string{"dark", "light", "mono", "retro"}
+
 // knownOptions is the vocabulary this build understands, and the values each
 // accepts. A key outside it is REFUSED on write — a typo would otherwise be
 // stored forever, read by nothing, and never reported.
@@ -41,6 +49,7 @@ const (
 // must survive, which is exactly what the merge preserves.
 var knownOptions = map[string][]string{
 	OptionEditorKeyset: {KeysetVim, KeysetTextEdit},
+	OptionTheme:        Themes,
 }
 
 // UserOptions reads an account's preferences.

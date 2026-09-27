@@ -145,3 +145,38 @@ func TestSetUserOption_RefusesAValueOutsideTheVocabulary(t *testing.T) {
 		}
 	}
 }
+
+// The theme is a preference the product ships a vocabulary for: each shipped
+// theme round-trips, beside the editor keyset without disturbing it, and a
+// theme the product does not ship is refused naming the ones it does.
+func TestSetUserOption_TheThemeRoundTripsAndIsBounded(t *testing.T) {
+	t.Parallel()
+	s, _, _ := newSvc(t)
+	rootTok, _ := mustBootstrap(t, s)
+	ctx := context.Background()
+
+	if err := s.SetUserOption(ctx, rootTok, OptionEditorKeyset, KeysetTextEdit, testIP); err != nil {
+		t.Fatal(err)
+	}
+	for _, theme := range Themes {
+		if err := s.SetUserOption(ctx, rootTok, OptionTheme, theme, testIP); err != nil {
+			t.Fatalf("SetUserOption(theme=%s): %v", theme, err)
+		}
+		opts, err := s.UserOptions(ctx, rootTok)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if opts[OptionTheme] != theme || opts[OptionEditorKeyset] != KeysetTextEdit {
+			t.Fatalf("after theme=%s: %v, want the theme and the keyset both", theme, opts)
+		}
+	}
+	err := s.SetUserOption(ctx, rootTok, OptionTheme, "neon", testIP)
+	if err == nil {
+		t.Fatal("a theme the product does not ship was accepted")
+	}
+	for _, want := range Themes {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %v does not name the shipped theme %q", err, want)
+		}
+	}
+}

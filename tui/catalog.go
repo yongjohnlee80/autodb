@@ -424,7 +424,7 @@ func catalogCommands() []CommandOf[*Host] {
 			// account, and there is no account to write it to before login.
 			ID:      "options.editor.vim",
 			Enabled: signedInToChooseAnEditor,
-			Run:     func(h *Host) { h.chooseKeyset(auth.KeysetVim) },
+			Run:     func(h *Host) { h.choosePref(h.prefs, auth.KeysetVim) },
 			Menu:    []MenuProjection{{Parent: nodeEditor, Label: "Vim mode", Hotkey: 'V', Order: 10}},
 		},
 		{
@@ -433,7 +433,7 @@ func catalogCommands() []CommandOf[*Host] {
 			// and the id is corrected with the label so the two cannot drift.
 			ID:      "options.editor.textedit",
 			Enabled: signedInToChooseAnEditor,
-			Run:     func(h *Host) { h.chooseKeyset(auth.KeysetTextEdit) },
+			Run:     func(h *Host) { h.choosePref(h.prefs, auth.KeysetTextEdit) },
 			Menu:    []MenuProjection{{Parent: nodeEditor, Label: "TextEdit mode", Hotkey: 'T', Order: 20}},
 		},
 		{
@@ -446,8 +446,16 @@ func catalogCommands() []CommandOf[*Host] {
 	for i, name := range themeNames() {
 		theme := name
 		cmds = append(cmds, CommandOf[*Host]{
-			ID:  CommandID(cmdThemePrefix + theme),
-			Run: func(h *Host) { h.useTheme(theme) },
+			ID: CommandID(cmdThemePrefix + theme),
+			// Stored on the account when there is one; before a sign-in the
+			// screen changes and nothing is written.
+			Run: func(h *Host) {
+				if signedIn(h) {
+					h.choosePref(h.themePref, theme)
+				} else {
+					h.useTheme(theme)
+				}
+			},
 			Menu: []MenuProjection{{Parent: nodeTheme, Label: themeLabel(theme),
 				Hotkey: rune(theme[0]), Order: 10 + i}},
 		})

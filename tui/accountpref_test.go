@@ -7,11 +7,13 @@ import (
 
 	"github.com/yongjohnlee80/golib/logger"
 
+	"github.com/yongjohnlee80/autodb/core/auth"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 )
 
-// editorpref_test.go holds the editor's keys: chosen from Options › Editor,
-// stored on the account, and never one person's for another.
+// accountpref_test.go holds the account's preferences — the editor's keys and
+// the theme: chosen from Options, stored on the account, and never one
+// person's for another.
 
 // addUser creates an editor account on the seeded server as root.
 func addUser(t *testing.T, addr, name, pass string) {
@@ -104,5 +106,60 @@ func TestOneWriteAtATimeAndTheLatestWaits(t *testing.T) {
 	case p := <-started:
 		t.Errorf("a third write went out: %q — the replaced choice was written too", p)
 	default:
+	}
+}
+
+// The theme is the account's too: retro chosen from Options › Theme is stored,
+// another account that never chose wears the layout's own (dark), and the
+// first gets retro back when it signs in again — in a new session as well,
+// since it lives on the account, not in this program.
+func TestTheThemeIsTheAccounts(t *testing.T) {
+	addr := seeded(t)
+	addUser(t, addr, "bob", rootPass)
+	h, s := runHostSized(t, addr, 120, 32)
+	loginAs(t, s, "root", rootPass)
+	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
+	if got := h.Theme(); got != "dark" {
+		t.Fatalf("the layout's own theme is %q, want dark", got)
+	}
+
+	h.RunCommand("options.theme.retro")
+	s.WaitFor(t, "stored", func(string) bool { return strings.Contains(lastRow(s), "theme: retro") && h.Theme() == "retro" })
+
+	s.Keys(t, key(' '), key('L'))
+	loginAs(t, s, "bob", rootPass)
+	s.WaitFor(t, "bob never chose: dark", func(string) bool {
+		return h.Auth() == "signed-in" && strings.Contains(lastRow(s), "bob") && h.Theme() == "dark"
+	})
+
+	// A fresh program — a new session, a new process as far as the screen
+	// knows — reads root's choice from the account.
+	h2, s2 := runHostSized(t, addr, 120, 32)
+	loginAs(t, s2, "root", rootPass)
+	s2.WaitFor(t, "root's retro back", func(string) bool { return h2.Auth() == "signed-in" && h2.Theme() == "retro" })
+}
+
+// Before a sign-in there is no account to store a theme on: the screen
+// changes and nothing is written — the next sign-in wears the account's.
+func TestAThemeChosenSignedOutIsNotStored(t *testing.T) {
+	addr := seeded(t)
+	h, s := runHostSized(t, addr, 120, 32)
+	s.WaitForText(t, "┌ sign in ")
+	h.RunCommand("options.theme.mono")
+	s.WaitFor(t, "mono worn", func(string) bool { return h.Theme() == "mono" })
+	loginAs(t, s, "root", rootPass)
+	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
+	s.WaitFor(t, "the account's own: dark", func(string) bool { return h.Theme() == "dark" })
+	if strings.Contains(lastRow(s), "saving it failed") {
+		t.Errorf("a signed-out choice tried to write: %q", lastRow(s))
+	}
+}
+
+// The themes the account may store are the themes the program ships: a
+// theme file with no entry in auth.Themes could be worn but never saved.
+func TestEveryShippedThemeCanBeStored(t *testing.T) {
+	shipped := tuiapp.ThemeNames()
+	if strings.Join(shipped, ",") != strings.Join(auth.Themes, ",") {
+		t.Errorf("the TUI ships %v; the account accepts %v", shipped, auth.Themes)
 	}
 }

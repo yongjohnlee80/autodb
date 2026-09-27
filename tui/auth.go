@@ -129,14 +129,14 @@ func (h *Host) afterSignIn() {
 			// notes is the one case the user must see.
 			h.setStatus(fmt.Sprintf("signed in as %s, but notes are unavailable: %v", u.Name, err))
 			h.reloadExplorer()
-			h.applyStoredKeyset()
+			h.applyStoredPrefs()
 			return
 		}
 		h.notes = notes
 	}
 	h.setStatus(fmt.Sprintf("signed in as %s (%s)", u.Name, u.Role))
 	h.reloadExplorer()
-	h.applyStoredKeyset()
+	h.applyStoredPrefs()
 }
 
 // retireIdentity ends the current identity's authority: its note store stops

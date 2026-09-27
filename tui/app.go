@@ -83,8 +83,9 @@ type Host struct {
 	noteOpen       *noteOpenState
 	listNotes      func(*NoteStore, map[int64]string) ([]noteChoice, error)
 	noteOpenListed func() // test-only: the held listing callback reached the UI loop
-	// prefs is the editor profile, stored on the account (editorpref.go).
-	prefs *editorPrefs
+	// prefs is the editor profile and themePref the theme, each stored on the
+	// account (accountpref.go).
+	prefs, themePref *accountPref
 	// zoomed is the pane that has the screen, "" for none (zoom.go).
 	zoomed string
 	// pickable is the connection picker's rows (picker.go).
@@ -246,7 +247,8 @@ func newHost(session *Session, notesFor NotesFactory, quit func(), opt Options) 
 	h.pressure = newPressureView()
 	h.workspaces = tuidecl.NewListModel("id", "name")
 	h.noteOpen = newNoteOpenState()
-	h.prefs = newEditorPrefs()
+	h.prefs = newKeysetPref()
+	h.themePref = newThemePref(themeOf(layout))
 	h.pickable = tuidecl.NewListModel("key", "label", "id", "ws", "name")
 	h.conns = newConnectionsManager()
 	h.spaces = newWorkspaceManager(h)
