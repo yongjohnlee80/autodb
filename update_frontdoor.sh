@@ -543,6 +543,34 @@ case "$PREFLIGHT_RC" in
     ;;
 esac
 
+# ------------------------------------------------------ as whom the schema runs
+#
+# The schema scripts run as the UNIT's user: a sqlite store written by root
+# would be left unreadable to the service. Decided HERE, before anything is
+# stopped — a host that cannot switch to that user refuses the update while
+# the service is still serving, and never falls back to running as root.
+# A FAILED LOOKUP IS NOT AN EMPTY User=. Empty means root, which is safe to
+# run as; a lookup that failed means "unknown", and guessing root there is the
+# very ownership failure this exists to prevent — so it refuses, still before
+# anything is stopped.
+UNIT_USER="$(systemctl show -p User --value "$UNIT" 2>/dev/null)" || die "could not read $UNIT's User= (systemctl show failed), so the schema scripts could
+       not be run as the service's user and running them as root might leave a store the
+       service cannot open. Nothing has been stopped and nothing has been installed."
+RUNUSER="${AUTODB_RUNUSER:-runuser}"   # the override exists for the test cells
+as_unit_user() {
+  if [ -n "$UNIT_USER" ] && [ "$UNIT_USER" != "root" ]; then
+    "$RUNUSER" -u "$UNIT_USER" -- "$@"
+  else
+    "$@"
+  fi
+}
+if [ -n "$UNIT_USER" ] && [ "$UNIT_USER" != "root" ] && ! command -v "$RUNUSER" >/dev/null 2>&1; then
+  die "$UNIT runs as $UNIT_USER, and this host has no runuser(1) to run the schema scripts as
+       that user. Running them as root would leave a sqlite store the service cannot open,
+       so nothing has been stopped and nothing has been installed. Install util-linux's
+       runuser and run this update again."
+fi
+
 # ------------------------------------------------------------------- the swap
 step "Swapping the binary"
 BACKUP="$PREFIX/autodb.previous"
@@ -557,6 +585,49 @@ systemctl stop "$UNIT" 2>/dev/null || true
 # open one, and sets the mode in the same step.
 install -m 0755 "$TMP/autodb" "$PREFIX/autodb"
 info "installed $("$PREFIX/autodb" --version)"
+
+# ------------------------------------------------------------ the schema
+#
+# THE SCHEMA BEFORE THE START (docs/ops/schema-scripts.md). The new binary applies its pending
+# schema scripts here, while the service is stopped — the lease is free — so a
+# script that fails is named now, not buried in a unit that went active and then
+# died. The whole set runs in one transaction: a failure leaves the store as it
+# was, so the previous binary is put back and started on the store it knew.
+#
+# As the UNIT's user, not root: a sqlite store written by root would be left
+# unreadable to the service.
+#
+# A build from before the scripts does not know the flag; that is POSITIVELY
+# identified (exit 2 and Go's unknown-flag message, as the pre-flight does) and
+# skipped — its own start migrates, as every build before it did.
+step "Applying the schema scripts"
+if [ -n "$PREFLIGHT_CONFIG" ]; then
+  set -- --apply-migration-scripts --config "$PREFLIGHT_CONFIG"
+else
+  set -- --apply-migration-scripts
+fi
+APPLY_OUT="$(as_unit_user "$PREFIX/autodb" "$@" 2>&1)" && APPLY_RC=0 || APPLY_RC=$?
+# APPLIED is the numbers of the scripts THIS update applied, newest last: what
+# a rollback must revert before the previous binary can open the store.
+APPLIED=""
+if [ "$APPLY_RC" = "0" ]; then
+  printf '%s\n' "$APPLY_OUT" | sed 's/^/  /'
+  APPLIED="$(printf '%s\n' "$APPLY_OUT" | sed -n 's/^  \([0-9][0-9]*\)_update_.*\.sql$/\1/p' | tr '\n' ' ')"
+elif [ "$APPLY_RC" = "2" ] &&
+     printf '%s' "$APPLY_OUT" | grep -q 'flag provided but not defined: -apply-migration-scripts'; then
+  info "this build predates the schema scripts; its own start migrates the store"
+else
+  printf '%s\n' "$APPLY_OUT" | sed 's/^/  /' >&2
+  warn "the new binary could not apply its schema scripts (exit $APPLY_RC); the store is unchanged"
+  warn "rolling back to the previous binary"
+  install -m 0755 "$BACKUP" "$PREFIX/autodb"
+  if [ "$WAS_ACTIVE" = "yes" ]; then
+    systemctl start "$UNIT" || true
+  fi
+  die "the schema scripts failed, so nothing was changed: the previous binary is back
+       ($("$PREFIX/autodb" --version 2>/dev/null || echo unknown)) on the store it knew. Fix what the
+       failure above names and run this update again."
+fi
 
 # ------------------------------------------------------------------ the restart
 #
@@ -580,6 +651,56 @@ else
     # restarts this unit on the old binary, which overwrites the exit status and
     # appends to the journal.
     report_failure "$UNIT"
+    # WHAT THE STORE CAN STILL BE OPENED BY. The baseline 000001 changes no
+    # schema ONLY when it adopted a store already at v17 — then it is a no-op
+    # that records itself, the legacy ledger stays at v17, and the previous
+    # binary opens the store, so the rollback is the binary swap it always was.
+    # The apply says so in a line of its own; without that line — a store the
+    # legacy chain brought up to v17 inside the same step, or a new one — the
+    # baseline counts as advancing the store like any later script.
+    #
+    # A LATER SCRIPT IS DIFFERENT, and it is not undone here: a revert is a
+    # conscious downgrade, never run automatically (docs/ops/schema-scripts.md),
+    # and the new daemon may already have written into what a revert would
+    # remove. The previous binary would refuse the store (or, from before the
+    # scripts, misread it). So the new binary and the store stay TOGETHER, the
+    # service is stopped, and the operator is given the exact downgrade.
+    ADVANCED=""
+    for _n in $APPLIED; do
+      if [ "$(printf '%s' "$_n" | sed 's/^0*//')" = "1" ] &&
+         printf '%s' "$APPLY_OUT" | grep -q '^000001 adopted a store already at v17: no schema change$'; then
+        continue
+      fi
+      ADVANCED="$ADVANCED $_n"
+    done
+    if [ -n "$ADVANCED" ]; then
+      systemctl stop "$UNIT" 2>/dev/null || true
+      _steps=""
+      _baseline="no"
+      for _n in $(printf '%s\n' $ADVANCED | sort -rn); do
+        _num="$(printf '%s' "$_n" | sed 's/^0*//')"
+        if [ "$_num" = "1" ]; then _baseline="yes"; continue; fi
+        _steps="$_steps
+         $PREFIX/autodb --revert-migration-script $_num${PREFLIGHT_CONFIG:+ --config $PREFLIGHT_CONFIG}"
+      done
+      if [ "$_baseline" = "yes" ]; then
+        # The baseline upgraded the store from an older schema, and it has no
+        # revert: there is no downgrade to offer, only the new binary or the
+        # store's backup.
+        _way_back="or go back to the previous binary with the meta store as it was BEFORE this
+       update — restored from your backup of it: this update brought the store up from an
+       older schema, which no script reverts (docs/ops/schema-scripts.md)."
+      else
+        _way_back="or downgrade, deliberately, reverting newest first (docs/ops/schema-scripts.md):$_steps
+         install -m 0755 $BACKUP $PREFIX/autodb && systemctl start $UNIT"
+      fi
+      die "the new binary did not come up, and it had already applied schema script(s)$ADVANCED,
+       which the previous binary cannot open. So the previous binary was NOT put back: the
+       new binary ($TAG) and the store are left together, and the service is STOPPED.
+       Either fix what $UNIT logged above and start it again:
+         systemctl start $UNIT
+       $_way_back"
+    fi
     warn "rolling back to the previous binary"
     install -m 0755 "$BACKUP" "$PREFIX/autodb"
     systemctl start "$UNIT" || true
@@ -602,6 +723,14 @@ say ""
 if [ "$ROLLED_BACK" = "yes" ]; then
   die "the update was ROLLED BACK: $TAG did not come up. What it said is printed above, under \"What $UNIT logged\"."
 fi
-say "Updated to $_ver. The config, meta store, TLS material and keyslot were"
-say "not touched. The previous binary is at $BACKUP if you want it back:"
-say "  install -m 0755 $BACKUP $PREFIX/autodb && systemctl restart $UNIT"
+if [ -n "$APPLIED" ]; then
+  say "Updated to $_ver. The config, TLS material and keyslot were not touched; the"
+  say "meta store's schema gained script(s) $APPLIED. Going back to the previous"
+  say "binary ($BACKUP) is a downgrade: stop the service, revert those scripts with"
+  say "this binary, newest first, then install the previous one"
+  say "(docs/ops/schema-scripts.md)."
+else
+  say "Updated to $_ver. The config, meta store, TLS material and keyslot were"
+  say "not touched. The previous binary is at $BACKUP if you want it back:"
+  say "  install -m 0755 $BACKUP $PREFIX/autodb && systemctl restart $UNIT"
+fi

@@ -26,6 +26,13 @@ printf 'systemctl %s\n' "$*" >> "$LOG"
 case "${1:-}" in
   show)
     case " $* " in
+      # The unit's User=: UPD_UNIT_USER, empty for a unit that sets none.
+      *" User "*)
+        # UPD_USER_LOOKUP_FAIL: the lookup itself fails, as opposed to an empty User=.
+        [ -n "${UPD_USER_LOOKUP_FAIL:-}" ] && exit 1
+        printf '%s\n' "${UPD_UNIT_USER:-}"
+        exit 0
+        ;;
       *" MainPID "*)
         _seq="${UPD_STATES:-active}"
         _cur="$LOG.cursor"

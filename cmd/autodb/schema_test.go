@@ -184,3 +184,18 @@ func TestTheBaselineSaysWhatItDidToTheStore(t *testing.T) {
 		t.Errorf("apply on a new store said:\n%s", out.String())
 	}
 }
+
+// The updater recognises an adoption by grepping this binary's words for it;
+// the two must never drift, or every rollback would keep the new binary (or,
+// worse, a changed sentence that still matched would put back one that
+// cannot open the store).
+func TestTheUpdaterReadsTheBaselineAdoptionAsThisBinaryWritesIt(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join("..", "..", "update_frontdoor.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "'^" + baselineEffect(17, false) + "$'"
+	if !strings.Contains(string(script), want) {
+		t.Errorf("update_frontdoor.sh does not grep for %s, which is what this binary prints for an adoption", want)
+	}
+}
