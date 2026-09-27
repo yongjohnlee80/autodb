@@ -395,7 +395,7 @@ func runServe(configPath string) error {
 	// default location, a missing file means defaults, and everything else
 	// (unreadable file, bad TOML, unknown keys) fails loudly — no silent
 	// fallback away from the operator's intended bind/allowlist/meta.
-	cfg, err := config.Load(configPath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
 	}
@@ -1074,7 +1074,7 @@ func spawnFor(cfg config.Config, configPath string) func() (string, error) {
 }
 
 func runUI(configPath string) error {
-	cfg, err := config.Load(configPath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
 	}
@@ -1150,7 +1150,7 @@ func runUI(configPath string) error {
 // through the same RPC client seam --ui uses, and unlike --ui it never starts one:
 // a missing daemon is a startup failure here, not something to fix by spawning.
 func runWebUI(configPath string, port int) error {
-	cfg, err := config.Load(configPath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
 	}
@@ -1338,7 +1338,7 @@ func listen(ep config.Endpoint) (net.Listener, error) {
 // is parsed by machines, and a stable two-field line is harder to get
 // wrong than JSON that grows fields.
 func runPrintEndpoint(configPath string) error {
-	cfg, err := config.Load(configPath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
 	}

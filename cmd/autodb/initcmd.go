@@ -88,7 +88,7 @@ func runInit(ctx context.Context, out io.Writer, configPath string, o initOpts) 
 		o.secret = ttySecret
 	}
 
-	cfg, err := config.Load(configPath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
 	}

@@ -64,7 +64,7 @@ type createCertOpts struct {
 //	                                       |
 //	                            [Report Paths & Exit]
 func runCreateCert(out io.Writer, configPath string, o createCertOpts) error {
-	cfg, err := config.Load(configPath)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
 	}
