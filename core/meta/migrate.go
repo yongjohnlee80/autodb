@@ -381,5 +381,7 @@ func TableCounts(ctx context.Context, s *Store) ([]TableRows, error) {
 // Exposed for the migration CLI, which must open WITHOUT migrating (to take
 // the lease first) and then migrate once it has proven no daemon is serving.
 func Migrate(ctx context.Context, s *Store, mcfg StoreConfig) error {
-	return runMigrations(ctx, s.conn, mcfg.StoreEngine())
+	warnings, err := runMigrations(ctx, s.conn, mcfg.StoreEngine())
+	s.schemaWarnings = warnings
+	return err
 }

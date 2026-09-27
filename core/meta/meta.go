@@ -39,6 +39,9 @@ type Store struct {
 	UserIPs        *dao.Schema[*UserIP, UserIPField, Sort, int64]
 	KV             *dao.Schema[*MetaKV, MetaKVField, Sort, string]
 	Keyslots       *dao.Schema[*Keyslot, KeyslotField, Sort, string]
+
+	// schemaWarnings are what Open's upgrade found (scripts.go).
+	schemaWarnings []string
 }
 
 // Open opens the configured meta-store engine, runs pending migrations, and
@@ -70,10 +73,12 @@ func Open(ctx context.Context, mcfg StoreConfig) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := runMigrations(ctx, s.conn, mcfg.StoreEngine()); err != nil {
+	warnings, err := runMigrations(ctx, s.conn, mcfg.StoreEngine())
+	if err != nil {
 		_ = s.conn.Close()
 		return nil, err
 	}
+	s.schemaWarnings = warnings
 	return s, nil
 }
 
