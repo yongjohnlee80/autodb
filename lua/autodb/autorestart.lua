@@ -115,8 +115,11 @@ function M.on_restart_answer(res, err, ctx)
     return "restarting"
   end
   local busy = type(res) == "table" and res.busy or {}
+  -- Nothing retries until the next connection (ADR-0202 §2), so the notice
+  -- promises only that: a user who stays connected is never restarted.
   log.notify(string.format("the backend is older than the installed binary but busy (%s): " ..
-    "it restarts itself once idle, or restart it now from <leader>DX", M.describe_busy(busy)),
+    "it is asked again at the next connection, or restart it from <leader>DX once that finishes",
+    M.describe_busy(busy)),
     { level = "warn", component = "lifecycle" })
   return "busy"
 end
