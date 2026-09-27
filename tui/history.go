@@ -50,6 +50,9 @@ func (h *Host) historyShow(i int) error {
 	h.valueText = r.Script
 	h.set("App.valueTitle", fmt.Sprintf("script — %s", r.StartedAt))
 	h.set("App.valueText", r.Script)
+	// By the connection's id, never its name: a name is a label, and one
+	// the explorer does not list (another workspace's) reads as the default.
+	h.set("App.valueSyntax", syntaxFor(h.explorer.engines[r.ConnID]))
 	h.open("value")
 	return nil
 }

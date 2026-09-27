@@ -585,7 +585,10 @@ func (b *Bound) Logout(ctx context.Context) error {
 
 // HistoryRow is one recorded execution (script history).
 type HistoryRow struct {
-	User      string
+	User string
+	// ConnID is the connection the script ran on: what its dialect is looked
+	// up by. Conn is its name, for reading.
+	ConnID    int64
 	Conn      string
 	IP        string
 	Script    string
@@ -611,7 +614,7 @@ func (b *Bound) History(ctx context.Context, limit int64) ([]HistoryRow, error) 
 	for _, row := range asList(res) {
 		m, _ := row.(map[string]any)
 		out = append(out, HistoryRow{
-			User: mS(m, "user"), Conn: mS(m, "connection"), IP: mS(m, "ip"),
+			User: mS(m, "user"), ConnID: mI(m, "connection_id"), Conn: mS(m, "connection"), IP: mS(m, "ip"),
 			Script: mS(m, "script"), StartedAt: mS(m, "started_at"),
 			Duration: time.Duration(mI(m, "duration_ms")) * time.Millisecond,
 			RowCount: mI(m, "row_count"), Status: mS(m, "status"),

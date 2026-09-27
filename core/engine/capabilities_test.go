@@ -141,6 +141,7 @@ var identityIsTheQuestion = map[string]string{
 	"core/meta/migrations.go": "selects the engine's own DDL for a migration step",
 	"core/config/config.go":   "validates the DSN transport only where there is a DSN",
 	"cmd/autodb/main.go":      "shows a path or a DSN in the startup banner",
+	"tui/syntax.go":           "names the highlighter for the engine's own SQL dialect — which language the query is written in",
 }
 
 func TestEngineIdentityIsComparedOnlyWhereItIsTheQuestion(t *testing.T) {

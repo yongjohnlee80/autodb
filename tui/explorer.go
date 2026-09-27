@@ -54,6 +54,9 @@ type explorer struct {
 	names  map[int64]string
 	wsOf   map[int64]int64
 	known  map[string][]tuidecl.TreeRow
+	// engines are each listed connection's engine, by id: which SQL a query
+	// on it, or a history row of it, is highlighted as.
+	engines map[int64]string
 }
 
 func newExplorer() *explorer {
@@ -65,6 +68,7 @@ func newExplorer() *explorer {
 func (e *explorer) reset() {
 	e.quoted, e.names, e.wsOf = map[string]string{}, map[int64]string{}, map[int64]int64{}
 	e.known = map[string][]tuidecl.TreeRow{}
+	e.engines = map[int64]string{}
 }
 
 func (e *explorer) connName(id int64) string { return e.names[id] }
@@ -154,6 +158,7 @@ func (h *Host) applyWorkspaces(wss []WorkspaceInfo) {
 		conns := make([]tuidecl.TreeRow, 0, len(ws.Connections))
 		for _, c := range ws.Connections {
 			e.names[c.ID], e.wsOf[c.ID] = c.Name, ws.ID
+			e.engines[c.ID] = c.Engine
 			conns = append(conns, row(fmt.Sprintf("conn:%d:%d", ws.ID, c.ID), c.Name,
 				fmt.Sprintf("%s  (ID:%d)", c.Engine, c.ID), true))
 		}

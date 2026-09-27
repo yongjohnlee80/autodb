@@ -35,6 +35,24 @@ Window {
     palette.mid: Theme.app.mid
     palette.light: Theme.app.light
 
+    // KSyntaxHighlighting's styles, set once: every highlighter under the
+    // Window wears them — the query editor, and a history script's view.
+    syntax.keyword: Theme.syntax.keyword
+    syntax.controlFlow: Theme.syntax.controlFlow
+    syntax.dataType: Theme.syntax.dataType
+    syntax.attribute: Theme.syntax.attribute
+    syntax.function: Theme.syntax.function
+    syntax.string: Theme.syntax.string
+    syntax.specialChar: Theme.syntax.specialChar
+    syntax.decVal: Theme.syntax.decVal
+    syntax.float: Theme.syntax.float
+    syntax.baseN: Theme.syntax.baseN
+    syntax.constant: Theme.syntax.constant
+    syntax.comment: Theme.syntax.comment
+    syntax.alert: Theme.syntax.alert
+    syntax.import: Theme.syntax.import
+    syntax.operator: Theme.syntax.operator
+
     // ---- keys ------------------------------------------------------------
     //
     // A Shortcut sees only what the focused widget leaves, and none is live
@@ -176,6 +194,9 @@ Window {
                     focus: true
                     keyset: App.keyset
                     onTextChanged: App.queryEdited()   // an open note is now unsaved
+                    // The SQL of the connection the query runs on; the host
+                    // follows the connection (syntax.go).
+                    SyntaxHighlighter { definition: App.querySyntax }
                 }
             }
             Frame {
