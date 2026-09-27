@@ -194,6 +194,9 @@ type ScriptStatus struct {
 	// what 000001, when pending, does to it — 0 creates it, 1..16 upgrades it
 	// through the legacy chain first, 17 adopts it with no schema change.
 	LegacyBefore int
+	// Backup is the copy of a SQLite store taken before the apply changed
+	// it; "" when none was (see backup.go).
+	Backup string
 }
 
 // PendingScripts reports the ledger and changes NOTHING: for
@@ -288,8 +291,13 @@ func RevertScript(ctx context.Context, s *Store, n int) (string, error) {
 // ApplyScripts is --apply-migration-scripts: the upgrade a daemon's start runs,
 // on a store opened with OpenNoMigrate whose instance lease the caller holds.
 func ApplyScripts(ctx context.Context, s *Store) (ScriptStatus, error) {
+	// The same backup a daemon's start takes, before anything changes.
+	_, backup, err := s.backupBeforeChange(ctx)
+	if err != nil {
+		return ScriptStatus{}, err
+	}
 	var st ScriptStatus
-	err := schemaTx(ctx, s.conn, s.engine, func(ex migExec) error {
+	err = schemaTx(ctx, s.conn, s.engine, func(ex migExec) error {
 		p, err := planScripts(ctx, ex, s.engine)
 		if err != nil {
 			return err
@@ -298,6 +306,10 @@ func ApplyScripts(ctx context.Context, s *Store) (ScriptStatus, error) {
 		_, err = applyAll(ctx, ex, s.conn.Dialect(), s.engine)
 		return err
 	})
+	st.Backup = backup
+	if err == nil && backup != "" {
+		s.rotateBackups()
+	}
 	return st, err
 }
 

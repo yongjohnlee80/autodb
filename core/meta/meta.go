@@ -42,6 +42,14 @@ type Store struct {
 
 	// schemaWarnings are what Open's upgrade found (scripts.go).
 	schemaWarnings []string
+	// sqlitePath is a SQLite store's resolved file, "" for :memory: and
+	// PostgreSQL: what a backup before a schema change copies (backup.go).
+	sqlitePath string
+	// startReport is what Open's upgrade did (backup.go).
+	startReport StartReport
+	// Test seams for a backup's name and its copy (backup.go); nil in use.
+	hookBackupName func(base, first string) (string, error)
+	hookVacuum     func(ctx context.Context, path string) error
 }
 
 // Open opens the configured meta-store engine, runs pending migrations, and
@@ -73,12 +81,23 @@ func Open(ctx context.Context, mcfg StoreConfig) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A SQLite store is copied before its schema changes (backup.go). The
+	// copy only reads the store, so if it fails nothing has changed.
+	pending, backup, err := s.backupBeforeChange(ctx)
+	if err != nil {
+		_ = s.conn.Close()
+		return nil, err
+	}
 	warnings, err := runMigrations(ctx, s.conn, mcfg.StoreEngine())
 	if err != nil {
 		_ = s.conn.Close()
 		return nil, err
 	}
 	s.schemaWarnings = warnings
+	s.startReport = StartReport{Applied: pending, Backup: backup}
+	if backup != "" {
+		s.rotateBackups()
+	}
 	return s, nil
 }
 
@@ -96,12 +115,16 @@ func Open(ctx context.Context, mcfg StoreConfig) (*Store, error) {
 // requests uses Open.
 func OpenNoMigrate(ctx context.Context, mcfg StoreConfig) (*Store, error) {
 	var (
-		conn dao.DataConn
-		err  error
+		conn       dao.DataConn
+		err        error
+		sqlitePath string
 	)
 	switch mcfg.StoreEngine() {
 	case engine.SQLite:
-		conn, err = openSqlite(ctx, mcfg.StorePath())
+		if sqlitePath, err = resolveSqlitePath(mcfg.StorePath()); err != nil {
+			return nil, err
+		}
+		conn, err = openSqlite(ctx, sqlitePath)
 	case engine.Postgres:
 		conn, err = postgres.OpenNamed(ctx, "meta", mcfg.StoreDSN(), metaPoolBound(mcfg))
 	default:
@@ -111,9 +134,13 @@ func OpenNoMigrate(ctx context.Context, mcfg StoreConfig) (*Store, error) {
 		return nil, fmt.Errorf("meta: opening %s store: %w", mcfg.StoreEngine(), err)
 	}
 
+	if sqlitePath == ":memory:" {
+		sqlitePath = ""
+	}
 	return &Store{
 		conn:           conn,
 		engine:         mcfg.StoreEngine(),
+		sqlitePath:     sqlitePath,
 		Users:          newUsers(conn),
 		Connections:    newConnections(conn),
 		Workspaces:     newWorkspaces(conn),
@@ -140,18 +167,20 @@ func openSqlite(ctx context.Context, path string) (dao.DataConn, error) {
 		return sqlite.OpenNamed(ctx, "meta", "file::memory:?_pragma=foreign_keys(1)",
 			sqlite.MaxOpenConns(1))
 	}
-	if path == "" {
-		p, err := DefaultPath()
-		if err != nil {
-			return nil, err
-		}
-		path = p
-	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("creating meta dir: %w", err)
 	}
 	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
 	return sqlite.OpenNamed(ctx, "meta", dsn)
+}
+
+// resolveSqlitePath is the file a SQLite store lives in: path, or the default
+// ($XDG_DATA_HOME/autodb/meta.db) when it is empty. ":memory:" stays itself.
+func resolveSqlitePath(path string) (string, error) {
+	if path == "" {
+		return DefaultPath()
+	}
+	return path, nil
 }
 
 // Close releases the underlying pool.

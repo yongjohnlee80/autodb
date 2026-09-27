@@ -3,6 +3,8 @@ package exec
 import (
 	"errors"
 	"sync"
+
+	"github.com/yongjohnlee80/autodb/core/meta"
 )
 
 // The idle-only shutdown: a restart taken only when nothing it would interrupt
@@ -146,3 +148,8 @@ func (e *Engine) AbortIdleShutdown(owner uint64) bool {
 	g.stmtClosed, g.wireClosed, g.owner = false, false, 0
 	return true
 }
+
+// StartReport is what the meta store's upgrade did when this daemon started:
+// the schema scripts it applied and the backup it took first — what a frontend
+// that restarted a stale backend says it did.
+func (e *Engine) StartReport() meta.StartReport { return e.store.StartReport() }

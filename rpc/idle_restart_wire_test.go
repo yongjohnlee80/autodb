@@ -121,3 +121,24 @@ func TestTheLifecycleVerbsTakeTheirFrozenArguments(t *testing.T) {
 		}
 	}
 }
+
+// hello says what this daemon's start did to the store: always the key, with
+// the scripts applied and the backup taken (none, for this in-memory fixture).
+func TestHelloSaysWhatTheStartDidToTheStore(t *testing.T) {
+	f := newFixture(t)
+	c := f.session(t)
+	errVal, res := c.call("sys.hello")
+	if errVal != nil {
+		t.Fatalf("sys.hello probe: %#v", errVal)
+	}
+	schema, ok := res.(map[string]any)["schema"].(map[string]any)
+	if !ok {
+		t.Fatalf("hello carries no schema: %#v", res)
+	}
+	if _, ok := schema["applied_at_start"].([]any); !ok {
+		t.Errorf("schema.applied_at_start is %T, not a list", schema["applied_at_start"])
+	}
+	if _, ok := schema["backup"].(string); !ok {
+		t.Errorf("schema.backup is %T, not a string", schema["backup"])
+	}
+}
