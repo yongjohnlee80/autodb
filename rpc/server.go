@@ -408,6 +408,10 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 		// address it is actually listening on.
 		"pid":  int64(os.Getpid()),
 		"addr": s.rpc.Addr(),
+		// What this daemon's start did to the meta store: the schema scripts
+		// it applied and the backup it took first, so a frontend that
+		// restarted it can say so. Additive: an older frontend ignores it.
+		"schema": s.schemaAtStart(),
 		// Notes are client-side files under <notes_dir>/ws-<id>/; the
 		// server is the authority on the path (config may override the
 		// default), so it reports it here for the frontends to list.
@@ -492,4 +496,13 @@ func peerIP(req *golibrpc.Request) string {
 		return req.Peer.String()
 	}
 	return host
+}
+
+// schemaAtStart is hello's "schema": {applied_at_start, backup}.
+func (s *Server) schemaAtStart() map[string]any {
+	if s.eng == nil {
+		return map[string]any{"applied_at_start": []any{}, "backup": ""}
+	}
+	r := s.eng.StartReport()
+	return map[string]any{"applied_at_start": strsToAny(r.Applied), "backup": r.Backup}
 }

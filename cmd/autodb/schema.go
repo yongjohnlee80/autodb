@@ -101,6 +101,9 @@ func runSchema(ctx context.Context, out io.Writer, configPath string, o schemaOp
 	default:
 		fmt.Fprintf(out, "applied %d script(s):\n", len(st.Pending))
 	}
+	if st.Backup != "" {
+		fmt.Fprintf(out, "backed up the store first: %s\n", st.Backup)
+	}
 	for _, name := range st.Pending {
 		fmt.Fprintf(out, "  %s\n", name)
 	}
