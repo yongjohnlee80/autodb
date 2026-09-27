@@ -72,10 +72,31 @@ function M.ensure_connected(cb)
       on_lost = function(reason)
         session.detach(reason)
       end,
-    }, function(c, cerr)
-      if not c then return _settle(false, cerr) end
+    }, function(c, cerr, info)
+      if not c then
+        _settle(false, cerr)
+        -- THE PLUGIN IS NEWER THAN THE DAEMON: its handshake is refused, so
+        -- there is no session to restart it from. Reach it on a lifecycle
+        -- connection at its own number instead (autodb.autorestart).
+        local older = info and info.server_protocol
+        if older and older < require("autodb.client").PROTOCOL then
+          require("autodb.autorestart").older_daemon(older, {
+            ep = ep, bin = bin, login = M._login, reconnect = M.ensure_connected,
+          })
+        end
+        return
+      end
       session.attach(c, { bin = bin })
-      M._login(c, function(lok, lerr) _settle(lok, lerr) end)
+      M._login(c, function(lok, lerr)
+        _settle(lok, lerr)
+        -- A backend older than the installed binary restarts itself if it
+        -- is idle; otherwise check_build's warning, shown at attach, stands.
+        if lok then
+          require("autodb.autorestart").after_login(c, {
+            ep = ep, bin = bin, detach = session.detach, reconnect = M.ensure_connected,
+          })
+        end
+      end)
     end)
   end
 

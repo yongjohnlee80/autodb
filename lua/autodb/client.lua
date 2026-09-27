@@ -50,6 +50,8 @@ M.PROTOCOL = 9
 ---@field mode string?                -- "pipe" (default endpoint) or "tcp"
 ---@field limits table?               -- auto-core.rpc frame limits
 ---@field on_lost fun(reason: string)? -- epoch ended
+---@field protocol integer?           -- declare this protocol instead of M.PROTOCOL:
+---                                      the LIFECYCLE connection to an older daemon
 
 ---@class AutodbClient
 local Client = {}
@@ -150,7 +152,32 @@ function M.connect(opts, cb)
   self._conn = conn
 
   -- Hello first, always. Nothing else is admitted until it lands.
-  conn:request("sys.hello", { { protocol = M.PROTOCOL, name = "autodb.nvim" } }, {},
+  -- The number this connection DECLARES: ours, or — for a lifecycle
+  -- connection to an older daemon — the daemon's own, reached only to restart
+  -- it through the verbs whose shapes are frozen (autodb.autorestart).
+  self._protocol = opts.protocol or M.PROTOCOL
+  -- PROBE FIRST (ADR-0202): a hello that declares nothing, which every daemon
+  -- answers and which admits and poisons nothing. A declaration the daemon
+  -- would refuse is never sent, so a mismatch leaves no protocol-error audit
+  -- row, and the daemon's number comes back structured — a caller that can
+  -- reach an older daemon another way (autodb.autorestart) need not parse
+  -- prose.
+  conn:request("sys.hello", {}, {}, function(probe)
+    if probe.status == "ok" and type(probe.value) == "table" and probe.value.server == "autodb" then
+      local ok, err = self:_check_protocol(probe.value)
+      if not ok then
+        conn:close()
+        return cb(nil, err, { server_protocol = tonumber(probe.value.protocol) })
+      end
+    end
+    -- Anything else falls through to the declared hello, which reports it.
+    self:_declare(conn, cb)
+  end)
+end
+
+---_declare sends the declared hello: the handshake proper.
+function Client:_declare(conn, cb)
+  conn:request("sys.hello", { { protocol = self._protocol, name = "autodb.nvim" } }, {},
     function(outcome)
       if outcome.status ~= "ok" then
         conn:close()
@@ -171,7 +198,7 @@ function M.connect(opts, cb)
       local ok, err = self:_check_protocol(hello)
       if not ok then
         conn:close()
-        return cb(nil, err)
+        return cb(nil, err, { server_protocol = tonumber(hello.protocol) })
       end
 
       self._hello = hello
@@ -188,7 +215,7 @@ end
 ---or update the plugin.
 function Client:_check_protocol(hello)
   local got = tonumber(hello.protocol)
-  if got == M.PROTOCOL then return true end
+  if got == self._protocol then return true end
   if got and got < M.PROTOCOL then
     return false, string.format(
       "autodb: the server speaks protocol %d, this plugin speaks %d — " ..
@@ -263,6 +290,23 @@ function Client:close()
   self._ready = false
   self._token = nil
   if self._conn then self._conn:close() end
+end
+
+---probe asks a daemon who it is WITHOUT declaring a protocol: the one hello
+---every autodb daemon answers and none refuses, whatever its number. It admits
+---nothing and poisons nothing; the connection is closed after.
+---@param opts AutodbClientOpts
+---@param cb fun(hello: table|nil, err: string|nil)
+function M.probe(opts, cb)
+  local conn, cerr = rpc.connect({ addr = opts.addr, mode = opts.mode or "pipe", limits = opts.limits })
+  if not conn then return cb(nil, cerr) end
+  conn:request("sys.hello", {}, {}, function(outcome)
+    conn:close()
+    if outcome.status ~= "ok" or type(outcome.value) ~= "table" then
+      return cb(nil, "autodb: the probe got no hello (" .. tostring(outcome.status) .. ")")
+    end
+    cb(outcome.value, nil)
+  end)
 end
 
 return M

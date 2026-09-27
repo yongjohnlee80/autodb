@@ -369,6 +369,29 @@ print("\n[4] client.connect — handshake over a REAL daemon on a socket")
   end
 
   -- is_listening must probe, not stat: the file outlives the process.
+  -- The protocol-bump path's two tools, against the real daemon (ADR-0202).
+  do
+    local done, hello, perr = false, nil, nil
+    client.probe({ addr = sock, mode = "pipe" }, function(h, e) done, hello, perr = true, h, e end)
+    vim.wait(4000, function() return done end, 20)
+    ok("p4: a probe learns the daemon's protocol without declaring one",
+      hello ~= nil and hello.protocol == client.PROTOCOL, vim.inspect(hello and hello.protocol) .. " " .. tostring(perr))
+    ok("p4: and hello says what the start did to the store",
+      hello ~= nil and type(hello.schema) == "table" and type(hello.schema.applied_at_start) == "table",
+      vim.inspect(hello and hello.schema))
+    local mdone, mc, merr, minfo = false, nil, nil, nil
+    client.connect({ addr = sock, mode = "pipe", protocol = client.PROTOCOL - 1 },
+      function(c3, e, info) mdone, mc, merr, minfo = true, c3, e, info end)
+    vim.wait(4000, function() return mdone end, 20)
+    ok("p4: a connection declaring another protocol is refused, carrying the daemon's number",
+      mc == nil and minfo ~= nil and minfo.server_protocol == client.PROTOCOL
+        and tostring(merr):find("PLUGIN is older", 1, true) ~= nil,
+      tostring(merr) .. " " .. vim.inspect(minfo))
+    local lc4 = connect({ addr = sock, mode = "pipe", protocol = client.PROTOCOL })
+    ok("p4: a lifecycle connection declaring the daemon's own number is admitted", lc4 ~= nil)
+    if lc4 then lc4:close() end
+  end
+
   ok("p4: is_listening sees the live daemon",
     lc.is_listening({ mode = "pipe", addr = sock }) == true)
   pcall(vim.fn.jobstop, job)
@@ -2291,6 +2314,135 @@ if below_floor then
   print(string.format("\nASSERTION FLOOR: ran %d, expected at least %d — some "
     .. "assertions did not run", total, EXPECTED_MIN_ASSERTIONS))
 end
+
+
+print("\n[21] autorestart — a stale backend restarts itself when idle (ADR-0202)")
+;(function()
+  local ar = require("autodb.autorestart")
+  local lc = require("autodb.lifecycle")
+
+  ok("p21: busy is described in words",
+    ar.describe_busy({ executing = 2, in_transaction = 0, wire_sessions = 1 }) ==
+      "2 statements running, 1 PostgreSQL client connected",
+    ar.describe_busy({ executing = 2, in_transaction = 0, wire_sessions = 1 }))
+  ok("p21: the start is described, backup included",
+    ar.describe_start({ schema = { applied_at_start = { "000003_update_x.sql" }, backup = "/b.bak" } }) ==
+      "schema scripts applied: 000003_update_x.sql; the store was backed up first to /b.bak")
+  ok("p21: no scripts is no schema change", ar.describe_start({ schema = { applied_at_start = {} } }) == "no schema change")
+
+  local real_bring_up = ar._bring_up
+  local brought, detached = 0, {}
+  ar._bring_up = function() brought = brought + 1 end
+  local ctx = { ep = {}, disk = "v2", detach = function(r) detached[#detached + 1] = r end, reconnect = function() end }
+
+  ok("p21: stopping detaches and brings the new backend up",
+    ar.on_restart_answer({ stopping = true }, nil, ctx) == "restarting" and brought == 1 and detached[1] == "idle-restart",
+    vim.inspect(detached))
+
+  local orig_notify, toasts = vim.notify, {}
+  local alog = require("autodb.log")
+  local orig_lnotify = alog.notify
+  alog.notify = function(msg) toasts[#toasts + 1] = tostring(msg) end
+  local what = ar.on_restart_answer({ stopping = false, busy = { executing = 1, in_transaction = 0, wire_sessions = 0 } }, nil, ctx)
+  alog.notify = orig_lnotify
+  ok("p21: busy says what is running and restarts nothing",
+    what == "busy" and brought == 1 and toasts[1] ~= nil and toasts[1]:find("1 statement running", 1, true) ~= nil,
+    tostring(toasts[1]))
+  ok("p21: an older daemon without the verb leaves the warning to stand",
+    ar.on_restart_answer(nil, { code = -32601, message = "method not found" }, ctx) == "unsupported" and brought == 1)
+  ok("p21: a refusal (not an admin) restarts nothing",
+    ar.on_restart_answer(nil, { code = -32031, message = "denied" }, ctx) == "refused" and brought == 1)
+
+  -- The same-protocol path asks only when the backend is stale.
+  local real_status, real_version = lc.build_status, lc.binary_version
+  local asked = {}
+  local fake = {
+    hello = function() return { version = "old" } end,
+    authed = function(_, method, _, cb) asked[#asked + 1] = method; cb({ stopping = false, busy = {} }, nil) end,
+  }
+  lc.binary_version = function() return "new" end
+  lc.build_status = function() return "match" end
+  ar.after_login(fake, { ep = {}, bin = "/bin/autodb", detach = function() end, reconnect = function() end })
+  ok("p21: a current backend is not asked to restart", #asked == 0, vim.inspect(asked))
+  lc.build_status = function() return "stale" end
+  vim.notify = function() end
+  ar.after_login(fake, { ep = {}, bin = "/bin/autodb", detach = function() end, reconnect = function() end })
+  vim.notify = orig_notify
+  ok("p21: a stale backend is asked to restart if idle", asked[1] == "sys.restart_if_idle", vim.inspect(asked))
+
+  -- The protocol-bump path: a lifecycle connection at the daemon's number.
+  local function older(proto, confirm_choice)
+    local declared, calls, logged_in = nil, {}, false
+    local lcl = { close = function() end,
+      authed = function(_, method, _, cb)
+        calls[#calls + 1] = method
+        if method == "sys.inflight" then return cb({ executing = 0, in_transaction = 0 }, nil) end
+        if method == "sys.restart_if_idle" then return cb({ stopping = true }, nil) end
+        if method == "sys.shutdown" then return cb({ stopping = true }, nil) end
+      end }
+    local real_confirm = vim.fn.confirm
+    vim.fn.confirm = function() return confirm_choice end
+    vim.notify = function() end
+    ar.older_daemon(proto, { ep = { addr = "x", mode = "pipe" }, bin = nil,
+      login = function(_, cb) logged_in = true; cb(true, nil) end, reconnect = function() end,
+      connect = function(opts, cb) declared = opts.protocol; cb(lcl, nil) end })
+    vim.fn.confirm = real_confirm
+    vim.notify = orig_notify
+    return declared, calls, logged_in
+  end
+  local declared, calls, logged_in = older(9, 1)
+  ok("p21: an older daemon at 9 is reached at ITS number and restarted if idle",
+    declared == 9 and logged_in and calls[1] == "sys.restart_if_idle", vim.inspect({ declared, calls }))
+  brought = 0
+  declared, calls = older(8, 1)
+  ok("p21: an older daemon at 8 is asked what is running, then restarted on a yes",
+    declared == 8 and calls[1] == "sys.inflight" and calls[2] == "sys.shutdown" and brought == 1, vim.inspect(calls))
+  brought = 0
+  declared, calls = older(8, 2)
+  ok("p21: and left alone on a no", calls[1] == "sys.inflight" and calls[2] == nil and brought == 0, vim.inspect(calls))
+
+  lc.build_status, lc.binary_version = real_status, real_version
+  ar._bring_up = real_bring_up
+
+  -- The wiring: ensure_connected routes a refused handshake and a login.
+  local autodb, session, cl = require("autodb"), require("autodb.session"), require("autodb.client")
+  local saved = { lc.resolve_binary, lc.resolve_endpoint, lc.is_listening, cl.connect,
+    ar.older_daemon, ar.after_login, autodb._login }
+  lc.resolve_binary = function() return "/bin/autodb" end
+  lc.resolve_endpoint = function() return { addr = "/tmp/x.sock", mode = "pipe" } end
+  lc.is_listening = function() return true end
+  local routed
+  ar.older_daemon = function(proto) routed = { "older", proto } end
+  ar.after_login = function() routed = { "after_login" } end
+  local function through(answer)
+    session.reset_for_tests()
+    routed = nil
+    cl.connect = answer
+    local done = false
+    autodb.ensure_connected(function() done = true end)
+    vim.wait(1000, function() return done end, 10)
+    return routed
+  end
+  local r = through(function(_, cb) cb(nil, "refused", { server_protocol = cl.PROTOCOL - 1 }) end)
+  ok("p21: a refused handshake from an OLDER daemon is routed to older_daemon at its number",
+    r ~= nil and r[1] == "older" and r[2] == cl.PROTOCOL - 1, vim.inspect(r))
+  r = through(function(_, cb) cb(nil, "refused", { server_protocol = cl.PROTOCOL + 1 }) end)
+  ok("p21: a NEWER daemon is not restarted (the plugin is what is behind)", r == nil, vim.inspect(r))
+  r = through(function(_, cb) cb(nil, "no socket") end)
+  ok("p21: a plain connect failure is not a restart", r == nil, vim.inspect(r))
+  local fc = { hello = function() return nil end, is_ready = function() return true end,
+    close = function() end, token = function() return "t" end, instance = function() return "i" end }
+  autodb._login = function(_, cb) cb(true, nil) end
+  r = through(function(_, cb) cb(fc, nil) end)
+  ok("p21: a signed-in session asks after_login", r ~= nil and r[1] == "after_login", vim.inspect(r))
+  autodb._login = function(_, cb) cb(false, "cancelled") end
+  r = through(function(_, cb) cb(fc, nil) end)
+  ok("p21: a cancelled login asks nothing", r == nil, vim.inspect(r))
+
+  lc.resolve_binary, lc.resolve_endpoint, lc.is_listening, cl.connect,
+    ar.older_daemon, ar.after_login, autodb._login = unpack(saved)
+  session.reset_for_tests()
+end)()
 
 print(string.format("\n%d passed, %d failed, %d missing (of >= %d expected)",
   pass_count, fail_count, #missing_prereqs, EXPECTED_MIN_ASSERTIONS))

@@ -102,17 +102,21 @@ func TestRestartIfIdle_AFailedAuditReopensEveryGate(t *testing.T) {
 // THE LIFECYCLE VERBS' SHAPES ARE FROZEN. After an update that bumps the
 // protocol, the new frontend meets the OLD daemon, which refuses its handshake;
 // it gets back in with a probe and a lifecycle connection at the daemon's own
-// protocol, and uses only these verbs there. So their argument lists may never
-// change — from protocol 8 onward, and sys.restart_if_idle from 9 — or that
-// connection breaks exactly when an update needs it.
+// protocol, and uses only these verbs there — the login's own included, which
+// asks auth.needs_bootstrap first and, on a store with no users yet, signs in
+// through auth.bootstrap. So their argument lists may never change — from
+// protocol 8 onward, and sys.restart_if_idle from 9 — or that connection
+// breaks exactly when an update needs it.
 func TestTheLifecycleVerbsTakeTheirFrozenArguments(t *testing.T) {
 	f := newFixture(t)
 	c := f.session(t)
 	for verb, want := range map[string]string{
-		"auth.login":          "want 2 argument(s)",
-		"sys.inflight":        "want 1 argument(s)",
-		"sys.restart_if_idle": "want 1 argument(s)",
-		"sys.shutdown":        "want 1 argument(s)",
+		"auth.needs_bootstrap": "want 0 argument(s)",
+		"auth.bootstrap":       "want 2 argument(s)",
+		"auth.login":           "want 2 argument(s)",
+		"sys.inflight":         "want 1 argument(s)",
+		"sys.restart_if_idle":  "want 1 argument(s)",
+		"sys.shutdown":         "want 1 argument(s)",
 	} {
 		errVal, _ := c.call(verb, "a", "b", "c", "d", "e")
 		m, _ := errVal.(map[string]any)
