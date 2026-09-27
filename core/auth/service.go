@@ -328,10 +328,32 @@ func (s *Service) AuditTx(tx *dao.Transaction, userID int64, ip, action, detail 
 // can be read per-transaction with a query instead of by parsing prose. Empty
 // for everything that happens outside a transaction, which is most of it.
 func (s *Service) AuditTxCorrelated(tx *dao.Transaction, userID int64, ip, action, detail, txID string) error {
+	return s.AuditTxRecord(tx, AuditRecord{UserID: userID, IP: ip, Action: action, Detail: detail, TxID: txID})
+}
+
+// AuditRecord is one audit row, with every correlating column.
+//
+// AttemptID and ConnID came with schema script 000003: the statement attempt
+// a row is about, and the connection. Columns, for the reason TxID is one — a
+// trail read by a query rather than by parsing Detail. Zero values for a row
+// about no attempt or no connection.
+type AuditRecord struct {
+	UserID    int64
+	IP        string
+	Action    string
+	Detail    string
+	TxID      string
+	AttemptID string
+	ConnID    int64
+}
+
+// AuditTxRecord appends rec inside tx.
+func (s *Service) AuditTxRecord(tx *dao.Transaction, rec AuditRecord) error {
 	_, err := s.store.Audit.On(tx).
-		Set(meta.AuditUserID, userID).Set(meta.AuditIP, ip).
-		Set(meta.AuditAction, action).Set(meta.AuditDetail, detail).
-		Set(meta.AuditTxID, txID).
+		Set(meta.AuditUserID, rec.UserID).Set(meta.AuditIP, rec.IP).
+		Set(meta.AuditAction, rec.Action).Set(meta.AuditDetail, rec.Detail).
+		Set(meta.AuditTxID, rec.TxID).
+		Set(meta.AuditAttemptID, rec.AttemptID).Set(meta.AuditConnID, rec.ConnID).
 		Set(meta.AuditCreatedAt, s.now().Unix()).
 		Insert()
 	if err != nil {
@@ -341,11 +363,16 @@ func (s *Service) AuditTxCorrelated(tx *dao.Transaction, userID int64, ip, actio
 	// that was really written: the seam cannot be reached by a caller that
 	// skipped the audit.
 	if s.hookAuditWrite != nil {
-		if herr := s.hookAuditWrite(action); herr != nil {
+		if herr := s.hookAuditWrite(rec.Action); herr != nil {
 			return herr
 		}
 	}
 	return nil
+}
+
+// AuditRecordCtx appends rec in a transaction of its own.
+func (s *Service) AuditRecordCtx(ctx context.Context, rec AuditRecord) error {
+	return s.inTx(ctx, func(tx *dao.Transaction) error { return s.AuditTxRecord(tx, rec) })
 }
 
 // Audit appends one standalone audit row (no accompanying mutation — e.g.

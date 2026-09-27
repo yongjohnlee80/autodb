@@ -35,6 +35,17 @@ func TestHistoryStatusesIsExhaustive(t *testing.T) {
 	vocabguard.Exhaustive(t, ".", "HistoryStatus", "HistoryStatuses", listed)
 }
 
+func TestDispositionsIsExhaustive(t *testing.T) {
+	var listed []string
+	for _, d := range Dispositions() {
+		if !d.IsSet() {
+			t.Errorf("Dispositions lists the empty value, which is no disposition")
+		}
+		listed = append(listed, string(d))
+	}
+	vocabguard.Exhaustive(t, ".", "Disposition", "Dispositions", listed)
+}
+
 // Every state is classified by exactly one of IsTerminal and IsPending, or by
 // neither — never by both.
 //

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -517,5 +518,40 @@ func TestInstanceLease_OneAbstractionAcrossEngines(t *testing.T) {
 	// release on a shutdown path.
 	if err := l.Release(); err != nil {
 		t.Errorf("second Release: %v", err)
+	}
+}
+
+// Every holding of the lease has its own epoch — a reacquire too — because
+// attempts are stamped with it, and recovery settles attempts whose epoch is
+// not the serving daemon's. Two holdings sharing one would let a daemon treat
+// a dead predecessor's attempts as its own live ones and never settle them.
+func TestInstanceLease_EveryHoldingHasItsOwnEpoch(t *testing.T) {
+	t.Parallel()
+	hex32 := regexp.MustCompile(`^[0-9a-f]{32}$`)
+	path := filepath.Join(t.TempDir(), "meta.db")
+	first, err := acquireFileLease(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e1 := first.Epoch()
+	if err := first.Release(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := acquireFileLease(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = again.Release() })
+	mem, err := acquireFileLease(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, e := range map[string]string{"first": e1, "reacquired": again.Epoch(), "in-memory": mem.Epoch()} {
+		if !hex32.MatchString(e) {
+			t.Errorf("%s lease epoch %q, want 32 hex characters", name, e)
+		}
+	}
+	if e1 == again.Epoch() {
+		t.Errorf("a reacquired lease kept the released holding's epoch %q", e1)
 	}
 }

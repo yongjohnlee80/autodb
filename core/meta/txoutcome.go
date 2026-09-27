@@ -265,6 +265,11 @@ const (
 	// survived. Distinct from error — the statement did not fail — and
 	// distinct from pending, because no future pass will improve on it.
 	StatusUnresolvable HistoryStatus = "outcome_unresolvable"
+	// StatusUnknown means the process that ran the statement ended before it
+	// recorded an outcome, so nothing says whether it ran or what its effect
+	// was. Written only by the recovery of a dead owner's attempts (schema
+	// script 000003), with DispositionUnknown beside it.
+	StatusUnknown HistoryStatus = "unknown"
 )
 
 // HistoryStatuses lists every status a history row can carry, in the order a
@@ -274,6 +279,46 @@ const (
 func HistoryStatuses() []HistoryStatus {
 	return []HistoryStatus{
 		StatusRunning, StatusOK, StatusPendingCommit,
-		StatusError, StatusRolledBack, StatusUnresolvable,
+		StatusError, StatusRolledBack, StatusUnresolvable, StatusUnknown,
+	}
+}
+
+// Disposition is what a statement ATTEMPT did (schema script 000003): written
+// once, by the terminal write's compare-and-set, and never changed afterwards.
+//
+// A SECOND AXIS BESIDE HistoryStatus, not a refinement of it. Status answers
+// what became of the effect, and a transaction's commit still refines it from
+// ok_pending_commit; the disposition answers what the attempt itself did, and
+// no later event rewrites it. A retried terminal is judged against the
+// disposition, so a retry after the commit's projection is the same delivery
+// it was before it.
+type Disposition string
+
+// IsSet reports whether d records a terminal. The empty value is an attempt
+// that is not terminal yet, or a row that finished before 000003; it is not a
+// disposition, so it is no constant here and Dispositions does not list it.
+func (d Disposition) IsSet() bool { return d != "" }
+
+const (
+	// DispositionCompleted: the statement ran. Its effect may still be the
+	// transaction's to decide; that is status's axis.
+	DispositionCompleted Disposition = "completed"
+	// DispositionFailed: the target returned an error.
+	DispositionFailed Disposition = "failed"
+	// DispositionRefused: refused after the attempt was recorded.
+	DispositionRefused Disposition = "refused"
+	// DispositionRolledBack: it ran, and the target's implicit rollback
+	// discarded it.
+	DispositionRolledBack Disposition = "rolled_back"
+	// DispositionUnknown: its process ended first. See StatusUnknown.
+	DispositionUnknown Disposition = "unknown"
+)
+
+// Dispositions lists every disposition.
+// A fresh slice per call, as TxStates.
+func Dispositions() []Disposition {
+	return []Disposition{
+		DispositionCompleted, DispositionFailed, DispositionRefused,
+		DispositionRolledBack, DispositionUnknown,
 	}
 }

@@ -44,6 +44,7 @@ const (
 	StatusError         = meta.StatusError
 	StatusRolledBack    = meta.StatusRolledBack
 	StatusUnresolvable  = meta.StatusUnresolvable
+	StatusUnknown       = meta.StatusUnknown
 )
 
 // historyStatusFor maps a transaction's terminal onto its statements' status.

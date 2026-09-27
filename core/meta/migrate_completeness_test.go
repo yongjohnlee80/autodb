@@ -376,15 +376,18 @@ func seedEverything(t *testing.T, s *Store) {
 		Set(HistScript, "SELECT 2").Set(HistStartedAt, int64(19)).Set(HistDurationMS, int64(7)).
 		Set(HistRowCount, int64(3)).Set(HistStatus, "ok_pending_commit").
 		Set(HistError, "boom").Set(HistTxID, "tx_seeded").
-		// Non-default: a column left at its default survives a copy that
-		// drops it, which is how suspended went unnoticed.
-		Set(HistSuspended, int64(1)).Insert(); err != nil {
+		// Non-default, every one: a column left at its default survives a copy
+		// that drops it, which is how suspended went unnoticed.
+		Set(HistSuspended, int64(1)).Set(HistAttemptID, "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf").
+		Set(HistAttemptOwner, "e0e1e2e3e4e5e6e7e8e9eaebecedeeef").
+		Set(HistDisposition, DispositionCompleted).Insert(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Audit.OnCtx(ctx).
 		Set(AuditUserID, rootID).Set(AuditIP, "10.1.2.3").Set(AuditAction, "exec").
 		Set(AuditDetail, "SELECT 2").Set(AuditCreatedAt, int64(20)).
-		Set(AuditTxID, "tx_seeded").Insert(); err != nil {
+		Set(AuditTxID, "tx_seeded").Set(AuditAttemptID, "a0a1a2a3a4a5a6a7a8a9aaabacadaeaf").
+		Set(AuditConnID, connID).Insert(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.TxPending.OnCtx(ctx).

@@ -359,6 +359,19 @@ type HistoryEntry struct {
 	// postgres. IsSuspended() is the predicate; the migration guards caught
 	// both halves of getting this wrong.
 	Suspended int64
+
+	// AttemptID is the attempt's identity (schema script 000003): minted once
+	// per dispatch decision, shared by every audit row about the attempt. ''
+	// on rows written before 000003.
+	AttemptID string
+	// AttemptOwner is the epoch of the daemon that made the attempt. A row
+	// whose owner is not the serving daemon's belongs to a process that is
+	// gone, because the instance lease is exclusive.
+	AttemptOwner string
+	// Disposition is what the attempt did, written once and never changed:
+	// see Dispositions. '' until the attempt is terminal, and on rows that
+	// finished before 000003.
+	Disposition Disposition
 }
 
 // IsSuspended reports whether this Execute left the statement unfinished.
@@ -382,6 +395,10 @@ const (
 	HistTxID       HistoryField = "tx_id"
 	// HistSuspended is the suspension axis — see HistoryEntry.Suspended.
 	HistSuspended HistoryField = "suspended"
+	// Attempt identity and disposition (schema script 000003).
+	HistAttemptID    HistoryField = "attempt_id"
+	HistAttemptOwner HistoryField = "attempt_owner"
+	HistDisposition  HistoryField = "disposition"
 )
 
 // HistByID orders history by insertion, so the repair sweep can page it.
@@ -391,18 +408,21 @@ func newHistory(conn dao.DataConn) *dao.Schema[*HistoryEntry, HistoryField, Sort
 	return sortableSchema(conn, "script_history", HistID,
 		map[Sort]string{HistByID: "id"},
 		map[HistoryField]dao.Field[*HistoryEntry]{
-			HistID:         {Column: "id", Scan: func(r *HistoryEntry) any { return &r.ID }},
-			HistUserID:     {Column: "user_id", Scan: func(r *HistoryEntry) any { return &r.UserID }, Value: func(r *HistoryEntry) any { return r.UserID }},
-			HistConnID:     {Column: "connection_id", Scan: func(r *HistoryEntry) any { return &r.ConnectionID }, Value: func(r *HistoryEntry) any { return r.ConnectionID }},
-			HistIP:         {Column: "ip", Scan: func(r *HistoryEntry) any { return &r.IP }, Value: func(r *HistoryEntry) any { return r.IP }},
-			HistScript:     {Column: "script", Scan: func(r *HistoryEntry) any { return &r.Script }, Value: func(r *HistoryEntry) any { return r.Script }},
-			HistStartedAt:  {Column: "started_at", Scan: func(r *HistoryEntry) any { return &r.StartedAt }, Value: func(r *HistoryEntry) any { return r.StartedAt }},
-			HistDurationMS: {Column: "duration_ms", Scan: func(r *HistoryEntry) any { return &r.DurationMS }, Value: func(r *HistoryEntry) any { return r.DurationMS }},
-			HistRowCount:   {Column: "row_count", Scan: func(r *HistoryEntry) any { return &r.RowCount }, Value: func(r *HistoryEntry) any { return r.RowCount }},
-			HistStatus:     {Column: "status", Scan: func(r *HistoryEntry) any { return &r.Status }, Value: func(r *HistoryEntry) any { return string(r.Status) }},
-			HistError:      {Column: "error", Scan: func(r *HistoryEntry) any { return &r.Error }, Value: func(r *HistoryEntry) any { return r.Error }},
-			HistTxID:       {Column: "tx_id", Scan: func(r *HistoryEntry) any { return &r.TxID }, Value: func(r *HistoryEntry) any { return r.TxID }},
-			HistSuspended:  {Column: "suspended", Scan: func(r *HistoryEntry) any { return &r.Suspended }, Value: func(r *HistoryEntry) any { return r.Suspended }},
+			HistID:           {Column: "id", Scan: func(r *HistoryEntry) any { return &r.ID }},
+			HistUserID:       {Column: "user_id", Scan: func(r *HistoryEntry) any { return &r.UserID }, Value: func(r *HistoryEntry) any { return r.UserID }},
+			HistConnID:       {Column: "connection_id", Scan: func(r *HistoryEntry) any { return &r.ConnectionID }, Value: func(r *HistoryEntry) any { return r.ConnectionID }},
+			HistIP:           {Column: "ip", Scan: func(r *HistoryEntry) any { return &r.IP }, Value: func(r *HistoryEntry) any { return r.IP }},
+			HistScript:       {Column: "script", Scan: func(r *HistoryEntry) any { return &r.Script }, Value: func(r *HistoryEntry) any { return r.Script }},
+			HistStartedAt:    {Column: "started_at", Scan: func(r *HistoryEntry) any { return &r.StartedAt }, Value: func(r *HistoryEntry) any { return r.StartedAt }},
+			HistDurationMS:   {Column: "duration_ms", Scan: func(r *HistoryEntry) any { return &r.DurationMS }, Value: func(r *HistoryEntry) any { return r.DurationMS }},
+			HistRowCount:     {Column: "row_count", Scan: func(r *HistoryEntry) any { return &r.RowCount }, Value: func(r *HistoryEntry) any { return r.RowCount }},
+			HistStatus:       {Column: "status", Scan: func(r *HistoryEntry) any { return &r.Status }, Value: func(r *HistoryEntry) any { return string(r.Status) }},
+			HistError:        {Column: "error", Scan: func(r *HistoryEntry) any { return &r.Error }, Value: func(r *HistoryEntry) any { return r.Error }},
+			HistTxID:         {Column: "tx_id", Scan: func(r *HistoryEntry) any { return &r.TxID }, Value: func(r *HistoryEntry) any { return r.TxID }},
+			HistSuspended:    {Column: "suspended", Scan: func(r *HistoryEntry) any { return &r.Suspended }, Value: func(r *HistoryEntry) any { return r.Suspended }},
+			HistAttemptID:    {Column: "attempt_id", Scan: func(r *HistoryEntry) any { return &r.AttemptID }, Value: func(r *HistoryEntry) any { return r.AttemptID }},
+			HistAttemptOwner: {Column: "attempt_owner", Scan: func(r *HistoryEntry) any { return &r.AttemptOwner }, Value: func(r *HistoryEntry) any { return r.AttemptOwner }},
+			HistDisposition:  {Column: "disposition", Scan: func(r *HistoryEntry) any { return &r.Disposition }, Value: func(r *HistoryEntry) any { return string(r.Disposition) }},
 		})
 }
 
@@ -422,6 +442,14 @@ type AuditEntry struct {
 	// the trail can be read per-transaction rather than reconstructed by
 	// parsing Detail.
 	TxID string
+
+	// AttemptID ties the row to the statement attempt it is about (schema
+	// script 000003); '' for rows about no attempt, and before 000003.
+	AttemptID string
+	// ConnID is the connection the row is about; 0 for rows about none, and
+	// for every row before 000003. No foreign key: an audit row outlives
+	// anything it names.
+	ConnID int64
 }
 
 type AuditField string
@@ -434,6 +462,8 @@ const (
 	AuditDetail    AuditField = "detail"
 	AuditCreatedAt AuditField = "created_at"
 	AuditTxID      AuditField = "tx_id"
+	AuditAttemptID AuditField = "attempt_id"
+	AuditConnID    AuditField = "conn_id"
 )
 
 func newAudit(conn dao.DataConn) *dao.Schema[*AuditEntry, AuditField, Sort, int64] {
@@ -445,6 +475,8 @@ func newAudit(conn dao.DataConn) *dao.Schema[*AuditEntry, AuditField, Sort, int6
 		AuditDetail:    {Column: "detail", Scan: func(r *AuditEntry) any { return &r.Detail }, Value: func(r *AuditEntry) any { return r.Detail }},
 		AuditCreatedAt: {Column: "created_at", Scan: func(r *AuditEntry) any { return &r.CreatedAt }, Value: func(r *AuditEntry) any { return r.CreatedAt }},
 		AuditTxID:      {Column: "tx_id", Scan: func(r *AuditEntry) any { return &r.TxID }, Value: func(r *AuditEntry) any { return r.TxID }},
+		AuditAttemptID: {Column: "attempt_id", Scan: func(r *AuditEntry) any { return &r.AttemptID }, Value: func(r *AuditEntry) any { return r.AttemptID }},
+		AuditConnID:    {Column: "conn_id", Scan: func(r *AuditEntry) any { return &r.ConnID }, Value: func(r *AuditEntry) any { return r.ConnID }},
 	})
 }
 
