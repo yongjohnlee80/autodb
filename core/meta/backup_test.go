@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yongjohnlee80/autodb/core/config"
 )
@@ -185,7 +186,10 @@ func TestAFailedBackupLeavesNoPartialFile(t *testing.T) {
 	}
 }
 
-// Rotation keeps this store's three newest backups and touches nothing else.
+// Rotation keeps this store's three newest backups and touches nothing else:
+// not another store's, and not a file that only shares this store's stem —
+// even when those are the OLDEST files there, which a looser match would
+// delete first.
 func TestRotationKeepsThreeAndOnlyItsOwn(t *testing.T) {
 	cfg, dir := fileStore(t)
 	_ = legacyV17(t, cfg).Close()
@@ -193,26 +197,47 @@ func TestRotationKeepsThreeAndOnlyItsOwn(t *testing.T) {
 	if err := os.Mkdir(bdir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, n := range []string{"meta.db.pre-000001-1-a.bak", "meta.db.pre-000001-2-b.bak", "meta.db.pre-000001-3-c.bak",
-		"notes.txt", "other.db.pre-000002-9-z.bak"} {
-		if err := os.WriteFile(filepath.Join(bdir, n), []byte("x"), 0o600); err != nil {
+	own := []string{"meta.db.pre-000001-1-0000000a.bak", "meta.db.pre-000001-2-0000000b.bak",
+		"meta.db.pre-legacy-v16-3-0000000c.bak"}
+	// Near-matches: each differs from the shape in one place.
+	notOwn := []string{
+		"meta.db.pre-manual.bak",                // the operator's own
+		"meta.db.pre-000001-4-0000000z.bak",     // not hex
+		"meta.db.pre-000001-5-0000000d.bak.old", // not .bak
+		"meta.db.pre-00001-6-0000000e.bak",      // a five-digit step
+		"meta.db.pre-000001-x-0000000f.bak",     // no nanosecond
+		"other.db.pre-000002-9-00000009.bak",    // another store's
+		"notes.txt",
+	}
+	long := time.Now().Add(-24 * time.Hour)
+	for i, n := range append(append([]string{}, own...), notOwn...) {
+		path := filepath.Join(bdir, n)
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		at := long.Add(time.Duration(i) * time.Minute) // own oldest-first, then the rest
+		if i >= len(own) {
+			at = long.Add(-time.Hour) // the near-matches are older than everything
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
 			t.Fatal(err)
 		}
 	}
 	_ = open(t, cfg) // backs up (a fourth of its own) and rotates
-	var mine int
 	entries, _ := os.ReadDir(bdir)
 	have := map[string]bool{}
 	for _, e := range entries {
 		have[e.Name()] = true
-		if strings.HasPrefix(e.Name(), "meta.db.pre-") {
-			mine++
+	}
+	for _, n := range notOwn {
+		if !have[n] {
+			t.Errorf("rotation removed %s, which it does not own", n)
 		}
 	}
-	if mine != backupsKept {
-		t.Errorf("%d of this store's backups kept, want %d", mine, backupsKept)
+	if have[own[0]] || !have[own[1]] || !have[own[2]] {
+		t.Errorf("rotation should remove only the oldest of its own (%s): %v", own[0], have)
 	}
-	if !have["notes.txt"] || !have["other.db.pre-000002-9-z.bak"] {
-		t.Errorf("rotation removed a file it does not own: %v", have)
+	if got := len(entries) - len(notOwn); got != backupsKept {
+		t.Errorf("%d of this store's backups kept, want %d: %v", got, backupsKept, have)
 	}
 }
