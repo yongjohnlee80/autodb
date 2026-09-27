@@ -77,7 +77,10 @@ func dispositionFor(status HistStatus, completionObserved bool) (meta.Dispositio
 // A conflict is RECORDED here, in tx, and reported as ErrDispositionConflict:
 // the caller must still commit tx, or the disposition_conflict row goes with
 // the rollback.
-func (e *Engine) settleTx(tx *dao.Transaction, ident auth.Identity, ip string, connID int64,
+//
+// userID and ip are the conflict row's: the caller's, or — for the recovery of
+// a dead owner's attempt, which has no caller — the attempt's own.
+func (e *Engine) settleTx(tx *dao.Transaction, userID int64, ip string, connID int64,
 	att Attempt, disp meta.Disposition, set map[meta.HistoryField]any) (bool, error) {
 	q := e.store.History.On(tx).
 		With(meta.HistID, att.HistID).With(meta.HistAttemptID, att.ID).
@@ -111,7 +114,7 @@ func (e *Engine) settleTx(tx *dao.Transaction, ident auth.Identity, ip string, c
 	if row.Disposition == disp {
 		return false, nil // an identical repeat: the first write stands
 	}
-	if aerr := e.auth.AuditTxRecord(tx, auth.AuditRecord{UserID: ident.UserID(), IP: ip,
+	if aerr := e.auth.AuditTxRecord(tx, auth.AuditRecord{UserID: userID, IP: ip,
 		Action: "disposition_conflict",
 		Detail: fmt.Sprintf("conn %d: attempt already %s, refused %s", connID, row.Disposition, disp),
 		TxID:   row.TxID, AttemptID: att.ID, ConnID: connID}); aerr != nil {

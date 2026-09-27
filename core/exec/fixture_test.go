@@ -20,9 +20,14 @@ package exec
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/yongjohnlee80/golib/dao/postgres"
 
 	"github.com/yongjohnlee80/autodb/core/auth"
 	"github.com/yongjohnlee80/autodb/core/config"
@@ -45,8 +50,14 @@ var fixtureSeq atomic.Int64
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureOn(t, config.Meta{Engine: "sqlite", Path: ":memory:"})
+}
+
+// newFixtureOn is newFixture over the meta store cfg names.
+func newFixtureOn(t *testing.T, cfg config.Meta) *fixture {
+	t.Helper()
 	ctx := context.Background()
-	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
+	store, err := meta.Open(ctx, cfg)
 	if err != nil {
 		t.Fatalf("meta.Open: %v", err)
 	}
@@ -113,4 +124,41 @@ func (f *fixture) audits(t *testing.T, action string) []*meta.AuditEntry {
 		t.Fatalf("reading %q audit rows: %v", action, err)
 	}
 	return rows
+}
+
+// onBothStores runs cell over a SQLite meta store and, when TEST_PGURL is set,
+// a PostgreSQL one in a scratch schema: the history table the terminal writes
+// and the recovery sweep read is partitioned on PostgreSQL, and a query or a
+// compare-and-set that holds on one engine is not thereby shown on the other.
+func onBothStores(t *testing.T, cell func(t *testing.T, f *fixture)) {
+	t.Run("sqlite", func(t *testing.T) { cell(t, newFixture(t)) })
+	t.Run("postgres", func(t *testing.T) {
+		base := os.Getenv("TEST_PGURL")
+		if base == "" {
+			t.Skip("TEST_PGURL not set; the PostgreSQL meta store is not exercised")
+		}
+		cell(t, newFixtureOn(t, config.Meta{Engine: "postgres", DSN: scratchSchemaDSN(t, base), AllowInsecureDSN: true}))
+	})
+}
+
+// scratchSchemaDSN is base with search_path on a fresh schema, dropped at
+// cleanup, so a PostgreSQL meta store is private to the test.
+func scratchSchemaDSN(t *testing.T, base string) string {
+	t.Helper()
+	ctx := context.Background()
+	name := fmt.Sprintf("autodb_exec_%d_%d", time.Now().UnixNano(), fixtureSeq.Add(1))
+	admin, err := postgres.Open(ctx, base)
+	if err != nil {
+		t.Fatalf("admin Open: %v", err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	if _, err := admin.ExecContext(ctx, "CREATE SCHEMA "+name); err != nil {
+		t.Fatalf("CREATE SCHEMA: %v", err)
+	}
+	t.Cleanup(func() { _, _ = admin.ExecContext(context.Background(), "DROP SCHEMA "+name+" CASCADE") })
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	return base + sep + "options=" + url.QueryEscape("-csearch_path="+name)
 }

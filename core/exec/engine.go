@@ -732,9 +732,17 @@ func (e *Engine) run(ctx context.Context, token string, connID int64, sqlText, i
 }
 
 // reject audits a refused execution attempt and returns the refusal.
+//
+// On its own bounded context, detached from the caller's, as every outcome is:
+// a refusal that has been DECIDED is recorded, whatever the caller did next. On
+// the caller's context a cancellation arriving between the decision and the
+// write would suppress it, and the refusal would leave no trace.
 func (e *Engine) reject(ctx context.Context, ident auth.Identity, connID int64, ip, sqlText string, cause error) error {
+	recCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
 	detail := fmt.Sprintf("conn %d: %v: %s", connID, cause, truncate(sqlText, maxAuditSQLBytes))
-	if err := e.auth.Audit(ctx, ident.UserID(), ip, "exec_rejected", detail); err != nil {
+	if err := e.auth.AuditRecordCtx(recCtx, auth.AuditRecord{UserID: ident.UserID(), IP: ip,
+		Action: "exec_rejected", Detail: detail, ConnID: connID}); err != nil {
 		return err
 	}
 	return cause
@@ -757,7 +765,7 @@ func (e *Engine) rejectRecordedAttempt(ctx context.Context, ident auth.Identity,
 	var conflict error
 	if err := dao.RunTx(recCtx, func(tx *dao.Transaction) error {
 		if e.history && att.HistID != 0 {
-			settled, serr := e.settleTx(tx, ident, ip, connID, att, meta.DispositionRefused,
+			settled, serr := e.settleTx(tx, ident.UserID(), ip, connID, att, meta.DispositionRefused,
 				map[meta.HistoryField]any{meta.HistStatus: StatusError, meta.HistError: errText})
 			if errors.Is(serr, ErrDispositionConflict) {
 				conflict = serr
@@ -892,7 +900,7 @@ func (e *Engine) writeOutcomeObserved(ctx context.Context, ident auth.Identity, 
 		// all. Only the write that made the attempt terminal gets an
 		// exec_result, so a retried terminal adds no second one.
 		if e.history && att.HistID != 0 {
-			settled, serr := e.settleTx(tx, ident, ip, connID, att, disp, map[meta.HistoryField]any{
+			settled, serr := e.settleTx(tx, ident.UserID(), ip, connID, att, disp, map[meta.HistoryField]any{
 				meta.HistDurationMS: dur.Milliseconds(), meta.HistRowCount: rows,
 				meta.HistStatus: status, meta.HistError: errText,
 				meta.HistSuspended: boolToFlag(suspended),

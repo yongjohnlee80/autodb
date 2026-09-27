@@ -573,6 +573,11 @@ func (e *Engine) StartOutcomeReconciler(ctx context.Context, every time.Duration
 	// anyone, and doing it before the oracle pass means that pass sees a
 	// smaller backlog.
 	e.RecoverStaleOpen(ctx)
+	// And the statement attempts they left running, on the same ordering
+	// argument's stronger cousin: an attempt of ANOTHER epoch is a dead
+	// process's whether or not this one is serving yet, so this also runs on
+	// every tick below.
+	e.RecoverDeadAttempts(ctx)
 	if n := e.ReconcileOutcomes(ctx); n > 0 {
 		e.logf("startup reconciliation resolved %d transaction outcome(s)", n)
 	}
@@ -589,6 +594,7 @@ func (e *Engine) StartOutcomeReconciler(ctx context.Context, every time.Duration
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				e.RecoverDeadAttempts(ctx)
 				e.ReconcileOutcomes(ctx)
 			}
 		}
