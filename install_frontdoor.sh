@@ -1595,7 +1595,10 @@ install_postgres() {
       fi
       ;;
     pacman)
-      pacman -Sy --noconfirm postgresql
+      # -S, never -Sy or -Syu: a database refresh without the upgrade is a
+      # partial upgrade on Arch, and when to upgrade is the owner's call. A
+      # stale database fails here, asking them to `pacman -Syu` first.
+      pacman -S --noconfirm --needed postgresql || die "pacman could not install postgresql — if its database is stale, run 'pacman -Syu' yourself, then this again"
       if [ ! -s /var/lib/postgres/data/PG_VERSION ]; then
         su - postgres -c "initdb --locale=C.UTF-8 -E UTF8 -D /var/lib/postgres/data"
       fi
