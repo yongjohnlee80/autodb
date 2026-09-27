@@ -116,7 +116,7 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					HistConnID: r.ConnectionID, HistIP: r.IP, HistScript: r.Script,
 					HistStartedAt: r.StartedAt, HistDurationMS: r.DurationMS,
 					HistRowCount: r.RowCount, HistStatus: r.Status, HistError: r.Error,
-					HistTxID: r.TxID}
+					HistTxID: r.TxID, HistSuspended: r.Suspended}
 			})
 		}},
 		{"audit_log", func() (int64, error) {

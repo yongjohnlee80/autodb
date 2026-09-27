@@ -375,7 +375,10 @@ func seedEverything(t *testing.T, s *Store) {
 		Set(HistUserID, rootID).Set(HistConnID, connID).Set(HistIP, "10.1.2.3").
 		Set(HistScript, "SELECT 2").Set(HistStartedAt, int64(19)).Set(HistDurationMS, int64(7)).
 		Set(HistRowCount, int64(3)).Set(HistStatus, "ok_pending_commit").
-		Set(HistError, "boom").Set(HistTxID, "tx_seeded").Insert(); err != nil {
+		Set(HistError, "boom").Set(HistTxID, "tx_seeded").
+		// Non-default: a column left at its default survives a copy that
+		// drops it, which is how suspended went unnoticed.
+		Set(HistSuspended, int64(1)).Insert(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Audit.OnCtx(ctx).
