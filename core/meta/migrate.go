@@ -83,7 +83,7 @@ func MigrateToPostgres(ctx context.Context, src, dst *Store) error {
 					ConnDSNEnc: nb(r.DSNEnc), ConnCreatedBy: r.CreatedBy,
 					ConnCreatedAt: r.CreatedAt, ConnUpdatedAt: r.UpdatedAt,
 					ConnProfile: r.Profile, ConnFrontDoorExposed: r.FrontDoorExposed, ConnDebug: r.Debug,
-					ConnPoolMaxConns: r.PoolMaxConns, ConnTargetDB: r.TargetDB}
+					ConnPoolMaxConns: r.PoolMaxConns, ConnTargetDB: r.TargetDB, ConnArchivedAt: r.ArchivedAt}
 			})
 		}},
 		{"workspaces", func() (int64, error) {

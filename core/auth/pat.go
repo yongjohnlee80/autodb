@@ -299,6 +299,11 @@ func (s *Service) CreatePAT(ctx context.Context, token, name string, connID int6
 		if cerr != nil {
 			return cerr
 		}
+		if connRow.IsArchived() {
+			// No token for a connection nobody can reach. An admin, whose
+			// role passes the grant check, is who reaches this.
+			return fmt.Errorf("%w: %w", ErrPATConnDenied, meta.ErrConnectionArchived)
+		}
 
 		// GATE 2 (LAST) — the connection must admit front-door use at all.
 		//

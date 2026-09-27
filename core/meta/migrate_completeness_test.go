@@ -346,6 +346,7 @@ func seedEverything(t *testing.T, s *Store) {
 		Set(ConnCreatedBy, rootID).Set(ConnCreatedAt, int64(13)).Set(ConnUpdatedAt, int64(14)).
 		Set(ConnProfile, "session").Set(ConnFrontDoorExposed, int64(1)).
 		Set(ConnDebug, int64(1)).Set(ConnPoolMaxConns, int64(5)).
+		Set(ConnArchivedAt, int64(16)).
 		Insert()
 	if err != nil {
 		t.Fatal(err)

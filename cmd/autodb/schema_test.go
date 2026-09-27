@@ -3,18 +3,31 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/core/config"
+	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/sql/deployments"
 )
 
 // schema_test.go holds --apply-migration-scripts and --revert-migration-script
 // to docs/ops/schema-scripts.md: they change nothing while a daemon serves the store, a dry
 // run changes nothing at all, and an apply says what it did.
+
+// scriptCount is how many update scripts a new sqlite store takes: all of them.
+func scriptCount(t *testing.T) int {
+	t.Helper()
+	updates, err := deployments.Updates(engine.SQLite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(updates)
+}
 
 func sqliteConfig(t *testing.T) (path, dbPath string) {
 	t.Helper()
@@ -61,7 +74,7 @@ func TestApplyMigrationScriptsReportsAndADryRunChangesNothing(t *testing.T) {
 	if err := runSchema(ctx, &out, cfg, schemaOpts{dryRun: true}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "would apply 1 script(s)") || !strings.Contains(out.String(), "000001_update_initialize_tables.sql") {
+	if !strings.Contains(out.String(), fmt.Sprintf("would apply %d script(s)", scriptCount(t))) || !strings.Contains(out.String(), "000001_update_initialize_tables.sql") {
 		t.Errorf("dry run said:\n%s", out.String())
 	}
 	if got := tablesIn(t, db); strings.Contains(got, "schema_version") || strings.Contains(got, "users") {
@@ -72,7 +85,7 @@ func TestApplyMigrationScriptsReportsAndADryRunChangesNothing(t *testing.T) {
 	if err := runSchema(ctx, &out, cfg, schemaOpts{}); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "applied 1 script(s)") {
+	if !strings.Contains(out.String(), fmt.Sprintf("applied %d script(s)", scriptCount(t))) {
 		t.Errorf("apply said:\n%s", out.String())
 	}
 	if got := tablesIn(t, db); !strings.Contains(got, "schema_version") || !strings.Contains(got, "users") {
@@ -138,7 +151,7 @@ func TestAnUnknownConfigKeyIsWarnedAndTheCommandRuns(t *testing.T) {
 	if !strings.Contains(warned.String(), "meta.retired_setting") || !strings.Contains(warned.String(), "warning") {
 		t.Errorf("stderr said %q, want a warning naming meta.retired_setting", warned.String())
 	}
-	if !strings.Contains(out.String(), "applied 1 script(s)") {
+	if !strings.Contains(out.String(), fmt.Sprintf("applied %d script(s)", scriptCount(t))) {
 		t.Errorf("the command did not run:\n%s", out.String())
 	}
 }

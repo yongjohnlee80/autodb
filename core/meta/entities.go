@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"errors"
 	"github.com/yongjohnlee80/autodb/core/engine"
 	"github.com/yongjohnlee80/golib/dao"
 )
@@ -140,7 +141,20 @@ type Connection struct {
 	// sealed inside the DSN, so it is VERIFIED against the decrypted DSN when a
 	// session pins its target rather than trusted.
 	TargetDB string
+	// ArchivedAt is when the connection was archived, unix seconds; 0 for a
+	// live one. An archived connection keeps its row for the history that
+	// names it and is otherwise gone: no DSN, no grants, no workspace, no
+	// front door, no tokens — see exec's ArchiveConnection.
+	ArchivedAt int64
 }
+
+// IsArchived reports whether the connection has been archived.
+func (c *Connection) IsArchived() bool { return c.ArchivedAt != 0 }
+
+// ErrConnectionArchived refuses any use of, or change to, an archived
+// connection: it has no DSN, and archiving is final. One sentinel for every
+// package that meets one.
+var ErrConnectionArchived = errors.New("the connection is archived")
 
 // IsDebug reports whether the connection carries the debug profile.
 func (c *Connection) IsDebug() bool { return c.Debug != 0 }
@@ -170,6 +184,7 @@ const (
 	ConnCreatedAt        ConnField = "created_at"
 	ConnUpdatedAt        ConnField = "updated_at"
 	ConnTargetDB         ConnField = "target_db"
+	ConnArchivedAt       ConnField = "archived_at"
 )
 
 func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort, int64] {
@@ -186,6 +201,7 @@ func newConnections(conn dao.DataConn) *dao.Schema[*Connection, ConnField, Sort,
 		ConnCreatedAt:        {Column: "created_at", Scan: func(r *Connection) any { return &r.CreatedAt }, Value: func(r *Connection) any { return r.CreatedAt }},
 		ConnUpdatedAt:        {Column: "updated_at", Scan: func(r *Connection) any { return &r.UpdatedAt }, Value: func(r *Connection) any { return r.UpdatedAt }},
 		ConnTargetDB:         {Column: "target_db", Scan: func(r *Connection) any { return &r.TargetDB }, Value: func(r *Connection) any { return r.TargetDB }},
+		ConnArchivedAt:       {Column: "archived_at", Scan: func(r *Connection) any { return &r.ArchivedAt }, Value: func(r *Connection) any { return r.ArchivedAt }},
 	})
 }
 

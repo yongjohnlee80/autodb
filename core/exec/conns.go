@@ -35,8 +35,10 @@ var (
 	openMySQL    = mysql.OpenNamed
 	openSQLite   = sqlite.OpenNamed
 
-	ErrConnectionNameTaken  = errors.New("exec: connection name is already in use")
-	ErrConnectionHasHistory = errors.New("exec: connection has recorded history and cannot be deleted")
+	ErrConnectionNameTaken = errors.New("exec: connection name is already in use")
+	// ErrConnectionArchived is meta's: any use of, or change to, an archived
+	// connection is refused.
+	ErrConnectionArchived = meta.ErrConnectionArchived
 )
 
 // target returns the cached dao connection for connID, opening it on first
@@ -62,6 +64,13 @@ func (e *Engine) target(ctx context.Context, connID int64, row *meta.Connection)
 	//
 	// Lock order is engine.mu → registry.mu → session.mu. isDraining takes
 	// the registry's lock, and no registry method reaches back for e.mu.
+	//
+	// AN ARCHIVED CONNECTION HAS NO POOL, EVER. Every use of a connection
+	// comes through here, so this is the one refusal that covers them all; its
+	// DSN is wiped, and a clear refusal beats a failed decryption.
+	if row.IsArchived() {
+		return nil, fmt.Errorf("%w: %q", ErrConnectionArchived, row.Name)
+	}
 	for {
 		e.mu.Lock()
 		if e.sessions.isDraining(connID) {
@@ -446,10 +455,29 @@ func (e *Engine) ListConnections(ctx context.Context, token string) ([]*meta.Con
 	if err != nil {
 		return nil, err
 	}
+	// An archived connection is listed nowhere: it survives only for the
+	// history that names it.
+	live := rows[:0]
 	for _, r := range rows {
+		if r.IsArchived() {
+			continue
+		}
 		r.DSNEnc = nil
+		live = append(live, r)
 	}
-	return rows, nil
+	return live, nil
+}
+
+// liveConnection is connID's row, refusing an archived one by name.
+func (e *Engine) liveConnection(ctx context.Context, connID int64) (*meta.Connection, error) {
+	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
+	if err != nil {
+		return nil, err
+	}
+	if row.IsArchived() {
+		return nil, fmt.Errorf("%w: %q", ErrConnectionArchived, row.Name)
+	}
+	return row, nil
 }
 
 // SetConnectionProfile changes a connection's capability profile.
@@ -477,7 +505,7 @@ func (e *Engine) SetConnectionProfile(ctx context.Context, token string, connID 
 		return fmt.Errorf("exec: unknown capability profile %q (want %q or %q)",
 			profile, meta.ProfileV1Compat, meta.ProfileSession)
 	}
-	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
+	row, err := e.liveConnection(ctx, connID)
 	if err != nil {
 		return err
 	}
@@ -533,7 +561,7 @@ func (e *Engine) SetConnectionExposure(ctx context.Context, token string, connID
 			e.exposureMu.Unlock()
 		}
 	}()
-	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
+	row, err := e.liveConnection(ctx, connID)
 	if err != nil {
 		return err
 	}
@@ -583,20 +611,28 @@ func (e *Engine) SetConnectionExposure(ctx context.Context, token string, connID
 	return nil
 }
 
-// DeleteConnection removes a managed connection (admin token). Grants and
-// workspace links cascade; history rows refuse the delete (FK) — the
-// record outlives the connection by design.
-func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int64, ip string) error {
+// DeleteConnection removes a managed connection (admin token), or ARCHIVES it
+// when it has recorded history, and reports which (archived true).
+//
+// A connection with history cannot be deleted: the history keeps a foreign key
+// to it, so the record outlives the connection by design. Archiving is what
+// the delete becomes instead, and it is final — see archiveTx. A connection
+// without history is deleted as it always was: grants and workspace links
+// cascade.
+func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int64, ip string) (archived bool, err error) {
 	ident, err := e.auth.ValidateToken(ctx, token)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if ident.Role() != meta.RoleAdmin {
-		return auth.ErrDenied
+		return false, auth.ErrDenied
 	}
 	row, err := e.store.Connections.OnCtx(ctx).With(meta.ConnID, connID).Get()
 	if err != nil {
-		return err
+		return false, err
+	}
+	if row.IsArchived() {
+		return false, fmt.Errorf("%w: %q", ErrConnectionArchived, row.Name)
 	}
 	// Order matters and is the documented sequence: mark the connection
 	// DRAINING and close its sessions FIRST, then drop the pool. Closing the
@@ -611,20 +647,94 @@ func (e *Engine) DeleteConnection(ctx context.Context, token string, connID int6
 
 	err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
 		if err := e.store.Connections.On(tx).With(meta.ConnID, connID).Delete(); err != nil {
-			if errors.Is(err, dao.ErrForeignKey) {
-				return fmt.Errorf("%w: %q: %w", ErrConnectionHasHistory, row.Name, err)
-			}
 			return err
 		}
 		return e.auth.AuditTx(tx, ident.UserID(), ip, "connection_deleted", row.Name)
 	})
+	if errors.Is(err, dao.ErrForeignKey) {
+		// Its history holds it: archive it instead, in a transaction of its
+		// own — the delete's rolled back whole, so nothing of it remains.
+		err = dao.RunTx(ctx, func(tx *dao.Transaction) error {
+			return e.archiveTx(tx, ident.UserID(), row, ip)
+		})
+		if err == nil {
+			// Draining stays set: the connection is gone for good, and no
+			// pool may be opened onto it again.
+			return true, nil
+		}
+	}
 	if err != nil {
-		// The row survives, so the connection must become usable again —
-		// otherwise a delete that failed on a foreign key would leave a live
-		// connection permanently unopenable with nothing saying why.
+		// The row survives, live, so the connection must become usable again
+		// — otherwise a failed delete would leave a live connection
+		// permanently unopenable with nothing saying why.
 		e.sessions.clearDraining(connID)
 	}
-	return err
+	return false, err
+}
+
+// archiveTx archives a connection whose history keeps it from being deleted.
+// All of it in the caller's one transaction, and all of it final:
+//
+//   - the stored DSN is wiped — the credentials are gone, not hidden;
+//   - it is renamed "<name> (archived <id>)", which frees its name for a new
+//     connection and marks every history and audit row that shows it;
+//   - its grants and workspace links are removed, and its front-door exposure
+//     turned off, so nothing lists it and nobody reaches it;
+//   - the access tokens bound to it are revoked;
+//   - archived_at records when, and the audit records who.
+//
+// Its row and id remain, for the history that names it.
+func (e *Engine) archiveTx(tx *dao.Transaction, actor int64, row *meta.Connection, ip string) error {
+	now := time.Now().Unix()
+	name, err := e.archivedName(tx, row)
+	if err != nil {
+		return fmt.Errorf("exec: archiving %q: %w", row.Name, err)
+	}
+	if err := e.store.Connections.On(tx).With(meta.ConnID, row.ID).
+		Set(meta.ConnArchivedAt, now).Set(meta.ConnName, name).
+		Set(meta.ConnDSNEnc, []byte{}).Set(meta.ConnFrontDoorExposed, int64(0)).
+		Set(meta.ConnUpdatedAt, now).Update(); err != nil {
+		return fmt.Errorf("exec: archiving %q: %w", row.Name, err)
+	}
+	if err := e.store.Grants.On(tx).With(meta.GrantConnID, row.ID).Delete(); err != nil && !errors.Is(err, dao.ErrNoRows) {
+		return fmt.Errorf("exec: archiving %q: removing its grants: %w", row.Name, err)
+	}
+	if err := e.store.WorkspaceConns.On(tx).With(meta.WcConnID, row.ID).Delete(); err != nil && !errors.Is(err, dao.ErrNoRows) {
+		return fmt.Errorf("exec: archiving %q: removing its workspace links: %w", row.Name, err)
+	}
+	if err := e.store.PATs.On(tx).With(meta.PATConnID, row.ID).With(meta.PATRevoked, int64(0)).
+		Set(meta.PATRevoked, int64(1)).Update(); err != nil && !errors.Is(err, dao.ErrNoRows) {
+		return fmt.Errorf("exec: archiving %q: revoking its access tokens: %w", row.Name, err)
+	}
+	return e.auth.AuditTx(tx, actor, ip, "connection_archived",
+		fmt.Sprintf("%s -> %s (its history is kept)", row.Name, name))
+}
+
+// archivedName is the name an archived connection is renamed to, freeing its
+// own: "<name> (archived <id>)", or, when a live connection already holds that,
+// "<name> (archived <id>, 2)", then 3, and so on.
+//
+// Names are the operator's to choose, so any of these may already be taken,
+// and an occupied one must not make the archive — and so the delete — fail.
+// The first free one is taken, read inside the archive's transaction. There
+// are finitely many connections, so a free one is always found within one more
+// try than there are rows. A connection created under the chosen name between
+// this read and the rename fails the rename on the unique name, and the delete
+// with it; the next delete picks the next free name.
+func (e *Engine) archivedName(tx *dao.Transaction, row *meta.Connection) (string, error) {
+	for n := 1; ; n++ {
+		name := fmt.Sprintf("%s (archived %d)", row.Name, row.ID)
+		if n > 1 {
+			name = fmt.Sprintf("%s (archived %d, %d)", row.Name, row.ID, n)
+		}
+		taken, err := e.store.Connections.On(tx).With(meta.ConnName, name).Count()
+		if err != nil {
+			return "", fmt.Errorf("choosing its archived name: %w", err)
+		}
+		if taken == 0 {
+			return name, nil
+		}
+	}
 }
 
 // TestConnection authorizes read access and probes the target with SELECT 1.
@@ -702,6 +812,10 @@ func (e *Engine) RenameConnection(ctx context.Context, token string, connID int6
 		row, terr := e.store.Connections.On(tx).With(meta.ConnID, connID).Get()
 		if terr != nil {
 			return terr
+		}
+		if row.IsArchived() {
+			// Its name marks it as archived in every record that shows it.
+			return fmt.Errorf("%w: %q", ErrConnectionArchived, row.Name)
 		}
 		if row.Name == name {
 			return nil

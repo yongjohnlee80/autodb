@@ -39,7 +39,12 @@ func catalog(t *testing.T, s *Store) []string {
 		queries = append(queries, `SELECT 'index-sql ' || name || ' ' || COALESCE(sql,'') FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL`)
 	} else {
 		queries = []string{
-			`SELECT 'col ' || table_name || '.' || column_name || ' ' || ordinal_position || ' ' || data_type || ' null=' || is_nullable || ' dflt=' || COALESCE(column_default,'') || ' identity=' || is_identity
+			// The column's place among the LIVE columns, not ordinal_position:
+			// a dropped column keeps its number, so a column dropped by a revert
+			// and added again by the next update is numbered one past where a
+			// fresh store numbers it — in the same place, which is what
+			// SELECT * and a positional INSERT see.
+			`SELECT 'col ' || table_name || '.' || column_name || ' ' || rank() OVER (PARTITION BY table_name ORDER BY ordinal_position) || ' ' || data_type || ' null=' || is_nullable || ' dflt=' || COALESCE(column_default,'') || ' identity=' || is_identity
 			   FROM information_schema.columns WHERE table_schema = current_schema()`,
 			`SELECT 'con ' || conrelid::regclass::text || ' ' || conname || ' ' || pg_get_constraintdef(oid)
 			   FROM pg_constraint WHERE connamespace = current_schema()::regnamespace`,
@@ -264,21 +269,76 @@ func TestAChangedScriptIsAWarningNotARerun(t *testing.T) {
 	}
 }
 
-// 000001 has no revert, and a revert that is not of the latest script is
-// refused before anything changes.
-func TestRevertRefusesTheBaselineAndAnyButTheLatest(t *testing.T) {
-	s := open(t, config.Meta{Engine: "sqlite", Path: filepath.Join(t.TempDir(), "meta.db")})
-	before := catalog(t, s)
-	if _, err := RevertScript(context.Background(), s, 1); err == nil || !strings.Contains(err.Error(), "baseline") {
-		t.Errorf("reverting 000001: %v, want the baseline refused", err)
+// schemaOnly is a store's catalog without the two ledgers: the schema the
+// scripts describe, not the bookkeeping about them.
+func schemaOnly(t *testing.T, s *Store) []string {
+	var out []string
+	for _, l := range catalog(t, s) {
+		if !strings.Contains(l, "schema_version") && !strings.Contains(l, "schema_migrations") {
+			out = append(out, l)
+		}
 	}
-	if _, err := RevertScript(context.Background(), s, 2); err == nil {
-		t.Error("reverting 000002, which does not exist, succeeded")
-	} else if errors.Is(err, ErrNotLatest) {
-		t.Errorf("reverting a script with no revert file said not-latest: %v", err)
-	}
-	if d := diffLines(before, catalog(t, s)); d != "" {
-		t.Errorf("a refused revert changed the schema:\n%s", d)
+	return out
+}
+
+// An update and its revert return the schema it started from; the ledger
+// forgets the reverted script, the next Open applies it again (a revert is a
+// downgrade's first step, not a hold), and a second revert of it is refused.
+// 000001 is never reverted.
+func TestAnUpdateAndItsRevertReturnTheSchemaItStartedFrom(t *testing.T) {
+	ctx := context.Background()
+	for name, cfgOf := range scriptEngines(t) {
+		t.Run(name, func(t *testing.T) {
+			cfg := cfgOf(t)
+			base := legacyV17(t, cfg)
+			before := schemaOnly(t, base)
+			_ = base.Close()
+
+			s := open(t, cfg)
+			updates, _ := deployments.Updates(s.engine)
+			latest := updates[len(updates)-1]
+			if latest.Number < 2 {
+				t.Fatal("no script after the baseline to revert")
+			}
+			if d := diffLines(before, schemaOnly(t, s)); d == "" {
+				t.Fatalf("%s changed no schema, so its revert proves nothing", latest.Name)
+			}
+
+			if _, err := RevertScript(ctx, s, 1); err == nil || !strings.Contains(err.Error(), "baseline") {
+				t.Errorf("reverting 000001: %v, want the baseline refused", err)
+			}
+			if latest.Number > 2 {
+				if _, err := RevertScript(ctx, s, latest.Number-1); !errors.Is(err, ErrNotLatest) {
+					t.Errorf("reverting one below the latest: %v, want ErrNotLatest", err)
+				}
+			}
+			// Down to the baseline, one script per call, newest first — as a
+			// downgrade does, in separate invocations.
+			for n := latest.Number; n >= 2; n-- {
+				got, err := RevertScript(ctx, s, n)
+				if err != nil {
+					t.Fatalf("reverting %06d: %v", n, err)
+				}
+				if !strings.HasPrefix(got, fmt.Sprintf("%06d_", n)) {
+					t.Errorf("reverting %06d reverted %s", n, got)
+				}
+			}
+			if d := diffLines(before, schemaOnly(t, s)); d != "" {
+				t.Errorf("after the reverts the schema is not the one before:\n%s", d)
+			}
+			applied, _ := appliedScripts(ctx, s.Conn())
+			if len(applied) != 1 {
+				t.Errorf("after the reverts the ledger holds %v, want only 000001", applied)
+			}
+			if _, err := RevertScript(ctx, s, 2); err == nil {
+				t.Error("a second revert of 000002 succeeded")
+			}
+
+			again := open(t, cfg)
+			if d := diffLines(schemaOnly(t, again), schemaOnly(t, open(t, cfgOf(t)))); d != "" {
+				t.Errorf("the next Open did not reapply the reverted scripts:\n%s", d)
+			}
+		})
 	}
 }
 
@@ -303,7 +363,7 @@ func TestApplyScriptsReportsTheLegacyVersionItFound(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if st.LegacyBefore != v || len(st.Pending) != 1 {
+		if st.LegacyBefore != v || len(st.Pending) == 0 || !strings.HasPrefix(st.Pending[0], "000001_") {
 			t.Errorf("a legacy v%d store: LegacyBefore %d, pending %v", v, st.LegacyBefore, st.Pending)
 		}
 	}

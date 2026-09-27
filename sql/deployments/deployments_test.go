@@ -15,10 +15,14 @@ import (
 // changes.
 var released = map[engine.Name]map[string]string{
 	engine.Postgres: {
-		"000001_update_initialize_tables.sql": "fdd481f2782788bd60cd18701189d944f174bb95d26c7cdbbe733cf16b7ad037",
+		"000001_update_initialize_tables.sql":   "fdd481f2782788bd60cd18701189d944f174bb95d26c7cdbbe733cf16b7ad037",
+		"000002_update_archive_connections.sql": "74bc203f12516663a3ad850929feff4f9a2d884ee56187b791d735462e191fe9",
+		"000002_revert_archive_connections.sql": "0dc21b98ecbbb697ddeccd66dcfd8ec5d7c0e6ec513000b20c22204d3fdcf559",
 	},
 	engine.SQLite: {
-		"000001_update_initialize_tables.sql": "a606ff45b7147501802a65d46773a9764828ba26213689052bb094ef854f6d1c",
+		"000001_update_initialize_tables.sql":   "a606ff45b7147501802a65d46773a9764828ba26213689052bb094ef854f6d1c",
+		"000002_update_archive_connections.sql": "185d9e48486d4ba3359916cf164b0d6fff49d125d60516617b88a96934523da7",
+		"000002_revert_archive_connections.sql": "55833cac3277d279ef596551d50d38768cc58eafc1e7970b33a9d4c695f22992",
 	},
 }
 
