@@ -28,7 +28,9 @@ type manager[T any] struct {
 	status     string // the source its help line reads
 	load       func(ctx context.Context, b *Bound) ([]T, error)
 	beforeLoad func(context.Context) // test seam for a worker held before its pinned load
+	completed  func()                // test seam: a reload's answer reached the loop, current or not
 	row        func(T) tuidecl.Row
+	reloads    uint64 // the newest reload's sequence; an older answer is dropped
 }
 
 func newManager[T any](status string, load func(context.Context, *Bound) ([]T, error), row func(T) tuidecl.Row, roles ...string) *manager[T] {
@@ -53,7 +55,17 @@ func openManager[T any](h *Host, m *manager[T]) {
 // reloadManager lists m's rows again, under its pinned connection, and then
 // shows done on m's help line: what the call that asked for the reload
 // answered, which "loading…" stands in for meanwhile.
+//
+// ONLY THE NEWEST RELOAD'S ANSWER IS SHOWN. Two reloads on one connection run
+// at once — a filter then a clear, next then prev — and their answers can
+// arrive in either order. The state a reload is for (the page, the filter,
+// the next cursor its after-hook reads) is the newest one, so an older answer
+// arriving last would pair its rows with the newer page's cursor. Each reload
+// takes a sequence number, and an answer that is not the newest's changes
+// nothing: not the rows, not the status, not the after-hook's state.
 func reloadManager[T any](h *Host, m *manager[T], done string) {
+	m.reloads++
+	seq := m.reloads
 	bound := m.bound
 	load := m.load // the scope is loop-owned and may change before the worker starts
 	before := m.beforeLoad
@@ -69,6 +81,12 @@ func reloadManager[T any](h *Host, m *manager[T], done string) {
 		rows, err := load(ctx, bound)
 		return listed{rows: rows, err: err}
 	}, func(l listed) {
+		if m.completed != nil {
+			defer m.completed()
+		}
+		if seq != m.reloads {
+			return // a newer reload was asked for; its answer is the one shown
+		}
 		if bound != m.bound || bound.Gen() != h.session.Gen() || bound.IdentityEpoch() != h.session.IdentityEpoch() {
 			return // reopened, or over a connection that is gone
 		}
