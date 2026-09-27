@@ -257,6 +257,8 @@ Window {
     Addresses { id: addresses }
     History { id: history }
     HistoryFilter { id: historyFilter }
+    Audit { id: audit }
+    AuditFilter { id: auditFilter }
     CACert { id: caCert }
     ConfirmRestart { id: restart }
     Keyslot { id: keyslot }
