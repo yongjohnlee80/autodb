@@ -32,8 +32,12 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
           COMMIT="$(git rev-parse --short HEAD)"
+          BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           OUT="autodb-${VERSION}-${GOOS}-${GOARCH}"
-          go build -ldflags "-X main.version=${VERSION} -X main.commit=${COMMIT}" -o "${OUT}" ./cmd/autodb
+          # -s -w: no symbol table or DWARF (about a third of the binary);
+          # stack traces keep their function names. -trimpath keeps the
+          # runner's paths out of the artefact.
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${BUILD_DATE}" -o "${OUT}" ./cmd/autodb
           tar czf "${OUT}.tar.gz" "${OUT}"
           sha256sum "${OUT}.tar.gz" > "${OUT}.tar.gz.sha256"
       - uses: actions/upload-artifact@v4

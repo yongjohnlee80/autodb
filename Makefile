@@ -1,7 +1,10 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
+# -s -w drop the symbol table and DWARF: about 11 MB of a 36 MB binary. Panics
+# still print full stack traces (the pclntab stays). Debug with `go test` or
+# `dlv debug`, not this artefact.
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(BUILD_DATE)
 
 # The dev checkout nests a worktree inside the bare store (family layout:
 # autodb/.git bare + autodb/main worktree). Go's nested-VCS rule then points
@@ -13,7 +16,7 @@ export GOFLAGS := -buildvcs=false
 .PHONY: build test test-go test-lua vet clean
 
 build:
-	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/autodb ./cmd/autodb
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/autodb ./cmd/autodb
 
 # `test` is the honest signal: BOTH sides. The Lua suite drives a real daemon and
 # the neovim UI, and was previously in neither this target nor CI — so a whole
