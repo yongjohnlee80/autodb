@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <code>mise use -g github:yongjohnlee80/autodb</code>
+  <code>brew install yongjohnlee80/tap/autodb</code>
 </p>
 
 ---
@@ -80,6 +80,7 @@ autodb is a single static binary with no runtime dependencies.
 
 | Platform | Install |
 |---|---|
+| macOS, Linux | [Homebrew](https://brew.sh): `brew install yongjohnlee80/tap/autodb` |
 | Linux, macOS | [mise](https://mise.jdx.dev): `mise use -g github:yongjohnlee80/autodb` |
 | Linux, macOS | The install script, below |
 | Linux, macOS | A [release archive](https://github.com/yongjohnlee80/autodb/releases/latest) (`amd64` and `arm64`, with SHA-256 checksums) |
@@ -254,7 +255,7 @@ your system clipboard over SSH and inside tmux.
 | PostgreSQL-wire front door, personal access tokens, connection cards | shipped |
 | AI review of SQL before it runs: your own model or keys, and it reads statements, never rows | designed |
 | BigQuery as a target | planned |
-| Homebrew, Windows builds, more package managers | planned |
+| Native Windows builds, more package managers | planned |
 
 ## License
 
