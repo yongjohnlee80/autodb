@@ -806,8 +806,8 @@ if [ "$BUILD" = "vm" ]; then
   _sha="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   _now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   say "  stamping version=$_ver commit=$_sha"
-  ( cd "$SRC" && GOMAXPROCS=1 CGO_ENABLED=0 "$MISE" exec -- go build -p 1 \
-      -ldflags "-X main.version=$_ver -X main.commit=$_sha -X main.buildDate=$_now" \
+  ( cd "$SRC" && GOMAXPROCS=1 CGO_ENABLED=0 "$MISE" exec -- go build -p 1 -trimpath \
+      -ldflags "-s -w -X main.version=$_ver -X main.commit=$_sha -X main.buildDate=$_now" \
       -o "$TMP/autodb" ./cmd/autodb )
   say "built $(du -m "$TMP/autodb" | awk '{print $1}') MiB"
 fi
@@ -829,7 +829,15 @@ if [ "$BUILD" = "prebuilt" ]; then
   _src=""
   for _c in "$HERE/main" "$HERE"; do [ -r "$_c/go.mod" ] && { _src="$_c"; break; }; done
   [ -n "$_src" ] || die "--prebuilt needs an autodb checkout beside this script"
-  ( cd "$_src" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "/tmp/autodb-linux-amd64" ./cmd/autodb )
+  # STAMPED like every other build. This was the one path that was not: a
+  # --prebuilt host reported "autodb dev", which the stale-backend check and
+  # update_frontdoor.sh's installed-vs-available comparison cannot place.
+  _pver="$(git -C "$_src" describe --tags --always 2>/dev/null || echo dev)"
+  _psha="$(git -C "$_src" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  _pnow="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  ( cd "$_src" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w -X main.version=$_pver -X main.commit=$_psha -X main.buildDate=$_pnow" \
+      -o "/tmp/autodb-linux-amd64" ./cmd/autodb )
   info "built $(du -m /tmp/autodb-linux-amd64 | awk '{print $1}') MiB from $_src"
   rcp /tmp/autodb-linux-amd64 "$REMOTE_TMP/autodb"
   rsh "chmod +x $REMOTE_TMP/autodb"

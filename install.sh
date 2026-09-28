@@ -185,8 +185,8 @@ install_source() {
   commit="$(git -C "$TMP/src" rev-parse --short HEAD)"
   date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   info "building (go $(go env GOVERSION), CGO disabled)"
-  ( cd "$TMP/src" && CGO_ENABLED=0 go build \
-      -ldflags "-X main.version=$VERSION -X main.commit=$commit -X main.buildDate=$date" \
+  ( cd "$TMP/src" && CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w -X main.version=$VERSION -X main.commit=$commit -X main.buildDate=$date" \
       -o "$TMP/autodb" ./cmd/autodb ) || die "build failed"
   install_file "$TMP/autodb"
 }

@@ -467,8 +467,8 @@ info "stamping version=$_ver commit=$_sha"
 # Serialized deliberately: one compile of modernc.org/sqlite peaks near 700 MiB,
 # and parallel compiles on a small VM multiply that into an OOM kill rather than
 # finishing sooner.
-( cd "$SRC" && GOMAXPROCS=1 CGO_ENABLED=0 $GOBIN go build -p 1 \
-    -ldflags "-X main.version=$_ver -X main.commit=$_sha -X main.buildDate=$_now" \
+( cd "$SRC" && GOMAXPROCS=1 CGO_ENABLED=0 $GOBIN go build -p 1 -trimpath \
+    -ldflags "-s -w -X main.version=$_ver -X main.commit=$_sha -X main.buildDate=$_now" \
     -o "$TMP/autodb" ./cmd/autodb )
 [ -x "$TMP/autodb" ] || die "the build produced no binary"
 info "built $(du -m "$TMP/autodb" | awk '{print $1}') MiB"
