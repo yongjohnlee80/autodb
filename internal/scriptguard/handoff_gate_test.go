@@ -236,19 +236,27 @@ func TestPlaybook_ARefusedStartFailsTheRunAndSaysSo(t *testing.T) {
 	}
 }
 
-// THE ENDPOINT MODE IS RESOLVED ONCE.
+// THE ENDPOINT MODE IS RESOLVED ONCE, AND THE PLAYBOOK'S DEFAULT IS A PORT.
 //
-// The notes decided it a second time and differently: they read "not
-// --rpc-socket" as port, but the INSTALLER'S DEFAULT IS SOCKET. So a default
-// run advertised /etc/autodb/client.toml -- a file socket mode never writes --
-// and an operator would have been sent to a config that does not exist.
-func TestPlaybook_DefaultRPCModeIsSocketEverywhere(t *testing.T) {
+// The playbook provisions a host for a team, so a bare run must let developers
+// other than root mint their own PATs: it defaults to --rpc-port 7419, and
+// --rpc-socket is the opt-out. (The installer on its own still defaults to the
+// socket; TestInstallConfig_DefaultsToTheUnixSocket pins that.)
+//
+// The notes once decided the mode a second time and differently, advertising
+// /etc/autodb/client.toml on a socket run that never writes it. So every
+// surface is asserted against the one resolution: the plan, the forwarded
+// installer flags, and the notes.
+func TestPlaybook_DefaultRPCModeIsPortEverywhere(t *testing.T) {
 	// Flags first: the resolved mode must be stated, not the flags that fed it.
-	if out := flags(t); !strings.Contains(out, "rpc:       socket") {
-		t.Errorf("a default run does not report socket as its resolved RPC mode:\n%s", out)
+	if out := flags(t); !strings.Contains(out, "rpc:       port 7419") {
+		t.Errorf("a default run does not report port 7419 as its resolved RPC mode:\n%s", out)
 	}
-	if out := flags(t, "--rpc-port", "7419"); !strings.Contains(out, "rpc:       port 7419") {
-		t.Errorf("--rpc-port is not reported as port:\n%s", out)
+	if out := flags(t, "--rpc-port", "7500"); !strings.Contains(out, "rpc:       port 7500") {
+		t.Errorf("--rpc-port is not reported as that port:\n%s", out)
+	}
+	if out := flags(t, "--rpc-socket"); !strings.Contains(out, "rpc:       socket") {
+		t.Errorf("--rpc-socket is not reported as socket:\n%s", out)
 	}
 
 	// And the notes must agree with it.
@@ -256,21 +264,38 @@ func TestPlaybook_DefaultRPCModeIsSocketEverywhere(t *testing.T) {
 	if !ok {
 		t.Fatalf("the clean default run failed:\n%s", lastRunOutput)
 	}
-	if strings.Contains(lastRunOutput, "client.toml") {
-		t.Errorf("a DEFAULT (socket) run advertises client.toml, which socket mode never "+
+	if !strings.Contains(lastRunOutput, "client.toml") {
+		t.Errorf("a DEFAULT (port) run does not point at the client config the installer "+
 			"writes:\n%s", lastRunOutput)
+	}
+
+	_, ok = runEnv(t, []string{"FAKE_HANDOFF_RC=0"}, "--rpc-socket")
+	if !ok {
+		t.Fatalf("the --rpc-socket run failed:\n%s", lastRunOutput)
+	}
+	if strings.Contains(lastRunOutput, "client.toml") {
+		t.Errorf("a SOCKET run advertises client.toml, which socket mode never writes:\n%s",
+			lastRunOutput)
 	}
 	if !strings.Contains(lastRunOutput, "unix SOCKET") {
 		t.Errorf("a socket run does not say the endpoint is a socket:\n%s", lastRunOutput)
 	}
+}
 
-	_, ok = runEnv(t, []string{"FAKE_HANDOFF_RC=0"}, "--rpc-port", "7419")
-	if !ok {
-		t.Fatalf("the --rpc-port run failed:\n%s", lastRunOutput)
+// A CONTRADICTION IS REFUSED, not resolved by whichever flag the parser saw
+// last: --rpc-port asks for self-service and --rpc-socket refuses it.
+//
+// The refusal comes before any connection, so the fake host records nothing
+// and runEnv (which rightly fails a run that observed nothing) is not used.
+func TestPlaybook_RPCPortAndSocketTogetherAreRefused(t *testing.T) {
+	cmd := exec.Command("sh", playbook(t), "--check", "--user", "root", "--host", "198.51.100.9",
+		"--rpc-port", "7419", "--rpc-socket")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("--rpc-port with --rpc-socket was accepted:\n%s", out)
 	}
-	if !strings.Contains(lastRunOutput, "client.toml") {
-		t.Errorf("a PORT run does not point at the client config the installer writes:\n%s",
-			lastRunOutput)
+	if !strings.Contains(string(out), "contradict each other") {
+		t.Errorf("the refusal does not say the flags contradict each other:\n%s", out)
 	}
 }
 
@@ -371,7 +396,8 @@ func TestPlaybook_TheTUICommandFitsTheOperatorAndTheEndpoint(t *testing.T) {
 	}
 
 	// Non-root login, socket endpoint: needs privilege, and the SERVER config.
-	if _, ok := runEnv(t, []string{"FAKE_HANDOFF_RC=0", "FAKE_REMOTE_UID=1000"}); !ok {
+	if _, ok := runEnv(t, []string{"FAKE_HANDOFF_RC=0", "FAKE_REMOTE_UID=1000"},
+		"--rpc-socket"); !ok {
 		t.Fatalf("the non-root run failed:\n%s", lastRunOutput)
 	}
 	line := uiLine(lastRunOutput)
@@ -385,9 +411,8 @@ func TestPlaybook_TheTUICommandFitsTheOperatorAndTheEndpoint(t *testing.T) {
 		t.Errorf("socket mode points at a client config it never writes:\n  %s", line)
 	}
 
-	// Non-root login, PORT endpoint: no privilege needed, client config.
-	if _, ok := runEnv(t, []string{"FAKE_HANDOFF_RC=0", "FAKE_REMOTE_UID=1000"},
-		"--rpc-port", "7419"); !ok {
+	// Non-root login, PORT endpoint (the default): no privilege, client config.
+	if _, ok := runEnv(t, []string{"FAKE_HANDOFF_RC=0", "FAKE_REMOTE_UID=1000"}); !ok {
 		t.Fatalf("the port run failed:\n%s", lastRunOutput)
 	}
 	line = uiLine(lastRunOutput)
@@ -400,7 +425,8 @@ func TestPlaybook_TheTUICommandFitsTheOperatorAndTheEndpoint(t *testing.T) {
 	}
 
 	// ROOT login, socket endpoint: already privileged, so no sudo.
-	if _, ok := runEnv(t, []string{"FAKE_HANDOFF_RC=0", "FAKE_REMOTE_UID=0"}); !ok {
+	if _, ok := runEnv(t, []string{"FAKE_HANDOFF_RC=0", "FAKE_REMOTE_UID=0"},
+		"--rpc-socket"); !ok {
 		t.Fatalf("the root run failed:\n%s", lastRunOutput)
 	}
 	if line = uiLine(lastRunOutput); strings.Contains(line, "sudo ") {
