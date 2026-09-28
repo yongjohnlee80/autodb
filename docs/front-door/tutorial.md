@@ -50,8 +50,19 @@ while you are here: they will run as root on the VM.
 sh provision_vm.sh --apply --user root --host 203.0.113.10 --dns autodb.example.com
 ```
 
-Leave out `--dns` to issue the certificate for the IP address instead. The
-script prepares the machine (swap on small hosts, base packages, a Go
+Leave out `--dns` to issue the certificate for the IP address instead.
+
+The TUI's server listens on a **loopback port** (7419) by default. That is what
+lets each person on the host open the TUI and mint their own token (step 6),
+and it is why the installer writes `/etc/autodb/client.toml`, which holds only
+the server's address. It binds `127.0.0.1`, so it is not reachable off the
+host. The trade is that every account on the host can reach the sign-in
+prompt, and there is no login rate limiting there yet, so give host accounts
+only to people you would give autodb accounts. `--rpc-socket` uses a unix
+socket instead: the stronger boundary, but then only root and the service
+account can open the TUI, and every token is minted by root.
+
+The script prepares the machine (swap on small hosts, base packages, a Go
 toolchain), builds the newest release, and hands off to the installer, which
 interviews you. Pressing return accepts the computed default every time:
 
@@ -94,9 +105,11 @@ Sign in as the administrator, then:
    **Use a database role created for autodb alone**, not a login your team
    already shares: step 7 retires the shared one, and a connection's DSN
    cannot be edited after it is saved.
-2. `SPC c` → `e` (**Edit**) on that connection: set **proxy** to `yes`, so the
-   front door will serve it, and the **capability profile** to `session`. The
-   front door does not serve a connection that is not both.
+2. `SPC c` → `e` (**Edit**) on that connection: set **proxy** to `yes`. That
+   is what makes it reachable through the front door and lets people mint
+   tokens for it. Set the **capability profile** to `session` as well: real
+   clients such as DataGrip and most drivers send `BEGIN` and `SET`, which the
+   default `v1compat` profile refuses.
 3. `SPC c` → `t` (**Test**) to check that autodb can reach production.
 
 ## 5. Create accounts and grants

@@ -106,14 +106,35 @@ git clone https://github.com/yongjohnlee80/autodb && cd autodb && make build   #
 Use `make build` rather than `go install`: the Makefile stamps the version,
 which autodb uses to notice when a running server is older than the client.
 
-**Neovim.** With [lazy.nvim](https://github.com/folke/lazy.nvim):
+### In Neovim
+
+The plugin drives the same `autodb` binary. With
+[lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ```lua
-{ "yongjohnlee80/autodb", dependencies = { "yongjohnlee80/auto-core.nvim" }, opts = {} }
+{
+  "yongjohnlee80/autodb",
+  dependencies = {
+    "yongjohnlee80/auto-core.nvim",          -- required
+    -- "yongjohnlee80/auto-finder.nvim",     -- optional: hosts the database drawer in its panel
+  },
+  build = "make build",                      -- optional: compile a binary matched to the plugin (needs Go)
+  opts = {},
+}
 ```
 
-The plugin uses the `autodb` on your `PATH`, or add `build = "make build"` to
-compile one matched to the plugin. See [docs/neovim.md](docs/neovim.md).
+Without `build`, the plugin uses the `autodb` on your `PATH` from any method
+above. Restart Neovim, then:
+
+```vim
+:checkhealth autodb
+```
+
+It reports which binary it found and where, the endpoint, and whether you are
+signed in. Nothing starts until you use it: `<leader>Dl` signs in (the first
+time, it creates your root user and passphrase), `<leader>Dc` picks a
+connection, and `<leader>Dr` runs the SQL buffer. `:AutodbDrawer` opens the
+database explorer. The rest is in [docs/neovim.md](docs/neovim.md).
 
 ## Quick start
 

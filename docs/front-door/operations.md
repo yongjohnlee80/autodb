@@ -175,9 +175,12 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
   means libpq's `prefer`, which silently falls back to plaintext. The one
   exception is a genuinely local channel — a unix socket or same-host loopback —
   via the deliberately named `allow_insecure_dsn`.
-- **Developer self-service PAT minting needs the RPC endpoint on a port, and
-  that is an opt-in.** The frontend endpoint defaults to a unix socket at mode
-  `0600`, re-applied on every bind — the socket file *is* the access control,
+- **Developer self-service PAT minting needs the RPC endpoint on a port.**
+  `provision_vm.sh` uses a loopback port (7419) unless you pass
+  `--rpc-socket`; `install_frontdoor.sh` run on its own defaults to the socket
+  and takes `--rpc-port` to opt in.
+
+  On a socket, the endpoint is a file at mode `0600`, re-applied on every bind — the socket file *is* the access control,
   and a socket peer is exempt from the IP allowlist because reaching it already
   proves same-user access. On a host where autodb runs as a service that socket
   belongs to the service account, so **only it and root can reach the TUI** —
@@ -193,7 +196,8 @@ from 64 sessions to 32, and at 512 MB it is refused outright.
   and rate limits. Every local account can then reach it and attempt logins. It
   binds `127.0.0.1`, so nothing is reachable off-host either way. Choose it
   when developer self-service is worth that on a box whose own accounts you
-  trust; the socket remains the default.
+  trust; `provision_vm.sh` makes that choice for you unless you pass
+  `--rpc-socket`.
 
   In port mode the installer also writes a world-readable `client.toml`
   carrying the address, `client_only = true`, and nothing else — so a developer
@@ -315,5 +319,7 @@ oldest compiler the module permits — and a stdlib that old carries advisories 
 shipping with.
 
 **Validated on Ubuntu 24.04** (1 vCPU / 961 MiB) for the sqlite backend. The
-PostgreSQL install paths are still untested, and the service is left stopped
-until TLS material exists — see the caveats above.
+PostgreSQL install paths are still untested. An `--apply` run issues the TLS
+certificate and starts the service; the start is withheld only when there is
+no TLS material, for example with `--no-cert` before you have installed your
+own — see the caveats above.
