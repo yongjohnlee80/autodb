@@ -210,11 +210,14 @@ OPTIONS:
                        as --port, the SSH one won for the space form and the
                        front-door one for the = form, so the same flag meant
                        two different things depending on how it was written.
-  --rpc-port <n>       Frontend RPC endpoint port (default 7419 downstream).
+  --rpc-port <n>       Frontend RPC endpoint port, on loopback. Default: 7419.
                        This is what lets developers other than root run the
-                       TUI and mint their own PATs.
+                       TUI and mint their own PATs. Every account on the VM
+                       can then attempt a login, and there is no rate limiting
+                       on that surface, so keep the VM's accounts trusted.
   --rpc-socket         Use a unix socket for the RPC endpoint instead, making
                        the TUI reachable only by the service account and root.
+                       The stronger boundary; minting then needs root.
   --keep-tmp           Leave the remote working directory (a clone plus the
                        built binary, tens of MB) in place for debugging.
   --service-user <n>   The system account the daemon runs as (default autodb).
@@ -337,6 +340,29 @@ if [ -n "$FD_PORT" ]; then
   BIND="${BIND%:*}:$FD_PORT"
 fi
 
+# THE RPC ENDPOINT MODE IS RESOLVED ONCE, HERE, before any consumer.
+#
+# THIS PLAYBOOK DEFAULTS TO A LOOPBACK PORT, and the installer on its own does
+# not. The playbook provisions a host for a team: developers other than root
+# must open the TUI and mint their own PATs, and on the installer's 0600 socket
+# only root and the service account can. So a bare run passes --rpc-port 7419
+# explicitly, and --rpc-socket is the opt-out. The installer's socket default is
+# unchanged, and deliberately so: there is NO rate limiting on the RPC surface,
+# so a port lets every account on the host attempt logins. A playbook run
+# accepts that trade for self-service; the notes and the plan say which mode
+# this host got.
+#
+# One resolution, consulted everywhere: --print-flags, FD_APPLY, and the notes.
+if [ "$RPC_SOCKET" = "yes" ] && [ -n "$RPC_PORT" ]; then
+  die "--rpc-port and --rpc-socket contradict each other; pass one"
+fi
+if [ "$RPC_SOCKET" = "yes" ]; then
+  RPC_EFFECTIVE="socket"
+else
+  RPC_PORT="${RPC_PORT:-7419}"
+  RPC_EFFECTIVE="port"
+fi
+
 # --UNATTENDED ALSO MEANS "DO NOT ASK ME".
 #
 # It implied --no-init but not --yes, so an unattended run still stopped at the
@@ -393,10 +419,9 @@ if [ "$MODE_FLAGS" = "yes" ]; then
   # where 5432 already belongs to something else, that is the difference
   # between reading the plan and colliding with it.
   printf 'front-door: %s\n' "$BIND"
-  # The RESOLVED mode, not the flags that fed it: "installer default" told a
-  # reader nothing, and the notes then guessed differently. Socket is the
-  # installer's default, so that is what a bare run gets.
-  printf 'rpc:       %s\n' "$( [ -n "$RPC_PORT" ] && echo "port $RPC_PORT" || echo "socket (installer default)" )"
+  # The RESOLVED mode, not the flags that fed it. A bare playbook run gets a
+  # loopback port (see the resolution after argument parsing).
+  printf 'rpc:       %s\n' "$( [ "$RPC_EFFECTIVE" = port ] && echo "port $RPC_PORT" || echo "socket" )"
   # TLS, RESOLVED. In cleartext mode there is no certificate at all, so
   # reporting a DNS name or "certificate for an IP" would describe material
   # that will not exist. The three surfaces this script keeps in step are
@@ -846,20 +871,9 @@ step "Configuring the front door"
 # its code did not enforce.
 #
 # Two owners for one action. Now there is one.
-# THE RPC ENDPOINT MODE IS RESOLVED ONCE, HERE.
-#
-# A review caught the notes deciding it a second time, differently: they took
-# "not --rpc-socket" to mean port, but the INSTALLER'S DEFAULT IS SOCKET
-# (install_frontdoor.sh RPC_MODE="socket" -- the safe default, since a 0600
-# socket is openable only by the service account and root). So a default run
-# advertised /etc/autodb/client.toml, a file socket mode never writes.
-#
-# One resolution, consulted everywhere: --print-flags, FD_APPLY, and the notes.
-if [ -n "$RPC_PORT" ]; then
-  RPC_EFFECTIVE="port"
-else
-  RPC_EFFECTIVE="socket"
-fi
+# THE RPC ENDPOINT MODE was resolved once, after argument parsing (see there).
+# A review caught the notes once deciding it a second time, differently, and
+# advertising /etc/autodb/client.toml on a socket run that never writes it.
 
 # --config IS FORWARDED, and its absence was a real defect.
 #
@@ -1132,11 +1146,11 @@ if [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-no}" = "yes" ] && [ "${START
   say "  SPC K   INSPECT the service keyslot -- it should read as verified."
   say "          Do NOT cut one: --init already did, and a second attempt is"
   say "          refused rather than silently replacing a working slot."
-  say "  SPC c   Connections. Add your target, then press 'e' on it to OPEN"
-  say "          THE FRONT DOOR for that connection. A new connection is"
-  say "          deliberately NOT reachable until you do -- the front door"
-  say "          refuses any connection whose profile is not 'session', and"
-  say "          so does minting a token against it."
+  say "  SPC c   Connections. Add your target, then press 'e' on it and set"
+  say "          proxy to 'yes' to OPEN THE FRONT DOOR for that connection. A"
+  say "          new connection is deliberately NOT reachable, and no token can"
+  say "          be minted for it, until you do. Set its profile to 'session'"
+  say "          too: SQL clients send BEGIN and SET, which v1compat refuses."
   say "  SPC u   Users and grants: each developer needs an account and a"
   say "          grant on the connection they should reach."
   say "  SPC T   Each developer mints their OWN token, bound to one"
@@ -1146,10 +1160,10 @@ if [ "${INIT_OK:-no}" = "yes" ] && [ "${HANDOFF_OK:-no}" = "yes" ] && [ "${START
     say "The RPC endpoint is on port $RPC_PORT (loopback), so a developer runs"
     say "the TUI over an ssh tunnel and mints their own token without root."
   else
-    say "The RPC endpoint is a unix SOCKET (the installer's default), openable"
-    say "only by $RUN_USER_REMOTE and root -- so the TUI above must be run as"
-    say "root, and there is no client config to hand to a developer. Re-run"
-    say "with --rpc-port to let developers mint their own tokens."
+    say "The RPC endpoint is a unix SOCKET (--rpc-socket), openable only by"
+    say "$RUN_USER_REMOTE and root -- so the TUI above must be run as root, and"
+    say "there is no client config to hand to a developer. Re-run without"
+    say "--rpc-socket to let developers mint their own tokens."
   fi
 elif [ "${START_OK:-skipped}" = "no" ]; then
   say "Provisioned, and the ceremony completed, BUT THE SERVICE DID NOT START."
