@@ -244,6 +244,7 @@ your system clipboard over SSH and inside tmux.
 | [Configuration](docs/configuration.md) | The config file, and who can reach the server |
 | [`config.example.toml`](config.example.toml) | Every setting, its default, and why |
 | [RPC protocol](rpc/README.md) | The msgpack-RPC surface the frontends use |
+| [Security policy](SECURITY.md) | How to report a vulnerability, privately |
 
 ## Roadmap
 
