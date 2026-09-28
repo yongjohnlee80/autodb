@@ -56,7 +56,7 @@ var ErrLeaseHeld = errors.New("meta: another autodb instance is already serving 
 //	         │                         │
 //	         ▼                         ▼
 //	[File Lock (flock)]       [Advisory Transaction Lock]
-//	• <database>.lock         • Dedicated pgx connection
+//	• .autodb-lease-<dev>-<ino> • Dedicated pgx connection
 //	• Mode: LOCK_EX           • pg_try_advisory_xact_lock()
 //	• Released by OS on exit  • Heartbeat ping every 10s
 //	                          • Lost() channel fires on drop
@@ -154,7 +154,7 @@ func (l *InstanceLease) Lost() <-chan struct{} { return l.beatFailed }
 
 // --- sqlite: an exclusive flock beside the store ----------------------------
 
-// acquireFileLease locks `<meta.db>.lease`.
+// acquireFileLease locks the store's sidecar lease file (see leaseLockPath).
 //
 // flock is used rather than an O_EXCL sentinel file precisely because it is
 // released by the kernel when the process exits, crashes or is killed. An
@@ -178,35 +178,13 @@ func acquireFileLease(path string) (*InstanceLease, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("meta: creating the lease directory: %w", err)
 	}
-	// The lock has to name the DATABASE, not the spelling of the path that
-	// reached it. Two engines started as `meta.db` and `link-to-meta.db`
-	// were both granted a lease over one file, which makes the lease
-	// decorative: absolute-ise and resolve symlinks so both spellings
-	// collapse to the same lock file.
-	//
-	// The lock is taken on the STORE FILE ITSELF, so the identity is its
-	// INODE rather than any spelling of a path that reaches it.
-	//
-	// This is the third attempt at that identity and the first correct one.
-	// A sidecar `<path>.lease` names a PATH, and a path is not a database:
-	// `meta.db` and a symlink to it produce two sidecars, and so do two
-	// HARDLINKS — which no amount of symlink resolution can fix, because
-	// hardlinks have no canonical name and may not even share a directory.
-	// Every path-derived scheme has this hole somewhere. The inode does not:
-	// it is what "the same database" actually means.
-	//
-	// flock on the store does not disturb SQLite. On Linux flock(2) and the
-	// POSIX record locks fcntl(2) uses are independent lock spaces, and
-	// SQLite's unix VFS uses the latter. That is a real dependency rather
-	// than an assumption, so TestInstanceLease_DoesNotDisturbSQLite holds it
-	// down: if a future driver switched to the unix-flock VFS, the lease
-	// would start blocking the store it protects, and that test says so.
-	//
-	// O_CREATE covers a first run: an empty file is a valid empty SQLite
-	// database, which is exactly what a fresh store starts as.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	lockPath, err := leaseLockPath(path)
 	if err != nil {
-		return nil, fmt.Errorf("meta: opening the meta store %s to lease it: %w", path, err)
+		return nil, err
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("meta: opening the lease file %s: %w", lockPath, err)
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
@@ -224,6 +202,62 @@ func acquireFileLease(path string) (*InstanceLease, error) {
 	}
 
 	return &InstanceLease{target: path, file: f, epoch: newEpoch()}, nil
+}
+
+// leaseLockPath names the lock file for the store at path.
+//
+// The lock has to name the DATABASE, not the spelling of the path that
+// reached it: `meta.db`, a symlink to it and a hardlink to it are one store,
+// and two engines granted leases through two spellings would each believe
+// they own it. So the name is the store's device and inode, and the file sits
+// in the directory the resolved path lives in. Symlinks resolve to that
+// directory; hardlinks share the inode. The one alias this cannot collapse is a
+// hardlink in a DIFFERENT directory, since the lock lives beside whichever
+// spelling was used.
+//
+// The lock is a SIDECAR and never the store file itself. The previous version
+// flocked meta.db directly, which relied on flock(2) and fcntl(2) being
+// independent lock spaces. They are on Linux. On darwin they are not: an
+// flock is refused while the same process holds an fcntl lock on the file,
+// and SQLite's unix VFS holds fcntl locks on meta.db from the moment Open
+// runs. So every `autodb --serve` on macOS refused itself with ErrLeaseHeld.
+// TestInstanceLease_AcquiresOverAnOpenStore runs the production order and
+// pins that.
+//
+// The store file is never opened here, not even to read its inode. Closing
+// any descriptor to a file drops every fcntl lock the process holds on it, so
+// an open-and-close would silently release SQLite's own locks. os.Stat reads
+// the inode without a descriptor. A missing store is created first (an empty
+// file is a valid empty SQLite database); no SQLite locks can exist on a file
+// that did not exist.
+func leaseLockPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("meta: resolving the meta store path %s: %w", path, err)
+	}
+	if _, err := os.Lstat(abs); errors.Is(err, os.ErrNotExist) {
+		f, cerr := os.OpenFile(abs, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if cerr != nil && !errors.Is(cerr, os.ErrExist) {
+			return "", fmt.Errorf("meta: creating the meta store %s: %w", abs, cerr)
+		}
+		if f != nil {
+			_ = f.Close()
+		}
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("meta: resolving the meta store path %s: %w", abs, err)
+	}
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("meta: reading the meta store %s: %w", resolved, err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("meta: no inode for the meta store %s on this platform", resolved)
+	}
+	return filepath.Join(filepath.Dir(resolved),
+		fmt.Sprintf(".autodb-lease-%d-%d", st.Dev, st.Ino)), nil
 }
 
 // --- postgres: an advisory lock on a pinned transaction ---------------------

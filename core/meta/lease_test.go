@@ -306,9 +306,10 @@ func TestInstanceLease_Postgres(t *testing.T) {
 
 // Both alias forms. A lease keyed on a PATH is not keyed on a database.
 // Symlink spellings were the first hole; hardlinks are the one no path
-// canonicalisation can close, because hardlinks have no canonical name and
-// need not even share a directory. The lock is taken on the store's inode,
-// which is what "the same database" means.
+// canonicalisation can close, because hardlinks have no canonical name. The
+// lease file is named by the store's device and inode, which is what "the
+// same database" means (a hardlink in another directory is the documented
+// gap; see leaseLockPath).
 func TestInstanceLease_AliasesAreTheSameDatabase(t *testing.T) {
 	t.Parallel()
 
@@ -366,12 +367,9 @@ func TestInstanceLease_AliasesAreTheSameDatabase(t *testing.T) {
 	}
 }
 
-// The lease locks the store file itself, which is only safe because flock(2)
-// and the POSIX record locks SQLite's unix VFS uses are independent lock
-// spaces on Linux. That is a real dependency on driver behaviour, not an
-// assumption, so it is pinned: if a driver ever switched to the unix-flock
-// VFS, the lease would begin blocking the store it exists to protect, and
-// this test is what would say so.
+// The lease taken first, SQLite opened under it: SQLite must still work.
+// TestInstanceLease_AcquiresOverAnOpenStore is the other order, the one
+// cmd/autodb actually runs.
 func TestInstanceLease_DoesNotDisturbSQLite(t *testing.T) {
 	t.Parallel()
 
@@ -390,6 +388,48 @@ func TestInstanceLease_DoesNotDisturbSQLite(t *testing.T) {
 	defer func() { _ = st.Close() }()
 	if _, err := st.Users.OnCtx(t.Context()).Select(); err != nil {
 		t.Fatalf("SQLite could not read while the lease is held: %v", err)
+	}
+}
+
+// The production order: cmd/autodb opens the store, THEN takes the lease. By
+// then SQLite holds fcntl locks on meta.db, and on darwin an flock on that
+// same file is refused while this process holds them. The previous lease
+// flocked meta.db itself, so every `autodb --serve` on macOS refused itself
+// with ErrLeaseHeld. The lease-first order above never saw it.
+func TestInstanceLease_AcquiresOverAnOpenStore(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "meta.db")
+	mcfg := config.Meta{Engine: "sqlite", Path: path}
+	st, err := Open(t.Context(), mcfg)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	if _, err := st.Users.OnCtx(t.Context()).Select(); err != nil {
+		t.Fatalf("read before the lease: %v", err)
+	}
+
+	lease, err := AcquireLease(t.Context(), st, mcfg)
+	if err != nil {
+		t.Fatalf("the lease was refused over this process's own open store: %v", err)
+	}
+
+	// Still exclusive: a second engine over the same store is refused.
+	if l, err := AcquireLease(t.Context(), st, mcfg); !errors.Is(err, ErrLeaseHeld) {
+		if err == nil {
+			_ = l.Release()
+		}
+		t.Fatalf("second lease over an open, leased store: err = %v, want ErrLeaseHeld", err)
+	}
+
+	// Releasing the lease must leave SQLite's own locks alone: a descriptor
+	// on meta.db closed here would drop every fcntl lock this process holds.
+	if err := lease.Release(); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if _, err := st.Users.OnCtx(t.Context()).Select(); err != nil {
+		t.Fatalf("read after the lease was released: %v", err)
 	}
 }
 
