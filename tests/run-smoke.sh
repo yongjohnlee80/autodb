@@ -58,9 +58,15 @@ mkdir -p "$XDG_CONFIG_HOME/autodb"
 
 # The five end-to-end sections need bin/autodb, which is gitignored — build it so
 # the suite's preconditions are met rather than skipped-into-failure.
+#
+# THROUGH `make build`, not a hand-written `go build`. bin/autodb is also the
+# plugin-local binary lua/autodb/lifecycle.lua selects, so whatever this writes
+# is what Neovim runs afterwards. A plain build replaced the stripped, stamped
+# artefact with an unstripped `autodb dev (none, built unknown)` on every
+# `make test`.
 echo "run-smoke: building bin/autodb"
-if ! CGO_ENABLED=0 GOFLAGS=-buildvcs=false go build -o bin/autodb ./cmd/autodb; then
-  echo "run-smoke: go build failed"
+if ! make build; then
+  echo "run-smoke: make build failed"
   exit 1
 fi
 
