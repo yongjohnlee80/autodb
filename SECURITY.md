@@ -52,8 +52,10 @@ In scope:
 Known limits, documented rather than vulnerabilities:
 
 - **The RPC server has no login rate limiting yet.** On a loopback port, any
-  account on the host can attempt logins. The default unix socket (mode
-  `0600`) is the stronger boundary. See
+  account on the host can attempt logins. A unix socket (mode `0600`) is the
+  stronger boundary. It is the default for a personal install and for
+  `install_frontdoor.sh`; `provision_vm.sh` uses a port so that a team can
+  mint its own tokens, and `--rpc-socket` opts out. See
   [Who can reach the daemon](docs/configuration.md#who-can-reach-the-daemon).
 - **Running the front door without TLS** (`insecure_disable_tls`) sends every
   token in cleartext. The setting is named to say so.
