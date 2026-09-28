@@ -1,13 +1,9 @@
 <h1 align="center">autodb</h1>
 
-<p align="center">
-  <strong>A security-first database IDE — for teams who cannot hand out production credentials.</strong>
-</p>
+<h3 align="center">Not another SQL TUI.</h3>
 
 <p align="center">
-  One static Go binary: a terminal UI, a browser UI and a Neovim plugin today,
-  with a PostgreSQL-wire front door landing now — all going through one gate
-  stack, one identity model, and one audit trail.
+  <em>A security-first SQL editor that doubles as the gate in front of your production database.</em>
 </p>
 
 <p align="center">
@@ -17,975 +13,226 @@
   <img alt="Go" src="https://img.shields.io/badge/go-1.25%2B-00ADD8">
 </p>
 
+<p align="center">
+  <code>mise use -g github:yongjohnlee80/autodb</code>
+</p>
+
 ---
-
-The usual way to give a developer database access is to give them the
-password. Then the password is in a `.env`, a DSN, a Slack thread and three
-laptops — and the audit log says `app_user` did it.
-
-autodb is the other way. Nobody gets the credential. People get an **account**,
-a **role**, and a **grant on a specific connection**. The real DSN is encrypted
-at rest and only autodb can decrypt it. Every statement anyone runs — from the
-TUI, from Neovim, from a browser, and soon from `psql` through the front door —
-is classified, authorized, and written to an audit log with a name attached.
-
-## See it
-
-### In the terminal
 
 ![autodb terminal UI](docs/media/autodb-tui.gif)
 
-*`autodb --ui` — a three-pane DB IDE with vim motions and a leader menu:
-explorer on the left, query editor top-right, results below. It closes on the
-script-history view, which is the audit trail as a queryable table: who ran
-what, against which connection, how long it took, how many rows, and the error
-if it failed.*
+autodb is a keyboard-driven SQL editor for your terminal, your browser and
+Neovim, and it never keeps a DSN in plain text: every connection is encrypted
+under your passphrase. It is also a **PostgreSQL-wire proxy**. Put it in front
+of production and nobody needs the database password again: developers,
+contractors and AI agents each get their own account, a role, and a
+**personal access token** for the one connection they are allowed to use.
+Every statement they run is checked and written to an audit log with their
+name on it.
 
-### Inside Neovim
+## Features
 
-![autodb inside Neovim](docs/media/autodb-neovim.gif)
+**One binary, three frontends:** a terminal UI (`autodb --ui`), the same UI in a browser (`autodb --web-ui`), and a Neovim plugin
 
-*The same core as a Neovim plugin — the database drawer lives in the sidebar
-(here hosted by [auto-finder](https://github.com/yongjohnlee80/auto-finder.nvim)),
-SQL is an ordinary buffer, and results open in a buffer you can navigate, search
-and yank. No context switch, no second application, no credentials on disk.*
+**A production front door:** `psql`, DataGrip, your app or an AI agent connects to autodb with an ordinary PostgreSQL DSN; production only has to trust one host
 
-### In a browser
+**Personal access tokens, not passwords:** one per person, laptop, app or agent, each with its own expiry and IP allowlist, revoked instantly
 
-![autodb in a browser](docs/media/autodb-web-ui.gif)
+**Role-based access:** `reader`, `editor` and `admin`, plus a grant per connection, so access is decided per database, not per shared login
 
-*`autodb --web-ui` serves the **same** TUI over a WebSocket, for admins who want
-a GUI or a machine without a terminal. It binds loopback only and refuses to
-start a daemon. It closes on the `grants` table — the reader/editor/admin
-assignments that decide what everyone else is allowed to do.*
+**Read-only means read-only:** readers run inside transactions PostgreSQL itself keeps read-only, so a write hidden in a function still fails
 
-## What autodb solves
+**Guards against the classic accidents:** `UPDATE` or `DELETE` with no `WHERE` is blocked, and so is a second statement smuggled after a `;`
 
-1. **Role-based database access, without distributing credentials.** Users,
-   roles and per-connection grants replace shared passwords. The connection
-   secret is encrypted at rest and never leaves the server.
-2. **An admin surface that is actually pleasant.** A full terminal UI, and the
-   same UI in a browser, for managing connections, users, grants, allowlists
-   and history.
-3. **First-class Neovim integration** for developers who take security
-   seriously and do not want to leave their editor to get it.
-4. **A production front door** that lets existing tools keep working while
-   production itself stops being directly reachable. *(In progress — see
-   [status](#the-production-front-door).)*
+**An audit trail you can query:** who ran what, against which connection, how long it took, how many rows, and why it was refused
 
-## Security-first by design
+**Secrets stay sealed:** connection passwords are encrypted at rest (AES-256-GCM, argon2id-derived key) and never leave the server
 
-Every frontend is a client of one core. There is no path that skips the gates,
-because the gates are not in the frontends.
+**Vim-style editing:** modal editor, vim motions everywhere, a `Space` leader menu, and `?` for the keys that work right here
 
-**Identity and authorization.** Three roles ordered `reader < editor < admin`.
-Statements are classified — read / write / DDL / control — and a class is
-checked against the caller's role *and* their grant on that specific
-connection. Connection-scoped actions require a grant **for admins too**: a
-globally-`reader` user never exceeds `SELECT`, whatever grants they hold.
+**Themes:** Dark, Light, Mono and Retro
 
-**Read-only means read-only.** `reader` users don't merely get their `UPDATE`s
-rejected by autodb. Through the front door — once it lands — they run inside
-**server-enforced read-only transactions**, so a write smuggled through a
-function, a procedure or dynamic SQL fails at PostgreSQL itself with SQLSTATE
-`25006`. The database enforces the boundary, not just the proxy in front of it.
+**Databases:** PostgreSQL, MySQL and SQLite
 
-**Dangerous-statement detection — deterministic, out of the box.** A
-hand-written lexer — not a regex, and not a full parser — decides what a
-statement *is* before it runs. This layer needs no configuration, no network
-and no model; it is on from the first launch:
+![autodb themes](docs/media/autodb-themes.png)
 
-- `UPDATE` / `DELETE` with no top-level `WHERE` clause is **blocked**.
-- **One statement per call on the single-statement path** — anything after a
-  top-level `;` is refused. The script runner deliberately *does* accept a
-  multi-statement buffer, but it splits the buffer and puts each statement
-  through the same classify → authorize → guard → audit path on its own, so
-  the audit record still equals exactly what ran. A script is not a
-  transaction, and a partial application says which statement failed and how
-  many had already run.
-- **Admission is the engine's decision against the connection's capability
-  profile**, not a tokenizer's: the `v1compat` profile refuses data-modifying
-  subqueries and CTEs outright, while the session profile admits them and
-  leaves them to the `WHERE` guard on their own merits. Transaction-control
-  and session-state statements (`BEGIN`, `SET`, `LOCK`, `PRAGMA`) are refused
-  off a session — on a pooled connection they would leave their state behind
-  for whoever gets that connection next.
-- Unterminated strings, comments and quotes are rejected as malformed rather
-  than guessed at.
-- Scripts over the size cap are rejected *before* execution.
+## Motivation
 
-These are the **syntactic** shapes — the ones a machine can be certain about.
-They catch the classic accidents (`DELETE FROM orders` with the `WHERE` still
-in your head) but they cannot tell a legitimate migration from a Friday-evening
-mistake that happens to be well-formed.
+I live in Neovim and in terminal apps for my dev work, and I could never find a
+database tool that stored my credentials safely. Every option ended with a
+plain-text DSN tucked away in a dotfile, a `.env` or an editor config. So I
+started my own small project: a SQL editor that encrypts every connection under
+a master passphrase, never writes a DSN in the clear, and runs natively inside
+Neovim as well as in the terminal.
 
-**AI inspection of the SQL — your model, your keys, never your data.**
-*(Accepted design, ADR-0076 — not yet implemented.)* On top of the
-deterministic gates, an AI agent reviews the **statement text** and flags or
-rejects dangerous executions that are syntactically perfect but semantically
-alarming — the well-formed `DELETE` against the wrong table, the migration
-nobody meant to run in production.
+The front door came next, and it changed how I work with AI agents. Instead of
+handing an agent a password, I mint it a personal access token (kept in
+[`pass`](https://www.passwordstore.org/)), and the agent can do only what that
+token's account is allowed to do, on the one connection it was given, with
+every statement audited under its name. The same holds for co-workers: each
+gets their own account and token, and nobody holds the production password.
 
-Two properties define the design:
-
-- **It reads scripts, not rows.** This is an architectural line autodb
-  enforces and *does not let you configure away*: the inspector has no access
-  to database data. It never receives introspection objects; it gets a
-  dedicated schema DTO restricted to an allowlist of identifier metadata —
-  table and column names, type names, nullability, primary-key membership —
-  which **structurally cannot represent** column defaults, function bodies or
-  arguments, comments, or any expression text, because those carry literal
-  values. There is no code path to result rows, to connections, to tools, or
-  even to raw error text (server errors can embed values). Canary
-  serialization tests plant secret-like content in every excluded field and
-  assert it can never appear in a prompt.
-- **Bring your own model.** autodb ships the seam, not the model, and provides
-  no inference of its own. Point it at a **local SLM or LLM** via Ollama for a
-  fully offline, nothing-leaves-the-box deployment, or supply **your own API
-  keys** for Anthropic, OpenAI or another provider, or run a frontier model
-  inside your own cloud boundary via Bedrock or Vertex. Providers are pinned
-  **per connection**, so a sensitive database can stay local-only while others
-  use a hosted model. API keys are stored by reference and sealed with the same
-  argon2id/AES-GCM keyslot as every other secret. The shipping default is
-  **off** — you turn it on deliberately.
-
-Enforcement and provider are separate axes: a deployment runs `advisory`
-(observe and annotate the audit) before it runs `enforcing` (refuse), and
-rolling back means returning to advisory, never going blind. Every external
-call is audited — provider, model digest, prompt revision, payload hash — so
-"a production query went to a vendor" is never an unrecorded event.
-
-**The honest caveat**, because a security tool should state it: statement text
-can contain literal values in a `WHERE` clause, and enabling a hosted provider
-means that text leaves your network. autodb makes that choice deliberate,
-per-connection, defaulted off and fully audited — it does not make it for you.
-A local model avoids it entirely.
-
-And the boundary itself never moves: **a model verdict is probabilistic and is
-never the security boundary.** That remains grants, server-enforced read-only
-transactions, and the deterministic gates above. The AI is a net over them, not
-a replacement for them.
-
-**Audit trails.** Every executed statement is recorded with the user, the
-connection, the SQL, the timing, the row count and the outcome. Refusals are
-audited too — a blocked query is evidence, not a silence. The front door adds
-token-attributed session opens and audited timeout rollbacks when it lands.
-
-**Secrets at rest.** Connection credentials are sealed with AES-256-GCM under a
-key unwrapped from your passphrase via argon2id (RFC 9106 profile). The
-key-encryption key is never stored. Lose the meta store and the DSNs are
-unrecoverable — which is the point: treat it as a credential store.
-
-**Network posture.** Loopback by default everywhere. IP allowlisting at both a
-global and a per-user layer. The browser UI refuses a non-loopback bind without
-TLS. The front door validates its TLS material *before* it binds, and will not
-listen with an identity it cannot prove.
-
-## The production front door
-
-> **Status: partially shipped.** ADR-0075 is accepted and implementation is
-> phased. Config + TLS-validated-before-bind, the pgwire startup/TLS
-> negotiation and the uniform denial shape, and Personal Access Tokens are
-> merged. The verification chain and session reservation (F0d) are in progress,
-> with budgets, deadlines and fuzzing (F0e) after it. **It is not yet usable
-> end to end** — the sections below describe the accepted design.
-
-autodb speaks the **PostgreSQL wire protocol**, so an unmodified application,
-`psql`, or a JetBrains data source connects *through autodb* with an ordinary
-DSN:
-
-```
-postgres://<user>:<personal-access-token>@autodb-host:5432/<connection>?sslmode=verify-full
-```
-
-This is the point of the whole project. **Production's own allowlist closes to
-everything except the autodb host.** Your tools keep working, unchanged — but
-the only route to the production database is one that knows who you are.
-The attack surface stops being "every laptop with a `.env`" and becomes one
-audited, TLS-terminated, allowlisted door.
-
-- **Credentials are named Personal Access Tokens, never passwords.** One per
-  machine or app (`auth.token_create "laptop-lm-http"`), listed and revoked
-  individually and instantly. Tokens are stored as a selector plus a SHA-256
-  hash, capped (16 per user, 512 global), expire on a 90d/365d schedule, and
-  can carry their own IP allowlist that must be a subset of the user's. Your
-  login passphrase never goes in a DSN — it unwraps your encryption keyslot.
-- **Read and write, gated by role.** `editor` users run the application's real
-  traffic through the full gate stack. `reader` users are pinned inside
-  server-enforced read-only transactions.
-- **Transactions behave like PostgreSQL.** One open transaction per connection;
-  a connection pool holds several, bounded by per-user session caps. Abandoned
-  transactions cannot sit on production locks: idle-in-transaction rolls back
-  at **90 s** — or **10 minutes** on a debug-profile connection, so a delve
-  breakpoint doesn't kill your transaction — with a 5-minute maximum duration.
-  Every timeout rollback is audited with the limit that fired.
-- **Refusals explain themselves.** An autodb-layer refusal carries an accurate
-  SQLSTATE, the gate rule in `DETAIL`, and the fix in `HINT` — rendered
-  natively by psql and IDEs. Target errors pass through verbatim, so you always
-  know *which layer* said no.
-
-## Databases, and adding more
-
-Targets today: **PostgreSQL**, **MySQL**, **SQLite**. DSNs are validated on the
-way in, and settings that would change parsing semantics under the classifier's
-feet — `sql_mode`, `standard_conforming_strings`, `init_command`, disabled
-autocommit — are rejected rather than silently honoured.
-
-Target access goes through [`golib/dao`](https://github.com/yongjohnlee80/golib),
-which owns the dialect and driver abstraction. That layer already ships a
-**BigQuery** driver alongside the PostgreSQL and MySQL ones, and its
-read-mostly / no-transaction driver contract exists precisely so warehouse-shaped
-targets — no interactive transactions, different introspection, different
-quoting — fit without special-casing them in autodb. **Wiring BigQuery in as an
-autodb target is planned**; the abstraction it needs is already there.
+I built it for myself first. I hope it helps someone in my shoes.
 
 ## Installation
 
-### 1. Get the binary
+autodb is a single static binary with no runtime dependencies.
 
-autodb is a single static binary with no runtime dependencies. Pick whichever
-of these you like — they all end with `autodb` on your `PATH`.
+| Platform | Install |
+|---|---|
+| Linux, macOS | [mise](https://mise.jdx.dev): `mise use -g github:yongjohnlee80/autodb` |
+| Linux, macOS | The install script, below |
+| Linux, macOS | A [release archive](https://github.com/yongjohnlee80/autodb/releases/latest) (`amd64` and `arm64`, with SHA-256 checksums) |
+| Windows | Use [WSL2](https://learn.microsoft.com/windows/wsl/install) and any Linux method. A native Windows build is not published yet. |
+| Any, with Go 1.25+ | Build from source, below |
 
-**Install script** — downloads the release build for your platform, verifies
-its published SHA-256 checksum, and falls back to building from source if
-there is no prebuilt binary for your OS/arch:
+**Install script.** It downloads the release for your platform, checks its
+SHA-256, and falls back to building from source when there is no prebuilt
+binary. It never uses `sudo`, and it installs to `~/.local/bin` by default.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install.sh | sh
 ```
 
-Read [`install.sh`](install.sh) before you pipe it into a shell — it is short,
-and you should not take that on faith from anyone. Options:
+Read [`install.sh`](install.sh) first if you prefer; it is short. It takes
+`--prefix <dir>`, `--version <tag>`, `--source` and `--binary`.
+
+**From source.**
 
 ```sh
-sh install.sh --prefix ~/bin        # where to install (default: ~/.local/bin)
-sh install.sh --version v0.3.0      # a specific release (default: latest)
-sh install.sh --source              # build with Go even if a binary exists
-sh install.sh --binary              # never build; fail if no binary fits
+git clone https://github.com/yongjohnlee80/autodb && cd autodb && make build   # → bin/autodb
 ```
 
-It never invokes `sudo`. If the prefix is not writable it says so and stops,
-and it tells you if the prefix is not on your `PATH`.
+Use `make build` rather than `go install`: the Makefile stamps the version,
+which autodb uses to notice when a running server is older than the client.
 
-### 2. First run
+**Neovim.** With [lazy.nvim](https://github.com/folke/lazy.nvim):
+
+```lua
+{ "yongjohnlee80/autodb", dependencies = { "yongjohnlee80/auto-core.nvim" }, opts = {} }
+```
+
+The plugin uses the `autodb` on your `PATH`, or add `build = "make build"` to
+compile one matched to the plugin. See [docs/neovim.md](docs/neovim.md).
+
+## Quick start
 
 ```sh
 autodb --ui
 ```
 
-That is the whole setup. The first run walks you through creating the root
-user and the master passphrase; there is no config file to write. The defaults
-are a per-user unix socket for RPC (`$XDG_RUNTIME_DIR/autodb.sock`, mode 0600,
-so only your own OS user can open it) and a SQLite meta store under
-`$XDG_DATA_HOME/autodb/`. Nothing listens on a TCP port until you configure one.
+That is the whole setup. The first run creates the root user and your master
+passphrase. There is no config file to write: the server listens on a
+per-user unix socket (mode `0600`) and keeps its own data in SQLite under
+`$XDG_DATA_HOME/autodb/`. Nothing listens on a TCP port until you ask it to.
 
-The other entry points:
+Then:
+
+1. `SPC c` → `a` to add a connection. The DSN is encrypted as soon as you save it.
+2. Write SQL in the editor and press `SPC r` to run it.
+3. `SPC H` shows the history: everything run, by whom, and how it went.
 
 ```sh
-autodb --serve                # msgpack-RPC server on the unix socket (or [server] port, if set)
-autodb --web-ui --port=7010   # the same TUI in a browser (never spawns a daemon)
-autodb --print-endpoint       # where this config listens: <network>\t<address>
+autodb --serve                # just the server (the UI starts one for you if needed)
+autodb --web-ui --port=7010   # the same UI in a browser, on 127.0.0.1
 autodb --version
 ```
 
-`--serve` binds the unix socket by default — or `127.0.0.1:<port>` when
-`[server] port` is set — drains gracefully on SIGINT/SIGTERM, and implements a
-single-instance guard: an endpoint held by a compatible autodb reports "already
-running" and exits **69** (`EX_UNAVAILABLE`), while a foreign occupant is a loud
-error. Non-zero because that process was asked to serve and did not: under a
-`Type=simple` unit a zero exit reads as a clean stop, so systemd recorded
-`Result=success` and left the unit dead while the front door was down. The
-protocol handshake, method surface and error codes are documented in
-[rpc/README.md](rpc/README.md).
+## The front door: production behind one gate
 
-### 3. Install the Neovim plugin
+This is what autodb is for in an organisation. autodb speaks the PostgreSQL
+wire protocol, so an unmodified client connects **through** it:
 
-The plugin talks to the same binary. Install it with your plugin manager —
-here [lazy.nvim](https://github.com/folke/lazy.nvim):
-
-```lua
-{
-  "yongjohnlee80/autodb",
-  dependencies = {
-    "yongjohnlee80/auto-core.nvim",       -- HARD: events, state, log, ui.*
-    -- "yongjohnlee80/auto-finder.nvim",  -- OPTIONAL: hosts the drawer in
-    --                                    -- its shared panel instead
-  },
-  opts = {},
-}
+```
+postgres://<user>:<personal-access-token>@autodb.example.com:5432/<database>?sslmode=verify-full&sslrootcert=ca.pem
 ```
 
-**How the plugin finds the binary**, in order — it never guesses silently, and
-a failure reports every path it tried:
+Close production's firewall to everything except the autodb host. Your tools
+keep working, and the only way in knows who you are.
 
-1. `opts.bin`, if you set it — honoured or refused, never quietly replaced.
-2. **`PATH`** — which covers Mason, `go install` (`~/go/bin`), Homebrew, a
-   system package, and the install script above. Nothing to configure.
-3. A plugin-local `bin/autodb`, which is what a lazy.nvim `build` hook makes.
-4. A managed cache under `stdpath("data")/autodb/bin/`.
+- **Developers** use `psql`, DataGrip or DBeaver with their own token. A
+  laptop that changes IP never touches the certificate, only the allowlist.
+- **Applications and CI** get an `editor` account and token of their own, so
+  the app's traffic is audited under its own name.
+- **AI agents** get a `reader` account and a token for one connection. Any
+  PostgreSQL client or MCP server works, and the database itself refuses a
+  write.
+- **Contractors** get a token that expires when their engagement does (up to
+  365 days), limited to their IP, and revocable at any moment.
 
-If you would rather have the binary version-matched to the plugin checkout
-than on your `PATH`, use a build hook instead of installing it separately:
+Minting a token (`SPC T` → `c`) opens a **connection card**: a ready DSN and
+JDBC URL, the host, port and database, the `sslmode` and CA file to pin, and
+the limits that apply, ready to paste into a client or hand to a colleague.
+`SPC k` shows the CA certificate itself. The token is shown once; the server
+keeps only its hash.
 
-```lua
-{
-  "yongjohnlee80/autodb",
-  dependencies = { "yongjohnlee80/auto-core.nvim" },
-  build = "make build",
-  opts = {},
-}
-```
-
-Then verify:
-
-```vim
-:checkhealth autodb
-```
-
-which reports the binary it resolved and from where, the endpoint, and the
-connection and login state. `setup()` itself is deliberately cheap — it
-connects nothing and opens nothing; the first command that needs the daemon
-brings it up and prompts for login.
-
-## The commands, copy-pasteable
-
-**One block, one paste.** Every block below is a single command: click the copy
-icon, paste, done. Nothing to set first, and — except where a remote address is
-unavoidable — nothing to edit.
-
-### Provision this machine
+**Walk through the whole setup in the [front door tutorial](docs/front-door/tutorial.md).**
+The commands, for quick access:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/provision_vm.sh -o provision_vm.sh && curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh && chmod +x provision_vm.sh install_frontdoor.sh && sudo sh provision_vm.sh --apply --host 127.0.0.1
+# Download the scripts. Read them before you run them: they run as root,
+# install a systemd unit and write TLS material.
+base=https://raw.githubusercontent.com/yongjohnlee80/autodb/main
+curl -fsSL -O "$base/provision_vm.sh" -O "$base/install_frontdoor.sh" -O "$base/update_frontdoor.sh" -O "$base/uninstall.sh"
+
+sh provision_vm.sh --check --host 127.0.0.1                  # see the plan; changes nothing
+sudo sh provision_vm.sh --apply --host 127.0.0.1             # provision THIS machine
+sh provision_vm.sh --apply --user root --host 203.0.113.10   # provision a fresh VM over SSH
+
+sudo sh update_frontdoor.sh      # update to the newest release (rolls back if it does not start)
+sudo sh uninstall.sh --apply     # remove it (archives the meta store first)
 ```
 
-Two files, because `provision_vm.sh` calls `install_frontdoor.sh` and expects
-it beside itself. `--host 127.0.0.1` means no ssh, no key, and no `--user`.
+Every script takes `--check`, which changes nothing, and `--help`. The
+[operator reference](docs/front-door/operations.md) explains what each one does
+and why.
 
-### See the plan first, change nothing
+## Keys
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/provision_vm.sh -o provision_vm.sh && curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh && sh provision_vm.sh --check --host 127.0.0.1
-```
+`Space` opens the leader menu, which lists every command with its key. `?`
+shows the keys that work in the panel or dialog you are in.
 
-### Provision a remote host
-
-Replace the address — it is the only edit:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/provision_vm.sh -o provision_vm.sh && curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh && chmod +x provision_vm.sh install_frontdoor.sh && sudo sh provision_vm.sh --apply --user root --host 203.0.113.10
-```
-
-### Install or reconfigure the service where the binary is already present
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/install_frontdoor.sh -o install_frontdoor.sh && sudo sh install_frontdoor.sh --apply
-```
-
-### Update to the newest release
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/update_frontdoor.sh -o update_frontdoor.sh && sudo sh update_frontdoor.sh
-```
-
-### Remove it
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/yongjohnlee80/autodb/main/uninstall.sh -o uninstall.sh && sudo sh uninstall.sh --apply
-```
-
-Every script takes `--check`, which changes nothing and prints what it would
-do, and `--help`, which lists every flag. Swap `--apply` for `--check` in any
-line above to rehearse it.
-
-**Read them before you run them, and there is deliberately no `curl | sh` line
-here.** They run as root, install a systemd unit and write TLS material;
-piping a script straight into a shell is precisely the arrangement that makes
-reading it first impossible.
-
-## Updating an install
-
-[`update_frontdoor.sh`](update_frontdoor.sh) resolves the **newest release tag**
-first, builds that, swaps the binary and restarts the unit. It touches the
-binary and the unit only — the config, the meta store, the TLS material and the
-unattended-unlock keyslot are neither read nor written, because an update is not
-a reinstall.
-
-```sh
-sudo sh update_frontdoor.sh --check        # installed vs available; changes nothing
-sudo sh update_frontdoor.sh                # do it
-sudo sh update_frontdoor.sh --ref v0.3.6   # a specific tag, e.g. to go back
-```
-
-The binary lives at `/usr/local/bin/autodb` (`--prefix` moves it); the config is
-`/etc/autodb/`. Those are separate on purpose, and it is why an update can
-replace one without touching the other.
-
-**It rolls back.** `systemctl restart` returns success for a unit that starts
-and then exits immediately, so "the restart worked" is not evidence the daemon
-is running. The previous binary is kept at `/usr/local/bin/autodb.previous`, the
-new one has to reach `ActiveState=active`, and if it does not the old binary
-goes back and the service is restarted on it. An update that leaves the front
-door down is worse than no update.
-
-## Provisioning this machine
-
-Give `provision_vm.sh` a loopback host and it provisions **the machine you are
-on**, over no transport at all — no sshd, no key, no login:
-
-```sh
-sudo sh provision_vm.sh --apply --host 127.0.0.1
-```
-
-`localhost` and `::1` do the same. `--user` is not required there, because
-there is nothing to log in to. Everything else is identical: the same sizing
-preflight, the same interview, the same first-run ceremony, and the closing
-notes print commands you can run directly rather than wrapped in `ssh`.
-
-## Running the front door as a service
-
-`install.sh` installs the binary. [`install_frontdoor.sh`](install_frontdoor.sh)
-configures the PostgreSQL-wire front door as a **systemd service** on a host
-that already has it: a memory-sizing preflight, a config scaffold, an optional
-PostgreSQL meta store, and a unit with `Restart=on-failure`, `GOMEMLIMIT` and
-`MemoryMax`.
-
-```sh
-sh install_frontdoor.sh --check                     # measure and report; changes nothing
-sh install_frontdoor.sh --check --assume-ram 1024 --assume-cpus 1
-sh install_frontdoor.sh --print-config              # the config it would write, to stdout
-sudo sh install_frontdoor.sh --apply                # prompts for each setting on a terminal
-```
-
-`--apply` walks the whole bring-up rather than stopping at a config file. It
-asks for a **DNS name** — leave it empty and the certificate is issued for an
-**IP address** instead — then the **port**, because together those are what
-somebody types into a client. With an address to issue for it runs
-`autodb --create-cert`, writes the certificate paths in, and enables the
-surface. Then it runs [`autodb --init`](#running-the-front-door-as-a-service)
-for the first administrator and the unattended-unlock slot, and starts the
-service if you asked it to.
-
-That leaves one file to hand out: `ca.pem`, plus `sslmode=verify-full` in the
-client's DSN. **`SPC k` in the TUI shows that certificate's contents** — not
-its path, which is no use to a developer on another machine, and unreadable
-even on the host unless you are root or the service account. It opens in a
-read-only vim editor: select and `y` to copy part of it, `Y` for the whole
-thing, and the footer names the keys.
-
-For an internet-facing deployment prefer a real ACME certificate and pass
-`--no-cert`.
-
-`--check` is the default and never writes anything. `--apply` interviews you,
-pre-filling every answer with the computed default, so pressing return through
-the whole thing gives exactly the non-interactive result.
-
-### Why there is a sizing preflight
-
-The front door's memory budgets are **accounting, not allocations**, and nothing
-in autodb reads a physical-memory figure — there is no `GOMEMLIMIT`, no
-`MemAvailable` check. A daemon whose general lane is larger than its host will
-boot happily, idle at a fraction of it, and then be unable to apply backpressure
-before the kernel's out-of-memory killer arrives. The guard is present, is
-consulted, and observes nothing.
-
-So the preflight computes a lane and a session cap the host can actually honour,
-and refuses a host too small to serve even one session. `--assume-ram` and
-`--assume-cpus` size a machine you are not standing on, which is how a small VPS
-gets planned from a workstation. **Pass both** — with only the first, the CPU
-warnings describe your workstation and the single-core warning silently never
-fires for the VM you were sizing for.
-
-The two numbers move **together**: the general lane's floor is
-`max_sessions_global × 4 MiB`, so raising the cap without raising the lane fails
-at startup. Lowering the *cap* is how a modest host asks for a smaller lane — it
-serves fewer sessions rather than promising more than it can hold.
-
-### The meta store, as one choice of three
-
-autodb's own database — users, grants, encrypted connection secrets, the audit
-log. Not a database you connect *to*.
-
-| Choice | What it does |
+| Key | Does |
 |---|---|
-| `sqlite` | One file, no server. The lighter choice on a small VPS. |
-| `pg-local` | Installs PostgreSQL here, creates the database and a role named after the service account so peer auth over the unix socket needs no stored password. |
-| `pg-remote` | An existing instance, by DSN. |
-
-A co-hosted PostgreSQL is charged its **own** reserve, and sizing is recomputed
-after that answer rather than before it — on a 1 GB host it takes the front door
-from 64 sessions to 32, and at 512 MB it is refused outright.
-
-### What to be aware of
-
-- **`--apply` is proven on ONE package manager, and the other four are
-  untested.** It has run end to end on a Debian-family host — a DigitalOcean
-  droplet, 1 vCPU / 961 MiB, through provisioning, TLS issuance, the first-run
-  ceremony and a working JDBC client — so the **apt-get** branch is exercised,
-  not merely written.
-
-  The other four (dnf/yum, pacman, apk, zypper) remain a best effort at each
-  distro's conventions and **not a support claim**: a run on one distro says
-  nothing about the other four, and the RHEL family, Arch and Alpine also ship
-  PostgreSQL's cluster uninitialised, which that run never touched. Use a
-  disposable VM for `--apply` on anything but a Debian-family host. The script
-  header carries a per-distro status table.
-
-  This entry used to say `--apply` was "not yet proven on any host", which was
-  true when written and stopped being true on 2026-09-08. Narrowed to what is
-  tested rather than left overstating in either direction.
-- **The sizing figures are provisional policy, not measurement.** Only the 4 MiB
-  watermark, the 256 default cap and the 1 GiB/4 GiB lane bounds come from the
-  code. The reserve fraction, the lane share and the PostgreSQL allowance are
-  conservative guesses chosen to fail toward a smaller front door. The header
-  documents how to replace them with real RSS figures.
-- **TLS is mandatory, so the front door ships disabled.** `enabled = true`
-  without both TLS keys is refused at config load — the daemon would not start at
-  all — so a config written before you have certificates sets `enabled = false`.
-  Add the `tls_*` keys and flip that line in the same edit. Without TLS a client
-  using `sslmode=require` authenticates nothing, and an active MITM collects
-  every access token in cleartext; a token works from anywhere it is admitted
-  until revoked.
-- **Migration from sqlite to PostgreSQL is ONE-WAY.** Decide before there is
-  production data.
-- **A PostgreSQL meta store's transport is checked at startup.** The DSN needs
-  `sslmode=verify-full` with an explicit `sslrootcert`, or autodb refuses to
-  start. `require` encrypts but authenticates nothing, and an absent `sslmode`
-  means libpq's `prefer`, which silently falls back to plaintext. The one
-  exception is a genuinely local channel — a unix socket or same-host loopback —
-  via the deliberately named `allow_insecure_dsn`.
-- **Developer self-service PAT minting needs the RPC endpoint on a port, and
-  that is an opt-in.** The frontend endpoint defaults to a unix socket at mode
-  `0600`, re-applied on every bind — the socket file *is* the access control,
-  and a socket peer is exempt from the IP allowlist because reaching it already
-  proves same-user access. On a host where autodb runs as a service that socket
-  belongs to the service account, so **only it and root can reach the TUI** —
-  and the TUI is where a developer mints their own token
-  (`auth.token_create` authorises any authenticated user, bound to a connection
-  they hold a grant on). On a socket, every credential request is a root
-  operation.
-
-  `--rpc-port` (7419) trades that for self-service. Be clear about the trade:
-  it replaces "same OS user" with "allowlist plus login", and **there is no
-  rate limiting on the RPC surface** — no connection, pre-auth or auth-failure
-  throttle exists there, and autodb's own config calls TCP M9-gated pending TLS
-  and rate limits. Every local account can then reach it and attempt logins. It
-  binds `127.0.0.1`, so nothing is reachable off-host either way. Choose it
-  when developer self-service is worth that on a box whose own accounts you
-  trust; the socket remains the default.
-
-  In port mode the installer also writes a world-readable `client.toml`
-  carrying the address, `client_only = true`, and nothing else — so a developer
-  can run `autodb --ui --config /etc/autodb/client.toml` without reading the
-  server config, which may name a PostgreSQL DSN with a password in it.
-  `client_only` matters on its own: without it, running the TUI while the
-  service is down would start a daemon as *them*, against their own empty meta
-  store, on the port the real service binds. It is no longer the only guard —
-  **no frontend spawns a daemon on a host that has a service config at all**,
-  whichever config it holds, including the service's own. That file used to be
-  excluded, and a TUI run against it spawned a detached daemon on the service's
-  own ports that outlived the TUI and kept the unit from starting.
-- **Run `autodb --init` once** to create the first administrator and cut the
-  unattended-unlock slot. It is the only surface that can do the second part:
-  enrolling the slot is admin-only *and* only possible while the store is
-  unlocked, because wrapping the master key requires holding it — and
-  bootstrapping generates that key, so the token and the unlocked store arrive
-  together in one process. It takes the instance lease, so stop the service
-  first. Re-running is safe: an existing slot is reported, never replaced.
-- **Set up unattended unlock, or a reboot locks everyone out.** Connection
-  secrets are encrypted with a master key normally unwrapped by a passphrase at
-  login, so after a restart every front-door client gets
-  `57P03 "the server is not accepting connections"` until a human logs in by
-  hand. Set `service_keyfile`, then cut the slot **once** from a running,
-  unlocked daemon: `autodb --ui`, then `SPC K`, then `e`. There is no `keyslot`
-  subcommand — enrolment is admin-only and only possible while unlocked, because
-  wrapping the master key requires holding it, so an installer cannot do it for
-  you. Give the keyfile **its own directory** — a keyfile beside the meta store
-  means one careless `tar` captures both halves of the envelope — and it must be
-  `0600`.
-- **`ip_allowlist` is loopback-only by default**, enforced at login, so nothing
-  remote can log in until you widen it. Widen it deliberately and narrowly.
-- **A connection is not reachable until `frontdoor_exposed = true`.** Exposure
-  is a separate, deliberate step and does not change its SQL capability profile.
-- **On a 1 vCPU host, interactive logins are slow.** Front-door PAT auth is
-  SHA-256 and cheap, but passphrase login uses argon2id at `m=64 MiB, p=4` — four
-  parallel lanes serialized onto one core, each transiently allocating 64 MiB.
-  TLS handshakes land on that same core.
-- **Small VPSes usually ship with no swap.** Add some regardless; the daemon's
-  budgets assume headroom the kernel does not otherwise have.
-
-### Removing it
-
-[`uninstall.sh`](uninstall.sh) removes the service, its config, its state and
-its service account, and `--remove-swap` / `--remove-toolchain` also undo what
-`provision_vm.sh` added underneath.
-
-```sh
-sh uninstall.sh --check                             # list what would go; changes nothing
-sh uninstall.sh --print-targets                     # the exact deletion set, one path per line
-sh uninstall.sh --backup-only                       # take the archive and stop
-sudo sh uninstall.sh --apply
-sudo sh uninstall.sh --apply --remove-swap --remove-toolchain
-```
-
-`--print-targets` is worth running before any `--apply`: it prints every path
-the script would unlink, so the destructive surface is something you read
-rather than infer. `--backup-only` stops the service, takes the archive, and
-removes nothing.
-
-**It archives the meta store first, and the archive deliberately excludes the
-service keyfile.** That store holds the encrypted connection secrets, and the
-master key that opens them lives only in its own keyslot envelope — there is no
-other copy, so deleting it destroys those secrets permanently. But putting the
-store *and* the keyfile in one tarball would be both halves of the envelope in a
-single file, which turns a backup into a credential. The store is archived at
-`0600`, the keyfile is left where it is, and the archive carries a `README`
-saying so. `--no-backup` skips the archive entirely.
-
-**Nothing is deleted unless the archive is good.** Every copy must succeed and
-the finished tarball is listed back and checked for the store by name; any
-failure aborts with the sources untouched and says so. A backup whose whole
-purpose is to make the following deletion survivable must not be allowed to be
-silently partial.
-
-**A config value cannot aim the deletion at your system.** Paths that come from
-the config must sit at least two levels inside a short allowlist of places a
-meta store legitimately lives — `/var/lib`, `/var/opt`, `/srv`, `/opt`,
-`/usr/local/share`, your home directory — and the config itself must contain
-recognisable autodb sections before the script treats it, or anything it names,
-as ours. That is an allowlist rather than a denylist because a denylist cannot
-enumerate every system file worth protecting.
-
-A PostgreSQL meta store is **not** touched: dropping a database is not an
-uninstaller's decision to make.
-
-### Provisioning a fresh VM
-
-[`provision_vm.sh`](provision_vm.sh) is the layer beneath the installer: it
-takes a **fresh** Linux VM over SSH and brings it to a built, configured front
-door. It owns the machine — swap, base packages, a `mise`-managed Go toolchain,
-cloning and building autodb — then hands off to `install_frontdoor.sh` for the
-service itself rather than duplicating it.
-
-```sh
-./provision_vm.sh --user root --host 203.0.113.10          # probe only; changes nothing
-./provision_vm.sh --user root --host vm.example.com --apply
-./provision_vm.sh root@203.0.113.10 --apply --meta pg-local
-```
-
-`--check` is the default: it connects, measures the host, prints the plan and
-the front-door sizing that host would get, and exits. Every step is idempotent,
-so a re-run repairs rather than duplicates.
-
-**It adds swap on small hosts, for a measured reason.** Compiling autodb peaks
-near 700 MiB of RSS in a single compile process even fully serialized
-(`modernc.org/sqlite` is the heavy one). On a 1 GB VPS with no swap — the
-default on most providers — the Go compiler gets OOM-killed. Disk is the cheap
-resource there, so it trades some for a build that finishes, and the swap keeps
-earning its place afterwards. `--prebuilt` cross-compiles locally and uploads
-the binary instead, for hosts too small even with swap.
-
-It installs the newest patch release in the Go **minor line** that `go.mod`
-requires, not the exact figure written there. That line is a minimum language
-version, not a toolchain pin, so installing it literally would build with the
-oldest compiler the module permits — and a stdlib that old carries advisories in
-`crypto/tls` and `crypto/x509` that a TLS-terminating front door should not be
-shipping with.
-
-**Validated on Ubuntu 24.04** (1 vCPU / 961 MiB) for the sqlite backend. The
-PostgreSQL install paths are still untested, and the service is left stopped
-until TLS material exists — see the caveats above.
-
-## The terminal UI
-
-```sh
-bin/autodb --ui
-```
-
-Everything hangs off the leader key:
-
-| Key                     | Does                                                              |
-| ----------------------- | ----------------------------------------------------------------- |
-| `Space`                 | leader menu — every command, with its binding                     |
-| `?`                     | the keys available RIGHT HERE (focused panel, or the open modal)  |
-| `Ctrl-h/j/k/l`          | move between panes (vim window motions)                           |
-| `SPC r` / `SPC R`       | run the buffer / run the selection                                |
-| `SPC C`                 | choose which connection the query runs against                    |
-| `SPC c` `SPC w` `SPC u` | connections, workspaces, users                                    |
-| `SPC H`                 | script history — who ran what, when, against which connection     |
-| `SPC k`                 | the front door's CA certificate, as text you can copy out          |
-| `SPC T` / `SPC i`       | your access tokens / your allowed IPs                             |
-| `SPC n` `SPC s`         | new note / save note (per-workspace `.sql` files)                 |
-| `1`–`9`                 | in the explorer, jump to the connection wearing that number        |
-| `/` `n` `N`             | search the focused panel, next/previous match                     |
-| `SPC z` / `Ctrl-w z`    | zoom the focused pane                                             |
-| `v`/`V` then `y` · `Y`  | in any read-only card: copy a selection · copy the whole thing     |
-| `SPC x` / `SPC X`       | disconnect-reconnect / restart the backend (admin; terminal only) |
-
-Explorer rows carry both numbers you need:
-
-```
-▾ Monstercat (4)
-  ▾ connections
-    ▸ [1] lm-local-test    postgres   (ID:7)
-      [2] gold-local-test  postgres  (ID:12)
-```
-
-`[1]` is the key that selects the row. `(ID:7)` is the connection id — the
-number `SPC u` → `g` ("grant on conn") asks for. Past the ninth connection a
-row shows `[·]`: it still displays its id, there is just no digit left to bind.
-
-`y` copies to the **system clipboard** (OSC 52, so it works over SSH and inside
-tmux) and to the editor register. A personal access token is shown **once** —
-the server stores only a SHA-256 — so the reveal float names its `y`, and if the
-clipboard is unavailable it says so and stays open rather than closing over a
-credential you never captured.
-| `SPC A`                 | about: build, backend, and where state lives                      |
-| `Ctrl-q`                | quit (the shared server keeps running)                            |
-
-The editor is vim-modal (`jk` escapes); the explorer and results honour
-`j/k/g/G`; the JSON results view and the script viewer are read-only vim
-buffers — navigate, select and yank, never edit.
-
-**The server outlives the TUI by design** (one shared server, many frontends),
-so a rebuilt binary keeps talking to the process already running. `SPC X`
-restarts it from inside the UI; a protocol mismatch says which side is stale.
-Neovim restarts a stale server on its own when it is idle — see
-[Updating through Mason](docs/ops/schema-scripts.md#updating-through-mason-or-any-package-manager).
-
-## Neovim
-
-autodb is a standalone plugin as well as a backend (see
-[Installation](#3-install-the-neovim-plugin) for the plugin spec).
-**`auto-core.nvim` is a hard dependency** — every module goes through it for
-events, state, logging and UI primitives, and there is no fallback. Everything
-else is optional. `opts` takes `bin` / `config` / `auto_spawn` / `keys`.
-
-### What you get standalone
-
-Everything, including the explorer. With auto-core alone autodb **self-hosts
-its own panel** for the drawer:
-
-|                             |                                              |
-| --------------------------- | -------------------------------------------- |
-| `<leader>Dl`                | sign in — retry, or switch user              |
-| `<leader>Dw`                | choose or create a workspace                 |
-| `<leader>Dc`                | choose a connection                          |
-| `<leader>Dn`                | choose or create a note                      |
-| `<leader>Dr` / `<leader>DR` | run this SQL buffer / the visual selection   |
-| `<leader>Dh`                | script history                               |
-| `<leader>DX`                | maintenance — restart / refresh              |
-| `:AutodbDrawer`             | toggle the database explorer drawer          |
-| `:checkhealth autodb`       | binary, endpoint, connection and login state |
-
-### What auto-finder adds
-
-If [`auto-finder.nvim`](https://github.com/yongjohnlee80/auto-finder.nvim) is
-installed and its `dbase` section is enabled, the **same** drawer renders in
-auto-finder's shared panel instead of a second one — section switching with
-`0..9`, one panel column, no duplication. autodb notices at open time and does
-not self-host. Nothing needs configuring on either side.
-
-The recommended setup is **autodb + auto-finder** (preferably under
-[autovim](https://github.com/yongjohnlee80/autovim)). Standalone is a fully
-supported configuration, not a degraded one.
-
-### Driving it from Lua
-
-Every `<leader>D` operation is a function on `require("autodb.api")`, so your
-own keymaps get exactly the same surface — the API is the contract and the
-built-in keymaps are one consumer of it.
-
-```lua
-local api = require("autodb.api")
-
-vim.keymap.set("n", "<leader>qq", function() api.drawer_toggle() end)
-
--- Anything that talks to the daemon is async and reports through an
--- optional callback, so you can sequence it.
-api.run_sql("select 1", function(ok, value)
-  if not ok then
-    -- value is { code, message, cause? }; `cancelled` means the user
-    -- backed out, which is not the same as a failure.
-    return vim.notify(value.message, vim.log.levels.ERROR)
-  end
-  -- value is { statements, result? }; result is nil for pure DDL and
-  -- otherwise carries columns and the RAW row arrays.
-  print(value.statements .. " statement(s)")
-end)
-```
-
-`autodb.commands` and the other modules are internal and may change;
-`autodb.api` is the supported surface. Host integration (`register_host`) lives
-on `autodb.views.drawer`.
-
-## The browser frontend
-
-```sh
-bin/autodb --serve                    # start the backend first (it does not auto-start here)
-bin/autodb --web-ui --port=7010       # then serve the TUI to a browser
-```
-
-`--web-ui` serves the **same** TUI you get from `--ui`, in a browser, over a
-WebSocket, talking to an already-running `--serve` daemon over RPC exactly as
-`--ui` does. It is off unless you ask for it.
-
-**It never starts the backend, and it fails fast if none is running.** Unlike
-`--ui` — which spawns a daemon when it cannot find one — `--web-ui` exits with
-an error naming the address. A browser frontend that silently started a
-database daemon would be a surprise in the wrong direction.
-
-**Access it over SSH, not a public bind.** `--web-ui` binds `127.0.0.1` only,
-and `golib/tui/web` refuses a non-loopback bind without TLS:
-
-```sh
-ssh -L 7010:127.0.0.1:7010 your-host      # then open http://127.0.0.1:7010/
-```
-
-**First login on a fresh backend creates the admin**, the same way `--ui`'s
-first run does. The window is safe because there is nothing to protect during
-setup: no connection can exist until a user does.
-
-A few behaviours differ from the terminal:
-
-- **One backend connection per user.** Three tabs share one login and one
-  daemon connection. Closing a tab detaches it; your login survives until the
-  last tab has been gone for the idle timeout (five minutes). Closing the last
-  tab is not an immediate sign-out.
-- **A reconnect resumes; a reload restarts.** A dropped network or a closed lid
-  reconnects to the same session with workspace and history intact. A browser
-  *reload* starts a fresh session.
-- **Notes are personal, keyed by (user, workspace)** — `<notes>/u-<username>/ws-<id>/`,
-  in both frontends. You see your own notes and nobody else's, and the same
-  account sees the same notes in a terminal and in a browser. Notes resolve
-  *after* you sign in: before that there is no identity, so there is
-  deliberately no shared tree to fall back on. `SPC A` shows the exact root in
-  use.
-- **Notes written before per-user keying appear as `legacy notes (ws-N) —
-  deprecated`.** They carry no owner, so nothing can decide whose they are.
-  `Enter` reads one, `m` migrates it into your own notes (copy, read back,
-  verify, then remove the original — refusing if the name collides), `d`
-  deletes it. The tree is read-and-delete only, so it can only shrink.
-- **Some Ctrl chords belong to the browser.** `Ctrl-L`, `Ctrl-W` and `Ctrl-T`
-  never reach autodb and a page cannot take them back. Measured: `Ctrl-H`,
-  `Ctrl-J`, `Ctrl-K` and every `Alt` chord do arrive — so pane motion is also
-  bound to **`Alt-h/j/k/l`**. Use those in a browser.
-- **No `SPC X`.** Nothing in the web process can start a daemon back up, and
-  restarting it would strand every other browser session. Restart from a
-  terminal.
-- **The daemon's audit shows the gateway's address.** Every browser user's RPC
-  calls reach the daemon from `127.0.0.1` (the web process), so the daemon's IP
-  allowlist and audit log attribute the *address* to the gateway. The **user**
-  is still recorded correctly. This is inherent to one process serving several
-  people.
-
-Browser text-machine behaviour — key handling, composition, paste, wide
-characters — is owned and tested by `golib/tui/web` across Chromium, Firefox
-and WebKit; autodb does not re-test it.
-
-## Configuration
-
-autodb runs with no config at all. To change anything, copy the annotated
-example — it ships every setting at its default value, so an uncommented copy
-behaves exactly like no config:
-
-```sh
-mkdir -p ~/.config/autodb
-cp config.example.toml ~/.config/autodb/config.toml
-```
-
-`--config <path>` overrides the location for `--serve`, `--ui` and `--web-ui`.
-Unknown keys are **rejected rather than ignored**, and values are validated at
-load — a bad port, bind, CIDR, or a PostgreSQL meta store without a DSN fails
-before the server listens, naming the offending key.
-
-### Who can reach the daemon
-
-With no `[server] port` configured, the daemon listens on a unix socket whose
-file is mode 0600 and owned by the OS user that started it. **The socket file
-is the access control:** no other machine can reach it, and no other OS account
-on the same machine can open it — not even to reach the login prompt. That
-default is intended for **single-user** use: one person, one daemon, on their
-own machine.
-
-For a **multi-user** host — several people with their own SSH accounts and one
-daemon serving them all — the preferred setup is to **map a port to the RPC
-server**: set `[server] port` (the default `bind = "127.0.0.1"` keeps it on
-loopback). Every OS account on that host can then SSH in, run `autodb --ui`,
-log in with their own autodb credentials, and from the token manager mint their
-Personal Access Token and whitelist the IP addresses it may be used from. Each
-person is identified by their autodb login, not by their OS user; the bind stays
-loopback, and exposing the port beyond the host is a separate, deliberate step
-(see `config.example.toml`).
-
-Two other routes exist and are second choices. The socket can be made
-group-owned by hand (`chmod 660` on the live socket file, with the other users
-in the daemon's group), but the daemon re-applies 0600 every time it binds, so
-that must be redone after every restart — a footgun, not a configuration. And
-`--web-ui` over an SSH port-forward reaches the same token manager from a
-browser with no change to the daemon at all.
-
-`autodb --print-endpoint` shows where a given config actually listens.
-
-### Known limitations of the PostgreSQL front door (v0.3.1)
-
-- **A standalone `Flush` delivers nothing until `Sync`.** The extended-protocol
-  segment is dispatched on `Sync`; a client that sends `Parse`/`Bind`/`Flush` and
-  waits for the responses before sending `Sync` will wait until it does. Drivers
-  built on `database/sql` (lib/pq, pgx's stdlib adapter) always `Sync`, so they
-  are unaffected. Tracked; fixed in the release after v0.3.1.
-
-Verified on a shared host (Linux, two OS uids, one daemon): with the default
-socket, the other uid's connect fails with `permission denied` while the owner
-connects; after `chmod 660`, a member of the daemon's group connects and a
-non-member is still refused; with `[server] port` set, the other uid connects
-over `127.0.0.1` and the daemon serves it.
-
-The meta store is autodb's own database — users, encrypted connection secrets,
-grants, workspaces, audit log, script history — not one of the databases you
-connect to. It runs on SQLite by default and on PostgreSQL for production
-deployments (see [docs/ops/postgres-meta-store.md](docs/ops/postgres-meta-store.md)).
-
-## Layout
-
-| Path                  | Role                                                                           |
-| --------------------- | ------------------------------------------------------------------------------ |
-| `core/`               | Package of record: config, meta store, identity/authz/audit, execution, guards |
-| `frontdoor/`          | The PostgreSQL wire-protocol listener (ADR-0075)                               |
-| `rpc/`                | msgpack-RPC server ([README](rpc/README.md))                                   |
-| `tui/`                | Standalone terminal UI on golib/tui                                            |
-| `webserver/`          | The `--web-ui` gateway                                                         |
-| `lua/`                | Neovim integration + binary lifecycle                                          |
-| `cmd/autodb/`         | The single binary                                                              |
-| `docs/`               | Operational docs and the front-door protocol matrix                            |
-| `config.example.toml` | Every setting, with its default and why it is that                             |
-| `install.sh`          | Installer: verified release download, or a Go build fallback                   |
-| `install_frontdoor.sh` | Front-door service setup: memory sizing preflight, config, systemd unit       |
-| `provision_vm.sh`     | Provisioning playbook: takes a fresh VM to a built, configured front door      |
-| `uninstall.sh`        | Removes the service, its config and state; archives the store first            |
-| `docs/media/`         | README demo recordings                                                         |
-
-## Status & roadmap
-
-The terminal UI, the browser UI, the Neovim integration, the msgpack-RPC
-server, and the session-capable execution engine are **shipped** (latest
-release: [v0.3.0](https://github.com/yongjohnlee80/autodb/releases/latest)).
-
-In flight:
-
-| Work                                             | State                                       |
-| ------------------------------------------------ | ------------------------------------------- |
-| Front door — config + TLS validated before bind  | merged                                      |
-| Front door — pgwire startup/TLS negotiation      | merged                                      |
-| Front door — Personal Access Tokens              | merged                                      |
-| Front door — verification chain + session leases | in progress                                 |
-| Front door — budgets, deadlines, fuzzing         | next                                        |
-| AI script inspection (BYO model, advisory first) | designed (ADR-0076), not started            |
-| BigQuery as a target                             | planned — the `golib/dao` driver exists     |
-
-Architecture decisions live in the project knowledge base as numbered ADRs;
-the front door's protocol behaviour is pinned cell-by-cell in
-[docs/front-door/protocol-matrix.md](docs/front-door/protocol-matrix.md).
+| `Ctrl-h/j/k/l` | move between panes |
+| `SPC r` / `SPC R` | run the buffer / run the selection |
+| `SPC C` | choose the connection the query runs against |
+| `SPC c` · `SPC w` · `SPC u` | connections · workspaces · users and grants |
+| `SPC H` | script history |
+| `SPC T` · `SPC i` | your access tokens · your allowed IPs |
+| `SPC k` | the front door's CA certificate, as text you can copy |
+| `SPC n` · `SPC s` | new note · save note (per-workspace `.sql` files) |
+| `/` · `n` · `N` | search the focused panel |
+| `SPC z` | zoom the focused pane |
+| `y` · `Y` | copy a selection · copy everything, in any read-only view |
+| `SPC A` | about: version, backend, and where state lives |
+| `Ctrl-q` | quit (the server keeps running for your other frontends) |
+
+The editor is vim-modal (`jk` escapes). Copying uses OSC 52, so it reaches
+your system clipboard over SSH and inside tmux.
+
+## Documentation
+
+| | |
+|---|---|
+| [Front door tutorial](docs/front-door/tutorial.md) | Put a production database behind autodb, step by step |
+| [Front door operator reference](docs/front-door/operations.md) | Sizing, the meta store, TLS, updates, removal, and what to watch for |
+| [Security model](docs/security.md) | The gates, the audit trail, secrets at rest, and the planned AI review |
+| [Neovim](docs/neovim.md) | Plugin setup, keymaps, auto-finder integration, the Lua API |
+| [Browser frontend](docs/web-ui.md) | `--web-ui`, access over SSH, and how it differs from the terminal |
+| [Configuration](docs/configuration.md) | The config file, and who can reach the server |
+| [`config.example.toml`](config.example.toml) | Every setting, its default, and why |
+| [RPC protocol](rpc/README.md) | The msgpack-RPC surface the frontends use |
+
+## Roadmap
+
+| Work | State |
+|---|---|
+| Terminal UI, browser UI, Neovim plugin | shipped |
+| PostgreSQL-wire front door, personal access tokens, connection cards | shipped |
+| AI review of SQL before it runs: your own model or keys, and it reads statements, never rows | designed |
+| BigQuery as a target | planned |
+| Homebrew, Windows builds, more package managers | planned |
 
 ## License
 
