@@ -2,7 +2,7 @@ package webserver
 
 import (
 	"github.com/yongjohnlee80/autodb/core/config"
-	tuiapp "github.com/yongjohnlee80/autodb/tui"
+	"github.com/yongjohnlee80/autodb/core/notes"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,7 +16,7 @@ import (
 // the exported surface is what keeps these assertions about the real derivation
 // rather than about a test-only copy of it.
 func rootFor(base, subject string) (string, error) {
-	s, err := tuiapp.NewPersonalNotes(base, subject)
+	s, err := notes.NewPersonalNotes(base, subject)
 	if err != nil {
 		return "", err
 	}

@@ -11,6 +11,7 @@ import (
 	tuicore "github.com/yongjohnlee80/golib/tui"
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
 
+	"github.com/yongjohnlee80/autodb/core/notes"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 )
 
@@ -33,7 +34,7 @@ func runHostSized(t *testing.T, addr string, w, h int) (*tuiapp.Host, *decltest.
 	t.Helper()
 	session := tuiapp.NewSession(addr, logger.Nop{}, nil)
 	t.Cleanup(session.Close)
-	notesFor := tuiapp.PersonalNotesIn(filepath.Join(t.TempDir(), "notes"))
+	notesFor := notes.PersonalNotesIn(filepath.Join(t.TempDir(), "notes"))
 	return tuiapp.RunHost(t, session, notesFor, tuiapp.Options{}, w, h)
 }
 
@@ -96,7 +97,7 @@ func TestBuildingAHostStartsNothingUntilItRuns(t *testing.T) {
 	session := tuiapp.NewSession(addr, logger.Nop{}, nil)
 	t.Cleanup(session.Close)
 	tb := tuicore.NewTestBackend(80, 10)
-	h, err := tuiapp.New(session, tuiapp.PersonalNotesIn(t.TempDir()), nil,
+	h, err := tuiapp.New(session, notes.PersonalNotesIn(t.TempDir()), nil,
 		tuiapp.Options{App: []tuicore.AppOption{tuicore.WithBackend(tb), tuicore.WithMinFrameInterval(0)}})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +130,7 @@ func TestTheWebHostJoinsTheSharedConnectionAndNeverRedials(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := session.Gen()
-	notesFor := tuiapp.PersonalNotesIn(filepath.Join(t.TempDir(), "notes"))
+	notesFor := notes.PersonalNotesIn(filepath.Join(t.TempDir(), "notes"))
 	_, s := tuiapp.RunHost(t, session, notesFor, tuiapp.Options{Frontend: tuiapp.FrontendWeb}, 100, 12)
 	s.WaitFor(t, "the shared connection joined", func(string) bool {
 		row := lastRow(s)

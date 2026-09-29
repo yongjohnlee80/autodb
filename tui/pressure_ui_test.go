@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yongjohnlee80/autodb/core/notes"
 	"github.com/yongjohnlee80/autodb/core/pressure"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/logger"
@@ -20,7 +21,7 @@ func (f pressureFunc) Pressure(ctx context.Context) (pressure.Snapshot, error) {
 func pressureScreen(t *testing.T, source pressureFunc) (*tuiapp.Host, *decltest.Screen) {
 	t.Helper()
 	h, s := tuiapp.RunHost(t, tuiapp.NewSession(seeded(t), logger.Nop{}, nil),
-		tuiapp.PersonalNotesIn(t.TempDir()), tuiapp.Options{PressureSource: source}, 120, 32)
+		notes.PersonalNotesIn(t.TempDir()), tuiapp.Options{PressureSource: source}, 120, 32)
 	loginAs(t, s, "root", rootPass)
 	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
 	s.WaitForText(t, "▸ main") // QML focus and explorer have both mounted

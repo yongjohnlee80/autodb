@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/yongjohnlee80/autodb/core/notes"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/logger"
 )
@@ -333,7 +334,7 @@ func TestGateway_SurplusConnectionIsClosedNotAbandoned(t *testing.T) {
 
 // Two users must not see each other's notes.
 //
-// tuiapp.NoteStore reads from disk and disk has no identity, so a single shared
+// notes.Store reads from disk and disk has no identity, so a single shared
 // root would hand every web user everyone else's notes. The terminal frontend
 // never had this problem: the OS gave it one user per process. This gateway is one
 // process for N users, which is where the whole class of problem comes from.
@@ -402,12 +403,12 @@ func TestGateway_NoteRootsAreScopedPerUser(t *testing.T) {
 	}
 
 	// Each user's App built its own root under the base, and they are different.
-	aStore, err := tuiapp.NewPersonalNotes(notesBase, "alice")
+	aStore, err := notes.NewPersonalNotes(notesBase, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
 	aRoot := aStore.Root()
-	bStore, err := tuiapp.NewPersonalNotes(notesBase, "bob")
+	bStore, err := notes.NewPersonalNotes(notesBase, "bob")
 	if err != nil {
 		t.Fatal(err)
 	}

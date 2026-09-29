@@ -1,6 +1,7 @@
 package tui_test
 
 import (
+	"github.com/yongjohnlee80/autodb/core/notes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,8 +9,6 @@ import (
 	"testing"
 
 	"github.com/yongjohnlee80/golib/tui/decl/decltest"
-
-	tuiapp "github.com/yongjohnlee80/autodb/tui"
 )
 
 func TestFileOpenNoteFiltersAndLoadsWithoutLosingUnsavedWork(t *testing.T) {
@@ -51,7 +50,7 @@ func TestFileOpenNoteFiltersAndLoadsWithoutLosingUnsavedWork(t *testing.T) {
 
 func TestFileOpenNoteListsDetachedLocalNotesAndRejectsAnAbsentSelection(t *testing.T) {
 	_, s, base := notesHost(t)
-	store, err := tuiapp.NewPersonalNotes(base, "root")
+	store, err := notes.NewPersonalNotes(base, "root")
 	if err != nil {
 		t.Fatal(err)
 	}

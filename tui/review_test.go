@@ -9,6 +9,7 @@ import (
 
 	"github.com/yongjohnlee80/golib/logger"
 
+	"github.com/yongjohnlee80/autodb/core/notes"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 )
 
@@ -29,7 +30,7 @@ func TestAWebSessionsAboutNamesTheRootItReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	base := t.TempDir()
-	h, s := tuiapp.RunHost(t, sess, tuiapp.PersonalNotesIn(base),
+	h, s := tuiapp.RunHost(t, sess, notes.PersonalNotesIn(base),
 		tuiapp.Options{Frontend: tuiapp.FrontendWeb, About: tuiapp.AboutInfo{NotesDir: base}}, 200, 32)
 	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
 	h.RunCommand("app.about")

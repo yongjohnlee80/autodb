@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/yongjohnlee80/autodb/core/notes"
 	"strconv"
 	"strings"
 
@@ -30,7 +31,7 @@ import (
 // noteBuffer is the note the query buffer holds, and what is being asked
 // about it.
 type noteBuffer struct {
-	note  *Note
+	note  *notes.Note
 	dirty bool
 	gen   uint64 // numbers the opens; the latest wins
 	// then is what the unsaved-note question guards: run after save or
@@ -116,7 +117,7 @@ func (h *Host) loadNote(wsID int64, name string) {
 	h.buf.gen++
 	gen, epoch := h.buf.gen, h.idEpoch
 	type loaded struct {
-		note *Note
+		note *notes.Note
 		body string
 		err  error
 	}
@@ -131,7 +132,7 @@ func (h *Host) loadNote(wsID int64, name string) {
 			h.setStatus("note: " + l.err.Error())
 			return
 		}
-		if !l.note.existed {
+		if !l.note.Existed() {
 			h.setStatus("note no longer exists: " + name)
 			return
 		}
@@ -171,7 +172,7 @@ func (h *Host) saveNote() {
 		h.setStatus("saved " + h.buf.note.Name)
 		h.refreshWhere()
 		h.refreshNotes(h.buf.note.WorkspaceID)
-	case errors.Is(err, ErrNoteConflict):
+	case errors.Is(err, notes.ErrNoteConflict):
 		h.buf.conflictBody = body
 		h.set("App.conflictQuestion", fmt.Sprintf(
 			"%s was written by someone or something else since you opened it. Overwrite it, save yours as a new note, or keep editing?",
@@ -263,7 +264,7 @@ func (h *Host) nameNote(wsID int64, name string) error {
 	if wsID == 0 {
 		return refuse("choose the workspace it goes in")
 	}
-	clean, err := CleanName(name)
+	clean, err := notes.CleanName(name)
 	if err != nil {
 		return refuse(err.Error())
 	}
@@ -282,7 +283,7 @@ func (h *Host) nameNote(wsID int64, name string) error {
 		if err != nil {
 			return refuse(err.Error())
 		}
-		if n.existed {
+		if n.Existed() {
 			return refuse(clean + " already exists — choose another name")
 		}
 		if err := store.Save(n, h.buf.body); err != nil {

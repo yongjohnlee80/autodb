@@ -1,4 +1,4 @@
-package tui
+package notes
 
 import (
 	"errors"
@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func testStore(t *testing.T) *NoteStore {
+func testStore(t *testing.T) *Store {
 	t.Helper()
 	s, err := NewPersonalNotes(filepath.Join(t.TempDir(), "notes"), "tester")
 	if err != nil {
@@ -19,7 +19,7 @@ func testStore(t *testing.T) *NoteStore {
 // mustWorkspaceDir names a workspace directory in a test, panicking on an id the
 // store would refuse. The chokepoint is fallible on purpose; these callers pass
 // literal valid ids, so the panic is unreachable and states that assumption.
-func mustWorkspaceDir(t *testing.T, s *NoteStore, wsID int64) string {
+func mustWorkspaceDir(t *testing.T, s *Store, wsID int64) string {
 	t.Helper()
 	dir, err := s.workspaceDir(wsID)
 	if err != nil {

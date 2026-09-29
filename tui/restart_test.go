@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yongjohnlee80/autodb/core/notes"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
 	"github.com/yongjohnlee80/golib/logger"
 )
@@ -13,7 +14,7 @@ func TestRestartNeedsASpawnerAndAsksBeforeShuttingDown(t *testing.T) {
 	addr := seeded(t)
 	session := tuiapp.NewSession(addr, logger.Nop{}, func() (string, error) { return "", nil })
 	t.Cleanup(session.Close)
-	h, s := tuiapp.RunHost(t, session, tuiapp.PersonalNotesIn(t.TempDir()), tuiapp.Options{}, 120, 32)
+	h, s := tuiapp.RunHost(t, session, notes.PersonalNotesIn(t.TempDir()), tuiapp.Options{}, 120, 32)
 	loginAs(t, s, "root", rootPass)
 	s.WaitFor(t, "signed in", func(string) bool { return h.Auth() == "signed-in" })
 	called := make(chan struct{}, 1)
