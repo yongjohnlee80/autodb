@@ -131,17 +131,16 @@ func (f *fixture) freshRemote(t *testing.T) *client {
 	return c
 }
 
-// Before it has signed in, a remote connection reaches only the greeting: every
-// other method, even one a local connection may call with the same token, is
-// refused at the gate as "sign in first". The same server serves the local
-// connection normally.
+// Before it has signed in, a remote connection reaches only the greeting and
+// the calls that sign it in: every other method, even one a local connection
+// may call with the same token, is refused at the gate as "sign in first".
+// The same server serves the local connection normally.
 func TestARemoteConnectionReachesOnlyTheGreetingBeforeSigningIn(t *testing.T) {
 	f, local, rem := remoteFixture(t)
 	for _, call := range []struct {
 		method string
 		params []any
 	}{
-		{"auth.login", []any{"root", "root-passphrase"}},
 		{"auth.whoami", []any{f.rootTok}},
 		{"conn.list", []any{f.rootTok}},
 	} {

@@ -12,12 +12,13 @@ import (
 //
 // The decision is the engine's, in one step (core/exec idle_shutdown.go): no
 // open transaction, no executing statement, no front-door client connected,
-// and — if so — every gate closed before the lock is let go. Admin-only, as
+// no one signed in remotely, and — if so — every gate closed before the lock
+// is let go. Admin-only, as
 // sys.shutdown is: whether this daemon may be restarted is the session's role,
 // never the caller's process lineage.
 //
 // BUSY IS AN ANSWER, not an error: {"stopping": false, "busy": {...}} carries
-// the three counts, because what the frontend does next — say what is running
+// the four counts, because what the frontend does next — say what is running
 // and when to retry — depends on them. An error is kept for what an error is:
 // not an admin, or another shutdown decision already in progress.
 func (s *Server) registerIdleRestart() {
@@ -38,9 +39,10 @@ func (s *Server) registerIdleRestart() {
 			if counts.Busy() {
 				// Nothing was refused and nothing closed, so nothing to audit.
 				return map[string]any{"stopping": false, "busy": map[string]any{
-					"in_transaction": int64(counts.InTransaction),
-					"executing":      int64(counts.Executing),
-					"wire_sessions":  int64(counts.WireSessions),
+					"in_transaction":  int64(counts.InTransaction),
+					"executing":       int64(counts.Executing),
+					"wire_sessions":   int64(counts.WireSessions),
+					"remote_sessions": int64(counts.RemoteSessions),
 				}}, nil
 			}
 			return nil, &golibrpc.Error{Code: CodeShutdownBlocked,
@@ -48,7 +50,7 @@ func (s *Server) registerIdleRestart() {
 					"progress on this server. Retry if it does not complete."}
 		}
 		// Audited BEFORE the effect, as every privileged act is. If the row
-		// cannot land, the decision is undone: ALL THREE gates reopen, or the
+		// cannot land, the decision is undone: EVERY gate reopens, or the
 		// daemon would refuse every statement and every client for good.
 		audit := func() error {
 			return s.auth.Audit(ctx, ident.UserID(), peerIP(req), "server_shutdown",

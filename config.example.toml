@@ -736,3 +736,7 @@ block_duration = "24h0m0s"
 # take the write, remote connections pause until it can, and a crash loses
 # nothing. Empty means remote-denials.pending in autodb's data directory.
 # denial_spill = "/var/lib/autodb/remote-denials.pending"
+# A remote session whose connection drops without a sign-out (a network blip, a
+# closed lid) can be taken up again by the same device within this long, with
+# no passphrase. After it, or after a daemon restart, the passphrase is asked.
+reconnect_grace = "2m0s"

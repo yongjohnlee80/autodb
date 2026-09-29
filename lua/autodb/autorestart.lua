@@ -33,7 +33,7 @@ local METHOD_NOT_FOUND = -32601
 M.EXIT_WAIT_MS = 10000
 
 ---describe_busy says what a busy daemon is doing, for the user.
----@param b table { in_transaction, executing, wire_sessions }
+---@param b table { in_transaction, executing, wire_sessions, remote_sessions }
 ---@return string
 function M.describe_busy(b)
   local parts = {}
@@ -44,6 +44,7 @@ function M.describe_busy(b)
   add(b.executing, "statement running", "statements running")
   add(b.in_transaction, "transaction open", "transactions open")
   add(b.wire_sessions, "PostgreSQL client connected", "PostgreSQL clients connected")
+  add(b.remote_sessions, "remote user signed in", "remote users signed in")
   return table.concat(parts, ", ")
 end
 

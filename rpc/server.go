@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,13 +53,13 @@ import (
 // interrupted, for an update to take effect).
 // Protocol 8 added sys.inflight -- what a restart would interrupt, which the
 // restart confirmation has to name before it asks.
-// Protocol 4 added exec.run_script (3 added history.list and sys.shutdown). BUMP THIS whenever the
+// Protocol 10 added remote.attest (4 added exec.run_script, 3 history.list and sys.shutdown). BUMP THIS whenever the
 // verb surface changes: the handshake is what tells a NEWER frontend that
 // it is talking to an OLDER server (the shared server outlives frontends
 // by design, so a rebuilt binary routinely meets a stale daemon). Without
 // the bump the frontend gets "unknown method" for a feature it can see in
 // its own menu — which is exactly how it presented in M6 testing.
-const Protocol int64 = 9
+const Protocol int64 = 10
 
 // Session keys the gate and the hello handler share.
 //
@@ -131,9 +132,16 @@ type Server struct {
 	// capability fixed at assembly, not per-call, because the surface is.
 	discloseDetail bool
 
-	// remoteDenied counts a remote connection's protocol violation
-	// (WithRemoteDenials); nil counts nothing.
-	remoteDenied func(ip, reason string, userID int64)
+	// remoteDenied counts a remote connection's refusals (WithRemoteDenials);
+	// nil counts nothing. remoteSignedIn is told of a remote sign-in
+	// (WithRemoteSignIns), which ends its address's run of refusals.
+	remoteDenied   func(ip, reason string, userID int64)
+	remoteSignedIn func(ip string)
+	// grace is how long a remote session whose connection dropped may be
+	// taken up again (WithReconnectGrace).
+	grace time.Duration
+	// logger is the transport logger, for what an operator must see.
+	logger logger.Logger
 
 	// hookShutdownAudit wraps sys.shutdown's audit write. nil in production.
 	//
@@ -178,7 +186,13 @@ func (s *Server) handle(method string, h golibrpc.Handler) {
 	// Every handler runs with its connection's Caller, set here once for all
 	// of them: the auth calls a handler makes resolve tokens for the surface
 	// the request actually arrived on.
+	//
+	// A remote connection's call before sign-in holds the connection's one
+	// pre-sign-in slot (gate) until it returns.
 	s.rpc.Handle(method, func(ctx context.Context, req *golibrpc.Request) (any, error) {
+		if peer, remote := remotePeer(req.Session); remote && remotePreLogin[method] {
+			defer peer.ReleasePreLogin()
+		}
 		return h(auth.WithCaller(ctx, callerOf(req.Session)), req)
 	})
 }
@@ -256,15 +270,30 @@ type options struct {
 	pressure       func() (pressure.Snapshot, error)
 	discloseDetail bool
 	remoteDenied   func(ip, reason string, userID int64)
+	remoteSignedIn func(ip string)
+	grace          time.Duration
 }
 
 // WithRemoteDenials sets what the server tells of a remote connection's
-// protocol violation (a method it may not call there): the address, the
-// reason ("protocol_violation") and the user its key named. The daemon counts
-// it against the address. Without it a violation is refused and hung up, but
-// not counted.
+// refusal (a method it may not call there, a device proof or a sign-in that
+// failed): the address, the reason (auth.DenialReason) and the user its key
+// named. The daemon counts it against the address. Without it a refusal is
+// answered and the connection ended, but not counted.
 func WithRemoteDenials(fn func(ip, reason string, userID int64)) Option {
 	return func(o *options) { o.remoteDenied = fn }
+}
+
+// WithRemoteSignIns sets what the server tells of a remote sign-in: the
+// address, whose run of refusals it ends.
+func WithRemoteSignIns(fn func(ip string)) Option {
+	return func(o *options) { o.remoteSignedIn = fn }
+}
+
+// WithReconnectGrace sets how long a remote session whose connection dropped
+// without a sign-out may be taken up again by its device. Zero is the
+// default ([remote] reconnect_grace).
+func WithReconnectGrace(d time.Duration) Option {
+	return func(o *options) { o.grace = d }
 }
 
 // WithLogger sets the transport logger.
@@ -337,7 +366,13 @@ func New(authSvc *auth.Service, eng *exec.Engine, cfg config.Server, version str
 		pressure:       o.pressure,
 		discloseDetail: o.discloseDetail,
 		remoteDenied:   o.remoteDenied,
+		remoteSignedIn: o.remoteSignedIn,
+		grace:          o.grace,
+		logger:         o.logger,
 		verbs:          make(map[string]struct{}),
+	}
+	if s.grace <= 0 {
+		s.grace = config.DefaultRemoteReconnectGrace
 	}
 
 	ropts := []golibrpc.Option{
@@ -428,9 +463,9 @@ func remotePeer(sess *golibrpc.Session) (*remote.Peer, bool) {
 }
 
 // callerOf is the auth.Caller of a request on sess: remote, with the
-// connection's id, for a connection the remote listener accepted (with no
-// Peer it has no id, and no remote token resolves on it), and local for
-// every other connection.
+// connection's id and the device it proved, for a connection the remote
+// listener accepted (with no Peer it has neither, and no remote token
+// resolves on it), and local for every other connection.
 func callerOf(sess *golibrpc.Session) auth.Caller {
 	peer, remote := remotePeer(sess)
 	if !remote {
@@ -438,7 +473,7 @@ func callerOf(sess *golibrpc.Session) auth.Caller {
 	}
 	c := auth.Caller{Surface: auth.SurfaceRemote}
 	if peer != nil {
-		c.ConnID = peer.ConnID
+		c.ConnID, c.DeviceID = peer.ConnID, peer.Device()
 	}
 	return c
 }
@@ -453,12 +488,20 @@ var remoteRefused = map[string]bool{
 }
 
 // remotePreLogin is what a remote connection may call before it has signed
-// in. Signing in over the remote surface is its own path, which this set
-// grows to include when it exists; until then a remote connection can only
-// greet.
+// in: greet, prove its device, sign in. One at a time (gate).
 var remotePreLogin = map[string]bool{
 	"sys.hello":            true,
 	"auth.needs_bootstrap": true,
+	"remote.attest":        true,
+	"auth.login":           true,
+}
+
+// remoteSignIn are the calls that prove a remote connection's device and
+// sign it in. A connection makes each once: after it has signed in they are
+// refused, uncounted (CodeAlreadySignedIn).
+var remoteSignIn = map[string]bool{
+	"remote.attest": true,
+	"auth.login":    true,
 }
 
 // remoteHangupBackstop is how long a remote connection that violated the
@@ -469,11 +512,18 @@ var remotePreLogin = map[string]bool{
 const remoteHangupBackstop = 10 * time.Second
 
 // remoteViolation counts a remote connection's call of a method it may not
-// make there, once per connection (the Peer's claim, shared with the
-// listener's own refusals), and returns whether the connection had ALREADY
-// violated: then the caller hangs it up at once, uncounted, because its
-// refusal was answered and it has no further guess to make.
+// make there: remoteDenial for protocol_violation.
 func (s *Server) remoteViolation(sess *golibrpc.Session, peer *remote.Peer) (again bool) {
+	return s.remoteDenial(sess, peer, string(auth.DenialProtocolViolation))
+}
+
+// remoteDenial counts a remote connection's refusal, once per connection
+// (the Peer's claim, shared with the listener's own refusals), and returns
+// whether the connection had ALREADY been refused: then the caller hangs it
+// up at once, uncounted, because its refusal was answered and it has no
+// further guess to make. The connection is ended after its refusal is
+// answered: on its next request, or after the backstop.
+func (s *Server) remoteDenial(sess *golibrpc.Session, peer *remote.Peer, reason string) (again bool) {
 	first := peer.ClaimViolation()
 	if peer == nil {
 		// A connection with no Peer cannot be hung up; count it once by the
@@ -486,23 +536,29 @@ func (s *Server) remoteViolation(sess *golibrpc.Session, peer *remote.Peer) (aga
 		return true
 	}
 	if s.remoteDenied != nil {
-		ip, user := "", int64(0)
+		user := int64(0)
 		if peer != nil {
 			user = peer.UserID
-			if peer.Addr != nil {
-				ip = peer.Addr.String()
-			}
 		}
-		if ip == "" && sess.Peer() != nil {
-			ip = sess.Peer().String()
-		}
-		if host, _, err := net.SplitHostPort(ip); err == nil {
-			ip = host
-		}
-		s.remoteDenied(ip, "protocol_violation", user)
+		s.remoteDenied(remoteIP(sess, peer), reason, user)
 	}
 	peer.HangupAfter(remoteHangupBackstop)
 	return false
+}
+
+// remoteIP is a remote connection's client address, without the port.
+func remoteIP(sess *golibrpc.Session, peer *remote.Peer) string {
+	ip := ""
+	if peer != nil && peer.Addr != nil {
+		ip = peer.Addr.String()
+	}
+	if ip == "" && sess != nil && sess.Peer() != nil {
+		ip = sess.Peer().String()
+	}
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+	return ip
 }
 
 // gate enforces handshake-before-methods: sys.hello is the
@@ -532,20 +588,46 @@ func (s *Server) gate(sess *golibrpc.Session, method string) error {
 			return &golibrpc.Error{Code: CodeRemoteRefused,
 				Message: method + " is available on the server host only"}
 		}
-		if !remotePreLogin[method] {
+		// A connection that signed out ends after its reply: whatever it
+		// sends next ends it now.
+		if peer.Ending() {
+			peer.Hangup()
+			return &golibrpc.Error{Code: CodeRemoteLoginRequired,
+				Message: "this remote connection is closed"}
+		}
+		if peer.Session() != 0 {
+			if remoteSignIn[method] {
+				return &golibrpc.Error{Code: CodeAlreadySignedIn,
+					Message: "this connection is already signed in"}
+			}
+		} else {
+			if !remotePreLogin[method] {
+				if s.remoteViolation(sess, peer) {
+					peer.Hangup()
+				}
+				return &golibrpc.Error{Code: CodeRemoteLoginRequired,
+					Message: "sign in on this remote connection first"}
+			}
+		}
+	}
+	if method != "sys.hello" {
+		if ok, _ := sess.Value(sessHello).(bool); !ok {
+			return &golibrpc.Error{Code: CodeHandshakeRequired,
+				Message: "handshake required: call sys.hello first"}
+		}
+	}
+	// Before sign-in, a remote connection makes one call at a time: a second
+	// one pipelined behind the first would be a second guess on one
+	// connection. Claimed last, once nothing else can refuse the call, so
+	// the handler that releases it always runs (handle).
+	if peer, remote := remotePeer(sess); remote && peer.Session() == 0 {
+		if !peer.ClaimPreLogin() {
 			if s.remoteViolation(sess, peer) {
 				peer.Hangup()
 			}
 			return &golibrpc.Error{Code: CodeRemoteLoginRequired,
-				Message: "sign in on this remote connection first"}
+				Message: "one call at a time before signing in"}
 		}
-	}
-	if method == "sys.hello" {
-		return nil
-	}
-	if ok, _ := sess.Value(sessHello).(bool); !ok {
-		return &golibrpc.Error{Code: CodeHandshakeRequired,
-			Message: "handshake required: call sys.hello first"}
 	}
 	return nil
 }
@@ -617,6 +699,13 @@ func (s *Server) helloHandler(ctx context.Context, req *golibrpc.Request) (any, 
 					Message: fmt.Sprintf("sys.hello: protocol must be an integer, got %T", raw)}
 			}
 			clientProto, declared = p, true
+		}
+		// What the client says it is, kept for the device-enrollment
+		// event. Informational: nothing decides on it.
+		name, _ := info["name"].(string)
+		ver, _ := info["version"].(string)
+		if v := strings.TrimSpace(name + " " + ver); v != "" && len(v) <= 128 {
+			req.Session.SetValue(sessClientVersion, v)
 		}
 	}
 	switch {

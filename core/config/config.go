@@ -612,6 +612,10 @@ type Remote struct {
 	// so a crash cannot lose one. Empty means remote-denials.pending in
 	// autodb's data directory.
 	DenialSpill string `toml:"denial_spill"`
+	// ReconnectGrace is how long a remote session whose connection dropped
+	// without a sign-out can be taken up again by the same device, without
+	// the passphrase.
+	ReconnectGrace Duration `toml:"reconnect_grace"`
 }
 
 // BindAddr is [remote] bind, or its default when unset.
@@ -654,6 +658,14 @@ func (r Remote) BlockFor() time.Duration {
 	return r.BlockDuration.Duration()
 }
 
+// Grace is [remote] reconnect_grace, or its default when unset.
+func (r Remote) Grace() time.Duration {
+	if r.ReconnectGrace <= 0 {
+		return DefaultRemoteReconnectGrace
+	}
+	return r.ReconnectGrace.Duration()
+}
+
 // DenialSpillPath is where refused remote connections are spilled before the
 // store: [remote] denial_spill, or remote-denials.pending in autodb's data
 // directory.
@@ -678,6 +690,7 @@ const (
 	DefaultRemoteBind               = "0.0.0.0:7422"
 	DefaultRemoteMaxUnauthenticated = 16
 	DefaultRemoteHandshakeTimeout   = 10 * time.Second
+	DefaultRemoteReconnectGrace     = 2 * time.Minute
 )
 
 // HostKeyPath is where the remote listener's host key lives: [remote]
@@ -836,6 +849,7 @@ func Default() Config {
 			HandshakeTimeout:   Duration(DefaultRemoteHandshakeTimeout),
 			BlockAfterFailures: DefaultRemoteBlockAfterFailures,
 			BlockDuration:      Duration(DefaultRemoteBlockDuration),
+			ReconnectGrace:     Duration(DefaultRemoteReconnectGrace),
 		},
 	}
 }
@@ -1287,6 +1301,9 @@ func (c Config) validate() error {
 	}
 	if c.Remote.BlockDuration < 0 {
 		return fmt.Errorf("%w: remote.block_duration must not be negative", ErrInvalid)
+	}
+	if c.Remote.ReconnectGrace < 0 {
+		return fmt.Errorf("%w: remote.reconnect_grace must not be negative", ErrInvalid)
 	}
 	if c.Exec.MaxStatementBytes <= 0 {
 		return fmt.Errorf("%w: exec.max_statement_bytes %d must be positive", ErrInvalid, c.Exec.MaxStatementBytes)

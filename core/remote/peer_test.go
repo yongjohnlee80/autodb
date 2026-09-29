@@ -1,31 +1,50 @@
-package remote_test
+package remote
 
-import (
-	"net"
-	"testing"
+import "testing"
 
-	"github.com/yongjohnlee80/autodb/core/remote"
-)
-
-type fakeConn struct {
-	net.Conn
-	peer *remote.Peer
+// A Peer's sign-in state moves forward once: one device proof (enrolled or
+// to enroll), then one sign-in, which binds the session's device.
+func TestAPeerProvesOneDeviceAndSignsInOnce(t *testing.T) {
+	p := &Peer{}
+	if !p.Attest(7) || p.Device() != 7 {
+		t.Fatal("the first proof was refused")
+	}
+	if p.Attest(8) || p.Stage([]byte("k")) || p.Device() != 7 {
+		t.Fatal("a second proof after an enrolled device's was taken")
+	}
+	q := &Peer{}
+	if !q.Stage([]byte("k")) || string(q.Pending()) != "k" {
+		t.Fatal("staging a device to enroll was refused")
+	}
+	if q.Attest(9) || q.Stage([]byte("j")) {
+		t.Fatal("a second proof after one to enroll was taken")
+	}
+	if !q.SignIn(3, 11) || q.Session() != 3 || q.Device() != 11 || q.Pending() != nil {
+		t.Fatalf("sign-in: session %d device %d pending %q", q.Session(), q.Device(), q.Pending())
+	}
+	if q.SignIn(4, 11) || q.Session() != 3 {
+		t.Fatal("a second sign-in was taken")
+	}
+	if q.Attest(12) {
+		t.Fatal("a proof after sign-in was taken")
+	}
 }
 
-func (c fakeConn) RemotePeer() *remote.Peer { return c.peer }
-
-// A plain net.Conn is not a remote Conn; one carrying a Peer is.
-func TestOnlyAConnWithAPeerIsRemote(t *testing.T) {
-	a, b := net.Pipe()
-	defer a.Close()
-	defer b.Close()
-	var plain net.Conn = a
-	if _, ok := plain.(remote.Conn); ok {
-		t.Fatal("a plain net.Conn satisfied remote.Conn")
+// OnEnd runs once the connection ends, or at once when it already has.
+func TestOnEndRunsOnceAtTheEnd(t *testing.T) {
+	p := &Peer{}
+	n := 0
+	p.OnEnd(func() { n++ })
+	if n != 0 {
+		t.Fatal("ran before the end")
 	}
-	var wrapped net.Conn = fakeConn{Conn: b, peer: &remote.Peer{ConnID: "c1"}}
-	rc, ok := wrapped.(remote.Conn)
-	if !ok || rc.RemotePeer().ConnID != "c1" {
-		t.Fatalf("a Conn carrying a Peer: ok=%v", ok)
+	p.ended()
+	p.ended()
+	if n != 1 {
+		t.Fatalf("ran %d times, want 1", n)
+	}
+	p.OnEnd(func() { n++ })
+	if n != 2 {
+		t.Fatal("registered after the end, it did not run at once")
 	}
 }

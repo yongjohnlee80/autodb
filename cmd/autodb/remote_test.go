@@ -36,11 +36,19 @@ type remoteRig struct {
 	lim   *auth.RemoteLimiter
 	fan   *remote.FanIn
 	key   ssh.Signer
+	eng   *coreexec.Engine
 }
 
 // newRemoteRig is a store with root, root's SSH key registered, and an RPC
 // server behind a fan-in over a local loopback listener.
 func newRemoteRig(t *testing.T) *remoteRig {
+	t.Helper()
+	return newRemoteRigAllowing(t, "127.0.0.1/32")
+}
+
+// newRemoteRigAllowing is newRemoteRig with allowlist as the global IP
+// allowlist.
+func newRemoteRigAllowing(t *testing.T, allowlist string) *remoteRig {
 	t.Helper()
 	ctx := t.Context()
 	store, err := meta.Open(ctx, config.Meta{Engine: "sqlite", Path: ":memory:"})
@@ -48,11 +56,11 @@ func newRemoteRig(t *testing.T) *remoteRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{"127.0.0.1/32"}))
+	svc, err := auth.New(store, auth.WithConfigAllowlist([]string{allowlist}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", "127.0.0.1"); err != nil {
+	if _, _, err := svc.Bootstrap(ctx, "root", "root-passphrase", auth.LocalPeer); err != nil {
 		t.Fatal(err)
 	}
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -82,13 +90,18 @@ func newRemoteRig(t *testing.T) *remoteRig {
 	srv := rpc.New(svc, eng, config.Server{}, "t", rpc.WithListener(fan), rpc.WithNotesDir("/srv/notes"),
 		rpc.WithRemoteDenials(func(ip, reason string, userID int64) {
 			remotectl.Deny(lim, func(string) {}, ip, reason, "", userID)
+		}),
+		rpc.WithRemoteSignIns(func(ip string) {
+			if err := lim.Succeeded(context.Background(), ip); err != nil {
+				t.Errorf("resetting %s's count: %v", ip, err)
+			}
 		}))
 	runCtx, cancel := context.WithCancel(ctx)
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Run(runCtx) }()
 	t.Cleanup(func() { cancel(); <-errc })
 
-	return &remoteRig{cfg: cfg, store: store, svc: svc, lim: lim, fan: fan, key: key}
+	return &remoteRig{cfg: cfg, store: store, svc: svc, lim: lim, fan: fan, key: key, eng: eng}
 }
 
 // control is Remote Control over the rig, with what it logs collected.

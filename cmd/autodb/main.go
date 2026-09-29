@@ -701,8 +701,17 @@ func runServe(configPath string) error {
 		// listener's refusals: against its address.
 		rpcOpts = append(rpcOpts, rpc.WithRemoteDenials(func(ip, reason string, userID int64) {
 			remotectl.Deny(lim, remoteLog, ip, reason, "", userID)
+		}), rpc.WithRemoteSignIns(func(ip string) {
+			// A sign-in ends the address's run of refusals. A failure here
+			// leaves the count as it was, which only errs toward blocking.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := lim.Succeeded(ctx, ip); err != nil {
+				remoteLog("resetting the remote refusal count of " + ip + ": " + err.Error())
+			}
 		}))
 	}
+	rpcOpts = append(rpcOpts, rpc.WithReconnectGrace(cfg.Remote.Grace()))
 	srv := rpc.New(svc, eng, cfg.Server, version, rpcOpts...)
 	fmt.Printf("autodb %s serving msgpack-RPC on %s\n", version, addr)
 	err = srv.Run(serveCtx)
