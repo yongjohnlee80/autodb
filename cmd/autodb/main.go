@@ -26,6 +26,7 @@ import (
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/core/outcome"
 	"github.com/yongjohnlee80/autodb/core/remote"
+	"github.com/yongjohnlee80/autodb/core/remotectl"
 	"github.com/yongjohnlee80/autodb/frontdoor"
 	"github.com/yongjohnlee80/autodb/rpc"
 	tuiapp "github.com/yongjohnlee80/autodb/tui"
@@ -674,30 +675,31 @@ func runServe(configPath string) error {
 	// connection is on is decided by the listener that accepted it.
 	fan := remote.NewFanIn(ln)
 	remoteLog := func(msg string) { fmt.Fprintf(os.Stderr, "autodb: %s\n", msg) }
-	lim, lerr := newRemoteLimiter(cfg, svc)
+	lim, lerr := remotectl.NewLimiter(cfg, svc)
 	if lerr != nil {
 		// Not fatal: the local surface does not need it. Without it the remote
-		// listener does not start (startRemote says so).
+		// listener does not serve (Remote Control's status says why).
 		remoteLog("the remote limiter did not start: " + lerr.Error())
+		lim = nil
 	} else {
 		defer lim.Close()
 	}
-	remoteAddr, stopRemote, rerr := startRemote(serveCtx, cfg, store, svc, lim, fan, version, remoteLog)
-	if rerr != nil {
-		// NEVER FAILS THE START. The local surface is the operators' way in,
-		// and a remote listener that cannot bind must not take it down; the
-		// failure is said loudly instead.
-		fmt.Fprintf(os.Stderr, "autodb: REMOTE CONTROL IS ON BUT THE REMOTE LISTENER DID NOT START: %v\n", rerr)
-	} else if remoteAddr != nil {
-		fmt.Printf("autodb: remote listener on %s\n", remoteAddr)
+	// Remote Control: while its switch is on, a supervised remote listener
+	// serves into fan. NEVER FAILS THE START: the local surface is the
+	// operators' way in, and a remote listener that cannot bind is tried again
+	// and said loudly instead.
+	ctl := remotectl.New(remotectl.Config{Cfg: cfg, Store: store, Auth: svc, Limiter: lim, Fan: fan,
+		Version: version, Logf: remoteLog})
+	if rerr := ctl.Start(serveCtx); rerr != nil {
+		remoteLog("REMOTE CONTROL DID NOT START: " + rerr.Error())
 	}
-	defer stopRemote()
+	defer ctl.Close()
 	rpcOpts := rpcServerOptions(ep, fan, oplog, notesRoot, frontDoorState, pressureState)
 	if lim != nil {
 		// A remote connection's protocol violation counts like the
 		// listener's refusals: against its address.
 		rpcOpts = append(rpcOpts, rpc.WithRemoteDenials(func(ip, reason string, userID int64) {
-			remoteDeny(lim, remoteLog, ip, reason, "", userID)
+			remotectl.Deny(lim, remoteLog, ip, reason, "", userID)
 		}))
 	}
 	srv := rpc.New(svc, eng, cfg.Server, version, rpcOpts...)
