@@ -15,7 +15,7 @@ import (
 
 // thisBumpAdded is the verb the CURRENT protocol number bought. Update it with
 // the number, in the same change: the pair is what makes a bump accountable.
-const thisBumpAdded = "history.search"
+const thisBumpAdded = "remote.attest"
 
 // adminOnlyVerbs are the verbs whose answer describes the whole server, so
 // only an admin reads them: sys.inflight (what a restart would interrupt,
@@ -185,25 +185,18 @@ func TestProtocol_AClientAtTheCurrentVersionReachesTheNewVerb(t *testing.T) {
 	f := newFixture(t)
 	c := f.session(t) // hello at rpc.Protocol
 
-	errVal, result := c.call(thisBumpAdded, f.rootTok, map[string]any{})
-	if errVal != nil {
-		t.Fatalf("a current client was refused %s: %#v", thisBumpAdded, errVal)
+	// remote.attest is for remote connections, so a local client is answered
+	// by the verb's own refusal: it was dispatched, which is what "reached"
+	// means here. The handshake's refusal or "unknown method" would mean it
+	// was not. The remote surface's cells exercise the verb itself.
+	errVal, _ := c.call(thisBumpAdded, []byte("device-pub"), []byte("sig"))
+	m, _ := errVal.(map[string]any)
+	if code, _ := m["code"].(int64); code != rpc.CodeRemoteRefused {
+		t.Fatalf("%s on a current local client: %#v; want its own CodeRemoteRefused, "+
+			"which only the handler answers", thisBumpAdded, errVal)
 	}
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("%s result shape: %#v", thisBumpAdded, result)
-	}
-	// THE EXACT SHAPE: a page of rows and the cursor of the next, nil at the
-	// end. A frontend paging on a key that is not there would page forever or
-	// never.
-	if _, ok := m["rows"].([]any); !ok {
-		t.Errorf("%s.rows is %T, not a list", thisBumpAdded, m["rows"])
-	}
-	if next, present := m["next"]; !present || next != nil {
-		t.Errorf("%s.next on a short listing = %#v (present %v), want nil", thisBumpAdded, next, present)
-	}
-	if len(m) != 2 {
-		t.Errorf("%s answered with %d fields, want exactly rows and next: %#v", thisBumpAdded, len(m), m)
+	if msg, _ := m["message"].(string); !strings.Contains(msg, "remote connections") {
+		t.Fatalf("%s answered %q, not its own refusal", thisBumpAdded, msg)
 	}
 }
 

@@ -23,6 +23,7 @@ const Subsystem = "autodb-rpc@autodb"
 const (
 	extKeyID  = "autodb-ssh-key-id"
 	extUserID = "autodb-user-id"
+	extKeyFP  = "autodb-ssh-key-fp"
 )
 
 // ErrUnknownKey is what an Authorize answers for a key that is not a live
@@ -150,6 +151,7 @@ func Listen(tcp net.Listener, cfg Config) (*Listener, error) {
 			return &ssh.Permissions{Extensions: map[string]string{
 				extKeyID:  strconv.FormatInt(keyID, 10),
 				extUserID: strconv.FormatInt(userID, 10),
+				extKeyFP:  ssh.FingerprintSHA256(key),
 			}}, nil
 		},
 	}
@@ -350,6 +352,10 @@ func (l *Listener) serve(c net.Conn) {
 		}()
 	}
 	l.regMu.Unlock()
+	go func() {
+		_ = sconn.Wait()
+		peer.ended()
+	}()
 	select {
 	case l.ready <- rc:
 	case <-l.done:
@@ -377,6 +383,7 @@ func peerOf(sconn *ssh.ServerConn, hostFP string) (*Peer, error) {
 	return &Peer{
 		ConnID:    hex.EncodeToString(id),
 		SSHKeyID:  keyID,
+		SSHKeyFP:  sconn.Permissions.Extensions[extKeyFP],
 		UserID:    userID,
 		SessionID: append([]byte(nil), sconn.SessionID()...),
 		HostKeyFP: hostFP,

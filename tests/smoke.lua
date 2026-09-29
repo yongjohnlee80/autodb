@@ -2325,6 +2325,10 @@ print("\n[21] autorestart — a stale backend restarts itself when idle (ADR-020
     ar.describe_busy({ executing = 2, in_transaction = 0, wire_sessions = 1 }) ==
       "2 statements running, 1 PostgreSQL client connected",
     ar.describe_busy({ executing = 2, in_transaction = 0, wire_sessions = 1 }))
+  ok("a remote user signed in is described",
+    ar.describe_busy({ executing = 0, in_transaction = 0, wire_sessions = 0, remote_sessions = 2 }) ==
+      "2 remote users signed in",
+    ar.describe_busy({ executing = 0, in_transaction = 0, wire_sessions = 0, remote_sessions = 2 }))
   ok("p21: the start is described, backup included",
     ar.describe_start({ schema = { applied_at_start = { "000003_update_x.sql" }, backup = "/b.bak" } }) ==
       "schema scripts applied: 000003_update_x.sql; the store was backed up first to /b.bak")

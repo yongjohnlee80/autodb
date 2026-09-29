@@ -141,22 +141,32 @@ func (s *Service) requireAdmin(ctx context.Context, token string) (Identity, err
 // newSessionTx inserts a session row inside tx and returns the one-time
 // token string.
 func (s *Service) newSessionTx(tx *dao.Transaction, userID int64, ip string) (string, error) {
+	token, _, err := s.newBoundSessionTx(tx, userID, ip, 0, "")
+	return token, err
+}
+
+// newBoundSessionTx is newSessionTx for a session bound to remote device
+// deviceID and owned by connection conn (both zero for a local session). It
+// also returns the session's id.
+func (s *Service) newBoundSessionTx(tx *dao.Transaction, userID int64, ip string, deviceID int64, conn string) (string, int64, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
-		return "", fmt.Errorf("auth: generating token: %w", err)
+		return "", 0, fmt.Errorf("auth: generating token: %w", err)
 	}
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	now := s.now()
-	if _, err := s.store.Sessions.On(tx).
+	id, err := s.store.Sessions.On(tx).
 		Set(meta.SessTokenHash, tokenHash(token)).
 		Set(meta.SessUserID, userID).Set(meta.SessIP, ip).
 		Set(meta.SessCreatedAt, now.Unix()).
 		Set(meta.SessExpiresAt, now.Add(s.ttl).Unix()).
 		Set(meta.SessRevoked, int64(0)).
-		Insert(); err != nil {
-		return "", err
+		Set(meta.SessDeviceID, deviceID).Set(meta.SessAttachedConn, conn).
+		Insert()
+	if err != nil {
+		return "", 0, err
 	}
-	return token, nil
+	return token, id, nil
 }
 
 // LocalPeer is the pseudo-address a unix-domain (local) connection presents
@@ -204,11 +214,19 @@ func (s *Service) Login(ctx context.Context, name, passphrase, ip string) (strin
 // An empty admissionIP means no second layer, which is the local TUI and
 // every existing caller: Login is that, unchanged.
 func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP string) (string, Identity, error) {
+	return s.login(ctx, name, passphrase, ip, admissionIP, nil)
+}
+
+// login is LoginAt's body, and LoginRemote's when remote is set.
+func (s *Service) login(ctx context.Context, name, passphrase, ip, admissionIP string, remote *remoteSession) (string, Identity, error) {
 	// A local (unix-socket) connection is exempt from the IP allowlist:
 	// the 0600 socket is the boundary, and a socket peer has no
 	// IP to match, so the allowlist can only ever refuse it. The allowlist
 	// governs TCP peers, which carry a real address.
-	if ip != LocalPeer {
+	//
+	// A remote sign-in is exempt too: the SSH key and the device proof are
+	// its gate, and signing in remotely is how a user adds a new address.
+	if ip != LocalPeer && remote == nil {
 		allowed, err := s.IPAllowed(ctx, ip)
 		if err != nil {
 			return "", Identity{}, err
@@ -240,6 +258,13 @@ func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP
 			return "", Identity{}, aerr
 		}
 		return "", Identity{}, ErrBadCredentials
+	}
+	if remote != nil && u.ID != remote.rl.OwnerID {
+		dummyDerive(passphrase)
+		if aerr := s.Audit(ctx, u.ID, ip, "login_failed", name+" (not the SSH key's owner)"); aerr != nil {
+			return "", Identity{}, aerr
+		}
+		return "", Identity{}, ErrRemoteUserMismatch
 	}
 
 	params, verifier, err := decodeHash(string(u.PassHash))
@@ -309,7 +334,11 @@ func (s *Service) LoginAt(ctx context.Context, name, passphrase, ip, admissionIP
 			if cur.Disabled != 0 || !bytes.Equal(cur.PassHash, verified) {
 				return ErrBadCredentials // credentials changed under us
 			}
-			token, terr = s.newSessionTx(tx, u.ID, ip)
+			if remote != nil {
+				token, terr = remote.commitTx(s, tx, cur, ip)
+			} else {
+				token, terr = s.newSessionTx(tx, u.ID, ip)
+			}
 			if terr != nil {
 				return terr
 			}

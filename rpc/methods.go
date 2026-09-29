@@ -48,6 +48,17 @@ const (
 	// at all, whoever calls it: restarting the daemon, and claiming an empty
 	// store. It is available on the server host only.
 	CodeRemoteRefused int64 = -32061
+	// CodeRemoteDenied: the remote connection's device proof or sign-in was
+	// refused. The refusal is counted against the address, and the
+	// connection ends.
+	CodeRemoteDenied int64 = -32062
+	// CodeAlreadySignedIn: the remote connection has signed in; it signs in
+	// once, and proves its device once. Not counted, and the connection
+	// stays open.
+	CodeAlreadySignedIn int64 = -32063
+	// CodeServerRestarting: the daemon is restarting and is not taking remote
+	// sign-ins. Not counted: sign in again shortly.
+	CodeServerRestarting int64 = -32064
 	// CodeProtocolMismatch refuses an incompatible client (re-provision).
 	CodeProtocolMismatch int64 = -32020
 	// CodeAuth carries credential/session failures (bad login, stale token,
@@ -402,6 +413,19 @@ func argStr(p []any, i int, name string) (string, error) {
 	return s, nil
 }
 
+func argBin(p []any, i int, name string) ([]byte, error) {
+	if i >= len(p) {
+		return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+			Message: fmt.Sprintf("missing argument %d (%s)", i, name)}
+	}
+	b, ok := p[i].([]byte)
+	if !ok {
+		return nil, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
+			Message: fmt.Sprintf("argument %d (%s): want binary, got %T", i, name, p[i])}
+	}
+	return b, nil
+}
+
 func argInt(p []any, i int, name string) (int64, error) {
 	if i >= len(p) {
 		return 0, &golibrpc.Error{Code: golibrpc.CodeInvalidParams,
@@ -437,6 +461,7 @@ func identMap(id auth.Identity) map[string]any {
 // peer IP threaded through, map the result/error. No business logic.
 func (s *Server) register() {
 	s.handle("sys.hello", s.helloHandler)
+	s.registerRemoteSignIn()
 	s.registerPressure()
 	s.registerM6()
 
@@ -513,6 +538,9 @@ func (s *Server) register() {
 		pass, err := argStr(req.Params, 1, "passphrase")
 		if err != nil {
 			return nil, err
+		}
+		if peer, remote := remotePeer(req.Session); remote {
+			return s.remoteLogin(ctx, req, peer, name, pass)
 		}
 		token, id, err := s.auth.Login(ctx, name, pass, peerIP(req))
 		if err != nil {
@@ -650,7 +678,15 @@ func (s *Server) register() {
 		if err != nil {
 			return nil, err
 		}
-		return nil, s.wireErrFor(req, s.auth.Logout(ctx, token, peerIP(req)))
+		if err := s.auth.Logout(ctx, token, peerIP(req)); err != nil {
+			return nil, s.wireErrFor(req, err)
+		}
+		// A remote connection that signs out ends: it never drops back to
+		// before sign-in, so it can never hold a second session.
+		if peer, remote := remotePeer(req.Session); remote {
+			peer.EndAfterReply(remoteHangupBackstop)
+		}
+		return nil, nil
 	})
 	s.handle("auth.whoami", func(ctx context.Context, req *golibrpc.Request) (any, error) {
 		if err := exactArgs(req.Params, 1); err != nil {
