@@ -70,6 +70,9 @@ type Listener struct {
 	done   chan struct{}
 	once   sync.Once
 	unauth chan struct{} // one token per connection still in its handshake
+	// err is why the listener stopped on its own (its TCP listener failed);
+	// nil when Close stopped it. Written before done closes.
+	err error
 }
 
 // Listen starts serving tcp. Close stops accepting; connections already
@@ -143,13 +146,33 @@ func (l *Listener) Accept() (net.Conn, error) {
 }
 
 // Close stops accepting. It does not close connections Accept returned.
-func (l *Listener) Close() error {
+func (l *Listener) Close() error { return l.stop(nil) }
+
+// stop ends the listener once: cause is nil for Close, the TCP listener's
+// error when it failed.
+func (l *Listener) stop(cause error) error {
 	var err error
 	l.once.Do(func() {
+		l.err = cause
 		close(l.done)
 		err = l.tcp.Close()
 	})
 	return err
+}
+
+// Done is closed when the listener stops: by Close, or because its TCP
+// listener failed. A supervisor waits on it; Err says which.
+func (l *Listener) Done() <-chan struct{} { return l.done }
+
+// Err is why the listener stopped on its own, or nil if it is running or Close
+// stopped it. Read it after Done is closed.
+func (l *Listener) Err() error {
+	select {
+	case <-l.done:
+		return l.err
+	default:
+		return nil
+	}
 }
 
 // Addr is the TCP address the listener is bound to.
@@ -171,7 +194,11 @@ func (l *Listener) acceptLoop() {
 			if errors.As(err, &ne) && ne.Timeout() {
 				continue
 			}
+			// TERMINAL: the listener stops and says why, so the one watching
+			// it can start another. Logging and returning left Accept blocked
+			// and the remote surface gone with nothing to notice.
 			l.cfg.Logf("remote listener: accept: %v", err)
+			_ = l.stop(fmt.Errorf("remote listener: accept: %w", err))
 			return
 		}
 		select {
