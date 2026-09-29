@@ -66,6 +66,9 @@ type Config struct {
 	// of SSH: false closes it at once, uncounted (a blocked address, or
 	// admission paused).
 	Admit func(ip string) bool
+	// Registry, when set, is where every connection handed to the RPC side
+	// is registered for its life, so it can be ended from outside.
+	Registry *Registry
 	// HangupForce bounds a graceful hangup: a connection whose client stops
 	// reading, so its pending bytes never leave, is closed after it. Zero
 	// means 30s.
@@ -90,9 +93,15 @@ type Listener struct {
 	cfg    Config
 	server *ssh.ServerConfig
 
-	ready  chan net.Conn
-	done   chan struct{}
-	once   sync.Once
+	ready chan net.Conn
+	done  chan struct{}
+	once  sync.Once
+	// regMu orders registration against stop: a connection is registered
+	// before the listener stops, or it is closed instead. Whoever ends the
+	// registry's connections after Close therefore reaches every one this
+	// listener let through, including those still in their handshake.
+	regMu  sync.Mutex
+	closed bool
 	unauth chan struct{} // one token per connection still in its handshake
 	// err is why the listener stopped on its own (its TCP listener failed);
 	// nil when Close stopped it. Written before done closes.
@@ -180,6 +189,9 @@ func (l *Listener) Close() error { return l.stop(nil) }
 func (l *Listener) stop(cause error) error {
 	var err error
 	l.once.Do(func() {
+		l.regMu.Lock()
+		l.closed = true
+		l.regMu.Unlock()
 		l.err = cause
 		close(l.done)
 		err = l.tcp.Close()
@@ -324,6 +336,20 @@ func (l *Listener) serve(c net.Conn) {
 			time.AfterFunc(l.cfg.HangupForce, func() { _ = sconn.Close() })
 		})
 	}
+	l.regMu.Lock()
+	if l.closed {
+		l.regMu.Unlock()
+		_ = rc.Close()
+		return
+	}
+	if reg := l.cfg.Registry; reg != nil {
+		reg.add(peer)
+		go func() {
+			_ = sconn.Wait()
+			reg.remove(peer.ConnID)
+		}()
+	}
+	l.regMu.Unlock()
 	select {
 	case l.ready <- rc:
 	case <-l.done:

@@ -25,6 +25,7 @@ import (
 	coreexec "github.com/yongjohnlee80/autodb/core/exec"
 	"github.com/yongjohnlee80/autodb/core/meta"
 	"github.com/yongjohnlee80/autodb/core/remote"
+	"github.com/yongjohnlee80/autodb/core/remotectl"
 	"github.com/yongjohnlee80/autodb/rpc"
 )
 
@@ -68,7 +69,7 @@ func newRemoteRig(t *testing.T) *remoteRig {
 	cfg.Remote.Bind = "127.0.0.1:0"
 	cfg.Remote.HostKey = filepath.Join(t.TempDir(), "keys", "remote_host_ed25519")
 	cfg.Remote.DenialSpill = filepath.Join(t.TempDir(), "spill", "remote-denials.pending")
-	lim, err := newRemoteLimiter(cfg, svc)
+	lim, err := remotectl.NewLimiter(cfg, svc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +81,7 @@ func newRemoteRig(t *testing.T) *remoteRig {
 	fan := remote.NewFanIn(local)
 	srv := rpc.New(svc, eng, config.Server{}, "t", rpc.WithListener(fan), rpc.WithNotesDir("/srv/notes"),
 		rpc.WithRemoteDenials(func(ip, reason string, userID int64) {
-			remoteDeny(lim, func(string) {}, ip, reason, "", userID)
+			remotectl.Deny(lim, func(string) {}, ip, reason, "", userID)
 		}))
 	runCtx, cancel := context.WithCancel(ctx)
 	errc := make(chan error, 1)
@@ -88,6 +89,53 @@ func newRemoteRig(t *testing.T) *remoteRig {
 	t.Cleanup(func() { cancel(); <-errc })
 
 	return &remoteRig{cfg: cfg, store: store, svc: svc, lim: lim, fan: fan, key: key}
+}
+
+// control is Remote Control over the rig, with what it logs collected.
+func (r *remoteRig) control(t *testing.T, lim *auth.RemoteLimiter, tweak func(*remotectl.Config)) (*remotectl.Control, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var logged []string
+	cfg := remotectl.Config{Cfg: r.cfg, Store: r.store, Auth: r.svc, Limiter: lim, Fan: r.fan, Version: "t",
+		Logf: func(m string) { mu.Lock(); logged = append(logged, m); mu.Unlock() }}
+	if tweak != nil {
+		tweak(&cfg)
+	}
+	ctl := remotectl.New(cfg)
+	if err := ctl.Start(t.Context()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(ctl.Close)
+	return ctl, func() []string { mu.Lock(); defer mu.Unlock(); return slices.Clone(logged) }
+}
+
+// waitState waits for Remote Control to reach state.
+func waitState(t *testing.T, ctl *remotectl.Control, state string) remotectl.Status {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		st := ctl.Status()
+		if st.State == state {
+			return st
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("remote control %+v; want %s", st, state)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// listening starts Remote Control, whose switch is on, and returns where it
+// listens.
+func (r *remoteRig) listening(t *testing.T) net.Addr {
+	t.Helper()
+	ctl, _ := r.control(t, r.lim, nil)
+	st := waitState(t, ctl, remotectl.StateListening)
+	addr, err := net.ResolveTCPAddr("tcp", st.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return addr
 }
 
 // rpcOverSSH dials addr with the rig's key, opens the autodb subsystem, and
@@ -120,19 +168,15 @@ func (r *remoteRig) rpcOverSSH(t *testing.T, addr net.Addr) *golibrpc.Client {
 	return cli
 }
 
-// With Remote Control on, startRemote serves the remote listener into the
+// With Remote Control on, the daemon serves the remote listener into the
 // fan-in: a registered key reaches the RPC server as the REMOTE surface (the
 // greeting has no notes_dir; whoami is refused until the remote sign-in).
-func TestStartRemoteServesTheRemoteSurfaceWhenRemoteControlIsOn(t *testing.T) {
+func TestRemoteControlServesTheRemoteSurfaceWhenItIsOn(t *testing.T) {
 	r := newRemoteRig(t)
 	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
 		t.Fatal(err)
 	}
-	addr, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, r.lim, r.fan, "t", func(string) {})
-	if err != nil || addr == nil {
-		t.Fatalf("startRemote: %v, %v", addr, err)
-	}
-	t.Cleanup(stop)
+	addr := r.listening(t)
 	cli := r.rpcOverSSH(t, addr)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -153,12 +197,15 @@ func TestStartRemoteServesTheRemoteSurfaceWhenRemoteControlIsOn(t *testing.T) {
 }
 
 // With Remote Control off (the default), nothing listens.
-func TestStartRemoteDoesNothingWhileRemoteControlIsOff(t *testing.T) {
+func TestRemoteControlDoesNothingWhileItIsOff(t *testing.T) {
 	r := newRemoteRig(t)
-	addr, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, r.lim, r.fan, "t", func(string) {})
-	defer stop()
-	if err != nil || addr != nil {
-		t.Fatalf("startRemote with the switch off: %v, %v; want nothing started", addr, err)
+	listened := false
+	ctl, _ := r.control(t, r.lim, func(c *remotectl.Config) {
+		c.Listen = func(network, addr string) (net.Listener, error) { listened = true; return net.Listen(network, addr) }
+	})
+	time.Sleep(50 * time.Millisecond)
+	if st := ctl.Status(); st.State != remotectl.StateOff || st.On || listened {
+		t.Fatalf("remote control with the switch off: %+v, bound %v; want nothing started", st, listened)
 	}
 }
 
@@ -186,7 +233,7 @@ func (f *failOnce) Accept() (net.Conn, error) {
 // SUPERVISED: the remote listener's TCP listener failing does not leave the
 // remote surface gone. The failure is said loudly, the listener is bound
 // again after the backoff, and a registered key reaches the RPC server
-// through the new one. Not parallel: it replaces the bind seam.
+// through the new one.
 func TestAFailedRemoteListenerIsRestarted(t *testing.T) {
 	r := newRemoteRig(t)
 	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
@@ -195,30 +242,23 @@ func TestAFailedRemoteListenerIsRestarted(t *testing.T) {
 	first := &failOnce{fail: make(chan struct{})}
 	rebound := make(chan net.Addr, 4)
 	calls := 0
-	oldListen, oldFirst := remoteListen, remoteRetryFirst
-	t.Cleanup(func() { remoteListen, remoteRetryFirst = oldListen, oldFirst })
-	remoteRetryFirst = 20 * time.Millisecond
-	remoteListen = func(network, addr string) (net.Listener, error) {
-		calls++
-		ln, err := net.Listen(network, addr)
-		if err != nil {
-			return nil, err
+	ctl, logged := r.control(t, r.lim, func(c *remotectl.Config) {
+		c.RetryFirst = 20 * time.Millisecond
+		c.Listen = func(network, addr string) (net.Listener, error) {
+			calls++
+			ln, err := net.Listen(network, addr)
+			if err != nil {
+				return nil, err
+			}
+			if calls == 1 {
+				first.Listener = ln
+				return first, nil
+			}
+			rebound <- ln.Addr()
+			return ln, nil
 		}
-		if calls == 1 {
-			first.Listener = ln
-			return first, nil
-		}
-		rebound <- ln.Addr()
-		return ln, nil
-	}
-	var mu sync.Mutex
-	var logged []string
-	onLog := func(m string) { mu.Lock(); logged = append(logged, m); mu.Unlock() }
-	_, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, r.lim, r.fan, "t", onLog)
-	if err != nil {
-		t.Fatalf("startRemote: %v", err)
-	}
-	t.Cleanup(stop)
+	})
+	waitState(t, ctl, remotectl.StateListening)
 
 	close(first.fail)
 	var addr net.Addr
@@ -233,10 +273,8 @@ func TestAFailedRemoteListenerIsRestarted(t *testing.T) {
 	if _, err := cli.Call(ctx, "sys.hello", map[string]any{"protocol": rpc.Protocol}); err != nil {
 		t.Fatalf("hello through the restarted listener: %v", err)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "REMOTE LISTENER FAILED") }) {
-		t.Errorf("the failure was not said: %q", logged)
+	if !slices.ContainsFunc(logged(), func(m string) bool { return strings.Contains(m, "REMOTE LISTENER FAILED") }) {
+		t.Errorf("the failure was not said: %q", logged())
 	}
 }
 
@@ -257,11 +295,7 @@ func TestThreeFailedRemoteLoginsBlockTheAddress(t *testing.T) {
 	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
 		t.Fatal(err)
 	}
-	addr, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, r.lim, r.fan, "t", func(string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(stop)
+	addr := r.listening(t)
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	stranger, _ := ssh.NewSignerFromKey(priv)
 	dial := func(k ssh.Signer) error {
@@ -296,18 +330,14 @@ func TestARemoteProtocolViolationIsCountedAndHungUp(t *testing.T) {
 	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
 		t.Fatal(err)
 	}
-	addr, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, r.lim, r.fan, "t", func(string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(stop)
+	addr := r.listening(t)
 	cli := r.rpcOverSSH(t, addr)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if _, err := cli.Call(ctx, "sys.hello", map[string]any{"protocol": rpc.Protocol}); err != nil {
 		t.Fatalf("hello: %v", err)
 	}
-	_, err = cli.Call(ctx, "conn.list", "any-token")
+	_, err := cli.Call(ctx, "conn.list", "any-token")
 	var re *golibrpc.Error
 	if !errors.As(err, &re) || re.Code != rpc.CodeRemoteLoginRequired {
 		t.Fatalf("conn.list: %v; want the refusal delivered", err)
@@ -325,17 +355,21 @@ func TestARemoteProtocolViolationIsCountedAndHungUp(t *testing.T) {
 	}
 }
 
-// Without its limiter the remote listener does not start: a remote surface
-// with no bound on guesses is refused.
-func TestStartRemoteRefusesToRunWithoutItsLimiter(t *testing.T) {
+// Without its limiter the remote listener does not serve: a remote surface
+// with no bound on guesses is refused, and the status says why.
+func TestRemoteControlRefusesToListenWithoutItsLimiter(t *testing.T) {
 	r := newRemoteRig(t)
 	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
 		t.Fatal(err)
 	}
-	addr, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, nil, r.fan, "t", func(string) {})
-	defer stop()
-	if err == nil || addr != nil {
-		t.Fatalf("startRemote without a limiter: %v, %v; want it refused", addr, err)
+	listened := false
+	ctl, _ := r.control(t, nil, func(c *remotectl.Config) {
+		c.Listen = func(network, addr string) (net.Listener, error) { listened = true; return net.Listen(network, addr) }
+	})
+	time.Sleep(50 * time.Millisecond)
+	st := ctl.Status()
+	if st.State != remotectl.StateRetrying || !strings.Contains(st.Err, "limiter") || listened {
+		t.Fatalf("remote control without a limiter: %+v, bound %v; want it refused", st, listened)
 	}
 }
 
@@ -349,11 +383,7 @@ func TestARemoteRefusalArrivesBeforeTheHangupAndTheNextRequestEndsIt(t *testing.
 	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
 		t.Fatal(err)
 	}
-	addr, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, r.lim, r.fan, "t", func(string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(stop)
+	addr := r.listening(t)
 	c, err := ssh.Dial("tcp", addr.String(), &ssh.ClientConfig{User: "autodb",
 		Auth: []ssh.AuthMethod{ssh.PublicKeys(r.key)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 2 * time.Second})
 	if err != nil {
@@ -434,11 +464,7 @@ func TestAPipelinedNextRequestDoesNotLoseTheRefusal(t *testing.T) {
 	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
 		t.Fatal(err)
 	}
-	addr, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, r.lim, r.fan, "t", func(string) {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(stop)
+	addr := r.listening(t)
 	c, err := ssh.Dial("tcp", addr.String(), &ssh.ClientConfig{User: "autodb",
 		Auth: []ssh.AuthMethod{ssh.PublicKeys(r.key)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 2 * time.Second})
 	if err != nil {
@@ -499,5 +525,196 @@ func TestAPipelinedNextRequestDoesNotLoseTheRefusal(t *testing.T) {
 	}
 	if n := auditRows(t, r.store, "remote_access_denied"); n != 1 {
 		t.Fatalf("remote_access_denied rows %d, want 1", n)
+	}
+}
+
+// hello calls sys.hello on cli.
+func hello(t *testing.T, cli *golibrpc.Client) error {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	_, err := cli.Call(ctx, "sys.hello", map[string]any{"protocol": rpc.Protocol})
+	return err
+}
+
+// Turned on at run time, Remote Control records the switch, audits the
+// change once (turning it on again is no change), and serves.
+func TestTurningRemoteControlOnRecordsAuditsAndServes(t *testing.T) {
+	r := newRemoteRig(t)
+	ctl, _ := r.control(t, r.lim, nil)
+	for range 2 {
+		if err := ctl.Set(t.Context(), true, 1, "127.0.0.1"); err != nil {
+			t.Fatalf("turn on: %v", err)
+		}
+	}
+	if v, _, _ := r.store.GetMeta(t.Context(), remote.ControlKey); v != "on" {
+		t.Fatalf("switch %q; want on", v)
+	}
+	if n := auditRows(t, r.store, "remote_control_changed"); n != 1 {
+		t.Fatalf("remote_control_changed rows %d; want 1", n)
+	}
+	st := waitState(t, ctl, remotectl.StateListening)
+	if !st.On || st.HostKeyFP == "" || st.Addr == "" {
+		t.Fatalf("status %+v; want on, with its address and host key", st)
+	}
+	addr, _ := net.ResolveTCPAddr("tcp", st.Addr)
+	if err := hello(t, r.rpcOverSSH(t, addr)); err != nil {
+		t.Fatalf("hello over the remote surface: %v", err)
+	}
+}
+
+// Turned off, Remote Control closes the listener and ends every live remote
+// connection, and the local surface of the same server keeps working. The
+// switch is recorded and the change audited.
+func TestTurningRemoteControlOffEndsRemoteConnectionsAndSparesLocalOnes(t *testing.T) {
+	r := newRemoteRig(t)
+	ctl, _ := r.control(t, r.lim, nil)
+	if err := ctl.Set(t.Context(), true, 1, "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	st := waitState(t, ctl, remotectl.StateListening)
+	addr, _ := net.ResolveTCPAddr("tcp", st.Addr)
+	remoteCli := r.rpcOverSSH(t, addr)
+	if err := hello(t, remoteCli); err != nil {
+		t.Fatalf("remote hello: %v", err)
+	}
+	localCli, err := golibrpc.Dial(t.Context(), r.fan.Addr().String(), msgpackrpc.New(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = localCli.Close() })
+	if err := hello(t, localCli); err != nil {
+		t.Fatalf("local hello: %v", err)
+	}
+	if n := ctl.Status().Live; n != 1 {
+		t.Fatalf("live remote connections %d; want 1", n)
+	}
+
+	if err := ctl.Set(t.Context(), false, 1, "127.0.0.1"); err != nil {
+		t.Fatalf("turn off: %v", err)
+	}
+	select {
+	case <-remoteCli.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("the remote connection outlived Remote Control being turned off")
+	}
+	if err := hello(t, localCli); err != nil {
+		t.Fatalf("the local connection was touched: %v", err)
+	}
+	if st := ctl.Status(); st.State != remotectl.StateOff || st.On {
+		t.Fatalf("status %+v; want off", st)
+	}
+	if c, err := net.DialTimeout("tcp", addr.String(), time.Second); err == nil {
+		c.Close()
+		t.Fatal("the remote listener still accepts after Remote Control was turned off")
+	}
+	if v, _, _ := r.store.GetMeta(t.Context(), remote.ControlKey); v != "off" {
+		t.Fatalf("switch %q; want off", v)
+	}
+	if n := auditRows(t, r.store, "remote_control_changed"); n != 2 {
+		t.Fatalf("remote_control_changed rows %d; want 2", n)
+	}
+}
+
+// A first bind that fails (the port is taken) does not leave Remote Control
+// silently off: the status says it is retrying and why, and already shows the
+// host key's fingerprint; once the port is free the listener binds and serves.
+func TestAFailedFirstBindIsRetriedAndShown(t *testing.T) {
+	r := newRemoteRig(t)
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.cfg.Remote.Bind = busy.Addr().String()
+	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
+		t.Fatal(err)
+	}
+	ctl, logged := r.control(t, r.lim, func(c *remotectl.Config) { c.RetryFirst, c.RetryMax = 20*time.Millisecond, 40*time.Millisecond })
+	deadline := time.Now().Add(3 * time.Second)
+	var st remotectl.Status
+	for st = ctl.Status(); st.Err == "starting" || st.Err == ""; st = ctl.Status() {
+		if time.Now().After(deadline) {
+			t.Fatalf("status %+v; want the bind failure", st)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if st.State != remotectl.StateRetrying || !st.On || st.NextTry.IsZero() || !strings.Contains(st.Err, "address already in use") {
+		t.Fatalf("status %+v; want retrying with the bind failure", st)
+	}
+	if st.HostKeyFP == "" {
+		t.Fatalf("status %+v; want the host key fingerprint shown while retrying, so it can be pinned", st)
+	}
+	if !slices.ContainsFunc(logged(), func(m string) bool { return strings.Contains(m, "REMOTE LISTENER NOT SERVING") }) {
+		t.Errorf("the failure was not said: %q", logged())
+	}
+	_ = busy.Close()
+	st = waitState(t, ctl, remotectl.StateListening)
+	if st.Addr != r.cfg.Remote.Bind || st.Err != "" {
+		t.Fatalf("status %+v; want listening on %s", st, r.cfg.Remote.Bind)
+	}
+	addr, _ := net.ResolveTCPAddr("tcp", st.Addr)
+	if err := hello(t, r.rpcOverSSH(t, addr)); err != nil {
+		t.Fatalf("hello after the retry: %v", err)
+	}
+}
+
+// The daemon's shutdown (Close) ends the live remote connections and leaves
+// the switch on, so the next start serves again.
+func TestShutdownEndsRemoteConnectionsAndKeepsTheSwitch(t *testing.T) {
+	r := newRemoteRig(t)
+	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
+		t.Fatal(err)
+	}
+	ctl, _ := r.control(t, r.lim, nil)
+	st := waitState(t, ctl, remotectl.StateListening)
+	addr, _ := net.ResolveTCPAddr("tcp", st.Addr)
+	cli := r.rpcOverSSH(t, addr)
+	if err := hello(t, cli); err != nil {
+		t.Fatal(err)
+	}
+	ctl.Close()
+	select {
+	case <-cli.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("a remote connection outlived the shutdown")
+	}
+	if v, _, _ := r.store.GetMeta(t.Context(), remote.ControlKey); v != "on" {
+		t.Fatalf("switch %q after shutdown; want it left on", v)
+	}
+}
+
+// Turned off while its listener is still binding, Remote Control says off:
+// the bind that then succeeds does not report the stopped listener as
+// listening, and the listener is closed.
+func TestABindFinishingAfterTurnOffLeavesItOff(t *testing.T) {
+	r := newRemoteRig(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var bound net.Listener
+	ctl, _ := r.control(t, r.lim, func(c *remotectl.Config) {
+		c.Listen = func(network, addr string) (net.Listener, error) {
+			close(entered)
+			<-release
+			ln, err := net.Listen(network, addr)
+			bound = ln
+			return ln, err
+		}
+	})
+	if err := ctl.Set(t.Context(), true, 1, "127.0.0.1"); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	off := make(chan error, 1)
+	go func() { off <- ctl.Set(t.Context(), false, 1, "127.0.0.1") }()
+	waitState(t, ctl, remotectl.StateOff)
+	close(release)
+	if err := <-off; err != nil {
+		t.Fatalf("turn off: %v", err)
+	}
+	if st := ctl.Status(); st.State != remotectl.StateOff || st.On {
+		t.Fatalf("status %+v after the late bind; want off", st)
+	}
+	if c, err := net.DialTimeout("tcp", bound.Addr().String(), time.Second); err == nil {
+		c.Close()
+		t.Fatal("the late-bound listener was left accepting")
 	}
 }

@@ -552,3 +552,119 @@ func TestAHangupIsForcedWhenTheClientStopsReading(t *testing.T) {
 		t.Fatal("a client that stopped reading held the hung-up connection")
 	}
 }
+
+// A registered connection is ended by the registry: only those its filter
+// matches, and it leaves the registry when its session ends.
+func TestTheRegistryEndsTheConnectionsItMatches(t *testing.T) {
+	a, b := newSigner(t), newSigner(t)
+	reg := remote.NewRegistry()
+	s := startListener(t, map[string]registered{
+		ssh.FingerprintSHA256(a.PublicKey()): {1, 10},
+		ssh.FingerprintSHA256(b.PublicKey()): {2, 20},
+	}, func(c *remote.Config) { c.Registry = reg })
+	ca, err := s.dial(t, ssh.PublicKeys(a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ca.Close()
+	openRPC(t, ca)
+	s.accept(t)
+	cb, err := s.dial(t, ssh.PublicKeys(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cb.Close()
+	openRPC(t, cb)
+	s.accept(t)
+	if reg.Len() != 2 {
+		t.Fatalf("registered %d, want 2", reg.Len())
+	}
+	if n := reg.Close(remote.ByUser(10)); n != 1 {
+		t.Fatalf("ByUser(10) closed %d, want 1", n)
+	}
+	done := make(chan struct{})
+	go func() { _ = ca.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("user 10's connection was not ended")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for reg.Len() != 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if reg.Len() != 1 {
+		t.Fatalf("after the close %d registered, want 1 (user 20's)", reg.Len())
+	}
+	if n := reg.Close(remote.BySSHKey(2)); n != 1 {
+		t.Fatalf("BySSHKey(2) closed %d, want 1", n)
+	}
+}
+
+// A connection still in its handshake when the listener is closed is ended
+// when the handshake completes: never handed to the RPC side and never
+// registered, so turning Remote Control off (close the listener, then end the
+// registry's connections) reaches it too. An Accept is pending throughout, as
+// the fan-in's would be; repeated, because without the ordering the handover
+// is a coin toss.
+func TestAHandshakeFinishingAfterCloseIsEnded(t *testing.T) {
+	for i := range 20 {
+		key := newSigner(t)
+		reg := remote.NewRegistry()
+		entered, release := make(chan struct{}), make(chan struct{})
+		s := startListener(t, nil, func(c *remote.Config) {
+			c.Registry = reg
+			c.Authorize = func(context.Context, string) (int64, int64, error) {
+				close(entered)
+				<-release
+				return 1, 10, nil
+			}
+		})
+		handed := make(chan net.Conn, 1)
+		go func() {
+			for {
+				c, err := s.l.Accept()
+				if err != nil {
+					return
+				}
+				handed <- c
+			}
+		}()
+		dialed := make(chan *ssh.Client, 1)
+		go func() {
+			c, err := s.dial(t, ssh.PublicKeys(key))
+			if err != nil {
+				dialed <- nil
+				return
+			}
+			dialed <- c
+		}()
+		<-entered
+		_ = s.l.Close()
+		close(release)
+		c := <-dialed
+		if c != nil {
+			go func() {
+				if sess, err := c.NewSession(); err == nil {
+					_ = sess.RequestSubsystem(remote.Subsystem)
+				}
+			}()
+			ended := make(chan struct{})
+			go func() { _ = c.Wait(); close(ended) }()
+			select {
+			case <-ended:
+			case <-time.After(3 * time.Second):
+				t.Fatalf("try %d: the connection outlived the closed listener", i)
+			}
+		}
+		select {
+		case hc := <-handed:
+			hc.Close()
+			t.Fatalf("try %d: a connection was handed over after Close", i)
+		default:
+		}
+		if n := reg.Len(); n != 0 {
+			t.Fatalf("try %d: %d registered after Close", i, n)
+		}
+	}
+}
