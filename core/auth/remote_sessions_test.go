@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/yongjohnlee80/autodb/core/meta"
+	"github.com/yongjohnlee80/autodb/core/remote"
 )
 
 // seedSession inserts a session row directly: the remote login that mints a
@@ -58,5 +60,41 @@ func TestRevokeRemoteSessionsRevokesOnlyLiveDeviceBoundOnes(t *testing.T) {
 	// Twice is the same as once: nothing is left to revoke.
 	if n, err := s.RevokeRemoteSessions(context.Background()); err != nil || n != 0 {
 		t.Errorf("second run: %d, %v; want 0, nil", n, err)
+	}
+}
+
+func seedKey(t *testing.T, store *meta.Store, userID int64, fp string, revokedAt int64) int64 {
+	t.Helper()
+	id, err := store.SSHKeys.OnCtx(context.Background()).
+		Set(meta.SSHKeyUserID, userID).Set(meta.SSHKeyPublicKey, "ssh-ed25519 AAAA"+fp).
+		Set(meta.SSHKeyFingerprint, fp).Set(meta.SSHKeyCreatedAt, int64(1)).
+		Set(meta.SSHKeyRevokedAt, revokedAt).Insert()
+	if err != nil {
+		t.Fatalf("seeding a key: %v", err)
+	}
+	return id
+}
+
+// A live key of an enabled user resolves to its id and owner; an unknown, a
+// revoked, and a disabled user's key are all the one ErrUnknownKey.
+func TestRemoteKeyOwnerAnswersOnlyForALiveKeyOfAnEnabledUser(t *testing.T) {
+	s, store, _ := newSvc(t)
+	_, root := mustBootstrap(t, s)
+	live := seedKey(t, store, root.userID, "SHA256:live", 0)
+	seedKey(t, store, root.userID, "SHA256:revoked", 9)
+	ctx := context.Background()
+	if k, u, err := s.RemoteKeyOwner(ctx, "SHA256:live"); err != nil || k != live || u != root.userID {
+		t.Fatalf("a live key: %d, %d, %v; want %d, %d", k, u, err, live, root.userID)
+	}
+	for _, fp := range []string{"SHA256:nobody", "SHA256:revoked"} {
+		if _, _, err := s.RemoteKeyOwner(ctx, fp); !errors.Is(err, remote.ErrUnknownKey) {
+			t.Errorf("%s: %v; want ErrUnknownKey", fp, err)
+		}
+	}
+	if err := store.Users.OnCtx(ctx).With(meta.UserID, root.userID).Set(meta.UserDisabled, int64(1)).Update(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.RemoteKeyOwner(ctx, "SHA256:live"); !errors.Is(err, remote.ErrUnknownKey) {
+		t.Errorf("a disabled user's key: %v; want ErrUnknownKey", err)
 	}
 }

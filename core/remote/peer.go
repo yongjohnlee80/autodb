@@ -41,3 +41,8 @@ type Peer struct {
 	// Addr is the client's TCP address.
 	Addr net.Addr
 }
+
+// ControlKey is the meta-store key of the Remote Control switch: "on" when an
+// admin has turned the remote listener on, anything else (absent, by default)
+// when it is off.
+const ControlKey = "remote.control"

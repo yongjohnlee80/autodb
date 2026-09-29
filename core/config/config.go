@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,6 +60,7 @@ type Config struct {
 	Web       Web       `toml:"web"`
 	Exec      Exec      `toml:"exec"`
 	FrontDoor FrontDoor `toml:"frontdoor"`
+	Remote    Remote    `toml:"remote"`
 
 	// seen records the keys the DECODER actually observed in the file, so a
 	// diagnostic can say which numbers an operator chose and which autodb
@@ -585,6 +587,72 @@ func (c Config) NotesRoot() (string, error) {
 	return filepath.Join(home, ".local", "share", "autodb", "notes"), nil
 }
 
+// Remote configures the remote listener: the SSH listener through which the
+// autodb TUI on another machine reaches this daemon. Whether it runs is not
+// configured here: an admin turns Remote Control on and off from the TUI, and
+// the switch lives in the store. These are the mechanics it runs with.
+type Remote struct {
+	// Bind is the TCP address it listens on, host:port.
+	Bind string `toml:"bind"`
+	// HostKey is the listener's ed25519 host key file, created on first use.
+	// Empty means remote_host_ed25519 in autodb's data directory; a service
+	// install puts it beside the service keyfile, in a 0700 directory the
+	// service user owns.
+	HostKey string `toml:"host_key"`
+	// MaxUnauthenticated caps connections still in their SSH handshake.
+	MaxUnauthenticated int `toml:"max_unauthenticated"`
+	// HandshakeTimeout bounds a connection's handshake: authentication and
+	// the request for the autodb subsystem.
+	HandshakeTimeout Duration `toml:"handshake_timeout"`
+}
+
+// BindAddr is [remote] bind, or its default when unset.
+func (r Remote) BindAddr() string {
+	if r.Bind == "" {
+		return DefaultRemoteBind
+	}
+	return r.Bind
+}
+
+// HandshakeLimit is [remote] handshake_timeout, or its default when unset.
+func (r Remote) HandshakeLimit() time.Duration {
+	if r.HandshakeTimeout <= 0 {
+		return DefaultRemoteHandshakeTimeout
+	}
+	return r.HandshakeTimeout.Duration()
+}
+
+// HandshakeSlots is [remote] max_unauthenticated, or its default when unset.
+func (r Remote) HandshakeSlots() int {
+	if r.MaxUnauthenticated <= 0 {
+		return DefaultRemoteMaxUnauthenticated
+	}
+	return r.MaxUnauthenticated
+}
+
+// Remote listener defaults.
+const (
+	DefaultRemoteBind               = "0.0.0.0:7422"
+	DefaultRemoteMaxUnauthenticated = 16
+	DefaultRemoteHandshakeTimeout   = 10 * time.Second
+)
+
+// HostKeyPath is where the remote listener's host key lives: [remote]
+// host_key, or remote_host_ed25519 in autodb's data directory.
+func (c Config) HostKeyPath() (string, error) {
+	if c.Remote.HostKey != "" {
+		return c.Remote.HostKey, nil
+	}
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "autodb", "remote_host_ed25519"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "share", "autodb", "remote_host_ed25519"), nil
+}
+
 // Server configures the RPC listener (consumed by rpc, roadmap M5).
 type Server struct {
 	// Port opts INTO TCP. Zero (the default) means the local unix
@@ -718,6 +786,11 @@ func Default() Config {
 			// independent and on a 1 vCPU host they contradicted: pool 2,
 			// headroom 4.
 			ReservedHeadroom: DefaultReservedHeadroom(DefaultPoolMaxConns()),
+		},
+		Remote: Remote{
+			Bind:               DefaultRemoteBind,
+			MaxUnauthenticated: DefaultRemoteMaxUnauthenticated,
+			HandshakeTimeout:   Duration(DefaultRemoteHandshakeTimeout),
 		},
 	}
 }
@@ -1145,6 +1218,24 @@ func (c Config) validate() error {
 		if _, err := netip.ParseAddr(c.Server.Bind); err != nil {
 			return fmt.Errorf("%w: server.bind %q: %v", ErrInvalid, c.Server.Bind, err)
 		}
+	}
+	// The remote listener's mechanics are validated whether or not Remote
+	// Control is on: the switch is flipped at run time, and a bad bind found
+	// then would be found by the admin who flipped it, not at start.
+	// A zero value is the default (Remote's accessors), as a Config built
+	// without Default() has them; only a value that is WRONG is refused.
+	if c.Remote.Bind != "" {
+		if _, port, err := net.SplitHostPort(c.Remote.Bind); err != nil {
+			return fmt.Errorf("%w: remote.bind %q: %v", ErrInvalid, c.Remote.Bind, err)
+		} else if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
+			return fmt.Errorf("%w: remote.bind %q: port out of range", ErrInvalid, c.Remote.Bind)
+		}
+	}
+	if c.Remote.MaxUnauthenticated < 0 {
+		return fmt.Errorf("%w: remote.max_unauthenticated %d must not be negative", ErrInvalid, c.Remote.MaxUnauthenticated)
+	}
+	if c.Remote.HandshakeTimeout < 0 {
+		return fmt.Errorf("%w: remote.handshake_timeout must not be negative", ErrInvalid)
 	}
 	if c.Exec.MaxStatementBytes <= 0 {
 		return fmt.Errorf("%w: exec.max_statement_bytes %d must be positive", ErrInvalid, c.Exec.MaxStatementBytes)
