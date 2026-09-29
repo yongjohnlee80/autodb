@@ -7,6 +7,9 @@ import (
 	"errors"
 	"net"
 	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,5 +147,83 @@ func TestStartRemoteDoesNothingWhileRemoteControlIsOff(t *testing.T) {
 	defer stop()
 	if err != nil || addr != nil {
 		t.Fatalf("startRemote with the switch off: %v, %v; want nothing started", addr, err)
+	}
+}
+
+// failOnce is a TCP listener whose Accept fails, permanently, when told to.
+type failOnce struct {
+	net.Listener
+	fail chan struct{}
+}
+
+func (f *failOnce) Accept() (net.Conn, error) {
+	type res struct {
+		c   net.Conn
+		err error
+	}
+	got := make(chan res, 1)
+	go func() { c, err := f.Listener.Accept(); got <- res{c, err} }()
+	select {
+	case r := <-got:
+		return r.c, r.err
+	case <-f.fail:
+		return nil, errors.New("injected: the socket went away")
+	}
+}
+
+// SUPERVISED: the remote listener's TCP listener failing does not leave the
+// remote surface gone. The failure is said loudly, the listener is bound
+// again after the backoff, and a registered key reaches the RPC server
+// through the new one. Not parallel: it replaces the bind seam.
+func TestAFailedRemoteListenerIsRestarted(t *testing.T) {
+	r := newRemoteRig(t)
+	if err := r.store.SetMeta(t.Context(), remote.ControlKey, "on"); err != nil {
+		t.Fatal(err)
+	}
+	first := &failOnce{fail: make(chan struct{})}
+	rebound := make(chan net.Addr, 4)
+	calls := 0
+	oldListen, oldFirst := remoteListen, remoteRetryFirst
+	t.Cleanup(func() { remoteListen, remoteRetryFirst = oldListen, oldFirst })
+	remoteRetryFirst = 20 * time.Millisecond
+	remoteListen = func(network, addr string) (net.Listener, error) {
+		calls++
+		ln, err := net.Listen(network, addr)
+		if err != nil {
+			return nil, err
+		}
+		if calls == 1 {
+			first.Listener = ln
+			return first, nil
+		}
+		rebound <- ln.Addr()
+		return ln, nil
+	}
+	var mu sync.Mutex
+	var logged []string
+	onLog := func(m string) { mu.Lock(); logged = append(logged, m); mu.Unlock() }
+	_, stop, err := startRemote(t.Context(), r.cfg, r.store, r.svc, r.fan, "t", onLog)
+	if err != nil {
+		t.Fatalf("startRemote: %v", err)
+	}
+	t.Cleanup(stop)
+
+	close(first.fail)
+	var addr net.Addr
+	select {
+	case addr = <-rebound:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the failed remote listener was never bound again")
+	}
+	cli := r.rpcOverSSH(t, addr)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, err := cli.Call(ctx, "sys.hello", map[string]any{"protocol": rpc.Protocol}); err != nil {
+		t.Fatalf("hello through the restarted listener: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.ContainsFunc(logged, func(m string) bool { return strings.Contains(m, "REMOTE LISTENER FAILED") }) {
+		t.Errorf("the failure was not said: %q", logged)
 	}
 }

@@ -322,3 +322,61 @@ func TestTheBridgeHonoursDeadlines(t *testing.T) {
 		t.Fatalf("read past the deadline: %v; want a timeout", err)
 	}
 }
+
+// failingTCP is a TCP listener whose Accept fails, permanently, once told to.
+type failingTCP struct {
+	net.Listener
+	fail chan struct{}
+}
+
+func (f *failingTCP) Accept() (net.Conn, error) {
+	type res struct {
+		c   net.Conn
+		err error
+	}
+	got := make(chan res, 1)
+	go func() { c, err := f.Listener.Accept(); got <- res{c, err} }()
+	select {
+	case r := <-got:
+		return r.c, r.err
+	case <-f.fail:
+		return nil, errors.New("injected: the socket went away")
+	}
+}
+
+// A listener whose TCP Accept fails stops and says why (Done, Err), so its
+// supervisor can start another; one stopped by Close says nothing.
+func TestAListenerThatFailsStopsAndSaysWhy(t *testing.T) {
+	host, fp, err := remote.LoadOrCreateHostKey(filepath.Join(t.TempDir(), "k", "host"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := remote.Config{HostKey: host, HostKeyFP: fp,
+		Authorize: func(context.Context, string) (int64, int64, error) { return 0, 0, remote.ErrUnknownKey }}
+	tcp, _ := net.Listen("tcp", "127.0.0.1:0")
+	ft := &failingTCP{Listener: tcp, fail: make(chan struct{})}
+	l, err := remote.Listen(ft, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(ft.fail)
+	select {
+	case <-l.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("a failed listener did not stop")
+	}
+	if l.Err() == nil {
+		t.Fatal("a failed listener's Err is nil")
+	}
+	if _, err := l.Accept(); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("Accept after the failure: %v; want net.ErrClosed", err)
+	}
+
+	tcp2, _ := net.Listen("tcp", "127.0.0.1:0")
+	l2, _ := remote.Listen(tcp2, cfg)
+	_ = l2.Close()
+	<-l2.Done()
+	if l2.Err() != nil {
+		t.Fatalf("a closed listener's Err: %v; want nil", l2.Err())
+	}
+}
