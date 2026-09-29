@@ -7,10 +7,9 @@ package tui
 // Split does. SPC z zooms the pane that holds the keyboard, or zooms out;
 // View › Zoom names one; Zoom out is offered only while something is zoomed.
 //
-// Ctrl+h/j/k/l, and Alt+h/j/k/l for a browser that keeps Ctrl+L, move the
-// keyboard between the panes the host knows — the explorer on the left, the
-// query above its results on the right. There is no geometry to it: the
-// layout is the host's, so the moves are.
+// Ctrl+h/j/k/l move the keyboard between the panes the host knows — the
+// explorer on the left, the query above its results on the right. There is no
+// geometry to it: the layout is the host's, so the moves are.
 
 // Panes the host knows, by the document's ids.
 const (
