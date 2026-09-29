@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tuicore "github.com/yongjohnlee80/golib/tui"
+	"github.com/yongjohnlee80/golib/tui/decl/decltest"
 )
 
 // zoom_test.go holds the three panes: moving between them, and one at a time.
@@ -29,6 +30,27 @@ func TestCtrlHJKLMovesBetweenThePanes(t *testing.T) {
 	// keyboard, so it stays on the query. (With rows, see the run test.)
 	s.Keys(t, ctrl('j'), ctrl('h'))
 	s.WaitFor(t, "still moving from the query", func(string) bool { return h.PaneWithFocus() == "explorerTree" })
+}
+
+// Alt+h/j/k/l are not pane moves: Alt+letter opens the menu bar's menus, and a
+// pane binding on Alt+H took Home's away. From either side, Alt+H opens Home;
+// Esc closes it, and Esc again leaves the bar for the query, as from any menu.
+func TestAltHOpensHomeNotAPaneMove(t *testing.T) {
+	h, s := signedIn(t)
+	s.WaitForText(t, "main")
+	for _, from := range []struct {
+		move rune
+		pane string
+	}{{'l', "editor"}, {'h', "explorerTree"}} {
+		s.Keys(t, ctrl(from.move))
+		s.WaitFor(t, "focus on "+from.pane, func(string) bool { return h.PaneWithFocus() == from.pane })
+		s.Keys(t, decltest.Alt('h'))
+		s.WaitForText(t, "My IP addresses…")
+		s.Keys(t, esc(), esc())
+		s.WaitFor(t, "Home closed, the query in use", func(sc string) bool {
+			return !strings.Contains(sc, "My IP addresses…") && h.PaneWithFocus() == "editor"
+		})
+	}
 }
 
 // SPC z gives the pane in use the screen, and SPC z again gives it back;

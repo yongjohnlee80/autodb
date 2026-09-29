@@ -61,16 +61,12 @@ Window {
     Shortcut { sequence: "/";      onActivated: App.openSearch() }
     Shortcut { sequence: "n";      onActivated: App.searchNext() }
     Shortcut { sequence: "Shift+N"; onActivated: App.searchPrevious() }
-    // Between the panes: Ctrl+h/j/k/l, and Alt+h/j/k/l for a browser that
-    // keeps Ctrl+L for its address bar.
+    // Between the panes: Ctrl+h/j/k/l. There is no Alt+h/j/k/l: Alt+letter
+    // opens the menu bar's menus, and Alt+H would take Home's.
     Shortcut { sequence: "Ctrl+H"; onActivated: App.movePane("h") }
     Shortcut { sequence: "Ctrl+J"; onActivated: App.movePane("j") }
     Shortcut { sequence: "Ctrl+K"; onActivated: App.movePane("k") }
     Shortcut { sequence: "Ctrl+L"; onActivated: App.movePane("l") }
-    Shortcut { sequence: "Alt+H";  onActivated: App.movePane("h") }
-    Shortcut { sequence: "Alt+J";  onActivated: App.movePane("j") }
-    Shortcut { sequence: "Alt+K";  onActivated: App.movePane("k") }
-    Shortcut { sequence: "Alt+L";  onActivated: App.movePane("l") }
 
     // ---- the menu bar: a view of the catalog -------------------------------
     //

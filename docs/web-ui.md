@@ -47,8 +47,10 @@ A few behaviours differ from the terminal:
   deletes it. The tree is read-and-delete only, so it can only shrink.
 - **Some Ctrl chords belong to the browser.** `Ctrl-L`, `Ctrl-W` and `Ctrl-T`
   never reach autodb and a page cannot take them back. Measured: `Ctrl-H`,
-  `Ctrl-J`, `Ctrl-K` and every `Alt` chord do arrive — so pane motion is also
-  bound to **`Alt-h/j/k/l`**. Use those in a browser.
+  `Ctrl-J` and `Ctrl-K` do arrive, so three of the four pane moves work. For
+  the fourth, focus a pane by name: **`SPC e`** (explorer), **`SPC q`** (query),
+  **`SPC t`** (results). Pane motion is *not* bound to `Alt-h/j/k/l`, because
+  `Alt` + a letter opens the menu bar's menus (`Alt-H` is Home).
 - **No `SPC X`.** Nothing in the web process can start a daemon back up, and
   restarting it would strand every other browser session. Restart from a
   terminal.
